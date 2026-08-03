@@ -397,6 +397,7 @@ mod tests {
             bold: false,
             italic: false,
             cursor: false,
+            selected: false,
             spacer_tail: false,
         }
     }

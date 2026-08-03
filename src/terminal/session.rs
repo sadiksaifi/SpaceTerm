@@ -7,7 +7,58 @@ use portable_pty::PtySize;
 use thiserror::Error;
 
 use crate::platform::macos_pty::{PtyError, SpawnedPty, spawn_user_shell};
-use crate::terminal::emulator::{ScreenSnapshot, TerminalEmulator};
+use crate::terminal::emulator::{EmulatorAction, ScreenSnapshot, TerminalEmulator};
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct SurfacePosition {
+    pub(crate) x: f32,
+    pub(crate) y: f32,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct InputModifiers {
+    pub(crate) shift: bool,
+    pub(crate) alt: bool,
+    pub(crate) control: bool,
+    pub(crate) platform: bool,
+}
+
+#[allow(
+    dead_code,
+    reason = "worker-side interaction contract is not wired to the UI in this milestone"
+)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum PointerButton {
+    Left,
+    Middle,
+    Right,
+}
+
+#[allow(
+    dead_code,
+    reason = "worker-side interaction contract is not wired to the UI in this milestone"
+)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum PointerPhase {
+    Press,
+    Motion,
+    Release,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct PointerInput {
+    pub(crate) phase: PointerPhase,
+    pub(crate) button: Option<PointerButton>,
+    pub(crate) position: SurfacePosition,
+    pub(crate) modifiers: InputModifiers,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct WheelInput {
+    pub(crate) steps: i32,
+    pub(crate) position: SurfacePosition,
+    pub(crate) modifiers: InputModifiers,
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct GridSize {
@@ -109,6 +160,62 @@ impl TerminalSession {
         }
     }
 
+    #[allow(
+        dead_code,
+        reason = "worker-side interaction contract is not wired to the UI in this milestone"
+    )]
+    pub(crate) fn pointer(&self, input: PointerInput) {
+        if let Some(commands) = &self.commands
+            && commands.send(Command::Pointer(input)).is_err()
+        {
+            eprintln!("terminal pointer input was dropped because the worker has stopped");
+        }
+    }
+
+    #[allow(
+        dead_code,
+        reason = "worker-side interaction contract is not wired to the UI in this milestone"
+    )]
+    pub(crate) fn wheel(&self, input: WheelInput) {
+        if let Some(commands) = &self.commands
+            && commands.send(Command::Wheel(input)).is_err()
+        {
+            eprintln!("terminal wheel input was dropped because the worker has stopped");
+        }
+    }
+
+    #[allow(
+        dead_code,
+        reason = "worker-side interaction contract is not wired to the UI in this milestone"
+    )]
+    pub(crate) fn paste(&self, text: String) {
+        if let Some(commands) = &self.commands
+            && commands.send(Command::Paste(text)).is_err()
+        {
+            eprintln!("terminal paste was dropped because the worker has stopped");
+        }
+    }
+
+    #[allow(
+        dead_code,
+        reason = "worker-side interaction contract is not wired to the UI in this milestone"
+    )]
+    pub(crate) fn request_selection_text(
+        &self,
+    ) -> async_channel::Receiver<Result<Option<String>, String>> {
+        let (reply, receiver) = async_channel::bounded(1);
+        let sent = self
+            .commands
+            .as_ref()
+            .is_some_and(|commands| commands.send(Command::SelectionText(reply.clone())).is_ok());
+        if !sent {
+            let _ = reply.try_send(Err(
+                "terminal selection could not be read because the worker has stopped".to_owned(),
+            ));
+        }
+        receiver
+    }
+
     fn shutdown(&mut self) {
         if let Some(commands) = self.commands.take()
             && commands.send(Command::Shutdown).is_err()
@@ -132,6 +239,26 @@ enum Command {
     Input(Vec<u8>),
     Output(Vec<u8>),
     Resize(GridSize),
+    #[allow(
+        dead_code,
+        reason = "worker-side interaction contract is not wired to the UI in this milestone"
+    )]
+    Pointer(PointerInput),
+    #[allow(
+        dead_code,
+        reason = "worker-side interaction contract is not wired to the UI in this milestone"
+    )]
+    Wheel(WheelInput),
+    #[allow(
+        dead_code,
+        reason = "worker-side interaction contract is not wired to the UI in this milestone"
+    )]
+    Paste(String),
+    #[allow(
+        dead_code,
+        reason = "worker-side interaction contract is not wired to the UI in this milestone"
+    )]
+    SelectionText(async_channel::Sender<Result<Option<String>, String>>),
     ReaderStopped(Option<String>),
     Shutdown,
 }
@@ -157,7 +284,12 @@ fn run_worker(
         }
     };
 
-    let mut emulator = match TerminalEmulator::new(initial_size.cols, initial_size.rows) {
+    let mut emulator = match TerminalEmulator::new(
+        initial_size.cols,
+        initial_size.rows,
+        u32::from(initial_size.cell_width_px),
+        u32::from(initial_size.cell_height_px),
+    ) {
         Ok(emulator) => emulator,
         Err(error) => {
             let _ = startup.send(Err(error.to_string()));
@@ -219,6 +351,37 @@ fn run_worker(
                         false
                     }
                 }
+            }
+            Command::Pointer(input) => match emulator.pointer(input) {
+                Ok(action) => {
+                    apply_emulator_action(action, &mut emulator, &mut pty.writer, &events)
+                }
+                Err(message) => {
+                    send_error(&events, message);
+                    false
+                }
+            },
+            Command::Wheel(input) => match emulator.wheel(input) {
+                Ok(action) => {
+                    apply_emulator_action(action, &mut emulator, &mut pty.writer, &events)
+                }
+                Err(message) => {
+                    send_error(&events, message);
+                    false
+                }
+            },
+            Command::Paste(text) => match emulator.paste(text) {
+                Ok(action) => {
+                    apply_emulator_action(action, &mut emulator, &mut pty.writer, &events)
+                }
+                Err(message) => {
+                    send_error(&events, message);
+                    false
+                }
+            },
+            Command::SelectionText(reply) => {
+                let _ = reply.try_send(emulator.selection_text());
+                true
             }
             Command::ReaderStopped(read_error) => {
                 let status = match pty.child.wait() {
@@ -303,6 +466,16 @@ fn process_output(
     (responses.is_empty() || write_pty(writer, &responses, events))
         && publish_screen(emulator, events)
         && commands_open
+}
+
+fn apply_emulator_action(
+    action: EmulatorAction,
+    emulator: &mut TerminalEmulator,
+    writer: &mut Box<dyn Write + Send>,
+    events: &async_channel::Sender<SessionEvent>,
+) -> bool {
+    (action.bytes.is_empty() || write_pty(writer, &action.bytes, events))
+        && (!action.screen_changed || publish_screen(emulator, events))
 }
 
 fn write_pty(
@@ -390,6 +563,17 @@ mod tests {
             SessionEvent::Exited(status) if status == "done"
         ));
         assert!(receiver.try_recv().is_err());
+    }
+
+    #[test]
+    fn stopped_session_returns_an_error_for_selection_requests() {
+        let session = TerminalSession {
+            commands: None,
+            worker: None,
+        };
+
+        let result = session.request_selection_text().try_recv().unwrap();
+        assert!(matches!(result, Err(message) if message.contains("worker has stopped")));
     }
 
     #[test]
