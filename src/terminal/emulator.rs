@@ -5,7 +5,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use libghostty_vt::fmt::Format;
-use libghostty_vt::key::Mods;
+use libghostty_vt::key::{
+    Action as KeyAction, Encoder as KeyEncoder, Event as KeyEvent, Key as GhosttyKey, Mods,
+    OptionAsAlt,
+};
 use libghostty_vt::mouse::{
     Action as MouseAction, Button as MouseButton, Encoder as MouseEncoder,
     EncoderSize as MouseEncoderSize, Event as MouseEvent, Position as MousePosition,
@@ -22,7 +25,8 @@ use libghostty_vt::terminal::{Mode, Point, PointCoordinate, ScrollViewport};
 use libghostty_vt::{Error, RenderState, Terminal, TerminalOptions};
 
 use crate::terminal::session::{
-    InputModifiers, PointerButton, PointerInput, PointerPhase, SurfacePosition, WheelInput,
+    InputModifiers, KeyCode, KeyInput, PointerButton, PointerInput, PointerPhase, SurfacePosition,
+    WheelInput,
 };
 use crate::theme::{ACTIVE_THEME, Color};
 
@@ -74,8 +78,12 @@ pub(crate) struct TerminalEmulator {
     render_state: RenderState<'static>,
     rows: RowIterator<'static>,
     cells: CellIterator<'static>,
+    key_encoder: KeyEncoder<'static>,
+    key_event: KeyEvent<'static>,
     mouse_encoder: MouseEncoder<'static>,
     mouse_event: MouseEvent<'static>,
+    cached_mouse_modes: Option<MouseModeState>,
+    cached_mouse_size: Option<MouseEncoderSize>,
     selection_gesture: Gesture<'static>,
     selection_press: PressEvent<'static>,
     selection_drag: DragEvent<'static>,
@@ -106,6 +114,18 @@ enum PointerRoute {
     Selection,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct MouseModeState {
+    x10: bool,
+    normal: bool,
+    button: bool,
+    any: bool,
+    utf8: bool,
+    sgr: bool,
+    urxvt: bool,
+    sgr_pixels: bool,
+}
+
 #[derive(Debug)]
 pub(crate) struct EmulatorAction {
     pub(crate) bytes: Vec<u8>,
@@ -120,7 +140,7 @@ impl EmulatorAction {
         }
     }
 
-    fn screen_changed() -> Self {
+    pub(crate) fn screen_changed() -> Self {
         Self {
             bytes: Vec::new(),
             screen_changed: true,
@@ -156,13 +176,20 @@ impl TerminalEmulator {
             move |_, data| pty_responses.borrow_mut().extend_from_slice(data)
         })?;
 
+        let mut mouse_encoder = MouseEncoder::new()?;
+        mouse_encoder.set_track_last_cell(true);
+
         Ok(Self {
             terminal,
             render_state: RenderState::new()?,
             rows: RowIterator::new()?,
             cells: CellIterator::new()?,
-            mouse_encoder: MouseEncoder::new()?,
+            key_encoder: KeyEncoder::new()?,
+            key_event: KeyEvent::new()?,
+            mouse_encoder,
             mouse_event: MouseEvent::new()?,
+            cached_mouse_modes: None,
+            cached_mouse_size: None,
             selection_gesture: Gesture::new()?,
             selection_press: PressEvent::new()?,
             selection_drag: DragEvent::new()?,
@@ -206,6 +233,12 @@ impl TerminalEmulator {
         mem::take(&mut *self.pty_responses.borrow_mut())
     }
 
+    pub(crate) fn key(&mut self, input: KeyInput) -> Result<EmulatorAction, String> {
+        let mut bytes = Vec::new();
+        self.encode_key(&input, &mut bytes)?;
+        Ok(EmulatorAction::bytes(bytes))
+    }
+
     pub(crate) fn pointer(&mut self, input: PointerInput) -> Result<EmulatorAction, String> {
         match input.phase {
             PointerPhase::Press => self.pointer_press(input),
@@ -225,6 +258,7 @@ impl TerminalEmulator {
             .is_mouse_tracking()
             .map_err(|error| format!("failed to query terminal mouse tracking mode: {error}"))?;
         if tracking && !input.modifiers.shift {
+            self.clear_selection()?;
             let button = if steps > 0 {
                 MouseButton::Four
             } else {
@@ -242,7 +276,10 @@ impl TerminalEmulator {
                     &mut bytes,
                 )?;
             }
-            return Ok(EmulatorAction::bytes(bytes));
+            return Ok(EmulatorAction {
+                bytes,
+                screen_changed: true,
+            });
         }
 
         let alternate_screen = self
@@ -255,21 +292,24 @@ impl TerminalEmulator {
             .mode(Mode::ALT_SCROLL)
             .map_err(|error| format!("failed to query alternate-scroll mode: {error}"))?;
         if alternate_screen && alternate_scroll {
-            let application_cursor = self
-                .terminal
-                .mode(Mode::DECCKM)
-                .map_err(|error| format!("failed to query cursor-key mode: {error}"))?;
-            let sequence: &[u8] = match (application_cursor, steps > 0) {
-                (true, true) => b"\x1bOA",
-                (true, false) => b"\x1bOB",
-                (false, true) => b"\x1b[A",
-                (false, false) => b"\x1b[B",
+            self.clear_selection()?;
+            let key = KeyInput {
+                code: if steps > 0 {
+                    KeyCode::ArrowUp
+                } else {
+                    KeyCode::ArrowDown
+                },
+                text: None,
+                modifiers: InputModifiers::default(),
             };
-            let mut bytes = Vec::with_capacity(sequence.len() * steps.unsigned_abs() as usize);
+            let mut bytes = Vec::new();
             for _ in 0..steps.unsigned_abs() {
-                bytes.extend_from_slice(sequence);
+                self.encode_key(&key, &mut bytes)?;
             }
-            return Ok(EmulatorAction::bytes(bytes));
+            return Ok(EmulatorAction {
+                bytes,
+                screen_changed: true,
+            });
         }
 
         self.terminal
@@ -328,12 +368,15 @@ impl TerminalEmulator {
     }
 
     fn pointer_press(&mut self, input: PointerInput) -> Result<EmulatorAction, String> {
+        if self.active_pointer.is_some() {
+            return Ok(EmulatorAction::none());
+        }
+
         let tracking = self
             .terminal
             .is_mouse_tracking()
             .map_err(|error| format!("failed to query terminal mouse tracking mode: {error}"))?;
         let Some(button) = input.button else {
-            self.active_pointer = None;
             return Ok(EmulatorAction::none());
         };
         let route = match button {
@@ -354,6 +397,7 @@ impl TerminalEmulator {
 
         match route {
             PointerRoute::Application => {
+                self.clear_selection()?;
                 let mut bytes = Vec::new();
                 self.encode_mouse_event(
                     MouseAction::Press,
@@ -363,7 +407,10 @@ impl TerminalEmulator {
                     true,
                     &mut bytes,
                 )?;
-                Ok(EmulatorAction::bytes(bytes))
+                Ok(EmulatorAction {
+                    bytes,
+                    screen_changed: true,
+                })
             }
             PointerRoute::Selection => {
                 self.selection_press(input.position)?;
@@ -419,9 +466,13 @@ impl TerminalEmulator {
     }
 
     fn pointer_release(&mut self, input: PointerInput) -> Result<EmulatorAction, String> {
-        let Some(active) = self.active_pointer.take() else {
+        let Some(active) = self.active_pointer else {
             return Ok(EmulatorAction::none());
         };
+        if input.button != Some(active.button) {
+            return Ok(EmulatorAction::none());
+        }
+        self.active_pointer = None;
 
         match active.route {
             PointerRoute::Application => {
@@ -443,6 +494,37 @@ impl TerminalEmulator {
         }
     }
 
+    fn encode_key(&mut self, input: &KeyInput, bytes: &mut Vec<u8>) -> Result<(), String> {
+        let (text, unshifted) = match input.code {
+            KeyCode::Character(character) => {
+                if character.is_control() {
+                    return Err("terminal character keys must be printable".to_owned());
+                }
+                let text = input.text.clone().unwrap_or_else(|| character.to_string());
+                if text.chars().any(char::is_control) {
+                    return Err("terminal key text must not contain control characters".to_owned());
+                }
+                (Some(text), unshifted_character(character))
+            }
+            _ => (None, '\0'),
+        };
+
+        self.key_encoder
+            .set_options_from_terminal(&self.terminal)
+            .set_macos_option_as_alt(OptionAsAlt::True);
+        self.key_event
+            .set_action(KeyAction::Press)
+            .set_key(ghostty_key(input.code))
+            .set_mods(key_modifiers(input.modifiers))
+            .set_consumed_mods(Mods::empty())
+            .set_composing(false)
+            .set_utf8(text)
+            .set_unshifted_codepoint(unshifted);
+        self.key_encoder
+            .encode_to_vec(&self.key_event, bytes)
+            .map_err(|error| format!("failed to encode terminal key input: {error}"))
+    }
+
     fn encode_mouse_event(
         &mut self,
         action: MouseAction,
@@ -452,10 +534,18 @@ impl TerminalEmulator {
         any_button_pressed: bool,
         bytes: &mut Vec<u8>,
     ) -> Result<(), String> {
+        let modes = self.mouse_mode_state()?;
+        if self.cached_mouse_modes != Some(modes) {
+            self.mouse_encoder.set_options_from_terminal(&self.terminal);
+            self.cached_mouse_modes = Some(modes);
+        }
+
         let size = self.mouse_encoder_size();
+        if self.cached_mouse_size != Some(size) {
+            self.mouse_encoder.set_size(size);
+            self.cached_mouse_size = Some(size);
+        }
         self.mouse_encoder
-            .set_options_from_terminal(&self.terminal)
-            .set_size(size)
             .set_any_button_pressed(any_button_pressed);
         self.mouse_event
             .set_action(action)
@@ -468,6 +558,14 @@ impl TerminalEmulator {
         self.mouse_encoder
             .encode_to_vec(&self.mouse_event, bytes)
             .map_err(|error| format!("failed to encode terminal mouse event: {error}"))
+    }
+
+    fn clear_selection(&mut self) -> Result<(), String> {
+        self.terminal
+            .set_selection(None)
+            .map_err(|error| format!("failed to clear terminal selection: {error}"))?;
+        self.selection_gesture.reset(&self.terminal);
+        Ok(())
     }
 
     fn selection_press(&mut self, position: SurfacePosition) -> Result<(), String> {
@@ -537,6 +635,24 @@ impl TerminalEmulator {
             .floor()
             .clamp(0.0, f32::from(self.rows_count.saturating_sub(1))) as u32;
         PointCoordinate { x, y }
+    }
+
+    fn mouse_mode_state(&self) -> Result<MouseModeState, String> {
+        let mode = |mode| {
+            self.terminal
+                .mode(mode)
+                .map_err(|error| format!("failed to query terminal mouse encoder mode: {error}"))
+        };
+        Ok(MouseModeState {
+            x10: mode(Mode::X10_MOUSE)?,
+            normal: mode(Mode::NORMAL_MOUSE)?,
+            button: mode(Mode::BUTTON_MOUSE)?,
+            any: mode(Mode::ANY_MOUSE)?,
+            utf8: mode(Mode::UTF8_MOUSE)?,
+            sgr: mode(Mode::SGR_MOUSE)?,
+            urxvt: mode(Mode::URXVT_MOUSE)?,
+            sgr_pixels: mode(Mode::SGR_PIXELS_MOUSE)?,
+        })
     }
 
     fn mouse_encoder_size(&self) -> MouseEncoderSize {
@@ -688,6 +804,117 @@ impl Drop for TerminalEmulator {
     }
 }
 
+fn ghostty_key(code: KeyCode) -> GhosttyKey {
+    match code {
+        KeyCode::Character(character) => ghostty_character_key(unshifted_character(character)),
+        KeyCode::Enter => GhosttyKey::Enter,
+        KeyCode::Backspace => GhosttyKey::Backspace,
+        KeyCode::Tab => GhosttyKey::Tab,
+        KeyCode::Escape => GhosttyKey::Escape,
+        KeyCode::ArrowUp => GhosttyKey::ArrowUp,
+        KeyCode::ArrowDown => GhosttyKey::ArrowDown,
+        KeyCode::ArrowLeft => GhosttyKey::ArrowLeft,
+        KeyCode::ArrowRight => GhosttyKey::ArrowRight,
+        KeyCode::Home => GhosttyKey::Home,
+        KeyCode::End => GhosttyKey::End,
+        KeyCode::PageUp => GhosttyKey::PageUp,
+        KeyCode::PageDown => GhosttyKey::PageDown,
+        KeyCode::Insert => GhosttyKey::Insert,
+        KeyCode::Delete => GhosttyKey::Delete,
+    }
+}
+
+fn ghostty_character_key(character: char) -> GhosttyKey {
+    match character {
+        '`' => GhosttyKey::Backquote,
+        '\\' => GhosttyKey::Backslash,
+        '[' => GhosttyKey::BracketLeft,
+        ']' => GhosttyKey::BracketRight,
+        ',' => GhosttyKey::Comma,
+        '0' => GhosttyKey::Digit0,
+        '1' => GhosttyKey::Digit1,
+        '2' => GhosttyKey::Digit2,
+        '3' => GhosttyKey::Digit3,
+        '4' => GhosttyKey::Digit4,
+        '5' => GhosttyKey::Digit5,
+        '6' => GhosttyKey::Digit6,
+        '7' => GhosttyKey::Digit7,
+        '8' => GhosttyKey::Digit8,
+        '9' => GhosttyKey::Digit9,
+        '=' => GhosttyKey::Equal,
+        'a' | 'A' => GhosttyKey::A,
+        'b' | 'B' => GhosttyKey::B,
+        'c' | 'C' => GhosttyKey::C,
+        'd' | 'D' => GhosttyKey::D,
+        'e' | 'E' => GhosttyKey::E,
+        'f' | 'F' => GhosttyKey::F,
+        'g' | 'G' => GhosttyKey::G,
+        'h' | 'H' => GhosttyKey::H,
+        'i' | 'I' => GhosttyKey::I,
+        'j' | 'J' => GhosttyKey::J,
+        'k' | 'K' => GhosttyKey::K,
+        'l' | 'L' => GhosttyKey::L,
+        'm' | 'M' => GhosttyKey::M,
+        'n' | 'N' => GhosttyKey::N,
+        'o' | 'O' => GhosttyKey::O,
+        'p' | 'P' => GhosttyKey::P,
+        'q' | 'Q' => GhosttyKey::Q,
+        'r' | 'R' => GhosttyKey::R,
+        's' | 'S' => GhosttyKey::S,
+        't' | 'T' => GhosttyKey::T,
+        'u' | 'U' => GhosttyKey::U,
+        'v' | 'V' => GhosttyKey::V,
+        'w' | 'W' => GhosttyKey::W,
+        'x' | 'X' => GhosttyKey::X,
+        'y' | 'Y' => GhosttyKey::Y,
+        'z' | 'Z' => GhosttyKey::Z,
+        '-' => GhosttyKey::Minus,
+        '.' => GhosttyKey::Period,
+        '\'' => GhosttyKey::Quote,
+        ';' => GhosttyKey::Semicolon,
+        '/' => GhosttyKey::Slash,
+        ' ' => GhosttyKey::Space,
+        _ => GhosttyKey::Unidentified,
+    }
+}
+
+fn unshifted_character(character: char) -> char {
+    match character {
+        '~' => '`',
+        '!' => '1',
+        '@' => '2',
+        '#' => '3',
+        '$' => '4',
+        '%' => '5',
+        '^' => '6',
+        '&' => '7',
+        '*' => '8',
+        '(' => '9',
+        ')' => '0',
+        '_' => '-',
+        '+' => '=',
+        '{' => '[',
+        '}' => ']',
+        '|' => '\\',
+        ':' => ';',
+        '"' => '\'',
+        '<' => ',',
+        '>' => '.',
+        '?' => '/',
+        character if character.is_ascii_uppercase() => character.to_ascii_lowercase(),
+        character => character,
+    }
+}
+
+fn key_modifiers(modifiers: InputModifiers) -> Mods {
+    let mut result = Mods::empty();
+    result.set(Mods::SHIFT, modifiers.shift);
+    result.set(Mods::ALT, modifiers.alt);
+    result.set(Mods::CTRL, modifiers.control);
+    result.set(Mods::SUPER, modifiers.platform);
+    result
+}
+
 fn mouse_button(button: PointerButton) -> MouseButton {
     match button {
         PointerButton::Left => MouseButton::Left,
@@ -792,6 +1019,39 @@ mod tests {
         }
     }
 
+    fn key(code: KeyCode, modifiers: InputModifiers) -> KeyInput {
+        KeyInput {
+            code,
+            text: None,
+            modifiers,
+        }
+    }
+
+    fn select_first_five(emulator: &mut TerminalEmulator, shift: bool) {
+        emulator
+            .pointer(pointer(
+                PointerPhase::Press,
+                Some(PointerButton::Left),
+                2.0,
+                10.0,
+                shift,
+            ))
+            .unwrap();
+        emulator
+            .pointer(pointer(PointerPhase::Motion, None, 48.0, 10.0, false))
+            .unwrap();
+        emulator
+            .pointer(pointer(
+                PointerPhase::Release,
+                Some(PointerButton::Left),
+                48.0,
+                10.0,
+                false,
+            ))
+            .unwrap();
+        assert_eq!(emulator.selection_text().unwrap(), Some("hello".to_owned()));
+    }
+
     fn row_text(snapshot: &ScreenSnapshot, row: usize) -> String {
         snapshot.rows[row]
             .iter()
@@ -831,6 +1091,100 @@ mod tests {
         let snapshot = emulator.snapshot().unwrap().unwrap();
         assert_eq!(snapshot.rows.len(), 4);
         assert!(snapshot.rows.iter().all(|row| row.len() == 20));
+    }
+
+    #[test]
+    fn resize_emits_in_band_size_responses() {
+        let mut emulator = emulator(10, 2);
+        emulator.feed(b"\x1b[?2048h");
+        assert!(emulator.take_pty_responses().is_empty());
+
+        emulator.resize(20, 4, 8, 18).unwrap();
+        assert_eq!(emulator.take_pty_responses(), b"\x1b[48;4;20;72;160t");
+    }
+
+    #[test]
+    fn key_encoding_tracks_cursor_mode_and_modifiers() {
+        let mut emulator = emulator(10, 2);
+        assert_eq!(
+            emulator
+                .key(key(KeyCode::ArrowUp, InputModifiers::default()))
+                .unwrap()
+                .bytes,
+            b"\x1b[A"
+        );
+
+        emulator.feed(b"\x1b[?1h");
+        assert_eq!(
+            emulator
+                .key(key(KeyCode::ArrowUp, InputModifiers::default()))
+                .unwrap()
+                .bytes,
+            b"\x1bOA"
+        );
+
+        let printable = KeyInput {
+            code: KeyCode::Character('é'),
+            text: Some("é".to_owned()),
+            modifiers: InputModifiers::default(),
+        };
+        assert_eq!(emulator.key(printable).unwrap().bytes, "é".as_bytes());
+
+        let control_c = KeyInput {
+            code: KeyCode::Character('c'),
+            text: Some("c".to_owned()),
+            modifiers: InputModifiers {
+                control: true,
+                ..InputModifiers::default()
+            },
+        };
+        assert_eq!(emulator.key(control_c).unwrap().bytes, b"\x03");
+
+        let alt_x = KeyInput {
+            code: KeyCode::Character('x'),
+            text: Some("x".to_owned()),
+            modifiers: InputModifiers {
+                alt: true,
+                ..InputModifiers::default()
+            },
+        };
+        assert_eq!(emulator.key(alt_x).unwrap().bytes, b"\x1bx");
+    }
+
+    #[test]
+    fn named_keys_use_ghostty_key_encoding() {
+        let mut emulator = emulator(10, 2);
+        let cases: &[(KeyCode, InputModifiers, &[u8])] = &[
+            (KeyCode::Enter, InputModifiers::default(), b"\r"),
+            (KeyCode::Backspace, InputModifiers::default(), b"\x7f"),
+            (KeyCode::Tab, InputModifiers::default(), b"\t"),
+            (
+                KeyCode::Tab,
+                InputModifiers {
+                    shift: true,
+                    ..InputModifiers::default()
+                },
+                b"\x1b[Z",
+            ),
+            (KeyCode::Escape, InputModifiers::default(), b"\x1b"),
+            (KeyCode::ArrowDown, InputModifiers::default(), b"\x1b[B"),
+            (KeyCode::ArrowLeft, InputModifiers::default(), b"\x1b[D"),
+            (KeyCode::ArrowRight, InputModifiers::default(), b"\x1b[C"),
+            (KeyCode::Home, InputModifiers::default(), b"\x1b[H"),
+            (KeyCode::End, InputModifiers::default(), b"\x1b[F"),
+            (KeyCode::PageUp, InputModifiers::default(), b"\x1b[5~"),
+            (KeyCode::PageDown, InputModifiers::default(), b"\x1b[6~"),
+            (KeyCode::Insert, InputModifiers::default(), b"\x1b[2~"),
+            (KeyCode::Delete, InputModifiers::default(), b"\x1b[3~"),
+        ];
+
+        for (code, modifiers, expected) in cases {
+            assert_eq!(
+                emulator.key(key(*code, *modifiers)).unwrap().bytes,
+                *expected,
+                "unexpected encoding for {code:?}"
+            );
+        }
     }
 
     #[test]
@@ -912,7 +1266,7 @@ mod tests {
         tracked.feed(b"\x1b[?1000h\x1b[?1006h");
         let reported = tracked.wheel(wheel(2, false)).unwrap();
         assert_eq!(reported.bytes, b"\x1b[<64;1;1M\x1b[<64;1;1M");
-        assert!(!reported.screen_changed);
+        assert!(reported.screen_changed);
 
         let mut alternate = emulator(10, 2);
         alternate.feed(b"\x1b[?1049h\x1b[?1007h");
@@ -922,6 +1276,26 @@ mod tests {
         );
         alternate.feed(b"\x1b[?1h");
         assert_eq!(alternate.wheel(wheel(-1, false)).unwrap().bytes, b"\x1bOB");
+    }
+
+    #[test]
+    fn cell_mouse_motion_is_deduplicated_without_losing_encoder_state() {
+        let mut emulator = emulator(10, 2);
+        emulator.feed(b"\x1b[?1003h\x1b[?1006h");
+
+        let first = emulator
+            .pointer(pointer(PointerPhase::Motion, None, 1.0, 1.0, false))
+            .unwrap();
+        let same_cell = emulator
+            .pointer(pointer(PointerPhase::Motion, None, 9.0, 19.0, false))
+            .unwrap();
+        let next_cell = emulator
+            .pointer(pointer(PointerPhase::Motion, None, 11.0, 1.0, false))
+            .unwrap();
+
+        assert_eq!(first.bytes, b"\x1b[<35;1;1M");
+        assert!(same_cell.bytes.is_empty());
+        assert_eq!(next_cell.bytes, b"\x1b[<35;2;1M");
     }
 
     #[test]
@@ -980,6 +1354,107 @@ mod tests {
 
         let snapshot = emulator.snapshot().unwrap().unwrap();
         assert!(snapshot.rows[0][..5].iter().all(|cell| cell.selected));
+    }
+
+    #[test]
+    fn application_mouse_routes_clear_selection_but_hover_does_not() {
+        let mut pressed = emulator(12, 3);
+        pressed.feed(b"hello world");
+        select_first_five(&mut pressed, false);
+        pressed.feed(b"\x1b[?1000h\x1b[?1006h");
+        let action = pressed
+            .pointer(pointer(
+                PointerPhase::Press,
+                Some(PointerButton::Left),
+                2.0,
+                10.0,
+                false,
+            ))
+            .unwrap();
+        assert!(action.screen_changed);
+        assert_eq!(pressed.selection_text().unwrap(), None);
+
+        let mut tracked_wheel = emulator(12, 3);
+        tracked_wheel.feed(b"hello world\x1b[?1000h\x1b[?1006h");
+        select_first_five(&mut tracked_wheel, true);
+        let action = tracked_wheel.wheel(wheel(1, false)).unwrap();
+        assert!(action.screen_changed);
+        assert_eq!(tracked_wheel.selection_text().unwrap(), None);
+
+        let mut alternate_wheel = emulator(12, 3);
+        alternate_wheel.feed(b"\x1b[?1049hhello world\x1b[?1007h");
+        select_first_five(&mut alternate_wheel, false);
+        let action = alternate_wheel.wheel(wheel(1, false)).unwrap();
+        assert!(action.screen_changed);
+        assert_eq!(alternate_wheel.selection_text().unwrap(), None);
+
+        let mut hover = emulator(12, 3);
+        hover.feed(b"hello world");
+        select_first_five(&mut hover, false);
+        hover.feed(b"\x1b[?1003h\x1b[?1006h");
+        let action = hover
+            .pointer(pointer(PointerPhase::Motion, None, 11.0, 1.0, false))
+            .unwrap();
+        assert!(!action.screen_changed);
+        assert_eq!(hover.selection_text().unwrap(), Some("hello".to_owned()));
+    }
+
+    #[test]
+    fn additional_presses_and_mismatched_releases_do_not_replace_active_route() {
+        let mut emulator = emulator(10, 2);
+        emulator.feed(b"\x1b[?1002h\x1b[?1006h");
+
+        let first = emulator
+            .pointer(pointer(
+                PointerPhase::Press,
+                Some(PointerButton::Left),
+                1.0,
+                1.0,
+                false,
+            ))
+            .unwrap();
+        let additional = emulator
+            .pointer(pointer(
+                PointerPhase::Press,
+                Some(PointerButton::Right),
+                1.0,
+                1.0,
+                false,
+            ))
+            .unwrap();
+        let mismatched_release = emulator
+            .pointer(pointer(
+                PointerPhase::Release,
+                Some(PointerButton::Right),
+                1.0,
+                1.0,
+                false,
+            ))
+            .unwrap();
+        let motion = emulator
+            .pointer(pointer(
+                PointerPhase::Motion,
+                Some(PointerButton::Left),
+                11.0,
+                1.0,
+                false,
+            ))
+            .unwrap();
+        let release = emulator
+            .pointer(pointer(
+                PointerPhase::Release,
+                Some(PointerButton::Left),
+                11.0,
+                1.0,
+                false,
+            ))
+            .unwrap();
+
+        assert_eq!(first.bytes, b"\x1b[<0;1;1M");
+        assert!(additional.bytes.is_empty());
+        assert!(mismatched_release.bytes.is_empty());
+        assert_eq!(motion.bytes, b"\x1b[<32;2;1M");
+        assert_eq!(release.bytes, b"\x1b[<0;2;1m");
     }
 
     #[test]

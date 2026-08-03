@@ -7,6 +7,6 @@ pub(crate) use emulator::{CellSnapshot, RowSnapshot, ScreenSnapshot};
     reason = "worker-side interaction contract is re-exported before UI input wiring"
 )]
 pub(crate) use session::{
-    GridSize, InputModifiers, PointerButton, PointerInput, PointerPhase, SessionEvent,
-    SurfacePosition, TerminalSession, WheelInput,
+    GridSize, InputModifiers, KeyCode, KeyInput, PointerButton, PointerInput, PointerPhase,
+    SessionEvent, SurfacePosition, TerminalSession, WheelInput,
 };

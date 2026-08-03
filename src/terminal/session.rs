@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver as CommandReceiver, Sender as CommandSender, TryRecvError};
 use std::thread::{self, JoinHandle};
 
-use portable_pty::PtySize;
+use portable_pty::{ChildKiller, PtySize};
 use thiserror::Error;
 
 use crate::platform::macos_pty::{PtyError, SpawnedPty, spawn_user_shell};
@@ -21,6 +21,40 @@ pub(crate) struct InputModifiers {
     pub(crate) alt: bool,
     pub(crate) control: bool,
     pub(crate) platform: bool,
+}
+
+#[allow(
+    dead_code,
+    reason = "semantic keyboard input is exposed before UI input migration"
+)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum KeyCode {
+    Character(char),
+    Enter,
+    Backspace,
+    Tab,
+    Escape,
+    ArrowUp,
+    ArrowDown,
+    ArrowLeft,
+    ArrowRight,
+    Home,
+    End,
+    PageUp,
+    PageDown,
+    Insert,
+    Delete,
+}
+
+#[allow(
+    dead_code,
+    reason = "semantic keyboard input is exposed before UI input migration"
+)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct KeyInput {
+    pub(crate) code: KeyCode,
+    pub(crate) text: Option<String>,
+    pub(crate) modifiers: InputModifiers,
 }
 
 #[allow(
@@ -103,6 +137,7 @@ pub(crate) enum SessionError {
 pub(crate) struct TerminalSession {
     commands: Option<CommandSender<Command>>,
     worker: Option<JoinHandle<()>>,
+    child_killer: Option<Box<dyn ChildKiller + Send + Sync>>,
 }
 
 impl TerminalSession {
@@ -110,6 +145,7 @@ impl TerminalSession {
         size: GridSize,
     ) -> Result<(Self, async_channel::Receiver<SessionEvent>), SessionError> {
         let pty = spawn_user_shell(size.pty_size())?;
+        let child_killer = pty.child.clone_killer();
         let (command_tx, command_rx) = mpsc::channel();
         // Two slots retain the latest screen and a final lifecycle event without
         // allowing sustained PTY output to build an unbounded UI backlog.
@@ -127,6 +163,7 @@ impl TerminalSession {
                 Self {
                     commands: Some(command_tx),
                     worker: Some(worker),
+                    child_killer: Some(child_killer),
                 },
                 event_rx,
             )),
@@ -149,6 +186,18 @@ impl TerminalSession {
             && commands.send(Command::Input(bytes)).is_err()
         {
             eprintln!("terminal input was dropped because the worker has stopped");
+        }
+    }
+
+    #[allow(
+        dead_code,
+        reason = "semantic keyboard input is exposed before UI input migration"
+    )]
+    pub(crate) fn key(&self, input: KeyInput) {
+        if let Some(commands) = &self.commands
+            && commands.send(Command::Key(input)).is_err()
+        {
+            eprintln!("terminal key input was dropped because the worker has stopped");
         }
     }
 
@@ -217,6 +266,16 @@ impl TerminalSession {
     }
 
     fn shutdown(&mut self) {
+        let child_killer = self.child_killer.take();
+        if self
+            .worker
+            .as_ref()
+            .is_some_and(|worker| !worker.is_finished())
+            && let Some(mut child_killer) = child_killer
+            && let Err(error) = child_killer.kill()
+        {
+            eprintln!("failed to terminate shell while shutting down terminal worker: {error}");
+        }
         if let Some(commands) = self.commands.take()
             && commands.send(Command::Shutdown).is_err()
         {
@@ -237,6 +296,7 @@ impl Drop for TerminalSession {
 #[derive(Debug)]
 enum Command {
     Input(Vec<u8>),
+    Key(KeyInput),
     Output(Vec<u8>),
     Resize(GridSize),
     #[allow(
@@ -323,6 +383,15 @@ fn run_worker(
 
         let keep_running = match command {
             Command::Input(bytes) => write_pty(&mut pty.writer, &bytes, &events),
+            Command::Key(input) => match emulator.key(input) {
+                Ok(action) => {
+                    apply_emulator_action(action, &mut emulator, &mut pty.writer, &events)
+                }
+                Err(message) => {
+                    send_error(&events, message);
+                    false
+                }
+            },
             Command::Output(bytes) => process_output(
                 bytes,
                 &commands,
@@ -332,20 +401,30 @@ fn run_worker(
                 &events,
             ),
             Command::Resize(size) => {
-                let pty_resized = pty.master.resize(size.pty_size()).map_err(|error| {
-                    format!("failed to resize the macOS pseudo-terminal: {error:#}")
-                });
-                let emulator_resized = emulator
-                    .resize(
-                        size.cols,
-                        size.rows,
-                        u32::from(size.cell_width_px),
-                        u32::from(size.cell_height_px),
-                    )
-                    .map_err(|error| format!("failed to resize terminal state: {error}"));
+                let result = pty
+                    .master
+                    .resize(size.pty_size())
+                    .map_err(|error| {
+                        format!("failed to resize the macOS pseudo-terminal: {error:#}")
+                    })
+                    .and_then(|()| {
+                        emulator
+                            .resize(
+                                size.cols,
+                                size.rows,
+                                u32::from(size.cell_width_px),
+                                u32::from(size.cell_height_px),
+                            )
+                            .map_err(|error| format!("failed to resize terminal state: {error}"))
+                    });
 
-                match pty_resized.and(emulator_resized) {
-                    Ok(()) => publish_screen(&mut emulator, &events),
+                match result {
+                    Ok(()) => apply_emulator_action(
+                        EmulatorAction::screen_changed(),
+                        &mut emulator,
+                        &mut pty.writer,
+                        &events,
+                    ),
                     Err(message) => {
                         send_error(&events, message);
                         false
@@ -450,9 +529,18 @@ fn process_output(
     events: &async_channel::Sender<SessionEvent>,
 ) -> bool {
     emulator.feed(&first);
+    if !write_pending_pty_responses(emulator, writer, events) {
+        return false;
+    }
+
     let commands_open = loop {
         match commands.try_recv() {
-            Ok(Command::Output(bytes)) => emulator.feed(&bytes),
+            Ok(Command::Output(bytes)) => {
+                emulator.feed(&bytes);
+                if !write_pending_pty_responses(emulator, writer, events) {
+                    return false;
+                }
+            }
             Ok(command) => {
                 *pending_command = Some(command);
                 break true;
@@ -462,10 +550,7 @@ fn process_output(
         }
     };
 
-    let responses = emulator.take_pty_responses();
-    (responses.is_empty() || write_pty(writer, &responses, events))
-        && publish_screen(emulator, events)
-        && commands_open
+    publish_screen(emulator, events) && commands_open
 }
 
 fn apply_emulator_action(
@@ -474,8 +559,18 @@ fn apply_emulator_action(
     writer: &mut Box<dyn Write + Send>,
     events: &async_channel::Sender<SessionEvent>,
 ) -> bool {
-    (action.bytes.is_empty() || write_pty(writer, &action.bytes, events))
+    write_pending_pty_responses(emulator, writer, events)
+        && (action.bytes.is_empty() || write_pty(writer, &action.bytes, events))
         && (!action.screen_changed || publish_screen(emulator, events))
+}
+
+fn write_pending_pty_responses(
+    emulator: &TerminalEmulator,
+    writer: &mut Box<dyn Write + Send>,
+    events: &async_channel::Sender<SessionEvent>,
+) -> bool {
+    let responses = emulator.take_pty_responses();
+    responses.is_empty() || write_pty(writer, &responses, events)
 }
 
 fn write_pty(
@@ -533,9 +628,44 @@ fn join_reader(reader: JoinHandle<()>) {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Condvar, Mutex};
     use std::time::{Duration, Instant};
 
     use super::*;
+
+    #[derive(Clone, Debug)]
+    struct UnblockingKiller {
+        killed: Arc<(Mutex<bool>, Condvar)>,
+    }
+
+    #[derive(Clone, Debug)]
+    struct RecordingWriter {
+        bytes: Arc<Mutex<Vec<u8>>>,
+    }
+
+    impl Write for RecordingWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.bytes.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl ChildKiller for UnblockingKiller {
+        fn kill(&mut self) -> std::io::Result<()> {
+            let (killed, wake) = &*self.killed;
+            *killed.lock().unwrap() = true;
+            wake.notify_all();
+            Ok(())
+        }
+
+        fn clone_killer(&self) -> Box<dyn ChildKiller + Send + Sync> {
+            Box::new(self.clone())
+        }
+    }
 
     #[test]
     fn terminal_events_preserve_the_latest_screen() {
@@ -566,10 +696,78 @@ mod tests {
     }
 
     #[test]
+    fn pending_pty_responses_are_written_before_action_input() {
+        let mut emulator = TerminalEmulator::new(10, 2, 10, 20).unwrap();
+        emulator.feed(b"\x1b[?2048h");
+        emulator.resize(20, 4, 8, 18).unwrap();
+        let written = Arc::new(Mutex::new(Vec::new()));
+        let mut writer: Box<dyn Write + Send> = Box::new(RecordingWriter {
+            bytes: Arc::clone(&written),
+        });
+        let (events, _receiver) = async_channel::bounded(2);
+
+        assert!(apply_emulator_action(
+            EmulatorAction {
+                bytes: b"later".to_vec(),
+                screen_changed: false,
+            },
+            &mut emulator,
+            &mut writer,
+            &events,
+        ));
+
+        assert_eq!(
+            written.lock().unwrap().as_slice(),
+            b"\x1b[48;4;20;72;160tlater"
+        );
+    }
+
+    #[test]
+    fn shutdown_kills_the_child_before_joining_a_blocked_worker() {
+        let killed = Arc::new((Mutex::new(false), Condvar::new()));
+        let worker_killed = Arc::clone(&killed);
+        let timed_out = Arc::new(Mutex::new(false));
+        let worker_timed_out = Arc::clone(&timed_out);
+        let saw_shutdown = Arc::new(Mutex::new(false));
+        let worker_saw_shutdown = Arc::clone(&saw_shutdown);
+        let (commands, command_rx) = mpsc::channel();
+        let worker = thread::spawn(move || {
+            let (killed, wake) = &*worker_killed;
+            let guard = killed.lock().unwrap();
+            let (guard, timeout) = wake
+                .wait_timeout_while(guard, Duration::from_secs(1), |killed| !*killed)
+                .unwrap();
+            *worker_timed_out.lock().unwrap() = timeout.timed_out();
+            drop(guard);
+            *worker_saw_shutdown.lock().unwrap() = matches!(
+                command_rx.recv_timeout(Duration::from_secs(1)),
+                Ok(Command::Shutdown)
+            );
+        });
+        let mut session = TerminalSession {
+            commands: Some(commands),
+            worker: Some(worker),
+            child_killer: Some(Box::new(UnblockingKiller {
+                killed: Arc::clone(&killed),
+            })),
+        };
+
+        session.shutdown();
+
+        assert!(*killed.0.lock().unwrap());
+        assert!(!*timed_out.lock().unwrap());
+        assert!(*saw_shutdown.lock().unwrap());
+        assert!(session.commands.is_none());
+        assert!(session.worker.is_none());
+        assert!(session.child_killer.is_none());
+    }
+
+    #[test]
     fn stopped_session_returns_an_error_for_selection_requests() {
         let session = TerminalSession {
             commands: None,
             worker: None,
+            child_killer: None,
         };
 
         let result = session.request_selection_text().try_recv().unwrap();
