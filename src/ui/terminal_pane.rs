@@ -2,12 +2,17 @@ use std::sync::Arc;
 
 use gpui::prelude::*;
 use gpui::{
-    App, Bounds, Context, FocusHandle, IntoElement, KeyDownEvent, MouseButton, Pixels, Render,
-    SharedString, Task, TextRun, Window, div, font, px, rgba,
+    App, Bounds, ClipboardItem, Context, FocusHandle, IntoElement, KeyDownEvent, MouseButton,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Render, ScrollWheelEvent, SharedString,
+    Task, TextRun, Window, div, font, px, rgba,
 };
 
 use super::terminal_element::{TerminalGridCache, TerminalGridElement};
-use crate::terminal::{GridSize, ScreenSnapshot, SessionEvent, TerminalSession};
+use super::{CopySelection, PasteClipboard, TERMINAL_KEY_CONTEXT};
+use crate::terminal::{
+    GridSize, InputModifiers, KeyCode, KeyInput, PointerButton, PointerInput, PointerPhase,
+    ScreenSnapshot, SessionEvent, SurfacePosition, TerminalSession, WheelInput,
+};
 use crate::theme::{ACTIVE_THEME, Color};
 
 const FONT_SIZE: f32 = 14.0;
@@ -24,6 +29,9 @@ pub(crate) struct TerminalPane {
     font_family: SharedString,
     cell_width: Pixels,
     last_grid_size: Option<GridSize>,
+    grid_bounds: Option<Bounds<Pixels>>,
+    pressed_button: Option<PointerButton>,
+    wheel_remainder: f32,
     render_cache: TerminalGridCache,
     _event_task: Option<Task<()>>,
 }
@@ -42,6 +50,9 @@ impl TerminalPane {
             font_family,
             cell_width,
             last_grid_size: None,
+            grid_bounds: None,
+            pressed_button: None,
+            wheel_remainder: 0.0,
             render_cache: TerminalGridCache::new(),
             _event_task: None,
         }
@@ -52,6 +63,7 @@ impl TerminalPane {
     }
 
     fn update_grid_bounds(&mut self, bounds: Bounds<Pixels>, cx: &mut Context<Self>) {
+        self.grid_bounds = Some(bounds);
         let size = grid_size(bounds, self.cell_width);
         if self.last_grid_size == Some(size) {
             return;
@@ -105,13 +117,171 @@ impl TerminalPane {
     }
 
     fn on_key_down(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
-        let bytes = encode_key(event);
-        if !bytes.is_empty() {
+        if let Some(input) = encode_key(event) {
             if let Some(session) = &self.session {
-                session.send_input(bytes);
+                session.key(input);
             }
             cx.stop_propagation();
         }
+    }
+
+    fn on_mouse_down(
+        &mut self,
+        event: &MouseDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.focus_handle.focus(window);
+        let Some(button) = pointer_button(event.button) else {
+            return;
+        };
+        if self.pressed_button.is_some() {
+            cx.stop_propagation();
+            return;
+        }
+        let Some(position) = self.surface_position(event.position, false) else {
+            return;
+        };
+
+        self.pressed_button = Some(button);
+        if let Some(session) = &self.session {
+            session.pointer(PointerInput {
+                phase: PointerPhase::Press,
+                button: Some(button),
+                position,
+                modifiers: input_modifiers(event.modifiers),
+            });
+        }
+        cx.stop_propagation();
+    }
+
+    fn on_mouse_move(
+        &mut self,
+        event: &MouseMoveEvent,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let dragging = self.pressed_button.is_some();
+        let Some(position) = self.surface_position(event.position, dragging) else {
+            return;
+        };
+        if let Some(session) = &self.session {
+            session.pointer(PointerInput {
+                phase: PointerPhase::Motion,
+                button: self.pressed_button,
+                position,
+                modifiers: input_modifiers(event.modifiers),
+            });
+        }
+        cx.stop_propagation();
+    }
+
+    fn on_mouse_up(&mut self, event: &MouseUpEvent, _window: &mut Window, cx: &mut Context<Self>) {
+        let Some(button) = pointer_button(event.button) else {
+            return;
+        };
+        if self.pressed_button != Some(button) {
+            return;
+        }
+        self.pressed_button = None;
+        let Some(position) = self.surface_position(event.position, true) else {
+            return;
+        };
+
+        if let Some(session) = &self.session {
+            session.pointer(PointerInput {
+                phase: PointerPhase::Release,
+                button: Some(button),
+                position,
+                modifiers: input_modifiers(event.modifiers),
+            });
+        }
+        cx.stop_propagation();
+    }
+
+    fn on_scroll_wheel(
+        &mut self,
+        event: &ScrollWheelEvent,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(position) = self.surface_position(event.position, false) else {
+            return;
+        };
+        let lines = f32::from(event.delta.pixel_delta(px(LINE_HEIGHT)).y) / LINE_HEIGHT;
+        let steps = accumulate_wheel_steps(&mut self.wheel_remainder, lines);
+
+        if steps != 0
+            && let Some(session) = &self.session
+        {
+            session.wheel(WheelInput {
+                steps,
+                position,
+                modifiers: input_modifiers(event.modifiers),
+            });
+        }
+        cx.stop_propagation();
+    }
+
+    fn copy_selection(&mut self, _: &CopySelection, _window: &mut Window, cx: &mut Context<Self>) {
+        let Some(session) = &self.session else {
+            return;
+        };
+        let receiver = session.request_selection_text();
+        cx.spawn(async move |this, cx| match receiver.recv().await {
+            Ok(Ok(Some(text))) if !text.is_empty() => {
+                let _ = this.update(cx, |_this, cx| {
+                    cx.write_to_clipboard(ClipboardItem::new_string(text));
+                });
+            }
+            Ok(Err(error)) => {
+                let _ = this.update(cx, |this, cx| {
+                    eprintln!("failed to copy terminal selection: {error}");
+                    this.status = Some(error);
+                    cx.notify();
+                });
+            }
+            Err(error) => {
+                let _ = this.update(cx, |this, cx| {
+                    let message = format!("terminal selection reply was lost: {error}");
+                    eprintln!("{message}");
+                    this.status = Some(message);
+                    cx.notify();
+                });
+            }
+            Ok(Ok(None | Some(_))) => {}
+        })
+        .detach();
+    }
+
+    fn paste_clipboard(
+        &mut self,
+        _: &PasteClipboard,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) else {
+            return;
+        };
+        if !text.is_empty()
+            && let Some(session) = &self.session
+        {
+            session.paste(text);
+        }
+    }
+
+    fn surface_position(
+        &self,
+        position: gpui::Point<Pixels>,
+        allow_outside: bool,
+    ) -> Option<SurfacePosition> {
+        terminal_surface_position(
+            self.grid_bounds?,
+            position,
+            self.cell_width,
+            self.last_grid_size?,
+            allow_outside,
+        )
     }
 }
 
@@ -149,12 +319,21 @@ impl Render for TerminalPane {
             .overflow_hidden()
             .bg(background)
             .p(px(PADDING))
+            .cursor_text()
+            .key_context(TERMINAL_KEY_CONTEXT)
             .track_focus(&self.focus_handle)
+            .on_action(cx.listener(Self::copy_selection))
+            .on_action(cx.listener(Self::paste_clipboard))
             .on_key_down(cx.listener(Self::on_key_down))
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, _, window, _| this.focus_handle.focus(window)),
-            )
+            .on_any_mouse_down(cx.listener(Self::on_mouse_down))
+            .on_mouse_move(cx.listener(Self::on_mouse_move))
+            .on_scroll_wheel(cx.listener(Self::on_scroll_wheel))
+            .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
+            .on_mouse_up(MouseButton::Middle, cx.listener(Self::on_mouse_up))
+            .on_mouse_up(MouseButton::Right, cx.listener(Self::on_mouse_up))
+            .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
+            .on_mouse_up_out(MouseButton::Middle, cx.listener(Self::on_mouse_up))
+            .on_mouse_up_out(MouseButton::Right, cx.listener(Self::on_mouse_up))
             .child(terminal_grid)
             .when_some(status, |root, status| {
                 root.child(
@@ -224,70 +403,95 @@ fn gpui_color(color: Color) -> gpui::Rgba {
     rgba(color.rgba_hex())
 }
 
-fn encode_key(event: &KeyDownEvent) -> Vec<u8> {
-    let keystroke = &event.keystroke;
-    if keystroke.modifiers.platform || keystroke.modifiers.function {
-        return Vec::new();
+fn pointer_button(button: MouseButton) -> Option<PointerButton> {
+    match button {
+        MouseButton::Left => Some(PointerButton::Left),
+        MouseButton::Middle => Some(PointerButton::Middle),
+        MouseButton::Right => Some(PointerButton::Right),
+        MouseButton::Navigate(_) => None,
     }
-
-    let special = match keystroke.key.as_str() {
-        "enter" => Some(b"\r".as_slice()),
-        "backspace" => Some(b"\x7f".as_slice()),
-        "tab" if keystroke.modifiers.shift => Some(b"\x1b[Z".as_slice()),
-        "tab" => Some(b"\t".as_slice()),
-        "escape" => Some(b"\x1b".as_slice()),
-        "up" => Some(b"\x1b[A".as_slice()),
-        "down" => Some(b"\x1b[B".as_slice()),
-        "right" => Some(b"\x1b[C".as_slice()),
-        "left" => Some(b"\x1b[D".as_slice()),
-        "home" => Some(b"\x1b[H".as_slice()),
-        "end" => Some(b"\x1b[F".as_slice()),
-        "pageup" => Some(b"\x1b[5~".as_slice()),
-        "pagedown" => Some(b"\x1b[6~".as_slice()),
-        "insert" => Some(b"\x1b[2~".as_slice()),
-        "delete" => Some(b"\x1b[3~".as_slice()),
-        _ => None,
-    };
-
-    if let Some(bytes) = special {
-        return with_optional_alt_prefix(bytes, keystroke.modifiers.alt);
-    }
-
-    if keystroke.modifiers.control
-        && let Some(control) = control_byte(&keystroke.key)
-    {
-        return with_optional_alt_prefix(&[control], keystroke.modifiers.alt);
-    }
-
-    keystroke
-        .key_char
-        .as_deref()
-        .map(str::as_bytes)
-        .map_or_else(Vec::new, |bytes| bytes.to_vec())
 }
 
-fn with_optional_alt_prefix(bytes: &[u8], alt: bool) -> Vec<u8> {
-    if !alt {
-        return bytes.to_vec();
+fn input_modifiers(modifiers: gpui::Modifiers) -> InputModifiers {
+    InputModifiers {
+        shift: modifiers.shift,
+        alt: modifiers.alt,
+        control: modifiers.control,
+        platform: modifiers.platform,
     }
-    let mut encoded = Vec::with_capacity(bytes.len() + 1);
-    encoded.push(0x1b);
-    encoded.extend_from_slice(bytes);
-    encoded
 }
 
-fn control_byte(key: &str) -> Option<u8> {
-    let byte = *key.as_bytes().first()?;
-    if key.len() != 1 || !byte.is_ascii() {
+fn terminal_surface_position(
+    bounds: Bounds<Pixels>,
+    position: gpui::Point<Pixels>,
+    rendered_cell_width: Pixels,
+    grid_size: GridSize,
+    allow_outside: bool,
+) -> Option<SurfacePosition> {
+    if !allow_outside && !bounds.contains(&position) {
         return None;
     }
 
-    match byte {
-        b'?' => Some(0x7f),
-        b' '..=b'_' => Some(byte & 0x1f),
-        b'a'..=b'z' => Some(byte - b'a' + 1),
-        _ => None,
+    let local_x = f32::from(position.x - bounds.origin.x);
+    let local_y = f32::from(position.y - bounds.origin.y);
+    Some(SurfacePosition {
+        x: local_x * f32::from(grid_size.cell_width_px) / f32::from(rendered_cell_width),
+        y: local_y * f32::from(grid_size.cell_height_px) / LINE_HEIGHT,
+    })
+}
+
+fn accumulate_wheel_steps(remainder: &mut f32, delta: f32) -> i32 {
+    *remainder += delta;
+    let steps = remainder.trunc() as i32;
+    *remainder -= steps as f32;
+    steps
+}
+
+fn encode_key(event: &KeyDownEvent) -> Option<KeyInput> {
+    let keystroke = &event.keystroke;
+    if keystroke.modifiers.platform || keystroke.modifiers.function {
+        return None;
     }
+
+    let code = match keystroke.key.as_str() {
+        "enter" => KeyCode::Enter,
+        "backspace" => KeyCode::Backspace,
+        "tab" => KeyCode::Tab,
+        "escape" => KeyCode::Escape,
+        "up" => KeyCode::ArrowUp,
+        "down" => KeyCode::ArrowDown,
+        "right" => KeyCode::ArrowRight,
+        "left" => KeyCode::ArrowLeft,
+        "home" => KeyCode::Home,
+        "end" => KeyCode::End,
+        "pageup" => KeyCode::PageUp,
+        "pagedown" => KeyCode::PageDown,
+        "insert" => KeyCode::Insert,
+        "delete" => KeyCode::Delete,
+        key => {
+            let character = single_char(key).or_else(|| {
+                keystroke
+                    .key_char
+                    .as_deref()
+                    .and_then(|text| text.chars().next())
+            })?;
+            KeyCode::Character(character)
+        }
+    };
+
+    Some(KeyInput {
+        code,
+        text: matches!(code, KeyCode::Character(_))
+            .then(|| keystroke.key_char.clone())
+            .flatten(),
+        modifiers: input_modifiers(keystroke.modifiers),
+    })
+}
+
+fn single_char(value: &str) -> Option<char> {
+    let mut characters = value.chars();
+    let first = characters.next()?;
+    characters.next().is_none().then_some(first)
 }
 
 #[cfg(test)]
@@ -308,28 +512,52 @@ mod tests {
     }
 
     #[test]
-    fn encodes_printable_text_and_terminal_keys() {
+    fn maps_printable_text_and_terminal_keys() {
         assert_eq!(
             encode_key(&event("a", Some("a"), Modifiers::default())),
-            b"a"
+            Some(KeyInput {
+                code: KeyCode::Character('a'),
+                text: Some("a".to_owned()),
+                modifiers: InputModifiers::default(),
+            })
         );
         assert_eq!(
             encode_key(&event("enter", None, Modifiers::default())),
-            b"\r"
+            Some(KeyInput {
+                code: KeyCode::Enter,
+                text: None,
+                modifiers: InputModifiers::default(),
+            })
         );
         assert_eq!(
             encode_key(&event("up", None, Modifiers::default())),
-            b"\x1b[A"
+            Some(KeyInput {
+                code: KeyCode::ArrowUp,
+                text: None,
+                modifiers: InputModifiers::default(),
+            })
         );
     }
 
     #[test]
-    fn encodes_control_characters() {
+    fn preserves_control_and_alt_for_worker_side_encoding() {
         let modifiers = Modifiers {
             control: true,
+            alt: true,
             ..Modifiers::default()
         };
-        assert_eq!(encode_key(&event("c", Some("c"), modifiers)), vec![0x03]);
+        assert_eq!(
+            encode_key(&event("c", Some("c"), modifiers)),
+            Some(KeyInput {
+                code: KeyCode::Character('c'),
+                text: Some("c".to_owned()),
+                modifiers: InputModifiers {
+                    control: true,
+                    alt: true,
+                    ..InputModifiers::default()
+                },
+            })
+        );
     }
 
     #[test]
@@ -338,6 +566,74 @@ mod tests {
             platform: true,
             ..Modifiers::default()
         };
-        assert!(encode_key(&event("q", None, modifiers)).is_empty());
+        assert!(encode_key(&event("q", None, modifiers)).is_none());
+    }
+
+    #[test]
+    fn maps_rendered_positions_to_reported_terminal_geometry() {
+        let bounds = Bounds::new(
+            gpui::point(px(10.0), px(20.0)),
+            gpui::size(px(75.0), px(40.0)),
+        );
+        let grid = GridSize {
+            cols: 10,
+            rows: 2,
+            cell_width_px: 8,
+            cell_height_px: 20,
+        };
+
+        let position = terminal_surface_position(
+            bounds,
+            gpui::point(px(47.5), px(30.0)),
+            px(7.5),
+            grid,
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(position, SurfacePosition { x: 40.0, y: 10.0 });
+        assert!(terminal_surface_position(
+            bounds,
+            gpui::point(px(9.0), px(20.0)),
+            px(7.5),
+            grid,
+            false,
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn accumulates_fractional_trackpad_scroll_into_terminal_steps() {
+        let mut remainder = 0.0;
+
+        assert_eq!(accumulate_wheel_steps(&mut remainder, 0.4), 0);
+        assert_eq!(accumulate_wheel_steps(&mut remainder, 0.7), 1);
+        assert!((remainder - 0.1).abs() < f32::EPSILON * 4.0);
+        assert_eq!(accumulate_wheel_steps(&mut remainder, -1.3), -1);
+        assert!((remainder + 0.2).abs() < f32::EPSILON * 4.0);
+    }
+
+    #[test]
+    fn maps_gpui_buttons_and_modifiers_to_terminal_input() {
+        assert_eq!(pointer_button(MouseButton::Left), Some(PointerButton::Left));
+        assert_eq!(
+            pointer_button(MouseButton::Navigate(gpui::NavigationDirection::Back)),
+            None
+        );
+        assert_eq!(
+            input_modifiers(Modifiers {
+                control: true,
+                alt: true,
+                shift: true,
+                platform: true,
+                function: true,
+            }),
+            InputModifiers {
+                shift: true,
+                alt: true,
+                control: true,
+                platform: true,
+            }
+        );
     }
 }

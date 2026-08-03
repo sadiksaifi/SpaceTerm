@@ -48,10 +48,6 @@ pub(crate) struct CellSnapshot {
     pub(crate) bold: bool,
     pub(crate) italic: bool,
     pub(crate) cursor: bool,
-    #[allow(
-        dead_code,
-        reason = "selection rendering is exposed before the UI interaction milestone"
-    )]
     pub(crate) selected: bool,
     pub(crate) spacer_tail: bool,
 }
@@ -234,9 +230,14 @@ impl TerminalEmulator {
     }
 
     pub(crate) fn key(&mut self, input: KeyInput) -> Result<EmulatorAction, String> {
+        self.clear_selection()?;
+        self.terminal.scroll_viewport(ScrollViewport::Bottom);
         let mut bytes = Vec::new();
         self.encode_key(&input, &mut bytes)?;
-        Ok(EmulatorAction::bytes(bytes))
+        Ok(EmulatorAction {
+            bytes,
+            screen_changed: true,
+        })
     }
 
     pub(crate) fn pointer(&mut self, input: PointerInput) -> Result<EmulatorAction, String> {
@@ -318,6 +319,7 @@ impl TerminalEmulator {
     }
 
     pub(crate) fn paste(&mut self, text: String) -> Result<EmulatorAction, String> {
+        self.clear_selection()?;
         let bracketed = self
             .terminal
             .mode(Mode::BRACKETED_PASTE)

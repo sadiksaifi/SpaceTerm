@@ -23,10 +23,6 @@ pub(crate) struct InputModifiers {
     pub(crate) platform: bool,
 }
 
-#[allow(
-    dead_code,
-    reason = "semantic keyboard input is exposed before UI input migration"
-)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum KeyCode {
     Character(char),
@@ -46,10 +42,6 @@ pub(crate) enum KeyCode {
     Delete,
 }
 
-#[allow(
-    dead_code,
-    reason = "semantic keyboard input is exposed before UI input migration"
-)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct KeyInput {
     pub(crate) code: KeyCode,
@@ -57,10 +49,6 @@ pub(crate) struct KeyInput {
     pub(crate) modifiers: InputModifiers,
 }
 
-#[allow(
-    dead_code,
-    reason = "worker-side interaction contract is not wired to the UI in this milestone"
-)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum PointerButton {
     Left,
@@ -68,10 +56,6 @@ pub(crate) enum PointerButton {
     Right,
 }
 
-#[allow(
-    dead_code,
-    reason = "worker-side interaction contract is not wired to the UI in this milestone"
-)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum PointerPhase {
     Press,
@@ -178,21 +162,6 @@ impl TerminalSession {
         }
     }
 
-    pub(crate) fn send_input(&self, bytes: Vec<u8>) {
-        if bytes.is_empty() {
-            return;
-        }
-        if let Some(commands) = &self.commands
-            && commands.send(Command::Input(bytes)).is_err()
-        {
-            eprintln!("terminal input was dropped because the worker has stopped");
-        }
-    }
-
-    #[allow(
-        dead_code,
-        reason = "semantic keyboard input is exposed before UI input migration"
-    )]
     pub(crate) fn key(&self, input: KeyInput) {
         if let Some(commands) = &self.commands
             && commands.send(Command::Key(input)).is_err()
@@ -209,10 +178,6 @@ impl TerminalSession {
         }
     }
 
-    #[allow(
-        dead_code,
-        reason = "worker-side interaction contract is not wired to the UI in this milestone"
-    )]
     pub(crate) fn pointer(&self, input: PointerInput) {
         if let Some(commands) = &self.commands
             && commands.send(Command::Pointer(input)).is_err()
@@ -221,10 +186,6 @@ impl TerminalSession {
         }
     }
 
-    #[allow(
-        dead_code,
-        reason = "worker-side interaction contract is not wired to the UI in this milestone"
-    )]
     pub(crate) fn wheel(&self, input: WheelInput) {
         if let Some(commands) = &self.commands
             && commands.send(Command::Wheel(input)).is_err()
@@ -233,10 +194,6 @@ impl TerminalSession {
         }
     }
 
-    #[allow(
-        dead_code,
-        reason = "worker-side interaction contract is not wired to the UI in this milestone"
-    )]
     pub(crate) fn paste(&self, text: String) {
         if let Some(commands) = &self.commands
             && commands.send(Command::Paste(text)).is_err()
@@ -245,10 +202,6 @@ impl TerminalSession {
         }
     }
 
-    #[allow(
-        dead_code,
-        reason = "worker-side interaction contract is not wired to the UI in this milestone"
-    )]
     pub(crate) fn request_selection_text(
         &self,
     ) -> async_channel::Receiver<Result<Option<String>, String>> {
@@ -295,29 +248,12 @@ impl Drop for TerminalSession {
 
 #[derive(Debug)]
 enum Command {
-    Input(Vec<u8>),
     Key(KeyInput),
     Output(Vec<u8>),
     Resize(GridSize),
-    #[allow(
-        dead_code,
-        reason = "worker-side interaction contract is not wired to the UI in this milestone"
-    )]
     Pointer(PointerInput),
-    #[allow(
-        dead_code,
-        reason = "worker-side interaction contract is not wired to the UI in this milestone"
-    )]
     Wheel(WheelInput),
-    #[allow(
-        dead_code,
-        reason = "worker-side interaction contract is not wired to the UI in this milestone"
-    )]
     Paste(String),
-    #[allow(
-        dead_code,
-        reason = "worker-side interaction contract is not wired to the UI in this milestone"
-    )]
     SelectionText(async_channel::Sender<Result<Option<String>, String>>),
     ReaderStopped(Option<String>),
     Shutdown,
@@ -382,7 +318,6 @@ fn run_worker(
         };
 
         let keep_running = match command {
-            Command::Input(bytes) => write_pty(&mut pty.writer, &bytes, &events),
             Command::Key(input) => match emulator.key(input) {
                 Ok(action) => {
                     apply_emulator_action(action, &mut emulator, &mut pty.writer, &events)
@@ -786,7 +721,7 @@ mod tests {
 
         // The command renders a red X. The echoed command contains an X too, but
         // only the shell's output passes through the SGR sequence and becomes red.
-        session.send_input(b"printf '\\033[31mX\\033[0m\\n'\r".to_vec());
+        session.paste("printf '\\033[31mX\\033[0m\\n'\n".to_owned());
 
         let deadline = Instant::now() + Duration::from_secs(5);
         let mut saw_red_x = false;

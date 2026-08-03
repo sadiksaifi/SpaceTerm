@@ -179,6 +179,7 @@ impl Element for TerminalGridElement {
             let backgrounds = row
                 .backgrounds
                 .iter()
+                .chain(&row.selections)
                 .map(|span| {
                     fill(
                         Bounds::new(
@@ -231,6 +232,7 @@ impl Element for TerminalGridElement {
 struct RowPaintInput {
     fragments: Vec<TextFragment>,
     backgrounds: Vec<BackgroundSpan>,
+    selections: Vec<BackgroundSpan>,
 }
 
 struct TextFragment {
@@ -319,6 +321,7 @@ fn prepare_row(
     let mut fragments = Vec::new();
     let mut regular_fragment: Option<FragmentBuilder> = None;
     let mut backgrounds: Vec<BackgroundSpan> = Vec::new();
+    let mut selections: Vec<BackgroundSpan> = Vec::new();
 
     for (column, cell) in row.iter().enumerate() {
         let (_, background) = effective_colors(cell);
@@ -333,6 +336,21 @@ fn prepare_row(
                     start: column,
                     len: 1,
                     color: background,
+                });
+            }
+        }
+
+        if cell.selected && !cell.cursor {
+            let selection = ACTIVE_THEME.players[0].selection;
+            if let Some(previous) = selections.last_mut()
+                && previous.start + previous.len == column
+            {
+                previous.len += 1;
+            } else {
+                selections.push(BackgroundSpan {
+                    start: column,
+                    len: 1,
+                    color: selection,
                 });
             }
         }
@@ -367,6 +385,7 @@ fn prepare_row(
     RowPaintInput {
         fragments,
         backgrounds,
+        selections,
     }
 }
 
@@ -451,6 +470,26 @@ mod tests {
         assert_eq!(
             input.fragments[0].runs.last().unwrap().color,
             gpui_color(ACTIVE_THEME.terminal_background).into()
+        );
+    }
+
+    #[test]
+    fn selected_cells_coalesce_into_themed_overlay_spans() {
+        let mut first = cell("a");
+        first.selected = true;
+        let mut second = cell("b");
+        second.selected = true;
+        let row = Arc::<[CellSnapshot]>::from([first, second, cell("c")]);
+
+        let input = prepare_row(&row, ACTIVE_THEME.terminal_background, &"Menlo".into());
+
+        assert_eq!(
+            input.selections,
+            vec![BackgroundSpan {
+                start: 0,
+                len: 2,
+                color: ACTIVE_THEME.players[0].selection,
+            }]
         );
     }
 
