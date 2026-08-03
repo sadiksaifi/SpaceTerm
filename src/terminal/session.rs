@@ -1,5 +1,6 @@
 use std::io::{ErrorKind, Read, Write};
-use std::sync::mpsc::{self, Receiver as CommandReceiver, Sender as CommandSender};
+use std::sync::Arc;
+use std::sync::mpsc::{self, Receiver as CommandReceiver, Sender as CommandSender, TryRecvError};
 use std::thread::{self, JoinHandle};
 
 use portable_pty::PtySize;
@@ -21,15 +22,17 @@ impl GridSize {
         PtySize {
             rows: self.rows,
             cols: self.cols,
-            pixel_width: self.cell_width_px,
-            pixel_height: self.cell_height_px,
+            pixel_width: self.cols.saturating_mul(self.cell_width_px),
+            pixel_height: self.rows.saturating_mul(self.cell_height_px),
         }
     }
 }
 
+// Screen events may supersede older screens. Error and Exited are final events,
+// so the worker must not publish another screen after either one.
 #[derive(Clone, Debug)]
 pub(crate) enum SessionEvent {
-    Screen(ScreenSnapshot),
+    Screen(Arc<ScreenSnapshot>),
     Exited(String),
     Error(String),
 }
@@ -57,7 +60,9 @@ impl TerminalSession {
     ) -> Result<(Self, async_channel::Receiver<SessionEvent>), SessionError> {
         let pty = spawn_user_shell(size.pty_size())?;
         let (command_tx, command_rx) = mpsc::channel();
-        let (event_tx, event_rx) = async_channel::unbounded();
+        // Two slots retain the latest screen and a final lifecycle event without
+        // allowing sustained PTY output to build an unbounded UI backlog.
+        let (event_tx, event_rx) = async_channel::bounded(2);
         let (startup_tx, startup_rx) = mpsc::sync_channel(1);
 
         let reader_commands = command_tx.clone();
@@ -174,15 +179,26 @@ fn run_worker(
         return;
     }
 
-    while let Ok(command) = commands.recv() {
+    let mut pending_command = None;
+    loop {
+        let command = match pending_command.take() {
+            Some(command) => command,
+            None => match commands.recv() {
+                Ok(command) => command,
+                Err(_) => break,
+            },
+        };
+
         let keep_running = match command {
             Command::Input(bytes) => write_pty(&mut pty.writer, &bytes, &events),
-            Command::Output(bytes) => {
-                emulator.feed(&bytes);
-                let responses = emulator.take_pty_responses();
-                (responses.is_empty() || write_pty(&mut pty.writer, &responses, &events))
-                    && publish_screen(&mut emulator, &events)
-            }
+            Command::Output(bytes) => process_output(
+                bytes,
+                &commands,
+                &mut pending_command,
+                &mut emulator,
+                &mut pty.writer,
+                &events,
+            ),
             Command::Resize(size) => {
                 let pty_resized = pty.master.resize(size.pty_size()).map_err(|error| {
                     format!("failed to resize the macOS pseudo-terminal: {error:#}")
@@ -198,7 +214,10 @@ fn run_worker(
 
                 match pty_resized.and(emulator_resized) {
                     Ok(()) => publish_screen(&mut emulator, &events),
-                    Err(message) => send_error(&events, message),
+                    Err(message) => {
+                        send_error(&events, message);
+                        false
+                    }
                 }
             }
             Command::ReaderStopped(read_error) => {
@@ -211,7 +230,7 @@ fn run_worker(
                         None => format!("Shell output stopped; process wait failed: {wait_error}"),
                     },
                 };
-                let _ = events.send_blocking(SessionEvent::Exited(status));
+                send_terminal_event(&events, SessionEvent::Exited(status));
                 false
             }
             Command::Shutdown => false,
@@ -259,6 +278,33 @@ fn spawn_reader(
         })
 }
 
+fn process_output(
+    first: Vec<u8>,
+    commands: &CommandReceiver<Command>,
+    pending_command: &mut Option<Command>,
+    emulator: &mut TerminalEmulator,
+    writer: &mut Box<dyn Write + Send>,
+    events: &async_channel::Sender<SessionEvent>,
+) -> bool {
+    emulator.feed(&first);
+    let commands_open = loop {
+        match commands.try_recv() {
+            Ok(Command::Output(bytes)) => emulator.feed(&bytes),
+            Ok(command) => {
+                *pending_command = Some(command);
+                break true;
+            }
+            Err(TryRecvError::Empty) => break true,
+            Err(TryRecvError::Disconnected) => break false,
+        }
+    };
+
+    let responses = emulator.take_pty_responses();
+    (responses.is_empty() || write_pty(writer, &responses, events))
+        && publish_screen(emulator, events)
+        && commands_open
+}
+
 fn write_pty(
     writer: &mut Box<dyn Write + Send>,
     bytes: &[u8],
@@ -276,16 +322,28 @@ fn publish_screen(
     events: &async_channel::Sender<SessionEvent>,
 ) -> bool {
     match emulator.snapshot() {
-        Ok(snapshot) => events.send_blocking(SessionEvent::Screen(snapshot)).is_ok(),
-        Err(error) => send_error(
-            events,
-            format!("failed to produce terminal screen snapshot: {error}"),
-        ),
+        Ok(Some(snapshot)) => events.force_send(SessionEvent::Screen(snapshot)).is_ok(),
+        Ok(None) => true,
+        Err(error) => {
+            send_error(
+                events,
+                format!("failed to produce terminal screen snapshot: {error}"),
+            );
+            false
+        }
     }
 }
 
 fn send_error(events: &async_channel::Sender<SessionEvent>, message: String) -> bool {
-    events.send_blocking(SessionEvent::Error(message)).is_ok()
+    send_terminal_event(events, SessionEvent::Error(message))
+}
+
+fn send_terminal_event(events: &async_channel::Sender<SessionEvent>, event: SessionEvent) -> bool {
+    match events.try_send(event) {
+        Ok(()) => true,
+        Err(async_channel::TrySendError::Full(event)) => events.force_send(event).is_ok(),
+        Err(async_channel::TrySendError::Closed(_)) => false,
+    }
 }
 
 fn join_worker(worker: JoinHandle<()>) {
@@ -307,6 +365,34 @@ mod tests {
     use super::*;
 
     #[test]
+    fn terminal_events_preserve_the_latest_screen() {
+        let (events, receiver) = async_channel::bounded(2);
+        let first = ScreenSnapshot::empty();
+        let second = ScreenSnapshot::empty();
+
+        events
+            .force_send(SessionEvent::Screen(Arc::clone(&first)))
+            .unwrap();
+        events
+            .force_send(SessionEvent::Screen(Arc::clone(&second)))
+            .unwrap();
+        assert!(send_terminal_event(
+            &events,
+            SessionEvent::Exited("done".to_owned())
+        ));
+
+        match receiver.try_recv().unwrap() {
+            SessionEvent::Screen(screen) => assert!(Arc::ptr_eq(&screen, &second)),
+            event => panic!("expected latest screen, got {event:?}"),
+        }
+        assert!(matches!(
+            receiver.try_recv().unwrap(),
+            SessionEvent::Exited(status) if status == "done"
+        ));
+        assert!(receiver.try_recv().is_err());
+    }
+
+    #[test]
     fn real_shell_output_round_trips_through_the_pty_and_emulator() {
         let size = GridSize {
             cols: 80,
@@ -325,7 +411,7 @@ mod tests {
         while Instant::now() < deadline && !saw_red_x {
             match events.try_recv() {
                 Ok(SessionEvent::Screen(screen)) => {
-                    saw_red_x = screen.rows.iter().flatten().any(|cell| {
+                    saw_red_x = screen.rows.iter().flat_map(|row| row.iter()).any(|cell| {
                         cell.text == "X"
                             && cell.foreground == crate::theme::ACTIVE_THEME.terminal_normal()[1]
                     });

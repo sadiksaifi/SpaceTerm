@@ -1,6 +1,6 @@
 use gpui::{App, AppContext, Bounds, WindowBounds, WindowOptions, px, size};
 
-use crate::ui::TerminalView;
+use crate::ui::TerminalPane;
 
 pub(crate) fn open(cx: &mut App) {
     let bounds = Bounds::centered(None, size(px(900.0), px(580.0)), cx);
@@ -12,7 +12,9 @@ pub(crate) fn open(cx: &mut App) {
         },
         |window, cx| {
             window.set_window_title("Termspace");
-            cx.new(|cx| TerminalView::new(window, cx))
+            let pane = cx.new(|cx| TerminalPane::new(window, cx));
+            pane.update(cx, |pane, _cx| pane.focus(window));
+            pane
         },
     );
 

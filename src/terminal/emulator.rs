@@ -1,6 +1,7 @@
 use std::cell::RefCell;
 use std::mem;
 use std::rc::Rc;
+use std::sync::Arc;
 
 use libghostty_vt::render::{CellIterator, Dirty, RowIterator};
 use libghostty_vt::screen::CellWide;
@@ -23,20 +24,23 @@ pub(crate) struct CellSnapshot {
     pub(crate) bold: bool,
     pub(crate) italic: bool,
     pub(crate) cursor: bool,
+    pub(crate) spacer_tail: bool,
 }
 
-#[derive(Clone, Debug)]
+pub(crate) type RowSnapshot = Arc<[CellSnapshot]>;
+
+#[derive(Debug)]
 pub(crate) struct ScreenSnapshot {
-    pub(crate) rows: Vec<Vec<CellSnapshot>>,
+    pub(crate) rows: Arc<[RowSnapshot]>,
     pub(crate) background: Color,
 }
 
 impl ScreenSnapshot {
-    pub(crate) fn empty() -> Self {
-        Self {
-            rows: Vec::new(),
+    pub(crate) fn empty() -> Arc<Self> {
+        Arc::new(Self {
+            rows: Arc::from([]),
             background: ACTIVE_THEME.terminal_background,
-        }
+        })
     }
 }
 
@@ -46,6 +50,11 @@ pub(crate) struct TerminalEmulator {
     rows: RowIterator<'static>,
     cells: CellIterator<'static>,
     pty_responses: Rc<RefCell<Vec<u8>>>,
+    row_cache: Vec<RowSnapshot>,
+    cached_cols: u16,
+    cached_foreground: Option<Color>,
+    cached_background: Option<Color>,
+    cached_cursor: Option<(u16, u16)>,
 }
 
 impl TerminalEmulator {
@@ -69,6 +78,11 @@ impl TerminalEmulator {
             rows: RowIterator::new()?,
             cells: CellIterator::new()?,
             pty_responses,
+            row_cache: Vec::new(),
+            cached_cols: 0,
+            cached_foreground: None,
+            cached_background: None,
+            cached_cursor: None,
         })
     }
 
@@ -91,8 +105,11 @@ impl TerminalEmulator {
         mem::take(&mut *self.pty_responses.borrow_mut())
     }
 
-    pub(crate) fn snapshot(&mut self) -> Result<ScreenSnapshot, libghostty_vt::Error> {
+    pub(crate) fn snapshot(&mut self) -> Result<Option<Arc<ScreenSnapshot>>, libghostty_vt::Error> {
         let snapshot = self.render_state.update(&self.terminal)?;
+        let dirty = snapshot.dirty()?;
+        let rows = snapshot.rows()?;
+        let cols = snapshot.cols()?;
         let colors = snapshot.colors()?;
         let cursor = if snapshot.cursor_visible()? {
             snapshot.cursor_viewport()?
@@ -102,70 +119,106 @@ impl TerminalEmulator {
 
         let default_foreground: Color = colors.foreground.into();
         let default_background: Color = colors.background.into();
-        let mut rendered_rows = Vec::with_capacity(usize::from(snapshot.rows()?));
+        let cursor_position = cursor.as_ref().map(|cursor| (cursor.x, cursor.y));
+        let rebuild_all = matches!(dirty, Dirty::Full)
+            || self.row_cache.len() != usize::from(rows)
+            || self.cached_cols != cols
+            || self.cached_foreground != Some(default_foreground)
+            || self.cached_background != Some(default_background);
+        let cursor_changed = self.cached_cursor != cursor_position;
+
+        if matches!(dirty, Dirty::Clean) && !rebuild_all && !cursor_changed {
+            return Ok(None);
+        }
+
+        let mut rendered_rows = if rebuild_all {
+            Vec::with_capacity(usize::from(rows))
+        } else {
+            self.row_cache.clone()
+        };
         let mut row_index = 0_u16;
         {
             let mut row_iteration = self.rows.update(&snapshot)?;
 
             while let Some(row) = row_iteration.next() {
-                let mut rendered_cells = Vec::with_capacity(usize::from(snapshot.cols()?));
-                let mut column_index = 0_u16;
-                let mut cell_iteration = self.cells.update(row)?;
+                let cursor_row_changed = cursor_changed
+                    && (self.cached_cursor.is_some_and(|(_, y)| y == row_index)
+                        || cursor_position.is_some_and(|(_, y)| y == row_index));
+                let rebuild_row = rebuild_all || row.dirty()? || cursor_row_changed;
 
-                while let Some(cell) = cell_iteration.next() {
-                    let style = cell.style()?;
-                    let mut foreground = cell
-                        .fg_color()?
-                        .map(Color::from)
-                        .unwrap_or(default_foreground);
-                    let mut background = cell
-                        .bg_color()?
-                        .map(Color::from)
-                        .unwrap_or(default_background);
+                if rebuild_row {
+                    let mut rendered_cells = Vec::with_capacity(usize::from(cols));
+                    let mut column_index = 0_u16;
+                    let mut cell_iteration = self.cells.update(row)?;
 
-                    if style.inverse {
-                        mem::swap(&mut foreground, &mut background);
-                    }
+                    while let Some(cell) = cell_iteration.next() {
+                        let style = cell.style()?;
+                        let mut foreground = cell
+                            .fg_color()?
+                            .map(Color::from)
+                            .unwrap_or(default_foreground);
+                        let mut background = cell
+                            .bg_color()?
+                            .map(Color::from)
+                            .unwrap_or(default_background);
 
-                    let raw_cell = cell.raw_cell()?;
-                    let spacer_tail = matches!(raw_cell.wide()?, CellWide::SpacerTail);
-                    let text = if style.invisible || spacer_tail {
-                        " ".to_owned()
-                    } else {
-                        let graphemes = cell.graphemes()?;
-                        if graphemes.is_empty() {
+                        if style.inverse {
+                            mem::swap(&mut foreground, &mut background);
+                        }
+
+                        let raw_cell = cell.raw_cell()?;
+                        let spacer_tail = matches!(raw_cell.wide()?, CellWide::SpacerTail);
+                        let text = if style.invisible || spacer_tail {
                             " ".to_owned()
                         } else {
-                            graphemes.into_iter().collect()
-                        }
-                    };
+                            let graphemes = cell.graphemes()?;
+                            if graphemes.is_empty() {
+                                " ".to_owned()
+                            } else {
+                                graphemes.into_iter().collect()
+                            }
+                        };
 
-                    let is_cursor = cursor
-                        .as_ref()
-                        .is_some_and(|cursor| cursor.x == column_index && cursor.y == row_index);
+                        let is_cursor = cursor.as_ref().is_some_and(|cursor| {
+                            cursor.x == column_index && cursor.y == row_index
+                        });
 
-                    rendered_cells.push(CellSnapshot {
-                        text,
-                        foreground,
-                        background,
-                        bold: style.bold,
-                        italic: style.italic,
-                        cursor: is_cursor,
-                    });
-                    column_index = column_index.saturating_add(1);
+                        rendered_cells.push(CellSnapshot {
+                            text,
+                            foreground,
+                            background,
+                            bold: style.bold,
+                            italic: style.italic,
+                            cursor: is_cursor,
+                            spacer_tail,
+                        });
+                        column_index = column_index.saturating_add(1);
+                    }
+
+                    let rendered_row = Arc::<[CellSnapshot]>::from(rendered_cells);
+                    if rebuild_all {
+                        rendered_rows.push(rendered_row);
+                    } else {
+                        rendered_rows[usize::from(row_index)] = rendered_row;
+                    }
                 }
 
                 row.set_dirty(false)?;
-                rendered_rows.push(rendered_cells);
                 row_index = row_index.saturating_add(1);
             }
         }
         snapshot.set_dirty(Dirty::Clean)?;
 
-        Ok(ScreenSnapshot {
-            rows: rendered_rows,
+        self.row_cache = rendered_rows;
+        self.cached_cols = cols;
+        self.cached_foreground = Some(default_foreground);
+        self.cached_background = Some(default_background);
+        self.cached_cursor = cursor_position;
+
+        Ok(Some(Arc::new(ScreenSnapshot {
+            rows: Arc::from(self.row_cache.clone()),
             background: default_background,
-        })
+        })))
     }
 }
 
@@ -228,7 +281,7 @@ mod tests {
         let mut emulator = TerminalEmulator::new(12, 3).unwrap();
         emulator.feed(b"hello\r\n\x1b[31mred\x1b[0m");
 
-        let snapshot = emulator.snapshot().unwrap();
+        let snapshot = emulator.snapshot().unwrap().unwrap();
         let first_row = snapshot.rows[0]
             .iter()
             .map(|cell| cell.text.as_str())
@@ -252,8 +305,29 @@ mod tests {
         let mut emulator = TerminalEmulator::new(10, 2).unwrap();
         emulator.resize(20, 4, 8, 18).unwrap();
 
-        let snapshot = emulator.snapshot().unwrap();
+        let snapshot = emulator.snapshot().unwrap().unwrap();
         assert_eq!(snapshot.rows.len(), 4);
         assert!(snapshot.rows.iter().all(|row| row.len() == 20));
+    }
+
+    #[test]
+    fn clean_screens_do_not_publish_another_snapshot() {
+        let mut emulator = TerminalEmulator::new(10, 2).unwrap();
+
+        assert!(emulator.snapshot().unwrap().is_some());
+        assert!(emulator.snapshot().unwrap().is_none());
+    }
+
+    #[test]
+    fn unchanged_rows_reuse_their_cell_storage() {
+        let mut emulator = TerminalEmulator::new(10, 3).unwrap();
+        let first = emulator.snapshot().unwrap().unwrap();
+
+        emulator.feed(b"x");
+        let second = emulator.snapshot().unwrap().unwrap();
+
+        assert!(!Arc::ptr_eq(&first.rows[0], &second.rows[0]));
+        assert!(Arc::ptr_eq(&first.rows[1], &second.rows[1]));
+        assert!(Arc::ptr_eq(&first.rows[2], &second.rows[2]));
     }
 }

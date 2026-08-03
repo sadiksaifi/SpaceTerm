@@ -1,10 +1,13 @@
+use std::sync::Arc;
+
 use gpui::prelude::*;
 use gpui::{
-    App, Context, FocusHandle, FontWeight, IntoElement, KeyDownEvent, MouseButton, Pixels, Render,
-    SharedString, Subscription, Task, TextRun, Window, div, font, px, rgba,
+    App, Bounds, Context, FocusHandle, IntoElement, KeyDownEvent, MouseButton, Pixels, Render,
+    SharedString, Task, TextRun, Window, div, font, px, rgba,
 };
 
-use crate::terminal::{CellSnapshot, GridSize, ScreenSnapshot, SessionEvent, TerminalSession};
+use super::terminal_element::{TerminalGridCache, TerminalGridElement};
+use crate::terminal::{GridSize, ScreenSnapshot, SessionEvent, TerminalSession};
 use crate::theme::{ACTIVE_THEME, Color};
 
 const FONT_SIZE: f32 = 14.0;
@@ -13,65 +16,81 @@ const PADDING: f32 = 12.0;
 const MIN_COLS: u16 = 2;
 const MIN_ROWS: u16 = 2;
 
-pub(crate) struct TerminalView {
+pub(crate) struct TerminalPane {
     session: Option<TerminalSession>,
-    screen: ScreenSnapshot,
+    screen: Arc<ScreenSnapshot>,
     status: Option<String>,
     focus_handle: FocusHandle,
     font_family: SharedString,
     cell_width: Pixels,
+    last_grid_size: Option<GridSize>,
+    render_cache: TerminalGridCache,
     _event_task: Option<Task<()>>,
-    _bounds_subscription: Subscription,
 }
 
-impl TerminalView {
+impl TerminalPane {
     pub(crate) fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let focus_handle = cx.focus_handle();
-        focus_handle.focus(window);
-
         let font_family = terminal_font(cx);
         let cell_width = measure_cell_width(window, &font_family);
-        let initial_size = grid_size(window, cell_width);
-
-        let (session, receiver, status) = match TerminalSession::start(initial_size) {
-            Ok((session, receiver)) => (Some(session), Some(receiver), None),
-            Err(error) => {
-                eprintln!("failed to start terminal session: {error:#}");
-                (None, None, Some(error.to_string()))
-            }
-        };
-
-        let event_task = receiver.map(|receiver| {
-            cx.spawn(async move |this, cx| {
-                while let Ok(event) = receiver.recv().await {
-                    if this
-                        .update(cx, |this, cx| {
-                            this.handle_event(event);
-                            cx.notify();
-                        })
-                        .is_err()
-                    {
-                        break;
-                    }
-                }
-            })
-        });
-
-        let bounds_subscription = cx.observe_window_bounds(window, |this, window, _| {
-            if let Some(session) = &this.session {
-                session.resize(grid_size(window, this.cell_width));
-            }
-        });
 
         Self {
-            session,
+            session: None,
             screen: ScreenSnapshot::empty(),
-            status,
+            status: None,
             focus_handle,
             font_family,
             cell_width,
-            _event_task: event_task,
-            _bounds_subscription: bounds_subscription,
+            last_grid_size: None,
+            render_cache: TerminalGridCache::new(),
+            _event_task: None,
+        }
+    }
+
+    pub(crate) fn focus(&self, window: &mut Window) {
+        self.focus_handle.focus(window);
+    }
+
+    fn update_grid_bounds(&mut self, bounds: Bounds<Pixels>, cx: &mut Context<Self>) {
+        let size = grid_size(bounds, self.cell_width);
+        if self.last_grid_size == Some(size) {
+            return;
+        }
+        self.last_grid_size = Some(size);
+
+        if let Some(session) = &self.session {
+            session.resize(size);
+            return;
+        }
+
+        match TerminalSession::start(size) {
+            Ok((session, receiver)) => {
+                self.session = Some(session);
+                self._event_task = Some(cx.spawn(async move |this, cx| {
+                    while let Ok(event) = receiver.recv().await {
+                        let mut events = vec![event];
+                        while let Ok(event) = receiver.try_recv() {
+                            events.push(event);
+                        }
+                        if this
+                            .update(cx, |this, cx| {
+                                for event in events {
+                                    this.handle_event(event);
+                                }
+                                cx.notify();
+                            })
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                }));
+            }
+            Err(error) => {
+                eprintln!("failed to start terminal session: {error:#}");
+                self.status = Some(error.to_string());
+                cx.notify();
+            }
         }
     }
 
@@ -96,48 +115,47 @@ impl TerminalView {
     }
 }
 
-impl Render for TerminalView {
+impl Drop for TerminalPane {
+    fn drop(&mut self) {
+        self._event_task.take();
+        self.session.take();
+    }
+}
+
+impl Render for TerminalPane {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let font_family = self.font_family.clone();
-        let cell_width = self.cell_width;
+        let pane = cx.entity().downgrade();
         let background = gpui_color(self.screen.background);
-        let rows = self.screen.rows.clone();
         let status = self.status.clone();
+        let terminal_grid = TerminalGridElement::new(
+            &self.screen,
+            &self.font_family,
+            px(FONT_SIZE),
+            px(LINE_HEIGHT),
+            self.cell_width,
+            &mut self.render_cache,
+        );
 
         div()
+            .on_children_prepainted(move |children, _window, cx| {
+                let Some(bounds) = children.first().copied() else {
+                    return;
+                };
+                let _ = pane.update(cx, |pane, cx| pane.update_grid_bounds(bounds, cx));
+            })
             .id("terminal-pane")
             .relative()
             .size_full()
             .overflow_hidden()
             .bg(background)
             .p(px(PADDING))
-            .font_family(font_family)
-            .text_size(px(FONT_SIZE))
-            .line_height(px(LINE_HEIGHT))
             .track_focus(&self.focus_handle)
             .on_key_down(cx.listener(Self::on_key_down))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _, window, _| this.focus_handle.focus(window)),
             )
-            .child(
-                div()
-                    .size_full()
-                    .flex()
-                    .flex_col()
-                    .children(rows.into_iter().map(move |row| {
-                        div()
-                            .h(px(LINE_HEIGHT))
-                            .w_full()
-                            .flex()
-                            .flex_row()
-                            .flex_shrink_0()
-                            .children(
-                                row.into_iter()
-                                    .map(move |cell| render_cell(cell, cell_width)),
-                            )
-                    })),
-            )
+            .child(terminal_grid)
             .when_some(status, |root, status| {
                 root.child(
                     div()
@@ -155,27 +173,6 @@ impl Render for TerminalView {
                 )
             })
     }
-}
-
-fn render_cell(cell: CellSnapshot, cell_width: Pixels) -> impl IntoElement {
-    let (foreground, background) = if cell.cursor {
-        (
-            gpui_color(ACTIVE_THEME.terminal_background),
-            gpui_color(ACTIVE_THEME.terminal_foreground),
-        )
-    } else {
-        (gpui_color(cell.foreground), gpui_color(cell.background))
-    };
-
-    div()
-        .w(cell_width)
-        .h(px(LINE_HEIGHT))
-        .flex_none()
-        .bg(background)
-        .text_color(foreground)
-        .when(cell.bold, |cell| cell.font_weight(FontWeight::BOLD))
-        .when(cell.italic, |cell| cell.italic())
-        .child(cell.text)
 }
 
 fn terminal_font(cx: &App) -> SharedString {
@@ -211,14 +208,13 @@ fn measure_cell_width(window: &mut Window, family: &SharedString) -> Pixels {
         .width
 }
 
-fn grid_size(window: &Window, cell_width: Pixels) -> GridSize {
-    let viewport = window.viewport_size();
-    let usable_width = (f32::from(viewport.width) - PADDING * 2.0).max(f32::from(cell_width));
-    let usable_height = (f32::from(viewport.height) - PADDING * 2.0).max(LINE_HEIGHT);
+fn grid_size(bounds: Bounds<Pixels>, cell_width: Pixels) -> GridSize {
+    let width = f32::from(bounds.size.width).max(f32::from(cell_width));
+    let height = f32::from(bounds.size.height).max(LINE_HEIGHT);
 
     GridSize {
-        cols: ((usable_width / f32::from(cell_width)).floor() as u16).max(MIN_COLS),
-        rows: ((usable_height / LINE_HEIGHT).floor() as u16).max(MIN_ROWS),
+        cols: ((width / f32::from(cell_width)).floor() as u16).max(MIN_COLS),
+        rows: ((height / LINE_HEIGHT).floor() as u16).max(MIN_ROWS),
         cell_width_px: f32::from(cell_width).round().clamp(1.0, u16::MAX as f32) as u16,
         cell_height_px: LINE_HEIGHT as u16,
     }
