@@ -1,0 +1,8 @@
+[package]
+name = "termspace"
+version = "0.0.0"
+edition = "2024"
+
+[dependencies]
+gpui = "=0.2.2"
+gpui-symbols = "=0.6.1"
