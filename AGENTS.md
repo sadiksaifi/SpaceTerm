@@ -11,7 +11,7 @@ Technology choices:
 - libghostty-vt for terminal emulation
 - A macOS PTY implementation for launching and communicating with shells
 - Native macOS SF Symbols through `gpui-symbols`
-- Theme: [Vague](https://github.com/vague-theme/vague-zed) is gonna be the default theme for terminal and even brand color and dark mode only application.
+- Theme: Vague is the only application and terminal theme and the source of all brand colors. Termspace is dark-mode only. The complete color palette is defined in `src/theme.rs`; reuse those tokens and do not hardcode or redefine color values in UI, terminal, platform, or domain modules.
 - Font: `JetBrainsMono Nerd Font` for terminal text when available
 - A sensible system monospace fallback when `JetBrainsMono Nerd Font` is unavailable
 
