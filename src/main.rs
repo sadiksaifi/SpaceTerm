@@ -10,6 +10,7 @@ use gpui::{App, Application};
 fn main() {
     Application::new().run(|cx: &mut App| {
         ui::init(cx);
+        app::init(cx);
         app::open(cx);
     });
 }
