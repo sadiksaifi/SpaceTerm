@@ -628,7 +628,6 @@ fn render_pane_menu(pane_id: PaneId, zoomed: bool, host: gpui::WeakEntity<PaneHo
             menu = menu.child(
                 div()
                     .h(px(MENU_SEPARATOR_SIZE))
-                    .mx(px(8.0))
                     .bg(gpui_color(ACTIVE_THEME.border)),
             );
         }
@@ -666,11 +665,11 @@ fn render_menu_row(
         .id(spec.command as usize)
         .debug_selector(|| format!("pane-menu-row-{}", spec.command.debug_name()))
         .h(px(MENU_ROW_HEIGHT))
-        .px(px(12.0))
+        .px(px(6.0))
         .flex()
         .flex_row()
         .items_center()
-        .gap(px(10.0))
+        .gap(px(8.0))
         .cursor_pointer()
         .text_size(px(13.0))
         .text_color(gpui_color(foreground))
