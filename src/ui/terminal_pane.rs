@@ -4,9 +4,9 @@ use std::time::Duration;
 
 use gpui::prelude::*;
 use gpui::{
-    App, Bounds, ClipboardItem, Context, DispatchPhase, FocusHandle, IntoElement, KeyDownEvent,
-    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Render, ScrollWheelEvent,
-    SharedString, Task, TextRun, Window, canvas, div, font, px, rgba,
+    App, Bounds, ClipboardItem, Context, DispatchPhase, EventEmitter, FocusHandle, IntoElement,
+    KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Render,
+    ScrollWheelEvent, SharedString, Task, TextRun, Window, canvas, div, font, px, rgba,
 };
 
 use super::terminal_element::{TerminalGridCache, TerminalGridElement};
@@ -29,6 +29,12 @@ const SCROLLBAR_HITBOX_WIDTH: f32 = SCROLLBAR_WIDTH + SCROLLBAR_HORIZONTAL_HITBO
 const SCROLLBAR_RIGHT_INSET: f32 = 4.0;
 const MIN_SCROLLBAR_THUMB_HEIGHT: f32 = 24.0;
 const SCROLLBAR_HIDE_DELAY: Duration = Duration::from_secs(2);
+const MAX_PANE_TITLE_CHARACTERS: usize = 256;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum TerminalPaneEvent {
+    TitleChanged(SharedString),
+}
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct ScrollbarGeometry {
@@ -51,6 +57,8 @@ pub(crate) struct TerminalPane {
     session_start_attempted: bool,
     screen: Arc<ScreenSnapshot>,
     status: Option<String>,
+    fallback_title: SharedString,
+    title: SharedString,
     focus_handle: FocusHandle,
     font_family: SharedString,
     cell_width: Pixels,
@@ -76,6 +84,8 @@ impl TerminalPane {
         let focus_handle = cx.focus_handle();
         let font_family = terminal_font(cx);
         let cell_width = measure_cell_width(window, &font_family);
+        let fallback_title: SharedString =
+            normalized_pane_title("", &session_factory.fallback_title()).into();
 
         Self {
             session_factory,
@@ -83,6 +93,8 @@ impl TerminalPane {
             session_start_attempted: false,
             screen: ScreenSnapshot::empty(),
             status: None,
+            title: fallback_title.clone(),
+            fallback_title,
             focus_handle,
             font_family,
             cell_width,
@@ -102,6 +114,10 @@ impl TerminalPane {
 
     pub(crate) fn focus(&self, window: &mut Window) {
         self.focus_handle.focus(window);
+    }
+
+    pub(crate) fn title(&self) -> SharedString {
+        self.title.clone()
     }
 
     #[cfg(test)]
@@ -146,7 +162,7 @@ impl TerminalPane {
                         if this
                             .update(cx, |this, cx| {
                                 for event in events {
-                                    this.handle_event(event);
+                                    this.handle_event(event, cx);
                                 }
                                 cx.notify();
                             })
@@ -165,9 +181,14 @@ impl TerminalPane {
         }
     }
 
-    fn handle_event(&mut self, event: SessionEvent) {
+    fn handle_event(&mut self, event: SessionEvent, cx: &mut Context<Self>) {
         match event {
             SessionEvent::Screen(screen) => {
+                let title = normalized_pane_title(&screen.title, &self.fallback_title);
+                if self.title.as_ref() != title {
+                    self.title = title.into();
+                    cx.emit(TerminalPaneEvent::TitleChanged(self.title.clone()));
+                }
                 if screen.scrollbar.total_rows <= screen.scrollbar.visible_rows {
                     self.scrollbar_visible = false;
                     self.scrollbar_hovered = false;
@@ -455,6 +476,8 @@ impl TerminalPane {
     }
 }
 
+impl EventEmitter<TerminalPaneEvent> for TerminalPane {}
+
 impl Drop for TerminalPane {
     fn drop(&mut self) {
         self.close();
@@ -686,6 +709,30 @@ fn gpui_color(color: Color) -> gpui::Rgba {
     rgba(color.rgba_hex())
 }
 
+fn normalized_pane_title(reported_title: &str, fallback_title: &str) -> String {
+    let reported = reported_title
+        .trim()
+        .chars()
+        .filter(|character| !character.is_control())
+        .take(MAX_PANE_TITLE_CHARACTERS)
+        .collect::<String>();
+    if !reported.is_empty() {
+        return reported;
+    }
+
+    let fallback = fallback_title
+        .trim()
+        .chars()
+        .filter(|character| !character.is_control())
+        .take(MAX_PANE_TITLE_CHARACTERS)
+        .collect::<String>();
+    if fallback.is_empty() {
+        "Terminal".to_owned()
+    } else {
+        fallback
+    }
+}
+
 fn close_session(session: &mut Option<Box<dyn TerminalSessionHandle>>) {
     session.take();
 }
@@ -846,6 +893,27 @@ mod tests {
             },
             is_held: false,
         }
+    }
+
+    #[test]
+    fn reported_terminal_title_should_replace_the_shell_fallback() {
+        assert_eq!(
+            normalized_pane_title("  Claude Code  ", "zsh"),
+            "Claude Code"
+        );
+    }
+
+    #[test]
+    fn empty_terminal_title_should_restore_the_shell_fallback() {
+        assert_eq!(normalized_pane_title("\n\t", "zsh"), "zsh");
+    }
+
+    #[test]
+    fn pane_title_should_remove_control_characters() {
+        assert_eq!(
+            normalized_pane_title("cargo\u{7} test", "zsh"),
+            "cargo test"
+        );
     }
 
     #[test]

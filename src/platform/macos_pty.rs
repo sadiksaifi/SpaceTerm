@@ -175,10 +175,7 @@ pub(crate) fn spawn_user_shell(size: PtySize) -> Result<(SpawnedPty, PtyTerminat
     let pty_system = native_pty_system();
     let pair = pty_system.openpty(size).map_err(PtyError::Open)?;
 
-    let shell = env::var("SHELL")
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| "/bin/zsh".to_owned());
+    let shell = user_shell();
 
     let mut command = CommandBuilder::new(&shell);
     command.arg("-l");
@@ -229,6 +226,13 @@ pub(crate) fn spawn_user_shell(size: PtySize) -> Result<(SpawnedPty, PtyTerminat
         },
         terminator,
     ))
+}
+
+pub(crate) fn user_shell() -> String {
+    env::var("SHELL")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "/bin/zsh".to_owned())
 }
 
 fn terminate_after_startup_failure(child: &mut dyn Child) {

@@ -5,7 +5,7 @@ mod terminal_pane;
 use gpui::{App, KeyBinding, actions};
 
 pub(crate) use pane_host::PaneHost;
-pub(crate) use terminal_pane::TerminalPane;
+pub(crate) use terminal_pane::{TerminalPane, TerminalPaneEvent};
 
 actions!(
     terminal,

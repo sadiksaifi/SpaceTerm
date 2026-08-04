@@ -8,7 +8,10 @@ use gpui::{
 };
 use gpui_symbols::{Icon, SymbolWeight};
 
-use super::{ClosePane, SplitDown, SplitRight, TERMINAL_KEY_CONTEXT, TerminalPane, TogglePaneZoom};
+use super::{
+    ClosePane, SplitDown, SplitRight, TERMINAL_KEY_CONTEXT, TerminalPane, TerminalPaneEvent,
+    TogglePaneZoom,
+};
 use crate::domain::{
     ClosePaneOutcome, PaneId, PaneNodeRef, PaneSize, PaneTreeRef, SplitAxis, SplitId,
     TerminalWindow, WindowId, ZoomState,
@@ -19,8 +22,13 @@ use crate::theme::{ACTIVE_THEME, Color};
 const MINIMUM_PANE_WIDTH: f32 = MENU_WIDTH + PANE_CONTROL_INSET * 2.0;
 const DIVIDER_SIZE: f32 = 1.0;
 const DIVIDER_HIT_SIZE: f32 = 8.0;
-const PANE_CONTROL_INSET: f32 = 8.0;
+const PANE_HEADER_HEIGHT: f32 = 32.0;
+const PANE_HEADER_HORIZONTAL_PADDING: f32 = 12.0;
+const PANE_CONTROL_INSET: f32 = 4.0;
+const PANE_CONTROL_TOP: f32 = 2.0;
 const PANE_CONTROL_SIZE: f32 = 28.0;
+const PANE_MENU_HEADER_OVERLAP: f32 = 8.0;
+const PANE_MENU_TOP: f32 = PANE_HEADER_HEIGHT - PANE_CONTROL_TOP - PANE_MENU_HEADER_OVERLAP;
 const MENU_WIDTH: f32 = 248.0;
 const MENU_ROW_HEIGHT: f32 = 28.0;
 const MENU_ITEM_COUNT: usize = 4;
@@ -29,7 +37,7 @@ const MENU_BORDER_SIZE: f32 = 1.0;
 const MENU_CORNER_RADIUS: f32 = 8.0;
 const MENU_INNER_CORNER_RADIUS: f32 = MENU_CORNER_RADIUS - MENU_BORDER_SIZE;
 const MENU_SHORTCUT_TEXT_SIZE: f32 = 11.0;
-const MENU_TOP: f32 = PANE_CONTROL_INSET + PANE_CONTROL_SIZE + 4.0;
+const MENU_TOP: f32 = PANE_CONTROL_TOP + PANE_MENU_TOP;
 const MENU_HEIGHT: f32 =
     MENU_ROW_HEIGHT * MENU_ITEM_COUNT as f32 + MENU_SEPARATOR_SIZE + MENU_BORDER_SIZE * 2.0;
 const MINIMUM_PANE_HEIGHT: f32 = MENU_TOP + MENU_HEIGHT + PANE_CONTROL_INSET;
@@ -72,6 +80,7 @@ pub(crate) struct PaneHost {
     next_split_id: u64,
     pane_bounds: BTreeMap<PaneId, Bounds<Pixels>>,
     split_bounds: BTreeMap<SplitId, Bounds<Pixels>>,
+    pane_titles: BTreeMap<PaneId, gpui::SharedString>,
     menu_pane_id: Option<PaneId>,
 }
 
@@ -89,7 +98,8 @@ impl PaneHost {
         };
         let initial_pane_id = PaneId::new(1);
         let initial_terminal =
-            cx.new(|cx| TerminalPane::new(Rc::clone(&session_factory), window, cx));
+            Self::create_terminal(initial_pane_id, Rc::clone(&session_factory), window, cx);
+        let initial_title = initial_terminal.read(cx).title();
 
         Self {
             terminal_window: TerminalWindow::new(
@@ -103,8 +113,28 @@ impl PaneHost {
             next_split_id: 1,
             pane_bounds: BTreeMap::new(),
             split_bounds: BTreeMap::new(),
+            pane_titles: BTreeMap::from([(initial_pane_id, initial_title)]),
             menu_pane_id: None,
         }
+    }
+
+    fn create_terminal(
+        pane_id: PaneId,
+        session_factory: Rc<dyn TerminalSessionFactory>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Entity<TerminalPane> {
+        let terminal = cx.new(|cx| TerminalPane::new(session_factory, window, cx));
+        cx.subscribe(
+            &terminal,
+            move |host, _terminal, event: &TerminalPaneEvent, cx| {
+                let TerminalPaneEvent::TitleChanged(title) = event;
+                host.pane_titles.insert(pane_id, title.clone());
+                cx.notify();
+            },
+        )
+        .detach();
+        terminal
     }
 
     pub(crate) fn focus(&self, window: &mut Window, cx: &mut App) {
@@ -162,11 +192,14 @@ impl PaneHost {
             axis,
             target_size,
             DIVIDER_SIZE,
-            || cx.new(|cx| TerminalPane::new(session_factory, window, cx)),
+            || Self::create_terminal(new_pane_id, session_factory, window, cx),
         );
 
         match result {
             Ok(pane_id) => {
+                if let Some(terminal) = self.terminal_window.terminal(pane_id) {
+                    self.pane_titles.insert(pane_id, terminal.read(cx).title());
+                }
                 self.menu_pane_id = None;
                 self.split_bounds.clear();
                 cx.notify();
@@ -199,6 +232,7 @@ impl PaneHost {
                 }
                 self.pane_bounds.remove(&pane_id);
                 self.split_bounds.clear();
+                self.pane_titles.remove(&pane_id);
                 self.menu_pane_id = None;
                 cx.notify();
                 if let Some(terminal) = self.terminal_window.terminal(focused_pane_id) {
@@ -313,7 +347,7 @@ impl PaneHost {
                 ratio,
                 first,
                 second,
-            } => self.render_split(split_id, axis, ratio, first, second, host),
+            } => self.render_split(split_id, axis, ratio, (first, second), host),
         }
     }
 
@@ -326,6 +360,12 @@ impl PaneHost {
         };
         let focused = self.terminal_window.focused_pane_id() == pane_id;
         let has_multiple_panes = self.terminal_window.pane_count() > 1;
+        let zoomed = matches!(self.terminal_window.zoom_state(), ZoomState::Zoomed(_));
+        let title = self
+            .pane_titles
+            .get(&pane_id)
+            .cloned()
+            .unwrap_or_else(|| "Terminal".into());
         let pane_group = format!("pane-group-{}", pane_id.get());
         let measure_host = host.clone();
         let focus_host = host.clone();
@@ -333,9 +373,12 @@ impl PaneHost {
 
         div()
             .on_children_prepainted(move |children, _, cx| {
-                let Some(bounds) = children.first().copied() else {
+                let Some(first) = children.first() else {
                     return;
                 };
+                let bounds = children
+                    .get(1)
+                    .map_or(*first, |terminal| first.union(terminal));
                 let _ = measure_host.update(cx, |host, _| {
                     host.pane_bounds.insert(pane_id, bounds);
                 });
@@ -346,26 +389,35 @@ impl PaneHost {
             .size_full()
             .min_w_0()
             .min_h_0()
+            .flex()
+            .flex_col()
             .capture_any_mouse_down(move |_: &MouseDownEvent, window, cx| {
                 let _ = focus_host.update(cx, |host, cx| host.focus_pane(pane_id, cx));
                 focus_terminal.update(cx, |terminal, _| terminal.focus(window));
             })
-            .child(terminal)
-            .when(has_multiple_panes && focused, |pane| {
-                pane.child(
-                    div()
-                        .absolute()
-                        .inset_0()
-                        .border(px(1.0))
-                        .border_color(gpui_color(ACTIVE_THEME.panel_focused_border)),
-                )
+            .when(has_multiple_panes, |pane| {
+                pane.child(render_pane_header(
+                    pane_id,
+                    title,
+                    focused,
+                    zoomed,
+                    host.clone(),
+                ))
             })
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .min_h_0()
+                    .overflow_hidden()
+                    .child(terminal),
+            )
             .when(has_multiple_panes, |pane| {
                 pane.child(render_pane_controls(
                     pane_id,
                     focused,
                     self.menu_pane_id == Some(pane_id),
-                    matches!(self.terminal_window.zoom_state(), ZoomState::Zoomed(_)),
+                    zoomed,
                     &pane_group,
                     host.clone(),
                 ))
@@ -378,10 +430,10 @@ impl PaneHost {
         split_id: SplitId,
         axis: SplitAxis,
         ratio: f32,
-        first: PaneTreeRef<'_>,
-        second: PaneTreeRef<'_>,
+        children: (PaneTreeRef<'_>, PaneTreeRef<'_>),
         host: gpui::WeakEntity<Self>,
     ) -> AnyElement {
+        let (first, second) = children;
         let first = self.render_tree(first, host.clone());
         let second = self.render_tree(second, host.clone());
         let drag_host = host.clone();
@@ -431,7 +483,6 @@ impl Render for PaneHost {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let host = cx.entity().downgrade();
         let zoom_state = self.terminal_window.zoom_state();
-        let pane_count = self.terminal_window.pane_count();
         let minimum_size = match zoom_state {
             ZoomState::Zoomed(_) => self.terminal_window.minimum_pane_size(),
             ZoomState::Restored => match self.terminal_window.minimum_size(DIVIDER_SIZE) {
@@ -461,10 +512,89 @@ impl Render for PaneHost {
             .on_action(cx.listener(Self::on_toggle_zoom))
             .on_action(cx.listener(Self::on_close_pane))
             .child(content)
-            .when(matches!(zoom_state, ZoomState::Zoomed(_)), |root| {
-                root.child(render_zoom_badge(pane_count))
-            })
     }
+}
+
+fn render_pane_header(
+    pane_id: PaneId,
+    title: gpui::SharedString,
+    focused: bool,
+    zoomed: bool,
+    host: gpui::WeakEntity<PaneHost>,
+) -> AnyElement {
+    let divider_color = if focused {
+        ACTIVE_THEME.panel_focused_border
+    } else {
+        ACTIVE_THEME.border
+    };
+    let title = if zoomed {
+        div()
+            .min_w_0()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(7.0))
+            .child(
+                div()
+                    .id(("pane-zoom-restore", pane_id.get()))
+                    .debug_selector(move || format!("pane-zoom-restore-{}", pane_id.get()))
+                    .size(px(20.0))
+                    .flex_shrink_0()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(4.0))
+                    .cursor_pointer()
+                    .occlude()
+                    .hover(|button| button.bg(gpui_color(ACTIVE_THEME.ghost_element_hover)))
+                    .on_click(move |_, window, cx| {
+                        let _ = host.update(cx, |host, cx| host.toggle_zoom(window, cx));
+                        cx.stop_propagation();
+                    })
+                    .child(
+                        Icon::new("arrow.down.right.and.arrow.up.left")
+                            .weight(SymbolWeight::Medium)
+                            .size(px(13.0))
+                            .color(gpui_color(ACTIVE_THEME.icon)),
+                    ),
+            )
+            .child(
+                div()
+                    .min_w_0()
+                    .truncate()
+                    .child(format!("{title} · Zoomed")),
+            )
+            .into_any_element()
+    } else {
+        div().min_w_0().truncate().child(title).into_any_element()
+    };
+
+    div()
+        .id(("pane-header", pane_id.get()))
+        .debug_selector(move || {
+            format!(
+                "pane-header-{}-{}",
+                pane_id.get(),
+                if focused { "focused" } else { "unfocused" }
+            )
+        })
+        .relative()
+        .h(px(PANE_HEADER_HEIGHT))
+        .w_full()
+        .flex_shrink_0()
+        .flex()
+        .flex_row()
+        .items_center()
+        .min_w_0()
+        .pl(px(PANE_HEADER_HORIZONTAL_PADDING))
+        .pr(px(PANE_CONTROL_INSET + PANE_CONTROL_SIZE + 4.0))
+        .border_b(px(1.0))
+        .border_color(gpui_color(divider_color))
+        .bg(gpui_color(ACTIVE_THEME.terminal_background))
+        .text_size(px(12.0))
+        .text_color(gpui_color(ACTIVE_THEME.text_muted))
+        .child(title)
+        .into_any_element()
 }
 
 fn split_child(child: AnyElement, axis: SplitAxis, ratio: f32) -> impl IntoElement {
@@ -574,7 +704,7 @@ fn render_pane_controls(
     div()
         .id(("pane-controls", pane_id.get()))
         .absolute()
-        .top(px(PANE_CONTROL_INSET))
+        .top(px(PANE_CONTROL_TOP))
         .right(px(PANE_CONTROL_INSET))
         .w(px(if show_menu {
             MENU_WIDTH
@@ -582,7 +712,7 @@ fn render_pane_controls(
             PANE_CONTROL_SIZE
         }))
         .h(px(if show_menu {
-            PANE_CONTROL_SIZE + 4.0 + MENU_HEIGHT
+            PANE_MENU_TOP + MENU_HEIGHT
         } else {
             PANE_CONTROL_SIZE
         }))
@@ -594,15 +724,10 @@ fn render_pane_controls(
                 });
             })
         })
-        .child(render_menu_button(
-            pane_id,
-            focused,
-            pane_group,
-            host.clone(),
-        ))
         .when(show_menu, |controls| {
-            controls.child(render_pane_menu(pane_id, zoomed, host))
+            controls.child(render_pane_menu(pane_id, zoomed, host.clone()))
         })
+        .child(render_menu_button(pane_id, focused, pane_group, host))
         .into_any_element()
 }
 
@@ -611,7 +736,7 @@ fn render_pane_menu(pane_id: PaneId, zoomed: bool, host: gpui::WeakEntity<PaneHo
         .id(("pane-menu", pane_id.get()))
         .debug_selector(|| format!("pane-menu-{}", pane_id.get()))
         .absolute()
-        .top(px(PANE_CONTROL_SIZE + 4.0))
+        .top(px(PANE_MENU_TOP))
         .right_0()
         .w(px(MENU_WIDTH))
         .flex()
@@ -720,33 +845,6 @@ impl PaneMenuCommand {
     }
 }
 
-fn render_zoom_badge(pane_count: usize) -> AnyElement {
-    div()
-        .absolute()
-        .top(px(PANE_CONTROL_INSET))
-        .left(px(PANE_CONTROL_INSET))
-        .h(px(PANE_CONTROL_SIZE))
-        .px(px(10.0))
-        .flex()
-        .flex_row()
-        .items_center()
-        .gap(px(7.0))
-        .rounded(px(6.0))
-        .border(px(1.0))
-        .border_color(gpui_color(ACTIVE_THEME.border))
-        .bg(gpui_color(ACTIVE_THEME.elevated_surface_background))
-        .text_size(px(12.0))
-        .text_color(gpui_color(ACTIVE_THEME.text_muted))
-        .child(
-            Icon::new("arrow.down.right.and.arrow.up.left")
-                .weight(SymbolWeight::Medium)
-                .size(px(14.0))
-                .color(gpui_color(ACTIVE_THEME.icon)),
-        )
-        .child(format!("{pane_count} Panes · Zoomed"))
-        .into_any_element()
-}
-
 fn pane_menu_items(zoomed: bool) -> [PaneMenuItemSpec; MENU_ITEM_COUNT] {
     [
         PaneMenuItemSpec {
@@ -819,14 +917,15 @@ fn gpui_color(color: Color) -> gpui::Rgba {
 
 #[cfg(test)]
 mod tests {
-    use std::cell::Cell;
+    use std::cell::{Cell, RefCell};
+    use std::sync::Arc;
 
     use gpui::{Modifiers, TestAppContext, bounds, point, px, size};
 
     use super::*;
     use crate::terminal::{
-        GridSize, KeyInput, PointerInput, SessionError, StartedTerminalSession,
-        TerminalSessionHandle, WheelInput,
+        GridSize, KeyInput, PointerInput, ScreenSnapshot, SessionError, SessionEvent,
+        StartedTerminalSession, TerminalSessionHandle, WheelInput,
     };
 
     struct RecordingSessionFactory {
@@ -847,6 +946,27 @@ mod tests {
 
     struct RecordingSessionHandle {
         pointer_count: Rc<Cell<usize>>,
+    }
+
+    struct TitleSessionFactory {
+        event_senders: Rc<RefCell<Vec<async_channel::Sender<SessionEvent>>>>,
+    }
+
+    impl TerminalSessionFactory for TitleSessionFactory {
+        fn start(&self, _size: GridSize) -> Result<StartedTerminalSession, SessionError> {
+            let (sender, events) = async_channel::unbounded();
+            self.event_senders.borrow_mut().push(sender);
+            Ok(StartedTerminalSession {
+                handle: Box::new(RecordingSessionHandle {
+                    pointer_count: Rc::new(Cell::new(0)),
+                }),
+                events,
+            })
+        }
+
+        fn fallback_title(&self) -> String {
+            "zsh".to_owned()
+        }
     }
 
     impl TerminalSessionHandle for RecordingSessionHandle {
@@ -871,6 +991,139 @@ mod tests {
             let _ = reply.try_send(Ok(None));
             receiver
         }
+    }
+
+    #[gpui::test]
+    fn single_pane_should_not_render_a_pane_header(cx: &mut TestAppContext) {
+        let session_factory: Rc<dyn TerminalSessionFactory> = Rc::new(RecordingSessionFactory {
+            pointer_count: Rc::new(Cell::new(0)),
+        });
+        let (_host, cx) =
+            cx.add_window_view(|window, cx| PaneHost::new(session_factory, window, cx));
+
+        assert!(cx.debug_bounds("pane-header-1-focused").is_none());
+    }
+
+    #[gpui::test]
+    fn split_panes_should_render_compact_focused_and_unfocused_headers(cx: &mut TestAppContext) {
+        let session_factory: Rc<dyn TerminalSessionFactory> = Rc::new(RecordingSessionFactory {
+            pointer_count: Rc::new(Cell::new(0)),
+        });
+        let (host, cx) =
+            cx.add_window_view(|window, cx| PaneHost::new(session_factory, window, cx));
+
+        cx.update(|window, cx| {
+            host.update(cx, |host, cx| {
+                host.split_focused(SplitAxis::Horizontal, window, cx);
+            });
+        });
+        cx.run_until_parked();
+
+        let unfocused_height = cx
+            .debug_bounds("pane-header-1-unfocused")
+            .map(|bounds| bounds.size.height);
+        let focused_height = cx
+            .debug_bounds("pane-header-2-focused")
+            .map(|bounds| bounds.size.height);
+
+        assert_eq!(
+            (unfocused_height, focused_height),
+            (Some(px(PANE_HEADER_HEIGHT)), Some(px(PANE_HEADER_HEIGHT)))
+        );
+    }
+
+    #[gpui::test]
+    fn focusing_another_pane_should_move_the_focused_header_state(cx: &mut TestAppContext) {
+        let session_factory: Rc<dyn TerminalSessionFactory> = Rc::new(RecordingSessionFactory {
+            pointer_count: Rc::new(Cell::new(0)),
+        });
+        let (host, cx) =
+            cx.add_window_view(|window, cx| PaneHost::new(session_factory, window, cx));
+
+        cx.update(|window, cx| {
+            host.update(cx, |host, cx| {
+                host.split_focused(SplitAxis::Horizontal, window, cx);
+                host.focus_pane(PaneId::new(1), cx);
+            });
+        });
+        cx.run_until_parked();
+
+        let header_state = (
+            cx.debug_bounds("pane-header-1-focused").is_some(),
+            cx.debug_bounds("pane-header-2-unfocused").is_some(),
+        );
+        assert_eq!(header_state, (true, true));
+    }
+
+    #[gpui::test]
+    fn terminal_title_event_should_update_the_pane_header_snapshot(cx: &mut TestAppContext) {
+        let event_senders = Rc::new(RefCell::new(Vec::new()));
+        let session_factory: Rc<dyn TerminalSessionFactory> = Rc::new(TitleSessionFactory {
+            event_senders: Rc::clone(&event_senders),
+        });
+        let (host, cx) =
+            cx.add_window_view(|window, cx| PaneHost::new(session_factory, window, cx));
+
+        cx.update(|window, cx| {
+            host.update(cx, |host, cx| {
+                host.split_focused(SplitAxis::Horizontal, window, cx);
+            });
+        });
+        cx.run_until_parked();
+
+        let sender = event_senders
+            .borrow()
+            .last()
+            .cloned()
+            .expect("the split Pane session was not started");
+        sender
+            .try_send(SessionEvent::Screen(Arc::new(ScreenSnapshot {
+                rows: Arc::from([]),
+                background: ACTIVE_THEME.terminal_background,
+                scrollbar: Default::default(),
+                title: Arc::from("Claude Code"),
+            })))
+            .unwrap();
+        cx.run_until_parked();
+
+        let title = host.read_with(cx, |host, _| host.pane_titles.get(&PaneId::new(2)).cloned());
+        assert_eq!(
+            title.as_ref().map(|title| title.as_ref()),
+            Some("Claude Code")
+        );
+    }
+
+    #[gpui::test]
+    fn zoom_restore_button_should_restore_panes_without_sending_terminal_pointer_input(
+        cx: &mut TestAppContext,
+    ) {
+        let pointer_count = Rc::new(Cell::new(0));
+        let session_factory: Rc<dyn TerminalSessionFactory> = Rc::new(RecordingSessionFactory {
+            pointer_count: Rc::clone(&pointer_count),
+        });
+        let (host, cx) =
+            cx.add_window_view(|window, cx| PaneHost::new(session_factory, window, cx));
+
+        cx.update(|window, cx| {
+            host.update(cx, |host, cx| {
+                host.split_focused(SplitAxis::Horizontal, window, cx);
+                host.toggle_zoom(window, cx);
+            });
+        });
+        cx.run_until_parked();
+
+        let restore_button = cx
+            .debug_bounds("pane-zoom-restore-2")
+            .map(|bounds| bounds.center())
+            .expect("the zoom restore button was not rendered");
+        cx.simulate_mouse_move(restore_button, None, Modifiers::none());
+        cx.simulate_click(restore_button, Modifiers::none());
+        cx.run_until_parked();
+
+        let state = host.read_with(cx, |host, _| {
+            (host.terminal_window.zoom_state(), pointer_count.get())
+        });
+        assert_eq!(state, (ZoomState::Restored, 0));
     }
 
     #[gpui::test]
@@ -1063,10 +1316,26 @@ mod tests {
         let menu_height = cx
             .debug_bounds("pane-menu-2")
             .map(|bounds| bounds.size.height);
+        let header_overlap = cx.debug_bounds("pane-menu-2").and_then(|menu_bounds| {
+            cx.debug_bounds("pane-header-2-focused")
+                .map(|header_bounds| {
+                    header_bounds.origin.y + header_bounds.size.height - menu_bounds.origin.y
+                })
+        });
 
         assert_eq!(
-            (first_row_height, last_row_height, menu_height),
-            (Some(px(28.0)), Some(px(28.0)), Some(px(115.0)))
+            (
+                first_row_height,
+                last_row_height,
+                menu_height,
+                header_overlap,
+            ),
+            (
+                Some(px(28.0)),
+                Some(px(28.0)),
+                Some(px(115.0)),
+                Some(px(PANE_MENU_HEADER_OVERLAP))
+            )
         );
     }
 

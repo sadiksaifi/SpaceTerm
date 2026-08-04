@@ -66,6 +66,7 @@ pub(crate) struct ScreenSnapshot {
     pub(crate) rows: Arc<[RowSnapshot]>,
     pub(crate) background: Color,
     pub(crate) scrollbar: ScrollbarSnapshot,
+    pub(crate) title: Arc<str>,
 }
 
 impl ScreenSnapshot {
@@ -74,6 +75,7 @@ impl ScreenSnapshot {
             rows: Arc::from([]),
             background: ACTIVE_THEME.terminal_background,
             scrollbar: ScrollbarSnapshot::default(),
+            title: Arc::from(""),
         })
     }
 }
@@ -94,6 +96,8 @@ pub(crate) struct TerminalEmulator {
     selection_drag: DragEvent<'static>,
     selection_release: ReleaseEvent<'static>,
     pty_responses: Rc<RefCell<Vec<u8>>>,
+    pending_title: Rc<RefCell<Option<Arc<str>>>>,
+    title: Arc<str>,
     row_cache: Vec<RowSnapshot>,
     cached_cols: u16,
     cached_foreground: Option<Color>,
@@ -169,6 +173,7 @@ impl TerminalEmulator {
         cell_height_px: u32,
     ) -> Result<Self, Error> {
         let pty_responses = Rc::new(RefCell::new(Vec::new()));
+        let pending_title = Rc::new(RefCell::new(None));
         let mut terminal: Terminal<'static, 'static> = Terminal::new(TerminalOptions {
             cols,
             rows,
@@ -180,6 +185,14 @@ impl TerminalEmulator {
         terminal.on_pty_write({
             let pty_responses = Rc::clone(&pty_responses);
             move |_, data| pty_responses.borrow_mut().extend_from_slice(data)
+        })?;
+        terminal.on_title_changed({
+            let pending_title = Rc::clone(&pending_title);
+            move |terminal| {
+                if let Ok(title) = terminal.title() {
+                    *pending_title.borrow_mut() = Some(Arc::from(title));
+                }
+            }
         })?;
 
         let mut mouse_encoder = MouseEncoder::new()?;
@@ -201,6 +214,8 @@ impl TerminalEmulator {
             selection_drag: DragEvent::new()?,
             selection_release: ReleaseEvent::new()?,
             pty_responses,
+            pending_title,
+            title: Arc::from(""),
             row_cache: Vec::new(),
             cached_cols: 0,
             cached_foreground: None,
@@ -697,6 +712,13 @@ impl TerminalEmulator {
     }
 
     pub(crate) fn snapshot(&mut self) -> Result<Option<Arc<ScreenSnapshot>>, Error> {
+        let pending_title = self.pending_title.borrow_mut().take();
+        let title_changed = pending_title
+            .as_ref()
+            .is_some_and(|title| title.as_ref() != self.title.as_ref());
+        if let Some(title) = pending_title {
+            self.title = title;
+        }
         let snapshot = self.render_state.update(&self.terminal)?;
         let dirty = snapshot.dirty()?;
         let rows = snapshot.rows()?;
@@ -725,7 +747,12 @@ impl TerminalEmulator {
         let cursor_changed = self.cached_cursor != cursor_position;
         let scrollbar_changed = self.cached_scrollbar != Some(scrollbar);
 
-        if matches!(dirty, Dirty::Clean) && !rebuild_all && !cursor_changed && !scrollbar_changed {
+        if matches!(dirty, Dirty::Clean)
+            && !rebuild_all
+            && !cursor_changed
+            && !scrollbar_changed
+            && !title_changed
+        {
             return Ok(None);
         }
 
@@ -822,6 +849,7 @@ impl TerminalEmulator {
             rows: Arc::from(self.row_cache.clone()),
             background: default_background,
             scrollbar,
+            title: Arc::clone(&self.title),
         })))
     }
 }
@@ -1109,6 +1137,29 @@ mod tests {
             snapshot.rows[1][0].foreground,
             ACTIVE_THEME.terminal_normal()[1]
         );
+    }
+
+    #[test]
+    fn title_only_osc_sequence_publishes_a_screen_snapshot() {
+        let mut emulator = emulator(12, 3);
+        let _ = emulator.snapshot().unwrap();
+
+        emulator.feed(b"\x1b]2;Claude Code\x07");
+        let snapshot = emulator.snapshot().unwrap().unwrap();
+
+        assert_eq!(snapshot.title.as_ref(), "Claude Code");
+    }
+
+    #[test]
+    fn latest_osc_title_replaces_the_previous_snapshot_title() {
+        let mut emulator = emulator(12, 3);
+        emulator.feed(b"\x1b]2;zsh\x07");
+        let _ = emulator.snapshot().unwrap();
+
+        emulator.feed(b"\x1b]2;cargo test\x07");
+        let snapshot = emulator.snapshot().unwrap().unwrap();
+
+        assert_eq!(snapshot.title.as_ref(), "cargo test");
     }
 
     #[test]

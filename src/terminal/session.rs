@@ -1,4 +1,5 @@
 use std::io::{ErrorKind, Read, Write};
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver as CommandReceiver, Sender as CommandSender, TryRecvError};
 use std::thread::{self, JoinHandle};
@@ -6,7 +7,9 @@ use std::thread::{self, JoinHandle};
 use portable_pty::PtySize;
 use thiserror::Error;
 
-use crate::platform::macos_pty::{PtyError, PtyTerminator, SpawnedPty, spawn_user_shell};
+use crate::platform::macos_pty::{
+    PtyError, PtyTerminator, SpawnedPty, spawn_user_shell, user_shell,
+};
 use crate::terminal::emulator::{EmulatorAction, ScreenSnapshot, TerminalEmulator};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -135,6 +138,10 @@ pub(crate) trait TerminalSessionHandle {
 
 pub(crate) trait TerminalSessionFactory {
     fn start(&self, size: GridSize) -> Result<StartedTerminalSession, SessionError>;
+
+    fn fallback_title(&self) -> String {
+        "Terminal".to_owned()
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -147,6 +154,16 @@ impl TerminalSessionFactory for NativeTerminalSessionFactory {
             handle: Box::new(session),
             events,
         })
+    }
+
+    fn fallback_title(&self) -> String {
+        let shell = user_shell();
+        Path::new(&shell)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .filter(|name| !name.is_empty())
+            .unwrap_or(&shell)
+            .to_owned()
     }
 }
 
