@@ -48,7 +48,8 @@ actions!(
 
 pub(crate) const TERMINAL_KEY_CONTEXT: &str = "TerminalPane";
 pub(crate) const TOP_CHROME_HEIGHT: f32 = 36.0;
-pub(crate) const WORKSPACE_SIDEBAR_WIDTH: f32 = 220.0;
+pub(crate) const WORKSPACE_SIDEBAR_DEFAULT_WIDTH: f32 = 240.0;
+pub(crate) const WORKSPACE_SIDEBAR_MINIMUM_WIDTH: f32 = 180.0;
 
 pub(crate) fn handle_top_chrome_mouse_down(
     event: &MouseDownEvent,

@@ -12,7 +12,7 @@ use super::{
     ActivateWindow1, ActivateWindow2, ActivateWindow3, ActivateWindow4, ActivateWindow5,
     ActivateWindow6, ActivateWindow7, ActivateWindow8, ActivateWindow9, CloseTarget, CloseWindow,
     CreateWindow, PANE_ACTION_MENU_HEIGHT, PANE_ACTION_MENU_WIDTH, PaneActionMenuCommand, PaneHost,
-    PaneHostEvent, TERMINAL_KEY_CONTEXT, TOP_CHROME_HEIGHT, WORKSPACE_SIDEBAR_WIDTH,
+    PaneHostEvent, TERMINAL_KEY_CONTEXT, TOP_CHROME_HEIGHT, WORKSPACE_SIDEBAR_DEFAULT_WIDTH,
     handle_top_chrome_mouse_down, render_pane_action_menu,
 };
 use crate::domain::{
@@ -54,6 +54,7 @@ pub(crate) struct WindowManager {
     workspace_root: PathBuf,
     active: bool,
     sidebar_visible: bool,
+    sidebar_width: Pixels,
     next_window_id: u64,
     window_menu: Option<WindowMenuState>,
     window_bar_scroll_handle: ScrollHandle,
@@ -85,6 +86,7 @@ impl WindowManager {
             workspace_root,
             active: true,
             sidebar_visible: true,
+            sidebar_width: px(WORKSPACE_SIDEBAR_DEFAULT_WIDTH),
             next_window_id: 2,
             window_menu: None,
             window_bar_scroll_handle: ScrollHandle::new(),
@@ -149,9 +151,15 @@ impl WindowManager {
         }
     }
 
-    pub(crate) fn set_sidebar_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
-        if self.sidebar_visible != visible {
+    pub(crate) fn set_sidebar_layout(
+        &mut self,
+        visible: bool,
+        width: Pixels,
+        cx: &mut Context<Self>,
+    ) {
+        if self.sidebar_visible != visible || self.sidebar_width != width {
             self.sidebar_visible = visible;
+            self.sidebar_width = width;
             cx.notify();
         }
     }
@@ -502,7 +510,7 @@ impl WindowManager {
             .flex()
             .items_center()
             .cursor_pointer()
-            .occlude()
+            .block_mouse_except_scroll()
             .bg(gpui_color(if active {
                 ACTIVE_THEME.tab_active_background
             } else {
@@ -549,7 +557,7 @@ impl WindowManager {
                     .justify_center()
                     .rounded(px(4.0))
                     .cursor_pointer()
-                    .occlude()
+                    .block_mouse_except_scroll()
                     .when(!active, |button| {
                         button
                             .opacity(0.0)
@@ -619,13 +627,15 @@ impl WindowManager {
         let active_window_id = self.windows.active_window_id();
         let mut items = div()
             .id("window-items")
+            .debug_selector(|| "window-items".to_owned())
             .h_full()
             .min_w_0()
             .flex_1()
             .flex()
             .flex_row()
             .overflow_x_scroll()
-            .track_scroll(&self.window_bar_scroll_handle);
+            .track_scroll(&self.window_bar_scroll_handle)
+            .occlude();
         for (window_id, pane_host) in self.windows.iter() {
             items = items.child(self.render_window_item(
                 window_id,
@@ -801,7 +811,7 @@ impl Render for WindowManager {
                         div()
                             .id("window-manager-top-spacer")
                             .debug_selector(|| "window-manager-top-spacer".to_owned())
-                            .w(px(WORKSPACE_SIDEBAR_WIDTH))
+                            .w(self.sidebar_width)
                             .h_full()
                             .flex_shrink_0()
                             .bg(gpui_color(ACTIVE_THEME.tab_bar_background)),
@@ -816,9 +826,7 @@ impl Render for WindowManager {
                     .min_w_0()
                     .min_h_0()
                     .overflow_hidden()
-                    .when(self.sidebar_visible, |body| {
-                        body.ml(px(WORKSPACE_SIDEBAR_WIDTH))
-                    })
+                    .when(self.sidebar_visible, |body| body.ml(self.sidebar_width))
                     .child(active_window),
             )
             .when_some(self.window_menu, |root, menu| {
@@ -848,7 +856,10 @@ mod tests {
     use std::path::Path;
     use std::sync::Arc;
 
-    use gpui::{Modifiers, TestAppContext, VisualTestContext};
+    use gpui::{
+        Modifiers, ScrollDelta, ScrollWheelEvent, TestAppContext, TouchPhase, VisualTestContext,
+        point,
+    };
 
     use super::*;
     use crate::domain::PaneId;
@@ -1058,8 +1069,8 @@ mod tests {
             (spacer.origin, spacer.size, bar.origin.x),
             (
                 root.origin,
-                gpui::size(px(WORKSPACE_SIDEBAR_WIDTH), px(TOP_CHROME_HEIGHT)),
-                root.origin.x + px(WORKSPACE_SIDEBAR_WIDTH),
+                gpui::size(px(WORKSPACE_SIDEBAR_DEFAULT_WIDTH), px(TOP_CHROME_HEIGHT)),
+                root.origin.x + px(WORKSPACE_SIDEBAR_DEFAULT_WIDTH),
             )
         );
     }
@@ -1077,7 +1088,9 @@ mod tests {
             .debug_bounds("window-bar")
             .expect("the Window bar was not rendered");
 
-        manager.update(cx, |manager, cx| manager.set_sidebar_visible(false, cx));
+        manager.update(cx, |manager, cx| {
+            manager.set_sidebar_layout(false, px(WORKSPACE_SIDEBAR_DEFAULT_WIDTH), cx);
+        });
         cx.run_until_parked();
 
         let hidden_content = cx
@@ -1094,10 +1107,10 @@ mod tests {
                 hidden_bar.origin.x,
             ),
             (
-                root.origin.x + px(WORKSPACE_SIDEBAR_WIDTH),
+                root.origin.x + px(WORKSPACE_SIDEBAR_DEFAULT_WIDTH),
                 root.origin.x,
-                root.origin.x + px(WORKSPACE_SIDEBAR_WIDTH),
-                root.origin.x + px(WORKSPACE_SIDEBAR_WIDTH),
+                root.origin.x + px(WORKSPACE_SIDEBAR_DEFAULT_WIDTH),
+                root.origin.x + px(WORKSPACE_SIDEBAR_DEFAULT_WIDTH),
             )
         );
     }
@@ -1336,6 +1349,39 @@ mod tests {
             state.2 < px(0.0),
             "the Window bar did not scroll; offset was {:?}",
             state.2
+        );
+    }
+
+    #[gpui::test]
+    fn window_items_should_scroll_horizontally_with_the_mouse_wheel(cx: &mut TestAppContext) {
+        let (manager, _records, cx) = window_manager(cx);
+        for _ in 0..12 {
+            click("create-window-button", cx);
+        }
+
+        manager.read_with(cx, |manager, _| {
+            manager
+                .window_bar_scroll_handle
+                .set_offset(point(px(0.0), px(0.0)));
+        });
+        manager.update(cx, |_, cx| cx.notify());
+        cx.run_until_parked();
+        let items = cx
+            .debug_bounds("window-items")
+            .expect("the Window item strip was not rendered");
+        cx.simulate_event(ScrollWheelEvent {
+            position: items.center(),
+            delta: ScrollDelta::Pixels(point(px(0.0), px(-120.0))),
+            modifiers: Modifiers::none(),
+            touch_phase: TouchPhase::Moved,
+        });
+        cx.run_until_parked();
+
+        let offset =
+            manager.read_with(cx, |manager, _| manager.window_bar_scroll_handle.offset().x);
+        assert!(
+            offset < px(0.0),
+            "the Window strip did not scroll; offset was {offset:?}"
         );
     }
 

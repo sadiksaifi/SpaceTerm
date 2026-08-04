@@ -1,10 +1,13 @@
 use std::path::PathBuf;
 use std::rc::Rc;
+use std::time::Duration;
 
 use gpui::prelude::*;
 use gpui::{
-    Action, AnyElement, App, Context, Entity, FocusHandle, KeyDownEvent, MouseButton,
-    MouseDownEvent, Pixels, Render, SharedString, WeakEntity, Window, div, px, rgba,
+    Action, AnyElement, App, Bounds, Context, DispatchPhase, DragMoveEvent, Empty, Entity,
+    FocusHandle, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels,
+    Render, ScrollHandle, ScrollWheelEvent, SharedString, Task, WeakEntity, Window, canvas, div,
+    point, px, rgba,
 };
 use gpui_symbols::{Icon, SymbolWeight};
 
@@ -13,8 +16,8 @@ use super::{
     ActivateWindow6, ActivateWindow7, ActivateWindow8, ActivateWindow9, ClosePane, CloseWindow,
     CreateWindow, CreateWorkspace, FocusPaneDown, FocusPaneLeft, FocusPaneRight, FocusPaneUp,
     SplitDown, SplitRight, TERMINAL_KEY_CONTEXT, TOP_CHROME_HEIGHT, TogglePaneZoom, ToggleSidebar,
-    ToggleSidebarFocus, WORKSPACE_SIDEBAR_WIDTH, WindowManager, WindowManagerEvent,
-    handle_top_chrome_mouse_down,
+    ToggleSidebarFocus, WORKSPACE_SIDEBAR_DEFAULT_WIDTH, WORKSPACE_SIDEBAR_MINIMUM_WIDTH,
+    WindowManager, WindowManagerEvent, handle_top_chrome_mouse_down,
 };
 use crate::domain::{
     CloseWorkspaceOutcome, NewWorkspace, WorkspaceCollection, WorkspaceError, WorkspaceId,
@@ -31,6 +34,16 @@ const SIDEBAR_NAME_TEXT_SIZE: f32 = 13.0;
 const SIDEBAR_DETAIL_TEXT_SIZE: f32 = 11.0;
 const NEW_WORKSPACE_BUTTON_HEIGHT: f32 = 40.0;
 const CHROME_DIVIDER_SIZE: f32 = 1.0;
+const SIDEBAR_RESIZE_HIT_SIZE: f32 = 8.0;
+const SIDEBAR_MAXIMUM_WIDTH: f32 = 420.0;
+const TERMINAL_CONTENT_MINIMUM_WIDTH: f32 = 240.0;
+const SIDEBAR_SCROLLBAR_WIDTH: f32 = 5.0;
+const SIDEBAR_SCROLLBAR_HORIZONTAL_HITBOX_PADDING: f32 = 4.0;
+const SIDEBAR_SCROLLBAR_HITBOX_WIDTH: f32 =
+    SIDEBAR_SCROLLBAR_WIDTH + SIDEBAR_SCROLLBAR_HORIZONTAL_HITBOX_PADDING * 2.0;
+const SIDEBAR_SCROLLBAR_RIGHT_INSET: f32 = 4.0;
+const SIDEBAR_SCROLLBAR_MINIMUM_THUMB_HEIGHT: f32 = 24.0;
+const SIDEBAR_SCROLLBAR_HIDE_DELAY: Duration = Duration::from_secs(2);
 const WORKSPACE_MENU_WIDTH: f32 = 208.0;
 const WORKSPACE_MENU_ROW_HEIGHT: f32 = 28.0;
 const WORKSPACE_MENU_SEPARATOR_SIZE: f32 = 1.0;
@@ -61,16 +74,40 @@ struct WorkspaceRenameState {
     replace_on_first_input: bool,
 }
 
+#[derive(Clone, Copy)]
+struct DraggedWorkspaceSidebar;
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct WorkspaceScrollbarGeometry {
+    top_px: f32,
+    height_px: f32,
+    track_height_px: f32,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct WorkspaceScrollbarDrag {
+    grab_ratio: f32,
+    track_top_px: f32,
+    track_height_px: f32,
+}
+
 pub(crate) struct WorkspaceManager {
     workspaces: WorkspaceCollection<Entity<WindowManager>>,
     session_factory: Rc<dyn TerminalSessionFactory>,
     home_directory: PathBuf,
     next_workspace_id: u64,
     sidebar_visible: bool,
+    sidebar_width: Pixels,
+    workspace_list_scroll_handle: ScrollHandle,
+    workspace_scrollbar_visible: bool,
+    workspace_scrollbar_hovered: bool,
+    workspace_scrollbar_drag: Option<WorkspaceScrollbarDrag>,
+    workspace_scrollbar_visibility_generation: u64,
     sidebar_focus: FocusHandle,
     rename_focus: FocusHandle,
     workspace_menu: Option<WorkspaceMenuState>,
     rename: Option<WorkspaceRenameState>,
+    _workspace_scrollbar_hide_task: Option<Task<()>>,
 }
 
 impl WorkspaceManager {
@@ -86,6 +123,7 @@ impl WorkspaceManager {
             Rc::clone(&session_factory),
             home_directory.clone(),
             true,
+            px(WORKSPACE_SIDEBAR_DEFAULT_WIDTH),
             window,
             cx,
         );
@@ -101,10 +139,17 @@ impl WorkspaceManager {
             home_directory,
             next_workspace_id: 2,
             sidebar_visible: true,
+            sidebar_width: px(WORKSPACE_SIDEBAR_DEFAULT_WIDTH),
+            workspace_list_scroll_handle: ScrollHandle::new(),
+            workspace_scrollbar_visible: false,
+            workspace_scrollbar_hovered: false,
+            workspace_scrollbar_drag: None,
+            workspace_scrollbar_visibility_generation: 0,
             sidebar_focus: cx.focus_handle(),
             rename_focus: cx.focus_handle(),
             workspace_menu: None,
             rename: None,
+            _workspace_scrollbar_hide_task: None,
         }
     }
 
@@ -113,12 +158,13 @@ impl WorkspaceManager {
         session_factory: Rc<dyn TerminalSessionFactory>,
         workspace_root: PathBuf,
         sidebar_visible: bool,
+        sidebar_width: Pixels,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Entity<WindowManager> {
         let manager = cx.new(|cx| {
             let mut manager = WindowManager::new(session_factory, workspace_root, window, cx);
-            manager.set_sidebar_visible(sidebar_visible, cx);
+            manager.set_sidebar_layout(sidebar_visible, sidebar_width, cx);
             manager
         });
         cx.subscribe_in(
@@ -152,6 +198,175 @@ impl WorkspaceManager {
         manager.update(cx, |manager, cx| manager.focus(window, cx));
     }
 
+    fn set_sidebar_layout(&mut self, visible: bool, width: Pixels, cx: &mut Context<Self>) {
+        if self.sidebar_visible == visible && self.sidebar_width == width {
+            return;
+        }
+        self.sidebar_visible = visible;
+        self.sidebar_width = width;
+        if !visible {
+            self.workspace_scrollbar_visible = false;
+            self.workspace_scrollbar_hovered = false;
+            self.workspace_scrollbar_drag = None;
+            self._workspace_scrollbar_hide_task.take();
+        }
+        for workspace in self.workspaces.iter() {
+            workspace.payload().update(cx, |manager, cx| {
+                manager.set_sidebar_layout(visible, width, cx);
+            });
+        }
+        cx.notify();
+    }
+
+    fn resize_sidebar(&mut self, pointer_x: Pixels, window: &mut Window, cx: &mut Context<Self>) {
+        let minimum_width = px(WORKSPACE_SIDEBAR_MINIMUM_WIDTH);
+        if pointer_x < minimum_width {
+            let was_sidebar_focused =
+                self.sidebar_focus.is_focused(window) || self.rename_focus.is_focused(window);
+            self.workspace_menu = None;
+            self.rename = None;
+            self.set_sidebar_layout(false, minimum_width, cx);
+            if was_sidebar_focused {
+                self.focus(window, cx);
+            }
+            return;
+        }
+
+        let maximum_width = (window.bounds().size.width - px(TERMINAL_CONTENT_MINIMUM_WIDTH))
+            .min(px(SIDEBAR_MAXIMUM_WIDTH))
+            .max(minimum_width);
+        self.set_sidebar_layout(true, pointer_x.clamp(minimum_width, maximum_width), cx);
+    }
+
+    fn scroll_active_workspace_into_view(&self) {
+        let active_workspace_id = self.workspaces.active_workspace_id();
+        if let Some(index) = self
+            .workspaces
+            .iter()
+            .position(|workspace| workspace.id() == active_workspace_id)
+        {
+            self.workspace_list_scroll_handle.scroll_to_item(index);
+        }
+    }
+
+    fn current_workspace_scrollbar_geometry(&self) -> Option<WorkspaceScrollbarGeometry> {
+        let track_height_px = f32::from(self.workspace_list_scroll_handle.bounds().size.height);
+        let maximum_offset_px = f32::from(self.workspace_list_scroll_handle.max_offset().height);
+        let offset_px = -f32::from(self.workspace_list_scroll_handle.offset().y);
+        workspace_scrollbar_geometry(track_height_px, maximum_offset_px, offset_px)
+    }
+
+    fn reveal_workspace_scrollbar(&mut self, cx: &mut Context<Self>) {
+        self.workspace_scrollbar_visible = true;
+        self.workspace_scrollbar_visibility_generation = self
+            .workspace_scrollbar_visibility_generation
+            .wrapping_add(1);
+        let generation = self.workspace_scrollbar_visibility_generation;
+        self._workspace_scrollbar_hide_task.take();
+
+        if self.workspace_scrollbar_drag.is_none() && !self.workspace_scrollbar_hovered {
+            self._workspace_scrollbar_hide_task = Some(cx.spawn(async move |this, cx| {
+                cx.background_executor()
+                    .timer(SIDEBAR_SCROLLBAR_HIDE_DELAY)
+                    .await;
+                let _ = this.update(cx, |this, cx| {
+                    if this.workspace_scrollbar_visibility_generation == generation
+                        && this.workspace_scrollbar_drag.is_none()
+                        && !this.workspace_scrollbar_hovered
+                    {
+                        this.workspace_scrollbar_visible = false;
+                        cx.notify();
+                    }
+                });
+            }));
+        }
+        cx.notify();
+    }
+
+    fn on_workspace_list_scroll_wheel(
+        &mut self,
+        _: &ScrollWheelEvent,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.workspace_list_scroll_handle.max_offset().height > px(0.0) {
+            self.reveal_workspace_scrollbar(cx);
+        }
+    }
+
+    fn set_workspace_scrollbar_hovered(&mut self, hovered: bool, cx: &mut Context<Self>) {
+        if self.workspace_scrollbar_hovered == hovered {
+            return;
+        }
+
+        self.workspace_scrollbar_hovered = hovered;
+        self.workspace_scrollbar_visibility_generation = self
+            .workspace_scrollbar_visibility_generation
+            .wrapping_add(1);
+        self._workspace_scrollbar_hide_task.take();
+        if hovered {
+            self.workspace_scrollbar_visible = true;
+            cx.notify();
+        } else {
+            self.reveal_workspace_scrollbar(cx);
+        }
+    }
+
+    fn begin_workspace_scrollbar_drag(
+        &mut self,
+        pointer_y: Pixels,
+        thumb_bounds: Bounds<Pixels>,
+        geometry: WorkspaceScrollbarGeometry,
+        cx: &mut Context<Self>,
+    ) {
+        self.workspace_scrollbar_visibility_generation = self
+            .workspace_scrollbar_visibility_generation
+            .wrapping_add(1);
+        self._workspace_scrollbar_hide_task.take();
+        self.workspace_scrollbar_visible = true;
+        self.workspace_scrollbar_drag = Some(WorkspaceScrollbarDrag {
+            grab_ratio: (f32::from(pointer_y - thumb_bounds.origin.y) / geometry.height_px)
+                .clamp(0.0, 1.0),
+            track_top_px: f32::from(thumb_bounds.origin.y) - geometry.top_px,
+            track_height_px: geometry.track_height_px,
+        });
+        cx.notify();
+    }
+
+    fn move_workspace_scrollbar_drag(&mut self, pointer_y: Pixels, cx: &mut Context<Self>) -> bool {
+        let Some(drag) = self.workspace_scrollbar_drag else {
+            return false;
+        };
+        let pointer_in_track_px = f32::from(pointer_y) - drag.track_top_px;
+        let maximum_offset_px = f32::from(self.workspace_list_scroll_handle.max_offset().height);
+        let Some(offset_px) = workspace_scrollbar_offset_for_pointer(
+            maximum_offset_px,
+            drag.track_height_px,
+            pointer_in_track_px,
+            drag.grab_ratio,
+        ) else {
+            return true;
+        };
+        let current_offset = self.workspace_list_scroll_handle.offset();
+        let next_offset = point(current_offset.x, px(-offset_px));
+        if current_offset == next_offset {
+            return true;
+        }
+
+        self.workspace_list_scroll_handle.set_offset(next_offset);
+        cx.notify();
+        true
+    }
+
+    fn finish_workspace_scrollbar_drag(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.workspace_scrollbar_drag.take().is_some() {
+            self.reveal_workspace_scrollbar(cx);
+            true
+        } else {
+            false
+        }
+    }
+
     fn create_workspace(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(workspace_id) = self.allocate_workspace_id() else {
             eprintln!("cannot create Workspace because the Workspace ID space is exhausted");
@@ -163,6 +378,7 @@ impl WorkspaceManager {
             Rc::clone(&self.session_factory),
             self.home_directory.clone(),
             self.sidebar_visible,
+            self.sidebar_width,
             window,
             cx,
         );
@@ -182,6 +398,7 @@ impl WorkspaceManager {
         next_manager.update(cx, |manager, cx| manager.activate(window, cx));
         self.workspace_menu = None;
         self.rename = None;
+        self.scroll_active_workspace_into_view();
         cx.notify();
     }
 
@@ -218,6 +435,7 @@ impl WorkspaceManager {
             next_manager.update(cx, |manager, cx| manager.activate(window, cx));
         }
         self.workspace_menu = None;
+        self.scroll_active_workspace_into_view();
         cx.notify();
         true
     }
@@ -245,6 +463,7 @@ impl WorkspaceManager {
                 Rc::clone(&self.session_factory),
                 self.home_directory.clone(),
                 self.sidebar_visible,
+                self.sidebar_width,
                 window,
                 cx,
             );
@@ -296,24 +515,20 @@ impl WorkspaceManager {
         {
             self.rename = None;
         }
+        self.scroll_active_workspace_into_view();
         cx.notify();
     }
 
     fn toggle_sidebar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let was_sidebar_focused =
             self.sidebar_focus.is_focused(window) || self.rename_focus.is_focused(window);
-        self.sidebar_visible = !self.sidebar_visible;
+        let sidebar_visible = !self.sidebar_visible;
         self.workspace_menu = None;
         self.rename = None;
-        for workspace in self.workspaces.iter() {
-            workspace.payload().update(cx, |manager, cx| {
-                manager.set_sidebar_visible(self.sidebar_visible, cx);
-            });
-        }
-        if !self.sidebar_visible && was_sidebar_focused {
+        self.set_sidebar_layout(sidebar_visible, self.sidebar_width, cx);
+        if !sidebar_visible && was_sidebar_focused {
             self.focus(window, cx);
         }
-        cx.notify();
     }
 
     fn toggle_sidebar_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -325,13 +540,7 @@ impl WorkspaceManager {
         }
 
         if !self.sidebar_visible {
-            self.sidebar_visible = true;
-            for workspace in self.workspaces.iter() {
-                workspace.payload().update(cx, |manager, cx| {
-                    manager.set_sidebar_visible(true, cx);
-                });
-            }
-            cx.notify();
+            self.set_sidebar_layout(true, self.sidebar_width, cx);
             cx.defer_in(window, |manager, window, _| {
                 manager.sidebar_focus.focus(window);
             });
@@ -508,7 +717,7 @@ impl WorkspaceManager {
             .absolute()
             .top_0()
             .left_0()
-            .w(px(WORKSPACE_SIDEBAR_WIDTH))
+            .w(self.sidebar_width)
             .h(px(TOP_CHROME_HEIGHT))
             .bg(gpui_color(ACTIVE_THEME.tab_bar_background))
             .occlude()
@@ -562,6 +771,19 @@ impl WorkspaceManager {
                             .size(px(14.0))
                             .color(gpui_color(ACTIVE_THEME.icon)),
                     ),
+            )
+            .child(
+                div()
+                    .id("workspace-top-chrome-resize-handle")
+                    .debug_selector(|| "workspace-top-chrome-resize-handle".to_owned())
+                    .absolute()
+                    .top_0()
+                    .right(px(-(SIDEBAR_RESIZE_HIT_SIZE - CHROME_DIVIDER_SIZE) / 2.0))
+                    .h_full()
+                    .w(px(SIDEBAR_RESIZE_HIT_SIZE))
+                    .block_mouse_except_scroll()
+                    .cursor_col_resize()
+                    .on_drag(DraggedWorkspaceSidebar, |_, _, _, cx| cx.new(|_| Empty)),
             )
             .into_any_element()
     }
@@ -634,6 +856,7 @@ impl WorkspaceManager {
                     if active { "active" } else { "inactive" }
                 )
             })
+            .relative()
             .w_full()
             .h(px(SIDEBAR_ROW_HEIGHT))
             .flex_shrink_0()
@@ -643,7 +866,7 @@ impl WorkspaceManager {
             .items_center()
             .gap(px(10.0))
             .cursor_pointer()
-            .occlude()
+            .block_mouse_except_scroll()
             .when(active, |row| {
                 row.bg(gpui_color(ACTIVE_THEME.element_selected))
             })
@@ -693,10 +916,22 @@ impl WorkspaceManager {
                             .child(detail),
                     ),
             )
+            .child(
+                div()
+                    .id(("workspace-row-divider", workspace_id.get()))
+                    .debug_selector(move || format!("workspace-row-divider-{}", workspace_id.get()))
+                    .absolute()
+                    .bottom_0()
+                    .left_0()
+                    .w_full()
+                    .h(px(CHROME_DIVIDER_SIZE))
+                    .bg(gpui_color(ACTIVE_THEME.border)),
+            )
             .into_any_element()
     }
 
     fn render_sidebar(&self, manager: WeakEntity<Self>, cx: &App) -> AnyElement {
+        let scroll_manager = manager.clone();
         let mut rows = div()
             .id("workspace-list")
             .debug_selector(|| "workspace-list".to_owned())
@@ -705,7 +940,14 @@ impl WorkspaceManager {
             .flex_1()
             .flex()
             .flex_col()
-            .overflow_y_scroll();
+            .overflow_y_scroll()
+            .track_scroll(&self.workspace_list_scroll_handle)
+            .on_scroll_wheel(move |event, window, cx| {
+                let _ = scroll_manager.update(cx, |manager, cx| {
+                    manager.on_workspace_list_scroll_wheel(event, window, cx);
+                });
+            })
+            .occlude();
         let active_workspace_id = self.workspaces.active_workspace_id();
         for workspace in self.workspaces.iter() {
             rows = rows.child(self.render_workspace_row(
@@ -717,7 +959,12 @@ impl WorkspaceManager {
             ));
         }
 
-        let create_manager = manager;
+        let scrollbar_dragging = self.workspace_scrollbar_drag.is_some();
+        let scrollbar = self
+            .workspace_scrollbar_visible
+            .then(|| self.current_workspace_scrollbar_geometry())
+            .flatten();
+        let create_manager = manager.clone();
         div()
             .id("workspace-sidebar")
             .debug_selector(|| "workspace-sidebar".to_owned())
@@ -725,7 +972,7 @@ impl WorkspaceManager {
             .top(px(TOP_CHROME_HEIGHT))
             .bottom_0()
             .left_0()
-            .w(px(WORKSPACE_SIDEBAR_WIDTH))
+            .w(self.sidebar_width)
             .min_h_0()
             .flex()
             .flex_col()
@@ -738,6 +985,7 @@ impl WorkspaceManager {
                 div()
                     .id("create-workspace-button")
                     .debug_selector(|| "create-workspace-button".to_owned())
+                    .relative()
                     .w_full()
                     .h(px(NEW_WORKSPACE_BUTTON_HEIGHT))
                     .flex_shrink_0()
@@ -772,8 +1020,132 @@ impl WorkspaceManager {
                             .text_size(px(10.0))
                             .text_color(gpui_color(ACTIVE_THEME.icon))
                             .child("⌘N"),
+                    )
+                    .child(
+                        div()
+                            .id("create-workspace-button-top-divider")
+                            .debug_selector(|| "create-workspace-button-top-divider".to_owned())
+                            .absolute()
+                            .top_0()
+                            .left_0()
+                            .w_full()
+                            .h(px(CHROME_DIVIDER_SIZE))
+                            .bg(gpui_color(ACTIVE_THEME.border)),
                     ),
             )
+            .when_some(scrollbar, move |sidebar, scrollbar| {
+                let hover_manager = manager.clone();
+                let down_manager = manager.clone();
+                let move_manager = manager.clone();
+                let up_manager = manager.clone();
+                let thumb_color = if scrollbar_dragging {
+                    ACTIVE_THEME.icon
+                } else {
+                    ACTIVE_THEME.scrollbar_thumb_background
+                };
+                let thumb_hover_color = if scrollbar_dragging {
+                    ACTIVE_THEME.icon
+                } else {
+                    ACTIVE_THEME.icon_accent
+                };
+                sidebar.child(
+                    div()
+                        .group("workspace-scrollbar-thumb")
+                        .id("workspace-scrollbar-thumb-hitbox")
+                        .debug_selector(|| "workspace-scrollbar-thumb-hitbox".to_owned())
+                        .absolute()
+                        .top(px(scrollbar.top_px))
+                        .right_0()
+                        .w(px(SIDEBAR_SCROLLBAR_HITBOX_WIDTH))
+                        .h(px(scrollbar.height_px))
+                        .block_mouse_except_scroll()
+                        .cursor_default()
+                        .on_hover(move |hovered, _, cx| {
+                            let _ = hover_manager.update(cx, |manager, cx| {
+                                manager.set_workspace_scrollbar_hovered(*hovered, cx);
+                            });
+                        })
+                        .child(
+                            div()
+                                .id("workspace-scrollbar-thumb")
+                                .debug_selector(|| "workspace-scrollbar-thumb".to_owned())
+                                .absolute()
+                                .right(px(SIDEBAR_SCROLLBAR_RIGHT_INSET))
+                                .w(px(SIDEBAR_SCROLLBAR_WIDTH))
+                                .h_full()
+                                .rounded(px(SIDEBAR_SCROLLBAR_WIDTH / 2.0))
+                                .bg(gpui_color(thumb_color))
+                                .group_hover("workspace-scrollbar-thumb", move |thumb| {
+                                    thumb.bg(gpui_color(thumb_hover_color))
+                                }),
+                        )
+                        .child(
+                            canvas(
+                                |_, _, _| (),
+                                move |thumb_bounds, _, window, _| {
+                                    window.on_mouse_event(
+                                        move |event: &MouseDownEvent, phase, window, cx| {
+                                            if phase != DispatchPhase::Bubble
+                                                || event.button != MouseButton::Left
+                                                || !thumb_bounds.contains(&event.position)
+                                            {
+                                                return;
+                                            }
+                                            let _ = down_manager.update(cx, |manager, cx| {
+                                                manager.sidebar_focus.focus(window);
+                                                manager.begin_workspace_scrollbar_drag(
+                                                    event.position.y,
+                                                    thumb_bounds,
+                                                    scrollbar,
+                                                    cx,
+                                                );
+                                            });
+                                            cx.stop_propagation();
+                                        },
+                                    );
+
+                                    window.on_mouse_event(
+                                        move |event: &MouseMoveEvent, phase, _, cx| {
+                                            if phase != DispatchPhase::Bubble || !event.dragging() {
+                                                return;
+                                            }
+                                            let handled = move_manager
+                                                .update(cx, |manager, cx| {
+                                                    manager.move_workspace_scrollbar_drag(
+                                                        event.position.y,
+                                                        cx,
+                                                    )
+                                                })
+                                                .unwrap_or(false);
+                                            if handled {
+                                                cx.stop_propagation();
+                                            }
+                                        },
+                                    );
+
+                                    window.on_mouse_event(
+                                        move |event: &MouseUpEvent, phase, _, cx| {
+                                            if phase != DispatchPhase::Bubble
+                                                || event.button != MouseButton::Left
+                                            {
+                                                return;
+                                            }
+                                            let handled = up_manager
+                                                .update(cx, |manager, cx| {
+                                                    manager.finish_workspace_scrollbar_drag(cx)
+                                                })
+                                                .unwrap_or(false);
+                                            if handled {
+                                                cx.stop_propagation();
+                                            }
+                                        },
+                                    );
+                                },
+                            )
+                            .size_full(),
+                        ),
+                )
+            })
             .child(
                 div()
                     .id("workspace-sidebar-right-divider")
@@ -784,6 +1156,19 @@ impl WorkspaceManager {
                     .h_full()
                     .w(px(CHROME_DIVIDER_SIZE))
                     .bg(gpui_color(ACTIVE_THEME.border)),
+            )
+            .child(
+                div()
+                    .id("workspace-sidebar-resize-handle")
+                    .debug_selector(|| "workspace-sidebar-resize-handle".to_owned())
+                    .absolute()
+                    .top_0()
+                    .right(px(-(SIDEBAR_RESIZE_HIT_SIZE - CHROME_DIVIDER_SIZE) / 2.0))
+                    .h_full()
+                    .w(px(SIDEBAR_RESIZE_HIT_SIZE))
+                    .block_mouse_except_scroll()
+                    .cursor_col_resize()
+                    .on_drag(DraggedWorkspaceSidebar, |_, _, _, cx| cx.new(|_| Empty)),
             )
             .into_any_element()
     }
@@ -818,6 +1203,7 @@ impl Render for WorkspaceManager {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         debug_assert!(self.workspaces.len() > 0);
         let manager = cx.entity().downgrade();
+        let resize_manager = manager.clone();
         let active_window_manager = self.workspaces.active_workspace().payload().clone();
         div()
             .id("workspace-manager")
@@ -829,6 +1215,12 @@ impl Render for WorkspaceManager {
             .min_h_0()
             .overflow_hidden()
             .bg(gpui_color(ACTIVE_THEME.terminal_background))
+            .on_drag_move::<DraggedWorkspaceSidebar>(move |event: &DragMoveEvent<_>, window, cx| {
+                let pointer_x = event.event.position.x - event.bounds.origin.x;
+                let _ = resize_manager.update(cx, |manager, cx| {
+                    manager.resize_sidebar(pointer_x, window, cx);
+                });
+            })
             .on_action(cx.listener(Self::on_create_workspace))
             .on_action(cx.listener(Self::on_toggle_sidebar))
             .on_action(cx.listener(Self::on_toggle_sidebar_focus))
@@ -963,6 +1355,47 @@ fn render_workspace_menu_row(
         .into_any_element()
 }
 
+fn workspace_scrollbar_geometry(
+    track_height_px: f32,
+    maximum_offset_px: f32,
+    offset_px: f32,
+) -> Option<WorkspaceScrollbarGeometry> {
+    if track_height_px <= 0.0 || maximum_offset_px <= 0.0 {
+        return None;
+    }
+
+    let track_height = f64::from(track_height_px);
+    let maximum_offset = f64::from(maximum_offset_px);
+    let content_height = track_height + maximum_offset;
+    let minimum_height = f64::from(SIDEBAR_SCROLLBAR_MINIMUM_THUMB_HEIGHT.min(track_height_px));
+    let thumb_height =
+        (track_height / content_height * track_height).clamp(minimum_height, track_height);
+    let progress = f64::from(offset_px.clamp(0.0, maximum_offset_px)) / maximum_offset;
+
+    Some(WorkspaceScrollbarGeometry {
+        top_px: ((track_height - thumb_height) * progress) as f32,
+        height_px: thumb_height as f32,
+        track_height_px,
+    })
+}
+
+fn workspace_scrollbar_offset_for_pointer(
+    maximum_offset_px: f32,
+    track_height_px: f32,
+    pointer_in_track_px: f32,
+    grab_ratio: f32,
+) -> Option<f32> {
+    let geometry = workspace_scrollbar_geometry(track_height_px, maximum_offset_px, 0.0)?;
+    let movable_height = (track_height_px - geometry.height_px).max(0.0);
+    if movable_height == 0.0 {
+        return Some(0.0);
+    }
+
+    let thumb_top = (pointer_in_track_px - grab_ratio.clamp(0.0, 1.0) * geometry.height_px)
+        .clamp(0.0, movable_height);
+    Some(thumb_top / movable_height * maximum_offset_px)
+}
+
 fn default_workspace_name(workspace_id: WorkspaceId) -> String {
     format!("Workspace {}", workspace_id.get())
 }
@@ -976,7 +1409,10 @@ mod tests {
     use std::cell::{Cell, RefCell};
     use std::path::Path;
 
-    use gpui::{Modifiers, TestAppContext, VisualTestContext};
+    use gpui::{
+        Modifiers, ScrollDelta, ScrollWheelEvent, TestAppContext, TouchPhase, VisualTestContext,
+        point,
+    };
 
     use super::*;
     use crate::terminal::{
@@ -1099,6 +1535,25 @@ mod tests {
         cx.run_until_parked();
     }
 
+    fn drag_to(selector: &'static str, destination_x: Pixels, cx: &mut VisualTestContext) {
+        let start = cx
+            .debug_bounds(selector)
+            .map(|bounds| bounds.center())
+            .unwrap_or_else(|| panic!("{selector} was not rendered"));
+        let destination = point(destination_x, start.y);
+        let drag_start = if destination_x >= start.x {
+            point(start.x + px(12.0), start.y)
+        } else {
+            point(start.x - px(12.0), start.y)
+        };
+        cx.simulate_mouse_move(start, None, Modifiers::none());
+        cx.simulate_mouse_down(start, MouseButton::Left, Modifiers::none());
+        cx.simulate_mouse_move(drag_start, MouseButton::Left, Modifiers::none());
+        cx.simulate_mouse_move(destination, MouseButton::Left, Modifiers::none());
+        cx.simulate_mouse_up(destination, MouseButton::Left, Modifiers::none());
+        cx.run_until_parked();
+    }
+
     #[gpui::test]
     fn sidebar_should_render_edge_to_edge_below_fixed_top_chrome(cx: &mut TestAppContext) {
         let (_manager, _records, cx) = workspace_manager(cx);
@@ -1138,19 +1593,410 @@ mod tests {
                 content.origin.x,
             ),
             (
-                gpui::size(px(WORKSPACE_SIDEBAR_WIDTH), px(TOP_CHROME_HEIGHT)),
+                gpui::size(px(WORKSPACE_SIDEBAR_DEFAULT_WIDTH), px(TOP_CHROME_HEIGHT)),
                 px(0.0),
                 px(TOP_CHROME_HEIGHT),
-                px(WORKSPACE_SIDEBAR_WIDTH),
+                px(WORKSPACE_SIDEBAR_DEFAULT_WIDTH),
                 px(0.0),
-                px(WORKSPACE_SIDEBAR_WIDTH),
+                px(WORKSPACE_SIDEBAR_DEFAULT_WIDTH),
                 sidebar.origin.x + sidebar.size.width,
                 sidebar.origin.y,
                 gpui::size(px(CHROME_DIVIDER_SIZE), sidebar.size.height),
                 chrome.origin.x + chrome.size.width,
                 chrome.size.height,
-                px(WORKSPACE_SIDEBAR_WIDTH),
+                px(WORKSPACE_SIDEBAR_DEFAULT_WIDTH),
             )
+        );
+    }
+
+    #[gpui::test]
+    fn dragging_sidebar_divider_should_resize_sidebar_chrome_and_content(cx: &mut TestAppContext) {
+        let (manager, _records, cx) = workspace_manager(cx);
+        let root = cx
+            .debug_bounds("workspace-manager")
+            .expect("the Workspace manager was not rendered");
+        let resized_width = px(300.0);
+
+        drag_to(
+            "workspace-sidebar-resize-handle",
+            root.origin.x + resized_width,
+            cx,
+        );
+
+        let layout = manager.read_with(cx, |manager, _| {
+            (manager.sidebar_visible, manager.sidebar_width)
+        });
+        let chrome = cx
+            .debug_bounds("workspace-top-chrome")
+            .expect("the persistent top-left chrome was not rendered");
+        let sidebar = cx
+            .debug_bounds("workspace-sidebar")
+            .expect("the resized Workspace sidebar was not rendered");
+        let content = cx
+            .debug_bounds("window-manager-content")
+            .expect("the active Window content was not rendered");
+        let window_bar = cx
+            .debug_bounds("window-bar")
+            .expect("the Window bar was not rendered");
+        assert_eq!(
+            (
+                layout,
+                chrome.size.width,
+                sidebar.size.width,
+                content.origin.x,
+                window_bar.origin.x,
+            ),
+            (
+                (true, resized_width),
+                resized_width,
+                resized_width,
+                root.origin.x + resized_width,
+                root.origin.x + resized_width,
+            )
+        );
+    }
+
+    #[gpui::test]
+    fn dragging_sidebar_below_minimum_should_collapse_it_at_the_minimum_width(
+        cx: &mut TestAppContext,
+    ) {
+        let (manager, _records, cx) = workspace_manager(cx);
+        let root = cx
+            .debug_bounds("workspace-manager")
+            .expect("the Workspace manager was not rendered");
+
+        drag_to(
+            "workspace-sidebar-resize-handle",
+            root.origin.x + px(WORKSPACE_SIDEBAR_MINIMUM_WIDTH - 20.0),
+            cx,
+        );
+
+        let layout = manager.read_with(cx, |manager, _| {
+            (manager.sidebar_visible, manager.sidebar_width)
+        });
+        let chrome = cx
+            .debug_bounds("workspace-top-chrome")
+            .expect("the persistent top-left chrome was not rendered");
+        let content = cx
+            .debug_bounds("window-manager-content")
+            .expect("the active Window content was not rendered");
+        let window_bar = cx
+            .debug_bounds("window-bar")
+            .expect("the Window bar was not rendered");
+        assert_eq!(
+            (
+                layout,
+                chrome.size.width,
+                content.origin.x,
+                window_bar.origin.x,
+            ),
+            (
+                (false, px(WORKSPACE_SIDEBAR_MINIMUM_WIDTH)),
+                px(WORKSPACE_SIDEBAR_MINIMUM_WIDTH),
+                root.origin.x,
+                root.origin.x + px(WORKSPACE_SIDEBAR_MINIMUM_WIDTH),
+            )
+        );
+    }
+
+    #[gpui::test]
+    fn every_workspace_row_should_end_with_a_full_width_divider(cx: &mut TestAppContext) {
+        let (_manager, _records, cx) = workspace_manager(cx);
+        cx.simulate_keystrokes("cmd-n");
+        cx.run_until_parked();
+
+        let first_row = cx
+            .debug_bounds("workspace-row-1-inactive")
+            .expect("the inactive Workspace row was not rendered");
+        let first_divider = cx
+            .debug_bounds("workspace-row-divider-1")
+            .expect("the first Workspace divider was not rendered");
+        let second_row = cx
+            .debug_bounds("workspace-row-2-active")
+            .expect("the Active Workspace row was not rendered");
+        let second_divider = cx
+            .debug_bounds("workspace-row-divider-2")
+            .expect("the second Workspace divider was not rendered");
+
+        assert_eq!(
+            (first_divider, second_divider),
+            (
+                gpui::bounds(
+                    point(
+                        first_row.origin.x,
+                        first_row.origin.y + first_row.size.height - px(1.0)
+                    ),
+                    gpui::size(first_row.size.width, px(CHROME_DIVIDER_SIZE)),
+                ),
+                gpui::bounds(
+                    point(
+                        second_row.origin.x,
+                        second_row.origin.y + second_row.size.height - px(1.0),
+                    ),
+                    gpui::size(second_row.size.width, px(CHROME_DIVIDER_SIZE)),
+                ),
+            )
+        );
+    }
+
+    #[gpui::test]
+    fn new_workspace_button_should_start_with_a_full_width_divider(cx: &mut TestAppContext) {
+        let (_manager, _records, cx) = workspace_manager(cx);
+        let button = cx
+            .debug_bounds("create-workspace-button")
+            .expect("the New Workspace button was not rendered");
+        let divider = cx
+            .debug_bounds("create-workspace-button-top-divider")
+            .expect("the New Workspace button divider was not rendered");
+
+        assert_eq!(
+            divider,
+            gpui::bounds(
+                button.origin,
+                gpui::size(button.size.width, px(CHROME_DIVIDER_SIZE)),
+            )
+        );
+    }
+
+    #[test]
+    fn workspace_scrollbar_geometry_should_be_proportional_across_the_track() {
+        let top = workspace_scrollbar_geometry(200.0, 800.0, 0.0).unwrap();
+        let middle = workspace_scrollbar_geometry(200.0, 800.0, 400.0).unwrap();
+        let bottom = workspace_scrollbar_geometry(200.0, 800.0, 800.0).unwrap();
+
+        assert_eq!(
+            (top, middle, bottom),
+            (
+                WorkspaceScrollbarGeometry {
+                    top_px: 0.0,
+                    height_px: 40.0,
+                    track_height_px: 200.0,
+                },
+                WorkspaceScrollbarGeometry {
+                    top_px: 80.0,
+                    height_px: 40.0,
+                    track_height_px: 200.0,
+                },
+                WorkspaceScrollbarGeometry {
+                    top_px: 160.0,
+                    height_px: 40.0,
+                    track_height_px: 200.0,
+                },
+            )
+        );
+    }
+
+    #[test]
+    fn workspace_scrollbar_drag_should_map_to_the_full_scroll_range() {
+        let top = workspace_scrollbar_offset_for_pointer(800.0, 200.0, 20.0, 0.5);
+        let middle = workspace_scrollbar_offset_for_pointer(800.0, 200.0, 100.0, 0.5);
+        let bottom = workspace_scrollbar_offset_for_pointer(800.0, 200.0, 180.0, 0.5);
+
+        assert_eq!((top, middle, bottom), (Some(0.0), Some(400.0), Some(800.0)));
+    }
+
+    #[gpui::test]
+    fn workspace_list_should_scroll_vertically_with_the_mouse_wheel(cx: &mut TestAppContext) {
+        let (manager, _records, cx) = workspace_manager(cx);
+        for _ in 0..24 {
+            cx.simulate_keystrokes("cmd-n");
+        }
+
+        manager.read_with(cx, |manager, _| {
+            manager
+                .workspace_list_scroll_handle
+                .set_offset(point(px(0.0), px(0.0)));
+        });
+        manager.update(cx, |_, cx| cx.notify());
+        cx.run_until_parked();
+        let list = cx
+            .debug_bounds("workspace-list")
+            .expect("the Workspace list was not rendered");
+        cx.simulate_event(ScrollWheelEvent {
+            position: list.center(),
+            delta: ScrollDelta::Pixels(point(px(0.0), px(-120.0))),
+            modifiers: Modifiers::none(),
+            touch_phase: TouchPhase::Moved,
+        });
+        cx.run_until_parked();
+
+        let offset = manager.read_with(cx, |manager, _| {
+            manager.workspace_list_scroll_handle.offset().y
+        });
+        assert!(
+            offset < px(0.0),
+            "the Workspace list did not scroll; offset was {offset:?}"
+        );
+    }
+
+    #[gpui::test]
+    fn workspace_scrollbar_should_reveal_when_the_list_scrolls(cx: &mut TestAppContext) {
+        let (manager, _records, cx) = workspace_manager(cx);
+        for _ in 0..24 {
+            cx.simulate_keystrokes("cmd-n");
+        }
+        manager.read_with(cx, |manager, _| {
+            manager
+                .workspace_list_scroll_handle
+                .set_offset(point(px(0.0), px(0.0)));
+        });
+        manager.update(cx, |_, cx| cx.notify());
+        cx.run_until_parked();
+
+        let list = cx
+            .debug_bounds("workspace-list")
+            .expect("the Workspace list was not rendered");
+        cx.simulate_event(ScrollWheelEvent {
+            position: list.center(),
+            delta: ScrollDelta::Pixels(point(px(0.0), px(-120.0))),
+            modifiers: Modifiers::none(),
+            touch_phase: TouchPhase::Moved,
+        });
+        cx.run_until_parked();
+
+        let thumb = cx
+            .debug_bounds("workspace-scrollbar-thumb")
+            .expect("the Workspace scrollbar thumb was not rendered");
+        assert!(
+            manager.read_with(cx, |manager, _| manager.workspace_scrollbar_visible)
+                && thumb.size.width == px(SIDEBAR_SCROLLBAR_WIDTH)
+                && thumb.size.height >= px(SIDEBAR_SCROLLBAR_MINIMUM_THUMB_HEIGHT)
+                && thumb.size.height < list.size.height,
+            "the revealed Workspace scrollbar had unexpected bounds: {thumb:?}"
+        );
+    }
+
+    #[gpui::test]
+    fn workspace_scrollbar_should_remain_visible_on_hover_then_hide_after_leaving(
+        cx: &mut TestAppContext,
+    ) {
+        let (manager, _records, cx) = workspace_manager(cx);
+        for _ in 0..24 {
+            cx.simulate_keystrokes("cmd-n");
+        }
+        manager.update(cx, |manager, cx| {
+            manager.reveal_workspace_scrollbar(cx);
+        });
+        cx.run_until_parked();
+
+        let thumb = cx
+            .debug_bounds("workspace-scrollbar-thumb-hitbox")
+            .expect("the Workspace scrollbar hitbox was not rendered");
+        let list = cx
+            .debug_bounds("workspace-list")
+            .expect("the Workspace list was not rendered");
+        cx.simulate_mouse_move(thumb.center(), None, Modifiers::none());
+        cx.executor()
+            .advance_clock(SIDEBAR_SCROLLBAR_HIDE_DELAY + Duration::from_millis(1));
+        cx.run_until_parked();
+        let visible_while_hovered = manager.read_with(cx, |manager, _| {
+            manager.workspace_scrollbar_visible && manager.workspace_scrollbar_hovered
+        });
+
+        cx.simulate_mouse_move(
+            point(list.origin.x + px(20.0), list.center().y),
+            None,
+            Modifiers::none(),
+        );
+        cx.executor()
+            .advance_clock(SIDEBAR_SCROLLBAR_HIDE_DELAY + Duration::from_millis(1));
+        cx.run_until_parked();
+        let hidden_after_leaving = manager.read_with(cx, |manager, _| {
+            !manager.workspace_scrollbar_visible && !manager.workspace_scrollbar_hovered
+        });
+
+        assert!(visible_while_hovered && hidden_after_leaving);
+    }
+
+    #[gpui::test]
+    fn workspace_scrollbar_thumb_should_drag_the_list(cx: &mut TestAppContext) {
+        let (manager, _records, cx) = workspace_manager(cx);
+        for _ in 0..24 {
+            cx.simulate_keystrokes("cmd-n");
+        }
+        manager.update(cx, |manager, cx| {
+            manager
+                .workspace_list_scroll_handle
+                .set_offset(point(px(0.0), px(0.0)));
+            manager.reveal_workspace_scrollbar(cx);
+        });
+        cx.run_until_parked();
+
+        let thumb = cx
+            .debug_bounds("workspace-scrollbar-thumb-hitbox")
+            .expect("the Workspace scrollbar hitbox was not rendered");
+        let list = cx
+            .debug_bounds("workspace-list")
+            .expect("the Workspace list was not rendered");
+        let start = thumb.center();
+        let destination = point(start.x, list.bottom() - thumb.size.height / 2.0);
+        cx.simulate_mouse_move(start, None, Modifiers::none());
+        cx.simulate_mouse_down(start, MouseButton::Left, Modifiers::none());
+        cx.simulate_mouse_move(
+            point(start.x, start.y + px(12.0)),
+            MouseButton::Left,
+            Modifiers::none(),
+        );
+        cx.simulate_mouse_move(destination, MouseButton::Left, Modifiers::none());
+        cx.simulate_mouse_up(destination, MouseButton::Left, Modifiers::none());
+        cx.run_until_parked();
+
+        let state = manager.read_with(cx, |manager, _| {
+            (
+                manager.workspace_list_scroll_handle.offset().y,
+                manager.workspace_scrollbar_drag.is_none(),
+            )
+        });
+        assert!(
+            state.0 < px(0.0) && state.1,
+            "the Workspace list did not finish a scrollbar drag: {state:?}"
+        );
+    }
+
+    #[gpui::test]
+    fn creating_workspaces_should_scroll_the_active_workspace_into_view(cx: &mut TestAppContext) {
+        let (manager, _records, cx) = workspace_manager(cx);
+        for _ in 0..24 {
+            cx.simulate_keystrokes("cmd-n");
+        }
+
+        let state = manager.read_with(cx, |manager, _| {
+            (
+                manager.workspaces.len(),
+                manager.workspaces.active_workspace_id(),
+                manager.workspace_list_scroll_handle.offset().y,
+            )
+        });
+        assert!(
+            state.0 == 25 && state.1 == WorkspaceId::new(25) && state.2 < px(0.0),
+            "the Active Workspace was not revealed; state was {state:?}"
+        );
+    }
+
+    #[gpui::test]
+    fn overflowing_workspace_list_should_not_cover_the_new_workspace_button(
+        cx: &mut TestAppContext,
+    ) {
+        let (_manager, _records, cx) = workspace_manager(cx);
+        for _ in 0..24 {
+            cx.simulate_keystrokes("cmd-n");
+        }
+
+        let sidebar = cx
+            .debug_bounds("workspace-sidebar")
+            .expect("the Workspace sidebar was not rendered");
+        let list = cx
+            .debug_bounds("workspace-list")
+            .expect("the overflowing Workspace list was not rendered");
+        let button = cx
+            .debug_bounds("create-workspace-button")
+            .expect("the New Workspace button was not rendered");
+        assert_eq!(
+            (
+                list.origin.y + list.size.height,
+                button.origin.y + button.size.height,
+            ),
+            (button.origin.y, sidebar.origin.y + sidebar.size.height)
         );
     }
 
