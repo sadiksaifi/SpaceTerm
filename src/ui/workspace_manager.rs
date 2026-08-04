@@ -13,11 +13,14 @@ use gpui_symbols::{Icon, SymbolWeight};
 
 use super::{
     ActivateWindow1, ActivateWindow2, ActivateWindow3, ActivateWindow4, ActivateWindow5,
-    ActivateWindow6, ActivateWindow7, ActivateWindow8, ActivateWindow9, ClosePane, CloseWindow,
-    CreateWindow, CreateWorkspace, FocusPaneDown, FocusPaneLeft, FocusPaneRight, FocusPaneUp,
-    SplitDown, SplitRight, TERMINAL_KEY_CONTEXT, TOP_CHROME_HEIGHT, TogglePaneZoom, ToggleSidebar,
-    ToggleSidebarFocus, WORKSPACE_SIDEBAR_DEFAULT_WIDTH, WORKSPACE_SIDEBAR_MINIMUM_WIDTH,
-    WindowManager, WindowManagerEvent, handle_top_chrome_mouse_down,
+    ActivateWindow6, ActivateWindow7, ActivateWindow8, ActivateWindow9, ActivateWorkspace1,
+    ActivateWorkspace2, ActivateWorkspace3, ActivateWorkspace4, ActivateWorkspace5,
+    ActivateWorkspace6, ActivateWorkspace7, ActivateWorkspace8, ActivateWorkspace9, ClosePane,
+    CloseWindow, CreateWindow, CreateWorkspace, FocusPaneDown, FocusPaneLeft, FocusPaneRight,
+    FocusPaneUp, SplitDown, SplitRight, TERMINAL_KEY_CONTEXT, TOP_CHROME_HEIGHT, TogglePaneZoom,
+    ToggleSidebar, ToggleSidebarFocus, WORKSPACE_SIDEBAR_DEFAULT_WIDTH,
+    WORKSPACE_SIDEBAR_MINIMUM_WIDTH, WindowManager, WindowManagerEvent,
+    handle_top_chrome_mouse_down,
 };
 use crate::domain::{
     CloseWorkspaceOutcome, NewWorkspace, WorkspaceCollection, WorkspaceError, WorkspaceId,
@@ -440,6 +443,17 @@ impl WorkspaceManager {
         true
     }
 
+    fn activate_workspace_at(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let workspace_id = self
+            .workspaces
+            .iter()
+            .nth(index)
+            .map(|workspace| workspace.id());
+        if let Some(workspace_id) = workspace_id {
+            self.activate_workspace(workspace_id, window, cx);
+        }
+    }
+
     fn close_workspace(
         &mut self,
         workspace_id: WorkspaceId,
@@ -679,6 +693,87 @@ impl WorkspaceManager {
         cx: &mut Context<Self>,
     ) {
         self.create_workspace(window, cx);
+    }
+
+    fn on_activate_workspace_1(
+        &mut self,
+        _: &ActivateWorkspace1,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.activate_workspace_at(0, window, cx);
+    }
+
+    fn on_activate_workspace_2(
+        &mut self,
+        _: &ActivateWorkspace2,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.activate_workspace_at(1, window, cx);
+    }
+
+    fn on_activate_workspace_3(
+        &mut self,
+        _: &ActivateWorkspace3,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.activate_workspace_at(2, window, cx);
+    }
+
+    fn on_activate_workspace_4(
+        &mut self,
+        _: &ActivateWorkspace4,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.activate_workspace_at(3, window, cx);
+    }
+
+    fn on_activate_workspace_5(
+        &mut self,
+        _: &ActivateWorkspace5,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.activate_workspace_at(4, window, cx);
+    }
+
+    fn on_activate_workspace_6(
+        &mut self,
+        _: &ActivateWorkspace6,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.activate_workspace_at(5, window, cx);
+    }
+
+    fn on_activate_workspace_7(
+        &mut self,
+        _: &ActivateWorkspace7,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.activate_workspace_at(6, window, cx);
+    }
+
+    fn on_activate_workspace_8(
+        &mut self,
+        _: &ActivateWorkspace8,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.activate_workspace_at(7, window, cx);
+    }
+
+    fn on_activate_workspace_9(
+        &mut self,
+        _: &ActivateWorkspace9,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.activate_workspace_at(8, window, cx);
     }
 
     fn on_toggle_sidebar(
@@ -1222,6 +1317,15 @@ impl Render for WorkspaceManager {
                 });
             })
             .on_action(cx.listener(Self::on_create_workspace))
+            .on_action(cx.listener(Self::on_activate_workspace_1))
+            .on_action(cx.listener(Self::on_activate_workspace_2))
+            .on_action(cx.listener(Self::on_activate_workspace_3))
+            .on_action(cx.listener(Self::on_activate_workspace_4))
+            .on_action(cx.listener(Self::on_activate_workspace_5))
+            .on_action(cx.listener(Self::on_activate_workspace_6))
+            .on_action(cx.listener(Self::on_activate_workspace_7))
+            .on_action(cx.listener(Self::on_activate_workspace_8))
+            .on_action(cx.listener(Self::on_activate_workspace_9))
             .on_action(cx.listener(Self::on_toggle_sidebar))
             .on_action(cx.listener(Self::on_toggle_sidebar_focus))
             .on_action(cx.listener(Self::forward_active_terminal_action::<CreateWindow>))
@@ -2099,6 +2203,53 @@ mod tests {
                 Vec::new(),
             )
         );
+    }
+
+    #[gpui::test]
+    fn control_number_should_activate_workspaces_by_position(cx: &mut TestAppContext) {
+        let (manager, _records, cx) = workspace_manager(cx);
+        cx.simulate_keystrokes("cmd-n cmd-n");
+        cx.run_until_parked();
+
+        cx.simulate_keystrokes("ctrl-1");
+        cx.run_until_parked();
+        let first_state = cx.update(|window, cx| {
+            let manager = manager.read(cx);
+            (
+                manager.workspaces.active_workspace_id(),
+                manager
+                    .workspaces
+                    .active_workspace()
+                    .payload()
+                    .read(cx)
+                    .focused_terminal_is_focused(window, cx),
+            )
+        });
+
+        cx.simulate_keystrokes("cmd-shift-e ctrl-2");
+        cx.run_until_parked();
+        let second_state = cx.update(|window, cx| {
+            let manager = manager.read(cx);
+            (
+                manager.workspaces.active_workspace_id(),
+                manager.sidebar_focus.is_focused(window),
+                manager
+                    .workspaces
+                    .active_workspace()
+                    .payload()
+                    .read(cx)
+                    .focused_terminal_is_focused(window, cx),
+            )
+        });
+
+        cx.simulate_keystrokes("ctrl-9");
+        cx.run_until_parked();
+        let unavailable_state =
+            manager.read_with(cx, |manager, _| manager.workspaces.active_workspace_id());
+
+        assert_eq!(first_state, (WorkspaceId::new(1), true));
+        assert_eq!(second_state, (WorkspaceId::new(2), true, false));
+        assert_eq!(unavailable_state, WorkspaceId::new(2));
     }
 
     #[gpui::test]
