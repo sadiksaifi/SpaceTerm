@@ -3,14 +3,15 @@ use std::rc::Rc;
 
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, App, Bounds, Context, DefiniteLength, DragMoveEvent, Empty, Entity, MouseDownEvent,
-    Pixels, Point, Render, Window, div, px, rgba,
+    AnyElement, App, Bounds, Context, DefiniteLength, DragMoveEvent, Empty, Entity, EventEmitter,
+    MouseDownEvent, Pixels, Point, Render, Window, div, px, rgba,
 };
 use gpui_symbols::{Icon, SymbolWeight};
 
 use super::{
-    ClosePane, FocusPaneDown, FocusPaneLeft, FocusPaneRight, FocusPaneUp, SplitDown, SplitRight,
-    TERMINAL_KEY_CONTEXT, TerminalPane, TerminalPaneEvent, TogglePaneZoom,
+    ClosePane, CloseTarget, FocusPaneDown, FocusPaneLeft, FocusPaneRight, FocusPaneUp,
+    PANE_ACTION_MENU_HEIGHT, PANE_ACTION_MENU_WIDTH, PaneActionMenuCommand, SplitDown, SplitRight,
+    TERMINAL_KEY_CONTEXT, TerminalPane, TerminalPaneEvent, TogglePaneZoom, render_pane_action_menu,
 };
 use crate::domain::{
     ClosePaneOutcome, FocusDirection, PaneId, PaneNodeRef, PaneSize, PaneTreeRef, SplitAxis,
@@ -19,7 +20,7 @@ use crate::domain::{
 use crate::terminal::TerminalSessionFactory;
 use crate::theme::{ACTIVE_THEME, Color};
 
-const MINIMUM_PANE_WIDTH: f32 = MENU_WIDTH + PANE_CONTROL_INSET * 2.0;
+const MINIMUM_PANE_WIDTH: f32 = PANE_ACTION_MENU_WIDTH + PANE_CONTROL_INSET * 2.0;
 const DIVIDER_SIZE: f32 = 1.0;
 const DIVIDER_HIT_SIZE: f32 = 8.0;
 const PANE_HEADER_HEIGHT: f32 = 32.0;
@@ -29,48 +30,17 @@ const PANE_CONTROL_TOP: f32 = 2.0;
 const PANE_CONTROL_SIZE: f32 = 28.0;
 const PANE_MENU_HEADER_OVERLAP: f32 = 8.0;
 const PANE_MENU_TOP: f32 = PANE_HEADER_HEIGHT - PANE_CONTROL_TOP - PANE_MENU_HEADER_OVERLAP;
-const MENU_WIDTH: f32 = 248.0;
-const MENU_ROW_HEIGHT: f32 = 28.0;
-const MENU_ITEM_COUNT: usize = 4;
-const MENU_SEPARATOR_SIZE: f32 = 1.0;
-const MENU_BORDER_SIZE: f32 = 1.0;
-const MENU_CORNER_RADIUS: f32 = 8.0;
-const MENU_INNER_CORNER_RADIUS: f32 = MENU_CORNER_RADIUS - MENU_BORDER_SIZE;
-const MENU_SHORTCUT_TEXT_SIZE: f32 = 11.0;
 const MENU_TOP: f32 = PANE_CONTROL_TOP + PANE_MENU_TOP;
-const MENU_HEIGHT: f32 =
-    MENU_ROW_HEIGHT * MENU_ITEM_COUNT as f32 + MENU_SEPARATOR_SIZE + MENU_BORDER_SIZE * 2.0;
-const MINIMUM_PANE_HEIGHT: f32 = MENU_TOP + MENU_HEIGHT + PANE_CONTROL_INSET;
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[repr(u8)]
-enum PaneMenuCommand {
-    SplitRight,
-    SplitDown,
-    ToggleZoom,
-    ClosePane,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct PaneMenuItemSpec {
-    command: PaneMenuCommand,
-    icon: &'static str,
-    label: &'static str,
-    shortcut: &'static str,
-    destructive: bool,
-    separator_before: bool,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum PaneMenuRowPosition {
-    First,
-    Middle,
-    Last,
-}
+const MINIMUM_PANE_HEIGHT: f32 = MENU_TOP + PANE_ACTION_MENU_HEIGHT + PANE_CONTROL_INSET;
 
 #[derive(Clone, Copy)]
 struct DraggedSplit {
     split_id: SplitId,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum PaneHostEvent {
+    CloseWindowRequested { window_id: WindowId },
 }
 
 pub(crate) struct PaneHost {
@@ -82,10 +52,12 @@ pub(crate) struct PaneHost {
     split_bounds: BTreeMap<SplitId, Bounds<Pixels>>,
     pane_titles: BTreeMap<PaneId, gpui::SharedString>,
     menu_pane_id: Option<PaneId>,
+    active: bool,
 }
 
 impl PaneHost {
     pub(crate) fn new(
+        window_id: WindowId,
         session_factory: Rc<dyn TerminalSessionFactory>,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -103,7 +75,7 @@ impl PaneHost {
 
         Self {
             terminal_window: TerminalWindow::new(
-                WindowId::new(1),
+                window_id,
                 initial_pane_id,
                 initial_terminal,
                 minimum_pane_size,
@@ -115,6 +87,7 @@ impl PaneHost {
             split_bounds: BTreeMap::new(),
             pane_titles: BTreeMap::from([(initial_pane_id, initial_title)]),
             menu_pane_id: None,
+            active: true,
         }
     }
 
@@ -140,14 +113,63 @@ impl PaneHost {
         terminal
     }
 
-    pub(crate) fn focus(&self, window: &mut Window, cx: &mut App) {
+    pub(crate) fn focus(&self, window: &mut Window, cx: &App) {
         let Some(terminal) = self
             .terminal_window
             .terminal(self.terminal_window.focused_pane_id())
         else {
             return;
         };
-        terminal.update(cx, |terminal, _| terminal.focus(window));
+        terminal.read(cx).focus(window);
+    }
+
+    pub(crate) const fn window_id(&self) -> WindowId {
+        self.terminal_window.id()
+    }
+
+    pub(crate) fn pane_count(&self) -> usize {
+        self.terminal_window.pane_count()
+    }
+
+    pub(crate) const fn zoom_state(&self) -> ZoomState {
+        self.terminal_window.zoom_state()
+    }
+
+    pub(crate) fn activate(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.active = true;
+        self.menu_pane_id = None;
+        cx.notify();
+        self.focus(window, cx);
+    }
+
+    pub(crate) fn deactivate(&mut self, cx: &mut Context<Self>) {
+        self.active = false;
+        self.menu_pane_id = None;
+        cx.notify();
+    }
+
+    pub(crate) fn close_all(&mut self, cx: &mut Context<Self>) {
+        for terminal in self.terminal_window.terminals() {
+            terminal.update(cx, |terminal, _| terminal.close());
+        }
+        self.menu_pane_id = None;
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn focused_pane_id(&self) -> PaneId {
+        self.terminal_window.focused_pane_id()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn focused_terminal_is_focused(&self, window: &Window, cx: &App) -> bool {
+        self.terminal_window
+            .terminal(self.terminal_window.focused_pane_id())
+            .is_some_and(|terminal| terminal.read(cx).is_focused(window))
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn is_active(&self) -> bool {
+        self.active
     }
 
     fn focus_pane(&mut self, pane_id: PaneId, cx: &mut Context<Self>) {
@@ -175,7 +197,12 @@ impl PaneHost {
         }
     }
 
-    fn split_focused(&mut self, axis: SplitAxis, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn split_focused(
+        &mut self,
+        axis: SplitAxis,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let focused_pane_id = self.terminal_window.focused_pane_id();
         self.split_pane(focused_pane_id, axis, window, cx);
     }
@@ -241,7 +268,10 @@ impl PaneHost {
                 if let Some(terminal) = terminal {
                     terminal.update(cx, |terminal, _| terminal.close());
                 }
-                window.remove_window();
+                self.menu_pane_id = None;
+                cx.emit(PaneHostEvent::CloseWindowRequested {
+                    window_id: self.terminal_window.id(),
+                });
             }
             Ok(ClosePaneOutcome::PaneClosed {
                 focused_pane_id, ..
@@ -254,7 +284,9 @@ impl PaneHost {
                 self.pane_titles.remove(&pane_id);
                 self.menu_pane_id = None;
                 cx.notify();
-                if let Some(terminal) = self.terminal_window.terminal(focused_pane_id) {
+                if self.active
+                    && let Some(terminal) = self.terminal_window.terminal(focused_pane_id)
+                {
                     terminal.update(cx, |terminal, _| terminal.focus(window));
                 }
             }
@@ -262,7 +294,7 @@ impl PaneHost {
         }
     }
 
-    fn toggle_zoom(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn toggle_zoom(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.terminal_window.pane_count() <= 1 {
             return;
         }
@@ -313,19 +345,21 @@ impl PaneHost {
 
     fn perform_menu_command(
         &mut self,
-        command: PaneMenuCommand,
+        command: PaneActionMenuCommand,
         pane_id: PaneId,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         self.menu_pane_id = None;
         match command {
-            PaneMenuCommand::SplitRight => {
+            PaneActionMenuCommand::SplitRight => {
                 self.split_pane(pane_id, SplitAxis::Horizontal, window, cx)
             }
-            PaneMenuCommand::SplitDown => self.split_pane(pane_id, SplitAxis::Vertical, window, cx),
-            PaneMenuCommand::ToggleZoom => self.toggle_zoom(window, cx),
-            PaneMenuCommand::ClosePane => self.close_pane(pane_id, window, cx),
+            PaneActionMenuCommand::SplitDown => {
+                self.split_pane(pane_id, SplitAxis::Vertical, window, cx)
+            }
+            PaneActionMenuCommand::ToggleZoom => self.toggle_zoom(window, cx),
+            PaneActionMenuCommand::Close => self.close_pane(pane_id, window, cx),
         }
     }
 
@@ -528,6 +562,8 @@ impl PaneHost {
             .into_any_element()
     }
 }
+
+impl EventEmitter<PaneHostEvent> for PaneHost {}
 
 impl Render for PaneHost {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -761,12 +797,12 @@ fn render_pane_controls(
         .top(px(PANE_CONTROL_TOP))
         .right(px(PANE_CONTROL_INSET))
         .w(px(if show_menu {
-            MENU_WIDTH
+            PANE_ACTION_MENU_WIDTH
         } else {
             PANE_CONTROL_SIZE
         }))
         .h(px(if show_menu {
-            PANE_MENU_TOP + MENU_HEIGHT
+            PANE_MENU_TOP + PANE_ACTION_MENU_HEIGHT
         } else {
             PANE_CONTROL_SIZE
         }))
@@ -779,165 +815,21 @@ fn render_pane_controls(
             })
         })
         .when(show_menu, |controls| {
-            controls.child(render_pane_menu(pane_id, zoomed, host.clone()))
+            controls.child(div().absolute().top(px(PANE_MENU_TOP)).right_0().child(
+                render_pane_action_menu(
+                    ("pane-menu", pane_id.get()),
+                    zoomed,
+                    true,
+                    CloseTarget::Pane,
+                    host.clone(),
+                    move |host, command, window, cx| {
+                        host.perform_menu_command(command, pane_id, window, cx);
+                    },
+                ),
+            ))
         })
         .child(render_menu_button(pane_id, focused, pane_group, host))
         .into_any_element()
-}
-
-fn render_pane_menu(pane_id: PaneId, zoomed: bool, host: gpui::WeakEntity<PaneHost>) -> AnyElement {
-    let mut menu = div()
-        .id(("pane-menu", pane_id.get()))
-        .debug_selector(|| format!("pane-menu-{}", pane_id.get()))
-        .absolute()
-        .top(px(PANE_MENU_TOP))
-        .right_0()
-        .w(px(MENU_WIDTH))
-        .flex()
-        .flex_col()
-        .overflow_hidden()
-        .rounded(px(MENU_CORNER_RADIUS))
-        .border(px(MENU_BORDER_SIZE))
-        .border_color(gpui_color(ACTIVE_THEME.border))
-        .bg(gpui_color(ACTIVE_THEME.elevated_surface_background))
-        .occlude();
-
-    for (index, spec) in pane_menu_items(zoomed).into_iter().enumerate() {
-        if spec.separator_before {
-            menu = menu.child(
-                div()
-                    .h(px(MENU_SEPARATOR_SIZE))
-                    .bg(gpui_color(ACTIVE_THEME.border)),
-            );
-        }
-        let position = if index == 0 {
-            PaneMenuRowPosition::First
-        } else if index == MENU_ITEM_COUNT - 1 {
-            PaneMenuRowPosition::Last
-        } else {
-            PaneMenuRowPosition::Middle
-        };
-        menu = menu.child(render_menu_row(spec, position, pane_id, host.clone()));
-    }
-
-    menu.into_any_element()
-}
-
-fn render_menu_row(
-    spec: PaneMenuItemSpec,
-    position: PaneMenuRowPosition,
-    pane_id: PaneId,
-    host: gpui::WeakEntity<PaneHost>,
-) -> AnyElement {
-    let foreground = if spec.destructive {
-        ACTIVE_THEME.error
-    } else {
-        ACTIVE_THEME.text
-    };
-    let icon_color = if spec.destructive {
-        ACTIVE_THEME.error
-    } else {
-        ACTIVE_THEME.icon
-    };
-
-    div()
-        .id(spec.command as usize)
-        .debug_selector(|| format!("pane-menu-row-{}", spec.command.debug_name()))
-        .h(px(MENU_ROW_HEIGHT))
-        .px(px(6.0))
-        .flex()
-        .flex_row()
-        .items_center()
-        .gap(px(8.0))
-        .cursor_pointer()
-        .text_size(px(13.0))
-        .text_color(gpui_color(foreground))
-        .when(position == PaneMenuRowPosition::First, |row| {
-            row.rounded_t(px(MENU_INNER_CORNER_RADIUS))
-        })
-        .when(position == PaneMenuRowPosition::Last, |row| {
-            row.rounded_b(px(MENU_INNER_CORNER_RADIUS))
-        })
-        .hover(|row| row.bg(gpui_color(ACTIVE_THEME.element_hover)))
-        .on_click(move |_, window, cx| {
-            let _ = host.update(cx, |host, cx| {
-                host.perform_menu_command(spec.command, pane_id, window, cx);
-            });
-            cx.stop_propagation();
-        })
-        .child(
-            div()
-                .w(px(18.0))
-                .flex()
-                .items_center()
-                .justify_center()
-                .child(
-                    Icon::new(spec.icon)
-                        .size(px(15.0))
-                        .color(gpui_color(icon_color)),
-                ),
-        )
-        .child(spec.label)
-        .child(div().flex_grow())
-        .child(
-            div()
-                .text_size(px(MENU_SHORTCUT_TEXT_SIZE))
-                .text_color(gpui_color(ACTIVE_THEME.icon))
-                .child(spec.shortcut),
-        )
-        .into_any_element()
-}
-
-impl PaneMenuCommand {
-    fn debug_name(self) -> &'static str {
-        match self {
-            Self::SplitRight => "split-right",
-            Self::SplitDown => "split-down",
-            Self::ToggleZoom => "toggle-zoom",
-            Self::ClosePane => "close-pane",
-        }
-    }
-}
-
-fn pane_menu_items(zoomed: bool) -> [PaneMenuItemSpec; MENU_ITEM_COUNT] {
-    [
-        PaneMenuItemSpec {
-            command: PaneMenuCommand::SplitRight,
-            icon: "rectangle.split.2x1",
-            label: "Split Right",
-            shortcut: "⌘D",
-            destructive: false,
-            separator_before: false,
-        },
-        PaneMenuItemSpec {
-            command: PaneMenuCommand::SplitDown,
-            icon: "rectangle.split.1x2",
-            label: "Split Down",
-            shortcut: "⇧⌘D",
-            destructive: false,
-            separator_before: false,
-        },
-        PaneMenuItemSpec {
-            command: PaneMenuCommand::ToggleZoom,
-            icon: if zoomed {
-                "arrow.down.right.and.arrow.up.left"
-            } else {
-                "arrow.up.left.and.arrow.down.right"
-            },
-            label: if zoomed { "Restore Panes" } else { "Zoom Pane" },
-            shortcut: "⇧⌘↩",
-            destructive: false,
-            separator_before: false,
-        },
-        PaneMenuItemSpec {
-            command: PaneMenuCommand::ClosePane,
-            icon: "xmark",
-            label: "Close Pane",
-            shortcut: "⌘W",
-            destructive: true,
-            separator_before: true,
-        },
-    ]
 }
 
 fn pane_size(bounds: Bounds<Pixels>) -> Result<PaneSize, crate::domain::PaneSizeError> {
@@ -1120,8 +1012,9 @@ mod tests {
         let session_factory: Rc<dyn TerminalSessionFactory> = Rc::new(RecordingSessionFactory {
             pointer_count: Rc::new(Cell::new(0)),
         });
-        let (host, cx) =
-            cx.add_window_view(|window, cx| PaneHost::new(session_factory, window, cx));
+        let (host, cx) = cx.add_window_view(|window, cx| {
+            PaneHost::new(WindowId::new(1), session_factory, window, cx)
+        });
 
         split_test_pane(&host, PaneId::new(1), SplitAxis::Horizontal, cx);
         split_test_pane(&host, PaneId::new(1), SplitAxis::Vertical, cx);
@@ -1153,8 +1046,9 @@ mod tests {
         let session_factory: Rc<dyn TerminalSessionFactory> = Rc::new(RecordingSessionFactory {
             pointer_count: Rc::new(Cell::new(0)),
         });
-        let (_host, cx) =
-            cx.add_window_view(|window, cx| PaneHost::new(session_factory, window, cx));
+        let (_host, cx) = cx.add_window_view(|window, cx| {
+            PaneHost::new(WindowId::new(1), session_factory, window, cx)
+        });
 
         assert!(cx.debug_bounds("pane-header-1-focused").is_none());
     }
@@ -1164,8 +1058,9 @@ mod tests {
         let session_factory: Rc<dyn TerminalSessionFactory> = Rc::new(RecordingSessionFactory {
             pointer_count: Rc::new(Cell::new(0)),
         });
-        let (host, cx) =
-            cx.add_window_view(|window, cx| PaneHost::new(session_factory, window, cx));
+        let (host, cx) = cx.add_window_view(|window, cx| {
+            PaneHost::new(WindowId::new(1), session_factory, window, cx)
+        });
 
         cx.update(|window, cx| {
             host.update(cx, |host, cx| {
@@ -1192,8 +1087,9 @@ mod tests {
         let session_factory: Rc<dyn TerminalSessionFactory> = Rc::new(RecordingSessionFactory {
             pointer_count: Rc::new(Cell::new(0)),
         });
-        let (host, cx) =
-            cx.add_window_view(|window, cx| PaneHost::new(session_factory, window, cx));
+        let (host, cx) = cx.add_window_view(|window, cx| {
+            PaneHost::new(WindowId::new(1), session_factory, window, cx)
+        });
 
         cx.update(|window, cx| {
             host.update(cx, |host, cx| {
@@ -1265,8 +1161,9 @@ mod tests {
         let session_factory: Rc<dyn TerminalSessionFactory> = Rc::new(TitleSessionFactory {
             event_senders: Rc::clone(&event_senders),
         });
-        let (host, cx) =
-            cx.add_window_view(|window, cx| PaneHost::new(session_factory, window, cx));
+        let (host, cx) = cx.add_window_view(|window, cx| {
+            PaneHost::new(WindowId::new(1), session_factory, window, cx)
+        });
 
         cx.update(|window, cx| {
             host.update(cx, |host, cx| {
@@ -1308,8 +1205,9 @@ mod tests {
             dropped_session_ids: Rc::clone(&dropped_session_ids),
             next_session_id: Cell::new(1),
         });
-        let (host, cx) =
-            cx.add_window_view(|window, cx| PaneHost::new(session_factory, window, cx));
+        let (host, cx) = cx.add_window_view(|window, cx| {
+            PaneHost::new(WindowId::new(1), session_factory, window, cx)
+        });
 
         cx.update(|window, cx| {
             host.update(cx, |host, cx| {
@@ -1338,11 +1236,8 @@ mod tests {
     }
 
     #[gpui::test]
-    fn exited_last_terminal_session_should_close_the_window(cx: &mut TestAppContext) {
-        let window_closed = Rc::new(Cell::new(false));
-        let window_closed_for_observer = Rc::clone(&window_closed);
-        let _window_closed_subscription =
-            cx.update(|cx| cx.on_window_closed(move |_| window_closed_for_observer.set(true)));
+    fn exited_last_terminal_session_should_request_window_close(cx: &mut TestAppContext) {
+        let close_requests = Rc::new(Cell::new(0));
         let event_senders = Rc::new(RefCell::new(Vec::new()));
         let dropped_session_ids = Rc::new(RefCell::new(Vec::new()));
         let session_factory: Rc<dyn TerminalSessionFactory> = Rc::new(LifecycleSessionFactory {
@@ -1350,8 +1245,16 @@ mod tests {
             dropped_session_ids: Rc::clone(&dropped_session_ids),
             next_session_id: Cell::new(1),
         });
-        let (_host, cx) =
-            cx.add_window_view(|window, cx| PaneHost::new(session_factory, window, cx));
+        let (host, cx) = cx.add_window_view(|window, cx| {
+            PaneHost::new(WindowId::new(1), session_factory, window, cx)
+        });
+        let close_requests_for_subscription = Rc::clone(&close_requests);
+        host.update(cx, |_, cx| {
+            cx.subscribe(&host, move |_, _, _: &PaneHostEvent, _| {
+                close_requests_for_subscription.update(|count| count + 1);
+            })
+            .detach();
+        });
 
         let sender = event_senders
             .borrow()
@@ -1364,8 +1267,8 @@ mod tests {
         cx.run_until_parked();
 
         assert_eq!(
-            (window_closed.get(), dropped_session_ids.borrow().clone()),
-            (true, vec![1])
+            (close_requests.get(), dropped_session_ids.borrow().clone()),
+            (1, vec![1])
         );
     }
 
@@ -1377,8 +1280,9 @@ mod tests {
         let session_factory: Rc<dyn TerminalSessionFactory> = Rc::new(RecordingSessionFactory {
             pointer_count: Rc::clone(&pointer_count),
         });
-        let (host, cx) =
-            cx.add_window_view(|window, cx| PaneHost::new(session_factory, window, cx));
+        let (host, cx) = cx.add_window_view(|window, cx| {
+            PaneHost::new(WindowId::new(1), session_factory, window, cx)
+        });
 
         cx.update(|window, cx| {
             host.update(cx, |host, cx| {
@@ -1410,8 +1314,9 @@ mod tests {
         let session_factory: Rc<dyn TerminalSessionFactory> = Rc::new(RecordingSessionFactory {
             pointer_count: Rc::clone(&pointer_count),
         });
-        let (host, cx) =
-            cx.add_window_view(|window, cx| PaneHost::new(session_factory, window, cx));
+        let (host, cx) = cx.add_window_view(|window, cx| {
+            PaneHost::new(WindowId::new(1), session_factory, window, cx)
+        });
 
         cx.update(|window, cx| {
             host.update(cx, |host, cx| {
@@ -1461,8 +1366,9 @@ mod tests {
         let session_factory: Rc<dyn TerminalSessionFactory> = Rc::new(RecordingSessionFactory {
             pointer_count: Rc::clone(&pointer_count),
         });
-        let (host, cx) =
-            cx.add_window_view(|window, cx| PaneHost::new(session_factory, window, cx));
+        let (host, cx) = cx.add_window_view(|window, cx| {
+            PaneHost::new(WindowId::new(1), session_factory, window, cx)
+        });
 
         cx.update(|window, cx| {
             host.update(cx, |host, cx| {
@@ -1497,8 +1403,9 @@ mod tests {
         let session_factory: Rc<dyn TerminalSessionFactory> = Rc::new(RecordingSessionFactory {
             pointer_count: Rc::clone(&pointer_count),
         });
-        let (host, cx) =
-            cx.add_window_view(|window, cx| PaneHost::new(session_factory, window, cx));
+        let (host, cx) = cx.add_window_view(|window, cx| {
+            PaneHost::new(WindowId::new(1), session_factory, window, cx)
+        });
 
         cx.update(|window, cx| {
             host.update(cx, |host, cx| {
@@ -1560,8 +1467,9 @@ mod tests {
         let session_factory: Rc<dyn TerminalSessionFactory> = Rc::new(RecordingSessionFactory {
             pointer_count: Rc::clone(&pointer_count),
         });
-        let (host, cx) =
-            cx.add_window_view(|window, cx| PaneHost::new(session_factory, window, cx));
+        let (host, cx) = cx.add_window_view(|window, cx| {
+            PaneHost::new(WindowId::new(1), session_factory, window, cx)
+        });
 
         cx.update(|window, cx| {
             host.update(cx, |host, cx| {
@@ -1616,23 +1524,6 @@ mod tests {
     }
 
     #[test]
-    fn menu_spec_should_use_restore_label_and_icon_when_zoomed() {
-        let zoom_item = pane_menu_items(true)[2];
-
-        assert_eq!(
-            (zoom_item.label, zoom_item.icon),
-            ("Restore Panes", "arrow.down.right.and.arrow.up.left")
-        );
-    }
-
-    #[test]
-    fn menu_spec_should_show_command_w_for_close_pane() {
-        let close_item = pane_menu_items(false)[3];
-
-        assert_eq!(close_item.shortcut, "⌘W");
-    }
-
-    #[test]
     fn split_ratio_should_follow_horizontal_pointer_position() {
         let split_bounds = bounds(point(px(10.0), px(20.0)), size(px(401.0), px(200.0)));
         let pointer = point(px(110.0), px(80.0));
@@ -1656,8 +1547,8 @@ mod tests {
 
     #[test]
     fn minimum_pane_size_should_contain_the_complete_menu() {
-        let menu_right = PANE_CONTROL_INSET + MENU_WIDTH;
-        let menu_bottom = MENU_TOP + MENU_HEIGHT;
+        let menu_right = PANE_CONTROL_INSET + PANE_ACTION_MENU_WIDTH;
+        let menu_bottom = MENU_TOP + PANE_ACTION_MENU_HEIGHT;
 
         assert!(
             MINIMUM_PANE_WIDTH >= menu_right + PANE_CONTROL_INSET

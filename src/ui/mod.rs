@@ -1,11 +1,18 @@
+mod pane_action_menu;
 mod pane_host;
 mod terminal_element;
 mod terminal_pane;
+mod window_manager;
 
 use gpui::{App, KeyBinding, actions};
 
-pub(crate) use pane_host::PaneHost;
+pub(crate) use pane_action_menu::{
+    CloseTarget, PANE_ACTION_MENU_HEIGHT, PANE_ACTION_MENU_WIDTH, PaneActionMenuCommand,
+    render_pane_action_menu,
+};
+pub(crate) use pane_host::{PaneHost, PaneHostEvent};
 pub(crate) use terminal_pane::{TerminalPane, TerminalPaneEvent};
+pub(crate) use window_manager::WindowManager;
 
 actions!(
     terminal,
@@ -19,7 +26,8 @@ actions!(
         FocusPaneUp,
         FocusPaneDown,
         TogglePaneZoom,
-        ClosePane
+        ClosePane,
+        CloseWindow
     ]
 );
 
@@ -45,5 +53,6 @@ pub(crate) fn init(cx: &mut App) {
             Some(TERMINAL_KEY_CONTEXT),
         ),
         KeyBinding::new("cmd-w", ClosePane, Some(TERMINAL_KEY_CONTEXT)),
+        KeyBinding::new("cmd-shift-w", CloseWindow, Some(TERMINAL_KEY_CONTEXT)),
     ]);
 }

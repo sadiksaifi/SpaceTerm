@@ -235,6 +235,10 @@ impl<T> TerminalWindow<T> {
         self.terminals.get(&pane_id)
     }
 
+    pub(crate) fn terminals(&self) -> impl ExactSizeIterator<Item = &T> {
+        self.terminals.values()
+    }
+
     pub(crate) fn focus_pane(&mut self, pane_id: PaneId) -> Result<(), PaneError> {
         if !self.root.contains_pane(pane_id) {
             return Err(PaneError::PaneNotFound(pane_id));
