@@ -1,3 +1,4 @@
+use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::fmt;
 
@@ -78,6 +79,14 @@ pub(crate) enum SplitAxis {
     Horizontal,
     /// Places the first Pane above the second Pane.
     Vertical,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum FocusDirection {
+    Left,
+    Right,
+    Up,
+    Down,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -231,11 +240,23 @@ impl<T> TerminalWindow<T> {
             return Err(PaneError::PaneNotFound(pane_id));
         }
 
+        self.set_focused_pane(pane_id);
+        Ok(())
+    }
+
+    pub(crate) fn focus_pane_in_direction(&mut self, direction: FocusDirection) -> Option<PaneId> {
+        let pane_id = self
+            .root
+            .pane_in_direction(self.focused_pane_id, direction)?;
+        self.set_focused_pane(pane_id);
+        Some(pane_id)
+    }
+
+    fn set_focused_pane(&mut self, pane_id: PaneId) {
         self.focused_pane_id = pane_id;
         if matches!(self.zoom_state, ZoomState::Zoomed(_)) {
             self.zoom_state = ZoomState::Zoomed(pane_id);
         }
-        Ok(())
     }
 
     pub(crate) fn toggle_zoom(&mut self) -> ZoomState {
@@ -399,6 +420,50 @@ struct PaneRemoval {
     focus_fallback: PaneId,
 }
 
+#[derive(Clone, Copy)]
+struct NormalizedBounds {
+    left: f32,
+    top: f32,
+    right: f32,
+    bottom: f32,
+}
+
+impl NormalizedBounds {
+    const ROOT: Self = Self {
+        left: 0.0,
+        top: 0.0,
+        right: 1.0,
+        bottom: 1.0,
+    };
+
+    fn center_x(self) -> f32 {
+        (self.left + self.right) / 2.0
+    }
+
+    fn center_y(self) -> f32 {
+        (self.top + self.bottom) / 2.0
+    }
+}
+
+#[derive(Clone, Copy)]
+struct DirectionalScore {
+    primary_distance: f32,
+    perpendicular_distance: f32,
+    overlap: f32,
+}
+
+impl DirectionalScore {
+    fn compare(self, other: Self) -> Ordering {
+        self.primary_distance
+            .total_cmp(&other.primary_distance)
+            .then_with(|| {
+                self.perpendicular_distance
+                    .total_cmp(&other.perpendicular_distance)
+            })
+            .then_with(|| other.overlap.total_cmp(&self.overlap))
+    }
+}
+
 impl PaneNode {
     fn contains_pane(&self, target: PaneId) -> bool {
         match self {
@@ -415,6 +480,78 @@ impl PaneNode {
             Self::Split {
                 id, first, second, ..
             } => *id == target || first.contains_split(target) || second.contains_split(target),
+        }
+    }
+
+    fn pane_in_direction(
+        &self,
+        focused_pane_id: PaneId,
+        direction: FocusDirection,
+    ) -> Option<PaneId> {
+        let mut panes = Vec::new();
+        self.collect_pane_bounds(NormalizedBounds::ROOT, &mut panes);
+        let focused_bounds = panes
+            .iter()
+            .find_map(|(pane_id, bounds)| (*pane_id == focused_pane_id).then_some(*bounds))?;
+
+        panes
+            .into_iter()
+            .filter_map(|(pane_id, bounds)| {
+                directional_score(focused_bounds, bounds, direction).map(|score| (pane_id, score))
+            })
+            .min_by(|(first_id, first_score), (second_id, second_score)| {
+                first_score
+                    .compare(*second_score)
+                    .then_with(|| first_id.cmp(second_id))
+            })
+            .map(|(pane_id, _)| pane_id)
+    }
+
+    fn collect_pane_bounds(
+        &self,
+        bounds: NormalizedBounds,
+        panes: &mut Vec<(PaneId, NormalizedBounds)>,
+    ) {
+        match self {
+            Self::Leaf(pane_id) => panes.push((*pane_id, bounds)),
+            Self::Split {
+                axis,
+                ratio,
+                first,
+                second,
+                ..
+            } => {
+                let (first_bounds, second_bounds) = match axis {
+                    SplitAxis::Horizontal => {
+                        let divider = bounds.left + (bounds.right - bounds.left) * ratio;
+                        (
+                            NormalizedBounds {
+                                right: divider,
+                                ..bounds
+                            },
+                            NormalizedBounds {
+                                left: divider,
+                                ..bounds
+                            },
+                        )
+                    }
+                    SplitAxis::Vertical => {
+                        let divider = bounds.top + (bounds.bottom - bounds.top) * ratio;
+                        (
+                            NormalizedBounds {
+                                bottom: divider,
+                                ..bounds
+                            },
+                            NormalizedBounds {
+                                top: divider,
+                                ..bounds
+                            },
+                        )
+                    }
+                };
+                first.collect_pane_bounds(first_bounds, panes);
+                second.collect_pane_bounds(second_bounds, panes);
+            }
         }
     }
 
@@ -584,6 +721,47 @@ impl PaneNode {
     }
 }
 
+fn directional_score(
+    focused: NormalizedBounds,
+    candidate: NormalizedBounds,
+    direction: FocusDirection,
+) -> Option<DirectionalScore> {
+    const EDGE_EPSILON: f32 = 0.000_001;
+
+    let (is_in_direction, primary_distance, perpendicular_distance, overlap) = match direction {
+        FocusDirection::Left => (
+            candidate.right <= focused.left + EDGE_EPSILON,
+            focused.left - candidate.right,
+            (focused.center_y() - candidate.center_y()).abs(),
+            focused.bottom.min(candidate.bottom) - focused.top.max(candidate.top),
+        ),
+        FocusDirection::Right => (
+            candidate.left >= focused.right - EDGE_EPSILON,
+            candidate.left - focused.right,
+            (focused.center_y() - candidate.center_y()).abs(),
+            focused.bottom.min(candidate.bottom) - focused.top.max(candidate.top),
+        ),
+        FocusDirection::Up => (
+            candidate.bottom <= focused.top + EDGE_EPSILON,
+            focused.top - candidate.bottom,
+            (focused.center_x() - candidate.center_x()).abs(),
+            focused.right.min(candidate.right) - focused.left.max(candidate.left),
+        ),
+        FocusDirection::Down => (
+            candidate.top >= focused.bottom - EDGE_EPSILON,
+            candidate.top - focused.bottom,
+            (focused.center_x() - candidate.center_x()).abs(),
+            focused.right.min(candidate.right) - focused.left.max(candidate.left),
+        ),
+    };
+
+    (is_in_direction && overlap > EDGE_EPSILON).then_some(DirectionalScore {
+        primary_distance: primary_distance.max(0.0),
+        perpendicular_distance,
+        overlap,
+    })
+}
+
 fn validate_divider_size(divider_size: f32) -> Result<(), PaneError> {
     if divider_size.is_finite() && divider_size >= 0.0 {
         Ok(())
@@ -656,6 +834,44 @@ mod tests {
             terminal,
             size(100.0, 50.0),
         )
+    }
+
+    fn four_pane_window() -> TerminalWindow<()> {
+        let mut window = window(());
+        window
+            .split_pane(
+                PaneId::new(1),
+                PaneId::new(2),
+                SplitId::new(10),
+                SplitAxis::Horizontal,
+                size(500.0, 400.0),
+                DIVIDER_SIZE,
+                || (),
+            )
+            .unwrap();
+        window
+            .split_pane(
+                PaneId::new(1),
+                PaneId::new(3),
+                SplitId::new(11),
+                SplitAxis::Vertical,
+                size(250.0, 400.0),
+                DIVIDER_SIZE,
+                || (),
+            )
+            .unwrap();
+        window
+            .split_pane(
+                PaneId::new(2),
+                PaneId::new(4),
+                SplitId::new(12),
+                SplitAxis::Vertical,
+                size(250.0, 400.0),
+                DIVIDER_SIZE,
+                || (),
+            )
+            .unwrap();
+        window
     }
 
     fn topology(tree: PaneTreeRef<'_>) -> String {
@@ -887,6 +1103,57 @@ mod tests {
                 Err(PaneError::PaneNotFound(PaneId::new(99))),
                 PaneId::new(1)
             )
+        );
+    }
+
+    #[test]
+    fn focus_pane_in_direction_should_follow_nested_visual_neighbors() {
+        let mut window = four_pane_window();
+        window.focus_pane(PaneId::new(1)).unwrap();
+
+        let focused_panes = [
+            FocusDirection::Right,
+            FocusDirection::Down,
+            FocusDirection::Left,
+            FocusDirection::Up,
+        ]
+        .map(|direction| window.focus_pane_in_direction(direction));
+
+        assert_eq!(
+            focused_panes,
+            [
+                Some(PaneId::new(2)),
+                Some(PaneId::new(4)),
+                Some(PaneId::new(3)),
+                Some(PaneId::new(1)),
+            ]
+        );
+    }
+
+    #[test]
+    fn focus_pane_in_direction_should_not_wrap_at_a_layout_edge() {
+        let mut window = four_pane_window();
+        window.focus_pane(PaneId::new(1)).unwrap();
+
+        let focused_pane = window.focus_pane_in_direction(FocusDirection::Left);
+
+        assert_eq!(
+            (focused_pane, window.focused_pane_id()),
+            (None, PaneId::new(1))
+        );
+    }
+
+    #[test]
+    fn focus_pane_in_direction_should_move_zoom_to_the_neighbor() {
+        let mut window = four_pane_window();
+        window.focus_pane(PaneId::new(1)).unwrap();
+        window.toggle_zoom();
+
+        let focused_pane = window.focus_pane_in_direction(FocusDirection::Right);
+
+        assert_eq!(
+            (focused_pane, window.zoom_state()),
+            (Some(PaneId::new(2)), ZoomState::Zoomed(PaneId::new(2)))
         );
     }
 

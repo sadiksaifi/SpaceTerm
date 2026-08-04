@@ -9,12 +9,12 @@ use gpui::{
 use gpui_symbols::{Icon, SymbolWeight};
 
 use super::{
-    ClosePane, SplitDown, SplitRight, TERMINAL_KEY_CONTEXT, TerminalPane, TerminalPaneEvent,
-    TogglePaneZoom,
+    ClosePane, FocusPaneDown, FocusPaneLeft, FocusPaneRight, FocusPaneUp, SplitDown, SplitRight,
+    TERMINAL_KEY_CONTEXT, TerminalPane, TerminalPaneEvent, TogglePaneZoom,
 };
 use crate::domain::{
-    ClosePaneOutcome, PaneId, PaneNodeRef, PaneSize, PaneTreeRef, SplitAxis, SplitId,
-    TerminalWindow, WindowId, ZoomState,
+    ClosePaneOutcome, FocusDirection, PaneId, PaneNodeRef, PaneSize, PaneTreeRef, SplitAxis,
+    SplitId, TerminalWindow, WindowId, ZoomState,
 };
 use crate::terminal::TerminalSessionFactory;
 use crate::theme::{ACTIVE_THEME, Color};
@@ -154,6 +154,22 @@ impl PaneHost {
         }
         self.menu_pane_id = None;
         cx.notify();
+    }
+
+    fn focus_pane_in_direction(
+        &mut self,
+        direction: FocusDirection,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(pane_id) = self.terminal_window.focus_pane_in_direction(direction) else {
+            return;
+        };
+        self.menu_pane_id = None;
+        cx.notify();
+        if let Some(terminal) = self.terminal_window.terminal(pane_id) {
+            terminal.update(cx, |terminal, _| terminal.focus(window));
+        }
     }
 
     fn split_focused(&mut self, axis: SplitAxis, window: &mut Window, cx: &mut Context<Self>) {
@@ -328,6 +344,37 @@ impl PaneHost {
 
     fn on_split_down(&mut self, _: &SplitDown, window: &mut Window, cx: &mut Context<Self>) {
         self.split_focused(SplitAxis::Vertical, window, cx);
+    }
+
+    fn on_focus_pane_left(
+        &mut self,
+        _: &FocusPaneLeft,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.focus_pane_in_direction(FocusDirection::Left, window, cx);
+    }
+
+    fn on_focus_pane_right(
+        &mut self,
+        _: &FocusPaneRight,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.focus_pane_in_direction(FocusDirection::Right, window, cx);
+    }
+
+    fn on_focus_pane_up(&mut self, _: &FocusPaneUp, window: &mut Window, cx: &mut Context<Self>) {
+        self.focus_pane_in_direction(FocusDirection::Up, window, cx);
+    }
+
+    fn on_focus_pane_down(
+        &mut self,
+        _: &FocusPaneDown,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.focus_pane_in_direction(FocusDirection::Down, window, cx);
     }
 
     fn on_toggle_zoom(&mut self, _: &TogglePaneZoom, window: &mut Window, cx: &mut Context<Self>) {
@@ -509,6 +556,10 @@ impl Render for PaneHost {
             .bg(gpui_color(ACTIVE_THEME.terminal_background))
             .on_action(cx.listener(Self::on_split_right))
             .on_action(cx.listener(Self::on_split_down))
+            .on_action(cx.listener(Self::on_focus_pane_left))
+            .on_action(cx.listener(Self::on_focus_pane_right))
+            .on_action(cx.listener(Self::on_focus_pane_up))
+            .on_action(cx.listener(Self::on_focus_pane_down))
             .on_action(cx.listener(Self::on_toggle_zoom))
             .on_action(cx.listener(Self::on_close_pane))
             .child(content)
@@ -920,7 +971,7 @@ mod tests {
     use std::cell::{Cell, RefCell};
     use std::sync::Arc;
 
-    use gpui::{Modifiers, TestAppContext, bounds, point, px, size};
+    use gpui::{Modifiers, TestAppContext, VisualTestContext, bounds, point, px, size};
 
     use super::*;
     use crate::terminal::{
@@ -993,6 +1044,53 @@ mod tests {
         }
     }
 
+    fn split_test_pane(
+        host: &Entity<PaneHost>,
+        pane_id: PaneId,
+        axis: SplitAxis,
+        cx: &mut VisualTestContext,
+    ) {
+        cx.update(|window, cx| {
+            host.update(cx, |host, cx| {
+                host.split_pane(pane_id, axis, window, cx);
+            });
+        });
+        cx.run_until_parked();
+    }
+
+    fn four_pane_host(cx: &mut TestAppContext) -> (Entity<PaneHost>, &mut VisualTestContext) {
+        cx.update(crate::ui::init);
+        let session_factory: Rc<dyn TerminalSessionFactory> = Rc::new(RecordingSessionFactory {
+            pointer_count: Rc::new(Cell::new(0)),
+        });
+        let (host, cx) =
+            cx.add_window_view(|window, cx| PaneHost::new(session_factory, window, cx));
+
+        split_test_pane(&host, PaneId::new(1), SplitAxis::Horizontal, cx);
+        split_test_pane(&host, PaneId::new(1), SplitAxis::Vertical, cx);
+        split_test_pane(&host, PaneId::new(2), SplitAxis::Vertical, cx);
+        cx.update(|window, cx| {
+            host.update(cx, |host, cx| {
+                host.focus_pane(PaneId::new(1), cx);
+                host.focus(window, cx);
+            });
+        });
+        cx.run_until_parked();
+
+        (host, cx)
+    }
+
+    fn focused_panes_after_shortcuts<const N: usize>(
+        host: &Entity<PaneHost>,
+        cx: &mut VisualTestContext,
+        shortcuts: [&str; N],
+    ) -> [PaneId; N] {
+        shortcuts.map(|shortcut| {
+            cx.simulate_keystrokes(shortcut);
+            host.read_with(cx, |host, _| host.terminal_window.focused_pane_id())
+        })
+    }
+
     #[gpui::test]
     fn single_pane_should_not_render_a_pane_header(cx: &mut TestAppContext) {
         let session_factory: Rc<dyn TerminalSessionFactory> = Rc::new(RecordingSessionFactory {
@@ -1053,6 +1151,55 @@ mod tests {
             cx.debug_bounds("pane-header-2-unfocused").is_some(),
         );
         assert_eq!(header_state, (true, true));
+    }
+
+    #[gpui::test]
+    fn command_shift_vim_shortcuts_should_focus_panes_in_each_direction(cx: &mut TestAppContext) {
+        let (host, cx) = four_pane_host(cx);
+
+        let focused_panes = focused_panes_after_shortcuts(
+            &host,
+            cx,
+            ["cmd-shift-l", "cmd-shift-j", "cmd-shift-h", "cmd-shift-k"],
+        );
+
+        assert_eq!(
+            focused_panes,
+            [
+                PaneId::new(2),
+                PaneId::new(4),
+                PaneId::new(3),
+                PaneId::new(1),
+            ]
+        );
+    }
+
+    #[gpui::test]
+    fn command_option_arrow_shortcuts_should_focus_panes_in_each_direction(
+        cx: &mut TestAppContext,
+    ) {
+        let (host, cx) = four_pane_host(cx);
+
+        let focused_panes = focused_panes_after_shortcuts(
+            &host,
+            cx,
+            [
+                "cmd-alt-right",
+                "cmd-alt-down",
+                "cmd-alt-left",
+                "cmd-alt-up",
+            ],
+        );
+
+        assert_eq!(
+            focused_panes,
+            [
+                PaneId::new(2),
+                PaneId::new(4),
+                PaneId::new(3),
+                PaneId::new(1),
+            ]
+        );
     }
 
     #[gpui::test]
