@@ -1,5 +1,5 @@
-app_bundle := "dist/TermSpace.app"
-disk_image := "dist/TermSpace.dmg"
+app_bundle := "dist/SpaceTerm.app"
+disk_image := "dist/SpaceTerm.dmg"
 
 # List the available project commands.
 default:
@@ -21,7 +21,7 @@ doctor:
 fetch:
     cargo fetch --locked
 
-# Run Termspace from source.
+# Run SpaceTerm from source.
 run:
     cargo run --locked
 
@@ -66,7 +66,7 @@ validate: fmt-check test clippy scripts-check diff-check
 release:
     cargo build --release --locked
 
-# Build and verify native TermSpace.app and TermSpace.dmg artifacts.
+# Build and verify native SpaceTerm.app and SpaceTerm.dmg artifacts.
 package build_number="1":
     ./scripts/package-macos.sh --build-number "{{ build_number }}"
 
@@ -89,6 +89,6 @@ open-dmg:
 # Show metadata, architecture, signature, and artifact sizes.
 package-info:
     @plutil -p "{{ app_bundle }}/Contents/Info.plist"
-    @lipo -archs "{{ app_bundle }}/Contents/MacOS/TermSpace"
+    @lipo -archs "{{ app_bundle }}/Contents/MacOS/SpaceTerm"
     @codesign --display --verbose=2 "{{ app_bundle }}"
-    @ls -lh "{{ disk_image }}" "{{ app_bundle }}/Contents/MacOS/TermSpace"
+    @ls -lh "{{ disk_image }}" "{{ app_bundle }}/Contents/MacOS/SpaceTerm"

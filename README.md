@@ -1,4 +1,4 @@
-# Termspace
+# SpaceTerm
 
 A native macOS terminal built with Rust, GPUI, `libghostty-vt`, and a macOS PTY.
 
@@ -37,10 +37,10 @@ Pass a build number when producing another build of the same Cargo version, for 
 
 The native-architecture artifacts are written to:
 
-- `dist/TermSpace.app`
-- `dist/TermSpace.dmg`
+- `dist/SpaceTerm.app`
+- `dist/SpaceTerm.dmg`
 
-The DMG contains `TermSpace.app` and an Applications shortcut. To build a universal Apple Silicon and Intel package, install both Rust targets and run the universal recipe:
+The DMG contains `SpaceTerm.app` and an Applications shortcut. To build a universal Apple Silicon and Intel package, install both Rust targets and run the universal recipe:
 
 ```sh
 rustup target add aarch64-apple-darwin x86_64-apple-darwin

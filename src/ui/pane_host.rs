@@ -1111,7 +1111,7 @@ mod tests {
     }
 
     fn test_workspace_root() -> PathBuf {
-        PathBuf::from("/tmp/termspace-test-workspace")
+        PathBuf::from("/tmp/spaceterm-test-workspace")
     }
 
     fn focused_panes_after_shortcuts<const N: usize>(
@@ -1145,7 +1145,7 @@ mod tests {
 
     #[gpui::test]
     fn initial_and_split_panes_should_start_in_the_workspace_root(cx: &mut TestAppContext) {
-        let workspace_root = PathBuf::from("/tmp/termspace-explicit-workspace-root");
+        let workspace_root = PathBuf::from("/tmp/spaceterm-explicit-workspace-root");
         let started_in = Rc::new(RefCell::new(Vec::new()));
         let session_factory: Rc<dyn TerminalSessionFactory> =
             Rc::new(WorkingDirectorySessionFactory {

@@ -4,8 +4,8 @@ set -euo pipefail
 IFS=$'\n\t'
 export LC_ALL=C
 
-readonly APP_NAME="TermSpace"
-readonly BUNDLE_IDENTIFIER="io.github.sadiksaifi.termspace"
+readonly APP_NAME="SpaceTerm"
+readonly BUNDLE_IDENTIFIER="io.github.sadiksaifi.spaceterm"
 readonly MINIMUM_MACOS_VERSION="11.0"
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
@@ -26,10 +26,10 @@ usage() {
     cat <<EOF
 Usage: $(basename -- "$0") [--app PATH] [--dmg PATH] [--universal]
 
-Verify the TermSpace application bundle and installer disk image.
+Verify the SpaceTerm application bundle and installer disk image.
 
-  --app PATH   Application bundle to verify (default: dist/TermSpace.app).
-  --dmg PATH   Disk image to verify (default: dist/TermSpace.dmg).
+  --app PATH   Application bundle to verify (default: dist/SpaceTerm.app).
+  --dmg PATH   Disk image to verify (default: dist/SpaceTerm.dmg).
   --universal  Require arm64 and x86_64 slices in both app executables.
   -h, --help   Show this help.
 EOF
@@ -178,7 +178,7 @@ require_command plutil
 [[ -x /usr/libexec/PlistBuddy ]] || die "required command not found: /usr/libexec/PlistBuddy"
 [[ -f "$DMG_PATH" ]] || die "disk image is missing: $DMG_PATH"
 
-TEMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/termspace-verify.XXXXXX")"
+TEMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/spaceterm-verify.XXXXXX")"
 readonly TEMP_ROOT
 MOUNT_POINT="$TEMP_ROOT/mount"
 readonly MOUNT_POINT

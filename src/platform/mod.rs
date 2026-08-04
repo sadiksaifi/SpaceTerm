@@ -2,4 +2,4 @@
 pub(crate) mod macos_pty;
 
 #[cfg(not(target_os = "macos"))]
-compile_error!("Termspace currently supports macOS only");
+compile_error!("SpaceTerm currently supports macOS only");

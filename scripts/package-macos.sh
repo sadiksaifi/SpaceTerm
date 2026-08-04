@@ -4,8 +4,8 @@ set -euo pipefail
 IFS=$'\n\t'
 export LC_ALL=C
 
-readonly APP_NAME="TermSpace"
-readonly BINARY_NAME="termspace"
+readonly APP_NAME="SpaceTerm"
+readonly BINARY_NAME="spaceterm"
 readonly ARM_TARGET="aarch64-apple-darwin"
 readonly INTEL_TARGET="x86_64-apple-darwin"
 
@@ -28,7 +28,7 @@ usage() {
     cat <<EOF
 Usage: $(basename -- "$0") [--universal] [--build-number NUMBER]
 
-Build and package TermSpace for macOS.
+Build and package SpaceTerm for macOS.
 
   --universal  Build a universal arm64 + x86_64 application.
   --build-number NUMBER
@@ -182,7 +182,7 @@ readonly VERSION
     || die "build number must contain one to three numeric components, got: $BUILD_NUMBER"
 readonly BUILD_NUMBER
 
-TEMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/termspace-package.XXXXXX")"
+TEMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/spaceterm-package.XXXXXX")"
 readonly TEMP_ROOT
 trap cleanup EXIT INT TERM
 

@@ -1,4 +1,4 @@
-//! The complete framework-independent Vague theme used by Termspace.
+//! The complete framework-independent Vague theme used by SpaceTerm.
 //!
 //! Every color from the canonical Vague palette is represented here, including
 //! currently unused syntax, collaboration, editor, and status colors. GPUI and
@@ -47,7 +47,7 @@ pub(crate) enum FontStyle {
 
 #[expect(
     dead_code,
-    reason = "syntax roles are canonical even before Termspace renders them"
+    reason = "syntax roles are canonical even before SpaceTerm renders them"
 )]
 pub(crate) struct SyntaxStyle {
     pub(crate) color: Color,

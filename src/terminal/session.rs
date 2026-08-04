@@ -195,7 +195,7 @@ impl TerminalSession {
 
         let reader_commands = command_tx.clone();
         let worker = thread::Builder::new()
-            .name("termspace-terminal".to_owned())
+            .name("spaceterm-terminal".to_owned())
             .spawn(move || run_worker(pty, size, command_rx, reader_commands, event_tx, startup_tx))
             .map_err(SessionError::SpawnWorker)?;
 
@@ -525,7 +525,7 @@ fn spawn_reader(
     commands: CommandSender<Command>,
 ) -> std::io::Result<JoinHandle<()>> {
     thread::Builder::new()
-        .name("termspace-pty-reader".to_owned())
+        .name("spaceterm-pty-reader".to_owned())
         .spawn(move || {
             let mut buffer = [0_u8; 16 * 1024];
             loop {

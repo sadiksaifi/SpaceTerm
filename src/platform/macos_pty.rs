@@ -185,7 +185,7 @@ pub(crate) fn spawn_user_shell(
     command.arg("-l");
     command.env("TERM", "xterm-256color");
     command.env("COLORTERM", "truecolor");
-    command.env("TERM_PROGRAM", "Termspace");
+    command.env("TERM_PROGRAM", "SpaceTerm");
     command.env("TERM_PROGRAM_VERSION", env!("CARGO_PKG_VERSION"));
 
     command.cwd(working_directory);

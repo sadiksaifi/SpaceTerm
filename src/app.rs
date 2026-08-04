@@ -10,7 +10,7 @@ use crate::terminal::{NativeTerminalSessionFactory, TerminalSessionFactory};
 use crate::ui::WorkspaceManager;
 
 actions!(
-    termspace,
+    spaceterm,
     [
         QuitApplication,
         HideApplication,
@@ -38,15 +38,15 @@ pub(crate) fn init(cx: &mut App) {
     cx.on_action(toggle_active_window_full_screen);
     cx.set_menus(vec![
         Menu {
-            name: "Termspace".into(),
+            name: "SpaceTerm".into(),
             items: vec![
                 MenuItem::os_submenu("Services", SystemMenuType::Services),
                 MenuItem::separator(),
-                MenuItem::action("Hide Termspace", HideApplication),
+                MenuItem::action("Hide SpaceTerm", HideApplication),
                 MenuItem::action("Hide Others", HideOtherApplications),
                 MenuItem::action("Show All", ShowAllApplications),
                 MenuItem::separator(),
-                MenuItem::action("Quit Termspace", QuitApplication),
+                MenuItem::action("Quit SpaceTerm", QuitApplication),
             ],
         },
         Menu {
@@ -65,7 +65,7 @@ fn minimize_active_window(_: &MinimizeWindow, cx: &mut App) {
     };
     cx.defer(move |cx| {
         if let Err(error) = active_window.update(cx, |_, window, _| window.minimize_window()) {
-            eprintln!("failed to minimize the active Termspace window: {error:#}");
+            eprintln!("failed to minimize the active SpaceTerm window: {error:#}");
         }
     });
 }
@@ -76,14 +76,14 @@ fn toggle_active_window_full_screen(_: &ToggleFullScreen, cx: &mut App) {
     };
     cx.defer(move |cx| {
         if let Err(error) = active_window.update(cx, |_, window, _| window.toggle_fullscreen()) {
-            eprintln!("failed to toggle full screen for the active Termspace window: {error:#}");
+            eprintln!("failed to toggle full screen for the active SpaceTerm window: {error:#}");
         }
     });
 }
 
 pub(crate) fn open(cx: &mut App) {
     let Some(home_directory) = std::env::var_os("HOME").map(PathBuf::from) else {
-        eprintln!("failed to open Termspace because the user home directory is unavailable");
+        eprintln!("failed to open SpaceTerm because the user home directory is unavailable");
         cx.quit();
         return;
     };
@@ -117,7 +117,7 @@ pub(crate) fn open(cx: &mut App) {
     );
 
     if let Err(error) = result {
-        eprintln!("failed to open Termspace window: {error:#}");
+        eprintln!("failed to open SpaceTerm window: {error:#}");
         cx.quit();
         return;
     }

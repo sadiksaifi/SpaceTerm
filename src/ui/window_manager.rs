@@ -957,7 +957,7 @@ mod tests {
         let (manager, cx) = cx.add_window_view(|window, cx| {
             WindowManager::new(
                 session_factory,
-                PathBuf::from("/tmp/termspace-window-manager-test"),
+                PathBuf::from("/tmp/spaceterm-window-manager-test"),
                 window,
                 cx,
             )

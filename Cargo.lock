@@ -5513,7 +5513,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "termspace"
+name = "spaceterm"
 version = "0.0.0"
 dependencies = [
  "anyhow",

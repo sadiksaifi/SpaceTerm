@@ -2,7 +2,7 @@
 
 Build a functional prototype of a modern native macOS terminal named:
 
-**Termspace**
+**SpaceTerm**
 
 Technology choices:
 
@@ -11,7 +11,7 @@ Technology choices:
 - libghostty-vt for terminal emulation
 - A macOS PTY implementation for launching and communicating with shells
 - Native macOS SF Symbols through `gpui-symbols`
-- Theme: Vague is the only application and terminal theme and the source of all brand colors. Termspace is dark-mode only. The complete color palette is defined in `src/theme.rs`; reuse those tokens and do not hardcode or redefine color values in UI, terminal, platform, or domain modules.
+- Theme: Vague is the only application and terminal theme and the source of all brand colors. SpaceTerm is dark-mode only. The complete color palette is defined in `src/theme.rs`; reuse those tokens and do not hardcode or redefine color values in UI, terminal, platform, or domain modules.
 - Font: `JetBrainsMono Nerd Font` for terminal text when available
 - A sensible system monospace fallback when `JetBrainsMono Nerd Font` is unavailable
 
@@ -21,17 +21,17 @@ Build the interface directly with GPUI as a compact, Zed-like desktop experience
 
 Use `gpui-symbols` for icons and native macOS menus and system dialogs where appropriate.
 
-Keep reusable Termspace controls in a small internal UI module.
+Keep reusable SpaceTerm controls in a small internal UI module.
 
 This is a macOS-only application for now. Do not spend time creating Linux or Windows abstractions.
 
 ## Mental model and terminology
 
-Termspace is inspired by the useful layout hierarchy of tmux, but it is not a tmux client and does not have a tmux-style server/client model.
+SpaceTerm is inspired by the useful layout hierarchy of tmux, but it is not a tmux client and does not have a tmux-style server/client model.
 
 The hierarchy is:
 
-Termspace
+SpaceTerm
 └── Workspace
     └── Window
         └── Pane
