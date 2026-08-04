@@ -3,8 +3,9 @@ mod pane_host;
 mod terminal_element;
 mod terminal_pane;
 mod window_manager;
+mod workspace_manager;
 
-use gpui::{App, KeyBinding, actions};
+use gpui::{App, KeyBinding, MouseDownEvent, Window, actions};
 
 pub(crate) use pane_action_menu::{
     CloseTarget, PANE_ACTION_MENU_HEIGHT, PANE_ACTION_MENU_WIDTH, PaneActionMenuCommand,
@@ -12,7 +13,8 @@ pub(crate) use pane_action_menu::{
 };
 pub(crate) use pane_host::{PaneHost, PaneHostEvent};
 pub(crate) use terminal_pane::{TerminalPane, TerminalPaneEvent};
-pub(crate) use window_manager::WindowManager;
+pub(crate) use window_manager::{WindowManager, WindowManagerEvent};
+pub(crate) use workspace_manager::WorkspaceManager;
 
 actions!(
     terminal,
@@ -37,11 +39,29 @@ actions!(
         ActivateWindow8,
         ActivateWindow9,
         ClosePane,
-        CloseWindow
+        CloseWindow,
+        CreateWorkspace,
+        ToggleSidebar,
+        ToggleSidebarFocus
     ]
 );
 
 pub(crate) const TERMINAL_KEY_CONTEXT: &str = "TerminalPane";
+pub(crate) const TOP_CHROME_HEIGHT: f32 = 36.0;
+pub(crate) const WORKSPACE_SIDEBAR_WIDTH: f32 = 220.0;
+
+pub(crate) fn handle_top_chrome_mouse_down(
+    event: &MouseDownEvent,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    match event.click_count {
+        1 => window.start_window_move(),
+        2 => window.titlebar_double_click(),
+        _ => {}
+    }
+    cx.stop_propagation();
+}
 
 pub(crate) fn init(cx: &mut App) {
     cx.bind_keys([
@@ -74,5 +94,12 @@ pub(crate) fn init(cx: &mut App) {
         KeyBinding::new("cmd-9", ActivateWindow9, Some(TERMINAL_KEY_CONTEXT)),
         KeyBinding::new("cmd-w", ClosePane, Some(TERMINAL_KEY_CONTEXT)),
         KeyBinding::new("cmd-shift-w", CloseWindow, Some(TERMINAL_KEY_CONTEXT)),
+        KeyBinding::new("cmd-n", CreateWorkspace, Some(TERMINAL_KEY_CONTEXT)),
+        KeyBinding::new("cmd-b", ToggleSidebar, Some(TERMINAL_KEY_CONTEXT)),
+        KeyBinding::new(
+            "cmd-shift-e",
+            ToggleSidebarFocus,
+            Some(TERMINAL_KEY_CONTEXT),
+        ),
     ]);
 }

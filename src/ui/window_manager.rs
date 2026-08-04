@@ -1,9 +1,10 @@
+use std::path::PathBuf;
 use std::rc::Rc;
 
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, App, Context, Entity, MouseButton, MouseDownEvent, Pixels, Point, Render,
-    ScrollHandle, SharedString, Window, div, px, rgba,
+    AnyElement, App, Context, Entity, EventEmitter, MouseButton, MouseDownEvent, Pixels, Point,
+    Render, ScrollHandle, SharedString, Window, div, px, rgba,
 };
 use gpui_symbols::{Icon, SymbolWeight};
 
@@ -11,7 +12,8 @@ use super::{
     ActivateWindow1, ActivateWindow2, ActivateWindow3, ActivateWindow4, ActivateWindow5,
     ActivateWindow6, ActivateWindow7, ActivateWindow8, ActivateWindow9, CloseTarget, CloseWindow,
     CreateWindow, PANE_ACTION_MENU_HEIGHT, PANE_ACTION_MENU_WIDTH, PaneActionMenuCommand, PaneHost,
-    PaneHostEvent, TERMINAL_KEY_CONTEXT, render_pane_action_menu,
+    PaneHostEvent, TERMINAL_KEY_CONTEXT, TOP_CHROME_HEIGHT, WORKSPACE_SIDEBAR_WIDTH,
+    handle_top_chrome_mouse_down, render_pane_action_menu,
 };
 use crate::domain::{
     CloseWindowOutcome, SplitAxis, WindowCollection, WindowError, WindowId, ZoomState,
@@ -19,7 +21,7 @@ use crate::domain::{
 use crate::terminal::TerminalSessionFactory;
 use crate::theme::{ACTIVE_THEME, Color};
 
-const WINDOW_BAR_HEIGHT: f32 = 36.0;
+const WINDOW_BAR_HEIGHT: f32 = TOP_CHROME_HEIGHT;
 const WINDOW_BAR_DIVIDER_SIZE: f32 = 1.0;
 const WINDOW_ITEM_WIDTH: f32 = 132.0;
 const WINDOW_ITEM_MINIMUM_WIDTH: f32 = 84.0;
@@ -40,9 +42,18 @@ struct WindowMenuState {
     zoom_enabled: bool,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum WindowManagerEvent {
+    CloseWorkspaceRequested,
+    PresentationChanged,
+}
+
 pub(crate) struct WindowManager {
     windows: WindowCollection<Entity<PaneHost>>,
     session_factory: Rc<dyn TerminalSessionFactory>,
+    workspace_root: PathBuf,
+    active: bool,
+    sidebar_visible: bool,
     next_window_id: u64,
     window_menu: Option<WindowMenuState>,
     window_bar_scroll_handle: ScrollHandle,
@@ -55,16 +66,25 @@ impl WindowManager {
 
     pub(crate) fn new(
         session_factory: Rc<dyn TerminalSessionFactory>,
+        workspace_root: PathBuf,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         let initial_window_id = WindowId::new(1);
-        let initial_window =
-            Self::create_pane_host(initial_window_id, Rc::clone(&session_factory), window, cx);
+        let initial_window = Self::create_pane_host(
+            initial_window_id,
+            Rc::clone(&session_factory),
+            workspace_root.clone(),
+            window,
+            cx,
+        );
 
         Self {
             windows: WindowCollection::new(initial_window_id, initial_window),
             session_factory,
+            workspace_root,
+            active: true,
+            sidebar_visible: true,
             next_window_id: 2,
             window_menu: None,
             window_bar_scroll_handle: ScrollHandle::new(),
@@ -74,10 +94,12 @@ impl WindowManager {
     fn create_pane_host(
         window_id: WindowId,
         session_factory: Rc<dyn TerminalSessionFactory>,
+        workspace_root: PathBuf,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Entity<PaneHost> {
-        let pane_host = cx.new(|cx| PaneHost::new(window_id, session_factory, window, cx));
+        let pane_host =
+            cx.new(|cx| PaneHost::new(window_id, session_factory, workspace_root, window, cx));
         debug_assert_eq!(pane_host.read(cx).window_id(), window_id);
         cx.subscribe_in(
             &pane_host,
@@ -86,7 +108,10 @@ impl WindowManager {
                 PaneHostEvent::CloseWindowRequested { window_id } => {
                     manager.close_window(*window_id, window, cx);
                 }
-                PaneHostEvent::PresentationChanged { .. } => cx.notify(),
+                PaneHostEvent::PresentationChanged { .. } => {
+                    cx.emit(WindowManagerEvent::PresentationChanged);
+                    cx.notify();
+                }
             },
         )
         .detach();
@@ -94,7 +119,57 @@ impl WindowManager {
     }
 
     pub(crate) fn focus(&self, window: &mut Window, cx: &mut App) {
-        self.windows.active_window().read(cx).focus(window, cx);
+        if self.active {
+            self.windows.active_window().read(cx).focus(window, cx);
+        }
+    }
+
+    pub(crate) fn activate(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.activate_without_focus(cx);
+        self.focus(window, cx);
+    }
+
+    pub(crate) fn activate_without_focus(&mut self, cx: &mut Context<Self>) {
+        self.active = true;
+        self.windows
+            .active_window()
+            .update(cx, |pane_host, cx| pane_host.activate_without_focus(cx));
+    }
+
+    pub(crate) fn deactivate(&mut self, cx: &mut Context<Self>) {
+        self.active = false;
+        self.windows
+            .active_window()
+            .update(cx, |pane_host, cx| pane_host.deactivate(cx));
+    }
+
+    pub(crate) fn close_all(&self, cx: &mut App) {
+        for (_, pane_host) in self.windows.iter() {
+            pane_host.update(cx, |pane_host, cx| pane_host.close_all(cx));
+        }
+    }
+
+    pub(crate) fn set_sidebar_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
+        if self.sidebar_visible != visible {
+            self.sidebar_visible = visible;
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn sidebar_detail(&self, cx: &App) -> SharedString {
+        let title = self.windows.active_window().read(cx).window_title();
+        if self.windows.len() == 1 {
+            return title;
+        }
+        format!("{title} · {} Windows", self.windows.len()).into()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn focused_terminal_is_focused(&self, window: &Window, cx: &App) -> bool {
+        self.windows
+            .active_window()
+            .read(cx)
+            .focused_terminal_is_focused(window, cx)
     }
 
     fn allocate_window_id(&mut self) -> Option<WindowId> {
@@ -114,14 +189,19 @@ impl WindowManager {
         }
     }
 
-    fn create_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn create_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(window_id) = self.allocate_window_id() else {
             eprintln!("cannot create Window because the Window ID space is exhausted");
             return;
         };
         let previous_window = self.windows.active_window().clone();
-        let pane_host =
-            Self::create_pane_host(window_id, Rc::clone(&self.session_factory), window, cx);
+        let pane_host = Self::create_pane_host(
+            window_id,
+            Rc::clone(&self.session_factory),
+            self.workspace_root.clone(),
+            window,
+            cx,
+        );
         if let Err(error) = self.windows.create_window(window_id, || pane_host.clone()) {
             pane_host.update(cx, |pane_host, cx| pane_host.close_all(cx));
             Self::report_window_error("create", error);
@@ -129,9 +209,14 @@ impl WindowManager {
         }
 
         previous_window.update(cx, |pane_host, cx| pane_host.deactivate(cx));
-        pane_host.update(cx, |pane_host, cx| pane_host.activate(window, cx));
+        if self.active {
+            pane_host.update(cx, |pane_host, cx| pane_host.activate(window, cx));
+        } else {
+            pane_host.update(cx, |pane_host, cx| pane_host.deactivate(cx));
+        }
         self.window_menu = None;
         self.scroll_active_window_into_view();
+        cx.emit(WindowManagerEvent::PresentationChanged);
         cx.notify();
     }
 
@@ -155,9 +240,14 @@ impl WindowManager {
         if previous_window_id != window_id {
             previous_window.update(cx, |pane_host, cx| pane_host.deactivate(cx));
         }
-        next_window.update(cx, |pane_host, cx| pane_host.activate(window, cx));
+        if self.active {
+            next_window.update(cx, |pane_host, cx| pane_host.activate(window, cx));
+        } else {
+            next_window.update(cx, |pane_host, cx| pane_host.deactivate(cx));
+        }
         self.window_menu = None;
         self.scroll_active_window_into_view();
+        cx.emit(WindowManagerEvent::PresentationChanged);
         cx.notify();
         true
     }
@@ -186,16 +276,19 @@ impl WindowManager {
                 payload.update(cx, |pane_host, cx| pane_host.close_all(cx));
                 if was_active {
                     let active_window = self.windows.active_window().clone();
-                    active_window.update(cx, |pane_host, cx| pane_host.activate(window, cx));
+                    if self.active {
+                        active_window.update(cx, |pane_host, cx| pane_host.activate(window, cx));
+                    } else {
+                        active_window.update(cx, |pane_host, cx| pane_host.deactivate(cx));
+                    }
                 }
                 debug_assert_eq!(active_window_id, self.windows.active_window_id());
                 self.scroll_active_window_into_view();
+                cx.emit(WindowManagerEvent::PresentationChanged);
                 cx.notify();
             }
             Ok(CloseWindowOutcome::CloseOperatingSystemWindow) => {
-                let final_window = self.windows.active_window().clone();
-                final_window.update(cx, |pane_host, cx| pane_host.close_all(cx));
-                window.remove_window();
+                cx.emit(WindowManagerEvent::CloseWorkspaceRequested);
             }
             Err(error) => Self::report_window_error("close", error),
         }
@@ -422,6 +515,7 @@ impl WindowManager {
                 ACTIVE_THEME.text_muted
             }))
             .hover(|item| item.bg(gpui_color(ACTIVE_THEME.ghost_element_selected)))
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_click(move |_, window, cx| {
                 let _ = click_manager.update(cx, |manager, cx| {
                     manager.activate_window(window_id, window, cx);
@@ -548,13 +642,15 @@ impl WindowManager {
             .debug_selector(|| "window-bar".to_owned())
             .relative()
             .h(px(WINDOW_BAR_HEIGHT))
-            .w_full()
+            .min_w_0()
+            .flex_1()
             .flex_shrink_0()
             .flex()
             .flex_row()
             .items_center()
             .pr(px(WINDOW_CONTROL_SIZE + WINDOW_CONTROL_INSET * 2.0))
             .bg(gpui_color(ACTIVE_THEME.tab_bar_background))
+            .on_mouse_down(MouseButton::Left, handle_top_chrome_mouse_down)
             .child(
                 div()
                     .id("window-bar-divider")
@@ -580,6 +676,7 @@ impl WindowManager {
                     .cursor_pointer()
                     .occlude()
                     .hover(|button| button.bg(gpui_color(ACTIVE_THEME.ghost_element_selected)))
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .on_click(move |_, window, cx| {
                         let _ = create_manager.update(cx, |manager, cx| {
                             manager.create_window(window, cx);
@@ -607,6 +704,7 @@ impl WindowManager {
                     .cursor_pointer()
                     .occlude()
                     .hover(|button| button.bg(gpui_color(ACTIVE_THEME.ghost_element_selected)))
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .on_click(move |_, window, cx| {
                         let _ = menu_manager.update(cx, |manager, cx| {
                             manager.toggle_active_window_menu(window, cx);
@@ -692,13 +790,35 @@ impl Render for WindowManager {
             .on_action(cx.listener(Self::on_activate_window_8))
             .on_action(cx.listener(Self::on_activate_window_9))
             .on_action(cx.listener(Self::on_close_window))
-            .child(window_bar)
             .child(
                 div()
+                    .h(px(TOP_CHROME_HEIGHT))
+                    .w_full()
+                    .flex_shrink_0()
+                    .flex()
+                    .flex_row()
+                    .child(
+                        div()
+                            .id("window-manager-top-spacer")
+                            .debug_selector(|| "window-manager-top-spacer".to_owned())
+                            .w(px(WORKSPACE_SIDEBAR_WIDTH))
+                            .h_full()
+                            .flex_shrink_0()
+                            .bg(gpui_color(ACTIVE_THEME.tab_bar_background)),
+                    )
+                    .child(window_bar),
+            )
+            .child(
+                div()
+                    .id("window-manager-content")
+                    .debug_selector(|| "window-manager-content".to_owned())
                     .flex_1()
                     .min_w_0()
                     .min_h_0()
                     .overflow_hidden()
+                    .when(self.sidebar_visible, |body| {
+                        body.ml(px(WORKSPACE_SIDEBAR_WIDTH))
+                    })
                     .child(active_window),
             )
             .when_some(self.window_menu, |root, menu| {
@@ -706,6 +826,8 @@ impl Render for WindowManager {
             })
     }
 }
+
+impl EventEmitter<WindowManagerEvent> for WindowManager {}
 
 fn gpui_color(color: Color) -> gpui::Rgba {
     rgba(color.rgba_hex())
@@ -723,6 +845,7 @@ fn window_menu_button_contains(position: Point<Pixels>, content_width: Pixels) -
 #[cfg(test)]
 mod tests {
     use std::cell::{Cell, RefCell};
+    use std::path::Path;
     use std::sync::Arc;
 
     use gpui::{Modifiers, TestAppContext, VisualTestContext};
@@ -753,7 +876,11 @@ mod tests {
     }
 
     impl TerminalSessionFactory for WindowSessionFactory {
-        fn start(&self, _size: GridSize) -> Result<StartedTerminalSession, SessionError> {
+        fn start(
+            &self,
+            _size: GridSize,
+            _working_directory: &Path,
+        ) -> Result<StartedTerminalSession, SessionError> {
             let session_id = self.next_session_id.get();
             self.next_session_id.set(session_id + 1);
             let (sender, events) = async_channel::unbounded();
@@ -816,8 +943,14 @@ mod tests {
             records: records.clone(),
             next_session_id: Cell::new(1),
         });
-        let (manager, cx) =
-            cx.add_window_view(|window, cx| WindowManager::new(session_factory, window, cx));
+        let (manager, cx) = cx.add_window_view(|window, cx| {
+            WindowManager::new(
+                session_factory,
+                PathBuf::from("/tmp/termspace-window-manager-test"),
+                window,
+                cx,
+            )
+        });
         cx.update(|window, cx| {
             manager.update(cx, |manager, cx| manager.focus(window, cx));
         });
@@ -904,6 +1037,67 @@ mod tests {
                 gpui::size(inactive_item.size.width, px(WINDOW_BAR_DIVIDER_SIZE)),
                 divider.origin.y,
                 gpui::size(active_item.size.width, px(WINDOW_BAR_DIVIDER_SIZE)),
+            )
+        );
+    }
+
+    #[gpui::test]
+    fn window_bar_should_start_after_the_persistent_sidebar_chrome(cx: &mut TestAppContext) {
+        let (_manager, _records, cx) = window_manager(cx);
+        let root = cx
+            .debug_bounds("window-manager")
+            .expect("the Window manager was not rendered");
+        let spacer = cx
+            .debug_bounds("window-manager-top-spacer")
+            .expect("the persistent top-left spacer was not rendered");
+        let bar = cx
+            .debug_bounds("window-bar")
+            .expect("the Window bar was not rendered");
+
+        assert_eq!(
+            (spacer.origin, spacer.size, bar.origin.x),
+            (
+                root.origin,
+                gpui::size(px(WORKSPACE_SIDEBAR_WIDTH), px(TOP_CHROME_HEIGHT)),
+                root.origin.x + px(WORKSPACE_SIDEBAR_WIDTH),
+            )
+        );
+    }
+
+    #[gpui::test]
+    fn hiding_sidebar_should_expand_content_without_moving_the_window_bar(cx: &mut TestAppContext) {
+        let (manager, _records, cx) = window_manager(cx);
+        let root = cx
+            .debug_bounds("window-manager")
+            .expect("the Window manager was not rendered");
+        let visible_content = cx
+            .debug_bounds("window-manager-content")
+            .expect("the Window content was not rendered");
+        let visible_bar = cx
+            .debug_bounds("window-bar")
+            .expect("the Window bar was not rendered");
+
+        manager.update(cx, |manager, cx| manager.set_sidebar_visible(false, cx));
+        cx.run_until_parked();
+
+        let hidden_content = cx
+            .debug_bounds("window-manager-content")
+            .expect("the expanded Window content was not rendered");
+        let hidden_bar = cx
+            .debug_bounds("window-bar")
+            .expect("the Window bar was not rendered");
+        assert_eq!(
+            (
+                visible_content.origin.x,
+                hidden_content.origin.x,
+                visible_bar.origin.x,
+                hidden_bar.origin.x,
+            ),
+            (
+                root.origin.x + px(WORKSPACE_SIDEBAR_WIDTH),
+                root.origin.x,
+                root.origin.x + px(WORKSPACE_SIDEBAR_WIDTH),
+                root.origin.x + px(WORKSPACE_SIDEBAR_WIDTH),
             )
         );
     }
@@ -1334,6 +1528,42 @@ mod tests {
     }
 
     #[gpui::test]
+    fn inactive_workspace_active_window_exit_should_leave_its_fallback_deactivated_and_unfocused(
+        cx: &mut TestAppContext,
+    ) {
+        let (manager, records, cx) = window_manager(cx);
+        click("create-window-button", cx);
+        let active_sender = records
+            .event_senders
+            .borrow()
+            .get(1)
+            .cloned()
+            .expect("Window 2 session must have started");
+        cx.update(|window, cx| {
+            manager.update(cx, |manager, cx| manager.deactivate(cx));
+            window.blur();
+        });
+
+        active_sender
+            .try_send(SessionEvent::Exited("Shell exited".to_owned()))
+            .unwrap();
+        cx.run_until_parked();
+
+        let fallback = manager.read_with(cx, |manager, _| manager.windows.active_window().clone());
+        let state = cx.update(|window, cx| {
+            (
+                manager.read(cx).active,
+                manager.read(cx).windows.len(),
+                manager.read(cx).windows.active_window_id(),
+                fallback.read(cx).is_active(),
+                fallback.read(cx).focused_terminal_is_focused(window, cx),
+                records.dropped_session_ids.borrow().clone(),
+            )
+        });
+        assert_eq!(state, (false, 1, WindowId::new(1), false, false, vec![2]));
+    }
+
+    #[gpui::test]
     fn active_shell_exit_should_close_its_window_and_focus_the_neighbor(cx: &mut TestAppContext) {
         let (manager, records, cx) = window_manager(cx);
         click("create-window-button", cx);
@@ -1442,21 +1672,29 @@ mod tests {
     }
 
     #[gpui::test]
-    fn command_shift_w_should_close_the_final_operating_system_window(cx: &mut TestAppContext) {
-        let window_closed = Rc::new(Cell::new(false));
-        let window_closed_for_observer = Rc::clone(&window_closed);
-        let _window_closed_subscription =
-            cx.update(|cx| cx.on_window_closed(move |_| window_closed_for_observer.set(true)));
-        let (_manager, records, cx) = window_manager(cx);
+    fn command_shift_w_should_request_owning_workspace_close_for_the_final_window(
+        cx: &mut TestAppContext,
+    ) {
+        let (manager, records, cx) = window_manager(cx);
+        let close_requests = Rc::new(Cell::new(0));
+        let close_requests_for_subscription = Rc::clone(&close_requests);
+        manager.update(cx, |_, cx| {
+            cx.subscribe(&manager, move |_, _, event: &WindowManagerEvent, _| {
+                if matches!(event, WindowManagerEvent::CloseWorkspaceRequested) {
+                    close_requests_for_subscription.update(|count| count + 1);
+                }
+            })
+            .detach();
+        });
 
         cx.simulate_keystrokes("cmd-shift-w");
 
         assert_eq!(
             (
-                window_closed.get(),
+                close_requests.get(),
                 records.dropped_session_ids.borrow().clone()
             ),
-            (true, vec![1])
+            (1, Vec::new())
         );
     }
 

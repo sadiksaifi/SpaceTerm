@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
@@ -54,6 +55,7 @@ struct ScrollbarDrag {
 
 pub(crate) struct TerminalPane {
     session_factory: Rc<dyn TerminalSessionFactory>,
+    working_directory: PathBuf,
     session: Option<Box<dyn TerminalSessionHandle>>,
     session_start_attempted: bool,
     screen: Arc<ScreenSnapshot>,
@@ -79,6 +81,7 @@ pub(crate) struct TerminalPane {
 impl TerminalPane {
     pub(crate) fn new(
         session_factory: Rc<dyn TerminalSessionFactory>,
+        working_directory: PathBuf,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -90,6 +93,7 @@ impl TerminalPane {
 
         Self {
             session_factory,
+            working_directory,
             session: None,
             session_start_attempted: false,
             screen: ScreenSnapshot::empty(),
@@ -150,7 +154,7 @@ impl TerminalPane {
         }
         self.session_start_attempted = true;
 
-        match self.session_factory.start(size) {
+        match self.session_factory.start(size, &self.working_directory) {
             Ok(started) => {
                 self.session = Some(started.handle);
                 let receiver = started.events;

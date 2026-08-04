@@ -137,7 +137,11 @@ pub(crate) trait TerminalSessionHandle {
 }
 
 pub(crate) trait TerminalSessionFactory {
-    fn start(&self, size: GridSize) -> Result<StartedTerminalSession, SessionError>;
+    fn start(
+        &self,
+        size: GridSize,
+        working_directory: &Path,
+    ) -> Result<StartedTerminalSession, SessionError>;
 
     fn fallback_title(&self) -> String {
         "Terminal".to_owned()
@@ -148,8 +152,12 @@ pub(crate) trait TerminalSessionFactory {
 pub(crate) struct NativeTerminalSessionFactory;
 
 impl TerminalSessionFactory for NativeTerminalSessionFactory {
-    fn start(&self, size: GridSize) -> Result<StartedTerminalSession, SessionError> {
-        let (session, events) = TerminalSession::start(size)?;
+    fn start(
+        &self,
+        size: GridSize,
+        working_directory: &Path,
+    ) -> Result<StartedTerminalSession, SessionError> {
+        let (session, events) = TerminalSession::start(size, working_directory)?;
         Ok(StartedTerminalSession {
             handle: Box::new(session),
             events,
@@ -176,8 +184,9 @@ pub(crate) struct TerminalSession {
 impl TerminalSession {
     pub(crate) fn start(
         size: GridSize,
+        working_directory: &Path,
     ) -> Result<(Self, async_channel::Receiver<SessionEvent>), SessionError> {
-        let (pty, terminator) = spawn_user_shell(size.pty_size())?;
+        let (pty, terminator) = spawn_user_shell(size.pty_size(), working_directory)?;
         let (command_tx, command_rx) = mpsc::channel();
         // Two slots retain the latest screen and a final lifecycle event without
         // allowing sustained PTY output to build an unbounded UI backlog.
@@ -832,7 +841,9 @@ mod tests {
         let StartedTerminalSession {
             handle: session,
             events,
-        } = NativeTerminalSessionFactory.start(size).unwrap();
+        } = NativeTerminalSessionFactory
+            .start(size, &std::env::current_dir().unwrap())
+            .unwrap();
 
         // The command renders a red X. The echoed command contains an X too, but
         // only the shell's output passes through the SGR sequence and becomes red.
@@ -875,7 +886,9 @@ mod tests {
         let StartedTerminalSession {
             handle: session,
             events,
-        } = NativeTerminalSessionFactory.start(size).unwrap();
+        } = NativeTerminalSessionFactory
+            .start(size, &std::env::current_dir().unwrap())
+            .unwrap();
 
         session.paste("exit\n".to_owned());
 

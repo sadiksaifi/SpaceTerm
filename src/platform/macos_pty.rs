@@ -1,5 +1,6 @@
 use std::env;
 use std::io::{self, Read, Write};
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -171,7 +172,10 @@ pub(crate) enum PtyError {
     TakeWriter(#[source] AnyError),
 }
 
-pub(crate) fn spawn_user_shell(size: PtySize) -> Result<(SpawnedPty, PtyTerminator), PtyError> {
+pub(crate) fn spawn_user_shell(
+    size: PtySize,
+    working_directory: &Path,
+) -> Result<(SpawnedPty, PtyTerminator), PtyError> {
     let pty_system = native_pty_system();
     let pair = pty_system.openpty(size).map_err(PtyError::Open)?;
 
@@ -184,9 +188,7 @@ pub(crate) fn spawn_user_shell(size: PtySize) -> Result<(SpawnedPty, PtyTerminat
     command.env("TERM_PROGRAM", "Termspace");
     command.env("TERM_PROGRAM_VERSION", env!("CARGO_PKG_VERSION"));
 
-    if let Ok(cwd) = env::current_dir() {
-        command.cwd(cwd);
-    }
+    command.cwd(working_directory);
 
     let mut child = pair
         .slave

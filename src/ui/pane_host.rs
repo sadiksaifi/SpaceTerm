@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 use std::rc::Rc;
 
 use gpui::prelude::*;
@@ -47,6 +48,7 @@ pub(crate) enum PaneHostEvent {
 pub(crate) struct PaneHost {
     terminal_window: TerminalWindow<Entity<TerminalPane>>,
     session_factory: Rc<dyn TerminalSessionFactory>,
+    workspace_root: PathBuf,
     next_pane_id: u64,
     next_split_id: u64,
     pane_bounds: BTreeMap<PaneId, Bounds<Pixels>>,
@@ -60,6 +62,7 @@ impl PaneHost {
     pub(crate) fn new(
         window_id: WindowId,
         session_factory: Rc<dyn TerminalSessionFactory>,
+        workspace_root: PathBuf,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -70,8 +73,13 @@ impl PaneHost {
             }
         };
         let initial_pane_id = PaneId::new(1);
-        let initial_terminal =
-            Self::create_terminal(initial_pane_id, Rc::clone(&session_factory), window, cx);
+        let initial_terminal = Self::create_terminal(
+            initial_pane_id,
+            Rc::clone(&session_factory),
+            workspace_root.clone(),
+            window,
+            cx,
+        );
         let initial_title = initial_terminal.read(cx).title();
 
         Self {
@@ -82,6 +90,7 @@ impl PaneHost {
                 minimum_pane_size,
             ),
             session_factory,
+            workspace_root,
             next_pane_id: 2,
             next_split_id: 1,
             pane_bounds: BTreeMap::new(),
@@ -95,10 +104,12 @@ impl PaneHost {
     fn create_terminal(
         pane_id: PaneId,
         session_factory: Rc<dyn TerminalSessionFactory>,
+        working_directory: PathBuf,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Entity<TerminalPane> {
-        let terminal = cx.new(|cx| TerminalPane::new(session_factory, window, cx));
+        let terminal =
+            cx.new(|cx| TerminalPane::new(session_factory, working_directory, window, cx));
         cx.subscribe_in(
             &terminal,
             window,
@@ -152,10 +163,14 @@ impl PaneHost {
     }
 
     pub(crate) fn activate(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.activate_without_focus(cx);
+        self.focus(window, cx);
+    }
+
+    pub(crate) fn activate_without_focus(&mut self, cx: &mut Context<Self>) {
         self.active = true;
         self.menu_pane_id = None;
         cx.notify();
-        self.focus(window, cx);
     }
 
     pub(crate) fn deactivate(&mut self, cx: &mut Context<Self>) {
@@ -247,6 +262,7 @@ impl PaneHost {
             return;
         };
         let session_factory = Rc::clone(&self.session_factory);
+        let workspace_root = self.workspace_root.clone();
         let result = self.terminal_window.split_pane(
             target_pane_id,
             new_pane_id,
@@ -254,7 +270,7 @@ impl PaneHost {
             axis,
             target_size,
             DIVIDER_SIZE,
-            || Self::create_terminal(new_pane_id, session_factory, window, cx),
+            || Self::create_terminal(new_pane_id, session_factory, workspace_root, window, cx),
         );
 
         match result {
@@ -886,6 +902,7 @@ fn gpui_color(color: Color) -> gpui::Rgba {
 #[cfg(test)]
 mod tests {
     use std::cell::{Cell, RefCell};
+    use std::path::{Path, PathBuf};
     use std::sync::Arc;
 
     use gpui::{Modifiers, TestAppContext, VisualTestContext, bounds, point, px, size};
@@ -900,12 +917,39 @@ mod tests {
         pointer_count: Rc<Cell<usize>>,
     }
 
+    struct WorkingDirectorySessionFactory {
+        started_in: Rc<RefCell<Vec<PathBuf>>>,
+    }
+
     impl TerminalSessionFactory for RecordingSessionFactory {
-        fn start(&self, _size: GridSize) -> Result<StartedTerminalSession, SessionError> {
+        fn start(
+            &self,
+            _size: GridSize,
+            _working_directory: &Path,
+        ) -> Result<StartedTerminalSession, SessionError> {
             let (_, events) = async_channel::unbounded();
             Ok(StartedTerminalSession {
                 handle: Box::new(RecordingSessionHandle {
                     pointer_count: Rc::clone(&self.pointer_count),
+                }),
+                events,
+            })
+        }
+    }
+
+    impl TerminalSessionFactory for WorkingDirectorySessionFactory {
+        fn start(
+            &self,
+            _size: GridSize,
+            working_directory: &Path,
+        ) -> Result<StartedTerminalSession, SessionError> {
+            self.started_in
+                .borrow_mut()
+                .push(working_directory.to_path_buf());
+            let (_, events) = async_channel::unbounded();
+            Ok(StartedTerminalSession {
+                handle: Box::new(RecordingSessionHandle {
+                    pointer_count: Rc::new(Cell::new(0)),
                 }),
                 events,
             })
@@ -932,7 +976,11 @@ mod tests {
     }
 
     impl TerminalSessionFactory for TitleSessionFactory {
-        fn start(&self, _size: GridSize) -> Result<StartedTerminalSession, SessionError> {
+        fn start(
+            &self,
+            _size: GridSize,
+            _working_directory: &Path,
+        ) -> Result<StartedTerminalSession, SessionError> {
             let (sender, events) = async_channel::unbounded();
             self.event_senders.borrow_mut().push(sender);
             Ok(StartedTerminalSession {
@@ -949,7 +997,11 @@ mod tests {
     }
 
     impl TerminalSessionFactory for LifecycleSessionFactory {
-        fn start(&self, _size: GridSize) -> Result<StartedTerminalSession, SessionError> {
+        fn start(
+            &self,
+            _size: GridSize,
+            _working_directory: &Path,
+        ) -> Result<StartedTerminalSession, SessionError> {
             let session_id = self.next_session_id.get();
             self.next_session_id.set(session_id + 1);
             let (sender, events) = async_channel::unbounded();
@@ -1035,7 +1087,13 @@ mod tests {
             pointer_count: Rc::new(Cell::new(0)),
         });
         let (host, cx) = cx.add_window_view(|window, cx| {
-            PaneHost::new(WindowId::new(1), session_factory, window, cx)
+            PaneHost::new(
+                WindowId::new(1),
+                session_factory,
+                test_workspace_root(),
+                window,
+                cx,
+            )
         });
 
         split_test_pane(&host, PaneId::new(1), SplitAxis::Horizontal, cx);
@@ -1050,6 +1108,10 @@ mod tests {
         cx.run_until_parked();
 
         (host, cx)
+    }
+
+    fn test_workspace_root() -> PathBuf {
+        PathBuf::from("/tmp/termspace-test-workspace")
     }
 
     fn focused_panes_after_shortcuts<const N: usize>(
@@ -1069,10 +1131,47 @@ mod tests {
             pointer_count: Rc::new(Cell::new(0)),
         });
         let (_host, cx) = cx.add_window_view(|window, cx| {
-            PaneHost::new(WindowId::new(1), session_factory, window, cx)
+            PaneHost::new(
+                WindowId::new(1),
+                session_factory,
+                test_workspace_root(),
+                window,
+                cx,
+            )
         });
 
         assert!(cx.debug_bounds("pane-header-1-focused").is_none());
+    }
+
+    #[gpui::test]
+    fn initial_and_split_panes_should_start_in_the_workspace_root(cx: &mut TestAppContext) {
+        let workspace_root = PathBuf::from("/tmp/termspace-explicit-workspace-root");
+        let started_in = Rc::new(RefCell::new(Vec::new()));
+        let session_factory: Rc<dyn TerminalSessionFactory> =
+            Rc::new(WorkingDirectorySessionFactory {
+                started_in: Rc::clone(&started_in),
+            });
+        let (host, cx) = cx.add_window_view(|window, cx| {
+            PaneHost::new(
+                WindowId::new(1),
+                session_factory,
+                workspace_root.clone(),
+                window,
+                cx,
+            )
+        });
+
+        cx.update(|window, cx| {
+            host.update(cx, |host, cx| {
+                host.split_focused(SplitAxis::Horizontal, window, cx);
+            });
+        });
+        cx.run_until_parked();
+
+        assert_eq!(
+            started_in.borrow().as_slice(),
+            [workspace_root.as_path(), workspace_root.as_path()]
+        );
     }
 
     #[gpui::test]
@@ -1081,7 +1180,13 @@ mod tests {
             pointer_count: Rc::new(Cell::new(0)),
         });
         let (host, cx) = cx.add_window_view(|window, cx| {
-            PaneHost::new(WindowId::new(1), session_factory, window, cx)
+            PaneHost::new(
+                WindowId::new(1),
+                session_factory,
+                test_workspace_root(),
+                window,
+                cx,
+            )
         });
 
         cx.update(|window, cx| {
@@ -1110,7 +1215,13 @@ mod tests {
             pointer_count: Rc::new(Cell::new(0)),
         });
         let (host, cx) = cx.add_window_view(|window, cx| {
-            PaneHost::new(WindowId::new(1), session_factory, window, cx)
+            PaneHost::new(
+                WindowId::new(1),
+                session_factory,
+                test_workspace_root(),
+                window,
+                cx,
+            )
         });
 
         cx.update(|window, cx| {
@@ -1184,7 +1295,13 @@ mod tests {
             event_senders: Rc::clone(&event_senders),
         });
         let (host, cx) = cx.add_window_view(|window, cx| {
-            PaneHost::new(WindowId::new(1), session_factory, window, cx)
+            PaneHost::new(
+                WindowId::new(1),
+                session_factory,
+                test_workspace_root(),
+                window,
+                cx,
+            )
         });
 
         cx.update(|window, cx| {
@@ -1228,7 +1345,13 @@ mod tests {
             next_session_id: Cell::new(1),
         });
         let (host, cx) = cx.add_window_view(|window, cx| {
-            PaneHost::new(WindowId::new(1), session_factory, window, cx)
+            PaneHost::new(
+                WindowId::new(1),
+                session_factory,
+                test_workspace_root(),
+                window,
+                cx,
+            )
         });
 
         cx.update(|window, cx| {
@@ -1268,7 +1391,13 @@ mod tests {
             next_session_id: Cell::new(1),
         });
         let (host, cx) = cx.add_window_view(|window, cx| {
-            PaneHost::new(WindowId::new(1), session_factory, window, cx)
+            PaneHost::new(
+                WindowId::new(1),
+                session_factory,
+                test_workspace_root(),
+                window,
+                cx,
+            )
         });
         let close_requests_for_subscription = Rc::clone(&close_requests);
         host.update(cx, |_, cx| {
@@ -1303,7 +1432,13 @@ mod tests {
             pointer_count: Rc::clone(&pointer_count),
         });
         let (host, cx) = cx.add_window_view(|window, cx| {
-            PaneHost::new(WindowId::new(1), session_factory, window, cx)
+            PaneHost::new(
+                WindowId::new(1),
+                session_factory,
+                test_workspace_root(),
+                window,
+                cx,
+            )
         });
 
         cx.update(|window, cx| {
@@ -1337,7 +1472,13 @@ mod tests {
             pointer_count: Rc::clone(&pointer_count),
         });
         let (host, cx) = cx.add_window_view(|window, cx| {
-            PaneHost::new(WindowId::new(1), session_factory, window, cx)
+            PaneHost::new(
+                WindowId::new(1),
+                session_factory,
+                test_workspace_root(),
+                window,
+                cx,
+            )
         });
 
         cx.update(|window, cx| {
@@ -1389,7 +1530,13 @@ mod tests {
             pointer_count: Rc::clone(&pointer_count),
         });
         let (host, cx) = cx.add_window_view(|window, cx| {
-            PaneHost::new(WindowId::new(1), session_factory, window, cx)
+            PaneHost::new(
+                WindowId::new(1),
+                session_factory,
+                test_workspace_root(),
+                window,
+                cx,
+            )
         });
 
         cx.update(|window, cx| {
@@ -1426,7 +1573,13 @@ mod tests {
             pointer_count: Rc::clone(&pointer_count),
         });
         let (host, cx) = cx.add_window_view(|window, cx| {
-            PaneHost::new(WindowId::new(1), session_factory, window, cx)
+            PaneHost::new(
+                WindowId::new(1),
+                session_factory,
+                test_workspace_root(),
+                window,
+                cx,
+            )
         });
 
         cx.update(|window, cx| {
@@ -1490,7 +1643,13 @@ mod tests {
             pointer_count: Rc::clone(&pointer_count),
         });
         let (host, cx) = cx.add_window_view(|window, cx| {
-            PaneHost::new(WindowId::new(1), session_factory, window, cx)
+            PaneHost::new(
+                WindowId::new(1),
+                session_factory,
+                test_workspace_root(),
+                window,
+                cx,
+            )
         });
 
         cx.update(|window, cx| {
