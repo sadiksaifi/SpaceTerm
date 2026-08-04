@@ -10,7 +10,9 @@ use gpui::{
     ScrollWheelEvent, SharedString, Task, TextRun, Window, canvas, div, font, px, rgba,
 };
 
-use super::terminal_element::{TerminalGridCache, TerminalGridElement};
+use super::terminal_element::{
+    TerminalGridCache, TerminalGridElement, terminal_grid_content_bounds,
+};
 use super::{CopySelection, PasteClipboard, TERMINAL_KEY_CONTEXT};
 use crate::terminal::{
     GridSize, InputModifiers, KeyCode, KeyInput, PointerButton, PointerInput, PointerPhase,
@@ -21,7 +23,8 @@ use crate::theme::{ACTIVE_THEME, Color};
 
 const FONT_SIZE: f32 = 14.0;
 const LINE_HEIGHT: f32 = 20.0;
-const PADDING: f32 = 12.0;
+const HORIZONTAL_PADDING: f32 = 4.0;
+const VERTICAL_PADDING: f32 = 8.0;
 const MIN_COLS: u16 = 2;
 const MIN_ROWS: u16 = 2;
 const SCROLLBAR_WIDTH: f32 = 5.0;
@@ -137,8 +140,12 @@ impl TerminalPane {
     }
 
     fn update_grid_bounds(&mut self, bounds: Bounds<Pixels>, cx: &mut Context<Self>) {
-        self.grid_bounds = Some(bounds);
         let size = grid_size(bounds, self.cell_width);
+        self.grid_bounds = Some(terminal_grid_content_bounds(
+            bounds,
+            usize::from(size.cols),
+            self.cell_width,
+        ));
         if self.last_grid_size == Some(size) {
             return;
         }
@@ -532,7 +539,8 @@ impl Render for TerminalPane {
             .size_full()
             .overflow_hidden()
             .bg(background)
-            .p(px(PADDING))
+            .px(px(HORIZONTAL_PADDING))
+            .py(px(VERTICAL_PADDING))
             .cursor_text()
             .key_context(TERMINAL_KEY_CONTEXT)
             .track_focus(&self.focus_handle)
@@ -569,7 +577,7 @@ impl Render for TerminalPane {
                         .group("terminal-scrollbar-thumb")
                         .id("terminal-scrollbar-thumb-hitbox")
                         .absolute()
-                        .top(px(PADDING + scrollbar.top_px))
+                        .top(px(VERTICAL_PADDING + scrollbar.top_px))
                         .right_0()
                         .w(px(SCROLLBAR_HITBOX_WIDTH))
                         .h(px(scrollbar.height_px))
@@ -655,8 +663,8 @@ impl Render for TerminalPane {
                 root.child(
                     div()
                         .absolute()
-                        .right(px(PADDING))
-                        .bottom(px(PADDING))
+                        .right(px(HORIZONTAL_PADDING))
+                        .bottom(px(VERTICAL_PADDING))
                         .max_w(px(520.0))
                         .px(px(10.0))
                         .py(px(6.0))

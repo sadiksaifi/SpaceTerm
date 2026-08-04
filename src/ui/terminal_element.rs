@@ -3,7 +3,7 @@ use std::sync::Arc;
 use gpui::{
     App, Bounds, ContentMask, Element, ElementId, FontFeatures, GlobalElementId,
     InspectorElementId, IntoElement, LayoutId, PaintQuad, Pixels, ShapedLine, SharedString, Style,
-    TextRun, Window, fill, font, point, relative, rgba, size,
+    TextRun, Window, fill, font, point, px, relative, rgba, size,
 };
 
 use crate::terminal::{CellSnapshot, RowSnapshot, ScreenSnapshot};
@@ -72,6 +72,7 @@ impl TerminalGridCache {
 pub(crate) struct TerminalGridElement {
     background: Color,
     rows: Arc<[Arc<RowPaintInput>]>,
+    columns: usize,
     font_size: Pixels,
     line_height: Pixels,
     cell_width: Pixels,
@@ -89,6 +90,7 @@ impl TerminalGridElement {
         Self {
             background: screen.background,
             rows: cache.prepare(&screen.rows, screen.background, font_family),
+            columns: screen.rows.first().map_or(0, |row| row.len()),
             font_size,
             line_height,
             cell_width,
@@ -157,6 +159,7 @@ impl Element for TerminalGridElement {
             as usize)
             .min(self.rows.len());
         let mut prepared_rows = Vec::with_capacity(visible_rows);
+        let grid_left = terminal_grid_content_bounds(bounds, self.columns, self.cell_width).left();
 
         for (row_index, row) in self.rows.iter().take(visible_rows).enumerate() {
             let row_top = bounds.top() + self.line_height * row_index as f32;
@@ -170,10 +173,7 @@ impl Element for TerminalGridElement {
                         &fragment.runs,
                         fragment.force_cell_width.then_some(self.cell_width),
                     ),
-                    origin: point(
-                        bounds.left() + self.cell_width * fragment.start as f32,
-                        row_top,
-                    ),
+                    origin: point(grid_left + self.cell_width * fragment.start as f32, row_top),
                 })
                 .collect();
             let backgrounds = row
@@ -183,7 +183,7 @@ impl Element for TerminalGridElement {
                 .map(|span| {
                     fill(
                         Bounds::new(
-                            point(bounds.left() + self.cell_width * span.start as f32, row_top),
+                            point(grid_left + self.cell_width * span.start as f32, row_top),
                             size(self.cell_width * span.len as f32, self.line_height),
                         ),
                         gpui_color(span.color),
@@ -227,6 +227,23 @@ impl Element for TerminalGridElement {
             }
         });
     }
+}
+
+pub(super) fn terminal_grid_content_bounds(
+    bounds: Bounds<Pixels>,
+    columns: usize,
+    cell_width: Pixels,
+) -> Bounds<Pixels> {
+    if columns == 0 {
+        return bounds;
+    }
+
+    let grid_width = (cell_width * columns as f32).min(bounds.size.width);
+    let horizontal_remainder = (bounds.size.width - grid_width).max(px(0.0));
+    Bounds::new(
+        point(bounds.left() + horizontal_remainder / 2.0, bounds.top()),
+        size(grid_width, bounds.size.height),
+    )
 }
 
 struct RowPaintInput {
@@ -419,6 +436,21 @@ mod tests {
             selected: false,
             spacer_tail: false,
         }
+    }
+
+    #[test]
+    fn terminal_grid_content_bounds_should_balance_horizontal_remainder() {
+        let outer = Bounds::new(point(px(10.0), px(20.0)), size(px(101.0), px(40.0)));
+        let content = terminal_grid_content_bounds(outer, 10, px(9.0));
+
+        assert_eq!(
+            (
+                content.origin.x - outer.origin.x,
+                outer.right() - content.right(),
+                content.size.width,
+            ),
+            (px(5.5), px(5.5), px(90.0))
+        );
     }
 
     #[test]
