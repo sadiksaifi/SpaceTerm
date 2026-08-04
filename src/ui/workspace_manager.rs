@@ -134,7 +134,7 @@ impl WorkspaceManager {
         Self {
             workspaces: WorkspaceCollection::new(
                 initial_workspace_id,
-                default_workspace_name(initial_workspace_id),
+                default_workspace_name(1),
                 home_directory.clone(),
                 initial_window_manager,
             ),
@@ -375,6 +375,7 @@ impl WorkspaceManager {
             eprintln!("cannot create Workspace because the Workspace ID space is exhausted");
             return;
         };
+        let workspace_name = next_default_workspace_name(&self.workspaces, None);
         let previous_manager = self.workspaces.active_workspace().payload().clone();
         let next_manager = Self::create_window_manager(
             workspace_id,
@@ -387,7 +388,7 @@ impl WorkspaceManager {
         );
         let result = self.workspaces.create_workspace(
             workspace_id,
-            default_workspace_name(workspace_id),
+            workspace_name,
             self.home_directory.clone(),
             || next_manager.clone(),
         );
@@ -472,6 +473,7 @@ impl WorkspaceManager {
             WorkspaceId::new(0)
         };
         let mut replacement = is_final.then(|| {
+            let name = next_default_workspace_name(&self.workspaces, Some(workspace_id));
             let manager = Self::create_window_manager(
                 replacement_workspace_id,
                 Rc::clone(&self.session_factory),
@@ -481,11 +483,7 @@ impl WorkspaceManager {
                 window,
                 cx,
             );
-            (
-                default_workspace_name(replacement_workspace_id),
-                self.home_directory.clone(),
-                manager,
-            )
+            (name, self.home_directory.clone(), manager)
         });
 
         let outcome =
@@ -1500,8 +1498,25 @@ fn workspace_scrollbar_offset_for_pointer(
     Some(thumb_top / movable_height * maximum_offset_px)
 }
 
-fn default_workspace_name(workspace_id: WorkspaceId) -> String {
-    format!("Workspace {}", workspace_id.get())
+fn default_workspace_name(workspace_number: usize) -> String {
+    format!("Workspace {workspace_number}")
+}
+
+fn next_default_workspace_name<T>(
+    workspaces: &WorkspaceCollection<T>,
+    excluded_workspace_id: Option<WorkspaceId>,
+) -> String {
+    for workspace_number in 1..=workspaces.len().saturating_add(1) {
+        let candidate = default_workspace_name(workspace_number);
+        let is_available = workspaces.iter().all(|workspace| {
+            Some(workspace.id()) == excluded_workspace_id || workspace.name() != candidate
+        });
+        if is_available {
+            return candidate;
+        }
+    }
+
+    unreachable!("one of len + 1 default Workspace names must be available")
 }
 
 fn gpui_color(color: Color) -> gpui::Rgba {
@@ -2359,11 +2374,34 @@ mod tests {
             (
                 manager.workspaces.len(),
                 manager.workspaces.active_workspace_id(),
+                manager.workspaces.active_workspace().name().to_owned(),
                 records.dropped_session_ids.borrow().clone(),
                 records.event_senders.borrow().len(),
             )
         });
-        assert_eq!(state, (1, WorkspaceId::new(2), vec![1], 2));
+        assert_eq!(
+            state,
+            (1, WorkspaceId::new(2), "Workspace 1".to_owned(), vec![1], 2,)
+        );
+    }
+
+    #[gpui::test]
+    fn repeated_command_w_should_keep_the_replacement_workspace_number_stable(
+        cx: &mut TestAppContext,
+    ) {
+        let (manager, _records, cx) = workspace_manager(cx);
+        cx.simulate_keystrokes("cmd-shift-e");
+        cx.run_until_parked();
+
+        for _ in 0..3 {
+            cx.simulate_keystrokes("cmd-w");
+            cx.run_until_parked();
+        }
+
+        let name = manager.read_with(cx, |manager, _| {
+            manager.workspaces.active_workspace().name().to_owned()
+        });
+        assert_eq!(name, "Workspace 1");
     }
 
     #[gpui::test]
