@@ -863,4 +863,40 @@ mod tests {
             "did not receive colored output from the real shell"
         );
     }
+
+    #[test]
+    fn real_shell_exit_command_emits_an_exited_event() {
+        let size = GridSize {
+            cols: 80,
+            rows: 24,
+            cell_width_px: 8,
+            cell_height_px: 20,
+        };
+        let StartedTerminalSession {
+            handle: session,
+            events,
+        } = NativeTerminalSessionFactory.start(size).unwrap();
+
+        session.paste("exit\n".to_owned());
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut exit_status = None;
+        while Instant::now() < deadline && exit_status.is_none() {
+            match events.try_recv() {
+                Ok(SessionEvent::Screen(_)) => {}
+                Ok(SessionEvent::Exited(status)) => exit_status = Some(status),
+                Ok(SessionEvent::Error(error)) => panic!("terminal session failed: {error}"),
+                Err(async_channel::TryRecvError::Empty) => {
+                    thread::sleep(Duration::from_millis(10));
+                }
+                Err(async_channel::TryRecvError::Closed) => break,
+            }
+        }
+
+        drop(session);
+        assert!(
+            exit_status.is_some(),
+            "shell exit did not produce a terminal lifecycle event"
+        );
+    }
 }

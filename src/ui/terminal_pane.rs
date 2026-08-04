@@ -34,6 +34,7 @@ const MAX_PANE_TITLE_CHARACTERS: usize = 256;
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum TerminalPaneEvent {
     TitleChanged(SharedString),
+    Exited,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -196,7 +197,12 @@ impl TerminalPane {
                 }
                 self.screen = screen;
             }
-            SessionEvent::Exited(status) | SessionEvent::Error(status) => {
+            SessionEvent::Exited(status) => {
+                eprintln!("{status}");
+                self.status = Some(status);
+                cx.emit(TerminalPaneEvent::Exited);
+            }
+            SessionEvent::Error(status) => {
                 eprintln!("{status}");
                 self.status = Some(status);
             }
@@ -959,6 +965,26 @@ mod tests {
                 modifiers: InputModifiers {
                     control: true,
                     alt: true,
+                    ..InputModifiers::default()
+                },
+            })
+        );
+    }
+
+    #[test]
+    fn control_d_should_be_sent_to_the_shell_as_eof_input() {
+        let modifiers = Modifiers {
+            control: true,
+            ..Modifiers::default()
+        };
+
+        assert_eq!(
+            encode_key(&event("d", Some("d"), modifiers)),
+            Some(KeyInput {
+                code: KeyCode::Character('d'),
+                text: Some("d".to_owned()),
+                modifiers: InputModifiers {
+                    control: true,
                     ..InputModifiers::default()
                 },
             })

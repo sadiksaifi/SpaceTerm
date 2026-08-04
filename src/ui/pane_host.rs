@@ -125,12 +125,15 @@ impl PaneHost {
         cx: &mut Context<Self>,
     ) -> Entity<TerminalPane> {
         let terminal = cx.new(|cx| TerminalPane::new(session_factory, window, cx));
-        cx.subscribe(
+        cx.subscribe_in(
             &terminal,
-            move |host, _terminal, event: &TerminalPaneEvent, cx| {
-                let TerminalPaneEvent::TitleChanged(title) = event;
-                host.pane_titles.insert(pane_id, title.clone());
-                cx.notify();
+            window,
+            move |host, _terminal, event: &TerminalPaneEvent, window, cx| match event {
+                TerminalPaneEvent::TitleChanged(title) => {
+                    host.pane_titles.insert(pane_id, title.clone());
+                    cx.notify();
+                }
+                TerminalPaneEvent::Exited => host.close_pane(pane_id, window, cx),
             },
         )
         .detach();
@@ -1003,6 +1006,17 @@ mod tests {
         event_senders: Rc<RefCell<Vec<async_channel::Sender<SessionEvent>>>>,
     }
 
+    struct LifecycleSessionFactory {
+        event_senders: Rc<RefCell<Vec<async_channel::Sender<SessionEvent>>>>,
+        dropped_session_ids: Rc<RefCell<Vec<usize>>>,
+        next_session_id: Cell<usize>,
+    }
+
+    struct LifecycleSessionHandle {
+        session_id: usize,
+        dropped_session_ids: Rc<RefCell<Vec<usize>>>,
+    }
+
     impl TerminalSessionFactory for TitleSessionFactory {
         fn start(&self, _size: GridSize) -> Result<StartedTerminalSession, SessionError> {
             let (sender, events) = async_channel::unbounded();
@@ -1017,6 +1031,49 @@ mod tests {
 
         fn fallback_title(&self) -> String {
             "zsh".to_owned()
+        }
+    }
+
+    impl TerminalSessionFactory for LifecycleSessionFactory {
+        fn start(&self, _size: GridSize) -> Result<StartedTerminalSession, SessionError> {
+            let session_id = self.next_session_id.get();
+            self.next_session_id.set(session_id + 1);
+            let (sender, events) = async_channel::unbounded();
+            self.event_senders.borrow_mut().push(sender);
+            Ok(StartedTerminalSession {
+                handle: Box::new(LifecycleSessionHandle {
+                    session_id,
+                    dropped_session_ids: Rc::clone(&self.dropped_session_ids),
+                }),
+                events,
+            })
+        }
+    }
+
+    impl Drop for LifecycleSessionHandle {
+        fn drop(&mut self) {
+            self.dropped_session_ids.borrow_mut().push(self.session_id);
+        }
+    }
+
+    impl TerminalSessionHandle for LifecycleSessionHandle {
+        fn key(&self, _input: KeyInput) {}
+
+        fn resize(&self, _size: GridSize) {}
+
+        fn pointer(&self, _input: PointerInput) {}
+
+        fn wheel(&self, _input: WheelInput) {}
+
+        fn scroll_to(&self, _offset_rows: u64) {}
+
+        fn paste(&self, _text: String) {}
+
+        fn request_selection_text(
+            &self,
+        ) -> async_channel::Receiver<Result<Option<String>, String>> {
+            let (_, receiver) = async_channel::bounded(1);
+            receiver
         }
     }
 
@@ -1237,6 +1294,78 @@ mod tests {
         assert_eq!(
             title.as_ref().map(|title| title.as_ref()),
             Some("Claude Code")
+        );
+    }
+
+    #[gpui::test]
+    fn exited_terminal_session_should_close_its_pane_and_focus_the_neighbor(
+        cx: &mut TestAppContext,
+    ) {
+        let event_senders = Rc::new(RefCell::new(Vec::new()));
+        let dropped_session_ids = Rc::new(RefCell::new(Vec::new()));
+        let session_factory: Rc<dyn TerminalSessionFactory> = Rc::new(LifecycleSessionFactory {
+            event_senders: Rc::clone(&event_senders),
+            dropped_session_ids: Rc::clone(&dropped_session_ids),
+            next_session_id: Cell::new(1),
+        });
+        let (host, cx) =
+            cx.add_window_view(|window, cx| PaneHost::new(session_factory, window, cx));
+
+        cx.update(|window, cx| {
+            host.update(cx, |host, cx| {
+                host.split_focused(SplitAxis::Horizontal, window, cx);
+            });
+        });
+        cx.run_until_parked();
+        let sender = event_senders
+            .borrow()
+            .get(1)
+            .cloned()
+            .expect("the split Pane session was not started");
+        sender
+            .try_send(SessionEvent::Exited("Shell exited".to_owned()))
+            .unwrap();
+        cx.run_until_parked();
+
+        let state = host.read_with(cx, |host, _| {
+            (
+                host.terminal_window.pane_count(),
+                host.terminal_window.focused_pane_id(),
+                dropped_session_ids.borrow().clone(),
+            )
+        });
+        assert_eq!(state, (1, PaneId::new(1), vec![2]));
+    }
+
+    #[gpui::test]
+    fn exited_last_terminal_session_should_close_the_window(cx: &mut TestAppContext) {
+        let window_closed = Rc::new(Cell::new(false));
+        let window_closed_for_observer = Rc::clone(&window_closed);
+        let _window_closed_subscription =
+            cx.update(|cx| cx.on_window_closed(move |_| window_closed_for_observer.set(true)));
+        let event_senders = Rc::new(RefCell::new(Vec::new()));
+        let dropped_session_ids = Rc::new(RefCell::new(Vec::new()));
+        let session_factory: Rc<dyn TerminalSessionFactory> = Rc::new(LifecycleSessionFactory {
+            event_senders: Rc::clone(&event_senders),
+            dropped_session_ids: Rc::clone(&dropped_session_ids),
+            next_session_id: Cell::new(1),
+        });
+        let (_host, cx) =
+            cx.add_window_view(|window, cx| PaneHost::new(session_factory, window, cx));
+
+        let sender = event_senders
+            .borrow()
+            .first()
+            .cloned()
+            .expect("the initial Pane session was not started");
+        sender
+            .try_send(SessionEvent::Exited("Shell exited".to_owned()))
+            .unwrap();
+        cx.run_until_parked();
+
+        assert_eq!(
+            (window_closed.get(), dropped_session_ids.borrow().clone()),
+            (true, vec![1])
         );
     }
 
