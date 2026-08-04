@@ -3,13 +3,15 @@ use std::rc::Rc;
 use gpui::prelude::*;
 use gpui::{
     AnyElement, App, Context, Entity, MouseButton, MouseDownEvent, Pixels, Point, Render,
-    ScrollHandle, Window, div, px, rgba,
+    ScrollHandle, SharedString, Window, div, px, rgba,
 };
-use gpui_symbols::Icon;
+use gpui_symbols::{Icon, SymbolWeight};
 
 use super::{
-    CloseTarget, CloseWindow, PANE_ACTION_MENU_HEIGHT, PANE_ACTION_MENU_WIDTH,
-    PaneActionMenuCommand, PaneHost, PaneHostEvent, TERMINAL_KEY_CONTEXT, render_pane_action_menu,
+    ActivateWindow1, ActivateWindow2, ActivateWindow3, ActivateWindow4, ActivateWindow5,
+    ActivateWindow6, ActivateWindow7, ActivateWindow8, ActivateWindow9, CloseTarget, CloseWindow,
+    CreateWindow, PANE_ACTION_MENU_HEIGHT, PANE_ACTION_MENU_WIDTH, PaneActionMenuCommand, PaneHost,
+    PaneHostEvent, TERMINAL_KEY_CONTEXT, render_pane_action_menu,
 };
 use crate::domain::{
     CloseWindowOutcome, SplitAxis, WindowCollection, WindowError, WindowId, ZoomState,
@@ -22,6 +24,9 @@ const WINDOW_BAR_DIVIDER_SIZE: f32 = 1.0;
 const WINDOW_ITEM_WIDTH: f32 = 132.0;
 const WINDOW_ITEM_MINIMUM_WIDTH: f32 = 84.0;
 const WINDOW_ITEM_MAXIMUM_WIDTH: f32 = 160.0;
+const WINDOW_ITEM_RIGHT_PADDING: f32 = 6.0;
+const WINDOW_CLOSE_CONTROL_SIZE: f32 = 20.0;
+const WINDOW_CLOSE_ICON_SIZE: f32 = 12.0;
 const WINDOW_CONTROL_SIZE: f32 = 28.0;
 const WINDOW_CONTROL_INSET: f32 = 4.0;
 const WINDOW_MENU_BAR_OVERLAP: f32 = 8.0;
@@ -81,6 +86,7 @@ impl WindowManager {
                 PaneHostEvent::CloseWindowRequested { window_id } => {
                     manager.close_window(*window_id, window, cx);
                 }
+                PaneHostEvent::PresentationChanged { .. } => cx.notify(),
             },
         )
         .detach();
@@ -154,6 +160,17 @@ impl WindowManager {
         self.scroll_active_window_into_view();
         cx.notify();
         true
+    }
+
+    fn activate_window_at(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let window_id = self
+            .windows
+            .iter()
+            .nth(index)
+            .map(|(window_id, _)| window_id);
+        if let Some(window_id) = window_id {
+            self.activate_window(window_id, window, cx);
+        }
     }
 
     fn close_window(&mut self, window_id: WindowId, window: &mut Window, cx: &mut Context<Self>) {
@@ -275,14 +292,102 @@ impl WindowManager {
         self.close_window(self.windows.active_window_id(), window, cx);
     }
 
+    fn on_create_window(&mut self, _: &CreateWindow, window: &mut Window, cx: &mut Context<Self>) {
+        self.create_window(window, cx);
+    }
+
+    fn on_activate_window_1(
+        &mut self,
+        _: &ActivateWindow1,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.activate_window_at(0, window, cx);
+    }
+
+    fn on_activate_window_2(
+        &mut self,
+        _: &ActivateWindow2,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.activate_window_at(1, window, cx);
+    }
+
+    fn on_activate_window_3(
+        &mut self,
+        _: &ActivateWindow3,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.activate_window_at(2, window, cx);
+    }
+
+    fn on_activate_window_4(
+        &mut self,
+        _: &ActivateWindow4,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.activate_window_at(3, window, cx);
+    }
+
+    fn on_activate_window_5(
+        &mut self,
+        _: &ActivateWindow5,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.activate_window_at(4, window, cx);
+    }
+
+    fn on_activate_window_6(
+        &mut self,
+        _: &ActivateWindow6,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.activate_window_at(5, window, cx);
+    }
+
+    fn on_activate_window_7(
+        &mut self,
+        _: &ActivateWindow7,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.activate_window_at(6, window, cx);
+    }
+
+    fn on_activate_window_8(
+        &mut self,
+        _: &ActivateWindow8,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.activate_window_at(7, window, cx);
+    }
+
+    fn on_activate_window_9(
+        &mut self,
+        _: &ActivateWindow9,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.activate_window_at(8, window, cx);
+    }
+
     fn render_window_item(
         &self,
         window_id: WindowId,
+        title: SharedString,
         active: bool,
         manager: gpui::WeakEntity<Self>,
     ) -> AnyElement {
         let click_manager = manager.clone();
-        let context_manager = manager;
+        let context_manager = manager.clone();
+        let close_manager = manager;
+        let window_group = format!("window-item-{}", window_id.get());
         div()
             .id(("window-item", window_id.get()))
             .debug_selector(move || {
@@ -293,12 +398,14 @@ impl WindowManager {
                 )
             })
             .relative()
+            .group(window_group.clone())
             .h_full()
             .flex_none()
             .w(px(WINDOW_ITEM_WIDTH))
             .min_w(px(WINDOW_ITEM_MINIMUM_WIDTH))
             .max_w(px(WINDOW_ITEM_MAXIMUM_WIDTH))
-            .px(px(12.0))
+            .pl(px(12.0))
+            .pr(px(WINDOW_ITEM_RIGHT_PADDING))
             .flex()
             .items_center()
             .cursor_pointer()
@@ -329,9 +436,72 @@ impl WindowManager {
             })
             .child(
                 div()
+                    .id(("window-title", window_id.get()))
+                    .debug_selector(move || format!("window-title-{}", window_id.get()))
+                    .flex_1()
                     .min_w_0()
                     .truncate()
-                    .child(format!("Window {}", window_id.get())),
+                    .child(title),
+            )
+            .child(
+                div()
+                    .id(("window-close-button", window_id.get()))
+                    .debug_selector(move || format!("window-close-button-{}", window_id.get()))
+                    .size(px(WINDOW_CLOSE_CONTROL_SIZE))
+                    .ml(px(4.0))
+                    .flex_shrink_0()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(4.0))
+                    .cursor_pointer()
+                    .occlude()
+                    .when(!active, |button| {
+                        button
+                            .opacity(0.0)
+                            .group_hover(window_group, |button| button.opacity(1.0))
+                    })
+                    .hover(|button| {
+                        button
+                            .opacity(1.0)
+                            .bg(gpui_color(ACTIVE_THEME.ghost_element_hover))
+                    })
+                    .on_click(move |_, window, cx| {
+                        let _ = close_manager.update(cx, |manager, cx| {
+                            manager.close_window(window_id, window, cx);
+                        });
+                        cx.stop_propagation();
+                    })
+                    .child(
+                        Icon::new("xmark")
+                            .weight(SymbolWeight::Medium)
+                            .size(px(WINDOW_CLOSE_ICON_SIZE))
+                            .color(gpui_color(ACTIVE_THEME.icon)),
+                    ),
+            )
+            .child(
+                div()
+                    .id(("window-item-divider", window_id.get()))
+                    .debug_selector(move || format!("window-item-{}-divider", window_id.get()))
+                    .absolute()
+                    .top_0()
+                    .right_0()
+                    .h_full()
+                    .w(px(WINDOW_BAR_DIVIDER_SIZE))
+                    .bg(gpui_color(ACTIVE_THEME.border)),
+            )
+            .child(
+                div()
+                    .id(("window-item-bottom-divider", window_id.get()))
+                    .debug_selector(move || {
+                        format!("window-item-{}-bottom-divider", window_id.get())
+                    })
+                    .absolute()
+                    .bottom_0()
+                    .left_0()
+                    .w_full()
+                    .h(px(WINDOW_BAR_DIVIDER_SIZE))
+                    .bg(gpui_color(ACTIVE_THEME.border)),
             )
             .when(active, |item| {
                 item.child(
@@ -351,7 +521,7 @@ impl WindowManager {
             .into_any_element()
     }
 
-    fn render_window_bar(&self, manager: gpui::WeakEntity<Self>) -> AnyElement {
+    fn render_window_bar(&self, manager: gpui::WeakEntity<Self>, cx: &App) -> AnyElement {
         let active_window_id = self.windows.active_window_id();
         let mut items = div()
             .id("window-items")
@@ -362,9 +532,10 @@ impl WindowManager {
             .flex_row()
             .overflow_x_scroll()
             .track_scroll(&self.window_bar_scroll_handle);
-        for (window_id, _) in self.windows.iter() {
+        for (window_id, pane_host) in self.windows.iter() {
             items = items.child(self.render_window_item(
                 window_id,
+                pane_host.read(cx).window_title(),
                 window_id == active_window_id,
                 manager.clone(),
             ));
@@ -496,7 +667,7 @@ impl Render for WindowManager {
         debug_assert!(self.windows.len() > 0);
         let manager = cx.entity().downgrade();
         let active_window = self.windows.active_window().clone();
-        let window_bar = self.render_window_bar(manager.clone());
+        let window_bar = self.render_window_bar(manager.clone(), cx);
 
         div()
             .id("window-manager")
@@ -510,6 +681,16 @@ impl Render for WindowManager {
             .flex_col()
             .overflow_hidden()
             .bg(gpui_color(ACTIVE_THEME.terminal_background))
+            .on_action(cx.listener(Self::on_create_window))
+            .on_action(cx.listener(Self::on_activate_window_1))
+            .on_action(cx.listener(Self::on_activate_window_2))
+            .on_action(cx.listener(Self::on_activate_window_3))
+            .on_action(cx.listener(Self::on_activate_window_4))
+            .on_action(cx.listener(Self::on_activate_window_5))
+            .on_action(cx.listener(Self::on_activate_window_6))
+            .on_action(cx.listener(Self::on_activate_window_7))
+            .on_action(cx.listener(Self::on_activate_window_8))
+            .on_action(cx.listener(Self::on_activate_window_9))
             .on_action(cx.listener(Self::on_close_window))
             .child(window_bar)
             .child(
@@ -542,14 +723,15 @@ fn window_menu_button_contains(position: Point<Pixels>, content_width: Pixels) -
 #[cfg(test)]
 mod tests {
     use std::cell::{Cell, RefCell};
+    use std::sync::Arc;
 
     use gpui::{Modifiers, TestAppContext, VisualTestContext};
 
     use super::*;
     use crate::domain::PaneId;
     use crate::terminal::{
-        GridSize, KeyInput, PointerInput, SessionError, SessionEvent, StartedTerminalSession,
-        TerminalSessionHandle, WheelInput,
+        GridSize, KeyInput, PointerInput, ScreenSnapshot, SessionError, SessionEvent,
+        StartedTerminalSession, TerminalSessionHandle, WheelInput,
     };
 
     #[derive(Clone)]
@@ -665,8 +847,11 @@ mod tests {
     }
 
     #[gpui::test]
-    fn window_bar_should_keep_its_divider_and_active_window_underline(cx: &mut TestAppContext) {
+    fn window_bar_should_keep_dim_dividers_beneath_every_item_and_accent_the_active_window(
+        cx: &mut TestAppContext,
+    ) {
         let (_manager, _records, cx) = window_manager(cx);
+        click("create-window-button", cx);
 
         let bar = cx
             .debug_bounds("window-bar")
@@ -675,16 +860,107 @@ mod tests {
             .debug_bounds("window-bar-divider")
             .expect("the Window bar divider was not rendered");
         let underline = cx
-            .debug_bounds("window-item-1-underline")
+            .debug_bounds("window-item-2-underline")
             .expect("the Active Window underline was not rendered");
+        let inactive_item = cx
+            .debug_bounds("window-item-1-inactive")
+            .expect("the inactive Window item was not rendered");
+        let active_item = cx
+            .debug_bounds("window-item-2-active")
+            .expect("the Active Window item was not rendered");
+        let item_divider = cx
+            .debug_bounds("window-item-1-divider")
+            .expect("the Window item divider was not rendered");
+        let inactive_bottom_divider = cx
+            .debug_bounds("window-item-1-bottom-divider")
+            .expect("the inactive Window bottom divider was not rendered");
+        let active_bottom_divider = cx
+            .debug_bounds("window-item-2-bottom-divider")
+            .expect("the Active Window bottom divider was not rendered");
 
-        assert_eq!(bar.size.height, px(WINDOW_BAR_HEIGHT));
-        assert_eq!(divider.size.height, px(WINDOW_BAR_DIVIDER_SIZE));
-        assert_eq!(underline.size.height, px(WINDOW_BAR_DIVIDER_SIZE));
         assert_eq!(
-            divider.origin.y + divider.size.height,
-            underline.origin.y + underline.size.height
+            (
+                bar.size.height,
+                divider.size.height,
+                underline.size.height,
+                divider.origin.y + divider.size.height,
+                item_divider.size.width,
+                item_divider.size.height,
+                item_divider.origin.x + item_divider.size.width,
+                inactive_bottom_divider.origin.y,
+                inactive_bottom_divider.size,
+                active_bottom_divider.origin.y,
+                active_bottom_divider.size,
+            ),
+            (
+                px(WINDOW_BAR_HEIGHT),
+                px(WINDOW_BAR_DIVIDER_SIZE),
+                px(WINDOW_BAR_DIVIDER_SIZE),
+                underline.origin.y + underline.size.height,
+                px(WINDOW_BAR_DIVIDER_SIZE),
+                inactive_item.size.height,
+                inactive_item.origin.x + inactive_item.size.width,
+                divider.origin.y,
+                gpui::size(inactive_item.size.width, px(WINDOW_BAR_DIVIDER_SIZE)),
+                divider.origin.y,
+                gpui::size(active_item.size.width, px(WINDOW_BAR_DIVIDER_SIZE)),
+            )
         );
+    }
+
+    #[gpui::test]
+    fn command_t_should_create_and_activate_a_new_window(cx: &mut TestAppContext) {
+        let (manager, records, cx) = window_manager(cx);
+
+        cx.simulate_keystrokes("cmd-t");
+        cx.run_until_parked();
+
+        let state = manager.read_with(cx, |manager, _| {
+            (
+                manager.windows.len(),
+                manager.windows.active_window_id(),
+                records.dropped_session_ids.borrow().clone(),
+            )
+        });
+        assert_eq!(state, (2, WindowId::new(2), Vec::new()));
+    }
+
+    #[gpui::test]
+    fn command_number_shortcuts_should_activate_windows_by_position(cx: &mut TestAppContext) {
+        let (manager, _records, cx) = window_manager(cx);
+        for _ in 1..9 {
+            cx.simulate_keystrokes("cmd-t");
+            cx.run_until_parked();
+        }
+
+        let mut active_window_ids = Vec::new();
+        for shortcut in [
+            "cmd-1", "cmd-2", "cmd-3", "cmd-4", "cmd-5", "cmd-6", "cmd-7", "cmd-8", "cmd-9",
+        ] {
+            cx.simulate_keystrokes(shortcut);
+            cx.run_until_parked();
+            active_window_ids
+                .push(manager.read_with(cx, |manager, _| manager.windows.active_window_id()));
+        }
+
+        assert_eq!(
+            active_window_ids,
+            (1..=9).map(WindowId::new).collect::<Vec<_>>()
+        );
+    }
+
+    #[gpui::test]
+    fn unavailable_command_number_shortcut_should_preserve_the_active_window(
+        cx: &mut TestAppContext,
+    ) {
+        let (manager, _records, cx) = window_manager(cx);
+
+        cx.simulate_keystrokes("cmd-9");
+        cx.run_until_parked();
+
+        let active_window_id =
+            manager.read_with(cx, |manager, _| manager.windows.active_window_id());
+        assert_eq!(active_window_id, WindowId::new(1));
     }
 
     #[gpui::test]
@@ -722,6 +998,126 @@ mod tests {
                 true,
                 true,
                 Vec::new(),
+            )
+        );
+    }
+
+    #[gpui::test]
+    fn single_pane_window_title_should_follow_the_terminal_title(cx: &mut TestAppContext) {
+        let (manager, records, cx) = window_manager(cx);
+        let sender = records
+            .event_senders
+            .borrow()
+            .first()
+            .cloned()
+            .expect("the initial Window session must have started");
+
+        sender
+            .try_send(SessionEvent::Screen(Arc::new(ScreenSnapshot {
+                rows: Arc::from([]),
+                background: ACTIVE_THEME.terminal_background,
+                scrollbar: Default::default(),
+                title: Arc::from("Claude Code"),
+            })))
+            .unwrap();
+        cx.run_until_parked();
+
+        let title = manager.read_with(cx, |manager, cx| {
+            manager.windows.active_window().read(cx).window_title()
+        });
+        assert_eq!(title.as_ref(), "Claude Code");
+    }
+
+    #[gpui::test]
+    fn split_window_title_should_show_the_count_and_restore_the_terminal_title_after_close(
+        cx: &mut TestAppContext,
+    ) {
+        let (manager, records, cx) = window_manager(cx);
+        let sender = records
+            .event_senders
+            .borrow()
+            .first()
+            .cloned()
+            .expect("the initial Window session must have started");
+        sender
+            .try_send(SessionEvent::Screen(Arc::new(ScreenSnapshot {
+                rows: Arc::from([]),
+                background: ACTIVE_THEME.terminal_background,
+                scrollbar: Default::default(),
+                title: Arc::from("Claude Code"),
+            })))
+            .unwrap();
+        cx.run_until_parked();
+
+        cx.simulate_keystrokes("cmd-d");
+        cx.run_until_parked();
+        let split_title = manager.read_with(cx, |manager, cx| {
+            manager.windows.active_window().read(cx).window_title()
+        });
+        cx.simulate_keystrokes("cmd-w");
+        cx.run_until_parked();
+        let restored_title = manager.read_with(cx, |manager, cx| {
+            manager.windows.active_window().read(cx).window_title()
+        });
+
+        assert_eq!(
+            (split_title.as_ref(), restored_title.as_ref()),
+            ("2 Panes", "Claude Code")
+        );
+    }
+
+    #[gpui::test]
+    fn hover_close_button_should_close_its_window_without_activating_it(cx: &mut TestAppContext) {
+        let (manager, records, cx) = window_manager(cx);
+        click("create-window-button", cx);
+
+        click("window-close-button-1", cx);
+
+        let state = manager.read_with(cx, |manager, _| {
+            (
+                manager.windows.len(),
+                manager.windows.active_window_id(),
+                records.dropped_session_ids.borrow().clone(),
+            )
+        });
+        assert_eq!(state, (1, WindowId::new(2), vec![1]));
+    }
+
+    #[gpui::test]
+    fn active_window_close_button_should_close_the_active_window(cx: &mut TestAppContext) {
+        let (manager, records, cx) = window_manager(cx);
+        click("create-window-button", cx);
+
+        click("window-close-button-2", cx);
+
+        let state = manager.read_with(cx, |manager, _| {
+            (
+                manager.windows.len(),
+                manager.windows.active_window_id(),
+                records.dropped_session_ids.borrow().clone(),
+            )
+        });
+        assert_eq!(state, (1, WindowId::new(1), vec![2]));
+    }
+
+    #[gpui::test]
+    fn window_close_button_should_use_a_compact_right_inset(cx: &mut TestAppContext) {
+        let (_manager, _records, cx) = window_manager(cx);
+        let item = cx
+            .debug_bounds("window-item-1-active")
+            .expect("the Active Window item was not rendered");
+        let close_button = cx
+            .debug_bounds("window-close-button-1")
+            .expect("the Active Window close button was not rendered");
+
+        assert_eq!(
+            (
+                item.origin.x + item.size.width - (close_button.origin.x + close_button.size.width),
+                close_button.size,
+            ),
+            (
+                px(WINDOW_ITEM_RIGHT_PADDING),
+                gpui::size(px(WINDOW_CLOSE_CONTROL_SIZE), px(WINDOW_CLOSE_CONTROL_SIZE)),
             )
         );
     }
@@ -935,6 +1331,32 @@ mod tests {
             )
         });
         assert_eq!(state, (WindowId::new(2), true, vec![1]));
+    }
+
+    #[gpui::test]
+    fn active_shell_exit_should_close_its_window_and_focus_the_neighbor(cx: &mut TestAppContext) {
+        let (manager, records, cx) = window_manager(cx);
+        click("create-window-button", cx);
+        let active_sender = records
+            .event_senders
+            .borrow()
+            .get(1)
+            .cloned()
+            .expect("Window 2 session must have started");
+
+        active_sender
+            .try_send(SessionEvent::Exited("Shell exited".to_owned()))
+            .unwrap();
+        cx.run_until_parked();
+
+        let state = manager.read_with(cx, |manager, _| {
+            (
+                manager.windows.len(),
+                manager.windows.active_window_id(),
+                records.dropped_session_ids.borrow().clone(),
+            )
+        });
+        assert_eq!(state, (1, WindowId::new(1), vec![2]));
     }
 
     #[gpui::test]

@@ -41,6 +41,7 @@ struct DraggedSplit {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum PaneHostEvent {
     CloseWindowRequested { window_id: WindowId },
+    PresentationChanged { window_id: WindowId },
 }
 
 pub(crate) struct PaneHost {
@@ -104,6 +105,9 @@ impl PaneHost {
             move |host, _terminal, event: &TerminalPaneEvent, window, cx| match event {
                 TerminalPaneEvent::TitleChanged(title) => {
                     host.pane_titles.insert(pane_id, title.clone());
+                    cx.emit(PaneHostEvent::PresentationChanged {
+                        window_id: host.terminal_window.id(),
+                    });
                     cx.notify();
                 }
                 TerminalPaneEvent::Exited => host.close_pane(pane_id, window, cx),
@@ -129,6 +133,18 @@ impl PaneHost {
 
     pub(crate) fn pane_count(&self) -> usize {
         self.terminal_window.pane_count()
+    }
+
+    pub(crate) fn window_title(&self) -> gpui::SharedString {
+        let pane_count = self.terminal_window.pane_count();
+        if pane_count > 1 {
+            return format!("{pane_count} Panes").into();
+        }
+
+        self.pane_titles
+            .get(&self.terminal_window.focused_pane_id())
+            .cloned()
+            .unwrap_or_else(|| "Terminal".into())
     }
 
     pub(crate) const fn zoom_state(&self) -> ZoomState {
@@ -248,6 +264,9 @@ impl PaneHost {
                 }
                 self.menu_pane_id = None;
                 self.split_bounds.clear();
+                cx.emit(PaneHostEvent::PresentationChanged {
+                    window_id: self.terminal_window.id(),
+                });
                 cx.notify();
                 if let Some(terminal) = self.terminal_window.terminal(pane_id) {
                     terminal.update(cx, |terminal, _| terminal.focus(window));
@@ -283,6 +302,9 @@ impl PaneHost {
                 self.split_bounds.clear();
                 self.pane_titles.remove(&pane_id);
                 self.menu_pane_id = None;
+                cx.emit(PaneHostEvent::PresentationChanged {
+                    window_id: self.terminal_window.id(),
+                });
                 cx.notify();
                 if self.active
                     && let Some(terminal) = self.terminal_window.terminal(focused_pane_id)
