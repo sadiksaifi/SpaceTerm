@@ -1,17 +1,18 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use gpui::prelude::*;
 use gpui::{
-    App, Bounds, ClipboardItem, Context, FocusHandle, IntoElement, KeyDownEvent, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Render, ScrollWheelEvent, SharedString,
-    Task, TextRun, Window, div, font, px, rgba,
+    App, Bounds, ClipboardItem, Context, DispatchPhase, FocusHandle, IntoElement, KeyDownEvent,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Render, ScrollWheelEvent,
+    SharedString, Task, TextRun, Window, canvas, div, font, px, rgba,
 };
 
 use super::terminal_element::{TerminalGridCache, TerminalGridElement};
 use super::{CopySelection, PasteClipboard, TERMINAL_KEY_CONTEXT};
 use crate::terminal::{
     GridSize, InputModifiers, KeyCode, KeyInput, PointerButton, PointerInput, PointerPhase,
-    ScreenSnapshot, SessionEvent, SurfacePosition, TerminalSession, WheelInput,
+    ScreenSnapshot, ScrollbarSnapshot, SessionEvent, SurfacePosition, TerminalSession, WheelInput,
 };
 use crate::theme::{ACTIVE_THEME, Color};
 
@@ -20,6 +21,27 @@ const LINE_HEIGHT: f32 = 20.0;
 const PADDING: f32 = 12.0;
 const MIN_COLS: u16 = 2;
 const MIN_ROWS: u16 = 2;
+const SCROLLBAR_WIDTH: f32 = 5.0;
+const SCROLLBAR_HORIZONTAL_HITBOX_PADDING: f32 = 4.0;
+const SCROLLBAR_HITBOX_WIDTH: f32 = SCROLLBAR_WIDTH + SCROLLBAR_HORIZONTAL_HITBOX_PADDING * 2.0;
+const SCROLLBAR_RIGHT_INSET: f32 = 4.0;
+const MIN_SCROLLBAR_THUMB_HEIGHT: f32 = 24.0;
+const SCROLLBAR_HIDE_DELAY: Duration = Duration::from_secs(2);
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct ScrollbarGeometry {
+    top_px: f32,
+    height_px: f32,
+    track_height_px: f32,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ScrollbarDrag {
+    grab_ratio: f32,
+    track_top_px: f32,
+    track_height_px: f32,
+    target_offset_rows: u64,
+}
 
 pub(crate) struct TerminalPane {
     session: Option<TerminalSession>,
@@ -32,8 +54,13 @@ pub(crate) struct TerminalPane {
     grid_bounds: Option<Bounds<Pixels>>,
     pressed_button: Option<PointerButton>,
     wheel_remainder: f32,
+    scrollbar_visible: bool,
+    scrollbar_hovered: bool,
+    scrollbar_drag: Option<ScrollbarDrag>,
+    scrollbar_visibility_generation: u64,
     render_cache: TerminalGridCache,
     _event_task: Option<Task<()>>,
+    _scrollbar_hide_task: Option<Task<()>>,
 }
 
 impl TerminalPane {
@@ -53,8 +80,13 @@ impl TerminalPane {
             grid_bounds: None,
             pressed_button: None,
             wheel_remainder: 0.0,
+            scrollbar_visible: false,
+            scrollbar_hovered: false,
+            scrollbar_drag: None,
+            scrollbar_visibility_generation: 0,
             render_cache: TerminalGridCache::new(),
             _event_task: None,
+            _scrollbar_hide_task: None,
         }
     }
 
@@ -108,7 +140,14 @@ impl TerminalPane {
 
     fn handle_event(&mut self, event: SessionEvent) {
         match event {
-            SessionEvent::Screen(screen) => self.screen = screen,
+            SessionEvent::Screen(screen) => {
+                if screen.scrollbar.total_rows <= screen.scrollbar.visible_rows {
+                    self.scrollbar_visible = false;
+                    self.scrollbar_hovered = false;
+                    self.scrollbar_drag = None;
+                }
+                self.screen = screen;
+            }
             SessionEvent::Exited(status) | SessionEvent::Error(status) => {
                 eprintln!("{status}");
                 self.status = Some(status);
@@ -161,6 +200,11 @@ impl TerminalPane {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.scrollbar_drag.is_some() {
+            self.move_scrollbar_drag(event.position.y, cx);
+            cx.stop_propagation();
+            return;
+        }
         let dragging = self.pressed_button.is_some();
         let Some(position) = self.surface_position(event.position, dragging) else {
             return;
@@ -177,6 +221,11 @@ impl TerminalPane {
     }
 
     fn on_mouse_up(&mut self, event: &MouseUpEvent, _window: &mut Window, cx: &mut Context<Self>) {
+        if event.button == MouseButton::Left && self.scrollbar_drag.is_some() {
+            self.finish_scrollbar_drag(cx);
+            cx.stop_propagation();
+            return;
+        }
         let Some(button) = pointer_button(event.button) else {
             return;
         };
@@ -208,6 +257,9 @@ impl TerminalPane {
         let Some(position) = self.surface_position(event.position, false) else {
             return;
         };
+        if self.screen.scrollbar.total_rows > self.screen.scrollbar.visible_rows {
+            self.reveal_scrollbar(cx);
+        }
         let lines = f32::from(event.delta.pixel_delta(px(LINE_HEIGHT)).y) / LINE_HEIGHT;
         let steps = accumulate_wheel_steps(&mut self.wheel_remainder, lines);
 
@@ -221,6 +273,97 @@ impl TerminalPane {
             });
         }
         cx.stop_propagation();
+    }
+
+    fn reveal_scrollbar(&mut self, cx: &mut Context<Self>) {
+        self.scrollbar_visible = true;
+        self.scrollbar_visibility_generation = self.scrollbar_visibility_generation.wrapping_add(1);
+        let generation = self.scrollbar_visibility_generation;
+        self._scrollbar_hide_task.take();
+
+        if self.scrollbar_drag.is_none() && !self.scrollbar_hovered {
+            self._scrollbar_hide_task = Some(cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(SCROLLBAR_HIDE_DELAY).await;
+                let _ = this.update(cx, |this, cx| {
+                    if this.scrollbar_visibility_generation == generation
+                        && this.scrollbar_drag.is_none()
+                        && !this.scrollbar_hovered
+                    {
+                        this.scrollbar_visible = false;
+                        cx.notify();
+                    }
+                });
+            }));
+        }
+        cx.notify();
+    }
+
+    fn set_scrollbar_hovered(&mut self, hovered: bool, cx: &mut Context<Self>) {
+        if self.scrollbar_hovered == hovered {
+            return;
+        }
+
+        self.scrollbar_hovered = hovered;
+        self.scrollbar_visibility_generation = self.scrollbar_visibility_generation.wrapping_add(1);
+        self._scrollbar_hide_task.take();
+        if hovered {
+            self.scrollbar_visible = true;
+            cx.notify();
+        } else {
+            self.reveal_scrollbar(cx);
+        }
+    }
+
+    fn begin_scrollbar_drag(
+        &mut self,
+        pointer_y: Pixels,
+        thumb_bounds: Bounds<Pixels>,
+        geometry: ScrollbarGeometry,
+        cx: &mut Context<Self>,
+    ) {
+        self.scrollbar_visibility_generation = self.scrollbar_visibility_generation.wrapping_add(1);
+        self._scrollbar_hide_task.take();
+        self.scrollbar_visible = true;
+        self.scrollbar_drag = Some(ScrollbarDrag {
+            grab_ratio: ((f32::from(pointer_y - thumb_bounds.origin.y) / geometry.height_px)
+                .clamp(0.0, 1.0)),
+            track_top_px: f32::from(thumb_bounds.origin.y) - geometry.top_px,
+            track_height_px: geometry.track_height_px,
+            target_offset_rows: self.screen.scrollbar.offset_rows,
+        });
+        cx.notify();
+    }
+
+    fn move_scrollbar_drag(&mut self, pointer_y: Pixels, cx: &mut Context<Self>) {
+        let Some(drag) = self.scrollbar_drag else {
+            return;
+        };
+        let pointer_in_track_px = f32::from(pointer_y) - drag.track_top_px;
+        let Some(offset_rows) = scrollbar_offset_for_pointer(
+            self.screen.scrollbar,
+            drag.track_height_px,
+            pointer_in_track_px,
+            drag.grab_ratio,
+        ) else {
+            return;
+        };
+        if offset_rows == drag.target_offset_rows {
+            return;
+        }
+
+        if let Some(drag) = &mut self.scrollbar_drag {
+            drag.target_offset_rows = offset_rows;
+        }
+        if let Some(session) = &self.session {
+            session.scroll_to(offset_rows);
+        }
+        cx.notify();
+    }
+
+    fn finish_scrollbar_drag(&mut self, cx: &mut Context<Self>) {
+        if self.scrollbar_drag.take().is_some() {
+            self.reveal_scrollbar(cx);
+        }
     }
 
     fn copy_selection(&mut self, _: &CopySelection, _window: &mut Window, cx: &mut Context<Self>) {
@@ -287,6 +430,7 @@ impl TerminalPane {
 
 impl Drop for TerminalPane {
     fn drop(&mut self) {
+        self._scrollbar_hide_task.take();
         self._event_task.take();
         self.session.take();
     }
@@ -295,8 +439,20 @@ impl Drop for TerminalPane {
 impl Render for TerminalPane {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let pane = cx.entity().downgrade();
+        let scrollbar_pane = cx.entity();
         let background = gpui_color(self.screen.background);
         let status = self.status.clone();
+        let scrollbar_dragging = self.scrollbar_drag.is_some();
+        let mut scrollbar_state = self.screen.scrollbar;
+        if let Some(drag) = self.scrollbar_drag {
+            scrollbar_state.offset_rows = drag.target_offset_rows;
+        }
+        let scrollbar = self.scrollbar_visible.then(|| {
+            self.last_grid_size.and_then(|size| {
+                scrollbar_geometry(scrollbar_state, f32::from(size.rows) * LINE_HEIGHT)
+            })
+        });
+        let scrollbar = scrollbar.flatten();
         let terminal_grid = TerminalGridElement::new(
             &self.screen,
             &self.font_family,
@@ -335,6 +491,108 @@ impl Render for TerminalPane {
             .on_mouse_up_out(MouseButton::Middle, cx.listener(Self::on_mouse_up))
             .on_mouse_up_out(MouseButton::Right, cx.listener(Self::on_mouse_up))
             .child(terminal_grid)
+            .when_some(scrollbar, move |root, scrollbar| {
+                let hover_pane = scrollbar_pane.clone();
+                let down_pane = scrollbar_pane.clone();
+                let move_pane = scrollbar_pane.clone();
+                let up_pane = scrollbar_pane.clone();
+                let thumb_color = if scrollbar_dragging {
+                    ACTIVE_THEME.icon
+                } else {
+                    ACTIVE_THEME.scrollbar_thumb_background
+                };
+                let thumb_hover_color = if scrollbar_dragging {
+                    ACTIVE_THEME.icon
+                } else {
+                    ACTIVE_THEME.icon_accent
+                };
+                root.child(
+                    div()
+                        .group("terminal-scrollbar-thumb")
+                        .id("terminal-scrollbar-thumb-hitbox")
+                        .absolute()
+                        .top(px(PADDING + scrollbar.top_px))
+                        .right_0()
+                        .w(px(SCROLLBAR_HITBOX_WIDTH))
+                        .h(px(scrollbar.height_px))
+                        .cursor_default()
+                        .on_hover(move |hovered, _, cx| {
+                            hover_pane.update(cx, |pane, cx| {
+                                pane.set_scrollbar_hovered(*hovered, cx);
+                            });
+                        })
+                        .child(
+                            div()
+                                .absolute()
+                                .right(px(SCROLLBAR_RIGHT_INSET))
+                                .w(px(SCROLLBAR_WIDTH))
+                                .h_full()
+                                .rounded(px(SCROLLBAR_WIDTH / 2.0))
+                                .bg(gpui_color(thumb_color))
+                                .group_hover("terminal-scrollbar-thumb", move |thumb| {
+                                    thumb.bg(gpui_color(thumb_hover_color))
+                                }),
+                        )
+                        .child(
+                            canvas(
+                                |_, _, _| (),
+                                move |thumb_bounds, _, window, _| {
+                                    window.on_mouse_event(
+                                        move |event: &MouseDownEvent, phase, window, cx| {
+                                            if phase != DispatchPhase::Bubble
+                                                || event.button != MouseButton::Left
+                                                || !thumb_bounds.contains(&event.position)
+                                            {
+                                                return;
+                                            }
+                                            down_pane.read(cx).focus_handle.focus(window);
+                                            down_pane.update(cx, |pane, cx| {
+                                                pane.begin_scrollbar_drag(
+                                                    event.position.y,
+                                                    thumb_bounds,
+                                                    scrollbar,
+                                                    cx,
+                                                );
+                                            });
+                                            cx.stop_propagation();
+                                        },
+                                    );
+
+                                    window.on_mouse_event(
+                                        move |event: &MouseMoveEvent, phase, _, cx| {
+                                            if phase != DispatchPhase::Bubble
+                                                || !event.dragging()
+                                                || move_pane.read(cx).scrollbar_drag.is_none()
+                                            {
+                                                return;
+                                            }
+                                            move_pane.update(cx, |pane, cx| {
+                                                pane.move_scrollbar_drag(event.position.y, cx);
+                                            });
+                                            cx.stop_propagation();
+                                        },
+                                    );
+
+                                    window.on_mouse_event(
+                                        move |event: &MouseUpEvent, phase, _, cx| {
+                                            if phase != DispatchPhase::Bubble
+                                                || event.button != MouseButton::Left
+                                                || up_pane.read(cx).scrollbar_drag.is_none()
+                                            {
+                                                return;
+                                            }
+                                            up_pane.update(cx, |pane, cx| {
+                                                pane.finish_scrollbar_drag(cx);
+                                            });
+                                            cx.stop_propagation();
+                                        },
+                                    );
+                                },
+                            )
+                            .size_full(),
+                        ),
+                )
+            })
             .when_some(status, |root, status| {
                 root.child(
                     div()
@@ -419,6 +677,53 @@ fn input_modifiers(modifiers: gpui::Modifiers) -> InputModifiers {
         control: modifiers.control,
         platform: modifiers.platform,
     }
+}
+
+fn scrollbar_geometry(
+    scrollbar: ScrollbarSnapshot,
+    track_height_px: f32,
+) -> Option<ScrollbarGeometry> {
+    if scrollbar.total_rows <= scrollbar.visible_rows || track_height_px <= 0.0 {
+        return None;
+    }
+
+    let total_rows = scrollbar.total_rows as f64;
+    let visible_rows = scrollbar.visible_rows as f64;
+    let maximum_offset = scrollbar.total_rows.saturating_sub(scrollbar.visible_rows);
+    if total_rows <= 0.0 || visible_rows <= 0.0 || maximum_offset == 0 {
+        return None;
+    }
+
+    let track_height = f64::from(track_height_px);
+    let minimum_height = f64::from(MIN_SCROLLBAR_THUMB_HEIGHT.min(track_height_px));
+    let thumb_height =
+        (visible_rows / total_rows * track_height).clamp(minimum_height, track_height);
+    let progress = scrollbar.offset_rows.min(maximum_offset) as f64 / maximum_offset as f64;
+
+    Some(ScrollbarGeometry {
+        top_px: ((track_height - thumb_height) * progress) as f32,
+        height_px: thumb_height as f32,
+        track_height_px,
+    })
+}
+
+fn scrollbar_offset_for_pointer(
+    scrollbar: ScrollbarSnapshot,
+    track_height_px: f32,
+    pointer_in_track_px: f32,
+    grab_ratio: f32,
+) -> Option<u64> {
+    let geometry = scrollbar_geometry(scrollbar, track_height_px)?;
+    let movable_height = (track_height_px - geometry.height_px).max(0.0);
+    if movable_height == 0.0 {
+        return Some(0);
+    }
+
+    let thumb_top = (pointer_in_track_px - grab_ratio.clamp(0.0, 1.0) * geometry.height_px)
+        .clamp(0.0, movable_height);
+    let progress = thumb_top / movable_height;
+    let maximum_offset = scrollbar.total_rows.saturating_sub(scrollbar.visible_rows);
+    Some((f64::from(progress) * maximum_offset as f64).round() as u64)
 }
 
 fn terminal_surface_position(
@@ -600,6 +905,116 @@ mod tests {
             false,
         )
         .is_none());
+    }
+
+    #[test]
+    fn calculates_proportional_scrollbar_geometry_across_the_track() {
+        let top = scrollbar_geometry(
+            ScrollbarSnapshot {
+                total_rows: 100,
+                offset_rows: 0,
+                visible_rows: 20,
+            },
+            200.0,
+        )
+        .unwrap();
+        assert_eq!(
+            top,
+            ScrollbarGeometry {
+                top_px: 0.0,
+                height_px: 40.0,
+                track_height_px: 200.0,
+            }
+        );
+
+        let middle = scrollbar_geometry(
+            ScrollbarSnapshot {
+                total_rows: 100,
+                offset_rows: 40,
+                visible_rows: 20,
+            },
+            200.0,
+        )
+        .unwrap();
+        assert_eq!(
+            middle,
+            ScrollbarGeometry {
+                top_px: 80.0,
+                height_px: 40.0,
+                track_height_px: 200.0,
+            }
+        );
+
+        assert_eq!(
+            scrollbar_geometry(
+                ScrollbarSnapshot {
+                    total_rows: 100,
+                    offset_rows: 80,
+                    visible_rows: 20,
+                },
+                200.0,
+            )
+            .unwrap()
+            .top_px,
+            160.0
+        );
+        assert!(
+            scrollbar_geometry(
+                ScrollbarSnapshot {
+                    total_rows: 20,
+                    offset_rows: 0,
+                    visible_rows: 20,
+                },
+                200.0,
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn enforces_a_minimum_scrollbar_thumb_height() {
+        let geometry = scrollbar_geometry(
+            ScrollbarSnapshot {
+                total_rows: 10_000,
+                offset_rows: 4_000,
+                visible_rows: 20,
+            },
+            200.0,
+        )
+        .unwrap();
+
+        assert_eq!(geometry.height_px, MIN_SCROLLBAR_THUMB_HEIGHT);
+        assert!(geometry.top_px > 0.0);
+    }
+
+    #[test]
+    fn maps_thumb_drag_positions_to_absolute_scrollback_offsets() {
+        let scrollbar = ScrollbarSnapshot {
+            total_rows: 100,
+            offset_rows: 0,
+            visible_rows: 20,
+        };
+
+        assert_eq!(
+            scrollbar_offset_for_pointer(scrollbar, 200.0, 20.0, 0.5),
+            Some(0)
+        );
+        assert_eq!(
+            scrollbar_offset_for_pointer(scrollbar, 200.0, 100.0, 0.5),
+            Some(40)
+        );
+        assert_eq!(
+            scrollbar_offset_for_pointer(scrollbar, 200.0, 180.0, 0.5),
+            Some(80)
+        );
+        assert_eq!(
+            scrollbar_offset_for_pointer(scrollbar, 200.0, -100.0, 0.5),
+            Some(0)
+        );
+        assert_eq!(
+            scrollbar_offset_for_pointer(scrollbar, 200.0, 500.0, 0.5),
+            Some(80)
+        );
     }
 
     #[test]

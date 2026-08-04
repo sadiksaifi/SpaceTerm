@@ -194,6 +194,14 @@ impl TerminalSession {
         }
     }
 
+    pub(crate) fn scroll_to(&self, offset_rows: u64) {
+        if let Some(commands) = &self.commands
+            && commands.send(Command::ScrollTo(offset_rows)).is_err()
+        {
+            eprintln!("terminal scrollbar input was dropped because the worker has stopped");
+        }
+    }
+
     pub(crate) fn paste(&self, text: String) {
         if let Some(commands) = &self.commands
             && commands.send(Command::Paste(text)).is_err()
@@ -253,6 +261,7 @@ enum Command {
     Resize(GridSize),
     Pointer(PointerInput),
     Wheel(WheelInput),
+    ScrollTo(u64),
     Paste(String),
     SelectionText(async_channel::Sender<Result<Option<String>, String>>),
     ReaderStopped(Option<String>),
@@ -384,6 +393,12 @@ fn run_worker(
                     false
                 }
             },
+            Command::ScrollTo(offset_rows) => apply_emulator_action(
+                emulator.scroll_to(offset_rows),
+                &mut emulator,
+                &mut pty.writer,
+                &events,
+            ),
             Command::Paste(text) => match emulator.paste(text) {
                 Ok(action) => {
                     apply_emulator_action(action, &mut emulator, &mut pty.writer, &events)

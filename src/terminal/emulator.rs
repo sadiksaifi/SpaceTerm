@@ -54,10 +54,18 @@ pub(crate) struct CellSnapshot {
 
 pub(crate) type RowSnapshot = Arc<[CellSnapshot]>;
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct ScrollbarSnapshot {
+    pub(crate) total_rows: u64,
+    pub(crate) offset_rows: u64,
+    pub(crate) visible_rows: u64,
+}
+
 #[derive(Debug)]
 pub(crate) struct ScreenSnapshot {
     pub(crate) rows: Arc<[RowSnapshot]>,
     pub(crate) background: Color,
+    pub(crate) scrollbar: ScrollbarSnapshot,
 }
 
 impl ScreenSnapshot {
@@ -65,6 +73,7 @@ impl ScreenSnapshot {
         Arc::new(Self {
             rows: Arc::from([]),
             background: ACTIVE_THEME.terminal_background,
+            scrollbar: ScrollbarSnapshot::default(),
         })
     }
 }
@@ -90,6 +99,7 @@ pub(crate) struct TerminalEmulator {
     cached_foreground: Option<Color>,
     cached_background: Option<Color>,
     cached_cursor: Option<(u16, u16)>,
+    cached_scrollbar: Option<ScrollbarSnapshot>,
     cols: u16,
     rows_count: u16,
     cell_width_px: u32,
@@ -196,6 +206,7 @@ impl TerminalEmulator {
             cached_foreground: None,
             cached_background: None,
             cached_cursor: None,
+            cached_scrollbar: None,
             cols,
             rows_count: rows,
             cell_width_px,
@@ -246,6 +257,12 @@ impl TerminalEmulator {
             PointerPhase::Motion => self.pointer_motion(input),
             PointerPhase::Release => self.pointer_release(input),
         }
+    }
+
+    pub(crate) fn scroll_to(&mut self, offset_rows: u64) -> EmulatorAction {
+        let row = usize::try_from(offset_rows).unwrap_or(usize::MAX);
+        self.terminal.scroll_viewport(ScrollViewport::Row(row));
+        EmulatorAction::screen_changed()
     }
 
     pub(crate) fn wheel(&mut self, input: WheelInput) -> Result<EmulatorAction, String> {
@@ -690,6 +707,12 @@ impl TerminalEmulator {
         } else {
             None
         };
+        let scrollbar = self.terminal.scrollbar()?;
+        let scrollbar = ScrollbarSnapshot {
+            total_rows: scrollbar.total,
+            offset_rows: scrollbar.offset,
+            visible_rows: scrollbar.len,
+        };
 
         let default_foreground: Color = colors.foreground.into();
         let default_background: Color = colors.background.into();
@@ -700,8 +723,9 @@ impl TerminalEmulator {
             || self.cached_foreground != Some(default_foreground)
             || self.cached_background != Some(default_background);
         let cursor_changed = self.cached_cursor != cursor_position;
+        let scrollbar_changed = self.cached_scrollbar != Some(scrollbar);
 
-        if matches!(dirty, Dirty::Clean) && !rebuild_all && !cursor_changed {
+        if matches!(dirty, Dirty::Clean) && !rebuild_all && !cursor_changed && !scrollbar_changed {
             return Ok(None);
         }
 
@@ -792,10 +816,12 @@ impl TerminalEmulator {
         self.cached_foreground = Some(default_foreground);
         self.cached_background = Some(default_background);
         self.cached_cursor = cursor_position;
+        self.cached_scrollbar = Some(scrollbar);
 
         Ok(Some(Arc::new(ScreenSnapshot {
             rows: Arc::from(self.row_cache.clone()),
             background: default_background,
+            scrollbar,
         })))
     }
 }
@@ -1252,6 +1278,13 @@ mod tests {
         let bottom = emulator.snapshot().unwrap().unwrap();
         assert!(row_text(&bottom, 0).starts_with("two"));
         assert!(row_text(&bottom, 1).starts_with("three"));
+        assert_eq!(
+            bottom
+                .scrollbar
+                .offset_rows
+                .saturating_add(bottom.scrollbar.visible_rows),
+            bottom.scrollbar.total_rows
+        );
 
         let action = emulator.wheel(wheel(1, false)).unwrap();
         assert!(action.bytes.is_empty());
@@ -1260,6 +1293,21 @@ mod tests {
         let scrolled = emulator.snapshot().unwrap().unwrap();
         assert!(row_text(&scrolled, 0).starts_with("one"));
         assert!(row_text(&scrolled, 1).starts_with("two"));
+        assert!(
+            scrolled
+                .scrollbar
+                .offset_rows
+                .saturating_add(scrolled.scrollbar.visible_rows)
+                < scrolled.scrollbar.total_rows
+        );
+        assert!(scrolled.scrollbar.offset_rows < bottom.scrollbar.offset_rows);
+
+        let action = emulator.scroll_to(bottom.scrollbar.offset_rows);
+        assert!(action.bytes.is_empty());
+        assert!(action.screen_changed);
+        let restored = emulator.snapshot().unwrap().unwrap();
+        assert!(row_text(&restored, 0).starts_with("two"));
+        assert!(row_text(&restored, 1).starts_with("three"));
     }
 
     #[test]
