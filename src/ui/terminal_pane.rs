@@ -1,3 +1,4 @@
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -12,7 +13,8 @@ use super::terminal_element::{TerminalGridCache, TerminalGridElement};
 use super::{CopySelection, PasteClipboard, TERMINAL_KEY_CONTEXT};
 use crate::terminal::{
     GridSize, InputModifiers, KeyCode, KeyInput, PointerButton, PointerInput, PointerPhase,
-    ScreenSnapshot, ScrollbarSnapshot, SessionEvent, SurfacePosition, TerminalSession, WheelInput,
+    ScreenSnapshot, ScrollbarSnapshot, SessionEvent, SurfacePosition, TerminalSessionFactory,
+    TerminalSessionHandle, WheelInput,
 };
 use crate::theme::{ACTIVE_THEME, Color};
 
@@ -44,7 +46,9 @@ struct ScrollbarDrag {
 }
 
 pub(crate) struct TerminalPane {
-    session: Option<TerminalSession>,
+    session_factory: Rc<dyn TerminalSessionFactory>,
+    session: Option<Box<dyn TerminalSessionHandle>>,
+    session_start_attempted: bool,
     screen: Arc<ScreenSnapshot>,
     status: Option<String>,
     focus_handle: FocusHandle,
@@ -64,13 +68,19 @@ pub(crate) struct TerminalPane {
 }
 
 impl TerminalPane {
-    pub(crate) fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub(crate) fn new(
+        session_factory: Rc<dyn TerminalSessionFactory>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let focus_handle = cx.focus_handle();
         let font_family = terminal_font(cx);
         let cell_width = measure_cell_width(window, &font_family);
 
         Self {
+            session_factory,
             session: None,
+            session_start_attempted: false,
             screen: ScreenSnapshot::empty(),
             status: None,
             focus_handle,
@@ -94,6 +104,17 @@ impl TerminalPane {
         self.focus_handle.focus(window);
     }
 
+    #[cfg(test)]
+    pub(crate) fn is_focused(&self, window: &Window) -> bool {
+        self.focus_handle.is_focused(window)
+    }
+
+    pub(crate) fn close(&mut self) {
+        self._scrollbar_hide_task.take();
+        self._event_task.take();
+        close_session(&mut self.session);
+    }
+
     fn update_grid_bounds(&mut self, bounds: Bounds<Pixels>, cx: &mut Context<Self>) {
         self.grid_bounds = Some(bounds);
         let size = grid_size(bounds, self.cell_width);
@@ -107,9 +128,15 @@ impl TerminalPane {
             return;
         }
 
-        match TerminalSession::start(size) {
-            Ok((session, receiver)) => {
-                self.session = Some(session);
+        if self.session_start_attempted {
+            return;
+        }
+        self.session_start_attempted = true;
+
+        match self.session_factory.start(size) {
+            Ok(started) => {
+                self.session = Some(started.handle);
+                let receiver = started.events;
                 self._event_task = Some(cx.spawn(async move |this, cx| {
                     while let Ok(event) = receiver.recv().await {
                         let mut events = vec![event];
@@ -430,9 +457,7 @@ impl TerminalPane {
 
 impl Drop for TerminalPane {
     fn drop(&mut self) {
-        self._scrollbar_hide_task.take();
-        self._event_task.take();
-        self.session.take();
+        self.close();
     }
 }
 
@@ -661,6 +686,10 @@ fn gpui_color(color: Color) -> gpui::Rgba {
     rgba(color.rgba_hex())
 }
 
+fn close_session(session: &mut Option<Box<dyn TerminalSessionHandle>>) {
+    session.take();
+}
+
 fn pointer_button(button: MouseButton) -> Option<PointerButton> {
     match button {
         MouseButton::Left => Some(PointerButton::Left),
@@ -801,6 +830,9 @@ fn single_char(value: &str) -> Option<char> {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
+    use std::rc::Rc;
+
     use gpui::{Keystroke, Modifiers};
 
     use super::*;
@@ -1050,5 +1082,50 @@ mod tests {
                 platform: true,
             }
         );
+    }
+
+    struct DropCountingSession {
+        drop_count: Rc<Cell<usize>>,
+    }
+
+    impl Drop for DropCountingSession {
+        fn drop(&mut self) {
+            self.drop_count.set(self.drop_count.get() + 1);
+        }
+    }
+
+    impl TerminalSessionHandle for DropCountingSession {
+        fn key(&self, _: KeyInput) {}
+
+        fn resize(&self, _: GridSize) {}
+
+        fn pointer(&self, _: PointerInput) {}
+
+        fn wheel(&self, _: WheelInput) {}
+
+        fn scroll_to(&self, _: u64) {}
+
+        fn paste(&self, _: String) {}
+
+        fn request_selection_text(
+            &self,
+        ) -> async_channel::Receiver<Result<Option<String>, String>> {
+            let (_, receiver) = async_channel::bounded(1);
+            receiver
+        }
+    }
+
+    #[test]
+    fn close_session_should_drop_a_handle_exactly_once_when_repeated() {
+        let drop_count = Rc::new(Cell::new(0));
+        let mut session: Option<Box<dyn TerminalSessionHandle>> =
+            Some(Box::new(DropCountingSession {
+                drop_count: Rc::clone(&drop_count),
+            }));
+
+        close_session(&mut session);
+        close_session(&mut session);
+
+        assert_eq!(drop_count.get(), 1);
     }
 }

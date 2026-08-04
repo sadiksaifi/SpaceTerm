@@ -3,10 +3,10 @@ use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver as CommandReceiver, Sender as CommandSender, TryRecvError};
 use std::thread::{self, JoinHandle};
 
-use portable_pty::{ChildKiller, PtySize};
+use portable_pty::PtySize;
 use thiserror::Error;
 
-use crate::platform::macos_pty::{PtyError, SpawnedPty, spawn_user_shell};
+use crate::platform::macos_pty::{PtyError, PtyTerminator, SpawnedPty, spawn_user_shell};
 use crate::terminal::emulator::{EmulatorAction, ScreenSnapshot, TerminalEmulator};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -118,18 +118,49 @@ pub(crate) enum SessionError {
     EmulatorStartup(String),
 }
 
+pub(crate) struct StartedTerminalSession {
+    pub(crate) handle: Box<dyn TerminalSessionHandle>,
+    pub(crate) events: async_channel::Receiver<SessionEvent>,
+}
+
+pub(crate) trait TerminalSessionHandle {
+    fn key(&self, input: KeyInput);
+    fn resize(&self, size: GridSize);
+    fn pointer(&self, input: PointerInput);
+    fn wheel(&self, input: WheelInput);
+    fn scroll_to(&self, offset_rows: u64);
+    fn paste(&self, text: String);
+    fn request_selection_text(&self) -> async_channel::Receiver<Result<Option<String>, String>>;
+}
+
+pub(crate) trait TerminalSessionFactory {
+    fn start(&self, size: GridSize) -> Result<StartedTerminalSession, SessionError>;
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct NativeTerminalSessionFactory;
+
+impl TerminalSessionFactory for NativeTerminalSessionFactory {
+    fn start(&self, size: GridSize) -> Result<StartedTerminalSession, SessionError> {
+        let (session, events) = TerminalSession::start(size)?;
+        Ok(StartedTerminalSession {
+            handle: Box::new(session),
+            events,
+        })
+    }
+}
+
 pub(crate) struct TerminalSession {
     commands: Option<CommandSender<Command>>,
     worker: Option<JoinHandle<()>>,
-    child_killer: Option<Box<dyn ChildKiller + Send + Sync>>,
+    terminator: Option<PtyTerminator>,
 }
 
 impl TerminalSession {
     pub(crate) fn start(
         size: GridSize,
     ) -> Result<(Self, async_channel::Receiver<SessionEvent>), SessionError> {
-        let pty = spawn_user_shell(size.pty_size())?;
-        let child_killer = pty.child.clone_killer();
+        let (pty, terminator) = spawn_user_shell(size.pty_size())?;
         let (command_tx, command_rx) = mpsc::channel();
         // Two slots retain the latest screen and a final lifecycle event without
         // allowing sustained PTY output to build an unbounded UI backlog.
@@ -147,7 +178,7 @@ impl TerminalSession {
                 Self {
                     commands: Some(command_tx),
                     worker: Some(worker),
-                    child_killer: Some(child_killer),
+                    terminator: Some(terminator),
                 },
                 event_rx,
             )),
@@ -227,24 +258,49 @@ impl TerminalSession {
     }
 
     fn shutdown(&mut self) {
-        let child_killer = self.child_killer.take();
-        if self
-            .worker
-            .as_ref()
-            .is_some_and(|worker| !worker.is_finished())
-            && let Some(mut child_killer) = child_killer
-            && let Err(error) = child_killer.kill()
-        {
-            eprintln!("failed to terminate shell while shutting down terminal worker: {error}");
-        }
         if let Some(commands) = self.commands.take()
             && commands.send(Command::Shutdown).is_err()
         {
             // The worker already stopped, so there is nothing left to signal.
         }
+        if let Some(terminator) = self.terminator.take()
+            && let Err(error) = terminator.terminate()
+        {
+            eprintln!("failed to terminate shell while shutting down terminal worker: {error}");
+        }
         if let Some(worker) = self.worker.take() {
             join_worker(worker);
         }
+    }
+}
+
+impl TerminalSessionHandle for TerminalSession {
+    fn key(&self, input: KeyInput) {
+        Self::key(self, input);
+    }
+
+    fn resize(&self, size: GridSize) {
+        Self::resize(self, size);
+    }
+
+    fn pointer(&self, input: PointerInput) {
+        Self::pointer(self, input);
+    }
+
+    fn wheel(&self, input: WheelInput) {
+        Self::wheel(self, input);
+    }
+
+    fn scroll_to(&self, offset_rows: u64) {
+        Self::scroll_to(self, offset_rows);
+    }
+
+    fn paste(&self, text: String) {
+        Self::paste(self, text);
+    }
+
+    fn request_selection_text(&self) -> async_channel::Receiver<Result<Option<String>, String>> {
+        Self::request_selection_text(self)
     }
 }
 
@@ -413,7 +469,7 @@ fn run_worker(
                 true
             }
             Command::ReaderStopped(read_error) => {
-                let status = match pty.child.wait() {
+                let status = match pty.wait_for_child() {
                     Ok(status) => format!("Shell exited ({status:?})"),
                     Err(wait_error) => match read_error {
                         Some(read_error) => format!(
@@ -581,11 +637,41 @@ mod tests {
     use std::sync::{Condvar, Mutex};
     use std::time::{Duration, Instant};
 
+    use portable_pty::{Child, ChildKiller, ExitStatus};
+
     use super::*;
 
     #[derive(Clone, Debug)]
     struct UnblockingKiller {
         killed: Arc<(Mutex<bool>, Condvar)>,
+    }
+
+    impl ChildKiller for UnblockingKiller {
+        fn kill(&mut self) -> std::io::Result<()> {
+            let (killed, wake) = &*self.killed;
+            *killed.lock().unwrap() = true;
+            wake.notify_all();
+            Ok(())
+        }
+
+        fn clone_killer(&self) -> Box<dyn ChildKiller + Send + Sync> {
+            Box::new(self.clone())
+        }
+    }
+
+    impl Child for UnblockingKiller {
+        fn try_wait(&mut self) -> std::io::Result<Option<ExitStatus>> {
+            let (killed, _) = &*self.killed;
+            Ok((*killed.lock().unwrap()).then(|| ExitStatus::with_exit_code(0)))
+        }
+
+        fn wait(&mut self) -> std::io::Result<ExitStatus> {
+            Ok(ExitStatus::with_exit_code(0))
+        }
+
+        fn process_id(&self) -> Option<u32> {
+            None
+        }
     }
 
     #[derive(Clone, Debug)]
@@ -601,19 +687,6 @@ mod tests {
 
         fn flush(&mut self) -> std::io::Result<()> {
             Ok(())
-        }
-    }
-
-    impl ChildKiller for UnblockingKiller {
-        fn kill(&mut self) -> std::io::Result<()> {
-            let (killed, wake) = &*self.killed;
-            *killed.lock().unwrap() = true;
-            wake.notify_all();
-            Ok(())
-        }
-
-        fn clone_killer(&self) -> Box<dyn ChildKiller + Send + Sync> {
-            Box::new(self.clone())
         }
     }
 
@@ -673,13 +746,13 @@ mod tests {
     }
 
     #[test]
-    fn shutdown_kills_the_child_before_joining_a_blocked_worker() {
+    fn shutdown_terminates_a_blocked_worker_before_joining_it() {
         let killed = Arc::new((Mutex::new(false), Condvar::new()));
         let worker_killed = Arc::clone(&killed);
-        let timed_out = Arc::new(Mutex::new(false));
-        let worker_timed_out = Arc::clone(&timed_out);
         let saw_shutdown = Arc::new(Mutex::new(false));
         let worker_saw_shutdown = Arc::clone(&saw_shutdown);
+        let worker_finished = Arc::new(Mutex::new(false));
+        let finished = Arc::clone(&worker_finished);
         let (commands, command_rx) = mpsc::channel();
         let worker = thread::spawn(move || {
             let (killed, wake) = &*worker_killed;
@@ -687,29 +760,36 @@ mod tests {
             let (guard, timeout) = wake
                 .wait_timeout_while(guard, Duration::from_secs(1), |killed| !*killed)
                 .unwrap();
-            *worker_timed_out.lock().unwrap() = timeout.timed_out();
+            assert!(!timeout.timed_out(), "worker was not unblocked");
             drop(guard);
             *worker_saw_shutdown.lock().unwrap() = matches!(
                 command_rx.recv_timeout(Duration::from_secs(1)),
                 Ok(Command::Shutdown)
             );
+            *finished.lock().unwrap() = true;
         });
         let mut session = TerminalSession {
             commands: Some(commands),
             worker: Some(worker),
-            child_killer: Some(Box::new(UnblockingKiller {
+            terminator: Some(PtyTerminator::for_test(Box::new(UnblockingKiller {
                 killed: Arc::clone(&killed),
-            })),
+            }))),
         };
 
         session.shutdown();
+        session.shutdown();
 
-        assert!(*killed.0.lock().unwrap());
-        assert!(!*timed_out.lock().unwrap());
-        assert!(*saw_shutdown.lock().unwrap());
-        assert!(session.commands.is_none());
-        assert!(session.worker.is_none());
-        assert!(session.child_killer.is_none());
+        assert_eq!(
+            (
+                *killed.0.lock().unwrap(),
+                *saw_shutdown.lock().unwrap(),
+                *worker_finished.lock().unwrap(),
+                session.commands.is_none(),
+                session.worker.is_none(),
+                session.terminator.is_none(),
+            ),
+            (true, true, true, true, true, true)
+        );
     }
 
     #[test]
@@ -717,7 +797,7 @@ mod tests {
         let session = TerminalSession {
             commands: None,
             worker: None,
-            child_killer: None,
+            terminator: None,
         };
 
         let result = session.request_selection_text().try_recv().unwrap();
@@ -732,7 +812,10 @@ mod tests {
             cell_width_px: 8,
             cell_height_px: 20,
         };
-        let (session, events) = TerminalSession::start(size).unwrap();
+        let StartedTerminalSession {
+            handle: session,
+            events,
+        } = NativeTerminalSessionFactory.start(size).unwrap();
 
         // The command renders a red X. The echoed command contains an X too, but
         // only the shell's output passes through the SGR sequence and becomes red.

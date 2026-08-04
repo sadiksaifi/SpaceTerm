@@ -1,9 +1,13 @@
+use std::rc::Rc;
+
 use gpui::{App, AppContext, Bounds, WindowBounds, WindowOptions, px, size};
 
-use crate::ui::TerminalPane;
+use crate::terminal::{NativeTerminalSessionFactory, TerminalSessionFactory};
+use crate::ui::PaneHost;
 
 pub(crate) fn open(cx: &mut App) {
     let bounds = Bounds::centered(None, size(px(900.0), px(580.0)), cx);
+    let session_factory: Rc<dyn TerminalSessionFactory> = Rc::new(NativeTerminalSessionFactory);
     let result = cx.open_window(
         WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
@@ -12,9 +16,9 @@ pub(crate) fn open(cx: &mut App) {
         },
         |window, cx| {
             window.set_window_title("Termspace");
-            let pane = cx.new(|cx| TerminalPane::new(window, cx));
-            pane.update(cx, |pane, _cx| pane.focus(window));
-            pane
+            let pane_host = cx.new(|cx| PaneHost::new(Rc::clone(&session_factory), window, cx));
+            pane_host.update(cx, |pane_host, cx| pane_host.focus(window, cx));
+            pane_host
         },
     );
 

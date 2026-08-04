@@ -1,4 +1,5 @@
 mod app;
+mod domain;
 mod platform;
 mod terminal;
 mod theme;
