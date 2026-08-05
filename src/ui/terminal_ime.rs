@@ -31,6 +31,17 @@ impl TerminalIme {
             .map_or(0..0, |marked| marked.selected_utf16.clone())
     }
 
+    pub(super) fn text_for_utf16_range(
+        &self,
+        range_utf16: Range<usize>,
+    ) -> Option<(String, Range<usize>)> {
+        let marked = self.marked.as_ref()?;
+        let bytes = utf16_range_to_bytes(&marked.text, range_utf16);
+        let adjusted = byte_offset_to_utf16(&marked.text, bytes.start)
+            ..byte_offset_to_utf16(&marked.text, bytes.end);
+        Some((marked.text[bytes].to_owned(), adjusted))
+    }
+
     pub(super) fn replace_and_mark(
         &mut self,
         replacement_utf16: Option<Range<usize>>,
@@ -44,6 +55,12 @@ impl TerminalIme {
         let replacement_utf16 =
             replacement_utf16.unwrap_or_else(|| 0..existing.encode_utf16().count());
         let replacement = utf16_range_to_bytes(&existing, replacement_utf16);
+        let replacement_start_utf16 = byte_offset_to_utf16(&existing, replacement.start);
+        let new_text_utf16_len = new_text.encode_utf16().count();
+        let relative_selection = normalized_utf16_range(
+            new_text,
+            selected_utf16.unwrap_or(new_text_utf16_len..new_text_utf16_len),
+        );
         let mut text = existing;
         text.replace_range(replacement, new_text);
 
@@ -52,9 +69,11 @@ impl TerminalIme {
             return;
         }
 
-        let utf16_len = text.encode_utf16().count();
-        let selected_utf16 =
-            normalized_utf16_range(&text, selected_utf16.unwrap_or(utf16_len..utf16_len));
+        let selected_utf16 = normalized_utf16_range(
+            &text,
+            replacement_start_utf16 + relative_selection.start
+                ..replacement_start_utf16 + relative_selection.end,
+        );
         self.marked = Some(MarkedText {
             text,
             selected_utf16,
@@ -63,13 +82,12 @@ impl TerminalIme {
 
     pub(super) fn cancel(&mut self) {
         self.marked = None;
+        self.pending_commit = None;
     }
 
     pub(super) fn commit(&mut self, text: &str) {
         self.marked = None;
-        if !text.is_empty() {
-            self.pending_commit = Some(text.to_owned());
-        }
+        self.pending_commit = (!text.is_empty()).then(|| text.to_owned());
     }
 
     pub(super) fn take_commit(&mut self) -> Option<String> {
@@ -212,9 +230,20 @@ mod tests {
         let mut ime = TerminalIme::default();
         ime.replace_and_mark(None, "A😀B", Some(3..3));
 
-        ime.replace_and_mark(Some(1..3), "界", Some(2..2));
+        ime.replace_and_mark(Some(1..3), "界", Some(1..1));
 
         assert_eq!(ime.marked_text(), Some("A界B"));
+        assert_eq!(ime.selected_range(), 2..2);
+    }
+
+    #[test]
+    fn replacement_selection_is_relative_to_inserted_marked_text() {
+        let mut ime = TerminalIme::default();
+        ime.replace_and_mark(None, "ab", Some(2..2));
+
+        ime.replace_and_mark(Some(1..2), "界x", Some(1..1));
+
+        assert_eq!(ime.marked_text(), Some("a界x"));
         assert_eq!(ime.selected_range(), 2..2);
     }
 
@@ -225,6 +254,18 @@ mod tests {
 
         assert_eq!(ime.marked_text(), Some("A😀B"));
         assert_eq!(ime.selected_range(), 1..1);
+    }
+
+    #[test]
+    fn marked_substrings_report_adjusted_utf16_ranges() {
+        let mut ime = TerminalIme::default();
+        ime.replace_and_mark(None, "A😀B", Some(3..3));
+
+        assert_eq!(ime.text_for_utf16_range(2..2), Some(("".to_owned(), 1..1)));
+        assert_eq!(
+            ime.text_for_utf16_range(1..3),
+            Some(("😀".to_owned(), 1..3))
+        );
     }
 
     #[test]

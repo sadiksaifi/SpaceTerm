@@ -1,9 +1,10 @@
 use std::sync::Arc;
 
 use gpui::{
-    App, BorderStyle, Bounds, ContentMask, Element, ElementId, Font, FontFallbacks, FontFeatures,
-    GlobalElementId, InspectorElementId, IntoElement, LayoutId, PaintQuad, Pixels, ShapedLine,
-    SharedString, Style, TextRun, Window, fill, font, outline, point, px, relative, rgba, size,
+    App, BorderStyle, Bounds, ContentMask, Element, ElementId, ElementInputHandler, Entity,
+    FocusHandle, Font, FontFallbacks, FontFeatures, GlobalElementId, InspectorElementId,
+    IntoElement, LayoutId, PaintQuad, Pixels, ShapedLine, SharedString, Style, TextRun,
+    UnderlineStyle, Window, fill, font, outline, point, px, relative, rgba, size,
 };
 use unicode_bidi::{BidiClass, bidi_class};
 
@@ -12,6 +13,9 @@ use crate::terminal::{
     ScreenSnapshot, TerminalColor, TerminalColorsSnapshot,
 };
 use crate::theme::{ACTIVE_THEME, Color};
+
+use super::terminal_ime::PreeditLayout;
+use super::terminal_pane::TerminalPane;
 
 pub(crate) struct TerminalGridCache {
     source_rows: Vec<RowSnapshot>,
@@ -90,6 +94,7 @@ impl TerminalGridCache {
 
 pub(crate) struct TerminalGridElement {
     background: Color,
+    foreground: Color,
     rows: Arc<[Arc<RowPaintInput>]>,
     columns: usize,
     font_size: Pixels,
@@ -98,17 +103,27 @@ pub(crate) struct TerminalGridElement {
     cursor: Option<(CursorPositionSnapshot, CellSnapshot)>,
     cursor_style: CursorSnapshot,
     font_family: SharedString,
+    preedit: Option<PreeditLayout>,
+    focus_handle: FocusHandle,
+    input: Entity<TerminalPane>,
+}
+
+pub(crate) struct TerminalGridConfiguration {
+    pub(crate) terminal_input_focused: bool,
+    pub(crate) font_family: SharedString,
+    pub(crate) font_size: Pixels,
+    pub(crate) line_height: Pixels,
+    pub(crate) cell_width: Pixels,
+    pub(crate) preedit: Option<PreeditLayout>,
+    pub(crate) focus_handle: FocusHandle,
+    pub(crate) input: Entity<TerminalPane>,
 }
 
 impl TerminalGridElement {
     pub(crate) fn new(
         screen: &Arc<ScreenSnapshot>,
-        terminal_input_focused: bool,
-        font_family: &SharedString,
-        font_size: Pixels,
-        line_height: Pixels,
-        cell_width: Pixels,
         cache: &mut TerminalGridCache,
+        configuration: TerminalGridConfiguration,
     ) -> Self {
         let cursor = screen.cursor.position.and_then(|position| {
             screen
@@ -118,22 +133,31 @@ impl TerminalGridElement {
                 .cloned()
                 .map(|cell| (position, cell))
         });
-        let cursor_style = presented_cursor_style(screen.cursor, terminal_input_focused);
+        let cursor_style =
+            presented_cursor_style(screen.cursor, configuration.terminal_input_focused);
         Self {
             background: screen.background,
+            foreground: if screen.colors.reversed {
+                screen.colors.background
+            } else {
+                screen.colors.foreground
+            },
             rows: cache.prepare(
                 &screen.rows,
                 &screen.colors,
-                font_family,
+                &configuration.font_family,
                 screen.cursor.position,
             ),
             columns: screen.rows.first().map_or(0, |row| row.len()),
-            font_size,
-            line_height,
-            cell_width,
+            font_size: configuration.font_size,
+            line_height: configuration.line_height,
+            cell_width: configuration.cell_width,
             cursor,
             cursor_style,
-            font_family: font_family.clone(),
+            font_family: configuration.font_family,
+            preedit: configuration.preedit,
+            focus_handle: configuration.focus_handle,
+            input: configuration.input,
         }
     }
 }
@@ -157,6 +181,9 @@ struct PreparedText {
 struct PreparedRow {
     text: Vec<PreparedText>,
     backgrounds: Vec<PaintQuad>,
+    overlay_text: Vec<PreparedText>,
+    overlay_backgrounds: Vec<PaintQuad>,
+    overlay_caret: Option<PaintQuad>,
 }
 
 pub(crate) struct PrepaintState {
@@ -244,7 +271,54 @@ impl Element for TerminalGridElement {
 
             let mut text: Vec<PreparedText> = text;
             let mut backgrounds = backgrounds;
-            if self.cursor_style.visible
+            let mut overlay_text = Vec::new();
+            let mut overlay_backgrounds = Vec::new();
+            let mut overlay_caret = None;
+            if let Some(preedit) = &self.preedit {
+                for cluster in preedit
+                    .clusters
+                    .iter()
+                    .filter(|cluster| cluster.row == row_index)
+                {
+                    let cluster_left = grid_left + self.cell_width * cluster.column as f32;
+                    let width_cells = usize::from(cluster.width).max(1);
+                    overlay_backgrounds.push(fill(
+                        Bounds::new(
+                            point(cluster_left, row_top),
+                            size(self.cell_width * width_cells as f32, self.line_height),
+                        ),
+                        gpui_color(self.background),
+                    ));
+                    let color = gpui_color(self.foreground).into();
+                    overlay_text.push(PreparedText {
+                        line: window.text_system().shape_line(
+                            cluster.text.clone().into(),
+                            self.font_size,
+                            &[TextRun {
+                                len: cluster.text.len(),
+                                font: terminal_cell_font(&self.font_family, false, false),
+                                color,
+                                background_color: None,
+                                underline: Some(UnderlineStyle {
+                                    thickness: px(1.0),
+                                    color: Some(color),
+                                    wavy: false,
+                                }),
+                                strikethrough: None,
+                            }],
+                            None,
+                        ),
+                        origin: point(cluster_left, row_top),
+                    });
+                }
+                if preedit.caret.row == row_index {
+                    let caret_left = grid_left + self.cell_width * preedit.caret.column as f32;
+                    overlay_caret = Some(fill(
+                        Bounds::new(point(caret_left, row_top), size(px(1.0), self.line_height)),
+                        gpui_color(self.cursor_style.color),
+                    ));
+                }
+            } else if self.cursor_style.visible
                 && let Some((position, cell)) = &self.cursor
                 && usize::from(position.row) == row_index
             {
@@ -289,7 +363,13 @@ impl Element for TerminalGridElement {
                 }
             }
 
-            prepared_rows.push(PreparedRow { text, backgrounds });
+            prepared_rows.push(PreparedRow {
+                text,
+                backgrounds,
+                overlay_text,
+                overlay_backgrounds,
+                overlay_caret,
+            });
         }
 
         PrepaintState {
@@ -322,8 +402,24 @@ impl Element for TerminalGridElement {
                         eprintln!("failed to paint terminal row: {error:#}");
                     }
                 }
+                for background in row.overlay_backgrounds.drain(..) {
+                    window.paint_quad(background);
+                }
+                for text in row.overlay_text.drain(..) {
+                    if let Err(error) = text.line.paint(text.origin, self.line_height, window, cx) {
+                        eprintln!("failed to paint marked terminal text: {error:#}");
+                    }
+                }
+                if let Some(caret) = row.overlay_caret.take() {
+                    window.paint_quad(caret);
+                }
             }
         });
+        window.handle_input(
+            &self.focus_handle,
+            ElementInputHandler::new(bounds, self.input.clone()),
+            cx,
+        );
     }
 }
 

@@ -31,6 +31,7 @@
 | **PTY** | The macOS pseudoterminal that connects a Terminal Emulator to its Shell Process. | Terminal, shell |
 | **Shell Process** | The command interpreter process launched for a Pane through its PTY. | Terminal, session |
 | **Scrollback** | Terminal output retained above the currently visible grid. | Workspace scroll, history |
+| **Marked Text** | Transient input-method preedit owned by the Pane with Terminal Input Focus; it is presented at the Cursor but is not Terminal Emulator or PTY input until committed. | terminal output, committed text |
 
 ## Lifecycle actions
 
@@ -54,6 +55,7 @@
 - A **Window** belongs to exactly one **Workspace** and cannot be linked, shared, or attached elsewhere.
 - A **Window** owns one or more **Panes**, exactly one **Focused Pane**, and one arbitrarily nested **Pane Layout**.
 - **Terminal Input Focus** is derived transient state and never replaces or duplicates a Window's **Focused Pane** identity.
+- **Marked Text** exists only while its Pane has **Terminal Input Focus**; cancellation or focus loss discards it without Terminal Session input.
 - A **Pane** belongs to exactly one **Window** and owns one **Terminal Session**.
 - A **Split** has exactly two child **Pane Layouts**; each child is either another **Split** or a **Pane**.
 - Closing any hierarchy entity closes every **Terminal Session**, **PTY**, and **Shell Process** it owns.

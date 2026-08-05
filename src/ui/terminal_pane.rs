@@ -1,18 +1,20 @@
+use std::ops::Range;
 use std::sync::Arc;
 
 use gpui::prelude::*;
 use gpui::{
-    App, Bounds, ClipboardItem, Context, Entity, EventEmitter, FocusHandle, IntoElement,
-    KeyDownEvent, KeyUpEvent, ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, Pixels, Render, ScrollWheelEvent, SharedString, Task, TextRun, Window, div, font,
-    px, rgba,
+    App, Bounds, ClipboardItem, Context, Entity, EntityInputHandler, EventEmitter, FocusHandle,
+    IntoElement, KeyDownEvent, KeyUpEvent, ModifiersChangedEvent, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, Pixels, Render, ScrollWheelEvent, SharedString, Task, TextRun,
+    UTF16Selection, Window, div, font, point, px, rgba, size,
 };
 
 use super::overlay_scrollbar::{OverlayScrollbar, OverlayScrollbarEvent, ScrollMetrics};
 use super::terminal_element::{
-    TerminalGridCache, TerminalGridElement, terminal_grid_content_bounds,
+    TerminalGridCache, TerminalGridConfiguration, TerminalGridElement, terminal_grid_content_bounds,
 };
 use super::terminal_focus::{TerminalFocusCoordinator, TerminalFocusFacts, TerminalProductFocus};
+use super::terminal_ime::{PreeditLayout, PreeditPosition, TerminalIme, layout_preedit};
 use super::{
     CopySelection, DecreaseTerminalFontSize, IncreaseTerminalFontSize, PasteClipboard,
     ResetTerminalFontSize, TERMINAL_KEY_CONTEXT,
@@ -71,6 +73,8 @@ pub(crate) struct TerminalPane {
     scrollbar: Entity<OverlayScrollbar<u64>>,
     render_cache: TerminalGridCache,
     keyboard_bridge: MacosKeyboardBridge,
+    ime: TerminalIme,
+    ime_suppressed_keys: Vec<PhysicalKey>,
     _event_task: Option<Task<()>>,
 }
 
@@ -133,6 +137,8 @@ impl TerminalPane {
             scrollbar,
             render_cache: TerminalGridCache::new(),
             keyboard_bridge: MacosKeyboardBridge::new(OptionAsAltPolicy::default()),
+            ime: TerminalIme::default(),
+            ime_suppressed_keys: Vec::new(),
             _event_task: None,
         }
     }
@@ -162,11 +168,28 @@ impl TerminalPane {
         let focused = self.terminal_input_focused(window);
         if self.terminal_input_focus != focused {
             self.terminal_input_focus = focused;
+            if !focused {
+                self.ime.cancel();
+                self.ime_suppressed_keys.clear();
+            }
             if let Some(session) = &self.session {
                 session.focus(focused);
             }
         }
         focused
+    }
+
+    fn preedit_layout(&self) -> Option<PreeditLayout> {
+        let text = self.ime.marked_text()?;
+        let position = self.screen.cursor.position?;
+        let columns = self.screen.rows.first()?.len();
+        Some(layout_preedit(
+            text,
+            usize::from(position.row),
+            usize::from(position.column),
+            columns,
+            self.ime.selected_range().end,
+        ))
     }
 
     pub(crate) fn title(&self) -> SharedString {
@@ -308,6 +331,18 @@ impl TerminalPane {
         let input = NativeKeyEvent::current_key(action)
             .map(|event| self.keyboard_bridge.translate(event))
             .unwrap_or_else(|| encode_key(event));
+        if self.ime.marked_text().is_some() {
+            if let KeyTranslation::Encoded(input) = &input
+                && input.physical_key != PhysicalKey::Unidentified
+                && !self.ime_suppressed_keys.contains(&input.physical_key)
+            {
+                self.ime_suppressed_keys.push(input.physical_key);
+            }
+            if !matches!(input, KeyTranslation::Unhandled(_)) {
+                cx.stop_propagation();
+            }
+            return;
+        }
         if self.send_key_translation(input) {
             cx.stop_propagation();
         }
@@ -320,6 +355,22 @@ impl TerminalPane {
         let input = NativeKeyEvent::current_key(KeyAction::Release)
             .map(|event| self.keyboard_bridge.translate(event))
             .unwrap_or_else(|| encode_keystroke(&event.keystroke, KeyAction::Release));
+        if let KeyTranslation::Encoded(input) = &input
+            && let Some(index) = self
+                .ime_suppressed_keys
+                .iter()
+                .position(|key| *key == input.physical_key)
+        {
+            self.ime_suppressed_keys.swap_remove(index);
+            cx.stop_propagation();
+            return;
+        }
+        if self.ime.marked_text().is_some() {
+            if !matches!(input, KeyTranslation::Unhandled(_)) {
+                cx.stop_propagation();
+            }
+            return;
+        }
         if self.send_key_translation(input) {
             cx.stop_propagation();
         }
@@ -579,6 +630,118 @@ impl TerminalPane {
 
 impl EventEmitter<TerminalPaneEvent> for TerminalPane {}
 
+impl EntityInputHandler for TerminalPane {
+    fn text_for_range(
+        &mut self,
+        range: Range<usize>,
+        adjusted_range: &mut Option<Range<usize>>,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<String> {
+        let (text, adjusted) = self.ime.text_for_utf16_range(range)?;
+        *adjusted_range = Some(adjusted);
+        Some(text)
+    }
+
+    fn selected_text_range(
+        &mut self,
+        ignore_disabled_input: bool,
+        window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<UTF16Selection> {
+        if !ignore_disabled_input && !self.terminal_input_focused(window) {
+            return None;
+        }
+        Some(UTF16Selection {
+            range: self.ime.selected_range(),
+            reversed: false,
+        })
+    }
+
+    fn marked_text_range(
+        &self,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<Range<usize>> {
+        self.ime.marked_range()
+    }
+
+    fn unmark_text(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        self.ime.cancel();
+        cx.notify();
+    }
+
+    fn replace_text_in_range(
+        &mut self,
+        _range: Option<Range<usize>>,
+        text: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.terminal_input_focused(window) {
+            self.ime.cancel();
+            return;
+        }
+        self.ime.commit(text);
+        if let Some(text) = self.ime.take_commit() {
+            self.send_key_translation(KeyTranslation::TextInput(text));
+        }
+        cx.notify();
+    }
+
+    fn replace_and_mark_text_in_range(
+        &mut self,
+        range: Option<Range<usize>>,
+        new_text: &str,
+        new_selected_range: Option<Range<usize>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.terminal_input_focused(window) {
+            self.ime.cancel();
+            return;
+        }
+        self.ime
+            .replace_and_mark(range, new_text, new_selected_range);
+        cx.notify();
+    }
+
+    fn bounds_for_range(
+        &mut self,
+        range_utf16: Range<usize>,
+        element_bounds: Bounds<Pixels>,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<Bounds<Pixels>> {
+        let position = self.screen.cursor.position?;
+        let columns = self.screen.rows.first()?.len();
+        let marked_text = self.ime.marked_text().unwrap_or("");
+        let layout = layout_preedit(
+            marked_text,
+            usize::from(position.row),
+            usize::from(position.column),
+            columns,
+            range_utf16.end,
+        );
+        Some(ime_candidate_bounds(
+            element_bounds,
+            columns,
+            self.cell_width,
+            px(self.line_height),
+            layout.caret,
+        ))
+    }
+
+    fn character_index_for_point(
+        &mut self,
+        _point: gpui::Point<Pixels>,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<usize> {
+        Some(self.ime.selected_range().end)
+    }
+}
+
 impl Drop for TerminalPane {
     fn drop(&mut self) {
         self.close();
@@ -593,14 +756,20 @@ impl Render for TerminalPane {
         let status = self.status.clone();
         self.sync_scrollbar(cx);
         let scrollbar = self.scrollbar.clone();
+        let preedit = self.preedit_layout();
         let terminal_grid = TerminalGridElement::new(
             &self.screen,
-            terminal_input_focused,
-            &self.font_family,
-            px(self.font_size),
-            px(self.line_height),
-            self.cell_width,
             &mut self.render_cache,
+            TerminalGridConfiguration {
+                terminal_input_focused,
+                font_family: self.font_family.clone(),
+                font_size: px(self.font_size),
+                line_height: px(self.line_height),
+                cell_width: self.cell_width,
+                preedit,
+                focus_handle: self.focus_handle.clone(),
+                input: cx.entity(),
+            },
         );
 
         div()
@@ -713,6 +882,23 @@ fn terminal_geometry(
         LogicalCellSize::new(f32::from(cell_width), line_height),
         backing_scale,
         CellGridSize::new(MIN_COLS, MIN_ROWS),
+    )
+}
+
+fn ime_candidate_bounds(
+    element_bounds: Bounds<Pixels>,
+    columns: usize,
+    cell_width: Pixels,
+    line_height: Pixels,
+    caret: PreeditPosition,
+) -> Bounds<Pixels> {
+    let grid_left = terminal_grid_content_bounds(element_bounds, columns, cell_width).left();
+    Bounds::new(
+        point(
+            grid_left + cell_width * caret.column as f32,
+            element_bounds.top() + line_height * caret.row as f32,
+        ),
+        size(cell_width, line_height),
     )
 }
 
@@ -1259,6 +1445,17 @@ mod tests {
         assert_eq!(select_terminal_font(&available), "Menlo");
     }
 
+    #[test]
+    fn ime_candidate_bounds_follow_wrapped_wide_preedit_caret() {
+        let element_bounds = Bounds::new(point(px(10.0), px(20.0)), size(px(50.0), px(60.0)));
+        let layout = layout_preedit("界", 0, 4, 5, 1);
+
+        assert_eq!(
+            ime_candidate_bounds(element_bounds, 5, px(10.0), px(20.0), layout.caret),
+            Bounds::new(point(px(30.0), px(40.0)), size(px(10.0), px(20.0)))
+        );
+    }
+
     #[gpui::test]
     fn native_shaper_resolves_emoji_through_terminal_fallbacks(cx: &mut TestAppContext) {
         let (_pane, cx) = terminal_pane(cx);
@@ -1292,6 +1489,143 @@ mod tests {
                     .any(|glyph| glyph.is_emoji)
             );
         });
+    }
+
+    #[gpui::test]
+    fn marked_text_stays_local_and_commits_each_input_method_once(cx: &mut TestAppContext) {
+        let (pane, cx, records) = connected_terminal_pane(cx);
+        let screen_before = pane.read_with(cx, |pane, _| pane.screen.clone());
+        let committed = [
+            ("´", "é"),
+            ("にほん", "日本"),
+            ("ㅎㅏㄴ", "한"),
+            ("zhong", "中"),
+            ("👩\u{200d}", "👩\u{200d}💻"),
+        ];
+
+        for (marked, commit) in committed {
+            let key_count_before_mark = records
+                .commands()
+                .iter()
+                .filter(|call| matches!(call.command, RecordedSessionCommand::Key(_)))
+                .count();
+            cx.update(|window, app| {
+                pane.update(app, |pane, pane_cx| {
+                    pane.replace_and_mark_text_in_range(
+                        None,
+                        marked,
+                        Some(marked.encode_utf16().count()..marked.encode_utf16().count()),
+                        window,
+                        pane_cx,
+                    );
+                });
+            });
+            assert_eq!(
+                records
+                    .commands()
+                    .iter()
+                    .filter(|call| matches!(call.command, RecordedSessionCommand::Key(_)))
+                    .count(),
+                key_count_before_mark
+            );
+            assert!(pane.read_with(cx, |pane, _| Arc::ptr_eq(&pane.screen, &screen_before)));
+            cx.update(|window, app| {
+                pane.update(app, |pane, pane_cx| {
+                    pane.replace_text_in_range(None, commit, window, pane_cx);
+                });
+            });
+        }
+
+        let commits = records
+            .commands()
+            .into_iter()
+            .filter_map(|call| match call.command {
+                RecordedSessionCommand::Key(input) if input.is_text_input() => input.text,
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(commits, ["é", "日本", "한", "中", "👩\u{200d}💻"]);
+    }
+
+    #[gpui::test]
+    fn cancellation_and_focus_loss_discard_marked_text_without_bytes(cx: &mut TestAppContext) {
+        let (pane, cx, records) = connected_terminal_pane(cx);
+        let mark = |pane: &Entity<TerminalPane>, cx: &mut VisualTestContext| {
+            cx.update(|window, app| {
+                pane.update(app, |pane, pane_cx| {
+                    pane.replace_and_mark_text_in_range(None, "かな", Some(2..2), window, pane_cx);
+                });
+            });
+        };
+
+        mark(&pane, cx);
+        cx.update(|window, app| {
+            pane.update(app, |pane, pane_cx| pane.unmark_text(window, pane_cx));
+        });
+        assert!(pane.read_with(cx, |pane, _| pane.ime.marked_text().is_none()));
+
+        mark(&pane, cx);
+        cx.update(|_window, app| {
+            pane.update(app, |pane, app| {
+                pane.set_product_focus(TerminalProductFocus {
+                    focused_pane: false,
+                    ..TerminalProductFocus::default()
+                });
+                app.notify();
+            });
+        });
+        cx.run_until_parked();
+
+        assert!(pane.read_with(cx, |pane, _| pane.ime.marked_text().is_none()));
+        assert!(
+            records
+                .commands()
+                .iter()
+                .all(|call| !matches!(call.command, RecordedSessionCommand::Key(_)))
+        );
+    }
+
+    #[gpui::test]
+    fn raw_key_callbacks_are_suppressed_while_marked_text_is_active(cx: &mut TestAppContext) {
+        let (pane, cx, records) = connected_terminal_pane(cx);
+        cx.update(|window, app| {
+            pane.update(app, |pane, pane_cx| {
+                pane.replace_and_mark_text_in_range(None, "に", Some(1..1), window, pane_cx);
+            });
+        });
+
+        cx.simulate_event(event("a", Some("a"), Modifiers::default()));
+
+        assert!(
+            records
+                .commands()
+                .iter()
+                .all(|call| !matches!(call.command, RecordedSessionCommand::Key(_)))
+        );
+
+        cx.update(|window, app| {
+            pane.update(app, |pane, pane_cx| {
+                pane.replace_text_in_range(None, "日", window, pane_cx);
+            });
+        });
+        cx.simulate_event(KeyUpEvent {
+            keystroke: Keystroke {
+                key: "a".to_owned(),
+                key_char: Some("a".to_owned()),
+                modifiers: Modifiers::default(),
+            },
+        });
+
+        let keys = records
+            .commands()
+            .into_iter()
+            .filter_map(|call| match call.command {
+                RecordedSessionCommand::Key(input) => Some(input),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(keys.len(), 1);
+        assert!(keys[0].is_text_input());
     }
 
     #[test]

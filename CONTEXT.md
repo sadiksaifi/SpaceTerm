@@ -177,10 +177,12 @@ resize burst cannot create an unbounded control backlog.
 Terminal key input crosses the Terminal Session command lane as one ordered, typed event carrying
 press, repeat, or release action; physical and native identity; logical identity; UTF-8 text and an
 unshifted codepoint; and full and consumed side-aware modifiers. Application Actions resolve before
-the raw terminal handler. Unsupported physical identities produce a typed error and never degrade
-to guessed terminal bytes. A worker-owned keyboard protocol Module reads Terminal Emulator modes
-for every event and delegates cursor, keypad, DECBKM, modifyOtherKeys, fixterms, and negotiated
-Kitty keyboard encoding to `libghostty-vt`; UI code never constructs terminal escape sequences.
+the raw terminal handler. An input-method commit is the explicit typed exception to physical-key
+identity and carries exact committed UTF-8 through the same ordered lane without entering held-key
+state. Unsupported ordinary physical identities produce a typed error and never degrade to guessed
+terminal bytes. A worker-owned keyboard protocol Module reads Terminal Emulator modes for every
+event and delegates cursor, keypad, DECBKM, modifyOtherKeys, fixterms, and negotiated Kitty keyboard
+encoding to `libghostty-vt`; UI code never constructs terminal escape sequences.
 
 ### Native macOS Keyboard Bridge
 
@@ -191,6 +193,18 @@ unshifted codepoints, and consumed modifiers from each event, so input-source ch
 cached layout state or Terminal Session restart. It balances left/right modifier transitions and
 carries the injected Option-as-Alt policy with every ordered key event. Key releases use the same
 Terminal Session command lane as presses and repeats.
+
+### Native Input Method Composition
+
+The Pane implements GPUI's entity input handler, which supplies AppKit's native text-input client
+and UTF-16 range contract without a parallel platform view. Marked Text is Pane-local presentation
+state: updates, replacements, cancellation, and focus loss never mutate the Terminal Emulator or
+write PTY bytes. Its complete grapheme clusters use the Terminal Emulator's width rules, wrap wide
+clusters before the right edge, and overlay the immutable grid with an underline and composition
+caret. Candidate-window bounds derive from that caret and the same logical cell geometry used for
+rendering. A nonempty commit clears Marked Text and becomes exactly one typed input-method event on
+the reliable Terminal Session command lane; the worker emits its UTF-8 once in order and never
+tracks it as a held key.
 
 ### Workspace-Bound Terminal Creation
 
