@@ -1007,6 +1007,10 @@ impl TerminalEmulator {
     }
 
     pub(crate) fn snapshot(&mut self) -> Result<Option<Arc<ScreenSnapshot>>, Error> {
+        if self.terminal.mode(Mode::SYNC_OUTPUT)? {
+            return Ok(None);
+        }
+
         let pending_title = self.pending_title.borrow_mut().take();
         let title_changed = pending_title
             .as_ref()
@@ -2064,6 +2068,19 @@ mod tests {
 
         assert!(emulator.snapshot().unwrap().is_some());
         assert!(emulator.snapshot().unwrap().is_none());
+    }
+
+    #[test]
+    fn synchronized_output_should_publish_only_the_completed_transaction() {
+        let mut emulator = emulator(16, 2);
+        let _ = emulator.snapshot().unwrap();
+
+        emulator.feed(b"\x1b[?2026hpartial");
+        assert!(emulator.snapshot().unwrap().is_none());
+
+        emulator.feed(b" complete\x1b[?2026l");
+        let completed = emulator.snapshot().unwrap().unwrap();
+        assert!(row_text(&completed, 0).starts_with("partial complete"));
     }
 
     #[test]
