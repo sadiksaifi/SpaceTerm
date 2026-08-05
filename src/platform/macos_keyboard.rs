@@ -354,4 +354,58 @@ mod tests {
             ]
         );
     }
+
+    #[test]
+    fn translation_modifiers_are_consumed_without_hiding_control_or_command() {
+        let bridge = MacosKeyboardBridge::new(OptionAsAltPolicy::Both);
+        let mut event = native(0, "A");
+        event.modifiers = NativeModifiers {
+            shift: true,
+            alt: true,
+            control: true,
+            platform: true,
+            shift_right: true,
+            alt_right: true,
+            control_right: true,
+            platform_right: true,
+            ..NativeModifiers::default()
+        };
+
+        let input = bridge.translate(event).unwrap();
+        assert_eq!(
+            input.consumed_modifiers,
+            InputModifiers {
+                shift: true,
+                alt: true,
+                shift_right: true,
+                alt_right: true,
+                ..InputModifiers::default()
+            }
+        );
+        assert!(input.modifiers.control);
+        assert!(input.modifiers.platform);
+    }
+
+    #[test]
+    fn dead_key_precursors_retain_identity_without_committing_text() {
+        let bridge = MacosKeyboardBridge::new(OptionAsAltPolicy::None);
+        let event = NativeKeyEvent {
+            action: KeyAction::Press,
+            native_key_code: 14,
+            characters: None,
+            characters_ignoring_modifiers: Some("´".to_owned()),
+            unmodified_characters: Some("e".to_owned()),
+            modifiers: NativeModifiers {
+                alt: true,
+                alt_left: true,
+                ..NativeModifiers::default()
+            },
+        };
+
+        let input = bridge.translate(event).unwrap();
+        assert_eq!(input.physical_key, PhysicalKey::E);
+        assert_eq!(input.logical_key, "´");
+        assert_eq!(input.text, None);
+        assert_eq!(input.unshifted_codepoint, Some('e'));
+    }
 }
