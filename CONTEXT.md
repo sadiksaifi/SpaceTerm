@@ -133,6 +133,15 @@ damage only the previously and currently occupied viewport rows. Terminal Presen
 filled block above backgrounds and selections and recolors its covered glyph, while bar and
 underline cursors add thin geometry without replacing text.
 
+### Terminal Input Focus
+
+Terminal Input Focus is a pure derived fact and is distinct from the Window-owned Focused Pane
+identity. The Terminal Focus Coordinator combines Active Workspace, Active Window, Focused Pane,
+terminal responder ownership, key Operating-System Window, active application, and temporary UI
+blockers. Only the complete true state admits terminal key input and presents the negotiated
+cursor. Any false fact preserves emulator visibility but presents a steady, outline-only hollow
+block; restoring every fact restores the negotiated shape and blink request.
+
 ### Unified Terminal Geometry
 
 `TerminalGeometry` is the sole conversion contract between GPUI logical viewport and cell metrics,

@@ -18,7 +18,8 @@
 | --- | --- | --- |
 | **Active Workspace** | The one Workspace currently presented by SpaceTerm. | Selected Workspace, focused Workspace, attached Workspace |
 | **Active Window** | The one Window selected within a Workspace. | Tab, selected Window, focused Window |
-| **Focused Pane** | The one Pane in a Window that is the target for terminal input. | Active Pane, selected Pane |
+| **Focused Pane** | The one Pane selected by a Window for Pane operations and focus restoration. | Active Pane, selected Pane, Terminal Input Focus |
+| **Terminal Input Focus** | Transient truth that a Pane may accept terminal key input because its Workspace and Window are Active, it is the Focused Pane and current responder, its Operating-System Window and SpaceTerm are active, and no temporary UI owner blocks it. | Focused Pane, selected terminal |
 | **Zoomed Pane** | The Focused Pane temporarily shown alone while its Window's Pane Layout remains intact. | Maximized Window, fullscreen Pane |
 
 ## Terminal runtime
@@ -52,6 +53,7 @@
 - A **Workspace** owns one or more **Windows** and has exactly one **Active Window**.
 - A **Window** belongs to exactly one **Workspace** and cannot be linked, shared, or attached elsewhere.
 - A **Window** owns one or more **Panes**, exactly one **Focused Pane**, and one arbitrarily nested **Pane Layout**.
+- **Terminal Input Focus** is derived transient state and never replaces or duplicates a Window's **Focused Pane** identity.
 - A **Pane** belongs to exactly one **Window** and owns one **Terminal Session**.
 - A **Split** has exactly two child **Pane Layouts**; each child is either another **Split** or a **Pane**.
 - Closing any hierarchy entity closes every **Terminal Session**, **PTY**, and **Shell Process** it owns.
@@ -77,5 +79,6 @@
 - "Session" can incorrectly imply a tmux-style **Workspace** or describe a Pane's runtime; never use bare "session" for hierarchy concepts, and use **Terminal Session** only for the qualified runtime.
 - tmux-inspired layout does not imply a server/client model; do not describe SpaceTerm concepts as clients, attached sessions, or shared Windows.
 - "Active," "focused," and "selected" were used as near-synonyms; reserve **Active** for Workspace and Window state and **Focused** for Pane state.
+- **Focused Pane** does not imply **Terminal Input Focus** while another responder, menu, modal, Operating-System Window, or application owns input.
 - "Terminal" can mean the application, emulator, runtime, or visible region; prefer **SpaceTerm**, **Terminal Emulator**, **Terminal Session**, or **Pane** according to the intended concept.
 - "Horizontal split" and "vertical split" can describe either divider orientation or Pane placement; use the user-facing actions **Split Right** and **Split Down**, and use an explicitly named split axis only in implementation discussions.

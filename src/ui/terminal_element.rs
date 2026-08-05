@@ -1,9 +1,9 @@
 use std::sync::Arc;
 
 use gpui::{
-    App, Bounds, ContentMask, Element, ElementId, FontFeatures, GlobalElementId,
+    App, BorderStyle, Bounds, ContentMask, Element, ElementId, FontFeatures, GlobalElementId,
     InspectorElementId, IntoElement, LayoutId, PaintQuad, Pixels, ShapedLine, SharedString, Style,
-    TextRun, Window, fill, font, point, px, relative, rgba, size,
+    TextRun, Window, fill, font, outline, point, px, relative, rgba, size,
 };
 
 use crate::terminal::{
@@ -94,6 +94,7 @@ pub(crate) struct TerminalGridElement {
 impl TerminalGridElement {
     pub(crate) fn new(
         screen: &Arc<ScreenSnapshot>,
+        terminal_input_focused: bool,
         font_family: &SharedString,
         font_size: Pixels,
         line_height: Pixels,
@@ -108,6 +109,7 @@ impl TerminalGridElement {
                 .cloned()
                 .map(|cell| (position, cell))
         });
+        let cursor_style = presented_cursor_style(screen.cursor, terminal_input_focused);
         Self {
             background: screen.background,
             rows: cache.prepare(&screen.rows, &screen.colors, font_family),
@@ -116,10 +118,21 @@ impl TerminalGridElement {
             line_height,
             cell_width,
             cursor,
-            cursor_style: screen.cursor,
+            cursor_style,
             font_family: font_family.clone(),
         }
     }
+}
+
+fn presented_cursor_style(
+    mut negotiated: CursorSnapshot,
+    terminal_input_focused: bool,
+) -> CursorSnapshot {
+    if negotiated.visible && !terminal_input_focused {
+        negotiated.shape = CursorShapeSnapshot::BlockHollow;
+        negotiated.blinking = false;
+    }
+    negotiated
 }
 
 struct PreparedText {
@@ -231,7 +244,14 @@ impl Element for TerminalGridElement {
                     position.width_cells,
                 )
                 .expect("a visible cursor always produces a paint plan");
-                backgrounds.push(fill(plan.bounds, gpui_color(self.cursor_style.color)));
+                backgrounds.push(match plan.paint {
+                    CursorPaint::Fill => fill(plan.bounds, gpui_color(self.cursor_style.color)),
+                    CursorPaint::Outline => outline(
+                        plan.bounds,
+                        gpui_color(self.cursor_style.color),
+                        BorderStyle::default(),
+                    ),
+                });
 
                 if plan.recolor_text && !cell.spacer_tail {
                     let mut cursor_font = font(self.font_family.clone());
@@ -507,6 +527,13 @@ fn effective_colors(cell: &CellSnapshot, colors: &TerminalColorsSnapshot) -> (Co
 struct CursorPaintPlan {
     bounds: Bounds<Pixels>,
     recolor_text: bool,
+    paint: CursorPaint,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CursorPaint {
+    Fill,
+    Outline,
 }
 
 fn cursor_paint_plan(
@@ -522,11 +549,16 @@ fn cursor_paint_plan(
     }
 
     let cursor_width = cell_width * f32::from(width_cells.max(1));
-    let (bounds, recolor_text) = match shape {
-        CursorShapeSnapshot::Block => (Bounds::new(origin, size(cursor_width, line_height)), true),
+    let (bounds, recolor_text, paint) = match shape {
+        CursorShapeSnapshot::Block => (
+            Bounds::new(origin, size(cursor_width, line_height)),
+            true,
+            CursorPaint::Fill,
+        ),
         CursorShapeSnapshot::Bar => (
             Bounds::new(origin, size((cell_width * 0.12).max(px(1.0)), line_height)),
             false,
+            CursorPaint::Fill,
         ),
         CursorShapeSnapshot::Underline => {
             let thickness = (line_height * 0.10).max(px(1.0));
@@ -536,15 +568,19 @@ fn cursor_paint_plan(
                     size(cursor_width, thickness),
                 ),
                 false,
+                CursorPaint::Fill,
             )
         }
-        CursorShapeSnapshot::BlockHollow => {
-            (Bounds::new(origin, size(cursor_width, line_height)), false)
-        }
+        CursorShapeSnapshot::BlockHollow => (
+            Bounds::new(origin, size(cursor_width, line_height)),
+            false,
+            CursorPaint::Outline,
+        ),
     };
     Some(CursorPaintPlan {
         bounds,
         recolor_text,
+        paint,
     })
 }
 
@@ -677,6 +713,49 @@ mod tests {
             )
             .is_none()
         );
+    }
+
+    #[test]
+    fn hollow_cursor_is_outline_only_and_preserves_covered_text() {
+        let plan = cursor_paint_plan(
+            true,
+            crate::terminal::CursorShapeSnapshot::BlockHollow,
+            point(px(0.0), px(0.0)),
+            px(9.0),
+            px(20.0),
+            2,
+        )
+        .unwrap();
+
+        assert_eq!(plan.paint, CursorPaint::Outline);
+        assert_eq!(plan.bounds.size, size(px(18.0), px(20.0)));
+        assert!(!plan.recolor_text);
+    }
+
+    #[test]
+    fn terminal_focus_alone_selects_negotiated_or_steady_hollow_cursor() {
+        let negotiated = CursorSnapshot {
+            visible: true,
+            blinking: true,
+            shape: crate::terminal::CursorShapeSnapshot::Bar,
+            ..CursorSnapshot::default()
+        };
+
+        assert_eq!(presented_cursor_style(negotiated, true), negotiated);
+        assert_eq!(
+            presented_cursor_style(negotiated, false),
+            CursorSnapshot {
+                blinking: false,
+                shape: crate::terminal::CursorShapeSnapshot::BlockHollow,
+                ..negotiated
+            }
+        );
+
+        let hidden = CursorSnapshot {
+            visible: false,
+            ..negotiated
+        };
+        assert_eq!(presented_cursor_style(hidden, false), hidden);
     }
 
     #[test]

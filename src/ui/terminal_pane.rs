@@ -12,6 +12,7 @@ use super::overlay_scrollbar::{OverlayScrollbar, OverlayScrollbarEvent, ScrollMe
 use super::terminal_element::{
     TerminalGridCache, TerminalGridElement, terminal_grid_content_bounds,
 };
+use super::terminal_focus::{TerminalFocusCoordinator, TerminalFocusFacts, TerminalProductFocus};
 use super::{
     CopySelection, DecreaseTerminalFontSize, IncreaseTerminalFontSize, PasteClipboard,
     ResetTerminalFontSize, TERMINAL_KEY_CONTEXT,
@@ -56,6 +57,7 @@ pub(crate) struct TerminalPane {
     fallback_title: SharedString,
     title: SharedString,
     focus_handle: FocusHandle,
+    product_focus: TerminalProductFocus,
     font_family: SharedString,
     font_size: f32,
     line_height: f32,
@@ -104,6 +106,8 @@ impl TerminalPane {
             pane.update_backing_scale(window.scale_factor(), window, cx);
         })
         .detach();
+        cx.observe_window_activation(window, |_pane, _window, cx| cx.notify())
+            .detach();
 
         Self {
             session_factory,
@@ -114,6 +118,7 @@ impl TerminalPane {
             title: fallback_title.clone(),
             fallback_title,
             focus_handle,
+            product_focus: TerminalProductFocus::default(),
             font_family,
             font_size: DEFAULT_FONT_SIZE,
             line_height: DEFAULT_LINE_HEIGHT,
@@ -132,6 +137,23 @@ impl TerminalPane {
 
     pub(crate) fn focus(&self, window: &mut Window) {
         self.focus_handle.focus(window);
+    }
+
+    pub(crate) fn set_product_focus(&mut self, product_focus: TerminalProductFocus) {
+        self.product_focus = product_focus;
+    }
+
+    pub(crate) fn terminal_input_focused(&self, window: &Window) -> bool {
+        let window_active = window.is_window_active();
+        TerminalFocusCoordinator::is_focused(TerminalFocusFacts {
+            active_workspace: self.product_focus.active_workspace,
+            active_window: self.product_focus.active_window,
+            focused_pane: self.product_focus.focused_pane,
+            responder: self.focus_handle.is_focused(window),
+            operating_system_window_key: window_active,
+            application_active: window_active,
+            blocker: self.product_focus.blocker,
+        })
     }
 
     pub(crate) fn title(&self) -> SharedString {
@@ -260,7 +282,10 @@ impl TerminalPane {
         }
     }
 
-    fn on_key_down(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
+    fn on_key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.terminal_input_focused(window) {
+            return;
+        }
         let action = if event.is_held {
             KeyAction::Repeat
         } else {
@@ -274,7 +299,10 @@ impl TerminalPane {
         }
     }
 
-    fn on_key_up(&mut self, event: &KeyUpEvent, _window: &mut Window, cx: &mut Context<Self>) {
+    fn on_key_up(&mut self, event: &KeyUpEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.terminal_input_focused(window) {
+            return;
+        }
         let input = NativeKeyEvent::current_key(KeyAction::Release)
             .map(|event| self.keyboard_bridge.translate(event))
             .unwrap_or_else(|| encode_keystroke(&event.keystroke, KeyAction::Release));
@@ -286,9 +314,12 @@ impl TerminalPane {
     fn on_modifiers_changed(
         &mut self,
         _event: &ModifiersChangedEvent,
-        _window: &mut Window,
+        window: &mut Window,
         _cx: &mut Context<Self>,
     ) {
+        if !self.terminal_input_focused(window) {
+            return;
+        }
         let Some(event) = NativeKeyEvent::current_modifier() else {
             return;
         };
@@ -541,7 +572,7 @@ impl Drop for TerminalPane {
 }
 
 impl Render for TerminalPane {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let pane = cx.entity().downgrade();
         let background = gpui_color(self.screen.background);
         let status = self.status.clone();
@@ -549,6 +580,7 @@ impl Render for TerminalPane {
         let scrollbar = self.scrollbar.clone();
         let terminal_grid = TerminalGridElement::new(
             &self.screen,
+            self.terminal_input_focused(window),
             &self.font_family,
             px(self.font_size),
             px(self.line_height),
@@ -952,6 +984,7 @@ mod tests {
         let (pane, cx) =
             cx.add_window_view(|window, cx| TerminalPane::new(session_factory, window, cx));
         cx.update(|window, cx| {
+            window.activate_window();
             pane.update(cx, |pane, _cx| pane.focus(window));
         });
         cx.run_until_parked();
@@ -975,7 +1008,10 @@ mod tests {
         );
         let (pane, cx) =
             cx.add_window_view(|window, cx| TerminalPane::new(session_factory, window, cx));
-        cx.update(|window, cx| pane.update(cx, |pane, _cx| pane.focus(window)));
+        cx.update(|window, cx| {
+            window.activate_window();
+            pane.update(cx, |pane, _cx| pane.focus(window));
+        });
         cx.run_until_parked();
         (pane, cx, records)
     }

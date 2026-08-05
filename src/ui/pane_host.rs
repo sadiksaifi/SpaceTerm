@@ -7,6 +7,7 @@ use gpui::{
 };
 use gpui_symbols::{Icon, SymbolWeight};
 
+use super::terminal_focus::{TerminalFocusBlocker, TerminalProductFocus};
 use super::{
     ClosePane, CloseTarget, FocusPaneDown, FocusPaneLeft, FocusPaneRight, FocusPaneUp,
     PANE_ACTION_MENU_HEIGHT, PANE_ACTION_MENU_WIDTH, PaneActionMenuCommand, SplitDown, SplitRight,
@@ -185,6 +186,13 @@ impl PaneHost {
     }
 
     #[cfg(test)]
+    pub(crate) fn focused_terminal_has_input_focus(&self, window: &Window, cx: &App) -> bool {
+        self.terminal_window
+            .terminal(self.terminal_window.focused_pane_id())
+            .is_some_and(|terminal| terminal.read(cx).terminal_input_focused(window))
+    }
+
+    #[cfg(test)]
     pub(crate) const fn is_active(&self) -> bool {
         self.active
     }
@@ -355,6 +363,25 @@ impl PaneHost {
         self.menu_pane_id = (self.menu_pane_id != Some(pane_id)).then_some(pane_id);
         cx.notify();
         self.terminal_window.terminal(pane_id).cloned()
+    }
+
+    fn sync_terminal_focus(&self, cx: &mut Context<Self>) {
+        let focused_terminal_id = self
+            .terminal_window
+            .terminal(self.terminal_window.focused_pane_id())
+            .map(Entity::entity_id);
+        let blocker = self.menu_pane_id.map(|_| TerminalFocusBlocker::PaneMenu);
+        for terminal in self.terminal_window.terminals() {
+            let product_focus = TerminalProductFocus {
+                active_workspace: self.active,
+                active_window: self.active,
+                focused_pane: Some(terminal.entity_id()) == focused_terminal_id,
+                blocker,
+            };
+            terminal.update(cx, |terminal, _| {
+                terminal.set_product_focus(product_focus);
+            });
+        }
     }
 
     fn perform_menu_command(
@@ -569,6 +596,7 @@ impl EventEmitter<PaneHostEvent> for PaneHost {}
 
 impl Render for PaneHost {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.sync_terminal_focus(cx);
         let host = cx.entity().downgrade();
         let zoom_state = self.terminal_window.zoom_state();
         let minimum_size = match zoom_state {
@@ -949,6 +977,54 @@ mod tests {
         });
 
         assert!(cx.debug_bounds("pane-header-1-focused").is_none());
+    }
+
+    #[gpui::test]
+    fn terminal_input_focus_tracks_pane_menu_and_native_window_activation(cx: &mut TestAppContext) {
+        let session_factory = test_session_factory();
+        let (host, cx) = cx.add_window_view(|window, cx| {
+            PaneHost::new(WindowId::new(1), session_factory, window, cx)
+        });
+        cx.update(|window, app| {
+            window.activate_window();
+            host.update(app, |host, app| host.focus(window, app));
+        });
+        cx.run_until_parked();
+
+        let initial =
+            cx.update(|window, app| host.read(app).focused_terminal_has_input_focus(window, app));
+        assert!(initial);
+
+        cx.update(|_window, app| {
+            host.update(app, |host, app| {
+                let focused_pane_id = host.terminal_window.focused_pane_id();
+                let _ = host.toggle_menu(focused_pane_id, app);
+            });
+        });
+        cx.run_until_parked();
+        let menu_open = cx.update(|window, app| {
+            (
+                host.read(app).focused_pane_id(),
+                host.read(app).focused_terminal_has_input_focus(window, app),
+            )
+        });
+        assert_eq!(menu_open, (PaneId::new(1), false));
+
+        cx.update(|_window, app| {
+            host.update(app, |host, app| {
+                let focused_pane_id = host.terminal_window.focused_pane_id();
+                let _ = host.toggle_menu(focused_pane_id, app);
+            });
+        });
+        cx.run_until_parked();
+        assert!(cx.update(|window, app| {
+            host.read(app).focused_terminal_has_input_focus(window, app)
+        }));
+
+        cx.deactivate_window();
+        assert!(!cx.update(|window, app| {
+            host.read(app).focused_terminal_has_input_focus(window, app)
+        }));
     }
 
     #[gpui::test]
