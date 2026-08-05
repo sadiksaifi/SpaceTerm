@@ -307,10 +307,9 @@ impl PaneHost {
     }
 
     pub(crate) fn toggle_zoom(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.terminal_window.pane_count() <= 1 {
+        if self.terminal_window.toggle_zoom().is_none() {
             return;
         }
-        self.terminal_window.toggle_zoom();
         self.menu_pane_id = None;
         cx.emit(PaneHostEvent::PresentationChanged {
             window_id: self.terminal_window.id(),

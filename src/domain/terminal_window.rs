@@ -278,12 +278,16 @@ impl<T> TerminalWindow<T> {
         }
     }
 
-    pub(crate) fn toggle_zoom(&mut self) -> ZoomState {
+    pub(crate) fn toggle_zoom(&mut self) -> Option<ZoomState> {
+        if self.pane_count() <= 1 {
+            return None;
+        }
+
         self.zoom_state = match self.zoom_state {
             ZoomState::Restored => ZoomState::Zoomed(self.focused_pane_id),
             ZoomState::Zoomed(_) => ZoomState::Restored,
         };
-        self.zoom_state
+        Some(self.zoom_state)
     }
 
     pub(crate) fn split_pane(
@@ -326,7 +330,7 @@ impl<T> TerminalWindow<T> {
         if self.focused_pane_id == pane_id {
             self.focused_pane_id = removal.focus_fallback;
         }
-        if self.zoom_state == ZoomState::Zoomed(pane_id) {
+        if self.pane_count() == 1 || self.zoom_state == ZoomState::Zoomed(pane_id) {
             self.zoom_state = ZoomState::Restored;
         }
         Ok(ClosePaneOutcome::PaneClosed {
@@ -1170,7 +1174,7 @@ mod tests {
     fn focus_pane_in_direction_should_move_zoom_to_the_neighbor() {
         let mut window = four_pane_window();
         window.focus_pane(PaneId::new(1)).unwrap();
-        window.toggle_zoom();
+        let _ = window.toggle_zoom();
 
         let focused_pane = window.focus_pane_in_direction(FocusDirection::Right);
 
@@ -1275,7 +1279,7 @@ mod tests {
                 |_| (),
             )
             .unwrap();
-        window.toggle_zoom();
+        let _ = window.toggle_zoom();
 
         window.focus_pane(PaneId::new(1)).unwrap();
 
@@ -1285,8 +1289,6 @@ mod tests {
     #[test]
     fn split_pane_should_restore_a_zoomed_layout() {
         let mut window = window(());
-        window.toggle_zoom();
-
         window
             .split_pane(
                 PaneId::new(1),
@@ -1296,8 +1298,27 @@ mod tests {
                 |_| (),
             )
             .unwrap();
+        let _ = window.toggle_zoom();
+        window
+            .split_pane(
+                PaneId::new(2),
+                SplitAxis::Vertical,
+                size(250.0, 400.0),
+                DIVIDER_SIZE,
+                |_| (),
+            )
+            .unwrap();
 
         assert_eq!(window.zoom_state(), ZoomState::Restored);
+    }
+
+    #[test]
+    fn toggle_zoom_should_be_unavailable_for_a_single_pane() {
+        let mut window = window(());
+
+        let result = window.toggle_zoom();
+
+        assert_eq!((result, window.zoom_state()), (None, ZoomState::Restored));
     }
 
     #[test]
@@ -1312,7 +1333,30 @@ mod tests {
                 |_| (),
             )
             .unwrap();
-        window.toggle_zoom();
+        let _ = window.toggle_zoom();
+
+        window.close_pane(PaneId::new(2)).unwrap();
+
+        assert_eq!(window.zoom_state(), ZoomState::Restored);
+    }
+
+    #[test]
+    fn close_pane_should_restore_when_only_the_zoomed_pane_remains() {
+        let mut window = window(());
+        window
+            .split_pane(
+                PaneId::new(1),
+                SplitAxis::Horizontal,
+                size(500.0, 400.0),
+                DIVIDER_SIZE,
+                |_| (),
+            )
+            .unwrap();
+        window.focus_pane(PaneId::new(1)).unwrap();
+        assert_eq!(
+            window.toggle_zoom(),
+            Some(ZoomState::Zoomed(PaneId::new(1)))
+        );
 
         window.close_pane(PaneId::new(2)).unwrap();
 
