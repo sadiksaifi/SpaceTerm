@@ -1,5 +1,6 @@
 mod emulator;
 pub(crate) mod geometry;
+mod key;
 mod session;
 #[cfg(test)]
 pub(crate) mod testing;
