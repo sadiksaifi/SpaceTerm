@@ -26,6 +26,8 @@ actions!(
         PasteClipboard,
         ConfirmUnsafePaste,
         CancelUnsafePaste,
+        AllowOsc52Clipboard,
+        DenyOsc52Clipboard,
         IncreaseTerminalFontSize,
         DecreaseTerminalFontSize,
         ResetTerminalFontSize,

@@ -18,8 +18,9 @@ use super::terminal_element::{
 use super::terminal_focus::{TerminalFocusCoordinator, TerminalFocusFacts, TerminalProductFocus};
 use super::terminal_ime::{PreeditLayout, PreeditPosition, TerminalIme, layout_preedit};
 use super::{
-    CancelUnsafePaste, ConfirmUnsafePaste, CopySelection, DecreaseTerminalFontSize,
-    IncreaseTerminalFontSize, PasteClipboard, ResetTerminalFontSize, TERMINAL_KEY_CONTEXT,
+    AllowOsc52Clipboard, CancelUnsafePaste, ConfirmUnsafePaste, CopySelection,
+    DecreaseTerminalFontSize, DenyOsc52Clipboard, IncreaseTerminalFontSize, PasteClipboard,
+    ResetTerminalFontSize, TERMINAL_KEY_CONTEXT,
 };
 use crate::platform::macos_keyboard::{
     KeyTranslation, MacosKeyboardBridge, NativeKeyEvent, NativeKeyEventKind, UnhandledKeyEvent,
@@ -28,10 +29,11 @@ use crate::terminal::geometry::{
     BackingScale, CellGridSize, LogicalCellSize, LogicalPosition, LogicalSize, TerminalGeometry,
 };
 use crate::terminal::{
-    InputModifiers, KeyAction, KeyInput, OptionAsAltPolicy, PasteConfirmation, PasteDecision,
-    PasteRequestOutcome, PasteResolution, PhysicalKey, PointerButton, PointerInput, PointerPhase,
-    ScreenSnapshot, SelectionCopy, SessionEvent, ShiftSelectionPolicy, SurfacePosition,
-    TerminalSessionHandle, WheelInput, WorkspaceTerminalSessionFactory,
+    InputModifiers, KeyAction, KeyInput, OptionAsAltPolicy, Osc52Access,
+    Osc52AuthorizationDecision, Osc52AuthorizationRequest, Osc52Target, PasteConfirmation,
+    PasteDecision, PasteRequestOutcome, PasteResolution, PhysicalKey, PointerButton, PointerInput,
+    PointerPhase, ScreenSnapshot, SelectionCopy, SessionEvent, ShiftSelectionPolicy,
+    SurfacePosition, TerminalSessionHandle, WheelInput, WorkspaceTerminalSessionFactory,
 };
 use crate::theme::{ACTIVE_THEME, Color};
 
@@ -81,6 +83,7 @@ pub(crate) struct TerminalPane {
     ime: TerminalIme,
     ime_suppressed_keys: Vec<PhysicalKey>,
     pending_paste: Option<PasteConfirmation>,
+    pending_osc52: Option<Osc52AuthorizationRequest>,
     _event_task: Option<Task<()>>,
 }
 
@@ -148,6 +151,7 @@ impl TerminalPane {
             ime: TerminalIme::default(),
             ime_suppressed_keys: Vec::new(),
             pending_paste: None,
+            pending_osc52: None,
             _event_task: None,
         }
     }
@@ -165,6 +169,15 @@ impl TerminalPane {
             && let Some(session) = &self.session
         {
             let _ = session.resolve_paste(confirmation.id, PasteDecision::Cancel);
+        }
+        if (!product_focus.active_workspace
+            || !product_focus.active_window
+            || !product_focus.focused_pane
+            || product_focus.blocker.is_some())
+            && let Some(request) = self.pending_osc52.take()
+            && let Some(session) = &self.session
+        {
+            session.resolve_osc52_authorization(request.id, Osc52AuthorizationDecision::Deny);
         }
         self.product_focus = product_focus;
     }
@@ -191,6 +204,12 @@ impl TerminalPane {
                     && let Some(session) = &self.session
                 {
                     let _ = session.resolve_paste(confirmation.id, PasteDecision::Cancel);
+                }
+                if let Some(request) = self.pending_osc52.take()
+                    && let Some(session) = &self.session
+                {
+                    session
+                        .resolve_osc52_authorization(request.id, Osc52AuthorizationDecision::Deny);
                 }
                 self.ime.cancel();
                 self.ime_suppressed_keys.clear();
@@ -234,6 +253,11 @@ impl TerminalPane {
             && let Some(session) = &self.session
         {
             let _ = session.resolve_paste(confirmation.id, PasteDecision::Cancel);
+        }
+        if let Some(request) = self.pending_osc52.take()
+            && let Some(session) = &self.session
+        {
+            session.resolve_osc52_authorization(request.id, Osc52AuthorizationDecision::Deny);
         }
         self._event_task.take();
         self.session.take();
@@ -336,6 +360,19 @@ impl TerminalPane {
                 }
                 self.screen = screen;
                 self.sync_scrollbar(cx);
+            }
+            SessionEvent::Osc52Authorization(request) => {
+                if let Some(previous) = self.pending_osc52.replace(request)
+                    && let Some(session) = &self.session
+                {
+                    session
+                        .resolve_osc52_authorization(previous.id, Osc52AuthorizationDecision::Deny);
+                }
+            }
+            SessionEvent::Osc52AuthorizationExpired(id) => {
+                if self.pending_osc52.is_some_and(|request| request.id == id) {
+                    self.pending_osc52 = None;
+                }
             }
             SessionEvent::Exited(status) => {
                 eprintln!("{status}");
@@ -749,6 +786,43 @@ impl TerminalPane {
         .detach();
     }
 
+    fn allow_osc52_clipboard(
+        &mut self,
+        _: &AllowOsc52Clipboard,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.resolve_osc52_authorization(Osc52AuthorizationDecision::Allow, window, cx);
+    }
+
+    fn deny_osc52_clipboard(
+        &mut self,
+        _: &DenyOsc52Clipboard,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.resolve_osc52_authorization(Osc52AuthorizationDecision::Deny, window, cx);
+    }
+
+    fn resolve_osc52_authorization(
+        &mut self,
+        mut decision: Osc52AuthorizationDecision,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(request) = self.pending_osc52.take() else {
+            return;
+        };
+        if !self.terminal_input_focused(window) {
+            decision = Osc52AuthorizationDecision::Deny;
+        }
+        if let Some(session) = &self.session {
+            session.resolve_osc52_authorization(request.id, decision);
+        }
+        self.focus_handle.focus(window);
+        cx.notify();
+    }
+
     fn surface_position(
         &self,
         position: gpui::Point<Pixels>,
@@ -890,6 +964,7 @@ impl Render for TerminalPane {
         let background = gpui_color(self.screen.background);
         let status = self.status.clone();
         let paste_confirmation = self.pending_paste;
+        let osc52_authorization = self.pending_osc52;
         self.sync_scrollbar(cx);
         let scrollbar = self.scrollbar.clone();
         let pointer_uses_text_cursor = pointer_uses_text_cursor(
@@ -935,6 +1010,8 @@ impl Render for TerminalPane {
             .on_action(cx.listener(Self::paste_clipboard))
             .on_action(cx.listener(Self::confirm_unsafe_paste))
             .on_action(cx.listener(Self::cancel_unsafe_paste))
+            .on_action(cx.listener(Self::allow_osc52_clipboard))
+            .on_action(cx.listener(Self::deny_osc52_clipboard))
             .on_action(cx.listener(Self::increase_font_size))
             .on_action(cx.listener(Self::decrease_font_size))
             .on_action(cx.listener(Self::reset_font_size))
@@ -957,6 +1034,9 @@ impl Render for TerminalPane {
                     confirmation,
                     cx.entity().downgrade(),
                 ))
+            })
+            .when_some(osc52_authorization, |root, request| {
+                root.child(render_osc52_authorization(request, cx.entity().downgrade()))
             })
             .when_some(status, |root, status| {
                 root.child(
@@ -1049,6 +1129,81 @@ fn render_paste_confirmation(
                 .on_click(move |_, window, cx| {
                     let _ = pane.update(cx, |pane, cx| {
                         pane.confirm_unsafe_paste(&ConfirmUnsafePaste, window, cx);
+                    });
+                    cx.stop_propagation();
+                }),
+        )
+}
+
+fn render_osc52_authorization(
+    request: Osc52AuthorizationRequest,
+    pane: gpui::WeakEntity<TerminalPane>,
+) -> impl IntoElement {
+    let deny_pane = pane.clone();
+    let access = match request.access {
+        Osc52Access::Read => "read",
+        Osc52Access::Write => "write",
+    };
+    let target = match request.target {
+        Osc52Target::Standard => "system clipboard",
+        Osc52Target::Selection => "selection clipboard",
+        Osc52Target::Primary => "primary clipboard",
+    };
+    let detail = match request.access {
+        Osc52Access::Read => format!("Allow the terminal program to read the {target}?"),
+        Osc52Access::Write => format!(
+            "Allow the terminal program to {access} {} bytes to the {target}?",
+            request.byte_len
+        ),
+    };
+
+    div()
+        .debug_selector(|| "osc52-authorization".to_owned())
+        .absolute()
+        .left(px(16.0))
+        .right(px(16.0))
+        .bottom(px(16.0))
+        .flex()
+        .items_center()
+        .gap(px(10.0))
+        .px(px(12.0))
+        .py(px(10.0))
+        .rounded(px(8.0))
+        .border_1()
+        .border_color(gpui_color(ACTIVE_THEME.warning_border))
+        .bg(gpui_color(ACTIVE_THEME.warning_background))
+        .text_color(gpui_color(ACTIVE_THEME.text))
+        .text_sm()
+        .occlude()
+        .child(detail)
+        .child(
+            div()
+                .id("deny-osc52-clipboard")
+                .cursor_pointer()
+                .px(px(8.0))
+                .py(px(4.0))
+                .rounded(px(5.0))
+                .bg(gpui_color(ACTIVE_THEME.element_active))
+                .child("Deny")
+                .on_click(move |_, window, cx| {
+                    let _ = deny_pane.update(cx, |pane, cx| {
+                        pane.deny_osc52_clipboard(&DenyOsc52Clipboard, window, cx);
+                    });
+                    cx.stop_propagation();
+                }),
+        )
+        .child(
+            div()
+                .id("allow-osc52-clipboard")
+                .cursor_pointer()
+                .px(px(8.0))
+                .py(px(4.0))
+                .rounded(px(5.0))
+                .bg(gpui_color(ACTIVE_THEME.element_active))
+                .child("Allow")
+                .on_click(move |_, window, cx| {
+                    let _ = pane.update(cx, |pane, cx| {
+                        pane.allow_osc52_clipboard(&AllowOsc52Clipboard, window, cx);
                     });
                     cx.stop_propagation();
                 }),
@@ -1701,6 +1856,41 @@ mod tests {
             call.command
                 == RecordedSessionCommand::ResolvePaste(confirmation.id, PasteDecision::Cancel)
         }));
+    }
+
+    #[gpui::test]
+    fn osc52_prompt_retains_focus_and_resolves_only_opaque_metadata(cx: &mut TestAppContext) {
+        let (pane, cx, records) = connected_terminal_pane(cx);
+        let request = Osc52AuthorizationRequest {
+            id: crate::terminal::Osc52AuthorizationId::new(11),
+            access: Osc52Access::Write,
+            target: Osc52Target::Standard,
+            byte_len: 42,
+        };
+
+        records
+            .last_event_sender()
+            .unwrap()
+            .send_blocking(SessionEvent::Osc52Authorization(request))
+            .unwrap();
+        cx.run_until_parked();
+
+        assert_eq!(
+            pane.read_with(cx, |pane, _| pane.pending_osc52),
+            Some(request)
+        );
+        assert!(cx.update(|window, cx| pane.read(cx).terminal_input_focused(window)));
+
+        cx.dispatch_action(DenyOsc52Clipboard);
+        cx.run_until_parked();
+        assert!(records.commands().iter().any(|call| {
+            call.command
+                == RecordedSessionCommand::ResolveOsc52Authorization(
+                    request.id,
+                    Osc52AuthorizationDecision::Deny,
+                )
+        }));
+        assert!(cx.update(|window, cx| pane.read(cx).terminal_input_focused(window)));
     }
 
     #[gpui::test]

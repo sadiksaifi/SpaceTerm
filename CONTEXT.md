@@ -236,6 +236,24 @@ lost reply writes no PTY bytes. Confirmed input is encoded once by `libghostty-v
 controls become spaces, unbracketed LF becomes CR, and bracketed input receives exactly one host
 opening and closing fence so an embedded closing sequence cannot escape.
 
+### Authorized OSC 52 Clipboard Access
+
+OSC 52 is intercepted by a bounded streaming host filter before Terminal Emulator parsing. The
+filter preserves sequences split across PTY reads, accepts only the standard, selection, and
+primary targets, requires canonical padded base64 and UTF-8 text, and limits decoded writes and
+encoded read replies to one mebibyte. Once the encoded bound is crossed, candidate storage is
+cleared and input is discarded through the sequence terminator, so hostile output cannot force an
+unbounded libghostty allocation. Malformed, oversized, unsupported, or denied operations are quiet:
+they mutate no pasteboard and disclose no clipboard data.
+
+Read and write authorization is deny-by-default and independently typed as deny, ask, or allow.
+Ask mode permits one worker-owned pending operation with an opaque thirty-second authorization;
+the Pane receives only access direction, target, and byte count. Later terminal output stays
+bounded behind that operation until allow, deny, timeout, focus or hierarchy loss, or Terminal
+Session shutdown resolves it. The worker flushes prior emulator replies before an allowed clipboard
+effect and resumes later output afterward, preserving exact PTY reply order. Authorization and
+failure diagnostics never contain clipboard contents.
+
 ### Typed Terminal Key Input
 
 Terminal key input crosses the Terminal Session command lane as one ordered, typed event carrying

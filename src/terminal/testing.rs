@@ -5,9 +5,10 @@ use std::rc::Rc;
 
 use super::geometry::TerminalGeometry;
 use super::{
-    KeyInput, PasteConfirmationId, PasteDecision, PasteRequestOutcome, PasteResolution,
-    PointerInput, PresentationGeneration, SelectionCopy, SessionError, SessionEvent,
-    StartedTerminalSession, TerminalSessionFactory, TerminalSessionHandle, WheelInput,
+    KeyInput, Osc52AuthorizationDecision, Osc52AuthorizationId, PasteConfirmationId, PasteDecision,
+    PasteRequestOutcome, PasteResolution, PointerInput, PresentationGeneration, SelectionCopy,
+    SessionError, SessionEvent, StartedTerminalSession, TerminalSessionFactory,
+    TerminalSessionHandle, WheelInput,
 };
 
 #[derive(Clone, Debug, PartialEq)]
@@ -27,6 +28,7 @@ pub(crate) enum RecordedSessionCommand {
     ScrollTo(u64, PresentationGeneration),
     RequestPaste(String),
     ResolvePaste(PasteConfirmationId, PasteDecision),
+    ResolveOsc52Authorization(Osc52AuthorizationId, Osc52AuthorizationDecision),
     RequestSelectionCopy,
 }
 
@@ -256,6 +258,16 @@ impl TerminalSessionHandle for TestTerminalSessionHandle {
         let (sender, receiver) = async_channel::bounded(1);
         let _ = sender.try_send(self.paste_resolution.clone());
         receiver
+    }
+
+    fn resolve_osc52_authorization(
+        &self,
+        id: Osc52AuthorizationId,
+        decision: Osc52AuthorizationDecision,
+    ) {
+        self.record(RecordedSessionCommand::ResolveOsc52Authorization(
+            id, decision,
+        ));
     }
 
     fn request_selection_copy(

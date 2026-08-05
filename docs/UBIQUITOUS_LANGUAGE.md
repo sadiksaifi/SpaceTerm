@@ -40,6 +40,7 @@
 | **Marked Text** | Transient input-method preedit owned by the Pane with Terminal Input Focus; it is presented at the Cursor but is not Terminal Emulator or PTY input until committed. | terminal output, committed text |
 | **Paste Payload** | An immutable, size-bounded text insertion candidate owned by the Terminal Session worker from normalization through encoding or cancellation. | clipboard contents, typed key input |
 | **Paste Confirmation** | A transient authorization for one unsafe Paste Payload, identified opaquely and valid only while its Pane retains Terminal Input Focus and the worker deadline has not expired. | generic modal, clipboard permission |
+| **OSC 52 Authorization** | A bounded, opaque, one-operation decision governing whether a terminal program may read or write a named clipboard target; access is denied unless explicit policy allows or asks for it. | paste confirmation, unrestricted clipboard access |
 
 ## Lifecycle actions
 
@@ -66,6 +67,7 @@
 - **Marked Text** exists only while its Pane has **Terminal Input Focus**; cancellation or focus loss discards it without Terminal Session input.
 - A **Paste Payload** that requires **Paste Confirmation** remains worker-owned; UI and diagnostics receive only bounded risk metadata, never its content.
 - A **Paste Confirmation** is cancelled by focus or hierarchy loss, timeout, Terminal Session shutdown, explicit cancellation, or a stale identity, and cancellation writes no PTY bytes.
+- **OSC 52 Authorization** exposes only access direction, target, and byte count to UI; clipboard contents remain inside the worker-owned native-service operation and are never diagnostic metadata.
 - The **Primary Screen** and **Alternate Screen** retain independent state; leaving the Alternate Screen restores the Primary Screen and its **Terminal Viewport**.
 - A **Presentation Generation** belongs to one published Terminal Presentation; coordinate or Scrollback requests from an older generation never mutate current Terminal Emulator state.
 - A **Pane** belongs to exactly one **Window** and owns one **Terminal Session**.

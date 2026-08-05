@@ -1,5 +1,7 @@
+use std::collections::VecDeque;
 use std::fmt;
 use std::io::{ErrorKind, Read, Write};
+use std::mem;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver as CommandReceiver, Sender as CommandSender};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -25,6 +27,13 @@ use crate::terminal::geometry::TerminalGeometry;
 #[cfg(test)]
 use crate::terminal::key::OptionAsAltPolicy;
 use crate::terminal::key::{InputModifiers, KeyInput};
+#[cfg(test)]
+use crate::terminal::osc52::Osc52ClipboardError;
+use crate::terminal::osc52::{
+    MAX_OSC52_CONTENT_BYTES, Osc52AccessPolicy, Osc52AuthorizationDecision, Osc52AuthorizationId,
+    Osc52AuthorizationPolicy, Osc52AuthorizationRequest, Osc52Clipboard, Osc52Effect, Osc52Filter,
+    Osc52Operation,
+};
 use crate::terminal::paste::{
     PasteConfirmationId, PasteDecision, PasteRejection, PasteRequestOutcome, PasteResolution,
     PreparedPaste,
@@ -35,6 +44,7 @@ const FINAL_CHILD_WAIT_TIMEOUT: Duration = Duration::from_secs(2);
 const PTY_READ_BUFFER_SIZE: usize = 16 * 1024;
 const PTY_OUTPUT_QUEUE_CAPACITY: usize = 8;
 const PASTE_CONFIRMATION_TIMEOUT: Duration = Duration::from_secs(30);
+const OSC52_AUTHORIZATION_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub(crate) struct SurfacePosition {
@@ -113,6 +123,8 @@ fn pty_size(geometry: TerminalGeometry) -> PtySize {
 #[derive(Clone, Debug)]
 pub(crate) enum SessionEvent {
     Screen(Arc<ScreenSnapshot>),
+    Osc52Authorization(Osc52AuthorizationRequest),
+    Osc52AuthorizationExpired(Osc52AuthorizationId),
     Exited(SessionExit),
     Failed(SessionFailure),
 }
@@ -247,6 +259,11 @@ pub(crate) trait TerminalSessionHandle {
         id: PasteConfirmationId,
         decision: PasteDecision,
     ) -> async_channel::Receiver<Result<PasteResolution, String>>;
+    fn resolve_osc52_authorization(
+        &self,
+        id: Osc52AuthorizationId,
+        decision: Osc52AuthorizationDecision,
+    );
     fn request_selection_copy(
         &self,
     ) -> async_channel::Receiver<Result<Option<SelectionCopy>, String>>;
@@ -331,6 +348,39 @@ trait SessionPty: Write + Send {
 
 trait SessionPtyTerminator: Send + Sync {
     fn terminate(&self) -> std::io::Result<()>;
+}
+
+#[cfg(test)]
+#[derive(Default)]
+struct UnavailableOsc52Clipboard;
+
+#[cfg(test)]
+impl Osc52Clipboard for UnavailableOsc52Clipboard {
+    fn read(
+        &mut self,
+        _target: crate::terminal::Osc52Target,
+    ) -> Result<String, Osc52ClipboardError> {
+        Err(Osc52ClipboardError::Unavailable)
+    }
+
+    fn write(
+        &mut self,
+        _target: crate::terminal::Osc52Target,
+        _text: &str,
+    ) -> Result<(), Osc52ClipboardError> {
+        Err(Osc52ClipboardError::Unavailable)
+    }
+}
+
+fn native_osc52_clipboard() -> Box<dyn Osc52Clipboard> {
+    #[cfg(test)]
+    {
+        Box::<UnavailableOsc52Clipboard>::default()
+    }
+    #[cfg(not(test))]
+    {
+        Box::<crate::platform::macos_pasteboard::MacosOsc52Clipboard>::default()
+    }
 }
 
 struct StartedSessionPty {
@@ -624,6 +674,20 @@ impl TerminalSession {
         receiver
     }
 
+    pub(crate) fn resolve_osc52_authorization(
+        &self,
+        id: Osc52AuthorizationId,
+        decision: Osc52AuthorizationDecision,
+    ) {
+        if let Some(commands) = &self.commands
+            && commands
+                .send(Command::ResolveOsc52Authorization(id, decision))
+                .is_err()
+        {
+            eprintln!("OSC 52 authorization reply was dropped because the worker has stopped");
+        }
+    }
+
     pub(crate) fn request_selection_copy(
         &self,
     ) -> async_channel::Receiver<Result<Option<SelectionCopy>, String>> {
@@ -698,6 +762,14 @@ impl TerminalSessionHandle for TerminalSession {
         Self::resolve_paste(self, id, decision)
     }
 
+    fn resolve_osc52_authorization(
+        &self,
+        id: Osc52AuthorizationId,
+        decision: Osc52AuthorizationDecision,
+    ) {
+        Self::resolve_osc52_authorization(self, id, decision);
+    }
+
     fn request_selection_copy(
         &self,
     ) -> async_channel::Receiver<Result<Option<SelectionCopy>, String>> {
@@ -756,6 +828,9 @@ enum Command {
         async_channel::Sender<Result<PasteResolution, String>>,
     ),
     PasteConfirmationExpired,
+    ResolveOsc52Authorization(Osc52AuthorizationId, Osc52AuthorizationDecision),
+    Osc52AuthorizationExpired(Osc52AuthorizationId),
+    ResumeOsc52Output,
     SelectionCopy(async_channel::Sender<Result<Option<SelectionCopy>, String>>),
     SelectionAutoscrollTick(PresentationGeneration),
     ReaderReady,
@@ -776,6 +851,79 @@ struct TerminalWorker {
     held_keys: HeldKeys,
     selection_autoscroll: SelectionAutoscrollSchedule,
     paste_confirmations: PasteConfirmationSchedule,
+    osc52_filter: Osc52Filter,
+    osc52_policy: Osc52AuthorizationPolicy,
+    osc52_clipboard: Box<dyn Osc52Clipboard>,
+    osc52_authorization: Osc52AuthorizationSchedule,
+    deferred_osc52_effects: VecDeque<Osc52Effect>,
+    deferred_output_chunks: VecDeque<Vec<u8>>,
+    deferred_reader_ready: bool,
+}
+
+struct PendingOsc52Authorization {
+    id: Osc52AuthorizationId,
+    operation: Osc52Operation,
+    deadline: Instant,
+}
+
+#[derive(Default)]
+struct Osc52AuthorizationSchedule {
+    next_id: u64,
+    pending: Option<PendingOsc52Authorization>,
+}
+
+impl Osc52AuthorizationSchedule {
+    fn deadline(&self) -> Option<Instant> {
+        self.pending.as_ref().map(|pending| pending.deadline)
+    }
+
+    fn is_pending(&self) -> bool {
+        self.pending.is_some()
+    }
+
+    fn create(
+        &mut self,
+        operation: Osc52Operation,
+        now: Instant,
+    ) -> Option<Osc52AuthorizationRequest> {
+        if self.pending.is_some() {
+            return None;
+        }
+        self.next_id = self.next_id.wrapping_add(1).max(1);
+        let id = Osc52AuthorizationId::from_counter(self.next_id);
+        let request = Osc52AuthorizationRequest {
+            id,
+            access: operation.access(),
+            target: operation.target(),
+            byte_len: operation.byte_len(),
+        };
+        self.pending = Some(PendingOsc52Authorization {
+            id,
+            operation,
+            deadline: now + OSC52_AUTHORIZATION_TIMEOUT,
+        });
+        Some(request)
+    }
+
+    fn take(&mut self, id: Osc52AuthorizationId, now: Instant) -> Option<Osc52Operation> {
+        let pending = self.pending.as_ref()?;
+        if pending.id != id || now >= pending.deadline {
+            return None;
+        }
+        self.pending.take().map(|pending| pending.operation)
+    }
+
+    fn expire(&mut self, now: Instant) -> Option<Osc52AuthorizationId> {
+        if self.deadline().is_some_and(|deadline| now >= deadline) {
+            self.pending.take().map(|pending| pending.id)
+        } else {
+            None
+        }
+    }
+
+    fn cancel(&mut self) {
+        self.pending = None;
+    }
 }
 
 struct PendingPaste {
@@ -995,6 +1143,13 @@ impl TerminalWorker {
             held_keys: HeldKeys::default(),
             selection_autoscroll: SelectionAutoscrollSchedule::default(),
             paste_confirmations: PasteConfirmationSchedule::default(),
+            osc52_filter: Osc52Filter::default(),
+            osc52_policy: Osc52AuthorizationPolicy::default(),
+            osc52_clipboard: native_osc52_clipboard(),
+            osc52_authorization: Osc52AuthorizationSchedule::default(),
+            deferred_osc52_effects: VecDeque::new(),
+            deferred_output_chunks: VecDeque::new(),
+            deferred_reader_ready: false,
         };
 
         if !startup.succeeded() {
@@ -1026,6 +1181,15 @@ impl TerminalWorker {
         if let Some(command) = self.pending_command.take() {
             return Some(command);
         }
+        if !self.osc52_authorization.is_pending()
+            && (!self.deferred_osc52_effects.is_empty() || !self.deferred_output_chunks.is_empty())
+        {
+            return Some(Command::ResumeOsc52Output);
+        }
+        if !self.osc52_authorization.is_pending() && self.deferred_reader_ready {
+            self.deferred_reader_ready = false;
+            return Some(Command::ReaderReady);
+        }
 
         loop {
             let synchronized_output_deadline = self.emulator.synchronized_output_deadline();
@@ -1034,6 +1198,7 @@ impl TerminalWorker {
                 synchronized_output_deadline,
                 autoscroll_deadline,
                 self.paste_confirmations.deadline(),
+                self.osc52_authorization.deadline(),
             ]
             .into_iter()
             .flatten()
@@ -1052,6 +1217,9 @@ impl TerminalWorker {
                     if self.paste_confirmations.expire(now) {
                         return Some(Command::PasteConfirmationExpired);
                     }
+                    if let Some(id) = self.osc52_authorization.expire(now) {
+                        return Some(Command::Osc52AuthorizationExpired(id));
+                    }
                     if synchronized_output_deadline.is_some()
                         && !self.release_synchronized_output_if_due(now)
                     {
@@ -1067,6 +1235,10 @@ impl TerminalWorker {
         match command {
             Command::Key(input) => self.process_key(input),
             Command::Focus(focused) => self.process_focus(focused),
+            Command::ReaderReady if self.osc52_authorization.is_pending() => {
+                self.deferred_reader_ready = true;
+                true
+            }
             Command::ReaderReady => self.process_reader_events(),
             Command::Resize => {
                 let Some(geometry) = self.resizes.take() else {
@@ -1120,6 +1292,14 @@ impl TerminalWorker {
                 self.process_paste_resolution(id, decision, reply)
             }
             Command::PasteConfirmationExpired => true,
+            Command::ResolveOsc52Authorization(id, decision) => {
+                self.process_osc52_authorization(id, decision)
+            }
+            Command::Osc52AuthorizationExpired(id) => {
+                let _ = self.send_terminal_event(SessionEvent::Osc52AuthorizationExpired(id));
+                true
+            }
+            Command::ResumeOsc52Output => self.resume_osc52_output(),
             Command::SelectionCopy(reply) => {
                 let _ = reply.try_send(
                     self.emulator
@@ -1318,37 +1498,134 @@ impl TerminalWorker {
     }
 
     fn process_output_chunks(&mut self, chunks: Vec<Vec<u8>>) -> bool {
-        let received_output = !chunks.is_empty();
+        self.process_output_queue(chunks.into())
+    }
+
+    fn process_output_queue(&mut self, mut chunks: VecDeque<Vec<u8>>) -> bool {
+        let received_output = !chunks.is_empty() || !self.deferred_osc52_effects.is_empty();
         let mut focus_reports = Vec::new();
-        for bytes in chunks {
-            self.emulator.feed(&bytes);
-            let focus_reporting_enabled = match self.emulator.focus_reporting_enabled() {
-                Ok(enabled) => enabled,
-                Err(message) => {
-                    self.send_runtime_failure(message);
-                    return false;
-                }
+        let mut effects = mem::take(&mut self.deferred_osc52_effects);
+
+        loop {
+            if effects.is_empty() {
+                let Some(bytes) = chunks.pop_front() else {
+                    break;
+                };
+                effects.extend(self.osc52_filter.feed(&bytes));
+            }
+            let Some(effect) = effects.pop_front() else {
+                continue;
             };
-            if focus_reporting_enabled && !self.focus_reporting_enabled {
-                match self.emulator.focus(self.terminal_input_focused) {
-                    Ok(action) => focus_reports.extend(action.bytes),
-                    Err(message) => {
-                        self.send_runtime_failure(message);
+            match effect {
+                Osc52Effect::Terminal(bytes) => {
+                    if !self.feed_terminal_output(&bytes, &mut focus_reports) {
                         return false;
                     }
                 }
+                Osc52Effect::Rejected(_rejection) => {}
+                Osc52Effect::Operation(operation) => {
+                    if !self.flush_ordered_terminal_replies(&mut focus_reports) {
+                        return false;
+                    }
+                    match self.osc52_policy.for_access(operation.access()) {
+                        Osc52AccessPolicy::Deny => {}
+                        Osc52AccessPolicy::Allow => {
+                            if !self.perform_osc52_operation(operation) {
+                                return false;
+                            }
+                        }
+                        Osc52AccessPolicy::Ask => {
+                            let Some(request) =
+                                self.osc52_authorization.create(operation, Instant::now())
+                            else {
+                                continue;
+                            };
+                            self.deferred_osc52_effects = effects;
+                            self.deferred_output_chunks = chunks;
+                            if !self.send_terminal_event(SessionEvent::Osc52Authorization(request))
+                            {
+                                return false;
+                            }
+                            return !received_output || self.publish_screen();
+                        }
+                    }
+                }
             }
-            self.focus_reporting_enabled = focus_reporting_enabled;
         }
 
         if received_output
-            && (!self.write_pending_pty_responses()
-                || (!focus_reports.is_empty() && !self.write_pty(&focus_reports))
-                || !self.publish_screen())
+            && (!self.flush_ordered_terminal_replies(&mut focus_reports) || !self.publish_screen())
         {
             return false;
         }
         true
+    }
+
+    fn feed_terminal_output(&mut self, bytes: &[u8], focus_reports: &mut Vec<u8>) -> bool {
+        self.emulator.feed(bytes);
+        let focus_reporting_enabled = match self.emulator.focus_reporting_enabled() {
+            Ok(enabled) => enabled,
+            Err(message) => {
+                self.send_runtime_failure(message);
+                return false;
+            }
+        };
+        if focus_reporting_enabled && !self.focus_reporting_enabled {
+            match self.emulator.focus(self.terminal_input_focused) {
+                Ok(action) => focus_reports.extend(action.bytes),
+                Err(message) => {
+                    self.send_runtime_failure(message);
+                    return false;
+                }
+            }
+        }
+        self.focus_reporting_enabled = focus_reporting_enabled;
+        true
+    }
+
+    fn flush_ordered_terminal_replies(&mut self, focus_reports: &mut Vec<u8>) -> bool {
+        self.write_pending_pty_responses()
+            && (focus_reports.is_empty() || self.write_pty(&mem::take(focus_reports)))
+    }
+
+    fn process_osc52_authorization(
+        &mut self,
+        id: Osc52AuthorizationId,
+        decision: Osc52AuthorizationDecision,
+    ) -> bool {
+        let Some(operation) = self.osc52_authorization.take(id, Instant::now()) else {
+            return true;
+        };
+        if decision == Osc52AuthorizationDecision::Allow && !self.perform_osc52_operation(operation)
+        {
+            return false;
+        }
+        self.resume_osc52_output()
+    }
+
+    fn resume_osc52_output(&mut self) -> bool {
+        let chunks = mem::take(&mut self.deferred_output_chunks);
+        self.process_output_queue(chunks)
+    }
+
+    fn perform_osc52_operation(&mut self, operation: Osc52Operation) -> bool {
+        match &operation {
+            Osc52Operation::Write { target, text } => {
+                let _ = self.osc52_clipboard.write(*target, text);
+                true
+            }
+            Osc52Operation::Read { target, .. } => {
+                let Ok(text) = self.osc52_clipboard.read(*target) else {
+                    return true;
+                };
+                if text.len() > MAX_OSC52_CONTENT_BYTES {
+                    return true;
+                }
+                operation
+                    .read_reply(&text)
+                    .is_none_or(|reply| self.write_pty(&reply))
+            }
+        }
     }
 
     fn process_key(&mut self, input: KeyInput) -> bool {
@@ -1369,6 +1646,7 @@ impl TerminalWorker {
 
         if !focused {
             self.paste_confirmations.cancel();
+            self.osc52_authorization.cancel();
             for input in self.held_keys.take_releases() {
                 match self.emulator.key(input) {
                     Ok(action) => {
@@ -1478,6 +1756,7 @@ impl TerminalWorker {
             held_keys: _held_keys,
             selection_autoscroll: _selection_autoscroll,
             paste_confirmations: _paste_confirmations,
+            ..
         } = self;
         // SpawnedPty's Drop terminates and reaps a live shell for the native Adapter.
         drop(reader_events);
@@ -1837,6 +2116,201 @@ mod tests {
                 }),
             }
         }
+    }
+
+    #[derive(Clone, Debug, Default, Eq, PartialEq)]
+    struct Osc52ClipboardState {
+        read_text: String,
+        reads: Vec<crate::terminal::Osc52Target>,
+        writes: Vec<(crate::terminal::Osc52Target, String)>,
+    }
+
+    #[derive(Clone, Default)]
+    struct RecordingOsc52Clipboard {
+        state: Arc<Mutex<Osc52ClipboardState>>,
+    }
+
+    impl RecordingOsc52Clipboard {
+        fn with_read_text(text: &str) -> Self {
+            Self {
+                state: Arc::new(Mutex::new(Osc52ClipboardState {
+                    read_text: text.to_owned(),
+                    ..Osc52ClipboardState::default()
+                })),
+            }
+        }
+
+        fn snapshot(&self) -> Osc52ClipboardState {
+            self.state.lock().unwrap().clone()
+        }
+    }
+
+    impl Osc52Clipboard for RecordingOsc52Clipboard {
+        fn read(
+            &mut self,
+            target: crate::terminal::Osc52Target,
+        ) -> Result<String, Osc52ClipboardError> {
+            let mut state = self.state.lock().unwrap();
+            state.reads.push(target);
+            Ok(state.read_text.clone())
+        }
+
+        fn write(
+            &mut self,
+            target: crate::terminal::Osc52Target,
+            text: &str,
+        ) -> Result<(), Osc52ClipboardError> {
+            self.state
+                .lock()
+                .unwrap()
+                .writes
+                .push((target, text.to_owned()));
+            Ok(())
+        }
+    }
+
+    fn osc52_worker(
+        policy: Osc52AuthorizationPolicy,
+        clipboard: RecordingOsc52Clipboard,
+    ) -> (
+        TerminalWorker,
+        async_channel::Receiver<SessionEvent>,
+        ScriptedPtyRecords,
+    ) {
+        let (_command_tx, commands) = mpsc::channel();
+        let (_reader_events, reader_event_rx) = mpsc::sync_channel(PTY_OUTPUT_QUEUE_CAPACITY);
+        let records = ScriptedPtyRecords::default();
+        let (events, receiver) = async_channel::bounded(PTY_OUTPUT_QUEUE_CAPACITY);
+        let worker = TerminalWorker {
+            pty: Box::new(ScriptedPty {
+                reader: None,
+                records: records.clone(),
+                reader_error: None,
+                resize_error: None,
+                write_error: None,
+                wait_error: None,
+                wait_times_out: false,
+                exit_code: 0,
+            }),
+            emulator: TerminalEmulator::new(test_geometry()).unwrap(),
+            commands,
+            reader_events: reader_event_rx,
+            reader_thread: thread::spawn(|| {}),
+            events,
+            resizes: ResizeMailbox::default(),
+            pending_command: None,
+            terminal_input_focused: true,
+            focus_reporting_enabled: false,
+            held_keys: HeldKeys::default(),
+            selection_autoscroll: SelectionAutoscrollSchedule::default(),
+            paste_confirmations: PasteConfirmationSchedule::default(),
+            osc52_filter: Osc52Filter::default(),
+            osc52_policy: policy,
+            osc52_clipboard: Box::new(clipboard),
+            osc52_authorization: Osc52AuthorizationSchedule::default(),
+            deferred_osc52_effects: VecDeque::new(),
+            deferred_output_chunks: VecDeque::new(),
+            deferred_reader_ready: false,
+        };
+        (worker, receiver, records)
+    }
+
+    #[test]
+    fn osc52_denial_is_quiet_and_never_accesses_the_clipboard() {
+        let clipboard = RecordingOsc52Clipboard::with_read_text("secret");
+        let (mut worker, _events, records) =
+            osc52_worker(Osc52AuthorizationPolicy::default(), clipboard.clone());
+
+        assert!(
+            worker.process_output_chunks(vec![b"\x1b]52;c;?\x07\x1b]52;c;d3JpdGU=\x07".to_vec()])
+        );
+
+        assert_eq!(
+            clipboard.snapshot(),
+            Osc52ClipboardState {
+                read_text: "secret".to_owned(),
+                ..Osc52ClipboardState::default()
+            }
+        );
+        assert!(records.snapshot().written.is_empty());
+    }
+
+    #[test]
+    fn allowed_osc52_read_reply_stays_ordered_between_terminal_protocol_replies() {
+        let clipboard = RecordingOsc52Clipboard::with_read_text("hello");
+        let (mut worker, _events, records) = osc52_worker(
+            Osc52AuthorizationPolicy {
+                read: Osc52AccessPolicy::Allow,
+                write: Osc52AccessPolicy::Allow,
+            },
+            clipboard.clone(),
+        );
+
+        assert!(worker.process_output_chunks(vec![b"\x1b[6n\x1b]52;c;?\x07\x1b[6n".to_vec()]));
+
+        assert_eq!(
+            clipboard.snapshot().reads,
+            [crate::terminal::Osc52Target::Standard]
+        );
+        assert_eq!(
+            records.snapshot().written,
+            b"\x1b[1;1R\x1b]52;c;aGVsbG8=\x07\x1b[1;1R"
+        );
+    }
+
+    #[test]
+    fn asked_osc52_write_retains_only_metadata_and_defers_later_output() {
+        let clipboard = RecordingOsc52Clipboard::default();
+        let (mut worker, events, records) = osc52_worker(
+            Osc52AuthorizationPolicy {
+                read: Osc52AccessPolicy::Ask,
+                write: Osc52AccessPolicy::Ask,
+            },
+            clipboard.clone(),
+        );
+
+        assert!(worker.process_output_chunks(vec![b"\x1b]52;c;c2VjcmV0\x07\x1b[6n".to_vec()]));
+        let SessionEvent::Osc52Authorization(request) = events.try_recv().unwrap() else {
+            panic!("ask policy must publish bounded authorization metadata")
+        };
+        assert_eq!(
+            (request.access, request.target, request.byte_len),
+            (
+                crate::terminal::Osc52Access::Write,
+                crate::terminal::Osc52Target::Standard,
+                6,
+            )
+        );
+        assert!(clipboard.snapshot().writes.is_empty());
+        assert!(records.snapshot().written.is_empty());
+        assert!(worker.osc52_authorization.is_pending());
+
+        assert!(worker.process_osc52_authorization(request.id, Osc52AuthorizationDecision::Allow,));
+        assert_eq!(
+            clipboard.snapshot().writes,
+            [(crate::terminal::Osc52Target::Standard, "secret".to_owned())]
+        );
+        assert_eq!(records.snapshot().written, b"\x1b[1;1R");
+    }
+
+    #[test]
+    fn osc52_authorization_allows_one_pending_request_and_rejects_stale_ids() {
+        let now = Instant::now();
+        let mut schedule = Osc52AuthorizationSchedule::default();
+        let operation = Osc52Operation::Read {
+            target: crate::terminal::Osc52Target::Standard,
+            terminator: crate::terminal::osc52::Osc52Terminator::StringTerminator,
+        };
+        let request = schedule.create(operation.clone(), now).unwrap();
+
+        assert!(schedule.create(operation, now).is_none());
+        assert_eq!(schedule.take(Osc52AuthorizationId::new(999), now), None);
+        assert!(schedule.is_pending());
+        assert_eq!(
+            schedule.expire(now + OSC52_AUTHORIZATION_TIMEOUT),
+            Some(request.id)
+        );
+        assert!(!schedule.is_pending());
     }
 
     impl Drop for ScriptedPty {
@@ -2504,6 +2978,13 @@ mod tests {
             held_keys: HeldKeys::default(),
             selection_autoscroll: SelectionAutoscrollSchedule::default(),
             paste_confirmations: PasteConfirmationSchedule::default(),
+            osc52_filter: Osc52Filter::default(),
+            osc52_policy: Osc52AuthorizationPolicy::default(),
+            osc52_clipboard: Box::<UnavailableOsc52Clipboard>::default(),
+            osc52_authorization: Osc52AuthorizationSchedule::default(),
+            deferred_osc52_effects: VecDeque::new(),
+            deferred_output_chunks: VecDeque::new(),
+            deferred_reader_ready: false,
         };
 
         assert!(worker.process_reader_events());
@@ -2550,6 +3031,13 @@ mod tests {
             held_keys: HeldKeys::default(),
             selection_autoscroll: SelectionAutoscrollSchedule::default(),
             paste_confirmations: PasteConfirmationSchedule::default(),
+            osc52_filter: Osc52Filter::default(),
+            osc52_policy: Osc52AuthorizationPolicy::default(),
+            osc52_clipboard: Box::<UnavailableOsc52Clipboard>::default(),
+            osc52_authorization: Osc52AuthorizationSchedule::default(),
+            deferred_osc52_effects: VecDeque::new(),
+            deferred_output_chunks: VecDeque::new(),
+            deferred_reader_ready: false,
         };
         assert!(worker.publish_screen());
         let _ = receiver.try_recv().unwrap();
@@ -3205,6 +3693,10 @@ mod tests {
                 }
                 Ok(SessionEvent::Failed(failure)) => panic!("terminal session failed: {failure}"),
                 Ok(SessionEvent::Exited(status)) => panic!("shell exited early: {status}"),
+                Ok(
+                    SessionEvent::Osc52Authorization(_)
+                    | SessionEvent::Osc52AuthorizationExpired(_),
+                ) => {}
                 Err(async_channel::TryRecvError::Empty) => {
                     thread::sleep(Duration::from_millis(10));
                 }
@@ -3248,6 +3740,10 @@ mod tests {
                 Ok(SessionEvent::Screen(_)) => {}
                 Ok(SessionEvent::Exited(status)) => exit_status = Some(status),
                 Ok(SessionEvent::Failed(failure)) => panic!("terminal session failed: {failure}"),
+                Ok(
+                    SessionEvent::Osc52Authorization(_)
+                    | SessionEvent::Osc52AuthorizationExpired(_),
+                ) => {}
                 Err(async_channel::TryRecvError::Empty) => {
                     thread::sleep(Duration::from_millis(10));
                 }
