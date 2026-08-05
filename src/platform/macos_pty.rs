@@ -1,6 +1,7 @@
 use std::env;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -12,40 +13,166 @@ use portable_pty::{
 use thiserror::Error;
 
 const CHILD_EXIT_POLL_INTERVAL: Duration = Duration::from_millis(10);
+const GRACEFUL_SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(250);
+const FORCED_SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(250);
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ShutdownDisposition {
+    NotRequested,
+    Graceful,
+    Forced,
+}
+
+#[derive(Debug)]
+pub(crate) struct ShellExit {
+    pub(crate) status: ExitStatus,
+    pub(crate) shutdown: ShutdownDisposition,
+}
+
+struct TerminationTarget {
+    process_group: Option<i32>,
+    fallback: Box<dyn ChildKiller + Send + Sync>,
+}
+
+impl TerminationTarget {
+    fn owns_process_group(&self) -> bool {
+        self.process_group.is_some()
+    }
+
+    fn hang_up(&mut self) -> io::Result<()> {
+        match self.process_group {
+            Some(process_group) => signal_process_group(process_group, libc::SIGHUP),
+            None => self.fallback.kill(),
+        }
+    }
+
+    fn force(&mut self) -> io::Result<()> {
+        match self.process_group {
+            Some(process_group) => signal_process_group(process_group, libc::SIGKILL),
+            None => self.fallback.kill(),
+        }
+    }
+
+    fn is_alive(&self) -> io::Result<bool> {
+        let Some(process_group) = self.process_group else {
+            return Ok(true);
+        };
+        process_group_is_alive(process_group)
+    }
+}
 
 struct ChildTermination {
-    signaller: Mutex<Option<Box<dyn ChildKiller + Send + Sync>>>,
+    target: Mutex<Option<TerminationTarget>>,
+    requested: AtomicBool,
+    forced: AtomicBool,
 }
 
 impl ChildTermination {
-    fn new(signaller: Box<dyn ChildKiller + Send + Sync>) -> Self {
+    fn new(process_group: Option<i32>, fallback: Box<dyn ChildKiller + Send + Sync>) -> Self {
         Self {
-            signaller: Mutex::new(Some(signaller)),
+            target: Mutex::new(Some(TerminationTarget {
+                process_group,
+                fallback,
+            })),
+            requested: AtomicBool::new(false),
+            forced: AtomicBool::new(false),
         }
     }
 
     fn signal(&self) -> io::Result<()> {
-        let mut gate = self.lock_signaller();
-        let Some(mut signaller) = gate.take() else {
+        if self.requested.swap(true, Ordering::AcqRel) {
             return Ok(());
-        };
-        // Keep the liveness gate locked through signal delivery so the worker cannot reap the
-        // process and allow its PID to be reused before this one-shot capability is consumed.
-        let result = signaller.kill();
-        drop(gate);
-        result
+        }
+        let mut target = self.lock_target();
+        match target.as_mut() {
+            Some(target) => target.hang_up(),
+            None => Ok(()),
+        }
     }
 
-    fn lock_signaller(
-        &self,
-    ) -> std::sync::MutexGuard<'_, Option<Box<dyn ChildKiller + Send + Sync>>> {
-        match self.signaller.lock() {
-            Ok(signaller) => signaller,
+    fn lock_target(&self) -> std::sync::MutexGuard<'_, Option<TerminationTarget>> {
+        match self.target.lock() {
+            Ok(target) => target,
             Err(poisoned) => {
                 eprintln!("terminal child-termination coordination lock was poisoned; recovering");
                 poisoned.into_inner()
             }
         }
+    }
+
+    fn revoke(&self) {
+        self.lock_target().take();
+    }
+
+    fn complete_process_group(&self, graceful_deadline: Instant) -> ShutdownDisposition {
+        if !self.requested.load(Ordering::Acquire) {
+            self.revoke();
+            return ShutdownDisposition::NotRequested;
+        }
+
+        let mut target_slot = self.lock_target();
+        let Some(target) = target_slot.as_mut() else {
+            return if self.forced.load(Ordering::Acquire) {
+                ShutdownDisposition::Forced
+            } else {
+                ShutdownDisposition::Graceful
+            };
+        };
+        if !target.owns_process_group() {
+            target_slot.take();
+            return ShutdownDisposition::Graceful;
+        }
+
+        while Instant::now() < graceful_deadline {
+            match target.is_alive() {
+                Ok(false) => {
+                    target_slot.take();
+                    return ShutdownDisposition::Graceful;
+                }
+                Ok(true) => thread::sleep(CHILD_EXIT_POLL_INTERVAL),
+                Err(error) => {
+                    eprintln!("failed to inspect shell process group during shutdown: {error}");
+                    break;
+                }
+            }
+        }
+
+        if let Err(error) = target.force() {
+            eprintln!("failed to force shell process group shutdown: {error}");
+        }
+        self.forced.store(true, Ordering::Release);
+        target_slot.take();
+        ShutdownDisposition::Forced
+    }
+
+    fn requested(&self) -> bool {
+        self.requested.load(Ordering::Acquire)
+    }
+}
+
+fn signal_process_group(process_group: i32, signal: i32) -> io::Result<()> {
+    // SAFETY: a negative PID addresses the process group created for this PTY.
+    if unsafe { libc::kill(-process_group, signal) } == 0 {
+        return Ok(());
+    }
+    let error = io::Error::last_os_error();
+    if error.raw_os_error() == Some(libc::ESRCH) {
+        Ok(())
+    } else {
+        Err(error)
+    }
+}
+
+fn process_group_is_alive(process_group: i32) -> io::Result<bool> {
+    // SAFETY: signal zero performs only an existence/permission check.
+    if unsafe { libc::kill(-process_group, 0) } == 0 {
+        return Ok(true);
+    }
+    let error = io::Error::last_os_error();
+    match error.raw_os_error() {
+        Some(libc::ESRCH) => Ok(false),
+        Some(libc::EPERM) => Ok(true),
+        _ => Err(error),
     }
 }
 
@@ -86,11 +213,14 @@ impl SpawnedPty {
         self.master.resize(size)
     }
 
-    pub(crate) fn wait_for_child(&mut self, timeout: Duration) -> io::Result<ExitStatus> {
+    pub(crate) fn wait_for_child(&mut self, timeout: Duration) -> io::Result<ShellExit> {
         let deadline = Instant::now() + timeout;
         loop {
             if let Some(status) = self.try_wait_for_child()? {
-                return Ok(status);
+                let shutdown = self
+                    .termination
+                    .complete_process_group(Instant::now() + GRACEFUL_SHUTDOWN_TIMEOUT);
+                return Ok(ShellExit { status, shutdown });
             }
 
             let remaining = deadline.saturating_duration_since(Instant::now());
@@ -108,33 +238,43 @@ impl SpawnedPty {
     }
 
     fn try_wait_for_child(&mut self) -> io::Result<Option<ExitStatus>> {
-        let mut signaller = self.termination.lock_signaller();
         let Some(child) = self.child.as_mut() else {
             return Err(child_already_reaped_error());
         };
         let status = child.try_wait()?;
         if status.is_some() {
-            signaller.take();
             self.child.take();
         }
         Ok(status)
     }
 
     fn cleanup_child(&mut self) {
-        let child = {
-            let mut signaller = self.termination.lock_signaller();
-            signaller.take();
-            self.child.take()
-        };
+        let child = self.child.take();
         let Some(mut child) = child else {
             return;
         };
 
         match child.try_wait() {
-            Ok(Some(_)) => return,
+            Ok(Some(_)) => {
+                self.termination
+                    .complete_process_group(Instant::now() + GRACEFUL_SHUTDOWN_TIMEOUT);
+                return;
+            }
             Ok(None) => {}
             Err(error) => eprintln!("failed to inspect shell process during cleanup: {error}"),
         }
+
+        let owns_process_group = self
+            .termination
+            .lock_target()
+            .as_ref()
+            .is_some_and(TerminationTarget::owns_process_group);
+        if owns_process_group {
+            self.cleanup_process_group(child.as_mut());
+            return;
+        }
+
+        self.termination.revoke();
 
         if let Err(error) = child.kill() {
             eprintln!("failed to terminate shell process during cleanup: {error}");
@@ -144,6 +284,44 @@ impl SpawnedPty {
 
         if let Err(error) = child.wait() {
             eprintln!("failed to reap shell process during cleanup: {error}");
+        }
+    }
+
+    fn cleanup_process_group(&self, child: &mut dyn Child) {
+        if !self.termination.requested()
+            && let Err(error) = self.termination.signal()
+        {
+            eprintln!("failed to gracefully terminate shell process group: {error}");
+        }
+
+        let graceful_deadline = Instant::now() + GRACEFUL_SHUTDOWN_TIMEOUT;
+        if Self::poll_child_until(child, graceful_deadline) {
+            self.termination.complete_process_group(graceful_deadline);
+            return;
+        }
+
+        self.termination.complete_process_group(graceful_deadline);
+        let forced_deadline = Instant::now() + FORCED_SHUTDOWN_TIMEOUT;
+        if !Self::poll_child_until(child, forced_deadline) {
+            eprintln!("shell process did not become reapable after forced process-group shutdown");
+        }
+    }
+
+    fn poll_child_until(child: &mut dyn Child, deadline: Instant) -> bool {
+        loop {
+            match child.try_wait() {
+                Ok(Some(_)) => return true,
+                Ok(None) => {}
+                Err(error) => {
+                    eprintln!("failed to inspect shell process during shutdown: {error}");
+                    return false;
+                }
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return false;
+            }
+            thread::sleep(CHILD_EXIT_POLL_INTERVAL.min(remaining));
         }
     }
 
@@ -202,6 +380,8 @@ pub(crate) enum PtyError {
         #[source]
         source: AnyError,
     },
+    #[error("the shell process did not expose its process-group identifier")]
+    MissingProcessGroup,
     #[error("failed to clone the pseudo-terminal reader: {0}")]
     CloneReader(#[source] AnyError),
     #[error("failed to acquire the pseudo-terminal writer: {0}")]
@@ -253,7 +433,17 @@ fn spawn_command_in_pty(
         }
     };
 
-    let termination = Arc::new(ChildTermination::new(child.clone_killer()));
+    let process_group = child
+        .process_id()
+        .and_then(|process_id| i32::try_from(process_id).ok());
+    let Some(process_group) = process_group else {
+        terminate_after_startup_failure(child.as_mut());
+        return Err(PtyError::MissingProcessGroup);
+    };
+    let termination = Arc::new(ChildTermination::new(
+        Some(process_group),
+        child.clone_killer(),
+    ));
     let terminator = PtyTerminator::new(Arc::clone(&termination));
 
     Ok((
@@ -334,7 +524,7 @@ fn terminate_after_startup_failure(child: &mut dyn Child) {
 mod tests {
     use std::collections::HashMap;
     use std::fmt;
-    use std::io;
+    use std::io::{self, BufRead, BufReader};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Condvar, Mutex, mpsc};
     use std::time::Instant;
@@ -417,7 +607,10 @@ mod tests {
             .read_to_string(&mut output)
             .unwrap();
         let status = pty.wait_for_child(Duration::from_secs(2)).unwrap();
-        assert!(status.success(), "controlled PTY child failed: {output}");
+        assert!(
+            status.status.success(),
+            "controlled PTY child failed: {output}"
+        );
         let report = output
             .lines()
             .find(|line| line.starts_with("SPACETERM_PTY_REPORT "))
@@ -514,6 +707,117 @@ mod tests {
             ),
             (true, true, "first", "second")
         );
+    }
+
+    #[test]
+    fn stubborn_process_group_should_receive_bounded_forced_shutdown() {
+        let working_directory = env::current_dir().unwrap();
+        let mut command = CommandBuilder::new("/bin/sh");
+        command.args([
+            "-c",
+            "trap '' HUP; (trap '' HUP; exec </dev/null >/dev/null 2>&1; while :; do sleep 1; done) & child=$!; echo SPACETERM_SHUTDOWN_REPORT leader=$$ child=$child; exec </dev/null >/dev/null 2>&1; while :; do sleep 1; done",
+        ]);
+        command.cwd(&working_directory);
+        let (mut pty, terminator) = spawn_command_in_pty(
+            PtySize {
+                rows: 24,
+                cols: 80,
+                pixel_width: 640,
+                pixel_height: 480,
+            },
+            command,
+            "stubborn process group",
+        )
+        .unwrap();
+        let mut reader = BufReader::new(pty.take_reader().unwrap());
+        let mut report = String::new();
+        reader.read_line(&mut report).unwrap();
+        let fields: HashMap<_, _> = report
+            .split_whitespace()
+            .skip_while(|field| *field != "SPACETERM_SHUTDOWN_REPORT")
+            .skip(1)
+            .map(|field| field.split_once('=').unwrap())
+            .collect();
+        let leader = fields["leader"].parse::<i32>().unwrap();
+        let child = fields["child"].parse::<i32>().unwrap();
+        // SAFETY: getpgid performs a read-only process identity query.
+        assert_eq!(unsafe { libc::getpgid(child) }, leader);
+
+        let started = Instant::now();
+        terminator.terminate().unwrap();
+        pty.cleanup_child();
+        let elapsed = started.elapsed();
+
+        assert!(
+            elapsed >= GRACEFUL_SHUTDOWN_TIMEOUT,
+            "forced shutdown skipped the grace window: {elapsed:?}"
+        );
+        assert!(
+            elapsed <= GRACEFUL_SHUTDOWN_TIMEOUT + FORCED_SHUTDOWN_TIMEOUT + Duration::from_secs(1),
+            "forced shutdown exceeded its bound: {elapsed:?}"
+        );
+        assert!(pty.termination.forced.load(Ordering::Acquire));
+        assert_process_disappears(leader);
+        assert_process_disappears(child);
+    }
+
+    #[test]
+    fn responsive_process_group_should_finish_during_the_grace_window() {
+        let working_directory = env::current_dir().unwrap();
+        let mut command = CommandBuilder::new("/bin/sh");
+        command.args([
+            "-c",
+            "sleep 30 & child=$!; echo SPACETERM_SHUTDOWN_REPORT leader=$$ child=$child; wait",
+        ]);
+        command.cwd(&working_directory);
+        let (mut pty, terminator) = spawn_command_in_pty(
+            PtySize {
+                rows: 24,
+                cols: 80,
+                pixel_width: 640,
+                pixel_height: 480,
+            },
+            command,
+            "responsive process group",
+        )
+        .unwrap();
+        let mut reader = BufReader::new(pty.take_reader().unwrap());
+        let mut report = String::new();
+        reader.read_line(&mut report).unwrap();
+        let fields: HashMap<_, _> = report
+            .split_whitespace()
+            .skip_while(|field| *field != "SPACETERM_SHUTDOWN_REPORT")
+            .skip(1)
+            .map(|field| field.split_once('=').unwrap())
+            .collect();
+        let leader = fields["leader"].parse::<i32>().unwrap();
+        let child = fields["child"].parse::<i32>().unwrap();
+
+        let started = Instant::now();
+        terminator.terminate().unwrap();
+        pty.cleanup_child();
+
+        assert!(started.elapsed() < GRACEFUL_SHUTDOWN_TIMEOUT);
+        assert!(!pty.termination.forced.load(Ordering::Acquire));
+        assert_process_disappears(leader);
+        assert_process_disappears(child);
+    }
+
+    fn assert_process_disappears(process: i32) {
+        let deadline = Instant::now() + Duration::from_secs(1);
+        loop {
+            // SAFETY: signal zero performs only an existence/permission check.
+            if unsafe { libc::kill(process, 0) } == -1
+                && io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+            {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "process {process} remained after process-group shutdown"
+            );
+            thread::sleep(CHILD_EXIT_POLL_INTERVAL);
+        }
     }
 
     #[test]
@@ -978,7 +1282,7 @@ mod tests {
     }
 
     fn spawned_pty(child: Box<dyn Child + Send + Sync>) -> (SpawnedPty, PtyTerminator) {
-        let termination = Arc::new(ChildTermination::new(child.clone_killer()));
+        let termination = Arc::new(ChildTermination::new(None, child.clone_killer()));
         let terminator = PtyTerminator::new(Arc::clone(&termination));
         (
             SpawnedPty {
@@ -1290,7 +1594,7 @@ mod tests {
     }
 
     #[test]
-    fn child_reap_should_exclude_and_revoke_a_concurrent_signal() {
+    fn termination_should_not_block_behind_a_concurrent_child_reap() {
         let cleanup = CleanupCounts::default();
         let try_wait_control = BlockingCallControl::default();
         let (mut pty, terminator) = spawned_pty(Box::new(BlockingTryWaitChild {
@@ -1311,11 +1615,11 @@ mod tests {
             termination_finished.send(terminator.terminate()).unwrap();
         });
         termination_start.recv().unwrap();
-        assert!(matches!(
-            termination_completion.recv_timeout(Duration::from_millis(50)),
-            Err(mpsc::RecvTimeoutError::Timeout)
-        ));
-        assert_eq!(cleanup.signal.load(Ordering::Relaxed), 0);
+        termination_completion
+            .recv_timeout(Duration::from_millis(50))
+            .unwrap()
+            .unwrap();
+        assert_eq!(cleanup.signal.load(Ordering::Relaxed), 1);
 
         try_wait_control.release();
         let (wait_result, pty) = wait_completion
@@ -1323,10 +1627,6 @@ mod tests {
             .unwrap();
         wait_result.unwrap();
         wait_thread.join().unwrap();
-        termination_completion
-            .recv_timeout(Duration::from_secs(1))
-            .unwrap()
-            .unwrap();
         termination_thread.join().unwrap();
         drop(pty);
 
@@ -1337,7 +1637,7 @@ mod tests {
                 cleanup.signal.load(Ordering::Relaxed),
                 cleanup.wait.load(Ordering::Relaxed),
             ),
-            (1, 0, 0, 0)
+            (1, 0, 1, 0)
         );
     }
 

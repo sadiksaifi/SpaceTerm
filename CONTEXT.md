@@ -93,7 +93,10 @@ configuration, Shell Process launch, and Terminal Emulator initialization occur 
 worker; Terminal Session creation returns after starting that worker, and startup errors arrive as
 typed terminal events. The worker installs a deferred one-shot signaller so a close racing startup
 still requests prompt termination. Once launched, only the worker may wait, perform full
-termination escalation, or reap, so close callers never wait for process cleanup.
+termination escalation, or reap, so close callers never wait for process cleanup. Shutdown sends
+one SIGHUP to the complete owned process group, allows a bounded grace period, then sends SIGKILL to
+that group when any member remains. The worker reaps the Shell Process exactly once after reader
+output and publishes typed normal, signal, graceful-shutdown, or forced-shutdown exit state.
 
 ### Bounded PTY Output Transport
 

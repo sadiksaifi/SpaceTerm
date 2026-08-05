@@ -243,7 +243,7 @@ impl TerminalPane {
             }
             SessionEvent::Exited(status) => {
                 eprintln!("{status}");
-                self.status = Some(status);
+                self.status = Some(status.to_string());
                 cx.emit(TerminalPaneEvent::Exited);
             }
             SessionEvent::Failed(failure) => {

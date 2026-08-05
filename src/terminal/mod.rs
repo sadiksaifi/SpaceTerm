@@ -18,10 +18,17 @@ pub(crate) use emulator::{
     )
 )]
 pub(crate) use session::SessionFailure;
+#[cfg_attr(
+    not(test),
+    expect(
+        unused_imports,
+        reason = "SessionExit is part of the crate-visible SessionEvent interface"
+    )
+)]
 pub(crate) use session::{
     InputModifiers, KeyCode, KeyInput, NativeTerminalSessionFactory, PointerButton, PointerInput,
-    PointerPhase, SessionEvent, SurfacePosition, TerminalSessionFactory, TerminalSessionHandle,
-    WheelInput,
+    PointerPhase, SessionEvent, SessionExit, SurfacePosition, TerminalSessionFactory,
+    TerminalSessionHandle, WheelInput,
 };
 #[cfg(test)]
 pub(crate) use session::{SessionError, StartedTerminalSession};

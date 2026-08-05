@@ -7,11 +7,14 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use anyhow::Error as AnyError;
-use portable_pty::{ExitStatus, PtySize};
+#[cfg(test)]
+use portable_pty::ExitStatus;
+use portable_pty::PtySize;
 use thiserror::Error;
 
 use crate::platform::macos_pty::{
-    PtyError, PtyTerminator, SpawnedPty, spawn_user_shell, user_shell,
+    PtyError, PtyTerminator, ShellExit, ShutdownDisposition, SpawnedPty, spawn_user_shell,
+    user_shell,
 };
 use crate::terminal::emulator::{EmulatorAction, ScreenSnapshot, TerminalEmulator};
 use crate::terminal::geometry::TerminalGeometry;
@@ -105,8 +108,29 @@ fn pty_size(geometry: TerminalGeometry) -> PtySize {
 #[derive(Clone, Debug)]
 pub(crate) enum SessionEvent {
     Screen(Arc<ScreenSnapshot>),
-    Exited(String),
+    Exited(SessionExit),
     Failed(SessionFailure),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum SessionExit {
+    Success,
+    ExitCode(u32),
+    Signal(String),
+    GracefulShutdown,
+    ForcedShutdown,
+}
+
+impl fmt::Display for SessionExit {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Success => formatter.write_str("Shell exited successfully"),
+            Self::ExitCode(code) => write!(formatter, "Shell exited with code {code}"),
+            Self::Signal(signal) => write!(formatter, "Shell exited after signal {signal}"),
+            Self::GracefulShutdown => formatter.write_str("Shell shut down gracefully"),
+            Self::ForcedShutdown => formatter.write_str("Shell shutdown was forced"),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -286,7 +310,7 @@ pub(crate) struct TerminalSession {
 trait SessionPty: Write + Send {
     fn take_reader(&mut self) -> std::io::Result<Box<dyn Read + Send>>;
     fn resize(&self, size: PtySize) -> Result<(), AnyError>;
-    fn wait_for_child(&mut self, timeout: Duration) -> std::io::Result<ExitStatus>;
+    fn wait_for_child(&mut self, timeout: Duration) -> std::io::Result<ShellExit>;
 }
 
 trait SessionPtyTerminator: Send + Sync {
@@ -355,7 +379,7 @@ impl SessionPty for SpawnedPty {
         SpawnedPty::resize(self, size)
     }
 
-    fn wait_for_child(&mut self, timeout: Duration) -> std::io::Result<ExitStatus> {
+    fn wait_for_child(&mut self, timeout: Duration) -> std::io::Result<ShellExit> {
         SpawnedPty::wait_for_child(self, timeout)
     }
 }
@@ -1041,18 +1065,30 @@ fn send_reader_event(
 
 fn classify_reader_stop(
     read_error: Option<String>,
-    wait_result: std::io::Result<ExitStatus>,
+    wait_result: std::io::Result<ShellExit>,
 ) -> SessionEvent {
     match (read_error, wait_result) {
-        (None, Ok(status)) => SessionEvent::Exited(format!("Shell exited ({status:?})")),
-        (Some(read_error), Ok(status)) => SessionEvent::Failed(SessionFailure::PtyRead {
+        (None, Ok(exit)) => SessionEvent::Exited(classify_shell_exit(exit)),
+        (Some(read_error), Ok(exit)) => SessionEvent::Failed(SessionFailure::PtyRead {
             read_error,
-            exit_status: format!("{status:?}"),
+            exit_status: classify_shell_exit(exit).to_string(),
         }),
         (read_error, Err(wait_error)) => SessionEvent::Failed(SessionFailure::ShellWait {
             read_error,
             wait_error: wait_error.to_string(),
         }),
+    }
+}
+
+fn classify_shell_exit(exit: ShellExit) -> SessionExit {
+    match exit.shutdown {
+        ShutdownDisposition::Graceful => SessionExit::GracefulShutdown,
+        ShutdownDisposition::Forced => SessionExit::ForcedShutdown,
+        ShutdownDisposition::NotRequested => match exit.status.signal() {
+            Some(signal) => SessionExit::Signal(signal.to_owned()),
+            None if exit.status.success() => SessionExit::Success,
+            None => SessionExit::ExitCode(exit.status.exit_code()),
+        },
     }
 }
 
@@ -1270,7 +1306,7 @@ mod tests {
             }
         }
 
-        fn wait_for_child(&mut self, timeout: Duration) -> io::Result<ExitStatus> {
+        fn wait_for_child(&mut self, timeout: Duration) -> io::Result<ShellExit> {
             self.records.update(|state| state.waits += 1);
             if self.wait_times_out {
                 return Err(io::Error::new(
@@ -1283,7 +1319,10 @@ mod tests {
             }
             match &self.wait_error {
                 Some(message) => Err(io::Error::other(message.clone())),
-                None => Ok(ExitStatus::with_exit_code(self.exit_code)),
+                None => Ok(ShellExit {
+                    status: ExitStatus::with_exit_code(self.exit_code),
+                    shutdown: ShutdownDisposition::NotRequested,
+                }),
             }
         }
     }
@@ -1431,6 +1470,47 @@ mod tests {
     }
 
     #[test]
+    fn shell_exit_should_preserve_normal_signal_and_shutdown_classifications() {
+        let classify = |status, shutdown| classify_shell_exit(ShellExit { status, shutdown });
+
+        assert_eq!(
+            classify(
+                ExitStatus::with_exit_code(0),
+                ShutdownDisposition::NotRequested
+            ),
+            SessionExit::Success
+        );
+        assert_eq!(
+            classify(
+                ExitStatus::with_exit_code(17),
+                ShutdownDisposition::NotRequested
+            ),
+            SessionExit::ExitCode(17)
+        );
+        assert_eq!(
+            classify(
+                ExitStatus::with_signal("Hangup"),
+                ShutdownDisposition::NotRequested
+            ),
+            SessionExit::Signal("Hangup".to_owned())
+        );
+        assert_eq!(
+            classify(
+                ExitStatus::with_signal("Hangup"),
+                ShutdownDisposition::Graceful
+            ),
+            SessionExit::GracefulShutdown
+        );
+        assert_eq!(
+            classify(
+                ExitStatus::with_signal("Killed"),
+                ShutdownDisposition::Forced
+            ),
+            SessionExit::ForcedShutdown
+        );
+    }
+
+    #[test]
     fn scripted_output_and_exit_should_preserve_the_latest_screen_before_the_final_event() {
         let (result, reader_steps, records) = start_scripted_session(ScriptedPtyOptions::default());
         let (mut session, events) = result.unwrap();
@@ -1453,7 +1533,7 @@ mod tests {
         let result = match (first, second) {
             (SessionEvent::Screen(screen), SessionEvent::Exited(status)) => (
                 screen_text(&screen).contains("bounded line 31"),
-                status.starts_with("Shell exited"),
+                status == SessionExit::Success,
                 events.try_recv().is_err(),
             ),
             events => panic!("expected the latest Screen followed by Exited, got {events:?}"),
@@ -1971,7 +2051,7 @@ mod tests {
             panic!("a read error followed by a successful wait must be classified as PtyRead")
         };
         assert_eq!(read_error, "read unavailable");
-        assert_eq!(exit_status, format!("{:?}", ExitStatus::with_exit_code(7)));
+        assert_eq!(exit_status, "Shell exited with code 7");
         assert_eq!(records.snapshot().waits, 1);
 
         session.shutdown();
@@ -2086,7 +2166,7 @@ mod tests {
 
         assert!(matches!(
             event,
-            SessionEvent::Exited(status) if status.starts_with("Shell exited")
+            SessionEvent::Exited(SessionExit::ExitCode(7))
         ));
         let state = records.wait_for("the exited PTY worker to release ownership", |state| {
             state.pty_drops == 1

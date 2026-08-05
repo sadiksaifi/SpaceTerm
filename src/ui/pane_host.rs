@@ -878,7 +878,7 @@ mod tests {
     use super::*;
     use crate::terminal::testing::{TestTerminalSessionFactory, TestTerminalSessionRecords};
     use crate::terminal::{
-        ScreenSnapshot, ScrollbarSnapshot, SessionEvent, TerminalSessionFactory,
+        ScreenSnapshot, ScrollbarSnapshot, SessionEvent, SessionExit, TerminalSessionFactory,
     };
 
     fn test_session_factory() -> WorkspaceTerminalSessionFactory {
@@ -1203,7 +1203,7 @@ mod tests {
             .event_sender(2)
             .expect("the split Pane session was not started");
         sender
-            .try_send(SessionEvent::Exited("Shell exited".to_owned()))
+            .try_send(SessionEvent::Exited(SessionExit::Success))
             .unwrap();
         cx.run_until_parked();
 
@@ -1240,10 +1240,10 @@ mod tests {
             .event_sender(1)
             .expect("the initial Pane session was not started");
         sender
-            .try_send(SessionEvent::Exited("Shell exited".to_owned()))
+            .try_send(SessionEvent::Exited(SessionExit::Success))
             .unwrap();
         sender
-            .try_send(SessionEvent::Exited("Shell exited again".to_owned()))
+            .try_send(SessionEvent::Exited(SessionExit::ExitCode(1)))
             .unwrap();
         cx.run_until_parked();
 

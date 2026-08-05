@@ -1312,8 +1312,8 @@ mod tests {
     };
 
     use super::*;
-    use crate::terminal::SessionEvent;
     use crate::terminal::testing::{TestTerminalSessionFactory, TestTerminalSessionRecords};
+    use crate::terminal::{SessionEvent, SessionExit};
 
     fn workspace_manager(
         cx: &mut TestAppContext,
@@ -2210,7 +2210,7 @@ mod tests {
         cx.run_until_parked();
 
         inactive_sender
-            .try_send(SessionEvent::Exited("Shell exited".to_owned()))
+            .try_send(SessionEvent::Exited(SessionExit::Success))
             .expect("the inactive shell exit must be delivered");
         cx.run_until_parked();
         cx.simulate_keystrokes("cmd-n");
