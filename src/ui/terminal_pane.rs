@@ -1034,6 +1034,7 @@ impl Render for TerminalPane {
                 focus_handle: self.focus_handle.clone(),
                 input: cx.entity(),
                 text_blink_visible: self.text_blink_visible,
+                scale_factor: window.scale_factor(),
             },
         );
 
