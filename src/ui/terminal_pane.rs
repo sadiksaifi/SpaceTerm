@@ -985,6 +985,7 @@ impl Render for TerminalPane {
                 preedit,
                 focus_handle: self.focus_handle.clone(),
                 input: cx.entity(),
+                text_blink_visible: true,
             },
         );
 

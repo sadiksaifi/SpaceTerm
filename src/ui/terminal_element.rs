@@ -106,6 +106,7 @@ pub(crate) struct TerminalGridElement {
     preedit: Option<PreeditLayout>,
     focus_handle: FocusHandle,
     input: Entity<TerminalPane>,
+    text_blink_visible: bool,
 }
 
 pub(crate) struct TerminalGridConfiguration {
@@ -117,6 +118,7 @@ pub(crate) struct TerminalGridConfiguration {
     pub(crate) preedit: Option<PreeditLayout>,
     pub(crate) focus_handle: FocusHandle,
     pub(crate) input: Entity<TerminalPane>,
+    pub(crate) text_blink_visible: bool,
 }
 
 impl TerminalGridElement {
@@ -158,6 +160,7 @@ impl TerminalGridElement {
             preedit: configuration.preedit,
             focus_handle: configuration.focus_handle,
             input: configuration.input,
+            text_blink_visible: configuration.text_blink_visible,
         }
     }
 }
@@ -244,6 +247,9 @@ impl Element for TerminalGridElement {
             let text = row
                 .fragments
                 .iter()
+                .filter(|fragment| {
+                    text_fragment_visible(fragment.blinking, self.text_blink_visible)
+                })
                 .map(|fragment| PreparedText {
                     line: window.text_system().shape_line(
                         fragment.text.clone(),
@@ -341,7 +347,11 @@ impl Element for TerminalGridElement {
                     ),
                 });
 
-                if plan.recolor_text && !cell.spacer_tail {
+                if plan.recolor_text
+                    && !cell.spacer_tail
+                    && !cell.invisible
+                    && text_fragment_visible(cell.blinking, self.text_blink_visible)
+                {
                     let cursor_font = terminal_cell_font(&self.font_family, cell.bold, cell.italic);
                     text.push(PreparedText {
                         line: window.text_system().shape_line(
@@ -664,6 +674,10 @@ fn is_bidi_sensitive(character: char) -> bool {
 
 fn force_cell_width_for_cell(text: &str, width_cells: u8) -> bool {
     width_cells == 1 && text.chars().count() == 1 && !text.chars().any(is_bidi_sensitive)
+}
+
+fn text_fragment_visible(blinking: bool, blink_phase_visible: bool) -> bool {
+    !blinking || blink_phase_visible
 }
 
 fn cursor_column_for_row(cursor: Option<CursorPositionSnapshot>, row: usize) -> Option<usize> {
@@ -1112,6 +1126,14 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![("a", false), ("b", true), ("c", false)]
         );
+    }
+
+    #[test]
+    fn text_blink_phase_hides_only_blinking_fragments() {
+        assert!(text_fragment_visible(false, false));
+        assert!(text_fragment_visible(false, true));
+        assert!(!text_fragment_visible(true, false));
+        assert!(text_fragment_visible(true, true));
     }
 
     #[test]
