@@ -323,6 +323,7 @@ pub(crate) struct ScreenSnapshot {
     pub(crate) scrollbar: ScrollbarSnapshot,
     pub(crate) active_screen: ActiveScreenSnapshot,
     pub(crate) cursor: CursorSnapshot,
+    pub(crate) text_blinking: bool,
     pub(crate) mouse_tracking: bool,
     pub(crate) title: Arc<str>,
     pub(crate) damage: SnapshotDamage,
@@ -339,6 +340,7 @@ impl PartialEq for ScreenSnapshot {
             && self.scrollbar == other.scrollbar
             && self.active_screen == other.active_screen
             && self.cursor == other.cursor
+            && self.text_blinking == other.text_blinking
             && self.mouse_tracking == other.mouse_tracking
             && self.title == other.title
             && self.damage == other.damage
@@ -362,6 +364,7 @@ impl ScreenSnapshot {
                 color: ACTIVE_THEME.terminal_foreground,
                 ..CursorSnapshot::default()
             },
+            text_blinking: false,
             mouse_tracking: false,
             title: Arc::from(""),
             damage: SnapshotDamage::initial(),
@@ -374,8 +377,10 @@ impl ScreenSnapshot {
         scrollbar: ScrollbarSnapshot,
         title: impl Into<Arc<str>>,
     ) -> Arc<Self> {
+        let text_blinking = rows_have_visible_blinking_text(&rows);
         Arc::new(Self {
             rows,
+            text_blinking,
             scrollbar,
             title: title.into(),
             ..Self::empty_value()
@@ -389,9 +394,11 @@ impl ScreenSnapshot {
         title: impl Into<Arc<str>>,
         generation: u64,
     ) -> Arc<Self> {
+        let text_blinking = rows_have_visible_blinking_text(&rows);
         Arc::new(Self {
             generation: PresentationGeneration(generation),
             rows,
+            text_blinking,
             scrollbar,
             title: title.into(),
             ..Self::empty_value()
@@ -410,11 +417,19 @@ impl ScreenSnapshot {
             scrollbar: ScrollbarSnapshot::default(),
             active_screen: ActiveScreenSnapshot::default(),
             cursor: CursorSnapshot::default(),
+            text_blinking: false,
             mouse_tracking: false,
             title: Arc::from(""),
             damage: SnapshotDamage::initial(),
         }
     }
+}
+
+fn rows_have_visible_blinking_text(rows: &[RowSnapshot]) -> bool {
+    rows.iter().any(|row| {
+        row.iter()
+            .any(|cell| cell.blinking && !cell.invisible && !cell.spacer_tail)
+    })
 }
 
 pub(crate) struct TerminalEmulator {
@@ -1531,6 +1546,7 @@ impl TerminalEmulator {
         self.cached_mouse_tracking = Some(mouse_tracking);
 
         self.presentation_generation = self.presentation_generation.next();
+        let text_blinking = rows_have_visible_blinking_text(row_cache);
         Ok(Some(Arc::new(ScreenSnapshot {
             generation: self.presentation_generation,
             rows: Arc::from(row_cache.clone()),
@@ -1541,6 +1557,7 @@ impl TerminalEmulator {
             scrollbar,
             active_screen,
             cursor,
+            text_blinking,
             mouse_tracking,
             title: Arc::clone(&self.title),
             damage,
@@ -2115,6 +2132,20 @@ mod tests {
         assert!(cell.blinking);
         assert!(cell.inverse);
         assert!(cell.invisible);
+    }
+
+    #[test]
+    fn snapshot_reports_text_blink_demand_only_for_visible_content() {
+        let mut visible = emulator(2, 1);
+        visible.feed(b"\x1b[5mA");
+        let visible = visible.snapshot().unwrap().unwrap();
+
+        let mut invisible = emulator(2, 1);
+        invisible.feed(b"\x1b[5;8mA");
+        let invisible = invisible.snapshot().unwrap().unwrap();
+
+        assert!(visible.text_blinking);
+        assert!(!invisible.text_blinking);
     }
 
     #[test]
