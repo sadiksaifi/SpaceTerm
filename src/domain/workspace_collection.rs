@@ -68,6 +68,18 @@ pub(crate) enum CloseWorkspaceOutcome<T> {
     },
 }
 
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) enum FinalWindowCloseOutcome<T> {
+    WorkspaceClosed {
+        closed_workspace_id: WorkspaceId,
+        active_workspace_id: WorkspaceId,
+        payload: T,
+    },
+    CloseOperatingSystemWindow {
+        workspace_id: WorkspaceId,
+    },
+}
+
 pub(crate) struct WorkspaceEntry<T> {
     id: WorkspaceId,
     name: String,
@@ -237,6 +249,35 @@ impl<T> WorkspaceCollection<T> {
         }
 
         Ok(CloseWorkspaceOutcome::WorkspaceClosed {
+            closed_workspace_id: closed_workspace.id,
+            active_workspace_id: self.active_workspace_id,
+            payload: closed_workspace.payload,
+        })
+    }
+
+    pub(crate) fn close_workspace_for_final_window(
+        &mut self,
+        workspace_id: WorkspaceId,
+    ) -> Result<FinalWindowCloseOutcome<T>, WorkspaceError> {
+        let Some(index) = self
+            .workspaces
+            .iter()
+            .position(|workspace| workspace.id == workspace_id)
+        else {
+            return Err(WorkspaceError::WorkspaceNotFound(workspace_id));
+        };
+
+        if self.workspaces.len() == 1 {
+            return Ok(FinalWindowCloseOutcome::CloseOperatingSystemWindow { workspace_id });
+        }
+
+        let closed_workspace = self.workspaces.remove(index);
+        if self.active_workspace_id == workspace_id {
+            let fallback_index = index.min(self.workspaces.len() - 1);
+            self.active_workspace_id = self.workspaces[fallback_index].id;
+        }
+
+        Ok(FinalWindowCloseOutcome::WorkspaceClosed {
             closed_workspace_id: closed_workspace.id,
             active_workspace_id: self.active_workspace_id,
             payload: closed_workspace.payload,
@@ -657,6 +698,84 @@ mod tests {
                 &"replacement payload",
             )
         );
+    }
+
+    #[test]
+    fn final_window_close_should_remove_a_non_final_workspace_without_allocating_a_replacement() {
+        let mut workspaces = new_workspaces("first payload");
+        workspaces
+            .create_workspace(
+                "second".to_owned(),
+                PathBuf::from("/second"),
+                |_| "second payload",
+            )
+            .unwrap();
+        workspaces.next_workspace_id = u64::MAX;
+
+        let outcome = workspaces
+            .close_workspace_for_final_window(WorkspaceId::new(1))
+            .unwrap();
+
+        assert_eq!(
+            outcome,
+            FinalWindowCloseOutcome::WorkspaceClosed {
+                closed_workspace_id: WorkspaceId::new(1),
+                active_workspace_id: WorkspaceId::new(2),
+                payload: "first payload",
+            }
+        );
+        assert_eq!(workspaces.active_workspace().payload(), &"second payload");
+    }
+
+    #[test]
+    fn final_window_close_should_preserve_the_globally_final_workspace() {
+        let mut workspaces = new_workspaces("first payload");
+        workspaces.next_workspace_id = u64::MAX;
+
+        let outcome = workspaces
+            .close_workspace_for_final_window(WorkspaceId::new(1))
+            .unwrap();
+
+        assert_eq!(
+            outcome,
+            FinalWindowCloseOutcome::CloseOperatingSystemWindow {
+                workspace_id: WorkspaceId::new(1),
+            }
+        );
+        assert_eq!(
+            (
+                workspaces.len(),
+                workspaces.active_workspace_id(),
+                workspaces.active_workspace().payload(),
+            ),
+            (1, WorkspaceId::new(1), &"first payload")
+        );
+    }
+
+    #[test]
+    fn final_window_close_should_transfer_ownership_and_drop_each_payload_exactly_once() {
+        let drops = Rc::new(Cell::new(0));
+        let mut workspaces = new_workspaces(DropProbe {
+            drops: Rc::clone(&drops),
+        });
+        workspaces
+            .create_workspace("second".to_owned(), PathBuf::from("/second"), |_| {
+                DropProbe {
+                    drops: Rc::clone(&drops),
+                }
+            })
+            .unwrap();
+
+        let outcome = workspaces
+            .close_workspace_for_final_window(WorkspaceId::new(1))
+            .unwrap();
+        assert_eq!(drops.get(), 0);
+
+        drop(outcome);
+        assert_eq!(drops.get(), 1);
+
+        drop(workspaces);
+        assert_eq!(drops.get(), 2);
     }
 
     #[test]

@@ -91,3 +91,11 @@ manufacturing domain state. Identities are monotonic and are not reused after de
 `SpawnedPty` exclusively owns the macOS PTY master, reader, writer, and Shell Process cleanup. The
 terminal worker uses its narrow read acquisition, resize, write, wait, and termination Interfaces
 without reaching into platform handles.
+
+### Cross-Hierarchy Close Escalation
+
+Closing a final child escalates to its owning hierarchy Module without first destroying the child.
+Closing the final Pane requests its Window close; closing the final Window removes its Workspace
+when another Workspace remains, or closes the Operating-System Window when globally final. Explicit
+Close Workspace remains distinct and replaces the final Workspace. The Module that resolves each
+close owns synchronous cleanup of the removed entity's Terminal Sessions.

@@ -100,13 +100,16 @@ pub(crate) enum ZoomState {
     Zoomed(PaneId),
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum ClosePaneOutcome {
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) enum ClosePaneOutcome<T> {
     PaneClosed {
         closed_pane_id: PaneId,
         focused_pane_id: PaneId,
+        closed_terminal: T,
     },
-    CloseWindow,
+    CloseWindow {
+        window_id: WindowId,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Error, PartialEq)]
@@ -306,13 +309,13 @@ impl<T> TerminalWindow<T> {
         Ok(new_pane_id)
     }
 
-    pub(crate) fn close_pane(&mut self, pane_id: PaneId) -> Result<ClosePaneOutcome, PaneError> {
+    pub(crate) fn close_pane(&mut self, pane_id: PaneId) -> Result<ClosePaneOutcome<T>, PaneError> {
         let removal = self
             .root
             .without_pane(pane_id)
             .ok_or(PaneError::PaneNotFound(pane_id))?;
         let Some(new_root) = removal.replacement else {
-            return Ok(ClosePaneOutcome::CloseWindow);
+            return Ok(ClosePaneOutcome::CloseWindow { window_id: self.id });
         };
         let terminal = self
             .terminals
@@ -326,11 +329,10 @@ impl<T> TerminalWindow<T> {
         if self.zoom_state == ZoomState::Zoomed(pane_id) {
             self.zoom_state = ZoomState::Restored;
         }
-        drop(terminal);
-
         Ok(ClosePaneOutcome::PaneClosed {
             closed_pane_id: pane_id,
             focused_pane_id: self.focused_pane_id,
+            closed_terminal: terminal,
         })
     }
 
@@ -1189,7 +1191,10 @@ mod tests {
 
         let outcome = window.close_pane(PaneId::new(1)).unwrap();
 
-        assert_eq!(outcome, ClosePaneOutcome::CloseWindow);
+        let ClosePaneOutcome::CloseWindow { window_id } = outcome else {
+            panic!("closing the final Pane must request its Window close")
+        };
+        assert_eq!(window_id, WindowId::new(7));
         assert!(drops.borrow().is_empty());
 
         drop(window);
@@ -1198,7 +1203,7 @@ mod tests {
     }
 
     #[test]
-    fn close_pane_should_drop_its_terminal_exactly_once() {
+    fn close_pane_should_transfer_its_terminal_and_drop_it_exactly_once() {
         let drops = Rc::new(RefCell::new(Vec::new()));
         let mut window = window(DropProbe {
             id: 1,
@@ -1217,7 +1222,11 @@ mod tests {
             )
             .unwrap();
 
-        window.close_pane(PaneId::new(2)).unwrap();
+        let outcome = window.close_pane(PaneId::new(2)).unwrap();
+
+        assert!(drops.borrow().is_empty());
+
+        drop(outcome);
 
         assert_eq!(*drops.borrow(), vec![2]);
 

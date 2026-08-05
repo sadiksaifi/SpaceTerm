@@ -44,7 +44,7 @@ struct WindowMenuState {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum WindowManagerEvent {
-    CloseWorkspaceRequested,
+    FinalWindowCloseRequested { final_window_id: WindowId },
     PresentationChanged,
 }
 
@@ -57,6 +57,7 @@ pub(crate) struct WindowManager {
     sidebar_width: Pixels,
     window_menu: Option<WindowMenuState>,
     window_bar_scroll_handle: ScrollHandle,
+    close_workspace_requested: bool,
 }
 
 impl WindowManager {
@@ -89,6 +90,7 @@ impl WindowManager {
             sidebar_width: px(WORKSPACE_SIDEBAR_DEFAULT_WIDTH),
             window_menu: None,
             window_bar_scroll_handle: ScrollHandle::new(),
+            close_workspace_requested: false,
         }
     }
 
@@ -264,6 +266,10 @@ impl WindowManager {
     }
 
     fn close_window(&mut self, window_id: WindowId, window: &mut Window, cx: &mut Context<Self>) {
+        if self.close_workspace_requested {
+            return;
+        }
+
         let was_active = self.windows.active_window_id() == window_id;
         self.window_menu = None;
         match self.windows.close_window(window_id) {
@@ -287,8 +293,9 @@ impl WindowManager {
                 cx.emit(WindowManagerEvent::PresentationChanged);
                 cx.notify();
             }
-            Ok(CloseWindowOutcome::CloseOperatingSystemWindow) => {
-                cx.emit(WindowManagerEvent::CloseWorkspaceRequested);
+            Ok(CloseWindowOutcome::CloseWorkspace { final_window_id }) => {
+                self.close_workspace_requested = true;
+                cx.emit(WindowManagerEvent::FinalWindowCloseRequested { final_window_id });
             }
             Err(error) => Self::report_window_error("close", error),
         }
@@ -1625,7 +1632,7 @@ mod tests {
         let close_requests_for_subscription = Rc::clone(&close_requests);
         manager.update(cx, |_, cx| {
             cx.subscribe(&manager, move |_, _, event: &WindowManagerEvent, _| {
-                if matches!(event, WindowManagerEvent::CloseWorkspaceRequested) {
+                if matches!(event, WindowManagerEvent::FinalWindowCloseRequested { .. }) {
                     close_requests_for_subscription.update(|count| count + 1);
                 }
             })
@@ -1633,6 +1640,8 @@ mod tests {
         });
 
         cx.simulate_keystrokes("cmd-shift-w");
+        cx.simulate_keystrokes("cmd-shift-w");
+        cx.run_until_parked();
 
         assert_eq!(
             (close_requests.get(), records.dropped_session_ids()),

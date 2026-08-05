@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::rc::Rc;
 
@@ -22,7 +23,8 @@ use super::{
     handle_top_chrome_mouse_down,
 };
 use crate::domain::{
-    CloseWorkspaceOutcome, NewWorkspace, WorkspaceCollection, WorkspaceError, WorkspaceId,
+    CloseWorkspaceOutcome, FinalWindowCloseOutcome, NewWorkspace, WorkspaceCollection,
+    WorkspaceError, WorkspaceId,
 };
 use crate::terminal::TerminalSessionFactory;
 use crate::theme::{ACTIVE_THEME, Color};
@@ -84,6 +86,7 @@ pub(crate) struct WorkspaceManager {
     rename_focus: FocusHandle,
     workspace_menu: Option<WorkspaceMenuState>,
     rename: Option<WorkspaceRenameState>,
+    pending_final_window_closes: BTreeSet<WorkspaceId>,
 }
 
 impl WorkspaceManager {
@@ -139,6 +142,7 @@ impl WorkspaceManager {
             rename_focus: cx.focus_handle(),
             workspace_menu: None,
             rename: None,
+            pending_final_window_closes: BTreeSet::new(),
         }
     }
 
@@ -159,11 +163,20 @@ impl WorkspaceManager {
         cx.subscribe_in(
             &manager,
             window,
-            move |_workspace_manager, _, event: &WindowManagerEvent, window, cx| match event {
-                WindowManagerEvent::CloseWorkspaceRequested => {
-                    cx.defer_in(window, move |workspace_manager, window, cx| {
-                        workspace_manager.close_workspace(workspace_id, window, cx);
-                    });
+            move |workspace_manager, _, event: &WindowManagerEvent, window, cx| match event {
+                WindowManagerEvent::FinalWindowCloseRequested { .. } => {
+                    if workspace_manager
+                        .pending_final_window_closes
+                        .insert(workspace_id)
+                    {
+                        cx.defer_in(window, move |workspace_manager, window, cx| {
+                            workspace_manager.close_workspace_for_final_window(
+                                workspace_id,
+                                window,
+                                cx,
+                            );
+                        });
+                    }
                 }
                 WindowManagerEvent::PresentationChanged => cx.notify(),
             },
@@ -410,6 +423,68 @@ impl WorkspaceManager {
         }
         self.scroll_active_workspace_into_view();
         cx.notify();
+    }
+
+    fn close_workspace_for_final_window(
+        &mut self,
+        workspace_id: WorkspaceId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let was_active = self.workspaces.active_workspace_id() == workspace_id;
+        let outcome = match self
+            .workspaces
+            .close_workspace_for_final_window(workspace_id)
+        {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                self.pending_final_window_closes.remove(&workspace_id);
+                Self::report_workspace_error("close for final Window", error);
+                return;
+            }
+        };
+
+        match outcome {
+            FinalWindowCloseOutcome::WorkspaceClosed {
+                closed_workspace_id,
+                active_workspace_id,
+                payload,
+            } => {
+                debug_assert_eq!(closed_workspace_id, workspace_id);
+                payload.update(cx, |manager, cx| manager.close_all(cx));
+
+                if was_active {
+                    let active_manager = self.workspaces.active_workspace().payload().clone();
+                    if self.sidebar_focus.is_focused(window) || self.rename_focus.is_focused(window)
+                    {
+                        active_manager.update(cx, |manager, cx| manager.activate_without_focus(cx));
+                    } else {
+                        active_manager.update(cx, |manager, cx| manager.activate(window, cx));
+                    }
+                }
+                debug_assert_eq!(active_workspace_id, self.workspaces.active_workspace_id());
+                self.pending_final_window_closes.remove(&workspace_id);
+                self.workspace_menu = None;
+                if self
+                    .rename
+                    .as_ref()
+                    .is_some_and(|rename| rename.workspace_id == workspace_id)
+                {
+                    self.rename = None;
+                }
+                self.scroll_active_workspace_into_view();
+                cx.notify();
+            }
+            FinalWindowCloseOutcome::CloseOperatingSystemWindow {
+                workspace_id: final_workspace_id,
+            } => {
+                debug_assert_eq!(final_workspace_id, workspace_id);
+                let manager = self.workspaces.active_workspace().payload().clone();
+                manager.update(cx, |manager, cx| manager.close_all(cx));
+                self.pending_final_window_closes.remove(&workspace_id);
+                window.remove_window();
+            }
+        }
     }
 
     fn toggle_sidebar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1926,7 +2001,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn command_w_from_sidebar_should_close_the_final_pane_and_replace_its_workspace(
+    fn command_w_from_sidebar_should_close_the_globally_final_operating_system_window(
         cx: &mut TestAppContext,
     ) {
         let (manager, records, cx) = workspace_manager(cx);
@@ -1940,34 +2015,35 @@ mod tests {
             (
                 manager.workspaces.len(),
                 manager.workspaces.active_workspace_id(),
-                manager.workspaces.active_workspace().name().to_owned(),
                 records.dropped_session_ids(),
                 records.session_count(),
             )
         });
-        assert_eq!(
-            state,
-            (1, WorkspaceId::new(2), "Workspace 1".to_owned(), vec![1], 2,)
-        );
+        assert_eq!(state, (1, WorkspaceId::new(1), vec![1], 1));
+        assert!(cx.windows().is_empty());
     }
 
     #[gpui::test]
-    fn repeated_command_w_should_keep_the_replacement_workspace_number_stable(
+    fn duplicate_final_window_close_requests_should_schedule_one_operating_system_window_close(
         cx: &mut TestAppContext,
     ) {
-        let (manager, _records, cx) = workspace_manager(cx);
-        cx.simulate_keystrokes("cmd-shift-e");
+        let (manager, records, cx) = workspace_manager(cx);
+        let window_manager = manager.read_with(cx, |manager, _| {
+            manager.workspaces.active_workspace().payload().clone()
+        });
+
+        window_manager.update(cx, |_, cx| {
+            cx.emit(WindowManagerEvent::FinalWindowCloseRequested {
+                final_window_id: crate::domain::WindowId::new(1),
+            });
+            cx.emit(WindowManagerEvent::FinalWindowCloseRequested {
+                final_window_id: crate::domain::WindowId::new(1),
+            });
+        });
         cx.run_until_parked();
 
-        for _ in 0..3 {
-            cx.simulate_keystrokes("cmd-w");
-            cx.run_until_parked();
-        }
-
-        let name = manager.read_with(cx, |manager, _| {
-            manager.workspaces.active_workspace().name().to_owned()
-        });
-        assert_eq!(name, "Workspace 1");
+        assert_eq!(records.dropped_session_ids(), vec![1]);
+        assert!(cx.windows().is_empty());
     }
 
     #[gpui::test]
@@ -2117,7 +2193,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn closing_the_final_workspace_should_replace_it_and_cleanup_its_pty_once(
+    fn explicitly_closing_the_final_workspace_should_replace_it_and_keep_the_window_open(
         cx: &mut TestAppContext,
     ) {
         let (manager, records, cx) = workspace_manager(cx);
@@ -2130,9 +2206,11 @@ mod tests {
                 manager.workspaces.len(),
                 manager.workspaces.active_workspace_id(),
                 records.dropped_session_ids(),
+                records.session_count(),
             )
         });
-        assert_eq!(state, (1, WorkspaceId::new(2), vec![1]));
+        assert_eq!(state, (1, WorkspaceId::new(2), vec![1], 2));
+        assert_eq!(cx.windows().len(), 1);
     }
 
     #[gpui::test]

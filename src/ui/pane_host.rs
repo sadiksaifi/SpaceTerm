@@ -54,6 +54,7 @@ pub(crate) struct PaneHost {
     pane_titles: BTreeMap<PaneId, gpui::SharedString>,
     menu_pane_id: Option<PaneId>,
     active: bool,
+    close_window_requested: bool,
 }
 
 impl PaneHost {
@@ -94,6 +95,7 @@ impl PaneHost {
             pane_titles: BTreeMap::from([(initial_pane_id, initial_title)]),
             menu_pane_id: None,
             active: true,
+            close_window_requested: false,
         }
     }
 
@@ -286,23 +288,22 @@ impl PaneHost {
     }
 
     fn close_pane(&mut self, pane_id: PaneId, window: &mut Window, cx: &mut Context<Self>) {
-        let terminal = self.terminal_window.terminal(pane_id).cloned();
+        if self.close_window_requested {
+            return;
+        }
+
         match self.terminal_window.close_pane(pane_id) {
-            Ok(ClosePaneOutcome::CloseWindow) => {
-                if let Some(terminal) = terminal {
-                    terminal.update(cx, |terminal, _| terminal.close());
-                }
+            Ok(ClosePaneOutcome::CloseWindow { window_id }) => {
+                self.close_window_requested = true;
                 self.menu_pane_id = None;
-                cx.emit(PaneHostEvent::CloseWindowRequested {
-                    window_id: self.terminal_window.id(),
-                });
+                cx.emit(PaneHostEvent::CloseWindowRequested { window_id });
             }
             Ok(ClosePaneOutcome::PaneClosed {
-                focused_pane_id, ..
+                focused_pane_id,
+                closed_terminal,
+                ..
             }) => {
-                if let Some(terminal) = terminal {
-                    terminal.update(cx, |terminal, _| terminal.close());
-                }
+                closed_terminal.update(cx, |terminal, _| terminal.close());
                 self.pane_bounds.remove(&pane_id);
                 self.split_bounds.clear();
                 self.pane_titles.remove(&pane_id);
@@ -1295,11 +1296,14 @@ mod tests {
         sender
             .try_send(SessionEvent::Exited("Shell exited".to_owned()))
             .unwrap();
+        sender
+            .try_send(SessionEvent::Exited("Shell exited again".to_owned()))
+            .unwrap();
         cx.run_until_parked();
 
         assert_eq!(
             (close_requests.get(), records.dropped_session_ids()),
-            (1, vec![1])
+            (1, Vec::new())
         );
     }
 
