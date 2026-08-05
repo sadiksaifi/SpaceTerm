@@ -50,11 +50,26 @@ pub(crate) enum PointerPhase {
     Release,
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ShiftSelectionPolicy {
-    #[default]
     OverrideApplicationMouse,
     ReportToApplication,
+}
+
+impl ShiftSelectionPolicy {
+    pub(crate) const fn from_selection_override(enabled: bool) -> Self {
+        if enabled {
+            Self::OverrideApplicationMouse
+        } else {
+            Self::ReportToApplication
+        }
+    }
+}
+
+impl Default for ShiftSelectionPolicy {
+    fn default() -> Self {
+        Self::from_selection_override(true)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
