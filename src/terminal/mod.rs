@@ -1,4 +1,5 @@
 mod emulator;
+mod geometry;
 mod session;
 #[cfg(test)]
 pub(crate) mod testing;
