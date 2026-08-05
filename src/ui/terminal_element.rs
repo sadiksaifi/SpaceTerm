@@ -610,14 +610,11 @@ fn prepare_row(
             continue;
         }
 
-        if regular_fragment
-            .as_ref()
-            .is_some_and(|fragment| {
-                fragment.selected != cell.selected
-                    || fragment.cursor != cursor
-                    || fragment.blinking != cell.blinking
-            })
-            && let Some(fragment) = regular_fragment.take()
+        if regular_fragment.as_ref().is_some_and(|fragment| {
+            fragment.selected != cell.selected
+                || fragment.cursor != cursor
+                || fragment.blinking != cell.blinking
+        }) && let Some(fragment) = regular_fragment.take()
         {
             fragments.push(fragment.finish(true));
         }
@@ -629,8 +626,7 @@ fn prepare_row(
             if let Some(fragment) = regular_fragment.take() {
                 fragments.push(fragment.finish(true));
             }
-            let mut fragment =
-                FragmentBuilder::new(column, cell.selected, cursor, cell.blinking);
+            let mut fragment = FragmentBuilder::new(column, cell.selected, cursor, cell.blinking);
             fragment.push(cell, colors, font_family);
             fragments.push(fragment.finish(false));
         } else {
