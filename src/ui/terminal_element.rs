@@ -17,6 +17,7 @@ pub(crate) struct TerminalGridCache {
     prepared_rows: Arc<[Arc<RowPaintInput>]>,
     font_family: Option<SharedString>,
     colors: Option<TerminalColorsSnapshot>,
+    cursor: Option<CursorPositionSnapshot>,
 }
 
 impl TerminalGridCache {
@@ -26,6 +27,7 @@ impl TerminalGridCache {
             prepared_rows: Arc::from([]),
             font_family: None,
             colors: None,
+            cursor: None,
         }
     }
 
@@ -34,6 +36,7 @@ impl TerminalGridCache {
         self.prepared_rows = Arc::from([]);
         self.font_family = None;
         self.colors = None;
+        self.cursor = None;
     }
 
     fn prepare(
@@ -41,10 +44,12 @@ impl TerminalGridCache {
         rows: &Arc<[RowSnapshot]>,
         colors: &TerminalColorsSnapshot,
         font_family: &SharedString,
+        cursor: Option<CursorPositionSnapshot>,
     ) -> Arc<[Arc<RowPaintInput>]> {
         let style_changed =
             self.font_family.as_ref() != Some(font_family) || self.colors.as_ref() != Some(colors);
         let rows_unchanged = !style_changed
+            && self.cursor == cursor
             && rows.len() == self.source_rows.len()
             && rows
                 .iter()
@@ -58,15 +63,17 @@ impl TerminalGridCache {
             .iter()
             .enumerate()
             .map(|(index, row)| {
+                let cursor_column = cursor_column_for_row(cursor, index);
                 if !style_changed
                     && self
                         .source_rows
                         .get(index)
                         .is_some_and(|cached| Arc::ptr_eq(row, cached))
+                    && cursor_column_for_row(self.cursor, index) == cursor_column
                 {
                     Arc::clone(&self.prepared_rows[index])
                 } else {
-                    Arc::new(prepare_row(row, colors, font_family))
+                    Arc::new(prepare_row(row, colors, font_family, cursor_column))
                 }
             })
             .collect::<Vec<_>>();
@@ -75,6 +82,7 @@ impl TerminalGridCache {
         self.prepared_rows = Arc::from(prepared_rows);
         self.font_family = Some(font_family.clone());
         self.colors = Some(colors.clone());
+        self.cursor = cursor;
         Arc::clone(&self.prepared_rows)
     }
 }
@@ -112,7 +120,12 @@ impl TerminalGridElement {
         let cursor_style = presented_cursor_style(screen.cursor, terminal_input_focused);
         Self {
             background: screen.background,
-            rows: cache.prepare(&screen.rows, &screen.colors, font_family),
+            rows: cache.prepare(
+                &screen.rows,
+                &screen.colors,
+                font_family,
+                screen.cursor.position,
+            ),
             columns: screen.rows.first().map_or(0, |row| row.len()),
             font_size,
             line_height,
@@ -352,15 +365,17 @@ struct TextFragment {
 struct FragmentBuilder {
     start: usize,
     selected: bool,
+    cursor: bool,
     text: String,
     runs: Vec<TextRun>,
 }
 
 impl FragmentBuilder {
-    fn new(start: usize, selected: bool) -> Self {
+    fn new(start: usize, selected: bool, cursor: bool) -> Self {
         Self {
             start,
             selected,
+            cursor,
             text: String::new(),
             runs: Vec::new(),
         }
@@ -431,6 +446,7 @@ fn prepare_row(
     row: &RowSnapshot,
     colors: &TerminalColorsSnapshot,
     font_family: &SharedString,
+    cursor_column: Option<usize>,
 ) -> RowPaintInput {
     let mut fragments = Vec::new();
     let mut regular_fragment: Option<FragmentBuilder> = None;
@@ -438,6 +454,7 @@ fn prepare_row(
     let mut selections: Vec<BackgroundSpan> = Vec::new();
 
     for (column, cell) in row.iter().enumerate() {
+        let cursor = cursor_column == Some(column);
         let (_, background) = effective_colors(cell, colors);
         if background != colors.effective_background() {
             if let Some(previous) = backgrounds.last_mut()
@@ -478,7 +495,9 @@ fn prepare_row(
 
         if regular_fragment
             .as_ref()
-            .is_some_and(|fragment| fragment.selected != cell.selected)
+            .is_some_and(|fragment| {
+                fragment.selected != cell.selected || fragment.cursor != cursor
+            })
             && let Some(fragment) = regular_fragment.take()
         {
             fragments.push(fragment.finish(true));
@@ -490,12 +509,12 @@ fn prepare_row(
             if let Some(fragment) = regular_fragment.take() {
                 fragments.push(fragment.finish(true));
             }
-            let mut fragment = FragmentBuilder::new(column, cell.selected);
+            let mut fragment = FragmentBuilder::new(column, cell.selected, cursor);
             fragment.push(cell, colors, font_family);
             fragments.push(fragment.finish(false));
         } else {
             regular_fragment
-                .get_or_insert_with(|| FragmentBuilder::new(column, cell.selected))
+                .get_or_insert_with(|| FragmentBuilder::new(column, cell.selected, cursor))
                 .push(cell, colors, font_family);
         }
     }
@@ -509,6 +528,12 @@ fn prepare_row(
         backgrounds,
         selections,
     }
+}
+
+fn cursor_column_for_row(cursor: Option<CursorPositionSnapshot>, row: usize) -> Option<usize> {
+    cursor
+        .filter(|cursor| usize::from(cursor.row) == row)
+        .map(|cursor| usize::from(cursor.column))
 }
 
 fn effective_colors(cell: &CellSnapshot, colors: &TerminalColorsSnapshot) -> (Color, Color) {
@@ -786,7 +811,7 @@ mod tests {
     #[test]
     fn text_runs_cover_utf8_bytes_and_coalesce_matching_styles() {
         let row = Arc::<[CellSnapshot]>::from([cell("a"), cell("é"), cell("b")]);
-        let input = prepare_row(&row, &colors(), &"Menlo".into());
+        let input = prepare_row(&row, &colors(), &"Menlo".into(), None);
 
         assert_eq!(input.fragments.len(), 1);
         assert_eq!(input.fragments[0].text.as_ref(), "aéb");
@@ -810,7 +835,7 @@ mod tests {
         second.background_source = crate::terminal::TerminalColor::Rgb(accent);
         let row = Arc::<[CellSnapshot]>::from([first, second, cell("c")]);
 
-        let input = prepare_row(&row, &colors(), &"Menlo".into());
+        let input = prepare_row(&row, &colors(), &"Menlo".into(), None);
 
         assert_eq!(
             input.backgrounds,
@@ -830,7 +855,7 @@ mod tests {
         second.selected = true;
         let row = Arc::<[CellSnapshot]>::from([first, second, cell("c")]);
 
-        let input = prepare_row(&row, &colors(), &"Menlo".into());
+        let input = prepare_row(&row, &colors(), &"Menlo".into(), None);
 
         assert_eq!(
             input.selections,
@@ -848,7 +873,23 @@ mod tests {
         selected.selected = true;
         let row = Arc::<[CellSnapshot]>::from([cell("a"), selected, cell("c")]);
 
-        let input = prepare_row(&row, &colors(), &"Menlo".into());
+        let input = prepare_row(&row, &colors(), &"Menlo".into(), None);
+
+        assert_eq!(
+            input
+                .fragments
+                .iter()
+                .map(|fragment| fragment.text.as_ref())
+                .collect::<Vec<_>>(),
+            vec!["a", "b", "c"]
+        );
+    }
+
+    #[test]
+    fn shaping_fragments_do_not_cross_cursor_boundaries() {
+        let row = Arc::<[CellSnapshot]>::from([cell("a"), cell("b"), cell("c")]);
+
+        let input = prepare_row(&row, &colors(), &"Menlo".into(), Some(1));
 
         assert_eq!(
             input
@@ -867,7 +908,7 @@ mod tests {
         let row =
             Arc::<[CellSnapshot]>::from([cell("界"), tail, cell("x"), cell("e\u{301}"), cell("y")]);
 
-        let input = prepare_row(&row, &colors(), &"Menlo".into());
+        let input = prepare_row(&row, &colors(), &"Menlo".into(), None);
 
         assert_eq!(input.fragments.len(), 4);
         assert_eq!(input.fragments[0].start, 0);
@@ -887,14 +928,49 @@ mod tests {
         let second_row = Arc::<[CellSnapshot]>::from([cell("b")]);
         let rows = Arc::<[RowSnapshot]>::from([Arc::clone(&first_row), Arc::clone(&second_row)]);
         let mut cache = TerminalGridCache::new();
-        let first = cache.prepare(&rows, &colors(), &"Menlo".into());
+        let first = cache.prepare(&rows, &colors(), &"Menlo".into(), None);
 
         let changed_row = Arc::<[CellSnapshot]>::from([cell("c")]);
         let changed_rows = Arc::<[RowSnapshot]>::from([first_row, changed_row]);
-        let second = cache.prepare(&changed_rows, &colors(), &"Menlo".into());
+        let second = cache.prepare(&changed_rows, &colors(), &"Menlo".into(), None);
 
         assert!(Arc::ptr_eq(&first[0], &second[0]));
         assert!(!Arc::ptr_eq(&first[1], &second[1]));
+    }
+
+    #[test]
+    fn cursor_movement_only_invalidates_affected_prepared_rows() {
+        let rows = Arc::<[RowSnapshot]>::from([
+            Arc::<[CellSnapshot]>::from([cell("a"), cell("b")]),
+            Arc::<[CellSnapshot]>::from([cell("c"), cell("d")]),
+            Arc::<[CellSnapshot]>::from([cell("e"), cell("f")]),
+        ]);
+        let mut cache = TerminalGridCache::new();
+        let first = cache.prepare(
+            &rows,
+            &colors(),
+            &"Menlo".into(),
+            Some(CursorPositionSnapshot {
+                row: 0,
+                column: 1,
+                width_cells: 1,
+            }),
+        );
+
+        let second = cache.prepare(
+            &rows,
+            &colors(),
+            &"Menlo".into(),
+            Some(CursorPositionSnapshot {
+                row: 1,
+                column: 0,
+                width_cells: 1,
+            }),
+        );
+
+        assert!(!Arc::ptr_eq(&first[0], &second[0]));
+        assert!(!Arc::ptr_eq(&first[1], &second[1]));
+        assert!(Arc::ptr_eq(&first[2], &second[2]));
     }
 
     #[test]
@@ -903,11 +979,11 @@ mod tests {
         let rows = Arc::<[RowSnapshot]>::from([row]);
         let mut cache = TerminalGridCache::new();
         let first_colors = colors();
-        let first = cache.prepare(&rows, &first_colors, &"Menlo".into());
+        let first = cache.prepare(&rows, &first_colors, &"Menlo".into(), None);
 
         let mut changed_colors = first_colors.clone();
         Arc::make_mut(&mut changed_colors.palette)[1] = Color::rgb(0xff_00_00);
-        let second = cache.prepare(&rows, &changed_colors, &"Menlo".into());
+        let second = cache.prepare(&rows, &changed_colors, &"Menlo".into(), None);
 
         assert!(!Arc::ptr_eq(&first[0], &second[0]));
     }
@@ -917,10 +993,10 @@ mod tests {
         let row = Arc::<[CellSnapshot]>::from([cell("a")]);
         let rows = Arc::<[RowSnapshot]>::from([row]);
         let mut cache = TerminalGridCache::new();
-        let first = cache.prepare(&rows, &colors(), &"Menlo".into());
+        let first = cache.prepare(&rows, &colors(), &"Menlo".into(), None);
 
         cache.invalidate_scale_dependent();
-        let second = cache.prepare(&rows, &colors(), &"Menlo".into());
+        let second = cache.prepare(&rows, &colors(), &"Menlo".into(), None);
 
         assert!(!Arc::ptr_eq(&first[0], &second[0]));
     }
