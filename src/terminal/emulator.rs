@@ -24,6 +24,7 @@ use libghostty_vt::style::{PaletteIndex, RgbColor};
 use libghostty_vt::terminal::{Mode, Point, PointCoordinate, ScrollViewport};
 use libghostty_vt::{Error, RenderState, Terminal, TerminalOptions};
 
+use crate::terminal::geometry::{BackingPosition, TerminalGeometry};
 use crate::terminal::session::{
     InputModifiers, KeyCode, KeyInput, PointerButton, PointerInput, PointerPhase, SurfacePosition,
     WheelInput,
@@ -286,10 +287,7 @@ pub(crate) struct TerminalEmulator {
     cached_cursor: Option<CursorSnapshot>,
     cached_scrollbar: Option<ScrollbarSnapshot>,
     cached_active_screen: Option<ActiveScreenSnapshot>,
-    cols: u16,
-    rows_count: u16,
-    cell_width_px: u32,
-    cell_height_px: u32,
+    geometry: TerminalGeometry,
     active_pointer: Option<ActivePointer>,
     gesture_epoch: Instant,
 }
@@ -348,22 +346,19 @@ impl EmulatorAction {
 }
 
 impl TerminalEmulator {
-    pub(crate) fn new(
-        cols: u16,
-        rows: u16,
-        cell_width_px: u32,
-        cell_height_px: u32,
-    ) -> Result<Self, Error> {
+    pub(crate) fn new(geometry: TerminalGeometry) -> Result<Self, Error> {
+        let grid = geometry.grid();
+        let cell = geometry.backing_cell_size();
         let pty_responses = Rc::new(RefCell::new(Vec::new()));
         let pending_title = Rc::new(RefCell::new(None));
         let mut terminal: Terminal<'static, 'static> = Terminal::new(TerminalOptions {
-            cols,
-            rows,
+            cols: grid.cols,
+            rows: grid.rows,
             max_scrollback: 10_000,
         })?;
 
         apply_theme(&mut terminal)?;
-        terminal.resize(cols, rows, cell_width_px, cell_height_px)?;
+        terminal.resize(grid.cols, grid.rows, cell.width, cell.height)?;
         terminal.on_pty_write({
             let pty_responses = Rc::clone(&pty_responses);
             move |_, data| pty_responses.borrow_mut().extend_from_slice(data)
@@ -405,10 +400,7 @@ impl TerminalEmulator {
             cached_cursor: None,
             cached_scrollbar: None,
             cached_active_screen: None,
-            cols,
-            rows_count: rows,
-            cell_width_px,
-            cell_height_px,
+            geometry,
             active_pointer: None,
             gesture_epoch: Instant::now(),
         })
@@ -418,19 +410,12 @@ impl TerminalEmulator {
         self.terminal.vt_write(bytes);
     }
 
-    pub(crate) fn resize(
-        &mut self,
-        cols: u16,
-        rows: u16,
-        cell_width_px: u32,
-        cell_height_px: u32,
-    ) -> Result<(), Error> {
+    pub(crate) fn resize(&mut self, geometry: TerminalGeometry) -> Result<(), Error> {
+        let grid = geometry.grid();
+        let cell = geometry.backing_cell_size();
         self.terminal
-            .resize(cols, rows, cell_width_px, cell_height_px)?;
-        self.cols = cols;
-        self.rows_count = rows;
-        self.cell_width_px = cell_width_px;
-        self.cell_height_px = cell_height_px;
+            .resize(grid.cols, grid.rows, cell.width, cell.height)?;
+        self.geometry = geometry;
         Ok(())
     }
 
@@ -764,13 +749,18 @@ impl TerminalEmulator {
         }
         self.mouse_encoder
             .set_any_button_pressed(any_button_pressed);
+        let encoded_position = if modes.sgr_pixels {
+            position
+        } else {
+            self.cell_mouse_encoder_position(position)
+        };
         self.mouse_event
             .set_action(action)
             .set_button(button)
             .set_mods(mouse_modifiers(modifiers))
             .set_position(MousePosition {
-                x: position.x,
-                y: position.y,
+                x: encoded_position.x,
+                y: encoded_position.y,
             });
         self.mouse_encoder
             .encode_to_vec(&self.mouse_event, bytes)
@@ -843,15 +833,24 @@ impl TerminalEmulator {
     }
 
     fn viewport_point(&self, position: SurfacePosition) -> PointCoordinate {
-        let cell_width = self.cell_width_px.max(1) as f32;
-        let cell_height = self.cell_height_px.max(1) as f32;
-        let x = (position.x / cell_width)
-            .floor()
-            .clamp(0.0, f32::from(self.cols.saturating_sub(1))) as u16;
-        let y = (position.y / cell_height)
-            .floor()
-            .clamp(0.0, f32::from(self.rows_count.saturating_sub(1))) as u32;
-        PointCoordinate { x, y }
+        let position = self
+            .geometry
+            .cell_at_backing_position(BackingPosition::new(position.x, position.y));
+        PointCoordinate {
+            x: position.col,
+            y: u32::from(position.row),
+        }
+    }
+
+    fn cell_mouse_encoder_position(&self, position: SurfacePosition) -> SurfacePosition {
+        let cell = self
+            .geometry
+            .cell_at_backing_position(BackingPosition::new(position.x, position.y));
+        let encoded_cell = self.geometry.backing_cell_size();
+        SurfacePosition {
+            x: f32::from(cell.col) * encoded_cell.width as f32,
+            y: f32::from(cell.row) * encoded_cell.height as f32,
+        }
     }
 
     fn mouse_mode_state(&self) -> Result<MouseModeState, String> {
@@ -873,11 +872,13 @@ impl TerminalEmulator {
     }
 
     fn mouse_encoder_size(&self) -> MouseEncoderSize {
+        let cell = self.geometry.backing_cell_size();
+        let backing = self.geometry.backing_grid_size();
         MouseEncoderSize {
-            screen_width: u32::from(self.cols).saturating_mul(self.cell_width_px),
-            screen_height: u32::from(self.rows_count).saturating_mul(self.cell_height_px),
-            cell_width: self.cell_width_px.max(1),
-            cell_height: self.cell_height_px.max(1),
+            screen_width: backing.width,
+            screen_height: backing.height,
+            cell_width: cell.width,
+            cell_height: cell.height,
             padding_top: 0,
             padding_bottom: 0,
             padding_right: 0,
@@ -886,11 +887,13 @@ impl TerminalEmulator {
     }
 
     fn selection_geometry(&self) -> SelectionGeometry {
+        let grid = self.geometry.grid();
+        let cell = self.geometry.backing_cell_size();
         SelectionGeometry {
-            columns: u32::from(self.cols),
-            cell_width: self.cell_width_px.max(1),
+            columns: u32::from(grid.cols),
+            cell_width: cell.width,
             padding_left: 0,
-            screen_height: u32::from(self.rows_count).saturating_mul(self.cell_height_px.max(1)),
+            screen_height: self.geometry.backing_grid_size().height,
         }
     }
 
@@ -1270,9 +1273,69 @@ fn ghostty_color(color: Color) -> RgbColor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::terminal::geometry::{
+        BackingScale, CellGridSize, LogicalCellSize, TerminalGeometry,
+    };
+
+    fn geometry(cols: u16, rows: u16, cell_width: f32, cell_height: f32) -> TerminalGeometry {
+        TerminalGeometry::from_grid(
+            CellGridSize::new(cols, rows),
+            LogicalCellSize::new(cell_width, cell_height),
+            BackingScale::ONE,
+        )
+    }
 
     fn emulator(cols: u16, rows: u16) -> TerminalEmulator {
-        TerminalEmulator::new(cols, rows, 10, 20).unwrap()
+        TerminalEmulator::new(geometry(cols, rows, 10.0, 20.0)).unwrap()
+    }
+
+    #[test]
+    fn pixel_mouse_coordinates_should_share_fractional_backing_geometry() {
+        let geometry = TerminalGeometry::from_grid(
+            CellGridSize::new(10, 2),
+            LogicalCellSize::new(7.5, 20.0),
+            BackingScale::new(1.5).unwrap(),
+        );
+        let mut emulator = TerminalEmulator::new(geometry).unwrap();
+        emulator.feed(b"\x1b[?1003h\x1b[?1016h");
+
+        let action = emulator
+            .pointer(pointer(PointerPhase::Motion, None, 5.625, 15.0, false))
+            .unwrap();
+
+        assert_eq!(
+            (action.bytes, emulator.mouse_encoder_size()),
+            (
+                b"\x1b[<35;6;15M".to_vec(),
+                MouseEncoderSize {
+                    screen_width: 113,
+                    screen_height: 60,
+                    cell_width: 12,
+                    cell_height: 30,
+                    padding_top: 0,
+                    padding_bottom: 0,
+                    padding_right: 0,
+                    padding_left: 0,
+                },
+            )
+        );
+    }
+
+    #[test]
+    fn cell_mouse_coordinates_should_not_drift_across_fractional_backing_cells() {
+        let geometry = TerminalGeometry::from_grid(
+            CellGridSize::new(10, 2),
+            LogicalCellSize::new(7.5, 20.0),
+            BackingScale::new(1.5).unwrap(),
+        );
+        let mut emulator = TerminalEmulator::new(geometry).unwrap();
+        emulator.feed(b"\x1b[?1003h\x1b[?1006h");
+
+        let action = emulator
+            .pointer(pointer(PointerPhase::Motion, None, 11.5, 1.0, false))
+            .unwrap();
+
+        assert_eq!(action.bytes, b"\x1b[<35;2;1M");
     }
 
     fn pointer(
@@ -1409,7 +1472,7 @@ mod tests {
     fn resize_changes_the_visible_grid() {
         let mut emulator = emulator(10, 2);
         let _ = emulator.snapshot().unwrap();
-        emulator.resize(20, 4, 8, 18).unwrap();
+        emulator.resize(geometry(20, 4, 8.0, 18.0)).unwrap();
 
         let snapshot = emulator.snapshot().unwrap().unwrap();
         assert_eq!(
@@ -1483,7 +1546,7 @@ mod tests {
         emulator.feed(b"\x1b[?2048h");
         assert!(emulator.take_pty_responses().is_empty());
 
-        emulator.resize(20, 4, 8, 18).unwrap();
+        emulator.resize(geometry(20, 4, 8.0, 18.0)).unwrap();
         assert_eq!(emulator.take_pty_responses(), b"\x1b[48;4;20;72;160t");
     }
 

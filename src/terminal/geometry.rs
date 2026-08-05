@@ -70,6 +70,18 @@ impl CellGridSize {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct CellGridPosition {
+    pub(crate) col: u16,
+    pub(crate) row: u16,
+}
+
+impl CellGridPosition {
+    pub(crate) const fn new(col: u16, row: u16) -> Self {
+        Self { col, row }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct BackingSize {
     pub(crate) width: u32,
     pub(crate) height: u32,
@@ -142,6 +154,18 @@ impl TerminalGeometry {
             logical.x * self.backing_scale.0,
             logical.y * self.backing_scale.0,
         )
+    }
+
+    pub(crate) fn cell_at_backing_position(self, position: BackingPosition) -> CellGridPosition {
+        let cell_width = self.logical_cell.width * self.backing_scale.0;
+        let cell_height = self.logical_cell.height * self.backing_scale.0;
+        let col = (position.x / cell_width)
+            .floor()
+            .clamp(0.0, f32::from(self.grid.cols.saturating_sub(1))) as u16;
+        let row = (position.y / cell_height)
+            .floor()
+            .clamp(0.0, f32::from(self.grid.rows.saturating_sub(1))) as u16;
+        CellGridPosition::new(col, row)
     }
 }
 

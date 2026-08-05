@@ -525,12 +525,7 @@ impl TerminalWorker {
             }
         };
 
-        let emulator = match TerminalEmulator::new(
-            initial_geometry.grid().cols,
-            initial_geometry.grid().rows,
-            initial_geometry.backing_cell_size().width,
-            initial_geometry.backing_cell_size().height,
-        ) {
+        let emulator = match TerminalEmulator::new(initial_geometry) {
             Ok(emulator) => emulator,
             Err(error) => {
                 let _ = startup.send(Err(error.to_string()));
@@ -599,12 +594,7 @@ impl TerminalWorker {
                     })
                     .and_then(|()| {
                         self.emulator
-                            .resize(
-                                geometry.grid().cols,
-                                geometry.grid().rows,
-                                geometry.backing_cell_size().width,
-                                geometry.backing_cell_size().height,
-                            )
+                            .resize(geometry)
                             .map_err(|error| format!("failed to resize terminal state: {error}"))
                     });
 
@@ -1467,7 +1457,7 @@ mod tests {
                 wait_times_out: false,
                 exit_code: 0,
             }),
-            emulator: TerminalEmulator::new(80, 24, 8, 20).unwrap(),
+            emulator: TerminalEmulator::new(test_geometry()).unwrap(),
             commands,
             reader_events: reader_event_rx,
             reader_thread: thread::spawn(|| {}),
