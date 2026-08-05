@@ -2291,6 +2291,31 @@ mod tests {
     }
 
     #[test]
+    fn pixel_only_resize_should_reach_the_pty_without_publishing_a_grid_screen() {
+        let (result, _reader_steps, records) =
+            start_scripted_session(ScriptedPtyOptions::default());
+        let (mut session, events) = result.unwrap();
+        let initial = receive_event(&events, "the initial terminal screen", |event| {
+            matches!(event, SessionEvent::Screen(_))
+        });
+        let SessionEvent::Screen(initial) = initial else {
+            unreachable!()
+        };
+        let grid = test_geometry().grid();
+        let resized = geometry(grid.cols, grid.rows, 9.0, 21.0);
+
+        session.resize(resized);
+        let barrier = session.request_selection_text();
+        assert!(barrier.recv_blocking().is_ok());
+
+        assert_eq!(records.snapshot().resizes, vec![pty_size(resized)]);
+        assert!(events.try_recv().is_err());
+        assert_eq!(initial.size.cols, grid.cols);
+        assert_eq!(initial.size.rows, grid.rows);
+        session.shutdown();
+    }
+
+    #[test]
     fn fractional_backing_geometry_should_reach_the_pty_without_per_cell_rounding() {
         let (result, _reader_steps, records) =
             start_scripted_session(ScriptedPtyOptions::default());

@@ -31,6 +31,7 @@ use crate::terminal::session::{
 use crate::theme::{ACTIVE_THEME, Color};
 
 const MAX_WHEEL_STEPS: i32 = 100;
+const MAX_SCROLLBACK_ROWS: usize = 10_000;
 pub(crate) const MAX_SYNCHRONIZED_OUTPUT_DURATION: Duration = Duration::from_secs(1);
 const REPEAT_CLICK_DISTANCE_PX: f64 = 5.0;
 const REPEAT_CLICK_INTERVAL: Duration = Duration::from_millis(500);
@@ -497,7 +498,7 @@ impl TerminalEmulator {
         let mut terminal: Terminal<'static, 'static> = Terminal::new(TerminalOptions {
             cols: grid.cols,
             rows: grid.rows,
-            max_scrollback: 10_000,
+            max_scrollback: MAX_SCROLLBACK_ROWS,
         })?;
 
         apply_theme(&mut terminal)?;
@@ -1750,6 +1751,109 @@ mod tests {
     }
 
     #[test]
+    fn grid_resize_reflows_logical_content_and_advances_the_presentation() {
+        let mut emulator = emulator(8, 3);
+        emulator.feed(b"abcdefghijkl");
+        let before = emulator.snapshot().unwrap().unwrap();
+
+        emulator.resize(geometry(5, 3, 8.0, 18.0)).unwrap();
+        let after = emulator.snapshot().unwrap().unwrap();
+
+        assert!(after.generation > before.generation);
+        assert!(row_text(&after, 0).starts_with("abcde"));
+        assert!(row_text(&after, 1).starts_with("fghij"));
+        assert!(row_text(&after, 2).starts_with("kl"));
+        assert!(after.damage.resize);
+        assert_eq!(after.damage.content, ContentDamageSnapshot::Full);
+    }
+
+    #[test]
+    fn grid_resize_preserves_selection_anchors_across_reflow() {
+        let mut emulator = emulator(12, 3);
+        emulator.feed(b"hello world");
+        let _ = emulator.snapshot().unwrap().unwrap();
+        let press = current_pointer(
+            &emulator,
+            pointer(
+                PointerPhase::Press,
+                Some(PointerButton::Left),
+                2.0,
+                10.0,
+                false,
+            ),
+        );
+        emulator.pointer(press).unwrap();
+        let drag = current_pointer(
+            &emulator,
+            pointer(PointerPhase::Motion, None, 48.0, 10.0, false),
+        );
+        emulator.pointer(drag).unwrap();
+        let release = current_pointer(
+            &emulator,
+            pointer(
+                PointerPhase::Release,
+                Some(PointerButton::Left),
+                48.0,
+                10.0,
+                false,
+            ),
+        );
+        emulator.pointer(release).unwrap();
+        assert_eq!(emulator.selection_text().unwrap(), Some("hello".to_owned()));
+
+        emulator.resize(geometry(6, 3, 8.0, 18.0)).unwrap();
+        let reflowed = emulator.snapshot().unwrap().unwrap();
+
+        assert_eq!(emulator.selection_text().unwrap(), Some("hello".to_owned()));
+        assert!(
+            reflowed
+                .rows
+                .iter()
+                .flat_map(|row| row.iter())
+                .take(5)
+                .all(|cell| cell.selected)
+        );
+    }
+
+    #[test]
+    fn pixel_only_resize_updates_backing_geometry_without_a_grid_presentation() {
+        let mut emulator = emulator(10, 2);
+        let before = emulator.snapshot().unwrap().unwrap();
+
+        emulator.resize(geometry(10, 2, 9.0, 20.0)).unwrap();
+
+        assert!(emulator.snapshot().unwrap().is_none());
+        assert_eq!(emulator.presentation_generation, before.generation);
+        assert_eq!(
+            emulator.mouse_encoder_size(),
+            MouseEncoderSize {
+                screen_width: 90,
+                screen_height: 40,
+                cell_width: 9,
+                cell_height: 20,
+                padding_top: 0,
+                padding_bottom: 0,
+                padding_right: 0,
+                padding_left: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn resize_releases_synchronized_output_without_spurious_grid_damage() {
+        let mut emulator = emulator(10, 2);
+        let _ = emulator.snapshot().unwrap().unwrap();
+        emulator.feed(b"\x1b[?2026hpending");
+        assert!(emulator.snapshot().unwrap().is_none());
+
+        emulator.resize(geometry(10, 2, 9.0, 20.0)).unwrap();
+        let released = emulator.snapshot().unwrap().unwrap();
+
+        assert!(row_text(&released, 0).starts_with("pending"));
+        assert!(!released.damage.resize);
+    }
+
+    #[test]
     fn alternate_screen_transition_reports_only_affected_metadata_and_content() {
         let mut emulator = emulator(10, 2);
         let first = emulator.snapshot().unwrap().unwrap();
@@ -2498,6 +2602,87 @@ mod tests {
         assert!(row_text(&restored, 0).starts_with("two"));
         assert_eq!(restored.cursor.position.unwrap().row, 1);
         assert!(row_text(&restored, 1).starts_with("three"));
+    }
+
+    #[test]
+    fn new_output_follows_the_bottom_only_from_a_following_viewport() {
+        let mut following = emulator(10, 2);
+        following.feed(b"one\r\ntwo\r\nthree");
+        let _ = following.snapshot().unwrap().unwrap();
+        following.feed(b"\r\nfour");
+        let advanced = following.snapshot().unwrap().unwrap();
+        assert!(row_text(&advanced, 0).starts_with("three"));
+        assert!(row_text(&advanced, 1).starts_with("four"));
+        assert_eq!(
+            advanced.scrollbar.offset_rows + advanced.scrollbar.visible_rows,
+            advanced.scrollbar.total_rows
+        );
+
+        let mut anchored = emulator(10, 2);
+        anchored.feed(b"one\r\ntwo\r\nthree");
+        let _ = anchored.snapshot().unwrap().unwrap();
+        let input = current_wheel(&anchored, wheel(1, false));
+        anchored.wheel(input).unwrap();
+        let before = anchored.snapshot().unwrap().unwrap();
+        assert!(row_text(&before, 0).starts_with("one"));
+        anchored.feed(b"\r\nfour");
+        let after = anchored.snapshot().unwrap().unwrap();
+        assert!(row_text(&after, 0).starts_with("one"));
+        assert!(row_text(&after, 1).starts_with("two"));
+        assert!(
+            after.scrollbar.offset_rows + after.scrollbar.visible_rows < after.scrollbar.total_rows
+        );
+    }
+
+    #[test]
+    fn erase_saved_lines_clears_scrollback_without_discarding_the_visible_screen() {
+        let mut emulator = emulator(10, 2);
+        emulator.feed(b"one\r\ntwo\r\nthree");
+        let before = emulator.snapshot().unwrap().unwrap();
+        assert!(before.scrollbar.total_rows > before.scrollbar.visible_rows);
+
+        emulator.feed(b"\x1b[3J");
+        let cleared = emulator.snapshot().unwrap().unwrap();
+
+        assert!(row_text(&cleared, 0).starts_with("two"));
+        assert!(row_text(&cleared, 1).starts_with("three"));
+        assert_eq!(cleared.scrollbar.total_rows, cleared.scrollbar.visible_rows);
+        assert_eq!(cleared.scrollbar.offset_rows, 0);
+    }
+
+    #[test]
+    fn terminal_reset_returns_to_a_clean_primary_screen() {
+        let mut emulator = emulator(10, 2);
+        emulator.feed(b"primary\r\nscroll\r\nback\x1b[?1049halternate");
+        let alternate = emulator.snapshot().unwrap().unwrap();
+        assert_eq!(alternate.active_screen, ActiveScreenSnapshot::Alternate);
+
+        emulator.feed(b"\x1bc");
+        let reset = emulator.snapshot().unwrap().unwrap();
+
+        assert_eq!(reset.active_screen, ActiveScreenSnapshot::Primary);
+        assert_eq!(reset.scrollbar.total_rows, reset.scrollbar.visible_rows);
+        assert!((0..reset.rows.len()).all(|row| row_text(&reset, row).trim().is_empty()));
+        assert_eq!(reset.cursor.position.unwrap().row, 0);
+        assert_eq!(reset.cursor.position.unwrap().column, 0);
+    }
+
+    #[test]
+    fn primary_scrollback_is_bounded_to_the_configured_history() {
+        let mut emulator = emulator(10, 2);
+        let output = b"x\r\n".repeat(MAX_SCROLLBACK_ROWS + 100);
+        emulator.feed(&output);
+
+        let snapshot = emulator.snapshot().unwrap().unwrap();
+
+        assert!(
+            snapshot.scrollbar.total_rows
+                <= u64::try_from(MAX_SCROLLBACK_ROWS).unwrap() + snapshot.scrollbar.visible_rows
+        );
+        assert_eq!(
+            snapshot.scrollbar.offset_rows + snapshot.scrollbar.visible_rows,
+            snapshot.scrollbar.total_rows
+        );
     }
 
     #[test]
