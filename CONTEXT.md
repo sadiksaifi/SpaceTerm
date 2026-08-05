@@ -6,9 +6,8 @@ and architectural principles. Domain terminology, relationships, and invariants 
 
 ## Product intent
 
-SpaceTerm is a functional prototype of a modern native macOS terminal. Its layout hierarchy takes
-useful inspiration from tmux, but SpaceTerm is not a tmux client and has no tmux-style server/client
-model.
+SpaceTerm is a modern native macOS terminal. Its layout hierarchy takes useful inspiration from
+tmux, but SpaceTerm is not a tmux client and has no tmux-style server/client model.
 
 ## Technology decisions
 
