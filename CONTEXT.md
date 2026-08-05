@@ -154,6 +154,21 @@ damage only the previously and currently occupied viewport rows. Terminal Presen
 filled block above backgrounds and selections and recolors its covered glyph, while bar and
 underline cursors add thin geometry without replacing text.
 
+### Terminal Text Attributes
+
+Terminal Presentation snapshots preserve bold, faint, italic, blink, inverse, and invisible cell
+attributes independently from their text and semantic color sources. GPUI selects bold and italic
+font faces, resolves bold-as-bright and inverse before applying faint only to foreground opacity,
+and splits prepared shaping fragments at every presentation-state boundary. Invisible cells retain
+their graphemes in the immutable snapshot but prepare no foreground content; their background and
+Selection presentation remain intact.
+
+Visible blinking text is explicit snapshot demand. A Pane owns at most one 600-millisecond GPUI
+clock task while its product surface is active and visible blinking content exists. Losing that
+demand cancels the task and restores the visible phase, so static, invisible, and inactive content
+does not schedule frames. Blink phase filters already prepared cell-aligned fragments and never
+mutates Terminal Emulator state.
+
 ### Terminal Input Focus
 
 Terminal Input Focus is a pure derived fact and is distinct from the Window-owned Focused Pane

@@ -1789,7 +1789,11 @@ mod tests {
 
         cx.update(|_window, cx| {
             pane.update(cx, |pane, cx| {
-                pane.handle_event(SessionEvent::Screen(ScreenSnapshot::empty()), cx);
+                pane.set_product_focus(TerminalProductFocus {
+                    active_workspace: true,
+                    active_window: false,
+                    ..TerminalProductFocus::default()
+                });
                 cx.notify();
             });
         });
@@ -1797,6 +1801,10 @@ mod tests {
 
         assert!(pane.read_with(cx, |pane, _| pane.text_blink_visible));
         assert!(pane.read_with(cx, |pane, _| pane._text_blink_task.is_none()));
+
+        cx.executor().advance_clock(TEXT_BLINK_INTERVAL * 2);
+        cx.run_until_parked();
+        assert!(pane.read_with(cx, |pane, _| pane.text_blink_visible));
     }
 
     #[test]
