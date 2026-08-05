@@ -680,6 +680,9 @@ fn effective_colors(cell: &CellSnapshot, colors: &TerminalColorsSnapshot) -> (Co
     if cell.inverse ^ colors.reversed {
         std::mem::swap(&mut foreground, &mut background);
     }
+    if cell.faint {
+        foreground.a = foreground.a.div_ceil(2);
+    }
     (foreground, background)
 }
 
@@ -822,6 +825,21 @@ mod tests {
             effective_colors(&subject, &reversed),
             (Color::rgb(0x12_34_56), colors.palette[200])
         );
+    }
+
+    #[test]
+    fn faint_reduces_only_the_resolved_foreground_opacity() {
+        let colors = colors();
+        let mut subject = cell("x");
+        subject.foreground_source = crate::terminal::TerminalColor::Rgb(Color::rgba(0x10_20_30_c0));
+        subject.background_source = crate::terminal::TerminalColor::Rgb(Color::rgb(0x40_50_60));
+        subject.inverse = true;
+        subject.faint = true;
+
+        let (foreground, background) = effective_colors(&subject, &colors);
+
+        assert_eq!(foreground, Color::rgba(0x40_50_60_80));
+        assert_eq!(background, Color::rgba(0x10_20_30_c0));
     }
 
     #[test]
