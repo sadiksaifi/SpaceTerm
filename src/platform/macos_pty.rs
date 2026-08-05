@@ -3,7 +3,7 @@ use std::io::{self, Read, Write};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Error as AnyError;
 use portable_pty::{Child, CommandBuilder, ExitStatus, MasterPty, PtySize, native_pty_system};
@@ -57,8 +57,11 @@ impl SharedChildProcess {
     }
 
     fn cleanup(&self) {
-        let mut state = self.lock_state();
-        let Some(mut child) = state.child.take() else {
+        let (child, termination_sent) = {
+            let mut state = self.lock_state();
+            (state.child.take(), state.termination_sent)
+        };
+        let Some(mut child) = child else {
             return;
         };
 
@@ -68,15 +71,10 @@ impl SharedChildProcess {
             Err(error) => eprintln!("failed to inspect shell process during cleanup: {error}"),
         }
 
-        if !state.termination_sent {
-            match child.kill() {
-                Ok(()) => state.termination_sent = true,
-                Err(error) => {
-                    eprintln!("failed to terminate shell process during cleanup: {error}");
-                    child_exited_after_failed_termination(child.as_mut());
-                    return;
-                }
-            }
+        if !termination_sent && let Err(error) = child.kill() {
+            eprintln!("failed to terminate shell process during cleanup: {error}");
+            child_exited_after_failed_termination(child.as_mut());
+            return;
         }
 
         if let Err(error) = child.wait() {
@@ -131,12 +129,24 @@ impl SpawnedPty {
         self.master.resize(size)
     }
 
-    pub(crate) fn wait_for_child(&mut self) -> io::Result<ExitStatus> {
+    pub(crate) fn wait_for_child(&mut self, timeout: Duration) -> io::Result<ExitStatus> {
+        let deadline = Instant::now() + timeout;
         loop {
             if let Some(status) = self.child.try_wait()? {
                 return Ok(status);
             }
-            thread::sleep(CHILD_EXIT_POLL_INTERVAL);
+
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    format!(
+                        "timed out after {} ms waiting for the shell process to exit",
+                        timeout.as_millis()
+                    ),
+                ));
+            }
+            thread::sleep(CHILD_EXIT_POLL_INTERVAL.min(remaining));
         }
     }
 }
@@ -266,8 +276,9 @@ fn terminate_after_startup_failure(child: &mut dyn Child) {
 mod tests {
     use std::fmt;
     use std::io;
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Condvar, Mutex, mpsc};
+    use std::time::Instant;
 
     use portable_pty::{ChildKiller, ExitStatus};
 
@@ -323,6 +334,56 @@ mod tests {
 
     struct ExitedChild {
         cleanup: CleanupCounts,
+    }
+
+    #[derive(Clone, Default)]
+    struct BlockingWaitControl {
+        state: Arc<(Mutex<BlockingWaitState>, Condvar)>,
+    }
+
+    #[derive(Default)]
+    struct BlockingWaitState {
+        entered: bool,
+        released: bool,
+    }
+
+    impl BlockingWaitControl {
+        fn block(&self) {
+            let (state, changed) = &*self.state;
+            let mut state = state.lock().unwrap();
+            state.entered = true;
+            changed.notify_all();
+            while !state.released {
+                state = changed.wait(state).unwrap();
+            }
+        }
+
+        fn wait_until_entered(&self) {
+            let (state, changed) = &*self.state;
+            let deadline = Instant::now() + Duration::from_secs(1);
+            let mut state = state.lock().unwrap();
+            while !state.entered {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                assert!(!remaining.is_zero(), "timed out waiting for child.wait()");
+                let (next_state, timeout) = changed.wait_timeout(state, remaining).unwrap();
+                state = next_state;
+                assert!(
+                    !timeout.timed_out() || state.entered,
+                    "timed out waiting for child.wait()"
+                );
+            }
+        }
+
+        fn release(&self) {
+            let (state, changed) = &*self.state;
+            state.lock().unwrap().released = true;
+            changed.notify_all();
+        }
+    }
+
+    struct BlockingWaitChild {
+        cleanup: CleanupCounts,
+        wait_control: BlockingWaitControl,
     }
 
     impl fmt::Debug for TestChild {
@@ -437,6 +498,45 @@ mod tests {
         }
     }
 
+    impl fmt::Debug for BlockingWaitChild {
+        fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter
+                .debug_struct("BlockingWaitChild")
+                .finish_non_exhaustive()
+        }
+    }
+
+    impl ChildKiller for BlockingWaitChild {
+        fn kill(&mut self) -> io::Result<()> {
+            self.cleanup.kill.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        }
+
+        fn clone_killer(&self) -> Box<dyn ChildKiller + Send + Sync> {
+            Box::new(Self {
+                cleanup: self.cleanup.clone(),
+                wait_control: self.wait_control.clone(),
+            })
+        }
+    }
+
+    impl Child for BlockingWaitChild {
+        fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
+            self.cleanup.try_wait.fetch_add(1, Ordering::Relaxed);
+            Ok(None)
+        }
+
+        fn wait(&mut self) -> io::Result<ExitStatus> {
+            self.cleanup.wait.fetch_add(1, Ordering::Relaxed);
+            self.wait_control.block();
+            Ok(ExitStatus::with_exit_code(0))
+        }
+
+        fn process_id(&self) -> Option<u32> {
+            None
+        }
+    }
+
     #[test]
     fn spawned_pty_should_expose_single_owner_io_operations() {
         let cleanup = CleanupCounts::default();
@@ -481,6 +581,65 @@ mod tests {
     }
 
     #[test]
+    fn terminator_should_not_wait_for_cleanup_that_owns_the_child() {
+        let cleanup = CleanupCounts::default();
+        let wait_control = BlockingWaitControl::default();
+        let child = Arc::new(SharedChildProcess::new(Box::new(BlockingWaitChild {
+            cleanup: cleanup.clone(),
+            wait_control: wait_control.clone(),
+        })));
+        let terminator = PtyTerminator::new(Arc::clone(&child));
+        let pty = SpawnedPty {
+            master: Box::new(TestMasterPty),
+            reader: Some(Box::new(io::empty())),
+            writer: Box::new(io::sink()),
+            child,
+        };
+        let (cleanup_finished, cleanup_completion) = mpsc::sync_channel(1);
+
+        let cleanup_thread = thread::spawn(move || {
+            drop(pty);
+            cleanup_finished.send(()).unwrap();
+        });
+        wait_control.wait_until_entered();
+
+        let (termination_finished, termination_completion) = mpsc::sync_channel(1);
+        let termination_thread = thread::spawn(move || {
+            termination_finished.send(terminator.terminate()).unwrap();
+        });
+        let termination = match termination_completion.recv_timeout(Duration::from_millis(250)) {
+            Ok(termination) => termination,
+            Err(error) => {
+                wait_control.release();
+                cleanup_thread.join().unwrap();
+                termination_thread.join().unwrap();
+                panic!("termination waited for child cleanup: {error}");
+            }
+        };
+
+        termination.unwrap();
+        assert!(matches!(
+            cleanup_completion.try_recv(),
+            Err(mpsc::TryRecvError::Empty)
+        ));
+        termination_thread.join().unwrap();
+
+        wait_control.release();
+        cleanup_completion
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap();
+        cleanup_thread.join().unwrap();
+        assert_eq!(
+            (
+                cleanup.try_wait.load(Ordering::Relaxed),
+                cleanup.kill.load(Ordering::Relaxed),
+                cleanup.wait.load(Ordering::Relaxed),
+            ),
+            (1, 1, 1)
+        );
+    }
+
+    #[test]
     fn waiting_for_a_child_marks_termination_complete() {
         let cleanup = CleanupCounts::default();
         let child = Arc::new(SharedChildProcess::new(Box::new(ExitedChild {
@@ -494,7 +653,7 @@ mod tests {
             child,
         };
 
-        pty.wait_for_child().unwrap();
+        pty.wait_for_child(Duration::from_secs(1)).unwrap();
         drop(pty);
         terminator.terminate().unwrap();
 
@@ -506,6 +665,28 @@ mod tests {
             ),
             (1, 0, 0)
         );
+    }
+
+    #[test]
+    fn waiting_for_a_live_child_should_honor_the_deadline() {
+        let cleanup = CleanupCounts::default();
+        let mut pty = SpawnedPty {
+            master: Box::new(TestMasterPty),
+            reader: Some(Box::new(io::empty())),
+            writer: Box::new(io::sink()),
+            child: Arc::new(SharedChildProcess::new(Box::new(TestChild {
+                cleanup: cleanup.clone(),
+            }))),
+        };
+
+        let error = pty.wait_for_child(Duration::ZERO).unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert_eq!(
+            error.to_string(),
+            "timed out after 0 ms waiting for the shell process to exit"
+        );
+        assert_eq!(cleanup.try_wait.load(Ordering::Relaxed), 1);
     }
 
     #[test]

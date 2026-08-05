@@ -106,4 +106,6 @@ Closing a final child escalates to its owning hierarchy Module without first des
 Closing the final Pane requests its Window close; closing the final Window removes its Workspace
 when another Workspace remains, or closes the Operating-System Window when globally final. Explicit
 Close Workspace remains distinct and replaces the final Workspace. The Module that resolves each
-close owns synchronous cleanup of the removed entity's Terminal Sessions.
+close synchronously removes the entity and initiates one-shot shutdown of its Terminal Sessions.
+Shell termination and PTY ownership cleanup continue on terminal worker threads so GPUI callers do
+not wait for reader or Shell Process joins.

@@ -4,6 +4,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver as CommandReceiver, Sender as CommandSender, TryRecvError};
 use std::thread::{self, JoinHandle};
+use std::time::Duration;
 
 use anyhow::Error as AnyError;
 use portable_pty::{ExitStatus, PtySize};
@@ -13,6 +14,8 @@ use crate::platform::macos_pty::{
     PtyError, PtyTerminator, SpawnedPty, spawn_user_shell, user_shell,
 };
 use crate::terminal::emulator::{EmulatorAction, ScreenSnapshot, TerminalEmulator};
+
+const FINAL_CHILD_WAIT_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub(crate) struct SurfacePosition {
@@ -230,7 +233,7 @@ pub(crate) struct TerminalSession {
 trait SessionPty: Write + Send {
     fn take_reader(&mut self) -> std::io::Result<Box<dyn Read + Send>>;
     fn resize(&self, size: PtySize) -> Result<(), AnyError>;
-    fn wait_for_child(&mut self) -> std::io::Result<ExitStatus>;
+    fn wait_for_child(&mut self, timeout: Duration) -> std::io::Result<ExitStatus>;
 }
 
 trait SessionPtyTerminator: Send + Sync {
@@ -263,8 +266,8 @@ impl SessionPty for NativeSessionPty {
         self.0.resize(size)
     }
 
-    fn wait_for_child(&mut self) -> std::io::Result<ExitStatus> {
-        self.0.wait_for_child()
+    fn wait_for_child(&mut self, timeout: Duration) -> std::io::Result<ExitStatus> {
+        self.0.wait_for_child(timeout)
     }
 }
 
@@ -398,19 +401,21 @@ impl TerminalSession {
     }
 
     fn shutdown(&mut self) {
-        if let Some(commands) = self.commands.take()
-            && commands.send(Command::Shutdown).is_err()
-        {
-            // The worker already stopped, so there is nothing left to signal.
-        }
+        // Terminate before telling the worker to exit. SpawnedPty cleanup waits while holding
+        // the child lock, so allowing that Drop to win this race could block the GPUI caller.
         if let Some(terminator) = self.terminator.take()
             && let Err(error) = terminator.terminate()
         {
             eprintln!("failed to terminate shell while shutting down terminal worker: {error}");
         }
-        if let Some(worker) = self.worker.take() {
-            join_worker(worker);
+        if let Some(commands) = self.commands.take()
+            && commands.send(Command::Shutdown).is_err()
+        {
+            // The worker already stopped, so there is nothing left to signal.
         }
+        // Dropping a JoinHandle detaches the worker. It still owns the PTY and reader
+        // cleanup, but a close operation must never block its GPUI caller on either thread.
+        drop(self.worker.take());
     }
 }
 
@@ -603,7 +608,8 @@ fn run_worker(
                 true
             }
             Command::ReaderStopped(read_error) => {
-                let event = classify_reader_stop(read_error, pty.wait_for_child());
+                let event =
+                    classify_reader_stop(read_error, pty.wait_for_child(FINAL_CHILD_WAIT_TIMEOUT));
                 send_terminal_event(&events, event);
                 false
             }
@@ -794,6 +800,12 @@ mod tests {
         cell_height_px: 20,
     };
 
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum LifecycleStep {
+        TerminationRequested,
+        PtyDropped,
+    }
+
     #[derive(Clone, Debug, Default)]
     struct ScriptedPtyState {
         take_reader_calls: usize,
@@ -804,7 +816,9 @@ mod tests {
         waits: usize,
         terminations: usize,
         pty_drops: usize,
+        reader_drops: usize,
         terminator_drops: usize,
+        lifecycle: Vec<LifecycleStep>,
     }
 
     #[derive(Clone, Default)]
@@ -854,6 +868,7 @@ mod tests {
     struct ScriptedReader {
         steps: mpsc::Receiver<ReaderStep>,
         pending: VecDeque<u8>,
+        records: ScriptedPtyRecords,
     }
 
     impl Read for ScriptedReader {
@@ -877,13 +892,36 @@ mod tests {
         }
     }
 
-    #[derive(Default)]
+    impl Drop for ScriptedReader {
+        fn drop(&mut self) {
+            self.records.update(|state| state.reader_drops += 1);
+        }
+    }
+
     struct ScriptedPtyOptions {
         reader_error: Option<String>,
         resize_error: Option<String>,
         write_error: Option<String>,
         wait_error: Option<String>,
+        wait_times_out: bool,
         exit_code: u32,
+        termination_error: Option<String>,
+        termination_releases_reader: bool,
+    }
+
+    impl Default for ScriptedPtyOptions {
+        fn default() -> Self {
+            Self {
+                reader_error: None,
+                resize_error: None,
+                write_error: None,
+                wait_error: None,
+                wait_times_out: false,
+                exit_code: 0,
+                termination_error: None,
+                termination_releases_reader: true,
+            }
+        }
     }
 
     struct ScriptedPty {
@@ -893,6 +931,7 @@ mod tests {
         resize_error: Option<String>,
         write_error: Option<String>,
         wait_error: Option<String>,
+        wait_times_out: bool,
         exit_code: u32,
     }
 
@@ -932,8 +971,17 @@ mod tests {
             }
         }
 
-        fn wait_for_child(&mut self) -> io::Result<ExitStatus> {
+        fn wait_for_child(&mut self, timeout: Duration) -> io::Result<ExitStatus> {
             self.records.update(|state| state.waits += 1);
+            if self.wait_times_out {
+                return Err(io::Error::new(
+                    ErrorKind::TimedOut,
+                    format!(
+                        "timed out after {} ms waiting for the scripted shell process to exit",
+                        timeout.as_millis()
+                    ),
+                ));
+            }
             match &self.wait_error {
                 Some(message) => Err(io::Error::other(message.clone())),
                 None => Ok(ExitStatus::with_exit_code(self.exit_code)),
@@ -943,20 +991,33 @@ mod tests {
 
     impl Drop for ScriptedPty {
         fn drop(&mut self) {
-            self.records.update(|state| state.pty_drops += 1);
+            self.records.update(|state| {
+                state.pty_drops += 1;
+                state.lifecycle.push(LifecycleStep::PtyDropped);
+            });
         }
     }
 
     struct ScriptedPtyTerminator {
         records: ScriptedPtyRecords,
         reader_steps: mpsc::Sender<ReaderStep>,
+        error: Option<String>,
+        releases_reader: bool,
     }
 
     impl SessionPtyTerminator for ScriptedPtyTerminator {
         fn terminate(&self) -> io::Result<()> {
-            self.records.update(|state| state.terminations += 1);
-            let _ = self.reader_steps.send(ReaderStep::Eof);
-            Ok(())
+            self.records.update(|state| {
+                state.terminations += 1;
+                state.lifecycle.push(LifecycleStep::TerminationRequested);
+            });
+            if self.releases_reader {
+                let _ = self.reader_steps.send(ReaderStep::Eof);
+            }
+            match &self.error {
+                Some(message) => Err(io::Error::other(message.clone())),
+                None => Ok(()),
+            }
         }
     }
 
@@ -982,7 +1043,10 @@ mod tests {
             resize_error,
             write_error,
             wait_error,
+            wait_times_out,
             exit_code,
+            termination_error,
+            termination_releases_reader,
         } = options;
 
         let result = TerminalSession::start_with(
@@ -996,17 +1060,21 @@ mod tests {
                         reader: Some(Box::new(ScriptedReader {
                             steps,
                             pending: VecDeque::new(),
+                            records: records_for_pty.clone(),
                         })),
                         records: records_for_pty,
                         reader_error,
                         resize_error,
                         write_error,
                         wait_error,
+                        wait_times_out,
                         exit_code,
                     }),
                     terminator: Box::new(ScriptedPtyTerminator {
                         records: records_for_terminator,
                         reader_steps: terminator_steps,
+                        error: termination_error,
+                        releases_reader: termination_releases_reader,
                     }),
                 })
             },
@@ -1018,22 +1086,38 @@ mod tests {
     fn receive_event(
         events: &async_channel::Receiver<SessionEvent>,
         description: &str,
-        predicate: impl Fn(&SessionEvent) -> bool,
+        predicate: impl Fn(&SessionEvent) -> bool + Send + 'static,
     ) -> SessionEvent {
-        let deadline = Instant::now() + Duration::from_secs(1);
-        loop {
-            match events.try_recv() {
-                Ok(event) if predicate(&event) => return event,
-                Ok(_) | Err(async_channel::TryRecvError::Empty) => {
-                    assert!(
-                        Instant::now() < deadline,
-                        "timed out waiting for {description}"
-                    );
-                    thread::sleep(Duration::from_millis(1));
+        let events = events.clone();
+        let (matched, result) = mpsc::sync_channel(1);
+        let waiter = thread::spawn(move || {
+            loop {
+                match events.recv_blocking() {
+                    Ok(event) if predicate(&event) => {
+                        let _ = matched.send(Some(event));
+                        break;
+                    }
+                    Ok(_) => {}
+                    Err(_) => {
+                        let _ = matched.send(None);
+                        break;
+                    }
                 }
-                Err(async_channel::TryRecvError::Closed) => {
-                    panic!("session events closed while waiting for {description}")
-                }
+            }
+        });
+
+        match result.recv_timeout(Duration::from_secs(1)) {
+            Ok(Some(event)) => {
+                waiter.join().unwrap();
+                event
+            }
+            Ok(None) => {
+                waiter.join().unwrap();
+                panic!("session events closed while waiting for {description}")
+            }
+            Err(error) => {
+                drop(waiter);
+                panic!("timed out waiting for {description}: {error}")
             }
         }
     }
@@ -1171,10 +1255,17 @@ mod tests {
         assert!(screen_text(&screen).contains("scripted output"));
 
         session.shutdown();
-        let state = records.snapshot();
+        let state = records.wait_for("the scripted session owners to be released", |state| {
+            state.pty_drops == 1 && state.reader_drops == 1
+        });
         assert_eq!(
-            (state.terminations, state.pty_drops, state.terminator_drops),
-            (1, 1, 1)
+            (
+                state.terminations,
+                state.pty_drops,
+                state.reader_drops,
+                state.terminator_drops,
+            ),
+            (1, 1, 1, 1)
         );
     }
 
@@ -1377,6 +1468,42 @@ mod tests {
     }
 
     #[test]
+    fn child_wait_timeout_should_emit_a_shell_wait_failure() {
+        let (result, reader_steps, records) = start_scripted_session(ScriptedPtyOptions {
+            wait_times_out: true,
+            ..ScriptedPtyOptions::default()
+        });
+        let (mut session, events) = result.unwrap();
+
+        reader_steps.send(ReaderStep::Eof).unwrap();
+        let event = receive_event(&events, "the bounded shell wait failure", |event| {
+            matches!(event, SessionEvent::Failed(_))
+        });
+
+        let SessionEvent::Failed(SessionFailure::ShellWait {
+            read_error,
+            wait_error,
+        }) = event
+        else {
+            panic!("a child wait timeout must be classified as ShellWait")
+        };
+        assert_eq!(read_error, None);
+        assert_eq!(
+            wait_error,
+            "timed out after 2000 ms waiting for the scripted shell process to exit"
+        );
+        let state = records.wait_for("the timed-out PTY worker to release ownership", |state| {
+            state.pty_drops == 1 && state.reader_drops == 1
+        });
+        assert_eq!(
+            (state.waits, state.pty_drops, state.reader_drops),
+            (1, 1, 1)
+        );
+
+        session.shutdown();
+    }
+
+    #[test]
     fn reader_eof_should_wait_for_the_child_and_emit_exit() {
         let (result, reader_steps, records) = start_scripted_session(ScriptedPtyOptions {
             exit_code: 7,
@@ -1402,25 +1529,111 @@ mod tests {
     }
 
     #[test]
-    fn repeated_shutdown_should_terminate_and_release_each_owner_once() {
-        let (result, _reader_steps, records) =
-            start_scripted_session(ScriptedPtyOptions::default());
+    fn repeated_shutdown_should_return_before_a_blocked_reader_finishes() {
+        let (result, reader_steps, records) = start_scripted_session(ScriptedPtyOptions {
+            termination_releases_reader: false,
+            ..ScriptedPtyOptions::default()
+        });
         let (mut session, _events) = result.unwrap();
+        let (completed, completion) = mpsc::sync_channel(1);
 
-        session.shutdown();
-        session.shutdown();
-
-        let state = records.snapshot();
+        let shutdown_thread = thread::spawn(move || {
+            session.shutdown();
+            session.shutdown();
+            completed.send(session).unwrap();
+        });
+        let session = match completion.recv_timeout(Duration::from_millis(250)) {
+            Ok(session) => session,
+            Err(error) => {
+                reader_steps.send(ReaderStep::Eof).unwrap();
+                shutdown_thread.join().unwrap();
+                panic!("shutdown waited for the blocked reader thread: {error}");
+            }
+        };
+        shutdown_thread.join().unwrap();
+        let state = records.wait_for("the detached worker to drop its PTY", |state| {
+            state.pty_drops == 1
+        });
         assert_eq!(
             (
                 state.terminations,
                 state.pty_drops,
+                state.reader_drops,
                 state.terminator_drops,
                 session.commands.is_none(),
                 session.worker.is_none(),
                 session.terminator.is_none(),
             ),
-            (1, 1, 1, true, true, true)
+            (1, 1, 0, 1, true, true, true)
+        );
+        assert_eq!(
+            state.lifecycle,
+            vec![
+                LifecycleStep::TerminationRequested,
+                LifecycleStep::PtyDropped,
+            ]
+        );
+
+        reader_steps.send(ReaderStep::Eof).unwrap();
+        let state = records.wait_for("the released reader ownership", |state| {
+            state.reader_drops == 1
+        });
+        assert_eq!(
+            (
+                state.terminations,
+                state.pty_drops,
+                state.reader_drops,
+                state.terminator_drops,
+            ),
+            (1, 1, 1, 1)
+        );
+    }
+
+    #[test]
+    fn drop_should_return_after_termination_fails_with_a_blocked_reader() {
+        let (result, reader_steps, records) = start_scripted_session(ScriptedPtyOptions {
+            termination_error: Some("termination unavailable".to_owned()),
+            termination_releases_reader: false,
+            ..ScriptedPtyOptions::default()
+        });
+        let (session, _events) = result.unwrap();
+        let (completed, completion) = mpsc::sync_channel(1);
+
+        let drop_thread = thread::spawn(move || {
+            drop(session);
+            completed.send(()).unwrap();
+        });
+        if let Err(error) = completion.recv_timeout(Duration::from_millis(250)) {
+            reader_steps.send(ReaderStep::Eof).unwrap();
+            drop_thread.join().unwrap();
+            panic!("Drop waited after termination failed: {error}");
+        }
+        drop_thread.join().unwrap();
+        let state = records.wait_for("the detached worker to drop its PTY", |state| {
+            state.pty_drops == 1
+        });
+        assert_eq!(
+            (
+                state.terminations,
+                state.pty_drops,
+                state.reader_drops,
+                state.terminator_drops,
+            ),
+            (1, 1, 0, 1)
+        );
+
+        reader_steps.send(ReaderStep::Eof).unwrap();
+        let state = records.wait_for("the reader to release after termination failure", |state| {
+            state.reader_drops == 1
+        });
+        assert_eq!(
+            (
+                state.terminations,
+                state.pty_drops,
+                state.reader_drops,
+                state.terminator_drops,
+            ),
+            (1, 1, 1, 1)
         );
     }
 
