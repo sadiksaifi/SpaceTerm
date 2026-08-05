@@ -203,6 +203,16 @@ host policy permits that override; otherwise its modifier is reported to the app
 presses, motion, and wheel input. Worker snapshots publish whether application mouse tracking is
 active so the Pane's pointer presentation matches the effective route.
 
+### Terminal Selection
+
+The Terminal Emulator owns Selection gestures and delegates cell, word, line, repeat-click, drag,
+wide-cell, and soft-wrap semantics to `libghostty-vt`. Gesture anchors are tracked terminal grid
+references, so completed Selection remains attached to logical content across Scrollback movement,
+new output, and resize reflow. Selection-owned presentations may continue the active gesture from
+its last accepted mapping, while output, resize, or page movement requires a fresh Presentation
+Generation. Off-grid drags request worker-owned autoscroll through the existing deadline loop; its
+rate is deterministic, depth-sensitive, bounded, and cancelled by release or stale mapping.
+
 ### Typed Terminal Key Input
 
 Terminal key input crosses the Terminal Session command lane as one ordered, typed event carrying

@@ -36,6 +36,7 @@
 | **Scrollback** | Bounded Primary Screen output retained outside the bottom Terminal Viewport and available by moving that viewport. | Workspace scroll, history |
 | **Presentation Generation** | The monotonic identity of a published Terminal Presentation grid, carried by coordinate and Scrollback mappings so stale mappings and older presentations can be rejected. | frame number, emulator generation |
 | **Synchronized Output** | A bounded DEC 2026 transaction whose intermediate Terminal Emulator changes are withheld until one atomic Terminal Presentation is published. | render lock, output buffering |
+| **Selection** | A terminal-owned logical content range created by pointer gestures and kept anchored across Scrollback movement, output, and resize reflow. | selected Workspace, selected Pane, text highlight |
 | **Marked Text** | Transient input-method preedit owned by the Pane with Terminal Input Focus; it is presented at the Cursor but is not Terminal Emulator or PTY input until committed. | terminal output, committed text |
 
 ## Lifecycle actions

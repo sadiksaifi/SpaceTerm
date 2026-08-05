@@ -2203,6 +2203,36 @@ mod tests {
     }
 
     #[test]
+    fn selection_stays_anchored_when_output_moves_scrollback_pages() {
+        let mut emulator = emulator(8, 2);
+        emulator.feed(b"one\r\ntwo\r\nthree\r\nfour");
+        _ = emulator.snapshot().unwrap().unwrap();
+        emulator.scroll_to(0);
+        let top = emulator.snapshot().unwrap().unwrap();
+        let input = |phase, x| PointerInput {
+            generation: top.generation,
+            phase,
+            button: (phase != PointerPhase::Motion).then_some(PointerButton::Left),
+            position: SurfacePosition { x, y: 1.0 },
+            modifiers: InputModifiers::default(),
+            shift_selection: ShiftSelectionPolicy::default(),
+        };
+        _ = emulator.pointer(input(PointerPhase::Press, 1.0)).unwrap();
+        _ = emulator.pointer(input(PointerPhase::Motion, 28.0)).unwrap();
+        _ = emulator
+            .pointer(input(PointerPhase::Release, 28.0))
+            .unwrap();
+        assert_eq!(emulator.selection_text().unwrap().as_deref(), Some("one"));
+
+        emulator.feed(b"\r\nfive");
+        let moved = emulator.snapshot().unwrap().unwrap();
+
+        assert!(row_text(&moved, 0).starts_with("one"));
+        assert!(moved.rows[0][..3].iter().all(|cell| cell.selected));
+        assert_eq!(emulator.selection_text().unwrap().as_deref(), Some("one"));
+    }
+
+    #[test]
     fn pixel_only_resize_updates_backing_geometry_without_a_grid_presentation() {
         let mut emulator = emulator(10, 2);
         let before = emulator.snapshot().unwrap().unwrap();
@@ -3294,6 +3324,31 @@ mod tests {
             emulator.selection_text().unwrap().as_deref(),
             Some("hello world")
         );
+    }
+
+    #[test]
+    fn output_mapping_changes_reject_active_gesture_coordinates() {
+        let mut emulator = emulator(8, 2);
+        emulator.feed(b"one\r\ntwo\r\nthree");
+        let before = emulator.snapshot().unwrap().unwrap();
+        let input = |phase, x| PointerInput {
+            generation: before.generation,
+            phase,
+            button: (phase != PointerPhase::Motion).then_some(PointerButton::Left),
+            position: SurfacePosition { x, y: 21.0 },
+            modifiers: InputModifiers::default(),
+            shift_selection: ShiftSelectionPolicy::default(),
+        };
+        _ = emulator.pointer(input(PointerPhase::Press, 1.0)).unwrap();
+        _ = emulator.pointer(input(PointerPhase::Motion, 28.0)).unwrap();
+        emulator.feed(b"\r\nfour");
+        let after = emulator.snapshot().unwrap().unwrap();
+        assert!(after.generation > before.generation);
+
+        let stale = emulator.pointer(input(PointerPhase::Motion, 68.0)).unwrap();
+
+        assert!(!stale.screen_changed);
+        assert_eq!(emulator.selection_autoscroll_interval().unwrap(), None);
     }
 
     #[test]
