@@ -5,8 +5,8 @@ use std::rc::Rc;
 
 use super::geometry::TerminalGeometry;
 use super::{
-    KeyInput, PointerInput, SessionError, SessionEvent, StartedTerminalSession,
-    TerminalSessionFactory, TerminalSessionHandle, WheelInput,
+    KeyInput, PointerInput, PresentationGeneration, SessionError, SessionEvent,
+    StartedTerminalSession, TerminalSessionFactory, TerminalSessionHandle, WheelInput,
 };
 
 #[derive(Clone, Debug, PartialEq)]
@@ -23,7 +23,7 @@ pub(crate) enum RecordedSessionCommand {
     Resize(TerminalGeometry),
     Pointer(PointerInput),
     Wheel(WheelInput),
-    ScrollTo(u64),
+    ScrollTo(u64, PresentationGeneration),
     Paste(String),
     RequestSelectionText,
 }
@@ -207,8 +207,8 @@ impl TerminalSessionHandle for TestTerminalSessionHandle {
         self.record(RecordedSessionCommand::Wheel(input));
     }
 
-    fn scroll_to(&self, offset_rows: u64) {
-        self.record(RecordedSessionCommand::ScrollTo(offset_rows));
+    fn scroll_to(&self, offset_rows: u64, generation: PresentationGeneration) {
+        self.record(RecordedSessionCommand::ScrollTo(offset_rows, generation));
     }
 
     fn paste(&self, text: String) {

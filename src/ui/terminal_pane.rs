@@ -101,7 +101,7 @@ impl TerminalPane {
                 }
                 OverlayScrollbarEvent::OffsetRequested(rows) => {
                     if let Some(session) = &pane.session {
-                        session.scroll_to(*rows);
+                        session.scroll_to(*rows, pane.screen.generation);
                     }
                 }
             },
@@ -298,6 +298,9 @@ impl TerminalPane {
     fn handle_event(&mut self, event: SessionEvent, cx: &mut Context<Self>) {
         match event {
             SessionEvent::Screen(screen) => {
+                if screen.generation < self.screen.generation {
+                    return;
+                }
                 let title = normalized_pane_title(&screen.title, &self.fallback_title);
                 if self.title.as_ref() != title {
                     self.title = title.into();
@@ -489,6 +492,7 @@ impl TerminalPane {
         self.pressed_button = Some(button);
         if let Some(session) = &self.session {
             session.pointer(PointerInput {
+                generation: self.screen.generation,
                 phase: PointerPhase::Press,
                 button: Some(button),
                 position,
@@ -510,6 +514,7 @@ impl TerminalPane {
         };
         if let Some(session) = &self.session {
             session.pointer(PointerInput {
+                generation: self.screen.generation,
                 phase: PointerPhase::Motion,
                 button: self.pressed_button,
                 position,
@@ -533,6 +538,7 @@ impl TerminalPane {
 
         if let Some(session) = &self.session {
             session.pointer(PointerInput {
+                generation: self.screen.generation,
                 phase: PointerPhase::Release,
                 button: Some(button),
                 position,
@@ -559,6 +565,7 @@ impl TerminalPane {
             && let Some(session) = &self.session
         {
             session.wheel(WheelInput {
+                generation: self.screen.generation,
                 steps,
                 position,
                 modifiers: input_modifiers(event.modifiers),
@@ -1173,7 +1180,7 @@ mod tests {
     use crate::terminal::testing::{
         RecordedSessionCommand, TestTerminalSessionFactory, TestTerminalSessionRecords,
     };
-    use crate::terminal::{SessionFailure, TerminalSessionFactory};
+    use crate::terminal::{ScrollbarSnapshot, SessionFailure, TerminalSessionFactory};
 
     fn terminal_pane(cx: &mut TestAppContext) -> (Entity<TerminalPane>, &mut VisualTestContext) {
         cx.update(crate::ui::init);
@@ -1837,8 +1844,12 @@ mod tests {
                 std::path::Path::new("/tmp/spaceterm-terminal-pane-test"),
             )
             .expect("the test terminal session should start");
+        let screen =
+            ScreenSnapshot::from_test_parts_at(Arc::from([]), ScrollbarSnapshot::default(), "", 7);
+        let generation = screen.generation;
         let scrollbar = pane.update(cx, |pane, _| {
             pane.session = Some(session.handle);
+            pane.screen = screen;
             pane.scrollbar.clone()
         });
 
@@ -1849,8 +1860,42 @@ mod tests {
 
         assert_eq!(
             records.commands().last().map(|input| &input.command),
-            Some(&RecordedSessionCommand::ScrollTo(u64::MAX - 1))
+            Some(&RecordedSessionCommand::ScrollTo(u64::MAX - 1, generation,))
         );
+    }
+
+    #[gpui::test]
+    fn terminal_pane_should_ignore_an_older_screen_presentation(cx: &mut TestAppContext) {
+        let (pane, cx, records) = connected_terminal_pane(cx);
+        let events = records.last_event_sender().unwrap();
+        events
+            .try_send(SessionEvent::Screen(ScreenSnapshot::from_test_parts_at(
+                Arc::from([]),
+                ScrollbarSnapshot::default(),
+                "newest",
+                2,
+            )))
+            .unwrap();
+        cx.run_until_parked();
+        events
+            .try_send(SessionEvent::Screen(ScreenSnapshot::from_test_parts_at(
+                Arc::from([]),
+                ScrollbarSnapshot::default(),
+                "stale",
+                1,
+            )))
+            .unwrap();
+        cx.run_until_parked();
+
+        let (generation, title) = pane.update(cx, |pane, _| {
+            (pane.screen.generation, pane.title.to_string())
+        });
+        assert_eq!(
+            generation,
+            ScreenSnapshot::from_test_parts_at(Arc::from([]), ScrollbarSnapshot::default(), "", 2,)
+                .generation
+        );
+        assert_eq!(title, "newest");
     }
 
     #[gpui::test]

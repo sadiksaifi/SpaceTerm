@@ -16,7 +16,9 @@ use crate::platform::macos_pty::{
     PtyError, PtyTerminator, ShellExit, ShutdownDisposition, SpawnedPty, spawn_user_shell,
     user_shell,
 };
-use crate::terminal::emulator::{EmulatorAction, ScreenSnapshot, TerminalEmulator};
+use crate::terminal::emulator::{
+    EmulatorAction, PresentationGeneration, ScreenSnapshot, TerminalEmulator,
+};
 use crate::terminal::geometry::TerminalGeometry;
 #[cfg(test)]
 use crate::terminal::key::OptionAsAltPolicy;
@@ -48,6 +50,7 @@ pub(crate) enum PointerPhase {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct PointerInput {
+    pub(crate) generation: PresentationGeneration,
     pub(crate) phase: PointerPhase,
     pub(crate) button: Option<PointerButton>,
     pub(crate) position: SurfacePosition,
@@ -56,6 +59,7 @@ pub(crate) struct PointerInput {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct WheelInput {
+    pub(crate) generation: PresentationGeneration,
     pub(crate) steps: i32,
     pub(crate) position: SurfacePosition,
     pub(crate) modifiers: InputModifiers,
@@ -201,7 +205,7 @@ pub(crate) trait TerminalSessionHandle {
     fn resize(&self, geometry: TerminalGeometry);
     fn pointer(&self, input: PointerInput);
     fn wheel(&self, input: WheelInput);
-    fn scroll_to(&self, offset_rows: u64);
+    fn scroll_to(&self, offset_rows: u64, generation: PresentationGeneration);
     fn paste(&self, text: String);
     fn request_selection_text(&self) -> async_channel::Receiver<Result<Option<String>, String>>;
 }
@@ -531,9 +535,11 @@ impl TerminalSession {
         }
     }
 
-    pub(crate) fn scroll_to(&self, offset_rows: u64) {
+    pub(crate) fn scroll_to(&self, offset_rows: u64, generation: PresentationGeneration) {
         if let Some(commands) = &self.commands
-            && commands.send(Command::ScrollTo(offset_rows)).is_err()
+            && commands
+                .send(Command::ScrollTo(offset_rows, generation))
+                .is_err()
         {
             eprintln!("terminal scrollbar input was dropped because the worker has stopped");
         }
@@ -602,8 +608,8 @@ impl TerminalSessionHandle for TerminalSession {
         Self::wheel(self, input);
     }
 
-    fn scroll_to(&self, offset_rows: u64) {
-        Self::scroll_to(self, offset_rows);
+    fn scroll_to(&self, offset_rows: u64, generation: PresentationGeneration) {
+        Self::scroll_to(self, offset_rows, generation);
     }
 
     fn paste(&self, text: String) {
@@ -655,7 +661,7 @@ enum Command {
     Resize,
     Pointer(PointerInput),
     Wheel(WheelInput),
-    ScrollTo(u64),
+    ScrollTo(u64, PresentationGeneration),
     Paste(String),
     SelectionText(async_channel::Sender<Result<Option<String>, String>>),
     ReaderReady,
@@ -875,8 +881,8 @@ impl TerminalWorker {
                     false
                 }
             },
-            Command::ScrollTo(offset_rows) => {
-                let action = self.emulator.scroll_to(offset_rows);
+            Command::ScrollTo(offset_rows, generation) => {
+                let action = self.emulator.scroll_to_at(offset_rows, generation);
                 self.apply_emulator_action(action)
             }
             Command::Paste(text) => match self.emulator.paste(text) {

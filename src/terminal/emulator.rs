@@ -102,6 +102,15 @@ impl TerminalColorsSnapshot {
 
 pub(crate) type RowSnapshot = Arc<[CellSnapshot]>;
 
+#[derive(Clone, Copy, Debug, Default, Eq, Ord, PartialEq, PartialOrd)]
+pub(crate) struct PresentationGeneration(u64);
+
+impl PresentationGeneration {
+    fn next(self) -> Self {
+        Self(self.0.saturating_add(1))
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) enum ActiveScreenSnapshot {
     #[default]
@@ -294,6 +303,7 @@ pub(crate) struct ScrollbarSnapshot {
 
 #[derive(Clone, Debug)]
 pub(crate) struct ScreenSnapshot {
+    pub(crate) generation: PresentationGeneration,
     pub(crate) rows: Arc<[RowSnapshot]>,
     pub(crate) background: Color,
     pub(crate) colors: TerminalColorsSnapshot,
@@ -309,6 +319,7 @@ pub(crate) struct ScreenSnapshot {
 impl PartialEq for ScreenSnapshot {
     fn eq(&self, other: &Self) -> bool {
         self.rows == other.rows
+            && self.generation == other.generation
             && self.background == other.background
             && self.colors == other.colors
             && self.size == other.size
@@ -326,6 +337,7 @@ impl Eq for ScreenSnapshot {}
 impl ScreenSnapshot {
     pub(crate) fn empty() -> Arc<Self> {
         Arc::new(Self {
+            generation: PresentationGeneration::default(),
             rows: Arc::from([]),
             background: ACTIVE_THEME.terminal_background,
             colors: TerminalColorsSnapshot::themed(),
@@ -357,8 +369,25 @@ impl ScreenSnapshot {
     }
 
     #[cfg(test)]
+    pub(crate) fn from_test_parts_at(
+        rows: Arc<[RowSnapshot]>,
+        scrollbar: ScrollbarSnapshot,
+        title: impl Into<Arc<str>>,
+        generation: u64,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            generation: PresentationGeneration(generation),
+            rows,
+            scrollbar,
+            title: title.into(),
+            ..Self::empty_value()
+        })
+    }
+
+    #[cfg(test)]
     fn empty_value() -> Self {
         Self {
+            generation: PresentationGeneration::default(),
             rows: Arc::from([]),
             background: ACTIVE_THEME.terminal_background,
             colors: TerminalColorsSnapshot::themed(),
@@ -401,6 +430,7 @@ pub(crate) struct TerminalEmulator {
     geometry: TerminalGeometry,
     active_pointer: Option<ActivePointer>,
     gesture_epoch: Instant,
+    presentation_generation: PresentationGeneration,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -514,6 +544,7 @@ impl TerminalEmulator {
             geometry,
             active_pointer: None,
             gesture_epoch: Instant::now(),
+            presentation_generation: PresentationGeneration::default(),
         })
     }
 
@@ -569,6 +600,16 @@ impl TerminalEmulator {
     }
 
     pub(crate) fn pointer(&mut self, input: PointerInput) -> Result<EmulatorAction, String> {
+        if input.generation != self.presentation_generation
+            || self
+                .terminal
+                .mode(Mode::SYNC_OUTPUT)
+                .map_err(|error| format!("failed to query synchronized-output mode: {error}"))?
+        {
+            self.selection_gesture.reset(&self.terminal);
+            self.active_pointer = None;
+            return Ok(EmulatorAction::none());
+        }
         match input.phase {
             PointerPhase::Press => self.pointer_press(input),
             PointerPhase::Motion => self.pointer_motion(input),
@@ -582,7 +623,26 @@ impl TerminalEmulator {
         EmulatorAction::screen_changed()
     }
 
+    pub(crate) fn scroll_to_at(
+        &mut self,
+        offset_rows: u64,
+        generation: PresentationGeneration,
+    ) -> EmulatorAction {
+        if generation != self.presentation_generation {
+            return EmulatorAction::none();
+        }
+        self.scroll_to(offset_rows)
+    }
+
     pub(crate) fn wheel(&mut self, input: WheelInput) -> Result<EmulatorAction, String> {
+        if input.generation != self.presentation_generation
+            || self
+                .terminal
+                .mode(Mode::SYNC_OUTPUT)
+                .map_err(|error| format!("failed to query synchronized-output mode: {error}"))?
+        {
+            return Ok(EmulatorAction::none());
+        }
         let steps = input.steps.clamp(-MAX_WHEEL_STEPS, MAX_WHEEL_STEPS);
         if steps == 0 {
             return Ok(EmulatorAction::none());
@@ -1224,7 +1284,9 @@ impl TerminalEmulator {
         self.cached_scrollbar = Some(scrollbar);
         self.cached_active_screen = Some(active_screen);
 
+        self.presentation_generation = self.presentation_generation.next();
         Ok(Some(Arc::new(ScreenSnapshot {
+            generation: self.presentation_generation,
             rows: Arc::from(row_cache.clone()),
             background: terminal_colors.effective_background(),
             colors: terminal_colors,
@@ -1388,6 +1450,7 @@ mod tests {
         shift: bool,
     ) -> PointerInput {
         PointerInput {
+            generation: PresentationGeneration::default(),
             phase,
             button,
             position: SurfacePosition { x, y },
@@ -1400,6 +1463,7 @@ mod tests {
 
     fn wheel(steps: i32, shift: bool) -> WheelInput {
         WheelInput {
+            generation: PresentationGeneration::default(),
             steps,
             position: SurfacePosition { x: 1.0, y: 1.0 },
             modifiers: InputModifiers {
@@ -1407,6 +1471,16 @@ mod tests {
                 ..InputModifiers::default()
             },
         }
+    }
+
+    fn current_pointer(emulator: &TerminalEmulator, mut input: PointerInput) -> PointerInput {
+        input.generation = emulator.presentation_generation;
+        input
+    }
+
+    fn current_wheel(emulator: &TerminalEmulator, mut input: WheelInput) -> WheelInput {
+        input.generation = emulator.presentation_generation;
+        input
     }
 
     fn key(physical_key: PhysicalKey, modifiers: InputModifiers) -> KeyInput {
@@ -1666,14 +1740,18 @@ mod tests {
         let mut emulator = emulator(10, 2);
         emulator.feed(b"one\r\ntwo\r\nthree");
         let _ = emulator.snapshot().unwrap().unwrap();
-        let _ = emulator.wheel(wheel(1, false)).unwrap();
+        let input = current_wheel(&emulator, wheel(1, false));
+        let _ = emulator.wheel(input).unwrap();
         let primary = emulator.snapshot().unwrap().unwrap();
         assert!(row_text(&primary, 0).starts_with("one"));
 
         emulator.feed(b"\x1b[?1049halternate");
         let alternate = emulator.snapshot().unwrap().unwrap();
         assert_eq!(alternate.active_screen, ActiveScreenSnapshot::Alternate);
-        assert_eq!(alternate.scrollbar.total_rows, alternate.scrollbar.visible_rows);
+        assert_eq!(
+            alternate.scrollbar.total_rows,
+            alternate.scrollbar.visible_rows
+        );
 
         emulator.feed(b"\x1b[?1049l");
         let restored = emulator.snapshot().unwrap().unwrap();
@@ -1710,6 +1788,7 @@ mod tests {
         let mut full_snapshot = (*full.snapshot().unwrap().unwrap()).clone();
         incremental_snapshot.damage = SnapshotDamage::default();
         full_snapshot.damage = SnapshotDamage::default();
+        full_snapshot.generation = incremental_snapshot.generation;
 
         assert_eq!(incremental_snapshot, full_snapshot);
     }
@@ -2273,24 +2352,33 @@ mod tests {
         assert_eq!(emulator.selection_text().unwrap(), None);
 
         emulator
-            .pointer(pointer(
-                PointerPhase::Press,
-                Some(PointerButton::Left),
-                2.0,
-                10.0,
-                false,
+            .pointer(current_pointer(
+                &emulator,
+                pointer(
+                    PointerPhase::Press,
+                    Some(PointerButton::Left),
+                    2.0,
+                    10.0,
+                    false,
+                ),
             ))
             .unwrap();
         emulator
-            .pointer(pointer(PointerPhase::Motion, None, 48.0, 10.0, false))
+            .pointer(current_pointer(
+                &emulator,
+                pointer(PointerPhase::Motion, None, 48.0, 10.0, false),
+            ))
             .unwrap();
         emulator
-            .pointer(pointer(
-                PointerPhase::Release,
-                Some(PointerButton::Left),
-                48.0,
-                10.0,
-                false,
+            .pointer(current_pointer(
+                &emulator,
+                pointer(
+                    PointerPhase::Release,
+                    Some(PointerButton::Left),
+                    48.0,
+                    10.0,
+                    false,
+                ),
             ))
             .unwrap();
 
@@ -2320,7 +2408,8 @@ mod tests {
             bottom.scrollbar.total_rows
         );
 
-        let action = emulator.wheel(wheel(1, false)).unwrap();
+        let input = current_wheel(&emulator, wheel(1, false));
+        let action = emulator.wheel(input).unwrap();
         assert!(action.bytes.is_empty());
         assert!(action.screen_changed);
 
@@ -2347,6 +2436,42 @@ mod tests {
         assert!(row_text(&restored, 0).starts_with("two"));
         assert_eq!(restored.cursor.position.unwrap().row, 1);
         assert!(row_text(&restored, 1).starts_with("three"));
+    }
+
+    #[test]
+    fn scrollback_rejects_a_viewport_request_from_an_older_presentation() {
+        let mut emulator = emulator(10, 2);
+        emulator.feed(b"one\r\ntwo\r\nthree");
+        let stale = emulator.snapshot().unwrap().unwrap();
+        emulator.resize(geometry(8, 2, 8.0, 18.0)).unwrap();
+        let current = emulator.snapshot().unwrap().unwrap();
+        assert!(current.generation > stale.generation);
+
+        let action = emulator.scroll_to_at(0, stale.generation);
+        assert!(!action.screen_changed);
+        assert!(emulator.snapshot().unwrap().is_none());
+    }
+
+    #[test]
+    fn selection_rejects_coordinates_from_an_older_presentation() {
+        let mut emulator = emulator(10, 2);
+        emulator.feed(b"hello world");
+        let stale = emulator.snapshot().unwrap().unwrap();
+        emulator.resize(geometry(8, 2, 8.0, 18.0)).unwrap();
+        let _ = emulator.snapshot().unwrap().unwrap();
+
+        let action = emulator
+            .pointer(PointerInput {
+                generation: stale.generation,
+                phase: PointerPhase::Press,
+                button: Some(PointerButton::Left),
+                position: SurfacePosition { x: 2.0, y: 10.0 },
+                modifiers: InputModifiers::default(),
+            })
+            .unwrap();
+
+        assert!(!action.screen_changed);
+        assert_eq!(emulator.selection_text().unwrap(), None);
     }
 
     #[test]
@@ -2416,39 +2541,47 @@ mod tests {
         emulator.feed(b"hello world\x1b[?1000h\x1b[?1006h");
         _ = emulator.snapshot().unwrap();
 
-        let reported = emulator
-            .pointer(pointer(
+        let input = current_pointer(
+            &emulator,
+            pointer(
                 PointerPhase::Press,
                 Some(PointerButton::Left),
                 2.0,
                 10.0,
                 false,
-            ))
-            .unwrap();
+            ),
+        );
+        let reported = emulator.pointer(input).unwrap();
         assert!(!reported.bytes.is_empty());
-        let released = emulator
-            .pointer(pointer(
+        let input = current_pointer(
+            &emulator,
+            pointer(
                 PointerPhase::Release,
                 Some(PointerButton::Left),
                 2.0,
                 10.0,
                 true,
-            ))
-            .unwrap();
+            ),
+        );
+        let released = emulator.pointer(input).unwrap();
         assert!(!released.bytes.is_empty());
 
-        let selected_press = emulator
-            .pointer(pointer(
+        let input = current_pointer(
+            &emulator,
+            pointer(
                 PointerPhase::Press,
                 Some(PointerButton::Left),
                 2.0,
                 10.0,
                 true,
-            ))
-            .unwrap();
-        let selected_drag = emulator
-            .pointer(pointer(PointerPhase::Motion, None, 48.0, 10.0, false))
-            .unwrap();
+            ),
+        );
+        let selected_press = emulator.pointer(input).unwrap();
+        let input = current_pointer(
+            &emulator,
+            pointer(PointerPhase::Motion, None, 48.0, 10.0, false),
+        );
+        let selected_drag = emulator.pointer(input).unwrap();
         assert!(selected_press.bytes.is_empty());
         assert!(selected_drag.bytes.is_empty());
         assert!(selected_drag.screen_changed);
