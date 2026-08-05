@@ -69,6 +69,8 @@ pub(crate) struct TerminalPane {
     last_geometry: Option<TerminalGeometry>,
     grid_bounds: Option<Bounds<Pixels>>,
     pressed_button: Option<PointerButton>,
+    pointer_modifiers: InputModifiers,
+    shift_selection: ShiftSelectionPolicy,
     wheel_remainder: f32,
     scrollbar: Entity<OverlayScrollbar<u64>>,
     render_cache: TerminalGridCache,
@@ -133,6 +135,8 @@ impl TerminalPane {
             last_geometry: None,
             grid_bounds: None,
             pressed_button: None,
+            pointer_modifiers: InputModifiers::default(),
+            shift_selection: ShiftSelectionPolicy::default(),
             wheel_remainder: 0.0,
             scrollbar,
             render_cache: TerminalGridCache::new(),
@@ -381,10 +385,15 @@ impl TerminalPane {
 
     fn on_modifiers_changed(
         &mut self,
-        _event: &ModifiersChangedEvent,
+        event: &ModifiersChangedEvent,
         window: &mut Window,
-        _cx: &mut Context<Self>,
+        cx: &mut Context<Self>,
     ) {
+        let modifiers = input_modifiers(event.modifiers);
+        if self.pointer_modifiers != modifiers {
+            self.pointer_modifiers = modifiers;
+            cx.notify();
+        }
         if !self.terminal_input_focused(window) {
             return;
         }
@@ -477,6 +486,7 @@ impl TerminalPane {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.pointer_modifiers = input_modifiers(event.modifiers);
         self.focus_handle.focus(window);
         let Some(button) = pointer_button(event.button) else {
             return;
@@ -496,8 +506,8 @@ impl TerminalPane {
                 phase: PointerPhase::Press,
                 button: Some(button),
                 position,
-                modifiers: input_modifiers(event.modifiers),
-                shift_selection: ShiftSelectionPolicy::default(),
+                modifiers: self.pointer_modifiers,
+                shift_selection: self.shift_selection,
             });
         }
         cx.stop_propagation();
@@ -509,6 +519,7 @@ impl TerminalPane {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.pointer_modifiers = input_modifiers(event.modifiers);
         let dragging = self.pressed_button.is_some();
         let Some(position) = self.surface_position(event.position, dragging) else {
             return;
@@ -519,14 +530,15 @@ impl TerminalPane {
                 phase: PointerPhase::Motion,
                 button: self.pressed_button,
                 position,
-                modifiers: input_modifiers(event.modifiers),
-                shift_selection: ShiftSelectionPolicy::default(),
+                modifiers: self.pointer_modifiers,
+                shift_selection: self.shift_selection,
             });
         }
         cx.stop_propagation();
     }
 
     fn on_mouse_up(&mut self, event: &MouseUpEvent, _window: &mut Window, cx: &mut Context<Self>) {
+        self.pointer_modifiers = input_modifiers(event.modifiers);
         let Some(button) = pointer_button(event.button) else {
             return;
         };
@@ -544,8 +556,8 @@ impl TerminalPane {
                 phase: PointerPhase::Release,
                 button: Some(button),
                 position,
-                modifiers: input_modifiers(event.modifiers),
-                shift_selection: ShiftSelectionPolicy::default(),
+                modifiers: self.pointer_modifiers,
+                shift_selection: self.shift_selection,
             });
         }
         cx.stop_propagation();
@@ -766,6 +778,11 @@ impl Render for TerminalPane {
         let status = self.status.clone();
         self.sync_scrollbar(cx);
         let scrollbar = self.scrollbar.clone();
+        let pointer_uses_text_cursor = pointer_uses_text_cursor(
+            self.screen.mouse_tracking,
+            self.pointer_modifiers.shift,
+            self.shift_selection,
+        );
         let preedit = self.preedit_layout();
         let terminal_grid = TerminalGridElement::new(
             &self.screen,
@@ -796,7 +813,8 @@ impl Render for TerminalPane {
             .bg(background)
             .px(px(HORIZONTAL_PADDING))
             .py(px(VERTICAL_PADDING))
-            .cursor_text()
+            .when(pointer_uses_text_cursor, |root| root.cursor_text())
+            .when(!pointer_uses_text_cursor, |root| root.cursor_default())
             .key_context(TERMINAL_KEY_CONTEXT)
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(Self::copy_selection))
@@ -957,6 +975,14 @@ fn input_modifiers(modifiers: gpui::Modifiers) -> InputModifiers {
         platform: modifiers.platform,
         ..InputModifiers::default()
     }
+}
+
+fn pointer_uses_text_cursor(
+    mouse_tracking: bool,
+    shift: bool,
+    shift_selection: ShiftSelectionPolicy,
+) -> bool {
+    !mouse_tracking || (shift && shift_selection == ShiftSelectionPolicy::OverrideApplicationMouse)
 }
 
 fn terminal_surface_position(
@@ -1239,6 +1265,20 @@ mod tests {
         let after = pane.read_with(cx, |pane, _cx| pane.font_size());
 
         assert_eq!((before, after), (14.0, 15.0));
+    }
+
+    #[test]
+    fn pointer_presentation_matches_the_effective_mouse_route() {
+        let policy = ShiftSelectionPolicy::OverrideApplicationMouse;
+
+        assert!(pointer_uses_text_cursor(false, false, policy));
+        assert!(!pointer_uses_text_cursor(true, false, policy));
+        assert!(pointer_uses_text_cursor(true, true, policy));
+        assert!(!pointer_uses_text_cursor(
+            true,
+            true,
+            ShiftSelectionPolicy::ReportToApplication,
+        ));
     }
 
     #[gpui::test]

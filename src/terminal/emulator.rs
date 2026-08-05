@@ -268,6 +268,7 @@ pub(crate) struct SnapshotDamage {
     pub(crate) viewport: bool,
     pub(crate) active_screen: bool,
     pub(crate) resize: bool,
+    pub(crate) mouse_tracking: bool,
 }
 
 impl SnapshotDamage {
@@ -280,6 +281,7 @@ impl SnapshotDamage {
             viewport: true,
             active_screen: true,
             resize: true,
+            mouse_tracking: true,
         }
     }
 
@@ -314,6 +316,7 @@ pub(crate) struct ScreenSnapshot {
     pub(crate) scrollbar: ScrollbarSnapshot,
     pub(crate) active_screen: ActiveScreenSnapshot,
     pub(crate) cursor: CursorSnapshot,
+    pub(crate) mouse_tracking: bool,
     pub(crate) title: Arc<str>,
     pub(crate) damage: SnapshotDamage,
 }
@@ -329,6 +332,7 @@ impl PartialEq for ScreenSnapshot {
             && self.scrollbar == other.scrollbar
             && self.active_screen == other.active_screen
             && self.cursor == other.cursor
+            && self.mouse_tracking == other.mouse_tracking
             && self.title == other.title
             && self.damage == other.damage
     }
@@ -351,6 +355,7 @@ impl ScreenSnapshot {
                 color: ACTIVE_THEME.terminal_foreground,
                 ..CursorSnapshot::default()
             },
+            mouse_tracking: false,
             title: Arc::from(""),
             damage: SnapshotDamage::initial(),
         })
@@ -398,6 +403,7 @@ impl ScreenSnapshot {
             scrollbar: ScrollbarSnapshot::default(),
             active_screen: ActiveScreenSnapshot::default(),
             cursor: CursorSnapshot::default(),
+            mouse_tracking: false,
             title: Arc::from(""),
             damage: SnapshotDamage::initial(),
         }
@@ -429,6 +435,7 @@ pub(crate) struct TerminalEmulator {
     cached_cursor: Option<CursorSnapshot>,
     cached_scrollbar: Option<ScrollbarSnapshot>,
     cached_active_screen: Option<ActiveScreenSnapshot>,
+    cached_mouse_tracking: Option<bool>,
     geometry: TerminalGeometry,
     active_pointer: Option<ActivePointer>,
     gesture_epoch: Instant,
@@ -544,6 +551,7 @@ impl TerminalEmulator {
             cached_cursor: None,
             cached_scrollbar: None,
             cached_active_screen: None,
+            cached_mouse_tracking: None,
             geometry,
             active_pointer: None,
             gesture_epoch: Instant::now(),
@@ -1150,6 +1158,7 @@ impl TerminalEmulator {
         };
         let size = ScreenSizeSnapshot { cols, rows };
         let active_screen: ActiveScreenSnapshot = self.terminal.active_screen()?.into();
+        let mouse_tracking = self.terminal.is_mouse_tracking()?;
         let row_cache = match active_screen {
             ActiveScreenSnapshot::Primary => &self.primary_row_cache,
             ActiveScreenSnapshot::Alternate => &self.alternate_row_cache,
@@ -1197,6 +1206,7 @@ impl TerminalEmulator {
                 }),
                 active_screen: self.cached_active_screen != Some(active_screen),
                 resize: self.cached_cols != cols || self.cached_rows != rows,
+                mouse_tracking: self.cached_mouse_tracking != Some(mouse_tracking),
                 ..SnapshotDamage::default()
             }
         };
@@ -1326,6 +1336,7 @@ impl TerminalEmulator {
         self.cached_cursor = Some(cursor);
         self.cached_scrollbar = Some(scrollbar);
         self.cached_active_screen = Some(active_screen);
+        self.cached_mouse_tracking = Some(mouse_tracking);
 
         self.presentation_generation = self.presentation_generation.next();
         Ok(Some(Arc::new(ScreenSnapshot {
@@ -1338,6 +1349,7 @@ impl TerminalEmulator {
             scrollbar,
             active_screen,
             cursor,
+            mouse_tracking,
             title: Arc::clone(&self.title),
             damage,
         })))
@@ -2859,6 +2871,19 @@ mod tests {
         let action = emulator.pointer(input).unwrap();
 
         assert_eq!(action.bytes, b"\x1b[<4;1;1M");
+    }
+
+    #[test]
+    fn mouse_tracking_changes_publish_pointer_routing_metadata() {
+        let mut emulator = emulator(10, 2);
+        let initial = emulator.snapshot().unwrap().unwrap();
+        assert!(!initial.mouse_tracking);
+
+        emulator.feed(b"\x1b[?1000h");
+        let tracked = emulator.snapshot().unwrap().unwrap();
+
+        assert!(tracked.mouse_tracking);
+        assert!(tracked.damage.mouse_tracking);
     }
 
     #[test]
