@@ -2184,9 +2184,7 @@ mod tests {
     #[test]
     fn snapshots_preserve_text_decorations_and_independent_underline_color() {
         let mut emulator = emulator(8, 1);
-        emulator.feed(
-            b"\x1b[58;5;200;4:1mS\x1b[4:2mD\x1b[4:3mC\x1b[4:4mO\x1b[4:5mH\x1b[9;53mX",
-        );
+        emulator.feed(b"\x1b[58;5;200;4:1mS\x1b[4:2mD\x1b[4:3mC\x1b[4:4mO\x1b[4:5mH\x1b[9;53mX");
 
         let snapshot = emulator.snapshot().unwrap().unwrap();
         let cells = &snapshot.rows[0];

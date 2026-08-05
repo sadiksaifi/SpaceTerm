@@ -3,8 +3,8 @@ use std::sync::Arc;
 use gpui::{
     App, BorderStyle, Bounds, ContentMask, Element, ElementId, ElementInputHandler, Entity,
     FocusHandle, Font, FontFallbacks, FontFeatures, GlobalElementId, InspectorElementId,
-    IntoElement, LayoutId, PaintQuad, Pixels, ShapedLine, SharedString, Style, TextRun,
-    UnderlineStyle, Window, fill, font, outline, point, px, relative, rgba, size,
+    IntoElement, LayoutId, PaintQuad, Path, PathBuilder, Pixels, ShapedLine, SharedString, Style,
+    TextRun, UnderlineStyle, Window, fill, font, outline, point, px, relative, rgba, size,
 };
 use unicode_bidi::{BidiClass, bidi_class};
 
@@ -184,6 +184,8 @@ struct PreparedText {
 struct PreparedRow {
     text: Vec<PreparedText>,
     backgrounds: Vec<PaintQuad>,
+    under_text_decorations: PreparedDecorations,
+    over_text_decorations: PreparedDecorations,
     overlay_text: Vec<PreparedText>,
     overlay_backgrounds: Vec<PaintQuad>,
     overlay_caret: Option<PaintQuad>,
@@ -192,6 +194,12 @@ struct PreparedRow {
 pub(crate) struct PrepaintState {
     surface: Option<PaintQuad>,
     rows: Vec<PreparedRow>,
+}
+
+#[derive(Default)]
+struct PreparedDecorations {
+    quads: Vec<PaintQuad>,
+    paths: Vec<(Path<Pixels>, Color)>,
 }
 
 impl IntoElement for TerminalGridElement {
@@ -241,6 +249,16 @@ impl Element for TerminalGridElement {
             .min(self.rows.len());
         let mut prepared_rows = Vec::with_capacity(visible_rows);
         let grid_left = terminal_grid_content_bounds(bounds, self.columns, self.cell_width).left();
+        let base_font = terminal_cell_font(&self.font_family, false, false);
+        let font_id = window.text_system().resolve_font(&base_font);
+        let baseline =
+            window
+                .text_system()
+                .baseline_offset(font_id, self.font_size, self.line_height);
+        let ascent = window.text_system().ascent(font_id, self.font_size);
+        let x_height = window.text_system().x_height(font_id, self.font_size);
+        let decoration_metrics =
+            decoration_metrics(baseline, ascent, x_height, window.scale_factor());
 
         for (row_index, row) in self.rows.iter().take(visible_rows).enumerate() {
             let row_top = bounds.top() + self.line_height * row_index as f32;
@@ -274,6 +292,22 @@ impl Element for TerminalGridElement {
                     )
                 })
                 .collect::<Vec<_>>();
+            let under_text_decorations = prepare_decoration_geometry(
+                &row.under_text_decorations,
+                row_top,
+                grid_left,
+                self.cell_width,
+                decoration_metrics,
+                self.text_blink_visible,
+            );
+            let over_text_decorations = prepare_decoration_geometry(
+                &row.over_text_decorations,
+                row_top,
+                grid_left,
+                self.cell_width,
+                decoration_metrics,
+                self.text_blink_visible,
+            );
 
             let mut text: Vec<PreparedText> = text;
             let mut backgrounds = backgrounds;
@@ -376,6 +410,8 @@ impl Element for TerminalGridElement {
             prepared_rows.push(PreparedRow {
                 text,
                 backgrounds,
+                under_text_decorations,
+                over_text_decorations,
                 overlay_text,
                 overlay_backgrounds,
                 overlay_caret,
@@ -398,33 +434,61 @@ impl Element for TerminalGridElement {
         window: &mut Window,
         cx: &mut App,
     ) {
-        window.with_content_mask(Some(ContentMask { bounds }), |window| {
-            if let Some(surface) = prepaint.surface.take() {
-                window.paint_quad(surface);
-            }
-
-            for row in &mut prepaint.rows {
-                for background in row.backgrounds.drain(..) {
-                    window.paint_quad(background);
-                }
-                for text in row.text.drain(..) {
-                    if let Err(error) = text.line.paint(text.origin, self.line_height, window, cx) {
-                        eprintln!("failed to paint terminal row: {error:#}");
+        if let Some(surface) = prepaint.surface.take() {
+            window.paint_quad(surface);
+        }
+        let grid_bounds = terminal_grid_content_bounds(bounds, self.columns, self.cell_width);
+        let grid_bounds = Bounds::new(
+            grid_bounds.origin,
+            size(
+                grid_bounds.size.width,
+                (self.line_height * prepaint.rows.len() as f32).min(grid_bounds.size.height),
+            ),
+        );
+        window.with_content_mask(
+            Some(ContentMask {
+                bounds: grid_bounds,
+            }),
+            |window| {
+                for row in &mut prepaint.rows {
+                    for background in row.backgrounds.drain(..) {
+                        window.paint_quad(background);
+                    }
+                    for quad in row.under_text_decorations.quads.drain(..) {
+                        window.paint_quad(quad);
+                    }
+                    for (path, color) in row.under_text_decorations.paths.drain(..) {
+                        window.paint_path(path, gpui_color(color));
+                    }
+                    for text in row.text.drain(..) {
+                        if let Err(error) =
+                            text.line.paint(text.origin, self.line_height, window, cx)
+                        {
+                            eprintln!("failed to paint terminal row: {error:#}");
+                        }
+                    }
+                    for quad in row.over_text_decorations.quads.drain(..) {
+                        window.paint_quad(quad);
+                    }
+                    for (path, color) in row.over_text_decorations.paths.drain(..) {
+                        window.paint_path(path, gpui_color(color));
+                    }
+                    for background in row.overlay_backgrounds.drain(..) {
+                        window.paint_quad(background);
+                    }
+                    for text in row.overlay_text.drain(..) {
+                        if let Err(error) =
+                            text.line.paint(text.origin, self.line_height, window, cx)
+                        {
+                            eprintln!("failed to paint marked terminal text: {error:#}");
+                        }
+                    }
+                    if let Some(caret) = row.overlay_caret.take() {
+                        window.paint_quad(caret);
                     }
                 }
-                for background in row.overlay_backgrounds.drain(..) {
-                    window.paint_quad(background);
-                }
-                for text in row.overlay_text.drain(..) {
-                    if let Err(error) = text.line.paint(text.origin, self.line_height, window, cx) {
-                        eprintln!("failed to paint marked terminal text: {error:#}");
-                    }
-                }
-                if let Some(caret) = row.overlay_caret.take() {
-                    window.paint_quad(caret);
-                }
-            }
-        });
+            },
+        );
         window.handle_input(
             &self.focus_handle,
             ElementInputHandler::new(bounds, self.input.clone()),
@@ -611,6 +675,95 @@ fn decoration_metrics(
         overline_y: snap(baseline - ascent),
         wave_amplitude: device_pixel * 2.0,
     }
+}
+
+fn prepare_decoration_geometry(
+    spans: &[DecorationSpan],
+    row_top: Pixels,
+    grid_left: Pixels,
+    cell_width: Pixels,
+    metrics: DecorationMetrics,
+    blink_phase_visible: bool,
+) -> PreparedDecorations {
+    let mut prepared = PreparedDecorations::default();
+    for span in spans
+        .iter()
+        .filter(|span| text_fragment_visible(span.blinking, blink_phase_visible))
+    {
+        let left = grid_left + cell_width * span.start as f32;
+        let right = left + cell_width * span.len as f32;
+        let width = right - left;
+        let mut push_line = |y: Pixels| {
+            prepared.quads.push(fill(
+                Bounds::new(point(left, row_top + y), size(width, metrics.thickness)),
+                gpui_color(span.color),
+            ));
+        };
+
+        match span.kind {
+            DecorationKind::Underline(TerminalUnderlineSnapshot::Single) => {
+                push_line(metrics.underline_y);
+            }
+            DecorationKind::Underline(TerminalUnderlineSnapshot::Double) => {
+                push_line(metrics.underline_y);
+                push_line(metrics.double_underline_y);
+            }
+            DecorationKind::Underline(TerminalUnderlineSnapshot::Dotted) => {
+                let mut x = left;
+                while x < right {
+                    let dot_width = metrics.thickness.min(right - x);
+                    prepared.quads.push(fill(
+                        Bounds::new(
+                            point(x, row_top + metrics.underline_y),
+                            size(dot_width, metrics.thickness),
+                        ),
+                        gpui_color(span.color),
+                    ));
+                    x += metrics.device_pixel * 2.0;
+                }
+            }
+            DecorationKind::Underline(TerminalUnderlineSnapshot::Dashed) => {
+                let dash_width = metrics.device_pixel * 3.0;
+                let mut x = left;
+                while x < right {
+                    let width = dash_width.min(right - x);
+                    prepared.quads.push(fill(
+                        Bounds::new(
+                            point(x, row_top + metrics.underline_y),
+                            size(width, metrics.thickness),
+                        ),
+                        gpui_color(span.color),
+                    ));
+                    x += dash_width + metrics.device_pixel * 2.0;
+                }
+            }
+            DecorationKind::Underline(TerminalUnderlineSnapshot::Curly) => {
+                let mut builder = PathBuilder::stroke(metrics.thickness);
+                let center_y = row_top + metrics.underline_y + metrics.wave_amplitude;
+                let half_wave = (cell_width / 4.0).max(metrics.device_pixel * 2.0);
+                let mut x = left;
+                let mut rise = true;
+                builder.move_to(point(x, center_y));
+                while x < right {
+                    x = (x + half_wave).min(right);
+                    let y = if rise {
+                        center_y - metrics.wave_amplitude
+                    } else {
+                        center_y + metrics.wave_amplitude
+                    };
+                    builder.line_to(point(x, y));
+                    rise = !rise;
+                }
+                if let Ok(path) = builder.build() {
+                    prepared.paths.push((path, span.color));
+                }
+            }
+            DecorationKind::Underline(TerminalUnderlineSnapshot::None) => {}
+            DecorationKind::Overline => push_line(metrics.overline_y),
+            DecorationKind::Strikethrough => push_line(metrics.strikethrough_y),
+        }
+    }
+    prepared
 }
 
 fn push_decoration(spans: &mut Vec<DecorationSpan>, mut span: DecorationSpan) {
@@ -1244,6 +1397,45 @@ mod tests {
         assert_eq!(metrics.strikethrough_y, px(11.0));
         assert_eq!(metrics.overline_y, px(4.0));
         assert!(metrics.wave_amplitude >= metrics.device_pixel);
+    }
+
+    #[test]
+    fn underline_variants_produce_distinct_cell_clipped_geometry() {
+        let metrics = decoration_metrics(px(15.0), px(11.0), px(8.0), 2.0);
+        let span = |kind| DecorationSpan {
+            start: 0,
+            len: 2,
+            kind: DecorationKind::Underline(kind),
+            color: Color::rgb(0x12_34_56),
+            blinking: false,
+        };
+        let prepare = |kind| {
+            prepare_decoration_geometry(&[span(kind)], px(0.0), px(0.0), px(8.0), metrics, true)
+        };
+
+        let single = prepare(crate::terminal::TerminalUnderlineSnapshot::Single);
+        let double = prepare(crate::terminal::TerminalUnderlineSnapshot::Double);
+        let curly = prepare(crate::terminal::TerminalUnderlineSnapshot::Curly);
+        let dotted = prepare(crate::terminal::TerminalUnderlineSnapshot::Dotted);
+        let dashed = prepare(crate::terminal::TerminalUnderlineSnapshot::Dashed);
+
+        assert_eq!((single.quads.len(), single.paths.len()), (1, 0));
+        assert_eq!((double.quads.len(), double.paths.len()), (2, 0));
+        assert_eq!((curly.quads.len(), curly.paths.len()), (0, 1));
+        assert!(dotted.quads.len() > dashed.quads.len());
+        assert!(dashed.quads.len() > single.quads.len());
+        assert!(
+            single
+                .quads
+                .iter()
+                .all(|quad| quad.bounds.right() <= px(16.0))
+        );
+        assert!(
+            double
+                .quads
+                .iter()
+                .all(|quad| quad.bounds.right() <= px(16.0))
+        );
     }
 
     #[test]
