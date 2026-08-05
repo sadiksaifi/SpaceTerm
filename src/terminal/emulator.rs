@@ -22,7 +22,9 @@ use libghostty_vt::terminal::{Mode, Point, PointCoordinate, ScrollViewport};
 use libghostty_vt::{Error, RenderState, Terminal, TerminalOptions};
 
 use crate::terminal::geometry::{BackingPosition, TerminalGeometry};
-use crate::terminal::key::{InputModifiers, KeyAction, KeyInput, PhysicalKey};
+use crate::terminal::key::{
+    InputModifiers, KeyAction, KeyInput, OptionAsAltPolicy, PhysicalKey,
+};
 use crate::terminal::keyboard_protocol::KeyboardProtocolEncoder;
 use crate::terminal::session::{
     PointerButton, PointerInput, PointerPhase, SurfacePosition, WheelInput,
@@ -503,6 +505,7 @@ impl TerminalEmulator {
                 unshifted_codepoint: None,
                 modifiers: InputModifiers::default(),
                 consumed_modifiers: InputModifiers::default(),
+                option_as_alt: OptionAsAltPolicy::default(),
             };
             let mut bytes = Vec::new();
             for _ in 0..steps.unsigned_abs() {
@@ -1241,6 +1244,7 @@ mod tests {
             unshifted_codepoint: None,
             modifiers,
             consumed_modifiers: InputModifiers::default(),
+            option_as_alt: OptionAsAltPolicy::default(),
         }
     }
 
@@ -1260,6 +1264,7 @@ mod tests {
             unshifted_codepoint: Some(unshifted_codepoint),
             modifiers,
             consumed_modifiers: InputModifiers::default(),
+            option_as_alt: OptionAsAltPolicy::default(),
         }
     }
 
@@ -1467,6 +1472,7 @@ mod tests {
             unshifted_codepoint: Some('e'),
             modifiers: InputModifiers::default(),
             consumed_modifiers: InputModifiers::default(),
+            option_as_alt: OptionAsAltPolicy::default(),
         };
         assert_eq!(emulator.key(printable).unwrap().bytes, "é".as_bytes());
 
@@ -1482,6 +1488,7 @@ mod tests {
                 ..InputModifiers::default()
             },
             consumed_modifiers: InputModifiers::default(),
+            option_as_alt: OptionAsAltPolicy::default(),
         };
         assert_eq!(emulator.key(control_c).unwrap().bytes, b"\x03");
 
@@ -1497,6 +1504,7 @@ mod tests {
                 ..InputModifiers::default()
             },
             consumed_modifiers: InputModifiers::default(),
+            option_as_alt: OptionAsAltPolicy::default(),
         };
         assert_eq!(emulator.key(alt_x).unwrap().bytes, b"\x1bx");
     }

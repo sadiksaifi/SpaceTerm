@@ -19,8 +19,9 @@ use crate::terminal::geometry::{
     BackingScale, CellGridSize, LogicalCellSize, LogicalPosition, LogicalSize, TerminalGeometry,
 };
 use crate::terminal::{
-    InputModifiers, KeyAction, KeyInput, KeyInputError, PhysicalKey, PointerButton, PointerInput,
-    PointerPhase, ScreenSnapshot, SessionEvent, SurfacePosition, TerminalSessionHandle, WheelInput,
+    InputModifiers, KeyAction, KeyInput, KeyInputError, OptionAsAltPolicy, PhysicalKey,
+    PointerButton, PointerInput, PointerPhase, ScreenSnapshot, SessionEvent, SurfacePosition,
+    TerminalSessionHandle, WheelInput,
     WorkspaceTerminalSessionFactory,
 };
 use crate::theme::{ACTIVE_THEME, Color};
@@ -714,6 +715,7 @@ fn encode_key(event: &KeyDownEvent) -> Result<KeyInput, KeyInputError> {
         unshifted_codepoint,
         modifiers: input_modifiers(keystroke.modifiers),
         consumed_modifiers: InputModifiers::default(),
+        option_as_alt: OptionAsAltPolicy::default(),
     };
     input.validate()?;
     Ok(input)
@@ -950,6 +952,7 @@ mod tests {
             unshifted_codepoint: single_char(logical_key).map(unshifted_character),
             modifiers,
             consumed_modifiers: InputModifiers::default(),
+            option_as_alt: OptionAsAltPolicy::default(),
         }
     }
 

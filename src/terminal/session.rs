@@ -18,7 +18,7 @@ use crate::platform::macos_pty::{
 };
 use crate::terminal::emulator::{EmulatorAction, ScreenSnapshot, TerminalEmulator};
 use crate::terminal::geometry::TerminalGeometry;
-use crate::terminal::key::{InputModifiers, KeyInput};
+use crate::terminal::key::{InputModifiers, KeyInput, OptionAsAltPolicy};
 
 const FINAL_CHILD_WAIT_TIMEOUT: Duration = Duration::from_secs(2);
 const PTY_READ_BUFFER_SIZE: usize = 16 * 1024;
@@ -1782,6 +1782,7 @@ mod tests {
                     unshifted_codepoint: Some('a'),
                     modifiers: InputModifiers::default(),
                     consumed_modifiers: InputModifiers::default(),
+                    option_as_alt: OptionAsAltPolicy::default(),
                 }))
                 .unwrap();
         }

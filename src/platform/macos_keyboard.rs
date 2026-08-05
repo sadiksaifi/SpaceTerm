@@ -1,4 +1,6 @@
-use crate::terminal::{InputModifiers, KeyAction, KeyInput, KeyInputError, PhysicalKey};
+use crate::terminal::{
+    InputModifiers, KeyAction, KeyInput, KeyInputError, OptionAsAltPolicy, PhysicalKey,
+};
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) struct NativeModifiers {
@@ -22,15 +24,6 @@ pub(crate) struct NativeKeyEvent {
     pub(crate) characters_ignoring_modifiers: Option<String>,
     pub(crate) unmodified_characters: Option<String>,
     pub(crate) modifiers: NativeModifiers,
-}
-
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) enum OptionAsAltPolicy {
-    None,
-    #[default]
-    Both,
-    Left,
-    Right,
 }
 
 pub(crate) struct MacosKeyboardBridge {
@@ -69,6 +62,7 @@ impl MacosKeyboardBridge {
                 alt_right: modifiers.alt_right,
                 ..InputModifiers::default()
             },
+            option_as_alt: self.option_as_alt,
         };
         input.validate()?;
         Ok(input)
@@ -259,5 +253,19 @@ mod tests {
             (dvorak.physical_key, dvorak.logical_key.as_str()),
             (PhysicalKey::Q, "'")
         );
+    }
+
+    #[test]
+    fn option_as_alt_policy_is_carried_per_event_for_each_side() {
+        for policy in [
+            OptionAsAltPolicy::None,
+            OptionAsAltPolicy::Both,
+            OptionAsAltPolicy::Left,
+            OptionAsAltPolicy::Right,
+        ] {
+            let bridge = MacosKeyboardBridge::new(policy);
+            let input = bridge.translate(native(0, "a")).unwrap();
+            assert_eq!(input.option_as_alt, policy);
+        }
     }
 }

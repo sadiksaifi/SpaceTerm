@@ -3,7 +3,7 @@ use libghostty_vt::key::{
     Action as GhosttyKeyAction, Encoder as KeyEncoder, Event as KeyEvent, Mods, OptionAsAlt,
 };
 
-use crate::terminal::key::{InputModifiers, KeyAction, KeyInput};
+use crate::terminal::key::{InputModifiers, KeyAction, KeyInput, OptionAsAltPolicy};
 
 pub(crate) struct KeyboardProtocolEncoder {
     encoder: KeyEncoder<'static>,
@@ -35,7 +35,12 @@ impl KeyboardProtocolEncoder {
 
         self.encoder
             .set_options_from_terminal(terminal)
-            .set_macos_option_as_alt(OptionAsAlt::True);
+            .set_macos_option_as_alt(match input.option_as_alt {
+                OptionAsAltPolicy::None => OptionAsAlt::False,
+                OptionAsAltPolicy::Both => OptionAsAlt::True,
+                OptionAsAltPolicy::Left => OptionAsAlt::Left,
+                OptionAsAltPolicy::Right => OptionAsAlt::Right,
+            });
         self.event
             .set_action(match input.action {
                 KeyAction::Press => GhosttyKeyAction::Press,

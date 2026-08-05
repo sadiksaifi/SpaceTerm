@@ -22,6 +22,15 @@ pub(crate) enum KeyAction {
     Release,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) enum OptionAsAltPolicy {
+    None,
+    #[default]
+    Both,
+    Left,
+    Right,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct KeyInput {
     pub(crate) action: KeyAction,
@@ -32,6 +41,7 @@ pub(crate) struct KeyInput {
     pub(crate) unshifted_codepoint: Option<char>,
     pub(crate) modifiers: InputModifiers,
     pub(crate) consumed_modifiers: InputModifiers,
+    pub(crate) option_as_alt: OptionAsAltPolicy,
 }
 
 impl KeyInput {
@@ -253,6 +263,7 @@ mod tests {
             unshifted_codepoint: None,
             modifiers: InputModifiers::default(),
             consumed_modifiers: InputModifiers::default(),
+            option_as_alt: OptionAsAltPolicy::default(),
         };
 
         assert_eq!(
@@ -283,6 +294,7 @@ mod tests {
                 unshifted_codepoint: None,
                 modifiers: InputModifiers::default(),
                 consumed_modifiers: InputModifiers::default(),
+                option_as_alt: OptionAsAltPolicy::default(),
             };
             assert_eq!(input.validate(), Ok(()), "{physical_key:?}");
         }
