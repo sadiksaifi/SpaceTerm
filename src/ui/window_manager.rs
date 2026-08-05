@@ -844,8 +844,7 @@ fn window_menu_button_contains(position: Point<Pixels>, content_width: Pixels) -
 
 #[cfg(test)]
 mod tests {
-    use std::cell::{Cell, RefCell};
-    use std::path::Path;
+    use std::cell::Cell;
     use std::sync::Arc;
 
     use gpui::{
@@ -855,97 +854,20 @@ mod tests {
 
     use super::*;
     use crate::domain::PaneId;
-    use crate::terminal::{
-        GridSize, KeyInput, PointerInput, ScreenSnapshot, SessionError, SessionEvent,
-        StartedTerminalSession, TerminalSessionHandle, WheelInput,
-    };
-
-    #[derive(Clone)]
-    struct SessionRecords {
-        event_senders: Rc<RefCell<Vec<async_channel::Sender<SessionEvent>>>>,
-        dropped_session_ids: Rc<RefCell<Vec<usize>>>,
-        pointer_count: Rc<Cell<usize>>,
-    }
-
-    struct WindowSessionFactory {
-        records: SessionRecords,
-        next_session_id: Cell<usize>,
-    }
-
-    struct WindowSessionHandle {
-        session_id: usize,
-        dropped_session_ids: Rc<RefCell<Vec<usize>>>,
-        pointer_count: Rc<Cell<usize>>,
-    }
-
-    impl TerminalSessionFactory for WindowSessionFactory {
-        fn start(
-            &self,
-            _size: GridSize,
-            _working_directory: &Path,
-        ) -> Result<StartedTerminalSession, SessionError> {
-            let session_id = self.next_session_id.get();
-            self.next_session_id.set(session_id + 1);
-            let (sender, events) = async_channel::unbounded();
-            self.records.event_senders.borrow_mut().push(sender);
-            Ok(StartedTerminalSession {
-                handle: Box::new(WindowSessionHandle {
-                    session_id,
-                    dropped_session_ids: Rc::clone(&self.records.dropped_session_ids),
-                    pointer_count: Rc::clone(&self.records.pointer_count),
-                }),
-                events,
-            })
-        }
-    }
-
-    impl Drop for WindowSessionHandle {
-        fn drop(&mut self) {
-            self.dropped_session_ids.borrow_mut().push(self.session_id);
-        }
-    }
-
-    impl TerminalSessionHandle for WindowSessionHandle {
-        fn key(&self, _input: KeyInput) {}
-
-        fn resize(&self, _size: GridSize) {}
-
-        fn pointer(&self, _input: PointerInput) {
-            self.pointer_count.update(|count| count + 1);
-        }
-
-        fn wheel(&self, _input: WheelInput) {}
-
-        fn scroll_to(&self, _offset_rows: u64) {}
-
-        fn paste(&self, _text: String) {}
-
-        fn request_selection_text(
-            &self,
-        ) -> async_channel::Receiver<Result<Option<String>, String>> {
-            let (sender, receiver) = async_channel::bounded(1);
-            let _ = sender.try_send(Ok(None));
-            receiver
-        }
-    }
+    use crate::terminal::testing::{TestTerminalSessionFactory, TestTerminalSessionRecords};
+    use crate::terminal::{ScreenSnapshot, SessionEvent};
 
     fn window_manager(
         cx: &mut TestAppContext,
     ) -> (
         Entity<WindowManager>,
-        SessionRecords,
+        TestTerminalSessionRecords,
         &mut VisualTestContext,
     ) {
         cx.update(crate::ui::init);
-        let records = SessionRecords {
-            event_senders: Rc::new(RefCell::new(Vec::new())),
-            dropped_session_ids: Rc::new(RefCell::new(Vec::new())),
-            pointer_count: Rc::new(Cell::new(0)),
-        };
-        let session_factory: Rc<dyn TerminalSessionFactory> = Rc::new(WindowSessionFactory {
-            records: records.clone(),
-            next_session_id: Cell::new(1),
-        });
+        let records = TestTerminalSessionRecords::default();
+        let session_factory: Rc<dyn TerminalSessionFactory> =
+            Rc::new(TestTerminalSessionFactory::new(records.clone()));
         let (manager, cx) = cx.add_window_view(|window, cx| {
             WindowManager::new(
                 session_factory,
@@ -1118,7 +1040,7 @@ mod tests {
             (
                 manager.windows.len(),
                 manager.windows.active_window_id(),
-                records.dropped_session_ids.borrow().clone(),
+                records.dropped_session_ids(),
             )
         });
         assert_eq!(state, (2, WindowId::new(2), Vec::new()));
@@ -1185,7 +1107,7 @@ mod tests {
                     .window(WindowId::new(1))
                     .is_some_and(|window| !window.read(cx).is_active()),
                 manager.windows.active_window().read(cx).is_active(),
-                records.dropped_session_ids.borrow().clone(),
+                records.dropped_session_ids(),
             )
         });
         assert_eq!(
@@ -1205,10 +1127,7 @@ mod tests {
     fn single_pane_window_title_should_follow_the_terminal_title(cx: &mut TestAppContext) {
         let (manager, records, cx) = window_manager(cx);
         let sender = records
-            .event_senders
-            .borrow()
-            .first()
-            .cloned()
+            .event_sender(1)
             .expect("the initial Window session must have started");
 
         sender
@@ -1233,10 +1152,7 @@ mod tests {
     ) {
         let (manager, records, cx) = window_manager(cx);
         let sender = records
-            .event_senders
-            .borrow()
-            .first()
-            .cloned()
+            .event_sender(1)
             .expect("the initial Window session must have started");
         sender
             .try_send(SessionEvent::Screen(Arc::new(ScreenSnapshot {
@@ -1276,7 +1192,7 @@ mod tests {
             (
                 manager.windows.len(),
                 manager.windows.active_window_id(),
-                records.dropped_session_ids.borrow().clone(),
+                records.dropped_session_ids(),
             )
         });
         assert_eq!(state, (1, WindowId::new(2), vec![1]));
@@ -1293,7 +1209,7 @@ mod tests {
             (
                 manager.windows.len(),
                 manager.windows.active_window_id(),
-                records.dropped_session_ids.borrow().clone(),
+                records.dropped_session_ids(),
             )
         });
         assert_eq!(state, (1, WindowId::new(1), vec![2]));
@@ -1470,7 +1386,7 @@ mod tests {
                     .expect("Window 2 must remain owned")
                     .read(cx)
                     .pane_count(),
-                records.pointer_count.get(),
+                records.pointer_count(),
             )
         });
         assert_eq!(pane_counts, (2, 1, 0));
@@ -1508,7 +1424,7 @@ mod tests {
             (
                 manager.windows.len(),
                 manager.windows.active_window_id(),
-                records.dropped_session_ids.borrow().clone(),
+                records.dropped_session_ids(),
             )
         });
         assert_eq!(state, (1, WindowId::new(1), vec![2]));
@@ -1529,7 +1445,7 @@ mod tests {
         let state = manager.read_with(cx, |manager, _| {
             (
                 manager.windows.active_window_id(),
-                records.dropped_session_ids.borrow().clone(),
+                records.dropped_session_ids(),
             )
         });
         assert_eq!(state, (WindowId::new(2), vec![1]));
@@ -1540,10 +1456,7 @@ mod tests {
         let (manager, records, cx) = window_manager(cx);
         click("create-window-button", cx);
         let first_sender = records
-            .event_senders
-            .borrow()
-            .first()
-            .cloned()
+            .event_sender(1)
             .expect("Window 1 session must have started");
 
         first_sender
@@ -1559,7 +1472,7 @@ mod tests {
                 active_window
                     .read(cx)
                     .focused_terminal_is_focused(window, cx),
-                records.dropped_session_ids.borrow().clone(),
+                records.dropped_session_ids(),
             )
         });
         assert_eq!(state, (WindowId::new(2), true, vec![1]));
@@ -1572,10 +1485,7 @@ mod tests {
         let (manager, records, cx) = window_manager(cx);
         click("create-window-button", cx);
         let active_sender = records
-            .event_senders
-            .borrow()
-            .get(1)
-            .cloned()
+            .event_sender(2)
             .expect("Window 2 session must have started");
         cx.update(|window, cx| {
             manager.update(cx, |manager, cx| manager.deactivate(cx));
@@ -1595,7 +1505,7 @@ mod tests {
                 manager.read(cx).windows.active_window_id(),
                 fallback.read(cx).is_active(),
                 fallback.read(cx).focused_terminal_is_focused(window, cx),
-                records.dropped_session_ids.borrow().clone(),
+                records.dropped_session_ids(),
             )
         });
         assert_eq!(state, (false, 1, WindowId::new(1), false, false, vec![2]));
@@ -1606,10 +1516,7 @@ mod tests {
         let (manager, records, cx) = window_manager(cx);
         click("create-window-button", cx);
         let active_sender = records
-            .event_senders
-            .borrow()
-            .get(1)
-            .cloned()
+            .event_sender(2)
             .expect("Window 2 session must have started");
 
         active_sender
@@ -1621,7 +1528,7 @@ mod tests {
             (
                 manager.windows.len(),
                 manager.windows.active_window_id(),
-                records.dropped_session_ids.borrow().clone(),
+                records.dropped_session_ids(),
             )
         });
         assert_eq!(state, (1, WindowId::new(1), vec![2]));
@@ -1642,7 +1549,7 @@ mod tests {
         });
         cx.run_until_parked();
 
-        let mut dropped = records.dropped_session_ids.borrow().clone();
+        let mut dropped = records.dropped_session_ids();
         dropped.sort_unstable();
         assert_eq!(dropped, vec![1, 2]);
     }
@@ -1662,7 +1569,7 @@ mod tests {
             (
                 manager.windows.len(),
                 manager.windows.active_window().read(cx).pane_count(),
-                records.dropped_session_ids.borrow().clone(),
+                records.dropped_session_ids(),
             )
         });
         assert_eq!(state, (1, 1, vec![2]));
@@ -1680,7 +1587,7 @@ mod tests {
             (
                 manager.windows.len(),
                 manager.windows.active_window_id(),
-                records.dropped_session_ids.borrow().clone(),
+                records.dropped_session_ids(),
             )
         });
         assert_eq!(state, (1, WindowId::new(1), vec![2]));
@@ -1696,7 +1603,7 @@ mod tests {
         cx.simulate_keystrokes("cmd-shift-w");
         cx.run_until_parked();
 
-        let mut dropped = records.dropped_session_ids.borrow().clone();
+        let mut dropped = records.dropped_session_ids();
         dropped.sort_unstable();
         let state = manager.read_with(cx, |manager, cx| {
             (
@@ -1728,10 +1635,7 @@ mod tests {
         cx.simulate_keystrokes("cmd-shift-w");
 
         assert_eq!(
-            (
-                close_requests.get(),
-                records.dropped_session_ids.borrow().clone()
-            ),
+            (close_requests.get(), records.dropped_session_ids()),
             (1, Vec::new())
         );
     }

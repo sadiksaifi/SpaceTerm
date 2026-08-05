@@ -1,5 +1,7 @@
 mod emulator;
 mod session;
+#[cfg(test)]
+pub(crate) mod testing;
 
 #[cfg(test)]
 pub(crate) use emulator::ScrollbarSnapshot;

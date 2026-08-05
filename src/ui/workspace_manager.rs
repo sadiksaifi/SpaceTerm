@@ -1252,104 +1252,26 @@ fn gpui_color(color: Color) -> gpui::Rgba {
 
 #[cfg(test)]
 mod tests {
-    use std::cell::{Cell, RefCell};
-    use std::path::Path;
-
     use gpui::{
         Modifiers, ScrollDelta, ScrollWheelEvent, TestAppContext, TouchPhase, VisualTestContext,
         point,
     };
 
     use super::*;
-    use crate::terminal::{
-        GridSize, KeyInput, PointerInput, SessionError, SessionEvent, StartedTerminalSession,
-        TerminalSessionHandle, WheelInput,
-    };
-
-    #[derive(Clone)]
-    struct SessionRecords {
-        event_senders: Rc<RefCell<Vec<async_channel::Sender<SessionEvent>>>>,
-        dropped_session_ids: Rc<RefCell<Vec<usize>>>,
-    }
-
-    struct WorkspaceSessionFactory {
-        records: SessionRecords,
-        next_session_id: Cell<usize>,
-    }
-
-    struct WorkspaceSessionHandle {
-        session_id: usize,
-        dropped_session_ids: Rc<RefCell<Vec<usize>>>,
-    }
-
-    impl TerminalSessionFactory for WorkspaceSessionFactory {
-        fn start(
-            &self,
-            _size: GridSize,
-            _working_directory: &Path,
-        ) -> Result<StartedTerminalSession, SessionError> {
-            let session_id = self.next_session_id.get();
-            self.next_session_id.set(session_id + 1);
-            let (sender, events) = async_channel::unbounded();
-            self.records.event_senders.borrow_mut().push(sender);
-            Ok(StartedTerminalSession {
-                handle: Box::new(WorkspaceSessionHandle {
-                    session_id,
-                    dropped_session_ids: Rc::clone(&self.records.dropped_session_ids),
-                }),
-                events,
-            })
-        }
-
-        fn fallback_title(&self) -> String {
-            "zsh".to_owned()
-        }
-    }
-
-    impl Drop for WorkspaceSessionHandle {
-        fn drop(&mut self) {
-            self.dropped_session_ids.borrow_mut().push(self.session_id);
-        }
-    }
-
-    impl TerminalSessionHandle for WorkspaceSessionHandle {
-        fn key(&self, _input: KeyInput) {}
-
-        fn resize(&self, _size: GridSize) {}
-
-        fn pointer(&self, _input: PointerInput) {}
-
-        fn wheel(&self, _input: WheelInput) {}
-
-        fn scroll_to(&self, _offset_rows: u64) {}
-
-        fn paste(&self, _text: String) {}
-
-        fn request_selection_text(
-            &self,
-        ) -> async_channel::Receiver<Result<Option<String>, String>> {
-            let (sender, receiver) = async_channel::bounded(1);
-            let _ = sender.try_send(Ok(None));
-            receiver
-        }
-    }
+    use crate::terminal::SessionEvent;
+    use crate::terminal::testing::{TestTerminalSessionFactory, TestTerminalSessionRecords};
 
     fn workspace_manager(
         cx: &mut TestAppContext,
     ) -> (
         Entity<WorkspaceManager>,
-        SessionRecords,
+        TestTerminalSessionRecords,
         &mut VisualTestContext,
     ) {
         cx.update(crate::ui::init);
-        let records = SessionRecords {
-            event_senders: Rc::new(RefCell::new(Vec::new())),
-            dropped_session_ids: Rc::new(RefCell::new(Vec::new())),
-        };
-        let session_factory: Rc<dyn TerminalSessionFactory> = Rc::new(WorkspaceSessionFactory {
-            records: records.clone(),
-            next_session_id: Cell::new(1),
-        });
+        let records = TestTerminalSessionRecords::default();
+        let session_factory: Rc<dyn TerminalSessionFactory> =
+            Rc::new(TestTerminalSessionFactory::new(records.clone()).with_fallback_title("zsh"));
         let (manager, cx) = cx.add_window_view(|window, cx| {
             WorkspaceManager::new(session_factory, PathBuf::from("/Users/test"), window, cx)
         });
@@ -1850,7 +1772,7 @@ mod tests {
                     .active_workspace()
                     .working_directory()
                     .to_path_buf(),
-                records.dropped_session_ids.borrow().clone(),
+                records.dropped_session_ids(),
             )
         });
         assert_eq!(
@@ -2019,8 +1941,8 @@ mod tests {
                 manager.workspaces.len(),
                 manager.workspaces.active_workspace_id(),
                 manager.workspaces.active_workspace().name().to_owned(),
-                records.dropped_session_ids.borrow().clone(),
-                records.event_senders.borrow().len(),
+                records.dropped_session_ids(),
+                records.session_count(),
             )
         });
         assert_eq!(
@@ -2069,7 +1991,7 @@ mod tests {
                     .payload()
                     .read(cx)
                     .sidebar_detail(cx),
-                records.dropped_session_ids.borrow().clone(),
+                records.dropped_session_ids(),
             )
         });
         assert_eq!(
@@ -2171,7 +2093,7 @@ mod tests {
                 first.name().to_owned(),
                 first.payload().read(cx).sidebar_detail(cx),
                 second.payload().read(cx).sidebar_detail(cx),
-                records.dropped_session_ids.borrow().clone(),
+                records.dropped_session_ids(),
             )
         });
         assert_eq!(
@@ -2207,7 +2129,7 @@ mod tests {
             (
                 manager.workspaces.len(),
                 manager.workspaces.active_workspace_id(),
-                records.dropped_session_ids.borrow().clone(),
+                records.dropped_session_ids(),
             )
         });
         assert_eq!(state, (1, WorkspaceId::new(2), vec![1]));
@@ -2219,10 +2141,7 @@ mod tests {
     ) {
         let (manager, records, cx) = workspace_manager(cx);
         let inactive_sender = records
-            .event_senders
-            .borrow()
-            .first()
-            .cloned()
+            .event_sender(1)
             .expect("the initial Workspace terminal session must have started");
         cx.simulate_keystrokes("cmd-n");
         cx.run_until_parked();
@@ -2238,7 +2157,7 @@ mod tests {
             (
                 manager.workspaces.len(),
                 manager.workspaces.active_workspace_id(),
-                records.dropped_session_ids.borrow().clone(),
+                records.dropped_session_ids(),
             )
         });
         assert_eq!(state, (2, WorkspaceId::new(3), vec![1]));

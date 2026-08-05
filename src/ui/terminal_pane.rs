@@ -707,31 +707,21 @@ fn single_char(value: &str) -> Option<char> {
 
 #[cfg(test)]
 mod tests {
-    use std::cell::Cell;
     use std::rc::Rc;
 
     use gpui::{Entity, Keystroke, Modifiers, TestAppContext, VisualTestContext};
 
     use super::*;
-    use crate::terminal::{SessionError, StartedTerminalSession};
-
-    struct UnavailableSessionFactory;
-
-    impl TerminalSessionFactory for UnavailableSessionFactory {
-        fn start(
-            &self,
-            _size: GridSize,
-            _working_directory: &std::path::Path,
-        ) -> Result<StartedTerminalSession, SessionError> {
-            Err(SessionError::EmulatorStartup(
-                "terminal session unavailable in UI test".to_owned(),
-            ))
-        }
-    }
+    use crate::terminal::testing::{
+        RecordedSessionCommand, TestTerminalSessionFactory, TestTerminalSessionRecords,
+    };
 
     fn terminal_pane(cx: &mut TestAppContext) -> (Entity<TerminalPane>, &mut VisualTestContext) {
         cx.update(crate::ui::init);
-        let session_factory: Rc<dyn TerminalSessionFactory> = Rc::new(UnavailableSessionFactory);
+        let session_factory: Rc<dyn TerminalSessionFactory> = Rc::new(
+            TestTerminalSessionFactory::new(TestTerminalSessionRecords::default())
+                .with_start_failure("terminal session unavailable in UI test"),
+        );
         let (pane, cx) = cx.add_window_view(|window, cx| {
             TerminalPane::new(
                 session_factory,
@@ -965,72 +955,23 @@ mod tests {
         );
     }
 
-    struct DropCountingSession {
-        drop_count: Rc<Cell<usize>>,
-    }
-
-    impl Drop for DropCountingSession {
-        fn drop(&mut self) {
-            self.drop_count.set(self.drop_count.get() + 1);
-        }
-    }
-
-    impl TerminalSessionHandle for DropCountingSession {
-        fn key(&self, _: KeyInput) {}
-
-        fn resize(&self, _: GridSize) {}
-
-        fn pointer(&self, _: PointerInput) {}
-
-        fn wheel(&self, _: WheelInput) {}
-
-        fn scroll_to(&self, _: u64) {}
-
-        fn paste(&self, _: String) {}
-
-        fn request_selection_text(
-            &self,
-        ) -> async_channel::Receiver<Result<Option<String>, String>> {
-            let (_, receiver) = async_channel::bounded(1);
-            receiver
-        }
-    }
-
-    struct ScrollRecordingSession {
-        target: Rc<Cell<Option<u64>>>,
-    }
-
-    impl TerminalSessionHandle for ScrollRecordingSession {
-        fn key(&self, _: KeyInput) {}
-
-        fn resize(&self, _: GridSize) {}
-
-        fn pointer(&self, _: PointerInput) {}
-
-        fn wheel(&self, _: WheelInput) {}
-
-        fn scroll_to(&self, rows: u64) {
-            self.target.set(Some(rows));
-        }
-
-        fn paste(&self, _: String) {}
-
-        fn request_selection_text(
-            &self,
-        ) -> async_channel::Receiver<Result<Option<String>, String>> {
-            let (_, receiver) = async_channel::bounded(1);
-            receiver
-        }
-    }
-
     #[gpui::test]
     fn terminal_scrollbar_should_request_exact_row_offsets(cx: &mut TestAppContext) {
         let (pane, cx) = terminal_pane(cx);
-        let target = Rc::new(Cell::new(None));
+        let records = TestTerminalSessionRecords::default();
+        let session = TestTerminalSessionFactory::new(records.clone())
+            .start(
+                GridSize {
+                    cols: 80,
+                    rows: 24,
+                    cell_width_px: 8,
+                    cell_height_px: 16,
+                },
+                std::path::Path::new("/tmp/spaceterm-terminal-pane-test"),
+            )
+            .expect("the test terminal session should start");
         let scrollbar = pane.update(cx, |pane, _| {
-            pane.session = Some(Box::new(ScrollRecordingSession {
-                target: Rc::clone(&target),
-            }));
+            pane.session = Some(session.handle);
             pane.scrollbar.clone()
         });
 
@@ -1039,20 +980,31 @@ mod tests {
         });
         cx.run_until_parked();
 
-        assert_eq!(target.get(), Some(u64::MAX - 1));
+        assert_eq!(
+            records.commands().last().map(|input| &input.command),
+            Some(&RecordedSessionCommand::ScrollTo(u64::MAX - 1))
+        );
     }
 
     #[test]
     fn close_session_should_drop_a_handle_exactly_once_when_repeated() {
-        let drop_count = Rc::new(Cell::new(0));
-        let mut session: Option<Box<dyn TerminalSessionHandle>> =
-            Some(Box::new(DropCountingSession {
-                drop_count: Rc::clone(&drop_count),
-            }));
+        let records = TestTerminalSessionRecords::default();
+        let started = TestTerminalSessionFactory::new(records.clone())
+            .start(
+                GridSize {
+                    cols: 80,
+                    rows: 24,
+                    cell_width_px: 8,
+                    cell_height_px: 16,
+                },
+                std::path::Path::new("/tmp/spaceterm-terminal-pane-test"),
+            )
+            .expect("the test terminal session should start");
+        let mut session = Some(started.handle);
 
         close_session(&mut session);
         close_session(&mut session);
 
-        assert_eq!(drop_count.get(), 1);
+        assert_eq!(records.dropped_session_ids(), vec![1]);
     }
 }
