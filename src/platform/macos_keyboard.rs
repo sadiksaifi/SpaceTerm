@@ -14,6 +14,10 @@ pub(crate) struct NativeModifiers {
     pub(crate) alt_right: bool,
     pub(crate) control_right: bool,
     pub(crate) platform_right: bool,
+    pub(crate) shift_left: bool,
+    pub(crate) alt_left: bool,
+    pub(crate) control_left: bool,
+    pub(crate) platform_left: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -28,11 +32,15 @@ pub(crate) struct NativeKeyEvent {
 
 pub(crate) struct MacosKeyboardBridge {
     option_as_alt: OptionAsAltPolicy,
+    pressed_modifier_key_codes: Vec<u16>,
 }
 
 impl MacosKeyboardBridge {
     pub(crate) fn new(option_as_alt: OptionAsAltPolicy) -> Self {
-        Self { option_as_alt }
+        Self {
+            option_as_alt,
+            pressed_modifier_key_codes: Vec::new(),
+        }
     }
 
     pub(crate) fn translate(&self, event: NativeKeyEvent) -> Result<KeyInput, KeyInputError> {
@@ -66,6 +74,50 @@ impl MacosKeyboardBridge {
         };
         input.validate()?;
         Ok(input)
+    }
+
+    pub(crate) fn modifier_transition(
+        &mut self,
+        mut event: NativeKeyEvent,
+    ) -> Result<Option<KeyInput>, KeyInputError> {
+        let physical_key = physical_key(event.native_key_code);
+        let active = match physical_key {
+            PhysicalKey::ShiftLeft => event.modifiers.shift_left,
+            PhysicalKey::ShiftRight => event.modifiers.shift_right,
+            PhysicalKey::AltLeft => event.modifiers.alt_left,
+            PhysicalKey::AltRight => event.modifiers.alt_right,
+            PhysicalKey::ControlLeft => event.modifiers.control_left,
+            PhysicalKey::ControlRight => event.modifiers.control_right,
+            PhysicalKey::MetaLeft => event.modifiers.platform_left,
+            PhysicalKey::MetaRight => event.modifiers.platform_right,
+            PhysicalKey::CapsLock => event.modifiers.caps_lock,
+            PhysicalKey::Fn => event.modifiers.num_lock,
+            _ => {
+                return Err(KeyInputError::UnsupportedKey {
+                    native_key_code: Some(event.native_key_code),
+                    logical_key: format!("{physical_key:?}"),
+                });
+            }
+        };
+        let position = self
+            .pressed_modifier_key_codes
+            .iter()
+            .position(|key_code| *key_code == event.native_key_code);
+        if active == position.is_some() {
+            return Ok(None);
+        }
+
+        event.action = if active {
+            self.pressed_modifier_key_codes.push(event.native_key_code);
+            KeyAction::Press
+        } else {
+            let Some(position) = position else {
+                return Ok(None);
+            };
+            self.pressed_modifier_key_codes.remove(position);
+            KeyAction::Release
+        };
+        self.translate(event).map(Some)
     }
 }
 
@@ -267,5 +319,39 @@ mod tests {
             let input = bridge.translate(native(0, "a")).unwrap();
             assert_eq!(input.option_as_alt, policy);
         }
+    }
+
+    #[test]
+    fn left_and_right_modifier_transitions_remain_balanced() {
+        let mut bridge = MacosKeyboardBridge::new(OptionAsAltPolicy::Both);
+        let modifier = |native_key_code, shift_left, shift_right| NativeKeyEvent {
+            action: KeyAction::Press,
+            native_key_code,
+            characters: None,
+            characters_ignoring_modifiers: None,
+            unmodified_characters: None,
+            modifiers: NativeModifiers {
+                shift: shift_left || shift_right,
+                shift_left,
+                shift_right,
+                ..NativeModifiers::default()
+            },
+        };
+
+        let events = [
+            bridge.modifier_transition(modifier(56, true, false)).unwrap(),
+            bridge.modifier_transition(modifier(60, true, true)).unwrap(),
+            bridge.modifier_transition(modifier(56, false, true)).unwrap(),
+            bridge.modifier_transition(modifier(60, false, false)).unwrap(),
+        ];
+        assert_eq!(
+            events.map(|event| event.map(|input| (input.physical_key, input.action))),
+            [
+                Some((PhysicalKey::ShiftLeft, KeyAction::Press)),
+                Some((PhysicalKey::ShiftRight, KeyAction::Press)),
+                Some((PhysicalKey::ShiftLeft, KeyAction::Release)),
+                Some((PhysicalKey::ShiftRight, KeyAction::Release)),
+            ]
+        );
     }
 }
