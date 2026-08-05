@@ -1,7 +1,8 @@
 # SpaceTerm domain language
 
-The SpaceTerm hierarchy, terminology, and invariants are defined in `AGENTS.md`.
-This file records additional concepts that name deep modules.
+The SpaceTerm hierarchy and invariants are defined in `AGENTS.md` and formalized for domain
+conversations in `docs/UBIQUITOUS_LANGUAGE.md`. This file records additional concepts that name
+deep modules.
 
 ## Overlay Scrollbar
 
