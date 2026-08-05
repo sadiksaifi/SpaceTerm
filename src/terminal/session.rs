@@ -1229,19 +1229,24 @@ mod tests {
         let (result, reader_steps, records) = start_scripted_session(ScriptedPtyOptions::default());
         let (mut session, events) = result.unwrap();
 
-        reader_steps
-            .send(ReaderStep::Bytes(b"ordered output".to_vec()))
-            .unwrap();
+        for index in 0..32 {
+            reader_steps
+                .send(ReaderStep::Bytes(
+                    format!("bounded line {index}\r\n").into_bytes(),
+                ))
+                .unwrap();
+        }
         reader_steps.send(ReaderStep::Eof).unwrap();
         records.wait_for("the scripted worker to finish", |state| {
             state.pty_drops == 1
         });
 
+        assert_eq!(events.len(), 2);
         let first = events.try_recv().unwrap();
         let second = events.try_recv().unwrap();
         let result = match (first, second) {
             (SessionEvent::Screen(screen), SessionEvent::Exited(status)) => (
-                screen_text(&screen).contains("ordered output"),
+                screen_text(&screen).contains("bounded line 31"),
                 status.starts_with("Shell exited"),
                 events.try_recv().is_err(),
             ),
@@ -1249,6 +1254,38 @@ mod tests {
         };
 
         assert_eq!(result, (true, true, true));
+        session.shutdown();
+    }
+
+    #[test]
+    fn session_snapshots_reuse_rows_unchanged_by_later_output() {
+        let (result, reader_steps, _records) =
+            start_scripted_session(ScriptedPtyOptions::default());
+        let (mut session, events) = result.unwrap();
+
+        reader_steps
+            .send(ReaderStep::Bytes(b"first row".to_vec()))
+            .unwrap();
+        let first = receive_event(
+            &events,
+            "the first row snapshot",
+            |event| matches!(event, SessionEvent::Screen(screen) if screen_text(screen).contains("first row")),
+        );
+        reader_steps
+            .send(ReaderStep::Bytes(b"\r\nsecond row".to_vec()))
+            .unwrap();
+        let second = receive_event(
+            &events,
+            "the second row snapshot",
+            |event| matches!(event, SessionEvent::Screen(screen) if screen_text(screen).contains("second row")),
+        );
+
+        let (SessionEvent::Screen(first), SessionEvent::Screen(second)) = (first, second) else {
+            unreachable!("the event predicates accept only terminal screens")
+        };
+        assert!(Arc::ptr_eq(&first.rows[0], &second.rows[0]));
+        assert!(!Arc::ptr_eq(&first.rows[1], &second.rows[1]));
+
         session.shutdown();
     }
 

@@ -101,6 +101,14 @@ Workers coalesce only consecutive output notifications up to a control boundary;
 remains reliable and ordered after its output. Closing the receiver wakes a blocked reader producer
 so terminal cleanup can continue off-thread.
 
+### Immutable Terminal Presentation Snapshots
+
+Each Terminal Session worker exclusively mutates its Terminal Emulator and publishes owned semantic
+snapshots to GPUI. Snapshots retain shared identity for unchanged rows and metadata, carry cursor,
+viewport, active-screen, size, and precise damage independently of cell content, and cross the
+worker boundary through a bounded latest-screen channel. GPUI renders only these immutable values
+and never borrows Terminal Emulator state.
+
 ### Workspace-Bound Terminal Creation
 
 `WorkspaceCollection` owns default Workspace naming and passes the exact stored Workspace root into

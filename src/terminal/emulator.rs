@@ -184,7 +184,7 @@ pub(crate) struct ScrollbarSnapshot {
     pub(crate) visible_rows: u64,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct ScreenSnapshot {
     pub(crate) rows: Arc<[RowSnapshot]>,
     pub(crate) background: Color,
@@ -980,9 +980,6 @@ impl TerminalEmulator {
                 let rebuild_row = rebuild_all || row.dirty()?;
 
                 if rebuild_row {
-                    if !rebuild_all {
-                        dirty_rows.push(row_index);
-                    }
                     let selection = row.selection()?;
                     let mut rendered_cells = Vec::with_capacity(usize::from(cols));
                     let mut column_index = 0_u16;
@@ -1031,10 +1028,17 @@ impl TerminalEmulator {
                     }
 
                     let rendered_row = Arc::<[CellSnapshot]>::from(rendered_cells);
+                    let rendered_row = self
+                        .row_cache
+                        .get(usize::from(row_index))
+                        .filter(|cached| cached.as_ref() == rendered_row.as_ref())
+                        .cloned()
+                        .unwrap_or(rendered_row);
                     if rebuild_all {
                         rendered_rows.push(rendered_row);
-                    } else {
+                    } else if !Arc::ptr_eq(&rendered_rows[usize::from(row_index)], &rendered_row) {
                         rendered_rows[usize::from(row_index)] = rendered_row;
+                        dirty_rows.push(row_index);
                     }
                 }
 
@@ -1362,12 +1366,26 @@ mod tests {
     #[test]
     fn title_only_osc_sequence_publishes_a_screen_snapshot() {
         let mut emulator = emulator(12, 3);
-        let _ = emulator.snapshot().unwrap();
+        let first = emulator.snapshot().unwrap().unwrap();
 
         emulator.feed(b"\x1b]2;Claude Code\x07");
         let snapshot = emulator.snapshot().unwrap().unwrap();
 
         assert_eq!(snapshot.title.as_ref(), "Claude Code");
+        assert!(
+            first
+                .rows
+                .iter()
+                .zip(snapshot.rows.iter())
+                .all(|(first, second)| Arc::ptr_eq(first, second))
+        );
+        assert_eq!(
+            snapshot.damage,
+            SnapshotDamage {
+                title: true,
+                ..SnapshotDamage::default()
+            }
+        );
     }
 
     #[test]
@@ -1385,6 +1403,7 @@ mod tests {
     #[test]
     fn resize_changes_the_visible_grid() {
         let mut emulator = emulator(10, 2);
+        let _ = emulator.snapshot().unwrap();
         emulator.resize(20, 4, 8, 18).unwrap();
 
         let snapshot = emulator.snapshot().unwrap().unwrap();
@@ -1397,6 +1416,10 @@ mod tests {
             ),
             (ScreenSizeSnapshot { cols: 20, rows: 4 }, 4, 4, true,)
         );
+        assert!(snapshot.damage.resize);
+        assert_eq!(snapshot.damage.content, ContentDamageSnapshot::Full);
+        assert!(!snapshot.damage.title);
+        assert!(!snapshot.damage.active_screen);
     }
 
     #[test]
@@ -1410,6 +1433,31 @@ mod tests {
         assert_eq!(snapshot.active_screen, ActiveScreenSnapshot::Alternate);
         assert!(snapshot.damage.active_screen);
         assert_eq!(snapshot.damage.content, ContentDamageSnapshot::Full);
+    }
+
+    #[test]
+    fn incremental_snapshots_match_a_full_snapshot_of_the_same_terminal_state() {
+        let chunks: [&[u8]; 3] = [
+            b"one\r\ntwo",
+            b"\x1b[31m red\x1b[0m",
+            b"\x1b]2;incremental build\x07",
+        ];
+        let mut incremental = emulator(16, 3);
+        let mut incremental_snapshot = None;
+        for chunk in chunks {
+            incremental.feed(chunk);
+            incremental_snapshot = incremental.snapshot().unwrap();
+        }
+
+        let mut full = emulator(16, 3);
+        full.feed(b"one\r\ntwo\x1b[31m red\x1b[0m\x1b]2;incremental build\x07");
+
+        let mut incremental_snapshot = (*incremental_snapshot.unwrap()).clone();
+        let mut full_snapshot = (*full.snapshot().unwrap().unwrap()).clone();
+        incremental_snapshot.damage = SnapshotDamage::default();
+        full_snapshot.damage = SnapshotDamage::default();
+
+        assert_eq!(incremental_snapshot, full_snapshot);
     }
 
     #[test]
@@ -1525,6 +1573,27 @@ mod tests {
         assert!(!Arc::ptr_eq(&first.rows[0], &second.rows[0]));
         assert!(Arc::ptr_eq(&first.rows[1], &second.rows[1]));
         assert!(Arc::ptr_eq(&first.rows[2], &second.rows[2]));
+        assert!(Arc::ptr_eq(&first.title, &second.title));
+    }
+
+    #[test]
+    fn row_dirty_update_reports_only_the_changed_row() {
+        let mut emulator = emulator(10, 3);
+        let first = emulator.snapshot().unwrap().unwrap();
+
+        emulator.feed(b"x\x1b[1D");
+        let second = emulator.snapshot().unwrap().unwrap();
+
+        assert!(!Arc::ptr_eq(&first.rows[0], &second.rows[0]));
+        assert!(Arc::ptr_eq(&first.rows[1], &second.rows[1]));
+        assert!(Arc::ptr_eq(&first.rows[2], &second.rows[2]));
+        assert_eq!(
+            second.damage,
+            SnapshotDamage {
+                content: ContentDamageSnapshot::Rows(Arc::from([0])),
+                ..SnapshotDamage::default()
+            }
+        );
     }
 
     #[test]
@@ -1544,6 +1613,30 @@ mod tests {
                 .all(|(first, second)| Arc::ptr_eq(first, second))
         );
         assert_eq!(second.damage, SnapshotDamage::cursor());
+    }
+
+    #[test]
+    fn cursor_snapshot_preserves_position_visibility_style_blink_and_color() {
+        let mut emulator = emulator(10, 3);
+        emulator.feed(b"\x1b[3;4H\x1b[6 q\x1b]12;#112233\x07");
+
+        let snapshot = emulator.snapshot().unwrap().unwrap();
+
+        assert_eq!(
+            snapshot.cursor,
+            CursorSnapshot {
+                position: Some(CursorPositionSnapshot {
+                    column: 3,
+                    row: 2,
+                    at_wide_tail: false,
+                }),
+                visible: true,
+                blinking: false,
+                password_input: false,
+                shape: CursorShapeSnapshot::Bar,
+                color: Color::rgb(0x11_22_33),
+            }
+        );
     }
 
     #[test]
@@ -1584,10 +1677,15 @@ mod tests {
     #[test]
     fn scrollback_wheel_changes_visible_rows() {
         let mut emulator = emulator(10, 2);
+        let _ = emulator.snapshot().unwrap();
         emulator.feed(b"one\r\ntwo\r\nthree");
         let bottom = emulator.snapshot().unwrap().unwrap();
         assert!(row_text(&bottom, 0).starts_with("two"));
         assert!(row_text(&bottom, 1).starts_with("three"));
+        assert!(bottom.damage.scrollbar);
+        assert!(!bottom.damage.title);
+        assert!(!bottom.damage.active_screen);
+        assert!(!bottom.damage.resize);
         assert_eq!(
             bottom
                 .scrollbar
@@ -1611,6 +1709,9 @@ mod tests {
                 < scrolled.scrollbar.total_rows
         );
         assert!(scrolled.scrollbar.offset_rows < bottom.scrollbar.offset_rows);
+        assert!(scrolled.damage.viewport);
+        assert!(!scrolled.damage.scrollbar);
+        assert!(!scrolled.damage.title);
 
         let action = emulator.scroll_to(bottom.scrollbar.offset_rows);
         assert!(action.bytes.is_empty());
@@ -1860,5 +1961,12 @@ mod tests {
             .pointer(pointer(PointerPhase::Motion, None, 21.0, 1.0, true))
             .unwrap();
         assert!(shifted_hover.bytes.is_empty());
+    }
+
+    #[test]
+    fn screen_snapshots_are_owned_and_safe_to_share_across_threads() {
+        fn assert_send_sync<T: Send + Sync>() {}
+
+        assert_send_sync::<ScreenSnapshot>();
     }
 }
