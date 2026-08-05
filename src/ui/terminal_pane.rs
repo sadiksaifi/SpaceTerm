@@ -95,6 +95,10 @@ impl TerminalPane {
             },
         )
         .detach();
+        cx.observe_window_bounds(window, |pane, window, cx| {
+            pane.update_backing_scale(window.scale_factor(), window, cx);
+        })
+        .detach();
 
         Self {
             session_factory,
@@ -295,6 +299,22 @@ impl TerminalPane {
         self.font_size = font_size;
         self.line_height = line_height_for_font_size(font_size);
         self.cell_width = measure_cell_width(window, &self.font_family, font_size);
+        self.last_geometry = None;
+        self.sync_scrollbar(cx);
+        cx.notify();
+    }
+
+    fn update_backing_scale(&mut self, factor: f32, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(backing_scale) = BackingScale::new(factor) else {
+            eprintln!("ignored invalid terminal backing scale: {factor}");
+            return;
+        };
+        if self.backing_scale == backing_scale {
+            return;
+        }
+
+        self.backing_scale = backing_scale;
+        self.cell_width = measure_cell_width(window, &self.font_family, self.font_size);
         self.last_geometry = None;
         self.sync_scrollbar(cx);
         cx.notify();
@@ -975,6 +995,54 @@ mod tests {
         assert_eq!(
             records.commands().last().map(|input| &input.command),
             Some(&RecordedSessionCommand::ScrollTo(u64::MAX - 1))
+        );
+    }
+
+    #[gpui::test]
+    fn backing_scale_change_should_preserve_the_grid_and_resize_backing_pixels(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(crate::ui::init);
+        let records = TestTerminalSessionRecords::default();
+        let session_factory: Rc<dyn TerminalSessionFactory> =
+            Rc::new(TestTerminalSessionFactory::new(records.clone()));
+        let session_factory = WorkspaceTerminalSessionFactory::new(
+            session_factory,
+            PathBuf::from("/tmp/spaceterm-terminal-pane-scale-test"),
+        );
+        let (pane, cx) =
+            cx.add_window_view(|window, cx| TerminalPane::new(session_factory, window, cx));
+        cx.run_until_parked();
+        let initial = records.starts()[0].geometry;
+
+        cx.update(|window, cx| {
+            pane.update(cx, |pane, cx| {
+                pane.update_backing_scale(1.0, window, cx);
+            });
+        });
+        cx.run_until_parked();
+        let resized = records
+            .commands()
+            .into_iter()
+            .find_map(|call| match call.command {
+                RecordedSessionCommand::Resize(geometry) => Some(geometry),
+                _ => None,
+            })
+            .expect("a backing-scale change should resize the Terminal Session");
+
+        assert_eq!(
+            (
+                initial.grid(),
+                resized.grid(),
+                initial.backing_grid_size().width,
+                resized.backing_grid_size().width,
+            ),
+            (
+                initial.grid(),
+                initial.grid(),
+                resized.backing_grid_size().width * 2,
+                resized.backing_grid_size().width,
+            )
         );
     }
 
