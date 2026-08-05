@@ -5,6 +5,7 @@ mod terminal_element;
 mod terminal_focus;
 mod terminal_ime;
 mod terminal_pane;
+mod terminal_symbols;
 mod window_manager;
 mod workspace_manager;
 
