@@ -1,5 +1,6 @@
 use std::ops::Range;
 use std::sync::Arc;
+use std::time::Duration;
 
 #[cfg(test)]
 use gpui::ClipboardItem;
@@ -47,6 +48,7 @@ const VERTICAL_PADDING: f32 = 8.0;
 const MIN_COLS: u16 = 2;
 const MIN_ROWS: u16 = 2;
 const MAX_PANE_TITLE_CHARACTERS: usize = 256;
+const TEXT_BLINK_INTERVAL: Duration = Duration::from_millis(600);
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum TerminalPaneEvent {
@@ -84,6 +86,9 @@ pub(crate) struct TerminalPane {
     ime_suppressed_keys: Vec<PhysicalKey>,
     pending_paste: Option<PasteConfirmation>,
     pending_osc52: Option<Osc52AuthorizationRequest>,
+    text_blink_visible: bool,
+    text_blink_generation: u64,
+    _text_blink_task: Option<Task<()>>,
     _event_task: Option<Task<()>>,
 }
 
@@ -152,6 +157,9 @@ impl TerminalPane {
             ime_suppressed_keys: Vec::new(),
             pending_paste: None,
             pending_osc52: None,
+            text_blink_visible: true,
+            text_blink_generation: 0,
+            _text_blink_task: None,
             _event_task: None,
         }
     }
@@ -259,8 +267,44 @@ impl TerminalPane {
         {
             session.resolve_osc52_authorization(request.id, Osc52AuthorizationDecision::Deny);
         }
+        self.text_blink_generation = self.text_blink_generation.wrapping_add(1);
+        self._text_blink_task.take();
         self._event_task.take();
         self.session.take();
+    }
+
+    fn sync_text_blink(&mut self, surface_active: bool, cx: &mut Context<Self>) {
+        let demanded = surface_active && self.screen.text_blinking;
+        if demanded == self._text_blink_task.is_some() {
+            return;
+        }
+
+        self.text_blink_generation = self.text_blink_generation.wrapping_add(1);
+        self._text_blink_task.take();
+        self.text_blink_visible = true;
+        if !demanded {
+            return;
+        }
+
+        let generation = self.text_blink_generation;
+        self._text_blink_task = Some(cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(TEXT_BLINK_INTERVAL).await;
+                let Ok(continue_blinking) = this.update(cx, |this, cx| {
+                    if this.text_blink_generation != generation {
+                        return false;
+                    }
+                    this.text_blink_visible = !this.text_blink_visible;
+                    cx.notify();
+                    true
+                }) else {
+                    break;
+                };
+                if !continue_blinking {
+                    break;
+                }
+            }
+        }));
     }
 
     fn scrollbar_metrics(&self) -> Option<ScrollMetrics<u64>> {
@@ -961,6 +1005,10 @@ impl Render for TerminalPane {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let pane = cx.entity().downgrade();
         let terminal_input_focused = self.sync_terminal_input_focus(window);
+        let surface_active = self.product_focus.active_workspace
+            && self.product_focus.active_window
+            && window.is_window_active();
+        self.sync_text_blink(surface_active, cx);
         let background = gpui_color(self.screen.background);
         let status = self.status.clone();
         let paste_confirmation = self.pending_paste;
@@ -985,7 +1033,7 @@ impl Render for TerminalPane {
                 preedit,
                 focus_handle: self.focus_handle.clone(),
                 input: cx.entity(),
-                text_blink_visible: true,
+                text_blink_visible: self.text_blink_visible,
             },
         );
 
@@ -1580,6 +1628,26 @@ mod tests {
     };
     use crate::terminal::{ScrollbarSnapshot, SessionFailure, TerminalSessionFactory};
 
+    fn blinking_screen() -> Arc<ScreenSnapshot> {
+        ScreenSnapshot::from_test_parts(
+            Arc::from([Arc::from([crate::terminal::CellSnapshot {
+                text: "x".to_owned(),
+                foreground_source: crate::terminal::TerminalColor::Default,
+                background_source: crate::terminal::TerminalColor::Default,
+                inverse: false,
+                bold: false,
+                faint: false,
+                italic: false,
+                blinking: true,
+                invisible: false,
+                selected: false,
+                spacer_tail: false,
+            }])]),
+            ScrollbarSnapshot::default(),
+            "blink",
+        )
+    }
+
     fn terminal_pane(cx: &mut TestAppContext) -> (Entity<TerminalPane>, &mut VisualTestContext) {
         cx.update(crate::ui::init);
         let session_factory: Rc<dyn TerminalSessionFactory> = Rc::new(
@@ -1692,6 +1760,43 @@ mod tests {
         let after = pane.read_with(cx, |pane, _cx| pane.font_size());
 
         assert_eq!((before, after), (14.0, 15.0));
+    }
+
+    #[gpui::test]
+    fn text_blink_uses_an_injected_clock_only_while_visible_content_demands_it(
+        cx: &mut TestAppContext,
+    ) {
+        let (pane, cx) = terminal_pane(cx);
+        cx.update(|_window, cx| {
+            pane.update(cx, |pane, cx| {
+                pane.set_product_focus(TerminalProductFocus {
+                    active_workspace: true,
+                    active_window: true,
+                    ..TerminalProductFocus::default()
+                });
+                pane.handle_event(SessionEvent::Screen(blinking_screen()), cx);
+                cx.notify();
+            });
+        });
+        cx.run_until_parked();
+
+        assert!(pane.read_with(cx, |pane, _| pane.text_blink_visible));
+        assert!(pane.read_with(cx, |pane, _| pane._text_blink_task.is_some()));
+
+        cx.executor().advance_clock(TEXT_BLINK_INTERVAL);
+        cx.run_until_parked();
+        assert!(!pane.read_with(cx, |pane, _| pane.text_blink_visible));
+
+        cx.update(|_window, cx| {
+            pane.update(cx, |pane, cx| {
+                pane.handle_event(SessionEvent::Screen(ScreenSnapshot::empty()), cx);
+                cx.notify();
+            });
+        });
+        cx.run_until_parked();
+
+        assert!(pane.read_with(cx, |pane, _| pane.text_blink_visible));
+        assert!(pane.read_with(cx, |pane, _| pane._text_blink_task.is_none()));
     }
 
     #[test]
