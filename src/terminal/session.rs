@@ -16,9 +16,10 @@ use crate::platform::macos_pty::{
     PtyError, PtyTerminator, ShellExit, ShutdownDisposition, SpawnedPty, spawn_user_shell,
     user_shell,
 };
+#[cfg(test)]
+use crate::terminal::emulator::MAX_SYNCHRONIZED_OUTPUT_DURATION;
 use crate::terminal::emulator::{
-    EmulatorAction, MAX_SYNCHRONIZED_OUTPUT_DURATION, PresentationGeneration, ScreenSnapshot,
-    TerminalEmulator,
+    EmulatorAction, PresentationGeneration, ScreenSnapshot, TerminalEmulator,
 };
 use crate::terminal::geometry::TerminalGeometry;
 #[cfg(test)]

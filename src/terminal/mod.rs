@@ -7,12 +7,12 @@ mod session;
 pub(crate) mod testing;
 mod workspace_terminal_session_factory;
 
-#[cfg(test)]
-pub(crate) use emulator::ScrollbarSnapshot;
 pub(crate) use emulator::{
-    CellSnapshot, CursorPositionSnapshot, CursorShapeSnapshot, CursorSnapshot,
-    PresentationGeneration, RowSnapshot, ScreenSnapshot, TerminalColor, TerminalColorsSnapshot,
+    CellSnapshot, CursorPositionSnapshot, CursorShapeSnapshot, CursorSnapshot, RowSnapshot,
+    ScreenSnapshot, TerminalColor, TerminalColorsSnapshot,
 };
+#[cfg(test)]
+pub(crate) use emulator::{PresentationGeneration, ScrollbarSnapshot};
 pub(crate) use key::{
     InputModifiers, KeyAction, KeyInput, KeyInputError, OptionAsAltPolicy, PhysicalKey,
 };
