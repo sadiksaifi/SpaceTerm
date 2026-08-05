@@ -12,7 +12,7 @@ mod workspace_terminal_session_factory;
 
 pub(crate) use emulator::{
     CellSnapshot, CursorPositionSnapshot, CursorShapeSnapshot, CursorSnapshot, RowSnapshot,
-    ScreenSnapshot, TerminalColor, TerminalColorsSnapshot,
+    ScreenSnapshot, TerminalColor, TerminalColorsSnapshot, TerminalUnderlineSnapshot,
 };
 #[cfg(test)]
 pub(crate) use emulator::{PresentationGeneration, ScrollbarSnapshot};

@@ -800,6 +800,10 @@ mod tests {
             italic: false,
             blinking: false,
             invisible: false,
+            underline: crate::terminal::TerminalUnderlineSnapshot::None,
+            underline_source: crate::terminal::TerminalColor::Default,
+            strikethrough: false,
+            overline: false,
             selected: false,
             spacer_tail: false,
         }

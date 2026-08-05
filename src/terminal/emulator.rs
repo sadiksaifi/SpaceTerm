@@ -19,7 +19,7 @@ use libghostty_vt::selection::gesture::{
     Autoscroll, AutoscrollTickEvent, DragEvent, Geometry as SelectionGeometry, Gesture, PressEvent,
     ReleaseEvent,
 };
-use libghostty_vt::style::{PaletteIndex, RgbColor, StyleColor};
+use libghostty_vt::style::{PaletteIndex, RgbColor, StyleColor, Underline};
 use libghostty_vt::terminal::{Mode, Point, PointCoordinate, ScrollViewport};
 use libghostty_vt::{Error, RenderState, Terminal, TerminalOptions};
 
@@ -57,8 +57,37 @@ pub(crate) struct CellSnapshot {
     pub(crate) italic: bool,
     pub(crate) blinking: bool,
     pub(crate) invisible: bool,
+    pub(crate) underline: TerminalUnderlineSnapshot,
+    pub(crate) underline_source: TerminalColor,
+    pub(crate) strikethrough: bool,
+    pub(crate) overline: bool,
     pub(crate) selected: bool,
     pub(crate) spacer_tail: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) enum TerminalUnderlineSnapshot {
+    #[default]
+    None,
+    Single,
+    Double,
+    Curly,
+    Dotted,
+    Dashed,
+}
+
+impl From<Underline> for TerminalUnderlineSnapshot {
+    fn from(underline: Underline) -> Self {
+        match underline {
+            Underline::None => Self::None,
+            Underline::Single => Self::Single,
+            Underline::Double => Self::Double,
+            Underline::Curly => Self::Curly,
+            Underline::Dotted => Self::Dotted,
+            Underline::Dashed => Self::Dashed,
+            _ => Self::None,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -1472,6 +1501,10 @@ impl TerminalEmulator {
                             italic: style.italic,
                             blinking: style.blink,
                             invisible: style.invisible,
+                            underline: style.underline.into(),
+                            underline_source: style.underline_color.into(),
+                            strikethrough: style.strikethrough,
+                            overline: style.overline,
                             selected: selection.is_some_and(|range| {
                                 column_index >= range.start_x && column_index <= range.end_x
                             }),
@@ -2146,6 +2179,26 @@ mod tests {
 
         assert!(visible.text_blinking);
         assert!(!invisible.text_blinking);
+    }
+
+    #[test]
+    fn snapshots_preserve_text_decorations_and_independent_underline_color() {
+        let mut emulator = emulator(8, 1);
+        emulator.feed(
+            b"\x1b[58;5;200;4:1mS\x1b[4:2mD\x1b[4:3mC\x1b[4:4mO\x1b[4:5mH\x1b[9;53mX",
+        );
+
+        let snapshot = emulator.snapshot().unwrap().unwrap();
+        let cells = &snapshot.rows[0];
+
+        assert_eq!(cells[0].underline, TerminalUnderlineSnapshot::Single);
+        assert_eq!(cells[1].underline, TerminalUnderlineSnapshot::Double);
+        assert_eq!(cells[2].underline, TerminalUnderlineSnapshot::Curly);
+        assert_eq!(cells[3].underline, TerminalUnderlineSnapshot::Dotted);
+        assert_eq!(cells[4].underline, TerminalUnderlineSnapshot::Dashed);
+        assert_eq!(cells[0].underline_source, TerminalColor::Palette(200));
+        assert!(cells[5].strikethrough);
+        assert!(cells[5].overline);
     }
 
     #[test]
