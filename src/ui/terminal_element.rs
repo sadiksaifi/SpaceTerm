@@ -589,7 +589,7 @@ fn prepare_row(
             }
         }
 
-        if cell.spacer_tail {
+        if cell.spacer_tail || cell.invisible {
             if let Some(fragment) = regular_fragment.take() {
                 fragments.push(fragment.finish(true));
             }
@@ -987,6 +987,27 @@ mod tests {
             vec![BackgroundSpan {
                 start: 0,
                 len: 2,
+                color: accent,
+            }]
+        );
+    }
+
+    #[test]
+    fn invisible_cells_keep_backgrounds_without_preparing_foreground_text() {
+        let accent = ACTIVE_THEME.terminal_normal()[1];
+        let mut invisible = cell("secret");
+        invisible.invisible = true;
+        invisible.background_source = crate::terminal::TerminalColor::Rgb(accent);
+        let row = Arc::<[CellSnapshot]>::from([invisible]);
+
+        let input = prepare_row(&row, &colors(), &"Menlo".into(), None);
+
+        assert!(input.fragments.is_empty());
+        assert_eq!(
+            input.backgrounds,
+            vec![BackgroundSpan {
+                start: 0,
+                len: 1,
                 color: accent,
             }]
         );
