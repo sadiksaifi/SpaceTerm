@@ -111,11 +111,6 @@ impl PtyTerminator {
     pub(crate) fn terminate(&self) -> io::Result<()> {
         self.child.terminate()
     }
-
-    #[cfg(test)]
-    pub(crate) fn for_test(child: Box<dyn Child + Send + Sync>) -> Self {
-        Self::new(Arc::new(SharedChildProcess::new(child)))
-    }
 }
 
 pub(crate) struct SpawnedPty {

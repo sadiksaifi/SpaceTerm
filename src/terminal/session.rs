@@ -4,7 +4,8 @@ use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver as CommandReceiver, Sender as CommandSender, TryRecvError};
 use std::thread::{self, JoinHandle};
 
-use portable_pty::PtySize;
+use anyhow::Error as AnyError;
+use portable_pty::{ExitStatus, PtySize};
 use thiserror::Error;
 
 use crate::platform::macos_pty::{
@@ -178,7 +179,67 @@ impl TerminalSessionFactory for NativeTerminalSessionFactory {
 pub(crate) struct TerminalSession {
     commands: Option<CommandSender<Command>>,
     worker: Option<JoinHandle<()>>,
-    terminator: Option<PtyTerminator>,
+    terminator: Option<Box<dyn SessionPtyTerminator>>,
+}
+
+trait SessionPty: Write + Send {
+    fn take_reader(&mut self) -> std::io::Result<Box<dyn Read + Send>>;
+    fn resize(&self, size: PtySize) -> Result<(), AnyError>;
+    fn wait_for_child(&mut self) -> std::io::Result<ExitStatus>;
+}
+
+trait SessionPtyTerminator: Send + Sync {
+    fn terminate(&self) -> std::io::Result<()>;
+}
+
+struct StartedSessionPty {
+    pty: Box<dyn SessionPty>,
+    terminator: Box<dyn SessionPtyTerminator>,
+}
+
+struct NativeSessionPty(SpawnedPty);
+
+impl Write for NativeSessionPty {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        self.0.write(buffer)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.0.flush()
+    }
+}
+
+impl SessionPty for NativeSessionPty {
+    fn take_reader(&mut self) -> std::io::Result<Box<dyn Read + Send>> {
+        self.0.take_reader()
+    }
+
+    fn resize(&self, size: PtySize) -> Result<(), AnyError> {
+        self.0.resize(size)
+    }
+
+    fn wait_for_child(&mut self) -> std::io::Result<ExitStatus> {
+        self.0.wait_for_child()
+    }
+}
+
+struct NativeSessionPtyTerminator(PtyTerminator);
+
+impl SessionPtyTerminator for NativeSessionPtyTerminator {
+    fn terminate(&self) -> std::io::Result<()> {
+        self.0.terminate()
+    }
+}
+
+fn spawn_native_session_pty(
+    size: PtySize,
+    working_directory: &Path,
+) -> Result<StartedSessionPty, PtyError> {
+    let (pty, terminator) = spawn_user_shell(size, working_directory)?;
+    Ok(StartedSessionPty {
+        pty: Box::new(NativeSessionPty(pty)),
+        terminator: Box::new(NativeSessionPtyTerminator(terminator)),
+    })
 }
 
 impl TerminalSession {
@@ -186,7 +247,15 @@ impl TerminalSession {
         size: GridSize,
         working_directory: &Path,
     ) -> Result<(Self, async_channel::Receiver<SessionEvent>), SessionError> {
-        let (pty, terminator) = spawn_user_shell(size.pty_size(), working_directory)?;
+        Self::start_with(size, working_directory, spawn_native_session_pty)
+    }
+
+    fn start_with(
+        size: GridSize,
+        working_directory: &Path,
+        spawn_pty: impl FnOnce(PtySize, &Path) -> Result<StartedSessionPty, PtyError>,
+    ) -> Result<(Self, async_channel::Receiver<SessionEvent>), SessionError> {
+        let StartedSessionPty { pty, terminator } = spawn_pty(size.pty_size(), working_directory)?;
         let (command_tx, command_rx) = mpsc::channel();
         // Two slots retain the latest screen and a final lifecycle event without
         // allowing sustained PTY output to build an unbounded UI backlog.
@@ -351,7 +420,7 @@ enum Command {
 }
 
 fn run_worker(
-    mut pty: SpawnedPty,
+    mut pty: Box<dyn SessionPty>,
     initial_size: GridSize,
     commands: CommandReceiver<Command>,
     command_tx: CommandSender<Command>,
@@ -509,7 +578,7 @@ fn run_worker(
         }
     }
 
-    // SpawnedPty::drop terminates and reaps a shell that is still running.
+    // The native SessionPty owns SpawnedPty, whose Drop terminates and reaps a live shell.
     drop(pty);
     join_reader(reader_thread);
 }
@@ -654,44 +723,269 @@ fn join_reader(reader: JoinHandle<()>) {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::VecDeque;
+    use std::io;
     use std::sync::{Condvar, Mutex};
     use std::time::{Duration, Instant};
 
-    use portable_pty::{Child, ChildKiller, ExitStatus};
-
     use super::*;
 
-    #[derive(Clone, Debug)]
-    struct UnblockingKiller {
-        killed: Arc<(Mutex<bool>, Condvar)>,
+    const TEST_SIZE: GridSize = GridSize {
+        cols: 80,
+        rows: 24,
+        cell_width_px: 8,
+        cell_height_px: 20,
+    };
+
+    #[derive(Clone, Debug, Default)]
+    struct ScriptedPtyState {
+        take_reader_calls: usize,
+        write_attempts: usize,
+        written: Vec<u8>,
+        flushes: usize,
+        resizes: Vec<PtySize>,
+        waits: usize,
+        terminations: usize,
+        pty_drops: usize,
+        terminator_drops: usize,
     }
 
-    impl ChildKiller for UnblockingKiller {
-        fn kill(&mut self) -> std::io::Result<()> {
-            let (killed, wake) = &*self.killed;
-            *killed.lock().unwrap() = true;
-            wake.notify_all();
+    #[derive(Clone, Default)]
+    struct ScriptedPtyRecords {
+        state: Arc<(Mutex<ScriptedPtyState>, Condvar)>,
+    }
+
+    impl ScriptedPtyRecords {
+        fn update(&self, update: impl FnOnce(&mut ScriptedPtyState)) {
+            let (state, changed) = &*self.state;
+            update(&mut state.lock().unwrap());
+            changed.notify_all();
+        }
+
+        fn snapshot(&self) -> ScriptedPtyState {
+            self.state.0.lock().unwrap().clone()
+        }
+
+        fn wait_for(
+            &self,
+            description: &str,
+            predicate: impl Fn(&ScriptedPtyState) -> bool,
+        ) -> ScriptedPtyState {
+            let (state, changed) = &*self.state;
+            let deadline = Instant::now() + Duration::from_secs(1);
+            let mut state = state.lock().unwrap();
+            while !predicate(&state) {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                assert!(!remaining.is_zero(), "timed out waiting for {description}");
+                let (next_state, timeout) = changed.wait_timeout(state, remaining).unwrap();
+                state = next_state;
+                assert!(
+                    !timeout.timed_out() || predicate(&state),
+                    "timed out waiting for {description}"
+                );
+            }
+            state.clone()
+        }
+    }
+
+    enum ReaderStep {
+        Bytes(Vec<u8>),
+        Eof,
+    }
+
+    struct ScriptedReader {
+        steps: mpsc::Receiver<ReaderStep>,
+        pending: VecDeque<u8>,
+    }
+
+    impl Read for ScriptedReader {
+        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+            while self.pending.is_empty() {
+                match self.steps.recv() {
+                    Ok(ReaderStep::Bytes(bytes)) => self.pending.extend(bytes),
+                    Ok(ReaderStep::Eof) | Err(_) => return Ok(0),
+                }
+            }
+
+            let read = buffer.len().min(self.pending.len());
+            for destination in &mut buffer[..read] {
+                let Some(byte) = self.pending.pop_front() else {
+                    unreachable!("the scripted reader length was checked before draining")
+                };
+                *destination = byte;
+            }
+            Ok(read)
+        }
+    }
+
+    #[derive(Default)]
+    struct ScriptedPtyOptions {
+        reader_error: Option<String>,
+        resize_error: Option<String>,
+        write_error: Option<String>,
+        wait_error: Option<String>,
+        exit_code: u32,
+    }
+
+    struct ScriptedPty {
+        reader: Option<Box<dyn Read + Send>>,
+        records: ScriptedPtyRecords,
+        reader_error: Option<String>,
+        resize_error: Option<String>,
+        write_error: Option<String>,
+        wait_error: Option<String>,
+        exit_code: u32,
+    }
+
+    impl Write for ScriptedPty {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.records.update(|state| state.write_attempts += 1);
+            if let Some(message) = &self.write_error {
+                return Err(io::Error::new(ErrorKind::BrokenPipe, message.clone()));
+            }
+            self.records
+                .update(|state| state.written.extend_from_slice(bytes));
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            self.records.update(|state| state.flushes += 1);
             Ok(())
         }
+    }
 
-        fn clone_killer(&self) -> Box<dyn ChildKiller + Send + Sync> {
-            Box::new(self.clone())
+    impl SessionPty for ScriptedPty {
+        fn take_reader(&mut self) -> io::Result<Box<dyn Read + Send>> {
+            self.records.update(|state| state.take_reader_calls += 1);
+            if let Some(message) = self.reader_error.take() {
+                return Err(io::Error::other(message));
+            }
+            self.reader.take().ok_or_else(|| {
+                io::Error::new(ErrorKind::NotFound, "scripted PTY reader was already taken")
+            })
+        }
+
+        fn resize(&self, size: PtySize) -> Result<(), AnyError> {
+            self.records.update(|state| state.resizes.push(size));
+            match &self.resize_error {
+                Some(message) => Err(AnyError::msg(message.clone())),
+                None => Ok(()),
+            }
+        }
+
+        fn wait_for_child(&mut self) -> io::Result<ExitStatus> {
+            self.records.update(|state| state.waits += 1);
+            match &self.wait_error {
+                Some(message) => Err(io::Error::other(message.clone())),
+                None => Ok(ExitStatus::with_exit_code(self.exit_code)),
+            }
         }
     }
 
-    impl Child for UnblockingKiller {
-        fn try_wait(&mut self) -> std::io::Result<Option<ExitStatus>> {
-            let (killed, _) = &*self.killed;
-            Ok((*killed.lock().unwrap()).then(|| ExitStatus::with_exit_code(0)))
+    impl Drop for ScriptedPty {
+        fn drop(&mut self) {
+            self.records.update(|state| state.pty_drops += 1);
         }
+    }
 
-        fn wait(&mut self) -> std::io::Result<ExitStatus> {
-            Ok(ExitStatus::with_exit_code(0))
-        }
+    struct ScriptedPtyTerminator {
+        records: ScriptedPtyRecords,
+        reader_steps: mpsc::Sender<ReaderStep>,
+    }
 
-        fn process_id(&self) -> Option<u32> {
-            None
+    impl SessionPtyTerminator for ScriptedPtyTerminator {
+        fn terminate(&self) -> io::Result<()> {
+            self.records.update(|state| state.terminations += 1);
+            let _ = self.reader_steps.send(ReaderStep::Eof);
+            Ok(())
         }
+    }
+
+    impl Drop for ScriptedPtyTerminator {
+        fn drop(&mut self) {
+            self.records.update(|state| state.terminator_drops += 1);
+        }
+    }
+
+    type ScriptedStart =
+        Result<(TerminalSession, async_channel::Receiver<SessionEvent>), SessionError>;
+
+    fn start_scripted_session(
+        options: ScriptedPtyOptions,
+    ) -> (ScriptedStart, mpsc::Sender<ReaderStep>, ScriptedPtyRecords) {
+        let records = ScriptedPtyRecords::default();
+        let records_for_pty = records.clone();
+        let records_for_terminator = records.clone();
+        let (reader_steps, steps) = mpsc::channel();
+        let terminator_steps = reader_steps.clone();
+        let ScriptedPtyOptions {
+            reader_error,
+            resize_error,
+            write_error,
+            wait_error,
+            exit_code,
+        } = options;
+
+        let result = TerminalSession::start_with(
+            TEST_SIZE,
+            Path::new("/scripted"),
+            move |size, working_directory| {
+                assert_eq!(size, TEST_SIZE.pty_size());
+                assert_eq!(working_directory, Path::new("/scripted"));
+                Ok(StartedSessionPty {
+                    pty: Box::new(ScriptedPty {
+                        reader: Some(Box::new(ScriptedReader {
+                            steps,
+                            pending: VecDeque::new(),
+                        })),
+                        records: records_for_pty,
+                        reader_error,
+                        resize_error,
+                        write_error,
+                        wait_error,
+                        exit_code,
+                    }),
+                    terminator: Box::new(ScriptedPtyTerminator {
+                        records: records_for_terminator,
+                        reader_steps: terminator_steps,
+                    }),
+                })
+            },
+        );
+
+        (result, reader_steps, records)
+    }
+
+    fn receive_event(
+        events: &async_channel::Receiver<SessionEvent>,
+        description: &str,
+        predicate: impl Fn(&SessionEvent) -> bool,
+    ) -> SessionEvent {
+        let deadline = Instant::now() + Duration::from_secs(1);
+        loop {
+            match events.try_recv() {
+                Ok(event) if predicate(&event) => return event,
+                Ok(_) | Err(async_channel::TryRecvError::Empty) => {
+                    assert!(
+                        Instant::now() < deadline,
+                        "timed out waiting for {description}"
+                    );
+                    thread::sleep(Duration::from_millis(1));
+                }
+                Err(async_channel::TryRecvError::Closed) => {
+                    panic!("session events closed while waiting for {description}")
+                }
+            }
+        }
+    }
+
+    fn screen_text(screen: &ScreenSnapshot) -> String {
+        screen
+            .rows
+            .iter()
+            .flat_map(|row| row.iter())
+            .map(|cell| cell.text.as_str())
+            .collect()
     }
 
     #[derive(Clone, Debug)]
@@ -739,6 +1033,110 @@ mod tests {
     }
 
     #[test]
+    fn reader_acquisition_failure_should_fail_startup_and_drop_the_pty_once() {
+        let (result, _reader_steps, records) = start_scripted_session(ScriptedPtyOptions {
+            reader_error: Some("reader unavailable".to_owned()),
+            ..ScriptedPtyOptions::default()
+        });
+
+        let error = match result {
+            Ok(_) => panic!("a missing PTY reader must fail startup"),
+            Err(error) => error,
+        };
+        let state = records.snapshot();
+
+        assert!(matches!(
+            error,
+            SessionError::EmulatorStartup(message) if message == "reader unavailable"
+        ));
+        assert_eq!(
+            (
+                state.take_reader_calls,
+                state.pty_drops,
+                state.terminations,
+                state.terminator_drops,
+            ),
+            (1, 1, 0, 1)
+        );
+    }
+
+    #[test]
+    fn scripted_output_should_reach_the_terminal_screen() {
+        let (result, reader_steps, records) = start_scripted_session(ScriptedPtyOptions::default());
+        let (mut session, events) = result.unwrap();
+
+        reader_steps
+            .send(ReaderStep::Bytes(b"scripted output".to_vec()))
+            .unwrap();
+        let event = receive_event(
+            &events,
+            "scripted terminal output",
+            |event| matches!(event, SessionEvent::Screen(screen) if screen_text(screen).contains("scripted output")),
+        );
+
+        let SessionEvent::Screen(screen) = event else {
+            unreachable!("the event predicate accepts only terminal screens")
+        };
+        assert!(screen_text(&screen).contains("scripted output"));
+
+        session.shutdown();
+        let state = records.snapshot();
+        assert_eq!(
+            (state.terminations, state.pty_drops, state.terminator_drops),
+            (1, 1, 1)
+        );
+    }
+
+    #[test]
+    fn consecutive_output_commands_should_publish_one_coalesced_screen() {
+        let mut emulator = TerminalEmulator::new(80, 24, 8, 20).unwrap();
+        let (command_tx, commands) = mpsc::channel();
+        command_tx
+            .send(Command::Output(b" second".to_vec()))
+            .unwrap();
+        let (reply, _reply_receiver) = async_channel::bounded(1);
+        command_tx.send(Command::SelectionText(reply)).unwrap();
+        let mut pending_command = None;
+        let mut writer = io::sink();
+        let (events, receiver) = async_channel::bounded(2);
+
+        assert!(process_output(
+            b"first".to_vec(),
+            &commands,
+            &mut pending_command,
+            &mut emulator,
+            &mut writer,
+            &events,
+        ));
+
+        let SessionEvent::Screen(screen) = receiver.try_recv().unwrap() else {
+            panic!("coalesced output must publish a terminal screen")
+        };
+        assert!(screen_text(&screen).contains("first second"));
+        assert!(receiver.try_recv().is_err());
+        assert!(matches!(pending_command, Some(Command::SelectionText(_))));
+    }
+
+    #[test]
+    fn resize_should_reach_the_pty_with_pixel_dimensions() {
+        let (result, _reader_steps, records) =
+            start_scripted_session(ScriptedPtyOptions::default());
+        let (mut session, _events) = result.unwrap();
+        let resized = GridSize {
+            cols: 100,
+            rows: 30,
+            cell_width_px: 9,
+            cell_height_px: 21,
+        };
+
+        session.resize(resized);
+        let state = records.wait_for("the scripted PTY resize", |state| state.resizes.len() == 1);
+
+        assert_eq!(state.resizes, vec![resized.pty_size()]);
+        session.shutdown();
+    }
+
+    #[test]
     fn pending_pty_responses_are_written_before_action_input() {
         let mut emulator = TerminalEmulator::new(10, 2, 10, 20).unwrap();
         emulator.feed(b"\x1b[?2048h");
@@ -766,49 +1164,81 @@ mod tests {
     }
 
     #[test]
-    fn shutdown_terminates_a_blocked_worker_before_joining_it() {
-        let killed = Arc::new((Mutex::new(false), Condvar::new()));
-        let worker_killed = Arc::clone(&killed);
-        let saw_shutdown = Arc::new(Mutex::new(false));
-        let worker_saw_shutdown = Arc::clone(&saw_shutdown);
-        let worker_finished = Arc::new(Mutex::new(false));
-        let finished = Arc::clone(&worker_finished);
-        let (commands, command_rx) = mpsc::channel();
-        let worker = thread::spawn(move || {
-            let (killed, wake) = &*worker_killed;
-            let guard = killed.lock().unwrap();
-            let (guard, timeout) = wake
-                .wait_timeout_while(guard, Duration::from_secs(1), |killed| !*killed)
-                .unwrap();
-            assert!(!timeout.timed_out(), "worker was not unblocked");
-            drop(guard);
-            *worker_saw_shutdown.lock().unwrap() = matches!(
-                command_rx.recv_timeout(Duration::from_secs(1)),
-                Ok(Command::Shutdown)
-            );
-            *finished.lock().unwrap() = true;
+    fn write_failure_should_emit_the_existing_error_event_and_stop_the_worker() {
+        let (result, _reader_steps, records) = start_scripted_session(ScriptedPtyOptions {
+            write_error: Some("write unavailable".to_owned()),
+            ..ScriptedPtyOptions::default()
         });
-        let mut session = TerminalSession {
-            commands: Some(commands),
-            worker: Some(worker),
-            terminator: Some(PtyTerminator::for_test(Box::new(UnblockingKiller {
-                killed: Arc::clone(&killed),
-            }))),
-        };
+        let (mut session, events) = result.unwrap();
+
+        session.paste("input".to_owned());
+        let event = receive_event(&events, "the PTY write failure", |event| {
+            matches!(event, SessionEvent::Error(_))
+        });
+
+        assert!(matches!(
+            event,
+            SessionEvent::Error(message)
+                if message == "failed to write to the shell PTY: write unavailable"
+        ));
+        let state = records.wait_for("the failed PTY worker to release ownership", |state| {
+            state.pty_drops == 1
+        });
+        assert_eq!((state.write_attempts, state.written.len()), (1, 0));
+
+        session.shutdown();
+        let state = records.snapshot();
+        assert_eq!(
+            (state.terminations, state.pty_drops, state.terminator_drops),
+            (1, 1, 1)
+        );
+    }
+
+    #[test]
+    fn reader_eof_should_wait_for_the_child_and_emit_exit() {
+        let (result, reader_steps, records) = start_scripted_session(ScriptedPtyOptions {
+            exit_code: 7,
+            ..ScriptedPtyOptions::default()
+        });
+        let (mut session, events) = result.unwrap();
+
+        reader_steps.send(ReaderStep::Eof).unwrap();
+        let event = receive_event(&events, "the scripted shell exit", |event| {
+            matches!(event, SessionEvent::Exited(_))
+        });
+
+        assert!(matches!(
+            event,
+            SessionEvent::Exited(status) if status.starts_with("Shell exited")
+        ));
+        let state = records.wait_for("the exited PTY worker to release ownership", |state| {
+            state.pty_drops == 1
+        });
+        assert_eq!((state.waits, state.pty_drops), (1, 1));
+
+        session.shutdown();
+    }
+
+    #[test]
+    fn repeated_shutdown_should_terminate_and_release_each_owner_once() {
+        let (result, _reader_steps, records) =
+            start_scripted_session(ScriptedPtyOptions::default());
+        let (mut session, _events) = result.unwrap();
 
         session.shutdown();
         session.shutdown();
 
+        let state = records.snapshot();
         assert_eq!(
             (
-                *killed.0.lock().unwrap(),
-                *saw_shutdown.lock().unwrap(),
-                *worker_finished.lock().unwrap(),
+                state.terminations,
+                state.pty_drops,
+                state.terminator_drops,
                 session.commands.is_none(),
                 session.worker.is_none(),
                 session.terminator.is_none(),
             ),
-            (true, true, true, true, true, true)
+            (1, 1, 1, true, true, true)
         );
     }
 
