@@ -1,16 +1,15 @@
 use std::path::PathBuf;
 use std::rc::Rc;
-use std::time::Duration;
 
 use gpui::prelude::*;
 use gpui::{
-    Action, AnyElement, App, Bounds, Context, DispatchPhase, DragMoveEvent, Empty, Entity,
-    FocusHandle, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels,
-    Render, ScrollHandle, ScrollWheelEvent, SharedString, Task, WeakEntity, Window, canvas, div,
-    point, px, rgba,
+    Action, AnyElement, App, Context, DragMoveEvent, Empty, Entity, FocusHandle, KeyDownEvent,
+    MouseButton, MouseDownEvent, Pixels, Render, ScrollHandle, ScrollWheelEvent, SharedString,
+    WeakEntity, Window, div, point, px, rgba,
 };
 use gpui_symbols::{Icon, SymbolWeight};
 
+use super::overlay_scrollbar::{OverlayScrollbar, OverlayScrollbarEvent, ScrollMetrics};
 use super::{
     ActivateWindow1, ActivateWindow2, ActivateWindow3, ActivateWindow4, ActivateWindow5,
     ActivateWindow6, ActivateWindow7, ActivateWindow8, ActivateWindow9, ActivateWorkspace1,
@@ -40,13 +39,6 @@ const CHROME_DIVIDER_SIZE: f32 = 1.0;
 const SIDEBAR_RESIZE_HIT_SIZE: f32 = 8.0;
 const SIDEBAR_MAXIMUM_WIDTH: f32 = 420.0;
 const TERMINAL_CONTENT_MINIMUM_WIDTH: f32 = 240.0;
-const SIDEBAR_SCROLLBAR_WIDTH: f32 = 5.0;
-const SIDEBAR_SCROLLBAR_HORIZONTAL_HITBOX_PADDING: f32 = 4.0;
-const SIDEBAR_SCROLLBAR_HITBOX_WIDTH: f32 =
-    SIDEBAR_SCROLLBAR_WIDTH + SIDEBAR_SCROLLBAR_HORIZONTAL_HITBOX_PADDING * 2.0;
-const SIDEBAR_SCROLLBAR_RIGHT_INSET: f32 = 4.0;
-const SIDEBAR_SCROLLBAR_MINIMUM_THUMB_HEIGHT: f32 = 24.0;
-const SIDEBAR_SCROLLBAR_HIDE_DELAY: Duration = Duration::from_secs(2);
 const WORKSPACE_MENU_WIDTH: f32 = 208.0;
 const WORKSPACE_MENU_ROW_HEIGHT: f32 = 28.0;
 const WORKSPACE_MENU_SEPARATOR_SIZE: f32 = 1.0;
@@ -80,37 +72,18 @@ struct WorkspaceRenameState {
 #[derive(Clone, Copy)]
 struct DraggedWorkspaceSidebar;
 
-#[derive(Clone, Copy, Debug, PartialEq)]
-struct WorkspaceScrollbarGeometry {
-    top_px: f32,
-    height_px: f32,
-    track_height_px: f32,
-}
-
-#[derive(Clone, Copy, Debug)]
-struct WorkspaceScrollbarDrag {
-    grab_ratio: f32,
-    track_top_px: f32,
-    track_height_px: f32,
-}
-
 pub(crate) struct WorkspaceManager {
     workspaces: WorkspaceCollection<Entity<WindowManager>>,
     session_factory: Rc<dyn TerminalSessionFactory>,
     home_directory: PathBuf,
-    next_workspace_id: u64,
     sidebar_visible: bool,
     sidebar_width: Pixels,
     workspace_list_scroll_handle: ScrollHandle,
-    workspace_scrollbar_visible: bool,
-    workspace_scrollbar_hovered: bool,
-    workspace_scrollbar_drag: Option<WorkspaceScrollbarDrag>,
-    workspace_scrollbar_visibility_generation: u64,
+    scrollbar: Entity<OverlayScrollbar<f32>>,
     sidebar_focus: FocusHandle,
     rename_focus: FocusHandle,
     workspace_menu: Option<WorkspaceMenuState>,
     rename: Option<WorkspaceRenameState>,
-    _workspace_scrollbar_hide_task: Option<Task<()>>,
 }
 
 impl WorkspaceManager {
@@ -120,39 +93,52 @@ impl WorkspaceManager {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let initial_workspace_id = WorkspaceId::new(1);
-        let initial_window_manager = Self::create_window_manager(
-            initial_workspace_id,
-            Rc::clone(&session_factory),
+        let workspaces = WorkspaceCollection::new(
+            default_workspace_name(1),
             home_directory.clone(),
-            true,
-            px(WORKSPACE_SIDEBAR_DEFAULT_WIDTH),
-            window,
-            cx,
+            |workspace_id| {
+                Self::create_window_manager(
+                    workspace_id,
+                    Rc::clone(&session_factory),
+                    home_directory.clone(),
+                    true,
+                    px(WORKSPACE_SIDEBAR_DEFAULT_WIDTH),
+                    window,
+                    cx,
+                )
+            },
         );
+        let scrollbar = cx.new(|_| OverlayScrollbar::<f32>::new("workspace-scrollbar"));
+        cx.subscribe_in(
+            &scrollbar,
+            window,
+            |manager, _, event: &OverlayScrollbarEvent<f32>, window, cx| match event {
+                OverlayScrollbarEvent::InteractionStarted => {
+                    manager.sidebar_focus.focus(window);
+                }
+                OverlayScrollbarEvent::OffsetRequested(offset) => {
+                    let current_offset = manager.workspace_list_scroll_handle.offset();
+                    manager
+                        .workspace_list_scroll_handle
+                        .set_offset(point(current_offset.x, px(-*offset)));
+                    cx.notify();
+                }
+            },
+        )
+        .detach();
 
         Self {
-            workspaces: WorkspaceCollection::new(
-                initial_workspace_id,
-                default_workspace_name(1),
-                home_directory.clone(),
-                initial_window_manager,
-            ),
+            workspaces,
             session_factory,
             home_directory,
-            next_workspace_id: 2,
             sidebar_visible: true,
             sidebar_width: px(WORKSPACE_SIDEBAR_DEFAULT_WIDTH),
             workspace_list_scroll_handle: ScrollHandle::new(),
-            workspace_scrollbar_visible: false,
-            workspace_scrollbar_hovered: false,
-            workspace_scrollbar_drag: None,
-            workspace_scrollbar_visibility_generation: 0,
+            scrollbar,
             sidebar_focus: cx.focus_handle(),
             rename_focus: cx.focus_handle(),
             workspace_menu: None,
             rename: None,
-            _workspace_scrollbar_hide_task: None,
         }
     }
 
@@ -190,12 +176,6 @@ impl WorkspaceManager {
         eprintln!("failed to {operation} Workspace: {error}");
     }
 
-    fn allocate_workspace_id(&mut self) -> Option<WorkspaceId> {
-        let workspace_id = WorkspaceId::new(self.next_workspace_id);
-        self.next_workspace_id = self.next_workspace_id.checked_add(1)?;
-        Some(workspace_id)
-    }
-
     pub(crate) fn focus(&self, window: &mut Window, cx: &mut App) {
         let manager = self.workspaces.active_workspace().payload().clone();
         manager.update(cx, |manager, cx| manager.focus(window, cx));
@@ -208,10 +188,8 @@ impl WorkspaceManager {
         self.sidebar_visible = visible;
         self.sidebar_width = width;
         if !visible {
-            self.workspace_scrollbar_visible = false;
-            self.workspace_scrollbar_hovered = false;
-            self.workspace_scrollbar_drag = None;
-            self._workspace_scrollbar_hide_task.take();
+            self.scrollbar
+                .update(cx, |scrollbar, cx| scrollbar.reset(cx));
         }
         for workspace in self.workspaces.iter() {
             workspace.payload().update(cx, |manager, cx| {
@@ -252,38 +230,23 @@ impl WorkspaceManager {
         }
     }
 
-    fn current_workspace_scrollbar_geometry(&self) -> Option<WorkspaceScrollbarGeometry> {
+    fn scrollbar_metrics(&self) -> Option<ScrollMetrics<f32>> {
         let track_height_px = f32::from(self.workspace_list_scroll_handle.bounds().size.height);
         let maximum_offset_px = f32::from(self.workspace_list_scroll_handle.max_offset().height);
         let offset_px = -f32::from(self.workspace_list_scroll_handle.offset().y);
-        workspace_scrollbar_geometry(track_height_px, maximum_offset_px, offset_px)
+        ScrollMetrics::for_pixels(0.0, track_height_px, maximum_offset_px, offset_px)
     }
 
-    fn reveal_workspace_scrollbar(&mut self, cx: &mut Context<Self>) {
-        self.workspace_scrollbar_visible = true;
-        self.workspace_scrollbar_visibility_generation = self
-            .workspace_scrollbar_visibility_generation
-            .wrapping_add(1);
-        let generation = self.workspace_scrollbar_visibility_generation;
-        self._workspace_scrollbar_hide_task.take();
+    fn sync_scrollbar(&self, cx: &mut Context<Self>) {
+        let metrics = self.scrollbar_metrics();
+        self.scrollbar
+            .update(cx, |scrollbar, cx| scrollbar.sync(metrics, cx));
+    }
 
-        if self.workspace_scrollbar_drag.is_none() && !self.workspace_scrollbar_hovered {
-            self._workspace_scrollbar_hide_task = Some(cx.spawn(async move |this, cx| {
-                cx.background_executor()
-                    .timer(SIDEBAR_SCROLLBAR_HIDE_DELAY)
-                    .await;
-                let _ = this.update(cx, |this, cx| {
-                    if this.workspace_scrollbar_visibility_generation == generation
-                        && this.workspace_scrollbar_drag.is_none()
-                        && !this.workspace_scrollbar_hovered
-                    {
-                        this.workspace_scrollbar_visible = false;
-                        cx.notify();
-                    }
-                });
-            }));
-        }
-        cx.notify();
+    fn reveal_scrollbar(&self, cx: &mut Context<Self>) {
+        let metrics = self.scrollbar_metrics();
+        self.scrollbar
+            .update(cx, |scrollbar, cx| scrollbar.reveal(metrics, cx));
     }
 
     fn on_workspace_list_scroll_wheel(
@@ -292,111 +255,45 @@ impl WorkspaceManager {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.workspace_list_scroll_handle.max_offset().height > px(0.0) {
-            self.reveal_workspace_scrollbar(cx);
-        }
-    }
-
-    fn set_workspace_scrollbar_hovered(&mut self, hovered: bool, cx: &mut Context<Self>) {
-        if self.workspace_scrollbar_hovered == hovered {
-            return;
-        }
-
-        self.workspace_scrollbar_hovered = hovered;
-        self.workspace_scrollbar_visibility_generation = self
-            .workspace_scrollbar_visibility_generation
-            .wrapping_add(1);
-        self._workspace_scrollbar_hide_task.take();
-        if hovered {
-            self.workspace_scrollbar_visible = true;
-            cx.notify();
-        } else {
-            self.reveal_workspace_scrollbar(cx);
-        }
-    }
-
-    fn begin_workspace_scrollbar_drag(
-        &mut self,
-        pointer_y: Pixels,
-        thumb_bounds: Bounds<Pixels>,
-        geometry: WorkspaceScrollbarGeometry,
-        cx: &mut Context<Self>,
-    ) {
-        self.workspace_scrollbar_visibility_generation = self
-            .workspace_scrollbar_visibility_generation
-            .wrapping_add(1);
-        self._workspace_scrollbar_hide_task.take();
-        self.workspace_scrollbar_visible = true;
-        self.workspace_scrollbar_drag = Some(WorkspaceScrollbarDrag {
-            grab_ratio: (f32::from(pointer_y - thumb_bounds.origin.y) / geometry.height_px)
-                .clamp(0.0, 1.0),
-            track_top_px: f32::from(thumb_bounds.origin.y) - geometry.top_px,
-            track_height_px: geometry.track_height_px,
-        });
-        cx.notify();
-    }
-
-    fn move_workspace_scrollbar_drag(&mut self, pointer_y: Pixels, cx: &mut Context<Self>) -> bool {
-        let Some(drag) = self.workspace_scrollbar_drag else {
-            return false;
-        };
-        let pointer_in_track_px = f32::from(pointer_y) - drag.track_top_px;
-        let maximum_offset_px = f32::from(self.workspace_list_scroll_handle.max_offset().height);
-        let Some(offset_px) = workspace_scrollbar_offset_for_pointer(
-            maximum_offset_px,
-            drag.track_height_px,
-            pointer_in_track_px,
-            drag.grab_ratio,
-        ) else {
-            return true;
-        };
-        let current_offset = self.workspace_list_scroll_handle.offset();
-        let next_offset = point(current_offset.x, px(-offset_px));
-        if current_offset == next_offset {
-            return true;
-        }
-
-        self.workspace_list_scroll_handle.set_offset(next_offset);
-        cx.notify();
-        true
-    }
-
-    fn finish_workspace_scrollbar_drag(&mut self, cx: &mut Context<Self>) -> bool {
-        if self.workspace_scrollbar_drag.take().is_some() {
-            self.reveal_workspace_scrollbar(cx);
-            true
-        } else {
-            false
-        }
+        self.reveal_scrollbar(cx);
     }
 
     fn create_workspace(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(workspace_id) = self.allocate_workspace_id() else {
-            eprintln!("cannot create Workspace because the Workspace ID space is exhausted");
-            return;
-        };
         let workspace_name = next_default_workspace_name(&self.workspaces, None);
         let previous_manager = self.workspaces.active_workspace().payload().clone();
-        let next_manager = Self::create_window_manager(
-            workspace_id,
-            Rc::clone(&self.session_factory),
-            self.home_directory.clone(),
-            self.sidebar_visible,
-            self.sidebar_width,
-            window,
-            cx,
-        );
+        let session_factory = Rc::clone(&self.session_factory);
+        let home_directory = self.home_directory.clone();
+        let sidebar_visible = self.sidebar_visible;
+        let sidebar_width = self.sidebar_width;
         let result = self.workspaces.create_workspace(
-            workspace_id,
             workspace_name,
             self.home_directory.clone(),
-            || next_manager.clone(),
+            |workspace_id| {
+                Self::create_window_manager(
+                    workspace_id,
+                    session_factory,
+                    home_directory,
+                    sidebar_visible,
+                    sidebar_width,
+                    window,
+                    cx,
+                )
+            },
         );
-        if let Err(error) = result {
-            next_manager.update(cx, |manager, cx| manager.close_all(cx));
-            Self::report_workspace_error("create", error);
-            return;
-        }
+        let workspace_id = match result {
+            Ok(workspace_id) => workspace_id,
+            Err(error) => {
+                Self::report_workspace_error("create", error);
+                return;
+            }
+        };
+        let Some(next_manager) = self
+            .workspaces
+            .workspace(workspace_id)
+            .map(|workspace| workspace.payload().clone())
+        else {
+            unreachable!("a newly created Workspace must remain owned by its collection")
+        };
 
         previous_manager.update(cx, |manager, cx| manager.deactivate(cx));
         next_manager.update(cx, |manager, cx| manager.activate(window, cx));
@@ -462,44 +359,28 @@ impl WorkspaceManager {
         cx: &mut Context<Self>,
     ) {
         let was_active = self.workspaces.active_workspace_id() == workspace_id;
-        let is_final = self.workspaces.len() == 1;
-        let replacement_workspace_id = if is_final {
-            let Some(workspace_id) = self.allocate_workspace_id() else {
-                eprintln!("cannot close Workspace because the Workspace ID space is exhausted");
-                return;
-            };
-            workspace_id
-        } else {
-            WorkspaceId::new(0)
-        };
-        let mut replacement = is_final.then(|| {
-            let name = next_default_workspace_name(&self.workspaces, Some(workspace_id));
-            let manager = Self::create_window_manager(
-                replacement_workspace_id,
-                Rc::clone(&self.session_factory),
-                self.home_directory.clone(),
-                self.sidebar_visible,
-                self.sidebar_width,
-                window,
-                cx,
-            );
-            (name, self.home_directory.clone(), manager)
-        });
-
-        let outcome =
-            self.workspaces
-                .close_workspace(workspace_id, replacement_workspace_id, || {
-                    let Some((name, working_directory, manager)) = replacement.take() else {
-                        unreachable!("the final Workspace replacement is prepared before closing")
-                    };
-                    NewWorkspace::new(name, working_directory, manager)
-                });
+        let replacement_name = next_default_workspace_name(&self.workspaces, Some(workspace_id));
+        let session_factory = Rc::clone(&self.session_factory);
+        let home_directory = self.home_directory.clone();
+        let sidebar_visible = self.sidebar_visible;
+        let sidebar_width = self.sidebar_width;
+        let outcome = self
+            .workspaces
+            .close_workspace(workspace_id, |replacement_workspace_id| {
+                let manager = Self::create_window_manager(
+                    replacement_workspace_id,
+                    session_factory,
+                    home_directory.clone(),
+                    sidebar_visible,
+                    sidebar_width,
+                    window,
+                    cx,
+                );
+                NewWorkspace::new(replacement_name, home_directory, manager)
+            });
         let outcome = match outcome {
             Ok(outcome) => outcome,
             Err(error) => {
-                if let Some((_, _, manager)) = replacement {
-                    manager.update(cx, |manager, cx| manager.close_all(cx));
-                }
                 Self::report_workspace_error("close", error);
                 return;
             }
@@ -1052,11 +933,7 @@ impl WorkspaceManager {
             ));
         }
 
-        let scrollbar_dragging = self.workspace_scrollbar_drag.is_some();
-        let scrollbar = self
-            .workspace_scrollbar_visible
-            .then(|| self.current_workspace_scrollbar_geometry())
-            .flatten();
+        let scrollbar = self.scrollbar.clone();
         let create_manager = manager.clone();
         div()
             .id("workspace-sidebar")
@@ -1126,119 +1003,7 @@ impl WorkspaceManager {
                             .bg(gpui_color(ACTIVE_THEME.border)),
                     ),
             )
-            .when_some(scrollbar, move |sidebar, scrollbar| {
-                let hover_manager = manager.clone();
-                let down_manager = manager.clone();
-                let move_manager = manager.clone();
-                let up_manager = manager.clone();
-                let thumb_color = if scrollbar_dragging {
-                    ACTIVE_THEME.icon
-                } else {
-                    ACTIVE_THEME.scrollbar_thumb_background
-                };
-                let thumb_hover_color = if scrollbar_dragging {
-                    ACTIVE_THEME.icon
-                } else {
-                    ACTIVE_THEME.icon_accent
-                };
-                sidebar.child(
-                    div()
-                        .group("workspace-scrollbar-thumb")
-                        .id("workspace-scrollbar-thumb-hitbox")
-                        .debug_selector(|| "workspace-scrollbar-thumb-hitbox".to_owned())
-                        .absolute()
-                        .top(px(scrollbar.top_px))
-                        .right_0()
-                        .w(px(SIDEBAR_SCROLLBAR_HITBOX_WIDTH))
-                        .h(px(scrollbar.height_px))
-                        .block_mouse_except_scroll()
-                        .cursor_default()
-                        .on_hover(move |hovered, _, cx| {
-                            let _ = hover_manager.update(cx, |manager, cx| {
-                                manager.set_workspace_scrollbar_hovered(*hovered, cx);
-                            });
-                        })
-                        .child(
-                            div()
-                                .id("workspace-scrollbar-thumb")
-                                .debug_selector(|| "workspace-scrollbar-thumb".to_owned())
-                                .absolute()
-                                .right(px(SIDEBAR_SCROLLBAR_RIGHT_INSET))
-                                .w(px(SIDEBAR_SCROLLBAR_WIDTH))
-                                .h_full()
-                                .rounded(px(SIDEBAR_SCROLLBAR_WIDTH / 2.0))
-                                .bg(gpui_color(thumb_color))
-                                .group_hover("workspace-scrollbar-thumb", move |thumb| {
-                                    thumb.bg(gpui_color(thumb_hover_color))
-                                }),
-                        )
-                        .child(
-                            canvas(
-                                |_, _, _| (),
-                                move |thumb_bounds, _, window, _| {
-                                    window.on_mouse_event(
-                                        move |event: &MouseDownEvent, phase, window, cx| {
-                                            if phase != DispatchPhase::Bubble
-                                                || event.button != MouseButton::Left
-                                                || !thumb_bounds.contains(&event.position)
-                                            {
-                                                return;
-                                            }
-                                            let _ = down_manager.update(cx, |manager, cx| {
-                                                manager.sidebar_focus.focus(window);
-                                                manager.begin_workspace_scrollbar_drag(
-                                                    event.position.y,
-                                                    thumb_bounds,
-                                                    scrollbar,
-                                                    cx,
-                                                );
-                                            });
-                                            cx.stop_propagation();
-                                        },
-                                    );
-
-                                    window.on_mouse_event(
-                                        move |event: &MouseMoveEvent, phase, _, cx| {
-                                            if phase != DispatchPhase::Bubble || !event.dragging() {
-                                                return;
-                                            }
-                                            let handled = move_manager
-                                                .update(cx, |manager, cx| {
-                                                    manager.move_workspace_scrollbar_drag(
-                                                        event.position.y,
-                                                        cx,
-                                                    )
-                                                })
-                                                .unwrap_or(false);
-                                            if handled {
-                                                cx.stop_propagation();
-                                            }
-                                        },
-                                    );
-
-                                    window.on_mouse_event(
-                                        move |event: &MouseUpEvent, phase, _, cx| {
-                                            if phase != DispatchPhase::Bubble
-                                                || event.button != MouseButton::Left
-                                            {
-                                                return;
-                                            }
-                                            let handled = up_manager
-                                                .update(cx, |manager, cx| {
-                                                    manager.finish_workspace_scrollbar_drag(cx)
-                                                })
-                                                .unwrap_or(false);
-                                            if handled {
-                                                cx.stop_propagation();
-                                            }
-                                        },
-                                    );
-                                },
-                            )
-                            .size_full(),
-                        ),
-                )
-            })
+            .child(scrollbar)
             .child(
                 div()
                     .id("workspace-sidebar-right-divider")
@@ -1298,6 +1063,9 @@ impl Render for WorkspaceManager {
         let manager = cx.entity().downgrade();
         let resize_manager = manager.clone();
         let active_window_manager = self.workspaces.active_workspace().payload().clone();
+        if self.sidebar_visible {
+            self.sync_scrollbar(cx);
+        }
         div()
             .id("workspace-manager")
             .debug_selector(|| "workspace-manager".to_owned())
@@ -1455,47 +1223,6 @@ fn render_workspace_menu_row(
                 .child(shortcut),
         )
         .into_any_element()
-}
-
-fn workspace_scrollbar_geometry(
-    track_height_px: f32,
-    maximum_offset_px: f32,
-    offset_px: f32,
-) -> Option<WorkspaceScrollbarGeometry> {
-    if track_height_px <= 0.0 || maximum_offset_px <= 0.0 {
-        return None;
-    }
-
-    let track_height = f64::from(track_height_px);
-    let maximum_offset = f64::from(maximum_offset_px);
-    let content_height = track_height + maximum_offset;
-    let minimum_height = f64::from(SIDEBAR_SCROLLBAR_MINIMUM_THUMB_HEIGHT.min(track_height_px));
-    let thumb_height =
-        (track_height / content_height * track_height).clamp(minimum_height, track_height);
-    let progress = f64::from(offset_px.clamp(0.0, maximum_offset_px)) / maximum_offset;
-
-    Some(WorkspaceScrollbarGeometry {
-        top_px: ((track_height - thumb_height) * progress) as f32,
-        height_px: thumb_height as f32,
-        track_height_px,
-    })
-}
-
-fn workspace_scrollbar_offset_for_pointer(
-    maximum_offset_px: f32,
-    track_height_px: f32,
-    pointer_in_track_px: f32,
-    grab_ratio: f32,
-) -> Option<f32> {
-    let geometry = workspace_scrollbar_geometry(track_height_px, maximum_offset_px, 0.0)?;
-    let movable_height = (track_height_px - geometry.height_px).max(0.0);
-    if movable_height == 0.0 {
-        return Some(0.0);
-    }
-
-    let thumb_top = (pointer_in_track_px - grab_ratio.clamp(0.0, 1.0) * geometry.height_px)
-        .clamp(0.0, movable_height);
-    Some(thumb_top / movable_height * maximum_offset_px)
 }
 
 fn default_workspace_name(workspace_number: usize) -> String {
@@ -1877,43 +1604,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn workspace_scrollbar_geometry_should_be_proportional_across_the_track() {
-        let top = workspace_scrollbar_geometry(200.0, 800.0, 0.0).unwrap();
-        let middle = workspace_scrollbar_geometry(200.0, 800.0, 400.0).unwrap();
-        let bottom = workspace_scrollbar_geometry(200.0, 800.0, 800.0).unwrap();
-
-        assert_eq!(
-            (top, middle, bottom),
-            (
-                WorkspaceScrollbarGeometry {
-                    top_px: 0.0,
-                    height_px: 40.0,
-                    track_height_px: 200.0,
-                },
-                WorkspaceScrollbarGeometry {
-                    top_px: 80.0,
-                    height_px: 40.0,
-                    track_height_px: 200.0,
-                },
-                WorkspaceScrollbarGeometry {
-                    top_px: 160.0,
-                    height_px: 40.0,
-                    track_height_px: 200.0,
-                },
-            )
-        );
-    }
-
-    #[test]
-    fn workspace_scrollbar_drag_should_map_to_the_full_scroll_range() {
-        let top = workspace_scrollbar_offset_for_pointer(800.0, 200.0, 20.0, 0.5);
-        let middle = workspace_scrollbar_offset_for_pointer(800.0, 200.0, 100.0, 0.5);
-        let bottom = workspace_scrollbar_offset_for_pointer(800.0, 200.0, 180.0, 0.5);
-
-        assert_eq!((top, middle, bottom), (Some(0.0), Some(400.0), Some(800.0)));
-    }
-
     #[gpui::test]
     fn workspace_list_should_scroll_vertically_with_the_mouse_wheel(cx: &mut TestAppContext) {
         let (manager, _records, cx) = workspace_manager(cx);
@@ -1977,54 +1667,11 @@ mod tests {
             .debug_bounds("workspace-scrollbar-thumb")
             .expect("the Workspace scrollbar thumb was not rendered");
         assert!(
-            manager.read_with(cx, |manager, _| manager.workspace_scrollbar_visible)
-                && thumb.size.width == px(SIDEBAR_SCROLLBAR_WIDTH)
-                && thumb.size.height >= px(SIDEBAR_SCROLLBAR_MINIMUM_THUMB_HEIGHT)
+            thumb.size.width > px(0.0)
+                && thumb.size.height > px(0.0)
                 && thumb.size.height < list.size.height,
             "the revealed Workspace scrollbar had unexpected bounds: {thumb:?}"
         );
-    }
-
-    #[gpui::test]
-    fn workspace_scrollbar_should_remain_visible_on_hover_then_hide_after_leaving(
-        cx: &mut TestAppContext,
-    ) {
-        let (manager, _records, cx) = workspace_manager(cx);
-        for _ in 0..24 {
-            cx.simulate_keystrokes("cmd-n");
-        }
-        manager.update(cx, |manager, cx| {
-            manager.reveal_workspace_scrollbar(cx);
-        });
-        cx.run_until_parked();
-
-        let thumb = cx
-            .debug_bounds("workspace-scrollbar-thumb-hitbox")
-            .expect("the Workspace scrollbar hitbox was not rendered");
-        let list = cx
-            .debug_bounds("workspace-list")
-            .expect("the Workspace list was not rendered");
-        cx.simulate_mouse_move(thumb.center(), None, Modifiers::none());
-        cx.executor()
-            .advance_clock(SIDEBAR_SCROLLBAR_HIDE_DELAY + Duration::from_millis(1));
-        cx.run_until_parked();
-        let visible_while_hovered = manager.read_with(cx, |manager, _| {
-            manager.workspace_scrollbar_visible && manager.workspace_scrollbar_hovered
-        });
-
-        cx.simulate_mouse_move(
-            point(list.origin.x + px(20.0), list.center().y),
-            None,
-            Modifiers::none(),
-        );
-        cx.executor()
-            .advance_clock(SIDEBAR_SCROLLBAR_HIDE_DELAY + Duration::from_millis(1));
-        cx.run_until_parked();
-        let hidden_after_leaving = manager.read_with(cx, |manager, _| {
-            !manager.workspace_scrollbar_visible && !manager.workspace_scrollbar_hovered
-        });
-
-        assert!(visible_while_hovered && hidden_after_leaving);
     }
 
     #[gpui::test]
@@ -2037,7 +1684,7 @@ mod tests {
             manager
                 .workspace_list_scroll_handle
                 .set_offset(point(px(0.0), px(0.0)));
-            manager.reveal_workspace_scrollbar(cx);
+            manager.reveal_scrollbar(cx);
         });
         cx.run_until_parked();
 
@@ -2061,13 +1708,10 @@ mod tests {
         cx.run_until_parked();
 
         let state = manager.read_with(cx, |manager, _| {
-            (
-                manager.workspace_list_scroll_handle.offset().y,
-                manager.workspace_scrollbar_drag.is_none(),
-            )
+            manager.workspace_list_scroll_handle.offset().y
         });
         assert!(
-            state.0 < px(0.0) && state.1,
+            state < px(0.0),
             "the Workspace list did not finish a scrollbar drag: {state:?}"
         );
     }
@@ -2587,15 +2231,16 @@ mod tests {
             .try_send(SessionEvent::Exited("Shell exited".to_owned()))
             .expect("the inactive shell exit must be delivered");
         cx.run_until_parked();
+        cx.simulate_keystrokes("cmd-n");
+        cx.run_until_parked();
 
         let state = manager.read_with(cx, |manager, _| {
             (
                 manager.workspaces.len(),
                 manager.workspaces.active_workspace_id(),
                 records.dropped_session_ids.borrow().clone(),
-                manager.next_workspace_id,
             )
         });
-        assert_eq!(state, (1, WorkspaceId::new(2), vec![1], 3));
+        assert_eq!(state, (2, WorkspaceId::new(3), vec![1]));
     }
 }

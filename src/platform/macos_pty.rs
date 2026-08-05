@@ -119,13 +119,23 @@ impl PtyTerminator {
 }
 
 pub(crate) struct SpawnedPty {
-    pub(crate) master: Box<dyn MasterPty + Send>,
-    pub(crate) reader: Option<Box<dyn Read + Send>>,
-    pub(crate) writer: Box<dyn Write + Send>,
+    master: Box<dyn MasterPty + Send>,
+    reader: Option<Box<dyn Read + Send>>,
+    writer: Box<dyn Write + Send>,
     child: Arc<SharedChildProcess>,
 }
 
 impl SpawnedPty {
+    pub(crate) fn take_reader(&mut self) -> io::Result<Box<dyn Read + Send>> {
+        self.reader
+            .take()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "PTY reader was already taken"))
+    }
+
+    pub(crate) fn resize(&self, size: PtySize) -> Result<(), AnyError> {
+        self.master.resize(size)
+    }
+
     pub(crate) fn wait_for_child(&mut self) -> io::Result<ExitStatus> {
         loop {
             if let Some(status) = self.child.try_wait()? {
@@ -133,6 +143,16 @@ impl SpawnedPty {
             }
             thread::sleep(CHILD_EXIT_POLL_INTERVAL);
         }
+    }
+}
+
+impl Write for SpawnedPty {
+    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+        self.writer.write(buffer)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.writer.flush()
     }
 }
 
@@ -420,6 +440,25 @@ mod tests {
         fn process_id(&self) -> Option<u32> {
             None
         }
+    }
+
+    #[test]
+    fn spawned_pty_should_expose_single_owner_io_operations() {
+        let cleanup = CleanupCounts::default();
+        let mut pty = SpawnedPty {
+            master: Box::new(TestMasterPty),
+            reader: Some(Box::new(io::empty())),
+            writer: Box::new(io::sink()),
+            child: Arc::new(SharedChildProcess::new(Box::new(ExitedChild { cleanup }))),
+        };
+
+        pty.resize(PtySize::default()).unwrap();
+        pty.write_all(b"input").unwrap();
+        pty.flush().unwrap();
+        drop(pty.take_reader().unwrap());
+        let error = pty.take_reader().err().unwrap();
+
+        assert_eq!(error.kind(), io::ErrorKind::NotFound);
     }
 
     #[test]

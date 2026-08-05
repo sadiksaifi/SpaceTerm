@@ -49,8 +49,6 @@ pub(crate) struct PaneHost {
     terminal_window: TerminalWindow<Entity<TerminalPane>>,
     session_factory: Rc<dyn TerminalSessionFactory>,
     workspace_root: PathBuf,
-    next_pane_id: u64,
-    next_split_id: u64,
     pane_bounds: BTreeMap<PaneId, Bounds<Pixels>>,
     split_bounds: BTreeMap<SplitId, Bounds<Pixels>>,
     pane_titles: BTreeMap<PaneId, gpui::SharedString>,
@@ -72,27 +70,25 @@ impl PaneHost {
                 unreachable!("fixed minimum Pane dimensions must be valid: {error}")
             }
         };
-        let initial_pane_id = PaneId::new(1);
-        let initial_terminal = Self::create_terminal(
-            initial_pane_id,
-            Rc::clone(&session_factory),
-            workspace_root.clone(),
-            window,
-            cx,
-        );
+        let terminal_window = TerminalWindow::new(window_id, minimum_pane_size, |pane_id| {
+            Self::create_terminal(
+                pane_id,
+                Rc::clone(&session_factory),
+                workspace_root.clone(),
+                window,
+                cx,
+            )
+        });
+        let initial_pane_id = terminal_window.focused_pane_id();
+        let Some(initial_terminal) = terminal_window.terminal(initial_pane_id) else {
+            unreachable!("a new Window must own its initial Pane terminal")
+        };
         let initial_title = initial_terminal.read(cx).title();
 
         Self {
-            terminal_window: TerminalWindow::new(
-                window_id,
-                initial_pane_id,
-                initial_terminal,
-                minimum_pane_size,
-            ),
+            terminal_window,
             session_factory,
             workspace_root,
-            next_pane_id: 2,
-            next_split_id: 1,
             pane_bounds: BTreeMap::new(),
             split_bounds: BTreeMap::new(),
             pane_titles: BTreeMap::from([(initial_pane_id, initial_title)]),
@@ -114,6 +110,7 @@ impl PaneHost {
             &terminal,
             window,
             move |host, _terminal, event: &TerminalPaneEvent, window, cx| match event {
+                TerminalPaneEvent::FocusRequested => host.focus_pane(pane_id, cx),
                 TerminalPaneEvent::TitleChanged(title) => {
                     host.pane_titles.insert(pane_id, title.clone());
                     cx.emit(PaneHostEvent::PresentationChanged {
@@ -253,24 +250,16 @@ impl PaneHost {
             eprintln!("cannot split Pane {target_pane_id} with invalid measured bounds");
             return;
         };
-        let Some(new_pane_id) = self.allocate_pane_id() else {
-            eprintln!("cannot split Pane because the Pane ID space is exhausted");
-            return;
-        };
-        let Some(split_id) = self.allocate_split_id() else {
-            eprintln!("cannot split Pane because the split ID space is exhausted");
-            return;
-        };
         let session_factory = Rc::clone(&self.session_factory);
         let workspace_root = self.workspace_root.clone();
         let result = self.terminal_window.split_pane(
             target_pane_id,
-            new_pane_id,
-            split_id,
             axis,
             target_size,
             DIVIDER_SIZE,
-            || Self::create_terminal(new_pane_id, session_factory, workspace_root, window, cx),
+            |new_pane_id| {
+                Self::create_terminal(new_pane_id, session_factory, workspace_root, window, cx)
+            },
         );
 
         match result {
@@ -399,18 +388,6 @@ impl PaneHost {
             PaneActionMenuCommand::ToggleZoom => self.toggle_zoom(window, cx),
             PaneActionMenuCommand::Close => self.close_pane(pane_id, window, cx),
         }
-    }
-
-    fn allocate_pane_id(&mut self) -> Option<PaneId> {
-        let id = PaneId::new(self.next_pane_id);
-        self.next_pane_id = self.next_pane_id.checked_add(1)?;
-        Some(id)
-    }
-
-    fn allocate_split_id(&mut self) -> Option<SplitId> {
-        let id = SplitId::new(self.next_split_id);
-        self.next_split_id = self.next_split_id.checked_add(1)?;
-        Some(id)
     }
 
     fn on_split_right(&mut self, _: &SplitRight, window: &mut Window, cx: &mut Context<Self>) {
@@ -905,12 +882,15 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
 
-    use gpui::{Modifiers, TestAppContext, VisualTestContext, bounds, point, px, size};
+    use gpui::{
+        Modifiers, MouseButton, ScrollDelta, ScrollWheelEvent, TestAppContext, TouchPhase,
+        VisualTestContext, bounds, point, px, size,
+    };
 
     use super::*;
     use crate::terminal::{
-        GridSize, KeyInput, PointerInput, ScreenSnapshot, SessionError, SessionEvent,
-        StartedTerminalSession, TerminalSessionHandle, WheelInput,
+        GridSize, KeyInput, PointerInput, ScreenSnapshot, ScrollbarSnapshot, SessionError,
+        SessionEvent, StartedTerminalSession, TerminalSessionHandle, WheelInput,
     };
 
     struct RecordingSessionFactory {
@@ -1237,6 +1217,79 @@ mod tests {
             cx.debug_bounds("pane-header-2-unfocused").is_some(),
         );
         assert_eq!(header_state, (true, true));
+    }
+
+    #[gpui::test]
+    fn terminal_scrollbar_interaction_should_focus_its_owning_pane(cx: &mut TestAppContext) {
+        let event_senders = Rc::new(RefCell::new(Vec::new()));
+        let session_factory: Rc<dyn TerminalSessionFactory> = Rc::new(TitleSessionFactory {
+            event_senders: Rc::clone(&event_senders),
+        });
+        let (host, cx) = cx.add_window_view(|window, cx| {
+            PaneHost::new(
+                WindowId::new(1),
+                session_factory,
+                test_workspace_root(),
+                window,
+                cx,
+            )
+        });
+        cx.update(|window, cx| {
+            host.update(cx, |host, cx| {
+                host.split_focused(SplitAxis::Horizontal, window, cx);
+            });
+        });
+        cx.run_until_parked();
+
+        let first_sender = event_senders
+            .borrow()
+            .first()
+            .cloned()
+            .expect("the first Pane session was not started");
+        first_sender
+            .try_send(SessionEvent::Screen(Arc::new(ScreenSnapshot {
+                rows: Arc::from([]),
+                background: ACTIVE_THEME.terminal_background,
+                scrollbar: ScrollbarSnapshot {
+                    total_rows: 100,
+                    visible_rows: 20,
+                    ..Default::default()
+                },
+                title: Arc::from(""),
+            })))
+            .unwrap();
+        cx.run_until_parked();
+
+        let first_pane = host.read_with(cx, |host, _| {
+            host.pane_bounds
+                .get(&PaneId::new(1))
+                .copied()
+                .expect("the first Pane bounds were not measured")
+        });
+        cx.simulate_event(ScrollWheelEvent {
+            position: first_pane.center(),
+            delta: ScrollDelta::Lines(point(0.0, -1.0)),
+            modifiers: Modifiers::none(),
+            touch_phase: TouchPhase::Moved,
+        });
+        cx.run_until_parked();
+        let scrollbar = cx
+            .debug_bounds("terminal-scrollbar-thumb-hitbox")
+            .expect("the first Pane scrollbar was not revealed");
+
+        cx.simulate_mouse_down(scrollbar.center(), MouseButton::Left, Modifiers::none());
+        cx.simulate_mouse_up(scrollbar.center(), MouseButton::Left, Modifiers::none());
+        cx.run_until_parked();
+
+        let state = cx.update(|window, cx| {
+            host.read_with(cx, |host, cx| {
+                (
+                    host.focused_pane_id(),
+                    host.focused_terminal_is_focused(window, cx),
+                )
+            })
+        });
+        assert_eq!(state, (PaneId::new(1), true));
     }
 
     #[gpui::test]

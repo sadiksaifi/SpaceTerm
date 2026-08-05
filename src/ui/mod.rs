@@ -1,3 +1,4 @@
+mod overlay_scrollbar;
 mod pane_action_menu;
 mod pane_host;
 mod terminal_element;

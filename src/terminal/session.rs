@@ -358,9 +358,12 @@ fn run_worker(
     events: async_channel::Sender<SessionEvent>,
     startup: mpsc::SyncSender<Result<(), String>>,
 ) {
-    let Some(reader) = pty.reader.take() else {
-        let _ = startup.send(Err("PTY reader was already taken".to_owned()));
-        return;
+    let reader = match pty.take_reader() {
+        Ok(reader) => reader,
+        Err(error) => {
+            let _ = startup.send(Err(error.to_string()));
+            return;
+        }
     };
 
     let reader_thread = match spawn_reader(reader, command_tx) {
@@ -410,9 +413,7 @@ fn run_worker(
 
         let keep_running = match command {
             Command::Key(input) => match emulator.key(input) {
-                Ok(action) => {
-                    apply_emulator_action(action, &mut emulator, &mut pty.writer, &events)
-                }
+                Ok(action) => apply_emulator_action(action, &mut emulator, &mut pty, &events),
                 Err(message) => {
                     send_error(&events, message);
                     false
@@ -423,12 +424,11 @@ fn run_worker(
                 &commands,
                 &mut pending_command,
                 &mut emulator,
-                &mut pty.writer,
+                &mut pty,
                 &events,
             ),
             Command::Resize(size) => {
                 let result = pty
-                    .master
                     .resize(size.pty_size())
                     .map_err(|error| {
                         format!("failed to resize the macOS pseudo-terminal: {error:#}")
@@ -448,7 +448,7 @@ fn run_worker(
                     Ok(()) => apply_emulator_action(
                         EmulatorAction::screen_changed(),
                         &mut emulator,
-                        &mut pty.writer,
+                        &mut pty,
                         &events,
                     ),
                     Err(message) => {
@@ -458,18 +458,14 @@ fn run_worker(
                 }
             }
             Command::Pointer(input) => match emulator.pointer(input) {
-                Ok(action) => {
-                    apply_emulator_action(action, &mut emulator, &mut pty.writer, &events)
-                }
+                Ok(action) => apply_emulator_action(action, &mut emulator, &mut pty, &events),
                 Err(message) => {
                     send_error(&events, message);
                     false
                 }
             },
             Command::Wheel(input) => match emulator.wheel(input) {
-                Ok(action) => {
-                    apply_emulator_action(action, &mut emulator, &mut pty.writer, &events)
-                }
+                Ok(action) => apply_emulator_action(action, &mut emulator, &mut pty, &events),
                 Err(message) => {
                     send_error(&events, message);
                     false
@@ -478,13 +474,11 @@ fn run_worker(
             Command::ScrollTo(offset_rows) => apply_emulator_action(
                 emulator.scroll_to(offset_rows),
                 &mut emulator,
-                &mut pty.writer,
+                &mut pty,
                 &events,
             ),
             Command::Paste(text) => match emulator.paste(text) {
-                Ok(action) => {
-                    apply_emulator_action(action, &mut emulator, &mut pty.writer, &events)
-                }
+                Ok(action) => apply_emulator_action(action, &mut emulator, &mut pty, &events),
                 Err(message) => {
                     send_error(&events, message);
                     false
@@ -557,7 +551,7 @@ fn process_output(
     commands: &CommandReceiver<Command>,
     pending_command: &mut Option<Command>,
     emulator: &mut TerminalEmulator,
-    writer: &mut Box<dyn Write + Send>,
+    writer: &mut dyn Write,
     events: &async_channel::Sender<SessionEvent>,
 ) -> bool {
     emulator.feed(&first);
@@ -588,7 +582,7 @@ fn process_output(
 fn apply_emulator_action(
     action: EmulatorAction,
     emulator: &mut TerminalEmulator,
-    writer: &mut Box<dyn Write + Send>,
+    writer: &mut dyn Write,
     events: &async_channel::Sender<SessionEvent>,
 ) -> bool {
     write_pending_pty_responses(emulator, writer, events)
@@ -598,7 +592,7 @@ fn apply_emulator_action(
 
 fn write_pending_pty_responses(
     emulator: &TerminalEmulator,
-    writer: &mut Box<dyn Write + Send>,
+    writer: &mut dyn Write,
     events: &async_channel::Sender<SessionEvent>,
 ) -> bool {
     let responses = emulator.take_pty_responses();
@@ -606,7 +600,7 @@ fn write_pending_pty_responses(
 }
 
 fn write_pty(
-    writer: &mut Box<dyn Write + Send>,
+    writer: &mut dyn Write,
     bytes: &[u8],
     events: &async_channel::Sender<SessionEvent>,
 ) -> bool {

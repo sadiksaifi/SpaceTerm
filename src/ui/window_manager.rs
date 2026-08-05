@@ -55,7 +55,6 @@ pub(crate) struct WindowManager {
     active: bool,
     sidebar_visible: bool,
     sidebar_width: Pixels,
-    next_window_id: u64,
     window_menu: Option<WindowMenuState>,
     window_bar_scroll_handle: ScrollHandle,
 }
@@ -71,23 +70,23 @@ impl WindowManager {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let initial_window_id = WindowId::new(1);
-        let initial_window = Self::create_pane_host(
-            initial_window_id,
-            Rc::clone(&session_factory),
-            workspace_root.clone(),
-            window,
-            cx,
-        );
+        let windows = WindowCollection::new(|window_id| {
+            Self::create_pane_host(
+                window_id,
+                Rc::clone(&session_factory),
+                workspace_root.clone(),
+                window,
+                cx,
+            )
+        });
 
         Self {
-            windows: WindowCollection::new(initial_window_id, initial_window),
+            windows,
             session_factory,
             workspace_root,
             active: true,
             sidebar_visible: true,
             sidebar_width: px(WORKSPACE_SIDEBAR_DEFAULT_WIDTH),
-            next_window_id: 2,
             window_menu: None,
             window_bar_scroll_handle: ScrollHandle::new(),
         }
@@ -180,12 +179,6 @@ impl WindowManager {
             .focused_terminal_is_focused(window, cx)
     }
 
-    fn allocate_window_id(&mut self) -> Option<WindowId> {
-        let window_id = WindowId::new(self.next_window_id);
-        self.next_window_id = self.next_window_id.checked_add(1)?;
-        Some(window_id)
-    }
-
     fn scroll_active_window_into_view(&self) {
         let active_window_id = self.windows.active_window_id();
         if let Some(index) = self
@@ -198,23 +191,22 @@ impl WindowManager {
     }
 
     pub(crate) fn create_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(window_id) = self.allocate_window_id() else {
-            eprintln!("cannot create Window because the Window ID space is exhausted");
-            return;
-        };
         let previous_window = self.windows.active_window().clone();
-        let pane_host = Self::create_pane_host(
-            window_id,
-            Rc::clone(&self.session_factory),
-            self.workspace_root.clone(),
-            window,
-            cx,
-        );
-        if let Err(error) = self.windows.create_window(window_id, || pane_host.clone()) {
-            pane_host.update(cx, |pane_host, cx| pane_host.close_all(cx));
-            Self::report_window_error("create", error);
-            return;
-        }
+        let session_factory = Rc::clone(&self.session_factory);
+        let workspace_root = self.workspace_root.clone();
+        let result = self.windows.create_window(|window_id| {
+            Self::create_pane_host(window_id, session_factory, workspace_root, window, cx)
+        });
+        let window_id = match result {
+            Ok(window_id) => window_id,
+            Err(error) => {
+                Self::report_window_error("create", error);
+                return;
+            }
+        };
+        let Some(pane_host) = self.windows.window(window_id).cloned() else {
+            unreachable!("a newly created Window must remain owned by its collection")
+        };
 
         previous_window.update(cx, |pane_host, cx| pane_host.deactivate(cx));
         if self.active {
