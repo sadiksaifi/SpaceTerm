@@ -124,6 +124,15 @@ terminal-wide reverse. Selection and Cursor colors remain separate presentation 
 color-state change invalidates prepared paint rows without changing unchanged snapshot row
 identity.
 
+### Negotiated Cursor Presentation
+
+The Terminal Emulator snapshot normalizes every visible cursor to its viewport row, wide-grapheme
+head, and occupied cell width while preserving negotiated shape, blink request, visibility, cursor
+color, and cursor-text color independently from cell and selection colors. Cursor-only changes
+damage only the previously and currently occupied viewport rows. Terminal Presentation renders a
+filled block above backgrounds and selections and recolors its covered glyph, while bar and
+underline cursors add thin geometry without replacing text.
+
 ### Unified Terminal Geometry
 
 `TerminalGeometry` is the sole conversion contract between GPUI logical viewport and cell metrics,

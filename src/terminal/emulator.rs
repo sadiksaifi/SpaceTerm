@@ -193,12 +193,15 @@ fn normalize_cursor_position(
     } else {
         column
     };
-    let width_cells = rows
+    let width_cells = if rows
         .get(usize::from(row))
         .and_then(|row| row.get(usize::from(column).saturating_add(1)))
         .is_some_and(|cell| cell.spacer_tail)
-        .then_some(2)
-        .unwrap_or(1);
+    {
+        2
+    } else {
+        1
+    };
     CursorPositionSnapshot {
         column,
         row,
@@ -2113,6 +2116,20 @@ mod tests {
     }
 
     #[test]
+    fn cursor_snapshot_tracks_blink_requests_and_hidden_state() {
+        let mut emulator = emulator(6, 2);
+        emulator.feed(b"\x1b[5 q");
+        let blinking = emulator.snapshot().unwrap().unwrap();
+        assert_eq!(blinking.cursor.shape, CursorShapeSnapshot::Bar);
+        assert!(blinking.cursor.blinking);
+        assert!(blinking.cursor.visible);
+
+        emulator.feed(b"\x1b[?25l");
+        let hidden = emulator.snapshot().unwrap().unwrap();
+        assert!(!hidden.cursor.visible);
+    }
+
+    #[test]
     fn cursor_movement_damages_only_the_old_and_new_rows() {
         let mut emulator = emulator(6, 3);
         let _ = emulator.snapshot().unwrap().unwrap();
@@ -2200,12 +2217,14 @@ mod tests {
         assert!(scrolled.damage.viewport);
         assert!(!scrolled.damage.scrollbar);
         assert!(!scrolled.damage.title);
+        assert_eq!(scrolled.cursor.position, None);
 
         let action = emulator.scroll_to(bottom.scrollbar.offset_rows);
         assert!(action.bytes.is_empty());
         assert!(action.screen_changed);
         let restored = emulator.snapshot().unwrap().unwrap();
         assert!(row_text(&restored, 0).starts_with("two"));
+        assert_eq!(restored.cursor.position.unwrap().row, 1);
         assert!(row_text(&restored, 1).starts_with("three"));
     }
 

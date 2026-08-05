@@ -7,8 +7,8 @@ use gpui::{
 };
 
 use crate::terminal::{
-    CellSnapshot, CursorPositionSnapshot, CursorSnapshot, RowSnapshot, ScreenSnapshot,
-    TerminalColor, TerminalColorsSnapshot,
+    CellSnapshot, CursorPositionSnapshot, CursorShapeSnapshot, CursorSnapshot, RowSnapshot,
+    ScreenSnapshot, TerminalColor, TerminalColorsSnapshot,
 };
 use crate::theme::{ACTIVE_THEME, Color};
 
@@ -222,15 +222,18 @@ impl Element for TerminalGridElement {
                 && usize::from(position.row) == row_index
             {
                 let cursor_left = grid_left + self.cell_width * f32::from(position.column);
-                backgrounds.push(fill(
-                    Bounds::new(
-                        point(cursor_left, row_top),
-                        size(self.cell_width, self.line_height),
-                    ),
-                    gpui_color(self.cursor_style.color),
-                ));
+                let plan = cursor_paint_plan(
+                    true,
+                    self.cursor_style.shape,
+                    point(cursor_left, row_top),
+                    self.cell_width,
+                    self.line_height,
+                    position.width_cells,
+                )
+                .expect("a visible cursor always produces a paint plan");
+                backgrounds.push(fill(plan.bounds, gpui_color(self.cursor_style.color)));
 
-                if !cell.spacer_tail {
+                if plan.recolor_text && !cell.spacer_tail {
                     let mut cursor_font = font(self.font_family.clone());
                     cursor_font.features = FontFeatures::disable_ligatures();
                     if cell.bold {
@@ -246,12 +249,12 @@ impl Element for TerminalGridElement {
                             &[TextRun {
                                 len: cell.text.len(),
                                 font: cursor_font,
-                                color: gpui_color(self.background).into(),
+                                color: gpui_color(self.cursor_style.text_color).into(),
                                 background_color: None,
                                 underline: None,
                                 strikethrough: None,
                             }],
-                            Some(self.cell_width),
+                            Some(self.cell_width * f32::from(position.width_cells)),
                         ),
                         origin: point(cursor_left, row_top),
                     });
@@ -500,6 +503,51 @@ fn effective_colors(cell: &CellSnapshot, colors: &TerminalColorsSnapshot) -> (Co
     (foreground, background)
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct CursorPaintPlan {
+    bounds: Bounds<Pixels>,
+    recolor_text: bool,
+}
+
+fn cursor_paint_plan(
+    visible: bool,
+    shape: CursorShapeSnapshot,
+    origin: gpui::Point<Pixels>,
+    cell_width: Pixels,
+    line_height: Pixels,
+    width_cells: u8,
+) -> Option<CursorPaintPlan> {
+    if !visible {
+        return None;
+    }
+
+    let cursor_width = cell_width * f32::from(width_cells.max(1));
+    let (bounds, recolor_text) = match shape {
+        CursorShapeSnapshot::Block => (Bounds::new(origin, size(cursor_width, line_height)), true),
+        CursorShapeSnapshot::Bar => (
+            Bounds::new(origin, size((cell_width * 0.12).max(px(1.0)), line_height)),
+            false,
+        ),
+        CursorShapeSnapshot::Underline => {
+            let thickness = (line_height * 0.10).max(px(1.0));
+            (
+                Bounds::new(
+                    point(origin.x, origin.y + line_height - thickness),
+                    size(cursor_width, thickness),
+                ),
+                false,
+            )
+        }
+        CursorShapeSnapshot::BlockHollow => {
+            (Bounds::new(origin, size(cursor_width, line_height)), false)
+        }
+    };
+    Some(CursorPaintPlan {
+        bounds,
+        recolor_text,
+    })
+}
+
 fn gpui_color(color: Color) -> gpui::Rgba {
     rgba(color.rgba_hex())
 }
@@ -574,6 +622,60 @@ mod tests {
         assert_eq!(
             effective_colors(&subject, &reversed),
             (Color::rgb(0x12_34_56), colors.palette[200])
+        );
+    }
+
+    #[test]
+    fn cursor_shape_geometry_and_text_layering_are_shape_specific() {
+        let origin = point(px(10.0), px(20.0));
+
+        let block = cursor_paint_plan(
+            true,
+            crate::terminal::CursorShapeSnapshot::Block,
+            origin,
+            px(9.0),
+            px(20.0),
+            2,
+        )
+        .unwrap();
+        assert_eq!(block.bounds, Bounds::new(origin, size(px(18.0), px(20.0))));
+        assert!(block.recolor_text);
+
+        let bar = cursor_paint_plan(
+            true,
+            crate::terminal::CursorShapeSnapshot::Bar,
+            origin,
+            px(9.0),
+            px(20.0),
+            2,
+        )
+        .unwrap();
+        assert_eq!(bar.bounds.size, size(px(9.0) * 0.12, px(20.0)));
+        assert!(!bar.recolor_text);
+
+        let underline = cursor_paint_plan(
+            true,
+            crate::terminal::CursorShapeSnapshot::Underline,
+            origin,
+            px(9.0),
+            px(20.0),
+            2,
+        )
+        .unwrap();
+        assert_eq!(underline.bounds.size, size(px(18.0), px(2.0)));
+        assert_eq!(underline.bounds.bottom(), px(40.0));
+        assert!(!underline.recolor_text);
+
+        assert!(
+            cursor_paint_plan(
+                false,
+                crate::terminal::CursorShapeSnapshot::Block,
+                origin,
+                px(9.0),
+                px(20.0),
+                1,
+            )
+            .is_none()
         );
     }
 
