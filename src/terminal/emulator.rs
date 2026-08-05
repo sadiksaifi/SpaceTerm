@@ -1287,6 +1287,25 @@ mod tests {
         }
     }
 
+    fn text_key(
+        physical_key: PhysicalKey,
+        text: &str,
+        unshifted_codepoint: char,
+        action: KeyAction,
+        modifiers: InputModifiers,
+    ) -> KeyInput {
+        KeyInput {
+            action,
+            physical_key,
+            native_key_code: None,
+            logical_key: text.to_owned(),
+            text: Some(text.to_owned()),
+            unshifted_codepoint: Some(unshifted_codepoint),
+            modifiers,
+            consumed_modifiers: InputModifiers::default(),
+        }
+    }
+
     fn select_first_five(emulator: &mut TerminalEmulator, shift: bool) {
         emulator
             .pointer(pointer(
@@ -1559,6 +1578,28 @@ mod tests {
                 "unexpected encoding for {code:?}"
             );
         }
+    }
+
+    #[test]
+    fn application_keypad_mode_changes_the_next_numpad_key_immediately() {
+        let mut emulator = emulator(10, 2);
+        let numpad_one = || {
+            text_key(
+                PhysicalKey::Numpad1,
+                "1",
+                '1',
+                KeyAction::Press,
+                InputModifiers::default(),
+            )
+        };
+
+        assert_eq!(emulator.key(numpad_one()).unwrap().bytes, b"1");
+        emulator.feed(b"\x1b[?1035l");
+        emulator.feed(b"\x1b[?66h");
+        assert!(emulator.terminal.mode(Mode::KEYPAD_KEYS).unwrap());
+        assert_eq!(emulator.key(numpad_one()).unwrap().bytes, b"\x1bOq");
+        emulator.feed(b"\x1b[?66l");
+        assert_eq!(emulator.key(numpad_one()).unwrap().bytes, b"1");
     }
 
     #[test]
