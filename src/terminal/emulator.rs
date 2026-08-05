@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use libghostty_vt::fmt::Format;
+use libghostty_vt::focus::Event as FocusEvent;
 use libghostty_vt::key::Mods;
 use libghostty_vt::mouse::{
     Action as MouseAction, Button as MouseButton, Encoder as MouseEncoder,
@@ -538,6 +539,29 @@ impl TerminalEmulator {
             bytes,
             screen_changed: true,
         })
+    }
+
+    pub(crate) fn focus_reporting_enabled(&self) -> Result<bool, String> {
+        self.terminal
+            .mode(Mode::FOCUS_EVENT)
+            .map_err(|error| format!("failed to query terminal focus reporting mode: {error}"))
+    }
+
+    pub(crate) fn focus(&self, focused: bool) -> Result<EmulatorAction, String> {
+        if !self.focus_reporting_enabled()? {
+            return Ok(EmulatorAction::none());
+        }
+
+        let event = if focused {
+            FocusEvent::Gained
+        } else {
+            FocusEvent::Lost
+        };
+        let mut buffer = [0_u8; 8];
+        let written = event
+            .encode(&mut buffer)
+            .map_err(|error| format!("failed to encode terminal focus event: {error}"))?;
+        Ok(EmulatorAction::bytes(buffer[..written].to_vec()))
     }
 
     pub(crate) fn pointer(&mut self, input: PointerInput) -> Result<EmulatorAction, String> {
@@ -2275,6 +2299,18 @@ mod tests {
         emulator.feed(b"\x1b[?2004h");
         let bracketed = emulator.paste("one\ntwo".to_owned()).unwrap();
         assert_eq!(bracketed.bytes, b"\x1b[200~one\ntwo\x1b[201~");
+    }
+
+    #[test]
+    fn focus_encoding_obeys_dec_1004_mode() {
+        let mut emulator = emulator(10, 2);
+
+        assert_eq!(emulator.focus(true).unwrap().bytes, b"");
+        emulator.feed(b"\x1b[?1004h");
+        assert_eq!(emulator.focus(true).unwrap().bytes, b"\x1b[I");
+        assert_eq!(emulator.focus(false).unwrap().bytes, b"\x1b[O");
+        emulator.feed(b"\x1b[?1004l");
+        assert_eq!(emulator.focus(false).unwrap().bytes, b"");
     }
 
     #[test]

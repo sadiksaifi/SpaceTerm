@@ -19,6 +19,7 @@ pub(crate) struct RecordedSessionStart {
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum RecordedSessionCommand {
     Key(KeyInput),
+    Focus(bool),
     Resize(TerminalGeometry),
     Pointer(PointerInput),
     Wheel(WheelInput),
@@ -188,6 +189,10 @@ impl Drop for TestTerminalSessionHandle {
 impl TerminalSessionHandle for TestTerminalSessionHandle {
     fn key(&self, input: KeyInput) {
         self.record(RecordedSessionCommand::Key(input));
+    }
+
+    fn focus(&self, focused: bool) {
+        self.record(RecordedSessionCommand::Focus(focused));
     }
 
     fn resize(&self, geometry: TerminalGeometry) {

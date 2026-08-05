@@ -197,6 +197,7 @@ pub(crate) struct StartedTerminalSession {
 
 pub(crate) trait TerminalSessionHandle {
     fn key(&self, input: KeyInput);
+    fn focus(&self, focused: bool);
     fn resize(&self, geometry: TerminalGeometry);
     fn pointer(&self, input: PointerInput);
     fn wheel(&self, input: WheelInput);
@@ -497,6 +498,14 @@ impl TerminalSession {
         }
     }
 
+    pub(crate) fn focus(&self, focused: bool) {
+        if let Some(commands) = &self.commands
+            && commands.send(Command::Focus(focused)).is_err()
+        {
+            eprintln!("terminal focus input was dropped because the worker has stopped");
+        }
+    }
+
     pub(crate) fn resize(&self, geometry: TerminalGeometry) {
         if let Some(commands) = &self.commands
             && self.resizes.replace(geometry)
@@ -577,6 +586,10 @@ impl TerminalSessionHandle for TerminalSession {
         Self::key(self, input);
     }
 
+    fn focus(&self, focused: bool) {
+        Self::focus(self, focused);
+    }
+
     fn resize(&self, geometry: TerminalGeometry) {
         Self::resize(self, geometry);
     }
@@ -638,6 +651,7 @@ struct ReaderEventBatch {
 #[derive(Debug)]
 enum Command {
     Key(KeyInput),
+    Focus(bool),
     Resize,
     Pointer(PointerInput),
     Wheel(WheelInput),
@@ -657,6 +671,43 @@ struct TerminalWorker {
     events: async_channel::Sender<SessionEvent>,
     resizes: ResizeMailbox,
     pending_command: Option<Command>,
+    terminal_input_focused: bool,
+    focus_reporting_enabled: bool,
+    held_keys: HeldKeys,
+}
+
+#[derive(Default)]
+struct HeldKeys(Vec<KeyInput>);
+
+impl HeldKeys {
+    fn route(&mut self, input: &KeyInput) {
+        match input.action {
+            crate::terminal::key::KeyAction::Press | crate::terminal::key::KeyAction::Repeat => {
+                if let Some(held) = self
+                    .0
+                    .iter_mut()
+                    .find(|held| held.physical_key == input.physical_key)
+                {
+                    *held = input.clone();
+                } else {
+                    self.0.push(input.clone());
+                }
+            }
+            crate::terminal::key::KeyAction::Release => self
+                .0
+                .retain(|held| held.physical_key != input.physical_key),
+        }
+    }
+
+    fn take_releases(&mut self) -> Vec<KeyInput> {
+        std::mem::take(&mut self.0)
+            .into_iter()
+            .map(|mut input| {
+                input.action = crate::terminal::key::KeyAction::Release;
+                input
+            })
+            .collect()
+    }
 }
 
 enum StartupReporter {
@@ -744,6 +795,9 @@ impl TerminalWorker {
             events,
             resizes,
             pending_command: None,
+            terminal_input_focused: true,
+            focus_reporting_enabled: false,
+            held_keys: HeldKeys::default(),
         };
 
         if !startup.succeeded() {
@@ -777,13 +831,8 @@ impl TerminalWorker {
 
     fn process_command(&mut self, command: Command) -> bool {
         match command {
-            Command::Key(input) => match self.emulator.key(input) {
-                Ok(action) => self.apply_emulator_action(action),
-                Err(message) => {
-                    self.send_runtime_failure(message);
-                    false
-                }
-            },
+            Command::Key(input) => self.process_key(input),
+            Command::Focus(focused) => self.process_focus(focused),
             Command::ReaderReady => self.process_reader_events(),
             Command::Resize => {
                 let Some(geometry) = self.resizes.take() else {
@@ -913,14 +962,78 @@ impl TerminalWorker {
 
     fn process_output_chunks(&mut self, chunks: Vec<Vec<u8>>) -> bool {
         let received_output = !chunks.is_empty();
+        let mut focus_reports = Vec::new();
         for bytes in chunks {
             self.emulator.feed(&bytes);
+            let focus_reporting_enabled = match self.emulator.focus_reporting_enabled() {
+                Ok(enabled) => enabled,
+                Err(message) => {
+                    self.send_runtime_failure(message);
+                    return false;
+                }
+            };
+            if focus_reporting_enabled && !self.focus_reporting_enabled {
+                match self.emulator.focus(self.terminal_input_focused) {
+                    Ok(action) => focus_reports.extend(action.bytes),
+                    Err(message) => {
+                        self.send_runtime_failure(message);
+                        return false;
+                    }
+                }
+            }
+            self.focus_reporting_enabled = focus_reporting_enabled;
         }
 
-        if received_output && (!self.write_pending_pty_responses() || !self.publish_screen()) {
+        if received_output
+            && (!self.write_pending_pty_responses()
+                || (!focus_reports.is_empty() && !self.write_pty(&focus_reports))
+                || !self.publish_screen())
+        {
             return false;
         }
         true
+    }
+
+    fn process_key(&mut self, input: KeyInput) -> bool {
+        self.held_keys.route(&input);
+        match self.emulator.key(input) {
+            Ok(action) => self.apply_emulator_action(action),
+            Err(message) => {
+                self.send_runtime_failure(message);
+                false
+            }
+        }
+    }
+
+    fn process_focus(&mut self, focused: bool) -> bool {
+        if self.terminal_input_focused == focused {
+            return true;
+        }
+
+        if !focused {
+            for input in self.held_keys.take_releases() {
+                match self.emulator.key(input) {
+                    Ok(action) => {
+                        if !self.apply_emulator_action(action) {
+                            return false;
+                        }
+                    }
+                    Err(message) => {
+                        self.send_runtime_failure(message);
+                        return false;
+                    }
+                }
+            }
+        }
+        self.terminal_input_focused = focused;
+
+        match self.emulator.focus(focused) {
+            Ok(action) => self.apply_emulator_action(action),
+            Err(message) => {
+                self.send_runtime_failure(message);
+                false
+            }
+        }
     }
 
     fn apply_emulator_action(&mut self, action: EmulatorAction) -> bool {
@@ -976,6 +1089,9 @@ impl TerminalWorker {
             events: _events,
             resizes: _resizes,
             pending_command: _pending_command,
+            terminal_input_focused: _terminal_input_focused,
+            focus_reporting_enabled: _focus_reporting_enabled,
+            held_keys: _held_keys,
         } = self;
         // SpawnedPty's Drop terminates and reaps a live shell for the native Adapter.
         drop(reader_events);
@@ -1103,6 +1219,37 @@ mod tests {
 
     fn test_geometry() -> TerminalGeometry {
         geometry(80, 24, 8.0, 20.0)
+    }
+
+    fn text_key(action: KeyAction) -> KeyInput {
+        KeyInput {
+            action,
+            physical_key: PhysicalKey::A,
+            native_key_code: Some(0),
+            logical_key: "a".to_owned(),
+            text: Some("a".to_owned()),
+            unshifted_codepoint: Some('a'),
+            modifiers: InputModifiers::default(),
+            consumed_modifiers: InputModifiers::default(),
+            option_as_alt: OptionAsAltPolicy::default(),
+        }
+    }
+
+    fn modifier_key(action: KeyAction) -> KeyInput {
+        KeyInput {
+            action,
+            physical_key: PhysicalKey::ShiftLeft,
+            native_key_code: Some(56),
+            logical_key: "shift".to_owned(),
+            text: None,
+            unshifted_codepoint: None,
+            modifiers: InputModifiers {
+                shift: action != KeyAction::Release,
+                ..InputModifiers::default()
+            },
+            consumed_modifiers: InputModifiers::default(),
+            option_as_alt: OptionAsAltPolicy::default(),
+        }
     }
 
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1803,6 +1950,101 @@ mod tests {
     }
 
     #[test]
+    fn held_keys_track_only_terminal_routed_keys_and_modifiers() {
+        let mut held = HeldKeys::default();
+        held.route(&text_key(KeyAction::Press));
+        held.route(&modifier_key(KeyAction::Press));
+        held.route(&text_key(KeyAction::Release));
+
+        let releases = held.take_releases();
+
+        assert_eq!(releases.len(), 1);
+        assert_eq!(releases[0].physical_key, PhysicalKey::ShiftLeft);
+        assert_eq!(releases[0].action, KeyAction::Release);
+        assert!(held.take_releases().is_empty());
+
+        let application_shortcut_never_routed = HeldKeys::default();
+        assert!(application_shortcut_never_routed.0.is_empty());
+    }
+
+    #[test]
+    fn enabling_focus_reporting_emits_current_state_and_deduplicates_edges() {
+        let (result, reader_steps, records) = start_scripted_session(ScriptedPtyOptions::default());
+        let (mut session, _events) = result.unwrap();
+        session.focus(false);
+        reader_steps
+            .send(ReaderStep::Bytes(b"\x1b[?1004h".to_vec()))
+            .unwrap();
+
+        let enabled = records.wait_for("the current focus-out report", |state| {
+            state.written == b"\x1b[O"
+        });
+        assert_eq!(enabled.written, b"\x1b[O");
+
+        session.focus(false);
+        session.resize(test_geometry());
+        records.wait_for("the duplicate focus barrier", |state| {
+            !state.resizes.is_empty()
+        });
+        assert_eq!(records.snapshot().written, b"\x1b[O");
+
+        session.focus(true);
+        records.wait_for("the focus-in edge", |state| {
+            state.written == b"\x1b[O\x1b[I"
+        });
+        session.focus(true);
+        session.resize(geometry(81, 24, 8.0, 20.0));
+        records.wait_for("the duplicate focus-in barrier", |state| {
+            state.resizes.len() == 2
+        });
+        assert_eq!(records.snapshot().written, b"\x1b[O\x1b[I");
+
+        reader_steps
+            .send(ReaderStep::Bytes(b"\x1b[?1004l".to_vec()))
+            .unwrap();
+        session.resize(geometry(82, 24, 8.0, 20.0));
+        records.wait_for("the focus-reporting disable barrier", |state| {
+            state.resizes.len() == 3
+        });
+        session.focus(false);
+        session.resize(geometry(83, 24, 8.0, 20.0));
+        records.wait_for("the disabled focus edge barrier", |state| {
+            state.resizes.len() == 4
+        });
+        assert_eq!(records.snapshot().written, b"\x1b[O\x1b[I");
+
+        session.shutdown();
+    }
+
+    #[test]
+    fn focus_loss_releases_terminal_held_keys_once_before_focus_out() {
+        let (result, reader_steps, records) = start_scripted_session(ScriptedPtyOptions::default());
+        let (mut session, _events) = result.unwrap();
+        reader_steps
+            .send(ReaderStep::Bytes(b"\x1b[>11u\x1b[?1004h".to_vec()))
+            .unwrap();
+        records.wait_for("the current focus-in report", |state| {
+            state.written == b"\x1b[I"
+        });
+
+        session.key(text_key(KeyAction::Press));
+        session.focus(false);
+        records.wait_for("held release before focus-out", |state| {
+            state.written.ends_with(b"\x1b[97;1:3u\x1b[O")
+        });
+        let once = records.snapshot().written;
+
+        session.focus(false);
+        session.resize(test_geometry());
+        records.wait_for("the duplicate focus-out barrier", |state| {
+            !state.resizes.is_empty()
+        });
+        assert_eq!(records.snapshot().written, once);
+
+        session.shutdown();
+    }
+
+    #[test]
     fn consecutive_output_chunks_should_publish_one_ordered_coalesced_screen() {
         let (command_tx, commands) = mpsc::channel();
         let (reader_events, reader_event_rx) = mpsc::sync_channel(PTY_OUTPUT_QUEUE_CAPACITY);
@@ -1838,6 +2080,9 @@ mod tests {
             events,
             resizes: ResizeMailbox::default(),
             pending_command: None,
+            terminal_input_focused: true,
+            focus_reporting_enabled: false,
+            held_keys: HeldKeys::default(),
         };
 
         assert!(worker.process_reader_events());
