@@ -5,6 +5,7 @@ use gpui::{
     InspectorElementId, IntoElement, LayoutId, PaintQuad, Pixels, ShapedLine, SharedString, Style,
     TextRun, Window, fill, font, outline, point, px, relative, rgba, size,
 };
+use unicode_bidi::{BidiClass, bidi_class};
 
 use crate::terminal::{
     CellSnapshot, CursorPositionSnapshot, CursorShapeSnapshot, CursorSnapshot, RowSnapshot,
@@ -504,8 +505,10 @@ fn prepare_row(
         }
 
         let is_wide_head = row.get(column + 1).is_some_and(|next| next.spacer_tail);
-        let is_single_scalar = cell.text.chars().count() == 1;
-        if is_wide_head || !is_single_scalar {
+        let requires_whole_cell_shaping = is_wide_head
+            || cell.text.chars().count() != 1
+            || cell.text.chars().any(is_bidi_sensitive);
+        if requires_whole_cell_shaping {
             if let Some(fragment) = regular_fragment.take() {
                 fragments.push(fragment.finish(true));
             }
@@ -528,6 +531,25 @@ fn prepare_row(
         backgrounds,
         selections,
     }
+}
+
+fn is_bidi_sensitive(character: char) -> bool {
+    matches!(
+        bidi_class(character),
+        BidiClass::R
+            | BidiClass::AL
+            | BidiClass::AN
+            | BidiClass::NSM
+            | BidiClass::RLE
+            | BidiClass::RLO
+            | BidiClass::RLI
+            | BidiClass::LRE
+            | BidiClass::LRO
+            | BidiClass::LRI
+            | BidiClass::FSI
+            | BidiClass::PDI
+            | BidiClass::PDF
+    )
 }
 
 fn cursor_column_for_row(cursor: Option<CursorPositionSnapshot>, row: usize) -> Option<usize> {
@@ -920,6 +942,28 @@ mod tests {
         assert_eq!(input.fragments[2].text.as_ref(), "e\u{301}");
         assert_eq!(input.fragments[3].start, 4);
         assert_eq!(input.fragments[3].text.as_ref(), "y");
+    }
+
+    #[test]
+    fn right_to_left_cells_keep_terminal_cell_order() {
+        let row = Arc::<[CellSnapshot]>::from([cell("א"), cell("ב"), cell("ג")]);
+
+        let input = prepare_row(&row, &colors(), &"Menlo".into(), None);
+
+        assert_eq!(
+            input
+                .fragments
+                .iter()
+                .map(|fragment| (fragment.start, fragment.text.as_ref()))
+                .collect::<Vec<_>>(),
+            vec![(0, "א"), (1, "ב"), (2, "ג")]
+        );
+        assert!(
+            input
+                .fragments
+                .iter()
+                .all(|fragment| !fragment.force_cell_width)
+        );
     }
 
     #[test]
