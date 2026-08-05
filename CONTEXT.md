@@ -142,6 +142,19 @@ blockers. Only the complete true state admits terminal key input and presents th
 cursor. Any false fact preserves emulator visibility but presents a steady, outline-only hollow
 block; restoring every fact restores the negotiated shape and blink request.
 
+### Terminal Grapheme Shaping
+
+Terminal Presentation shapes the complete text stored in each terminal cell and anchors the
+result at that cell's grid position. Wide heads, combining sequences, variation-selector forms,
+emoji ZWJ sequences, and bidirectional-sensitive cells use an unconstrained whole-cell shaping
+fragment; spacer tails never produce text. Compatible simple narrow cells may share one
+fixed-width fragment, but fragments never cross a row, Selection, or Cursor boundary. Terminal
+fonts disable ligatures and carry an explicit emoji and system-monospace fallback cascade, while
+CoreText appends its language-aware system cascade. Cursor recoloring uses the same whole-grapheme
+width policy as ordinary text. Prepared rows retain immutable snapshot identity, and a Cursor move
+rebuilds only its previous and current rows, so shaping work remains bounded by visible cells and
+changed rows.
+
 ### Ordered Terminal Focus Reporting
 
 Every authoritative Terminal Input Focus transition crosses the reliable Terminal Session command

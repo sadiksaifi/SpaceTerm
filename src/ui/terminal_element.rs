@@ -1,9 +1,9 @@
 use std::sync::Arc;
 
 use gpui::{
-    App, BorderStyle, Bounds, ContentMask, Element, ElementId, FontFeatures, GlobalElementId,
-    InspectorElementId, IntoElement, LayoutId, PaintQuad, Pixels, ShapedLine, SharedString, Style,
-    TextRun, Window, fill, font, outline, point, px, relative, rgba, size,
+    App, BorderStyle, Bounds, ContentMask, Element, ElementId, Font, FontFallbacks, FontFeatures,
+    GlobalElementId, InspectorElementId, IntoElement, LayoutId, PaintQuad, Pixels, ShapedLine,
+    SharedString, Style, TextRun, Window, fill, font, outline, point, px, relative, rgba, size,
 };
 use unicode_bidi::{BidiClass, bidi_class};
 
@@ -268,14 +268,7 @@ impl Element for TerminalGridElement {
                 });
 
                 if plan.recolor_text && !cell.spacer_tail {
-                    let mut cursor_font = font(self.font_family.clone());
-                    cursor_font.features = FontFeatures::disable_ligatures();
-                    if cell.bold {
-                        cursor_font = cursor_font.bold();
-                    }
-                    if cell.italic {
-                        cursor_font = cursor_font.italic();
-                    }
+                    let cursor_font = terminal_cell_font(&self.font_family, cell.bold, cell.italic);
                     text.push(PreparedText {
                         line: window.text_system().shape_line(
                             cell.text.clone().into(),
@@ -288,7 +281,8 @@ impl Element for TerminalGridElement {
                                 underline: None,
                                 strikethrough: None,
                             }],
-                            Some(self.cell_width * f32::from(position.width_cells)),
+                            force_cell_width_for_cell(&cell.text, position.width_cells)
+                                .then_some(self.cell_width),
                         ),
                         origin: point(cursor_left, row_top),
                     });
@@ -396,14 +390,7 @@ impl FragmentBuilder {
         }
 
         let (foreground, _) = effective_colors(cell, colors);
-        let mut cell_font = font(font_family.clone());
-        cell_font.features = FontFeatures::disable_ligatures();
-        if cell.bold {
-            cell_font = cell_font.bold();
-        }
-        if cell.italic {
-            cell_font = cell_font.italic();
-        }
+        let cell_font = terminal_cell_font(font_family, cell.bold, cell.italic);
         let color = gpui_color(foreground).into();
 
         if let Some(previous) = self.runs.last_mut()
@@ -434,6 +421,25 @@ impl FragmentBuilder {
             force_cell_width,
         }
     }
+}
+
+pub(super) fn terminal_cell_font(family: &SharedString, bold: bool, italic: bool) -> Font {
+    let mut cell_font = font(family.clone());
+    cell_font.features = FontFeatures::disable_ligatures();
+    cell_font.fallbacks = Some(FontFallbacks::from_fonts(
+        ["Apple Color Emoji", "Menlo"]
+            .into_iter()
+            .filter(|fallback| !family.as_ref().eq_ignore_ascii_case(fallback))
+            .map(str::to_owned)
+            .collect(),
+    ));
+    if bold {
+        cell_font = cell_font.bold();
+    }
+    if italic {
+        cell_font = cell_font.italic();
+    }
+    cell_font
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -496,18 +502,15 @@ fn prepare_row(
 
         if regular_fragment
             .as_ref()
-            .is_some_and(|fragment| {
-                fragment.selected != cell.selected || fragment.cursor != cursor
-            })
+            .is_some_and(|fragment| fragment.selected != cell.selected || fragment.cursor != cursor)
             && let Some(fragment) = regular_fragment.take()
         {
             fragments.push(fragment.finish(true));
         }
 
         let is_wide_head = row.get(column + 1).is_some_and(|next| next.spacer_tail);
-        let requires_whole_cell_shaping = is_wide_head
-            || cell.text.chars().count() != 1
-            || cell.text.chars().any(is_bidi_sensitive);
+        let width_cells = if is_wide_head { 2 } else { 1 };
+        let requires_whole_cell_shaping = !force_cell_width_for_cell(&cell.text, width_cells);
         if requires_whole_cell_shaping {
             if let Some(fragment) = regular_fragment.take() {
                 fragments.push(fragment.finish(true));
@@ -550,6 +553,10 @@ fn is_bidi_sensitive(character: char) -> bool {
             | BidiClass::PDI
             | BidiClass::PDF
     )
+}
+
+fn force_cell_width_for_cell(text: &str, width_cells: u8) -> bool {
+    width_cells == 1 && text.chars().count() == 1 && !text.chars().any(is_bidi_sensitive)
 }
 
 fn cursor_column_for_row(cursor: Option<CursorPositionSnapshot>, row: usize) -> Option<usize> {
@@ -849,6 +856,23 @@ mod tests {
     }
 
     #[test]
+    fn terminal_text_runs_configure_emoji_and_system_fallbacks() {
+        let row = Arc::<[CellSnapshot]>::from([cell("A")]);
+
+        let input = prepare_row(&row, &colors(), &"JetBrains Mono".into(), None);
+
+        assert_eq!(
+            input.fragments[0].runs[0]
+                .font
+                .fallbacks
+                .as_ref()
+                .expect("terminal text must carry an explicit fallback cascade")
+                .fallback_list(),
+            ["Apple Color Emoji", "Menlo"]
+        );
+    }
+
+    #[test]
     fn matching_cell_backgrounds_coalesce() {
         let accent = ACTIVE_THEME.terminal_normal()[1];
         let mut first = cell("a");
@@ -964,6 +988,16 @@ mod tests {
                 .iter()
                 .all(|fragment| !fragment.force_cell_width)
         );
+    }
+
+    #[test]
+    fn width_constraints_only_apply_to_simple_narrow_cells() {
+        assert!(force_cell_width_for_cell("a", 1));
+        assert!(!force_cell_width_for_cell("界", 2));
+        assert!(!force_cell_width_for_cell("e\u{301}", 1));
+        assert!(!force_cell_width_for_cell("\u{2764}\u{fe0f}", 2));
+        assert!(!force_cell_width_for_cell("👩\u{200d}💻", 2));
+        assert!(!force_cell_width_for_cell("א", 1));
     }
 
     #[test]

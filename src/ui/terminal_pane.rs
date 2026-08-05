@@ -661,6 +661,10 @@ impl Render for TerminalPane {
 
 fn terminal_font(cx: &App) -> SharedString {
     let font_names = cx.text_system().all_font_names();
+    select_terminal_font(&font_names).into()
+}
+
+fn select_terminal_font(font_names: &[String]) -> &'static str {
     [
         "JetBrainsMono Nerd Font",
         "JetBrainsMono Nerd Font Mono",
@@ -674,7 +678,6 @@ fn terminal_font(cx: &App) -> SharedString {
             .any(|available| available.eq_ignore_ascii_case(candidate))
     })
     .unwrap_or("Menlo")
-    .into()
 }
 
 fn measure_cell_width(window: &mut Window, family: &SharedString, font_size: f32) -> Pixels {
@@ -1240,6 +1243,55 @@ mod tests {
             normalized_pane_title("  Claude Code  ", "zsh"),
             "Claude Code"
         );
+    }
+
+    #[test]
+    fn preferred_terminal_font_is_selected_when_present() {
+        let available = vec!["Menlo".to_owned(), "JetBrains Mono".to_owned()];
+
+        assert_eq!(select_terminal_font(&available), "JetBrains Mono");
+    }
+
+    #[test]
+    fn system_monospace_font_is_selected_when_preferred_fonts_are_absent() {
+        let available = vec!["Helvetica".to_owned(), "Menlo".to_owned()];
+
+        assert_eq!(select_terminal_font(&available), "Menlo");
+    }
+
+    #[gpui::test]
+    fn native_shaper_resolves_emoji_through_terminal_fallbacks(cx: &mut TestAppContext) {
+        let (_pane, cx) = terminal_pane(cx);
+
+        cx.update(|window, _cx| {
+            let text = "👩\u{200d}💻";
+            let run = TextRun {
+                len: text.len(),
+                font: crate::ui::terminal_element::terminal_cell_font(
+                    &"Menlo".into(),
+                    false,
+                    false,
+                ),
+                color: gpui_color(ACTIVE_THEME.terminal_foreground).into(),
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            };
+
+            let shaped =
+                window
+                    .text_system()
+                    .shape_line(text.into(), px(DEFAULT_FONT_SIZE), &[run], None);
+
+            assert_eq!(shaped.len(), text.len());
+            assert!(
+                shaped
+                    .runs
+                    .iter()
+                    .flat_map(|run| &run.glyphs)
+                    .any(|glyph| glyph.is_emoji)
+            );
+        });
     }
 
     #[test]
