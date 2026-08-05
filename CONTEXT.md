@@ -213,6 +213,13 @@ its last accepted mapping, while output, resize, or page movement requires a fre
 Generation. Off-grid drags request worker-owned autoscroll through the existing deadline loop; its
 rate is deterministic, depth-sensitive, bounded, and cancelled by release or stale mapping.
 
+Selection copy is an ordered worker query that formats the terminal-owned range through
+`libghostty-vt` into a typed plain-text and optional HTML value. Its explicit options distinguish
+soft-wrap unwrapping from hard newlines and make trailing-space trimming deterministic; wide
+spacer tails never become duplicated text. Pasteboard ownership stays outside the Terminal
+Emulator: the macOS Adapter publishes only public UTF-8 plain-text and HTML representations, and
+copy failures report the operation or representation type without logging copied content.
+
 ### Typed Terminal Key Input
 
 Terminal key input crosses the Terminal Session command lane as one ordered, typed event carrying

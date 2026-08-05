@@ -26,6 +26,7 @@ use libghostty_vt::{Error, RenderState, Terminal, TerminalOptions};
 use crate::terminal::geometry::{BackingPosition, TerminalGeometry};
 use crate::terminal::key::{InputModifiers, KeyAction, KeyInput, OptionAsAltPolicy, PhysicalKey};
 use crate::terminal::keyboard_protocol::KeyboardProtocolEncoder;
+use crate::terminal::selection::{SelectionCopy, SelectionCopyOptions, TrailingSpacePolicy};
 use crate::terminal::session::{
     PointerButton, PointerInput, PointerPhase, ShiftSelectionPolicy, SurfacePosition, WheelInput,
 };
@@ -833,11 +834,35 @@ impl TerminalEmulator {
         })
     }
 
+    #[cfg(test)]
     pub(crate) fn selection_text(&self) -> Result<Option<String>, String> {
+        self.format_selection(Format::Plain, SelectionCopyOptions::default())
+    }
+
+    pub(crate) fn selection_copy(
+        &self,
+        options: SelectionCopyOptions,
+    ) -> Result<Option<SelectionCopy>, String> {
+        let Some(plain_text) = self.format_selection(Format::Plain, options)? else {
+            return Ok(None);
+        };
+        let html = if options.include_html {
+            self.format_selection(Format::Html, options)?
+        } else {
+            None
+        };
+        Ok(Some(SelectionCopy { plain_text, html }))
+    }
+
+    fn format_selection(
+        &self,
+        format: Format,
+        options: SelectionCopyOptions,
+    ) -> Result<Option<String>, String> {
         let options = FormatOptions::new()
-            .with_emit_format(Format::Plain)
-            .with_unwrap(true)
-            .with_trim(true);
+            .with_emit_format(format)
+            .with_unwrap(options.unwrap_soft_wraps)
+            .with_trim(options.trailing_spaces == TrailingSpacePolicy::Trim);
         let Some(bytes) = self
             .terminal
             .format_selection_alloc(None, options)
@@ -850,7 +875,7 @@ impl TerminalEmulator {
             .map(Some)
             .map_err(|error| {
                 format!(
-                    "terminal selection contained invalid UTF-8 at byte {}",
+                    "formatted terminal selection contained invalid UTF-8 at byte {}",
                     error.utf8_error().valid_up_to()
                 )
             })
@@ -1969,6 +1994,11 @@ mod tests {
         assert_eq!(emulator.selection_text().unwrap(), Some("hello".to_owned()));
     }
 
+    fn select_all(emulator: &mut TerminalEmulator) {
+        let selection = emulator.terminal.select_all().unwrap().unwrap();
+        emulator.terminal.set_selection(Some(&selection)).unwrap();
+    }
+
     fn row_text(snapshot: &ScreenSnapshot, row: usize) -> String {
         snapshot.rows[row]
             .iter()
@@ -2969,6 +2999,50 @@ mod tests {
         assert!(snapshot.rows[0][..5].iter().all(|cell| cell.selected));
         assert!(!snapshot.rows[0][5].selected);
         assert_eq!(emulator.selection_text().unwrap(), Some("hello".to_owned()));
+    }
+
+    #[test]
+    fn selection_copy_distinguishes_soft_wraps_and_hard_lines() {
+        let mut emulator = emulator(5, 3);
+        emulator.feed(b"abcdefgh\r\nxy");
+        select_all(&mut emulator);
+
+        let copy = emulator
+            .selection_copy(SelectionCopyOptions::default())
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(copy.plain_text, "abcdefgh\nxy");
+        let html = copy.html.unwrap();
+        assert!(html.contains("abcdefgh"));
+        assert!(html.contains("xy"));
+        assert!(!html.contains("CellSnapshot"));
+    }
+
+    #[test]
+    fn selection_copy_wide_cells_and_trailing_space_policy_are_deterministic() {
+        let mut emulator = emulator(6, 2);
+        emulator.feed("😀  \r\nx".as_bytes());
+        select_all(&mut emulator);
+
+        let trimmed = emulator
+            .selection_copy(SelectionCopyOptions::default())
+            .unwrap()
+            .unwrap();
+        let preserved = emulator
+            .selection_copy(SelectionCopyOptions {
+                trailing_spaces: TrailingSpacePolicy::Preserve,
+                include_html: false,
+                ..SelectionCopyOptions::default()
+            })
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(trimmed.plain_text.matches('😀').count(), 1);
+        assert_eq!(trimmed.plain_text, "😀\nx");
+        assert!(preserved.plain_text.starts_with("😀  \n"));
+        assert_eq!(preserved.plain_text.matches('😀').count(), 1);
+        assert_eq!(preserved.html, None);
     }
 
     #[test]

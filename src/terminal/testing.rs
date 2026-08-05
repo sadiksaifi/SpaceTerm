@@ -5,7 +5,7 @@ use std::rc::Rc;
 
 use super::geometry::TerminalGeometry;
 use super::{
-    KeyInput, PointerInput, PresentationGeneration, SessionError, SessionEvent,
+    KeyInput, PointerInput, PresentationGeneration, SelectionCopy, SessionError, SessionEvent,
     StartedTerminalSession, TerminalSessionFactory, TerminalSessionHandle, WheelInput,
 };
 
@@ -25,7 +25,7 @@ pub(crate) enum RecordedSessionCommand {
     Wheel(WheelInput),
     ScrollTo(u64, PresentationGeneration),
     Paste(String),
-    RequestSelectionText,
+    RequestSelectionCopy,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -87,7 +87,7 @@ pub(crate) struct TestTerminalSessionFactory {
     next_session_id: Cell<usize>,
     fallback_title: String,
     start_failure: Option<String>,
-    selection_response: Result<Option<String>, String>,
+    selection_response: Result<Option<SelectionCopy>, String>,
 }
 
 impl TestTerminalSessionFactory {
@@ -111,9 +111,9 @@ impl TestTerminalSessionFactory {
         self
     }
 
-    pub(crate) fn with_selection_response(
+    pub(crate) fn with_selection_copy_response(
         mut self,
-        response: Result<Option<String>, String>,
+        response: Result<Option<SelectionCopy>, String>,
     ) -> Self {
         self.selection_response = response;
         self
@@ -162,7 +162,7 @@ impl TerminalSessionFactory for TestTerminalSessionFactory {
 struct TestTerminalSessionHandle {
     session_id: usize,
     records: TestTerminalSessionRecords,
-    selection_response: Result<Option<String>, String>,
+    selection_response: Result<Option<SelectionCopy>, String>,
 }
 
 impl TestTerminalSessionHandle {
@@ -215,8 +215,10 @@ impl TerminalSessionHandle for TestTerminalSessionHandle {
         self.record(RecordedSessionCommand::Paste(text));
     }
 
-    fn request_selection_text(&self) -> async_channel::Receiver<Result<Option<String>, String>> {
-        self.record(RecordedSessionCommand::RequestSelectionText);
+    fn request_selection_copy(
+        &self,
+    ) -> async_channel::Receiver<Result<Option<SelectionCopy>, String>> {
+        self.record(RecordedSessionCommand::RequestSelectionCopy);
         let (sender, receiver) = async_channel::bounded(1);
         let _ = sender.try_send(self.selection_response.clone());
         receiver

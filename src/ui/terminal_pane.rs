@@ -1,12 +1,14 @@
 use std::ops::Range;
 use std::sync::Arc;
 
+#[cfg(test)]
+use gpui::ClipboardItem;
 use gpui::prelude::*;
 use gpui::{
-    App, Bounds, ClipboardItem, Context, Entity, EntityInputHandler, EventEmitter, FocusHandle,
-    IntoElement, KeyDownEvent, KeyUpEvent, ModifiersChangedEvent, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, Pixels, Render, ScrollWheelEvent, SharedString, Task, TextRun,
-    UTF16Selection, Window, div, font, point, px, rgba, size,
+    App, Bounds, Context, Entity, EntityInputHandler, EventEmitter, FocusHandle, IntoElement,
+    KeyDownEvent, KeyUpEvent, ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, Pixels, Render, ScrollWheelEvent, SharedString, Task, TextRun, UTF16Selection,
+    Window, div, font, point, px, rgba, size,
 };
 
 use super::overlay_scrollbar::{OverlayScrollbar, OverlayScrollbarEvent, ScrollMetrics};
@@ -27,8 +29,8 @@ use crate::terminal::geometry::{
 };
 use crate::terminal::{
     InputModifiers, KeyAction, KeyInput, OptionAsAltPolicy, PhysicalKey, PointerButton,
-    PointerInput, PointerPhase, ScreenSnapshot, SessionEvent, ShiftSelectionPolicy, SurfacePosition,
-    TerminalSessionHandle, WheelInput, WorkspaceTerminalSessionFactory,
+    PointerInput, PointerPhase, ScreenSnapshot, SelectionCopy, SessionEvent, ShiftSelectionPolicy,
+    SurfacePosition, TerminalSessionHandle, WheelInput, WorkspaceTerminalSessionFactory,
 };
 use crate::theme::{ACTIVE_THEME, Color};
 
@@ -594,11 +596,15 @@ impl TerminalPane {
         let Some(session) = &self.session else {
             return;
         };
-        let receiver = session.request_selection_text();
+        let receiver = session.request_selection_copy();
         cx.spawn(async move |this, cx| match receiver.recv().await {
-            Ok(Ok(Some(text))) if !text.is_empty() => {
-                let _ = this.update(cx, |_this, cx| {
-                    cx.write_to_clipboard(ClipboardItem::new_string(text));
+            Ok(Ok(Some(copy))) if !copy.plain_text.is_empty() => {
+                let _ = this.update(cx, |this, cx| {
+                    if let Err(error) = write_selection_copy(copy, cx) {
+                        eprintln!("failed to write terminal selection to pasteboard: {error}");
+                        this.status = Some(error);
+                        cx.notify();
+                    }
                 });
             }
             Ok(Err(error)) => {
@@ -978,6 +984,20 @@ fn input_modifiers(modifiers: gpui::Modifiers) -> InputModifiers {
     }
 }
 
+fn write_selection_copy(copy: SelectionCopy, cx: &mut App) -> Result<(), String> {
+    #[cfg(test)]
+    {
+        cx.write_to_clipboard(ClipboardItem::new_string(copy.plain_text));
+        let _ = copy.html;
+        Ok(())
+    }
+    #[cfg(not(test))]
+    {
+        let _ = cx;
+        crate::platform::macos_pasteboard::write_selection(&copy.plain_text, copy.html.as_deref())
+    }
+}
+
 fn pointer_uses_text_cursor(
     mouse_tracking: bool,
     shift: bool,
@@ -1257,6 +1277,34 @@ mod tests {
         (pane, cx, records)
     }
 
+    fn terminal_pane_with_selection_copy(
+        cx: &mut TestAppContext,
+        copy: SelectionCopy,
+    ) -> (
+        Entity<TerminalPane>,
+        &mut VisualTestContext,
+        TestTerminalSessionRecords,
+    ) {
+        cx.update(crate::ui::init);
+        let records = TestTerminalSessionRecords::default();
+        let session_factory: Rc<dyn TerminalSessionFactory> = Rc::new(
+            TestTerminalSessionFactory::new(records.clone())
+                .with_selection_copy_response(Ok(Some(copy))),
+        );
+        let session_factory = WorkspaceTerminalSessionFactory::new(
+            session_factory,
+            PathBuf::from("/tmp/spaceterm-terminal-pane-copy-test"),
+        );
+        let (pane, cx) =
+            cx.add_window_view(|window, cx| TerminalPane::new(session_factory, window, cx));
+        cx.update(|window, cx| {
+            window.activate_window();
+            pane.update(cx, |pane, _cx| pane.focus(window));
+        });
+        cx.run_until_parked();
+        (pane, cx, records)
+    }
+
     #[gpui::test]
     fn command_equals_should_increase_terminal_font_size(cx: &mut TestAppContext) {
         let (pane, cx) = terminal_pane(cx);
@@ -1323,6 +1371,32 @@ mod tests {
                 .commands()
                 .iter()
                 .all(|call| !matches!(call.command, RecordedSessionCommand::Key(_)))
+        );
+    }
+
+    #[gpui::test]
+    fn copy_action_requests_semantic_selection_and_writes_plain_text_pasteboard(
+        cx: &mut TestAppContext,
+    ) {
+        let (_pane, cx, records) = terminal_pane_with_selection_copy(
+            cx,
+            SelectionCopy {
+                plain_text: "alpha\nbeta".to_owned(),
+                html: Some("<pre>alpha\nbeta</pre>".to_owned()),
+            },
+        );
+
+        cx.dispatch_action(CopySelection);
+        cx.run_until_parked();
+
+        assert_eq!(
+            cx.read_from_clipboard().and_then(|item| item.text()),
+            Some("alpha\nbeta".to_owned())
+        );
+        assert!(
+            records.commands().iter().any(|call| {
+                matches!(call.command, RecordedSessionCommand::RequestSelectionCopy)
+            })
         );
     }
 

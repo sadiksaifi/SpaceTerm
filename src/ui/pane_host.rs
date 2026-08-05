@@ -913,7 +913,7 @@ mod tests {
         WorkspaceTerminalSessionFactory::new(
             Rc::new(
                 TestTerminalSessionFactory::new(TestTerminalSessionRecords::default())
-                    .with_selection_response(Ok(None)),
+                    .with_selection_copy_response(Ok(None)),
             ),
             test_workspace_root(),
         )

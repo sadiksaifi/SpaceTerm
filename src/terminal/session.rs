@@ -25,6 +25,7 @@ use crate::terminal::geometry::TerminalGeometry;
 #[cfg(test)]
 use crate::terminal::key::OptionAsAltPolicy;
 use crate::terminal::key::{InputModifiers, KeyInput};
+use crate::terminal::selection::{SelectionCopy, SelectionCopyOptions};
 
 const FINAL_CHILD_WAIT_TIMEOUT: Duration = Duration::from_secs(2);
 const PTY_READ_BUFFER_SIZE: usize = 16 * 1024;
@@ -233,7 +234,9 @@ pub(crate) trait TerminalSessionHandle {
     fn wheel(&self, input: WheelInput);
     fn scroll_to(&self, offset_rows: u64, generation: PresentationGeneration);
     fn paste(&self, text: String);
-    fn request_selection_text(&self) -> async_channel::Receiver<Result<Option<String>, String>>;
+    fn request_selection_copy(
+        &self,
+    ) -> async_channel::Receiver<Result<Option<SelectionCopy>, String>>;
 }
 
 pub(crate) trait TerminalSessionFactory {
@@ -579,17 +582,17 @@ impl TerminalSession {
         }
     }
 
-    pub(crate) fn request_selection_text(
+    pub(crate) fn request_selection_copy(
         &self,
-    ) -> async_channel::Receiver<Result<Option<String>, String>> {
+    ) -> async_channel::Receiver<Result<Option<SelectionCopy>, String>> {
         let (reply, receiver) = async_channel::bounded(1);
         let sent = self
             .commands
             .as_ref()
-            .is_some_and(|commands| commands.send(Command::SelectionText(reply.clone())).is_ok());
+            .is_some_and(|commands| commands.send(Command::SelectionCopy(reply.clone())).is_ok());
         if !sent {
             let _ = reply.try_send(Err(
-                "terminal selection could not be read because the worker has stopped".to_owned(),
+                "terminal selection could not be copied because the worker has stopped".to_owned(),
             ));
         }
         receiver
@@ -642,8 +645,10 @@ impl TerminalSessionHandle for TerminalSession {
         Self::paste(self, text);
     }
 
-    fn request_selection_text(&self) -> async_channel::Receiver<Result<Option<String>, String>> {
-        Self::request_selection_text(self)
+    fn request_selection_copy(
+        &self,
+    ) -> async_channel::Receiver<Result<Option<SelectionCopy>, String>> {
+        Self::request_selection_copy(self)
     }
 }
 
@@ -689,7 +694,7 @@ enum Command {
     Wheel(WheelInput),
     ScrollTo(u64, PresentationGeneration),
     Paste(String),
-    SelectionText(async_channel::Sender<Result<Option<String>, String>>),
+    SelectionCopy(async_channel::Sender<Result<Option<SelectionCopy>, String>>),
     SelectionAutoscrollTick(PresentationGeneration),
     ReaderReady,
     Shutdown,
@@ -988,8 +993,11 @@ impl TerminalWorker {
                     false
                 }
             },
-            Command::SelectionText(reply) => {
-                let _ = reply.try_send(self.emulator.selection_text());
+            Command::SelectionCopy(reply) => {
+                let _ = reply.try_send(
+                    self.emulator
+                        .selection_copy(SelectionCopyOptions::default()),
+                );
                 true
             }
             Command::SelectionAutoscrollTick(generation) => {
@@ -2413,7 +2421,7 @@ mod tests {
         let resized = geometry(grid.cols, grid.rows, 9.0, 21.0);
 
         session.resize(resized);
-        let barrier = session.request_selection_text();
+        let barrier = session.request_selection_copy();
         assert!(barrier.recv_blocking().is_ok());
 
         assert_eq!(records.snapshot().resizes, vec![pty_size(resized)]);
@@ -2810,7 +2818,7 @@ mod tests {
             resizes: ResizeMailbox::default(),
         };
 
-        let result = session.request_selection_text().try_recv().unwrap();
+        let result = session.request_selection_copy().try_recv().unwrap();
         assert!(matches!(result, Err(message) if message.contains("worker has stopped")));
     }
 
