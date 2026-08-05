@@ -1,6 +1,6 @@
 use std::env;
 use std::io::{self, Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -180,8 +180,22 @@ impl Drop for SpawnedPty {
 
 #[derive(Debug, Error)]
 pub(crate) enum PtyError {
+    #[error("Workspace working directory {} is unavailable: {source}", path.display())]
+    WorkingDirectory {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
     #[error("failed to open the macOS pseudo-terminal: {0}")]
     Open(#[source] AnyError),
+    #[error("the macOS pseudo-terminal did not expose its native descriptor")]
+    MissingDescriptor,
+    #[error("failed to read the macOS pseudo-terminal attributes: {0}")]
+    ReadTermios(#[source] io::Error),
+    #[error("failed to enable UTF-8 input on the macOS pseudo-terminal: {0}")]
+    ConfigureTermios(#[source] io::Error),
+    #[error("failed to apply the initial macOS pseudo-terminal size: {0}")]
+    InitialResize(#[source] AnyError),
     #[error("failed to start shell {shell}: {source}")]
     SpawnShell {
         shell: String,
@@ -198,25 +212,26 @@ pub(crate) fn spawn_user_shell(
     size: PtySize,
     working_directory: &Path,
 ) -> Result<(SpawnedPty, PtyTerminator), PtyError> {
+    validate_working_directory(working_directory)?;
+    let shell = user_shell();
+    let command = build_shell_command(&shell, working_directory);
+    spawn_command_in_pty(size, command, &shell)
+}
+
+fn spawn_command_in_pty(
+    size: PtySize,
+    command: CommandBuilder,
+    description: &str,
+) -> Result<(SpawnedPty, PtyTerminator), PtyError> {
     let pty_system = native_pty_system();
     let pair = pty_system.openpty(size).map_err(PtyError::Open)?;
-
-    let shell = user_shell();
-
-    let mut command = CommandBuilder::new(&shell);
-    command.arg("-l");
-    command.env("TERM", "xterm-256color");
-    command.env("COLORTERM", "truecolor");
-    command.env("TERM_PROGRAM", "SpaceTerm");
-    command.env("TERM_PROGRAM_VERSION", env!("CARGO_PKG_VERSION"));
-
-    command.cwd(working_directory);
+    initialize_pty(pair.master.as_ref(), size)?;
 
     let mut child = pair
         .slave
         .spawn_command(command)
         .map_err(|source| PtyError::SpawnShell {
-            shell: shell.clone(),
+            shell: description.to_owned(),
             source,
         })?;
 
@@ -253,6 +268,51 @@ pub(crate) fn spawn_user_shell(
     ))
 }
 
+fn initialize_pty(master: &dyn MasterPty, size: PtySize) -> Result<(), PtyError> {
+    let descriptor = master.as_raw_fd().ok_or(PtyError::MissingDescriptor)?;
+    let mut termios = std::mem::MaybeUninit::<libc::termios>::uninit();
+    // SAFETY: descriptor is the live PTY master and termios points to writable storage.
+    if unsafe { libc::tcgetattr(descriptor, termios.as_mut_ptr()) } == -1 {
+        return Err(PtyError::ReadTermios(io::Error::last_os_error()));
+    }
+    // SAFETY: tcgetattr initialized termios after succeeding above.
+    let mut termios = unsafe { termios.assume_init() };
+    termios.c_iflag |= libc::IUTF8;
+    // SAFETY: descriptor remains live and termios contains attributes read from this PTY.
+    if unsafe { libc::tcsetattr(descriptor, libc::TCSANOW, &termios) } == -1 {
+        return Err(PtyError::ConfigureTermios(io::Error::last_os_error()));
+    }
+    master.resize(size).map_err(PtyError::InitialResize)
+}
+
+fn validate_working_directory(working_directory: &Path) -> Result<(), PtyError> {
+    let metadata = working_directory
+        .metadata()
+        .map_err(|source| PtyError::WorkingDirectory {
+            path: working_directory.to_owned(),
+            source,
+        })?;
+    if metadata.is_dir() {
+        Ok(())
+    } else {
+        Err(PtyError::WorkingDirectory {
+            path: working_directory.to_owned(),
+            source: io::Error::new(io::ErrorKind::NotADirectory, "path is not a directory"),
+        })
+    }
+}
+
+fn build_shell_command(shell: &str, working_directory: &Path) -> CommandBuilder {
+    let mut command = CommandBuilder::new(shell);
+    command.arg("-l");
+    command.env("TERM", "xterm-256color");
+    command.env("COLORTERM", "truecolor");
+    command.env("TERM_PROGRAM", "SpaceTerm");
+    command.env("TERM_PROGRAM_VERSION", env!("CARGO_PKG_VERSION"));
+    command.cwd(working_directory);
+    command
+}
+
 pub(crate) fn user_shell() -> String {
     env::var("SHELL")
         .ok()
@@ -272,6 +332,7 @@ fn terminate_after_startup_failure(child: &mut dyn Child) {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::fmt;
     use std::io;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -281,6 +342,234 @@ mod tests {
     use portable_pty::{ChildKiller, ExitStatus};
 
     use super::*;
+
+    const CONTROLLED_CHILD_ENV: &str = "SPACETERM_CONTROLLED_PTY_CHILD";
+
+    #[test]
+    #[ignore = "runs only as a child of the controlled PTY integration tests"]
+    fn controlled_pty_child_reports_runtime_configuration() {
+        if env::var_os(CONTROLLED_CHILD_ENV).is_none() {
+            return;
+        }
+
+        let mut termios = std::mem::MaybeUninit::<libc::termios>::uninit();
+        let mut window_size = std::mem::MaybeUninit::<libc::winsize>::uninit();
+        // SAFETY: stdin is the PTY slave installed by portable-pty. Both calls initialize their
+        // output structs on success, which is asserted before assume_init.
+        let termios_result = unsafe { libc::tcgetattr(libc::STDIN_FILENO, termios.as_mut_ptr()) };
+        // SAFETY: TIOCGWINSZ writes a winsize to the valid pointer supplied here.
+        let window_result = unsafe {
+            libc::ioctl(
+                libc::STDIN_FILENO,
+                libc::TIOCGWINSZ,
+                window_size.as_mut_ptr(),
+            )
+        };
+        assert_eq!(termios_result, 0);
+        assert_eq!(window_result, 0);
+        // SAFETY: the successful system calls above initialized both values.
+        let termios = unsafe { termios.assume_init() };
+        // SAFETY: the successful ioctl above initialized the window size.
+        let window_size = unsafe { window_size.assume_init() };
+        let cwd = env::current_dir().unwrap();
+
+        // SAFETY: these process and terminal identity queries have no pointer preconditions.
+        let (pid, group, session, foreground, is_tty) = unsafe {
+            (
+                libc::getpid(),
+                libc::getpgrp(),
+                libc::getsid(0),
+                libc::tcgetpgrp(libc::STDIN_FILENO),
+                libc::isatty(libc::STDIN_FILENO),
+            )
+        };
+        println!(
+            "SPACETERM_PTY_REPORT pid={pid} group={group} session={session} foreground={foreground} tty={is_tty} utf8={} rows={} cols={} pixel_width={} pixel_height={} cwd={} marker={}",
+            usize::from(termios.c_iflag & libc::IUTF8 != 0),
+            window_size.ws_row,
+            window_size.ws_col,
+            window_size.ws_xpixel,
+            window_size.ws_ypixel,
+            cwd.display(),
+            env::var("SPACETERM_PTY_MARKER").unwrap(),
+        );
+        thread::sleep(Duration::from_millis(100));
+    }
+
+    fn controlled_child_command(working_directory: &Path, marker: &str) -> CommandBuilder {
+        let mut command = CommandBuilder::new(env::current_exe().unwrap());
+        command.args([
+            "--ignored",
+            "--exact",
+            "platform::macos_pty::tests::controlled_pty_child_reports_runtime_configuration",
+            "--nocapture",
+        ]);
+        command.env(CONTROLLED_CHILD_ENV, "1");
+        command.env("SPACETERM_PTY_MARKER", marker);
+        command.cwd(working_directory);
+        command
+    }
+
+    fn read_controlled_report(pty: &mut SpawnedPty) -> HashMap<String, String> {
+        let mut output = String::new();
+        pty.take_reader()
+            .unwrap()
+            .read_to_string(&mut output)
+            .unwrap();
+        let status = pty.wait_for_child(Duration::from_secs(2)).unwrap();
+        assert!(status.success(), "controlled PTY child failed: {output}");
+        let report = output
+            .lines()
+            .find(|line| line.starts_with("SPACETERM_PTY_REPORT "))
+            .unwrap_or_else(|| panic!("controlled PTY report was missing from: {output}"));
+
+        report
+            .split_whitespace()
+            .skip(1)
+            .map(|field| {
+                let (key, value) = field.split_once('=').unwrap();
+                (key.to_owned(), value.to_owned())
+            })
+            .collect()
+    }
+
+    #[test]
+    fn controlled_child_should_observe_initialized_terminal_state_before_interaction() {
+        let working_directory = env::current_dir().unwrap();
+        let size = PtySize {
+            rows: 31,
+            cols: 97,
+            pixel_width: 1_164,
+            pixel_height: 682,
+        };
+        let command = controlled_child_command(&working_directory, "initialized");
+
+        let (mut pty, _terminator) =
+            spawn_command_in_pty(size, command, "controlled child").unwrap();
+        let report = read_controlled_report(&mut pty);
+
+        assert_eq!(
+            (
+                &report["pid"],
+                &report["group"],
+                &report["session"],
+                &report["foreground"],
+                report["tty"].as_str(),
+                report["utf8"].as_str(),
+                report["rows"].as_str(),
+                report["cols"].as_str(),
+                report["pixel_width"].as_str(),
+                report["pixel_height"].as_str(),
+                report["cwd"].as_str(),
+                report["marker"].as_str(),
+            ),
+            (
+                &report["pid"],
+                &report["pid"],
+                &report["pid"],
+                &report["pid"],
+                "1",
+                "1",
+                "31",
+                "97",
+                "1164",
+                "682",
+                working_directory.to_str().unwrap(),
+                "initialized",
+            )
+        );
+    }
+
+    #[test]
+    fn concurrent_terminal_sessions_should_own_distinct_process_groups() {
+        let working_directory = env::current_dir().unwrap();
+        let size = PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 640,
+            pixel_height: 480,
+        };
+        let (mut first, _first_terminator) = spawn_command_in_pty(
+            size,
+            controlled_child_command(&working_directory, "first"),
+            "first controlled child",
+        )
+        .unwrap();
+        let (mut second, _second_terminator) = spawn_command_in_pty(
+            size,
+            controlled_child_command(&working_directory, "second"),
+            "second controlled child",
+        )
+        .unwrap();
+
+        let first_report = read_controlled_report(&mut first);
+        let second_report = read_controlled_report(&mut second);
+
+        assert_eq!(
+            (
+                first_report["group"] != second_report["group"],
+                first_report["session"] != second_report["session"],
+                first_report["marker"].as_str(),
+                second_report["marker"].as_str(),
+            ),
+            (true, true, "first", "second")
+        );
+    }
+
+    #[test]
+    fn shell_command_should_preserve_login_environment_and_working_directory() {
+        let working_directory = Path::new("/private/tmp/workspace root");
+
+        let command = build_shell_command("/bin/zsh", working_directory);
+
+        assert_eq!(
+            command.get_argv(),
+            &vec![
+                std::ffi::OsString::from("/bin/zsh"),
+                std::ffi::OsString::from("-l"),
+            ]
+        );
+        assert_eq!(
+            command.get_cwd(),
+            Some(&working_directory.as_os_str().to_owned())
+        );
+        assert_eq!(
+            command.get_env("TERM"),
+            Some(std::ffi::OsStr::new("xterm-256color"))
+        );
+        assert_eq!(
+            command.get_env("COLORTERM"),
+            Some(std::ffi::OsStr::new("truecolor"))
+        );
+        assert_eq!(
+            command.get_env("TERM_PROGRAM"),
+            Some(std::ffi::OsStr::new("SpaceTerm"))
+        );
+        assert_eq!(
+            command.get_env("TERM_PROGRAM_VERSION"),
+            Some(std::ffi::OsStr::new(env!("CARGO_PKG_VERSION")))
+        );
+        assert!(command.get_controlling_tty());
+    }
+
+    #[test]
+    fn shell_spawn_should_reject_a_missing_working_directory() {
+        let result = spawn_user_shell(
+            PtySize {
+                rows: 24,
+                cols: 80,
+                pixel_width: 640,
+                pixel_height: 480,
+            },
+            Path::new("/private/tmp/spaceterm-missing-working-directory"),
+        );
+
+        let error = match result {
+            Ok(_) => panic!("a missing Workspace root must not silently fall back to HOME"),
+            Err(error) => error,
+        };
+        assert!(matches!(error, PtyError::WorkingDirectory { .. }));
+    }
 
     #[derive(Default)]
     struct TestMasterPty;

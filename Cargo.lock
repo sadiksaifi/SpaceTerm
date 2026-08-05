@@ -5132,6 +5132,7 @@ dependencies = [
  "async-channel 2.5.0",
  "gpui",
  "gpui-symbols",
+ "libc",
  "libghostty-vt",
  "portable-pty",
  "thiserror 2.0.19",
