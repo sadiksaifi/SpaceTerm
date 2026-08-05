@@ -5,9 +5,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use libghostty_vt::fmt::Format;
-use libghostty_vt::key::{
-    Action as GhosttyKeyAction, Encoder as KeyEncoder, Event as KeyEvent, Mods, OptionAsAlt,
-};
+use libghostty_vt::key::Mods;
 use libghostty_vt::mouse::{
     Action as MouseAction, Button as MouseButton, Encoder as MouseEncoder,
     EncoderSize as MouseEncoderSize, Event as MouseEvent, Position as MousePosition,
@@ -25,6 +23,7 @@ use libghostty_vt::{Error, RenderState, Terminal, TerminalOptions};
 
 use crate::terminal::geometry::{BackingPosition, TerminalGeometry};
 use crate::terminal::key::{InputModifiers, KeyAction, KeyInput, PhysicalKey};
+use crate::terminal::keyboard_protocol::KeyboardProtocolEncoder;
 use crate::terminal::session::{
     PointerButton, PointerInput, PointerPhase, SurfacePosition, WheelInput,
 };
@@ -266,8 +265,7 @@ pub(crate) struct TerminalEmulator {
     render_state: RenderState<'static>,
     rows: RowIterator<'static>,
     cells: CellIterator<'static>,
-    key_encoder: KeyEncoder<'static>,
-    key_event: KeyEvent<'static>,
+    keyboard_protocol: KeyboardProtocolEncoder,
     mouse_encoder: MouseEncoder<'static>,
     mouse_event: MouseEvent<'static>,
     cached_mouse_modes: Option<MouseModeState>,
@@ -379,8 +377,7 @@ impl TerminalEmulator {
             render_state: RenderState::new()?,
             rows: RowIterator::new()?,
             cells: CellIterator::new()?,
-            key_encoder: KeyEncoder::new()?,
-            key_event: KeyEvent::new()?,
+            keyboard_protocol: KeyboardProtocolEncoder::new()?,
             mouse_encoder,
             mouse_event: MouseEvent::new()?,
             cached_mouse_modes: None,
@@ -701,33 +698,8 @@ impl TerminalEmulator {
     }
 
     fn encode_key(&mut self, input: &KeyInput, bytes: &mut Vec<u8>) -> Result<(), String> {
-        input.validate().map_err(|error| error.to_string())?;
-        if input
-            .text
-            .as_deref()
-            .is_some_and(|text| text.chars().any(char::is_control))
-        {
-            return Err("terminal key text must not contain control characters".to_owned());
-        }
-
-        self.key_encoder
-            .set_options_from_terminal(&self.terminal)
-            .set_macos_option_as_alt(OptionAsAlt::True);
-        self.key_event
-            .set_action(match input.action {
-                KeyAction::Press => GhosttyKeyAction::Press,
-                KeyAction::Repeat => GhosttyKeyAction::Repeat,
-                KeyAction::Release => GhosttyKeyAction::Release,
-            })
-            .set_key(input.physical_key)
-            .set_mods(key_modifiers(input.modifiers))
-            .set_consumed_mods(key_modifiers(input.consumed_modifiers))
-            .set_composing(false)
-            .set_utf8(input.text.clone())
-            .set_unshifted_codepoint(input.unshifted_codepoint.unwrap_or('\0'));
-        self.key_encoder
-            .encode_to_vec(&self.key_event, bytes)
-            .map_err(|error| format!("failed to encode terminal key input: {error}"))
+        self.keyboard_protocol
+            .encode(&self.terminal, input, bytes)
     }
 
     fn encode_mouse_event(
@@ -1093,21 +1065,6 @@ impl Drop for TerminalEmulator {
     fn drop(&mut self) {
         self.selection_gesture.reset(&self.terminal);
     }
-}
-
-fn key_modifiers(modifiers: InputModifiers) -> Mods {
-    let mut result = Mods::empty();
-    result.set(Mods::SHIFT, modifiers.shift);
-    result.set(Mods::ALT, modifiers.alt);
-    result.set(Mods::CTRL, modifiers.control);
-    result.set(Mods::SUPER, modifiers.platform);
-    result.set(Mods::CAPS_LOCK, modifiers.caps_lock);
-    result.set(Mods::NUM_LOCK, modifiers.num_lock);
-    result.set(Mods::SHIFT_SIDE, modifiers.shift_right);
-    result.set(Mods::ALT_SIDE, modifiers.alt_right);
-    result.set(Mods::CTRL_SIDE, modifiers.control_right);
-    result.set(Mods::SUPER_SIDE, modifiers.platform_right);
-    result
 }
 
 fn mouse_button(button: PointerButton) -> MouseButton {
@@ -1697,6 +1654,40 @@ mod tests {
         assert_eq!(emulator.key(backspace()).unwrap().bytes, b"\x08");
         emulator.feed(b"\x1b[?67l");
         assert_eq!(emulator.key(backspace()).unwrap().bytes, b"\x7f");
+    }
+
+    #[test]
+    fn conventional_application_shortcuts_keep_legacy_compatibility_bytes() {
+        let mut emulator = emulator(10, 2);
+        let cases = [
+            (PhysicalKey::C, "c", b"\x03".as_slice(), "shell interrupt"),
+            (PhysicalKey::B, "b", b"\x02".as_slice(), "tmux prefix"),
+            (PhysicalKey::R, "r", b"\x12".as_slice(), "fzf history"),
+        ];
+
+        for (physical_key, text, expected, fixture) in cases {
+            let input = text_key(
+                physical_key,
+                text,
+                text.chars().next().unwrap(),
+                KeyAction::Press,
+                InputModifiers {
+                    control: true,
+                    ..InputModifiers::default()
+                },
+            );
+            assert_eq!(emulator.key(input).unwrap().bytes, expected, "{fixture}");
+        }
+
+        emulator.feed(b"\x1b[?1h");
+        assert_eq!(
+            emulator
+                .key(key(PhysicalKey::ArrowUp, InputModifiers::default()))
+                .unwrap()
+                .bytes,
+            b"\x1bOA",
+            "Vim/Neovim application cursor"
+        );
     }
 
     #[test]

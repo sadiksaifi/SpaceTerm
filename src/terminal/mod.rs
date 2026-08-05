@@ -1,6 +1,7 @@
 mod emulator;
 pub(crate) mod geometry;
 mod key;
+mod keyboard_protocol;
 mod session;
 #[cfg(test)]
 pub(crate) mod testing;

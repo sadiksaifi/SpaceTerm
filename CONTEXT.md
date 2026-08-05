@@ -129,7 +129,9 @@ Terminal key input crosses the Terminal Session command lane as one ordered, typ
 press, repeat, or release action; physical and native identity; logical identity; UTF-8 text and an
 unshifted codepoint; and full and consumed side-aware modifiers. Application Actions resolve before
 the raw terminal handler. Unsupported physical identities produce a typed error and never degrade
-to guessed terminal bytes; terminal protocol encoding remains worker-owned.
+to guessed terminal bytes. A worker-owned keyboard protocol Module reads Terminal Emulator modes
+for every event and delegates cursor, keypad, DECBKM, modifyOtherKeys, fixterms, and negotiated
+Kitty keyboard encoding to `libghostty-vt`; UI code never constructs terminal escape sequences.
 
 ### Workspace-Bound Terminal Creation
 
