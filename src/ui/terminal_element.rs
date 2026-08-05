@@ -577,6 +577,42 @@ struct DecorationSpan {
     blinking: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct DecorationMetrics {
+    device_pixel: Pixels,
+    thickness: Pixels,
+    underline_y: Pixels,
+    double_underline_y: Pixels,
+    strikethrough_y: Pixels,
+    overline_y: Pixels,
+    wave_amplitude: Pixels,
+}
+
+fn decoration_metrics(
+    baseline: Pixels,
+    ascent: Pixels,
+    x_height: Pixels,
+    scale_factor: f32,
+) -> DecorationMetrics {
+    let scale_factor = if scale_factor.is_finite() && scale_factor > 0.0 {
+        scale_factor
+    } else {
+        1.0
+    };
+    let device_pixel = px(1.0 / scale_factor);
+    let snap = |value: Pixels| px((f32::from(value) * scale_factor).round() / scale_factor);
+    let underline_y = snap(baseline + device_pixel * 2.0);
+    DecorationMetrics {
+        device_pixel,
+        thickness: device_pixel,
+        underline_y,
+        double_underline_y: underline_y + device_pixel * 2.0,
+        strikethrough_y: snap(baseline - x_height / 2.0),
+        overline_y: snap(baseline - ascent),
+        wave_amplitude: device_pixel * 2.0,
+    }
+}
+
 fn push_decoration(spans: &mut Vec<DecorationSpan>, mut span: DecorationSpan) {
     if let Some(previous) = spans.last_mut()
         && previous.start + previous.len == span.start
@@ -1195,6 +1231,19 @@ mod tests {
                 blinking: false,
             }]
         );
+    }
+
+    #[test]
+    fn decoration_metrics_follow_font_metrics_and_snap_to_retina_pixels() {
+        let metrics = decoration_metrics(px(15.2), px(11.1), px(8.2), 2.0);
+
+        assert_eq!(metrics.device_pixel, px(0.5));
+        assert_eq!(metrics.thickness, px(0.5));
+        assert_eq!(metrics.underline_y, px(16.0));
+        assert_eq!(metrics.double_underline_y, px(17.0));
+        assert_eq!(metrics.strikethrough_y, px(11.0));
+        assert_eq!(metrics.overline_y, px(4.0));
+        assert!(metrics.wave_amplitude >= metrics.device_pixel);
     }
 
     #[test]
