@@ -28,6 +28,13 @@ impl TerminalGridCache {
         }
     }
 
+    pub(crate) fn invalidate_scale_dependent(&mut self) {
+        self.source_rows.clear();
+        self.prepared_rows = Arc::from([]);
+        self.font_family = None;
+        self.background = None;
+    }
+
     fn prepare(
         &mut self,
         rows: &Arc<[RowSnapshot]>,
@@ -602,5 +609,18 @@ mod tests {
 
         assert!(Arc::ptr_eq(&first[0], &second[0]));
         assert!(!Arc::ptr_eq(&first[1], &second[1]));
+    }
+
+    #[test]
+    fn scale_invalidation_should_discard_prepared_terminal_rows() {
+        let row = Arc::<[CellSnapshot]>::from([cell("a")]);
+        let rows = Arc::<[RowSnapshot]>::from([row]);
+        let mut cache = TerminalGridCache::new();
+        let first = cache.prepare(&rows, ACTIVE_THEME.terminal_background, &"Menlo".into());
+
+        cache.invalidate_scale_dependent();
+        let second = cache.prepare(&rows, ACTIVE_THEME.terminal_background, &"Menlo".into());
+
+        assert!(!Arc::ptr_eq(&first[0], &second[0]));
     }
 }

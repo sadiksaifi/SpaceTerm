@@ -316,6 +316,7 @@ impl TerminalPane {
         self.backing_scale = backing_scale;
         self.cell_width = measure_cell_width(window, &self.font_family, self.font_size);
         self.last_geometry = None;
+        self.render_cache.invalidate_scale_dependent();
         self.sync_scrollbar(cx);
         cx.notify();
     }
