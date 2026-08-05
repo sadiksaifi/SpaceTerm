@@ -30,7 +30,12 @@
 | **Terminal Emulator** | The state machine that interprets terminal output and maintains the visible grid and Scrollback. | Terminal Session, Pane |
 | **PTY** | The macOS pseudoterminal that connects a Terminal Emulator to its Shell Process. | Terminal, shell |
 | **Shell Process** | The command interpreter process launched for a Pane through its PTY. | Terminal, session |
-| **Scrollback** | Terminal output retained above the currently visible grid. | Workspace scroll, history |
+| **Primary Screen** | The Terminal Emulator screen whose logical content includes bounded Scrollback and whose Terminal Viewport is restored after Alternate Screen use. | main buffer, normal buffer |
+| **Alternate Screen** | The temporary Terminal Emulator screen used by full-screen terminal applications; it has no Scrollback and does not replace Primary Screen state. | alternate buffer, secondary terminal |
+| **Terminal Viewport** | The visible row window over the active screen; it follows new output only while already at the bottom and otherwise remains anchored to logical content. | Workspace viewport, Pane scroll |
+| **Scrollback** | Bounded Primary Screen output retained outside the bottom Terminal Viewport and available by moving that viewport. | Workspace scroll, history |
+| **Presentation Generation** | The monotonic identity of a published Terminal Presentation grid, carried by coordinate and Scrollback mappings so stale mappings and older presentations can be rejected. | frame number, emulator generation |
+| **Synchronized Output** | A bounded DEC 2026 transaction whose intermediate Terminal Emulator changes are withheld until one atomic Terminal Presentation is published. | render lock, output buffering |
 | **Marked Text** | Transient input-method preedit owned by the Pane with Terminal Input Focus; it is presented at the Cursor but is not Terminal Emulator or PTY input until committed. | terminal output, committed text |
 
 ## Lifecycle actions
@@ -56,6 +61,8 @@
 - A **Window** owns one or more **Panes**, exactly one **Focused Pane**, and one arbitrarily nested **Pane Layout**.
 - **Terminal Input Focus** is derived transient state and never replaces or duplicates a Window's **Focused Pane** identity.
 - **Marked Text** exists only while its Pane has **Terminal Input Focus**; cancellation or focus loss discards it without Terminal Session input.
+- The **Primary Screen** and **Alternate Screen** retain independent state; leaving the Alternate Screen restores the Primary Screen and its **Terminal Viewport**.
+- A **Presentation Generation** belongs to one published Terminal Presentation; coordinate or Scrollback requests from an older generation never mutate current Terminal Emulator state.
 - A **Pane** belongs to exactly one **Window** and owns one **Terminal Session**.
 - A **Split** has exactly two child **Pane Layouts**; each child is either another **Split** or a **Pane**.
 - Closing any hierarchy entity closes every **Terminal Session**, **PTY**, and **Shell Process** it owns.

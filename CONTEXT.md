@@ -114,6 +114,27 @@ viewport, active-screen, size, and precise damage independently of cell content,
 worker boundary through a bounded latest-screen channel. GPUI renders only these immutable values
 and never borrows Terminal Emulator state.
 
+### Transactional Terminal Presentation
+
+The Terminal Emulator owns independent Primary Screen and Alternate Screen presentation caches;
+entering the Alternate Screen never transfers Scrollback, and leaving it restores the Primary
+Screen's content, Cursor, and Terminal Viewport. Primary Scrollback is bounded to 10,000 retained
+rows. New output follows the bottom only when the Terminal Viewport was already following it, while
+a scrolled Terminal Viewport and Selection remain anchored to logical content across output and
+grid reflow.
+
+Every published Terminal Presentation snapshot carries a monotonic Presentation Generation.
+Scrollbar, pointer, and wheel mappings return that generation through the reliable Terminal
+Session command lane; the worker rejects mappings that no longer describe its presented grid, and
+GPUI rejects older snapshots. Grid resize reflows logical content and publishes full resize damage.
+A pixel-only resize still reaches both the PTY and Terminal Emulator, but does not manufacture grid
+damage or advance the Presentation Generation when no visible state changed.
+
+DEC 2026 synchronized output is one presentation transaction: intermediate snapshots are
+suppressed, then one completed snapshot is published when the transaction ends. A worker-owned
+one-second deadline prevents a stalled producer from freezing presentation, and resize or terminal
+exit flushes pending synchronized output before later screen or lifecycle events.
+
 ### Semantic Terminal Colors
 
 Terminal Presentation snapshots preserve default, palette-indexed, and RGB color sources instead
