@@ -16,7 +16,8 @@ use libghostty_vt::render::{CellIterator, CursorVisualStyle, Dirty, RowIterator}
 use libghostty_vt::screen::{CellContentTag, CellWide, Screen};
 use libghostty_vt::selection::FormatOptions;
 use libghostty_vt::selection::gesture::{
-    DragEvent, Geometry as SelectionGeometry, Gesture, PressEvent, ReleaseEvent,
+    Autoscroll, AutoscrollTickEvent, DragEvent, Geometry as SelectionGeometry, Gesture, PressEvent,
+    ReleaseEvent,
 };
 use libghostty_vt::style::{PaletteIndex, RgbColor, StyleColor};
 use libghostty_vt::terminal::{Mode, Point, PointCoordinate, ScrollViewport};
@@ -35,6 +36,8 @@ const MAX_SCROLLBACK_ROWS: usize = 10_000;
 pub(crate) const MAX_SYNCHRONIZED_OUTPUT_DURATION: Duration = Duration::from_secs(1);
 const REPEAT_CLICK_DISTANCE_PX: f64 = 5.0;
 const REPEAT_CLICK_INTERVAL: Duration = Duration::from_millis(500);
+const MIN_SELECTION_AUTOSCROLL_INTERVAL: Duration = Duration::from_millis(25);
+const MAX_SELECTION_AUTOSCROLL_INTERVAL: Duration = Duration::from_millis(150);
 
 impl From<RgbColor> for Color {
     fn from(value: RgbColor) -> Self {
@@ -424,6 +427,7 @@ pub(crate) struct TerminalEmulator {
     selection_press: PressEvent<'static>,
     selection_drag: DragEvent<'static>,
     selection_release: ReleaseEvent<'static>,
+    selection_autoscroll_tick: AutoscrollTickEvent<'static>,
     pty_responses: Rc<RefCell<Vec<u8>>>,
     pending_title: Rc<RefCell<Option<Arc<str>>>>,
     title: Arc<str>,
@@ -438,6 +442,8 @@ pub(crate) struct TerminalEmulator {
     cached_mouse_tracking: Option<bool>,
     geometry: TerminalGeometry,
     active_pointer: Option<ActivePointer>,
+    selection_drag_position: Option<SurfacePosition>,
+    pointer_mapping_invalidated: bool,
     gesture_clock: GestureClock,
     presentation_generation: PresentationGeneration,
     synchronized_output_started: Option<Instant>,
@@ -447,6 +453,7 @@ pub(crate) struct TerminalEmulator {
 struct ActivePointer {
     button: PointerButton,
     route: PointerRoute,
+    generation: PresentationGeneration,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -556,6 +563,7 @@ impl TerminalEmulator {
             selection_press: PressEvent::new()?,
             selection_drag: DragEvent::new()?,
             selection_release: ReleaseEvent::new()?,
+            selection_autoscroll_tick: AutoscrollTickEvent::new()?,
             pty_responses,
             pending_title,
             title: Arc::from(""),
@@ -570,6 +578,8 @@ impl TerminalEmulator {
             cached_mouse_tracking: None,
             geometry,
             active_pointer: None,
+            selection_drag_position: None,
+            pointer_mapping_invalidated: false,
             gesture_clock: GestureClock::System(Instant::now()),
             presentation_generation: PresentationGeneration::default(),
             synchronized_output_started: None,
@@ -581,6 +591,9 @@ impl TerminalEmulator {
     }
 
     pub(crate) fn feed_at(&mut self, bytes: &[u8], now: Instant) {
+        if !bytes.is_empty() && self.active_pointer.is_some() {
+            self.pointer_mapping_invalidated = true;
+        }
         let synchronized_before = self.terminal.mode(Mode::SYNC_OUTPUT).unwrap_or(false);
         self.terminal.vt_write(bytes);
         let synchronized_after = self.terminal.mode(Mode::SYNC_OUTPUT).unwrap_or(false);
@@ -594,6 +607,10 @@ impl TerminalEmulator {
     pub(crate) fn synchronized_output_deadline(&self) -> Option<Instant> {
         self.synchronized_output_started
             .map(|started| started + MAX_SYNCHRONIZED_OUTPUT_DURATION)
+    }
+
+    pub(crate) fn presentation_generation(&self) -> PresentationGeneration {
+        self.presentation_generation
     }
 
     pub(crate) fn expire_synchronized_output(&mut self, now: Instant) -> Result<bool, Error> {
@@ -617,6 +634,10 @@ impl TerminalEmulator {
 
     pub(crate) fn resize(&mut self, geometry: TerminalGeometry) -> Result<(), Error> {
         self.end_synchronized_output()?;
+        self.selection_gesture.reset(&self.terminal);
+        self.active_pointer = None;
+        self.selection_drag_position = None;
+        self.pointer_mapping_invalidated = false;
         let grid = geometry.grid();
         let cell = geometry.backing_cell_size();
         self.terminal
@@ -664,14 +685,16 @@ impl TerminalEmulator {
     }
 
     pub(crate) fn pointer(&mut self, input: PointerInput) -> Result<EmulatorAction, String> {
-        if input.generation != self.presentation_generation
-            || self
-                .terminal
-                .mode(Mode::SYNC_OUTPUT)
-                .map_err(|error| format!("failed to query synchronized-output mode: {error}"))?
+        if self
+            .terminal
+            .mode(Mode::SYNC_OUTPUT)
+            .map_err(|error| format!("failed to query synchronized-output mode: {error}"))?
+            || !self.accept_pointer_generation(input.generation)
         {
             self.selection_gesture.reset(&self.terminal);
             self.active_pointer = None;
+            self.selection_drag_position = None;
+            self.pointer_mapping_invalidated = false;
             return Ok(EmulatorAction::none());
         }
         match input.phase {
@@ -833,6 +856,25 @@ impl TerminalEmulator {
             })
     }
 
+    fn accept_pointer_generation(&mut self, generation: PresentationGeneration) -> bool {
+        let Some(active) = self.active_pointer.as_mut() else {
+            return generation == self.presentation_generation;
+        };
+        if self.pointer_mapping_invalidated {
+            if generation == self.presentation_generation && generation != active.generation {
+                active.generation = generation;
+                self.pointer_mapping_invalidated = false;
+                return true;
+            }
+            return false;
+        }
+        if generation == self.presentation_generation {
+            active.generation = generation;
+            return true;
+        }
+        generation == active.generation
+    }
+
     fn pointer_press(&mut self, input: PointerInput) -> Result<EmulatorAction, String> {
         if self.active_pointer.is_some() {
             return Ok(EmulatorAction::none());
@@ -861,7 +903,11 @@ impl TerminalEmulator {
                 return Ok(EmulatorAction::none());
             }
         };
-        self.active_pointer = Some(ActivePointer { button, route });
+        self.active_pointer = Some(ActivePointer {
+            button,
+            route,
+            generation: input.generation,
+        });
 
         match route {
             PointerRoute::Application => {
@@ -881,6 +927,7 @@ impl TerminalEmulator {
                 })
             }
             PointerRoute::Selection => {
+                self.selection_drag_position = Some(input.position);
                 self.selection_press(input.position)?;
                 Ok(EmulatorAction::screen_changed())
             }
@@ -892,6 +939,7 @@ impl TerminalEmulator {
             Some(ActivePointer {
                 button,
                 route: PointerRoute::Application,
+                ..
             }) => {
                 let mut bytes = Vec::new();
                 self.encode_mouse_event(
@@ -908,6 +956,7 @@ impl TerminalEmulator {
                 route: PointerRoute::Selection,
                 ..
             }) => {
+                self.selection_drag_position = Some(input.position);
                 self.selection_drag(input.position)?;
                 Ok(EmulatorAction::screen_changed())
             }
@@ -943,6 +992,7 @@ impl TerminalEmulator {
             return Ok(EmulatorAction::none());
         }
         self.active_pointer = None;
+        self.selection_drag_position = None;
 
         match active.route {
             PointerRoute::Application => {
@@ -1013,6 +1063,7 @@ impl TerminalEmulator {
             .set_selection(None)
             .map_err(|error| format!("failed to clear terminal selection: {error}"))?;
         self.selection_gesture.reset(&self.terminal);
+        self.selection_drag_position = None;
         Ok(())
     }
 
@@ -1071,6 +1122,78 @@ impl TerminalEmulator {
         self.selection_release
             .apply(&mut self.selection_gesture, &self.terminal, Some(grid_ref))
             .map_err(|error| format!("failed to apply terminal selection release: {error}"))
+    }
+
+    pub(crate) fn selection_autoscroll_interval(&self) -> Result<Option<Duration>, String> {
+        if !matches!(
+            self.active_pointer,
+            Some(ActivePointer {
+                route: PointerRoute::Selection,
+                ..
+            })
+        ) {
+            return Ok(None);
+        }
+        let Some(position) = self.selection_drag_position else {
+            return Ok(None);
+        };
+        let direction = self
+            .selection_gesture
+            .autoscroll(&self.terminal)
+            .map_err(|error| format!("failed to query selection autoscroll: {error}"))?;
+        if direction == Autoscroll::None {
+            return Ok(None);
+        }
+        Ok(selection_autoscroll_interval_for_position(
+            position,
+            self.geometry.backing_grid_size().height,
+            self.geometry.backing_cell_size().height,
+        ))
+    }
+
+    pub(crate) fn selection_autoscroll_tick(
+        &mut self,
+        generation: PresentationGeneration,
+    ) -> Result<EmulatorAction, String> {
+        if generation != self.presentation_generation {
+            self.selection_gesture.reset(&self.terminal);
+            self.active_pointer = None;
+            self.selection_drag_position = None;
+            return Ok(EmulatorAction::none());
+        }
+        let Some(position) = self.selection_drag_position else {
+            return Ok(EmulatorAction::none());
+        };
+        let direction = self
+            .selection_gesture
+            .autoscroll(&self.terminal)
+            .map_err(|error| format!("failed to query selection autoscroll: {error}"))?;
+        let delta = match direction {
+            Autoscroll::Up => -1,
+            Autoscroll::Down => 1,
+            Autoscroll::None => return Ok(EmulatorAction::none()),
+            _ => return Ok(EmulatorAction::none()),
+        };
+        self.terminal.scroll_viewport(ScrollViewport::Delta(delta));
+        let viewport = self.selection_viewport_point(position)?;
+        let geometry = self.selection_geometry();
+        let selection = self
+            .selection_autoscroll_tick
+            .set_position(f64::from(position.x), f64::from(position.y))
+            .and_then(|event| event.set_rectangle(false))
+            .and_then(|event| {
+                event.apply(
+                    &mut self.selection_gesture,
+                    &self.terminal,
+                    viewport,
+                    geometry,
+                )
+            })
+            .map_err(|error| format!("failed to apply selection autoscroll tick: {error}"))?;
+        self.terminal
+            .set_selection(selection.as_ref())
+            .map_err(|error| format!("failed to install autoscrolled selection: {error}"))?;
+        Ok(EmulatorAction::screen_changed())
     }
 
     #[cfg(test)]
@@ -1422,6 +1545,25 @@ fn shift_overrides_application_mouse(
     policy: ShiftSelectionPolicy,
 ) -> bool {
     modifiers.shift && policy == ShiftSelectionPolicy::OverrideApplicationMouse
+}
+
+fn selection_autoscroll_interval_for_position(
+    position: SurfacePosition,
+    screen_height: u32,
+    cell_height: u32,
+) -> Option<Duration> {
+    let overflow = if position.y < 0.0 {
+        -position.y
+    } else if position.y >= screen_height as f32 {
+        position.y - screen_height as f32 + 1.0
+    } else {
+        return None;
+    };
+    let cell_height = cell_height.max(1) as f32;
+    let depth = (overflow / cell_height).ceil().clamp(1.0, 6.0) as u32;
+    let range = MAX_SELECTION_AUTOSCROLL_INTERVAL - MIN_SELECTION_AUTOSCROLL_INTERVAL;
+    let step = range / 5;
+    Some(MAX_SELECTION_AUTOSCROLL_INTERVAL - step * (depth - 1))
 }
 
 const ANSI_NORMAL_INDICES: [PaletteIndex; 8] = [
@@ -2892,6 +3034,69 @@ mod tests {
     }
 
     #[test]
+    fn selection_autoscroll_rate_is_bounded_by_offscreen_depth() {
+        assert_eq!(
+            selection_autoscroll_interval_for_position(SurfacePosition { x: 1.0, y: 10.0 }, 40, 20,),
+            None
+        );
+        assert_eq!(
+            selection_autoscroll_interval_for_position(SurfacePosition { x: 1.0, y: -1.0 }, 40, 20,),
+            Some(MAX_SELECTION_AUTOSCROLL_INTERVAL)
+        );
+        assert_eq!(
+            selection_autoscroll_interval_for_position(
+                SurfacePosition { x: 1.0, y: -200.0 },
+                40,
+                20,
+            ),
+            Some(MIN_SELECTION_AUTOSCROLL_INTERVAL)
+        );
+    }
+
+    #[test]
+    fn autoscroll_tick_moves_the_viewport_and_rejects_a_stale_generation() {
+        let mut emulator = emulator(8, 2);
+        emulator.feed(b"one\r\ntwo\r\nthree\r\nfour");
+        let initial = emulator.snapshot().unwrap().unwrap();
+        let press = current_pointer(
+            &emulator,
+            pointer(
+                PointerPhase::Press,
+                Some(PointerButton::Left),
+                1.0,
+                21.0,
+                false,
+            ),
+        );
+        assert!(emulator.pointer(press).unwrap().screen_changed);
+        let drag = current_pointer(
+            &emulator,
+            pointer(PointerPhase::Motion, None, 1.0, -41.0, false),
+        );
+        assert!(emulator.pointer(drag).unwrap().screen_changed);
+        let dragged = emulator.snapshot().unwrap().unwrap();
+        assert_eq!(
+            emulator.selection_autoscroll_interval().unwrap(),
+            Some(Duration::from_millis(100))
+        );
+
+        let action = emulator
+            .selection_autoscroll_tick(dragged.generation)
+            .unwrap();
+        assert!(action.screen_changed);
+        let scrolled = emulator.snapshot().unwrap().unwrap();
+        assert!(scrolled.scrollbar.offset_rows < dragged.scrollbar.offset_rows);
+        assert!(
+            emulator
+                .selection_autoscroll_tick(initial.generation)
+                .unwrap()
+                .bytes
+                .is_empty()
+        );
+        assert_eq!(emulator.selection_autoscroll_interval().unwrap(), None);
+    }
+
+    #[test]
     fn scrollback_wheel_changes_visible_rows() {
         let mut emulator = emulator(10, 2);
         let _ = emulator.snapshot().unwrap();
@@ -3057,6 +3262,38 @@ mod tests {
 
         assert!(!action.screen_changed);
         assert_eq!(emulator.selection_text().unwrap(), None);
+    }
+
+    #[test]
+    fn selection_owned_presentations_do_not_stale_the_active_gesture() {
+        let mut emulator = emulator(12, 2);
+        emulator.feed(b"hello world");
+        let presented = emulator.snapshot().unwrap().unwrap();
+        let press = PointerInput {
+            generation: presented.generation,
+            phase: PointerPhase::Press,
+            button: Some(PointerButton::Left),
+            position: SurfacePosition { x: 1.0, y: 1.0 },
+            modifiers: InputModifiers::default(),
+            shift_selection: ShiftSelectionPolicy::default(),
+        };
+        _ = emulator.pointer(press).unwrap();
+        let mut drag = press;
+        drag.phase = PointerPhase::Motion;
+        drag.button = None;
+        drag.position.x = 41.0;
+        _ = emulator.pointer(drag).unwrap();
+        let selected = emulator.snapshot().unwrap().unwrap();
+        assert!(selected.generation > presented.generation);
+
+        drag.position.x = 108.0;
+        let extended = emulator.pointer(drag).unwrap();
+
+        assert!(extended.screen_changed);
+        assert_eq!(
+            emulator.selection_text().unwrap().as_deref(),
+            Some("hello world")
+        );
     }
 
     #[test]

@@ -690,6 +690,7 @@ enum Command {
     ScrollTo(u64, PresentationGeneration),
     Paste(String),
     SelectionText(async_channel::Sender<Result<Option<String>, String>>),
+    SelectionAutoscrollTick(PresentationGeneration),
     ReaderReady,
     Shutdown,
 }
@@ -706,6 +707,38 @@ struct TerminalWorker {
     terminal_input_focused: bool,
     focus_reporting_enabled: bool,
     held_keys: HeldKeys,
+    selection_autoscroll: SelectionAutoscrollSchedule,
+}
+
+#[derive(Default)]
+struct SelectionAutoscrollSchedule {
+    deadline: Option<Instant>,
+    generation: PresentationGeneration,
+}
+
+impl SelectionAutoscrollSchedule {
+    fn update(
+        &mut self,
+        now: Instant,
+        interval: Option<Duration>,
+        generation: PresentationGeneration,
+    ) {
+        self.deadline = interval.map(|interval| now + interval);
+        self.generation = generation;
+    }
+
+    fn deadline(&self) -> Option<Instant> {
+        self.deadline
+    }
+
+    fn take_due(&mut self, now: Instant) -> Option<PresentationGeneration> {
+        if self.deadline.is_some_and(|deadline| now >= deadline) {
+            self.deadline = None;
+            Some(self.generation)
+        } else {
+            None
+        }
+    }
 }
 
 #[derive(Default)]
@@ -833,6 +866,7 @@ impl TerminalWorker {
             terminal_input_focused: true,
             focus_reporting_enabled: false,
             held_keys: HeldKeys::default(),
+            selection_autoscroll: SelectionAutoscrollSchedule::default(),
         };
 
         if !startup.succeeded() {
@@ -866,14 +900,27 @@ impl TerminalWorker {
         }
 
         loop {
-            let Some(deadline) = self.emulator.synchronized_output_deadline() else {
+            let synchronized_output_deadline = self.emulator.synchronized_output_deadline();
+            let autoscroll_deadline = self.selection_autoscroll.deadline();
+            let deadline = match (synchronized_output_deadline, autoscroll_deadline) {
+                (Some(left), Some(right)) => Some(left.min(right)),
+                (Some(deadline), None) | (None, Some(deadline)) => Some(deadline),
+                (None, None) => None,
+            };
+            let Some(deadline) = deadline else {
                 return self.commands.recv().ok();
             };
             let timeout = deadline.saturating_duration_since(Instant::now());
             match self.commands.recv_timeout(timeout) {
                 Ok(command) => return Some(command),
                 Err(mpsc::RecvTimeoutError::Timeout) => {
-                    if !self.release_synchronized_output_if_due(deadline) {
+                    let now = Instant::now();
+                    if let Some(generation) = self.selection_autoscroll.take_due(now) {
+                        return Some(Command::SelectionAutoscrollTick(generation));
+                    }
+                    if synchronized_output_deadline.is_some()
+                        && !self.release_synchronized_output_if_due(now)
+                    {
                         return None;
                     }
                 }
@@ -904,7 +951,10 @@ impl TerminalWorker {
                     });
 
                 match result {
-                    Ok(()) => self.apply_emulator_action(EmulatorAction::screen_changed()),
+                    Ok(()) => {
+                        self.apply_emulator_action(EmulatorAction::screen_changed())
+                            && self.refresh_selection_autoscroll()
+                    }
                     Err(message) => {
                         self.send_runtime_failure(message);
                         false
@@ -912,7 +962,9 @@ impl TerminalWorker {
                 }
             }
             Command::Pointer(input) => match self.emulator.pointer(input) {
-                Ok(action) => self.apply_emulator_action(action),
+                Ok(action) => {
+                    self.apply_emulator_action(action) && self.refresh_selection_autoscroll()
+                }
                 Err(message) => {
                     self.send_runtime_failure(message);
                     false
@@ -940,7 +992,35 @@ impl TerminalWorker {
                 let _ = reply.try_send(self.emulator.selection_text());
                 true
             }
+            Command::SelectionAutoscrollTick(generation) => {
+                match self.emulator.selection_autoscroll_tick(generation) {
+                    Ok(action) => {
+                        self.apply_emulator_action(action) && self.refresh_selection_autoscroll()
+                    }
+                    Err(message) => {
+                        self.send_runtime_failure(message);
+                        false
+                    }
+                }
+            }
             Command::Shutdown => false,
+        }
+    }
+
+    fn refresh_selection_autoscroll(&mut self) -> bool {
+        match self.emulator.selection_autoscroll_interval() {
+            Ok(interval) => {
+                self.selection_autoscroll.update(
+                    Instant::now(),
+                    interval,
+                    self.emulator.presentation_generation(),
+                );
+                true
+            }
+            Err(message) => {
+                self.send_runtime_failure(message);
+                false
+            }
         }
     }
 
@@ -1174,6 +1254,7 @@ impl TerminalWorker {
             terminal_input_focused: _terminal_input_focused,
             focus_reporting_enabled: _focus_reporting_enabled,
             held_keys: _held_keys,
+            selection_autoscroll: _selection_autoscroll,
         } = self;
         // SpawnedPty's Drop terminates and reaps a live shell for the native Adapter.
         drop(reader_events);
@@ -2198,6 +2279,7 @@ mod tests {
             terminal_input_focused: true,
             focus_reporting_enabled: false,
             held_keys: HeldKeys::default(),
+            selection_autoscroll: SelectionAutoscrollSchedule::default(),
         };
 
         assert!(worker.process_reader_events());
@@ -2242,6 +2324,7 @@ mod tests {
             terminal_input_focused: true,
             focus_reporting_enabled: false,
             held_keys: HeldKeys::default(),
+            selection_autoscroll: SelectionAutoscrollSchedule::default(),
         };
         assert!(worker.publish_screen());
         let _ = receiver.try_recv().unwrap();
@@ -2802,5 +2885,77 @@ mod tests {
             exit_status.is_some(),
             "shell exit did not produce a terminal lifecycle event"
         );
+    }
+
+    #[test]
+    fn selection_autoscroll_schedule_uses_an_injected_monotonic_now() {
+        let epoch = Instant::now();
+        let generation = PresentationGeneration::default();
+        let mut schedule = SelectionAutoscrollSchedule::default();
+
+        schedule.update(epoch, Some(Duration::from_millis(100)), generation);
+
+        assert_eq!(schedule.take_due(epoch + Duration::from_millis(99)), None);
+        assert_eq!(
+            schedule.take_due(epoch + Duration::from_millis(100)),
+            Some(generation)
+        );
+        assert_eq!(schedule.take_due(epoch + Duration::from_secs(1)), None);
+
+        schedule.update(epoch, Some(Duration::from_millis(25)), generation);
+        schedule.update(epoch, None, generation);
+        assert_eq!(schedule.take_due(epoch + Duration::from_secs(1)), None);
+    }
+
+    #[test]
+    fn worker_autoscroll_ticks_publish_scrollback_without_more_pointer_motion() {
+        let (result, reader_steps, _records) =
+            start_scripted_session(ScriptedPtyOptions::default());
+        let (mut session, events) = result.unwrap();
+        let mut output = Vec::new();
+        for row in 0..30 {
+            output.extend_from_slice(format!("row {row:02}\r\n").as_bytes());
+        }
+        reader_steps.send(ReaderStep::Bytes(output)).unwrap();
+        let SessionEvent::Screen(bottom) = receive_event(
+            &events,
+            "scrollback at the bottom",
+            |event| matches!(event, SessionEvent::Screen(screen) if screen.scrollbar.total_rows > screen.scrollbar.visible_rows),
+        ) else {
+            unreachable!()
+        };
+        let bottom_offset = bottom.scrollbar.offset_rows;
+        let pointer = |phase, position, generation| PointerInput {
+            generation,
+            phase,
+            button: (phase != PointerPhase::Motion).then_some(PointerButton::Left),
+            position,
+            modifiers: InputModifiers::default(),
+            shift_selection: ShiftSelectionPolicy::default(),
+        };
+        session.pointer(pointer(
+            PointerPhase::Press,
+            SurfacePosition { x: 1.0, y: 470.0 },
+            bottom.generation,
+        ));
+        session.pointer(pointer(
+            PointerPhase::Motion,
+            SurfacePosition { x: 1.0, y: -1.0 },
+            bottom.generation,
+        ));
+
+        let SessionEvent::Screen(autoscrolled) = receive_event(
+            &events,
+            "worker-driven selection autoscroll",
+            move |event| matches!(event, SessionEvent::Screen(screen) if screen.scrollbar.offset_rows < bottom_offset),
+        ) else {
+            unreachable!()
+        };
+        session.pointer(pointer(
+            PointerPhase::Release,
+            SurfacePosition { x: 1.0, y: -1.0 },
+            autoscrolled.generation,
+        ));
+        session.shutdown();
     }
 }
