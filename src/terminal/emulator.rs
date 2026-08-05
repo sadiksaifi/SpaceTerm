@@ -17,7 +17,7 @@ use libghostty_vt::selection::FormatOptions;
 use libghostty_vt::selection::gesture::{
     DragEvent, Geometry as SelectionGeometry, Gesture, PressEvent, ReleaseEvent,
 };
-use libghostty_vt::style::{PaletteIndex, RgbColor};
+use libghostty_vt::style::{PaletteIndex, RgbColor, StyleColor};
 use libghostty_vt::terminal::{Mode, Point, PointCoordinate, ScrollViewport};
 use libghostty_vt::{Error, RenderState, Terminal, TerminalOptions};
 
@@ -42,12 +42,31 @@ impl From<RgbColor> for Color {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct CellSnapshot {
     pub(crate) text: String,
+    pub(crate) foreground_source: TerminalColor,
     pub(crate) foreground: Color,
     pub(crate) background: Color,
     pub(crate) bold: bool,
     pub(crate) italic: bool,
     pub(crate) selected: bool,
     pub(crate) spacer_tail: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) enum TerminalColor {
+    #[default]
+    Default,
+    Palette(u8),
+    Rgb(Color),
+}
+
+impl From<StyleColor> for TerminalColor {
+    fn from(color: StyleColor) -> Self {
+        match color {
+            StyleColor::None => Self::Default,
+            StyleColor::Palette(PaletteIndex(index)) => Self::Palette(index),
+            StyleColor::Rgb(color) => Self::Rgb(color.into()),
+        }
+    }
 }
 
 pub(crate) type RowSnapshot = Arc<[CellSnapshot]>;
@@ -993,6 +1012,7 @@ impl TerminalEmulator {
 
                         rendered_cells.push(CellSnapshot {
                             text,
+                            foreground_source: style.fg_color.into(),
                             foreground,
                             background,
                             bold: style.bold,
@@ -1318,6 +1338,28 @@ mod tests {
         assert_eq!(
             snapshot.rows[1][0].foreground,
             ACTIVE_THEME.terminal_normal()[1]
+        );
+    }
+
+    #[test]
+    fn snapshots_preserve_foreground_color_sources() {
+        let mut emulator = emulator(8, 1);
+        emulator.feed(b"d\x1b[31ma\x1b[38;5;200mi\x1b[38;2;1;2;3mr");
+
+        let snapshot = emulator.snapshot().unwrap().unwrap();
+        let sources = snapshot.rows[0][..4]
+            .iter()
+            .map(|cell| cell.foreground_source)
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            sources,
+            vec![
+                TerminalColor::Default,
+                TerminalColor::Palette(1),
+                TerminalColor::Palette(200),
+                TerminalColor::Rgb(Color::from_rgb_components(1, 2, 3)),
+            ]
         );
     }
 

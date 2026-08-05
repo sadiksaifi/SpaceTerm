@@ -487,6 +487,7 @@ mod tests {
     fn cell(text: &str) -> CellSnapshot {
         CellSnapshot {
             text: text.to_owned(),
+            foreground_source: crate::terminal::TerminalColor::Default,
             foreground: ACTIVE_THEME.terminal_foreground,
             background: ACTIVE_THEME.terminal_background,
             bold: false,
