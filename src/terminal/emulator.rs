@@ -1629,6 +1629,38 @@ mod tests {
     }
 
     #[test]
+    fn fixterms_disambiguates_control_keys_that_overlap_legacy_bytes() {
+        let mut emulator = emulator(10, 2);
+        let cases = [
+            (PhysicalKey::I, "i", 'i', false, b"\x1b[105;5u".as_slice()),
+            (PhysicalKey::M, "m", 'm', false, b"\x1b[109;5u".as_slice()),
+            (
+                PhysicalKey::BracketLeft,
+                "[",
+                '[',
+                false,
+                b"\x1b[91;5u".as_slice(),
+            ),
+            (PhysicalKey::M, "M", 'm', true, b"\x1b[109;6u".as_slice()),
+        ];
+
+        for (physical_key, text, unshifted, shift, expected) in cases {
+            let input = text_key(
+                physical_key,
+                text,
+                unshifted,
+                KeyAction::Press,
+                InputModifiers {
+                    shift,
+                    control: true,
+                    ..InputModifiers::default()
+                },
+            );
+            assert_eq!(emulator.key(input).unwrap().bytes, expected);
+        }
+    }
+
+    #[test]
     fn clean_screens_do_not_publish_another_snapshot() {
         let mut emulator = emulator(10, 2);
 
