@@ -50,6 +50,13 @@ pub(crate) enum PointerPhase {
     Release,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) enum ShiftSelectionPolicy {
+    #[default]
+    OverrideApplicationMouse,
+    ReportToApplication,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct PointerInput {
     pub(crate) generation: PresentationGeneration,
@@ -57,6 +64,7 @@ pub(crate) struct PointerInput {
     pub(crate) button: Option<PointerButton>,
     pub(crate) position: SurfacePosition,
     pub(crate) modifiers: InputModifiers,
+    pub(crate) shift_selection: ShiftSelectionPolicy,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]

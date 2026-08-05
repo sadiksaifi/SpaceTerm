@@ -27,7 +27,7 @@ use crate::terminal::geometry::{
 };
 use crate::terminal::{
     InputModifiers, KeyAction, KeyInput, OptionAsAltPolicy, PhysicalKey, PointerButton,
-    PointerInput, PointerPhase, ScreenSnapshot, SessionEvent, SurfacePosition,
+    PointerInput, PointerPhase, ScreenSnapshot, SessionEvent, ShiftSelectionPolicy, SurfacePosition,
     TerminalSessionHandle, WheelInput, WorkspaceTerminalSessionFactory,
 };
 use crate::theme::{ACTIVE_THEME, Color};
@@ -497,6 +497,7 @@ impl TerminalPane {
                 button: Some(button),
                 position,
                 modifiers: input_modifiers(event.modifiers),
+                shift_selection: ShiftSelectionPolicy::default(),
             });
         }
         cx.stop_propagation();
@@ -519,6 +520,7 @@ impl TerminalPane {
                 button: self.pressed_button,
                 position,
                 modifiers: input_modifiers(event.modifiers),
+                shift_selection: ShiftSelectionPolicy::default(),
             });
         }
         cx.stop_propagation();
@@ -543,6 +545,7 @@ impl TerminalPane {
                 button: Some(button),
                 position,
                 modifiers: input_modifiers(event.modifiers),
+                shift_selection: ShiftSelectionPolicy::default(),
             });
         }
         cx.stop_propagation();

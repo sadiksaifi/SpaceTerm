@@ -26,7 +26,7 @@ use crate::terminal::geometry::{BackingPosition, TerminalGeometry};
 use crate::terminal::key::{InputModifiers, KeyAction, KeyInput, OptionAsAltPolicy, PhysicalKey};
 use crate::terminal::keyboard_protocol::KeyboardProtocolEncoder;
 use crate::terminal::session::{
-    PointerButton, PointerInput, PointerPhase, SurfacePosition, WheelInput,
+    PointerButton, PointerInput, PointerPhase, ShiftSelectionPolicy, SurfacePosition, WheelInput,
 };
 use crate::theme::{ACTIVE_THEME, Color};
 
@@ -823,7 +823,10 @@ impl TerminalEmulator {
         };
         let route = match button {
             PointerButton::Left => {
-                if input.modifiers.shift || !tracking {
+                if !tracking
+                    || (input.modifiers.shift
+                        && input.shift_selection == ShiftSelectionPolicy::OverrideApplicationMouse)
+                {
                     PointerRoute::Selection
                 } else {
                     PointerRoute::Application
@@ -1498,6 +1501,7 @@ mod tests {
                 shift,
                 ..InputModifiers::default()
             },
+            shift_selection: ShiftSelectionPolicy::default(),
         }
     }
 
@@ -2714,6 +2718,7 @@ mod tests {
                 button: Some(PointerButton::Left),
                 position: SurfacePosition { x: 2.0, y: 10.0 },
                 modifiers: InputModifiers::default(),
+                shift_selection: ShiftSelectionPolicy::default(),
             })
             .unwrap();
 
@@ -2835,6 +2840,25 @@ mod tests {
 
         let snapshot = emulator.snapshot().unwrap().unwrap();
         assert!(snapshot.rows[0][..5].iter().all(|cell| cell.selected));
+    }
+
+    #[test]
+    fn shift_selection_override_is_policy_driven() {
+        let mut emulator = emulator(10, 2);
+        emulator.feed(b"\x1b[?1000h\x1b[?1006h");
+
+        let mut input = pointer(
+            PointerPhase::Press,
+            Some(PointerButton::Left),
+            1.0,
+            1.0,
+            true,
+        );
+        input.shift_selection = ShiftSelectionPolicy::ReportToApplication;
+
+        let action = emulator.pointer(input).unwrap();
+
+        assert_eq!(action.bytes, b"\x1b[<4;1;1M");
     }
 
     #[test]
