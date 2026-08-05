@@ -169,6 +169,20 @@ demand cancels the task and restores the visible phase, so static, invisible, an
 does not schedule frames. Blink phase filters already prepared cell-aligned fragments and never
 mutates Terminal Emulator state.
 
+### Terminal Text Decorations
+
+Terminal Presentation snapshots preserve single, double, curly, dotted, and dashed underline,
+independent underline color, strikethrough, and overline as semantic cell attributes. Preparation
+coalesces decoration spans only across adjacent cells with identical kind, resolved color, and
+blink state; wide spacer tails extend their head cell's decoration without producing text.
+Invisible cells prepare no foreground decorations, while Selection remains an independent overlay.
+
+Decoration positions derive from the selected terminal font's baseline, ascent, and x-height, and
+their minimum thickness and positions snap to one backing device pixel. GPUI builds quads and curly
+paths during prepaint and clips them to terminal grid bounds. The fixed paint order is background
+and Selection, underline and overline, glyph or generated symbol, then strikethrough; marked-text
+overlays remain above the immutable grid presentation.
+
 ### Terminal Input Focus
 
 Terminal Input Focus is a pure derived fact and is distinct from the Window-owned Focused Pane

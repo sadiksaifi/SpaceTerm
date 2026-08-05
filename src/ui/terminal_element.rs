@@ -1387,6 +1387,46 @@ mod tests {
     }
 
     #[test]
+    fn decorations_compose_with_inverse_selection_visibility_and_blink_phase() {
+        let mut decorated = cell("x");
+        decorated.inverse = true;
+        decorated.selected = true;
+        decorated.blinking = true;
+        decorated.underline = crate::terminal::TerminalUnderlineSnapshot::Single;
+        decorated.overline = true;
+        decorated.strikethrough = true;
+        let row = Arc::<[CellSnapshot]>::from([decorated.clone()]);
+
+        let input = prepare_row(&row, &colors(), &"Menlo".into(), None);
+
+        assert_eq!(input.selections.len(), 1);
+        assert!(
+            input
+                .under_text_decorations
+                .iter()
+                .chain(&input.over_text_decorations)
+                .all(|span| span.color == colors().background && span.blinking)
+        );
+        let metrics = decoration_metrics(px(15.0), px(11.0), px(8.0), 2.0);
+        let hidden = prepare_decoration_geometry(
+            &input.under_text_decorations,
+            px(0.0),
+            px(0.0),
+            px(8.0),
+            metrics,
+            false,
+        );
+        assert!(hidden.quads.is_empty() && hidden.paths.is_empty());
+
+        decorated.invisible = true;
+        let invisible = Arc::<[CellSnapshot]>::from([decorated]);
+        let invisible = prepare_row(&invisible, &colors(), &"Menlo".into(), None);
+        assert!(invisible.under_text_decorations.is_empty());
+        assert!(invisible.over_text_decorations.is_empty());
+        assert_eq!(invisible.selections.len(), 1);
+    }
+
+    #[test]
     fn decoration_metrics_follow_font_metrics_and_snap_to_retina_pixels() {
         let metrics = decoration_metrics(px(15.2), px(11.1), px(8.2), 2.0);
 
