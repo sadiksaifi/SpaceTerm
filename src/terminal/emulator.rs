@@ -438,7 +438,7 @@ pub(crate) struct TerminalEmulator {
     cached_mouse_tracking: Option<bool>,
     geometry: TerminalGeometry,
     active_pointer: Option<ActivePointer>,
-    gesture_epoch: Instant,
+    gesture_clock: GestureClock,
     presentation_generation: PresentationGeneration,
     synchronized_output_started: Option<Instant>,
 }
@@ -453,6 +453,22 @@ struct ActivePointer {
 enum PointerRoute {
     Application,
     Selection,
+}
+
+enum GestureClock {
+    System(Instant),
+    #[cfg(test)]
+    Manual(Duration),
+}
+
+impl GestureClock {
+    fn elapsed(&self) -> Duration {
+        match self {
+            Self::System(epoch) => epoch.elapsed(),
+            #[cfg(test)]
+            Self::Manual(elapsed) => *elapsed,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -554,7 +570,7 @@ impl TerminalEmulator {
             cached_mouse_tracking: None,
             geometry,
             active_pointer: None,
-            gesture_epoch: Instant::now(),
+            gesture_clock: GestureClock::System(Instant::now()),
             presentation_generation: PresentationGeneration::default(),
             synchronized_output_started: None,
         })
@@ -1001,7 +1017,7 @@ impl TerminalEmulator {
     }
 
     fn selection_press(&mut self, position: SurfacePosition) -> Result<(), String> {
-        let point = self.viewport_point(position);
+        let point = self.selection_viewport_point(position)?;
         let grid_ref = self
             .terminal
             .grid_ref(Point::Viewport(point))
@@ -1010,7 +1026,7 @@ impl TerminalEmulator {
             .selection_press
             .set_position(f64::from(position.x), f64::from(position.y))
             .and_then(|event| event.set_repeat_distance(REPEAT_CLICK_DISTANCE_PX))
-            .and_then(|event| event.set_time(self.gesture_epoch.elapsed()))
+            .and_then(|event| event.set_time(self.gesture_clock.elapsed()))
             .and_then(|event| event.set_repeat_interval(REPEAT_CLICK_INTERVAL))
             .and_then(|event| event.apply(&mut self.selection_gesture, &self.terminal, grid_ref))
             .map_err(|error| format!("failed to apply terminal selection press: {error}"))?;
@@ -1021,7 +1037,7 @@ impl TerminalEmulator {
     }
 
     fn selection_drag(&mut self, position: SurfacePosition) -> Result<(), String> {
-        let point = self.viewport_point(position);
+        let point = self.selection_viewport_point(position)?;
         let geometry = self.selection_geometry();
         let grid_ref = self
             .terminal
@@ -1047,7 +1063,7 @@ impl TerminalEmulator {
     }
 
     fn selection_release(&mut self, position: SurfacePosition) -> Result<(), String> {
-        let point = self.viewport_point(position);
+        let point = self.selection_viewport_point(position)?;
         let grid_ref = self
             .terminal
             .grid_ref(Point::Viewport(point))
@@ -1057,14 +1073,35 @@ impl TerminalEmulator {
             .map_err(|error| format!("failed to apply terminal selection release: {error}"))
     }
 
-    fn viewport_point(&self, position: SurfacePosition) -> PointCoordinate {
+    #[cfg(test)]
+    fn set_gesture_time_for_test(&mut self, elapsed: Duration) {
+        self.gesture_clock = GestureClock::Manual(elapsed);
+    }
+
+    fn selection_viewport_point(
+        &self,
+        position: SurfacePosition,
+    ) -> Result<PointCoordinate, String> {
         let position = self
             .geometry
             .cell_at_backing_position(BackingPosition::new(position.x, position.y));
-        PointCoordinate {
+        let mut point = PointCoordinate {
             x: position.col,
             y: u32::from(position.row),
+        };
+        let grid_ref = self
+            .terminal
+            .grid_ref(Point::Viewport(point))
+            .map_err(|error| format!("failed to resolve terminal selection cell: {error}"))?;
+        if grid_ref
+            .cell()
+            .and_then(|cell| cell.wide())
+            .map_err(|error| format!("failed to inspect terminal selection cell: {error}"))?
+            == CellWide::SpacerTail
+        {
+            point.x = point.x.saturating_sub(1);
         }
+        Ok(point)
     }
 
     fn cell_mouse_encoder_position(&self, position: SurfacePosition) -> SurfacePosition {
@@ -2760,6 +2797,98 @@ mod tests {
         assert!(snapshot.rows[0][..5].iter().all(|cell| cell.selected));
         assert!(!snapshot.rows[0][5].selected);
         assert_eq!(emulator.selection_text().unwrap(), Some("hello".to_owned()));
+    }
+
+    #[test]
+    fn repeat_clicks_select_cells_words_and_lines_with_injected_time() {
+        let mut emulator = emulator(12, 2);
+        emulator.feed(b"alpha beta");
+
+        for (time, expected) in [
+            (Duration::ZERO, None),
+            (Duration::from_millis(100), Some("beta")),
+            (Duration::from_millis(200), Some("alpha beta")),
+        ] {
+            emulator.set_gesture_time_for_test(time);
+            _ = emulator
+                .pointer(pointer(
+                    PointerPhase::Press,
+                    Some(PointerButton::Left),
+                    61.0,
+                    1.0,
+                    false,
+                ))
+                .unwrap();
+            _ = emulator
+                .pointer(pointer(
+                    PointerPhase::Release,
+                    Some(PointerButton::Left),
+                    61.0,
+                    1.0,
+                    false,
+                ))
+                .unwrap();
+
+            assert_eq!(emulator.selection_text().unwrap().as_deref(), expected);
+        }
+    }
+
+    #[test]
+    fn wide_tail_and_soft_wrapped_word_select_complete_graphemes() {
+        for x in [11.0, 21.0] {
+            let mut wide = emulator(8, 2);
+            wide.feed("A😀B".as_bytes());
+            for time in [Duration::ZERO, Duration::from_millis(100)] {
+                wide.set_gesture_time_for_test(time);
+                _ = wide
+                    .pointer(pointer(
+                        PointerPhase::Press,
+                        Some(PointerButton::Left),
+                        x,
+                        1.0,
+                        false,
+                    ))
+                    .unwrap();
+                _ = wide
+                    .pointer(pointer(
+                        PointerPhase::Release,
+                        Some(PointerButton::Left),
+                        x,
+                        1.0,
+                        false,
+                    ))
+                    .unwrap();
+            }
+            assert_eq!(wide.selection_text().unwrap().as_deref(), Some("A😀"));
+        }
+
+        let mut wrapped = emulator(5, 2);
+        wrapped.feed(b"abcdefgh");
+        for time in [Duration::ZERO, Duration::from_millis(100)] {
+            wrapped.set_gesture_time_for_test(time);
+            _ = wrapped
+                .pointer(pointer(
+                    PointerPhase::Press,
+                    Some(PointerButton::Left),
+                    11.0,
+                    21.0,
+                    false,
+                ))
+                .unwrap();
+            _ = wrapped
+                .pointer(pointer(
+                    PointerPhase::Release,
+                    Some(PointerButton::Left),
+                    11.0,
+                    21.0,
+                    false,
+                ))
+                .unwrap();
+        }
+        assert_eq!(
+            wrapped.selection_text().unwrap().as_deref(),
+            Some("abcdefgh")
+        );
     }
 
     #[test]
