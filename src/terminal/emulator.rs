@@ -390,8 +390,10 @@ pub(crate) struct TerminalEmulator {
     pty_responses: Rc<RefCell<Vec<u8>>>,
     pending_title: Rc<RefCell<Option<Arc<str>>>>,
     title: Arc<str>,
-    row_cache: Vec<RowSnapshot>,
+    primary_row_cache: Vec<RowSnapshot>,
+    alternate_row_cache: Vec<RowSnapshot>,
     cached_cols: u16,
+    cached_rows: u16,
     cached_colors: Option<TerminalColorsSnapshot>,
     cached_cursor: Option<CursorSnapshot>,
     cached_scrollbar: Option<ScrollbarSnapshot>,
@@ -501,8 +503,10 @@ impl TerminalEmulator {
             pty_responses,
             pending_title,
             title: Arc::from(""),
-            row_cache: Vec::new(),
+            primary_row_cache: Vec::new(),
+            alternate_row_cache: Vec::new(),
             cached_cols: 0,
+            cached_rows: 0,
             cached_colors: None,
             cached_cursor: None,
             cached_scrollbar: None,
@@ -1043,6 +1047,14 @@ impl TerminalEmulator {
         };
         let size = ScreenSizeSnapshot { cols, rows };
         let active_screen: ActiveScreenSnapshot = self.terminal.active_screen()?.into();
+        let row_cache = match active_screen {
+            ActiveScreenSnapshot::Primary => &self.primary_row_cache,
+            ActiveScreenSnapshot::Alternate => &self.alternate_row_cache,
+        };
+        let other_row_cache = match active_screen {
+            ActiveScreenSnapshot::Primary => &self.alternate_row_cache,
+            ActiveScreenSnapshot::Alternate => &self.primary_row_cache,
+        };
 
         let terminal_colors = TerminalColorsSnapshot {
             foreground: colors.foreground.into(),
@@ -1061,9 +1073,9 @@ impl TerminalEmulator {
             color: cursor_color,
             text_color: terminal_colors.effective_background(),
         };
-        let mut cursor = build_cursor(&self.row_cache);
+        let mut cursor = build_cursor(row_cache);
         let rebuild_all = matches!(dirty, Dirty::Full)
-            || self.row_cache.len() != usize::from(rows)
+            || row_cache.len() != usize::from(rows)
             || self.cached_cols != cols
             || self.cached_colors.as_ref() != Some(&terminal_colors);
         let previous_scrollbar = self.cached_scrollbar;
@@ -1081,7 +1093,7 @@ impl TerminalEmulator {
                         || previous.visible_rows != scrollbar.visible_rows
                 }),
                 active_screen: self.cached_active_screen != Some(active_screen),
-                resize: self.cached_cols != cols || self.row_cache.len() != usize::from(rows),
+                resize: self.cached_cols != cols || self.cached_rows != rows,
                 ..SnapshotDamage::default()
             }
         };
@@ -1093,7 +1105,7 @@ impl TerminalEmulator {
         let mut rendered_rows = if rebuild_all {
             Vec::with_capacity(usize::from(rows))
         } else {
-            self.row_cache.clone()
+            row_cache.clone()
         };
         let mut dirty_rows = Vec::new();
         let mut row_index = 0_u16;
@@ -1149,13 +1161,23 @@ impl TerminalEmulator {
                     }
 
                     let rendered_row = Arc::<[CellSnapshot]>::from(rendered_cells);
-                    let cached_row = self.row_cache.get(usize::from(row_index));
-                    let rendered_row = cached_row
-                        .filter(|cached| cached.as_ref() == rendered_row.as_ref())
+                    let previous_row = row_cache.get(usize::from(row_index));
+                    let rendered_row = previous_row
+                        .into_iter()
+                        .chain(other_row_cache.get(usize::from(row_index)))
+                        .find(|cached| cached.as_ref() == rendered_row.as_ref())
                         .cloned()
                         .unwrap_or(rendered_row);
                     if rebuild_all {
-                        if cached_row.is_none_or(|cached| !Arc::ptr_eq(cached, &rendered_row)) {
+                        let row_changed = previous_row.map_or_else(
+                            || {
+                                other_row_cache
+                                    .get(usize::from(row_index))
+                                    .is_none_or(|cached| !Arc::ptr_eq(cached, &rendered_row))
+                            },
+                            |cached| !Arc::ptr_eq(cached, &rendered_row),
+                        );
+                        if row_changed {
                             dirty_rows.push(row_index);
                         }
                         rendered_rows.push(rendered_row);
@@ -1187,15 +1209,23 @@ impl TerminalEmulator {
             ContentDamageSnapshot::Rows(Arc::from(dirty_rows))
         };
 
-        self.row_cache = rendered_rows;
+        match active_screen {
+            ActiveScreenSnapshot::Primary => self.primary_row_cache = rendered_rows,
+            ActiveScreenSnapshot::Alternate => self.alternate_row_cache = rendered_rows,
+        }
+        let row_cache = match active_screen {
+            ActiveScreenSnapshot::Primary => &self.primary_row_cache,
+            ActiveScreenSnapshot::Alternate => &self.alternate_row_cache,
+        };
         self.cached_cols = cols;
+        self.cached_rows = rows;
         self.cached_colors = Some(terminal_colors.clone());
         self.cached_cursor = Some(cursor);
         self.cached_scrollbar = Some(scrollbar);
         self.cached_active_screen = Some(active_screen);
 
         Ok(Some(Arc::new(ScreenSnapshot {
-            rows: Arc::from(self.row_cache.clone()),
+            rows: Arc::from(row_cache.clone()),
             background: terminal_colors.effective_background(),
             colors: terminal_colors,
             size,
@@ -1628,6 +1658,34 @@ mod tests {
                 active_screen: true,
                 ..SnapshotDamage::default()
             }
+        );
+    }
+
+    #[test]
+    fn alternate_screen_exit_restores_the_primary_viewport_and_cached_rows() {
+        let mut emulator = emulator(10, 2);
+        emulator.feed(b"one\r\ntwo\r\nthree");
+        let _ = emulator.snapshot().unwrap().unwrap();
+        let _ = emulator.wheel(wheel(1, false)).unwrap();
+        let primary = emulator.snapshot().unwrap().unwrap();
+        assert!(row_text(&primary, 0).starts_with("one"));
+
+        emulator.feed(b"\x1b[?1049halternate");
+        let alternate = emulator.snapshot().unwrap().unwrap();
+        assert_eq!(alternate.active_screen, ActiveScreenSnapshot::Alternate);
+        assert_eq!(alternate.scrollbar.total_rows, alternate.scrollbar.visible_rows);
+
+        emulator.feed(b"\x1b[?1049l");
+        let restored = emulator.snapshot().unwrap().unwrap();
+        assert_eq!(restored.active_screen, ActiveScreenSnapshot::Primary);
+        assert_eq!(restored.viewport, primary.viewport);
+        assert!(row_text(&restored, 0).starts_with("one"));
+        assert!(
+            primary
+                .rows
+                .iter()
+                .zip(restored.rows.iter())
+                .all(|(before, after)| Arc::ptr_eq(before, after))
         );
     }
 
