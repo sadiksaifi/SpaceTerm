@@ -3,8 +3,9 @@ use std::sync::Arc;
 use gpui::prelude::*;
 use gpui::{
     App, Bounds, ClipboardItem, Context, Entity, EventEmitter, FocusHandle, IntoElement,
-    KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Render,
-    ScrollWheelEvent, SharedString, Task, TextRun, Window, div, font, px, rgba,
+    KeyDownEvent, KeyUpEvent, ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, Pixels, Render, ScrollWheelEvent, SharedString, Task, TextRun, Window, div, font,
+    px, rgba,
 };
 
 use super::overlay_scrollbar::{OverlayScrollbar, OverlayScrollbarEvent, ScrollMetrics};
@@ -15,14 +16,14 @@ use super::{
     CopySelection, DecreaseTerminalFontSize, IncreaseTerminalFontSize, PasteClipboard,
     ResetTerminalFontSize, TERMINAL_KEY_CONTEXT,
 };
+use crate::platform::macos_keyboard::{MacosKeyboardBridge, NativeKeyEvent};
 use crate::terminal::geometry::{
     BackingScale, CellGridSize, LogicalCellSize, LogicalPosition, LogicalSize, TerminalGeometry,
 };
 use crate::terminal::{
     InputModifiers, KeyAction, KeyInput, KeyInputError, OptionAsAltPolicy, PhysicalKey,
     PointerButton, PointerInput, PointerPhase, ScreenSnapshot, SessionEvent, SurfacePosition,
-    TerminalSessionHandle, WheelInput,
-    WorkspaceTerminalSessionFactory,
+    TerminalSessionHandle, WheelInput, WorkspaceTerminalSessionFactory,
 };
 use crate::theme::{ACTIVE_THEME, Color};
 
@@ -64,6 +65,7 @@ pub(crate) struct TerminalPane {
     wheel_remainder: f32,
     scrollbar: Entity<OverlayScrollbar<u64>>,
     render_cache: TerminalGridCache,
+    keyboard_bridge: MacosKeyboardBridge,
     _event_task: Option<Task<()>>,
 }
 
@@ -121,6 +123,7 @@ impl TerminalPane {
             wheel_remainder: 0.0,
             scrollbar,
             render_cache: TerminalGridCache::new(),
+            keyboard_bridge: MacosKeyboardBridge::new(OptionAsAltPolicy::default()),
             _event_task: None,
         }
     }
@@ -256,7 +259,44 @@ impl TerminalPane {
     }
 
     fn on_key_down(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
-        match encode_key(event) {
+        let action = if event.is_held {
+            KeyAction::Repeat
+        } else {
+            KeyAction::Press
+        };
+        let input = NativeKeyEvent::current_key(action)
+            .map(|event| self.keyboard_bridge.translate(event))
+            .unwrap_or_else(|| encode_key(event));
+        self.send_key_input(input);
+        cx.stop_propagation();
+    }
+
+    fn on_key_up(&mut self, event: &KeyUpEvent, _window: &mut Window, cx: &mut Context<Self>) {
+        let input = NativeKeyEvent::current_key(KeyAction::Release)
+            .map(|event| self.keyboard_bridge.translate(event))
+            .unwrap_or_else(|| encode_keystroke(&event.keystroke, KeyAction::Release));
+        self.send_key_input(input);
+        cx.stop_propagation();
+    }
+
+    fn on_modifiers_changed(
+        &mut self,
+        _event: &ModifiersChangedEvent,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) {
+        let Some(event) = NativeKeyEvent::current_modifier() else {
+            return;
+        };
+        match self.keyboard_bridge.modifier_transition(event) {
+            Ok(Some(input)) => self.send_key_input(Ok(input)),
+            Ok(None) => {}
+            Err(error) => self.send_key_input(Err(error)),
+        }
+    }
+
+    fn send_key_input(&mut self, input: Result<KeyInput, KeyInputError>) {
+        match input {
             Ok(input) => {
                 if let Some(session) = &self.session {
                     session.key(input);
@@ -268,7 +308,6 @@ impl TerminalPane {
                 self.status = Some(status);
             }
         }
-        cx.stop_propagation();
     }
 
     fn increase_font_size(
@@ -536,6 +575,8 @@ impl Render for TerminalPane {
             .on_action(cx.listener(Self::decrease_font_size))
             .on_action(cx.listener(Self::reset_font_size))
             .on_key_down(cx.listener(Self::on_key_down))
+            .on_key_up(cx.listener(Self::on_key_up))
+            .on_modifiers_changed(cx.listener(Self::on_modifiers_changed))
             .on_any_mouse_down(cx.listener(Self::on_mouse_down))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
             .on_scroll_wheel(cx.listener(Self::on_scroll_wheel))
@@ -695,19 +736,29 @@ fn accumulate_wheel_steps(remainder: &mut f32, delta: f32) -> i32 {
 }
 
 fn encode_key(event: &KeyDownEvent) -> Result<KeyInput, KeyInputError> {
-    let keystroke = &event.keystroke;
-    let physical_key = physical_key(&keystroke.key);
-    let text = keystroke.key_char.clone().filter(|text| {
-        !text.is_empty() && !text.chars().any(char::is_control)
-    });
-    let unshifted_codepoint = single_char(&keystroke.key).map(unshifted_character);
-
-    let input = KeyInput {
-        action: if event.is_held {
+    encode_keystroke(
+        &event.keystroke,
+        if event.is_held {
             KeyAction::Repeat
         } else {
             KeyAction::Press
         },
+    )
+}
+
+fn encode_keystroke(
+    keystroke: &gpui::Keystroke,
+    action: KeyAction,
+) -> Result<KeyInput, KeyInputError> {
+    let physical_key = physical_key(&keystroke.key);
+    let text = keystroke
+        .key_char
+        .clone()
+        .filter(|text| !text.is_empty() && !text.chars().any(char::is_control));
+    let unshifted_codepoint = single_char(&keystroke.key).map(unshifted_character);
+
+    let input = KeyInput {
+        action,
         physical_key,
         native_key_code: None,
         logical_key: keystroke.key.clone(),
@@ -863,7 +914,7 @@ mod tests {
     use std::path::PathBuf;
     use std::rc::Rc;
 
-    use gpui::{Entity, Keystroke, Modifiers, TestAppContext, VisualTestContext};
+    use gpui::{Entity, KeyUpEvent, Keystroke, Modifiers, TestAppContext, VisualTestContext};
 
     use super::*;
     use crate::terminal::testing::{
@@ -888,6 +939,28 @@ mod tests {
         });
         cx.run_until_parked();
         (pane, cx)
+    }
+
+    fn connected_terminal_pane(
+        cx: &mut TestAppContext,
+    ) -> (
+        Entity<TerminalPane>,
+        &mut VisualTestContext,
+        TestTerminalSessionRecords,
+    ) {
+        cx.update(crate::ui::init);
+        let records = TestTerminalSessionRecords::default();
+        let session_factory: Rc<dyn TerminalSessionFactory> =
+            Rc::new(TestTerminalSessionFactory::new(records.clone()));
+        let session_factory = WorkspaceTerminalSessionFactory::new(
+            session_factory,
+            PathBuf::from("/tmp/spaceterm-terminal-pane-keyboard-test"),
+        );
+        let (pane, cx) =
+            cx.add_window_view(|window, cx| TerminalPane::new(session_factory, window, cx));
+        cx.update(|window, cx| pane.update(cx, |pane, _cx| pane.focus(window)));
+        cx.run_until_parked();
+        (pane, cx, records)
     }
 
     #[gpui::test]
@@ -924,6 +997,51 @@ mod tests {
         let after = pane.read_with(cx, |pane, _cx| pane.font_size());
 
         assert_eq!((before, after), (20.0, DEFAULT_FONT_SIZE));
+    }
+
+    #[gpui::test]
+    fn command_actions_resolve_before_the_raw_terminal_key_handler(cx: &mut TestAppContext) {
+        let (pane, cx, records) = connected_terminal_pane(cx);
+        let before = pane.read_with(cx, |pane, _cx| pane.font_size());
+
+        cx.simulate_keystrokes("cmd-=");
+
+        assert_eq!(
+            pane.read_with(cx, |pane, _cx| pane.font_size()),
+            before + 1.0
+        );
+        assert!(
+            records
+                .commands()
+                .iter()
+                .all(|call| !matches!(call.command, RecordedSessionCommand::Key(_)))
+        );
+    }
+
+    #[gpui::test]
+    fn raw_key_down_and_key_up_reach_the_session_as_distinct_actions(cx: &mut TestAppContext) {
+        let (_pane, cx, records) = connected_terminal_pane(cx);
+        let keystroke = Keystroke {
+            key: "a".to_owned(),
+            key_char: Some("a".to_owned()),
+            modifiers: Modifiers::default(),
+        };
+
+        cx.simulate_event(KeyDownEvent {
+            keystroke: keystroke.clone(),
+            is_held: false,
+        });
+        cx.simulate_event(KeyUpEvent { keystroke });
+
+        let actions = records
+            .commands()
+            .into_iter()
+            .filter_map(|call| match call.command {
+                RecordedSessionCommand::Key(input) => Some(input.action),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(actions, [KeyAction::Press, KeyAction::Release]);
     }
 
     fn event(key: &str, key_char: Option<&str>, modifiers: Modifiers) -> KeyDownEvent {

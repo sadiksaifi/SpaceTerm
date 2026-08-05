@@ -18,7 +18,9 @@ use crate::platform::macos_pty::{
 };
 use crate::terminal::emulator::{EmulatorAction, ScreenSnapshot, TerminalEmulator};
 use crate::terminal::geometry::TerminalGeometry;
-use crate::terminal::key::{InputModifiers, KeyInput, OptionAsAltPolicy};
+#[cfg(test)]
+use crate::terminal::key::OptionAsAltPolicy;
+use crate::terminal::key::{InputModifiers, KeyInput};
 
 const FINAL_CHILD_WAIT_TIMEOUT: Duration = Duration::from_secs(2);
 const PTY_READ_BUFFER_SIZE: usize = 16 * 1024;

@@ -22,6 +22,10 @@ pub(crate) enum KeyAction {
     Release,
 }
 
+#[allow(
+    dead_code,
+    reason = "all policies are configuration values even before preferences UI exists"
+)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) enum OptionAsAltPolicy {
     None,
@@ -59,9 +63,7 @@ impl KeyInput {
 
 #[derive(Clone, Debug, Eq, Error, PartialEq)]
 pub(crate) enum KeyInputError {
-    #[error(
-        "unsupported terminal key {logical_key:?} with native key code {native_key_code:?}"
-    )]
+    #[error("unsupported terminal key {logical_key:?} with native key code {native_key_code:?}")]
     UnsupportedKey {
         native_key_code: Option<u16>,
         logical_key: String,

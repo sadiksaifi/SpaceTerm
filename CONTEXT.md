@@ -133,6 +133,16 @@ to guessed terminal bytes. A worker-owned keyboard protocol Module reads Termina
 for every event and delegates cursor, keypad, DECBKM, modifyOtherKeys, fixterms, and negotiated
 Kitty keyboard encoding to `libghostty-vt`; UI code never constructs terminal escape sequences.
 
+### Native macOS Keyboard Bridge
+
+The focused Pane reads the current AppKit keyboard event synchronously from GPUI's raw keyboard
+callbacks, after application Actions have had the first opportunity to consume Command bindings.
+The bridge maps native macOS keycodes to stable physical identities while deriving logical text,
+unshifted codepoints, and consumed modifiers from each event, so input-source changes require no
+cached layout state or Terminal Session restart. It balances left/right modifier transitions and
+carries the injected Option-as-Alt policy with every ordered key event. Key releases use the same
+Terminal Session command lane as presses and repeats.
+
 ### Workspace-Bound Terminal Creation
 
 `WorkspaceCollection` owns default Workspace naming and passes the exact stored Workspace root into

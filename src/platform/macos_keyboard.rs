@@ -1,3 +1,10 @@
+use std::ffi::CStr;
+
+use cocoa::appkit::{NSApp, NSEvent, NSEventModifierFlags, NSEventType};
+use cocoa::base::{id, nil};
+use cocoa::foundation::NSString;
+use objc::{msg_send, sel, sel_impl};
+
 use crate::terminal::{
     InputModifiers, KeyAction, KeyInput, KeyInputError, OptionAsAltPolicy, PhysicalKey,
 };
@@ -18,6 +25,7 @@ pub(crate) struct NativeModifiers {
     pub(crate) alt_left: bool,
     pub(crate) control_left: bool,
     pub(crate) platform_left: bool,
+    pub(crate) function: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -27,7 +35,134 @@ pub(crate) struct NativeKeyEvent {
     pub(crate) characters: Option<String>,
     pub(crate) characters_ignoring_modifiers: Option<String>,
     pub(crate) unmodified_characters: Option<String>,
+    pub(crate) characters_without_option: Option<String>,
     pub(crate) modifiers: NativeModifiers,
+}
+
+impl NativeKeyEvent {
+    #[allow(
+        unexpected_cfgs,
+        reason = "objc 0.2's msg_send macro probes its historical cargo-clippy cfg"
+    )]
+    pub(crate) fn current_key(action: KeyAction) -> Option<Self> {
+        let event_type = match action {
+            KeyAction::Press | KeyAction::Repeat => NSEventType::NSKeyDown,
+            KeyAction::Release => NSEventType::NSKeyUp,
+        };
+        Self::current(action, event_type, true)
+    }
+
+    pub(crate) fn current_modifier() -> Option<Self> {
+        Self::current(KeyAction::Press, NSEventType::NSFlagsChanged, false)
+    }
+
+    #[allow(
+        unexpected_cfgs,
+        reason = "objc 0.2's msg_send macro probes its historical cargo-clippy cfg"
+    )]
+    fn current(action: KeyAction, expected_type: NSEventType, include_text: bool) -> Option<Self> {
+        // SAFETY: GPUI invokes the bridge synchronously while AppKit is dispatching
+        // the corresponding NSEvent. All returned NSString values are copied before
+        // returning, so no Objective-C object escapes this call.
+        unsafe {
+            let application = NSApp();
+            if application == nil {
+                return None;
+            }
+            let event: id = msg_send![application, currentEvent];
+            if event == nil {
+                return None;
+            }
+            if event.eventType() != expected_type {
+                return None;
+            }
+
+            let raw_flags = event.modifierFlags().bits();
+            let unmodified: id = if include_text {
+                msg_send![event, charactersByApplyingModifiers: 0usize]
+            } else {
+                nil
+            };
+            let flags_without_option = raw_flags & !NSEventModifierFlags::NSAlternateKeyMask.bits();
+            let without_option: id = if include_text {
+                msg_send![event, charactersByApplyingModifiers: flags_without_option]
+            } else {
+                nil
+            };
+            let mut characters = include_text
+                .then(|| ns_string(event.characters()))
+                .flatten();
+            if characters.as_deref().is_some_and(is_single_control_text) {
+                let flags_without_control =
+                    raw_flags & !NSEventModifierFlags::NSControlKeyMask.bits();
+                let value: id =
+                    msg_send![event, charactersByApplyingModifiers: flags_without_control];
+                characters = ns_string(value);
+            }
+            let mut characters_without_option = ns_string(without_option);
+            if characters_without_option
+                .as_deref()
+                .is_some_and(is_single_control_text)
+            {
+                let flags_without_option_or_control =
+                    flags_without_option & !NSEventModifierFlags::NSControlKeyMask.bits();
+                let value: id = msg_send![event, charactersByApplyingModifiers: flags_without_option_or_control];
+                characters_without_option = ns_string(value);
+            }
+            Some(Self {
+                action,
+                native_key_code: event.keyCode(),
+                characters,
+                characters_ignoring_modifiers: include_text
+                    .then(|| ns_string(event.charactersIgnoringModifiers()))
+                    .flatten(),
+                unmodified_characters: ns_string(unmodified),
+                characters_without_option,
+                modifiers: NativeModifiers::from_raw_flags(raw_flags),
+            })
+        }
+    }
+}
+
+impl NativeModifiers {
+    fn from_raw_flags(flags: u64) -> Self {
+        let contains = |flag: NSEventModifierFlags| flags & flag.bits() != 0;
+        Self {
+            shift: contains(NSEventModifierFlags::NSShiftKeyMask),
+            alt: contains(NSEventModifierFlags::NSAlternateKeyMask),
+            control: contains(NSEventModifierFlags::NSControlKeyMask),
+            platform: contains(NSEventModifierFlags::NSCommandKeyMask),
+            caps_lock: contains(NSEventModifierFlags::NSAlphaShiftKeyMask),
+            num_lock: false,
+            shift_left: flags & 0x0002 != 0,
+            shift_right: flags & 0x0004 != 0,
+            control_left: flags & 0x0001 != 0,
+            control_right: flags & 0x2000 != 0,
+            alt_left: flags & 0x0020 != 0,
+            alt_right: flags & 0x0040 != 0,
+            platform_left: flags & 0x0008 != 0,
+            platform_right: flags & 0x0010 != 0,
+            function: contains(NSEventModifierFlags::NSFunctionKeyMask),
+        }
+    }
+}
+
+unsafe fn ns_string(value: id) -> Option<String> {
+    if value == nil {
+        return None;
+    }
+    // SAFETY: `value` is an NSString supplied by the current NSEvent, and
+    // UTF8String remains valid for the duration of this synchronous copy.
+    let utf8 = unsafe { value.UTF8String() };
+    if utf8.is_null() {
+        return None;
+    }
+    // SAFETY: NSString guarantees UTF8String is NUL-terminated valid UTF-8.
+    Some(
+        unsafe { CStr::from_ptr(utf8) }
+            .to_string_lossy()
+            .into_owned(),
+    )
 }
 
 pub(crate) struct MacosKeyboardBridge {
@@ -52,12 +187,18 @@ impl MacosKeyboardBridge {
             .unwrap_or("")
             .to_owned();
         let modifiers = input_modifiers(event.modifiers);
+        let option_is_alt = option_is_alt(self.option_as_alt, modifiers);
         let input = KeyInput {
             action: event.action,
             physical_key,
             native_key_code: Some(event.native_key_code),
             logical_key,
-            text: event.characters.filter(|text| printable_text(text)),
+            text: if option_is_alt {
+                event.characters_without_option
+            } else {
+                event.characters
+            }
+            .filter(|text| printable_text(text)),
             unshifted_codepoint: event
                 .unmodified_characters
                 .as_deref()
@@ -65,9 +206,9 @@ impl MacosKeyboardBridge {
             modifiers,
             consumed_modifiers: InputModifiers {
                 shift: modifiers.shift,
-                alt: modifiers.alt,
+                alt: modifiers.alt && !option_is_alt,
                 shift_right: modifiers.shift_right,
-                alt_right: modifiers.alt_right,
+                alt_right: modifiers.alt_right && !option_is_alt,
                 ..InputModifiers::default()
             },
             option_as_alt: self.option_as_alt,
@@ -91,7 +232,7 @@ impl MacosKeyboardBridge {
             PhysicalKey::MetaLeft => event.modifiers.platform_left,
             PhysicalKey::MetaRight => event.modifiers.platform_right,
             PhysicalKey::CapsLock => event.modifiers.caps_lock,
-            PhysicalKey::Fn => event.modifiers.num_lock,
+            PhysicalKey::Fn => event.modifiers.function,
             _ => {
                 return Err(KeyInputError::UnsupportedKey {
                     native_key_code: Some(event.native_key_code),
@@ -121,6 +262,16 @@ impl MacosKeyboardBridge {
     }
 }
 
+fn option_is_alt(policy: OptionAsAltPolicy, modifiers: InputModifiers) -> bool {
+    modifiers.alt
+        && match policy {
+            OptionAsAltPolicy::None => false,
+            OptionAsAltPolicy::Both => true,
+            OptionAsAltPolicy::Left => !modifiers.alt_right,
+            OptionAsAltPolicy::Right => modifiers.alt_right,
+        }
+}
+
 fn input_modifiers(modifiers: NativeModifiers) -> InputModifiers {
     InputModifiers {
         shift: modifiers.shift,
@@ -141,6 +292,11 @@ fn printable_text(text: &str) -> bool {
         && text
             .chars()
             .all(|character| !character.is_control() && !is_appkit_function_character(character))
+}
+
+fn is_single_control_text(text: &str) -> bool {
+    let mut characters = text.chars();
+    characters.next().is_some_and(char::is_control) && characters.next().is_none()
 }
 
 fn single_scalar(text: &str) -> Option<char> {
@@ -289,18 +445,22 @@ mod tests {
             characters: Some(text.to_owned()),
             characters_ignoring_modifiers: Some(text.to_owned()),
             unmodified_characters: Some(text.to_owned()),
+            characters_without_option: Some(text.to_owned()),
             modifiers: NativeModifiers::default(),
         }
     }
 
     #[test]
     fn native_identity_stays_physical_when_the_active_layout_changes_text() {
-        let bridge = MacosKeyboardBridge::new(OptionAsAltPolicy::Both);
+        let bridge = MacosKeyboardBridge::new(OptionAsAltPolicy::None);
 
         let us = bridge.translate(native(12, "q")).unwrap();
         let dvorak = bridge.translate(native(12, "'")).unwrap();
 
-        assert_eq!((us.physical_key, us.logical_key.as_str()), (PhysicalKey::Q, "q"));
+        assert_eq!(
+            (us.physical_key, us.logical_key.as_str()),
+            (PhysicalKey::Q, "q")
+        );
         assert_eq!(
             (dvorak.physical_key, dvorak.logical_key.as_str()),
             (PhysicalKey::Q, "'")
@@ -330,6 +490,7 @@ mod tests {
             characters: None,
             characters_ignoring_modifiers: None,
             unmodified_characters: None,
+            characters_without_option: None,
             modifiers: NativeModifiers {
                 shift: shift_left || shift_right,
                 shift_left,
@@ -339,10 +500,18 @@ mod tests {
         };
 
         let events = [
-            bridge.modifier_transition(modifier(56, true, false)).unwrap(),
-            bridge.modifier_transition(modifier(60, true, true)).unwrap(),
-            bridge.modifier_transition(modifier(56, false, true)).unwrap(),
-            bridge.modifier_transition(modifier(60, false, false)).unwrap(),
+            bridge
+                .modifier_transition(modifier(56, true, false))
+                .unwrap(),
+            bridge
+                .modifier_transition(modifier(60, true, true))
+                .unwrap(),
+            bridge
+                .modifier_transition(modifier(56, false, true))
+                .unwrap(),
+            bridge
+                .modifier_transition(modifier(60, false, false))
+                .unwrap(),
         ];
         assert_eq!(
             events.map(|event| event.map(|input| (input.physical_key, input.action))),
@@ -357,7 +526,7 @@ mod tests {
 
     #[test]
     fn translation_modifiers_are_consumed_without_hiding_control_or_command() {
-        let bridge = MacosKeyboardBridge::new(OptionAsAltPolicy::Both);
+        let bridge = MacosKeyboardBridge::new(OptionAsAltPolicy::None);
         let mut event = native(0, "A");
         event.modifiers = NativeModifiers {
             shift: true,
@@ -395,6 +564,7 @@ mod tests {
             characters: None,
             characters_ignoring_modifiers: Some("´".to_owned()),
             unmodified_characters: Some("e".to_owned()),
+            characters_without_option: Some("e".to_owned()),
             modifiers: NativeModifiers {
                 alt: true,
                 alt_left: true,
@@ -407,5 +577,35 @@ mod tests {
         assert_eq!(input.logical_key, "´");
         assert_eq!(input.text, None);
         assert_eq!(input.unshifted_codepoint, Some('e'));
+    }
+
+    #[test]
+    fn option_policy_selects_layout_text_and_consumption_by_side() {
+        let cases = [
+            (OptionAsAltPolicy::None, false, "å", true),
+            (OptionAsAltPolicy::Both, false, "a", false),
+            (OptionAsAltPolicy::Left, false, "a", false),
+            (OptionAsAltPolicy::Right, false, "å", true),
+            (OptionAsAltPolicy::None, true, "å", true),
+            (OptionAsAltPolicy::Both, true, "a", false),
+            (OptionAsAltPolicy::Left, true, "å", true),
+            (OptionAsAltPolicy::Right, true, "a", false),
+        ];
+
+        for (policy, alt_right, expected_text, consumed_alt) in cases {
+            let bridge = MacosKeyboardBridge::new(policy);
+            let mut event = native(0, "å");
+            event.characters_without_option = Some("a".to_owned());
+            event.modifiers = NativeModifiers {
+                alt: true,
+                alt_left: !alt_right,
+                alt_right,
+                ..NativeModifiers::default()
+            };
+
+            let input = bridge.translate(event).unwrap();
+            assert_eq!(input.text.as_deref(), Some(expected_text), "{policy:?}");
+            assert_eq!(input.consumed_modifiers.alt, consumed_alt, "{policy:?}");
+        }
     }
 }

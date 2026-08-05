@@ -22,9 +22,7 @@ use libghostty_vt::terminal::{Mode, Point, PointCoordinate, ScrollViewport};
 use libghostty_vt::{Error, RenderState, Terminal, TerminalOptions};
 
 use crate::terminal::geometry::{BackingPosition, TerminalGeometry};
-use crate::terminal::key::{
-    InputModifiers, KeyAction, KeyInput, OptionAsAltPolicy, PhysicalKey,
-};
+use crate::terminal::key::{InputModifiers, KeyAction, KeyInput, OptionAsAltPolicy, PhysicalKey};
 use crate::terminal::keyboard_protocol::KeyboardProtocolEncoder;
 use crate::terminal::session::{
     PointerButton, PointerInput, PointerPhase, SurfacePosition, WheelInput,
@@ -701,8 +699,7 @@ impl TerminalEmulator {
     }
 
     fn encode_key(&mut self, input: &KeyInput, bytes: &mut Vec<u8>) -> Result<(), String> {
-        self.keyboard_protocol
-            .encode(&self.terminal, input, bytes)
+        self.keyboard_protocol.encode(&self.terminal, input, bytes)
     }
 
     fn encode_mouse_event(
@@ -1527,7 +1524,11 @@ mod tests {
             (PhysicalKey::Escape, InputModifiers::default(), b"\x1b"),
             (PhysicalKey::ArrowDown, InputModifiers::default(), b"\x1b[B"),
             (PhysicalKey::ArrowLeft, InputModifiers::default(), b"\x1b[D"),
-            (PhysicalKey::ArrowRight, InputModifiers::default(), b"\x1b[C"),
+            (
+                PhysicalKey::ArrowRight,
+                InputModifiers::default(),
+                b"\x1b[C",
+            ),
             (PhysicalKey::Home, InputModifiers::default(), b"\x1b[H"),
             (PhysicalKey::End, InputModifiers::default(), b"\x1b[F"),
             (PhysicalKey::PageUp, InputModifiers::default(), b"\x1b[5~"),
@@ -1585,10 +1586,7 @@ mod tests {
 
         assert_eq!(emulator.key(alt_eight()).unwrap().bytes, b"\x1b8");
         emulator.feed(b"\x1b[>4;2m");
-        assert_eq!(
-            emulator.key(alt_eight()).unwrap().bytes,
-            b"\x1b[27;3;56~"
-        );
+        assert_eq!(emulator.key(alt_eight()).unwrap().bytes, b"\x1b[27;3;56~");
         emulator.feed(b"\x1b[>4;0m");
         assert_eq!(emulator.key(alt_eight()).unwrap().bytes, b"\x1b8");
     }
@@ -1628,17 +1626,15 @@ mod tests {
     #[test]
     fn kitty_report_events_encodes_repeats_and_releases_but_legacy_does_not() {
         let mut emulator = emulator(10, 2);
-        let action = |action| {
-            text_key(
-                PhysicalKey::A,
-                "a",
-                'a',
-                action,
-                InputModifiers::default(),
-            )
-        };
+        let action = |action| text_key(PhysicalKey::A, "a", 'a', action, InputModifiers::default());
 
-        assert!(emulator.key(action(KeyAction::Release)).unwrap().bytes.is_empty());
+        assert!(
+            emulator
+                .key(action(KeyAction::Release))
+                .unwrap()
+                .bytes
+                .is_empty()
+        );
         emulator.feed(b"\x1b[>11u");
         assert_eq!(
             emulator.key(action(KeyAction::Repeat)).unwrap().bytes,
@@ -1649,7 +1645,13 @@ mod tests {
             b"\x1b[97;1:3u"
         );
         emulator.feed(b"\x1b[<u");
-        assert!(emulator.key(action(KeyAction::Release)).unwrap().bytes.is_empty());
+        assert!(
+            emulator
+                .key(action(KeyAction::Release))
+                .unwrap()
+                .bytes
+                .is_empty()
+        );
     }
 
     #[test]
@@ -1762,6 +1764,52 @@ mod tests {
                     .bytes,
                 expected,
                 "{physical_key:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn option_as_alt_policy_matrix_respects_modifier_side() {
+        let mut emulator = emulator(10, 2);
+        let cases: &[(OptionAsAltPolicy, bool, &[u8])] = &[
+            (OptionAsAltPolicy::None, false, b"["),
+            (OptionAsAltPolicy::Both, false, b"\x1b["),
+            (OptionAsAltPolicy::Left, false, b"\x1b["),
+            (OptionAsAltPolicy::Right, false, b"["),
+            (OptionAsAltPolicy::None, true, b"["),
+            (OptionAsAltPolicy::Both, true, b"\x1b["),
+            (OptionAsAltPolicy::Left, true, b"["),
+            (OptionAsAltPolicy::Right, true, b"\x1b["),
+        ];
+
+        for (policy, alt_right, expected) in cases {
+            let mut input = text_key(
+                PhysicalKey::Digit8,
+                "[",
+                '8',
+                KeyAction::Press,
+                InputModifiers {
+                    alt: true,
+                    alt_right: *alt_right,
+                    ..InputModifiers::default()
+                },
+            );
+            let policy_applies = match policy {
+                OptionAsAltPolicy::None => false,
+                OptionAsAltPolicy::Both => true,
+                OptionAsAltPolicy::Left => !alt_right,
+                OptionAsAltPolicy::Right => *alt_right,
+            };
+            input.consumed_modifiers = InputModifiers {
+                alt: !policy_applies,
+                alt_right: *alt_right && !policy_applies,
+                ..InputModifiers::default()
+            };
+            input.option_as_alt = *policy;
+            assert_eq!(
+                emulator.key(input).unwrap().bytes,
+                *expected,
+                "{policy:?}, right={alt_right}"
             );
         }
     }

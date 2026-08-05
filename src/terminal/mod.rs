@@ -12,6 +12,9 @@ pub(crate) use emulator::ScrollbarSnapshot;
 pub(crate) use emulator::{
     CellSnapshot, CursorPositionSnapshot, CursorSnapshot, RowSnapshot, ScreenSnapshot,
 };
+pub(crate) use key::{
+    InputModifiers, KeyAction, KeyInput, KeyInputError, OptionAsAltPolicy, PhysicalKey,
+};
 #[cfg_attr(
     not(test),
     expect(
@@ -30,9 +33,6 @@ pub(crate) use session::SessionFailure;
 pub(crate) use session::{
     NativeTerminalSessionFactory, PointerButton, PointerInput, PointerPhase, SessionEvent,
     SessionExit, SurfacePosition, TerminalSessionFactory, TerminalSessionHandle, WheelInput,
-};
-pub(crate) use key::{
-    InputModifiers, KeyAction, KeyInput, KeyInputError, OptionAsAltPolicy, PhysicalKey,
 };
 #[cfg(test)]
 pub(crate) use session::{SessionError, StartedTerminalSession};
