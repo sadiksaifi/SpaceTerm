@@ -1603,6 +1603,32 @@ mod tests {
     }
 
     #[test]
+    fn modify_other_keys_mode_changes_the_next_modified_text_key_immediately() {
+        let mut emulator = emulator(10, 2);
+        let alt_eight = || {
+            text_key(
+                PhysicalKey::Digit8,
+                "8",
+                '8',
+                KeyAction::Press,
+                InputModifiers {
+                    alt: true,
+                    ..InputModifiers::default()
+                },
+            )
+        };
+
+        assert_eq!(emulator.key(alt_eight()).unwrap().bytes, b"\x1b8");
+        emulator.feed(b"\x1b[>4;2m");
+        assert_eq!(
+            emulator.key(alt_eight()).unwrap().bytes,
+            b"\x1b[27;3;56~"
+        );
+        emulator.feed(b"\x1b[>4;0m");
+        assert_eq!(emulator.key(alt_eight()).unwrap().bytes, b"\x1b8");
+    }
+
+    #[test]
     fn clean_screens_do_not_publish_another_snapshot() {
         let mut emulator = emulator(10, 2);
 
