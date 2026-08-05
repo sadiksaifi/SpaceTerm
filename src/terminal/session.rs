@@ -1,8 +1,8 @@
 use std::fmt;
 use std::io::{ErrorKind, Read, Write};
 use std::path::Path;
-use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver as CommandReceiver, Sender as CommandSender};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
@@ -219,10 +219,36 @@ impl TerminalSessionFactory for NativeTerminalSessionFactory {
     }
 }
 
+#[derive(Clone, Default)]
+struct ResizeMailbox {
+    pending: Arc<Mutex<Option<TerminalGeometry>>>,
+}
+
+impl ResizeMailbox {
+    fn replace(&self, geometry: TerminalGeometry) -> bool {
+        let mut pending = self.lock();
+        let should_notify = pending.is_none();
+        *pending = Some(geometry);
+        should_notify
+    }
+
+    fn take(&self) -> Option<TerminalGeometry> {
+        self.lock().take()
+    }
+
+    fn lock(&self) -> MutexGuard<'_, Option<TerminalGeometry>> {
+        self.pending.lock().unwrap_or_else(|poisoned| {
+            eprintln!("terminal resize mailbox recovered after a worker panic");
+            poisoned.into_inner()
+        })
+    }
+}
+
 pub(crate) struct TerminalSession {
     commands: Option<CommandSender<Command>>,
     worker: Option<JoinHandle<()>>,
     terminator: Option<Box<dyn SessionPtyTerminator>>,
+    resizes: ResizeMailbox,
 }
 
 trait SessionPty: Write + Send {
@@ -292,6 +318,8 @@ impl TerminalSession {
         // allowing sustained PTY output to build an unbounded UI backlog.
         let (event_tx, event_rx) = async_channel::bounded(2);
         let (startup_tx, startup_rx) = mpsc::sync_channel(1);
+        let resizes = ResizeMailbox::default();
+        let worker_resizes = resizes.clone();
 
         let worker = thread::Builder::new()
             .name("spaceterm-terminal".to_owned())
@@ -301,6 +329,7 @@ impl TerminalSession {
                     geometry,
                     command_rx,
                     reader_transport,
+                    worker_resizes,
                     event_tx,
                     startup_tx,
                 )
@@ -313,6 +342,7 @@ impl TerminalSession {
                     commands: Some(command_tx),
                     worker: Some(worker),
                     terminator: Some(terminator),
+                    resizes,
                 },
                 event_rx,
             )),
@@ -337,7 +367,8 @@ impl TerminalSession {
 
     pub(crate) fn resize(&self, geometry: TerminalGeometry) {
         if let Some(commands) = &self.commands
-            && commands.send(Command::Resize(geometry)).is_err()
+            && self.resizes.replace(geometry)
+            && commands.send(Command::Resize).is_err()
         {
             eprintln!("terminal resize was dropped because the worker has stopped");
         }
@@ -475,7 +506,7 @@ struct ReaderEventBatch {
 #[derive(Debug)]
 enum Command {
     Key(KeyInput),
-    Resize(TerminalGeometry),
+    Resize,
     Pointer(PointerInput),
     Wheel(WheelInput),
     ScrollTo(u64),
@@ -492,6 +523,7 @@ struct TerminalWorker {
     reader_events: mpsc::Receiver<ReaderEvent>,
     reader_thread: JoinHandle<()>,
     events: async_channel::Sender<SessionEvent>,
+    resizes: ResizeMailbox,
     pending_command: Option<Command>,
 }
 
@@ -501,6 +533,7 @@ impl TerminalWorker {
         initial_geometry: TerminalGeometry,
         commands: CommandReceiver<Command>,
         reader_transport: ReaderTransport,
+        resizes: ResizeMailbox,
         events: async_channel::Sender<SessionEvent>,
         startup: mpsc::SyncSender<Result<(), String>>,
     ) {
@@ -543,6 +576,7 @@ impl TerminalWorker {
             reader_events: reader_event_rx,
             reader_thread,
             events,
+            resizes,
             pending_command: None,
         };
 
@@ -585,7 +619,10 @@ impl TerminalWorker {
                 }
             },
             Command::ReaderReady => self.process_reader_events(),
-            Command::Resize(geometry) => {
+            Command::Resize => {
+                let Some(geometry) = self.resizes.take() else {
+                    return true;
+                };
                 let result = self
                     .pty
                     .resize(pty_size(geometry))
@@ -775,6 +812,7 @@ impl TerminalWorker {
             reader_events,
             reader_thread,
             events: _events,
+            resizes: _resizes,
             pending_command: _pending_command,
         } = self;
         // SpawnedPty's Drop terminates and reaps a live shell for the native Adapter.
@@ -1462,6 +1500,7 @@ mod tests {
             reader_events: reader_event_rx,
             reader_thread: thread::spawn(|| {}),
             events,
+            resizes: ResizeMailbox::default(),
             pending_command: None,
         };
 
@@ -1531,6 +1570,65 @@ mod tests {
         let state = records.wait_for("the scripted PTY resize", |state| state.resizes.len() == 1);
 
         assert_eq!(state.resizes, vec![pty_size(resized)]);
+        session.shutdown();
+    }
+
+    #[test]
+    fn fractional_backing_geometry_should_reach_the_pty_without_per_cell_rounding() {
+        let (result, _reader_steps, records) =
+            start_scripted_session(ScriptedPtyOptions::default());
+        let (mut session, _events) = result.unwrap();
+        let resized = TerminalGeometry::from_grid(
+            CellGridSize::new(10, 2),
+            LogicalCellSize::new(7.5, 20.0),
+            BackingScale::new(1.5).unwrap(),
+        );
+
+        session.resize(resized);
+        let state = records.wait_for("the fractional scripted PTY resize", |state| {
+            state.resizes.len() == 1
+        });
+
+        assert_eq!(
+            state.resizes,
+            vec![PtySize {
+                rows: 2,
+                cols: 10,
+                pixel_width: 113,
+                pixel_height: 60,
+            }]
+        );
+        session.shutdown();
+    }
+
+    #[test]
+    fn rapid_resizes_should_queue_one_notification_and_retain_only_the_latest_geometry() {
+        let (commands, receiver) = mpsc::channel();
+        let resizes = ResizeMailbox::default();
+        let mut session = TerminalSession {
+            commands: Some(commands),
+            worker: None,
+            terminator: None,
+            resizes: resizes.clone(),
+        };
+        let pixel_only = TerminalGeometry::from_grid(
+            CellGridSize::new(80, 24),
+            LogicalCellSize::new(7.5, 20.0),
+            BackingScale::new(1.5).unwrap(),
+        );
+        let latest = geometry(100, 30, 9.0, 21.0);
+
+        session.resize(pixel_only);
+        session.resize(latest);
+
+        assert_eq!(
+            (
+                matches!(receiver.try_recv(), Ok(Command::Resize)),
+                receiver.try_recv().is_err(),
+                resizes.take(),
+            ),
+            (true, true, Some(latest))
+        );
         session.shutdown();
     }
 
@@ -1859,6 +1957,7 @@ mod tests {
             commands: None,
             worker: None,
             terminator: None,
+            resizes: ResizeMailbox::default(),
         };
 
         let result = session.request_selection_text().try_recv().unwrap();

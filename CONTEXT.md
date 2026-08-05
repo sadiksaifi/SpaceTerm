@@ -109,6 +109,15 @@ viewport, active-screen, size, and precise damage independently of cell content,
 worker boundary through a bounded latest-screen channel. GPUI renders only these immutable values
 and never borrows Terminal Emulator state.
 
+### Unified Terminal Geometry
+
+`TerminalGeometry` is the sole conversion contract between GPUI logical viewport and cell metrics,
+the native window backing scale, Terminal Emulator dimensions, mouse positions, and PTY pixel
+dimensions. Full logical grid extents are scaled before rounding so fractional cells cannot
+accumulate row or column drift. A Pane observes native window metric changes, invalidates
+scale-dependent rendering resources, and sends resize updates through a latest-only mailbox so a
+resize burst cannot create an unbounded control backlog.
+
 ### Workspace-Bound Terminal Creation
 
 `WorkspaceCollection` owns default Workspace naming and passes the exact stored Workspace root into
