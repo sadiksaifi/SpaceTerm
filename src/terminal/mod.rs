@@ -6,7 +6,9 @@ mod workspace_terminal_session_factory;
 
 #[cfg(test)]
 pub(crate) use emulator::ScrollbarSnapshot;
-pub(crate) use emulator::{CellSnapshot, RowSnapshot, ScreenSnapshot};
+pub(crate) use emulator::{
+    CellSnapshot, CursorPositionSnapshot, CursorSnapshot, RowSnapshot, ScreenSnapshot,
+};
 #[cfg_attr(
     not(test),
     expect(

@@ -6,7 +6,9 @@ use gpui::{
     TextRun, Window, fill, font, point, px, relative, rgba, size,
 };
 
-use crate::terminal::{CellSnapshot, RowSnapshot, ScreenSnapshot};
+use crate::terminal::{
+    CellSnapshot, CursorPositionSnapshot, CursorSnapshot, RowSnapshot, ScreenSnapshot,
+};
 use crate::theme::{ACTIVE_THEME, Color};
 
 pub(crate) struct TerminalGridCache {
@@ -76,6 +78,9 @@ pub(crate) struct TerminalGridElement {
     font_size: Pixels,
     line_height: Pixels,
     cell_width: Pixels,
+    cursor: Option<(CursorPositionSnapshot, CellSnapshot)>,
+    cursor_style: CursorSnapshot,
+    font_family: SharedString,
 }
 
 impl TerminalGridElement {
@@ -87,6 +92,14 @@ impl TerminalGridElement {
         cell_width: Pixels,
         cache: &mut TerminalGridCache,
     ) -> Self {
+        let cursor = screen.cursor.position.and_then(|position| {
+            screen
+                .rows
+                .get(usize::from(position.row))
+                .and_then(|row| row.get(usize::from(position.column)))
+                .cloned()
+                .map(|cell| (position, cell))
+        });
         Self {
             background: screen.background,
             rows: cache.prepare(&screen.rows, screen.background, font_family),
@@ -94,6 +107,9 @@ impl TerminalGridElement {
             font_size,
             line_height,
             cell_width,
+            cursor,
+            cursor_style: screen.cursor,
+            font_family: font_family.clone(),
         }
     }
 }
@@ -189,7 +205,50 @@ impl Element for TerminalGridElement {
                         gpui_color(span.color),
                     )
                 })
-                .collect();
+                .collect::<Vec<_>>();
+
+            let mut text: Vec<PreparedText> = text;
+            let mut backgrounds = backgrounds;
+            if self.cursor_style.visible
+                && let Some((position, cell)) = &self.cursor
+                && usize::from(position.row) == row_index
+            {
+                let cursor_left = grid_left + self.cell_width * f32::from(position.column);
+                backgrounds.push(fill(
+                    Bounds::new(
+                        point(cursor_left, row_top),
+                        size(self.cell_width, self.line_height),
+                    ),
+                    gpui_color(self.cursor_style.color),
+                ));
+
+                if !cell.spacer_tail {
+                    let mut cursor_font = font(self.font_family.clone());
+                    cursor_font.features = FontFeatures::disable_ligatures();
+                    if cell.bold {
+                        cursor_font = cursor_font.bold();
+                    }
+                    if cell.italic {
+                        cursor_font = cursor_font.italic();
+                    }
+                    text.push(PreparedText {
+                        line: window.text_system().shape_line(
+                            cell.text.clone().into(),
+                            self.font_size,
+                            &[TextRun {
+                                len: cell.text.len(),
+                                font: cursor_font,
+                                color: gpui_color(self.background).into(),
+                                background_color: None,
+                                underline: None,
+                                strikethrough: None,
+                            }],
+                            Some(self.cell_width),
+                        ),
+                        origin: point(cursor_left, row_top),
+                    });
+                }
+            }
 
             prepared_rows.push(PreparedRow { text, backgrounds });
         }
@@ -357,7 +416,7 @@ fn prepare_row(
             }
         }
 
-        if cell.selected && !cell.cursor {
+        if cell.selected {
             let selection = ACTIVE_THEME.players[0].selection;
             if let Some(previous) = selections.last_mut()
                 && previous.start + previous.len == column
@@ -407,14 +466,7 @@ fn prepare_row(
 }
 
 fn effective_colors(cell: &CellSnapshot) -> (Color, Color) {
-    if cell.cursor {
-        (
-            ACTIVE_THEME.terminal_background,
-            ACTIVE_THEME.terminal_foreground,
-        )
-    } else {
-        (cell.foreground, cell.background)
-    }
+    (cell.foreground, cell.background)
 }
 
 fn gpui_color(color: Color) -> gpui::Rgba {
@@ -432,7 +484,6 @@ mod tests {
             background: ACTIVE_THEME.terminal_background,
             bold: false,
             italic: false,
-            cursor: false,
             selected: false,
             spacer_tail: false,
         }
@@ -472,36 +523,23 @@ mod tests {
     }
 
     #[test]
-    fn backgrounds_coalesce_and_cursor_uses_terminal_cursor_colors() {
+    fn matching_cell_backgrounds_coalesce() {
         let accent = ACTIVE_THEME.terminal_normal()[1];
         let mut first = cell("a");
         first.background = accent;
         let mut second = cell("b");
         second.background = accent;
-        let mut cursor = cell("c");
-        cursor.cursor = true;
-        let row = Arc::<[CellSnapshot]>::from([first, second, cursor]);
+        let row = Arc::<[CellSnapshot]>::from([first, second, cell("c")]);
 
         let input = prepare_row(&row, ACTIVE_THEME.terminal_background, &"Menlo".into());
 
         assert_eq!(
             input.backgrounds,
-            vec![
-                BackgroundSpan {
-                    start: 0,
-                    len: 2,
-                    color: accent,
-                },
-                BackgroundSpan {
-                    start: 2,
-                    len: 1,
-                    color: ACTIVE_THEME.terminal_foreground,
-                },
-            ]
-        );
-        assert_eq!(
-            input.fragments[0].runs.last().unwrap().color,
-            gpui_color(ACTIVE_THEME.terminal_background).into()
+            vec![BackgroundSpan {
+                start: 0,
+                len: 2,
+                color: accent,
+            }]
         );
     }
 

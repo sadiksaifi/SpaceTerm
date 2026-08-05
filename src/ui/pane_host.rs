@@ -1050,16 +1050,15 @@ mod tests {
             .event_sender(1)
             .expect("the first Pane session was not started");
         first_sender
-            .try_send(SessionEvent::Screen(Arc::new(ScreenSnapshot {
-                rows: Arc::from([]),
-                background: ACTIVE_THEME.terminal_background,
-                scrollbar: ScrollbarSnapshot {
+            .try_send(SessionEvent::Screen(ScreenSnapshot::from_test_parts(
+                Arc::from([]),
+                ScrollbarSnapshot {
                     total_rows: 100,
                     visible_rows: 20,
                     ..Default::default()
                 },
-                title: Arc::from(""),
-            })))
+                "",
+            )))
             .unwrap();
         cx.run_until_parked();
 
@@ -1166,12 +1165,11 @@ mod tests {
             .last_event_sender()
             .expect("the split Pane session was not started");
         sender
-            .try_send(SessionEvent::Screen(Arc::new(ScreenSnapshot {
-                rows: Arc::from([]),
-                background: ACTIVE_THEME.terminal_background,
-                scrollbar: Default::default(),
-                title: Arc::from("Claude Code"),
-            })))
+            .try_send(SessionEvent::Screen(ScreenSnapshot::from_test_parts(
+                Arc::from([]),
+                Default::default(),
+                "Claude Code",
+            )))
             .unwrap();
         cx.run_until_parked();
 

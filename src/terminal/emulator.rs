@@ -14,7 +14,7 @@ use libghostty_vt::mouse::{
     EncoderSize as MouseEncoderSize, Event as MouseEvent, Position as MousePosition,
 };
 use libghostty_vt::paste;
-use libghostty_vt::render::{CellIterator, Dirty, RowIterator};
+use libghostty_vt::render::{CellIterator, CursorVisualStyle, Dirty, RowIterator};
 use libghostty_vt::screen::{CellWide, Screen};
 use libghostty_vt::selection::FormatOptions;
 use libghostty_vt::selection::gesture::{
@@ -40,19 +40,142 @@ impl From<RgbColor> for Color {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct CellSnapshot {
     pub(crate) text: String,
     pub(crate) foreground: Color,
     pub(crate) background: Color,
     pub(crate) bold: bool,
     pub(crate) italic: bool,
-    pub(crate) cursor: bool,
     pub(crate) selected: bool,
     pub(crate) spacer_tail: bool,
 }
 
 pub(crate) type RowSnapshot = Arc<[CellSnapshot]>;
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) enum ActiveScreenSnapshot {
+    #[default]
+    Primary,
+    Alternate,
+}
+
+impl From<Screen> for ActiveScreenSnapshot {
+    fn from(screen: Screen) -> Self {
+        match screen {
+            Screen::Primary => Self::Primary,
+            Screen::Alternate => Self::Alternate,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct ScreenSizeSnapshot {
+    pub(crate) cols: u16,
+    pub(crate) rows: u16,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct ViewportSnapshot {
+    pub(crate) offset_rows: u64,
+    pub(crate) visible_rows: u64,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) enum CursorShapeSnapshot {
+    Bar,
+    #[default]
+    Block,
+    Underline,
+    BlockHollow,
+}
+
+impl From<CursorVisualStyle> for CursorShapeSnapshot {
+    fn from(style: CursorVisualStyle) -> Self {
+        match style {
+            CursorVisualStyle::Bar => Self::Bar,
+            CursorVisualStyle::Block => Self::Block,
+            CursorVisualStyle::Underline => Self::Underline,
+            CursorVisualStyle::BlockHollow => Self::BlockHollow,
+            _ => Self::Block,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct CursorPositionSnapshot {
+    pub(crate) column: u16,
+    pub(crate) row: u16,
+    pub(crate) at_wide_tail: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct CursorSnapshot {
+    pub(crate) position: Option<CursorPositionSnapshot>,
+    pub(crate) visible: bool,
+    pub(crate) blinking: bool,
+    pub(crate) password_input: bool,
+    pub(crate) shape: CursorShapeSnapshot,
+    pub(crate) color: Color,
+}
+
+impl Default for CursorSnapshot {
+    fn default() -> Self {
+        Self {
+            position: None,
+            visible: false,
+            blinking: false,
+            password_input: false,
+            shape: CursorShapeSnapshot::default(),
+            color: ACTIVE_THEME.terminal_foreground,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(crate) enum ContentDamageSnapshot {
+    #[default]
+    Clean,
+    Rows(Arc<[u16]>),
+    Full,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(crate) struct SnapshotDamage {
+    pub(crate) content: ContentDamageSnapshot,
+    pub(crate) cursor: bool,
+    pub(crate) title: bool,
+    pub(crate) scrollbar: bool,
+    pub(crate) viewport: bool,
+    pub(crate) active_screen: bool,
+    pub(crate) resize: bool,
+}
+
+impl SnapshotDamage {
+    fn initial() -> Self {
+        Self {
+            content: ContentDamageSnapshot::Full,
+            cursor: true,
+            title: true,
+            scrollbar: true,
+            viewport: true,
+            active_screen: true,
+            resize: true,
+        }
+    }
+
+    #[cfg(test)]
+    fn cursor() -> Self {
+        Self {
+            cursor: true,
+            ..Self::default()
+        }
+    }
+
+    fn is_clean(&self) -> bool {
+        self == &Self::default()
+    }
+}
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) struct ScrollbarSnapshot {
@@ -65,18 +188,76 @@ pub(crate) struct ScrollbarSnapshot {
 pub(crate) struct ScreenSnapshot {
     pub(crate) rows: Arc<[RowSnapshot]>,
     pub(crate) background: Color,
+    pub(crate) size: ScreenSizeSnapshot,
+    pub(crate) viewport: ViewportSnapshot,
     pub(crate) scrollbar: ScrollbarSnapshot,
+    pub(crate) active_screen: ActiveScreenSnapshot,
+    pub(crate) cursor: CursorSnapshot,
     pub(crate) title: Arc<str>,
+    pub(crate) damage: SnapshotDamage,
 }
+
+impl PartialEq for ScreenSnapshot {
+    fn eq(&self, other: &Self) -> bool {
+        self.rows == other.rows
+            && self.background == other.background
+            && self.size == other.size
+            && self.viewport == other.viewport
+            && self.scrollbar == other.scrollbar
+            && self.active_screen == other.active_screen
+            && self.cursor == other.cursor
+            && self.title == other.title
+            && self.damage == other.damage
+    }
+}
+
+impl Eq for ScreenSnapshot {}
 
 impl ScreenSnapshot {
     pub(crate) fn empty() -> Arc<Self> {
         Arc::new(Self {
             rows: Arc::from([]),
             background: ACTIVE_THEME.terminal_background,
+            size: ScreenSizeSnapshot::default(),
+            viewport: ViewportSnapshot::default(),
             scrollbar: ScrollbarSnapshot::default(),
+            active_screen: ActiveScreenSnapshot::default(),
+            cursor: CursorSnapshot {
+                color: ACTIVE_THEME.terminal_foreground,
+                ..CursorSnapshot::default()
+            },
             title: Arc::from(""),
+            damage: SnapshotDamage::initial(),
         })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn from_test_parts(
+        rows: Arc<[RowSnapshot]>,
+        scrollbar: ScrollbarSnapshot,
+        title: impl Into<Arc<str>>,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            rows,
+            scrollbar,
+            title: title.into(),
+            ..Self::empty_value()
+        })
+    }
+
+    #[cfg(test)]
+    fn empty_value() -> Self {
+        Self {
+            rows: Arc::from([]),
+            background: ACTIVE_THEME.terminal_background,
+            size: ScreenSizeSnapshot::default(),
+            viewport: ViewportSnapshot::default(),
+            scrollbar: ScrollbarSnapshot::default(),
+            active_screen: ActiveScreenSnapshot::default(),
+            cursor: CursorSnapshot::default(),
+            title: Arc::from(""),
+            damage: SnapshotDamage::initial(),
+        }
     }
 }
 
@@ -102,8 +283,9 @@ pub(crate) struct TerminalEmulator {
     cached_cols: u16,
     cached_foreground: Option<Color>,
     cached_background: Option<Color>,
-    cached_cursor: Option<(u16, u16)>,
+    cached_cursor: Option<CursorSnapshot>,
     cached_scrollbar: Option<ScrollbarSnapshot>,
+    cached_active_screen: Option<ActiveScreenSnapshot>,
     cols: u16,
     rows_count: u16,
     cell_width_px: u32,
@@ -222,6 +404,7 @@ impl TerminalEmulator {
             cached_background: None,
             cached_cursor: None,
             cached_scrollbar: None,
+            cached_active_screen: None,
             cols,
             rows_count: rows,
             cell_width_px,
@@ -724,10 +907,20 @@ impl TerminalEmulator {
         let rows = snapshot.rows()?;
         let cols = snapshot.cols()?;
         let colors = snapshot.colors()?;
-        let cursor = if snapshot.cursor_visible()? {
-            snapshot.cursor_viewport()?
-        } else {
-            None
+        let cursor_position = snapshot
+            .cursor_viewport()?
+            .map(|cursor| CursorPositionSnapshot {
+                column: cursor.x,
+                row: cursor.y,
+                at_wide_tail: cursor.at_wide_tail,
+            });
+        let cursor = CursorSnapshot {
+            position: cursor_position,
+            visible: snapshot.cursor_visible()?,
+            blinking: snapshot.cursor_blinking()?,
+            password_input: snapshot.cursor_password_input()?,
+            shape: snapshot.cursor_visual_style()?.into(),
+            color: snapshot.cursor_color()?.unwrap_or(colors.foreground).into(),
         };
         let scrollbar = self.terminal.scrollbar()?;
         let scrollbar = ScrollbarSnapshot {
@@ -735,24 +928,41 @@ impl TerminalEmulator {
             offset_rows: scrollbar.offset,
             visible_rows: scrollbar.len,
         };
+        let viewport = ViewportSnapshot {
+            offset_rows: scrollbar.offset_rows,
+            visible_rows: scrollbar.visible_rows,
+        };
+        let size = ScreenSizeSnapshot { cols, rows };
+        let active_screen: ActiveScreenSnapshot = self.terminal.active_screen()?.into();
 
         let default_foreground: Color = colors.foreground.into();
         let default_background: Color = colors.background.into();
-        let cursor_position = cursor.as_ref().map(|cursor| (cursor.x, cursor.y));
         let rebuild_all = matches!(dirty, Dirty::Full)
             || self.row_cache.len() != usize::from(rows)
             || self.cached_cols != cols
             || self.cached_foreground != Some(default_foreground)
             || self.cached_background != Some(default_background);
-        let cursor_changed = self.cached_cursor != cursor_position;
-        let scrollbar_changed = self.cached_scrollbar != Some(scrollbar);
+        let previous_scrollbar = self.cached_scrollbar;
+        let first_snapshot = self.cached_foreground.is_none();
+        let mut damage = if first_snapshot {
+            SnapshotDamage::initial()
+        } else {
+            SnapshotDamage {
+                cursor: self.cached_cursor != Some(cursor),
+                title: title_changed,
+                scrollbar: previous_scrollbar
+                    .is_some_and(|previous| previous.total_rows != scrollbar.total_rows),
+                viewport: previous_scrollbar.is_some_and(|previous| {
+                    previous.offset_rows != scrollbar.offset_rows
+                        || previous.visible_rows != scrollbar.visible_rows
+                }),
+                active_screen: self.cached_active_screen != Some(active_screen),
+                resize: self.cached_cols != cols || self.row_cache.len() != usize::from(rows),
+                ..SnapshotDamage::default()
+            }
+        };
 
-        if matches!(dirty, Dirty::Clean)
-            && !rebuild_all
-            && !cursor_changed
-            && !scrollbar_changed
-            && !title_changed
-        {
+        if matches!(dirty, Dirty::Clean) && !rebuild_all && damage.is_clean() {
             return Ok(None);
         }
 
@@ -761,17 +971,18 @@ impl TerminalEmulator {
         } else {
             self.row_cache.clone()
         };
+        let mut dirty_rows = Vec::new();
         let mut row_index = 0_u16;
         {
             let mut row_iteration = self.rows.update(&snapshot)?;
 
             while let Some(row) = row_iteration.next() {
-                let cursor_row_changed = cursor_changed
-                    && (self.cached_cursor.is_some_and(|(_, y)| y == row_index)
-                        || cursor_position.is_some_and(|(_, y)| y == row_index));
-                let rebuild_row = rebuild_all || row.dirty()? || cursor_row_changed;
+                let rebuild_row = rebuild_all || row.dirty()?;
 
                 if rebuild_row {
+                    if !rebuild_all {
+                        dirty_rows.push(row_index);
+                    }
                     let selection = row.selection()?;
                     let mut rendered_cells = Vec::with_capacity(usize::from(cols));
                     let mut column_index = 0_u16;
@@ -805,17 +1016,12 @@ impl TerminalEmulator {
                             }
                         };
 
-                        let is_cursor = cursor.as_ref().is_some_and(|cursor| {
-                            cursor.x == column_index && cursor.y == row_index
-                        });
-
                         rendered_cells.push(CellSnapshot {
                             text,
                             foreground,
                             background,
                             bold: style.bold,
                             italic: style.italic,
-                            cursor: is_cursor,
                             selected: selection.is_some_and(|range| {
                                 column_index >= range.start_x && column_index <= range.end_x
                             }),
@@ -838,18 +1044,32 @@ impl TerminalEmulator {
         }
         snapshot.set_dirty(Dirty::Clean)?;
 
+        damage.content = if rebuild_all {
+            ContentDamageSnapshot::Full
+        } else if dirty_rows.is_empty() {
+            ContentDamageSnapshot::Clean
+        } else {
+            ContentDamageSnapshot::Rows(Arc::from(dirty_rows))
+        };
+
         self.row_cache = rendered_rows;
         self.cached_cols = cols;
         self.cached_foreground = Some(default_foreground);
         self.cached_background = Some(default_background);
-        self.cached_cursor = cursor_position;
+        self.cached_cursor = Some(cursor);
         self.cached_scrollbar = Some(scrollbar);
+        self.cached_active_screen = Some(active_screen);
 
         Ok(Some(Arc::new(ScreenSnapshot {
             rows: Arc::from(self.row_cache.clone()),
             background: default_background,
+            size,
+            viewport,
             scrollbar,
+            active_screen,
+            cursor,
             title: Arc::clone(&self.title),
+            damage,
         })))
     }
 }
@@ -1168,8 +1388,28 @@ mod tests {
         emulator.resize(20, 4, 8, 18).unwrap();
 
         let snapshot = emulator.snapshot().unwrap().unwrap();
-        assert_eq!(snapshot.rows.len(), 4);
-        assert!(snapshot.rows.iter().all(|row| row.len() == 20));
+        assert_eq!(
+            (
+                snapshot.size,
+                snapshot.viewport.visible_rows,
+                snapshot.rows.len(),
+                snapshot.rows.iter().all(|row| row.len() == 20),
+            ),
+            (ScreenSizeSnapshot { cols: 20, rows: 4 }, 4, 4, true,)
+        );
+    }
+
+    #[test]
+    fn alternate_screen_transition_reports_only_affected_metadata_and_content() {
+        let mut emulator = emulator(10, 2);
+        let _ = emulator.snapshot().unwrap();
+
+        emulator.feed(b"\x1b[?1049h");
+        let snapshot = emulator.snapshot().unwrap().unwrap();
+
+        assert_eq!(snapshot.active_screen, ActiveScreenSnapshot::Alternate);
+        assert!(snapshot.damage.active_screen);
+        assert_eq!(snapshot.damage.content, ContentDamageSnapshot::Full);
     }
 
     #[test]
@@ -1285,6 +1525,25 @@ mod tests {
         assert!(!Arc::ptr_eq(&first.rows[0], &second.rows[0]));
         assert!(Arc::ptr_eq(&first.rows[1], &second.rows[1]));
         assert!(Arc::ptr_eq(&first.rows[2], &second.rows[2]));
+    }
+
+    #[test]
+    fn cursor_only_changes_reuse_every_row_and_report_cursor_damage() {
+        let mut emulator = emulator(10, 3);
+        emulator.feed(b"abc");
+        let first = emulator.snapshot().unwrap().unwrap();
+
+        emulator.feed(b"\x1b[1D");
+        let second = emulator.snapshot().unwrap().unwrap();
+
+        assert!(
+            first
+                .rows
+                .iter()
+                .zip(second.rows.iter())
+                .all(|(first, second)| Arc::ptr_eq(first, second))
+        );
+        assert_eq!(second.damage, SnapshotDamage::cursor());
     }
 
     #[test]
