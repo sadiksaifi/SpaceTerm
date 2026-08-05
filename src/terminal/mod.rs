@@ -1,7 +1,9 @@
 mod emulator;
 mod session;
 
-pub(crate) use emulator::{CellSnapshot, RowSnapshot, ScreenSnapshot, ScrollbarSnapshot};
+#[cfg(test)]
+pub(crate) use emulator::ScrollbarSnapshot;
+pub(crate) use emulator::{CellSnapshot, RowSnapshot, ScreenSnapshot};
 pub(crate) use session::{
     GridSize, InputModifiers, KeyCode, KeyInput, NativeTerminalSessionFactory, PointerButton,
     PointerInput, PointerPhase, SessionEvent, SurfacePosition, TerminalSessionFactory,

@@ -6,8 +6,8 @@ use super::WindowId;
 pub(crate) enum WindowError {
     #[error("Window {0} does not belong to this collection")]
     WindowNotFound(WindowId),
-    #[error("Window ID {0} is already in use")]
-    DuplicateWindowId(WindowId),
+    #[error("Window ID space is exhausted")]
+    IdSpaceExhausted,
 }
 
 pub(crate) enum CloseWindowOutcome<T> {
@@ -27,16 +27,19 @@ struct WindowEntry<T> {
 pub(crate) struct WindowCollection<T> {
     windows: Vec<WindowEntry<T>>,
     active_window_id: WindowId,
+    next_window_id: u64,
 }
 
 impl<T> WindowCollection<T> {
-    pub(crate) fn new(initial_window_id: WindowId, initial_payload: T) -> Self {
+    pub(crate) fn new(create_initial_payload: impl FnOnce(WindowId) -> T) -> Self {
+        let initial_window_id = WindowId::from_raw(1);
         Self {
             windows: vec![WindowEntry {
                 id: initial_window_id,
-                payload: initial_payload,
+                payload: create_initial_payload(initial_window_id),
             }],
             active_window_id: initial_window_id,
+            next_window_id: 2,
         }
     }
 
@@ -70,19 +73,16 @@ impl<T> WindowCollection<T> {
 
     pub(crate) fn create_window(
         &mut self,
-        window_id: WindowId,
-        create_payload: impl FnOnce() -> T,
+        create_payload: impl FnOnce(WindowId) -> T,
     ) -> Result<WindowId, WindowError> {
-        if self.windows.iter().any(|window| window.id == window_id) {
-            return Err(WindowError::DuplicateWindowId(window_id));
-        }
-
-        let payload = create_payload();
+        let (window_id, next_window_id) = self.next_window_id()?;
+        let payload = create_payload(window_id);
         self.windows.push(WindowEntry {
             id: window_id,
             payload,
         });
         self.active_window_id = window_id;
+        self.next_window_id = next_window_id;
         Ok(window_id)
     }
 
@@ -122,6 +122,12 @@ impl<T> WindowCollection<T> {
             payload: closed_window.payload,
         })
     }
+
+    fn next_window_id(&self) -> Result<(WindowId, u64), WindowError> {
+        let value = self.next_window_id;
+        let next = value.checked_add(1).ok_or(WindowError::IdSpaceExhausted)?;
+        Ok((WindowId::from_raw(value), next))
+    }
 }
 
 #[cfg(test)]
@@ -143,7 +149,7 @@ mod tests {
 
     #[test]
     fn new_should_create_one_valid_active_window() {
-        let windows = WindowCollection::new(WindowId::new(1), "first");
+        let windows = WindowCollection::new(|_| "first");
 
         assert_eq!(
             (
@@ -157,11 +163,9 @@ mod tests {
 
     #[test]
     fn iter_should_preserve_window_creation_order() {
-        let mut windows = WindowCollection::new(WindowId::new(1), "first");
-        windows
-            .create_window(WindowId::new(2), || "second")
-            .unwrap();
-        windows.create_window(WindowId::new(3), || "third").unwrap();
+        let mut windows = WindowCollection::new(|_| "first");
+        windows.create_window(|_| "second").unwrap();
+        windows.create_window(|_| "third").unwrap();
 
         let ordered_windows = windows.iter().collect::<Vec<_>>();
 
@@ -177,11 +181,9 @@ mod tests {
 
     #[test]
     fn create_window_should_create_and_activate_the_new_window() {
-        let mut windows = WindowCollection::new(WindowId::new(1), "first");
+        let mut windows = WindowCollection::new(|_| "first");
 
-        let created = windows
-            .create_window(WindowId::new(2), || "second")
-            .unwrap();
+        let created = windows.create_window(|_| "second").unwrap();
 
         assert_eq!(
             (
@@ -195,27 +197,26 @@ mod tests {
     }
 
     #[test]
-    fn create_window_should_reject_a_duplicate_before_creating_its_payload() {
-        let mut windows = WindowCollection::new(WindowId::new(1), "first");
+    fn create_window_should_reject_exhausted_ids_before_creating_its_payload() {
+        let mut windows = WindowCollection::new(|_| "first");
+        windows.next_window_id = u64::MAX;
         let creations = Cell::new(0);
 
-        let result = windows.create_window(WindowId::new(1), || {
+        let result = windows.create_window(|_| {
             creations.update(|count| count + 1);
-            "duplicate"
+            "second"
         });
 
         assert_eq!(
             (result, creations.get(), windows.len()),
-            (Err(WindowError::DuplicateWindowId(WindowId::new(1))), 0, 1)
+            (Err(WindowError::IdSpaceExhausted), 0, 1)
         );
     }
 
     #[test]
     fn activate_window_should_select_an_owned_window() {
-        let mut windows = WindowCollection::new(WindowId::new(1), "first");
-        windows
-            .create_window(WindowId::new(2), || "second")
-            .unwrap();
+        let mut windows = WindowCollection::new(|_| "first");
+        windows.create_window(|_| "second").unwrap();
 
         windows.activate_window(WindowId::new(1)).unwrap();
 
@@ -227,7 +228,7 @@ mod tests {
 
     #[test]
     fn activate_window_should_reject_an_unknown_id_without_changing_the_active_window() {
-        let mut windows = WindowCollection::new(WindowId::new(1), "first");
+        let mut windows = WindowCollection::new(|_| "first");
 
         let result = windows.activate_window(WindowId::new(99));
 
@@ -242,11 +243,9 @@ mod tests {
 
     #[test]
     fn close_window_should_preserve_the_active_window_when_closing_an_inactive_window() {
-        let mut windows = WindowCollection::new(WindowId::new(1), "first");
-        windows
-            .create_window(WindowId::new(2), || "second")
-            .unwrap();
-        windows.create_window(WindowId::new(3), || "third").unwrap();
+        let mut windows = WindowCollection::new(|_| "first");
+        windows.create_window(|_| "second").unwrap();
+        windows.create_window(|_| "third").unwrap();
 
         let outcome = windows.close_window(WindowId::new(1)).unwrap();
 
@@ -266,11 +265,9 @@ mod tests {
 
     #[test]
     fn close_window_should_focus_the_next_window_when_closing_the_active_middle_window() {
-        let mut windows = WindowCollection::new(WindowId::new(1), "first");
-        windows
-            .create_window(WindowId::new(2), || "second")
-            .unwrap();
-        windows.create_window(WindowId::new(3), || "third").unwrap();
+        let mut windows = WindowCollection::new(|_| "first");
+        windows.create_window(|_| "second").unwrap();
+        windows.create_window(|_| "third").unwrap();
         windows.activate_window(WindowId::new(2)).unwrap();
 
         let outcome = windows.close_window(WindowId::new(2)).unwrap();
@@ -286,10 +283,8 @@ mod tests {
 
     #[test]
     fn close_window_should_focus_the_previous_window_when_closing_the_active_last_window() {
-        let mut windows = WindowCollection::new(WindowId::new(1), "first");
-        windows
-            .create_window(WindowId::new(2), || "second")
-            .unwrap();
+        let mut windows = WindowCollection::new(|_| "first");
+        windows.create_window(|_| "second").unwrap();
 
         let outcome = windows.close_window(WindowId::new(2)).unwrap();
 
@@ -304,7 +299,7 @@ mod tests {
 
     #[test]
     fn close_window_should_reject_an_unknown_id_without_mutation() {
-        let mut windows = WindowCollection::new(WindowId::new(1), "first");
+        let mut windows = WindowCollection::new(|_| "first");
 
         let result = windows.close_window(WindowId::new(99));
 
@@ -325,8 +320,19 @@ mod tests {
     }
 
     #[test]
+    fn closed_window_ids_should_not_be_reused() {
+        let mut windows = WindowCollection::new(|_| "first");
+        let second = windows.create_window(|_| "second").unwrap();
+        windows.close_window(second).unwrap();
+
+        let third = windows.create_window(|_| "third").unwrap();
+
+        assert_eq!(third, WindowId::new(3));
+    }
+
+    #[test]
     fn close_window_should_request_operating_system_close_for_the_final_window() {
-        let mut windows = WindowCollection::new(WindowId::new(1), "first");
+        let mut windows = WindowCollection::new(|_| "first");
 
         let outcome = windows.close_window(WindowId::new(1)).unwrap();
 
@@ -347,14 +353,11 @@ mod tests {
     #[test]
     fn close_window_should_transfer_ownership_and_drop_each_payload_exactly_once() {
         let drops = Rc::new(Cell::new(0));
-        let mut windows = WindowCollection::new(
-            WindowId::new(1),
-            DropProbe {
-                drops: Rc::clone(&drops),
-            },
-        );
+        let mut windows = WindowCollection::new(|_| DropProbe {
+            drops: Rc::clone(&drops),
+        });
         windows
-            .create_window(WindowId::new(2), || DropProbe {
+            .create_window(|_| DropProbe {
                 drops: Rc::clone(&drops),
             })
             .unwrap();

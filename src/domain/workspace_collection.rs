@@ -10,8 +10,13 @@ use thiserror::Error;
 pub(crate) struct WorkspaceId(u64);
 
 impl WorkspaceId {
-    pub(crate) const fn new(value: u64) -> Self {
+    const fn from_raw(value: u64) -> Self {
         Self(value)
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn new(value: u64) -> Self {
+        Self::from_raw(value)
     }
 
     pub(crate) const fn get(self) -> u64 {
@@ -29,8 +34,8 @@ impl fmt::Display for WorkspaceId {
 pub(crate) enum WorkspaceError {
     #[error("Workspace {0} does not belong to this collection")]
     WorkspaceNotFound(WorkspaceId),
-    #[error("Workspace ID {0} is already in use")]
-    DuplicateWorkspaceId(WorkspaceId),
+    #[error("Workspace ID space is exhausted")]
+    IdSpaceExhausted,
 }
 
 pub(crate) struct NewWorkspace<T> {
@@ -99,23 +104,25 @@ impl<T> WorkspaceEntry<T> {
 pub(crate) struct WorkspaceCollection<T> {
     workspaces: Vec<WorkspaceEntry<T>>,
     active_workspace_id: WorkspaceId,
+    next_workspace_id: u64,
 }
 
 impl<T> WorkspaceCollection<T> {
     pub(crate) fn new(
-        initial_workspace_id: WorkspaceId,
         name: String,
         working_directory: PathBuf,
-        initial_payload: T,
+        create_initial_payload: impl FnOnce(WorkspaceId) -> T,
     ) -> Self {
+        let initial_workspace_id = WorkspaceId::from_raw(1);
         Self {
             workspaces: vec![WorkspaceEntry {
                 id: initial_workspace_id,
                 name,
                 working_directory,
-                payload: initial_payload,
+                payload: create_initial_payload(initial_workspace_id),
             }],
             active_workspace_id: initial_workspace_id,
+            next_workspace_id: 2,
         }
     }
 
@@ -146,16 +153,12 @@ impl<T> WorkspaceCollection<T> {
 
     pub(crate) fn create_workspace(
         &mut self,
-        workspace_id: WorkspaceId,
         name: String,
         working_directory: PathBuf,
-        create_payload: impl FnOnce() -> T,
+        create_payload: impl FnOnce(WorkspaceId) -> T,
     ) -> Result<WorkspaceId, WorkspaceError> {
-        if self.workspace(workspace_id).is_some() {
-            return Err(WorkspaceError::DuplicateWorkspaceId(workspace_id));
-        }
-
-        let payload = create_payload();
+        let (workspace_id, next_workspace_id) = self.next_workspace_id()?;
+        let payload = create_payload(workspace_id);
         self.workspaces.push(WorkspaceEntry {
             id: workspace_id,
             name,
@@ -163,6 +166,7 @@ impl<T> WorkspaceCollection<T> {
             payload,
         });
         self.active_workspace_id = workspace_id;
+        self.next_workspace_id = next_workspace_id;
         Ok(workspace_id)
     }
 
@@ -194,8 +198,7 @@ impl<T> WorkspaceCollection<T> {
     pub(crate) fn close_workspace(
         &mut self,
         workspace_id: WorkspaceId,
-        replacement_workspace_id: WorkspaceId,
-        create_replacement: impl FnOnce() -> NewWorkspace<T>,
+        create_replacement: impl FnOnce(WorkspaceId) -> NewWorkspace<T>,
     ) -> Result<CloseWorkspaceOutcome<T>, WorkspaceError> {
         let Some(index) = self
             .workspaces
@@ -206,13 +209,8 @@ impl<T> WorkspaceCollection<T> {
         };
 
         if self.workspaces.len() == 1 {
-            if self.workspace(replacement_workspace_id).is_some() {
-                return Err(WorkspaceError::DuplicateWorkspaceId(
-                    replacement_workspace_id,
-                ));
-            }
-
-            let replacement = create_replacement();
+            let (replacement_workspace_id, next_workspace_id) = self.next_workspace_id()?;
+            let replacement = create_replacement(replacement_workspace_id);
             let closed_workspace = std::mem::replace(
                 &mut self.workspaces[index],
                 WorkspaceEntry {
@@ -223,6 +221,7 @@ impl<T> WorkspaceCollection<T> {
                 },
             );
             self.active_workspace_id = replacement_workspace_id;
+            self.next_workspace_id = next_workspace_id;
 
             return Ok(CloseWorkspaceOutcome::FinalWorkspaceReplaced {
                 closed_workspace_id: closed_workspace.id,
@@ -249,6 +248,14 @@ impl<T> WorkspaceCollection<T> {
             .iter_mut()
             .find(|workspace| workspace.id == workspace_id)
     }
+
+    fn next_workspace_id(&self) -> Result<(WorkspaceId, u64), WorkspaceError> {
+        let value = self.next_workspace_id;
+        let next = value
+            .checked_add(1)
+            .ok_or(WorkspaceError::IdSpaceExhausted)?;
+        Ok((WorkspaceId::from_raw(value), next))
+    }
 }
 
 #[cfg(test)]
@@ -269,12 +276,7 @@ mod tests {
     }
 
     fn new_workspaces<T>(payload: T) -> WorkspaceCollection<T> {
-        WorkspaceCollection::new(
-            WorkspaceId::new(1),
-            "first".to_owned(),
-            PathBuf::from("/first"),
-            payload,
-        )
+        WorkspaceCollection::new("first".to_owned(), PathBuf::from("/first"), |_| payload)
     }
 
     #[test]
@@ -302,18 +304,16 @@ mod tests {
         let mut workspaces = new_workspaces("first payload");
         workspaces
             .create_workspace(
-                WorkspaceId::new(2),
                 "second".to_owned(),
                 PathBuf::from("/second"),
-                || "second payload",
+                |_| "second payload",
             )
             .unwrap();
         workspaces
             .create_workspace(
-                WorkspaceId::new(3),
                 "third".to_owned(),
                 PathBuf::from("/third"),
-                || "third payload",
+                |_| "third payload",
             )
             .unwrap();
 
@@ -338,10 +338,9 @@ mod tests {
 
         let created = workspaces
             .create_workspace(
-                WorkspaceId::new(2),
                 "second".to_owned(),
                 PathBuf::from("/second"),
-                || "second payload",
+                |_| "second payload",
             )
             .unwrap();
 
@@ -367,10 +366,9 @@ mod tests {
 
         workspaces
             .create_workspace(
-                WorkspaceId::new(2),
                 "projects".to_owned(),
                 PathBuf::from("/Users/test/projects"),
-                || "second payload",
+                |_| "second payload",
             )
             .unwrap();
 
@@ -384,27 +382,20 @@ mod tests {
     }
 
     #[test]
-    fn create_workspace_should_reject_a_duplicate_before_creating_its_payload() {
+    fn create_workspace_should_reject_exhausted_ids_before_creating_its_payload() {
         let mut workspaces = new_workspaces("first payload");
+        workspaces.next_workspace_id = u64::MAX;
         let creations = Cell::new(0);
 
-        let result = workspaces.create_workspace(
-            WorkspaceId::new(1),
-            "duplicate".to_owned(),
-            PathBuf::from("/duplicate"),
-            || {
+        let result =
+            workspaces.create_workspace("second".to_owned(), PathBuf::from("/second"), |_| {
                 creations.update(|count| count + 1);
-                "duplicate payload"
-            },
-        );
+                "second payload"
+            });
 
         assert_eq!(
             (result, creations.get(), workspaces.len()),
-            (
-                Err(WorkspaceError::DuplicateWorkspaceId(WorkspaceId::new(1))),
-                0,
-                1,
-            )
+            (Err(WorkspaceError::IdSpaceExhausted), 0, 1,)
         );
     }
 
@@ -413,10 +404,9 @@ mod tests {
         let mut workspaces = new_workspaces("first payload");
         workspaces
             .create_workspace(
-                WorkspaceId::new(2),
                 "second".to_owned(),
                 PathBuf::from("/second"),
-                || "second payload",
+                |_| "second payload",
             )
             .unwrap();
 
@@ -451,10 +441,9 @@ mod tests {
         let mut workspaces = new_workspaces("first payload");
         workspaces
             .create_workspace(
-                WorkspaceId::new(2),
                 "second".to_owned(),
                 PathBuf::from("/second"),
-                || "second payload",
+                |_| "second payload",
             )
             .unwrap();
 
@@ -485,19 +474,19 @@ mod tests {
     }
 
     #[test]
-    fn close_workspace_should_preserve_the_active_workspace_when_closing_an_inactive_workspace() {
+    fn non_final_close_should_not_allocate_a_replacement_workspace_id() {
         let mut workspaces = new_workspaces("first payload");
         workspaces
             .create_workspace(
-                WorkspaceId::new(2),
                 "second".to_owned(),
                 PathBuf::from("/second"),
-                || "second payload",
+                |_| "second payload",
             )
             .unwrap();
+        workspaces.next_workspace_id = u64::MAX;
 
         let outcome = workspaces
-            .close_workspace(WorkspaceId::new(1), WorkspaceId::new(99), || {
+            .close_workspace(WorkspaceId::new(1), |_| {
                 unreachable!("a replacement is not needed")
             })
             .unwrap();
@@ -513,28 +502,51 @@ mod tests {
     }
 
     #[test]
+    fn closed_workspace_ids_should_not_be_reused() {
+        let mut workspaces = new_workspaces("first payload");
+        let second = workspaces
+            .create_workspace(
+                "second".to_owned(),
+                PathBuf::from("/second"),
+                |_| "second payload",
+            )
+            .unwrap();
+        workspaces
+            .close_workspace(second, |_| unreachable!("a replacement is not needed"))
+            .unwrap();
+
+        let third = workspaces
+            .create_workspace(
+                "third".to_owned(),
+                PathBuf::from("/third"),
+                |_| "third payload",
+            )
+            .unwrap();
+
+        assert_eq!(third, WorkspaceId::new(3));
+    }
+
+    #[test]
     fn close_workspace_should_focus_the_next_workspace_when_closing_the_active_middle_workspace() {
         let mut workspaces = new_workspaces("first payload");
         workspaces
             .create_workspace(
-                WorkspaceId::new(2),
                 "second".to_owned(),
                 PathBuf::from("/second"),
-                || "second payload",
+                |_| "second payload",
             )
             .unwrap();
         workspaces
             .create_workspace(
-                WorkspaceId::new(3),
                 "third".to_owned(),
                 PathBuf::from("/third"),
-                || "third payload",
+                |_| "third payload",
             )
             .unwrap();
         workspaces.activate_workspace(WorkspaceId::new(2)).unwrap();
 
         let outcome = workspaces
-            .close_workspace(WorkspaceId::new(2), WorkspaceId::new(99), || {
+            .close_workspace(WorkspaceId::new(2), |_| {
                 unreachable!("a replacement is not needed")
             })
             .unwrap();
@@ -555,15 +567,14 @@ mod tests {
         let mut workspaces = new_workspaces("first payload");
         workspaces
             .create_workspace(
-                WorkspaceId::new(2),
                 "second".to_owned(),
                 PathBuf::from("/second"),
-                || "second payload",
+                |_| "second payload",
             )
             .unwrap();
 
         let outcome = workspaces
-            .close_workspace(WorkspaceId::new(2), WorkspaceId::new(99), || {
+            .close_workspace(WorkspaceId::new(2), |_| {
                 unreachable!("a replacement is not needed")
             })
             .unwrap();
@@ -583,7 +594,7 @@ mod tests {
         let mut workspaces = new_workspaces("first payload");
         let creations = Cell::new(0);
 
-        let result = workspaces.close_workspace(WorkspaceId::new(99), WorkspaceId::new(2), || {
+        let result = workspaces.close_workspace(WorkspaceId::new(99), |_| {
             creations.update(|count| count + 1);
             NewWorkspace::new(
                 "replacement".to_owned(),
@@ -613,7 +624,7 @@ mod tests {
         let mut workspaces = new_workspaces("first payload");
 
         let outcome = workspaces
-            .close_workspace(WorkspaceId::new(1), WorkspaceId::new(2), || {
+            .close_workspace(WorkspaceId::new(1), |_| {
                 NewWorkspace::new(
                     "replacement".to_owned(),
                     PathBuf::from("/replacement"),
@@ -649,11 +660,12 @@ mod tests {
     }
 
     #[test]
-    fn close_workspace_should_reject_a_duplicate_replacement_before_factory_side_effects() {
+    fn close_workspace_should_reject_exhausted_ids_before_factory_side_effects() {
         let mut workspaces = new_workspaces("first payload");
+        workspaces.next_workspace_id = u64::MAX;
         let creations = Cell::new(0);
 
-        let result = workspaces.close_workspace(WorkspaceId::new(1), WorkspaceId::new(1), || {
+        let result = workspaces.close_workspace(WorkspaceId::new(1), |_| {
             creations.update(|count| count + 1);
             NewWorkspace::new(
                 "replacement".to_owned(),
@@ -670,7 +682,7 @@ mod tests {
                 workspaces.active_workspace_id(),
             ),
             (
-                Some(WorkspaceError::DuplicateWorkspaceId(WorkspaceId::new(1))),
+                Some(WorkspaceError::IdSpaceExhausted),
                 0,
                 1,
                 WorkspaceId::new(1),
@@ -686,7 +698,7 @@ mod tests {
         });
 
         let outcome = workspaces
-            .close_workspace(WorkspaceId::new(1), WorkspaceId::new(2), || {
+            .close_workspace(WorkspaceId::new(1), |_| {
                 NewWorkspace::new(
                     "replacement".to_owned(),
                     PathBuf::from("/replacement"),

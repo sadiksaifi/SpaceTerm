@@ -10,8 +10,13 @@ macro_rules! typed_id {
         pub(crate) struct $name(u64);
 
         impl $name {
-            pub(crate) const fn new(value: u64) -> Self {
+            pub(super) const fn from_raw(value: u64) -> Self {
                 Self(value)
+            }
+
+            #[cfg(test)]
+            pub(crate) const fn new(value: u64) -> Self {
+                Self::from_raw(value)
             }
 
             pub(crate) const fn get(self) -> u64 {
@@ -110,10 +115,10 @@ pub(crate) enum PaneError {
     PaneNotFound(PaneId),
     #[error("Split {0} does not belong to this Window")]
     SplitNotFound(SplitId),
-    #[error("Pane ID {0} is already in use")]
-    DuplicatePaneId(PaneId),
-    #[error("Split ID {0} is already in use")]
-    DuplicateSplitId(SplitId),
+    #[error("Pane ID space is exhausted")]
+    PaneIdExhausted,
+    #[error("split ID space is exhausted")]
+    SplitIdExhausted,
     #[error("split divider size must be finite and non-negative, got {0}")]
     InvalidDividerSize(f32),
     #[error("split ratio must be finite, got {0}")]
@@ -188,22 +193,29 @@ pub(crate) struct TerminalWindow<T> {
     focused_pane_id: PaneId,
     zoom_state: ZoomState,
     minimum_pane_size: PaneSize,
+    next_pane_id: u64,
+    next_split_id: u64,
 }
 
 impl<T> TerminalWindow<T> {
     pub(crate) fn new(
         id: WindowId,
-        initial_pane_id: PaneId,
-        initial_terminal: T,
         minimum_pane_size: PaneSize,
+        create_initial_terminal: impl FnOnce(PaneId) -> T,
     ) -> Self {
+        let initial_pane_id = PaneId::from_raw(1);
         Self {
             id,
             root: PaneNode::Leaf(initial_pane_id),
-            terminals: BTreeMap::from([(initial_pane_id, initial_terminal)]),
+            terminals: BTreeMap::from([(
+                initial_pane_id,
+                create_initial_terminal(initial_pane_id),
+            )]),
             focused_pane_id: initial_pane_id,
             zoom_state: ZoomState::Restored,
             minimum_pane_size,
+            next_pane_id: 2,
+            next_split_id: 1,
         }
     }
 
@@ -271,29 +283,25 @@ impl<T> TerminalWindow<T> {
         self.zoom_state
     }
 
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "the split command keeps validated geometry and injected creation explicit"
-    )]
     pub(crate) fn split_pane(
         &mut self,
         target_pane_id: PaneId,
-        new_pane_id: PaneId,
-        split_id: SplitId,
         axis: SplitAxis,
         target_size: PaneSize,
         divider_size: f32,
-        create_terminal: impl FnOnce() -> T,
+        create_terminal: impl FnOnce(PaneId) -> T,
     ) -> Result<PaneId, PaneError> {
-        let new_root = self.prepare_split(
-            target_pane_id,
-            new_pane_id,
-            split_id,
-            axis,
-            target_size,
-            divider_size,
-        )?;
-        let terminal = create_terminal();
+        self.validate_split(target_pane_id, axis, target_size, divider_size)?;
+        let (new_pane_id, split_id, next_pane_id, next_split_id) = self.next_split_ids()?;
+        let Some(new_root) = self
+            .root
+            .with_split(target_pane_id, new_pane_id, split_id, axis)
+        else {
+            unreachable!("a validated split target must remain in the Pane layout")
+        };
+        let terminal = create_terminal(new_pane_id);
+        self.next_pane_id = next_pane_id;
+        self.next_split_id = next_split_id;
         self.commit_split(new_root, new_pane_id, terminal);
         Ok(new_pane_id)
     }
@@ -369,23 +377,15 @@ impl<T> TerminalWindow<T> {
         Ok(ratio)
     }
 
-    fn prepare_split(
+    fn validate_split(
         &self,
         target_pane_id: PaneId,
-        new_pane_id: PaneId,
-        split_id: SplitId,
         axis: SplitAxis,
         target_size: PaneSize,
         divider_size: f32,
-    ) -> Result<PaneNode, PaneError> {
+    ) -> Result<(), PaneError> {
         if !self.root.contains_pane(target_pane_id) {
             return Err(PaneError::PaneNotFound(target_pane_id));
-        }
-        if self.root.contains_pane(new_pane_id) || self.terminals.contains_key(&new_pane_id) {
-            return Err(PaneError::DuplicatePaneId(new_pane_id));
-        }
-        if self.root.contains_split(split_id) {
-            return Err(PaneError::DuplicateSplitId(split_id));
         }
         validate_divider_size(divider_size)?;
         let required = combined_minimum(
@@ -395,10 +395,24 @@ impl<T> TerminalWindow<T> {
             divider_size,
         )?;
         ensure_space(target_size, required)?;
+        Ok(())
+    }
 
-        self.root
-            .with_split(target_pane_id, new_pane_id, split_id, axis)
-            .ok_or(PaneError::PaneNotFound(target_pane_id))
+    fn next_split_ids(&self) -> Result<(PaneId, SplitId, u64, u64), PaneError> {
+        let next_pane_id = self
+            .next_pane_id
+            .checked_add(1)
+            .ok_or(PaneError::PaneIdExhausted)?;
+        let next_split_id = self
+            .next_split_id
+            .checked_add(1)
+            .ok_or(PaneError::SplitIdExhausted)?;
+        Ok((
+            PaneId::from_raw(self.next_pane_id),
+            SplitId::from_raw(self.next_split_id),
+            next_pane_id,
+            next_split_id,
+        ))
     }
 
     fn commit_split(&mut self, root: PaneNode, pane_id: PaneId, terminal: T) {
@@ -475,15 +489,6 @@ impl PaneNode {
             Self::Split { first, second, .. } => {
                 first.contains_pane(target) || second.contains_pane(target)
             }
-        }
-    }
-
-    fn contains_split(&self, target: SplitId) -> bool {
-        match self {
-            Self::Leaf(_) => false,
-            Self::Split {
-                id, first, second, ..
-            } => *id == target || first.contains_split(target) || second.contains_split(target),
         }
     }
 
@@ -832,12 +837,7 @@ mod tests {
     }
 
     fn window<T>(terminal: T) -> TerminalWindow<T> {
-        TerminalWindow::new(
-            WindowId::new(7),
-            PaneId::new(1),
-            terminal,
-            size(100.0, 50.0),
-        )
+        TerminalWindow::new(WindowId::new(7), size(100.0, 50.0), |_| terminal)
     }
 
     fn four_pane_window() -> TerminalWindow<()> {
@@ -845,34 +845,28 @@ mod tests {
         window
             .split_pane(
                 PaneId::new(1),
-                PaneId::new(2),
-                SplitId::new(10),
                 SplitAxis::Horizontal,
                 size(500.0, 400.0),
                 DIVIDER_SIZE,
-                || (),
+                |_| (),
             )
             .unwrap();
         window
             .split_pane(
                 PaneId::new(1),
-                PaneId::new(3),
-                SplitId::new(11),
                 SplitAxis::Vertical,
                 size(250.0, 400.0),
                 DIVIDER_SIZE,
-                || (),
+                |_| (),
             )
             .unwrap();
         window
             .split_pane(
                 PaneId::new(2),
-                PaneId::new(4),
-                SplitId::new(12),
                 SplitAxis::Vertical,
                 size(250.0, 400.0),
                 DIVIDER_SIZE,
-                || (),
+                |_| (),
             )
             .unwrap();
         window
@@ -897,11 +891,18 @@ mod tests {
 
     #[test]
     fn new_should_create_one_focused_pane() {
-        let window = window(());
+        let created_id = Cell::new(None);
+        let window = TerminalWindow::new(WindowId::new(7), size(100.0, 50.0), |pane_id| {
+            created_id.set(Some(pane_id));
+        });
 
         assert_eq!(
-            (window.pane_count(), window.focused_pane_id()),
-            (1, PaneId::new(1))
+            (
+                window.pane_count(),
+                window.focused_pane_id(),
+                created_id.get()
+            ),
+            (1, PaneId::new(1), Some(PaneId::new(1)))
         );
     }
 
@@ -911,29 +912,25 @@ mod tests {
         window
             .split_pane(
                 PaneId::new(1),
-                PaneId::new(2),
-                SplitId::new(10),
                 SplitAxis::Horizontal,
                 size(500.0, 400.0),
                 DIVIDER_SIZE,
-                || (),
+                |_| (),
             )
             .unwrap();
         window
             .split_pane(
                 PaneId::new(2),
-                PaneId::new(3),
-                SplitId::new(11),
                 SplitAxis::Vertical,
                 size(250.0, 400.0),
                 DIVIDER_SIZE,
-                || (),
+                |_| (),
             )
             .unwrap();
 
         assert_eq!(
             topology(window.root()),
-            "10:Horizontal:0.50(1,11:Vertical:0.50(2,3))"
+            "1:Horizontal:0.50(1,2:Vertical:0.50(2,3))"
         );
     }
 
@@ -943,12 +940,10 @@ mod tests {
         window
             .split_pane(
                 PaneId::new(1),
-                PaneId::new(2),
-                SplitId::new(10),
                 SplitAxis::Horizontal,
                 size(500.0, 400.0),
                 DIVIDER_SIZE,
-                || (),
+                |_| (),
             )
             .unwrap();
 
@@ -956,25 +951,58 @@ mod tests {
     }
 
     #[test]
-    fn split_pane_should_validate_ids_before_creating_terminal() {
+    fn closed_pane_and_split_ids_should_not_be_reused() {
+        let mut window = window(());
+        let second = window
+            .split_pane(
+                PaneId::new(1),
+                SplitAxis::Horizontal,
+                size(500.0, 400.0),
+                DIVIDER_SIZE,
+                |_| (),
+            )
+            .unwrap();
+        window.close_pane(second).unwrap();
+
+        let third = window
+            .split_pane(
+                PaneId::new(1),
+                SplitAxis::Vertical,
+                size(500.0, 400.0),
+                DIVIDER_SIZE,
+                |_| (),
+            )
+            .unwrap();
+
+        assert_eq!(
+            (third, topology(window.root())),
+            (PaneId::new(3), "2:Vertical:0.50(1,3)".into())
+        );
+    }
+
+    #[test]
+    fn split_pane_should_validate_the_target_before_creating_terminal() {
         let mut window = window(());
         let creations = Cell::new(0);
 
         let result = window.split_pane(
             PaneId::new(99),
-            PaneId::new(2),
-            SplitId::new(10),
             SplitAxis::Horizontal,
             size(500.0, 400.0),
             DIVIDER_SIZE,
-            || {
+            |_| {
                 creations.set(creations.get() + 1);
             },
         );
 
         assert_eq!(
-            (result, creations.get()),
-            (Err(PaneError::PaneNotFound(PaneId::new(99))), 0)
+            (
+                result,
+                creations.get(),
+                window.next_pane_id,
+                window.next_split_id,
+            ),
+            (Err(PaneError::PaneNotFound(PaneId::new(99))), 0, 2, 1)
         );
     }
 
@@ -985,52 +1013,45 @@ mod tests {
 
         let result = window.split_pane(
             PaneId::new(1),
-            PaneId::new(2),
-            SplitId::new(10),
             SplitAxis::Horizontal,
             size(200.0, 50.0),
             DIVIDER_SIZE,
-            || {
+            |_| {
                 creations.set(creations.get() + 1);
             },
         );
 
         assert_eq!(
-            (result, creations.get()),
+            (
+                result,
+                creations.get(),
+                window.next_pane_id,
+                window.next_split_id,
+            ),
             (
                 Err(PaneError::InsufficientSpace {
                     available: size(200.0, 50.0),
                     required: size(201.0, 50.0),
                 }),
                 0,
+                2,
+                1,
             )
         );
     }
 
     #[test]
-    fn split_pane_should_reject_a_duplicate_pane_id_without_mutation() {
+    fn split_pane_should_reject_exhausted_pane_ids_without_mutation() {
         let mut window = window(());
-        window
-            .split_pane(
-                PaneId::new(1),
-                PaneId::new(2),
-                SplitId::new(10),
-                SplitAxis::Horizontal,
-                size(500.0, 400.0),
-                DIVIDER_SIZE,
-                || (),
-            )
-            .unwrap();
+        window.next_pane_id = u64::MAX;
         let creations = Cell::new(0);
 
         let result = window.split_pane(
             PaneId::new(1),
-            PaneId::new(2),
-            SplitId::new(11),
-            SplitAxis::Vertical,
-            size(250.0, 400.0),
+            SplitAxis::Horizontal,
+            size(500.0, 400.0),
             DIVIDER_SIZE,
-            || creations.set(creations.get() + 1),
+            |_| creations.set(creations.get() + 1),
         );
 
         assert_eq!(
@@ -1040,41 +1061,33 @@ mod tests {
                 topology(window.root()),
                 window.pane_count(),
                 window.focused_pane_id(),
+                window.next_pane_id,
+                window.next_split_id,
             ),
             (
-                Err(PaneError::DuplicatePaneId(PaneId::new(2))),
+                Err(PaneError::PaneIdExhausted),
                 0,
-                "10:Horizontal:0.50(1,2)".into(),
-                2,
-                PaneId::new(2),
+                "1".into(),
+                1,
+                PaneId::new(1),
+                u64::MAX,
+                1,
             )
         );
     }
 
     #[test]
-    fn split_pane_should_reject_a_duplicate_split_id_without_mutation() {
+    fn split_pane_should_reject_exhausted_split_ids_without_mutation() {
         let mut window = window(());
-        window
-            .split_pane(
-                PaneId::new(1),
-                PaneId::new(2),
-                SplitId::new(10),
-                SplitAxis::Horizontal,
-                size(500.0, 400.0),
-                DIVIDER_SIZE,
-                || (),
-            )
-            .unwrap();
+        window.next_split_id = u64::MAX;
         let creations = Cell::new(0);
 
         let result = window.split_pane(
-            PaneId::new(2),
-            PaneId::new(3),
-            SplitId::new(10),
-            SplitAxis::Vertical,
-            size(250.0, 400.0),
+            PaneId::new(1),
+            SplitAxis::Horizontal,
+            size(500.0, 400.0),
             DIVIDER_SIZE,
-            || creations.set(creations.get() + 1),
+            |_| creations.set(creations.get() + 1),
         );
 
         assert_eq!(
@@ -1084,13 +1097,17 @@ mod tests {
                 topology(window.root()),
                 window.pane_count(),
                 window.focused_pane_id(),
+                window.next_pane_id,
+                window.next_split_id,
             ),
             (
-                Err(PaneError::DuplicateSplitId(SplitId::new(10))),
+                Err(PaneError::SplitIdExhausted),
                 0,
-                "10:Horizontal:0.50(1,2)".into(),
+                "1".into(),
+                1,
+                PaneId::new(1),
                 2,
-                PaneId::new(2),
+                u64::MAX,
             )
         );
     }
@@ -1190,12 +1207,10 @@ mod tests {
         window
             .split_pane(
                 PaneId::new(1),
-                PaneId::new(2),
-                SplitId::new(10),
                 SplitAxis::Horizontal,
                 size(500.0, 400.0),
                 DIVIDER_SIZE,
-                || DropProbe {
+                |_| DropProbe {
                     id: 2,
                     drops: drops.clone(),
                 },
@@ -1217,23 +1232,19 @@ mod tests {
         window
             .split_pane(
                 PaneId::new(1),
-                PaneId::new(2),
-                SplitId::new(10),
                 SplitAxis::Horizontal,
                 size(500.0, 400.0),
                 DIVIDER_SIZE,
-                || (),
+                |_| (),
             )
             .unwrap();
         window
             .split_pane(
                 PaneId::new(1),
-                PaneId::new(3),
-                SplitId::new(11),
                 SplitAxis::Vertical,
                 size(250.0, 400.0),
                 DIVIDER_SIZE,
-                || (),
+                |_| (),
             )
             .unwrap();
         window.focus_pane(PaneId::new(2)).unwrap();
@@ -1249,12 +1260,10 @@ mod tests {
         window
             .split_pane(
                 PaneId::new(1),
-                PaneId::new(2),
-                SplitId::new(10),
                 SplitAxis::Horizontal,
                 size(500.0, 400.0),
                 DIVIDER_SIZE,
-                || (),
+                |_| (),
             )
             .unwrap();
         window.toggle_zoom();
@@ -1272,12 +1281,10 @@ mod tests {
         window
             .split_pane(
                 PaneId::new(1),
-                PaneId::new(2),
-                SplitId::new(10),
                 SplitAxis::Horizontal,
                 size(500.0, 400.0),
                 DIVIDER_SIZE,
-                || (),
+                |_| (),
             )
             .unwrap();
 
@@ -1290,12 +1297,10 @@ mod tests {
         window
             .split_pane(
                 PaneId::new(1),
-                PaneId::new(2),
-                SplitId::new(10),
                 SplitAxis::Horizontal,
                 size(500.0, 400.0),
                 DIVIDER_SIZE,
-                || (),
+                |_| (),
             )
             .unwrap();
         window.toggle_zoom();
@@ -1311,23 +1316,19 @@ mod tests {
         window
             .split_pane(
                 PaneId::new(1),
-                PaneId::new(2),
-                SplitId::new(10),
                 SplitAxis::Horizontal,
                 size(500.0, 400.0),
                 DIVIDER_SIZE,
-                || (),
+                |_| (),
             )
             .unwrap();
         window
             .split_pane(
                 PaneId::new(2),
-                PaneId::new(3),
-                SplitId::new(11),
                 SplitAxis::Vertical,
                 size(250.0, 400.0),
                 DIVIDER_SIZE,
-                || (),
+                |_| (),
             )
             .unwrap();
 
@@ -1343,28 +1344,24 @@ mod tests {
         window
             .split_pane(
                 PaneId::new(1),
-                PaneId::new(2),
-                SplitId::new(10),
                 SplitAxis::Horizontal,
                 size(500.0, 400.0),
                 DIVIDER_SIZE,
-                || (),
+                |_| (),
             )
             .unwrap();
         window
             .split_pane(
                 PaneId::new(1),
-                PaneId::new(3),
-                SplitId::new(11),
                 SplitAxis::Horizontal,
                 size(250.0, 400.0),
                 DIVIDER_SIZE,
-                || (),
+                |_| (),
             )
             .unwrap();
 
         let ratio = window
-            .resize_split(SplitId::new(10), size(402.0, 100.0), DIVIDER_SIZE, 0.1)
+            .resize_split(SplitId::new(1), size(402.0, 100.0), DIVIDER_SIZE, 0.1)
             .unwrap();
 
         assert_eq!(ratio, 201.0 / 401.0);
@@ -1376,20 +1373,18 @@ mod tests {
         window
             .split_pane(
                 PaneId::new(1),
-                PaneId::new(2),
-                SplitId::new(10),
                 SplitAxis::Horizontal,
                 size(500.0, 400.0),
                 DIVIDER_SIZE,
-                || (),
+                |_| (),
             )
             .unwrap();
 
-        let result = window.resize_split(SplitId::new(10), size(200.0, 50.0), DIVIDER_SIZE, 0.8);
+        let result = window.resize_split(SplitId::new(1), size(200.0, 50.0), DIVIDER_SIZE, 0.8);
 
         assert_eq!(
             (result.is_err(), topology(window.root())),
-            (true, "10:Horizontal:0.50(1,2)".into())
+            (true, "1:Horizontal:0.50(1,2)".into())
         );
     }
 
@@ -1399,17 +1394,15 @@ mod tests {
         window
             .split_pane(
                 PaneId::new(1),
-                PaneId::new(2),
-                SplitId::new(10),
                 SplitAxis::Horizontal,
                 size(500.0, 400.0),
                 DIVIDER_SIZE,
-                || (),
+                |_| (),
             )
             .unwrap();
 
         let result =
-            window.resize_split(SplitId::new(10), size(500.0, 400.0), DIVIDER_SIZE, f32::NAN);
+            window.resize_split(SplitId::new(1), size(500.0, 400.0), DIVIDER_SIZE, f32::NAN);
 
         assert!(matches!(result, Err(PaneError::InvalidSplitRatio(value)) if value.is_nan()));
     }
