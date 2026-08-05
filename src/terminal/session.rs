@@ -1,3 +1,4 @@
+use std::fmt;
 use std::io::{ErrorKind, Read, Write};
 use std::path::Path;
 use std::sync::Arc;
@@ -101,14 +102,58 @@ impl GridSize {
     }
 }
 
-// Screen events may supersede older screens. Error and Exited are final events,
+// Screen events may supersede older screens. Failed and Exited are final events,
 // so the worker must not publish another screen after either one.
 #[derive(Clone, Debug)]
 pub(crate) enum SessionEvent {
     Screen(Arc<ScreenSnapshot>),
     Exited(String),
-    Error(String),
+    Failed(SessionFailure),
 }
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum SessionFailure {
+    Runtime(String),
+    PtyRead {
+        read_error: String,
+        exit_status: String,
+    },
+    ShellWait {
+        read_error: Option<String>,
+        wait_error: String,
+    },
+}
+
+impl fmt::Display for SessionFailure {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Runtime(message) => write!(formatter, "Terminal runtime failed: {message}"),
+            Self::PtyRead {
+                read_error,
+                exit_status,
+            } => write!(
+                formatter,
+                "Shell output failed: {read_error}; shell exited ({exit_status})"
+            ),
+            Self::ShellWait {
+                read_error: Some(read_error),
+                wait_error,
+            } => write!(
+                formatter,
+                "Shell output failed: {read_error}; waiting for the shell also failed: {wait_error}"
+            ),
+            Self::ShellWait {
+                read_error: None,
+                wait_error,
+            } => write!(
+                formatter,
+                "Shell output ended, but waiting for the shell failed: {wait_error}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for SessionFailure {}
 
 #[derive(Debug, Error)]
 pub(crate) enum SessionError {
@@ -484,7 +529,7 @@ fn run_worker(
             Command::Key(input) => match emulator.key(input) {
                 Ok(action) => apply_emulator_action(action, &mut emulator, &mut pty, &events),
                 Err(message) => {
-                    send_error(&events, message);
+                    send_runtime_failure(&events, message);
                     false
                 }
             },
@@ -521,7 +566,7 @@ fn run_worker(
                         &events,
                     ),
                     Err(message) => {
-                        send_error(&events, message);
+                        send_runtime_failure(&events, message);
                         false
                     }
                 }
@@ -529,14 +574,14 @@ fn run_worker(
             Command::Pointer(input) => match emulator.pointer(input) {
                 Ok(action) => apply_emulator_action(action, &mut emulator, &mut pty, &events),
                 Err(message) => {
-                    send_error(&events, message);
+                    send_runtime_failure(&events, message);
                     false
                 }
             },
             Command::Wheel(input) => match emulator.wheel(input) {
                 Ok(action) => apply_emulator_action(action, &mut emulator, &mut pty, &events),
                 Err(message) => {
-                    send_error(&events, message);
+                    send_runtime_failure(&events, message);
                     false
                 }
             },
@@ -549,7 +594,7 @@ fn run_worker(
             Command::Paste(text) => match emulator.paste(text) {
                 Ok(action) => apply_emulator_action(action, &mut emulator, &mut pty, &events),
                 Err(message) => {
-                    send_error(&events, message);
+                    send_runtime_failure(&events, message);
                     false
                 }
             },
@@ -558,16 +603,8 @@ fn run_worker(
                 true
             }
             Command::ReaderStopped(read_error) => {
-                let status = match pty.wait_for_child() {
-                    Ok(status) => format!("Shell exited ({status:?})"),
-                    Err(wait_error) => match read_error {
-                        Some(read_error) => format!(
-                            "Shell output stopped: {read_error}; process wait failed: {wait_error}"
-                        ),
-                        None => format!("Shell output stopped; process wait failed: {wait_error}"),
-                    },
-                };
-                send_terminal_event(&events, SessionEvent::Exited(status));
+                let event = classify_reader_stop(read_error, pty.wait_for_child());
+                send_terminal_event(&events, event);
                 false
             }
             Command::Shutdown => false,
@@ -674,7 +711,7 @@ fn write_pty(
     events: &async_channel::Sender<SessionEvent>,
 ) -> bool {
     if let Err(error) = writer.write_all(bytes).and_then(|()| writer.flush()) {
-        let _ = send_error(events, format!("failed to write to the shell PTY: {error}"));
+        let _ = send_runtime_failure(events, format!("failed to write to the shell PTY: {error}"));
         return false;
     }
     true
@@ -688,7 +725,7 @@ fn publish_screen(
         Ok(Some(snapshot)) => events.force_send(SessionEvent::Screen(snapshot)).is_ok(),
         Ok(None) => true,
         Err(error) => {
-            send_error(
+            send_runtime_failure(
                 events,
                 format!("failed to produce terminal screen snapshot: {error}"),
             );
@@ -697,8 +734,28 @@ fn publish_screen(
     }
 }
 
-fn send_error(events: &async_channel::Sender<SessionEvent>, message: String) -> bool {
-    send_terminal_event(events, SessionEvent::Error(message))
+fn classify_reader_stop(
+    read_error: Option<String>,
+    wait_result: std::io::Result<ExitStatus>,
+) -> SessionEvent {
+    match (read_error, wait_result) {
+        (None, Ok(status)) => SessionEvent::Exited(format!("Shell exited ({status:?})")),
+        (Some(read_error), Ok(status)) => SessionEvent::Failed(SessionFailure::PtyRead {
+            read_error,
+            exit_status: format!("{status:?}"),
+        }),
+        (read_error, Err(wait_error)) => SessionEvent::Failed(SessionFailure::ShellWait {
+            read_error,
+            wait_error: wait_error.to_string(),
+        }),
+    }
+}
+
+fn send_runtime_failure(events: &async_channel::Sender<SessionEvent>, message: String) -> bool {
+    send_terminal_event(
+        events,
+        SessionEvent::Failed(SessionFailure::Runtime(message)),
+    )
 }
 
 fn send_terminal_event(events: &async_channel::Sender<SessionEvent>, event: SessionEvent) -> bool {
@@ -790,6 +847,7 @@ mod tests {
 
     enum ReaderStep {
         Bytes(Vec<u8>),
+        Error(String),
         Eof,
     }
 
@@ -803,6 +861,7 @@ mod tests {
             while self.pending.is_empty() {
                 match self.steps.recv() {
                     Ok(ReaderStep::Bytes(bytes)) => self.pending.extend(bytes),
+                    Ok(ReaderStep::Error(message)) => return Err(io::Error::other(message)),
                     Ok(ReaderStep::Eof) | Err(_) => return Ok(0),
                 }
             }
@@ -1033,6 +1092,38 @@ mod tests {
     }
 
     #[test]
+    fn session_failure_display_should_explain_each_classification() {
+        let failures = [
+            SessionFailure::Runtime("write unavailable".to_owned()),
+            SessionFailure::PtyRead {
+                read_error: "read unavailable".to_owned(),
+                exit_status: "exit code 7".to_owned(),
+            },
+            SessionFailure::ShellWait {
+                read_error: Some("read unavailable".to_owned()),
+                wait_error: "wait unavailable".to_owned(),
+            },
+            SessionFailure::ShellWait {
+                read_error: None,
+                wait_error: "wait unavailable".to_owned(),
+            },
+        ];
+
+        let statuses = failures.each_ref().map(ToString::to_string);
+
+        assert_eq!(
+            statuses,
+            [
+                "Terminal runtime failed: write unavailable",
+                "Shell output failed: read unavailable; shell exited (exit code 7)",
+                "Shell output failed: read unavailable; waiting for the shell also failed: wait unavailable",
+                "Shell output ended, but waiting for the shell failed: wait unavailable",
+            ]
+        );
+        let _: &dyn std::error::Error = &failures[0];
+    }
+
+    #[test]
     fn reader_acquisition_failure_should_fail_startup_and_drop_the_pty_once() {
         let (result, _reader_steps, records) = start_scripted_session(ScriptedPtyOptions {
             reader_error: Some("reader unavailable".to_owned()),
@@ -1164,7 +1255,7 @@ mod tests {
     }
 
     #[test]
-    fn write_failure_should_emit_the_existing_error_event_and_stop_the_worker() {
+    fn write_failure_should_emit_a_runtime_failure_and_stop_the_worker() {
         let (result, _reader_steps, records) = start_scripted_session(ScriptedPtyOptions {
             write_error: Some("write unavailable".to_owned()),
             ..ScriptedPtyOptions::default()
@@ -1173,14 +1264,18 @@ mod tests {
 
         session.paste("input".to_owned());
         let event = receive_event(&events, "the PTY write failure", |event| {
-            matches!(event, SessionEvent::Error(_))
+            matches!(event, SessionEvent::Failed(_))
         });
 
-        assert!(matches!(
-            event,
-            SessionEvent::Error(message)
-                if message == "failed to write to the shell PTY: write unavailable"
-        ));
+        let SessionEvent::Failed(failure) = event else {
+            unreachable!("the event predicate accepts only terminal failures")
+        };
+        assert_eq!(
+            failure,
+            SessionFailure::Runtime(
+                "failed to write to the shell PTY: write unavailable".to_owned()
+            )
+        );
         let state = records.wait_for("the failed PTY worker to release ownership", |state| {
             state.pty_drops == 1
         });
@@ -1192,6 +1287,93 @@ mod tests {
             (state.terminations, state.pty_drops, state.terminator_drops),
             (1, 1, 1)
         );
+    }
+
+    #[test]
+    fn reader_error_with_successful_wait_should_emit_a_pty_read_failure() {
+        let (result, reader_steps, records) = start_scripted_session(ScriptedPtyOptions {
+            exit_code: 7,
+            ..ScriptedPtyOptions::default()
+        });
+        let (mut session, events) = result.unwrap();
+
+        reader_steps
+            .send(ReaderStep::Error("read unavailable".to_owned()))
+            .unwrap();
+        let event = receive_event(&events, "the PTY read failure", |event| {
+            matches!(event, SessionEvent::Failed(_))
+        });
+
+        let SessionEvent::Failed(SessionFailure::PtyRead {
+            read_error,
+            exit_status,
+        }) = event
+        else {
+            panic!("a read error followed by a successful wait must be classified as PtyRead")
+        };
+        assert_eq!(read_error, "read unavailable");
+        assert_eq!(exit_status, format!("{:?}", ExitStatus::with_exit_code(7)));
+        assert_eq!(records.snapshot().waits, 1);
+
+        session.shutdown();
+    }
+
+    #[test]
+    fn reader_error_with_wait_failure_should_preserve_both_errors() {
+        let (result, reader_steps, records) = start_scripted_session(ScriptedPtyOptions {
+            wait_error: Some("wait unavailable".to_owned()),
+            ..ScriptedPtyOptions::default()
+        });
+        let (mut session, events) = result.unwrap();
+
+        reader_steps
+            .send(ReaderStep::Error("read unavailable".to_owned()))
+            .unwrap();
+        let event = receive_event(&events, "the PTY read and wait failure", |event| {
+            matches!(event, SessionEvent::Failed(_))
+        });
+
+        let SessionEvent::Failed(failure) = event else {
+            unreachable!("the event predicate accepts only terminal failures")
+        };
+        assert_eq!(
+            failure,
+            SessionFailure::ShellWait {
+                read_error: Some("read unavailable".to_owned()),
+                wait_error: "wait unavailable".to_owned(),
+            }
+        );
+        assert_eq!(records.snapshot().waits, 1);
+
+        session.shutdown();
+    }
+
+    #[test]
+    fn reader_eof_with_wait_failure_should_emit_a_shell_wait_failure() {
+        let (result, reader_steps, records) = start_scripted_session(ScriptedPtyOptions {
+            wait_error: Some("wait unavailable".to_owned()),
+            ..ScriptedPtyOptions::default()
+        });
+        let (mut session, events) = result.unwrap();
+
+        reader_steps.send(ReaderStep::Eof).unwrap();
+        let event = receive_event(&events, "the shell wait failure", |event| {
+            matches!(event, SessionEvent::Failed(_))
+        });
+
+        let SessionEvent::Failed(failure) = event else {
+            unreachable!("the event predicate accepts only terminal failures")
+        };
+        assert_eq!(
+            failure,
+            SessionFailure::ShellWait {
+                read_error: None,
+                wait_error: "wait unavailable".to_owned(),
+            }
+        );
+        assert_eq!(records.snapshot().waits, 1);
+
+        session.shutdown();
     }
 
     #[test]
@@ -1283,7 +1465,7 @@ mod tests {
                             && cell.foreground == crate::theme::ACTIVE_THEME.terminal_normal()[1]
                     });
                 }
-                Ok(SessionEvent::Error(error)) => panic!("terminal session failed: {error}"),
+                Ok(SessionEvent::Failed(failure)) => panic!("terminal session failed: {failure}"),
                 Ok(SessionEvent::Exited(status)) => panic!("shell exited early: {status}"),
                 Err(async_channel::TryRecvError::Empty) => {
                     thread::sleep(Duration::from_millis(10));
@@ -1322,7 +1504,7 @@ mod tests {
             match events.try_recv() {
                 Ok(SessionEvent::Screen(_)) => {}
                 Ok(SessionEvent::Exited(status)) => exit_status = Some(status),
-                Ok(SessionEvent::Error(error)) => panic!("terminal session failed: {error}"),
+                Ok(SessionEvent::Failed(failure)) => panic!("terminal session failed: {failure}"),
                 Err(async_channel::TryRecvError::Empty) => {
                     thread::sleep(Duration::from_millis(10));
                 }

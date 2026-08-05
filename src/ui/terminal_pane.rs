@@ -231,7 +231,8 @@ impl TerminalPane {
                 self.status = Some(status);
                 cx.emit(TerminalPaneEvent::Exited);
             }
-            SessionEvent::Error(status) => {
+            SessionEvent::Failed(failure) => {
+                let status = failure.to_string();
                 eprintln!("{status}");
                 self.status = Some(status);
             }
@@ -511,6 +512,7 @@ impl Render for TerminalPane {
             .when_some(status, |root, status| {
                 root.child(
                     div()
+                        .debug_selector(|| "terminal-status".to_owned())
                         .absolute()
                         .right(px(HORIZONTAL_PADDING))
                         .bottom(px(VERTICAL_PADDING))
@@ -702,16 +704,17 @@ fn single_char(value: &str) -> Option<char> {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
     use std::path::PathBuf;
     use std::rc::Rc;
 
     use gpui::{Entity, Keystroke, Modifiers, TestAppContext, VisualTestContext};
 
     use super::*;
-    use crate::terminal::TerminalSessionFactory;
     use crate::terminal::testing::{
         RecordedSessionCommand, TestTerminalSessionFactory, TestTerminalSessionRecords,
     };
+    use crate::terminal::{SessionFailure, TerminalSessionFactory};
 
     fn terminal_pane(cx: &mut TestAppContext) -> (Entity<TerminalPane>, &mut VisualTestContext) {
         cx.update(crate::ui::init);
@@ -1001,5 +1004,59 @@ mod tests {
         close_session(&mut session);
 
         assert_eq!(records.dropped_session_ids(), vec![1]);
+    }
+
+    #[gpui::test]
+    fn terminal_failure_should_keep_the_pane_visible_with_a_failure_status(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(crate::ui::init);
+        let records = TestTerminalSessionRecords::default();
+        let session_factory: Rc<dyn TerminalSessionFactory> =
+            Rc::new(TestTerminalSessionFactory::new(records.clone()));
+        let session_factory = WorkspaceTerminalSessionFactory::new(
+            session_factory,
+            PathBuf::from("/tmp/spaceterm-terminal-pane-test"),
+        );
+        let (pane, cx) =
+            cx.add_window_view(|window, cx| TerminalPane::new(session_factory, window, cx));
+        let exits = Rc::new(Cell::new(0));
+        let exits_for_subscription = Rc::clone(&exits);
+        pane.update(cx, |_, cx| {
+            cx.subscribe(&pane, move |_, _, event: &TerminalPaneEvent, _| {
+                if matches!(event, TerminalPaneEvent::Exited) {
+                    exits_for_subscription.update(|exits| exits + 1);
+                }
+            })
+            .detach();
+        });
+        cx.run_until_parked();
+        let sender = records
+            .event_sender(1)
+            .expect("rendering the Pane must start its Terminal Session");
+
+        sender
+            .try_send(SessionEvent::Failed(SessionFailure::PtyRead {
+                read_error: "read unavailable".to_owned(),
+                exit_status: "exit code 7".to_owned(),
+            }))
+            .unwrap();
+        cx.run_until_parked();
+
+        let state = pane.read_with(cx, |pane, _| (pane.status.clone(), pane.session.is_some()));
+        assert_eq!(
+            state,
+            (
+                Some(
+                    "Shell output failed: read unavailable; shell exited (exit code 7)".to_owned()
+                ),
+                true,
+            )
+        );
+        assert_eq!(
+            (exits.get(), records.dropped_session_ids()),
+            (0, Vec::new())
+        );
+        assert!(cx.debug_bounds("terminal-status").is_some());
     }
 }
