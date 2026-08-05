@@ -6,8 +6,7 @@ use std::time::{Duration, Instant};
 
 use libghostty_vt::fmt::Format;
 use libghostty_vt::key::{
-    Action as KeyAction, Encoder as KeyEncoder, Event as KeyEvent, Key as GhosttyKey, Mods,
-    OptionAsAlt,
+    Action as GhosttyKeyAction, Encoder as KeyEncoder, Event as KeyEvent, Mods, OptionAsAlt,
 };
 use libghostty_vt::mouse::{
     Action as MouseAction, Button as MouseButton, Encoder as MouseEncoder,
@@ -25,9 +24,9 @@ use libghostty_vt::terminal::{Mode, Point, PointCoordinate, ScrollViewport};
 use libghostty_vt::{Error, RenderState, Terminal, TerminalOptions};
 
 use crate::terminal::geometry::{BackingPosition, TerminalGeometry};
+use crate::terminal::key::{InputModifiers, KeyAction, KeyInput, PhysicalKey};
 use crate::terminal::session::{
-    InputModifiers, KeyCode, KeyInput, PointerButton, PointerInput, PointerPhase, SurfacePosition,
-    WheelInput,
+    PointerButton, PointerInput, PointerPhase, SurfacePosition, WheelInput,
 };
 use crate::theme::{ACTIVE_THEME, Color};
 
@@ -495,13 +494,18 @@ impl TerminalEmulator {
         if alternate_screen && alternate_scroll {
             self.clear_selection()?;
             let key = KeyInput {
-                code: if steps > 0 {
-                    KeyCode::ArrowUp
+                action: KeyAction::Press,
+                physical_key: if steps > 0 {
+                    PhysicalKey::ArrowUp
                 } else {
-                    KeyCode::ArrowDown
+                    PhysicalKey::ArrowDown
                 },
+                native_key_code: None,
+                logical_key: if steps > 0 { "up" } else { "down" }.to_owned(),
                 text: None,
+                unshifted_codepoint: None,
                 modifiers: InputModifiers::default(),
+                consumed_modifiers: InputModifiers::default(),
             };
             let mut bytes = Vec::new();
             for _ in 0..steps.unsigned_abs() {
@@ -697,31 +701,30 @@ impl TerminalEmulator {
     }
 
     fn encode_key(&mut self, input: &KeyInput, bytes: &mut Vec<u8>) -> Result<(), String> {
-        let (text, unshifted) = match input.code {
-            KeyCode::Character(character) => {
-                if character.is_control() {
-                    return Err("terminal character keys must be printable".to_owned());
-                }
-                let text = input.text.clone().unwrap_or_else(|| character.to_string());
-                if text.chars().any(char::is_control) {
-                    return Err("terminal key text must not contain control characters".to_owned());
-                }
-                (Some(text), unshifted_character(character))
-            }
-            _ => (None, '\0'),
-        };
+        input.validate().map_err(|error| error.to_string())?;
+        if input
+            .text
+            .as_deref()
+            .is_some_and(|text| text.chars().any(char::is_control))
+        {
+            return Err("terminal key text must not contain control characters".to_owned());
+        }
 
         self.key_encoder
             .set_options_from_terminal(&self.terminal)
             .set_macos_option_as_alt(OptionAsAlt::True);
         self.key_event
-            .set_action(KeyAction::Press)
-            .set_key(ghostty_key(input.code))
+            .set_action(match input.action {
+                KeyAction::Press => GhosttyKeyAction::Press,
+                KeyAction::Repeat => GhosttyKeyAction::Repeat,
+                KeyAction::Release => GhosttyKeyAction::Release,
+            })
+            .set_key(input.physical_key)
             .set_mods(key_modifiers(input.modifiers))
-            .set_consumed_mods(Mods::empty())
+            .set_consumed_mods(key_modifiers(input.consumed_modifiers))
             .set_composing(false)
-            .set_utf8(text)
-            .set_unshifted_codepoint(unshifted);
+            .set_utf8(input.text.clone())
+            .set_unshifted_codepoint(input.unshifted_codepoint.unwrap_or('\0'));
         self.key_encoder
             .encode_to_vec(&self.key_event, bytes)
             .map_err(|error| format!("failed to encode terminal key input: {error}"))
@@ -1092,114 +1095,18 @@ impl Drop for TerminalEmulator {
     }
 }
 
-fn ghostty_key(code: KeyCode) -> GhosttyKey {
-    match code {
-        KeyCode::Character(character) => ghostty_character_key(unshifted_character(character)),
-        KeyCode::Enter => GhosttyKey::Enter,
-        KeyCode::Backspace => GhosttyKey::Backspace,
-        KeyCode::Tab => GhosttyKey::Tab,
-        KeyCode::Escape => GhosttyKey::Escape,
-        KeyCode::ArrowUp => GhosttyKey::ArrowUp,
-        KeyCode::ArrowDown => GhosttyKey::ArrowDown,
-        KeyCode::ArrowLeft => GhosttyKey::ArrowLeft,
-        KeyCode::ArrowRight => GhosttyKey::ArrowRight,
-        KeyCode::Home => GhosttyKey::Home,
-        KeyCode::End => GhosttyKey::End,
-        KeyCode::PageUp => GhosttyKey::PageUp,
-        KeyCode::PageDown => GhosttyKey::PageDown,
-        KeyCode::Insert => GhosttyKey::Insert,
-        KeyCode::Delete => GhosttyKey::Delete,
-    }
-}
-
-fn ghostty_character_key(character: char) -> GhosttyKey {
-    match character {
-        '`' => GhosttyKey::Backquote,
-        '\\' => GhosttyKey::Backslash,
-        '[' => GhosttyKey::BracketLeft,
-        ']' => GhosttyKey::BracketRight,
-        ',' => GhosttyKey::Comma,
-        '0' => GhosttyKey::Digit0,
-        '1' => GhosttyKey::Digit1,
-        '2' => GhosttyKey::Digit2,
-        '3' => GhosttyKey::Digit3,
-        '4' => GhosttyKey::Digit4,
-        '5' => GhosttyKey::Digit5,
-        '6' => GhosttyKey::Digit6,
-        '7' => GhosttyKey::Digit7,
-        '8' => GhosttyKey::Digit8,
-        '9' => GhosttyKey::Digit9,
-        '=' => GhosttyKey::Equal,
-        'a' | 'A' => GhosttyKey::A,
-        'b' | 'B' => GhosttyKey::B,
-        'c' | 'C' => GhosttyKey::C,
-        'd' | 'D' => GhosttyKey::D,
-        'e' | 'E' => GhosttyKey::E,
-        'f' | 'F' => GhosttyKey::F,
-        'g' | 'G' => GhosttyKey::G,
-        'h' | 'H' => GhosttyKey::H,
-        'i' | 'I' => GhosttyKey::I,
-        'j' | 'J' => GhosttyKey::J,
-        'k' | 'K' => GhosttyKey::K,
-        'l' | 'L' => GhosttyKey::L,
-        'm' | 'M' => GhosttyKey::M,
-        'n' | 'N' => GhosttyKey::N,
-        'o' | 'O' => GhosttyKey::O,
-        'p' | 'P' => GhosttyKey::P,
-        'q' | 'Q' => GhosttyKey::Q,
-        'r' | 'R' => GhosttyKey::R,
-        's' | 'S' => GhosttyKey::S,
-        't' | 'T' => GhosttyKey::T,
-        'u' | 'U' => GhosttyKey::U,
-        'v' | 'V' => GhosttyKey::V,
-        'w' | 'W' => GhosttyKey::W,
-        'x' | 'X' => GhosttyKey::X,
-        'y' | 'Y' => GhosttyKey::Y,
-        'z' | 'Z' => GhosttyKey::Z,
-        '-' => GhosttyKey::Minus,
-        '.' => GhosttyKey::Period,
-        '\'' => GhosttyKey::Quote,
-        ';' => GhosttyKey::Semicolon,
-        '/' => GhosttyKey::Slash,
-        ' ' => GhosttyKey::Space,
-        _ => GhosttyKey::Unidentified,
-    }
-}
-
-fn unshifted_character(character: char) -> char {
-    match character {
-        '~' => '`',
-        '!' => '1',
-        '@' => '2',
-        '#' => '3',
-        '$' => '4',
-        '%' => '5',
-        '^' => '6',
-        '&' => '7',
-        '*' => '8',
-        '(' => '9',
-        ')' => '0',
-        '_' => '-',
-        '+' => '=',
-        '{' => '[',
-        '}' => ']',
-        '|' => '\\',
-        ':' => ';',
-        '"' => '\'',
-        '<' => ',',
-        '>' => '.',
-        '?' => '/',
-        character if character.is_ascii_uppercase() => character.to_ascii_lowercase(),
-        character => character,
-    }
-}
-
 fn key_modifiers(modifiers: InputModifiers) -> Mods {
     let mut result = Mods::empty();
     result.set(Mods::SHIFT, modifiers.shift);
     result.set(Mods::ALT, modifiers.alt);
     result.set(Mods::CTRL, modifiers.control);
     result.set(Mods::SUPER, modifiers.platform);
+    result.set(Mods::CAPS_LOCK, modifiers.caps_lock);
+    result.set(Mods::NUM_LOCK, modifiers.num_lock);
+    result.set(Mods::SHIFT_SIDE, modifiers.shift_right);
+    result.set(Mods::ALT_SIDE, modifiers.alt_right);
+    result.set(Mods::CTRL_SIDE, modifiers.control_right);
+    result.set(Mods::SUPER_SIDE, modifiers.platform_right);
     result
 }
 
@@ -1367,11 +1274,16 @@ mod tests {
         }
     }
 
-    fn key(code: KeyCode, modifiers: InputModifiers) -> KeyInput {
+    fn key(physical_key: PhysicalKey, modifiers: InputModifiers) -> KeyInput {
         KeyInput {
-            code,
+            action: KeyAction::Press,
+            physical_key,
+            native_key_code: None,
+            logical_key: format!("{physical_key:?}"),
             text: None,
+            unshifted_codepoint: None,
             modifiers,
+            consumed_modifiers: InputModifiers::default(),
         }
     }
 
@@ -1555,7 +1467,7 @@ mod tests {
         let mut emulator = emulator(10, 2);
         assert_eq!(
             emulator
-                .key(key(KeyCode::ArrowUp, InputModifiers::default()))
+                .key(key(PhysicalKey::ArrowUp, InputModifiers::default()))
                 .unwrap()
                 .bytes,
             b"\x1b[A"
@@ -1564,36 +1476,51 @@ mod tests {
         emulator.feed(b"\x1b[?1h");
         assert_eq!(
             emulator
-                .key(key(KeyCode::ArrowUp, InputModifiers::default()))
+                .key(key(PhysicalKey::ArrowUp, InputModifiers::default()))
                 .unwrap()
                 .bytes,
             b"\x1bOA"
         );
 
         let printable = KeyInput {
-            code: KeyCode::Character('é'),
+            action: KeyAction::Press,
+            physical_key: PhysicalKey::E,
+            native_key_code: None,
+            logical_key: "é".to_owned(),
             text: Some("é".to_owned()),
+            unshifted_codepoint: Some('e'),
             modifiers: InputModifiers::default(),
+            consumed_modifiers: InputModifiers::default(),
         };
         assert_eq!(emulator.key(printable).unwrap().bytes, "é".as_bytes());
 
         let control_c = KeyInput {
-            code: KeyCode::Character('c'),
+            action: KeyAction::Press,
+            physical_key: PhysicalKey::C,
+            native_key_code: None,
+            logical_key: "c".to_owned(),
             text: Some("c".to_owned()),
+            unshifted_codepoint: Some('c'),
             modifiers: InputModifiers {
                 control: true,
                 ..InputModifiers::default()
             },
+            consumed_modifiers: InputModifiers::default(),
         };
         assert_eq!(emulator.key(control_c).unwrap().bytes, b"\x03");
 
         let alt_x = KeyInput {
-            code: KeyCode::Character('x'),
+            action: KeyAction::Press,
+            physical_key: PhysicalKey::X,
+            native_key_code: None,
+            logical_key: "x".to_owned(),
             text: Some("x".to_owned()),
+            unshifted_codepoint: Some('x'),
             modifiers: InputModifiers {
                 alt: true,
                 ..InputModifiers::default()
             },
+            consumed_modifiers: InputModifiers::default(),
         };
         assert_eq!(emulator.key(alt_x).unwrap().bytes, b"\x1bx");
     }
@@ -1601,28 +1528,28 @@ mod tests {
     #[test]
     fn named_keys_use_ghostty_key_encoding() {
         let mut emulator = emulator(10, 2);
-        let cases: &[(KeyCode, InputModifiers, &[u8])] = &[
-            (KeyCode::Enter, InputModifiers::default(), b"\r"),
-            (KeyCode::Backspace, InputModifiers::default(), b"\x7f"),
-            (KeyCode::Tab, InputModifiers::default(), b"\t"),
+        let cases: &[(PhysicalKey, InputModifiers, &[u8])] = &[
+            (PhysicalKey::Enter, InputModifiers::default(), b"\r"),
+            (PhysicalKey::Backspace, InputModifiers::default(), b"\x7f"),
+            (PhysicalKey::Tab, InputModifiers::default(), b"\t"),
             (
-                KeyCode::Tab,
+                PhysicalKey::Tab,
                 InputModifiers {
                     shift: true,
                     ..InputModifiers::default()
                 },
                 b"\x1b[Z",
             ),
-            (KeyCode::Escape, InputModifiers::default(), b"\x1b"),
-            (KeyCode::ArrowDown, InputModifiers::default(), b"\x1b[B"),
-            (KeyCode::ArrowLeft, InputModifiers::default(), b"\x1b[D"),
-            (KeyCode::ArrowRight, InputModifiers::default(), b"\x1b[C"),
-            (KeyCode::Home, InputModifiers::default(), b"\x1b[H"),
-            (KeyCode::End, InputModifiers::default(), b"\x1b[F"),
-            (KeyCode::PageUp, InputModifiers::default(), b"\x1b[5~"),
-            (KeyCode::PageDown, InputModifiers::default(), b"\x1b[6~"),
-            (KeyCode::Insert, InputModifiers::default(), b"\x1b[2~"),
-            (KeyCode::Delete, InputModifiers::default(), b"\x1b[3~"),
+            (PhysicalKey::Escape, InputModifiers::default(), b"\x1b"),
+            (PhysicalKey::ArrowDown, InputModifiers::default(), b"\x1b[B"),
+            (PhysicalKey::ArrowLeft, InputModifiers::default(), b"\x1b[D"),
+            (PhysicalKey::ArrowRight, InputModifiers::default(), b"\x1b[C"),
+            (PhysicalKey::Home, InputModifiers::default(), b"\x1b[H"),
+            (PhysicalKey::End, InputModifiers::default(), b"\x1b[F"),
+            (PhysicalKey::PageUp, InputModifiers::default(), b"\x1b[5~"),
+            (PhysicalKey::PageDown, InputModifiers::default(), b"\x1b[6~"),
+            (PhysicalKey::Insert, InputModifiers::default(), b"\x1b[2~"),
+            (PhysicalKey::Delete, InputModifiers::default(), b"\x1b[3~"),
         ];
 
         for (code, modifiers, expected) in cases {

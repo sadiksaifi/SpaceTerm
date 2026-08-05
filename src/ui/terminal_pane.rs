@@ -19,8 +19,8 @@ use crate::terminal::geometry::{
     BackingScale, CellGridSize, LogicalCellSize, LogicalPosition, LogicalSize, TerminalGeometry,
 };
 use crate::terminal::{
-    InputModifiers, KeyCode, KeyInput, PointerButton, PointerInput, PointerPhase, ScreenSnapshot,
-    SessionEvent, SurfacePosition, TerminalSessionHandle, WheelInput,
+    InputModifiers, KeyAction, KeyInput, PhysicalKey, PointerButton, PointerInput, PointerPhase,
+    ScreenSnapshot, SessionEvent, SurfacePosition, TerminalSessionHandle, WheelInput,
     WorkspaceTerminalSessionFactory,
 };
 use crate::theme::{ACTIVE_THEME, Color};
@@ -656,6 +656,7 @@ fn input_modifiers(modifiers: gpui::Modifiers) -> InputModifiers {
         alt: modifiers.alt,
         control: modifiers.control,
         platform: modifiers.platform,
+        ..InputModifiers::default()
     }
 }
 
@@ -687,43 +688,156 @@ fn accumulate_wheel_steps(remainder: &mut f32, delta: f32) -> i32 {
 
 fn encode_key(event: &KeyDownEvent) -> Option<KeyInput> {
     let keystroke = &event.keystroke;
-    if keystroke.modifiers.platform || keystroke.modifiers.function {
-        return None;
-    }
-
-    let code = match keystroke.key.as_str() {
-        "enter" => KeyCode::Enter,
-        "backspace" => KeyCode::Backspace,
-        "tab" => KeyCode::Tab,
-        "escape" => KeyCode::Escape,
-        "up" => KeyCode::ArrowUp,
-        "down" => KeyCode::ArrowDown,
-        "right" => KeyCode::ArrowRight,
-        "left" => KeyCode::ArrowLeft,
-        "home" => KeyCode::Home,
-        "end" => KeyCode::End,
-        "pageup" => KeyCode::PageUp,
-        "pagedown" => KeyCode::PageDown,
-        "insert" => KeyCode::Insert,
-        "delete" => KeyCode::Delete,
-        key => {
-            let character = single_char(key).or_else(|| {
-                keystroke
-                    .key_char
-                    .as_deref()
-                    .and_then(|text| text.chars().next())
-            })?;
-            KeyCode::Character(character)
-        }
-    };
+    let physical_key = physical_key(&keystroke.key);
+    let text = keystroke.key_char.clone().filter(|text| {
+        !text.is_empty() && !text.chars().any(char::is_control)
+    });
+    let unshifted_codepoint = single_char(&keystroke.key).map(unshifted_character);
 
     Some(KeyInput {
-        code,
-        text: matches!(code, KeyCode::Character(_))
-            .then(|| keystroke.key_char.clone())
-            .flatten(),
+        action: if event.is_held {
+            KeyAction::Repeat
+        } else {
+            KeyAction::Press
+        },
+        physical_key,
+        native_key_code: None,
+        logical_key: keystroke.key.clone(),
+        text,
+        unshifted_codepoint,
         modifiers: input_modifiers(keystroke.modifiers),
+        consumed_modifiers: InputModifiers::default(),
     })
+}
+
+fn physical_key(key: &str) -> PhysicalKey {
+    match key {
+        "enter" => PhysicalKey::Enter,
+        "backspace" => PhysicalKey::Backspace,
+        "tab" => PhysicalKey::Tab,
+        "escape" => PhysicalKey::Escape,
+        "up" => PhysicalKey::ArrowUp,
+        "down" => PhysicalKey::ArrowDown,
+        "right" => PhysicalKey::ArrowRight,
+        "left" => PhysicalKey::ArrowLeft,
+        "home" => PhysicalKey::Home,
+        "end" => PhysicalKey::End,
+        "pageup" => PhysicalKey::PageUp,
+        "pagedown" => PhysicalKey::PageDown,
+        "insert" => PhysicalKey::Insert,
+        "delete" => PhysicalKey::Delete,
+        "f1" => PhysicalKey::F1,
+        "f2" => PhysicalKey::F2,
+        "f3" => PhysicalKey::F3,
+        "f4" => PhysicalKey::F4,
+        "f5" => PhysicalKey::F5,
+        "f6" => PhysicalKey::F6,
+        "f7" => PhysicalKey::F7,
+        "f8" => PhysicalKey::F8,
+        "f9" => PhysicalKey::F9,
+        "f10" => PhysicalKey::F10,
+        "f11" => PhysicalKey::F11,
+        "f12" => PhysicalKey::F12,
+        "f13" => PhysicalKey::F13,
+        "f14" => PhysicalKey::F14,
+        "f15" => PhysicalKey::F15,
+        "f16" => PhysicalKey::F16,
+        "f17" => PhysicalKey::F17,
+        "f18" => PhysicalKey::F18,
+        "f19" => PhysicalKey::F19,
+        "f20" => PhysicalKey::F20,
+        "f21" => PhysicalKey::F21,
+        "f22" => PhysicalKey::F22,
+        "f23" => PhysicalKey::F23,
+        "f24" => PhysicalKey::F24,
+        "f25" => PhysicalKey::F25,
+        "space" | " " => PhysicalKey::Space,
+        value => single_char(value)
+            .map(physical_character_key)
+            .unwrap_or(PhysicalKey::Unidentified),
+    }
+}
+
+fn physical_character_key(character: char) -> PhysicalKey {
+    match unshifted_character(character) {
+        '`' => PhysicalKey::Backquote,
+        '\\' => PhysicalKey::Backslash,
+        '[' => PhysicalKey::BracketLeft,
+        ']' => PhysicalKey::BracketRight,
+        ',' => PhysicalKey::Comma,
+        '0' => PhysicalKey::Digit0,
+        '1' => PhysicalKey::Digit1,
+        '2' => PhysicalKey::Digit2,
+        '3' => PhysicalKey::Digit3,
+        '4' => PhysicalKey::Digit4,
+        '5' => PhysicalKey::Digit5,
+        '6' => PhysicalKey::Digit6,
+        '7' => PhysicalKey::Digit7,
+        '8' => PhysicalKey::Digit8,
+        '9' => PhysicalKey::Digit9,
+        '=' => PhysicalKey::Equal,
+        'a' => PhysicalKey::A,
+        'b' => PhysicalKey::B,
+        'c' => PhysicalKey::C,
+        'd' => PhysicalKey::D,
+        'e' => PhysicalKey::E,
+        'f' => PhysicalKey::F,
+        'g' => PhysicalKey::G,
+        'h' => PhysicalKey::H,
+        'i' => PhysicalKey::I,
+        'j' => PhysicalKey::J,
+        'k' => PhysicalKey::K,
+        'l' => PhysicalKey::L,
+        'm' => PhysicalKey::M,
+        'n' => PhysicalKey::N,
+        'o' => PhysicalKey::O,
+        'p' => PhysicalKey::P,
+        'q' => PhysicalKey::Q,
+        'r' => PhysicalKey::R,
+        's' => PhysicalKey::S,
+        't' => PhysicalKey::T,
+        'u' => PhysicalKey::U,
+        'v' => PhysicalKey::V,
+        'w' => PhysicalKey::W,
+        'x' => PhysicalKey::X,
+        'y' => PhysicalKey::Y,
+        'z' => PhysicalKey::Z,
+        '-' => PhysicalKey::Minus,
+        '.' => PhysicalKey::Period,
+        '\'' => PhysicalKey::Quote,
+        ';' => PhysicalKey::Semicolon,
+        '/' => PhysicalKey::Slash,
+        ' ' => PhysicalKey::Space,
+        _ => PhysicalKey::Unidentified,
+    }
+}
+
+fn unshifted_character(character: char) -> char {
+    match character {
+        '~' => '`',
+        '!' => '1',
+        '@' => '2',
+        '#' => '3',
+        '$' => '4',
+        '%' => '5',
+        '^' => '6',
+        '&' => '7',
+        '*' => '8',
+        '(' => '9',
+        ')' => '0',
+        '_' => '-',
+        '+' => '=',
+        '{' => '[',
+        '}' => ']',
+        '|' => '\\',
+        ':' => ';',
+        '"' => '\'',
+        '<' => ',',
+        '>' => '.',
+        '?' => '/',
+        character if character.is_ascii_uppercase() => character.to_ascii_lowercase(),
+        character => character,
+    }
 }
 
 fn single_char(value: &str) -> Option<char> {
@@ -812,6 +926,24 @@ mod tests {
         }
     }
 
+    fn expected_key(
+        physical_key: PhysicalKey,
+        logical_key: &str,
+        text: Option<&str>,
+        modifiers: InputModifiers,
+    ) -> KeyInput {
+        KeyInput {
+            action: KeyAction::Press,
+            physical_key,
+            native_key_code: None,
+            logical_key: logical_key.to_owned(),
+            text: text.map(ToOwned::to_owned),
+            unshifted_codepoint: single_char(logical_key).map(unshifted_character),
+            modifiers,
+            consumed_modifiers: InputModifiers::default(),
+        }
+    }
+
     #[test]
     fn reported_terminal_title_should_replace_the_shell_fallback() {
         assert_eq!(
@@ -837,27 +969,30 @@ mod tests {
     fn maps_printable_text_and_terminal_keys() {
         assert_eq!(
             encode_key(&event("a", Some("a"), Modifiers::default())),
-            Some(KeyInput {
-                code: KeyCode::Character('a'),
-                text: Some("a".to_owned()),
-                modifiers: InputModifiers::default(),
-            })
+            Some(expected_key(
+                PhysicalKey::A,
+                "a",
+                Some("a"),
+                InputModifiers::default(),
+            ))
         );
         assert_eq!(
             encode_key(&event("enter", None, Modifiers::default())),
-            Some(KeyInput {
-                code: KeyCode::Enter,
-                text: None,
-                modifiers: InputModifiers::default(),
-            })
+            Some(expected_key(
+                PhysicalKey::Enter,
+                "enter",
+                None,
+                InputModifiers::default(),
+            ))
         );
         assert_eq!(
             encode_key(&event("up", None, Modifiers::default())),
-            Some(KeyInput {
-                code: KeyCode::ArrowUp,
-                text: None,
-                modifiers: InputModifiers::default(),
-            })
+            Some(expected_key(
+                PhysicalKey::ArrowUp,
+                "up",
+                None,
+                InputModifiers::default(),
+            ))
         );
     }
 
@@ -870,15 +1005,16 @@ mod tests {
         };
         assert_eq!(
             encode_key(&event("c", Some("c"), modifiers)),
-            Some(KeyInput {
-                code: KeyCode::Character('c'),
-                text: Some("c".to_owned()),
-                modifiers: InputModifiers {
+            Some(expected_key(
+                PhysicalKey::C,
+                "c",
+                Some("c"),
+                InputModifiers {
                     control: true,
                     alt: true,
                     ..InputModifiers::default()
                 },
-            })
+            ))
         );
     }
 
@@ -891,24 +1027,36 @@ mod tests {
 
         assert_eq!(
             encode_key(&event("d", Some("d"), modifiers)),
-            Some(KeyInput {
-                code: KeyCode::Character('d'),
-                text: Some("d".to_owned()),
-                modifiers: InputModifiers {
+            Some(expected_key(
+                PhysicalKey::D,
+                "d",
+                Some("d"),
+                InputModifiers {
                     control: true,
                     ..InputModifiers::default()
                 },
-            })
+            ))
         );
     }
 
     #[test]
-    fn leaves_command_shortcuts_for_the_application() {
+    fn preserves_unbound_command_keys_for_terminal_protocol_encoding() {
         let modifiers = Modifiers {
             platform: true,
             ..Modifiers::default()
         };
-        assert!(encode_key(&event("q", None, modifiers)).is_none());
+        assert_eq!(
+            encode_key(&event("q", None, modifiers)),
+            Some(expected_key(
+                PhysicalKey::Q,
+                "q",
+                None,
+                InputModifiers {
+                    platform: true,
+                    ..InputModifiers::default()
+                },
+            ))
+        );
     }
 
     #[test]
@@ -965,6 +1113,7 @@ mod tests {
                 alt: true,
                 control: true,
                 platform: true,
+                ..InputModifiers::default()
             }
         );
     }

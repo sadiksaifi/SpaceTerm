@@ -27,10 +27,10 @@ pub(crate) use session::SessionFailure;
     )
 )]
 pub(crate) use session::{
-    InputModifiers, KeyCode, KeyInput, NativeTerminalSessionFactory, PointerButton, PointerInput,
-    PointerPhase, SessionEvent, SessionExit, SurfacePosition, TerminalSessionFactory,
-    TerminalSessionHandle, WheelInput,
+    NativeTerminalSessionFactory, PointerButton, PointerInput, PointerPhase, SessionEvent,
+    SessionExit, SurfacePosition, TerminalSessionFactory, TerminalSessionHandle, WheelInput,
 };
+pub(crate) use key::{InputModifiers, KeyAction, KeyInput, PhysicalKey};
 #[cfg(test)]
 pub(crate) use session::{SessionError, StartedTerminalSession};
 pub(crate) use workspace_terminal_session_factory::WorkspaceTerminalSessionFactory;

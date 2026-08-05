@@ -1,4 +1,4 @@
-use libghostty_vt::key::Key as PhysicalKey;
+pub(crate) use libghostty_vt::key::Key as PhysicalKey;
 use thiserror::Error;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]

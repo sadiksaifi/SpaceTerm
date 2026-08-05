@@ -18,6 +18,7 @@ use crate::platform::macos_pty::{
 };
 use crate::terminal::emulator::{EmulatorAction, ScreenSnapshot, TerminalEmulator};
 use crate::terminal::geometry::TerminalGeometry;
+use crate::terminal::key::{InputModifiers, KeyInput};
 
 const FINAL_CHILD_WAIT_TIMEOUT: Duration = Duration::from_secs(2);
 const PTY_READ_BUFFER_SIZE: usize = 16 * 1024;
@@ -27,40 +28,6 @@ const PTY_OUTPUT_QUEUE_CAPACITY: usize = 8;
 pub(crate) struct SurfacePosition {
     pub(crate) x: f32,
     pub(crate) y: f32,
-}
-
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) struct InputModifiers {
-    pub(crate) shift: bool,
-    pub(crate) alt: bool,
-    pub(crate) control: bool,
-    pub(crate) platform: bool,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum KeyCode {
-    Character(char),
-    Enter,
-    Backspace,
-    Tab,
-    Escape,
-    ArrowUp,
-    ArrowDown,
-    ArrowLeft,
-    ArrowRight,
-    Home,
-    End,
-    PageUp,
-    PageDown,
-    Insert,
-    Delete,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct KeyInput {
-    pub(crate) code: KeyCode,
-    pub(crate) text: Option<String>,
-    pub(crate) modifiers: InputModifiers,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1122,6 +1089,7 @@ mod tests {
 
     use super::*;
     use crate::terminal::geometry::{BackingScale, CellGridSize, LogicalCellSize};
+    use crate::terminal::key::{KeyAction, PhysicalKey};
 
     fn geometry(cols: u16, rows: u16, cell_width: f32, cell_height: f32) -> TerminalGeometry {
         TerminalGeometry::from_grid(
@@ -1798,6 +1766,37 @@ mod tests {
         drop(reader_event_rx);
         assert_eq!(completions.recv().unwrap(), None);
         producer.join().unwrap();
+    }
+
+    #[test]
+    fn key_actions_should_retain_fifo_order_in_the_reliable_command_lane() {
+        let (commands, receiver) = mpsc::channel();
+        for action in [KeyAction::Press, KeyAction::Repeat, KeyAction::Release] {
+            commands
+                .send(Command::Key(KeyInput {
+                    action,
+                    physical_key: PhysicalKey::A,
+                    native_key_code: Some(0),
+                    logical_key: "a".to_owned(),
+                    text: Some("a".to_owned()),
+                    unshifted_codepoint: Some('a'),
+                    modifiers: InputModifiers::default(),
+                    consumed_modifiers: InputModifiers::default(),
+                }))
+                .unwrap();
+        }
+
+        let actions = [receiver.recv(), receiver.recv(), receiver.recv()].map(|command| {
+            let Command::Key(input) = command.unwrap() else {
+                panic!("the command lane should contain only typed key input")
+            };
+            input.action
+        });
+
+        assert_eq!(
+            actions,
+            [KeyAction::Press, KeyAction::Repeat, KeyAction::Release]
+        );
     }
 
     #[test]
