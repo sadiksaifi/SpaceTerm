@@ -10,7 +10,7 @@ use unicode_bidi::{BidiClass, bidi_class};
 
 use crate::terminal::{
     CellSnapshot, CursorPositionSnapshot, CursorShapeSnapshot, CursorSnapshot, RowSnapshot,
-    ScreenSnapshot, TerminalColor, TerminalColorsSnapshot,
+    ScreenSnapshot, TerminalColor, TerminalColorsSnapshot, TerminalUnderlineSnapshot,
 };
 use crate::theme::{ACTIVE_THEME, Color};
 
@@ -454,6 +454,8 @@ struct RowPaintInput {
     fragments: Vec<TextFragment>,
     backgrounds: Vec<BackgroundSpan>,
     selections: Vec<BackgroundSpan>,
+    under_text_decorations: Vec<DecorationSpan>,
+    over_text_decorations: Vec<DecorationSpan>,
 }
 
 struct TextFragment {
@@ -559,6 +561,36 @@ struct BackgroundSpan {
     color: Color,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DecorationKind {
+    Underline(TerminalUnderlineSnapshot),
+    Overline,
+    Strikethrough,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct DecorationSpan {
+    start: usize,
+    len: usize,
+    kind: DecorationKind,
+    color: Color,
+    blinking: bool,
+}
+
+fn push_decoration(spans: &mut Vec<DecorationSpan>, mut span: DecorationSpan) {
+    if let Some(previous) = spans.last_mut()
+        && previous.start + previous.len == span.start
+        && previous.kind == span.kind
+        && previous.color == span.color
+        && previous.blinking == span.blinking
+    {
+        previous.len += span.len;
+        return;
+    }
+    span.len = span.len.max(1);
+    spans.push(span);
+}
+
 fn prepare_row(
     row: &RowSnapshot,
     colors: &TerminalColorsSnapshot,
@@ -569,6 +601,9 @@ fn prepare_row(
     let mut regular_fragment: Option<FragmentBuilder> = None;
     let mut backgrounds: Vec<BackgroundSpan> = Vec::new();
     let mut selections: Vec<BackgroundSpan> = Vec::new();
+    let mut underlines = Vec::new();
+    let mut overlines = Vec::new();
+    let mut strikethroughs = Vec::new();
 
     for (column, cell) in row.iter().enumerate() {
         let cursor = cursor_column == Some(column);
@@ -600,6 +635,46 @@ fn prepare_row(
                     len: 1,
                     color: selection,
                 });
+            }
+        }
+
+        if !cell.invisible {
+            let (foreground, _) = effective_colors(cell, colors);
+            if cell.underline != TerminalUnderlineSnapshot::None {
+                push_decoration(
+                    &mut underlines,
+                    DecorationSpan {
+                        start: column,
+                        len: 1,
+                        kind: DecorationKind::Underline(cell.underline),
+                        color: effective_underline_color(cell, colors, foreground),
+                        blinking: cell.blinking,
+                    },
+                );
+            }
+            if cell.overline {
+                push_decoration(
+                    &mut overlines,
+                    DecorationSpan {
+                        start: column,
+                        len: 1,
+                        kind: DecorationKind::Overline,
+                        color: foreground,
+                        blinking: cell.blinking,
+                    },
+                );
+            }
+            if cell.strikethrough {
+                push_decoration(
+                    &mut strikethroughs,
+                    DecorationSpan {
+                        start: column,
+                        len: 1,
+                        kind: DecorationKind::Strikethrough,
+                        color: foreground,
+                        blinking: cell.blinking,
+                    },
+                );
             }
         }
 
@@ -642,10 +717,13 @@ fn prepare_row(
         fragments.push(fragment.finish(true));
     }
 
+    underlines.extend(overlines);
     RowPaintInput {
         fragments,
         backgrounds,
         selections,
+        under_text_decorations: underlines,
+        over_text_decorations: strikethroughs,
     }
 }
 
@@ -687,17 +765,8 @@ fn effective_colors(cell: &CellSnapshot, colors: &TerminalColorsSnapshot) -> (Co
         (TerminalColor::Palette(index @ 0..=7), true) => TerminalColor::Palette(index + 8),
         (source, _) => source,
     };
-    let resolve = |source| match source {
-        TerminalColor::Default => colors.foreground,
-        TerminalColor::Palette(index) => colors.palette[usize::from(index)],
-        TerminalColor::Rgb(color) => color,
-    };
-    let mut foreground = resolve(foreground_source);
-    let mut background = match cell.background_source {
-        TerminalColor::Default => colors.background,
-        TerminalColor::Palette(index) => colors.palette[usize::from(index)],
-        TerminalColor::Rgb(color) => color,
-    };
+    let mut foreground = resolve_color_source(foreground_source, colors, colors.foreground);
+    let mut background = resolve_color_source(cell.background_source, colors, colors.background);
     if cell.inverse ^ colors.reversed {
         std::mem::swap(&mut foreground, &mut background);
     }
@@ -705,6 +774,30 @@ fn effective_colors(cell: &CellSnapshot, colors: &TerminalColorsSnapshot) -> (Co
         foreground.a = foreground.a.div_ceil(2);
     }
     (foreground, background)
+}
+
+fn effective_underline_color(
+    cell: &CellSnapshot,
+    colors: &TerminalColorsSnapshot,
+    effective_foreground: Color,
+) -> Color {
+    let mut color = resolve_color_source(cell.underline_source, colors, effective_foreground);
+    if cell.faint && cell.underline_source != TerminalColor::Default {
+        color.a = color.a.div_ceil(2);
+    }
+    color
+}
+
+fn resolve_color_source(
+    source: TerminalColor,
+    colors: &TerminalColorsSnapshot,
+    default: Color,
+) -> Color {
+    match source {
+        TerminalColor::Default => default,
+        TerminalColor::Palette(index) => colors.palette[usize::from(index)],
+        TerminalColor::Rgb(color) => color,
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -1052,6 +1145,54 @@ mod tests {
                 start: 0,
                 len: 1,
                 color: accent,
+            }]
+        );
+    }
+
+    #[test]
+    fn prepared_decorations_preserve_kind_color_layer_and_cell_span() {
+        let accent = ACTIVE_THEME.terminal_normal()[1];
+        let mut decorated = cell("界");
+        decorated.underline = crate::terminal::TerminalUnderlineSnapshot::Double;
+        decorated.underline_source = crate::terminal::TerminalColor::Rgb(accent);
+        decorated.overline = true;
+        decorated.strikethrough = true;
+        let mut tail = decorated.clone();
+        tail.text = " ".to_owned();
+        tail.spacer_tail = true;
+        let row = Arc::<[CellSnapshot]>::from([decorated, tail]);
+
+        let input = prepare_row(&row, &colors(), &"Menlo".into(), None);
+
+        assert_eq!(
+            input.under_text_decorations,
+            vec![
+                DecorationSpan {
+                    start: 0,
+                    len: 2,
+                    kind: DecorationKind::Underline(
+                        crate::terminal::TerminalUnderlineSnapshot::Double,
+                    ),
+                    color: accent,
+                    blinking: false,
+                },
+                DecorationSpan {
+                    start: 0,
+                    len: 2,
+                    kind: DecorationKind::Overline,
+                    color: colors().foreground,
+                    blinking: false,
+                },
+            ]
+        );
+        assert_eq!(
+            input.over_text_decorations,
+            vec![DecorationSpan {
+                start: 0,
+                len: 2,
+                kind: DecorationKind::Strikethrough,
+                color: colors().foreground,
+                blinking: false,
             }]
         );
     }
