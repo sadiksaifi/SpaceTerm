@@ -123,6 +123,14 @@ accumulate row or column drift. A Pane observes native window metric changes, in
 scale-dependent rendering resources, and sends resize updates through a latest-only mailbox so a
 resize burst cannot create an unbounded control backlog.
 
+### Typed Terminal Key Input
+
+Terminal key input crosses the Terminal Session command lane as one ordered, typed event carrying
+press, repeat, or release action; physical and native identity; logical identity; UTF-8 text and an
+unshifted codepoint; and full and consumed side-aware modifiers. Application Actions resolve before
+the raw terminal handler. Unsupported physical identities produce a typed error and never degrade
+to guessed terminal bytes; terminal protocol encoding remains worker-owned.
+
 ### Workspace-Bound Terminal Creation
 
 `WorkspaceCollection` owns default Workspace naming and passes the exact stored Workspace root into
