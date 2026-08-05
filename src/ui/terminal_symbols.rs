@@ -97,6 +97,58 @@ pub(super) struct SymbolPlan {
     pub(super) primitives: Vec<SymbolPrimitive>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+struct SymbolPlanKey {
+    symbol: TerminalSymbol,
+    width_device: u16,
+    height_device: u16,
+    scale_bits: u32,
+}
+
+#[derive(Default)]
+pub(super) struct SymbolPlanCache {
+    plans: HashMap<SymbolPlanKey, Arc<SymbolPlan>>,
+}
+
+impl SymbolPlanCache {
+    pub(super) fn get(
+        &mut self,
+        symbol: TerminalSymbol,
+        cell_width: f32,
+        line_height: f32,
+        width_cells: u8,
+        scale_factor: f32,
+    ) -> Arc<SymbolPlan> {
+        let scale_factor = valid_scale_factor(scale_factor);
+        let width_device =
+            scaled_dimension(cell_width * f32::from(width_cells.max(1)), scale_factor);
+        let height_device = scaled_dimension(line_height, scale_factor);
+        let key = SymbolPlanKey {
+            symbol,
+            width_device,
+            height_device,
+            scale_bits: scale_factor.to_bits(),
+        };
+        Arc::clone(self.plans.entry(key).or_insert_with(|| {
+            Arc::new(build_symbol_plan_for_device(
+                symbol,
+                width_device,
+                height_device,
+                scale_factor,
+            ))
+        }))
+    }
+
+    pub(super) fn invalidate_scale_dependent(&mut self) {
+        self.plans.clear();
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.plans.len()
+    }
+}
+
 impl SymbolPlan {
     fn touches_left_and_right_edges(&self) -> bool {
         let right = f32::from(self.width_device);
@@ -131,13 +183,18 @@ pub(super) fn build_symbol_plan(
     height: u16,
     scale_factor: f32,
 ) -> SymbolPlan {
-    let scale_factor = if scale_factor.is_finite() && scale_factor > 0.0 {
-        scale_factor
-    } else {
-        1.0
-    };
-    let width_device = ((f32::from(width) * scale_factor).round() as u16).max(1);
-    let height_device = ((f32::from(height) * scale_factor).round() as u16).max(1);
+    let scale_factor = valid_scale_factor(scale_factor);
+    let width_device = scaled_dimension(f32::from(width), scale_factor);
+    let height_device = scaled_dimension(f32::from(height), scale_factor);
+    build_symbol_plan_for_device(symbol, width_device, height_device, scale_factor)
+}
+
+fn build_symbol_plan_for_device(
+    symbol: TerminalSymbol,
+    width_device: u16,
+    height_device: u16,
+    scale_factor: f32,
+) -> SymbolPlan {
     let mut plan = SymbolPlan {
         width_device,
         height_device,
@@ -153,6 +210,23 @@ pub(super) fn build_symbol_plan(
         TerminalSymbol::LegacySextant(index) => add_legacy_sextant(&mut plan, index),
     }
     plan
+}
+
+fn valid_scale_factor(scale_factor: f32) -> f32 {
+    if scale_factor.is_finite() && scale_factor > 0.0 {
+        scale_factor
+    } else {
+        1.0
+    }
+}
+
+fn scaled_dimension(logical: f32, scale_factor: f32) -> u16 {
+    if !logical.is_finite() || logical <= 0.0 {
+        return 1;
+    }
+    (logical * scale_factor)
+        .round()
+        .clamp(1.0, f32::from(u16::MAX)) as u16
 }
 
 fn rect(plan: &mut SymbolPlan, x: u16, y: u16, width: u16, height: u16, alpha: u8) {
@@ -692,6 +766,8 @@ fn box_line_encoding(codepoint: u32) -> Option<u8> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
 
     #[test]
@@ -738,4 +814,27 @@ mod tests {
                 .all(SymbolPrimitive::is_cell_local)
         );
     }
+
+    #[test]
+    fn owner_cache_reuses_exact_geometry_and_releases_it_on_scale_invalidation() {
+        let symbol = terminal_symbol("").unwrap();
+        let mut cache = SymbolPlanCache::default();
+
+        let first = cache.get(symbol, 9.0, 20.0, 1, 2.0);
+        let same = cache.get(symbol, 9.0, 20.0, 1, 2.0);
+        let wide = cache.get(symbol, 9.0, 20.0, 2, 2.0);
+
+        assert!(Arc::ptr_eq(&first, &same));
+        assert!(!Arc::ptr_eq(&first, &wide));
+        assert_eq!(wide.width_device, first.width_device * 2);
+        assert_eq!(cache.len(), 2);
+
+        cache.invalidate_scale_dependent();
+        assert_eq!(cache.len(), 0);
+        assert_eq!(Arc::strong_count(&first), 2);
+        drop(same);
+        assert_eq!(Arc::strong_count(&first), 1);
+    }
 }
+use std::collections::HashMap;
+use std::sync::Arc;
