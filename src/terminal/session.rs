@@ -1,6 +1,6 @@
 use std::fmt;
 use std::io::{ErrorKind, Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver as CommandReceiver, Sender as CommandSender};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::{self, JoinHandle};
@@ -111,6 +111,10 @@ pub(crate) enum SessionEvent {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum SessionFailure {
+    Startup {
+        stage: SessionStartupStage,
+        message: String,
+    },
     Runtime(String),
     PtyRead {
         read_error: String,
@@ -122,9 +126,23 @@ pub(crate) enum SessionFailure {
     },
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SessionStartupStage {
+    Pty,
+    Reader,
+    ReaderThread,
+    Emulator,
+}
+
 impl fmt::Display for SessionFailure {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Startup { stage, message } => {
+                write!(
+                    formatter,
+                    "Terminal Session startup failed during {stage}: {message}"
+                )
+            }
             Self::Runtime(message) => write!(formatter, "Terminal runtime failed: {message}"),
             Self::PtyRead {
                 read_error,
@@ -153,14 +171,28 @@ impl fmt::Display for SessionFailure {
 
 impl std::error::Error for SessionFailure {}
 
+impl fmt::Display for SessionStartupStage {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Pty => formatter.write_str("PTY creation"),
+            Self::Reader => formatter.write_str("PTY reader acquisition"),
+            Self::ReaderThread => formatter.write_str("PTY reader thread creation"),
+            Self::Emulator => formatter.write_str("Terminal Emulator creation"),
+        }
+    }
+}
+
 #[derive(Debug, Error)]
 pub(crate) enum SessionError {
+    #[cfg(test)]
     #[error(transparent)]
     Pty(#[from] PtyError),
     #[error("failed to start the terminal worker thread: {0}")]
     SpawnWorker(#[source] std::io::Error),
+    #[cfg(test)]
     #[error("terminal worker stopped before initialization completed")]
     StartupChannelClosed,
+    #[cfg(test)]
     #[error("terminal emulator initialization failed: {0}")]
     EmulatorStartup(String),
 }
@@ -266,6 +298,54 @@ struct StartedSessionPty {
     terminator: Box<dyn SessionPtyTerminator>,
 }
 
+#[derive(Clone, Default)]
+struct DeferredPtyTerminator {
+    state: Arc<Mutex<DeferredPtyTerminationState>>,
+}
+
+#[derive(Default)]
+struct DeferredPtyTerminationState {
+    requested: bool,
+    terminator: Option<Box<dyn SessionPtyTerminator>>,
+}
+
+impl DeferredPtyTerminator {
+    fn install(&self, terminator: Box<dyn SessionPtyTerminator>) -> std::io::Result<()> {
+        let mut state = self.lock_state();
+        if state.requested {
+            drop(state);
+            terminator.terminate()
+        } else {
+            state.terminator = Some(terminator);
+            Ok(())
+        }
+    }
+
+    fn lock_state(&self) -> std::sync::MutexGuard<'_, DeferredPtyTerminationState> {
+        match self.state.lock() {
+            Ok(state) => state,
+            Err(poisoned) => {
+                eprintln!("deferred PTY termination lock was poisoned; recovering");
+                poisoned.into_inner()
+            }
+        }
+    }
+}
+
+impl SessionPtyTerminator for DeferredPtyTerminator {
+    fn terminate(&self) -> std::io::Result<()> {
+        let terminator = {
+            let mut state = self.lock_state();
+            state.requested = true;
+            state.terminator.take()
+        };
+        match terminator {
+            Some(terminator) => terminator.terminate(),
+            None => Ok(()),
+        }
+    }
+}
+
 impl SessionPty for SpawnedPty {
     fn take_reader(&mut self) -> std::io::Result<Box<dyn Read + Send>> {
         SpawnedPty::take_reader(self)
@@ -302,9 +382,68 @@ impl TerminalSession {
         geometry: TerminalGeometry,
         working_directory: &Path,
     ) -> Result<(Self, async_channel::Receiver<SessionEvent>), SessionError> {
-        Self::start_with(geometry, working_directory, spawn_native_session_pty)
+        Self::start_deferred_with(geometry, working_directory, spawn_native_session_pty)
     }
 
+    fn start_deferred_with(
+        geometry: TerminalGeometry,
+        working_directory: &Path,
+        spawn_pty: impl FnOnce(PtySize, &Path) -> Result<StartedSessionPty, PtyError> + Send + 'static,
+    ) -> Result<(Self, async_channel::Receiver<SessionEvent>), SessionError> {
+        let working_directory = PathBuf::from(working_directory);
+        let (command_tx, command_rx) = mpsc::channel();
+        let reader_transport = ReaderTransport::new(command_tx.clone());
+        let resizes = ResizeMailbox::default();
+        let worker_resizes = resizes.clone();
+        let (event_tx, event_rx) = async_channel::bounded(2);
+        let deferred_terminator = DeferredPtyTerminator::default();
+        let worker_terminator = deferred_terminator.clone();
+        let worker_events = event_tx.clone();
+
+        let worker = thread::Builder::new()
+            .name("spaceterm-terminal".to_owned())
+            .spawn(move || {
+                let StartedSessionPty { pty, terminator } =
+                    match spawn_pty(pty_size(geometry), &working_directory) {
+                        Ok(started) => started,
+                        Err(error) => {
+                            send_session_event(
+                                &worker_events,
+                                SessionEvent::Failed(SessionFailure::Startup {
+                                    stage: SessionStartupStage::Pty,
+                                    message: error.to_string(),
+                                }),
+                            );
+                            return;
+                        }
+                    };
+                if let Err(error) = worker_terminator.install(terminator) {
+                    eprintln!("failed to terminate a PTY closed during startup: {error}");
+                }
+                TerminalWorker::run(
+                    pty,
+                    geometry,
+                    command_rx,
+                    reader_transport,
+                    worker_resizes,
+                    event_tx,
+                    StartupReporter::Events(worker_events),
+                );
+            })
+            .map_err(SessionError::SpawnWorker)?;
+
+        Ok((
+            Self {
+                commands: Some(command_tx),
+                worker: Some(worker),
+                terminator: Some(Box::new(deferred_terminator)),
+                resizes,
+            },
+            event_rx,
+        ))
+    }
+
+    #[cfg(test)]
     fn start_with(
         geometry: TerminalGeometry,
         working_directory: &Path,
@@ -331,7 +470,7 @@ impl TerminalSession {
                     reader_transport,
                     worker_resizes,
                     event_tx,
-                    startup_tx,
+                    StartupReporter::Blocking(startup_tx),
                 )
             })
             .map_err(SessionError::SpawnWorker)?;
@@ -527,6 +666,37 @@ struct TerminalWorker {
     pending_command: Option<Command>,
 }
 
+enum StartupReporter {
+    #[cfg(test)]
+    Blocking(mpsc::SyncSender<Result<(), String>>),
+    Events(async_channel::Sender<SessionEvent>),
+}
+
+impl StartupReporter {
+    fn failed(&self, stage: SessionStartupStage, message: String) {
+        match self {
+            #[cfg(test)]
+            Self::Blocking(startup) => {
+                let _ = startup.send(Err(message));
+            }
+            Self::Events(events) => {
+                send_session_event(
+                    events,
+                    SessionEvent::Failed(SessionFailure::Startup { stage, message }),
+                );
+            }
+        }
+    }
+
+    fn succeeded(&self) -> bool {
+        match self {
+            #[cfg(test)]
+            Self::Blocking(startup) => startup.send(Ok(())).is_ok(),
+            Self::Events(_) => true,
+        }
+    }
+}
+
 impl TerminalWorker {
     fn run(
         mut pty: Box<dyn SessionPty>,
@@ -535,7 +705,7 @@ impl TerminalWorker {
         reader_transport: ReaderTransport,
         resizes: ResizeMailbox,
         events: async_channel::Sender<SessionEvent>,
-        startup: mpsc::SyncSender<Result<(), String>>,
+        startup: StartupReporter,
     ) {
         let ReaderTransport {
             commands: reader_commands,
@@ -545,7 +715,7 @@ impl TerminalWorker {
         let reader = match pty.take_reader() {
             Ok(reader) => reader,
             Err(error) => {
-                let _ = startup.send(Err(error.to_string()));
+                startup.failed(SessionStartupStage::Reader, error.to_string());
                 return;
             }
         };
@@ -553,7 +723,10 @@ impl TerminalWorker {
         let reader_thread = match spawn_reader(reader, reader_events, reader_commands) {
             Ok(thread) => thread,
             Err(error) => {
-                let _ = startup.send(Err(format!("failed to start PTY reader thread: {error}")));
+                startup.failed(
+                    SessionStartupStage::ReaderThread,
+                    format!("failed to start PTY reader thread: {error}"),
+                );
                 return;
             }
         };
@@ -561,7 +734,7 @@ impl TerminalWorker {
         let emulator = match TerminalEmulator::new(initial_geometry) {
             Ok(emulator) => emulator,
             Err(error) => {
-                let _ = startup.send(Err(error.to_string()));
+                startup.failed(SessionStartupStage::Emulator, error.to_string());
                 drop(reader_event_rx);
                 drop(pty);
                 join_reader(reader_thread);
@@ -580,7 +753,7 @@ impl TerminalWorker {
             pending_command: None,
         };
 
-        if startup.send(Ok(())).is_err() {
+        if !startup.succeeded() {
             worker.finish();
             return;
         }
@@ -797,11 +970,7 @@ impl TerminalWorker {
     }
 
     fn send_terminal_event(&self, event: SessionEvent) -> bool {
-        match self.events.try_send(event) {
-            Ok(()) => true,
-            Err(async_channel::TrySendError::Full(event)) => self.events.force_send(event).is_ok(),
-            Err(async_channel::TrySendError::Closed(_)) => false,
-        }
+        send_session_event(&self.events, event)
     }
 
     fn finish(self) {
@@ -887,6 +1056,15 @@ fn classify_reader_stop(
     }
 }
 
+fn send_session_event(events: &async_channel::Sender<SessionEvent>, event: SessionEvent) -> bool {
+    match events.try_send(event) {
+        Ok(()) => true,
+        Err(async_channel::TrySendError::Full(event)) => events.force_send(event).is_ok(),
+        Err(async_channel::TrySendError::Closed(_)) => false,
+    }
+}
+
+#[cfg(test)]
 fn join_worker(worker: JoinHandle<()>) {
     if worker.join().is_err() {
         eprintln!("terminal worker thread panicked");
@@ -1320,6 +1498,10 @@ mod tests {
     #[test]
     fn session_failure_display_should_explain_each_classification() {
         let failures = [
+            SessionFailure::Startup {
+                stage: SessionStartupStage::Pty,
+                message: "open unavailable".to_owned(),
+            },
             SessionFailure::Runtime("write unavailable".to_owned()),
             SessionFailure::PtyRead {
                 read_error: "read unavailable".to_owned(),
@@ -1340,6 +1522,7 @@ mod tests {
         assert_eq!(
             statuses,
             [
+                "Terminal Session startup failed during PTY creation: open unavailable",
                 "Terminal runtime failed: write unavailable",
                 "Shell output failed: read unavailable; shell exited (exit code 7)",
                 "Shell output failed: read unavailable; waiting for the shell also failed: wait unavailable",
@@ -1347,6 +1530,77 @@ mod tests {
             ]
         );
         let _: &dyn std::error::Error = &failures[0];
+    }
+
+    #[test]
+    fn deferred_start_should_return_before_pty_spawn_and_publish_a_typed_failure() {
+        let (spawn_entered, entered) = mpsc::sync_channel(1);
+        let (release_spawn, release) = mpsc::sync_channel(1);
+        let started_at = Instant::now();
+
+        let (mut session, events) = TerminalSession::start_deferred_with(
+            test_geometry(),
+            Path::new("/scripted"),
+            move |size, working_directory| {
+                assert_eq!(size, pty_size(test_geometry()));
+                assert_eq!(working_directory, Path::new("/scripted"));
+                spawn_entered.send(()).unwrap();
+                release.recv().unwrap();
+                Err(PtyError::Open(AnyError::msg("scripted spawn unavailable")))
+            },
+        )
+        .unwrap();
+
+        entered.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert!(
+            started_at.elapsed() < Duration::from_millis(250),
+            "Terminal Session start waited for PTY spawn"
+        );
+        release_spawn.send(()).unwrap();
+        let event = receive_event(&events, "the deferred PTY spawn failure", |event| {
+            matches!(
+                event,
+                SessionEvent::Failed(SessionFailure::Startup {
+                    stage: SessionStartupStage::Pty,
+                    ..
+                })
+            )
+        });
+
+        let SessionEvent::Failed(SessionFailure::Startup { message, .. }) = event else {
+            unreachable!("the event predicate accepts only typed startup failures")
+        };
+        assert!(message.contains("scripted spawn unavailable"));
+        session.shutdown();
+    }
+
+    #[test]
+    fn native_factory_should_report_pty_spawn_failures_through_session_events() {
+        let StartedTerminalSession {
+            handle: session,
+            events,
+        } = NativeTerminalSessionFactory
+            .start(
+                test_geometry(),
+                Path::new("/private/tmp/spaceterm-missing-session-workspace"),
+            )
+            .unwrap();
+
+        let event = receive_event(&events, "the native PTY startup failure", |event| {
+            matches!(
+                event,
+                SessionEvent::Failed(SessionFailure::Startup {
+                    stage: SessionStartupStage::Pty,
+                    ..
+                })
+            )
+        });
+
+        let SessionEvent::Failed(SessionFailure::Startup { message, .. }) = event else {
+            unreachable!("the event predicate accepts only typed PTY startup failures")
+        };
+        assert!(message.contains("Workspace working directory"));
+        drop(session);
     }
 
     #[test]

@@ -88,10 +88,12 @@ manufacturing domain state. Identities are monotonic and are not reused after de
 
 ### Native PTY Owner
 
-`SpawnedPty` exclusively owns the macOS PTY master, reader, writer, and Shell Process. After startup,
-its terminal worker is the only owner that may wait, perform full termination escalation, or reap.
-Terminal Session shutdown uses a cloned one-shot signaller synchronized with worker reaping, so
-close callers request prompt termination without waiting for full process cleanup.
+`SpawnedPty` exclusively owns the macOS PTY master, reader, writer, and Shell Process. PTY
+configuration, Shell Process launch, and Terminal Emulator initialization occur on the terminal
+worker; Terminal Session creation returns after starting that worker, and startup errors arrive as
+typed terminal events. The worker installs a deferred one-shot signaller so a close racing startup
+still requests prompt termination. Once launched, only the worker may wait, perform full
+termination escalation, or reap, so close callers never wait for process cleanup.
 
 ### Bounded PTY Output Transport
 
