@@ -21,6 +21,9 @@ actions!(
     [
         CopySelection,
         PasteClipboard,
+        IncreaseTerminalFontSize,
+        DecreaseTerminalFontSize,
+        ResetTerminalFontSize,
         SplitRight,
         SplitDown,
         FocusPaneLeft,
@@ -77,6 +80,22 @@ pub(crate) fn init(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("cmd-c", CopySelection, Some(TERMINAL_KEY_CONTEXT)),
         KeyBinding::new("cmd-v", PasteClipboard, Some(TERMINAL_KEY_CONTEXT)),
+        KeyBinding::new(
+            "cmd-=",
+            IncreaseTerminalFontSize,
+            Some(TERMINAL_KEY_CONTEXT),
+        ),
+        KeyBinding::new(
+            "cmd-+",
+            IncreaseTerminalFontSize,
+            Some(TERMINAL_KEY_CONTEXT),
+        ),
+        KeyBinding::new(
+            "cmd--",
+            DecreaseTerminalFontSize,
+            Some(TERMINAL_KEY_CONTEXT),
+        ),
+        KeyBinding::new("cmd-0", ResetTerminalFontSize, Some(TERMINAL_KEY_CONTEXT)),
         KeyBinding::new("cmd-d", SplitRight, Some(TERMINAL_KEY_CONTEXT)),
         KeyBinding::new("cmd-shift-d", SplitDown, Some(TERMINAL_KEY_CONTEXT)),
         KeyBinding::new("cmd-shift-h", FocusPaneLeft, Some(TERMINAL_KEY_CONTEXT)),
@@ -121,4 +140,42 @@ pub(crate) fn init(cx: &mut App) {
             Some(TERMINAL_KEY_CONTEXT),
         ),
     ]);
+}
+
+#[cfg(test)]
+mod tests {
+    use gpui::{Action, Keystroke, TestAppContext};
+
+    use super::*;
+
+    #[gpui::test]
+    fn terminal_zoom_shortcuts_should_bind_font_size_actions(cx: &mut TestAppContext) {
+        cx.update(init);
+        let expected = [
+            ("cmd-=", IncreaseTerminalFontSize.name()),
+            ("cmd-+", IncreaseTerminalFontSize.name()),
+            ("cmd--", DecreaseTerminalFontSize.name()),
+            ("cmd-0", ResetTerminalFontSize.name()),
+        ];
+        let actual = cx.update(|cx| {
+            expected
+                .iter()
+                .map(|(shortcut, _)| {
+                    let keystroke = Keystroke::parse(shortcut).unwrap_or_else(|error| {
+                        panic!("invalid test shortcut {shortcut}: {error}")
+                    });
+                    let bindings = cx.all_bindings_for_input(&[keystroke]);
+                    (
+                        *shortcut,
+                        bindings
+                            .last()
+                            .map(|binding| binding.action().name())
+                            .unwrap_or(""),
+                    )
+                })
+                .collect::<Vec<_>>()
+        });
+
+        assert_eq!(actual.as_slice(), expected);
+    }
 }

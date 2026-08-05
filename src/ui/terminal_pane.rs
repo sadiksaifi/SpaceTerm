@@ -13,7 +13,10 @@ use gpui::{
 use super::terminal_element::{
     TerminalGridCache, TerminalGridElement, terminal_grid_content_bounds,
 };
-use super::{CopySelection, PasteClipboard, TERMINAL_KEY_CONTEXT};
+use super::{
+    CopySelection, DecreaseTerminalFontSize, IncreaseTerminalFontSize, PasteClipboard,
+    ResetTerminalFontSize, TERMINAL_KEY_CONTEXT,
+};
 use crate::terminal::{
     GridSize, InputModifiers, KeyCode, KeyInput, PointerButton, PointerInput, PointerPhase,
     ScreenSnapshot, ScrollbarSnapshot, SessionEvent, SurfacePosition, TerminalSessionFactory,
@@ -21,8 +24,11 @@ use crate::terminal::{
 };
 use crate::theme::{ACTIVE_THEME, Color};
 
-const FONT_SIZE: f32 = 14.0;
-const LINE_HEIGHT: f32 = 20.0;
+const DEFAULT_FONT_SIZE: f32 = 14.0;
+const DEFAULT_LINE_HEIGHT: f32 = 20.0;
+const MIN_FONT_SIZE: f32 = 8.0;
+const MAX_FONT_SIZE: f32 = 32.0;
+const FONT_SIZE_STEP: f32 = 1.0;
 const HORIZONTAL_PADDING: f32 = 4.0;
 const VERTICAL_PADDING: f32 = 8.0;
 const MIN_COLS: u16 = 2;
@@ -67,6 +73,8 @@ pub(crate) struct TerminalPane {
     title: SharedString,
     focus_handle: FocusHandle,
     font_family: SharedString,
+    font_size: f32,
+    line_height: f32,
     cell_width: Pixels,
     last_grid_size: Option<GridSize>,
     grid_bounds: Option<Bounds<Pixels>>,
@@ -90,7 +98,7 @@ impl TerminalPane {
     ) -> Self {
         let focus_handle = cx.focus_handle();
         let font_family = terminal_font(cx);
-        let cell_width = measure_cell_width(window, &font_family);
+        let cell_width = measure_cell_width(window, &font_family, DEFAULT_FONT_SIZE);
         let fallback_title: SharedString =
             normalized_pane_title("", &session_factory.fallback_title()).into();
 
@@ -105,6 +113,8 @@ impl TerminalPane {
             fallback_title,
             focus_handle,
             font_family,
+            font_size: DEFAULT_FONT_SIZE,
+            line_height: DEFAULT_LINE_HEIGHT,
             cell_width,
             last_grid_size: None,
             grid_bounds: None,
@@ -133,6 +143,11 @@ impl TerminalPane {
         self.focus_handle.is_focused(window)
     }
 
+    #[cfg(test)]
+    pub(crate) const fn font_size(&self) -> f32 {
+        self.font_size
+    }
+
     pub(crate) fn close(&mut self) {
         self._scrollbar_hide_task.take();
         self._event_task.take();
@@ -140,7 +155,7 @@ impl TerminalPane {
     }
 
     fn update_grid_bounds(&mut self, bounds: Bounds<Pixels>, cx: &mut Context<Self>) {
-        let size = grid_size(bounds, self.cell_width);
+        let size = grid_size(bounds, self.cell_width, self.line_height);
         self.grid_bounds = Some(terminal_grid_content_bounds(
             bounds,
             usize::from(size.cols),
@@ -227,6 +242,46 @@ impl TerminalPane {
             }
             cx.stop_propagation();
         }
+    }
+
+    fn increase_font_size(
+        &mut self,
+        _: &IncreaseTerminalFontSize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.set_font_size(self.font_size + FONT_SIZE_STEP, window, cx);
+    }
+
+    fn decrease_font_size(
+        &mut self,
+        _: &DecreaseTerminalFontSize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.set_font_size(self.font_size - FONT_SIZE_STEP, window, cx);
+    }
+
+    fn reset_font_size(
+        &mut self,
+        _: &ResetTerminalFontSize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.set_font_size(DEFAULT_FONT_SIZE, window, cx);
+    }
+
+    fn set_font_size(&mut self, font_size: f32, window: &mut Window, cx: &mut Context<Self>) {
+        let font_size = font_size.clamp(MIN_FONT_SIZE, MAX_FONT_SIZE);
+        if self.font_size == font_size {
+            return;
+        }
+
+        self.font_size = font_size;
+        self.line_height = line_height_for_font_size(font_size);
+        self.cell_width = measure_cell_width(window, &self.font_family, font_size);
+        self.last_grid_size = None;
+        cx.notify();
     }
 
     fn on_mouse_down(
@@ -325,7 +380,7 @@ impl TerminalPane {
         if self.screen.scrollbar.total_rows > self.screen.scrollbar.visible_rows {
             self.reveal_scrollbar(cx);
         }
-        let lines = f32::from(event.delta.pixel_delta(px(LINE_HEIGHT)).y) / LINE_HEIGHT;
+        let lines = f32::from(event.delta.pixel_delta(px(self.line_height)).y) / self.line_height;
         let steps = accumulate_wheel_steps(&mut self.wheel_remainder, lines);
 
         if steps != 0
@@ -487,6 +542,7 @@ impl TerminalPane {
             self.grid_bounds?,
             position,
             self.cell_width,
+            self.line_height,
             self.last_grid_size?,
             allow_outside,
         )
@@ -514,15 +570,15 @@ impl Render for TerminalPane {
         }
         let scrollbar = self.scrollbar_visible.then(|| {
             self.last_grid_size.and_then(|size| {
-                scrollbar_geometry(scrollbar_state, f32::from(size.rows) * LINE_HEIGHT)
+                scrollbar_geometry(scrollbar_state, f32::from(size.rows) * self.line_height)
             })
         });
         let scrollbar = scrollbar.flatten();
         let terminal_grid = TerminalGridElement::new(
             &self.screen,
             &self.font_family,
-            px(FONT_SIZE),
-            px(LINE_HEIGHT),
+            px(self.font_size),
+            px(self.line_height),
             self.cell_width,
             &mut self.render_cache,
         );
@@ -546,6 +602,9 @@ impl Render for TerminalPane {
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(Self::copy_selection))
             .on_action(cx.listener(Self::paste_clipboard))
+            .on_action(cx.listener(Self::increase_font_size))
+            .on_action(cx.listener(Self::decrease_font_size))
+            .on_action(cx.listener(Self::reset_font_size))
             .on_key_down(cx.listener(Self::on_key_down))
             .on_any_mouse_down(cx.listener(Self::on_mouse_down))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
@@ -696,7 +755,7 @@ fn terminal_font(cx: &App) -> SharedString {
     .into()
 }
 
-fn measure_cell_width(window: &mut Window, family: &SharedString) -> Pixels {
+fn measure_cell_width(window: &mut Window, family: &SharedString, font_size: f32) -> Pixels {
     let run = TextRun {
         len: 1,
         font: font(family.clone()),
@@ -707,19 +766,23 @@ fn measure_cell_width(window: &mut Window, family: &SharedString) -> Pixels {
     };
     window
         .text_system()
-        .shape_line("M".into(), px(FONT_SIZE), &[run], None)
+        .shape_line("M".into(), px(font_size), &[run], None)
         .width
 }
 
-fn grid_size(bounds: Bounds<Pixels>, cell_width: Pixels) -> GridSize {
+fn line_height_for_font_size(font_size: f32) -> f32 {
+    font_size * DEFAULT_LINE_HEIGHT / DEFAULT_FONT_SIZE
+}
+
+fn grid_size(bounds: Bounds<Pixels>, cell_width: Pixels, line_height: f32) -> GridSize {
     let width = f32::from(bounds.size.width).max(f32::from(cell_width));
-    let height = f32::from(bounds.size.height).max(LINE_HEIGHT);
+    let height = f32::from(bounds.size.height).max(line_height);
 
     GridSize {
         cols: ((width / f32::from(cell_width)).floor() as u16).max(MIN_COLS),
-        rows: ((height / LINE_HEIGHT).floor() as u16).max(MIN_ROWS),
+        rows: ((height / line_height).floor() as u16).max(MIN_ROWS),
         cell_width_px: f32::from(cell_width).round().clamp(1.0, u16::MAX as f32) as u16,
-        cell_height_px: LINE_HEIGHT as u16,
+        cell_height_px: line_height.round().clamp(1.0, u16::MAX as f32) as u16,
     }
 }
 
@@ -824,6 +887,7 @@ fn terminal_surface_position(
     bounds: Bounds<Pixels>,
     position: gpui::Point<Pixels>,
     rendered_cell_width: Pixels,
+    rendered_line_height: f32,
     grid_size: GridSize,
     allow_outside: bool,
 ) -> Option<SurfacePosition> {
@@ -835,7 +899,7 @@ fn terminal_surface_position(
     let local_y = f32::from(position.y - bounds.origin.y);
     Some(SurfacePosition {
         x: local_x * f32::from(grid_size.cell_width_px) / f32::from(rendered_cell_width),
-        y: local_y * f32::from(grid_size.cell_height_px) / LINE_HEIGHT,
+        y: local_y * f32::from(grid_size.cell_height_px) / rendered_line_height,
     })
 }
 
@@ -898,9 +962,78 @@ mod tests {
     use std::cell::Cell;
     use std::rc::Rc;
 
-    use gpui::{Keystroke, Modifiers};
+    use gpui::{Entity, Keystroke, Modifiers, TestAppContext, VisualTestContext};
 
     use super::*;
+    use crate::terminal::{SessionError, StartedTerminalSession};
+
+    struct UnavailableSessionFactory;
+
+    impl TerminalSessionFactory for UnavailableSessionFactory {
+        fn start(
+            &self,
+            _size: GridSize,
+            _working_directory: &std::path::Path,
+        ) -> Result<StartedTerminalSession, SessionError> {
+            Err(SessionError::EmulatorStartup(
+                "terminal session unavailable in UI test".to_owned(),
+            ))
+        }
+    }
+
+    fn terminal_pane(cx: &mut TestAppContext) -> (Entity<TerminalPane>, &mut VisualTestContext) {
+        cx.update(crate::ui::init);
+        let session_factory: Rc<dyn TerminalSessionFactory> = Rc::new(UnavailableSessionFactory);
+        let (pane, cx) = cx.add_window_view(|window, cx| {
+            TerminalPane::new(
+                session_factory,
+                PathBuf::from("/tmp/spaceterm-terminal-pane-test"),
+                window,
+                cx,
+            )
+        });
+        cx.update(|window, cx| {
+            pane.update(cx, |pane, _cx| pane.focus(window));
+        });
+        cx.run_until_parked();
+        (pane, cx)
+    }
+
+    #[gpui::test]
+    fn command_equals_should_increase_terminal_font_size(cx: &mut TestAppContext) {
+        let (pane, cx) = terminal_pane(cx);
+        let before = pane.read_with(cx, |pane, _cx| pane.font_size());
+
+        cx.simulate_keystrokes("cmd-=");
+        let after = pane.read_with(cx, |pane, _cx| pane.font_size());
+
+        assert_eq!((before, after), (14.0, 15.0));
+    }
+
+    #[gpui::test]
+    fn command_minus_should_decrease_terminal_font_size(cx: &mut TestAppContext) {
+        let (pane, cx) = terminal_pane(cx);
+        let before = pane.read_with(cx, |pane, _cx| pane.font_size());
+
+        cx.simulate_keystrokes("cmd--");
+        let after = pane.read_with(cx, |pane, _cx| pane.font_size());
+
+        assert_eq!((before, after), (14.0, 13.0));
+    }
+
+    #[gpui::test]
+    fn command_zero_should_reset_terminal_font_size(cx: &mut TestAppContext) {
+        let (pane, cx) = terminal_pane(cx);
+        cx.update(|window, cx| {
+            pane.update(cx, |pane, cx| pane.set_font_size(20.0, window, cx));
+        });
+        let before = pane.read_with(cx, |pane, _cx| pane.font_size());
+
+        cx.simulate_keystrokes("cmd-0");
+        let after = pane.read_with(cx, |pane, _cx| pane.font_size());
+
+        assert_eq!((before, after), (20.0, DEFAULT_FONT_SIZE));
+    }
 
     fn event(key: &str, key_char: Option<&str>, modifiers: Modifiers) -> KeyDownEvent {
         KeyDownEvent {
@@ -1029,20 +1162,24 @@ mod tests {
             bounds,
             gpui::point(px(47.5), px(30.0)),
             px(7.5),
+            20.0,
             grid,
             false,
         )
         .unwrap();
 
         assert_eq!(position, SurfacePosition { x: 40.0, y: 10.0 });
-        assert!(terminal_surface_position(
-            bounds,
-            gpui::point(px(9.0), px(20.0)),
-            px(7.5),
-            grid,
-            false,
-        )
-        .is_none());
+        assert!(
+            terminal_surface_position(
+                bounds,
+                gpui::point(px(9.0), px(20.0)),
+                px(7.5),
+                20.0,
+                grid,
+                false,
+            )
+            .is_none()
+        );
     }
 
     #[test]
