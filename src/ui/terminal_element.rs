@@ -8,6 +8,7 @@ use gpui::{
 
 use crate::terminal::{
     CellSnapshot, CursorPositionSnapshot, CursorSnapshot, RowSnapshot, ScreenSnapshot,
+    TerminalColor, TerminalColorsSnapshot,
 };
 use crate::theme::{ACTIVE_THEME, Color};
 
@@ -15,7 +16,7 @@ pub(crate) struct TerminalGridCache {
     source_rows: Vec<RowSnapshot>,
     prepared_rows: Arc<[Arc<RowPaintInput>]>,
     font_family: Option<SharedString>,
-    background: Option<Color>,
+    colors: Option<TerminalColorsSnapshot>,
 }
 
 impl TerminalGridCache {
@@ -24,7 +25,7 @@ impl TerminalGridCache {
             source_rows: Vec::new(),
             prepared_rows: Arc::from([]),
             font_family: None,
-            background: None,
+            colors: None,
         }
     }
 
@@ -32,17 +33,17 @@ impl TerminalGridCache {
         self.source_rows.clear();
         self.prepared_rows = Arc::from([]);
         self.font_family = None;
-        self.background = None;
+        self.colors = None;
     }
 
     fn prepare(
         &mut self,
         rows: &Arc<[RowSnapshot]>,
-        background: Color,
+        colors: &TerminalColorsSnapshot,
         font_family: &SharedString,
     ) -> Arc<[Arc<RowPaintInput>]> {
         let style_changed =
-            self.font_family.as_ref() != Some(font_family) || self.background != Some(background);
+            self.font_family.as_ref() != Some(font_family) || self.colors.as_ref() != Some(colors);
         let rows_unchanged = !style_changed
             && rows.len() == self.source_rows.len()
             && rows
@@ -65,7 +66,7 @@ impl TerminalGridCache {
                 {
                     Arc::clone(&self.prepared_rows[index])
                 } else {
-                    Arc::new(prepare_row(row, background, font_family))
+                    Arc::new(prepare_row(row, colors, font_family))
                 }
             })
             .collect::<Vec<_>>();
@@ -73,7 +74,7 @@ impl TerminalGridCache {
         self.source_rows = rows.iter().cloned().collect();
         self.prepared_rows = Arc::from(prepared_rows);
         self.font_family = Some(font_family.clone());
-        self.background = Some(background);
+        self.colors = Some(colors.clone());
         Arc::clone(&self.prepared_rows)
     }
 }
@@ -109,7 +110,7 @@ impl TerminalGridElement {
         });
         Self {
             background: screen.background,
-            rows: cache.prepare(&screen.rows, screen.background, font_family),
+            rows: cache.prepare(&screen.rows, &screen.colors, font_family),
             columns: screen.rows.first().map_or(0, |row| row.len()),
             font_size,
             line_height,
@@ -340,7 +341,12 @@ impl FragmentBuilder {
         }
     }
 
-    fn push(&mut self, cell: &CellSnapshot, font_family: &SharedString) {
+    fn push(
+        &mut self,
+        cell: &CellSnapshot,
+        colors: &TerminalColorsSnapshot,
+        font_family: &SharedString,
+    ) {
         let start = self.text.len();
         self.text.push_str(&cell.text);
         let len = self.text.len() - start;
@@ -348,7 +354,7 @@ impl FragmentBuilder {
             return;
         }
 
-        let (foreground, _) = effective_colors(cell);
+        let (foreground, _) = effective_colors(cell, colors);
         let mut cell_font = font(font_family.clone());
         cell_font.features = FontFeatures::disable_ligatures();
         if cell.bold {
@@ -398,7 +404,7 @@ struct BackgroundSpan {
 
 fn prepare_row(
     row: &RowSnapshot,
-    default_background: Color,
+    colors: &TerminalColorsSnapshot,
     font_family: &SharedString,
 ) -> RowPaintInput {
     let mut fragments = Vec::new();
@@ -407,8 +413,8 @@ fn prepare_row(
     let mut selections: Vec<BackgroundSpan> = Vec::new();
 
     for (column, cell) in row.iter().enumerate() {
-        let (_, background) = effective_colors(cell);
-        if background != default_background {
+        let (_, background) = effective_colors(cell, colors);
+        if background != colors.effective_background() {
             if let Some(previous) = backgrounds.last_mut()
                 && previous.color == background
                 && previous.start + previous.len == column
@@ -452,12 +458,12 @@ fn prepare_row(
                 fragments.push(fragment.finish(true));
             }
             let mut fragment = FragmentBuilder::new(column);
-            fragment.push(cell, font_family);
+            fragment.push(cell, colors, font_family);
             fragments.push(fragment.finish(false));
         } else {
             regular_fragment
                 .get_or_insert_with(|| FragmentBuilder::new(column))
-                .push(cell, font_family);
+                .push(cell, colors, font_family);
         }
     }
 
@@ -472,8 +478,26 @@ fn prepare_row(
     }
 }
 
-fn effective_colors(cell: &CellSnapshot) -> (Color, Color) {
-    (cell.foreground, cell.background)
+fn effective_colors(cell: &CellSnapshot, colors: &TerminalColorsSnapshot) -> (Color, Color) {
+    let foreground_source = match (cell.foreground_source, cell.bold) {
+        (TerminalColor::Palette(index @ 0..=7), true) => TerminalColor::Palette(index + 8),
+        (source, _) => source,
+    };
+    let resolve = |source| match source {
+        TerminalColor::Default => colors.foreground,
+        TerminalColor::Palette(index) => colors.palette[usize::from(index)],
+        TerminalColor::Rgb(color) => color,
+    };
+    let mut foreground = resolve(foreground_source);
+    let mut background = match cell.background_source {
+        TerminalColor::Default => colors.background,
+        TerminalColor::Palette(index) => colors.palette[usize::from(index)],
+        TerminalColor::Rgb(color) => color,
+    };
+    if cell.inverse ^ colors.reversed {
+        std::mem::swap(&mut foreground, &mut background);
+    }
+    (foreground, background)
 }
 
 fn gpui_color(color: Color) -> gpui::Rgba {
@@ -484,18 +508,73 @@ fn gpui_color(color: Color) -> gpui::Rgba {
 mod tests {
     use super::*;
 
+    fn colors() -> crate::terminal::TerminalColorsSnapshot {
+        let mut palette = [Color::rgb(0); 256];
+        palette[1] = Color::rgb(0x11_11_11);
+        palette[9] = Color::rgb(0x99_99_99);
+        palette[200] = Color::rgb(0x20_02_00);
+        crate::terminal::TerminalColorsSnapshot {
+            foreground: Color::rgb(0xaa_aa_aa),
+            background: Color::rgb(0x0b_0b_0b),
+            palette: Arc::new(palette),
+            reversed: false,
+        }
+    }
+
     fn cell(text: &str) -> CellSnapshot {
         CellSnapshot {
             text: text.to_owned(),
             foreground_source: crate::terminal::TerminalColor::Default,
             background_source: crate::terminal::TerminalColor::Default,
-            foreground: ACTIVE_THEME.terminal_foreground,
-            background: ACTIVE_THEME.terminal_background,
+            inverse: false,
             bold: false,
             italic: false,
             selected: false,
             spacer_tail: false,
         }
+    }
+
+    #[test]
+    fn effective_colors_resolve_sources_bold_and_reverse_precedence() {
+        let colors = colors();
+        let mut subject = cell("x");
+
+        assert_eq!(
+            effective_colors(&subject, &colors),
+            (colors.foreground, colors.background)
+        );
+
+        subject.foreground_source = crate::terminal::TerminalColor::Palette(1);
+        subject.background_source = crate::terminal::TerminalColor::Palette(200);
+        assert_eq!(
+            effective_colors(&subject, &colors),
+            (colors.palette[1], colors.palette[200])
+        );
+
+        subject.bold = true;
+        assert_eq!(
+            effective_colors(&subject, &colors),
+            (colors.palette[9], colors.palette[200])
+        );
+
+        subject.foreground_source = crate::terminal::TerminalColor::Rgb(Color::rgb(0x12_34_56));
+        assert_eq!(
+            effective_colors(&subject, &colors).0,
+            Color::rgb(0x12_34_56)
+        );
+
+        subject.inverse = true;
+        assert_eq!(
+            effective_colors(&subject, &colors),
+            (colors.palette[200], Color::rgb(0x12_34_56))
+        );
+
+        let mut reversed = colors.clone();
+        reversed.reversed = true;
+        assert_eq!(
+            effective_colors(&subject, &reversed),
+            (Color::rgb(0x12_34_56), colors.palette[200])
+        );
     }
 
     #[test]
@@ -516,7 +595,7 @@ mod tests {
     #[test]
     fn text_runs_cover_utf8_bytes_and_coalesce_matching_styles() {
         let row = Arc::<[CellSnapshot]>::from([cell("a"), cell("é"), cell("b")]);
-        let input = prepare_row(&row, ACTIVE_THEME.terminal_background, &"Menlo".into());
+        let input = prepare_row(&row, &colors(), &"Menlo".into());
 
         assert_eq!(input.fragments.len(), 1);
         assert_eq!(input.fragments[0].text.as_ref(), "aéb");
@@ -535,12 +614,12 @@ mod tests {
     fn matching_cell_backgrounds_coalesce() {
         let accent = ACTIVE_THEME.terminal_normal()[1];
         let mut first = cell("a");
-        first.background = accent;
+        first.background_source = crate::terminal::TerminalColor::Rgb(accent);
         let mut second = cell("b");
-        second.background = accent;
+        second.background_source = crate::terminal::TerminalColor::Rgb(accent);
         let row = Arc::<[CellSnapshot]>::from([first, second, cell("c")]);
 
-        let input = prepare_row(&row, ACTIVE_THEME.terminal_background, &"Menlo".into());
+        let input = prepare_row(&row, &colors(), &"Menlo".into());
 
         assert_eq!(
             input.backgrounds,
@@ -560,7 +639,7 @@ mod tests {
         second.selected = true;
         let row = Arc::<[CellSnapshot]>::from([first, second, cell("c")]);
 
-        let input = prepare_row(&row, ACTIVE_THEME.terminal_background, &"Menlo".into());
+        let input = prepare_row(&row, &colors(), &"Menlo".into());
 
         assert_eq!(
             input.selections,
@@ -579,7 +658,7 @@ mod tests {
         let row =
             Arc::<[CellSnapshot]>::from([cell("界"), tail, cell("x"), cell("e\u{301}"), cell("y")]);
 
-        let input = prepare_row(&row, ACTIVE_THEME.terminal_background, &"Menlo".into());
+        let input = prepare_row(&row, &colors(), &"Menlo".into());
 
         assert_eq!(input.fragments.len(), 4);
         assert_eq!(input.fragments[0].start, 0);
@@ -599,18 +678,29 @@ mod tests {
         let second_row = Arc::<[CellSnapshot]>::from([cell("b")]);
         let rows = Arc::<[RowSnapshot]>::from([Arc::clone(&first_row), Arc::clone(&second_row)]);
         let mut cache = TerminalGridCache::new();
-        let first = cache.prepare(&rows, ACTIVE_THEME.terminal_background, &"Menlo".into());
+        let first = cache.prepare(&rows, &colors(), &"Menlo".into());
 
         let changed_row = Arc::<[CellSnapshot]>::from([cell("c")]);
         let changed_rows = Arc::<[RowSnapshot]>::from([first_row, changed_row]);
-        let second = cache.prepare(
-            &changed_rows,
-            ACTIVE_THEME.terminal_background,
-            &"Menlo".into(),
-        );
+        let second = cache.prepare(&changed_rows, &colors(), &"Menlo".into());
 
         assert!(Arc::ptr_eq(&first[0], &second[0]));
         assert!(!Arc::ptr_eq(&first[1], &second[1]));
+    }
+
+    #[test]
+    fn render_cache_invalidates_rows_when_color_semantics_change() {
+        let row = Arc::<[CellSnapshot]>::from([cell("a")]);
+        let rows = Arc::<[RowSnapshot]>::from([row]);
+        let mut cache = TerminalGridCache::new();
+        let first_colors = colors();
+        let first = cache.prepare(&rows, &first_colors, &"Menlo".into());
+
+        let mut changed_colors = first_colors.clone();
+        Arc::make_mut(&mut changed_colors.palette)[1] = Color::rgb(0xff_00_00);
+        let second = cache.prepare(&rows, &changed_colors, &"Menlo".into());
+
+        assert!(!Arc::ptr_eq(&first[0], &second[0]));
     }
 
     #[test]
@@ -618,10 +708,10 @@ mod tests {
         let row = Arc::<[CellSnapshot]>::from([cell("a")]);
         let rows = Arc::<[RowSnapshot]>::from([row]);
         let mut cache = TerminalGridCache::new();
-        let first = cache.prepare(&rows, ACTIVE_THEME.terminal_background, &"Menlo".into());
+        let first = cache.prepare(&rows, &colors(), &"Menlo".into());
 
         cache.invalidate_scale_dependent();
-        let second = cache.prepare(&rows, ACTIVE_THEME.terminal_background, &"Menlo".into());
+        let second = cache.prepare(&rows, &colors(), &"Menlo".into());
 
         assert!(!Arc::ptr_eq(&first[0], &second[0]));
     }

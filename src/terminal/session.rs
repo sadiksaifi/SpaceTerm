@@ -2321,7 +2321,7 @@ mod tests {
                 Ok(SessionEvent::Screen(screen)) => {
                     saw_red_x = screen.rows.iter().flat_map(|row| row.iter()).any(|cell| {
                         cell.text == "X"
-                            && cell.foreground == crate::theme::ACTIVE_THEME.terminal_normal()[1]
+                            && cell.foreground_source == crate::terminal::TerminalColor::Palette(1)
                     });
                 }
                 Ok(SessionEvent::Failed(failure)) => panic!("terminal session failed: {failure}"),

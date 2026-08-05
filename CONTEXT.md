@@ -114,6 +114,16 @@ viewport, active-screen, size, and precise damage independently of cell content,
 worker boundary through a bounded latest-screen channel. GPUI renders only these immutable values
 and never borrows Terminal Emulator state.
 
+### Semantic Terminal Colors
+
+Terminal Presentation snapshots preserve default, palette-indexed, and RGB color sources instead
+of flattening them into display colors. Each snapshot also owns the active defaults, complete
+palette, and terminal-wide reverse state needed to resolve those sources immutably. GPUI applies
+bold-as-bright only to normal ANSI foreground indices, then composes per-cell inverse with
+terminal-wide reverse. Selection and Cursor colors remain separate presentation inputs, and a
+color-state change invalidates prepared paint rows without changing unchanged snapshot row
+identity.
+
 ### Unified Terminal Geometry
 
 `TerminalGeometry` is the sole conversion contract between GPUI logical viewport and cell metrics,

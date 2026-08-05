@@ -12,7 +12,7 @@ use libghostty_vt::mouse::{
 };
 use libghostty_vt::paste;
 use libghostty_vt::render::{CellIterator, CursorVisualStyle, Dirty, RowIterator};
-use libghostty_vt::screen::{CellWide, Screen};
+use libghostty_vt::screen::{CellContentTag, CellWide, Screen};
 use libghostty_vt::selection::FormatOptions;
 use libghostty_vt::selection::gesture::{
     DragEvent, Geometry as SelectionGeometry, Gesture, PressEvent, ReleaseEvent,
@@ -44,8 +44,7 @@ pub(crate) struct CellSnapshot {
     pub(crate) text: String,
     pub(crate) foreground_source: TerminalColor,
     pub(crate) background_source: TerminalColor,
-    pub(crate) foreground: Color,
-    pub(crate) background: Color,
+    pub(crate) inverse: bool,
     pub(crate) bold: bool,
     pub(crate) italic: bool,
     pub(crate) selected: bool,
@@ -66,6 +65,36 @@ impl From<StyleColor> for TerminalColor {
             StyleColor::None => Self::Default,
             StyleColor::Palette(PaletteIndex(index)) => Self::Palette(index),
             StyleColor::Rgb(color) => Self::Rgb(color.into()),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct TerminalColorsSnapshot {
+    pub(crate) foreground: Color,
+    pub(crate) background: Color,
+    pub(crate) palette: Arc<[Color; 256]>,
+    pub(crate) reversed: bool,
+}
+
+impl TerminalColorsSnapshot {
+    fn themed() -> Self {
+        let mut palette = [ACTIVE_THEME.terminal_foreground; 256];
+        palette[..8].copy_from_slice(&ACTIVE_THEME.terminal_normal());
+        palette[8..16].copy_from_slice(&ACTIVE_THEME.terminal_bright());
+        Self {
+            foreground: ACTIVE_THEME.terminal_foreground,
+            background: ACTIVE_THEME.terminal_background,
+            palette: Arc::new(palette),
+            reversed: false,
+        }
+    }
+
+    pub(crate) fn effective_background(&self) -> Color {
+        if self.reversed {
+            self.foreground
+        } else {
+            self.background
         }
     }
 }
@@ -207,6 +236,7 @@ pub(crate) struct ScrollbarSnapshot {
 pub(crate) struct ScreenSnapshot {
     pub(crate) rows: Arc<[RowSnapshot]>,
     pub(crate) background: Color,
+    pub(crate) colors: TerminalColorsSnapshot,
     pub(crate) size: ScreenSizeSnapshot,
     pub(crate) viewport: ViewportSnapshot,
     pub(crate) scrollbar: ScrollbarSnapshot,
@@ -220,6 +250,7 @@ impl PartialEq for ScreenSnapshot {
     fn eq(&self, other: &Self) -> bool {
         self.rows == other.rows
             && self.background == other.background
+            && self.colors == other.colors
             && self.size == other.size
             && self.viewport == other.viewport
             && self.scrollbar == other.scrollbar
@@ -237,6 +268,7 @@ impl ScreenSnapshot {
         Arc::new(Self {
             rows: Arc::from([]),
             background: ACTIVE_THEME.terminal_background,
+            colors: TerminalColorsSnapshot::themed(),
             size: ScreenSizeSnapshot::default(),
             viewport: ViewportSnapshot::default(),
             scrollbar: ScrollbarSnapshot::default(),
@@ -269,6 +301,7 @@ impl ScreenSnapshot {
         Self {
             rows: Arc::from([]),
             background: ACTIVE_THEME.terminal_background,
+            colors: TerminalColorsSnapshot::themed(),
             size: ScreenSizeSnapshot::default(),
             viewport: ViewportSnapshot::default(),
             scrollbar: ScrollbarSnapshot::default(),
@@ -299,8 +332,7 @@ pub(crate) struct TerminalEmulator {
     title: Arc<str>,
     row_cache: Vec<RowSnapshot>,
     cached_cols: u16,
-    cached_foreground: Option<Color>,
-    cached_background: Option<Color>,
+    cached_colors: Option<TerminalColorsSnapshot>,
     cached_cursor: Option<CursorSnapshot>,
     cached_scrollbar: Option<ScrollbarSnapshot>,
     cached_active_screen: Option<ActiveScreenSnapshot>,
@@ -411,8 +443,7 @@ impl TerminalEmulator {
             title: Arc::from(""),
             row_cache: Vec::new(),
             cached_cols: 0,
-            cached_foreground: None,
-            cached_background: None,
+            cached_colors: None,
             cached_cursor: None,
             cached_scrollbar: None,
             cached_active_screen: None,
@@ -933,15 +964,18 @@ impl TerminalEmulator {
         let size = ScreenSizeSnapshot { cols, rows };
         let active_screen: ActiveScreenSnapshot = self.terminal.active_screen()?.into();
 
-        let default_foreground: Color = colors.foreground.into();
-        let default_background: Color = colors.background.into();
+        let terminal_colors = TerminalColorsSnapshot {
+            foreground: colors.foreground.into(),
+            background: colors.background.into(),
+            palette: Arc::new(colors.palette.map(Color::from)),
+            reversed: self.terminal.mode(Mode::REVERSE_COLORS)?,
+        };
         let rebuild_all = matches!(dirty, Dirty::Full)
             || self.row_cache.len() != usize::from(rows)
             || self.cached_cols != cols
-            || self.cached_foreground != Some(default_foreground)
-            || self.cached_background != Some(default_background);
+            || self.cached_colors.as_ref() != Some(&terminal_colors);
         let previous_scrollbar = self.cached_scrollbar;
-        let first_snapshot = self.cached_foreground.is_none();
+        let first_snapshot = self.cached_colors.is_none();
         let mut damage = if first_snapshot {
             SnapshotDamage::initial()
         } else {
@@ -985,20 +1019,16 @@ impl TerminalEmulator {
 
                     while let Some(cell) = cell_iteration.next() {
                         let style = cell.style()?;
-                        let mut foreground = cell
-                            .fg_color()?
-                            .map(Color::from)
-                            .unwrap_or(default_foreground);
-                        let mut background = cell
-                            .bg_color()?
-                            .map(Color::from)
-                            .unwrap_or(default_background);
-
-                        if style.inverse {
-                            mem::swap(&mut foreground, &mut background);
-                        }
-
                         let raw_cell = cell.raw_cell()?;
+                        let background_source = match raw_cell.content_tag()? {
+                            CellContentTag::BgColorPalette => {
+                                TerminalColor::Palette(raw_cell.bg_color_palette()?.0)
+                            }
+                            CellContentTag::BgColorRgb => {
+                                TerminalColor::Rgb(raw_cell.bg_color_rgb()?.into())
+                            }
+                            _ => style.bg_color.into(),
+                        };
                         let spacer_tail = matches!(raw_cell.wide()?, CellWide::SpacerTail);
                         let text = if style.invisible || spacer_tail {
                             " ".to_owned()
@@ -1014,9 +1044,8 @@ impl TerminalEmulator {
                         rendered_cells.push(CellSnapshot {
                             text,
                             foreground_source: style.fg_color.into(),
-                            background_source: style.bg_color.into(),
-                            foreground,
-                            background,
+                            background_source,
+                            inverse: style.inverse,
                             bold: style.bold,
                             italic: style.italic,
                             selected: selection.is_some_and(|range| {
@@ -1063,15 +1092,15 @@ impl TerminalEmulator {
 
         self.row_cache = rendered_rows;
         self.cached_cols = cols;
-        self.cached_foreground = Some(default_foreground);
-        self.cached_background = Some(default_background);
+        self.cached_colors = Some(terminal_colors.clone());
         self.cached_cursor = Some(cursor);
         self.cached_scrollbar = Some(scrollbar);
         self.cached_active_screen = Some(active_screen);
 
         Ok(Some(Arc::new(ScreenSnapshot {
             rows: Arc::from(self.row_cache.clone()),
-            background: default_background,
+            background: terminal_colors.effective_background(),
+            colors: terminal_colors,
             size,
             viewport,
             scrollbar,
@@ -1338,8 +1367,8 @@ mod tests {
         assert!(second_row.starts_with("red"));
         assert!(!first_row.contains('\x1b'));
         assert_eq!(
-            snapshot.rows[1][0].foreground,
-            ACTIVE_THEME.terminal_normal()[1]
+            snapshot.rows[1][0].foreground_source,
+            TerminalColor::Palette(1)
         );
     }
 
@@ -1384,6 +1413,40 @@ mod tests {
                 TerminalColor::Palette(200),
                 TerminalColor::Rgb(Color::from_rgb_components(4, 5, 6)),
             ]
+        );
+    }
+
+    #[test]
+    fn snapshots_preserve_inverse_and_terminal_reverse_semantics() {
+        let mut emulator = emulator(4, 1);
+        emulator.feed(b"\x1b[7mx\x1b[27m\x1b[?5h");
+
+        let snapshot = emulator.snapshot().unwrap().unwrap();
+
+        assert!(snapshot.rows[0][0].inverse);
+        assert!(snapshot.colors.reversed);
+        assert_eq!(snapshot.background, snapshot.colors.foreground);
+        assert_eq!(
+            snapshot.colors.palette[1],
+            ACTIVE_THEME.terminal_normal()[1]
+        );
+        assert_eq!(
+            snapshot.colors.palette[9],
+            ACTIVE_THEME.terminal_bright()[1]
+        );
+    }
+
+    #[test]
+    fn erased_cells_preserve_explicit_background_sources() {
+        let mut emulator = emulator(4, 1);
+        emulator.feed(b"\x1b[41m\x1b[2K");
+
+        let snapshot = emulator.snapshot().unwrap().unwrap();
+
+        assert!(
+            snapshot.rows[0]
+                .iter()
+                .all(|cell| cell.background_source == TerminalColor::Palette(1))
         );
     }
 
