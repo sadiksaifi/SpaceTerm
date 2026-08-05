@@ -154,7 +154,7 @@ impl From<CursorVisualStyle> for CursorShapeSnapshot {
 pub(crate) struct CursorPositionSnapshot {
     pub(crate) column: u16,
     pub(crate) row: u16,
-    pub(crate) at_wide_tail: bool,
+    pub(crate) width_cells: u8,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -165,6 +165,7 @@ pub(crate) struct CursorSnapshot {
     pub(crate) password_input: bool,
     pub(crate) shape: CursorShapeSnapshot,
     pub(crate) color: Color,
+    pub(crate) text_color: Color,
 }
 
 impl Default for CursorSnapshot {
@@ -176,7 +177,62 @@ impl Default for CursorSnapshot {
             password_input: false,
             shape: CursorShapeSnapshot::default(),
             color: ACTIVE_THEME.terminal_foreground,
+            text_color: ACTIVE_THEME.terminal_background,
         }
+    }
+}
+
+fn normalize_cursor_position(
+    column: u16,
+    row: u16,
+    at_wide_tail: bool,
+    rows: &[RowSnapshot],
+) -> CursorPositionSnapshot {
+    let column = if at_wide_tail {
+        column.saturating_sub(1)
+    } else {
+        column
+    };
+    let width_cells = rows
+        .get(usize::from(row))
+        .and_then(|row| row.get(usize::from(column).saturating_add(1)))
+        .is_some_and(|cell| cell.spacer_tail)
+        .then_some(2)
+        .unwrap_or(1);
+    CursorPositionSnapshot {
+        column,
+        row,
+        width_cells,
+    }
+}
+
+fn cursor_damage(
+    previous: Option<&CursorSnapshot>,
+    current: &CursorSnapshot,
+) -> ContentDamageSnapshot {
+    if previous == Some(current) {
+        return ContentDamageSnapshot::Clean;
+    }
+
+    let mut rows = previous
+        .filter(|cursor| cursor.visible)
+        .and_then(|cursor| cursor.position)
+        .map(|position| position.row)
+        .into_iter()
+        .chain(
+            current
+                .visible
+                .then_some(current.position)
+                .flatten()
+                .map(|position| position.row),
+        )
+        .collect::<Vec<_>>();
+    rows.sort_unstable();
+    rows.dedup();
+    if rows.is_empty() {
+        ContentDamageSnapshot::Clean
+    } else {
+        ContentDamageSnapshot::Rows(Arc::from(rows))
     }
 }
 
@@ -191,7 +247,7 @@ pub(crate) enum ContentDamageSnapshot {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(crate) struct SnapshotDamage {
     pub(crate) content: ContentDamageSnapshot,
-    pub(crate) cursor: bool,
+    pub(crate) cursor: ContentDamageSnapshot,
     pub(crate) title: bool,
     pub(crate) scrollbar: bool,
     pub(crate) viewport: bool,
@@ -203,7 +259,7 @@ impl SnapshotDamage {
     fn initial() -> Self {
         Self {
             content: ContentDamageSnapshot::Full,
-            cursor: true,
+            cursor: ContentDamageSnapshot::Full,
             title: true,
             scrollbar: true,
             viewport: true,
@@ -213,9 +269,9 @@ impl SnapshotDamage {
     }
 
     #[cfg(test)]
-    fn cursor() -> Self {
+    fn cursor(row: u16) -> Self {
         Self {
-            cursor: true,
+            cursor: ContentDamageSnapshot::Rows(Arc::from([row])),
             ..Self::default()
         }
     }
@@ -938,19 +994,12 @@ impl TerminalEmulator {
         let colors = snapshot.colors()?;
         let cursor_position = snapshot
             .cursor_viewport()?
-            .map(|cursor| CursorPositionSnapshot {
-                column: cursor.x,
-                row: cursor.y,
-                at_wide_tail: cursor.at_wide_tail,
-            });
-        let cursor = CursorSnapshot {
-            position: cursor_position,
-            visible: snapshot.cursor_visible()?,
-            blinking: snapshot.cursor_blinking()?,
-            password_input: snapshot.cursor_password_input()?,
-            shape: snapshot.cursor_visual_style()?.into(),
-            color: snapshot.cursor_color()?.unwrap_or(colors.foreground).into(),
-        };
+            .map(|cursor| (cursor.x, cursor.y, cursor.at_wide_tail));
+        let cursor_visible = snapshot.cursor_visible()?;
+        let cursor_blinking = snapshot.cursor_blinking()?;
+        let cursor_password_input = snapshot.cursor_password_input()?;
+        let cursor_shape: CursorShapeSnapshot = snapshot.cursor_visual_style()?.into();
+        let cursor_color: Color = snapshot.cursor_color()?.unwrap_or(colors.foreground).into();
         let scrollbar = self.terminal.scrollbar()?;
         let scrollbar = ScrollbarSnapshot {
             total_rows: scrollbar.total,
@@ -970,6 +1019,18 @@ impl TerminalEmulator {
             palette: Arc::new(colors.palette.map(Color::from)),
             reversed: self.terminal.mode(Mode::REVERSE_COLORS)?,
         };
+        let build_cursor = |rows: &[RowSnapshot]| CursorSnapshot {
+            position: cursor_position.map(|(column, row, at_wide_tail)| {
+                normalize_cursor_position(column, row, at_wide_tail, rows)
+            }),
+            visible: cursor_visible,
+            blinking: cursor_blinking,
+            password_input: cursor_password_input,
+            shape: cursor_shape,
+            color: cursor_color,
+            text_color: terminal_colors.effective_background(),
+        };
+        let mut cursor = build_cursor(&self.row_cache);
         let rebuild_all = matches!(dirty, Dirty::Full)
             || self.row_cache.len() != usize::from(rows)
             || self.cached_cols != cols
@@ -980,7 +1041,7 @@ impl TerminalEmulator {
             SnapshotDamage::initial()
         } else {
             SnapshotDamage {
-                cursor: self.cached_cursor != Some(cursor),
+                cursor: cursor_damage(self.cached_cursor.as_ref(), &cursor),
                 title: title_changed,
                 scrollbar: previous_scrollbar
                     .is_some_and(|previous| previous.total_rows != scrollbar.total_rows),
@@ -1078,6 +1139,11 @@ impl TerminalEmulator {
             }
         }
         snapshot.set_dirty(Dirty::Clean)?;
+
+        cursor = build_cursor(&rendered_rows);
+        if !first_snapshot {
+            damage.cursor = cursor_damage(self.cached_cursor.as_ref(), &cursor);
+        }
 
         damage.content = if first_snapshot
             || damage.resize
@@ -2001,7 +2067,7 @@ mod tests {
                 .zip(second.rows.iter())
                 .all(|(first, second)| Arc::ptr_eq(first, second))
         );
-        assert_eq!(second.damage, SnapshotDamage::cursor());
+        assert_eq!(second.damage, SnapshotDamage::cursor(0));
     }
 
     #[test]
@@ -2017,15 +2083,48 @@ mod tests {
                 position: Some(CursorPositionSnapshot {
                     column: 3,
                     row: 2,
-                    at_wide_tail: false,
+                    width_cells: 1,
                 }),
                 visible: true,
                 blinking: false,
                 password_input: false,
                 shape: CursorShapeSnapshot::Bar,
                 color: Color::rgb(0x11_22_33),
+                text_color: snapshot.colors.background,
             }
         );
+    }
+
+    #[test]
+    fn cursor_on_a_wide_tail_normalizes_to_the_full_grapheme() {
+        let mut emulator = emulator(6, 2);
+        emulator.feed("界\x1b[1D".as_bytes());
+
+        let snapshot = emulator.snapshot().unwrap().unwrap();
+
+        assert_eq!(
+            snapshot.cursor.position,
+            Some(CursorPositionSnapshot {
+                column: 0,
+                row: 0,
+                width_cells: 2,
+            })
+        );
+    }
+
+    #[test]
+    fn cursor_movement_damages_only_the_old_and_new_rows() {
+        let mut emulator = emulator(6, 3);
+        let _ = emulator.snapshot().unwrap().unwrap();
+        emulator.feed(b"\x1b[3;1H");
+
+        let snapshot = emulator.snapshot().unwrap().unwrap();
+
+        assert_eq!(
+            snapshot.damage.cursor,
+            ContentDamageSnapshot::Rows(Arc::from([0, 2]))
+        );
+        assert_eq!(snapshot.damage.content, ContentDamageSnapshot::Clean);
     }
 
     #[test]
