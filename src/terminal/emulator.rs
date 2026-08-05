@@ -1691,6 +1691,74 @@ mod tests {
     }
 
     #[test]
+    fn function_key_byte_tables_cover_legacy_and_extended_kitty_ranges() {
+        let mut emulator = emulator(10, 2);
+        let legacy_cases: &[(PhysicalKey, &[u8])] = &[
+            (PhysicalKey::F1, b"\x1bOP"),
+            (PhysicalKey::F2, b"\x1bOQ"),
+            (PhysicalKey::F3, b"\x1bOR"),
+            (PhysicalKey::F4, b"\x1bOS"),
+            (PhysicalKey::F5, b"\x1b[15~"),
+            (PhysicalKey::F6, b"\x1b[17~"),
+            (PhysicalKey::F7, b"\x1b[18~"),
+            (PhysicalKey::F8, b"\x1b[19~"),
+            (PhysicalKey::F9, b"\x1b[20~"),
+            (PhysicalKey::F10, b"\x1b[21~"),
+            (PhysicalKey::F11, b"\x1b[23~"),
+            (PhysicalKey::F12, b"\x1b[24~"),
+        ];
+        for (physical_key, expected) in legacy_cases {
+            assert_eq!(
+                emulator
+                    .key(key(*physical_key, InputModifiers::default()))
+                    .unwrap()
+                    .bytes,
+                *expected,
+                "{physical_key:?}"
+            );
+        }
+
+        let extended = [
+            PhysicalKey::F13,
+            PhysicalKey::F14,
+            PhysicalKey::F15,
+            PhysicalKey::F16,
+            PhysicalKey::F17,
+            PhysicalKey::F18,
+            PhysicalKey::F19,
+            PhysicalKey::F20,
+            PhysicalKey::F21,
+            PhysicalKey::F22,
+            PhysicalKey::F23,
+            PhysicalKey::F24,
+            PhysicalKey::F25,
+        ];
+        for physical_key in extended {
+            assert!(
+                emulator
+                    .key(key(physical_key, InputModifiers::default()))
+                    .unwrap()
+                    .bytes
+                    .is_empty(),
+                "legacy must not invent bytes for {physical_key:?}"
+            );
+        }
+
+        emulator.feed(b"\x1b[>9u");
+        for (offset, physical_key) in extended.into_iter().enumerate() {
+            let expected = format!("\x1b[{}u", 57_376 + offset).into_bytes();
+            assert_eq!(
+                emulator
+                    .key(key(physical_key, InputModifiers::default()))
+                    .unwrap()
+                    .bytes,
+                expected,
+                "{physical_key:?}"
+            );
+        }
+    }
+
+    #[test]
     fn clean_screens_do_not_publish_another_snapshot() {
         let mut emulator = emulator(10, 2);
 
