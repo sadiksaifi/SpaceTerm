@@ -312,6 +312,9 @@ impl PaneHost {
         }
         self.terminal_window.toggle_zoom();
         self.menu_pane_id = None;
+        cx.emit(PaneHostEvent::PresentationChanged {
+            window_id: self.terminal_window.id(),
+        });
         cx.notify();
         self.focus(window, cx);
     }
@@ -1251,6 +1254,57 @@ mod tests {
             (close_requests.get(), records.dropped_session_ids()),
             (1, Vec::new())
         );
+    }
+
+    #[gpui::test]
+    fn single_pane_toggle_zoom_should_not_emit_presentation_changed(cx: &mut TestAppContext) {
+        let presentation_changes = Rc::new(Cell::new(0));
+        let session_factory = test_session_factory();
+        let (host, cx) = cx.add_window_view(|window, cx| {
+            PaneHost::new(WindowId::new(1), session_factory, window, cx)
+        });
+        let presentation_changes_for_subscription = Rc::clone(&presentation_changes);
+        host.update(cx, |_, cx| {
+            cx.subscribe(&host, move |_, _, event: &PaneHostEvent, _| {
+                if matches!(event, PaneHostEvent::PresentationChanged { .. }) {
+                    presentation_changes_for_subscription.update(|count| count + 1);
+                }
+            })
+            .detach();
+        });
+
+        cx.update(|window, cx| {
+            host.update(cx, |host, cx| host.toggle_zoom(window, cx));
+        });
+        cx.run_until_parked();
+
+        assert_eq!(presentation_changes.get(), 0);
+    }
+
+    #[gpui::test]
+    fn successful_toggle_zoom_should_emit_one_presentation_changed(cx: &mut TestAppContext) {
+        let presentation_changes = Rc::new(Cell::new(0));
+        let session_factory = test_session_factory();
+        let (host, cx) = cx.add_window_view(|window, cx| {
+            PaneHost::new(WindowId::new(1), session_factory, window, cx)
+        });
+        split_test_pane(&host, PaneId::new(1), SplitAxis::Horizontal, cx);
+        let presentation_changes_for_subscription = Rc::clone(&presentation_changes);
+        host.update(cx, |_, cx| {
+            cx.subscribe(&host, move |_, _, event: &PaneHostEvent, _| {
+                if matches!(event, PaneHostEvent::PresentationChanged { .. }) {
+                    presentation_changes_for_subscription.update(|count| count + 1);
+                }
+            })
+            .detach();
+        });
+
+        cx.update(|window, cx| {
+            host.update(cx, |host, cx| host.toggle_zoom(window, cx));
+        });
+        cx.run_until_parked();
+
+        assert_eq!(presentation_changes.get(), 1);
     }
 
     #[gpui::test]

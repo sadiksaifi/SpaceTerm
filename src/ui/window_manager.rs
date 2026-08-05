@@ -35,8 +35,6 @@ const WINDOW_MENU_TOP: f32 = WINDOW_BAR_HEIGHT - WINDOW_MENU_BAR_OVERLAP;
 struct WindowMenuState {
     window_id: WindowId,
     left: Option<Pixels>,
-    zoomed: bool,
-    zoom_enabled: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -296,16 +294,7 @@ impl WindowManager {
         if !self.activate_window(window_id, window, cx) {
             return;
         }
-        let Some(pane_host) = self.windows.window(window_id) else {
-            return;
-        };
-        let pane_host = pane_host.read(cx);
-        self.window_menu = Some(WindowMenuState {
-            window_id,
-            left,
-            zoomed: matches!(pane_host.zoom_state(), ZoomState::Zoomed(_)),
-            zoom_enabled: pane_host.pane_count() > 1,
-        });
+        self.window_menu = Some(WindowMenuState { window_id, left });
         cx.notify();
     }
 
@@ -718,12 +707,22 @@ impl WindowManager {
         &self,
         menu: WindowMenuState,
         manager: gpui::WeakEntity<Self>,
+        cx: &App,
     ) -> AnyElement {
+        let Some((zoomed, zoom_enabled)) = self.windows.window(menu.window_id).map(|pane_host| {
+            let pane_host = pane_host.read(cx);
+            (
+                matches!(pane_host.zoom_state(), ZoomState::Zoomed(_)),
+                pane_host.pane_count() > 1,
+            )
+        }) else {
+            return div().into_any_element();
+        };
         let dismiss_manager = manager.clone();
         let menu_element = render_pane_action_menu(
             ("window-menu", menu.window_id.get()),
-            menu.zoomed,
-            menu.zoom_enabled,
+            zoomed,
+            zoom_enabled,
             CloseTarget::Window,
             manager,
             |manager, command, window, cx| {
@@ -814,7 +813,7 @@ impl Render for WindowManager {
                     .child(active_window),
             )
             .when_some(self.window_menu, |root, menu| {
-                root.child(self.render_window_menu(menu, manager))
+                root.child(self.render_window_menu(menu, manager, cx))
             })
     }
 }
@@ -1400,6 +1399,29 @@ mod tests {
             )
         });
         assert_eq!(state, (true, ZoomState::Restored));
+    }
+
+    #[gpui::test]
+    fn open_single_pane_window_menu_should_enable_zoom_after_split_shortcut(
+        cx: &mut TestAppContext,
+    ) {
+        let (manager, _records, cx) = window_manager(cx);
+        click("window-menu-button", cx);
+
+        cx.simulate_keystrokes("cmd-d");
+        cx.run_until_parked();
+        click("window-menu-row-toggle-zoom", cx);
+
+        let state = manager.read_with(cx, |manager, cx| {
+            (
+                manager.window_menu.is_none(),
+                manager.windows.active_window().read(cx).zoom_state(),
+            )
+        });
+        assert!(
+            matches!(state, (true, ZoomState::Zoomed(_))),
+            "the open Window menu did not use the target PaneHost's live zoom state: {state:?}"
+        );
     }
 
     #[gpui::test]
