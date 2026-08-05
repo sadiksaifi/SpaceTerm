@@ -451,22 +451,25 @@ struct TextFragment {
     text: SharedString,
     runs: Vec<TextRun>,
     force_cell_width: bool,
+    blinking: bool,
 }
 
 struct FragmentBuilder {
     start: usize,
     selected: bool,
     cursor: bool,
+    blinking: bool,
     text: String,
     runs: Vec<TextRun>,
 }
 
 impl FragmentBuilder {
-    fn new(start: usize, selected: bool, cursor: bool) -> Self {
+    fn new(start: usize, selected: bool, cursor: bool, blinking: bool) -> Self {
         Self {
             start,
             selected,
             cursor,
+            blinking,
             text: String::new(),
             runs: Vec::new(),
         }
@@ -515,6 +518,7 @@ impl FragmentBuilder {
             text: self.text.into(),
             runs: self.runs,
             force_cell_width,
+            blinking: self.blinking,
         }
     }
 }
@@ -598,7 +602,11 @@ fn prepare_row(
 
         if regular_fragment
             .as_ref()
-            .is_some_and(|fragment| fragment.selected != cell.selected || fragment.cursor != cursor)
+            .is_some_and(|fragment| {
+                fragment.selected != cell.selected
+                    || fragment.cursor != cursor
+                    || fragment.blinking != cell.blinking
+            })
             && let Some(fragment) = regular_fragment.take()
         {
             fragments.push(fragment.finish(true));
@@ -611,12 +619,15 @@ fn prepare_row(
             if let Some(fragment) = regular_fragment.take() {
                 fragments.push(fragment.finish(true));
             }
-            let mut fragment = FragmentBuilder::new(column, cell.selected, cursor);
+            let mut fragment =
+                FragmentBuilder::new(column, cell.selected, cursor, cell.blinking);
             fragment.push(cell, colors, font_family);
             fragments.push(fragment.finish(false));
         } else {
             regular_fragment
-                .get_or_insert_with(|| FragmentBuilder::new(column, cell.selected, cursor))
+                .get_or_insert_with(|| {
+                    FragmentBuilder::new(column, cell.selected, cursor, cell.blinking)
+                })
                 .push(cell, colors, font_family);
         }
     }
@@ -1082,6 +1093,24 @@ mod tests {
                 .map(|fragment| fragment.text.as_ref())
                 .collect::<Vec<_>>(),
             vec!["a", "b", "c"]
+        );
+    }
+
+    #[test]
+    fn shaping_fragments_do_not_cross_text_blink_boundaries() {
+        let mut blinking = cell("b");
+        blinking.blinking = true;
+        let row = Arc::<[CellSnapshot]>::from([cell("a"), blinking, cell("c")]);
+
+        let input = prepare_row(&row, &colors(), &"Menlo".into(), None);
+
+        assert_eq!(
+            input
+                .fragments
+                .iter()
+                .map(|fragment| (fragment.text.as_ref(), fragment.blinking))
+                .collect::<Vec<_>>(),
+            vec![("a", false), ("b", true), ("c", false)]
         );
     }
 
