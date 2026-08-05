@@ -22,22 +22,48 @@ impl LogicalCellSize {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct LogicalPosition {
+    pub(crate) x: f32,
+    pub(crate) y: f32,
+}
+
+impl LogicalPosition {
+    pub(crate) const fn new(x: f32, y: f32) -> Self {
+        Self { x, y }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct BackingScale(f32);
 
 impl BackingScale {
+    pub(crate) const ONE: Self = Self(1.0);
+
     pub(crate) fn new(factor: f32) -> Option<Self> {
         (factor.is_finite() && factor > 0.0).then_some(Self(factor))
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct BackingPosition {
+    pub(crate) x: f32,
+    pub(crate) y: f32,
+}
+
+impl BackingPosition {
+    pub(crate) const fn new(x: f32, y: f32) -> Self {
+        Self { x, y }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct GridSize {
+pub(crate) struct CellGridSize {
     pub(crate) cols: u16,
     pub(crate) rows: u16,
 }
 
-impl GridSize {
+impl CellGridSize {
     pub(crate) const fn new(cols: u16, rows: u16) -> Self {
         Self { cols, rows }
     }
@@ -57,7 +83,7 @@ impl BackingSize {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct TerminalGeometry {
-    grid: GridSize,
+    grid: CellGridSize,
     logical_cell: LogicalCellSize,
     backing_scale: BackingScale,
     backing_cell: BackingSize,
@@ -69,14 +95,24 @@ impl TerminalGeometry {
         viewport: LogicalSize,
         cell: LogicalCellSize,
         backing_scale: BackingScale,
-        minimum_grid: GridSize,
+        minimum_grid: CellGridSize,
     ) -> Self {
         let cols = grid_dimension(viewport.width, cell.width, minimum_grid.cols);
         let rows = grid_dimension(viewport.height, cell.height, minimum_grid.rows);
-        let grid = GridSize::new(cols, rows);
+        Self::from_grid(CellGridSize::new(cols, rows), cell, backing_scale)
+    }
+
+    pub(crate) fn from_grid(
+        grid: CellGridSize,
+        cell: LogicalCellSize,
+        backing_scale: BackingScale,
+    ) -> Self {
         let backing_cell = backing_size(LogicalSize::new(cell.width, cell.height), backing_scale);
         let backing_grid = backing_size(
-            LogicalSize::new(cell.width * f32::from(cols), cell.height * f32::from(rows)),
+            LogicalSize::new(
+                cell.width * f32::from(grid.cols),
+                cell.height * f32::from(grid.rows),
+            ),
             backing_scale,
         );
 
@@ -89,7 +125,7 @@ impl TerminalGeometry {
         }
     }
 
-    pub(crate) const fn grid(self) -> GridSize {
+    pub(crate) const fn grid(self) -> CellGridSize {
         self.grid
     }
 
@@ -99,6 +135,13 @@ impl TerminalGeometry {
 
     pub(crate) const fn backing_grid_size(self) -> BackingSize {
         self.backing_grid
+    }
+
+    pub(crate) fn to_backing_position(self, logical: LogicalPosition) -> BackingPosition {
+        BackingPosition::new(
+            logical.x * self.backing_scale.0,
+            logical.y * self.backing_scale.0,
+        )
     }
 }
 
@@ -132,7 +175,7 @@ mod tests {
             LogicalSize::new(101.0, 52.0),
             LogicalCellSize::new(7.5, 17.25),
             BackingScale::new(1.5).unwrap(),
-            GridSize::new(2, 2),
+            CellGridSize::new(2, 2),
         );
 
         assert_eq!(
@@ -142,9 +185,63 @@ mod tests {
                 geometry.backing_grid_size(),
             ),
             (
-                GridSize::new(13, 3),
+                CellGridSize::new(13, 3),
                 BackingSize::new(12, 26),
                 BackingSize::new(147, 78),
+            )
+        );
+    }
+
+    #[test]
+    fn backing_scale_changes_pixels_without_changing_the_cell_grid() {
+        let viewport = LogicalSize::new(80.0, 40.0);
+        let cell = LogicalCellSize::new(8.0, 20.0);
+        let minimum = CellGridSize::new(2, 2);
+        let one_x = TerminalGeometry::from_viewport(
+            viewport,
+            cell,
+            BackingScale::new(1.0).unwrap(),
+            minimum,
+        );
+        let two_x = TerminalGeometry::from_viewport(
+            viewport,
+            cell,
+            BackingScale::new(2.0).unwrap(),
+            minimum,
+        );
+
+        assert_eq!(
+            (
+                one_x.grid(),
+                two_x.grid(),
+                one_x.backing_grid_size(),
+                two_x.backing_grid_size(),
+            ),
+            (
+                CellGridSize::new(10, 2),
+                CellGridSize::new(10, 2),
+                BackingSize::new(80, 40),
+                BackingSize::new(160, 80),
+            )
+        );
+    }
+
+    #[test]
+    fn logical_mouse_positions_use_the_same_fractional_backing_scale_as_grid_dimensions() {
+        let geometry = TerminalGeometry::from_grid(
+            CellGridSize::new(10, 2),
+            LogicalCellSize::new(7.5, 17.25),
+            BackingScale::new(1.5).unwrap(),
+        );
+
+        assert_eq!(
+            (
+                geometry.to_backing_position(LogicalPosition::new(3.75, 8.625)),
+                geometry.backing_grid_size(),
+            ),
+            (
+                BackingPosition::new(5.625, 12.9375),
+                BackingSize::new(113, 52),
             )
         );
     }

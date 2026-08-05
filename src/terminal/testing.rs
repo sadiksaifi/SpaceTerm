@@ -3,22 +3,23 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
+use super::geometry::TerminalGeometry;
 use super::{
-    GridSize, KeyInput, PointerInput, SessionError, SessionEvent, StartedTerminalSession,
+    KeyInput, PointerInput, SessionError, SessionEvent, StartedTerminalSession,
     TerminalSessionFactory, TerminalSessionHandle, WheelInput,
 };
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) struct RecordedSessionStart {
     pub(crate) session_id: usize,
-    pub(crate) size: GridSize,
+    pub(crate) geometry: TerminalGeometry,
     pub(crate) working_directory: PathBuf,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum RecordedSessionCommand {
     Key(KeyInput),
-    Resize(GridSize),
+    Resize(TerminalGeometry),
     Pointer(PointerInput),
     Wheel(WheelInput),
     ScrollTo(u64),
@@ -121,14 +122,14 @@ impl TestTerminalSessionFactory {
 impl TerminalSessionFactory for TestTerminalSessionFactory {
     fn start(
         &self,
-        size: GridSize,
+        geometry: TerminalGeometry,
         working_directory: &Path,
     ) -> Result<StartedTerminalSession, SessionError> {
         let session_id = self.next_session_id.get();
         self.next_session_id.set(session_id + 1);
         self.records.starts.borrow_mut().push(RecordedSessionStart {
             session_id,
-            size,
+            geometry,
             working_directory: working_directory.to_path_buf(),
         });
 
@@ -189,8 +190,8 @@ impl TerminalSessionHandle for TestTerminalSessionHandle {
         self.record(RecordedSessionCommand::Key(input));
     }
 
-    fn resize(&self, size: GridSize) {
-        self.record(RecordedSessionCommand::Resize(size));
+    fn resize(&self, geometry: TerminalGeometry) {
+        self.record(RecordedSessionCommand::Resize(geometry));
     }
 
     fn pointer(&self, input: PointerInput) {

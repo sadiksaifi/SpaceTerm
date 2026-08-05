@@ -14,6 +14,7 @@ use crate::platform::macos_pty::{
     PtyError, PtyTerminator, SpawnedPty, spawn_user_shell, user_shell,
 };
 use crate::terminal::emulator::{EmulatorAction, ScreenSnapshot, TerminalEmulator};
+use crate::terminal::geometry::TerminalGeometry;
 
 const FINAL_CHILD_WAIT_TIMEOUT: Duration = Duration::from_secs(2);
 const PTY_READ_BUFFER_SIZE: usize = 16 * 1024;
@@ -88,22 +89,14 @@ pub(crate) struct WheelInput {
     pub(crate) modifiers: InputModifiers,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct GridSize {
-    pub(crate) cols: u16,
-    pub(crate) rows: u16,
-    pub(crate) cell_width_px: u16,
-    pub(crate) cell_height_px: u16,
-}
-
-impl GridSize {
-    fn pty_size(self) -> PtySize {
-        PtySize {
-            rows: self.rows,
-            cols: self.cols,
-            pixel_width: self.cols.saturating_mul(self.cell_width_px),
-            pixel_height: self.rows.saturating_mul(self.cell_height_px),
-        }
+fn pty_size(geometry: TerminalGeometry) -> PtySize {
+    let grid = geometry.grid();
+    let backing = geometry.backing_grid_size();
+    PtySize {
+        rows: grid.rows,
+        cols: grid.cols,
+        pixel_width: backing.width.min(u32::from(u16::MAX)) as u16,
+        pixel_height: backing.height.min(u32::from(u16::MAX)) as u16,
     }
 }
 
@@ -179,7 +172,7 @@ pub(crate) struct StartedTerminalSession {
 
 pub(crate) trait TerminalSessionHandle {
     fn key(&self, input: KeyInput);
-    fn resize(&self, size: GridSize);
+    fn resize(&self, geometry: TerminalGeometry);
     fn pointer(&self, input: PointerInput);
     fn wheel(&self, input: WheelInput);
     fn scroll_to(&self, offset_rows: u64);
@@ -190,7 +183,7 @@ pub(crate) trait TerminalSessionHandle {
 pub(crate) trait TerminalSessionFactory {
     fn start(
         &self,
-        size: GridSize,
+        geometry: TerminalGeometry,
         working_directory: &Path,
     ) -> Result<StartedTerminalSession, SessionError>;
 
@@ -205,10 +198,10 @@ pub(crate) struct NativeTerminalSessionFactory;
 impl TerminalSessionFactory for NativeTerminalSessionFactory {
     fn start(
         &self,
-        size: GridSize,
+        geometry: TerminalGeometry,
         working_directory: &Path,
     ) -> Result<StartedTerminalSession, SessionError> {
-        let (session, events) = TerminalSession::start(size, working_directory)?;
+        let (session, events) = TerminalSession::start(geometry, working_directory)?;
         Ok(StartedTerminalSession {
             handle: Box::new(session),
             events,
@@ -280,18 +273,19 @@ fn spawn_native_session_pty(
 
 impl TerminalSession {
     pub(crate) fn start(
-        size: GridSize,
+        geometry: TerminalGeometry,
         working_directory: &Path,
     ) -> Result<(Self, async_channel::Receiver<SessionEvent>), SessionError> {
-        Self::start_with(size, working_directory, spawn_native_session_pty)
+        Self::start_with(geometry, working_directory, spawn_native_session_pty)
     }
 
     fn start_with(
-        size: GridSize,
+        geometry: TerminalGeometry,
         working_directory: &Path,
         spawn_pty: impl FnOnce(PtySize, &Path) -> Result<StartedSessionPty, PtyError>,
     ) -> Result<(Self, async_channel::Receiver<SessionEvent>), SessionError> {
-        let StartedSessionPty { pty, terminator } = spawn_pty(size.pty_size(), working_directory)?;
+        let StartedSessionPty { pty, terminator } =
+            spawn_pty(pty_size(geometry), working_directory)?;
         let (command_tx, command_rx) = mpsc::channel();
         let reader_transport = ReaderTransport::new(command_tx.clone());
         // Two slots retain the latest screen and a final lifecycle event without
@@ -304,7 +298,7 @@ impl TerminalSession {
             .spawn(move || {
                 TerminalWorker::run(
                     pty,
-                    size,
+                    geometry,
                     command_rx,
                     reader_transport,
                     event_tx,
@@ -341,9 +335,9 @@ impl TerminalSession {
         }
     }
 
-    pub(crate) fn resize(&self, size: GridSize) {
+    pub(crate) fn resize(&self, geometry: TerminalGeometry) {
         if let Some(commands) = &self.commands
-            && commands.send(Command::Resize(size)).is_err()
+            && commands.send(Command::Resize(geometry)).is_err()
         {
             eprintln!("terminal resize was dropped because the worker has stopped");
         }
@@ -420,8 +414,8 @@ impl TerminalSessionHandle for TerminalSession {
         Self::key(self, input);
     }
 
-    fn resize(&self, size: GridSize) {
-        Self::resize(self, size);
+    fn resize(&self, geometry: TerminalGeometry) {
+        Self::resize(self, geometry);
     }
 
     fn pointer(&self, input: PointerInput) {
@@ -481,7 +475,7 @@ struct ReaderEventBatch {
 #[derive(Debug)]
 enum Command {
     Key(KeyInput),
-    Resize(GridSize),
+    Resize(TerminalGeometry),
     Pointer(PointerInput),
     Wheel(WheelInput),
     ScrollTo(u64),
@@ -504,7 +498,7 @@ struct TerminalWorker {
 impl TerminalWorker {
     fn run(
         mut pty: Box<dyn SessionPty>,
-        initial_size: GridSize,
+        initial_geometry: TerminalGeometry,
         commands: CommandReceiver<Command>,
         reader_transport: ReaderTransport,
         events: async_channel::Sender<SessionEvent>,
@@ -532,10 +526,10 @@ impl TerminalWorker {
         };
 
         let emulator = match TerminalEmulator::new(
-            initial_size.cols,
-            initial_size.rows,
-            u32::from(initial_size.cell_width_px),
-            u32::from(initial_size.cell_height_px),
+            initial_geometry.grid().cols,
+            initial_geometry.grid().rows,
+            initial_geometry.backing_cell_size().width,
+            initial_geometry.backing_cell_size().height,
         ) {
             Ok(emulator) => emulator,
             Err(error) => {
@@ -596,20 +590,20 @@ impl TerminalWorker {
                 }
             },
             Command::ReaderReady => self.process_reader_events(),
-            Command::Resize(size) => {
+            Command::Resize(geometry) => {
                 let result = self
                     .pty
-                    .resize(size.pty_size())
+                    .resize(pty_size(geometry))
                     .map_err(|error| {
                         format!("failed to resize the macOS pseudo-terminal: {error:#}")
                     })
                     .and_then(|()| {
                         self.emulator
                             .resize(
-                                size.cols,
-                                size.rows,
-                                u32::from(size.cell_width_px),
-                                u32::from(size.cell_height_px),
+                                geometry.grid().cols,
+                                geometry.grid().rows,
+                                geometry.backing_cell_size().width,
+                                geometry.backing_cell_size().height,
                             )
                             .map_err(|error| format!("failed to resize terminal state: {error}"))
                     });
@@ -885,13 +879,19 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::*;
+    use crate::terminal::geometry::{BackingScale, CellGridSize, LogicalCellSize};
 
-    const TEST_SIZE: GridSize = GridSize {
-        cols: 80,
-        rows: 24,
-        cell_width_px: 8,
-        cell_height_px: 20,
-    };
+    fn geometry(cols: u16, rows: u16, cell_width: f32, cell_height: f32) -> TerminalGeometry {
+        TerminalGeometry::from_grid(
+            CellGridSize::new(cols, rows),
+            LogicalCellSize::new(cell_width, cell_height),
+            BackingScale::ONE,
+        )
+    }
+
+    fn test_geometry() -> TerminalGeometry {
+        geometry(80, 24, 8.0, 20.0)
+    }
 
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     enum LifecycleStep {
@@ -1143,10 +1143,10 @@ mod tests {
         } = options;
 
         let result = TerminalSession::start_with(
-            TEST_SIZE,
+            test_geometry(),
             Path::new("/scripted"),
             move |size, working_directory| {
-                assert_eq!(size, TEST_SIZE.pty_size());
+                assert_eq!(size, pty_size(test_geometry()));
                 assert_eq!(working_directory, Path::new("/scripted"));
                 Ok(StartedSessionPty {
                     pty: Box::new(ScriptedPty {
@@ -1503,7 +1503,7 @@ mod tests {
             "the first output Screen",
             |event| matches!(event, SessionEvent::Screen(screen) if screen_text(screen).contains("first")),
         );
-        session.resize(TEST_SIZE);
+        session.resize(test_geometry());
         records.wait_for("the control between output chunks", |state| {
             state.resizes.len() == 1
         });
@@ -1525,7 +1525,7 @@ mod tests {
                 screen_text(&second).contains("first second"),
                 records.snapshot().resizes,
             ),
-            (false, true, vec![TEST_SIZE.pty_size()])
+            (false, true, vec![pty_size(test_geometry())])
         );
         session.shutdown();
     }
@@ -1535,17 +1535,12 @@ mod tests {
         let (result, _reader_steps, records) =
             start_scripted_session(ScriptedPtyOptions::default());
         let (mut session, _events) = result.unwrap();
-        let resized = GridSize {
-            cols: 100,
-            rows: 30,
-            cell_width_px: 9,
-            cell_height_px: 21,
-        };
+        let resized = geometry(100, 30, 9.0, 21.0);
 
         session.resize(resized);
         let state = records.wait_for("the scripted PTY resize", |state| state.resizes.len() == 1);
 
-        assert_eq!(state.resizes, vec![resized.pty_size()]);
+        assert_eq!(state.resizes, vec![pty_size(resized)]);
         session.shutdown();
     }
 
@@ -1553,12 +1548,7 @@ mod tests {
     fn pending_pty_responses_should_precede_later_input_through_the_session_interface() {
         let (result, reader_steps, records) = start_scripted_session(ScriptedPtyOptions::default());
         let (mut session, events) = result.unwrap();
-        let resized = GridSize {
-            cols: 20,
-            rows: 4,
-            cell_width_px: 8,
-            cell_height_px: 18,
-        };
+        let resized = geometry(20, 4, 8.0, 18.0);
 
         reader_steps
             .send(ReaderStep::Bytes(b"\x1b[?2048hX".to_vec()))
@@ -1887,12 +1877,7 @@ mod tests {
 
     #[test]
     fn real_shell_output_round_trips_through_the_pty_and_emulator() {
-        let size = GridSize {
-            cols: 80,
-            rows: 24,
-            cell_width_px: 8,
-            cell_height_px: 20,
-        };
+        let size = test_geometry();
         let StartedTerminalSession {
             handle: session,
             events,
@@ -1932,12 +1917,7 @@ mod tests {
 
     #[test]
     fn real_shell_exit_command_emits_an_exited_event() {
-        let size = GridSize {
-            cols: 80,
-            rows: 24,
-            cell_width_px: 8,
-            cell_height_px: 20,
-        };
+        let size = test_geometry();
         let StartedTerminalSession {
             handle: session,
             events,

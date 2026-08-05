@@ -15,9 +15,12 @@ use super::{
     CopySelection, DecreaseTerminalFontSize, IncreaseTerminalFontSize, PasteClipboard,
     ResetTerminalFontSize, TERMINAL_KEY_CONTEXT,
 };
+use crate::terminal::geometry::{
+    BackingScale, CellGridSize, LogicalCellSize, LogicalPosition, LogicalSize, TerminalGeometry,
+};
 use crate::terminal::{
-    GridSize, InputModifiers, KeyCode, KeyInput, PointerButton, PointerInput, PointerPhase,
-    ScreenSnapshot, SessionEvent, SurfacePosition, TerminalSessionHandle, WheelInput,
+    InputModifiers, KeyCode, KeyInput, PointerButton, PointerInput, PointerPhase, ScreenSnapshot,
+    SessionEvent, SurfacePosition, TerminalSessionHandle, WheelInput,
     WorkspaceTerminalSessionFactory,
 };
 use crate::theme::{ACTIVE_THEME, Color};
@@ -53,7 +56,8 @@ pub(crate) struct TerminalPane {
     font_size: f32,
     line_height: f32,
     cell_width: Pixels,
-    last_grid_size: Option<GridSize>,
+    backing_scale: BackingScale,
+    last_geometry: Option<TerminalGeometry>,
     grid_bounds: Option<Bounds<Pixels>>,
     pressed_button: Option<PointerButton>,
     wheel_remainder: f32,
@@ -71,6 +75,7 @@ impl TerminalPane {
         let focus_handle = cx.focus_handle();
         let font_family = terminal_font(cx);
         let cell_width = measure_cell_width(window, &font_family, DEFAULT_FONT_SIZE);
+        let backing_scale = BackingScale::new(window.scale_factor()).unwrap_or(BackingScale::ONE);
         let fallback_title: SharedString =
             normalized_pane_title("", &session_factory.fallback_title()).into();
         let scrollbar = cx.new(|_| OverlayScrollbar::<u64>::new("terminal-scrollbar"));
@@ -104,7 +109,8 @@ impl TerminalPane {
             font_size: DEFAULT_FONT_SIZE,
             line_height: DEFAULT_LINE_HEIGHT,
             cell_width,
-            last_grid_size: None,
+            backing_scale,
+            last_geometry: None,
             grid_bounds: None,
             pressed_button: None,
             wheel_remainder: 0.0,
@@ -138,7 +144,7 @@ impl TerminalPane {
     }
 
     fn scrollbar_metrics(&self) -> Option<ScrollMetrics<u64>> {
-        let size = self.last_grid_size?;
+        let size = self.last_geometry?.grid();
         ScrollMetrics::for_rows(
             VERTICAL_PADDING,
             f32::from(size.rows) * self.line_height,
@@ -161,20 +167,25 @@ impl TerminalPane {
     }
 
     fn update_grid_bounds(&mut self, bounds: Bounds<Pixels>, cx: &mut Context<Self>) {
-        let size = grid_size(bounds, self.cell_width, self.line_height);
+        let geometry = terminal_geometry(
+            bounds,
+            self.cell_width,
+            self.line_height,
+            self.backing_scale,
+        );
         self.grid_bounds = Some(terminal_grid_content_bounds(
             bounds,
-            usize::from(size.cols),
+            usize::from(geometry.grid().cols),
             self.cell_width,
         ));
-        if self.last_grid_size == Some(size) {
+        if self.last_geometry == Some(geometry) {
             return;
         }
-        self.last_grid_size = Some(size);
+        self.last_geometry = Some(geometry);
         self.sync_scrollbar(cx);
 
         if let Some(session) = &self.session {
-            session.resize(size);
+            session.resize(geometry);
             return;
         }
 
@@ -183,7 +194,7 @@ impl TerminalPane {
         }
         self.session_start_attempted = true;
 
-        match self.session_factory.start(size) {
+        match self.session_factory.start(geometry) {
             Ok(started) => {
                 self.session = Some(started.handle);
                 let receiver = started.events;
@@ -284,7 +295,7 @@ impl TerminalPane {
         self.font_size = font_size;
         self.line_height = line_height_for_font_size(font_size);
         self.cell_width = measure_cell_width(window, &self.font_family, font_size);
-        self.last_grid_size = None;
+        self.last_geometry = None;
         self.sync_scrollbar(cx);
         cx.notify();
     }
@@ -443,9 +454,7 @@ impl TerminalPane {
         terminal_surface_position(
             self.grid_bounds?,
             position,
-            self.cell_width,
-            self.line_height,
-            self.last_grid_size?,
+            self.last_geometry?,
             allow_outside,
         )
     }
@@ -566,16 +575,21 @@ fn line_height_for_font_size(font_size: f32) -> f32 {
     font_size * DEFAULT_LINE_HEIGHT / DEFAULT_FONT_SIZE
 }
 
-fn grid_size(bounds: Bounds<Pixels>, cell_width: Pixels, line_height: f32) -> GridSize {
+fn terminal_geometry(
+    bounds: Bounds<Pixels>,
+    cell_width: Pixels,
+    line_height: f32,
+    backing_scale: BackingScale,
+) -> TerminalGeometry {
     let width = f32::from(bounds.size.width).max(f32::from(cell_width));
     let height = f32::from(bounds.size.height).max(line_height);
 
-    GridSize {
-        cols: ((width / f32::from(cell_width)).floor() as u16).max(MIN_COLS),
-        rows: ((height / line_height).floor() as u16).max(MIN_ROWS),
-        cell_width_px: f32::from(cell_width).round().clamp(1.0, u16::MAX as f32) as u16,
-        cell_height_px: line_height.round().clamp(1.0, u16::MAX as f32) as u16,
-    }
+    TerminalGeometry::from_viewport(
+        LogicalSize::new(width, height),
+        LogicalCellSize::new(f32::from(cell_width), line_height),
+        backing_scale,
+        CellGridSize::new(MIN_COLS, MIN_ROWS),
+    )
 }
 
 fn gpui_color(color: Color) -> gpui::Rgba {
@@ -627,9 +641,7 @@ fn input_modifiers(modifiers: gpui::Modifiers) -> InputModifiers {
 fn terminal_surface_position(
     bounds: Bounds<Pixels>,
     position: gpui::Point<Pixels>,
-    rendered_cell_width: Pixels,
-    rendered_line_height: f32,
-    grid_size: GridSize,
+    geometry: TerminalGeometry,
     allow_outside: bool,
 ) -> Option<SurfacePosition> {
     if !allow_outside && !bounds.contains(&position) {
@@ -638,9 +650,10 @@ fn terminal_surface_position(
 
     let local_x = f32::from(position.x - bounds.origin.x);
     let local_y = f32::from(position.y - bounds.origin.y);
+    let backing = geometry.to_backing_position(LogicalPosition::new(local_x, local_y));
     Some(SurfacePosition {
-        x: local_x * f32::from(grid_size.cell_width_px) / f32::from(rendered_cell_width),
-        y: local_y * f32::from(grid_size.cell_height_px) / rendered_line_height,
+        x: backing.x,
+        y: backing.y,
     })
 }
 
@@ -883,34 +896,20 @@ mod tests {
             gpui::point(px(10.0), px(20.0)),
             gpui::size(px(75.0), px(40.0)),
         );
-        let grid = GridSize {
-            cols: 10,
-            rows: 2,
-            cell_width_px: 8,
-            cell_height_px: 20,
-        };
+        let geometry = TerminalGeometry::from_grid(
+            CellGridSize::new(10, 2),
+            LogicalCellSize::new(7.5, 20.0),
+            BackingScale::ONE,
+        );
 
-        let position = terminal_surface_position(
-            bounds,
-            gpui::point(px(47.5), px(30.0)),
-            px(7.5),
-            20.0,
-            grid,
-            false,
-        )
-        .unwrap();
+        let position =
+            terminal_surface_position(bounds, gpui::point(px(47.5), px(30.0)), geometry, false)
+                .unwrap();
 
-        assert_eq!(position, SurfacePosition { x: 40.0, y: 10.0 });
+        assert_eq!(position, SurfacePosition { x: 37.5, y: 10.0 });
         assert!(
-            terminal_surface_position(
-                bounds,
-                gpui::point(px(9.0), px(20.0)),
-                px(7.5),
-                20.0,
-                grid,
-                false,
-            )
-            .is_none()
+            terminal_surface_position(bounds, gpui::point(px(9.0), px(20.0)), geometry, false,)
+                .is_none()
         );
     }
 
@@ -955,12 +954,11 @@ mod tests {
         let records = TestTerminalSessionRecords::default();
         let session = TestTerminalSessionFactory::new(records.clone())
             .start(
-                GridSize {
-                    cols: 80,
-                    rows: 24,
-                    cell_width_px: 8,
-                    cell_height_px: 16,
-                },
+                TerminalGeometry::from_grid(
+                    CellGridSize::new(80, 24),
+                    LogicalCellSize::new(8.0, 16.0),
+                    BackingScale::ONE,
+                ),
                 std::path::Path::new("/tmp/spaceterm-terminal-pane-test"),
             )
             .expect("the test terminal session should start");

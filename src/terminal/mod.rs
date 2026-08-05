@@ -1,5 +1,5 @@
 mod emulator;
-mod geometry;
+pub(crate) mod geometry;
 mod session;
 #[cfg(test)]
 pub(crate) mod testing;
@@ -19,9 +19,9 @@ pub(crate) use emulator::{
 )]
 pub(crate) use session::SessionFailure;
 pub(crate) use session::{
-    GridSize, InputModifiers, KeyCode, KeyInput, NativeTerminalSessionFactory, PointerButton,
-    PointerInput, PointerPhase, SessionEvent, SurfacePosition, TerminalSessionFactory,
-    TerminalSessionHandle, WheelInput,
+    InputModifiers, KeyCode, KeyInput, NativeTerminalSessionFactory, PointerButton, PointerInput,
+    PointerPhase, SessionEvent, SurfacePosition, TerminalSessionFactory, TerminalSessionHandle,
+    WheelInput,
 };
 #[cfg(test)]
 pub(crate) use session::{SessionError, StartedTerminalSession};

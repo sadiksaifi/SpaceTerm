@@ -1,7 +1,8 @@
 use std::path::PathBuf;
 use std::rc::Rc;
 
-use super::session::{GridSize, SessionError, StartedTerminalSession, TerminalSessionFactory};
+use super::geometry::TerminalGeometry;
+use super::session::{SessionError, StartedTerminalSession, TerminalSessionFactory};
 
 #[derive(Clone)]
 pub(crate) struct WorkspaceTerminalSessionFactory {
@@ -20,8 +21,11 @@ impl WorkspaceTerminalSessionFactory {
         }
     }
 
-    pub(crate) fn start(&self, size: GridSize) -> Result<StartedTerminalSession, SessionError> {
-        self.session_factory.start(size, &self.workspace_root)
+    pub(crate) fn start(
+        &self,
+        geometry: TerminalGeometry,
+    ) -> Result<StartedTerminalSession, SessionError> {
+        self.session_factory.start(geometry, &self.workspace_root)
     }
 
     pub(crate) fn fallback_title(&self) -> String {
