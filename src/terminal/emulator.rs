@@ -1028,13 +1028,15 @@ impl TerminalEmulator {
                     }
 
                     let rendered_row = Arc::<[CellSnapshot]>::from(rendered_cells);
-                    let rendered_row = self
-                        .row_cache
-                        .get(usize::from(row_index))
+                    let cached_row = self.row_cache.get(usize::from(row_index));
+                    let rendered_row = cached_row
                         .filter(|cached| cached.as_ref() == rendered_row.as_ref())
                         .cloned()
                         .unwrap_or(rendered_row);
                     if rebuild_all {
+                        if cached_row.is_none_or(|cached| !Arc::ptr_eq(cached, &rendered_row)) {
+                            dirty_rows.push(row_index);
+                        }
                         rendered_rows.push(rendered_row);
                     } else if !Arc::ptr_eq(&rendered_rows[usize::from(row_index)], &rendered_row) {
                         rendered_rows[usize::from(row_index)] = rendered_row;
@@ -1048,7 +1050,10 @@ impl TerminalEmulator {
         }
         snapshot.set_dirty(Dirty::Clean)?;
 
-        damage.content = if rebuild_all {
+        damage.content = if first_snapshot
+            || damage.resize
+            || (rebuild_all && dirty_rows.len() == usize::from(rows) && rows != 0)
+        {
             ContentDamageSnapshot::Full
         } else if dirty_rows.is_empty() {
             ContentDamageSnapshot::Clean
@@ -1425,14 +1430,26 @@ mod tests {
     #[test]
     fn alternate_screen_transition_reports_only_affected_metadata_and_content() {
         let mut emulator = emulator(10, 2);
-        let _ = emulator.snapshot().unwrap();
+        let first = emulator.snapshot().unwrap().unwrap();
 
         emulator.feed(b"\x1b[?1049h");
         let snapshot = emulator.snapshot().unwrap().unwrap();
 
         assert_eq!(snapshot.active_screen, ActiveScreenSnapshot::Alternate);
-        assert!(snapshot.damage.active_screen);
-        assert_eq!(snapshot.damage.content, ContentDamageSnapshot::Full);
+        assert!(
+            first
+                .rows
+                .iter()
+                .zip(snapshot.rows.iter())
+                .all(|(first, second)| Arc::ptr_eq(first, second))
+        );
+        assert_eq!(
+            snapshot.damage,
+            SnapshotDamage {
+                active_screen: true,
+                ..SnapshotDamage::default()
+            }
+        );
     }
 
     #[test]
