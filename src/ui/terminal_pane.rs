@@ -134,7 +134,7 @@ impl TerminalPane {
 
     pub(crate) fn close(&mut self) {
         self._event_task.take();
-        close_session(&mut self.session);
+        self.session.take();
     }
 
     fn scrollbar_metrics(&self) -> Option<ScrollMetrics<u64>> {
@@ -606,10 +606,6 @@ fn normalized_pane_title(reported_title: &str, fallback_title: &str) -> String {
     }
 }
 
-fn close_session(session: &mut Option<Box<dyn TerminalSessionHandle>>) {
-    session.take();
-}
-
 fn pointer_button(button: MouseButton) -> Option<PointerButton> {
     match button {
         MouseButton::Left => Some(PointerButton::Left),
@@ -984,24 +980,24 @@ mod tests {
         );
     }
 
-    #[test]
-    fn close_session_should_drop_a_handle_exactly_once_when_repeated() {
+    #[gpui::test]
+    fn terminal_pane_close_should_drop_its_session_once_when_repeated(cx: &mut TestAppContext) {
+        cx.update(crate::ui::init);
         let records = TestTerminalSessionRecords::default();
-        let started = TestTerminalSessionFactory::new(records.clone())
-            .start(
-                GridSize {
-                    cols: 80,
-                    rows: 24,
-                    cell_width_px: 8,
-                    cell_height_px: 16,
-                },
-                std::path::Path::new("/tmp/spaceterm-terminal-pane-test"),
-            )
-            .expect("the test terminal session should start");
-        let mut session = Some(started.handle);
+        let session_factory: Rc<dyn TerminalSessionFactory> =
+            Rc::new(TestTerminalSessionFactory::new(records.clone()));
+        let session_factory = WorkspaceTerminalSessionFactory::new(
+            session_factory,
+            PathBuf::from("/tmp/spaceterm-terminal-pane-test"),
+        );
+        let (pane, cx) =
+            cx.add_window_view(|window, cx| TerminalPane::new(session_factory, window, cx));
+        cx.run_until_parked();
 
-        close_session(&mut session);
-        close_session(&mut session);
+        pane.update(cx, |pane, _| {
+            pane.close();
+            pane.close();
+        });
 
         assert_eq!(records.dropped_session_ids(), vec![1]);
     }

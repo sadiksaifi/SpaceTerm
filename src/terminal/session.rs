@@ -247,37 +247,23 @@ struct StartedSessionPty {
     terminator: Box<dyn SessionPtyTerminator>,
 }
 
-struct NativeSessionPty(SpawnedPty);
-
-impl Write for NativeSessionPty {
-    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
-        self.0.write(buffer)
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        self.0.flush()
-    }
-}
-
-impl SessionPty for NativeSessionPty {
+impl SessionPty for SpawnedPty {
     fn take_reader(&mut self) -> std::io::Result<Box<dyn Read + Send>> {
-        self.0.take_reader()
+        SpawnedPty::take_reader(self)
     }
 
     fn resize(&self, size: PtySize) -> Result<(), AnyError> {
-        self.0.resize(size)
+        SpawnedPty::resize(self, size)
     }
 
     fn wait_for_child(&mut self, timeout: Duration) -> std::io::Result<ExitStatus> {
-        self.0.wait_for_child(timeout)
+        SpawnedPty::wait_for_child(self, timeout)
     }
 }
 
-struct NativeSessionPtyTerminator(PtyTerminator);
-
-impl SessionPtyTerminator for NativeSessionPtyTerminator {
+impl SessionPtyTerminator for PtyTerminator {
     fn terminate(&self) -> std::io::Result<()> {
-        self.0.terminate()
+        PtyTerminator::terminate(self)
     }
 }
 
@@ -287,8 +273,8 @@ fn spawn_native_session_pty(
 ) -> Result<StartedSessionPty, PtyError> {
     let (pty, terminator) = spawn_user_shell(size, working_directory)?;
     Ok(StartedSessionPty {
-        pty: Box::new(NativeSessionPty(pty)),
-        terminator: Box::new(NativeSessionPtyTerminator(terminator)),
+        pty: Box::new(pty),
+        terminator: Box::new(terminator),
     })
 }
 
@@ -316,7 +302,7 @@ impl TerminalSession {
         let worker = thread::Builder::new()
             .name("spaceterm-terminal".to_owned())
             .spawn(move || {
-                run_worker(
+                TerminalWorker::run(
                     pty,
                     size,
                     command_rx,
@@ -505,99 +491,120 @@ enum Command {
     Shutdown,
 }
 
-fn run_worker(
-    mut pty: Box<dyn SessionPty>,
-    initial_size: GridSize,
+struct TerminalWorker {
+    pty: Box<dyn SessionPty>,
+    emulator: TerminalEmulator,
     commands: CommandReceiver<Command>,
-    reader_transport: ReaderTransport,
+    reader_events: mpsc::Receiver<ReaderEvent>,
+    reader_thread: JoinHandle<()>,
     events: async_channel::Sender<SessionEvent>,
-    startup: mpsc::SyncSender<Result<(), String>>,
-) {
-    let ReaderTransport {
-        commands: reader_commands,
-        events: reader_events,
-        event_rx: reader_event_rx,
-    } = reader_transport;
-    let reader = match pty.take_reader() {
-        Ok(reader) => reader,
-        Err(error) => {
-            let _ = startup.send(Err(error.to_string()));
-            return;
-        }
-    };
+    pending_command: Option<Command>,
+}
 
-    let reader_thread = match spawn_reader(reader, reader_events, reader_commands) {
-        Ok(thread) => thread,
-        Err(error) => {
-            let _ = startup.send(Err(format!("failed to start PTY reader thread: {error}")));
-            return;
-        }
-    };
-
-    let mut emulator = match TerminalEmulator::new(
-        initial_size.cols,
-        initial_size.rows,
-        u32::from(initial_size.cell_width_px),
-        u32::from(initial_size.cell_height_px),
+impl TerminalWorker {
+    fn run(
+        mut pty: Box<dyn SessionPty>,
+        initial_size: GridSize,
+        commands: CommandReceiver<Command>,
+        reader_transport: ReaderTransport,
+        events: async_channel::Sender<SessionEvent>,
+        startup: mpsc::SyncSender<Result<(), String>>,
     ) {
-        Ok(emulator) => emulator,
-        Err(error) => {
-            let _ = startup.send(Err(error.to_string()));
-            drop(reader_event_rx);
-            drop(pty);
-            join_reader(reader_thread);
-            return;
-        }
-    };
-
-    if startup.send(Ok(())).is_err() {
-        drop(reader_event_rx);
-        drop(pty);
-        join_reader(reader_thread);
-        return;
-    }
-
-    if !publish_screen(&mut emulator, &events) {
-        drop(reader_event_rx);
-        drop(pty);
-        join_reader(reader_thread);
-        return;
-    }
-
-    let mut pending_command = None;
-    loop {
-        let command = match pending_command.take() {
-            Some(command) => command,
-            None => match commands.recv() {
-                Ok(command) => command,
-                Err(_) => break,
-            },
+        let ReaderTransport {
+            commands: reader_commands,
+            events: reader_events,
+            event_rx: reader_event_rx,
+        } = reader_transport;
+        let reader = match pty.take_reader() {
+            Ok(reader) => reader,
+            Err(error) => {
+                let _ = startup.send(Err(error.to_string()));
+                return;
+            }
         };
 
-        let keep_running = match command {
-            Command::Key(input) => match emulator.key(input) {
-                Ok(action) => apply_emulator_action(action, &mut emulator, &mut pty, &events),
+        let reader_thread = match spawn_reader(reader, reader_events, reader_commands) {
+            Ok(thread) => thread,
+            Err(error) => {
+                let _ = startup.send(Err(format!("failed to start PTY reader thread: {error}")));
+                return;
+            }
+        };
+
+        let emulator = match TerminalEmulator::new(
+            initial_size.cols,
+            initial_size.rows,
+            u32::from(initial_size.cell_width_px),
+            u32::from(initial_size.cell_height_px),
+        ) {
+            Ok(emulator) => emulator,
+            Err(error) => {
+                let _ = startup.send(Err(error.to_string()));
+                drop(reader_event_rx);
+                drop(pty);
+                join_reader(reader_thread);
+                return;
+            }
+        };
+
+        let mut worker = Self {
+            pty,
+            emulator,
+            commands,
+            reader_events: reader_event_rx,
+            reader_thread,
+            events,
+            pending_command: None,
+        };
+
+        if startup.send(Ok(())).is_err() {
+            worker.finish();
+            return;
+        }
+
+        worker.run_commands();
+        worker.finish();
+    }
+
+    fn run_commands(&mut self) {
+        if !self.publish_screen() {
+            return;
+        }
+
+        loop {
+            let command = match self.pending_command.take() {
+                Some(command) => command,
+                None => match self.commands.recv() {
+                    Ok(command) => command,
+                    Err(_) => break,
+                },
+            };
+
+            if !self.process_command(command) {
+                break;
+            }
+        }
+    }
+
+    fn process_command(&mut self, command: Command) -> bool {
+        match command {
+            Command::Key(input) => match self.emulator.key(input) {
+                Ok(action) => self.apply_emulator_action(action),
                 Err(message) => {
-                    send_runtime_failure(&events, message);
+                    self.send_runtime_failure(message);
                     false
                 }
             },
-            Command::ReaderReady => process_reader_events(
-                &reader_event_rx,
-                &commands,
-                &mut pending_command,
-                &mut emulator,
-                pty.as_mut(),
-                &events,
-            ),
+            Command::ReaderReady => self.process_reader_events(),
             Command::Resize(size) => {
-                let result = pty
+                let result = self
+                    .pty
                     .resize(size.pty_size())
                     .map_err(|error| {
                         format!("failed to resize the macOS pseudo-terminal: {error:#}")
                     })
                     .and_then(|()| {
-                        emulator
+                        self.emulator
                             .resize(
                                 size.cols,
                                 size.rows,
@@ -608,61 +615,189 @@ fn run_worker(
                     });
 
                 match result {
-                    Ok(()) => apply_emulator_action(
-                        EmulatorAction::screen_changed(),
-                        &mut emulator,
-                        &mut pty,
-                        &events,
-                    ),
+                    Ok(()) => self.apply_emulator_action(EmulatorAction::screen_changed()),
                     Err(message) => {
-                        send_runtime_failure(&events, message);
+                        self.send_runtime_failure(message);
                         false
                     }
                 }
             }
-            Command::Pointer(input) => match emulator.pointer(input) {
-                Ok(action) => apply_emulator_action(action, &mut emulator, &mut pty, &events),
+            Command::Pointer(input) => match self.emulator.pointer(input) {
+                Ok(action) => self.apply_emulator_action(action),
                 Err(message) => {
-                    send_runtime_failure(&events, message);
+                    self.send_runtime_failure(message);
                     false
                 }
             },
-            Command::Wheel(input) => match emulator.wheel(input) {
-                Ok(action) => apply_emulator_action(action, &mut emulator, &mut pty, &events),
+            Command::Wheel(input) => match self.emulator.wheel(input) {
+                Ok(action) => self.apply_emulator_action(action),
                 Err(message) => {
-                    send_runtime_failure(&events, message);
+                    self.send_runtime_failure(message);
                     false
                 }
             },
-            Command::ScrollTo(offset_rows) => apply_emulator_action(
-                emulator.scroll_to(offset_rows),
-                &mut emulator,
-                &mut pty,
-                &events,
-            ),
-            Command::Paste(text) => match emulator.paste(text) {
-                Ok(action) => apply_emulator_action(action, &mut emulator, &mut pty, &events),
+            Command::ScrollTo(offset_rows) => {
+                let action = self.emulator.scroll_to(offset_rows);
+                self.apply_emulator_action(action)
+            }
+            Command::Paste(text) => match self.emulator.paste(text) {
+                Ok(action) => self.apply_emulator_action(action),
                 Err(message) => {
-                    send_runtime_failure(&events, message);
+                    self.send_runtime_failure(message);
                     false
                 }
             },
             Command::SelectionText(reply) => {
-                let _ = reply.try_send(emulator.selection_text());
+                let _ = reply.try_send(self.emulator.selection_text());
                 true
             }
             Command::Shutdown => false,
-        };
-
-        if !keep_running {
-            break;
         }
     }
 
-    // The native SessionPty owns SpawnedPty, whose Drop terminates and reaps a live shell.
-    drop(reader_event_rx);
-    drop(pty);
-    join_reader(reader_thread);
+    fn process_reader_events(&mut self) -> bool {
+        let (batch, commands_open) = match self.receive_reader_batch(PTY_OUTPUT_QUEUE_CAPACITY) {
+            Ok(batch) => batch,
+            Err(message) => {
+                self.send_runtime_failure(message);
+                return false;
+            }
+        };
+        let ReaderEventBatch {
+            chunks,
+            reader_stopped,
+        } = batch;
+        if !self.process_output_chunks(chunks) {
+            return false;
+        }
+
+        if let Some(read_error) = reader_stopped {
+            let event = classify_reader_stop(
+                read_error,
+                self.pty.wait_for_child(FINAL_CHILD_WAIT_TIMEOUT),
+            );
+            self.send_terminal_event(event);
+            false
+        } else {
+            commands_open
+        }
+    }
+
+    fn receive_reader_batch(&mut self, limit: usize) -> Result<(ReaderEventBatch, bool), String> {
+        let mut batch = ReaderEventBatch {
+            chunks: Vec::with_capacity(limit),
+            reader_stopped: None,
+        };
+        let mut commands_open = true;
+
+        for index in 0..limit {
+            match self.reader_events.recv() {
+                Ok(ReaderEvent::Output(bytes)) => batch.chunks.push(bytes),
+                Ok(ReaderEvent::Stopped(read_error)) => {
+                    batch.reader_stopped = Some(read_error);
+                    break;
+                }
+                Err(_) => {
+                    return Err(
+                        "PTY reader notification arrived after its event channel closed".to_owned(),
+                    );
+                }
+            }
+
+            if index + 1 == limit {
+                break;
+            }
+            match self.commands.try_recv() {
+                Ok(Command::ReaderReady) => {}
+                Ok(command) => {
+                    self.pending_command = Some(command);
+                    break;
+                }
+                Err(mpsc::TryRecvError::Empty) => break,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    commands_open = false;
+                    break;
+                }
+            }
+        }
+
+        Ok((batch, commands_open))
+    }
+
+    fn process_output_chunks(&mut self, chunks: Vec<Vec<u8>>) -> bool {
+        let received_output = !chunks.is_empty();
+        for bytes in chunks {
+            self.emulator.feed(&bytes);
+        }
+
+        if received_output && (!self.write_pending_pty_responses() || !self.publish_screen()) {
+            return false;
+        }
+        true
+    }
+
+    fn apply_emulator_action(&mut self, action: EmulatorAction) -> bool {
+        self.write_pending_pty_responses()
+            && (action.bytes.is_empty() || self.write_pty(&action.bytes))
+            && (!action.screen_changed || self.publish_screen())
+    }
+
+    fn write_pending_pty_responses(&mut self) -> bool {
+        let responses = self.emulator.take_pty_responses();
+        responses.is_empty() || self.write_pty(&responses)
+    }
+
+    fn write_pty(&mut self, bytes: &[u8]) -> bool {
+        if let Err(error) = self.pty.write_all(bytes).and_then(|()| self.pty.flush()) {
+            let _ = self.send_runtime_failure(format!("failed to write to the shell PTY: {error}"));
+            return false;
+        }
+        true
+    }
+
+    fn publish_screen(&mut self) -> bool {
+        match self.emulator.snapshot() {
+            Ok(Some(snapshot)) => self
+                .events
+                .force_send(SessionEvent::Screen(snapshot))
+                .is_ok(),
+            Ok(None) => true,
+            Err(error) => {
+                self.send_runtime_failure(format!(
+                    "failed to produce terminal screen snapshot: {error}"
+                ));
+                false
+            }
+        }
+    }
+
+    fn send_runtime_failure(&self, message: String) -> bool {
+        self.send_terminal_event(SessionEvent::Failed(SessionFailure::Runtime(message)))
+    }
+
+    fn send_terminal_event(&self, event: SessionEvent) -> bool {
+        match self.events.try_send(event) {
+            Ok(()) => true,
+            Err(async_channel::TrySendError::Full(event)) => self.events.force_send(event).is_ok(),
+            Err(async_channel::TrySendError::Closed(_)) => false,
+        }
+    }
+
+    fn finish(self) {
+        let Self {
+            pty,
+            emulator: _emulator,
+            commands: _commands,
+            reader_events,
+            reader_thread,
+            events: _events,
+            pending_command: _pending_command,
+        } = self;
+        // SpawnedPty's Drop terminates and reaps a live shell for the native Adapter.
+        drop(reader_events);
+        drop(pty);
+        join_reader(reader_thread);
+    }
 }
 
 fn spawn_reader(
@@ -713,158 +848,6 @@ fn send_reader_event(
     events.send(event).is_ok() && commands.send(Command::ReaderReady).is_ok()
 }
 
-fn process_reader_events(
-    reader_events: &mpsc::Receiver<ReaderEvent>,
-    commands: &CommandReceiver<Command>,
-    pending_command: &mut Option<Command>,
-    emulator: &mut TerminalEmulator,
-    pty: &mut dyn SessionPty,
-    events: &async_channel::Sender<SessionEvent>,
-) -> bool {
-    let (batch, commands_open) = match receive_reader_batch(
-        reader_events,
-        commands,
-        pending_command,
-        PTY_OUTPUT_QUEUE_CAPACITY,
-    ) {
-        Ok(batch) => batch,
-        Err(message) => {
-            send_runtime_failure(events, message);
-            return false;
-        }
-    };
-    let ReaderEventBatch {
-        chunks,
-        reader_stopped,
-    } = batch;
-    if !process_output_chunks(chunks, emulator, pty, events) {
-        return false;
-    }
-
-    if let Some(read_error) = reader_stopped {
-        let event = classify_reader_stop(read_error, pty.wait_for_child(FINAL_CHILD_WAIT_TIMEOUT));
-        send_terminal_event(events, event);
-        false
-    } else {
-        commands_open
-    }
-}
-
-fn receive_reader_batch(
-    reader_events: &mpsc::Receiver<ReaderEvent>,
-    commands: &CommandReceiver<Command>,
-    pending_command: &mut Option<Command>,
-    limit: usize,
-) -> Result<(ReaderEventBatch, bool), String> {
-    let mut batch = ReaderEventBatch {
-        chunks: Vec::with_capacity(limit),
-        reader_stopped: None,
-    };
-    let mut commands_open = true;
-
-    for index in 0..limit {
-        match reader_events.recv() {
-            Ok(ReaderEvent::Output(bytes)) => batch.chunks.push(bytes),
-            Ok(ReaderEvent::Stopped(read_error)) => {
-                batch.reader_stopped = Some(read_error);
-                break;
-            }
-            Err(_) => {
-                return Err(
-                    "PTY reader notification arrived after its event channel closed".to_owned(),
-                );
-            }
-        }
-
-        if index + 1 == limit {
-            break;
-        }
-        match commands.try_recv() {
-            Ok(Command::ReaderReady) => {}
-            Ok(command) => {
-                *pending_command = Some(command);
-                break;
-            }
-            Err(mpsc::TryRecvError::Empty) => break,
-            Err(mpsc::TryRecvError::Disconnected) => {
-                commands_open = false;
-                break;
-            }
-        }
-    }
-
-    Ok((batch, commands_open))
-}
-
-fn process_output_chunks(
-    chunks: Vec<Vec<u8>>,
-    emulator: &mut TerminalEmulator,
-    writer: &mut dyn Write,
-    events: &async_channel::Sender<SessionEvent>,
-) -> bool {
-    let received_output = !chunks.is_empty();
-    for bytes in chunks {
-        emulator.feed(&bytes);
-    }
-
-    if received_output
-        && (!write_pending_pty_responses(emulator, writer, events)
-            || !publish_screen(emulator, events))
-    {
-        return false;
-    }
-    true
-}
-
-fn apply_emulator_action(
-    action: EmulatorAction,
-    emulator: &mut TerminalEmulator,
-    writer: &mut dyn Write,
-    events: &async_channel::Sender<SessionEvent>,
-) -> bool {
-    write_pending_pty_responses(emulator, writer, events)
-        && (action.bytes.is_empty() || write_pty(writer, &action.bytes, events))
-        && (!action.screen_changed || publish_screen(emulator, events))
-}
-
-fn write_pending_pty_responses(
-    emulator: &TerminalEmulator,
-    writer: &mut dyn Write,
-    events: &async_channel::Sender<SessionEvent>,
-) -> bool {
-    let responses = emulator.take_pty_responses();
-    responses.is_empty() || write_pty(writer, &responses, events)
-}
-
-fn write_pty(
-    writer: &mut dyn Write,
-    bytes: &[u8],
-    events: &async_channel::Sender<SessionEvent>,
-) -> bool {
-    if let Err(error) = writer.write_all(bytes).and_then(|()| writer.flush()) {
-        let _ = send_runtime_failure(events, format!("failed to write to the shell PTY: {error}"));
-        return false;
-    }
-    true
-}
-
-fn publish_screen(
-    emulator: &mut TerminalEmulator,
-    events: &async_channel::Sender<SessionEvent>,
-) -> bool {
-    match emulator.snapshot() {
-        Ok(Some(snapshot)) => events.force_send(SessionEvent::Screen(snapshot)).is_ok(),
-        Ok(None) => true,
-        Err(error) => {
-            send_runtime_failure(
-                events,
-                format!("failed to produce terminal screen snapshot: {error}"),
-            );
-            false
-        }
-    }
-}
-
 fn classify_reader_stop(
     read_error: Option<String>,
     wait_result: std::io::Result<ExitStatus>,
@@ -879,21 +862,6 @@ fn classify_reader_stop(
             read_error,
             wait_error: wait_error.to_string(),
         }),
-    }
-}
-
-fn send_runtime_failure(events: &async_channel::Sender<SessionEvent>, message: String) -> bool {
-    send_terminal_event(
-        events,
-        SessionEvent::Failed(SessionFailure::Runtime(message)),
-    )
-}
-
-fn send_terminal_event(events: &async_channel::Sender<SessionEvent>, event: SessionEvent) -> bool {
-    match events.try_send(event) {
-        Ok(()) => true,
-        Err(async_channel::TrySendError::Full(event)) => events.force_send(event).is_ok(),
-        Err(async_channel::TrySendError::Closed(_)) => false,
     }
 }
 
@@ -1256,48 +1224,32 @@ mod tests {
             .collect()
     }
 
-    #[derive(Clone, Debug)]
-    struct RecordingWriter {
-        bytes: Arc<Mutex<Vec<u8>>>,
-    }
-
-    impl Write for RecordingWriter {
-        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-            self.bytes.lock().unwrap().extend_from_slice(bytes);
-            Ok(bytes.len())
-        }
-
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-
     #[test]
-    fn terminal_events_preserve_the_latest_screen() {
-        let (events, receiver) = async_channel::bounded(2);
-        let first = ScreenSnapshot::empty();
-        let second = ScreenSnapshot::empty();
+    fn scripted_output_and_exit_should_preserve_the_latest_screen_before_the_final_event() {
+        let (result, reader_steps, records) = start_scripted_session(ScriptedPtyOptions::default());
+        let (mut session, events) = result.unwrap();
 
-        events
-            .force_send(SessionEvent::Screen(Arc::clone(&first)))
+        reader_steps
+            .send(ReaderStep::Bytes(b"ordered output".to_vec()))
             .unwrap();
-        events
-            .force_send(SessionEvent::Screen(Arc::clone(&second)))
-            .unwrap();
-        assert!(send_terminal_event(
-            &events,
-            SessionEvent::Exited("done".to_owned())
-        ));
+        reader_steps.send(ReaderStep::Eof).unwrap();
+        records.wait_for("the scripted worker to finish", |state| {
+            state.pty_drops == 1
+        });
 
-        match receiver.try_recv().unwrap() {
-            SessionEvent::Screen(screen) => assert!(Arc::ptr_eq(&screen, &second)),
-            event => panic!("expected latest screen, got {event:?}"),
-        }
-        assert!(matches!(
-            receiver.try_recv().unwrap(),
-            SessionEvent::Exited(status) if status == "done"
-        ));
-        assert!(receiver.try_recv().is_err());
+        let first = events.try_recv().unwrap();
+        let second = events.try_recv().unwrap();
+        let result = match (first, second) {
+            (SessionEvent::Screen(screen), SessionEvent::Exited(status)) => (
+                screen_text(&screen).contains("ordered output"),
+                status.starts_with("Shell exited"),
+                events.try_recv().is_err(),
+            ),
+            events => panic!("expected the latest Screen followed by Exited, got {events:?}"),
+        };
+
+        assert_eq!(result, (true, true, true));
+        session.shutdown();
     }
 
     #[test]
@@ -1450,110 +1402,7 @@ mod tests {
     }
 
     #[test]
-    fn output_control_output_should_preserve_the_control_boundary() {
-        let (command_tx, commands) = mpsc::channel();
-        let (reader_events, reader_event_rx) = mpsc::sync_channel(PTY_OUTPUT_QUEUE_CAPACITY);
-        assert!(send_reader_event(
-            ReaderEvent::Output(b"first".to_vec()),
-            &reader_events,
-            &command_tx,
-        ));
-        command_tx.send(Command::Resize(TEST_SIZE)).unwrap();
-        assert!(send_reader_event(
-            ReaderEvent::Output(b" second".to_vec()),
-            &reader_events,
-            &command_tx,
-        ));
-
-        assert!(matches!(commands.recv().unwrap(), Command::ReaderReady));
-        let mut pending_command = None;
-        let (first, commands_open) = receive_reader_batch(
-            &reader_event_rx,
-            &commands,
-            &mut pending_command,
-            PTY_OUTPUT_QUEUE_CAPACITY,
-        )
-        .unwrap();
-        assert!(commands_open);
-        assert_eq!(first.chunks, vec![b"first".to_vec()]);
-        assert!(matches!(pending_command, Some(Command::Resize(TEST_SIZE))));
-
-        let mut emulator = TerminalEmulator::new(80, 24, 8, 20).unwrap();
-        let mut writer = io::sink();
-        let (events, screens) = async_channel::bounded(2);
-        assert!(process_output_chunks(
-            first.chunks,
-            &mut emulator,
-            &mut writer,
-            &events,
-        ));
-        let SessionEvent::Screen(screen) = screens.try_recv().unwrap() else {
-            panic!("first output must publish a screen before the pending control")
-        };
-        assert!(screen_text(&screen).contains("first"));
-        assert!(!screen_text(&screen).contains("second"));
-
-        assert!(matches!(
-            pending_command.take(),
-            Some(Command::Resize(TEST_SIZE))
-        ));
-        assert!(matches!(commands.recv().unwrap(), Command::ReaderReady));
-        let (second, commands_open) = receive_reader_batch(
-            &reader_event_rx,
-            &commands,
-            &mut pending_command,
-            PTY_OUTPUT_QUEUE_CAPACITY,
-        )
-        .unwrap();
-        assert!(commands_open);
-        assert_eq!(second.chunks, vec![b" second".to_vec()]);
-        assert!(pending_command.is_none());
-        assert!(process_output_chunks(
-            second.chunks,
-            &mut emulator,
-            &mut writer,
-            &events,
-        ));
-        let SessionEvent::Screen(screen) = screens.try_recv().unwrap() else {
-            panic!("second output must publish after the pending control")
-        };
-        assert!(screen_text(&screen).contains("first second"));
-    }
-
-    #[test]
-    fn reader_completion_should_follow_all_bounded_output_in_one_batch() {
-        let (command_tx, commands) = mpsc::channel();
-        let (reader_events, reader_event_rx) = mpsc::sync_channel(PTY_OUTPUT_QUEUE_CAPACITY);
-        let reader = spawn_reader(
-            Box::new(io::Cursor::new(b"ordered output")),
-            reader_events,
-            command_tx,
-        )
-        .unwrap();
-
-        reader.join().unwrap();
-        assert!(matches!(commands.recv().unwrap(), Command::ReaderReady));
-        let mut pending_command = None;
-        let (batch, _commands_open) = receive_reader_batch(
-            &reader_event_rx,
-            &commands,
-            &mut pending_command,
-            PTY_OUTPUT_QUEUE_CAPACITY,
-        )
-        .unwrap();
-        assert!(matches!(
-            commands.try_recv(),
-            Err(mpsc::TryRecvError::Empty | mpsc::TryRecvError::Disconnected)
-        ));
-        let bytes = batch.chunks.into_iter().flatten().collect::<Vec<_>>();
-
-        assert_eq!(bytes, b"ordered output");
-        assert_eq!(batch.reader_stopped, Some(None));
-    }
-
-    #[test]
     fn consecutive_output_chunks_should_publish_one_ordered_coalesced_screen() {
-        let mut emulator = TerminalEmulator::new(80, 24, 8, 20).unwrap();
         let (command_tx, commands) = mpsc::channel();
         let (reader_events, reader_event_rx) = mpsc::sync_channel(PTY_OUTPUT_QUEUE_CAPACITY);
         assert!(send_reader_event(
@@ -1567,36 +1416,81 @@ mod tests {
             &command_tx,
         ));
         assert!(matches!(commands.recv().unwrap(), Command::ReaderReady));
-        let mut pending_command = None;
-        let (batch, commands_open) = receive_reader_batch(
-            &reader_event_rx,
-            &commands,
-            &mut pending_command,
-            PTY_OUTPUT_QUEUE_CAPACITY,
-        )
-        .unwrap();
-        assert!(commands_open);
-        assert!(pending_command.is_none());
-        assert!(matches!(
-            commands.try_recv(),
-            Err(mpsc::TryRecvError::Empty)
-        ));
-        let mut writer = io::sink();
-        let (events, receiver) = async_channel::bounded(2);
 
-        assert!(process_output_chunks(
-            batch.chunks,
-            &mut emulator,
-            &mut writer,
-            &events,
-        ));
-        assert_eq!(batch.reader_stopped, None);
+        let records = ScriptedPtyRecords::default();
+        let (events, receiver) = async_channel::bounded(PTY_OUTPUT_QUEUE_CAPACITY);
+        let mut worker = TerminalWorker {
+            pty: Box::new(ScriptedPty {
+                reader: None,
+                records,
+                reader_error: None,
+                resize_error: None,
+                write_error: None,
+                wait_error: None,
+                wait_times_out: false,
+                exit_code: 0,
+            }),
+            emulator: TerminalEmulator::new(80, 24, 8, 20).unwrap(),
+            commands,
+            reader_events: reader_event_rx,
+            reader_thread: thread::spawn(|| {}),
+            events,
+            pending_command: None,
+        };
 
+        assert!(worker.process_reader_events());
+        assert!(worker.pending_command.is_none());
         let SessionEvent::Screen(screen) = receiver.try_recv().unwrap() else {
             panic!("coalesced output must publish a terminal screen")
         };
         assert!(screen_text(&screen).contains("first second"));
         assert!(receiver.try_recv().is_err());
+        assert!(matches!(
+            worker.commands.try_recv(),
+            Err(mpsc::TryRecvError::Empty)
+        ));
+
+        worker.finish();
+    }
+
+    #[test]
+    fn output_control_output_should_preserve_screen_order_through_the_session_interface() {
+        let (result, reader_steps, records) = start_scripted_session(ScriptedPtyOptions::default());
+        let (mut session, events) = result.unwrap();
+
+        reader_steps
+            .send(ReaderStep::Bytes(b"first".to_vec()))
+            .unwrap();
+        let first = receive_event(
+            &events,
+            "the first output Screen",
+            |event| matches!(event, SessionEvent::Screen(screen) if screen_text(screen).contains("first")),
+        );
+        session.resize(TEST_SIZE);
+        records.wait_for("the control between output chunks", |state| {
+            state.resizes.len() == 1
+        });
+        reader_steps
+            .send(ReaderStep::Bytes(b" second".to_vec()))
+            .unwrap();
+        let second = receive_event(
+            &events,
+            "the second output Screen",
+            |event| matches!(event, SessionEvent::Screen(screen) if screen_text(screen).contains("first second")),
+        );
+
+        let (SessionEvent::Screen(first), SessionEvent::Screen(second)) = (first, second) else {
+            unreachable!("the event predicates accept only terminal screens")
+        };
+        assert_eq!(
+            (
+                screen_text(&first).contains("second"),
+                screen_text(&second).contains("first second"),
+                records.snapshot().resizes,
+            ),
+            (false, true, vec![TEST_SIZE.pty_size()])
+        );
+        session.shutdown();
     }
 
     #[test]
@@ -1619,30 +1513,35 @@ mod tests {
     }
 
     #[test]
-    fn pending_pty_responses_are_written_before_action_input() {
-        let mut emulator = TerminalEmulator::new(10, 2, 10, 20).unwrap();
-        emulator.feed(b"\x1b[?2048h");
-        emulator.resize(20, 4, 8, 18).unwrap();
-        let written = Arc::new(Mutex::new(Vec::new()));
-        let mut writer: Box<dyn Write + Send> = Box::new(RecordingWriter {
-            bytes: Arc::clone(&written),
-        });
-        let (events, _receiver) = async_channel::bounded(2);
+    fn pending_pty_responses_should_precede_later_input_through_the_session_interface() {
+        let (result, reader_steps, records) = start_scripted_session(ScriptedPtyOptions::default());
+        let (mut session, events) = result.unwrap();
+        let resized = GridSize {
+            cols: 20,
+            rows: 4,
+            cell_width_px: 8,
+            cell_height_px: 18,
+        };
 
-        assert!(apply_emulator_action(
-            EmulatorAction {
-                bytes: b"later".to_vec(),
-                screen_changed: false,
-            },
-            &mut emulator,
-            &mut writer,
+        reader_steps
+            .send(ReaderStep::Bytes(b"\x1b[?2048hX".to_vec()))
+            .unwrap();
+        receive_event(
             &events,
-        ));
-
-        assert_eq!(
-            written.lock().unwrap().as_slice(),
-            b"\x1b[48;4;20;72;160tlater"
+            "the mode-setting terminal output",
+            |event| matches!(event, SessionEvent::Screen(screen) if screen_text(screen).contains('X')),
         );
+        session.resize(resized);
+        records.wait_for("the in-band terminal resize response", |state| {
+            state.written == b"\x1b[48;4;20;72;160t"
+        });
+        session.paste("later".to_owned());
+        let state = records.wait_for("the later terminal input", |state| {
+            state.written.ends_with(b"later")
+        });
+
+        assert_eq!(state.written, b"\x1b[48;4;20;72;160tlater");
+        session.shutdown();
     }
 
     #[test]
