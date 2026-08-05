@@ -51,6 +51,10 @@ pub(crate) struct KeyInput {
 impl KeyInput {
     const TEXT_INPUT_LOGICAL_KEY: &'static str = "text-input";
 
+    pub(crate) fn input_method_commit(text: impl Into<String>) -> Self {
+        Self::text_input(text)
+    }
+
     pub(crate) fn text_input(text: impl Into<String>) -> Self {
         Self {
             action: KeyAction::Press,
@@ -302,13 +306,13 @@ mod tests {
     }
 
     #[test]
-    fn text_input_should_be_valid_without_a_physical_key() {
-        let input = KeyInput::text_input("日本語");
+    fn input_method_commits_are_valid_text_without_a_physical_key() {
+        let input = KeyInput::input_method_commit("日本語");
 
-        assert_eq!(
-            (input.validate(), input.text.as_deref(), input.physical_key),
-            (Ok(()), Some("日本語"), PhysicalKey::Unidentified)
-        );
+        assert_eq!(input.validate(), Ok(()));
+        assert!(input.is_text_input());
+        assert_eq!(input.text.as_deref(), Some("日本語"));
+        assert_eq!(input.physical_key, PhysicalKey::Unidentified);
     }
 
     #[test]

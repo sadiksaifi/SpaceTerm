@@ -681,6 +681,9 @@ struct HeldKeys(Vec<KeyInput>);
 
 impl HeldKeys {
     fn route(&mut self, input: &KeyInput) {
+        if input.is_text_input() {
+            return;
+        }
         match input.action {
             crate::terminal::key::KeyAction::Press | crate::terminal::key::KeyAction::Repeat => {
                 if let Some(held) = self
@@ -1250,6 +1253,15 @@ mod tests {
             consumed_modifiers: InputModifiers::default(),
             option_as_alt: OptionAsAltPolicy::default(),
         }
+    }
+
+    #[test]
+    fn input_method_commits_never_enter_the_held_key_set() {
+        let mut held = HeldKeys::default();
+
+        held.route(&KeyInput::input_method_commit("한"));
+
+        assert!(held.take_releases().is_empty());
     }
 
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]

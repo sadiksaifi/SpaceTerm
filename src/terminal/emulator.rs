@@ -1729,6 +1729,28 @@ mod tests {
     }
 
     #[test]
+    fn input_method_commits_emit_exact_utf8_independent_of_keyboard_protocol() {
+        let mut emulator = emulator(10, 2);
+
+        assert_eq!(
+            emulator
+                .key(KeyInput::input_method_commit("日本語"))
+                .unwrap()
+                .bytes,
+            "日本語".as_bytes()
+        );
+
+        emulator.feed(b"\x1b[>11u");
+        assert_eq!(
+            emulator
+                .key(KeyInput::input_method_commit("👩\u{200d}💻"))
+                .unwrap()
+                .bytes,
+            "👩\u{200d}💻".as_bytes()
+        );
+    }
+
+    #[test]
     fn named_keys_use_ghostty_key_encoding() {
         let mut emulator = emulator(10, 2);
         let cases: &[(PhysicalKey, InputModifiers, &[u8])] = &[
