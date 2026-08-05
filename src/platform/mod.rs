@@ -1,4 +1,7 @@
 #[cfg(target_os = "macos")]
+pub(crate) mod macos_keyboard;
+
+#[cfg(target_os = "macos")]
 pub(crate) mod macos_pty;
 
 #[cfg(not(target_os = "macos"))]

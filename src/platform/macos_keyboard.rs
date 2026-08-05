@@ -1,0 +1,263 @@
+use crate::terminal::{InputModifiers, KeyAction, KeyInput, KeyInputError, PhysicalKey};
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct NativeModifiers {
+    pub(crate) shift: bool,
+    pub(crate) alt: bool,
+    pub(crate) control: bool,
+    pub(crate) platform: bool,
+    pub(crate) caps_lock: bool,
+    pub(crate) num_lock: bool,
+    pub(crate) shift_right: bool,
+    pub(crate) alt_right: bool,
+    pub(crate) control_right: bool,
+    pub(crate) platform_right: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct NativeKeyEvent {
+    pub(crate) action: KeyAction,
+    pub(crate) native_key_code: u16,
+    pub(crate) characters: Option<String>,
+    pub(crate) characters_ignoring_modifiers: Option<String>,
+    pub(crate) unmodified_characters: Option<String>,
+    pub(crate) modifiers: NativeModifiers,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) enum OptionAsAltPolicy {
+    None,
+    #[default]
+    Both,
+    Left,
+    Right,
+}
+
+pub(crate) struct MacosKeyboardBridge {
+    option_as_alt: OptionAsAltPolicy,
+}
+
+impl MacosKeyboardBridge {
+    pub(crate) fn new(option_as_alt: OptionAsAltPolicy) -> Self {
+        Self { option_as_alt }
+    }
+
+    pub(crate) fn translate(&self, event: NativeKeyEvent) -> Result<KeyInput, KeyInputError> {
+        let physical_key = physical_key(event.native_key_code);
+        let logical_key = event
+            .characters_ignoring_modifiers
+            .as_deref()
+            .or(event.characters.as_deref())
+            .unwrap_or("")
+            .to_owned();
+        let modifiers = input_modifiers(event.modifiers);
+        let input = KeyInput {
+            action: event.action,
+            physical_key,
+            native_key_code: Some(event.native_key_code),
+            logical_key,
+            text: event.characters.filter(|text| printable_text(text)),
+            unshifted_codepoint: event
+                .unmodified_characters
+                .as_deref()
+                .and_then(single_scalar),
+            modifiers,
+            consumed_modifiers: InputModifiers {
+                shift: modifiers.shift,
+                alt: modifiers.alt,
+                shift_right: modifiers.shift_right,
+                alt_right: modifiers.alt_right,
+                ..InputModifiers::default()
+            },
+        };
+        input.validate()?;
+        Ok(input)
+    }
+}
+
+fn input_modifiers(modifiers: NativeModifiers) -> InputModifiers {
+    InputModifiers {
+        shift: modifiers.shift,
+        alt: modifiers.alt,
+        control: modifiers.control,
+        platform: modifiers.platform,
+        caps_lock: modifiers.caps_lock,
+        num_lock: modifiers.num_lock,
+        shift_right: modifiers.shift_right,
+        alt_right: modifiers.alt_right,
+        control_right: modifiers.control_right,
+        platform_right: modifiers.platform_right,
+    }
+}
+
+fn printable_text(text: &str) -> bool {
+    !text.is_empty()
+        && text
+            .chars()
+            .all(|character| !character.is_control() && !is_appkit_function_character(character))
+}
+
+fn single_scalar(text: &str) -> Option<char> {
+    let mut characters = text.chars();
+    let character = characters.next()?;
+    (characters.next().is_none()
+        && !character.is_control()
+        && !is_appkit_function_character(character))
+    .then_some(character)
+}
+
+fn is_appkit_function_character(character: char) -> bool {
+    ('\u{f700}'..='\u{f8ff}').contains(&character)
+}
+
+fn physical_key(native_key_code: u16) -> PhysicalKey {
+    match native_key_code {
+        0 => PhysicalKey::A,
+        1 => PhysicalKey::S,
+        2 => PhysicalKey::D,
+        3 => PhysicalKey::F,
+        4 => PhysicalKey::H,
+        5 => PhysicalKey::G,
+        6 => PhysicalKey::Z,
+        7 => PhysicalKey::X,
+        8 => PhysicalKey::C,
+        9 => PhysicalKey::V,
+        10 => PhysicalKey::IntlBackslash,
+        11 => PhysicalKey::B,
+        12 => PhysicalKey::Q,
+        13 => PhysicalKey::W,
+        14 => PhysicalKey::E,
+        15 => PhysicalKey::R,
+        16 => PhysicalKey::Y,
+        17 => PhysicalKey::T,
+        18 => PhysicalKey::Digit1,
+        19 => PhysicalKey::Digit2,
+        20 => PhysicalKey::Digit3,
+        21 => PhysicalKey::Digit4,
+        22 => PhysicalKey::Digit6,
+        23 => PhysicalKey::Digit5,
+        24 => PhysicalKey::Equal,
+        25 => PhysicalKey::Digit9,
+        26 => PhysicalKey::Digit7,
+        27 => PhysicalKey::Minus,
+        28 => PhysicalKey::Digit8,
+        29 => PhysicalKey::Digit0,
+        30 => PhysicalKey::BracketRight,
+        31 => PhysicalKey::O,
+        32 => PhysicalKey::U,
+        33 => PhysicalKey::BracketLeft,
+        34 => PhysicalKey::I,
+        35 => PhysicalKey::P,
+        36 => PhysicalKey::Enter,
+        37 => PhysicalKey::L,
+        38 => PhysicalKey::J,
+        39 => PhysicalKey::Quote,
+        40 => PhysicalKey::K,
+        41 => PhysicalKey::Semicolon,
+        42 => PhysicalKey::Backslash,
+        43 => PhysicalKey::Comma,
+        44 => PhysicalKey::Slash,
+        45 => PhysicalKey::N,
+        46 => PhysicalKey::M,
+        47 => PhysicalKey::Period,
+        48 => PhysicalKey::Tab,
+        49 => PhysicalKey::Space,
+        50 => PhysicalKey::Backquote,
+        51 => PhysicalKey::Backspace,
+        53 => PhysicalKey::Escape,
+        54 => PhysicalKey::MetaRight,
+        55 => PhysicalKey::MetaLeft,
+        56 => PhysicalKey::ShiftLeft,
+        57 => PhysicalKey::CapsLock,
+        58 => PhysicalKey::AltLeft,
+        59 => PhysicalKey::ControlLeft,
+        60 => PhysicalKey::ShiftRight,
+        61 => PhysicalKey::AltRight,
+        62 => PhysicalKey::ControlRight,
+        63 => PhysicalKey::Fn,
+        64 => PhysicalKey::F17,
+        65 => PhysicalKey::NumpadDecimal,
+        67 => PhysicalKey::NumpadMultiply,
+        69 => PhysicalKey::NumpadAdd,
+        71 => PhysicalKey::NumpadClear,
+        72 => PhysicalKey::AudioVolumeUp,
+        73 => PhysicalKey::AudioVolumeDown,
+        74 => PhysicalKey::AudioVolumeMute,
+        75 => PhysicalKey::NumpadDivide,
+        76 => PhysicalKey::NumpadEnter,
+        78 => PhysicalKey::NumpadSubtract,
+        79 => PhysicalKey::F18,
+        80 => PhysicalKey::F19,
+        81 => PhysicalKey::NumpadEqual,
+        82 => PhysicalKey::Numpad0,
+        83 => PhysicalKey::Numpad1,
+        84 => PhysicalKey::Numpad2,
+        85 => PhysicalKey::Numpad3,
+        86 => PhysicalKey::Numpad4,
+        87 => PhysicalKey::Numpad5,
+        88 => PhysicalKey::Numpad6,
+        89 => PhysicalKey::Numpad7,
+        91 => PhysicalKey::Numpad8,
+        92 => PhysicalKey::Numpad9,
+        93 => PhysicalKey::IntlYen,
+        94 => PhysicalKey::IntlRo,
+        95 => PhysicalKey::NumpadComma,
+        96 => PhysicalKey::F5,
+        97 => PhysicalKey::F6,
+        98 => PhysicalKey::F7,
+        99 => PhysicalKey::F3,
+        100 => PhysicalKey::F8,
+        101 => PhysicalKey::F9,
+        103 => PhysicalKey::F11,
+        105 => PhysicalKey::F13,
+        106 => PhysicalKey::F16,
+        107 => PhysicalKey::F14,
+        109 => PhysicalKey::F10,
+        111 => PhysicalKey::F12,
+        113 => PhysicalKey::F15,
+        114 => PhysicalKey::Help,
+        115 => PhysicalKey::Home,
+        116 => PhysicalKey::PageUp,
+        117 => PhysicalKey::Delete,
+        118 => PhysicalKey::F4,
+        119 => PhysicalKey::End,
+        120 => PhysicalKey::F2,
+        121 => PhysicalKey::PageDown,
+        122 => PhysicalKey::F1,
+        123 => PhysicalKey::ArrowLeft,
+        124 => PhysicalKey::ArrowRight,
+        125 => PhysicalKey::ArrowDown,
+        126 => PhysicalKey::ArrowUp,
+        _ => PhysicalKey::Unidentified,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn native(native_key_code: u16, text: &str) -> NativeKeyEvent {
+        NativeKeyEvent {
+            action: KeyAction::Press,
+            native_key_code,
+            characters: Some(text.to_owned()),
+            characters_ignoring_modifiers: Some(text.to_owned()),
+            unmodified_characters: Some(text.to_owned()),
+            modifiers: NativeModifiers::default(),
+        }
+    }
+
+    #[test]
+    fn native_identity_stays_physical_when_the_active_layout_changes_text() {
+        let bridge = MacosKeyboardBridge::new(OptionAsAltPolicy::Both);
+
+        let us = bridge.translate(native(12, "q")).unwrap();
+        let dvorak = bridge.translate(native(12, "'")).unwrap();
+
+        assert_eq!((us.physical_key, us.logical_key.as_str()), (PhysicalKey::Q, "q"));
+        assert_eq!(
+            (dvorak.physical_key, dvorak.logical_key.as_str()),
+            (PhysicalKey::Q, "'")
+        );
+    }
+}
