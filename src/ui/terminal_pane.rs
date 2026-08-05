@@ -19,8 +19,8 @@ use crate::terminal::geometry::{
     BackingScale, CellGridSize, LogicalCellSize, LogicalPosition, LogicalSize, TerminalGeometry,
 };
 use crate::terminal::{
-    InputModifiers, KeyAction, KeyInput, PhysicalKey, PointerButton, PointerInput, PointerPhase,
-    ScreenSnapshot, SessionEvent, SurfacePosition, TerminalSessionHandle, WheelInput,
+    InputModifiers, KeyAction, KeyInput, KeyInputError, PhysicalKey, PointerButton, PointerInput,
+    PointerPhase, ScreenSnapshot, SessionEvent, SurfacePosition, TerminalSessionHandle, WheelInput,
     WorkspaceTerminalSessionFactory,
 };
 use crate::theme::{ACTIVE_THEME, Color};
@@ -255,12 +255,19 @@ impl TerminalPane {
     }
 
     fn on_key_down(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(input) = encode_key(event) {
-            if let Some(session) = &self.session {
-                session.key(input);
+        match encode_key(event) {
+            Ok(input) => {
+                if let Some(session) = &self.session {
+                    session.key(input);
+                }
             }
-            cx.stop_propagation();
+            Err(error) => {
+                let status = error.to_string();
+                eprintln!("{status}");
+                self.status = Some(status);
+            }
         }
+        cx.stop_propagation();
     }
 
     fn increase_font_size(
@@ -686,7 +693,7 @@ fn accumulate_wheel_steps(remainder: &mut f32, delta: f32) -> i32 {
     steps
 }
 
-fn encode_key(event: &KeyDownEvent) -> Option<KeyInput> {
+fn encode_key(event: &KeyDownEvent) -> Result<KeyInput, KeyInputError> {
     let keystroke = &event.keystroke;
     let physical_key = physical_key(&keystroke.key);
     let text = keystroke.key_char.clone().filter(|text| {
@@ -694,7 +701,7 @@ fn encode_key(event: &KeyDownEvent) -> Option<KeyInput> {
     });
     let unshifted_codepoint = single_char(&keystroke.key).map(unshifted_character);
 
-    Some(KeyInput {
+    let input = KeyInput {
         action: if event.is_held {
             KeyAction::Repeat
         } else {
@@ -707,7 +714,9 @@ fn encode_key(event: &KeyDownEvent) -> Option<KeyInput> {
         unshifted_codepoint,
         modifiers: input_modifiers(keystroke.modifiers),
         consumed_modifiers: InputModifiers::default(),
-    })
+    };
+    input.validate()?;
+    Ok(input)
 }
 
 fn physical_key(key: &str) -> PhysicalKey {
@@ -969,7 +978,7 @@ mod tests {
     fn maps_printable_text_and_terminal_keys() {
         assert_eq!(
             encode_key(&event("a", Some("a"), Modifiers::default())),
-            Some(expected_key(
+            Ok(expected_key(
                 PhysicalKey::A,
                 "a",
                 Some("a"),
@@ -978,7 +987,7 @@ mod tests {
         );
         assert_eq!(
             encode_key(&event("enter", None, Modifiers::default())),
-            Some(expected_key(
+            Ok(expected_key(
                 PhysicalKey::Enter,
                 "enter",
                 None,
@@ -987,7 +996,7 @@ mod tests {
         );
         assert_eq!(
             encode_key(&event("up", None, Modifiers::default())),
-            Some(expected_key(
+            Ok(expected_key(
                 PhysicalKey::ArrowUp,
                 "up",
                 None,
@@ -1005,7 +1014,7 @@ mod tests {
         };
         assert_eq!(
             encode_key(&event("c", Some("c"), modifiers)),
-            Some(expected_key(
+            Ok(expected_key(
                 PhysicalKey::C,
                 "c",
                 Some("c"),
@@ -1027,7 +1036,7 @@ mod tests {
 
         assert_eq!(
             encode_key(&event("d", Some("d"), modifiers)),
-            Some(expected_key(
+            Ok(expected_key(
                 PhysicalKey::D,
                 "d",
                 Some("d"),
@@ -1047,7 +1056,7 @@ mod tests {
         };
         assert_eq!(
             encode_key(&event("q", None, modifiers)),
-            Some(expected_key(
+            Ok(expected_key(
                 PhysicalKey::Q,
                 "q",
                 None,
@@ -1056,6 +1065,17 @@ mod tests {
                     ..InputModifiers::default()
                 },
             ))
+        );
+    }
+
+    #[test]
+    fn unsupported_keys_return_typed_identity_errors() {
+        assert_eq!(
+            encode_key(&event("hyper", None, Modifiers::default())),
+            Err(KeyInputError::UnsupportedKey {
+                native_key_code: None,
+                logical_key: "hyper".to_owned(),
+            })
         );
     }
 
