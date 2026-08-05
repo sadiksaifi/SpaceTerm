@@ -1836,6 +1836,10 @@ mod tests {
             terminal_surface_position(bounds, gpui::point(px(9.0), px(20.0)), geometry, false,)
                 .is_none()
         );
+        assert_eq!(
+            terminal_surface_position(bounds, gpui::point(px(2.5), px(65.0)), geometry, true),
+            Some(SurfacePosition { x: -7.5, y: 45.0 })
+        );
     }
 
     #[test]

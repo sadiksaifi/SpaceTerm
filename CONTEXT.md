@@ -193,6 +193,16 @@ accumulate row or column drift. A Pane observes native window metric changes, in
 scale-dependent rendering resources, and sends resize updates through a latest-only mailbox so a
 resize burst cannot create an unbounded control backlog.
 
+### Terminal Mouse Input Routing
+
+The Terminal Emulator owns conventional mouse-mode routing and delegates X10, normal, button,
+any-motion, UTF-8, SGR, URXVT, and SGR-pixel byte encoding to `libghostty-vt`. Cell and pixel
+reports derive from `TerminalGeometry`, including clamped off-grid drags. A captured press owns its
+route and button state until the matching release. Shift selects locally only when the injected
+host policy permits that override; otherwise its modifier is reported to the application for
+presses, motion, and wheel input. Worker snapshots publish whether application mouse tracking is
+active so the Pane's pointer presentation matches the effective route.
+
 ### Typed Terminal Key Input
 
 Terminal key input crosses the Terminal Session command lane as one ordered, typed event carrying

@@ -1505,6 +1505,189 @@ mod tests {
         assert_eq!(action.bytes, b"\x1b[<35;2;1M");
     }
 
+    #[test]
+    fn conventional_mouse_protocol_mode_matrix_is_byte_exact() {
+        let mut x10 = emulator(10, 3);
+        x10.feed(b"\x1b[?9h");
+        assert_eq!(
+            x10.pointer(pointer(
+                PointerPhase::Press,
+                Some(PointerButton::Left),
+                11.0,
+                21.0,
+                false,
+            ))
+            .unwrap()
+            .bytes,
+            b"\x1b[M \"\""
+        );
+
+        let mut normal = emulator(10, 3);
+        normal.feed(b"\x1b[?1000h");
+        _ = normal
+            .pointer(pointer(
+                PointerPhase::Press,
+                Some(PointerButton::Left),
+                11.0,
+                21.0,
+                false,
+            ))
+            .unwrap();
+        assert_eq!(
+            normal
+                .pointer(pointer(
+                    PointerPhase::Release,
+                    Some(PointerButton::Left),
+                    11.0,
+                    21.0,
+                    false,
+                ))
+                .unwrap()
+                .bytes,
+            b"\x1b[M#\"\""
+        );
+
+        let mut button = emulator(10, 3);
+        button.feed(b"\x1b[?1002h");
+        _ = button
+            .pointer(pointer(
+                PointerPhase::Press,
+                Some(PointerButton::Left),
+                11.0,
+                21.0,
+                false,
+            ))
+            .unwrap();
+        assert_eq!(
+            button
+                .pointer(pointer(
+                    PointerPhase::Motion,
+                    Some(PointerButton::Left),
+                    21.0,
+                    21.0,
+                    false,
+                ))
+                .unwrap()
+                .bytes,
+            b"\x1b[M@#\""
+        );
+
+        let mut any_motion = emulator(10, 3);
+        any_motion.feed(b"\x1b[?1003h");
+        assert_eq!(
+            any_motion
+                .pointer(pointer(PointerPhase::Motion, None, 11.0, 21.0, false))
+                .unwrap()
+                .bytes,
+            b"\x1b[MC\"\""
+        );
+
+        let mut utf8 = emulator(300, 3);
+        utf8.feed(b"\x1b[?1000h\x1b[?1005h");
+        assert_eq!(
+            utf8.pointer(pointer(
+                PointerPhase::Press,
+                Some(PointerButton::Left),
+                2_591.0,
+                21.0,
+                false,
+            ))
+            .unwrap()
+            .bytes,
+            b"\x1b[M \xc4\xa4\""
+        );
+
+        let mut sgr = emulator(10, 3);
+        sgr.feed(b"\x1b[?1000h\x1b[?1006h");
+        assert_eq!(
+            sgr.pointer(pointer(
+                PointerPhase::Press,
+                Some(PointerButton::Left),
+                11.0,
+                21.0,
+                false,
+            ))
+            .unwrap()
+            .bytes,
+            b"\x1b[<0;2;2M"
+        );
+
+        let mut urxvt = emulator(10, 3);
+        urxvt.feed(b"\x1b[?1000h\x1b[?1015h");
+        assert_eq!(
+            urxvt
+                .pointer(pointer(
+                    PointerPhase::Press,
+                    Some(PointerButton::Left),
+                    11.0,
+                    21.0,
+                    false,
+                ))
+                .unwrap()
+                .bytes,
+            b"\x1b[32;2;2M"
+        );
+
+        let mut sgr_pixels = emulator(10, 3);
+        sgr_pixels.feed(b"\x1b[?1000h\x1b[?1016h");
+        assert_eq!(
+            sgr_pixels
+                .pointer(pointer(
+                    PointerPhase::Press,
+                    Some(PointerButton::Left),
+                    11.0,
+                    21.0,
+                    false,
+                ))
+                .unwrap()
+                .bytes,
+            b"\x1b[<0;11;21M"
+        );
+    }
+
+    #[test]
+    fn offscreen_drag_preserves_button_and_modifiers_at_clamped_boundaries() {
+        let mut emulator = emulator(10, 2);
+        emulator.feed(b"\x1b[?1002h\x1b[?1006h");
+        _ = emulator
+            .pointer(pointer(
+                PointerPhase::Press,
+                Some(PointerButton::Left),
+                1.0,
+                1.0,
+                false,
+            ))
+            .unwrap();
+
+        let mut drag = pointer(
+            PointerPhase::Motion,
+            Some(PointerButton::Left),
+            -10.0,
+            100.0,
+            false,
+        );
+        drag.modifiers = InputModifiers {
+            shift: true,
+            alt: true,
+            control: true,
+            ..InputModifiers::default()
+        };
+        let dragged = emulator.pointer(drag).unwrap();
+
+        let mut release = pointer(
+            PointerPhase::Release,
+            Some(PointerButton::Left),
+            200.0,
+            -10.0,
+            false,
+        );
+        release.modifiers = drag.modifiers;
+        let released = emulator.pointer(release).unwrap();
+
+        assert_eq!(dragged.bytes, b"\x1b[<60;1;2M");
+        assert_eq!(released.bytes, b"\x1b[<28;10;1m");
+    }
+
     fn pointer(
         phase: PointerPhase,
         button: Option<PointerButton>,
