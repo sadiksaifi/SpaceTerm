@@ -1,5 +1,3 @@
-use std::path::PathBuf;
-use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui::prelude::*;
@@ -19,8 +17,8 @@ use super::{
 };
 use crate::terminal::{
     GridSize, InputModifiers, KeyCode, KeyInput, PointerButton, PointerInput, PointerPhase,
-    ScreenSnapshot, SessionEvent, SurfacePosition, TerminalSessionFactory, TerminalSessionHandle,
-    WheelInput,
+    ScreenSnapshot, SessionEvent, SurfacePosition, TerminalSessionHandle, WheelInput,
+    WorkspaceTerminalSessionFactory,
 };
 use crate::theme::{ACTIVE_THEME, Color};
 
@@ -43,8 +41,7 @@ pub(crate) enum TerminalPaneEvent {
 }
 
 pub(crate) struct TerminalPane {
-    session_factory: Rc<dyn TerminalSessionFactory>,
-    working_directory: PathBuf,
+    session_factory: WorkspaceTerminalSessionFactory,
     session: Option<Box<dyn TerminalSessionHandle>>,
     session_start_attempted: bool,
     screen: Arc<ScreenSnapshot>,
@@ -67,8 +64,7 @@ pub(crate) struct TerminalPane {
 
 impl TerminalPane {
     pub(crate) fn new(
-        session_factory: Rc<dyn TerminalSessionFactory>,
-        working_directory: PathBuf,
+        session_factory: WorkspaceTerminalSessionFactory,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -97,7 +93,6 @@ impl TerminalPane {
 
         Self {
             session_factory,
-            working_directory,
             session: None,
             session_start_attempted: false,
             screen: ScreenSnapshot::empty(),
@@ -188,7 +183,7 @@ impl TerminalPane {
         }
         self.session_start_attempted = true;
 
-        match self.session_factory.start(size, &self.working_directory) {
+        match self.session_factory.start(size) {
             Ok(started) => {
                 self.session = Some(started.handle);
                 let receiver = started.events;
@@ -707,11 +702,13 @@ fn single_char(value: &str) -> Option<char> {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
     use std::rc::Rc;
 
     use gpui::{Entity, Keystroke, Modifiers, TestAppContext, VisualTestContext};
 
     use super::*;
+    use crate::terminal::TerminalSessionFactory;
     use crate::terminal::testing::{
         RecordedSessionCommand, TestTerminalSessionFactory, TestTerminalSessionRecords,
     };
@@ -722,14 +719,12 @@ mod tests {
             TestTerminalSessionFactory::new(TestTerminalSessionRecords::default())
                 .with_start_failure("terminal session unavailable in UI test"),
         );
-        let (pane, cx) = cx.add_window_view(|window, cx| {
-            TerminalPane::new(
-                session_factory,
-                PathBuf::from("/tmp/spaceterm-terminal-pane-test"),
-                window,
-                cx,
-            )
-        });
+        let session_factory = WorkspaceTerminalSessionFactory::new(
+            session_factory,
+            PathBuf::from("/tmp/spaceterm-terminal-pane-test"),
+        );
+        let (pane, cx) =
+            cx.add_window_view(|window, cx| TerminalPane::new(session_factory, window, cx));
         cx.update(|window, cx| {
             pane.update(cx, |pane, _cx| pane.focus(window));
         });

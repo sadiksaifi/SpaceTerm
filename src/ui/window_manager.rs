@@ -1,6 +1,3 @@
-use std::path::PathBuf;
-use std::rc::Rc;
-
 use gpui::prelude::*;
 use gpui::{
     AnyElement, App, Context, Entity, EventEmitter, MouseButton, MouseDownEvent, Pixels, Point,
@@ -18,7 +15,7 @@ use super::{
 use crate::domain::{
     CloseWindowOutcome, SplitAxis, WindowCollection, WindowError, WindowId, ZoomState,
 };
-use crate::terminal::TerminalSessionFactory;
+use crate::terminal::WorkspaceTerminalSessionFactory;
 use crate::theme::{ACTIVE_THEME, Color};
 
 const WINDOW_BAR_HEIGHT: f32 = TOP_CHROME_HEIGHT;
@@ -50,8 +47,7 @@ pub(crate) enum WindowManagerEvent {
 
 pub(crate) struct WindowManager {
     windows: WindowCollection<Entity<PaneHost>>,
-    session_factory: Rc<dyn TerminalSessionFactory>,
-    workspace_root: PathBuf,
+    session_factory: WorkspaceTerminalSessionFactory,
     active: bool,
     sidebar_visible: bool,
     sidebar_width: Pixels,
@@ -66,25 +62,17 @@ impl WindowManager {
     }
 
     pub(crate) fn new(
-        session_factory: Rc<dyn TerminalSessionFactory>,
-        workspace_root: PathBuf,
+        session_factory: WorkspaceTerminalSessionFactory,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         let windows = WindowCollection::new(|window_id| {
-            Self::create_pane_host(
-                window_id,
-                Rc::clone(&session_factory),
-                workspace_root.clone(),
-                window,
-                cx,
-            )
+            Self::create_pane_host(window_id, session_factory.clone(), window, cx)
         });
 
         Self {
             windows,
             session_factory,
-            workspace_root,
             active: true,
             sidebar_visible: true,
             sidebar_width: px(WORKSPACE_SIDEBAR_DEFAULT_WIDTH),
@@ -96,13 +84,11 @@ impl WindowManager {
 
     fn create_pane_host(
         window_id: WindowId,
-        session_factory: Rc<dyn TerminalSessionFactory>,
-        workspace_root: PathBuf,
+        session_factory: WorkspaceTerminalSessionFactory,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Entity<PaneHost> {
-        let pane_host =
-            cx.new(|cx| PaneHost::new(window_id, session_factory, workspace_root, window, cx));
+        let pane_host = cx.new(|cx| PaneHost::new(window_id, session_factory, window, cx));
         debug_assert_eq!(pane_host.read(cx).window_id(), window_id);
         cx.subscribe_in(
             &pane_host,
@@ -194,10 +180,9 @@ impl WindowManager {
 
     pub(crate) fn create_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let previous_window = self.windows.active_window().clone();
-        let session_factory = Rc::clone(&self.session_factory);
-        let workspace_root = self.workspace_root.clone();
+        let session_factory = self.session_factory.clone();
         let result = self.windows.create_window(|window_id| {
-            Self::create_pane_host(window_id, session_factory, workspace_root, window, cx)
+            Self::create_pane_host(window_id, session_factory, window, cx)
         });
         let window_id = match result {
             Ok(window_id) => window_id,
@@ -852,6 +837,8 @@ fn window_menu_button_contains(position: Point<Pixels>, content_width: Pixels) -
 #[cfg(test)]
 mod tests {
     use std::cell::Cell;
+    use std::path::PathBuf;
+    use std::rc::Rc;
     use std::sync::Arc;
 
     use gpui::{
@@ -862,7 +849,7 @@ mod tests {
     use super::*;
     use crate::domain::PaneId;
     use crate::terminal::testing::{TestTerminalSessionFactory, TestTerminalSessionRecords};
-    use crate::terminal::{ScreenSnapshot, SessionEvent};
+    use crate::terminal::{ScreenSnapshot, SessionEvent, TerminalSessionFactory};
 
     fn window_manager(
         cx: &mut TestAppContext,
@@ -875,14 +862,12 @@ mod tests {
         let records = TestTerminalSessionRecords::default();
         let session_factory: Rc<dyn TerminalSessionFactory> =
             Rc::new(TestTerminalSessionFactory::new(records.clone()));
-        let (manager, cx) = cx.add_window_view(|window, cx| {
-            WindowManager::new(
-                session_factory,
-                PathBuf::from("/tmp/spaceterm-window-manager-test"),
-                window,
-                cx,
-            )
-        });
+        let session_factory = WorkspaceTerminalSessionFactory::new(
+            session_factory,
+            PathBuf::from("/tmp/spaceterm-window-manager-test"),
+        );
+        let (manager, cx) =
+            cx.add_window_view(|window, cx| WindowManager::new(session_factory, window, cx));
         cx.update(|window, cx| {
             manager.update(cx, |manager, cx| manager.focus(window, cx));
         });

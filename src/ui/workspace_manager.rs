@@ -23,10 +23,10 @@ use super::{
     handle_top_chrome_mouse_down,
 };
 use crate::domain::{
-    CloseWorkspaceOutcome, FinalWindowCloseOutcome, NewWorkspace, WorkspaceCollection,
-    WorkspaceError, WorkspaceId,
+    CloseWorkspaceOutcome, FinalWindowCloseOutcome, WorkspaceCollection, WorkspaceError,
+    WorkspaceId,
 };
-use crate::terminal::TerminalSessionFactory;
+use crate::terminal::{TerminalSessionFactory, WorkspaceTerminalSessionFactory};
 use crate::theme::{ACTIVE_THEME, Color};
 
 const SIDEBAR_TOGGLE_INSET: f32 = 4.0;
@@ -77,7 +77,7 @@ struct DraggedWorkspaceSidebar;
 pub(crate) struct WorkspaceManager {
     workspaces: WorkspaceCollection<Entity<WindowManager>>,
     session_factory: Rc<dyn TerminalSessionFactory>,
-    home_directory: PathBuf,
+    default_workspace_root: PathBuf,
     sidebar_visible: bool,
     sidebar_width: Pixels,
     workspace_list_scroll_handle: ScrollHandle,
@@ -92,18 +92,19 @@ pub(crate) struct WorkspaceManager {
 impl WorkspaceManager {
     pub(crate) fn new(
         session_factory: Rc<dyn TerminalSessionFactory>,
-        home_directory: PathBuf,
+        default_workspace_root: PathBuf,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         let workspaces = WorkspaceCollection::new(
-            default_workspace_name(1),
-            home_directory.clone(),
-            |workspace_id| {
+            default_workspace_root.clone(),
+            |workspace_id, workspace_root| {
                 Self::create_window_manager(
                     workspace_id,
-                    Rc::clone(&session_factory),
-                    home_directory.clone(),
+                    WorkspaceTerminalSessionFactory::new(
+                        Rc::clone(&session_factory),
+                        workspace_root.to_path_buf(),
+                    ),
                     true,
                     px(WORKSPACE_SIDEBAR_DEFAULT_WIDTH),
                     window,
@@ -133,7 +134,7 @@ impl WorkspaceManager {
         Self {
             workspaces,
             session_factory,
-            home_directory,
+            default_workspace_root,
             sidebar_visible: true,
             sidebar_width: px(WORKSPACE_SIDEBAR_DEFAULT_WIDTH),
             workspace_list_scroll_handle: ScrollHandle::new(),
@@ -148,15 +149,14 @@ impl WorkspaceManager {
 
     fn create_window_manager(
         workspace_id: WorkspaceId,
-        session_factory: Rc<dyn TerminalSessionFactory>,
-        workspace_root: PathBuf,
+        session_factory: WorkspaceTerminalSessionFactory,
         sidebar_visible: bool,
         sidebar_width: Pixels,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Entity<WindowManager> {
         let manager = cx.new(|cx| {
-            let mut manager = WindowManager::new(session_factory, workspace_root, window, cx);
+            let mut manager = WindowManager::new(session_factory, window, cx);
             manager.set_sidebar_layout(sidebar_visible, sidebar_width, cx);
             manager
         });
@@ -272,20 +272,19 @@ impl WorkspaceManager {
     }
 
     fn create_workspace(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let workspace_name = next_default_workspace_name(&self.workspaces, None);
         let previous_manager = self.workspaces.active_workspace().payload().clone();
         let session_factory = Rc::clone(&self.session_factory);
-        let home_directory = self.home_directory.clone();
         let sidebar_visible = self.sidebar_visible;
         let sidebar_width = self.sidebar_width;
         let result = self.workspaces.create_workspace(
-            workspace_name,
-            self.home_directory.clone(),
-            |workspace_id| {
+            self.default_workspace_root.clone(),
+            |workspace_id, workspace_root| {
                 Self::create_window_manager(
                     workspace_id,
-                    session_factory,
-                    home_directory,
+                    WorkspaceTerminalSessionFactory::new(
+                        session_factory,
+                        workspace_root.to_path_buf(),
+                    ),
                     sidebar_visible,
                     sidebar_width,
                     window,
@@ -372,25 +371,26 @@ impl WorkspaceManager {
         cx: &mut Context<Self>,
     ) {
         let was_active = self.workspaces.active_workspace_id() == workspace_id;
-        let replacement_name = next_default_workspace_name(&self.workspaces, Some(workspace_id));
         let session_factory = Rc::clone(&self.session_factory);
-        let home_directory = self.home_directory.clone();
         let sidebar_visible = self.sidebar_visible;
         let sidebar_width = self.sidebar_width;
-        let outcome = self
-            .workspaces
-            .close_workspace(workspace_id, |replacement_workspace_id| {
-                let manager = Self::create_window_manager(
+        let outcome = self.workspaces.close_workspace(
+            workspace_id,
+            self.default_workspace_root.clone(),
+            |replacement_workspace_id, workspace_root| {
+                Self::create_window_manager(
                     replacement_workspace_id,
-                    session_factory,
-                    home_directory.clone(),
+                    WorkspaceTerminalSessionFactory::new(
+                        session_factory,
+                        workspace_root.to_path_buf(),
+                    ),
                     sidebar_visible,
                     sidebar_width,
                     window,
                     cx,
-                );
-                NewWorkspace::new(replacement_name, home_directory, manager)
-            });
+                )
+            },
+        );
         let outcome = match outcome {
             Ok(outcome) => outcome,
             Err(error) => {
@@ -1300,27 +1300,6 @@ fn render_workspace_menu_row(
         .into_any_element()
 }
 
-fn default_workspace_name(workspace_number: usize) -> String {
-    format!("Workspace {workspace_number}")
-}
-
-fn next_default_workspace_name<T>(
-    workspaces: &WorkspaceCollection<T>,
-    excluded_workspace_id: Option<WorkspaceId>,
-) -> String {
-    for workspace_number in 1..=workspaces.len().saturating_add(1) {
-        let candidate = default_workspace_name(workspace_number);
-        let is_available = workspaces.iter().all(|workspace| {
-            Some(workspace.id()) == excluded_workspace_id || workspace.name() != candidate
-        });
-        if is_available {
-            return candidate;
-        }
-    }
-
-    unreachable!("one of len + 1 default Workspace names must be available")
-}
-
 fn gpui_color(color: Color) -> gpui::Rgba {
     rgba(color.rgba_hex())
 }
@@ -1832,7 +1811,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn command_n_should_create_and_activate_a_home_directory_workspace(cx: &mut TestAppContext) {
+    fn command_n_should_create_and_activate_a_default_root_workspace(cx: &mut TestAppContext) {
         let (manager, records, cx) = workspace_manager(cx);
 
         cx.simulate_keystrokes("cmd-n");
@@ -1848,6 +1827,11 @@ mod tests {
                     .working_directory()
                     .to_path_buf(),
                 records.dropped_session_ids(),
+                records
+                    .starts()
+                    .into_iter()
+                    .map(|start| start.working_directory)
+                    .collect::<Vec<_>>(),
             )
         });
         assert_eq!(
@@ -1857,6 +1841,7 @@ mod tests {
                 WorkspaceId::new(2),
                 PathBuf::from("/Users/test"),
                 Vec::new(),
+                vec![PathBuf::from("/Users/test"), PathBuf::from("/Users/test")],
             )
         );
     }

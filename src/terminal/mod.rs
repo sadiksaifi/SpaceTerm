@@ -2,6 +2,7 @@ mod emulator;
 mod session;
 #[cfg(test)]
 pub(crate) mod testing;
+mod workspace_terminal_session_factory;
 
 #[cfg(test)]
 pub(crate) use emulator::ScrollbarSnapshot;
@@ -13,3 +14,4 @@ pub(crate) use session::{
 };
 #[cfg(test)]
 pub(crate) use session::{SessionError, StartedTerminalSession};
+pub(crate) use workspace_terminal_session_factory::WorkspaceTerminalSessionFactory;

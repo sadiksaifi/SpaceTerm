@@ -8,6 +8,6 @@ pub(crate) use terminal_window::{
 };
 pub(crate) use window_collection::{CloseWindowOutcome, WindowCollection, WindowError};
 pub(crate) use workspace_collection::{
-    CloseWorkspaceOutcome, FinalWindowCloseOutcome, NewWorkspace, WorkspaceCollection,
-    WorkspaceError, WorkspaceId,
+    CloseWorkspaceOutcome, FinalWindowCloseOutcome, WorkspaceCollection, WorkspaceError,
+    WorkspaceId,
 };

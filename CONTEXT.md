@@ -92,6 +92,14 @@ manufacturing domain state. Identities are monotonic and are not reused after de
 terminal worker uses its narrow read acquisition, resize, write, wait, and termination Interfaces
 without reaching into platform handles.
 
+### Workspace-Bound Terminal Creation
+
+`WorkspaceCollection` owns default Workspace naming and passes the exact stored Workspace root into
+payload construction. `WorkspaceTerminalSessionFactory` binds the existing dynamic Terminal Session
+factory Seam to that root, and Windows, Pane hosts, and terminal Panes carry only this scoped Module.
+Terminal creation therefore cannot select a working directory independently of its owning
+Workspace, and no additional provider trait or global state is introduced.
+
 ### Cross-Hierarchy Close Escalation
 
 Closing a final child escalates to its owning hierarchy Module without first destroying the child.

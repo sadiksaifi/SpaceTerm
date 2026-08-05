@@ -1,6 +1,4 @@
 use std::collections::BTreeMap;
-use std::path::PathBuf;
-use std::rc::Rc;
 
 use gpui::prelude::*;
 use gpui::{
@@ -18,7 +16,7 @@ use crate::domain::{
     ClosePaneOutcome, FocusDirection, PaneId, PaneNodeRef, PaneSize, PaneTreeRef, SplitAxis,
     SplitId, TerminalWindow, WindowId, ZoomState,
 };
-use crate::terminal::TerminalSessionFactory;
+use crate::terminal::WorkspaceTerminalSessionFactory;
 use crate::theme::{ACTIVE_THEME, Color};
 
 const MINIMUM_PANE_WIDTH: f32 = PANE_ACTION_MENU_WIDTH + PANE_CONTROL_INSET * 2.0;
@@ -47,8 +45,7 @@ pub(crate) enum PaneHostEvent {
 
 pub(crate) struct PaneHost {
     terminal_window: TerminalWindow<Entity<TerminalPane>>,
-    session_factory: Rc<dyn TerminalSessionFactory>,
-    workspace_root: PathBuf,
+    session_factory: WorkspaceTerminalSessionFactory,
     pane_bounds: BTreeMap<PaneId, Bounds<Pixels>>,
     split_bounds: BTreeMap<SplitId, Bounds<Pixels>>,
     pane_titles: BTreeMap<PaneId, gpui::SharedString>,
@@ -60,8 +57,7 @@ pub(crate) struct PaneHost {
 impl PaneHost {
     pub(crate) fn new(
         window_id: WindowId,
-        session_factory: Rc<dyn TerminalSessionFactory>,
-        workspace_root: PathBuf,
+        session_factory: WorkspaceTerminalSessionFactory,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -72,13 +68,7 @@ impl PaneHost {
             }
         };
         let terminal_window = TerminalWindow::new(window_id, minimum_pane_size, |pane_id| {
-            Self::create_terminal(
-                pane_id,
-                Rc::clone(&session_factory),
-                workspace_root.clone(),
-                window,
-                cx,
-            )
+            Self::create_terminal(pane_id, session_factory.clone(), window, cx)
         });
         let initial_pane_id = terminal_window.focused_pane_id();
         let Some(initial_terminal) = terminal_window.terminal(initial_pane_id) else {
@@ -89,7 +79,6 @@ impl PaneHost {
         Self {
             terminal_window,
             session_factory,
-            workspace_root,
             pane_bounds: BTreeMap::new(),
             split_bounds: BTreeMap::new(),
             pane_titles: BTreeMap::from([(initial_pane_id, initial_title)]),
@@ -101,13 +90,11 @@ impl PaneHost {
 
     fn create_terminal(
         pane_id: PaneId,
-        session_factory: Rc<dyn TerminalSessionFactory>,
-        working_directory: PathBuf,
+        session_factory: WorkspaceTerminalSessionFactory,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Entity<TerminalPane> {
-        let terminal =
-            cx.new(|cx| TerminalPane::new(session_factory, working_directory, window, cx));
+        let terminal = cx.new(|cx| TerminalPane::new(session_factory, window, cx));
         cx.subscribe_in(
             &terminal,
             window,
@@ -252,16 +239,13 @@ impl PaneHost {
             eprintln!("cannot split Pane {target_pane_id} with invalid measured bounds");
             return;
         };
-        let session_factory = Rc::clone(&self.session_factory);
-        let workspace_root = self.workspace_root.clone();
+        let session_factory = self.session_factory.clone();
         let result = self.terminal_window.split_pane(
             target_pane_id,
             axis,
             target_size,
             DIVIDER_SIZE,
-            |new_pane_id| {
-                Self::create_terminal(new_pane_id, session_factory, workspace_root, window, cx)
-            },
+            |new_pane_id| Self::create_terminal(new_pane_id, session_factory, window, cx),
         );
 
         match result {
@@ -881,6 +865,7 @@ fn gpui_color(color: Color) -> gpui::Rgba {
 mod tests {
     use std::cell::Cell;
     use std::path::PathBuf;
+    use std::rc::Rc;
     use std::sync::Arc;
 
     use gpui::{
@@ -890,12 +875,17 @@ mod tests {
 
     use super::*;
     use crate::terminal::testing::{TestTerminalSessionFactory, TestTerminalSessionRecords};
-    use crate::terminal::{ScreenSnapshot, ScrollbarSnapshot, SessionEvent};
+    use crate::terminal::{
+        ScreenSnapshot, ScrollbarSnapshot, SessionEvent, TerminalSessionFactory,
+    };
 
-    fn test_session_factory() -> Rc<dyn TerminalSessionFactory> {
-        Rc::new(
-            TestTerminalSessionFactory::new(TestTerminalSessionRecords::default())
-                .with_selection_response(Ok(None)),
+    fn test_session_factory() -> WorkspaceTerminalSessionFactory {
+        WorkspaceTerminalSessionFactory::new(
+            Rc::new(
+                TestTerminalSessionFactory::new(TestTerminalSessionRecords::default())
+                    .with_selection_response(Ok(None)),
+            ),
+            test_workspace_root(),
         )
     }
 
@@ -917,13 +907,7 @@ mod tests {
         cx.update(crate::ui::init);
         let session_factory = test_session_factory();
         let (host, cx) = cx.add_window_view(|window, cx| {
-            PaneHost::new(
-                WindowId::new(1),
-                session_factory,
-                test_workspace_root(),
-                window,
-                cx,
-            )
+            PaneHost::new(WindowId::new(1), session_factory, window, cx)
         });
 
         split_test_pane(&host, PaneId::new(1), SplitAxis::Horizontal, cx);
@@ -959,13 +943,7 @@ mod tests {
     fn single_pane_should_not_render_a_pane_header(cx: &mut TestAppContext) {
         let session_factory = test_session_factory();
         let (_host, cx) = cx.add_window_view(|window, cx| {
-            PaneHost::new(
-                WindowId::new(1),
-                session_factory,
-                test_workspace_root(),
-                window,
-                cx,
-            )
+            PaneHost::new(WindowId::new(1), session_factory, window, cx)
         });
 
         assert!(cx.debug_bounds("pane-header-1-focused").is_none());
@@ -977,14 +955,10 @@ mod tests {
         let records = TestTerminalSessionRecords::default();
         let session_factory: Rc<dyn TerminalSessionFactory> =
             Rc::new(TestTerminalSessionFactory::new(records.clone()));
+        let session_factory =
+            WorkspaceTerminalSessionFactory::new(session_factory, workspace_root.clone());
         let (host, cx) = cx.add_window_view(|window, cx| {
-            PaneHost::new(
-                WindowId::new(1),
-                session_factory,
-                workspace_root.clone(),
-                window,
-                cx,
-            )
+            PaneHost::new(WindowId::new(1), session_factory, window, cx)
         });
 
         cx.update(|window, cx| {
@@ -1008,13 +982,7 @@ mod tests {
     fn split_panes_should_render_compact_focused_and_unfocused_headers(cx: &mut TestAppContext) {
         let session_factory = test_session_factory();
         let (host, cx) = cx.add_window_view(|window, cx| {
-            PaneHost::new(
-                WindowId::new(1),
-                session_factory,
-                test_workspace_root(),
-                window,
-                cx,
-            )
+            PaneHost::new(WindowId::new(1), session_factory, window, cx)
         });
 
         cx.update(|window, cx| {
@@ -1041,13 +1009,7 @@ mod tests {
     fn focusing_another_pane_should_move_the_focused_header_state(cx: &mut TestAppContext) {
         let session_factory = test_session_factory();
         let (host, cx) = cx.add_window_view(|window, cx| {
-            PaneHost::new(
-                WindowId::new(1),
-                session_factory,
-                test_workspace_root(),
-                window,
-                cx,
-            )
+            PaneHost::new(WindowId::new(1), session_factory, window, cx)
         });
 
         cx.update(|window, cx| {
@@ -1070,14 +1032,10 @@ mod tests {
         let records = TestTerminalSessionRecords::default();
         let session_factory: Rc<dyn TerminalSessionFactory> =
             Rc::new(TestTerminalSessionFactory::new(records.clone()).with_fallback_title("zsh"));
+        let session_factory =
+            WorkspaceTerminalSessionFactory::new(session_factory, test_workspace_root());
         let (host, cx) = cx.add_window_view(|window, cx| {
-            PaneHost::new(
-                WindowId::new(1),
-                session_factory,
-                test_workspace_root(),
-                window,
-                cx,
-            )
+            PaneHost::new(WindowId::new(1), session_factory, window, cx)
         });
         cx.update(|window, cx| {
             host.update(cx, |host, cx| {
@@ -1189,14 +1147,10 @@ mod tests {
         let records = TestTerminalSessionRecords::default();
         let session_factory: Rc<dyn TerminalSessionFactory> =
             Rc::new(TestTerminalSessionFactory::new(records.clone()).with_fallback_title("zsh"));
+        let session_factory =
+            WorkspaceTerminalSessionFactory::new(session_factory, test_workspace_root());
         let (host, cx) = cx.add_window_view(|window, cx| {
-            PaneHost::new(
-                WindowId::new(1),
-                session_factory,
-                test_workspace_root(),
-                window,
-                cx,
-            )
+            PaneHost::new(WindowId::new(1), session_factory, window, cx)
         });
 
         cx.update(|window, cx| {
@@ -1233,14 +1187,10 @@ mod tests {
         let records = TestTerminalSessionRecords::default();
         let session_factory: Rc<dyn TerminalSessionFactory> =
             Rc::new(TestTerminalSessionFactory::new(records.clone()));
+        let session_factory =
+            WorkspaceTerminalSessionFactory::new(session_factory, test_workspace_root());
         let (host, cx) = cx.add_window_view(|window, cx| {
-            PaneHost::new(
-                WindowId::new(1),
-                session_factory,
-                test_workspace_root(),
-                window,
-                cx,
-            )
+            PaneHost::new(WindowId::new(1), session_factory, window, cx)
         });
 
         cx.update(|window, cx| {
@@ -1273,14 +1223,10 @@ mod tests {
         let records = TestTerminalSessionRecords::default();
         let session_factory: Rc<dyn TerminalSessionFactory> =
             Rc::new(TestTerminalSessionFactory::new(records.clone()));
+        let session_factory =
+            WorkspaceTerminalSessionFactory::new(session_factory, test_workspace_root());
         let (host, cx) = cx.add_window_view(|window, cx| {
-            PaneHost::new(
-                WindowId::new(1),
-                session_factory,
-                test_workspace_root(),
-                window,
-                cx,
-            )
+            PaneHost::new(WindowId::new(1), session_factory, window, cx)
         });
         let close_requests_for_subscription = Rc::clone(&close_requests);
         host.update(cx, |_, cx| {
@@ -1314,14 +1260,10 @@ mod tests {
         let records = TestTerminalSessionRecords::default();
         let session_factory: Rc<dyn TerminalSessionFactory> =
             Rc::new(TestTerminalSessionFactory::new(records.clone()));
+        let session_factory =
+            WorkspaceTerminalSessionFactory::new(session_factory, test_workspace_root());
         let (host, cx) = cx.add_window_view(|window, cx| {
-            PaneHost::new(
-                WindowId::new(1),
-                session_factory,
-                test_workspace_root(),
-                window,
-                cx,
-            )
+            PaneHost::new(WindowId::new(1), session_factory, window, cx)
         });
 
         cx.update(|window, cx| {
@@ -1353,14 +1295,10 @@ mod tests {
         let records = TestTerminalSessionRecords::default();
         let session_factory: Rc<dyn TerminalSessionFactory> =
             Rc::new(TestTerminalSessionFactory::new(records.clone()));
+        let session_factory =
+            WorkspaceTerminalSessionFactory::new(session_factory, test_workspace_root());
         let (host, cx) = cx.add_window_view(|window, cx| {
-            PaneHost::new(
-                WindowId::new(1),
-                session_factory,
-                test_workspace_root(),
-                window,
-                cx,
-            )
+            PaneHost::new(WindowId::new(1), session_factory, window, cx)
         });
 
         cx.update(|window, cx| {
@@ -1410,14 +1348,10 @@ mod tests {
         let records = TestTerminalSessionRecords::default();
         let session_factory: Rc<dyn TerminalSessionFactory> =
             Rc::new(TestTerminalSessionFactory::new(records.clone()));
+        let session_factory =
+            WorkspaceTerminalSessionFactory::new(session_factory, test_workspace_root());
         let (host, cx) = cx.add_window_view(|window, cx| {
-            PaneHost::new(
-                WindowId::new(1),
-                session_factory,
-                test_workspace_root(),
-                window,
-                cx,
-            )
+            PaneHost::new(WindowId::new(1), session_factory, window, cx)
         });
 
         cx.update(|window, cx| {
@@ -1452,14 +1386,10 @@ mod tests {
         let records = TestTerminalSessionRecords::default();
         let session_factory: Rc<dyn TerminalSessionFactory> =
             Rc::new(TestTerminalSessionFactory::new(records.clone()));
+        let session_factory =
+            WorkspaceTerminalSessionFactory::new(session_factory, test_workspace_root());
         let (host, cx) = cx.add_window_view(|window, cx| {
-            PaneHost::new(
-                WindowId::new(1),
-                session_factory,
-                test_workspace_root(),
-                window,
-                cx,
-            )
+            PaneHost::new(WindowId::new(1), session_factory, window, cx)
         });
 
         cx.update(|window, cx| {
@@ -1521,14 +1451,10 @@ mod tests {
         let records = TestTerminalSessionRecords::default();
         let session_factory: Rc<dyn TerminalSessionFactory> =
             Rc::new(TestTerminalSessionFactory::new(records));
+        let session_factory =
+            WorkspaceTerminalSessionFactory::new(session_factory, test_workspace_root());
         let (host, cx) = cx.add_window_view(|window, cx| {
-            PaneHost::new(
-                WindowId::new(1),
-                session_factory,
-                test_workspace_root(),
-                window,
-                cx,
-            )
+            PaneHost::new(WindowId::new(1), session_factory, window, cx)
         });
 
         cx.update(|window, cx| {
