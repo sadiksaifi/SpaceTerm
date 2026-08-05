@@ -1661,6 +1661,33 @@ mod tests {
     }
 
     #[test]
+    fn kitty_report_events_encodes_repeats_and_releases_but_legacy_does_not() {
+        let mut emulator = emulator(10, 2);
+        let action = |action| {
+            text_key(
+                PhysicalKey::A,
+                "a",
+                'a',
+                action,
+                InputModifiers::default(),
+            )
+        };
+
+        assert!(emulator.key(action(KeyAction::Release)).unwrap().bytes.is_empty());
+        emulator.feed(b"\x1b[>11u");
+        assert_eq!(
+            emulator.key(action(KeyAction::Repeat)).unwrap().bytes,
+            b"\x1b[97;1:2u"
+        );
+        assert_eq!(
+            emulator.key(action(KeyAction::Release)).unwrap().bytes,
+            b"\x1b[97;1:3u"
+        );
+        emulator.feed(b"\x1b[<u");
+        assert!(emulator.key(action(KeyAction::Release)).unwrap().bytes.is_empty());
+    }
+
+    #[test]
     fn clean_screens_do_not_publish_another_snapshot() {
         let mut emulator = emulator(10, 2);
 
