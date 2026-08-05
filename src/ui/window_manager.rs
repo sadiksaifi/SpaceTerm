@@ -1,6 +1,3 @@
-use std::path::PathBuf;
-use std::rc::Rc;
-
 use gpui::prelude::*;
 use gpui::{
     AnyElement, App, Context, Entity, EventEmitter, MouseButton, MouseDownEvent, Pixels, Point,
@@ -18,7 +15,7 @@ use super::{
 use crate::domain::{
     CloseWindowOutcome, SplitAxis, WindowCollection, WindowError, WindowId, ZoomState,
 };
-use crate::terminal::TerminalSessionFactory;
+use crate::terminal::WorkspaceTerminalSessionFactory;
 use crate::theme::{ACTIVE_THEME, Color};
 
 const WINDOW_BAR_HEIGHT: f32 = TOP_CHROME_HEIGHT;
@@ -38,25 +35,23 @@ const WINDOW_MENU_TOP: f32 = WINDOW_BAR_HEIGHT - WINDOW_MENU_BAR_OVERLAP;
 struct WindowMenuState {
     window_id: WindowId,
     left: Option<Pixels>,
-    zoomed: bool,
-    zoom_enabled: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum WindowManagerEvent {
-    CloseWorkspaceRequested,
+    FinalWindowCloseRequested { final_window_id: WindowId },
     PresentationChanged,
 }
 
 pub(crate) struct WindowManager {
     windows: WindowCollection<Entity<PaneHost>>,
-    session_factory: Rc<dyn TerminalSessionFactory>,
-    workspace_root: PathBuf,
+    session_factory: WorkspaceTerminalSessionFactory,
     active: bool,
     sidebar_visible: bool,
     sidebar_width: Pixels,
     window_menu: Option<WindowMenuState>,
     window_bar_scroll_handle: ScrollHandle,
+    close_workspace_requested: bool,
 }
 
 impl WindowManager {
@@ -65,42 +60,33 @@ impl WindowManager {
     }
 
     pub(crate) fn new(
-        session_factory: Rc<dyn TerminalSessionFactory>,
-        workspace_root: PathBuf,
+        session_factory: WorkspaceTerminalSessionFactory,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         let windows = WindowCollection::new(|window_id| {
-            Self::create_pane_host(
-                window_id,
-                Rc::clone(&session_factory),
-                workspace_root.clone(),
-                window,
-                cx,
-            )
+            Self::create_pane_host(window_id, session_factory.clone(), window, cx)
         });
 
         Self {
             windows,
             session_factory,
-            workspace_root,
             active: true,
             sidebar_visible: true,
             sidebar_width: px(WORKSPACE_SIDEBAR_DEFAULT_WIDTH),
             window_menu: None,
             window_bar_scroll_handle: ScrollHandle::new(),
+            close_workspace_requested: false,
         }
     }
 
     fn create_pane_host(
         window_id: WindowId,
-        session_factory: Rc<dyn TerminalSessionFactory>,
-        workspace_root: PathBuf,
+        session_factory: WorkspaceTerminalSessionFactory,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Entity<PaneHost> {
-        let pane_host =
-            cx.new(|cx| PaneHost::new(window_id, session_factory, workspace_root, window, cx));
+        let pane_host = cx.new(|cx| PaneHost::new(window_id, session_factory, window, cx));
         debug_assert_eq!(pane_host.read(cx).window_id(), window_id);
         cx.subscribe_in(
             &pane_host,
@@ -192,10 +178,9 @@ impl WindowManager {
 
     pub(crate) fn create_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let previous_window = self.windows.active_window().clone();
-        let session_factory = Rc::clone(&self.session_factory);
-        let workspace_root = self.workspace_root.clone();
+        let session_factory = self.session_factory.clone();
         let result = self.windows.create_window(|window_id| {
-            Self::create_pane_host(window_id, session_factory, workspace_root, window, cx)
+            Self::create_pane_host(window_id, session_factory, window, cx)
         });
         let window_id = match result {
             Ok(window_id) => window_id,
@@ -264,6 +249,10 @@ impl WindowManager {
     }
 
     fn close_window(&mut self, window_id: WindowId, window: &mut Window, cx: &mut Context<Self>) {
+        if self.close_workspace_requested {
+            return;
+        }
+
         let was_active = self.windows.active_window_id() == window_id;
         self.window_menu = None;
         match self.windows.close_window(window_id) {
@@ -287,8 +276,9 @@ impl WindowManager {
                 cx.emit(WindowManagerEvent::PresentationChanged);
                 cx.notify();
             }
-            Ok(CloseWindowOutcome::CloseOperatingSystemWindow) => {
-                cx.emit(WindowManagerEvent::CloseWorkspaceRequested);
+            Ok(CloseWindowOutcome::CloseWorkspace { final_window_id }) => {
+                self.close_workspace_requested = true;
+                cx.emit(WindowManagerEvent::FinalWindowCloseRequested { final_window_id });
             }
             Err(error) => Self::report_window_error("close", error),
         }
@@ -304,16 +294,7 @@ impl WindowManager {
         if !self.activate_window(window_id, window, cx) {
             return;
         }
-        let Some(pane_host) = self.windows.window(window_id) else {
-            return;
-        };
-        let pane_host = pane_host.read(cx);
-        self.window_menu = Some(WindowMenuState {
-            window_id,
-            left,
-            zoomed: matches!(pane_host.zoom_state(), ZoomState::Zoomed(_)),
-            zoom_enabled: pane_host.pane_count() > 1,
-        });
+        self.window_menu = Some(WindowMenuState { window_id, left });
         cx.notify();
     }
 
@@ -726,12 +707,22 @@ impl WindowManager {
         &self,
         menu: WindowMenuState,
         manager: gpui::WeakEntity<Self>,
+        cx: &App,
     ) -> AnyElement {
+        let Some((zoomed, zoom_enabled)) = self.windows.window(menu.window_id).map(|pane_host| {
+            let pane_host = pane_host.read(cx);
+            (
+                matches!(pane_host.zoom_state(), ZoomState::Zoomed(_)),
+                pane_host.pane_count() > 1,
+            )
+        }) else {
+            return div().into_any_element();
+        };
         let dismiss_manager = manager.clone();
         let menu_element = render_pane_action_menu(
             ("window-menu", menu.window_id.get()),
-            menu.zoomed,
-            menu.zoom_enabled,
+            zoomed,
+            zoom_enabled,
             CloseTarget::Window,
             manager,
             |manager, command, window, cx| {
@@ -822,7 +813,7 @@ impl Render for WindowManager {
                     .child(active_window),
             )
             .when_some(self.window_menu, |root, menu| {
-                root.child(self.render_window_menu(menu, manager))
+                root.child(self.render_window_menu(menu, manager, cx))
             })
     }
 }
@@ -844,8 +835,9 @@ fn window_menu_button_contains(position: Point<Pixels>, content_width: Pixels) -
 
 #[cfg(test)]
 mod tests {
-    use std::cell::{Cell, RefCell};
-    use std::path::Path;
+    use std::cell::Cell;
+    use std::path::PathBuf;
+    use std::rc::Rc;
     use std::sync::Arc;
 
     use gpui::{
@@ -855,105 +847,26 @@ mod tests {
 
     use super::*;
     use crate::domain::PaneId;
-    use crate::terminal::{
-        GridSize, KeyInput, PointerInput, ScreenSnapshot, SessionError, SessionEvent,
-        StartedTerminalSession, TerminalSessionHandle, WheelInput,
-    };
-
-    #[derive(Clone)]
-    struct SessionRecords {
-        event_senders: Rc<RefCell<Vec<async_channel::Sender<SessionEvent>>>>,
-        dropped_session_ids: Rc<RefCell<Vec<usize>>>,
-        pointer_count: Rc<Cell<usize>>,
-    }
-
-    struct WindowSessionFactory {
-        records: SessionRecords,
-        next_session_id: Cell<usize>,
-    }
-
-    struct WindowSessionHandle {
-        session_id: usize,
-        dropped_session_ids: Rc<RefCell<Vec<usize>>>,
-        pointer_count: Rc<Cell<usize>>,
-    }
-
-    impl TerminalSessionFactory for WindowSessionFactory {
-        fn start(
-            &self,
-            _size: GridSize,
-            _working_directory: &Path,
-        ) -> Result<StartedTerminalSession, SessionError> {
-            let session_id = self.next_session_id.get();
-            self.next_session_id.set(session_id + 1);
-            let (sender, events) = async_channel::unbounded();
-            self.records.event_senders.borrow_mut().push(sender);
-            Ok(StartedTerminalSession {
-                handle: Box::new(WindowSessionHandle {
-                    session_id,
-                    dropped_session_ids: Rc::clone(&self.records.dropped_session_ids),
-                    pointer_count: Rc::clone(&self.records.pointer_count),
-                }),
-                events,
-            })
-        }
-    }
-
-    impl Drop for WindowSessionHandle {
-        fn drop(&mut self) {
-            self.dropped_session_ids.borrow_mut().push(self.session_id);
-        }
-    }
-
-    impl TerminalSessionHandle for WindowSessionHandle {
-        fn key(&self, _input: KeyInput) {}
-
-        fn resize(&self, _size: GridSize) {}
-
-        fn pointer(&self, _input: PointerInput) {
-            self.pointer_count.update(|count| count + 1);
-        }
-
-        fn wheel(&self, _input: WheelInput) {}
-
-        fn scroll_to(&self, _offset_rows: u64) {}
-
-        fn paste(&self, _text: String) {}
-
-        fn request_selection_text(
-            &self,
-        ) -> async_channel::Receiver<Result<Option<String>, String>> {
-            let (sender, receiver) = async_channel::bounded(1);
-            let _ = sender.try_send(Ok(None));
-            receiver
-        }
-    }
+    use crate::terminal::testing::{TestTerminalSessionFactory, TestTerminalSessionRecords};
+    use crate::terminal::{ScreenSnapshot, SessionEvent, TerminalSessionFactory};
 
     fn window_manager(
         cx: &mut TestAppContext,
     ) -> (
         Entity<WindowManager>,
-        SessionRecords,
+        TestTerminalSessionRecords,
         &mut VisualTestContext,
     ) {
         cx.update(crate::ui::init);
-        let records = SessionRecords {
-            event_senders: Rc::new(RefCell::new(Vec::new())),
-            dropped_session_ids: Rc::new(RefCell::new(Vec::new())),
-            pointer_count: Rc::new(Cell::new(0)),
-        };
-        let session_factory: Rc<dyn TerminalSessionFactory> = Rc::new(WindowSessionFactory {
-            records: records.clone(),
-            next_session_id: Cell::new(1),
-        });
-        let (manager, cx) = cx.add_window_view(|window, cx| {
-            WindowManager::new(
-                session_factory,
-                PathBuf::from("/tmp/spaceterm-window-manager-test"),
-                window,
-                cx,
-            )
-        });
+        let records = TestTerminalSessionRecords::default();
+        let session_factory: Rc<dyn TerminalSessionFactory> =
+            Rc::new(TestTerminalSessionFactory::new(records.clone()));
+        let session_factory = WorkspaceTerminalSessionFactory::new(
+            session_factory,
+            PathBuf::from("/tmp/spaceterm-window-manager-test"),
+        );
+        let (manager, cx) =
+            cx.add_window_view(|window, cx| WindowManager::new(session_factory, window, cx));
         cx.update(|window, cx| {
             manager.update(cx, |manager, cx| manager.focus(window, cx));
         });
@@ -1118,7 +1031,7 @@ mod tests {
             (
                 manager.windows.len(),
                 manager.windows.active_window_id(),
-                records.dropped_session_ids.borrow().clone(),
+                records.dropped_session_ids(),
             )
         });
         assert_eq!(state, (2, WindowId::new(2), Vec::new()));
@@ -1185,7 +1098,7 @@ mod tests {
                     .window(WindowId::new(1))
                     .is_some_and(|window| !window.read(cx).is_active()),
                 manager.windows.active_window().read(cx).is_active(),
-                records.dropped_session_ids.borrow().clone(),
+                records.dropped_session_ids(),
             )
         });
         assert_eq!(
@@ -1205,10 +1118,7 @@ mod tests {
     fn single_pane_window_title_should_follow_the_terminal_title(cx: &mut TestAppContext) {
         let (manager, records, cx) = window_manager(cx);
         let sender = records
-            .event_senders
-            .borrow()
-            .first()
-            .cloned()
+            .event_sender(1)
             .expect("the initial Window session must have started");
 
         sender
@@ -1233,10 +1143,7 @@ mod tests {
     ) {
         let (manager, records, cx) = window_manager(cx);
         let sender = records
-            .event_senders
-            .borrow()
-            .first()
-            .cloned()
+            .event_sender(1)
             .expect("the initial Window session must have started");
         sender
             .try_send(SessionEvent::Screen(Arc::new(ScreenSnapshot {
@@ -1276,7 +1183,7 @@ mod tests {
             (
                 manager.windows.len(),
                 manager.windows.active_window_id(),
-                records.dropped_session_ids.borrow().clone(),
+                records.dropped_session_ids(),
             )
         });
         assert_eq!(state, (1, WindowId::new(2), vec![1]));
@@ -1293,7 +1200,7 @@ mod tests {
             (
                 manager.windows.len(),
                 manager.windows.active_window_id(),
-                records.dropped_session_ids.borrow().clone(),
+                records.dropped_session_ids(),
             )
         });
         assert_eq!(state, (1, WindowId::new(1), vec![2]));
@@ -1470,7 +1377,7 @@ mod tests {
                     .expect("Window 2 must remain owned")
                     .read(cx)
                     .pane_count(),
-                records.pointer_count.get(),
+                records.pointer_count(),
             )
         });
         assert_eq!(pane_counts, (2, 1, 0));
@@ -1495,6 +1402,29 @@ mod tests {
     }
 
     #[gpui::test]
+    fn open_single_pane_window_menu_should_enable_zoom_after_split_shortcut(
+        cx: &mut TestAppContext,
+    ) {
+        let (manager, _records, cx) = window_manager(cx);
+        click("window-menu-button", cx);
+
+        cx.simulate_keystrokes("cmd-d");
+        cx.run_until_parked();
+        click("window-menu-row-toggle-zoom", cx);
+
+        let state = manager.read_with(cx, |manager, cx| {
+            (
+                manager.window_menu.is_none(),
+                manager.windows.active_window().read(cx).zoom_state(),
+            )
+        });
+        assert!(
+            matches!(state, (true, ZoomState::Zoomed(_))),
+            "the open Window menu did not use the target PaneHost's live zoom state: {state:?}"
+        );
+    }
+
+    #[gpui::test]
     fn close_window_menu_should_focus_the_neighbor_and_drop_the_closed_session_once(
         cx: &mut TestAppContext,
     ) {
@@ -1508,7 +1438,7 @@ mod tests {
             (
                 manager.windows.len(),
                 manager.windows.active_window_id(),
-                records.dropped_session_ids.borrow().clone(),
+                records.dropped_session_ids(),
             )
         });
         assert_eq!(state, (1, WindowId::new(1), vec![2]));
@@ -1529,7 +1459,7 @@ mod tests {
         let state = manager.read_with(cx, |manager, _| {
             (
                 manager.windows.active_window_id(),
-                records.dropped_session_ids.borrow().clone(),
+                records.dropped_session_ids(),
             )
         });
         assert_eq!(state, (WindowId::new(2), vec![1]));
@@ -1540,10 +1470,7 @@ mod tests {
         let (manager, records, cx) = window_manager(cx);
         click("create-window-button", cx);
         let first_sender = records
-            .event_senders
-            .borrow()
-            .first()
-            .cloned()
+            .event_sender(1)
             .expect("Window 1 session must have started");
 
         first_sender
@@ -1559,7 +1486,7 @@ mod tests {
                 active_window
                     .read(cx)
                     .focused_terminal_is_focused(window, cx),
-                records.dropped_session_ids.borrow().clone(),
+                records.dropped_session_ids(),
             )
         });
         assert_eq!(state, (WindowId::new(2), true, vec![1]));
@@ -1572,10 +1499,7 @@ mod tests {
         let (manager, records, cx) = window_manager(cx);
         click("create-window-button", cx);
         let active_sender = records
-            .event_senders
-            .borrow()
-            .get(1)
-            .cloned()
+            .event_sender(2)
             .expect("Window 2 session must have started");
         cx.update(|window, cx| {
             manager.update(cx, |manager, cx| manager.deactivate(cx));
@@ -1595,7 +1519,7 @@ mod tests {
                 manager.read(cx).windows.active_window_id(),
                 fallback.read(cx).is_active(),
                 fallback.read(cx).focused_terminal_is_focused(window, cx),
-                records.dropped_session_ids.borrow().clone(),
+                records.dropped_session_ids(),
             )
         });
         assert_eq!(state, (false, 1, WindowId::new(1), false, false, vec![2]));
@@ -1606,10 +1530,7 @@ mod tests {
         let (manager, records, cx) = window_manager(cx);
         click("create-window-button", cx);
         let active_sender = records
-            .event_senders
-            .borrow()
-            .get(1)
-            .cloned()
+            .event_sender(2)
             .expect("Window 2 session must have started");
 
         active_sender
@@ -1621,7 +1542,7 @@ mod tests {
             (
                 manager.windows.len(),
                 manager.windows.active_window_id(),
-                records.dropped_session_ids.borrow().clone(),
+                records.dropped_session_ids(),
             )
         });
         assert_eq!(state, (1, WindowId::new(1), vec![2]));
@@ -1642,7 +1563,7 @@ mod tests {
         });
         cx.run_until_parked();
 
-        let mut dropped = records.dropped_session_ids.borrow().clone();
+        let mut dropped = records.dropped_session_ids();
         dropped.sort_unstable();
         assert_eq!(dropped, vec![1, 2]);
     }
@@ -1662,7 +1583,7 @@ mod tests {
             (
                 manager.windows.len(),
                 manager.windows.active_window().read(cx).pane_count(),
-                records.dropped_session_ids.borrow().clone(),
+                records.dropped_session_ids(),
             )
         });
         assert_eq!(state, (1, 1, vec![2]));
@@ -1680,7 +1601,7 @@ mod tests {
             (
                 manager.windows.len(),
                 manager.windows.active_window_id(),
-                records.dropped_session_ids.borrow().clone(),
+                records.dropped_session_ids(),
             )
         });
         assert_eq!(state, (1, WindowId::new(1), vec![2]));
@@ -1696,7 +1617,7 @@ mod tests {
         cx.simulate_keystrokes("cmd-shift-w");
         cx.run_until_parked();
 
-        let mut dropped = records.dropped_session_ids.borrow().clone();
+        let mut dropped = records.dropped_session_ids();
         dropped.sort_unstable();
         let state = manager.read_with(cx, |manager, cx| {
             (
@@ -1718,7 +1639,7 @@ mod tests {
         let close_requests_for_subscription = Rc::clone(&close_requests);
         manager.update(cx, |_, cx| {
             cx.subscribe(&manager, move |_, _, event: &WindowManagerEvent, _| {
-                if matches!(event, WindowManagerEvent::CloseWorkspaceRequested) {
+                if matches!(event, WindowManagerEvent::FinalWindowCloseRequested { .. }) {
                     close_requests_for_subscription.update(|count| count + 1);
                 }
             })
@@ -1726,12 +1647,11 @@ mod tests {
         });
 
         cx.simulate_keystrokes("cmd-shift-w");
+        cx.simulate_keystrokes("cmd-shift-w");
+        cx.run_until_parked();
 
         assert_eq!(
-            (
-                close_requests.get(),
-                records.dropped_session_ids.borrow().clone()
-            ),
+            (close_requests.get(), records.dropped_session_ids()),
             (1, Vec::new())
         );
     }

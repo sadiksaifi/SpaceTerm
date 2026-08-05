@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::rc::Rc;
 
@@ -22,9 +23,10 @@ use super::{
     handle_top_chrome_mouse_down,
 };
 use crate::domain::{
-    CloseWorkspaceOutcome, NewWorkspace, WorkspaceCollection, WorkspaceError, WorkspaceId,
+    CloseWorkspaceOutcome, FinalWindowCloseOutcome, WorkspaceCollection, WorkspaceError,
+    WorkspaceId,
 };
-use crate::terminal::TerminalSessionFactory;
+use crate::terminal::{TerminalSessionFactory, WorkspaceTerminalSessionFactory};
 use crate::theme::{ACTIVE_THEME, Color};
 
 const SIDEBAR_TOGGLE_INSET: f32 = 4.0;
@@ -75,7 +77,7 @@ struct DraggedWorkspaceSidebar;
 pub(crate) struct WorkspaceManager {
     workspaces: WorkspaceCollection<Entity<WindowManager>>,
     session_factory: Rc<dyn TerminalSessionFactory>,
-    home_directory: PathBuf,
+    default_workspace_root: PathBuf,
     sidebar_visible: bool,
     sidebar_width: Pixels,
     workspace_list_scroll_handle: ScrollHandle,
@@ -84,23 +86,25 @@ pub(crate) struct WorkspaceManager {
     rename_focus: FocusHandle,
     workspace_menu: Option<WorkspaceMenuState>,
     rename: Option<WorkspaceRenameState>,
+    pending_final_window_closes: BTreeSet<WorkspaceId>,
 }
 
 impl WorkspaceManager {
     pub(crate) fn new(
         session_factory: Rc<dyn TerminalSessionFactory>,
-        home_directory: PathBuf,
+        default_workspace_root: PathBuf,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         let workspaces = WorkspaceCollection::new(
-            default_workspace_name(1),
-            home_directory.clone(),
-            |workspace_id| {
+            default_workspace_root.clone(),
+            |workspace_id, workspace_root| {
                 Self::create_window_manager(
                     workspace_id,
-                    Rc::clone(&session_factory),
-                    home_directory.clone(),
+                    WorkspaceTerminalSessionFactory::new(
+                        Rc::clone(&session_factory),
+                        workspace_root.to_path_buf(),
+                    ),
                     true,
                     px(WORKSPACE_SIDEBAR_DEFAULT_WIDTH),
                     window,
@@ -130,7 +134,7 @@ impl WorkspaceManager {
         Self {
             workspaces,
             session_factory,
-            home_directory,
+            default_workspace_root,
             sidebar_visible: true,
             sidebar_width: px(WORKSPACE_SIDEBAR_DEFAULT_WIDTH),
             workspace_list_scroll_handle: ScrollHandle::new(),
@@ -139,31 +143,40 @@ impl WorkspaceManager {
             rename_focus: cx.focus_handle(),
             workspace_menu: None,
             rename: None,
+            pending_final_window_closes: BTreeSet::new(),
         }
     }
 
     fn create_window_manager(
         workspace_id: WorkspaceId,
-        session_factory: Rc<dyn TerminalSessionFactory>,
-        workspace_root: PathBuf,
+        session_factory: WorkspaceTerminalSessionFactory,
         sidebar_visible: bool,
         sidebar_width: Pixels,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Entity<WindowManager> {
         let manager = cx.new(|cx| {
-            let mut manager = WindowManager::new(session_factory, workspace_root, window, cx);
+            let mut manager = WindowManager::new(session_factory, window, cx);
             manager.set_sidebar_layout(sidebar_visible, sidebar_width, cx);
             manager
         });
         cx.subscribe_in(
             &manager,
             window,
-            move |_workspace_manager, _, event: &WindowManagerEvent, window, cx| match event {
-                WindowManagerEvent::CloseWorkspaceRequested => {
-                    cx.defer_in(window, move |workspace_manager, window, cx| {
-                        workspace_manager.close_workspace(workspace_id, window, cx);
-                    });
+            move |workspace_manager, _, event: &WindowManagerEvent, window, cx| match event {
+                WindowManagerEvent::FinalWindowCloseRequested { .. } => {
+                    if workspace_manager
+                        .pending_final_window_closes
+                        .insert(workspace_id)
+                    {
+                        cx.defer_in(window, move |workspace_manager, window, cx| {
+                            workspace_manager.close_workspace_for_final_window(
+                                workspace_id,
+                                window,
+                                cx,
+                            );
+                        });
+                    }
                 }
                 WindowManagerEvent::PresentationChanged => cx.notify(),
             },
@@ -259,20 +272,19 @@ impl WorkspaceManager {
     }
 
     fn create_workspace(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let workspace_name = next_default_workspace_name(&self.workspaces, None);
         let previous_manager = self.workspaces.active_workspace().payload().clone();
         let session_factory = Rc::clone(&self.session_factory);
-        let home_directory = self.home_directory.clone();
         let sidebar_visible = self.sidebar_visible;
         let sidebar_width = self.sidebar_width;
         let result = self.workspaces.create_workspace(
-            workspace_name,
-            self.home_directory.clone(),
-            |workspace_id| {
+            self.default_workspace_root.clone(),
+            |workspace_id, workspace_root| {
                 Self::create_window_manager(
                     workspace_id,
-                    session_factory,
-                    home_directory,
+                    WorkspaceTerminalSessionFactory::new(
+                        session_factory,
+                        workspace_root.to_path_buf(),
+                    ),
                     sidebar_visible,
                     sidebar_width,
                     window,
@@ -359,25 +371,26 @@ impl WorkspaceManager {
         cx: &mut Context<Self>,
     ) {
         let was_active = self.workspaces.active_workspace_id() == workspace_id;
-        let replacement_name = next_default_workspace_name(&self.workspaces, Some(workspace_id));
         let session_factory = Rc::clone(&self.session_factory);
-        let home_directory = self.home_directory.clone();
         let sidebar_visible = self.sidebar_visible;
         let sidebar_width = self.sidebar_width;
-        let outcome = self
-            .workspaces
-            .close_workspace(workspace_id, |replacement_workspace_id| {
-                let manager = Self::create_window_manager(
+        let outcome = self.workspaces.close_workspace(
+            workspace_id,
+            self.default_workspace_root.clone(),
+            |replacement_workspace_id, workspace_root| {
+                Self::create_window_manager(
                     replacement_workspace_id,
-                    session_factory,
-                    home_directory.clone(),
+                    WorkspaceTerminalSessionFactory::new(
+                        session_factory,
+                        workspace_root.to_path_buf(),
+                    ),
                     sidebar_visible,
                     sidebar_width,
                     window,
                     cx,
-                );
-                NewWorkspace::new(replacement_name, home_directory, manager)
-            });
+                )
+            },
+        );
         let outcome = match outcome {
             Ok(outcome) => outcome,
             Err(error) => {
@@ -410,6 +423,68 @@ impl WorkspaceManager {
         }
         self.scroll_active_workspace_into_view();
         cx.notify();
+    }
+
+    fn close_workspace_for_final_window(
+        &mut self,
+        workspace_id: WorkspaceId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let was_active = self.workspaces.active_workspace_id() == workspace_id;
+        let outcome = match self
+            .workspaces
+            .close_workspace_for_final_window(workspace_id)
+        {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                self.pending_final_window_closes.remove(&workspace_id);
+                Self::report_workspace_error("close for final Window", error);
+                return;
+            }
+        };
+
+        match outcome {
+            FinalWindowCloseOutcome::WorkspaceClosed {
+                closed_workspace_id,
+                active_workspace_id,
+                payload,
+            } => {
+                debug_assert_eq!(closed_workspace_id, workspace_id);
+                payload.update(cx, |manager, cx| manager.close_all(cx));
+
+                if was_active {
+                    let active_manager = self.workspaces.active_workspace().payload().clone();
+                    if self.sidebar_focus.is_focused(window) || self.rename_focus.is_focused(window)
+                    {
+                        active_manager.update(cx, |manager, cx| manager.activate_without_focus(cx));
+                    } else {
+                        active_manager.update(cx, |manager, cx| manager.activate(window, cx));
+                    }
+                }
+                debug_assert_eq!(active_workspace_id, self.workspaces.active_workspace_id());
+                self.pending_final_window_closes.remove(&workspace_id);
+                self.workspace_menu = None;
+                if self
+                    .rename
+                    .as_ref()
+                    .is_some_and(|rename| rename.workspace_id == workspace_id)
+                {
+                    self.rename = None;
+                }
+                self.scroll_active_workspace_into_view();
+                cx.notify();
+            }
+            FinalWindowCloseOutcome::CloseOperatingSystemWindow {
+                workspace_id: final_workspace_id,
+            } => {
+                debug_assert_eq!(final_workspace_id, workspace_id);
+                let manager = self.workspaces.active_workspace().payload().clone();
+                manager.update(cx, |manager, cx| manager.close_all(cx));
+                self.pending_final_window_closes.remove(&workspace_id);
+                window.remove_window();
+            }
+        }
     }
 
     fn toggle_sidebar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1225,131 +1300,32 @@ fn render_workspace_menu_row(
         .into_any_element()
 }
 
-fn default_workspace_name(workspace_number: usize) -> String {
-    format!("Workspace {workspace_number}")
-}
-
-fn next_default_workspace_name<T>(
-    workspaces: &WorkspaceCollection<T>,
-    excluded_workspace_id: Option<WorkspaceId>,
-) -> String {
-    for workspace_number in 1..=workspaces.len().saturating_add(1) {
-        let candidate = default_workspace_name(workspace_number);
-        let is_available = workspaces.iter().all(|workspace| {
-            Some(workspace.id()) == excluded_workspace_id || workspace.name() != candidate
-        });
-        if is_available {
-            return candidate;
-        }
-    }
-
-    unreachable!("one of len + 1 default Workspace names must be available")
-}
-
 fn gpui_color(color: Color) -> gpui::Rgba {
     rgba(color.rgba_hex())
 }
 
 #[cfg(test)]
 mod tests {
-    use std::cell::{Cell, RefCell};
-    use std::path::Path;
-
     use gpui::{
         Modifiers, ScrollDelta, ScrollWheelEvent, TestAppContext, TouchPhase, VisualTestContext,
         point,
     };
 
     use super::*;
-    use crate::terminal::{
-        GridSize, KeyInput, PointerInput, SessionError, SessionEvent, StartedTerminalSession,
-        TerminalSessionHandle, WheelInput,
-    };
-
-    #[derive(Clone)]
-    struct SessionRecords {
-        event_senders: Rc<RefCell<Vec<async_channel::Sender<SessionEvent>>>>,
-        dropped_session_ids: Rc<RefCell<Vec<usize>>>,
-    }
-
-    struct WorkspaceSessionFactory {
-        records: SessionRecords,
-        next_session_id: Cell<usize>,
-    }
-
-    struct WorkspaceSessionHandle {
-        session_id: usize,
-        dropped_session_ids: Rc<RefCell<Vec<usize>>>,
-    }
-
-    impl TerminalSessionFactory for WorkspaceSessionFactory {
-        fn start(
-            &self,
-            _size: GridSize,
-            _working_directory: &Path,
-        ) -> Result<StartedTerminalSession, SessionError> {
-            let session_id = self.next_session_id.get();
-            self.next_session_id.set(session_id + 1);
-            let (sender, events) = async_channel::unbounded();
-            self.records.event_senders.borrow_mut().push(sender);
-            Ok(StartedTerminalSession {
-                handle: Box::new(WorkspaceSessionHandle {
-                    session_id,
-                    dropped_session_ids: Rc::clone(&self.records.dropped_session_ids),
-                }),
-                events,
-            })
-        }
-
-        fn fallback_title(&self) -> String {
-            "zsh".to_owned()
-        }
-    }
-
-    impl Drop for WorkspaceSessionHandle {
-        fn drop(&mut self) {
-            self.dropped_session_ids.borrow_mut().push(self.session_id);
-        }
-    }
-
-    impl TerminalSessionHandle for WorkspaceSessionHandle {
-        fn key(&self, _input: KeyInput) {}
-
-        fn resize(&self, _size: GridSize) {}
-
-        fn pointer(&self, _input: PointerInput) {}
-
-        fn wheel(&self, _input: WheelInput) {}
-
-        fn scroll_to(&self, _offset_rows: u64) {}
-
-        fn paste(&self, _text: String) {}
-
-        fn request_selection_text(
-            &self,
-        ) -> async_channel::Receiver<Result<Option<String>, String>> {
-            let (sender, receiver) = async_channel::bounded(1);
-            let _ = sender.try_send(Ok(None));
-            receiver
-        }
-    }
+    use crate::terminal::SessionEvent;
+    use crate::terminal::testing::{TestTerminalSessionFactory, TestTerminalSessionRecords};
 
     fn workspace_manager(
         cx: &mut TestAppContext,
     ) -> (
         Entity<WorkspaceManager>,
-        SessionRecords,
+        TestTerminalSessionRecords,
         &mut VisualTestContext,
     ) {
         cx.update(crate::ui::init);
-        let records = SessionRecords {
-            event_senders: Rc::new(RefCell::new(Vec::new())),
-            dropped_session_ids: Rc::new(RefCell::new(Vec::new())),
-        };
-        let session_factory: Rc<dyn TerminalSessionFactory> = Rc::new(WorkspaceSessionFactory {
-            records: records.clone(),
-            next_session_id: Cell::new(1),
-        });
+        let records = TestTerminalSessionRecords::default();
+        let session_factory: Rc<dyn TerminalSessionFactory> =
+            Rc::new(TestTerminalSessionFactory::new(records.clone()).with_fallback_title("zsh"));
         let (manager, cx) = cx.add_window_view(|window, cx| {
             WorkspaceManager::new(session_factory, PathBuf::from("/Users/test"), window, cx)
         });
@@ -1835,7 +1811,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn command_n_should_create_and_activate_a_home_directory_workspace(cx: &mut TestAppContext) {
+    fn command_n_should_create_and_activate_a_default_root_workspace(cx: &mut TestAppContext) {
         let (manager, records, cx) = workspace_manager(cx);
 
         cx.simulate_keystrokes("cmd-n");
@@ -1850,7 +1826,12 @@ mod tests {
                     .active_workspace()
                     .working_directory()
                     .to_path_buf(),
-                records.dropped_session_ids.borrow().clone(),
+                records.dropped_session_ids(),
+                records
+                    .starts()
+                    .into_iter()
+                    .map(|start| start.working_directory)
+                    .collect::<Vec<_>>(),
             )
         });
         assert_eq!(
@@ -1860,6 +1841,7 @@ mod tests {
                 WorkspaceId::new(2),
                 PathBuf::from("/Users/test"),
                 Vec::new(),
+                vec![PathBuf::from("/Users/test"), PathBuf::from("/Users/test")],
             )
         );
     }
@@ -2004,7 +1986,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn command_w_from_sidebar_should_close_the_final_pane_and_replace_its_workspace(
+    fn command_w_from_sidebar_should_close_the_globally_final_operating_system_window(
         cx: &mut TestAppContext,
     ) {
         let (manager, records, cx) = workspace_manager(cx);
@@ -2018,34 +2000,35 @@ mod tests {
             (
                 manager.workspaces.len(),
                 manager.workspaces.active_workspace_id(),
-                manager.workspaces.active_workspace().name().to_owned(),
-                records.dropped_session_ids.borrow().clone(),
-                records.event_senders.borrow().len(),
+                records.dropped_session_ids(),
+                records.session_count(),
             )
         });
-        assert_eq!(
-            state,
-            (1, WorkspaceId::new(2), "Workspace 1".to_owned(), vec![1], 2,)
-        );
+        assert_eq!(state, (1, WorkspaceId::new(1), vec![1], 1));
+        assert!(cx.windows().is_empty());
     }
 
     #[gpui::test]
-    fn repeated_command_w_should_keep_the_replacement_workspace_number_stable(
+    fn duplicate_final_window_close_requests_should_schedule_one_operating_system_window_close(
         cx: &mut TestAppContext,
     ) {
-        let (manager, _records, cx) = workspace_manager(cx);
-        cx.simulate_keystrokes("cmd-shift-e");
+        let (manager, records, cx) = workspace_manager(cx);
+        let window_manager = manager.read_with(cx, |manager, _| {
+            manager.workspaces.active_workspace().payload().clone()
+        });
+
+        window_manager.update(cx, |_, cx| {
+            cx.emit(WindowManagerEvent::FinalWindowCloseRequested {
+                final_window_id: crate::domain::WindowId::new(1),
+            });
+            cx.emit(WindowManagerEvent::FinalWindowCloseRequested {
+                final_window_id: crate::domain::WindowId::new(1),
+            });
+        });
         cx.run_until_parked();
 
-        for _ in 0..3 {
-            cx.simulate_keystrokes("cmd-w");
-            cx.run_until_parked();
-        }
-
-        let name = manager.read_with(cx, |manager, _| {
-            manager.workspaces.active_workspace().name().to_owned()
-        });
-        assert_eq!(name, "Workspace 1");
+        assert_eq!(records.dropped_session_ids(), vec![1]);
+        assert!(cx.windows().is_empty());
     }
 
     #[gpui::test]
@@ -2069,7 +2052,7 @@ mod tests {
                     .payload()
                     .read(cx)
                     .sidebar_detail(cx),
-                records.dropped_session_ids.borrow().clone(),
+                records.dropped_session_ids(),
             )
         });
         assert_eq!(
@@ -2171,7 +2154,7 @@ mod tests {
                 first.name().to_owned(),
                 first.payload().read(cx).sidebar_detail(cx),
                 second.payload().read(cx).sidebar_detail(cx),
-                records.dropped_session_ids.borrow().clone(),
+                records.dropped_session_ids(),
             )
         });
         assert_eq!(
@@ -2195,7 +2178,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn closing_the_final_workspace_should_replace_it_and_cleanup_its_pty_once(
+    fn explicitly_closing_the_final_workspace_should_replace_it_and_keep_the_window_open(
         cx: &mut TestAppContext,
     ) {
         let (manager, records, cx) = workspace_manager(cx);
@@ -2207,10 +2190,12 @@ mod tests {
             (
                 manager.workspaces.len(),
                 manager.workspaces.active_workspace_id(),
-                records.dropped_session_ids.borrow().clone(),
+                records.dropped_session_ids(),
+                records.session_count(),
             )
         });
-        assert_eq!(state, (1, WorkspaceId::new(2), vec![1]));
+        assert_eq!(state, (1, WorkspaceId::new(2), vec![1], 2));
+        assert_eq!(cx.windows().len(), 1);
     }
 
     #[gpui::test]
@@ -2219,10 +2204,7 @@ mod tests {
     ) {
         let (manager, records, cx) = workspace_manager(cx);
         let inactive_sender = records
-            .event_senders
-            .borrow()
-            .first()
-            .cloned()
+            .event_sender(1)
             .expect("the initial Workspace terminal session must have started");
         cx.simulate_keystrokes("cmd-n");
         cx.run_until_parked();
@@ -2238,7 +2220,7 @@ mod tests {
             (
                 manager.workspaces.len(),
                 manager.workspaces.active_workspace_id(),
-                records.dropped_session_ids.borrow().clone(),
+                records.dropped_session_ids(),
             )
         });
         assert_eq!(state, (2, WorkspaceId::new(3), vec![1]));

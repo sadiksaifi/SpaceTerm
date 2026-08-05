@@ -1,6 +1,4 @@
 use std::collections::BTreeMap;
-use std::path::PathBuf;
-use std::rc::Rc;
 
 use gpui::prelude::*;
 use gpui::{
@@ -18,7 +16,7 @@ use crate::domain::{
     ClosePaneOutcome, FocusDirection, PaneId, PaneNodeRef, PaneSize, PaneTreeRef, SplitAxis,
     SplitId, TerminalWindow, WindowId, ZoomState,
 };
-use crate::terminal::TerminalSessionFactory;
+use crate::terminal::WorkspaceTerminalSessionFactory;
 use crate::theme::{ACTIVE_THEME, Color};
 
 const MINIMUM_PANE_WIDTH: f32 = PANE_ACTION_MENU_WIDTH + PANE_CONTROL_INSET * 2.0;
@@ -47,20 +45,19 @@ pub(crate) enum PaneHostEvent {
 
 pub(crate) struct PaneHost {
     terminal_window: TerminalWindow<Entity<TerminalPane>>,
-    session_factory: Rc<dyn TerminalSessionFactory>,
-    workspace_root: PathBuf,
+    session_factory: WorkspaceTerminalSessionFactory,
     pane_bounds: BTreeMap<PaneId, Bounds<Pixels>>,
     split_bounds: BTreeMap<SplitId, Bounds<Pixels>>,
     pane_titles: BTreeMap<PaneId, gpui::SharedString>,
     menu_pane_id: Option<PaneId>,
     active: bool,
+    close_window_requested: bool,
 }
 
 impl PaneHost {
     pub(crate) fn new(
         window_id: WindowId,
-        session_factory: Rc<dyn TerminalSessionFactory>,
-        workspace_root: PathBuf,
+        session_factory: WorkspaceTerminalSessionFactory,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -71,13 +68,7 @@ impl PaneHost {
             }
         };
         let terminal_window = TerminalWindow::new(window_id, minimum_pane_size, |pane_id| {
-            Self::create_terminal(
-                pane_id,
-                Rc::clone(&session_factory),
-                workspace_root.clone(),
-                window,
-                cx,
-            )
+            Self::create_terminal(pane_id, session_factory.clone(), window, cx)
         });
         let initial_pane_id = terminal_window.focused_pane_id();
         let Some(initial_terminal) = terminal_window.terminal(initial_pane_id) else {
@@ -88,24 +79,22 @@ impl PaneHost {
         Self {
             terminal_window,
             session_factory,
-            workspace_root,
             pane_bounds: BTreeMap::new(),
             split_bounds: BTreeMap::new(),
             pane_titles: BTreeMap::from([(initial_pane_id, initial_title)]),
             menu_pane_id: None,
             active: true,
+            close_window_requested: false,
         }
     }
 
     fn create_terminal(
         pane_id: PaneId,
-        session_factory: Rc<dyn TerminalSessionFactory>,
-        working_directory: PathBuf,
+        session_factory: WorkspaceTerminalSessionFactory,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Entity<TerminalPane> {
-        let terminal =
-            cx.new(|cx| TerminalPane::new(session_factory, working_directory, window, cx));
+        let terminal = cx.new(|cx| TerminalPane::new(session_factory, window, cx));
         cx.subscribe_in(
             &terminal,
             window,
@@ -250,16 +239,13 @@ impl PaneHost {
             eprintln!("cannot split Pane {target_pane_id} with invalid measured bounds");
             return;
         };
-        let session_factory = Rc::clone(&self.session_factory);
-        let workspace_root = self.workspace_root.clone();
+        let session_factory = self.session_factory.clone();
         let result = self.terminal_window.split_pane(
             target_pane_id,
             axis,
             target_size,
             DIVIDER_SIZE,
-            |new_pane_id| {
-                Self::create_terminal(new_pane_id, session_factory, workspace_root, window, cx)
-            },
+            |new_pane_id| Self::create_terminal(new_pane_id, session_factory, window, cx),
         );
 
         match result {
@@ -286,23 +272,22 @@ impl PaneHost {
     }
 
     fn close_pane(&mut self, pane_id: PaneId, window: &mut Window, cx: &mut Context<Self>) {
-        let terminal = self.terminal_window.terminal(pane_id).cloned();
+        if self.close_window_requested {
+            return;
+        }
+
         match self.terminal_window.close_pane(pane_id) {
-            Ok(ClosePaneOutcome::CloseWindow) => {
-                if let Some(terminal) = terminal {
-                    terminal.update(cx, |terminal, _| terminal.close());
-                }
+            Ok(ClosePaneOutcome::CloseWindow { window_id }) => {
+                self.close_window_requested = true;
                 self.menu_pane_id = None;
-                cx.emit(PaneHostEvent::CloseWindowRequested {
-                    window_id: self.terminal_window.id(),
-                });
+                cx.emit(PaneHostEvent::CloseWindowRequested { window_id });
             }
             Ok(ClosePaneOutcome::PaneClosed {
-                focused_pane_id, ..
+                focused_pane_id,
+                closed_terminal,
+                ..
             }) => {
-                if let Some(terminal) = terminal {
-                    terminal.update(cx, |terminal, _| terminal.close());
-                }
+                closed_terminal.update(cx, |terminal, _| terminal.close());
                 self.pane_bounds.remove(&pane_id);
                 self.split_bounds.clear();
                 self.pane_titles.remove(&pane_id);
@@ -327,6 +312,9 @@ impl PaneHost {
         }
         self.terminal_window.toggle_zoom();
         self.menu_pane_id = None;
+        cx.emit(PaneHostEvent::PresentationChanged {
+            window_id: self.terminal_window.id(),
+        });
         cx.notify();
         self.focus(window, cx);
     }
@@ -878,8 +866,9 @@ fn gpui_color(color: Color) -> gpui::Rgba {
 
 #[cfg(test)]
 mod tests {
-    use std::cell::{Cell, RefCell};
-    use std::path::{Path, PathBuf};
+    use std::cell::Cell;
+    use std::path::PathBuf;
+    use std::rc::Rc;
     use std::sync::Arc;
 
     use gpui::{
@@ -888,163 +877,19 @@ mod tests {
     };
 
     use super::*;
+    use crate::terminal::testing::{TestTerminalSessionFactory, TestTerminalSessionRecords};
     use crate::terminal::{
-        GridSize, KeyInput, PointerInput, ScreenSnapshot, ScrollbarSnapshot, SessionError,
-        SessionEvent, StartedTerminalSession, TerminalSessionHandle, WheelInput,
+        ScreenSnapshot, ScrollbarSnapshot, SessionEvent, TerminalSessionFactory,
     };
 
-    struct RecordingSessionFactory {
-        pointer_count: Rc<Cell<usize>>,
-    }
-
-    struct WorkingDirectorySessionFactory {
-        started_in: Rc<RefCell<Vec<PathBuf>>>,
-    }
-
-    impl TerminalSessionFactory for RecordingSessionFactory {
-        fn start(
-            &self,
-            _size: GridSize,
-            _working_directory: &Path,
-        ) -> Result<StartedTerminalSession, SessionError> {
-            let (_, events) = async_channel::unbounded();
-            Ok(StartedTerminalSession {
-                handle: Box::new(RecordingSessionHandle {
-                    pointer_count: Rc::clone(&self.pointer_count),
-                }),
-                events,
-            })
-        }
-    }
-
-    impl TerminalSessionFactory for WorkingDirectorySessionFactory {
-        fn start(
-            &self,
-            _size: GridSize,
-            working_directory: &Path,
-        ) -> Result<StartedTerminalSession, SessionError> {
-            self.started_in
-                .borrow_mut()
-                .push(working_directory.to_path_buf());
-            let (_, events) = async_channel::unbounded();
-            Ok(StartedTerminalSession {
-                handle: Box::new(RecordingSessionHandle {
-                    pointer_count: Rc::new(Cell::new(0)),
-                }),
-                events,
-            })
-        }
-    }
-
-    struct RecordingSessionHandle {
-        pointer_count: Rc<Cell<usize>>,
-    }
-
-    struct TitleSessionFactory {
-        event_senders: Rc<RefCell<Vec<async_channel::Sender<SessionEvent>>>>,
-    }
-
-    struct LifecycleSessionFactory {
-        event_senders: Rc<RefCell<Vec<async_channel::Sender<SessionEvent>>>>,
-        dropped_session_ids: Rc<RefCell<Vec<usize>>>,
-        next_session_id: Cell<usize>,
-    }
-
-    struct LifecycleSessionHandle {
-        session_id: usize,
-        dropped_session_ids: Rc<RefCell<Vec<usize>>>,
-    }
-
-    impl TerminalSessionFactory for TitleSessionFactory {
-        fn start(
-            &self,
-            _size: GridSize,
-            _working_directory: &Path,
-        ) -> Result<StartedTerminalSession, SessionError> {
-            let (sender, events) = async_channel::unbounded();
-            self.event_senders.borrow_mut().push(sender);
-            Ok(StartedTerminalSession {
-                handle: Box::new(RecordingSessionHandle {
-                    pointer_count: Rc::new(Cell::new(0)),
-                }),
-                events,
-            })
-        }
-
-        fn fallback_title(&self) -> String {
-            "zsh".to_owned()
-        }
-    }
-
-    impl TerminalSessionFactory for LifecycleSessionFactory {
-        fn start(
-            &self,
-            _size: GridSize,
-            _working_directory: &Path,
-        ) -> Result<StartedTerminalSession, SessionError> {
-            let session_id = self.next_session_id.get();
-            self.next_session_id.set(session_id + 1);
-            let (sender, events) = async_channel::unbounded();
-            self.event_senders.borrow_mut().push(sender);
-            Ok(StartedTerminalSession {
-                handle: Box::new(LifecycleSessionHandle {
-                    session_id,
-                    dropped_session_ids: Rc::clone(&self.dropped_session_ids),
-                }),
-                events,
-            })
-        }
-    }
-
-    impl Drop for LifecycleSessionHandle {
-        fn drop(&mut self) {
-            self.dropped_session_ids.borrow_mut().push(self.session_id);
-        }
-    }
-
-    impl TerminalSessionHandle for LifecycleSessionHandle {
-        fn key(&self, _input: KeyInput) {}
-
-        fn resize(&self, _size: GridSize) {}
-
-        fn pointer(&self, _input: PointerInput) {}
-
-        fn wheel(&self, _input: WheelInput) {}
-
-        fn scroll_to(&self, _offset_rows: u64) {}
-
-        fn paste(&self, _text: String) {}
-
-        fn request_selection_text(
-            &self,
-        ) -> async_channel::Receiver<Result<Option<String>, String>> {
-            let (_, receiver) = async_channel::bounded(1);
-            receiver
-        }
-    }
-
-    impl TerminalSessionHandle for RecordingSessionHandle {
-        fn key(&self, _input: KeyInput) {}
-
-        fn resize(&self, _size: GridSize) {}
-
-        fn pointer(&self, _input: PointerInput) {
-            self.pointer_count.update(|count| count + 1);
-        }
-
-        fn wheel(&self, _input: WheelInput) {}
-
-        fn scroll_to(&self, _offset_rows: u64) {}
-
-        fn paste(&self, _text: String) {}
-
-        fn request_selection_text(
-            &self,
-        ) -> async_channel::Receiver<Result<Option<String>, String>> {
-            let (reply, receiver) = async_channel::bounded(1);
-            let _ = reply.try_send(Ok(None));
-            receiver
-        }
+    fn test_session_factory() -> WorkspaceTerminalSessionFactory {
+        WorkspaceTerminalSessionFactory::new(
+            Rc::new(
+                TestTerminalSessionFactory::new(TestTerminalSessionRecords::default())
+                    .with_selection_response(Ok(None)),
+            ),
+            test_workspace_root(),
+        )
     }
 
     fn split_test_pane(
@@ -1063,17 +908,9 @@ mod tests {
 
     fn four_pane_host(cx: &mut TestAppContext) -> (Entity<PaneHost>, &mut VisualTestContext) {
         cx.update(crate::ui::init);
-        let session_factory: Rc<dyn TerminalSessionFactory> = Rc::new(RecordingSessionFactory {
-            pointer_count: Rc::new(Cell::new(0)),
-        });
+        let session_factory = test_session_factory();
         let (host, cx) = cx.add_window_view(|window, cx| {
-            PaneHost::new(
-                WindowId::new(1),
-                session_factory,
-                test_workspace_root(),
-                window,
-                cx,
-            )
+            PaneHost::new(WindowId::new(1), session_factory, window, cx)
         });
 
         split_test_pane(&host, PaneId::new(1), SplitAxis::Horizontal, cx);
@@ -1107,17 +944,9 @@ mod tests {
 
     #[gpui::test]
     fn single_pane_should_not_render_a_pane_header(cx: &mut TestAppContext) {
-        let session_factory: Rc<dyn TerminalSessionFactory> = Rc::new(RecordingSessionFactory {
-            pointer_count: Rc::new(Cell::new(0)),
-        });
+        let session_factory = test_session_factory();
         let (_host, cx) = cx.add_window_view(|window, cx| {
-            PaneHost::new(
-                WindowId::new(1),
-                session_factory,
-                test_workspace_root(),
-                window,
-                cx,
-            )
+            PaneHost::new(WindowId::new(1), session_factory, window, cx)
         });
 
         assert!(cx.debug_bounds("pane-header-1-focused").is_none());
@@ -1126,19 +955,13 @@ mod tests {
     #[gpui::test]
     fn initial_and_split_panes_should_start_in_the_workspace_root(cx: &mut TestAppContext) {
         let workspace_root = PathBuf::from("/tmp/spaceterm-explicit-workspace-root");
-        let started_in = Rc::new(RefCell::new(Vec::new()));
+        let records = TestTerminalSessionRecords::default();
         let session_factory: Rc<dyn TerminalSessionFactory> =
-            Rc::new(WorkingDirectorySessionFactory {
-                started_in: Rc::clone(&started_in),
-            });
+            Rc::new(TestTerminalSessionFactory::new(records.clone()));
+        let session_factory =
+            WorkspaceTerminalSessionFactory::new(session_factory, workspace_root.clone());
         let (host, cx) = cx.add_window_view(|window, cx| {
-            PaneHost::new(
-                WindowId::new(1),
-                session_factory,
-                workspace_root.clone(),
-                window,
-                cx,
-            )
+            PaneHost::new(WindowId::new(1), session_factory, window, cx)
         });
 
         cx.update(|window, cx| {
@@ -1149,24 +972,20 @@ mod tests {
         cx.run_until_parked();
 
         assert_eq!(
-            started_in.borrow().as_slice(),
-            [workspace_root.as_path(), workspace_root.as_path()]
+            records
+                .starts()
+                .into_iter()
+                .map(|start| start.working_directory)
+                .collect::<Vec<_>>(),
+            vec![workspace_root.clone(), workspace_root]
         );
     }
 
     #[gpui::test]
     fn split_panes_should_render_compact_focused_and_unfocused_headers(cx: &mut TestAppContext) {
-        let session_factory: Rc<dyn TerminalSessionFactory> = Rc::new(RecordingSessionFactory {
-            pointer_count: Rc::new(Cell::new(0)),
-        });
+        let session_factory = test_session_factory();
         let (host, cx) = cx.add_window_view(|window, cx| {
-            PaneHost::new(
-                WindowId::new(1),
-                session_factory,
-                test_workspace_root(),
-                window,
-                cx,
-            )
+            PaneHost::new(WindowId::new(1), session_factory, window, cx)
         });
 
         cx.update(|window, cx| {
@@ -1191,17 +1010,9 @@ mod tests {
 
     #[gpui::test]
     fn focusing_another_pane_should_move_the_focused_header_state(cx: &mut TestAppContext) {
-        let session_factory: Rc<dyn TerminalSessionFactory> = Rc::new(RecordingSessionFactory {
-            pointer_count: Rc::new(Cell::new(0)),
-        });
+        let session_factory = test_session_factory();
         let (host, cx) = cx.add_window_view(|window, cx| {
-            PaneHost::new(
-                WindowId::new(1),
-                session_factory,
-                test_workspace_root(),
-                window,
-                cx,
-            )
+            PaneHost::new(WindowId::new(1), session_factory, window, cx)
         });
 
         cx.update(|window, cx| {
@@ -1221,18 +1032,13 @@ mod tests {
 
     #[gpui::test]
     fn terminal_scrollbar_interaction_should_focus_its_owning_pane(cx: &mut TestAppContext) {
-        let event_senders = Rc::new(RefCell::new(Vec::new()));
-        let session_factory: Rc<dyn TerminalSessionFactory> = Rc::new(TitleSessionFactory {
-            event_senders: Rc::clone(&event_senders),
-        });
+        let records = TestTerminalSessionRecords::default();
+        let session_factory: Rc<dyn TerminalSessionFactory> =
+            Rc::new(TestTerminalSessionFactory::new(records.clone()).with_fallback_title("zsh"));
+        let session_factory =
+            WorkspaceTerminalSessionFactory::new(session_factory, test_workspace_root());
         let (host, cx) = cx.add_window_view(|window, cx| {
-            PaneHost::new(
-                WindowId::new(1),
-                session_factory,
-                test_workspace_root(),
-                window,
-                cx,
-            )
+            PaneHost::new(WindowId::new(1), session_factory, window, cx)
         });
         cx.update(|window, cx| {
             host.update(cx, |host, cx| {
@@ -1241,10 +1047,8 @@ mod tests {
         });
         cx.run_until_parked();
 
-        let first_sender = event_senders
-            .borrow()
-            .first()
-            .cloned()
+        let first_sender = records
+            .event_sender(1)
             .expect("the first Pane session was not started");
         first_sender
             .try_send(SessionEvent::Screen(Arc::new(ScreenSnapshot {
@@ -1343,18 +1147,13 @@ mod tests {
 
     #[gpui::test]
     fn terminal_title_event_should_update_the_pane_header_snapshot(cx: &mut TestAppContext) {
-        let event_senders = Rc::new(RefCell::new(Vec::new()));
-        let session_factory: Rc<dyn TerminalSessionFactory> = Rc::new(TitleSessionFactory {
-            event_senders: Rc::clone(&event_senders),
-        });
+        let records = TestTerminalSessionRecords::default();
+        let session_factory: Rc<dyn TerminalSessionFactory> =
+            Rc::new(TestTerminalSessionFactory::new(records.clone()).with_fallback_title("zsh"));
+        let session_factory =
+            WorkspaceTerminalSessionFactory::new(session_factory, test_workspace_root());
         let (host, cx) = cx.add_window_view(|window, cx| {
-            PaneHost::new(
-                WindowId::new(1),
-                session_factory,
-                test_workspace_root(),
-                window,
-                cx,
-            )
+            PaneHost::new(WindowId::new(1), session_factory, window, cx)
         });
 
         cx.update(|window, cx| {
@@ -1364,10 +1163,8 @@ mod tests {
         });
         cx.run_until_parked();
 
-        let sender = event_senders
-            .borrow()
-            .last()
-            .cloned()
+        let sender = records
+            .last_event_sender()
             .expect("the split Pane session was not started");
         sender
             .try_send(SessionEvent::Screen(Arc::new(ScreenSnapshot {
@@ -1390,21 +1187,13 @@ mod tests {
     fn exited_terminal_session_should_close_its_pane_and_focus_the_neighbor(
         cx: &mut TestAppContext,
     ) {
-        let event_senders = Rc::new(RefCell::new(Vec::new()));
-        let dropped_session_ids = Rc::new(RefCell::new(Vec::new()));
-        let session_factory: Rc<dyn TerminalSessionFactory> = Rc::new(LifecycleSessionFactory {
-            event_senders: Rc::clone(&event_senders),
-            dropped_session_ids: Rc::clone(&dropped_session_ids),
-            next_session_id: Cell::new(1),
-        });
+        let records = TestTerminalSessionRecords::default();
+        let session_factory: Rc<dyn TerminalSessionFactory> =
+            Rc::new(TestTerminalSessionFactory::new(records.clone()));
+        let session_factory =
+            WorkspaceTerminalSessionFactory::new(session_factory, test_workspace_root());
         let (host, cx) = cx.add_window_view(|window, cx| {
-            PaneHost::new(
-                WindowId::new(1),
-                session_factory,
-                test_workspace_root(),
-                window,
-                cx,
-            )
+            PaneHost::new(WindowId::new(1), session_factory, window, cx)
         });
 
         cx.update(|window, cx| {
@@ -1413,10 +1202,8 @@ mod tests {
             });
         });
         cx.run_until_parked();
-        let sender = event_senders
-            .borrow()
-            .get(1)
-            .cloned()
+        let sender = records
+            .event_sender(2)
             .expect("the split Pane session was not started");
         sender
             .try_send(SessionEvent::Exited("Shell exited".to_owned()))
@@ -1427,7 +1214,7 @@ mod tests {
             (
                 host.terminal_window.pane_count(),
                 host.terminal_window.focused_pane_id(),
-                dropped_session_ids.borrow().clone(),
+                records.dropped_session_ids(),
             )
         });
         assert_eq!(state, (1, PaneId::new(1), vec![2]));
@@ -1436,21 +1223,13 @@ mod tests {
     #[gpui::test]
     fn exited_last_terminal_session_should_request_window_close(cx: &mut TestAppContext) {
         let close_requests = Rc::new(Cell::new(0));
-        let event_senders = Rc::new(RefCell::new(Vec::new()));
-        let dropped_session_ids = Rc::new(RefCell::new(Vec::new()));
-        let session_factory: Rc<dyn TerminalSessionFactory> = Rc::new(LifecycleSessionFactory {
-            event_senders: Rc::clone(&event_senders),
-            dropped_session_ids: Rc::clone(&dropped_session_ids),
-            next_session_id: Cell::new(1),
-        });
+        let records = TestTerminalSessionRecords::default();
+        let session_factory: Rc<dyn TerminalSessionFactory> =
+            Rc::new(TestTerminalSessionFactory::new(records.clone()));
+        let session_factory =
+            WorkspaceTerminalSessionFactory::new(session_factory, test_workspace_root());
         let (host, cx) = cx.add_window_view(|window, cx| {
-            PaneHost::new(
-                WindowId::new(1),
-                session_factory,
-                test_workspace_root(),
-                window,
-                cx,
-            )
+            PaneHost::new(WindowId::new(1), session_factory, window, cx)
         });
         let close_requests_for_subscription = Rc::clone(&close_requests);
         host.update(cx, |_, cx| {
@@ -1460,38 +1239,85 @@ mod tests {
             .detach();
         });
 
-        let sender = event_senders
-            .borrow()
-            .first()
-            .cloned()
+        let sender = records
+            .event_sender(1)
             .expect("the initial Pane session was not started");
         sender
             .try_send(SessionEvent::Exited("Shell exited".to_owned()))
             .unwrap();
+        sender
+            .try_send(SessionEvent::Exited("Shell exited again".to_owned()))
+            .unwrap();
         cx.run_until_parked();
 
         assert_eq!(
-            (close_requests.get(), dropped_session_ids.borrow().clone()),
-            (1, vec![1])
+            (close_requests.get(), records.dropped_session_ids()),
+            (1, Vec::new())
         );
+    }
+
+    #[gpui::test]
+    fn single_pane_toggle_zoom_should_not_emit_presentation_changed(cx: &mut TestAppContext) {
+        let presentation_changes = Rc::new(Cell::new(0));
+        let session_factory = test_session_factory();
+        let (host, cx) = cx.add_window_view(|window, cx| {
+            PaneHost::new(WindowId::new(1), session_factory, window, cx)
+        });
+        let presentation_changes_for_subscription = Rc::clone(&presentation_changes);
+        host.update(cx, |_, cx| {
+            cx.subscribe(&host, move |_, _, event: &PaneHostEvent, _| {
+                if matches!(event, PaneHostEvent::PresentationChanged { .. }) {
+                    presentation_changes_for_subscription.update(|count| count + 1);
+                }
+            })
+            .detach();
+        });
+
+        cx.update(|window, cx| {
+            host.update(cx, |host, cx| host.toggle_zoom(window, cx));
+        });
+        cx.run_until_parked();
+
+        assert_eq!(presentation_changes.get(), 0);
+    }
+
+    #[gpui::test]
+    fn successful_toggle_zoom_should_emit_one_presentation_changed(cx: &mut TestAppContext) {
+        let presentation_changes = Rc::new(Cell::new(0));
+        let session_factory = test_session_factory();
+        let (host, cx) = cx.add_window_view(|window, cx| {
+            PaneHost::new(WindowId::new(1), session_factory, window, cx)
+        });
+        split_test_pane(&host, PaneId::new(1), SplitAxis::Horizontal, cx);
+        let presentation_changes_for_subscription = Rc::clone(&presentation_changes);
+        host.update(cx, |_, cx| {
+            cx.subscribe(&host, move |_, _, event: &PaneHostEvent, _| {
+                if matches!(event, PaneHostEvent::PresentationChanged { .. }) {
+                    presentation_changes_for_subscription.update(|count| count + 1);
+                }
+            })
+            .detach();
+        });
+
+        cx.update(|window, cx| {
+            host.update(cx, |host, cx| host.toggle_zoom(window, cx));
+        });
+        cx.run_until_parked();
+
+        assert_eq!(presentation_changes.get(), 1);
     }
 
     #[gpui::test]
     fn zoom_restore_button_should_restore_panes_without_sending_terminal_pointer_input(
         cx: &mut TestAppContext,
     ) {
-        let pointer_count = Rc::new(Cell::new(0));
-        let session_factory: Rc<dyn TerminalSessionFactory> = Rc::new(RecordingSessionFactory {
-            pointer_count: Rc::clone(&pointer_count),
-        });
+        let records = TestTerminalSessionRecords::default();
+        let session_factory: Rc<dyn TerminalSessionFactory> =
+            Rc::new(TestTerminalSessionFactory::new(records.clone()));
+        let session_factory =
+            WorkspaceTerminalSessionFactory::new(session_factory, test_workspace_root());
         let (host, cx) = cx.add_window_view(|window, cx| {
-            PaneHost::new(
-                WindowId::new(1),
-                session_factory,
-                test_workspace_root(),
-                window,
-                cx,
-            )
+            PaneHost::new(WindowId::new(1), session_factory, window, cx)
         });
 
         cx.update(|window, cx| {
@@ -1511,7 +1337,7 @@ mod tests {
         cx.run_until_parked();
 
         let state = host.read_with(cx, |host, _| {
-            (host.terminal_window.zoom_state(), pointer_count.get())
+            (host.terminal_window.zoom_state(), records.pointer_count())
         });
         assert_eq!(state, (ZoomState::Restored, 0));
     }
@@ -1520,18 +1346,13 @@ mod tests {
     fn menu_click_should_execute_command_without_sending_terminal_pointer_input(
         cx: &mut TestAppContext,
     ) {
-        let pointer_count = Rc::new(Cell::new(0));
-        let session_factory: Rc<dyn TerminalSessionFactory> = Rc::new(RecordingSessionFactory {
-            pointer_count: Rc::clone(&pointer_count),
-        });
+        let records = TestTerminalSessionRecords::default();
+        let session_factory: Rc<dyn TerminalSessionFactory> =
+            Rc::new(TestTerminalSessionFactory::new(records.clone()));
+        let session_factory =
+            WorkspaceTerminalSessionFactory::new(session_factory, test_workspace_root());
         let (host, cx) = cx.add_window_view(|window, cx| {
-            PaneHost::new(
-                WindowId::new(1),
-                session_factory,
-                test_workspace_root(),
-                window,
-                cx,
-            )
+            PaneHost::new(WindowId::new(1), session_factory, window, cx)
         });
 
         cx.update(|window, cx| {
@@ -1568,7 +1389,7 @@ mod tests {
             (
                 host.terminal_window.pane_count(),
                 host.menu_pane_id,
-                pointer_count.get(),
+                records.pointer_count(),
             )
         });
         assert_eq!(state, (3, None, 0));
@@ -1578,18 +1399,13 @@ mod tests {
     fn ellipsis_click_should_toggle_menu_without_sending_terminal_pointer_input(
         cx: &mut TestAppContext,
     ) {
-        let pointer_count = Rc::new(Cell::new(0));
-        let session_factory: Rc<dyn TerminalSessionFactory> = Rc::new(RecordingSessionFactory {
-            pointer_count: Rc::clone(&pointer_count),
-        });
+        let records = TestTerminalSessionRecords::default();
+        let session_factory: Rc<dyn TerminalSessionFactory> =
+            Rc::new(TestTerminalSessionFactory::new(records.clone()));
+        let session_factory =
+            WorkspaceTerminalSessionFactory::new(session_factory, test_workspace_root());
         let (host, cx) = cx.add_window_view(|window, cx| {
-            PaneHost::new(
-                WindowId::new(1),
-                session_factory,
-                test_workspace_root(),
-                window,
-                cx,
-            )
+            PaneHost::new(WindowId::new(1), session_factory, window, cx)
         });
 
         cx.update(|window, cx| {
@@ -1615,24 +1431,19 @@ mod tests {
             cx.run_until_parked();
         }
 
-        let state = host.read_with(cx, |host, _| (host.menu_pane_id, pointer_count.get()));
+        let state = host.read_with(cx, |host, _| (host.menu_pane_id, records.pointer_count()));
         assert_eq!(state, (None, 0));
     }
 
     #[gpui::test]
     fn opening_nonfocused_pane_menu_should_focus_and_zoom_the_target_pane(cx: &mut TestAppContext) {
-        let pointer_count = Rc::new(Cell::new(0));
-        let session_factory: Rc<dyn TerminalSessionFactory> = Rc::new(RecordingSessionFactory {
-            pointer_count: Rc::clone(&pointer_count),
-        });
+        let records = TestTerminalSessionRecords::default();
+        let session_factory: Rc<dyn TerminalSessionFactory> =
+            Rc::new(TestTerminalSessionFactory::new(records.clone()));
+        let session_factory =
+            WorkspaceTerminalSessionFactory::new(session_factory, test_workspace_root());
         let (host, cx) = cx.add_window_view(|window, cx| {
-            PaneHost::new(
-                WindowId::new(1),
-                session_factory,
-                test_workspace_root(),
-                window,
-                cx,
-            )
+            PaneHost::new(WindowId::new(1), session_factory, window, cx)
         });
 
         cx.update(|window, cx| {
@@ -1679,7 +1490,7 @@ mod tests {
                 host.terminal_window.focused_pane_id(),
                 host.terminal_window.zoom_state(),
                 terminal_is_focused,
-                pointer_count.get(),
+                records.pointer_count(),
             )
         });
 
@@ -1691,18 +1502,13 @@ mod tests {
 
     #[gpui::test]
     fn pane_menu_should_render_compact_row_and_menu_heights(cx: &mut TestAppContext) {
-        let pointer_count = Rc::new(Cell::new(0));
-        let session_factory: Rc<dyn TerminalSessionFactory> = Rc::new(RecordingSessionFactory {
-            pointer_count: Rc::clone(&pointer_count),
-        });
+        let records = TestTerminalSessionRecords::default();
+        let session_factory: Rc<dyn TerminalSessionFactory> =
+            Rc::new(TestTerminalSessionFactory::new(records));
+        let session_factory =
+            WorkspaceTerminalSessionFactory::new(session_factory, test_workspace_root());
         let (host, cx) = cx.add_window_view(|window, cx| {
-            PaneHost::new(
-                WindowId::new(1),
-                session_factory,
-                test_workspace_root(),
-                window,
-                cx,
-            )
+            PaneHost::new(WindowId::new(1), session_factory, window, cx)
         });
 
         cx.update(|window, cx| {

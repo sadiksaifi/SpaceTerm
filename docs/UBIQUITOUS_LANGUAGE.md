@@ -38,7 +38,7 @@
 | **Create Workspace** | Add and activate a new Workspace with its initial Window and Pane. | Start session, attach session |
 | **Close Workspace** | Remove a Workspace and its owned terminal runtimes, replacing it when it is the last Workspace. | Detach session, delete session |
 | **Create Window** | Add and activate a new Window in the Active Workspace. | New tab, link Window |
-| **Close Window** | Remove a Window and its owned terminal runtimes, or close the Operating-System Window when it is the final Window. | Close tab, detach Window |
+| **Close Window** | Remove a Window and its owned terminal runtimes, escalating through its Workspace when it is the final Window. | Close tab, detach Window |
 | **Split Pane** | Divide a target Pane and focus the newly created Pane. | Create Window, split Window |
 | **Close Pane** | Remove a Pane and its Terminal Session, escalating to Close Window when it is the final Pane. | Close split, close terminal |
 | **Focus Pane** | Make an owned Pane the Focused Pane without changing its owning Window. | Activate Pane, select terminal |
@@ -55,6 +55,8 @@
 - A **Pane** belongs to exactly one **Window** and owns one **Terminal Session**.
 - A **Split** has exactly two child **Pane Layouts**; each child is either another **Split** or a **Pane**.
 - Closing any hierarchy entity closes every **Terminal Session**, **PTY**, and **Shell Process** it owns.
+- Closing the final **Window** closes its **Workspace** when another Workspace remains, or closes the **Operating-System Window** when it is globally final.
+- Explicitly closing the final **Workspace** replaces it; escalation from its final **Window** closes the **Operating-System Window** instead.
 - No operation may leave an orphaned **PTY** or **Shell Process**.
 - Active and focused identities always reference entities still owned by their parent.
 
@@ -66,7 +68,7 @@
 
 > **Dev:** "What happens if they close that Pane after it becomes the only Pane?"
 
-> **Domain expert:** "**Close Pane** escalates to **Close Window**. If it is also the final Window, SpaceTerm closes the **Operating-System Window** instead of leaving an empty Workspace."
+> **Domain expert:** "**Close Pane** escalates to **Close Window**. A final Window closes its Workspace when another remains, and closes the **Operating-System Window** only when it is globally final."
 
 ## Flagged ambiguities
 

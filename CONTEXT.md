@@ -88,6 +88,33 @@ manufacturing domain state. Identities are monotonic and are not reused after de
 
 ### Native PTY Owner
 
-`SpawnedPty` exclusively owns the macOS PTY master, reader, writer, and Shell Process cleanup. The
-terminal worker uses its narrow read acquisition, resize, write, wait, and termination Interfaces
-without reaching into platform handles.
+`SpawnedPty` exclusively owns the macOS PTY master, reader, writer, and Shell Process. After startup,
+its terminal worker is the only owner that may wait, perform full termination escalation, or reap.
+Terminal Session shutdown uses a cloned one-shot signaller synchronized with worker reaping, so
+close callers request prompt termination without waiting for full process cleanup.
+
+### Bounded PTY Output Transport
+
+Terminal Session control Commands, including Shutdown, use a reliable latency-sensitive lane. PTY
+reader events use a separate bounded queue with backpressure and ordered worker notifications.
+Workers coalesce only consecutive output notifications up to a control boundary; reader completion
+remains reliable and ordered after its output. Closing the receiver wakes a blocked reader producer
+so terminal cleanup can continue off-thread.
+
+### Workspace-Bound Terminal Creation
+
+`WorkspaceCollection` owns default Workspace naming and passes the exact stored Workspace root into
+payload construction. `WorkspaceTerminalSessionFactory` binds the existing dynamic Terminal Session
+factory Seam to that root, and Windows, Pane hosts, and terminal Panes carry only this scoped Module.
+Terminal creation therefore cannot select a working directory independently of its owning
+Workspace, and no additional provider trait or global state is introduced.
+
+### Cross-Hierarchy Close Escalation
+
+Closing a final child escalates to its owning hierarchy Module without first destroying the child.
+Closing the final Pane requests its Window close; closing the final Window removes its Workspace
+when another Workspace remains, or closes the Operating-System Window when globally final. Explicit
+Close Workspace remains distinct and replaces the final Workspace. The Module that resolves each
+close synchronously removes the entity and initiates one-shot shutdown of its Terminal Sessions.
+Shell termination and PTY ownership cleanup continue on terminal worker threads so GPUI callers do
+not wait for reader or Shell Process joins.

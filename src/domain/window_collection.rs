@@ -16,7 +16,9 @@ pub(crate) enum CloseWindowOutcome<T> {
         active_window_id: WindowId,
         payload: T,
     },
-    CloseOperatingSystemWindow,
+    CloseWorkspace {
+        final_window_id: WindowId,
+    },
 }
 
 struct WindowEntry<T> {
@@ -107,7 +109,9 @@ impl<T> WindowCollection<T> {
             return Err(WindowError::WindowNotFound(window_id));
         };
         if self.windows.len() == 1 {
-            return Ok(CloseWindowOutcome::CloseOperatingSystemWindow);
+            return Ok(CloseWindowOutcome::CloseWorkspace {
+                final_window_id: window_id,
+            });
         }
 
         let closed_window = self.windows.remove(index);
@@ -331,15 +335,15 @@ mod tests {
     }
 
     #[test]
-    fn close_window_should_request_operating_system_close_for_the_final_window() {
+    fn close_window_should_request_workspace_close_for_the_final_window() {
         let mut windows = WindowCollection::new(|_| "first");
 
         let outcome = windows.close_window(WindowId::new(1)).unwrap();
 
-        assert!(matches!(
-            outcome,
-            CloseWindowOutcome::CloseOperatingSystemWindow
-        ));
+        let CloseWindowOutcome::CloseWorkspace { final_window_id } = outcome else {
+            panic!("closing the final Window must request its Workspace close")
+        };
+        assert_eq!(final_window_id, WindowId::new(1));
         assert_eq!(
             (
                 windows.len(),

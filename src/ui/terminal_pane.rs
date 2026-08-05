@@ -1,5 +1,3 @@
-use std::path::PathBuf;
-use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui::prelude::*;
@@ -19,8 +17,8 @@ use super::{
 };
 use crate::terminal::{
     GridSize, InputModifiers, KeyCode, KeyInput, PointerButton, PointerInput, PointerPhase,
-    ScreenSnapshot, SessionEvent, SurfacePosition, TerminalSessionFactory, TerminalSessionHandle,
-    WheelInput,
+    ScreenSnapshot, SessionEvent, SurfacePosition, TerminalSessionHandle, WheelInput,
+    WorkspaceTerminalSessionFactory,
 };
 use crate::theme::{ACTIVE_THEME, Color};
 
@@ -43,8 +41,7 @@ pub(crate) enum TerminalPaneEvent {
 }
 
 pub(crate) struct TerminalPane {
-    session_factory: Rc<dyn TerminalSessionFactory>,
-    working_directory: PathBuf,
+    session_factory: WorkspaceTerminalSessionFactory,
     session: Option<Box<dyn TerminalSessionHandle>>,
     session_start_attempted: bool,
     screen: Arc<ScreenSnapshot>,
@@ -67,8 +64,7 @@ pub(crate) struct TerminalPane {
 
 impl TerminalPane {
     pub(crate) fn new(
-        session_factory: Rc<dyn TerminalSessionFactory>,
-        working_directory: PathBuf,
+        session_factory: WorkspaceTerminalSessionFactory,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -97,7 +93,6 @@ impl TerminalPane {
 
         Self {
             session_factory,
-            working_directory,
             session: None,
             session_start_attempted: false,
             screen: ScreenSnapshot::empty(),
@@ -188,7 +183,7 @@ impl TerminalPane {
         }
         self.session_start_attempted = true;
 
-        match self.session_factory.start(size, &self.working_directory) {
+        match self.session_factory.start(size) {
             Ok(started) => {
                 self.session = Some(started.handle);
                 let receiver = started.events;
@@ -236,7 +231,8 @@ impl TerminalPane {
                 self.status = Some(status);
                 cx.emit(TerminalPaneEvent::Exited);
             }
-            SessionEvent::Error(status) => {
+            SessionEvent::Failed(failure) => {
+                let status = failure.to_string();
                 eprintln!("{status}");
                 self.status = Some(status);
             }
@@ -516,6 +512,7 @@ impl Render for TerminalPane {
             .when_some(status, |root, status| {
                 root.child(
                     div()
+                        .debug_selector(|| "terminal-status".to_owned())
                         .absolute()
                         .right(px(HORIZONTAL_PADDING))
                         .bottom(px(VERTICAL_PADDING))
@@ -708,38 +705,29 @@ fn single_char(value: &str) -> Option<char> {
 #[cfg(test)]
 mod tests {
     use std::cell::Cell;
+    use std::path::PathBuf;
     use std::rc::Rc;
 
     use gpui::{Entity, Keystroke, Modifiers, TestAppContext, VisualTestContext};
 
     use super::*;
-    use crate::terminal::{SessionError, StartedTerminalSession};
-
-    struct UnavailableSessionFactory;
-
-    impl TerminalSessionFactory for UnavailableSessionFactory {
-        fn start(
-            &self,
-            _size: GridSize,
-            _working_directory: &std::path::Path,
-        ) -> Result<StartedTerminalSession, SessionError> {
-            Err(SessionError::EmulatorStartup(
-                "terminal session unavailable in UI test".to_owned(),
-            ))
-        }
-    }
+    use crate::terminal::testing::{
+        RecordedSessionCommand, TestTerminalSessionFactory, TestTerminalSessionRecords,
+    };
+    use crate::terminal::{SessionFailure, TerminalSessionFactory};
 
     fn terminal_pane(cx: &mut TestAppContext) -> (Entity<TerminalPane>, &mut VisualTestContext) {
         cx.update(crate::ui::init);
-        let session_factory: Rc<dyn TerminalSessionFactory> = Rc::new(UnavailableSessionFactory);
-        let (pane, cx) = cx.add_window_view(|window, cx| {
-            TerminalPane::new(
-                session_factory,
-                PathBuf::from("/tmp/spaceterm-terminal-pane-test"),
-                window,
-                cx,
-            )
-        });
+        let session_factory: Rc<dyn TerminalSessionFactory> = Rc::new(
+            TestTerminalSessionFactory::new(TestTerminalSessionRecords::default())
+                .with_start_failure("terminal session unavailable in UI test"),
+        );
+        let session_factory = WorkspaceTerminalSessionFactory::new(
+            session_factory,
+            PathBuf::from("/tmp/spaceterm-terminal-pane-test"),
+        );
+        let (pane, cx) =
+            cx.add_window_view(|window, cx| TerminalPane::new(session_factory, window, cx));
         cx.update(|window, cx| {
             pane.update(cx, |pane, _cx| pane.focus(window));
         });
@@ -965,72 +953,23 @@ mod tests {
         );
     }
 
-    struct DropCountingSession {
-        drop_count: Rc<Cell<usize>>,
-    }
-
-    impl Drop for DropCountingSession {
-        fn drop(&mut self) {
-            self.drop_count.set(self.drop_count.get() + 1);
-        }
-    }
-
-    impl TerminalSessionHandle for DropCountingSession {
-        fn key(&self, _: KeyInput) {}
-
-        fn resize(&self, _: GridSize) {}
-
-        fn pointer(&self, _: PointerInput) {}
-
-        fn wheel(&self, _: WheelInput) {}
-
-        fn scroll_to(&self, _: u64) {}
-
-        fn paste(&self, _: String) {}
-
-        fn request_selection_text(
-            &self,
-        ) -> async_channel::Receiver<Result<Option<String>, String>> {
-            let (_, receiver) = async_channel::bounded(1);
-            receiver
-        }
-    }
-
-    struct ScrollRecordingSession {
-        target: Rc<Cell<Option<u64>>>,
-    }
-
-    impl TerminalSessionHandle for ScrollRecordingSession {
-        fn key(&self, _: KeyInput) {}
-
-        fn resize(&self, _: GridSize) {}
-
-        fn pointer(&self, _: PointerInput) {}
-
-        fn wheel(&self, _: WheelInput) {}
-
-        fn scroll_to(&self, rows: u64) {
-            self.target.set(Some(rows));
-        }
-
-        fn paste(&self, _: String) {}
-
-        fn request_selection_text(
-            &self,
-        ) -> async_channel::Receiver<Result<Option<String>, String>> {
-            let (_, receiver) = async_channel::bounded(1);
-            receiver
-        }
-    }
-
     #[gpui::test]
     fn terminal_scrollbar_should_request_exact_row_offsets(cx: &mut TestAppContext) {
         let (pane, cx) = terminal_pane(cx);
-        let target = Rc::new(Cell::new(None));
+        let records = TestTerminalSessionRecords::default();
+        let session = TestTerminalSessionFactory::new(records.clone())
+            .start(
+                GridSize {
+                    cols: 80,
+                    rows: 24,
+                    cell_width_px: 8,
+                    cell_height_px: 16,
+                },
+                std::path::Path::new("/tmp/spaceterm-terminal-pane-test"),
+            )
+            .expect("the test terminal session should start");
         let scrollbar = pane.update(cx, |pane, _| {
-            pane.session = Some(Box::new(ScrollRecordingSession {
-                target: Rc::clone(&target),
-            }));
+            pane.session = Some(session.handle);
             pane.scrollbar.clone()
         });
 
@@ -1039,20 +978,85 @@ mod tests {
         });
         cx.run_until_parked();
 
-        assert_eq!(target.get(), Some(u64::MAX - 1));
+        assert_eq!(
+            records.commands().last().map(|input| &input.command),
+            Some(&RecordedSessionCommand::ScrollTo(u64::MAX - 1))
+        );
     }
 
     #[test]
     fn close_session_should_drop_a_handle_exactly_once_when_repeated() {
-        let drop_count = Rc::new(Cell::new(0));
-        let mut session: Option<Box<dyn TerminalSessionHandle>> =
-            Some(Box::new(DropCountingSession {
-                drop_count: Rc::clone(&drop_count),
-            }));
+        let records = TestTerminalSessionRecords::default();
+        let started = TestTerminalSessionFactory::new(records.clone())
+            .start(
+                GridSize {
+                    cols: 80,
+                    rows: 24,
+                    cell_width_px: 8,
+                    cell_height_px: 16,
+                },
+                std::path::Path::new("/tmp/spaceterm-terminal-pane-test"),
+            )
+            .expect("the test terminal session should start");
+        let mut session = Some(started.handle);
 
         close_session(&mut session);
         close_session(&mut session);
 
-        assert_eq!(drop_count.get(), 1);
+        assert_eq!(records.dropped_session_ids(), vec![1]);
+    }
+
+    #[gpui::test]
+    fn terminal_failure_should_keep_the_pane_visible_with_a_failure_status(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(crate::ui::init);
+        let records = TestTerminalSessionRecords::default();
+        let session_factory: Rc<dyn TerminalSessionFactory> =
+            Rc::new(TestTerminalSessionFactory::new(records.clone()));
+        let session_factory = WorkspaceTerminalSessionFactory::new(
+            session_factory,
+            PathBuf::from("/tmp/spaceterm-terminal-pane-test"),
+        );
+        let (pane, cx) =
+            cx.add_window_view(|window, cx| TerminalPane::new(session_factory, window, cx));
+        let exits = Rc::new(Cell::new(0));
+        let exits_for_subscription = Rc::clone(&exits);
+        pane.update(cx, |_, cx| {
+            cx.subscribe(&pane, move |_, _, event: &TerminalPaneEvent, _| {
+                if matches!(event, TerminalPaneEvent::Exited) {
+                    exits_for_subscription.update(|exits| exits + 1);
+                }
+            })
+            .detach();
+        });
+        cx.run_until_parked();
+        let sender = records
+            .event_sender(1)
+            .expect("rendering the Pane must start its Terminal Session");
+
+        sender
+            .try_send(SessionEvent::Failed(SessionFailure::PtyRead {
+                read_error: "read unavailable".to_owned(),
+                exit_status: "exit code 7".to_owned(),
+            }))
+            .unwrap();
+        cx.run_until_parked();
+
+        let state = pane.read_with(cx, |pane, _| (pane.status.clone(), pane.session.is_some()));
+        assert_eq!(
+            state,
+            (
+                Some(
+                    "Shell output failed: read unavailable; shell exited (exit code 7)".to_owned()
+                ),
+                true,
+            )
+        );
+        assert_eq!(
+            (exits.get(), records.dropped_session_ids()),
+            (0, Vec::new())
+        );
+        assert!(cx.debug_bounds("terminal-status").is_some());
     }
 }
