@@ -700,7 +700,7 @@ impl TerminalEmulator {
             .terminal
             .is_mouse_tracking()
             .map_err(|error| format!("failed to query terminal mouse tracking mode: {error}"))?;
-        if tracking && !input.modifiers.shift {
+        if tracking && !shift_overrides_application_mouse(input.modifiers, input.shift_selection) {
             self.clear_selection()?;
             let button = if steps > 0 {
                 MouseButton::Four
@@ -832,8 +832,7 @@ impl TerminalEmulator {
         let route = match button {
             PointerButton::Left => {
                 if !tracking
-                    || (input.modifiers.shift
-                        && input.shift_selection == ShiftSelectionPolicy::OverrideApplicationMouse)
+                    || shift_overrides_application_mouse(input.modifiers, input.shift_selection)
                 {
                     PointerRoute::Selection
                 } else {
@@ -900,7 +899,9 @@ impl TerminalEmulator {
                 let tracking = self.terminal.is_mouse_tracking().map_err(|error| {
                     format!("failed to query terminal mouse tracking mode: {error}")
                 })?;
-                if !tracking || input.modifiers.shift {
+                if !tracking
+                    || shift_overrides_application_mouse(input.modifiers, input.shift_selection)
+                {
                     return Ok(EmulatorAction::none());
                 }
 
@@ -1379,6 +1380,13 @@ fn mouse_modifiers(modifiers: InputModifiers) -> Mods {
     result
 }
 
+fn shift_overrides_application_mouse(
+    modifiers: InputModifiers,
+    policy: ShiftSelectionPolicy,
+) -> bool {
+    modifiers.shift && policy == ShiftSelectionPolicy::OverrideApplicationMouse
+}
+
 const ANSI_NORMAL_INDICES: [PaletteIndex; 8] = [
     PaletteIndex::BLACK,
     PaletteIndex::RED,
@@ -1526,6 +1534,7 @@ mod tests {
                 shift,
                 ..InputModifiers::default()
             },
+            shift_selection: ShiftSelectionPolicy::default(),
         }
     }
 
@@ -2871,6 +2880,27 @@ mod tests {
         let action = emulator.pointer(input).unwrap();
 
         assert_eq!(action.bytes, b"\x1b[<4;1;1M");
+    }
+
+    #[test]
+    fn shift_policy_applies_to_hover_and_wheel_reporting() {
+        let mut hover = emulator(10, 2);
+        hover.feed(b"\x1b[?1003h\x1b[?1006h");
+        let mut hover_input = pointer(PointerPhase::Motion, None, 11.0, 1.0, true);
+        hover_input.shift_selection = ShiftSelectionPolicy::ReportToApplication;
+
+        let hover_action = hover.pointer(hover_input).unwrap();
+
+        assert_eq!(hover_action.bytes, b"\x1b[<39;2;1M");
+
+        let mut wheel_emulator = emulator(10, 2);
+        wheel_emulator.feed(b"\x1b[?1000h\x1b[?1006h");
+        let mut wheel_input = wheel(1, true);
+        wheel_input.shift_selection = ShiftSelectionPolicy::ReportToApplication;
+
+        let wheel_action = wheel_emulator.wheel(wheel_input).unwrap();
+
+        assert_eq!(wheel_action.bytes, b"\x1b[<68;1;1M");
     }
 
     #[test]

@@ -73,6 +73,7 @@ pub(crate) struct WheelInput {
     pub(crate) steps: i32,
     pub(crate) position: SurfacePosition,
     pub(crate) modifiers: InputModifiers,
+    pub(crate) shift_selection: ShiftSelectionPolicy,
 }
 
 fn pty_size(geometry: TerminalGeometry) -> PtySize {

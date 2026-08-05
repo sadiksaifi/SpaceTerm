@@ -584,6 +584,7 @@ impl TerminalPane {
                 steps,
                 position,
                 modifiers: input_modifiers(event.modifiers),
+                shift_selection: self.shift_selection,
             });
         }
         cx.stop_propagation();
