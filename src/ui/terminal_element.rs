@@ -351,14 +351,16 @@ struct TextFragment {
 
 struct FragmentBuilder {
     start: usize,
+    selected: bool,
     text: String,
     runs: Vec<TextRun>,
 }
 
 impl FragmentBuilder {
-    fn new(start: usize) -> Self {
+    fn new(start: usize, selected: bool) -> Self {
         Self {
             start,
+            selected,
             text: String::new(),
             runs: Vec::new(),
         }
@@ -474,18 +476,26 @@ fn prepare_row(
             continue;
         }
 
+        if regular_fragment
+            .as_ref()
+            .is_some_and(|fragment| fragment.selected != cell.selected)
+            && let Some(fragment) = regular_fragment.take()
+        {
+            fragments.push(fragment.finish(true));
+        }
+
         let is_wide_head = row.get(column + 1).is_some_and(|next| next.spacer_tail);
         let is_single_scalar = cell.text.chars().count() == 1;
         if is_wide_head || !is_single_scalar {
             if let Some(fragment) = regular_fragment.take() {
                 fragments.push(fragment.finish(true));
             }
-            let mut fragment = FragmentBuilder::new(column);
+            let mut fragment = FragmentBuilder::new(column, cell.selected);
             fragment.push(cell, colors, font_family);
             fragments.push(fragment.finish(false));
         } else {
             regular_fragment
-                .get_or_insert_with(|| FragmentBuilder::new(column))
+                .get_or_insert_with(|| FragmentBuilder::new(column, cell.selected))
                 .push(cell, colors, font_family);
         }
     }
@@ -829,6 +839,24 @@ mod tests {
                 len: 2,
                 color: ACTIVE_THEME.players[0].selection,
             }]
+        );
+    }
+
+    #[test]
+    fn shaping_fragments_do_not_cross_selection_boundaries() {
+        let mut selected = cell("b");
+        selected.selected = true;
+        let row = Arc::<[CellSnapshot]>::from([cell("a"), selected, cell("c")]);
+
+        let input = prepare_row(&row, &colors(), &"Menlo".into());
+
+        assert_eq!(
+            input
+                .fragments
+                .iter()
+                .map(|fragment| fragment.text.as_ref())
+                .collect::<Vec<_>>(),
+            vec!["a", "b", "c"]
         );
     }
 
