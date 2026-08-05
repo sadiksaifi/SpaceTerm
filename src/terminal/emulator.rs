@@ -43,6 +43,7 @@ impl From<RgbColor> for Color {
 pub(crate) struct CellSnapshot {
     pub(crate) text: String,
     pub(crate) foreground_source: TerminalColor,
+    pub(crate) background_source: TerminalColor,
     pub(crate) foreground: Color,
     pub(crate) background: Color,
     pub(crate) bold: bool,
@@ -1013,6 +1014,7 @@ impl TerminalEmulator {
                         rendered_cells.push(CellSnapshot {
                             text,
                             foreground_source: style.fg_color.into(),
+                            background_source: style.bg_color.into(),
                             foreground,
                             background,
                             bold: style.bold,
@@ -1359,6 +1361,28 @@ mod tests {
                 TerminalColor::Palette(1),
                 TerminalColor::Palette(200),
                 TerminalColor::Rgb(Color::from_rgb_components(1, 2, 3)),
+            ]
+        );
+    }
+
+    #[test]
+    fn snapshots_preserve_background_color_sources() {
+        let mut emulator = emulator(8, 1);
+        emulator.feed(b"d\x1b[41ma\x1b[48;5;200mi\x1b[48;2;4;5;6mr");
+
+        let snapshot = emulator.snapshot().unwrap().unwrap();
+        let sources = snapshot.rows[0][..4]
+            .iter()
+            .map(|cell| cell.background_source)
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            sources,
+            vec![
+                TerminalColor::Default,
+                TerminalColor::Palette(1),
+                TerminalColor::Palette(200),
+                TerminalColor::Rgb(Color::from_rgb_components(4, 5, 6)),
             ]
         );
     }
