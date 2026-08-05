@@ -1688,6 +1688,18 @@ mod tests {
     }
 
     #[test]
+    fn dec_backarrow_mode_changes_backspace_policy_immediately() {
+        let mut emulator = emulator(10, 2);
+        let backspace = || key(PhysicalKey::Backspace, InputModifiers::default());
+
+        assert_eq!(emulator.key(backspace()).unwrap().bytes, b"\x7f");
+        emulator.feed(b"\x1b[?67h");
+        assert_eq!(emulator.key(backspace()).unwrap().bytes, b"\x08");
+        emulator.feed(b"\x1b[?67l");
+        assert_eq!(emulator.key(backspace()).unwrap().bytes, b"\x7f");
+    }
+
+    #[test]
     fn clean_screens_do_not_publish_another_snapshot() {
         let mut emulator = emulator(10, 2);
 
