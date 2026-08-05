@@ -92,6 +92,14 @@ manufacturing domain state. Identities are monotonic and are not reused after de
 terminal worker uses its narrow read acquisition, resize, write, wait, and termination Interfaces
 without reaching into platform handles.
 
+### Bounded PTY Output Transport
+
+Terminal Session control Commands, including Shutdown, use a reliable latency-sensitive lane. PTY
+reader events use a separate bounded queue with backpressure and ordered worker notifications.
+Workers coalesce only consecutive output notifications up to a control boundary; reader completion
+remains reliable and ordered after its output. Closing the receiver wakes a blocked reader producer
+so terminal cleanup can continue off-thread.
+
 ### Workspace-Bound Terminal Creation
 
 `WorkspaceCollection` owns default Workspace naming and passes the exact stored Workspace root into
