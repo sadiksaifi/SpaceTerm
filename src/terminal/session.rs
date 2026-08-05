@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver as CommandReceiver, Sender as CommandSender};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Error as AnyError;
 #[cfg(test)]
@@ -17,7 +17,8 @@ use crate::platform::macos_pty::{
     user_shell,
 };
 use crate::terminal::emulator::{
-    EmulatorAction, PresentationGeneration, ScreenSnapshot, TerminalEmulator,
+    EmulatorAction, MAX_SYNCHRONIZED_OUTPUT_DURATION, PresentationGeneration, ScreenSnapshot,
+    TerminalEmulator,
 };
 use crate::terminal::geometry::TerminalGeometry;
 #[cfg(test)]
@@ -824,16 +825,34 @@ impl TerminalWorker {
         }
 
         loop {
-            let command = match self.pending_command.take() {
-                Some(command) => command,
-                None => match self.commands.recv() {
-                    Ok(command) => command,
-                    Err(_) => break,
-                },
+            let Some(command) = self.receive_next_command() else {
+                break;
             };
 
             if !self.process_command(command) {
                 break;
+            }
+        }
+    }
+
+    fn receive_next_command(&mut self) -> Option<Command> {
+        if let Some(command) = self.pending_command.take() {
+            return Some(command);
+        }
+
+        loop {
+            let Some(deadline) = self.emulator.synchronized_output_deadline() else {
+                return self.commands.recv().ok();
+            };
+            let timeout = deadline.saturating_duration_since(Instant::now());
+            match self.commands.recv_timeout(timeout) {
+                Ok(command) => return Some(command),
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    if !self.release_synchronized_output_if_due(deadline) {
+                        return None;
+                    }
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => return None,
             }
         }
     }
@@ -917,6 +936,9 @@ impl TerminalWorker {
         }
 
         if let Some(read_error) = reader_stopped {
+            if !self.flush_synchronized_output() {
+                return false;
+            }
             let event = classify_reader_stop(
                 read_error,
                 self.pty.wait_for_child(FINAL_CHILD_WAIT_TIMEOUT),
@@ -1074,6 +1096,32 @@ impl TerminalWorker {
             Err(error) => {
                 self.send_runtime_failure(format!(
                     "failed to produce terminal screen snapshot: {error}"
+                ));
+                false
+            }
+        }
+    }
+
+    fn release_synchronized_output_if_due(&mut self, now: Instant) -> bool {
+        match self.emulator.expire_synchronized_output(now) {
+            Ok(true) => self.publish_screen(),
+            Ok(false) => true,
+            Err(error) => {
+                self.send_runtime_failure(format!(
+                    "failed to release synchronized terminal output: {error}"
+                ));
+                false
+            }
+        }
+    }
+
+    fn flush_synchronized_output(&mut self) -> bool {
+        match self.emulator.end_synchronized_output() {
+            Ok(true) => self.publish_screen(),
+            Ok(false) => true,
+            Err(error) => {
+                self.send_runtime_failure(format!(
+                    "failed to flush synchronized terminal output: {error}"
                 ));
                 false
             }
@@ -1679,6 +1727,30 @@ mod tests {
     }
 
     #[test]
+    fn shell_exit_should_flush_a_pending_synchronized_output_transaction() {
+        let (result, reader_steps, records) = start_scripted_session(ScriptedPtyOptions::default());
+        let (mut session, events) = result.unwrap();
+
+        reader_steps
+            .send(ReaderStep::Bytes(b"\x1b[?2026hfinal output".to_vec()))
+            .unwrap();
+        reader_steps.send(ReaderStep::Eof).unwrap();
+        records.wait_for("the synchronized-output worker to finish", |state| {
+            state.pty_drops == 1
+        });
+
+        assert_eq!(events.len(), 2);
+        let screen = events.try_recv().unwrap();
+        let exited = events.try_recv().unwrap();
+        assert!(matches!(
+            screen,
+            SessionEvent::Screen(screen) if screen_text(&screen).contains("final output")
+        ));
+        assert!(matches!(exited, SessionEvent::Exited(SessionExit::Success)));
+        session.shutdown();
+    }
+
+    #[test]
     fn session_snapshots_reuse_rows_unchanged_by_later_output() {
         let (result, reader_steps, _records) =
             start_scripted_session(ScriptedPtyOptions::default());
@@ -2115,6 +2187,52 @@ mod tests {
             Err(mpsc::TryRecvError::Empty)
         ));
 
+        worker.finish();
+    }
+
+    #[test]
+    fn synchronized_output_deadline_should_publish_the_pending_screen() {
+        let (_command_tx, commands) = mpsc::channel();
+        let (_reader_events, reader_event_rx) = mpsc::sync_channel(PTY_OUTPUT_QUEUE_CAPACITY);
+        let records = ScriptedPtyRecords::default();
+        let (events, receiver) = async_channel::bounded(PTY_OUTPUT_QUEUE_CAPACITY);
+        let mut worker = TerminalWorker {
+            pty: Box::new(ScriptedPty {
+                reader: None,
+                records,
+                reader_error: None,
+                resize_error: None,
+                write_error: None,
+                wait_error: None,
+                wait_times_out: false,
+                exit_code: 0,
+            }),
+            emulator: TerminalEmulator::new(test_geometry()).unwrap(),
+            commands,
+            reader_events: reader_event_rx,
+            reader_thread: thread::spawn(|| {}),
+            events,
+            resizes: ResizeMailbox::default(),
+            pending_command: None,
+            terminal_input_focused: true,
+            focus_reporting_enabled: false,
+            held_keys: HeldKeys::default(),
+        };
+        assert!(worker.publish_screen());
+        let _ = receiver.try_recv().unwrap();
+
+        let started = Instant::now();
+        worker.emulator.feed_at(b"\x1b[?2026hstalled", started);
+        assert!(worker.publish_screen());
+        assert!(receiver.try_recv().is_err());
+
+        assert!(
+            worker.release_synchronized_output_if_due(started + MAX_SYNCHRONIZED_OUTPUT_DURATION)
+        );
+        let SessionEvent::Screen(screen) = receiver.try_recv().unwrap() else {
+            panic!("the synchronized-output deadline must publish a screen")
+        };
+        assert!(screen_text(&screen).contains("stalled"));
         worker.finish();
     }
 

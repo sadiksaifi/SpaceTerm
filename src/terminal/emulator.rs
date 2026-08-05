@@ -31,6 +31,7 @@ use crate::terminal::session::{
 use crate::theme::{ACTIVE_THEME, Color};
 
 const MAX_WHEEL_STEPS: i32 = 100;
+pub(crate) const MAX_SYNCHRONIZED_OUTPUT_DURATION: Duration = Duration::from_secs(1);
 const REPEAT_CLICK_DISTANCE_PX: f64 = 5.0;
 const REPEAT_CLICK_INTERVAL: Duration = Duration::from_millis(500);
 
@@ -431,6 +432,7 @@ pub(crate) struct TerminalEmulator {
     active_pointer: Option<ActivePointer>,
     gesture_epoch: Instant,
     presentation_generation: PresentationGeneration,
+    synchronized_output_started: Option<Instant>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -545,14 +547,51 @@ impl TerminalEmulator {
             active_pointer: None,
             gesture_epoch: Instant::now(),
             presentation_generation: PresentationGeneration::default(),
+            synchronized_output_started: None,
         })
     }
 
     pub(crate) fn feed(&mut self, bytes: &[u8]) {
+        self.feed_at(bytes, Instant::now());
+    }
+
+    pub(crate) fn feed_at(&mut self, bytes: &[u8], now: Instant) {
+        let synchronized_before = self.terminal.mode(Mode::SYNC_OUTPUT).unwrap_or(false);
         self.terminal.vt_write(bytes);
+        let synchronized_after = self.terminal.mode(Mode::SYNC_OUTPUT).unwrap_or(false);
+        self.synchronized_output_started = match (synchronized_before, synchronized_after) {
+            (false, true) => Some(now),
+            (true, true) => self.synchronized_output_started.or(Some(now)),
+            (_, false) => None,
+        };
+    }
+
+    pub(crate) fn synchronized_output_deadline(&self) -> Option<Instant> {
+        self.synchronized_output_started
+            .map(|started| started + MAX_SYNCHRONIZED_OUTPUT_DURATION)
+    }
+
+    pub(crate) fn expire_synchronized_output(&mut self, now: Instant) -> Result<bool, Error> {
+        if self
+            .synchronized_output_deadline()
+            .is_none_or(|deadline| now < deadline)
+        {
+            return Ok(false);
+        }
+        self.end_synchronized_output()
+    }
+
+    pub(crate) fn end_synchronized_output(&mut self) -> Result<bool, Error> {
+        self.synchronized_output_started = None;
+        if !self.terminal.mode(Mode::SYNC_OUTPUT)? {
+            return Ok(false);
+        }
+        self.terminal.set_mode(Mode::SYNC_OUTPUT, false)?;
+        Ok(true)
     }
 
     pub(crate) fn resize(&mut self, geometry: TerminalGeometry) -> Result<(), Error> {
+        self.end_synchronized_output()?;
         let grid = geometry.grid();
         let cell = geometry.backing_cell_size();
         self.terminal
@@ -2218,6 +2257,29 @@ mod tests {
         emulator.feed(b" complete\x1b[?2026l");
         let completed = emulator.snapshot().unwrap().unwrap();
         assert!(row_text(&completed, 0).starts_with("partial complete"));
+    }
+
+    #[test]
+    fn synchronized_output_deadline_should_release_a_stalled_transaction() {
+        let mut emulator = emulator(16, 2);
+        let _ = emulator.snapshot().unwrap();
+        let started = Instant::now();
+        emulator.feed_at(b"\x1b[?2026hstalled", started);
+        assert!(emulator.snapshot().unwrap().is_none());
+
+        assert!(
+            !emulator
+                .expire_synchronized_output(started + Duration::from_millis(999))
+                .unwrap()
+        );
+        assert!(emulator.snapshot().unwrap().is_none());
+        assert!(
+            emulator
+                .expire_synchronized_output(started + Duration::from_secs(1))
+                .unwrap()
+        );
+        let released = emulator.snapshot().unwrap().unwrap();
+        assert!(row_text(&released, 0).starts_with("stalled"));
     }
 
     #[test]
