@@ -3,6 +3,7 @@ mod pane_action_menu;
 mod pane_host;
 mod terminal_element;
 mod terminal_focus;
+mod terminal_ime;
 mod terminal_pane;
 mod window_manager;
 mod workspace_manager;
