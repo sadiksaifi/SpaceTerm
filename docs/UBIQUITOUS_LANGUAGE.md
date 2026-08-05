@@ -55,6 +55,7 @@
 - A **Pane** belongs to exactly one **Window** and owns one **Terminal Session**.
 - A **Split** has exactly two child **Pane Layouts**; each child is either another **Split** or a **Pane**.
 - Closing any hierarchy entity closes every **Terminal Session**, **PTY**, and **Shell Process** it owns.
+- No operation may leave an orphaned **PTY** or **Shell Process**.
 - Active and focused identities always reference entities still owned by their parent.
 
 ## Example dialogue
@@ -72,6 +73,7 @@
 - "Window" can mean either a product **Window** or a native macOS **Operating-System Window**; use **Window** for the SpaceTerm hierarchy and qualify the native surface every time.
 - "Tab" visually describes the Window selector but is not a SpaceTerm concept; always call the entity a **Window**.
 - "Session" can incorrectly imply a tmux-style **Workspace** or describe a Pane's runtime; never use bare "session" for hierarchy concepts, and use **Terminal Session** only for the qualified runtime.
+- tmux-inspired layout does not imply a server/client model; do not describe SpaceTerm concepts as clients, attached sessions, or shared Windows.
 - "Active," "focused," and "selected" were used as near-synonyms; reserve **Active** for Workspace and Window state and **Focused** for Pane state.
 - "Terminal" can mean the application, emulator, runtime, or visible region; prefer **SpaceTerm**, **Terminal Emulator**, **Terminal Session**, or **Pane** according to the intended concept.
 - "Horizontal split" and "vertical split" can describe either divider orientation or Pane placement; use the user-facing actions **Split Right** and **Split Down**, and use an explicitly named split axis only in implementation discussions.
