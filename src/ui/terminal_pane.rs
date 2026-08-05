@@ -58,6 +58,7 @@ pub(crate) struct TerminalPane {
     title: SharedString,
     focus_handle: FocusHandle,
     product_focus: TerminalProductFocus,
+    terminal_input_focus: bool,
     font_family: SharedString,
     font_size: f32,
     line_height: f32,
@@ -119,6 +120,7 @@ impl TerminalPane {
             fallback_title,
             focus_handle,
             product_focus: TerminalProductFocus::default(),
+            terminal_input_focus: false,
             font_family,
             font_size: DEFAULT_FONT_SIZE,
             line_height: DEFAULT_LINE_HEIGHT,
@@ -154,6 +156,17 @@ impl TerminalPane {
             application_active: window_active,
             blocker: self.product_focus.blocker,
         })
+    }
+
+    fn sync_terminal_input_focus(&mut self, window: &Window) -> bool {
+        let focused = self.terminal_input_focused(window);
+        if self.terminal_input_focus != focused {
+            self.terminal_input_focus = focused;
+            if let Some(session) = &self.session {
+                session.focus(focused);
+            }
+        }
+        focused
     }
 
     pub(crate) fn title(&self) -> SharedString {
@@ -228,6 +241,7 @@ impl TerminalPane {
 
         match self.session_factory.start(geometry) {
             Ok(started) => {
+                started.handle.focus(self.terminal_input_focus);
                 self.session = Some(started.handle);
                 let receiver = started.events;
                 self._event_task = Some(cx.spawn(async move |this, cx| {
@@ -574,13 +588,14 @@ impl Drop for TerminalPane {
 impl Render for TerminalPane {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let pane = cx.entity().downgrade();
+        let terminal_input_focused = self.sync_terminal_input_focus(window);
         let background = gpui_color(self.screen.background);
         let status = self.status.clone();
         self.sync_scrollbar(cx);
         let scrollbar = self.scrollbar.clone();
         let terminal_grid = TerminalGridElement::new(
             &self.screen,
-            self.terminal_input_focused(window),
+            terminal_input_focused,
             &self.font_family,
             px(self.font_size),
             px(self.line_height),
@@ -1133,6 +1148,60 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert_eq!(inputs, [KeyInput::text_input("界")]);
+    }
+
+    #[gpui::test]
+    fn authoritative_focus_transitions_share_one_deduplicated_session_path(
+        cx: &mut TestAppContext,
+    ) {
+        let (pane, cx, records) = connected_terminal_pane(cx);
+        let focus_commands = || {
+            records
+                .commands()
+                .into_iter()
+                .filter_map(|call| match call.command {
+                    RecordedSessionCommand::Focus(focused) => Some(focused),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(focus_commands(), vec![false, true]);
+
+        cx.update(|_window, app| {
+            pane.update(app, |pane, app| {
+                pane.set_product_focus(TerminalProductFocus {
+                    focused_pane: false,
+                    ..TerminalProductFocus::default()
+                });
+                app.notify();
+            });
+        });
+        cx.run_until_parked();
+        assert_eq!(focus_commands(), vec![false, true, false]);
+
+        cx.update(|_window, app| {
+            pane.update(app, |pane, app| {
+                pane.set_product_focus(TerminalProductFocus {
+                    focused_pane: false,
+                    ..TerminalProductFocus::default()
+                });
+                app.notify();
+            });
+        });
+        cx.run_until_parked();
+        assert_eq!(focus_commands(), vec![false, true, false]);
+
+        cx.update(|_window, app| {
+            pane.update(app, |pane, app| {
+                pane.set_product_focus(TerminalProductFocus::default());
+                app.notify();
+            });
+        });
+        cx.run_until_parked();
+        assert_eq!(focus_commands(), vec![false, true, false, true]);
+
+        cx.deactivate_window();
+        assert_eq!(focus_commands(), vec![false, true, false, true, false]);
     }
 
     fn event(key: &str, key_char: Option<&str>, modifiers: Modifiers) -> KeyDownEvent {

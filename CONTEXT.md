@@ -142,6 +142,14 @@ blockers. Only the complete true state admits terminal key input and presents th
 cursor. Any false fact preserves emulator visibility but presents a steady, outline-only hollow
 block; restoring every fact restores the negotiated shape and blink request.
 
+### Ordered Terminal Focus Reporting
+
+Every authoritative Terminal Input Focus transition crosses the reliable Terminal Session command
+lane. The terminal worker owns the last reported focus state, DEC 1004 mode state, and the set of
+terminal-routed held keys. Enabling DEC 1004 emits the current state immediately; later duplicate
+transitions emit nothing. On focus loss, the worker synthesizes releases for its held keys before
+emitting focus-out, while application Actions remain outside that held-key set.
+
 ### Unified Terminal Geometry
 
 `TerminalGeometry` is the sole conversion contract between GPUI logical viewport and cell metrics,
