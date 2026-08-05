@@ -3475,6 +3475,24 @@ mod tests {
     }
 
     #[test]
+    fn bracketed_paste_encoder_neutralizes_embedded_closing_fences_and_controls() {
+        let mut emulator = emulator(10, 2);
+        emulator.feed(b"\x1b[?2004h");
+
+        let action = emulator.paste("a\x1b[201~\x03b\n".to_owned()).unwrap();
+
+        assert_eq!(action.bytes, b"\x1b[200~a [201~ b\n\x1b[201~");
+        assert_eq!(
+            action
+                .bytes
+                .windows(b"\x1b[201~".len())
+                .filter(|window| *window == b"\x1b[201~")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
     fn focus_encoding_obeys_dec_1004_mode() {
         let mut emulator = emulator(10, 2);
 

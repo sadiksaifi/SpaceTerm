@@ -18,8 +18,8 @@ use super::terminal_element::{
 use super::terminal_focus::{TerminalFocusCoordinator, TerminalFocusFacts, TerminalProductFocus};
 use super::terminal_ime::{PreeditLayout, PreeditPosition, TerminalIme, layout_preedit};
 use super::{
-    CopySelection, DecreaseTerminalFontSize, IncreaseTerminalFontSize, PasteClipboard,
-    ResetTerminalFontSize, TERMINAL_KEY_CONTEXT,
+    CancelUnsafePaste, ConfirmUnsafePaste, CopySelection, DecreaseTerminalFontSize,
+    IncreaseTerminalFontSize, PasteClipboard, ResetTerminalFontSize, TERMINAL_KEY_CONTEXT,
 };
 use crate::platform::macos_keyboard::{
     KeyTranslation, MacosKeyboardBridge, NativeKeyEvent, NativeKeyEventKind, UnhandledKeyEvent,
@@ -28,9 +28,10 @@ use crate::terminal::geometry::{
     BackingScale, CellGridSize, LogicalCellSize, LogicalPosition, LogicalSize, TerminalGeometry,
 };
 use crate::terminal::{
-    InputModifiers, KeyAction, KeyInput, OptionAsAltPolicy, PhysicalKey, PointerButton,
-    PointerInput, PointerPhase, ScreenSnapshot, SelectionCopy, SessionEvent, ShiftSelectionPolicy,
-    SurfacePosition, TerminalSessionHandle, WheelInput, WorkspaceTerminalSessionFactory,
+    InputModifiers, KeyAction, KeyInput, OptionAsAltPolicy, PasteConfirmation, PasteDecision,
+    PasteRequestOutcome, PasteResolution, PhysicalKey, PointerButton, PointerInput, PointerPhase,
+    ScreenSnapshot, SelectionCopy, SessionEvent, ShiftSelectionPolicy, SurfacePosition,
+    TerminalSessionHandle, WheelInput, WorkspaceTerminalSessionFactory,
 };
 use crate::theme::{ACTIVE_THEME, Color};
 
@@ -79,6 +80,7 @@ pub(crate) struct TerminalPane {
     keyboard_bridge: MacosKeyboardBridge,
     ime: TerminalIme,
     ime_suppressed_keys: Vec<PhysicalKey>,
+    pending_paste: Option<PasteConfirmation>,
     _event_task: Option<Task<()>>,
 }
 
@@ -145,6 +147,7 @@ impl TerminalPane {
             keyboard_bridge: MacosKeyboardBridge::new(OptionAsAltPolicy::default()),
             ime: TerminalIme::default(),
             ime_suppressed_keys: Vec::new(),
+            pending_paste: None,
             _event_task: None,
         }
     }
@@ -154,6 +157,15 @@ impl TerminalPane {
     }
 
     pub(crate) fn set_product_focus(&mut self, product_focus: TerminalProductFocus) {
+        if (!product_focus.active_workspace
+            || !product_focus.active_window
+            || !product_focus.focused_pane
+            || product_focus.blocker.is_some())
+            && let Some(confirmation) = self.pending_paste.take()
+            && let Some(session) = &self.session
+        {
+            let _ = session.resolve_paste(confirmation.id, PasteDecision::Cancel);
+        }
         self.product_focus = product_focus;
     }
 
@@ -175,6 +187,11 @@ impl TerminalPane {
         if self.terminal_input_focus != focused {
             self.terminal_input_focus = focused;
             if !focused {
+                if let Some(confirmation) = self.pending_paste.take()
+                    && let Some(session) = &self.session
+                {
+                    let _ = session.resolve_paste(confirmation.id, PasteDecision::Cancel);
+                }
                 self.ime.cancel();
                 self.ime_suppressed_keys.clear();
             }
@@ -213,6 +230,11 @@ impl TerminalPane {
     }
 
     pub(crate) fn close(&mut self) {
+        if let Some(confirmation) = self.pending_paste.take()
+            && let Some(session) = &self.session
+        {
+            let _ = session.resolve_paste(confirmation.id, PasteDecision::Cancel);
+        }
         self._event_task.take();
         self.session.take();
     }
@@ -636,11 +658,95 @@ impl TerminalPane {
         let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) else {
             return;
         };
-        if !text.is_empty()
-            && let Some(session) = &self.session
-        {
-            session.paste(text);
+        if text.is_empty() {
+            return;
         }
+        let Some(session) = &self.session else {
+            return;
+        };
+        let receiver = session.request_paste(text);
+        cx.spawn(async move |this, cx| match receiver.recv().await {
+            Ok(Ok(PasteRequestOutcome::Written)) => {}
+            Ok(Ok(PasteRequestOutcome::ConfirmationRequired(confirmation))) => {
+                let _ = this.update(cx, |this, cx| {
+                    this.pending_paste = Some(confirmation);
+                    cx.notify();
+                });
+            }
+            Ok(Ok(PasteRequestOutcome::Rejected(rejection))) => {
+                let _ = this.update(cx, |this, cx| {
+                    this.status = Some(format!("Paste rejected: {rejection}"));
+                    cx.notify();
+                });
+            }
+            Ok(Err(_)) | Err(_) => {
+                let _ = this.update(cx, |this, cx| {
+                    this.status = Some(
+                        "Paste request failed before any terminal input was written".to_owned(),
+                    );
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+    }
+
+    fn confirm_unsafe_paste(
+        &mut self,
+        _: &ConfirmUnsafePaste,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.resolve_pending_paste(PasteDecision::Confirm, window, cx);
+    }
+
+    fn cancel_unsafe_paste(
+        &mut self,
+        _: &CancelUnsafePaste,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.resolve_pending_paste(PasteDecision::Cancel, window, cx);
+    }
+
+    fn resolve_pending_paste(
+        &mut self,
+        mut decision: PasteDecision,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(confirmation) = self.pending_paste.take() else {
+            return;
+        };
+        if !self.terminal_input_focused(window) {
+            decision = PasteDecision::Cancel;
+        }
+        let Some(session) = &self.session else {
+            return;
+        };
+        let receiver = session.resolve_paste(confirmation.id, decision);
+        self.focus_handle.focus(window);
+        cx.notify();
+        cx.spawn(async move |this, cx| match receiver.recv().await {
+            Ok(Ok(PasteResolution::Written | PasteResolution::Cancelled)) => {}
+            Ok(Ok(PasteResolution::Stale)) => {
+                let _ = this.update(cx, |this, cx| {
+                    this.status = Some(
+                        "Paste confirmation expired without writing terminal input".to_owned(),
+                    );
+                    cx.notify();
+                });
+            }
+            Ok(Err(_)) | Err(_) => {
+                let _ = this.update(cx, |this, cx| {
+                    this.status = Some(
+                        "Paste confirmation was lost without writing terminal input".to_owned(),
+                    );
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
     }
 
     fn surface_position(
@@ -783,6 +889,7 @@ impl Render for TerminalPane {
         let terminal_input_focused = self.sync_terminal_input_focus(window);
         let background = gpui_color(self.screen.background);
         let status = self.status.clone();
+        let paste_confirmation = self.pending_paste;
         self.sync_scrollbar(cx);
         let scrollbar = self.scrollbar.clone();
         let pointer_uses_text_cursor = pointer_uses_text_cursor(
@@ -826,6 +933,8 @@ impl Render for TerminalPane {
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(Self::copy_selection))
             .on_action(cx.listener(Self::paste_clipboard))
+            .on_action(cx.listener(Self::confirm_unsafe_paste))
+            .on_action(cx.listener(Self::cancel_unsafe_paste))
             .on_action(cx.listener(Self::increase_font_size))
             .on_action(cx.listener(Self::decrease_font_size))
             .on_action(cx.listener(Self::reset_font_size))
@@ -843,6 +952,12 @@ impl Render for TerminalPane {
             .on_mouse_up_out(MouseButton::Right, cx.listener(Self::on_mouse_up))
             .child(terminal_grid)
             .child(scrollbar)
+            .when_some(paste_confirmation, |root, confirmation| {
+                root.child(render_paste_confirmation(
+                    confirmation,
+                    cx.entity().downgrade(),
+                ))
+            })
             .when_some(status, |root, status| {
                 root.child(
                     div()
@@ -861,6 +976,83 @@ impl Render for TerminalPane {
                 )
             })
     }
+}
+
+fn render_paste_confirmation(
+    confirmation: PasteConfirmation,
+    pane: gpui::WeakEntity<TerminalPane>,
+) -> impl IntoElement {
+    let cancel_pane = pane.clone();
+    let risks = [
+        confirmation.risk.multiline.then_some("multiple lines"),
+        confirmation
+            .risk
+            .control_bytes
+            .then_some("terminal control bytes"),
+        confirmation
+            .risk
+            .closing_fence
+            .then_some("a bracketed-paste closing fence"),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>()
+    .join(", ");
+
+    div()
+        .debug_selector(|| "unsafe-paste-confirmation".to_owned())
+        .absolute()
+        .left(px(16.0))
+        .right(px(16.0))
+        .bottom(px(16.0))
+        .flex()
+        .items_center()
+        .gap(px(10.0))
+        .px(px(12.0))
+        .py(px(10.0))
+        .rounded(px(8.0))
+        .border_1()
+        .border_color(gpui_color(ACTIVE_THEME.warning_border))
+        .bg(gpui_color(ACTIVE_THEME.warning_background))
+        .text_color(gpui_color(ACTIVE_THEME.text))
+        .text_sm()
+        .occlude()
+        .child(format!(
+            "Paste {} bytes across {} lines? Detected {risks}.",
+            confirmation.byte_len, confirmation.line_count
+        ))
+        .child(
+            div()
+                .id("cancel-unsafe-paste")
+                .cursor_pointer()
+                .px(px(8.0))
+                .py(px(4.0))
+                .rounded(px(5.0))
+                .bg(gpui_color(ACTIVE_THEME.element_active))
+                .child("Cancel")
+                .on_click(move |_, window, cx| {
+                    let _ = cancel_pane.update(cx, |pane, cx| {
+                        pane.cancel_unsafe_paste(&CancelUnsafePaste, window, cx);
+                    });
+                    cx.stop_propagation();
+                }),
+        )
+        .child(
+            div()
+                .id("confirm-unsafe-paste")
+                .cursor_pointer()
+                .px(px(8.0))
+                .py(px(4.0))
+                .rounded(px(5.0))
+                .bg(gpui_color(ACTIVE_THEME.element_active))
+                .child("Paste")
+                .on_click(move |_, window, cx| {
+                    let _ = pane.update(cx, |pane, cx| {
+                        pane.confirm_unsafe_paste(&ConfirmUnsafePaste, window, cx);
+                    });
+                    cx.stop_propagation();
+                }),
+        )
 }
 
 fn terminal_font(cx: &App) -> SharedString {
@@ -1305,6 +1497,36 @@ mod tests {
         (pane, cx, records)
     }
 
+    fn terminal_pane_with_paste_response(
+        cx: &mut TestAppContext,
+        response: Result<PasteRequestOutcome, String>,
+        resolution: Result<PasteResolution, String>,
+    ) -> (
+        Entity<TerminalPane>,
+        &mut VisualTestContext,
+        TestTerminalSessionRecords,
+    ) {
+        cx.update(crate::ui::init);
+        let records = TestTerminalSessionRecords::default();
+        let session_factory: Rc<dyn TerminalSessionFactory> = Rc::new(
+            TestTerminalSessionFactory::new(records.clone())
+                .with_paste_response(response)
+                .with_paste_resolution(resolution),
+        );
+        let session_factory = WorkspaceTerminalSessionFactory::new(
+            session_factory,
+            PathBuf::from("/tmp/spaceterm-terminal-pane-paste-test"),
+        );
+        let (pane, cx) =
+            cx.add_window_view(|window, cx| TerminalPane::new(session_factory, window, cx));
+        cx.update(|window, cx| {
+            window.activate_window();
+            pane.update(cx, |pane, _cx| pane.focus(window));
+        });
+        cx.run_until_parked();
+        (pane, cx, records)
+    }
+
     #[gpui::test]
     fn command_equals_should_increase_terminal_font_size(cx: &mut TestAppContext) {
         let (pane, cx) = terminal_pane(cx);
@@ -1398,6 +1620,87 @@ mod tests {
                 matches!(call.command, RecordedSessionCommand::RequestSelectionCopy)
             })
         );
+    }
+
+    #[gpui::test]
+    fn unsafe_paste_confirmation_retains_terminal_focus_and_keeps_only_metadata_in_ui(
+        cx: &mut TestAppContext,
+    ) {
+        let confirmation = PasteConfirmation {
+            id: crate::terminal::PasteConfirmationId::new(7),
+            byte_len: 12,
+            line_count: 2,
+            risk: crate::terminal::PasteRisk {
+                multiline: true,
+                control_bytes: false,
+                closing_fence: false,
+            },
+        };
+        let (pane, cx, records) = terminal_pane_with_paste_response(
+            cx,
+            Ok(PasteRequestOutcome::ConfirmationRequired(confirmation)),
+            Ok(PasteResolution::Written),
+        );
+        cx.write_to_clipboard(ClipboardItem::new_string("first\nsecond".to_owned()));
+
+        cx.dispatch_action(PasteClipboard);
+        cx.run_until_parked();
+
+        assert_eq!(
+            pane.read_with(cx, |pane, _| pane.pending_paste),
+            Some(confirmation)
+        );
+        assert!(cx.update(|window, cx| pane.read(cx).terminal_input_focused(window)));
+        assert!(
+            records
+                .commands()
+                .iter()
+                .any(|call| { matches!(call.command, RecordedSessionCommand::RequestPaste(_)) })
+        );
+
+        cx.dispatch_action(ConfirmUnsafePaste);
+        cx.run_until_parked();
+        assert!(records.commands().iter().any(|call| {
+            call.command
+                == RecordedSessionCommand::ResolvePaste(confirmation.id, PasteDecision::Confirm)
+        }));
+        assert!(cx.update(|window, cx| pane.read(cx).terminal_input_focused(window)));
+    }
+
+    #[gpui::test]
+    fn losing_product_focus_cancels_pending_paste_without_confirming_it(cx: &mut TestAppContext) {
+        let confirmation = PasteConfirmation {
+            id: crate::terminal::PasteConfirmationId::new(9),
+            byte_len: 12,
+            line_count: 2,
+            risk: crate::terminal::PasteRisk {
+                multiline: true,
+                control_bytes: false,
+                closing_fence: false,
+            },
+        };
+        let (pane, cx, records) = terminal_pane_with_paste_response(
+            cx,
+            Ok(PasteRequestOutcome::ConfirmationRequired(confirmation)),
+            Ok(PasteResolution::Cancelled),
+        );
+        cx.write_to_clipboard(ClipboardItem::new_string("first\nsecond".to_owned()));
+        cx.dispatch_action(PasteClipboard);
+        cx.run_until_parked();
+
+        pane.update(cx, |pane, _| {
+            pane.set_product_focus(TerminalProductFocus {
+                active_workspace: false,
+                ..TerminalProductFocus::default()
+            });
+        });
+        cx.run_until_parked();
+
+        assert!(pane.read_with(cx, |pane, _| pane.pending_paste.is_none()));
+        assert!(records.commands().iter().any(|call| {
+            call.command
+                == RecordedSessionCommand::ResolvePaste(confirmation.id, PasteDecision::Cancel)
+        }));
     }
 
     #[gpui::test]

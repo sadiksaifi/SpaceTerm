@@ -25,11 +25,16 @@ use crate::terminal::geometry::TerminalGeometry;
 #[cfg(test)]
 use crate::terminal::key::OptionAsAltPolicy;
 use crate::terminal::key::{InputModifiers, KeyInput};
+use crate::terminal::paste::{
+    PasteConfirmationId, PasteDecision, PasteRejection, PasteRequestOutcome, PasteResolution,
+    PreparedPaste,
+};
 use crate::terminal::selection::{SelectionCopy, SelectionCopyOptions};
 
 const FINAL_CHILD_WAIT_TIMEOUT: Duration = Duration::from_secs(2);
 const PTY_READ_BUFFER_SIZE: usize = 16 * 1024;
 const PTY_OUTPUT_QUEUE_CAPACITY: usize = 8;
+const PASTE_CONFIRMATION_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub(crate) struct SurfacePosition {
@@ -233,7 +238,15 @@ pub(crate) trait TerminalSessionHandle {
     fn pointer(&self, input: PointerInput);
     fn wheel(&self, input: WheelInput);
     fn scroll_to(&self, offset_rows: u64, generation: PresentationGeneration);
-    fn paste(&self, text: String);
+    fn request_paste(
+        &self,
+        text: String,
+    ) -> async_channel::Receiver<Result<PasteRequestOutcome, String>>;
+    fn resolve_paste(
+        &self,
+        id: PasteConfirmationId,
+        decision: PasteDecision,
+    ) -> async_channel::Receiver<Result<PasteResolution, String>>;
     fn request_selection_copy(
         &self,
     ) -> async_channel::Receiver<Result<Option<SelectionCopy>, String>>;
@@ -574,12 +587,41 @@ impl TerminalSession {
         }
     }
 
-    pub(crate) fn paste(&self, text: String) {
-        if let Some(commands) = &self.commands
-            && commands.send(Command::Paste(text)).is_err()
-        {
-            eprintln!("terminal paste was dropped because the worker has stopped");
+    pub(crate) fn request_paste(
+        &self,
+        text: String,
+    ) -> async_channel::Receiver<Result<PasteRequestOutcome, String>> {
+        let (reply, receiver) = async_channel::bounded(1);
+        let sent = self.commands.as_ref().is_some_and(|commands| {
+            commands
+                .send(Command::RequestPaste(text, reply.clone()))
+                .is_ok()
+        });
+        if !sent {
+            let _ = reply.try_send(Err(
+                "terminal paste could not be requested because the worker has stopped".to_owned(),
+            ));
         }
+        receiver
+    }
+
+    pub(crate) fn resolve_paste(
+        &self,
+        id: PasteConfirmationId,
+        decision: PasteDecision,
+    ) -> async_channel::Receiver<Result<PasteResolution, String>> {
+        let (reply, receiver) = async_channel::bounded(1);
+        let sent = self.commands.as_ref().is_some_and(|commands| {
+            commands
+                .send(Command::ResolvePaste(id, decision, reply.clone()))
+                .is_ok()
+        });
+        if !sent {
+            let _ = reply.try_send(Err(
+                "terminal paste confirmation was lost because the worker has stopped".to_owned(),
+            ));
+        }
+        receiver
     }
 
     pub(crate) fn request_selection_copy(
@@ -641,8 +683,19 @@ impl TerminalSessionHandle for TerminalSession {
         Self::scroll_to(self, offset_rows, generation);
     }
 
-    fn paste(&self, text: String) {
-        Self::paste(self, text);
+    fn request_paste(
+        &self,
+        text: String,
+    ) -> async_channel::Receiver<Result<PasteRequestOutcome, String>> {
+        Self::request_paste(self, text)
+    }
+
+    fn resolve_paste(
+        &self,
+        id: PasteConfirmationId,
+        decision: PasteDecision,
+    ) -> async_channel::Receiver<Result<PasteResolution, String>> {
+        Self::resolve_paste(self, id, decision)
     }
 
     fn request_selection_copy(
@@ -693,7 +746,16 @@ enum Command {
     Pointer(PointerInput),
     Wheel(WheelInput),
     ScrollTo(u64, PresentationGeneration),
-    Paste(String),
+    RequestPaste(
+        String,
+        async_channel::Sender<Result<PasteRequestOutcome, String>>,
+    ),
+    ResolvePaste(
+        PasteConfirmationId,
+        PasteDecision,
+        async_channel::Sender<Result<PasteResolution, String>>,
+    ),
+    PasteConfirmationExpired,
     SelectionCopy(async_channel::Sender<Result<Option<SelectionCopy>, String>>),
     SelectionAutoscrollTick(PresentationGeneration),
     ReaderReady,
@@ -713,6 +775,66 @@ struct TerminalWorker {
     focus_reporting_enabled: bool,
     held_keys: HeldKeys,
     selection_autoscroll: SelectionAutoscrollSchedule,
+    paste_confirmations: PasteConfirmationSchedule,
+}
+
+struct PendingPaste {
+    id: PasteConfirmationId,
+    payload: PreparedPaste,
+    deadline: Instant,
+}
+
+#[derive(Default)]
+struct PasteConfirmationSchedule {
+    next_id: u64,
+    pending: Option<PendingPaste>,
+}
+
+impl PasteConfirmationSchedule {
+    fn deadline(&self) -> Option<Instant> {
+        self.pending.as_ref().map(|pending| pending.deadline)
+    }
+
+    fn create(
+        &mut self,
+        payload: PreparedPaste,
+        now: Instant,
+    ) -> Option<crate::terminal::PasteConfirmation> {
+        if self.pending.is_some() {
+            return None;
+        }
+        self.next_id = self.next_id.wrapping_add(1).max(1);
+        let id = PasteConfirmationId::new(self.next_id);
+        let confirmation = payload.confirmation(id);
+        self.pending = Some(PendingPaste {
+            id,
+            payload,
+            deadline: now + PASTE_CONFIRMATION_TIMEOUT,
+        });
+        Some(confirmation)
+    }
+
+    fn take(&mut self, id: PasteConfirmationId, now: Instant) -> Option<PreparedPaste> {
+        let pending = self.pending.take()?;
+        if pending.id == id && now < pending.deadline {
+            Some(pending.payload)
+        } else {
+            None
+        }
+    }
+
+    fn expire(&mut self, now: Instant) -> bool {
+        if self.deadline().is_some_and(|deadline| now >= deadline) {
+            self.pending = None;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn cancel(&mut self) {
+        self.pending = None;
+    }
 }
 
 #[derive(Default)]
@@ -872,6 +994,7 @@ impl TerminalWorker {
             focus_reporting_enabled: false,
             held_keys: HeldKeys::default(),
             selection_autoscroll: SelectionAutoscrollSchedule::default(),
+            paste_confirmations: PasteConfirmationSchedule::default(),
         };
 
         if !startup.succeeded() {
@@ -907,11 +1030,14 @@ impl TerminalWorker {
         loop {
             let synchronized_output_deadline = self.emulator.synchronized_output_deadline();
             let autoscroll_deadline = self.selection_autoscroll.deadline();
-            let deadline = match (synchronized_output_deadline, autoscroll_deadline) {
-                (Some(left), Some(right)) => Some(left.min(right)),
-                (Some(deadline), None) | (None, Some(deadline)) => Some(deadline),
-                (None, None) => None,
-            };
+            let deadline = [
+                synchronized_output_deadline,
+                autoscroll_deadline,
+                self.paste_confirmations.deadline(),
+            ]
+            .into_iter()
+            .flatten()
+            .min();
             let Some(deadline) = deadline else {
                 return self.commands.recv().ok();
             };
@@ -922,6 +1048,9 @@ impl TerminalWorker {
                     let now = Instant::now();
                     if let Some(generation) = self.selection_autoscroll.take_due(now) {
                         return Some(Command::SelectionAutoscrollTick(generation));
+                    }
+                    if self.paste_confirmations.expire(now) {
+                        return Some(Command::PasteConfirmationExpired);
                     }
                     if synchronized_output_deadline.is_some()
                         && !self.release_synchronized_output_if_due(now)
@@ -986,13 +1115,11 @@ impl TerminalWorker {
                 let action = self.emulator.scroll_to_at(offset_rows, generation);
                 self.apply_emulator_action(action)
             }
-            Command::Paste(text) => match self.emulator.paste(text) {
-                Ok(action) => self.apply_emulator_action(action),
-                Err(message) => {
-                    self.send_runtime_failure(message);
-                    false
-                }
-            },
+            Command::RequestPaste(text, reply) => self.process_paste_request(text, reply),
+            Command::ResolvePaste(id, decision, reply) => {
+                self.process_paste_resolution(id, decision, reply)
+            }
+            Command::PasteConfirmationExpired => true,
             Command::SelectionCopy(reply) => {
                 let _ = reply.try_send(
                     self.emulator
@@ -1012,6 +1139,92 @@ impl TerminalWorker {
                 }
             }
             Command::Shutdown => false,
+        }
+    }
+
+    fn process_paste_request(
+        &mut self,
+        text: String,
+        reply: async_channel::Sender<Result<PasteRequestOutcome, String>>,
+    ) -> bool {
+        if !self.terminal_input_focused {
+            let _ = reply.try_send(Ok(PasteRequestOutcome::Rejected(
+                PasteRejection::TerminalUnfocused,
+            )));
+            return true;
+        }
+        let payload = match PreparedPaste::prepare(text) {
+            Ok(payload) => payload,
+            Err(rejection) => {
+                let _ = reply.try_send(Ok(PasteRequestOutcome::Rejected(rejection)));
+                return true;
+            }
+        };
+        if payload.requires_confirmation() {
+            let outcome = self
+                .paste_confirmations
+                .create(payload, Instant::now())
+                .map(PasteRequestOutcome::ConfirmationRequired)
+                .unwrap_or(PasteRequestOutcome::Rejected(
+                    PasteRejection::ConfirmationPending,
+                ));
+            let _ = reply.try_send(Ok(outcome));
+            return true;
+        }
+
+        self.write_prepared_paste(payload, reply, PasteRequestOutcome::Written)
+    }
+
+    fn process_paste_resolution(
+        &mut self,
+        id: PasteConfirmationId,
+        decision: PasteDecision,
+        reply: async_channel::Sender<Result<PasteResolution, String>>,
+    ) -> bool {
+        let Some(payload) = self.paste_confirmations.take(id, Instant::now()) else {
+            let _ = reply.try_send(Ok(PasteResolution::Stale));
+            return true;
+        };
+        if decision == PasteDecision::Cancel || !self.terminal_input_focused {
+            let _ = reply.try_send(Ok(PasteResolution::Cancelled));
+            return true;
+        }
+
+        match self.emulator.paste(payload.into_text()) {
+            Ok(action) => {
+                let applied = self.apply_emulator_action(action);
+                if applied {
+                    let _ = reply.try_send(Ok(PasteResolution::Written));
+                }
+                applied
+            }
+            Err(message) => {
+                let _ = reply.try_send(Err("terminal paste encoding failed".to_owned()));
+                self.send_runtime_failure(message);
+                false
+            }
+        }
+    }
+
+    fn write_prepared_paste(
+        &mut self,
+        payload: PreparedPaste,
+        reply: async_channel::Sender<Result<PasteRequestOutcome, String>>,
+        outcome: PasteRequestOutcome,
+    ) -> bool {
+        match self.emulator.paste(payload.into_text()) {
+            Ok(action) => {
+                let applied = self.apply_emulator_action(action);
+                if applied {
+                    let _ = reply.try_send(Ok(outcome));
+                }
+                applied
+            }
+            Err(message) => {
+                let _ = reply.try_send(Err("terminal paste encoding failed".to_owned()));
+                self.send_runtime_failure(message);
+                false
+            }
         }
     }
 
@@ -1155,6 +1368,7 @@ impl TerminalWorker {
         }
 
         if !focused {
+            self.paste_confirmations.cancel();
             for input in self.held_keys.take_releases() {
                 match self.emulator.key(input) {
                     Ok(action) => {
@@ -1263,6 +1477,7 @@ impl TerminalWorker {
             focus_reporting_enabled: _focus_reporting_enabled,
             held_keys: _held_keys,
             selection_autoscroll: _selection_autoscroll,
+            paste_confirmations: _paste_confirmations,
         } = self;
         // SpawnedPty's Drop terminates and reaps a live shell for the native Adapter.
         drop(reader_events);
@@ -2288,6 +2503,7 @@ mod tests {
             focus_reporting_enabled: false,
             held_keys: HeldKeys::default(),
             selection_autoscroll: SelectionAutoscrollSchedule::default(),
+            paste_confirmations: PasteConfirmationSchedule::default(),
         };
 
         assert!(worker.process_reader_events());
@@ -2333,6 +2549,7 @@ mod tests {
             focus_reporting_enabled: false,
             held_keys: HeldKeys::default(),
             selection_autoscroll: SelectionAutoscrollSchedule::default(),
+            paste_confirmations: PasteConfirmationSchedule::default(),
         };
         assert!(worker.publish_screen());
         let _ = receiver.try_recv().unwrap();
@@ -2508,13 +2725,139 @@ mod tests {
         records.wait_for("the in-band terminal resize response", |state| {
             state.written == b"\x1b[48;4;20;72;160t"
         });
-        session.paste("later".to_owned());
+        assert_eq!(
+            session
+                .request_paste("later".to_owned())
+                .recv_blocking()
+                .unwrap(),
+            Ok(PasteRequestOutcome::Written)
+        );
         let state = records.wait_for("the later terminal input", |state| {
             state.written.ends_with(b"later")
         });
 
         assert_eq!(state.written, b"\x1b[48;4;20;72;160tlater");
         session.shutdown();
+    }
+
+    #[test]
+    fn unsafe_paste_is_immutable_until_confirmation_and_uses_exact_unbracketed_bytes() {
+        let (result, _reader_steps, records) =
+            start_scripted_session(ScriptedPtyOptions::default());
+        let (mut session, _events) = result.unwrap();
+        let mut caller_copy = "one\r\ntw\x03o".to_owned();
+
+        let outcome = session
+            .request_paste(caller_copy.clone())
+            .recv_blocking()
+            .unwrap()
+            .unwrap();
+        caller_copy.clear();
+        let PasteRequestOutcome::ConfirmationRequired(confirmation) = outcome else {
+            panic!("multiline, control-bearing paste must require confirmation")
+        };
+        assert!(records.snapshot().written.is_empty());
+
+        assert_eq!(
+            session
+                .resolve_paste(confirmation.id, PasteDecision::Confirm)
+                .recv_blocking()
+                .unwrap(),
+            Ok(PasteResolution::Written)
+        );
+        assert_eq!(records.snapshot().written, b"one\rtw o");
+        session.shutdown();
+    }
+
+    #[test]
+    fn cancelled_paste_writes_no_pty_bytes() {
+        let (result, _reader_steps, records) =
+            start_scripted_session(ScriptedPtyOptions::default());
+        let (mut session, _events) = result.unwrap();
+        let outcome = session
+            .request_paste("first\nsecond".to_owned())
+            .recv_blocking()
+            .unwrap()
+            .unwrap();
+        let PasteRequestOutcome::ConfirmationRequired(confirmation) = outcome else {
+            panic!("multiline paste must require confirmation")
+        };
+
+        assert_eq!(
+            session
+                .resolve_paste(confirmation.id, PasteDecision::Cancel)
+                .recv_blocking()
+                .unwrap(),
+            Ok(PasteResolution::Cancelled)
+        );
+        assert!(records.snapshot().written.is_empty());
+        session.shutdown();
+    }
+
+    #[test]
+    fn focus_loss_invalidates_pending_paste_before_confirmation() {
+        let (result, _reader_steps, records) =
+            start_scripted_session(ScriptedPtyOptions::default());
+        let (mut session, _events) = result.unwrap();
+        let outcome = session
+            .request_paste("first\nsecond".to_owned())
+            .recv_blocking()
+            .unwrap()
+            .unwrap();
+        let PasteRequestOutcome::ConfirmationRequired(confirmation) = outcome else {
+            panic!("multiline paste must require confirmation")
+        };
+
+        session.focus(false);
+        let _ = session.request_selection_copy().recv_blocking();
+        assert_eq!(
+            session
+                .resolve_paste(confirmation.id, PasteDecision::Confirm)
+                .recv_blocking()
+                .unwrap(),
+            Ok(PasteResolution::Stale)
+        );
+        assert!(records.snapshot().written.is_empty());
+        session.shutdown();
+    }
+
+    #[test]
+    fn only_one_unsafe_paste_can_await_confirmation() {
+        let (result, _reader_steps, records) =
+            start_scripted_session(ScriptedPtyOptions::default());
+        let (mut session, _events) = result.unwrap();
+        let first = session
+            .request_paste("first\ncommand".to_owned())
+            .recv_blocking()
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            first,
+            PasteRequestOutcome::ConfirmationRequired(_)
+        ));
+
+        assert_eq!(
+            session
+                .request_paste("second\ncommand".to_owned())
+                .recv_blocking()
+                .unwrap(),
+            Ok(PasteRequestOutcome::Rejected(
+                PasteRejection::ConfirmationPending
+            ))
+        );
+        assert!(records.snapshot().written.is_empty());
+        session.shutdown();
+    }
+
+    #[test]
+    fn paste_confirmation_schedule_expires_without_exposing_payload() {
+        let now = Instant::now();
+        let mut schedule = PasteConfirmationSchedule::default();
+        let payload = PreparedPaste::prepare("first\nsecond".to_owned()).unwrap();
+        let confirmation = schedule.create(payload, now).unwrap();
+
+        assert!(schedule.expire(now + PASTE_CONFIRMATION_TIMEOUT));
+        assert_eq!(schedule.take(confirmation.id, now), None);
     }
 
     #[test]
@@ -2525,7 +2868,7 @@ mod tests {
         });
         let (mut session, events) = result.unwrap();
 
-        session.paste("input".to_owned());
+        let _ = session.request_paste("input".to_owned()).recv_blocking();
         let event = receive_event(&events, "the PTY write failure", |event| {
             matches!(event, SessionEvent::Failed(_))
         });
@@ -2834,7 +3177,21 @@ mod tests {
 
         // The command renders a red X. The echoed command contains an X too, but
         // only the shell's output passes through the SGR sequence and becomes red.
-        session.paste("printf '\\033[31mX\\033[0m\\n'\n".to_owned());
+        let request = session
+            .request_paste("printf '\\033[31mX\\033[0m\\n'\n".to_owned())
+            .recv_blocking()
+            .unwrap()
+            .unwrap();
+        let PasteRequestOutcome::ConfirmationRequired(confirmation) = request else {
+            panic!("multiline paste must require confirmation")
+        };
+        assert_eq!(
+            session
+                .resolve_paste(confirmation.id, PasteDecision::Confirm)
+                .recv_blocking()
+                .unwrap(),
+            Ok(PasteResolution::Written)
+        );
 
         let deadline = Instant::now() + Duration::from_secs(5);
         let mut saw_red_x = false;
@@ -2872,7 +3229,17 @@ mod tests {
             .start(size, &std::env::current_dir().unwrap())
             .unwrap();
 
-        session.paste("exit\n".to_owned());
+        let request = session
+            .request_paste("exit\n".to_owned())
+            .recv_blocking()
+            .unwrap()
+            .unwrap();
+        let PasteRequestOutcome::ConfirmationRequired(confirmation) = request else {
+            panic!("multiline paste must require confirmation")
+        };
+        let _ = session
+            .resolve_paste(confirmation.id, PasteDecision::Confirm)
+            .recv_blocking();
 
         let deadline = Instant::now() + Duration::from_secs(5);
         let mut exit_status = None;

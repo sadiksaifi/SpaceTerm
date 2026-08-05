@@ -220,6 +220,22 @@ spacer tails never become duplicated text. Pasteboard ownership stays outside th
 Emulator: the macOS Adapter publishes only public UTF-8 plain-text and HTML representations, and
 copy failures report the operation or representation type without logging copied content.
 
+### Safe Terminal Insertion
+
+Every text-insertion Adapter submits one owned Paste Payload through the Terminal Session command
+lane. The worker rejects empty or over-one-mebibyte payloads, normalizes CRLF and CR to LF, and
+classifies multiline input, the bracketed-paste closing fence, and the exact control-byte set that
+`libghostty-vt` replaces. Safe input is encoded immediately; unsafe input remains immutable and
+worker-only behind one opaque, thirty-second Paste Confirmation. The Pane presents only byte and
+line counts plus risk categories, without transferring responder ownership or exposing content in
+UI state or diagnostics.
+
+Approval is valid only for the matching opaque identity while the Pane still has Terminal Input
+Focus. Cancel, timeout, focus or hierarchy loss, Terminal Session shutdown, a stale identity, or a
+lost reply writes no PTY bytes. Confirmed input is encoded once by `libghostty-vt`: stripped
+controls become spaces, unbracketed LF becomes CR, and bracketed input receives exactly one host
+opening and closing fence so an embedded closing sequence cannot escape.
+
 ### Typed Terminal Key Input
 
 Terminal key input crosses the Terminal Session command lane as one ordered, typed event carrying

@@ -24,6 +24,8 @@ actions!(
     [
         CopySelection,
         PasteClipboard,
+        ConfirmUnsafePaste,
+        CancelUnsafePaste,
         IncreaseTerminalFontSize,
         DecreaseTerminalFontSize,
         ResetTerminalFontSize,

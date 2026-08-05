@@ -2,6 +2,7 @@ mod emulator;
 pub(crate) mod geometry;
 mod key;
 mod keyboard_protocol;
+mod paste;
 mod selection;
 mod session;
 #[cfg(test)]
@@ -17,6 +18,9 @@ pub(crate) use emulator::{PresentationGeneration, ScrollbarSnapshot};
 pub(crate) use key::{
     InputModifiers, KeyAction, KeyInput, KeyInputError, OptionAsAltPolicy, PhysicalKey,
 };
+pub(crate) use paste::{PasteConfirmation, PasteDecision, PasteRequestOutcome, PasteResolution};
+#[cfg(test)]
+pub(crate) use paste::{PasteConfirmationId, PasteRisk};
 pub(crate) use selection::SelectionCopy;
 #[cfg_attr(
     not(test),
