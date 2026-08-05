@@ -772,7 +772,10 @@ mod tests {
             background_source: crate::terminal::TerminalColor::Default,
             inverse: false,
             bold: false,
+            faint: false,
             italic: false,
+            blinking: false,
+            invisible: false,
             selected: false,
             spacer_tail: false,
         }

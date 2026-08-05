@@ -53,7 +53,10 @@ pub(crate) struct CellSnapshot {
     pub(crate) background_source: TerminalColor,
     pub(crate) inverse: bool,
     pub(crate) bold: bool,
+    pub(crate) faint: bool,
     pub(crate) italic: bool,
+    pub(crate) blinking: bool,
+    pub(crate) invisible: bool,
     pub(crate) selected: bool,
     pub(crate) spacer_tail: bool,
 }
@@ -1433,7 +1436,7 @@ impl TerminalEmulator {
                             _ => style.bg_color.into(),
                         };
                         let spacer_tail = matches!(raw_cell.wide()?, CellWide::SpacerTail);
-                        let text = if style.invisible || spacer_tail {
+                        let text = if spacer_tail {
                             " ".to_owned()
                         } else {
                             let graphemes = cell.graphemes()?;
@@ -1450,7 +1453,10 @@ impl TerminalEmulator {
                             background_source,
                             inverse: style.inverse,
                             bold: style.bold,
+                            faint: style.faint,
                             italic: style.italic,
+                            blinking: style.blink,
+                            invisible: style.invisible,
                             selected: selection.is_some_and(|range| {
                                 column_index >= range.start_x && column_index <= range.end_x
                             }),
@@ -2092,6 +2098,23 @@ mod tests {
             snapshot.colors.palette[9],
             ACTIVE_THEME.terminal_bright()[1]
         );
+    }
+
+    #[test]
+    fn snapshots_preserve_text_presentation_attributes_and_invisible_content() {
+        let mut emulator = emulator(8, 1);
+        emulator.feed(b"\x1b[1;2;3;5;7;8msecret\x1b[0m");
+
+        let snapshot = emulator.snapshot().unwrap().unwrap();
+        let cell = &snapshot.rows[0][0];
+
+        assert_eq!(cell.text, "s");
+        assert!(cell.bold);
+        assert!(cell.faint);
+        assert!(cell.italic);
+        assert!(cell.blinking);
+        assert!(cell.inverse);
+        assert!(cell.invisible);
     }
 
     #[test]
