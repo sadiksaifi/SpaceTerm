@@ -6,10 +6,10 @@ use std::time::Duration;
 use gpui::ClipboardItem;
 use gpui::prelude::*;
 use gpui::{
-    App, Bounds, Context, Entity, EntityInputHandler, EventEmitter, FocusHandle, IntoElement,
-    KeyDownEvent, KeyUpEvent, ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, Pixels, Render, ScrollDelta, ScrollWheelEvent, SharedString, Task, TextRun,
-    UTF16Selection, Window, div, font, point, px, rgba, size,
+    App, Bounds, Context, Entity, EntityInputHandler, EventEmitter, ExternalPaths, FocusHandle,
+    IntoElement, KeyDownEvent, KeyUpEvent, ModifiersChangedEvent, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, Pixels, Render, ScrollDelta, ScrollWheelEvent, SharedString,
+    Task, TextRun, UTF16Selection, Window, div, font, point, px, rgba, size,
 };
 
 use super::overlay_scrollbar::{OverlayScrollbar, OverlayScrollbarEvent, ScrollMetrics};
@@ -26,6 +26,7 @@ use super::{
 use crate::platform::macos_keyboard::{
     KeyTranslation, MacosKeyboardBridge, NativeKeyEvent, NativeKeyEventKind, UnhandledKeyEvent,
 };
+use crate::platform::macos_pasteboard::read_file_urls;
 use crate::platform::macos_scroll::current_wheel_phase;
 use crate::platform::macos_secure_input::{
     SecureInputPaneId, register_pane as register_secure_input_pane,
@@ -36,12 +37,12 @@ use crate::terminal::geometry::{
     BackingScale, CellGridSize, LogicalCellSize, LogicalPosition, LogicalSize, TerminalGeometry,
 };
 use crate::terminal::{
-    InputModifiers, KeyAction, KeyInput, OptionAsAltPolicy, Osc52Access,
+    FileInsertionSource, InputModifiers, KeyAction, KeyInput, OptionAsAltPolicy, Osc52Access,
     Osc52AuthorizationDecision, Osc52AuthorizationRequest, Osc52Target, PasteConfirmation,
     PasteDecision, PasteRequestOutcome, PasteResolution, PhysicalKey, PointerButton, PointerInput,
     PointerPhase, ScreenSnapshot, SelectionCopy, SessionEvent, ShiftSelectionPolicy,
     SurfacePosition, TerminalSessionHandle, WheelInput, WheelPhase,
-    WorkspaceTerminalSessionFactory,
+    WorkspaceTerminalSessionFactory, prepare_file_insertion,
 };
 use crate::theme::{ACTIVE_THEME, Color};
 
@@ -836,12 +837,38 @@ impl TerminalPane {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) else {
-            return;
+        let paths = read_file_urls().unwrap_or_default();
+        let text = if paths.is_empty() {
+            let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) else {
+                return;
+            };
+            text
+        } else {
+            let Ok(insertion) = prepare_file_insertion(FileInsertionSource::Pasteboard, &paths)
+            else {
+                return;
+            };
+            insertion.text
         };
         if text.is_empty() {
             return;
         }
+        self.request_paste_text(text, cx);
+    }
+
+    fn insert_dropped_files(
+        &mut self,
+        paths: &ExternalPaths,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Ok(insertion) = prepare_file_insertion(FileInsertionSource::Drop, paths.paths()) else {
+            return;
+        };
+        self.request_paste_text(insertion.text, cx);
+    }
+
+    fn request_paste_text(&mut self, text: String, cx: &mut Context<Self>) {
         let Some(session) = &self.session else {
             return;
         };
@@ -1201,6 +1228,7 @@ impl Render for TerminalPane {
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(Self::copy_selection))
             .on_action(cx.listener(Self::paste_clipboard))
+            .on_drop(cx.listener(Self::insert_dropped_files))
             .on_action(cx.listener(Self::confirm_unsafe_paste))
             .on_action(cx.listener(Self::cancel_unsafe_paste))
             .on_action(cx.listener(Self::allow_osc52_clipboard))

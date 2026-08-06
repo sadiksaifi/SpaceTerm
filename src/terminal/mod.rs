@@ -1,4 +1,5 @@
 mod emulator;
+mod file_insertion;
 pub(crate) mod geometry;
 mod hyperlink;
 mod key;
@@ -18,6 +19,7 @@ pub(crate) use emulator::{
     PresentationGeneration, RowSnapshot, ScreenSnapshot, TerminalColor, TerminalColorsSnapshot,
     TerminalUnderlineSnapshot,
 };
+pub(crate) use file_insertion::{FileInsertionSource, prepare_file_insertion};
 pub(crate) use hyperlink::HyperlinkTarget;
 pub(crate) use key::{
     InputModifiers, KeyAction, KeyInput, KeyInputError, OptionAsAltPolicy, PhysicalKey,

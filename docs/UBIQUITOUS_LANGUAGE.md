@@ -41,6 +41,7 @@
 | **Marked Text** | Transient input-method preedit owned by the Pane with Terminal Input Focus; it is presented at the Cursor but is not Terminal Emulator or PTY input until committed. | terminal output, committed text |
 | **Secure Event Input** | Process-global macOS keyboard protection held only while exactly one live Pane both reads hidden canonical PTY input and owns Terminal Input Focus. | password text, per-Pane secure mode |
 | **Paste Payload** | An immutable, size-bounded text insertion candidate owned by the Terminal Session worker from normalization through encoding or cancellation. | clipboard contents, typed key input |
+| **File Insertion** | Ordered native file URLs converted to absolute POSIX-shell-quoted paths before becoming a Paste Payload. | raw URL paste, direct PTY write |
 | **Paste Confirmation** | A transient authorization for one unsafe Paste Payload, identified opaquely and valid only while its Pane retains Terminal Input Focus and the worker deadline has not expired. | generic modal, clipboard permission |
 | **OSC 52 Authorization** | A bounded, opaque, one-operation decision governing whether a terminal program may read or write a named clipboard target; access is denied unless explicit policy allows or asks for it. | paste confirmation, unrestricted clipboard access |
 

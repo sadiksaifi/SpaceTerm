@@ -281,6 +281,15 @@ with the same stable identity, while opening requires a platform-modified press 
 same identity and Presentation Generation; drags, stale mappings, malformed schemes, and missing
 paths are inert.
 
+### Native File Insertion
+
+Pasteboard, Services, and drag/drop file inputs enter one bounded converter as ordered absolute
+paths. Each item uses POSIX single-quote shell syntax with embedded quotes split safely, and items
+join with exactly one space. Native pasteboard intake accepts only `public.file-url` values;
+non-file URLs, relative paths, excessive items, and oversized output are rejected. Converted text
+always enters the existing worker-owned Paste Payload sanitizer and confirmation lifecycle and
+never writes directly to the PTY.
+
 ### Terminal Selection
 
 The Terminal Emulator owns Selection gestures and delegates cell, word, line, repeat-click, drag,
