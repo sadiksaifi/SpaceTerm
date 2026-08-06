@@ -17,6 +17,14 @@ pub(crate) use pane_action_menu::{
     render_pane_action_menu,
 };
 pub(crate) use pane_host::{PaneHost, PaneHostEvent};
+#[cfg(test)]
+pub(crate) use render_lifecycle::{RenderLifecycle, ScaleChange, SurfaceVisibility};
+#[cfg(test)]
+pub(crate) use terminal_focus::{
+    TerminalFocusBlocker, TerminalFocusCoordinator, TerminalFocusFacts,
+};
+#[cfg(test)]
+pub(crate) use terminal_ime::conformance_ime_observation;
 pub(crate) use terminal_pane::{TerminalPane, TerminalPaneEvent};
 pub(crate) use window_manager::{WindowManager, WindowManagerEvent};
 pub(crate) use workspace_manager::WorkspaceManager;
