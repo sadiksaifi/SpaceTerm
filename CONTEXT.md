@@ -183,6 +183,21 @@ paths during prepaint and clips them to terminal grid bounds. The fixed paint or
 and Selection, underline and overline, glyph or generated symbol, then strikethrough; marked-text
 overlays remain above the immutable grid presentation.
 
+### Terminal Drawing Symbols
+
+GPUI generates cell-local geometry for exact single-scalar box-drawing, block-element, Braille,
+Powerline, and legacy sextant cells instead of delegating them to font shaping. Combined graphemes,
+variation-selector forms, ZWJ sequences, and unsupported scalars continue through the normal
+whole-cell shaping path. Generated symbols use the cell's resolved foreground after inverse and
+faint processing, while Selection remains an independent background overlay.
+
+Each terminal grid owner caches immutable symbol plans by scalar, device-pixel dimensions, cell
+width, and backing scale. Plans are released when scale-dependent rendering state is invalidated
+or the owner is dropped. Their geometry reaches shared device-pixel cell edges without font
+bearings, paints between under-text decorations and strikethrough, participates in text blink
+filtering, and receives the same Cursor block recoloring overlay as shaped glyphs. Logical origins
+still derive from Unified Terminal Geometry so fractional cell widths do not accumulate drift.
+
 ### Terminal Input Focus
 
 Terminal Input Focus is a pure derived fact and is distinct from the Window-owned Focused Pane
