@@ -1,3 +1,4 @@
+pub(crate) mod attention;
 mod emulator;
 mod file_insertion;
 pub(crate) mod geometry;
@@ -14,6 +15,7 @@ mod session;
 pub(crate) mod testing;
 mod workspace_terminal_session_factory;
 
+pub(crate) use attention::AttentionFacts;
 #[cfg(test)]
 pub(crate) use emulator::{CellSemanticSnapshot, ScrollbarSnapshot};
 pub(crate) use emulator::{

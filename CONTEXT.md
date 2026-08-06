@@ -149,6 +149,17 @@ the final metadata stale before the typed lifecycle event. Pane and Window chrom
 owning snapshot's resolved sanitized title and never parse terminal controls or query live emulator
 state.
 
+### Scoped Terminal Attention
+
+BEL and the transition to finished Command Metadata become typed Terminal Attention events on the
+owning Terminal Session lane; they never carry command text. Each Pane reduces only its own events
+against explicit Terminal Input Focus, active-surface, key-window, and application facts using an
+injected monotonic clock. Repeated bells are suppressed within 100 milliseconds, Dock requests are
+limited to one per second, and inactive-only notifications aggregate for five seconds. Vague visual
+bells and Pane/Window unread indicators never move focus. Focus gain or accepted key input clears
+eligible state and cancels the outstanding native Dock request. AppKit audio, Dock, and notification
+effects sit behind one testable platform Seam and native notification policy.
+
 ### Transactional Terminal Presentation
 
 The Terminal Emulator owns independent Primary Screen and Alternate Screen presentation caches;

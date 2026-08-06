@@ -50,6 +50,7 @@ pub(crate) struct PaneHost {
     pane_bounds: BTreeMap<PaneId, Bounds<Pixels>>,
     split_bounds: BTreeMap<SplitId, Bounds<Pixels>>,
     pane_titles: BTreeMap<PaneId, gpui::SharedString>,
+    pane_attention: BTreeMap<PaneId, u32>,
     menu_pane_id: Option<PaneId>,
     active: bool,
     close_window_requested: bool,
@@ -83,6 +84,7 @@ impl PaneHost {
             pane_bounds: BTreeMap::new(),
             split_bounds: BTreeMap::new(),
             pane_titles: BTreeMap::from([(initial_pane_id, initial_title)]),
+            pane_attention: BTreeMap::from([(initial_pane_id, 0)]),
             menu_pane_id: None,
             active: true,
             close_window_requested: false,
@@ -103,6 +105,13 @@ impl PaneHost {
                 TerminalPaneEvent::FocusRequested => host.focus_pane(pane_id, cx),
                 TerminalPaneEvent::TitleChanged(title) => {
                     host.pane_titles.insert(pane_id, title.clone());
+                    cx.emit(PaneHostEvent::PresentationChanged {
+                        window_id: host.terminal_window.id(),
+                    });
+                    cx.notify();
+                }
+                TerminalPaneEvent::AttentionChanged { unread_count } => {
+                    host.pane_attention.insert(pane_id, *unread_count);
                     cx.emit(PaneHostEvent::PresentationChanged {
                         window_id: host.terminal_window.id(),
                     });
@@ -134,15 +143,26 @@ impl PaneHost {
     }
 
     pub(crate) fn window_title(&self) -> gpui::SharedString {
+        let attention = self.pane_attention.values().copied().sum::<u32>();
         let pane_count = self.terminal_window.pane_count();
         if pane_count > 1 {
-            return format!("{pane_count} Panes").into();
+            return if attention > 0 {
+                format!("• {pane_count} Panes").into()
+            } else {
+                format!("{pane_count} Panes").into()
+            };
         }
 
-        self.pane_titles
+        let title = self
+            .pane_titles
             .get(&self.terminal_window.focused_pane_id())
             .cloned()
-            .unwrap_or_else(|| "Terminal".into())
+            .unwrap_or_else(|| "Terminal".into());
+        if attention > 0 {
+            format!("• {title}").into()
+        } else {
+            title
+        }
     }
 
     pub(crate) const fn zoom_state(&self) -> ZoomState {
@@ -261,6 +281,7 @@ impl PaneHost {
                 if let Some(terminal) = self.terminal_window.terminal(pane_id) {
                     self.pane_titles.insert(pane_id, terminal.read(cx).title());
                 }
+                self.pane_attention.insert(pane_id, 0);
                 self.menu_pane_id = None;
                 self.split_bounds.clear();
                 cx.emit(PaneHostEvent::PresentationChanged {
@@ -299,6 +320,7 @@ impl PaneHost {
                 self.pane_bounds.remove(&pane_id);
                 self.split_bounds.clear();
                 self.pane_titles.remove(&pane_id);
+                self.pane_attention.remove(&pane_id);
                 self.menu_pane_id = None;
                 cx.emit(PaneHostEvent::PresentationChanged {
                     window_id: self.terminal_window.id(),
@@ -480,6 +502,7 @@ impl PaneHost {
             .cloned()
             .unwrap_or_else(|| "Terminal".into());
         let pane_group = format!("pane-group-{}", pane_id.get());
+        let attention = self.pane_attention.get(&pane_id).copied().unwrap_or(0) > 0;
         let measure_host = host.clone();
         let focus_host = host.clone();
         let focus_terminal = terminal.clone();
@@ -514,6 +537,7 @@ impl PaneHost {
                     title,
                     focused,
                     zoomed,
+                    attention,
                     host.clone(),
                 ))
             })
@@ -640,6 +664,7 @@ fn render_pane_header(
     title: gpui::SharedString,
     focused: bool,
     zoomed: bool,
+    attention: bool,
     host: gpui::WeakEntity<PaneHost>,
 ) -> AnyElement {
     let divider_color = if focused {
@@ -713,6 +738,16 @@ fn render_pane_header(
         .bg(gpui_color(ACTIVE_THEME.terminal_background))
         .text_size(px(12.0))
         .text_color(gpui_color(ACTIVE_THEME.text_muted))
+        .when(attention, |header| {
+            header.child(
+                div()
+                    .debug_selector(move || format!("pane-attention-{}", pane_id.get()))
+                    .mr(px(7.0))
+                    .size(px(7.0))
+                    .rounded_full()
+                    .bg(gpui_color(ACTIVE_THEME.warning)),
+            )
+        })
         .child(title)
         .into_any_element()
 }
@@ -952,6 +987,27 @@ mod tests {
         cx.run_until_parked();
 
         (host, cx)
+    }
+
+    #[gpui::test]
+    fn attention_remains_scoped_to_its_owning_pane_and_window_title(cx: &mut TestAppContext) {
+        cx.update(crate::ui::init);
+        let (host, cx) = cx.add_window_view(|window, cx| {
+            PaneHost::new(WindowId::new(1), test_session_factory(), window, cx)
+        });
+
+        host.update(cx, |host, _| {
+            host.pane_attention.insert(PaneId::new(1), 2);
+        });
+
+        assert_eq!(
+            host.read_with(cx, |host, _| host.window_title()),
+            "• Terminal"
+        );
+        assert_eq!(
+            host.read_with(cx, |host, _| host.pane_attention.clone()),
+            BTreeMap::from([(PaneId::new(1), 2)])
+        );
     }
 
     fn test_workspace_root() -> PathBuf {

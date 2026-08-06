@@ -19,6 +19,7 @@ use crate::platform::macos_pty::{
     user_shell,
 };
 use crate::platform::shell_integration::resource_root;
+use crate::terminal::attention::AttentionEvent;
 #[cfg(test)]
 use crate::terminal::emulator::MAX_SYNCHRONIZED_OUTPUT_DURATION;
 use crate::terminal::emulator::{
@@ -141,6 +142,7 @@ fn pty_size(geometry: TerminalGeometry) -> PtySize {
 #[derive(Clone, Debug)]
 pub(crate) enum SessionEvent {
     Screen(Arc<ScreenSnapshot>),
+    Attention(AttentionEvent),
     HiddenInputChanged(bool),
     Osc52Authorization(Osc52AuthorizationRequest),
     Osc52AuthorizationExpired(Osc52AuthorizationId),
@@ -1678,6 +1680,11 @@ impl TerminalWorker {
 
     fn feed_terminal_output(&mut self, bytes: &[u8], focus_reports: &mut Vec<u8>) -> bool {
         self.emulator.feed(bytes);
+        for event in self.emulator.take_attention_events() {
+            if !self.send_terminal_event(SessionEvent::Attention(event)) {
+                return false;
+            }
+        }
         let focus_reporting_enabled = match self.emulator.focus_reporting_enabled() {
             Ok(enabled) => enabled,
             Err(message) => {
@@ -3840,7 +3847,7 @@ mod tests {
                     SessionEvent::Osc52Authorization(_)
                     | SessionEvent::Osc52AuthorizationExpired(_),
                 ) => {}
-                Ok(SessionEvent::HiddenInputChanged(_)) => {}
+                Ok(SessionEvent::HiddenInputChanged(_) | SessionEvent::Attention(_)) => {}
                 Err(async_channel::TryRecvError::Empty) => {
                     thread::sleep(Duration::from_millis(10));
                 }
@@ -3888,7 +3895,7 @@ mod tests {
                     SessionEvent::Osc52Authorization(_)
                     | SessionEvent::Osc52AuthorizationExpired(_),
                 ) => {}
-                Ok(SessionEvent::HiddenInputChanged(_)) => {}
+                Ok(SessionEvent::HiddenInputChanged(_) | SessionEvent::Attention(_)) => {}
                 Err(async_channel::TryRecvError::Empty) => {
                     thread::sleep(Duration::from_millis(10));
                 }

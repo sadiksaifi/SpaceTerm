@@ -23,6 +23,7 @@ use libghostty_vt::style::{PaletteIndex, RgbColor, StyleColor, Underline};
 use libghostty_vt::terminal::{Mode, Point, PointCoordinate, ScrollViewport};
 use libghostty_vt::{Error, RenderState, Terminal, TerminalOptions};
 
+use crate::terminal::attention::AttentionEvent;
 use crate::terminal::geometry::{BackingPosition, TerminalGeometry};
 use crate::terminal::identity::{self, XtGetTcapObserver};
 use crate::terminal::key::{InputModifiers, KeyAction, KeyInput, OptionAsAltPolicy, PhysicalKey};
@@ -514,6 +515,7 @@ pub(crate) struct TerminalEmulator {
     pty_responses: Rc<RefCell<Vec<u8>>>,
     pending_title: Rc<RefCell<Option<Arc<str>>>>,
     pending_directory: Rc<RefCell<Option<Arc<str>>>>,
+    pending_attention: Rc<RefCell<Vec<AttentionEvent>>>,
     title: Arc<str>,
     metadata: MetadataTracker,
     xtgettcap: XtGetTcapObserver,
@@ -632,6 +634,7 @@ impl TerminalEmulator {
         let pty_responses = Rc::new(RefCell::new(Vec::new()));
         let pending_title = Rc::new(RefCell::new(None));
         let pending_directory = Rc::new(RefCell::new(None));
+        let pending_attention = Rc::new(RefCell::new(Vec::new()));
         let mut terminal: Terminal<'static, 'static> = Terminal::new(TerminalOptions {
             cols: grid.cols,
             rows: grid.rows,
@@ -662,6 +665,10 @@ impl TerminalEmulator {
         })?;
         terminal.on_xtversion(|_| Some(identity::XTVERSION))?;
         terminal.on_device_attributes(|_| Some(identity::device_attributes()))?;
+        terminal.on_bell({
+            let pending_attention = Rc::clone(&pending_attention);
+            move |_| pending_attention.borrow_mut().push(AttentionEvent::Bell)
+        })?;
 
         let metadata =
             MetadataTracker::new(initial_directory, fallback_title, local_hostname, epoch);
@@ -688,6 +695,7 @@ impl TerminalEmulator {
             pty_responses,
             pending_title,
             pending_directory,
+            pending_attention,
             title,
             metadata,
             xtgettcap: XtGetTcapObserver::new(terminal_name),
@@ -721,7 +729,32 @@ impl TerminalEmulator {
         }
         self.xtgettcap
             .feed(bytes, &mut self.pty_responses.borrow_mut());
+        let command_was_finished =
+            self.metadata
+                .snapshot()
+                .command
+                .as_ref()
+                .is_some_and(|command| {
+                    matches!(
+                        command.state,
+                        crate::terminal::metadata::CommandState::Finished { .. }
+                    )
+                });
         self.metadata.feed(bytes, now);
+        if !command_was_finished
+            && let Some(command) = &self.metadata.snapshot().command
+            && let crate::terminal::metadata::CommandState::Finished {
+                exit_status,
+                duration,
+            } = command.state
+        {
+            self.pending_attention
+                .borrow_mut()
+                .push(AttentionEvent::CommandFinished {
+                    exit_status,
+                    duration,
+                });
+        }
         let synchronized_before = self.terminal.mode(Mode::SYNC_OUTPUT).unwrap_or(false);
         self.terminal.vt_write(bytes);
         let synchronized_after = self.terminal.mode(Mode::SYNC_OUTPUT).unwrap_or(false);
@@ -776,6 +809,10 @@ impl TerminalEmulator {
 
     pub(crate) fn take_pty_responses(&self) -> Vec<u8> {
         mem::take(&mut *self.pty_responses.borrow_mut())
+    }
+
+    pub(crate) fn take_attention_events(&self) -> Vec<AttentionEvent> {
+        mem::take(&mut *self.pending_attention.borrow_mut())
     }
 
     pub(crate) fn key(&mut self, input: KeyInput) -> Result<EmulatorAction, String> {
@@ -2772,6 +2809,27 @@ mod tests {
             !String::from_utf8_lossy(&replies)
                 .to_ascii_lowercase()
                 .contains("ghostty")
+        );
+    }
+
+    #[test]
+    fn bell_and_command_completion_publish_typed_attention_once() {
+        let epoch = Instant::now();
+        let mut emulator = emulator(10, 2);
+
+        emulator.feed_at(b"\x07\x1b]133;C;cmdline=true\x07", epoch);
+        emulator.feed_at(b"\x1b]133;D;0\x07", epoch + Duration::from_secs(2));
+        emulator.feed_at(b"\x1b]133;D;0\x07", epoch + Duration::from_secs(3));
+
+        assert_eq!(
+            emulator.take_attention_events(),
+            vec![
+                AttentionEvent::Bell,
+                AttentionEvent::CommandFinished {
+                    exit_status: Some(0),
+                    duration: Duration::from_secs(2),
+                },
+            ]
         );
     }
 

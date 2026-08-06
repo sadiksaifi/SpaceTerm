@@ -1,6 +1,6 @@
 use std::ops::Range;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 #[cfg(test)]
 use gpui::ClipboardItem;
@@ -23,6 +23,8 @@ use super::{
     DecreaseTerminalFontSize, DenyOsc52Clipboard, IncreaseTerminalFontSize, PasteClipboard,
     ResetTerminalFontSize, TERMINAL_KEY_CONTEXT,
 };
+#[cfg(not(test))]
+use crate::platform::macos_attention::{MacosAttentionPlatform, apply_attention_effects};
 use crate::platform::macos_keyboard::{
     KeyTranslation, MacosKeyboardBridge, NativeKeyEvent, NativeKeyEventKind, UnhandledKeyEvent,
 };
@@ -33,11 +35,12 @@ use crate::platform::macos_secure_input::{
     remove_pane as remove_secure_input_pane, update_application_activation,
     update_pane as update_secure_input_pane,
 };
+use crate::terminal::attention::AttentionState;
 use crate::terminal::geometry::{
     BackingScale, CellGridSize, LogicalCellSize, LogicalPosition, LogicalSize, TerminalGeometry,
 };
 use crate::terminal::{
-    InputModifiers, KeyAction, KeyInput, OptionAsAltPolicy, Osc52Access,
+    AttentionFacts, InputModifiers, KeyAction, KeyInput, OptionAsAltPolicy, Osc52Access,
     Osc52AuthorizationDecision, Osc52AuthorizationRequest, Osc52Target, PasteConfirmation,
     PasteDecision, PasteRequestOutcome, PasteResolution, PhysicalKey, PointerButton, PointerInput,
     PointerPhase, ScreenSnapshot, SelectionCopy, SessionEvent, ShiftSelectionPolicy,
@@ -57,11 +60,20 @@ const MIN_COLS: u16 = 2;
 const MIN_ROWS: u16 = 2;
 const MAX_PANE_TITLE_CHARACTERS: usize = 256;
 const PRESENTATION_BLINK_INTERVAL: Duration = Duration::from_millis(600);
+const VISUAL_BELL_DURATION: Duration = Duration::from_millis(120);
+
+fn apply_native_attention(effects: crate::terminal::attention::AttentionEffects) {
+    #[cfg(not(test))]
+    apply_attention_effects(&mut MacosAttentionPlatform, effects);
+    #[cfg(test)]
+    let _ = effects;
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum TerminalPaneEvent {
     FocusRequested,
     TitleChanged(SharedString),
+    AttentionChanged { unread_count: u32 },
     Exited,
 }
 
@@ -76,6 +88,11 @@ pub(crate) struct TerminalPane {
     focus_handle: FocusHandle,
     product_focus: TerminalProductFocus,
     terminal_input_focus: bool,
+    surface_active: bool,
+    application_active: bool,
+    attention: AttentionState,
+    attention_visual: bool,
+    attention_generation: u64,
     hidden_input: bool,
     secure_input_pane: Option<SecureInputPaneId>,
     font_family: SharedString,
@@ -104,6 +121,7 @@ pub(crate) struct TerminalPane {
     blink_phase_visible: bool,
     blink_generation: u64,
     _blink_task: Option<Task<()>>,
+    _attention_task: Option<Task<()>>,
     _event_task: Option<Task<()>>,
 }
 
@@ -154,6 +172,11 @@ impl TerminalPane {
             focus_handle,
             product_focus: TerminalProductFocus::default(),
             terminal_input_focus: false,
+            surface_active: false,
+            application_active: false,
+            attention: AttentionState::default(),
+            attention_visual: false,
+            attention_generation: 0,
             hidden_input: false,
             secure_input_pane: Some(register_secure_input_pane()),
             font_family,
@@ -179,6 +202,7 @@ impl TerminalPane {
             blink_phase_visible: true,
             blink_generation: 0,
             _blink_task: None,
+            _attention_task: None,
             _event_task: None,
         }
     }
@@ -222,8 +246,9 @@ impl TerminalPane {
         })
     }
 
-    fn sync_terminal_input_focus(&mut self, window: &Window) -> bool {
+    fn sync_terminal_input_focus(&mut self, window: &Window) -> (bool, bool) {
         let focused = self.terminal_input_focused(window);
+        let focus_gained = !self.terminal_input_focus && focused;
         if self.terminal_input_focus != focused {
             self.terminal_input_focus = focused;
             self.reset_blink_phase();
@@ -247,7 +272,35 @@ impl TerminalPane {
             }
             self.sync_secure_input();
         }
-        focused
+        (focused, focus_gained)
+    }
+
+    fn clear_attention(&mut self, cx: &mut Context<Self>) {
+        if self.attention.unread_count() == 0 && !self.attention.visual_bell() {
+            return;
+        }
+        let effects = self.attention.clear();
+        self.attention_visual = false;
+        self.attention_generation = self.attention_generation.wrapping_add(1);
+        self._attention_task.take();
+        apply_native_attention(effects);
+        cx.emit(TerminalPaneEvent::AttentionChanged { unread_count: 0 });
+    }
+
+    fn start_visual_bell(&mut self, cx: &mut Context<Self>) {
+        self.attention_generation = self.attention_generation.wrapping_add(1);
+        let generation = self.attention_generation;
+        self.attention_visual = true;
+        self._attention_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(VISUAL_BELL_DURATION).await;
+            let _ = this.update(cx, |this, cx| {
+                if this.attention_generation == generation {
+                    this.attention_visual = false;
+                    this._attention_task.take();
+                    cx.notify();
+                }
+            });
+        }));
     }
 
     fn sync_secure_input(&self) {
@@ -295,7 +348,9 @@ impl TerminalPane {
             session.resolve_osc52_authorization(request.id, Osc52AuthorizationDecision::Deny);
         }
         self.blink_generation = self.blink_generation.wrapping_add(1);
+        self.attention_generation = self.attention_generation.wrapping_add(1);
         self._blink_task.take();
+        self._attention_task.take();
         self._event_task.take();
         self.session.take();
         if let Some(id) = self.secure_input_pane.take() {
@@ -448,6 +503,23 @@ impl TerminalPane {
                 self.screen = screen;
                 self.sync_scrollbar(cx);
             }
+            SessionEvent::Attention(event) => {
+                let effects = self.attention.observe(
+                    event,
+                    AttentionFacts {
+                        terminal_input_focus: self.terminal_input_focus,
+                        surface_active: self.surface_active,
+                        application_active: self.application_active,
+                    },
+                    Instant::now(),
+                );
+                if effects.visual_bell {
+                    self.start_visual_bell(cx);
+                }
+                let unread_count = effects.unread_count;
+                apply_native_attention(effects);
+                cx.emit(TerminalPaneEvent::AttentionChanged { unread_count });
+            }
             SessionEvent::HiddenInputChanged(hidden_input) => {
                 self.hidden_input = hidden_input;
                 self.sync_secure_input();
@@ -486,6 +558,7 @@ impl TerminalPane {
         if !self.terminal_input_focused(window) {
             return;
         }
+        self.clear_attention(cx);
         let action = if event.is_held {
             KeyAction::Repeat
         } else {
@@ -647,6 +720,7 @@ impl TerminalPane {
     ) {
         self.pointer_modifiers = input_modifiers(event.modifiers);
         self.focus_handle.focus(window);
+        self.clear_attention(cx);
         let Some(button) = pointer_button(event.button) else {
             return;
         };
@@ -1140,10 +1214,15 @@ impl Render for TerminalPane {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         update_application_activation();
         let pane = cx.entity().downgrade();
-        let terminal_input_focused = self.sync_terminal_input_focus(window);
+        let (terminal_input_focused, focus_gained) = self.sync_terminal_input_focus(window);
         let surface_active = self.product_focus.active_workspace
             && self.product_focus.active_window
             && window.is_window_active();
+        self.surface_active = surface_active;
+        self.application_active = window.is_window_active();
+        if focus_gained {
+            self.clear_attention(cx);
+        }
         self.sync_presentation_blink(surface_active, terminal_input_focused, cx);
         let background = gpui_color(self.screen.background);
         let status = self.status.clone();
@@ -1189,6 +1268,7 @@ impl Render for TerminalPane {
             self.shift_selection,
         );
         let preedit = self.preedit_layout();
+        let attention_visual = self.attention_visual;
         let terminal_grid = TerminalGridElement::new(
             &self.screen,
             &mut self.render_cache,
@@ -1250,6 +1330,16 @@ impl Render for TerminalPane {
             .child(terminal_grid)
             .children(link_highlights)
             .child(scrollbar)
+            .when(attention_visual, |root| {
+                root.child(
+                    div()
+                        .debug_selector(|| "terminal-visual-bell".to_owned())
+                        .absolute()
+                        .inset_0()
+                        .border_2()
+                        .border_color(gpui_color(ACTIVE_THEME.warning)),
+                )
+            })
             .when_some(hovered_link, |root, link| {
                 root.child(
                     div()
@@ -1925,6 +2015,23 @@ mod tests {
         });
         cx.run_until_parked();
         (pane, cx)
+    }
+
+    #[gpui::test]
+    fn visual_bell_presentation_state_clears_on_focus_or_input(cx: &mut TestAppContext) {
+        let (pane, cx) = terminal_pane(cx);
+
+        pane.update(cx, |pane, cx| {
+            pane.terminal_input_focus = true;
+            pane.handle_event(
+                SessionEvent::Attention(crate::terminal::attention::AttentionEvent::Bell),
+                cx,
+            );
+        });
+        assert!(pane.read_with(cx, |pane, _| pane.attention_visual));
+
+        pane.update(cx, |pane, cx| pane.clear_attention(cx));
+        assert!(!pane.read_with(cx, |pane, _| pane.attention_visual));
     }
 
     fn connected_terminal_pane(
