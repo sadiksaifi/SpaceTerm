@@ -7,7 +7,7 @@ use gpui::{
 };
 
 use crate::terminal::{NativeTerminalSessionFactory, TerminalSessionFactory};
-use crate::ui::WorkspaceManager;
+use crate::ui::{ExportTerminalDiagnostics, WorkspaceManager};
 
 actions!(
     spaceterm,
@@ -40,6 +40,8 @@ pub(crate) fn init(cx: &mut App) {
         Menu {
             name: "SpaceTerm".into(),
             items: vec![
+                MenuItem::action("Export Terminal Diagnostics…", ExportTerminalDiagnostics),
+                MenuItem::separator(),
                 MenuItem::os_submenu("Services", SystemMenuType::Services),
                 MenuItem::separator(),
                 MenuItem::action("Hide SpaceTerm", HideApplication),

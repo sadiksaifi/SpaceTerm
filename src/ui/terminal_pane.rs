@@ -1,18 +1,19 @@
 use std::ops::Range;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 #[cfg(test)]
 use gpui::ClipboardItem;
 use gpui::prelude::*;
 use gpui::{
-    App, Bounds, Context, Entity, EntityInputHandler, EventEmitter, FocusHandle, IntoElement,
-    KeyDownEvent, KeyUpEvent, ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, Pixels, Render, ScrollWheelEvent, SharedString, Task, TextRun, UTF16Selection,
-    Window, div, font, point, px, rgba, size,
+    App, Bounds, Context, Entity, EntityInputHandler, EventEmitter, ExternalPaths, FocusHandle,
+    IntoElement, KeyDownEvent, KeyUpEvent, ModifiersChangedEvent, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, Pixels, Render, ScrollDelta, ScrollWheelEvent, SharedString,
+    Task, TextRun, UTF16Selection, Window, div, font, point, px, rgba, size,
 };
 
 use super::overlay_scrollbar::{OverlayScrollbar, OverlayScrollbarEvent, ScrollMetrics};
+use super::render_lifecycle::{RenderLifecycle, ScaleChange, SurfaceVisibility};
 use super::terminal_element::{
     TerminalGridCache, TerminalGridConfiguration, TerminalGridElement, terminal_grid_content_bounds,
 };
@@ -20,21 +21,36 @@ use super::terminal_focus::{TerminalFocusCoordinator, TerminalFocusFacts, Termin
 use super::terminal_ime::{PreeditLayout, PreeditPosition, TerminalIme, layout_preedit};
 use super::{
     AllowOsc52Clipboard, CancelUnsafePaste, ConfirmUnsafePaste, CopySelection,
-    DecreaseTerminalFontSize, DenyOsc52Clipboard, IncreaseTerminalFontSize, PasteClipboard,
-    ResetTerminalFontSize, TERMINAL_KEY_CONTEXT,
+    DecreaseTerminalFontSize, DenyOsc52Clipboard, ExportTerminalDiagnostics,
+    IncreaseTerminalFontSize, PasteClipboard, ResetTerminalFontSize, TERMINAL_KEY_CONTEXT,
 };
+use crate::platform::macos_accessibility::post_accessibility_notifications;
+#[cfg(not(test))]
+use crate::platform::macos_attention::{MacosAttentionPlatform, apply_attention_effects};
 use crate::platform::macos_keyboard::{
     KeyTranslation, MacosKeyboardBridge, NativeKeyEvent, NativeKeyEventKind, UnhandledKeyEvent,
 };
+use crate::platform::macos_pasteboard::read_file_urls;
+use crate::platform::macos_render_lifecycle::current_window_visibility;
+use crate::platform::macos_scroll::current_wheel_phase;
+use crate::platform::macos_secure_input::{
+    SecureInputPaneId, register_pane as register_secure_input_pane,
+    remove_pane as remove_secure_input_pane, update_application_activation,
+    update_pane as update_secure_input_pane,
+};
+use crate::terminal::attention::AttentionState;
 use crate::terminal::geometry::{
     BackingScale, CellGridSize, LogicalCellSize, LogicalPosition, LogicalSize, TerminalGeometry,
 };
 use crate::terminal::{
-    InputModifiers, KeyAction, KeyInput, OptionAsAltPolicy, Osc52Access,
-    Osc52AuthorizationDecision, Osc52AuthorizationRequest, Osc52Target, PasteConfirmation,
-    PasteDecision, PasteRequestOutcome, PasteResolution, PhysicalKey, PointerButton, PointerInput,
-    PointerPhase, ScreenSnapshot, SelectionCopy, SessionEvent, ShiftSelectionPolicy,
-    SurfacePosition, TerminalSessionHandle, WheelInput, WorkspaceTerminalSessionFactory,
+    AccessibilityGeometry, AccessibilityNotification, AttentionFacts, DiagnosticBundle,
+    DiagnosticKeyEventKind, InputModifiers, KeyAction, KeyInput, NativeContextActions,
+    NativeInsertion, OptionAsAltPolicy, Osc52Access, Osc52AuthorizationDecision,
+    Osc52AuthorizationRequest, Osc52Target, PaneTerminalState, PasteConfirmation, PasteDecision,
+    PasteRequestOutcome, PasteResolution, PhysicalKey, PointerButton, PointerInput, PointerPhase,
+    ScreenSnapshot, SelectionCopy, SessionEvent, ShiftSelectionPolicy, SurfacePosition,
+    TerminalAccessibilityModel, TerminalFailure, TerminalSessionHandle, UnhandledKeyDiagnostic,
+    WheelInput, WheelPhase, WorkspaceTerminalSessionFactory,
 };
 use crate::theme::{ACTIVE_THEME, Color};
 
@@ -49,11 +65,20 @@ const MIN_COLS: u16 = 2;
 const MIN_ROWS: u16 = 2;
 const MAX_PANE_TITLE_CHARACTERS: usize = 256;
 const PRESENTATION_BLINK_INTERVAL: Duration = Duration::from_millis(600);
+const VISUAL_BELL_DURATION: Duration = Duration::from_millis(120);
+
+fn apply_native_attention(effects: crate::terminal::attention::AttentionEffects) {
+    #[cfg(not(test))]
+    apply_attention_effects(&mut MacosAttentionPlatform, effects);
+    #[cfg(test)]
+    let _ = effects;
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum TerminalPaneEvent {
     FocusRequested,
     TitleChanged(SharedString),
+    AttentionChanged { unread_count: u32 },
     Exited,
 }
 
@@ -62,12 +87,24 @@ pub(crate) struct TerminalPane {
     session: Option<Box<dyn TerminalSessionHandle>>,
     session_start_attempted: bool,
     screen: Arc<ScreenSnapshot>,
+    accessibility: TerminalAccessibilityModel,
+    accessibility_notifications: Vec<AccessibilityNotification>,
+    render_lifecycle: RenderLifecycle,
+    pane_state: PaneTerminalState,
+    diagnostics: DiagnosticBundle,
     status: Option<String>,
     fallback_title: SharedString,
     title: SharedString,
     focus_handle: FocusHandle,
     product_focus: TerminalProductFocus,
     terminal_input_focus: bool,
+    surface_active: bool,
+    application_active: bool,
+    attention: AttentionState,
+    attention_visual: bool,
+    attention_generation: u64,
+    hidden_input: bool,
+    secure_input_pane: Option<SecureInputPaneId>,
     font_family: SharedString,
     font_size: f32,
     line_height: f32,
@@ -78,7 +115,7 @@ pub(crate) struct TerminalPane {
     pressed_button: Option<PointerButton>,
     pointer_modifiers: InputModifiers,
     shift_selection: ShiftSelectionPolicy,
-    wheel_remainder: f32,
+    wheel_accumulator: WheelAccumulator,
     scrollbar: Entity<OverlayScrollbar<u64>>,
     render_cache: TerminalGridCache,
     keyboard_bridge: MacosKeyboardBridge,
@@ -86,9 +123,15 @@ pub(crate) struct TerminalPane {
     ime_suppressed_keys: Vec<PhysicalKey>,
     pending_paste: Option<PasteConfirmation>,
     pending_osc52: Option<Osc52AuthorizationRequest>,
+    hovered_link: Option<crate::terminal::HyperlinkTarget>,
+    pressed_link: Option<(
+        crate::terminal::PresentationGeneration,
+        crate::terminal::HyperlinkTarget,
+    )>,
     blink_phase_visible: bool,
     blink_generation: u64,
     _blink_task: Option<Task<()>>,
+    _attention_task: Option<Task<()>>,
     _event_task: Option<Task<()>>,
 }
 
@@ -105,6 +148,18 @@ impl TerminalPane {
         let fallback_title: SharedString =
             normalized_pane_title("", &session_factory.fallback_title()).into();
         let scrollbar = cx.new(|_| OverlayScrollbar::<u64>::new("terminal-scrollbar"));
+        let screen = ScreenSnapshot::empty();
+        let accessibility = TerminalAccessibilityModel::from_screen(&screen);
+        let mut render_lifecycle = RenderLifecycle::new(SurfaceVisibility {
+            application_active: false,
+            key_window: false,
+            minimized: false,
+            occluded: true,
+            live_resize: false,
+            workspace_visible: false,
+            pane_visible: false,
+        });
+        let _ = render_lifecycle.update_scale(window.scale_factor());
         cx.subscribe_in(
             &scrollbar,
             window,
@@ -132,13 +187,25 @@ impl TerminalPane {
             session_factory,
             session: None,
             session_start_attempted: false,
-            screen: ScreenSnapshot::empty(),
+            screen,
+            accessibility,
+            accessibility_notifications: Vec::new(),
+            render_lifecycle,
+            pane_state: PaneTerminalState::default(),
+            diagnostics: DiagnosticBundle::default(),
             status: None,
             title: fallback_title.clone(),
             fallback_title,
             focus_handle,
             product_focus: TerminalProductFocus::default(),
             terminal_input_focus: false,
+            surface_active: false,
+            application_active: false,
+            attention: AttentionState::default(),
+            attention_visual: false,
+            attention_generation: 0,
+            hidden_input: false,
+            secure_input_pane: Some(register_secure_input_pane()),
             font_family,
             font_size: DEFAULT_FONT_SIZE,
             line_height: DEFAULT_LINE_HEIGHT,
@@ -149,7 +216,7 @@ impl TerminalPane {
             pressed_button: None,
             pointer_modifiers: InputModifiers::default(),
             shift_selection: ShiftSelectionPolicy::default(),
-            wheel_remainder: 0.0,
+            wheel_accumulator: WheelAccumulator::default(),
             scrollbar,
             render_cache: TerminalGridCache::new(),
             keyboard_bridge: MacosKeyboardBridge::new(OptionAsAltPolicy::default()),
@@ -157,9 +224,12 @@ impl TerminalPane {
             ime_suppressed_keys: Vec::new(),
             pending_paste: None,
             pending_osc52: None,
+            hovered_link: None,
+            pressed_link: None,
             blink_phase_visible: true,
             blink_generation: 0,
             _blink_task: None,
+            _attention_task: None,
             _event_task: None,
         }
     }
@@ -203,10 +273,13 @@ impl TerminalPane {
         })
     }
 
-    fn sync_terminal_input_focus(&mut self, window: &Window) -> bool {
+    fn sync_terminal_input_focus(&mut self, window: &Window) -> (bool, bool) {
         let focused = self.terminal_input_focused(window);
+        let focus_gained = !self.terminal_input_focus && focused;
         if self.terminal_input_focus != focused {
             self.terminal_input_focus = focused;
+            self.accessibility_notifications
+                .push(AccessibilityNotification::Focus);
             self.reset_blink_phase();
             if !focused {
                 if let Some(confirmation) = self.pending_paste.take()
@@ -226,8 +299,43 @@ impl TerminalPane {
             if let Some(session) = &self.session {
                 session.focus(focused);
             }
+            self.sync_secure_input();
         }
-        focused
+        (focused, focus_gained)
+    }
+
+    fn clear_attention(&mut self, cx: &mut Context<Self>) {
+        if self.attention.unread_count() == 0 && !self.attention.visual_bell() {
+            return;
+        }
+        let effects = self.attention.clear();
+        self.attention_visual = false;
+        self.attention_generation = self.attention_generation.wrapping_add(1);
+        self._attention_task.take();
+        apply_native_attention(effects);
+        cx.emit(TerminalPaneEvent::AttentionChanged { unread_count: 0 });
+    }
+
+    fn start_visual_bell(&mut self, cx: &mut Context<Self>) {
+        self.attention_generation = self.attention_generation.wrapping_add(1);
+        let generation = self.attention_generation;
+        self.attention_visual = true;
+        self._attention_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(VISUAL_BELL_DURATION).await;
+            let _ = this.update(cx, |this, cx| {
+                if this.attention_generation == generation {
+                    this.attention_visual = false;
+                    this._attention_task.take();
+                    cx.notify();
+                }
+            });
+        }));
+    }
+
+    fn sync_secure_input(&self) {
+        if let Some(id) = self.secure_input_pane {
+            update_secure_input_pane(id, self.hidden_input, self.terminal_input_focus);
+        }
     }
 
     fn preedit_layout(&self) -> Option<PreeditLayout> {
@@ -269,9 +377,15 @@ impl TerminalPane {
             session.resolve_osc52_authorization(request.id, Osc52AuthorizationDecision::Deny);
         }
         self.blink_generation = self.blink_generation.wrapping_add(1);
+        self.attention_generation = self.attention_generation.wrapping_add(1);
         self._blink_task.take();
+        self._attention_task.take();
         self._event_task.take();
+        self.render_lifecycle.release();
         self.session.take();
+        if let Some(id) = self.secure_input_pane.take() {
+            remove_secure_input_pane(id);
+        }
     }
 
     fn reset_blink_phase(&mut self) {
@@ -338,6 +452,15 @@ impl TerminalPane {
             .update(cx, |scrollbar, cx| scrollbar.sync(metrics, cx));
     }
 
+    fn present_failure(&mut self, failure: TerminalFailure, preserve_frame: bool) {
+        self.diagnostics.record(&failure);
+        self.pane_state = PaneTerminalState::failed(
+            failure.clone(),
+            preserve_frame.then_some(self.screen.generation),
+        );
+        self.status = Some(failure.to_string());
+    }
+
     fn reveal_scrollbar(&self, cx: &mut Context<Self>) {
         let metrics = self.scrollbar_metrics();
         self.scrollbar
@@ -398,8 +521,8 @@ impl TerminalPane {
                 }));
             }
             Err(error) => {
-                eprintln!("failed to start terminal session: {error:#}");
-                self.status = Some(error.to_string());
+                let _ = error;
+                self.present_failure(TerminalFailure::platform("start-session-worker"), false);
                 cx.notify();
             }
         }
@@ -416,8 +539,40 @@ impl TerminalPane {
                     self.title = title.into();
                     cx.emit(TerminalPaneEvent::TitleChanged(self.title.clone()));
                 }
+                let accessibility = TerminalAccessibilityModel::from_screen(&screen);
+                if accessibility.text() != self.accessibility.text() {
+                    self.accessibility_notifications
+                        .push(AccessibilityNotification::Value);
+                }
+                if accessibility.selection_range() != self.accessibility.selection_range() {
+                    self.accessibility_notifications
+                        .push(AccessibilityNotification::Selection);
+                }
+                self.accessibility = accessibility;
+                let _ = self.render_lifecycle.observe_snapshot(screen.generation);
                 self.screen = screen;
                 self.sync_scrollbar(cx);
+            }
+            SessionEvent::Attention(event) => {
+                let effects = self.attention.observe(
+                    event,
+                    AttentionFacts {
+                        terminal_input_focus: self.terminal_input_focus,
+                        surface_active: self.surface_active,
+                        application_active: self.application_active,
+                    },
+                    Instant::now(),
+                );
+                if effects.visual_bell {
+                    self.start_visual_bell(cx);
+                }
+                let unread_count = effects.unread_count;
+                apply_native_attention(effects);
+                cx.emit(TerminalPaneEvent::AttentionChanged { unread_count });
+            }
+            SessionEvent::HiddenInputChanged(hidden_input) => {
+                self.hidden_input = hidden_input;
+                self.sync_secure_input();
             }
             SessionEvent::Osc52Authorization(request) => {
                 if let Some(previous) = self.pending_osc52.replace(request)
@@ -433,14 +588,17 @@ impl TerminalPane {
                 }
             }
             SessionEvent::Exited(status) => {
-                eprintln!("{status}");
+                self.hidden_input = false;
+                self.sync_secure_input();
                 self.status = Some(status.to_string());
+                self.pane_state = PaneTerminalState::exited(status);
                 cx.emit(TerminalPaneEvent::Exited);
             }
             SessionEvent::Failed(failure) => {
-                let status = failure.to_string();
-                eprintln!("{status}");
-                self.status = Some(status);
+                self.hidden_input = false;
+                self.sync_secure_input();
+                let failure = TerminalFailure::from_session(&failure);
+                self.present_failure(failure, true);
             }
         }
     }
@@ -457,6 +615,9 @@ impl TerminalPane {
         let input = NativeKeyEvent::current_key(action)
             .map(|event| self.keyboard_bridge.translate(event))
             .unwrap_or_else(|| encode_key(event));
+        if !matches!(input, KeyTranslation::Unhandled(_)) {
+            self.clear_attention(cx);
+        }
         if self.ime.marked_text().is_some() {
             if let KeyTranslation::Encoded(input) = &input
                 && input.physical_key != PhysicalKey::Unidentified
@@ -531,7 +692,20 @@ impl TerminalPane {
         let input = match translation {
             KeyTranslation::Encoded(input) => input,
             KeyTranslation::TextInput(text) => KeyInput::text_input(text),
-            KeyTranslation::Unhandled(_) => return false,
+            KeyTranslation::Unhandled(event) => {
+                let kind = match event.kind {
+                    NativeKeyEventKind::KeyDown => DiagnosticKeyEventKind::KeyDown,
+                    NativeKeyEventKind::KeyUp => DiagnosticKeyEventKind::KeyUp,
+                    NativeKeyEventKind::FlagsChanged => DiagnosticKeyEventKind::FlagsChanged,
+                };
+                self.diagnostics
+                    .record_unhandled_key(UnhandledKeyDiagnostic::new(
+                        kind,
+                        event.action,
+                        event.native_key_code,
+                    ));
+                return false;
+            }
         };
         let resets_cursor_blink = input.action != KeyAction::Release;
         if let Some(session) = &self.session {
@@ -587,7 +761,12 @@ impl TerminalPane {
 
     fn update_backing_scale(&mut self, factor: f32, window: &mut Window, cx: &mut Context<Self>) {
         let Some(backing_scale) = BackingScale::new(factor) else {
-            eprintln!("ignored invalid terminal backing scale: {factor}");
+            let failure = TerminalFailure::presentation("update-backing-scale");
+            self.diagnostics.record(&failure);
+            self.pane_state =
+                PaneTerminalState::failed(failure.clone(), Some(self.screen.generation));
+            self.status = Some(failure.to_string());
+            cx.notify();
             return;
         };
         if self.backing_scale == backing_scale {
@@ -597,7 +776,9 @@ impl TerminalPane {
         self.backing_scale = backing_scale;
         self.cell_width = measure_cell_width(window, &self.font_family, self.font_size);
         self.last_geometry = None;
-        self.render_cache.invalidate_scale_dependent();
+        if self.render_lifecycle.update_scale(factor) == ScaleChange::ScaleResources {
+            self.render_cache.invalidate_scale_dependent();
+        }
         self.sync_scrollbar(cx);
         cx.notify();
     }
@@ -610,6 +791,7 @@ impl TerminalPane {
     ) {
         self.pointer_modifiers = input_modifiers(event.modifiers);
         self.focus_handle.focus(window);
+        self.clear_attention(cx);
         let Some(button) = pointer_button(event.button) else {
             return;
         };
@@ -620,6 +802,15 @@ impl TerminalPane {
         let Some(position) = self.surface_position(event.position, false) else {
             return;
         };
+
+        if button == PointerButton::Left
+            && event.modifiers.platform
+            && let Some(link) = self.link_at(position)
+        {
+            self.pressed_link = Some((self.screen.generation, link));
+            cx.stop_propagation();
+            return;
+        }
 
         self.pressed_button = Some(button);
         if let Some(session) = &self.session {
@@ -646,6 +837,15 @@ impl TerminalPane {
         let Some(position) = self.surface_position(event.position, dragging) else {
             return;
         };
+        let hovered_link = self.link_at(position);
+        if self.hovered_link != hovered_link {
+            self.hovered_link = hovered_link;
+            cx.notify();
+        }
+        if self.pressed_link.is_some() {
+            cx.stop_propagation();
+            return;
+        }
         if let Some(session) = &self.session {
             session.pointer(PointerInput {
                 generation: self.screen.generation,
@@ -664,6 +864,21 @@ impl TerminalPane {
         let Some(button) = pointer_button(event.button) else {
             return;
         };
+        if let Some((generation, pressed)) = self.pressed_link.take() {
+            let current = self
+                .surface_position(event.position, false)
+                .and_then(|position| self.link_at(position));
+            if let Some(url) = activated_link(
+                generation,
+                &pressed,
+                self.screen.generation,
+                current.as_ref(),
+            ) {
+                cx.open_url(&url);
+            }
+            cx.stop_propagation();
+            return;
+        }
         if self.pressed_button != Some(button) {
             return;
         }
@@ -695,15 +910,29 @@ impl TerminalPane {
             return;
         };
         self.reveal_scrollbar(cx);
-        let lines = f32::from(event.delta.pixel_delta(px(self.line_height)).y) / self.line_height;
-        let steps = accumulate_wheel_steps(&mut self.wheel_remainder, lines);
+        let delta = match event.delta {
+            ScrollDelta::Pixels(delta) => point(
+                f32::from(delta.x) / f32::from(self.cell_width),
+                f32::from(delta.y) / self.line_height,
+            ),
+            ScrollDelta::Lines(delta) => point(delta.x, delta.y),
+        };
+        let phase = current_wheel_phase().unwrap_or(match event.touch_phase {
+            gpui::TouchPhase::Started => WheelPhase::GestureStarted,
+            gpui::TouchPhase::Moved => WheelPhase::GestureChanged,
+            gpui::TouchPhase::Ended => WheelPhase::GestureEnded,
+        });
+        let (horizontal_steps, vertical_steps) =
+            self.wheel_accumulator.push(delta.x, delta.y, phase);
 
-        if steps != 0
+        if (horizontal_steps != 0 || vertical_steps != 0)
             && let Some(session) = &self.session
         {
             session.wheel(WheelInput {
                 generation: self.screen.generation,
-                steps,
+                horizontal_steps,
+                vertical_steps,
+                phase,
                 position,
                 modifiers: input_modifiers(event.modifiers),
                 shift_selection: self.shift_selection,
@@ -721,24 +950,32 @@ impl TerminalPane {
             Ok(Ok(Some(copy))) if !copy.plain_text.is_empty() => {
                 let _ = this.update(cx, |this, cx| {
                     if let Err(error) = write_selection_copy(copy, cx) {
-                        eprintln!("failed to write terminal selection to pasteboard: {error}");
-                        this.status = Some(error);
+                        let _ = error;
+                        this.present_failure(
+                            TerminalFailure::platform("write-selection-pasteboard"),
+                            true,
+                        );
                         cx.notify();
                     }
                 });
             }
             Ok(Err(error)) => {
                 let _ = this.update(cx, |this, cx| {
-                    eprintln!("failed to copy terminal selection: {error}");
-                    this.status = Some(error);
+                    let _ = error;
+                    this.present_failure(
+                        TerminalFailure::emulator("format-terminal-selection"),
+                        true,
+                    );
                     cx.notify();
                 });
             }
             Err(error) => {
                 let _ = this.update(cx, |this, cx| {
-                    let message = format!("terminal selection reply was lost: {error}");
-                    eprintln!("{message}");
-                    this.status = Some(message);
+                    let _ = error;
+                    this.present_failure(
+                        TerminalFailure::resource("receive-selection-reply"),
+                        true,
+                    );
                     cx.notify();
                 });
             }
@@ -753,12 +990,50 @@ impl TerminalPane {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) else {
+        let paths = read_file_urls().unwrap_or_default();
+        let terminal_input_focused = self.terminal_input_focus;
+        let insertion = if paths.is_empty() {
+            let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) else {
+                return;
+            };
+            NativeInsertion::service_text(text, terminal_input_focused)
+        } else {
+            NativeInsertion::dropped_files(&paths, terminal_input_focused)
+        };
+        let Ok(insertion) = insertion else {
             return;
         };
-        if text.is_empty() {
-            return;
+        if !insertion.text().is_empty() {
+            self.request_paste_text(insertion.into_text(), cx);
         }
+    }
+
+    fn insert_dropped_files(
+        &mut self,
+        paths: &ExternalPaths,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Ok(insertion) =
+            NativeInsertion::dropped_files(paths.paths(), self.terminal_input_focus)
+        else {
+            return;
+        };
+        self.request_paste_text(insertion.into_text(), cx);
+    }
+
+    fn native_context_actions(&self) -> NativeContextActions {
+        NativeContextActions::from_presence(
+            self.screen
+                .rows
+                .iter()
+                .flat_map(|row| row.iter())
+                .any(|cell| cell.selected),
+            self.hovered_link.as_ref(),
+        )
+    }
+
+    fn request_paste_text(&mut self, text: String, cx: &mut Context<Self>) {
         let Some(session) = &self.session else {
             return;
         };
@@ -785,6 +1060,40 @@ impl TerminalPane {
                     cx.notify();
                 });
             }
+        })
+        .detach();
+    }
+
+    fn export_diagnostics(
+        &mut self,
+        _: &ExportTerminalDiagnostics,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let directory = std::env::current_dir().unwrap_or_else(|_| std::env::temp_dir());
+        let receiver = cx.prompt_for_new_path(&directory, Some("SpaceTerm-diagnostics.txt"));
+        let diagnostics = self.diagnostics.clone();
+        cx.spawn(async move |this, cx| {
+            let Ok(Ok(Some(path))) = receiver.await else {
+                return;
+            };
+            let exported_path = path.clone();
+            let result = cx
+                .background_executor()
+                .spawn(async move { diagnostics.export(&exported_path) })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.status = Some(if result.is_ok() {
+                    format!("Diagnostics exported to {}", path.display())
+                } else {
+                    let failure = TerminalFailure::resource("export-diagnostics-file");
+                    this.diagnostics.record(&failure);
+                    this.pane_state =
+                        PaneTerminalState::failed(failure.clone(), Some(this.screen.generation));
+                    failure.to_string()
+                });
+                cx.notify();
+            });
         })
         .detach();
     }
@@ -896,6 +1205,12 @@ impl TerminalPane {
             allow_outside,
         )
     }
+
+    fn link_at(&self, position: SurfacePosition) -> Option<crate::terminal::HyperlinkTarget> {
+        let row = (position.y / self.line_height).floor() as usize;
+        let column = (position.x / f32::from(self.cell_width)).floor() as usize;
+        self.screen.rows.get(row)?.get(column)?.hyperlink.clone()
+    }
 }
 
 impl EventEmitter<TerminalPaneEvent> for TerminalPane {}
@@ -908,8 +1223,18 @@ impl EntityInputHandler for TerminalPane {
         _window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> Option<String> {
-        let (text, adjusted) = self.ime.text_for_utf16_range(range)?;
-        *adjusted_range = Some(adjusted);
+        if self.ime.marked_text().is_some() {
+            let (text, adjusted) = self.ime.text_for_utf16_range(range)?;
+            *adjusted_range = Some(adjusted);
+            return Some(text);
+        }
+        if range.start < self.accessibility.visible_range().end
+            && self.accessibility.line_for_index(range.start).is_none()
+        {
+            return None;
+        }
+        let text = self.accessibility.text_for_range(range.clone())?.to_owned();
+        *adjusted_range = Some(range);
         Some(text)
     }
 
@@ -922,8 +1247,15 @@ impl EntityInputHandler for TerminalPane {
         if !ignore_disabled_input && !self.terminal_input_focused(window) {
             return None;
         }
+        let range = if self.ime.marked_text().is_some() {
+            self.ime.selected_range()
+        } else {
+            self.accessibility
+                .selection_range()
+                .unwrap_or_else(|| self.accessibility.cursor_range())
+        };
         Some(UTF16Selection {
-            range: self.ime.selected_range(),
+            range,
             reversed: false,
         })
     }
@@ -938,6 +1270,8 @@ impl EntityInputHandler for TerminalPane {
 
     fn unmark_text(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         self.ime.cancel();
+        self.accessibility_notifications
+            .push(AccessibilityNotification::Value);
         cx.notify();
     }
 
@@ -959,6 +1293,8 @@ impl EntityInputHandler for TerminalPane {
                 cx,
             );
         }
+        self.accessibility_notifications
+            .push(AccessibilityNotification::Value);
         cx.notify();
     }
 
@@ -976,6 +1312,8 @@ impl EntityInputHandler for TerminalPane {
         }
         self.ime
             .replace_and_mark(range, new_text, new_selected_range);
+        self.accessibility_notifications
+            .push(AccessibilityNotification::Value);
         cx.notify();
     }
 
@@ -986,32 +1324,56 @@ impl EntityInputHandler for TerminalPane {
         _window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> Option<Bounds<Pixels>> {
-        let position = self.screen.cursor.position?;
-        let columns = self.screen.rows.first()?.len();
-        let marked_text = self.ime.marked_text().unwrap_or("");
-        let layout = layout_preedit(
-            marked_text,
-            usize::from(position.row),
-            usize::from(position.column),
-            columns,
-            range_utf16.end,
-        );
-        Some(ime_candidate_bounds(
-            element_bounds,
-            columns,
-            self.cell_width,
-            px(self.line_height),
-            layout.caret,
+        if let Some(marked_text) = self.ime.marked_text() {
+            let position = self.screen.cursor.position?;
+            let columns = self.screen.rows.first()?.len();
+            let layout = layout_preedit(
+                marked_text,
+                usize::from(position.row),
+                usize::from(position.column),
+                columns,
+                range_utf16.end,
+            );
+            return Some(ime_candidate_bounds(
+                element_bounds,
+                columns,
+                self.cell_width,
+                px(self.line_height),
+                layout.caret,
+            ));
+        }
+        let grid = self.grid_bounds?;
+        let geometry = AccessibilityGeometry::new(
+            f32::from(grid.origin.x),
+            f32::from(grid.origin.y),
+            f32::from(self.cell_width),
+            self.line_height,
+        )?;
+        let (x, y, width, height) = self.accessibility.bounds_for_range(range_utf16, geometry)?;
+        Some(Bounds::new(
+            point(px(x), px(y)),
+            size(px(width), px(height)),
         ))
     }
 
     fn character_index_for_point(
         &mut self,
-        _point: gpui::Point<Pixels>,
+        point: gpui::Point<Pixels>,
         _window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> Option<usize> {
-        Some(self.ime.selected_range().end)
+        if self.ime.marked_text().is_some() {
+            return Some(self.ime.selected_range().end);
+        }
+        let grid = self.grid_bounds?;
+        let geometry = AccessibilityGeometry::new(
+            f32::from(grid.origin.x),
+            f32::from(grid.origin.y),
+            f32::from(self.cell_width),
+            self.line_height,
+        )?;
+        self.accessibility
+            .index_for_point(f32::from(point.x), f32::from(point.y), geometry)
     }
 }
 
@@ -1023,14 +1385,85 @@ impl Drop for TerminalPane {
 
 impl Render for TerminalPane {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        update_application_activation();
+        let notifications = AccessibilityNotification::coalesce(&self.accessibility_notifications);
+        self.accessibility_notifications.clear();
+        post_accessibility_notifications(&notifications, self.accessibility.visible_range());
         let pane = cx.entity().downgrade();
-        let terminal_input_focused = self.sync_terminal_input_focus(window);
+        let (terminal_input_focused, focus_gained) = self.sync_terminal_input_focus(window);
         let surface_active = self.product_focus.active_workspace
             && self.product_focus.active_window
             && window.is_window_active();
-        self.sync_presentation_blink(surface_active, terminal_input_focused, cx);
+        let native_visibility = current_window_visibility();
+        let lifecycle_effects = self.render_lifecycle.update_visibility(SurfaceVisibility {
+            application_active: window.is_window_active(),
+            key_window: window.is_window_active(),
+            minimized: native_visibility.minimized,
+            occluded: native_visibility.occluded,
+            live_resize: native_visibility.live_resize,
+            workspace_visible: self.product_focus.active_workspace,
+            pane_visible: self.product_focus.active_window,
+        });
+        if lifecycle_effects.request_redraw {
+            cx.notify();
+        }
+        self.surface_active = surface_active;
+        self.application_active = window.is_window_active();
+        if focus_gained {
+            self.clear_attention(cx);
+        }
+        self.sync_presentation_blink(
+            lifecycle_effects.animations_active,
+            terminal_input_focused,
+            cx,
+        );
         let background = gpui_color(self.screen.background);
         let status = self.status.clone();
+        let diagnostics_available =
+            self.pane_state.failure().is_some() && self.diagnostics.record_count() > 0;
+        let last_valid_frame_preserved = self.pane_state.last_valid_frame().is_some();
+        let export_pane = cx.entity().downgrade();
+        let hovered_link = self.hovered_link.clone();
+        let native_context_actions = self.native_context_actions();
+        let native_context_selector = format!(
+            "terminal-native-context-copy-{}-open-{}-quick-look-{}-failure-{}-last-frame-{}",
+            native_context_actions.copy,
+            native_context_actions.open_link,
+            native_context_actions.quick_look,
+            diagnostics_available,
+            last_valid_frame_preserved,
+        );
+        let link_cell_width = self.cell_width;
+        let link_line_height = self.line_height;
+        let link_rows = self.screen.rows.clone();
+        let link_highlights = hovered_link.as_ref().map_or_else(Vec::new, |hovered| {
+            link_rows
+                .iter()
+                .enumerate()
+                .flat_map(|(row, cells)| {
+                    cells
+                        .iter()
+                        .enumerate()
+                        .filter(move |(_, cell)| {
+                            cell.hyperlink
+                                .as_ref()
+                                .is_some_and(|link| link.identity == hovered.identity)
+                        })
+                        .map(move |(column, _)| {
+                            div()
+                                .absolute()
+                                .left(px(
+                                    HORIZONTAL_PADDING + column as f32 * f32::from(link_cell_width)
+                                ))
+                                .top(px(VERTICAL_PADDING + row as f32 * link_line_height))
+                                .w(link_cell_width)
+                                .h(px(link_line_height))
+                                .border_b_1()
+                                .border_color(gpui_color(ACTIVE_THEME.link_text_hover))
+                        })
+                })
+                .collect::<Vec<_>>()
+        });
         let paste_confirmation = self.pending_paste;
         let osc52_authorization = self.pending_osc52;
         self.sync_scrollbar(cx);
@@ -1041,6 +1474,7 @@ impl Render for TerminalPane {
             self.shift_selection,
         );
         let preedit = self.preedit_layout();
+        let attention_visual = self.attention_visual;
         let terminal_grid = TerminalGridElement::new(
             &self.screen,
             &mut self.render_cache,
@@ -1057,8 +1491,12 @@ impl Render for TerminalPane {
                 scale_factor: window.scale_factor(),
             },
         );
+        if let Some(generation) = self.render_lifecycle.take_frame() {
+            self.render_lifecycle.mark_presented(generation);
+        }
 
         div()
+            .debug_selector(move || native_context_selector.clone())
             .on_children_prepainted(move |children, _window, cx| {
                 let Some(bounds) = children.first().copied() else {
                     return;
@@ -1074,10 +1512,13 @@ impl Render for TerminalPane {
             .py(px(VERTICAL_PADDING))
             .when(pointer_uses_text_cursor, |root| root.cursor_text())
             .when(!pointer_uses_text_cursor, |root| root.cursor_default())
+            .when(hovered_link.is_some(), |root| root.cursor_pointer())
             .key_context(TERMINAL_KEY_CONTEXT)
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(Self::copy_selection))
             .on_action(cx.listener(Self::paste_clipboard))
+            .on_action(cx.listener(Self::export_diagnostics))
+            .on_drop(cx.listener(Self::insert_dropped_files))
             .on_action(cx.listener(Self::confirm_unsafe_paste))
             .on_action(cx.listener(Self::cancel_unsafe_paste))
             .on_action(cx.listener(Self::allow_osc52_clipboard))
@@ -1098,7 +1539,29 @@ impl Render for TerminalPane {
             .on_mouse_up_out(MouseButton::Middle, cx.listener(Self::on_mouse_up))
             .on_mouse_up_out(MouseButton::Right, cx.listener(Self::on_mouse_up))
             .child(terminal_grid)
+            .children(link_highlights)
             .child(scrollbar)
+            .when(attention_visual, |root| {
+                root.child(
+                    div()
+                        .debug_selector(|| "terminal-visual-bell".to_owned())
+                        .absolute()
+                        .inset_0()
+                        .border_2()
+                        .border_color(gpui_color(ACTIVE_THEME.warning)),
+                )
+            })
+            .when_some(hovered_link, |root, link| {
+                root.child(
+                    div()
+                        .absolute()
+                        .left(px(8.0))
+                        .bottom(px(8.0))
+                        .px(px(6.0))
+                        .bg(gpui_color(ACTIVE_THEME.background))
+                        .child(link.value),
+                )
+            })
             .when_some(paste_confirmation, |root, confirmation| {
                 root.child(render_paste_confirmation(
                     confirmation,
@@ -1122,7 +1585,30 @@ impl Render for TerminalPane {
                         .bg(gpui_color(ACTIVE_THEME.element_active))
                         .text_color(gpui_color(ACTIVE_THEME.text))
                         .text_sm()
-                        .child(status),
+                        .flex()
+                        .flex_col()
+                        .gap(px(6.0))
+                        .child(status)
+                        .when(diagnostics_available, |status| {
+                            status.child(
+                                div()
+                                    .id("export-terminal-diagnostics")
+                                    .debug_selector(|| "export-terminal-diagnostics".to_owned())
+                                    .cursor_pointer()
+                                    .text_color(gpui_color(ACTIVE_THEME.link_text_hover))
+                                    .on_click(move |_, window, cx| {
+                                        let _ = export_pane.update(cx, |pane, cx| {
+                                            pane.export_diagnostics(
+                                                &ExportTerminalDiagnostics,
+                                                window,
+                                                cx,
+                                            );
+                                        });
+                                        cx.stop_propagation();
+                                    })
+                                    .child("Export Diagnostics…"),
+                            )
+                        }),
                 )
             })
     }
@@ -1442,11 +1928,44 @@ fn terminal_surface_position(
     })
 }
 
-fn accumulate_wheel_steps(remainder: &mut f32, delta: f32) -> i32 {
-    *remainder += delta;
-    let steps = remainder.trunc() as i32;
-    *remainder -= steps as f32;
-    steps
+fn activated_link(
+    pressed_generation: crate::terminal::PresentationGeneration,
+    pressed: &crate::terminal::HyperlinkTarget,
+    current_generation: crate::terminal::PresentationGeneration,
+    current: Option<&crate::terminal::HyperlinkTarget>,
+) -> Option<String> {
+    (pressed_generation == current_generation
+        && current.is_some_and(|link| link.identity == pressed.identity))
+    .then(|| pressed.activation_url())
+}
+
+#[derive(Default)]
+struct WheelAccumulator {
+    horizontal: f32,
+    vertical: f32,
+}
+
+impl WheelAccumulator {
+    fn push(&mut self, horizontal: f32, vertical: f32, phase: WheelPhase) -> (i32, i32) {
+        if phase == WheelPhase::GestureStarted {
+            *self = Self::default();
+        }
+        self.horizontal += horizontal;
+        self.vertical += vertical;
+        let steps = (self.horizontal.trunc() as i32, self.vertical.trunc() as i32);
+        self.horizontal -= steps.0 as f32;
+        self.vertical -= steps.1 as f32;
+        if matches!(
+            phase,
+            WheelPhase::GestureEnded
+                | WheelPhase::GestureCancelled
+                | WheelPhase::MomentumEnded
+                | WheelPhase::MomentumCancelled
+        ) {
+            *self = Self::default();
+        }
+        steps
+    }
 }
 
 fn encode_key(event: &KeyDownEvent) -> KeyTranslation {
@@ -1649,6 +2168,23 @@ mod tests {
     };
     use crate::terminal::{ScrollbarSnapshot, SessionFailure, TerminalSessionFactory};
 
+    struct KeyPropagationProbe {
+        pane: Entity<TerminalPane>,
+        propagated_key_downs: Rc<Cell<usize>>,
+    }
+
+    impl Render for KeyPropagationProbe {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let propagated_key_downs = Rc::clone(&self.propagated_key_downs);
+            div()
+                .size_full()
+                .on_key_down(move |_, _, _| {
+                    propagated_key_downs.set(propagated_key_downs.get() + 1);
+                })
+                .child(self.pane.clone())
+        }
+    }
+
     fn blinking_screen() -> Arc<ScreenSnapshot> {
         ScreenSnapshot::from_test_parts(
             Arc::from([Arc::from([crate::terminal::CellSnapshot {
@@ -1667,6 +2203,8 @@ mod tests {
                 overline: false,
                 selected: false,
                 spacer_tail: false,
+                semantic_content: crate::terminal::CellSemanticSnapshot::Output,
+                hyperlink: None,
             }])]),
             ScrollbarSnapshot::default(),
             "blink",
@@ -1691,6 +2229,8 @@ mod tests {
                 overline: false,
                 selected: false,
                 spacer_tail: false,
+                semantic_content: crate::terminal::CellSemanticSnapshot::Output,
+                hyperlink: None,
             }])]),
             ScrollbarSnapshot::default(),
             "cursor blink",
@@ -1728,6 +2268,23 @@ mod tests {
         (pane, cx)
     }
 
+    #[gpui::test]
+    fn visual_bell_presentation_state_clears_on_focus_or_input(cx: &mut TestAppContext) {
+        let (pane, cx) = terminal_pane(cx);
+
+        pane.update(cx, |pane, cx| {
+            pane.terminal_input_focus = true;
+            pane.handle_event(
+                SessionEvent::Attention(crate::terminal::attention::AttentionEvent::Bell),
+                cx,
+            );
+        });
+        assert!(pane.read_with(cx, |pane, _| pane.attention_visual));
+
+        pane.update(cx, |pane, cx| pane.clear_attention(cx));
+        assert!(!pane.read_with(cx, |pane, _| pane.attention_visual));
+    }
+
     fn connected_terminal_pane(
         cx: &mut TestAppContext,
     ) -> (
@@ -1751,6 +2308,40 @@ mod tests {
         });
         cx.run_until_parked();
         (pane, cx, records)
+    }
+
+    fn connected_terminal_pane_with_key_propagation(
+        cx: &mut TestAppContext,
+    ) -> (
+        Entity<TerminalPane>,
+        &mut VisualTestContext,
+        TestTerminalSessionRecords,
+        Rc<Cell<usize>>,
+    ) {
+        cx.update(crate::ui::init);
+        let records = TestTerminalSessionRecords::default();
+        let session_factory: Rc<dyn TerminalSessionFactory> =
+            Rc::new(TestTerminalSessionFactory::new(records.clone()));
+        let session_factory = WorkspaceTerminalSessionFactory::new(
+            session_factory,
+            PathBuf::from("/tmp/spaceterm-terminal-pane-keyboard-propagation-test"),
+        );
+        let propagated_key_downs = Rc::new(Cell::new(0));
+        let propagated_for_probe = Rc::clone(&propagated_key_downs);
+        let (probe, cx) = cx.add_window_view(|window, cx| {
+            let pane = cx.new(|cx| TerminalPane::new(session_factory, window, cx));
+            KeyPropagationProbe {
+                pane,
+                propagated_key_downs: propagated_for_probe,
+            }
+        });
+        let pane = probe.read_with(cx, |probe, _| probe.pane.clone());
+        cx.update(|window, cx| {
+            window.activate_window();
+            pane.update(cx, |pane, _| pane.focus(window));
+        });
+        cx.run_until_parked();
+        (pane, cx, records, propagated_key_downs)
     }
 
     fn terminal_pane_with_selection_copy(
@@ -1915,7 +2506,10 @@ mod tests {
 
         cx.update(|_window, cx| {
             pane.update(cx, |pane, cx| {
-                pane.send_key_input(Ok(KeyInput::input_method_commit("x")), cx);
+                pane.send_key_translation(
+                    KeyTranslation::Encoded(KeyInput::input_method_commit("x")),
+                    cx,
+                );
             });
         });
         cx.run_until_parked();
@@ -2277,21 +2871,151 @@ mod tests {
     }
 
     #[gpui::test]
-    fn unsupported_key_down_is_neither_sent_nor_presented_as_a_pane_failure(
+    fn unhandled_key_translation_preserves_pane_presentation_and_propagates(
         cx: &mut TestAppContext,
     ) {
         let (pane, cx, records) = connected_terminal_pane(cx);
-
-        cx.simulate_event(event("hyper", None, Modifiers::default()));
-
-        let key_count = records
+        pane.update(cx, |pane, cx| {
+            pane.handle_event(SessionEvent::Screen(blinking_cursor_screen(true, true)), cx);
+            pane.blink_phase_visible = false;
+        });
+        cx.run_until_parked();
+        let (
+            presentation_generation,
+            pending_frame,
+            blink_generation,
+            blink_phase_visible,
+            diagnostic_count,
+        ) = pane.read_with(cx, |pane, _| {
+            (
+                pane.screen.generation,
+                pane.render_lifecycle.take_frame(),
+                pane.blink_generation,
+                pane.blink_phase_visible,
+                pane.diagnostics.record_count(),
+            )
+        });
+        let key_count_before = records
             .commands()
             .iter()
             .filter(|call| matches!(call.command, RecordedSessionCommand::Key(_)))
             .count();
+
+        let handled = pane.update(cx, |pane, cx| {
+            pane.send_key_translation(
+                KeyTranslation::Unhandled(UnhandledKeyEvent {
+                    kind: NativeKeyEventKind::KeyDown,
+                    action: KeyAction::Press,
+                    native_key_code: Some(u16::MAX),
+                }),
+                cx,
+            )
+        });
+
+        let key_count_after = records
+            .commands()
+            .iter()
+            .filter(|call| matches!(call.command, RecordedSessionCommand::Key(_)))
+            .count();
+        let after = pane.read_with(cx, |pane, _| {
+            (
+                pane.screen.generation,
+                pane.render_lifecycle.take_frame(),
+                pane.blink_generation,
+                pane.blink_phase_visible,
+                pane.diagnostics.record_count(),
+                pane.status.clone(),
+                pane.pane_state.clone(),
+            )
+        });
         assert_eq!(
-            (key_count, pane.read_with(cx, |pane, _| pane.status.clone())),
-            (0, None)
+            (
+                handled,
+                key_count_before,
+                key_count_after,
+                after,
+                cx.debug_bounds("terminal-status"),
+            ),
+            (
+                false,
+                0,
+                0,
+                (
+                    presentation_generation,
+                    pending_frame,
+                    blink_generation,
+                    blink_phase_visible,
+                    diagnostic_count + 1,
+                    None,
+                    PaneTerminalState::Running,
+                ),
+                None,
+            )
+        );
+    }
+
+    #[gpui::test]
+    fn unhandled_key_down_preserves_attention_and_propagates(cx: &mut TestAppContext) {
+        let (pane, cx, _records, propagated_key_downs) =
+            connected_terminal_pane_with_key_propagation(cx);
+        let attention_events = Rc::new(Cell::new(0));
+        let attention_events_for_subscription = Rc::clone(&attention_events);
+        pane.update(cx, |_, cx| {
+            cx.subscribe(&pane, move |_, _, event: &TerminalPaneEvent, _| {
+                if matches!(event, TerminalPaneEvent::AttentionChanged { .. }) {
+                    attention_events_for_subscription
+                        .set(attention_events_for_subscription.get() + 1);
+                }
+            })
+            .detach();
+        });
+        pane.update(cx, |pane, cx| {
+            pane.terminal_input_focus = false;
+            pane.handle_event(
+                SessionEvent::Attention(crate::terminal::attention::AttentionEvent::Bell),
+                cx,
+            );
+            pane.terminal_input_focus = true;
+        });
+        let before = pane.read_with(cx, |pane, _| {
+            (
+                pane.attention.unread_count(),
+                pane.attention.visual_bell(),
+                pane.attention_visual,
+                pane.attention_generation,
+                pane._attention_task.is_some(),
+                pane.diagnostics.record_count(),
+            )
+        });
+        let attention_events_before = attention_events.get();
+
+        cx.simulate_event(event("hyper", None, Modifiers::default()));
+
+        let after = pane.read_with(cx, |pane, _| {
+            (
+                pane.attention.unread_count(),
+                pane.attention.visual_bell(),
+                pane.attention_visual,
+                pane.attention_generation,
+                pane._attention_task.is_some(),
+                pane.diagnostics.record_count(),
+            )
+        });
+        assert_eq!(
+            (
+                before,
+                after,
+                attention_events_before,
+                attention_events.get(),
+                propagated_key_downs.get(),
+            ),
+            (
+                (1, true, true, before.3, true, before.5),
+                (1, true, true, before.3, true, before.5 + 1),
+                attention_events_before,
+                attention_events_before,
+                1,
+            )
         );
     }
 
@@ -2768,13 +3492,38 @@ mod tests {
 
     #[test]
     fn accumulates_fractional_trackpad_scroll_into_terminal_steps() {
-        let mut remainder = 0.0;
+        let mut accumulator = WheelAccumulator::default();
+        assert_eq!(
+            accumulator.push(0.4, 0.4, WheelPhase::GestureStarted),
+            (0, 0)
+        );
+        assert_eq!(
+            accumulator.push(0.7, 0.7, WheelPhase::GestureChanged),
+            (1, 1)
+        );
+        assert_eq!(
+            accumulator.push(-1.3, -1.3, WheelPhase::MomentumStarted),
+            (-1, -1)
+        );
+        assert_eq!(
+            accumulator.push(0.0, 0.0, WheelPhase::MomentumCancelled),
+            (0, 0)
+        );
+        assert_eq!((accumulator.horizontal, accumulator.vertical), (0.0, 0.0));
+    }
 
-        assert_eq!(accumulate_wheel_steps(&mut remainder, 0.4), 0);
-        assert_eq!(accumulate_wheel_steps(&mut remainder, 0.7), 1);
-        assert!((remainder - 0.1).abs() < f32::EPSILON * 4.0);
-        assert_eq!(accumulate_wheel_steps(&mut remainder, -1.3), -1);
-        assert!((remainder + 0.2).abs() < f32::EPSILON * 4.0);
+    #[test]
+    fn hyperlinks_open_only_on_same_generation_explicit_release() {
+        let link = crate::terminal::HyperlinkTarget::url("https://example.test").unwrap();
+        let first = crate::terminal::PresentationGeneration::test(1);
+        let second = crate::terminal::PresentationGeneration::test(2);
+
+        assert_eq!(
+            activated_link(first, &link, first, Some(&link)),
+            Some("https://example.test".to_owned())
+        );
+        assert_eq!(activated_link(first, &link, second, Some(&link)), None);
+        assert_eq!(activated_link(first, &link, first, None), None);
     }
 
     #[test]
@@ -2977,14 +3726,26 @@ mod tests {
             .unwrap();
         cx.run_until_parked();
 
-        let state = pane.read_with(cx, |pane, _| (pane.status.clone(), pane.session.is_some()));
+        let state = pane.read_with(cx, |pane, _| {
+            (
+                pane.status.clone(),
+                pane.session.is_some(),
+                pane.pane_state
+                    .failure()
+                    .map(crate::terminal::TerminalFailure::class),
+                pane.diagnostics.record_count(),
+            )
+        });
         assert_eq!(
             state,
             (
                 Some(
-                    "Shell output failed: read unavailable; shell exited (exit code 7)".to_owned()
+                    "PTY failed during read-shell-output. Close this Pane and restart the terminal command."
+                        .to_owned()
                 ),
                 true,
+                Some(crate::terminal::FailureClass::Pty),
+                1,
             )
         );
         assert_eq!(
@@ -2992,5 +3753,11 @@ mod tests {
             (0, Vec::new())
         );
         assert!(cx.debug_bounds("terminal-status").is_some());
+        let export = cx
+            .debug_bounds("export-terminal-diagnostics")
+            .expect("typed failure should expose explicit diagnostic export");
+        cx.simulate_click(export.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert!(cx.did_prompt_for_new_path());
     }
 }
