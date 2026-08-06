@@ -1,6 +1,9 @@
 use std::collections::BTreeSet;
 
-use super::emulator::TerminalEmulator;
+use super::emulator::{
+    ActiveScreenSnapshot, CellSnapshot, CursorShapeSnapshot, TerminalColor, TerminalEmulator,
+    TerminalUnderlineSnapshot,
+};
 use super::geometry::{BackingScale, CellGridSize, LogicalCellSize, TerminalGeometry};
 use super::key::{InputModifiers, KeyAction, KeyInput, OptionAsAltPolicy, PhysicalKey};
 
@@ -46,41 +49,239 @@ macro_rules! fixture {
 }
 
 const FIXTURES: &[FixtureSpec] = &[
-    fixture!("snapshot.damage-and-isolation", 6, [45, 46], "spaceterm-snapshot-contract", SemanticSnapshot),
-    fixture!("geometry.logical-and-backing", 7, [34, 44], "ecma-48-and-xterm-window-ops", Geometry),
-    fixture!("pty.initialization", 8, [38, 46], "posix-and-darwin-pty", Lifecycle),
-    fixture!("pty.shutdown", 9, [39, 46], "posix-process-lifecycle", Lifecycle),
-    fixture!("presentation.colors", 10, [3], "ecma-48-sgr", SemanticSnapshot),
-    fixture!("presentation.text-attributes", 11, [4], "ecma-48-sgr", SemanticSnapshot),
-    fixture!("presentation.decorations", 12, [4], "ecma-48-and-xterm-sgr", SemanticSnapshot),
-    fixture!("unicode.graphemes", 13, [2], "unicode-uax-11-uax-29", SemanticSnapshot),
-    fixture!("unicode.drawing-symbols", 14, [2], "unicode-blocks", Geometry),
-    fixture!("cursor.negotiated-shape", 15, [5, 7], "dec-deccusr", SemanticSnapshot),
-    fixture!("focus.terminal-input-focus", 16, [8, 9, 10, 11, 12, 13, 46], "apple-responder-and-spaceterm-focus", Native),
-    fixture!("keyboard.vocabulary", 17, [1, 17, 18], "w3c-code-and-ghostty-key", Bytes),
-    fixture!("keyboard.protocols", 18, [18, 19], "kitty-keyboard-fixterms-xterm", Bytes),
-    fixture!("keyboard.macos-bridge", 19, [20, 21], "apple-nsevent", Native),
-    fixture!("focus.dec-1004", 20, [14, 15, 16], "xterm-focus-event", Bytes),
-    fixture!("cursor.blink-lifecycle", 21, [6, 7], "dec-deccusr-and-spaceterm-cadence", Lifecycle),
-    fixture!("ime.marked-text", 22, [22], "apple-nstextinputclient", Native),
-    fixture!("input.secure-event", 23, [23], "apple-secure-event-input", Security),
-    fixture!("screen.scrollback-and-reflow", 24, [33, 34], "ecma-48-and-xterm-private-modes", SemanticSnapshot),
-    fixture!("mouse.protocols", 25, [24, 25], "xterm-mouse-tracking", Bytes),
-    fixture!("selection.semantic-ranges", 26, [26], "spaceterm-selection-contract", SemanticSnapshot),
-    fixture!("mouse.precision-wheel", 27, [27], "apple-scroll-phases-and-xterm", Bytes),
+    fixture!(
+        "snapshot.damage-and-isolation",
+        6,
+        [45, 46],
+        "spaceterm-snapshot-contract",
+        SemanticSnapshot
+    ),
+    fixture!(
+        "geometry.logical-and-backing",
+        7,
+        [34, 44],
+        "ecma-48-and-xterm-window-ops",
+        Geometry
+    ),
+    fixture!(
+        "pty.initialization",
+        8,
+        [38, 46],
+        "posix-and-darwin-pty",
+        Lifecycle
+    ),
+    fixture!(
+        "pty.shutdown",
+        9,
+        [39, 46],
+        "posix-process-lifecycle",
+        Lifecycle
+    ),
+    fixture!(
+        "presentation.colors",
+        10,
+        [3],
+        "ecma-48-sgr",
+        SemanticSnapshot
+    ),
+    fixture!(
+        "presentation.text-attributes",
+        11,
+        [4],
+        "ecma-48-sgr",
+        SemanticSnapshot
+    ),
+    fixture!(
+        "presentation.decorations",
+        12,
+        [4],
+        "ecma-48-and-xterm-sgr",
+        SemanticSnapshot
+    ),
+    fixture!(
+        "unicode.graphemes",
+        13,
+        [2],
+        "unicode-uax-11-uax-29",
+        SemanticSnapshot
+    ),
+    fixture!(
+        "unicode.drawing-symbols",
+        14,
+        [2],
+        "unicode-blocks",
+        Geometry
+    ),
+    fixture!(
+        "cursor.negotiated-shape",
+        15,
+        [5, 7],
+        "dec-deccusr",
+        SemanticSnapshot
+    ),
+    fixture!(
+        "focus.terminal-input-focus",
+        16,
+        [8, 9, 10, 11, 12, 13, 46],
+        "apple-responder-and-spaceterm-focus",
+        Native
+    ),
+    fixture!(
+        "keyboard.vocabulary",
+        17,
+        [1, 17, 18],
+        "w3c-code-and-ghostty-key",
+        Bytes
+    ),
+    fixture!(
+        "keyboard.protocols",
+        18,
+        [18, 19],
+        "kitty-keyboard-fixterms-xterm",
+        Bytes
+    ),
+    fixture!(
+        "keyboard.macos-bridge",
+        19,
+        [20, 21],
+        "apple-nsevent",
+        Native
+    ),
+    fixture!(
+        "focus.dec-1004",
+        20,
+        [14, 15, 16],
+        "xterm-focus-event",
+        Bytes
+    ),
+    fixture!(
+        "cursor.blink-lifecycle",
+        21,
+        [6, 7],
+        "dec-deccusr-and-spaceterm-cadence",
+        Lifecycle
+    ),
+    fixture!(
+        "ime.marked-text",
+        22,
+        [22],
+        "apple-nstextinputclient",
+        Native
+    ),
+    fixture!(
+        "input.secure-event",
+        23,
+        [23],
+        "apple-secure-event-input",
+        Security
+    ),
+    fixture!(
+        "screen.scrollback-and-reflow",
+        24,
+        [33, 34],
+        "ecma-48-and-xterm-private-modes",
+        SemanticSnapshot
+    ),
+    fixture!(
+        "mouse.protocols",
+        25,
+        [24, 25],
+        "xterm-mouse-tracking",
+        Bytes
+    ),
+    fixture!(
+        "selection.semantic-ranges",
+        26,
+        [26],
+        "spaceterm-selection-contract",
+        SemanticSnapshot
+    ),
+    fixture!(
+        "mouse.precision-wheel",
+        27,
+        [27],
+        "apple-scroll-phases-and-xterm",
+        Bytes
+    ),
     fixture!("links.osc-8", 29, [28], "vte-osc-8", Security),
-    fixture!("clipboard.selection-copy", 30, [29], "apple-pasteboard", SemanticSnapshot),
-    fixture!("paste.unified-safety", 31, [30], "xterm-bracketed-paste", Security),
-    fixture!("paste.file-urls", 32, [31], "apple-file-url-and-posix-shell", Security),
+    fixture!(
+        "clipboard.selection-copy",
+        30,
+        [29],
+        "apple-pasteboard",
+        SemanticSnapshot
+    ),
+    fixture!(
+        "paste.unified-safety",
+        31,
+        [30],
+        "xterm-bracketed-paste",
+        Security
+    ),
+    fixture!(
+        "paste.file-urls",
+        32,
+        [31],
+        "apple-file-url-and-posix-shell",
+        Security
+    ),
     fixture!("clipboard.osc-52", 33, [32], "xterm-osc-52", Security),
-    fixture!("metadata.osc-7-and-133", 34, [35], "osc-7-and-finalterm-osc-133", SemanticSnapshot),
-    fixture!("shell.temporary-integration", 35, [36], "shell-startup-contracts", Lifecycle),
-    fixture!("identity.terminfo-and-runtime", 36, [37], "ncurses-terminfo-and-xterm", Bytes),
-    fixture!("attention.bell-and-notification", 37, [41], "ecma-48-bel-and-apple-notifications", Native),
-    fixture!("services.native-actions", 38, [43], "apple-services-drag-and-quick-look", Native),
-    fixture!("accessibility.editable-text", 39, [42], "apple-nsaccessibility", Native),
-    fixture!("render.visibility-lifecycle", 40, [12, 13, 44, 45], "apple-window-visibility", Lifecycle),
-    fixture!("failure.typed-local-diagnostics", 41, [40], "spaceterm-failure-contract", Security),
+    fixture!(
+        "metadata.osc-7-and-133",
+        34,
+        [35],
+        "osc-7-and-finalterm-osc-133",
+        SemanticSnapshot
+    ),
+    fixture!(
+        "shell.temporary-integration",
+        35,
+        [36],
+        "shell-startup-contracts",
+        Lifecycle
+    ),
+    fixture!(
+        "identity.terminfo-and-runtime",
+        36,
+        [37],
+        "ncurses-terminfo-and-xterm",
+        Bytes
+    ),
+    fixture!(
+        "attention.bell-and-notification",
+        37,
+        [41],
+        "ecma-48-bel-and-apple-notifications",
+        Native
+    ),
+    fixture!(
+        "services.native-actions",
+        38,
+        [43],
+        "apple-services-drag-and-quick-look",
+        Native
+    ),
+    fixture!(
+        "accessibility.editable-text",
+        39,
+        [42],
+        "apple-nsaccessibility",
+        Native
+    ),
+    fixture!(
+        "render.visibility-lifecycle",
+        40,
+        [12, 13, 44, 45],
+        "apple-window-visibility",
+        Lifecycle
+    ),
+    fixture!(
+        "failure.typed-local-diagnostics",
+        41,
+        [40],
+        "spaceterm-failure-contract",
+        Security
+    ),
 ];
 
 const KEYBOARD_PROTOCOL_EXPECTED: &[ExpectedObservation] = &[
@@ -93,6 +294,24 @@ const KEYBOARD_PROTOCOL_EXPECTED: &[ExpectedObservation] = &[
         step: 2,
         field: "application-cursor-up-bytes",
         value: "1b 4f 41",
+    },
+];
+
+const SEMANTIC_SNAPSHOT_EXPECTED: &[ExpectedObservation] = &[
+    ExpectedObservation {
+        step: 1,
+        field: "cells",
+        value: "A{fg=palette:1,bg=palette:4,bold,italic,underline=single} é{width=1} 界{width=2}",
+    },
+    ExpectedObservation {
+        step: 1,
+        field: "cursor",
+        value: "visible=true shape=bar blinking=false column=6 row=0 width=1",
+    },
+    ExpectedObservation {
+        step: 1,
+        field: "metadata",
+        value: "title=Corpus active-screen=primary rows=3 cols=12",
     },
 ];
 
@@ -168,11 +387,7 @@ fn run_fixture(fixture: &ExecutableFixture) -> Result<(), String> {
         {
             return Err(format!(
                 "fixture `{}` step {} `{}` mismatch:\nexpected: {}\nobserved: {}",
-                fixture.spec.id,
-                expected.step,
-                expected.field,
-                expected.value,
-                observed.value
+                fixture.spec.id, expected.step, expected.field, expected.value, observed.value
             ));
         }
     }
@@ -187,9 +402,7 @@ fn run_fixture(fixture: &ExecutableFixture) -> Result<(), String> {
     Ok(())
 }
 
-fn observe_keyboard_protocols(
-    budget: &mut FixtureBudget,
-) -> Result<Vec<Observation>, String> {
+fn observe_keyboard_protocols(budget: &mut FixtureBudget) -> Result<Vec<Observation>, String> {
     let geometry = TerminalGeometry::from_grid(
         CellGridSize::new(80, 24),
         LogicalCellSize::new(8.0, 16.0),
@@ -238,6 +451,132 @@ fn observe_keyboard_protocols(
     ])
 }
 
+fn observe_semantic_snapshot(budget: &mut FixtureBudget) -> Result<Vec<Observation>, String> {
+    let geometry = TerminalGeometry::from_grid(
+        CellGridSize::new(12, 3),
+        LogicalCellSize::new(8.0, 16.0),
+        BackingScale::ONE,
+    );
+    let mut emulator = TerminalEmulator::new(geometry).map_err(|error| error.to_string())?;
+    let input = concat!(
+        "\x1b]2;Corpus\x07",
+        "\x1b[31;44;1;3;4mA\x1b[0m e\u{301} 界",
+        "\x1b[6 q"
+    );
+    emulator.feed(input.as_bytes());
+    let snapshot = emulator
+        .snapshot()
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "terminal did not publish the semantic snapshot".to_owned())?;
+
+    let cells = snapshot.rows[0]
+        .iter()
+        .enumerate()
+        .filter(|(_, cell)| cell.text != " " && !cell.spacer_tail)
+        .map(|(column, cell)| canonical_cell(column, &snapshot.rows[0], cell))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let cursor = snapshot
+        .cursor
+        .position
+        .map(|position| {
+            format!(
+                "visible={} shape={} blinking={} column={} row={} width={}",
+                snapshot.cursor.visible,
+                cursor_shape(snapshot.cursor.shape),
+                snapshot.cursor.blinking,
+                position.column,
+                position.row,
+                position.width_cells
+            )
+        })
+        .unwrap_or_else(|| "visible=false position=none".to_owned());
+    let metadata = format!(
+        "title={} active-screen={} rows={} cols={}",
+        snapshot.title,
+        match snapshot.active_screen {
+            ActiveScreenSnapshot::Primary => "primary",
+            ActiveScreenSnapshot::Alternate => "alternate",
+        },
+        snapshot.size.rows,
+        snapshot.size.cols
+    );
+    let observations = vec![
+        Observation {
+            step: 1,
+            field: "cells",
+            value: cells,
+        },
+        Observation {
+            step: 1,
+            field: "cursor",
+            value: cursor,
+        },
+        Observation {
+            step: 1,
+            field: "metadata",
+            value: metadata,
+        },
+    ];
+    budget.record(
+        input.len(),
+        observations
+            .iter()
+            .map(|observation| observation.value.len())
+            .sum(),
+    );
+    Ok(observations)
+}
+
+fn canonical_cell(column: usize, row: &[CellSnapshot], cell: &CellSnapshot) -> String {
+    let styled = cell.foreground_source != TerminalColor::Default
+        || cell.background_source != TerminalColor::Default
+        || cell.bold
+        || cell.italic
+        || cell.underline != TerminalUnderlineSnapshot::None;
+    if !styled {
+        let width = usize::from(row.get(column + 1).is_some_and(|next| next.spacer_tail)) + 1;
+        return format!("{}{{width={width}}}", cell.text);
+    }
+    format!(
+        "{}{{fg={},bg={},{}{}underline={}}}",
+        cell.text,
+        terminal_color(cell.foreground_source),
+        terminal_color(cell.background_source),
+        if cell.bold { "bold," } else { "" },
+        if cell.italic { "italic," } else { "" },
+        underline(cell.underline)
+    )
+}
+
+fn terminal_color(color: TerminalColor) -> String {
+    match color {
+        TerminalColor::Default => "default".to_owned(),
+        TerminalColor::Palette(index) => format!("palette:{index}"),
+        TerminalColor::Rgb(color) => format!("rgb:{:08x}", color.rgba_hex()),
+    }
+}
+
+const fn underline(value: TerminalUnderlineSnapshot) -> &'static str {
+    match value {
+        TerminalUnderlineSnapshot::None => "none",
+        TerminalUnderlineSnapshot::Single => "single",
+        TerminalUnderlineSnapshot::Double => "double",
+        TerminalUnderlineSnapshot::Curly => "curly",
+        TerminalUnderlineSnapshot::Dotted => "dotted",
+        TerminalUnderlineSnapshot::Dashed => "dashed",
+    }
+}
+
+const fn cursor_shape(value: CursorShapeSnapshot) -> &'static str {
+    match value {
+        CursorShapeSnapshot::Bar => "bar",
+        CursorShapeSnapshot::Block => "block",
+        CursorShapeSnapshot::Underline => "underline",
+        CursorShapeSnapshot::BlockHollow => "hollow-block",
+    }
+}
+
 fn hex_bytes(bytes: &[u8]) -> String {
     bytes
         .iter()
@@ -246,11 +585,18 @@ fn hex_bytes(bytes: &[u8]) -> String {
         .join(" ")
 }
 
-const EXECUTABLE_FIXTURES: &[ExecutableFixture] = &[ExecutableFixture {
-    spec: &FIXTURES[12],
-    expected: KEYBOARD_PROTOCOL_EXPECTED,
-    observe: observe_keyboard_protocols,
-}];
+const EXECUTABLE_FIXTURES: &[ExecutableFixture] = &[
+    ExecutableFixture {
+        spec: &FIXTURES[12],
+        expected: KEYBOARD_PROTOCOL_EXPECTED,
+        observe: observe_keyboard_protocols,
+    },
+    ExecutableFixture {
+        spec: &FIXTURES[4],
+        expected: SEMANTIC_SNAPSHOT_EXPECTED,
+        observe: observe_semantic_snapshot,
+    },
+];
 
 #[test]
 fn registry_covers_every_advertised_capability_without_image_protocols() {
@@ -266,7 +612,11 @@ fn registry_covers_every_advertised_capability_without_image_protocols() {
     let forbidden = ["image", "sixel", "kitty-graphics", "iterm-image"];
 
     assert_eq!(stories, expected);
-    assert_eq!(ids.len(), FIXTURES.len(), "fixture identifiers must be unique");
+    assert_eq!(
+        ids.len(),
+        FIXTURES.len(),
+        "fixture identifiers must be unique"
+    );
     for fixture in FIXTURES {
         assert!((6..42).contains(&fixture.issue) && fixture.issue != 28);
         assert!(!fixture.authority.is_empty());
@@ -337,10 +687,7 @@ fn runner_rejects_a_fixture_that_exceeds_its_deterministic_budget() {
 
     assert_eq!(
         run_fixture(&fixture),
-        Err(
-            "fixture `snapshot.damage-and-isolation` exceeded steps budget: 257 > 256"
-                .to_owned()
-        )
+        Err("fixture `snapshot.damage-and-isolation` exceeded steps budget: 257 > 256".to_owned())
     );
 }
 
@@ -348,6 +695,17 @@ fn runner_rejects_a_fixture_that_exceeds_its_deterministic_budget() {
 fn golden_byte_fixtures_match_protocol_authorities() {
     for fixture in EXECUTABLE_FIXTURES {
         if fixture.spec.oracle == OracleKind::Bytes
+            && let Err(error) = run_fixture(fixture)
+        {
+            panic!("{error}");
+        }
+    }
+}
+
+#[test]
+fn semantic_snapshot_fixtures_match_terminal_state() {
+    for fixture in EXECUTABLE_FIXTURES {
+        if fixture.spec.oracle == OracleKind::SemanticSnapshot
             && let Err(error) = run_fixture(fixture)
         {
             panic!("{error}");
