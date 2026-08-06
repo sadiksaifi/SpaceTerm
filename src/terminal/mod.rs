@@ -1,5 +1,7 @@
 mod accessibility;
 pub(crate) mod attention;
+#[cfg(test)]
+mod conformance;
 mod emulator;
 mod failure;
 mod file_insertion;
