@@ -33,7 +33,9 @@ use super::session::{
     PointerButton, PointerInput, PointerPhase, ShiftSelectionPolicy, SurfacePosition, WheelInput,
     WheelPhase,
 };
-use crate::platform::macos_keyboard::{MacosKeyboardBridge, NativeKeyEvent, NativeModifiers};
+use crate::platform::macos_keyboard::{
+    KeyTranslation, MacosKeyboardBridge, NativeKeyEvent, NativeModifiers,
+};
 use crate::platform::shell_integration::{
     ShellEnvironment, ShellIntegrationMode, ShellIntegrationStatus, ShellKind,
     plan_shell_integration, resource_root,
@@ -956,21 +958,24 @@ fn check_keyboard_encoding() -> Result<(), String> {
 
 fn check_macos_keyboard_bridge() -> Result<(), String> {
     let bridge = MacosKeyboardBridge::new(OptionAsAltPolicy::Left);
-    let input = bridge
-        .translate(NativeKeyEvent {
-            action: KeyAction::Press,
-            native_key_code: 0,
-            characters: Some("å".to_owned()),
-            characters_ignoring_modifiers: Some("a".to_owned()),
-            unmodified_characters: Some("a".to_owned()),
-            characters_without_option: Some("a".to_owned()),
-            modifiers: NativeModifiers {
-                alt: true,
-                alt_left: true,
-                ..NativeModifiers::default()
-            },
-        })
-        .map_err(|error| error.to_string())?;
+    let translation = bridge.translate(NativeKeyEvent {
+        action: KeyAction::Press,
+        native_key_code: 0,
+        characters: Some("å".to_owned()),
+        characters_ignoring_modifiers: Some("a".to_owned()),
+        unmodified_characters: Some("a".to_owned()),
+        characters_without_option: Some("a".to_owned()),
+        modifiers: NativeModifiers {
+            alt: true,
+            alt_left: true,
+            ..NativeModifiers::default()
+        },
+    });
+    let KeyTranslation::Encoded(input) = translation else {
+        return Err(format!(
+            "expected encoded macOS key, observed {translation:?}"
+        ));
+    };
     require_eq("physical-key", input.physical_key, PhysicalKey::A)?;
     require_eq("option-as-alt-text", input.text.as_deref(), Some("a"))?;
     require(
