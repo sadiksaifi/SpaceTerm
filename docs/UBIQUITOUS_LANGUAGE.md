@@ -36,6 +36,9 @@
 | **Scrollback** | Bounded Primary Screen output retained outside the bottom Terminal Viewport and available by moving that viewport. | Workspace scroll, history |
 | **Presentation Generation** | The monotonic identity of a published Terminal Presentation grid, carried by coordinate and Scrollback mappings so stale mappings and older presentations can be rejected. | frame number, emulator generation |
 | **Synchronized Output** | A bounded DEC 2026 transaction whose intermediate Terminal Emulator changes are withheld until one atomic Terminal Presentation is published. | render lock, output buffering |
+| **Terminal Metadata** | Immutable session-scoped title, Reported Working Directory, Semantic Zone, command, and progress facts published with explicit provenance and freshness in a Terminal Presentation. | live emulator state, arbitrary OSC text |
+| **Reported Working Directory** | The last valid local absolute directory reported by a Terminal Session, initially inherited from its Workspace and updated only by trusted OSC 7. | process-global current directory, remote URL |
+| **Semantic Zone** | A Prompt, Command Input, or Command Output region marked by OSC 133 and owned by immutable terminal cells. | UI text classification, shell transcript parser |
 | **Selection** | A terminal-owned logical content range created by pointer gestures and kept anchored across Scrollback movement, output, and resize reflow. | selected Workspace, selected Pane, text highlight |
 | **Terminal Hyperlink** | A validated immutable target mapped to complete Terminal Presentation cells and opened only by an explicit same-generation activation. | arbitrary terminal text, automatic file execution |
 | **Marked Text** | Transient input-method preedit owned by the Pane with Terminal Input Focus; it is presented at the Cursor but is not Terminal Emulator or PTY input until committed. | terminal output, committed text |
@@ -73,6 +76,8 @@
 - **OSC 52 Authorization** exposes only access direction, target, and byte count to UI; clipboard contents remain inside the worker-owned native-service operation and are never diagnostic metadata.
 - The **Primary Screen** and **Alternate Screen** retain independent state; leaving the Alternate Screen restores the Primary Screen and its **Terminal Viewport**.
 - A **Presentation Generation** belongs to one published Terminal Presentation; coordinate or Scrollback requests from an older generation never mutate current Terminal Emulator state.
+- **Terminal Metadata** belongs to exactly one **Terminal Session**; Pane and Window chrome may consume its sanitized immutable values but never terminal control bytes or live emulator state.
+- A **Reported Working Directory** accepts only a local absolute `file://` report and retains its last valid provenance when a malformed or remote report arrives.
 - A **Pane** belongs to exactly one **Window** and owns one **Terminal Session**.
 - A **Split** has exactly two child **Pane Layouts**; each child is either another **Split** or a **Pane**.
 - Closing any hierarchy entity closes every **Terminal Session**, **PTY**, and **Shell Process** it owns.

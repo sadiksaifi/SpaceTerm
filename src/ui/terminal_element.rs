@@ -1327,6 +1327,7 @@ mod tests {
             overline: false,
             selected: false,
             spacer_tail: false,
+            semantic_content: crate::terminal::CellSemanticSnapshot::Output,
             hyperlink: None,
         }
     }

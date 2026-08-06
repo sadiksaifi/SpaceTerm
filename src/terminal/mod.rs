@@ -4,6 +4,7 @@ pub(crate) mod geometry;
 mod hyperlink;
 mod key;
 mod keyboard_protocol;
+pub(crate) mod metadata;
 pub(crate) mod osc52;
 mod paste;
 mod selection;
@@ -13,7 +14,7 @@ pub(crate) mod testing;
 mod workspace_terminal_session_factory;
 
 #[cfg(test)]
-pub(crate) use emulator::ScrollbarSnapshot;
+pub(crate) use emulator::{CellSemanticSnapshot, ScrollbarSnapshot};
 pub(crate) use emulator::{
     CellSnapshot, CursorPositionSnapshot, CursorShapeSnapshot, CursorSnapshot,
     PresentationGeneration, RowSnapshot, ScreenSnapshot, TerminalColor, TerminalColorsSnapshot,

@@ -505,6 +505,7 @@ impl TerminalSession {
         spawn_pty: impl FnOnce(PtySize, &Path) -> Result<StartedSessionPty, PtyError> + Send + 'static,
     ) -> Result<(Self, async_channel::Receiver<SessionEvent>), SessionError> {
         let working_directory = PathBuf::from(working_directory);
+        let fallback_title = shell_fallback_title();
         let (command_tx, command_rx) = mpsc::channel();
         let reader_transport = ReaderTransport::new(command_tx.clone());
         let resizes = ResizeMailbox::default();
@@ -536,7 +537,11 @@ impl TerminalSession {
                 }
                 TerminalWorker::run(
                     pty,
-                    geometry,
+                    TerminalWorkerContext {
+                        initial_geometry: geometry,
+                        initial_directory: working_directory,
+                        fallback_title,
+                    },
                     command_rx,
                     reader_transport,
                     worker_resizes,
@@ -563,6 +568,7 @@ impl TerminalSession {
         working_directory: &Path,
         spawn_pty: impl FnOnce(PtySize, &Path) -> Result<StartedSessionPty, PtyError>,
     ) -> Result<(Self, async_channel::Receiver<SessionEvent>), SessionError> {
+        let worker_directory = working_directory.to_owned();
         let StartedSessionPty { pty, terminator } =
             spawn_pty(pty_size(geometry), working_directory)?;
         let (command_tx, command_rx) = mpsc::channel();
@@ -579,7 +585,11 @@ impl TerminalSession {
             .spawn(move || {
                 TerminalWorker::run(
                     pty,
-                    geometry,
+                    TerminalWorkerContext {
+                        initial_geometry: geometry,
+                        initial_directory: worker_directory,
+                        fallback_title: "Terminal".to_owned(),
+                    },
                     command_rx,
                     reader_transport,
                     worker_resizes,
@@ -886,6 +896,12 @@ struct TerminalWorker {
     hidden_input: HiddenInputSchedule,
 }
 
+struct TerminalWorkerContext {
+    initial_geometry: TerminalGeometry,
+    initial_directory: PathBuf,
+    fallback_title: String,
+}
+
 struct HiddenInputSchedule {
     active: bool,
     deadline: Instant,
@@ -1146,13 +1162,18 @@ impl StartupReporter {
 impl TerminalWorker {
     fn run(
         mut pty: Box<dyn SessionPty>,
-        initial_geometry: TerminalGeometry,
+        context: TerminalWorkerContext,
         commands: CommandReceiver<Command>,
         reader_transport: ReaderTransport,
         resizes: ResizeMailbox,
         events: async_channel::Sender<SessionEvent>,
         startup: StartupReporter,
     ) {
+        let TerminalWorkerContext {
+            initial_geometry,
+            initial_directory,
+            fallback_title,
+        } = context;
         let ReaderTransport {
             commands: reader_commands,
             events: reader_events,
@@ -1177,7 +1198,14 @@ impl TerminalWorker {
             }
         };
 
-        let emulator = match TerminalEmulator::new(initial_geometry) {
+        let local_hostname = crate::terminal::metadata::local_hostname();
+        let emulator = match TerminalEmulator::new_with_metadata(
+            initial_geometry,
+            &initial_directory.to_string_lossy(),
+            &fallback_title,
+            local_hostname.as_deref(),
+            Instant::now(),
+        ) {
             Ok(emulator) => emulator,
             Err(error) => {
                 startup.failed(SessionStartupStage::Emulator, error.to_string());
@@ -1523,6 +1551,10 @@ impl TerminalWorker {
                 read_error,
                 self.pty.wait_for_child(FINAL_CHILD_WAIT_TIMEOUT),
             );
+            self.emulator.mark_metadata_stale();
+            if !self.publish_screen() {
+                return false;
+            }
             self.send_terminal_event(event);
             false
         } else {
@@ -1837,6 +1869,16 @@ impl TerminalWorker {
         drop(pty);
         join_reader(reader_thread);
     }
+}
+
+fn shell_fallback_title() -> String {
+    let shell = user_shell();
+    Path::new(&shell)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .unwrap_or(&shell)
+        .to_owned()
 }
 
 fn spawn_reader(

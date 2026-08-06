@@ -114,6 +114,17 @@ viewport, active-screen, size, and precise damage independently of cell content,
 worker boundary through a bounded latest-screen channel. GPUI renders only these immutable values
 and never borrows Terminal Emulator state.
 
+Terminal-controlled title, working-directory, prompt, command, and progress facts are sanitized
+inside the Terminal Session worker and published as immutable Terminal Metadata in the same
+snapshot. OSC 7 accepts only absolute `file://` paths with an empty, `localhost`, or verified local
+authority; malformed and remote reports cannot replace the last valid value. OSC 133 semantic
+zones and command completion retain bounded command text, exit status, and injected-monotonic-clock
+duration, while OSC 9;4 progress is clamped to its protocol range. Every metadata value carries
+session provenance and freshness, metadata-only changes reuse row identity, and completion marks
+the final metadata stale before the typed lifecycle event. Pane and Window chrome consume only the
+owning snapshot's resolved sanitized title and never parse terminal controls or query live emulator
+state.
+
 ### Transactional Terminal Presentation
 
 The Terminal Emulator owns independent Primary Screen and Alternate Screen presentation caches;
