@@ -731,7 +731,7 @@ impl TerminalPane {
             ),
             ScrollDelta::Lines(delta) => point(delta.x, delta.y),
         };
-        let phase = current_wheel_phase().unwrap_or_else(|| match event.touch_phase {
+        let phase = current_wheel_phase().unwrap_or(match event.touch_phase {
             gpui::TouchPhase::Started => WheelPhase::GestureStarted,
             gpui::TouchPhase::Moved => WheelPhase::GestureChanged,
             gpui::TouchPhase::Ended => WheelPhase::GestureEnded,

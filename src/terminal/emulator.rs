@@ -27,9 +27,10 @@ use crate::terminal::geometry::{BackingPosition, TerminalGeometry};
 use crate::terminal::key::{InputModifiers, KeyAction, KeyInput, OptionAsAltPolicy, PhysicalKey};
 use crate::terminal::keyboard_protocol::KeyboardProtocolEncoder;
 use crate::terminal::selection::{SelectionCopy, SelectionCopyOptions, TrailingSpacePolicy};
+#[cfg(test)]
+use crate::terminal::session::WheelPhase;
 use crate::terminal::session::{
     PointerButton, PointerInput, PointerPhase, ShiftSelectionPolicy, SurfacePosition, WheelInput,
-    WheelPhase,
 };
 use crate::theme::{ACTIVE_THEME, Color};
 
