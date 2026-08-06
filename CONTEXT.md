@@ -149,6 +149,22 @@ the final metadata stale before the typed lifecycle event. Pane and Window chrom
 owning snapshot's resolved sanitized title and never parse terminal controls or query live emulator
 state.
 
+### Conventional Terminal Conformance Corpus
+
+The test-only corpus in `src/terminal/conformance.rs` is the release gate for every advertised
+conventional terminal capability. Each fixture names its owning issue, covered user stories,
+authoritative protocol key, oracle class, and deterministic step/input/output budgets. The runner
+executes real Terminal Emulator, Session, platform, and UI reducers without user configuration,
+network access, or mutable global application state. Byte goldens preserve protocol output;
+semantic goldens preserve row and cell order, Presentation Generation, Cursor, screen, and
+Terminal Metadata identity. Failures report the fixture, exact step, field, expected value, and
+observed value.
+
+Published specifications are authoritative. The audited Ghostty revision is only a behavioral
+reference, and image protocols are intentionally outside the corpus. The fixture matrix, authority
+catalog, audit revision, and maintenance rules are canonical in `docs/CONFORMANCE.md`. `just test`
+and therefore `just validate` run the corpus; `just conformance` provides the focused loop.
+
 ### Scoped Terminal Attention
 
 BEL and the transition to finished Command Metadata become typed Terminal Attention events on the
@@ -336,6 +352,18 @@ non-file URLs, relative paths, excessive items, and oversized output are rejecte
 always enters the existing worker-owned Paste Payload sanitizer and confirmation lifecycle and
 never writes directly to the PTY.
 
+### Native Terminal Services
+
+macOS Services, contextual actions, Quick Look eligibility, pasteboard file insertion, and
+drag/drop are adapters over existing terminal policies rather than independent mutation paths.
+Context actions are derived from the current immutable Selection and Terminal Hyperlink state.
+Service text and converted file paths become Paste Payload candidates only while the Pane owns
+Terminal Input Focus, so normalization, size limits, unsafe-paste confirmation, cancellation, and
+PTY writes remain worker-owned. Quick Look accepts only a validated Terminal Hyperlink whose
+canonical target is an existing local regular file; a web URL or stale path is never previewable.
+Native interactions may request selection formatting or paste processing, but never mutate the
+Terminal Emulator directly.
+
 ### Terminal Selection
 
 The Terminal Emulator owns Selection gestures and delegates cell, word, line, repeat-click, drag,
@@ -420,6 +448,43 @@ caret. Candidate-window bounds derive from that caret and the same logical cell 
 rendering. A nonempty commit clears Marked Text and becomes exactly one typed input-method event on
 the reliable Terminal Session command lane; the worker emits its UTF-8 once in order and never
 tracks it as a held key.
+
+### Terminal Accessibility
+
+Each Pane exposes one native editable text-area model whose canonical indexes are UTF-16 code
+units, matching AppKit. The model preserves complete grapheme text while mapping wide-cell spacer
+tails, combining sequences, hard lines, soft wraps, the visible range, Selection, and Cursor back
+to logical terminal cells. Candidate and range bounds use the same logical cell origin, width, and
+line height as pointer and renderer geometry. Terminal output, Selection, Terminal Input Focus,
+and Marked Text changes produce typed, coalesced native accessibility notifications; notifications
+carry no terminal contents. Accessibility may request terminal-owned selection changes through the
+Terminal Session, but never mutates the Terminal Emulator from the native callback.
+
+### Demand-Driven Render Lifecycle
+
+A Pane-owned Render Lifecycle separates one-shot presentation demand from recurring animation
+eligibility. Immutable Terminal Presentations received while minimized, occluded, in a hidden
+Workspace, or otherwise non-presentable coalesce to the newest Presentation Generation without
+requesting frames; visibility restoration requests exactly one presentation of that newest state.
+Cursor blink, text blink, and visual effects run only while the application, key Operating-System
+Window, Workspace, and Pane can present them and while AppKit is not minimizing, occluding, or
+live-resizing the surface. Display moves and backing-scale changes preserve logical grid state and
+invalidate only scale-dependent prepared rows and symbol geometry. Pane destruction releases
+render caches and cancels every owned presentation task and native resource.
+
+### Typed Terminal Failures and Local Diagnostics
+
+Normal Shell Process exit is distinct from PTY, Terminal Emulator, presentation, macOS platform,
+and renderer-resource failure. A Pane owns this typed state and presents an actionable recovery:
+fatal runtime failures require closing the Pane and restarting the command, while recoverable
+presentation or resource failures retain the last valid Presentation Generation and permit retry.
+Failure mapping discards raw library messages at the boundary so terminal contents, clipboard
+data, environment values, paths, and secrets never enter Pane state or diagnostics. Diagnostics
+retain only a bounded sequence of failure class, recoverability, and static operation identifiers,
+plus unhandled keyboard event kind, action, and native key code (at most 128 records and 64 KiB).
+Logical and typed key text never enters diagnostics. SpaceTerm performs no automatic network
+telemetry or crash upload. A local diagnostic file is created only after the user explicitly
+chooses Export Terminal Diagnostics and confirms a path through the native save panel.
 
 ### Workspace-Bound Terminal Creation
 

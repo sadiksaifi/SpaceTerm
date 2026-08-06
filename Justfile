@@ -46,6 +46,10 @@ test:
 test-one filter:
     cargo test --all-targets --all-features --locked "{{ filter }}"
 
+# Run the conventional terminal capability and protocol conformance corpus.
+conformance:
+    cargo test --all-targets --all-features --locked "terminal::conformance"
+
 # Run Clippy with warnings treated as errors.
 clippy:
     cargo clippy --all-targets --all-features --locked -- -D warnings

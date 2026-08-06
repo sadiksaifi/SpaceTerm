@@ -210,6 +210,23 @@ fn byte_offset_to_utf16(text: &str, offset: usize) -> usize {
 }
 
 #[cfg(test)]
+pub(crate) fn conformance_ime_observation() -> String {
+    let mut ime = TerminalIme::default();
+    ime.replace_and_mark(None, "A😀B", Some(1..3));
+    ime.replace_and_mark(Some(1..3), "界", Some(1..1));
+    let marked = ime.marked_text().unwrap_or_default().to_owned();
+    let selection = ime.selected_range();
+    let layout = layout_preedit(&marked, 0, 3, 4, selection.end);
+    ime.commit(&marked);
+    format!(
+        "marked={marked} selection={selection:?} clusters={:?} caret={:?} commit={:?}",
+        layout.clusters,
+        layout.caret,
+        ime.take_commit()
+    )
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 

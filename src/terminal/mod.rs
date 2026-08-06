@@ -1,5 +1,9 @@
+mod accessibility;
 pub(crate) mod attention;
+#[cfg(test)]
+mod conformance;
 mod emulator;
+mod failure;
 mod file_insertion;
 pub(crate) mod geometry;
 mod hyperlink;
@@ -7,6 +11,7 @@ pub(crate) mod identity;
 mod key;
 mod keyboard_protocol;
 pub(crate) mod metadata;
+mod native_services;
 pub(crate) mod osc52;
 mod paste;
 mod selection;
@@ -15,6 +20,9 @@ mod session;
 pub(crate) mod testing;
 mod workspace_terminal_session_factory;
 
+pub(crate) use accessibility::{
+    AccessibilityGeometry, AccessibilityNotification, TerminalAccessibilityModel,
+};
 pub(crate) use attention::AttentionFacts;
 #[cfg(test)]
 pub(crate) use emulator::{CellSemanticSnapshot, ScrollbarSnapshot};
@@ -23,11 +31,17 @@ pub(crate) use emulator::{
     PresentationGeneration, RowSnapshot, ScreenSnapshot, TerminalColor, TerminalColorsSnapshot,
     TerminalUnderlineSnapshot,
 };
-pub(crate) use file_insertion::prepare_file_insertion;
+#[cfg(test)]
+pub(crate) use failure::FailureClass;
+pub(crate) use failure::{
+    DiagnosticBundle, DiagnosticKeyEventKind, PaneTerminalState, TerminalFailure,
+    UnhandledKeyDiagnostic,
+};
 pub(crate) use hyperlink::HyperlinkTarget;
 pub(crate) use key::{
     InputModifiers, KeyAction, KeyInput, KeyInputError, OptionAsAltPolicy, PhysicalKey,
 };
+pub(crate) use native_services::{NativeContextActions, NativeInsertion};
 #[cfg(test)]
 pub(crate) use osc52::Osc52AuthorizationId;
 pub(crate) use osc52::{

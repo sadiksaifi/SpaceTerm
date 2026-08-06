@@ -550,6 +550,70 @@ pub(crate) fn user_shell() -> String {
         .unwrap_or_else(|| "/bin/zsh".to_owned())
 }
 
+#[cfg(test)]
+pub(crate) fn conformance_initialization_observation() -> String {
+    let command = build_shell_command_with_resources(
+        "/bin/zsh",
+        Path::new("/tmp"),
+        Path::new("/spaceterm-conformance-missing-resources"),
+    );
+    format!(
+        "argv={:?} cwd={} term={} colorterm={} program={} version={} controlling-tty={}",
+        command.get_argv(),
+        command
+            .get_cwd()
+            .and_then(|path| path.to_str())
+            .unwrap_or("missing"),
+        command
+            .get_env("TERM")
+            .and_then(std::ffi::OsStr::to_str)
+            .unwrap_or("missing"),
+        command
+            .get_env("COLORTERM")
+            .and_then(std::ffi::OsStr::to_str)
+            .unwrap_or("missing"),
+        command
+            .get_env("TERM_PROGRAM")
+            .and_then(std::ffi::OsStr::to_str)
+            .unwrap_or("missing"),
+        command
+            .get_env("TERM_PROGRAM_VERSION")
+            .and_then(std::ffi::OsStr::to_str)
+            .unwrap_or("missing"),
+        command.get_controlling_tty(),
+    )
+}
+
+#[cfg(test)]
+pub(crate) fn conformance_shutdown_observation() -> String {
+    use std::sync::atomic::AtomicUsize;
+
+    #[derive(Debug)]
+    struct CountingKiller(Arc<AtomicUsize>);
+
+    impl ChildKiller for CountingKiller {
+        fn kill(&mut self) -> io::Result<()> {
+            self.0.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        }
+
+        fn clone_killer(&self) -> Box<dyn ChildKiller + Send + Sync> {
+            Box::new(Self(Arc::clone(&self.0)))
+        }
+    }
+
+    let kills = Arc::new(AtomicUsize::new(0));
+    let termination = ChildTermination::new(None, Box::new(CountingKiller(Arc::clone(&kills))));
+    let first = termination.signal().is_ok();
+    let second = termination.signal().is_ok();
+    let disposition = termination.complete_process_group(Instant::now());
+    format!(
+        "first={first} duplicate={second} signals={} disposition={disposition:?} revoked={}",
+        kills.load(Ordering::Relaxed),
+        termination.lock_target().is_none(),
+    )
+}
+
 fn terminate_after_startup_failure(child: &mut dyn Child) {
     if let Err(error) = child.kill() {
         eprintln!("failed to terminate shell after PTY setup failed: {error}");
