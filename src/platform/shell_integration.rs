@@ -351,13 +351,13 @@ mod tests {
     }
 
     #[test]
-    fn zsh_prompt_hook_preserves_prior_status_without_stderr() {
+    fn zsh_prompt_hook_renders_protocol_marker_once_without_changing_printable_prompt() {
         let integration = resource_root().join("shell-integration/zsh/spaceterm-integration");
         let output = Command::new("/bin/zsh")
             .args([
                 "-dfi",
                 "-c",
-                r#"builtin source -- "$1"; _spaceterm_command_active=1; (builtin exit 7); "$precmd_functions[-1]""#,
+                r#"PS1='SPACE> '; builtin source -- "$1"; _spaceterm_command_active=1; (builtin exit 7); "$precmd_functions[-1]"; "$precmd_functions[-1]"; builtin print -nrP -- "$PS1""#,
                 "spaceterm",
             ])
             .arg(integration)
@@ -365,18 +365,33 @@ mod tests {
             .output()
             .unwrap();
         let completion = b"\x1b]133;D;7\x07";
+        let prompt_marker = b"\x1b]133;B\x07";
+        let literal_prompt_marker = br"\e]133;B\a";
         let reported_prior_status = output
             .stdout
             .windows(completion.len())
             .any(|window| window == completion);
+        let rendered_prompt_markers = output
+            .stdout
+            .windows(prompt_marker.len())
+            .filter(|window| *window == prompt_marker)
+            .count();
+        let rendered_literal_marker = output
+            .stdout
+            .windows(literal_prompt_marker.len())
+            .any(|window| window == literal_prompt_marker);
+        let rendered_prompt_is_preserved = output.stdout.ends_with(b"SPACE> \x1b]133;B\x07");
 
         assert_eq!(
             (
                 output.status.success(),
                 output.stderr.as_slice(),
                 reported_prior_status,
+                rendered_prompt_markers,
+                rendered_literal_marker,
+                rendered_prompt_is_preserved,
             ),
-            (true, &[][..], true),
+            (true, &[][..], true, 1, false, true),
             "stdout: {:?}",
             String::from_utf8_lossy(&output.stdout),
         );
