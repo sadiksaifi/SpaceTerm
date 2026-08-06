@@ -9,8 +9,8 @@ use gpui::{
 use unicode_bidi::{BidiClass, bidi_class};
 
 use crate::terminal::{
-    CellSnapshot, CursorPositionSnapshot, CursorShapeSnapshot, CursorSnapshot, RowSnapshot,
-    ScreenSnapshot, TerminalColor, TerminalColorsSnapshot, TerminalUnderlineSnapshot,
+    CellSnapshot, CursorPositionSnapshot, CursorShapeSnapshot, CursorSnapshot, FindHighlightSpan,
+    RowSnapshot, ScreenSnapshot, TerminalColor, TerminalColorsSnapshot, TerminalUnderlineSnapshot,
 };
 use crate::theme::{ACTIVE_THEME, Color};
 
@@ -141,6 +141,7 @@ pub(crate) struct TerminalGridElement {
     focus_handle: FocusHandle,
     input: Entity<TerminalPane>,
     blink_phase_visible: bool,
+    find_spans: Arc<[FindHighlightSpan]>,
 }
 
 pub(crate) struct TerminalGridConfiguration {
@@ -154,6 +155,7 @@ pub(crate) struct TerminalGridConfiguration {
     pub(crate) input: Entity<TerminalPane>,
     pub(crate) blink_phase_visible: bool,
     pub(crate) scale_factor: f32,
+    pub(crate) find_spans: Arc<[FindHighlightSpan]>,
 }
 
 impl TerminalGridElement {
@@ -204,6 +206,7 @@ impl TerminalGridElement {
             focus_handle: configuration.focus_handle,
             input: configuration.input,
             blink_phase_visible: configuration.blink_phase_visible,
+            find_spans: configuration.find_spans,
         }
     }
 }
@@ -326,10 +329,8 @@ impl Element for TerminalGridElement {
                     origin: point(grid_left + self.cell_width * fragment.start as f32, row_top),
                 })
                 .collect();
-            let backgrounds = row
-                .backgrounds
+            let mut backgrounds = presentation_backgrounds(row, row_index, &self.find_spans)
                 .iter()
-                .chain(&row.selections)
                 .map(|span| {
                     fill(
                         Bounds::new(
@@ -365,7 +366,6 @@ impl Element for TerminalGridElement {
             );
 
             let mut text: Vec<PreparedText> = text;
-            let mut backgrounds = backgrounds;
             let mut overlay_text = Vec::new();
             let mut overlay_symbols = PreparedDecorations::default();
             let mut overlay_backgrounds = Vec::new();
@@ -720,6 +720,36 @@ struct BackgroundSpan {
     start: usize,
     len: usize,
     color: Color,
+}
+
+fn presentation_backgrounds(
+    row: &RowPaintInput,
+    row_index: usize,
+    find_spans: &[FindHighlightSpan],
+) -> Vec<BackgroundSpan> {
+    let mut backgrounds = row.backgrounds.clone();
+    for current in [false, true] {
+        backgrounds.extend(
+            find_spans
+                .iter()
+                .filter(|span| usize::from(span.row) == row_index && span.current == current)
+                .map(|span| BackgroundSpan {
+                    start: usize::from(span.start_column),
+                    len: usize::from(
+                        span.end_column
+                            .saturating_sub(span.start_column)
+                            .saturating_add(1),
+                    ),
+                    color: if current {
+                        ACTIVE_THEME.search_current_match_background
+                    } else {
+                        ACTIVE_THEME.search_match_background
+                    },
+                }),
+        );
+    }
+    backgrounds.extend(row.selections.iter().copied());
+    backgrounds
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1571,6 +1601,42 @@ mod tests {
                 len: 2,
                 color: accent,
             }]
+        );
+    }
+
+    #[test]
+    fn find_backgrounds_distinguish_current_match_and_keep_selection_on_top() {
+        let mut selected = cell("a");
+        selected.selected = true;
+        let row = Arc::<[CellSnapshot]>::from([selected]);
+        let input = prepare_row(&row, &colors(), &"Menlo".into(), None);
+        let spans = [
+            FindHighlightSpan {
+                row: 0,
+                start_column: 0,
+                end_column: 0,
+                current: false,
+            },
+            FindHighlightSpan {
+                row: 0,
+                start_column: 0,
+                end_column: 0,
+                current: true,
+            },
+        ];
+
+        let backgrounds = presentation_backgrounds(&input, 0, &spans);
+
+        assert_eq!(
+            backgrounds
+                .iter()
+                .map(|background| background.color)
+                .collect::<Vec<_>>(),
+            [
+                ACTIVE_THEME.search_match_background,
+                ACTIVE_THEME.search_current_match_background,
+                ACTIVE_THEME.players[0].selection,
+            ]
         );
     }
 

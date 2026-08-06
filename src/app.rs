@@ -7,7 +7,9 @@ use gpui::{
 };
 
 use crate::terminal::{NativeTerminalSessionFactory, TerminalSessionFactory};
-use crate::ui::{ExportTerminalDiagnostics, WorkspaceManager};
+use crate::ui::{
+    ExportTerminalDiagnostics, FindNext, FindPrevious, OpenTerminalFind, WorkspaceManager,
+};
 
 actions!(
     spaceterm,
@@ -50,6 +52,17 @@ pub(crate) fn init(cx: &mut App) {
                 MenuItem::separator(),
                 MenuItem::action("Quit SpaceTerm", QuitApplication),
             ],
+        },
+        Menu {
+            name: "Edit".into(),
+            items: vec![MenuItem::submenu(Menu {
+                name: "Find".into(),
+                items: vec![
+                    MenuItem::action("Find…", OpenTerminalFind),
+                    MenuItem::action("Find Next", FindNext),
+                    MenuItem::action("Find Previous", FindPrevious),
+                ],
+            })],
         },
         Menu {
             name: "Window".into(),

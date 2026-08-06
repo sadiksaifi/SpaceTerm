@@ -5,6 +5,7 @@ mod conformance;
 mod emulator;
 mod failure;
 mod file_insertion;
+mod find;
 pub(crate) mod geometry;
 mod hyperlink;
 pub(crate) mod identity;
@@ -36,6 +37,9 @@ pub(crate) use failure::FailureClass;
 pub(crate) use failure::{
     DiagnosticBundle, DiagnosticKeyEventKind, PaneTerminalState, TerminalFailure,
     UnhandledKeyDiagnostic,
+};
+pub(crate) use find::{
+    FindDirection, FindHighlightSpan, FindQueryGeneration, TerminalFindSnapshot,
 };
 pub(crate) use hyperlink::HyperlinkTarget;
 pub(crate) use key::{

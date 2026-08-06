@@ -43,6 +43,8 @@
 | **Reported Working Directory** | The last valid local absolute directory reported by a Terminal Session, initially inherited from its Workspace and updated only by trusted OSC 7. | process-global current directory, remote URL |
 | **Semantic Zone** | A Prompt, Command Input, or Command Output region marked by OSC 133 and owned by immutable terminal cells. | UI text classification, shell transcript parser |
 | **Selection** | A terminal-owned logical content range created by pointer gestures and kept anchored across Scrollback movement, output, and resize reflow. | selected Workspace, selected Pane, text highlight |
+| **Terminal Find** | Transient Pane-owned literal search over one Terminal Session's active screen and its available Scrollback, with worker-owned grapheme-cell mapping and immutable viewport highlights. | global search, regex search, Selection |
+| **Find Query Generation** | The identity of the current Terminal Find query, carried by navigation commands and result snapshots so stale results cannot be presented or selected. | Presentation Generation, frame number |
 | **Terminal Hyperlink** | A validated immutable target mapped to complete Terminal Presentation cells and opened only by an explicit same-generation activation. | arbitrary terminal text, automatic file execution |
 | **Marked Text** | Transient input-method preedit owned by the Pane with Terminal Input Focus; it is presented at the Cursor but is not Terminal Emulator or PTY input until committed. | terminal output, committed text |
 | **Secure Event Input** | Process-global macOS keyboard protection held only while exactly one live Pane both reads hidden canonical PTY input and owns Terminal Input Focus. | password text, per-Pane secure mode |
@@ -78,6 +80,11 @@
 - A **Window** belongs to exactly one **Workspace** and cannot be linked, shared, or attached elsewhere.
 - A **Window** owns one or more **Panes**, exactly one **Focused Pane**, and one arbitrarily nested **Pane Layout**.
 - **Terminal Input Focus** is derived transient state and never replaces or duplicates a Window's **Focused Pane** identity.
+- **Terminal Find** belongs to one **Pane** and one **Terminal Session**; losing that Pane's **Focused Pane** status closes it and clears its worker-owned state.
+- A **Find Query Generation** belongs to one **Terminal Find** query; stale navigation commands and highlight snapshots cannot affect or present a newer query.
+- Opening **Terminal Find** transfers responder ownership away from terminal input without changing **Focused Pane** identity; clicking the terminal may restore **Terminal Input Focus** while Find remains open.
+- **Terminal Find** searches across soft wraps but not hard line boundaries, maps UTF-8 bytes to grapheme-head cells, excludes wide spacer tails, and never derives search results in GPUI rendering.
+- **Selection** is painted above every **Terminal Find** result, including its current result.
 - **Marked Text** exists only while its Pane has **Terminal Input Focus**; cancellation or focus loss discards it without Terminal Session input.
 - A **Paste Payload** that requires **Paste Confirmation** remains worker-owned; UI and diagnostics receive only bounded risk metadata, never its content.
 - A **Paste Confirmation** is cancelled by focus or hierarchy loss, timeout, Terminal Session shutdown, explicit cancellation, or a stale identity, and cancellation writes no PTY bytes.
