@@ -16,13 +16,15 @@ use super::{
     CopySelection, DecreaseTerminalFontSize, IncreaseTerminalFontSize, PasteClipboard,
     ResetTerminalFontSize, TERMINAL_KEY_CONTEXT,
 };
-use crate::platform::macos_keyboard::{MacosKeyboardBridge, NativeKeyEvent};
+use crate::platform::macos_keyboard::{
+    KeyTranslation, MacosKeyboardBridge, NativeKeyEvent, NativeKeyEventKind, UnhandledKeyEvent,
+};
 use crate::terminal::geometry::{
     BackingScale, CellGridSize, LogicalCellSize, LogicalPosition, LogicalSize, TerminalGeometry,
 };
 use crate::terminal::{
-    InputModifiers, KeyAction, KeyInput, KeyInputError, OptionAsAltPolicy, PhysicalKey,
-    PointerButton, PointerInput, PointerPhase, ScreenSnapshot, SessionEvent, SurfacePosition,
+    InputModifiers, KeyAction, KeyInput, OptionAsAltPolicy, PhysicalKey, PointerButton,
+    PointerInput, PointerPhase, ScreenSnapshot, SessionEvent, SurfacePosition,
     TerminalSessionHandle, WheelInput, WorkspaceTerminalSessionFactory,
 };
 use crate::theme::{ACTIVE_THEME, Color};
@@ -265,18 +267,20 @@ impl TerminalPane {
             KeyAction::Press
         };
         let input = NativeKeyEvent::current_key(action)
-            .map(|event| self.keyboard_bridge.translate(event).into_result())
+            .map(|event| self.keyboard_bridge.translate(event))
             .unwrap_or_else(|| encode_key(event));
-        self.send_key_input(input);
-        cx.stop_propagation();
+        if self.send_key_translation(input) {
+            cx.stop_propagation();
+        }
     }
 
     fn on_key_up(&mut self, event: &KeyUpEvent, _window: &mut Window, cx: &mut Context<Self>) {
         let input = NativeKeyEvent::current_key(KeyAction::Release)
-            .map(|event| self.keyboard_bridge.translate(event).into_result())
+            .map(|event| self.keyboard_bridge.translate(event))
             .unwrap_or_else(|| encode_keystroke(&event.keystroke, KeyAction::Release));
-        self.send_key_input(input);
-        cx.stop_propagation();
+        if self.send_key_translation(input) {
+            cx.stop_propagation();
+        }
     }
 
     fn on_modifiers_changed(
@@ -288,27 +292,19 @@ impl TerminalPane {
         let Some(event) = NativeKeyEvent::current_modifier() else {
             return;
         };
-        match self.keyboard_bridge.modifier_transition(event) {
-            crate::platform::macos_keyboard::KeyTranslation::Encoded(input) => {
-                self.send_key_input(Ok(input));
-            }
-            crate::platform::macos_keyboard::KeyTranslation::TextInput(_)
-            | crate::platform::macos_keyboard::KeyTranslation::Unhandled(_) => {}
-        }
+        let translation = self.keyboard_bridge.modifier_transition(event);
+        self.send_key_translation(translation);
     }
 
-    fn send_key_input(&mut self, input: Result<KeyInput, KeyInputError>) {
-        match input {
-            Ok(input) => {
+    fn send_key_translation(&mut self, translation: KeyTranslation) -> bool {
+        match translation {
+            KeyTranslation::Encoded(input) => {
                 if let Some(session) = &self.session {
                     session.key(input);
                 }
+                true
             }
-            Err(error) => {
-                let status = error.to_string();
-                eprintln!("{status}");
-                self.status = Some(status);
-            }
+            KeyTranslation::TextInput(_) | KeyTranslation::Unhandled(_) => false,
         }
     }
 
@@ -737,7 +733,7 @@ fn accumulate_wheel_steps(remainder: &mut f32, delta: f32) -> i32 {
     steps
 }
 
-fn encode_key(event: &KeyDownEvent) -> Result<KeyInput, KeyInputError> {
+fn encode_key(event: &KeyDownEvent) -> KeyTranslation {
     encode_keystroke(
         &event.keystroke,
         if event.is_held {
@@ -748,10 +744,7 @@ fn encode_key(event: &KeyDownEvent) -> Result<KeyInput, KeyInputError> {
     )
 }
 
-fn encode_keystroke(
-    keystroke: &gpui::Keystroke,
-    action: KeyAction,
-) -> Result<KeyInput, KeyInputError> {
+fn encode_keystroke(keystroke: &gpui::Keystroke, action: KeyAction) -> KeyTranslation {
     let physical_key = physical_key(&keystroke.key);
     let text = keystroke
         .key_char
@@ -770,8 +763,20 @@ fn encode_keystroke(
         consumed_modifiers: InputModifiers::default(),
         option_as_alt: OptionAsAltPolicy::default(),
     };
-    input.validate()?;
-    Ok(input)
+    match input.validate() {
+        Ok(()) => KeyTranslation::Encoded(input),
+        Err(_) => match input.text {
+            Some(text) if action != KeyAction::Release => KeyTranslation::TextInput(text),
+            _ => KeyTranslation::Unhandled(UnhandledKeyEvent {
+                kind: match action {
+                    KeyAction::Press | KeyAction::Repeat => NativeKeyEventKind::KeyDown,
+                    KeyAction::Release => NativeKeyEventKind::KeyUp,
+                },
+                action,
+                native_key_code: None,
+            }),
+        },
+    }
 }
 
 fn physical_key(key: &str) -> PhysicalKey {
@@ -1046,6 +1051,25 @@ mod tests {
         assert_eq!(actions, [KeyAction::Press, KeyAction::Release]);
     }
 
+    #[gpui::test]
+    fn unsupported_key_down_is_neither_sent_nor_presented_as_a_pane_failure(
+        cx: &mut TestAppContext,
+    ) {
+        let (pane, cx, records) = connected_terminal_pane(cx);
+
+        cx.simulate_event(event("hyper", None, Modifiers::default()));
+
+        let key_count = records
+            .commands()
+            .iter()
+            .filter(|call| matches!(call.command, RecordedSessionCommand::Key(_)))
+            .count();
+        assert_eq!(
+            (key_count, pane.read_with(cx, |pane, _| pane.status.clone())),
+            (0, None)
+        );
+    }
+
     fn event(key: &str, key_char: Option<&str>, modifiers: Modifiers) -> KeyDownEvent {
         KeyDownEvent {
             keystroke: Keystroke {
@@ -1101,7 +1125,7 @@ mod tests {
     fn maps_printable_text_and_terminal_keys() {
         assert_eq!(
             encode_key(&event("a", Some("a"), Modifiers::default())),
-            Ok(expected_key(
+            KeyTranslation::Encoded(expected_key(
                 PhysicalKey::A,
                 "a",
                 Some("a"),
@@ -1110,7 +1134,7 @@ mod tests {
         );
         assert_eq!(
             encode_key(&event("enter", None, Modifiers::default())),
-            Ok(expected_key(
+            KeyTranslation::Encoded(expected_key(
                 PhysicalKey::Enter,
                 "enter",
                 None,
@@ -1119,7 +1143,7 @@ mod tests {
         );
         assert_eq!(
             encode_key(&event("up", None, Modifiers::default())),
-            Ok(expected_key(
+            KeyTranslation::Encoded(expected_key(
                 PhysicalKey::ArrowUp,
                 "up",
                 None,
@@ -1137,7 +1161,7 @@ mod tests {
         };
         assert_eq!(
             encode_key(&event("c", Some("c"), modifiers)),
-            Ok(expected_key(
+            KeyTranslation::Encoded(expected_key(
                 PhysicalKey::C,
                 "c",
                 Some("c"),
@@ -1159,7 +1183,7 @@ mod tests {
 
         assert_eq!(
             encode_key(&event("d", Some("d"), modifiers)),
-            Ok(expected_key(
+            KeyTranslation::Encoded(expected_key(
                 PhysicalKey::D,
                 "d",
                 Some("d"),
@@ -1179,7 +1203,7 @@ mod tests {
         };
         assert_eq!(
             encode_key(&event("q", None, modifiers)),
-            Ok(expected_key(
+            KeyTranslation::Encoded(expected_key(
                 PhysicalKey::Q,
                 "q",
                 None,
@@ -1192,12 +1216,13 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_keys_return_typed_identity_errors() {
+    fn unsupported_keys_are_unhandled_without_native_identity() {
         assert_eq!(
             encode_key(&event("hyper", None, Modifiers::default())),
-            Err(KeyInputError::UnsupportedKey {
+            KeyTranslation::Unhandled(UnhandledKeyEvent {
+                kind: NativeKeyEventKind::KeyDown,
+                action: KeyAction::Press,
                 native_key_code: None,
-                logical_key: "hyper".to_owned(),
             })
         );
     }

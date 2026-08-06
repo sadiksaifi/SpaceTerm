@@ -50,7 +50,7 @@ pub(crate) enum NativeKeyEventKind {
 pub(crate) struct UnhandledKeyEvent {
     pub(crate) kind: NativeKeyEventKind,
     pub(crate) action: KeyAction,
-    pub(crate) native_key_code: u16,
+    pub(crate) native_key_code: Option<u16>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -58,22 +58,6 @@ pub(crate) enum KeyTranslation {
     Encoded(KeyInput),
     TextInput(String),
     Unhandled(UnhandledKeyEvent),
-}
-
-impl KeyTranslation {
-    pub(crate) fn into_result(self) -> Result<KeyInput, KeyInputError> {
-        match self {
-            Self::Encoded(input) => Ok(input),
-            Self::TextInput(text) => Err(KeyInputError::UnsupportedKey {
-                native_key_code: None,
-                logical_key: text,
-            }),
-            Self::Unhandled(event) => Err(KeyInputError::UnsupportedKey {
-                native_key_code: Some(event.native_key_code),
-                logical_key: format!("{:?}", event.kind),
-            }),
-        }
-    }
 }
 
 impl NativeKeyEvent {
@@ -222,7 +206,7 @@ impl MacosKeyboardBridge {
                 KeyAction::Release => NativeKeyEventKind::KeyUp,
             },
             action: event.action,
-            native_key_code: event.native_key_code,
+            native_key_code: Some(event.native_key_code),
         };
         let physical_key = physical_key(event.native_key_code);
         let logical_key = event
@@ -271,7 +255,7 @@ impl MacosKeyboardBridge {
         let unhandled = UnhandledKeyEvent {
             kind: NativeKeyEventKind::FlagsChanged,
             action: event.action,
-            native_key_code: event.native_key_code,
+            native_key_code: Some(event.native_key_code),
         };
         let physical_key = physical_key(event.native_key_code);
         let active = match physical_key {
@@ -518,7 +502,7 @@ mod tests {
             KeyTranslation::Unhandled(UnhandledKeyEvent {
                 kind: NativeKeyEventKind::KeyDown,
                 action: KeyAction::Press,
-                native_key_code: u16::MAX,
+                native_key_code: Some(u16::MAX),
             })
         );
     }
@@ -544,7 +528,7 @@ mod tests {
             KeyTranslation::Unhandled(UnhandledKeyEvent {
                 kind: NativeKeyEventKind::KeyUp,
                 action: KeyAction::Release,
-                native_key_code: u16::MAX,
+                native_key_code: Some(u16::MAX),
             })
         );
     }
@@ -627,7 +611,7 @@ mod tests {
             KeyTranslation::Unhandled(UnhandledKeyEvent {
                 kind: NativeKeyEventKind::FlagsChanged,
                 action: KeyAction::Press,
-                native_key_code: 0,
+                native_key_code: Some(0),
             })
         );
     }
