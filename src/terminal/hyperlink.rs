@@ -5,7 +5,7 @@ pub(crate) const MAX_LINK_BYTES: usize = 4096;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum HyperlinkKind {
     Url,
-    #[expect(
+    #[allow(
         dead_code,
         reason = "local-path detection is configured by the Session host"
     )]
@@ -32,7 +32,7 @@ impl HyperlinkTarget {
         Some(Self::new(HyperlinkKind::Url, value.to_owned()))
     }
 
-    #[expect(
+    #[allow(
         dead_code,
         reason = "local-path detection is configured by the Session host"
     )]
