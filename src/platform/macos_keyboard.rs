@@ -39,6 +39,37 @@ pub(crate) struct NativeKeyEvent {
     pub(crate) modifiers: NativeModifiers,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum NativeKeyEventKind {
+    KeyDown,
+    KeyUp,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct UnhandledKeyEvent {
+    pub(crate) kind: NativeKeyEventKind,
+    pub(crate) action: KeyAction,
+    pub(crate) native_key_code: u16,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum KeyTranslation {
+    Encoded(KeyInput),
+    Unhandled(UnhandledKeyEvent),
+}
+
+impl KeyTranslation {
+    pub(crate) fn into_result(self) -> Result<KeyInput, KeyInputError> {
+        match self {
+            Self::Encoded(input) => Ok(input),
+            Self::Unhandled(event) => Err(KeyInputError::UnsupportedKey {
+                native_key_code: Some(event.native_key_code),
+                logical_key: format!("{:?}", event.kind),
+            }),
+        }
+    }
+}
+
 impl NativeKeyEvent {
     #[allow(
         unexpected_cfgs,
@@ -178,7 +209,15 @@ impl MacosKeyboardBridge {
         }
     }
 
-    pub(crate) fn translate(&self, event: NativeKeyEvent) -> Result<KeyInput, KeyInputError> {
+    pub(crate) fn translate(&self, event: NativeKeyEvent) -> KeyTranslation {
+        let unhandled = UnhandledKeyEvent {
+            kind: match event.action {
+                KeyAction::Press | KeyAction::Repeat => NativeKeyEventKind::KeyDown,
+                KeyAction::Release => NativeKeyEventKind::KeyUp,
+            },
+            action: event.action,
+            native_key_code: event.native_key_code,
+        };
         let physical_key = physical_key(event.native_key_code);
         let logical_key = event
             .characters_ignoring_modifiers
@@ -213,8 +252,10 @@ impl MacosKeyboardBridge {
             },
             option_as_alt: self.option_as_alt,
         };
-        input.validate()?;
-        Ok(input)
+        match input.validate() {
+            Ok(()) => KeyTranslation::Encoded(input),
+            Err(KeyInputError::UnsupportedKey { .. }) => KeyTranslation::Unhandled(unhandled),
+        }
     }
 
     pub(crate) fn modifier_transition(
@@ -258,7 +299,7 @@ impl MacosKeyboardBridge {
             self.pressed_modifier_key_codes.remove(position);
             KeyAction::Release
         };
-        self.translate(event).map(Some)
+        self.translate(event).into_result().map(Some)
     }
 }
 
@@ -438,6 +479,13 @@ fn physical_key(native_key_code: u16) -> PhysicalKey {
 mod tests {
     use super::*;
 
+    fn encoded(translation: KeyTranslation) -> KeyInput {
+        let KeyTranslation::Encoded(input) = translation else {
+            panic!("expected encoded key input, found {translation:?}");
+        };
+        input
+    }
+
     fn native(native_key_code: u16, text: &str) -> NativeKeyEvent {
         NativeKeyEvent {
             action: KeyAction::Press,
@@ -451,11 +499,30 @@ mod tests {
     }
 
     #[test]
+    fn unknown_native_key_down_is_unhandled_with_privacy_safe_identity() {
+        let bridge = MacosKeyboardBridge::new(OptionAsAltPolicy::None);
+        let mut event = native(u16::MAX, "");
+        event.characters = None;
+        event.characters_ignoring_modifiers = None;
+        event.unmodified_characters = None;
+        event.characters_without_option = None;
+
+        assert_eq!(
+            bridge.translate(event),
+            KeyTranslation::Unhandled(UnhandledKeyEvent {
+                kind: NativeKeyEventKind::KeyDown,
+                action: KeyAction::Press,
+                native_key_code: u16::MAX,
+            })
+        );
+    }
+
+    #[test]
     fn native_identity_stays_physical_when_the_active_layout_changes_text() {
         let bridge = MacosKeyboardBridge::new(OptionAsAltPolicy::None);
 
-        let us = bridge.translate(native(12, "q")).unwrap();
-        let dvorak = bridge.translate(native(12, "'")).unwrap();
+        let us = encoded(bridge.translate(native(12, "q")));
+        let dvorak = encoded(bridge.translate(native(12, "'")));
 
         assert_eq!(
             (us.physical_key, us.logical_key.as_str()),
@@ -476,7 +543,7 @@ mod tests {
             OptionAsAltPolicy::Right,
         ] {
             let bridge = MacosKeyboardBridge::new(policy);
-            let input = bridge.translate(native(0, "a")).unwrap();
+            let input = encoded(bridge.translate(native(0, "a")));
             assert_eq!(input.option_as_alt, policy);
         }
     }
@@ -540,7 +607,7 @@ mod tests {
             ..NativeModifiers::default()
         };
 
-        let input = bridge.translate(event).unwrap();
+        let input = encoded(bridge.translate(event));
         assert_eq!(
             input.consumed_modifiers,
             InputModifiers {
@@ -572,7 +639,7 @@ mod tests {
             },
         };
 
-        let input = bridge.translate(event).unwrap();
+        let input = encoded(bridge.translate(event));
         assert_eq!(input.physical_key, PhysicalKey::E);
         assert_eq!(input.logical_key, "´");
         assert_eq!(input.text, None);
@@ -603,7 +670,7 @@ mod tests {
                 ..NativeModifiers::default()
             };
 
-            let input = bridge.translate(event).unwrap();
+            let input = encoded(bridge.translate(event));
             assert_eq!(input.text.as_deref(), Some(expected_text), "{policy:?}");
             assert_eq!(input.consumed_modifiers.alt, consumed_alt, "{policy:?}");
         }

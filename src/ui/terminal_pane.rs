@@ -265,7 +265,7 @@ impl TerminalPane {
             KeyAction::Press
         };
         let input = NativeKeyEvent::current_key(action)
-            .map(|event| self.keyboard_bridge.translate(event))
+            .map(|event| self.keyboard_bridge.translate(event).into_result())
             .unwrap_or_else(|| encode_key(event));
         self.send_key_input(input);
         cx.stop_propagation();
@@ -273,7 +273,7 @@ impl TerminalPane {
 
     fn on_key_up(&mut self, event: &KeyUpEvent, _window: &mut Window, cx: &mut Context<Self>) {
         let input = NativeKeyEvent::current_key(KeyAction::Release)
-            .map(|event| self.keyboard_bridge.translate(event))
+            .map(|event| self.keyboard_bridge.translate(event).into_result())
             .unwrap_or_else(|| encode_keystroke(&event.keystroke, KeyAction::Release));
         self.send_key_input(input);
         cx.stop_propagation();
