@@ -681,7 +681,7 @@ struct HeldKeys(Vec<KeyInput>);
 
 impl HeldKeys {
     fn route(&mut self, input: &KeyInput) {
-        if input.is_text_input() {
+        if input.is_text_input() || input.is_input_method_commit() {
             return;
         }
         match input.action {

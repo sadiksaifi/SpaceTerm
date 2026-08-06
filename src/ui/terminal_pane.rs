@@ -684,7 +684,7 @@ impl EntityInputHandler for TerminalPane {
         }
         self.ime.commit(text);
         if let Some(text) = self.ime.take_commit() {
-            self.send_key_translation(KeyTranslation::TextInput(text));
+            self.send_key_translation(KeyTranslation::Encoded(KeyInput::input_method_commit(text)));
         }
         cx.notify();
     }
@@ -1540,7 +1540,7 @@ mod tests {
             .commands()
             .into_iter()
             .filter_map(|call| match call.command {
-                RecordedSessionCommand::Key(input) if input.is_text_input() => input.text,
+                RecordedSessionCommand::Key(input) if input.is_input_method_commit() => input.text,
                 _ => None,
             })
             .collect::<Vec<_>>();
@@ -1625,7 +1625,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert_eq!(keys.len(), 1);
-        assert!(keys[0].is_text_input());
+        assert!(keys[0].is_input_method_commit());
     }
 
     #[test]

@@ -50,9 +50,12 @@ pub(crate) struct KeyInput {
 
 impl KeyInput {
     const TEXT_INPUT_LOGICAL_KEY: &'static str = "text-input";
+    const INPUT_METHOD_LOGICAL_KEY: &'static str = "input-method-commit";
 
     pub(crate) fn input_method_commit(text: impl Into<String>) -> Self {
-        Self::text_input(text)
+        let mut input = Self::text_input(text);
+        input.logical_key = Self::INPUT_METHOD_LOGICAL_KEY.to_owned();
+        input
     }
 
     pub(crate) fn text_input(text: impl Into<String>) -> Self {
@@ -77,8 +80,19 @@ impl KeyInput {
             && self.text.is_some()
     }
 
+    pub(crate) fn is_input_method_commit(&self) -> bool {
+        self.action == KeyAction::Press
+            && self.physical_key == PhysicalKey::Unidentified
+            && self.native_key_code.is_none()
+            && self.logical_key == Self::INPUT_METHOD_LOGICAL_KEY
+            && self.text.is_some()
+    }
+
     pub(crate) fn validate(&self) -> Result<(), KeyInputError> {
-        if self.physical_key == PhysicalKey::Unidentified && !self.is_text_input() {
+        if self.physical_key == PhysicalKey::Unidentified
+            && !self.is_text_input()
+            && !self.is_input_method_commit()
+        {
             return Err(KeyInputError::UnsupportedKey {
                 native_key_code: self.native_key_code,
                 logical_key: self.logical_key.clone(),
@@ -310,7 +324,7 @@ mod tests {
         let input = KeyInput::input_method_commit("日本語");
 
         assert_eq!(input.validate(), Ok(()));
-        assert!(input.is_text_input());
+        assert!(input.is_input_method_commit());
         assert_eq!(input.text.as_deref(), Some("日本語"));
         assert_eq!(input.physical_key, PhysicalKey::Unidentified);
     }
