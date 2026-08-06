@@ -206,10 +206,9 @@ mod tests {
 
     #[test]
     fn converted_file_paths_still_require_the_unified_unsafe_paste_policy() {
-        let insertion = crate::terminal::prepare_file_insertion(
-            crate::terminal::FileInsertionSource::Drop,
-            &[std::path::PathBuf::from("/tmp/line\nbreak")],
-        )
+        let insertion = crate::terminal::prepare_file_insertion(&[std::path::PathBuf::from(
+            "/tmp/line\nbreak",
+        )])
         .unwrap();
         let prepared = PreparedPaste::prepare(insertion.text).unwrap();
         assert!(prepared.requires_confirmation());

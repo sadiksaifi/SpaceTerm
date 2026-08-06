@@ -37,7 +37,7 @@ use crate::terminal::geometry::{
     BackingScale, CellGridSize, LogicalCellSize, LogicalPosition, LogicalSize, TerminalGeometry,
 };
 use crate::terminal::{
-    FileInsertionSource, InputModifiers, KeyAction, KeyInput, OptionAsAltPolicy, Osc52Access,
+    InputModifiers, KeyAction, KeyInput, OptionAsAltPolicy, Osc52Access,
     Osc52AuthorizationDecision, Osc52AuthorizationRequest, Osc52Target, PasteConfirmation,
     PasteDecision, PasteRequestOutcome, PasteResolution, PhysicalKey, PointerButton, PointerInput,
     PointerPhase, ScreenSnapshot, SelectionCopy, SessionEvent, ShiftSelectionPolicy,
@@ -844,8 +844,7 @@ impl TerminalPane {
             };
             text
         } else {
-            let Ok(insertion) = prepare_file_insertion(FileInsertionSource::Pasteboard, &paths)
-            else {
+            let Ok(insertion) = prepare_file_insertion(&paths) else {
                 return;
             };
             insertion.text
@@ -862,7 +861,7 @@ impl TerminalPane {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Ok(insertion) = prepare_file_insertion(FileInsertionSource::Drop, paths.paths()) else {
+        let Ok(insertion) = prepare_file_insertion(paths.paths()) else {
             return;
         };
         self.request_paste_text(insertion.text, cx);
