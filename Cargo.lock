@@ -5130,11 +5130,15 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "async-channel 2.5.0",
+ "cocoa 0.26.0",
  "gpui",
  "gpui-symbols",
+ "libc",
  "libghostty-vt",
+ "objc",
  "portable-pty",
  "thiserror 2.0.19",
+ "unicode-bidi",
 ]
 
 [[package]]

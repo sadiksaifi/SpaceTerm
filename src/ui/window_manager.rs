@@ -848,7 +848,7 @@ mod tests {
     use super::*;
     use crate::domain::PaneId;
     use crate::terminal::testing::{TestTerminalSessionFactory, TestTerminalSessionRecords};
-    use crate::terminal::{ScreenSnapshot, SessionEvent, TerminalSessionFactory};
+    use crate::terminal::{ScreenSnapshot, SessionEvent, SessionExit, TerminalSessionFactory};
 
     fn window_manager(
         cx: &mut TestAppContext,
@@ -1472,7 +1472,7 @@ mod tests {
             .expect("Window 1 session must have started");
 
         first_sender
-            .try_send(SessionEvent::Exited("Shell exited".to_owned()))
+            .try_send(SessionEvent::Exited(SessionExit::Success))
             .unwrap();
         cx.run_until_parked();
 
@@ -1505,7 +1505,7 @@ mod tests {
         });
 
         active_sender
-            .try_send(SessionEvent::Exited("Shell exited".to_owned()))
+            .try_send(SessionEvent::Exited(SessionExit::Success))
             .unwrap();
         cx.run_until_parked();
 
@@ -1532,7 +1532,7 @@ mod tests {
             .expect("Window 2 session must have started");
 
         active_sender
-            .try_send(SessionEvent::Exited("Shell exited".to_owned()))
+            .try_send(SessionEvent::Exited(SessionExit::Success))
             .unwrap();
         cx.run_until_parked();
 

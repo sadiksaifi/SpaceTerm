@@ -1,6 +1,7 @@
 use std::env;
 use std::io::{self, Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -11,41 +12,172 @@ use portable_pty::{
 };
 use thiserror::Error;
 
+use crate::platform::shell_integration::{
+    ShellEnvironment, configured_mode, plan_shell_integration, resource_root,
+};
+use crate::terminal::identity;
+
 const CHILD_EXIT_POLL_INTERVAL: Duration = Duration::from_millis(10);
+const GRACEFUL_SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(250);
+const FORCED_SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(250);
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ShutdownDisposition {
+    NotRequested,
+    Graceful,
+    Forced,
+}
+
+#[derive(Debug)]
+pub(crate) struct ShellExit {
+    pub(crate) status: ExitStatus,
+    pub(crate) shutdown: ShutdownDisposition,
+}
+
+struct TerminationTarget {
+    process_group: Option<i32>,
+    fallback: Box<dyn ChildKiller + Send + Sync>,
+}
+
+impl TerminationTarget {
+    fn owns_process_group(&self) -> bool {
+        self.process_group.is_some()
+    }
+
+    fn hang_up(&mut self) -> io::Result<()> {
+        match self.process_group {
+            Some(process_group) => signal_process_group(process_group, libc::SIGHUP),
+            None => self.fallback.kill(),
+        }
+    }
+
+    fn force(&mut self) -> io::Result<()> {
+        match self.process_group {
+            Some(process_group) => signal_process_group(process_group, libc::SIGKILL),
+            None => self.fallback.kill(),
+        }
+    }
+
+    fn is_alive(&self) -> io::Result<bool> {
+        let Some(process_group) = self.process_group else {
+            return Ok(true);
+        };
+        process_group_is_alive(process_group)
+    }
+}
 
 struct ChildTermination {
-    signaller: Mutex<Option<Box<dyn ChildKiller + Send + Sync>>>,
+    target: Mutex<Option<TerminationTarget>>,
+    requested: AtomicBool,
+    forced: AtomicBool,
 }
 
 impl ChildTermination {
-    fn new(signaller: Box<dyn ChildKiller + Send + Sync>) -> Self {
+    fn new(process_group: Option<i32>, fallback: Box<dyn ChildKiller + Send + Sync>) -> Self {
         Self {
-            signaller: Mutex::new(Some(signaller)),
+            target: Mutex::new(Some(TerminationTarget {
+                process_group,
+                fallback,
+            })),
+            requested: AtomicBool::new(false),
+            forced: AtomicBool::new(false),
         }
     }
 
     fn signal(&self) -> io::Result<()> {
-        let mut gate = self.lock_signaller();
-        let Some(mut signaller) = gate.take() else {
+        if self.requested.swap(true, Ordering::AcqRel) {
             return Ok(());
-        };
-        // Keep the liveness gate locked through signal delivery so the worker cannot reap the
-        // process and allow its PID to be reused before this one-shot capability is consumed.
-        let result = signaller.kill();
-        drop(gate);
-        result
+        }
+        let mut target = self.lock_target();
+        match target.as_mut() {
+            Some(target) => target.hang_up(),
+            None => Ok(()),
+        }
     }
 
-    fn lock_signaller(
-        &self,
-    ) -> std::sync::MutexGuard<'_, Option<Box<dyn ChildKiller + Send + Sync>>> {
-        match self.signaller.lock() {
-            Ok(signaller) => signaller,
+    fn lock_target(&self) -> std::sync::MutexGuard<'_, Option<TerminationTarget>> {
+        match self.target.lock() {
+            Ok(target) => target,
             Err(poisoned) => {
                 eprintln!("terminal child-termination coordination lock was poisoned; recovering");
                 poisoned.into_inner()
             }
         }
+    }
+
+    fn revoke(&self) {
+        self.lock_target().take();
+    }
+
+    fn complete_process_group(&self, graceful_deadline: Instant) -> ShutdownDisposition {
+        if !self.requested.load(Ordering::Acquire) {
+            self.revoke();
+            return ShutdownDisposition::NotRequested;
+        }
+
+        let mut target_slot = self.lock_target();
+        let Some(target) = target_slot.as_mut() else {
+            return if self.forced.load(Ordering::Acquire) {
+                ShutdownDisposition::Forced
+            } else {
+                ShutdownDisposition::Graceful
+            };
+        };
+        if !target.owns_process_group() {
+            target_slot.take();
+            return ShutdownDisposition::Graceful;
+        }
+
+        while Instant::now() < graceful_deadline {
+            match target.is_alive() {
+                Ok(false) => {
+                    target_slot.take();
+                    return ShutdownDisposition::Graceful;
+                }
+                Ok(true) => thread::sleep(CHILD_EXIT_POLL_INTERVAL),
+                Err(error) => {
+                    eprintln!("failed to inspect shell process group during shutdown: {error}");
+                    break;
+                }
+            }
+        }
+
+        if let Err(error) = target.force() {
+            eprintln!("failed to force shell process group shutdown: {error}");
+        }
+        self.forced.store(true, Ordering::Release);
+        target_slot.take();
+        ShutdownDisposition::Forced
+    }
+
+    fn requested(&self) -> bool {
+        self.requested.load(Ordering::Acquire)
+    }
+}
+
+fn signal_process_group(process_group: i32, signal: i32) -> io::Result<()> {
+    // SAFETY: a negative PID addresses the process group created for this PTY.
+    if unsafe { libc::kill(-process_group, signal) } == 0 {
+        return Ok(());
+    }
+    let error = io::Error::last_os_error();
+    if error.raw_os_error() == Some(libc::ESRCH) {
+        Ok(())
+    } else {
+        Err(error)
+    }
+}
+
+fn process_group_is_alive(process_group: i32) -> io::Result<bool> {
+    // SAFETY: signal zero performs only an existence/permission check.
+    if unsafe { libc::kill(-process_group, 0) } == 0 {
+        return Ok(true);
+    }
+    let error = io::Error::last_os_error();
+    match error.raw_os_error() {
+        Some(libc::ESRCH) => Ok(false),
+        Some(libc::EPERM) => Ok(true),
+        _ => Err(error),
     }
 }
 
@@ -86,11 +218,22 @@ impl SpawnedPty {
         self.master.resize(size)
     }
 
-    pub(crate) fn wait_for_child(&mut self, timeout: Duration) -> io::Result<ExitStatus> {
+    pub(crate) fn hidden_input(&self) -> io::Result<bool> {
+        let descriptor = self
+            .master
+            .as_raw_fd()
+            .ok_or_else(|| io::Error::other("PTY master descriptor is unavailable"))?;
+        read_termios(descriptor).map(|termios| termios_hidden_input(&termios))
+    }
+
+    pub(crate) fn wait_for_child(&mut self, timeout: Duration) -> io::Result<ShellExit> {
         let deadline = Instant::now() + timeout;
         loop {
             if let Some(status) = self.try_wait_for_child()? {
-                return Ok(status);
+                let shutdown = self
+                    .termination
+                    .complete_process_group(Instant::now() + GRACEFUL_SHUTDOWN_TIMEOUT);
+                return Ok(ShellExit { status, shutdown });
             }
 
             let remaining = deadline.saturating_duration_since(Instant::now());
@@ -108,33 +251,43 @@ impl SpawnedPty {
     }
 
     fn try_wait_for_child(&mut self) -> io::Result<Option<ExitStatus>> {
-        let mut signaller = self.termination.lock_signaller();
         let Some(child) = self.child.as_mut() else {
             return Err(child_already_reaped_error());
         };
         let status = child.try_wait()?;
         if status.is_some() {
-            signaller.take();
             self.child.take();
         }
         Ok(status)
     }
 
     fn cleanup_child(&mut self) {
-        let child = {
-            let mut signaller = self.termination.lock_signaller();
-            signaller.take();
-            self.child.take()
-        };
+        let child = self.child.take();
         let Some(mut child) = child else {
             return;
         };
 
         match child.try_wait() {
-            Ok(Some(_)) => return,
+            Ok(Some(_)) => {
+                self.termination
+                    .complete_process_group(Instant::now() + GRACEFUL_SHUTDOWN_TIMEOUT);
+                return;
+            }
             Ok(None) => {}
             Err(error) => eprintln!("failed to inspect shell process during cleanup: {error}"),
         }
+
+        let owns_process_group = self
+            .termination
+            .lock_target()
+            .as_ref()
+            .is_some_and(TerminationTarget::owns_process_group);
+        if owns_process_group {
+            self.cleanup_process_group(child.as_mut());
+            return;
+        }
+
+        self.termination.revoke();
 
         if let Err(error) = child.kill() {
             eprintln!("failed to terminate shell process during cleanup: {error}");
@@ -144,6 +297,44 @@ impl SpawnedPty {
 
         if let Err(error) = child.wait() {
             eprintln!("failed to reap shell process during cleanup: {error}");
+        }
+    }
+
+    fn cleanup_process_group(&self, child: &mut dyn Child) {
+        if !self.termination.requested()
+            && let Err(error) = self.termination.signal()
+        {
+            eprintln!("failed to gracefully terminate shell process group: {error}");
+        }
+
+        let graceful_deadline = Instant::now() + GRACEFUL_SHUTDOWN_TIMEOUT;
+        if Self::poll_child_until(child, graceful_deadline) {
+            self.termination.complete_process_group(graceful_deadline);
+            return;
+        }
+
+        self.termination.complete_process_group(graceful_deadline);
+        let forced_deadline = Instant::now() + FORCED_SHUTDOWN_TIMEOUT;
+        if !Self::poll_child_until(child, forced_deadline) {
+            eprintln!("shell process did not become reapable after forced process-group shutdown");
+        }
+    }
+
+    fn poll_child_until(child: &mut dyn Child, deadline: Instant) -> bool {
+        loop {
+            match child.try_wait() {
+                Ok(Some(_)) => return true,
+                Ok(None) => {}
+                Err(error) => {
+                    eprintln!("failed to inspect shell process during shutdown: {error}");
+                    return false;
+                }
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return false;
+            }
+            thread::sleep(CHILD_EXIT_POLL_INTERVAL.min(remaining));
         }
     }
 
@@ -180,14 +371,30 @@ impl Drop for SpawnedPty {
 
 #[derive(Debug, Error)]
 pub(crate) enum PtyError {
+    #[error("Workspace working directory {} is unavailable: {source}", path.display())]
+    WorkingDirectory {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
     #[error("failed to open the macOS pseudo-terminal: {0}")]
     Open(#[source] AnyError),
+    #[error("the macOS pseudo-terminal did not expose its native descriptor")]
+    MissingDescriptor,
+    #[error("failed to read the macOS pseudo-terminal attributes: {0}")]
+    ReadTermios(#[source] io::Error),
+    #[error("failed to enable UTF-8 input on the macOS pseudo-terminal: {0}")]
+    ConfigureTermios(#[source] io::Error),
+    #[error("failed to apply the initial macOS pseudo-terminal size: {0}")]
+    InitialResize(#[source] AnyError),
     #[error("failed to start shell {shell}: {source}")]
     SpawnShell {
         shell: String,
         #[source]
         source: AnyError,
     },
+    #[error("the shell process did not expose its process-group identifier")]
+    MissingProcessGroup,
     #[error("failed to clone the pseudo-terminal reader: {0}")]
     CloneReader(#[source] AnyError),
     #[error("failed to acquire the pseudo-terminal writer: {0}")]
@@ -198,25 +405,26 @@ pub(crate) fn spawn_user_shell(
     size: PtySize,
     working_directory: &Path,
 ) -> Result<(SpawnedPty, PtyTerminator), PtyError> {
+    validate_working_directory(working_directory)?;
+    let shell = user_shell();
+    let command = build_shell_command(&shell, working_directory);
+    spawn_command_in_pty(size, command, &shell)
+}
+
+fn spawn_command_in_pty(
+    size: PtySize,
+    command: CommandBuilder,
+    description: &str,
+) -> Result<(SpawnedPty, PtyTerminator), PtyError> {
     let pty_system = native_pty_system();
     let pair = pty_system.openpty(size).map_err(PtyError::Open)?;
-
-    let shell = user_shell();
-
-    let mut command = CommandBuilder::new(&shell);
-    command.arg("-l");
-    command.env("TERM", "xterm-256color");
-    command.env("COLORTERM", "truecolor");
-    command.env("TERM_PROGRAM", "SpaceTerm");
-    command.env("TERM_PROGRAM_VERSION", env!("CARGO_PKG_VERSION"));
-
-    command.cwd(working_directory);
+    initialize_pty(pair.master.as_ref(), size)?;
 
     let mut child = pair
         .slave
         .spawn_command(command)
         .map_err(|source| PtyError::SpawnShell {
-            shell: shell.clone(),
+            shell: description.to_owned(),
             source,
         })?;
 
@@ -238,7 +446,17 @@ pub(crate) fn spawn_user_shell(
         }
     };
 
-    let termination = Arc::new(ChildTermination::new(child.clone_killer()));
+    let process_group = child
+        .process_id()
+        .and_then(|process_id| i32::try_from(process_id).ok());
+    let Some(process_group) = process_group else {
+        terminate_after_startup_failure(child.as_mut());
+        return Err(PtyError::MissingProcessGroup);
+    };
+    let termination = Arc::new(ChildTermination::new(
+        Some(process_group),
+        child.clone_killer(),
+    ));
     let terminator = PtyTerminator::new(Arc::clone(&termination));
 
     Ok((
@@ -253,11 +471,147 @@ pub(crate) fn spawn_user_shell(
     ))
 }
 
+fn initialize_pty(master: &dyn MasterPty, size: PtySize) -> Result<(), PtyError> {
+    let descriptor = master.as_raw_fd().ok_or(PtyError::MissingDescriptor)?;
+    let mut termios = read_termios(descriptor).map_err(PtyError::ReadTermios)?;
+    termios.c_iflag |= libc::IUTF8;
+    // SAFETY: descriptor remains live and termios contains attributes read from this PTY.
+    if unsafe { libc::tcsetattr(descriptor, libc::TCSANOW, &termios) } == -1 {
+        return Err(PtyError::ConfigureTermios(io::Error::last_os_error()));
+    }
+    master.resize(size).map_err(PtyError::InitialResize)
+}
+
+fn read_termios(descriptor: std::os::fd::RawFd) -> io::Result<libc::termios> {
+    let mut termios = std::mem::MaybeUninit::<libc::termios>::uninit();
+    // SAFETY: descriptor is a live PTY master and termios points to writable storage.
+    if unsafe { libc::tcgetattr(descriptor, termios.as_mut_ptr()) } == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: tcgetattr initialized termios after succeeding above.
+    Ok(unsafe { termios.assume_init() })
+}
+
+const fn termios_hidden_input(termios: &libc::termios) -> bool {
+    termios.c_lflag & libc::ICANON != 0 && termios.c_lflag & libc::ECHO == 0
+}
+
+fn validate_working_directory(working_directory: &Path) -> Result<(), PtyError> {
+    let metadata = working_directory
+        .metadata()
+        .map_err(|source| PtyError::WorkingDirectory {
+            path: working_directory.to_owned(),
+            source,
+        })?;
+    if metadata.is_dir() {
+        Ok(())
+    } else {
+        Err(PtyError::WorkingDirectory {
+            path: working_directory.to_owned(),
+            source: io::Error::new(io::ErrorKind::NotADirectory, "path is not a directory"),
+        })
+    }
+}
+
+fn build_shell_command(shell: &str, working_directory: &Path) -> CommandBuilder {
+    build_shell_command_with_resources(shell, working_directory, &resource_root())
+}
+
+fn build_shell_command_with_resources(
+    shell: &str,
+    working_directory: &Path,
+    resources: &Path,
+) -> CommandBuilder {
+    let mut command = CommandBuilder::new(shell);
+    let integration = plan_shell_integration(
+        Path::new(shell),
+        resources,
+        configured_mode(),
+        &ShellEnvironment::capture(),
+    );
+    integration.apply(&mut command);
+    let terminal_identity = identity::launch_identity(resources);
+    command.arg("-l");
+    command.env("TERM", terminal_identity.term);
+    if let Some(terminfo) = terminal_identity.terminfo {
+        command.env("TERMINFO", terminfo);
+    }
+    command.env("COLORTERM", identity::COLORTERM);
+    command.env("TERM_PROGRAM", identity::PROGRAM_NAME);
+    command.env("TERM_PROGRAM_VERSION", identity::PROGRAM_VERSION);
+    command.cwd(working_directory);
+    command
+}
+
 pub(crate) fn user_shell() -> String {
     env::var("SHELL")
         .ok()
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| "/bin/zsh".to_owned())
+}
+
+#[cfg(test)]
+pub(crate) fn conformance_initialization_observation() -> String {
+    let command = build_shell_command_with_resources(
+        "/bin/zsh",
+        Path::new("/tmp"),
+        Path::new("/spaceterm-conformance-missing-resources"),
+    );
+    format!(
+        "argv={:?} cwd={} term={} colorterm={} program={} version={} controlling-tty={}",
+        command.get_argv(),
+        command
+            .get_cwd()
+            .and_then(|path| path.to_str())
+            .unwrap_or("missing"),
+        command
+            .get_env("TERM")
+            .and_then(std::ffi::OsStr::to_str)
+            .unwrap_or("missing"),
+        command
+            .get_env("COLORTERM")
+            .and_then(std::ffi::OsStr::to_str)
+            .unwrap_or("missing"),
+        command
+            .get_env("TERM_PROGRAM")
+            .and_then(std::ffi::OsStr::to_str)
+            .unwrap_or("missing"),
+        command
+            .get_env("TERM_PROGRAM_VERSION")
+            .and_then(std::ffi::OsStr::to_str)
+            .unwrap_or("missing"),
+        command.get_controlling_tty(),
+    )
+}
+
+#[cfg(test)]
+pub(crate) fn conformance_shutdown_observation() -> String {
+    use std::sync::atomic::AtomicUsize;
+
+    #[derive(Debug)]
+    struct CountingKiller(Arc<AtomicUsize>);
+
+    impl ChildKiller for CountingKiller {
+        fn kill(&mut self) -> io::Result<()> {
+            self.0.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        }
+
+        fn clone_killer(&self) -> Box<dyn ChildKiller + Send + Sync> {
+            Box::new(Self(Arc::clone(&self.0)))
+        }
+    }
+
+    let kills = Arc::new(AtomicUsize::new(0));
+    let termination = ChildTermination::new(None, Box::new(CountingKiller(Arc::clone(&kills))));
+    let first = termination.signal().is_ok();
+    let second = termination.signal().is_ok();
+    let disposition = termination.complete_process_group(Instant::now());
+    format!(
+        "first={first} duplicate={second} signals={} disposition={disposition:?} revoked={}",
+        kills.load(Ordering::Relaxed),
+        termination.lock_target().is_none(),
+    )
 }
 
 fn terminate_after_startup_failure(child: &mut dyn Child) {
@@ -272,8 +626,9 @@ fn terminate_after_startup_failure(child: &mut dyn Child) {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::fmt;
-    use std::io;
+    use std::io::{self, BufRead, BufReader};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Condvar, Mutex, mpsc};
     use std::time::Instant;
@@ -281,6 +636,397 @@ mod tests {
     use portable_pty::{ChildKiller, ExitStatus};
 
     use super::*;
+
+    #[test]
+    fn hidden_input_requires_canonical_mode_without_echo() {
+        // SAFETY: termios is a plain C data structure whose zero value is valid for flag tests.
+        let mut termios = unsafe { std::mem::zeroed::<libc::termios>() };
+        termios.c_lflag = libc::ICANON | libc::ECHO;
+        assert!(!termios_hidden_input(&termios));
+
+        termios.c_lflag = libc::ICANON;
+        assert!(termios_hidden_input(&termios));
+
+        termios.c_lflag = 0;
+        assert!(!termios_hidden_input(&termios));
+    }
+
+    const CONTROLLED_CHILD_ENV: &str = "SPACETERM_CONTROLLED_PTY_CHILD";
+
+    #[test]
+    #[ignore = "runs only as a child of the controlled PTY integration tests"]
+    fn controlled_pty_child_reports_runtime_configuration() {
+        if env::var_os(CONTROLLED_CHILD_ENV).is_none() {
+            return;
+        }
+
+        let mut termios = std::mem::MaybeUninit::<libc::termios>::uninit();
+        let mut window_size = std::mem::MaybeUninit::<libc::winsize>::uninit();
+        // SAFETY: stdin is the PTY slave installed by portable-pty. Both calls initialize their
+        // output structs on success, which is asserted before assume_init.
+        let termios_result = unsafe { libc::tcgetattr(libc::STDIN_FILENO, termios.as_mut_ptr()) };
+        // SAFETY: TIOCGWINSZ writes a winsize to the valid pointer supplied here.
+        let window_result = unsafe {
+            libc::ioctl(
+                libc::STDIN_FILENO,
+                libc::TIOCGWINSZ,
+                window_size.as_mut_ptr(),
+            )
+        };
+        assert_eq!(termios_result, 0);
+        assert_eq!(window_result, 0);
+        // SAFETY: the successful system calls above initialized both values.
+        let termios = unsafe { termios.assume_init() };
+        // SAFETY: the successful ioctl above initialized the window size.
+        let window_size = unsafe { window_size.assume_init() };
+        let cwd = env::current_dir().unwrap();
+
+        // SAFETY: these process and terminal identity queries have no pointer preconditions.
+        let (pid, group, session, foreground, is_tty) = unsafe {
+            (
+                libc::getpid(),
+                libc::getpgrp(),
+                libc::getsid(0),
+                libc::tcgetpgrp(libc::STDIN_FILENO),
+                libc::isatty(libc::STDIN_FILENO),
+            )
+        };
+        println!(
+            "SPACETERM_PTY_REPORT pid={pid} group={group} session={session} foreground={foreground} tty={is_tty} utf8={} rows={} cols={} pixel_width={} pixel_height={} cwd={} marker={}",
+            usize::from(termios.c_iflag & libc::IUTF8 != 0),
+            window_size.ws_row,
+            window_size.ws_col,
+            window_size.ws_xpixel,
+            window_size.ws_ypixel,
+            cwd.display(),
+            env::var("SPACETERM_PTY_MARKER").unwrap(),
+        );
+        thread::sleep(Duration::from_millis(100));
+    }
+
+    fn controlled_child_command(working_directory: &Path, marker: &str) -> CommandBuilder {
+        let mut command = CommandBuilder::new(env::current_exe().unwrap());
+        command.args([
+            "--ignored",
+            "--exact",
+            "platform::macos_pty::tests::controlled_pty_child_reports_runtime_configuration",
+            "--nocapture",
+        ]);
+        command.env(CONTROLLED_CHILD_ENV, "1");
+        command.env("SPACETERM_PTY_MARKER", marker);
+        command.cwd(working_directory);
+        command
+    }
+
+    fn read_controlled_report(pty: &mut SpawnedPty) -> HashMap<String, String> {
+        let mut output = String::new();
+        pty.take_reader()
+            .unwrap()
+            .read_to_string(&mut output)
+            .unwrap();
+        let status = pty.wait_for_child(Duration::from_secs(2)).unwrap();
+        assert!(
+            status.status.success(),
+            "controlled PTY child failed: {output}"
+        );
+        let report = output
+            .lines()
+            .find(|line| line.starts_with("SPACETERM_PTY_REPORT "))
+            .unwrap_or_else(|| panic!("controlled PTY report was missing from: {output}"));
+
+        report
+            .split_whitespace()
+            .skip(1)
+            .map(|field| {
+                let (key, value) = field.split_once('=').unwrap();
+                (key.to_owned(), value.to_owned())
+            })
+            .collect()
+    }
+
+    #[test]
+    fn controlled_child_should_observe_initialized_terminal_state_before_interaction() {
+        let working_directory = env::current_dir().unwrap();
+        let size = PtySize {
+            rows: 31,
+            cols: 97,
+            pixel_width: 1_164,
+            pixel_height: 682,
+        };
+        let command = controlled_child_command(&working_directory, "initialized");
+
+        let (mut pty, _terminator) =
+            spawn_command_in_pty(size, command, "controlled child").unwrap();
+        let report = read_controlled_report(&mut pty);
+
+        assert_eq!(
+            (
+                &report["pid"],
+                &report["group"],
+                &report["session"],
+                &report["foreground"],
+                report["tty"].as_str(),
+                report["utf8"].as_str(),
+                report["rows"].as_str(),
+                report["cols"].as_str(),
+                report["pixel_width"].as_str(),
+                report["pixel_height"].as_str(),
+                report["cwd"].as_str(),
+                report["marker"].as_str(),
+            ),
+            (
+                &report["pid"],
+                &report["pid"],
+                &report["pid"],
+                &report["pid"],
+                "1",
+                "1",
+                "31",
+                "97",
+                "1164",
+                "682",
+                working_directory.to_str().unwrap(),
+                "initialized",
+            )
+        );
+    }
+
+    #[test]
+    fn concurrent_terminal_sessions_should_own_distinct_process_groups() {
+        let working_directory = env::current_dir().unwrap();
+        let size = PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 640,
+            pixel_height: 480,
+        };
+        let (mut first, _first_terminator) = spawn_command_in_pty(
+            size,
+            controlled_child_command(&working_directory, "first"),
+            "first controlled child",
+        )
+        .unwrap();
+        let (mut second, _second_terminator) = spawn_command_in_pty(
+            size,
+            controlled_child_command(&working_directory, "second"),
+            "second controlled child",
+        )
+        .unwrap();
+
+        let first_report = read_controlled_report(&mut first);
+        let second_report = read_controlled_report(&mut second);
+
+        assert_eq!(
+            (
+                first_report["group"] != second_report["group"],
+                first_report["session"] != second_report["session"],
+                first_report["marker"].as_str(),
+                second_report["marker"].as_str(),
+            ),
+            (true, true, "first", "second")
+        );
+    }
+
+    #[test]
+    fn stubborn_process_group_should_receive_bounded_forced_shutdown() {
+        let working_directory = env::current_dir().unwrap();
+        let mut command = CommandBuilder::new("/bin/sh");
+        command.args([
+            "-c",
+            "trap '' HUP; (trap '' HUP; exec </dev/null >/dev/null 2>&1; while :; do sleep 1; done) & child=$!; echo SPACETERM_SHUTDOWN_REPORT leader=$$ child=$child; exec </dev/null >/dev/null 2>&1; while :; do sleep 1; done",
+        ]);
+        command.cwd(&working_directory);
+        let (mut pty, terminator) = spawn_command_in_pty(
+            PtySize {
+                rows: 24,
+                cols: 80,
+                pixel_width: 640,
+                pixel_height: 480,
+            },
+            command,
+            "stubborn process group",
+        )
+        .unwrap();
+        let mut reader = BufReader::new(pty.take_reader().unwrap());
+        let mut report = String::new();
+        reader.read_line(&mut report).unwrap();
+        let fields: HashMap<_, _> = report
+            .split_whitespace()
+            .skip_while(|field| *field != "SPACETERM_SHUTDOWN_REPORT")
+            .skip(1)
+            .map(|field| field.split_once('=').unwrap())
+            .collect();
+        let leader = fields["leader"].parse::<i32>().unwrap();
+        let child = fields["child"].parse::<i32>().unwrap();
+        // SAFETY: getpgid performs a read-only process identity query.
+        assert_eq!(unsafe { libc::getpgid(child) }, leader);
+
+        let started = Instant::now();
+        terminator.terminate().unwrap();
+        pty.cleanup_child();
+        let elapsed = started.elapsed();
+
+        assert!(
+            elapsed >= GRACEFUL_SHUTDOWN_TIMEOUT,
+            "forced shutdown skipped the grace window: {elapsed:?}"
+        );
+        assert!(
+            elapsed <= GRACEFUL_SHUTDOWN_TIMEOUT + FORCED_SHUTDOWN_TIMEOUT + Duration::from_secs(1),
+            "forced shutdown exceeded its bound: {elapsed:?}"
+        );
+        assert!(pty.termination.forced.load(Ordering::Acquire));
+        assert_process_disappears(leader);
+        assert_process_disappears(child);
+    }
+
+    #[test]
+    fn responsive_process_group_should_finish_during_the_grace_window() {
+        let working_directory = env::current_dir().unwrap();
+        let mut command = CommandBuilder::new("/bin/sh");
+        command.args([
+            "-c",
+            "sleep 30 & child=$!; echo SPACETERM_SHUTDOWN_REPORT leader=$$ child=$child; wait",
+        ]);
+        command.cwd(&working_directory);
+        let (mut pty, terminator) = spawn_command_in_pty(
+            PtySize {
+                rows: 24,
+                cols: 80,
+                pixel_width: 640,
+                pixel_height: 480,
+            },
+            command,
+            "responsive process group",
+        )
+        .unwrap();
+        let mut reader = BufReader::new(pty.take_reader().unwrap());
+        let mut report = String::new();
+        reader.read_line(&mut report).unwrap();
+        let fields: HashMap<_, _> = report
+            .split_whitespace()
+            .skip_while(|field| *field != "SPACETERM_SHUTDOWN_REPORT")
+            .skip(1)
+            .map(|field| field.split_once('=').unwrap())
+            .collect();
+        let leader = fields["leader"].parse::<i32>().unwrap();
+        let child = fields["child"].parse::<i32>().unwrap();
+
+        let started = Instant::now();
+        terminator.terminate().unwrap();
+        pty.cleanup_child();
+
+        assert!(started.elapsed() < GRACEFUL_SHUTDOWN_TIMEOUT);
+        assert!(!pty.termination.forced.load(Ordering::Acquire));
+        assert_process_disappears(leader);
+        assert_process_disappears(child);
+    }
+
+    fn assert_process_disappears(process: i32) {
+        let deadline = Instant::now() + Duration::from_secs(1);
+        loop {
+            // SAFETY: signal zero performs only an existence/permission check.
+            if unsafe { libc::kill(process, 0) } == -1
+                && io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+            {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "process {process} remained after process-group shutdown"
+            );
+            thread::sleep(CHILD_EXIT_POLL_INTERVAL);
+        }
+    }
+
+    #[test]
+    fn shell_command_should_preserve_login_environment_and_working_directory() {
+        let working_directory = Path::new("/private/tmp/workspace root");
+
+        let command = build_shell_command("/bin/zsh", working_directory);
+
+        assert_eq!(
+            command.get_argv(),
+            &vec![
+                std::ffi::OsString::from("/bin/zsh"),
+                std::ffi::OsString::from("-l"),
+            ]
+        );
+        assert_eq!(
+            command.get_cwd(),
+            Some(&working_directory.as_os_str().to_owned())
+        );
+        assert_eq!(
+            command.get_env("TERM"),
+            Some(std::ffi::OsStr::new("xterm-256color"))
+        );
+        assert_eq!(
+            command.get_env("COLORTERM"),
+            Some(std::ffi::OsStr::new("truecolor"))
+        );
+        assert_eq!(
+            command.get_env("TERM_PROGRAM"),
+            Some(std::ffi::OsStr::new("SpaceTerm"))
+        );
+        assert_eq!(
+            command.get_env("TERM_PROGRAM_VERSION"),
+            Some(std::ffi::OsStr::new(env!("CARGO_PKG_VERSION")))
+        );
+        assert!(command.get_controlling_tty());
+    }
+
+    #[test]
+    fn shell_command_uses_packaged_terminfo_only_when_the_entry_is_discoverable() {
+        let resources = std::env::temp_dir().join(format!(
+            "spaceterm-command-terminfo-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let terminfo = resources.join("terminfo/78/xterm-spaceterm");
+        std::fs::create_dir_all(terminfo.parent().unwrap()).unwrap();
+        std::fs::write(&terminfo, b"compiled").unwrap();
+
+        let command = build_shell_command_with_resources("/bin/zsh", Path::new("/tmp"), &resources);
+
+        assert_eq!(
+            command.get_env("TERM"),
+            Some(std::ffi::OsStr::new(identity::TERM_NAME))
+        );
+        assert_eq!(
+            command.get_env("TERMINFO"),
+            Some(resources.join("terminfo").as_os_str())
+        );
+        assert_eq!(
+            command.get_env("TERM_PROGRAM"),
+            Some(std::ffi::OsStr::new(identity::PROGRAM_NAME))
+        );
+        assert_eq!(
+            command.get_env("TERM_PROGRAM_VERSION"),
+            Some(std::ffi::OsStr::new(identity::PROGRAM_VERSION))
+        );
+        std::fs::remove_dir_all(resources).unwrap();
+    }
+
+    #[test]
+    fn shell_spawn_should_reject_a_missing_working_directory() {
+        let result = spawn_user_shell(
+            PtySize {
+                rows: 24,
+                cols: 80,
+                pixel_width: 640,
+                pixel_height: 480,
+            },
+            Path::new("/private/tmp/spaceterm-missing-working-directory"),
+        );
+
+        let error = match result {
+            Ok(_) => panic!("a missing Workspace root must not silently fall back to HOME"),
+            Err(error) => error,
+        };
+        assert!(matches!(error, PtyError::WorkingDirectory { .. }));
+    }
 
     #[derive(Default)]
     struct TestMasterPty;
@@ -689,7 +1435,7 @@ mod tests {
     }
 
     fn spawned_pty(child: Box<dyn Child + Send + Sync>) -> (SpawnedPty, PtyTerminator) {
-        let termination = Arc::new(ChildTermination::new(child.clone_killer()));
+        let termination = Arc::new(ChildTermination::new(None, child.clone_killer()));
         let terminator = PtyTerminator::new(Arc::clone(&termination));
         (
             SpawnedPty {
@@ -1001,7 +1747,7 @@ mod tests {
     }
 
     #[test]
-    fn child_reap_should_exclude_and_revoke_a_concurrent_signal() {
+    fn termination_should_not_block_behind_a_concurrent_child_reap() {
         let cleanup = CleanupCounts::default();
         let try_wait_control = BlockingCallControl::default();
         let (mut pty, terminator) = spawned_pty(Box::new(BlockingTryWaitChild {
@@ -1022,11 +1768,11 @@ mod tests {
             termination_finished.send(terminator.terminate()).unwrap();
         });
         termination_start.recv().unwrap();
-        assert!(matches!(
-            termination_completion.recv_timeout(Duration::from_millis(50)),
-            Err(mpsc::RecvTimeoutError::Timeout)
-        ));
-        assert_eq!(cleanup.signal.load(Ordering::Relaxed), 0);
+        termination_completion
+            .recv_timeout(Duration::from_millis(50))
+            .unwrap()
+            .unwrap();
+        assert_eq!(cleanup.signal.load(Ordering::Relaxed), 1);
 
         try_wait_control.release();
         let (wait_result, pty) = wait_completion
@@ -1034,10 +1780,6 @@ mod tests {
             .unwrap();
         wait_result.unwrap();
         wait_thread.join().unwrap();
-        termination_completion
-            .recv_timeout(Duration::from_secs(1))
-            .unwrap()
-            .unwrap();
         termination_thread.join().unwrap();
         drop(pty);
 
@@ -1048,7 +1790,7 @@ mod tests {
                 cleanup.signal.load(Ordering::Relaxed),
                 cleanup.wait.load(Ordering::Relaxed),
             ),
-            (1, 0, 0, 0)
+            (1, 0, 1, 0)
         );
     }
 
