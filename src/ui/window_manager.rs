@@ -848,7 +848,7 @@ mod tests {
     use super::*;
     use crate::domain::PaneId;
     use crate::terminal::testing::{TestTerminalSessionFactory, TestTerminalSessionRecords};
-    use crate::terminal::{ScreenSnapshot, SessionEvent, TerminalSessionFactory};
+    use crate::terminal::{ScreenSnapshot, SessionEvent, SessionExit, TerminalSessionFactory};
 
     fn window_manager(
         cx: &mut TestAppContext,
@@ -1122,12 +1122,11 @@ mod tests {
             .expect("the initial Window session must have started");
 
         sender
-            .try_send(SessionEvent::Screen(Arc::new(ScreenSnapshot {
-                rows: Arc::from([]),
-                background: ACTIVE_THEME.terminal_background,
-                scrollbar: Default::default(),
-                title: Arc::from("Claude Code"),
-            })))
+            .try_send(SessionEvent::Screen(ScreenSnapshot::from_test_parts(
+                Arc::from([]),
+                Default::default(),
+                "Claude Code",
+            )))
             .unwrap();
         cx.run_until_parked();
 
@@ -1146,12 +1145,11 @@ mod tests {
             .event_sender(1)
             .expect("the initial Window session must have started");
         sender
-            .try_send(SessionEvent::Screen(Arc::new(ScreenSnapshot {
-                rows: Arc::from([]),
-                background: ACTIVE_THEME.terminal_background,
-                scrollbar: Default::default(),
-                title: Arc::from("Claude Code"),
-            })))
+            .try_send(SessionEvent::Screen(ScreenSnapshot::from_test_parts(
+                Arc::from([]),
+                Default::default(),
+                "Claude Code",
+            )))
             .unwrap();
         cx.run_until_parked();
 
@@ -1474,7 +1472,7 @@ mod tests {
             .expect("Window 1 session must have started");
 
         first_sender
-            .try_send(SessionEvent::Exited("Shell exited".to_owned()))
+            .try_send(SessionEvent::Exited(SessionExit::Success))
             .unwrap();
         cx.run_until_parked();
 
@@ -1507,7 +1505,7 @@ mod tests {
         });
 
         active_sender
-            .try_send(SessionEvent::Exited("Shell exited".to_owned()))
+            .try_send(SessionEvent::Exited(SessionExit::Success))
             .unwrap();
         cx.run_until_parked();
 
@@ -1534,7 +1532,7 @@ mod tests {
             .expect("Window 2 session must have started");
 
         active_sender
-            .try_send(SessionEvent::Exited("Shell exited".to_owned()))
+            .try_send(SessionEvent::Exited(SessionExit::Success))
             .unwrap();
         cx.run_until_parked();
 

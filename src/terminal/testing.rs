@@ -3,27 +3,33 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
+use super::geometry::TerminalGeometry;
 use super::{
-    GridSize, KeyInput, PointerInput, SessionError, SessionEvent, StartedTerminalSession,
-    TerminalSessionFactory, TerminalSessionHandle, WheelInput,
+    KeyInput, Osc52AuthorizationDecision, Osc52AuthorizationId, PasteConfirmationId, PasteDecision,
+    PasteRequestOutcome, PasteResolution, PointerInput, PresentationGeneration, SelectionCopy,
+    SessionError, SessionEvent, StartedTerminalSession, TerminalSessionFactory,
+    TerminalSessionHandle, WheelInput,
 };
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) struct RecordedSessionStart {
     pub(crate) session_id: usize,
-    pub(crate) size: GridSize,
+    pub(crate) geometry: TerminalGeometry,
     pub(crate) working_directory: PathBuf,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum RecordedSessionCommand {
     Key(KeyInput),
-    Resize(GridSize),
+    Focus(bool),
+    Resize(TerminalGeometry),
     Pointer(PointerInput),
     Wheel(WheelInput),
-    ScrollTo(u64),
-    Paste(String),
-    RequestSelectionText,
+    ScrollTo(u64, PresentationGeneration),
+    RequestPaste(String),
+    ResolvePaste(PasteConfirmationId, PasteDecision),
+    ResolveOsc52Authorization(Osc52AuthorizationId, Osc52AuthorizationDecision),
+    RequestSelectionCopy,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -85,7 +91,9 @@ pub(crate) struct TestTerminalSessionFactory {
     next_session_id: Cell<usize>,
     fallback_title: String,
     start_failure: Option<String>,
-    selection_response: Result<Option<String>, String>,
+    selection_response: Result<Option<SelectionCopy>, String>,
+    paste_response: Result<PasteRequestOutcome, String>,
+    paste_resolution: Result<PasteResolution, String>,
 }
 
 impl TestTerminalSessionFactory {
@@ -96,6 +104,8 @@ impl TestTerminalSessionFactory {
             fallback_title: "Terminal".to_owned(),
             start_failure: None,
             selection_response: Ok(None),
+            paste_response: Ok(PasteRequestOutcome::Written),
+            paste_resolution: Ok(PasteResolution::Written),
         }
     }
 
@@ -109,11 +119,27 @@ impl TestTerminalSessionFactory {
         self
     }
 
-    pub(crate) fn with_selection_response(
+    pub(crate) fn with_selection_copy_response(
         mut self,
-        response: Result<Option<String>, String>,
+        response: Result<Option<SelectionCopy>, String>,
     ) -> Self {
         self.selection_response = response;
+        self
+    }
+
+    pub(crate) fn with_paste_response(
+        mut self,
+        response: Result<PasteRequestOutcome, String>,
+    ) -> Self {
+        self.paste_response = response;
+        self
+    }
+
+    pub(crate) fn with_paste_resolution(
+        mut self,
+        response: Result<PasteResolution, String>,
+    ) -> Self {
+        self.paste_resolution = response;
         self
     }
 }
@@ -121,14 +147,14 @@ impl TestTerminalSessionFactory {
 impl TerminalSessionFactory for TestTerminalSessionFactory {
     fn start(
         &self,
-        size: GridSize,
+        geometry: TerminalGeometry,
         working_directory: &Path,
     ) -> Result<StartedTerminalSession, SessionError> {
         let session_id = self.next_session_id.get();
         self.next_session_id.set(session_id + 1);
         self.records.starts.borrow_mut().push(RecordedSessionStart {
             session_id,
-            size,
+            geometry,
             working_directory: working_directory.to_path_buf(),
         });
 
@@ -147,6 +173,8 @@ impl TerminalSessionFactory for TestTerminalSessionFactory {
                 session_id,
                 records: self.records.clone(),
                 selection_response: self.selection_response.clone(),
+                paste_response: self.paste_response.clone(),
+                paste_resolution: self.paste_resolution.clone(),
             }),
             events,
         })
@@ -160,7 +188,9 @@ impl TerminalSessionFactory for TestTerminalSessionFactory {
 struct TestTerminalSessionHandle {
     session_id: usize,
     records: TestTerminalSessionRecords,
-    selection_response: Result<Option<String>, String>,
+    selection_response: Result<Option<SelectionCopy>, String>,
+    paste_response: Result<PasteRequestOutcome, String>,
+    paste_resolution: Result<PasteResolution, String>,
 }
 
 impl TestTerminalSessionHandle {
@@ -189,8 +219,12 @@ impl TerminalSessionHandle for TestTerminalSessionHandle {
         self.record(RecordedSessionCommand::Key(input));
     }
 
-    fn resize(&self, size: GridSize) {
-        self.record(RecordedSessionCommand::Resize(size));
+    fn focus(&self, focused: bool) {
+        self.record(RecordedSessionCommand::Focus(focused));
+    }
+
+    fn resize(&self, geometry: TerminalGeometry) {
+        self.record(RecordedSessionCommand::Resize(geometry));
     }
 
     fn pointer(&self, input: PointerInput) {
@@ -201,16 +235,45 @@ impl TerminalSessionHandle for TestTerminalSessionHandle {
         self.record(RecordedSessionCommand::Wheel(input));
     }
 
-    fn scroll_to(&self, offset_rows: u64) {
-        self.record(RecordedSessionCommand::ScrollTo(offset_rows));
+    fn scroll_to(&self, offset_rows: u64, generation: PresentationGeneration) {
+        self.record(RecordedSessionCommand::ScrollTo(offset_rows, generation));
     }
 
-    fn paste(&self, text: String) {
-        self.record(RecordedSessionCommand::Paste(text));
+    fn request_paste(
+        &self,
+        text: String,
+    ) -> async_channel::Receiver<Result<PasteRequestOutcome, String>> {
+        self.record(RecordedSessionCommand::RequestPaste(text));
+        let (sender, receiver) = async_channel::bounded(1);
+        let _ = sender.try_send(self.paste_response.clone());
+        receiver
     }
 
-    fn request_selection_text(&self) -> async_channel::Receiver<Result<Option<String>, String>> {
-        self.record(RecordedSessionCommand::RequestSelectionText);
+    fn resolve_paste(
+        &self,
+        id: PasteConfirmationId,
+        decision: PasteDecision,
+    ) -> async_channel::Receiver<Result<PasteResolution, String>> {
+        self.record(RecordedSessionCommand::ResolvePaste(id, decision));
+        let (sender, receiver) = async_channel::bounded(1);
+        let _ = sender.try_send(self.paste_resolution.clone());
+        receiver
+    }
+
+    fn resolve_osc52_authorization(
+        &self,
+        id: Osc52AuthorizationId,
+        decision: Osc52AuthorizationDecision,
+    ) {
+        self.record(RecordedSessionCommand::ResolveOsc52Authorization(
+            id, decision,
+        ));
+    }
+
+    fn request_selection_copy(
+        &self,
+    ) -> async_channel::Receiver<Result<Option<SelectionCopy>, String>> {
+        self.record(RecordedSessionCommand::RequestSelectionCopy);
         let (sender, receiver) = async_channel::bounded(1);
         let _ = sender.try_send(self.selection_response.clone());
         receiver

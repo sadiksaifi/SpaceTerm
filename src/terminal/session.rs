@@ -1,62 +1,59 @@
+use std::collections::VecDeque;
 use std::fmt;
 use std::io::{ErrorKind, Read, Write};
-use std::path::Path;
-use std::sync::Arc;
+use std::mem;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver as CommandReceiver, Sender as CommandSender};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Error as AnyError;
-use portable_pty::{ExitStatus, PtySize};
+#[cfg(test)]
+use portable_pty::ExitStatus;
+use portable_pty::PtySize;
 use thiserror::Error;
 
 use crate::platform::macos_pty::{
-    PtyError, PtyTerminator, SpawnedPty, spawn_user_shell, user_shell,
+    PtyError, PtyTerminator, ShellExit, ShutdownDisposition, SpawnedPty, spawn_user_shell,
+    user_shell,
 };
-use crate::terminal::emulator::{EmulatorAction, ScreenSnapshot, TerminalEmulator};
+use crate::platform::shell_integration::resource_root;
+use crate::terminal::attention::AttentionEvent;
+#[cfg(test)]
+use crate::terminal::emulator::MAX_SYNCHRONIZED_OUTPUT_DURATION;
+use crate::terminal::emulator::{
+    EmulatorAction, PresentationGeneration, ScreenSnapshot, TerminalEmulator,
+};
+use crate::terminal::geometry::TerminalGeometry;
+use crate::terminal::identity;
+#[cfg(test)]
+use crate::terminal::key::OptionAsAltPolicy;
+use crate::terminal::key::{InputModifiers, KeyInput};
+#[cfg(test)]
+use crate::terminal::osc52::Osc52ClipboardError;
+use crate::terminal::osc52::{
+    MAX_OSC52_CONTENT_BYTES, Osc52AccessPolicy, Osc52AuthorizationDecision, Osc52AuthorizationId,
+    Osc52AuthorizationPolicy, Osc52AuthorizationRequest, Osc52Clipboard, Osc52Effect, Osc52Filter,
+    Osc52Operation,
+};
+use crate::terminal::paste::{
+    PasteConfirmationId, PasteDecision, PasteRejection, PasteRequestOutcome, PasteResolution,
+    PreparedPaste,
+};
+use crate::terminal::selection::{SelectionCopy, SelectionCopyOptions};
 
 const FINAL_CHILD_WAIT_TIMEOUT: Duration = Duration::from_secs(2);
 const PTY_READ_BUFFER_SIZE: usize = 16 * 1024;
 const PTY_OUTPUT_QUEUE_CAPACITY: usize = 8;
+const TERMIOS_POLL_INTERVAL: Duration = Duration::from_millis(200);
+const PASTE_CONFIRMATION_TIMEOUT: Duration = Duration::from_secs(30);
+const OSC52_AUTHORIZATION_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub(crate) struct SurfacePosition {
     pub(crate) x: f32,
     pub(crate) y: f32,
-}
-
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) struct InputModifiers {
-    pub(crate) shift: bool,
-    pub(crate) alt: bool,
-    pub(crate) control: bool,
-    pub(crate) platform: bool,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum KeyCode {
-    Character(char),
-    Enter,
-    Backspace,
-    Tab,
-    Escape,
-    ArrowUp,
-    ArrowDown,
-    ArrowLeft,
-    ArrowRight,
-    Home,
-    End,
-    PageUp,
-    PageDown,
-    Insert,
-    Delete,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct KeyInput {
-    pub(crate) code: KeyCode,
-    pub(crate) text: Option<String>,
-    pub(crate) modifiers: InputModifiers,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -73,37 +70,70 @@ pub(crate) enum PointerPhase {
     Release,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ShiftSelectionPolicy {
+    OverrideApplicationMouse,
+    ReportToApplication,
+}
+
+impl ShiftSelectionPolicy {
+    pub(crate) const fn from_selection_override(enabled: bool) -> Self {
+        if enabled {
+            Self::OverrideApplicationMouse
+        } else {
+            Self::ReportToApplication
+        }
+    }
+}
+
+impl Default for ShiftSelectionPolicy {
+    fn default() -> Self {
+        Self::from_selection_override(true)
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct PointerInput {
+    pub(crate) generation: PresentationGeneration,
     pub(crate) phase: PointerPhase,
     pub(crate) button: Option<PointerButton>,
     pub(crate) position: SurfacePosition,
     pub(crate) modifiers: InputModifiers,
+    pub(crate) shift_selection: ShiftSelectionPolicy,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct WheelInput {
-    pub(crate) steps: i32,
+    pub(crate) generation: PresentationGeneration,
+    pub(crate) horizontal_steps: i32,
+    pub(crate) vertical_steps: i32,
+    pub(crate) phase: WheelPhase,
     pub(crate) position: SurfacePosition,
     pub(crate) modifiers: InputModifiers,
+    pub(crate) shift_selection: ShiftSelectionPolicy,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct GridSize {
-    pub(crate) cols: u16,
-    pub(crate) rows: u16,
-    pub(crate) cell_width_px: u16,
-    pub(crate) cell_height_px: u16,
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) enum WheelPhase {
+    GestureStarted,
+    #[default]
+    GestureChanged,
+    GestureEnded,
+    GestureCancelled,
+    MomentumStarted,
+    MomentumChanged,
+    MomentumEnded,
+    MomentumCancelled,
 }
 
-impl GridSize {
-    fn pty_size(self) -> PtySize {
-        PtySize {
-            rows: self.rows,
-            cols: self.cols,
-            pixel_width: self.cols.saturating_mul(self.cell_width_px),
-            pixel_height: self.rows.saturating_mul(self.cell_height_px),
-        }
+fn pty_size(geometry: TerminalGeometry) -> PtySize {
+    let grid = geometry.grid();
+    let backing = geometry.backing_grid_size();
+    PtySize {
+        rows: grid.rows,
+        cols: grid.cols,
+        pixel_width: backing.width.min(u32::from(u16::MAX)) as u16,
+        pixel_height: backing.height.min(u32::from(u16::MAX)) as u16,
     }
 }
 
@@ -112,12 +142,41 @@ impl GridSize {
 #[derive(Clone, Debug)]
 pub(crate) enum SessionEvent {
     Screen(Arc<ScreenSnapshot>),
-    Exited(String),
+    Attention(AttentionEvent),
+    HiddenInputChanged(bool),
+    Osc52Authorization(Osc52AuthorizationRequest),
+    Osc52AuthorizationExpired(Osc52AuthorizationId),
+    Exited(SessionExit),
     Failed(SessionFailure),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum SessionExit {
+    Success,
+    ExitCode(u32),
+    Signal(String),
+    GracefulShutdown,
+    ForcedShutdown,
+}
+
+impl fmt::Display for SessionExit {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Success => formatter.write_str("Shell exited successfully"),
+            Self::ExitCode(code) => write!(formatter, "Shell exited with code {code}"),
+            Self::Signal(signal) => write!(formatter, "Shell exited after signal {signal}"),
+            Self::GracefulShutdown => formatter.write_str("Shell shut down gracefully"),
+            Self::ForcedShutdown => formatter.write_str("Shell shutdown was forced"),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum SessionFailure {
+    Startup {
+        stage: SessionStartupStage,
+        message: String,
+    },
     Runtime(String),
     PtyRead {
         read_error: String,
@@ -129,9 +188,23 @@ pub(crate) enum SessionFailure {
     },
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SessionStartupStage {
+    Pty,
+    Reader,
+    ReaderThread,
+    Emulator,
+}
+
 impl fmt::Display for SessionFailure {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Startup { stage, message } => {
+                write!(
+                    formatter,
+                    "Terminal Session startup failed during {stage}: {message}"
+                )
+            }
             Self::Runtime(message) => write!(formatter, "Terminal runtime failed: {message}"),
             Self::PtyRead {
                 read_error,
@@ -160,14 +233,28 @@ impl fmt::Display for SessionFailure {
 
 impl std::error::Error for SessionFailure {}
 
+impl fmt::Display for SessionStartupStage {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Pty => formatter.write_str("PTY creation"),
+            Self::Reader => formatter.write_str("PTY reader acquisition"),
+            Self::ReaderThread => formatter.write_str("PTY reader thread creation"),
+            Self::Emulator => formatter.write_str("Terminal Emulator creation"),
+        }
+    }
+}
+
 #[derive(Debug, Error)]
 pub(crate) enum SessionError {
+    #[cfg(test)]
     #[error(transparent)]
     Pty(#[from] PtyError),
     #[error("failed to start the terminal worker thread: {0}")]
     SpawnWorker(#[source] std::io::Error),
+    #[cfg(test)]
     #[error("terminal worker stopped before initialization completed")]
     StartupChannelClosed,
+    #[cfg(test)]
     #[error("terminal emulator initialization failed: {0}")]
     EmulatorStartup(String),
 }
@@ -179,18 +266,34 @@ pub(crate) struct StartedTerminalSession {
 
 pub(crate) trait TerminalSessionHandle {
     fn key(&self, input: KeyInput);
-    fn resize(&self, size: GridSize);
+    fn focus(&self, focused: bool);
+    fn resize(&self, geometry: TerminalGeometry);
     fn pointer(&self, input: PointerInput);
     fn wheel(&self, input: WheelInput);
-    fn scroll_to(&self, offset_rows: u64);
-    fn paste(&self, text: String);
-    fn request_selection_text(&self) -> async_channel::Receiver<Result<Option<String>, String>>;
+    fn scroll_to(&self, offset_rows: u64, generation: PresentationGeneration);
+    fn request_paste(
+        &self,
+        text: String,
+    ) -> async_channel::Receiver<Result<PasteRequestOutcome, String>>;
+    fn resolve_paste(
+        &self,
+        id: PasteConfirmationId,
+        decision: PasteDecision,
+    ) -> async_channel::Receiver<Result<PasteResolution, String>>;
+    fn resolve_osc52_authorization(
+        &self,
+        id: Osc52AuthorizationId,
+        decision: Osc52AuthorizationDecision,
+    );
+    fn request_selection_copy(
+        &self,
+    ) -> async_channel::Receiver<Result<Option<SelectionCopy>, String>>;
 }
 
 pub(crate) trait TerminalSessionFactory {
     fn start(
         &self,
-        size: GridSize,
+        geometry: TerminalGeometry,
         working_directory: &Path,
     ) -> Result<StartedTerminalSession, SessionError>;
 
@@ -205,10 +308,10 @@ pub(crate) struct NativeTerminalSessionFactory;
 impl TerminalSessionFactory for NativeTerminalSessionFactory {
     fn start(
         &self,
-        size: GridSize,
+        geometry: TerminalGeometry,
         working_directory: &Path,
     ) -> Result<StartedTerminalSession, SessionError> {
-        let (session, events) = TerminalSession::start(size, working_directory)?;
+        let (session, events) = TerminalSession::start(geometry, working_directory)?;
         Ok(StartedTerminalSession {
             handle: Box::new(session),
             events,
@@ -226,25 +329,135 @@ impl TerminalSessionFactory for NativeTerminalSessionFactory {
     }
 }
 
+#[derive(Clone, Default)]
+struct ResizeMailbox {
+    pending: Arc<Mutex<Option<TerminalGeometry>>>,
+}
+
+impl ResizeMailbox {
+    fn replace(&self, geometry: TerminalGeometry) -> bool {
+        let mut pending = self.lock();
+        let should_notify = pending.is_none();
+        *pending = Some(geometry);
+        should_notify
+    }
+
+    fn take(&self) -> Option<TerminalGeometry> {
+        self.lock().take()
+    }
+
+    fn lock(&self) -> MutexGuard<'_, Option<TerminalGeometry>> {
+        self.pending.lock().unwrap_or_else(|poisoned| {
+            eprintln!("terminal resize mailbox recovered after a worker panic");
+            poisoned.into_inner()
+        })
+    }
+}
+
 pub(crate) struct TerminalSession {
     commands: Option<CommandSender<Command>>,
     worker: Option<JoinHandle<()>>,
     terminator: Option<Box<dyn SessionPtyTerminator>>,
+    resizes: ResizeMailbox,
 }
 
 trait SessionPty: Write + Send {
     fn take_reader(&mut self) -> std::io::Result<Box<dyn Read + Send>>;
     fn resize(&self, size: PtySize) -> Result<(), AnyError>;
-    fn wait_for_child(&mut self, timeout: Duration) -> std::io::Result<ExitStatus>;
+    fn wait_for_child(&mut self, timeout: Duration) -> std::io::Result<ShellExit>;
+    fn hidden_input(&self) -> std::io::Result<bool> {
+        Ok(false)
+    }
 }
 
 trait SessionPtyTerminator: Send + Sync {
     fn terminate(&self) -> std::io::Result<()>;
 }
 
+#[cfg(test)]
+#[derive(Default)]
+struct UnavailableOsc52Clipboard;
+
+#[cfg(test)]
+impl Osc52Clipboard for UnavailableOsc52Clipboard {
+    fn read(
+        &mut self,
+        _target: crate::terminal::Osc52Target,
+    ) -> Result<String, Osc52ClipboardError> {
+        Err(Osc52ClipboardError::Unavailable)
+    }
+
+    fn write(
+        &mut self,
+        _target: crate::terminal::Osc52Target,
+        _text: &str,
+    ) -> Result<(), Osc52ClipboardError> {
+        Err(Osc52ClipboardError::Unavailable)
+    }
+}
+
+fn native_osc52_clipboard() -> Box<dyn Osc52Clipboard> {
+    #[cfg(test)]
+    {
+        Box::<UnavailableOsc52Clipboard>::default()
+    }
+    #[cfg(not(test))]
+    {
+        Box::<crate::platform::macos_pasteboard::MacosOsc52Clipboard>::default()
+    }
+}
+
 struct StartedSessionPty {
     pty: Box<dyn SessionPty>,
     terminator: Box<dyn SessionPtyTerminator>,
+}
+
+#[derive(Clone, Default)]
+struct DeferredPtyTerminator {
+    state: Arc<Mutex<DeferredPtyTerminationState>>,
+}
+
+#[derive(Default)]
+struct DeferredPtyTerminationState {
+    requested: bool,
+    terminator: Option<Box<dyn SessionPtyTerminator>>,
+}
+
+impl DeferredPtyTerminator {
+    fn install(&self, terminator: Box<dyn SessionPtyTerminator>) -> std::io::Result<()> {
+        let mut state = self.lock_state();
+        if state.requested {
+            drop(state);
+            terminator.terminate()
+        } else {
+            state.terminator = Some(terminator);
+            Ok(())
+        }
+    }
+
+    fn lock_state(&self) -> std::sync::MutexGuard<'_, DeferredPtyTerminationState> {
+        match self.state.lock() {
+            Ok(state) => state,
+            Err(poisoned) => {
+                eprintln!("deferred PTY termination lock was poisoned; recovering");
+                poisoned.into_inner()
+            }
+        }
+    }
+}
+
+impl SessionPtyTerminator for DeferredPtyTerminator {
+    fn terminate(&self) -> std::io::Result<()> {
+        let terminator = {
+            let mut state = self.lock_state();
+            state.requested = true;
+            state.terminator.take()
+        };
+        match terminator {
+            Some(terminator) => terminator.terminate(),
+            None => Ok(()),
+        }
+    }
 }
 
 impl SessionPty for SpawnedPty {
@@ -256,8 +469,12 @@ impl SessionPty for SpawnedPty {
         SpawnedPty::resize(self, size)
     }
 
-    fn wait_for_child(&mut self, timeout: Duration) -> std::io::Result<ExitStatus> {
+    fn wait_for_child(&mut self, timeout: Duration) -> std::io::Result<ShellExit> {
         SpawnedPty::wait_for_child(self, timeout)
+    }
+
+    fn hidden_input(&self) -> std::io::Result<bool> {
+        SpawnedPty::hidden_input(self)
     }
 }
 
@@ -280,35 +497,112 @@ fn spawn_native_session_pty(
 
 impl TerminalSession {
     pub(crate) fn start(
-        size: GridSize,
+        geometry: TerminalGeometry,
         working_directory: &Path,
     ) -> Result<(Self, async_channel::Receiver<SessionEvent>), SessionError> {
-        Self::start_with(size, working_directory, spawn_native_session_pty)
+        Self::start_deferred_with(geometry, working_directory, spawn_native_session_pty)
     }
 
+    fn start_deferred_with(
+        geometry: TerminalGeometry,
+        working_directory: &Path,
+        spawn_pty: impl FnOnce(PtySize, &Path) -> Result<StartedSessionPty, PtyError> + Send + 'static,
+    ) -> Result<(Self, async_channel::Receiver<SessionEvent>), SessionError> {
+        let working_directory = PathBuf::from(working_directory);
+        let fallback_title = shell_fallback_title();
+        let terminal_name = identity::launch_identity(&resource_root()).term;
+        let (command_tx, command_rx) = mpsc::channel();
+        let reader_transport = ReaderTransport::new(command_tx.clone());
+        let resizes = ResizeMailbox::default();
+        let worker_resizes = resizes.clone();
+        let (event_tx, event_rx) = async_channel::bounded(2);
+        let deferred_terminator = DeferredPtyTerminator::default();
+        let worker_terminator = deferred_terminator.clone();
+        let worker_events = event_tx.clone();
+
+        let worker = thread::Builder::new()
+            .name("spaceterm-terminal".to_owned())
+            .spawn(move || {
+                let StartedSessionPty { pty, terminator } =
+                    match spawn_pty(pty_size(geometry), &working_directory) {
+                        Ok(started) => started,
+                        Err(error) => {
+                            send_session_event(
+                                &worker_events,
+                                SessionEvent::Failed(SessionFailure::Startup {
+                                    stage: SessionStartupStage::Pty,
+                                    message: error.to_string(),
+                                }),
+                            );
+                            return;
+                        }
+                    };
+                if let Err(error) = worker_terminator.install(terminator) {
+                    eprintln!("failed to terminate a PTY closed during startup: {error}");
+                }
+                TerminalWorker::run(
+                    pty,
+                    TerminalWorkerContext {
+                        initial_geometry: geometry,
+                        initial_directory: working_directory,
+                        fallback_title,
+                        terminal_name,
+                    },
+                    command_rx,
+                    reader_transport,
+                    worker_resizes,
+                    event_tx,
+                    StartupReporter::Events(worker_events),
+                );
+            })
+            .map_err(SessionError::SpawnWorker)?;
+
+        Ok((
+            Self {
+                commands: Some(command_tx),
+                worker: Some(worker),
+                terminator: Some(Box::new(deferred_terminator)),
+                resizes,
+            },
+            event_rx,
+        ))
+    }
+
+    #[cfg(test)]
     fn start_with(
-        size: GridSize,
+        geometry: TerminalGeometry,
         working_directory: &Path,
         spawn_pty: impl FnOnce(PtySize, &Path) -> Result<StartedSessionPty, PtyError>,
     ) -> Result<(Self, async_channel::Receiver<SessionEvent>), SessionError> {
-        let StartedSessionPty { pty, terminator } = spawn_pty(size.pty_size(), working_directory)?;
+        let worker_directory = working_directory.to_owned();
+        let terminal_name = identity::launch_identity(&resource_root()).term;
+        let StartedSessionPty { pty, terminator } =
+            spawn_pty(pty_size(geometry), working_directory)?;
         let (command_tx, command_rx) = mpsc::channel();
         let reader_transport = ReaderTransport::new(command_tx.clone());
         // Two slots retain the latest screen and a final lifecycle event without
         // allowing sustained PTY output to build an unbounded UI backlog.
         let (event_tx, event_rx) = async_channel::bounded(2);
         let (startup_tx, startup_rx) = mpsc::sync_channel(1);
+        let resizes = ResizeMailbox::default();
+        let worker_resizes = resizes.clone();
 
         let worker = thread::Builder::new()
             .name("spaceterm-terminal".to_owned())
             .spawn(move || {
                 TerminalWorker::run(
                     pty,
-                    size,
+                    TerminalWorkerContext {
+                        initial_geometry: geometry,
+                        initial_directory: worker_directory,
+                        fallback_title: "Terminal".to_owned(),
+                        terminal_name,
+                    },
                     command_rx,
                     reader_transport,
+                    worker_resizes,
                     event_tx,
-                    startup_tx,
+                    StartupReporter::Blocking(startup_tx),
                 )
             })
             .map_err(SessionError::SpawnWorker)?;
@@ -319,6 +613,7 @@ impl TerminalSession {
                     commands: Some(command_tx),
                     worker: Some(worker),
                     terminator: Some(terminator),
+                    resizes,
                 },
                 event_rx,
             )),
@@ -341,9 +636,18 @@ impl TerminalSession {
         }
     }
 
-    pub(crate) fn resize(&self, size: GridSize) {
+    pub(crate) fn focus(&self, focused: bool) {
         if let Some(commands) = &self.commands
-            && commands.send(Command::Resize(size)).is_err()
+            && commands.send(Command::Focus(focused)).is_err()
+        {
+            eprintln!("terminal focus input was dropped because the worker has stopped");
+        }
+    }
+
+    pub(crate) fn resize(&self, geometry: TerminalGeometry) {
+        if let Some(commands) = &self.commands
+            && self.resizes.replace(geometry)
+            && commands.send(Command::Resize).is_err()
         {
             eprintln!("terminal resize was dropped because the worker has stopped");
         }
@@ -365,33 +669,78 @@ impl TerminalSession {
         }
     }
 
-    pub(crate) fn scroll_to(&self, offset_rows: u64) {
+    pub(crate) fn scroll_to(&self, offset_rows: u64, generation: PresentationGeneration) {
         if let Some(commands) = &self.commands
-            && commands.send(Command::ScrollTo(offset_rows)).is_err()
+            && commands
+                .send(Command::ScrollTo(offset_rows, generation))
+                .is_err()
         {
             eprintln!("terminal scrollbar input was dropped because the worker has stopped");
         }
     }
 
-    pub(crate) fn paste(&self, text: String) {
+    pub(crate) fn request_paste(
+        &self,
+        text: String,
+    ) -> async_channel::Receiver<Result<PasteRequestOutcome, String>> {
+        let (reply, receiver) = async_channel::bounded(1);
+        let sent = self.commands.as_ref().is_some_and(|commands| {
+            commands
+                .send(Command::RequestPaste(text, reply.clone()))
+                .is_ok()
+        });
+        if !sent {
+            let _ = reply.try_send(Err(
+                "terminal paste could not be requested because the worker has stopped".to_owned(),
+            ));
+        }
+        receiver
+    }
+
+    pub(crate) fn resolve_paste(
+        &self,
+        id: PasteConfirmationId,
+        decision: PasteDecision,
+    ) -> async_channel::Receiver<Result<PasteResolution, String>> {
+        let (reply, receiver) = async_channel::bounded(1);
+        let sent = self.commands.as_ref().is_some_and(|commands| {
+            commands
+                .send(Command::ResolvePaste(id, decision, reply.clone()))
+                .is_ok()
+        });
+        if !sent {
+            let _ = reply.try_send(Err(
+                "terminal paste confirmation was lost because the worker has stopped".to_owned(),
+            ));
+        }
+        receiver
+    }
+
+    pub(crate) fn resolve_osc52_authorization(
+        &self,
+        id: Osc52AuthorizationId,
+        decision: Osc52AuthorizationDecision,
+    ) {
         if let Some(commands) = &self.commands
-            && commands.send(Command::Paste(text)).is_err()
+            && commands
+                .send(Command::ResolveOsc52Authorization(id, decision))
+                .is_err()
         {
-            eprintln!("terminal paste was dropped because the worker has stopped");
+            eprintln!("OSC 52 authorization reply was dropped because the worker has stopped");
         }
     }
 
-    pub(crate) fn request_selection_text(
+    pub(crate) fn request_selection_copy(
         &self,
-    ) -> async_channel::Receiver<Result<Option<String>, String>> {
+    ) -> async_channel::Receiver<Result<Option<SelectionCopy>, String>> {
         let (reply, receiver) = async_channel::bounded(1);
         let sent = self
             .commands
             .as_ref()
-            .is_some_and(|commands| commands.send(Command::SelectionText(reply.clone())).is_ok());
+            .is_some_and(|commands| commands.send(Command::SelectionCopy(reply.clone())).is_ok());
         if !sent {
             let _ = reply.try_send(Err(
-                "terminal selection could not be read because the worker has stopped".to_owned(),
+                "terminal selection could not be copied because the worker has stopped".to_owned(),
             ));
         }
         receiver
@@ -420,8 +769,12 @@ impl TerminalSessionHandle for TerminalSession {
         Self::key(self, input);
     }
 
-    fn resize(&self, size: GridSize) {
-        Self::resize(self, size);
+    fn focus(&self, focused: bool) {
+        Self::focus(self, focused);
+    }
+
+    fn resize(&self, geometry: TerminalGeometry) {
+        Self::resize(self, geometry);
     }
 
     fn pointer(&self, input: PointerInput) {
@@ -432,16 +785,37 @@ impl TerminalSessionHandle for TerminalSession {
         Self::wheel(self, input);
     }
 
-    fn scroll_to(&self, offset_rows: u64) {
-        Self::scroll_to(self, offset_rows);
+    fn scroll_to(&self, offset_rows: u64, generation: PresentationGeneration) {
+        Self::scroll_to(self, offset_rows, generation);
     }
 
-    fn paste(&self, text: String) {
-        Self::paste(self, text);
+    fn request_paste(
+        &self,
+        text: String,
+    ) -> async_channel::Receiver<Result<PasteRequestOutcome, String>> {
+        Self::request_paste(self, text)
     }
 
-    fn request_selection_text(&self) -> async_channel::Receiver<Result<Option<String>, String>> {
-        Self::request_selection_text(self)
+    fn resolve_paste(
+        &self,
+        id: PasteConfirmationId,
+        decision: PasteDecision,
+    ) -> async_channel::Receiver<Result<PasteResolution, String>> {
+        Self::resolve_paste(self, id, decision)
+    }
+
+    fn resolve_osc52_authorization(
+        &self,
+        id: Osc52AuthorizationId,
+        decision: Osc52AuthorizationDecision,
+    ) {
+        Self::resolve_osc52_authorization(self, id, decision);
+    }
+
+    fn request_selection_copy(
+        &self,
+    ) -> async_channel::Receiver<Result<Option<SelectionCopy>, String>> {
+        Self::request_selection_copy(self)
     }
 }
 
@@ -481,14 +855,29 @@ struct ReaderEventBatch {
 #[derive(Debug)]
 enum Command {
     Key(KeyInput),
-    Resize(GridSize),
+    Focus(bool),
+    Resize,
     Pointer(PointerInput),
     Wheel(WheelInput),
-    ScrollTo(u64),
-    Paste(String),
-    SelectionText(async_channel::Sender<Result<Option<String>, String>>),
+    ScrollTo(u64, PresentationGeneration),
+    RequestPaste(
+        String,
+        async_channel::Sender<Result<PasteRequestOutcome, String>>,
+    ),
+    ResolvePaste(
+        PasteConfirmationId,
+        PasteDecision,
+        async_channel::Sender<Result<PasteResolution, String>>,
+    ),
+    PasteConfirmationExpired,
+    ResolveOsc52Authorization(Osc52AuthorizationId, Osc52AuthorizationDecision),
+    Osc52AuthorizationExpired(Osc52AuthorizationId),
+    ResumeOsc52Output,
+    SelectionCopy(async_channel::Sender<Result<Option<SelectionCopy>, String>>),
+    SelectionAutoscrollTick(PresentationGeneration),
     ReaderReady,
     Shutdown,
+    PollHiddenInput,
 }
 
 struct TerminalWorker {
@@ -498,18 +887,303 @@ struct TerminalWorker {
     reader_events: mpsc::Receiver<ReaderEvent>,
     reader_thread: JoinHandle<()>,
     events: async_channel::Sender<SessionEvent>,
+    resizes: ResizeMailbox,
     pending_command: Option<Command>,
+    terminal_input_focused: bool,
+    focus_reporting_enabled: bool,
+    held_keys: HeldKeys,
+    selection_autoscroll: SelectionAutoscrollSchedule,
+    paste_confirmations: PasteConfirmationSchedule,
+    osc52_filter: Osc52Filter,
+    osc52_policy: Osc52AuthorizationPolicy,
+    osc52_clipboard: Box<dyn Osc52Clipboard>,
+    osc52_authorization: Osc52AuthorizationSchedule,
+    deferred_osc52_effects: VecDeque<Osc52Effect>,
+    deferred_output_chunks: VecDeque<Vec<u8>>,
+    deferred_reader_ready: bool,
+    hidden_input: HiddenInputSchedule,
+}
+
+struct TerminalWorkerContext {
+    initial_geometry: TerminalGeometry,
+    initial_directory: PathBuf,
+    fallback_title: String,
+    terminal_name: &'static str,
+}
+
+struct HiddenInputSchedule {
+    active: bool,
+    deadline: Instant,
+}
+
+impl HiddenInputSchedule {
+    fn new(now: Instant) -> Self {
+        Self {
+            active: false,
+            deadline: now,
+        }
+    }
+
+    fn update(&mut self, now: Instant, result: std::io::Result<bool>) -> Option<bool> {
+        self.deadline = now + TERMIOS_POLL_INTERVAL;
+        let active = match result {
+            Ok(active) => active,
+            Err(error) => {
+                eprintln!(
+                    "failed to inspect PTY hidden-input state; releasing secure input: {error}"
+                );
+                false
+            }
+        };
+        if self.active == active {
+            None
+        } else {
+            self.active = active;
+            Some(active)
+        }
+    }
+}
+
+struct PendingOsc52Authorization {
+    id: Osc52AuthorizationId,
+    operation: Osc52Operation,
+    deadline: Instant,
+}
+
+#[derive(Default)]
+struct Osc52AuthorizationSchedule {
+    next_id: u64,
+    pending: Option<PendingOsc52Authorization>,
+}
+
+impl Osc52AuthorizationSchedule {
+    fn deadline(&self) -> Option<Instant> {
+        self.pending.as_ref().map(|pending| pending.deadline)
+    }
+
+    fn is_pending(&self) -> bool {
+        self.pending.is_some()
+    }
+
+    fn create(
+        &mut self,
+        operation: Osc52Operation,
+        now: Instant,
+    ) -> Option<Osc52AuthorizationRequest> {
+        if self.pending.is_some() {
+            return None;
+        }
+        self.next_id = self.next_id.wrapping_add(1).max(1);
+        let id = Osc52AuthorizationId::from_counter(self.next_id);
+        let request = Osc52AuthorizationRequest {
+            id,
+            access: operation.access(),
+            target: operation.target(),
+            byte_len: operation.byte_len(),
+        };
+        self.pending = Some(PendingOsc52Authorization {
+            id,
+            operation,
+            deadline: now + OSC52_AUTHORIZATION_TIMEOUT,
+        });
+        Some(request)
+    }
+
+    fn take(&mut self, id: Osc52AuthorizationId, now: Instant) -> Option<Osc52Operation> {
+        let pending = self.pending.as_ref()?;
+        if pending.id != id || now >= pending.deadline {
+            return None;
+        }
+        self.pending.take().map(|pending| pending.operation)
+    }
+
+    fn expire(&mut self, now: Instant) -> Option<Osc52AuthorizationId> {
+        if self.deadline().is_some_and(|deadline| now >= deadline) {
+            self.pending.take().map(|pending| pending.id)
+        } else {
+            None
+        }
+    }
+
+    fn cancel(&mut self) {
+        self.pending = None;
+    }
+}
+
+struct PendingPaste {
+    id: PasteConfirmationId,
+    payload: PreparedPaste,
+    deadline: Instant,
+}
+
+#[derive(Default)]
+struct PasteConfirmationSchedule {
+    next_id: u64,
+    pending: Option<PendingPaste>,
+}
+
+impl PasteConfirmationSchedule {
+    fn deadline(&self) -> Option<Instant> {
+        self.pending.as_ref().map(|pending| pending.deadline)
+    }
+
+    fn create(
+        &mut self,
+        payload: PreparedPaste,
+        now: Instant,
+    ) -> Option<crate::terminal::PasteConfirmation> {
+        if self.pending.is_some() {
+            return None;
+        }
+        self.next_id = self.next_id.wrapping_add(1).max(1);
+        let id = PasteConfirmationId::new(self.next_id);
+        let confirmation = payload.confirmation(id);
+        self.pending = Some(PendingPaste {
+            id,
+            payload,
+            deadline: now + PASTE_CONFIRMATION_TIMEOUT,
+        });
+        Some(confirmation)
+    }
+
+    fn take(&mut self, id: PasteConfirmationId, now: Instant) -> Option<PreparedPaste> {
+        let pending = self.pending.take()?;
+        if pending.id == id && now < pending.deadline {
+            Some(pending.payload)
+        } else {
+            None
+        }
+    }
+
+    fn expire(&mut self, now: Instant) -> bool {
+        if self.deadline().is_some_and(|deadline| now >= deadline) {
+            self.pending = None;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn cancel(&mut self) {
+        self.pending = None;
+    }
+}
+
+#[derive(Default)]
+struct SelectionAutoscrollSchedule {
+    deadline: Option<Instant>,
+    generation: PresentationGeneration,
+}
+
+impl SelectionAutoscrollSchedule {
+    fn update(
+        &mut self,
+        now: Instant,
+        interval: Option<Duration>,
+        generation: PresentationGeneration,
+    ) {
+        self.deadline = interval.map(|interval| now + interval);
+        self.generation = generation;
+    }
+
+    fn deadline(&self) -> Option<Instant> {
+        self.deadline
+    }
+
+    fn take_due(&mut self, now: Instant) -> Option<PresentationGeneration> {
+        if self.deadline.is_some_and(|deadline| now >= deadline) {
+            self.deadline = None;
+            Some(self.generation)
+        } else {
+            None
+        }
+    }
+}
+
+#[derive(Default)]
+struct HeldKeys(Vec<KeyInput>);
+
+impl HeldKeys {
+    fn route(&mut self, input: &KeyInput) {
+        if input.is_text_input() || input.is_input_method_commit() {
+            return;
+        }
+        match input.action {
+            crate::terminal::key::KeyAction::Press | crate::terminal::key::KeyAction::Repeat => {
+                if let Some(held) = self
+                    .0
+                    .iter_mut()
+                    .find(|held| held.physical_key == input.physical_key)
+                {
+                    *held = input.clone();
+                } else {
+                    self.0.push(input.clone());
+                }
+            }
+            crate::terminal::key::KeyAction::Release => self
+                .0
+                .retain(|held| held.physical_key != input.physical_key),
+        }
+    }
+
+    fn take_releases(&mut self) -> Vec<KeyInput> {
+        std::mem::take(&mut self.0)
+            .into_iter()
+            .map(|mut input| {
+                input.action = crate::terminal::key::KeyAction::Release;
+                input
+            })
+            .collect()
+    }
+}
+
+enum StartupReporter {
+    #[cfg(test)]
+    Blocking(mpsc::SyncSender<Result<(), String>>),
+    Events(async_channel::Sender<SessionEvent>),
+}
+
+impl StartupReporter {
+    fn failed(&self, stage: SessionStartupStage, message: String) {
+        match self {
+            #[cfg(test)]
+            Self::Blocking(startup) => {
+                let _ = startup.send(Err(message));
+            }
+            Self::Events(events) => {
+                send_session_event(
+                    events,
+                    SessionEvent::Failed(SessionFailure::Startup { stage, message }),
+                );
+            }
+        }
+    }
+
+    fn succeeded(&self) -> bool {
+        match self {
+            #[cfg(test)]
+            Self::Blocking(startup) => startup.send(Ok(())).is_ok(),
+            Self::Events(_) => true,
+        }
+    }
 }
 
 impl TerminalWorker {
     fn run(
         mut pty: Box<dyn SessionPty>,
-        initial_size: GridSize,
+        context: TerminalWorkerContext,
         commands: CommandReceiver<Command>,
         reader_transport: ReaderTransport,
+        resizes: ResizeMailbox,
         events: async_channel::Sender<SessionEvent>,
-        startup: mpsc::SyncSender<Result<(), String>>,
+        startup: StartupReporter,
     ) {
+        let TerminalWorkerContext {
+            initial_geometry,
+            initial_directory,
+            fallback_title,
+            terminal_name,
+        } = context;
         let ReaderTransport {
             commands: reader_commands,
             events: reader_events,
@@ -518,7 +1192,7 @@ impl TerminalWorker {
         let reader = match pty.take_reader() {
             Ok(reader) => reader,
             Err(error) => {
-                let _ = startup.send(Err(error.to_string()));
+                startup.failed(SessionStartupStage::Reader, error.to_string());
                 return;
             }
         };
@@ -526,20 +1200,26 @@ impl TerminalWorker {
         let reader_thread = match spawn_reader(reader, reader_events, reader_commands) {
             Ok(thread) => thread,
             Err(error) => {
-                let _ = startup.send(Err(format!("failed to start PTY reader thread: {error}")));
+                startup.failed(
+                    SessionStartupStage::ReaderThread,
+                    format!("failed to start PTY reader thread: {error}"),
+                );
                 return;
             }
         };
 
-        let emulator = match TerminalEmulator::new(
-            initial_size.cols,
-            initial_size.rows,
-            u32::from(initial_size.cell_width_px),
-            u32::from(initial_size.cell_height_px),
+        let local_hostname = crate::terminal::metadata::local_hostname();
+        let emulator = match TerminalEmulator::new_with_metadata(
+            initial_geometry,
+            &initial_directory.to_string_lossy(),
+            &fallback_title,
+            local_hostname.as_deref(),
+            terminal_name,
+            Instant::now(),
         ) {
             Ok(emulator) => emulator,
             Err(error) => {
-                let _ = startup.send(Err(error.to_string()));
+                startup.failed(SessionStartupStage::Emulator, error.to_string());
                 drop(reader_event_rx);
                 drop(pty);
                 join_reader(reader_thread);
@@ -554,10 +1234,24 @@ impl TerminalWorker {
             reader_events: reader_event_rx,
             reader_thread,
             events,
+            resizes,
             pending_command: None,
+            terminal_input_focused: true,
+            focus_reporting_enabled: false,
+            held_keys: HeldKeys::default(),
+            selection_autoscroll: SelectionAutoscrollSchedule::default(),
+            paste_confirmations: PasteConfirmationSchedule::default(),
+            osc52_filter: Osc52Filter::default(),
+            osc52_policy: Osc52AuthorizationPolicy::default(),
+            osc52_clipboard: native_osc52_clipboard(),
+            osc52_authorization: Osc52AuthorizationSchedule::default(),
+            deferred_osc52_effects: VecDeque::new(),
+            deferred_output_chunks: VecDeque::new(),
+            deferred_reader_ready: false,
+            hidden_input: HiddenInputSchedule::new(Instant::now()),
         };
 
-        if startup.send(Ok(())).is_err() {
+        if !startup.succeeded() {
             worker.finish();
             return;
         }
@@ -572,12 +1266,8 @@ impl TerminalWorker {
         }
 
         loop {
-            let command = match self.pending_command.take() {
-                Some(command) => command,
-                None => match self.commands.recv() {
-                    Ok(command) => command,
-                    Err(_) => break,
-                },
+            let Some(command) = self.receive_next_command() else {
+                break;
             };
 
             if !self.process_command(command) {
@@ -586,36 +1276,94 @@ impl TerminalWorker {
         }
     }
 
+    fn receive_next_command(&mut self) -> Option<Command> {
+        if let Some(command) = self.pending_command.take() {
+            return Some(command);
+        }
+        if !self.osc52_authorization.is_pending()
+            && (!self.deferred_osc52_effects.is_empty() || !self.deferred_output_chunks.is_empty())
+        {
+            return Some(Command::ResumeOsc52Output);
+        }
+        if !self.osc52_authorization.is_pending() && self.deferred_reader_ready {
+            self.deferred_reader_ready = false;
+            return Some(Command::ReaderReady);
+        }
+
+        loop {
+            let synchronized_output_deadline = self.emulator.synchronized_output_deadline();
+            let autoscroll_deadline = self.selection_autoscroll.deadline();
+            let deadline = [
+                synchronized_output_deadline,
+                autoscroll_deadline,
+                self.paste_confirmations.deadline(),
+                self.osc52_authorization.deadline(),
+                Some(self.hidden_input.deadline),
+            ]
+            .into_iter()
+            .flatten()
+            .min();
+            let Some(deadline) = deadline else {
+                return self.commands.recv().ok();
+            };
+            let timeout = deadline.saturating_duration_since(Instant::now());
+            match self.commands.recv_timeout(timeout) {
+                Ok(command) => return Some(command),
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    let now = Instant::now();
+                    if let Some(generation) = self.selection_autoscroll.take_due(now) {
+                        return Some(Command::SelectionAutoscrollTick(generation));
+                    }
+                    if self.paste_confirmations.expire(now) {
+                        return Some(Command::PasteConfirmationExpired);
+                    }
+                    if let Some(id) = self.osc52_authorization.expire(now) {
+                        return Some(Command::Osc52AuthorizationExpired(id));
+                    }
+                    if now >= self.hidden_input.deadline {
+                        return Some(Command::PollHiddenInput);
+                    }
+                    if synchronized_output_deadline.is_some()
+                        && !self.release_synchronized_output_if_due(now)
+                    {
+                        return None;
+                    }
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => return None,
+            }
+        }
+    }
+
     fn process_command(&mut self, command: Command) -> bool {
         match command {
-            Command::Key(input) => match self.emulator.key(input) {
-                Ok(action) => self.apply_emulator_action(action),
-                Err(message) => {
-                    self.send_runtime_failure(message);
-                    false
-                }
-            },
+            Command::Key(input) => self.process_key(input),
+            Command::Focus(focused) => self.process_focus(focused),
+            Command::ReaderReady if self.osc52_authorization.is_pending() => {
+                self.deferred_reader_ready = true;
+                true
+            }
             Command::ReaderReady => self.process_reader_events(),
-            Command::Resize(size) => {
+            Command::Resize => {
+                let Some(geometry) = self.resizes.take() else {
+                    return true;
+                };
                 let result = self
                     .pty
-                    .resize(size.pty_size())
+                    .resize(pty_size(geometry))
                     .map_err(|error| {
                         format!("failed to resize the macOS pseudo-terminal: {error:#}")
                     })
                     .and_then(|()| {
                         self.emulator
-                            .resize(
-                                size.cols,
-                                size.rows,
-                                u32::from(size.cell_width_px),
-                                u32::from(size.cell_height_px),
-                            )
+                            .resize(geometry)
                             .map_err(|error| format!("failed to resize terminal state: {error}"))
                     });
 
                 match result {
-                    Ok(()) => self.apply_emulator_action(EmulatorAction::screen_changed()),
+                    Ok(()) => {
+                        self.apply_emulator_action(EmulatorAction::screen_changed())
+                            && self.refresh_selection_autoscroll()
+                    }
                     Err(message) => {
                         self.send_runtime_failure(message);
                         false
@@ -623,7 +1371,9 @@ impl TerminalWorker {
                 }
             }
             Command::Pointer(input) => match self.emulator.pointer(input) {
-                Ok(action) => self.apply_emulator_action(action),
+                Ok(action) => {
+                    self.apply_emulator_action(action) && self.refresh_selection_autoscroll()
+                }
                 Err(message) => {
                     self.send_runtime_failure(message);
                     false
@@ -636,22 +1386,155 @@ impl TerminalWorker {
                     false
                 }
             },
-            Command::ScrollTo(offset_rows) => {
-                let action = self.emulator.scroll_to(offset_rows);
+            Command::ScrollTo(offset_rows, generation) => {
+                let action = self.emulator.scroll_to_at(offset_rows, generation);
                 self.apply_emulator_action(action)
             }
-            Command::Paste(text) => match self.emulator.paste(text) {
-                Ok(action) => self.apply_emulator_action(action),
-                Err(message) => {
-                    self.send_runtime_failure(message);
-                    false
-                }
-            },
-            Command::SelectionText(reply) => {
-                let _ = reply.try_send(self.emulator.selection_text());
+            Command::RequestPaste(text, reply) => self.process_paste_request(text, reply),
+            Command::ResolvePaste(id, decision, reply) => {
+                self.process_paste_resolution(id, decision, reply)
+            }
+            Command::PasteConfirmationExpired => true,
+            Command::ResolveOsc52Authorization(id, decision) => {
+                self.process_osc52_authorization(id, decision)
+            }
+            Command::Osc52AuthorizationExpired(id) => {
+                let _ = self.send_terminal_event(SessionEvent::Osc52AuthorizationExpired(id));
                 true
             }
+            Command::ResumeOsc52Output => self.resume_osc52_output(),
+            Command::SelectionCopy(reply) => {
+                let _ = reply.try_send(
+                    self.emulator
+                        .selection_copy(SelectionCopyOptions::default()),
+                );
+                true
+            }
+            Command::SelectionAutoscrollTick(generation) => {
+                match self.emulator.selection_autoscroll_tick(generation) {
+                    Ok(action) => {
+                        self.apply_emulator_action(action) && self.refresh_selection_autoscroll()
+                    }
+                    Err(message) => {
+                        self.send_runtime_failure(message);
+                        false
+                    }
+                }
+            }
             Command::Shutdown => false,
+            Command::PollHiddenInput => {
+                if let Some(active) = self
+                    .hidden_input
+                    .update(Instant::now(), self.pty.hidden_input())
+                {
+                    send_session_event(&self.events, SessionEvent::HiddenInputChanged(active))
+                } else {
+                    true
+                }
+            }
+        }
+    }
+
+    fn process_paste_request(
+        &mut self,
+        text: String,
+        reply: async_channel::Sender<Result<PasteRequestOutcome, String>>,
+    ) -> bool {
+        if !self.terminal_input_focused {
+            let _ = reply.try_send(Ok(PasteRequestOutcome::Rejected(
+                PasteRejection::TerminalUnfocused,
+            )));
+            return true;
+        }
+        let payload = match PreparedPaste::prepare(text) {
+            Ok(payload) => payload,
+            Err(rejection) => {
+                let _ = reply.try_send(Ok(PasteRequestOutcome::Rejected(rejection)));
+                return true;
+            }
+        };
+        if payload.requires_confirmation() {
+            let outcome = self
+                .paste_confirmations
+                .create(payload, Instant::now())
+                .map(PasteRequestOutcome::ConfirmationRequired)
+                .unwrap_or(PasteRequestOutcome::Rejected(
+                    PasteRejection::ConfirmationPending,
+                ));
+            let _ = reply.try_send(Ok(outcome));
+            return true;
+        }
+
+        self.write_prepared_paste(payload, reply, PasteRequestOutcome::Written)
+    }
+
+    fn process_paste_resolution(
+        &mut self,
+        id: PasteConfirmationId,
+        decision: PasteDecision,
+        reply: async_channel::Sender<Result<PasteResolution, String>>,
+    ) -> bool {
+        let Some(payload) = self.paste_confirmations.take(id, Instant::now()) else {
+            let _ = reply.try_send(Ok(PasteResolution::Stale));
+            return true;
+        };
+        if decision == PasteDecision::Cancel || !self.terminal_input_focused {
+            let _ = reply.try_send(Ok(PasteResolution::Cancelled));
+            return true;
+        }
+
+        match self.emulator.paste(payload.into_text()) {
+            Ok(action) => {
+                let applied = self.apply_emulator_action(action);
+                if applied {
+                    let _ = reply.try_send(Ok(PasteResolution::Written));
+                }
+                applied
+            }
+            Err(message) => {
+                let _ = reply.try_send(Err("terminal paste encoding failed".to_owned()));
+                self.send_runtime_failure(message);
+                false
+            }
+        }
+    }
+
+    fn write_prepared_paste(
+        &mut self,
+        payload: PreparedPaste,
+        reply: async_channel::Sender<Result<PasteRequestOutcome, String>>,
+        outcome: PasteRequestOutcome,
+    ) -> bool {
+        match self.emulator.paste(payload.into_text()) {
+            Ok(action) => {
+                let applied = self.apply_emulator_action(action);
+                if applied {
+                    let _ = reply.try_send(Ok(outcome));
+                }
+                applied
+            }
+            Err(message) => {
+                let _ = reply.try_send(Err("terminal paste encoding failed".to_owned()));
+                self.send_runtime_failure(message);
+                false
+            }
+        }
+    }
+
+    fn refresh_selection_autoscroll(&mut self) -> bool {
+        match self.emulator.selection_autoscroll_interval() {
+            Ok(interval) => {
+                self.selection_autoscroll.update(
+                    Instant::now(),
+                    interval,
+                    self.emulator.presentation_generation(),
+                );
+                true
+            }
+            Err(message) => {
+                self.send_runtime_failure(message);
+                false
+            }
         }
     }
 
@@ -672,10 +1555,17 @@ impl TerminalWorker {
         }
 
         if let Some(read_error) = reader_stopped {
+            if !self.flush_synchronized_output() {
+                return false;
+            }
             let event = classify_reader_stop(
                 read_error,
                 self.pty.wait_for_child(FINAL_CHILD_WAIT_TIMEOUT),
             );
+            self.emulator.mark_metadata_stale();
+            if !self.publish_screen() {
+                return false;
+            }
             self.send_terminal_event(event);
             false
         } else {
@@ -725,15 +1615,183 @@ impl TerminalWorker {
     }
 
     fn process_output_chunks(&mut self, chunks: Vec<Vec<u8>>) -> bool {
-        let received_output = !chunks.is_empty();
-        for bytes in chunks {
-            self.emulator.feed(&bytes);
+        self.process_output_queue(chunks.into())
+    }
+
+    fn process_output_queue(&mut self, mut chunks: VecDeque<Vec<u8>>) -> bool {
+        let received_output = !chunks.is_empty() || !self.deferred_osc52_effects.is_empty();
+        let mut focus_reports = Vec::new();
+        let mut effects = mem::take(&mut self.deferred_osc52_effects);
+
+        loop {
+            if effects.is_empty() {
+                let Some(bytes) = chunks.pop_front() else {
+                    break;
+                };
+                effects.extend(self.osc52_filter.feed(&bytes));
+            }
+            let Some(effect) = effects.pop_front() else {
+                continue;
+            };
+            match effect {
+                Osc52Effect::Terminal(bytes) => {
+                    if !self.feed_terminal_output(&bytes, &mut focus_reports) {
+                        return false;
+                    }
+                }
+                Osc52Effect::Rejected(_rejection) => {}
+                Osc52Effect::Operation(operation) => {
+                    if !self.flush_ordered_terminal_replies(&mut focus_reports) {
+                        return false;
+                    }
+                    match self.osc52_policy.for_access(operation.access()) {
+                        Osc52AccessPolicy::Deny => {}
+                        Osc52AccessPolicy::Allow => {
+                            if !self.perform_osc52_operation(operation) {
+                                return false;
+                            }
+                        }
+                        Osc52AccessPolicy::Ask => {
+                            let Some(request) =
+                                self.osc52_authorization.create(operation, Instant::now())
+                            else {
+                                continue;
+                            };
+                            self.deferred_osc52_effects = effects;
+                            self.deferred_output_chunks = chunks;
+                            if !self.send_terminal_event(SessionEvent::Osc52Authorization(request))
+                            {
+                                return false;
+                            }
+                            return !received_output || self.publish_screen();
+                        }
+                    }
+                }
+            }
         }
 
-        if received_output && (!self.write_pending_pty_responses() || !self.publish_screen()) {
+        if received_output
+            && (!self.flush_ordered_terminal_replies(&mut focus_reports) || !self.publish_screen())
+        {
             return false;
         }
         true
+    }
+
+    fn feed_terminal_output(&mut self, bytes: &[u8], focus_reports: &mut Vec<u8>) -> bool {
+        self.emulator.feed(bytes);
+        for event in self.emulator.take_attention_events() {
+            if !self.send_terminal_event(SessionEvent::Attention(event)) {
+                return false;
+            }
+        }
+        let focus_reporting_enabled = match self.emulator.focus_reporting_enabled() {
+            Ok(enabled) => enabled,
+            Err(message) => {
+                self.send_runtime_failure(message);
+                return false;
+            }
+        };
+        if focus_reporting_enabled && !self.focus_reporting_enabled {
+            match self.emulator.focus(self.terminal_input_focused) {
+                Ok(action) => focus_reports.extend(action.bytes),
+                Err(message) => {
+                    self.send_runtime_failure(message);
+                    return false;
+                }
+            }
+        }
+        self.focus_reporting_enabled = focus_reporting_enabled;
+        true
+    }
+
+    fn flush_ordered_terminal_replies(&mut self, focus_reports: &mut Vec<u8>) -> bool {
+        self.write_pending_pty_responses()
+            && (focus_reports.is_empty() || self.write_pty(&mem::take(focus_reports)))
+    }
+
+    fn process_osc52_authorization(
+        &mut self,
+        id: Osc52AuthorizationId,
+        decision: Osc52AuthorizationDecision,
+    ) -> bool {
+        let Some(operation) = self.osc52_authorization.take(id, Instant::now()) else {
+            return true;
+        };
+        if decision == Osc52AuthorizationDecision::Allow && !self.perform_osc52_operation(operation)
+        {
+            return false;
+        }
+        self.resume_osc52_output()
+    }
+
+    fn resume_osc52_output(&mut self) -> bool {
+        let chunks = mem::take(&mut self.deferred_output_chunks);
+        self.process_output_queue(chunks)
+    }
+
+    fn perform_osc52_operation(&mut self, operation: Osc52Operation) -> bool {
+        match &operation {
+            Osc52Operation::Write { target, text } => {
+                let _ = self.osc52_clipboard.write(*target, text);
+                true
+            }
+            Osc52Operation::Read { target, .. } => {
+                let Ok(text) = self.osc52_clipboard.read(*target) else {
+                    return true;
+                };
+                if text.len() > MAX_OSC52_CONTENT_BYTES {
+                    return true;
+                }
+                operation
+                    .read_reply(&text)
+                    .is_none_or(|reply| self.write_pty(&reply))
+            }
+        }
+    }
+
+    fn process_key(&mut self, input: KeyInput) -> bool {
+        self.held_keys.route(&input);
+        match self.emulator.key(input) {
+            Ok(action) => self.apply_emulator_action(action),
+            Err(message) => {
+                self.send_runtime_failure(message);
+                false
+            }
+        }
+    }
+
+    fn process_focus(&mut self, focused: bool) -> bool {
+        if self.terminal_input_focused == focused {
+            return true;
+        }
+
+        if !focused {
+            self.paste_confirmations.cancel();
+            self.osc52_authorization.cancel();
+            for input in self.held_keys.take_releases() {
+                match self.emulator.key(input) {
+                    Ok(action) => {
+                        if !self.apply_emulator_action(action) {
+                            return false;
+                        }
+                    }
+                    Err(message) => {
+                        self.send_runtime_failure(message);
+                        return false;
+                    }
+                }
+            }
+        }
+        self.terminal_input_focused = focused;
+
+        match self.emulator.focus(focused) {
+            Ok(action) => self.apply_emulator_action(action),
+            Err(message) => {
+                self.send_runtime_failure(message);
+                false
+            }
+        }
     }
 
     fn apply_emulator_action(&mut self, action: EmulatorAction) -> bool {
@@ -771,16 +1829,38 @@ impl TerminalWorker {
         }
     }
 
+    fn release_synchronized_output_if_due(&mut self, now: Instant) -> bool {
+        match self.emulator.expire_synchronized_output(now) {
+            Ok(true) => self.publish_screen(),
+            Ok(false) => true,
+            Err(error) => {
+                self.send_runtime_failure(format!(
+                    "failed to release synchronized terminal output: {error}"
+                ));
+                false
+            }
+        }
+    }
+
+    fn flush_synchronized_output(&mut self) -> bool {
+        match self.emulator.end_synchronized_output() {
+            Ok(true) => self.publish_screen(),
+            Ok(false) => true,
+            Err(error) => {
+                self.send_runtime_failure(format!(
+                    "failed to flush synchronized terminal output: {error}"
+                ));
+                false
+            }
+        }
+    }
+
     fn send_runtime_failure(&self, message: String) -> bool {
         self.send_terminal_event(SessionEvent::Failed(SessionFailure::Runtime(message)))
     }
 
     fn send_terminal_event(&self, event: SessionEvent) -> bool {
-        match self.events.try_send(event) {
-            Ok(()) => true,
-            Err(async_channel::TrySendError::Full(event)) => self.events.force_send(event).is_ok(),
-            Err(async_channel::TrySendError::Closed(_)) => false,
-        }
+        send_session_event(&self.events, event)
     }
 
     fn finish(self) {
@@ -791,13 +1871,30 @@ impl TerminalWorker {
             reader_events,
             reader_thread,
             events: _events,
+            resizes: _resizes,
             pending_command: _pending_command,
+            terminal_input_focused: _terminal_input_focused,
+            focus_reporting_enabled: _focus_reporting_enabled,
+            held_keys: _held_keys,
+            selection_autoscroll: _selection_autoscroll,
+            paste_confirmations: _paste_confirmations,
+            ..
         } = self;
         // SpawnedPty's Drop terminates and reaps a live shell for the native Adapter.
         drop(reader_events);
         drop(pty);
         join_reader(reader_thread);
     }
+}
+
+fn shell_fallback_title() -> String {
+    let shell = user_shell();
+    Path::new(&shell)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .unwrap_or(&shell)
+        .to_owned()
 }
 
 fn spawn_reader(
@@ -850,13 +1947,13 @@ fn send_reader_event(
 
 fn classify_reader_stop(
     read_error: Option<String>,
-    wait_result: std::io::Result<ExitStatus>,
+    wait_result: std::io::Result<ShellExit>,
 ) -> SessionEvent {
     match (read_error, wait_result) {
-        (None, Ok(status)) => SessionEvent::Exited(format!("Shell exited ({status:?})")),
-        (Some(read_error), Ok(status)) => SessionEvent::Failed(SessionFailure::PtyRead {
+        (None, Ok(exit)) => SessionEvent::Exited(classify_shell_exit(exit)),
+        (Some(read_error), Ok(exit)) => SessionEvent::Failed(SessionFailure::PtyRead {
             read_error,
-            exit_status: format!("{status:?}"),
+            exit_status: classify_shell_exit(exit).to_string(),
         }),
         (read_error, Err(wait_error)) => SessionEvent::Failed(SessionFailure::ShellWait {
             read_error,
@@ -865,6 +1962,27 @@ fn classify_reader_stop(
     }
 }
 
+fn classify_shell_exit(exit: ShellExit) -> SessionExit {
+    match exit.shutdown {
+        ShutdownDisposition::Graceful => SessionExit::GracefulShutdown,
+        ShutdownDisposition::Forced => SessionExit::ForcedShutdown,
+        ShutdownDisposition::NotRequested => match exit.status.signal() {
+            Some(signal) => SessionExit::Signal(signal.to_owned()),
+            None if exit.status.success() => SessionExit::Success,
+            None => SessionExit::ExitCode(exit.status.exit_code()),
+        },
+    }
+}
+
+fn send_session_event(events: &async_channel::Sender<SessionEvent>, event: SessionEvent) -> bool {
+    match events.try_send(event) {
+        Ok(()) => true,
+        Err(async_channel::TrySendError::Full(event)) => events.force_send(event).is_ok(),
+        Err(async_channel::TrySendError::Closed(_)) => false,
+    }
+}
+
+#[cfg(test)]
 fn join_worker(worker: JoinHandle<()>) {
     if worker.join().is_err() {
         eprintln!("terminal worker thread panicked");
@@ -886,12 +2004,74 @@ mod tests {
 
     use super::*;
 
-    const TEST_SIZE: GridSize = GridSize {
-        cols: 80,
-        rows: 24,
-        cell_width_px: 8,
-        cell_height_px: 20,
-    };
+    #[test]
+    fn hidden_input_polling_emits_only_transitions_and_fails_closed() {
+        let start = Instant::now();
+        let mut schedule = HiddenInputSchedule::new(start);
+
+        assert_eq!(schedule.update(start, Ok(false)), None);
+        assert_eq!(schedule.update(start, Ok(true)), Some(true));
+        assert_eq!(schedule.update(start, Ok(true)), None);
+        assert_eq!(
+            schedule.update(start, Err(io::Error::other("descriptor closed"))),
+            Some(false)
+        );
+        assert_eq!(schedule.deadline, start + TERMIOS_POLL_INTERVAL);
+    }
+    use crate::terminal::geometry::{BackingScale, CellGridSize, LogicalCellSize};
+    use crate::terminal::key::{KeyAction, PhysicalKey};
+
+    fn geometry(cols: u16, rows: u16, cell_width: f32, cell_height: f32) -> TerminalGeometry {
+        TerminalGeometry::from_grid(
+            CellGridSize::new(cols, rows),
+            LogicalCellSize::new(cell_width, cell_height),
+            BackingScale::ONE,
+        )
+    }
+
+    fn test_geometry() -> TerminalGeometry {
+        geometry(80, 24, 8.0, 20.0)
+    }
+
+    fn text_key(action: KeyAction) -> KeyInput {
+        KeyInput {
+            action,
+            physical_key: PhysicalKey::A,
+            native_key_code: Some(0),
+            logical_key: "a".to_owned(),
+            text: Some("a".to_owned()),
+            unshifted_codepoint: Some('a'),
+            modifiers: InputModifiers::default(),
+            consumed_modifiers: InputModifiers::default(),
+            option_as_alt: OptionAsAltPolicy::default(),
+        }
+    }
+
+    fn modifier_key(action: KeyAction) -> KeyInput {
+        KeyInput {
+            action,
+            physical_key: PhysicalKey::ShiftLeft,
+            native_key_code: Some(56),
+            logical_key: "shift".to_owned(),
+            text: None,
+            unshifted_codepoint: None,
+            modifiers: InputModifiers {
+                shift: action != KeyAction::Release,
+                ..InputModifiers::default()
+            },
+            consumed_modifiers: InputModifiers::default(),
+            option_as_alt: OptionAsAltPolicy::default(),
+        }
+    }
+
+    #[test]
+    fn input_method_commits_never_enter_the_held_key_set() {
+        let mut held = HeldKeys::default();
+
+        held.route(&KeyInput::input_method_commit("한"));
+
+        assert!(held.take_releases().is_empty());
+    }
 
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     enum LifecycleStep {
@@ -1064,7 +2244,7 @@ mod tests {
             }
         }
 
-        fn wait_for_child(&mut self, timeout: Duration) -> io::Result<ExitStatus> {
+        fn wait_for_child(&mut self, timeout: Duration) -> io::Result<ShellExit> {
             self.records.update(|state| state.waits += 1);
             if self.wait_times_out {
                 return Err(io::Error::new(
@@ -1077,9 +2257,208 @@ mod tests {
             }
             match &self.wait_error {
                 Some(message) => Err(io::Error::other(message.clone())),
-                None => Ok(ExitStatus::with_exit_code(self.exit_code)),
+                None => Ok(ShellExit {
+                    status: ExitStatus::with_exit_code(self.exit_code),
+                    shutdown: ShutdownDisposition::NotRequested,
+                }),
             }
         }
+    }
+
+    #[derive(Clone, Debug, Default, Eq, PartialEq)]
+    struct Osc52ClipboardState {
+        read_text: String,
+        reads: Vec<crate::terminal::Osc52Target>,
+        writes: Vec<(crate::terminal::Osc52Target, String)>,
+    }
+
+    #[derive(Clone, Default)]
+    struct RecordingOsc52Clipboard {
+        state: Arc<Mutex<Osc52ClipboardState>>,
+    }
+
+    impl RecordingOsc52Clipboard {
+        fn with_read_text(text: &str) -> Self {
+            Self {
+                state: Arc::new(Mutex::new(Osc52ClipboardState {
+                    read_text: text.to_owned(),
+                    ..Osc52ClipboardState::default()
+                })),
+            }
+        }
+
+        fn snapshot(&self) -> Osc52ClipboardState {
+            self.state.lock().unwrap().clone()
+        }
+    }
+
+    impl Osc52Clipboard for RecordingOsc52Clipboard {
+        fn read(
+            &mut self,
+            target: crate::terminal::Osc52Target,
+        ) -> Result<String, Osc52ClipboardError> {
+            let mut state = self.state.lock().unwrap();
+            state.reads.push(target);
+            Ok(state.read_text.clone())
+        }
+
+        fn write(
+            &mut self,
+            target: crate::terminal::Osc52Target,
+            text: &str,
+        ) -> Result<(), Osc52ClipboardError> {
+            self.state
+                .lock()
+                .unwrap()
+                .writes
+                .push((target, text.to_owned()));
+            Ok(())
+        }
+    }
+
+    fn osc52_worker(
+        policy: Osc52AuthorizationPolicy,
+        clipboard: RecordingOsc52Clipboard,
+    ) -> (
+        TerminalWorker,
+        async_channel::Receiver<SessionEvent>,
+        ScriptedPtyRecords,
+    ) {
+        let (_command_tx, commands) = mpsc::channel();
+        let (_reader_events, reader_event_rx) = mpsc::sync_channel(PTY_OUTPUT_QUEUE_CAPACITY);
+        let records = ScriptedPtyRecords::default();
+        let (events, receiver) = async_channel::bounded(PTY_OUTPUT_QUEUE_CAPACITY);
+        let worker = TerminalWorker {
+            pty: Box::new(ScriptedPty {
+                reader: None,
+                records: records.clone(),
+                reader_error: None,
+                resize_error: None,
+                write_error: None,
+                wait_error: None,
+                wait_times_out: false,
+                exit_code: 0,
+            }),
+            emulator: TerminalEmulator::new(test_geometry()).unwrap(),
+            commands,
+            reader_events: reader_event_rx,
+            reader_thread: thread::spawn(|| {}),
+            events,
+            resizes: ResizeMailbox::default(),
+            pending_command: None,
+            terminal_input_focused: true,
+            focus_reporting_enabled: false,
+            held_keys: HeldKeys::default(),
+            selection_autoscroll: SelectionAutoscrollSchedule::default(),
+            paste_confirmations: PasteConfirmationSchedule::default(),
+            osc52_filter: Osc52Filter::default(),
+            osc52_policy: policy,
+            osc52_clipboard: Box::new(clipboard),
+            osc52_authorization: Osc52AuthorizationSchedule::default(),
+            deferred_osc52_effects: VecDeque::new(),
+            deferred_output_chunks: VecDeque::new(),
+            deferred_reader_ready: false,
+            hidden_input: HiddenInputSchedule::new(Instant::now()),
+        };
+        (worker, receiver, records)
+    }
+
+    #[test]
+    fn osc52_denial_is_quiet_and_never_accesses_the_clipboard() {
+        let clipboard = RecordingOsc52Clipboard::with_read_text("secret");
+        let (mut worker, _events, records) =
+            osc52_worker(Osc52AuthorizationPolicy::default(), clipboard.clone());
+
+        assert!(
+            worker.process_output_chunks(vec![b"\x1b]52;c;?\x07\x1b]52;c;d3JpdGU=\x07".to_vec()])
+        );
+
+        assert_eq!(
+            clipboard.snapshot(),
+            Osc52ClipboardState {
+                read_text: "secret".to_owned(),
+                ..Osc52ClipboardState::default()
+            }
+        );
+        assert!(records.snapshot().written.is_empty());
+    }
+
+    #[test]
+    fn allowed_osc52_read_reply_stays_ordered_between_terminal_protocol_replies() {
+        let clipboard = RecordingOsc52Clipboard::with_read_text("hello");
+        let (mut worker, _events, records) = osc52_worker(
+            Osc52AuthorizationPolicy {
+                read: Osc52AccessPolicy::Allow,
+                write: Osc52AccessPolicy::Allow,
+            },
+            clipboard.clone(),
+        );
+
+        assert!(worker.process_output_chunks(vec![b"\x1b[6n\x1b]52;c;?\x07\x1b[6n".to_vec()]));
+
+        assert_eq!(
+            clipboard.snapshot().reads,
+            [crate::terminal::Osc52Target::Standard]
+        );
+        assert_eq!(
+            records.snapshot().written,
+            b"\x1b[1;1R\x1b]52;c;aGVsbG8=\x07\x1b[1;1R"
+        );
+    }
+
+    #[test]
+    fn asked_osc52_write_retains_only_metadata_and_defers_later_output() {
+        let clipboard = RecordingOsc52Clipboard::default();
+        let (mut worker, events, records) = osc52_worker(
+            Osc52AuthorizationPolicy {
+                read: Osc52AccessPolicy::Ask,
+                write: Osc52AccessPolicy::Ask,
+            },
+            clipboard.clone(),
+        );
+
+        assert!(worker.process_output_chunks(vec![b"\x1b]52;c;c2VjcmV0\x07\x1b[6n".to_vec()]));
+        let SessionEvent::Osc52Authorization(request) = events.try_recv().unwrap() else {
+            panic!("ask policy must publish bounded authorization metadata")
+        };
+        assert_eq!(
+            (request.access, request.target, request.byte_len),
+            (
+                crate::terminal::Osc52Access::Write,
+                crate::terminal::Osc52Target::Standard,
+                6,
+            )
+        );
+        assert!(clipboard.snapshot().writes.is_empty());
+        assert!(records.snapshot().written.is_empty());
+        assert!(worker.osc52_authorization.is_pending());
+
+        assert!(worker.process_osc52_authorization(request.id, Osc52AuthorizationDecision::Allow,));
+        assert_eq!(
+            clipboard.snapshot().writes,
+            [(crate::terminal::Osc52Target::Standard, "secret".to_owned())]
+        );
+        assert_eq!(records.snapshot().written, b"\x1b[1;1R");
+    }
+
+    #[test]
+    fn osc52_authorization_allows_one_pending_request_and_rejects_stale_ids() {
+        let now = Instant::now();
+        let mut schedule = Osc52AuthorizationSchedule::default();
+        let operation = Osc52Operation::Read {
+            target: crate::terminal::Osc52Target::Standard,
+            terminator: crate::terminal::osc52::Osc52Terminator::StringTerminator,
+        };
+        let request = schedule.create(operation.clone(), now).unwrap();
+
+        assert!(schedule.create(operation, now).is_none());
+        assert_eq!(schedule.take(Osc52AuthorizationId::new(999), now), None);
+        assert!(schedule.is_pending());
+        assert_eq!(
+            schedule.expire(now + OSC52_AUTHORIZATION_TIMEOUT),
+            Some(request.id)
+        );
+        assert!(!schedule.is_pending());
     }
 
     impl Drop for ScriptedPty {
@@ -1143,10 +2522,10 @@ mod tests {
         } = options;
 
         let result = TerminalSession::start_with(
-            TEST_SIZE,
+            test_geometry(),
             Path::new("/scripted"),
             move |size, working_directory| {
-                assert_eq!(size, TEST_SIZE.pty_size());
+                assert_eq!(size, pty_size(test_geometry()));
                 assert_eq!(working_directory, Path::new("/scripted"));
                 Ok(StartedSessionPty {
                     pty: Box::new(ScriptedPty {
@@ -1225,24 +2604,70 @@ mod tests {
     }
 
     #[test]
+    fn shell_exit_should_preserve_normal_signal_and_shutdown_classifications() {
+        let classify = |status, shutdown| classify_shell_exit(ShellExit { status, shutdown });
+
+        assert_eq!(
+            classify(
+                ExitStatus::with_exit_code(0),
+                ShutdownDisposition::NotRequested
+            ),
+            SessionExit::Success
+        );
+        assert_eq!(
+            classify(
+                ExitStatus::with_exit_code(17),
+                ShutdownDisposition::NotRequested
+            ),
+            SessionExit::ExitCode(17)
+        );
+        assert_eq!(
+            classify(
+                ExitStatus::with_signal("Hangup"),
+                ShutdownDisposition::NotRequested
+            ),
+            SessionExit::Signal("Hangup".to_owned())
+        );
+        assert_eq!(
+            classify(
+                ExitStatus::with_signal("Hangup"),
+                ShutdownDisposition::Graceful
+            ),
+            SessionExit::GracefulShutdown
+        );
+        assert_eq!(
+            classify(
+                ExitStatus::with_signal("Killed"),
+                ShutdownDisposition::Forced
+            ),
+            SessionExit::ForcedShutdown
+        );
+    }
+
+    #[test]
     fn scripted_output_and_exit_should_preserve_the_latest_screen_before_the_final_event() {
         let (result, reader_steps, records) = start_scripted_session(ScriptedPtyOptions::default());
         let (mut session, events) = result.unwrap();
 
-        reader_steps
-            .send(ReaderStep::Bytes(b"ordered output".to_vec()))
-            .unwrap();
+        for index in 0..32 {
+            reader_steps
+                .send(ReaderStep::Bytes(
+                    format!("bounded line {index}\r\n").into_bytes(),
+                ))
+                .unwrap();
+        }
         reader_steps.send(ReaderStep::Eof).unwrap();
         records.wait_for("the scripted worker to finish", |state| {
             state.pty_drops == 1
         });
 
+        assert_eq!(events.len(), 2);
         let first = events.try_recv().unwrap();
         let second = events.try_recv().unwrap();
         let result = match (first, second) {
             (SessionEvent::Screen(screen), SessionEvent::Exited(status)) => (
-                screen_text(&screen).contains("ordered output"),
-                status.starts_with("Shell exited"),
+                screen_text(&screen).contains("bounded line 31"),
+                status == SessionExit::Success,
                 events.try_recv().is_err(),
             ),
             events => panic!("expected the latest Screen followed by Exited, got {events:?}"),
@@ -1253,8 +2678,68 @@ mod tests {
     }
 
     #[test]
+    fn shell_exit_should_flush_a_pending_synchronized_output_transaction() {
+        let (result, reader_steps, records) = start_scripted_session(ScriptedPtyOptions::default());
+        let (mut session, events) = result.unwrap();
+
+        reader_steps
+            .send(ReaderStep::Bytes(b"\x1b[?2026hfinal output".to_vec()))
+            .unwrap();
+        reader_steps.send(ReaderStep::Eof).unwrap();
+        records.wait_for("the synchronized-output worker to finish", |state| {
+            state.pty_drops == 1
+        });
+
+        assert_eq!(events.len(), 2);
+        let screen = events.try_recv().unwrap();
+        let exited = events.try_recv().unwrap();
+        assert!(matches!(
+            screen,
+            SessionEvent::Screen(screen) if screen_text(&screen).contains("final output")
+        ));
+        assert!(matches!(exited, SessionEvent::Exited(SessionExit::Success)));
+        session.shutdown();
+    }
+
+    #[test]
+    fn session_snapshots_reuse_rows_unchanged_by_later_output() {
+        let (result, reader_steps, _records) =
+            start_scripted_session(ScriptedPtyOptions::default());
+        let (mut session, events) = result.unwrap();
+
+        reader_steps
+            .send(ReaderStep::Bytes(b"first row".to_vec()))
+            .unwrap();
+        let first = receive_event(
+            &events,
+            "the first row snapshot",
+            |event| matches!(event, SessionEvent::Screen(screen) if screen_text(screen).contains("first row")),
+        );
+        reader_steps
+            .send(ReaderStep::Bytes(b"\r\nsecond row".to_vec()))
+            .unwrap();
+        let second = receive_event(
+            &events,
+            "the second row snapshot",
+            |event| matches!(event, SessionEvent::Screen(screen) if screen_text(screen).contains("second row")),
+        );
+
+        let (SessionEvent::Screen(first), SessionEvent::Screen(second)) = (first, second) else {
+            unreachable!("the event predicates accept only terminal screens")
+        };
+        assert!(Arc::ptr_eq(&first.rows[0], &second.rows[0]));
+        assert!(!Arc::ptr_eq(&first.rows[1], &second.rows[1]));
+
+        session.shutdown();
+    }
+
+    #[test]
     fn session_failure_display_should_explain_each_classification() {
         let failures = [
+            SessionFailure::Startup {
+                stage: SessionStartupStage::Pty,
+                message: "open unavailable".to_owned(),
+            },
             SessionFailure::Runtime("write unavailable".to_owned()),
             SessionFailure::PtyRead {
                 read_error: "read unavailable".to_owned(),
@@ -1275,6 +2760,7 @@ mod tests {
         assert_eq!(
             statuses,
             [
+                "Terminal Session startup failed during PTY creation: open unavailable",
                 "Terminal runtime failed: write unavailable",
                 "Shell output failed: read unavailable; shell exited (exit code 7)",
                 "Shell output failed: read unavailable; waiting for the shell also failed: wait unavailable",
@@ -1282,6 +2768,77 @@ mod tests {
             ]
         );
         let _: &dyn std::error::Error = &failures[0];
+    }
+
+    #[test]
+    fn deferred_start_should_return_before_pty_spawn_and_publish_a_typed_failure() {
+        let (spawn_entered, entered) = mpsc::sync_channel(1);
+        let (release_spawn, release) = mpsc::sync_channel(1);
+        let started_at = Instant::now();
+
+        let (mut session, events) = TerminalSession::start_deferred_with(
+            test_geometry(),
+            Path::new("/scripted"),
+            move |size, working_directory| {
+                assert_eq!(size, pty_size(test_geometry()));
+                assert_eq!(working_directory, Path::new("/scripted"));
+                spawn_entered.send(()).unwrap();
+                release.recv().unwrap();
+                Err(PtyError::Open(AnyError::msg("scripted spawn unavailable")))
+            },
+        )
+        .unwrap();
+
+        entered.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert!(
+            started_at.elapsed() < Duration::from_millis(250),
+            "Terminal Session start waited for PTY spawn"
+        );
+        release_spawn.send(()).unwrap();
+        let event = receive_event(&events, "the deferred PTY spawn failure", |event| {
+            matches!(
+                event,
+                SessionEvent::Failed(SessionFailure::Startup {
+                    stage: SessionStartupStage::Pty,
+                    ..
+                })
+            )
+        });
+
+        let SessionEvent::Failed(SessionFailure::Startup { message, .. }) = event else {
+            unreachable!("the event predicate accepts only typed startup failures")
+        };
+        assert!(message.contains("scripted spawn unavailable"));
+        session.shutdown();
+    }
+
+    #[test]
+    fn native_factory_should_report_pty_spawn_failures_through_session_events() {
+        let StartedTerminalSession {
+            handle: session,
+            events,
+        } = NativeTerminalSessionFactory
+            .start(
+                test_geometry(),
+                Path::new("/private/tmp/spaceterm-missing-session-workspace"),
+            )
+            .unwrap();
+
+        let event = receive_event(&events, "the native PTY startup failure", |event| {
+            matches!(
+                event,
+                SessionEvent::Failed(SessionFailure::Startup {
+                    stage: SessionStartupStage::Pty,
+                    ..
+                })
+            )
+        });
+
+        let SessionEvent::Failed(SessionFailure::Startup { message, .. }) = event else {
+            unreachable!("the event predicate accepts only typed PTY startup failures")
+        };
+        assert!(message.contains("Workspace working directory"));
+        drop(session);
     }
 
     #[test]
@@ -1402,6 +2959,133 @@ mod tests {
     }
 
     #[test]
+    fn key_actions_should_retain_fifo_order_in_the_reliable_command_lane() {
+        let (commands, receiver) = mpsc::channel();
+        for action in [KeyAction::Press, KeyAction::Repeat, KeyAction::Release] {
+            commands
+                .send(Command::Key(KeyInput {
+                    action,
+                    physical_key: PhysicalKey::A,
+                    native_key_code: Some(0),
+                    logical_key: "a".to_owned(),
+                    text: Some("a".to_owned()),
+                    unshifted_codepoint: Some('a'),
+                    modifiers: InputModifiers::default(),
+                    consumed_modifiers: InputModifiers::default(),
+                    option_as_alt: OptionAsAltPolicy::default(),
+                }))
+                .unwrap();
+        }
+
+        let actions = [receiver.recv(), receiver.recv(), receiver.recv()].map(|command| {
+            let Command::Key(input) = command.unwrap() else {
+                panic!("the command lane should contain only typed key input")
+            };
+            input.action
+        });
+
+        assert_eq!(
+            actions,
+            [KeyAction::Press, KeyAction::Repeat, KeyAction::Release]
+        );
+    }
+
+    #[test]
+    fn held_keys_track_only_terminal_routed_keys_and_modifiers() {
+        let mut held = HeldKeys::default();
+        held.route(&text_key(KeyAction::Press));
+        held.route(&modifier_key(KeyAction::Press));
+        held.route(&text_key(KeyAction::Release));
+
+        let releases = held.take_releases();
+
+        assert_eq!(releases.len(), 1);
+        assert_eq!(releases[0].physical_key, PhysicalKey::ShiftLeft);
+        assert_eq!(releases[0].action, KeyAction::Release);
+        assert!(held.take_releases().is_empty());
+
+        let application_shortcut_never_routed = HeldKeys::default();
+        assert!(application_shortcut_never_routed.0.is_empty());
+    }
+
+    #[test]
+    fn enabling_focus_reporting_emits_current_state_and_deduplicates_edges() {
+        let (result, reader_steps, records) = start_scripted_session(ScriptedPtyOptions::default());
+        let (mut session, _events) = result.unwrap();
+        session.focus(false);
+        reader_steps
+            .send(ReaderStep::Bytes(b"\x1b[?1004h".to_vec()))
+            .unwrap();
+
+        let enabled = records.wait_for("the current focus-out report", |state| {
+            state.written == b"\x1b[O"
+        });
+        assert_eq!(enabled.written, b"\x1b[O");
+
+        session.focus(false);
+        session.resize(test_geometry());
+        records.wait_for("the duplicate focus barrier", |state| {
+            !state.resizes.is_empty()
+        });
+        assert_eq!(records.snapshot().written, b"\x1b[O");
+
+        session.focus(true);
+        records.wait_for("the focus-in edge", |state| {
+            state.written == b"\x1b[O\x1b[I"
+        });
+        session.focus(true);
+        session.resize(geometry(81, 24, 8.0, 20.0));
+        records.wait_for("the duplicate focus-in barrier", |state| {
+            state.resizes.len() == 2
+        });
+        assert_eq!(records.snapshot().written, b"\x1b[O\x1b[I");
+
+        reader_steps
+            .send(ReaderStep::Bytes(b"\x1b[?1004l".to_vec()))
+            .unwrap();
+        session.resize(geometry(82, 24, 8.0, 20.0));
+        records.wait_for("the focus-reporting disable barrier", |state| {
+            state.resizes.len() == 3
+        });
+        session.focus(false);
+        session.resize(geometry(83, 24, 8.0, 20.0));
+        records.wait_for("the disabled focus edge barrier", |state| {
+            state.resizes.len() == 4
+        });
+        assert_eq!(records.snapshot().written, b"\x1b[O\x1b[I");
+
+        session.shutdown();
+    }
+
+    #[test]
+    fn focus_loss_releases_terminal_held_keys_once_before_focus_out() {
+        let (result, reader_steps, records) = start_scripted_session(ScriptedPtyOptions::default());
+        let (mut session, _events) = result.unwrap();
+        reader_steps
+            .send(ReaderStep::Bytes(b"\x1b[>11u\x1b[?1004h".to_vec()))
+            .unwrap();
+        records.wait_for("the current focus-in report", |state| {
+            state.written == b"\x1b[I"
+        });
+
+        session.key(text_key(KeyAction::Press));
+        session.focus(false);
+        records.wait_for("held release before focus-out", |state| {
+            state.written.ends_with(b"\x1b[97;1:3u\x1b[O")
+        });
+        let once = records.snapshot().written;
+
+        session.focus(false);
+        session.resize(test_geometry());
+        records.wait_for("the duplicate focus-out barrier", |state| {
+            !state.resizes.is_empty()
+        });
+        assert_eq!(records.snapshot().written, once);
+
+        session.shutdown();
+    }
+
+    #[test]
     fn consecutive_output_chunks_should_publish_one_ordered_coalesced_screen() {
         let (command_tx, commands) = mpsc::channel();
         let (reader_events, reader_event_rx) = mpsc::sync_channel(PTY_OUTPUT_QUEUE_CAPACITY);
@@ -1430,12 +3114,26 @@ mod tests {
                 wait_times_out: false,
                 exit_code: 0,
             }),
-            emulator: TerminalEmulator::new(80, 24, 8, 20).unwrap(),
+            emulator: TerminalEmulator::new(test_geometry()).unwrap(),
             commands,
             reader_events: reader_event_rx,
             reader_thread: thread::spawn(|| {}),
             events,
+            resizes: ResizeMailbox::default(),
             pending_command: None,
+            terminal_input_focused: true,
+            focus_reporting_enabled: false,
+            held_keys: HeldKeys::default(),
+            selection_autoscroll: SelectionAutoscrollSchedule::default(),
+            paste_confirmations: PasteConfirmationSchedule::default(),
+            osc52_filter: Osc52Filter::default(),
+            osc52_policy: Osc52AuthorizationPolicy::default(),
+            osc52_clipboard: Box::<UnavailableOsc52Clipboard>::default(),
+            osc52_authorization: Osc52AuthorizationSchedule::default(),
+            deferred_osc52_effects: VecDeque::new(),
+            deferred_output_chunks: VecDeque::new(),
+            deferred_reader_ready: false,
+            hidden_input: HiddenInputSchedule::new(Instant::now()),
         };
 
         assert!(worker.process_reader_events());
@@ -1454,6 +3152,62 @@ mod tests {
     }
 
     #[test]
+    fn synchronized_output_deadline_should_publish_the_pending_screen() {
+        let (_command_tx, commands) = mpsc::channel();
+        let (_reader_events, reader_event_rx) = mpsc::sync_channel(PTY_OUTPUT_QUEUE_CAPACITY);
+        let records = ScriptedPtyRecords::default();
+        let (events, receiver) = async_channel::bounded(PTY_OUTPUT_QUEUE_CAPACITY);
+        let mut worker = TerminalWorker {
+            pty: Box::new(ScriptedPty {
+                reader: None,
+                records,
+                reader_error: None,
+                resize_error: None,
+                write_error: None,
+                wait_error: None,
+                wait_times_out: false,
+                exit_code: 0,
+            }),
+            emulator: TerminalEmulator::new(test_geometry()).unwrap(),
+            commands,
+            reader_events: reader_event_rx,
+            reader_thread: thread::spawn(|| {}),
+            events,
+            resizes: ResizeMailbox::default(),
+            pending_command: None,
+            terminal_input_focused: true,
+            focus_reporting_enabled: false,
+            held_keys: HeldKeys::default(),
+            selection_autoscroll: SelectionAutoscrollSchedule::default(),
+            paste_confirmations: PasteConfirmationSchedule::default(),
+            osc52_filter: Osc52Filter::default(),
+            osc52_policy: Osc52AuthorizationPolicy::default(),
+            osc52_clipboard: Box::<UnavailableOsc52Clipboard>::default(),
+            osc52_authorization: Osc52AuthorizationSchedule::default(),
+            deferred_osc52_effects: VecDeque::new(),
+            deferred_output_chunks: VecDeque::new(),
+            deferred_reader_ready: false,
+            hidden_input: HiddenInputSchedule::new(Instant::now()),
+        };
+        assert!(worker.publish_screen());
+        let _ = receiver.try_recv().unwrap();
+
+        let started = Instant::now();
+        worker.emulator.feed_at(b"\x1b[?2026hstalled", started);
+        assert!(worker.publish_screen());
+        assert!(receiver.try_recv().is_err());
+
+        assert!(
+            worker.release_synchronized_output_if_due(started + MAX_SYNCHRONIZED_OUTPUT_DURATION)
+        );
+        let SessionEvent::Screen(screen) = receiver.try_recv().unwrap() else {
+            panic!("the synchronized-output deadline must publish a screen")
+        };
+        assert!(screen_text(&screen).contains("stalled"));
+        worker.finish();
+    }
+
+    #[test]
     fn output_control_output_should_preserve_screen_order_through_the_session_interface() {
         let (result, reader_steps, records) = start_scripted_session(ScriptedPtyOptions::default());
         let (mut session, events) = result.unwrap();
@@ -1466,7 +3220,7 @@ mod tests {
             "the first output Screen",
             |event| matches!(event, SessionEvent::Screen(screen) if screen_text(screen).contains("first")),
         );
-        session.resize(TEST_SIZE);
+        session.resize(test_geometry());
         records.wait_for("the control between output chunks", |state| {
             state.resizes.len() == 1
         });
@@ -1488,7 +3242,7 @@ mod tests {
                 screen_text(&second).contains("first second"),
                 records.snapshot().resizes,
             ),
-            (false, true, vec![TEST_SIZE.pty_size()])
+            (false, true, vec![pty_size(test_geometry())])
         );
         session.shutdown();
     }
@@ -1498,17 +3252,96 @@ mod tests {
         let (result, _reader_steps, records) =
             start_scripted_session(ScriptedPtyOptions::default());
         let (mut session, _events) = result.unwrap();
-        let resized = GridSize {
-            cols: 100,
-            rows: 30,
-            cell_width_px: 9,
-            cell_height_px: 21,
-        };
+        let resized = geometry(100, 30, 9.0, 21.0);
 
         session.resize(resized);
         let state = records.wait_for("the scripted PTY resize", |state| state.resizes.len() == 1);
 
-        assert_eq!(state.resizes, vec![resized.pty_size()]);
+        assert_eq!(state.resizes, vec![pty_size(resized)]);
+        session.shutdown();
+    }
+
+    #[test]
+    fn pixel_only_resize_should_reach_the_pty_without_publishing_a_grid_screen() {
+        let (result, _reader_steps, records) =
+            start_scripted_session(ScriptedPtyOptions::default());
+        let (mut session, events) = result.unwrap();
+        let initial = receive_event(&events, "the initial terminal screen", |event| {
+            matches!(event, SessionEvent::Screen(_))
+        });
+        let SessionEvent::Screen(initial) = initial else {
+            unreachable!()
+        };
+        let grid = test_geometry().grid();
+        let resized = geometry(grid.cols, grid.rows, 9.0, 21.0);
+
+        session.resize(resized);
+        let barrier = session.request_selection_copy();
+        assert!(barrier.recv_blocking().is_ok());
+
+        assert_eq!(records.snapshot().resizes, vec![pty_size(resized)]);
+        assert!(events.try_recv().is_err());
+        assert_eq!(initial.size.cols, grid.cols);
+        assert_eq!(initial.size.rows, grid.rows);
+        session.shutdown();
+    }
+
+    #[test]
+    fn fractional_backing_geometry_should_reach_the_pty_without_per_cell_rounding() {
+        let (result, _reader_steps, records) =
+            start_scripted_session(ScriptedPtyOptions::default());
+        let (mut session, _events) = result.unwrap();
+        let resized = TerminalGeometry::from_grid(
+            CellGridSize::new(10, 2),
+            LogicalCellSize::new(7.5, 20.0),
+            BackingScale::new(1.5).unwrap(),
+        );
+
+        session.resize(resized);
+        let state = records.wait_for("the fractional scripted PTY resize", |state| {
+            state.resizes.len() == 1
+        });
+
+        assert_eq!(
+            state.resizes,
+            vec![PtySize {
+                rows: 2,
+                cols: 10,
+                pixel_width: 113,
+                pixel_height: 60,
+            }]
+        );
+        session.shutdown();
+    }
+
+    #[test]
+    fn rapid_resizes_should_queue_one_notification_and_retain_only_the_latest_geometry() {
+        let (commands, receiver) = mpsc::channel();
+        let resizes = ResizeMailbox::default();
+        let mut session = TerminalSession {
+            commands: Some(commands),
+            worker: None,
+            terminator: None,
+            resizes: resizes.clone(),
+        };
+        let pixel_only = TerminalGeometry::from_grid(
+            CellGridSize::new(80, 24),
+            LogicalCellSize::new(7.5, 20.0),
+            BackingScale::new(1.5).unwrap(),
+        );
+        let latest = geometry(100, 30, 9.0, 21.0);
+
+        session.resize(pixel_only);
+        session.resize(latest);
+
+        assert_eq!(
+            (
+                matches!(receiver.try_recv(), Ok(Command::Resize)),
+                receiver.try_recv().is_err(),
+                resizes.take(),
+            ),
+            (true, true, Some(latest))
+        );
         session.shutdown();
     }
 
@@ -1516,12 +3349,7 @@ mod tests {
     fn pending_pty_responses_should_precede_later_input_through_the_session_interface() {
         let (result, reader_steps, records) = start_scripted_session(ScriptedPtyOptions::default());
         let (mut session, events) = result.unwrap();
-        let resized = GridSize {
-            cols: 20,
-            rows: 4,
-            cell_width_px: 8,
-            cell_height_px: 18,
-        };
+        let resized = geometry(20, 4, 8.0, 18.0);
 
         reader_steps
             .send(ReaderStep::Bytes(b"\x1b[?2048hX".to_vec()))
@@ -1535,13 +3363,139 @@ mod tests {
         records.wait_for("the in-band terminal resize response", |state| {
             state.written == b"\x1b[48;4;20;72;160t"
         });
-        session.paste("later".to_owned());
+        assert_eq!(
+            session
+                .request_paste("later".to_owned())
+                .recv_blocking()
+                .unwrap(),
+            Ok(PasteRequestOutcome::Written)
+        );
         let state = records.wait_for("the later terminal input", |state| {
             state.written.ends_with(b"later")
         });
 
         assert_eq!(state.written, b"\x1b[48;4;20;72;160tlater");
         session.shutdown();
+    }
+
+    #[test]
+    fn unsafe_paste_is_immutable_until_confirmation_and_uses_exact_unbracketed_bytes() {
+        let (result, _reader_steps, records) =
+            start_scripted_session(ScriptedPtyOptions::default());
+        let (mut session, _events) = result.unwrap();
+        let mut caller_copy = "one\r\ntw\x03o".to_owned();
+
+        let outcome = session
+            .request_paste(caller_copy.clone())
+            .recv_blocking()
+            .unwrap()
+            .unwrap();
+        caller_copy.clear();
+        let PasteRequestOutcome::ConfirmationRequired(confirmation) = outcome else {
+            panic!("multiline, control-bearing paste must require confirmation")
+        };
+        assert!(records.snapshot().written.is_empty());
+
+        assert_eq!(
+            session
+                .resolve_paste(confirmation.id, PasteDecision::Confirm)
+                .recv_blocking()
+                .unwrap(),
+            Ok(PasteResolution::Written)
+        );
+        assert_eq!(records.snapshot().written, b"one\rtw o");
+        session.shutdown();
+    }
+
+    #[test]
+    fn cancelled_paste_writes_no_pty_bytes() {
+        let (result, _reader_steps, records) =
+            start_scripted_session(ScriptedPtyOptions::default());
+        let (mut session, _events) = result.unwrap();
+        let outcome = session
+            .request_paste("first\nsecond".to_owned())
+            .recv_blocking()
+            .unwrap()
+            .unwrap();
+        let PasteRequestOutcome::ConfirmationRequired(confirmation) = outcome else {
+            panic!("multiline paste must require confirmation")
+        };
+
+        assert_eq!(
+            session
+                .resolve_paste(confirmation.id, PasteDecision::Cancel)
+                .recv_blocking()
+                .unwrap(),
+            Ok(PasteResolution::Cancelled)
+        );
+        assert!(records.snapshot().written.is_empty());
+        session.shutdown();
+    }
+
+    #[test]
+    fn focus_loss_invalidates_pending_paste_before_confirmation() {
+        let (result, _reader_steps, records) =
+            start_scripted_session(ScriptedPtyOptions::default());
+        let (mut session, _events) = result.unwrap();
+        let outcome = session
+            .request_paste("first\nsecond".to_owned())
+            .recv_blocking()
+            .unwrap()
+            .unwrap();
+        let PasteRequestOutcome::ConfirmationRequired(confirmation) = outcome else {
+            panic!("multiline paste must require confirmation")
+        };
+
+        session.focus(false);
+        let _ = session.request_selection_copy().recv_blocking();
+        assert_eq!(
+            session
+                .resolve_paste(confirmation.id, PasteDecision::Confirm)
+                .recv_blocking()
+                .unwrap(),
+            Ok(PasteResolution::Stale)
+        );
+        assert!(records.snapshot().written.is_empty());
+        session.shutdown();
+    }
+
+    #[test]
+    fn only_one_unsafe_paste_can_await_confirmation() {
+        let (result, _reader_steps, records) =
+            start_scripted_session(ScriptedPtyOptions::default());
+        let (mut session, _events) = result.unwrap();
+        let first = session
+            .request_paste("first\ncommand".to_owned())
+            .recv_blocking()
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            first,
+            PasteRequestOutcome::ConfirmationRequired(_)
+        ));
+
+        assert_eq!(
+            session
+                .request_paste("second\ncommand".to_owned())
+                .recv_blocking()
+                .unwrap(),
+            Ok(PasteRequestOutcome::Rejected(
+                PasteRejection::ConfirmationPending
+            ))
+        );
+        assert!(records.snapshot().written.is_empty());
+        session.shutdown();
+    }
+
+    #[test]
+    fn paste_confirmation_schedule_expires_without_exposing_payload() {
+        let now = Instant::now();
+        let mut schedule = PasteConfirmationSchedule::default();
+        let payload = PreparedPaste::prepare("first\nsecond".to_owned()).unwrap();
+        let confirmation = schedule.create(payload, now).unwrap();
+
+        assert!(schedule.expire(now + PASTE_CONFIRMATION_TIMEOUT));
+        assert_eq!(schedule.take(confirmation.id, now), None);
     }
 
     #[test]
@@ -1552,7 +3506,7 @@ mod tests {
         });
         let (mut session, events) = result.unwrap();
 
-        session.paste("input".to_owned());
+        let _ = session.request_paste("input".to_owned()).recv_blocking();
         let event = receive_event(&events, "the PTY write failure", |event| {
             matches!(event, SessionEvent::Failed(_))
         });
@@ -1602,7 +3556,7 @@ mod tests {
             panic!("a read error followed by a successful wait must be classified as PtyRead")
         };
         assert_eq!(read_error, "read unavailable");
-        assert_eq!(exit_status, format!("{:?}", ExitStatus::with_exit_code(7)));
+        assert_eq!(exit_status, "Shell exited with code 7");
         assert_eq!(records.snapshot().waits, 1);
 
         session.shutdown();
@@ -1717,7 +3671,7 @@ mod tests {
 
         assert!(matches!(
             event,
-            SessionEvent::Exited(status) if status.starts_with("Shell exited")
+            SessionEvent::Exited(SessionExit::ExitCode(7))
         ));
         let state = records.wait_for("the exited PTY worker to release ownership", |state| {
             state.pty_drops == 1
@@ -1842,20 +3796,16 @@ mod tests {
             commands: None,
             worker: None,
             terminator: None,
+            resizes: ResizeMailbox::default(),
         };
 
-        let result = session.request_selection_text().try_recv().unwrap();
+        let result = session.request_selection_copy().try_recv().unwrap();
         assert!(matches!(result, Err(message) if message.contains("worker has stopped")));
     }
 
     #[test]
     fn real_shell_output_round_trips_through_the_pty_and_emulator() {
-        let size = GridSize {
-            cols: 80,
-            rows: 24,
-            cell_width_px: 8,
-            cell_height_px: 20,
-        };
+        let size = test_geometry();
         let StartedTerminalSession {
             handle: session,
             events,
@@ -1865,7 +3815,21 @@ mod tests {
 
         // The command renders a red X. The echoed command contains an X too, but
         // only the shell's output passes through the SGR sequence and becomes red.
-        session.paste("printf '\\033[31mX\\033[0m\\n'\n".to_owned());
+        let request = session
+            .request_paste("printf '\\033[31mX\\033[0m\\n'\n".to_owned())
+            .recv_blocking()
+            .unwrap()
+            .unwrap();
+        let PasteRequestOutcome::ConfirmationRequired(confirmation) = request else {
+            panic!("multiline paste must require confirmation")
+        };
+        assert_eq!(
+            session
+                .resolve_paste(confirmation.id, PasteDecision::Confirm)
+                .recv_blocking()
+                .unwrap(),
+            Ok(PasteResolution::Written)
+        );
 
         let deadline = Instant::now() + Duration::from_secs(5);
         let mut saw_red_x = false;
@@ -1874,11 +3838,16 @@ mod tests {
                 Ok(SessionEvent::Screen(screen)) => {
                     saw_red_x = screen.rows.iter().flat_map(|row| row.iter()).any(|cell| {
                         cell.text == "X"
-                            && cell.foreground == crate::theme::ACTIVE_THEME.terminal_normal()[1]
+                            && cell.foreground_source == crate::terminal::TerminalColor::Palette(1)
                     });
                 }
                 Ok(SessionEvent::Failed(failure)) => panic!("terminal session failed: {failure}"),
                 Ok(SessionEvent::Exited(status)) => panic!("shell exited early: {status}"),
+                Ok(
+                    SessionEvent::Osc52Authorization(_)
+                    | SessionEvent::Osc52AuthorizationExpired(_),
+                ) => {}
+                Ok(SessionEvent::HiddenInputChanged(_) | SessionEvent::Attention(_)) => {}
                 Err(async_channel::TryRecvError::Empty) => {
                     thread::sleep(Duration::from_millis(10));
                 }
@@ -1895,12 +3864,7 @@ mod tests {
 
     #[test]
     fn real_shell_exit_command_emits_an_exited_event() {
-        let size = GridSize {
-            cols: 80,
-            rows: 24,
-            cell_width_px: 8,
-            cell_height_px: 20,
-        };
+        let size = test_geometry();
         let StartedTerminalSession {
             handle: session,
             events,
@@ -1908,7 +3872,17 @@ mod tests {
             .start(size, &std::env::current_dir().unwrap())
             .unwrap();
 
-        session.paste("exit\n".to_owned());
+        let request = session
+            .request_paste("exit\n".to_owned())
+            .recv_blocking()
+            .unwrap()
+            .unwrap();
+        let PasteRequestOutcome::ConfirmationRequired(confirmation) = request else {
+            panic!("multiline paste must require confirmation")
+        };
+        let _ = session
+            .resolve_paste(confirmation.id, PasteDecision::Confirm)
+            .recv_blocking();
 
         let deadline = Instant::now() + Duration::from_secs(5);
         let mut exit_status = None;
@@ -1917,6 +3891,11 @@ mod tests {
                 Ok(SessionEvent::Screen(_)) => {}
                 Ok(SessionEvent::Exited(status)) => exit_status = Some(status),
                 Ok(SessionEvent::Failed(failure)) => panic!("terminal session failed: {failure}"),
+                Ok(
+                    SessionEvent::Osc52Authorization(_)
+                    | SessionEvent::Osc52AuthorizationExpired(_),
+                ) => {}
+                Ok(SessionEvent::HiddenInputChanged(_) | SessionEvent::Attention(_)) => {}
                 Err(async_channel::TryRecvError::Empty) => {
                     thread::sleep(Duration::from_millis(10));
                 }
@@ -1929,5 +3908,77 @@ mod tests {
             exit_status.is_some(),
             "shell exit did not produce a terminal lifecycle event"
         );
+    }
+
+    #[test]
+    fn selection_autoscroll_schedule_uses_an_injected_monotonic_now() {
+        let epoch = Instant::now();
+        let generation = PresentationGeneration::default();
+        let mut schedule = SelectionAutoscrollSchedule::default();
+
+        schedule.update(epoch, Some(Duration::from_millis(100)), generation);
+
+        assert_eq!(schedule.take_due(epoch + Duration::from_millis(99)), None);
+        assert_eq!(
+            schedule.take_due(epoch + Duration::from_millis(100)),
+            Some(generation)
+        );
+        assert_eq!(schedule.take_due(epoch + Duration::from_secs(1)), None);
+
+        schedule.update(epoch, Some(Duration::from_millis(25)), generation);
+        schedule.update(epoch, None, generation);
+        assert_eq!(schedule.take_due(epoch + Duration::from_secs(1)), None);
+    }
+
+    #[test]
+    fn worker_autoscroll_ticks_publish_scrollback_without_more_pointer_motion() {
+        let (result, reader_steps, _records) =
+            start_scripted_session(ScriptedPtyOptions::default());
+        let (mut session, events) = result.unwrap();
+        let mut output = Vec::new();
+        for row in 0..30 {
+            output.extend_from_slice(format!("row {row:02}\r\n").as_bytes());
+        }
+        reader_steps.send(ReaderStep::Bytes(output)).unwrap();
+        let SessionEvent::Screen(bottom) = receive_event(
+            &events,
+            "scrollback at the bottom",
+            |event| matches!(event, SessionEvent::Screen(screen) if screen.scrollbar.total_rows > screen.scrollbar.visible_rows),
+        ) else {
+            unreachable!()
+        };
+        let bottom_offset = bottom.scrollbar.offset_rows;
+        let pointer = |phase, position, generation| PointerInput {
+            generation,
+            phase,
+            button: (phase != PointerPhase::Motion).then_some(PointerButton::Left),
+            position,
+            modifiers: InputModifiers::default(),
+            shift_selection: ShiftSelectionPolicy::default(),
+        };
+        session.pointer(pointer(
+            PointerPhase::Press,
+            SurfacePosition { x: 1.0, y: 470.0 },
+            bottom.generation,
+        ));
+        session.pointer(pointer(
+            PointerPhase::Motion,
+            SurfacePosition { x: 1.0, y: -1.0 },
+            bottom.generation,
+        ));
+
+        let SessionEvent::Screen(autoscrolled) = receive_event(
+            &events,
+            "worker-driven selection autoscroll",
+            move |event| matches!(event, SessionEvent::Screen(screen) if screen.scrollbar.offset_rows < bottom_offset),
+        ) else {
+            unreachable!()
+        };
+        session.pointer(pointer(
+            PointerPhase::Release,
+            SurfacePosition { x: 1.0, y: -1.0 },
+            autoscrolled.generation,
+        ));
+        session.shutdown();
     }
 }
