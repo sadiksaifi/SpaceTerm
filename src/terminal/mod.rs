@@ -1,5 +1,6 @@
 mod emulator;
 pub(crate) mod geometry;
+mod hyperlink;
 mod key;
 mod keyboard_protocol;
 pub(crate) mod osc52;
@@ -10,12 +11,14 @@ mod session;
 pub(crate) mod testing;
 mod workspace_terminal_session_factory;
 
-pub(crate) use emulator::{
-    CellSnapshot, CursorPositionSnapshot, CursorShapeSnapshot, CursorSnapshot, RowSnapshot,
-    ScreenSnapshot, TerminalColor, TerminalColorsSnapshot, TerminalUnderlineSnapshot,
-};
 #[cfg(test)]
-pub(crate) use emulator::{PresentationGeneration, ScrollbarSnapshot};
+pub(crate) use emulator::ScrollbarSnapshot;
+pub(crate) use emulator::{
+    CellSnapshot, CursorPositionSnapshot, CursorShapeSnapshot, CursorSnapshot,
+    PresentationGeneration, RowSnapshot, ScreenSnapshot, TerminalColor, TerminalColorsSnapshot,
+    TerminalUnderlineSnapshot,
+};
+pub(crate) use hyperlink::HyperlinkTarget;
 pub(crate) use key::{
     InputModifiers, KeyAction, KeyInput, KeyInputError, OptionAsAltPolicy, PhysicalKey,
 };

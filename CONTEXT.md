@@ -271,6 +271,16 @@ strictly application mouse reporting first, alternate-screen arrow policy second
 Screen Scrollback last. Mouse reporting uses buttons 4/5 vertically and 6/7 horizontally;
 horizontal movement never mutates ordinary Scrollback.
 
+### Terminal Hyperlinks
+
+Immutable Terminal Presentations attach validated link targets to complete cells. OSC 8 targets
+come from `libghostty-vt`; configured detection maps UTF-8 byte spans back to whole grapheme cells.
+URL and local-path validation are separate, bounded, and control-free, with local paths resolved
+only against trusted Session context and required to exist. Hover presentation covers every cell
+with the same stable identity, while opening requires a platform-modified press and release on the
+same identity and Presentation Generation; drags, stale mappings, malformed schemes, and missing
+paths are inert.
+
 ### Terminal Selection
 
 The Terminal Emulator owns Selection gestures and delegates cell, word, line, repeat-click, drag,

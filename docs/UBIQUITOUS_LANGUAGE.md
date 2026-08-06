@@ -37,6 +37,7 @@
 | **Presentation Generation** | The monotonic identity of a published Terminal Presentation grid, carried by coordinate and Scrollback mappings so stale mappings and older presentations can be rejected. | frame number, emulator generation |
 | **Synchronized Output** | A bounded DEC 2026 transaction whose intermediate Terminal Emulator changes are withheld until one atomic Terminal Presentation is published. | render lock, output buffering |
 | **Selection** | A terminal-owned logical content range created by pointer gestures and kept anchored across Scrollback movement, output, and resize reflow. | selected Workspace, selected Pane, text highlight |
+| **Terminal Hyperlink** | A validated immutable target mapped to complete Terminal Presentation cells and opened only by an explicit same-generation activation. | arbitrary terminal text, automatic file execution |
 | **Marked Text** | Transient input-method preedit owned by the Pane with Terminal Input Focus; it is presented at the Cursor but is not Terminal Emulator or PTY input until committed. | terminal output, committed text |
 | **Secure Event Input** | Process-global macOS keyboard protection held only while exactly one live Pane both reads hidden canonical PTY input and owns Terminal Input Focus. | password text, per-Pane secure mode |
 | **Paste Payload** | An immutable, size-bounded text insertion candidate owned by the Terminal Session worker from normalization through encoding or cancellation. | clipboard contents, typed key input |

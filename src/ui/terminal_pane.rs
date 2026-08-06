@@ -95,6 +95,11 @@ pub(crate) struct TerminalPane {
     ime_suppressed_keys: Vec<PhysicalKey>,
     pending_paste: Option<PasteConfirmation>,
     pending_osc52: Option<Osc52AuthorizationRequest>,
+    hovered_link: Option<crate::terminal::HyperlinkTarget>,
+    pressed_link: Option<(
+        crate::terminal::PresentationGeneration,
+        crate::terminal::HyperlinkTarget,
+    )>,
     blink_phase_visible: bool,
     blink_generation: u64,
     _blink_task: Option<Task<()>>,
@@ -168,6 +173,8 @@ impl TerminalPane {
             ime_suppressed_keys: Vec::new(),
             pending_paste: None,
             pending_osc52: None,
+            hovered_link: None,
+            pressed_link: None,
             blink_phase_visible: true,
             blink_generation: 0,
             _blink_task: None,
@@ -650,6 +657,15 @@ impl TerminalPane {
             return;
         };
 
+        if button == PointerButton::Left
+            && event.modifiers.platform
+            && let Some(link) = self.link_at(position)
+        {
+            self.pressed_link = Some((self.screen.generation, link));
+            cx.stop_propagation();
+            return;
+        }
+
         self.pressed_button = Some(button);
         if let Some(session) = &self.session {
             session.pointer(PointerInput {
@@ -675,6 +691,15 @@ impl TerminalPane {
         let Some(position) = self.surface_position(event.position, dragging) else {
             return;
         };
+        let hovered_link = self.link_at(position);
+        if self.hovered_link != hovered_link {
+            self.hovered_link = hovered_link;
+            cx.notify();
+        }
+        if self.pressed_link.is_some() {
+            cx.stop_propagation();
+            return;
+        }
         if let Some(session) = &self.session {
             session.pointer(PointerInput {
                 generation: self.screen.generation,
@@ -693,6 +718,21 @@ impl TerminalPane {
         let Some(button) = pointer_button(event.button) else {
             return;
         };
+        if let Some((generation, pressed)) = self.pressed_link.take() {
+            let current = self
+                .surface_position(event.position, false)
+                .and_then(|position| self.link_at(position));
+            if let Some(url) = activated_link(
+                generation,
+                &pressed,
+                self.screen.generation,
+                current.as_ref(),
+            ) {
+                cx.open_url(&url);
+            }
+            cx.stop_propagation();
+            return;
+        }
         if self.pressed_button != Some(button) {
             return;
         }
@@ -939,6 +979,12 @@ impl TerminalPane {
             allow_outside,
         )
     }
+
+    fn link_at(&self, position: SurfacePosition) -> Option<crate::terminal::HyperlinkTarget> {
+        let row = (position.y / self.line_height).floor() as usize;
+        let column = (position.x / f32::from(self.cell_width)).floor() as usize;
+        self.screen.rows.get(row)?.get(column)?.hyperlink.clone()
+    }
 }
 
 impl EventEmitter<TerminalPaneEvent> for TerminalPane {}
@@ -1075,6 +1121,34 @@ impl Render for TerminalPane {
         self.sync_presentation_blink(surface_active, terminal_input_focused, cx);
         let background = gpui_color(self.screen.background);
         let status = self.status.clone();
+        let hovered_link = self.hovered_link.clone();
+        let link_cell_width = self.cell_width;
+        let link_line_height = self.line_height;
+        let link_rows = self.screen.rows.clone();
+        let link_highlights = hovered_link.as_ref().map_or_else(Vec::new, |hovered| {
+            link_rows
+                .iter()
+                .enumerate()
+                .flat_map(|(row, cells)| {
+                    cells.iter().enumerate().filter_map(move |(column, cell)| {
+                        cell.hyperlink
+                            .as_ref()
+                            .is_some_and(|link| link.identity == hovered.identity)
+                            .then(|| {
+                                div()
+                                    .absolute()
+                                    .left(px(HORIZONTAL_PADDING
+                                        + column as f32 * f32::from(link_cell_width)))
+                                    .top(px(VERTICAL_PADDING + row as f32 * link_line_height))
+                                    .w(link_cell_width)
+                                    .h(px(link_line_height))
+                                    .border_b_1()
+                                    .border_color(gpui_color(ACTIVE_THEME.link_text_hover))
+                            })
+                    })
+                })
+                .collect::<Vec<_>>()
+        });
         let paste_confirmation = self.pending_paste;
         let osc52_authorization = self.pending_osc52;
         self.sync_scrollbar(cx);
@@ -1118,6 +1192,7 @@ impl Render for TerminalPane {
             .py(px(VERTICAL_PADDING))
             .when(pointer_uses_text_cursor, |root| root.cursor_text())
             .when(!pointer_uses_text_cursor, |root| root.cursor_default())
+            .when(hovered_link.is_some(), |root| root.cursor_pointer())
             .key_context(TERMINAL_KEY_CONTEXT)
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(Self::copy_selection))
@@ -1142,7 +1217,19 @@ impl Render for TerminalPane {
             .on_mouse_up_out(MouseButton::Middle, cx.listener(Self::on_mouse_up))
             .on_mouse_up_out(MouseButton::Right, cx.listener(Self::on_mouse_up))
             .child(terminal_grid)
+            .children(link_highlights)
             .child(scrollbar)
+            .when_some(hovered_link, |root, link| {
+                root.child(
+                    div()
+                        .absolute()
+                        .left(px(8.0))
+                        .bottom(px(8.0))
+                        .px(px(6.0))
+                        .bg(gpui_color(ACTIVE_THEME.background))
+                        .child(link.value),
+                )
+            })
             .when_some(paste_confirmation, |root, confirmation| {
                 root.child(render_paste_confirmation(
                     confirmation,
@@ -1486,6 +1573,17 @@ fn terminal_surface_position(
     })
 }
 
+fn activated_link(
+    pressed_generation: crate::terminal::PresentationGeneration,
+    pressed: &crate::terminal::HyperlinkTarget,
+    current_generation: crate::terminal::PresentationGeneration,
+    current: Option<&crate::terminal::HyperlinkTarget>,
+) -> Option<String> {
+    (pressed_generation == current_generation
+        && current.is_some_and(|link| link.identity == pressed.identity))
+    .then(|| pressed.activation_url())
+}
+
 #[derive(Default)]
 struct WheelAccumulator {
     horizontal: f32,
@@ -1733,6 +1831,7 @@ mod tests {
                 overline: false,
                 selected: false,
                 spacer_tail: false,
+                hyperlink: None,
             }])]),
             ScrollbarSnapshot::default(),
             "blink",
@@ -1757,6 +1856,7 @@ mod tests {
                 overline: false,
                 selected: false,
                 spacer_tail: false,
+                hyperlink: None,
             }])]),
             ScrollbarSnapshot::default(),
             "cursor blink",
@@ -2852,6 +2952,20 @@ mod tests {
             (0, 0)
         );
         assert_eq!((accumulator.horizontal, accumulator.vertical), (0.0, 0.0));
+    }
+
+    #[test]
+    fn hyperlinks_open_only_on_same_generation_explicit_release() {
+        let link = crate::terminal::HyperlinkTarget::url("https://example.test").unwrap();
+        let first = crate::terminal::PresentationGeneration::test(1);
+        let second = crate::terminal::PresentationGeneration::test(2);
+
+        assert_eq!(
+            activated_link(first, &link, first, Some(&link)),
+            Some("https://example.test".to_owned())
+        );
+        assert_eq!(activated_link(first, &link, second, Some(&link)), None);
+        assert_eq!(activated_link(first, &link, first, None), None);
     }
 
     #[test]

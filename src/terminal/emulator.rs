@@ -65,6 +65,7 @@ pub(crate) struct CellSnapshot {
     pub(crate) overline: bool,
     pub(crate) selected: bool,
     pub(crate) spacer_tail: bool,
+    pub(crate) hyperlink: Option<crate::terminal::HyperlinkTarget>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -148,6 +149,11 @@ pub(crate) struct PresentationGeneration(u64);
 impl PresentationGeneration {
     fn next(self) -> Self {
         Self(self.0.saturating_add(1))
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn test(value: u64) -> Self {
+        Self(value)
     }
 }
 
@@ -1502,6 +1508,21 @@ impl TerminalEmulator {
                                 graphemes.into_iter().collect()
                             }
                         };
+                        let hyperlink = if raw_cell.has_hyperlink()? {
+                            let reference =
+                                self.terminal.grid_ref(Point::Viewport(PointCoordinate {
+                                    x: column_index,
+                                    y: u32::from(row_index),
+                                }))?;
+                            let mut uri = vec![0; crate::terminal::hyperlink::MAX_LINK_BYTES];
+                            reference
+                                .hyperlink_uri(&mut uri)
+                                .ok()
+                                .and_then(|length| std::str::from_utf8(&uri[..length]).ok())
+                                .and_then(crate::terminal::HyperlinkTarget::url)
+                        } else {
+                            None
+                        };
 
                         rendered_cells.push(CellSnapshot {
                             text,
@@ -1521,10 +1542,22 @@ impl TerminalEmulator {
                                 column_index >= range.start_x && column_index <= range.end_x
                             }),
                             spacer_tail,
+                            hyperlink,
                         });
                         column_index = column_index.saturating_add(1);
                     }
 
+                    let detected = crate::terminal::hyperlink::detect_url_cells(
+                        &rendered_cells
+                            .iter()
+                            .map(|cell| cell.text.clone())
+                            .collect::<Vec<_>>(),
+                    );
+                    for (cell, detected) in rendered_cells.iter_mut().zip(detected) {
+                        if cell.hyperlink.is_none() {
+                            cell.hyperlink = detected;
+                        }
+                    }
                     let rendered_row = Arc::<[CellSnapshot]>::from(rendered_cells);
                     let previous_row = row_cache.get(usize::from(row_index));
                     let rendered_row = previous_row
@@ -3568,6 +3601,23 @@ mod tests {
         let ignored = alternate.wheel(horizontal).unwrap();
         assert!(ignored.bytes.is_empty());
         assert!(!ignored.screen_changed);
+    }
+
+    #[test]
+    fn osc8_identity_survives_wrapping_in_immutable_snapshots() {
+        let mut emulator = emulator(5, 2);
+        emulator.feed(b"\x1b]8;;https://example.test/path\x07abcdefgh\x1b]8;;\x07");
+
+        let snapshot = emulator.snapshot().unwrap().unwrap();
+        let identities = snapshot
+            .rows
+            .iter()
+            .flat_map(|row| row.iter())
+            .filter_map(|cell| cell.hyperlink.as_ref().map(|link| link.identity))
+            .collect::<Vec<_>>();
+
+        assert_eq!(identities.len(), 8);
+        assert!(identities.iter().all(|identity| *identity == identities[0]));
     }
 
     #[test]
