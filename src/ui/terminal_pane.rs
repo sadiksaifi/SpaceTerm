@@ -1892,6 +1892,164 @@ mod tests {
         assert!(!pane.read_with(cx, |pane, _| pane.blink_phase_visible));
     }
 
+    #[gpui::test]
+    fn cursor_blink_resets_on_accepted_input_and_focus_gain(cx: &mut TestAppContext) {
+        let (pane, cx, _records) = connected_terminal_pane(cx);
+        cx.update(|_window, cx| {
+            pane.update(cx, |pane, cx| {
+                pane.set_product_focus(TerminalProductFocus {
+                    active_workspace: true,
+                    active_window: true,
+                    focused_pane: true,
+                    ..TerminalProductFocus::default()
+                });
+                pane.handle_event(SessionEvent::Screen(blinking_cursor_screen(true, true)), cx);
+                cx.notify();
+            });
+        });
+        cx.run_until_parked();
+
+        cx.executor().advance_clock(PRESENTATION_BLINK_INTERVAL);
+        cx.run_until_parked();
+        assert!(!pane.read_with(cx, |pane, _| pane.blink_phase_visible));
+
+        cx.update(|_window, cx| {
+            pane.update(cx, |pane, cx| {
+                pane.send_key_input(Ok(KeyInput::input_method_commit("x")), cx);
+            });
+        });
+        cx.run_until_parked();
+        assert!(pane.read_with(cx, |pane, _| pane.blink_phase_visible));
+        assert!(pane.read_with(cx, |pane, _| pane._blink_task.is_some()));
+
+        cx.executor()
+            .advance_clock(PRESENTATION_BLINK_INTERVAL - Duration::from_millis(1));
+        cx.run_until_parked();
+        assert!(pane.read_with(cx, |pane, _| pane.blink_phase_visible));
+
+        cx.executor().advance_clock(Duration::from_millis(1));
+        cx.run_until_parked();
+        assert!(!pane.read_with(cx, |pane, _| pane.blink_phase_visible));
+
+        cx.update(|_window, cx| {
+            pane.update(cx, |pane, cx| {
+                pane.set_product_focus(TerminalProductFocus {
+                    active_workspace: true,
+                    active_window: true,
+                    focused_pane: false,
+                    ..TerminalProductFocus::default()
+                });
+                cx.notify();
+            });
+        });
+        cx.run_until_parked();
+        assert!(pane.read_with(cx, |pane, _| pane.blink_phase_visible));
+        assert!(pane.read_with(cx, |pane, _| pane._blink_task.is_none()));
+
+        cx.update(|_window, cx| {
+            pane.update(cx, |pane, cx| {
+                pane.set_product_focus(TerminalProductFocus {
+                    active_workspace: true,
+                    active_window: true,
+                    focused_pane: true,
+                    ..TerminalProductFocus::default()
+                });
+                cx.notify();
+            });
+        });
+        cx.run_until_parked();
+        assert!(pane.read_with(cx, |pane, _| pane.blink_phase_visible));
+        assert!(pane.read_with(cx, |pane, _| pane._blink_task.is_some()));
+
+        cx.executor().advance_clock(PRESENTATION_BLINK_INTERVAL);
+        cx.run_until_parked();
+        assert!(!pane.read_with(cx, |pane, _| pane.blink_phase_visible));
+    }
+
+    #[gpui::test]
+    fn cursor_blink_has_no_task_when_steady_hidden_or_unfocused_and_close_cancels(
+        cx: &mut TestAppContext,
+    ) {
+        let (pane, cx) = terminal_pane(cx);
+        let focused = TerminalProductFocus {
+            active_workspace: true,
+            active_window: true,
+            focused_pane: true,
+            ..TerminalProductFocus::default()
+        };
+
+        cx.update(|_window, cx| {
+            pane.update(cx, |pane, cx| {
+                pane.set_product_focus(focused);
+                pane.handle_event(
+                    SessionEvent::Screen(blinking_cursor_screen(true, false)),
+                    cx,
+                );
+                cx.notify();
+            });
+        });
+        cx.run_until_parked();
+        assert!(pane.read_with(cx, |pane, _| pane._blink_task.is_none()));
+
+        cx.update(|_window, cx| {
+            pane.update(cx, |pane, cx| {
+                pane.handle_event(
+                    SessionEvent::Screen(blinking_cursor_screen(false, true)),
+                    cx,
+                );
+                cx.notify();
+            });
+        });
+        cx.run_until_parked();
+        assert!(pane.read_with(cx, |pane, _| pane._blink_task.is_none()));
+
+        cx.update(|_window, cx| {
+            pane.update(cx, |pane, cx| {
+                pane.handle_event(SessionEvent::Screen(blinking_cursor_screen(true, true)), cx);
+                cx.notify();
+            });
+        });
+        cx.run_until_parked();
+        assert!(pane.read_with(cx, |pane, _| pane._blink_task.is_some()));
+
+        cx.update(|_window, cx| {
+            pane.update(cx, |pane, cx| {
+                pane.set_product_focus(TerminalProductFocus {
+                    focused_pane: false,
+                    ..focused
+                });
+                cx.notify();
+            });
+        });
+        cx.run_until_parked();
+        assert!(pane.read_with(cx, |pane, _| pane._blink_task.is_none()));
+        assert!(pane.read_with(cx, |pane, _| pane.blink_phase_visible));
+
+        cx.update(|_window, cx| {
+            pane.update(cx, |pane, cx| {
+                pane.set_product_focus(focused);
+                cx.notify();
+            });
+        });
+        cx.run_until_parked();
+        assert!(pane.read_with(cx, |pane, _| pane._blink_task.is_some()));
+
+        let generation = pane.read_with(cx, |pane, _| pane.blink_generation);
+        let phase = pane.read_with(cx, |pane, _| pane.blink_phase_visible);
+        pane.update(cx, |pane, _| pane.close());
+        assert!(pane.read_with(cx, |pane, _| pane._blink_task.is_none()));
+        assert_ne!(
+            pane.read_with(cx, |pane, _| pane.blink_generation),
+            generation
+        );
+        cx.executor().advance_clock(PRESENTATION_BLINK_INTERVAL);
+        cx.run_until_parked();
+        assert_eq!(
+            pane.read_with(cx, |pane, _| pane.blink_phase_visible),
+            phase
+        );
+    }
+
     #[test]
     fn pointer_presentation_matches_the_effective_mouse_route() {
         let policy = ShiftSelectionPolicy::OverrideApplicationMouse;

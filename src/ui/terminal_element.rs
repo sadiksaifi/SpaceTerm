@@ -1953,6 +1953,51 @@ mod tests {
     }
 
     #[test]
+    fn cursor_blink_phase_reuses_every_prepared_row() {
+        let rows = Arc::<[RowSnapshot]>::from([
+            Arc::<[CellSnapshot]>::from([cell("a"), cell("b")]),
+            Arc::<[CellSnapshot]>::from([cell("c"), cell("d")]),
+            Arc::<[CellSnapshot]>::from([cell("e"), cell("f")]),
+        ]);
+        let cursor = CursorPositionSnapshot {
+            row: 1,
+            column: 0,
+            width_cells: 1,
+        };
+        let mut cache = TerminalGridCache::new();
+        let first = cache.prepare(
+            &rows,
+            &colors(),
+            &"Menlo".into(),
+            Some(cursor),
+            grid_metrics(),
+        );
+
+        let negotiated = CursorSnapshot {
+            position: Some(cursor),
+            visible: true,
+            blinking: true,
+            ..CursorSnapshot::default()
+        };
+        assert!(presented_cursor_style(negotiated, true, true).visible);
+        assert!(!presented_cursor_style(negotiated, true, false).visible);
+
+        let second = cache.prepare(
+            &rows,
+            &colors(),
+            &"Menlo".into(),
+            Some(cursor),
+            grid_metrics(),
+        );
+        assert!(
+            first
+                .iter()
+                .zip(second.iter())
+                .all(|(first, second)| Arc::ptr_eq(first, second))
+        );
+    }
+
+    #[test]
     fn cursor_movement_only_invalidates_affected_prepared_rows() {
         let rows = Arc::<[RowSnapshot]>::from([
             Arc::<[CellSnapshot]>::from([cell("a"), cell("b")]),
