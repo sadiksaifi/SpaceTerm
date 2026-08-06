@@ -96,12 +96,53 @@ struct ExpectedObservation {
 struct ExecutableFixture {
     spec: &'static FixtureSpec,
     expected: &'static [ExpectedObservation],
-    observe: fn() -> Result<Vec<Observation>, String>,
+    observe: fn(&mut FixtureBudget) -> Result<Vec<Observation>, String>,
+}
+
+#[derive(Debug)]
+struct FixtureBudget {
+    steps: usize,
+    input_bytes: usize,
+    output_bytes: usize,
+}
+
+impl FixtureBudget {
+    const fn new() -> Self {
+        Self {
+            steps: 0,
+            input_bytes: 0,
+            output_bytes: 0,
+        }
+    }
+
+    fn record(&mut self, input_bytes: usize, output_bytes: usize) {
+        self.steps = self.steps.saturating_add(1);
+        self.input_bytes = self.input_bytes.saturating_add(input_bytes);
+        self.output_bytes = self.output_bytes.saturating_add(output_bytes);
+    }
+
+    fn verify(&self, spec: &FixtureSpec) -> Result<(), String> {
+        for (name, actual, limit) in [
+            ("steps", self.steps, spec.max_steps),
+            ("input bytes", self.input_bytes, spec.max_input_bytes),
+            ("output bytes", self.output_bytes, spec.max_output_bytes),
+        ] {
+            if actual > limit {
+                return Err(format!(
+                    "fixture `{}` exceeded {name} budget: {actual} > {limit}",
+                    spec.id
+                ));
+            }
+        }
+        Ok(())
+    }
 }
 
 fn run_fixture(fixture: &ExecutableFixture) -> Result<(), String> {
-    let observed = (fixture.observe)()
+    let mut budget = FixtureBudget::new();
+    let observed = (fixture.observe)(&mut budget)
         .map_err(|error| format!("fixture `{}` failed: {error}", fixture.spec.id))?;
+    budget.verify(fixture.spec)?;
 
     for (expected, observed) in fixture.expected.iter().zip(&observed) {
         if expected.step != observed.step
@@ -169,7 +210,8 @@ fn registry_covers_every_advertised_capability_without_image_protocols() {
 
 #[test]
 fn runner_identifies_the_exact_fixture_step_and_oracle_mismatch() {
-    fn observe() -> Result<Vec<Observation>, String> {
+    fn observe(budget: &mut FixtureBudget) -> Result<Vec<Observation>, String> {
+        budget.record(3, 4);
         Ok(vec![Observation {
             step: 2,
             field: "pty-bytes",
@@ -191,6 +233,30 @@ fn runner_identifies_the_exact_fixture_step_and_oracle_mismatch() {
         run_fixture(&fixture),
         Err(
             "fixture `keyboard.protocols` step 2 `pty-bytes` mismatch:\nexpected: 1b 5b 41\nobserved: 1b 5b 4f 41"
+                .to_owned()
+        )
+    );
+}
+
+#[test]
+fn runner_rejects_a_fixture_that_exceeds_its_deterministic_budget() {
+    fn observe(budget: &mut FixtureBudget) -> Result<Vec<Observation>, String> {
+        for _ in 0..=FIXTURES[0].max_steps {
+            budget.record(0, 0);
+        }
+        Ok(Vec::new())
+    }
+
+    let fixture = ExecutableFixture {
+        spec: &FIXTURES[0],
+        expected: &[],
+        observe,
+    };
+
+    assert_eq!(
+        run_fixture(&fixture),
+        Err(
+            "fixture `snapshot.damage-and-isolation` exceeded steps budget: 257 > 256"
                 .to_owned()
         )
     );
