@@ -304,7 +304,13 @@ impl TerminalPane {
                 }
                 true
             }
-            KeyTranslation::TextInput(_) | KeyTranslation::Unhandled(_) => false,
+            KeyTranslation::TextInput(text) => {
+                if let Some(session) = &self.session {
+                    session.key(KeyInput::text_input(text));
+                }
+                true
+            }
+            KeyTranslation::Unhandled(_) => false,
         }
     }
 
@@ -1068,6 +1074,25 @@ mod tests {
             (key_count, pane.read_with(cx, |pane, _| pane.status.clone())),
             (0, None)
         );
+    }
+
+    #[gpui::test]
+    fn printable_text_without_physical_identity_reaches_the_terminal_session(
+        cx: &mut TestAppContext,
+    ) {
+        let (_pane, cx, records) = connected_terminal_pane(cx);
+
+        cx.simulate_event(event("hyper", Some("界"), Modifiers::default()));
+
+        let inputs = records
+            .commands()
+            .into_iter()
+            .filter_map(|call| match call.command {
+                RecordedSessionCommand::Key(input) => Some(input),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(inputs, [KeyInput::text_input("界")]);
     }
 
     fn event(key: &str, key_char: Option<&str>, modifiers: Modifiers) -> KeyDownEvent {
