@@ -3,6 +3,7 @@ use std::fmt;
 use std::path::Path;
 
 use super::emulator::PresentationGeneration;
+use super::key::KeyAction;
 use super::session::{SessionExit, SessionFailure, SessionStartupStage};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -168,19 +169,65 @@ impl PaneTerminalState {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum DiagnosticKeyEventKind {
+    KeyDown,
+    KeyUp,
+    FlagsChanged,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct UnhandledKeyDiagnostic {
+    kind: DiagnosticKeyEventKind,
+    action: KeyAction,
+    native_key_code: Option<u16>,
+}
+
+impl UnhandledKeyDiagnostic {
+    pub(crate) const fn new(
+        kind: DiagnosticKeyEventKind,
+        action: KeyAction,
+        native_key_code: Option<u16>,
+    ) -> Self {
+        Self {
+            kind,
+            action,
+            native_key_code,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct DiagnosticRecord {
-    class: FailureClass,
-    recoverability: Recoverability,
-    operation: &'static str,
+enum DiagnosticRecord {
+    Failure {
+        class: FailureClass,
+        recoverability: Recoverability,
+        operation: &'static str,
+    },
+    UnhandledKey(UnhandledKeyDiagnostic),
 }
 
 impl DiagnosticRecord {
     fn encode(&self) -> String {
-        format!(
-            "class={:?} recoverability={:?} operation={}\n",
-            self.class, self.recoverability, self.operation
-        )
+        match self {
+            Self::Failure {
+                class,
+                recoverability,
+                operation,
+            } => {
+                format!("class={class:?} recoverability={recoverability:?} operation={operation}\n")
+            }
+            Self::UnhandledKey(event) => match event.native_key_code {
+                Some(native_key_code) => format!(
+                    "event=UnhandledKey kind={:?} action={:?} native_key_code={native_key_code}\n",
+                    event.kind, event.action
+                ),
+                None => format!(
+                    "event=UnhandledKey kind={:?} action={:?} native_key_code=none\n",
+                    event.kind, event.action
+                ),
+            },
+        }
     }
 }
 
@@ -196,11 +243,21 @@ impl DiagnosticBundle {
         "SpaceTerm diagnostics\nnetwork_telemetry=false\nterminal_content=false\n";
 
     pub(crate) fn record(&mut self, failure: &TerminalFailure) {
-        self.records.push_back(DiagnosticRecord {
+        self.records.push_back(DiagnosticRecord::Failure {
             class: failure.class(),
             recoverability: failure.recoverability(),
             operation: failure.operation(),
         });
+        self.enforce_bounds();
+    }
+
+    pub(crate) fn record_unhandled_key(&mut self, event: UnhandledKeyDiagnostic) {
+        self.records
+            .push_back(DiagnosticRecord::UnhandledKey(event));
+        self.enforce_bounds();
+    }
+
+    fn enforce_bounds(&mut self) {
         while self.records.len() > Self::MAX_RECORDS || self.encoded_len() > Self::MAX_BYTES {
             self.records.pop_front();
         }
@@ -321,6 +378,36 @@ mod tests {
         let exported = fs::read_to_string(&path).unwrap();
         assert!(exported.contains("network_telemetry=false"));
         assert!(!exported.contains("terminal text"));
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn unhandled_key_diagnostics_export_only_privacy_safe_event_identity() {
+        let mut bundle = DiagnosticBundle::default();
+        bundle.record_unhandled_key(UnhandledKeyDiagnostic::new(
+            DiagnosticKeyEventKind::KeyDown,
+            crate::terminal::KeyAction::Press,
+            Some(u16::MAX),
+        ));
+
+        let directory = std::env::temp_dir().join(format!(
+            "spaceterm-unhandled-key-diagnostics-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("diagnostics.txt");
+        bundle.export(&path).unwrap();
+        let exported = fs::read_to_string(&path).unwrap();
+
+        assert_eq!(
+            exported,
+            concat!(
+                "SpaceTerm diagnostics\n",
+                "network_telemetry=false\n",
+                "terminal_content=false\n",
+                "event=UnhandledKey kind=KeyDown action=Press native_key_code=65535\n",
+            )
+        );
         fs::remove_dir_all(directory).unwrap();
     }
 }
