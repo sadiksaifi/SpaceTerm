@@ -18,12 +18,15 @@ use crate::platform::macos_pty::{
     PtyError, PtyTerminator, ShellExit, ShutdownDisposition, SpawnedPty, spawn_user_shell,
     user_shell,
 };
+use crate::platform::shell_integration::resource_root;
+use crate::terminal::attention::AttentionEvent;
 #[cfg(test)]
 use crate::terminal::emulator::MAX_SYNCHRONIZED_OUTPUT_DURATION;
 use crate::terminal::emulator::{
     EmulatorAction, PresentationGeneration, ScreenSnapshot, TerminalEmulator,
 };
 use crate::terminal::geometry::TerminalGeometry;
+use crate::terminal::identity;
 #[cfg(test)]
 use crate::terminal::key::OptionAsAltPolicy;
 use crate::terminal::key::{InputModifiers, KeyInput};
@@ -139,6 +142,7 @@ fn pty_size(geometry: TerminalGeometry) -> PtySize {
 #[derive(Clone, Debug)]
 pub(crate) enum SessionEvent {
     Screen(Arc<ScreenSnapshot>),
+    Attention(AttentionEvent),
     HiddenInputChanged(bool),
     Osc52Authorization(Osc52AuthorizationRequest),
     Osc52AuthorizationExpired(Osc52AuthorizationId),
@@ -505,6 +509,8 @@ impl TerminalSession {
         spawn_pty: impl FnOnce(PtySize, &Path) -> Result<StartedSessionPty, PtyError> + Send + 'static,
     ) -> Result<(Self, async_channel::Receiver<SessionEvent>), SessionError> {
         let working_directory = PathBuf::from(working_directory);
+        let fallback_title = shell_fallback_title();
+        let terminal_name = identity::launch_identity(&resource_root()).term;
         let (command_tx, command_rx) = mpsc::channel();
         let reader_transport = ReaderTransport::new(command_tx.clone());
         let resizes = ResizeMailbox::default();
@@ -536,7 +542,12 @@ impl TerminalSession {
                 }
                 TerminalWorker::run(
                     pty,
-                    geometry,
+                    TerminalWorkerContext {
+                        initial_geometry: geometry,
+                        initial_directory: working_directory,
+                        fallback_title,
+                        terminal_name,
+                    },
                     command_rx,
                     reader_transport,
                     worker_resizes,
@@ -563,6 +574,8 @@ impl TerminalSession {
         working_directory: &Path,
         spawn_pty: impl FnOnce(PtySize, &Path) -> Result<StartedSessionPty, PtyError>,
     ) -> Result<(Self, async_channel::Receiver<SessionEvent>), SessionError> {
+        let worker_directory = working_directory.to_owned();
+        let terminal_name = identity::launch_identity(&resource_root()).term;
         let StartedSessionPty { pty, terminator } =
             spawn_pty(pty_size(geometry), working_directory)?;
         let (command_tx, command_rx) = mpsc::channel();
@@ -579,7 +592,12 @@ impl TerminalSession {
             .spawn(move || {
                 TerminalWorker::run(
                     pty,
-                    geometry,
+                    TerminalWorkerContext {
+                        initial_geometry: geometry,
+                        initial_directory: worker_directory,
+                        fallback_title: "Terminal".to_owned(),
+                        terminal_name,
+                    },
                     command_rx,
                     reader_transport,
                     worker_resizes,
@@ -886,6 +904,13 @@ struct TerminalWorker {
     hidden_input: HiddenInputSchedule,
 }
 
+struct TerminalWorkerContext {
+    initial_geometry: TerminalGeometry,
+    initial_directory: PathBuf,
+    fallback_title: String,
+    terminal_name: &'static str,
+}
+
 struct HiddenInputSchedule {
     active: bool,
     deadline: Instant,
@@ -1146,13 +1171,19 @@ impl StartupReporter {
 impl TerminalWorker {
     fn run(
         mut pty: Box<dyn SessionPty>,
-        initial_geometry: TerminalGeometry,
+        context: TerminalWorkerContext,
         commands: CommandReceiver<Command>,
         reader_transport: ReaderTransport,
         resizes: ResizeMailbox,
         events: async_channel::Sender<SessionEvent>,
         startup: StartupReporter,
     ) {
+        let TerminalWorkerContext {
+            initial_geometry,
+            initial_directory,
+            fallback_title,
+            terminal_name,
+        } = context;
         let ReaderTransport {
             commands: reader_commands,
             events: reader_events,
@@ -1177,7 +1208,15 @@ impl TerminalWorker {
             }
         };
 
-        let emulator = match TerminalEmulator::new(initial_geometry) {
+        let local_hostname = crate::terminal::metadata::local_hostname();
+        let emulator = match TerminalEmulator::new_with_metadata(
+            initial_geometry,
+            &initial_directory.to_string_lossy(),
+            &fallback_title,
+            local_hostname.as_deref(),
+            terminal_name,
+            Instant::now(),
+        ) {
             Ok(emulator) => emulator,
             Err(error) => {
                 startup.failed(SessionStartupStage::Emulator, error.to_string());
@@ -1523,6 +1562,10 @@ impl TerminalWorker {
                 read_error,
                 self.pty.wait_for_child(FINAL_CHILD_WAIT_TIMEOUT),
             );
+            self.emulator.mark_metadata_stale();
+            if !self.publish_screen() {
+                return false;
+            }
             self.send_terminal_event(event);
             false
         } else {
@@ -1637,6 +1680,11 @@ impl TerminalWorker {
 
     fn feed_terminal_output(&mut self, bytes: &[u8], focus_reports: &mut Vec<u8>) -> bool {
         self.emulator.feed(bytes);
+        for event in self.emulator.take_attention_events() {
+            if !self.send_terminal_event(SessionEvent::Attention(event)) {
+                return false;
+            }
+        }
         let focus_reporting_enabled = match self.emulator.focus_reporting_enabled() {
             Ok(enabled) => enabled,
             Err(message) => {
@@ -1837,6 +1885,16 @@ impl TerminalWorker {
         drop(pty);
         join_reader(reader_thread);
     }
+}
+
+fn shell_fallback_title() -> String {
+    let shell = user_shell();
+    Path::new(&shell)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .unwrap_or(&shell)
+        .to_owned()
 }
 
 fn spawn_reader(
@@ -3789,7 +3847,7 @@ mod tests {
                     SessionEvent::Osc52Authorization(_)
                     | SessionEvent::Osc52AuthorizationExpired(_),
                 ) => {}
-                Ok(SessionEvent::HiddenInputChanged(_)) => {}
+                Ok(SessionEvent::HiddenInputChanged(_) | SessionEvent::Attention(_)) => {}
                 Err(async_channel::TryRecvError::Empty) => {
                     thread::sleep(Duration::from_millis(10));
                 }
@@ -3837,7 +3895,7 @@ mod tests {
                     SessionEvent::Osc52Authorization(_)
                     | SessionEvent::Osc52AuthorizationExpired(_),
                 ) => {}
-                Ok(SessionEvent::HiddenInputChanged(_)) => {}
+                Ok(SessionEvent::HiddenInputChanged(_) | SessionEvent::Attention(_)) => {}
                 Err(async_channel::TryRecvError::Empty) => {
                     thread::sleep(Duration::from_millis(10));
                 }

@@ -13,7 +13,7 @@ use libghostty_vt::mouse::{
 };
 use libghostty_vt::paste;
 use libghostty_vt::render::{CellIterator, CursorVisualStyle, Dirty, RowIterator};
-use libghostty_vt::screen::{CellContentTag, CellWide, Screen};
+use libghostty_vt::screen::{CellContentTag, CellSemanticContent, CellWide, Screen};
 use libghostty_vt::selection::FormatOptions;
 use libghostty_vt::selection::gesture::{
     Autoscroll, AutoscrollTickEvent, DragEvent, Geometry as SelectionGeometry, Gesture, PressEvent,
@@ -23,9 +23,12 @@ use libghostty_vt::style::{PaletteIndex, RgbColor, StyleColor, Underline};
 use libghostty_vt::terminal::{Mode, Point, PointCoordinate, ScrollViewport};
 use libghostty_vt::{Error, RenderState, Terminal, TerminalOptions};
 
+use crate::terminal::attention::AttentionEvent;
 use crate::terminal::geometry::{BackingPosition, TerminalGeometry};
+use crate::terminal::identity::{self, XtGetTcapObserver};
 use crate::terminal::key::{InputModifiers, KeyAction, KeyInput, OptionAsAltPolicy, PhysicalKey};
 use crate::terminal::keyboard_protocol::KeyboardProtocolEncoder;
+use crate::terminal::metadata::{MetadataTracker, TerminalMetadataSnapshot};
 use crate::terminal::selection::{SelectionCopy, SelectionCopyOptions, TrailingSpacePolicy};
 #[cfg(test)]
 use crate::terminal::session::WheelPhase;
@@ -65,7 +68,26 @@ pub(crate) struct CellSnapshot {
     pub(crate) overline: bool,
     pub(crate) selected: bool,
     pub(crate) spacer_tail: bool,
+    pub(crate) semantic_content: CellSemanticSnapshot,
     pub(crate) hyperlink: Option<crate::terminal::HyperlinkTarget>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) enum CellSemanticSnapshot {
+    #[default]
+    Output,
+    Input,
+    Prompt,
+}
+
+impl From<CellSemanticContent> for CellSemanticSnapshot {
+    fn from(value: CellSemanticContent) -> Self {
+        match value {
+            CellSemanticContent::Output => Self::Output,
+            CellSemanticContent::Input => Self::Input,
+            CellSemanticContent::Prompt => Self::Prompt,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -308,6 +330,7 @@ pub(crate) struct SnapshotDamage {
     pub(crate) content: ContentDamageSnapshot,
     pub(crate) cursor: ContentDamageSnapshot,
     pub(crate) title: bool,
+    pub(crate) metadata: bool,
     pub(crate) scrollbar: bool,
     pub(crate) viewport: bool,
     pub(crate) active_screen: bool,
@@ -321,6 +344,7 @@ impl SnapshotDamage {
             content: ContentDamageSnapshot::Full,
             cursor: ContentDamageSnapshot::Full,
             title: true,
+            metadata: true,
             scrollbar: true,
             viewport: true,
             active_screen: true,
@@ -363,6 +387,7 @@ pub(crate) struct ScreenSnapshot {
     pub(crate) text_blinking: bool,
     pub(crate) mouse_tracking: bool,
     pub(crate) title: Arc<str>,
+    pub(crate) metadata: Arc<TerminalMetadataSnapshot>,
     pub(crate) damage: SnapshotDamage,
 }
 
@@ -380,6 +405,7 @@ impl PartialEq for ScreenSnapshot {
             && self.text_blinking == other.text_blinking
             && self.mouse_tracking == other.mouse_tracking
             && self.title == other.title
+            && self.metadata == other.metadata
             && self.damage == other.damage
     }
 }
@@ -404,6 +430,7 @@ impl ScreenSnapshot {
             text_blinking: false,
             mouse_tracking: false,
             title: Arc::from(""),
+            metadata: MetadataTracker::new("", "", None, Instant::now()).snapshot(),
             damage: SnapshotDamage::initial(),
         })
     }
@@ -457,6 +484,7 @@ impl ScreenSnapshot {
             text_blinking: false,
             mouse_tracking: false,
             title: Arc::from(""),
+            metadata: MetadataTracker::new("", "", None, Instant::now()).snapshot(),
             damage: SnapshotDamage::initial(),
         }
     }
@@ -486,7 +514,11 @@ pub(crate) struct TerminalEmulator {
     selection_autoscroll_tick: AutoscrollTickEvent<'static>,
     pty_responses: Rc<RefCell<Vec<u8>>>,
     pending_title: Rc<RefCell<Option<Arc<str>>>>,
+    pending_directory: Rc<RefCell<Option<Arc<str>>>>,
+    pending_attention: Rc<RefCell<Vec<AttentionEvent>>>,
     title: Arc<str>,
+    metadata: MetadataTracker,
+    xtgettcap: XtGetTcapObserver,
     primary_row_cache: Vec<RowSnapshot>,
     alternate_row_cache: Vec<RowSnapshot>,
     cached_cols: u16,
@@ -496,6 +528,7 @@ pub(crate) struct TerminalEmulator {
     cached_scrollbar: Option<ScrollbarSnapshot>,
     cached_active_screen: Option<ActiveScreenSnapshot>,
     cached_mouse_tracking: Option<bool>,
+    cached_metadata_revision: Option<u64>,
     geometry: TerminalGeometry,
     active_pointer: Option<ActivePointer>,
     selection_drag_position: Option<SurfacePosition>,
@@ -576,11 +609,32 @@ impl EmulatorAction {
 }
 
 impl TerminalEmulator {
+    #[cfg(test)]
     pub(crate) fn new(geometry: TerminalGeometry) -> Result<Self, Error> {
+        Self::new_with_metadata(
+            geometry,
+            "",
+            "",
+            None,
+            identity::TERM_FALLBACK,
+            Instant::now(),
+        )
+    }
+
+    pub(crate) fn new_with_metadata(
+        geometry: TerminalGeometry,
+        initial_directory: &str,
+        fallback_title: &str,
+        local_hostname: Option<&str>,
+        terminal_name: &'static str,
+        epoch: Instant,
+    ) -> Result<Self, Error> {
         let grid = geometry.grid();
         let cell = geometry.backing_cell_size();
         let pty_responses = Rc::new(RefCell::new(Vec::new()));
         let pending_title = Rc::new(RefCell::new(None));
+        let pending_directory = Rc::new(RefCell::new(None));
+        let pending_attention = Rc::new(RefCell::new(Vec::new()));
         let mut terminal: Terminal<'static, 'static> = Terminal::new(TerminalOptions {
             cols: grid.cols,
             rows: grid.rows,
@@ -601,6 +655,24 @@ impl TerminalEmulator {
                 }
             }
         })?;
+        terminal.on_pwd_changed({
+            let pending_directory = Rc::clone(&pending_directory);
+            move |terminal| {
+                if let Ok(directory) = terminal.pwd() {
+                    *pending_directory.borrow_mut() = Some(Arc::from(directory));
+                }
+            }
+        })?;
+        terminal.on_xtversion(|_| Some(identity::XTVERSION))?;
+        terminal.on_device_attributes(|_| Some(identity::device_attributes()))?;
+        terminal.on_bell({
+            let pending_attention = Rc::clone(&pending_attention);
+            move |_| pending_attention.borrow_mut().push(AttentionEvent::Bell)
+        })?;
+
+        let metadata =
+            MetadataTracker::new(initial_directory, fallback_title, local_hostname, epoch);
+        let title = Arc::clone(&metadata.snapshot().title.value);
 
         let mut mouse_encoder = MouseEncoder::new()?;
         mouse_encoder.set_track_last_cell(true);
@@ -622,7 +694,11 @@ impl TerminalEmulator {
             selection_autoscroll_tick: AutoscrollTickEvent::new()?,
             pty_responses,
             pending_title,
-            title: Arc::from(""),
+            pending_directory,
+            pending_attention,
+            title,
+            metadata,
+            xtgettcap: XtGetTcapObserver::new(terminal_name),
             primary_row_cache: Vec::new(),
             alternate_row_cache: Vec::new(),
             cached_cols: 0,
@@ -632,6 +708,7 @@ impl TerminalEmulator {
             cached_scrollbar: None,
             cached_active_screen: None,
             cached_mouse_tracking: None,
+            cached_metadata_revision: None,
             geometry,
             active_pointer: None,
             selection_drag_position: None,
@@ -649,6 +726,34 @@ impl TerminalEmulator {
     pub(crate) fn feed_at(&mut self, bytes: &[u8], now: Instant) {
         if !bytes.is_empty() && self.active_pointer.is_some() {
             self.pointer_mapping_invalidated = true;
+        }
+        self.xtgettcap
+            .feed(bytes, &mut self.pty_responses.borrow_mut());
+        let command_was_finished =
+            self.metadata
+                .snapshot()
+                .command
+                .as_ref()
+                .is_some_and(|command| {
+                    matches!(
+                        command.state,
+                        crate::terminal::metadata::CommandState::Finished { .. }
+                    )
+                });
+        self.metadata.feed(bytes, now);
+        if !command_was_finished
+            && let Some(command) = &self.metadata.snapshot().command
+            && let crate::terminal::metadata::CommandState::Finished {
+                exit_status,
+                duration,
+            } = command.state
+        {
+            self.pending_attention
+                .borrow_mut()
+                .push(AttentionEvent::CommandFinished {
+                    exit_status,
+                    duration,
+                });
         }
         let synchronized_before = self.terminal.mode(Mode::SYNC_OUTPUT).unwrap_or(false);
         self.terminal.vt_write(bytes);
@@ -704,6 +809,10 @@ impl TerminalEmulator {
 
     pub(crate) fn take_pty_responses(&self) -> Vec<u8> {
         mem::take(&mut *self.pty_responses.borrow_mut())
+    }
+
+    pub(crate) fn take_attention_events(&self) -> Vec<AttentionEvent> {
+        mem::take(&mut *self.pending_attention.borrow_mut())
     }
 
     pub(crate) fn key(&mut self, input: KeyInput) -> Result<EmulatorAction, String> {
@@ -1378,12 +1487,16 @@ impl TerminalEmulator {
         }
 
         let pending_title = self.pending_title.borrow_mut().take();
-        let title_changed = pending_title
-            .as_ref()
-            .is_some_and(|title| title.as_ref() != self.title.as_ref());
         if let Some(title) = pending_title {
-            self.title = title;
+            self.metadata.set_reported_title(&title);
         }
+        let pending_directory = self.pending_directory.borrow_mut().take();
+        if let Some(directory) = pending_directory {
+            self.metadata.set_reported_directory(&directory);
+        }
+        let metadata = self.metadata.snapshot();
+        let title = Arc::clone(&metadata.title.value);
+        let title_changed = title != self.title;
         let snapshot = self.render_state.update(&self.terminal)?;
         let dirty = snapshot.dirty()?;
         let rows = snapshot.rows()?;
@@ -1449,6 +1562,7 @@ impl TerminalEmulator {
             SnapshotDamage {
                 cursor: cursor_damage(self.cached_cursor.as_ref(), &cursor),
                 title: title_changed,
+                metadata: self.cached_metadata_revision != Some(metadata.revision),
                 scrollbar: previous_scrollbar
                     .is_some_and(|previous| previous.total_rows != scrollbar.total_rows),
                 viewport: previous_scrollbar.is_some_and(|previous| {
@@ -1542,6 +1656,7 @@ impl TerminalEmulator {
                                 column_index >= range.start_x && column_index <= range.end_x
                             }),
                             spacer_tail,
+                            semantic_content: raw_cell.semantic_content()?.into(),
                             hyperlink,
                         });
                         column_index = column_index.saturating_add(1);
@@ -1622,6 +1737,8 @@ impl TerminalEmulator {
         self.cached_scrollbar = Some(scrollbar);
         self.cached_active_screen = Some(active_screen);
         self.cached_mouse_tracking = Some(mouse_tracking);
+        self.cached_metadata_revision = Some(metadata.revision);
+        self.title = Arc::clone(&title);
 
         self.presentation_generation = self.presentation_generation.next();
         let text_blinking = rows_have_visible_blinking_text(row_cache);
@@ -1637,9 +1754,14 @@ impl TerminalEmulator {
             cursor,
             text_blinking,
             mouse_tracking,
-            title: Arc::clone(&self.title),
+            title,
+            metadata,
             damage,
         })))
+    }
+
+    pub(crate) fn mark_metadata_stale(&mut self) {
+        self.metadata.mark_stale();
     }
 }
 
@@ -1748,6 +1870,7 @@ mod tests {
     use crate::terminal::geometry::{
         BackingScale, CellGridSize, LogicalCellSize, TerminalGeometry,
     };
+    use crate::terminal::metadata::{DirectoryProvenance, ProgressMetadata};
 
     fn geometry(cols: u16, rows: u16, cell_width: f32, cell_height: f32) -> TerminalGeometry {
         TerminalGeometry::from_grid(
@@ -1759,6 +1882,22 @@ mod tests {
 
     fn emulator(cols: u16, rows: u16) -> TerminalEmulator {
         TerminalEmulator::new(geometry(cols, rows, 10.0, 20.0)).unwrap()
+    }
+
+    fn emulator_with_terminal_name(
+        cols: u16,
+        rows: u16,
+        terminal_name: &'static str,
+    ) -> TerminalEmulator {
+        TerminalEmulator::new_with_metadata(
+            geometry(cols, rows, 10.0, 20.0),
+            "",
+            "",
+            None,
+            terminal_name,
+            Instant::now(),
+        )
+        .unwrap()
     }
 
     #[test]
@@ -2280,6 +2419,7 @@ mod tests {
             snapshot.damage,
             SnapshotDamage {
                 title: true,
+                metadata: true,
                 ..SnapshotDamage::default()
             }
         );
@@ -2295,6 +2435,97 @@ mod tests {
         let snapshot = emulator.snapshot().unwrap().unwrap();
 
         assert_eq!(snapshot.title.as_ref(), "cargo test");
+    }
+
+    #[test]
+    fn metadata_only_output_publishes_owned_provenance_without_rebuilding_rows() {
+        let geometry = geometry(12, 3, 10.0, 20.0);
+        let epoch = Instant::now();
+        let mut emulator = TerminalEmulator::new_with_metadata(
+            geometry,
+            "/Users/me",
+            "zsh",
+            Some("mac.local"),
+            identity::TERM_FALLBACK,
+            epoch,
+        )
+        .unwrap();
+        let first = emulator.snapshot().unwrap().unwrap();
+
+        emulator.feed_at(
+            b"\x1b]7;file://mac.local/Users/me/Project\x07\x1b]9;4;3\x07",
+            epoch + Duration::from_secs(1),
+        );
+        let snapshot = emulator.snapshot().unwrap().unwrap();
+
+        assert_eq!(snapshot.title.as_ref(), "Project");
+        assert_eq!(
+            snapshot.metadata.directory.path.as_ref(),
+            "/Users/me/Project"
+        );
+        assert_eq!(
+            snapshot.metadata.directory.provenance,
+            DirectoryProvenance::Osc7
+        );
+        assert_eq!(snapshot.metadata.progress, ProgressMetadata::Indeterminate);
+        assert!(snapshot.damage.metadata);
+        assert_eq!(snapshot.damage.content, ContentDamageSnapshot::Clean);
+        assert!(
+            first
+                .rows
+                .iter()
+                .zip(snapshot.rows.iter())
+                .all(|(first, second)| Arc::ptr_eq(first, second))
+        );
+    }
+
+    #[test]
+    fn semantic_prompt_zones_and_command_state_are_owned_by_the_snapshot() {
+        let geometry = geometry(16, 2, 10.0, 20.0);
+        let epoch = Instant::now();
+        let mut emulator = TerminalEmulator::new_with_metadata(
+            geometry,
+            "/tmp",
+            "zsh",
+            None,
+            identity::TERM_FALLBACK,
+            epoch,
+        )
+        .unwrap();
+        emulator.feed_at(
+            b"\x1b]133;A\x07$ \x1b]133;B\x07echo\x1b]133;C;cmdline=echo\x07out",
+            epoch + Duration::from_secs(1),
+        );
+
+        let snapshot = emulator.snapshot().unwrap().unwrap();
+
+        assert!(
+            snapshot.rows[0][0..2]
+                .iter()
+                .all(|cell| cell.semantic_content == CellSemanticSnapshot::Prompt)
+        );
+        assert!(
+            snapshot.rows[0][2..6]
+                .iter()
+                .all(|cell| cell.semantic_content == CellSemanticSnapshot::Input)
+        );
+        assert!(
+            snapshot.rows[0][6..9]
+                .iter()
+                .all(|cell| cell.semantic_content == CellSemanticSnapshot::Output)
+        );
+        assert_eq!(
+            snapshot.metadata.prompt_zone,
+            crate::terminal::metadata::PromptZone::CommandOutput
+        );
+        assert_eq!(
+            snapshot
+                .metadata
+                .command
+                .as_ref()
+                .map(|command| command.line.as_ref()),
+            Some("echo")
+        );
     }
 
     #[test]
@@ -2543,6 +2774,63 @@ mod tests {
 
         emulator.resize(geometry(20, 4, 8.0, 18.0)).unwrap();
         assert_eq!(emulator.take_pty_responses(), b"\x1b[48;4;20;72;160t");
+    }
+
+    #[test]
+    fn runtime_identity_replies_are_spaceterm_owned_and_capability_bounded() {
+        let mut emulator = emulator_with_terminal_name(10, 2, identity::TERM_NAME);
+
+        emulator.feed(b"\x1b[>q\x1b[c\x1b[>c\x1bP+q544E;436F\x1b\\");
+        let replies = emulator.take_pty_responses();
+
+        assert!(
+            replies
+                .windows(identity::XTVERSION.len())
+                .any(|window| window == identity::XTVERSION.as_bytes())
+        );
+        assert!(
+            replies
+                .windows(b"\x1b[?62;22;52c".len())
+                .any(|window| window == b"\x1b[?62;22;52c")
+        );
+        assert!(
+            replies
+                .windows(b"\x1b[>1;0;0c".len())
+                .any(|window| window == b"\x1b[>1;0;0c")
+        );
+        assert!(replies.windows(7).any(|window| window == b"1+r544E"));
+        assert!(
+            replies
+                .windows(b"787465726D2D73706163657465726D".len())
+                .any(|window| window == b"787465726D2D73706163657465726D")
+        );
+        assert!(replies.windows(7).any(|window| window == b"1+r436F"));
+        assert!(
+            !String::from_utf8_lossy(&replies)
+                .to_ascii_lowercase()
+                .contains("ghostty")
+        );
+    }
+
+    #[test]
+    fn bell_and_command_completion_publish_typed_attention_once() {
+        let epoch = Instant::now();
+        let mut emulator = emulator(10, 2);
+
+        emulator.feed_at(b"\x07\x1b]133;C;cmdline=true\x07", epoch);
+        emulator.feed_at(b"\x1b]133;D;0\x07", epoch + Duration::from_secs(2));
+        emulator.feed_at(b"\x1b]133;D;0\x07", epoch + Duration::from_secs(3));
+
+        assert_eq!(
+            emulator.take_attention_events(),
+            vec![
+                AttentionEvent::Bell,
+                AttentionEvent::CommandFinished {
+                    exit_status: Some(0),
+                    duration: Duration::from_secs(2),
+                },
+            ]
+        );
     }
 
     #[test]

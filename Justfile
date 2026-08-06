@@ -16,6 +16,7 @@ doctor:
     @xcrun --find codesign
     @xcrun --find hdiutil
     @xcrun --find iconutil
+    @xcrun --find tic
 
 # Download locked Rust dependencies.
 fetch:
@@ -44,6 +45,10 @@ test:
 # Run tests whose names contain the supplied filter.
 test-one filter:
     cargo test --all-targets --all-features --locked "{{ filter }}"
+
+# Run the conventional terminal capability and protocol conformance corpus.
+conformance:
+    cargo test --all-targets --all-features --locked "terminal::conformance"
 
 # Run Clippy with warnings treated as errors.
 clippy:

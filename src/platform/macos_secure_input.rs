@@ -156,6 +156,34 @@ fn application_is_active() -> bool {
 }
 
 #[cfg(test)]
+pub(crate) fn conformance_secure_input_observation() -> String {
+    #[derive(Default)]
+    struct RecordingDriver {
+        calls: Vec<bool>,
+    }
+
+    impl SecureInputDriver for RecordingDriver {
+        fn set_enabled(&mut self, enabled: bool) -> Result<(), i32> {
+            self.calls.push(enabled);
+            Ok(())
+        }
+    }
+
+    let pane = SecureInputPaneId::test(1);
+    let mut coordinator = SecureInputCoordinator::new(RecordingDriver::default());
+    coordinator.register(pane);
+    coordinator.set_application_active(true);
+    coordinator.update(pane, true, true);
+    coordinator.update(pane, true, false);
+    coordinator.update(pane, true, true);
+    coordinator.set_application_active(false);
+    format!(
+        "transitions={:?} enabled={}",
+        coordinator.driver.calls, coordinator.enabled
+    )
+}
+
+#[cfg(test)]
 mod tests {
     use std::collections::VecDeque;
 
