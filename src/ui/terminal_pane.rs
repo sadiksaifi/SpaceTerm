@@ -1130,22 +1130,26 @@ impl Render for TerminalPane {
                 .iter()
                 .enumerate()
                 .flat_map(|(row, cells)| {
-                    cells.iter().enumerate().filter_map(move |(column, cell)| {
-                        cell.hyperlink
-                            .as_ref()
-                            .is_some_and(|link| link.identity == hovered.identity)
-                            .then(|| {
-                                div()
-                                    .absolute()
-                                    .left(px(HORIZONTAL_PADDING
-                                        + column as f32 * f32::from(link_cell_width)))
-                                    .top(px(VERTICAL_PADDING + row as f32 * link_line_height))
-                                    .w(link_cell_width)
-                                    .h(px(link_line_height))
-                                    .border_b_1()
-                                    .border_color(gpui_color(ACTIVE_THEME.link_text_hover))
-                            })
-                    })
+                    cells
+                        .iter()
+                        .enumerate()
+                        .filter(move |(_, cell)| {
+                            cell.hyperlink
+                                .as_ref()
+                                .is_some_and(|link| link.identity == hovered.identity)
+                        })
+                        .map(move |(column, _)| {
+                            div()
+                                .absolute()
+                                .left(px(
+                                    HORIZONTAL_PADDING + column as f32 * f32::from(link_cell_width)
+                                ))
+                                .top(px(VERTICAL_PADDING + row as f32 * link_line_height))
+                                .w(link_cell_width)
+                                .h(px(link_line_height))
+                                .border_b_1()
+                                .border_color(gpui_color(ACTIVE_THEME.link_text_hover))
+                        })
                 })
                 .collect::<Vec<_>>()
         });
