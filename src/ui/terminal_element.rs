@@ -18,6 +18,13 @@ use super::terminal_ime::PreeditLayout;
 use super::terminal_pane::TerminalPane;
 use super::terminal_symbols::{SymbolPlan, SymbolPlanCache, SymbolPrimitive, terminal_symbol};
 
+#[derive(Clone, Copy)]
+struct TerminalGridMetrics {
+    cell_width: Pixels,
+    line_height: Pixels,
+    scale_factor: f32,
+}
+
 pub(crate) struct TerminalGridCache {
     source_rows: Vec<RowSnapshot>,
     prepared_rows: Arc<[Arc<RowPaintInput>]>,
@@ -63,15 +70,13 @@ impl TerminalGridCache {
         colors: &TerminalColorsSnapshot,
         font_family: &SharedString,
         cursor: Option<CursorPositionSnapshot>,
-        cell_width: Pixels,
-        line_height: Pixels,
-        scale_factor: f32,
+        metrics: TerminalGridMetrics,
     ) -> Arc<[Arc<RowPaintInput>]> {
         let style_changed = self.font_family.as_ref() != Some(font_family)
             || self.colors.as_ref() != Some(colors)
-            || self.cell_width != Some(cell_width)
-            || self.line_height != Some(line_height)
-            || self.scale_factor_bits != Some(scale_factor.to_bits());
+            || self.cell_width != Some(metrics.cell_width)
+            || self.line_height != Some(metrics.line_height)
+            || self.scale_factor_bits != Some(metrics.scale_factor.to_bits());
         let rows_unchanged = !style_changed
             && self.cursor == cursor
             && rows.len() == self.source_rows.len()
@@ -103,9 +108,7 @@ impl TerminalGridCache {
                         font_family,
                         cursor_column,
                         &mut self.symbol_plans,
-                        cell_width,
-                        line_height,
-                        scale_factor,
+                        metrics,
                     ))
                 }
             })
@@ -116,9 +119,9 @@ impl TerminalGridCache {
         self.font_family = Some(font_family.clone());
         self.colors = Some(colors.clone());
         self.cursor = cursor;
-        self.cell_width = Some(cell_width);
-        self.line_height = Some(line_height);
-        self.scale_factor_bits = Some(scale_factor.to_bits());
+        self.cell_width = Some(metrics.cell_width);
+        self.line_height = Some(metrics.line_height);
+        self.scale_factor_bits = Some(metrics.scale_factor.to_bits());
         Arc::clone(&self.prepared_rows)
     }
 }
@@ -181,9 +184,11 @@ impl TerminalGridElement {
                 &screen.colors,
                 &configuration.font_family,
                 screen.cursor.position,
-                configuration.cell_width,
-                configuration.line_height,
-                configuration.scale_factor,
+                TerminalGridMetrics {
+                    cell_width: configuration.cell_width,
+                    line_height: configuration.line_height,
+                    scale_factor: configuration.scale_factor,
+                },
             ),
             columns: screen.rows.first().map_or(0, |row| row.len()),
             font_size: configuration.font_size,
@@ -218,6 +223,8 @@ struct PreparedText {
 
 struct PreparedRow {
     text: Vec<PreparedText>,
+    symbols: PreparedDecorations,
+    overlay_symbols: PreparedDecorations,
     backgrounds: Vec<PaintQuad>,
     under_text_decorations: PreparedDecorations,
     over_text_decorations: PreparedDecorations,
@@ -343,10 +350,18 @@ impl Element for TerminalGridElement {
                 decoration_metrics,
                 self.text_blink_visible,
             );
+            let symbols = prepare_symbol_geometry(
+                &row.symbols,
+                row_top,
+                grid_left,
+                self.cell_width,
+                self.text_blink_visible,
+            );
 
             let mut text: Vec<PreparedText> = text;
             let mut backgrounds = backgrounds;
             let mut overlay_text = Vec::new();
+            let mut overlay_symbols = PreparedDecorations::default();
             let mut overlay_backgrounds = Vec::new();
             let mut overlay_caret = None;
             if let Some(preedit) = &self.preedit {
@@ -421,29 +436,48 @@ impl Element for TerminalGridElement {
                     && !cell.invisible
                     && text_fragment_visible(cell.blinking, self.text_blink_visible)
                 {
-                    let cursor_font = terminal_cell_font(&self.font_family, cell.bold, cell.italic);
-                    text.push(PreparedText {
-                        line: window.text_system().shape_line(
-                            cell.text.clone().into(),
-                            self.font_size,
-                            &[TextRun {
-                                len: cell.text.len(),
-                                font: cursor_font,
-                                color: gpui_color(self.cursor_style.text_color).into(),
-                                background_color: None,
-                                underline: None,
-                                strikethrough: None,
-                            }],
-                            force_cell_width_for_cell(&cell.text, position.width_cells)
-                                .then_some(self.cell_width),
-                        ),
-                        origin: point(cursor_left, row_top),
-                    });
+                    if let Some(symbol) = row
+                        .symbols
+                        .iter()
+                        .find(|symbol| symbol.start == usize::from(position.column))
+                    {
+                        let mut symbol = symbol.clone();
+                        symbol.color = self.cursor_style.text_color;
+                        overlay_symbols = prepare_symbol_geometry(
+                            &[symbol],
+                            row_top,
+                            grid_left,
+                            self.cell_width,
+                            self.text_blink_visible,
+                        );
+                    } else {
+                        let cursor_font =
+                            terminal_cell_font(&self.font_family, cell.bold, cell.italic);
+                        text.push(PreparedText {
+                            line: window.text_system().shape_line(
+                                cell.text.clone().into(),
+                                self.font_size,
+                                &[TextRun {
+                                    len: cell.text.len(),
+                                    font: cursor_font,
+                                    color: gpui_color(self.cursor_style.text_color).into(),
+                                    background_color: None,
+                                    underline: None,
+                                    strikethrough: None,
+                                }],
+                                force_cell_width_for_cell(&cell.text, position.width_cells)
+                                    .then_some(self.cell_width),
+                            ),
+                            origin: point(cursor_left, row_top),
+                        });
+                    }
                 }
             }
 
             prepared_rows.push(PreparedRow {
                 text,
+                symbols,
+                overlay_symbols,
                 backgrounds,
                 under_text_decorations,
                 over_text_decorations,
@@ -495,12 +529,24 @@ impl Element for TerminalGridElement {
                     for (path, color) in row.under_text_decorations.paths.drain(..) {
                         window.paint_path(path, gpui_color(color));
                     }
+                    for quad in row.symbols.quads.drain(..) {
+                        window.paint_quad(quad);
+                    }
+                    for (path, color) in row.symbols.paths.drain(..) {
+                        window.paint_path(path, gpui_color(color));
+                    }
                     for text in row.text.drain(..) {
                         if let Err(error) =
                             text.line.paint(text.origin, self.line_height, window, cx)
                         {
                             eprintln!("failed to paint terminal row: {error:#}");
                         }
+                    }
+                    for quad in row.overlay_symbols.quads.drain(..) {
+                        window.paint_quad(quad);
+                    }
+                    for (path, color) in row.overlay_symbols.paths.drain(..) {
+                        window.paint_path(path, gpui_color(color));
                     }
                     for quad in row.over_text_decorations.quads.drain(..) {
                         window.paint_quad(quad);
@@ -811,6 +857,102 @@ fn prepare_decoration_geometry(
     prepared
 }
 
+fn prepare_symbol_geometry(
+    symbols: &[SymbolPaintInput],
+    row_top: Pixels,
+    grid_left: Pixels,
+    cell_width: Pixels,
+    blink_phase_visible: bool,
+) -> PreparedDecorations {
+    let mut prepared = PreparedDecorations::default();
+    for symbol in symbols
+        .iter()
+        .filter(|symbol| text_fragment_visible(symbol.blinking, blink_phase_visible))
+    {
+        debug_assert!(matches!(symbol.width_cells, 1 | 2));
+        let scale = symbol.plan.scale_factor;
+        let origin = point(grid_left + cell_width * symbol.start as f32, row_top);
+        for primitive in &symbol.plan.primitives {
+            match primitive {
+                SymbolPrimitive::Rect {
+                    x,
+                    y,
+                    width,
+                    height,
+                    alpha,
+                } => prepared.quads.push(fill(
+                    Bounds::new(
+                        point(
+                            origin.x + px(f32::from(*x) / scale),
+                            origin.y + px(f32::from(*y) / scale),
+                        ),
+                        size(
+                            px(f32::from(*width) / scale),
+                            px(f32::from(*height) / scale),
+                        ),
+                    ),
+                    gpui_color(symbol_color_with_alpha(symbol.color, *alpha)),
+                )),
+                SymbolPrimitive::Polygon { points, alpha } => {
+                    let mut points = points.iter();
+                    let Some(first) = points.next() else {
+                        continue;
+                    };
+                    let mut builder = PathBuilder::fill();
+                    builder.move_to(point(
+                        origin.x + px(first.x / scale),
+                        origin.y + px(first.y / scale),
+                    ));
+                    for vertex in points {
+                        builder.line_to(point(
+                            origin.x + px(vertex.x / scale),
+                            origin.y + px(vertex.y / scale),
+                        ));
+                    }
+                    builder.close();
+                    if let Ok(path) = builder.build() {
+                        prepared
+                            .paths
+                            .push((path, symbol_color_with_alpha(symbol.color, *alpha)));
+                    }
+                }
+                SymbolPrimitive::Stroke {
+                    points,
+                    thickness,
+                    alpha,
+                } => {
+                    let mut points = points.iter();
+                    let Some(first) = points.next() else {
+                        continue;
+                    };
+                    let mut builder = PathBuilder::stroke(px(f32::from(*thickness) / scale));
+                    builder.move_to(point(
+                        origin.x + px(first.x / scale),
+                        origin.y + px(first.y / scale),
+                    ));
+                    for vertex in points {
+                        builder.line_to(point(
+                            origin.x + px(vertex.x / scale),
+                            origin.y + px(vertex.y / scale),
+                        ));
+                    }
+                    if let Ok(path) = builder.build() {
+                        prepared
+                            .paths
+                            .push((path, symbol_color_with_alpha(symbol.color, *alpha)));
+                    }
+                }
+            }
+        }
+    }
+    prepared
+}
+
+fn symbol_color_with_alpha(mut color: Color, primitive_alpha: u8) -> Color {
+    color.a = ((u16::from(color.a) * u16::from(primitive_alpha) + 127) / 255) as u8;
+    color
+}
+
 fn push_decoration(spans: &mut Vec<DecorationSpan>, mut span: DecorationSpan) {
     if let Some(previous) = spans.last_mut()
         && previous.start + previous.len == span.start
@@ -838,9 +980,11 @@ fn prepare_row(
         font_family,
         cursor_column,
         &mut SymbolPlanCache::default(),
-        px(8.0),
-        px(20.0),
-        1.0,
+        TerminalGridMetrics {
+            cell_width: px(8.0),
+            line_height: px(20.0),
+            scale_factor: 1.0,
+        },
     )
 }
 
@@ -850,9 +994,7 @@ fn prepare_row_cached(
     font_family: &SharedString,
     cursor_column: Option<usize>,
     symbol_plans: &mut SymbolPlanCache,
-    cell_width: Pixels,
-    line_height: Pixels,
-    scale_factor: f32,
+    metrics: TerminalGridMetrics,
 ) -> RowPaintInput {
     let mut fragments = Vec::new();
     let mut symbols = Vec::new();
@@ -957,10 +1099,10 @@ fn prepare_row_cached(
                 blinking: cell.blinking,
                 plan: symbol_plans.get(
                     symbol,
-                    f32::from(cell_width),
-                    f32::from(line_height),
+                    f32::from(metrics.cell_width),
+                    f32::from(metrics.line_height),
                     width_cells,
-                    scale_factor,
+                    metrics.scale_factor,
                 ),
             });
             continue;
@@ -1179,6 +1321,14 @@ mod tests {
             overline: false,
             selected: false,
             spacer_tail: false,
+        }
+    }
+
+    fn grid_metrics() -> TerminalGridMetrics {
+        TerminalGridMetrics {
+            cell_width: px(8.0),
+            line_height: px(20.0),
+            scale_factor: 1.0,
         }
     }
 
@@ -1704,6 +1854,37 @@ mod tests {
     }
 
     #[test]
+    fn symbol_prepaint_obeys_blink_phase_and_preserves_terminal_width() {
+        let mut block = cell("█");
+        block.blinking = true;
+        let mut tail = block.clone();
+        tail.text = " ".to_owned();
+        tail.spacer_tail = true;
+        let row = Arc::<[CellSnapshot]>::from([block, tail]);
+        let input = prepare_row(&row, &colors(), &"Menlo".into(), None);
+
+        let hidden = prepare_symbol_geometry(&input.symbols, px(10.0), px(5.0), px(8.0), false);
+        let visible = prepare_symbol_geometry(&input.symbols, px(10.0), px(5.0), px(8.0), true);
+
+        assert!(hidden.quads.is_empty() && hidden.paths.is_empty());
+        assert_eq!(visible.quads.len(), 1);
+        assert_eq!(
+            visible.quads[0].bounds,
+            Bounds::new(point(px(5.0), px(10.0)), size(px(16.0), px(20.0)))
+        );
+    }
+
+    #[test]
+    fn symbol_prepaint_uses_fractional_logical_cell_origins() {
+        let row = Arc::<[CellSnapshot]>::from([cell("a"), cell("a"), cell("█")]);
+        let input = prepare_row(&row, &colors(), &"Menlo".into(), None);
+
+        let visible = prepare_symbol_geometry(&input.symbols, px(10.0), px(5.0), px(8.25), true);
+
+        assert_eq!(visible.quads[0].bounds.origin.x, px(21.5));
+    }
+
+    #[test]
     fn right_to_left_cells_keep_terminal_cell_order() {
         let row = Arc::<[CellSnapshot]>::from([cell("א"), cell("ב"), cell("ג")]);
 
@@ -1741,15 +1922,7 @@ mod tests {
         let second_row = Arc::<[CellSnapshot]>::from([cell("b")]);
         let rows = Arc::<[RowSnapshot]>::from([Arc::clone(&first_row), Arc::clone(&second_row)]);
         let mut cache = TerminalGridCache::new();
-        let first = cache.prepare(
-            &rows,
-            &colors(),
-            &"Menlo".into(),
-            None,
-            px(8.0),
-            px(20.0),
-            1.0,
-        );
+        let first = cache.prepare(&rows, &colors(), &"Menlo".into(), None, grid_metrics());
 
         let changed_row = Arc::<[CellSnapshot]>::from([cell("c")]);
         let changed_rows = Arc::<[RowSnapshot]>::from([first_row, changed_row]);
@@ -1758,9 +1931,7 @@ mod tests {
             &colors(),
             &"Menlo".into(),
             None,
-            px(8.0),
-            px(20.0),
-            1.0,
+            grid_metrics(),
         );
 
         assert!(Arc::ptr_eq(&first[0], &second[0]));
@@ -1784,9 +1955,7 @@ mod tests {
                 column: 1,
                 width_cells: 1,
             }),
-            px(8.0),
-            px(20.0),
-            1.0,
+            grid_metrics(),
         );
 
         let second = cache.prepare(
@@ -1798,9 +1967,7 @@ mod tests {
                 column: 0,
                 width_cells: 1,
             }),
-            px(8.0),
-            px(20.0),
-            1.0,
+            grid_metrics(),
         );
 
         assert!(!Arc::ptr_eq(&first[0], &second[0]));
@@ -1814,15 +1981,7 @@ mod tests {
         let rows = Arc::<[RowSnapshot]>::from([row]);
         let mut cache = TerminalGridCache::new();
         let first_colors = colors();
-        let first = cache.prepare(
-            &rows,
-            &first_colors,
-            &"Menlo".into(),
-            None,
-            px(8.0),
-            px(20.0),
-            1.0,
-        );
+        let first = cache.prepare(&rows, &first_colors, &"Menlo".into(), None, grid_metrics());
 
         let mut changed_colors = first_colors.clone();
         Arc::make_mut(&mut changed_colors.palette)[1] = Color::rgb(0xff_00_00);
@@ -1831,9 +1990,7 @@ mod tests {
             &changed_colors,
             &"Menlo".into(),
             None,
-            px(8.0),
-            px(20.0),
-            1.0,
+            grid_metrics(),
         );
 
         assert!(!Arc::ptr_eq(&first[0], &second[0]));
@@ -1844,26 +2001,10 @@ mod tests {
         let row = Arc::<[CellSnapshot]>::from([cell("a")]);
         let rows = Arc::<[RowSnapshot]>::from([row]);
         let mut cache = TerminalGridCache::new();
-        let first = cache.prepare(
-            &rows,
-            &colors(),
-            &"Menlo".into(),
-            None,
-            px(8.0),
-            px(20.0),
-            1.0,
-        );
+        let first = cache.prepare(&rows, &colors(), &"Menlo".into(), None, grid_metrics());
 
         cache.invalidate_scale_dependent();
-        let second = cache.prepare(
-            &rows,
-            &colors(),
-            &"Menlo".into(),
-            None,
-            px(8.0),
-            px(20.0),
-            1.0,
-        );
+        let second = cache.prepare(&rows, &colors(), &"Menlo".into(), None, grid_metrics());
 
         assert!(!Arc::ptr_eq(&first[0], &second[0]));
     }

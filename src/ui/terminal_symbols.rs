@@ -1,3 +1,6 @@
+use std::collections::HashMap;
+use std::sync::Arc;
+
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(super) enum TerminalSymbol {
     BoxDrawing(char),
@@ -54,6 +57,7 @@ pub(super) enum SymbolPrimitive {
     },
 }
 
+#[cfg(test)]
 impl SymbolPrimitive {
     fn bounds(&self) -> (f32, f32, f32, f32) {
         match self {
@@ -149,6 +153,7 @@ impl SymbolPlanCache {
     }
 }
 
+#[cfg(test)]
 impl SymbolPlan {
     fn touches_left_and_right_edges(&self) -> bool {
         let right = f32::from(self.width_device);
@@ -177,7 +182,8 @@ impl SymbolPlan {
     }
 }
 
-pub(super) fn build_symbol_plan(
+#[cfg(test)]
+fn build_symbol_plan(
     symbol: TerminalSymbol,
     width: u16,
     height: u16,
@@ -836,5 +842,3 @@ mod tests {
         assert_eq!(Arc::strong_count(&first), 1);
     }
 }
-use std::collections::HashMap;
-use std::sync::Arc;
