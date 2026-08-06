@@ -260,8 +260,8 @@ impl MacosKeyboardBridge {
         match input.validate() {
             Ok(()) => KeyTranslation::Encoded(input),
             Err(KeyInputError::UnsupportedKey { .. }) => match input.text {
-                Some(text) => KeyTranslation::TextInput(text),
-                None => KeyTranslation::Unhandled(unhandled),
+                Some(text) if input.action != KeyAction::Release => KeyTranslation::TextInput(text),
+                _ => KeyTranslation::Unhandled(unhandled),
             },
         }
     }
@@ -532,6 +532,22 @@ mod tests {
         assert_eq!(
             bridge.translate(native(u16::MAX, "界")),
             KeyTranslation::TextInput("界".to_owned())
+        );
+    }
+
+    #[test]
+    fn unknown_native_key_up_does_not_repeat_printable_text() {
+        let bridge = MacosKeyboardBridge::new(OptionAsAltPolicy::None);
+        let mut event = native(u16::MAX, "界");
+        event.action = KeyAction::Release;
+
+        assert_eq!(
+            bridge.translate(event),
+            KeyTranslation::Unhandled(UnhandledKeyEvent {
+                kind: NativeKeyEventKind::KeyUp,
+                action: KeyAction::Release,
+                native_key_code: u16::MAX,
+            })
         );
     }
 
