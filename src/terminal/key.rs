@@ -49,8 +49,32 @@ pub(crate) struct KeyInput {
 }
 
 impl KeyInput {
+    const TEXT_INPUT_LOGICAL_KEY: &'static str = "text-input";
+
+    pub(crate) fn text_input(text: impl Into<String>) -> Self {
+        Self {
+            action: KeyAction::Press,
+            physical_key: PhysicalKey::Unidentified,
+            native_key_code: None,
+            logical_key: Self::TEXT_INPUT_LOGICAL_KEY.to_owned(),
+            text: Some(text.into()),
+            unshifted_codepoint: None,
+            modifiers: InputModifiers::default(),
+            consumed_modifiers: InputModifiers::default(),
+            option_as_alt: OptionAsAltPolicy::None,
+        }
+    }
+
+    pub(crate) fn is_text_input(&self) -> bool {
+        self.action == KeyAction::Press
+            && self.physical_key == PhysicalKey::Unidentified
+            && self.native_key_code.is_none()
+            && self.logical_key == Self::TEXT_INPUT_LOGICAL_KEY
+            && self.text.is_some()
+    }
+
     pub(crate) fn validate(&self) -> Result<(), KeyInputError> {
-        if self.physical_key == PhysicalKey::Unidentified {
+        if self.physical_key == PhysicalKey::Unidentified && !self.is_text_input() {
             return Err(KeyInputError::UnsupportedKey {
                 native_key_code: self.native_key_code,
                 logical_key: self.logical_key.clone(),
@@ -274,6 +298,16 @@ mod tests {
                 native_key_code: Some(0xffff),
                 logical_key: "Hyper".to_owned(),
             })
+        );
+    }
+
+    #[test]
+    fn text_input_should_be_valid_without_a_physical_key() {
+        let input = KeyInput::text_input("日本語");
+
+        assert_eq!(
+            (input.validate(), input.text.as_deref(), input.physical_key),
+            (Ok(()), Some("日本語"), PhysicalKey::Unidentified)
         );
     }
 
