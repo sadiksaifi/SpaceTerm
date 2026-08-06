@@ -55,6 +55,7 @@ pub(crate) struct UnhandledKeyEvent {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum KeyTranslation {
     Encoded(KeyInput),
+    TextInput(String),
     Unhandled(UnhandledKeyEvent),
 }
 
@@ -62,6 +63,10 @@ impl KeyTranslation {
     pub(crate) fn into_result(self) -> Result<KeyInput, KeyInputError> {
         match self {
             Self::Encoded(input) => Ok(input),
+            Self::TextInput(text) => Err(KeyInputError::UnsupportedKey {
+                native_key_code: None,
+                logical_key: text,
+            }),
             Self::Unhandled(event) => Err(KeyInputError::UnsupportedKey {
                 native_key_code: Some(event.native_key_code),
                 logical_key: format!("{:?}", event.kind),
@@ -254,7 +259,10 @@ impl MacosKeyboardBridge {
         };
         match input.validate() {
             Ok(()) => KeyTranslation::Encoded(input),
-            Err(KeyInputError::UnsupportedKey { .. }) => KeyTranslation::Unhandled(unhandled),
+            Err(KeyInputError::UnsupportedKey { .. }) => match input.text {
+                Some(text) => KeyTranslation::TextInput(text),
+                None => KeyTranslation::Unhandled(unhandled),
+            },
         }
     }
 
@@ -514,6 +522,16 @@ mod tests {
                 action: KeyAction::Press,
                 native_key_code: u16::MAX,
             })
+        );
+    }
+
+    #[test]
+    fn unknown_native_key_down_with_printable_text_uses_text_input() {
+        let bridge = MacosKeyboardBridge::new(OptionAsAltPolicy::None);
+
+        assert_eq!(
+            bridge.translate(native(u16::MAX, "界")),
+            KeyTranslation::TextInput("界".to_owned())
         );
     }
 
