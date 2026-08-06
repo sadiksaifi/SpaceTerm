@@ -31,7 +31,10 @@ pub(crate) use emulator::{
 };
 #[cfg(test)]
 pub(crate) use failure::FailureClass;
-pub(crate) use failure::{DiagnosticBundle, PaneTerminalState, TerminalFailure};
+pub(crate) use failure::{
+    DiagnosticBundle, DiagnosticKeyEventKind, PaneTerminalState, TerminalFailure,
+    UnhandledKeyDiagnostic,
+};
 pub(crate) use hyperlink::HyperlinkTarget;
 pub(crate) use key::{
     InputModifiers, KeyAction, KeyInput, KeyInputError, OptionAsAltPolicy, PhysicalKey,

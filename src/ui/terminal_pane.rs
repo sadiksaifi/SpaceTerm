@@ -44,13 +44,13 @@ use crate::terminal::geometry::{
 };
 use crate::terminal::{
     AccessibilityGeometry, AccessibilityNotification, AttentionFacts, DiagnosticBundle,
-    InputModifiers, KeyAction, KeyInput, NativeContextActions, NativeInsertion, OptionAsAltPolicy,
-    Osc52Access, Osc52AuthorizationDecision, Osc52AuthorizationRequest, Osc52Target,
-    PaneTerminalState, PasteConfirmation, PasteDecision, PasteRequestOutcome, PasteResolution,
-    PhysicalKey, PointerButton, PointerInput, PointerPhase, ScreenSnapshot, SelectionCopy,
-    SessionEvent, ShiftSelectionPolicy, SurfacePosition, TerminalAccessibilityModel,
-    TerminalFailure, TerminalSessionHandle, WheelInput, WheelPhase,
-    WorkspaceTerminalSessionFactory,
+    DiagnosticKeyEventKind, InputModifiers, KeyAction, KeyInput, NativeContextActions,
+    NativeInsertion, OptionAsAltPolicy, Osc52Access, Osc52AuthorizationDecision,
+    Osc52AuthorizationRequest, Osc52Target, PaneTerminalState, PasteConfirmation, PasteDecision,
+    PasteRequestOutcome, PasteResolution, PhysicalKey, PointerButton, PointerInput, PointerPhase,
+    ScreenSnapshot, SelectionCopy, SessionEvent, ShiftSelectionPolicy, SurfacePosition,
+    TerminalAccessibilityModel, TerminalFailure, TerminalSessionHandle, UnhandledKeyDiagnostic,
+    WheelInput, WheelPhase, WorkspaceTerminalSessionFactory,
 };
 use crate::theme::{ACTIVE_THEME, Color};
 
@@ -690,7 +690,20 @@ impl TerminalPane {
         let input = match translation {
             KeyTranslation::Encoded(input) => input,
             KeyTranslation::TextInput(text) => KeyInput::text_input(text),
-            KeyTranslation::Unhandled(_) => return false,
+            KeyTranslation::Unhandled(event) => {
+                let kind = match event.kind {
+                    NativeKeyEventKind::KeyDown => DiagnosticKeyEventKind::KeyDown,
+                    NativeKeyEventKind::KeyUp => DiagnosticKeyEventKind::KeyUp,
+                    NativeKeyEventKind::FlagsChanged => DiagnosticKeyEventKind::FlagsChanged,
+                };
+                self.diagnostics
+                    .record_unhandled_key(UnhandledKeyDiagnostic::new(
+                        kind,
+                        event.action,
+                        event.native_key_code,
+                    ));
+                return false;
+            }
         };
         let resets_cursor_blink = input.action != KeyAction::Release;
         if let Some(session) = &self.session {
@@ -2805,21 +2818,86 @@ mod tests {
     }
 
     #[gpui::test]
-    fn unsupported_key_down_is_neither_sent_nor_presented_as_a_pane_failure(
+    fn unhandled_key_translation_preserves_pane_presentation_and_propagates(
         cx: &mut TestAppContext,
     ) {
         let (pane, cx, records) = connected_terminal_pane(cx);
-
-        cx.simulate_event(event("hyper", None, Modifiers::default()));
-
-        let key_count = records
+        pane.update(cx, |pane, cx| {
+            pane.handle_event(SessionEvent::Screen(blinking_cursor_screen(true, true)), cx);
+            pane.blink_phase_visible = false;
+        });
+        cx.run_until_parked();
+        let (
+            presentation_generation,
+            pending_frame,
+            blink_generation,
+            blink_phase_visible,
+            diagnostic_count,
+        ) = pane.read_with(cx, |pane, _| {
+            (
+                pane.screen.generation,
+                pane.render_lifecycle.take_frame(),
+                pane.blink_generation,
+                pane.blink_phase_visible,
+                pane.diagnostics.record_count(),
+            )
+        });
+        let key_count_before = records
             .commands()
             .iter()
             .filter(|call| matches!(call.command, RecordedSessionCommand::Key(_)))
             .count();
+
+        let handled = pane.update(cx, |pane, cx| {
+            pane.send_key_translation(
+                KeyTranslation::Unhandled(UnhandledKeyEvent {
+                    kind: NativeKeyEventKind::KeyDown,
+                    action: KeyAction::Press,
+                    native_key_code: Some(u16::MAX),
+                }),
+                cx,
+            )
+        });
+
+        let key_count_after = records
+            .commands()
+            .iter()
+            .filter(|call| matches!(call.command, RecordedSessionCommand::Key(_)))
+            .count();
+        let after = pane.read_with(cx, |pane, _| {
+            (
+                pane.screen.generation,
+                pane.render_lifecycle.take_frame(),
+                pane.blink_generation,
+                pane.blink_phase_visible,
+                pane.diagnostics.record_count(),
+                pane.status.clone(),
+                pane.pane_state.clone(),
+            )
+        });
         assert_eq!(
-            (key_count, pane.read_with(cx, |pane, _| pane.status.clone())),
-            (0, None)
+            (
+                handled,
+                key_count_before,
+                key_count_after,
+                after,
+                cx.debug_bounds("terminal-status"),
+            ),
+            (
+                false,
+                0,
+                0,
+                (
+                    presentation_generation,
+                    pending_frame,
+                    blink_generation,
+                    blink_phase_visible,
+                    diagnostic_count + 1,
+                    None,
+                    PaneTerminalState::Running,
+                ),
+                None,
+            )
         );
     }
 
