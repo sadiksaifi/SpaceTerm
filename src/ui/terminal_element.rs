@@ -3,19 +3,27 @@ use std::sync::Arc;
 use gpui::{
     App, BorderStyle, Bounds, ContentMask, Element, ElementId, ElementInputHandler, Entity,
     FocusHandle, Font, FontFallbacks, FontFeatures, GlobalElementId, InspectorElementId,
-    IntoElement, LayoutId, PaintQuad, Pixels, ShapedLine, SharedString, Style, TextRun,
-    UnderlineStyle, Window, fill, font, outline, point, px, relative, rgba, size,
+    IntoElement, LayoutId, PaintQuad, Path, PathBuilder, Pixels, ShapedLine, SharedString, Style,
+    TextRun, UnderlineStyle, Window, fill, font, outline, point, px, relative, rgba, size,
 };
 use unicode_bidi::{BidiClass, bidi_class};
 
 use crate::terminal::{
     CellSnapshot, CursorPositionSnapshot, CursorShapeSnapshot, CursorSnapshot, RowSnapshot,
-    ScreenSnapshot, TerminalColor, TerminalColorsSnapshot,
+    ScreenSnapshot, TerminalColor, TerminalColorsSnapshot, TerminalUnderlineSnapshot,
 };
 use crate::theme::{ACTIVE_THEME, Color};
 
 use super::terminal_ime::PreeditLayout;
 use super::terminal_pane::TerminalPane;
+use super::terminal_symbols::{SymbolPlan, SymbolPlanCache, SymbolPrimitive, terminal_symbol};
+
+#[derive(Clone, Copy)]
+struct TerminalGridMetrics {
+    cell_width: Pixels,
+    line_height: Pixels,
+    scale_factor: f32,
+}
 
 pub(crate) struct TerminalGridCache {
     source_rows: Vec<RowSnapshot>,
@@ -23,6 +31,10 @@ pub(crate) struct TerminalGridCache {
     font_family: Option<SharedString>,
     colors: Option<TerminalColorsSnapshot>,
     cursor: Option<CursorPositionSnapshot>,
+    cell_width: Option<Pixels>,
+    line_height: Option<Pixels>,
+    scale_factor_bits: Option<u32>,
+    symbol_plans: SymbolPlanCache,
 }
 
 impl TerminalGridCache {
@@ -33,6 +45,10 @@ impl TerminalGridCache {
             font_family: None,
             colors: None,
             cursor: None,
+            cell_width: None,
+            line_height: None,
+            scale_factor_bits: None,
+            symbol_plans: SymbolPlanCache::default(),
         }
     }
 
@@ -42,6 +58,10 @@ impl TerminalGridCache {
         self.font_family = None;
         self.colors = None;
         self.cursor = None;
+        self.cell_width = None;
+        self.line_height = None;
+        self.scale_factor_bits = None;
+        self.symbol_plans.invalidate_scale_dependent();
     }
 
     fn prepare(
@@ -50,9 +70,13 @@ impl TerminalGridCache {
         colors: &TerminalColorsSnapshot,
         font_family: &SharedString,
         cursor: Option<CursorPositionSnapshot>,
+        metrics: TerminalGridMetrics,
     ) -> Arc<[Arc<RowPaintInput>]> {
-        let style_changed =
-            self.font_family.as_ref() != Some(font_family) || self.colors.as_ref() != Some(colors);
+        let style_changed = self.font_family.as_ref() != Some(font_family)
+            || self.colors.as_ref() != Some(colors)
+            || self.cell_width != Some(metrics.cell_width)
+            || self.line_height != Some(metrics.line_height)
+            || self.scale_factor_bits != Some(metrics.scale_factor.to_bits());
         let rows_unchanged = !style_changed
             && self.cursor == cursor
             && rows.len() == self.source_rows.len()
@@ -78,7 +102,14 @@ impl TerminalGridCache {
                 {
                     Arc::clone(&self.prepared_rows[index])
                 } else {
-                    Arc::new(prepare_row(row, colors, font_family, cursor_column))
+                    Arc::new(prepare_row_cached(
+                        row,
+                        colors,
+                        font_family,
+                        cursor_column,
+                        &mut self.symbol_plans,
+                        metrics,
+                    ))
                 }
             })
             .collect::<Vec<_>>();
@@ -88,6 +119,9 @@ impl TerminalGridCache {
         self.font_family = Some(font_family.clone());
         self.colors = Some(colors.clone());
         self.cursor = cursor;
+        self.cell_width = Some(metrics.cell_width);
+        self.line_height = Some(metrics.line_height);
+        self.scale_factor_bits = Some(metrics.scale_factor.to_bits());
         Arc::clone(&self.prepared_rows)
     }
 }
@@ -106,6 +140,7 @@ pub(crate) struct TerminalGridElement {
     preedit: Option<PreeditLayout>,
     focus_handle: FocusHandle,
     input: Entity<TerminalPane>,
+    blink_phase_visible: bool,
 }
 
 pub(crate) struct TerminalGridConfiguration {
@@ -117,6 +152,8 @@ pub(crate) struct TerminalGridConfiguration {
     pub(crate) preedit: Option<PreeditLayout>,
     pub(crate) focus_handle: FocusHandle,
     pub(crate) input: Entity<TerminalPane>,
+    pub(crate) blink_phase_visible: bool,
+    pub(crate) scale_factor: f32,
 }
 
 impl TerminalGridElement {
@@ -133,8 +170,11 @@ impl TerminalGridElement {
                 .cloned()
                 .map(|cell| (position, cell))
         });
-        let cursor_style =
-            presented_cursor_style(screen.cursor, configuration.terminal_input_focused);
+        let cursor_style = presented_cursor_style(
+            screen.cursor,
+            configuration.terminal_input_focused,
+            configuration.blink_phase_visible,
+        );
         Self {
             background: screen.background,
             foreground: if screen.colors.reversed {
@@ -147,6 +187,11 @@ impl TerminalGridElement {
                 &screen.colors,
                 &configuration.font_family,
                 screen.cursor.position,
+                TerminalGridMetrics {
+                    cell_width: configuration.cell_width,
+                    line_height: configuration.line_height,
+                    scale_factor: configuration.scale_factor,
+                },
             ),
             columns: screen.rows.first().map_or(0, |row| row.len()),
             font_size: configuration.font_size,
@@ -158,6 +203,7 @@ impl TerminalGridElement {
             preedit: configuration.preedit,
             focus_handle: configuration.focus_handle,
             input: configuration.input,
+            blink_phase_visible: configuration.blink_phase_visible,
         }
     }
 }
@@ -165,10 +211,13 @@ impl TerminalGridElement {
 fn presented_cursor_style(
     mut negotiated: CursorSnapshot,
     terminal_input_focused: bool,
+    blink_phase_visible: bool,
 ) -> CursorSnapshot {
     if negotiated.visible && !terminal_input_focused {
         negotiated.shape = CursorShapeSnapshot::BlockHollow;
         negotiated.blinking = false;
+    } else if negotiated.visible && negotiated.blinking && !blink_phase_visible {
+        negotiated.visible = false;
     }
     negotiated
 }
@@ -180,7 +229,11 @@ struct PreparedText {
 
 struct PreparedRow {
     text: Vec<PreparedText>,
+    symbols: PreparedDecorations,
+    overlay_symbols: PreparedDecorations,
     backgrounds: Vec<PaintQuad>,
+    under_text_decorations: PreparedDecorations,
+    over_text_decorations: PreparedDecorations,
     overlay_text: Vec<PreparedText>,
     overlay_backgrounds: Vec<PaintQuad>,
     overlay_caret: Option<PaintQuad>,
@@ -189,6 +242,12 @@ struct PreparedRow {
 pub(crate) struct PrepaintState {
     surface: Option<PaintQuad>,
     rows: Vec<PreparedRow>,
+}
+
+#[derive(Default)]
+struct PreparedDecorations {
+    quads: Vec<PaintQuad>,
+    paths: Vec<(Path<Pixels>, Color)>,
 }
 
 impl IntoElement for TerminalGridElement {
@@ -238,12 +297,25 @@ impl Element for TerminalGridElement {
             .min(self.rows.len());
         let mut prepared_rows = Vec::with_capacity(visible_rows);
         let grid_left = terminal_grid_content_bounds(bounds, self.columns, self.cell_width).left();
+        let base_font = terminal_cell_font(&self.font_family, false, false);
+        let font_id = window.text_system().resolve_font(&base_font);
+        let baseline =
+            window
+                .text_system()
+                .baseline_offset(font_id, self.font_size, self.line_height);
+        let ascent = window.text_system().ascent(font_id, self.font_size);
+        let x_height = window.text_system().x_height(font_id, self.font_size);
+        let decoration_metrics =
+            decoration_metrics(baseline, ascent, x_height, window.scale_factor());
 
         for (row_index, row) in self.rows.iter().take(visible_rows).enumerate() {
             let row_top = bounds.top() + self.line_height * row_index as f32;
             let text = row
                 .fragments
                 .iter()
+                .filter(|fragment| {
+                    text_fragment_visible(fragment.blinking, self.blink_phase_visible)
+                })
                 .map(|fragment| PreparedText {
                     line: window.text_system().shape_line(
                         fragment.text.clone(),
@@ -268,10 +340,34 @@ impl Element for TerminalGridElement {
                     )
                 })
                 .collect::<Vec<_>>();
+            let under_text_decorations = prepare_decoration_geometry(
+                &row.under_text_decorations,
+                row_top,
+                grid_left,
+                self.cell_width,
+                decoration_metrics,
+                self.blink_phase_visible,
+            );
+            let over_text_decorations = prepare_decoration_geometry(
+                &row.over_text_decorations,
+                row_top,
+                grid_left,
+                self.cell_width,
+                decoration_metrics,
+                self.blink_phase_visible,
+            );
+            let symbols = prepare_symbol_geometry(
+                &row.symbols,
+                row_top,
+                grid_left,
+                self.cell_width,
+                self.blink_phase_visible,
+            );
 
             let mut text: Vec<PreparedText> = text;
             let mut backgrounds = backgrounds;
             let mut overlay_text = Vec::new();
+            let mut overlay_symbols = PreparedDecorations::default();
             let mut overlay_backgrounds = Vec::new();
             let mut overlay_caret = None;
             if let Some(preedit) = &self.preedit {
@@ -341,31 +437,56 @@ impl Element for TerminalGridElement {
                     ),
                 });
 
-                if plan.recolor_text && !cell.spacer_tail {
-                    let cursor_font = terminal_cell_font(&self.font_family, cell.bold, cell.italic);
-                    text.push(PreparedText {
-                        line: window.text_system().shape_line(
-                            cell.text.clone().into(),
-                            self.font_size,
-                            &[TextRun {
-                                len: cell.text.len(),
-                                font: cursor_font,
-                                color: gpui_color(self.cursor_style.text_color).into(),
-                                background_color: None,
-                                underline: None,
-                                strikethrough: None,
-                            }],
-                            force_cell_width_for_cell(&cell.text, position.width_cells)
-                                .then_some(self.cell_width),
-                        ),
-                        origin: point(cursor_left, row_top),
-                    });
+                if plan.recolor_text
+                    && !cell.spacer_tail
+                    && !cell.invisible
+                    && text_fragment_visible(cell.blinking, self.blink_phase_visible)
+                {
+                    if let Some(symbol) = row
+                        .symbols
+                        .iter()
+                        .find(|symbol| symbol.start == usize::from(position.column))
+                    {
+                        let mut symbol = symbol.clone();
+                        symbol.color = self.cursor_style.text_color;
+                        overlay_symbols = prepare_symbol_geometry(
+                            &[symbol],
+                            row_top,
+                            grid_left,
+                            self.cell_width,
+                            self.blink_phase_visible,
+                        );
+                    } else {
+                        let cursor_font =
+                            terminal_cell_font(&self.font_family, cell.bold, cell.italic);
+                        text.push(PreparedText {
+                            line: window.text_system().shape_line(
+                                cell.text.clone().into(),
+                                self.font_size,
+                                &[TextRun {
+                                    len: cell.text.len(),
+                                    font: cursor_font,
+                                    color: gpui_color(self.cursor_style.text_color).into(),
+                                    background_color: None,
+                                    underline: None,
+                                    strikethrough: None,
+                                }],
+                                force_cell_width_for_cell(&cell.text, position.width_cells)
+                                    .then_some(self.cell_width),
+                            ),
+                            origin: point(cursor_left, row_top),
+                        });
+                    }
                 }
             }
 
             prepared_rows.push(PreparedRow {
                 text,
+                symbols,
+                overlay_symbols,
                 backgrounds,
+                under_text_decorations,
+                over_text_decorations,
                 overlay_text,
                 overlay_backgrounds,
                 overlay_caret,
@@ -388,33 +509,73 @@ impl Element for TerminalGridElement {
         window: &mut Window,
         cx: &mut App,
     ) {
-        window.with_content_mask(Some(ContentMask { bounds }), |window| {
-            if let Some(surface) = prepaint.surface.take() {
-                window.paint_quad(surface);
-            }
-
-            for row in &mut prepaint.rows {
-                for background in row.backgrounds.drain(..) {
-                    window.paint_quad(background);
-                }
-                for text in row.text.drain(..) {
-                    if let Err(error) = text.line.paint(text.origin, self.line_height, window, cx) {
-                        eprintln!("failed to paint terminal row: {error:#}");
+        if let Some(surface) = prepaint.surface.take() {
+            window.paint_quad(surface);
+        }
+        let grid_bounds = terminal_grid_content_bounds(bounds, self.columns, self.cell_width);
+        let grid_bounds = Bounds::new(
+            grid_bounds.origin,
+            size(
+                grid_bounds.size.width,
+                (self.line_height * prepaint.rows.len() as f32).min(grid_bounds.size.height),
+            ),
+        );
+        window.with_content_mask(
+            Some(ContentMask {
+                bounds: grid_bounds,
+            }),
+            |window| {
+                for row in &mut prepaint.rows {
+                    for background in row.backgrounds.drain(..) {
+                        window.paint_quad(background);
+                    }
+                    for quad in row.under_text_decorations.quads.drain(..) {
+                        window.paint_quad(quad);
+                    }
+                    for (path, color) in row.under_text_decorations.paths.drain(..) {
+                        window.paint_path(path, gpui_color(color));
+                    }
+                    for quad in row.symbols.quads.drain(..) {
+                        window.paint_quad(quad);
+                    }
+                    for (path, color) in row.symbols.paths.drain(..) {
+                        window.paint_path(path, gpui_color(color));
+                    }
+                    for text in row.text.drain(..) {
+                        if let Err(error) =
+                            text.line.paint(text.origin, self.line_height, window, cx)
+                        {
+                            eprintln!("failed to paint terminal row: {error:#}");
+                        }
+                    }
+                    for quad in row.overlay_symbols.quads.drain(..) {
+                        window.paint_quad(quad);
+                    }
+                    for (path, color) in row.overlay_symbols.paths.drain(..) {
+                        window.paint_path(path, gpui_color(color));
+                    }
+                    for quad in row.over_text_decorations.quads.drain(..) {
+                        window.paint_quad(quad);
+                    }
+                    for (path, color) in row.over_text_decorations.paths.drain(..) {
+                        window.paint_path(path, gpui_color(color));
+                    }
+                    for background in row.overlay_backgrounds.drain(..) {
+                        window.paint_quad(background);
+                    }
+                    for text in row.overlay_text.drain(..) {
+                        if let Err(error) =
+                            text.line.paint(text.origin, self.line_height, window, cx)
+                        {
+                            eprintln!("failed to paint marked terminal text: {error:#}");
+                        }
+                    }
+                    if let Some(caret) = row.overlay_caret.take() {
+                        window.paint_quad(caret);
                     }
                 }
-                for background in row.overlay_backgrounds.drain(..) {
-                    window.paint_quad(background);
-                }
-                for text in row.overlay_text.drain(..) {
-                    if let Err(error) = text.line.paint(text.origin, self.line_height, window, cx) {
-                        eprintln!("failed to paint marked terminal text: {error:#}");
-                    }
-                }
-                if let Some(caret) = row.overlay_caret.take() {
-                    window.paint_quad(caret);
-                }
-            }
-        });
+            },
+        );
         window.handle_input(
             &self.focus_handle,
             ElementInputHandler::new(bounds, self.input.clone()),
@@ -442,8 +603,20 @@ pub(super) fn terminal_grid_content_bounds(
 
 struct RowPaintInput {
     fragments: Vec<TextFragment>,
+    symbols: Vec<SymbolPaintInput>,
     backgrounds: Vec<BackgroundSpan>,
     selections: Vec<BackgroundSpan>,
+    under_text_decorations: Vec<DecorationSpan>,
+    over_text_decorations: Vec<DecorationSpan>,
+}
+
+#[derive(Clone, Debug)]
+struct SymbolPaintInput {
+    start: usize,
+    width_cells: u8,
+    color: Color,
+    blinking: bool,
+    plan: Arc<SymbolPlan>,
 }
 
 struct TextFragment {
@@ -451,22 +624,25 @@ struct TextFragment {
     text: SharedString,
     runs: Vec<TextRun>,
     force_cell_width: bool,
+    blinking: bool,
 }
 
 struct FragmentBuilder {
     start: usize,
     selected: bool,
     cursor: bool,
+    blinking: bool,
     text: String,
     runs: Vec<TextRun>,
 }
 
 impl FragmentBuilder {
-    fn new(start: usize, selected: bool, cursor: bool) -> Self {
+    fn new(start: usize, selected: bool, cursor: bool, blinking: bool) -> Self {
         Self {
             start,
             selected,
             cursor,
+            blinking,
             text: String::new(),
             runs: Vec::new(),
         }
@@ -515,6 +691,7 @@ impl FragmentBuilder {
             text: self.text.into(),
             runs: self.runs,
             force_cell_width,
+            blinking: self.blinking,
         }
     }
 }
@@ -545,16 +722,294 @@ struct BackgroundSpan {
     color: Color,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DecorationKind {
+    Underline(TerminalUnderlineSnapshot),
+    Overline,
+    Strikethrough,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct DecorationSpan {
+    start: usize,
+    len: usize,
+    kind: DecorationKind,
+    color: Color,
+    blinking: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct DecorationMetrics {
+    device_pixel: Pixels,
+    thickness: Pixels,
+    underline_y: Pixels,
+    double_underline_y: Pixels,
+    strikethrough_y: Pixels,
+    overline_y: Pixels,
+    wave_amplitude: Pixels,
+}
+
+fn decoration_metrics(
+    baseline: Pixels,
+    ascent: Pixels,
+    x_height: Pixels,
+    scale_factor: f32,
+) -> DecorationMetrics {
+    let scale_factor = if scale_factor.is_finite() && scale_factor > 0.0 {
+        scale_factor
+    } else {
+        1.0
+    };
+    let device_pixel = px(1.0 / scale_factor);
+    let snap = |value: Pixels| px((f32::from(value) * scale_factor).round() / scale_factor);
+    let underline_y = snap(baseline + device_pixel * 2.0);
+    DecorationMetrics {
+        device_pixel,
+        thickness: device_pixel,
+        underline_y,
+        double_underline_y: underline_y + device_pixel * 2.0,
+        strikethrough_y: snap(baseline - x_height / 2.0),
+        overline_y: snap(baseline - ascent),
+        wave_amplitude: device_pixel * 2.0,
+    }
+}
+
+fn prepare_decoration_geometry(
+    spans: &[DecorationSpan],
+    row_top: Pixels,
+    grid_left: Pixels,
+    cell_width: Pixels,
+    metrics: DecorationMetrics,
+    blink_phase_visible: bool,
+) -> PreparedDecorations {
+    let mut prepared = PreparedDecorations::default();
+    for span in spans
+        .iter()
+        .filter(|span| text_fragment_visible(span.blinking, blink_phase_visible))
+    {
+        let left = grid_left + cell_width * span.start as f32;
+        let right = left + cell_width * span.len as f32;
+        let width = right - left;
+        let mut push_line = |y: Pixels| {
+            prepared.quads.push(fill(
+                Bounds::new(point(left, row_top + y), size(width, metrics.thickness)),
+                gpui_color(span.color),
+            ));
+        };
+
+        match span.kind {
+            DecorationKind::Underline(TerminalUnderlineSnapshot::Single) => {
+                push_line(metrics.underline_y);
+            }
+            DecorationKind::Underline(TerminalUnderlineSnapshot::Double) => {
+                push_line(metrics.underline_y);
+                push_line(metrics.double_underline_y);
+            }
+            DecorationKind::Underline(TerminalUnderlineSnapshot::Dotted) => {
+                let mut x = left;
+                while x < right {
+                    let dot_width = metrics.thickness.min(right - x);
+                    prepared.quads.push(fill(
+                        Bounds::new(
+                            point(x, row_top + metrics.underline_y),
+                            size(dot_width, metrics.thickness),
+                        ),
+                        gpui_color(span.color),
+                    ));
+                    x += metrics.device_pixel * 2.0;
+                }
+            }
+            DecorationKind::Underline(TerminalUnderlineSnapshot::Dashed) => {
+                let dash_width = metrics.device_pixel * 3.0;
+                let mut x = left;
+                while x < right {
+                    let width = dash_width.min(right - x);
+                    prepared.quads.push(fill(
+                        Bounds::new(
+                            point(x, row_top + metrics.underline_y),
+                            size(width, metrics.thickness),
+                        ),
+                        gpui_color(span.color),
+                    ));
+                    x += dash_width + metrics.device_pixel * 2.0;
+                }
+            }
+            DecorationKind::Underline(TerminalUnderlineSnapshot::Curly) => {
+                let mut builder = PathBuilder::stroke(metrics.thickness);
+                let center_y = row_top + metrics.underline_y + metrics.wave_amplitude;
+                let half_wave = (cell_width / 4.0).max(metrics.device_pixel * 2.0);
+                let mut x = left;
+                let mut rise = true;
+                builder.move_to(point(x, center_y));
+                while x < right {
+                    x = (x + half_wave).min(right);
+                    let y = if rise {
+                        center_y - metrics.wave_amplitude
+                    } else {
+                        center_y + metrics.wave_amplitude
+                    };
+                    builder.line_to(point(x, y));
+                    rise = !rise;
+                }
+                if let Ok(path) = builder.build() {
+                    prepared.paths.push((path, span.color));
+                }
+            }
+            DecorationKind::Underline(TerminalUnderlineSnapshot::None) => {}
+            DecorationKind::Overline => push_line(metrics.overline_y),
+            DecorationKind::Strikethrough => push_line(metrics.strikethrough_y),
+        }
+    }
+    prepared
+}
+
+fn prepare_symbol_geometry(
+    symbols: &[SymbolPaintInput],
+    row_top: Pixels,
+    grid_left: Pixels,
+    cell_width: Pixels,
+    blink_phase_visible: bool,
+) -> PreparedDecorations {
+    let mut prepared = PreparedDecorations::default();
+    for symbol in symbols
+        .iter()
+        .filter(|symbol| text_fragment_visible(symbol.blinking, blink_phase_visible))
+    {
+        debug_assert!(matches!(symbol.width_cells, 1 | 2));
+        let scale = symbol.plan.scale_factor;
+        let origin = point(grid_left + cell_width * symbol.start as f32, row_top);
+        for primitive in &symbol.plan.primitives {
+            match primitive {
+                SymbolPrimitive::Rect {
+                    x,
+                    y,
+                    width,
+                    height,
+                    alpha,
+                } => prepared.quads.push(fill(
+                    Bounds::new(
+                        point(
+                            origin.x + px(f32::from(*x) / scale),
+                            origin.y + px(f32::from(*y) / scale),
+                        ),
+                        size(
+                            px(f32::from(*width) / scale),
+                            px(f32::from(*height) / scale),
+                        ),
+                    ),
+                    gpui_color(symbol_color_with_alpha(symbol.color, *alpha)),
+                )),
+                SymbolPrimitive::Polygon { points, alpha } => {
+                    let mut points = points.iter();
+                    let Some(first) = points.next() else {
+                        continue;
+                    };
+                    let mut builder = PathBuilder::fill();
+                    builder.move_to(point(
+                        origin.x + px(first.x / scale),
+                        origin.y + px(first.y / scale),
+                    ));
+                    for vertex in points {
+                        builder.line_to(point(
+                            origin.x + px(vertex.x / scale),
+                            origin.y + px(vertex.y / scale),
+                        ));
+                    }
+                    builder.close();
+                    if let Ok(path) = builder.build() {
+                        prepared
+                            .paths
+                            .push((path, symbol_color_with_alpha(symbol.color, *alpha)));
+                    }
+                }
+                SymbolPrimitive::Stroke {
+                    points,
+                    thickness,
+                    alpha,
+                } => {
+                    let mut points = points.iter();
+                    let Some(first) = points.next() else {
+                        continue;
+                    };
+                    let mut builder = PathBuilder::stroke(px(f32::from(*thickness) / scale));
+                    builder.move_to(point(
+                        origin.x + px(first.x / scale),
+                        origin.y + px(first.y / scale),
+                    ));
+                    for vertex in points {
+                        builder.line_to(point(
+                            origin.x + px(vertex.x / scale),
+                            origin.y + px(vertex.y / scale),
+                        ));
+                    }
+                    if let Ok(path) = builder.build() {
+                        prepared
+                            .paths
+                            .push((path, symbol_color_with_alpha(symbol.color, *alpha)));
+                    }
+                }
+            }
+        }
+    }
+    prepared
+}
+
+fn symbol_color_with_alpha(mut color: Color, primitive_alpha: u8) -> Color {
+    color.a = ((u16::from(color.a) * u16::from(primitive_alpha) + 127) / 255) as u8;
+    color
+}
+
+fn push_decoration(spans: &mut Vec<DecorationSpan>, mut span: DecorationSpan) {
+    if let Some(previous) = spans.last_mut()
+        && previous.start + previous.len == span.start
+        && previous.kind == span.kind
+        && previous.color == span.color
+        && previous.blinking == span.blinking
+    {
+        previous.len += span.len;
+        return;
+    }
+    span.len = span.len.max(1);
+    spans.push(span);
+}
+
+#[cfg(test)]
 fn prepare_row(
     row: &RowSnapshot,
     colors: &TerminalColorsSnapshot,
     font_family: &SharedString,
     cursor_column: Option<usize>,
 ) -> RowPaintInput {
+    prepare_row_cached(
+        row,
+        colors,
+        font_family,
+        cursor_column,
+        &mut SymbolPlanCache::default(),
+        TerminalGridMetrics {
+            cell_width: px(8.0),
+            line_height: px(20.0),
+            scale_factor: 1.0,
+        },
+    )
+}
+
+fn prepare_row_cached(
+    row: &RowSnapshot,
+    colors: &TerminalColorsSnapshot,
+    font_family: &SharedString,
+    cursor_column: Option<usize>,
+    symbol_plans: &mut SymbolPlanCache,
+    metrics: TerminalGridMetrics,
+) -> RowPaintInput {
     let mut fragments = Vec::new();
+    let mut symbols = Vec::new();
     let mut regular_fragment: Option<FragmentBuilder> = None;
     let mut backgrounds: Vec<BackgroundSpan> = Vec::new();
     let mut selections: Vec<BackgroundSpan> = Vec::new();
+    let mut underlines = Vec::new();
+    let mut overlines = Vec::new();
+    let mut strikethroughs = Vec::new();
 
     for (column, cell) in row.iter().enumerate() {
         let cursor = cursor_column == Some(column);
@@ -589,34 +1044,98 @@ fn prepare_row(
             }
         }
 
-        if cell.spacer_tail {
+        if !cell.invisible {
+            let (foreground, _) = effective_colors(cell, colors);
+            if cell.underline != TerminalUnderlineSnapshot::None {
+                push_decoration(
+                    &mut underlines,
+                    DecorationSpan {
+                        start: column,
+                        len: 1,
+                        kind: DecorationKind::Underline(cell.underline),
+                        color: effective_underline_color(cell, colors, foreground),
+                        blinking: cell.blinking,
+                    },
+                );
+            }
+            if cell.overline {
+                push_decoration(
+                    &mut overlines,
+                    DecorationSpan {
+                        start: column,
+                        len: 1,
+                        kind: DecorationKind::Overline,
+                        color: foreground,
+                        blinking: cell.blinking,
+                    },
+                );
+            }
+            if cell.strikethrough {
+                push_decoration(
+                    &mut strikethroughs,
+                    DecorationSpan {
+                        start: column,
+                        len: 1,
+                        kind: DecorationKind::Strikethrough,
+                        color: foreground,
+                        blinking: cell.blinking,
+                    },
+                );
+            }
+        }
+
+        if cell.spacer_tail || cell.invisible {
             if let Some(fragment) = regular_fragment.take() {
                 fragments.push(fragment.finish(true));
             }
             continue;
         }
 
-        if regular_fragment
-            .as_ref()
-            .is_some_and(|fragment| fragment.selected != cell.selected || fragment.cursor != cursor)
-            && let Some(fragment) = regular_fragment.take()
+        let is_wide_head = row.get(column + 1).is_some_and(|next| next.spacer_tail);
+        let width_cells = if is_wide_head { 2 } else { 1 };
+        if let Some(symbol) = terminal_symbol(&cell.text) {
+            if let Some(fragment) = regular_fragment.take() {
+                fragments.push(fragment.finish(true));
+            }
+            let (color, _) = effective_colors(cell, colors);
+            symbols.push(SymbolPaintInput {
+                start: column,
+                width_cells,
+                color,
+                blinking: cell.blinking,
+                plan: symbol_plans.get(
+                    symbol,
+                    f32::from(metrics.cell_width),
+                    f32::from(metrics.line_height),
+                    width_cells,
+                    metrics.scale_factor,
+                ),
+            });
+            continue;
+        }
+
+        if regular_fragment.as_ref().is_some_and(|fragment| {
+            fragment.selected != cell.selected
+                || fragment.cursor != cursor
+                || fragment.blinking != cell.blinking
+        }) && let Some(fragment) = regular_fragment.take()
         {
             fragments.push(fragment.finish(true));
         }
 
-        let is_wide_head = row.get(column + 1).is_some_and(|next| next.spacer_tail);
-        let width_cells = if is_wide_head { 2 } else { 1 };
         let requires_whole_cell_shaping = !force_cell_width_for_cell(&cell.text, width_cells);
         if requires_whole_cell_shaping {
             if let Some(fragment) = regular_fragment.take() {
                 fragments.push(fragment.finish(true));
             }
-            let mut fragment = FragmentBuilder::new(column, cell.selected, cursor);
+            let mut fragment = FragmentBuilder::new(column, cell.selected, cursor, cell.blinking);
             fragment.push(cell, colors, font_family);
             fragments.push(fragment.finish(false));
         } else {
             regular_fragment
-                .get_or_insert_with(|| FragmentBuilder::new(column, cell.selected, cursor))
+                .get_or_insert_with(|| {
+                    FragmentBuilder::new(column, cell.selected, cursor, cell.blinking)
+                })
                 .push(cell, colors, font_family);
         }
     }
@@ -625,10 +1144,14 @@ fn prepare_row(
         fragments.push(fragment.finish(true));
     }
 
+    underlines.extend(overlines);
     RowPaintInput {
         fragments,
+        symbols,
         backgrounds,
         selections,
+        under_text_decorations: underlines,
+        over_text_decorations: strikethroughs,
     }
 }
 
@@ -655,6 +1178,10 @@ fn force_cell_width_for_cell(text: &str, width_cells: u8) -> bool {
     width_cells == 1 && text.chars().count() == 1 && !text.chars().any(is_bidi_sensitive)
 }
 
+fn text_fragment_visible(blinking: bool, blink_phase_visible: bool) -> bool {
+    !blinking || blink_phase_visible
+}
+
 fn cursor_column_for_row(cursor: Option<CursorPositionSnapshot>, row: usize) -> Option<usize> {
     cursor
         .filter(|cursor| usize::from(cursor.row) == row)
@@ -666,21 +1193,39 @@ fn effective_colors(cell: &CellSnapshot, colors: &TerminalColorsSnapshot) -> (Co
         (TerminalColor::Palette(index @ 0..=7), true) => TerminalColor::Palette(index + 8),
         (source, _) => source,
     };
-    let resolve = |source| match source {
-        TerminalColor::Default => colors.foreground,
-        TerminalColor::Palette(index) => colors.palette[usize::from(index)],
-        TerminalColor::Rgb(color) => color,
-    };
-    let mut foreground = resolve(foreground_source);
-    let mut background = match cell.background_source {
-        TerminalColor::Default => colors.background,
-        TerminalColor::Palette(index) => colors.palette[usize::from(index)],
-        TerminalColor::Rgb(color) => color,
-    };
+    let mut foreground = resolve_color_source(foreground_source, colors, colors.foreground);
+    let mut background = resolve_color_source(cell.background_source, colors, colors.background);
     if cell.inverse ^ colors.reversed {
         std::mem::swap(&mut foreground, &mut background);
     }
+    if cell.faint {
+        foreground.a = foreground.a.div_ceil(2);
+    }
     (foreground, background)
+}
+
+fn effective_underline_color(
+    cell: &CellSnapshot,
+    colors: &TerminalColorsSnapshot,
+    effective_foreground: Color,
+) -> Color {
+    let mut color = resolve_color_source(cell.underline_source, colors, effective_foreground);
+    if cell.faint && cell.underline_source != TerminalColor::Default {
+        color.a = color.a.div_ceil(2);
+    }
+    color
+}
+
+fn resolve_color_source(
+    source: TerminalColor,
+    colors: &TerminalColorsSnapshot,
+    default: Color,
+) -> Color {
+    match source {
+        TerminalColor::Default => default,
+        TerminalColor::Palette(index) => colors.palette[usize::from(index)],
+        TerminalColor::Rgb(color) => color,
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -772,9 +1317,26 @@ mod tests {
             background_source: crate::terminal::TerminalColor::Default,
             inverse: false,
             bold: false,
+            faint: false,
             italic: false,
+            blinking: false,
+            invisible: false,
+            underline: crate::terminal::TerminalUnderlineSnapshot::None,
+            underline_source: crate::terminal::TerminalColor::Default,
+            strikethrough: false,
+            overline: false,
             selected: false,
             spacer_tail: false,
+            semantic_content: crate::terminal::CellSemanticSnapshot::Output,
+            hyperlink: None,
+        }
+    }
+
+    fn grid_metrics() -> TerminalGridMetrics {
+        TerminalGridMetrics {
+            cell_width: px(8.0),
+            line_height: px(20.0),
+            scale_factor: 1.0,
         }
     }
 
@@ -819,6 +1381,21 @@ mod tests {
             effective_colors(&subject, &reversed),
             (Color::rgb(0x12_34_56), colors.palette[200])
         );
+    }
+
+    #[test]
+    fn faint_reduces_only_the_resolved_foreground_opacity() {
+        let colors = colors();
+        let mut subject = cell("x");
+        subject.foreground_source = crate::terminal::TerminalColor::Rgb(Color::rgba(0x10_20_30_c0));
+        subject.background_source = crate::terminal::TerminalColor::Rgb(Color::rgb(0x40_50_60));
+        subject.inverse = true;
+        subject.faint = true;
+
+        let (foreground, background) = effective_colors(&subject, &colors);
+
+        assert_eq!(foreground, Color::rgba(0x40_50_60_80));
+        assert_eq!(background, Color::rgba(0x10_20_30_c0));
     }
 
     #[test]
@@ -901,12 +1478,20 @@ mod tests {
             ..CursorSnapshot::default()
         };
 
-        assert_eq!(presented_cursor_style(negotiated, true), negotiated);
+        assert_eq!(presented_cursor_style(negotiated, true, true), negotiated);
         assert_eq!(
-            presented_cursor_style(negotiated, false),
+            presented_cursor_style(negotiated, false, false),
             CursorSnapshot {
                 blinking: false,
                 shape: crate::terminal::CursorShapeSnapshot::BlockHollow,
+                ..negotiated
+            }
+        );
+
+        assert_eq!(
+            presented_cursor_style(negotiated, true, false),
+            CursorSnapshot {
+                visible: false,
                 ..negotiated
             }
         );
@@ -915,7 +1500,7 @@ mod tests {
             visible: false,
             ..negotiated
         };
-        assert_eq!(presented_cursor_style(hidden, false), hidden);
+        assert_eq!(presented_cursor_style(hidden, false, false), hidden);
     }
 
     #[test]
@@ -990,6 +1575,167 @@ mod tests {
     }
 
     #[test]
+    fn invisible_cells_keep_backgrounds_without_preparing_foreground_text() {
+        let accent = ACTIVE_THEME.terminal_normal()[1];
+        let mut invisible = cell("secret");
+        invisible.invisible = true;
+        invisible.background_source = crate::terminal::TerminalColor::Rgb(accent);
+        let row = Arc::<[CellSnapshot]>::from([invisible]);
+
+        let input = prepare_row(&row, &colors(), &"Menlo".into(), None);
+
+        assert!(input.fragments.is_empty());
+        assert_eq!(
+            input.backgrounds,
+            vec![BackgroundSpan {
+                start: 0,
+                len: 1,
+                color: accent,
+            }]
+        );
+    }
+
+    #[test]
+    fn prepared_decorations_preserve_kind_color_layer_and_cell_span() {
+        let accent = ACTIVE_THEME.terminal_normal()[1];
+        let mut decorated = cell("界");
+        decorated.underline = crate::terminal::TerminalUnderlineSnapshot::Double;
+        decorated.underline_source = crate::terminal::TerminalColor::Rgb(accent);
+        decorated.overline = true;
+        decorated.strikethrough = true;
+        let mut tail = decorated.clone();
+        tail.text = " ".to_owned();
+        tail.spacer_tail = true;
+        let row = Arc::<[CellSnapshot]>::from([decorated, tail]);
+
+        let input = prepare_row(&row, &colors(), &"Menlo".into(), None);
+
+        assert_eq!(
+            input.under_text_decorations,
+            vec![
+                DecorationSpan {
+                    start: 0,
+                    len: 2,
+                    kind: DecorationKind::Underline(
+                        crate::terminal::TerminalUnderlineSnapshot::Double,
+                    ),
+                    color: accent,
+                    blinking: false,
+                },
+                DecorationSpan {
+                    start: 0,
+                    len: 2,
+                    kind: DecorationKind::Overline,
+                    color: colors().foreground,
+                    blinking: false,
+                },
+            ]
+        );
+        assert_eq!(
+            input.over_text_decorations,
+            vec![DecorationSpan {
+                start: 0,
+                len: 2,
+                kind: DecorationKind::Strikethrough,
+                color: colors().foreground,
+                blinking: false,
+            }]
+        );
+    }
+
+    #[test]
+    fn decorations_compose_with_inverse_selection_visibility_and_blink_phase() {
+        let mut decorated = cell("x");
+        decorated.inverse = true;
+        decorated.selected = true;
+        decorated.blinking = true;
+        decorated.underline = crate::terminal::TerminalUnderlineSnapshot::Single;
+        decorated.overline = true;
+        decorated.strikethrough = true;
+        let row = Arc::<[CellSnapshot]>::from([decorated.clone()]);
+
+        let input = prepare_row(&row, &colors(), &"Menlo".into(), None);
+
+        assert_eq!(input.selections.len(), 1);
+        assert!(
+            input
+                .under_text_decorations
+                .iter()
+                .chain(&input.over_text_decorations)
+                .all(|span| span.color == colors().background && span.blinking)
+        );
+        let metrics = decoration_metrics(px(15.0), px(11.0), px(8.0), 2.0);
+        let hidden = prepare_decoration_geometry(
+            &input.under_text_decorations,
+            px(0.0),
+            px(0.0),
+            px(8.0),
+            metrics,
+            false,
+        );
+        assert!(hidden.quads.is_empty() && hidden.paths.is_empty());
+
+        decorated.invisible = true;
+        let invisible = Arc::<[CellSnapshot]>::from([decorated]);
+        let invisible = prepare_row(&invisible, &colors(), &"Menlo".into(), None);
+        assert!(invisible.under_text_decorations.is_empty());
+        assert!(invisible.over_text_decorations.is_empty());
+        assert_eq!(invisible.selections.len(), 1);
+    }
+
+    #[test]
+    fn decoration_metrics_follow_font_metrics_and_snap_to_retina_pixels() {
+        let metrics = decoration_metrics(px(15.2), px(11.1), px(8.2), 2.0);
+
+        assert_eq!(metrics.device_pixel, px(0.5));
+        assert_eq!(metrics.thickness, px(0.5));
+        assert_eq!(metrics.underline_y, px(16.0));
+        assert_eq!(metrics.double_underline_y, px(17.0));
+        assert_eq!(metrics.strikethrough_y, px(11.0));
+        assert_eq!(metrics.overline_y, px(4.0));
+        assert!(metrics.wave_amplitude >= metrics.device_pixel);
+    }
+
+    #[test]
+    fn underline_variants_produce_distinct_cell_clipped_geometry() {
+        let metrics = decoration_metrics(px(15.0), px(11.0), px(8.0), 2.0);
+        let span = |kind| DecorationSpan {
+            start: 0,
+            len: 2,
+            kind: DecorationKind::Underline(kind),
+            color: Color::rgb(0x12_34_56),
+            blinking: false,
+        };
+        let prepare = |kind| {
+            prepare_decoration_geometry(&[span(kind)], px(0.0), px(0.0), px(8.0), metrics, true)
+        };
+
+        let single = prepare(crate::terminal::TerminalUnderlineSnapshot::Single);
+        let double = prepare(crate::terminal::TerminalUnderlineSnapshot::Double);
+        let curly = prepare(crate::terminal::TerminalUnderlineSnapshot::Curly);
+        let dotted = prepare(crate::terminal::TerminalUnderlineSnapshot::Dotted);
+        let dashed = prepare(crate::terminal::TerminalUnderlineSnapshot::Dashed);
+
+        assert_eq!((single.quads.len(), single.paths.len()), (1, 0));
+        assert_eq!((double.quads.len(), double.paths.len()), (2, 0));
+        assert_eq!((curly.quads.len(), curly.paths.len()), (0, 1));
+        assert!(dotted.quads.len() > dashed.quads.len());
+        assert!(dashed.quads.len() > single.quads.len());
+        assert!(
+            single
+                .quads
+                .iter()
+                .all(|quad| quad.bounds.right() <= px(16.0))
+        );
+        assert!(
+            double
+                .quads
+                .iter()
+                .all(|quad| quad.bounds.right() <= px(16.0))
+        );
+    }
+
+    #[test]
     fn selected_cells_coalesce_into_themed_overlay_spans() {
         let mut first = cell("a");
         first.selected = true;
@@ -1044,6 +1790,32 @@ mod tests {
     }
 
     #[test]
+    fn shaping_fragments_do_not_cross_text_blink_boundaries() {
+        let mut blinking = cell("b");
+        blinking.blinking = true;
+        let row = Arc::<[CellSnapshot]>::from([cell("a"), blinking, cell("c")]);
+
+        let input = prepare_row(&row, &colors(), &"Menlo".into(), None);
+
+        assert_eq!(
+            input
+                .fragments
+                .iter()
+                .map(|fragment| (fragment.text.as_ref(), fragment.blinking))
+                .collect::<Vec<_>>(),
+            vec![("a", false), ("b", true), ("c", false)]
+        );
+    }
+
+    #[test]
+    fn text_blink_phase_hides_only_blinking_fragments() {
+        assert!(text_fragment_visible(false, false));
+        assert!(text_fragment_visible(false, true));
+        assert!(!text_fragment_visible(true, false));
+        assert!(text_fragment_visible(true, true));
+    }
+
+    #[test]
     fn wide_and_combining_cells_anchor_following_text_to_columns() {
         let mut tail = cell(" ");
         tail.spacer_tail = true;
@@ -1062,6 +1834,70 @@ mod tests {
         assert_eq!(input.fragments[2].text.as_ref(), "e\u{301}");
         assert_eq!(input.fragments[3].start, 4);
         assert_eq!(input.fragments[3].text.as_ref(), "y");
+    }
+
+    #[test]
+    fn supported_symbols_bypass_shaping_without_capturing_grapheme_sequences() {
+        let box_line = cell("─");
+        let variation_sequence = cell("─\u{fe0f}");
+        let mut wide_block = cell("█");
+        wide_block.inverse = true;
+        wide_block.selected = true;
+        let mut tail = wide_block.clone();
+        tail.text = " ".to_owned();
+        tail.spacer_tail = true;
+        let row = Arc::<[CellSnapshot]>::from([box_line, variation_sequence, wide_block, tail]);
+
+        let input = prepare_row(&row, &colors(), &"Menlo".into(), None);
+
+        assert_eq!(
+            input
+                .symbols
+                .iter()
+                .map(|symbol| (symbol.start, symbol.width_cells, symbol.color))
+                .collect::<Vec<_>>(),
+            vec![(0, 1, colors().foreground), (2, 2, colors().background)]
+        );
+        assert_eq!(
+            input
+                .fragments
+                .iter()
+                .map(|fragment| (fragment.start, fragment.text.as_ref()))
+                .collect::<Vec<_>>(),
+            vec![(1, "─\u{fe0f}")]
+        );
+        assert_eq!(input.selections.len(), 1);
+    }
+
+    #[test]
+    fn symbol_prepaint_obeys_blink_phase_and_preserves_terminal_width() {
+        let mut block = cell("█");
+        block.blinking = true;
+        let mut tail = block.clone();
+        tail.text = " ".to_owned();
+        tail.spacer_tail = true;
+        let row = Arc::<[CellSnapshot]>::from([block, tail]);
+        let input = prepare_row(&row, &colors(), &"Menlo".into(), None);
+
+        let hidden = prepare_symbol_geometry(&input.symbols, px(10.0), px(5.0), px(8.0), false);
+        let visible = prepare_symbol_geometry(&input.symbols, px(10.0), px(5.0), px(8.0), true);
+
+        assert!(hidden.quads.is_empty() && hidden.paths.is_empty());
+        assert_eq!(visible.quads.len(), 1);
+        assert_eq!(
+            visible.quads[0].bounds,
+            Bounds::new(point(px(5.0), px(10.0)), size(px(16.0), px(20.0)))
+        );
+    }
+
+    #[test]
+    fn symbol_prepaint_uses_fractional_logical_cell_origins() {
+        let row = Arc::<[CellSnapshot]>::from([cell("a"), cell("a"), cell("█")]);
+        let input = prepare_row(&row, &colors(), &"Menlo".into(), None);
+
+        let visible = prepare_symbol_geometry(&input.symbols, px(10.0), px(5.0), px(8.25), true);
+
+        assert_eq!(visible.quads[0].bounds.origin.x, px(21.5));
     }
 
     #[test]
@@ -1102,14 +1938,65 @@ mod tests {
         let second_row = Arc::<[CellSnapshot]>::from([cell("b")]);
         let rows = Arc::<[RowSnapshot]>::from([Arc::clone(&first_row), Arc::clone(&second_row)]);
         let mut cache = TerminalGridCache::new();
-        let first = cache.prepare(&rows, &colors(), &"Menlo".into(), None);
+        let first = cache.prepare(&rows, &colors(), &"Menlo".into(), None, grid_metrics());
 
         let changed_row = Arc::<[CellSnapshot]>::from([cell("c")]);
         let changed_rows = Arc::<[RowSnapshot]>::from([first_row, changed_row]);
-        let second = cache.prepare(&changed_rows, &colors(), &"Menlo".into(), None);
+        let second = cache.prepare(
+            &changed_rows,
+            &colors(),
+            &"Menlo".into(),
+            None,
+            grid_metrics(),
+        );
 
         assert!(Arc::ptr_eq(&first[0], &second[0]));
         assert!(!Arc::ptr_eq(&first[1], &second[1]));
+    }
+
+    #[test]
+    fn cursor_blink_phase_reuses_every_prepared_row() {
+        let rows = Arc::<[RowSnapshot]>::from([
+            Arc::<[CellSnapshot]>::from([cell("a"), cell("b")]),
+            Arc::<[CellSnapshot]>::from([cell("c"), cell("d")]),
+            Arc::<[CellSnapshot]>::from([cell("e"), cell("f")]),
+        ]);
+        let cursor = CursorPositionSnapshot {
+            row: 1,
+            column: 0,
+            width_cells: 1,
+        };
+        let mut cache = TerminalGridCache::new();
+        let first = cache.prepare(
+            &rows,
+            &colors(),
+            &"Menlo".into(),
+            Some(cursor),
+            grid_metrics(),
+        );
+
+        let negotiated = CursorSnapshot {
+            position: Some(cursor),
+            visible: true,
+            blinking: true,
+            ..CursorSnapshot::default()
+        };
+        assert!(presented_cursor_style(negotiated, true, true).visible);
+        assert!(!presented_cursor_style(negotiated, true, false).visible);
+
+        let second = cache.prepare(
+            &rows,
+            &colors(),
+            &"Menlo".into(),
+            Some(cursor),
+            grid_metrics(),
+        );
+        assert!(
+            first
+                .iter()
+                .zip(second.iter())
+                .all(|(first, second)| Arc::ptr_eq(first, second))
+        );
     }
 
     #[test]
@@ -1129,6 +2016,7 @@ mod tests {
                 column: 1,
                 width_cells: 1,
             }),
+            grid_metrics(),
         );
 
         let second = cache.prepare(
@@ -1140,6 +2028,7 @@ mod tests {
                 column: 0,
                 width_cells: 1,
             }),
+            grid_metrics(),
         );
 
         assert!(!Arc::ptr_eq(&first[0], &second[0]));
@@ -1153,11 +2042,17 @@ mod tests {
         let rows = Arc::<[RowSnapshot]>::from([row]);
         let mut cache = TerminalGridCache::new();
         let first_colors = colors();
-        let first = cache.prepare(&rows, &first_colors, &"Menlo".into(), None);
+        let first = cache.prepare(&rows, &first_colors, &"Menlo".into(), None, grid_metrics());
 
         let mut changed_colors = first_colors.clone();
         Arc::make_mut(&mut changed_colors.palette)[1] = Color::rgb(0xff_00_00);
-        let second = cache.prepare(&rows, &changed_colors, &"Menlo".into(), None);
+        let second = cache.prepare(
+            &rows,
+            &changed_colors,
+            &"Menlo".into(),
+            None,
+            grid_metrics(),
+        );
 
         assert!(!Arc::ptr_eq(&first[0], &second[0]));
     }
@@ -1167,10 +2062,10 @@ mod tests {
         let row = Arc::<[CellSnapshot]>::from([cell("a")]);
         let rows = Arc::<[RowSnapshot]>::from([row]);
         let mut cache = TerminalGridCache::new();
-        let first = cache.prepare(&rows, &colors(), &"Menlo".into(), None);
+        let first = cache.prepare(&rows, &colors(), &"Menlo".into(), None, grid_metrics());
 
         cache.invalidate_scale_dependent();
-        let second = cache.prepare(&rows, &colors(), &"Menlo".into(), None);
+        let second = cache.prepare(&rows, &colors(), &"Menlo".into(), None, grid_metrics());
 
         assert!(!Arc::ptr_eq(&first[0], &second[0]));
     }

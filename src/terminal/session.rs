@@ -18,12 +18,15 @@ use crate::platform::macos_pty::{
     PtyError, PtyTerminator, ShellExit, ShutdownDisposition, SpawnedPty, spawn_user_shell,
     user_shell,
 };
+use crate::platform::shell_integration::resource_root;
+use crate::terminal::attention::AttentionEvent;
 #[cfg(test)]
 use crate::terminal::emulator::MAX_SYNCHRONIZED_OUTPUT_DURATION;
 use crate::terminal::emulator::{
     EmulatorAction, PresentationGeneration, ScreenSnapshot, TerminalEmulator,
 };
 use crate::terminal::geometry::TerminalGeometry;
+use crate::terminal::identity;
 #[cfg(test)]
 use crate::terminal::key::OptionAsAltPolicy;
 use crate::terminal::key::{InputModifiers, KeyInput};
@@ -43,6 +46,7 @@ use crate::terminal::selection::{SelectionCopy, SelectionCopyOptions};
 const FINAL_CHILD_WAIT_TIMEOUT: Duration = Duration::from_secs(2);
 const PTY_READ_BUFFER_SIZE: usize = 16 * 1024;
 const PTY_OUTPUT_QUEUE_CAPACITY: usize = 8;
+const TERMIOS_POLL_INTERVAL: Duration = Duration::from_millis(200);
 const PASTE_CONFIRMATION_TIMEOUT: Duration = Duration::from_secs(30);
 const OSC52_AUTHORIZATION_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -101,10 +105,25 @@ pub(crate) struct PointerInput {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct WheelInput {
     pub(crate) generation: PresentationGeneration,
-    pub(crate) steps: i32,
+    pub(crate) horizontal_steps: i32,
+    pub(crate) vertical_steps: i32,
+    pub(crate) phase: WheelPhase,
     pub(crate) position: SurfacePosition,
     pub(crate) modifiers: InputModifiers,
     pub(crate) shift_selection: ShiftSelectionPolicy,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) enum WheelPhase {
+    GestureStarted,
+    #[default]
+    GestureChanged,
+    GestureEnded,
+    GestureCancelled,
+    MomentumStarted,
+    MomentumChanged,
+    MomentumEnded,
+    MomentumCancelled,
 }
 
 fn pty_size(geometry: TerminalGeometry) -> PtySize {
@@ -123,6 +142,8 @@ fn pty_size(geometry: TerminalGeometry) -> PtySize {
 #[derive(Clone, Debug)]
 pub(crate) enum SessionEvent {
     Screen(Arc<ScreenSnapshot>),
+    Attention(AttentionEvent),
+    HiddenInputChanged(bool),
     Osc52Authorization(Osc52AuthorizationRequest),
     Osc52AuthorizationExpired(Osc52AuthorizationId),
     Exited(SessionExit),
@@ -344,6 +365,9 @@ trait SessionPty: Write + Send {
     fn take_reader(&mut self) -> std::io::Result<Box<dyn Read + Send>>;
     fn resize(&self, size: PtySize) -> Result<(), AnyError>;
     fn wait_for_child(&mut self, timeout: Duration) -> std::io::Result<ShellExit>;
+    fn hidden_input(&self) -> std::io::Result<bool> {
+        Ok(false)
+    }
 }
 
 trait SessionPtyTerminator: Send + Sync {
@@ -448,6 +472,10 @@ impl SessionPty for SpawnedPty {
     fn wait_for_child(&mut self, timeout: Duration) -> std::io::Result<ShellExit> {
         SpawnedPty::wait_for_child(self, timeout)
     }
+
+    fn hidden_input(&self) -> std::io::Result<bool> {
+        SpawnedPty::hidden_input(self)
+    }
 }
 
 impl SessionPtyTerminator for PtyTerminator {
@@ -481,6 +509,8 @@ impl TerminalSession {
         spawn_pty: impl FnOnce(PtySize, &Path) -> Result<StartedSessionPty, PtyError> + Send + 'static,
     ) -> Result<(Self, async_channel::Receiver<SessionEvent>), SessionError> {
         let working_directory = PathBuf::from(working_directory);
+        let fallback_title = shell_fallback_title();
+        let terminal_name = identity::launch_identity(&resource_root()).term;
         let (command_tx, command_rx) = mpsc::channel();
         let reader_transport = ReaderTransport::new(command_tx.clone());
         let resizes = ResizeMailbox::default();
@@ -512,7 +542,12 @@ impl TerminalSession {
                 }
                 TerminalWorker::run(
                     pty,
-                    geometry,
+                    TerminalWorkerContext {
+                        initial_geometry: geometry,
+                        initial_directory: working_directory,
+                        fallback_title,
+                        terminal_name,
+                    },
                     command_rx,
                     reader_transport,
                     worker_resizes,
@@ -539,6 +574,8 @@ impl TerminalSession {
         working_directory: &Path,
         spawn_pty: impl FnOnce(PtySize, &Path) -> Result<StartedSessionPty, PtyError>,
     ) -> Result<(Self, async_channel::Receiver<SessionEvent>), SessionError> {
+        let worker_directory = working_directory.to_owned();
+        let terminal_name = identity::launch_identity(&resource_root()).term;
         let StartedSessionPty { pty, terminator } =
             spawn_pty(pty_size(geometry), working_directory)?;
         let (command_tx, command_rx) = mpsc::channel();
@@ -555,7 +592,12 @@ impl TerminalSession {
             .spawn(move || {
                 TerminalWorker::run(
                     pty,
-                    geometry,
+                    TerminalWorkerContext {
+                        initial_geometry: geometry,
+                        initial_directory: worker_directory,
+                        fallback_title: "Terminal".to_owned(),
+                        terminal_name,
+                    },
                     command_rx,
                     reader_transport,
                     worker_resizes,
@@ -835,6 +877,7 @@ enum Command {
     SelectionAutoscrollTick(PresentationGeneration),
     ReaderReady,
     Shutdown,
+    PollHiddenInput,
 }
 
 struct TerminalWorker {
@@ -858,6 +901,47 @@ struct TerminalWorker {
     deferred_osc52_effects: VecDeque<Osc52Effect>,
     deferred_output_chunks: VecDeque<Vec<u8>>,
     deferred_reader_ready: bool,
+    hidden_input: HiddenInputSchedule,
+}
+
+struct TerminalWorkerContext {
+    initial_geometry: TerminalGeometry,
+    initial_directory: PathBuf,
+    fallback_title: String,
+    terminal_name: &'static str,
+}
+
+struct HiddenInputSchedule {
+    active: bool,
+    deadline: Instant,
+}
+
+impl HiddenInputSchedule {
+    fn new(now: Instant) -> Self {
+        Self {
+            active: false,
+            deadline: now,
+        }
+    }
+
+    fn update(&mut self, now: Instant, result: std::io::Result<bool>) -> Option<bool> {
+        self.deadline = now + TERMIOS_POLL_INTERVAL;
+        let active = match result {
+            Ok(active) => active,
+            Err(error) => {
+                eprintln!(
+                    "failed to inspect PTY hidden-input state; releasing secure input: {error}"
+                );
+                false
+            }
+        };
+        if self.active == active {
+            None
+        } else {
+            self.active = active;
+            Some(active)
+        }
+    }
 }
 
 struct PendingOsc52Authorization {
@@ -1087,13 +1171,19 @@ impl StartupReporter {
 impl TerminalWorker {
     fn run(
         mut pty: Box<dyn SessionPty>,
-        initial_geometry: TerminalGeometry,
+        context: TerminalWorkerContext,
         commands: CommandReceiver<Command>,
         reader_transport: ReaderTransport,
         resizes: ResizeMailbox,
         events: async_channel::Sender<SessionEvent>,
         startup: StartupReporter,
     ) {
+        let TerminalWorkerContext {
+            initial_geometry,
+            initial_directory,
+            fallback_title,
+            terminal_name,
+        } = context;
         let ReaderTransport {
             commands: reader_commands,
             events: reader_events,
@@ -1118,7 +1208,15 @@ impl TerminalWorker {
             }
         };
 
-        let emulator = match TerminalEmulator::new(initial_geometry) {
+        let local_hostname = crate::terminal::metadata::local_hostname();
+        let emulator = match TerminalEmulator::new_with_metadata(
+            initial_geometry,
+            &initial_directory.to_string_lossy(),
+            &fallback_title,
+            local_hostname.as_deref(),
+            terminal_name,
+            Instant::now(),
+        ) {
             Ok(emulator) => emulator,
             Err(error) => {
                 startup.failed(SessionStartupStage::Emulator, error.to_string());
@@ -1150,6 +1248,7 @@ impl TerminalWorker {
             deferred_osc52_effects: VecDeque::new(),
             deferred_output_chunks: VecDeque::new(),
             deferred_reader_ready: false,
+            hidden_input: HiddenInputSchedule::new(Instant::now()),
         };
 
         if !startup.succeeded() {
@@ -1199,6 +1298,7 @@ impl TerminalWorker {
                 autoscroll_deadline,
                 self.paste_confirmations.deadline(),
                 self.osc52_authorization.deadline(),
+                Some(self.hidden_input.deadline),
             ]
             .into_iter()
             .flatten()
@@ -1219,6 +1319,9 @@ impl TerminalWorker {
                     }
                     if let Some(id) = self.osc52_authorization.expire(now) {
                         return Some(Command::Osc52AuthorizationExpired(id));
+                    }
+                    if now >= self.hidden_input.deadline {
+                        return Some(Command::PollHiddenInput);
                     }
                     if synchronized_output_deadline.is_some()
                         && !self.release_synchronized_output_if_due(now)
@@ -1319,6 +1422,16 @@ impl TerminalWorker {
                 }
             }
             Command::Shutdown => false,
+            Command::PollHiddenInput => {
+                if let Some(active) = self
+                    .hidden_input
+                    .update(Instant::now(), self.pty.hidden_input())
+                {
+                    send_session_event(&self.events, SessionEvent::HiddenInputChanged(active))
+                } else {
+                    true
+                }
+            }
         }
     }
 
@@ -1449,6 +1562,10 @@ impl TerminalWorker {
                 read_error,
                 self.pty.wait_for_child(FINAL_CHILD_WAIT_TIMEOUT),
             );
+            self.emulator.mark_metadata_stale();
+            if !self.publish_screen() {
+                return false;
+            }
             self.send_terminal_event(event);
             false
         } else {
@@ -1563,6 +1680,11 @@ impl TerminalWorker {
 
     fn feed_terminal_output(&mut self, bytes: &[u8], focus_reports: &mut Vec<u8>) -> bool {
         self.emulator.feed(bytes);
+        for event in self.emulator.take_attention_events() {
+            if !self.send_terminal_event(SessionEvent::Attention(event)) {
+                return false;
+            }
+        }
         let focus_reporting_enabled = match self.emulator.focus_reporting_enabled() {
             Ok(enabled) => enabled,
             Err(message) => {
@@ -1765,6 +1887,16 @@ impl TerminalWorker {
     }
 }
 
+fn shell_fallback_title() -> String {
+    let shell = user_shell();
+    Path::new(&shell)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .unwrap_or(&shell)
+        .to_owned()
+}
+
 fn spawn_reader(
     mut reader: Box<dyn Read + Send>,
     events: mpsc::SyncSender<ReaderEvent>,
@@ -1871,6 +2003,21 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::*;
+
+    #[test]
+    fn hidden_input_polling_emits_only_transitions_and_fails_closed() {
+        let start = Instant::now();
+        let mut schedule = HiddenInputSchedule::new(start);
+
+        assert_eq!(schedule.update(start, Ok(false)), None);
+        assert_eq!(schedule.update(start, Ok(true)), Some(true));
+        assert_eq!(schedule.update(start, Ok(true)), None);
+        assert_eq!(
+            schedule.update(start, Err(io::Error::other("descriptor closed"))),
+            Some(false)
+        );
+        assert_eq!(schedule.deadline, start + TERMIOS_POLL_INTERVAL);
+    }
     use crate::terminal::geometry::{BackingScale, CellGridSize, LogicalCellSize};
     use crate::terminal::key::{KeyAction, PhysicalKey};
 
@@ -2211,6 +2358,7 @@ mod tests {
             deferred_osc52_effects: VecDeque::new(),
             deferred_output_chunks: VecDeque::new(),
             deferred_reader_ready: false,
+            hidden_input: HiddenInputSchedule::new(Instant::now()),
         };
         (worker, receiver, records)
     }
@@ -2985,6 +3133,7 @@ mod tests {
             deferred_osc52_effects: VecDeque::new(),
             deferred_output_chunks: VecDeque::new(),
             deferred_reader_ready: false,
+            hidden_input: HiddenInputSchedule::new(Instant::now()),
         };
 
         assert!(worker.process_reader_events());
@@ -3038,6 +3187,7 @@ mod tests {
             deferred_osc52_effects: VecDeque::new(),
             deferred_output_chunks: VecDeque::new(),
             deferred_reader_ready: false,
+            hidden_input: HiddenInputSchedule::new(Instant::now()),
         };
         assert!(worker.publish_screen());
         let _ = receiver.try_recv().unwrap();
@@ -3697,6 +3847,7 @@ mod tests {
                     SessionEvent::Osc52Authorization(_)
                     | SessionEvent::Osc52AuthorizationExpired(_),
                 ) => {}
+                Ok(SessionEvent::HiddenInputChanged(_) | SessionEvent::Attention(_)) => {}
                 Err(async_channel::TryRecvError::Empty) => {
                     thread::sleep(Duration::from_millis(10));
                 }
@@ -3744,6 +3895,7 @@ mod tests {
                     SessionEvent::Osc52Authorization(_)
                     | SessionEvent::Osc52AuthorizationExpired(_),
                 ) => {}
+                Ok(SessionEvent::HiddenInputChanged(_) | SessionEvent::Attention(_)) => {}
                 Err(async_channel::TryRecvError::Empty) => {
                     thread::sleep(Duration::from_millis(10));
                 }

@@ -70,6 +70,9 @@ verify_app_bundle() {
     local bundle_name display_name marketing_version build_number minimum_macos_version
     local extracted_iconset="$TEMP_ROOT/$label.iconset"
     local executable_description signature_details
+    local shell_integration="$app/Contents/Resources/shell-integration"
+    local terminfo="$app/Contents/Resources/terminfo"
+    local terminfo_description
 
     [[ -d "$app" ]] || die "$label app bundle is missing: $app"
     [[ -f "$plist" ]] || die "$label Info.plist is missing: $plist"
@@ -133,6 +136,31 @@ verify_app_bundle() {
     [[ -f "$extracted_iconset/icon_512x512@2x.png" ]] \
         || die "$label app icon does not contain a 1024x1024 representation"
 
+    [[ "$(tr -d '[:space:]' < "$shell_integration/VERSION")" == "1" ]] \
+        || die "$label shell integration version is missing or unsupported"
+    for resource in \
+        bash/spaceterm.bash \
+        elvish/lib/spaceterm-integration.elv \
+        fish/vendor_conf.d/spaceterm-shell-integration.fish \
+        nushell/vendor/autoload/spaceterm.nu \
+        zsh/.zshenv \
+        zsh/spaceterm-integration; do
+        [[ -f "$shell_integration/$resource" ]] \
+            || die "$label shell integration resource is missing: $resource"
+    done
+
+    terminfo_description="$(TERMINFO="$terminfo" infocmp -x -1 xterm-spaceterm)" \
+        || die "$label xterm-spaceterm entry is not discoverable"
+    grep -Fq "xterm-spaceterm|SpaceTerm truthful xterm-compatible terminal" \
+        <<<"$terminfo_description" \
+        || die "$label terminfo entry has the wrong identity"
+    for capability in "colors#256" "RGB#8" "Tc" "Ms=" "Ss=" "Se="; do
+        grep -Fq "$capability" <<<"$terminfo_description" \
+            || die "$label terminfo entry is missing verified capability: $capability"
+    done
+    ! grep -Fiq "ghostty" <<<"$terminfo_description" \
+        || die "$label terminfo must not identify as Ghostty"
+
     codesign --verify --strict --verbose=2 "$app" >/dev/null 2>&1 \
         || die "$label app signature verification failed: $app"
     signature_details="$(codesign --display --verbose=4 "$app" 2>&1)" \
@@ -173,6 +201,7 @@ require_command codesign
 require_command file
 require_command hdiutil
 require_command iconutil
+require_command infocmp
 require_command lipo
 require_command plutil
 [[ -x /usr/libexec/PlistBuddy ]] || die "required command not found: /usr/libexec/PlistBuddy"
