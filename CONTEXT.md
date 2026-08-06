@@ -154,6 +154,13 @@ damage only the previously and currently occupied viewport rows. Terminal Presen
 filled block above backgrounds and selections and recolors its covered glyph, while bar and
 underline cursors add thin geometry without replacing text.
 
+A focused visible cursor whose negotiated state requests blinking participates in the Pane's
+single 600-millisecond presentation clock. Accepted terminal key input and Terminal Input Focus
+gain reveal the cursor immediately and restart the clock from a new scheduling generation. Focus
+loss removes cursor demand and presents the steady hollow cursor; steady or hidden cursors never
+schedule frames. Blink phase changes only cursor submission during prepaint, so immutable snapshots
+and prepared row identities remain unchanged, and Pane close cancels its owned task.
+
 ### Terminal Text Attributes
 
 Terminal Presentation snapshots preserve bold, faint, italic, blink, inverse, and invisible cell
@@ -163,11 +170,12 @@ and splits prepared shaping fragments at every presentation-state boundary. Invi
 their graphemes in the immutable snapshot but prepare no foreground content; their background and
 Selection presentation remain intact.
 
-Visible blinking text is explicit snapshot demand. A Pane owns at most one 600-millisecond GPUI
-clock task while its product surface is active and visible blinking content exists. Losing that
-demand cancels the task and restores the visible phase, so static, invisible, and inactive content
-does not schedule frames. Blink phase filters already prepared cell-aligned fragments and never
-mutates Terminal Emulator state.
+Visible blinking text is explicit snapshot demand and shares the Pane's presentation clock with
+cursor blink. A Pane owns at most one 600-millisecond GPUI task while its product surface is active
+and visible text or a focused cursor demands animation. Losing every demand cancels the task and
+restores the visible phase, so static, invisible, and inactive content does not schedule frames.
+Blink phase filters already prepared cell-aligned fragments and never mutates Terminal Emulator
+state.
 
 ### Terminal Text Decorations
 
