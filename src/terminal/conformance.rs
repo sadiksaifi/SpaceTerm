@@ -1,5 +1,9 @@
 use std::collections::BTreeSet;
 
+use super::emulator::TerminalEmulator;
+use super::geometry::{BackingScale, CellGridSize, LogicalCellSize, TerminalGeometry};
+use super::key::{InputModifiers, KeyAction, KeyInput, OptionAsAltPolicy, PhysicalKey};
+
 const MAX_FIXTURE_STEPS: usize = 1_024;
 const MAX_FIXTURE_INPUT_BYTES: usize = 64 * 1024;
 const MAX_FIXTURE_OUTPUT_BYTES: usize = 64 * 1024;
@@ -77,6 +81,19 @@ const FIXTURES: &[FixtureSpec] = &[
     fixture!("accessibility.editable-text", 39, [42], "apple-nsaccessibility", Native),
     fixture!("render.visibility-lifecycle", 40, [12, 13, 44, 45], "apple-window-visibility", Lifecycle),
     fixture!("failure.typed-local-diagnostics", 41, [40], "spaceterm-failure-contract", Security),
+];
+
+const KEYBOARD_PROTOCOL_EXPECTED: &[ExpectedObservation] = &[
+    ExpectedObservation {
+        step: 1,
+        field: "legacy-printable-bytes",
+        value: "61",
+    },
+    ExpectedObservation {
+        step: 2,
+        field: "application-cursor-up-bytes",
+        value: "1b 4f 41",
+    },
 ];
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -170,6 +187,71 @@ fn run_fixture(fixture: &ExecutableFixture) -> Result<(), String> {
     Ok(())
 }
 
+fn observe_keyboard_protocols(
+    budget: &mut FixtureBudget,
+) -> Result<Vec<Observation>, String> {
+    let geometry = TerminalGeometry::from_grid(
+        CellGridSize::new(80, 24),
+        LogicalCellSize::new(8.0, 16.0),
+        BackingScale::ONE,
+    );
+    let mut emulator = TerminalEmulator::new(geometry).map_err(|error| error.to_string())?;
+    let printable = emulator.key(KeyInput {
+        action: KeyAction::Press,
+        physical_key: PhysicalKey::A,
+        native_key_code: Some(0),
+        logical_key: "a".to_owned(),
+        text: Some("a".to_owned()),
+        unshifted_codepoint: Some('a'),
+        modifiers: InputModifiers::default(),
+        consumed_modifiers: InputModifiers::default(),
+        option_as_alt: OptionAsAltPolicy::None,
+    })?;
+    budget.record(1, printable.bytes.len());
+
+    const APPLICATION_CURSOR_MODE: &[u8] = b"\x1b[?1h";
+    emulator.feed(APPLICATION_CURSOR_MODE);
+    let cursor_up = emulator.key(KeyInput {
+        action: KeyAction::Press,
+        physical_key: PhysicalKey::ArrowUp,
+        native_key_code: Some(126),
+        logical_key: "ArrowUp".to_owned(),
+        text: None,
+        unshifted_codepoint: None,
+        modifiers: InputModifiers::default(),
+        consumed_modifiers: InputModifiers::default(),
+        option_as_alt: OptionAsAltPolicy::None,
+    })?;
+    budget.record(APPLICATION_CURSOR_MODE.len(), cursor_up.bytes.len());
+
+    Ok(vec![
+        Observation {
+            step: 1,
+            field: "legacy-printable-bytes",
+            value: hex_bytes(&printable.bytes),
+        },
+        Observation {
+            step: 2,
+            field: "application-cursor-up-bytes",
+            value: hex_bytes(&cursor_up.bytes),
+        },
+    ])
+}
+
+fn hex_bytes(bytes: &[u8]) -> String {
+    bytes
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+const EXECUTABLE_FIXTURES: &[ExecutableFixture] = &[ExecutableFixture {
+    spec: &FIXTURES[12],
+    expected: KEYBOARD_PROTOCOL_EXPECTED,
+    observe: observe_keyboard_protocols,
+}];
+
 #[test]
 fn registry_covers_every_advertised_capability_without_image_protocols() {
     let stories = FIXTURES
@@ -260,4 +342,15 @@ fn runner_rejects_a_fixture_that_exceeds_its_deterministic_budget() {
                 .to_owned()
         )
     );
+}
+
+#[test]
+fn golden_byte_fixtures_match_protocol_authorities() {
+    for fixture in EXECUTABLE_FIXTURES {
+        if fixture.spec.oracle == OracleKind::Bytes
+            && let Err(error) = run_fixture(fixture)
+        {
+            panic!("{error}");
+        }
+    }
 }
