@@ -217,6 +217,7 @@ impl MacosKeyboardBridge {
             .to_owned();
         let modifiers = input_modifiers(event.modifiers);
         let option_is_alt = option_is_alt(self.option_as_alt, modifiers);
+        let allows_text_input = !modifiers.control && !modifiers.platform && !option_is_alt;
         let input = KeyInput {
             action: event.action,
             physical_key,
@@ -245,7 +246,9 @@ impl MacosKeyboardBridge {
         match input.validate() {
             Ok(()) => KeyTranslation::Encoded(input),
             Err(KeyInputError::UnsupportedKey { .. }) => match input.text {
-                Some(text) if input.action != KeyAction::Release => KeyTranslation::TextInput(text),
+                Some(text) if input.action != KeyAction::Release && allows_text_input => {
+                    KeyTranslation::TextInput(text)
+                }
                 _ => KeyTranslation::Unhandled(unhandled),
             },
         }
@@ -514,6 +517,26 @@ mod tests {
         assert_eq!(
             bridge.translate(native(u16::MAX, "界")),
             KeyTranslation::TextInput("界".to_owned())
+        );
+    }
+
+    #[test]
+    fn unknown_native_command_key_with_text_remains_unhandled() {
+        let bridge = MacosKeyboardBridge::new(OptionAsAltPolicy::None);
+        let mut event = native(u16::MAX, "x");
+        event.modifiers = NativeModifiers {
+            platform: true,
+            platform_left: true,
+            ..NativeModifiers::default()
+        };
+
+        assert_eq!(
+            bridge.translate(event),
+            KeyTranslation::Unhandled(UnhandledKeyEvent {
+                kind: NativeKeyEventKind::KeyDown,
+                action: KeyAction::Press,
+                native_key_code: Some(u16::MAX),
+            })
         );
     }
 
