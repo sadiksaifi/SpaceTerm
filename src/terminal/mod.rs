@@ -7,6 +7,7 @@ pub(crate) mod identity;
 mod key;
 mod keyboard_protocol;
 pub(crate) mod metadata;
+mod native_services;
 pub(crate) mod osc52;
 mod paste;
 mod selection;
@@ -23,11 +24,11 @@ pub(crate) use emulator::{
     PresentationGeneration, RowSnapshot, ScreenSnapshot, TerminalColor, TerminalColorsSnapshot,
     TerminalUnderlineSnapshot,
 };
-pub(crate) use file_insertion::prepare_file_insertion;
 pub(crate) use hyperlink::HyperlinkTarget;
 pub(crate) use key::{
     InputModifiers, KeyAction, KeyInput, KeyInputError, OptionAsAltPolicy, PhysicalKey,
 };
+pub(crate) use native_services::{NativeContextActions, NativeInsertion};
 #[cfg(test)]
 pub(crate) use osc52::Osc52AuthorizationId;
 pub(crate) use osc52::{

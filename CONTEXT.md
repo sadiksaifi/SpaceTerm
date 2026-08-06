@@ -336,6 +336,18 @@ non-file URLs, relative paths, excessive items, and oversized output are rejecte
 always enters the existing worker-owned Paste Payload sanitizer and confirmation lifecycle and
 never writes directly to the PTY.
 
+### Native Terminal Services
+
+macOS Services, contextual actions, Quick Look eligibility, pasteboard file insertion, and
+drag/drop are adapters over existing terminal policies rather than independent mutation paths.
+Context actions are derived from the current immutable Selection and Terminal Hyperlink state.
+Service text and converted file paths become Paste Payload candidates only while the Pane owns
+Terminal Input Focus, so normalization, size limits, unsafe-paste confirmation, cancellation, and
+PTY writes remain worker-owned. Quick Look accepts only a validated Terminal Hyperlink whose
+canonical target is an existing local regular file; a web URL or stale path is never previewable.
+Native interactions may request selection formatting or paste processing, but never mutate the
+Terminal Emulator directly.
+
 ### Terminal Selection
 
 The Terminal Emulator owns Selection gestures and delegates cell, word, line, repeat-click, drag,

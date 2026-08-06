@@ -40,12 +40,12 @@ use crate::terminal::geometry::{
     BackingScale, CellGridSize, LogicalCellSize, LogicalPosition, LogicalSize, TerminalGeometry,
 };
 use crate::terminal::{
-    AttentionFacts, InputModifiers, KeyAction, KeyInput, OptionAsAltPolicy, Osc52Access,
-    Osc52AuthorizationDecision, Osc52AuthorizationRequest, Osc52Target, PasteConfirmation,
-    PasteDecision, PasteRequestOutcome, PasteResolution, PhysicalKey, PointerButton, PointerInput,
-    PointerPhase, ScreenSnapshot, SelectionCopy, SessionEvent, ShiftSelectionPolicy,
-    SurfacePosition, TerminalSessionHandle, WheelInput, WheelPhase,
-    WorkspaceTerminalSessionFactory, prepare_file_insertion,
+    AttentionFacts, InputModifiers, KeyAction, KeyInput, NativeContextActions, NativeInsertion,
+    OptionAsAltPolicy, Osc52Access, Osc52AuthorizationDecision, Osc52AuthorizationRequest,
+    Osc52Target, PasteConfirmation, PasteDecision, PasteRequestOutcome, PasteResolution,
+    PhysicalKey, PointerButton, PointerInput, PointerPhase, ScreenSnapshot, SelectionCopy,
+    SessionEvent, ShiftSelectionPolicy, SurfacePosition, TerminalSessionHandle, WheelInput,
+    WheelPhase, WorkspaceTerminalSessionFactory,
 };
 use crate::theme::{ACTIVE_THEME, Color};
 
@@ -912,21 +912,21 @@ impl TerminalPane {
         cx: &mut Context<Self>,
     ) {
         let paths = read_file_urls().unwrap_or_default();
-        let text = if paths.is_empty() {
+        let terminal_input_focused = self.terminal_input_focus;
+        let insertion = if paths.is_empty() {
             let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) else {
                 return;
             };
-            text
+            NativeInsertion::service_text(text, terminal_input_focused)
         } else {
-            let Ok(insertion) = prepare_file_insertion(&paths) else {
-                return;
-            };
-            insertion.text
+            NativeInsertion::dropped_files(&paths, terminal_input_focused)
         };
-        if text.is_empty() {
+        let Ok(insertion) = insertion else {
             return;
+        };
+        if !insertion.text().is_empty() {
+            self.request_paste_text(insertion.into_text(), cx);
         }
-        self.request_paste_text(text, cx);
     }
 
     fn insert_dropped_files(
@@ -935,10 +935,23 @@ impl TerminalPane {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Ok(insertion) = prepare_file_insertion(paths.paths()) else {
+        let Ok(insertion) =
+            NativeInsertion::dropped_files(paths.paths(), self.terminal_input_focus)
+        else {
             return;
         };
-        self.request_paste_text(insertion.text, cx);
+        self.request_paste_text(insertion.into_text(), cx);
+    }
+
+    fn native_context_actions(&self) -> NativeContextActions {
+        NativeContextActions::from_presence(
+            self.screen
+                .rows
+                .iter()
+                .flat_map(|row| row.iter())
+                .any(|cell| cell.selected),
+            self.hovered_link.as_ref(),
+        )
     }
 
     fn request_paste_text(&mut self, text: String, cx: &mut Context<Self>) {
@@ -1227,6 +1240,13 @@ impl Render for TerminalPane {
         let background = gpui_color(self.screen.background);
         let status = self.status.clone();
         let hovered_link = self.hovered_link.clone();
+        let native_context_actions = self.native_context_actions();
+        let native_context_selector = format!(
+            "terminal-native-context-copy-{}-open-{}-quick-look-{}",
+            native_context_actions.copy,
+            native_context_actions.open_link,
+            native_context_actions.quick_look,
+        );
         let link_cell_width = self.cell_width;
         let link_line_height = self.line_height;
         let link_rows = self.screen.rows.clone();
@@ -1287,6 +1307,7 @@ impl Render for TerminalPane {
         );
 
         div()
+            .debug_selector(move || native_context_selector.clone())
             .on_children_prepainted(move |children, _window, cx| {
                 let Some(bounds) = children.first().copied() else {
                     return;
