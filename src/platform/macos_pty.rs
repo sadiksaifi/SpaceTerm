@@ -213,6 +213,14 @@ impl SpawnedPty {
         self.master.resize(size)
     }
 
+    pub(crate) fn hidden_input(&self) -> io::Result<bool> {
+        let descriptor = self
+            .master
+            .as_raw_fd()
+            .ok_or_else(|| io::Error::other("PTY master descriptor is unavailable"))?;
+        read_termios(descriptor).map(|termios| termios_hidden_input(&termios))
+    }
+
     pub(crate) fn wait_for_child(&mut self, timeout: Duration) -> io::Result<ShellExit> {
         let deadline = Instant::now() + timeout;
         loop {
@@ -460,19 +468,27 @@ fn spawn_command_in_pty(
 
 fn initialize_pty(master: &dyn MasterPty, size: PtySize) -> Result<(), PtyError> {
     let descriptor = master.as_raw_fd().ok_or(PtyError::MissingDescriptor)?;
-    let mut termios = std::mem::MaybeUninit::<libc::termios>::uninit();
-    // SAFETY: descriptor is the live PTY master and termios points to writable storage.
-    if unsafe { libc::tcgetattr(descriptor, termios.as_mut_ptr()) } == -1 {
-        return Err(PtyError::ReadTermios(io::Error::last_os_error()));
-    }
-    // SAFETY: tcgetattr initialized termios after succeeding above.
-    let mut termios = unsafe { termios.assume_init() };
+    let mut termios = read_termios(descriptor).map_err(PtyError::ReadTermios)?;
     termios.c_iflag |= libc::IUTF8;
     // SAFETY: descriptor remains live and termios contains attributes read from this PTY.
     if unsafe { libc::tcsetattr(descriptor, libc::TCSANOW, &termios) } == -1 {
         return Err(PtyError::ConfigureTermios(io::Error::last_os_error()));
     }
     master.resize(size).map_err(PtyError::InitialResize)
+}
+
+fn read_termios(descriptor: std::os::fd::RawFd) -> io::Result<libc::termios> {
+    let mut termios = std::mem::MaybeUninit::<libc::termios>::uninit();
+    // SAFETY: descriptor is a live PTY master and termios points to writable storage.
+    if unsafe { libc::tcgetattr(descriptor, termios.as_mut_ptr()) } == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: tcgetattr initialized termios after succeeding above.
+    Ok(unsafe { termios.assume_init() })
+}
+
+const fn termios_hidden_input(termios: &libc::termios) -> bool {
+    termios.c_lflag & libc::ICANON != 0 && termios.c_lflag & libc::ECHO == 0
 }
 
 fn validate_working_directory(working_directory: &Path) -> Result<(), PtyError> {
@@ -532,6 +548,20 @@ mod tests {
     use portable_pty::{ChildKiller, ExitStatus};
 
     use super::*;
+
+    #[test]
+    fn hidden_input_requires_canonical_mode_without_echo() {
+        // SAFETY: termios is a plain C data structure whose zero value is valid for flag tests.
+        let mut termios = unsafe { std::mem::zeroed::<libc::termios>() };
+        termios.c_lflag = libc::ICANON | libc::ECHO;
+        assert!(!termios_hidden_input(&termios));
+
+        termios.c_lflag = libc::ICANON;
+        assert!(termios_hidden_input(&termios));
+
+        termios.c_lflag = 0;
+        assert!(!termios_hidden_input(&termios));
+    }
 
     const CONTROLLED_CHILD_ENV: &str = "SPACETERM_CONTROLLED_PTY_CHILD";
 

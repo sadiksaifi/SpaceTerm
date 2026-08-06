@@ -26,6 +26,11 @@ use super::{
 use crate::platform::macos_keyboard::{
     KeyTranslation, MacosKeyboardBridge, NativeKeyEvent, NativeKeyEventKind, UnhandledKeyEvent,
 };
+use crate::platform::macos_secure_input::{
+    SecureInputPaneId, register_pane as register_secure_input_pane,
+    remove_pane as remove_secure_input_pane, update_application_activation,
+    update_pane as update_secure_input_pane,
+};
 use crate::terminal::geometry::{
     BackingScale, CellGridSize, LogicalCellSize, LogicalPosition, LogicalSize, TerminalGeometry,
 };
@@ -68,6 +73,8 @@ pub(crate) struct TerminalPane {
     focus_handle: FocusHandle,
     product_focus: TerminalProductFocus,
     terminal_input_focus: bool,
+    hidden_input: bool,
+    secure_input_pane: Option<SecureInputPaneId>,
     font_family: SharedString,
     font_size: f32,
     line_height: f32,
@@ -139,6 +146,8 @@ impl TerminalPane {
             focus_handle,
             product_focus: TerminalProductFocus::default(),
             terminal_input_focus: false,
+            hidden_input: false,
+            secure_input_pane: Some(register_secure_input_pane()),
             font_family,
             font_size: DEFAULT_FONT_SIZE,
             line_height: DEFAULT_LINE_HEIGHT,
@@ -226,8 +235,15 @@ impl TerminalPane {
             if let Some(session) = &self.session {
                 session.focus(focused);
             }
+            self.sync_secure_input();
         }
         focused
+    }
+
+    fn sync_secure_input(&self) {
+        if let Some(id) = self.secure_input_pane {
+            update_secure_input_pane(id, self.hidden_input, self.terminal_input_focus);
+        }
     }
 
     fn preedit_layout(&self) -> Option<PreeditLayout> {
@@ -272,6 +288,9 @@ impl TerminalPane {
         self._blink_task.take();
         self._event_task.take();
         self.session.take();
+        if let Some(id) = self.secure_input_pane.take() {
+            remove_secure_input_pane(id);
+        }
     }
 
     fn reset_blink_phase(&mut self) {
@@ -419,6 +438,10 @@ impl TerminalPane {
                 self.screen = screen;
                 self.sync_scrollbar(cx);
             }
+            SessionEvent::HiddenInputChanged(hidden_input) => {
+                self.hidden_input = hidden_input;
+                self.sync_secure_input();
+            }
             SessionEvent::Osc52Authorization(request) => {
                 if let Some(previous) = self.pending_osc52.replace(request)
                     && let Some(session) = &self.session
@@ -433,11 +456,15 @@ impl TerminalPane {
                 }
             }
             SessionEvent::Exited(status) => {
+                self.hidden_input = false;
+                self.sync_secure_input();
                 eprintln!("{status}");
                 self.status = Some(status.to_string());
                 cx.emit(TerminalPaneEvent::Exited);
             }
             SessionEvent::Failed(failure) => {
+                self.hidden_input = false;
+                self.sync_secure_input();
                 let status = failure.to_string();
                 eprintln!("{status}");
                 self.status = Some(status);
@@ -1023,6 +1050,7 @@ impl Drop for TerminalPane {
 
 impl Render for TerminalPane {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        update_application_activation();
         let pane = cx.entity().downgrade();
         let terminal_input_focused = self.sync_terminal_input_focus(window);
         let surface_active = self.product_focus.active_workspace

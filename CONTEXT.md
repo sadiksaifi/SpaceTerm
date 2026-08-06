@@ -236,6 +236,16 @@ terminal-routed held keys. Enabling DEC 1004 emits the current state immediately
 transitions emit nothing. On focus loss, the worker synthesizes releases for its held keys before
 emitting focus-out, while application Actions remain outside that held-key set.
 
+### Balanced Secure Event Input
+
+The terminal worker polls the worker-owned PTY master at a bounded 200-millisecond interval and
+classifies hidden input only when canonical mode is enabled and echo is disabled. An AppKit-thread,
+application-scoped coordinator enables Carbon Secure Event Input only when exactly one live Pane
+both reports hidden input and owns Terminal Input Focus. It performs only physical state
+transitions, treats API and termios failures as non-ownership, and releases on focus loss,
+application deactivation, Session completion, or Pane removal. Diagnostics contain state,
+identity counts, reasons, and OSStatus values but never terminal input.
+
 ### Unified Terminal Geometry
 
 `TerminalGeometry` is the sole conversion contract between GPUI logical viewport and cell metrics,

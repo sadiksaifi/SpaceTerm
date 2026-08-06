@@ -43,6 +43,7 @@ use crate::terminal::selection::{SelectionCopy, SelectionCopyOptions};
 const FINAL_CHILD_WAIT_TIMEOUT: Duration = Duration::from_secs(2);
 const PTY_READ_BUFFER_SIZE: usize = 16 * 1024;
 const PTY_OUTPUT_QUEUE_CAPACITY: usize = 8;
+const TERMIOS_POLL_INTERVAL: Duration = Duration::from_millis(200);
 const PASTE_CONFIRMATION_TIMEOUT: Duration = Duration::from_secs(30);
 const OSC52_AUTHORIZATION_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -123,6 +124,7 @@ fn pty_size(geometry: TerminalGeometry) -> PtySize {
 #[derive(Clone, Debug)]
 pub(crate) enum SessionEvent {
     Screen(Arc<ScreenSnapshot>),
+    HiddenInputChanged(bool),
     Osc52Authorization(Osc52AuthorizationRequest),
     Osc52AuthorizationExpired(Osc52AuthorizationId),
     Exited(SessionExit),
@@ -344,6 +346,9 @@ trait SessionPty: Write + Send {
     fn take_reader(&mut self) -> std::io::Result<Box<dyn Read + Send>>;
     fn resize(&self, size: PtySize) -> Result<(), AnyError>;
     fn wait_for_child(&mut self, timeout: Duration) -> std::io::Result<ShellExit>;
+    fn hidden_input(&self) -> std::io::Result<bool> {
+        Ok(false)
+    }
 }
 
 trait SessionPtyTerminator: Send + Sync {
@@ -447,6 +452,10 @@ impl SessionPty for SpawnedPty {
 
     fn wait_for_child(&mut self, timeout: Duration) -> std::io::Result<ShellExit> {
         SpawnedPty::wait_for_child(self, timeout)
+    }
+
+    fn hidden_input(&self) -> std::io::Result<bool> {
+        SpawnedPty::hidden_input(self)
     }
 }
 
@@ -835,6 +844,7 @@ enum Command {
     SelectionAutoscrollTick(PresentationGeneration),
     ReaderReady,
     Shutdown,
+    PollHiddenInput,
 }
 
 struct TerminalWorker {
@@ -858,6 +868,40 @@ struct TerminalWorker {
     deferred_osc52_effects: VecDeque<Osc52Effect>,
     deferred_output_chunks: VecDeque<Vec<u8>>,
     deferred_reader_ready: bool,
+    hidden_input: HiddenInputSchedule,
+}
+
+struct HiddenInputSchedule {
+    active: bool,
+    deadline: Instant,
+}
+
+impl HiddenInputSchedule {
+    fn new(now: Instant) -> Self {
+        Self {
+            active: false,
+            deadline: now,
+        }
+    }
+
+    fn update(&mut self, now: Instant, result: std::io::Result<bool>) -> Option<bool> {
+        self.deadline = now + TERMIOS_POLL_INTERVAL;
+        let active = match result {
+            Ok(active) => active,
+            Err(error) => {
+                eprintln!(
+                    "failed to inspect PTY hidden-input state; releasing secure input: {error}"
+                );
+                false
+            }
+        };
+        if self.active == active {
+            None
+        } else {
+            self.active = active;
+            Some(active)
+        }
+    }
 }
 
 struct PendingOsc52Authorization {
@@ -1150,6 +1194,7 @@ impl TerminalWorker {
             deferred_osc52_effects: VecDeque::new(),
             deferred_output_chunks: VecDeque::new(),
             deferred_reader_ready: false,
+            hidden_input: HiddenInputSchedule::new(Instant::now()),
         };
 
         if !startup.succeeded() {
@@ -1199,6 +1244,7 @@ impl TerminalWorker {
                 autoscroll_deadline,
                 self.paste_confirmations.deadline(),
                 self.osc52_authorization.deadline(),
+                Some(self.hidden_input.deadline),
             ]
             .into_iter()
             .flatten()
@@ -1219,6 +1265,9 @@ impl TerminalWorker {
                     }
                     if let Some(id) = self.osc52_authorization.expire(now) {
                         return Some(Command::Osc52AuthorizationExpired(id));
+                    }
+                    if now >= self.hidden_input.deadline {
+                        return Some(Command::PollHiddenInput);
                     }
                     if synchronized_output_deadline.is_some()
                         && !self.release_synchronized_output_if_due(now)
@@ -1319,6 +1368,16 @@ impl TerminalWorker {
                 }
             }
             Command::Shutdown => false,
+            Command::PollHiddenInput => {
+                if let Some(active) = self
+                    .hidden_input
+                    .update(Instant::now(), self.pty.hidden_input())
+                {
+                    send_session_event(&self.events, SessionEvent::HiddenInputChanged(active))
+                } else {
+                    true
+                }
+            }
         }
     }
 
@@ -1871,6 +1930,21 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::*;
+
+    #[test]
+    fn hidden_input_polling_emits_only_transitions_and_fails_closed() {
+        let start = Instant::now();
+        let mut schedule = HiddenInputSchedule::new(start);
+
+        assert_eq!(schedule.update(start, Ok(false)), None);
+        assert_eq!(schedule.update(start, Ok(true)), Some(true));
+        assert_eq!(schedule.update(start, Ok(true)), None);
+        assert_eq!(
+            schedule.update(start, Err(io::Error::other("descriptor closed"))),
+            Some(false)
+        );
+        assert_eq!(schedule.deadline, start + TERMIOS_POLL_INTERVAL);
+    }
     use crate::terminal::geometry::{BackingScale, CellGridSize, LogicalCellSize};
     use crate::terminal::key::{KeyAction, PhysicalKey};
 
@@ -2211,6 +2285,7 @@ mod tests {
             deferred_osc52_effects: VecDeque::new(),
             deferred_output_chunks: VecDeque::new(),
             deferred_reader_ready: false,
+            hidden_input: HiddenInputSchedule::new(Instant::now()),
         };
         (worker, receiver, records)
     }
@@ -2985,6 +3060,7 @@ mod tests {
             deferred_osc52_effects: VecDeque::new(),
             deferred_output_chunks: VecDeque::new(),
             deferred_reader_ready: false,
+            hidden_input: HiddenInputSchedule::new(Instant::now()),
         };
 
         assert!(worker.process_reader_events());
@@ -3038,6 +3114,7 @@ mod tests {
             deferred_osc52_effects: VecDeque::new(),
             deferred_output_chunks: VecDeque::new(),
             deferred_reader_ready: false,
+            hidden_input: HiddenInputSchedule::new(Instant::now()),
         };
         assert!(worker.publish_screen());
         let _ = receiver.try_recv().unwrap();
@@ -3697,6 +3774,7 @@ mod tests {
                     SessionEvent::Osc52Authorization(_)
                     | SessionEvent::Osc52AuthorizationExpired(_),
                 ) => {}
+                Ok(SessionEvent::HiddenInputChanged(_)) => {}
                 Err(async_channel::TryRecvError::Empty) => {
                     thread::sleep(Duration::from_millis(10));
                 }
@@ -3744,6 +3822,7 @@ mod tests {
                     SessionEvent::Osc52Authorization(_)
                     | SessionEvent::Osc52AuthorizationExpired(_),
                 ) => {}
+                Ok(SessionEvent::HiddenInputChanged(_)) => {}
                 Err(async_channel::TryRecvError::Empty) => {
                     thread::sleep(Duration::from_millis(10));
                 }
