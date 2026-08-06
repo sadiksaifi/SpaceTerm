@@ -1,6 +1,7 @@
 mod accessibility;
 pub(crate) mod attention;
 mod emulator;
+mod failure;
 mod file_insertion;
 pub(crate) mod geometry;
 mod hyperlink;
@@ -28,6 +29,9 @@ pub(crate) use emulator::{
     PresentationGeneration, RowSnapshot, ScreenSnapshot, TerminalColor, TerminalColorsSnapshot,
     TerminalUnderlineSnapshot,
 };
+#[cfg(test)]
+pub(crate) use failure::FailureClass;
+pub(crate) use failure::{DiagnosticBundle, PaneTerminalState, TerminalFailure};
 pub(crate) use hyperlink::HyperlinkTarget;
 pub(crate) use key::{
     InputModifiers, KeyAction, KeyInput, KeyInputError, OptionAsAltPolicy, PhysicalKey,

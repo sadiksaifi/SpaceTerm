@@ -30,6 +30,7 @@ actions!(
         CancelUnsafePaste,
         AllowOsc52Clipboard,
         DenyOsc52Clipboard,
+        ExportTerminalDiagnostics,
         IncreaseTerminalFontSize,
         DecreaseTerminalFontSize,
         ResetTerminalFontSize,

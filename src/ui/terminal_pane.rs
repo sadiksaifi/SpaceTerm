@@ -21,8 +21,8 @@ use super::terminal_focus::{TerminalFocusCoordinator, TerminalFocusFacts, Termin
 use super::terminal_ime::{PreeditLayout, PreeditPosition, TerminalIme, layout_preedit};
 use super::{
     AllowOsc52Clipboard, CancelUnsafePaste, ConfirmUnsafePaste, CopySelection,
-    DecreaseTerminalFontSize, DenyOsc52Clipboard, IncreaseTerminalFontSize, PasteClipboard,
-    ResetTerminalFontSize, TERMINAL_KEY_CONTEXT,
+    DecreaseTerminalFontSize, DenyOsc52Clipboard, ExportTerminalDiagnostics,
+    IncreaseTerminalFontSize, PasteClipboard, ResetTerminalFontSize, TERMINAL_KEY_CONTEXT,
 };
 use crate::platform::macos_accessibility::post_accessibility_notifications;
 #[cfg(not(test))]
@@ -43,12 +43,13 @@ use crate::terminal::geometry::{
     BackingScale, CellGridSize, LogicalCellSize, LogicalPosition, LogicalSize, TerminalGeometry,
 };
 use crate::terminal::{
-    AccessibilityGeometry, AccessibilityNotification, AttentionFacts, InputModifiers, KeyAction,
-    KeyInput, NativeContextActions, NativeInsertion, OptionAsAltPolicy, Osc52Access,
-    Osc52AuthorizationDecision, Osc52AuthorizationRequest, Osc52Target, PasteConfirmation,
-    PasteDecision, PasteRequestOutcome, PasteResolution, PhysicalKey, PointerButton, PointerInput,
-    PointerPhase, ScreenSnapshot, SelectionCopy, SessionEvent, ShiftSelectionPolicy,
-    SurfacePosition, TerminalAccessibilityModel, TerminalSessionHandle, WheelInput, WheelPhase,
+    AccessibilityGeometry, AccessibilityNotification, AttentionFacts, DiagnosticBundle,
+    InputModifiers, KeyAction, KeyInput, NativeContextActions, NativeInsertion, OptionAsAltPolicy,
+    Osc52Access, Osc52AuthorizationDecision, Osc52AuthorizationRequest, Osc52Target,
+    PaneTerminalState, PasteConfirmation, PasteDecision, PasteRequestOutcome, PasteResolution,
+    PhysicalKey, PointerButton, PointerInput, PointerPhase, ScreenSnapshot, SelectionCopy,
+    SessionEvent, ShiftSelectionPolicy, SurfacePosition, TerminalAccessibilityModel,
+    TerminalFailure, TerminalSessionHandle, WheelInput, WheelPhase,
     WorkspaceTerminalSessionFactory,
 };
 use crate::theme::{ACTIVE_THEME, Color};
@@ -89,6 +90,8 @@ pub(crate) struct TerminalPane {
     accessibility: TerminalAccessibilityModel,
     accessibility_notifications: Vec<AccessibilityNotification>,
     render_lifecycle: RenderLifecycle,
+    pane_state: PaneTerminalState,
+    diagnostics: DiagnosticBundle,
     status: Option<String>,
     fallback_title: SharedString,
     title: SharedString,
@@ -188,6 +191,8 @@ impl TerminalPane {
             accessibility,
             accessibility_notifications: Vec::new(),
             render_lifecycle,
+            pane_state: PaneTerminalState::default(),
+            diagnostics: DiagnosticBundle::default(),
             status: None,
             title: fallback_title.clone(),
             fallback_title,
@@ -447,6 +452,15 @@ impl TerminalPane {
             .update(cx, |scrollbar, cx| scrollbar.sync(metrics, cx));
     }
 
+    fn present_failure(&mut self, failure: TerminalFailure, preserve_frame: bool) {
+        self.diagnostics.record(&failure);
+        self.pane_state = PaneTerminalState::failed(
+            failure.clone(),
+            preserve_frame.then_some(self.screen.generation),
+        );
+        self.status = Some(failure.to_string());
+    }
+
     fn reveal_scrollbar(&self, cx: &mut Context<Self>) {
         let metrics = self.scrollbar_metrics();
         self.scrollbar
@@ -507,8 +521,8 @@ impl TerminalPane {
                 }));
             }
             Err(error) => {
-                eprintln!("failed to start terminal session: {error:#}");
-                self.status = Some(error.to_string());
+                let _ = error;
+                self.present_failure(TerminalFailure::platform("start-session-worker"), false);
                 cx.notify();
             }
         }
@@ -576,16 +590,15 @@ impl TerminalPane {
             SessionEvent::Exited(status) => {
                 self.hidden_input = false;
                 self.sync_secure_input();
-                eprintln!("{status}");
                 self.status = Some(status.to_string());
+                self.pane_state = PaneTerminalState::exited(status);
                 cx.emit(TerminalPaneEvent::Exited);
             }
             SessionEvent::Failed(failure) => {
                 self.hidden_input = false;
                 self.sync_secure_input();
-                let status = failure.to_string();
-                eprintln!("{status}");
-                self.status = Some(status);
+                let failure = TerminalFailure::from_session(&failure);
+                self.present_failure(failure, true);
             }
         }
     }
@@ -733,7 +746,12 @@ impl TerminalPane {
 
     fn update_backing_scale(&mut self, factor: f32, window: &mut Window, cx: &mut Context<Self>) {
         let Some(backing_scale) = BackingScale::new(factor) else {
-            eprintln!("ignored invalid terminal backing scale: {factor}");
+            let failure = TerminalFailure::presentation("update-backing-scale");
+            self.diagnostics.record(&failure);
+            self.pane_state =
+                PaneTerminalState::failed(failure.clone(), Some(self.screen.generation));
+            self.status = Some(failure.to_string());
+            cx.notify();
             return;
         };
         if self.backing_scale == backing_scale {
@@ -917,24 +935,32 @@ impl TerminalPane {
             Ok(Ok(Some(copy))) if !copy.plain_text.is_empty() => {
                 let _ = this.update(cx, |this, cx| {
                     if let Err(error) = write_selection_copy(copy, cx) {
-                        eprintln!("failed to write terminal selection to pasteboard: {error}");
-                        this.status = Some(error);
+                        let _ = error;
+                        this.present_failure(
+                            TerminalFailure::platform("write-selection-pasteboard"),
+                            true,
+                        );
                         cx.notify();
                     }
                 });
             }
             Ok(Err(error)) => {
                 let _ = this.update(cx, |this, cx| {
-                    eprintln!("failed to copy terminal selection: {error}");
-                    this.status = Some(error);
+                    let _ = error;
+                    this.present_failure(
+                        TerminalFailure::emulator("format-terminal-selection"),
+                        true,
+                    );
                     cx.notify();
                 });
             }
             Err(error) => {
                 let _ = this.update(cx, |this, cx| {
-                    let message = format!("terminal selection reply was lost: {error}");
-                    eprintln!("{message}");
-                    this.status = Some(message);
+                    let _ = error;
+                    this.present_failure(
+                        TerminalFailure::resource("receive-selection-reply"),
+                        true,
+                    );
                     cx.notify();
                 });
             }
@@ -1019,6 +1045,40 @@ impl TerminalPane {
                     cx.notify();
                 });
             }
+        })
+        .detach();
+    }
+
+    fn export_diagnostics(
+        &mut self,
+        _: &ExportTerminalDiagnostics,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let directory = std::env::current_dir().unwrap_or_else(|_| std::env::temp_dir());
+        let receiver = cx.prompt_for_new_path(&directory, Some("SpaceTerm-diagnostics.txt"));
+        let diagnostics = self.diagnostics.clone();
+        cx.spawn(async move |this, cx| {
+            let Ok(Ok(Some(path))) = receiver.await else {
+                return;
+            };
+            let exported_path = path.clone();
+            let result = cx
+                .background_executor()
+                .spawn(async move { diagnostics.export(&exported_path) })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.status = Some(if result.is_ok() {
+                    format!("Diagnostics exported to {}", path.display())
+                } else {
+                    let failure = TerminalFailure::resource("export-diagnostics-file");
+                    this.diagnostics.record(&failure);
+                    this.pane_state =
+                        PaneTerminalState::failed(failure.clone(), Some(this.screen.generation));
+                    failure.to_string()
+                });
+                cx.notify();
+            });
         })
         .detach();
     }
@@ -1344,13 +1404,19 @@ impl Render for TerminalPane {
         );
         let background = gpui_color(self.screen.background);
         let status = self.status.clone();
+        let diagnostics_available =
+            self.pane_state.failure().is_some() && self.diagnostics.record_count() > 0;
+        let last_valid_frame_preserved = self.pane_state.last_valid_frame().is_some();
+        let export_pane = cx.entity().downgrade();
         let hovered_link = self.hovered_link.clone();
         let native_context_actions = self.native_context_actions();
         let native_context_selector = format!(
-            "terminal-native-context-copy-{}-open-{}-quick-look-{}",
+            "terminal-native-context-copy-{}-open-{}-quick-look-{}-failure-{}-last-frame-{}",
             native_context_actions.copy,
             native_context_actions.open_link,
             native_context_actions.quick_look,
+            diagnostics_available,
+            last_valid_frame_preserved,
         );
         let link_cell_width = self.cell_width;
         let link_line_height = self.line_height;
@@ -1436,6 +1502,7 @@ impl Render for TerminalPane {
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(Self::copy_selection))
             .on_action(cx.listener(Self::paste_clipboard))
+            .on_action(cx.listener(Self::export_diagnostics))
             .on_drop(cx.listener(Self::insert_dropped_files))
             .on_action(cx.listener(Self::confirm_unsafe_paste))
             .on_action(cx.listener(Self::cancel_unsafe_paste))
@@ -1503,7 +1570,30 @@ impl Render for TerminalPane {
                         .bg(gpui_color(ACTIVE_THEME.element_active))
                         .text_color(gpui_color(ACTIVE_THEME.text))
                         .text_sm()
-                        .child(status),
+                        .flex()
+                        .flex_col()
+                        .gap(px(6.0))
+                        .child(status)
+                        .when(diagnostics_available, |status| {
+                            status.child(
+                                div()
+                                    .id("export-terminal-diagnostics")
+                                    .debug_selector(|| "export-terminal-diagnostics".to_owned())
+                                    .cursor_pointer()
+                                    .text_color(gpui_color(ACTIVE_THEME.link_text_hover))
+                                    .on_click(move |_, window, cx| {
+                                        let _ = export_pane.update(cx, |pane, cx| {
+                                            pane.export_diagnostics(
+                                                &ExportTerminalDiagnostics,
+                                                window,
+                                                cx,
+                                            );
+                                        });
+                                        cx.stop_propagation();
+                                    })
+                                    .child("Export Diagnostics…"),
+                            )
+                        }),
                 )
             })
     }
@@ -2350,7 +2440,10 @@ mod tests {
 
         cx.update(|_window, cx| {
             pane.update(cx, |pane, cx| {
-                pane.send_key_input(Ok(KeyInput::input_method_commit("x")), cx);
+                pane.send_key_translation(
+                    KeyTranslation::Encoded(KeyInput::input_method_commit("x")),
+                    cx,
+                );
             });
         });
         cx.run_until_parked();
@@ -3437,14 +3530,26 @@ mod tests {
             .unwrap();
         cx.run_until_parked();
 
-        let state = pane.read_with(cx, |pane, _| (pane.status.clone(), pane.session.is_some()));
+        let state = pane.read_with(cx, |pane, _| {
+            (
+                pane.status.clone(),
+                pane.session.is_some(),
+                pane.pane_state
+                    .failure()
+                    .map(crate::terminal::TerminalFailure::class),
+                pane.diagnostics.record_count(),
+            )
+        });
         assert_eq!(
             state,
             (
                 Some(
-                    "Shell output failed: read unavailable; shell exited (exit code 7)".to_owned()
+                    "PTY failed during read-shell-output. Close this Pane and restart the terminal command."
+                        .to_owned()
                 ),
                 true,
+                Some(crate::terminal::FailureClass::Pty),
+                1,
             )
         );
         assert_eq!(
@@ -3452,5 +3557,11 @@ mod tests {
             (0, Vec::new())
         );
         assert!(cx.debug_bounds("terminal-status").is_some());
+        let export = cx
+            .debug_bounds("export-terminal-diagnostics")
+            .expect("typed failure should expose explicit diagnostic export");
+        cx.simulate_click(export.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert!(cx.did_prompt_for_new_path());
     }
 }

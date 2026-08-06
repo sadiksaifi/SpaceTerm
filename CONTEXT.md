@@ -456,6 +456,19 @@ live-resizing the surface. Display moves and backing-scale changes preserve logi
 invalidate only scale-dependent prepared rows and symbol geometry. Pane destruction releases
 render caches and cancels every owned presentation task and native resource.
 
+### Typed Terminal Failures and Local Diagnostics
+
+Normal Shell Process exit is distinct from PTY, Terminal Emulator, presentation, macOS platform,
+and renderer-resource failure. A Pane owns this typed state and presents an actionable recovery:
+fatal runtime failures require closing the Pane and restarting the command, while recoverable
+presentation or resource failures retain the last valid Presentation Generation and permit retry.
+Failure mapping discards raw library messages at the boundary so terminal contents, clipboard
+data, environment values, paths, and secrets never enter Pane state or diagnostics. Diagnostics
+retain only a bounded sequence of failure class, recoverability, and static operation identifiers
+(at most 128 records and 64 KiB). SpaceTerm performs no automatic network telemetry or crash
+upload. A local diagnostic file is created only after the user explicitly chooses Export Terminal
+Diagnostics and confirms a path through the native save panel.
+
 ### Workspace-Bound Terminal Creation
 
 `WorkspaceCollection` owns default Workspace naming and passes the exact stored Workspace root into
