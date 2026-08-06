@@ -29,6 +29,7 @@ use crate::terminal::keyboard_protocol::KeyboardProtocolEncoder;
 use crate::terminal::selection::{SelectionCopy, SelectionCopyOptions, TrailingSpacePolicy};
 use crate::terminal::session::{
     PointerButton, PointerInput, PointerPhase, ShiftSelectionPolicy, SurfacePosition, WheelInput,
+    WheelPhase,
 };
 use crate::theme::{ACTIVE_THEME, Color};
 
@@ -778,8 +779,13 @@ impl TerminalEmulator {
         {
             return Ok(EmulatorAction::none());
         }
-        let steps = input.steps.clamp(-MAX_WHEEL_STEPS, MAX_WHEEL_STEPS);
-        if steps == 0 {
+        let horizontal = input
+            .horizontal_steps
+            .clamp(-MAX_WHEEL_STEPS, MAX_WHEEL_STEPS);
+        let vertical = input
+            .vertical_steps
+            .clamp(-MAX_WHEEL_STEPS, MAX_WHEEL_STEPS);
+        if horizontal == 0 && vertical == 0 {
             return Ok(EmulatorAction::none());
         }
 
@@ -789,22 +795,23 @@ impl TerminalEmulator {
             .map_err(|error| format!("failed to query terminal mouse tracking mode: {error}"))?;
         if tracking && !shift_overrides_application_mouse(input.modifiers, input.shift_selection) {
             self.clear_selection()?;
-            let button = if steps > 0 {
-                MouseButton::Four
-            } else {
-                MouseButton::Five
-            };
             let any_button_pressed = self.active_pointer.is_some();
             let mut bytes = Vec::new();
-            for _ in 0..steps.unsigned_abs() {
-                self.encode_mouse_event(
-                    MouseAction::Press,
-                    Some(button),
-                    input.position,
-                    input.modifiers,
-                    any_button_pressed,
-                    &mut bytes,
-                )?;
+            for (steps, positive, negative) in [
+                (horizontal, MouseButton::Six, MouseButton::Seven),
+                (vertical, MouseButton::Four, MouseButton::Five),
+            ] {
+                let button = if steps > 0 { positive } else { negative };
+                for _ in 0..steps.unsigned_abs() {
+                    self.encode_mouse_event(
+                        MouseAction::Press,
+                        Some(button),
+                        input.position,
+                        input.modifiers,
+                        any_button_pressed,
+                        &mut bytes,
+                    )?;
+                }
             }
             return Ok(EmulatorAction {
                 bytes,
@@ -821,17 +828,17 @@ impl TerminalEmulator {
             .terminal
             .mode(Mode::ALT_SCROLL)
             .map_err(|error| format!("failed to query alternate-scroll mode: {error}"))?;
-        if alternate_screen && alternate_scroll {
+        if alternate_screen && alternate_scroll && vertical != 0 {
             self.clear_selection()?;
             let key = KeyInput {
                 action: KeyAction::Press,
-                physical_key: if steps > 0 {
+                physical_key: if vertical > 0 {
                     PhysicalKey::ArrowUp
                 } else {
                     PhysicalKey::ArrowDown
                 },
                 native_key_code: None,
-                logical_key: if steps > 0 { "up" } else { "down" }.to_owned(),
+                logical_key: if vertical > 0 { "up" } else { "down" }.to_owned(),
                 text: None,
                 unshifted_codepoint: None,
                 modifiers: InputModifiers::default(),
@@ -839,7 +846,7 @@ impl TerminalEmulator {
                 option_as_alt: OptionAsAltPolicy::default(),
             };
             let mut bytes = Vec::new();
-            for _ in 0..steps.unsigned_abs() {
+            for _ in 0..vertical.unsigned_abs() {
                 self.encode_key(&key, &mut bytes)?;
             }
             return Ok(EmulatorAction {
@@ -848,8 +855,12 @@ impl TerminalEmulator {
             });
         }
 
+        if vertical == 0 {
+            return Ok(EmulatorAction::none());
+        }
+
         self.terminal
-            .scroll_viewport(ScrollViewport::Delta(-(steps as isize)));
+            .scroll_viewport(ScrollViewport::Delta(-(vertical as isize)));
         Ok(EmulatorAction::screen_changed())
     }
 
@@ -1971,7 +1982,9 @@ mod tests {
     fn wheel(steps: i32, shift: bool) -> WheelInput {
         WheelInput {
             generation: PresentationGeneration::default(),
-            steps,
+            horizontal_steps: 0,
+            vertical_steps: steps,
+            phase: WheelPhase::GestureChanged,
             position: SurfacePosition { x: 1.0, y: 1.0 },
             modifiers: InputModifiers {
                 shift,
@@ -3537,6 +3550,9 @@ mod tests {
         let reported = tracked.wheel(wheel(2, false)).unwrap();
         assert_eq!(reported.bytes, b"\x1b[<64;1;1M\x1b[<64;1;1M");
         assert!(reported.screen_changed);
+        let mut horizontal = wheel(0, false);
+        horizontal.horizontal_steps = 1;
+        assert_eq!(tracked.wheel(horizontal).unwrap().bytes, b"\x1b[<66;1;1M");
 
         let mut alternate = emulator(10, 2);
         alternate.feed(b"\x1b[?1049h\x1b[?1007h");
@@ -3546,6 +3562,11 @@ mod tests {
         );
         alternate.feed(b"\x1b[?1h");
         assert_eq!(alternate.wheel(wheel(-1, false)).unwrap().bytes, b"\x1bOB");
+        let mut horizontal = wheel(0, false);
+        horizontal.horizontal_steps = -2;
+        let ignored = alternate.wheel(horizontal).unwrap();
+        assert!(ignored.bytes.is_empty());
+        assert!(!ignored.screen_changed);
     }
 
     #[test]

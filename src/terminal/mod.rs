@@ -46,7 +46,7 @@ pub(crate) use session::SessionFailure;
 pub(crate) use session::{
     NativeTerminalSessionFactory, PointerButton, PointerInput, PointerPhase, SessionEvent,
     SessionExit, ShiftSelectionPolicy, SurfacePosition, TerminalSessionFactory,
-    TerminalSessionHandle, WheelInput,
+    TerminalSessionHandle, WheelInput, WheelPhase,
 };
 #[cfg(test)]
 pub(crate) use session::{SessionError, StartedTerminalSession};

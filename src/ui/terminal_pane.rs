@@ -8,8 +8,8 @@ use gpui::prelude::*;
 use gpui::{
     App, Bounds, Context, Entity, EntityInputHandler, EventEmitter, FocusHandle, IntoElement,
     KeyDownEvent, KeyUpEvent, ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, Pixels, Render, ScrollWheelEvent, SharedString, Task, TextRun, UTF16Selection,
-    Window, div, font, point, px, rgba, size,
+    MouseUpEvent, Pixels, Render, ScrollDelta, ScrollWheelEvent, SharedString, Task, TextRun,
+    UTF16Selection, Window, div, font, point, px, rgba, size,
 };
 
 use super::overlay_scrollbar::{OverlayScrollbar, OverlayScrollbarEvent, ScrollMetrics};
@@ -26,6 +26,7 @@ use super::{
 use crate::platform::macos_keyboard::{
     KeyTranslation, MacosKeyboardBridge, NativeKeyEvent, NativeKeyEventKind, UnhandledKeyEvent,
 };
+use crate::platform::macos_scroll::current_wheel_phase;
 use crate::platform::macos_secure_input::{
     SecureInputPaneId, register_pane as register_secure_input_pane,
     remove_pane as remove_secure_input_pane, update_application_activation,
@@ -39,7 +40,8 @@ use crate::terminal::{
     Osc52AuthorizationDecision, Osc52AuthorizationRequest, Osc52Target, PasteConfirmation,
     PasteDecision, PasteRequestOutcome, PasteResolution, PhysicalKey, PointerButton, PointerInput,
     PointerPhase, ScreenSnapshot, SelectionCopy, SessionEvent, ShiftSelectionPolicy,
-    SurfacePosition, TerminalSessionHandle, WheelInput, WorkspaceTerminalSessionFactory,
+    SurfacePosition, TerminalSessionHandle, WheelInput, WheelPhase,
+    WorkspaceTerminalSessionFactory,
 };
 use crate::theme::{ACTIVE_THEME, Color};
 
@@ -85,7 +87,7 @@ pub(crate) struct TerminalPane {
     pressed_button: Option<PointerButton>,
     pointer_modifiers: InputModifiers,
     shift_selection: ShiftSelectionPolicy,
-    wheel_remainder: f32,
+    wheel_accumulator: WheelAccumulator,
     scrollbar: Entity<OverlayScrollbar<u64>>,
     render_cache: TerminalGridCache,
     keyboard_bridge: MacosKeyboardBridge,
@@ -158,7 +160,7 @@ impl TerminalPane {
             pressed_button: None,
             pointer_modifiers: InputModifiers::default(),
             shift_selection: ShiftSelectionPolicy::default(),
-            wheel_remainder: 0.0,
+            wheel_accumulator: WheelAccumulator::default(),
             scrollbar,
             render_cache: TerminalGridCache::new(),
             keyboard_bridge: MacosKeyboardBridge::new(OptionAsAltPolicy::default()),
@@ -722,15 +724,29 @@ impl TerminalPane {
             return;
         };
         self.reveal_scrollbar(cx);
-        let lines = f32::from(event.delta.pixel_delta(px(self.line_height)).y) / self.line_height;
-        let steps = accumulate_wheel_steps(&mut self.wheel_remainder, lines);
+        let delta = match event.delta {
+            ScrollDelta::Pixels(delta) => point(
+                f32::from(delta.x) / f32::from(self.cell_width),
+                f32::from(delta.y) / self.line_height,
+            ),
+            ScrollDelta::Lines(delta) => point(delta.x, delta.y),
+        };
+        let phase = current_wheel_phase().unwrap_or_else(|| match event.touch_phase {
+            gpui::TouchPhase::Started => WheelPhase::GestureStarted,
+            gpui::TouchPhase::Moved => WheelPhase::GestureChanged,
+            gpui::TouchPhase::Ended => WheelPhase::GestureEnded,
+        });
+        let (horizontal_steps, vertical_steps) =
+            self.wheel_accumulator.push(delta.x, delta.y, phase);
 
-        if steps != 0
+        if (horizontal_steps != 0 || vertical_steps != 0)
             && let Some(session) = &self.session
         {
             session.wheel(WheelInput {
                 generation: self.screen.generation,
-                steps,
+                horizontal_steps,
+                vertical_steps,
+                phase,
                 position,
                 modifiers: input_modifiers(event.modifiers),
                 shift_selection: self.shift_selection,
@@ -1470,11 +1486,33 @@ fn terminal_surface_position(
     })
 }
 
-fn accumulate_wheel_steps(remainder: &mut f32, delta: f32) -> i32 {
-    *remainder += delta;
-    let steps = remainder.trunc() as i32;
-    *remainder -= steps as f32;
-    steps
+#[derive(Default)]
+struct WheelAccumulator {
+    horizontal: f32,
+    vertical: f32,
+}
+
+impl WheelAccumulator {
+    fn push(&mut self, horizontal: f32, vertical: f32, phase: WheelPhase) -> (i32, i32) {
+        if phase == WheelPhase::GestureStarted {
+            *self = Self::default();
+        }
+        self.horizontal += horizontal;
+        self.vertical += vertical;
+        let steps = (self.horizontal.trunc() as i32, self.vertical.trunc() as i32);
+        self.horizontal -= steps.0 as f32;
+        self.vertical -= steps.1 as f32;
+        if matches!(
+            phase,
+            WheelPhase::GestureEnded
+                | WheelPhase::GestureCancelled
+                | WheelPhase::MomentumEnded
+                | WheelPhase::MomentumCancelled
+        ) {
+            *self = Self::default();
+        }
+        steps
+    }
 }
 
 fn encode_key(event: &KeyDownEvent) -> KeyTranslation {
@@ -2796,13 +2834,24 @@ mod tests {
 
     #[test]
     fn accumulates_fractional_trackpad_scroll_into_terminal_steps() {
-        let mut remainder = 0.0;
-
-        assert_eq!(accumulate_wheel_steps(&mut remainder, 0.4), 0);
-        assert_eq!(accumulate_wheel_steps(&mut remainder, 0.7), 1);
-        assert!((remainder - 0.1).abs() < f32::EPSILON * 4.0);
-        assert_eq!(accumulate_wheel_steps(&mut remainder, -1.3), -1);
-        assert!((remainder + 0.2).abs() < f32::EPSILON * 4.0);
+        let mut accumulator = WheelAccumulator::default();
+        assert_eq!(
+            accumulator.push(0.4, 0.4, WheelPhase::GestureStarted),
+            (0, 0)
+        );
+        assert_eq!(
+            accumulator.push(0.7, 0.7, WheelPhase::GestureChanged),
+            (1, 1)
+        );
+        assert_eq!(
+            accumulator.push(-1.3, -1.3, WheelPhase::MomentumStarted),
+            (-1, -1)
+        );
+        assert_eq!(
+            accumulator.push(0.0, 0.0, WheelPhase::MomentumCancelled),
+            (0, 0)
+        );
+        assert_eq!((accumulator.horizontal, accumulator.vertical), (0.0, 0.0));
     }
 
     #[test]

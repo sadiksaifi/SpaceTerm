@@ -265,6 +265,12 @@ host policy permits that override; otherwise its modifier is reported to the app
 presses, motion, and wheel input. Worker snapshots publish whether application mouse tracking is
 active so the Pane's pointer presentation matches the effective route.
 
+Precision wheel input retains independent horizontal and vertical fractional remainders in logical
+cell units and carries AppKit gesture and momentum phases across GPUI's event boundary. Routing is
+strictly application mouse reporting first, alternate-screen arrow policy second, and Primary
+Screen Scrollback last. Mouse reporting uses buttons 4/5 vertically and 6/7 horizontally;
+horizontal movement never mutates ordinary Scrollback.
+
 ### Terminal Selection
 
 The Terminal Emulator owns Selection gestures and delegates cell, word, line, repeat-click, drag,
