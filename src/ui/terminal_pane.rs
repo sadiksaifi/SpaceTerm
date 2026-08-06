@@ -48,7 +48,7 @@ const VERTICAL_PADDING: f32 = 8.0;
 const MIN_COLS: u16 = 2;
 const MIN_ROWS: u16 = 2;
 const MAX_PANE_TITLE_CHARACTERS: usize = 256;
-const TEXT_BLINK_INTERVAL: Duration = Duration::from_millis(600);
+const PRESENTATION_BLINK_INTERVAL: Duration = Duration::from_millis(600);
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum TerminalPaneEvent {
@@ -86,9 +86,9 @@ pub(crate) struct TerminalPane {
     ime_suppressed_keys: Vec<PhysicalKey>,
     pending_paste: Option<PasteConfirmation>,
     pending_osc52: Option<Osc52AuthorizationRequest>,
-    text_blink_visible: bool,
-    text_blink_generation: u64,
-    _text_blink_task: Option<Task<()>>,
+    blink_phase_visible: bool,
+    blink_generation: u64,
+    _blink_task: Option<Task<()>>,
     _event_task: Option<Task<()>>,
 }
 
@@ -157,9 +157,9 @@ impl TerminalPane {
             ime_suppressed_keys: Vec::new(),
             pending_paste: None,
             pending_osc52: None,
-            text_blink_visible: true,
-            text_blink_generation: 0,
-            _text_blink_task: None,
+            blink_phase_visible: true,
+            blink_generation: 0,
+            _blink_task: None,
             _event_task: None,
         }
     }
@@ -207,6 +207,7 @@ impl TerminalPane {
         let focused = self.terminal_input_focused(window);
         if self.terminal_input_focus != focused {
             self.terminal_input_focus = focused;
+            self.reset_blink_phase();
             if !focused {
                 if let Some(confirmation) = self.pending_paste.take()
                     && let Some(session) = &self.session
@@ -267,34 +268,47 @@ impl TerminalPane {
         {
             session.resolve_osc52_authorization(request.id, Osc52AuthorizationDecision::Deny);
         }
-        self.text_blink_generation = self.text_blink_generation.wrapping_add(1);
-        self._text_blink_task.take();
+        self.blink_generation = self.blink_generation.wrapping_add(1);
+        self._blink_task.take();
         self._event_task.take();
         self.session.take();
     }
 
-    fn sync_text_blink(&mut self, surface_active: bool, cx: &mut Context<Self>) {
-        let demanded = surface_active && self.screen.text_blinking;
-        if demanded == self._text_blink_task.is_some() {
+    fn reset_blink_phase(&mut self) {
+        self.blink_generation = self.blink_generation.wrapping_add(1);
+        self._blink_task.take();
+        self.blink_phase_visible = true;
+    }
+
+    fn sync_presentation_blink(
+        &mut self,
+        surface_active: bool,
+        terminal_input_focused: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let cursor_demanded =
+            terminal_input_focused && self.screen.cursor.visible && self.screen.cursor.blinking;
+        let demanded = surface_active && (self.screen.text_blinking || cursor_demanded);
+        if demanded == self._blink_task.is_some() {
             return;
         }
 
-        self.text_blink_generation = self.text_blink_generation.wrapping_add(1);
-        self._text_blink_task.take();
-        self.text_blink_visible = true;
+        self.reset_blink_phase();
         if !demanded {
             return;
         }
 
-        let generation = self.text_blink_generation;
-        self._text_blink_task = Some(cx.spawn(async move |this, cx| {
+        let generation = self.blink_generation;
+        self._blink_task = Some(cx.spawn(async move |this, cx| {
             loop {
-                cx.background_executor().timer(TEXT_BLINK_INTERVAL).await;
+                cx.background_executor()
+                    .timer(PRESENTATION_BLINK_INTERVAL)
+                    .await;
                 let Ok(continue_blinking) = this.update(cx, |this, cx| {
-                    if this.text_blink_generation != generation {
+                    if this.blink_generation != generation {
                         return false;
                     }
-                    this.text_blink_visible = !this.text_blink_visible;
+                    this.blink_phase_visible = !this.blink_phase_visible;
                     cx.notify();
                     true
                 }) else {
@@ -455,7 +469,7 @@ impl TerminalPane {
             }
             return;
         }
-        if self.send_key_translation(input) {
+        if self.send_key_translation(input, cx) {
             cx.stop_propagation();
         }
     }
@@ -483,7 +497,7 @@ impl TerminalPane {
             }
             return;
         }
-        if self.send_key_translation(input) {
+        if self.send_key_translation(input, cx) {
             cx.stop_propagation();
         }
     }
@@ -506,25 +520,28 @@ impl TerminalPane {
             return;
         };
         let translation = self.keyboard_bridge.modifier_transition(event);
-        self.send_key_translation(translation);
+        self.send_key_translation(translation, cx);
     }
 
-    fn send_key_translation(&mut self, translation: KeyTranslation) -> bool {
-        match translation {
-            KeyTranslation::Encoded(input) => {
-                if let Some(session) = &self.session {
-                    session.key(input);
-                }
-                true
+    fn send_key_translation(
+        &mut self,
+        translation: KeyTranslation,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let input = match translation {
+            KeyTranslation::Encoded(input) => input,
+            KeyTranslation::TextInput(text) => KeyInput::text_input(text),
+            KeyTranslation::Unhandled(_) => return false,
+        };
+        let resets_cursor_blink = input.action != KeyAction::Release;
+        if let Some(session) = &self.session {
+            session.key(input);
+            if resets_cursor_blink && self.screen.cursor.visible && self.screen.cursor.blinking {
+                self.reset_blink_phase();
+                cx.notify();
             }
-            KeyTranslation::TextInput(text) => {
-                if let Some(session) = &self.session {
-                    session.key(KeyInput::text_input(text));
-                }
-                true
-            }
-            KeyTranslation::Unhandled(_) => false,
         }
+        true
     }
 
     fn increase_font_size(
@@ -937,7 +954,10 @@ impl EntityInputHandler for TerminalPane {
         }
         self.ime.commit(text);
         if let Some(text) = self.ime.take_commit() {
-            self.send_key_translation(KeyTranslation::Encoded(KeyInput::input_method_commit(text)));
+            self.send_key_translation(
+                KeyTranslation::Encoded(KeyInput::input_method_commit(text)),
+                cx,
+            );
         }
         cx.notify();
     }
@@ -1008,7 +1028,7 @@ impl Render for TerminalPane {
         let surface_active = self.product_focus.active_workspace
             && self.product_focus.active_window
             && window.is_window_active();
-        self.sync_text_blink(surface_active, cx);
+        self.sync_presentation_blink(surface_active, terminal_input_focused, cx);
         let background = gpui_color(self.screen.background);
         let status = self.status.clone();
         let paste_confirmation = self.pending_paste;
@@ -1033,7 +1053,7 @@ impl Render for TerminalPane {
                 preedit,
                 focus_handle: self.focus_handle.clone(),
                 input: cx.entity(),
-                text_blink_visible: self.text_blink_visible,
+                blink_phase_visible: self.blink_phase_visible,
                 scale_factor: window.scale_factor(),
             },
         );
@@ -1653,6 +1673,41 @@ mod tests {
         )
     }
 
+    fn blinking_cursor_screen(visible: bool, blinking: bool) -> Arc<ScreenSnapshot> {
+        let mut screen = ScreenSnapshot::from_test_parts(
+            Arc::from([Arc::from([crate::terminal::CellSnapshot {
+                text: "x".to_owned(),
+                foreground_source: crate::terminal::TerminalColor::Default,
+                background_source: crate::terminal::TerminalColor::Default,
+                inverse: false,
+                bold: false,
+                faint: false,
+                italic: false,
+                blinking: false,
+                invisible: false,
+                underline: crate::terminal::TerminalUnderlineSnapshot::None,
+                underline_source: crate::terminal::TerminalColor::Default,
+                strikethrough: false,
+                overline: false,
+                selected: false,
+                spacer_tail: false,
+            }])]),
+            ScrollbarSnapshot::default(),
+            "cursor blink",
+        );
+        Arc::make_mut(&mut screen).cursor = crate::terminal::CursorSnapshot {
+            position: Some(crate::terminal::CursorPositionSnapshot {
+                column: 0,
+                row: 0,
+                width_cells: 1,
+            }),
+            visible,
+            blinking,
+            ..crate::terminal::CursorSnapshot::default()
+        };
+        screen
+    }
+
     fn terminal_pane(cx: &mut TestAppContext) -> (Entity<TerminalPane>, &mut VisualTestContext) {
         cx.update(crate::ui::init);
         let session_factory: Rc<dyn TerminalSessionFactory> = Rc::new(
@@ -1785,12 +1840,12 @@ mod tests {
         });
         cx.run_until_parked();
 
-        assert!(pane.read_with(cx, |pane, _| pane.text_blink_visible));
-        assert!(pane.read_with(cx, |pane, _| pane._text_blink_task.is_some()));
+        assert!(pane.read_with(cx, |pane, _| pane.blink_phase_visible));
+        assert!(pane.read_with(cx, |pane, _| pane._blink_task.is_some()));
 
-        cx.executor().advance_clock(TEXT_BLINK_INTERVAL);
+        cx.executor().advance_clock(PRESENTATION_BLINK_INTERVAL);
         cx.run_until_parked();
-        assert!(!pane.read_with(cx, |pane, _| pane.text_blink_visible));
+        assert!(!pane.read_with(cx, |pane, _| pane.blink_phase_visible));
 
         cx.update(|_window, cx| {
             pane.update(cx, |pane, cx| {
@@ -1804,12 +1859,37 @@ mod tests {
         });
         cx.run_until_parked();
 
-        assert!(pane.read_with(cx, |pane, _| pane.text_blink_visible));
-        assert!(pane.read_with(cx, |pane, _| pane._text_blink_task.is_none()));
+        assert!(pane.read_with(cx, |pane, _| pane.blink_phase_visible));
+        assert!(pane.read_with(cx, |pane, _| pane._blink_task.is_none()));
 
-        cx.executor().advance_clock(TEXT_BLINK_INTERVAL * 2);
+        cx.executor().advance_clock(PRESENTATION_BLINK_INTERVAL * 2);
         cx.run_until_parked();
-        assert!(pane.read_with(cx, |pane, _| pane.text_blink_visible));
+        assert!(pane.read_with(cx, |pane, _| pane.blink_phase_visible));
+    }
+
+    #[gpui::test]
+    fn focused_cursor_blink_uses_the_injected_pane_clock(cx: &mut TestAppContext) {
+        let (pane, cx) = terminal_pane(cx);
+        cx.update(|_window, cx| {
+            pane.update(cx, |pane, cx| {
+                pane.set_product_focus(TerminalProductFocus {
+                    active_workspace: true,
+                    active_window: true,
+                    focused_pane: true,
+                    ..TerminalProductFocus::default()
+                });
+                pane.handle_event(SessionEvent::Screen(blinking_cursor_screen(true, true)), cx);
+                cx.notify();
+            });
+        });
+        cx.run_until_parked();
+
+        assert!(pane.read_with(cx, |pane, _| pane.blink_phase_visible));
+        assert!(pane.read_with(cx, |pane, _| pane._blink_task.is_some()));
+
+        cx.executor().advance_clock(PRESENTATION_BLINK_INTERVAL);
+        cx.run_until_parked();
+        assert!(!pane.read_with(cx, |pane, _| pane.blink_phase_visible));
     }
 
     #[test]

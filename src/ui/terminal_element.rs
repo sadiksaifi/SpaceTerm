@@ -140,7 +140,7 @@ pub(crate) struct TerminalGridElement {
     preedit: Option<PreeditLayout>,
     focus_handle: FocusHandle,
     input: Entity<TerminalPane>,
-    text_blink_visible: bool,
+    blink_phase_visible: bool,
 }
 
 pub(crate) struct TerminalGridConfiguration {
@@ -152,7 +152,7 @@ pub(crate) struct TerminalGridConfiguration {
     pub(crate) preedit: Option<PreeditLayout>,
     pub(crate) focus_handle: FocusHandle,
     pub(crate) input: Entity<TerminalPane>,
-    pub(crate) text_blink_visible: bool,
+    pub(crate) blink_phase_visible: bool,
     pub(crate) scale_factor: f32,
 }
 
@@ -170,8 +170,11 @@ impl TerminalGridElement {
                 .cloned()
                 .map(|cell| (position, cell))
         });
-        let cursor_style =
-            presented_cursor_style(screen.cursor, configuration.terminal_input_focused);
+        let cursor_style = presented_cursor_style(
+            screen.cursor,
+            configuration.terminal_input_focused,
+            configuration.blink_phase_visible,
+        );
         Self {
             background: screen.background,
             foreground: if screen.colors.reversed {
@@ -200,7 +203,7 @@ impl TerminalGridElement {
             preedit: configuration.preedit,
             focus_handle: configuration.focus_handle,
             input: configuration.input,
-            text_blink_visible: configuration.text_blink_visible,
+            blink_phase_visible: configuration.blink_phase_visible,
         }
     }
 }
@@ -208,10 +211,13 @@ impl TerminalGridElement {
 fn presented_cursor_style(
     mut negotiated: CursorSnapshot,
     terminal_input_focused: bool,
+    blink_phase_visible: bool,
 ) -> CursorSnapshot {
     if negotiated.visible && !terminal_input_focused {
         negotiated.shape = CursorShapeSnapshot::BlockHollow;
         negotiated.blinking = false;
+    } else if negotiated.visible && negotiated.blinking && !blink_phase_visible {
+        negotiated.visible = false;
     }
     negotiated
 }
@@ -308,7 +314,7 @@ impl Element for TerminalGridElement {
                 .fragments
                 .iter()
                 .filter(|fragment| {
-                    text_fragment_visible(fragment.blinking, self.text_blink_visible)
+                    text_fragment_visible(fragment.blinking, self.blink_phase_visible)
                 })
                 .map(|fragment| PreparedText {
                     line: window.text_system().shape_line(
@@ -340,7 +346,7 @@ impl Element for TerminalGridElement {
                 grid_left,
                 self.cell_width,
                 decoration_metrics,
-                self.text_blink_visible,
+                self.blink_phase_visible,
             );
             let over_text_decorations = prepare_decoration_geometry(
                 &row.over_text_decorations,
@@ -348,14 +354,14 @@ impl Element for TerminalGridElement {
                 grid_left,
                 self.cell_width,
                 decoration_metrics,
-                self.text_blink_visible,
+                self.blink_phase_visible,
             );
             let symbols = prepare_symbol_geometry(
                 &row.symbols,
                 row_top,
                 grid_left,
                 self.cell_width,
-                self.text_blink_visible,
+                self.blink_phase_visible,
             );
 
             let mut text: Vec<PreparedText> = text;
@@ -434,7 +440,7 @@ impl Element for TerminalGridElement {
                 if plan.recolor_text
                     && !cell.spacer_tail
                     && !cell.invisible
-                    && text_fragment_visible(cell.blinking, self.text_blink_visible)
+                    && text_fragment_visible(cell.blinking, self.blink_phase_visible)
                 {
                     if let Some(symbol) = row
                         .symbols
@@ -448,7 +454,7 @@ impl Element for TerminalGridElement {
                             row_top,
                             grid_left,
                             self.cell_width,
-                            self.text_blink_visible,
+                            self.blink_phase_visible,
                         );
                     } else {
                         let cursor_font =
@@ -1470,12 +1476,20 @@ mod tests {
             ..CursorSnapshot::default()
         };
 
-        assert_eq!(presented_cursor_style(negotiated, true), negotiated);
+        assert_eq!(presented_cursor_style(negotiated, true, true), negotiated);
         assert_eq!(
-            presented_cursor_style(negotiated, false),
+            presented_cursor_style(negotiated, false, false),
             CursorSnapshot {
                 blinking: false,
                 shape: crate::terminal::CursorShapeSnapshot::BlockHollow,
+                ..negotiated
+            }
+        );
+
+        assert_eq!(
+            presented_cursor_style(negotiated, true, false),
+            CursorSnapshot {
+                visible: false,
                 ..negotiated
             }
         );
@@ -1484,7 +1498,7 @@ mod tests {
             visible: false,
             ..negotiated
         };
-        assert_eq!(presented_cursor_style(hidden, false), hidden);
+        assert_eq!(presented_cursor_style(hidden, false, false), hidden);
     }
 
     #[test]
