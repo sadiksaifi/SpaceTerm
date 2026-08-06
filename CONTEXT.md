@@ -464,10 +464,11 @@ fatal runtime failures require closing the Pane and restarting the command, whil
 presentation or resource failures retain the last valid Presentation Generation and permit retry.
 Failure mapping discards raw library messages at the boundary so terminal contents, clipboard
 data, environment values, paths, and secrets never enter Pane state or diagnostics. Diagnostics
-retain only a bounded sequence of failure class, recoverability, and static operation identifiers
-(at most 128 records and 64 KiB). SpaceTerm performs no automatic network telemetry or crash
-upload. A local diagnostic file is created only after the user explicitly chooses Export Terminal
-Diagnostics and confirms a path through the native save panel.
+retain only a bounded sequence of failure class, recoverability, and static operation identifiers,
+plus unhandled keyboard event kind, action, and native key code (at most 128 records and 64 KiB).
+Logical and typed key text never enters diagnostics. SpaceTerm performs no automatic network
+telemetry or crash upload. A local diagnostic file is created only after the user explicitly
+chooses Export Terminal Diagnostics and confirms a path through the native save panel.
 
 ### Workspace-Bound Terminal Creation
 
