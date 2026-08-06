@@ -2,6 +2,7 @@ mod emulator;
 mod file_insertion;
 pub(crate) mod geometry;
 mod hyperlink;
+pub(crate) mod identity;
 mod key;
 mod keyboard_protocol;
 pub(crate) mod metadata;

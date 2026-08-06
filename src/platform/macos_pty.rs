@@ -15,6 +15,7 @@ use thiserror::Error;
 use crate::platform::shell_integration::{
     ShellEnvironment, configured_mode, plan_shell_integration, resource_root,
 };
+use crate::terminal::identity;
 
 const CHILD_EXIT_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const GRACEFUL_SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(250);
@@ -513,19 +514,31 @@ fn validate_working_directory(working_directory: &Path) -> Result<(), PtyError> 
 }
 
 fn build_shell_command(shell: &str, working_directory: &Path) -> CommandBuilder {
+    build_shell_command_with_resources(shell, working_directory, &resource_root())
+}
+
+fn build_shell_command_with_resources(
+    shell: &str,
+    working_directory: &Path,
+    resources: &Path,
+) -> CommandBuilder {
     let mut command = CommandBuilder::new(shell);
     let integration = plan_shell_integration(
         Path::new(shell),
-        &resource_root(),
+        resources,
         configured_mode(),
         &ShellEnvironment::capture(),
     );
     integration.apply(&mut command);
+    let terminal_identity = identity::launch_identity(resources);
     command.arg("-l");
-    command.env("TERM", "xterm-256color");
-    command.env("COLORTERM", "truecolor");
-    command.env("TERM_PROGRAM", "SpaceTerm");
-    command.env("TERM_PROGRAM_VERSION", env!("CARGO_PKG_VERSION"));
+    command.env("TERM", terminal_identity.term);
+    if let Some(terminfo) = terminal_identity.terminfo {
+        command.env("TERMINFO", terminfo);
+    }
+    command.env("COLORTERM", identity::COLORTERM);
+    command.env("TERM_PROGRAM", identity::PROGRAM_NAME);
+    command.env("TERM_PROGRAM_VERSION", identity::PROGRAM_VERSION);
     command.cwd(working_directory);
     command
 }
@@ -895,6 +908,41 @@ mod tests {
             Some(std::ffi::OsStr::new(env!("CARGO_PKG_VERSION")))
         );
         assert!(command.get_controlling_tty());
+    }
+
+    #[test]
+    fn shell_command_uses_packaged_terminfo_only_when_the_entry_is_discoverable() {
+        let resources = std::env::temp_dir().join(format!(
+            "spaceterm-command-terminfo-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let terminfo = resources.join("terminfo/78/xterm-spaceterm");
+        std::fs::create_dir_all(terminfo.parent().unwrap()).unwrap();
+        std::fs::write(&terminfo, b"compiled").unwrap();
+
+        let command = build_shell_command_with_resources("/bin/zsh", Path::new("/tmp"), &resources);
+
+        assert_eq!(
+            command.get_env("TERM"),
+            Some(std::ffi::OsStr::new(identity::TERM_NAME))
+        );
+        assert_eq!(
+            command.get_env("TERMINFO"),
+            Some(resources.join("terminfo").as_os_str())
+        );
+        assert_eq!(
+            command.get_env("TERM_PROGRAM"),
+            Some(std::ffi::OsStr::new(identity::PROGRAM_NAME))
+        );
+        assert_eq!(
+            command.get_env("TERM_PROGRAM_VERSION"),
+            Some(std::ffi::OsStr::new(identity::PROGRAM_VERSION))
+        );
+        std::fs::remove_dir_all(resources).unwrap();
     }
 
     #[test]

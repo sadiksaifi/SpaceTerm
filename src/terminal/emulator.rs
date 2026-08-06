@@ -24,6 +24,7 @@ use libghostty_vt::terminal::{Mode, Point, PointCoordinate, ScrollViewport};
 use libghostty_vt::{Error, RenderState, Terminal, TerminalOptions};
 
 use crate::terminal::geometry::{BackingPosition, TerminalGeometry};
+use crate::terminal::identity::{self, XtGetTcapObserver};
 use crate::terminal::key::{InputModifiers, KeyAction, KeyInput, OptionAsAltPolicy, PhysicalKey};
 use crate::terminal::keyboard_protocol::KeyboardProtocolEncoder;
 use crate::terminal::metadata::{MetadataTracker, TerminalMetadataSnapshot};
@@ -515,6 +516,7 @@ pub(crate) struct TerminalEmulator {
     pending_directory: Rc<RefCell<Option<Arc<str>>>>,
     title: Arc<str>,
     metadata: MetadataTracker,
+    xtgettcap: XtGetTcapObserver,
     primary_row_cache: Vec<RowSnapshot>,
     alternate_row_cache: Vec<RowSnapshot>,
     cached_cols: u16,
@@ -607,7 +609,14 @@ impl EmulatorAction {
 impl TerminalEmulator {
     #[cfg(test)]
     pub(crate) fn new(geometry: TerminalGeometry) -> Result<Self, Error> {
-        Self::new_with_metadata(geometry, "", "", None, Instant::now())
+        Self::new_with_metadata(
+            geometry,
+            "",
+            "",
+            None,
+            identity::TERM_FALLBACK,
+            Instant::now(),
+        )
     }
 
     pub(crate) fn new_with_metadata(
@@ -615,6 +624,7 @@ impl TerminalEmulator {
         initial_directory: &str,
         fallback_title: &str,
         local_hostname: Option<&str>,
+        terminal_name: &'static str,
         epoch: Instant,
     ) -> Result<Self, Error> {
         let grid = geometry.grid();
@@ -650,6 +660,8 @@ impl TerminalEmulator {
                 }
             }
         })?;
+        terminal.on_xtversion(|_| Some(identity::XTVERSION))?;
+        terminal.on_device_attributes(|_| Some(identity::device_attributes()))?;
 
         let metadata =
             MetadataTracker::new(initial_directory, fallback_title, local_hostname, epoch);
@@ -678,6 +690,7 @@ impl TerminalEmulator {
             pending_directory,
             title,
             metadata,
+            xtgettcap: XtGetTcapObserver::new(terminal_name),
             primary_row_cache: Vec::new(),
             alternate_row_cache: Vec::new(),
             cached_cols: 0,
@@ -706,6 +719,8 @@ impl TerminalEmulator {
         if !bytes.is_empty() && self.active_pointer.is_some() {
             self.pointer_mapping_invalidated = true;
         }
+        self.xtgettcap
+            .feed(bytes, &mut self.pty_responses.borrow_mut());
         self.metadata.feed(bytes, now);
         let synchronized_before = self.terminal.mode(Mode::SYNC_OUTPUT).unwrap_or(false);
         self.terminal.vt_write(bytes);
@@ -1832,6 +1847,22 @@ mod tests {
         TerminalEmulator::new(geometry(cols, rows, 10.0, 20.0)).unwrap()
     }
 
+    fn emulator_with_terminal_name(
+        cols: u16,
+        rows: u16,
+        terminal_name: &'static str,
+    ) -> TerminalEmulator {
+        TerminalEmulator::new_with_metadata(
+            geometry(cols, rows, 10.0, 20.0),
+            "",
+            "",
+            None,
+            terminal_name,
+            Instant::now(),
+        )
+        .unwrap()
+    }
+
     #[test]
     fn pixel_mouse_coordinates_should_share_fractional_backing_geometry() {
         let geometry = TerminalGeometry::from_grid(
@@ -2378,6 +2409,7 @@ mod tests {
             "/Users/me",
             "zsh",
             Some("mac.local"),
+            identity::TERM_FALLBACK,
             epoch,
         )
         .unwrap();
@@ -2414,8 +2446,15 @@ mod tests {
     fn semantic_prompt_zones_and_command_state_are_owned_by_the_snapshot() {
         let geometry = geometry(16, 2, 10.0, 20.0);
         let epoch = Instant::now();
-        let mut emulator =
-            TerminalEmulator::new_with_metadata(geometry, "/tmp", "zsh", None, epoch).unwrap();
+        let mut emulator = TerminalEmulator::new_with_metadata(
+            geometry,
+            "/tmp",
+            "zsh",
+            None,
+            identity::TERM_FALLBACK,
+            epoch,
+        )
+        .unwrap();
         emulator.feed_at(
             b"\x1b]133;A\x07$ \x1b]133;B\x07echo\x1b]133;C;cmdline=echo\x07out",
             epoch + Duration::from_secs(1),
@@ -2698,6 +2737,42 @@ mod tests {
 
         emulator.resize(geometry(20, 4, 8.0, 18.0)).unwrap();
         assert_eq!(emulator.take_pty_responses(), b"\x1b[48;4;20;72;160t");
+    }
+
+    #[test]
+    fn runtime_identity_replies_are_spaceterm_owned_and_capability_bounded() {
+        let mut emulator = emulator_with_terminal_name(10, 2, identity::TERM_NAME);
+
+        emulator.feed(b"\x1b[>q\x1b[c\x1b[>c\x1bP+q544E;436F\x1b\\");
+        let replies = emulator.take_pty_responses();
+
+        assert!(
+            replies
+                .windows(identity::XTVERSION.len())
+                .any(|window| window == identity::XTVERSION.as_bytes())
+        );
+        assert!(
+            replies
+                .windows(b"\x1b[?62;22;52c".len())
+                .any(|window| window == b"\x1b[?62;22;52c")
+        );
+        assert!(
+            replies
+                .windows(b"\x1b[>1;0;0c".len())
+                .any(|window| window == b"\x1b[>1;0;0c")
+        );
+        assert!(replies.windows(7).any(|window| window == b"1+r544E"));
+        assert!(
+            replies
+                .windows(b"787465726D2D73706163657465726D".len())
+                .any(|window| window == b"787465726D2D73706163657465726D")
+        );
+        assert!(replies.windows(7).any(|window| window == b"1+r436F"));
+        assert!(
+            !String::from_utf8_lossy(&replies)
+                .to_ascii_lowercase()
+                .contains("ghostty")
+        );
     }
 
     #[test]

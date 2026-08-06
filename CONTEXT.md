@@ -110,6 +110,18 @@ bounded OSC 7 directory and OSC 133 prompt/command marks consumed by Terminal Me
 resource version is discovered from `Contents/Resources` in a packaged app and `assets` during
 development, and package verification requires every supported shell resource.
 
+### Truthful Terminal Capability Identity
+
+One Terminal Capability Identity owns the SpaceTerm program name and version, preferred and
+fallback `TERM` values, true-color marker, XTVERSION and device-attribute replies, and the bounded
+XTGETTCAP allowlist. A Shell Launch Plan selects `xterm-spaceterm` only when its compiled entry is
+discoverable in packaged resources and otherwise keeps `xterm-256color`; the selected terminfo
+root is passed explicitly to the Shell Process. The generated entry inherits the established
+xterm-256color baseline and adds only direct color, authorized clipboard, and cursor-shape
+capabilities already implemented by the runtime. Packaging compiles the source with `tic`, and
+verification resolves the entry from both the signed app and mounted DMG. No runtime or packaged
+identity may identify SpaceTerm as its emulator dependency.
+
 ### Bounded PTY Output Transport
 
 Terminal Session control Commands, including Shutdown, use a reliable latency-sensitive lane. PTY

@@ -18,12 +18,14 @@ use crate::platform::macos_pty::{
     PtyError, PtyTerminator, ShellExit, ShutdownDisposition, SpawnedPty, spawn_user_shell,
     user_shell,
 };
+use crate::platform::shell_integration::resource_root;
 #[cfg(test)]
 use crate::terminal::emulator::MAX_SYNCHRONIZED_OUTPUT_DURATION;
 use crate::terminal::emulator::{
     EmulatorAction, PresentationGeneration, ScreenSnapshot, TerminalEmulator,
 };
 use crate::terminal::geometry::TerminalGeometry;
+use crate::terminal::identity;
 #[cfg(test)]
 use crate::terminal::key::OptionAsAltPolicy;
 use crate::terminal::key::{InputModifiers, KeyInput};
@@ -506,6 +508,7 @@ impl TerminalSession {
     ) -> Result<(Self, async_channel::Receiver<SessionEvent>), SessionError> {
         let working_directory = PathBuf::from(working_directory);
         let fallback_title = shell_fallback_title();
+        let terminal_name = identity::launch_identity(&resource_root()).term;
         let (command_tx, command_rx) = mpsc::channel();
         let reader_transport = ReaderTransport::new(command_tx.clone());
         let resizes = ResizeMailbox::default();
@@ -541,6 +544,7 @@ impl TerminalSession {
                         initial_geometry: geometry,
                         initial_directory: working_directory,
                         fallback_title,
+                        terminal_name,
                     },
                     command_rx,
                     reader_transport,
@@ -569,6 +573,7 @@ impl TerminalSession {
         spawn_pty: impl FnOnce(PtySize, &Path) -> Result<StartedSessionPty, PtyError>,
     ) -> Result<(Self, async_channel::Receiver<SessionEvent>), SessionError> {
         let worker_directory = working_directory.to_owned();
+        let terminal_name = identity::launch_identity(&resource_root()).term;
         let StartedSessionPty { pty, terminator } =
             spawn_pty(pty_size(geometry), working_directory)?;
         let (command_tx, command_rx) = mpsc::channel();
@@ -589,6 +594,7 @@ impl TerminalSession {
                         initial_geometry: geometry,
                         initial_directory: worker_directory,
                         fallback_title: "Terminal".to_owned(),
+                        terminal_name,
                     },
                     command_rx,
                     reader_transport,
@@ -900,6 +906,7 @@ struct TerminalWorkerContext {
     initial_geometry: TerminalGeometry,
     initial_directory: PathBuf,
     fallback_title: String,
+    terminal_name: &'static str,
 }
 
 struct HiddenInputSchedule {
@@ -1173,6 +1180,7 @@ impl TerminalWorker {
             initial_geometry,
             initial_directory,
             fallback_title,
+            terminal_name,
         } = context;
         let ReaderTransport {
             commands: reader_commands,
@@ -1204,6 +1212,7 @@ impl TerminalWorker {
             &initial_directory.to_string_lossy(),
             &fallback_title,
             local_hostname.as_deref(),
+            terminal_name,
             Instant::now(),
         ) {
             Ok(emulator) => emulator,

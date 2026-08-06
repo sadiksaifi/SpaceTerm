@@ -16,6 +16,7 @@ doctor:
     @xcrun --find codesign
     @xcrun --find hdiutil
     @xcrun --find iconutil
+    @xcrun --find tic
 
 # Download locked Rust dependencies.
 fetch:
