@@ -433,6 +433,17 @@ rendering. A nonempty commit clears Marked Text and becomes exactly one typed in
 the reliable Terminal Session command lane; the worker emits its UTF-8 once in order and never
 tracks it as a held key.
 
+### Terminal Accessibility
+
+Each Pane exposes one native editable text-area model whose canonical indexes are UTF-16 code
+units, matching AppKit. The model preserves complete grapheme text while mapping wide-cell spacer
+tails, combining sequences, hard lines, soft wraps, the visible range, Selection, and Cursor back
+to logical terminal cells. Candidate and range bounds use the same logical cell origin, width, and
+line height as pointer and renderer geometry. Terminal output, Selection, Terminal Input Focus,
+and Marked Text changes produce typed, coalesced native accessibility notifications; notifications
+carry no terminal contents. Accessibility may request terminal-owned selection changes through the
+Terminal Session, but never mutates the Terminal Emulator from the native callback.
+
 ### Workspace-Bound Terminal Creation
 
 `WorkspaceCollection` owns default Workspace naming and passes the exact stored Workspace root into

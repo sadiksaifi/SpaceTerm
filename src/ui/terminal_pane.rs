@@ -23,6 +23,7 @@ use super::{
     DecreaseTerminalFontSize, DenyOsc52Clipboard, IncreaseTerminalFontSize, PasteClipboard,
     ResetTerminalFontSize, TERMINAL_KEY_CONTEXT,
 };
+use crate::platform::macos_accessibility::post_accessibility_notifications;
 #[cfg(not(test))]
 use crate::platform::macos_attention::{MacosAttentionPlatform, apply_attention_effects};
 use crate::platform::macos_keyboard::{
@@ -40,12 +41,13 @@ use crate::terminal::geometry::{
     BackingScale, CellGridSize, LogicalCellSize, LogicalPosition, LogicalSize, TerminalGeometry,
 };
 use crate::terminal::{
-    AttentionFacts, InputModifiers, KeyAction, KeyInput, NativeContextActions, NativeInsertion,
-    OptionAsAltPolicy, Osc52Access, Osc52AuthorizationDecision, Osc52AuthorizationRequest,
-    Osc52Target, PasteConfirmation, PasteDecision, PasteRequestOutcome, PasteResolution,
-    PhysicalKey, PointerButton, PointerInput, PointerPhase, ScreenSnapshot, SelectionCopy,
-    SessionEvent, ShiftSelectionPolicy, SurfacePosition, TerminalSessionHandle, WheelInput,
-    WheelPhase, WorkspaceTerminalSessionFactory,
+    AccessibilityGeometry, AccessibilityNotification, AttentionFacts, InputModifiers, KeyAction,
+    KeyInput, NativeContextActions, NativeInsertion, OptionAsAltPolicy, Osc52Access,
+    Osc52AuthorizationDecision, Osc52AuthorizationRequest, Osc52Target, PasteConfirmation,
+    PasteDecision, PasteRequestOutcome, PasteResolution, PhysicalKey, PointerButton, PointerInput,
+    PointerPhase, ScreenSnapshot, SelectionCopy, SessionEvent, ShiftSelectionPolicy,
+    SurfacePosition, TerminalAccessibilityModel, TerminalSessionHandle, WheelInput, WheelPhase,
+    WorkspaceTerminalSessionFactory,
 };
 use crate::theme::{ACTIVE_THEME, Color};
 
@@ -82,6 +84,8 @@ pub(crate) struct TerminalPane {
     session: Option<Box<dyn TerminalSessionHandle>>,
     session_start_attempted: bool,
     screen: Arc<ScreenSnapshot>,
+    accessibility: TerminalAccessibilityModel,
+    accessibility_notifications: Vec<AccessibilityNotification>,
     status: Option<String>,
     fallback_title: SharedString,
     title: SharedString,
@@ -138,6 +142,8 @@ impl TerminalPane {
         let fallback_title: SharedString =
             normalized_pane_title("", &session_factory.fallback_title()).into();
         let scrollbar = cx.new(|_| OverlayScrollbar::<u64>::new("terminal-scrollbar"));
+        let screen = ScreenSnapshot::empty();
+        let accessibility = TerminalAccessibilityModel::from_screen(&screen);
         cx.subscribe_in(
             &scrollbar,
             window,
@@ -165,7 +171,9 @@ impl TerminalPane {
             session_factory,
             session: None,
             session_start_attempted: false,
-            screen: ScreenSnapshot::empty(),
+            screen,
+            accessibility,
+            accessibility_notifications: Vec::new(),
             status: None,
             title: fallback_title.clone(),
             fallback_title,
@@ -251,6 +259,8 @@ impl TerminalPane {
         let focus_gained = !self.terminal_input_focus && focused;
         if self.terminal_input_focus != focused {
             self.terminal_input_focus = focused;
+            self.accessibility_notifications
+                .push(AccessibilityNotification::Focus);
             self.reset_blink_phase();
             if !focused {
                 if let Some(confirmation) = self.pending_paste.take()
@@ -500,6 +510,16 @@ impl TerminalPane {
                     self.title = title.into();
                     cx.emit(TerminalPaneEvent::TitleChanged(self.title.clone()));
                 }
+                let accessibility = TerminalAccessibilityModel::from_screen(&screen);
+                if accessibility.text() != self.accessibility.text() {
+                    self.accessibility_notifications
+                        .push(AccessibilityNotification::Value);
+                }
+                if accessibility.selection_range() != self.accessibility.selection_range() {
+                    self.accessibility_notifications
+                        .push(AccessibilityNotification::Selection);
+                }
+                self.accessibility = accessibility;
                 self.screen = screen;
                 self.sync_scrollbar(cx);
             }
@@ -1110,8 +1130,18 @@ impl EntityInputHandler for TerminalPane {
         _window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> Option<String> {
-        let (text, adjusted) = self.ime.text_for_utf16_range(range)?;
-        *adjusted_range = Some(adjusted);
+        if self.ime.marked_text().is_some() {
+            let (text, adjusted) = self.ime.text_for_utf16_range(range)?;
+            *adjusted_range = Some(adjusted);
+            return Some(text);
+        }
+        if range.start < self.accessibility.visible_range().end
+            && self.accessibility.line_for_index(range.start).is_none()
+        {
+            return None;
+        }
+        let text = self.accessibility.text_for_range(range.clone())?.to_owned();
+        *adjusted_range = Some(range);
         Some(text)
     }
 
@@ -1124,8 +1154,15 @@ impl EntityInputHandler for TerminalPane {
         if !ignore_disabled_input && !self.terminal_input_focused(window) {
             return None;
         }
+        let range = if self.ime.marked_text().is_some() {
+            self.ime.selected_range()
+        } else {
+            self.accessibility
+                .selection_range()
+                .unwrap_or_else(|| self.accessibility.cursor_range())
+        };
         Some(UTF16Selection {
-            range: self.ime.selected_range(),
+            range,
             reversed: false,
         })
     }
@@ -1140,6 +1177,8 @@ impl EntityInputHandler for TerminalPane {
 
     fn unmark_text(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         self.ime.cancel();
+        self.accessibility_notifications
+            .push(AccessibilityNotification::Value);
         cx.notify();
     }
 
@@ -1161,6 +1200,8 @@ impl EntityInputHandler for TerminalPane {
                 cx,
             );
         }
+        self.accessibility_notifications
+            .push(AccessibilityNotification::Value);
         cx.notify();
     }
 
@@ -1178,6 +1219,8 @@ impl EntityInputHandler for TerminalPane {
         }
         self.ime
             .replace_and_mark(range, new_text, new_selected_range);
+        self.accessibility_notifications
+            .push(AccessibilityNotification::Value);
         cx.notify();
     }
 
@@ -1188,32 +1231,56 @@ impl EntityInputHandler for TerminalPane {
         _window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> Option<Bounds<Pixels>> {
-        let position = self.screen.cursor.position?;
-        let columns = self.screen.rows.first()?.len();
-        let marked_text = self.ime.marked_text().unwrap_or("");
-        let layout = layout_preedit(
-            marked_text,
-            usize::from(position.row),
-            usize::from(position.column),
-            columns,
-            range_utf16.end,
-        );
-        Some(ime_candidate_bounds(
-            element_bounds,
-            columns,
-            self.cell_width,
-            px(self.line_height),
-            layout.caret,
+        if let Some(marked_text) = self.ime.marked_text() {
+            let position = self.screen.cursor.position?;
+            let columns = self.screen.rows.first()?.len();
+            let layout = layout_preedit(
+                marked_text,
+                usize::from(position.row),
+                usize::from(position.column),
+                columns,
+                range_utf16.end,
+            );
+            return Some(ime_candidate_bounds(
+                element_bounds,
+                columns,
+                self.cell_width,
+                px(self.line_height),
+                layout.caret,
+            ));
+        }
+        let grid = self.grid_bounds?;
+        let geometry = AccessibilityGeometry::new(
+            f32::from(grid.origin.x),
+            f32::from(grid.origin.y),
+            f32::from(self.cell_width),
+            self.line_height,
+        )?;
+        let (x, y, width, height) = self.accessibility.bounds_for_range(range_utf16, geometry)?;
+        Some(Bounds::new(
+            point(px(x), px(y)),
+            size(px(width), px(height)),
         ))
     }
 
     fn character_index_for_point(
         &mut self,
-        _point: gpui::Point<Pixels>,
+        point: gpui::Point<Pixels>,
         _window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> Option<usize> {
-        Some(self.ime.selected_range().end)
+        if self.ime.marked_text().is_some() {
+            return Some(self.ime.selected_range().end);
+        }
+        let grid = self.grid_bounds?;
+        let geometry = AccessibilityGeometry::new(
+            f32::from(grid.origin.x),
+            f32::from(grid.origin.y),
+            f32::from(self.cell_width),
+            self.line_height,
+        )?;
+        self.accessibility
+            .index_for_point(f32::from(point.x), f32::from(point.y), geometry)
     }
 }
 
@@ -1226,6 +1293,9 @@ impl Drop for TerminalPane {
 impl Render for TerminalPane {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         update_application_activation();
+        let notifications = AccessibilityNotification::coalesce(&self.accessibility_notifications);
+        self.accessibility_notifications.clear();
+        post_accessibility_notifications(&notifications, self.accessibility.visible_range());
         let pane = cx.entity().downgrade();
         let (terminal_input_focused, focus_gained) = self.sync_terminal_input_focus(window);
         let surface_active = self.product_focus.active_workspace
