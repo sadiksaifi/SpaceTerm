@@ -607,7 +607,6 @@ impl TerminalPane {
         if !self.terminal_input_focused(window) {
             return;
         }
-        self.clear_attention(cx);
         let action = if event.is_held {
             KeyAction::Repeat
         } else {
@@ -616,6 +615,9 @@ impl TerminalPane {
         let input = NativeKeyEvent::current_key(action)
             .map(|event| self.keyboard_bridge.translate(event))
             .unwrap_or_else(|| encode_key(event));
+        if !matches!(input, KeyTranslation::Unhandled(_)) {
+            self.clear_attention(cx);
+        }
         if self.ime.marked_text().is_some() {
             if let KeyTranslation::Encoded(input) = &input
                 && input.physical_key != PhysicalKey::Unidentified
@@ -2166,6 +2168,23 @@ mod tests {
     };
     use crate::terminal::{ScrollbarSnapshot, SessionFailure, TerminalSessionFactory};
 
+    struct KeyPropagationProbe {
+        pane: Entity<TerminalPane>,
+        propagated_key_downs: Rc<Cell<usize>>,
+    }
+
+    impl Render for KeyPropagationProbe {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let propagated_key_downs = Rc::clone(&self.propagated_key_downs);
+            div()
+                .size_full()
+                .on_key_down(move |_, _, _| {
+                    propagated_key_downs.set(propagated_key_downs.get() + 1);
+                })
+                .child(self.pane.clone())
+        }
+    }
+
     fn blinking_screen() -> Arc<ScreenSnapshot> {
         ScreenSnapshot::from_test_parts(
             Arc::from([Arc::from([crate::terminal::CellSnapshot {
@@ -2289,6 +2308,40 @@ mod tests {
         });
         cx.run_until_parked();
         (pane, cx, records)
+    }
+
+    fn connected_terminal_pane_with_key_propagation(
+        cx: &mut TestAppContext,
+    ) -> (
+        Entity<TerminalPane>,
+        &mut VisualTestContext,
+        TestTerminalSessionRecords,
+        Rc<Cell<usize>>,
+    ) {
+        cx.update(crate::ui::init);
+        let records = TestTerminalSessionRecords::default();
+        let session_factory: Rc<dyn TerminalSessionFactory> =
+            Rc::new(TestTerminalSessionFactory::new(records.clone()));
+        let session_factory = WorkspaceTerminalSessionFactory::new(
+            session_factory,
+            PathBuf::from("/tmp/spaceterm-terminal-pane-keyboard-propagation-test"),
+        );
+        let propagated_key_downs = Rc::new(Cell::new(0));
+        let propagated_for_probe = Rc::clone(&propagated_key_downs);
+        let (probe, cx) = cx.add_window_view(|window, cx| {
+            let pane = cx.new(|cx| TerminalPane::new(session_factory, window, cx));
+            KeyPropagationProbe {
+                pane,
+                propagated_key_downs: propagated_for_probe,
+            }
+        });
+        let pane = probe.read_with(cx, |probe, _| probe.pane.clone());
+        cx.update(|window, cx| {
+            window.activate_window();
+            pane.update(cx, |pane, _| pane.focus(window));
+        });
+        cx.run_until_parked();
+        (pane, cx, records, propagated_key_downs)
     }
 
     fn terminal_pane_with_selection_copy(
@@ -2897,6 +2950,71 @@ mod tests {
                     PaneTerminalState::Running,
                 ),
                 None,
+            )
+        );
+    }
+
+    #[gpui::test]
+    fn unhandled_key_down_preserves_attention_and_propagates(cx: &mut TestAppContext) {
+        let (pane, cx, _records, propagated_key_downs) =
+            connected_terminal_pane_with_key_propagation(cx);
+        let attention_events = Rc::new(Cell::new(0));
+        let attention_events_for_subscription = Rc::clone(&attention_events);
+        pane.update(cx, |_, cx| {
+            cx.subscribe(&pane, move |_, _, event: &TerminalPaneEvent, _| {
+                if matches!(event, TerminalPaneEvent::AttentionChanged { .. }) {
+                    attention_events_for_subscription
+                        .set(attention_events_for_subscription.get() + 1);
+                }
+            })
+            .detach();
+        });
+        pane.update(cx, |pane, cx| {
+            pane.terminal_input_focus = false;
+            pane.handle_event(
+                SessionEvent::Attention(crate::terminal::attention::AttentionEvent::Bell),
+                cx,
+            );
+            pane.terminal_input_focus = true;
+        });
+        let before = pane.read_with(cx, |pane, _| {
+            (
+                pane.attention.unread_count(),
+                pane.attention.visual_bell(),
+                pane.attention_visual,
+                pane.attention_generation,
+                pane._attention_task.is_some(),
+                pane.diagnostics.record_count(),
+            )
+        });
+        let attention_events_before = attention_events.get();
+
+        cx.simulate_event(event("hyper", None, Modifiers::default()));
+
+        let after = pane.read_with(cx, |pane, _| {
+            (
+                pane.attention.unread_count(),
+                pane.attention.visual_bell(),
+                pane.attention_visual,
+                pane.attention_generation,
+                pane._attention_task.is_some(),
+                pane.diagnostics.record_count(),
+            )
+        });
+        assert_eq!(
+            (
+                before,
+                after,
+                attention_events_before,
+                attention_events.get(),
+                propagated_key_downs.get(),
+            ),
+            (
+                (1, true, true, before.3, true, before.5),
+                (1, true, true, before.3, true, before.5 + 1),
+                attention_events_before,
+                attention_events_before,
+                1,
             )
         );
     }
