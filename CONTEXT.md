@@ -149,6 +149,22 @@ the final metadata stale before the typed lifecycle event. Pane and Window chrom
 owning snapshot's resolved sanitized title and never parse terminal controls or query live emulator
 state.
 
+### Conventional Terminal Conformance Corpus
+
+The test-only corpus in `src/terminal/conformance.rs` is the release gate for every advertised
+conventional terminal capability. Each fixture names its owning issue, covered user stories,
+authoritative protocol key, oracle class, and deterministic step/input/output budgets. The runner
+executes real Terminal Emulator, Session, platform, and UI reducers without user configuration,
+network access, or mutable global application state. Byte goldens preserve protocol output;
+semantic goldens preserve row and cell order, Presentation Generation, Cursor, screen, and
+Terminal Metadata identity. Failures report the fixture, exact step, field, expected value, and
+observed value.
+
+Published specifications are authoritative. The audited Ghostty revision is only a behavioral
+reference, and image protocols are intentionally outside the corpus. The fixture matrix, authority
+catalog, audit revision, and maintenance rules are canonical in `docs/CONFORMANCE.md`. `just test`
+and therefore `just validate` run the corpus; `just conformance` provides the focused loop.
+
 ### Scoped Terminal Attention
 
 BEL and the transition to finished Command Metadata become typed Terminal Attention events on the
