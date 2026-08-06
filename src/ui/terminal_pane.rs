@@ -769,10 +769,14 @@ fn encode_keystroke(keystroke: &gpui::Keystroke, action: KeyAction) -> KeyTransl
         consumed_modifiers: InputModifiers::default(),
         option_as_alt: OptionAsAltPolicy::default(),
     };
+    let allows_text_input =
+        !input.modifiers.control && !input.modifiers.platform && !input.modifiers.alt;
     match input.validate() {
         Ok(()) => KeyTranslation::Encoded(input),
         Err(_) => match input.text {
-            Some(text) if action != KeyAction::Release => KeyTranslation::TextInput(text),
+            Some(text) if action != KeyAction::Release && allows_text_input => {
+                KeyTranslation::TextInput(text)
+            }
             _ => KeyTranslation::Unhandled(UnhandledKeyEvent {
                 kind: match action {
                     KeyAction::Press | KeyAction::Repeat => NativeKeyEventKind::KeyDown,
@@ -1244,6 +1248,23 @@ mod tests {
     fn unsupported_keys_are_unhandled_without_native_identity() {
         assert_eq!(
             encode_key(&event("hyper", None, Modifiers::default())),
+            KeyTranslation::Unhandled(UnhandledKeyEvent {
+                kind: NativeKeyEventKind::KeyDown,
+                action: KeyAction::Press,
+                native_key_code: None,
+            })
+        );
+    }
+
+    #[test]
+    fn unsupported_command_keys_with_text_are_unhandled() {
+        let modifiers = Modifiers {
+            platform: true,
+            ..Modifiers::default()
+        };
+
+        assert_eq!(
+            encode_key(&event("hyper", Some("x"), modifiers)),
             KeyTranslation::Unhandled(UnhandledKeyEvent {
                 kind: NativeKeyEventKind::KeyDown,
                 action: KeyAction::Press,
