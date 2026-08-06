@@ -70,6 +70,7 @@ verify_app_bundle() {
     local bundle_name display_name marketing_version build_number minimum_macos_version
     local extracted_iconset="$TEMP_ROOT/$label.iconset"
     local executable_description signature_details
+    local shell_integration="$app/Contents/Resources/shell-integration"
 
     [[ -d "$app" ]] || die "$label app bundle is missing: $app"
     [[ -f "$plist" ]] || die "$label Info.plist is missing: $plist"
@@ -132,6 +133,19 @@ verify_app_bundle() {
         || die "$label app icon does not contain a 16x16 representation"
     [[ -f "$extracted_iconset/icon_512x512@2x.png" ]] \
         || die "$label app icon does not contain a 1024x1024 representation"
+
+    [[ "$(tr -d '[:space:]' < "$shell_integration/VERSION")" == "1" ]] \
+        || die "$label shell integration version is missing or unsupported"
+    for resource in \
+        bash/spaceterm.bash \
+        elvish/lib/spaceterm-integration.elv \
+        fish/vendor_conf.d/spaceterm-shell-integration.fish \
+        nushell/vendor/autoload/spaceterm.nu \
+        zsh/.zshenv \
+        zsh/spaceterm-integration; do
+        [[ -f "$shell_integration/$resource" ]] \
+            || die "$label shell integration resource is missing: $resource"
+    done
 
     codesign --verify --strict --verbose=2 "$app" >/dev/null 2>&1 \
         || die "$label app signature verification failed: $app"

@@ -12,6 +12,10 @@ use portable_pty::{
 };
 use thiserror::Error;
 
+use crate::platform::shell_integration::{
+    ShellEnvironment, configured_mode, plan_shell_integration, resource_root,
+};
+
 const CHILD_EXIT_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const GRACEFUL_SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(250);
 const FORCED_SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(250);
@@ -510,6 +514,13 @@ fn validate_working_directory(working_directory: &Path) -> Result<(), PtyError> 
 
 fn build_shell_command(shell: &str, working_directory: &Path) -> CommandBuilder {
     let mut command = CommandBuilder::new(shell);
+    let integration = plan_shell_integration(
+        Path::new(shell),
+        &resource_root(),
+        configured_mode(),
+        &ShellEnvironment::capture(),
+    );
+    integration.apply(&mut command);
     command.arg("-l");
     command.env("TERM", "xterm-256color");
     command.env("COLORTERM", "truecolor");

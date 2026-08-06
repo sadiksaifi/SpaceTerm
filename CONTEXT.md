@@ -98,6 +98,18 @@ one SIGHUP to the complete owned process group, allows a bounded grace period, t
 that group when any member remains. The worker reaps the Shell Process exactly once after reader
 output and publishes typed normal, signal, graceful-shutdown, or forced-shutdown exit state.
 
+### Temporary Shell Integration
+
+The Shell Launch Plan may inject versioned SpaceTerm resources into supported interactive Bash,
+Zsh, Fish, Nushell, and Elvish processes without writing user configuration. Each shell keeps its
+normal login/startup ordering: Zsh restores and sources the original `ZDOTDIR`, modern Bash
+restores `ENV` after its POSIX bootstrap, and XDG-aware shells prepend then remove the packaged
+resource directory. Apple `/bin/bash`, unknown shells, disabled integration, and missing or
+mismatched resources fall back to an unchanged login launch. Integration scripts emit only
+bounded OSC 7 directory and OSC 133 prompt/command marks consumed by Terminal Metadata. The same
+resource version is discovered from `Contents/Resources` in a packaged app and `assets` during
+development, and package verification requires every supported shell resource.
+
 ### Bounded PTY Output Transport
 
 Terminal Session control Commands, including Shutdown, use a reliable latency-sensitive lane. PTY

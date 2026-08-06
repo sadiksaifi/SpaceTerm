@@ -30,6 +30,7 @@
 | **Terminal Emulator** | The state machine that interprets terminal output and maintains the visible grid and Scrollback. | Terminal Session, Pane |
 | **PTY** | The macOS pseudoterminal that connects a Terminal Emulator to its Shell Process. | Terminal, shell |
 | **Shell Process** | The command interpreter process launched for a Pane through its PTY. | Terminal, session |
+| **Shell Integration** | Versioned temporary startup resources injected only into a supported Shell Process to report safe directory, prompt, command, and completion facts without changing user configuration. | shell plugin installation, dotfile rewrite |
 | **Primary Screen** | The Terminal Emulator screen whose logical content includes bounded Scrollback and whose Terminal Viewport is restored after Alternate Screen use. | main buffer, normal buffer |
 | **Alternate Screen** | The temporary Terminal Emulator screen used by full-screen terminal applications; it has no Scrollback and does not replace Primary Screen state. | alternate buffer, secondary terminal |
 | **Terminal Viewport** | The visible row window over the active screen; it follows new output only while already at the bottom and otherwise remains anchored to logical content. | Workspace viewport, Pane scroll |
@@ -77,6 +78,7 @@
 - The **Primary Screen** and **Alternate Screen** retain independent state; leaving the Alternate Screen restores the Primary Screen and its **Terminal Viewport**.
 - A **Presentation Generation** belongs to one published Terminal Presentation; coordinate or Scrollback requests from an older generation never mutate current Terminal Emulator state.
 - **Terminal Metadata** belongs to exactly one **Terminal Session**; Pane and Window chrome may consume its sanitized immutable values but never terminal control bytes or live emulator state.
+- **Shell Integration** is scoped to one launched **Shell Process** and must preserve its ordinary startup files and environment or fall back without injection.
 - A **Reported Working Directory** accepts only a local absolute `file://` report and retains its last valid provenance when a malformed or remote report arrives.
 - A **Pane** belongs to exactly one **Window** and owns one **Terminal Session**.
 - A **Split** has exactly two child **Pane Layouts**; each child is either another **Split** or a **Pane**.

@@ -18,6 +18,7 @@ readonly OUTPUT_APP="$DIST_DIR/$APP_NAME.app"
 readonly OUTPUT_DMG="$DIST_DIR/$APP_NAME.dmg"
 readonly INFO_PLIST_SOURCE="$REPO_ROOT/packaging/macos/Info.plist"
 readonly ICON_SOURCE="$REPO_ROOT/assets/macos/AppIcon.png"
+readonly SHELL_INTEGRATION_SOURCE="$REPO_ROOT/assets/shell-integration"
 readonly BUILD_TARGET_DIR="$REPO_ROOT/target"
 
 UNIVERSAL=0
@@ -167,6 +168,8 @@ require_command plutil
 require_command sips
 [[ -f "$INFO_PLIST_SOURCE" ]] || die "missing Info.plist template: $INFO_PLIST_SOURCE"
 [[ -f "$ICON_SOURCE" ]] || die "missing app icon source: $ICON_SOURCE"
+[[ -f "$SHELL_INTEGRATION_SOURCE/VERSION" ]] \
+    || die "missing shell integration resources: $SHELL_INTEGRATION_SOURCE"
 
 PACKAGE_VERSION="$(
     cargo metadata --no-deps --format-version 1 --manifest-path "$REPO_ROOT/Cargo.toml" \
@@ -202,6 +205,9 @@ plutil -lint "$CONTENTS_DIR/Info.plist" >/dev/null
 
 echo "Generating $APP_NAME.icns"
 generate_icon "$TEMP_ROOT/$APP_NAME.iconset" "$BUNDLE_ICON"
+
+echo "Installing shell integration resources"
+ditto "$SHELL_INTEGRATION_SOURCE" "$RESOURCES_DIR/shell-integration"
 
 if (( UNIVERSAL )); then
     echo "Building universal release executable (arm64 + x86_64)"
