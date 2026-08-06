@@ -79,6 +79,56 @@ const FIXTURES: &[FixtureSpec] = &[
     fixture!("failure.typed-local-diagnostics", 41, [40], "spaceterm-failure-contract", Security),
 ];
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct Observation {
+    step: usize,
+    field: &'static str,
+    value: String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ExpectedObservation {
+    step: usize,
+    field: &'static str,
+    value: &'static str,
+}
+
+struct ExecutableFixture {
+    spec: &'static FixtureSpec,
+    expected: &'static [ExpectedObservation],
+    observe: fn() -> Result<Vec<Observation>, String>,
+}
+
+fn run_fixture(fixture: &ExecutableFixture) -> Result<(), String> {
+    let observed = (fixture.observe)()
+        .map_err(|error| format!("fixture `{}` failed: {error}", fixture.spec.id))?;
+
+    for (expected, observed) in fixture.expected.iter().zip(&observed) {
+        if expected.step != observed.step
+            || expected.field != observed.field
+            || expected.value != observed.value
+        {
+            return Err(format!(
+                "fixture `{}` step {} `{}` mismatch:\nexpected: {}\nobserved: {}",
+                fixture.spec.id,
+                expected.step,
+                expected.field,
+                expected.value,
+                observed.value
+            ));
+        }
+    }
+    if fixture.expected.len() != observed.len() {
+        return Err(format!(
+            "fixture `{}` observation count mismatch: expected {}, observed {}",
+            fixture.spec.id,
+            fixture.expected.len(),
+            observed.len()
+        ));
+    }
+    Ok(())
+}
+
 #[test]
 fn registry_covers_every_advertised_capability_without_image_protocols() {
     let stories = FIXTURES
@@ -115,4 +165,33 @@ fn registry_covers_every_advertised_capability_without_image_protocols() {
                 | OracleKind::Native
         ));
     }
+}
+
+#[test]
+fn runner_identifies_the_exact_fixture_step_and_oracle_mismatch() {
+    fn observe() -> Result<Vec<Observation>, String> {
+        Ok(vec![Observation {
+            step: 2,
+            field: "pty-bytes",
+            value: "1b 5b 4f 41".to_owned(),
+        }])
+    }
+
+    let fixture = ExecutableFixture {
+        spec: &FIXTURES[12],
+        expected: &[ExpectedObservation {
+            step: 2,
+            field: "pty-bytes",
+            value: "1b 5b 41",
+        }],
+        observe,
+    };
+
+    assert_eq!(
+        run_fixture(&fixture),
+        Err(
+            "fixture `keyboard.protocols` step 2 `pty-bytes` mismatch:\nexpected: 1b 5b 41\nobserved: 1b 5b 4f 41"
+                .to_owned()
+        )
+    );
 }
