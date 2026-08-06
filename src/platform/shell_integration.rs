@@ -192,6 +192,8 @@ fn detect_shell(shell: &Path) -> Option<ShellKind> {
 
 #[cfg(test)]
 mod tests {
+    use std::process::Command;
+
     use super::*;
 
     #[test]
@@ -346,5 +348,37 @@ mod tests {
                 "{relative} must verify the resource handshake"
             );
         }
+    }
+
+    #[test]
+    fn zsh_prompt_hook_preserves_prior_status_without_stderr() {
+        let integration = resource_root().join("shell-integration/zsh/spaceterm-integration");
+        let output = Command::new("/bin/zsh")
+            .args([
+                "-dfi",
+                "-c",
+                r#"builtin source -- "$1"; _spaceterm_command_active=1; (builtin exit 7); "$precmd_functions[-1]""#,
+                "spaceterm",
+            ])
+            .arg(integration)
+            .env("SPACETERM_SHELL_INTEGRATION_VERSION", "1")
+            .output()
+            .unwrap();
+        let completion = b"\x1b]133;D;7\x07";
+        let reported_prior_status = output
+            .stdout
+            .windows(completion.len())
+            .any(|window| window == completion);
+
+        assert_eq!(
+            (
+                output.status.success(),
+                output.stderr.as_slice(),
+                reported_prior_status,
+            ),
+            (true, &[][..], true),
+            "stdout: {:?}",
+            String::from_utf8_lossy(&output.stdout),
+        );
     }
 }

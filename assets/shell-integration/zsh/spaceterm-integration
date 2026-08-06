@@ -9,9 +9,9 @@ _spaceterm_report_directory() {
     builtin printf '\e]7;file://localhost%s\a' "$PWD"
 }
 _spaceterm_before_prompt() {
-    local status=$?
+    builtin local -i cmd_status=$?
     if (( _spaceterm_command_active )); then
-        builtin printf '\e]133;D;%d\a' "$status"
+        builtin printf '\e]133;D;%d\a' "$cmd_status"
         _spaceterm_command_active=0
     fi
     _spaceterm_report_directory
