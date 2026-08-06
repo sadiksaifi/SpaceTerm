@@ -8,6 +8,7 @@ use cocoa::foundation::{NSAutoreleasePool, NSInteger, NSString};
 use objc::{class, msg_send, sel, sel_impl};
 #[cfg(not(test))]
 use std::ffi::CStr;
+use std::path::PathBuf;
 
 #[cfg(not(test))]
 use crate::terminal::Osc52Target;
@@ -189,6 +190,3 @@ mod tests {
         );
     }
 }
-#[cfg(not(test))]
-use std::ffi::CStr;
-use std::path::PathBuf;
