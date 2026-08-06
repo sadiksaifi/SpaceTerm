@@ -16,11 +16,11 @@ use super::{
     ActivateWindow6, ActivateWindow7, ActivateWindow8, ActivateWindow9, ActivateWorkspace1,
     ActivateWorkspace2, ActivateWorkspace3, ActivateWorkspace4, ActivateWorkspace5,
     ActivateWorkspace6, ActivateWorkspace7, ActivateWorkspace8, ActivateWorkspace9, ClosePane,
-    CloseWindow, CreateWindow, CreateWorkspace, FocusPaneDown, FocusPaneLeft, FocusPaneRight,
-    FocusPaneUp, SplitDown, SplitRight, TERMINAL_KEY_CONTEXT, TOP_CHROME_HEIGHT, TogglePaneZoom,
-    ToggleSidebar, ToggleSidebarFocus, WORKSPACE_SIDEBAR_DEFAULT_WIDTH,
-    WORKSPACE_SIDEBAR_MINIMUM_WIDTH, WindowManager, WindowManagerEvent,
-    handle_top_chrome_mouse_down,
+    CloseTerminalFind, CloseWindow, CreateWindow, CreateWorkspace, FindNext, FindPrevious,
+    FocusPaneDown, FocusPaneLeft, FocusPaneRight, FocusPaneUp, OpenTerminalFind, SplitDown,
+    SplitRight, TERMINAL_KEY_CONTEXT, TOP_CHROME_HEIGHT, TogglePaneZoom, ToggleSidebar,
+    ToggleSidebarFocus, WORKSPACE_SIDEBAR_DEFAULT_WIDTH, WORKSPACE_SIDEBAR_MINIMUM_WIDTH,
+    WindowManager, WindowManagerEvent, handle_top_chrome_mouse_down,
 };
 use crate::domain::{
     CloseWorkspaceOutcome, FinalWindowCloseOutcome, WorkspaceCollection, WorkspaceError,
@@ -1188,6 +1188,10 @@ impl Render for WorkspaceManager {
             .on_action(cx.listener(Self::forward_active_terminal_action::<FocusPaneUp>))
             .on_action(cx.listener(Self::forward_active_terminal_action::<FocusPaneDown>))
             .on_action(cx.listener(Self::forward_active_terminal_action::<TogglePaneZoom>))
+            .on_action(cx.listener(Self::forward_active_terminal_action::<OpenTerminalFind>))
+            .on_action(cx.listener(Self::forward_active_terminal_action::<FindNext>))
+            .on_action(cx.listener(Self::forward_active_terminal_action::<FindPrevious>))
+            .on_action(cx.listener(Self::forward_active_terminal_action::<CloseTerminalFind>))
             .on_key_down(cx.listener(Self::on_rename_key_down))
             .child(active_window_manager)
             .child(self.render_top_left_chrome(manager.clone()))

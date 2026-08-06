@@ -2,27 +2,30 @@ use std::ops::Range;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-#[cfg(test)]
 use gpui::ClipboardItem;
 use gpui::prelude::*;
 use gpui::{
-    App, Bounds, Context, Entity, EntityInputHandler, EventEmitter, ExternalPaths, FocusHandle,
-    IntoElement, KeyDownEvent, KeyUpEvent, ModifiersChangedEvent, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, Pixels, Render, ScrollDelta, ScrollWheelEvent, SharedString,
-    Task, TextRun, UTF16Selection, Window, div, font, point, px, rgba, size,
+    AnyElement, App, Bounds, Context, Entity, EntityInputHandler, EventEmitter, ExternalPaths,
+    FocusHandle, IntoElement, KeyDownEvent, KeyUpEvent, ModifiersChangedEvent, MouseButton,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Render, ScrollDelta, ScrollWheelEvent,
+    SharedString, Task, TextRun, UTF16Selection, Window, div, font, point, px, relative, rgba,
+    size,
 };
+use gpui_symbols::{Icon, SymbolWeight};
 
 use super::overlay_scrollbar::{OverlayScrollbar, OverlayScrollbarEvent, ScrollMetrics};
 use super::render_lifecycle::{RenderLifecycle, ScaleChange, SurfaceVisibility};
 use super::terminal_element::{
     TerminalGridCache, TerminalGridConfiguration, TerminalGridElement, terminal_grid_content_bounds,
 };
+use super::terminal_find::{FindEditor, FindInputElement};
 use super::terminal_focus::{TerminalFocusCoordinator, TerminalFocusFacts, TerminalProductFocus};
 use super::terminal_ime::{PreeditLayout, PreeditPosition, TerminalIme, layout_preedit};
 use super::{
-    AllowOsc52Clipboard, CancelUnsafePaste, ConfirmUnsafePaste, CopySelection,
-    DecreaseTerminalFontSize, DenyOsc52Clipboard, ExportTerminalDiagnostics,
-    IncreaseTerminalFontSize, PasteClipboard, ResetTerminalFontSize, TERMINAL_KEY_CONTEXT,
+    AllowOsc52Clipboard, CancelUnsafePaste, CloseTerminalFind, ConfirmUnsafePaste, CopySelection,
+    DecreaseTerminalFontSize, DenyOsc52Clipboard, ExportTerminalDiagnostics, FindNext,
+    FindPrevious, IncreaseTerminalFontSize, OpenTerminalFind, PasteClipboard,
+    ResetTerminalFontSize, TERMINAL_FIND_KEY_CONTEXT, TERMINAL_KEY_CONTEXT,
 };
 use crate::platform::macos_accessibility::post_accessibility_notifications;
 #[cfg(not(test))]
@@ -44,13 +47,14 @@ use crate::terminal::geometry::{
 };
 use crate::terminal::{
     AccessibilityGeometry, AccessibilityNotification, AttentionFacts, DiagnosticBundle,
-    DiagnosticKeyEventKind, InputModifiers, KeyAction, KeyInput, NativeContextActions,
-    NativeInsertion, OptionAsAltPolicy, Osc52Access, Osc52AuthorizationDecision,
-    Osc52AuthorizationRequest, Osc52Target, PaneTerminalState, PasteConfirmation, PasteDecision,
-    PasteRequestOutcome, PasteResolution, PhysicalKey, PointerButton, PointerInput, PointerPhase,
-    ScreenSnapshot, SelectionCopy, SessionEvent, ShiftSelectionPolicy, SurfacePosition,
-    TerminalAccessibilityModel, TerminalFailure, TerminalSessionHandle, UnhandledKeyDiagnostic,
-    WheelInput, WheelPhase, WorkspaceTerminalSessionFactory,
+    DiagnosticKeyEventKind, FindDirection, FindQueryGeneration, InputModifiers, KeyAction,
+    KeyInput, NativeContextActions, NativeInsertion, OptionAsAltPolicy, Osc52Access,
+    Osc52AuthorizationDecision, Osc52AuthorizationRequest, Osc52Target, PaneTerminalState,
+    PasteConfirmation, PasteDecision, PasteRequestOutcome, PasteResolution, PhysicalKey,
+    PointerButton, PointerInput, PointerPhase, ScreenSnapshot, SelectionCopy, SessionEvent,
+    ShiftSelectionPolicy, SurfacePosition, TerminalAccessibilityModel, TerminalFailure,
+    TerminalSessionHandle, UnhandledKeyDiagnostic, WheelInput, WheelPhase,
+    WorkspaceTerminalSessionFactory,
 };
 use crate::theme::{ACTIVE_THEME, Color};
 
@@ -96,6 +100,9 @@ pub(crate) struct TerminalPane {
     fallback_title: SharedString,
     title: SharedString,
     focus_handle: FocusHandle,
+    find_focus_handle: FocusHandle,
+    find_editor: Option<FindEditor>,
+    find_generation: FindQueryGeneration,
     product_focus: TerminalProductFocus,
     terminal_input_focus: bool,
     surface_active: bool,
@@ -142,6 +149,7 @@ impl TerminalPane {
         cx: &mut Context<Self>,
     ) -> Self {
         let focus_handle = cx.focus_handle();
+        let find_focus_handle = cx.focus_handle();
         let font_family = terminal_font(cx);
         let cell_width = measure_cell_width(window, &font_family, DEFAULT_FONT_SIZE);
         let backing_scale = BackingScale::new(window.scale_factor()).unwrap_or(BackingScale::ONE);
@@ -197,6 +205,9 @@ impl TerminalPane {
             title: fallback_title.clone(),
             fallback_title,
             focus_handle,
+            find_focus_handle,
+            find_editor: None,
+            find_generation: FindQueryGeneration::default(),
             product_focus: TerminalProductFocus::default(),
             terminal_input_focus: false,
             surface_active: false,
@@ -239,6 +250,9 @@ impl TerminalPane {
     }
 
     pub(crate) fn set_product_focus(&mut self, product_focus: TerminalProductFocus) {
+        if self.product_focus.focused_pane && !product_focus.focused_pane {
+            self.end_find_state();
+        }
         if (!product_focus.active_workspace
             || !product_focus.active_window
             || !product_focus.focused_pane
@@ -258,6 +272,65 @@ impl TerminalPane {
             session.resolve_osc52_authorization(request.id, Osc52AuthorizationDecision::Deny);
         }
         self.product_focus = product_focus;
+    }
+
+    fn open_find(&mut self, _: &OpenTerminalFind, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(editor) = &mut self.find_editor {
+            editor.select_all();
+        } else {
+            self.find_editor = Some(FindEditor::default());
+            self.find_generation = self.find_generation.next();
+            if let Some(session) = &self.session {
+                session.set_find_query(self.find_generation, String::new());
+            }
+        }
+        self.find_focus_handle.focus(window);
+        cx.notify();
+    }
+
+    fn find_next(&mut self, _: &FindNext, _window: &mut Window, _cx: &mut Context<Self>) {
+        if let Some(session) = &self.session
+            && self.find_editor.is_some()
+        {
+            session.navigate_find(self.find_generation, FindDirection::Next);
+        }
+    }
+
+    fn find_previous(&mut self, _: &FindPrevious, _window: &mut Window, _cx: &mut Context<Self>) {
+        if let Some(session) = &self.session
+            && self.find_editor.is_some()
+        {
+            session.navigate_find(self.find_generation, FindDirection::Previous);
+        }
+    }
+
+    fn close_find(&mut self, _: &CloseTerminalFind, window: &mut Window, cx: &mut Context<Self>) {
+        if self.find_editor.is_none() {
+            return;
+        }
+        self.end_find_state();
+        self.focus_handle.focus(window);
+        cx.notify();
+    }
+
+    fn end_find_state(&mut self) {
+        if self.find_editor.take().is_none() {
+            return;
+        }
+        self.find_generation = self.find_generation.next();
+        if let Some(session) = &self.session {
+            session.end_find(self.find_generation);
+        }
+    }
+
+    fn find_query_changed(&mut self) {
+        let Some(editor) = &self.find_editor else {
+            return;
+        };
+        self.find_generation = self.find_generation.next();
+        if let Some(session) = &self.session {
+            session.set_find_query(self.find_generation, editor.text().to_owned());
+        }
     }
 
     pub(crate) fn terminal_input_focused(&self, window: &Window) -> bool {
@@ -366,6 +439,7 @@ impl TerminalPane {
     }
 
     pub(crate) fn close(&mut self) {
+        self.end_find_state();
         if let Some(confirmation) = self.pending_paste.take()
             && let Some(session) = &self.session
         {
@@ -498,6 +572,11 @@ impl TerminalPane {
         match self.session_factory.start(geometry) {
             Ok(started) => {
                 started.handle.focus(self.terminal_input_focus);
+                if let Some(editor) = &self.find_editor {
+                    started
+                        .handle
+                        .set_find_query(self.find_generation, editor.text().to_owned());
+                }
                 self.session = Some(started.handle);
                 let receiver = started.events;
                 self._event_task = Some(cx.spawn(async move |this, cx| {
@@ -604,6 +683,57 @@ impl TerminalPane {
     }
 
     fn on_key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if self.find_focus_handle.is_focused(window) && self.find_editor.is_some() {
+            let key = event.keystroke.key.as_str();
+            let extend = event.keystroke.modifiers.shift;
+            let changed = match key {
+                "backspace" => self
+                    .find_editor
+                    .as_mut()
+                    .is_some_and(FindEditor::delete_backward),
+                "delete" => self
+                    .find_editor
+                    .as_mut()
+                    .is_some_and(FindEditor::delete_forward),
+                "left" => {
+                    if let Some(editor) = &mut self.find_editor {
+                        editor.move_left(extend);
+                    }
+                    false
+                }
+                "right" => {
+                    if let Some(editor) = &mut self.find_editor {
+                        editor.move_right(extend);
+                    }
+                    false
+                }
+                "home" | "up" => {
+                    if let Some(editor) = &mut self.find_editor {
+                        editor.move_to_start(extend);
+                    }
+                    false
+                }
+                "end" | "down" => {
+                    if let Some(editor) = &mut self.find_editor {
+                        editor.move_to_end(extend);
+                    }
+                    false
+                }
+                "a" if event.keystroke.modifiers.platform => {
+                    if let Some(editor) = &mut self.find_editor {
+                        editor.select_all();
+                    }
+                    false
+                }
+                _ => return,
+            };
+            if changed {
+                self.find_query_changed();
+            }
+            cx.stop_propagation();
+            cx.notify();
+            return;
+        }
         if !self.terminal_input_focused(window) {
             return;
         }
@@ -941,7 +1071,15 @@ impl TerminalPane {
         cx.stop_propagation();
     }
 
-    fn copy_selection(&mut self, _: &CopySelection, _window: &mut Window, cx: &mut Context<Self>) {
+    fn copy_selection(&mut self, _: &CopySelection, window: &mut Window, cx: &mut Context<Self>) {
+        if self.find_focus_handle.is_focused(window)
+            && let Some(editor) = &self.find_editor
+            && !editor.selection().is_empty()
+        {
+            let (text, _) = editor.text_for_range(editor.selection());
+            cx.write_to_clipboard(ClipboardItem::new_string(text));
+            return;
+        }
         let Some(session) = &self.session else {
             return;
         };
@@ -984,12 +1122,18 @@ impl TerminalPane {
         .detach();
     }
 
-    fn paste_clipboard(
-        &mut self,
-        _: &PasteClipboard,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn paste_clipboard(&mut self, _: &PasteClipboard, window: &mut Window, cx: &mut Context<Self>) {
+        if self.find_focus_handle.is_focused(window) && self.find_editor.is_some() {
+            let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) else {
+                return;
+            };
+            if let Some(editor) = &mut self.find_editor {
+                editor.replace(None, &text);
+            }
+            self.find_query_changed();
+            cx.notify();
+            return;
+        }
         let paths = read_file_urls().unwrap_or_default();
         let terminal_input_focused = self.terminal_input_focus;
         let insertion = if paths.is_empty() {
@@ -1211,6 +1355,167 @@ impl TerminalPane {
         let column = (position.x / f32::from(self.cell_width)).floor() as usize;
         self.screen.rows.get(row)?.get(column)?.hyperlink.clone()
     }
+
+    fn render_find_bar(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let editor = self.find_editor.as_ref()?;
+        let snapshot = self
+            .screen
+            .find
+            .as_ref()
+            .filter(|snapshot| snapshot.generation == self.find_generation);
+        let result_label = snapshot.map_or_else(
+            || "–/–".to_owned(),
+            |snapshot| {
+                format!(
+                    "{}/{}",
+                    snapshot
+                        .current_match
+                        .map_or_else(|| "–".to_owned(), |index| index.to_string()),
+                    snapshot.total_matches
+                )
+            },
+        );
+        let has_results = snapshot.is_some_and(|snapshot| snapshot.total_matches > 0);
+        let text: SharedString = if editor.text().is_empty() {
+            "Find".into()
+        } else {
+            editor.text().to_owned().into()
+        };
+        let text_color = if editor.text().is_empty() {
+            ACTIVE_THEME.text_muted
+        } else {
+            ACTIVE_THEME.text
+        };
+        let pane = cx.entity().downgrade();
+        let previous_pane = pane.clone();
+        let next_pane = pane.clone();
+        let close_pane = pane.clone();
+        let focus_handle = self.find_focus_handle.clone();
+        let input_focus_handle = focus_handle.clone();
+
+        Some(
+            div()
+                .id("terminal-find-bar")
+                .debug_selector(|| "terminal-find-bar".to_owned())
+                .absolute()
+                .top(px(8.0))
+                .right(px(8.0))
+                .w(px(360.0))
+                .max_w(relative(0.94))
+                .h(px(32.0))
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(4.0))
+                .px(px(5.0))
+                .rounded(px(7.0))
+                .border_1()
+                .border_color(gpui_color(ACTIVE_THEME.border))
+                .bg(gpui_color(ACTIVE_THEME.background))
+                .shadow_md()
+                .block_mouse_except_scroll()
+                .key_context(TERMINAL_FIND_KEY_CONTEXT)
+                .track_focus(&focus_handle)
+                .child(
+                    div()
+                        .id("terminal-find-input")
+                        .debug_selector(|| "terminal-find-input".to_owned())
+                        .relative()
+                        .h(px(24.0))
+                        .min_w(px(60.0))
+                        .flex_grow()
+                        .overflow_hidden()
+                        .flex()
+                        .items_center()
+                        .px(px(5.0))
+                        .rounded(px(4.0))
+                        .bg(gpui_color(ACTIVE_THEME.element_background))
+                        .text_size(px(13.0))
+                        .text_color(gpui_color(text_color))
+                        .whitespace_nowrap()
+                        .on_click(move |_, window, cx| {
+                            input_focus_handle.focus(window);
+                            cx.stop_propagation();
+                        })
+                        .child(text)
+                        .child(div().absolute().inset_0().child(FindInputElement::new(
+                            self.find_focus_handle.clone(),
+                            cx.entity(),
+                        ))),
+                )
+                .child(
+                    div()
+                        .debug_selector(|| "terminal-find-result-label".to_owned())
+                        .min_w(px(42.0))
+                        .text_size(px(11.0))
+                        .text_color(gpui_color(ACTIVE_THEME.text_muted))
+                        .child(result_label),
+                )
+                .child(find_icon_button(
+                    "terminal-find-previous",
+                    "chevron.up",
+                    has_results,
+                    move |window, cx| {
+                        let _ = previous_pane.update(cx, |pane, cx| {
+                            pane.find_previous(&FindPrevious, window, cx);
+                        });
+                    },
+                ))
+                .child(find_icon_button(
+                    "terminal-find-next",
+                    "chevron.down",
+                    has_results,
+                    move |window, cx| {
+                        let _ = next_pane.update(cx, |pane, cx| {
+                            pane.find_next(&FindNext, window, cx);
+                        });
+                    },
+                ))
+                .child(find_icon_button(
+                    "terminal-find-close",
+                    "xmark",
+                    true,
+                    move |window, cx| {
+                        let _ = close_pane.update(cx, |pane, cx| {
+                            pane.close_find(&CloseTerminalFind, window, cx);
+                        });
+                    },
+                ))
+                .into_any_element(),
+        )
+    }
+}
+
+fn find_icon_button(
+    id: &'static str,
+    symbol: &'static str,
+    enabled: bool,
+    on_click: impl Fn(&mut Window, &mut App) + 'static,
+) -> AnyElement {
+    div()
+        .id(id)
+        .debug_selector(move || id.to_owned())
+        .size(px(22.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(4.0))
+        .cursor_pointer()
+        .when(!enabled, |button| button.opacity(0.45))
+        .hover(|button| button.bg(gpui_color(ACTIVE_THEME.ghost_element_hover)))
+        .on_click(move |_, window, cx| {
+            if enabled {
+                on_click(window, cx);
+            }
+            cx.stop_propagation();
+        })
+        .child(
+            Icon::new(symbol)
+                .weight(SymbolWeight::Medium)
+                .size(px(11.0))
+                .color(gpui_color(ACTIVE_THEME.icon)),
+        )
+        .into_any_element()
 }
 
 impl EventEmitter<TerminalPaneEvent> for TerminalPane {}
@@ -1223,6 +1528,13 @@ impl EntityInputHandler for TerminalPane {
         _window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> Option<String> {
+        if self.find_focus_handle.is_focused(_window)
+            && let Some(editor) = &self.find_editor
+        {
+            let (text, adjusted) = editor.text_for_range(range);
+            *adjusted_range = Some(adjusted);
+            return Some(text);
+        }
         if self.ime.marked_text().is_some() {
             let (text, adjusted) = self.ime.text_for_utf16_range(range)?;
             *adjusted_range = Some(adjusted);
@@ -1244,6 +1556,14 @@ impl EntityInputHandler for TerminalPane {
         window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> Option<UTF16Selection> {
+        if self.find_focus_handle.is_focused(window)
+            && let Some(editor) = &self.find_editor
+        {
+            return Some(UTF16Selection {
+                range: editor.selection(),
+                reversed: editor.selection_reversed(),
+            });
+        }
         if !ignore_disabled_input && !self.terminal_input_focused(window) {
             return None;
         }
@@ -1265,10 +1585,20 @@ impl EntityInputHandler for TerminalPane {
         _window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> Option<Range<usize>> {
+        if self.find_focus_handle.is_focused(_window) {
+            return self.find_editor.as_ref().and_then(FindEditor::marked_range);
+        }
         self.ime.marked_range()
     }
 
-    fn unmark_text(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+    fn unmark_text(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.find_focus_handle.is_focused(window)
+            && let Some(editor) = &mut self.find_editor
+        {
+            editor.unmark();
+            cx.notify();
+            return;
+        }
         self.ime.cancel();
         self.accessibility_notifications
             .push(AccessibilityNotification::Value);
@@ -1282,6 +1612,14 @@ impl EntityInputHandler for TerminalPane {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.find_focus_handle.is_focused(window)
+            && let Some(editor) = &mut self.find_editor
+        {
+            editor.replace(_range, text);
+            self.find_query_changed();
+            cx.notify();
+            return;
+        }
         if !self.terminal_input_focused(window) {
             self.ime.cancel();
             return;
@@ -1306,6 +1644,14 @@ impl EntityInputHandler for TerminalPane {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.find_focus_handle.is_focused(window)
+            && let Some(editor) = &mut self.find_editor
+        {
+            editor.replace_and_mark(range, new_text, new_selected_range);
+            self.find_query_changed();
+            cx.notify();
+            return;
+        }
         if !self.terminal_input_focused(window) {
             self.ime.cancel();
             return;
@@ -1324,6 +1670,9 @@ impl EntityInputHandler for TerminalPane {
         _window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> Option<Bounds<Pixels>> {
+        if self.find_focus_handle.is_focused(_window) && self.find_editor.is_some() {
+            return Some(element_bounds);
+        }
         if let Some(marked_text) = self.ime.marked_text() {
             let position = self.screen.cursor.position?;
             let columns = self.screen.rows.first()?.len();
@@ -1362,6 +1711,11 @@ impl EntityInputHandler for TerminalPane {
         _window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> Option<usize> {
+        if self.find_focus_handle.is_focused(_window)
+            && let Some(editor) = &self.find_editor
+        {
+            return Some(editor.selection().end);
+        }
         if self.ime.marked_text().is_some() {
             return Some(self.ime.selected_range().end);
         }
@@ -1475,6 +1829,13 @@ impl Render for TerminalPane {
         );
         let preedit = self.preedit_layout();
         let attention_visual = self.attention_visual;
+        let find_spans = self
+            .find_editor
+            .as_ref()
+            .and_then(|_| self.screen.find.as_ref())
+            .filter(|snapshot| snapshot.generation == self.find_generation)
+            .map_or_else(|| Arc::from([]), |snapshot| snapshot.visible_spans.clone());
+        let find_bar = self.render_find_bar(cx);
         let terminal_grid = TerminalGridElement::new(
             &self.screen,
             &mut self.render_cache,
@@ -1489,6 +1850,7 @@ impl Render for TerminalPane {
                 input: cx.entity(),
                 blink_phase_visible: self.blink_phase_visible,
                 scale_factor: window.scale_factor(),
+                find_spans,
             },
         );
         if let Some(generation) = self.render_lifecycle.take_frame() {
@@ -1526,6 +1888,10 @@ impl Render for TerminalPane {
             .on_action(cx.listener(Self::increase_font_size))
             .on_action(cx.listener(Self::decrease_font_size))
             .on_action(cx.listener(Self::reset_font_size))
+            .on_action(cx.listener(Self::open_find))
+            .on_action(cx.listener(Self::find_next))
+            .on_action(cx.listener(Self::find_previous))
+            .on_action(cx.listener(Self::close_find))
             .on_key_down(cx.listener(Self::on_key_down))
             .on_key_up(cx.listener(Self::on_key_up))
             .on_modifiers_changed(cx.listener(Self::on_modifiers_changed))
@@ -1541,6 +1907,7 @@ impl Render for TerminalPane {
             .child(terminal_grid)
             .children(link_highlights)
             .child(scrollbar)
+            .when_some(find_bar, |root, find_bar| root.child(find_bar))
             .when(attention_visual, |root| {
                 root.child(
                     div()
@@ -2411,6 +2778,111 @@ mod tests {
         let after = pane.read_with(cx, |pane, _cx| pane.font_size());
 
         assert_eq!((before, after), (14.0, 15.0));
+    }
+
+    #[gpui::test]
+    fn terminal_find_open_edit_navigate_and_close_are_pane_scoped(cx: &mut TestAppContext) {
+        let (pane, cx, records) = connected_terminal_pane(cx);
+
+        cx.dispatch_action(OpenTerminalFind);
+        cx.update(|window, app| {
+            pane.update(app, |pane, pane_cx| {
+                pane.replace_text_in_range(None, "日本", window, pane_cx);
+            });
+        });
+        cx.dispatch_action(FindNext);
+        cx.dispatch_action(FindPrevious);
+        cx.dispatch_action(CloseTerminalFind);
+
+        let commands = records
+            .commands()
+            .into_iter()
+            .filter_map(|call| match call.command {
+                RecordedSessionCommand::SetFindQuery(_, query) => Some(format!("set:{query}")),
+                RecordedSessionCommand::NavigateFind(_, FindDirection::Next) => {
+                    Some("next".to_owned())
+                }
+                RecordedSessionCommand::NavigateFind(_, FindDirection::Previous) => {
+                    Some("previous".to_owned())
+                }
+                RecordedSessionCommand::EndFind(_) => Some("end".to_owned()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(commands, ["set:", "set:日本", "next", "previous", "end"]);
+        assert!(pane.read_with(cx, |pane, _| pane.find_editor.is_none()));
+    }
+
+    #[gpui::test]
+    fn repeated_terminal_find_selects_the_existing_query(cx: &mut TestAppContext) {
+        let (pane, cx, records) = connected_terminal_pane(cx);
+        cx.dispatch_action(OpenTerminalFind);
+        cx.update(|window, app| {
+            pane.update(app, |pane, pane_cx| {
+                pane.replace_text_in_range(None, "needle", window, pane_cx);
+            });
+        });
+
+        cx.dispatch_action(OpenTerminalFind);
+
+        assert_eq!(
+            pane.read_with(cx, |pane, _| {
+                pane.find_editor.as_ref().unwrap().selection()
+            }),
+            0..6
+        );
+        assert_eq!(
+            records
+                .commands()
+                .iter()
+                .filter(|call| matches!(call.command, RecordedSessionCommand::SetFindQuery(_, _)))
+                .count(),
+            2
+        );
+    }
+
+    #[gpui::test]
+    fn losing_focused_pane_status_closes_terminal_find(cx: &mut TestAppContext) {
+        let (pane, cx, records) = connected_terminal_pane(cx);
+        pane.update(cx, |pane, _| {
+            pane.set_product_focus(TerminalProductFocus {
+                active_workspace: true,
+                active_window: true,
+                focused_pane: true,
+                ..TerminalProductFocus::default()
+            });
+        });
+        cx.dispatch_action(OpenTerminalFind);
+
+        pane.update(cx, |pane, _| {
+            pane.set_product_focus(TerminalProductFocus {
+                active_workspace: true,
+                active_window: true,
+                focused_pane: false,
+                ..TerminalProductFocus::default()
+            });
+        });
+
+        assert!(pane.read_with(cx, |pane, _| pane.find_editor.is_none()));
+        assert!(
+            records
+                .commands()
+                .iter()
+                .any(|call| matches!(call.command, RecordedSessionCommand::EndFind(_)))
+        );
+    }
+
+    #[gpui::test]
+    fn terminal_find_renders_fixed_bar_and_moves_responder_focus(cx: &mut TestAppContext) {
+        let (pane, cx, _records) = connected_terminal_pane(cx);
+
+        cx.dispatch_action(OpenTerminalFind);
+        cx.run_until_parked();
+
+        assert!(cx.debug_bounds("terminal-find-bar").is_some());
+        assert!(cx.update(|window, app| pane.read_with(app, |pane, _| {
+            pane.find_focus_handle.is_focused(window) && !pane.focus_handle.is_focused(window)
+        })));
     }
 
     #[gpui::test]

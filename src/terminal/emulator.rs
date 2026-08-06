@@ -24,6 +24,7 @@ use libghostty_vt::terminal::{Mode, Point, PointCoordinate, ScrollViewport};
 use libghostty_vt::{Error, RenderState, Terminal, TerminalOptions};
 
 use crate::terminal::attention::AttentionEvent;
+use crate::terminal::find::TerminalFindState;
 use crate::terminal::geometry::{BackingPosition, TerminalGeometry};
 use crate::terminal::identity::{self, XtGetTcapObserver};
 use crate::terminal::key::{InputModifiers, KeyAction, KeyInput, OptionAsAltPolicy, PhysicalKey};
@@ -35,6 +36,7 @@ use crate::terminal::session::WheelPhase;
 use crate::terminal::session::{
     PointerButton, PointerInput, PointerPhase, ShiftSelectionPolicy, SurfacePosition, WheelInput,
 };
+use crate::terminal::{FindDirection, FindQueryGeneration, TerminalFindSnapshot};
 use crate::theme::{ACTIVE_THEME, Color};
 
 const MAX_WHEEL_STEPS: i32 = 100;
@@ -336,6 +338,7 @@ pub(crate) struct SnapshotDamage {
     pub(crate) active_screen: bool,
     pub(crate) resize: bool,
     pub(crate) mouse_tracking: bool,
+    pub(crate) search: bool,
 }
 
 impl SnapshotDamage {
@@ -350,6 +353,7 @@ impl SnapshotDamage {
             active_screen: true,
             resize: true,
             mouse_tracking: true,
+            search: false,
         }
     }
 
@@ -388,6 +392,7 @@ pub(crate) struct ScreenSnapshot {
     pub(crate) mouse_tracking: bool,
     pub(crate) title: Arc<str>,
     pub(crate) metadata: Arc<TerminalMetadataSnapshot>,
+    pub(crate) find: Option<Arc<TerminalFindSnapshot>>,
     pub(crate) damage: SnapshotDamage,
 }
 
@@ -406,6 +411,7 @@ impl PartialEq for ScreenSnapshot {
             && self.mouse_tracking == other.mouse_tracking
             && self.title == other.title
             && self.metadata == other.metadata
+            && self.find == other.find
             && self.damage == other.damage
     }
 }
@@ -431,6 +437,7 @@ impl ScreenSnapshot {
             mouse_tracking: false,
             title: Arc::from(""),
             metadata: MetadataTracker::new("", "", None, Instant::now()).snapshot(),
+            find: None,
             damage: SnapshotDamage::initial(),
         })
     }
@@ -485,6 +492,7 @@ impl ScreenSnapshot {
             mouse_tracking: false,
             title: Arc::from(""),
             metadata: MetadataTracker::new("", "", None, Instant::now()).snapshot(),
+            find: None,
             damage: SnapshotDamage::initial(),
         }
     }
@@ -536,6 +544,7 @@ pub(crate) struct TerminalEmulator {
     gesture_clock: GestureClock,
     presentation_generation: PresentationGeneration,
     synchronized_output_started: Option<Instant>,
+    find: TerminalFindState,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -597,6 +606,14 @@ impl EmulatorAction {
         Self {
             bytes: Vec::new(),
             screen_changed: true,
+        }
+    }
+
+    fn screen_changed_if(changed: bool) -> Self {
+        if changed {
+            Self::screen_changed()
+        } else {
+            Self::none()
         }
     }
 
@@ -716,6 +733,7 @@ impl TerminalEmulator {
             gesture_clock: GestureClock::System(Instant::now()),
             presentation_generation: PresentationGeneration::default(),
             synchronized_output_started: None,
+            find: TerminalFindState::default(),
         })
     }
 
@@ -757,6 +775,9 @@ impl TerminalEmulator {
         }
         let synchronized_before = self.terminal.mode(Mode::SYNC_OUTPUT).unwrap_or(false);
         self.terminal.vt_write(bytes);
+        if !bytes.is_empty() {
+            self.find.invalidate();
+        }
         let synchronized_after = self.terminal.mode(Mode::SYNC_OUTPUT).unwrap_or(false);
         self.synchronized_output_started = match (synchronized_before, synchronized_after) {
             (false, true) => Some(now),
@@ -803,6 +824,7 @@ impl TerminalEmulator {
         let cell = geometry.backing_cell_size();
         self.terminal
             .resize(grid.cols, grid.rows, cell.width, cell.height)?;
+        self.find.invalidate();
         self.geometry = geometry;
         Ok(())
     }
@@ -830,6 +852,32 @@ impl TerminalEmulator {
         self.terminal
             .mode(Mode::FOCUS_EVENT)
             .map_err(|error| format!("failed to query terminal focus reporting mode: {error}"))
+    }
+
+    pub(crate) fn set_find_query(
+        &mut self,
+        generation: FindQueryGeneration,
+        query: String,
+    ) -> EmulatorAction {
+        self.find.set_query(generation, query);
+        EmulatorAction::screen_changed()
+    }
+
+    pub(crate) fn end_find(&mut self, generation: FindQueryGeneration) -> EmulatorAction {
+        self.find.end(generation);
+        EmulatorAction::screen_changed()
+    }
+
+    pub(crate) fn navigate_find(
+        &mut self,
+        generation: FindQueryGeneration,
+        direction: FindDirection,
+    ) -> Result<EmulatorAction, String> {
+        let cols = self.geometry.grid().cols;
+        self.find
+            .navigate(&mut self.terminal, cols, generation, direction)
+            .map(EmulatorAction::screen_changed_if)
+            .map_err(|error| format!("failed to navigate terminal Find results: {error}"))
     }
 
     pub(crate) fn focus(&self, focused: bool) -> Result<EmulatorAction, String> {
@@ -1486,6 +1534,10 @@ impl TerminalEmulator {
             return Ok(None);
         }
 
+        self.find
+            .refresh(&self.terminal, self.geometry.grid().cols)?;
+        let find_changed = self.find.is_changed();
+
         let pending_title = self.pending_title.borrow_mut().take();
         if let Some(title) = pending_title {
             self.metadata.set_reported_title(&title);
@@ -1572,6 +1624,7 @@ impl TerminalEmulator {
                 active_screen: self.cached_active_screen != Some(active_screen),
                 resize: self.cached_cols != cols || self.cached_rows != rows,
                 mouse_tracking: self.cached_mouse_tracking != Some(mouse_tracking),
+                search: find_changed,
                 ..SnapshotDamage::default()
             }
         };
@@ -1742,6 +1795,10 @@ impl TerminalEmulator {
 
         self.presentation_generation = self.presentation_generation.next();
         let text_blinking = rows_have_visible_blinking_text(row_cache);
+        let find = self
+            .find
+            .snapshot(cols, scrollbar.offset_rows, scrollbar.visible_rows);
+        self.find.mark_published();
         Ok(Some(Arc::new(ScreenSnapshot {
             generation: self.presentation_generation,
             rows: Arc::from(row_cache.clone()),
@@ -1756,6 +1813,7 @@ impl TerminalEmulator {
             mouse_tracking,
             title,
             metadata,
+            find,
             damage,
         })))
     }
@@ -1898,6 +1956,210 @@ mod tests {
             Instant::now(),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn terminal_find_matches_across_soft_wraps() {
+        let mut emulator = emulator(3, 2);
+        emulator.feed(b"abcdef");
+        emulator.set_find_query(FindQueryGeneration::test(1), "cde".to_owned());
+
+        let snapshot = emulator.snapshot().unwrap().unwrap();
+
+        assert_eq!(snapshot.find.as_ref().unwrap().total_matches, 1);
+    }
+
+    #[test]
+    fn terminal_find_rejects_matches_across_hard_lines() {
+        let mut emulator = emulator(4, 2);
+        emulator.feed(b"abc\r\ndef");
+        emulator.set_find_query(FindQueryGeneration::test(1), "cde".to_owned());
+
+        let snapshot = emulator.snapshot().unwrap().unwrap();
+
+        assert_eq!(snapshot.find.as_ref().unwrap().total_matches, 0);
+    }
+
+    #[test]
+    fn terminal_find_includes_primary_scrollback() {
+        let mut emulator = emulator(8, 2);
+        emulator.feed(b"needle\r\nsecond\r\nthird");
+        emulator.set_find_query(FindQueryGeneration::test(1), "needle".to_owned());
+
+        let snapshot = emulator.snapshot().unwrap().unwrap();
+
+        assert_eq!(snapshot.find.as_ref().unwrap().total_matches, 1);
+    }
+
+    #[test]
+    fn terminal_find_highlights_the_complete_wide_grapheme() {
+        let mut emulator = emulator(8, 2);
+        emulator.feed("🙂".as_bytes());
+        emulator.set_find_query(FindQueryGeneration::test(1), "🙂".to_owned());
+
+        let snapshot = emulator.snapshot().unwrap().unwrap();
+
+        assert_eq!(
+            snapshot.find.as_ref().unwrap().visible_spans.as_ref(),
+            [crate::terminal::FindHighlightSpan {
+                row: 0,
+                start_column: 0,
+                end_column: 1,
+                current: false,
+            }]
+        );
+    }
+
+    #[test]
+    fn terminal_find_query_only_snapshot_reuses_rows() {
+        let mut emulator = emulator(8, 2);
+        emulator.feed(b"needle");
+        let first = emulator.snapshot().unwrap().unwrap();
+        emulator.set_find_query(FindQueryGeneration::test(1), "needle".to_owned());
+
+        let found = emulator.snapshot().unwrap().unwrap();
+
+        assert!(found.damage.search);
+        assert_eq!(found.damage.content, ContentDamageSnapshot::Clean);
+        assert!(
+            first
+                .rows
+                .iter()
+                .zip(found.rows.iter())
+                .all(|(first, second)| Arc::ptr_eq(first, second))
+        );
+    }
+
+    #[test]
+    fn terminal_find_navigation_rejects_stale_query_generation() {
+        let mut emulator = emulator(8, 2);
+        emulator.feed(b"needle");
+        emulator.set_find_query(FindQueryGeneration::test(2), "needle".to_owned());
+        let _ = emulator.snapshot().unwrap().unwrap();
+
+        let action = emulator
+            .navigate_find(FindQueryGeneration::test(1), FindDirection::Next)
+            .unwrap();
+
+        assert!(!action.screen_changed);
+    }
+
+    #[test]
+    fn terminal_find_navigation_wraps_and_marks_the_current_result() {
+        let mut emulator = emulator(12, 2);
+        emulator.feed(b"one one");
+        let generation = FindQueryGeneration::test(1);
+        emulator.set_find_query(generation, "one".to_owned());
+        let _ = emulator.snapshot().unwrap().unwrap();
+
+        let _ = emulator
+            .navigate_find(generation, FindDirection::Next)
+            .unwrap();
+        let first = emulator.snapshot().unwrap().unwrap();
+        let _ = emulator
+            .navigate_find(generation, FindDirection::Next)
+            .unwrap();
+        let second = emulator.snapshot().unwrap().unwrap();
+        let _ = emulator
+            .navigate_find(generation, FindDirection::Next)
+            .unwrap();
+        let wrapped = emulator.snapshot().unwrap().unwrap();
+
+        assert_eq!(first.find.as_ref().unwrap().current_match, Some(1));
+        assert_eq!(second.find.as_ref().unwrap().current_match, Some(2));
+        assert_eq!(wrapped.find.as_ref().unwrap().current_match, Some(1));
+    }
+
+    #[test]
+    fn terminal_find_initial_navigation_starts_in_the_current_viewport() {
+        let mut emulator = emulator(16, 2);
+        emulator.feed(b"needle old\r\nmiddle\r\nneedle new");
+        let generation = FindQueryGeneration::test(1);
+        emulator.set_find_query(generation, "needle".to_owned());
+        let before = emulator.snapshot().unwrap().unwrap();
+        assert!(before.scrollbar.offset_rows > 0);
+
+        let _ = emulator
+            .navigate_find(generation, FindDirection::Next)
+            .unwrap();
+        let selected = emulator.snapshot().unwrap().unwrap();
+
+        assert_eq!(selected.find.as_ref().unwrap().current_match, Some(2));
+        assert_eq!(selected.scrollbar.offset_rows, before.scrollbar.offset_rows);
+    }
+
+    #[test]
+    fn terminal_find_navigation_scrolls_an_offscreen_match_completely_into_view() {
+        let mut emulator = emulator(16, 2);
+        emulator.feed(b"needle\r\nmiddle\r\nbottom");
+        let generation = FindQueryGeneration::test(1);
+        emulator.set_find_query(generation, "needle".to_owned());
+        let _ = emulator.snapshot().unwrap().unwrap();
+
+        let _ = emulator
+            .navigate_find(generation, FindDirection::Next)
+            .unwrap();
+        let selected = emulator.snapshot().unwrap().unwrap();
+
+        assert_eq!(selected.scrollbar.offset_rows, 0);
+        assert_eq!(selected.find.as_ref().unwrap().current_match, Some(1));
+    }
+
+    #[test]
+    fn terminal_find_preserves_current_result_across_output_and_reflow() {
+        let mut emulator = emulator(8, 2);
+        let generation = FindQueryGeneration::test(1);
+        emulator.feed(b"needle");
+        emulator.set_find_query(generation, "needle".to_owned());
+        let _ = emulator.snapshot().unwrap().unwrap();
+        let _ = emulator
+            .navigate_find(generation, FindDirection::Next)
+            .unwrap();
+        let _ = emulator.snapshot().unwrap().unwrap();
+
+        emulator.feed(b"\r\nmore");
+        let after_output = emulator.snapshot().unwrap().unwrap();
+        emulator.resize(geometry(4, 3, 10.0, 20.0)).unwrap();
+        let after_reflow = emulator.snapshot().unwrap().unwrap();
+
+        assert_eq!(after_output.find.as_ref().unwrap().current_match, Some(1));
+        assert_eq!(after_reflow.find.as_ref().unwrap().current_match, Some(1));
+    }
+
+    #[test]
+    fn terminal_find_drops_current_result_when_scrollback_prunes_it() {
+        let mut emulator = emulator(8, 2);
+        let generation = FindQueryGeneration::test(1);
+        emulator.feed(b"needle");
+        emulator.set_find_query(generation, "needle".to_owned());
+        let _ = emulator.snapshot().unwrap().unwrap();
+        let _ = emulator
+            .navigate_find(generation, FindDirection::Next)
+            .unwrap();
+        let _ = emulator.snapshot().unwrap().unwrap();
+
+        emulator.feed(format!("\r\n{}", "x\r\n".repeat(MAX_SCROLLBACK_ROWS * 2)).as_bytes());
+        let pruned = emulator.snapshot().unwrap().unwrap();
+
+        assert_eq!(pruned.find.as_ref().unwrap().total_matches, 0);
+        assert_eq!(pruned.find.as_ref().unwrap().current_match, None);
+    }
+
+    #[test]
+    fn terminal_find_active_screen_scope_restores_primary_results() {
+        let mut emulator = emulator(12, 2);
+        let generation = FindQueryGeneration::test(1);
+        emulator.feed(b"primary");
+        emulator.set_find_query(generation, "primary".to_owned());
+        let primary = emulator.snapshot().unwrap().unwrap();
+        emulator.feed(b"\x1b[?1049halternate");
+        let alternate = emulator.snapshot().unwrap().unwrap();
+        emulator.feed(b"\x1b[?1049l");
+        let restored = emulator.snapshot().unwrap().unwrap();
+
+        assert_eq!(primary.find.as_ref().unwrap().total_matches, 1);
+        assert_eq!(alternate.find.as_ref().unwrap().total_matches, 0);
+        assert_eq!(restored.find.as_ref().unwrap().total_matches, 1);
     }
 
     #[test]

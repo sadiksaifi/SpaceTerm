@@ -5,10 +5,10 @@ use std::rc::Rc;
 
 use super::geometry::TerminalGeometry;
 use super::{
-    KeyInput, Osc52AuthorizationDecision, Osc52AuthorizationId, PasteConfirmationId, PasteDecision,
-    PasteRequestOutcome, PasteResolution, PointerInput, PresentationGeneration, SelectionCopy,
-    SessionError, SessionEvent, StartedTerminalSession, TerminalSessionFactory,
-    TerminalSessionHandle, WheelInput,
+    FindDirection, FindQueryGeneration, KeyInput, Osc52AuthorizationDecision, Osc52AuthorizationId,
+    PasteConfirmationId, PasteDecision, PasteRequestOutcome, PasteResolution, PointerInput,
+    PresentationGeneration, SelectionCopy, SessionError, SessionEvent, StartedTerminalSession,
+    TerminalSessionFactory, TerminalSessionHandle, WheelInput,
 };
 
 #[derive(Clone, Debug, PartialEq)]
@@ -26,6 +26,9 @@ pub(crate) enum RecordedSessionCommand {
     Pointer(PointerInput),
     Wheel(WheelInput),
     ScrollTo(u64, PresentationGeneration),
+    SetFindQuery(FindQueryGeneration, String),
+    NavigateFind(FindQueryGeneration, FindDirection),
+    EndFind(FindQueryGeneration),
     RequestPaste(String),
     ResolvePaste(PasteConfirmationId, PasteDecision),
     ResolveOsc52Authorization(Osc52AuthorizationId, Osc52AuthorizationDecision),
@@ -237,6 +240,18 @@ impl TerminalSessionHandle for TestTerminalSessionHandle {
 
     fn scroll_to(&self, offset_rows: u64, generation: PresentationGeneration) {
         self.record(RecordedSessionCommand::ScrollTo(offset_rows, generation));
+    }
+
+    fn set_find_query(&self, generation: FindQueryGeneration, query: String) {
+        self.record(RecordedSessionCommand::SetFindQuery(generation, query));
+    }
+
+    fn navigate_find(&self, generation: FindQueryGeneration, direction: FindDirection) {
+        self.record(RecordedSessionCommand::NavigateFind(generation, direction));
+    }
+
+    fn end_find(&self, generation: FindQueryGeneration) {
+        self.record(RecordedSessionCommand::EndFind(generation));
     }
 
     fn request_paste(

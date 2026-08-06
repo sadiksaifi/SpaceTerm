@@ -381,6 +381,32 @@ spacer tails never become duplicated text. Pasteboard ownership stays outside th
 Emulator: the macOS Adapter publishes only public UTF-8 plain-text and HTML representations, and
 copy failures report the operation or representation type without logging copied content.
 
+### Terminal Find
+
+Terminal Find is transient Pane-owned UI over one Terminal Session's active screen. Its literal,
+single-line query covers the active screen and that screen's Scrollback; the Alternate Screen has
+no Primary Scrollback. ASCII comparison is case-insensitive while non-ASCII UTF-8 comparison is
+exact. Soft-wrapped rows form one logical line and hard line boundaries never match across.
+
+The Terminal Session worker exclusively builds the search corpus, maps every UTF-8 byte to its
+grapheme-head terminal cell, excludes wide-cell spacer tails, retains current-result anchors as
+tracked grid references, and rebuilds results after terminal mutation or reflow. It publishes only
+immutable viewport-relative highlight spans, count, current index, and query generation with the
+Terminal Presentation. GPUI suppresses stale generations and converts spans only into geometry;
+search and byte-to-cell mapping never run during prepaint or paint.
+
+Terminal Find belongs to exactly one Pane. Command-F opens or refocuses its fixed top-right bar and
+makes that native UTF-16 text editor the responder, so Terminal Input Focus becomes false and the
+terminal Cursor uses its steady hollow presentation. Clicking the terminal may restore terminal
+responder focus without closing Find. Losing Focused Pane status, Escape, or the close control ends
+Find, clears worker search state, and restores terminal responder focus when the Pane remains
+Focused. Query changes do not move the Terminal Viewport or choose a current result; navigation
+wraps and minimally moves the Terminal Viewport to show the complete current match.
+
+Terminal Find highlighting composes in this fixed order: terminal background, non-current matches,
+current match, Selection, terminal text and decorations, Cursor, then Marked Text. Selection
+therefore wins deterministically when it overlaps any Find result.
+
 ### Safe Terminal Insertion
 
 Every text-insertion Adapter submits one owned Paste Payload through the Terminal Session command

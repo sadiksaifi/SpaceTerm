@@ -3,6 +3,7 @@ mod pane_action_menu;
 mod pane_host;
 mod render_lifecycle;
 mod terminal_element;
+mod terminal_find;
 mod terminal_focus;
 mod terminal_ime;
 mod terminal_pane;
@@ -72,11 +73,16 @@ actions!(
         CloseWindow,
         CreateWorkspace,
         ToggleSidebar,
-        ToggleSidebarFocus
+        ToggleSidebarFocus,
+        OpenTerminalFind,
+        FindNext,
+        FindPrevious,
+        CloseTerminalFind
     ]
 );
 
 pub(crate) const TERMINAL_KEY_CONTEXT: &str = "TerminalPane";
+pub(crate) const TERMINAL_FIND_KEY_CONTEXT: &str = "TerminalFind";
 pub(crate) const TOP_CHROME_HEIGHT: f32 = 36.0;
 pub(crate) const WORKSPACE_SIDEBAR_DEFAULT_WIDTH: f32 = 240.0;
 pub(crate) const WORKSPACE_SIDEBAR_MINIMUM_WIDTH: f32 = 180.0;
@@ -98,6 +104,15 @@ pub(crate) fn init(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("cmd-c", CopySelection, Some(TERMINAL_KEY_CONTEXT)),
         KeyBinding::new("cmd-v", PasteClipboard, Some(TERMINAL_KEY_CONTEXT)),
+        KeyBinding::new("cmd-f", OpenTerminalFind, Some(TERMINAL_KEY_CONTEXT)),
+        KeyBinding::new("cmd-g", FindNext, Some(TERMINAL_KEY_CONTEXT)),
+        KeyBinding::new("cmd-shift-g", FindPrevious, Some(TERMINAL_KEY_CONTEXT)),
+        KeyBinding::new("cmd-f", OpenTerminalFind, Some(TERMINAL_FIND_KEY_CONTEXT)),
+        KeyBinding::new("cmd-g", FindNext, Some(TERMINAL_FIND_KEY_CONTEXT)),
+        KeyBinding::new("cmd-shift-g", FindPrevious, Some(TERMINAL_FIND_KEY_CONTEXT)),
+        KeyBinding::new("enter", FindNext, Some(TERMINAL_FIND_KEY_CONTEXT)),
+        KeyBinding::new("shift-enter", FindPrevious, Some(TERMINAL_FIND_KEY_CONTEXT)),
+        KeyBinding::new("escape", CloseTerminalFind, Some(TERMINAL_FIND_KEY_CONTEXT)),
         KeyBinding::new(
             "cmd-=",
             IncreaseTerminalFontSize,
@@ -174,6 +189,36 @@ mod tests {
             ("cmd-+", IncreaseTerminalFontSize.name()),
             ("cmd--", DecreaseTerminalFontSize.name()),
             ("cmd-0", ResetTerminalFontSize.name()),
+        ];
+        let actual = cx.update(|cx| {
+            expected
+                .iter()
+                .map(|(shortcut, _)| {
+                    let keystroke = Keystroke::parse(shortcut).unwrap_or_else(|error| {
+                        panic!("invalid test shortcut {shortcut}: {error}")
+                    });
+                    let bindings = cx.all_bindings_for_input(&[keystroke]);
+                    (
+                        *shortcut,
+                        bindings
+                            .last()
+                            .map(|binding| binding.action().name())
+                            .unwrap_or(""),
+                    )
+                })
+                .collect::<Vec<_>>()
+        });
+
+        assert_eq!(actual.as_slice(), expected);
+    }
+
+    #[gpui::test]
+    fn terminal_find_shortcuts_should_bind_standard_macos_actions(cx: &mut TestAppContext) {
+        cx.update(init);
+        let expected = [
+            ("cmd-f", OpenTerminalFind.name()),
+            ("cmd-g", FindNext.name()),
+            ("cmd-shift-g", FindPrevious.name()),
         ];
         let actual = cx.update(|cx| {
             expected

@@ -42,6 +42,7 @@ use crate::terminal::paste::{
     PreparedPaste,
 };
 use crate::terminal::selection::{SelectionCopy, SelectionCopyOptions};
+use crate::terminal::{FindDirection, FindQueryGeneration};
 
 const FINAL_CHILD_WAIT_TIMEOUT: Duration = Duration::from_secs(2);
 const PTY_READ_BUFFER_SIZE: usize = 16 * 1024;
@@ -271,6 +272,9 @@ pub(crate) trait TerminalSessionHandle {
     fn pointer(&self, input: PointerInput);
     fn wheel(&self, input: WheelInput);
     fn scroll_to(&self, offset_rows: u64, generation: PresentationGeneration);
+    fn set_find_query(&self, generation: FindQueryGeneration, query: String);
+    fn navigate_find(&self, generation: FindQueryGeneration, direction: FindDirection);
+    fn end_find(&self, generation: FindQueryGeneration);
     fn request_paste(
         &self,
         text: String,
@@ -354,11 +358,43 @@ impl ResizeMailbox {
     }
 }
 
+#[derive(Debug)]
+enum FindQueryUpdate {
+    Set(FindQueryGeneration, String),
+    End(FindQueryGeneration),
+}
+
+#[derive(Clone, Default)]
+struct FindQueryMailbox {
+    pending: Arc<Mutex<Option<FindQueryUpdate>>>,
+}
+
+impl FindQueryMailbox {
+    fn replace(&self, update: FindQueryUpdate) -> bool {
+        let mut pending = self.lock();
+        let should_notify = pending.is_none();
+        *pending = Some(update);
+        should_notify
+    }
+
+    fn take(&self) -> Option<FindQueryUpdate> {
+        self.lock().take()
+    }
+
+    fn lock(&self) -> MutexGuard<'_, Option<FindQueryUpdate>> {
+        self.pending.lock().unwrap_or_else(|poisoned| {
+            eprintln!("terminal Find mailbox recovered after a worker panic");
+            poisoned.into_inner()
+        })
+    }
+}
+
 pub(crate) struct TerminalSession {
     commands: Option<CommandSender<Command>>,
     worker: Option<JoinHandle<()>>,
     terminator: Option<Box<dyn SessionPtyTerminator>>,
     resizes: ResizeMailbox,
+    find_queries: FindQueryMailbox,
 }
 
 trait SessionPty: Write + Send {
@@ -515,6 +551,8 @@ impl TerminalSession {
         let reader_transport = ReaderTransport::new(command_tx.clone());
         let resizes = ResizeMailbox::default();
         let worker_resizes = resizes.clone();
+        let find_queries = FindQueryMailbox::default();
+        let worker_find_queries = find_queries.clone();
         let (event_tx, event_rx) = async_channel::bounded(2);
         let deferred_terminator = DeferredPtyTerminator::default();
         let worker_terminator = deferred_terminator.clone();
@@ -550,7 +588,10 @@ impl TerminalSession {
                     },
                     command_rx,
                     reader_transport,
-                    worker_resizes,
+                    TerminalWorkerMailboxes {
+                        resizes: worker_resizes,
+                        find_queries: worker_find_queries,
+                    },
                     event_tx,
                     StartupReporter::Events(worker_events),
                 );
@@ -563,6 +604,7 @@ impl TerminalSession {
                 worker: Some(worker),
                 terminator: Some(Box::new(deferred_terminator)),
                 resizes,
+                find_queries,
             },
             event_rx,
         ))
@@ -586,6 +628,8 @@ impl TerminalSession {
         let (startup_tx, startup_rx) = mpsc::sync_channel(1);
         let resizes = ResizeMailbox::default();
         let worker_resizes = resizes.clone();
+        let find_queries = FindQueryMailbox::default();
+        let worker_find_queries = find_queries.clone();
 
         let worker = thread::Builder::new()
             .name("spaceterm-terminal".to_owned())
@@ -600,7 +644,10 @@ impl TerminalSession {
                     },
                     command_rx,
                     reader_transport,
-                    worker_resizes,
+                    TerminalWorkerMailboxes {
+                        resizes: worker_resizes,
+                        find_queries: worker_find_queries,
+                    },
                     event_tx,
                     StartupReporter::Blocking(startup_tx),
                 )
@@ -614,6 +661,7 @@ impl TerminalSession {
                     worker: Some(worker),
                     terminator: Some(terminator),
                     resizes,
+                    find_queries,
                 },
                 event_rx,
             )),
@@ -676,6 +724,36 @@ impl TerminalSession {
                 .is_err()
         {
             eprintln!("terminal scrollbar input was dropped because the worker has stopped");
+        }
+    }
+
+    pub(crate) fn set_find_query(&self, generation: FindQueryGeneration, query: String) {
+        if let Some(commands) = &self.commands
+            && self
+                .find_queries
+                .replace(FindQueryUpdate::Set(generation, query))
+            && commands.send(Command::FindQueryChanged).is_err()
+        {
+            eprintln!("terminal Find query was dropped because the worker has stopped");
+        }
+    }
+
+    pub(crate) fn navigate_find(&self, generation: FindQueryGeneration, direction: FindDirection) {
+        if let Some(commands) = &self.commands
+            && commands
+                .send(Command::NavigateFind(generation, direction))
+                .is_err()
+        {
+            eprintln!("terminal Find navigation was dropped because the worker has stopped");
+        }
+    }
+
+    pub(crate) fn end_find(&self, generation: FindQueryGeneration) {
+        if let Some(commands) = &self.commands
+            && self.find_queries.replace(FindQueryUpdate::End(generation))
+            && commands.send(Command::FindQueryChanged).is_err()
+        {
+            eprintln!("terminal Find close was dropped because the worker has stopped");
         }
     }
 
@@ -789,6 +867,18 @@ impl TerminalSessionHandle for TerminalSession {
         Self::scroll_to(self, offset_rows, generation);
     }
 
+    fn set_find_query(&self, generation: FindQueryGeneration, query: String) {
+        Self::set_find_query(self, generation, query);
+    }
+
+    fn navigate_find(&self, generation: FindQueryGeneration, direction: FindDirection) {
+        Self::navigate_find(self, generation, direction);
+    }
+
+    fn end_find(&self, generation: FindQueryGeneration) {
+        Self::end_find(self, generation);
+    }
+
     fn request_paste(
         &self,
         text: String,
@@ -860,6 +950,8 @@ enum Command {
     Pointer(PointerInput),
     Wheel(WheelInput),
     ScrollTo(u64, PresentationGeneration),
+    FindQueryChanged,
+    NavigateFind(FindQueryGeneration, FindDirection),
     RequestPaste(
         String,
         async_channel::Sender<Result<PasteRequestOutcome, String>>,
@@ -888,6 +980,7 @@ struct TerminalWorker {
     reader_thread: JoinHandle<()>,
     events: async_channel::Sender<SessionEvent>,
     resizes: ResizeMailbox,
+    find_queries: FindQueryMailbox,
     pending_command: Option<Command>,
     terminal_input_focused: bool,
     focus_reporting_enabled: bool,
@@ -909,6 +1002,11 @@ struct TerminalWorkerContext {
     initial_directory: PathBuf,
     fallback_title: String,
     terminal_name: &'static str,
+}
+
+struct TerminalWorkerMailboxes {
+    resizes: ResizeMailbox,
+    find_queries: FindQueryMailbox,
 }
 
 struct HiddenInputSchedule {
@@ -1174,7 +1272,7 @@ impl TerminalWorker {
         context: TerminalWorkerContext,
         commands: CommandReceiver<Command>,
         reader_transport: ReaderTransport,
-        resizes: ResizeMailbox,
+        mailboxes: TerminalWorkerMailboxes,
         events: async_channel::Sender<SessionEvent>,
         startup: StartupReporter,
     ) {
@@ -1184,6 +1282,10 @@ impl TerminalWorker {
             fallback_title,
             terminal_name,
         } = context;
+        let TerminalWorkerMailboxes {
+            resizes,
+            find_queries,
+        } = mailboxes;
         let ReaderTransport {
             commands: reader_commands,
             events: reader_events,
@@ -1235,6 +1337,7 @@ impl TerminalWorker {
             reader_thread,
             events,
             resizes,
+            find_queries,
             pending_command: None,
             terminal_input_focused: true,
             focus_reporting_enabled: false,
@@ -1389,6 +1492,27 @@ impl TerminalWorker {
             Command::ScrollTo(offset_rows, generation) => {
                 let action = self.emulator.scroll_to_at(offset_rows, generation);
                 self.apply_emulator_action(action)
+            }
+            Command::FindQueryChanged => {
+                let Some(update) = self.find_queries.take() else {
+                    return true;
+                };
+                let action = match update {
+                    FindQueryUpdate::Set(generation, query) => {
+                        self.emulator.set_find_query(generation, query)
+                    }
+                    FindQueryUpdate::End(generation) => self.emulator.end_find(generation),
+                };
+                self.apply_emulator_action(action)
+            }
+            Command::NavigateFind(generation, direction) => {
+                match self.emulator.navigate_find(generation, direction) {
+                    Ok(action) => self.apply_emulator_action(action),
+                    Err(message) => {
+                        self.send_runtime_failure(message);
+                        false
+                    }
+                }
             }
             Command::RequestPaste(text, reply) => self.process_paste_request(text, reply),
             Command::ResolvePaste(id, decision, reply) => {
@@ -2345,6 +2469,7 @@ mod tests {
             reader_thread: thread::spawn(|| {}),
             events,
             resizes: ResizeMailbox::default(),
+            find_queries: FindQueryMailbox::default(),
             pending_command: None,
             terminal_input_focused: true,
             focus_reporting_enabled: false,
@@ -3120,6 +3245,7 @@ mod tests {
             reader_thread: thread::spawn(|| {}),
             events,
             resizes: ResizeMailbox::default(),
+            find_queries: FindQueryMailbox::default(),
             pending_command: None,
             terminal_input_focused: true,
             focus_reporting_enabled: false,
@@ -3174,6 +3300,7 @@ mod tests {
             reader_thread: thread::spawn(|| {}),
             events,
             resizes: ResizeMailbox::default(),
+            find_queries: FindQueryMailbox::default(),
             pending_command: None,
             terminal_input_focused: true,
             focus_reporting_enabled: false,
@@ -3323,6 +3450,7 @@ mod tests {
             worker: None,
             terminator: None,
             resizes: resizes.clone(),
+            find_queries: FindQueryMailbox::default(),
         };
         let pixel_only = TerminalGeometry::from_grid(
             CellGridSize::new(80, 24),
@@ -3342,6 +3470,58 @@ mod tests {
             ),
             (true, true, Some(latest))
         );
+        session.shutdown();
+    }
+
+    #[test]
+    fn rapid_find_queries_should_queue_one_notification_and_retain_only_the_latest_query() {
+        let (commands, receiver) = mpsc::channel();
+        let find_queries = FindQueryMailbox::default();
+        let mut session = TerminalSession {
+            commands: Some(commands),
+            worker: None,
+            terminator: None,
+            resizes: ResizeMailbox::default(),
+            find_queries: find_queries.clone(),
+        };
+
+        session.set_find_query(FindQueryGeneration::test(1), "n".to_owned());
+        session.set_find_query(FindQueryGeneration::test(2), "needle".to_owned());
+
+        assert!(matches!(receiver.try_recv(), Ok(Command::FindQueryChanged)));
+        assert!(matches!(
+            find_queries.take(),
+            Some(FindQueryUpdate::Set(generation, query))
+                if generation == FindQueryGeneration::test(2) && query == "needle"
+        ));
+        assert!(matches!(
+            receiver.try_recv(),
+            Err(mpsc::TryRecvError::Empty)
+        ));
+        session.shutdown();
+    }
+
+    #[test]
+    fn find_close_should_supersede_a_pending_query_update() {
+        let (commands, receiver) = mpsc::channel();
+        let find_queries = FindQueryMailbox::default();
+        let mut session = TerminalSession {
+            commands: Some(commands),
+            worker: None,
+            terminator: None,
+            resizes: ResizeMailbox::default(),
+            find_queries: find_queries.clone(),
+        };
+
+        session.set_find_query(FindQueryGeneration::test(1), "needle".to_owned());
+        session.end_find(FindQueryGeneration::test(2));
+
+        assert!(matches!(receiver.try_recv(), Ok(Command::FindQueryChanged)));
+        assert!(matches!(
+            find_queries.take(),
+            Some(FindQueryUpdate::End(generation))
+                if generation == FindQueryGeneration::test(2)
+        ));
         session.shutdown();
     }
 
@@ -3797,6 +3977,7 @@ mod tests {
             worker: None,
             terminator: None,
             resizes: ResizeMailbox::default(),
+            find_queries: FindQueryMailbox::default(),
         };
 
         let result = session.request_selection_copy().try_recv().unwrap();
