@@ -11,6 +11,9 @@ pub(crate) mod macos_keyboard;
 pub(crate) mod macos_pasteboard;
 
 #[cfg(target_os = "macos")]
+pub(crate) mod macos_render_lifecycle;
+
+#[cfg(target_os = "macos")]
 pub(crate) mod macos_pty;
 
 #[cfg(target_os = "macos")]

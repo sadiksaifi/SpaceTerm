@@ -444,6 +444,18 @@ and Marked Text changes produce typed, coalesced native accessibility notificati
 carry no terminal contents. Accessibility may request terminal-owned selection changes through the
 Terminal Session, but never mutates the Terminal Emulator from the native callback.
 
+### Demand-Driven Render Lifecycle
+
+A Pane-owned Render Lifecycle separates one-shot presentation demand from recurring animation
+eligibility. Immutable Terminal Presentations received while minimized, occluded, in a hidden
+Workspace, or otherwise non-presentable coalesce to the newest Presentation Generation without
+requesting frames; visibility restoration requests exactly one presentation of that newest state.
+Cursor blink, text blink, and visual effects run only while the application, key Operating-System
+Window, Workspace, and Pane can present them and while AppKit is not minimizing, occluding, or
+live-resizing the surface. Display moves and backing-scale changes preserve logical grid state and
+invalidate only scale-dependent prepared rows and symbol geometry. Pane destruction releases
+render caches and cancels every owned presentation task and native resource.
+
 ### Workspace-Bound Terminal Creation
 
 `WorkspaceCollection` owns default Workspace naming and passes the exact stored Workspace root into

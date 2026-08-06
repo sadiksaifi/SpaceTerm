@@ -50,6 +50,7 @@
 | **File Insertion** | Ordered native file URLs converted to absolute POSIX-shell-quoted paths before becoming a Paste Payload. | raw URL paste, direct PTY write |
 | **Native Terminal Service** | A macOS Services, contextual-action, Quick Look, pasteboard, or drag/drop adapter that requests existing Selection, Terminal Hyperlink, File Insertion, and Paste Payload policies without mutating the Terminal Emulator. | independent input path, direct PTY service |
 | **Terminal Accessibility Model** | A Pane-owned native editable text-area projection whose UTF-16 ranges map visible and retained terminal text, Selection, Cursor, and bounds back to logical terminal cells. | flattened cell string, screen-reader transcript |
+| **Render Lifecycle** | Pane-owned visibility, animation, scale, and newest-generation presentation state that schedules frames only when its native surface can present them. | render loop, global animation timer |
 | **Paste Confirmation** | A transient authorization for one unsafe Paste Payload, identified opaquely and valid only while its Pane retains Terminal Input Focus and the worker deadline has not expired. | generic modal, clipboard permission |
 | **OSC 52 Authorization** | A bounded, opaque, one-operation decision governing whether a terminal program may read or write a named clipboard target; access is denied unless explicit policy allows or asks for it. | paste confirmation, unrestricted clipboard access |
 
@@ -80,6 +81,7 @@
 - A **Paste Confirmation** is cancelled by focus or hierarchy loss, timeout, Terminal Session shutdown, explicit cancellation, or a stale identity, and cancellation writes no PTY bytes.
 - A **Native Terminal Service** may submit a **Paste Payload** only while its Pane owns **Terminal Input Focus**, and may offer Quick Look only for an existing validated local-file **Terminal Hyperlink**.
 - A **Terminal Accessibility Model** observes immutable terminal state and may request worker-owned Selection changes, but never mutates the Terminal Emulator directly.
+- A **Render Lifecycle** coalesces hidden Terminal Presentations to the newest **Presentation Generation** and schedules exactly one frame when visibility returns.
 - **OSC 52 Authorization** exposes only access direction, target, and byte count to UI; clipboard contents remain inside the worker-owned native-service operation and are never diagnostic metadata.
 - The **Primary Screen** and **Alternate Screen** retain independent state; leaving the Alternate Screen restores the Primary Screen and its **Terminal Viewport**.
 - A **Presentation Generation** belongs to one published Terminal Presentation; coordinate or Scrollback requests from an older generation never mutate current Terminal Emulator state.

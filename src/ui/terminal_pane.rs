@@ -13,6 +13,7 @@ use gpui::{
 };
 
 use super::overlay_scrollbar::{OverlayScrollbar, OverlayScrollbarEvent, ScrollMetrics};
+use super::render_lifecycle::{RenderLifecycle, ScaleChange, SurfaceVisibility};
 use super::terminal_element::{
     TerminalGridCache, TerminalGridConfiguration, TerminalGridElement, terminal_grid_content_bounds,
 };
@@ -30,6 +31,7 @@ use crate::platform::macos_keyboard::{
     KeyTranslation, MacosKeyboardBridge, NativeKeyEvent, NativeKeyEventKind, UnhandledKeyEvent,
 };
 use crate::platform::macos_pasteboard::read_file_urls;
+use crate::platform::macos_render_lifecycle::current_window_visibility;
 use crate::platform::macos_scroll::current_wheel_phase;
 use crate::platform::macos_secure_input::{
     SecureInputPaneId, register_pane as register_secure_input_pane,
@@ -86,6 +88,7 @@ pub(crate) struct TerminalPane {
     screen: Arc<ScreenSnapshot>,
     accessibility: TerminalAccessibilityModel,
     accessibility_notifications: Vec<AccessibilityNotification>,
+    render_lifecycle: RenderLifecycle,
     status: Option<String>,
     fallback_title: SharedString,
     title: SharedString,
@@ -144,6 +147,16 @@ impl TerminalPane {
         let scrollbar = cx.new(|_| OverlayScrollbar::<u64>::new("terminal-scrollbar"));
         let screen = ScreenSnapshot::empty();
         let accessibility = TerminalAccessibilityModel::from_screen(&screen);
+        let mut render_lifecycle = RenderLifecycle::new(SurfaceVisibility {
+            application_active: false,
+            key_window: false,
+            minimized: false,
+            occluded: true,
+            live_resize: false,
+            workspace_visible: false,
+            pane_visible: false,
+        });
+        let _ = render_lifecycle.update_scale(window.scale_factor());
         cx.subscribe_in(
             &scrollbar,
             window,
@@ -174,6 +187,7 @@ impl TerminalPane {
             screen,
             accessibility,
             accessibility_notifications: Vec::new(),
+            render_lifecycle,
             status: None,
             title: fallback_title.clone(),
             fallback_title,
@@ -362,6 +376,7 @@ impl TerminalPane {
         self._blink_task.take();
         self._attention_task.take();
         self._event_task.take();
+        self.render_lifecycle.release();
         self.session.take();
         if let Some(id) = self.secure_input_pane.take() {
             remove_secure_input_pane(id);
@@ -520,6 +535,7 @@ impl TerminalPane {
                         .push(AccessibilityNotification::Selection);
                 }
                 self.accessibility = accessibility;
+                let _ = self.render_lifecycle.observe_snapshot(screen.generation);
                 self.screen = screen;
                 self.sync_scrollbar(cx);
             }
@@ -727,7 +743,9 @@ impl TerminalPane {
         self.backing_scale = backing_scale;
         self.cell_width = measure_cell_width(window, &self.font_family, self.font_size);
         self.last_geometry = None;
-        self.render_cache.invalidate_scale_dependent();
+        if self.render_lifecycle.update_scale(factor) == ScaleChange::ScaleResources {
+            self.render_cache.invalidate_scale_dependent();
+        }
         self.sync_scrollbar(cx);
         cx.notify();
     }
@@ -1301,12 +1319,29 @@ impl Render for TerminalPane {
         let surface_active = self.product_focus.active_workspace
             && self.product_focus.active_window
             && window.is_window_active();
+        let native_visibility = current_window_visibility();
+        let lifecycle_effects = self.render_lifecycle.update_visibility(SurfaceVisibility {
+            application_active: window.is_window_active(),
+            key_window: window.is_window_active(),
+            minimized: native_visibility.minimized,
+            occluded: native_visibility.occluded,
+            live_resize: native_visibility.live_resize,
+            workspace_visible: self.product_focus.active_workspace,
+            pane_visible: self.product_focus.active_window,
+        });
+        if lifecycle_effects.request_redraw {
+            cx.notify();
+        }
         self.surface_active = surface_active;
         self.application_active = window.is_window_active();
         if focus_gained {
             self.clear_attention(cx);
         }
-        self.sync_presentation_blink(surface_active, terminal_input_focused, cx);
+        self.sync_presentation_blink(
+            lifecycle_effects.animations_active,
+            terminal_input_focused,
+            cx,
+        );
         let background = gpui_color(self.screen.background);
         let status = self.status.clone();
         let hovered_link = self.hovered_link.clone();
@@ -1375,6 +1410,9 @@ impl Render for TerminalPane {
                 scale_factor: window.scale_factor(),
             },
         );
+        if let Some(generation) = self.render_lifecycle.take_frame() {
+            self.render_lifecycle.mark_presented(generation);
+        }
 
         div()
             .debug_selector(move || native_context_selector.clone())
