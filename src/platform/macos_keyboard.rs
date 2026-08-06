@@ -43,6 +43,7 @@ pub(crate) struct NativeKeyEvent {
 pub(crate) enum NativeKeyEventKind {
     KeyDown,
     KeyUp,
+    FlagsChanged,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -266,10 +267,12 @@ impl MacosKeyboardBridge {
         }
     }
 
-    pub(crate) fn modifier_transition(
-        &mut self,
-        mut event: NativeKeyEvent,
-    ) -> Result<Option<KeyInput>, KeyInputError> {
+    pub(crate) fn modifier_transition(&mut self, mut event: NativeKeyEvent) -> KeyTranslation {
+        let unhandled = UnhandledKeyEvent {
+            kind: NativeKeyEventKind::FlagsChanged,
+            action: event.action,
+            native_key_code: event.native_key_code,
+        };
         let physical_key = physical_key(event.native_key_code);
         let active = match physical_key {
             PhysicalKey::ShiftLeft => event.modifiers.shift_left,
@@ -282,19 +285,14 @@ impl MacosKeyboardBridge {
             PhysicalKey::MetaRight => event.modifiers.platform_right,
             PhysicalKey::CapsLock => event.modifiers.caps_lock,
             PhysicalKey::Fn => event.modifiers.function,
-            _ => {
-                return Err(KeyInputError::UnsupportedKey {
-                    native_key_code: Some(event.native_key_code),
-                    logical_key: format!("{physical_key:?}"),
-                });
-            }
+            _ => return KeyTranslation::Unhandled(unhandled),
         };
         let position = self
             .pressed_modifier_key_codes
             .iter()
             .position(|key_code| *key_code == event.native_key_code);
         if active == position.is_some() {
-            return Ok(None);
+            return KeyTranslation::Unhandled(unhandled);
         }
 
         event.action = if active {
@@ -302,12 +300,12 @@ impl MacosKeyboardBridge {
             KeyAction::Press
         } else {
             let Some(position) = position else {
-                return Ok(None);
+                return KeyTranslation::Unhandled(unhandled);
             };
             self.pressed_modifier_key_codes.remove(position);
             KeyAction::Release
         };
-        self.translate(event).into_result().map(Some)
+        self.translate(event)
     }
 }
 
@@ -601,27 +599,36 @@ mod tests {
         };
 
         let events = [
-            bridge
-                .modifier_transition(modifier(56, true, false))
-                .unwrap(),
-            bridge
-                .modifier_transition(modifier(60, true, true))
-                .unwrap(),
-            bridge
-                .modifier_transition(modifier(56, false, true))
-                .unwrap(),
-            bridge
-                .modifier_transition(modifier(60, false, false))
-                .unwrap(),
+            bridge.modifier_transition(modifier(56, true, false)),
+            bridge.modifier_transition(modifier(60, true, true)),
+            bridge.modifier_transition(modifier(56, false, true)),
+            bridge.modifier_transition(modifier(60, false, false)),
         ];
         assert_eq!(
-            events.map(|event| event.map(|input| (input.physical_key, input.action))),
+            events.map(|translation| match translation {
+                KeyTranslation::Encoded(input) => Some((input.physical_key, input.action)),
+                KeyTranslation::TextInput(_) | KeyTranslation::Unhandled(_) => None,
+            }),
             [
                 Some((PhysicalKey::ShiftLeft, KeyAction::Press)),
                 Some((PhysicalKey::ShiftRight, KeyAction::Press)),
                 Some((PhysicalKey::ShiftLeft, KeyAction::Release)),
                 Some((PhysicalKey::ShiftRight, KeyAction::Release)),
             ]
+        );
+    }
+
+    #[test]
+    fn non_modifier_flags_change_is_unhandled() {
+        let mut bridge = MacosKeyboardBridge::new(OptionAsAltPolicy::None);
+
+        assert_eq!(
+            bridge.modifier_transition(native(0, "")),
+            KeyTranslation::Unhandled(UnhandledKeyEvent {
+                kind: NativeKeyEventKind::FlagsChanged,
+                action: KeyAction::Press,
+                native_key_code: 0,
+            })
         );
     }
 

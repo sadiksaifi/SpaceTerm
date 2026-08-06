@@ -289,9 +289,11 @@ impl TerminalPane {
             return;
         };
         match self.keyboard_bridge.modifier_transition(event) {
-            Ok(Some(input)) => self.send_key_input(Ok(input)),
-            Ok(None) => {}
-            Err(error) => self.send_key_input(Err(error)),
+            crate::platform::macos_keyboard::KeyTranslation::Encoded(input) => {
+                self.send_key_input(Ok(input));
+            }
+            crate::platform::macos_keyboard::KeyTranslation::TextInput(_)
+            | crate::platform::macos_keyboard::KeyTranslation::Unhandled(_) => {}
         }
     }
 
