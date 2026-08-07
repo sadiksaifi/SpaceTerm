@@ -380,6 +380,9 @@ soft-wrap unwrapping from hard newlines and make trailing-space trimming determi
 spacer tails never become duplicated text. Pasteboard ownership stays outside the Terminal
 Emulator: the macOS Adapter publishes only public UTF-8 plain-text and HTML representations, and
 copy failures report the operation or representation type without logging copied content.
+Command-C completes that latency-sensitive query and publishes its representations before the
+action returns, so any immediate Paste observes the new Selection rather than the previous
+pasteboard value.
 
 ### Terminal Find
 
@@ -451,7 +454,9 @@ identity and carries exact committed UTF-8 through the same ordered lane without
 state. Unsupported ordinary physical identities produce a typed error and never degrade to guessed
 terminal bytes. A worker-owned keyboard protocol Module reads Terminal Emulator modes for every
 event and delegates cursor, keypad, DECBKM, modifyOtherKeys, fixterms, and negotiated Kitty keyboard
-encoding to `libghostty-vt`; UI code never constructs terminal escape sequences.
+encoding to `libghostty-vt`; UI code never constructs terminal escape sequences. Modifier-only
+transitions remain protocol-visible without clearing the Selection or forcing the viewport to the
+bottom; the first non-modifier terminal input retains the normal clear-on-type behavior.
 
 ### Native macOS Keyboard Bridge
 

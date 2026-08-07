@@ -71,8 +71,8 @@ pub(crate) use session::SessionFailure;
     )
 )]
 pub(crate) use session::{
-    NativeTerminalSessionFactory, PointerButton, PointerInput, PointerPhase, SessionEvent,
-    SessionExit, ShiftSelectionPolicy, SurfacePosition, TerminalSessionFactory,
+    NativeTerminalSessionFactory, PointerButton, PointerInput, PointerPhase, SelectionCopyError,
+    SessionEvent, SessionExit, ShiftSelectionPolicy, SurfacePosition, TerminalSessionFactory,
     TerminalSessionHandle, WheelInput, WheelPhase,
 };
 #[cfg(test)]

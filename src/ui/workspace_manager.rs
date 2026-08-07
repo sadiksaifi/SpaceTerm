@@ -16,9 +16,9 @@ use super::{
     ActivateWindow6, ActivateWindow7, ActivateWindow8, ActivateWindow9, ActivateWorkspace1,
     ActivateWorkspace2, ActivateWorkspace3, ActivateWorkspace4, ActivateWorkspace5,
     ActivateWorkspace6, ActivateWorkspace7, ActivateWorkspace8, ActivateWorkspace9, ClosePane,
-    CloseTerminalFind, CloseWindow, CreateWindow, CreateWorkspace, FindNext, FindPrevious,
-    FocusPaneDown, FocusPaneLeft, FocusPaneRight, FocusPaneUp, OpenTerminalFind, SplitDown,
-    SplitRight, TERMINAL_KEY_CONTEXT, TOP_CHROME_HEIGHT, TogglePaneZoom, ToggleSidebar,
+    CloseTerminalFind, CloseWindow, CopySelection, CreateWindow, CreateWorkspace, FindNext,
+    FindPrevious, FocusPaneDown, FocusPaneLeft, FocusPaneRight, FocusPaneUp, OpenTerminalFind,
+    SplitDown, SplitRight, TERMINAL_KEY_CONTEXT, TOP_CHROME_HEIGHT, TogglePaneZoom, ToggleSidebar,
     ToggleSidebarFocus, WORKSPACE_SIDEBAR_DEFAULT_WIDTH, WORKSPACE_SIDEBAR_MINIMUM_WIDTH,
     WindowManager, WindowManagerEvent, handle_top_chrome_mouse_down,
 };
@@ -1169,6 +1169,7 @@ impl Render for WorkspaceManager {
             .on_action(cx.listener(Self::on_activate_workspace_9))
             .on_action(cx.listener(Self::on_toggle_sidebar))
             .on_action(cx.listener(Self::on_toggle_sidebar_focus))
+            .on_action(cx.listener(Self::forward_active_terminal_action::<CopySelection>))
             .on_action(cx.listener(Self::forward_active_terminal_action::<CreateWindow>))
             .on_action(cx.listener(Self::forward_active_terminal_action::<ActivateWindow1>))
             .on_action(cx.listener(Self::forward_active_terminal_action::<ActivateWindow2>))

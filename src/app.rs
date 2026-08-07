@@ -8,7 +8,8 @@ use gpui::{
 
 use crate::terminal::{NativeTerminalSessionFactory, TerminalSessionFactory};
 use crate::ui::{
-    ExportTerminalDiagnostics, FindNext, FindPrevious, OpenTerminalFind, WorkspaceManager,
+    CopySelection, ExportTerminalDiagnostics, FindNext, FindPrevious, OpenTerminalFind,
+    WorkspaceManager,
 };
 
 actions!(
@@ -19,7 +20,8 @@ actions!(
         HideOtherApplications,
         ShowAllApplications,
         MinimizeWindow,
-        ToggleFullScreen
+        ToggleFullScreen,
+        CopyTerminalSelection
     ]
 );
 
@@ -31,6 +33,7 @@ pub(crate) fn init(cx: &mut App) {
         KeyBinding::new("cmd-m", MinimizeWindow, None),
         KeyBinding::new("ctrl-cmd-f", ToggleFullScreen, None),
         KeyBinding::new("fn-f", ToggleFullScreen, None),
+        KeyBinding::new("cmd-c", CopyTerminalSelection, None),
     ]);
     cx.on_action(|_: &QuitApplication, cx| cx.quit());
     cx.on_action(|_: &HideApplication, cx| cx.hide());
@@ -38,6 +41,9 @@ pub(crate) fn init(cx: &mut App) {
     cx.on_action(|_: &ShowAllApplications, cx| cx.unhide_other_apps());
     cx.on_action(minimize_active_window);
     cx.on_action(toggle_active_window_full_screen);
+    cx.on_action(|_: &CopyTerminalSelection, cx| {
+        cx.defer(|cx| cx.dispatch_action(&CopySelection));
+    });
     cx.set_menus(vec![
         Menu {
             name: "SpaceTerm".into(),
@@ -55,14 +61,18 @@ pub(crate) fn init(cx: &mut App) {
         },
         Menu {
             name: "Edit".into(),
-            items: vec![MenuItem::submenu(Menu {
-                name: "Find".into(),
-                items: vec![
-                    MenuItem::action("Find…", OpenTerminalFind),
-                    MenuItem::action("Find Next", FindNext),
-                    MenuItem::action("Find Previous", FindPrevious),
-                ],
-            })],
+            items: vec![
+                MenuItem::action("Copy", CopyTerminalSelection),
+                MenuItem::separator(),
+                MenuItem::submenu(Menu {
+                    name: "Find".into(),
+                    items: vec![
+                        MenuItem::action("Find…", OpenTerminalFind),
+                        MenuItem::action("Find Next", FindNext),
+                        MenuItem::action("Find Previous", FindPrevious),
+                    ],
+                }),
+            ],
         },
         Menu {
             name: "Window".into(),
@@ -142,9 +152,12 @@ pub(crate) fn open(cx: &mut App) {
 
 #[cfg(test)]
 mod tests {
-    use gpui::{Action, Keystroke, TestAppContext};
+    use gpui::{Action, ClipboardItem, Keystroke, TestAppContext};
 
     use super::*;
+    use crate::terminal::testing::{TestTerminalSessionFactory, TestTerminalSessionRecords};
+    use crate::terminal::{SelectionCopy, WorkspaceTerminalSessionFactory};
+    use crate::ui::TerminalPane;
 
     #[gpui::test]
     fn standard_macos_shortcuts_should_bind_global_application_actions(cx: &mut TestAppContext) {
@@ -156,6 +169,7 @@ mod tests {
             ("cmd-m", MinimizeWindow.name()),
             ("ctrl-cmd-f", ToggleFullScreen.name()),
             ("fn-f", ToggleFullScreen.name()),
+            ("cmd-c", CopyTerminalSelection.name()),
         ];
         let actual = cx.update(|cx| {
             expected
@@ -177,5 +191,40 @@ mod tests {
         });
 
         assert_eq!(actual.as_slice(), expected);
+    }
+
+    #[gpui::test]
+    fn native_copy_command_dispatches_semantic_copy_to_the_terminal(cx: &mut TestAppContext) {
+        cx.update(crate::ui::init);
+        cx.update(init);
+        let records = TestTerminalSessionRecords::default();
+        let session_factory: Rc<dyn TerminalSessionFactory> = Rc::new(
+            TestTerminalSessionFactory::new(records.clone()).with_selection_copy_response(Ok(
+                Some(SelectionCopy {
+                    plain_text: "native command copy".to_owned(),
+                    html: None,
+                }),
+            )),
+        );
+        let session_factory = WorkspaceTerminalSessionFactory::new(
+            session_factory,
+            PathBuf::from("/tmp/spaceterm-native-copy-command-test"),
+        );
+        let (pane, cx) =
+            cx.add_window_view(|window, cx| TerminalPane::new(session_factory, window, cx));
+        cx.update(|window, cx| {
+            window.activate_window();
+            pane.update(cx, |pane, _| pane.focus(window));
+        });
+        cx.run_until_parked();
+        cx.write_to_clipboard(ClipboardItem::new_string("stale clipboard".to_owned()));
+
+        cx.simulate_keystrokes("cmd-c");
+        cx.run_until_parked();
+
+        assert_eq!(
+            cx.read_from_clipboard().and_then(|item| item.text()),
+            Some("native command copy".to_owned())
+        );
     }
 }
