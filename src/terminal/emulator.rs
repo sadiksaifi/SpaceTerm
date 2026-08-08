@@ -1032,10 +1032,7 @@ impl TerminalEmulator {
 
     pub(crate) fn paste(&mut self, text: String) -> Result<EmulatorAction, String> {
         self.clear_selection()?;
-        let bracketed = self
-            .terminal
-            .mode(Mode::BRACKETED_PASTE)
-            .map_err(|error| format!("failed to query bracketed-paste mode: {error}"))?;
+        let bracketed = self.bracketed_paste_mode()?;
         let mut source = text.into_bytes();
         let mut bytes = vec![0; source.len()];
 
@@ -1056,6 +1053,12 @@ impl TerminalEmulator {
             bytes,
             screen_changed: true,
         })
+    }
+
+    pub(crate) fn bracketed_paste_mode(&self) -> Result<bool, String> {
+        self.terminal
+            .mode(Mode::BRACKETED_PASTE)
+            .map_err(|error| format!("failed to query bracketed-paste mode: {error}"))
     }
 
     #[cfg(test)]

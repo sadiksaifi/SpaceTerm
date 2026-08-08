@@ -1228,12 +1228,19 @@ fn check_hyperlinks() -> Result<(), String> {
 }
 
 fn check_paste_safety() -> Result<(), String> {
+    let bracketed_multiline =
+        PreparedPaste::prepare("one\ntwo".to_owned()).map_err(|error| error.to_string())?;
+    require(
+        !bracketed_multiline.requires_confirmation(true),
+        "paste-confirmation-bracketed-multiline",
+        "ordinary bracketed multiline paste required confirmation",
+    )?;
     let prepared = PreparedPaste::prepare("one\r\ntwo\x1b[201~".to_owned())
         .map_err(|error| error.to_string())?;
     require(
-        prepared.requires_confirmation(),
-        "paste-confirmation",
-        "multiline closing-fence paste was treated as safe",
+        prepared.requires_confirmation(true),
+        "paste-confirmation-bracketed-fence",
+        "bracketed closing-fence paste was treated as safe",
     )?;
     require_eq(
         "paste-normalization",

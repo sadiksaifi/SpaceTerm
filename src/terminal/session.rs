@@ -1577,7 +1577,16 @@ impl TerminalWorker {
                 return true;
             }
         };
-        if payload.requires_confirmation() {
+        let bracketed_paste = match self.emulator.bracketed_paste_mode() {
+            Ok(bracketed_paste) => bracketed_paste,
+            Err(message) => {
+                let _ =
+                    reply.try_send(Err("terminal paste mode could not be determined".to_owned()));
+                self.send_runtime_failure(message);
+                return false;
+            }
+        };
+        if payload.requires_confirmation(bracketed_paste) {
             let outcome = self
                 .paste_confirmations
                 .create(payload, Instant::now())
@@ -3596,6 +3605,80 @@ mod tests {
         });
 
         assert_eq!(state.written, b"\x1b[48;4;20;72;160tlater");
+        session.shutdown();
+    }
+
+    #[test]
+    fn bracketed_multiline_paste_is_written_without_confirmation() {
+        let (result, reader_steps, records) = start_scripted_session(ScriptedPtyOptions::default());
+        let (mut session, events) = result.unwrap();
+
+        reader_steps
+            .send(ReaderStep::Bytes(b"\x1b[?2004hX".to_vec()))
+            .unwrap();
+        receive_event(
+            &events,
+            "bracketed-paste mode activation",
+            |event| matches!(event, SessionEvent::Screen(screen) if screen_text(screen).contains('X')),
+        );
+
+        assert_eq!(
+            session
+                .request_paste("one\ntwo".to_owned())
+                .recv_blocking()
+                .unwrap(),
+            Ok(PasteRequestOutcome::Written)
+        );
+        let state = records.wait_for("the bracketed multiline paste", |state| {
+            state.written.ends_with(b"\x1b[200~one\ntwo\x1b[201~")
+        });
+        assert_eq!(state.written, b"\x1b[200~one\ntwo\x1b[201~");
+        session.shutdown();
+    }
+
+    #[test]
+    fn control_bearing_paste_is_sanitized_without_confirmation() {
+        let (result, _reader_steps, records) =
+            start_scripted_session(ScriptedPtyOptions::default());
+        let (mut session, _events) = result.unwrap();
+
+        assert_eq!(
+            session
+                .request_paste("one\x03two".to_owned())
+                .recv_blocking()
+                .unwrap(),
+            Ok(PasteRequestOutcome::Written)
+        );
+        let state = records.wait_for("the sanitized paste", |state| state.written == b"one two");
+        assert_eq!(state.written, b"one two");
+        session.shutdown();
+    }
+
+    #[test]
+    fn bracketed_paste_with_a_closing_fence_still_requires_confirmation() {
+        let (result, reader_steps, records) = start_scripted_session(ScriptedPtyOptions::default());
+        let (mut session, events) = result.unwrap();
+
+        reader_steps
+            .send(ReaderStep::Bytes(b"\x1b[?2004hX".to_vec()))
+            .unwrap();
+        receive_event(
+            &events,
+            "bracketed-paste mode activation",
+            |event| matches!(event, SessionEvent::Screen(screen) if screen_text(screen).contains('X')),
+        );
+
+        let outcome = session
+            .request_paste("one\x1b[201~two".to_owned())
+            .recv_blocking()
+            .unwrap()
+            .unwrap();
+        let PasteRequestOutcome::ConfirmationRequired(confirmation) = outcome else {
+            panic!("an embedded closing fence must require confirmation")
+        };
+
+        assert!(confirmation.risk.closing_fence);
+        assert!(records.snapshot().written.is_empty());
         session.shutdown();
     }
 
