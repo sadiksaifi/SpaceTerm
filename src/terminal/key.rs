@@ -88,6 +88,24 @@ impl KeyInput {
             && self.text.is_some()
     }
 
+    pub(crate) fn is_modifier_key(&self) -> bool {
+        matches!(
+            self.physical_key,
+            PhysicalKey::AltLeft
+                | PhysicalKey::AltRight
+                | PhysicalKey::CapsLock
+                | PhysicalKey::ControlLeft
+                | PhysicalKey::ControlRight
+                | PhysicalKey::Fn
+                | PhysicalKey::FnLock
+                | PhysicalKey::MetaLeft
+                | PhysicalKey::MetaRight
+                | PhysicalKey::NumLock
+                | PhysicalKey::ShiftLeft
+                | PhysicalKey::ShiftRight
+        )
+    }
+
     pub(crate) fn validate(&self) -> Result<(), KeyInputError> {
         if self.physical_key == PhysicalKey::Unidentified
             && !self.is_text_input()

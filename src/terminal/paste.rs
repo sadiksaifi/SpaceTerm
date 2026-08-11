@@ -24,8 +24,8 @@ pub(crate) struct PasteRisk {
 }
 
 impl PasteRisk {
-    const fn requires_confirmation(self) -> bool {
-        self.multiline || self.control_bytes || self.closing_fence
+    const fn requires_confirmation(self, bracketed_paste: bool) -> bool {
+        self.closing_fence || (self.multiline && !bracketed_paste)
     }
 }
 
@@ -114,8 +114,8 @@ impl PreparedPaste {
         Ok(Self { text, risk })
     }
 
-    pub(super) const fn requires_confirmation(&self) -> bool {
-        self.risk.requires_confirmation()
+    pub(super) const fn requires_confirmation(&self, bracketed_paste: bool) -> bool {
+        self.risk.requires_confirmation(bracketed_paste)
     }
 
     pub(super) fn confirmation(&self, id: PasteConfirmationId) -> PasteConfirmation {
@@ -169,16 +169,17 @@ mod tests {
                 closing_fence: false,
             }
         );
-        assert!(prepared.requires_confirmation());
+        assert!(prepared.requires_confirmation(false));
+        assert!(!prepared.requires_confirmation(true));
     }
 
     #[test]
-    fn preparation_classifies_every_control_replaced_by_the_ghostty_encoder() {
+    fn preparation_classifies_and_trusts_every_control_replaced_by_the_ghostty_encoder() {
         for byte in STRIPPED_CONTROLS {
             let prepared = PreparedPaste::prepare(String::from_utf8(vec![b'a', byte]).unwrap())
-                .expect("control-bearing input remains encodable after confirmation");
+                .expect("control-bearing input remains encodable after sanitization");
             assert!(prepared.risk.control_bytes, "control byte {byte:#04x}");
-            assert!(prepared.requires_confirmation());
+            assert!(!prepared.requires_confirmation(false));
         }
     }
 
@@ -187,7 +188,8 @@ mod tests {
         let prepared = PreparedPaste::prepare("safe\x1b[201~unsafe".to_owned()).unwrap();
 
         assert!(prepared.risk.closing_fence);
-        assert!(prepared.requires_confirmation());
+        assert!(prepared.requires_confirmation(false));
+        assert!(prepared.requires_confirmation(true));
     }
 
     #[test]
@@ -212,7 +214,7 @@ mod tests {
             )])
             .unwrap();
         let prepared = PreparedPaste::prepare(insertion.text).unwrap();
-        assert!(prepared.requires_confirmation());
+        assert!(prepared.requires_confirmation(false));
         assert!(prepared.risk.multiline);
     }
 }

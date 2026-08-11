@@ -51,9 +51,9 @@ use crate::terminal::{
     KeyInput, NativeContextActions, NativeInsertion, OptionAsAltPolicy, Osc52Access,
     Osc52AuthorizationDecision, Osc52AuthorizationRequest, Osc52Target, PaneTerminalState,
     PasteConfirmation, PasteDecision, PasteRequestOutcome, PasteResolution, PhysicalKey,
-    PointerButton, PointerInput, PointerPhase, ScreenSnapshot, SelectionCopy, SessionEvent,
-    ShiftSelectionPolicy, SurfacePosition, TerminalAccessibilityModel, TerminalFailure,
-    TerminalSessionHandle, UnhandledKeyDiagnostic, WheelInput, WheelPhase,
+    PointerButton, PointerInput, PointerPhase, ScreenSnapshot, SelectionCopy, SelectionCopyError,
+    SessionEvent, ShiftSelectionPolicy, SurfacePosition, TerminalAccessibilityModel,
+    TerminalFailure, TerminalSessionHandle, UnhandledKeyDiagnostic, WheelInput, WheelPhase,
     WorkspaceTerminalSessionFactory,
 };
 use crate::theme::{ACTIVE_THEME, Color};
@@ -1083,43 +1083,27 @@ impl TerminalPane {
         let Some(session) = &self.session else {
             return;
         };
-        let receiver = session.request_selection_copy();
-        cx.spawn(async move |this, cx| match receiver.recv().await {
-            Ok(Ok(Some(copy))) if !copy.plain_text.is_empty() => {
-                let _ = this.update(cx, |this, cx| {
-                    if let Err(error) = write_selection_copy(copy, cx) {
-                        let _ = error;
-                        this.present_failure(
-                            TerminalFailure::platform("write-selection-pasteboard"),
-                            true,
-                        );
-                        cx.notify();
-                    }
-                });
-            }
-            Ok(Err(error)) => {
-                let _ = this.update(cx, |this, cx| {
+        match session.copy_selection() {
+            Ok(Some(copy)) if !copy.plain_text.is_empty() => {
+                if let Err(error) = write_selection_copy(copy, cx) {
                     let _ = error;
-                    this.present_failure(
-                        TerminalFailure::emulator("format-terminal-selection"),
+                    self.present_failure(
+                        TerminalFailure::platform("write-selection-pasteboard"),
                         true,
                     );
                     cx.notify();
-                });
+                }
             }
-            Err(error) => {
-                let _ = this.update(cx, |this, cx| {
-                    let _ = error;
-                    this.present_failure(
-                        TerminalFailure::resource("receive-selection-reply"),
-                        true,
-                    );
-                    cx.notify();
-                });
+            Err(SelectionCopyError::Formatting) => {
+                self.present_failure(TerminalFailure::emulator("format-terminal-selection"), true);
+                cx.notify();
             }
-            Ok(Ok(None | Some(_))) => {}
-        })
-        .detach();
+            Err(SelectionCopyError::WorkerStopped) => {
+                self.present_failure(TerminalFailure::resource("receive-selection-reply"), true);
+                cx.notify();
+            }
+            Ok(None | Some(_)) => {}
+        }
     }
 
     fn paste_clipboard(&mut self, _: &PasteClipboard, window: &mut Window, cx: &mut Context<Self>) {
@@ -3186,8 +3170,7 @@ mod tests {
             },
         );
 
-        cx.dispatch_action(CopySelection);
-        cx.run_until_parked();
+        cx.simulate_keystrokes("cmd-c");
 
         assert_eq!(
             cx.read_from_clipboard().and_then(|item| item.text()),
@@ -3197,6 +3180,29 @@ mod tests {
             records.commands().iter().any(|call| {
                 matches!(call.command, RecordedSessionCommand::RequestSelectionCopy)
             })
+        );
+    }
+
+    #[gpui::test]
+    fn copy_updates_the_pasteboard_before_the_action_returns(cx: &mut TestAppContext) {
+        let (pane, cx, _records) = terminal_pane_with_selection_copy(
+            cx,
+            SelectionCopy {
+                plain_text: "new selection".to_owned(),
+                html: None,
+            },
+        );
+        cx.write_to_clipboard(ClipboardItem::new_string("old clipboard".to_owned()));
+
+        cx.update(|window, cx| {
+            pane.update(cx, |pane, cx| {
+                pane.copy_selection(&CopySelection, window, cx);
+            });
+        });
+
+        assert_eq!(
+            cx.read_from_clipboard().and_then(|item| item.text()),
+            Some("new selection".to_owned())
         );
     }
 

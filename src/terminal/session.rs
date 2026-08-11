@@ -265,6 +265,12 @@ pub(crate) struct StartedTerminalSession {
     pub(crate) events: async_channel::Receiver<SessionEvent>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SelectionCopyError {
+    Formatting,
+    WorkerStopped,
+}
+
 pub(crate) trait TerminalSessionHandle {
     fn key(&self, input: KeyInput);
     fn focus(&self, focused: bool);
@@ -289,9 +295,7 @@ pub(crate) trait TerminalSessionHandle {
         id: Osc52AuthorizationId,
         decision: Osc52AuthorizationDecision,
     );
-    fn request_selection_copy(
-        &self,
-    ) -> async_channel::Receiver<Result<Option<SelectionCopy>, String>>;
+    fn copy_selection(&self) -> Result<Option<SelectionCopy>, SelectionCopyError>;
 }
 
 pub(crate) trait TerminalSessionFactory {
@@ -808,20 +812,17 @@ impl TerminalSession {
         }
     }
 
-    pub(crate) fn request_selection_copy(
-        &self,
-    ) -> async_channel::Receiver<Result<Option<SelectionCopy>, String>> {
-        let (reply, receiver) = async_channel::bounded(1);
-        let sent = self
-            .commands
-            .as_ref()
-            .is_some_and(|commands| commands.send(Command::SelectionCopy(reply.clone())).is_ok());
-        if !sent {
-            let _ = reply.try_send(Err(
-                "terminal selection could not be copied because the worker has stopped".to_owned(),
-            ));
-        }
+    pub(crate) fn copy_selection(&self) -> Result<Option<SelectionCopy>, SelectionCopyError> {
+        let Some(commands) = &self.commands else {
+            return Err(SelectionCopyError::WorkerStopped);
+        };
+        let (reply, receiver) = mpsc::sync_channel(1);
+        commands
+            .send(Command::SelectionCopy(reply))
+            .map_err(|_| SelectionCopyError::WorkerStopped)?;
         receiver
+            .recv()
+            .map_err(|_| SelectionCopyError::WorkerStopped)?
     }
 
     fn shutdown(&mut self) {
@@ -902,10 +903,8 @@ impl TerminalSessionHandle for TerminalSession {
         Self::resolve_osc52_authorization(self, id, decision);
     }
 
-    fn request_selection_copy(
-        &self,
-    ) -> async_channel::Receiver<Result<Option<SelectionCopy>, String>> {
-        Self::request_selection_copy(self)
+    fn copy_selection(&self) -> Result<Option<SelectionCopy>, SelectionCopyError> {
+        Self::copy_selection(self)
     }
 }
 
@@ -965,7 +964,7 @@ enum Command {
     ResolveOsc52Authorization(Osc52AuthorizationId, Osc52AuthorizationDecision),
     Osc52AuthorizationExpired(Osc52AuthorizationId),
     ResumeOsc52Output,
-    SelectionCopy(async_channel::Sender<Result<Option<SelectionCopy>, String>>),
+    SelectionCopy(mpsc::SyncSender<Result<Option<SelectionCopy>, SelectionCopyError>>),
     SelectionAutoscrollTick(PresentationGeneration),
     ReaderReady,
     Shutdown,
@@ -1528,9 +1527,10 @@ impl TerminalWorker {
             }
             Command::ResumeOsc52Output => self.resume_osc52_output(),
             Command::SelectionCopy(reply) => {
-                let _ = reply.try_send(
+                let _ = reply.send(
                     self.emulator
-                        .selection_copy(SelectionCopyOptions::default()),
+                        .selection_copy(SelectionCopyOptions::default())
+                        .map_err(|_| SelectionCopyError::Formatting),
                 );
                 true
             }
@@ -1577,7 +1577,16 @@ impl TerminalWorker {
                 return true;
             }
         };
-        if payload.requires_confirmation() {
+        let bracketed_paste = match self.emulator.bracketed_paste_mode() {
+            Ok(bracketed_paste) => bracketed_paste,
+            Err(message) => {
+                let _ =
+                    reply.try_send(Err("terminal paste mode could not be determined".to_owned()));
+                self.send_runtime_failure(message);
+                return false;
+            }
+        };
+        if payload.requires_confirmation(bracketed_paste) {
             let outcome = self
                 .paste_confirmations
                 .create(payload, Instant::now())
@@ -3375,6 +3384,48 @@ mod tests {
     }
 
     #[test]
+    fn copy_selection_should_observe_every_preceding_pointer_event() {
+        let (result, reader_steps, _records) =
+            start_scripted_session(ScriptedPtyOptions::default());
+        let (mut session, events) = result.unwrap();
+        reader_steps
+            .send(ReaderStep::Bytes(b"selected".to_vec()))
+            .unwrap();
+        let SessionEvent::Screen(screen) = receive_event(
+            &events,
+            "the selectable terminal output",
+            |event| matches!(event, SessionEvent::Screen(screen) if screen_text(screen).contains("selected")),
+        ) else {
+            unreachable!()
+        };
+        let pointer = |phase, position| PointerInput {
+            generation: screen.generation,
+            phase,
+            button: (phase != PointerPhase::Motion).then_some(PointerButton::Left),
+            position,
+            modifiers: InputModifiers::default(),
+            shift_selection: ShiftSelectionPolicy::default(),
+        };
+
+        session.pointer(pointer(
+            PointerPhase::Press,
+            SurfacePosition { x: 1.0, y: 1.0 },
+        ));
+        session.pointer(pointer(
+            PointerPhase::Motion,
+            SurfacePosition { x: 63.0, y: 1.0 },
+        ));
+        session.pointer(pointer(
+            PointerPhase::Release,
+            SurfacePosition { x: 63.0, y: 1.0 },
+        ));
+        let copy = session.copy_selection().unwrap().unwrap();
+
+        assert_eq!(copy.plain_text, "selected");
+        session.shutdown();
+    }
+
+    #[test]
     fn resize_should_reach_the_pty_with_pixel_dimensions() {
         let (result, _reader_steps, records) =
             start_scripted_session(ScriptedPtyOptions::default());
@@ -3403,8 +3454,7 @@ mod tests {
         let resized = geometry(grid.cols, grid.rows, 9.0, 21.0);
 
         session.resize(resized);
-        let barrier = session.request_selection_copy();
-        assert!(barrier.recv_blocking().is_ok());
+        assert!(session.copy_selection().is_ok());
 
         assert_eq!(records.snapshot().resizes, vec![pty_size(resized)]);
         assert!(events.try_recv().is_err());
@@ -3559,6 +3609,80 @@ mod tests {
     }
 
     #[test]
+    fn bracketed_multiline_paste_is_written_without_confirmation() {
+        let (result, reader_steps, records) = start_scripted_session(ScriptedPtyOptions::default());
+        let (mut session, events) = result.unwrap();
+
+        reader_steps
+            .send(ReaderStep::Bytes(b"\x1b[?2004hX".to_vec()))
+            .unwrap();
+        receive_event(
+            &events,
+            "bracketed-paste mode activation",
+            |event| matches!(event, SessionEvent::Screen(screen) if screen_text(screen).contains('X')),
+        );
+
+        assert_eq!(
+            session
+                .request_paste("one\ntwo".to_owned())
+                .recv_blocking()
+                .unwrap(),
+            Ok(PasteRequestOutcome::Written)
+        );
+        let state = records.wait_for("the bracketed multiline paste", |state| {
+            state.written.ends_with(b"\x1b[200~one\ntwo\x1b[201~")
+        });
+        assert_eq!(state.written, b"\x1b[200~one\ntwo\x1b[201~");
+        session.shutdown();
+    }
+
+    #[test]
+    fn control_bearing_paste_is_sanitized_without_confirmation() {
+        let (result, _reader_steps, records) =
+            start_scripted_session(ScriptedPtyOptions::default());
+        let (mut session, _events) = result.unwrap();
+
+        assert_eq!(
+            session
+                .request_paste("one\x03two".to_owned())
+                .recv_blocking()
+                .unwrap(),
+            Ok(PasteRequestOutcome::Written)
+        );
+        let state = records.wait_for("the sanitized paste", |state| state.written == b"one two");
+        assert_eq!(state.written, b"one two");
+        session.shutdown();
+    }
+
+    #[test]
+    fn bracketed_paste_with_a_closing_fence_still_requires_confirmation() {
+        let (result, reader_steps, records) = start_scripted_session(ScriptedPtyOptions::default());
+        let (mut session, events) = result.unwrap();
+
+        reader_steps
+            .send(ReaderStep::Bytes(b"\x1b[?2004hX".to_vec()))
+            .unwrap();
+        receive_event(
+            &events,
+            "bracketed-paste mode activation",
+            |event| matches!(event, SessionEvent::Screen(screen) if screen_text(screen).contains('X')),
+        );
+
+        let outcome = session
+            .request_paste("one\x1b[201~two".to_owned())
+            .recv_blocking()
+            .unwrap()
+            .unwrap();
+        let PasteRequestOutcome::ConfirmationRequired(confirmation) = outcome else {
+            panic!("an embedded closing fence must require confirmation")
+        };
+
+        assert!(confirmation.risk.closing_fence);
+        assert!(records.snapshot().written.is_empty());
+        session.shutdown();
+    }
+
+    #[test]
     fn unsafe_paste_is_immutable_until_confirmation_and_uses_exact_unbracketed_bytes() {
         let (result, _reader_steps, records) =
             start_scripted_session(ScriptedPtyOptions::default());
@@ -3627,7 +3751,7 @@ mod tests {
         };
 
         session.focus(false);
-        let _ = session.request_selection_copy().recv_blocking();
+        let _ = session.copy_selection();
         assert_eq!(
             session
                 .resolve_paste(confirmation.id, PasteDecision::Confirm)
@@ -3980,8 +4104,10 @@ mod tests {
             find_queries: FindQueryMailbox::default(),
         };
 
-        let result = session.request_selection_copy().try_recv().unwrap();
-        assert!(matches!(result, Err(message) if message.contains("worker has stopped")));
+        assert_eq!(
+            session.copy_selection(),
+            Err(SelectionCopyError::WorkerStopped)
+        );
     }
 
     #[test]

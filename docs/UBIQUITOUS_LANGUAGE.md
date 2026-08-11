@@ -87,6 +87,7 @@
 - **Selection** is painted above every **Terminal Find** result, including its current result.
 - **Marked Text** exists only while its Pane has **Terminal Input Focus**; cancellation or focus loss discards it without Terminal Session input.
 - A **Paste Payload** that requires **Paste Confirmation** remains worker-owned; UI and diagnostics receive only bounded risk metadata, never its content.
+- A multiline **Paste Payload** requires **Paste Confirmation** only when bracketed-paste mode is inactive; an embedded closing fence always requires confirmation, while encoder-replaced control bytes alone do not.
 - A **Paste Confirmation** is cancelled by focus or hierarchy loss, timeout, Terminal Session shutdown, explicit cancellation, or a stale identity, and cancellation writes no PTY bytes.
 - A **Native Terminal Service** may submit a **Paste Payload** only while its Pane owns **Terminal Input Focus**, and may offer Quick Look only for an existing validated local-file **Terminal Hyperlink**.
 - A **Terminal Accessibility Model** observes immutable terminal state and may request worker-owned Selection changes, but never mutates the Terminal Emulator directly.

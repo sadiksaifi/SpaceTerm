@@ -1,12 +1,9 @@
-#[cfg(not(test))]
 use cocoa::appkit::{NSPasteboard, NSPasteboardTypeHTML, NSPasteboardTypeString};
-#[cfg(not(test))]
 use cocoa::base::{YES, nil};
+use cocoa::foundation::{NSArray, NSAutoreleasePool, NSInteger, NSString};
 #[cfg(not(test))]
-use cocoa::foundation::{NSAutoreleasePool, NSInteger, NSString};
-#[cfg(not(test))]
-use objc::{class, msg_send, sel, sel_impl};
-#[cfg(not(test))]
+use objc::class;
+use objc::{msg_send, sel, sel_impl};
 use std::ffi::CStr;
 use std::path::PathBuf;
 
@@ -87,30 +84,50 @@ pub(crate) fn read_file_urls() -> Result<Vec<PathBuf>, String> {
 
 #[cfg(not(test))]
 pub(crate) fn write_selection(plain_text: &str, html: Option<&str>) -> Result<(), String> {
-    let representations = selection_representations(plain_text, html);
     unsafe {
         let pool = NSAutoreleasePool::new(nil);
         let pasteboard = NSPasteboard::generalPasteboard(nil);
-        let _: NSInteger = pasteboard.clearContents();
-        for representation in representations {
+        let result = write_selection_to_pasteboard(pasteboard, plain_text, html);
+        pool.drain();
+        result
+    }
+}
+
+fn write_selection_to_pasteboard(
+    pasteboard: cocoa::base::id,
+    plain_text: &str,
+    html: Option<&str>,
+) -> Result<(), String> {
+    let representations = selection_representations(plain_text, html)
+        .into_iter()
+        .map(|representation| {
+            let pasteboard_type = match representation.mime {
+                PLAIN_TEXT_MIME => unsafe { NSPasteboardTypeString },
+                HTML_MIME => unsafe { NSPasteboardTypeHTML },
+                _ => unreachable!("selection pasteboard MIME types are closed"),
+            };
+            (representation, pasteboard_type)
+        })
+        .collect::<Vec<_>>();
+    let types = representations
+        .iter()
+        .map(|(_, pasteboard_type)| *pasteboard_type)
+        .collect::<Vec<_>>();
+
+    unsafe {
+        let types = NSArray::arrayWithObjects(nil, &types);
+        let _: NSInteger = pasteboard.declareTypes_owner(types, nil);
+        for (representation, pasteboard_type) in representations {
             let value = NSString::alloc(nil)
                 .init_str(representation.text)
                 .autorelease();
-            let pasteboard_type = match representation.mime {
-                PLAIN_TEXT_MIME => NSPasteboardTypeString,
-                HTML_MIME => NSPasteboardTypeHTML,
-                _ => unreachable!("selection pasteboard MIME types are closed"),
-            };
-            let written = pasteboard.setString_forType(value, pasteboard_type) == YES;
-            if !written {
-                pool.drain();
+            if pasteboard.setString_forType(value, pasteboard_type) != YES {
                 return Err(format!(
                     "macOS refused terminal selection representation {}",
                     representation.mime
                 ));
             }
         }
-        pool.drain();
     }
     Ok(())
 }
@@ -188,5 +205,35 @@ mod tests {
                 text: "plain",
             }]
         );
+    }
+
+    #[test]
+    fn native_write_declares_every_representation_before_publishing_data() {
+        unsafe {
+            let pool = NSAutoreleasePool::new(nil);
+            let pasteboard = NSPasteboard::pasteboardWithUniqueName(nil);
+
+            write_selection_to_pasteboard(
+                pasteboard,
+                "native selection",
+                Some("<pre>native selection</pre>"),
+            )
+            .unwrap();
+
+            let types = pasteboard.types();
+            let has_plain_text: bool = msg_send![types, containsObject: NSPasteboardTypeString];
+            let has_html: bool = msg_send![types, containsObject: NSPasteboardTypeHTML];
+            let plain_text = pasteboard.stringForType(NSPasteboardTypeString);
+            let plain_text = CStr::from_ptr(NSString::UTF8String(plain_text))
+                .to_string_lossy()
+                .into_owned();
+            pasteboard.releaseGlobally();
+            pool.drain();
+
+            assert_eq!(
+                (has_plain_text, has_html, plain_text),
+                (true, true, "native selection".to_owned())
+            );
+        }
     }
 }

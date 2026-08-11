@@ -838,8 +838,10 @@ impl TerminalEmulator {
     }
 
     pub(crate) fn key(&mut self, input: KeyInput) -> Result<EmulatorAction, String> {
-        self.clear_selection()?;
-        self.terminal.scroll_viewport(ScrollViewport::Bottom);
+        if !input.is_modifier_key() {
+            self.clear_selection()?;
+            self.terminal.scroll_viewport(ScrollViewport::Bottom);
+        }
         let mut bytes = Vec::new();
         self.encode_key(&input, &mut bytes)?;
         Ok(EmulatorAction {
@@ -1030,10 +1032,7 @@ impl TerminalEmulator {
 
     pub(crate) fn paste(&mut self, text: String) -> Result<EmulatorAction, String> {
         self.clear_selection()?;
-        let bracketed = self
-            .terminal
-            .mode(Mode::BRACKETED_PASTE)
-            .map_err(|error| format!("failed to query bracketed-paste mode: {error}"))?;
+        let bracketed = self.bracketed_paste_mode()?;
         let mut source = text.into_bytes();
         let mut bytes = vec![0; source.len()];
 
@@ -1054,6 +1053,12 @@ impl TerminalEmulator {
             bytes,
             screen_changed: true,
         })
+    }
+
+    pub(crate) fn bracketed_paste_mode(&self) -> Result<bool, String> {
+        self.terminal
+            .mode(Mode::BRACKETED_PASTE)
+            .map_err(|error| format!("failed to query bracketed-paste mode: {error}"))
     }
 
     #[cfg(test)]
@@ -1115,11 +1120,11 @@ impl TerminalEmulator {
             }
             return false;
         }
-        if generation == self.presentation_generation {
-            active.generation = generation;
-            return true;
+        if generation < active.generation || generation > self.presentation_generation {
+            return false;
         }
-        generation == active.generation
+        active.generation = generation;
+        true
     }
 
     fn pointer_press(&mut self, input: PointerInput) -> Result<EmulatorAction, String> {
@@ -3704,6 +3709,40 @@ mod tests {
     }
 
     #[test]
+    fn modifier_key_transitions_should_preserve_selection_for_application_shortcuts() {
+        let mut emulator = emulator(12, 3);
+        emulator.feed(b"hello world");
+        select_first_five(&mut emulator, false);
+        let mut meta = key(
+            PhysicalKey::MetaLeft,
+            InputModifiers {
+                platform: true,
+                ..InputModifiers::default()
+            },
+        );
+
+        emulator.key(meta.clone()).unwrap();
+        meta.action = KeyAction::Release;
+        meta.modifiers.platform = false;
+        emulator.key(meta).unwrap();
+
+        assert_eq!(emulator.selection_text().unwrap(), Some("hello".to_owned()));
+    }
+
+    #[test]
+    fn non_modifier_key_input_should_clear_selection() {
+        let mut emulator = emulator(12, 3);
+        emulator.feed(b"hello world");
+        select_first_five(&mut emulator, false);
+
+        emulator
+            .key(key(PhysicalKey::A, InputModifiers::default()))
+            .unwrap();
+
+        assert_eq!(emulator.selection_text().unwrap(), None);
+    }
+
+    #[test]
     fn selection_copy_distinguishes_soft_wraps_and_hard_lines() {
         let mut emulator = emulator(5, 3);
         emulator.feed(b"abcdefgh\r\nxy");
@@ -4096,6 +4135,41 @@ mod tests {
         let extended = emulator.pointer(drag).unwrap();
 
         assert!(extended.screen_changed);
+        assert_eq!(
+            emulator.selection_text().unwrap().as_deref(),
+            Some("hello world")
+        );
+    }
+
+    #[test]
+    fn selection_accepts_an_intermediate_selection_owned_presentation() {
+        let mut emulator = emulator(12, 2);
+        emulator.feed(b"hello world");
+        let presented = emulator.snapshot().unwrap().unwrap();
+        let mut pointer = PointerInput {
+            generation: presented.generation,
+            phase: PointerPhase::Press,
+            button: Some(PointerButton::Left),
+            position: SurfacePosition { x: 1.0, y: 1.0 },
+            modifiers: InputModifiers::default(),
+            shift_selection: ShiftSelectionPolicy::default(),
+        };
+        _ = emulator.pointer(pointer).unwrap();
+
+        pointer.phase = PointerPhase::Motion;
+        pointer.button = None;
+        pointer.position.x = 25.0;
+        _ = emulator.pointer(pointer).unwrap();
+        let intermediate = emulator.snapshot().unwrap().unwrap();
+
+        pointer.position.x = 41.0;
+        _ = emulator.pointer(pointer).unwrap();
+        _ = emulator.snapshot().unwrap().unwrap();
+
+        pointer.generation = intermediate.generation;
+        pointer.position.x = 108.0;
+        _ = emulator.pointer(pointer).unwrap();
+
         assert_eq!(
             emulator.selection_text().unwrap().as_deref(),
             Some("hello world")
