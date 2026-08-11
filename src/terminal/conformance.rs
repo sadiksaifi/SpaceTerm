@@ -320,6 +320,13 @@ const FIXTURES: &[FixtureSpec] = &[
         "spaceterm-failure-contract",
         Security
     ),
+    fixture!(
+        "graphics.kitty-static",
+        89,
+        [2, 34, 44, 45, 46],
+        "kitty-graphics-protocol",
+        SemanticSnapshot
+    ),
 ];
 
 const KEYBOARD_PROTOCOL_EXPECTED: &[ExpectedObservation] = &[
@@ -355,6 +362,24 @@ const SEMANTIC_SNAPSHOT_EXPECTED: &[ExpectedObservation] = &[
         step: 1,
         field: "frame",
         value: "generation=PresentationGeneration(1) row-count=3",
+    },
+];
+
+const KITTY_GRAPHICS_EXPECTED: &[ExpectedObservation] = &[
+    ExpectedObservation {
+        step: 1,
+        field: "rgba",
+        value: "ff 00 00 ff",
+    },
+    ExpectedObservation {
+        step: 1,
+        field: "placement",
+        value: "image=89 placement=7 origin=0,0 destination=1x1 z=0 virtual=false",
+    },
+    ExpectedObservation {
+        step: 1,
+        field: "damage",
+        value: "content=true geometry=true text=Clean",
     },
 ];
 
@@ -595,6 +620,74 @@ fn observe_semantic_snapshot(
     Ok(observations)
 }
 
+fn observe_kitty_graphics(
+    _spec: &FixtureSpec,
+    budget: &mut FixtureBudget,
+) -> Result<Vec<Observation>, String> {
+    let _guard = super::graphics::test_lock();
+    let geometry = TerminalGeometry::from_grid(
+        CellGridSize::new(12, 3),
+        LogicalCellSize::new(8.0, 16.0),
+        BackingScale::ONE,
+    );
+    let mut emulator = TerminalEmulator::new(geometry).map_err(|error| error.to_string())?;
+    emulator
+        .snapshot()
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "terminal did not publish its initial snapshot".to_owned())?;
+    let input = b"\x1b_Ga=T,t=d,f=24,i=89,p=7,s=1,v=1,C=1;/wAA\x1b\\";
+    emulator.feed(input);
+    let replies = emulator.take_pty_responses();
+    budget.record(input.len(), replies.len());
+    let snapshot = emulator
+        .snapshot()
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "terminal did not publish Kitty graphics".to_owned())?;
+    let image = snapshot
+        .graphics
+        .images
+        .first()
+        .ok_or_else(|| "snapshot omitted decoded Kitty image".to_owned())?;
+    let placement = snapshot
+        .graphics
+        .placements
+        .first()
+        .ok_or_else(|| "snapshot omitted Kitty placement".to_owned())?;
+
+    Ok(vec![
+        Observation {
+            step: 1,
+            field: "rgba",
+            value: hex_bytes(&image.rgba),
+        },
+        Observation {
+            step: 1,
+            field: "placement",
+            value: format!(
+                "image={} placement={} origin={},{} destination={}x{} z={} virtual={}",
+                placement.image.image_id,
+                placement.placement_id,
+                placement.viewport_col,
+                placement.viewport_row,
+                placement.destination_width,
+                placement.destination_height,
+                placement.z,
+                placement.unicode_placeholder,
+            ),
+        },
+        Observation {
+            step: 1,
+            field: "damage",
+            value: format!(
+                "content={} geometry={} text={:?}",
+                snapshot.damage.graphics_content,
+                snapshot.damage.graphics_geometry,
+                snapshot.damage.content,
+            ),
+        },
+    ])
+}
+
 fn canonical_cell(column: usize, row: &[CellSnapshot], cell: &CellSnapshot) -> String {
     let styled = cell.foreground_source != TerminalColor::Default
         || cell.background_source != TerminalColor::Default
@@ -692,6 +785,7 @@ fn observe_advertised_capability(
         39 => check_accessibility()?,
         40 => check_render_lifecycle()?,
         41 => check_typed_failures()?,
+        89 => check_kitty_graphics()?,
         issue => {
             return Err(format!(
                 "issue #{issue} has no executable conformance driver"
@@ -704,6 +798,14 @@ fn observe_advertised_capability(
         field: "capability",
         value: "pass".to_owned(),
     }])
+}
+
+fn check_kitty_graphics() -> Result<(), String> {
+    run_fixture(&ExecutableFixture {
+        spec: &FIXTURES[35],
+        expected: KITTY_GRAPHICS_EXPECTED,
+        observe: observe_kitty_graphics,
+    })
 }
 
 fn require(
@@ -1523,10 +1625,15 @@ const EXECUTABLE_FIXTURES: &[ExecutableFixture] = &[
         expected: SEMANTIC_SNAPSHOT_EXPECTED,
         observe: observe_semantic_snapshot,
     },
+    ExecutableFixture {
+        spec: &FIXTURES[35],
+        expected: KITTY_GRAPHICS_EXPECTED,
+        observe: observe_kitty_graphics,
+    },
 ];
 
 #[test]
-fn registry_covers_every_advertised_capability_without_image_protocols() {
+fn registry_covers_every_advertised_capability() {
     let stories = FIXTURES
         .iter()
         .flat_map(|fixture| fixture.stories.iter().copied())
@@ -1536,7 +1643,7 @@ fn registry_covers_every_advertised_capability_without_image_protocols() {
         .iter()
         .map(|fixture| fixture.id)
         .collect::<BTreeSet<_>>();
-    let forbidden = ["image", "sixel", "kitty-graphics", "iterm-image"];
+    let forbidden = ["sixel", "iterm-image"];
 
     assert_eq!(stories, expected);
     assert_eq!(
@@ -1545,7 +1652,7 @@ fn registry_covers_every_advertised_capability_without_image_protocols() {
         "fixture identifiers must be unique"
     );
     for fixture in FIXTURES {
-        assert!((6..42).contains(&fixture.issue) && fixture.issue != 28);
+        assert!(((6..42).contains(&fixture.issue) && fixture.issue != 28) || fixture.issue == 89);
         assert!(!fixture.authority.is_empty());
         assert!(
             forbidden

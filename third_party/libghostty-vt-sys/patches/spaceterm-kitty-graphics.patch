@@ -1,0 +1,219 @@
+diff --git a/include/ghostty/vt/kitty_graphics.h b/include/ghostty/vt/kitty_graphics.h
+index dda8b836e..bb91e544f 100644
+--- a/include/ghostty/vt/kitty_graphics.h
++++ b/include/ghostty/vt/kitty_graphics.h
+@@ -474,6 +474,30 @@ typedef struct {
+   uint32_t source_height;
+ } GhosttyKittyGraphicsPlacementRenderInfo;
+ 
++/** Fully resolved render geometry for a normal or Unicode-placeholder placement. */
++typedef struct {
++  size_t size;
++  uint32_t image_id;
++  uint32_t placement_id;
++  int32_t z;
++  int32_t viewport_col;
++  int32_t viewport_row;
++  uint32_t cell_offset_x;
++  uint32_t cell_offset_y;
++  uint32_t source_x;
++  uint32_t source_y;
++  uint32_t source_width;
++  uint32_t source_height;
++  uint32_t dest_width;
++  uint32_t dest_height;
++  bool is_virtual;
++} GhosttyKittyGraphicsResolvedPlacement;
++
++/** Return false to stop visiting placements. */
++typedef bool (*GhosttyKittyGraphicsResolvedPlacementCallback)(
++    void* userdata,
++    const GhosttyKittyGraphicsResolvedPlacement* placement);
++
+ /**
+  * Get data from a kitty graphics storage instance.
+  *
+@@ -850,6 +874,16 @@ GHOSTTY_API GhosttyResult ghostty_kitty_graphics_placement_render_info(
+     GhosttyTerminal terminal,
+     GhosttyKittyGraphicsPlacementRenderInfo* out_info);
+ 
++/**
++ * Visit every visible Kitty placement with renderer-ready geometry.
++ * This includes placements resolved from U+10EEEE placeholder cells.
++ * All pointers are borrowed and valid only for the duration of this call.
++ */
++GHOSTTY_API GhosttyResult ghostty_terminal_kitty_graphics_resolved_placements(
++    GhosttyTerminal terminal,
++    void* userdata,
++    GhosttyKittyGraphicsResolvedPlacementCallback callback);
++
+ /** @} */
+ 
+ #ifdef __cplusplus
+diff --git a/src/lib_vt.zig b/src/lib_vt.zig
+index e01cdbb89..0d1add82b 100644
+--- a/src/lib_vt.zig
++++ b/src/lib_vt.zig
+@@ -305,6 +305,7 @@ comptime {
+         @export(&c.kitty_graphics_placement_viewport_pos, .{ .name = "ghostty_kitty_graphics_placement_viewport_pos" });
+         @export(&c.kitty_graphics_placement_source_rect, .{ .name = "ghostty_kitty_graphics_placement_source_rect" });
+         @export(&c.kitty_graphics_placement_render_info, .{ .name = "ghostty_kitty_graphics_placement_render_info" });
++        @export(&c.kitty_graphics_resolved_placements, .{ .name = "ghostty_terminal_kitty_graphics_resolved_placements" });
+         @export(&c.grid_ref_cell, .{ .name = "ghostty_grid_ref_cell" });
+         @export(&c.grid_ref_row, .{ .name = "ghostty_grid_ref_row" });
+         @export(&c.grid_ref_graphemes, .{ .name = "ghostty_grid_ref_graphemes" });
+diff --git a/src/terminal/c/kitty_graphics.zig b/src/terminal/c/kitty_graphics.zig
+index 13a675ccc..5b640dc46 100644
+--- a/src/terminal/c/kitty_graphics.zig
++++ b/src/terminal/c/kitty_graphics.zig
+@@ -546,6 +546,119 @@ pub const PlacementRenderInfo = extern struct {
+     source_height: u32 = 0,
+ };
+ 
++/// A fully resolved placement ready for a renderer. Unlike the raw placement
++/// iterator, this includes occurrences produced by Unicode placeholders.
++pub const ResolvedPlacement = extern struct {
++    size: usize = @sizeOf(ResolvedPlacement),
++    image_id: u32 = 0,
++    placement_id: u32 = 0,
++    z: i32 = 0,
++    viewport_col: i32 = 0,
++    viewport_row: i32 = 0,
++    cell_offset_x: u32 = 0,
++    cell_offset_y: u32 = 0,
++    source_x: u32 = 0,
++    source_y: u32 = 0,
++    source_width: u32 = 0,
++    source_height: u32 = 0,
++    dest_width: u32 = 0,
++    dest_height: u32 = 0,
++    is_virtual: bool = false,
++};
++
++pub const ResolvedPlacementCallback = *const fn (
++    userdata: ?*anyopaque,
++    placement: *const ResolvedPlacement,
++) callconv(lib.calling_conv) bool;
++
++/// Visit all visible placements after resolving their viewport geometry.
++/// The callback and placement pointer are valid only for this call.
++pub fn resolved_placements(
++    terminal_: terminal_c.Terminal,
++    userdata: ?*anyopaque,
++    callback_: ?ResolvedPlacementCallback,
++) callconv(lib.calling_conv) Result {
++    if (comptime !build_options.kitty_graphics) return .no_value;
++
++    const wrapper = terminal_ orelse return .invalid_value;
++    const callback = callback_ orelse return .invalid_value;
++    const t = wrapper.terminal;
++    const storage = &t.screens.active.kitty_images;
++    const top = t.screens.active.pages.getTopLeft(.viewport);
++    const bot = t.screens.active.pages.getBottomRight(.viewport) orelse return .success;
++    const top_y = t.screens.active.pages.pointFromPin(.screen, top).?.screen.y;
++    const bot_y = t.screens.active.pages.pointFromPin(.screen, bot).?.screen.y;
++
++    var has_virtual = false;
++    var it = storage.placements.iterator();
++    while (it.next()) |entry| {
++        const p = entry.value_ptr;
++        switch (p.location) {
++            .virtual => {
++                has_virtual = true;
++                continue;
++            },
++            .pin => {},
++        }
++
++        const image = storage.imageById(entry.key_ptr.image_id) orelse continue;
++        const rect = p.rect(image, t) orelse continue;
++        const image_top_y = t.screens.active.pages.pointFromPin(.screen, rect.top_left).?.screen.y;
++        const image_bot_y = t.screens.active.pages.pointFromPin(.screen, rect.bottom_right).?.screen.y;
++        if (image_top_y > bot_y or image_bot_y < top_y) continue;
++
++        const dest = p.pixelSize(image, t);
++        if (dest.width == 0 or dest.height == 0) continue;
++        const source_x = @min(image.width, p.source_x);
++        const source_y = @min(image.height, p.source_y);
++        const resolved: ResolvedPlacement = .{
++            .image_id = image.id,
++            .placement_id = entry.key_ptr.placement_id.id,
++            .z = p.z,
++            .viewport_col = @intCast(rect.top_left.x),
++            .viewport_row = @as(i32, @intCast(image_top_y)) - @as(i32, @intCast(top_y)),
++            .cell_offset_x = p.x_offset,
++            .cell_offset_y = p.y_offset,
++            .source_x = source_x,
++            .source_y = source_y,
++            .source_width = if (p.source_width > 0) @min(image.width - source_x, p.source_width) else image.width - source_x,
++            .source_height = if (p.source_height > 0) @min(image.height - source_y, p.source_height) else image.height - source_y,
++            .dest_width = dest.width,
++            .dest_height = dest.height,
++        };
++        if (!callback(userdata, &resolved)) return .success;
++    }
++
++    if (has_virtual) {
++        var virtual_it = @import("../kitty/graphics_unicode.zig").placementIterator(top, bot);
++        while (virtual_it.next()) |p| {
++            const image = storage.imageById(p.image_id) orelse continue;
++            const rp = p.renderPlacement(storage, &image, t.width_px / t.cols, t.height_px / t.rows) catch continue;
++            if (rp.dest_width == 0 or rp.dest_height == 0) continue;
++            const viewport = t.screens.active.pages.pointFromPin(.viewport, rp.top_left) orelse continue;
++            const resolved: ResolvedPlacement = .{
++                .image_id = image.id,
++                .placement_id = p.placement_id,
++                .z = -1,
++                .viewport_col = @intCast(rp.top_left.x),
++                .viewport_row = @intCast(viewport.viewport.y),
++                .cell_offset_x = rp.offset_x,
++                .cell_offset_y = rp.offset_y,
++                .source_x = rp.source_x,
++                .source_y = rp.source_y,
++                .source_width = rp.source_width,
++                .source_height = rp.source_height,
++                .dest_width = rp.dest_width,
++                .dest_height = rp.dest_height,
++                .is_virtual = true,
++            };
++            if (!callback(userdata, &resolved)) return .success;
++        }
++    }
++
++    return .success;
++}
++
+ pub fn placement_render_info(
+     iter_: PlacementIterator,
+     image_: ImageHandle,
+diff --git a/src/terminal/c/main.zig b/src/terminal/c/main.zig
+index 37dc57684..ab87c1277 100644
+--- a/src/terminal/c/main.zig
++++ b/src/terminal/c/main.zig
+@@ -27,6 +27,7 @@ pub const kitty_graphics_placement_grid_size = kitty_graphics.placement_grid_siz
+ pub const kitty_graphics_placement_viewport_pos = kitty_graphics.placement_viewport_pos;
+ pub const kitty_graphics_placement_source_rect = kitty_graphics.placement_source_rect;
+ pub const kitty_graphics_placement_render_info = kitty_graphics.placement_render_info;
++pub const kitty_graphics_resolved_placements = kitty_graphics.resolved_placements;
+ pub const types = @import("types.zig");
+ pub const modes = @import("modes.zig");
+ pub const osc = @import("osc.zig");
+diff --git a/src/terminal/kitty/graphics_image.zig b/src/terminal/kitty/graphics_image.zig
+index b6f44fac2..a7b31e6c1 100644
+--- a/src/terminal/kitty/graphics_image.zig
++++ b/src/terminal/kitty/graphics_image.zig
+@@ -19,10 +19,12 @@ const temp_dir = struct {
+ const log = std.log.scoped(.kitty_gfx);
+ 
+ /// Maximum width or height of an image. Taken directly from Kitty.
+-const max_dimension = 10000;
++// SpaceTerm keeps decoded image and GPU resources bounded. Keep these
++// pre-allocation limits aligned with its semantic snapshot budget.
++const max_dimension = 8192;
+ 
+ /// Maximum size in bytes, taken from Kitty.
+-const max_size = 400 * 1024 * 1024; // 400MB
++const max_size = 96 * 1024 * 1024; // 96 MiB
+ 
+ /// An image that is still being loaded. The image should be initialized
+ /// using init on the first chunk and then addData for each subsequent
