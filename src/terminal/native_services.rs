@@ -62,11 +62,13 @@ impl NativeInsertion {
         if !terminal_input_focused {
             return Err(NativeInsertionError::TerminalUnfocused);
         }
-        prepare_file_insertion(paths)
-            .map(|insertion| Self {
-                text: insertion.text,
-            })
-            .map_err(NativeInsertionError::InvalidFiles)
+        Self::prepare_dropped_files(paths).map_err(NativeInsertionError::InvalidFiles)
+    }
+
+    pub(crate) fn prepare_dropped_files(paths: &[PathBuf]) -> Result<Self, &'static str> {
+        prepare_file_insertion(paths).map(|insertion| Self {
+            text: insertion.text,
+        })
     }
 
     pub(crate) fn text(&self) -> &str {

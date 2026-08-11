@@ -1,4 +1,5 @@
 use std::ops::Range;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -130,6 +131,7 @@ pub(crate) struct TerminalPane {
     keyboard_bridge: MacosKeyboardBridge,
     ime: TerminalIme,
     ime_suppressed_keys: Vec<PhysicalKey>,
+    pending_file_insertion: Option<NativeInsertion>,
     pending_paste: Option<PasteConfirmation>,
     pending_osc52: Option<Osc52AuthorizationRequest>,
     hovered_link: Option<crate::terminal::HyperlinkTarget>,
@@ -241,6 +243,7 @@ impl TerminalPane {
             keyboard_bridge: MacosKeyboardBridge::new(OptionAsAltPolicy::default()),
             ime: TerminalIme::default(),
             ime_suppressed_keys: Vec::new(),
+            pending_file_insertion: None,
             pending_paste: None,
             pending_osc52: None,
             hovered_link: None,
@@ -261,19 +264,20 @@ impl TerminalPane {
         if self.product_focus.focused_pane && !product_focus.focused_pane {
             self.end_find_state();
         }
-        if (!product_focus.active_workspace
+        let native_service_blocked = !product_focus.active_workspace
             || !product_focus.active_window
             || !product_focus.focused_pane
-            || product_focus.blocker.is_some())
+            || product_focus.blocker.is_some();
+        if native_service_blocked {
+            self.pending_file_insertion = None;
+        }
+        if native_service_blocked
             && let Some(confirmation) = self.pending_paste.take()
             && let Some(session) = &self.session
         {
             let _ = session.resolve_paste(confirmation.id, PasteDecision::Cancel);
         }
-        if (!product_focus.active_workspace
-            || !product_focus.active_window
-            || !product_focus.focused_pane
-            || product_focus.blocker.is_some())
+        if native_service_blocked
             && let Some(request) = self.pending_osc52.take()
             && let Some(session) = &self.session
         {
@@ -586,6 +590,7 @@ impl TerminalPane {
                         .set_find_query(self.find_generation, editor.text().to_owned());
                 }
                 self.session = Some(started.handle);
+                self.flush_pending_file_insertion(cx);
                 let receiver = started.events;
                 self._event_task = Some(cx.spawn(async move |this, cx| {
                     while let Ok(event) = receiver.recv().await {
@@ -1147,12 +1152,48 @@ impl TerminalPane {
     fn insert_dropped_files(
         &mut self,
         paths: &ExternalPaths,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Ok(insertion) =
-            NativeInsertion::dropped_files(paths.paths(), self.terminal_input_focus)
-        else {
+        self.insert_dropped_file_paths(paths.paths(), window, cx);
+    }
+
+    fn insert_dropped_file_paths(
+        &mut self,
+        paths: &[PathBuf],
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let insertion = match NativeInsertion::prepare_dropped_files(paths) {
+            Ok(insertion) => insertion,
+            Err(message) => {
+                self.status = Some(format!("File drop rejected: {message}"));
+                cx.notify();
+                return;
+            }
+        };
+        self.pending_file_insertion = Some(insertion);
+        window.activate_window();
+        self.focus_handle.focus(window);
+        cx.emit(TerminalPaneEvent::FocusRequested);
+        cx.notify();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn insert_dropped_file_paths_for_test(
+        &mut self,
+        paths: &[PathBuf],
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.insert_dropped_file_paths(paths, window, cx);
+    }
+
+    fn flush_pending_file_insertion(&mut self, cx: &mut Context<Self>) {
+        if !self.terminal_input_focus || self.session.is_none() {
+            return;
+        }
+        let Some(insertion) = self.pending_file_insertion.take() else {
             return;
         };
         self.request_paste_text(insertion.into_text(), cx);
@@ -1737,6 +1778,7 @@ impl Render for TerminalPane {
         post_accessibility_notifications(&notifications, self.accessibility.visible_range());
         let pane = cx.entity().downgrade();
         let (terminal_input_focused, focus_gained) = self.sync_terminal_input_focus(window);
+        self.flush_pending_file_insertion(cx);
         let surface_active = self.product_focus.active_workspace
             && self.product_focus.active_window
             && window.is_window_active();
@@ -3581,6 +3623,45 @@ mod tests {
 
         cx.deactivate_window();
         assert_eq!(focus_commands(), vec![false, true, false, true, false]);
+    }
+
+    #[gpui::test]
+    fn file_drop_from_inactive_app_focuses_before_requesting_paste(cx: &mut TestAppContext) {
+        let (pane, cx, records) = connected_terminal_pane(cx);
+        cx.deactivate_window();
+
+        cx.update(|window, cx| {
+            pane.update(cx, |pane, cx| {
+                pane.insert_dropped_file_paths_for_test(
+                    &[PathBuf::from("/tmp/a dropped file")],
+                    window,
+                    cx,
+                );
+            });
+        });
+        cx.run_until_parked();
+
+        let mut relevant = records
+            .commands()
+            .into_iter()
+            .filter_map(|call| match call.command {
+                RecordedSessionCommand::Focus(true) => Some(RecordedSessionCommand::Focus(true)),
+                RecordedSessionCommand::RequestPaste(text) => {
+                    Some(RecordedSessionCommand::RequestPaste(text))
+                }
+                _ => None,
+            })
+            .rev()
+            .take(2)
+            .collect::<Vec<_>>();
+        relevant.reverse();
+        assert_eq!(
+            relevant,
+            vec![
+                RecordedSessionCommand::Focus(true),
+                RecordedSessionCommand::RequestPaste("'/tmp/a dropped file'".to_owned()),
+            ]
+        );
     }
 
     fn event(key: &str, key_char: Option<&str>, modifiers: Modifiers) -> KeyDownEvent {
