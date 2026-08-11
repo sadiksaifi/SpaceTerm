@@ -5,6 +5,7 @@ mod render_lifecycle;
 mod terminal_element;
 mod terminal_find;
 mod terminal_focus;
+mod terminal_graphics;
 mod terminal_ime;
 mod terminal_pane;
 mod terminal_symbols;

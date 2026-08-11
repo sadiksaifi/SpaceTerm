@@ -14,6 +14,7 @@ use crate::terminal::{
 };
 use crate::theme::{ACTIVE_THEME, Color};
 
+use super::terminal_graphics::{GraphicsLayer, GraphicsPaintPlan, PreparedGraphics};
 use super::terminal_ime::PreeditLayout;
 use super::terminal_pane::TerminalPane;
 use super::terminal_symbols::{SymbolPlan, SymbolPlanCache, SymbolPrimitive, terminal_symbol};
@@ -142,6 +143,8 @@ pub(crate) struct TerminalGridElement {
     input: Entity<TerminalPane>,
     blink_phase_visible: bool,
     find_spans: Arc<[FindHighlightSpan]>,
+    graphics: PreparedGraphics,
+    scale_factor: f32,
 }
 
 pub(crate) struct TerminalGridConfiguration {
@@ -156,6 +159,7 @@ pub(crate) struct TerminalGridConfiguration {
     pub(crate) blink_phase_visible: bool,
     pub(crate) scale_factor: f32,
     pub(crate) find_spans: Arc<[FindHighlightSpan]>,
+    pub(crate) graphics: PreparedGraphics,
 }
 
 impl TerminalGridElement {
@@ -207,6 +211,8 @@ impl TerminalGridElement {
             input: configuration.input,
             blink_phase_visible: configuration.blink_phase_visible,
             find_spans: configuration.find_spans,
+            graphics: configuration.graphics,
+            scale_factor: configuration.scale_factor,
         }
     }
 }
@@ -245,6 +251,7 @@ struct PreparedRow {
 pub(crate) struct PrepaintState {
     surface: Option<PaintQuad>,
     rows: Vec<PreparedRow>,
+    graphics: GraphicsPaintPlan,
 }
 
 #[derive(Default)]
@@ -493,9 +500,23 @@ impl Element for TerminalGridElement {
             });
         }
 
+        let grid_bounds = terminal_grid_content_bounds(bounds, self.columns, self.cell_width);
+        let grid_bounds = Bounds::new(
+            grid_bounds.origin,
+            size(
+                grid_bounds.size.width,
+                (self.line_height * visible_rows as f32).min(grid_bounds.size.height),
+            ),
+        );
         PrepaintState {
             surface: Some(fill(bounds, gpui_color(self.background))),
             rows: prepared_rows,
+            graphics: self.graphics.paint_plan(
+                grid_bounds,
+                self.cell_width,
+                self.line_height,
+                self.scale_factor,
+            ),
         }
     }
 
@@ -525,10 +546,18 @@ impl Element for TerminalGridElement {
                 bounds: grid_bounds,
             }),
             |window| {
+                prepaint
+                    .graphics
+                    .paint_layer(GraphicsLayer::BelowBackground, window);
                 for row in &mut prepaint.rows {
                     for background in row.backgrounds.drain(..) {
                         window.paint_quad(background);
                     }
+                }
+                prepaint
+                    .graphics
+                    .paint_layer(GraphicsLayer::BelowText, window);
+                for row in &mut prepaint.rows {
                     for quad in row.under_text_decorations.quads.drain(..) {
                         window.paint_quad(quad);
                     }
@@ -560,6 +589,13 @@ impl Element for TerminalGridElement {
                     for (path, color) in row.over_text_decorations.paths.drain(..) {
                         window.paint_path(path, gpui_color(color));
                     }
+                }
+                prepaint
+                    .graphics
+                    .paint_layer(GraphicsLayer::AboveText, window);
+                // IME remains above every image layer so marked text and its
+                // caret are always usable while an above-text image is shown.
+                for row in &mut prepaint.rows {
                     for background in row.overlay_backgrounds.drain(..) {
                         window.paint_quad(background);
                     }

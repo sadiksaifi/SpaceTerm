@@ -7,6 +7,7 @@ mod failure;
 mod file_insertion;
 mod find;
 pub(crate) mod geometry;
+mod graphics;
 mod hyperlink;
 pub(crate) mod identity;
 mod key;
@@ -41,6 +42,7 @@ pub(crate) use failure::{
 pub(crate) use find::{
     FindDirection, FindHighlightSpan, FindQueryGeneration, TerminalFindSnapshot,
 };
+pub(crate) use graphics::{GraphicsSnapshot, ImageKey, ImagePlacementSnapshot, ImageSnapshot};
 pub(crate) use hyperlink::HyperlinkTarget;
 pub(crate) use key::{
     InputModifiers, KeyAction, KeyInput, KeyInputError, OptionAsAltPolicy, PhysicalKey,

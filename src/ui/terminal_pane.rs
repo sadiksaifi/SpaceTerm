@@ -20,6 +20,7 @@ use super::terminal_element::{
 };
 use super::terminal_find::{FindEditor, FindInputElement};
 use super::terminal_focus::{TerminalFocusCoordinator, TerminalFocusFacts, TerminalProductFocus};
+use super::terminal_graphics::TerminalGraphicsCache;
 use super::terminal_ime::{PreeditLayout, PreeditPosition, TerminalIme, layout_preedit};
 use super::{
     AllowOsc52Clipboard, CancelUnsafePaste, CloseTerminalFind, ConfirmUnsafePaste, CopySelection,
@@ -125,6 +126,7 @@ pub(crate) struct TerminalPane {
     wheel_accumulator: WheelAccumulator,
     scrollbar: Entity<OverlayScrollbar<u64>>,
     render_cache: TerminalGridCache,
+    graphics_cache: Entity<TerminalGraphicsCache>,
     keyboard_bridge: MacosKeyboardBridge,
     ime: TerminalIme,
     ime_suppressed_keys: Vec<PhysicalKey>,
@@ -156,6 +158,11 @@ impl TerminalPane {
         let fallback_title: SharedString =
             normalized_pane_title("", &session_factory.fallback_title()).into();
         let scrollbar = cx.new(|_| OverlayScrollbar::<u64>::new("terminal-scrollbar"));
+        let graphics_cache = cx.new(|_| TerminalGraphicsCache::default());
+        cx.on_release(|pane, cx| {
+            pane.graphics_cache.update(cx, |cache, cx| cache.clear(cx));
+        })
+        .detach();
         let screen = ScreenSnapshot::empty();
         let accessibility = TerminalAccessibilityModel::from_screen(&screen);
         let mut render_lifecycle = RenderLifecycle::new(SurfaceVisibility {
@@ -230,6 +237,7 @@ impl TerminalPane {
             wheel_accumulator: WheelAccumulator::default(),
             scrollbar,
             render_cache: TerminalGridCache::new(),
+            graphics_cache,
             keyboard_bridge: MacosKeyboardBridge::new(OptionAsAltPolicy::default()),
             ime: TerminalIme::default(),
             ime_suppressed_keys: Vec::new(),
@@ -1820,6 +1828,10 @@ impl Render for TerminalPane {
             .filter(|snapshot| snapshot.generation == self.find_generation)
             .map_or_else(|| Arc::from([]), |snapshot| snapshot.visible_spans.clone());
         let find_bar = self.render_find_bar(cx);
+        let graphics_snapshot = self.screen.graphics.clone();
+        let graphics = self
+            .graphics_cache
+            .update(cx, |cache, cx| cache.sync(&graphics_snapshot, window, cx));
         let terminal_grid = TerminalGridElement::new(
             &self.screen,
             &mut self.render_cache,
@@ -1835,6 +1847,7 @@ impl Render for TerminalPane {
                 blink_phase_visible: self.blink_phase_visible,
                 scale_factor: window.scale_factor(),
                 find_spans,
+                graphics,
             },
         );
         if let Some(generation) = self.render_lifecycle.take_frame() {

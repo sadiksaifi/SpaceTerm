@@ -2979,19 +2979,16 @@ dependencies = [
 [[package]]
 name = "libghostty-vt"
 version = "0.2.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6219ed1c364b3ef5815fb0fd2acc0662f792adc706dabf59b7ca89280ee6d066"
 dependencies = [
  "bitflags 2.13.1",
  "int-enum",
  "libghostty-vt-sys",
+ "png 0.18.1",
 ]
 
 [[package]]
 name = "libghostty-vt-sys"
 version = "0.2.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "865fed12a8b2bba3507b3bccd0bef439e06ef1100e652fe6b71d132c41ee8db0"
 
 [[package]]
 name = "libgit2-sys"
@@ -5133,10 +5130,12 @@ dependencies = [
  "cocoa 0.26.0",
  "gpui",
  "gpui-symbols",
+ "image",
  "libc",
  "libghostty-vt",
  "objc",
  "portable-pty",
+ "smallvec",
  "thiserror 2.0.19",
  "unicode-bidi",
 ]

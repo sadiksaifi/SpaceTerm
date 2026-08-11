@@ -15,7 +15,8 @@ a real SpaceTerm mechanism and declares:
 - bounded step, input-byte, and output-byte budgets.
 
 The registry rejects missing story coverage, duplicate fixture identifiers, unbounded fixtures,
-unknown prerequisite issues, and any image-protocol fixture. The executable gate runs every
+and unknown prerequisite issues. Static Kitty graphics fixtures are admitted only under the
+dedicated protocol authority; unsupported image protocols remain excluded. The executable gate runs every
 registry entry. Golden byte fixtures compare encoded terminal input exactly. Semantic snapshot
 goldens retain row order, cell column, cell width, style sources, Presentation Generation, Cursor,
 active screen, grid size, title, and Terminal Metadata. A mismatch identifies the fixture, step,
@@ -31,12 +32,13 @@ required release gate.
 
 Published standards and platform documentation are authoritative. Ghostty is an audited
 behavioral reference at the fixed revision
-[`46767b521358200bfe3f268f365ccd2f218db558`](https://github.com/ghostty-org/ghostty/tree/46767b521358200bfe3f268f365ccd2f218db558),
+[`a887df42c56f6de86c0fe6da9c4eeca37931e083`](https://github.com/ghostty-org/ghostty/tree/a887df42c56f6de86c0fe6da9c4eeca37931e083),
 not a source of protocol truth. Updating that revision requires a deliberate audit and this
 document changing in the same commit.
 
-Image protocols, including Sixel, Kitty graphics, and iTerm inline images, are excluded. Their
-absence is enforced by the registry test.
+Static direct-media Kitty graphics is included under the published Kitty protocol. Sixel, iTerm
+inline images, Kitty host-file media, and Kitty animation remain excluded; the security fixtures
+verify that unsupported media cannot read host files or produce a false capability response.
 
 ## Authority catalog
 
@@ -44,7 +46,7 @@ absence is enforced by the registry test.
 | --- | --- |
 | `spaceterm-snapshot-contract` | [SpaceTerm immutable snapshot decision](../CONTEXT.md#immutable-terminal-presentation-snapshots) |
 | `ecma-48-and-xterm-window-ops` | [ECMA-48](https://ecma-international.org/publications-and-standards/standards/ecma-48/) and [XTerm control sequences](https://invisible-island.net/xterm/ctlseqs/ctlseqs.html) |
-| `posix-and-darwin-pty` | [POSIX terminal interface](https://pubs.opengroup.org/onlinepubs/9799919799/basedefs/termios.h.html) and [Apple `openpty`](https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man3/openpty.3.html) |
+| `posix-and-darwin-pty` | [POSIX terminal interface](https://pubs.opengroup.org/onlinepubs/9799919799/basedefs/termios.h.html), [Apple `openpty`](https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man3/openpty.3.html), and [SpaceTerm capability and compatibility identity](../CONTEXT.md#terminal-capability-and-compatibility-identity) |
 | `posix-process-lifecycle` | [POSIX `wait`](https://pubs.opengroup.org/onlinepubs/9799919799/functions/wait.html) and [POSIX `kill`](https://pubs.opengroup.org/onlinepubs/9799919799/functions/kill.html) |
 | `ecma-48-sgr` | [ECMA-48 Select Graphic Rendition](https://ecma-international.org/publications-and-standards/standards/ecma-48/) |
 | `ecma-48-and-xterm-sgr` | [ECMA-48](https://ecma-international.org/publications-and-standards/standards/ecma-48/) and [XTerm SGR extensions](https://invisible-island.net/xterm/ctlseqs/ctlseqs.html) |
@@ -76,6 +78,7 @@ absence is enforced by the registry test.
 | `apple-nsaccessibility` | [Apple accessibility protocol](https://developer.apple.com/documentation/appkit/nsaccessibilityprotocol) |
 | `apple-window-visibility` | [Apple window occlusion state](https://developer.apple.com/documentation/appkit/nswindow/occlusionstate) |
 | `spaceterm-failure-contract` | [SpaceTerm error-handling principle](../CONTEXT.md#error-handling) |
+| `kitty-graphics-protocol` | [Kitty graphics protocol](https://sw.kovidgoyal.net/kitty/graphics-protocol/) and [SpaceTerm static graphics decision](../CONTEXT.md#static-kitty-graphics) |
 
 ## Fixture matrix
 
@@ -116,6 +119,7 @@ absence is enforced by the registry test.
 | `accessibility.editable-text` | #39 | US-42 | `apple-nsaccessibility` | Native |
 | `render.visibility-lifecycle` | #40 | US-12, US-13, US-44, US-45 | `apple-window-visibility` | Lifecycle |
 | `failure.typed-local-diagnostics` | #41 | US-40 | `spaceterm-failure-contract` | Security |
+| `graphics.kitty-static` | #89 | US-02, US-34, US-44–US-46 | `kitty-graphics-protocol` | Semantic snapshot |
 
 ## Maintenance
 

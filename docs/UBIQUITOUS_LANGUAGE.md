@@ -31,7 +31,8 @@
 | **PTY** | The macOS pseudoterminal that connects a Terminal Emulator to its Shell Process. | Terminal, shell |
 | **Shell Process** | The command interpreter process launched for a Pane through its PTY. | Terminal, session |
 | **Shell Integration** | Versioned temporary startup resources injected only into a supported Shell Process to report safe directory, prompt, command, and completion facts without changing user configuration. | shell plugin installation, dotfile rewrite |
-| **Terminal Capability Identity** | The canonical truthful program, version, `TERM`, terminfo, XTVERSION, device-attribute, and XTGETTCAP profile exposed by one Terminal Session. | emulator dependency identity, user-agent string |
+| **Terminal Capability Identity** | The canonical SpaceTerm program, version, `TERM`, terminfo, XTVERSION, device-attribute, and XTGETTCAP profile exposed by one Terminal Session. | emulator dependency identity, user-agent string |
+| **Compatibility Identity** | The narrow default `TERM_PROGRAM=ghostty` ecosystem adapter exposed to name-gated Shell Processes while `SPACETERM=1` preserves direct identification; it is not terminal protocol authority. | Terminal Capability Identity, Ghostty runtime |
 | **Terminal Attention** | Pane-owned unread and visual state derived from bounded BEL or command-completion events without moving Terminal Input Focus. | global alarm, focus request |
 | **Primary Screen** | The Terminal Emulator screen whose logical content includes bounded Scrollback and whose Terminal Viewport is restored after Alternate Screen use. | main buffer, normal buffer |
 | **Alternate Screen** | The temporary Terminal Emulator screen used by full-screen terminal applications; it has no Scrollback and does not replace Primary Screen state. | alternate buffer, secondary terminal |
@@ -39,6 +40,8 @@
 | **Scrollback** | Bounded Primary Screen output retained outside the bottom Terminal Viewport and available by moving that viewport. | Workspace scroll, history |
 | **Presentation Generation** | The monotonic identity of a published Terminal Presentation grid, carried by coordinate and Scrollback mappings so stale mappings and older presentations can be rejected. | frame number, emulator generation |
 | **Synchronized Output** | A bounded DEC 2026 transaction whose intermediate Terminal Emulator changes are withheld until one atomic Terminal Presentation is published. | render lock, output buffering |
+| **Terminal Image** | Immutable decoded RGBA content identified by a Kitty image ID and content generation within one Primary or Alternate Screen. | file image, texture path, live emulator pointer |
+| **Image Placement** | Renderer-ready geometry that references a Terminal Image and remains attached to terminal content or U+10EEEE placeholder cells across scrolling and reflow. | UI image, copied crop, floating overlay |
 | **Terminal Metadata** | Immutable session-scoped title, Reported Working Directory, Semantic Zone, command, and progress facts published with explicit provenance and freshness in a Terminal Presentation. | live emulator state, arbitrary OSC text |
 | **Reported Working Directory** | The last valid local absolute directory reported by a Terminal Session, initially inherited from its Workspace and updated only by trusted OSC 7. | process-global current directory, remote URL |
 | **Semantic Zone** | A Prompt, Command Input, or Command Output region marked by OSC 133 and owned by immutable terminal cells. | UI text classification, shell transcript parser |
@@ -96,10 +99,13 @@
 - **Local Diagnostics** never contain terminal, clipboard, environment, path, secret, logical-key, or typed-key values and never leave the machine automatically.
 - **OSC 52 Authorization** exposes only access direction, target, and byte count to UI; clipboard contents remain inside the worker-owned native-service operation and are never diagnostic metadata.
 - The **Primary Screen** and **Alternate Screen** retain independent state; leaving the Alternate Screen restores the Primary Screen and its **Terminal Viewport**.
+- A **Terminal Image** belongs to exactly one screen's bounded Kitty store; immutable snapshots may share its RGBA allocation only while its image ID and content generation are unchanged.
+- An **Image Placement** is resolved by the Terminal Emulator, never reconstructed from placeholder cells by GPUI, and paints in the Kitty z layer relative to backgrounds and glyphs.
 - A **Presentation Generation** belongs to one published Terminal Presentation; coordinate or Scrollback requests from an older generation never mutate current Terminal Emulator state.
 - **Terminal Metadata** belongs to exactly one **Terminal Session**; Pane and Window chrome may consume its sanitized immutable values but never terminal control bytes or live emulator state.
 - **Shell Integration** is scoped to one launched **Shell Process** and must preserve its ordinary startup files and environment or fall back without injection.
-- **Terminal Capability Identity** selects `xterm-spaceterm` only with a discoverable packaged entry, otherwise retains `xterm-256color`, and never advertises the Terminal Emulator dependency as SpaceTerm's identity.
+- **Terminal Capability Identity** selects `xterm-spaceterm` only with a discoverable packaged entry and otherwise retains `xterm-256color`; the default **Compatibility Identity** changes only `TERM_PROGRAM`, never SpaceTerm's terminfo, protocol replies, or supported capability set.
+- A **Shell Process** receives no inherited foreign terminal-emulator or multiplexer resource, window, socket, session, or remote-control marker; **Compatibility Identity** cannot bind it to the runtime that launched SpaceTerm.
 - **Terminal Attention** remains scoped to its owning Pane and Window; focus gain or accepted input clears it, while repeated native effects are rate-limited and notifications occur only when SpaceTerm is inactive.
 - A **Reported Working Directory** accepts only a local absolute `file://` report and retains its last valid provenance when a malformed or remote report arrives.
 - A **Pane** belongs to exactly one **Window** and owns one **Terminal Session**.
