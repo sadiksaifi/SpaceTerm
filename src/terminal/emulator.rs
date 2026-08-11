@@ -772,7 +772,15 @@ impl TerminalEmulator {
 
     pub(crate) fn feed_at(&mut self, bytes: &[u8], now: Instant) {
         self.enable_graphics_for_apc(bytes);
-        if !bytes.is_empty() && self.active_pointer.is_some() {
+        if !bytes.is_empty()
+            && matches!(
+                self.active_pointer,
+                Some(ActivePointer {
+                    route: PointerRoute::Selection,
+                    ..
+                })
+            )
+        {
             self.pointer_mapping_invalidated = true;
         }
         self.xtgettcap
@@ -4242,6 +4250,33 @@ mod tests {
             emulator.selection_text().unwrap().as_deref(),
             Some("hello world")
         );
+    }
+
+    #[test]
+    fn application_mouse_release_survives_output_generation_change() {
+        let mut emulator = emulator(8, 2);
+        emulator.feed(b"\x1b[?1000h\x1b[?1006h");
+        let before = emulator.snapshot().unwrap().unwrap();
+        let press = PointerInput {
+            generation: before.generation,
+            phase: PointerPhase::Press,
+            button: Some(PointerButton::Left),
+            position: SurfacePosition { x: 1.0, y: 1.0 },
+            modifiers: InputModifiers::default(),
+            shift_selection: ShiftSelectionPolicy::default(),
+        };
+        _ = emulator.pointer(press).unwrap();
+        emulator.feed(b"redraw");
+        _ = emulator.snapshot().unwrap().unwrap();
+
+        let release = emulator
+            .pointer(PointerInput {
+                phase: PointerPhase::Release,
+                ..press
+            })
+            .unwrap();
+
+        assert_eq!(release.bytes, b"\x1b[<0;1;1m");
     }
 
     #[test]
