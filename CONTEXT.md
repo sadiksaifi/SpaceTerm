@@ -110,7 +110,7 @@ bounded OSC 7 directory and OSC 133 prompt/command marks consumed by Terminal Me
 resource version is discovered from `Contents/Resources` in a packaged app and `assets` during
 development, and package verification requires every supported shell resource.
 
-### Truthful Terminal Capability Identity
+### Terminal Capability and Compatibility Identity
 
 One Terminal Capability Identity owns the SpaceTerm program name and version, preferred and
 fallback `TERM` values, true-color marker, XTVERSION and device-attribute replies, and the bounded
@@ -119,8 +119,16 @@ discoverable in packaged resources and otherwise keeps `xterm-256color`; the sel
 root is passed explicitly to the Shell Process. The generated entry inherits the established
 xterm-256color baseline and adds only direct color, authorized clipboard, and cursor-shape
 capabilities already implemented by the runtime. Packaging compiles the source with `tic`, and
-verification resolves the entry from both the signed app and mounted DMG. No runtime or packaged
-identity may identify SpaceTerm as its emulator dependency.
+verification resolves the entry from both the signed app and mounted DMG.
+
+Until name-gated terminal applications discover Kitty graphics through its protocol query or
+recognize SpaceTerm directly, Shell Processes receive the narrow Compatibility Identity
+`TERM_PROGRAM=ghostty` by default. `SPACETERM=1`, SpaceTerm's own version, `TERM`, terminfo,
+XTVERSION, device attributes, and XTGETTCAP remain authoritative; the compatibility alias neither
+changes nor expands any supported terminal protocol. SpaceTerm does not set Ghostty resource,
+window, socket, or remote-control variables and removes inherited terminal-emulator and
+multiplexer markers before launch, so a Shell Process cannot accidentally bind to the runtime that
+launched SpaceTerm. Compatibility Identity is an ecosystem adapter, never protocol authority.
 
 ### Bounded PTY Output Transport
 
@@ -166,7 +174,9 @@ rendering claim. Each Primary or Alternate Screen is limited to 96 MiB and 8192 
 dimension; one graphics-enabled Terminal Session reserves 192 MiB, and application-wide decoded
 storage is limited to 384 MiB. Encoded APC input is limited to 128 MiB. File, temporary-file, and
 shared-memory media and all animation actions remain disabled and cannot read host files. Kitty
-support is discovered only through the protocol query and is not added to terminfo.
+support remains queryable through the official protocol and is not added to terminfo. The narrow
+Compatibility Identity enables legacy name-gated applications to attempt the implemented static
+subset; unsupported inputs still receive the protocol-defined rejection behavior.
 
 GPUI caches `RenderImage` values by image ID and content generation, converts RGBA to its BGRA
 upload format once, and explicitly removes stale atlas entries on replacement, deletion, quota

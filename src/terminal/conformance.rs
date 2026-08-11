@@ -18,7 +18,8 @@ use super::geometry::{
 };
 use super::hyperlink::{HyperlinkKind, HyperlinkTarget, detect_url_cells};
 use super::identity::{
-    COLORTERM, PROGRAM_NAME, TERM_FALLBACK, TERM_NAME, XtGetTcapObserver, launch_identity,
+    COLORTERM, COMPATIBILITY_PROGRAM_NAME, TERM_FALLBACK, TERM_NAME, XTVERSION, XtGetTcapObserver,
+    launch_identity,
 };
 use super::key::{InputModifiers, KeyAction, KeyInput, OptionAsAltPolicy, PhysicalKey};
 use super::metadata::{DirectoryProvenance, parse_osc7_directory, sanitize_title};
@@ -897,7 +898,8 @@ fn check_pty_initialization() -> Result<(), String> {
         "cwd=/tmp",
         "term=xterm-256color",
         "colorterm=truecolor",
-        "program=SpaceTerm",
+        "program=ghostty",
+        "spaceterm=1",
         "controlling-tty=true",
     ] {
         require(
@@ -1448,7 +1450,16 @@ fn check_shell_integration() -> Result<(), String> {
 }
 
 fn check_identity() -> Result<(), String> {
-    require_eq("program-name", PROGRAM_NAME, "SpaceTerm")?;
+    require(
+        XTVERSION.starts_with("SpaceTerm "),
+        "program-name",
+        XTVERSION,
+    )?;
+    require_eq(
+        "compatibility-program-name",
+        COMPATIBILITY_PROGRAM_NAME,
+        "ghostty",
+    )?;
     require_eq("colorterm", COLORTERM, "truecolor")?;
     let identity = launch_identity(&resource_root());
     require(

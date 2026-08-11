@@ -20,6 +20,35 @@ use crate::terminal::identity;
 const CHILD_EXIT_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const GRACEFUL_SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(250);
 const FORCED_SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(250);
+const FOREIGN_RUNTIME_ENVIRONMENT: &[&str] = &[
+    "GHOSTTY_BIN_DIR",
+    "GHOSTTY_RESOURCES_DIR",
+    "GHOSTTY_SHELL_FEATURES",
+    "ITERM_SESSION_ID",
+    "KITTY_LISTEN_ON",
+    "KITTY_PID",
+    "KITTY_PUBLIC_KEY",
+    "KITTY_WINDOW_ID",
+    "LC_TERMINAL",
+    "LC_TERMINAL_VERSION",
+    "STY",
+    "TERM_SESSION_ID",
+    "TERMINAL_EMULATOR",
+    "TMUX",
+    "TMUX_PANE",
+    "WARP_SESSION_ID",
+    "WARP_TERMINAL_SESSION_UUID",
+    "WEZTERM_CONFIG_FILE",
+    "WEZTERM_EXECUTABLE",
+    "WEZTERM_EXECUTABLE_DIR",
+    "WEZTERM_PANE",
+    "WEZTERM_UNIX_SOCKET",
+    "WT_PROFILE_ID",
+    "WT_SESSION",
+    "ZELLIJ",
+    "ZELLIJ_PANE_ID",
+    "ZELLIJ_SESSION_NAME",
+];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ShutdownDisposition {
@@ -530,17 +559,27 @@ fn build_shell_command_with_resources(
         &ShellEnvironment::capture(),
     );
     integration.apply(&mut command);
-    let terminal_identity = identity::launch_identity(resources);
     command.arg("-l");
+    apply_terminal_identity(&mut command, resources);
+    command.cwd(working_directory);
+    command
+}
+
+fn apply_terminal_identity(command: &mut CommandBuilder, resources: &Path) {
+    for name in FOREIGN_RUNTIME_ENVIRONMENT {
+        command.env_remove(name);
+    }
+    command.env_remove("TERMINFO");
+
+    let terminal_identity = identity::launch_identity(resources);
     command.env("TERM", terminal_identity.term);
     if let Some(terminfo) = terminal_identity.terminfo {
         command.env("TERMINFO", terminfo);
     }
     command.env("COLORTERM", identity::COLORTERM);
-    command.env("TERM_PROGRAM", identity::PROGRAM_NAME);
+    command.env("TERM_PROGRAM", identity::COMPATIBILITY_PROGRAM_NAME);
     command.env("TERM_PROGRAM_VERSION", identity::PROGRAM_VERSION);
-    command.cwd(working_directory);
-    command
+    command.env("SPACETERM", "1");
 }
 
 pub(crate) fn user_shell() -> String {
@@ -558,7 +597,7 @@ pub(crate) fn conformance_initialization_observation() -> String {
         Path::new("/spaceterm-conformance-missing-resources"),
     );
     format!(
-        "argv={:?} cwd={} term={} colorterm={} program={} version={} controlling-tty={}",
+        "argv={:?} cwd={} term={} colorterm={} program={} version={} spaceterm={} controlling-tty={}",
         command.get_argv(),
         command
             .get_cwd()
@@ -578,6 +617,10 @@ pub(crate) fn conformance_initialization_observation() -> String {
             .unwrap_or("missing"),
         command
             .get_env("TERM_PROGRAM_VERSION")
+            .and_then(std::ffi::OsStr::to_str)
+            .unwrap_or("missing"),
+        command
+            .get_env("SPACETERM")
             .and_then(std::ffi::OsStr::to_str)
             .unwrap_or("missing"),
         command.get_controlling_tty(),
@@ -939,7 +982,7 @@ mod tests {
     }
 
     #[test]
-    fn shell_command_should_preserve_login_environment_and_working_directory() {
+    fn shell_command_should_apply_compatibility_identity_and_working_directory() {
         let working_directory = Path::new("/private/tmp/workspace root");
 
         let command = build_shell_command("/bin/zsh", working_directory);
@@ -965,7 +1008,11 @@ mod tests {
         );
         assert_eq!(
             command.get_env("TERM_PROGRAM"),
-            Some(std::ffi::OsStr::new("SpaceTerm"))
+            Some(std::ffi::OsStr::new("ghostty"))
+        );
+        assert_eq!(
+            command.get_env("SPACETERM"),
+            Some(std::ffi::OsStr::new("1"))
         );
         assert_eq!(
             command.get_env("TERM_PROGRAM_VERSION"),
@@ -1000,13 +1047,31 @@ mod tests {
         );
         assert_eq!(
             command.get_env("TERM_PROGRAM"),
-            Some(std::ffi::OsStr::new(identity::PROGRAM_NAME))
+            Some(std::ffi::OsStr::new("ghostty"))
         );
         assert_eq!(
             command.get_env("TERM_PROGRAM_VERSION"),
             Some(std::ffi::OsStr::new(identity::PROGRAM_VERSION))
         );
         std::fs::remove_dir_all(resources).unwrap();
+    }
+
+    #[test]
+    fn terminal_identity_should_remove_inherited_foreign_runtime_markers() {
+        let mut command = CommandBuilder::new("/bin/zsh");
+        for name in FOREIGN_RUNTIME_ENVIRONMENT {
+            command.env(name, "inherited");
+        }
+        command.env("TERMINFO", "/inherited/terminfo");
+
+        apply_terminal_identity(&mut command, Path::new("/spaceterm-test-missing-resources"));
+
+        assert!(
+            FOREIGN_RUNTIME_ENVIRONMENT
+                .iter()
+                .all(|name| command.get_env(name).is_none())
+        );
+        assert_eq!(command.get_env("TERMINFO"), None);
     }
 
     #[test]

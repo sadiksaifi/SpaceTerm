@@ -7,7 +7,7 @@ use libghostty_vt::terminal::{
 
 pub(crate) const TERM_FALLBACK: &str = "xterm-256color";
 pub(crate) const TERM_NAME: &str = "xterm-spaceterm";
-pub(crate) const PROGRAM_NAME: &str = "SpaceTerm";
+pub(crate) const COMPATIBILITY_PROGRAM_NAME: &str = "ghostty";
 pub(crate) const PROGRAM_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub(crate) const XTVERSION: &str = concat!("SpaceTerm ", env!("CARGO_PKG_VERSION"));
 pub(crate) const COLORTERM: &str = "truecolor";

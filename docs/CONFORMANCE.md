@@ -46,7 +46,7 @@ verify that unsupported media cannot read host files or produce a false capabili
 | --- | --- |
 | `spaceterm-snapshot-contract` | [SpaceTerm immutable snapshot decision](../CONTEXT.md#immutable-terminal-presentation-snapshots) |
 | `ecma-48-and-xterm-window-ops` | [ECMA-48](https://ecma-international.org/publications-and-standards/standards/ecma-48/) and [XTerm control sequences](https://invisible-island.net/xterm/ctlseqs/ctlseqs.html) |
-| `posix-and-darwin-pty` | [POSIX terminal interface](https://pubs.opengroup.org/onlinepubs/9799919799/basedefs/termios.h.html) and [Apple `openpty`](https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man3/openpty.3.html) |
+| `posix-and-darwin-pty` | [POSIX terminal interface](https://pubs.opengroup.org/onlinepubs/9799919799/basedefs/termios.h.html), [Apple `openpty`](https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man3/openpty.3.html), and [SpaceTerm capability and compatibility identity](../CONTEXT.md#terminal-capability-and-compatibility-identity) |
 | `posix-process-lifecycle` | [POSIX `wait`](https://pubs.opengroup.org/onlinepubs/9799919799/functions/wait.html) and [POSIX `kill`](https://pubs.opengroup.org/onlinepubs/9799919799/functions/kill.html) |
 | `ecma-48-sgr` | [ECMA-48 Select Graphic Rendition](https://ecma-international.org/publications-and-standards/standards/ecma-48/) |
 | `ecma-48-and-xterm-sgr` | [ECMA-48](https://ecma-international.org/publications-and-standards/standards/ecma-48/) and [XTerm SGR extensions](https://invisible-island.net/xterm/ctlseqs/ctlseqs.html) |
