@@ -1162,6 +1162,62 @@ mod tests {
     }
 
     #[gpui::test]
+    fn file_drop_should_focus_the_target_pane_before_requesting_its_paste(cx: &mut TestAppContext) {
+        cx.update(crate::ui::init);
+        let records = TestTerminalSessionRecords::default();
+        let session_factory: Rc<dyn TerminalSessionFactory> =
+            Rc::new(TestTerminalSessionFactory::new(records.clone()));
+        let session_factory =
+            WorkspaceTerminalSessionFactory::new(session_factory, test_workspace_root());
+        let (host, cx) = cx.add_window_view(|window, cx| {
+            PaneHost::new(WindowId::new(1), session_factory, window, cx)
+        });
+        cx.update(|window, cx| {
+            window.activate_window();
+            host.update(cx, |host, cx| {
+                host.focus(window, cx);
+                host.split_focused(SplitAxis::Horizontal, window, cx);
+            });
+        });
+        cx.run_until_parked();
+        let first_pane = host.read_with(cx, |host, _| {
+            host.terminal_window
+                .terminal(PaneId::new(1))
+                .cloned()
+                .expect("the original Pane should still exist")
+        });
+
+        cx.update(|window, cx| {
+            first_pane.update(cx, |pane, cx| {
+                pane.insert_dropped_file_paths_for_test(
+                    &[PathBuf::from("/tmp/first pane")],
+                    window,
+                    cx,
+                );
+            });
+        });
+        cx.run_until_parked();
+
+        let paste_requests = records
+            .commands()
+            .into_iter()
+            .filter_map(|call| match call.command {
+                crate::terminal::testing::RecordedSessionCommand::RequestPaste(text) => {
+                    Some((call.session_id, text))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            (
+                host.read_with(cx, |host, _| host.focused_pane_id()),
+                paste_requests,
+            ),
+            (PaneId::new(1), vec![(1, "'/tmp/first pane'".to_owned())],)
+        );
+    }
+
+    #[gpui::test]
     fn terminal_scrollbar_interaction_should_focus_its_owning_pane(cx: &mut TestAppContext) {
         let records = TestTerminalSessionRecords::default();
         let session_factory: Rc<dyn TerminalSessionFactory> =
