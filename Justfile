@@ -56,17 +56,37 @@ clippy:
 
 # Validate the macOS packaging scripts.
 scripts-check:
-    bash -n scripts/acceptance-identity.sh scripts/test-acceptance-identity.sh scripts/package-macos.sh scripts/verify-macos-package.sh
-    shellcheck -x scripts/acceptance-identity.sh scripts/test-acceptance-identity.sh scripts/package-macos.sh scripts/verify-macos-package.sh
+    bash -n scripts/acceptance-identity.sh scripts/test-acceptance-identity.sh \
+        scripts/package-macos.sh scripts/verify-macos-package.sh \
+        scripts/release-performance-workload.sh \
+        scripts/sample-release-performance-rss.sh \
+        scripts/record-release-performance-trace.sh \
+        scripts/test-release-performance-tools.sh
+    shellcheck -x scripts/acceptance-identity.sh scripts/test-acceptance-identity.sh \
+        scripts/package-macos.sh scripts/verify-macos-package.sh \
+        scripts/release-performance-workload.sh \
+        scripts/sample-release-performance-rss.sh \
+        scripts/record-release-performance-trace.sh \
+        scripts/test-release-performance-tools.sh
     ./scripts/test-acceptance-identity.sh
+    python3 -c 'import pathlib; [compile(path.read_text(), path.name, "exec") for path in map(pathlib.Path, ["scripts/inspect-release-performance-process.py", "scripts/run-release-performance-command.py", "scripts/verify-release-performance-trace.py"])]'
     plutil -lint packaging/macos/Info.plist
+
+# Run focused checks for the release-performance workload and evidence tools.
+performance-tools-check:
+    ./scripts/test-release-performance-tools.sh
+
+# Check the local Instruments and RSS prerequisites used for release acceptance.
+performance-doctor:
+    @./scripts/sample-release-performance-rss.sh --doctor
+    @./scripts/record-release-performance-trace.sh --doctor
 
 # Check patches for whitespace errors.
 diff-check:
     git diff --check
 
 # Run every repository validation required before committing.
-validate: fmt-check test clippy scripts-check diff-check
+validate: fmt-check test clippy scripts-check performance-tools-check diff-check
 
 # Build the optimized native executable.
 release:
