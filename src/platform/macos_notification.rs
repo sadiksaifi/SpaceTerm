@@ -1,5 +1,8 @@
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+#[cfg(not(test))]
+use std::sync::atomic::{AtomicBool, AtomicU32};
 
 #[cfg(not(test))]
 use block::ConcreteBlock;
@@ -17,8 +20,11 @@ const AUTHORIZATION_OPTION_ALERT: usize = 1 << 2;
 const AUTHORIZATION_OPTION_PROVISIONAL: usize = 1 << 6;
 
 static NOTIFICATION_GENERATION: AtomicU64 = AtomicU64::new(0);
+#[cfg(not(test))]
 static LATEST_DELIVERY_GENERATION: AtomicU64 = AtomicU64::new(0);
+#[cfg(not(test))]
 static LATEST_AGGREGATE_COUNT: AtomicU32 = AtomicU32::new(0);
+#[cfg(not(test))]
 static AUTHORIZATION_REQUEST_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
 static NATIVE_NOTIFICATION_LOCK: Mutex<()> = Mutex::new(());
 
