@@ -134,7 +134,10 @@ pub(crate) struct TerminalPane {
     pending_file_insertion: Option<NativeInsertion>,
     pending_paste: Option<PasteConfirmation>,
     pending_osc52: Option<Osc52AuthorizationRequest>,
-    hovered_link: Option<crate::terminal::HyperlinkTarget>,
+    hovered_link: Option<(
+        crate::terminal::PresentationGeneration,
+        crate::terminal::HyperlinkTarget,
+    )>,
     pressed_link: Option<(
         crate::terminal::PresentationGeneration,
         crate::terminal::HyperlinkTarget,
@@ -980,7 +983,9 @@ impl TerminalPane {
         let Some(position) = self.surface_position(event.position, dragging) else {
             return;
         };
-        let hovered_link = self.link_at(position);
+        let hovered_link = self
+            .link_at(position)
+            .map(|link| (self.screen.generation, link));
         if self.hovered_link != hovered_link {
             self.hovered_link = hovered_link;
             cx.notify();
@@ -1201,13 +1206,13 @@ impl TerminalPane {
 
     fn native_context_actions(&self) -> NativeContextActions {
         NativeContextActions::from_presence(
-            self.screen
-                .rows
-                .iter()
-                .flat_map(|row| row.iter())
-                .any(|cell| cell.selected),
-            self.hovered_link.as_ref(),
+            self.screen.selection_present,
+            self.current_hovered_link(),
         )
+    }
+
+    fn current_hovered_link(&self) -> Option<&crate::terminal::HyperlinkTarget> {
+        hovered_link_for_generation(self.hovered_link.as_ref(), self.screen.generation)
     }
 
     fn request_paste_text(&mut self, text: String, cx: &mut Context<Self>) {
@@ -1811,7 +1816,7 @@ impl Render for TerminalPane {
             self.pane_state.failure().is_some() && self.diagnostics.record_count() > 0;
         let last_valid_frame_preserved = self.pane_state.last_valid_frame().is_some();
         let export_pane = cx.entity().downgrade();
-        let hovered_link = self.hovered_link.clone();
+        let hovered_link = self.current_hovered_link().cloned();
         let native_context_actions = self.native_context_actions();
         let native_context_selector = format!(
             "terminal-native-context-copy-{}-open-{}-quick-look-{}-failure-{}-last-frame-{}",
@@ -2343,6 +2348,18 @@ fn activated_link(
     (pressed_generation == current_generation
         && current.is_some_and(|link| link.identity == pressed.identity))
     .then(|| pressed.activation_url())
+}
+
+fn hovered_link_for_generation(
+    hovered: Option<&(
+        crate::terminal::PresentationGeneration,
+        crate::terminal::HyperlinkTarget,
+    )>,
+    current_generation: crate::terminal::PresentationGeneration,
+) -> Option<&crate::terminal::HyperlinkTarget> {
+    hovered
+        .filter(|(generation, _)| *generation == current_generation)
+        .map(|(_, link)| link)
 }
 
 #[derive(Default)]
@@ -4096,6 +4113,39 @@ mod tests {
         );
         assert_eq!(activated_link(first, &link, second, Some(&link)), None);
         assert_eq!(activated_link(first, &link, first, None), None);
+    }
+
+    #[test]
+    fn hovered_link_is_inert_after_presentation_generation_advances() {
+        let link = crate::terminal::HyperlinkTarget::url("https://example.test").unwrap();
+        let first = crate::terminal::PresentationGeneration::test(1);
+        let second = crate::terminal::PresentationGeneration::test(2);
+        let hovered = (first, link);
+
+        assert!(hovered_link_for_generation(Some(&hovered), first).is_some());
+        assert_eq!(hovered_link_for_generation(Some(&hovered), second), None);
+        assert_eq!(
+            NativeContextActions::from_presence(
+                false,
+                hovered_link_for_generation(Some(&hovered), second),
+            ),
+            NativeContextActions::default()
+        );
+    }
+
+    #[gpui::test]
+    fn context_copy_stays_eligible_for_offscreen_selection_presence(cx: &mut TestAppContext) {
+        let (pane, cx) = terminal_pane(cx);
+
+        let actions = pane.update(cx, |pane, _| {
+            let mut screen =
+                ScreenSnapshot::from_test_parts(Arc::from([]), ScrollbarSnapshot::default(), "");
+            Arc::make_mut(&mut screen).selection_present = true;
+            pane.screen = screen;
+            pane.native_context_actions()
+        });
+
+        assert!(actions.copy);
     }
 
     #[test]
