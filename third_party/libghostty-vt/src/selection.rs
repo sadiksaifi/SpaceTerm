@@ -198,6 +198,22 @@ impl<'t> Selection<'t> {
 
 /// Methods related to [selections](crate::selection).
 impl Terminal<'_, '_> {
+    /// Return whether the active screen currently owns a selection.
+    ///
+    /// This observes the terminal-owned selection directly without formatting
+    /// or copying its contents.
+    pub fn has_selection(&self) -> Result<bool> {
+        let mut value = ffi::sized!(ffi::Selection);
+        let result = unsafe {
+            ffi::ghostty_terminal_get(
+                self.inner.as_raw(),
+                ffi::TerminalData::SELECTION,
+                (&raw mut value).cast(),
+            )
+        };
+        Ok(from_optional_result(result, value)?.is_some())
+    }
+
     /// Set the active screen selection.
     ///
     /// The selection's grid references must be valid for this terminal's

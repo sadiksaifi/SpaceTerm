@@ -343,6 +343,7 @@ pub(crate) struct SnapshotDamage {
     pub(crate) active_screen: bool,
     pub(crate) resize: bool,
     pub(crate) mouse_tracking: bool,
+    pub(crate) selection_presence: bool,
     pub(crate) search: bool,
     pub(crate) graphics_content: bool,
     pub(crate) graphics_geometry: bool,
@@ -360,6 +361,7 @@ impl SnapshotDamage {
             active_screen: true,
             resize: true,
             mouse_tracking: true,
+            selection_presence: true,
             search: false,
             graphics_content: true,
             graphics_geometry: true,
@@ -399,6 +401,7 @@ pub(crate) struct ScreenSnapshot {
     pub(crate) cursor: CursorSnapshot,
     pub(crate) text_blinking: bool,
     pub(crate) mouse_tracking: bool,
+    pub(crate) selection_present: bool,
     pub(crate) title: Arc<str>,
     pub(crate) metadata: Arc<TerminalMetadataSnapshot>,
     pub(crate) find: Option<Arc<TerminalFindSnapshot>>,
@@ -419,6 +422,7 @@ impl PartialEq for ScreenSnapshot {
             && self.cursor == other.cursor
             && self.text_blinking == other.text_blinking
             && self.mouse_tracking == other.mouse_tracking
+            && self.selection_present == other.selection_present
             && self.title == other.title
             && self.metadata == other.metadata
             && self.find == other.find
@@ -446,6 +450,7 @@ impl ScreenSnapshot {
             },
             text_blinking: false,
             mouse_tracking: false,
+            selection_present: false,
             title: Arc::from(""),
             metadata: MetadataTracker::new("", "", None, Instant::now()).snapshot(),
             find: None,
@@ -461,9 +466,11 @@ impl ScreenSnapshot {
         title: impl Into<Arc<str>>,
     ) -> Arc<Self> {
         let text_blinking = rows_have_visible_blinking_text(&rows);
+        let selection_present = rows_have_selection(&rows);
         Arc::new(Self {
             rows,
             text_blinking,
+            selection_present,
             scrollbar,
             title: title.into(),
             ..Self::empty_value()
@@ -478,10 +485,12 @@ impl ScreenSnapshot {
         generation: u64,
     ) -> Arc<Self> {
         let text_blinking = rows_have_visible_blinking_text(&rows);
+        let selection_present = rows_have_selection(&rows);
         Arc::new(Self {
             generation: PresentationGeneration(generation),
             rows,
             text_blinking,
+            selection_present,
             scrollbar,
             title: title.into(),
             ..Self::empty_value()
@@ -502,6 +511,7 @@ impl ScreenSnapshot {
             cursor: CursorSnapshot::default(),
             text_blinking: false,
             mouse_tracking: false,
+            selection_present: false,
             title: Arc::from(""),
             metadata: MetadataTracker::new("", "", None, Instant::now()).snapshot(),
             find: None,
@@ -516,6 +526,11 @@ fn rows_have_visible_blinking_text(rows: &[RowSnapshot]) -> bool {
         row.iter()
             .any(|cell| cell.blinking && !cell.invisible && !cell.spacer_tail)
     })
+}
+
+#[cfg(test)]
+fn rows_have_selection(rows: &[RowSnapshot]) -> bool {
+    rows.iter().any(|row| row.iter().any(|cell| cell.selected))
 }
 
 pub(crate) struct TerminalEmulator {
@@ -553,6 +568,7 @@ pub(crate) struct TerminalEmulator {
     cached_scrollbar: Option<ScrollbarSnapshot>,
     cached_active_screen: Option<ActiveScreenSnapshot>,
     cached_mouse_tracking: Option<bool>,
+    cached_selection_present: Option<bool>,
     cached_metadata_revision: Option<u64>,
     geometry: TerminalGeometry,
     active_pointer: Option<ActivePointer>,
@@ -754,6 +770,7 @@ impl TerminalEmulator {
             cached_scrollbar: None,
             cached_active_screen: None,
             cached_mouse_tracking: None,
+            cached_selection_present: None,
             cached_metadata_revision: None,
             geometry,
             active_pointer: None,
@@ -1653,6 +1670,7 @@ impl TerminalEmulator {
         let graphics_content_changed = previous_graphics.generation != graphics.generation;
         let graphics_geometry_changed = previous_graphics.placements != graphics.placements;
         let mouse_tracking = self.terminal.is_mouse_tracking()?;
+        let selection_present = self.terminal.has_selection()?;
         let row_cache = match active_screen {
             ActiveScreenSnapshot::Primary => &self.primary_row_cache,
             ActiveScreenSnapshot::Alternate => &self.alternate_row_cache,
@@ -1702,6 +1720,7 @@ impl TerminalEmulator {
                 active_screen: self.cached_active_screen != Some(active_screen),
                 resize: self.cached_cols != cols || self.cached_rows != rows,
                 mouse_tracking: self.cached_mouse_tracking != Some(mouse_tracking),
+                selection_presence: self.cached_selection_present != Some(selection_present),
                 search: find_changed,
                 graphics_content: graphics_content_changed,
                 graphics_geometry: graphics_geometry_changed,
@@ -1870,6 +1889,7 @@ impl TerminalEmulator {
         self.cached_scrollbar = Some(scrollbar);
         self.cached_active_screen = Some(active_screen);
         self.cached_mouse_tracking = Some(mouse_tracking);
+        self.cached_selection_present = Some(selection_present);
         self.cached_metadata_revision = Some(metadata.revision);
         self.title = Arc::clone(&title);
 
@@ -1891,6 +1911,7 @@ impl TerminalEmulator {
             cursor,
             text_blinking,
             mouse_tracking,
+            selection_present,
             title,
             metadata,
             find,
@@ -3782,6 +3803,76 @@ mod tests {
         assert!(snapshot.rows[0][..5].iter().all(|cell| cell.selected));
         assert!(!snapshot.rows[0][5].selected);
         assert_eq!(emulator.selection_text().unwrap(), Some("hello".to_owned()));
+    }
+
+    #[test]
+    fn snapshot_preserves_selection_presence_when_selected_content_is_offscreen() {
+        let mut emulator = emulator(10, 2);
+        emulator.feed(b"one\r\ntwo\r\nthree\r\nfour\r\nfive");
+        let presented = emulator.snapshot().unwrap().unwrap();
+
+        let mut pointer = current_pointer(
+            &emulator,
+            pointer(
+                PointerPhase::Press,
+                Some(PointerButton::Left),
+                2.0,
+                21.0,
+                false,
+            ),
+        );
+        emulator.pointer(pointer).unwrap();
+        pointer.phase = PointerPhase::Motion;
+        pointer.button = None;
+        pointer.position.x = 48.0;
+        emulator.pointer(pointer).unwrap();
+        pointer.phase = PointerPhase::Release;
+        pointer.button = Some(PointerButton::Left);
+        emulator.pointer(pointer).unwrap();
+        let selected = emulator.snapshot().unwrap().unwrap();
+        assert!(selected.selection_present);
+
+        let action = emulator.scroll_to_at(0, selected.generation);
+        assert!(action.screen_changed);
+        let scrolled = emulator.snapshot().unwrap().unwrap();
+
+        assert!(scrolled.selection_present);
+        assert!(
+            scrolled
+                .rows
+                .iter()
+                .flat_map(|row| row.iter())
+                .all(|cell| !cell.selected)
+        );
+        assert!(scrolled.generation > presented.generation);
+
+        emulator.clear_selection().unwrap();
+        let cleared = emulator.snapshot().unwrap().unwrap();
+        assert!(!cleared.selection_present);
+        assert!(cleared.damage.selection_presence);
+    }
+
+    #[test]
+    fn snapshot_selection_presence_follows_active_screen_ownership() {
+        let mut emulator = emulator(12, 2);
+        emulator.feed(b"hello world");
+        select_first_five(&mut emulator, false);
+
+        let primary = emulator.snapshot().unwrap().unwrap();
+        assert_eq!(primary.active_screen, ActiveScreenSnapshot::Primary);
+        assert!(primary.selection_present);
+
+        emulator.feed(b"\x1b[?1049h");
+        let alternate = emulator.snapshot().unwrap().unwrap();
+        assert_eq!(alternate.active_screen, ActiveScreenSnapshot::Alternate);
+        assert!(!alternate.selection_present);
+        assert!(alternate.damage.selection_presence);
+
+        emulator.feed(b"\x1b[?1049l");
+        let restored = emulator.snapshot().unwrap().unwrap();
+        assert_eq!(restored.active_screen, ActiveScreenSnapshot::Primary);
+        assert!(restored.selection_present);
+        assert!(restored.damage.selection_presence);
     }
 
     #[test]
