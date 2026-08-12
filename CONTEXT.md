@@ -288,10 +288,12 @@ blink state; wide spacer tails extend their head cell's decoration without produ
 Invisible cells prepare no foreground decorations, while Selection remains an independent overlay.
 
 Decoration positions derive from the selected terminal font's baseline, ascent, and x-height, and
-their minimum thickness and positions snap to one backing device pixel. GPUI builds quads and curly
-paths during prepaint and clips them to terminal grid bounds. The fixed paint order is background
-and Selection, underline and overline, glyph or generated symbol, then strikethrough; marked-text
-overlays remain above the immutable grid presentation.
+their minimum thickness and positions snap to one backing device pixel. Prepared rows cache flat
+scene primitives for every decoration, including GPUI wavy-underlines for curly strokes, and reuse
+that geometry until row content or layout invalidates it. GPUI clips submission to terminal grid
+bounds. The fixed paint order is background and Selection, underline and overline, glyph or
+generated symbol, then strikethrough; marked-text overlays remain above the immutable grid
+presentation.
 
 ### Terminal Drawing Symbols
 
@@ -303,10 +305,12 @@ faint processing, while Selection remains an independent background overlay.
 
 Each terminal grid owner caches immutable symbol plans by scalar, device-pixel dimensions, cell
 width, and backing scale. Plans are released when scale-dependent rendering state is invalidated
-or the owner is dropped. Their geometry reaches shared device-pixel cell edges without font
-bearings, paints between under-text decorations and strikethrough, participates in text blink
-filtering, and receives the same Cursor block recoloring overlay as shaped glyphs. Logical origins
-still derive from Unified Terminal Geometry so fractional cell widths do not accumulate drift.
+or the owner is dropped. Prepared rows rasterize vector plan primitives into flat, cell-local quads
+only when stable row geometry invalidates. Their geometry reaches shared device-pixel cell edges
+without font bearings, paints between under-text decorations and strikethrough, participates in
+text blink filtering, and receives the same Cursor block recoloring overlay as shaped glyphs.
+Logical origins still derive from Unified Terminal Geometry so fractional cell widths do not
+accumulate drift.
 
 ### Terminal Input Focus
 

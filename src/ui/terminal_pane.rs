@@ -126,7 +126,7 @@ pub(crate) struct TerminalPane {
     shift_selection: ShiftSelectionPolicy,
     wheel_accumulator: WheelAccumulator,
     scrollbar: Entity<OverlayScrollbar<u64>>,
-    render_cache: TerminalGridCache,
+    render_cache: Entity<TerminalGridCache>,
     graphics_cache: Entity<TerminalGraphicsCache>,
     keyboard_bridge: MacosKeyboardBridge,
     ime: TerminalIme,
@@ -160,6 +160,7 @@ impl TerminalPane {
         let fallback_title: SharedString =
             normalized_pane_title("", &session_factory.fallback_title()).into();
         let scrollbar = cx.new(|_| OverlayScrollbar::<u64>::new("terminal-scrollbar"));
+        let render_cache = cx.new(|_| TerminalGridCache::new());
         let graphics_cache = cx.new(|_| TerminalGraphicsCache::default());
         cx.on_release(|pane, cx| {
             pane.graphics_cache.update(cx, |cache, cx| cache.clear(cx));
@@ -238,7 +239,7 @@ impl TerminalPane {
             shift_selection: ShiftSelectionPolicy::default(),
             wheel_accumulator: WheelAccumulator::default(),
             scrollbar,
-            render_cache: TerminalGridCache::new(),
+            render_cache,
             graphics_cache,
             keyboard_bridge: MacosKeyboardBridge::new(OptionAsAltPolicy::default()),
             ime: TerminalIme::default(),
@@ -920,7 +921,8 @@ impl TerminalPane {
         self.cell_width = measure_cell_width(window, &self.font_family, self.font_size);
         self.last_geometry = None;
         if self.render_lifecycle.update_scale(factor) == ScaleChange::ScaleResources {
-            self.render_cache.invalidate_scale_dependent();
+            self.render_cache
+                .update(cx, |cache, _| cache.invalidate_scale_dependent());
         }
         self.sync_scrollbar(cx);
         cx.notify();
@@ -1876,7 +1878,7 @@ impl Render for TerminalPane {
             .update(cx, |cache, cx| cache.sync(&graphics_snapshot, window, cx));
         let terminal_grid = TerminalGridElement::new(
             &self.screen,
-            &mut self.render_cache,
+            self.render_cache.clone(),
             TerminalGridConfiguration {
                 terminal_input_focused,
                 font_family: self.font_family.clone(),
@@ -1891,6 +1893,7 @@ impl Render for TerminalPane {
                 find_spans,
                 graphics,
             },
+            cx,
         );
         if let Some(generation) = self.render_lifecycle.take_frame() {
             self.render_lifecycle.mark_presented(generation);
