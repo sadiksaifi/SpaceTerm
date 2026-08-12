@@ -92,10 +92,14 @@ pub(crate) fn handle_top_chrome_mouse_down(
     event: &MouseDownEvent,
     window: &mut Window,
     cx: &mut App,
+    mut set_terminal_focus_blocked: impl FnMut(bool, &Window, &mut App),
 ) {
     match event.click_count {
-        1 => window.start_window_move(),
-        2 => window.titlebar_double_click(),
+        1 => set_terminal_focus_blocked(true, window, cx),
+        2 => {
+            set_terminal_focus_blocked(false, window, cx);
+            window.titlebar_double_click();
+        }
         _ => {}
     }
     cx.stop_propagation();

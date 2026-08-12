@@ -52,6 +52,7 @@ pub(crate) struct PaneHost {
     pane_titles: BTreeMap<PaneId, gpui::SharedString>,
     pane_attention: BTreeMap<PaneId, u32>,
     menu_pane_id: Option<PaneId>,
+    parent_focus_blocker: Option<TerminalFocusBlocker>,
     active: bool,
     close_window_requested: bool,
 }
@@ -86,6 +87,7 @@ impl PaneHost {
             pane_titles: BTreeMap::from([(initial_pane_id, initial_title)]),
             pane_attention: BTreeMap::from([(initial_pane_id, 0)]),
             menu_pane_id: None,
+            parent_focus_blocker: None,
             active: true,
             close_window_requested: false,
         }
@@ -177,12 +179,14 @@ impl PaneHost {
     pub(crate) fn activate_without_focus(&mut self, cx: &mut Context<Self>) {
         self.active = true;
         self.menu_pane_id = None;
+        self.sync_terminal_focus(cx);
         cx.notify();
     }
 
     pub(crate) fn deactivate(&mut self, cx: &mut Context<Self>) {
         self.active = false;
         self.menu_pane_id = None;
+        self.sync_terminal_focus(cx);
         cx.notify();
     }
 
@@ -209,7 +213,7 @@ impl PaneHost {
     pub(crate) fn focused_terminal_has_input_focus(&self, window: &Window, cx: &App) -> bool {
         self.terminal_window
             .terminal(self.terminal_window.focused_pane_id())
-            .is_some_and(|terminal| terminal.read(cx).terminal_input_focused(window))
+            .is_some_and(|terminal| terminal.read(cx).terminal_input_focused(window, cx))
     }
 
     #[cfg(test)]
@@ -217,12 +221,29 @@ impl PaneHost {
         self.active
     }
 
+    pub(crate) fn set_parent_focus_blocker(
+        &mut self,
+        blocker: Option<TerminalFocusBlocker>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.parent_focus_blocker == blocker {
+            return;
+        }
+        self.parent_focus_blocker = blocker;
+        self.sync_terminal_focus(cx);
+        cx.notify();
+    }
+
     fn focus_pane(&mut self, pane_id: PaneId, cx: &mut Context<Self>) {
+        if self.terminal_window.focused_pane_id() == pane_id {
+            return;
+        }
         if let Err(error) = self.terminal_window.focus_pane(pane_id) {
             eprintln!("failed to focus Pane: {error}");
             return;
         }
         self.menu_pane_id = None;
+        self.sync_terminal_focus(cx);
         cx.notify();
     }
 
@@ -236,6 +257,7 @@ impl PaneHost {
             return;
         };
         self.menu_pane_id = None;
+        self.sync_terminal_focus(cx);
         cx.notify();
         if let Some(terminal) = self.terminal_window.terminal(pane_id) {
             terminal.update(cx, |terminal, _| terminal.focus(window));
@@ -283,6 +305,7 @@ impl PaneHost {
                 }
                 self.pane_attention.insert(pane_id, 0);
                 self.menu_pane_id = None;
+                self.sync_terminal_focus(cx);
                 self.split_bounds.clear();
                 cx.emit(PaneHostEvent::PresentationChanged {
                     window_id: self.terminal_window.id(),
@@ -309,6 +332,7 @@ impl PaneHost {
             Ok(ClosePaneOutcome::CloseWindow { window_id }) => {
                 self.close_window_requested = true;
                 self.menu_pane_id = None;
+                self.sync_terminal_focus(cx);
                 cx.emit(PaneHostEvent::CloseWindowRequested { window_id });
             }
             Ok(ClosePaneOutcome::PaneClosed {
@@ -322,6 +346,7 @@ impl PaneHost {
                 self.pane_titles.remove(&pane_id);
                 self.pane_attention.remove(&pane_id);
                 self.menu_pane_id = None;
+                self.sync_terminal_focus(cx);
                 cx.emit(PaneHostEvent::PresentationChanged {
                     window_id: self.terminal_window.id(),
                 });
@@ -341,6 +366,7 @@ impl PaneHost {
             return;
         }
         self.menu_pane_id = None;
+        self.sync_terminal_focus(cx);
         cx.emit(PaneHostEvent::PresentationChanged {
             window_id: self.terminal_window.id(),
         });
@@ -383,6 +409,7 @@ impl PaneHost {
             return None;
         }
         self.menu_pane_id = (self.menu_pane_id != Some(pane_id)).then_some(pane_id);
+        self.sync_terminal_focus(cx);
         cx.notify();
         self.terminal_window.terminal(pane_id).cloned()
     }
@@ -392,7 +419,10 @@ impl PaneHost {
             .terminal_window
             .terminal(self.terminal_window.focused_pane_id())
             .map(Entity::entity_id);
-        let blocker = self.menu_pane_id.map(|_| TerminalFocusBlocker::PaneMenu);
+        let blocker = self
+            .menu_pane_id
+            .map(|_| TerminalFocusBlocker::PaneMenu)
+            .or(self.parent_focus_blocker);
         for terminal in self.terminal_window.terminals() {
             let product_focus = TerminalProductFocus {
                 active_workspace: self.active,
@@ -400,8 +430,10 @@ impl PaneHost {
                 focused_pane: Some(terminal.entity_id()) == focused_terminal_id,
                 blocker,
             };
-            terminal.update(cx, |terminal, _| {
-                terminal.set_product_focus(product_focus);
+            terminal.update(cx, |terminal, cx| {
+                if terminal.set_product_focus(product_focus) {
+                    cx.notify();
+                }
             });
         }
     }
@@ -413,7 +445,6 @@ impl PaneHost {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.menu_pane_id = None;
         match command {
             PaneActionMenuCommand::SplitRight => {
                 self.split_pane(pane_id, SplitAxis::Horizontal, window, cx)
@@ -423,6 +454,10 @@ impl PaneHost {
             }
             PaneActionMenuCommand::ToggleZoom => self.toggle_zoom(window, cx),
             PaneActionMenuCommand::Close => self.close_pane(pane_id, window, cx),
+        }
+        if self.menu_pane_id.take().is_some() {
+            self.sync_terminal_focus(cx);
+            cx.notify();
         }
     }
 
@@ -505,7 +540,6 @@ impl PaneHost {
         let attention = self.pane_attention.get(&pane_id).copied().unwrap_or(0) > 0;
         let measure_host = host.clone();
         let focus_host = host.clone();
-        let focus_terminal = terminal.clone();
 
         div()
             .on_children_prepainted(move |children, _, cx| {
@@ -527,9 +561,8 @@ impl PaneHost {
             .min_h_0()
             .flex()
             .flex_col()
-            .capture_any_mouse_down(move |_: &MouseDownEvent, window, cx| {
+            .capture_any_mouse_down(move |_: &MouseDownEvent, _, cx| {
                 let _ = focus_host.update(cx, |host, cx| host.focus_pane(pane_id, cx));
-                focus_terminal.update(cx, |terminal, _| terminal.focus(window));
             })
             .when(has_multiple_panes, |pane| {
                 pane.child(render_pane_header(
@@ -875,6 +908,7 @@ fn render_pane_controls(
             controls.on_mouse_down_out(move |_, _, cx| {
                 let _ = dismiss_host.update(cx, |host, cx| {
                     host.menu_pane_id = None;
+                    host.sync_terminal_focus(cx);
                     cx.notify();
                 });
             })
@@ -939,7 +973,9 @@ mod tests {
     };
 
     use super::*;
-    use crate::terminal::testing::{TestTerminalSessionFactory, TestTerminalSessionRecords};
+    use crate::terminal::testing::{
+        RecordedSessionCommand, TestTerminalSessionFactory, TestTerminalSessionRecords,
+    };
     use crate::terminal::{
         ScreenSnapshot, ScrollbarSnapshot, SessionEvent, SessionExit, TerminalSessionFactory,
     };
@@ -1081,6 +1117,55 @@ mod tests {
         assert!(!cx.update(|window, app| {
             host.read(app).focused_terminal_has_input_focus(window, app)
         }));
+    }
+
+    #[gpui::test]
+    fn pane_menu_mouse_down_should_not_restore_terminal_before_command_completion(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(crate::ui::init);
+        let records = TestTerminalSessionRecords::default();
+        let session_factory: Rc<dyn TerminalSessionFactory> =
+            Rc::new(TestTerminalSessionFactory::new(records.clone()));
+        let session_factory =
+            WorkspaceTerminalSessionFactory::new(session_factory, test_workspace_root());
+        let (host, cx) = cx.add_window_view(|window, cx| {
+            PaneHost::new(WindowId::new(1), session_factory, window, cx)
+        });
+        cx.update(|window, _| window.activate_window());
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            host.update(cx, |host, cx| {
+                host.split_focused(SplitAxis::Horizontal, window, cx);
+            });
+        });
+        cx.run_until_parked();
+        let command_count = records.commands().len();
+
+        let menu_button = cx
+            .debug_bounds("pane-menu-button-1")
+            .expect("Pane menu button must be rendered")
+            .center();
+        cx.simulate_mouse_down(menu_button, MouseButton::Left, Modifiers::none());
+        cx.simulate_mouse_up(menu_button, MouseButton::Left, Modifiers::none());
+        cx.run_until_parked();
+        let menu_row = cx
+            .debug_bounds("pane-menu-row-split-right")
+            .expect("Pane menu row must be rendered")
+            .center();
+        cx.simulate_mouse_down(menu_row, MouseButton::Left, Modifiers::none());
+        cx.run_until_parked();
+
+        let focus_edges = records
+            .commands()
+            .into_iter()
+            .skip(command_count)
+            .filter_map(|call| match call.command {
+                RecordedSessionCommand::Focus(focused) => Some(focused),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(focus_edges, [false]);
     }
 
     #[gpui::test]
