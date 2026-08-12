@@ -56,8 +56,9 @@ clippy:
 
 # Validate the macOS packaging scripts.
 scripts-check:
-    bash -n scripts/package-macos.sh scripts/verify-macos-package.sh
-    shellcheck -x scripts/package-macos.sh scripts/verify-macos-package.sh
+    bash -n scripts/acceptance-identity.sh scripts/test-acceptance-identity.sh scripts/package-macos.sh scripts/verify-macos-package.sh
+    shellcheck -x scripts/acceptance-identity.sh scripts/test-acceptance-identity.sh scripts/package-macos.sh scripts/verify-macos-package.sh
+    ./scripts/test-acceptance-identity.sh
     plutil -lint packaging/macos/Info.plist
 
 # Check patches for whitespace errors.
@@ -97,3 +98,19 @@ package-info:
     @lipo -archs "{{ app_bundle }}/Contents/MacOS/SpaceTerm"
     @codesign --display --verbose=2 "{{ app_bundle }}"
     @ls -lh "{{ disk_image }}" "{{ app_bundle }}/Contents/MacOS/SpaceTerm"
+
+# Create the immutable identity directory for one acceptance run.
+acceptance-identity run_dir origin="app-bundle":
+    ./scripts/acceptance-identity.sh collect --run-dir "{{ run_dir }}" --origin "{{ origin }}" --app "{{ app_bundle }}" --dmg "{{ disk_image }}"
+
+# Launch the exact mounted DMG app and create a final-capable identity from its runtime proof.
+acceptance-mounted-dmg-identity run_dir:
+    ./scripts/acceptance-identity.sh collect --run-dir "{{ run_dir }}" --origin mounted-dmg --app "{{ app_bundle }}" --dmg "{{ disk_image }}"
+
+# Verify an existing acceptance-run identity against its source and package artifacts.
+verify-acceptance-identity run_dir:
+    ./scripts/acceptance-identity.sh verify --run-dir "{{ run_dir }}"
+
+# Verify that an acceptance identity is complete enough for final evidence.
+verify-final-acceptance-identity run_dir:
+    ./scripts/acceptance-identity.sh verify --run-dir "{{ run_dir }}" --final

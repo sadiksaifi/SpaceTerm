@@ -92,6 +92,7 @@ pub(crate) struct TerminalPane {
     session_factory: WorkspaceTerminalSessionFactory,
     session: Option<Box<dyn TerminalSessionHandle>>,
     session_start_attempted: bool,
+    acceptance_observation_claimed: bool,
     screen: Arc<ScreenSnapshot>,
     accessibility: TerminalAccessibilityModel,
     accessibility_notifications: Vec<AccessibilityNotification>,
@@ -207,6 +208,7 @@ impl TerminalPane {
             session_factory,
             session: None,
             session_start_attempted: false,
+            acceptance_observation_claimed: false,
             screen,
             accessibility,
             accessibility_notifications: Vec::new(),
@@ -572,6 +574,11 @@ impl TerminalPane {
             return;
         }
         self.last_geometry = Some(geometry);
+        if self.acceptance_observation_claimed {
+            crate::platform::acceptance_observation::update_geometry(observation_geometry(
+                geometry,
+            ));
+        }
         self.sync_scrollbar(cx);
 
         if let Some(session) = &self.session {
@@ -583,6 +590,12 @@ impl TerminalPane {
             return;
         }
         self.session_start_attempted = true;
+
+        self.acceptance_observation_claimed =
+            crate::platform::acceptance_observation::claim_session(
+                self.font_family.as_ref(),
+                observation_geometry(geometry),
+            );
 
         match self.session_factory.start(geometry) {
             Ok(started) => {
@@ -1899,6 +1912,18 @@ impl Render for TerminalPane {
         );
         if let Some(generation) = self.render_lifecycle.take_frame() {
             self.render_lifecycle.mark_presented(generation);
+            if self.acceptance_observation_claimed && self.screen.generation == generation {
+                let rows = self.screen.size.rows;
+                let columns = self.screen.size.cols;
+                window.on_next_frame(move |_, _| {
+                    if let Some(observation) =
+                        crate::platform::acceptance_observation::prepare_once(rows, columns)
+                        && let Err(error) = observation.emit()
+                    {
+                        eprintln!("failed to emit acceptance observation: {error}");
+                    }
+                });
+            }
         }
 
         div()
@@ -2232,6 +2257,22 @@ fn terminal_geometry(
         backing_scale,
         CellGridSize::new(MIN_COLS, MIN_ROWS),
     )
+}
+
+fn observation_geometry(
+    geometry: TerminalGeometry,
+) -> crate::platform::acceptance_observation::ObservationGeometry {
+    let grid = geometry.grid();
+    let logical = geometry.logical_grid_size();
+    let backing = geometry.backing_grid_size();
+    crate::platform::acceptance_observation::ObservationGeometry {
+        rows: grid.rows,
+        columns: grid.cols,
+        logical_width: logical.width,
+        logical_height: logical.height,
+        backing_pixel_width: backing.width,
+        backing_pixel_height: backing.height,
+    }
 }
 
 fn ime_candidate_bounds(
