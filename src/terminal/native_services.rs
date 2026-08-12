@@ -170,18 +170,39 @@ impl NativeInsertion {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[cfg_attr(
+    not(test),
+    allow(
+        dead_code,
+        reason = "the next stacked context-action layer owns Quick Look presentation"
+    )
+)]
 pub(crate) struct QuickLookTarget {
-    path: PathBuf,
+    link: HyperlinkTarget,
 }
 
 impl QuickLookTarget {
+    #[cfg_attr(
+        not(test),
+        allow(
+            dead_code,
+            reason = "the next stacked context-action layer resolves the current hyperlink"
+        )
+    )]
     pub(crate) fn from_link(link: &HyperlinkTarget) -> Option<Self> {
-        link.revalidated_local_path().map(|path| Self { path })
+        link.revalidated_local_path()?;
+        Some(Self { link: link.clone() })
     }
 
-    #[cfg(test)]
-    pub(crate) fn path(&self) -> &std::path::Path {
-        &self.path
+    #[cfg_attr(
+        not(test),
+        allow(
+            dead_code,
+            reason = "the next stacked context-action layer revalidates before native presentation"
+        )
+    )]
+    pub(crate) fn revalidated_path(&self) -> Option<PathBuf> {
+        self.link.revalidated_local_path()
     }
 }
 
@@ -276,7 +297,7 @@ mod tests {
         .unwrap();
         let url = HyperlinkTarget::url("https://example.test").unwrap();
         assert_eq!(
-            QuickLookTarget::from_link(&local).map(|target| target.path().to_path_buf()),
+            QuickLookTarget::from_link(&local).and_then(|target| target.revalidated_path()),
             Some(file.canonicalize().unwrap())
         );
         assert!(QuickLookTarget::from_link(&url).is_none());

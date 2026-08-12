@@ -49,7 +49,7 @@ pub(crate) use key::{
 };
 pub(crate) use native_services::{
     NativeContextActions, NativeInsertion, NativeServiceCapabilities, NativeServiceOrigin,
-    NativeServiceStatus,
+    NativeServiceStatus, QuickLookTarget,
 };
 #[cfg(test)]
 pub(crate) use osc52::Osc52AuthorizationId;
