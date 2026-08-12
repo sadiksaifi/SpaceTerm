@@ -14,7 +14,9 @@ use crate::terminal::{
 };
 use crate::theme::{ACTIVE_THEME, Color};
 
-use super::terminal_graphics::{GraphicsLayer, GraphicsPaintPlan, PreparedGraphics};
+use super::terminal_graphics::{
+    GraphicsAttemptToken, GraphicsLayer, GraphicsPaintPlan, PreparedGraphics, TerminalGraphicsCache,
+};
 use super::terminal_ime::PreeditLayout;
 use super::terminal_pane::TerminalPane;
 use super::terminal_symbols::{
@@ -39,6 +41,7 @@ pub(crate) struct TerminalGridCache {
     scale_factor_bits: Option<u32>,
     symbol_plans: SymbolPlanCache,
     prepared_geometry: Vec<Option<PreparedRowCacheEntry<PreparedRow>>>,
+    preedit: Option<PreparedPreedit>,
 }
 
 impl TerminalGridCache {
@@ -54,6 +57,7 @@ impl TerminalGridCache {
             scale_factor_bits: None,
             symbol_plans: SymbolPlanCache::default(),
             prepared_geometry: Vec::new(),
+            preedit: None,
         }
     }
 
@@ -68,6 +72,7 @@ impl TerminalGridCache {
         self.scale_factor_bits = None;
         self.symbol_plans.invalidate_scale_dependent();
         self.prepared_geometry.clear();
+        self.preedit = None;
     }
 
     fn prepare(
@@ -151,6 +156,9 @@ pub(crate) struct TerminalGridElement {
     blink_phase_visible: bool,
     find_spans: Arc<[FindHighlightSpan]>,
     graphics: PreparedGraphics,
+    graphics_attempt: Option<GraphicsAttemptToken>,
+    graphics_cache: Entity<TerminalGraphicsCache>,
+    presentation_generation: Option<crate::terminal::PresentationGeneration>,
     scale_factor: f32,
 }
 
@@ -167,6 +175,9 @@ pub(crate) struct TerminalGridConfiguration {
     pub(crate) scale_factor: f32,
     pub(crate) find_spans: Arc<[FindHighlightSpan]>,
     pub(crate) graphics: PreparedGraphics,
+    pub(crate) graphics_attempt: Option<GraphicsAttemptToken>,
+    pub(crate) graphics_cache: Entity<TerminalGraphicsCache>,
+    pub(crate) presentation_generation: Option<crate::terminal::PresentationGeneration>,
 }
 
 impl TerminalGridElement {
@@ -227,6 +238,9 @@ impl TerminalGridElement {
             blink_phase_visible: configuration.blink_phase_visible,
             find_spans: configuration.find_spans,
             graphics: configuration.graphics,
+            graphics_attempt: configuration.graphics_attempt,
+            graphics_cache: configuration.graphics_cache,
+            presentation_generation: configuration.presentation_generation,
             scale_factor: configuration.scale_factor,
         }
     }
@@ -246,6 +260,7 @@ fn presented_cursor_style(
     negotiated
 }
 
+#[derive(Clone)]
 struct PreparedText {
     line: ShapedLine,
     origin: gpui::Point<Pixels>,
@@ -268,9 +283,54 @@ struct PreparedFrameRow {
     find_backgrounds: Vec<PaintQuad>,
     cursor_background: Option<PaintQuad>,
     cursor_overlay_visible: bool,
-    overlay_text: Vec<PreparedText>,
-    overlay_backgrounds: Vec<PaintQuad>,
-    overlay_caret: Option<PaintQuad>,
+    preedit: Option<PreparedPreeditRow>,
+}
+
+#[derive(Clone, Debug)]
+struct PreparedPreeditKey {
+    clusters: Arc<[super::terminal_ime::PreeditCluster]>,
+    caret: super::terminal_ime::PreeditPosition,
+    visible_rows: usize,
+    grid_left: Pixels,
+    grid_top: Pixels,
+    font_family: SharedString,
+    font_size: Pixels,
+    cell_width: Pixels,
+    line_height: Pixels,
+    foreground: Color,
+    background: Color,
+    caret_color: Color,
+    scale_factor_bits: u32,
+}
+
+impl PartialEq for PreparedPreeditKey {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.clusters, &other.clusters)
+            && self.caret == other.caret
+            && self.visible_rows == other.visible_rows
+            && self.grid_left == other.grid_left
+            && self.grid_top == other.grid_top
+            && self.font_family == other.font_family
+            && self.font_size == other.font_size
+            && self.cell_width == other.cell_width
+            && self.line_height == other.line_height
+            && self.foreground == other.foreground
+            && self.background == other.background
+            && self.caret_color == other.caret_color
+            && self.scale_factor_bits == other.scale_factor_bits
+    }
+}
+
+struct PreparedPreedit {
+    key: PreparedPreeditKey,
+    rows: Arc<[PreparedPreeditRow]>,
+}
+
+#[derive(Clone, Default)]
+struct PreparedPreeditRow {
+    text: Arc<[PreparedText]>,
+    backgrounds: Arc<[PaintQuad]>,
+    caret: Option<PaintQuad>,
 }
 
 impl PreparedFrameRow {
@@ -280,9 +340,7 @@ impl PreparedFrameRow {
             find_backgrounds: Vec::new(),
             cursor_background: None,
             cursor_overlay_visible: false,
-            overlay_text: Vec::new(),
-            overlay_backgrounds: Vec::new(),
-            overlay_caret: None,
+            preedit: None,
         }
     }
 }
@@ -413,6 +471,110 @@ impl TerminalGridCache {
                 })
             })
             .collect()
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn prepare_preedit(
+        &mut self,
+        layout: Option<&PreeditLayout>,
+        visible_rows: usize,
+        grid_left: Pixels,
+        grid_top: Pixels,
+        font_family: &SharedString,
+        font_size: Pixels,
+        cell_width: Pixels,
+        line_height: Pixels,
+        foreground: Color,
+        background: Color,
+        caret_color: Color,
+        scale_factor: f32,
+        window: &mut Window,
+    ) -> Option<Arc<[PreparedPreeditRow]>> {
+        let Some(layout) = layout else {
+            self.preedit = None;
+            return None;
+        };
+        let key = PreparedPreeditKey {
+            clusters: Arc::clone(&layout.clusters),
+            caret: layout.caret,
+            visible_rows,
+            grid_left,
+            grid_top,
+            font_family: font_family.clone(),
+            font_size,
+            cell_width,
+            line_height,
+            foreground,
+            background,
+            caret_color,
+            scale_factor_bits: scale_factor.to_bits(),
+        };
+        if let Some(cached) = &self.preedit
+            && cached.key == key
+        {
+            return Some(Arc::clone(&cached.rows));
+        }
+
+        let mut rows = (0..visible_rows)
+            .map(|_| PreparedPreeditRow::default())
+            .collect::<Vec<_>>();
+        for (row_index, row) in rows.iter_mut().enumerate() {
+            let row_top = grid_top + line_height * row_index as f32;
+            let clusters = layout
+                .clusters
+                .iter()
+                .filter(|cluster| cluster.row == row_index);
+            let mut text = Vec::new();
+            let mut backgrounds = Vec::new();
+            for cluster in clusters {
+                let cluster_left = grid_left + cell_width * cluster.column as f32;
+                let width_cells = usize::from(cluster.width).max(1);
+                backgrounds.push(fill(
+                    Bounds::new(
+                        point(cluster_left, row_top),
+                        size(cell_width * width_cells as f32, line_height),
+                    ),
+                    gpui_color(background),
+                ));
+                let color = gpui_color(foreground).into();
+                text.push(PreparedText {
+                    line: window.text_system().shape_line(
+                        cluster.text.clone().into(),
+                        font_size,
+                        &[TextRun {
+                            len: cluster.text.len(),
+                            font: terminal_cell_font(font_family, false, false),
+                            color,
+                            background_color: None,
+                            underline: Some(UnderlineStyle {
+                                thickness: px(1.0),
+                                color: Some(color),
+                                wavy: false,
+                            }),
+                            strikethrough: None,
+                        }],
+                        None,
+                    ),
+                    origin: point(cluster_left, row_top),
+                    blinking: false,
+                });
+            }
+            row.text = Arc::from(text);
+            row.backgrounds = Arc::from(backgrounds);
+            if layout.caret.row == row_index {
+                let caret_left = grid_left + cell_width * layout.caret.column as f32;
+                row.caret = Some(fill(
+                    Bounds::new(point(caret_left, row_top), size(px(1.0), line_height)),
+                    gpui_color(caret_color),
+                ));
+            }
+        }
+        let rows = Arc::from(rows);
+        self.preedit = Some(PreparedPreedit {
+            key,
+            rows: Arc::clone(&rows),
+        });
+        Some(rows)
     }
 }
 
@@ -611,8 +773,8 @@ impl Element for TerminalGridElement {
         let cursor = self.cursor.as_ref();
         let cursor_preparation_style = self.cursor_preparation_style;
         let font_family = self.font_family.clone();
-        let stable_rows = self.cache.update(_cx, |cache, _| {
-            cache.prepare_visible_geometry(
+        let (stable_rows, preedit_rows) = self.cache.update(_cx, |cache, _| {
+            let stable_rows = cache.prepare_visible_geometry(
                 &rows,
                 visible_rows,
                 PreparedGridLayout {
@@ -627,7 +789,23 @@ impl Element for TerminalGridElement {
                 cursor,
                 cursor_preparation_style,
                 window,
-            )
+            );
+            let preedit_rows = cache.prepare_preedit(
+                self.preedit.as_ref(),
+                visible_rows,
+                grid_left,
+                bounds.top(),
+                &font_family,
+                self.font_size,
+                self.cell_width,
+                self.line_height,
+                self.foreground,
+                self.background,
+                self.cursor_style.color,
+                self.scale_factor,
+                window,
+            );
+            (stable_rows, preedit_rows)
         });
 
         for (row_index, stable) in stable_rows.into_iter().enumerate() {
@@ -639,57 +817,13 @@ impl Element for TerminalGridElement {
                 self.cell_width,
                 self.line_height,
             );
-            let mut overlay_text = Vec::new();
-            let mut overlay_backgrounds = Vec::new();
-            let mut overlay_caret = None;
             let mut cursor_background = None;
             let mut cursor_overlay_visible = false;
-            if let Some(preedit) = &self.preedit {
-                for cluster in preedit
-                    .clusters
-                    .iter()
-                    .filter(|cluster| cluster.row == row_index)
-                {
-                    let cluster_left = grid_left + self.cell_width * cluster.column as f32;
-                    let width_cells = usize::from(cluster.width).max(1);
-                    overlay_backgrounds.push(fill(
-                        Bounds::new(
-                            point(cluster_left, row_top),
-                            size(self.cell_width * width_cells as f32, self.line_height),
-                        ),
-                        gpui_color(self.background),
-                    ));
-                    let color = gpui_color(self.foreground).into();
-                    overlay_text.push(PreparedText {
-                        line: window.text_system().shape_line(
-                            cluster.text.clone().into(),
-                            self.font_size,
-                            &[TextRun {
-                                len: cluster.text.len(),
-                                font: terminal_cell_font(&self.font_family, false, false),
-                                color,
-                                background_color: None,
-                                underline: Some(UnderlineStyle {
-                                    thickness: px(1.0),
-                                    color: Some(color),
-                                    wavy: false,
-                                }),
-                                strikethrough: None,
-                            }],
-                            None,
-                        ),
-                        origin: point(cluster_left, row_top),
-                        blinking: false,
-                    });
-                }
-                if preedit.caret.row == row_index {
-                    let caret_left = grid_left + self.cell_width * preedit.caret.column as f32;
-                    overlay_caret = Some(fill(
-                        Bounds::new(point(caret_left, row_top), size(px(1.0), self.line_height)),
-                        gpui_color(self.cursor_style.color),
-                    ));
-                }
-            } else if self.cursor_style.visible
+            if preedit_rows
+                .as_ref()
+                .and_then(|rows| rows.get(row_index))
+                .is_none()
+                && self.cursor_style.visible
                 && let Some((position, _)) = &self.cursor
                 && usize::from(position.row) == row_index
             {
@@ -718,9 +852,10 @@ impl Element for TerminalGridElement {
             frame.find_backgrounds = find_backgrounds;
             frame.cursor_background = cursor_background;
             frame.cursor_overlay_visible = cursor_overlay_visible;
-            frame.overlay_text = overlay_text;
-            frame.overlay_backgrounds = overlay_backgrounds;
-            frame.overlay_caret = overlay_caret;
+            frame.preedit = preedit_rows
+                .as_ref()
+                .and_then(|rows| rows.get(row_index))
+                .cloned();
             prepared_rows.push(frame);
         }
 
@@ -754,6 +889,27 @@ impl Element for TerminalGridElement {
         window: &mut Window,
         cx: &mut App,
     ) {
+        let mut scene_failed = false;
+        let graphics_preflight_ok = [
+            GraphicsLayer::BelowBackground,
+            GraphicsLayer::BelowText,
+            GraphicsLayer::AboveText,
+        ]
+        .into_iter()
+        .all(|layer| prepaint.graphics.preflight_layer(layer, window));
+        if !graphics_preflight_ok {
+            if let Some(graphics_attempt) = self.graphics_attempt {
+                self.graphics_cache.update(cx, |cache, cx| {
+                    cache.rollback(graphics_attempt, Some(window), cx);
+                });
+            }
+            window.handle_input(
+                &self.focus_handle,
+                ElementInputHandler::new(bounds, self.input.clone()),
+                cx,
+            );
+            return;
+        }
         if let Some(surface) = prepaint.surface.take() {
             window.paint_quad(surface);
         }
@@ -770,7 +926,7 @@ impl Element for TerminalGridElement {
                 bounds: grid_bounds,
             }),
             |window| {
-                prepaint
+                scene_failed |= !prepaint
                     .graphics
                     .paint_layer(GraphicsLayer::BelowBackground, window);
                 for row in &mut prepaint.rows {
@@ -787,7 +943,7 @@ impl Element for TerminalGridElement {
                         window.paint_quad(background);
                     }
                 }
-                prepaint
+                scene_failed |= !prepaint
                     .graphics
                     .paint_layer(GraphicsLayer::BelowText, window);
                 for row in &mut prepaint.rows {
@@ -807,6 +963,7 @@ impl Element for TerminalGridElement {
                         if let Err(error) =
                             text.line.paint(text.origin, self.line_height, window, cx)
                         {
+                            scene_failed = true;
                             eprintln!("failed to paint terminal row: {error:#}");
                         }
                     }
@@ -822,6 +979,7 @@ impl Element for TerminalGridElement {
                             if let Err(error) =
                                 text.line.paint(text.origin, self.line_height, window, cx)
                             {
+                                scene_failed = true;
                                 eprintln!("failed to paint terminal cursor text: {error:#}");
                             }
                         }
@@ -832,28 +990,54 @@ impl Element for TerminalGridElement {
                         window,
                     );
                 }
-                prepaint
+                scene_failed |= !prepaint
                     .graphics
                     .paint_layer(GraphicsLayer::AboveText, window);
                 // IME remains above every image layer so marked text and its
                 // caret are always usable while an above-text image is shown.
-                for row in &mut prepaint.rows {
-                    for background in row.overlay_backgrounds.drain(..) {
-                        window.paint_quad(background);
-                    }
-                    for text in row.overlay_text.drain(..) {
-                        if let Err(error) =
-                            text.line.paint(text.origin, self.line_height, window, cx)
-                        {
-                            eprintln!("failed to paint marked terminal text: {error:#}");
+                for row in &prepaint.rows {
+                    if let Some(preedit) = &row.preedit {
+                        for background in preedit.backgrounds.iter() {
+                            window.paint_quad(background.clone());
                         }
-                    }
-                    if let Some(caret) = row.overlay_caret.take() {
-                        window.paint_quad(caret);
+                        for text in preedit.text.iter() {
+                            if let Err(error) =
+                                text.line.paint(text.origin, self.line_height, window, cx)
+                            {
+                                scene_failed = true;
+                                eprintln!("failed to paint marked terminal text: {error:#}");
+                            }
+                        }
+                        if let Some(caret) = &preedit.caret {
+                            window.paint_quad(caret.clone());
+                        }
                     }
                 }
             },
         );
+        if scene_failed {
+            if let Some(graphics_attempt) = self.graphics_attempt {
+                self.graphics_cache.update(cx, |cache, cx| {
+                    cache.rollback(graphics_attempt, Some(window), cx);
+                });
+            }
+            window.handle_input(
+                &self.focus_handle,
+                ElementInputHandler::new(bounds, self.input.clone()),
+                cx,
+            );
+            return;
+        }
+        if let (Some(graphics_attempt), Some(presentation_generation)) =
+            (self.graphics_attempt, self.presentation_generation)
+        {
+            let input = self.input.clone();
+            cx.defer(move |cx| {
+                input.update(cx, |pane, cx| {
+                    pane.graphics_scene_succeeded(graphics_attempt, presentation_generation, cx);
+                });
+            });
+        }
         window.handle_input(
             &self.focus_handle,
             ElementInputHandler::new(bounds, self.input.clone()),
@@ -1762,6 +1946,7 @@ mod tests {
     use std::cell::Cell;
 
     use super::*;
+    use crate::ui::terminal_ime::layout_preedit;
 
     fn colors() -> crate::terminal::TerminalColorsSnapshot {
         let mut palette = [Color::rgb(0); 256];
@@ -1815,6 +2000,24 @@ mod tests {
             line_height: px(20.0),
             decoration_metrics: decoration_metrics(px(15.0), px(11.0), px(8.0), 2.0),
             cursor,
+        }
+    }
+
+    fn prepared_preedit_key(layout: &PreeditLayout, visible_rows: usize) -> PreparedPreeditKey {
+        PreparedPreeditKey {
+            clusters: Arc::clone(&layout.clusters),
+            caret: layout.caret,
+            visible_rows,
+            grid_left: px(0.0),
+            grid_top: px(0.0),
+            font_family: "Menlo".into(),
+            font_size: px(14.0),
+            cell_width: px(8.0),
+            line_height: px(20.0),
+            foreground: Color::rgb(0xff_ff_ff),
+            background: Color::rgb(0),
+            caret_color: Color::rgb(0xff_ff_ff),
+            scale_factor_bits: 2.0f32.to_bits(),
         }
     }
 
@@ -2481,6 +2684,27 @@ mod tests {
 
         assert!(Arc::ptr_eq(&first[0], &second[0]));
         assert!(!Arc::ptr_eq(&first[1], &second[1]));
+    }
+
+    #[test]
+    fn preedit_shape_cache_key_reuses_only_the_same_logical_cluster_snapshot() {
+        let layout = layout_preedit("かな", 0, 0, 80, 2);
+        let first = prepared_preedit_key(&layout, 24);
+        let second = prepared_preedit_key(&layout, 24);
+        let equal_content_new_snapshot = layout_preedit("かな", 0, 0, 80, 2);
+        let replaced = prepared_preedit_key(&equal_content_new_snapshot, 24);
+
+        assert_eq!(first, second);
+        assert_ne!(first, replaced);
+    }
+
+    #[test]
+    fn preedit_shape_cache_key_invalidates_when_visible_height_changes() {
+        let layout = layout_preedit("かな", 0, 0, 80, 2);
+        let first = prepared_preedit_key(&layout, 24);
+        let resized = prepared_preedit_key(&layout, 25);
+
+        assert_ne!(first, resized);
     }
 
     #[test]

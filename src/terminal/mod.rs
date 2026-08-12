@@ -26,13 +26,13 @@ pub(crate) use accessibility::{
     AccessibilityGeometry, AccessibilityNotification, TerminalAccessibilityModel,
 };
 pub(crate) use attention::AttentionFacts;
+pub(crate) use emulator::{
+    ActiveScreenSnapshot, CellSnapshot, CursorPositionSnapshot, CursorShapeSnapshot,
+    CursorSnapshot, PresentationGeneration, RowSnapshot, ScreenSnapshot, TerminalColor,
+    TerminalColorsSnapshot, TerminalUnderlineSnapshot,
+};
 #[cfg(test)]
 pub(crate) use emulator::{CellSemanticSnapshot, ScrollbarSnapshot};
-pub(crate) use emulator::{
-    CellSnapshot, CursorPositionSnapshot, CursorShapeSnapshot, CursorSnapshot,
-    PresentationGeneration, RowSnapshot, ScreenSnapshot, TerminalColor, TerminalColorsSnapshot,
-    TerminalUnderlineSnapshot,
-};
 #[cfg(test)]
 pub(crate) use failure::FailureClass;
 pub(crate) use failure::{

@@ -88,6 +88,15 @@ pub(crate) enum TerminalPaneEvent {
     Exited,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct PreeditLayoutKey {
+    marked_revision: u64,
+    start_row: usize,
+    start_column: usize,
+    columns: usize,
+    caret_utf16: usize,
+}
+
 pub(crate) struct TerminalPane {
     session_factory: WorkspaceTerminalSessionFactory,
     session: Option<Box<dyn TerminalSessionHandle>>,
@@ -130,6 +139,9 @@ pub(crate) struct TerminalPane {
     graphics_cache: Entity<TerminalGraphicsCache>,
     keyboard_bridge: MacosKeyboardBridge,
     ime: TerminalIme,
+    preedit_layout: Option<PreeditLayout>,
+    preedit_layout_key: Option<PreeditLayoutKey>,
+    marked_revision: u64,
     ime_suppressed_keys: Vec<PhysicalKey>,
     pending_file_insertion: Option<NativeInsertion>,
     pending_paste: Option<PasteConfirmation>,
@@ -243,6 +255,9 @@ impl TerminalPane {
             graphics_cache,
             keyboard_bridge: MacosKeyboardBridge::new(OptionAsAltPolicy::default()),
             ime: TerminalIme::default(),
+            preedit_layout: None,
+            preedit_layout_key: None,
+            marked_revision: 0,
             ime_suppressed_keys: Vec::new(),
             pending_file_insertion: None,
             pending_paste: None,
@@ -380,6 +395,7 @@ impl TerminalPane {
                         .resolve_osc52_authorization(request.id, Osc52AuthorizationDecision::Deny);
                 }
                 self.ime.cancel();
+                self.invalidate_preedit_layout();
                 self.ime_suppressed_keys.clear();
             }
             if let Some(session) = &self.session {
@@ -424,17 +440,67 @@ impl TerminalPane {
         }
     }
 
-    fn preedit_layout(&self) -> Option<PreeditLayout> {
-        let text = self.ime.marked_text()?;
-        let position = self.screen.cursor.position?;
-        let columns = self.screen.rows.first()?.len();
-        Some(layout_preedit(
-            text,
-            usize::from(position.row),
-            usize::from(position.column),
+    fn preedit_layout(&mut self) -> Option<PreeditLayout> {
+        let Some(text) = self.ime.marked_text() else {
+            self.preedit_layout = None;
+            self.preedit_layout_key = None;
+            return None;
+        };
+        let Some(position) = self.screen.cursor.position else {
+            self.preedit_layout = None;
+            self.preedit_layout_key = None;
+            return None;
+        };
+        let Some(columns) = self.screen.rows.first().map(|row| row.len()) else {
+            self.preedit_layout = None;
+            self.preedit_layout_key = None;
+            return None;
+        };
+        let caret_utf16 = self.ime.selected_range().end;
+        let key = PreeditLayoutKey {
+            marked_revision: self.marked_revision,
+            start_row: usize::from(position.row),
+            start_column: usize::from(position.column),
             columns,
-            self.ime.selected_range().end,
-        ))
+            caret_utf16,
+        };
+        if self.preedit_layout_key.as_ref() != Some(&key) {
+            self.preedit_layout = Some(layout_preedit(
+                text,
+                key.start_row,
+                key.start_column,
+                columns,
+                caret_utf16,
+            ));
+            self.preedit_layout_key = Some(key);
+        }
+        self.preedit_layout.clone()
+    }
+
+    #[cfg(test)]
+    fn mark_for_preedit_cache_test(&mut self, text: &str, selected_utf16: Range<usize>) {
+        self.ime.replace_and_mark(None, text, Some(selected_utf16));
+        self.invalidate_preedit_layout();
+    }
+
+    fn invalidate_preedit_layout(&mut self) {
+        self.marked_revision = self.marked_revision.wrapping_add(1);
+        self.preedit_layout = None;
+        self.preedit_layout_key = None;
+    }
+
+    pub(super) fn graphics_scene_succeeded(
+        &mut self,
+        attempt: super::terminal_graphics::GraphicsAttemptToken,
+        generation: crate::terminal::PresentationGeneration,
+        cx: &mut Context<Self>,
+    ) {
+        if self
+            .graphics_cache
+            .update(cx, |cache, cx| cache.mark_presented(attempt, cx))
+        {
+            self.render_lifecycle.mark_presented(generation);
+        }
     }
 
     pub(crate) fn title(&self) -> SharedString {
@@ -1635,6 +1701,7 @@ impl EntityInputHandler for TerminalPane {
             return;
         }
         self.ime.cancel();
+        self.invalidate_preedit_layout();
         self.accessibility_notifications
             .push(AccessibilityNotification::Value);
         cx.notify();
@@ -1657,9 +1724,11 @@ impl EntityInputHandler for TerminalPane {
         }
         if !self.terminal_input_focused(window) {
             self.ime.cancel();
+            self.invalidate_preedit_layout();
             return;
         }
         self.ime.commit(text);
+        self.invalidate_preedit_layout();
         if let Some(text) = self.ime.take_commit() {
             self.send_key_translation(
                 KeyTranslation::Encoded(KeyInput::input_method_commit(text)),
@@ -1689,10 +1758,12 @@ impl EntityInputHandler for TerminalPane {
         }
         if !self.terminal_input_focused(window) {
             self.ime.cancel();
+            self.invalidate_preedit_layout();
             return;
         }
         self.ime
             .replace_and_mark(range, new_text, new_selected_range);
+        self.invalidate_preedit_layout();
         self.accessibility_notifications
             .push(AccessibilityNotification::Value);
         cx.notify();
@@ -1872,10 +1943,28 @@ impl Render for TerminalPane {
             .filter(|snapshot| snapshot.generation == self.find_generation)
             .map_or_else(|| Arc::from([]), |snapshot| snapshot.visible_spans.clone());
         let find_bar = self.render_find_bar(cx);
-        let graphics_snapshot = self.screen.graphics.clone();
-        let graphics = self
-            .graphics_cache
-            .update(cx, |cache, cx| cache.sync(&graphics_snapshot, window, cx));
+        let presentation_generation = self.render_lifecycle.take_frame();
+        let (graphics, graphics_attempt) = if presentation_generation.is_some() {
+            let graphics_snapshot = self.screen.graphics.clone();
+            let active_screen = self.screen.active_screen;
+            let preparation = self.graphics_cache.update(cx, |cache, cx| {
+                cache.sync(active_screen, &graphics_snapshot, window, cx)
+            });
+            let Ok(preparation) = preparation else {
+                return div()
+                    .size_full()
+                    .bg(background)
+                    .child("Terminal graphics unavailable")
+                    .into_any_element();
+            };
+            (preparation.graphics, Some(preparation.token))
+        } else {
+            (
+                self.graphics_cache
+                    .read_with(cx, |cache, _| cache.last_presented()),
+                None,
+            )
+        };
         let terminal_grid = TerminalGridElement::new(
             &self.screen,
             self.render_cache.clone(),
@@ -1892,12 +1981,12 @@ impl Render for TerminalPane {
                 scale_factor: window.scale_factor(),
                 find_spans,
                 graphics,
+                graphics_attempt,
+                graphics_cache: self.graphics_cache.clone(),
+                presentation_generation,
             },
             cx,
         );
-        if let Some(generation) = self.render_lifecycle.take_frame() {
-            self.render_lifecycle.mark_presented(generation);
-        }
 
         div()
             .debug_selector(move || native_context_selector.clone())
@@ -2020,6 +2109,7 @@ impl Render for TerminalPane {
                         }),
                 )
             })
+            .into_any_element()
     }
 }
 
@@ -3728,6 +3818,35 @@ mod tests {
             ime_candidate_bounds(element_bounds, 5, px(10.0), px(20.0), layout.caret),
             Bounds::new(point(px(30.0), px(40.0)), size(px(10.0), px(20.0)))
         );
+    }
+
+    #[gpui::test]
+    fn unchanged_marked_text_reuses_logical_preedit_clusters(cx: &mut TestAppContext) {
+        let (pane, cx) = terminal_pane(cx);
+        pane.update(cx, |pane, _| {
+            pane.screen = blinking_cursor_screen(true, false);
+            pane.mark_for_preedit_cache_test("かな", 2..2);
+        });
+
+        let first = pane.update(cx, |pane, _| pane.preedit_layout().unwrap());
+        let second = pane.update(cx, |pane, _| pane.preedit_layout().unwrap());
+
+        assert!(Arc::ptr_eq(&first.clusters, &second.clusters));
+    }
+
+    #[gpui::test]
+    fn marked_text_edit_replaces_logical_preedit_clusters(cx: &mut TestAppContext) {
+        let (pane, cx) = terminal_pane(cx);
+        pane.update(cx, |pane, _| {
+            pane.screen = blinking_cursor_screen(true, false);
+            pane.mark_for_preedit_cache_test("か", 1..1);
+        });
+        let first = pane.update(cx, |pane, _| pane.preedit_layout().unwrap());
+        pane.update(cx, |pane, _| pane.mark_for_preedit_cache_test("かな", 2..2));
+
+        let second = pane.update(cx, |pane, _| pane.preedit_layout().unwrap());
+
+        assert!(!Arc::ptr_eq(&first.clusters, &second.clusters));
     }
 
     #[gpui::test]

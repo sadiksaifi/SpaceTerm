@@ -181,7 +181,12 @@ subset; unsupported inputs still receive the protocol-defined rejection behavior
 GPUI caches `RenderImage` values by image ID and content generation, converts RGBA to its BGRA
 upload format once, and explicitly removes stale atlas entries on replacement, deletion, quota
 eviction, screen ownership changes, and Pane release. The cache is application-bounded to 384 MiB.
-Source cropping paints transformed full-image bounds through nested destination and grid masks.
+Candidate resources and immutable placement geometry are staged transactionally; they become
+authoritative only after scene submission succeeds, while a failed attempt retains the last valid
+resource set and Presentation Generation. Unchanged content and placement generations, active
+screen, grid geometry, and backing scale reuse one Arc-backed placement paint plan without
+reconstructing image geometry. Source cropping paints transformed full-image bounds through nested
+destination and grid masks.
 Paint order is terminal base background; images with `z < -1073741824`; cell, search, Selection,
 and Cursor backgrounds; images with `-1073741824 <= z < 0`; glyphs and decorations; images with
 `z >= 0`; then Marked Text and its caret. Equal-z placements use increasing image ID; Marked Text
@@ -524,7 +529,10 @@ clusters before the right edge, and overlay the immutable grid with an underline
 caret. Candidate-window bounds derive from that caret and the same logical cell geometry used for
 rendering. A nonempty commit clears Marked Text and becomes exactly one typed input-method event on
 the reliable Terminal Session command lane; the worker emits its UTF-8 once in order and never
-tracks it as a held key.
+tracks it as a held key. The Pane and terminal grid cache logical cluster layout and shaped overlay
+geometry by the exact marked-text revision, caret, Cursor origin, grid metrics, font, colors, and
+backing scale, so unrelated frames do not reshape stable composition while every native edit
+invalidates it immediately.
 
 ### Terminal Accessibility
 
