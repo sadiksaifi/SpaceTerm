@@ -14,9 +14,11 @@ use crate::terminal::{
 };
 use crate::theme::{ACTIVE_THEME, Color};
 
-use super::terminal_graphics::{GraphicsLayer, GraphicsPaintPlan, PreparedGraphics};
+use super::terminal_graphics::{
+    GraphicsAttemptToken, GraphicsLayer, GraphicsPaintPlan, PreparedGraphics, TerminalGraphicsCache,
+};
 use super::terminal_ime::PreeditLayout;
-use super::terminal_pane::TerminalPane;
+use super::terminal_pane::{OperationToken, TerminalPane};
 use super::terminal_symbols::{SymbolPlan, SymbolPlanCache, SymbolPrimitive, terminal_symbol};
 
 #[derive(Clone, Copy)]
@@ -145,6 +147,13 @@ pub(crate) struct TerminalGridElement {
     find_spans: Arc<[FindHighlightSpan]>,
     graphics: PreparedGraphics,
     scale_factor: f32,
+    presentation: Arc<ScreenSnapshot>,
+    presentation_operation: Option<OperationToken>,
+    graphics_attempt: Option<GraphicsAttemptToken>,
+    graphics_cache: Entity<TerminalGraphicsCache>,
+    fallback: Option<Box<TerminalGridElement>>,
+    fallback_generation: Option<crate::terminal::PresentationGeneration>,
+    paint_fault: Option<PaintPreflightFault>,
 }
 
 pub(crate) struct TerminalGridConfiguration {
@@ -160,14 +169,57 @@ pub(crate) struct TerminalGridConfiguration {
     pub(crate) scale_factor: f32,
     pub(crate) find_spans: Arc<[FindHighlightSpan]>,
     pub(crate) graphics: PreparedGraphics,
+    pub(crate) presentation_operation: Option<OperationToken>,
+    pub(crate) graphics_attempt: Option<GraphicsAttemptToken>,
+    pub(crate) graphics_cache: Entity<TerminalGraphicsCache>,
+    pub(crate) fallback: Option<(Arc<ScreenSnapshot>, PreparedGraphics)>,
+    pub(crate) paint_fault: Option<PaintPreflightFault>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum PaintPreflightFault {
+    #[cfg(test)]
+    Row(usize),
+    #[cfg(test)]
+    Glyph(usize),
+    #[cfg(test)]
+    Image(usize),
 }
 
 impl TerminalGridElement {
     pub(crate) fn new(
         screen: &Arc<ScreenSnapshot>,
         cache: &mut TerminalGridCache,
-        configuration: TerminalGridConfiguration,
+        mut configuration: TerminalGridConfiguration,
     ) -> Self {
+        let fallback = configuration.fallback.take().map(|(screen, graphics)| {
+            Box::new(Self::new(
+                &screen,
+                cache,
+                TerminalGridConfiguration {
+                    terminal_input_focused: configuration.terminal_input_focused,
+                    font_family: configuration.font_family.clone(),
+                    font_size: configuration.font_size,
+                    line_height: configuration.line_height,
+                    cell_width: configuration.cell_width,
+                    preedit: None,
+                    focus_handle: configuration.focus_handle.clone(),
+                    input: configuration.input.clone(),
+                    blink_phase_visible: configuration.blink_phase_visible,
+                    scale_factor: configuration.scale_factor,
+                    find_spans: Arc::from([]),
+                    graphics,
+                    presentation_operation: None,
+                    graphics_attempt: None,
+                    graphics_cache: configuration.graphics_cache.clone(),
+                    fallback: None,
+                    paint_fault: None,
+                },
+            ))
+        });
+        let fallback_generation = fallback
+            .as_ref()
+            .map(|fallback| fallback.presentation.generation);
         let cursor = screen.cursor.position.and_then(|position| {
             screen
                 .rows
@@ -213,6 +265,13 @@ impl TerminalGridElement {
             find_spans: configuration.find_spans,
             graphics: configuration.graphics,
             scale_factor: configuration.scale_factor,
+            presentation: Arc::clone(screen),
+            presentation_operation: configuration.presentation_operation,
+            graphics_attempt: configuration.graphics_attempt,
+            graphics_cache: configuration.graphics_cache,
+            fallback,
+            fallback_generation,
+            paint_fault: configuration.paint_fault,
         }
     }
 }
@@ -249,9 +308,194 @@ struct PreparedRow {
 }
 
 pub(crate) struct PrepaintState {
+    candidate: TerminalPaintBatch,
+    fallback: Option<TerminalPaintBatch>,
+}
+
+struct TerminalPaintBatch {
     surface: Option<PaintQuad>,
     rows: Vec<PreparedRow>,
     graphics: GraphicsPaintPlan,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PaintBatchFailure {
+    Presentation,
+    RendererResources,
+}
+
+impl TerminalPaintBatch {
+    fn preflight(
+        &self,
+        line_height: Pixels,
+        fault: Option<PaintPreflightFault>,
+        window: &mut Window,
+        _cx: &mut App,
+    ) -> Result<(), PaintBatchFailure> {
+        if let Some(failure) = self.injected_failure(fault) {
+            return Err(failure);
+        }
+        // GPUI has no public paint transaction. Warming the exact glyph and image
+        // resources through offscreen preparation geometry exercises every
+        // fallible paint seam without submitting commands to the visible grid.
+        let offscreen = px(-1_000_000.0);
+        let preflight_mask = ContentMask {
+            bounds: Bounds::new(point(offscreen, offscreen), size(px(2.0), px(2.0))),
+        };
+        window.with_content_mask(Some(preflight_mask), |window| {
+            self.graphics
+                .preflight_layer(GraphicsLayer::BelowBackground, window)
+                .map_err(|_| PaintBatchFailure::RendererResources)?;
+            self.graphics
+                .preflight_layer(GraphicsLayer::BelowText, window)
+                .map_err(|_| PaintBatchFailure::RendererResources)?;
+            for row in &self.rows {
+                for text in &row.text {
+                    preflight_text(text, line_height, window)
+                        .map_err(|_| PaintBatchFailure::Presentation)?;
+                }
+            }
+            self.graphics
+                .preflight_layer(GraphicsLayer::AboveText, window)
+                .map_err(|_| PaintBatchFailure::RendererResources)?;
+            for row in &self.rows {
+                for text in &row.overlay_text {
+                    preflight_text(text, line_height, window)
+                        .map_err(|_| PaintBatchFailure::Presentation)?;
+                }
+            }
+            Ok(())
+        })
+    }
+
+    fn injected_failure(&self, fault: Option<PaintPreflightFault>) -> Option<PaintBatchFailure> {
+        match fault? {
+            #[cfg(test)]
+            PaintPreflightFault::Row(index) => self
+                .rows
+                .get(index)
+                .map(|_| PaintBatchFailure::Presentation),
+            #[cfg(test)]
+            PaintPreflightFault::Glyph(index) => self
+                .rows
+                .iter()
+                .flat_map(|row| row.text.iter().chain(&row.overlay_text))
+                .flat_map(|text| text.line.text.chars())
+                .nth(index)
+                .map(|_| PaintBatchFailure::Presentation),
+            #[cfg(test)]
+            PaintPreflightFault::Image(index) => (index < self.graphics.image_count())
+                .then_some(PaintBatchFailure::RendererResources),
+        }
+    }
+
+    fn submit(
+        &mut self,
+        grid_bounds: Bounds<Pixels>,
+        line_height: Pixels,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Result<(), PaintBatchFailure> {
+        if let Some(surface) = self.surface.take() {
+            window.paint_quad(surface);
+        }
+        window.with_content_mask(
+            Some(ContentMask {
+                bounds: grid_bounds,
+            }),
+            |window| {
+                self.graphics
+                    .paint_layer(GraphicsLayer::BelowBackground, window)
+                    .map_err(|_| PaintBatchFailure::RendererResources)?;
+                for row in &mut self.rows {
+                    for background in row.backgrounds.drain(..) {
+                        window.paint_quad(background);
+                    }
+                }
+                self.graphics
+                    .paint_layer(GraphicsLayer::BelowText, window)
+                    .map_err(|_| PaintBatchFailure::RendererResources)?;
+                for row in &mut self.rows {
+                    for quad in row.under_text_decorations.quads.drain(..) {
+                        window.paint_quad(quad);
+                    }
+                    for (path, color) in row.under_text_decorations.paths.drain(..) {
+                        window.paint_path(path, gpui_color(color));
+                    }
+                    for quad in row.symbols.quads.drain(..) {
+                        window.paint_quad(quad);
+                    }
+                    for (path, color) in row.symbols.paths.drain(..) {
+                        window.paint_path(path, gpui_color(color));
+                    }
+                    for text in row.text.drain(..) {
+                        text.line
+                            .paint(text.origin, line_height, window, cx)
+                            .map_err(|_| PaintBatchFailure::Presentation)?;
+                    }
+                    for quad in row.overlay_symbols.quads.drain(..) {
+                        window.paint_quad(quad);
+                    }
+                    for (path, color) in row.overlay_symbols.paths.drain(..) {
+                        window.paint_path(path, gpui_color(color));
+                    }
+                    for quad in row.over_text_decorations.quads.drain(..) {
+                        window.paint_quad(quad);
+                    }
+                    for (path, color) in row.over_text_decorations.paths.drain(..) {
+                        window.paint_path(path, gpui_color(color));
+                    }
+                }
+                self.graphics
+                    .paint_layer(GraphicsLayer::AboveText, window)
+                    .map_err(|_| PaintBatchFailure::RendererResources)?;
+                for row in &mut self.rows {
+                    for background in row.overlay_backgrounds.drain(..) {
+                        window.paint_quad(background);
+                    }
+                    for text in row.overlay_text.drain(..) {
+                        text.line
+                            .paint(text.origin, line_height, window, cx)
+                            .map_err(|_| PaintBatchFailure::Presentation)?;
+                    }
+                    if let Some(caret) = row.overlay_caret.take() {
+                        window.paint_quad(caret);
+                    }
+                }
+                Ok(())
+            },
+        )
+    }
+}
+
+fn preflight_text(
+    text: &PreparedText,
+    line_height: Pixels,
+    window: &mut Window,
+) -> gpui::Result<()> {
+    let layout = &*text.line;
+    let baseline = (line_height - layout.ascent - layout.descent) / 2.0 + layout.ascent;
+    let mut glyph_origin = text.origin;
+    let mut previous_position = gpui::Point::default();
+    for run in &layout.runs {
+        for glyph in &run.glyphs {
+            glyph_origin += glyph.position - previous_position;
+            previous_position = glyph.position;
+            let origin = glyph_origin + point(px(0.0), baseline);
+            if glyph.is_emoji {
+                window.paint_emoji(origin, run.font_id, glyph.id, layout.font_size)?;
+            } else {
+                window.paint_glyph(
+                    origin,
+                    run.font_id,
+                    glyph.id,
+                    layout.font_size,
+                    rgba(0).into(),
+                )?;
+            }
+        }
+    }
+    Ok(())
 }
 
 #[derive(Default)]
@@ -508,7 +752,7 @@ impl Element for TerminalGridElement {
                 (self.line_height * visible_rows as f32).min(grid_bounds.size.height),
             ),
         );
-        PrepaintState {
+        let candidate = TerminalPaintBatch {
             surface: Some(fill(bounds, gpui_color(self.background))),
             rows: prepared_rows,
             graphics: self.graphics.paint_plan(
@@ -517,6 +761,16 @@ impl Element for TerminalGridElement {
                 self.line_height,
                 self.scale_factor,
             ),
+        };
+        let fallback = self.fallback.as_mut().map(|fallback| {
+            let mut request_layout = ();
+            fallback
+                .prepaint(None, None, bounds, &mut request_layout, window, _cx)
+                .candidate
+        });
+        PrepaintState {
+            candidate,
+            fallback,
         }
     }
 
@@ -530,93 +784,85 @@ impl Element for TerminalGridElement {
         window: &mut Window,
         cx: &mut App,
     ) {
-        if let Some(surface) = prepaint.surface.take() {
-            window.paint_quad(surface);
-        }
         let grid_bounds = terminal_grid_content_bounds(bounds, self.columns, self.cell_width);
         let grid_bounds = Bounds::new(
             grid_bounds.origin,
             size(
                 grid_bounds.size.width,
-                (self.line_height * prepaint.rows.len() as f32).min(grid_bounds.size.height),
+                (self.line_height * prepaint.candidate.rows.len() as f32)
+                    .min(grid_bounds.size.height),
             ),
         );
-        window.with_content_mask(
-            Some(ContentMask {
-                bounds: grid_bounds,
-            }),
-            |window| {
-                prepaint
-                    .graphics
-                    .paint_layer(GraphicsLayer::BelowBackground, window);
-                for row in &mut prepaint.rows {
-                    for background in row.backgrounds.drain(..) {
-                        window.paint_quad(background);
-                    }
-                }
-                prepaint
-                    .graphics
-                    .paint_layer(GraphicsLayer::BelowText, window);
-                for row in &mut prepaint.rows {
-                    for quad in row.under_text_decorations.quads.drain(..) {
-                        window.paint_quad(quad);
-                    }
-                    for (path, color) in row.under_text_decorations.paths.drain(..) {
-                        window.paint_path(path, gpui_color(color));
-                    }
-                    for quad in row.symbols.quads.drain(..) {
-                        window.paint_quad(quad);
-                    }
-                    for (path, color) in row.symbols.paths.drain(..) {
-                        window.paint_path(path, gpui_color(color));
-                    }
-                    for text in row.text.drain(..) {
-                        if let Err(error) =
-                            text.line.paint(text.origin, self.line_height, window, cx)
-                        {
-                            eprintln!("failed to paint terminal row: {error:#}");
-                        }
-                    }
-                    for quad in row.overlay_symbols.quads.drain(..) {
-                        window.paint_quad(quad);
-                    }
-                    for (path, color) in row.overlay_symbols.paths.drain(..) {
-                        window.paint_path(path, gpui_color(color));
-                    }
-                    for quad in row.over_text_decorations.quads.drain(..) {
-                        window.paint_quad(quad);
-                    }
-                    for (path, color) in row.over_text_decorations.paths.drain(..) {
-                        window.paint_path(path, gpui_color(color));
-                    }
-                }
-                prepaint
-                    .graphics
-                    .paint_layer(GraphicsLayer::AboveText, window);
-                // IME remains above every image layer so marked text and its
-                // caret are always usable while an above-text image is shown.
-                for row in &mut prepaint.rows {
-                    for background in row.overlay_backgrounds.drain(..) {
-                        window.paint_quad(background);
-                    }
-                    for text in row.overlay_text.drain(..) {
-                        if let Err(error) =
-                            text.line.paint(text.origin, self.line_height, window, cx)
-                        {
-                            eprintln!("failed to paint marked terminal text: {error:#}");
-                        }
-                    }
-                    if let Some(caret) = row.overlay_caret.take() {
-                        window.paint_quad(caret);
-                    }
-                }
-            },
-        );
+        let mut failure = prepaint
+            .candidate
+            .preflight(self.line_height, self.paint_fault.take(), window, cx)
+            .err();
+        if failure.is_some()
+            && let Some(graphics_attempt) = self.graphics_attempt
+        {
+            self.graphics_cache.update(cx, |cache, cx| {
+                cache.rollback(graphics_attempt, Some(window), cx);
+            });
+        }
+        let mut submitted_generation = None;
+        if failure.is_none() {
+            submitted_generation = Some(self.presentation.generation);
+            match prepaint
+                .candidate
+                .submit(grid_bounds, self.line_height, window, cx)
+            {
+                Ok(()) => {}
+                Err(submission_failure) => failure = Some(submission_failure),
+            }
+        } else if let Some(fallback) = &mut prepaint.fallback
+            && fallback
+                .preflight(self.line_height, None, window, cx)
+                .is_ok()
+        {
+            submitted_generation = self.fallback_generation;
+            let _ = fallback.submit(grid_bounds, self.line_height, window, cx);
+        }
+        if failure.is_some()
+            && let Some(graphics_attempt) = self.graphics_attempt
+        {
+            self.graphics_cache.update(cx, |cache, cx| {
+                cache.rollback(graphics_attempt, Some(window), cx);
+            });
+        }
         window.handle_input(
             &self.focus_handle,
             ElementInputHandler::new(bounds, self.input.clone()),
             cx,
         );
+        let pane = self.input.clone();
+        let presentation = Arc::clone(&self.presentation);
+        if let (Some(operation), Some(graphics_attempt)) =
+            (self.presentation_operation, self.graphics_attempt)
+        {
+            cx.defer(move |cx| {
+                pane.update(cx, |pane, cx| {
+                    if let Some(generation) = submitted_generation {
+                        pane.record_scene_submission_attempt(generation);
+                    }
+                    match failure {
+                        Some(PaintBatchFailure::RendererResources) => {
+                            pane.renderer_resource_failed(operation, graphics_attempt, cx);
+                        }
+                        Some(PaintBatchFailure::Presentation) => {
+                            pane.presentation_failed(operation, graphics_attempt, cx);
+                        }
+                        None => {
+                            pane.presentation_succeeded(
+                                operation,
+                                graphics_attempt,
+                                presentation,
+                                cx,
+                            );
+                        }
+                    }
+                });
+            });
+        }
     }
 }
 

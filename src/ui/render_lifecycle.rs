@@ -80,6 +80,7 @@ impl RenderLifecycle {
         self.effects_with_redraw(false)
     }
 
+    #[cfg(test)]
     pub(crate) fn take_frame(&self) -> Option<PresentationGeneration> {
         (self.visibility.presentable() && !self.released)
             .then_some(self.latest)
