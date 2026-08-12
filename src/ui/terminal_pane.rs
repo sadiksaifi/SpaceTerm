@@ -29,7 +29,7 @@ use super::{
     FindPrevious, IncreaseTerminalFontSize, OpenTerminalFind, PasteClipboard,
     ResetTerminalFontSize, TERMINAL_FIND_KEY_CONTEXT, TERMINAL_KEY_CONTEXT,
 };
-use crate::platform::macos_accessibility::post_accessibility_notifications;
+use crate::platform::macos_accessibility::{MacosAccessibilityElement, MacosAccessibilityUpdate};
 #[cfg(not(test))]
 use crate::platform::macos_attention::{MacosAttentionPlatform, apply_attention_effects};
 use crate::platform::macos_keyboard::{
@@ -94,6 +94,7 @@ pub(crate) struct TerminalPane {
     session_start_attempted: bool,
     screen: Arc<ScreenSnapshot>,
     accessibility: TerminalAccessibilityModel,
+    accessibility_element: MacosAccessibilityElement,
     accessibility_notifications: Vec<AccessibilityNotification>,
     render_lifecycle: RenderLifecycle,
     pane_state: PaneTerminalState,
@@ -167,6 +168,7 @@ impl TerminalPane {
         .detach();
         let screen = ScreenSnapshot::empty();
         let accessibility = TerminalAccessibilityModel::from_screen(&screen);
+        let accessibility_element = MacosAccessibilityElement::new(window, accessibility.clone());
         let mut render_lifecycle = RenderLifecycle::new(SurfaceVisibility {
             application_active: false,
             key_window: false,
@@ -206,6 +208,7 @@ impl TerminalPane {
             session_start_attempted: false,
             screen,
             accessibility,
+            accessibility_element,
             accessibility_notifications: Vec::new(),
             render_lifecycle,
             pane_state: PaneTerminalState::default(),
@@ -286,6 +289,10 @@ impl TerminalPane {
         self.product_focus = product_focus;
     }
 
+    pub(crate) fn set_accessibility_hierarchy(&mut self, presented: bool, order: usize) {
+        self.accessibility_element.set_hierarchy(presented, order);
+    }
+
     fn open_find(&mut self, _: &OpenTerminalFind, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(editor) = &mut self.find_editor {
             editor.select_all();
@@ -363,8 +370,10 @@ impl TerminalPane {
         let focus_gained = !self.terminal_input_focus && focused;
         if self.terminal_input_focus != focused {
             self.terminal_input_focus = focused;
-            self.accessibility_notifications
-                .push(AccessibilityNotification::Focus);
+            if focused {
+                self.accessibility_notifications
+                    .push(AccessibilityNotification::Focus);
+            }
             self.reset_blink_phase();
             if !focused {
                 if let Some(confirmation) = self.pending_paste.take()
@@ -620,6 +629,27 @@ impl TerminalPane {
         }
     }
 
+    fn sync_native_accessibility(&mut self, window: &Window, focused: bool) {
+        let notifications = AccessibilityNotification::coalesce(&self.accessibility_notifications);
+        self.accessibility_notifications.clear();
+        #[cfg(all(target_os = "macos", not(test)))]
+        let selection_sender = self
+            .session
+            .as_ref()
+            .and_then(|session| session.accessibility_selection_sender());
+        self.accessibility_element.update(MacosAccessibilityUpdate {
+            window,
+            model: &self.accessibility,
+            bounds: self.grid_bounds,
+            cell_width: self.cell_width,
+            line_height: px(self.line_height),
+            focused,
+            notifications: &notifications,
+            #[cfg(all(target_os = "macos", not(test)))]
+            selection_sender,
+        });
+    }
+
     fn handle_event(&mut self, event: SessionEvent, cx: &mut Context<Self>) {
         match event {
             SessionEvent::Screen(screen) => {
@@ -636,7 +666,9 @@ impl TerminalPane {
                     self.accessibility_notifications
                         .push(AccessibilityNotification::Value);
                 }
-                if accessibility.selection_range() != self.accessibility.selection_range() {
+                if accessibility.selected_or_cursor_range()
+                    != self.accessibility.selected_or_cursor_range()
+                {
                     self.accessibility_notifications
                         .push(AccessibilityNotification::Selection);
                 }
@@ -1773,9 +1805,6 @@ impl Drop for TerminalPane {
 impl Render for TerminalPane {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         update_application_activation();
-        let notifications = AccessibilityNotification::coalesce(&self.accessibility_notifications);
-        self.accessibility_notifications.clear();
-        post_accessibility_notifications(&notifications, self.accessibility.visible_range());
         let pane = cx.entity().downgrade();
         let (terminal_input_focused, focus_gained) = self.sync_terminal_input_focus(window);
         self.flush_pending_file_insertion(cx);
@@ -1898,11 +1927,14 @@ impl Render for TerminalPane {
 
         div()
             .debug_selector(move || native_context_selector.clone())
-            .on_children_prepainted(move |children, _window, cx| {
+            .on_children_prepainted(move |children, window, cx| {
                 let Some(bounds) = children.first().copied() else {
                     return;
                 };
-                let _ = pane.update(cx, |pane, cx| pane.update_grid_bounds(bounds, cx));
+                let _ = pane.update(cx, |pane, cx| {
+                    pane.update_grid_bounds(bounds, cx);
+                    pane.sync_native_accessibility(window, terminal_input_focused);
+                });
             })
             .id("terminal-pane")
             .relative()

@@ -19,6 +19,8 @@ use crate::platform::macos_pty::{
     user_shell,
 };
 use crate::platform::shell_integration::resource_root;
+#[cfg(all(target_os = "macos", not(test)))]
+use crate::terminal::accessibility::AccessibilitySelectionRequest;
 use crate::terminal::attention::AttentionEvent;
 #[cfg(test)]
 use crate::terminal::emulator::MAX_SYNCHRONIZED_OUTPUT_DURATION;
@@ -271,6 +273,27 @@ pub(crate) enum SelectionCopyError {
     WorkerStopped,
 }
 
+#[derive(Clone, Debug)]
+#[cfg(all(target_os = "macos", not(test)))]
+pub(crate) struct AccessibilitySelectionSender {
+    commands: CommandSender<Command>,
+}
+
+#[cfg(all(target_os = "macos", not(test)))]
+impl AccessibilitySelectionSender {
+    pub(crate) fn request(&self, request: AccessibilitySelectionRequest) {
+        if self
+            .commands
+            .send(Command::AccessibilitySelection(request))
+            .is_err()
+        {
+            eprintln!(
+                "terminal accessibility selection was dropped because the worker has stopped"
+            );
+        }
+    }
+}
+
 pub(crate) trait TerminalSessionHandle {
     fn key(&self, input: KeyInput);
     fn focus(&self, focused: bool);
@@ -296,6 +319,10 @@ pub(crate) trait TerminalSessionHandle {
         decision: Osc52AuthorizationDecision,
     );
     fn copy_selection(&self) -> Result<Option<SelectionCopy>, SelectionCopyError>;
+    #[cfg(all(target_os = "macos", not(test)))]
+    fn accessibility_selection_sender(&self) -> Option<AccessibilitySelectionSender> {
+        None
+    }
 }
 
 pub(crate) trait TerminalSessionFactory {
@@ -906,6 +933,15 @@ impl TerminalSessionHandle for TerminalSession {
     fn copy_selection(&self) -> Result<Option<SelectionCopy>, SelectionCopyError> {
         Self::copy_selection(self)
     }
+
+    #[cfg(all(target_os = "macos", not(test)))]
+    fn accessibility_selection_sender(&self) -> Option<AccessibilitySelectionSender> {
+        self.commands
+            .as_ref()
+            .map(|commands| AccessibilitySelectionSender {
+                commands: commands.clone(),
+            })
+    }
 }
 
 impl Drop for TerminalSession {
@@ -965,6 +1001,8 @@ enum Command {
     Osc52AuthorizationExpired(Osc52AuthorizationId),
     ResumeOsc52Output,
     SelectionCopy(mpsc::SyncSender<Result<Option<SelectionCopy>, SelectionCopyError>>),
+    #[cfg(all(target_os = "macos", not(test)))]
+    AccessibilitySelection(AccessibilitySelectionRequest),
     SelectionAutoscrollTick(PresentationGeneration),
     ReaderReady,
     Shutdown,
@@ -1533,6 +1571,18 @@ impl TerminalWorker {
                         .map_err(|_| SelectionCopyError::Formatting),
                 );
                 true
+            }
+            #[cfg(all(target_os = "macos", not(test)))]
+            Command::AccessibilitySelection(request) => {
+                match self.emulator.set_accessibility_selection(request) {
+                    Ok(action) => {
+                        self.apply_emulator_action(action) && self.refresh_selection_autoscroll()
+                    }
+                    Err(message) => {
+                        self.send_runtime_failure(message);
+                        false
+                    }
+                }
             }
             Command::SelectionAutoscrollTick(generation) => {
                 match self.emulator.selection_autoscroll_tick(generation) {
