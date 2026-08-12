@@ -5127,6 +5127,7 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "async-channel 2.5.0",
+ "block",
  "cocoa 0.26.0",
  "gpui",
  "gpui-symbols",
