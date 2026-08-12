@@ -2502,6 +2502,7 @@ fn activated_link(
     (pressed_generation == current_generation
         && current.is_some_and(|link| link.identity == pressed.identity))
     .then(|| pressed.activation_url())
+    .flatten()
 }
 
 fn hovered_link_for_generation(

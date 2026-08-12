@@ -1,0 +1,672 @@
+diff --git a/include/ghostty/vt/grid_ref.h b/include/ghostty/vt/grid_ref.h
+index c43791dc2..883eb9dd5 100644
+--- a/include/ghostty/vt/grid_ref.h
++++ b/include/ghostty/vt/grid_ref.h
+@@ -190,6 +190,18 @@ GHOSTTY_API GhosttyResult ghostty_grid_ref_hyperlink_uri(
+     size_t buf_len,
+     size_t *out_len);
+ 
++/**
++ * Get opaque application metadata retained with the cell's hyperlink.
++ *
++ * If the cell has no hyperlink, all values are set to zero. This metadata is
++ * never included in terminal text or formatter output.
++ */
++GHOSTTY_API GhosttyResult ghostty_grid_ref_hyperlink_userdata(
++    const GhosttyGridRef *ref,
++    uint8_t *buf,
++    size_t buf_len,
++    size_t *out_len);
++
+ /**
+  * Get the style of the cell at the grid reference's position.
+  *
+diff --git a/include/ghostty/vt/terminal.h b/include/ghostty/vt/terminal.h
+index 26ee0c0b8..c75cf48c7 100644
+--- a/include/ghostty/vt/terminal.h
++++ b/include/ghostty/vt/terminal.h
+@@ -618,6 +618,33 @@ typedef void (*GhosttyTerminalWritePtyFn)(GhosttyTerminal terminal,
+ typedef GhosttyString (*GhosttyTerminalXtversionFn)(GhosttyTerminal terminal,
+                                                      void* userdata);
+ 
++/** Result of resolving an accepted OSC 8 hyperlink URI. */
++typedef enum GHOSTTY_ENUM_TYPED {
++  GHOSTTY_HYPERLINK_RESOLUTION_PASSTHROUGH = 0,
++  GHOSTTY_HYPERLINK_RESOLUTION_REPLACE = 1,
++  GHOSTTY_HYPERLINK_RESOLUTION_SUPPRESS = 2,
++  GHOSTTY_HYPERLINK_RESOLUTION_MAX_VALUE = GHOSTTY_ENUM_MAX_VALUE,
++} GhosttyHyperlinkResolution;
++
++/**
++ * Resolves one semantically accepted OSC 8 hyperlink start. URI bytes are
++ * borrowed for the callback duration. For REPLACE, write replacement bytes and
++ * optional opaque userdata to library-owned output storage. The bytes and
++ * userdata are copied into the screen before semantic dispatch returns. The
++ * callback must not retain either pointer or re-enter this terminal.
++ */
++typedef GhosttyHyperlinkResolution (*GhosttyTerminalHyperlinkResolveFn)(
++    GhosttyTerminal terminal, void* userdata, GhosttyString uri,
++    GhosttyBuffer* out, GhosttyBuffer* out_userdata);
++
++/** Observes one semantically accepted OSC 133 command. */
++typedef void (*GhosttyTerminalSemanticPromptFn)(GhosttyTerminal terminal,
++    void* userdata, int action, GhosttyString options);
++
++/** Observes one semantically accepted ConEmu OSC 9;4 progress report. */
++typedef void (*GhosttyTerminalProgressReportFn)(GhosttyTerminal terminal,
++    void* userdata, int state, int16_t progress);
++
+ /**
+  * Terminal option identifiers.
+  *
+@@ -887,6 +914,15 @@ typedef enum GHOSTTY_ENUM_TYPED {
+    * Input type: GhosttyTerminalClipboardWriteFn
+    */
+   GHOSTTY_TERMINAL_OPT_CLIPBOARD_WRITE = 26,
++
++  /** Input type: GhosttyTerminalHyperlinkResolveFn */
++  GHOSTTY_TERMINAL_OPT_HYPERLINK_RESOLVE = 27,
++
++  /** Input type: GhosttyTerminalSemanticPromptFn */
++  GHOSTTY_TERMINAL_OPT_SEMANTIC_PROMPT = 28,
++
++  /** Input type: GhosttyTerminalProgressReportFn */
++  GHOSTTY_TERMINAL_OPT_PROGRESS_REPORT = 29,
+   GHOSTTY_TERMINAL_OPT_MAX_VALUE = GHOSTTY_ENUM_MAX_VALUE,
+ } GhosttyTerminalOption;
+ 
+diff --git a/src/lib_vt.zig b/src/lib_vt.zig
+index 0d1add82b..b9bc27d48 100644
+--- a/src/lib_vt.zig
++++ b/src/lib_vt.zig
+@@ -310,6 +310,7 @@ comptime {
+         @export(&c.grid_ref_row, .{ .name = "ghostty_grid_ref_row" });
+         @export(&c.grid_ref_graphemes, .{ .name = "ghostty_grid_ref_graphemes" });
+         @export(&c.grid_ref_hyperlink_uri, .{ .name = "ghostty_grid_ref_hyperlink_uri" });
++        @export(&c.grid_ref_hyperlink_userdata, .{ .name = "ghostty_grid_ref_hyperlink_userdata" });
+         @export(&c.grid_ref_style, .{ .name = "ghostty_grid_ref_style" });
+         @export(&c.tracked_grid_ref_free, .{ .name = "ghostty_tracked_grid_ref_free" });
+         @export(&c.tracked_grid_ref_has_value, .{ .name = "ghostty_tracked_grid_ref_has_value" });
+diff --git a/src/terminal/Screen.zig b/src/terminal/Screen.zig
+index 6c4db3237..1b334b0c8 100644
+--- a/src/terminal/Screen.zig
++++ b/src/terminal/Screen.zig
+@@ -1311,7 +1311,11 @@ pub fn cursorCopy(self: *Screen, other: Cursor, opts: struct {
+         };
+ 
+         // And it to our cursor.
+-        self.startHyperlink(uri, id_) catch |err| {
++        self.startHyperlinkWithUserdata(
++            uri,
++            id_,
++            other_link.userdata.slice(other_page.memory),
++        ) catch |err| {
+             // This shouldn't happen because startHyperlink should handle
+             // resizing. This only happens if we're truly out of RAM. Degrade
+             // to forgetting the hyperlink.
+@@ -1392,10 +1396,14 @@ inline fn cursorChangePin(self: *Screen, new: Pin) void {
+         self.cursor.hyperlink = null;
+ 
+         // Re-add
+-        self.startHyperlink(link.uri, switch (link.id) {
+-            .explicit => |v| v,
+-            .implicit => null,
+-        }) catch |err| {
++        self.startHyperlinkWithUserdata(
++            link.uri,
++            switch (link.id) {
++                .explicit => |v| v,
++                .implicit => null,
++            },
++            link.userdata,
++        ) catch |err| {
+             // This shouldn't happen because startHyperlink should handle
+             // resizing. This only happens if we're truly out of RAM. Degrade
+             // to forgetting the hyperlink.
+@@ -2025,10 +2033,14 @@ pub inline fn resize(
+ 
+     // Fix up our hyperlink if we had one.
+     if (hyperlink_) |link| {
+-        self.startHyperlink(link.uri, switch (link.id) {
+-            .explicit => |v| v,
+-            .implicit => null,
+-        }) catch |err| {
++        self.startHyperlinkWithUserdata(
++            link.uri,
++            switch (link.id) {
++                .explicit => |v| v,
++                .implicit => null,
++            },
++            link.userdata,
++        ) catch |err| {
+             // This shouldn't happen because startHyperlink should handle
+             // resizing. This only happens if we're truly out of RAM. Degrade
+             // to forgetting the hyperlink.
+@@ -2421,10 +2433,22 @@ pub fn startHyperlink(
+     self: *Screen,
+     uri: []const u8,
+     id_: ?[]const u8,
++) PageList.IncreaseCapacityError!void {
++    return self.startHyperlinkWithUserdata(uri, id_, "");
++}
++
++/// Start a hyperlink and retain caller-provided opaque metadata with its
++/// page entry. The metadata never participates in terminal text formatting.
++pub fn startHyperlinkWithUserdata(
++    self: *Screen,
++    uri: []const u8,
++    id_: ?[]const u8,
++    userdata: []const u8,
+ ) PageList.IncreaseCapacityError!void {
+     // Create our pending entry.
+     const link: hyperlink.Hyperlink = .{
+         .uri = uri,
++        .userdata = userdata,
+         .id = if (id_) |id| .{
+             .explicit = id,
+         } else implicit: {
+@@ -3975,7 +3999,7 @@ test "Screen cursorCopy hyperlink copy" {
+     defer s.deinit();
+ 
+     // Create a hyperlink for the cursor.
+-    try s.startHyperlink("https://example.com/", null);
++    try s.startHyperlinkWithUserdata("https://example.com/", null, "resolver-data");
+     try testing.expectEqual(@as(usize, 1), s.cursor.page_pin.node.page().hyperlink_set.count());
+     try testing.expect(s.cursor.hyperlink_id != 0);
+ 
+@@ -3990,6 +4014,7 @@ test "Screen cursorCopy hyperlink copy" {
+     try s2.cursorCopy(s.cursor, .{});
+     try testing.expectEqual(@as(usize, 1), page.hyperlink_set.count());
+     try testing.expect(s2.cursor.hyperlink_id != 0);
++    try testing.expectEqualStrings("resolver-data", s2.cursor.hyperlink.?.userdata);
+ }
+ 
+ test "Screen cursorCopy hyperlink copy disabled" {
+@@ -10178,7 +10203,7 @@ test "Screen: hyperlink cursor state on resize" {
+     defer s.deinit();
+ 
+     // Start a hyperlink
+-    try s.startHyperlink("http://example.com", null);
++    try s.startHyperlinkWithUserdata("http://example.com", null, "resolver-data");
+     try testing.expect(s.cursor.hyperlink_id != 0);
+     {
+         const page = s.cursor.page_pin.node.page();
+@@ -10188,6 +10213,7 @@ test "Screen: hyperlink cursor state on resize" {
+     // Resize. Any column growth will trigger a page to be reallocated.
+     try s.resize(.{ .cols = 10, .rows = 10 });
+     try testing.expect(s.cursor.hyperlink_id != 0);
++    try testing.expectEqualStrings("resolver-data", s.cursor.hyperlink.?.userdata);
+     {
+         const page = s.cursor.page_pin.node.page();
+         try testing.expectEqual(1, page.hyperlink_set.count());
+@@ -10201,6 +10227,24 @@ test "Screen: hyperlink cursor state on resize" {
+     }
+ }
+ 
++test "Screen: active hyperlink userdata survives a page-pin change" {
++    const testing = std.testing;
++    const alloc = testing.allocator;
++
++    var s = try init(alloc, .{ .cols = 10, .rows = 3, .max_scrollback = 1 });
++    defer s.deinit();
++
++    const start_page = s.cursor.page_pin.node.page();
++    const remaining_rows = start_page.capacity.rows;
++    start_page.pauseIntegrityChecks(true);
++    defer start_page.pauseIntegrityChecks(false);
++    try s.startHyperlinkWithUserdata("file:relative", null, "resolver-data");
++    for (0..remaining_rows) |_| try s.cursorDownOrScroll();
++
++    try testing.expect(start_page != s.cursor.page_pin.node.page());
++    try testing.expectEqualStrings("resolver-data", s.cursor.hyperlink.?.userdata);
++}
++
+ test "Screen: cursorSetHyperlink OOM + URI too large for string alloc" {
+     const testing = std.testing;
+     const alloc = testing.allocator;
+diff --git a/src/terminal/c/grid_ref.zig b/src/terminal/c/grid_ref.zig
+index 946ca8a1e..9ae1a37c2 100644
+--- a/src/terminal/c/grid_ref.zig
++++ b/src/terminal/c/grid_ref.zig
+@@ -127,6 +127,38 @@ pub fn grid_ref_hyperlink_uri(
+     return .success;
+ }
+ 
++pub fn grid_ref_hyperlink_userdata(
++    ref: *const CGridRef,
++    out_buf: ?[*]u8,
++    buf_len: usize,
++    out_len: *usize,
++) callconv(lib.calling_conv) Result {
++    const p = ref.toPin() orelse return .invalid_value;
++    const terminal_page = p.node.page();
++    const cell = terminal_page.getRowAndCell(p.x, p.y).cell;
++
++    if (!cell.hyperlink) {
++        out_len.* = 0;
++        return .success;
++    }
++
++    const link_id = terminal_page.lookupHyperlink(cell) orelse {
++        out_len.* = 0;
++        return .success;
++    };
++    const userdata = terminal_page.hyperlink_set.get(
++        terminal_page.memory,
++        link_id,
++    ).userdata.slice(terminal_page.memory);
++    if (out_buf == null or buf_len < userdata.len) {
++        out_len.* = userdata.len;
++        return .out_of_space;
++    }
++    @memcpy(out_buf.?[0..userdata.len], userdata);
++    out_len.* = userdata.len;
++    return .success;
++}
++
+ pub fn grid_ref_style(
+     ref: *const CGridRef,
+     out: ?*style_c.Style,
+@@ -253,3 +285,51 @@ test "grid_ref_hyperlink_uri with hyperlink" {
+     try testing.expectEqual(Result.success, grid_ref_hyperlink_uri(&ref, &buf, buf.len, &len));
+     try testing.expectEqualStrings("https://example.com", buf[0..len]);
+ }
++
++test "grid_ref hyperlink userdata remains distinct for the same URI" {
++    var terminal: terminal_c.Terminal = null;
++    try testing.expectEqual(Result.success, terminal_c.new(
++        &lib.alloc.test_allocator,
++        &terminal,
++        .{ .cols = 80, .rows = 24, .max_scrollback = 10_000 },
++    ));
++    defer terminal_c.free(terminal);
++
++    try terminal.?.terminal.screens.active.startHyperlinkWithUserdata(
++        "file:///tmp/example",
++        "same-id",
++        .{ 1, 2, 3 },
++    );
++    terminal_c.vt_write(terminal, "a", 1);
++    terminal.?.terminal.screens.active.endHyperlink();
++    try terminal.?.terminal.screens.active.startHyperlinkWithUserdata(
++        "file:///tmp/example",
++        "same-id",
++        .{ 4, 5, 6 },
++    );
++    terminal_c.vt_write(terminal, "b", 1);
++    terminal.?.terminal.screens.active.endHyperlink();
++
++    for ([_]struct { x: u16, expected: [3]u8 }{
++        .{ .x = 0, .expected = .{ 1, 2, 3 } },
++        .{ .x = 1, .expected = .{ 4, 5, 6 } },
++    }) |case| {
++        var ref: CGridRef = undefined;
++        try testing.expectEqual(Result.success, terminal_c.grid_ref(
++            terminal,
++            point.Point.cval(.{ .active = .{ .x = case.x, .y = 0 } }),
++            &ref,
++        ));
++        var userdata: [3]u8 = undefined;
++        var userdata_len: usize = 0;
++        try testing.expectEqual(
++            Result.success,
++            grid_ref_hyperlink_userdata(&ref, &userdata, userdata.len, &userdata_len),
++        );
++        try testing.expectEqualSlices(u8, &case.expected, userdata[0..userdata_len]);
++    }
++
++    const plain = try terminal.?.terminal.plainString(testing.allocator);
++    defer testing.allocator.free(plain);
++    try testing.expectEqualStrings("ab", plain);
++}
+diff --git a/src/terminal/c/main.zig b/src/terminal/c/main.zig
+index ab87c1277..da4285146 100644
+--- a/src/terminal/c/main.zig
++++ b/src/terminal/c/main.zig
+@@ -224,6 +224,7 @@ pub const grid_ref_cell = grid_ref.grid_ref_cell;
+ pub const grid_ref_row = grid_ref.grid_ref_row;
+ pub const grid_ref_graphemes = grid_ref.grid_ref_graphemes;
+ pub const grid_ref_hyperlink_uri = grid_ref.grid_ref_hyperlink_uri;
++pub const grid_ref_hyperlink_userdata = grid_ref.grid_ref_hyperlink_userdata;
+ pub const grid_ref_style = grid_ref.grid_ref_style;
+ pub const tracked_grid_ref_free = grid_ref_tracked.tracked_grid_ref_free;
+ pub const tracked_grid_ref_has_value = grid_ref_tracked.tracked_grid_ref_has_value;
+diff --git a/src/terminal/c/terminal.zig b/src/terminal/c/terminal.zig
+index 1c3b9f0c5..3d0caa666 100644
+--- a/src/terminal/c/terminal.zig
++++ b/src/terminal/c/terminal.zig
+@@ -74,6 +74,9 @@ const Effects = struct {
+     pwd_changed: ?PwdChangedFn = null,
+     size_cb: ?SizeFn = null,
+     clipboard_write: ?ClipboardWriteFn = null,
++    hyperlink_resolve: ?HyperlinkResolveFn = null,
++    semantic_prompt: ?SemanticPromptFn = null,
++    progress_report: ?ProgressReportFn = null,
+ 
+     /// Scratch buffer for DA1 feature codes. The device attributes
+     /// trampoline converts C feature codes into this buffer and returns
+@@ -108,6 +111,11 @@ const Effects = struct {
+     /// and its contents are borrowed and only valid for the callback duration.
+     pub const ClipboardWriteFn = *const fn (Terminal, ?*anyopaque, *const ClipboardWrite) callconv(lib.calling_conv) clipboard.WriteResult;
+ 
++    pub const HyperlinkResolution = enum(c_int) { passthrough, replace, suppress, _ };
++    pub const HyperlinkResolveFn = *const fn (Terminal, ?*anyopaque, lib.String, *lib.Buffer, *lib.Buffer) callconv(lib.calling_conv) HyperlinkResolution;
++    pub const SemanticPromptFn = *const fn (Terminal, ?*anyopaque, c_int, lib.String) callconv(lib.calling_conv) void;
++    pub const ProgressReportFn = *const fn (Terminal, ?*anyopaque, c_int, i16) callconv(lib.calling_conv) void;
++
+     /// C function pointer type for the title_changed callback.
+     pub const TitleChangedFn = *const fn (Terminal, ?*anyopaque) callconv(lib.calling_conv) void;
+ 
+@@ -200,6 +208,38 @@ const Effects = struct {
+         return func(@ptrCast(wrapper), wrapper.effects.userdata, &request);
+     }
+ 
++    fn hyperlinkResolveTrampoline(handler: *Handler, uri: []const u8, replacement: []u8, userdata: []u8) Handler.HyperlinkResolution {
++        const stream_ptr: *Stream = @fieldParentPtr("handler", handler);
++        const wrapper: *TerminalWrapper = @fieldParentPtr("stream", stream_ptr);
++        const func = wrapper.effects.hyperlink_resolve orelse return .passthrough;
++        var out: lib.Buffer = .{ .ptr = replacement.ptr, .cap = replacement.len };
++        var out_userdata: lib.Buffer = .{ .ptr = userdata.ptr, .cap = userdata.len };
++        const resolution = func(@ptrCast(wrapper), wrapper.effects.userdata, .init(uri), &out, &out_userdata);
++        return switch (resolution) {
++            .passthrough => .passthrough,
++            .replace => if (out.len > 0 and out.len <= out.cap and out_userdata.len <= out_userdata.cap) .{ .replace = .{
++                .len = out.len,
++                .userdata_len = out_userdata.len,
++            } } else .suppress,
++            .suppress => .suppress,
++            _ => .suppress,
++        };
++    }
++
++    fn semanticPromptTrampoline(handler: *Handler, command: @import("../osc.zig").Command.SemanticPrompt) void {
++        const stream_ptr: *Stream = @fieldParentPtr("handler", handler);
++        const wrapper: *TerminalWrapper = @fieldParentPtr("stream", stream_ptr);
++        const func = wrapper.effects.semantic_prompt orelse return;
++        func(@ptrCast(wrapper), wrapper.effects.userdata, @intFromEnum(command.action), .init(command.options_unvalidated));
++    }
++
++    fn progressReportTrampoline(handler: *Handler, report: @import("../osc.zig").Command.ProgressReport) void {
++        const stream_ptr: *Stream = @fieldParentPtr("handler", handler);
++        const wrapper: *TerminalWrapper = @fieldParentPtr("stream", stream_ptr);
++        const func = wrapper.effects.progress_report orelse return;
++        func(@ptrCast(wrapper), wrapper.effects.userdata, @intFromEnum(report.state), if (report.progress) |value| @intCast(value) else -1);
++    }
++
+     fn colorSchemeTrampoline(handler: *Handler) ?device_status.ColorScheme {
+         const stream_ptr: *Stream = @fieldParentPtr("handler", handler);
+         const wrapper: *TerminalWrapper = @fieldParentPtr("stream", stream_ptr);
+@@ -365,6 +405,9 @@ fn new_(
+         .pwd_changed = &Effects.pwdChangedTrampoline,
+         .size = &Effects.sizeTrampoline,
+         .clipboard_write = &Effects.clipboardWriteTrampoline,
++        .hyperlink_resolve = &Effects.hyperlinkResolveTrampoline,
++        .semantic_prompt = &Effects.semanticPromptTrampoline,
++        .progress_report = &Effects.progressReportTrampoline,
+     };
+ 
+     wrapper.* = .{
+@@ -437,6 +480,9 @@ pub const Option = enum(c_int) {
+     glyph_protocol = 24,
+     pwd_changed = 25,
+     clipboard_write = 26,
++    hyperlink_resolve = 27,
++    semantic_prompt = 28,
++    progress_report = 29,
+ 
+     /// Input type expected for setting the option.
+     pub fn InType(comptime self: Option) type {
+@@ -452,6 +498,9 @@ pub const Option = enum(c_int) {
+             .pwd_changed => ?Effects.PwdChangedFn,
+             .size_cb => ?Effects.SizeFn,
+             .clipboard_write => ?Effects.ClipboardWriteFn,
++            .hyperlink_resolve => ?Effects.HyperlinkResolveFn,
++            .semantic_prompt => ?Effects.SemanticPromptFn,
++            .progress_report => ?Effects.ProgressReportFn,
+             .title, .pwd => ?*const lib.String,
+             .color_foreground, .color_background, .color_cursor => ?*const color.RGB.C,
+             .color_palette => ?*const color.PaletteC,
+@@ -509,6 +558,9 @@ fn setTyped(
+         .pwd_changed => wrapper.effects.pwd_changed = value,
+         .size_cb => wrapper.effects.size_cb = value,
+         .clipboard_write => wrapper.effects.clipboard_write = value,
++        .hyperlink_resolve => wrapper.effects.hyperlink_resolve = value,
++        .semantic_prompt => wrapper.effects.semantic_prompt = value,
++        .progress_report => wrapper.effects.progress_report = value,
+         .title => {
+             const str = if (value) |v| v.ptr[0..v.len] else "";
+             wrapper.terminal.setTitle(str) catch return .out_of_memory;
+diff --git a/src/terminal/hyperlink.zig b/src/terminal/hyperlink.zig
+index 35a16a2ae..06c9c85b2 100644
+--- a/src/terminal/hyperlink.zig
++++ b/src/terminal/hyperlink.zig
+@@ -29,6 +29,7 @@ pub const Map = AutoOffsetHashMap(Offset(Cell), Id, 80);
+ pub const Hyperlink = struct {
+     id: Hyperlink.Id,
+     uri: []const u8,
++    userdata: []const u8 = "",
+ 
+     /// See PageEntry.Id
+     pub const Id = union(enum) {
+@@ -44,6 +45,7 @@ pub const Hyperlink = struct {
+     /// called.
+     pub fn deinit(self: *const Hyperlink, alloc: Allocator) void {
+         alloc.free(self.uri);
++        alloc.free(self.userdata);
+         switch (self.id) {
+             .implicit => {},
+             .explicit => |v| alloc.free(v),
+@@ -60,6 +62,9 @@ pub const Hyperlink = struct {
+         const uri = try alloc.dupe(u8, self.uri);
+         errdefer alloc.free(uri);
+ 
++        const userdata = try alloc.dupe(u8, self.userdata);
++        errdefer alloc.free(userdata);
++
+         const id: Hyperlink.Id = switch (self.id) {
+             .implicit => self.id,
+             .explicit => |v| .{ .explicit = try alloc.dupe(u8, v) },
+@@ -69,7 +74,7 @@ pub const Hyperlink = struct {
+             .explicit => |v| alloc.free(v),
+         };
+ 
+-        return .{ .id = id, .uri = uri };
++        return .{ .id = id, .uri = uri, .userdata = userdata };
+     }
+ };
+ 
+@@ -80,6 +85,7 @@ pub const Hyperlink = struct {
+ pub const PageEntry = struct {
+     id: PageEntry.Id,
+     uri: Offset(u8).Slice,
++    userdata: Offset(u8).Slice = .{},
+ 
+     pub const Id = union(enum) {
+         /// An explicitly provided ID via the OSC8 sequence.
+@@ -116,6 +122,20 @@ pub const PageEntry = struct {
+             copy.uri.slice(dst_page.memory),
+         );
+ 
++        if (self.userdata.len > 0) {
++            const userdata = self.userdata.slice(self_page.memory);
++            const buf = try dst_page.string_alloc.alloc(u8, dst_page.memory, userdata.len);
++            @memcpy(buf, userdata);
++            copy.userdata = .{
++                .offset = size.getOffset(u8, dst_page.memory, &buf[0]),
++                .len = userdata.len,
++            };
++        }
++        errdefer if (copy.userdata.len > 0) dst_page.string_alloc.free(
++            dst_page.memory,
++            copy.userdata.slice(dst_page.memory),
++        );
++
+         // Copy the ID
+         switch (copy.id) {
+             .implicit => {}, // Shallow is fine
+@@ -156,6 +176,7 @@ pub const PageEntry = struct {
+             self.uri.slice(base),
+             .Deep,
+         );
++        autoHashStrat(&hasher, self.userdata.slice(base), .Deep);
+         return hasher.final();
+     }
+ 
+@@ -178,6 +199,11 @@ pub const PageEntry = struct {
+                 )) return false;
+             },
+         }
++        if (!std.mem.eql(
++            u8,
++            self.userdata.slice(self_base),
++            other.userdata.slice(other_base),
++        )) return false;
+ 
+         return std.mem.eql(
+             u8,
+@@ -203,6 +229,10 @@ pub const PageEntry = struct {
+             page.memory,
+             self.uri.slice(page.memory),
+         );
++        if (self.userdata.len > 0) alloc.free(
++            page.memory,
++            self.userdata.slice(page.memory),
++        );
+     }
+ };
+ 
+diff --git a/src/terminal/page.zig b/src/terminal/page.zig
+index ca6d9854c..2b3fd08fb 100644
+--- a/src/terminal/page.zig
++++ b/src/terminal/page.zig
+@@ -761,6 +761,9 @@ pub const Page = struct {
+                             // Get the hyperlink entry to compute string bytes
+                             const entry = self.hyperlink_set.get(self.memory, id);
+                             string_bytes += StringAlloc.bytesRequired(u8, entry.uri.len);
++                            if (entry.userdata.len > 0) {
++                                string_bytes += StringAlloc.bytesRequired(u8, entry.userdata.len);
++                            }
+ 
+                             switch (entry.id) {
+                                 .implicit => {},
+@@ -1369,6 +1372,27 @@ pub const Page = struct {
+             page_uri.slice(self.memory),
+         );
+ 
++        const page_userdata: Offset(u8).Slice = userdata: {
++            if (link.userdata.len == 0) break :userdata .{};
++            const buf = self.string_alloc.alloc(
++                u8,
++                self.memory,
++                link.userdata.len,
++            ) catch |err| switch (err) {
++                error.OutOfMemory => return error.StringsOutOfMemory,
++            };
++            errdefer self.string_alloc.free(self.memory, buf);
++            @memcpy(buf, link.userdata);
++            break :userdata .{
++                .offset = size.getOffset(u8, self.memory, &buf[0]),
++                .len = link.userdata.len,
++            };
++        };
++        errdefer if (page_userdata.len > 0) self.string_alloc.free(
++            self.memory,
++            page_userdata.slice(self.memory),
++        );
++
+         // Allocate an ID for our page memory if we have to.
+         const page_id: hyperlink.PageEntry.Id = switch (link.id) {
+             .explicit => |id| explicit: {
+@@ -1404,6 +1428,7 @@ pub const Page = struct {
+         const entry: hyperlink.PageEntry = .{
+             .id = page_id,
+             .uri = page_uri,
++            .userdata = page_userdata,
+         };
+ 
+         // Put our hyperlink into the hyperlink set to get an ID
+diff --git a/src/terminal/stream_terminal.zig b/src/terminal/stream_terminal.zig
+index 91cfb21cf..ec7c6d022 100644
+--- a/src/terminal/stream_terminal.zig
++++ b/src/terminal/stream_terminal.zig
+@@ -104,6 +104,9 @@ pub const Handler = struct {
+         /// terminal silently read the user's clipboard, and a VT state
+         /// library has no way to mediate that with user consent.
+         clipboard_write: ?*const fn (*Handler, clipboard.Write) clipboard.WriteResult,
++        hyperlink_resolve: ?*const fn (*Handler, []const u8, []u8, []u8) @This().HyperlinkResolution,
++        semantic_prompt: ?*const fn (*Handler, osc.Command.SemanticPrompt) void,
++        progress_report: ?*const fn (*Handler, osc.Command.ProgressReport) void,
+ 
+         /// Called in response to an XTVERSION query. Returns the version
+         /// string to report (e.g. "ghostty 1.2.3"). The returned memory
+@@ -123,10 +126,22 @@ pub const Handler = struct {
+             .size = null,
+             .title_changed = null,
+             .pwd_changed = null,
++            .hyperlink_resolve = null,
++            .semantic_prompt = null,
++            .progress_report = null,
+             .write_pty = null,
+             .xtversion = null,
+         };
++        pub const HyperlinkResolution = union(enum) {
++            passthrough,
++            suppress,
++            replace: struct {
++                len: usize,
++                userdata_len: usize = 0,
++            },
++        };
+     };
++    pub const HyperlinkResolution = Effects.HyperlinkResolution;
+ 
+     pub fn init(terminal: *Terminal) Handler {
+         return .{
+@@ -271,9 +286,33 @@ pub const Handler = struct {
+                 self.terminal.modes.set(.cursor_blinking, self.default_cursor_blink);
+                 self.terminal.screens.active.cursor.cursor_style = self.default_cursor_style;
+             },
+-            .start_hyperlink => try self.terminal.screens.active.startHyperlink(value.uri, value.id),
++            .start_hyperlink => {
++                var replacement: [4096]u8 = undefined;
++                var userdata: [4096]u8 = undefined;
++                const resolution: HyperlinkResolution = if (self.effects.hyperlink_resolve) |resolve|
++                    resolve(self, value.uri, &replacement, &userdata)
++                else
++                    .passthrough;
++                switch (resolution) {
++                    .passthrough => try self.terminal.screens.active.startHyperlink(value.uri, value.id),
++                    .replace => |result| if (result.len > 0 and
++                        result.len <= replacement.len and
++                        result.userdata_len <= userdata.len)
++                        try self.terminal.screens.active.startHyperlinkWithUserdata(
++                            replacement[0..result.len],
++                            value.id,
++                            userdata[0..result.userdata_len],
++                        )
++                    else
++                        self.terminal.screens.active.endHyperlink(),
++                    .suppress => self.terminal.screens.active.endHyperlink(),
++                }
++            },
+             .end_hyperlink => self.terminal.screens.active.endHyperlink(),
+-            .semantic_prompt => try self.terminal.semanticPrompt(value),
++            .semantic_prompt => {
++                try self.terminal.semanticPrompt(value);
++                if (self.effects.semantic_prompt) |observe| observe(self, value);
++            },
+             .mouse_shape => self.terminal.mouse_shape = value,
+             .color_operation => try self.colorOperation(&value.requests, value.terminator),
+             .kitty_color_report => try self.kittyColorOperation(value),
+@@ -307,10 +346,10 @@ pub const Handler = struct {
+ 
+             // Have no terminal-modifying effect
+             .show_desktop_notification,
+-            .progress_report,
+             .title_push,
+             .title_pop,
+             => {},
++            .progress_report => if (self.effects.progress_report) |observe| observe(self, value),
+         }
+     }
+ 

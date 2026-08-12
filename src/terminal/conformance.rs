@@ -23,7 +23,9 @@ use super::identity::{
 };
 use super::key::{InputModifiers, KeyAction, KeyInput, OptionAsAltPolicy, PhysicalKey};
 use super::metadata::{DirectoryProvenance, parse_osc7_directory, sanitize_title};
-use super::native_services::{NativeContextActions, NativeInsertion, NativeInsertionError};
+use super::native_services::{
+    NativeContextActions, NativeInsertion, NativeInsertionError, QuickLookTarget,
+};
 use super::osc52::{
     Osc52AccessPolicy, Osc52AuthorizationPolicy, Osc52Effect, Osc52Filter, Osc52Operation,
     Osc52Rejection, Osc52Target,
@@ -1315,7 +1317,7 @@ fn check_hyperlinks() -> Result<(), String> {
     require_eq(
         "activation-url",
         target.activation_url(),
-        "https://example.test/path".to_owned(),
+        Some("https://example.test/path".to_owned()),
     )?;
     let cells = ["go ".to_owned(), "https://example.test/path".to_owned()];
     let detected = detect_url_cells(&cells);
@@ -1328,7 +1330,67 @@ fn check_hyperlinks() -> Result<(), String> {
         HyperlinkTarget::url("file:///tmp/secret").is_none(),
         "link-scheme",
         "file URL passed URL authorization",
-    )
+    )?;
+
+    let directory = std::env::temp_dir().join(format!(
+        "spaceterm-conformance-hyperlink-{}",
+        std::process::id()
+    ));
+    _ = std::fs::remove_dir_all(&directory);
+    std::fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
+    let file = directory.join("preview file.txt");
+    std::fs::write(&file, b"preview").map_err(|error| error.to_string())?;
+    let result = (|| {
+        let local = HyperlinkTarget::osc8("file:preview%20file.txt", &directory, None)
+            .ok_or_else(|| "valid local OSC 8 target was rejected".to_owned())?;
+        require_eq("local-link-kind", local.kind, HyperlinkKind::LocalPath)?;
+        require_eq(
+            "local-link-path",
+            local.value.as_str(),
+            file.canonicalize()
+                .map_err(|error| error.to_string())?
+                .to_str()
+                .ok_or_else(|| "canonical fixture path was not UTF-8".to_owned())?,
+        )?;
+        let retained = HyperlinkTarget::from_local_emission_metadata(
+            &local
+                .local_emission_metadata()
+                .ok_or_else(|| "valid local target metadata exceeded its bound".to_owned())?,
+        )
+        .ok_or_else(|| "resolver-only local target metadata did not decode".to_owned())?;
+        require_eq("local-link-emission-identity", retained, local.clone())?;
+        require(
+            HyperlinkTarget::osc8(
+                &format!("file://remote.test{}", file.to_string_lossy()),
+                &directory,
+                Some("mac.local"),
+            )
+            .is_none()
+                && HyperlinkTarget::osc8("file:missing.txt", &directory, None).is_none(),
+            "local-link-rejections",
+            "remote or missing local OSC 8 target was accepted",
+        )?;
+
+        let next_directory = directory.join("next");
+        std::fs::create_dir_all(&next_directory).map_err(|error| error.to_string())?;
+        let next_file = next_directory.join("preview file.txt");
+        std::fs::write(&next_file, b"next").map_err(|error| error.to_string())?;
+        let next = HyperlinkTarget::osc8("file:preview%20file.txt", &next_directory, None)
+            .ok_or_else(|| "second valid local OSC 8 target was rejected".to_owned())?;
+        let local_url = local
+            .activation_url()
+            .ok_or_else(|| "fresh local OSC 8 target became inert".to_owned())?;
+        let next_url = next
+            .activation_url()
+            .ok_or_else(|| "fresh second local OSC 8 target became inert".to_owned())?;
+        require_eq(
+            "local-link-canonical-emission-directory",
+            (local.canonical_file_url(), next.canonical_file_url()),
+            (Some(local_url), Some(next_url)),
+        )
+    })();
+    _ = std::fs::remove_dir_all(directory);
+    result
 }
 
 fn check_paste_safety() -> Result<(), String> {
@@ -1522,7 +1584,38 @@ fn check_native_services() -> Result<(), String> {
         "native-focus-gate",
         NativeInsertion::service_text("ignored", false),
         Err(NativeInsertionError::TerminalUnfocused),
-    )
+    )?;
+
+    let directory = std::env::temp_dir().join(format!(
+        "spaceterm-conformance-quick-look-{}",
+        std::process::id()
+    ));
+    _ = std::fs::remove_dir_all(&directory);
+    std::fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
+    let file = directory.join("preview.txt");
+    std::fs::write(&file, b"preview").map_err(|error| error.to_string())?;
+    let result = (|| {
+        let local = HyperlinkTarget::osc8(
+            &format!("file://{}", file.to_string_lossy()),
+            &directory,
+            None,
+        )
+        .ok_or_else(|| "valid Quick Look link was rejected".to_owned())?;
+        require_eq(
+            "quick-look-local-regular-file",
+            NativeContextActions::from_presence(false, Some(&local)).quick_look,
+            true,
+        )?;
+        std::fs::remove_file(&file).map_err(|error| error.to_string())?;
+        require(
+            QuickLookTarget::from_link(&local).is_none()
+                && NativeContextActions::from_presence(false, Some(&local)).quick_look,
+            "quick-look-stale-path",
+            "missing local file remained executable or immutable eligibility was lost",
+        )
+    })();
+    _ = std::fs::remove_dir_all(directory);
+    result
 }
 
 fn check_accessibility() -> Result<(), String> {

@@ -125,6 +125,23 @@ impl GridRef<'_> {
         };
         from_result_with_len(result, len)
     }
+
+    /// Get opaque embedding metadata retained with the cell's hyperlink.
+    ///
+    /// This data is never part of terminal text or formatter output. It is
+    /// empty for hyperlinks that were not replaced by a resolver callback.
+    pub fn hyperlink_userdata(&self, buf: &mut [u8]) -> Result<usize> {
+        let mut len = 0;
+        let result = unsafe {
+            ffi::ghostty_grid_ref_hyperlink_userdata(
+                std::ptr::from_ref(&self.inner),
+                std::ptr::from_mut(buf).cast(),
+                buf.len(),
+                &raw mut len,
+            )
+        };
+        from_result_with_len(result, len)
+    }
 }
 
 /// Owned grid references that move with the terminal.

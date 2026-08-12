@@ -1361,6 +1361,41 @@ pub enum ClipboardWriteError {
     IoError = ffi::ClipboardWriteResult::IO_ERROR,
 }
 
+/// Decision for a semantically accepted OSC 8 hyperlink start.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum HyperlinkResolution {
+    /// Preserve the original URI byte-for-byte.
+    Passthrough,
+    /// Replace the URI and retain opaque metadata beside the hyperlink entry.
+    /// Neither byte vector is borrowed after the callback returns.
+    Replace { uri: Vec<u8>, userdata: Vec<u8> },
+    /// End any active hyperlink and do not start a replacement.
+    Suppress,
+}
+
+/// Accepted OSC 133 semantic prompt action.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SemanticPromptAction {
+    FreshLine,
+    FreshLineNewPrompt,
+    NewCommand,
+    PromptStart,
+    EndPromptStartInput,
+    EndPromptStartInputTerminateEol,
+    EndInputStartOutput,
+    EndCommand,
+}
+
+/// Accepted ConEmu progress state.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProgressState {
+    Remove,
+    Set,
+    Error,
+    Indeterminate,
+    Pause,
+}
+
 //---------------------------------------
 // Callbacks
 //---------------------------------------
@@ -1531,6 +1566,98 @@ macro_rules! handlers {
 }
 
 handlers! {
+    /// Resolve one semantically accepted OSC 8 hyperlink start. The URI is
+    /// borrowed only for this callback. Replacement bytes are copied before
+    /// the callback returns. Panics fail closed and suppress the hyperlink.
+    pub fn on_hyperlink_resolve(
+        &mut self,
+        tag = HYPERLINK_RESOLVE,
+        from = GhosttyTerminalHyperlinkResolveFn(uri: ffi::String, out: *mut ffi::Buffer, out_userdata: *mut ffi::Buffer) -> ffi::HyperlinkResolution::Type,
+        to = <'t>HyperlinkResolveFn(&'t [u8]) -> HyperlinkResolution,
+    ) |term, func| {
+        let uri = if uri.ptr.is_null() { &[] } else {
+            // SAFETY: libghostty borrows URI bytes for this callback only.
+            unsafe { std::slice::from_raw_parts(uri.ptr, uri.len) }
+        };
+        let resolution = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| func(&term, uri)))
+            .unwrap_or(HyperlinkResolution::Suppress);
+        match resolution {
+            HyperlinkResolution::Passthrough => ffi::HyperlinkResolution::PASSTHROUGH,
+            HyperlinkResolution::Suppress => ffi::HyperlinkResolution::SUPPRESS,
+            HyperlinkResolution::Replace { uri, userdata } => {
+                let out = unsafe { out.as_mut() };
+                let out_userdata = unsafe { out_userdata.as_mut() };
+                match (out, out_userdata) {
+                    (Some(out), Some(out_userdata))
+                        if !out.ptr.is_null()
+                            && !uri.is_empty()
+                            && uri.len() <= out.cap
+                            && (userdata.is_empty() || !out_userdata.ptr.is_null())
+                            && userdata.len() <= out_userdata.cap =>
+                    {
+                        // SAFETY: libghostty owns both buffers for this callback and supplied
+                        // their writable capacities. The screen copies them before return.
+                        unsafe {
+                            std::ptr::copy_nonoverlapping(uri.as_ptr(), out.ptr, uri.len());
+                            if !userdata.is_empty() {
+                                std::ptr::copy_nonoverlapping(
+                                    userdata.as_ptr(),
+                                    out_userdata.ptr,
+                                    userdata.len(),
+                                );
+                            }
+                        }
+                        out.len = uri.len();
+                        out_userdata.len = userdata.len();
+                        ffi::HyperlinkResolution::REPLACE
+                    }
+                    _ => ffi::HyperlinkResolution::SUPPRESS,
+                }
+            },
+        }
+    }
+
+    /// Observe one semantically accepted OSC 133 command.
+    pub fn on_semantic_prompt(
+        &mut self,
+        tag = SEMANTIC_PROMPT,
+        from = GhosttyTerminalSemanticPromptFn(action: std::os::raw::c_int, options: ffi::String),
+        to = <'t>SemanticPromptFn(SemanticPromptAction, &'t [u8]),
+    ) |term, func| {
+        let action = ([
+            SemanticPromptAction::FreshLine,
+            SemanticPromptAction::FreshLineNewPrompt,
+            SemanticPromptAction::NewCommand,
+            SemanticPromptAction::PromptStart,
+            SemanticPromptAction::EndPromptStartInput,
+            SemanticPromptAction::EndPromptStartInputTerminateEol,
+            SemanticPromptAction::EndInputStartOutput,
+            SemanticPromptAction::EndCommand,
+        ]).get(action as usize).copied();
+        let options = if options.ptr.is_null() { &[] } else {
+            // SAFETY: options are borrowed for this callback only.
+            unsafe { std::slice::from_raw_parts(options.ptr, options.len) }
+        };
+        if let Some(action) = action {
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| func(&term, action, options)));
+        }
+    }
+
+    /// Observe one semantically accepted ConEmu progress report.
+    pub fn on_progress_report(
+        &mut self,
+        tag = PROGRESS_REPORT,
+        from = GhosttyTerminalProgressReportFn(state: std::os::raw::c_int, progress: i16),
+        to = ProgressReportFn(ProgressState, Option<u8>),
+    ) |term, func| {
+        let state = ([ProgressState::Remove, ProgressState::Set, ProgressState::Error,
+            ProgressState::Indeterminate, ProgressState::Pause]).get(state as usize).copied();
+        let progress = u8::try_from(progress).ok().filter(|value| *value <= 100);
+        if let Some(state) = state {
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| func(&term, state, progress)));
+        }
+    }
+
     /// Call the given function when the terminal needs to write data back
     /// to the pty (e.g. in response to a DECRQM query or device status report).
     pub fn on_pty_write(
@@ -1834,6 +1961,101 @@ mod tests {
         terminal.vt_write(b"\x1b]7;file://localhost/tmp/other\x1b\\");
         assert_eq!(callback_count.get(), 2);
         assert_eq!(*captured_pwd.borrow(), "file://localhost/tmp/other");
+    }
+
+    #[test]
+    fn hyperlink_resolver_observes_only_semantically_accepted_osc8_starts() {
+        let observed: RefCell<Vec<Vec<u8>>> = RefCell::new(Vec::new());
+        let mut terminal = Terminal::new(Options {
+            cols: 80,
+            rows: 24,
+            max_scrollback: 0,
+        })
+        .expect("terminal should initialize");
+        terminal
+            .on_hyperlink_resolve(|_, uri| {
+                observed.borrow_mut().push(uri.to_vec());
+                HyperlinkResolution::Suppress
+            })
+            .expect("resolver should register");
+
+        terminal.vt_write(b"\x1b]8;;file:split");
+        terminal.vt_write(b"-link\x07");
+        terminal.vt_write(b"\x1b]\x008;;fi\x00le:c0\x18");
+        terminal.vt_write(b"\x1b]8;;file:escape\x1bX");
+        terminal.vt_write(b"\x1b]8;;file:sub\x1a");
+        terminal.vt_write("before\u{075d}after".as_bytes());
+        terminal.vt_write(b"\x9d8;;file:ground-c1\x07");
+        terminal.vt_write(b"\x1b[\x9d8;;file:non-ground-c1\x07");
+        terminal.vt_write(b"\x1b]8;;file:c1-st\x9cpayload\x07");
+
+        assert_eq!(
+            *observed.borrow(),
+            vec![
+                b"file:split-link".to_vec(),
+                b"file:c0".to_vec(),
+                b"file:escape".to_vec(),
+                b"file:sub".to_vec(),
+                b"file:non-ground-c1".to_vec(),
+                b"file:c1-st\x9cpayload".to_vec(),
+            ]
+        );
+    }
+
+    #[test]
+    fn hyperlink_resolver_userdata_is_retained_but_never_formatted() {
+        use crate::fmt::{Format, Formatter, FormatterOptions};
+
+        let private_metadata = b"/private/canonical/path\0device\0inode";
+        let mut terminal = Terminal::new(Options {
+            cols: 80,
+            rows: 24,
+            max_scrollback: 0,
+        })
+        .expect("terminal should initialize");
+        terminal
+            .on_hyperlink_resolve(|_, uri| HyperlinkResolution::Replace {
+                uri: uri.to_vec(),
+                userdata: private_metadata.to_vec(),
+            })
+            .expect("resolver should register");
+        terminal.vt_write(b"\x1b]8;;file:relative\x07link\x1b]8;;\x07");
+
+        let reference = terminal
+            .grid_ref(Point::Active(PointCoordinate { x: 0, y: 0 }))
+            .expect("linked cell should resolve");
+        let mut uri = [0; 64];
+        let uri_len = reference
+            .hyperlink_uri(&mut uri)
+            .expect("hyperlink URI should read");
+        let mut userdata = [0; 64];
+        let userdata_len = reference
+            .hyperlink_userdata(&mut userdata)
+            .expect("hyperlink userdata should read");
+        assert_eq!(&uri[..uri_len], b"file:relative");
+        assert_eq!(&userdata[..userdata_len], private_metadata);
+
+        for format in [Format::Plain, Format::Vt, Format::Html] {
+            let mut formatter = Formatter::new(
+                &terminal,
+                FormatterOptions::new()
+                    .with_format(format)
+                    .with_hyperlink(true),
+            )
+            .expect("formatter should initialize");
+            let len = formatter
+                .format_len()
+                .expect("format length should resolve");
+            let mut output = vec![0; len];
+            let written = formatter
+                .format_buf(&mut output)
+                .expect("format should succeed");
+            assert!(
+                !output[..written]
+                    .windows(private_metadata.len())
+                    .any(|window| window == private_metadata)
+            );
+        }
     }
 
     #[test]

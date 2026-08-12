@@ -44,3 +44,44 @@ impl bindings::String {
         unsafe { std::str::from_utf8_unchecked(slice) }
     }
 }
+
+#[cfg(test)]
+mod abi_tests {
+    use super::*;
+
+    #[test]
+    fn terminal_effect_extension_has_stable_option_and_callback_shapes() {
+        unsafe extern "C" fn resolve(
+            _: Terminal,
+            _: *mut std::os::raw::c_void,
+            _: String,
+            _: *mut Buffer,
+            _: *mut Buffer,
+        ) -> HyperlinkResolution::Type {
+            HyperlinkResolution::SUPPRESS
+        }
+
+        assert_eq!(TerminalOption::HYPERLINK_RESOLVE, 27);
+        assert_eq!(TerminalOption::SEMANTIC_PROMPT, 28);
+        assert_eq!(TerminalOption::PROGRESS_REPORT, 29);
+        assert_eq!(HyperlinkResolution::PASSTHROUGH, 0);
+        assert_eq!(HyperlinkResolution::REPLACE, 1);
+        assert_eq!(HyperlinkResolution::SUPPRESS, 2);
+        let callback: TerminalHyperlinkResolveFn = Some(resolve);
+        assert!(callback.is_some());
+        let _: unsafe extern "C" fn(*const GridRef, *mut u8, usize, *mut usize) -> Result::Type =
+            ghostty_grid_ref_hyperlink_userdata;
+        assert_eq!(
+            std::mem::size_of::<TerminalHyperlinkResolveFn>(),
+            std::mem::size_of::<usize>()
+        );
+        assert_eq!(
+            std::mem::size_of::<TerminalSemanticPromptFn>(),
+            std::mem::size_of::<usize>()
+        );
+        assert_eq!(
+            std::mem::size_of::<TerminalProgressReportFn>(),
+            std::mem::size_of::<usize>()
+        );
+    }
+}

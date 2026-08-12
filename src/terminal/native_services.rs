@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use crate::domain::{PaneId, WindowId, WorkspaceId};
 
@@ -106,7 +106,7 @@ impl NativeContextActions {
         Self {
             copy: selection_present,
             open_link: link.is_some(),
-            quick_look: link.and_then(QuickLookTarget::from_link).is_some(),
+            quick_look: link.is_some_and(|link| link.kind == HyperlinkKind::LocalPath),
         }
     }
 
@@ -176,15 +176,11 @@ pub(crate) struct QuickLookTarget {
 
 impl QuickLookTarget {
     pub(crate) fn from_link(link: &HyperlinkTarget) -> Option<Self> {
-        if link.kind != HyperlinkKind::LocalPath {
-            return None;
-        }
-        let path = Path::new(&link.value).canonicalize().ok()?;
-        path.is_file().then_some(Self { path })
+        link.revalidated_local_path().map(|path| Self { path })
     }
 
     #[cfg(test)]
-    pub(crate) fn path(&self) -> &Path {
+    pub(crate) fn path(&self) -> &std::path::Path {
         &self.path
     }
 }
@@ -192,6 +188,7 @@ impl QuickLookTarget {
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::os::unix::fs::symlink;
     use std::path::PathBuf;
 
     use super::*;
@@ -271,7 +268,12 @@ mod tests {
         let file = directory.join("preview.txt");
         fs::write(&file, b"preview").unwrap();
 
-        let local = HyperlinkTarget::local(file.to_str().unwrap(), &directory).unwrap();
+        let local = HyperlinkTarget::osc8(
+            &format!("file://{}", file.to_str().unwrap()),
+            &directory,
+            None,
+        )
+        .unwrap();
         let url = HyperlinkTarget::url("https://example.test").unwrap();
         assert_eq!(
             QuickLookTarget::from_link(&local).map(|target| target.path().to_path_buf()),
@@ -279,6 +281,65 @@ mod tests {
         );
         assert!(QuickLookTarget::from_link(&url).is_none());
 
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn local_native_actions_are_inert_after_the_file_is_removed() {
+        let directory =
+            std::env::temp_dir().join(format!("spaceterm-local-removed-{}", std::process::id()));
+        fs::create_dir_all(&directory).unwrap();
+        let file = directory.join("preview.txt");
+        fs::write(&file, b"preview").unwrap();
+        let local = HyperlinkTarget::osc8("file:preview.txt", &directory, None).unwrap();
+
+        fs::remove_file(file).unwrap();
+
+        assert_eq!(local.activation_url(), None);
+        assert_eq!(QuickLookTarget::from_link(&local), None);
+        assert!(NativeContextActions::from_presence(false, Some(&local)).open_link);
+        assert!(NativeContextActions::from_presence(false, Some(&local)).quick_look);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn local_native_actions_are_inert_after_the_file_is_replaced() {
+        let directory =
+            std::env::temp_dir().join(format!("spaceterm-local-replaced-{}", std::process::id()));
+        fs::create_dir_all(&directory).unwrap();
+        let file = directory.join("preview.txt");
+        let replacement = directory.join("replacement.txt");
+        fs::write(&file, b"first").unwrap();
+        let local = HyperlinkTarget::osc8("file:preview.txt", &directory, None).unwrap();
+
+        fs::write(&replacement, b"replacement").unwrap();
+        fs::rename(&replacement, &file).unwrap();
+
+        assert_eq!(local.activation_url(), None);
+        assert_eq!(QuickLookTarget::from_link(&local), None);
+        assert!(NativeContextActions::from_presence(false, Some(&local)).open_link);
+        assert!(NativeContextActions::from_presence(false, Some(&local)).quick_look);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn local_native_actions_are_inert_after_the_path_becomes_a_different_symlink() {
+        let directory =
+            std::env::temp_dir().join(format!("spaceterm-local-symlink-{}", std::process::id()));
+        fs::create_dir_all(&directory).unwrap();
+        let file = directory.join("preview.txt");
+        let other = directory.join("other.txt");
+        fs::write(&file, b"first").unwrap();
+        fs::write(&other, b"other").unwrap();
+        let local = HyperlinkTarget::osc8("file:preview.txt", &directory, None).unwrap();
+
+        fs::remove_file(&file).unwrap();
+        symlink(&other, &file).unwrap();
+
+        assert_eq!(local.activation_url(), None);
+        assert_eq!(QuickLookTarget::from_link(&local), None);
+        assert!(NativeContextActions::from_presence(false, Some(&local)).open_link);
+        assert!(NativeContextActions::from_presence(false, Some(&local)).quick_look);
         fs::remove_dir_all(directory).unwrap();
     }
 }

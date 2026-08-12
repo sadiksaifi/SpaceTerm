@@ -5,7 +5,10 @@ use std::process::Command;
 /// Pinned ghostty commit. Update this to pull a newer version.
 const GHOSTTY_REPO: &str = "https://github.com/ghostty-org/ghostty.git";
 const GHOSTTY_COMMIT: &str = "a887df42c56f6de86c0fe6da9c4eeca37931e083";
-const SPACETERM_PATCH: &str = "patches/spaceterm-kitty-graphics.patch";
+const SPACETERM_PATCHES: &[&str] = &[
+    "patches/spaceterm-kitty-graphics.patch",
+    "patches/spaceterm-terminal-effects.patch",
+];
 
 #[derive(Clone, Copy)]
 enum LinkMode {
@@ -80,7 +83,9 @@ fn main() {
     println!("cargo:rerun-if-env-changed=DEBUG");
     println!("cargo:rerun-if-env-changed=OPT_LEVEL");
     println!("cargo:rerun-if-changed=crates/libghostty-vt-sys/build.rs");
-    println!("cargo:rerun-if-changed={SPACETERM_PATCH}");
+    for patch in SPACETERM_PATCHES {
+        println!("cargo:rerun-if-changed={patch}");
+    }
 
     // An explicit source override should stay authoritative even when the
     // pkg-config feature is enabled, so local Ghostty checkouts remain easy to
@@ -366,8 +371,12 @@ fn fetch_ghostty(out_dir: &Path) -> PathBuf {
 
 fn apply_spaceterm_patch(src_dir: &Path) {
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("manifest dir"));
-    let patch = manifest_dir.join(SPACETERM_PATCH);
+    for patch in SPACETERM_PATCHES {
+        apply_patch(src_dir, &manifest_dir.join(patch));
+    }
+}
 
+fn apply_patch(src_dir: &Path, patch: &Path) {
     let status = Command::new("git")
         .args(["apply", "--check"])
         .arg(&patch)
@@ -387,7 +396,10 @@ fn apply_spaceterm_patch(src_dir: &Path) {
         .current_dir(src_dir)
         .status()
         .unwrap_or_else(|error| panic!("failed to verify SpaceTerm Ghostty patch: {error}"));
-    assert!(already_applied.success(), "SpaceTerm Ghostty patch no longer applies cleanly");
+    assert!(
+        already_applied.success(),
+        "SpaceTerm Ghostty patch no longer applies cleanly"
+    );
 }
 
 fn run(mut command: Command, context: &str) {
