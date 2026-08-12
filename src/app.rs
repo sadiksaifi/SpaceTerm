@@ -26,6 +26,10 @@ actions!(
 );
 
 pub(crate) fn init(cx: &mut App) {
+    #[cfg(not(test))]
+    if let Err(error) = crate::platform::macos_services::register() {
+        eprintln!("failed to register macOS Services types: {error}");
+    }
     cx.bind_keys([
         KeyBinding::new("cmd-q", QuitApplication, None),
         KeyBinding::new("cmd-h", HideApplication, None),
@@ -137,6 +141,9 @@ pub(crate) fn open(cx: &mut App) {
             workspace_manager.update(cx, |workspace_manager, cx| {
                 workspace_manager.focus(window, cx);
             });
+            if let Err(error) = crate::platform::macos_services::install(window, cx) {
+                eprintln!("failed to install the macOS Services responder: {error}");
+            }
             workspace_manager
         },
     );

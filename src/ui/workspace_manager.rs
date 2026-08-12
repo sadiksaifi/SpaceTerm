@@ -11,6 +11,7 @@ use gpui::{
 use gpui_symbols::{Icon, SymbolWeight};
 
 use super::overlay_scrollbar::{OverlayScrollbar, OverlayScrollbarEvent, ScrollMetrics};
+use super::terminal_focus::TerminalFocusBlocker;
 use super::{
     ActivateWindow1, ActivateWindow2, ActivateWindow3, ActivateWindow4, ActivateWindow5,
     ActivateWindow6, ActivateWindow7, ActivateWindow8, ActivateWindow9, ActivateWorkspace1,
@@ -26,7 +27,10 @@ use crate::domain::{
     CloseWorkspaceOutcome, FinalWindowCloseOutcome, WorkspaceCollection, WorkspaceError,
     WorkspaceId,
 };
-use crate::terminal::{TerminalSessionFactory, WorkspaceTerminalSessionFactory};
+use crate::terminal::{
+    NativeServiceOrigin, NativeServiceStatus, SelectionCopy, TerminalSessionFactory,
+    WorkspaceTerminalSessionFactory,
+};
 use crate::theme::{ACTIVE_THEME, Color};
 
 const SIDEBAR_TOGGLE_INSET: f32 = 4.0;
@@ -118,7 +122,7 @@ impl WorkspaceManager {
             window,
             |manager, _, event: &OverlayScrollbarEvent<f32>, window, cx| match event {
                 OverlayScrollbarEvent::InteractionStarted => {
-                    manager.sidebar_focus.focus(window);
+                    manager.focus_sidebar(TerminalFocusBlocker::Sidebar, window, cx);
                 }
                 OverlayScrollbarEvent::OffsetRequested(offset) => {
                     let current_offset = manager.workspace_list_scroll_handle.offset();
@@ -191,7 +195,105 @@ impl WorkspaceManager {
 
     pub(crate) fn focus(&self, window: &mut Window, cx: &mut App) {
         let manager = self.workspaces.active_workspace().payload().clone();
-        manager.update(cx, |manager, cx| manager.focus(window, cx));
+        manager.update(cx, |manager, cx| {
+            manager.set_workspace_focus_blocker(None, cx);
+            manager.focus(window, cx);
+        });
+    }
+
+    fn set_active_focus_blocker(
+        &self,
+        blocker: Option<TerminalFocusBlocker>,
+        cx: &mut Context<Self>,
+    ) {
+        self.workspaces
+            .active_workspace()
+            .payload()
+            .update(cx, |manager, cx| {
+                manager.set_workspace_focus_blocker(blocker, cx);
+            });
+    }
+
+    fn focus_sidebar(
+        &self,
+        blocker: TerminalFocusBlocker,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.set_active_focus_blocker(Some(blocker), cx);
+        self.sidebar_focus.focus(window);
+    }
+
+    fn focus_rename(&self, window: &mut Window, cx: &mut Context<Self>) {
+        self.set_active_focus_blocker(Some(TerminalFocusBlocker::RenameField), cx);
+        self.rename_focus.focus(window);
+    }
+
+    pub(crate) fn native_service_status(
+        &self,
+        window: &Window,
+        cx: &mut App,
+    ) -> NativeServiceStatus {
+        let workspace_id = self.workspaces.active_workspace_id();
+        let blocker = self.workspace_focus_blocker(window);
+        self.workspaces
+            .active_workspace()
+            .payload()
+            .update(cx, |manager, cx| {
+                manager.set_workspace_focus_blocker(blocker, cx);
+                manager.native_service_status(workspace_id, window, cx)
+            })
+    }
+
+    fn workspace_focus_blocker(&self, window: &Window) -> Option<TerminalFocusBlocker> {
+        if self.rename_focus.is_focused(window) {
+            Some(TerminalFocusBlocker::RenameField)
+        } else if self.workspace_menu.is_some() {
+            Some(TerminalFocusBlocker::ContextMenu)
+        } else if self.sidebar_focus.is_focused(window) {
+            Some(TerminalFocusBlocker::Sidebar)
+        } else {
+            None
+        }
+    }
+
+    fn sync_active_focus_blocker(&self, window: &Window, cx: &mut Context<Self>) {
+        self.set_active_focus_blocker(self.workspace_focus_blocker(window), cx);
+    }
+
+    pub(crate) fn native_service_selection(
+        &self,
+        origin: NativeServiceOrigin,
+        window: &Window,
+        cx: &mut App,
+    ) -> Option<SelectionCopy> {
+        if self.workspaces.active_workspace_id() != origin.workspace_id() {
+            return None;
+        }
+        self.workspaces
+            .workspace(origin.workspace_id())?
+            .payload()
+            .update(cx, |manager, cx| {
+                manager.native_service_selection(origin, window, cx)
+            })
+    }
+
+    pub(crate) fn insert_native_service_text(
+        &self,
+        origin: NativeServiceOrigin,
+        text: String,
+        window: &Window,
+        cx: &mut App,
+    ) -> bool {
+        if self.workspaces.active_workspace_id() != origin.workspace_id() {
+            return false;
+        }
+        let Some(workspace) = self.workspaces.workspace(origin.workspace_id()) else {
+            return false;
+        };
+        workspace.payload().update(cx, |manager, cx| {
+            manager.insert_native_service_text(origin, text, window, cx)
+        })
     }
 
     fn set_sidebar_layout(&mut self, visible: bool, width: Pixels, cx: &mut Context<Self>) {
@@ -222,6 +324,8 @@ impl WorkspaceManager {
             self.set_sidebar_layout(false, minimum_width, cx);
             if was_sidebar_focused {
                 self.focus(window, cx);
+            } else {
+                self.sync_active_focus_blocker(window, cx);
             }
             return;
         }
@@ -311,6 +415,7 @@ impl WorkspaceManager {
         next_manager.update(cx, |manager, cx| manager.activate(window, cx));
         self.workspace_menu = None;
         self.rename = None;
+        self.sync_active_focus_blocker(window, cx);
         self.scroll_active_workspace_into_view();
         cx.notify();
     }
@@ -348,6 +453,7 @@ impl WorkspaceManager {
             next_manager.update(cx, |manager, cx| manager.activate(window, cx));
         }
         self.workspace_menu = None;
+        self.sync_active_focus_blocker(window, cx);
         self.scroll_active_workspace_into_view();
         cx.notify();
         true
@@ -421,6 +527,7 @@ impl WorkspaceManager {
         {
             self.rename = None;
         }
+        self.sync_active_focus_blocker(window, cx);
         self.scroll_active_workspace_into_view();
         cx.notify();
     }
@@ -472,6 +579,7 @@ impl WorkspaceManager {
                 {
                     self.rename = None;
                 }
+                self.sync_active_focus_blocker(window, cx);
                 self.scroll_active_workspace_into_view();
                 cx.notify();
             }
@@ -493,6 +601,7 @@ impl WorkspaceManager {
         let sidebar_visible = !self.sidebar_visible;
         self.workspace_menu = None;
         self.rename = None;
+        self.sync_active_focus_blocker(window, cx);
         self.set_sidebar_layout(sidebar_visible, self.sidebar_width, cx);
         if !sidebar_visible && was_sidebar_focused {
             self.focus(window, cx);
@@ -509,13 +618,13 @@ impl WorkspaceManager {
 
         if !self.sidebar_visible {
             self.set_sidebar_layout(true, self.sidebar_width, cx);
-            cx.defer_in(window, |manager, window, _| {
-                manager.sidebar_focus.focus(window);
+            cx.defer_in(window, |manager, window, cx| {
+                manager.focus_sidebar(TerminalFocusBlocker::Sidebar, window, cx);
             });
             return;
         }
 
-        self.sidebar_focus.focus(window);
+        self.focus_sidebar(TerminalFocusBlocker::Sidebar, window, cx);
         cx.notify();
     }
 
@@ -526,7 +635,7 @@ impl WorkspaceManager {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.sidebar_focus.focus(window);
+        self.focus_sidebar(TerminalFocusBlocker::ContextMenu, window, cx);
         if !self.activate_workspace(workspace_id, window, cx) {
             return;
         }
@@ -541,6 +650,7 @@ impl WorkspaceManager {
                 .clamp(px(TOP_CHROME_HEIGHT + WORKSPACE_MENU_INSET), maximum_top),
         });
         self.rename = None;
+        self.set_active_focus_blocker(Some(TerminalFocusBlocker::ContextMenu), cx);
         cx.notify();
     }
 
@@ -553,6 +663,7 @@ impl WorkspaceManager {
         let Some(menu) = self.workspace_menu.take() else {
             return;
         };
+        self.set_active_focus_blocker(Some(TerminalFocusBlocker::Sidebar), cx);
         match command {
             WorkspaceMenuCommand::NewWindow => {
                 if self.activate_workspace(menu.workspace_id, window, cx)
@@ -573,8 +684,8 @@ impl WorkspaceManager {
                     replace_on_first_input: true,
                 });
                 cx.notify();
-                cx.defer_in(window, |manager, window, _| {
-                    manager.rename_focus.focus(window);
+                cx.defer_in(window, |manager, window, cx| {
+                    manager.focus_rename(window, cx);
                 });
             }
             WorkspaceMenuCommand::Close => self.close_workspace(menu.workspace_id, window, cx),
@@ -606,11 +717,11 @@ impl WorkspaceManager {
                     }
                 }
                 self.rename = None;
-                self.sidebar_focus.focus(window);
+                self.focus_sidebar(TerminalFocusBlocker::Sidebar, window, cx);
             }
             "escape" => {
                 self.rename = None;
-                self.sidebar_focus.focus(window);
+                self.focus_sidebar(TerminalFocusBlocker::Sidebar, window, cx);
             }
             "backspace" => {
                 if rename.replace_on_first_input {
@@ -874,8 +985,8 @@ impl WorkspaceManager {
                 .bg(gpui_color(ACTIVE_THEME.element_background))
                 .text_color(gpui_color(ACTIVE_THEME.text))
                 .on_click(move |_, window, cx| {
-                    let _ = rename_manager.update(cx, |manager, _| {
-                        manager.rename_focus.focus(window);
+                    let _ = rename_manager.update(cx, |manager, cx| {
+                        manager.focus_rename(window, cx);
                     });
                     cx.stop_propagation();
                 })
@@ -922,7 +1033,7 @@ impl WorkspaceManager {
             .hover(|row| row.bg(gpui_color(ACTIVE_THEME.ghost_element_selected)))
             .on_click(move |_, window, cx| {
                 let _ = click_manager.update(cx, |manager, cx| {
-                    manager.sidebar_focus.focus(window);
+                    manager.focus_sidebar(TerminalFocusBlocker::Sidebar, window, cx);
                     manager.activate_workspace(workspace_id, window, cx);
                 });
                 cx.stop_propagation();
@@ -1123,6 +1234,7 @@ impl WorkspaceManager {
             .on_mouse_down_out(move |_, _, cx| {
                 let _ = dismiss_manager.update(cx, |manager, cx| {
                     if manager.workspace_menu.take().is_some() {
+                        manager.set_active_focus_blocker(Some(TerminalFocusBlocker::Sidebar), cx);
                         cx.notify();
                     }
                 });

@@ -15,9 +15,11 @@ use super::{
 };
 use crate::domain::{
     ClosePaneOutcome, FocusDirection, PaneId, PaneNodeRef, PaneSize, PaneTreeRef, SplitAxis,
-    SplitId, TerminalWindow, WindowId, ZoomState,
+    SplitId, TerminalWindow, WindowId, WorkspaceId, ZoomState,
 };
-use crate::terminal::WorkspaceTerminalSessionFactory;
+use crate::terminal::{
+    NativeServiceOrigin, NativeServiceStatus, SelectionCopy, WorkspaceTerminalSessionFactory,
+};
 use crate::theme::{ACTIVE_THEME, Color};
 
 const MINIMUM_PANE_WIDTH: f32 = PANE_ACTION_MENU_WIDTH + PANE_CONTROL_INSET * 2.0;
@@ -53,6 +55,9 @@ pub(crate) struct PaneHost {
     pane_attention: BTreeMap<PaneId, u32>,
     menu_pane_id: Option<PaneId>,
     active: bool,
+    focus_branch_blocker: Option<TerminalFocusBlocker>,
+    native_service_hierarchy_generation: u64,
+    native_service_focus_signature: Option<(bool, PaneId, Option<TerminalFocusBlocker>)>,
     close_window_requested: bool,
 }
 
@@ -87,6 +92,9 @@ impl PaneHost {
             pane_attention: BTreeMap::from([(initial_pane_id, 0)]),
             menu_pane_id: None,
             active: true,
+            focus_branch_blocker: None,
+            native_service_hierarchy_generation: 0,
+            native_service_focus_signature: None,
             close_window_requested: false,
         }
     }
@@ -134,6 +142,70 @@ impl PaneHost {
         terminal.read(cx).focus(window);
     }
 
+    pub(crate) fn native_service_status(
+        &mut self,
+        workspace_id: WorkspaceId,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> NativeServiceStatus {
+        self.sync_terminal_focus(cx);
+        let pane_id = self.terminal_window.focused_pane_id();
+        let window_id = self.terminal_window.id();
+        let hierarchy_generation = self.native_service_hierarchy_generation;
+        let Some(terminal) = self.terminal_window.terminal(pane_id) else {
+            return NativeServiceStatus::default();
+        };
+        terminal.update(cx, |terminal, _| {
+            terminal.native_service_status(
+                workspace_id,
+                window_id,
+                pane_id,
+                hierarchy_generation,
+                window,
+            )
+        })
+    }
+
+    pub(crate) fn native_service_selection(
+        &self,
+        origin: NativeServiceOrigin,
+        window: &Window,
+        cx: &mut App,
+    ) -> Option<SelectionCopy> {
+        if self.terminal_window.id() != origin.window_id()
+            || self.terminal_window.focused_pane_id() != origin.pane_id()
+            || self.native_service_hierarchy_generation != origin.hierarchy_generation()
+        {
+            return None;
+        }
+        self.terminal_window
+            .terminal(origin.pane_id())?
+            .update(cx, |terminal, cx| {
+                terminal.native_service_selection(origin, window, cx)
+            })
+    }
+
+    pub(crate) fn insert_native_service_text(
+        &self,
+        origin: NativeServiceOrigin,
+        text: String,
+        window: &Window,
+        cx: &mut App,
+    ) -> bool {
+        if self.terminal_window.id() != origin.window_id()
+            || self.terminal_window.focused_pane_id() != origin.pane_id()
+            || self.native_service_hierarchy_generation != origin.hierarchy_generation()
+        {
+            return false;
+        }
+        let Some(terminal) = self.terminal_window.terminal(origin.pane_id()) else {
+            return false;
+        };
+        terminal.update(cx, |terminal, cx| {
+            terminal.insert_native_service_text(origin, text, window, cx)
+        })
+    }
+
     pub(crate) const fn window_id(&self) -> WindowId {
         self.terminal_window.id()
     }
@@ -175,15 +247,27 @@ impl PaneHost {
     }
 
     pub(crate) fn activate_without_focus(&mut self, cx: &mut Context<Self>) {
-        self.active = true;
-        self.menu_pane_id = None;
+        self.set_focus_branch(true, None, cx);
         cx.notify();
     }
 
     pub(crate) fn deactivate(&mut self, cx: &mut Context<Self>) {
-        self.active = false;
-        self.menu_pane_id = None;
+        self.set_focus_branch(false, None, cx);
         cx.notify();
+    }
+
+    pub(crate) fn set_focus_branch(
+        &mut self,
+        active: bool,
+        blocker: Option<TerminalFocusBlocker>,
+        cx: &mut Context<Self>,
+    ) {
+        self.active = active;
+        self.focus_branch_blocker = blocker;
+        if !active {
+            self.menu_pane_id = None;
+        }
+        self.sync_terminal_focus(cx);
     }
 
     pub(crate) fn close_all(&mut self, cx: &mut Context<Self>) {
@@ -223,6 +307,7 @@ impl PaneHost {
             return;
         }
         self.menu_pane_id = None;
+        self.sync_terminal_focus(cx);
         cx.notify();
     }
 
@@ -236,6 +321,7 @@ impl PaneHost {
             return;
         };
         self.menu_pane_id = None;
+        self.sync_terminal_focus(cx);
         cx.notify();
         if let Some(terminal) = self.terminal_window.terminal(pane_id) {
             terminal.update(cx, |terminal, _| terminal.focus(window));
@@ -278,12 +364,14 @@ impl PaneHost {
 
         match result {
             Ok(pane_id) => {
+                self.advance_native_service_hierarchy_generation(cx);
                 if let Some(terminal) = self.terminal_window.terminal(pane_id) {
                     self.pane_titles.insert(pane_id, terminal.read(cx).title());
                 }
                 self.pane_attention.insert(pane_id, 0);
                 self.menu_pane_id = None;
                 self.split_bounds.clear();
+                self.sync_terminal_focus(cx);
                 cx.emit(PaneHostEvent::PresentationChanged {
                     window_id: self.terminal_window.id(),
                 });
@@ -307,6 +395,7 @@ impl PaneHost {
 
         match self.terminal_window.close_pane(pane_id) {
             Ok(ClosePaneOutcome::CloseWindow { window_id }) => {
+                self.advance_native_service_hierarchy_generation(cx);
                 self.close_window_requested = true;
                 self.menu_pane_id = None;
                 cx.emit(PaneHostEvent::CloseWindowRequested { window_id });
@@ -316,12 +405,14 @@ impl PaneHost {
                 closed_terminal,
                 ..
             }) => {
+                self.advance_native_service_hierarchy_generation(cx);
                 closed_terminal.update(cx, |terminal, _| terminal.close());
                 self.pane_bounds.remove(&pane_id);
                 self.split_bounds.clear();
                 self.pane_titles.remove(&pane_id);
                 self.pane_attention.remove(&pane_id);
                 self.menu_pane_id = None;
+                self.sync_terminal_focus(cx);
                 cx.emit(PaneHostEvent::PresentationChanged {
                     window_id: self.terminal_window.id(),
                 });
@@ -340,6 +431,7 @@ impl PaneHost {
         if self.terminal_window.toggle_zoom().is_none() {
             return;
         }
+        self.advance_native_service_hierarchy_generation(cx);
         self.menu_pane_id = None;
         cx.emit(PaneHostEvent::PresentationChanged {
             window_id: self.terminal_window.id(),
@@ -383,16 +475,25 @@ impl PaneHost {
             return None;
         }
         self.menu_pane_id = (self.menu_pane_id != Some(pane_id)).then_some(pane_id);
+        self.sync_terminal_focus(cx);
         cx.notify();
         self.terminal_window.terminal(pane_id).cloned()
     }
 
-    fn sync_terminal_focus(&self, cx: &mut Context<Self>) {
+    fn sync_terminal_focus(&mut self, cx: &mut Context<Self>) {
         let focused_terminal_id = self
             .terminal_window
             .terminal(self.terminal_window.focused_pane_id())
             .map(Entity::entity_id);
-        let blocker = self.menu_pane_id.map(|_| TerminalFocusBlocker::PaneMenu);
+        let blocker = self
+            .focus_branch_blocker
+            .or_else(|| self.menu_pane_id.map(|_| TerminalFocusBlocker::PaneMenu));
+        let signature = (self.active, self.terminal_window.focused_pane_id(), blocker);
+        if self.native_service_focus_signature != Some(signature) {
+            self.advance_native_service_hierarchy_generation(cx);
+            self.native_service_focus_signature = Some(signature);
+        }
+        let hierarchy_generation = self.native_service_hierarchy_generation;
         for terminal in self.terminal_window.terminals() {
             let product_focus = TerminalProductFocus {
                 active_workspace: self.active,
@@ -402,6 +503,18 @@ impl PaneHost {
             };
             terminal.update(cx, |terminal, _| {
                 terminal.set_product_focus(product_focus);
+                terminal.synchronize_native_service_hierarchy_generation(hierarchy_generation);
+            });
+        }
+    }
+
+    fn advance_native_service_hierarchy_generation(&mut self, cx: &mut Context<Self>) {
+        self.native_service_hierarchy_generation =
+            self.native_service_hierarchy_generation.wrapping_add(1);
+        let hierarchy_generation = self.native_service_hierarchy_generation;
+        for terminal in self.terminal_window.terminals() {
+            terminal.update(cx, |terminal, _| {
+                terminal.synchronize_native_service_hierarchy_generation(hierarchy_generation);
             });
         }
     }
@@ -1159,6 +1272,98 @@ mod tests {
             cx.debug_bounds("pane-header-2-unfocused").is_some(),
         );
         assert_eq!(header_state, (true, true));
+    }
+
+    #[gpui::test]
+    fn native_service_return_is_rejected_after_pane_changes_away_and_back(cx: &mut TestAppContext) {
+        cx.update(crate::ui::init);
+        let records = TestTerminalSessionRecords::default();
+        let session_factory: Rc<dyn TerminalSessionFactory> =
+            Rc::new(TestTerminalSessionFactory::new(records.clone()));
+        let session_factory =
+            WorkspaceTerminalSessionFactory::new(session_factory, test_workspace_root());
+        let (host, cx) = cx.add_window_view(|window, cx| {
+            PaneHost::new(WindowId::new(1), session_factory, window, cx)
+        });
+        cx.update(|window, cx| {
+            window.activate_window();
+            host.update(cx, |host, cx| {
+                host.focus(window, cx);
+                host.split_focused(SplitAxis::Horizontal, window, cx);
+                host.focus_pane(PaneId::new(1), cx);
+                host.focus(window, cx);
+            });
+        });
+        cx.run_until_parked();
+
+        let origin = cx.update(|window, cx| {
+            host.update(cx, |host, cx| {
+                host.native_service_status(WorkspaceId::new(1), window, cx)
+                    .origin
+                    .expect("the focused terminal must expose a Service origin")
+            })
+        });
+        let accepted = cx.update(|window, cx| {
+            host.update(cx, |host, cx| {
+                host.focus_pane(PaneId::new(2), cx);
+                host.focus_pane(PaneId::new(1), cx);
+                host.focus(window, cx);
+                host.insert_native_service_text(origin, "stale return".to_owned(), window, cx)
+            })
+        });
+
+        assert!(!accepted);
+        assert!(!records.commands().iter().any(|call| {
+            matches!(
+                call.command,
+                crate::terminal::testing::RecordedSessionCommand::RequestPaste(_)
+            )
+        }));
+    }
+
+    #[gpui::test]
+    fn closing_a_nonfocused_pane_invalidates_the_service_hierarchy(cx: &mut TestAppContext) {
+        cx.update(crate::ui::init);
+        let records = TestTerminalSessionRecords::default();
+        let session_factory: Rc<dyn TerminalSessionFactory> =
+            Rc::new(TestTerminalSessionFactory::new(records.clone()));
+        let session_factory =
+            WorkspaceTerminalSessionFactory::new(session_factory, test_workspace_root());
+        let (host, cx) = cx.add_window_view(|window, cx| {
+            PaneHost::new(WindowId::new(1), session_factory, window, cx)
+        });
+        cx.update(|window, cx| {
+            window.activate_window();
+            host.update(cx, |host, cx| {
+                host.focus(window, cx);
+                host.split_focused(SplitAxis::Horizontal, window, cx);
+                host.focus_pane(PaneId::new(1), cx);
+                host.focus(window, cx);
+            });
+        });
+        cx.run_until_parked();
+        let origin = cx.update(|window, cx| {
+            host.update(cx, |host, cx| {
+                host.native_service_status(WorkspaceId::new(1), window, cx)
+                    .origin
+                    .unwrap()
+            })
+        });
+
+        let accepted = cx.update(|window, cx| {
+            host.update(cx, |host, cx| {
+                host.close_pane(PaneId::new(2), window, cx);
+                host.insert_native_service_text(origin, "stale return".to_owned(), window, cx)
+            })
+        });
+
+        assert!(!accepted);
+        assert!(!records.commands().iter().any(|call| {
+            matches!(
+                call.command,
+                crate::terminal::testing::RecordedSessionCommand::RequestPaste(_)
+            )
+        }));
     }
 
     #[gpui::test]

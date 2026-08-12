@@ -1,5 +1,7 @@
 use std::path::{Path, PathBuf};
 
+use crate::domain::{PaneId, WindowId, WorkspaceId};
+
 use super::file_insertion::prepare_file_insertion;
 use super::hyperlink::{HyperlinkKind, HyperlinkTarget};
 #[cfg(test)]
@@ -10,6 +12,93 @@ pub(crate) struct NativeContextActions {
     pub(crate) copy: bool,
     pub(crate) open_link: bool,
     pub(crate) quick_look: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct NativeServiceCapabilities {
+    pub(crate) send_text: bool,
+    pub(crate) return_text: bool,
+}
+
+impl NativeServiceCapabilities {
+    pub(crate) const fn new(send_text: bool, return_text: bool) -> Self {
+        Self {
+            send_text,
+            return_text,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct NativeServiceOrigin {
+    workspace_id: WorkspaceId,
+    window_id: WindowId,
+    pane_id: PaneId,
+    session_identity: u64,
+    focus_epoch: u64,
+    hierarchy_generation: u64,
+}
+
+impl NativeServiceOrigin {
+    pub(crate) const fn new(
+        workspace_id: WorkspaceId,
+        window_id: WindowId,
+        pane_id: PaneId,
+        session_identity: u64,
+        focus_epoch: u64,
+        hierarchy_generation: u64,
+    ) -> Self {
+        Self {
+            workspace_id,
+            window_id,
+            pane_id,
+            session_identity,
+            focus_epoch,
+            hierarchy_generation,
+        }
+    }
+
+    pub(crate) const fn workspace_id(self) -> WorkspaceId {
+        self.workspace_id
+    }
+
+    pub(crate) const fn window_id(self) -> WindowId {
+        self.window_id
+    }
+
+    pub(crate) const fn pane_id(self) -> PaneId {
+        self.pane_id
+    }
+
+    pub(crate) const fn session_identity(self) -> u64 {
+        self.session_identity
+    }
+
+    pub(crate) const fn focus_epoch(self) -> u64 {
+        self.focus_epoch
+    }
+
+    pub(crate) const fn hierarchy_generation(self) -> u64 {
+        self.hierarchy_generation
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct NativeServiceStatus {
+    pub(crate) capabilities: NativeServiceCapabilities,
+    pub(crate) origin: Option<NativeServiceOrigin>,
+}
+
+impl NativeServiceStatus {
+    pub(crate) const fn new(
+        capabilities: NativeServiceCapabilities,
+        origin: Option<NativeServiceOrigin>,
+    ) -> Self {
+        Self {
+            capabilities,
+            origin,
+        }
+    }
 }
 
 impl NativeContextActions {
@@ -149,6 +238,17 @@ mod tests {
             Err(NativeInsertionError::TerminalUnfocused)
         );
         assert!(NativeInsertion::dropped_files(&[PathBuf::from("relative")], true).is_err());
+    }
+
+    #[test]
+    fn service_capabilities_keep_selection_export_distinct_from_terminal_input_focus() {
+        assert_eq!(
+            NativeServiceCapabilities::new(true, false),
+            NativeServiceCapabilities {
+                send_text: true,
+                return_text: false,
+            }
+        );
     }
 
     #[test]

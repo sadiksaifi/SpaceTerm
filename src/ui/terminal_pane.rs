@@ -1,3 +1,4 @@
+use std::cell::Cell;
 use std::ops::Range;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -29,6 +30,7 @@ use super::{
     FindPrevious, IncreaseTerminalFontSize, OpenTerminalFind, PasteClipboard,
     ResetTerminalFontSize, TERMINAL_FIND_KEY_CONTEXT, TERMINAL_KEY_CONTEXT,
 };
+use crate::domain::{PaneId, WindowId, WorkspaceId};
 use crate::platform::macos_accessibility::post_accessibility_notifications;
 #[cfg(not(test))]
 use crate::platform::macos_attention::{MacosAttentionPlatform, apply_attention_effects};
@@ -50,7 +52,8 @@ use crate::terminal::geometry::{
 use crate::terminal::{
     AccessibilityGeometry, AccessibilityNotification, AttentionFacts, DiagnosticBundle,
     DiagnosticKeyEventKind, FindDirection, FindQueryGeneration, InputModifiers, KeyAction,
-    KeyInput, NativeContextActions, NativeInsertion, OptionAsAltPolicy, Osc52Access,
+    KeyInput, NativeContextActions, NativeInsertion, NativeServiceCapabilities,
+    NativeServiceOrigin, NativeServiceStatus, OptionAsAltPolicy, Osc52Access,
     Osc52AuthorizationDecision, Osc52AuthorizationRequest, Osc52Target, PaneTerminalState,
     PasteConfirmation, PasteDecision, PasteRequestOutcome, PasteResolution, PhysicalKey,
     PointerButton, PointerInput, PointerPhase, ScreenSnapshot, SelectionCopy, SelectionCopyError,
@@ -88,10 +91,20 @@ pub(crate) enum TerminalPaneEvent {
     Exited,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PasteRequestGuard {
+    session_identity: u64,
+    focus_epoch: u64,
+    hierarchy_generation: u64,
+}
+
 pub(crate) struct TerminalPane {
     session_factory: WorkspaceTerminalSessionFactory,
     session: Option<Box<dyn TerminalSessionHandle>>,
     session_start_attempted: bool,
+    native_service_session_identity: u64,
+    native_service_focus_epoch: Cell<u64>,
+    native_service_hierarchy_generation: u64,
     screen: Arc<ScreenSnapshot>,
     accessibility: TerminalAccessibilityModel,
     accessibility_notifications: Vec<AccessibilityNotification>,
@@ -185,7 +198,7 @@ impl TerminalPane {
             window,
             |pane, _, event: &OverlayScrollbarEvent<u64>, window, cx| match event {
                 OverlayScrollbarEvent::InteractionStarted => {
-                    pane.focus_handle.focus(window);
+                    pane.focus(window);
                     cx.emit(TerminalPaneEvent::FocusRequested);
                 }
                 OverlayScrollbarEvent::OffsetRequested(rows) => {
@@ -200,13 +213,29 @@ impl TerminalPane {
             pane.update_backing_scale(window.scale_factor(), window, cx);
         })
         .detach();
-        cx.observe_window_activation(window, |_pane, _window, cx| cx.notify())
-            .detach();
+        cx.observe_window_activation(window, |pane, window, cx| {
+            pane.sync_terminal_input_focus(window);
+            cx.notify();
+        })
+        .detach();
+        cx.on_focus(&focus_handle, window, |pane, window, cx| {
+            pane.sync_terminal_input_focus(window);
+            cx.notify();
+        })
+        .detach();
+        cx.on_blur(&focus_handle, window, |pane, window, cx| {
+            pane.sync_terminal_input_focus(window);
+            cx.notify();
+        })
+        .detach();
 
         Self {
             session_factory,
             session: None,
             session_start_attempted: false,
+            native_service_session_identity: 0,
+            native_service_focus_epoch: Cell::new(0),
+            native_service_hierarchy_generation: 0,
             screen,
             accessibility,
             accessibility_notifications: Vec::new(),
@@ -260,10 +289,25 @@ impl TerminalPane {
     }
 
     pub(crate) fn focus(&self, window: &mut Window) {
+        self.advance_native_service_focus_epoch();
         self.focus_handle.focus(window);
     }
 
+    fn focus_find(&self, window: &mut Window) {
+        self.advance_native_service_focus_epoch();
+        self.find_focus_handle.focus(window);
+    }
+
+    fn advance_native_service_focus_epoch(&self) {
+        self.native_service_focus_epoch
+            .set(self.native_service_focus_epoch.get().wrapping_add(1));
+    }
+
     pub(crate) fn set_product_focus(&mut self, product_focus: TerminalProductFocus) {
+        if self.product_focus != product_focus {
+            self.native_service_hierarchy_generation =
+                self.native_service_hierarchy_generation.wrapping_add(1);
+        }
         if self.product_focus.focused_pane && !product_focus.focused_pane {
             self.end_find_state();
         }
@@ -289,6 +333,10 @@ impl TerminalPane {
         self.product_focus = product_focus;
     }
 
+    pub(crate) fn synchronize_native_service_hierarchy_generation(&mut self, generation: u64) {
+        self.native_service_hierarchy_generation = generation;
+    }
+
     fn open_find(&mut self, _: &OpenTerminalFind, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(editor) = &mut self.find_editor {
             editor.select_all();
@@ -299,7 +347,7 @@ impl TerminalPane {
                 session.set_find_query(self.find_generation, String::new());
             }
         }
-        self.find_focus_handle.focus(window);
+        self.focus_find(window);
         cx.notify();
     }
 
@@ -324,7 +372,7 @@ impl TerminalPane {
             return;
         }
         self.end_find_state();
-        self.focus_handle.focus(window);
+        self.focus(window);
         cx.notify();
     }
 
@@ -366,6 +414,7 @@ impl TerminalPane {
         let focus_gained = !self.terminal_input_focus && focused;
         if self.terminal_input_focus != focused {
             self.terminal_input_focus = focused;
+            self.advance_native_service_focus_epoch();
             self.accessibility_notifications
                 .push(AccessibilityNotification::Focus);
             self.reset_blink_phase();
@@ -471,7 +520,10 @@ impl TerminalPane {
         self._attention_task.take();
         self._event_task.take();
         self.render_lifecycle.release();
-        self.session.take();
+        if self.session.take().is_some() {
+            self.native_service_session_identity =
+                self.native_service_session_identity.wrapping_add(1);
+        }
         if let Some(id) = self.secure_input_pane.take() {
             remove_secure_input_pane(id);
         }
@@ -592,6 +644,8 @@ impl TerminalPane {
                         .handle
                         .set_find_query(self.find_generation, editor.text().to_owned());
                 }
+                self.native_service_session_identity =
+                    self.native_service_session_identity.wrapping_add(1);
                 self.session = Some(started.handle);
                 self.flush_pending_file_insertion(cx);
                 let receiver = started.events;
@@ -936,7 +990,7 @@ impl TerminalPane {
         cx: &mut Context<Self>,
     ) {
         self.pointer_modifiers = input_modifiers(event.modifiers);
-        self.focus_handle.focus(window);
+        self.focus(window);
         self.clear_attention(cx);
         let Some(button) = pointer_button(event.button) else {
             return;
@@ -1098,30 +1152,46 @@ impl TerminalPane {
             cx.write_to_clipboard(ClipboardItem::new_string(text));
             return;
         }
-        let Some(session) = &self.session else {
-            return;
-        };
+        if let Some(copy) = self.ordered_selection_copy(cx)
+            && let Err(error) = write_selection_copy(copy, cx)
+        {
+            let _ = error;
+            self.present_failure(
+                TerminalFailure::platform("write-selection-pasteboard"),
+                true,
+            );
+            cx.notify();
+        }
+    }
+
+    fn ordered_selection_copy(&mut self, cx: &mut Context<Self>) -> Option<SelectionCopy> {
+        let session = self.session.as_ref()?;
         match session.copy_selection() {
-            Ok(Some(copy)) if !copy.plain_text.is_empty() => {
-                if let Err(error) = write_selection_copy(copy, cx) {
-                    let _ = error;
-                    self.present_failure(
-                        TerminalFailure::platform("write-selection-pasteboard"),
-                        true,
-                    );
-                    cx.notify();
-                }
-            }
+            Ok(Some(copy)) if !copy.plain_text.is_empty() => Some(copy),
             Err(SelectionCopyError::Formatting) => {
                 self.present_failure(TerminalFailure::emulator("format-terminal-selection"), true);
                 cx.notify();
+                None
             }
             Err(SelectionCopyError::WorkerStopped) => {
                 self.present_failure(TerminalFailure::resource("receive-selection-reply"), true);
                 cx.notify();
+                None
             }
-            Ok(None | Some(_)) => {}
+            Ok(None | Some(_)) => None,
         }
+    }
+
+    pub(crate) fn native_service_selection(
+        &mut self,
+        origin: NativeServiceOrigin,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Option<SelectionCopy> {
+        self.sync_terminal_input_focus(window);
+        self.native_service_origin_matches(origin)
+            .then(|| self.ordered_selection_copy(cx))
+            .flatten()
     }
 
     fn paste_clipboard(&mut self, _: &PasteClipboard, window: &mut Window, cx: &mut Context<Self>) {
@@ -1154,6 +1224,27 @@ impl TerminalPane {
         }
     }
 
+    pub(crate) fn insert_native_service_text(
+        &mut self,
+        origin: NativeServiceOrigin,
+        text: String,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        self.sync_terminal_input_focus(window);
+        if !self.native_service_origin_matches(origin) || !self.terminal_input_focus {
+            return false;
+        }
+        let Ok(insertion) = NativeInsertion::service_text(text, true) else {
+            return false;
+        };
+        if insertion.text().is_empty() {
+            return false;
+        }
+        self.request_paste_text(insertion.into_text(), cx);
+        true
+    }
+
     fn insert_dropped_files(
         &mut self,
         paths: &ExternalPaths,
@@ -1179,7 +1270,7 @@ impl TerminalPane {
         };
         self.pending_file_insertion = Some(insertion);
         window.activate_window();
-        self.focus_handle.focus(window);
+        self.focus(window);
         cx.emit(TerminalPaneEvent::FocusRequested);
         cx.notify();
     }
@@ -1215,35 +1306,94 @@ impl TerminalPane {
         hovered_link_for_generation(self.hovered_link.as_ref(), self.screen.generation)
     }
 
+    pub(crate) fn native_service_status(
+        &mut self,
+        workspace_id: WorkspaceId,
+        window_id: WindowId,
+        pane_id: PaneId,
+        hierarchy_generation: u64,
+        window: &Window,
+    ) -> NativeServiceStatus {
+        self.sync_terminal_input_focus(window);
+        let session_available = self.session.is_some();
+        let capabilities = NativeServiceCapabilities::new(
+            session_available && self.native_context_actions().copy,
+            session_available && self.terminal_input_focus,
+        );
+        let origin = session_available.then(|| {
+            NativeServiceOrigin::new(
+                workspace_id,
+                window_id,
+                pane_id,
+                self.native_service_session_identity,
+                self.native_service_focus_epoch.get(),
+                hierarchy_generation,
+            )
+        });
+        NativeServiceStatus::new(capabilities, origin)
+    }
+
     fn request_paste_text(&mut self, text: String, cx: &mut Context<Self>) {
         let Some(session) = &self.session else {
             return;
         };
+        let guard = self.paste_request_guard();
         let receiver = session.request_paste(text);
-        cx.spawn(async move |this, cx| match receiver.recv().await {
-            Ok(Ok(PasteRequestOutcome::Written)) => {}
-            Ok(Ok(PasteRequestOutcome::ConfirmationRequired(confirmation))) => {
-                let _ = this.update(cx, |this, cx| {
-                    this.pending_paste = Some(confirmation);
-                    cx.notify();
-                });
-            }
-            Ok(Ok(PasteRequestOutcome::Rejected(rejection))) => {
-                let _ = this.update(cx, |this, cx| {
-                    this.status = Some(format!("Paste rejected: {rejection}"));
-                    cx.notify();
-                });
-            }
-            Ok(Err(_)) | Err(_) => {
-                let _ = this.update(cx, |this, cx| {
-                    this.status = Some(
-                        "Paste request failed before any terminal input was written".to_owned(),
-                    );
-                    cx.notify();
-                });
-            }
+        cx.spawn(async move |this, cx| {
+            let outcome = receiver.recv().await;
+            let _ = this.update(cx, |this, cx| {
+                if !this.paste_request_guard_is_current(guard) {
+                    if let Ok(Ok(PasteRequestOutcome::ConfirmationRequired(confirmation))) = outcome
+                        && this.native_service_session_identity == guard.session_identity
+                        && let Some(session) = &this.session
+                    {
+                        let _ = session.resolve_paste(confirmation.id, PasteDecision::Cancel);
+                    }
+                    return;
+                }
+                match outcome {
+                    Ok(Ok(PasteRequestOutcome::Written)) => {}
+                    Ok(Ok(PasteRequestOutcome::ConfirmationRequired(confirmation))) => {
+                        this.pending_paste = Some(confirmation);
+                        cx.notify();
+                    }
+                    Ok(Ok(PasteRequestOutcome::Rejected(rejection))) => {
+                        this.status = Some(format!("Paste rejected: {rejection}"));
+                        cx.notify();
+                    }
+                    Ok(Err(_)) | Err(_) => {
+                        this.status = Some(
+                            "Paste request failed before any terminal input was written".to_owned(),
+                        );
+                        cx.notify();
+                    }
+                }
+            });
         })
         .detach();
+    }
+
+    fn paste_request_guard(&self) -> PasteRequestGuard {
+        PasteRequestGuard {
+            session_identity: self.native_service_session_identity,
+            focus_epoch: self.native_service_focus_epoch.get(),
+            hierarchy_generation: self.native_service_hierarchy_generation,
+        }
+    }
+
+    fn paste_request_guard_is_current(&self, guard: PasteRequestGuard) -> bool {
+        self.session.is_some()
+            && self.terminal_input_focus
+            && self.native_service_session_identity == guard.session_identity
+            && self.native_service_focus_epoch.get() == guard.focus_epoch
+            && self.native_service_hierarchy_generation == guard.hierarchy_generation
+    }
+
+    fn native_service_origin_matches(&self, origin: NativeServiceOrigin) -> bool {
+        self.session.is_some()
+            && self.native_service_session_identity == origin.session_identity()
+            && self.native_service_focus_epoch.get() == origin.focus_epoch()
+            && self.native_service_hierarchy_generation == origin.hierarchy_generation()
     }
 
     fn export_diagnostics(
@@ -1314,7 +1464,7 @@ impl TerminalPane {
             return;
         };
         let receiver = session.resolve_paste(confirmation.id, decision);
-        self.focus_handle.focus(window);
+        self.focus(window);
         cx.notify();
         cx.spawn(async move |this, cx| match receiver.recv().await {
             Ok(Ok(PasteResolution::Written | PasteResolution::Cancelled)) => {}
@@ -1371,7 +1521,7 @@ impl TerminalPane {
         if let Some(session) = &self.session {
             session.resolve_osc52_authorization(request.id, decision);
         }
-        self.focus_handle.focus(window);
+        self.focus(window);
         cx.notify();
     }
 
@@ -1428,6 +1578,7 @@ impl TerminalPane {
         let previous_pane = pane.clone();
         let next_pane = pane.clone();
         let close_pane = pane.clone();
+        let input_pane = pane.clone();
         let focus_handle = self.find_focus_handle.clone();
         let input_focus_handle = focus_handle.clone();
 
@@ -1472,6 +1623,9 @@ impl TerminalPane {
                         .text_color(gpui_color(text_color))
                         .whitespace_nowrap()
                         .on_click(move |_, window, cx| {
+                            let _ = input_pane.update(cx, |pane, _| {
+                                pane.advance_native_service_focus_epoch();
+                            });
                             input_focus_handle.focus(window);
                             cx.stop_propagation();
                         })
@@ -2825,6 +2979,25 @@ mod tests {
         (pane, cx, records)
     }
 
+    fn current_native_service_origin(
+        pane: &Entity<TerminalPane>,
+        cx: &mut VisualTestContext,
+    ) -> NativeServiceOrigin {
+        cx.update(|window, cx| {
+            pane.update(cx, |pane, _| {
+                pane.native_service_status(
+                    WorkspaceId::new(1),
+                    WindowId::new(1),
+                    PaneId::new(1),
+                    pane.native_service_hierarchy_generation,
+                    window,
+                )
+                .origin
+                .expect("the connected test terminal must expose its Service origin")
+            })
+        })
+    }
+
     #[gpui::test]
     fn command_equals_should_increase_terminal_font_size(cx: &mut TestAppContext) {
         let (pane, cx) = terminal_pane(cx);
@@ -3276,6 +3449,216 @@ mod tests {
             cx.read_from_clipboard().and_then(|item| item.text()),
             Some("new selection".to_owned())
         );
+    }
+
+    #[gpui::test]
+    fn native_service_selection_uses_the_ordered_terminal_selection_query(cx: &mut TestAppContext) {
+        let (pane, cx, records) = terminal_pane_with_selection_copy(
+            cx,
+            SelectionCopy {
+                plain_text: "authoritative selection".to_owned(),
+                html: None,
+            },
+        );
+
+        let origin = current_native_service_origin(&pane, cx);
+        let selection = cx.update(|window, cx| {
+            pane.update(cx, |pane, cx| {
+                pane.native_service_selection(origin, window, cx)
+            })
+        });
+        let requested_selection = records
+            .commands()
+            .iter()
+            .any(|call| matches!(call.command, RecordedSessionCommand::RequestSelectionCopy));
+
+        assert_eq!(
+            (selection.map(|copy| copy.plain_text), requested_selection),
+            (Some("authoritative selection".to_owned()), true),
+        );
+    }
+
+    #[gpui::test]
+    fn native_service_return_routes_through_paste_payload_instead_of_ime(cx: &mut TestAppContext) {
+        let confirmation = PasteConfirmation {
+            id: crate::terminal::PasteConfirmationId::new(17),
+            byte_len: 12,
+            line_count: 2,
+            risk: crate::terminal::PasteRisk {
+                multiline: true,
+                control_bytes: false,
+                closing_fence: false,
+            },
+        };
+        let (pane, cx, records) = terminal_pane_with_paste_response(
+            cx,
+            Ok(PasteRequestOutcome::ConfirmationRequired(confirmation)),
+            Ok(PasteResolution::Cancelled),
+        );
+        let origin = current_native_service_origin(&pane, cx);
+
+        let accepted = cx.update(|window, cx| {
+            pane.update(cx, |pane, cx| {
+                pane.insert_native_service_text(origin, "first\nsecond".to_owned(), window, cx)
+            })
+        });
+        cx.run_until_parked();
+        let commands = records.commands();
+        let paste_payload = commands.iter().find_map(|call| match &call.command {
+            RecordedSessionCommand::RequestPaste(text) => Some(text.clone()),
+            _ => None,
+        });
+        let ime_input = commands
+            .iter()
+            .any(|call| matches!(call.command, RecordedSessionCommand::Key(_)));
+        let pending_confirmation = pane.read_with(cx, |pane, _| pane.pending_paste);
+
+        assert_eq!(
+            (accepted, paste_payload, ime_input, pending_confirmation,),
+            (
+                true,
+                Some("first\nsecond".to_owned()),
+                false,
+                Some(confirmation),
+            ),
+        );
+    }
+
+    #[gpui::test]
+    fn focus_loss_before_paste_reply_cancels_stale_confirmation(cx: &mut TestAppContext) {
+        let confirmation = PasteConfirmation {
+            id: crate::terminal::PasteConfirmationId::new(18),
+            byte_len: 12,
+            line_count: 2,
+            risk: crate::terminal::PasteRisk {
+                multiline: true,
+                control_bytes: false,
+                closing_fence: false,
+            },
+        };
+        let (pane, cx, records) = terminal_pane_with_paste_response(
+            cx,
+            Ok(PasteRequestOutcome::ConfirmationRequired(confirmation)),
+            Ok(PasteResolution::Cancelled),
+        );
+        let origin = current_native_service_origin(&pane, cx);
+
+        let accepted = cx.update(|window, cx| {
+            pane.update(cx, |pane, cx| {
+                let accepted =
+                    pane.insert_native_service_text(origin, "first\nsecond".to_owned(), window, cx);
+                pane.focus_find(window);
+                accepted
+            })
+        });
+        cx.run_until_parked();
+
+        assert!(accepted);
+        assert_eq!(pane.read_with(cx, |pane, _| pane.pending_paste), None);
+        assert!(records.commands().iter().any(|call| {
+            call.command
+                == RecordedSessionCommand::ResolvePaste(confirmation.id, PasteDecision::Cancel)
+        }));
+    }
+
+    #[gpui::test]
+    fn hierarchy_change_before_paste_reply_cancels_stale_confirmation(cx: &mut TestAppContext) {
+        let confirmation = PasteConfirmation {
+            id: crate::terminal::PasteConfirmationId::new(19),
+            byte_len: 12,
+            line_count: 2,
+            risk: crate::terminal::PasteRisk {
+                multiline: true,
+                control_bytes: false,
+                closing_fence: false,
+            },
+        };
+        let (pane, cx, records) = terminal_pane_with_paste_response(
+            cx,
+            Ok(PasteRequestOutcome::ConfirmationRequired(confirmation)),
+            Ok(PasteResolution::Cancelled),
+        );
+        let origin = current_native_service_origin(&pane, cx);
+
+        let accepted = cx.update(|window, cx| {
+            pane.update(cx, |pane, cx| {
+                let accepted =
+                    pane.insert_native_service_text(origin, "first\nsecond".to_owned(), window, cx);
+                pane.synchronize_native_service_hierarchy_generation(
+                    origin.hierarchy_generation().wrapping_add(1),
+                );
+                accepted
+            })
+        });
+        cx.run_until_parked();
+
+        assert!(accepted);
+        assert_eq!(pane.read_with(cx, |pane, _| pane.pending_paste), None);
+        assert!(records.commands().iter().any(|call| {
+            call.command
+                == RecordedSessionCommand::ResolvePaste(confirmation.id, PasteDecision::Cancel)
+        }));
+    }
+
+    #[gpui::test]
+    fn responder_focus_away_and_back_invalidates_the_previous_service_origin(
+        cx: &mut TestAppContext,
+    ) {
+        let (pane, cx, records) = terminal_pane_with_paste_response(
+            cx,
+            Ok(PasteRequestOutcome::Written),
+            Ok(PasteResolution::Written),
+        );
+        let origin = current_native_service_origin(&pane, cx);
+
+        let accepted = cx.update(|window, cx| {
+            pane.update(cx, |pane, cx| {
+                pane.focus_find(window);
+                pane.focus(window);
+                pane.insert_native_service_text(origin, "stale return".to_owned(), window, cx)
+            })
+        });
+
+        assert!(!accepted);
+        assert!(
+            !records
+                .commands()
+                .iter()
+                .any(|call| { matches!(call.command, RecordedSessionCommand::RequestPaste(_)) })
+        );
+    }
+
+    #[gpui::test]
+    fn native_service_return_is_rejected_without_terminal_input_focus(cx: &mut TestAppContext) {
+        let (pane, cx, records) = terminal_pane_with_paste_response(
+            cx,
+            Ok(PasteRequestOutcome::Written),
+            Ok(PasteResolution::Written),
+        );
+        let origin = current_native_service_origin(&pane, cx);
+        pane.update(cx, |pane, _| {
+            pane.set_product_focus(TerminalProductFocus {
+                active_workspace: false,
+                ..TerminalProductFocus::default()
+            });
+        });
+
+        let accepted = cx.update(|window, cx| {
+            pane.update(cx, |pane, cx| {
+                pane.insert_native_service_text(
+                    origin,
+                    "must not be inserted".to_owned(),
+                    window,
+                    cx,
+                )
+            })
+        });
+        let requested_paste = records
+            .commands()
+            .iter()
+            .any(|call| matches!(call.command, RecordedSessionCommand::RequestPaste(_)));
+
+        assert_eq!((accepted, requested_paste), (false, false));
     }
 
     #[gpui::test]

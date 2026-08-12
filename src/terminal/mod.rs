@@ -47,13 +47,18 @@ pub(crate) use hyperlink::HyperlinkTarget;
 pub(crate) use key::{
     InputModifiers, KeyAction, KeyInput, KeyInputError, OptionAsAltPolicy, PhysicalKey,
 };
-pub(crate) use native_services::{NativeContextActions, NativeInsertion};
+pub(crate) use native_services::{
+    NativeContextActions, NativeInsertion, NativeServiceCapabilities, NativeServiceOrigin,
+    NativeServiceStatus,
+};
 #[cfg(test)]
 pub(crate) use osc52::Osc52AuthorizationId;
 pub(crate) use osc52::{
     Osc52Access, Osc52AuthorizationDecision, Osc52AuthorizationRequest, Osc52Target,
 };
-pub(crate) use paste::{PasteConfirmation, PasteDecision, PasteRequestOutcome, PasteResolution};
+pub(crate) use paste::{
+    MAX_PASTE_BYTES, PasteConfirmation, PasteDecision, PasteRequestOutcome, PasteResolution,
+};
 #[cfg(test)]
 pub(crate) use paste::{PasteConfirmationId, PasteRisk};
 pub(crate) use selection::SelectionCopy;
