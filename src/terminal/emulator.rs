@@ -3985,7 +3985,7 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_selection_presence_follows_active_screen_ownership() {
+    fn snapshot_selection_presence_reflects_screen_switch_clearing() {
         let mut emulator = emulator(12, 2);
         emulator.feed(b"hello world");
         select_first_five(&mut emulator, false);
@@ -4003,8 +4003,15 @@ mod tests {
         emulator.feed(b"\x1b[?1049l");
         let restored = emulator.snapshot().unwrap().unwrap();
         assert_eq!(restored.active_screen, ActiveScreenSnapshot::Primary);
-        assert!(restored.selection_present);
-        assert!(restored.damage.selection_presence);
+        assert!(!restored.selection_present);
+        assert!(!restored.damage.selection_presence);
+        assert!(
+            restored
+                .rows
+                .iter()
+                .flat_map(|row| row.iter())
+                .all(|cell| !cell.selected)
+        );
     }
 
     #[test]
@@ -4625,7 +4632,10 @@ mod tests {
             *value == Some(second_file.canonicalize().unwrap().to_str().unwrap())
         }));
         let first_link = snapshot.rows[0][0].hyperlink.as_ref().unwrap();
-        assert_eq!(first_link.value, file.to_str().unwrap());
+        assert_eq!(
+            first_link.value,
+            file.canonicalize().unwrap().to_str().unwrap()
+        );
         assert_eq!(first_link.activation_url(), None);
         fs::remove_dir_all(directory).unwrap();
         fs::remove_dir_all(second_directory).unwrap();
@@ -4657,7 +4667,7 @@ mod tests {
             snapshot
                 .rows
                 .iter()
-                .flatten()
+                .flat_map(|row| row.iter())
                 .all(|cell| cell.hyperlink.is_none())
         );
     }

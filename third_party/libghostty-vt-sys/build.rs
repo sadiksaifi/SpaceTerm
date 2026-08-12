@@ -5,9 +5,23 @@ use std::process::Command;
 /// Pinned ghostty commit. Update this to pull a newer version.
 const GHOSTTY_REPO: &str = "https://github.com/ghostty-org/ghostty.git";
 const GHOSTTY_COMMIT: &str = "a887df42c56f6de86c0fe6da9c4eeca37931e083";
-const SPACETERM_PATCHES: &[&str] = &[
-    "patches/spaceterm-kitty-graphics.patch",
-    "patches/spaceterm-terminal-effects.patch",
+const BUILD_MANIFEST_DIR: &str = env!("CARGO_MANIFEST_DIR");
+const BUILD_SCRIPT_FILES: &[&str] = &["spaceterm-terminal-effects-build.rs", "build.rs"];
+
+struct SpaceTermPatch {
+    relative_path: &'static str,
+    compiled_source: &'static [u8],
+}
+
+const SPACETERM_PATCHES: &[SpaceTermPatch] = &[
+    SpaceTermPatch {
+        relative_path: "patches/spaceterm-kitty-graphics.patch",
+        compiled_source: include_bytes!("patches/spaceterm-kitty-graphics.patch"),
+    },
+    SpaceTermPatch {
+        relative_path: "patches/spaceterm-terminal-effects.patch",
+        compiled_source: include_bytes!("patches/spaceterm-terminal-effects.patch"),
+    },
 ];
 
 #[derive(Clone, Copy)]
@@ -66,6 +80,8 @@ impl LinkMode {
 }
 
 fn main() {
+    let manifest_dir = manifest_dir();
+
     // docs.rs has no Zig toolchain. The checked-in bindings in src/bindings.rs
     // are enough for generating documentation, so skip the entire native
     // build when running under docs.rs.
@@ -82,10 +98,19 @@ fn main() {
     println!("cargo:rerun-if-env-changed=HOST");
     println!("cargo:rerun-if-env-changed=DEBUG");
     println!("cargo:rerun-if-env-changed=OPT_LEVEL");
-    println!("cargo:rerun-if-changed=crates/libghostty-vt-sys/build.rs");
-    for patch in SPACETERM_PATCHES {
-        println!("cargo:rerun-if-changed={patch}");
+    for build_script in BUILD_SCRIPT_FILES {
+        println!(
+            "cargo:rerun-if-changed={}",
+            manifest_dir.join(build_script).display()
+        );
     }
+    for patch in SPACETERM_PATCHES {
+        println!(
+            "cargo:rerun-if-changed={}",
+            manifest_dir.join(patch.relative_path).display()
+        );
+    }
+    verify_compiled_patch_inputs(&manifest_dir);
 
     // An explicit source override should stay authoritative even when the
     // pkg-config feature is enabled, so local Ghostty checkouts remain easy to
@@ -104,6 +129,33 @@ fn main() {
     }
 
     build_vendored(link_mode);
+}
+
+fn manifest_dir() -> PathBuf {
+    let runtime_manifest_dir =
+        PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("manifest dir must be set"));
+    let compiled_manifest_dir = Path::new(BUILD_MANIFEST_DIR);
+    assert_eq!(
+        runtime_manifest_dir, compiled_manifest_dir,
+        "Cargo reused a libghostty-vt-sys build script compiled for a different worktree; \
+         remove this package's build-script artifacts from the shared target directory"
+    );
+    runtime_manifest_dir
+}
+
+fn verify_compiled_patch_inputs(manifest_dir: &Path) {
+    for patch in SPACETERM_PATCHES {
+        let path = manifest_dir.join(patch.relative_path);
+        let on_disk = std::fs::read(&path)
+            .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
+        assert_eq!(
+            on_disk,
+            patch.compiled_source,
+            "compiled build script contains stale patch data for {}; remove this package's \
+             build-script artifacts from the shared target directory",
+            path.display()
+        );
+    }
 }
 
 /// Build libghostty-vt from source via zig. The zig build itself generates
@@ -126,6 +178,7 @@ fn build_vendored(link_mode: LinkMode) {
         }
         Err(_) => fetch_ghostty(&out_dir),
     };
+    verify_required_source_exports(&ghostty_dir);
 
     // Build libghostty-vt via zig.
     let install_prefix = out_dir.join("ghostty-install");
@@ -182,27 +235,30 @@ fn build_vendored(link_mode: LinkMode) {
     let search_dirs = library_search_dirs(&target, &install_prefix);
     warn_unused_xcframework(&lib_dir);
 
-    let has_requested_library = search_dirs.iter().any(|dir| {
-        std::fs::read_dir(dir)
-            .unwrap_or_else(|error| panic!("failed to read {}: {error}", dir.display()))
-            .any(|entry| {
-                let entry = entry.unwrap_or_else(|error| {
-                    panic!("failed to read entry from {}: {error}", dir.display())
-                });
-                let file_name = entry.file_name();
-                let Some(file_name) = file_name.to_str() else {
-                    return false;
-                };
-
-                link_mode.matches_library(&target, file_name)
-            })
-    });
+    let requested_libraries = search_dirs
+        .iter()
+        .flat_map(|dir| {
+            std::fs::read_dir(dir)
+                .unwrap_or_else(|error| panic!("failed to read {}: {error}", dir.display()))
+                .filter_map(|entry| {
+                    let entry = entry.unwrap_or_else(|error| {
+                        panic!("failed to read entry from {}: {error}", dir.display())
+                    });
+                    let file_name = entry.file_name();
+                    let file_name = file_name.to_str()?;
+                    link_mode
+                        .matches_library(&target, file_name)
+                        .then(|| entry.path())
+                })
+        })
+        .collect::<Vec<_>>();
     assert!(
-        has_requested_library,
+        !requested_libraries.is_empty(),
         "expected libghostty-vt {} in one of {:?}",
         link_mode.artifact_kind(),
         search_dirs
     );
+    verify_required_library_exports(&target, link_mode, &requested_libraries);
     assert!(
         include_dir.join("ghostty").join("vt.h").exists(),
         "expected header at {}",
@@ -217,6 +273,72 @@ fn build_vendored(link_mode: LinkMode) {
         LinkMode::Static => println!("cargo:rustc-link-lib=static=ghostty-vt"),
     }
     emit_include_metadata(&[include_dir]);
+}
+
+fn verify_required_source_exports(ghostty_dir: &Path) {
+    const REQUIRED_EXPORTS: &[(&str, &str)] = &[
+        (
+            "include/ghostty/vt/grid_ref.h",
+            "ghostty_grid_ref_hyperlink_userdata(",
+        ),
+        (
+            "src/terminal/c/grid_ref.zig",
+            "pub fn grid_ref_hyperlink_userdata(",
+        ),
+        (
+            "src/terminal/c/main.zig",
+            "pub const grid_ref_hyperlink_userdata = grid_ref.grid_ref_hyperlink_userdata;",
+        ),
+        (
+            "src/lib_vt.zig",
+            "@export(&c.grid_ref_hyperlink_userdata, .{ .name = \"ghostty_grid_ref_hyperlink_userdata\" });",
+        ),
+    ];
+
+    for (relative_path, required_source) in REQUIRED_EXPORTS {
+        let path = ghostty_dir.join(relative_path);
+        let source = std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
+        assert!(
+            source.contains(required_source),
+            "patched Ghostty source {} is missing required export `{required_source}`",
+            path.display()
+        );
+    }
+}
+
+fn verify_required_library_exports(
+    target: &str,
+    link_mode: LinkMode,
+    requested_libraries: &[PathBuf],
+) {
+    if !target.contains("darwin") || !matches!(link_mode, LinkMode::Static) {
+        return;
+    }
+
+    const REQUIRED_SYMBOL: &str = "ghostty_grid_ref_hyperlink_userdata";
+    for library in requested_libraries {
+        let output = Command::new("nm")
+            .arg("-gU")
+            .arg(library)
+            .output()
+            .unwrap_or_else(|error| panic!("failed to inspect {}: {error}", library.display()));
+        assert!(
+            output.status.success(),
+            "nm -gU failed while inspecting {}: {}",
+            library.display(),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let defines_required_symbol = String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter_map(|line| line.split_whitespace().last())
+            .any(|symbol| symbol.trim_start_matches('_') == REQUIRED_SYMBOL);
+        assert!(
+            defines_required_symbol,
+            "built libghostty-vt archive {} does not define external symbol `{REQUIRED_SYMBOL}`",
+            library.display()
+        );
+    }
 }
 
 fn warn_unused_xcframework(lib_dir: &Path) {
@@ -370,9 +492,9 @@ fn fetch_ghostty(out_dir: &Path) -> PathBuf {
 }
 
 fn apply_spaceterm_patch(src_dir: &Path) {
-    let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("manifest dir"));
+    let manifest_dir = manifest_dir();
     for patch in SPACETERM_PATCHES {
-        apply_patch(src_dir, &manifest_dir.join(patch));
+        apply_patch(src_dir, &manifest_dir.join(patch.relative_path));
     }
 }
 

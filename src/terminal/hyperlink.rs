@@ -132,6 +132,7 @@ impl HyperlinkTarget {
 
     /// Returns the canonical file URI immediately after construction. Callers
     /// must not retain this as proof that the filesystem entry is still safe.
+    #[cfg(test)]
     pub(crate) fn canonical_file_url(&self) -> Option<String> {
         (self.kind == HyperlinkKind::LocalPath).then(|| file_url(&self.value))
     }

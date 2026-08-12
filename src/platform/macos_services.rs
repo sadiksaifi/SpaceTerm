@@ -380,9 +380,7 @@ extern "C" fn valid_requestor(this: &Object, _: Sel, send_type: id, return_type:
     let operation = catch_unwind(AssertUnwindSafe(|| {
         let send_type = unsafe { service_data_type(send_type) };
         let return_type = unsafe { service_data_type(return_type) };
-        let Some(state) = (unsafe { services_state(this) }) else {
-            return None;
-        };
+        let state = (unsafe { services_state(this) })?;
         let status = state.endpoint.status();
         let accepted = accepts_service_request(status.capabilities, send_type, return_type);
         if !accepted || status.origin.is_none() {

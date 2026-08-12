@@ -2,6 +2,7 @@ mod overlay_scrollbar;
 mod pane_action_menu;
 mod pane_host;
 mod render_lifecycle;
+mod terminal_context_menu;
 mod terminal_element;
 mod terminal_find;
 mod terminal_focus;

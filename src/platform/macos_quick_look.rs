@@ -108,7 +108,7 @@ impl QuickLookPanel for NativeQuickLookPanel {
                 if url == nil {
                     return Err(QuickLookError::PlatformUnavailable);
                 }
-                let window = unsafe { OwnedQuickLookWindow::new()? };
+                let window = OwnedQuickLookWindow::new()?;
                 let _: () = msg_send![window.preview, setPreviewItem: url];
                 let _: () = msg_send![window.preview, refreshPreviewItem];
 

@@ -87,6 +87,43 @@ index 0d1add82b..b9bc27d48 100644
          @export(&c.grid_ref_style, .{ .name = "ghostty_grid_ref_style" });
          @export(&c.tracked_grid_ref_free, .{ .name = "ghostty_tracked_grid_ref_free" });
          @export(&c.tracked_grid_ref_has_value, .{ .name = "ghostty_tracked_grid_ref_has_value" });
+diff --git a/src/lib/types.zig b/src/lib/types.zig
+index 655fdc220..cee22a89b 100644
+--- a/src/lib/types.zig
++++ b/src/lib/types.zig
+@@ -3,15 +3,29 @@ pub const String = extern struct {
+     len: usize,
+ 
+     pub fn init(zig: anytype) String {
+-        return switch (@TypeOf(zig)) {
+-            []u8, []const u8 => .{
++        return switch (@typeInfo(@TypeOf(zig))) {
++            .pointer => |pointer| if (pointer.size == .slice and
++                pointer.child == u8 and
++                !pointer.is_volatile) .{
+                 .ptr = zig.ptr,
+                 .len = zig.len,
+-            },
++            } else @compileError("String.init expects a mutable or const byte slice"),
++            else => @compileError("String.init expects a mutable or const byte slice"),
+         };
+     }
+ };
+ 
++comptime {
++    var mutable_storage: [1]u8 = .{0};
++    const mutable: []u8 = mutable_storage[0..];
++    const mutable_string: String = String.init(mutable);
++    _ = mutable_string;
++
++    const immutable: []const u8 = "";
++    const immutable_string: String = String.init(immutable);
++    _ = immutable_string;
++}
++
+ pub const Buffer = extern struct {
+     ptr: ?[*]u8 = null,
+     cap: usize = 0,
 diff --git a/src/terminal/Screen.zig b/src/terminal/Screen.zig
 index 6c4db3237..1b334b0c8 100644
 --- a/src/terminal/Screen.zig

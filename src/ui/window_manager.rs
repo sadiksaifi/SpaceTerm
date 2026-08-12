@@ -953,6 +953,7 @@ mod tests {
         let (manager, cx) =
             cx.add_window_view(|window, cx| WindowManager::new(session_factory, window, cx));
         cx.update(|window, cx| {
+            window.activate_window();
             manager.update(cx, |manager, cx| manager.focus(window, cx));
         });
         cx.run_until_parked();

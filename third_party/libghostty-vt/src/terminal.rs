@@ -1368,7 +1368,12 @@ pub enum HyperlinkResolution {
     Passthrough,
     /// Replace the URI and retain opaque metadata beside the hyperlink entry.
     /// Neither byte vector is borrowed after the callback returns.
-    Replace { uri: Vec<u8>, userdata: Vec<u8> },
+    Replace {
+        /// URI bytes to store for formatting and activation.
+        uri: Vec<u8>,
+        /// Opaque resolver metadata retained beside the URI.
+        userdata: Vec<u8>,
+    },
     /// End any active hyperlink and do not start a replacement.
     Suppress,
 }
@@ -1376,23 +1381,36 @@ pub enum HyperlinkResolution {
 /// Accepted OSC 133 semantic prompt action.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SemanticPromptAction {
+    /// Start a prompt on a fresh line.
     FreshLine,
+    /// Start a new prompt after first moving to a fresh line.
     FreshLineNewPrompt,
+    /// Mark the beginning of a new command.
     NewCommand,
+    /// Mark the beginning of prompt output.
     PromptStart,
+    /// End the prompt and begin command input.
     EndPromptStartInput,
+    /// End the prompt, begin input, and terminate the current line.
     EndPromptStartInputTerminateEol,
+    /// End command input and begin command output.
     EndInputStartOutput,
+    /// Mark the end of the current command.
     EndCommand,
 }
 
 /// Accepted ConEmu progress state.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ProgressState {
+    /// Remove the current progress indication.
     Remove,
+    /// Set determinate progress.
     Set,
+    /// Present the progress indication as failed.
     Error,
+    /// Present indeterminate progress.
     Indeterminate,
+    /// Present the progress indication as paused.
     Pause,
 }
 

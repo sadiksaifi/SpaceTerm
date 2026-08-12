@@ -17,11 +17,17 @@ use gpui_symbols::{Icon, SymbolWeight};
 
 use super::overlay_scrollbar::{OverlayScrollbar, OverlayScrollbarEvent, ScrollMetrics};
 use super::render_lifecycle::{RenderLifecycle, ScaleChange, SurfaceVisibility};
+use super::terminal_context_menu::{
+    TERMINAL_CONTEXT_MENU_HEIGHT, TERMINAL_CONTEXT_MENU_WIDTH, TerminalContextMenuCommand,
+    render_terminal_context_menu,
+};
 use super::terminal_element::{
     TerminalGridCache, TerminalGridConfiguration, TerminalGridElement, terminal_grid_content_bounds,
 };
 use super::terminal_find::{FindEditor, FindInputElement};
-use super::terminal_focus::{TerminalFocusCoordinator, TerminalFocusFacts, TerminalProductFocus};
+use super::terminal_focus::{
+    TerminalFocusBlocker, TerminalFocusCoordinator, TerminalFocusFacts, TerminalProductFocus,
+};
 use super::terminal_graphics::TerminalGraphicsCache;
 use super::terminal_ime::{PreeditLayout, PreeditPosition, TerminalIme, layout_preedit};
 use super::{
@@ -38,6 +44,7 @@ use crate::platform::macos_keyboard::{
     KeyTranslation, MacosKeyboardBridge, NativeKeyEvent, NativeKeyEventKind, UnhandledKeyEvent,
 };
 use crate::platform::macos_pasteboard::read_file_urls;
+use crate::platform::macos_quick_look::{MacosQuickLook, QuickLookPlatform};
 use crate::platform::macos_render_lifecycle::current_window_visibility;
 use crate::platform::macos_scroll::current_wheel_phase;
 use crate::platform::macos_secure_input::{
@@ -47,7 +54,8 @@ use crate::platform::macos_secure_input::{
 };
 use crate::terminal::attention::AttentionState;
 use crate::terminal::geometry::{
-    BackingScale, CellGridSize, LogicalCellSize, LogicalPosition, LogicalSize, TerminalGeometry,
+    BackingPosition, BackingScale, CellGridSize, LogicalCellSize, LogicalPosition, LogicalSize,
+    TerminalGeometry,
 };
 use crate::terminal::{
     AccessibilityGeometry, AccessibilityNotification, AttentionFacts, DiagnosticBundle,
@@ -56,10 +64,10 @@ use crate::terminal::{
     NativeServiceOrigin, NativeServiceStatus, OptionAsAltPolicy, Osc52Access,
     Osc52AuthorizationDecision, Osc52AuthorizationRequest, Osc52Target, PaneTerminalState,
     PasteConfirmation, PasteDecision, PasteRequestOutcome, PasteResolution, PhysicalKey,
-    PointerButton, PointerInput, PointerPhase, ScreenSnapshot, SelectionCopy, SelectionCopyError,
-    SessionEvent, ShiftSelectionPolicy, SurfacePosition, TerminalAccessibilityModel,
-    TerminalFailure, TerminalSessionHandle, UnhandledKeyDiagnostic, WheelInput, WheelPhase,
-    WorkspaceTerminalSessionFactory,
+    PointerButton, PointerInput, PointerPhase, QuickLookTarget, ScreenSnapshot, SelectionCopy,
+    SelectionCopyError, SessionEvent, ShiftSelectionPolicy, SurfacePosition,
+    TerminalAccessibilityModel, TerminalFailure, TerminalSessionHandle, UnhandledKeyDiagnostic,
+    WheelInput, WheelPhase, WorkspaceTerminalSessionFactory,
 };
 use crate::theme::{ACTIVE_THEME, Color};
 
@@ -96,6 +104,17 @@ struct PasteRequestGuard {
     session_identity: u64,
     focus_epoch: u64,
     hierarchy_generation: u64,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct TerminalContextMenuState {
+    left: Pixels,
+    top: Pixels,
+    generation: crate::terminal::PresentationGeneration,
+    position: SurfacePosition,
+    link: Option<crate::terminal::HyperlinkTarget>,
+    selection_present: bool,
+    quick_look_eligible: bool,
 }
 
 pub(crate) struct TerminalPane {
@@ -155,6 +174,8 @@ pub(crate) struct TerminalPane {
         crate::terminal::PresentationGeneration,
         crate::terminal::HyperlinkTarget,
     )>,
+    quick_look: Box<dyn QuickLookPlatform>,
+    context_menu: Option<TerminalContextMenuState>,
     blink_phase_visible: bool,
     blink_generation: u64,
     _blink_task: Option<Task<()>>,
@@ -165,6 +186,20 @@ pub(crate) struct TerminalPane {
 impl TerminalPane {
     pub(crate) fn new(
         session_factory: WorkspaceTerminalSessionFactory,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        Self::new_with_quick_look(
+            session_factory,
+            Box::new(MacosQuickLook::default()),
+            window,
+            cx,
+        )
+    }
+
+    fn new_with_quick_look(
+        session_factory: WorkspaceTerminalSessionFactory,
+        quick_look: Box<dyn QuickLookPlatform>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -280,6 +315,8 @@ impl TerminalPane {
             pending_osc52: None,
             hovered_link: None,
             pressed_link: None,
+            quick_look,
+            context_menu: None,
             blink_phase_visible: true,
             blink_generation: 0,
             _blink_task: None,
@@ -315,8 +352,15 @@ impl TerminalPane {
             || !product_focus.active_window
             || !product_focus.focused_pane
             || product_focus.blocker.is_some();
+        let pane_inactive = !product_focus.active_workspace
+            || !product_focus.active_window
+            || !product_focus.focused_pane;
+        if pane_inactive {
+            self.quick_look.dismiss();
+        }
         if native_service_blocked {
             self.pending_file_insertion = None;
+            self.context_menu = None;
         }
         if native_service_blocked
             && let Some(confirmation) = self.pending_paste.take()
@@ -398,6 +442,11 @@ impl TerminalPane {
 
     pub(crate) fn terminal_input_focused(&self, window: &Window) -> bool {
         let window_active = window.is_window_active();
+        let blocker = if self.context_menu.is_some() {
+            Some(TerminalFocusBlocker::ContextMenu)
+        } else {
+            self.product_focus.blocker
+        };
         TerminalFocusCoordinator::is_focused(TerminalFocusFacts {
             active_workspace: self.product_focus.active_workspace,
             active_window: self.product_focus.active_window,
@@ -405,7 +454,7 @@ impl TerminalPane {
             responder: self.focus_handle.is_focused(window),
             operating_system_window_key: window_active,
             application_active: window_active,
-            blocker: self.product_focus.blocker,
+            blocker,
         })
     }
 
@@ -520,6 +569,8 @@ impl TerminalPane {
         self._attention_task.take();
         self._event_task.take();
         self.render_lifecycle.release();
+        self.context_menu = None;
+        self.quick_look.dismiss();
         if self.session.take().is_some() {
             self.native_service_session_identity =
                 self.native_service_session_identity.wrapping_add(1);
@@ -737,6 +788,8 @@ impl TerminalPane {
                 }
             }
             SessionEvent::Exited(status) => {
+                self.context_menu = None;
+                self.quick_look.dismiss();
                 self.hidden_input = false;
                 self.sync_secure_input();
                 self.status = Some(status.to_string());
@@ -744,6 +797,8 @@ impl TerminalPane {
                 cx.emit(TerminalPaneEvent::Exited);
             }
             SessionEvent::Failed(failure) => {
+                self.context_menu = None;
+                self.quick_look.dismiss();
                 self.hidden_input = false;
                 self.sync_secure_input();
                 let failure = TerminalFailure::from_session(&failure);
@@ -753,6 +808,13 @@ impl TerminalPane {
     }
 
     fn on_key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if self.context_menu.is_some() {
+            if event.keystroke.key == "escape" {
+                self.dismiss_context_menu(window, cx);
+                cx.stop_propagation();
+            }
+            return;
+        }
         if self.find_focus_handle.is_focused(window) && self.find_editor.is_some() {
             let key = event.keystroke.key.as_str();
             let extend = event.keystroke.modifiers.shift;
@@ -989,6 +1051,10 @@ impl TerminalPane {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.context_menu.is_some() {
+            cx.stop_propagation();
+            return;
+        }
         self.pointer_modifiers = input_modifiers(event.modifiers);
         self.focus(window);
         self.clear_attention(cx);
@@ -1002,6 +1068,17 @@ impl TerminalPane {
         let Some(position) = self.surface_position(event.position, false) else {
             return;
         };
+
+        if opens_terminal_context_menu(
+            button,
+            self.screen.mouse_tracking,
+            event.modifiers.shift,
+            self.shift_selection,
+        ) {
+            self.open_context_menu(event, position, window, cx);
+            cx.stop_propagation();
+            return;
+        }
 
         if button == PointerButton::Left
             && event.modifiers.platform
@@ -1032,6 +1109,10 @@ impl TerminalPane {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.context_menu.is_some() {
+            cx.stop_propagation();
+            return;
+        }
         self.pointer_modifiers = input_modifiers(event.modifiers);
         let dragging = self.pressed_button.is_some();
         let Some(position) = self.surface_position(event.position, dragging) else {
@@ -1062,6 +1143,10 @@ impl TerminalPane {
     }
 
     fn on_mouse_up(&mut self, event: &MouseUpEvent, _window: &mut Window, cx: &mut Context<Self>) {
+        if self.context_menu.is_some() {
+            cx.stop_propagation();
+            return;
+        }
         self.pointer_modifiers = input_modifiers(event.modifiers);
         let Some(button) = pointer_button(event.button) else {
             return;
@@ -1102,12 +1187,30 @@ impl TerminalPane {
         cx.stop_propagation();
     }
 
+    fn on_mouse_up_out(
+        &mut self,
+        event: &MouseUpEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.context_menu.is_some() {
+            // The occluding menu owns this release. Its child listener runs
+            // later in capture, so the Pane must not stop propagation here.
+            return;
+        }
+        self.on_mouse_up(event, window, cx);
+    }
+
     fn on_scroll_wheel(
         &mut self,
         event: &ScrollWheelEvent,
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.context_menu.is_some() {
+            cx.stop_propagation();
+            return;
+        }
         let Some(position) = self.surface_position(event.position, false) else {
             return;
         };
@@ -1300,6 +1403,116 @@ impl TerminalPane {
             self.screen.selection_present,
             self.current_hovered_link(),
         )
+    }
+
+    fn context_menu_actions(&self, menu: &TerminalContextMenuState) -> NativeContextActions {
+        let current = self.link_at(menu.position);
+        let link = revalidated_context_link(
+            menu.generation,
+            menu.link.as_ref(),
+            self.screen.generation,
+            current.as_ref(),
+        );
+        let selection_is_current = menu.generation == self.screen.generation;
+        let mut actions = NativeContextActions::from_presence(
+            selection_is_current && menu.selection_present && self.screen.selection_present,
+            link,
+        );
+        actions.quick_look = menu.quick_look_eligible && link.is_some();
+        actions
+    }
+
+    fn open_context_menu(
+        &mut self,
+        event: &MouseDownEvent,
+        position: SurfacePosition,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(bounds) = self.grid_bounds else {
+            return;
+        };
+        let (left, top) = terminal_context_menu_origin(bounds, event.position);
+        let link = self.link_at(position);
+        let quick_look_eligible =
+            NativeContextActions::from_presence(false, link.as_ref()).quick_look;
+        self.context_menu = Some(TerminalContextMenuState {
+            left,
+            top,
+            generation: self.screen.generation,
+            position,
+            selection_present: self.screen.selection_present,
+            quick_look_eligible,
+            link,
+        });
+        self.sync_terminal_input_focus(window);
+        cx.notify();
+    }
+
+    fn dismiss_context_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.context_menu.take().is_none() {
+            return;
+        }
+        self.sync_terminal_input_focus(window);
+        cx.notify();
+    }
+
+    fn perform_context_menu_command(
+        &mut self,
+        command: TerminalContextMenuCommand,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(menu) = self.context_menu.take() else {
+            return;
+        };
+        let current = self.link_at(menu.position);
+        let link = revalidated_context_link(
+            menu.generation,
+            menu.link.as_ref(),
+            self.screen.generation,
+            current.as_ref(),
+        )
+        .cloned();
+        let selection_is_current = menu.generation == self.screen.generation;
+        let mut actions = NativeContextActions::from_presence(
+            selection_is_current && menu.selection_present && self.screen.selection_present,
+            link.as_ref(),
+        );
+        actions.quick_look = menu.quick_look_eligible && link.is_some();
+        self.sync_terminal_input_focus(window);
+
+        match command {
+            TerminalContextMenuCommand::Copy if actions.copy => {
+                self.copy_selection(&CopySelection, window, cx);
+            }
+            TerminalContextMenuCommand::OpenLink if actions.open_link => {
+                if let Some(url) = link.and_then(|link| link.activation_url()) {
+                    cx.open_url(&url);
+                }
+            }
+            TerminalContextMenuCommand::QuickLook if actions.quick_look => {
+                if let Some(link) = link {
+                    self.preview_context_link(&link, cx);
+                }
+            }
+            _ => {}
+        }
+        cx.notify();
+    }
+
+    fn preview_context_link(
+        &mut self,
+        link: &crate::terminal::HyperlinkTarget,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(target) = QuickLookTarget::from_link(link) else {
+            return;
+        };
+        if self.quick_look.preview(&target).is_err() {
+            self.present_failure(TerminalFailure::platform("preview-local-file"), true);
+            cx.notify();
+        }
     }
 
     fn current_hovered_link(&self) -> Option<&crate::terminal::HyperlinkTarget> {
@@ -1539,9 +1752,15 @@ impl TerminalPane {
     }
 
     fn link_at(&self, position: SurfacePosition) -> Option<crate::terminal::HyperlinkTarget> {
-        let row = (position.y / self.line_height).floor() as usize;
-        let column = (position.x / f32::from(self.cell_width)).floor() as usize;
-        self.screen.rows.get(row)?.get(column)?.hyperlink.clone()
+        let cell = self
+            .last_geometry?
+            .cell_at_backing_position(BackingPosition::new(position.x, position.y));
+        self.screen
+            .rows
+            .get(usize::from(cell.row))?
+            .get(usize::from(cell.col))?
+            .hyperlink
+            .clone()
     }
 
     fn render_find_bar(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -2054,6 +2273,19 @@ impl Render for TerminalPane {
         if let Some(generation) = self.render_lifecycle.take_frame() {
             self.render_lifecycle.mark_presented(generation);
         }
+        let context_menu = self.context_menu.clone().map(|menu| {
+            let actions = self.context_menu_actions(&menu);
+            render_terminal_context_menu(
+                menu.left,
+                menu.top,
+                actions,
+                cx.entity().downgrade(),
+                |pane, command, window, cx| {
+                    pane.perform_context_menu_command(command, window, cx);
+                },
+                |pane, window, cx| pane.dismiss_context_menu(window, cx),
+            )
+        });
 
         div()
             .debug_selector(move || native_context_selector.clone())
@@ -2099,9 +2331,9 @@ impl Render for TerminalPane {
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_up(MouseButton::Middle, cx.listener(Self::on_mouse_up))
             .on_mouse_up(MouseButton::Right, cx.listener(Self::on_mouse_up))
-            .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
-            .on_mouse_up_out(MouseButton::Middle, cx.listener(Self::on_mouse_up))
-            .on_mouse_up_out(MouseButton::Right, cx.listener(Self::on_mouse_up))
+            .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up_out))
+            .on_mouse_up_out(MouseButton::Middle, cx.listener(Self::on_mouse_up_out))
+            .on_mouse_up_out(MouseButton::Right, cx.listener(Self::on_mouse_up_out))
             .child(terminal_grid)
             .children(link_highlights)
             .child(scrollbar)
@@ -2176,6 +2408,7 @@ impl Render for TerminalPane {
                         }),
                 )
             })
+            .when_some(context_menu, |root, menu| root.child(menu))
     }
 }
 
@@ -2474,6 +2707,16 @@ fn pointer_uses_text_cursor(
     !mouse_tracking || (shift && shift_selection == ShiftSelectionPolicy::OverrideApplicationMouse)
 }
 
+fn opens_terminal_context_menu(
+    button: PointerButton,
+    mouse_tracking: bool,
+    shift: bool,
+    shift_selection: ShiftSelectionPolicy,
+) -> bool {
+    button == PointerButton::Right
+        && pointer_uses_text_cursor(mouse_tracking, shift, shift_selection)
+}
+
 fn terminal_surface_position(
     bounds: Bounds<Pixels>,
     position: gpui::Point<Pixels>,
@@ -2503,6 +2746,32 @@ fn activated_link(
         && current.is_some_and(|link| link.identity == pressed.identity))
     .then(|| pressed.activation_url())
     .flatten()
+}
+
+fn revalidated_context_link<'a>(
+    clicked_generation: crate::terminal::PresentationGeneration,
+    clicked: Option<&'a crate::terminal::HyperlinkTarget>,
+    current_generation: crate::terminal::PresentationGeneration,
+    current: Option<&crate::terminal::HyperlinkTarget>,
+) -> Option<&'a crate::terminal::HyperlinkTarget> {
+    clicked.filter(|clicked| {
+        clicked_generation == current_generation
+            && current.is_some_and(|current| current.identity == clicked.identity)
+    })
+}
+
+fn terminal_context_menu_origin(
+    bounds: Bounds<Pixels>,
+    clicked: gpui::Point<Pixels>,
+) -> (Pixels, Pixels) {
+    let local_x = clicked.x - bounds.origin.x;
+    let local_y = clicked.y - bounds.origin.y;
+    let maximum_left = (bounds.size.width - px(TERMINAL_CONTEXT_MENU_WIDTH)).max(px(0.0));
+    let maximum_top = (bounds.size.height - px(TERMINAL_CONTEXT_MENU_HEIGHT)).max(px(0.0));
+    (
+        local_x.clamp(px(0.0), maximum_left) + px(HORIZONTAL_PADDING),
+        local_y.clamp(px(0.0), maximum_top) + px(VERTICAL_PADDING),
+    )
 }
 
 fn hovered_link_for_generation(
@@ -2751,6 +3020,25 @@ mod tests {
         propagated_key_downs: Rc<Cell<usize>>,
     }
 
+    struct RecordingQuickLookPresenter {
+        previews: Rc<Cell<usize>>,
+        dismissals: Rc<Cell<usize>>,
+    }
+
+    impl QuickLookPlatform for RecordingQuickLookPresenter {
+        fn preview(
+            &mut self,
+            _: &QuickLookTarget,
+        ) -> Result<(), crate::platform::macos_quick_look::QuickLookError> {
+            self.previews.set(self.previews.get() + 1);
+            Ok(())
+        }
+
+        fn dismiss(&mut self) {
+            self.dismissals.set(self.dismissals.get() + 1);
+        }
+    }
+
     impl Render for KeyPropagationProbe {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
             let propagated_key_downs = Rc::clone(&self.propagated_key_downs);
@@ -2823,6 +3111,38 @@ mod tests {
             blinking,
             ..crate::terminal::CursorSnapshot::default()
         };
+        screen
+    }
+
+    fn context_action_screen(
+        link: Option<crate::terminal::HyperlinkTarget>,
+        selection_present: bool,
+    ) -> Arc<ScreenSnapshot> {
+        let mut screen = ScreenSnapshot::from_test_parts_at(
+            Arc::from([Arc::from([crate::terminal::CellSnapshot {
+                text: "x".to_owned(),
+                foreground_source: crate::terminal::TerminalColor::Default,
+                background_source: crate::terminal::TerminalColor::Default,
+                inverse: false,
+                bold: false,
+                faint: false,
+                italic: false,
+                blinking: false,
+                invisible: false,
+                underline: crate::terminal::TerminalUnderlineSnapshot::None,
+                underline_source: crate::terminal::TerminalColor::Default,
+                strikethrough: false,
+                overline: false,
+                selected: selection_present,
+                spacer_tail: false,
+                semantic_content: crate::terminal::CellSemanticSnapshot::Output,
+                hyperlink: link,
+            }])]),
+            ScrollbarSnapshot::default(),
+            "context action",
+            7,
+        );
+        Arc::make_mut(&mut screen).selection_present = selection_present;
         screen
     }
 
@@ -3357,6 +3677,42 @@ mod tests {
             true,
             true,
             ShiftSelectionPolicy::ReportToApplication,
+        ));
+    }
+
+    #[test]
+    fn context_menu_preserves_application_mouse_tracking_and_shift_override() {
+        let policy = ShiftSelectionPolicy::OverrideApplicationMouse;
+
+        assert!(opens_terminal_context_menu(
+            PointerButton::Right,
+            false,
+            false,
+            policy,
+        ));
+        assert!(!opens_terminal_context_menu(
+            PointerButton::Right,
+            true,
+            false,
+            policy,
+        ));
+        assert!(opens_terminal_context_menu(
+            PointerButton::Right,
+            true,
+            true,
+            policy,
+        ));
+        assert!(!opens_terminal_context_menu(
+            PointerButton::Right,
+            true,
+            true,
+            ShiftSelectionPolicy::ReportToApplication,
+        ));
+        assert!(!opens_terminal_context_menu(
+            PointerButton::Left,
+            false,
+            false,
+            policy,
         ));
     }
 
@@ -4515,6 +4871,319 @@ mod tests {
             ),
             NativeContextActions::default()
         );
+    }
+
+    #[test]
+    fn context_link_requires_the_clicked_generation_and_identity() {
+        let clicked = crate::terminal::HyperlinkTarget::url("https://example.test/first").unwrap();
+        let replacement =
+            crate::terminal::HyperlinkTarget::url("https://example.test/second").unwrap();
+        let first = crate::terminal::PresentationGeneration::test(1);
+        let second = crate::terminal::PresentationGeneration::test(2);
+
+        assert_eq!(
+            revalidated_context_link(first, Some(&clicked), first, Some(&clicked)),
+            Some(&clicked)
+        );
+        assert_eq!(
+            revalidated_context_link(first, Some(&clicked), second, Some(&clicked)),
+            None
+        );
+        assert_eq!(
+            revalidated_context_link(first, Some(&clicked), first, Some(&replacement)),
+            None
+        );
+        assert_eq!(revalidated_context_link(first, None, first, None), None);
+    }
+
+    #[gpui::test]
+    fn context_copy_requires_the_frozen_presentation_generation(cx: &mut TestAppContext) {
+        let (pane, cx) = terminal_pane(cx);
+
+        let (current, stale) = pane.update(cx, |pane, _| {
+            pane.screen = context_action_screen(None, true);
+            let mut menu = TerminalContextMenuState {
+                left: px(0.0),
+                top: px(0.0),
+                generation: pane.screen.generation,
+                position: SurfacePosition::default(),
+                link: None,
+                selection_present: true,
+                quick_look_eligible: false,
+            };
+            let current = pane.context_menu_actions(&menu);
+            menu.generation = crate::terminal::PresentationGeneration::test(6);
+            (current, pane.context_menu_actions(&menu))
+        });
+
+        assert!(current.copy);
+        assert!(!stale.copy);
+    }
+
+    #[gpui::test]
+    fn context_menu_focus_blocker_reports_focus_out_before_focus_in(cx: &mut TestAppContext) {
+        let (pane, cx, records) = connected_terminal_pane(cx);
+
+        cx.update(|window, cx| {
+            pane.update(cx, |pane, cx| {
+                pane.context_menu = Some(TerminalContextMenuState {
+                    left: px(0.0),
+                    top: px(0.0),
+                    generation: pane.screen.generation,
+                    position: SurfacePosition::default(),
+                    link: None,
+                    selection_present: false,
+                    quick_look_eligible: false,
+                });
+                pane.sync_terminal_input_focus(window);
+                pane.dismiss_context_menu(window, cx);
+            });
+        });
+
+        let reports = records
+            .commands()
+            .into_iter()
+            .filter_map(|call| match call.command {
+                RecordedSessionCommand::Focus(focused) => Some(focused),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(reports, [false, true, false, true]);
+    }
+
+    #[gpui::test]
+    fn local_right_click_opens_the_packaged_menu_and_copy_revalidates_selection(
+        cx: &mut TestAppContext,
+    ) {
+        let (pane, cx, records) = connected_terminal_pane(cx);
+        pane.update(cx, |pane, cx| {
+            pane.screen = context_action_screen(
+                crate::terminal::HyperlinkTarget::url("https://example.test"),
+                true,
+            );
+            cx.notify();
+        });
+        cx.run_until_parked();
+        let click = pane.read_with(cx, |pane, _| {
+            let bounds = pane.grid_bounds.expect("terminal grid was painted");
+            point(
+                bounds.origin.x + pane.cell_width / 2.0,
+                bounds.origin.y + px(pane.line_height / 2.0),
+            )
+        });
+
+        cx.simulate_mouse_down(click, MouseButton::Right, Modifiers::none());
+        cx.simulate_mouse_up(click, MouseButton::Right, Modifiers::none());
+        cx.run_until_parked();
+
+        cx.simulate_mouse_move(click, None, Modifiers::none());
+        cx.simulate_event(ScrollWheelEvent {
+            position: click,
+            delta: ScrollDelta::Lines(point(0.0, -1.0)),
+            modifiers: Modifiers::none(),
+            touch_phase: gpui::TouchPhase::Moved,
+        });
+        cx.run_until_parked();
+
+        assert!(cx.debug_bounds("terminal-context-menu").is_some());
+        assert!(
+            cx.debug_bounds("terminal-context-menu-row-copy-enabled")
+                .is_some()
+        );
+        assert!(
+            cx.debug_bounds("terminal-context-menu-row-open-link-enabled")
+                .is_some()
+        );
+        assert!(
+            cx.debug_bounds("terminal-context-menu-row-quick-look-disabled")
+                .is_some()
+        );
+        assert!(records.commands().iter().all(|call| !matches!(
+            call.command,
+            RecordedSessionCommand::Pointer(_) | RecordedSessionCommand::Wheel(_)
+        )));
+
+        let copy = cx
+            .debug_bounds("terminal-context-menu-row-copy-enabled")
+            .expect("Copy row was not rendered")
+            .center();
+        cx.simulate_mouse_move(copy, None, Modifiers::none());
+        cx.simulate_click(copy, Modifiers::none());
+        cx.run_until_parked();
+
+        assert!(pane.read_with(cx, |pane, _| pane.context_menu.is_none()));
+        let relevant = records
+            .commands()
+            .into_iter()
+            .filter_map(|call| match call.command {
+                RecordedSessionCommand::Focus(focused) => {
+                    Some(RecordedSessionCommand::Focus(focused))
+                }
+                RecordedSessionCommand::RequestSelectionCopy => {
+                    Some(RecordedSessionCommand::RequestSelectionCopy)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            &relevant[relevant.len() - 3..],
+            [
+                RecordedSessionCommand::Focus(false),
+                RecordedSessionCommand::Focus(true),
+                RecordedSessionCommand::RequestSelectionCopy,
+            ]
+        );
+    }
+
+    #[gpui::test]
+    fn quick_look_command_revalidates_then_calls_the_retained_presenter(cx: &mut TestAppContext) {
+        let directory = std::env::temp_dir().join(format!(
+            "spaceterm-context-quick-look-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let file = directory.join("preview.txt");
+        std::fs::write(&file, b"preview").unwrap();
+        let link =
+            crate::terminal::HyperlinkTarget::osc8("file:preview.txt", &directory, None).unwrap();
+        let previews = Rc::new(Cell::new(0));
+        let dismissals = Rc::new(Cell::new(0));
+        let (pane, cx, _records) = connected_terminal_pane(cx);
+
+        cx.update(|window, cx| {
+            pane.update(cx, |pane, cx| {
+                pane.screen = context_action_screen(Some(link.clone()), false);
+                pane.last_geometry = Some(TerminalGeometry::from_grid(
+                    CellGridSize::new(1, 1),
+                    LogicalCellSize::new(f32::from(pane.cell_width), pane.line_height),
+                    BackingScale::ONE,
+                ));
+                pane.quick_look = Box::new(RecordingQuickLookPresenter {
+                    previews: Rc::clone(&previews),
+                    dismissals: Rc::clone(&dismissals),
+                });
+                pane.context_menu = Some(TerminalContextMenuState {
+                    left: px(0.0),
+                    top: px(0.0),
+                    generation: pane.screen.generation,
+                    position: SurfacePosition::default(),
+                    link: Some(link),
+                    selection_present: false,
+                    quick_look_eligible: true,
+                });
+                pane.sync_terminal_input_focus(window);
+                pane.perform_context_menu_command(
+                    TerminalContextMenuCommand::QuickLook,
+                    window,
+                    cx,
+                );
+            });
+        });
+
+        assert_eq!(previews.get(), 1);
+        assert_eq!(dismissals.get(), 0);
+        pane.update(cx, |pane, _| pane.close());
+        assert_eq!(dismissals.get(), 1);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[gpui::test]
+    fn stale_context_generation_never_reaches_the_presenter(cx: &mut TestAppContext) {
+        let directory = std::env::temp_dir().join(format!(
+            "spaceterm-stale-context-quick-look-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let file = directory.join("preview.txt");
+        std::fs::write(&file, b"preview").unwrap();
+        let link =
+            crate::terminal::HyperlinkTarget::osc8("file:preview.txt", &directory, None).unwrap();
+        let previews = Rc::new(Cell::new(0));
+        let dismissals = Rc::new(Cell::new(0));
+        let (pane, cx, _records) = connected_terminal_pane(cx);
+
+        cx.update(|window, cx| {
+            pane.update(cx, |pane, cx| {
+                let clicked_screen = context_action_screen(Some(link.clone()), false);
+                pane.last_geometry = Some(TerminalGeometry::from_grid(
+                    CellGridSize::new(1, 1),
+                    LogicalCellSize::new(f32::from(pane.cell_width), pane.line_height),
+                    BackingScale::ONE,
+                ));
+                pane.quick_look = Box::new(RecordingQuickLookPresenter {
+                    previews: Rc::clone(&previews),
+                    dismissals: Rc::clone(&dismissals),
+                });
+                pane.context_menu = Some(TerminalContextMenuState {
+                    left: px(0.0),
+                    top: px(0.0),
+                    generation: clicked_screen.generation,
+                    position: SurfacePosition::default(),
+                    link: Some(link),
+                    selection_present: false,
+                    quick_look_eligible: true,
+                });
+                pane.screen = ScreenSnapshot::from_test_parts_at(
+                    clicked_screen.rows.clone(),
+                    ScrollbarSnapshot::default(),
+                    "advanced",
+                    8,
+                );
+                pane.sync_terminal_input_focus(window);
+                pane.perform_context_menu_command(
+                    TerminalContextMenuCommand::QuickLook,
+                    window,
+                    cx,
+                );
+            });
+        });
+
+        assert_eq!(previews.get(), 0);
+        assert!(pane.read_with(cx, |pane, _| pane.context_menu.is_none()));
+        pane.update(cx, |pane, _| pane.close());
+        assert_eq!(dismissals.get(), 1);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[gpui::test]
+    fn session_exit_dismisses_quick_look_and_the_context_menu(cx: &mut TestAppContext) {
+        let (pane, cx) = terminal_pane(cx);
+        let dismissals = Rc::new(Cell::new(0));
+
+        pane.update(cx, |pane, cx| {
+            pane.quick_look = Box::new(RecordingQuickLookPresenter {
+                previews: Rc::new(Cell::new(0)),
+                dismissals: Rc::clone(&dismissals),
+            });
+            pane.context_menu = Some(TerminalContextMenuState {
+                left: px(0.0),
+                top: px(0.0),
+                generation: pane.screen.generation,
+                position: SurfacePosition::default(),
+                link: None,
+                selection_present: false,
+                quick_look_eligible: false,
+            });
+            pane.handle_event(
+                SessionEvent::Exited(crate::terminal::SessionExit::Success),
+                cx,
+            );
+        });
+
+        assert_eq!(dismissals.get(), 1);
+        assert!(pane.read_with(cx, |pane, _| pane.context_menu.is_none()));
+    }
+
+    #[test]
+    fn context_menu_stays_within_terminal_surface() {
+        let bounds = Bounds {
+            origin: point(px(40.0), px(60.0)),
+            size: size(px(300.0), px(180.0)),
+        };
+        let (left, top) = terminal_context_menu_origin(bounds, point(px(330.0), px(230.0)));
+
+        assert_eq!(left, px(84.0));
+        assert_eq!(top, px(102.0));
     }
 
     #[gpui::test]

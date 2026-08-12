@@ -122,10 +122,6 @@ impl MetadataTracker {
         Arc::clone(&self.snapshot)
     }
 
-    pub(crate) fn local_hostname(&self) -> Option<&str> {
-        self.local_hostname.as_deref()
-    }
-
     pub(crate) fn set_reported_title(&mut self, title: &str) -> bool {
         let title = sanitize_title(title);
         let (value, provenance) = if title.is_empty() {
