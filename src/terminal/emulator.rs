@@ -1,5 +1,7 @@
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::mem;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -21,7 +23,10 @@ use libghostty_vt::selection::gesture::{
     ReleaseEvent,
 };
 use libghostty_vt::style::{PaletteIndex, RgbColor, StyleColor, Underline};
-use libghostty_vt::terminal::{Mode, Point, PointCoordinate, ScrollViewport};
+use libghostty_vt::terminal::{
+    HyperlinkResolution, Mode, Point, PointCoordinate, ProgressState, ScrollViewport,
+    SemanticPromptAction,
+};
 use libghostty_vt::{Error, RenderState, Terminal, TerminalOptions};
 
 use crate::terminal::attention::AttentionEvent;
@@ -31,6 +36,7 @@ use crate::terminal::graphics::{
     APC_TRANSMISSION_LIMIT, GraphicsReservation, GraphicsSnapshot, GraphicsState,
     IMAGE_STORAGE_LIMIT, starts_apc,
 };
+use crate::terminal::hyperlink::{HyperlinkTarget, has_file_scheme};
 use crate::terminal::identity::{self, XtGetTcapObserver};
 use crate::terminal::key::{InputModifiers, KeyAction, KeyInput, OptionAsAltPolicy, PhysicalKey};
 use crate::terminal::keyboard_protocol::KeyboardProtocolEncoder;
@@ -553,8 +559,7 @@ pub(crate) struct TerminalEmulator {
     selection_release: ReleaseEvent<'static>,
     selection_autoscroll_tick: AutoscrollTickEvent<'static>,
     pty_responses: Rc<RefCell<Vec<u8>>>,
-    pending_title: Rc<RefCell<Option<Arc<str>>>>,
-    pending_directory: Rc<RefCell<Option<Arc<str>>>>,
+    pending_metadata: Rc<RefCell<Vec<MetadataEvent>>>,
     pending_attention: Rc<RefCell<Vec<AttentionEvent>>>,
     title: Arc<str>,
     metadata: MetadataTracker,
@@ -582,6 +587,13 @@ pub(crate) struct TerminalEmulator {
     presentation_generation: PresentationGeneration,
     synchronized_output_started: Option<Instant>,
     find: TerminalFindState,
+}
+
+enum MetadataEvent {
+    Title(Arc<str>),
+    Directory(Arc<str>),
+    SemanticPrompt(String),
+    Progress { state: u8, value: Option<u8> },
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -686,8 +698,12 @@ impl TerminalEmulator {
         let grid = geometry.grid();
         let cell = geometry.backing_cell_size();
         let pty_responses = Rc::new(RefCell::new(Vec::new()));
-        let pending_title = Rc::new(RefCell::new(None));
-        let pending_directory = Rc::new(RefCell::new(None));
+        let pending_metadata = Rc::new(RefCell::new(Vec::new()));
+        let trusted_directory = Rc::new(RefCell::new(
+            Path::new(initial_directory)
+                .is_absolute()
+                .then(|| PathBuf::from(initial_directory)),
+        ));
         let pending_attention = Rc::new(RefCell::new(Vec::new()));
         set_png_decoder(Some(Box::new(RustPngDecoder::new())))?;
         let mut terminal: Terminal<'static, 'static> = Terminal::new(TerminalOptions {
@@ -710,19 +726,99 @@ impl TerminalEmulator {
             move |_, data| pty_responses.borrow_mut().extend_from_slice(data)
         })?;
         terminal.on_title_changed({
-            let pending_title = Rc::clone(&pending_title);
+            let pending_metadata = Rc::clone(&pending_metadata);
             move |terminal| {
                 if let Ok(title) = terminal.title() {
-                    *pending_title.borrow_mut() = Some(Arc::from(title));
+                    pending_metadata
+                        .borrow_mut()
+                        .push(MetadataEvent::Title(Arc::from(title)));
                 }
             }
         })?;
         terminal.on_pwd_changed({
-            let pending_directory = Rc::clone(&pending_directory);
+            let pending_metadata = Rc::clone(&pending_metadata);
+            let trusted_directory = Rc::clone(&trusted_directory);
+            let local_hostname = local_hostname.map(ToOwned::to_owned);
             move |terminal| {
                 if let Ok(directory) = terminal.pwd() {
-                    *pending_directory.borrow_mut() = Some(Arc::from(directory));
+                    *trusted_directory.borrow_mut() =
+                        crate::terminal::metadata::parse_osc7_directory(
+                            directory,
+                            local_hostname.as_deref(),
+                        )
+                        .map(|metadata| PathBuf::from(metadata.path.as_ref()));
+                    pending_metadata
+                        .borrow_mut()
+                        .push(MetadataEvent::Directory(Arc::from(directory)));
                 }
+            }
+        })?;
+        terminal.on_hyperlink_resolve({
+            let trusted_directory = Rc::clone(&trusted_directory);
+            let local_hostname = local_hostname.map(ToOwned::to_owned);
+            move |_, uri| {
+                if !has_file_scheme(uri) {
+                    return HyperlinkResolution::Passthrough;
+                }
+                let Some(directory) = trusted_directory.borrow().clone() else {
+                    return HyperlinkResolution::Suppress;
+                };
+                let Ok(uri) = std::str::from_utf8(uri) else {
+                    return HyperlinkResolution::Suppress;
+                };
+                let Some(target) =
+                    HyperlinkTarget::osc8(uri, &directory, local_hostname.as_deref())
+                else {
+                    return HyperlinkResolution::Suppress;
+                };
+                let Some(userdata) = target.local_emission_metadata() else {
+                    return HyperlinkResolution::Suppress;
+                };
+                HyperlinkResolution::Replace {
+                    uri: uri.as_bytes().to_vec(),
+                    userdata,
+                }
+            }
+        })?;
+        terminal.on_semantic_prompt({
+            let pending_metadata = Rc::clone(&pending_metadata);
+            move |_, action, options| {
+                let Ok(options) = std::str::from_utf8(options) else {
+                    return;
+                };
+                let action = match action {
+                    SemanticPromptAction::FreshLine => "L",
+                    SemanticPromptAction::FreshLineNewPrompt => "A",
+                    SemanticPromptAction::NewCommand => "N",
+                    SemanticPromptAction::PromptStart => "P",
+                    SemanticPromptAction::EndPromptStartInput => "B",
+                    SemanticPromptAction::EndPromptStartInputTerminateEol => "I",
+                    SemanticPromptAction::EndInputStartOutput => "C",
+                    SemanticPromptAction::EndCommand => "D",
+                };
+                let value = if options.is_empty() {
+                    action.to_owned()
+                } else {
+                    format!("{action};{options}")
+                };
+                pending_metadata
+                    .borrow_mut()
+                    .push(MetadataEvent::SemanticPrompt(value));
+            }
+        })?;
+        terminal.on_progress_report({
+            let pending_metadata = Rc::clone(&pending_metadata);
+            move |_, state, value| {
+                let state = match state {
+                    ProgressState::Remove => 0,
+                    ProgressState::Set => 1,
+                    ProgressState::Error => 2,
+                    ProgressState::Indeterminate => 3,
+                    ProgressState::Pause => 4,
+                };
+                pending_metadata
+                    .borrow_mut()
+                    .push(MetadataEvent::Progress { state, value });
             }
         })?;
         terminal.on_xtversion(|_| Some(identity::XTVERSION))?;
@@ -755,8 +851,7 @@ impl TerminalEmulator {
             selection_release: ReleaseEvent::new()?,
             selection_autoscroll_tick: AutoscrollTickEvent::new()?,
             pty_responses,
-            pending_title,
-            pending_directory,
+            pending_metadata,
             pending_attention,
             title,
             metadata,
@@ -817,7 +912,24 @@ impl TerminalEmulator {
                         crate::terminal::metadata::CommandState::Finished { .. }
                     )
                 });
-        self.metadata.feed(bytes, now);
+        let synchronized_before = self.terminal.mode(Mode::SYNC_OUTPUT).unwrap_or(false);
+        self.terminal.vt_write(bytes);
+        for event in self.pending_metadata.borrow_mut().drain(..) {
+            match event {
+                MetadataEvent::Title(title) => {
+                    self.metadata.set_reported_title(&title);
+                }
+                MetadataEvent::Directory(directory) => {
+                    self.metadata.set_reported_directory(&directory);
+                }
+                MetadataEvent::SemanticPrompt(value) => {
+                    self.metadata.apply_semantic_prompt(&value, now);
+                }
+                MetadataEvent::Progress { state, value } => {
+                    self.metadata.apply_progress_report(state, value);
+                }
+            }
+        }
         if !command_was_finished
             && let Some(command) = &self.metadata.snapshot().command
             && let crate::terminal::metadata::CommandState::Finished {
@@ -832,8 +944,6 @@ impl TerminalEmulator {
                     duration,
                 });
         }
-        let synchronized_before = self.terminal.mode(Mode::SYNC_OUTPUT).unwrap_or(false);
-        self.terminal.vt_write(bytes);
         if !bytes.is_empty() {
             self.find.invalidate();
         }
@@ -1621,14 +1731,6 @@ impl TerminalEmulator {
             .refresh(&self.terminal, self.geometry.grid().cols)?;
         let find_changed = self.find.is_changed();
 
-        let pending_title = self.pending_title.borrow_mut().take();
-        if let Some(title) = pending_title {
-            self.metadata.set_reported_title(&title);
-        }
-        let pending_directory = self.pending_directory.borrow_mut().take();
-        if let Some(directory) = pending_directory {
-            self.metadata.set_reported_directory(&directory);
-        }
         let metadata = self.metadata.snapshot();
         let title = Arc::clone(&metadata.title.value);
         let title_changed = title != self.title;
@@ -1741,6 +1843,10 @@ impl TerminalEmulator {
         } else {
             row_cache.clone()
         };
+        let mut web_hyperlink_targets =
+            HashMap::<String, Option<crate::terminal::HyperlinkTarget>>::new();
+        let mut local_hyperlink_targets =
+            HashMap::<Vec<u8>, Option<crate::terminal::HyperlinkTarget>>::new();
         let mut dirty_rows = Vec::new();
         let mut row_index = 0_u16;
         {
@@ -1752,6 +1858,8 @@ impl TerminalEmulator {
                 if rebuild_row {
                     let selection = row.selection()?;
                     let mut rendered_cells = Vec::with_capacity(usize::from(cols));
+                    let mut hyperlink_uri = [0; crate::terminal::hyperlink::MAX_LINK_BYTES];
+                    let mut hyperlink_userdata = [0; crate::terminal::hyperlink::MAX_LINK_BYTES];
                     let mut column_index = 0_u16;
                     let mut cell_iteration = self.cells.update(row)?;
 
@@ -1784,12 +1892,34 @@ impl TerminalEmulator {
                                     x: column_index,
                                     y: u32::from(row_index),
                                 }))?;
-                            let mut uri = vec![0; crate::terminal::hyperlink::MAX_LINK_BYTES];
-                            reference
-                                .hyperlink_uri(&mut uri)
-                                .ok()
-                                .and_then(|length| std::str::from_utf8(&uri[..length]).ok())
-                                .and_then(crate::terminal::HyperlinkTarget::url)
+                            let uri_length = reference.hyperlink_uri(&mut hyperlink_uri).ok();
+                            let userdata_length =
+                                reference.hyperlink_userdata(&mut hyperlink_userdata).ok();
+                            uri_length
+                                .zip(userdata_length)
+                                .and_then(|(uri_length, userdata_length)| {
+                                    let uri = std::str::from_utf8(&hyperlink_uri[..uri_length]).ok()?;
+                                    if userdata_length == 0 {
+                                        if let Some(target) = web_hyperlink_targets.get(uri) {
+                                            return target.clone();
+                                        }
+                                        let target = crate::terminal::HyperlinkTarget::url(uri);
+                                        web_hyperlink_targets
+                                            .insert(uri.to_owned(), target.clone());
+                                        return target;
+                                    }
+                                    if !has_file_scheme(uri.as_bytes()) {
+                                        return None;
+                                    }
+                                    let userdata = &hyperlink_userdata[..userdata_length];
+                                    if let Some(target) = local_hyperlink_targets.get(userdata) {
+                                        return target.clone();
+                                    }
+                                    let target = crate::terminal::HyperlinkTarget::from_local_emission_metadata(userdata);
+                                    local_hyperlink_targets
+                                        .insert(userdata.to_vec(), target.clone());
+                                    target
+                                })
                         } else {
                             None
                         };
@@ -2030,6 +2160,8 @@ fn ghostty_color(color: Color) -> RgbColor {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use super::*;
     use crate::terminal::geometry::{
         BackingScale, CellGridSize, LogicalCellSize, TerminalGeometry,
@@ -3857,7 +3989,7 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_selection_presence_follows_active_screen_ownership() {
+    fn snapshot_selection_presence_reflects_screen_switch_clearing() {
         let mut emulator = emulator(12, 2);
         emulator.feed(b"hello world");
         select_first_five(&mut emulator, false);
@@ -3883,6 +4015,7 @@ mod tests {
         let restored = emulator.snapshot().unwrap().unwrap();
         assert_eq!(restored.active_screen, ActiveScreenSnapshot::Primary);
         assert!(!restored.selection_present);
+        assert!(!restored.damage.selection_presence);
         assert!(
             restored
                 .rows
@@ -4453,6 +4586,150 @@ mod tests {
 
         assert_eq!(identities.len(), 8);
         assert!(identities.iter().all(|identity| *identity == identities[0]));
+    }
+
+    #[test]
+    fn osc8_relative_file_targets_bind_to_the_directory_at_emission() {
+        let directory = std::env::temp_dir().join(format!(
+            "spaceterm-emulator-local-link-first-{}",
+            std::process::id()
+        ));
+        let second_directory = std::env::temp_dir().join(format!(
+            "spaceterm-emulator-local-link-second-{}",
+            std::process::id()
+        ));
+        _ = fs::remove_dir_all(&directory);
+        _ = fs::remove_dir_all(&second_directory);
+        fs::create_dir_all(&directory).unwrap();
+        fs::create_dir_all(&second_directory).unwrap();
+        let file = directory.join("preview.txt");
+        let second_file = second_directory.join("preview.txt");
+        fs::write(&file, b"preview").unwrap();
+        fs::write(&second_file, b"preview").unwrap();
+        let mut emulator = TerminalEmulator::new_with_metadata(
+            geometry(16, 2, 10.0, 20.0),
+            directory.to_str().unwrap(),
+            "zsh",
+            Some("mac.local"),
+            identity::TERM_FALLBACK,
+            Instant::now(),
+        )
+        .unwrap();
+
+        emulator.feed(b"\x1b]8;;file:prev");
+        emulator.feed(b"iew.txt\x07first\x1b]8;;\x07 \x1b]7;FiLe://local");
+        emulator.feed(
+            format!(
+                "host{}\x07\x1b]8;;file:preview.txt\x07second\x1b]8;;\x07",
+                second_directory.to_str().unwrap()
+            )
+            .as_bytes(),
+        );
+        let replacement = directory.join("replacement.txt");
+        fs::write(&replacement, b"replacement").unwrap();
+        fs::rename(&replacement, &file).unwrap();
+        let snapshot = emulator.snapshot().unwrap().unwrap();
+        let values = snapshot.rows[0]
+            .iter()
+            .map(|cell| cell.hyperlink.as_ref().map(|link| link.value.as_str()))
+            .collect::<Vec<_>>();
+
+        assert!(
+            values[..5]
+                .iter()
+                .all(|value| { *value == Some(file.canonicalize().unwrap().to_str().unwrap()) })
+        );
+        assert!(values[6..12].iter().all(|value| {
+            *value == Some(second_file.canonicalize().unwrap().to_str().unwrap())
+        }));
+        let first_link = snapshot.rows[0][0].hyperlink.as_ref().unwrap();
+        assert_eq!(
+            first_link.value,
+            file.canonicalize().unwrap().to_str().unwrap()
+        );
+        assert_eq!(first_link.activation_url(), None);
+        fs::remove_dir_all(directory).unwrap();
+        fs::remove_dir_all(second_directory).unwrap();
+    }
+
+    #[test]
+    fn ground_utf8_containing_9d_is_printed_without_starting_c1_osc() {
+        let mut emulator = emulator(24, 2);
+
+        emulator.feed("before\u{075d}after".as_bytes());
+        let snapshot = emulator.snapshot().unwrap().unwrap();
+        let text = snapshot.rows[0]
+            .iter()
+            .map(|cell| cell.text.as_str())
+            .collect::<String>();
+
+        assert!(text.starts_with("before\u{075d}after"));
+        assert!(snapshot.rows[0].iter().all(|cell| cell.hyperlink.is_none()));
+    }
+
+    #[test]
+    fn raw_9d_in_ground_does_not_introduce_an_osc8_link() {
+        let mut emulator = emulator(32, 2);
+
+        emulator.feed(b"\x9d8;;file:/tmp/not-a-link\x07visible");
+        let snapshot = emulator.snapshot().unwrap().unwrap();
+
+        assert!(
+            snapshot
+                .rows
+                .iter()
+                .flat_map(|row| row.iter())
+                .all(|cell| cell.hyperlink.is_none())
+        );
+    }
+
+    #[test]
+    fn rejected_local_osc8_start_ends_a_previously_active_link() {
+        let mut emulator = emulator(16, 2);
+
+        emulator
+            .feed(b"\x1b]8;;https://example.test\x07web\x1b]8;;file:missing\x07plain\x1b]8;;\x07");
+        let snapshot = emulator.snapshot().unwrap().unwrap();
+
+        assert!(
+            snapshot.rows[0][..3]
+                .iter()
+                .all(|cell| cell.hyperlink.is_some())
+        );
+        assert!(
+            snapshot.rows[0][3..8]
+                .iter()
+                .all(|cell| cell.hyperlink.is_none())
+        );
+    }
+
+    #[test]
+    fn unsupported_terminal_uri_cannot_attach_resolver_only_local_metadata() {
+        let mut emulator = emulator(16, 2);
+
+        emulator.feed(b"\x1b]8;;unsupported:terminal-controlled-metadata\x07plain\x1b]8;;\x07");
+        let snapshot = emulator.snapshot().unwrap().unwrap();
+
+        assert!(
+            snapshot.rows[0][..5]
+                .iter()
+                .all(|cell| cell.hyperlink.is_none())
+        );
+    }
+
+    #[test]
+    fn c1_st_inside_osc_is_payload_in_the_pinned_terminal_stream() {
+        let mut emulator = emulator(24, 2);
+
+        emulator.feed(b"\x1b]8;;file:missing\x9cNOT_VISIBLE\x07visible");
+        let snapshot = emulator.snapshot().unwrap().unwrap();
+        let text = snapshot.rows[0]
+            .iter()
+            .map(|cell| cell.text.as_str())
+            .collect::<String>();
+
+        assert!(text.starts_with("visible"));
+        assert!(!text.contains("NOT_VISIBLE"));
     }
 
     #[test]

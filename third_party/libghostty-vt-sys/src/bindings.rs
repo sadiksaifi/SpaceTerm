@@ -1001,6 +1001,15 @@ unsafe extern "C" {
     ) -> Result::Type;
 }
 unsafe extern "C" {
+    #[doc = " Get opaque application metadata retained with the cell's hyperlink.\n\n If the cell has no hyperlink, out_len is set to 0. This metadata is never\n included in terminal text or formatter output.\n"]
+    pub fn ghostty_grid_ref_hyperlink_userdata(
+        ref_: *const GridRef,
+        buf: *mut u8,
+        buf_len: usize,
+        out_len: *mut usize,
+    ) -> Result::Type;
+}
+unsafe extern "C" {
     #[doc = " Get the style of the cell at the grid reference's position.\n\n         node is NULL\n"]
     pub fn ghostty_grid_ref_style(ref_: *const GridRef, out_style: *mut Style) -> Result::Type;
 }
@@ -2355,6 +2364,38 @@ pub type TerminalTitleChangedFn = ::std::option::Option<
 pub type TerminalPwdChangedFn = ::std::option::Option<
     unsafe extern "C" fn(terminal: Terminal, userdata: *mut ::std::os::raw::c_void),
 >;
+pub mod HyperlinkResolution {
+    pub type Type = ::std::os::raw::c_uint;
+    pub const PASSTHROUGH: Type = 0;
+    pub const REPLACE: Type = 1;
+    pub const SUPPRESS: Type = 2;
+    pub const MAX_VALUE: Type = 2147483647;
+}
+pub type TerminalHyperlinkResolveFn = ::std::option::Option<
+    unsafe extern "C" fn(
+        terminal: Terminal,
+        userdata: *mut ::std::os::raw::c_void,
+        uri: String,
+        out: *mut Buffer,
+        out_userdata: *mut Buffer,
+    ) -> HyperlinkResolution::Type,
+>;
+pub type TerminalSemanticPromptFn = ::std::option::Option<
+    unsafe extern "C" fn(
+        terminal: Terminal,
+        userdata: *mut ::std::os::raw::c_void,
+        action: ::std::os::raw::c_int,
+        options: String,
+    ),
+>;
+pub type TerminalProgressReportFn = ::std::option::Option<
+    unsafe extern "C" fn(
+        terminal: Terminal,
+        userdata: *mut ::std::os::raw::c_void,
+        state: ::std::os::raw::c_int,
+        progress: i16,
+    ),
+>;
 #[doc = " Callback function type for write_pty.\n\n Called when the terminal needs to write data back to the pty, for\n example in response to a device status report or mode query. The\n data is only valid for the duration of the call; callers must copy\n it if it needs to persist.\n\n"]
 pub type TerminalWritePtyFn = ::std::option::Option<
     unsafe extern "C" fn(
@@ -2425,6 +2466,9 @@ pub mod TerminalOption {
     pub const PWD_CHANGED: Type = 25;
     #[doc = " Callback invoked when the running program performs a clipboard write.\n OSC 52 and iTerm2 OSC 1337 Copy writes are normalized to an atomic set\n of decoded MIME representations. Set to NULL to ignore clipboard writes.\n Clipboard read requests are always ignored; see\n GhosttyTerminalClipboardWriteFn.\n\n Input type: GhosttyTerminalClipboardWriteFn"]
     pub const CLIPBOARD_WRITE: Type = 26;
+    pub const HYPERLINK_RESOLVE: Type = 27;
+    pub const SEMANTIC_PROMPT: Type = 28;
+    pub const PROGRESS_REPORT: Type = 29;
     #[doc = " Callback invoked when the running program performs a clipboard write.\n OSC 52 and iTerm2 OSC 1337 Copy writes are normalized to an atomic set\n of decoded MIME representations. Set to NULL to ignore clipboard writes.\n Clipboard read requests are always ignored; see\n GhosttyTerminalClipboardWriteFn.\n\n Input type: GhosttyTerminalClipboardWriteFn"]
     pub const MAX_VALUE: Type = 2147483647;
 }

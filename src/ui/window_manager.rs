@@ -5,6 +5,7 @@ use gpui::{
 };
 use gpui_symbols::{Icon, SymbolWeight};
 
+use super::terminal_focus::TerminalFocusBlocker;
 use super::{
     ActivateWindow1, ActivateWindow2, ActivateWindow3, ActivateWindow4, ActivateWindow5,
     ActivateWindow6, ActivateWindow7, ActivateWindow8, ActivateWindow9, CloseTarget, CloseWindow,
@@ -13,9 +14,11 @@ use super::{
     handle_top_chrome_mouse_down, render_pane_action_menu,
 };
 use crate::domain::{
-    CloseWindowOutcome, SplitAxis, WindowCollection, WindowError, WindowId, ZoomState,
+    CloseWindowOutcome, SplitAxis, WindowCollection, WindowError, WindowId, WorkspaceId, ZoomState,
 };
-use crate::terminal::WorkspaceTerminalSessionFactory;
+use crate::terminal::{
+    NativeServiceOrigin, NativeServiceStatus, SelectionCopy, WorkspaceTerminalSessionFactory,
+};
 use crate::theme::{ACTIVE_THEME, Color};
 
 const WINDOW_BAR_HEIGHT: f32 = TOP_CHROME_HEIGHT;
@@ -50,6 +53,7 @@ pub(crate) struct WindowManager {
     sidebar_visible: bool,
     sidebar_width: Pixels,
     window_menu: Option<WindowMenuState>,
+    workspace_focus_blocker: Option<TerminalFocusBlocker>,
     window_bar_scroll_handle: ScrollHandle,
     close_workspace_requested: bool,
 }
@@ -75,6 +79,7 @@ impl WindowManager {
             sidebar_visible: true,
             sidebar_width: px(WORKSPACE_SIDEBAR_DEFAULT_WIDTH),
             window_menu: None,
+            workspace_focus_blocker: None,
             window_bar_scroll_handle: ScrollHandle::new(),
             close_workspace_requested: false,
         }
@@ -111,6 +116,64 @@ impl WindowManager {
         }
     }
 
+    pub(crate) fn set_workspace_focus_blocker(
+        &mut self,
+        blocker: Option<TerminalFocusBlocker>,
+        cx: &mut Context<Self>,
+    ) {
+        self.workspace_focus_blocker = blocker;
+        self.sync_active_focus_branch(cx);
+    }
+
+    pub(crate) fn native_service_status(
+        &self,
+        workspace_id: WorkspaceId,
+        window: &Window,
+        cx: &mut App,
+    ) -> NativeServiceStatus {
+        if !self.active {
+            return NativeServiceStatus::default();
+        }
+        self.windows.active_window().update(cx, |pane_host, cx| {
+            pane_host.set_focus_branch(true, self.window_focus_blocker(), cx);
+            pane_host.native_service_status(workspace_id, window, cx)
+        })
+    }
+
+    pub(crate) fn native_service_selection(
+        &self,
+        origin: NativeServiceOrigin,
+        window: &Window,
+        cx: &mut App,
+    ) -> Option<SelectionCopy> {
+        if !self.active || self.windows.active_window_id() != origin.window_id() {
+            return None;
+        }
+        self.windows
+            .window(origin.window_id())?
+            .update(cx, |pane_host, cx| {
+                pane_host.native_service_selection(origin, window, cx)
+            })
+    }
+
+    pub(crate) fn insert_native_service_text(
+        &self,
+        origin: NativeServiceOrigin,
+        text: String,
+        window: &Window,
+        cx: &mut App,
+    ) -> bool {
+        if !self.active || self.windows.active_window_id() != origin.window_id() {
+            return false;
+        }
+        let Some(pane_host) = self.windows.window(origin.window_id()) else {
+            return false;
+        };
+        pane_host.update(cx, |pane_host, cx| {
+            pane_host.insert_native_service_text(origin, text, window, cx)
+        })
+    }
+
     pub(crate) fn activate(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.activate_without_focus(cx);
         self.focus(window, cx);
@@ -118,16 +181,12 @@ impl WindowManager {
 
     pub(crate) fn activate_without_focus(&mut self, cx: &mut Context<Self>) {
         self.active = true;
-        self.windows
-            .active_window()
-            .update(cx, |pane_host, cx| pane_host.activate_without_focus(cx));
+        self.sync_active_focus_branch(cx);
     }
 
     pub(crate) fn deactivate(&mut self, cx: &mut Context<Self>) {
         self.active = false;
-        self.windows
-            .active_window()
-            .update(cx, |pane_host, cx| pane_host.deactivate(cx));
+        self.sync_active_focus_branch(cx);
     }
 
     pub(crate) fn close_all(&self, cx: &mut App) {
@@ -200,6 +259,7 @@ impl WindowManager {
             pane_host.update(cx, |pane_host, cx| pane_host.deactivate(cx));
         }
         self.window_menu = None;
+        self.sync_active_focus_branch(cx);
         self.scroll_active_window_into_view();
         cx.emit(WindowManagerEvent::PresentationChanged);
         cx.notify();
@@ -231,6 +291,7 @@ impl WindowManager {
             next_window.update(cx, |pane_host, cx| pane_host.deactivate(cx));
         }
         self.window_menu = None;
+        self.sync_active_focus_branch(cx);
         self.scroll_active_window_into_view();
         cx.emit(WindowManagerEvent::PresentationChanged);
         cx.notify();
@@ -295,6 +356,7 @@ impl WindowManager {
             return;
         }
         self.window_menu = Some(WindowMenuState { window_id, left });
+        self.sync_active_focus_branch(cx);
         cx.notify();
     }
 
@@ -305,6 +367,7 @@ impl WindowManager {
             .is_some_and(|menu| menu.window_id == window_id && menu.left.is_none())
         {
             self.window_menu = None;
+            self.sync_active_focus_branch(cx);
             cx.notify();
             return;
         }
@@ -337,6 +400,7 @@ impl WindowManager {
         let Some(menu) = self.window_menu.take() else {
             return;
         };
+        self.sync_active_focus_branch(cx);
         let Some(pane_host) = self.windows.window(menu.window_id).cloned() else {
             return;
         };
@@ -358,8 +422,29 @@ impl WindowManager {
 
     fn dismiss_window_menu(&mut self, cx: &mut Context<Self>) {
         if self.window_menu.take().is_some() {
+            self.sync_active_focus_branch(cx);
             cx.notify();
         }
+    }
+
+    fn window_focus_blocker(&self) -> Option<TerminalFocusBlocker> {
+        self.workspace_focus_blocker.or_else(|| {
+            self.window_menu.map(|menu| {
+                if menu.left.is_some() {
+                    TerminalFocusBlocker::ContextMenu
+                } else {
+                    TerminalFocusBlocker::WindowSelector
+                }
+            })
+        })
+    }
+
+    fn sync_active_focus_branch(&self, cx: &mut Context<Self>) {
+        let active = self.active;
+        let blocker = active.then(|| self.window_focus_blocker()).flatten();
+        self.windows.active_window().update(cx, |pane_host, cx| {
+            pane_host.set_focus_branch(active, blocker, cx);
+        });
     }
 
     fn on_close_window(&mut self, _: &CloseWindow, window: &mut Window, cx: &mut Context<Self>) {
@@ -868,6 +953,7 @@ mod tests {
         let (manager, cx) =
             cx.add_window_view(|window, cx| WindowManager::new(session_factory, window, cx));
         cx.update(|window, cx| {
+            window.activate_window();
             manager.update(cx, |manager, cx| manager.focus(window, cx));
         });
         cx.run_until_parked();
@@ -1324,6 +1410,15 @@ mod tests {
             )
         });
         assert_eq!(state, (WindowId::new(1), Some((WindowId::new(1), true))));
+        let services_blocked = cx.update(|window, cx| {
+            manager.update(cx, |manager, cx| {
+                !manager
+                    .native_service_status(WorkspaceId::new(1), window, cx)
+                    .capabilities
+                    .return_text
+            })
+        });
+        assert!(services_blocked);
     }
 
     #[gpui::test]
@@ -1338,6 +1433,36 @@ mod tests {
             menu.map(|menu| (menu.window_id, menu.left)),
             Some((WindowId::new(2), None))
         );
+    }
+
+    #[gpui::test]
+    fn window_menu_blocks_services_and_invalidates_the_previous_focus_branch(
+        cx: &mut TestAppContext,
+    ) {
+        let (manager, _records, cx) = window_manager(cx);
+        let before = cx.update(|window, cx| {
+            manager.update(cx, |manager, cx| {
+                manager.native_service_status(WorkspaceId::new(1), window, cx)
+            })
+        });
+
+        click("window-menu-button", cx);
+        let blocked = cx.update(|window, cx| {
+            manager.update(cx, |manager, cx| {
+                manager.native_service_status(WorkspaceId::new(1), window, cx)
+            })
+        });
+        click("window-menu-button", cx);
+        let restored = cx.update(|window, cx| {
+            manager.update(cx, |manager, cx| {
+                manager.native_service_status(WorkspaceId::new(1), window, cx)
+            })
+        });
+
+        assert!(before.capabilities.return_text);
+        assert!(!blocked.capabilities.return_text);
+        assert!(restored.capabilities.return_text);
+        assert_ne!(before.origin, restored.origin);
     }
 
     #[gpui::test]

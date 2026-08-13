@@ -13,6 +13,9 @@ pub(crate) mod macos_keyboard;
 pub(crate) mod macos_pasteboard;
 
 #[cfg(target_os = "macos")]
+pub(crate) mod macos_quick_look;
+
+#[cfg(target_os = "macos")]
 pub(crate) mod macos_render_lifecycle;
 
 #[cfg(target_os = "macos")]
@@ -23,6 +26,9 @@ pub(crate) mod macos_secure_input;
 
 #[cfg(target_os = "macos")]
 pub(crate) mod macos_scroll;
+
+#[cfg(target_os = "macos")]
+pub(crate) mod macos_services;
 
 #[cfg(target_os = "macos")]
 pub(crate) mod shell_integration;

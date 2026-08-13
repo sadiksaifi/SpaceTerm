@@ -1,4 +1,6 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
+
+use crate::domain::{PaneId, WindowId, WorkspaceId};
 
 use super::file_insertion::prepare_file_insertion;
 use super::hyperlink::{HyperlinkKind, HyperlinkTarget};
@@ -12,12 +14,99 @@ pub(crate) struct NativeContextActions {
     pub(crate) quick_look: bool,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct NativeServiceCapabilities {
+    pub(crate) send_text: bool,
+    pub(crate) return_text: bool,
+}
+
+impl NativeServiceCapabilities {
+    pub(crate) const fn new(send_text: bool, return_text: bool) -> Self {
+        Self {
+            send_text,
+            return_text,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct NativeServiceOrigin {
+    workspace_id: WorkspaceId,
+    window_id: WindowId,
+    pane_id: PaneId,
+    session_identity: u64,
+    focus_epoch: u64,
+    hierarchy_generation: u64,
+}
+
+impl NativeServiceOrigin {
+    pub(crate) const fn new(
+        workspace_id: WorkspaceId,
+        window_id: WindowId,
+        pane_id: PaneId,
+        session_identity: u64,
+        focus_epoch: u64,
+        hierarchy_generation: u64,
+    ) -> Self {
+        Self {
+            workspace_id,
+            window_id,
+            pane_id,
+            session_identity,
+            focus_epoch,
+            hierarchy_generation,
+        }
+    }
+
+    pub(crate) const fn workspace_id(self) -> WorkspaceId {
+        self.workspace_id
+    }
+
+    pub(crate) const fn window_id(self) -> WindowId {
+        self.window_id
+    }
+
+    pub(crate) const fn pane_id(self) -> PaneId {
+        self.pane_id
+    }
+
+    pub(crate) const fn session_identity(self) -> u64 {
+        self.session_identity
+    }
+
+    pub(crate) const fn focus_epoch(self) -> u64 {
+        self.focus_epoch
+    }
+
+    pub(crate) const fn hierarchy_generation(self) -> u64 {
+        self.hierarchy_generation
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct NativeServiceStatus {
+    pub(crate) capabilities: NativeServiceCapabilities,
+    pub(crate) origin: Option<NativeServiceOrigin>,
+}
+
+impl NativeServiceStatus {
+    pub(crate) const fn new(
+        capabilities: NativeServiceCapabilities,
+        origin: Option<NativeServiceOrigin>,
+    ) -> Self {
+        Self {
+            capabilities,
+            origin,
+        }
+    }
+}
+
 impl NativeContextActions {
     pub(crate) fn from_presence(selection_present: bool, link: Option<&HyperlinkTarget>) -> Self {
         Self {
             copy: selection_present,
             open_link: link.is_some(),
-            quick_look: link.and_then(QuickLookTarget::from_link).is_some(),
+            quick_look: link.is_some_and(|link| link.kind == HyperlinkKind::LocalPath),
         }
     }
 
@@ -81,28 +170,46 @@ impl NativeInsertion {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[cfg_attr(
+    not(test),
+    allow(
+        dead_code,
+        reason = "the next stacked context-action layer owns Quick Look presentation"
+    )
+)]
 pub(crate) struct QuickLookTarget {
-    path: PathBuf,
+    link: HyperlinkTarget,
 }
 
 impl QuickLookTarget {
+    #[cfg_attr(
+        not(test),
+        allow(
+            dead_code,
+            reason = "the next stacked context-action layer resolves the current hyperlink"
+        )
+    )]
     pub(crate) fn from_link(link: &HyperlinkTarget) -> Option<Self> {
-        if link.kind != HyperlinkKind::LocalPath {
-            return None;
-        }
-        let path = Path::new(&link.value).canonicalize().ok()?;
-        path.is_file().then_some(Self { path })
+        link.revalidated_local_path()?;
+        Some(Self { link: link.clone() })
     }
 
-    #[cfg(test)]
-    pub(crate) fn path(&self) -> &Path {
-        &self.path
+    #[cfg_attr(
+        not(test),
+        allow(
+            dead_code,
+            reason = "the next stacked context-action layer revalidates before native presentation"
+        )
+    )]
+    pub(crate) fn revalidated_path(&self) -> Option<PathBuf> {
+        self.link.revalidated_local_path()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::os::unix::fs::symlink;
     use std::path::PathBuf;
 
     use super::*;
@@ -152,6 +259,17 @@ mod tests {
     }
 
     #[test]
+    fn service_capabilities_keep_selection_export_distinct_from_terminal_input_focus() {
+        assert_eq!(
+            NativeServiceCapabilities::new(true, false),
+            NativeServiceCapabilities {
+                send_text: true,
+                return_text: false,
+            }
+        );
+    }
+
+    #[test]
     fn context_enablement_can_be_derived_without_copying_selection_text() {
         assert_eq!(
             NativeContextActions::from_presence(true, None),
@@ -171,14 +289,78 @@ mod tests {
         let file = directory.join("preview.txt");
         fs::write(&file, b"preview").unwrap();
 
-        let local = HyperlinkTarget::local(file.to_str().unwrap(), &directory).unwrap();
+        let local = HyperlinkTarget::osc8(
+            &format!("file://{}", file.to_str().unwrap()),
+            &directory,
+            None,
+        )
+        .unwrap();
         let url = HyperlinkTarget::url("https://example.test").unwrap();
         assert_eq!(
-            QuickLookTarget::from_link(&local).map(|target| target.path().to_path_buf()),
+            QuickLookTarget::from_link(&local).and_then(|target| target.revalidated_path()),
             Some(file.canonicalize().unwrap())
         );
         assert!(QuickLookTarget::from_link(&url).is_none());
 
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn local_native_actions_are_inert_after_the_file_is_removed() {
+        let directory =
+            std::env::temp_dir().join(format!("spaceterm-local-removed-{}", std::process::id()));
+        fs::create_dir_all(&directory).unwrap();
+        let file = directory.join("preview.txt");
+        fs::write(&file, b"preview").unwrap();
+        let local = HyperlinkTarget::osc8("file:preview.txt", &directory, None).unwrap();
+
+        fs::remove_file(file).unwrap();
+
+        assert_eq!(local.activation_url(), None);
+        assert_eq!(QuickLookTarget::from_link(&local), None);
+        assert!(NativeContextActions::from_presence(false, Some(&local)).open_link);
+        assert!(NativeContextActions::from_presence(false, Some(&local)).quick_look);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn local_native_actions_are_inert_after_the_file_is_replaced() {
+        let directory =
+            std::env::temp_dir().join(format!("spaceterm-local-replaced-{}", std::process::id()));
+        fs::create_dir_all(&directory).unwrap();
+        let file = directory.join("preview.txt");
+        let replacement = directory.join("replacement.txt");
+        fs::write(&file, b"first").unwrap();
+        let local = HyperlinkTarget::osc8("file:preview.txt", &directory, None).unwrap();
+
+        fs::write(&replacement, b"replacement").unwrap();
+        fs::rename(&replacement, &file).unwrap();
+
+        assert_eq!(local.activation_url(), None);
+        assert_eq!(QuickLookTarget::from_link(&local), None);
+        assert!(NativeContextActions::from_presence(false, Some(&local)).open_link);
+        assert!(NativeContextActions::from_presence(false, Some(&local)).quick_look);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn local_native_actions_are_inert_after_the_path_becomes_a_different_symlink() {
+        let directory =
+            std::env::temp_dir().join(format!("spaceterm-local-symlink-{}", std::process::id()));
+        fs::create_dir_all(&directory).unwrap();
+        let file = directory.join("preview.txt");
+        let other = directory.join("other.txt");
+        fs::write(&file, b"first").unwrap();
+        fs::write(&other, b"other").unwrap();
+        let local = HyperlinkTarget::osc8("file:preview.txt", &directory, None).unwrap();
+
+        fs::remove_file(&file).unwrap();
+        symlink(&other, &file).unwrap();
+
+        assert_eq!(local.activation_url(), None);
+        assert_eq!(QuickLookTarget::from_link(&local), None);
+        assert!(NativeContextActions::from_presence(false, Some(&local)).open_link);
+        assert!(NativeContextActions::from_presence(false, Some(&local)).quick_look);
         fs::remove_dir_all(directory).unwrap();
     }
 }

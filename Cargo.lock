@@ -5135,6 +5135,7 @@ dependencies = [
  "libghostty-vt",
  "objc",
  "portable-pty",
+ "raw-window-handle",
  "smallvec",
  "thiserror 2.0.19",
  "unicode-bidi",
