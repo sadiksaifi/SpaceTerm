@@ -29,6 +29,15 @@ def parse_time(value: str) -> dt.datetime:
         fail("invalid-trace-time")
 
 
+def epoch_nanoseconds(value: dt.datetime) -> int:
+    epoch = dt.datetime(1970, 1, 1, tzinfo=dt.timezone.utc)
+    delta = value.astimezone(dt.timezone.utc) - epoch
+    return (
+        (delta.days * 86_400 + delta.seconds) * 1_000_000
+        + delta.microseconds
+    ) * 1_000
+
+
 def text(element: ET.Element | None) -> str:
     return "" if element is None or element.text is None else element.text.strip()
 
@@ -48,6 +57,16 @@ def row_targets_pid(row: ET.Element, pid: int, identifiers: set[str]) -> bool:
         if process.get("ref") in identifiers:
             return True
     return False
+
+
+def table_exclusively_targets_pid(root: ET.Element, pid: int) -> bool:
+    """Require every concrete exported process binding to be the target."""
+    bindings = [
+        text(process.find("pid"))
+        for process in root.findall(".//process")
+        if process.find("pid") is not None
+    ]
+    return bool(bindings) and set(bindings) == {str(pid)}
 
 
 def numeric(value: str) -> float:
@@ -93,6 +112,10 @@ def main() -> None:
     ]
     if len(processes) != 1 or len(matching) != 1:
         fail("trace-process-scope-is-not-single-target")
+    if len(run.findall('./data/table[@schema="time-profile"]')) != 1:
+        fail("time-profile-table-is-not-exact")
+    if len(run.findall('./data/table[@schema="potential-hangs"]')) != 1:
+        fail("hangs-table-is-not-exact")
 
     summary = run.find("./info/summary")
     if summary is None:
@@ -109,9 +132,8 @@ def main() -> None:
         fail("command-elapsed-does-not-cover-trace")
 
     time_root = parse_xml(arguments.time_profile)
-    if time_root.find("./node/schema") is None or time_root.find(
-        "./node/schema"
-    ).get("name") != "time-profile":
+    time_schemas = time_root.findall("./node/schema")
+    if len(time_schemas) != 1 or time_schemas[0].get("name") != "time-profile":
         fail("time-profile-schema-mismatch")
     time_rows = time_root.findall("./node/row")
     time_ids = process_ids(time_root, arguments.pid)
@@ -143,38 +165,48 @@ def main() -> None:
     if len(allocation_details) != 1:
         fail("allocations-detail-is-not-exact")
     allocation_root = parse_xml(arguments.allocations)
+    if not table_exclusively_targets_pid(allocation_root, arguments.pid):
+        fail("allocations-target-binding-missing")
     allocation_rows = allocation_root.findall("./node/row")
     if not allocation_rows:
         fail("allocation-events-empty")
     for row in allocation_rows:
         if not all(row.get(attribute) for attribute in ("timestamp", "identifier", "size")):
             fail("allocation-row-invalid")
-        # Current Allocations List exports have no per-row process column.
-        # The singleton attached process/run scope checked above is therefore
-        # the only exact target binding available for this detail export.
+        # Current Allocations List exports have no per-row process column. The
+        # export must therefore carry an independent target process record.
 
     hangs_root = parse_xml(arguments.hangs)
-    hangs_schema = hangs_root.find("./node/schema")
-    if hangs_schema is None or hangs_schema.get("name") != "potential-hangs":
+    hangs_schemas = hangs_root.findall("./node/schema")
+    if len(hangs_schemas) != 1 or hangs_schemas[0].get("name") != "potential-hangs":
         fail("hangs-schema-mismatch")
+    if not table_exclusively_targets_pid(hangs_root, arguments.pid):
+        fail("hangs-target-binding-missing")
     hang_rows = hangs_root.findall("./node/row")
     # Zero potential-hang events is a valid clean recording. Instrument
     # presence and full-duration target coverage are proven by the exact TOC
     # table plus the target-bound continuous Time Profiler export above.
     hang_ids = process_ids(hangs_root, arguments.pid)
+    hang_durations: list[float] = []
     for row in hang_rows:
         if any(row.find(field) is None for field in ("start-time", "duration", "hang-type")):
             fail("hang-row-invalid")
         if not row_targets_pid(row, arguments.pid, hang_ids):
             fail("hang-row-target-mismatch")
+        hang_durations.append(numeric(text(row.find("duration"))))
 
     print("reason\tnone")
     print(f"trace_started_at\t{text(summary.find('start-date'))}")
     print(f"trace_ended_at\t{text(summary.find('end-date'))}")
+    print(f"trace_started_epoch_ns\t{epoch_nanoseconds(started)}")
+    print(f"trace_ended_epoch_ns\t{epoch_nanoseconds(ended)}")
     print(f"actual_record_duration_seconds\t{duration:.6f}")
-    print(f"time_profiler_sample_count\t{len(time_rows)}")
-    print(f"allocations_event_count\t{len(allocation_rows)}")
-    print(f"hangs_event_count\t{len(hang_rows)}")
+    # xctrace potential-hangs durations are emitted in nanoseconds.
+    maximum_hang_ms = max(hang_durations, default=0.0) / 1_000_000
+    print(f"time_profiler_rows\t{len(time_rows)}")
+    print(f"allocations_rows\t{len(allocation_rows)}")
+    print(f"hangs_rows\t{len(hang_rows)}")
+    print(f"maximum_main_thread_hang_ms\t{maximum_hang_ms:.6f}")
 
 
 if __name__ == "__main__":

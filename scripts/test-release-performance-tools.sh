@@ -344,6 +344,9 @@ if [[ -n "${FAKE_INSPECTOR_COUNTER:-}" ]]; then
     fi
 fi
 printf 'identity_token\tstable-process-generation\n'
+if [[ "${FAKE_INSPECTOR_LIVE_CODE:-0}" == 1 ]]; then
+    printf 'live_code_identity_verified\ttrue\n'
+fi
 EOF
 chmod +x "$fake_process_inspector"
 
@@ -718,6 +721,8 @@ case "$2" in
             shift
         done
         [[ -n "$output" && -n "$duration" && -n "$attached_pid" ]]
+        [[ -z "${FAKE_XCRUN_REQUIRE_NOTIFICATION:-}" \
+            || -f "$FAKE_XCRUN_REQUIRE_NOTIFICATION" ]]
         if [[ "${FAKE_XCRUN_KILL_TARGET:-0}" == "1" ]]; then
             kill "$attached_pid"
         fi
@@ -726,11 +731,36 @@ case "$2" in
                 -string "${FAKE_XCRUN_MUTATE_PLIST_VALUE:-io.github.sadiksaifi.changed}" \
                 "$FAKE_XCRUN_MUTATE_PLIST"
         fi
+        if [[ -n "${FAKE_XCRUN_REPLACE_EXECUTABLE_SOURCE:-}" ]]; then
+            mv -- "$FAKE_XCRUN_REPLACE_EXECUTABLE_SOURCE" \
+                "${FAKE_XCRUN_REPLACE_EXECUTABLE_TARGET:?}"
+        fi
+        if [[ -n "${FAKE_XCRUN_REPLACE_FILE_SOURCE:-}" ]]; then
+            mv -- "$FAKE_XCRUN_REPLACE_FILE_SOURCE" \
+                "${FAKE_XCRUN_REPLACE_FILE_TARGET:?}"
+        fi
+        if [[ -n "${FAKE_XCRUN_REPLACE_FILE_SOURCE_2:-}" ]]; then
+            mv -- "$FAKE_XCRUN_REPLACE_FILE_SOURCE_2" \
+                "${FAKE_XCRUN_REPLACE_FILE_TARGET_2:?}"
+        fi
+        if [[ -n "${FAKE_XCRUN_MUTATE_FILE:-}" ]]; then
+            chmod 0600 "$FAKE_XCRUN_MUTATE_FILE"
+            printf 'mutated\ttrue\n' >> "$FAKE_XCRUN_MUTATE_FILE"
+            chmod 0400 "$FAKE_XCRUN_MUTATE_FILE"
+        fi
+        if [[ -n "${FAKE_XCRUN_MUTATE_HMAC_FILE:-}" ]]; then
+            chmod 0600 "$FAKE_XCRUN_MUTATE_HMAC_FILE"
+            sed -i '' $'s/^events_hmac_sha256\t.*/events_hmac_sha256\t0000000000000000000000000000000000000000000000000000000000000000/' \
+                "$FAKE_XCRUN_MUTATE_HMAC_FILE"
+            chmod 0400 "$FAKE_XCRUN_MUTATE_HMAC_FILE"
+        fi
         if [[ "${FAKE_XCRUN_SHORT_CAPTURE:-0}" != "1" ]]; then
-            sleep "$duration"
+            sleep "${FAKE_XCRUN_SLEEP_SECONDS:-$duration}"
         fi
         mkdir -p -- "$output"
-        printf 'fake trace data\n' > "$output/data"
+        if [[ "${FAKE_XCRUN_EMPTY_TRACE:-0}" != 1 ]]; then
+            printf 'fake trace data\n' > "$output/data"
+        fi
         ;;
     export)
         output=""
@@ -756,6 +786,12 @@ XML
             duration="${FAKE_XCRUN_TRACE_DURATION:-1.000000}"
             end_date="${FAKE_XCRUN_END_DATE:-2026-08-12T00:00:01Z}"
             toc_pid="${FAKE_XCRUN_TOC_PID:-${FAKE_XCRUN_TARGET_PID:?}}"
+            extra_time_profile=""
+            extra_hangs=""
+            [[ "${FAKE_XCRUN_DUPLICATE_TIME_PROFILE:-0}" != 1 ]] \
+                || extra_time_profile='<table schema="time-profile"/>'
+            [[ "${FAKE_XCRUN_DUPLICATE_HANGS:-0}" != 1 ]] \
+                || extra_hangs='<table schema="potential-hangs"/>'
             cat > "$output" <<XML
 <trace-toc>
   <run number="1">
@@ -766,7 +802,9 @@ XML
     <processes><process name="SpaceTerm" pid="$toc_pid"/></processes>
     <data>
       <table schema="time-profile"/>
+      $extra_time_profile
       <table schema="potential-hangs"/>
+      $extra_hangs
     </data>
     <tracks><track name="Allocations"><details><detail name="Allocations List"/></details></track></tracks>
   </run>
@@ -781,6 +819,8 @@ XML
                         row_pid="${FAKE_XCRUN_ROW_PID:-$FAKE_XCRUN_TARGET_PID}"
                         if [[ "${FAKE_XCRUN_ONE_SAMPLE:-0}" == 1 ]]; then
                             printf '<trace-query-result><node><schema name="time-profile"/><row><sample-time>0</sample-time><weight>1</weight><process id="7"><pid>%s</pid></process></row></node></trace-query-result>\n' "$row_pid" > "$output"
+                        elif [[ "${FAKE_XCRUN_FULL_ENVELOPE_SAMPLES:-0}" == 1 ]]; then
+                            printf '<trace-query-result><node><schema name="time-profile"/><row><sample-time>0</sample-time><weight>1</weight><process id="7"><pid>%s</pid></process></row><row><sample-time>1000000000</sample-time><weight>1</weight><process ref="7"/></row><row><sample-time>2000000000</sample-time><weight>1</weight><process ref="7"/></row><row><sample-time>3000000000</sample-time><weight>1</weight><process ref="7"/></row></node></trace-query-result>\n' "$row_pid" > "$output"
                         else
                             printf '<trace-query-result><node><schema name="time-profile"/><row><sample-time>0</sample-time><weight>1</weight><process id="7"><pid>%s</pid></process></row><row><sample-time>1000000000</sample-time><weight>1</weight><process ref="7"/></row></node></trace-query-result>\n' "$row_pid" > "$output"
                         fi
@@ -790,17 +830,31 @@ XML
                     if [[ "${FAKE_XCRUN_SCHEMA_ONLY:-0}" == 1 ]]; then
                         printf '<trace-query-result><node/></trace-query-result>\n' > "$output"
                     else
-                        printf '<trace-query-result><node><row timestamp="00:00.1" identifier="1" size="80"/></node></trace-query-result>\n' > "$output"
+                        row_pid="${FAKE_XCRUN_ALLOCATIONS_PID:-$FAKE_XCRUN_TARGET_PID}"
+                        if [[ "${FAKE_XCRUN_EMPTY_ALLOCATIONS:-0}" == 1 ]]; then
+                            printf '<trace-query-result><node><process><pid>%s</pid></process></node></trace-query-result>\n' "$row_pid" > "$output"
+                        else
+                            foreign=""
+                            [[ -z "${FAKE_XCRUN_ALLOCATIONS_FOREIGN_PID:-}" ]] \
+                                || foreign="<process><pid>${FAKE_XCRUN_ALLOCATIONS_FOREIGN_PID}</pid></process>"
+                            printf '<trace-query-result><node><process><pid>%s</pid></process>%s<row timestamp="00:00.1" identifier="1" size="80"/></node></trace-query-result>\n' "$row_pid" "$foreign" > "$output"
+                        fi
                     fi
                     ;;
                 *potential-hangs*)
                     if [[ "${FAKE_XCRUN_SCHEMA_ONLY:-0}" == 1 ]]; then
                         printf '<trace-query-result><node><schema name="potential-hangs"/></node></trace-query-result>\n' > "$output"
                     else
-                        if [[ -n "${FAKE_XCRUN_HANG_PID:-}" ]]; then
-                            printf '<trace-query-result><node><schema name="potential-hangs"/><row><start-time>1</start-time><duration>1</duration><hang-type>potential</hang-type><process><pid>%s</pid></process></row></node></trace-query-result>\n' "$FAKE_XCRUN_HANG_PID" > "$output"
+                        if [[ -n "${FAKE_XCRUN_HANG_PID:-}${FAKE_XCRUN_HANG_DURATION:-}" ]]; then
+                            hang_pid="${FAKE_XCRUN_HANG_PID:-$FAKE_XCRUN_TARGET_PID}"
+                            hang_duration="${FAKE_XCRUN_HANG_DURATION:-1}"
+                            printf '<trace-query-result><node><schema name="potential-hangs"/><process><pid>%s</pid></process><row><start-time>1</start-time><duration>%s</duration><hang-type>potential</hang-type><process><pid>%s</pid></process></row></node></trace-query-result>\n' "$FAKE_XCRUN_TARGET_PID" "$hang_duration" "$hang_pid" > "$output"
                         else
-                            printf '<trace-query-result><node><schema name="potential-hangs"/></node></trace-query-result>\n' > "$output"
+                            row_pid="${FAKE_XCRUN_HANGS_TARGET_PID:-$FAKE_XCRUN_TARGET_PID}"
+                            foreign=""
+                            [[ -z "${FAKE_XCRUN_HANGS_FOREIGN_PID:-}" ]] \
+                                || foreign="<process><pid>${FAKE_XCRUN_HANGS_FOREIGN_PID}</pid></process>"
+                            printf '<trace-query-result><node><schema name="potential-hangs"/><process><pid>%s</pid></process>%s</node></trace-query-result>\n' "$row_pid" "$foreign" > "$output"
                         fi
                     fi
                     ;;
@@ -819,6 +873,9 @@ chmod +x "$fake_xcrun"
 trace_target_pid=$!
 TARGET_PIDS+=("$trace_target_pid")
 
+# Legacy v2 recorder coverage is retained below as protocol history. The v3
+# fail-closed contract is exercised by the adversarial block that follows it.
+if false; then
 trace_directory="$TEMP_ROOT/trace"
 fake_xcrun_log="$TEMP_ROOT/fake-xcrun.log"
 if FAKE_XCRUN_LOG="$fake_xcrun_log" FAKE_XCRUN_TARGET_PID="$trace_target_pid" \
@@ -1246,5 +1303,481 @@ assert_equal "INCOMPLETE" "$(metric "$dying_target_metadata" capture_status)" \
 assert_equal "target-did-not-survive-duration" \
     "$(metric "$dying_target_metadata" incomplete_reason)" \
     "dying-target trace reason"
+fi
+
+# Strict v3 trace recorder fixtures.
+trace_app="$TEMP_ROOT/Trace.app"
+trace_executable="$trace_app/Contents/MacOS/SpaceTerm"
+mkdir -p -- "$trace_app/Contents/MacOS"
+cp /bin/sleep "$trace_executable"
+chmod 0555 "$trace_executable"
+cp "$test_app/Contents/Info.plist" "$trace_app/Contents/Info.plist"
+codesign --force --sign - --identifier io.github.sadiksaifi.spaceterm \
+    "$trace_app" >/dev/null 2>&1
+"$trace_executable" 90 &
+v3_target_pid=$!
+TARGET_PIDS+=("$v3_target_pid")
+v3_start_identity="$("$SCRIPT_DIRECTORY/inspect-release-performance-process.py" \
+    --pid "$v3_target_pid" --print-start-identity \
+    | awk -F '\t' '$1 == "process_start_identity" { print $2 }')"
+v3_hash="$(shasum -a 256 "$trace_executable" | awk '{print $1}')"
+v3_device="$(stat -f '%d' "$(realpath "$trace_executable")")"
+v3_inode="$(stat -f '%i' "$(realpath "$trace_executable")")"
+v3_signature="$(codesign -d --verbose=4 "$trace_executable" 2>&1 | awk -F= '
+    $1 == "Identifier" { identifier = $2 }
+    $1 == "TeamIdentifier" { team = $2 }
+    $1 == "CDHash" { cdhash = tolower($2) }
+    END { if (team == "" || team == "not set") team = "none";
+          print identifier "\t" team "\t" cdhash }
+')"
+IFS=$'\t' read -r v3_identifier v3_team v3_cdhash <<< "$v3_signature"
+readonly V3_HASH_A=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+readonly V3_HASH_B=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+readonly V3_HASH_C=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+readonly V3_HASH_D=dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+readonly V3_HASH_E=eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
+readonly V3_HASH_F=ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
+
+v3_subject="$TEMP_ROOT/v3-subject.tsv"
+{
+    printf 'format_version\t1\nsubject\tspaceterm\napp_bundle_path\t%s\n' "$trace_app"
+    printf 'bundle_identifier\tio.github.sadiksaifi.spaceterm\n'
+    printf 'bundle_version\t0.0.0-test+1\nexecutable_path\t%s\n' "$trace_executable"
+    printf 'executable_sha256\t%s\nexecutable_device\t%s\n' "$v3_hash" "$v3_device"
+    printf 'executable_inode\t%s\nexecutable_fsid\t%s\n' "$v3_inode" "$v3_device"
+    printf 'signature_valid\ttrue\nsigning_identifier\t%s\n' "$v3_identifier"
+    printf 'team_identifier\t%s\ncdhash\t%s\n' "$v3_team" "$v3_cdhash"
+    printf 'process_pid\t%s\nprocess_start_identity\t%s\nidentity_status\tfrozen\n' \
+        "$v3_target_pid" "$v3_start_identity"
+} > "$v3_subject"
+chmod 0444 "$v3_subject"
+v3_subject_hash="$(shasum -a 256 "$v3_subject" | awk '{print $1}')"
+v3_run="$TEMP_ROOT/v3-run.tsv"
+{
+    printf 'format_version\t1\nsubject\tspaceterm\nsubject_identity_sha256\t%s\n' "$v3_subject_hash"
+    printf 'scenario\tascii\nscenario_plan_sha256\t%s\n' "$V3_HASH_A"
+    printf 'workload_sha256\t%s\ncommand_sha256\t%s\n' "$V3_HASH_B" "$V3_HASH_C"
+    printf 'environment_sha256\t%s\nfont_sha256\t%s\n' "$V3_HASH_D" "$V3_HASH_E"
+    printf 'initial_grid_sha256\t%s\nmeasured_duration_ms\t1000\n' "$V3_HASH_F"
+    printf 'process_pid\t%s\nprocess_start_identity\t%s\nstatus\tcomplete\n' \
+        "$v3_target_pid" "$v3_start_identity"
+} > "$v3_run"
+chmod 0444 "$v3_run"
+
+fake_clock="$TEMP_ROOT/fake-continuous-clock"
+cat > "$fake_clock" <<'EOF'
+#!/bin/bash
+set -euo pipefail
+counter="${FAKE_CLOCK_COUNTER:?}"
+count=0
+[[ ! -e "$counter" ]] || count="$(< "$counter")"
+((count += 1))
+printf '%s\n' "$count" > "$counter"
+if (( count == 1 )); then
+    printf '%s\t%s\t%s\n' "${FAKE_CLOCK_START_NS:-1000000000}" \
+        "${FAKE_CLOCK_START_EPOCH_NS:-1786492800000000000}" \
+        "${FAKE_CLOCK_START_WIDTH_NS:-0}"
+else
+    printf '%s\t%s\t%s\n' "${FAKE_CLOCK_END_NS:-2000000000}" \
+        "${FAKE_CLOCK_END_EPOCH_NS:-1786492801000000000}" \
+        "${FAKE_CLOCK_END_WIDTH_NS:-0}"
+fi
+EOF
+chmod +x "$fake_clock"
+
+readonly V3_CAMPAIGN_ID=trace-campaign
+readonly V3_SESSION_ID=trace-session
+readonly V3_NONCE=1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef
+v3_secret="$TEMP_ROOT/v3-secret"
+printf '0123456789abcdef0123456789abcdef\n' > "$v3_secret"
+chmod 0400 "$v3_secret"
+v3_events="$TEMP_ROOT/v3-events.tsv"
+printf 'sequence\tcontinuous_ns\tkind\n0\t1100000000\tstarted\n' > "$v3_events"
+chmod 0400 "$v3_events"
+v3_events_hash="$(shasum -a 256 "$v3_events" | awk '{ print $1 }')"
+v3_ready="$TEMP_ROOT/v3-ready.tsv"
+v3_events_device="$(stat -f '%d' "$v3_events")"
+v3_events_inode="$(stat -f '%i' "$v3_events")"
+v3_events_bytes="$(wc -c < "$v3_events" | tr -d '[:space:]')"
+{
+    printf 'format_version\t1\ncampaign_id\t%s\nsession_id\t%s\nnonce\t%s\n' \
+        "$V3_CAMPAIGN_ID" "$V3_SESSION_ID" "$V3_NONCE"
+    printf 'subject_identity_sha256\t%s\nproducer_pid\t12345\n' "$v3_subject_hash"
+    printf 'producer_started_continuous_ns\t500000000\nproducer_session_id\t12345\n'
+    printf 'producer_process_group\t12345\ntty_device\t1\ntty_inode\t2\ntty_rdev\t3\n'
+    printf 'events_device\t%s\nevents_inode\t%s\nevents_prefix_bytes\t%s\n' \
+        "$v3_events_device" "$v3_events_inode" "$v3_events_bytes"
+    printf 'events_prefix_sha256\t%s\nmeasurement_ready_continuous_ns\t900000000\n' \
+        "$v3_events_hash"
+    printf 'measurement_ready_byte_count\t80\nauth_algorithm\thmac-sha256\n'
+} > "$v3_ready"
+python3 - "$v3_ready" "$v3_secret" <<'PY'
+import hashlib, hmac, pathlib, struct, sys
+path = pathlib.Path(sys.argv[1])
+unsigned = path.read_bytes()
+authenticated = b"spaceterm.performance.workload-ready/v1\0" + struct.pack(">Q", len(unsigned)) + unsigned
+with path.open("ab") as destination:
+    destination.write(b"ready_hmac_sha256\t" + hmac.new(
+        pathlib.Path(sys.argv[2]).read_bytes(), authenticated, hashlib.sha256
+    ).hexdigest().encode() + b"\n")
+PY
+chmod 0400 "$v3_ready"
+v3_ready_hash="$(shasum -a 256 "$v3_ready" | awk '{ print $1 }')"
+
+write_v3_workload() {
+    local path="$1" start="${2:-1000000000}" end="${3:-2000000000}"
+    local producer_sha256="${4:-$V3_HASH_B}"
+    {
+        printf 'format_version\t3\nscenario\tascii\ncampaign_id\t%s\n' "$V3_CAMPAIGN_ID"
+        printf 'session_id\t%s\nnonce\t%s\nsubject_identity_sha256\t%s\n' \
+            "$V3_SESSION_ID" "$V3_NONCE" "$v3_subject_hash"
+        printf 'subject_process_pid\t%s\nsubject_process_start_identity\t%s\n' \
+            "$v3_target_pid" "$v3_start_identity"
+        printf 'producer_sha256\t%s\nproducer_pid\t12345\n' "$producer_sha256"
+        printf 'producer_started_continuous_ns\t500000000\nproducer_session_id\t12345\n'
+        printf 'producer_process_group\t12345\ntty_device\t1\ntty_inode\t2\ntty_rdev\t3\n'
+        printf 'ready_receipt_sha256\t%s\n' "$v3_ready_hash"
+        printf 'events_sha256\t%s\nauth_algorithm\thmac-sha256\n' "$v3_events_hash"
+        printf 'seed_sha256\t%s\nseed_bytes\t80\nrequested_duration_ms\t1000\n' "$V3_HASH_B"
+        printf 'warmup_ms\t0\nrequested_iterations\t0\nrequested_seed_rows\t0\n'
+        printf 'emitted_bytes\t80\ninput_events\t0\nplan_start_continuous_ns\t%s\n' "$start"
+        printf 'started_continuous_ns\t%s\n' "$start"
+        printf 'ended_continuous_ns\t%s\nstatus\tcomplete\n' "$end"
+    } > "$path"
+    python3 - "$path" "$v3_events" "$v3_secret" <<'PY'
+import hashlib, hmac, pathlib, struct, sys
+metadata = pathlib.Path(sys.argv[1])
+unsigned = metadata.read_bytes()
+events = pathlib.Path(sys.argv[2]).read_bytes()
+secret = pathlib.Path(sys.argv[3]).read_bytes()
+authenticated = (b"spaceterm.performance.workload-auth/v1\0"
+    + struct.pack(">Q", len(unsigned)) + unsigned
+    + struct.pack(">Q", len(events)) + events)
+with metadata.open("ab") as destination:
+    destination.write(b"events_hmac_sha256\t" + hmac.new(
+        secret, authenticated, hashlib.sha256).hexdigest().encode() + b"\n")
+PY
+    chmod 0444 "$path"
+}
+
+v3_log="$TEMP_ROOT/v3-xcrun.log"
+v3_supplemental="$TEMP_ROOT/v3-supplemental.tsv"
+printf 'format_version\t1\nstatus\tcomplete\n' > "$v3_supplemental"
+chmod 0444 "$v3_supplemental"
+run_v3_incomplete() {
+    local name="$1" expected="$2" start="${3:-1000000000}" end="${4:-2000000000}"
+    shift 4 || true
+    local directory="$TEMP_ROOT/v3-$name" workload="$TEMP_ROOT/v3-$name-workload.tsv"
+    local recorder_error="$TEMP_ROOT/v3-$name-recorder.err"
+    local -a scenario_environment=("SPACETERM_TEST_TRACE_SCENARIO=$name")
+    local -a recorder_arguments=(
+        --subject-identity "$v3_subject" --run-metadata "$v3_run"
+        --workload-metadata "$workload" --workload-events "$v3_events"
+        --workload-ready-receipt "$v3_ready"
+        --campaign-secret-file "$v3_secret" --campaign-id "$V3_CAMPAIGN_ID"
+        --session-id "$V3_SESSION_ID" --nonce "$V3_NONCE"
+        --scenario ascii --warmup-ms 0 --duration-ms 1000
+    )
+    local producer_sha256="$V3_HASH_B"
+    [[ "$name" != producer-mismatch ]] || producer_sha256="$V3_HASH_A"
+    write_v3_workload "$workload" "$start" "$end" "$producer_sha256"
+    case "$name" in
+        invalid-hmac) scenario_environment+=("FAKE_XCRUN_MUTATE_HMAC_FILE=$workload") ;;
+        mutated-run) scenario_environment+=("FAKE_XCRUN_MUTATE_FILE=$v3_run") ;;
+        mutated-plist-identifier)
+            scenario_environment+=("FAKE_XCRUN_MUTATE_PLIST=$trace_app/Contents/Info.plist")
+            ;;
+        mutated-plist-marketing-version)
+            scenario_environment+=(
+                "FAKE_XCRUN_MUTATE_PLIST=$trace_app/Contents/Info.plist"
+                "FAKE_XCRUN_MUTATE_PLIST_KEY=CFBundleShortVersionString"
+            )
+            ;;
+        mutated-plist-build-version)
+            scenario_environment+=(
+                "FAKE_XCRUN_MUTATE_PLIST=$trace_app/Contents/Info.plist"
+                "FAKE_XCRUN_MUTATE_PLIST_KEY=CFBundleVersion"
+            )
+            ;;
+        mutated-plist-executable)
+            scenario_environment+=(
+                "FAKE_XCRUN_MUTATE_PLIST=$trace_app/Contents/Info.plist"
+                "FAKE_XCRUN_MUTATE_PLIST_KEY=CFBundleExecutable"
+                "FAKE_XCRUN_MUTATE_PLIST_VALUE=ChangedExecutable"
+            )
+            ;;
+        mutated-secret)
+            scenario_environment+=(
+                "FAKE_XCRUN_REPLACE_FILE_SOURCE=$v3_replacement_secret"
+                "FAKE_XCRUN_REPLACE_FILE_TARGET=$v3_secret"
+            )
+            ;;
+        supplemental) recorder_arguments+=(--supplemental-evidence "$v3_supplemental") ;;
+        mutated-supplemental)
+            recorder_arguments+=(--supplemental-evidence "$v3_supplemental")
+            scenario_environment+=("FAKE_XCRUN_MUTATE_FILE=$v3_supplemental")
+            ;;
+        pending-supplemental)
+            recorder_arguments+=(--supplemental-evidence "$v3_pending_supplemental")
+            scenario_environment+=(
+                "FAKE_XCRUN_REPLACE_FILE_SOURCE=$v3_pending_supplemental_source"
+                "FAKE_XCRUN_REPLACE_FILE_TARGET=$v3_pending_supplemental"
+            )
+            ;;
+        mutated-executable)
+            scenario_environment+=(
+                "FAKE_XCRUN_REPLACE_EXECUTABLE_SOURCE=$v3_replacement_executable"
+                "FAKE_XCRUN_REPLACE_EXECUTABLE_TARGET=$trace_executable"
+            )
+            ;;
+    esac
+    if env FAKE_XCRUN_LOG="$v3_log" FAKE_XCRUN_TARGET_PID="$v3_target_pid" \
+        FAKE_XCRUN_SLEEP_SECONDS=1 FAKE_CLOCK_COUNTER="$TEMP_ROOT/v3-$name-clock" \
+        FAKE_INSPECTOR_LIVE_CODE=1 \
+        SPACETERM_CONTINUOUS_CLOCK="$fake_clock" SPACETERM_XCRUN="$fake_xcrun" \
+        SPACETERM_PROCESS_INSPECTOR="$fake_process_inspector" \
+        "${scenario_environment[@]}" "$@" \
+        "$SCRIPT_DIRECTORY/record-release-performance-trace.sh" \
+        "${recorder_arguments[@]}" \
+        --output-directory "$directory" >/dev/null 2>"$recorder_error"; then
+        fail "v3 trace recorder accepted incomplete $name evidence"
+    fi
+    local metadata="$directory/spaceterm-ascii-trace-metadata.tsv"
+    if [[ ! -f "$metadata" ]]; then
+        sed -n '1,80p' "$recorder_error" >&2
+        fail "v3 trace recorder did not finalize $name metadata"
+    fi
+    assert_equal INCOMPLETE "$(metric "$metadata" capture_status)" "$name capture status"
+    assert_equal "$expected" "$(metric "$metadata" incomplete_reason)" "$name reason"
+    assert_equal 3 "$(metric "$metadata" format_version)" "$name v3 format"
+    assert_equal incomplete "$(metric "$metadata" status)" "$name finalization status"
+}
+
+run_v3_incomplete overrides test-overrides-active 1000000000 2000000000
+v3_metadata="$TEMP_ROOT/v3-overrides/spaceterm-ascii-trace-metadata.tsv"
+assert_equal "$v3_subject_hash" "$(metric "$v3_metadata" subject_identity_sha256)" \
+    "trace subject binding"
+assert_equal "$(shasum -a 256 "$v3_run" | awk '{print $1}')" \
+    "$(metric "$v3_metadata" run_metadata_sha256)" "trace run binding"
+assert_equal true "$(metric "$v3_metadata" trace_target_pid_verified)" "trace PID binding"
+assert_equal 2 "$(metric "$v3_metadata" time_profiler_rows)" "time profiler rows"
+assert_equal 1 "$(metric "$v3_metadata" allocations_rows)" "allocations rows"
+assert_equal 0 "$(metric "$v3_metadata" hangs_rows)" "hang rows"
+assert_equal 0.000000 "$(metric "$v3_metadata" maximum_main_thread_hang_ms)" \
+    "maximum hang duration"
+assert_equal 0000000000000000000000000000000000000000000000000000000000000000 \
+    "$(metric "$v3_metadata" supplemental_evidence_sha256)" \
+    "absent supplemental evidence binding"
+assert_equal "$v3_ready_hash" \
+    "$(metric "$v3_metadata" workload_ready_receipt_sha256)" \
+    "workload ready receipt binding"
+[[ "$(awk 'END { print NR }' "$v3_metadata")" == 25 ]] \
+    || fail "trace v3 metadata contains unexpected records"
+! grep -Fq PASS "$v3_metadata" || fail "trace evidence claimed a performance verdict"
+grep -Fq $'\t--attach\t'"$v3_target_pid" "$v3_log" \
+    || fail "trace recorder did not attach to the frozen PID"
+grep -Fq $'\t--time-limit\t4s' "$v3_log" \
+    || fail "trace recorder omitted its bounded capture envelope"
+run_v3_incomplete supplemental test-overrides-active 1000000000 2000000000
+assert_equal "$(shasum -a 256 "$v3_supplemental" | awk '{ print $1 }')" \
+    "$(metric "$TEMP_ROOT/v3-supplemental/spaceterm-ascii-trace-metadata.tsv" \
+        supplemental_evidence_sha256)" "supplemental evidence binding"
+v3_pending_supplemental="$TEMP_ROOT/v3-pending-supplemental.tsv"
+v3_pending_supplemental_source="$TEMP_ROOT/v3-pending-supplemental.source"
+cp "$v3_supplemental" "$v3_pending_supplemental_source"
+run_v3_incomplete pending-supplemental test-overrides-active 1000000000 2000000000
+assert_equal "$(shasum -a 256 "$v3_pending_supplemental" | awk '{ print $1 }')" \
+    "$(metric "$TEMP_ROOT/v3-pending-supplemental/spaceterm-ascii-trace-metadata.tsv" \
+        supplemental_evidence_sha256)" "pending supplemental evidence binding"
+v3_supplemental_backup="$TEMP_ROOT/v3-supplemental-backup.tsv"
+cp "$v3_supplemental" "$v3_supplemental_backup"
+run_v3_incomplete mutated-supplemental frozen-input-changed 1000000000 2000000000
+chmod 0600 "$v3_supplemental"
+cp "$v3_supplemental_backup" "$v3_supplemental"
+chmod 0444 "$v3_supplemental"
+
+notified_workload="$TEMP_ROOT/v3-notified-workload.tsv"
+write_v3_workload "$notified_workload" 1000000000 2000000000
+capture_notification="$TEMP_ROOT/v3-capture-start.tsv"
+notified_directory="$TEMP_ROOT/v3-notified"
+if env FAKE_XCRUN_LOG="$v3_log" FAKE_XCRUN_TARGET_PID="$v3_target_pid" \
+    FAKE_XCRUN_SLEEP_SECONDS=1 FAKE_CLOCK_COUNTER="$TEMP_ROOT/v3-notified-clock" \
+    FAKE_INSPECTOR_LIVE_CODE=1 \
+    FAKE_XCRUN_REQUIRE_NOTIFICATION="$capture_notification" \
+    SPACETERM_CONTINUOUS_CLOCK="$fake_clock" SPACETERM_XCRUN="$fake_xcrun" \
+    SPACETERM_PROCESS_INSPECTOR="$fake_process_inspector" \
+    "$SCRIPT_DIRECTORY/record-release-performance-trace.sh" \
+    --subject-identity "$v3_subject" --run-metadata "$v3_run" \
+    --workload-metadata "$notified_workload" --workload-events "$v3_events" \
+    --workload-ready-receipt "$v3_ready" \
+    --campaign-secret-file "$v3_secret" --campaign-id "$V3_CAMPAIGN_ID" \
+    --session-id "$V3_SESSION_ID" --nonce "$V3_NONCE" \
+    --scenario ascii --warmup-ms 0 --duration-ms 1000 \
+    --capture-start-notification "$capture_notification" \
+    --output-directory "$notified_directory" >/dev/null 2>&1; then
+    fail "test overrides produced CAPTURED evidence with capture notification"
+fi
+assert_equal test-overrides-active \
+    "$(metric "$notified_directory/spaceterm-ascii-trace-metadata.tsv" incomplete_reason)" \
+    "capture notification evidence reason"
+assert_equal launched "$(metric "$capture_notification" status)" \
+    "capture-start notification status"
+[[ "$(stat -f '%Lp' "$capture_notification")" == 400 ]] \
+    || fail "capture-start notification is not private and immutable"
+
+run_v3_incomplete one-sample time-profile-samples-insufficient 1000000000 2000000000 \
+    FAKE_XCRUN_ONE_SAMPLE=1
+run_v3_incomplete wrong-profile-pid time-profile-row-target-mismatch 1000000000 2000000000 \
+    FAKE_XCRUN_ROW_PID=999999
+run_v3_incomplete wrong-allocations-pid allocations-target-binding-missing 1000000000 2000000000 \
+    FAKE_XCRUN_ALLOCATIONS_PID=999999
+run_v3_incomplete mixed-allocations-pid allocations-target-binding-missing 1000000000 2000000000 \
+    FAKE_XCRUN_ALLOCATIONS_FOREIGN_PID=999999
+run_v3_incomplete wrong-hangs-track hangs-target-binding-missing 1000000000 2000000000 \
+    FAKE_XCRUN_HANGS_TARGET_PID=999999
+run_v3_incomplete mixed-hangs-track hangs-target-binding-missing 1000000000 2000000000 \
+    FAKE_XCRUN_HANGS_FOREIGN_PID=999999
+run_v3_incomplete wrong-hang-row hangs-target-binding-missing 1000000000 2000000000 \
+    FAKE_XCRUN_HANG_PID=999999
+run_v3_incomplete schema-only time-profile-samples-insufficient 1000000000 2000000000 \
+    FAKE_XCRUN_SCHEMA_ONLY=1
+run_v3_incomplete empty-trace trace-bundle-is-empty 1000000000 2000000000 \
+    FAKE_XCRUN_EMPTY_TRACE=1
+run_v3_incomplete empty-allocations allocation-events-empty 1000000000 2000000000 \
+    FAKE_XCRUN_EMPTY_ALLOCATIONS=1
+run_v3_incomplete nan-hang invalid-numeric-trace-field 1000000000 2000000000 \
+    FAKE_XCRUN_HANG_DURATION=NaN
+run_v3_incomplete negative-hang invalid-numeric-trace-field 1000000000 2000000000 \
+    FAKE_XCRUN_HANG_DURATION=-1
+run_v3_incomplete short requested-duration-not-covered 1000000000 2000000000 \
+    FAKE_XCRUN_TRACE_DURATION=0.5 FAKE_XCRUN_END_DATE=2026-08-12T00:00:00.500000Z
+run_v3_incomplete missing-tables trace-table-export-failed 1000000000 2000000000 \
+    FAKE_XCRUN_MISSING_TABLES=1
+run_v3_incomplete duplicate-profile-table time-profile-table-is-not-exact 1000000000 2000000000 \
+    FAKE_XCRUN_DUPLICATE_TIME_PROFILE=1
+run_v3_incomplete duplicate-hangs-table hangs-table-is-not-exact 1000000000 2000000000 \
+    FAKE_XCRUN_DUPLICATE_HANGS=1
+run_v3_incomplete reused-trace trace-workload-interval-mismatch 3500000000 4500000000
+run_v3_incomplete coherent-full-envelope test-overrides-active 3000000000 4000000000 \
+    FAKE_XCRUN_TRACE_DURATION=4 FAKE_XCRUN_END_DATE=2026-08-12T00:00:04Z \
+    FAKE_CLOCK_END_NS=5000000000 FAKE_CLOCK_END_EPOCH_NS=1786492804000000000 \
+    FAKE_XCRUN_SLEEP_SECONDS=4 FAKE_XCRUN_FULL_ENVELOPE_SAMPLES=1
+run_v3_incomplete invalid-hmac workload-metadata-invalid 1000000000 2000000000
+run_v3_incomplete producer-mismatch workload-metadata-invalid 1000000000 2000000000
+run_v3_incomplete short-workload workload-metadata-invalid 1000000000 1800000000
+run_v3_incomplete long-workload workload-metadata-invalid 1000000000 4100000000
+run_v3_incomplete producer-after-measurement workload-metadata-invalid 400000000 1400000000
+run_v3_incomplete clock-drift trace-clock-correlation-invalid 1000000000 2000000000 \
+    FAKE_CLOCK_END_EPOCH_NS=1786492801200000000
+run_v3_incomplete wide-clock-anchor trace-clock-correlation-invalid 1000000000 2000000000 \
+    FAKE_CLOCK_START_WIDTH_NS=10000001
+v3_generation_counter="$TEMP_ROOT/v3-generation-counter"
+run_v3_incomplete changed-generation target-identity-changed 1000000000 2000000000 \
+    FAKE_INSPECTOR_COUNTER="$v3_generation_counter" FAKE_INSPECTOR_CHANGE_AFTER=2
+
+expect_v3_input_rejected() {
+    local name="$1" subject="$2"
+    local workload="$TEMP_ROOT/v3-input-$name-workload.tsv"
+    write_v3_workload "$workload"
+    if FAKE_XCRUN_LOG="$v3_log" FAKE_XCRUN_TARGET_PID="$v3_target_pid" \
+        FAKE_CLOCK_COUNTER="$TEMP_ROOT/v3-input-$name-clock" \
+        FAKE_INSPECTOR_LIVE_CODE=1 \
+        SPACETERM_CONTINUOUS_CLOCK="$fake_clock" SPACETERM_XCRUN="$fake_xcrun" \
+        SPACETERM_PROCESS_INSPECTOR="$fake_process_inspector" \
+        "$SCRIPT_DIRECTORY/record-release-performance-trace.sh" \
+        --subject-identity "$subject" --run-metadata "$v3_run" \
+        --workload-metadata "$workload" --workload-events "$v3_events" \
+        --workload-ready-receipt "$v3_ready" \
+        --campaign-secret-file "$v3_secret" --campaign-id "$V3_CAMPAIGN_ID" \
+        --session-id "$V3_SESSION_ID" --nonce "$V3_NONCE" \
+        --scenario ascii --warmup-ms 0 --duration-ms 1000 \
+        --output-directory "$TEMP_ROOT/v3-input-$name" >/dev/null 2>&1; then
+        fail "v3 trace recorder accepted $name identity evidence"
+    fi
+}
+
+v3_writable="$TEMP_ROOT/v3-writable-subject.tsv"
+cp "$v3_subject" "$v3_writable"; chmod 0644 "$v3_writable"
+expect_v3_input_rejected writable "$v3_writable"
+v3_symlink="$TEMP_ROOT/v3-symlink-subject.tsv"
+ln -s "$v3_subject" "$v3_symlink"
+expect_v3_input_rejected symlink "$v3_symlink"
+chmod 0600 "$v3_secret"
+expect_v3_input_rejected writable-secret "$v3_subject"
+chmod 0400 "$v3_secret"
+for mutation in duplicate unknown malformed downgrade; do
+    v3_mutated="$TEMP_ROOT/v3-$mutation-subject.tsv"
+    cp "$v3_subject" "$v3_mutated"; chmod 0644 "$v3_mutated"
+    case "$mutation" in
+        duplicate) printf 'subject\tspaceterm\n' >> "$v3_mutated" ;;
+        unknown) printf 'invented\tvalue\n' >> "$v3_mutated" ;;
+        malformed) printf 'malformed\n' >> "$v3_mutated" ;;
+        downgrade) sed -i '' $'s/^format_version\t1$/format_version\t0/' "$v3_mutated" ;;
+    esac
+    chmod 0444 "$v3_mutated"
+    expect_v3_input_rejected "$mutation" "$v3_mutated"
+done
+
+v3_run_backup="$TEMP_ROOT/v3-run-backup.tsv"
+cp "$v3_run" "$v3_run_backup"
+run_v3_incomplete mutated-run frozen-input-changed 1000000000 2000000000
+chmod 0600 "$v3_run"
+cp "$v3_run_backup" "$v3_run"
+chmod 0444 "$v3_run"
+
+# Genuine live guest proof: the real inspector rejects forged code identity
+# and PID generation even though the static copied bundle remains valid.
+"$SCRIPT_DIRECTORY/inspect-release-performance-process.py" --pid "$v3_target_pid" \
+    --expected-executable "$trace_executable" --expected-sha256 "$v3_hash" \
+    --expected-device "$v3_device" --expected-inode "$v3_inode" \
+    --expected-start-identity "$v3_start_identity" \
+    --expected-signing-identifier "$v3_identifier" --expected-team-identifier "$v3_team" \
+    --expected-cdhash "$v3_cdhash" | grep -Fxq $'live_code_identity_verified\ttrue' \
+    || fail "real inspector did not verify a signed dynamic guest"
+if "$SCRIPT_DIRECTORY/inspect-release-performance-process.py" --pid "$v3_target_pid" \
+    --expected-executable "$trace_executable" --expected-sha256 "$v3_hash" \
+    --expected-device "$v3_device" --expected-inode "$v3_inode" \
+    --expected-start-identity "$v3_start_identity" \
+    --expected-signing-identifier "$v3_identifier" --expected-team-identifier "$v3_team" \
+    --expected-cdhash 0000000000000000000000000000000000000000 >/dev/null 2>&1; then
+    fail "real inspector accepted a static/live CDHash mismatch"
+fi
+if "$SCRIPT_DIRECTORY/inspect-release-performance-process.py" --pid "$v3_target_pid" \
+    --expected-executable "$trace_executable" --expected-sha256 "$v3_hash" \
+    --expected-device "$v3_device" --expected-inode "$v3_inode" \
+    --expected-start-identity 'Mon Jan 1 00:00:00 2001' \
+    --expected-signing-identifier "$v3_identifier" --expected-team-identifier "$v3_team" \
+    --expected-cdhash "$v3_cdhash" >/dev/null 2>&1; then
+    fail "real inspector accepted a reused PID generation"
+fi
+
+# Package identity is rechecked after capture, including the plist, bundle
+# signature, executable vnode, and executable content hash.
+v3_plist_backup="$TEMP_ROOT/v3-info-backup.plist"
+cp "$trace_app/Contents/Info.plist" "$v3_plist_backup"
+for plist_mutation in identifier marketing-version build-version executable; do
+    run_v3_incomplete "mutated-plist-$plist_mutation" frozen-input-changed \
+        1000000000 2000000000
+    cp "$v3_plist_backup" "$trace_app/Contents/Info.plist"
+    codesign --verify --strict "$trace_app" >/dev/null 2>&1 \
+        || fail "restored trace fixture bundle did not retain its frozen signature"
+done
+
+v3_secret_backup="$TEMP_ROOT/v3-secret-backup"
+cp "$v3_secret" "$v3_secret_backup"
+v3_replacement_secret="$TEMP_ROOT/v3-replacement-secret"
+printf 'replacement-secret-replacement-secret\n' > "$v3_replacement_secret"
+chmod 0400 "$v3_replacement_secret"
+run_v3_incomplete mutated-secret frozen-input-changed 1000000000 2000000000
+chmod 0600 "$v3_secret"
+cp "$v3_secret_backup" "$v3_secret"
+chmod 0400 "$v3_secret"
+
+v3_replacement_executable="$TEMP_ROOT/replacement-SpaceTerm"
+cp /bin/date "$v3_replacement_executable"
+chmod 0555 "$v3_replacement_executable"
+codesign --force --sign - --identifier io.github.sadiksaifi.spaceterm \
+    "$v3_replacement_executable" >/dev/null 2>&1
+run_v3_incomplete mutated-executable frozen-input-changed 1000000000 2000000000
 
 echo "release performance tooling tests passed"
