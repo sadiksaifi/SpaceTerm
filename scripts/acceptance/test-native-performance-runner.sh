@@ -229,6 +229,8 @@ run_runner() {
         --workload-ready-receipt "$RUN_DIR/ready-$suffix.tsv" \
         --plan-start-gate "$RUN_DIR/plan-start-$suffix.tsv" \
         --driver-output "$RUN_DIR/driver-$suffix.tsv" \
+        --driver-intent "$RUN_DIR/driver-intent-$suffix.tsv" \
+        --driver-receipt "$RUN_DIR/driver-receipt-$suffix.tsv" \
         --rss-output "$RUN_DIR/rss-$suffix.tsv" \
         --trace-output-directory "$RUN_DIR/trace-$suffix" \
         --result-output "$RUN_DIR/result-$suffix.tsv" --trace-recorder "$TRACE" \
@@ -273,7 +275,10 @@ expect_failure "wrong window owner PID" env SPACETERM_PERFORMANCE_TEST_MODE=1 \
         --workload-metadata "$RUN_DIR/workload-window.tsv" \
         --workload-ready-receipt "$RUN_DIR/ready-window.tsv" \
         --plan-start-gate "$RUN_DIR/plan-start-window.tsv" \
-        --driver-output "$RUN_DIR/driver-window.tsv" --rss-output "$RUN_DIR/rss-window.tsv" \
+        --driver-output "$RUN_DIR/driver-window.tsv" \
+        --driver-intent "$RUN_DIR/driver-intent-window.tsv" \
+        --driver-receipt "$RUN_DIR/driver-receipt-window.tsv" \
+        --rss-output "$RUN_DIR/rss-window.tsv" \
         --trace-output-directory "$RUN_DIR/trace-window" \
         --result-output "$RUN_DIR/result-window.tsv" --trace-recorder "$TRACE" \
         --campaign-secret-file "$SECRET" --campaign-id "$CAMPAIGN_ID" \
@@ -292,7 +297,10 @@ expect_failure "stale process generation" env SPACETERM_PERFORMANCE_TEST_MODE=1 
         --workload-metadata "$RUN_DIR/workload-start.tsv" \
         --workload-ready-receipt "$RUN_DIR/ready-start.tsv" \
         --plan-start-gate "$RUN_DIR/plan-start-start.tsv" \
-        --driver-output "$RUN_DIR/driver-start.tsv" --rss-output "$RUN_DIR/rss-start.tsv" \
+        --driver-output "$RUN_DIR/driver-start.tsv" \
+        --driver-intent "$RUN_DIR/driver-intent-start.tsv" \
+        --driver-receipt "$RUN_DIR/driver-receipt-start.tsv" \
+        --rss-output "$RUN_DIR/rss-start.tsv" \
         --trace-output-directory "$RUN_DIR/trace-start" \
         --result-output "$RUN_DIR/result-start.tsv" --trace-recorder "$TRACE" \
         --campaign-secret-file "$SECRET" --campaign-id "$CAMPAIGN_ID" \
@@ -308,7 +316,10 @@ expect_failure "seed timeout produces no orphans" env SPACETERM_PERFORMANCE_TEST
         --workload-metadata "$RUN_DIR/workload-timeout.tsv" \
         --workload-ready-receipt "$RUN_DIR/ready-timeout.tsv" \
         --plan-start-gate "$RUN_DIR/plan-start-timeout.tsv" \
-        --driver-output "$RUN_DIR/driver-timeout.tsv" --rss-output "$RUN_DIR/rss-timeout.tsv" \
+        --driver-output "$RUN_DIR/driver-timeout.tsv" \
+        --driver-intent "$RUN_DIR/driver-intent-timeout.tsv" \
+        --driver-receipt "$RUN_DIR/driver-receipt-timeout.tsv" \
+        --rss-output "$RUN_DIR/rss-timeout.tsv" \
         --trace-output-directory "$RUN_DIR/trace-timeout" \
         --result-output "$RUN_DIR/result-timeout.tsv" --trace-recorder "$TRACE" \
         --campaign-secret-file "$SECRET" --campaign-id "$CAMPAIGN_ID" \

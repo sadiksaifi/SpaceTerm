@@ -19,6 +19,8 @@ WORKLOAD_READY_RECEIPT=""
 WORKLOAD_AUTH_VERIFIER=""
 PLAN_START_GATE=""
 DRIVER_OUTPUT=""
+DRIVER_INTENT=""
+DRIVER_RECEIPT=""
 RSS_OUTPUT=""
 TRACE_OUTPUT_DIRECTORY=""
 RESULT_OUTPUT=""
@@ -59,6 +61,7 @@ TRACE_VERIFIER_SHA256=unavailable
 TRACE_COMMAND_RUNNER_SHA256=unavailable
 WORKLOAD_READY_VERIFIER_SHA256=unavailable
 WORKLOAD_AUTH_VERIFIER_SHA256=unavailable
+DRIVER_RECEIPT_TOOL_SHA256=unavailable
 
 usage() {
     cat <<EOF
@@ -67,7 +70,8 @@ Usage: $(basename -- "$0") --run-directory ABSOLUTE_DIRECTORY \\
   --scenario NAME --scenario-plan FILE --plan-metadata FILE --run-metadata FILE \\
   --workload-events ABSENT_OR_ACTIVE_FILE --workload-metadata ABSENT_FILE \\
   --workload-ready-receipt ABSENT_FILE --plan-start-gate ABSENT_FILE \\
-  --driver-output ABSENT_FILE --rss-output ABSENT_FILE \\
+  --driver-output ABSENT_FILE --driver-intent ABSENT_FILE \\
+  --driver-receipt ABSENT_FILE --rss-output ABSENT_FILE \\
   --trace-output-directory ABSENT_DIRECTORY --result-output ABSENT_FILE \\
   --trace-recorder FILE --campaign-secret-file PRIVATE_FILE \\
   --campaign-id LABEL --session-id LABEL --nonce SHA256 \\
@@ -248,6 +252,9 @@ publish_result() {
         printf 'workload_ready_verifier_sha256\t%s\n' "$WORKLOAD_READY_VERIFIER_SHA256"
         printf 'workload_auth_verifier_sha256\t%s\n' "$WORKLOAD_AUTH_VERIFIER_SHA256"
         printf 'driver_events_sha256\t%s\n' "$(sha256 "$DRIVER_OUTPUT" 2>/dev/null || printf unavailable)"
+        printf 'driver_intent_sha256\t%s\n' "$(sha256 "$DRIVER_INTENT" 2>/dev/null || printf unavailable)"
+        printf 'driver_receipt_sha256\t%s\n' "$(sha256 "$DRIVER_RECEIPT" 2>/dev/null || printf unavailable)"
+        printf 'driver_receipt_tool_sha256\t%s\n' "$DRIVER_RECEIPT_TOOL_SHA256"
         printf 'rss_samples_sha256\t%s\n' "$(sha256 "$RSS_OUTPUT" 2>/dev/null || printf unavailable)"
         printf 'trace_metadata_sha256\t%s\n' "$(sha256 "${TRACE_OUTPUT_DIRECTORY:-/nonexistent}/$SUBJECT-$SCENARIO-trace-metadata.tsv" 2>/dev/null || printf unavailable)"
         printf 'campaign_id\t%s\n' "$CAMPAIGN_ID"
@@ -315,7 +322,41 @@ verify_controller_toolchain() {
         && "$(sha256 "$TRACE_VERIFIER")" == "$TRACE_VERIFIER_SHA256" \
         && "$(sha256 "$TRACE_COMMAND_RUNNER")" == "$TRACE_COMMAND_RUNNER_SHA256" \
         && "$(sha256 "$WORKLOAD_READY_VERIFIER")" == "$WORKLOAD_READY_VERIFIER_SHA256" \
-        && "$(sha256 "$WORKLOAD_AUTH_VERIFIER")" == "$WORKLOAD_AUTH_VERIFIER_SHA256" ]]
+        && "$(sha256 "$WORKLOAD_AUTH_VERIFIER")" == "$WORKLOAD_AUTH_VERIFIER_SHA256" \
+        && "$(sha256 "$DRIVER_RECEIPT_TOOL")" == "$DRIVER_RECEIPT_TOOL_SHA256" ]]
+}
+
+run_driver_receipt_tool() {
+    local command_name="$1"
+    shift
+    "$DRIVER_RECEIPT_TOOL" "$command_name" \
+        --campaign-secret-file "$CAMPAIGN_SECRET_FILE" \
+        --campaign-id "$CAMPAIGN_ID" --session-id "$SESSION_ID" --nonce "$NONCE" \
+        --driver-output "$DRIVER_OUTPUT" --driver-binary "$DRIVER_BINARY" \
+        --driver-source "$SCRIPT_DIRECTORY/performance-driver.m" \
+        --controller "$SCRIPT_DIRECTORY/$(basename -- "$0")" \
+        --scenario-plan "$SCENARIO_PLAN" \
+        --plan-start-continuous-ns "$PLAN_START_CONTINUOUS_NS" \
+        --subject-identity "$SUBJECT_IDENTITY" --window-identity "$WINDOW_IDENTITY" \
+        "$@"
+}
+
+publish_driver_intent() {
+    run_driver_receipt_tool intent --output "$DRIVER_INTENT" \
+        || abort_run driver-intent-authentication-failed
+    require_immutable_file "$DRIVER_INTENT" driver-intent
+}
+
+finalize_driver_receipt() {
+    run_driver_receipt_tool finalize --intent "$DRIVER_INTENT" \
+        --receipt-output "$DRIVER_RECEIPT" \
+        || abort_run driver-receipt-finalization-failed
+    require_immutable_file "$DRIVER_RECEIPT" driver-receipt
+}
+
+verify_driver_receipt() {
+    run_driver_receipt_tool verify --intent "$DRIVER_INTENT" \
+        --receipt "$DRIVER_RECEIPT"
 }
 
 workload_event_time() {
@@ -459,6 +500,8 @@ while (( $# > 0 )); do
         --workload-ready-receipt) WORKLOAD_READY_RECEIPT="${2:-}"; shift ;;
         --plan-start-gate) PLAN_START_GATE="${2:-}"; shift ;;
         --driver-output) DRIVER_OUTPUT="${2:-}"; shift ;;
+        --driver-intent) DRIVER_INTENT="${2:-}"; shift ;;
+        --driver-receipt) DRIVER_RECEIPT="${2:-}"; shift ;;
         --rss-output) RSS_OUTPUT="${2:-}"; shift ;;
         --trace-output-directory) TRACE_OUTPUT_DIRECTORY="${2:-}"; shift ;;
         --result-output) RESULT_OUTPUT="${2:-}"; shift ;;
@@ -506,7 +549,8 @@ secret_mode="$(stat -f '%Lp' "$CAMPAIGN_SECRET_FILE")"
 (( $(stat -f '%z' "$CAMPAIGN_SECRET_FILE") >= 32 )) \
     || die "campaign secret is too short"
 for output in "$WORKLOAD_EVENTS" "$WORKLOAD_METADATA" "$WORKLOAD_READY_RECEIPT" \
-    "$PLAN_START_GATE" "$DRIVER_OUTPUT" "$RSS_OUTPUT" \
+    "$PLAN_START_GATE" "$DRIVER_OUTPUT" "$DRIVER_INTENT" "$DRIVER_RECEIPT" \
+    "$RSS_OUTPUT" \
     "$RESULT_OUTPUT"; do
     path_is_within_run "$output" || die "output is outside the run: $output"
 done
@@ -517,6 +561,8 @@ done
 require_absent_output "$WORKLOAD_READY_RECEIPT" workload-ready-receipt
 require_absent_output "$PLAN_START_GATE" plan-start-gate
 require_absent_output "$DRIVER_OUTPUT" driver-output
+require_absent_output "$DRIVER_INTENT" driver-intent
+require_absent_output "$DRIVER_RECEIPT" driver-receipt
 require_absent_output "$RSS_OUTPUT" rss-output
 require_absent_output "$RESULT_OUTPUT" result-output
 require_absent_output "$TRACE_OUTPUT_DIRECTORY" trace-output-directory
@@ -556,6 +602,10 @@ readonly WORKLOAD_AUTH_VERIFIER
 [[ -f "$WORKLOAD_AUTH_VERIFIER" && -x "$WORKLOAD_AUTH_VERIFIER" \
     && ! -L "$WORKLOAD_AUTH_VERIFIER" ]] \
     || die "workload authentication verifier is unavailable"
+readonly DRIVER_RECEIPT_TOOL="$SCRIPT_DIRECTORY/performance-driver-receipt.py"
+[[ -f "$DRIVER_RECEIPT_TOOL" && -x "$DRIVER_RECEIPT_TOOL" \
+    && ! -L "$DRIVER_RECEIPT_TOOL" ]] \
+    || die "driver receipt tool is unavailable"
 TRACE_RECORDER="$(realpath "$TRACE_RECORDER")"
 readonly TRACE_RECORDER
 CANONICAL_TRACE_RECORDER="$(realpath "$SCRIPT_DIRECTORY/../record-release-performance-trace.sh")"
@@ -578,9 +628,11 @@ TRACE_VERIFIER_SHA256="$(sha256 "$TRACE_VERIFIER")"
 TRACE_COMMAND_RUNNER_SHA256="$(sha256 "$TRACE_COMMAND_RUNNER")"
 WORKLOAD_READY_VERIFIER_SHA256="$(sha256 "$WORKLOAD_READY_VERIFIER")"
 WORKLOAD_AUTH_VERIFIER_SHA256="$(sha256 "$WORKLOAD_AUTH_VERIFIER")"
+DRIVER_RECEIPT_TOOL_SHA256="$(sha256 "$DRIVER_RECEIPT_TOOL")"
 readonly CONTROLLER_SHA256 PROCESS_GROUP_RUNNER_SHA256 TRACE_RECORDER_SHA256
 readonly TRACE_INSPECTOR_SHA256 TRACE_VERIFIER_SHA256 TRACE_COMMAND_RUNNER_SHA256
 readonly WORKLOAD_READY_VERIFIER_SHA256 WORKLOAD_AUTH_VERIFIER_SHA256
+readonly DRIVER_RECEIPT_TOOL_SHA256
 verify_controller_toolchain || die "controller toolchain changed during startup"
 [[ "$(kv "$TOOLS_METADATA" format_version)" == 1 \
     && "$(kv "$TOOLS_METADATA" status)" == complete ]] || die "tools metadata is invalid"
@@ -692,6 +744,7 @@ CHILDREN_STARTED_CONTINUOUS_NS="$(continuous_ns)"
 
 PLAN_START_CONTINUOUS_NS=$((CHILDREN_STARTED_CONTINUOUS_NS + 5000000000))
 TRACE_BOUNDARY_CONTINUOUS_NS=$((PLAN_START_CONTINUOUS_NS + WARMUP_MS * 1000000))
+publish_driver_intent
 publish_plan_start_gate
 
 spawn_process_group "$DRIVER_BINARY" --pid "$SUBJECT_PID" --start-identity "$START_IDENTITY" \
@@ -742,6 +795,7 @@ while [[ "$driver_done" == false || "$rss_done" == false || "$trace_done" == fal
         fi
         DRIVER_PID=""; DRIVER_PGID=""; driver_done=true
         [[ "$DRIVER_STATUS" == 0 ]] || abort_run driver-failed
+        finalize_driver_receipt
     fi
     if [[ "$rss_done" == false ]] && process_has_exited "$RSS_PID"; then
         set +e; wait "$RSS_PID"; RSS_STATUS=$?; set -e
@@ -809,6 +863,8 @@ TAIL_VERIFIED_CONTINUOUS_NS="$(continuous_ns)"
     || abort_run post-producer-tail-not-preserved
 
 [[ -f "$DRIVER_OUTPUT" && ! -L "$DRIVER_OUTPUT" \
+    && -f "$DRIVER_INTENT" && ! -L "$DRIVER_INTENT" \
+    && -f "$DRIVER_RECEIPT" && ! -L "$DRIVER_RECEIPT" \
     && -f "$RSS_OUTPUT" && ! -L "$RSS_OUTPUT" \
     && -d "$TRACE_OUTPUT_DIRECTORY" && ! -L "$TRACE_OUTPUT_DIRECTORY" ]] \
     || abort_run expected-child-artifact-missing
@@ -843,6 +899,7 @@ rss_skew=$((rss_first - TRACE_BOUNDARY_CONTINUOUS_NS))
     && "$(kv "$trace_metadata" workload_ready_receipt_sha256)" == "$(sha256 "$WORKLOAD_READY_RECEIPT")" \
     && "$(kv "$trace_metadata" supplemental_evidence_sha256)" == "$(sha256 "$PLAN_START_GATE")" ]] \
     || abort_run trace-metadata-input-binding-failed
+verify_driver_receipt || abort_run driver-receipt-postflight-failed
 verify_controller_toolchain || abort_run controller-toolchain-changed-during-run
 
 cleanup_temp

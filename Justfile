@@ -72,6 +72,7 @@ scripts-check:
         scripts/acceptance/performance-workload.sh \
         scripts/acceptance/performance-plan.sh \
         scripts/acceptance/run-native-performance-scenario.sh \
+        scripts/acceptance/test-performance-driver-receipt.sh \
         scripts/acceptance/test-native-performance-runner.sh \
         scripts/acceptance/test-release-performance-campaign.sh
     shellcheck -x scripts/acceptance-identity.sh scripts/test-acceptance-identity.sh \
@@ -90,6 +91,7 @@ scripts-check:
         scripts/acceptance/performance-workload.sh \
         scripts/acceptance/performance-plan.sh \
         scripts/acceptance/run-native-performance-scenario.sh \
+        scripts/acceptance/test-performance-driver-receipt.sh \
         scripts/acceptance/test-native-performance-runner.sh \
         scripts/acceptance/test-release-performance-campaign.sh
     ./scripts/test-acceptance-identity.sh
@@ -105,13 +107,14 @@ scripts-check:
     xcrun clang -std=c17 -fsyntax-only -Wall -Wextra -Werror -Wpedantic \
         -mmacosx-version-min=11.0 \
         scripts/acceptance/performance-workload.c
-    python3 -c 'import pathlib; [compile(path.read_text(), path.name, "exec") for path in map(pathlib.Path, ["scripts/acceptance/run-performance-process-group.py", "scripts/inspect-release-performance-process.py", "scripts/run-release-performance-command.py", "scripts/verify-release-performance-trace.py", "scripts/acceptance/verify-performance-workload-auth.py", "scripts/acceptance/verify-performance-workload-ready.py"])]'
+    python3 -c 'import pathlib; [compile(path.read_text(), path.name, "exec") for path in map(pathlib.Path, ["scripts/acceptance/performance-driver-receipt.py", "scripts/acceptance/run-performance-process-group.py", "scripts/inspect-release-performance-process.py", "scripts/run-release-performance-command.py", "scripts/verify-release-performance-trace.py", "scripts/acceptance/verify-performance-workload-auth.py", "scripts/acceptance/verify-performance-workload-ready.py"])]'
     plutil -lint packaging/macos/Info.plist
 
 # Run focused checks for the release-performance workload and evidence tools.
 performance-tools-check:
     ./scripts/test-release-performance-tools.sh
     ./scripts/acceptance/test-release-performance-campaign.sh
+    ./scripts/acceptance/test-performance-driver-receipt.sh
     ./scripts/acceptance/test-native-performance-runner.sh
 
 # Compile the native performance tools into one absent run-owned directory.
