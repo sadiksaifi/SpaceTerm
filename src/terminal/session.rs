@@ -3706,7 +3706,7 @@ mod tests {
     #[test]
     fn physical_key_up_after_refocus_is_suppressed_after_synthetic_release() {
         let (result, reader_steps, records) = start_scripted_session(ScriptedPtyOptions::default());
-        let (mut session, events) = result.unwrap();
+        let (mut session, events, _accessibility) = result.unwrap();
         reader_steps
             .send(ReaderStep::Bytes(b"\x1b[>11u\x1b[?1004h".to_vec()))
             .unwrap();

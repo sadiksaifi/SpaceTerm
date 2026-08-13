@@ -40,6 +40,7 @@ use super::{
 };
 use crate::domain::{PaneId, WindowId, WorkspaceId};
 use crate::platform::macos_accessibility::{MacosAccessibilityElement, MacosAccessibilityUpdate};
+#[cfg(not(test))]
 use crate::platform::macos_application;
 use crate::platform::macos_attention::{
     AttentionPaneId, AttentionSchedules, reconcile_scheduled as reconcile_attention_schedule,
@@ -5126,7 +5127,7 @@ mod tests {
             pane.update(cx, |pane, cx| {
                 let accepted =
                     pane.insert_native_service_text(origin, "first\nsecond".to_owned(), window, cx);
-                pane.focus_find(window);
+                pane.focus_find(window, cx);
                 accepted
             })
         });
@@ -5192,7 +5193,7 @@ mod tests {
 
         let accepted = cx.update(|window, cx| {
             pane.update(cx, |pane, cx| {
-                pane.focus_find(window);
+                pane.focus_find(window, cx);
                 pane.focus(window);
                 pane.insert_native_service_text(origin, "stale return".to_owned(), window, cx)
             })
