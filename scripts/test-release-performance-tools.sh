@@ -13,14 +13,25 @@ CLEANED_UP=false
 
 cleanup() {
     local pid
+    local job_pid
+    local owned_job
+    local running_jobs
     [[ "$CLEANED_UP" == false ]] || return 0
     CLEANED_UP=true
+    running_jobs="$(jobs -pr)"
     for pid in "${TARGET_PIDS[@]}"; do
         [[ -n "$pid" ]] || continue
-        if kill -0 "$pid" 2>/dev/null; then
+        owned_job=false
+        for job_pid in $running_jobs; do
+            if [[ "$job_pid" == "$pid" ]]; then
+                owned_job=true
+                break
+            fi
+        done
+        if [[ "$owned_job" == true ]] && kill -0 "$pid" 2>/dev/null; then
             kill "$pid" 2>/dev/null || true
         fi
-        wait "$pid" 2>/dev/null || true
+        [[ "$owned_job" != true ]] || wait "$pid" 2>/dev/null || true
     done
     rm -rf -- "$TEMP_ROOT"
 }
@@ -326,6 +337,25 @@ PLIST
 test_executable_sha256="$(shasum -a 256 "$test_executable" | awk '{ print $1 }')"
 test_commit="$(git -C "$SCRIPT_DIRECTORY/.." rev-parse HEAD)"
 test_cargo_lock_sha256="$(shasum -a 256 "$SCRIPT_DIRECTORY/../Cargo.lock" | awk '{print $1}')"
+fake_git_directory="$TEMP_ROOT/fake-git-bin"
+mkdir -p -- "$fake_git_directory"
+cat > "$fake_git_directory/git" <<'EOF'
+#!/bin/bash
+set -euo pipefail
+for ((index = 1; index <= $#; index += 1)); do
+    if [[ "${!index}" == status ]]; then
+        next=$((index + 1))
+        next_two=$((index + 2))
+        if (( next_two <= $# )) \
+            && [[ "${!next}" == --porcelain \
+                && "${!next_two}" == --untracked-files=no ]]; then
+            exit 0
+        fi
+    fi
+done
+exec /usr/bin/git "$@"
+EOF
+chmod +x "$fake_git_directory/git"
 fake_process_inspector="$TEMP_ROOT/fake-process-inspector"
 cat > "$fake_process_inspector" <<'EOF'
 #!/bin/bash
@@ -389,7 +419,8 @@ rss_output_receipt="$TEMP_ROOT/rss-output-receipt.tsv"
     printf 'status\tcomplete\n'
 } > "$rss_output_receipt"
 sign_evidence "$rss_output_receipt" "$campaign_secret" receipt_hmac_sha256
-if SPACETERM_PROCESS_INSPECTOR="$fake_process_inspector" \
+if PATH="$fake_git_directory:$PATH" \
+    SPACETERM_PROCESS_INSPECTOR="$fake_process_inspector" \
     "$SCRIPT_DIRECTORY/sample-release-performance-rss.sh" \
     --pid "$rss_target_pid" \
     --duration-seconds 1 \
@@ -417,7 +448,8 @@ assert_equal "test-overrides-active" \
     "RSS sampler override status"
 
 misaligned_samples="$TEMP_ROOT/misaligned-rss.tsv"
-if SPACETERM_PROCESS_INSPECTOR="$fake_process_inspector" \
+if PATH="$fake_git_directory:$PATH" \
+    SPACETERM_PROCESS_INSPECTOR="$fake_process_inspector" \
     "$SCRIPT_DIRECTORY/sample-release-performance-rss.sh" \
     --pid "$rss_target_pid" \
     --duration-seconds 11 \
@@ -441,7 +473,8 @@ fi
 
 fake_inspector_counter="$TEMP_ROOT/fake-inspector-counter"
 reused_pid_samples="$TEMP_ROOT/reused-pid-rss.tsv"
-if FAKE_INSPECTOR_COUNTER="$fake_inspector_counter" \
+if PATH="$fake_git_directory:$PATH" \
+    FAKE_INSPECTOR_COUNTER="$fake_inspector_counter" \
     FAKE_INSPECTOR_CHANGE_AFTER=3 \
     SPACETERM_PROCESS_INSPECTOR="$fake_process_inspector" \
     "$SCRIPT_DIRECTORY/sample-release-performance-rss.sh" \
@@ -470,7 +503,8 @@ assert_equal "target-identity-changed-after-rss-read" \
 
 fake_unavailable_counter="$TEMP_ROOT/fake-unavailable-counter"
 zombie_samples="$TEMP_ROOT/zombie-rss.tsv"
-if FAKE_INSPECTOR_COUNTER="$fake_unavailable_counter" \
+if PATH="$fake_git_directory:$PATH" \
+    FAKE_INSPECTOR_COUNTER="$fake_unavailable_counter" \
     FAKE_INSPECTOR_FAIL_AFTER=2 \
     SPACETERM_PROCESS_INSPECTOR="$fake_process_inspector" \
     "$SCRIPT_DIRECTORY/sample-release-performance-rss.sh" \
@@ -745,12 +779,14 @@ case "$2" in
         fi
         if [[ -n "${FAKE_XCRUN_PUBLISH_RUN_SOURCE:-}" \
             && "${FAKE_XCRUN_SKIP_RUN_PUBLISH:-0}" != 1 ]]; then
-            mv -- "$FAKE_XCRUN_PUBLISH_RUN_SOURCE" \
+            /bin/mv -f -- "$FAKE_XCRUN_PUBLISH_RUN_SOURCE" \
                 "${FAKE_XCRUN_PUBLISH_RUN_TARGET:?}"
         fi
         if [[ -n "${FAKE_XCRUN_REPLACE_PUBLISHED_RUN_SOURCE:-}" ]]; then
-            mv -- "$FAKE_XCRUN_REPLACE_PUBLISHED_RUN_SOURCE" \
-                "${FAKE_XCRUN_PUBLISH_RUN_TARGET:?}"
+            published_run_target="${FAKE_XCRUN_PUBLISH_RUN_TARGET:?}"
+            /bin/chmod u+w "$published_run_target"
+            /bin/mv -f -- "$FAKE_XCRUN_REPLACE_PUBLISHED_RUN_SOURCE" \
+                "$published_run_target"
         fi
         if [[ -n "${FAKE_XCRUN_MUTATE_FILE:-}" ]]; then
             chmod 0600 "$FAKE_XCRUN_MUTATE_FILE"
@@ -1372,7 +1408,8 @@ v3_run_intent="$TEMP_ROOT/v3-run-intent.tsv"
         "$v3_target_pid" "$v3_start_identity"
     printf 'campaign_id\ttrace-campaign\nsession_id\ttrace-session\n'
     printf 'nonce\t1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef\n'
-    printf 'native_provisional_observation_sha256\t%s\nstatus\tprepared\n' "$V3_HASH_A"
+    printf 'native_provisional_observation_sha256\t%s\n' "$V3_HASH_A"
+    printf 'evidence_mode\ttest-only\nstatus\tprepared\n'
 } > "$v3_run_intent"
 chmod 0444 "$v3_run_intent"
 v3_run_intent_hash="$(shasum -a 256 "$v3_run_intent" | awk '{ print $1 }')"
@@ -1425,7 +1462,8 @@ write_v3_final_run() {
         printf 'trace_provisional_receipt_sha256\t%s\n' "$provisional_hash"
         printf 'performance_tail_receipt_sha256\t%s\n' "$V3_HASH_A"
         printf 'performance_quit_receipt_sha256\t%s\n' "$V3_HASH_B"
-        printf 'subject_exit_receipt_sha256\t%s\nstatus\tcomplete\n' "$V3_HASH_C"
+        printf 'subject_exit_receipt_sha256\t%s\n' "$V3_HASH_C"
+        printf 'evidence_mode\ttest-only\nstatus\tcomplete\n'
     } > "$path"
     chmod 0444 "$path"
 }
@@ -1514,7 +1552,10 @@ run_v3_incomplete() {
     local provisional="$TEMP_ROOT/v3-$name-provisional.tsv"
     local recorder_error="$TEMP_ROOT/v3-$name-recorder.err"
     local late_publisher_pid=""
-    local -a scenario_environment=("SPACETERM_TEST_TRACE_SCENARIO=$name")
+    local -a scenario_environment=(
+        "SPACETERM_TEST_TRACE_SCENARIO=$name"
+        "SPACETERM_PERFORMANCE_TEST_MODE=1"
+    )
     local -a recorder_arguments=(
         --subject-identity "$v3_subject" --run-intent "$v3_run_intent"
         --run-metadata "$run_metadata" --provisional-receipt "$provisional"
@@ -1561,7 +1602,7 @@ run_v3_incomplete() {
                 "FAKE_XCRUN_SKIP_RUN_PUBLISH=1"
                 "SPACETERM_TEST_RUN_METADATA_WAIT_TENTHS=2"
             )
-            ( sleep 2; mv -- "$run_source" "$run_metadata" ) &
+            ( sleep 2; /bin/mv -f -- "$run_source" "$run_metadata" ) &
             late_publisher_pid=$!
             TARGET_PIDS+=("$late_publisher_pid")
             ;;
@@ -1679,6 +1720,7 @@ if env FAKE_XCRUN_LOG="$v3_log" FAKE_XCRUN_TARGET_PID="$v3_target_pid" \
     FAKE_CLOCK_COUNTER="$TEMP_ROOT/v3-premature-clock" FAKE_INSPECTOR_LIVE_CODE=1 \
     SPACETERM_CONTINUOUS_CLOCK="$fake_clock" SPACETERM_XCRUN="$fake_xcrun" \
     SPACETERM_PROCESS_INSPECTOR="$fake_process_inspector" \
+    SPACETERM_PERFORMANCE_TEST_MODE=1 \
     "$SCRIPT_DIRECTORY/record-release-performance-trace.sh" \
     --subject-identity "$v3_subject" --run-intent "$v3_run_intent" \
     --run-metadata "$premature_run" \
@@ -1725,6 +1767,7 @@ if env FAKE_XCRUN_LOG="$v3_log" FAKE_XCRUN_TARGET_PID="$v3_target_pid" \
     FAKE_XCRUN_PUBLISH_RUN_TARGET="$notified_run" \
     SPACETERM_CONTINUOUS_CLOCK="$fake_clock" SPACETERM_XCRUN="$fake_xcrun" \
     SPACETERM_PROCESS_INSPECTOR="$fake_process_inspector" \
+    SPACETERM_PERFORMANCE_TEST_MODE=1 \
     "$SCRIPT_DIRECTORY/record-release-performance-trace.sh" \
     --subject-identity "$v3_subject" --run-intent "$v3_run_intent" \
     --run-metadata "$notified_run" \
@@ -1810,6 +1853,7 @@ expect_v3_input_rejected() {
         FAKE_INSPECTOR_LIVE_CODE=1 \
         SPACETERM_CONTINUOUS_CLOCK="$fake_clock" SPACETERM_XCRUN="$fake_xcrun" \
         SPACETERM_PROCESS_INSPECTOR="$fake_process_inspector" \
+        SPACETERM_PERFORMANCE_TEST_MODE=1 \
         "$SCRIPT_DIRECTORY/record-release-performance-trace.sh" \
         --subject-identity "$subject" --run-intent "$v3_run_intent" \
         --run-metadata "$TEMP_ROOT/v3-input-$name-run.tsv" \

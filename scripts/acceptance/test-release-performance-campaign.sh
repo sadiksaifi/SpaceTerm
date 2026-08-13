@@ -16,6 +16,8 @@ readonly BASE_CONTINUOUS_NS=1000000000000
 readonly CAMPAIGN_ID="campaign-43"
 readonly SESSION_ID="session-43"
 readonly NONCE="dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+readonly SPACETERM_SESSION_ID="session-43-spaceterm"
+readonly SPACETERM_NONCE="eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
 CAMPAIGN_SECRET_FILE="$TEMP_ROOT/campaign-secret"
 printf '0123456789abcdef0123456789abcdef\n' > "$CAMPAIGN_SECRET_FILE"
 chmod 0600 "$CAMPAIGN_SECRET_FILE"
@@ -39,7 +41,7 @@ expect_result() {
     shift 3
     local output="$TEMP_ROOT/result.tsv"
     local actual_exit=0
-    "$@" > "$output" 2>/dev/null || actual_exit=$?
+    "$@" > "$output" || actual_exit=$?
     if [[ "$actual_exit" != "$expected_exit" ]]; then
         sed 's/^/  /' "$output" >&2
         fail "$label exit: expected $expected_exit, observed $actual_exit"
@@ -68,6 +70,7 @@ publish_plan_start_gate() {
     local secret="${3:-$CAMPAIGN_SECRET_FILE}"
     local ready_receipt="${4:?ready receipt path is required}"
     local start_override="${5:-}"
+    local session="${6:-$SESSION_ID}" nonce="${7:-$NONCE}"
     for _ in {1..12000}; do
         if [[ -f "$events" && -f "$ready_receipt" ]] \
             && awk -F '\t' '$3 == "measurement-ready" { found = 1 } END { exit !found }' \
@@ -95,7 +98,7 @@ print(mach.mach_continuous_time() * info.numer // info.denom + 3_000_000_000)
 PY
 )"
     fi
-    python3 - "$gate" "$secret" "$start" "$CAMPAIGN_ID" "$SESSION_ID" "$NONCE" \
+    python3 - "$gate" "$secret" "$start" "$CAMPAIGN_ID" "$session" "$nonce" \
         "$ready_receipt" <<'PY'
 import hashlib
 import hmac
@@ -128,8 +131,9 @@ PY
 
 write_ready_receipt() {
     local events="$1" identity="$2" output="$3"
+    local session="${4:-$SESSION_ID}" nonce="${5:-$NONCE}"
     python3 - "$events" "$identity" "$CAMPAIGN_SECRET_FILE" "$output" \
-        "$CAMPAIGN_ID" "$SESSION_ID" "$NONCE" <<'PY'
+        "$CAMPAIGN_ID" "$session" "$nonce" <<'PY'
 import hashlib, hmac, os, pathlib, struct, sys
 
 events_path, identity_path, secret_path, output, campaign, session, nonce = sys.argv[1:]
@@ -209,6 +213,33 @@ write_driver_events() {
                 123, 44, $4, $5, 1, 1, "verified"
         }
     ' "$plan" > "$output"
+    chmod 0400 "$output"
+}
+
+write_window_identity() {
+    local subject="$1" identity="$2" output="$3"
+    {
+        printf 'format_version\t1\n'
+        printf 'subject_identity_sha256\t%s\n' "$(sha256 "$identity")"
+        printf 'subject\t%s\n' "$subject"
+        printf 'process_pid\t123\n'
+        printf 'process_start_identity\t1786473000:123456\n'
+        printf 'bundle_identifier\tcom.example.%s\n' "$subject"
+        printf 'executable_sha256\t%s\n' "$HASH_A"
+        printf 'window_number\t44\n'
+        printf 'window_owner_pid_verified\ttrue\n'
+        printf 'window_layer\t0\n'
+        printf 'window_onscreen\ttrue\n'
+        printf 'window_minimized\tfalse\n'
+        printf 'window_x\t0\n'
+        printf 'window_y\t0\n'
+        printf 'window_width\t1000\n'
+        printf 'window_height\t800\n'
+        printf 'resolved_continuous_ns\t%d\n' "$BASE_CONTINUOUS_NS"
+        printf 'selector_kind\tfrontmost-normal-window\n'
+        printf 'status\tfrozen\n'
+    } > "$output"
+    chmod 0400 "$output"
 }
 
 write_workload_events() {
@@ -253,13 +284,14 @@ write_workload_metadata() {
     local identity="$3"
     local output="$4"
     local ready_receipt="${5:-$READY_RECEIPT}"
+    local session="${6:-$SESSION_ID}" nonce="${7:-$NONCE}"
     local unsigned="$TEMP_ROOT/workload-metadata-unsigned.$$"
     {
         printf 'format_version\t3\n'
         printf 'scenario\tascii\n'
         printf 'campaign_id\t%s\n' "$CAMPAIGN_ID"
-        printf 'session_id\t%s\n' "$SESSION_ID"
-        printf 'nonce\t%s\n' "$NONCE"
+        printf 'session_id\t%s\n' "$session"
+        printf 'nonce\t%s\n' "$nonce"
         printf 'subject_identity_sha256\t%s\n' "$(sha256 "$identity")"
         printf 'subject_process_pid\t123\n'
         printf 'subject_process_start_identity\t1786473000:123456\n'
@@ -526,19 +558,21 @@ write_manual_artifacts() {
     } > "$output"
 }
 
-write_native_launch() {
+write_native_provisional() {
     local identity="$1"
     local output="$2"
+    local nonce="${3:-$NONCE}"
     {
-        printf 'schema\tspaceterm.acceptance.native-launch-proof/v4\n'
+        printf 'schema\tspaceterm.acceptance.native-launch-proof/v5\n'
         printf 'observation.source\tproduction-app\n'
-        printf 'launch.nonce\t%s\n' "$NONCE"
+        printf 'launch.nonce\t%s\n' "$nonce"
         printf 'run.id\t%s\n' "$CAMPAIGN_ID"
         printf 'package.app.sha256\t%s\n' "$HASH_C"
         printf 'runtime.schema\tspaceterm.acceptance.runtime-stream/v1\n'
         printf 'runtime.sample_interval_ms\t1000\n'
         printf 'runtime.transition_capacity\t64\n'
         printf 'failure.action.schema\tspaceterm.acceptance.failure-action/v1\n'
+        printf 'failure.action.enabled\tfalse\n'
         printf 'process.pid\t123\n'
         printf 'process.pidversion\t5\n'
         printf 'process.executable.path\t%s\n' \
@@ -548,7 +582,7 @@ write_native_launch() {
         printf 'process.executable.fsid\t1:1\n'
         printf 'process.signature.cdhash\tabcd1234\n'
         printf 'process.signature.identifier\tcom.example.spaceterm\n'
-        printf 'process.signature.team_identifier\tnone\n'
+        printf 'process.signature.team_identifier\t\n'
         printf 'terminal_font_selected\tMenlo 12\n'
         printf 'initial_grid.rows\t40\n'
         printf 'initial_grid.columns\t100\n'
@@ -558,6 +592,28 @@ write_native_launch() {
         printf 'initial_grid.backing_pixel_height\t1600\n'
         printf 'observation.complete\ttrue\n'
     } > "$output"
+    chmod 0400 "$output"
+}
+
+write_native_final() {
+    local provisional="$1"
+    local runtime_metadata="$2"
+    local failure_actions="$3"
+    local output="$4"
+    sed '$d' "$provisional" > "$output"
+    {
+        printf 'provisional.observation.sha256\t%s\n' "$(sha256 "$provisional")"
+        printf 'runtime.metadata.schema\tspaceterm.acceptance.runtime-observation-metadata/v3\n'
+        printf 'runtime.metadata.path\truntime-metadata.tsv\n'
+        printf 'runtime.metadata.sha256\t%s\n' "$(sha256 "$runtime_metadata")"
+        printf 'failure.result.schema\tspaceterm.acceptance.failure-action-result/v2\n'
+        printf 'failure.actions.path\tfailure-actions.tsv\n'
+        printf 'failure.actions.sha256\t%s\n' "$(sha256 "$failure_actions")"
+        printf 'failure.request_count\t0\n'
+        printf 'failure.result_count\t0\n'
+        printf 'observation.complete\ttrue\n'
+    } >> "$output"
+    chmod 0400 "$output"
 }
 
 write_runtime_observation() {
@@ -582,8 +638,10 @@ write_runtime_observation() {
             inputs=$((accepted * index / 599))
             (( inputs <= accepted )) || inputs="$accepted"
             screen_events="$generation"
+            sample_ns="$((start + index * 1000000000))"
+            (( index < 600 )) || sample_ns="$end"
             printf '%d\t%d\t%d\t%d\t%d\t%d\t0\t2\t%d\t%d\t2\t%d\t%d\t%d\t%d\t1\t0\t0\t1\t1\t0\t500\t40\t0\t0\t0\t0\t0\t0\t40\t100\t1000\t800\t%d\t%s\t%d\n' \
-                "$index" "$((start + index * 1000000000))" \
+                "$index" "$sample_ns" \
                 "$generation" "$screen_events" "$generation" "$((index + 1))" \
                 "$generation" "$generation" "$generation" "$generation" \
                 "$generation" "$generation" "$inputs" \
@@ -595,10 +653,10 @@ write_runtime_observation() {
         printf '0\t%d\tsession-exited\t602\t0\t0\n' "$end"
     } > "$events"
     {
-        printf '%s\n' $'request_id\tsequence\tcase_id\taction\tresult\tpane_id\tpane_state\tfailure_class\tfailure_recoverability\tfailure_operation\tstate_revision\tlatest_generation\tlast_valid_generation\tvisible_generation\tpending_recovery\tterminal_input_usable\tsession_attached'
+        printf '%s\n' $'request_id\tsequence\tcase_id\taction\tresult\tpane_id\tpane_state\tfailure_class\tfailure_recoverability\tfailure_operation\tstate_revision\tlatest_generation\tlast_valid_generation\tvisible_generation\tpending_recovery\tterminal_input_usable\tsession_attached\tresource_staged_count\tresource_staged_bytes\tresource_rolled_back_count\tresource_rolled_back_bytes'
     } > "$failure_actions"
     {
-        printf 'schema\tspaceterm.acceptance.runtime-observation-metadata/v2\n'
+        printf 'schema\tspaceterm.acceptance.runtime-observation-metadata/v3\n'
         printf 'observation.source\tproduction-app\n'
         printf 'run.id\t%s\n' "$CAMPAIGN_ID"
         printf 'package.app.sha256\t%s\n' "$HASH_C"
@@ -608,9 +666,11 @@ write_runtime_observation() {
         printf 'runtime.events.path\truntime-events.tsv\n'
         printf 'runtime.events.sha256\t%s\n' "$(sha256 "$events")"
         printf 'failure.action.schema\tspaceterm.acceptance.failure-action/v1\n'
-        printf 'failure.result.schema\tspaceterm.acceptance.failure-action-result/v1\n'
+        printf 'failure.action.enabled\tfalse\n'
+        printf 'failure.result.schema\tspaceterm.acceptance.failure-action-result/v2\n'
         printf 'failure.actions.path\tfailure-actions.tsv\n'
         printf 'failure.actions.sha256\t%s\n' "$(sha256 "$failure_actions")"
+        printf 'failure.request_count\t0\n'
         printf 'failure.result_count\t0\n'
         printf 'observer.started_continuous_ns\t%d\n' "$start"
         printf 'observer.ended_continuous_ns\t%d\n' "$end"
@@ -621,6 +681,348 @@ write_runtime_observation() {
         printf 'observer.status\tcomplete\n'
         printf 'observation.complete\ttrue\n'
     } > "$metadata"
+    chmod 0400 "$samples" "$events" "$metadata" "$failure_actions"
+}
+
+freeze_run_intent() {
+    local subject="$1" identity="$2" output="$3"
+    local provisional="${4:-}"
+    local session="${5:-$SESSION_ID}" nonce="${6:-$NONCE}"
+    local -a arguments=(
+        --subject "$subject"
+        --pair-metadata "$PAIR_METADATA"
+        --subject-identity "$identity"
+        --plan "$PLAN"
+        --workload-binary "$WORKLOAD_BINARY"
+        --command-manifest "$TEMP_ROOT/command.tsv"
+        --environment-manifest "$TEMP_ROOT/environment.tsv"
+        --font-manifest "$TEMP_ROOT/font.tsv"
+        --initial-grid-manifest "$TEMP_ROOT/initial-grid.tsv"
+        --campaign-id "$CAMPAIGN_ID"
+        --session-id "$session"
+        --nonce "$nonce"
+        --output "$output"
+    )
+    [[ -z "$provisional" ]] \
+        || arguments+=(--native-provisional-observation "$provisional")
+    "$SCRIPT_DIRECTORY/freeze-performance-run-intent.sh" "${arguments[@]}" >/dev/null
+}
+
+write_trace_provisional() {
+    local identity="$1" intent="$2" workload_metadata="$3"
+    local ready_receipt="$4" plan_start_gate="$5" output="$6"
+    python3 - "$identity" "$intent" "$workload_metadata" "$ready_receipt" \
+        "$plan_start_gate" "$CAMPAIGN_SECRET_FILE" "$output" \
+        "$BASE_CONTINUOUS_NS" <<'PY'
+import hashlib
+import hmac
+import pathlib
+import struct
+import sys
+
+identity, intent, workload, ready, gate, secret, output = map(pathlib.Path, sys.argv[1:8])
+base = int(sys.argv[8])
+digest = lambda path: hashlib.sha256(path.read_bytes()).hexdigest()
+rows = [
+    ("format_version", "1"),
+    ("subject_identity_sha256", digest(identity)),
+    ("run_intent_sha256", digest(intent)),
+    ("workload_metadata_sha256", digest(workload)),
+    ("workload_ready_receipt_sha256", digest(ready)),
+    ("supplemental_evidence_sha256", digest(gate)),
+    ("capture_status", "CAPTURED"),
+    ("requested_duration_ms", "600000"),
+    ("actual_duration_ms", "600001"),
+    ("capture_started_continuous_ns", str(base + 60_000_000_000)),
+    ("capture_ended_continuous_ns", str(base + 660_100_000_000)),
+    ("trace_bundle_tree_sha256", "a" * 64),
+    ("toc_sha256", "b" * 64),
+    ("time_profile_export_sha256", "c" * 64),
+    ("allocations_export_sha256", "d" * 64),
+    ("hangs_export_sha256", "e" * 64),
+    ("trace_verification_sha256", "f" * 64),
+    ("verifier_sha256", "1" * 64),
+    ("evidence_mode", "production"),
+    ("status", "complete"),
+    ("auth_algorithm", "hmac-sha256"),
+]
+unsigned = b"".join(f"{key}\t{value}\n".encode() for key, value in rows)
+payload = b"spaceterm.performance.trace-provisional/v1\0" + struct.pack(">Q", len(unsigned)) + unsigned
+signature = hmac.new(secret.read_bytes(), payload, hashlib.sha256).hexdigest()
+output.write_bytes(unsigned + f"provisional_hmac_sha256\t{signature}\n".encode())
+output.chmod(0o400)
+PY
+}
+
+write_normal_exit_closure() {
+    local subject="$1" identity="$2" intent="$3" tail="$4" quit="$5"
+    local exit_receipt="$6" native_observation="${7:-}"
+    local terminator_source="$8" terminator_binary="$9"
+    local quit_token tail_ns request_ns exit_ns
+    local session nonce
+    session="$(awk -F '\t' '$1 == "session_id" {print $2}' "$intent")"
+    nonce="$(awk -F '\t' '$1 == "nonce" {print $2}' "$intent")"
+    quit_token="$(awk -F '\t' '$1 == "quit_token" { print $2 }' "$tail")"
+    tail_ns="$(awk -F '\t' '$1 == "tail_completed_continuous_ns" { print $2 }' "$tail")"
+    request_ns="$((tail_ns + 100))"
+    exit_ns="$((request_ns + 100))"
+    {
+        printf 'format_version\t1\n'
+        printf 'campaign_id\t%s\n' "$CAMPAIGN_ID"
+        printf 'session_id\t%s\n' "$session"
+        printf 'nonce\t%s\n' "$nonce"
+        printf 'run_intent_sha256\t%s\n' "$(sha256 "$intent")"
+        printf 'subject_process_pid\t123\n'
+        printf 'subject_process_start_identity\t1786473000:123456\n'
+        printf 'quit_token\t%s\n' "$quit_token"
+        printf 'request_continuous_ns\t%s\n' "$request_ns"
+        printf 'exit_continuous_ns\t%s\n' "$exit_ns"
+        printf 'termination_method\tappkit-terminate\n'
+        printf 'runtime_closure_status\tconfirmed\n'
+        printf 'appkit_terminator_source_device\t%s\n' "$(stat -f '%d' "$terminator_source")"
+        printf 'appkit_terminator_source_inode\t%s\n' "$(stat -f '%i' "$terminator_source")"
+        printf 'appkit_terminator_source_sha256\t%s\n' "$(sha256 "$terminator_source")"
+        printf 'appkit_terminator_binary_device\t%s\n' "$(stat -f '%d' "$terminator_binary")"
+        printf 'appkit_terminator_binary_inode\t%s\n' "$(stat -f '%i' "$terminator_binary")"
+        printf 'appkit_terminator_binary_sha256\t%s\n' "$(sha256 "$terminator_binary")"
+        printf 'evidence_mode\tproduction\n'
+        printf 'status\tcompleted\n'
+    } > "$quit"
+    chmod 0400 "$quit"
+    python3 - "$subject" "$identity" "$intent" "$tail" "$quit" "$exit_receipt" \
+        "$CAMPAIGN_SECRET_FILE" "$request_ns" "$exit_ns" "$native_observation" \
+        "$terminator_source" "$terminator_binary" <<'PY'
+import hashlib
+import hmac
+import pathlib
+import struct
+import sys
+
+subject, identity_name, intent_name, tail_name, quit_name, output_name, secret_name, requested, exited, native_name, source_name, binary_name = sys.argv[1:]
+identity = pathlib.Path(identity_name)
+intent = pathlib.Path(intent_name)
+tail = pathlib.Path(tail_name)
+quit_receipt = pathlib.Path(quit_name)
+output = pathlib.Path(output_name)
+secret = pathlib.Path(secret_name)
+digest = lambda path: hashlib.sha256(path.read_bytes()).hexdigest()
+intent_values = dict(line.split("\t", 1) for line in intent.read_text().splitlines())
+native_hash = digest(pathlib.Path(native_name)) if subject == "spaceterm" else "not-applicable"
+rows = [
+    ("schema", "spaceterm.acceptance.performance-subject-exit/v1"),
+    ("subject", subject),
+    ("campaign_id", intent_values["campaign_id"]),
+    ("session_id", intent_values["session_id"]),
+    ("nonce", intent_values["nonce"]),
+    ("run_intent_sha256", digest(intent)),
+    ("subject_identity_sha256", digest(identity)),
+    ("process_pid", intent_values["process_pid"]),
+    ("process_start_identity", intent_values["process_start_identity"]),
+    ("tail_receipt_sha256", digest(tail)),
+    ("quit_receipt_sha256", digest(quit_receipt)),
+    ("exit_requested_continuous_ns", requested),
+    ("process_exited_continuous_ns", exited),
+    ("exit_status", "normal"),
+    ("native_observation_sha256", native_hash),
+    ("appkit_terminator_source_device", str(pathlib.Path(source_name).stat().st_dev)),
+    ("appkit_terminator_source_inode", str(pathlib.Path(source_name).stat().st_ino)),
+    ("appkit_terminator_source_sha256", digest(pathlib.Path(source_name))),
+    ("appkit_terminator_binary_device", str(pathlib.Path(binary_name).stat().st_dev)),
+    ("appkit_terminator_binary_inode", str(pathlib.Path(binary_name).stat().st_ino)),
+    ("appkit_terminator_binary_sha256", digest(pathlib.Path(binary_name))),
+    ("evidence_mode", "production"),
+    ("auth_algorithm", "hmac-sha256"),
+]
+status = ("status", "complete")
+unsigned = b"".join(f"{key}\t{value}\n".encode() for key, value in rows + [status])
+payload = b"spaceterm.acceptance.performance-subject-exit/v1\0" + struct.pack(">Q", len(unsigned)) + unsigned
+signature = hmac.new(secret.read_bytes(), payload, hashlib.sha256).hexdigest()
+output.write_bytes(
+    b"".join(f"{key}\t{value}\n".encode() for key, value in rows)
+    + f"receipt_hmac_sha256\t{signature}\nstatus\tcomplete\n".encode()
+)
+output.chmod(0o400)
+PY
+}
+
+write_lifecycle_receipts() {
+    local subject="$1" identity="$2" intent="$3" tail="$4" workload="$5" events="$6"
+    local ready="$7" quit="$8" exit_receipt="$9" native="${10}"
+    local source="${11}" binary="${12}" token="${13}" ready_output="${14}" registration_output="${15}"
+    python3 - "$subject" "$identity" "$intent" "$tail" "$workload" "$events" "$ready" \
+        "$quit" "$exit_receipt" "$native" "$source" "$binary" "$token" \
+        "$ready_output" "$registration_output" "$CAMPAIGN_SECRET_FILE" <<'PY'
+import hashlib,hmac,pathlib,struct,sys
+(subject,identity_name,intent_name,tail_name,workload_name,events_name,ready_name,
+ quit_name,exit_name,native_name,source_name,binary_name,token,ready_output,
+ registration_output,secret_name)=sys.argv[1:]
+paths=[pathlib.Path(value) for value in (identity_name,intent_name,tail_name,workload_name,
+ events_name,ready_name,quit_name,exit_name,source_name,binary_name)]
+identity,intent,tail,workload,events,ready,quit_receipt,exit_receipt,source,binary=paths
+secret=pathlib.Path(secret_name).read_bytes(); digest=lambda path:hashlib.sha256(path.read_bytes()).hexdigest()
+values=dict(line.split("\t",1) for line in identity.read_text().splitlines())
+intent_values=dict(line.split("\t",1) for line in intent.read_text().splitlines())
+tool=[("appkit_terminator_source_device",str(source.stat().st_dev)),
+ ("appkit_terminator_source_inode",str(source.stat().st_ino)),
+ ("appkit_terminator_source_sha256",digest(source)),
+ ("appkit_terminator_binary_device",str(binary.stat().st_dev)),
+ ("appkit_terminator_binary_inode",str(binary.stat().st_ino)),
+ ("appkit_terminator_binary_sha256",digest(binary))]
+def signed(rows,field,magic):
+ unsigned=b"".join(f"{k}\t{v}\n".encode() for k,v in rows)
+ signature=hmac.new(secret,magic+struct.pack(">Q",len(unsigned))+unsigned,hashlib.sha256).hexdigest()
+ return b"".join(f"{k}\t{v}\n".encode() for k,v in rows[:-1])+f"{field}\t{signature}\n".encode()+f"{rows[-1][0]}\t{rows[-1][1]}\n".encode()
+ready_rows=[("schema","spaceterm.acceptance.performance-lifecycle-ready/v1"),
+ ("subject",subject),("campaign_id",intent_values["campaign_id"]),
+ ("session_id",intent_values["session_id"]),("nonce",intent_values["nonce"]),
+ ("subject_identity_sha256",digest(identity)),
+ ("process_pid",values["process_pid"]),("process_start_identity",values["process_start_identity"]),
+ ("executable_sha256",values["executable_sha256"]),("ready_continuous_ns","1"),
+ ("registration_control_device","1"),("registration_control_inode","2")]+tool+[
+ ("evidence_mode","production"),("auth_algorithm","hmac-sha256"),("status","ready")]
+pathlib.Path(ready_output).write_bytes(signed(ready_rows,"receipt_hmac_sha256",b"spaceterm.acceptance.performance-lifecycle-ready/v1\0"))
+native="not-applicable" if subject=="ghostty" else str(pathlib.Path(native_name).resolve())
+registration=[("format_version","1"),("campaign_id",intent_values["campaign_id"]),
+ ("session_id",intent_values["session_id"]),("nonce",intent_values["nonce"]),
+ ("registration_token",token),("subject_identity_sha256",digest(identity)),
+ ("process_pid",values["process_pid"]),("process_start_identity",values["process_start_identity"]),
+ ("run_intent_path",str(intent.resolve())),("run_intent_sha256",digest(intent)),
+ ("tail_receipt_path",str(tail.resolve())),("workload_metadata_path",str(workload.resolve())),
+ ("workload_events_path",str(events.resolve())),("workload_ready_receipt_path",str(ready.resolve())),
+ ("quit_receipt_path",str(quit_receipt.resolve())),("subject_exit_receipt_path",str(exit_receipt.resolve())),
+ ("native_observation_path",native)]+tool+[("evidence_mode","production"),
+ ("auth_algorithm","hmac-sha256"),("status","registered")]
+pathlib.Path(registration_output).write_bytes(signed(registration,"registration_hmac_sha256",b"spaceterm.acceptance.performance-lifecycle-registration/v1\0"))
+PY
+    chmod 0400 "$ready_output" "$registration_output"
+}
+
+build_causal_closure() {
+    local prefix="$1" subject="$2" identity="$3" intent="$4"
+    local workload_metadata="$5" workload_events="$6" ready_receipt="$7"
+    local driver_events="$8" rss_samples="$9" plan_start_gate="${10}"
+    local native_provisional="${11:-}" native_observation="${12:-}"
+    local runtime_metadata="${13:-}" runtime_samples="${14:-}"
+    local runtime_events="${15:-}" failure_actions="${16:-}"
+    local driver_intent="$TEMP_ROOT/$prefix-driver-intent.tsv"
+    local driver_receipt="$TEMP_ROOT/$prefix-driver-receipt.tsv"
+    local window_identity="$TEMP_ROOT/$prefix-window-identity.tsv"
+    local driver_binary="$TEMP_ROOT/$prefix-performance-driver"
+    local trace_provisional="$TEMP_ROOT/$prefix-trace-provisional.tsv"
+    local tail_receipt="$TEMP_ROOT/$prefix-tail.tsv"
+    local quit_receipt="$TEMP_ROOT/$prefix-quit.tsv"
+    local exit_receipt="$TEMP_ROOT/$prefix-exit.tsv"
+    local lifecycle_ready="$TEMP_ROOT/$prefix-lifecycle-ready.tsv"
+    local lifecycle_registration="$TEMP_ROOT/$prefix-lifecycle-registration.tsv"
+    local run_metadata="$TEMP_ROOT/$prefix-run.tsv"
+    local trace_metadata="$TEMP_ROOT/$prefix-trace.tsv"
+    local run_session run_nonce
+    run_session="$(awk -F '\t' '$1 == "session_id" {print $2}' "$intent")"
+    run_nonce="$(awk -F '\t' '$1 == "nonce" {print $2}' "$intent")"
+    printf 'fixture native driver binary: %s\n' "$prefix" > "$driver_binary"
+    chmod 0500 "$driver_binary"
+    write_window_identity "$subject" "$identity" "$window_identity"
+    local held_driver_events="$TEMP_ROOT/$prefix-driver-events-held.tsv"
+    mv -- "$driver_events" "$held_driver_events"
+    "$SCRIPT_DIRECTORY/performance-driver-receipt.py" intent \
+        --campaign-secret-file "$CAMPAIGN_SECRET_FILE" \
+        --campaign-id "$CAMPAIGN_ID" --session-id "$run_session" --nonce "$run_nonce" \
+        --driver-output "$driver_events" --driver-binary "$driver_binary" \
+        --driver-source "$SCRIPT_DIRECTORY/performance-driver.m" \
+        --controller "$SCRIPT_DIRECTORY/run-native-performance-scenario.sh" \
+        --scenario-plan "$PLAN" --plan-start-continuous-ns "$BASE_CONTINUOUS_NS" \
+        --subject-identity "$identity" --window-identity "$window_identity" \
+        --output "$driver_intent"
+    mv -- "$held_driver_events" "$driver_events"
+    "$SCRIPT_DIRECTORY/performance-driver-receipt.py" finalize \
+        --campaign-secret-file "$CAMPAIGN_SECRET_FILE" \
+        --campaign-id "$CAMPAIGN_ID" --session-id "$run_session" --nonce "$run_nonce" \
+        --driver-output "$driver_events" --driver-binary "$driver_binary" \
+        --driver-source "$SCRIPT_DIRECTORY/performance-driver.m" \
+        --controller "$SCRIPT_DIRECTORY/run-native-performance-scenario.sh" \
+        --scenario-plan "$PLAN" --plan-start-continuous-ns "$BASE_CONTINUOUS_NS" \
+        --subject-identity "$identity" --window-identity "$window_identity" \
+        --intent "$driver_intent" --receipt-output "$driver_receipt"
+    write_trace_provisional "$identity" "$intent" "$workload_metadata" \
+        "$ready_receipt" "$plan_start_gate" "$trace_provisional"
+    local tail_ns quit_token
+    tail_ns="$(( $(awk -F '\t' '$1 == "ended_continuous_ns" { print $2 }' "$workload_metadata") + 5000000000 ))"
+    quit_token="$(sha256 "$driver_receipt")"
+    local terminator_binary="$TEMP_ROOT/performance-appkit-terminate"
+    if [[ ! -e "$terminator_binary" ]]; then
+        printf 'fixture AppKit terminator binary\n' > "$terminator_binary"
+        chmod 0500 "$terminator_binary"
+    fi
+    "$SCRIPT_DIRECTORY/performance-tail-receipt.py" create \
+        --campaign-secret-file "$CAMPAIGN_SECRET_FILE" \
+        --campaign-id "$CAMPAIGN_ID" --session-id "$run_session" --nonce "$run_nonce" \
+        --quit-token "$quit_token" --run-intent "$intent" \
+        --subject-identity "$identity" --driver-receipt "$driver_receipt" \
+        --driver-events "$driver_events" --workload-metadata "$workload_metadata" \
+        --workload-events "$workload_events" --workload-ready-receipt "$ready_receipt" \
+        --rss-samples "$rss_samples" --trace-provisional-receipt "$trace_provisional" \
+        --appkit-terminator-source \
+            "$SCRIPT_DIRECTORY/performance-appkit-terminate.m" \
+        --appkit-terminator-binary "$terminator_binary" \
+        --tail-completed-continuous-ns "$tail_ns" --output "$tail_receipt"
+    write_normal_exit_closure "$subject" "$identity" "$intent" "$tail_receipt" \
+        "$quit_receipt" "$exit_receipt" "$native_observation" \
+        "$SCRIPT_DIRECTORY/performance-appkit-terminate.m" "$terminator_binary"
+    write_lifecycle_receipts "$subject" "$identity" "$intent" "$tail_receipt" \
+        "$workload_metadata" "$workload_events" "$ready_receipt" "$quit_receipt" \
+        "$exit_receipt" "$native_observation" \
+        "$SCRIPT_DIRECTORY/performance-appkit-terminate.m" "$terminator_binary" \
+        "$quit_token" "$lifecycle_ready" "$lifecycle_registration"
+    local -a final_arguments=(
+        --run-intent "$intent"
+        --subject-identity "$identity"
+        --campaign-secret-file "$CAMPAIGN_SECRET_FILE"
+        --trace-provisional-receipt "$trace_provisional"
+        --performance-tail-receipt "$tail_receipt"
+        --performance-quit-receipt "$quit_receipt"
+        --subject-exit-receipt "$exit_receipt"
+        --driver-intent "$driver_intent"
+        --driver-receipt "$driver_receipt"
+        --driver-events "$driver_events"
+        --window-identity "$window_identity"
+        --driver-binary "$driver_binary"
+        --driver-source "$SCRIPT_DIRECTORY/performance-driver.m"
+        --driver-controller "$SCRIPT_DIRECTORY/run-native-performance-scenario.sh"
+        --scenario-plan "$PLAN"
+        --plan-start-gate "$plan_start_gate"
+        --workload-metadata "$workload_metadata"
+        --workload-events "$workload_events"
+        --workload-ready-receipt "$ready_receipt"
+        --rss-samples "$rss_samples"
+        --performance-lifecycle-ready-receipt "$lifecycle_ready"
+        --performance-lifecycle-registration "$lifecycle_registration"
+        --subject-lifecycle-helper "$SCRIPT_DIRECTORY/performance-subject-lifecycle.py"
+        --appkit-terminator-source "$SCRIPT_DIRECTORY/performance-appkit-terminate.m"
+        --appkit-terminator-binary "$terminator_binary"
+        --output "$run_metadata"
+    )
+    for artifact in "$CAMPAIGN_SECRET_FILE" "$trace_provisional" "$tail_receipt" \
+        "$quit_receipt" "$exit_receipt" "$driver_intent" "$driver_receipt" "$driver_events" \
+        "$window_identity" "$driver_binary" "$lifecycle_ready" "$lifecycle_registration" \
+        "$workload_metadata" "$workload_events" "$ready_receipt" "$rss_samples"; do
+        [[ -f "$artifact" && ! -L "$artifact" ]] \
+            || fail "causal fixture artifact is unavailable: $artifact"
+    done
+    if [[ "$subject" == spaceterm ]]; then
+        final_arguments+=(
+            --native-provisional-observation "$native_provisional"
+            --native-observation "$native_observation"
+            --native-runtime-metadata "$runtime_metadata"
+            --native-runtime-samples "$runtime_samples"
+            --native-runtime-events "$runtime_events"
+            --native-failure-actions "$failure_actions"
+        )
+    fi
+    "$SCRIPT_DIRECTORY/freeze-performance-run.sh" "${final_arguments[@]}" >/dev/null
+    TRACE_READY_RECEIPT_OVERRIDE="$ready_receipt" \
+    TRACE_PLAN_START_GATE_OVERRIDE="$plan_start_gate" \
+        write_trace_metadata "$identity" "$run_metadata" "$workload_metadata" \
+            "$trace_metadata"
 }
 
 run_case() {
@@ -635,42 +1037,95 @@ run_case() {
     local workload_metadata="${WORKLOAD_METADATA_OVERRIDE:-$WORKLOAD_METADATA}"
     local ready_receipt="${READY_RECEIPT_OVERRIDE:-$READY_RECEIPT}"
     local plan_start_gate="${PLAN_START_GATE_OVERRIDE:-$PLAN_START_GATE}"
+    local run_intent causal_prefix driver_receipt trace_provisional
+    local tail_receipt quit_receipt exit_receipt lifecycle_ready lifecycle_registration
+    local native_provisional=""
+    local -a native_case_arguments=()
+    causal_prefix="${CAUSAL_PREFIX_OVERRIDE:-$subject}"
     [[ "$subject" != spaceterm ]] \
         || {
             workload_metadata="$SPACETERM_WORKLOAD_METADATA"
             ready_receipt="$SPACETERM_READY_RECEIPT"
             plan_start_gate="$SPACETERM_PLAN_START_GATE"
+            native_provisional="$NATIVE_PROVISIONAL"
         }
+    if [[ "$subject" == spaceterm ]]; then
+        run_intent="${RUN_INTENT_OVERRIDE:-$SPACETERM_INTENT}"
+    else
+        run_intent="${RUN_INTENT_OVERRIDE:-$GHOSTTY_INTENT}"
+    fi
+    [[ -z "$native_provisional" ]] \
+        || native_case_arguments+=(--native-provisional-observation "$native_provisional")
+    driver_receipt="$TEMP_ROOT/$causal_prefix-driver-receipt.tsv"
+    trace_provisional="$TEMP_ROOT/$causal_prefix-trace-provisional.tsv"
+    tail_receipt="$TEMP_ROOT/$causal_prefix-tail.tsv"
+    quit_receipt="$TEMP_ROOT/$causal_prefix-quit.tsv"
+    exit_receipt="$TEMP_ROOT/$causal_prefix-exit.tsv"
+    lifecycle_ready="$TEMP_ROOT/$causal_prefix-lifecycle-ready.tsv"
+    lifecycle_registration="$TEMP_ROOT/$causal_prefix-lifecycle-registration.tsv"
+    local run_session run_nonce
+    run_session="$(awk -F '\t' '$1 == "session_id" {print $2}' "$run_intent")"
+    run_nonce="$(awk -F '\t' '$1 == "nonce" {print $2}' "$run_intent")"
     shift 8
-    "$SCRIPT_DIRECTORY/analyze-release-performance-case.sh" \
+    ( "$SCRIPT_DIRECTORY/analyze-release-performance-case.sh" \
         --subject "$subject" \
         --scenario ascii \
         --plan "$PLAN" \
         --plan-metadata "$PLAN_METADATA" \
         --pair-metadata "$PAIR_METADATA" \
         --subject-identity "$identity" \
+        --run-intent "$run_intent" \
         --run-metadata "$run_metadata" \
         --workload-metadata "$workload_metadata" \
         --workload-events "$workload_events" \
         --ready-receipt "$ready_receipt" \
         --campaign-id "$CAMPAIGN_ID" \
-        --session-id "$SESSION_ID" \
-        --nonce "$NONCE" \
+        --session-id "$run_session" \
+        --nonce "$run_nonce" \
         --campaign-secret-file "$CAMPAIGN_SECRET_FILE" \
         --driver-events "$driver_events" \
+        --driver-intent "$TEMP_ROOT/$causal_prefix-driver-intent.tsv" \
+        --driver-receipt "$driver_receipt" \
+        --window-identity "$TEMP_ROOT/$causal_prefix-window-identity.tsv" \
+        --driver-binary "$TEMP_ROOT/$causal_prefix-performance-driver" \
+        --driver-source "$SCRIPT_DIRECTORY/performance-driver.m" \
+        --driver-controller "$SCRIPT_DIRECTORY/run-native-performance-scenario.sh" \
         --rss-samples "$rss" \
         --trace-metadata "$trace" \
+        --trace-provisional-receipt "$trace_provisional" \
+        --performance-tail-receipt "$tail_receipt" \
+        --performance-quit-receipt "$quit_receipt" \
+        --subject-exit-receipt "$exit_receipt" \
+        --performance-lifecycle-ready-receipt "$lifecycle_ready" \
+        --performance-lifecycle-registration "$lifecycle_registration" \
+        --subject-lifecycle-helper "$SCRIPT_DIRECTORY/performance-subject-lifecycle.py" \
+        --appkit-terminator-source "$SCRIPT_DIRECTORY/performance-appkit-terminate.m" \
+        --appkit-terminator-binary "$TEMP_ROOT/performance-appkit-terminate" \
         --plan-start-gate "$plan_start_gate" \
         --manual-artifacts "$manual" \
         --manual-screenshot "$MANUAL_SCREENSHOT" \
         --manual-video "$MANUAL_VIDEO" \
-        "$@"
+        ${native_case_arguments[@]+"${native_case_arguments[@]}"} \
+        "$@" )
+    return $?
 }
 
 run_case_with_metadata() {
     local metadata="$1"
     shift
     WORKLOAD_METADATA_OVERRIDE="$metadata" run_case "$@"
+}
+
+run_case_with_causal_prefix() {
+    local prefix="$1"
+    shift
+    CAUSAL_PREFIX_OVERRIDE="$prefix" run_case "$@"
+}
+
+run_case_with_metadata_and_prefix() {
+    local metadata="$1" prefix="$2"
+    shift 2
+    WORKLOAD_METADATA_OVERRIDE="$metadata" CAUSAL_PREFIX_OVERRIDE="$prefix" run_case "$@"
 }
 
 for command in awk bash chmod cmp cp grep mktemp python3 rm sed shasum sort; do
@@ -859,34 +1314,6 @@ PAIR_METADATA="$TEMP_ROOT/pair-metadata.tsv"
     --output "$PAIR_METADATA" >/dev/null
 readonly PAIR_METADATA
 
-GHOSTTY_RUN="$TEMP_ROOT/ghostty-run.tsv"
-"$SCRIPT_DIRECTORY/freeze-performance-run.sh" \
-    --subject ghostty \
-    --pair-metadata "$PAIR_METADATA" \
-    --subject-identity "$GHOSTTY_IDENTITY" \
-    --plan "$PLAN" \
-    --workload-binary "$WORKLOAD_BINARY" \
-    --command-manifest "$TEMP_ROOT/command.tsv" \
-    --environment-manifest "$TEMP_ROOT/environment.tsv" \
-    --font-manifest "$TEMP_ROOT/font.tsv" \
-    --initial-grid-manifest "$TEMP_ROOT/initial-grid.tsv" \
-    --output "$GHOSTTY_RUN" >/dev/null
-readonly GHOSTTY_RUN
-
-SPACETERM_RUN="$TEMP_ROOT/spaceterm-run.tsv"
-"$SCRIPT_DIRECTORY/freeze-performance-run.sh" \
-    --subject spaceterm \
-    --pair-metadata "$PAIR_METADATA" \
-    --subject-identity "$SPACETERM_IDENTITY" \
-    --plan "$PLAN" \
-    --workload-binary "$WORKLOAD_BINARY" \
-    --command-manifest "$TEMP_ROOT/command.tsv" \
-    --environment-manifest "$TEMP_ROOT/environment.tsv" \
-    --font-manifest "$TEMP_ROOT/font.tsv" \
-    --initial-grid-manifest "$TEMP_ROOT/initial-grid.tsv" \
-    --output "$SPACETERM_RUN" >/dev/null
-readonly SPACETERM_RUN
-
 DRIVER_EVENTS="$TEMP_ROOT/driver-events.tsv"
 WORKLOAD_EVENTS="$TEMP_ROOT/workload-events.tsv"
 WORKLOAD_METADATA="$TEMP_ROOT/workload-metadata.tsv"
@@ -896,7 +1323,6 @@ PLAN_START_GATE="$TEMP_ROOT/synthetic-plan-start-gate.tsv"
 SPACETERM_READY_RECEIPT="$TEMP_ROOT/spaceterm-ready-receipt.tsv"
 SPACETERM_PLAN_START_GATE="$TEMP_ROOT/spaceterm-plan-start-gate.tsv"
 GHOSTTY_RSS="$TEMP_ROOT/ghostty-rss.tsv"
-GHOSTTY_TRACE="$TEMP_ROOT/ghostty-trace.tsv"
 MANUAL="$TEMP_ROOT/manual.tsv"
 MANUAL_SCREENSHOT="$TEMP_ROOT/manual-screenshot.png"
 MANUAL_VIDEO="$TEMP_ROOT/manual-video.mov"
@@ -906,18 +1332,17 @@ write_ready_receipt "$WORKLOAD_EVENTS" "$GHOSTTY_IDENTITY" "$READY_RECEIPT"
 publish_plan_start_gate "$WORKLOAD_EVENTS" "$PLAN_START_GATE" \
     "$CAMPAIGN_SECRET_FILE" "$READY_RECEIPT" "$BASE_CONTINUOUS_NS"
 write_ready_receipt "$WORKLOAD_EVENTS" "$SPACETERM_IDENTITY" \
-    "$SPACETERM_READY_RECEIPT"
+    "$SPACETERM_READY_RECEIPT" "$SPACETERM_SESSION_ID" "$SPACETERM_NONCE"
 publish_plan_start_gate "$WORKLOAD_EVENTS" "$SPACETERM_PLAN_START_GATE" \
-    "$CAMPAIGN_SECRET_FILE" "$SPACETERM_READY_RECEIPT" "$BASE_CONTINUOUS_NS"
+    "$CAMPAIGN_SECRET_FILE" "$SPACETERM_READY_RECEIPT" "$BASE_CONTINUOUS_NS" \
+    "$SPACETERM_SESSION_ID" "$SPACETERM_NONCE"
 write_workload_metadata "$WORKLOAD_BINARY" "$WORKLOAD_EVENTS" \
     "$GHOSTTY_IDENTITY" "$WORKLOAD_METADATA"
 write_workload_metadata "$WORKLOAD_BINARY" "$WORKLOAD_EVENTS" \
     "$SPACETERM_IDENTITY" "$SPACETERM_WORKLOAD_METADATA" \
-    "$SPACETERM_READY_RECEIPT"
+    "$SPACETERM_READY_RECEIPT" "$SPACETERM_SESSION_ID" "$SPACETERM_NONCE"
 write_sustained_rss "$GHOSTTY_IDENTITY" "$WORKLOAD_METADATA" \
     "$WORKLOAD_EVENTS" "$DRIVER_EVENTS" "$GHOSTTY_RSS"
-write_trace_metadata "$GHOSTTY_IDENTITY" "$GHOSTTY_RUN" \
-    "$WORKLOAD_METADATA" "$GHOSTTY_TRACE"
 printf 'bounded fake screenshot evidence\n' > "$MANUAL_SCREENSHOT"
 printf 'bounded fake video evidence\n' > "$MANUAL_VIDEO"
 write_manual_artifacts "$MANUAL"
@@ -925,7 +1350,7 @@ readonly DRIVER_EVENTS WORKLOAD_EVENTS WORKLOAD_METADATA SPACETERM_WORKLOAD_META
 readonly READY_RECEIPT
 readonly PLAN_START_GATE
 readonly SPACETERM_READY_RECEIPT SPACETERM_PLAN_START_GATE
-readonly GHOSTTY_RSS GHOSTTY_TRACE MANUAL
+readonly GHOSTTY_RSS MANUAL
 readonly MANUAL_SCREENSHOT MANUAL_VIDEO
 
 RAW_RSS="$TEMP_ROOT/raw-rss.tsv"
@@ -946,6 +1371,26 @@ write_raw_rss "$GHOSTTY_IDENTITY" "$RAW_RSS"
     --driver-events "$DRIVER_EVENTS" \
     --output "$ASSEMBLED_RSS"
 readonly RAW_RSS ASSEMBLED_RSS
+
+# Freeze pre-action intents only after each subject identity and SpaceTerm's
+# provisional native launch observation exist. Final run metadata is produced
+# below from the complete authenticated causal closure.
+NATIVE_PROVISIONAL="$TEMP_ROOT/native-provisional.tsv"
+write_native_provisional "$SPACETERM_IDENTITY" "$NATIVE_PROVISIONAL" "$SPACETERM_NONCE"
+GHOSTTY_INTENT="$TEMP_ROOT/ghostty-intent.tsv"
+SPACETERM_INTENT="$TEMP_ROOT/spaceterm-intent.tsv"
+freeze_run_intent ghostty "$GHOSTTY_IDENTITY" "$GHOSTTY_INTENT"
+freeze_run_intent spaceterm "$SPACETERM_IDENTITY" "$SPACETERM_INTENT" \
+    "$NATIVE_PROVISIONAL" "$SPACETERM_SESSION_ID" "$SPACETERM_NONCE"
+
+# The baseline Ghostty closure is built from the exact assembled evidence.
+build_causal_closure ghostty ghostty "$GHOSTTY_IDENTITY" "$GHOSTTY_INTENT" \
+    "$WORKLOAD_METADATA" "$WORKLOAD_EVENTS" "$READY_RECEIPT" \
+    "$DRIVER_EVENTS" "$GHOSTTY_RSS" "$PLAN_START_GATE"
+GHOSTTY_RUN="$TEMP_ROOT/ghostty-run.tsv"
+GHOSTTY_TRACE="$TEMP_ROOT/ghostty-trace.tsv"
+readonly NATIVE_PROVISIONAL GHOSTTY_INTENT SPACETERM_INTENT
+readonly GHOSTTY_RUN GHOSTTY_TRACE
 
 # Force the scheduler ordering that used to race: the sampler is already
 # waiting at the measurement boundary, while progress-000000 is not published
@@ -1024,15 +1469,23 @@ write_raw_rss "$GHOSTTY_IDENTITY" "$DELAYED_RAW_RSS" \
     --nonce "$NONCE" --campaign-secret-file "$CAMPAIGN_SECRET_FILE" \
     --driver-events "$DRIVER_EVENTS" \
     --output "$DELAYED_ASSEMBLED_RSS"
-expect_result 0 PASS "scheduled RSS cadence survives normal sampling delay" \
-    run_case ghostty "$GHOSTTY_IDENTITY" "$GHOSTTY_RUN" \
+build_causal_closure delayed ghostty "$GHOSTTY_IDENTITY" "$GHOSTTY_INTENT" \
+    "$WORKLOAD_METADATA" "$WORKLOAD_EVENTS" "$READY_RECEIPT" \
+    "$DRIVER_EVENTS" "$DELAYED_ASSEMBLED_RSS" "$PLAN_START_GATE"
+expect_result 0 CASE-COMPLETE "scheduled RSS cadence survives normal sampling delay" \
+    run_case_with_causal_prefix delayed ghostty "$GHOSTTY_IDENTITY" \
+        "$TEMP_ROOT/delayed-run.tsv" \
         "$WORKLOAD_EVENTS" "$DRIVER_EVENTS" "$DELAYED_ASSEMBLED_RSS" \
-        "$GHOSTTY_TRACE" "$MANUAL"
+        "$TEMP_ROOT/delayed-trace.tsv" "$MANUAL"
 
-expect_result 0 PASS "valid assembled raw RSS evidence" \
-    run_case ghostty "$GHOSTTY_IDENTITY" "$GHOSTTY_RUN" \
+build_causal_closure assembled ghostty "$GHOSTTY_IDENTITY" "$GHOSTTY_INTENT" \
+    "$WORKLOAD_METADATA" "$WORKLOAD_EVENTS" "$READY_RECEIPT" \
+    "$DRIVER_EVENTS" "$ASSEMBLED_RSS" "$PLAN_START_GATE"
+expect_result 0 CASE-COMPLETE "valid assembled raw RSS evidence" \
+    run_case_with_causal_prefix assembled ghostty "$GHOSTTY_IDENTITY" \
+        "$TEMP_ROOT/assembled-run.tsv" \
         "$WORKLOAD_EVENTS" "$DRIVER_EVENTS" "$ASSEMBLED_RSS" \
-        "$GHOSTTY_TRACE" "$MANUAL"
+        "$TEMP_ROOT/assembled-trace.tsv" "$MANUAL"
 
 WRONG_SUBJECT_RAW="$TEMP_ROOT/wrong-subject-raw.tsv"
 write_raw_rss "$GHOSTTY_IDENTITY" "$WRONG_SUBJECT_RAW" "$HASH_C"
@@ -1259,13 +1712,13 @@ ln -s "$CAMPAIGN_SECRET_FILE" "$SECRET_SYMLINK"
 expect_progress_assembly_failure "campaign secret symlink" "$WORKLOAD_EVENTS" \
     "$WORKLOAD_METADATA" "$RAW_RSS" "$GHOSTTY_IDENTITY" "$SECRET_SYMLINK"
 
-expect_result 0 PASS "valid Ghostty case with zero Hangs" \
+expect_result 0 CASE-COMPLETE "valid Ghostty case with zero Hangs" \
     run_case ghostty "$GHOSTTY_IDENTITY" "$GHOSTTY_RUN" \
         "$WORKLOAD_EVENTS" "$DRIVER_EVENTS" "$GHOSTTY_RSS" "$GHOSTTY_TRACE" "$MANUAL"
 
 SPACETERM_RSS="$TEMP_ROOT/spaceterm-rss.tsv"
 SPACETERM_TRACE="$TEMP_ROOT/spaceterm-trace.tsv"
-NATIVE_LAUNCH="$TEMP_ROOT/native-launch.tsv"
+NATIVE_LAUNCH="$TEMP_ROOT/native-final.tsv"
 RUNTIME_SAMPLES="$TEMP_ROOT/runtime-samples.tsv"
 RUNTIME_EVENTS="$TEMP_ROOT/runtime-events.tsv"
 RUNTIME_METADATA="$TEMP_ROOT/runtime-metadata.tsv"
@@ -1273,18 +1726,21 @@ FAILURE_ACTIONS="$TEMP_ROOT/failure-actions.tsv"
 write_sustained_rss "$SPACETERM_IDENTITY" "$SPACETERM_WORKLOAD_METADATA" "$WORKLOAD_EVENTS" \
     "$DRIVER_EVENTS" "$SPACETERM_RSS" 0 "$SPACETERM_READY_RECEIPT" \
     "$SPACETERM_PLAN_START_GATE"
-TRACE_READY_RECEIPT_OVERRIDE="$SPACETERM_READY_RECEIPT" \
-TRACE_PLAN_START_GATE_OVERRIDE="$SPACETERM_PLAN_START_GATE" \
-    write_trace_metadata "$SPACETERM_IDENTITY" "$SPACETERM_RUN" \
-        "$SPACETERM_WORKLOAD_METADATA" "$SPACETERM_TRACE"
-write_native_launch "$SPACETERM_IDENTITY" "$NATIVE_LAUNCH"
 write_runtime_observation "$WORKLOAD_EVENTS" "$RUNTIME_SAMPLES" \
     "$RUNTIME_EVENTS" "$RUNTIME_METADATA" "$FAILURE_ACTIONS"
+write_native_final "$NATIVE_PROVISIONAL" "$RUNTIME_METADATA" "$FAILURE_ACTIONS" \
+    "$NATIVE_LAUNCH"
+build_causal_closure spaceterm spaceterm "$SPACETERM_IDENTITY" "$SPACETERM_INTENT" \
+    "$SPACETERM_WORKLOAD_METADATA" "$WORKLOAD_EVENTS" "$SPACETERM_READY_RECEIPT" \
+    "$DRIVER_EVENTS" "$SPACETERM_RSS" "$SPACETERM_PLAN_START_GATE" \
+    "$NATIVE_PROVISIONAL" "$NATIVE_LAUNCH" "$RUNTIME_METADATA" \
+    "$RUNTIME_SAMPLES" "$RUNTIME_EVENTS" "$FAILURE_ACTIONS"
+SPACETERM_RUN="$TEMP_ROOT/spaceterm-run.tsv"
 readonly SPACETERM_RSS SPACETERM_TRACE NATIVE_LAUNCH
 readonly RUNTIME_SAMPLES RUNTIME_EVENTS RUNTIME_METADATA
 readonly FAILURE_ACTIONS
 
-expect_result 0 PASS "valid authenticated SpaceTerm runtime case" \
+expect_result 0 CASE-COMPLETE "valid authenticated SpaceTerm runtime case" \
     run_case spaceterm "$SPACETERM_IDENTITY" "$SPACETERM_RUN" \
         "$WORKLOAD_EVENTS" "$DRIVER_EVENTS" "$SPACETERM_RSS" \
         "$SPACETERM_TRACE" "$MANUAL" \
@@ -1294,10 +1750,158 @@ expect_result 0 PASS "valid authenticated SpaceTerm runtime case" \
         --failure-actions "$FAILURE_ACTIONS" \
         --native-launch-observation "$NATIVE_LAUNCH"
 
+# Final release acceptance is pair-scoped. Reuse both complete production-mode
+# subject bundles above, whose distinct session/nonce values prevent replay.
+PAIR_RESULT="$TEMP_ROOT/pair-result.tsv"
+pair_result_arguments=(
+    --campaign-secret-file "$CAMPAIGN_SECRET_FILE" --campaign-id "$CAMPAIGN_ID"
+    --pair-metadata "$PAIR_METADATA" --scenario-plan "$PLAN"
+)
+for pair_subject in spaceterm ghostty; do
+    if [[ "$pair_subject" == spaceterm ]]; then
+        pair_identity="$SPACETERM_IDENTITY"; pair_intent="$SPACETERM_INTENT"
+        pair_run="$SPACETERM_RUN"; pair_gate="$SPACETERM_PLAN_START_GATE"
+        pair_workload="$SPACETERM_WORKLOAD_METADATA"; pair_ready="$SPACETERM_READY_RECEIPT"
+    else
+        pair_identity="$GHOSTTY_IDENTITY"; pair_intent="$GHOSTTY_INTENT"
+        pair_run="$GHOSTTY_RUN"; pair_gate="$PLAN_START_GATE"
+        pair_workload="$WORKLOAD_METADATA"; pair_ready="$READY_RECEIPT"
+    fi
+    pair_result_arguments+=(
+        "--$pair_subject-subject-identity" "$pair_identity"
+        "--$pair_subject-run-intent" "$pair_intent"
+        "--$pair_subject-run-metadata" "$pair_run"
+        "--$pair_subject-window-identity" "$TEMP_ROOT/$pair_subject-window-identity.tsv"
+        "--$pair_subject-driver-intent" "$TEMP_ROOT/$pair_subject-driver-intent.tsv"
+        "--$pair_subject-driver-events" "$DRIVER_EVENTS"
+        "--$pair_subject-driver-receipt" "$TEMP_ROOT/$pair_subject-driver-receipt.tsv"
+        "--$pair_subject-driver-binary" "$TEMP_ROOT/$pair_subject-performance-driver"
+        "--$pair_subject-driver-source" "$SCRIPT_DIRECTORY/performance-driver.m"
+        "--$pair_subject-driver-controller" "$SCRIPT_DIRECTORY/run-native-performance-scenario.sh"
+        "--$pair_subject-plan-start-gate" "$pair_gate"
+        "--$pair_subject-trace-provisional-receipt" "$TEMP_ROOT/$pair_subject-trace-provisional.tsv"
+        "--$pair_subject-workload-metadata" "$pair_workload"
+        "--$pair_subject-workload-events" "$WORKLOAD_EVENTS"
+        "--$pair_subject-workload-ready-receipt" "$pair_ready"
+        "--$pair_subject-lifecycle-ready-receipt" "$TEMP_ROOT/$pair_subject-lifecycle-ready.tsv"
+        "--$pair_subject-lifecycle-registration" "$TEMP_ROOT/$pair_subject-lifecycle-registration.tsv"
+        "--$pair_subject-tail-receipt" "$TEMP_ROOT/$pair_subject-tail.tsv"
+        "--$pair_subject-quit-receipt" "$TEMP_ROOT/$pair_subject-quit.tsv"
+        "--$pair_subject-exit-receipt" "$TEMP_ROOT/$pair_subject-exit.tsv"
+    )
+done
+pair_result_arguments+=(
+    --spaceterm-native-provisional-observation "$NATIVE_PROVISIONAL"
+    --spaceterm-native-observation "$NATIVE_LAUNCH"
+    --spaceterm-native-runtime-metadata "$RUNTIME_METADATA"
+    --spaceterm-native-runtime-samples "$RUNTIME_SAMPLES"
+    --spaceterm-native-runtime-events "$RUNTIME_EVENTS"
+    --spaceterm-native-failure-actions "$FAILURE_ACTIONS"
+    --common-lifecycle-helper "$SCRIPT_DIRECTORY/performance-subject-lifecycle.py"
+    --appkit-terminator-source "$SCRIPT_DIRECTORY/performance-appkit-terminate.m"
+    --appkit-terminator-binary "$TEMP_ROOT/performance-appkit-terminate"
+)
+chmod 0400 "$DRIVER_EVENTS" "$WORKLOAD_EVENTS" "$WORKLOAD_METADATA" \
+    "$SPACETERM_WORKLOAD_METADATA" "$READY_RECEIPT" "$SPACETERM_READY_RECEIPT"
+"$SCRIPT_DIRECTORY/performance-pair-result.py" create \
+    "${pair_result_arguments[@]}" --output "$PAIR_RESULT"
+
+pair_analyzer_arguments=(
+    --campaign-id "$CAMPAIGN_ID" --campaign-secret-file "$CAMPAIGN_SECRET_FILE"
+    --scenario ascii --plan "$PLAN" --plan-metadata "$PLAN_METADATA"
+    --pair-metadata "$PAIR_METADATA" --pair-result "$PAIR_RESULT"
+)
+for pair_subject in spaceterm ghostty; do
+    if [[ "$pair_subject" == spaceterm ]]; then
+        pair_identity="$SPACETERM_IDENTITY"; pair_intent="$SPACETERM_INTENT"
+        pair_run="$SPACETERM_RUN"; pair_workload="$SPACETERM_WORKLOAD_METADATA"
+        pair_ready="$SPACETERM_READY_RECEIPT"; pair_session="$SPACETERM_SESSION_ID"
+        pair_nonce="$SPACETERM_NONCE"; pair_rss="$SPACETERM_RSS"
+        pair_trace="$SPACETERM_TRACE"; pair_gate="$SPACETERM_PLAN_START_GATE"
+    else
+        pair_identity="$GHOSTTY_IDENTITY"; pair_intent="$GHOSTTY_INTENT"
+        pair_run="$GHOSTTY_RUN"; pair_workload="$WORKLOAD_METADATA"
+        pair_ready="$READY_RECEIPT"; pair_session="$SESSION_ID"; pair_nonce="$NONCE"
+        pair_rss="$GHOSTTY_RSS"; pair_trace="$GHOSTTY_TRACE"; pair_gate="$PLAN_START_GATE"
+    fi
+    pair_analyzer_arguments+=(
+        "--$pair_subject-subject-identity" "$pair_identity"
+        "--$pair_subject-run-intent" "$pair_intent"
+        "--$pair_subject-run-metadata" "$pair_run"
+        "--$pair_subject-workload-metadata" "$pair_workload"
+        "--$pair_subject-workload-events" "$WORKLOAD_EVENTS"
+        "--$pair_subject-ready-receipt" "$pair_ready"
+        "--$pair_subject-session-id" "$pair_session" "--$pair_subject-nonce" "$pair_nonce"
+        "--$pair_subject-driver-events" "$DRIVER_EVENTS"
+        "--$pair_subject-driver-intent" "$TEMP_ROOT/$pair_subject-driver-intent.tsv"
+        "--$pair_subject-driver-receipt" "$TEMP_ROOT/$pair_subject-driver-receipt.tsv"
+        "--$pair_subject-window-identity" "$TEMP_ROOT/$pair_subject-window-identity.tsv"
+        "--$pair_subject-driver-binary" "$TEMP_ROOT/$pair_subject-performance-driver"
+        "--$pair_subject-driver-source" "$SCRIPT_DIRECTORY/performance-driver.m"
+        "--$pair_subject-driver-controller" "$SCRIPT_DIRECTORY/run-native-performance-scenario.sh"
+        "--$pair_subject-rss-samples" "$pair_rss"
+        "--$pair_subject-trace-metadata" "$pair_trace"
+        "--$pair_subject-trace-provisional-receipt" "$TEMP_ROOT/$pair_subject-trace-provisional.tsv"
+        "--$pair_subject-performance-tail-receipt" "$TEMP_ROOT/$pair_subject-tail.tsv"
+        "--$pair_subject-performance-quit-receipt" "$TEMP_ROOT/$pair_subject-quit.tsv"
+        "--$pair_subject-subject-exit-receipt" "$TEMP_ROOT/$pair_subject-exit.tsv"
+        "--$pair_subject-plan-start-gate" "$pair_gate"
+        "--$pair_subject-manual-artifacts" "$MANUAL"
+        "--$pair_subject-manual-screenshot" "$MANUAL_SCREENSHOT"
+        "--$pair_subject-manual-video" "$MANUAL_VIDEO"
+        "--$pair_subject-lifecycle-ready-receipt" "$TEMP_ROOT/$pair_subject-lifecycle-ready.tsv"
+        "--$pair_subject-lifecycle-registration" "$TEMP_ROOT/$pair_subject-lifecycle-registration.tsv"
+    )
+done
+pair_analyzer_arguments+=(
+    --spaceterm-runtime-samples "$RUNTIME_SAMPLES"
+    --spaceterm-runtime-events "$RUNTIME_EVENTS"
+    --spaceterm-runtime-metadata "$RUNTIME_METADATA"
+    --spaceterm-failure-actions "$FAILURE_ACTIONS"
+    --spaceterm-native-launch-observation "$NATIVE_LAUNCH"
+    --spaceterm-native-provisional-observation "$NATIVE_PROVISIONAL"
+    --common-lifecycle-helper "$SCRIPT_DIRECTORY/performance-subject-lifecycle.py"
+    --appkit-terminator-source "$SCRIPT_DIRECTORY/performance-appkit-terminate.m"
+    --appkit-terminator-binary "$TEMP_ROOT/performance-appkit-terminate"
+)
+expect_result 0 PASS "authenticated completed pair" \
+    "$SCRIPT_DIRECTORY/analyze-release-performance-pair.sh" "${pair_analyzer_arguments[@]}"
+run_pair_with_replacement() {
+    local old="$1" replacement="$2" index
+    local -a replaced_arguments=("${pair_analyzer_arguments[@]}")
+    for index in "${!replaced_arguments[@]}"; do
+        [[ "${replaced_arguments[$index]}" != "$old" ]] \
+            || replaced_arguments[index]="$replacement"
+    done
+    "$SCRIPT_DIRECTORY/analyze-release-performance-pair.sh" \
+        "${replaced_arguments[@]}"
+}
+expect_result 2 NOT-RUN "missing pair result" \
+    run_pair_with_replacement "$PAIR_RESULT" "$TEMP_ROOT/missing-pair-result.tsv"
+expect_result 2 NOT-RUN "one-sided pair evidence" \
+    run_pair_with_replacement "$GHOSTTY_RUN" "$TEMP_ROOT/missing-ghostty-run.tsv"
+expect_result 2 NOT-RUN "cross-run pair evidence replay" \
+    run_pair_with_replacement "$TEMP_ROOT/ghostty-tail.tsv" \
+        "$TEMP_ROOT/spaceterm-tail.tsv"
+
+MISMATCHED_NATIVE_TEAM="$TEMP_ROOT/mismatched-native-team.tsv"
+sed $'s/^process.signature.team_identifier\t$/process.signature.team_identifier\tFORGEDTEAM/' \
+    "$NATIVE_LAUNCH" > "$MISMATCHED_NATIVE_TEAM"
+chmod 0400 "$MISMATCHED_NATIVE_TEAM"
+expect_result 2 NOT-RUN "native team identifier mismatch" \
+    run_case spaceterm "$SPACETERM_IDENTITY" "$SPACETERM_RUN" \
+        "$WORKLOAD_EVENTS" "$DRIVER_EVENTS" "$SPACETERM_RSS" \
+        "$SPACETERM_TRACE" "$MANUAL" \
+        --runtime-samples "$RUNTIME_SAMPLES" \
+        --runtime-events "$RUNTIME_EVENTS" \
+        --runtime-metadata "$RUNTIME_METADATA" \
+        --failure-actions "$FAILURE_ACTIONS" \
+        --native-launch-observation "$MISMATCHED_NATIVE_TEAM"
+
 ALTERED_FONT="$TEMP_ROOT/altered-font.tsv"
 printf 'different-font-manifest\n' > "$ALTERED_FONT"
 expect_command_failure "paired font mismatch" \
-    "$SCRIPT_DIRECTORY/freeze-performance-run.sh" \
+    "$SCRIPT_DIRECTORY/freeze-performance-run-intent.sh" \
         --subject ghostty \
         --pair-metadata "$PAIR_METADATA" \
         --subject-identity "$GHOSTTY_IDENTITY" \
@@ -1307,6 +1911,7 @@ expect_command_failure "paired font mismatch" \
         --environment-manifest "$TEMP_ROOT/environment.tsv" \
         --font-manifest "$ALTERED_FONT" \
         --initial-grid-manifest "$TEMP_ROOT/initial-grid.tsv" \
+        --campaign-id "$CAMPAIGN_ID" --session-id "$SESSION_ID" --nonce "$NONCE" \
         --output "$TEMP_ROOT/invalid-run.tsv"
 
 BAD_DURATION_RUN="$TEMP_ROOT/bad-duration-run.tsv"
@@ -1334,12 +1939,16 @@ SLOW_RSS="$TEMP_ROOT/slow-rss.tsv"
 write_sustained_rss "$GHOSTTY_IDENTITY" "$SLOW_WORKLOAD_METADATA" \
     "$SLOW_WORKLOAD" "$DRIVER_EVENTS" "$SLOW_RSS" 0 \
     "$SLOW_READY_RECEIPT" "$SLOW_PLAN_START_GATE"
+build_causal_closure slow ghostty "$GHOSTTY_IDENTITY" "$GHOSTTY_INTENT" \
+    "$SLOW_WORKLOAD_METADATA" "$SLOW_WORKLOAD" "$SLOW_READY_RECEIPT" \
+    "$DRIVER_EVENTS" "$SLOW_RSS" "$SLOW_PLAN_START_GATE"
 READY_RECEIPT_OVERRIDE="$SLOW_READY_RECEIPT" \
 PLAN_START_GATE_OVERRIDE="$SLOW_PLAN_START_GATE" \
 expect_result 1 FAIL "input acknowledgement over 250 ms" \
-    run_case_with_metadata "$SLOW_WORKLOAD_METADATA" \
-        ghostty "$GHOSTTY_IDENTITY" "$GHOSTTY_RUN" \
-        "$SLOW_WORKLOAD" "$DRIVER_EVENTS" "$SLOW_RSS" "$GHOSTTY_TRACE" "$MANUAL"
+    run_case_with_metadata_and_prefix "$SLOW_WORKLOAD_METADATA" slow \
+        ghostty "$GHOSTTY_IDENTITY" "$TEMP_ROOT/slow-run.tsv" \
+        "$SLOW_WORKLOAD" "$DRIVER_EVENTS" "$SLOW_RSS" \
+        "$TEMP_ROOT/slow-trace.tsv" "$MANUAL"
 
 MISSING_END="$TEMP_ROOT/missing-producer-end.tsv"
 sed '$d' "$WORKLOAD_EVENTS" > "$MISSING_END"

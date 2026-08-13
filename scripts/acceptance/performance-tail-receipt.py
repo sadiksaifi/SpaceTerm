@@ -26,14 +26,17 @@ KEYS = (
     "subject_process_start_identity", "driver_receipt_sha256", "driver_events_sha256",
     "workload_metadata_sha256", "workload_events_sha256", "rss_samples_sha256",
     "trace_provisional_receipt_sha256", "tail_completed_continuous_ns",
-    "terminal_status", "auth_algorithm", "tail_hmac_sha256",
+    "appkit_terminator_source_device", "appkit_terminator_source_inode",
+    "appkit_terminator_source_sha256", "appkit_terminator_binary_device",
+    "appkit_terminator_binary_inode", "appkit_terminator_binary_sha256",
+    "evidence_mode", "terminal_status", "auth_algorithm", "tail_hmac_sha256",
 )
 INTENT_KEYS = (
     "format_version", "subject", "subject_identity_sha256", "scenario",
     "scenario_plan_sha256", "workload_sha256", "command_sha256", "environment_sha256",
     "font_sha256", "initial_grid_sha256", "measured_duration_ms", "process_pid",
     "process_start_identity", "campaign_id", "session_id", "nonce",
-    "native_provisional_observation_sha256", "status",
+    "native_provisional_observation_sha256", "evidence_mode", "status",
 )
 TRACE_KEYS = (
     "format_version", "subject_identity_sha256", "run_intent_sha256",
@@ -42,7 +45,7 @@ TRACE_KEYS = (
     "actual_duration_ms", "capture_started_continuous_ns", "capture_ended_continuous_ns",
     "trace_bundle_tree_sha256", "toc_sha256", "time_profile_export_sha256",
     "allocations_export_sha256", "hangs_export_sha256", "trace_verification_sha256",
-    "verifier_sha256", "status", "auth_algorithm", "provisional_hmac_sha256",
+    "verifier_sha256", "evidence_mode", "status", "auth_algorithm", "provisional_hmac_sha256",
 )
 TRACE_MAGIC = b"spaceterm.performance.trace-provisional/v1\0"
 WORKLOAD_MAGIC = b"spaceterm.performance.workload-auth/v1\0"
@@ -120,6 +123,39 @@ def digest(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+def tool_identity(path_text: str, *, executable: bool) -> tuple[str, str, str]:
+    path = Path(path_text)
+    if not path.is_absolute():
+        raise Invalid("terminator-path-not-absolute")
+    before = path.lstat()
+    if not stat.S_ISREG(before.st_mode) or stat.S_ISLNK(before.st_mode) \
+            or before.st_uid != os.geteuid() or before.st_nlink != 1 \
+            or before.st_mode & 0o022 or (executable and before.st_mode & 0o111 == 0) \
+            or before.st_size <= 0:
+        raise Invalid("unsafe-terminator-tool")
+    fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        opened = os.fstat(fd)
+        hasher = hashlib.sha256()
+        while True:
+            chunk = os.read(fd, 1024 * 1024)
+            if not chunk:
+                break
+            hasher.update(chunk)
+        after = os.fstat(fd)
+    finally:
+        os.close(fd)
+    current = path.lstat()
+    fields = (
+        "st_dev", "st_ino", "st_mode", "st_uid", "st_nlink", "st_size",
+        "st_mtime_ns", "st_ctime_ns",
+    )
+    if any(getattr(before, key) != getattr(other, key)
+           for other in (opened, after, current) for key in fields):
+        raise Invalid("terminator-tool-changed")
+    return str(before.st_dev), str(before.st_ino), hasher.hexdigest()
+
+
 def add_common(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--campaign-secret-file", required=True)
     parser.add_argument("--campaign-id", required=True)
@@ -136,6 +172,8 @@ def add_common(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--rss-samples", required=True)
     parser.add_argument("--trace-provisional-receipt", required=True)
     parser.add_argument("--tail-completed-continuous-ns", required=True)
+    parser.add_argument("--appkit-terminator-source")
+    parser.add_argument("--appkit-terminator-binary")
 
 
 def arguments() -> argparse.Namespace:
@@ -150,7 +188,10 @@ def arguments() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def build(args: argparse.Namespace) -> tuple[bytes, bytes]:
+def build(
+    args: argparse.Namespace, asserted_tool: dict[str, str] | None = None,
+) -> tuple[bytes, bytes]:
+    evidence_mode = "test-only" if os.environ.get("SPACETERM_PERFORMANCE_TEST_MODE") == "1" else "production"
     if SAFE.fullmatch(args.campaign_id) is None or SAFE.fullmatch(args.session_id) is None \
             or HEX.fullmatch(args.nonce) is None or HEX.fullmatch(args.quit_token) is None \
             or POSITIVE.fullmatch(args.tail_completed_continuous_ns) is None:
@@ -158,6 +199,34 @@ def build(args: argparse.Namespace) -> tuple[bytes, bytes]:
     secret = stable_read(args.campaign_secret_file, 4096, private=True)
     if len(secret) < 32:
         raise Invalid("secret-too-short")
+    tool_keys = KEYS[16:22]
+    if (args.appkit_terminator_source is None) != (args.appkit_terminator_binary is None):
+        raise Invalid("incomplete-terminator-tool")
+    if args.appkit_terminator_source is not None:
+        source_device, source_inode, source_sha256 = tool_identity(
+            args.appkit_terminator_source, executable=False,
+        )
+        binary_device, binary_inode, binary_sha256 = tool_identity(
+            args.appkit_terminator_binary, executable=True,
+        )
+        if evidence_mode == "production" \
+                and Path(args.appkit_terminator_source).resolve(strict=True) \
+                != Path(__file__).resolve().with_name("performance-appkit-terminate.m"):
+            raise Invalid("non-production-terminator-source")
+        tool = dict(zip(tool_keys, (
+            source_device, source_inode, source_sha256,
+            binary_device, binary_inode, binary_sha256,
+        )))
+    elif asserted_tool is not None:
+        tool = {key: asserted_tool[key] for key in tool_keys}
+        if any(POSITIVE.fullmatch(tool[key]) is None for key in (
+                "appkit_terminator_source_device", "appkit_terminator_source_inode",
+                "appkit_terminator_binary_device", "appkit_terminator_binary_inode")) \
+                or any(HEX.fullmatch(tool[key]) is None for key in (
+                    "appkit_terminator_source_sha256", "appkit_terminator_binary_sha256")):
+            raise Invalid("terminator-tool-receipt-provenance")
+    else:
+        raise Invalid("missing-terminator-tool")
     intent_data = stable_read(args.run_intent, 64 * 1024)
     subject_data = stable_read(args.subject_identity, 64 * 1024)
     intent, _ = parse(intent_data, INTENT_KEYS)
@@ -170,6 +239,7 @@ def build(args: argparse.Namespace) -> tuple[bytes, bytes]:
             or intent["session_id"] != args.session_id or intent["nonce"] != args.nonce \
             or intent["subject_identity_sha256"] != digest(subject_data) \
             or intent["process_pid"] != pid or intent["process_start_identity"] != start \
+            or intent["evidence_mode"] != evidence_mode \
             or POSITIVE.fullmatch(pid) is None or START.fullmatch(start) is None:
         raise Invalid("intent-subject-binding")
     artifact_names = (
@@ -184,7 +254,8 @@ def build(args: argparse.Namespace) -> tuple[bytes, bytes]:
     workload, workload_unsigned = parse(artifacts["workload_metadata"], WORKLOAD_KEYS)
     ready, ready_unsigned = parse(artifacts["workload_ready_receipt"], READY_KEYS)
     if trace["format_version"] != "1" or trace["capture_status"] != "CAPTURED" \
-            or trace["status"] != "complete" or trace["auth_algorithm"] != "hmac-sha256" \
+            or trace["status"] != "complete" or trace["evidence_mode"] != evidence_mode \
+            or trace["auth_algorithm"] != "hmac-sha256" \
             or trace["subject_identity_sha256"] != digest(subject_data) \
             or trace["run_intent_sha256"] != digest(intent_data) \
             or trace["workload_metadata_sha256"] != digest(artifacts["workload_metadata"]) \
@@ -253,7 +324,9 @@ def build(args: argparse.Namespace) -> tuple[bytes, bytes]:
         "rss_samples_sha256": digest(artifacts["rss_samples"]),
         "trace_provisional_receipt_sha256": digest(artifacts["trace_provisional_receipt"]),
         "tail_completed_continuous_ns": args.tail_completed_continuous_ns,
-        "terminal_status": "tail-complete", "auth_algorithm": "hmac-sha256",
+        **tool,
+        "evidence_mode": evidence_mode, "terminal_status": "tail-complete",
+        "auth_algorithm": "hmac-sha256",
     }
     unsigned = b"".join(f"{key}\t{values[key]}\n".encode() for key in KEYS[:-1])
     values["tail_hmac_sha256"] = hmac.new(
@@ -286,12 +359,13 @@ def publish(path_text: str, data: bytes) -> None:
 def main() -> int:
     args = arguments()
     try:
-        expected, _ = build(args)
         if args.command == "create":
+            expected, _ = build(args)
             publish(args.output, expected)
         else:
             actual = stable_read(args.receipt, 64 * 1024, private=True)
             actual_values, _ = parse(actual, KEYS)
+            expected, _ = build(args, actual_values)
             expected_values, _ = parse(expected, KEYS)
             for key in KEYS:
                 if key == "tail_hmac_sha256":

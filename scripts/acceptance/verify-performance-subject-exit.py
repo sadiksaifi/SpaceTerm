@@ -24,7 +24,7 @@ INTENT_KEYS = (
     "scenario_plan_sha256", "workload_sha256", "command_sha256", "environment_sha256",
     "font_sha256", "initial_grid_sha256", "measured_duration_ms", "process_pid",
     "process_start_identity", "campaign_id", "session_id", "nonce",
-    "native_provisional_observation_sha256", "status",
+    "native_provisional_observation_sha256", "evidence_mode", "status",
 )
 TAIL_KEYS = (
     "format_version", "campaign_id", "session_id", "nonce", "quit_token",
@@ -32,20 +32,29 @@ TAIL_KEYS = (
     "subject_process_start_identity", "driver_receipt_sha256", "driver_events_sha256",
     "workload_metadata_sha256", "workload_events_sha256", "rss_samples_sha256",
     "trace_provisional_receipt_sha256", "tail_completed_continuous_ns",
-    "terminal_status", "auth_algorithm", "tail_hmac_sha256",
+    "appkit_terminator_source_device", "appkit_terminator_source_inode",
+    "appkit_terminator_source_sha256", "appkit_terminator_binary_device",
+    "appkit_terminator_binary_inode", "appkit_terminator_binary_sha256",
+    "evidence_mode", "terminal_status", "auth_algorithm", "tail_hmac_sha256",
 )
 QUIT_KEYS = (
     "format_version", "campaign_id", "session_id", "nonce", "run_intent_sha256",
     "subject_process_pid", "subject_process_start_identity", "quit_token",
     "request_continuous_ns", "exit_continuous_ns", "termination_method",
-    "runtime_closure_status", "status",
+    "runtime_closure_status", "appkit_terminator_source_device",
+    "appkit_terminator_source_inode", "appkit_terminator_source_sha256",
+    "appkit_terminator_binary_device", "appkit_terminator_binary_inode",
+    "appkit_terminator_binary_sha256", "evidence_mode", "status",
 )
 EXIT_KEYS = (
     "schema", "subject", "campaign_id", "session_id", "nonce", "run_intent_sha256",
     "subject_identity_sha256", "process_pid", "process_start_identity",
     "tail_receipt_sha256", "quit_receipt_sha256", "exit_requested_continuous_ns",
     "process_exited_continuous_ns", "exit_status", "native_observation_sha256",
-    "auth_algorithm", "receipt_hmac_sha256", "status",
+    "appkit_terminator_source_device", "appkit_terminator_source_inode",
+    "appkit_terminator_source_sha256", "appkit_terminator_binary_device",
+    "appkit_terminator_binary_inode", "appkit_terminator_binary_sha256",
+    "evidence_mode", "auth_algorithm", "receipt_hmac_sha256", "status",
 )
 
 
@@ -119,10 +128,48 @@ def arguments() -> argparse.Namespace:
     parser.add_argument("--quit-receipt", required=True)
     parser.add_argument("--subject-exit-receipt", required=True)
     parser.add_argument("--native-observation")
+    parser.add_argument("--appkit-terminator-source")
+    parser.add_argument("--appkit-terminator-binary")
     return parser.parse_args()
 
 
+def tool_identity(path_text: str, *, executable: bool) -> dict[str, str]:
+    path = Path(path_text)
+    before = path.lstat()
+    if not path.is_absolute() or not stat.S_ISREG(before.st_mode) \
+            or stat.S_ISLNK(before.st_mode) or before.st_uid != os.geteuid() \
+            or before.st_nlink != 1 or before.st_mode & 0o022 \
+            or (executable and before.st_mode & 0o111 == 0):
+        raise Invalid("unsafe-terminator-tool")
+    fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        opened = os.fstat(fd)
+        data = b""
+        while len(data) <= 16 * 1024 * 1024:
+            chunk = os.read(fd, min(65536, 16 * 1024 * 1024 + 1 - len(data)))
+            if not chunk:
+                break
+            data += chunk
+        after = os.fstat(fd)
+    finally:
+        os.close(fd)
+    current = path.lstat()
+    fields = ("st_dev", "st_ino", "st_mode", "st_uid", "st_nlink", "st_size",
+              "st_mtime_ns", "st_ctime_ns")
+    if len(data) != before.st_size or len(data) > 16 * 1024 * 1024 \
+            or any(getattr(before, key) != getattr(other, key)
+                   for other in (opened, after, current) for key in fields):
+        raise Invalid("terminator-tool-changed")
+    prefix = "appkit_terminator_binary" if executable else "appkit_terminator_source"
+    return {
+        f"{prefix}_device": str(before.st_dev),
+        f"{prefix}_inode": str(before.st_ino),
+        f"{prefix}_sha256": sha(data),
+    }
+
+
 def verify(args: argparse.Namespace) -> None:
+    evidence_mode = "production"
     secret = stable(args.campaign_secret_file, 4096, secret=True, private=True)
     intent_data = stable(args.run_intent)
     subject_data = stable(args.subject_identity)
@@ -133,6 +180,11 @@ def verify(args: argparse.Namespace) -> None:
     tail, _ = parse(tail_data, TAIL_KEYS)
     quit_receipt, _ = parse(quit_data, QUIT_KEYS)
     receipt, unsigned = parse(exit_data, EXIT_KEYS)
+    tool_keys = (
+        "appkit_terminator_source_device", "appkit_terminator_source_inode",
+        "appkit_terminator_source_sha256", "appkit_terminator_binary_device",
+        "appkit_terminator_binary_inode", "appkit_terminator_binary_sha256",
+    )
     subject = dict(line.split(b"\t", 1) for line in subject_data.splitlines())
     pid = subject.get(b"process_pid", b"").decode()
     start = subject.get(b"process_start_identity", b"").decode()
@@ -141,16 +193,20 @@ def verify(args: argparse.Namespace) -> None:
     tail_time = tail["tail_completed_continuous_ns"]
     if intent["format_version"] != "1" or intent["status"] != "prepared" \
             or intent["subject"] not in ("spaceterm", "ghostty") \
+            or intent["evidence_mode"] != evidence_mode \
             or intent["subject_identity_sha256"] != sha(subject_data) \
             or intent["process_pid"] != pid or intent["process_start_identity"] != start \
             or START.fullmatch(start) is None or UINT.fullmatch(pid) is None or pid == "0" \
+            or tail["evidence_mode"] != evidence_mode \
             or tail["terminal_status"] != "tail-complete" \
             or quit_receipt["termination_method"] != "appkit-terminate" \
             or quit_receipt["runtime_closure_status"] != "confirmed" \
+            or quit_receipt["evidence_mode"] != evidence_mode \
             or quit_receipt["status"] != "completed" \
             or receipt["schema"] != "spaceterm.acceptance.performance-subject-exit/v1" \
             or receipt["subject"] != intent["subject"] \
-            or receipt["exit_status"] != "normal" or receipt["status"] != "complete" \
+            or receipt["exit_status"] != "normal" or receipt["evidence_mode"] != evidence_mode \
+            or receipt["status"] != "complete" \
             or receipt["auth_algorithm"] != "hmac-sha256" \
             or receipt["run_intent_sha256"] != sha(intent_data) \
             or receipt["subject_identity_sha256"] != sha(subject_data) \
@@ -158,6 +214,20 @@ def verify(args: argparse.Namespace) -> None:
             or receipt["tail_receipt_sha256"] != sha(tail_data) \
             or receipt["quit_receipt_sha256"] != sha(quit_data):
         raise Invalid("closure-binding")
+    if any(tail[key] != quit_receipt[key] or tail[key] != receipt[key]
+           for key in tool_keys):
+        raise Invalid("terminator-provenance-binding")
+    if (args.appkit_terminator_source is None) != (args.appkit_terminator_binary is None):
+        raise Invalid("incomplete-terminator-tool")
+    if args.appkit_terminator_source is not None:
+        actual_tool = {
+            **tool_identity(args.appkit_terminator_source, executable=False),
+            **tool_identity(args.appkit_terminator_binary, executable=True),
+        }
+        if any(receipt[key] != actual_tool[key] for key in tool_keys):
+            raise Invalid("terminator-provenance-file-binding")
+    elif evidence_mode == "production":
+        raise Invalid("missing-production-terminator-tool")
     for key in ("campaign_id", "session_id", "nonce"):
         if receipt[key] != intent[key] or tail[key] != intent[key] or quit_receipt[key] != intent[key]:
             raise Invalid(f"campaign-binding-{key}")

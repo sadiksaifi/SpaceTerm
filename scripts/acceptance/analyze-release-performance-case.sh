@@ -19,7 +19,12 @@ WORKLOAD_METADATA=""
 WORKLOAD_EVENTS=""
 READY_RECEIPT=""
 DRIVER_EVENTS=""
+DRIVER_INTENT=""
 DRIVER_RECEIPT=""
+WINDOW_IDENTITY=""
+DRIVER_BINARY=""
+DRIVER_SOURCE=""
+DRIVER_CONTROLLER=""
 RSS_SAMPLES=""
 RUNTIME_SAMPLES=""
 RUNTIME_EVENTS=""
@@ -32,6 +37,11 @@ TRACE_PROVISIONAL_RECEIPT=""
 PERFORMANCE_TAIL_RECEIPT=""
 PERFORMANCE_QUIT_RECEIPT=""
 SUBJECT_EXIT_RECEIPT=""
+PERFORMANCE_LIFECYCLE_READY_RECEIPT=""
+PERFORMANCE_LIFECYCLE_REGISTRATION=""
+SUBJECT_LIFECYCLE_HELPER=""
+APPKIT_TERMINATOR_SOURCE=""
+APPKIT_TERMINATOR_BINARY=""
 PLAN_START_GATE=""
 MANUAL_ARTIFACTS=""
 MANUAL_SCREENSHOT=""
@@ -57,10 +67,15 @@ Usage: $(basename -- "$0") --subject spaceterm|ghostty --scenario NAME \\
   --workload-metadata FILE --workload-events FILE --ready-receipt FILE \\
   --campaign-id ID --session-id ID --nonce 64_LOWER_HEX \\
   --campaign-secret-file FILE \\
-  --driver-events FILE --driver-receipt FILE --rss-samples FILE \\
+  --driver-events FILE --driver-intent FILE --driver-receipt FILE \\
+  --window-identity FILE --driver-binary FILE --driver-source FILE \\
+  --driver-controller FILE --rss-samples FILE \\
   --trace-metadata FILE --trace-provisional-receipt FILE \\
   --performance-tail-receipt FILE --performance-quit-receipt FILE \\
   --subject-exit-receipt FILE \\
+  --performance-lifecycle-ready-receipt FILE \\
+  --performance-lifecycle-registration FILE --subject-lifecycle-helper FILE \\
+  --appkit-terminator-source FILE --appkit-terminator-binary FILE \\
   --plan-start-gate FILE \\
   --manual-artifacts FILE --manual-screenshot FILE --manual-video FILE \
   [SPACETERM RUNTIME FILES]
@@ -71,9 +86,9 @@ SpaceTerm runtime files:
   --native-launch-observation FILE
   --native-provisional-observation FILE
 
-Print a content-free PASS, FAIL, or NOT-RUN verdict for one native release-
-performance case. PASS requires the paired immutable plan and workload,
-authenticated evidence, exact state/event correlation, and manual artifacts.
+Print a content-free CASE-COMPLETE, FAIL, or NOT-RUN verdict for one native
+release-performance case. CASE-COMPLETE is non-final; only the paired analyzer
+may emit PASS after both subjects and the authenticated pair closure verify.
 EOF
 }
 
@@ -83,10 +98,22 @@ verdict() {
     printf 'format_version\t1\n'
     printf 'subject\t%s\n' "${SUBJECT:-unknown}"
     printf 'scenario\t%s\n' "${SCENARIO:-unknown}"
+    printf 'session_id\t%s\n' "${SESSION_ID:-unknown}"
+    printf 'nonce\t%s\n' "${NONCE:-unknown}"
+    if [[ -f "${RUN_INTENT:-}" && ! -L "${RUN_INTENT:-}" ]]; then
+        printf 'run_intent_sha256\t%s\n' "$(shasum -a 256 "$RUN_INTENT" | awk '{print $1}')"
+    else
+        printf 'run_intent_sha256\tunavailable\n'
+    fi
+    if [[ -f "${RUN_METADATA:-}" && ! -L "${RUN_METADATA:-}" ]]; then
+        printf 'run_metadata_sha256\t%s\n' "$(shasum -a 256 "$RUN_METADATA" | awk '{print $1}')"
+    else
+        printf 'run_metadata_sha256\tunavailable\n'
+    fi
     printf 'result\t%s\n' "$result"
     printf 'reason\t%s\n' "$reason"
     case "$result" in
-        PASS) exit 0 ;;
+        CASE-COMPLETE) exit 0 ;;
         FAIL) exit 1 ;;
         NOT-RUN) exit 2 ;;
         *) exit 3 ;;
@@ -212,7 +239,12 @@ while (( $# > 0 )); do
         --nonce) NONCE="${2:-}"; shift ;;
         --campaign-secret-file) CAMPAIGN_SECRET_FILE="${2:-}"; shift ;;
         --driver-events) DRIVER_EVENTS="${2:-}"; shift ;;
+        --driver-intent) DRIVER_INTENT="${2:-}"; shift ;;
         --driver-receipt) DRIVER_RECEIPT="${2:-}"; shift ;;
+        --window-identity) WINDOW_IDENTITY="${2:-}"; shift ;;
+        --driver-binary) DRIVER_BINARY="${2:-}"; shift ;;
+        --driver-source) DRIVER_SOURCE="${2:-}"; shift ;;
+        --driver-controller) DRIVER_CONTROLLER="${2:-}"; shift ;;
         --rss-samples) RSS_SAMPLES="${2:-}"; shift ;;
         --runtime-samples) RUNTIME_SAMPLES="${2:-}"; shift ;;
         --runtime-events) RUNTIME_EVENTS="${2:-}"; shift ;;
@@ -225,6 +257,11 @@ while (( $# > 0 )); do
         --performance-tail-receipt) PERFORMANCE_TAIL_RECEIPT="${2:-}"; shift ;;
         --performance-quit-receipt) PERFORMANCE_QUIT_RECEIPT="${2:-}"; shift ;;
         --subject-exit-receipt) SUBJECT_EXIT_RECEIPT="${2:-}"; shift ;;
+        --performance-lifecycle-ready-receipt) PERFORMANCE_LIFECYCLE_READY_RECEIPT="${2:-}"; shift ;;
+        --performance-lifecycle-registration) PERFORMANCE_LIFECYCLE_REGISTRATION="${2:-}"; shift ;;
+        --subject-lifecycle-helper) SUBJECT_LIFECYCLE_HELPER="${2:-}"; shift ;;
+        --appkit-terminator-source) APPKIT_TERMINATOR_SOURCE="${2:-}"; shift ;;
+        --appkit-terminator-binary) APPKIT_TERMINATOR_BINARY="${2:-}"; shift ;;
         --plan-start-gate) PLAN_START_GATE="${2:-}"; shift ;;
         --manual-artifacts) MANUAL_ARTIFACTS="${2:-}"; shift ;;
         --manual-screenshot) MANUAL_SCREENSHOT="${2:-}"; shift ;;
@@ -262,17 +299,54 @@ require_file workload-events "$WORKLOAD_EVENTS"
 require_file ready-receipt "$READY_RECEIPT"
 require_file campaign-secret "$CAMPAIGN_SECRET_FILE"
 require_file driver-events "$DRIVER_EVENTS"
+require_file driver-intent "$DRIVER_INTENT"
 require_file driver-receipt "$DRIVER_RECEIPT"
+require_file window-identity "$WINDOW_IDENTITY"
+require_file driver-binary "$DRIVER_BINARY"
+require_file driver-source "$DRIVER_SOURCE"
+require_file driver-controller "$DRIVER_CONTROLLER"
 require_file rss-samples "$RSS_SAMPLES"
 require_file trace-metadata "$TRACE_METADATA"
 require_file trace-provisional-receipt "$TRACE_PROVISIONAL_RECEIPT"
 require_file performance-tail-receipt "$PERFORMANCE_TAIL_RECEIPT"
 require_file performance-quit-receipt "$PERFORMANCE_QUIT_RECEIPT"
 require_file subject-exit-receipt "$SUBJECT_EXIT_RECEIPT"
+require_file performance-lifecycle-ready-receipt "$PERFORMANCE_LIFECYCLE_READY_RECEIPT"
+require_file performance-lifecycle-registration "$PERFORMANCE_LIFECYCLE_REGISTRATION"
+require_file subject-lifecycle-helper "$SUBJECT_LIFECYCLE_HELPER"
+require_file appkit-terminator-source "$APPKIT_TERMINATOR_SOURCE"
+require_file appkit-terminator-binary "$APPKIT_TERMINATOR_BINARY"
 require_file plan-start-gate "$PLAN_START_GATE"
 require_file manual-artifacts "$MANUAL_ARTIFACTS"
 require_file manual-screenshot "$MANUAL_SCREENSHOT"
 require_file manual-video "$MANUAL_VIDEO"
+
+canonical_path() {
+    local directory base
+    directory="$(cd -- "$(dirname -- "$1")" && pwd -P)" || return 1
+    base="$(basename -- "$1")"
+    printf '%s/%s\n' "$directory" "$base"
+}
+[[ "$(canonical_path "$DRIVER_SOURCE")" == "$SCRIPT_DIRECTORY/performance-driver.m" \
+    && "$(canonical_path "$DRIVER_CONTROLLER")" \
+        == "$SCRIPT_DIRECTORY/run-native-performance-scenario.sh" \
+    && "$(canonical_path "$SUBJECT_LIFECYCLE_HELPER")" \
+        == "$SCRIPT_DIRECTORY/performance-subject-lifecycle.py" \
+    && "$(canonical_path "$APPKIT_TERMINATOR_SOURCE")" \
+        == "$SCRIPT_DIRECTORY/performance-appkit-terminate.m" ]] \
+    || not_run "noncanonical-performance-toolchain"
+plan_start_continuous_ns="$(kv "$PLAN_START_GATE" plan_start_continuous_ns)"
+[[ "$plan_start_continuous_ns" =~ ^[1-9][0-9]*$ ]] \
+    || not_run "invalid-driver-plan-start-gate"
+python3 "$SCRIPT_DIRECTORY/performance-driver-receipt.py" verify \
+    --campaign-secret-file "$CAMPAIGN_SECRET_FILE" --campaign-id "$CAMPAIGN_ID" \
+    --session-id "$SESSION_ID" --nonce "$NONCE" --driver-output "$DRIVER_EVENTS" \
+    --driver-binary "$DRIVER_BINARY" --driver-source "$DRIVER_SOURCE" \
+    --controller "$DRIVER_CONTROLLER" --scenario-plan "$PLAN" \
+    --plan-start-continuous-ns "$plan_start_continuous_ns" \
+    --subject-identity "$SUBJECT_IDENTITY" --window-identity "$WINDOW_IDENTITY" \
+    --intent "$DRIVER_INTENT" --receipt "$DRIVER_RECEIPT" >/dev/null 2>&1 \
+    || not_run "public-driver-evidence-invalid"
 if [[ "$SUBJECT" == spaceterm ]]; then
     require_file runtime-samples "$RUNTIME_SAMPLES"
     require_file runtime-events "$RUNTIME_EVENTS"
@@ -295,6 +369,8 @@ python3 "$SCRIPT_DIRECTORY/performance-tail-receipt.py" verify \
     --workload-ready-receipt "$READY_RECEIPT" \
     --rss-samples "$RSS_SAMPLES" --trace-provisional-receipt "$TRACE_PROVISIONAL_RECEIPT" \
     --tail-completed-continuous-ns "$tail_completed_ns" \
+    --appkit-terminator-source "$APPKIT_TERMINATOR_SOURCE" \
+    --appkit-terminator-binary "$APPKIT_TERMINATOR_BINARY" \
     --receipt "$PERFORMANCE_TAIL_RECEIPT" >/dev/null 2>&1 \
     || not_run "performance-tail-receipt-invalid"
 exit_arguments=(
@@ -302,10 +378,29 @@ exit_arguments=(
     --subject-identity "$SUBJECT_IDENTITY" --tail-receipt "$PERFORMANCE_TAIL_RECEIPT"
     --quit-receipt "$PERFORMANCE_QUIT_RECEIPT"
     --subject-exit-receipt "$SUBJECT_EXIT_RECEIPT"
+    --appkit-terminator-source "$APPKIT_TERMINATOR_SOURCE"
+    --appkit-terminator-binary "$APPKIT_TERMINATOR_BINARY"
+)
+lifecycle_arguments=(
+    --campaign-secret-file "$CAMPAIGN_SECRET_FILE"
+    --ready-receipt "$PERFORMANCE_LIFECYCLE_READY_RECEIPT"
+    --registration-receipt "$PERFORMANCE_LIFECYCLE_REGISTRATION"
+    --run-intent "$RUN_INTENT" --subject-identity "$SUBJECT_IDENTITY"
+    --tail-receipt "$PERFORMANCE_TAIL_RECEIPT"
+    --workload-metadata "$WORKLOAD_METADATA" --workload-events "$WORKLOAD_EVENTS"
+    --workload-ready-receipt "$READY_RECEIPT"
+    --quit-receipt "$PERFORMANCE_QUIT_RECEIPT"
+    --subject-exit-receipt "$SUBJECT_EXIT_RECEIPT"
+    --appkit-terminator-source "$APPKIT_TERMINATOR_SOURCE"
+    --appkit-terminator-binary "$APPKIT_TERMINATOR_BINARY"
 )
 if [[ "$SUBJECT" == spaceterm ]]; then
     exit_arguments+=(--native-observation "$NATIVE_LAUNCH_OBSERVATION")
+    lifecycle_arguments+=(--native-observation "$NATIVE_LAUNCH_OBSERVATION")
 fi
+python3 "$SCRIPT_DIRECTORY/verify-performance-lifecycle-receipts.py" \
+    "${lifecycle_arguments[@]}" >/dev/null 2>&1 \
+    || not_run "performance-lifecycle-receipts-invalid"
 python3 "$SCRIPT_DIRECTORY/verify-performance-subject-exit.py" "${exit_arguments[@]}" \
     >/dev/null 2>&1 || not_run "performance-subject-exit-invalid"
 
@@ -398,10 +493,10 @@ reject_unknown_kv "$SUBJECT_IDENTITY" \
     "format_version subject app_bundle_path bundle_identifier bundle_version executable_path executable_sha256 executable_device executable_inode executable_fsid signature_valid signing_identifier team_identifier cdhash process_pid process_start_identity identity_status" \
     subject-identity
 require_ordered_kv_schema "$RUN_INTENT" \
-    "format_version subject subject_identity_sha256 scenario scenario_plan_sha256 workload_sha256 command_sha256 environment_sha256 font_sha256 initial_grid_sha256 measured_duration_ms process_pid process_start_identity campaign_id session_id nonce native_provisional_observation_sha256 status" \
+    "format_version subject subject_identity_sha256 scenario scenario_plan_sha256 workload_sha256 command_sha256 environment_sha256 font_sha256 initial_grid_sha256 measured_duration_ms process_pid process_start_identity campaign_id session_id nonce native_provisional_observation_sha256 evidence_mode status" \
     run-intent
 require_ordered_kv_schema "$RUN_METADATA" \
-    "format_version subject subject_identity_sha256 scenario scenario_plan_sha256 workload_sha256 command_sha256 environment_sha256 font_sha256 initial_grid_sha256 measured_duration_ms process_pid process_start_identity run_intent_sha256 native_observation_sha256 native_runtime_metadata_sha256 native_failure_actions_sha256 native_failure_action_enabled native_failure_request_count native_failure_result_count native_failure_resource_staged_count native_failure_resource_staged_bytes native_failure_resource_rolled_back_count native_failure_resource_rolled_back_bytes trace_provisional_receipt_sha256 performance_tail_receipt_sha256 performance_quit_receipt_sha256 subject_exit_receipt_sha256 status" \
+    "format_version subject subject_identity_sha256 scenario scenario_plan_sha256 workload_sha256 command_sha256 environment_sha256 font_sha256 initial_grid_sha256 measured_duration_ms process_pid process_start_identity run_intent_sha256 native_observation_sha256 native_runtime_metadata_sha256 native_failure_actions_sha256 native_failure_action_enabled native_failure_request_count native_failure_result_count native_failure_resource_staged_count native_failure_resource_staged_bytes native_failure_resource_rolled_back_count native_failure_resource_rolled_back_bytes trace_provisional_receipt_sha256 performance_tail_receipt_sha256 performance_quit_receipt_sha256 subject_exit_receipt_sha256 lifecycle_ready_receipt_sha256 lifecycle_registration_receipt_sha256 lifecycle_helper_sha256 terminator_source_sha256 terminator_binary_sha256 evidence_mode status" \
     run-metadata
 require_exact_kv_schema "$TRACE_METADATA" \
     "format_version capture_status incomplete_reason subject_identity_sha256 run_metadata_sha256 workload_metadata_sha256 workload_ready_receipt_sha256 supplemental_evidence_sha256 requested_duration_ms actual_duration_ms capture_started_continuous_ns capture_ended_continuous_ns target_identity_verified trace_target_pid_verified time_profiler_instrument allocations_instrument hangs_instrument time_profiler_target_verified allocations_target_verified hangs_target_verified time_profiler_rows allocations_rows hangs_rows maximum_main_thread_hang_ms status" \
@@ -457,19 +552,21 @@ done
 
 [[ "$(require_kv "$RUN_INTENT" format_version intent)" == 1 \
     && "$(require_kv "$RUN_INTENT" status intent)" == prepared \
+    && "$(require_kv "$RUN_INTENT" evidence_mode intent)" == production \
     && "$(require_kv "$RUN_INTENT" subject intent)" == "$SUBJECT" \
     && "$(require_kv "$RUN_INTENT" campaign_id intent)" == "$CAMPAIGN_ID" \
     && "$(require_kv "$RUN_INTENT" session_id intent)" == "$SESSION_ID" \
     && "$(require_kv "$RUN_INTENT" nonce intent)" == "$NONCE" \
     && "$(require_kv "$RUN_INTENT" subject_identity_sha256 intent)" == "$subject_hash" ]] \
     || not_run "run-intent-binding-mismatch"
-[[ "$(require_kv "$RUN_METADATA" format_version run)" == 3 \
+[[ "$(require_kv "$RUN_METADATA" format_version run)" == 4 \
     && "$(require_kv "$RUN_METADATA" subject run)" == "$SUBJECT" \
     && "$(require_kv "$RUN_METADATA" scenario run)" == "$SCENARIO" \
     && "$(require_kv "$RUN_METADATA" subject_identity_sha256 run)" == "$subject_hash" \
     && "$(require_kv "$RUN_METADATA" scenario_plan_sha256 run)" == "$plan_hash" \
     && "$(require_kv "$RUN_METADATA" measured_duration_ms run)" == "$measured_duration_ms" \
     && "$(require_kv "$RUN_METADATA" run_intent_sha256 run)" == "$(sha256 "$RUN_INTENT")" \
+    && "$(require_kv "$RUN_METADATA" evidence_mode run)" == production \
     && "$(require_kv "$RUN_METADATA" status run)" == complete ]] \
     || not_run "run-metadata-binding-mismatch"
 for parity_key in workload_sha256 command_sha256 environment_sha256 font_sha256 initial_grid_sha256; do
@@ -499,6 +596,17 @@ done
     && "$(require_kv "$RUN_METADATA" subject_exit_receipt_sha256 run)" \
         == "$(sha256 "$SUBJECT_EXIT_RECEIPT")" ]] \
     || not_run "run-causal-closure-mismatch"
+[[ "$(require_kv "$RUN_METADATA" lifecycle_ready_receipt_sha256 run)" \
+        == "$(sha256 "$PERFORMANCE_LIFECYCLE_READY_RECEIPT")" \
+    && "$(require_kv "$RUN_METADATA" lifecycle_registration_receipt_sha256 run)" \
+        == "$(sha256 "$PERFORMANCE_LIFECYCLE_REGISTRATION")" \
+    && "$(require_kv "$RUN_METADATA" lifecycle_helper_sha256 run)" \
+        == "$(sha256 "$SUBJECT_LIFECYCLE_HELPER")" \
+    && "$(require_kv "$RUN_METADATA" terminator_source_sha256 run)" \
+        == "$(sha256 "$APPKIT_TERMINATOR_SOURCE")" \
+    && "$(require_kv "$RUN_METADATA" terminator_binary_sha256 run)" \
+        == "$(sha256 "$APPKIT_TERMINATOR_BINARY")" ]] \
+    || not_run "run-lifecycle-provenance-mismatch"
 if [[ "$SUBJECT" == spaceterm ]]; then
     [[ "$(require_kv "$RUN_METADATA" native_observation_sha256 run)" \
             == "$(sha256 "$NATIVE_LAUNCH_OBSERVATION")" \
@@ -814,6 +922,9 @@ if [[ "$SUBJECT" == spaceterm ]]; then
         && "$(require_kv "$NATIVE_LAUNCH_OBSERVATION" process.executable.fsid launch)" \
             =~ ^-?[0-9]+:-?[0-9]+$ ]] \
         || not_run "native-launch-observation-value-invalid"
+    subject_team_identifier="$(require_kv "$SUBJECT_IDENTITY" team_identifier subject)"
+    expected_native_team_identifier="$subject_team_identifier"
+    [[ "$subject_team_identifier" != none ]] || expected_native_team_identifier=""
     [[ "$(require_kv "$NATIVE_LAUNCH_OBSERVATION" schema launch)" \
             == spaceterm.acceptance.native-launch-proof/v5 \
         && "$(require_kv "$NATIVE_LAUNCH_OBSERVATION" observation.source launch)" \
@@ -861,8 +972,7 @@ if [[ "$SUBJECT" == spaceterm ]]; then
         && "$(require_kv "$NATIVE_LAUNCH_OBSERVATION" process.signature.identifier launch)" \
             == "$(require_kv "$SUBJECT_IDENTITY" signing_identifier subject)" \
         && "$(kv "$NATIVE_LAUNCH_OBSERVATION" process.signature.team_identifier)" \
-            == "$([[ "$(require_kv "$SUBJECT_IDENTITY" team_identifier subject)" == none ]] \
-                && printf '' || require_kv "$SUBJECT_IDENTITY" team_identifier subject)" ]] \
+            == "$expected_native_team_identifier" ]] \
         || not_run "native-launch-observation-does-not-bind-subject"
     reject_unknown_kv "$RUNTIME_METADATA" \
         "schema observation.source run.id package.app.sha256 process.pid runtime.samples.path runtime.samples.sha256 runtime.events.path runtime.events.sha256 failure.action.schema failure.action.enabled failure.result.schema failure.actions.path failure.actions.sha256 failure.request_count failure.result_count observer.started_continuous_ns observer.ended_continuous_ns observer.sample_interval_ms observer.transition_capacity observer.sample_count observer.event_count observer.status observation.complete" \
@@ -1169,4 +1279,4 @@ else
         || not_run "sustained-memory-result-missing"
 fi
 
-verdict PASS all-required-evidence-passed
+verdict CASE-COMPLETE all-required-evidence-complete

@@ -26,6 +26,9 @@ RSS_OUTPUT=""
 TRACE_OUTPUT_DIRECTORY=""
 TRACE_PROVISIONAL_RECEIPT=""
 PERFORMANCE_TAIL_RECEIPT=""
+PERFORMANCE_LIFECYCLE_READY_RECEIPT=""
+PERFORMANCE_LIFECYCLE_CONTROL=""
+PERFORMANCE_LIFECYCLE_REGISTRATION=""
 PERFORMANCE_QUIT_CONTROL=""
 PERFORMANCE_QUIT_RECEIPT=""
 SUBJECT_EXIT_RECEIPT=""
@@ -47,12 +50,16 @@ SEED_TIMEOUT_SECONDS=300
 DRIVER_PID=""
 RSS_PID=""
 TRACE_PID=""
+LIFECYCLE_PID=""
 DRIVER_PGID=""
 RSS_PGID=""
 TRACE_PGID=""
+LIFECYCLE_PGID=""
 DRIVER_STATUS=-1
 RSS_STATUS=-1
 TRACE_STATUS=-1
+LIFECYCLE_STATUS=-1
+QUIT_TOKEN=""
 SEED_CONTINUOUS_NS=0
 MEASUREMENT_READY_CONTINUOUS_NS=0
 PLAN_START_CONTINUOUS_NS=0
@@ -90,7 +97,11 @@ Usage: $(basename -- "$0") --run-directory ABSOLUTE_DIRECTORY \\
   --driver-output ABSENT_FILE --driver-intent ABSENT_FILE \\
   --driver-receipt ABSENT_FILE --rss-output ABSENT_FILE \\
   --trace-output-directory ABSENT_DIRECTORY --trace-provisional-receipt ABSENT_FILE \\
-  --performance-tail-receipt ABSENT_FILE --performance-quit-control FIFO \\
+  --performance-tail-receipt ABSENT_FILE \\
+  --performance-lifecycle-ready-receipt ABSENT_FILE \\
+  --performance-lifecycle-control ABSENT_FIFO \\
+  --performance-lifecycle-registration ABSENT_FILE \\
+  --performance-quit-control FIFO_OR_none \\
   --performance-quit-receipt ABSENT_FILE --subject-exit-receipt ABSENT_FILE \\
   --result-output ABSENT_FILE \\
   --trace-recorder FILE --campaign-secret-file PRIVATE_FILE \\
@@ -210,9 +221,11 @@ cleanup_children() {
     terminate_process_group "$TRACE_PGID" "$TRACE_PID"
     terminate_process_group "$RSS_PGID" "$RSS_PID"
     terminate_process_group "$DRIVER_PGID" "$DRIVER_PID"
+    terminate_process_group "$LIFECYCLE_PGID" "$LIFECYCLE_PID"
     TRACE_PID=""; TRACE_PGID=""
     RSS_PID=""; RSS_PGID=""
     DRIVER_PID=""; DRIVER_PGID=""
+    LIFECYCLE_PID=""; LIFECYCLE_PGID=""
 }
 
 restore_termios() {
@@ -289,6 +302,10 @@ publish_result() {
             "$(sha256 "$TRACE_PROVISIONAL_RECEIPT" 2>/dev/null || printf unavailable)"
         printf 'performance_tail_receipt_sha256\t%s\n' \
             "$(sha256 "$PERFORMANCE_TAIL_RECEIPT" 2>/dev/null || printf unavailable)"
+        printf 'performance_lifecycle_ready_receipt_sha256\t%s\n' \
+            "$(sha256 "$PERFORMANCE_LIFECYCLE_READY_RECEIPT" 2>/dev/null || printf unavailable)"
+        printf 'performance_lifecycle_registration_sha256\t%s\n' \
+            "$(sha256 "$PERFORMANCE_LIFECYCLE_REGISTRATION" 2>/dev/null || printf unavailable)"
         printf 'performance_quit_receipt_sha256\t%s\n' \
             "$(sha256 "$PERFORMANCE_QUIT_RECEIPT" 2>/dev/null || printf unavailable)"
         printf 'subject_exit_receipt_sha256\t%s\n' \
@@ -308,6 +325,7 @@ publish_result() {
         printf 'driver_exit_status\t%s\n' "$DRIVER_STATUS"
         printf 'rss_exit_status\t%s\n' "$RSS_STATUS"
         printf 'trace_exit_status\t%s\n' "$TRACE_STATUS"
+        printf 'lifecycle_exit_status\t%s\n' "$LIFECYCLE_STATUS"
         printf 'trace_protocol\t%s\n' 'subject-identity-v3'
         printf 'post_producer_tail_ms\t%s\n' "${SPACETERM_PERFORMANCE_TAIL_MS:-5000}"
         printf 'test_overrides_active\t%s\n' "$test_mode"
@@ -364,7 +382,14 @@ verify_controller_toolchain() {
         && "$(sha256 "$TAIL_RECEIPT_TOOL")" == "$TAIL_RECEIPT_TOOL_SHA256" \
         && "$(sha256 "$SUBJECT_EXIT_VERIFIER")" == "$SUBJECT_EXIT_VERIFIER_SHA256" \
         && "$(sha256 "$RUN_FINALIZER")" == "$RUN_FINALIZER_SHA256" \
-        && "$(sha256 "$NATIVE_CLOSURE_VERIFIER")" == "$NATIVE_CLOSURE_VERIFIER_SHA256" ]]
+        && "$(sha256 "$NATIVE_CLOSURE_VERIFIER")" == "$NATIVE_CLOSURE_VERIFIER_SHA256" \
+        && "$(sha256 "$SUBJECT_LIFECYCLE")" == "$SUBJECT_LIFECYCLE_SHA256" \
+        && "$(sha256 "$APPKIT_TERMINATOR_SOURCE")" == "$APPKIT_TERMINATOR_SOURCE_SHA256" \
+        && "$(sha256 "$APPKIT_TERMINATOR")" == "$APPKIT_TERMINATOR_BINARY_SHA256" \
+        && "$(stat -f '%d:%i' "$APPKIT_TERMINATOR_SOURCE")" == \
+            "$APPKIT_TERMINATOR_SOURCE_DEVICE:$APPKIT_TERMINATOR_SOURCE_INODE" \
+        && "$(stat -f '%d:%i' "$APPKIT_TERMINATOR")" == \
+            "$APPKIT_TERMINATOR_BINARY_DEVICE:$APPKIT_TERMINATOR_BINARY_INODE" ]]
 }
 
 run_driver_receipt_tool() {
@@ -492,6 +517,158 @@ wait_for_authenticated_ready() {
         || abort_run stale-authenticated-workload-ready
 }
 
+start_subject_lifecycle() {
+    local native_path=not-applicable deadline now lifecycle_timeout_seconds
+    [[ "$SUBJECT" != spaceterm ]] || native_path="$NATIVE_OBSERVATION"
+    lifecycle_timeout_seconds=$(( (WARMUP_MS + DURATION_MS) / 1000 + 180 ))
+    spawn_process_group "$SUBJECT_LIFECYCLE" \
+        --subject-identity "$SUBJECT_IDENTITY" \
+        --campaign-secret-file "$CAMPAIGN_SECRET_FILE" \
+        --campaign-id "$CAMPAIGN_ID" --session-id "$SESSION_ID" --nonce "$NONCE" \
+        --live-ready-receipt "$PERFORMANCE_LIFECYCLE_READY_RECEIPT" \
+        --registration-control "$PERFORMANCE_LIFECYCLE_CONTROL" \
+        --quit-receipt "$PERFORMANCE_QUIT_RECEIPT" \
+        --subject-exit-receipt "$SUBJECT_EXIT_RECEIPT" \
+        --native-observation "$native_path" \
+        --driver-receipt "$DRIVER_RECEIPT" --driver-events "$DRIVER_OUTPUT" \
+        --workload-metadata "$WORKLOAD_METADATA" --workload-events "$WORKLOAD_EVENTS" \
+        --workload-ready-receipt "$WORKLOAD_READY_RECEIPT" \
+        --rss-samples "$RSS_OUTPUT" \
+        --trace-provisional-receipt "$TRACE_PROVISIONAL_RECEIPT" \
+        --plan-start-gate "$PLAN_START_GATE" \
+        --process-inspector "$TRACE_INSPECTOR" \
+        --appkit-terminator-source "$APPKIT_TERMINATOR_SOURCE" \
+        --appkit-terminator "$APPKIT_TERMINATOR" \
+        --expected-appkit-terminator-source-device "$APPKIT_TERMINATOR_SOURCE_DEVICE" \
+        --expected-appkit-terminator-source-inode "$APPKIT_TERMINATOR_SOURCE_INODE" \
+        --expected-appkit-terminator-source-sha256 "$APPKIT_TERMINATOR_SOURCE_SHA256" \
+        --expected-appkit-terminator-binary-device "$APPKIT_TERMINATOR_BINARY_DEVICE" \
+        --expected-appkit-terminator-binary-inode "$APPKIT_TERMINATOR_BINARY_INODE" \
+        --expected-appkit-terminator-binary-sha256 "$APPKIT_TERMINATOR_BINARY_SHA256" \
+        --timeout-seconds "$lifecycle_timeout_seconds" \
+        || abort_run lifecycle-process-group-launch-failed
+    LIFECYCLE_PID="$SPAWNED_PID"
+    LIFECYCLE_PGID="$LIFECYCLE_PID"
+    deadline=$(( $(continuous_ns) + 5000000000 ))
+    while [[ ! -f "$PERFORMANCE_LIFECYCLE_READY_RECEIPT" ]]; do
+        process_has_exited "$LIFECYCLE_PID" && abort_run lifecycle-helper-exited-before-ready
+        now="$(continuous_ns)"
+        (( now < deadline )) || abort_run lifecycle-ready-timeout
+        sleep 0.02
+    done
+    require_immutable_file "$PERFORMANCE_LIFECYCLE_READY_RECEIPT" lifecycle-ready-receipt
+    python3 - "$PERFORMANCE_LIFECYCLE_READY_RECEIPT" "$CAMPAIGN_SECRET_FILE" \
+        "$SUBJECT" "$CAMPAIGN_ID" "$SESSION_ID" "$NONCE" "$SUBJECT_HASH" \
+        "$SUBJECT_PID" "$START_IDENTITY" "$EXECUTABLE_SHA256" \
+        "$APPKIT_TERMINATOR_SOURCE_DEVICE" "$APPKIT_TERMINATOR_SOURCE_INODE" \
+        "$APPKIT_TERMINATOR_SOURCE_SHA256" "$APPKIT_TERMINATOR_BINARY_DEVICE" \
+        "$APPKIT_TERMINATOR_BINARY_INODE" "$APPKIT_TERMINATOR_BINARY_SHA256" \
+        "$PERFORMANCE_LIFECYCLE_CONTROL" <<'PY' \
+        || abort_run lifecycle-ready-authentication-failed
+import hashlib, hmac, os, pathlib, stat, struct, sys
+ready, secret, subject, campaign, session, nonce, subject_hash, pid, start, executable_hash, \
+ source_device, source_inode, source_hash, binary_device, binary_inode, binary_hash, control = sys.argv[1:]
+keys = ["schema","subject","campaign_id","session_id","nonce","subject_identity_sha256",
+    "process_pid","process_start_identity","executable_sha256","ready_continuous_ns",
+    "registration_control_device","registration_control_inode",
+    "appkit_terminator_source_device","appkit_terminator_source_inode",
+    "appkit_terminator_source_sha256","appkit_terminator_binary_device",
+    "appkit_terminator_binary_inode","appkit_terminator_binary_sha256","evidence_mode",
+    "auth_algorithm","receipt_hmac_sha256","status"]
+data = pathlib.Path(ready).read_bytes(); lines = data.splitlines(keepends=True)
+if len(lines) != len(keys) or [line.split(b"\t",1)[0].decode() for line in lines] != keys:
+    raise SystemExit(1)
+values = dict(line.rstrip(b"\n").split(b"\t",1) for line in lines)
+unsigned = b"".join(line for line in lines if not line.startswith(b"receipt_hmac_sha256\t"))
+expected = hmac.new(pathlib.Path(secret).read_bytes(),
+    b"spaceterm.acceptance.performance-lifecycle-ready/v1\0" + struct.pack(">Q",len(unsigned)) + unsigned,
+    hashlib.sha256).hexdigest().encode()
+control_stat = os.lstat(control)
+required = {b"schema":b"spaceterm.acceptance.performance-lifecycle-ready/v1",
+    b"subject":subject.encode(),b"campaign_id":campaign.encode(),b"session_id":session.encode(),
+    b"nonce":nonce.encode(),b"subject_identity_sha256":subject_hash.encode(),b"process_pid":pid.encode(),
+    b"process_start_identity":start.encode(),b"executable_sha256":executable_hash.encode(),
+    b"appkit_terminator_source_device":source_device.encode(),
+    b"appkit_terminator_source_inode":source_inode.encode(),
+    b"appkit_terminator_source_sha256":source_hash.encode(),
+    b"appkit_terminator_binary_device":binary_device.encode(),
+    b"appkit_terminator_binary_inode":binary_inode.encode(),
+    b"appkit_terminator_binary_sha256":binary_hash.encode(),
+    b"evidence_mode":(b"test-only" if os.environ.get("SPACETERM_PERFORMANCE_TEST_MODE")=="1" else b"production"),
+    b"auth_algorithm":b"hmac-sha256",b"status":b"ready"}
+if any(values.get(k) != v for k,v in required.items()) or values.get(b"receipt_hmac_sha256") != expected \
+        or not stat.S_ISFIFO(control_stat.st_mode) or stat.S_ISLNK(control_stat.st_mode) \
+        or int(values[b"registration_control_device"]) != control_stat.st_dev \
+        or int(values[b"registration_control_inode"]) != control_stat.st_ino:
+    raise SystemExit(1)
+PY
+}
+
+register_subject_lifecycle() {
+    QUIT_TOKEN="$(python3 -c 'import secrets; print(secrets.token_hex(32))')"
+    local native_path=not-applicable
+    [[ "$SUBJECT" != spaceterm ]] || native_path="$NATIVE_OBSERVATION"
+    python3 - "$PERFORMANCE_LIFECYCLE_REGISTRATION" "$CAMPAIGN_SECRET_FILE" \
+        "$CAMPAIGN_ID" "$SESSION_ID" "$NONCE" "$QUIT_TOKEN" "$SUBJECT_HASH" \
+        "$SUBJECT_PID" "$START_IDENTITY" "$RUN_INTENT" "$PERFORMANCE_TAIL_RECEIPT" \
+        "$WORKLOAD_METADATA" "$WORKLOAD_EVENTS" "$WORKLOAD_READY_RECEIPT" \
+        "$PERFORMANCE_QUIT_RECEIPT" "$SUBJECT_EXIT_RECEIPT" "$native_path" \
+        "$APPKIT_TERMINATOR_SOURCE_DEVICE" "$APPKIT_TERMINATOR_SOURCE_INODE" \
+        "$APPKIT_TERMINATOR_SOURCE_SHA256" "$APPKIT_TERMINATOR_BINARY_DEVICE" \
+        "$APPKIT_TERMINATOR_BINARY_INODE" "$APPKIT_TERMINATOR_BINARY_SHA256" <<'PY' \
+        || abort_run lifecycle-registration-publication-failed
+import hashlib,hmac,os,pathlib,struct,sys
+(target,secret,campaign,session,nonce,token,subject_hash,pid,start,intent,tail,metadata,events,
+ ready,quit,exit_receipt,native,source_device,source_inode,source_hash,binary_device,
+ binary_inode,binary_hash)=sys.argv[1:]
+rows=[("format_version","1"),("campaign_id",campaign),("session_id",session),("nonce",nonce),
+ ("registration_token",token),("subject_identity_sha256",subject_hash),("process_pid",pid),
+ ("process_start_identity",start),("run_intent_path",str(pathlib.Path(intent).resolve())),
+ ("run_intent_sha256",hashlib.sha256(pathlib.Path(intent).read_bytes()).hexdigest()),
+ ("tail_receipt_path",str(pathlib.Path(tail).resolve())),
+ ("workload_metadata_path",str(pathlib.Path(metadata).resolve())),
+ ("workload_events_path",str(pathlib.Path(events).resolve())),
+ ("workload_ready_receipt_path",str(pathlib.Path(ready).resolve())),
+ ("quit_receipt_path",str(pathlib.Path(quit).resolve())),
+ ("subject_exit_receipt_path",str(pathlib.Path(exit_receipt).resolve())),
+ ("native_observation_path",native if native=="not-applicable" else str(pathlib.Path(native).resolve())),
+ ("appkit_terminator_source_device",source_device),
+ ("appkit_terminator_source_inode",source_inode),
+ ("appkit_terminator_source_sha256",source_hash),
+ ("appkit_terminator_binary_device",binary_device),
+ ("appkit_terminator_binary_inode",binary_inode),
+ ("appkit_terminator_binary_sha256",binary_hash),
+ ("evidence_mode","test-only" if os.environ.get("SPACETERM_PERFORMANCE_TEST_MODE")=="1" else "production"),
+ ("auth_algorithm","hmac-sha256"),("status","registered")]
+unsigned=b"".join(f"{k}\t{v}\n".encode() for k,v in rows)
+signature=hmac.new(pathlib.Path(secret).read_bytes(),
+ b"spaceterm.acceptance.performance-lifecycle-registration/v1\0"+struct.pack(">Q",len(unsigned))+unsigned,
+ hashlib.sha256).hexdigest()
+contents=b"".join(f"{k}\t{v}\n".encode() for k,v in rows[:-1]) \
+ + f"registration_hmac_sha256\t{signature}\n".encode() + f"status\t{rows[-1][1]}\n".encode()
+fd=os.open(target,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o400)
+try:
+ if os.write(fd,contents)!=len(contents): raise OSError("short write")
+ os.fsync(fd)
+finally: os.close(fd)
+PY
+    require_immutable_file "$PERFORMANCE_LIFECYCLE_REGISTRATION" lifecycle-registration
+    python3 - "$PERFORMANCE_LIFECYCLE_CONTROL" "$QUIT_TOKEN" \
+        "$PERFORMANCE_LIFECYCLE_REGISTRATION" <<'PY' \
+        || abort_run lifecycle-registration-delivery-failed
+import os,stat,sys
+path,token,registration=sys.argv[1:]
+before=os.lstat(path)
+if not stat.S_ISFIFO(before.st_mode) or stat.S_ISLNK(before.st_mode): raise SystemExit(1)
+fd=os.open(path,os.O_WRONLY|os.O_NONBLOCK|os.O_NOFOLLOW)
+try:
+ opened=os.fstat(fd); payload=f"register\t{token}\t{registration}\n".encode()
+ if before.st_dev!=opened.st_dev or before.st_ino!=opened.st_ino or os.write(fd,payload)!=len(payload):
+  raise SystemExit(1)
+finally: os.close(fd)
+PY
+}
+
 verify_window_proof() {
     local phase="$1" expected_hash expected_number expected_pid proof_hash proof_number proof_pid
     if [[ "$TEST_MODE" == 1 ]]; then
@@ -548,6 +725,9 @@ while (( $# > 0 )); do
         --trace-output-directory) TRACE_OUTPUT_DIRECTORY="${2:-}"; shift ;;
         --trace-provisional-receipt) TRACE_PROVISIONAL_RECEIPT="${2:-}"; shift ;;
         --performance-tail-receipt) PERFORMANCE_TAIL_RECEIPT="${2:-}"; shift ;;
+        --performance-lifecycle-ready-receipt) PERFORMANCE_LIFECYCLE_READY_RECEIPT="${2:-}"; shift ;;
+        --performance-lifecycle-control) PERFORMANCE_LIFECYCLE_CONTROL="${2:-}"; shift ;;
+        --performance-lifecycle-registration) PERFORMANCE_LIFECYCLE_REGISTRATION="${2:-}"; shift ;;
         --performance-quit-control) PERFORMANCE_QUIT_CONTROL="${2:-}"; shift ;;
         --performance-quit-receipt) PERFORMANCE_QUIT_RECEIPT="${2:-}"; shift ;;
         --subject-exit-receipt) SUBJECT_EXIT_RECEIPT="${2:-}"; shift ;;
@@ -607,7 +787,9 @@ secret_mode="$(stat -f '%Lp' "$CAMPAIGN_SECRET_FILE")"
 for output in "$WORKLOAD_EVENTS" "$WORKLOAD_METADATA" "$WORKLOAD_READY_RECEIPT" \
     "$PLAN_START_GATE" "$DRIVER_OUTPUT" "$DRIVER_INTENT" "$DRIVER_RECEIPT" \
     "$RSS_OUTPUT" "$RUN_METADATA" "$TRACE_PROVISIONAL_RECEIPT" \
-    "$PERFORMANCE_TAIL_RECEIPT" "$PERFORMANCE_QUIT_RECEIPT" \
+    "$PERFORMANCE_TAIL_RECEIPT" "$PERFORMANCE_LIFECYCLE_READY_RECEIPT" \
+    "$PERFORMANCE_LIFECYCLE_CONTROL" "$PERFORMANCE_LIFECYCLE_REGISTRATION" \
+    "$PERFORMANCE_QUIT_RECEIPT" \
     "$SUBJECT_EXIT_RECEIPT" \
     "$RESULT_OUTPUT"; do
     path_is_within_run "$output" || die "output is outside the run: $output"
@@ -625,14 +807,13 @@ require_absent_output "$RSS_OUTPUT" rss-output
 require_absent_output "$RUN_METADATA" run-metadata
 require_absent_output "$TRACE_PROVISIONAL_RECEIPT" trace-provisional-receipt
 require_absent_output "$PERFORMANCE_TAIL_RECEIPT" performance-tail-receipt
+require_absent_output "$PERFORMANCE_LIFECYCLE_READY_RECEIPT" performance-lifecycle-ready-receipt
+require_absent_output "$PERFORMANCE_LIFECYCLE_CONTROL" performance-lifecycle-control
+require_absent_output "$PERFORMANCE_LIFECYCLE_REGISTRATION" performance-lifecycle-registration
 require_absent_output "$PERFORMANCE_QUIT_RECEIPT" performance-quit-receipt
 require_absent_output "$SUBJECT_EXIT_RECEIPT" subject-exit-receipt
 require_absent_output "$RESULT_OUTPUT" result-output
 require_absent_output "$TRACE_OUTPUT_DIRECTORY" trace-output-directory
-path_is_within_run "$PERFORMANCE_QUIT_CONTROL" \
-    || die "performance quit control is outside the run"
-[[ -p "$PERFORMANCE_QUIT_CONTROL" && ! -L "$PERFORMANCE_QUIT_CONTROL" ]] \
-    || die "performance quit control must be the launch verifier FIFO"
 [[ -f "$TRACE_RECORDER" && -x "$TRACE_RECORDER" && ! -L "$TRACE_RECORDER" ]] \
     || die "trace recorder must be an executable non-symlink file"
 
@@ -644,19 +825,25 @@ if [[ -n "${SPACETERM_PERFORMANCE_TAIL_MS:-}" \
 fi
 readonly TEST_MODE="${SPACETERM_PERFORMANCE_TEST_MODE:-0}"
 readonly TAIL_MS="${SPACETERM_PERFORMANCE_TAIL_MS:-5000}"
+EVIDENCE_MODE=production
+[[ "$TEST_MODE" != 1 ]] || EVIDENCE_MODE=test-only
+readonly EVIDENCE_MODE
 
 readonly TOOLS_METADATA="$TOOLS_DIRECTORY/native-performance-tools.tsv"
 readonly WORKLOAD_BINARY="$TOOLS_DIRECTORY/performance-workload"
 readonly DRIVER_BINARY="$TOOLS_DIRECTORY/performance-driver"
 readonly RSS_BINARY="$TOOLS_DIRECTORY/performance-rss-sampler"
 readonly WINDOW_RESOLVER="$TOOLS_DIRECTORY/performance-window-resolver"
-for binary in "$WORKLOAD_BINARY" "$DRIVER_BINARY" "$RSS_BINARY" "$WINDOW_RESOLVER"; do
+readonly APPKIT_TERMINATOR="$TOOLS_DIRECTORY/performance-appkit-terminate"
+for binary in "$WORKLOAD_BINARY" "$DRIVER_BINARY" "$RSS_BINARY" "$WINDOW_RESOLVER" \
+    "$APPKIT_TERMINATOR"; do
     [[ -f "$binary" && -x "$binary" && ! -L "$binary" ]] \
         || die "run-built native tool is unavailable: $binary"
 done
 
 SCRIPT_DIRECTORY="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 readonly SCRIPT_DIRECTORY
+readonly APPKIT_TERMINATOR_SOURCE="$SCRIPT_DIRECTORY/performance-appkit-terminate.m"
 readonly PROCESS_GROUP_RUNNER="$SCRIPT_DIRECTORY/run-performance-process-group.py"
 [[ -f "$PROCESS_GROUP_RUNNER" && -x "$PROCESS_GROUP_RUNNER" && ! -L "$PROCESS_GROUP_RUNNER" ]] \
     || die "process-group runner is unavailable"
@@ -677,8 +864,9 @@ readonly TAIL_RECEIPT_TOOL="$SCRIPT_DIRECTORY/performance-tail-receipt.py"
 readonly SUBJECT_EXIT_VERIFIER="$SCRIPT_DIRECTORY/verify-performance-subject-exit.py"
 readonly RUN_FINALIZER="$SCRIPT_DIRECTORY/freeze-performance-run.sh"
 readonly NATIVE_CLOSURE_VERIFIER="$SCRIPT_DIRECTORY/verify-performance-native-closure.py"
+readonly SUBJECT_LIFECYCLE="$SCRIPT_DIRECTORY/performance-subject-lifecycle.py"
 for dependency in "$TAIL_RECEIPT_TOOL" "$SUBJECT_EXIT_VERIFIER" "$RUN_FINALIZER" \
-    "$NATIVE_CLOSURE_VERIFIER"; do
+    "$NATIVE_CLOSURE_VERIFIER" "$SUBJECT_LIFECYCLE"; do
     [[ -f "$dependency" && -x "$dependency" && ! -L "$dependency" ]] \
         || die "causal closure tool is unavailable: $dependency"
 done
@@ -709,18 +897,29 @@ TAIL_RECEIPT_TOOL_SHA256="$(sha256 "$TAIL_RECEIPT_TOOL")"
 SUBJECT_EXIT_VERIFIER_SHA256="$(sha256 "$SUBJECT_EXIT_VERIFIER")"
 RUN_FINALIZER_SHA256="$(sha256 "$RUN_FINALIZER")"
 NATIVE_CLOSURE_VERIFIER_SHA256="$(sha256 "$NATIVE_CLOSURE_VERIFIER")"
+SUBJECT_LIFECYCLE_SHA256="$(sha256 "$SUBJECT_LIFECYCLE")"
+APPKIT_TERMINATOR_SOURCE_DEVICE="$(stat -f '%d' "$APPKIT_TERMINATOR_SOURCE")"
+APPKIT_TERMINATOR_SOURCE_INODE="$(stat -f '%i' "$APPKIT_TERMINATOR_SOURCE")"
+APPKIT_TERMINATOR_SOURCE_SHA256="$(sha256 "$APPKIT_TERMINATOR_SOURCE")"
+APPKIT_TERMINATOR_BINARY_DEVICE="$(stat -f '%d' "$APPKIT_TERMINATOR")"
+APPKIT_TERMINATOR_BINARY_INODE="$(stat -f '%i' "$APPKIT_TERMINATOR")"
+APPKIT_TERMINATOR_BINARY_SHA256="$(sha256 "$APPKIT_TERMINATOR")"
 readonly CONTROLLER_SHA256 PROCESS_GROUP_RUNNER_SHA256 TRACE_RECORDER_SHA256
 readonly TRACE_INSPECTOR_SHA256 TRACE_VERIFIER_SHA256 TRACE_COMMAND_RUNNER_SHA256
 readonly WORKLOAD_READY_VERIFIER_SHA256 WORKLOAD_AUTH_VERIFIER_SHA256
 readonly DRIVER_RECEIPT_TOOL_SHA256
 readonly TAIL_RECEIPT_TOOL_SHA256 SUBJECT_EXIT_VERIFIER_SHA256 RUN_FINALIZER_SHA256
 readonly NATIVE_CLOSURE_VERIFIER_SHA256
+readonly SUBJECT_LIFECYCLE_SHA256
+readonly APPKIT_TERMINATOR_SOURCE_DEVICE APPKIT_TERMINATOR_SOURCE_INODE
+readonly APPKIT_TERMINATOR_SOURCE_SHA256 APPKIT_TERMINATOR_BINARY_DEVICE
+readonly APPKIT_TERMINATOR_BINARY_INODE APPKIT_TERMINATOR_BINARY_SHA256
 verify_controller_toolchain || die "controller toolchain changed during startup"
 [[ "$(kv "$TOOLS_METADATA" format_version)" == 1 \
     && "$(kv "$TOOLS_METADATA" status)" == complete ]] || die "tools metadata is invalid"
-declare -a tool_names=(performance_workload performance_driver performance_rss_sampler performance_window_resolver)
-declare -a tool_sources=(performance-workload.c performance-driver.m performance-rss-sampler.m performance-window-resolver.m)
-declare -a tool_binaries=(performance-workload performance-driver performance-rss-sampler performance-window-resolver)
+declare -a tool_names=(performance_workload performance_driver performance_rss_sampler performance_window_resolver performance_appkit_terminator)
+declare -a tool_sources=(performance-workload.c performance-driver.m performance-rss-sampler.m performance-window-resolver.m performance-appkit-terminate.m)
+declare -a tool_binaries=(performance-workload performance-driver performance-rss-sampler performance-window-resolver performance-appkit-terminate)
 for ((index = 0; index < ${#tool_names[@]}; index += 1)); do
     source_path="$SCRIPT_DIRECTORY/${tool_sources[index]}"
     binary_path="$TOOLS_DIRECTORY/${tool_binaries[index]}"
@@ -741,7 +940,8 @@ if [[ "$TEST_MODE" != 1 ]]; then
     architecture="$(kv "$TOOLS_METADATA" architecture)"
     [[ "$architecture" == arm64 || "$architecture" == x86_64 ]] \
         || die "tools architecture is invalid"
-    for binary in "$WORKLOAD_BINARY" "$DRIVER_BINARY" "$RSS_BINARY" "$WINDOW_RESOLVER"; do
+    for binary in "$WORKLOAD_BINARY" "$DRIVER_BINARY" "$RSS_BINARY" "$WINDOW_RESOLVER" \
+        "$APPKIT_TERMINATOR"; do
         [[ "$(lipo -archs "$binary")" == "$architecture" ]] \
             || die "tool is not an exact-architecture Mach-O binary: $binary"
     done
@@ -768,6 +968,10 @@ readonly EXECUTABLE EXECUTABLE_SHA256 APP_BUNDLE BUNDLE_IDENTIFIER
 readonly SIGNING_IDENTIFIER TEAM_IDENTIFIER CDHASH WINDOW_NUMBER WARMUP_MS DURATION_MS
 [[ "$SUBJECT" == spaceterm || "$SUBJECT" == ghostty ]] || die "subject identity is invalid"
 if [[ "$SUBJECT" == spaceterm ]]; then
+    path_is_within_run "$PERFORMANCE_QUIT_CONTROL" \
+        || die "performance quit control is outside the run"
+    [[ -p "$PERFORMANCE_QUIT_CONTROL" && ! -L "$PERFORMANCE_QUIT_CONTROL" ]] \
+        || die "performance quit control must be the native verifier FIFO"
     require_immutable_file "$NATIVE_PROVISIONAL_OBSERVATION" native-provisional-observation
     for output in "$NATIVE_OBSERVATION" "$NATIVE_RUNTIME_METADATA" \
         "$NATIVE_RUNTIME_SAMPLES" "$NATIVE_RUNTIME_EVENTS" "$NATIVE_FAILURE_ACTIONS"; do
@@ -775,6 +979,8 @@ if [[ "$SUBJECT" == spaceterm ]]; then
         [[ ! -e "$output" && ! -L "$output" ]] || die "native closure output exists prematurely"
     done
 else
+    [[ "$PERFORMANCE_QUIT_CONTROL" == none ]] \
+        || die "Ghostty must not receive a native verifier FIFO"
     [[ -z "$NATIVE_PROVISIONAL_OBSERVATION$NATIVE_OBSERVATION$NATIVE_RUNTIME_METADATA" \
         && -z "$NATIVE_RUNTIME_SAMPLES$NATIVE_RUNTIME_EVENTS$NATIVE_FAILURE_ACTIONS" ]] \
         || die "Ghostty must not receive SpaceTerm native closure paths"
@@ -812,6 +1018,7 @@ fi
     && "$(kv "$RUN_INTENT" campaign_id)" == "$CAMPAIGN_ID" \
     && "$(kv "$RUN_INTENT" session_id)" == "$SESSION_ID" \
     && "$(kv "$RUN_INTENT" nonce)" == "$NONCE" \
+    && "$(kv "$RUN_INTENT" evidence_mode)" == "$EVIDENCE_MODE" \
     && "$(kv "$RUN_INTENT" status)" == prepared ]] \
     || die "run intent does not bind the frozen process and inputs"
 
@@ -828,6 +1035,8 @@ if [[ -t 0 ]]; then SAVED_TERMIOS="$(stty -g)"; fi
 EXIT_TRAP_ACTIVE=true
 trap 'on_exit $?' EXIT
 trap on_signal INT TERM HUP
+start_subject_lifecycle
+register_subject_lifecycle
 verify_window_proof preflight
 wait_for_authenticated_ready
 (( MEASUREMENT_READY_CONTINUOUS_NS >= SEED_CONTINUOUS_NS \
@@ -922,6 +1131,7 @@ while [[ "$driver_done" == false || "$rss_done" == false \
             && "$(kv "$TRACE_PROVISIONAL_RECEIPT" run_intent_sha256)" == "$(sha256 "$RUN_INTENT")" \
             && "$(kv "$TRACE_PROVISIONAL_RECEIPT" subject_identity_sha256)" == "$SUBJECT_HASH" \
             && "$(kv "$TRACE_PROVISIONAL_RECEIPT" capture_status)" == CAPTURED \
+            && "$(kv "$TRACE_PROVISIONAL_RECEIPT" evidence_mode)" == "$EVIDENCE_MODE" \
             && "$(kv "$TRACE_PROVISIONAL_RECEIPT" status)" == complete ]] \
             || abort_run trace-provisional-receipt-invalid
         trace_provisional_ready=true
@@ -977,38 +1187,20 @@ TAIL_VERIFIED_CONTINUOUS_NS="$(continuous_ns)"
 
 verify_driver_receipt || abort_run driver-receipt-postflight-failed
 verify_controller_toolchain || abort_run controller-toolchain-changed-before-tail
-quit_token="$(python3 -c 'import secrets; print(secrets.token_hex(32))')"
 "$TAIL_RECEIPT_TOOL" create --campaign-secret-file "$CAMPAIGN_SECRET_FILE" \
     --campaign-id "$CAMPAIGN_ID" --session-id "$SESSION_ID" --nonce "$NONCE" \
-    --quit-token "$quit_token" --run-intent "$RUN_INTENT" \
+    --quit-token "$QUIT_TOKEN" --run-intent "$RUN_INTENT" \
     --subject-identity "$SUBJECT_IDENTITY" --driver-receipt "$DRIVER_RECEIPT" \
     --driver-events "$DRIVER_OUTPUT" --workload-metadata "$WORKLOAD_METADATA" \
     --workload-events "$WORKLOAD_EVENTS" --rss-samples "$RSS_OUTPUT" \
     --workload-ready-receipt "$WORKLOAD_READY_RECEIPT" \
     --trace-provisional-receipt "$TRACE_PROVISIONAL_RECEIPT" \
+    --appkit-terminator-source "$APPKIT_TERMINATOR_SOURCE" \
+    --appkit-terminator-binary "$APPKIT_TERMINATOR" \
     --tail-completed-continuous-ns "$TAIL_VERIFIED_CONTINUOUS_NS" \
     --output "$PERFORMANCE_TAIL_RECEIPT" \
     || abort_run performance-tail-receipt-publication-failed
 require_immutable_file "$PERFORMANCE_TAIL_RECEIPT" performance-tail-receipt
-
-python3 - "$PERFORMANCE_QUIT_CONTROL" "$quit_token" <<'PY' \
-    || abort_run performance-normal-quit-request-failed
-import os, stat, sys
-path, token = sys.argv[1:]
-before = os.lstat(path)
-if not stat.S_ISFIFO(before.st_mode) or stat.S_ISLNK(before.st_mode) \
-        or before.st_uid != os.geteuid() or before.st_mode & 0o077:
-    raise SystemExit(1)
-fd = os.open(path, os.O_WRONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0))
-try:
-    opened = os.fstat(fd)
-    payload = f"tail-complete\t{token}\n".encode("ascii")
-    if before.st_dev != opened.st_dev or before.st_ino != opened.st_ino \
-            or not stat.S_ISFIFO(opened.st_mode) or os.write(fd, payload) != len(payload):
-        raise SystemExit(1)
-finally:
-    os.close(fd)
-PY
 
 closure_deadline=$(( $(continuous_ns) + 60000000000 ))
 while [[ ! -f "$PERFORMANCE_QUIT_RECEIPT" || ! -f "$SUBJECT_EXIT_RECEIPT" \
@@ -1021,15 +1213,33 @@ while [[ ! -f "$PERFORMANCE_QUIT_RECEIPT" || ! -f "$SUBJECT_EXIT_RECEIPT" \
         TRACE_PID=""; TRACE_PGID=""
         abort_run trace-recorder-exited-before-causal-run-closure
     fi
+    if process_has_exited "$LIFECYCLE_PID" \
+        && [[ ! -f "$PERFORMANCE_QUIT_RECEIPT" || ! -f "$SUBJECT_EXIT_RECEIPT" ]]; then
+        abort_run lifecycle-helper-exited-before-causal-closure
+    fi
     (( $(continuous_ns) < closure_deadline )) || abort_run performance-normal-quit-timeout
     sleep 0.02
 done
+
+while ! process_has_exited "$LIFECYCLE_PID"; do
+    (( $(continuous_ns) < closure_deadline )) || abort_run lifecycle-helper-exit-timeout
+    sleep 0.02
+done
+set +e; wait "$LIFECYCLE_PID"; LIFECYCLE_STATUS=$?; set -e
+if process_group_exists "$LIFECYCLE_PGID"; then
+    terminate_process_group "$LIFECYCLE_PGID" ""
+    LIFECYCLE_STATUS=70
+fi
+LIFECYCLE_PID=""; LIFECYCLE_PGID=""
+[[ "$LIFECYCLE_STATUS" == 0 ]] || abort_run lifecycle-helper-failed
 
 exit_verify_arguments=(
     --campaign-secret-file "$CAMPAIGN_SECRET_FILE" --run-intent "$RUN_INTENT"
     --subject-identity "$SUBJECT_IDENTITY" --tail-receipt "$PERFORMANCE_TAIL_RECEIPT"
     --quit-receipt "$PERFORMANCE_QUIT_RECEIPT"
     --subject-exit-receipt "$SUBJECT_EXIT_RECEIPT"
+    --appkit-terminator-source "$APPKIT_TERMINATOR_SOURCE"
+    --appkit-terminator-binary "$APPKIT_TERMINATOR"
 )
 finalizer_arguments=(
     --run-intent "$RUN_INTENT" --subject-identity "$SUBJECT_IDENTITY"
@@ -1038,10 +1248,20 @@ finalizer_arguments=(
     --performance-tail-receipt "$PERFORMANCE_TAIL_RECEIPT"
     --performance-quit-receipt "$PERFORMANCE_QUIT_RECEIPT"
     --subject-exit-receipt "$SUBJECT_EXIT_RECEIPT"
-    --driver-receipt "$DRIVER_RECEIPT" --driver-events "$DRIVER_OUTPUT"
+    --driver-intent "$DRIVER_INTENT" --driver-receipt "$DRIVER_RECEIPT"
+    --driver-events "$DRIVER_OUTPUT" --window-identity "$WINDOW_IDENTITY"
+    --driver-binary "$DRIVER_BINARY"
+    --driver-source "$SCRIPT_DIRECTORY/performance-driver.m"
+    --driver-controller "$SCRIPT_DIRECTORY/$(basename -- "$0")"
+    --scenario-plan "$SCENARIO_PLAN" --plan-start-gate "$PLAN_START_GATE"
     --workload-metadata "$WORKLOAD_METADATA" --workload-events "$WORKLOAD_EVENTS"
     --workload-ready-receipt "$WORKLOAD_READY_RECEIPT"
     --rss-samples "$RSS_OUTPUT"
+    --performance-lifecycle-ready-receipt "$PERFORMANCE_LIFECYCLE_READY_RECEIPT"
+    --performance-lifecycle-registration "$PERFORMANCE_LIFECYCLE_REGISTRATION"
+    --subject-lifecycle-helper "$SUBJECT_LIFECYCLE"
+    --appkit-terminator-source "$APPKIT_TERMINATOR_SOURCE"
+    --appkit-terminator-binary "$APPKIT_TERMINATOR"
 )
 if [[ "$SUBJECT" == spaceterm ]]; then
     exit_verify_arguments+=(--native-observation "$NATIVE_OBSERVATION")
@@ -1053,6 +1273,18 @@ if [[ "$SUBJECT" == spaceterm ]]; then
         --native-runtime-events "$NATIVE_RUNTIME_EVENTS"
         --native-failure-actions "$NATIVE_FAILURE_ACTIONS"
     )
+fi
+if [[ "$TEST_MODE" == 1 ]]; then
+    terminate_process_group "$TRACE_PGID" "$TRACE_PID"
+    TRACE_PID=""; TRACE_PGID=""; TRACE_STATUS=0
+    cleanup_temp
+    restore_termios
+    publish_result test-only evidence-mode-test-only \
+        || abort_run test-only-result-publication-failed
+    FINALIZED=true
+    EXIT_TRAP_ACTIVE=false
+    trap - EXIT INT TERM HUP
+    exit 0
 fi
 "$SUBJECT_EXIT_VERIFIER" "${exit_verify_arguments[@]}" >/dev/null \
     || abort_run performance-subject-exit-receipt-invalid

@@ -9,6 +9,17 @@ SCRIPT_DIRECTORY="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 TEMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/spaceterm-run-v3.XXXXXX")"
 trap 'rm -rf -- "$TEMP_ROOT"' EXIT INT TERM
 NONCE=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+TERMINATOR_SOURCE="$SCRIPT_DIRECTORY/performance-appkit-terminate.m"
+TERMINATOR_BINARY="$TEMP_ROOT/performance-appkit-terminate"
+printf '%s\n' '#!/bin/sh' 'exit 0' > "$TERMINATOR_BINARY"
+chmod 0500 "$TERMINATOR_BINARY"
+TERMINATOR_SOURCE_DEVICE="$(stat -f '%d' "$TERMINATOR_SOURCE")"
+TERMINATOR_SOURCE_INODE="$(stat -f '%i' "$TERMINATOR_SOURCE")"
+TERMINATOR_SOURCE_SHA256="$(shasum -a 256 "$TERMINATOR_SOURCE" | awk '{ print $1 }')"
+TERMINATOR_BINARY_DEVICE="$(stat -f '%d' "$TERMINATOR_BINARY")"
+TERMINATOR_BINARY_INODE="$(stat -f '%i' "$TERMINATOR_BINARY")"
+TERMINATOR_BINARY_SHA256="$(shasum -a 256 "$TERMINATOR_BINARY" | awk '{ print $1 }')"
+LIFECYCLE_HELPER="$SCRIPT_DIRECTORY/performance-subject-lifecycle.py"
 
 fail() { echo "test failure: $*" >&2; exit 1; }
 sha256() { shasum -a 256 "$1" | awk '{ print $1 }'; }
@@ -113,7 +124,7 @@ SPACETERM_INTENT="$TEMP_ROOT/spaceterm-intent.tsv"
 "$SCRIPT_DIRECTORY/freeze-performance-run-intent.sh" --subject spaceterm \
     --subject-identity "$SPACETERM_SUBJECT" "${intent_args[@]}" \
     --native-provisional-observation "$PROVISIONAL" --output "$SPACETERM_INTENT" >/dev/null
-[[ "$(wc -l < "$SPACETERM_INTENT" | tr -d ' ')" == 18 ]] || fail "intent is not exact18"
+[[ "$(wc -l < "$SPACETERM_INTENT" | tr -d ' ')" == 19 ]] || fail "intent is not exact19"
 
 GHOSTTY_INTENT="$TEMP_ROOT/ghostty-intent.tsv"
 "$SCRIPT_DIRECTORY/freeze-performance-run-intent.sh" --subject ghostty \
@@ -124,6 +135,12 @@ GHOSTTY_INTENT="$TEMP_ROOT/ghostty-intent.tsv"
 expect_failure "Ghostty provisional artifact" "$SCRIPT_DIRECTORY/freeze-performance-run-intent.sh" \
     --subject ghostty --subject-identity "$GHOSTTY_SUBJECT" "${intent_args[@]}" \
     --native-provisional-observation "$PROVISIONAL" --output "$TEMP_ROOT/bad-ghostty-intent.tsv"
+TEST_ONLY_INTENT="$TEMP_ROOT/test-only-intent.tsv"
+SPACETERM_PERFORMANCE_TEST_MODE=1 "$SCRIPT_DIRECTORY/freeze-performance-run-intent.sh" \
+    --subject ghostty --subject-identity "$GHOSTTY_SUBJECT" "${intent_args[@]}" \
+    --output "$TEST_ONLY_INTENT" >/dev/null
+[[ "$(awk -F '\t' '$1 == "evidence_mode" {print $2}' "$TEST_ONLY_INTENT")" == test-only ]] \
+    || fail "test-mode freezer did not mark the run intent test-only"
 
 SAMPLES="$TEMP_ROOT/runtime-samples.tsv"
 EVENTS="$TEMP_ROOT/runtime-events.tsv"
@@ -184,12 +201,11 @@ chmod 0600 "$SECRET"
 
 write_causal_closure() {
     local prefix="$1" intent="$2" identity="$3" native_observation="$4"
+    local terminator_source="$5" terminator_binary="$6"
     local token
     token="$(printf '%064d' "$([[ "$prefix" == spaceterm ]] && echo 1 || echo 2)")"
-    for name in driver-receipt driver-events rss-samples; do
-        printf '%s-%s\n' "$prefix" "$name" > "$TEMP_ROOT/$prefix-$name.tsv"
-        chmod 0400 "$TEMP_ROOT/$prefix-$name.tsv"
-    done
+    printf '%s-rss-samples\n' "$prefix" > "$TEMP_ROOT/$prefix-rss-samples.tsv"
+    chmod 0400 "$TEMP_ROOT/$prefix-rss-samples.tsv"
     python3 - "$TEMP_ROOT/$prefix-workload-events.tsv" \
         "$TEMP_ROOT/$prefix-workload-metadata.tsv" "$TEMP_ROOT/$prefix-ready.tsv" \
         "$SECRET" "$identity" "$prefix" <<'PY'
@@ -228,22 +244,86 @@ metadata_path.write_bytes(unsigned+f"events_hmac_sha256\t{hmac.new(secret,payloa
 PY
     chmod 0400 "$TEMP_ROOT/$prefix-workload-events.tsv" \
         "$TEMP_ROOT/$prefix-workload-metadata.tsv" "$TEMP_ROOT/$prefix-ready.tsv"
+    local window="$TEMP_ROOT/$prefix-window.tsv"
+    local driver_binary="$TEMP_ROOT/$prefix-performance-driver"
+    local driver_intent="$TEMP_ROOT/$prefix-driver-intent.tsv"
+    local driver_events="$TEMP_ROOT/$prefix-driver-events.tsv"
+    local driver_receipt="$TEMP_ROOT/$prefix-driver-receipt.tsv"
+    local gate="$TEMP_ROOT/$prefix-plan-start-gate.tsv"
+    local pid window_number=42 plan_start=1000000000
+    pid="$(awk -F '\t' '$1 == "process_pid" {print $2}' "$identity")"
+    printf 'driver-binary\n' > "$driver_binary"
+    chmod 0500 "$driver_binary"
+    cat > "$window" <<EOF
+format_version	1
+subject_identity_sha256	$(sha256 "$identity")
+subject	$prefix
+process_pid	$pid
+process_start_identity	100:200
+bundle_identifier	dev.spaceterm.$prefix
+executable_sha256	bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+window_number	$window_number
+window_owner_pid_verified	true
+window_layer	0
+window_onscreen	true
+window_minimized	false
+window_x	0.000
+window_y	0.000
+window_width	800.000
+window_height	600.000
+resolved_continuous_ns	900000000
+selector_kind	unique
+status	frozen
+EOF
+    chmod 0400 "$window"
+    python3 - "$gate" "$SECRET" "$prefix" "$plan_start" \
+        "$(sha256 "$TEMP_ROOT/$prefix-ready.tsv")" <<'PY'
+import hashlib,hmac,os,pathlib,struct,sys
+output,secret,prefix,start,ready=sys.argv[1:]
+unsigned=("format_version\t1\ncampaign_id\tcampaign-a\nsession_id\tsession-a\n"
+    f"nonce\t{'a'*64}\nready_receipt_sha256\t{ready}\nplan_start_continuous_ns\t{start}\n").encode()
+signature=hmac.new(pathlib.Path(secret).read_bytes(),
+ b"spaceterm.performance.plan-start-gate/v1\0"+struct.pack(">Q",len(unsigned))+unsigned,
+ hashlib.sha256).hexdigest()
+fd=os.open(output,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o400)
+try: os.write(fd,unsigned+f"start_gate_hmac_sha256\t{signature}\n".encode())
+finally: os.close(fd)
+PY
+    local -a driver_bindings=(
+        --campaign-secret-file "$SECRET" --campaign-id campaign-a --session-id session-a
+        --nonce "$NONCE" --driver-output "$driver_events" --driver-binary "$driver_binary"
+        --driver-source "$SCRIPT_DIRECTORY/performance-driver.m"
+        --controller "$SCRIPT_DIRECTORY/run-native-performance-scenario.sh"
+        --scenario-plan "$PLAN" --plan-start-continuous-ns "$plan_start"
+        --subject-identity "$identity" --window-identity "$window"
+    )
+    "$SCRIPT_DIRECTORY/performance-driver-receipt.py" intent "${driver_bindings[@]}" \
+        --output "$driver_intent"
+    cat > "$driver_events" <<EOF
+sequence	continuous_ns	event_id	action	target_pid	window_number	requested_a	requested_b	observed_a	observed_b	result
+0	2000000000	stop	stop	$pid	$window_number	0	0	1	1	verified
+EOF
+    chmod 0400 "$driver_events"
+    "$SCRIPT_DIRECTORY/performance-driver-receipt.py" finalize "${driver_bindings[@]}" \
+        --intent "$driver_intent" --receipt-output "$driver_receipt"
     python3 - "$TEMP_ROOT/$prefix-trace-provisional.tsv" "$SECRET" "$identity" "$intent" \
-        "$TEMP_ROOT/$prefix-workload-metadata.tsv" "$TEMP_ROOT/$prefix-ready.tsv" <<'PY'
+        "$TEMP_ROOT/$prefix-workload-metadata.tsv" "$TEMP_ROOT/$prefix-ready.tsv" \
+        "$gate" <<'PY'
 import hashlib, hmac, pathlib, struct, sys
-output, secret, subject, intent, workload, ready = map(pathlib.Path, sys.argv[1:])
+output, secret, subject, intent, workload, ready, gate = map(pathlib.Path, sys.argv[1:])
 sha = lambda path: hashlib.sha256(path.read_bytes()).hexdigest()
 rows = [
     ("format_version", "1"), ("subject_identity_sha256", sha(subject)),
     ("run_intent_sha256", sha(intent)), ("workload_metadata_sha256", sha(workload)),
     ("workload_ready_receipt_sha256", sha(ready)),
-    ("supplemental_evidence_sha256", "c" * 64), ("capture_status", "CAPTURED"),
+    ("supplemental_evidence_sha256", sha(gate)), ("capture_status", "CAPTURED"),
     ("requested_duration_ms", "1000"), ("actual_duration_ms", "1000"),
     ("capture_started_continuous_ns", "1000"),
     ("capture_ended_continuous_ns", "2000"), ("trace_bundle_tree_sha256", "c" * 64),
     ("toc_sha256", "c" * 64), ("time_profile_export_sha256", "c" * 64),
     ("allocations_export_sha256", "c" * 64), ("hangs_export_sha256", "c" * 64),
     ("trace_verification_sha256", "c" * 64), ("verifier_sha256", "c" * 64),
+    ("evidence_mode", "production"),
     ("status", "complete"), ("auth_algorithm", "hmac-sha256"),
 ]
 unsigned = b"".join(f"{key}\t{value}\n".encode() for key, value in rows)
@@ -263,7 +343,10 @@ PY
         --workload-ready-receipt "$TEMP_ROOT/$prefix-ready.tsv" \
         --rss-samples "$TEMP_ROOT/$prefix-rss-samples.tsv" \
         --trace-provisional-receipt "$TEMP_ROOT/$prefix-trace-provisional.tsv" \
-        --tail-completed-continuous-ns 5000003000 --output "$TEMP_ROOT/$prefix-tail.tsv"
+        --tail-completed-continuous-ns 5000003000 \
+        --appkit-terminator-source "$TERMINATOR_SOURCE" \
+        --appkit-terminator-binary "$TERMINATOR_BINARY" \
+        --output "$TEMP_ROOT/$prefix-tail.tsv"
     cat > "$TEMP_ROOT/$prefix-quit.tsv" <<EOF
 format_version	1
 campaign_id	campaign-a
@@ -277,11 +360,19 @@ request_continuous_ns	5000003100
 exit_continuous_ns	5000003200
 termination_method	appkit-terminate
 runtime_closure_status	confirmed
+appkit_terminator_source_device	$TERMINATOR_SOURCE_DEVICE
+appkit_terminator_source_inode	$TERMINATOR_SOURCE_INODE
+appkit_terminator_source_sha256	$TERMINATOR_SOURCE_SHA256
+appkit_terminator_binary_device	$TERMINATOR_BINARY_DEVICE
+appkit_terminator_binary_inode	$TERMINATOR_BINARY_INODE
+appkit_terminator_binary_sha256	$TERMINATOR_BINARY_SHA256
+evidence_mode	production
 status	completed
 EOF
     chmod 0400 "$TEMP_ROOT/$prefix-quit.tsv"
     python3 - "$TEMP_ROOT/$prefix-exit.tsv" "$SECRET" "$prefix" "$identity" "$intent" \
-        "$TEMP_ROOT/$prefix-tail.tsv" "$TEMP_ROOT/$prefix-quit.tsv" "$native_observation" <<'PY'
+        "$TEMP_ROOT/$prefix-tail.tsv" "$TEMP_ROOT/$prefix-quit.tsv" "$native_observation" \
+        "$terminator_source" "$terminator_binary" <<'PY'
 import hashlib, hmac, pathlib, struct, sys
 output, secret, subject_name, identity, intent, tail, quit_receipt = map(pathlib.Path, sys.argv[1:8])
 native_arg = sys.argv[8]
@@ -299,6 +390,13 @@ rows = [
     ("exit_requested_continuous_ns", "5000003100"),
     ("process_exited_continuous_ns", "5000003200"),
     ("exit_status", "normal"), ("native_observation_sha256", native_hash),
+    ("appkit_terminator_source_device", str(pathlib.Path(sys.argv[9]).stat().st_dev)),
+    ("appkit_terminator_source_inode", str(pathlib.Path(sys.argv[9]).stat().st_ino)),
+    ("appkit_terminator_source_sha256", sha(pathlib.Path(sys.argv[9]))),
+    ("appkit_terminator_binary_device", str(pathlib.Path(sys.argv[10]).stat().st_dev)),
+    ("appkit_terminator_binary_inode", str(pathlib.Path(sys.argv[10]).stat().st_ino)),
+    ("appkit_terminator_binary_sha256", sha(pathlib.Path(sys.argv[10]))),
+    ("evidence_mode", "production"),
     ("auth_algorithm", "hmac-sha256"),
 ]
 status = ("status", "complete")
@@ -309,10 +407,57 @@ output.write_bytes(b"".join(f"{key}\t{value}\n".encode() for key, value in rows)
     + f"receipt_hmac_sha256\t{signature}\nstatus\tcomplete\n".encode())
 PY
     chmod 0400 "$TEMP_ROOT/$prefix-exit.tsv"
+    python3 - "$TEMP_ROOT/$prefix-lifecycle-ready.tsv" \
+        "$TEMP_ROOT/$prefix-lifecycle-registration.tsv" "$SECRET" "$prefix" "$identity" \
+        "$intent" "$TEMP_ROOT/$prefix-tail.tsv" "$TEMP_ROOT/$prefix-workload-metadata.tsv" \
+        "$TEMP_ROOT/$prefix-workload-events.tsv" "$TEMP_ROOT/$prefix-ready.tsv" \
+        "$TEMP_ROOT/$prefix-quit.tsv" "$TEMP_ROOT/$prefix-exit.tsv" "$native_observation" \
+        "$terminator_source" "$terminator_binary" "$token" <<'PY'
+import hashlib,hmac,pathlib,struct,sys
+(ready_out,reg_out,secret_path,subject_name,identity_path,intent_path,tail_path,
+ workload_path,events_path,workload_ready_path,quit_path,exit_path,native_path,
+ source_path,binary_path,token)=map(pathlib.Path,sys.argv[1:])
+secret=secret_path.read_bytes(); sha=lambda path:hashlib.sha256(path.read_bytes()).hexdigest()
+identity=dict(line.split("\t",1) for line in identity_path.read_text().splitlines())
+tool=[("appkit_terminator_source_device",str(source_path.stat().st_dev)),
+ ("appkit_terminator_source_inode",str(source_path.stat().st_ino)),
+ ("appkit_terminator_source_sha256",sha(source_path)),
+ ("appkit_terminator_binary_device",str(binary_path.stat().st_dev)),
+ ("appkit_terminator_binary_inode",str(binary_path.stat().st_ino)),
+ ("appkit_terminator_binary_sha256",sha(binary_path))]
+ready=[("schema","spaceterm.acceptance.performance-lifecycle-ready/v1"),
+ ("subject",subject_name.name),("campaign_id","campaign-a"),("session_id","session-a"),
+ ("nonce","a"*64),("subject_identity_sha256",sha(identity_path)),
+ ("process_pid",identity["process_pid"]),("process_start_identity",identity["process_start_identity"]),
+ ("executable_sha256",identity["executable_sha256"]),("ready_continuous_ns","900"),
+ ("registration_control_device","1"),("registration_control_inode","2")]+tool+[
+ ("evidence_mode","production"),("auth_algorithm","hmac-sha256"),("status","ready")]
+def signed(rows,field,magic):
+ unsigned=b"".join(f"{k}\t{v}\n".encode() for k,v in rows)
+ signature=hmac.new(secret,magic+struct.pack(">Q",len(unsigned))+unsigned,hashlib.sha256).hexdigest()
+ return b"".join(f"{k}\t{v}\n".encode() for k,v in rows[:-1])+f"{field}\t{signature}\n".encode()+f"{rows[-1][0]}\t{rows[-1][1]}\n".encode()
+ready_out.write_bytes(signed(ready,"receipt_hmac_sha256",b"spaceterm.acceptance.performance-lifecycle-ready/v1\0"))
+native="not-applicable" if native_path.name=="not-applicable" else str(native_path.resolve())
+reg=[("format_version","1"),("campaign_id","campaign-a"),("session_id","session-a"),
+ ("nonce","a"*64),("registration_token",token.name),("subject_identity_sha256",sha(identity_path)),
+ ("process_pid",identity["process_pid"]),("process_start_identity",identity["process_start_identity"]),
+ ("run_intent_path",str(intent_path.resolve())),("run_intent_sha256",sha(intent_path)),
+ ("tail_receipt_path",str(tail_path.resolve())),("workload_metadata_path",str(workload_path.resolve())),
+ ("workload_events_path",str(events_path.resolve())),
+ ("workload_ready_receipt_path",str(workload_ready_path.resolve())),
+ ("quit_receipt_path",str(quit_path.resolve())),("subject_exit_receipt_path",str(exit_path.resolve())),
+ ("native_observation_path",native)]+tool+[("evidence_mode","production"),
+ ("auth_algorithm","hmac-sha256"),("status","registered")]
+reg_out.write_bytes(signed(reg,"registration_hmac_sha256",b"spaceterm.acceptance.performance-lifecycle-registration/v1\0"))
+PY
+    chmod 0400 "$TEMP_ROOT/$prefix-lifecycle-ready.tsv" \
+        "$TEMP_ROOT/$prefix-lifecycle-registration.tsv"
 }
 
-write_causal_closure spaceterm "$SPACETERM_INTENT" "$SPACETERM_SUBJECT" "$FINAL"
-write_causal_closure ghostty "$GHOSTTY_INTENT" "$GHOSTTY_SUBJECT" not-applicable
+write_causal_closure spaceterm "$SPACETERM_INTENT" "$SPACETERM_SUBJECT" "$FINAL" \
+    "$TERMINATOR_SOURCE" "$TERMINATOR_BINARY"
+write_causal_closure ghostty "$GHOSTTY_INTENT" "$GHOSTTY_SUBJECT" not-applicable \
+    "$TERMINATOR_SOURCE" "$TERMINATOR_BINARY"
 SPACETERM_CAUSAL=(
     --campaign-secret-file "$SECRET"
     --trace-provisional-receipt "$TEMP_ROOT/spaceterm-trace-provisional.tsv"
@@ -321,10 +466,22 @@ SPACETERM_CAUSAL=(
     --subject-exit-receipt "$TEMP_ROOT/spaceterm-exit.tsv"
     --driver-receipt "$TEMP_ROOT/spaceterm-driver-receipt.tsv"
     --driver-events "$TEMP_ROOT/spaceterm-driver-events.tsv"
+    --driver-intent "$TEMP_ROOT/spaceterm-driver-intent.tsv"
+    --window-identity "$TEMP_ROOT/spaceterm-window.tsv"
+    --driver-binary "$TEMP_ROOT/spaceterm-performance-driver"
+    --driver-source "$SCRIPT_DIRECTORY/performance-driver.m"
+    --driver-controller "$SCRIPT_DIRECTORY/run-native-performance-scenario.sh"
+    --scenario-plan "$PLAN"
+    --plan-start-gate "$TEMP_ROOT/spaceterm-plan-start-gate.tsv"
     --workload-metadata "$TEMP_ROOT/spaceterm-workload-metadata.tsv"
     --workload-events "$TEMP_ROOT/spaceterm-workload-events.tsv"
     --workload-ready-receipt "$TEMP_ROOT/spaceterm-ready.tsv"
     --rss-samples "$TEMP_ROOT/spaceterm-rss-samples.tsv"
+    --performance-lifecycle-ready-receipt "$TEMP_ROOT/spaceterm-lifecycle-ready.tsv"
+    --performance-lifecycle-registration "$TEMP_ROOT/spaceterm-lifecycle-registration.tsv"
+    --subject-lifecycle-helper "$LIFECYCLE_HELPER"
+    --appkit-terminator-source "$TERMINATOR_SOURCE"
+    --appkit-terminator-binary "$TERMINATOR_BINARY"
 )
 GHOSTTY_CAUSAL=(
     --campaign-secret-file "$SECRET"
@@ -334,11 +491,27 @@ GHOSTTY_CAUSAL=(
     --subject-exit-receipt "$TEMP_ROOT/ghostty-exit.tsv"
     --driver-receipt "$TEMP_ROOT/ghostty-driver-receipt.tsv"
     --driver-events "$TEMP_ROOT/ghostty-driver-events.tsv"
+    --driver-intent "$TEMP_ROOT/ghostty-driver-intent.tsv"
+    --window-identity "$TEMP_ROOT/ghostty-window.tsv"
+    --driver-binary "$TEMP_ROOT/ghostty-performance-driver"
+    --driver-source "$SCRIPT_DIRECTORY/performance-driver.m"
+    --driver-controller "$SCRIPT_DIRECTORY/run-native-performance-scenario.sh"
+    --scenario-plan "$PLAN"
+    --plan-start-gate "$TEMP_ROOT/ghostty-plan-start-gate.tsv"
     --workload-metadata "$TEMP_ROOT/ghostty-workload-metadata.tsv"
     --workload-events "$TEMP_ROOT/ghostty-workload-events.tsv"
     --workload-ready-receipt "$TEMP_ROOT/ghostty-ready.tsv"
     --rss-samples "$TEMP_ROOT/ghostty-rss-samples.tsv"
+    --performance-lifecycle-ready-receipt "$TEMP_ROOT/ghostty-lifecycle-ready.tsv"
+    --performance-lifecycle-registration "$TEMP_ROOT/ghostty-lifecycle-registration.tsv"
+    --subject-lifecycle-helper "$LIFECYCLE_HELPER"
+    --appkit-terminator-source "$TERMINATOR_SOURCE"
+    --appkit-terminator-binary "$TERMINATOR_BINARY"
 )
+expect_failure "test-only intent production finalization" \
+    "$SCRIPT_DIRECTORY/freeze-performance-run.sh" --run-intent "$TEST_ONLY_INTENT" \
+    --subject-identity "$GHOSTTY_SUBJECT" "${GHOSTTY_CAUSAL[@]}" \
+    --output "$TEMP_ROOT/test-only-final.tsv"
 
 closure_args=(
     --native-provisional-observation "$PROVISIONAL" --native-observation "$FINAL"
@@ -349,9 +522,9 @@ SPACETERM_RUN="$TEMP_ROOT/spaceterm-run.tsv"
 "$SCRIPT_DIRECTORY/freeze-performance-run.sh" --run-intent "$SPACETERM_INTENT" \
     --subject-identity "$SPACETERM_SUBJECT" "${SPACETERM_CAUSAL[@]}" \
     "${closure_args[@]}" --output "$SPACETERM_RUN" >/dev/null
-[[ "$(wc -l < "$SPACETERM_RUN" | tr -d ' ')" == 29 \
+[[ "$(wc -l < "$SPACETERM_RUN" | tr -d ' ')" == 35 \
     && "$(awk -F '\t' '$1 == "run_intent_sha256" {print $2}' "$SPACETERM_RUN")" \
-        == "$(sha256 "$SPACETERM_INTENT")" ]] || fail "SpaceTerm final metadata is not exact29"
+        == "$(sha256 "$SPACETERM_INTENT")" ]] || fail "SpaceTerm final metadata is not exact35"
 for binding in trace_provisional_receipt performance_tail_receipt \
     performance_quit_receipt subject_exit_receipt; do
     value="$(awk -F '\t' -v key="${binding}_sha256" '$1 == key {print $2}' "$SPACETERM_RUN")"
@@ -363,6 +536,14 @@ GHOSTTY_RUN="$TEMP_ROOT/ghostty-run.tsv"
     --subject-identity "$GHOSTTY_SUBJECT" "${GHOSTTY_CAUSAL[@]}" --output "$GHOSTTY_RUN" >/dev/null
 [[ "$(awk -F '\t' '$2 == "not-applicable" {count++} END {print count}' "$GHOSTTY_RUN")" == 10 ]] \
     || fail "Ghostty final metadata does not contain ten N/A fields"
+BAD_LIFECYCLE_READY="$TEMP_ROOT/bad-lifecycle-ready.tsv"
+sed 's/status\tready/status\tforged/' "$TEMP_ROOT/spaceterm-lifecycle-ready.tsv" \
+    > "$BAD_LIFECYCLE_READY"
+chmod 0400 "$BAD_LIFECYCLE_READY"
+expect_failure "forged lifecycle ready receipt" "$SCRIPT_DIRECTORY/freeze-performance-run.sh" \
+    --run-intent "$SPACETERM_INTENT" --subject-identity "$SPACETERM_SUBJECT" \
+    "${SPACETERM_CAUSAL[@]/$TEMP_ROOT\/spaceterm-lifecycle-ready.tsv/$BAD_LIFECYCLE_READY}" \
+    "${closure_args[@]}" --output "$TEMP_ROOT/forged-lifecycle-run.tsv"
 expect_failure "cross-subject intent replay" "$SCRIPT_DIRECTORY/freeze-performance-run.sh" \
     --run-intent "$SPACETERM_INTENT" --subject-identity "$GHOSTTY_SUBJECT" \
     "${SPACETERM_CAUSAL[@]}" "${closure_args[@]}" --output "$TEMP_ROOT/cross-subject.tsv"

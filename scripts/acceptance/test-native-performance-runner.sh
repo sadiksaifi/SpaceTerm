@@ -101,6 +101,8 @@ for tool in performance-workload performance-driver performance-rss-sampler \
     [[ -x "$TOOLS/$tool" && ! -L "$TOOLS/$tool" ]] || fail "missing native tool: $tool"
     "$TOOLS/$tool" --help >/dev/null
 done
+[[ -x "$TOOLS/performance-appkit-terminate" && ! -L "$TOOLS/performance-appkit-terminate" ]] \
+    || fail "missing native tool: performance-appkit-terminate"
 
 expect_failure "builder reused output" "$BUILDER" --run-directory "$RUN_DIR" \
     --output-directory "$RUN_DIR/tools" --architecture "$(uname -m)"
@@ -117,7 +119,7 @@ chmod 0500 "$ALTERED_TOOLS/performance-workload"
 write_file() {
     local path="$1"
     shift
-    printf '%s' "$*" > "$path"
+    printf '%s\n' "$*" > "$path"
     chmod 0400 "$path"
 }
 
@@ -242,6 +244,7 @@ campaign_id	i43-test
 session_id	spaceterm-resize-01
 nonce	cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
 native_provisional_observation_sha256	$(sha256 "$NATIVE_PROVISIONAL")
+evidence_mode	test-only
 status	prepared
 EOF
 )"
@@ -257,6 +260,8 @@ readonly NONCE=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
 run_runner() {
     local tools="$1" suffix="$2" window="${3:-$WINDOW}"
     local quit_control="$RUN_DIR/quit-$suffix.fifo"
+    export SPACETERM_TEST_LIFECYCLE_IDENTITY=valid
+    export SPACETERM_TEST_LIFECYCLE_TERMINATION=normal
     [[ -e "$quit_control" ]] || mkfifo -m 600 "$quit_control"
     "$RUNNER" --run-directory "$RUN_DIR" --tools-directory "$tools" \
         --subject-identity "$SUBJECT" --window-identity "$window" \
@@ -273,6 +278,9 @@ run_runner() {
         --trace-output-directory "$RUN_DIR/trace-$suffix" \
         --trace-provisional-receipt "$RUN_DIR/trace-provisional-$suffix.tsv" \
         --performance-tail-receipt "$RUN_DIR/tail-$suffix.tsv" \
+        --performance-lifecycle-ready-receipt "$RUN_DIR/lifecycle-ready-$suffix.tsv" \
+        --performance-lifecycle-control "$RUN_DIR/lifecycle-$suffix.fifo" \
+        --performance-lifecycle-registration "$RUN_DIR/lifecycle-registration-$suffix.tsv" \
         --performance-quit-control "$quit_control" \
         --performance-quit-receipt "$RUN_DIR/quit-receipt-$suffix.tsv" \
         --subject-exit-receipt "$RUN_DIR/exit-$suffix.tsv" \
@@ -329,7 +337,9 @@ SPACETERM_PERFORMANCE_TEST_MODE=1 SPACETERM_PERFORMANCE_TAIL_MS=0 \
 [[ -z "$(jobs -pr)" ]] || fail "orphaned background job after failure"
 [[ "$(awk -F '\t' '$1 == "status" {print $2}' "$RUN_DIR/result-timeout.tsv")" == incomplete ]] \
     || fail "timeout result is not incomplete"
-[[ "$(awk -F '\t' '$1 == "result_reason" {print $2}' "$RUN_DIR/result-timeout.tsv")" == workload-ready-receipt-timeout ]] \
-    || fail "timeout result did not reach authenticated readiness wait"
+observed_reason="$(awk -F '\t' '$1 == "result_reason" {print $2}' "$RUN_DIR/result-timeout.tsv")"
+[[ "$observed_reason" == workload-ready-receipt-timeout ]] \
+    || { sed 's/^/  /' "$TEMP_ROOT/failure.stderr" >&2; \
+        fail "timeout result did not reach authenticated readiness wait: $observed_reason"; }
 
 echo "native performance runner tests passed"

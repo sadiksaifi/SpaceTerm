@@ -63,6 +63,7 @@ scripts-check:
         scripts/record-release-performance-trace.sh \
         scripts/test-release-performance-tools.sh \
         scripts/acceptance/analyze-release-performance-case.sh \
+        scripts/acceptance/analyze-release-performance-pair.sh \
         scripts/acceptance/failure-action-driver.sh \
         scripts/acceptance/assemble-release-performance-rss-v3.sh \
         scripts/acceptance/build-native-performance-tools.sh \
@@ -74,6 +75,7 @@ scripts-check:
         scripts/acceptance/performance-plan.sh \
         scripts/acceptance/run-native-performance-scenario.sh \
         scripts/acceptance/test-performance-driver-receipt.sh \
+        scripts/acceptance/test-performance-pair-result.sh \
         scripts/acceptance/test-performance-run-metadata-v3.sh \
         scripts/acceptance/test-performance-tail-receipt.sh \
         scripts/acceptance/test-native-performance-runner.sh \
@@ -85,6 +87,7 @@ scripts-check:
         scripts/record-release-performance-trace.sh \
         scripts/test-release-performance-tools.sh \
         scripts/acceptance/analyze-release-performance-case.sh \
+        scripts/acceptance/analyze-release-performance-pair.sh \
         scripts/acceptance/failure-action-driver.sh \
         scripts/acceptance/assemble-release-performance-rss-v3.sh \
         scripts/acceptance/build-native-performance-tools.sh \
@@ -96,6 +99,7 @@ scripts-check:
         scripts/acceptance/performance-plan.sh \
         scripts/acceptance/run-native-performance-scenario.sh \
         scripts/acceptance/test-performance-driver-receipt.sh \
+        scripts/acceptance/test-performance-pair-result.sh \
         scripts/acceptance/test-performance-run-metadata-v3.sh \
         scripts/acceptance/test-performance-tail-receipt.sh \
         scripts/acceptance/test-native-performance-runner.sh \
@@ -110,10 +114,13 @@ scripts-check:
     xcrun clang -fobjc-arc -fblocks -fsyntax-only -Wall -Wextra -Werror -Wpedantic \
         -mmacosx-version-min=11.0 \
         scripts/acceptance/performance-window-resolver.m
+    xcrun clang -fobjc-arc -fblocks -fsyntax-only -Wall -Wextra -Werror -Wpedantic \
+        -mmacosx-version-min=11.0 \
+        scripts/acceptance/performance-appkit-terminate.m
     xcrun clang -std=c17 -fsyntax-only -Wall -Wextra -Werror -Wpedantic \
         -mmacosx-version-min=11.0 \
         scripts/acceptance/performance-workload.c
-    python3 -c 'import pathlib; [compile(path.read_text(), path.name, "exec") for path in map(pathlib.Path, ["scripts/acceptance/performance-driver-receipt.py", "scripts/acceptance/performance-tail-receipt.py", "scripts/acceptance/run-performance-process-group.py", "scripts/inspect-release-performance-process.py", "scripts/run-release-performance-command.py", "scripts/verify-release-performance-trace.py", "scripts/acceptance/verify-performance-native-closure.py", "scripts/acceptance/verify-performance-subject-exit.py", "scripts/acceptance/verify-performance-workload-auth.py", "scripts/acceptance/verify-performance-workload-ready.py"])]'
+    python3 -c 'import pathlib; [compile(path.read_text(), path.name, "exec") for path in map(pathlib.Path, ["scripts/acceptance/performance-driver-receipt.py", "scripts/acceptance/performance-pair-result.py", "scripts/acceptance/performance-subject-lifecycle.py", "scripts/acceptance/performance-tail-receipt.py", "scripts/acceptance/run-performance-process-group.py", "scripts/inspect-release-performance-process.py", "scripts/run-release-performance-command.py", "scripts/verify-release-performance-trace.py", "scripts/acceptance/verify-performance-lifecycle-receipts.py", "scripts/acceptance/verify-performance-native-closure.py", "scripts/acceptance/verify-performance-subject-exit.py", "scripts/acceptance/verify-performance-workload-auth.py", "scripts/acceptance/verify-performance-workload-ready.py"])]'
     plutil -lint packaging/macos/Info.plist
 
 # Run focused checks for the release-performance workload and evidence tools.
@@ -121,6 +128,8 @@ performance-tools-check:
     ./scripts/test-release-performance-tools.sh
     ./scripts/acceptance/test-release-performance-campaign.sh
     ./scripts/acceptance/test-performance-driver-receipt.sh
+    ./scripts/acceptance/test-performance-pair-result.sh
+    ./scripts/acceptance/test-performance-subject-lifecycle.py
     ./scripts/acceptance/test-performance-run-metadata-v3.sh
     ./scripts/acceptance/test-performance-tail-receipt.sh
     ./scripts/acceptance/test-native-performance-runner.sh
@@ -134,6 +143,14 @@ performance-native-tools run_dir output_dir architecture:
 # Run one authenticated native performance scenario against a frozen subject.
 performance-native-run *arguments:
     ./scripts/acceptance/run-native-performance-scenario.sh {{ arguments }}
+
+# Finalize one authenticated pair from two complete production subject runs.
+performance-pair-finalize *arguments:
+    python3 scripts/acceptance/performance-pair-result.py create {{ arguments }}
+
+# Emit the only release-performance PASS after both complete cases and pair replay.
+performance-pair-analyze *arguments:
+    ./scripts/acceptance/analyze-release-performance-pair.sh {{ arguments }}
 
 # Check the local Instruments and RSS prerequisites used for release acceptance.
 performance-doctor:

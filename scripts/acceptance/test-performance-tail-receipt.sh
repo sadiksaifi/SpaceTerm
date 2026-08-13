@@ -4,6 +4,7 @@ set -euo pipefail
 IFS=$'\n\t'
 export LC_ALL=C
 umask 077
+export SPACETERM_PERFORMANCE_TEST_MODE=1
 
 SCRIPT_DIRECTORY="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 TOOL="$SCRIPT_DIRECTORY/performance-tail-receipt.py"
@@ -59,6 +60,7 @@ campaign_id	campaign-a
 session_id	session-a
 nonce	$NONCE
 native_provisional_observation_sha256	cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+evidence_mode	test-only
 status	prepared
 EOF
 chmod 0400 "$INTENT"
@@ -136,6 +138,7 @@ rows = [
     ("toc_sha256", "c" * 64), ("time_profile_export_sha256", "c" * 64),
     ("allocations_export_sha256", "c" * 64), ("hangs_export_sha256", "c" * 64),
     ("trace_verification_sha256", "c" * 64), ("verifier_sha256", "c" * 64),
+    ("evidence_mode", "test-only"),
     ("status", "complete"), ("auth_algorithm", "hmac-sha256"),
 ]
 unsigned = b"".join(f"{key}\t{value}\n".encode() for key, value in rows)
@@ -145,6 +148,11 @@ output.write_bytes(unsigned + f"provisional_hmac_sha256\t{signature}\n".encode()
 PY
 chmod 0400 "$TRACE"
 RECEIPT="$TEMP_ROOT/tail.tsv"
+TERMINATOR_SOURCE="$TEMP_ROOT/performance-appkit-terminate.m"
+TERMINATOR_BINARY="$TEMP_ROOT/performance-appkit-terminate"
+printf '%s\n' '// fixture' > "$TERMINATOR_SOURCE"
+printf '%s\n' '#!/bin/sh' 'exit 0' > "$TERMINATOR_BINARY"
+chmod 0500 "$TERMINATOR_BINARY"
 common=(
     --campaign-secret-file "$SECRET" --campaign-id campaign-a --session-id session-a
     --nonce "$NONCE" --quit-token "$TOKEN" --run-intent "$INTENT"
@@ -154,6 +162,8 @@ common=(
     --workload-ready-receipt "$WORKLOAD_READY" --rss-samples "$TEMP_ROOT/rss-samples.tsv"
     --trace-provisional-receipt "$TRACE"
     --tail-completed-continuous-ns 5000003000
+    --appkit-terminator-source "$TERMINATOR_SOURCE"
+    --appkit-terminator-binary "$TERMINATOR_BINARY"
 )
 "$TOOL" create "${common[@]}" --output "$RECEIPT"
 "$TOOL" verify "${common[@]}" --receipt "$RECEIPT"

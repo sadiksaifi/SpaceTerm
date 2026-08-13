@@ -71,7 +71,9 @@ readonly WORKLOAD_SOURCE="$SCRIPT_DIRECTORY/performance-workload.c"
 readonly DRIVER_SOURCE="$SCRIPT_DIRECTORY/performance-driver.m"
 readonly RSS_SOURCE="$SCRIPT_DIRECTORY/performance-rss-sampler.m"
 readonly WINDOW_SOURCE="$SCRIPT_DIRECTORY/performance-window-resolver.m"
-for source in "$WORKLOAD_SOURCE" "$DRIVER_SOURCE" "$RSS_SOURCE" "$WINDOW_SOURCE"; do
+readonly TERMINATOR_SOURCE="$SCRIPT_DIRECTORY/performance-appkit-terminate.m"
+for source in "$WORKLOAD_SOURCE" "$DRIVER_SOURCE" "$RSS_SOURCE" "$WINDOW_SOURCE" \
+    "$TERMINATOR_SOURCE"; do
     [[ -f "$source" && ! -L "$source" ]] || die "source must be a non-symlink regular file: $source"
 done
 
@@ -89,9 +91,11 @@ WORKLOAD_SOURCE_SHA256="$(sha256 "$WORKLOAD_SOURCE")"
 DRIVER_SOURCE_SHA256="$(sha256 "$DRIVER_SOURCE")"
 RSS_SOURCE_SHA256="$(sha256 "$RSS_SOURCE")"
 WINDOW_SOURCE_SHA256="$(sha256 "$WINDOW_SOURCE")"
+TERMINATOR_SOURCE_SHA256="$(sha256 "$TERMINATOR_SOURCE")"
 readonly COMPILER_VERSION COMPILER_SHA256 BUILDER_SHA256
 readonly WORKLOAD_SOURCE_SHA256 DRIVER_SOURCE_SHA256 RSS_SOURCE_SHA256
 readonly WINDOW_SOURCE_SHA256
+readonly TERMINATOR_SOURCE_SHA256
 
 TEMP_DIRECTORY="$(mktemp -d "$RUN_DIRECTORY/.native-performance-tools.XXXXXX")"
 trap cleanup EXIT INT TERM HUP
@@ -117,17 +121,21 @@ declare -a driver_libraries=(-lbsm)
     "$RSS_SOURCE" "${objc_frameworks[@]}" -o "$TEMP_DIRECTORY/performance-rss-sampler"
 "$COMPILER" "${objc_flags[@]}" "${common_flags[@]}" \
     "$WINDOW_SOURCE" "${objc_frameworks[@]}" -o "$TEMP_DIRECTORY/performance-window-resolver"
+"$COMPILER" "${objc_flags[@]}" "${common_flags[@]}" \
+    "$TERMINATOR_SOURCE" -framework AppKit -framework Foundation \
+    -o "$TEMP_DIRECTORY/performance-appkit-terminate"
 
 [[ "$(sha256 "$WORKLOAD_SOURCE")" == "$WORKLOAD_SOURCE_SHA256" \
     && "$(sha256 "$DRIVER_SOURCE")" == "$DRIVER_SOURCE_SHA256" \
     && "$(sha256 "$RSS_SOURCE")" == "$RSS_SOURCE_SHA256" \
     && "$(sha256 "$WINDOW_SOURCE")" == "$WINDOW_SOURCE_SHA256" \
+    && "$(sha256 "$TERMINATOR_SOURCE")" == "$TERMINATOR_SOURCE_SHA256" \
     && "$(sha256 "$BUILDER_PATH")" == "$BUILDER_SHA256" \
     && "$(sha256 "$COMPILER")" == "$COMPILER_SHA256" ]] \
     || die "compiler, builder, or source changed during the build"
 
 for binary in performance-workload performance-driver performance-rss-sampler \
-    performance-window-resolver; do
+    performance-window-resolver performance-appkit-terminate; do
     [[ -f "$TEMP_DIRECTORY/$binary" && -x "$TEMP_DIRECTORY/$binary" \
         && ! -L "$TEMP_DIRECTORY/$binary" ]] \
         || die "compiler did not produce the expected binary: $binary"
@@ -172,6 +180,12 @@ metadata="$TEMP_DIRECTORY/native-performance-tools.tsv"
     printf 'performance_window_resolver_binary\t%s\n' 'performance-window-resolver'
     printf 'performance_window_resolver_binary_sha256\t%s\n' \
         "$(sha256 "$TEMP_DIRECTORY/performance-window-resolver")"
+    printf 'performance_appkit_terminator_source\t%s\n' \
+        'scripts/acceptance/performance-appkit-terminate.m'
+    printf 'performance_appkit_terminator_source_sha256\t%s\n' "$TERMINATOR_SOURCE_SHA256"
+    printf 'performance_appkit_terminator_binary\t%s\n' 'performance-appkit-terminate'
+    printf 'performance_appkit_terminator_binary_sha256\t%s\n' \
+        "$(sha256 "$TEMP_DIRECTORY/performance-appkit-terminate")"
     printf 'status\tcomplete\n'
 } > "$metadata"
 chmod 0400 "$metadata"

@@ -20,6 +20,9 @@ NONCE=""
 NATIVE_PROVISIONAL_OBSERVATION=""
 OUTPUT=""
 TEMP=""
+EVIDENCE_MODE=production
+[[ "${SPACETERM_PERFORMANCE_TEST_MODE:-0}" != 1 ]] || EVIDENCE_MODE=test-only
+readonly EVIDENCE_MODE
 
 SCRIPT_DIRECTORY="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 readonly SCRIPT_DIRECTORY
@@ -161,6 +164,7 @@ trap cleanup EXIT INT TERM
     printf 'session_id\t%s\n' "$SESSION_ID"
     printf 'nonce\t%s\n' "$NONCE"
     printf 'native_provisional_observation_sha256\t%s\n' "$provisional_hash"
+    printf 'evidence_mode\t%s\n' "$EVIDENCE_MODE"
     printf 'status\tprepared\n'
 } > "$TEMP"
 chmod 0444 "$TEMP"

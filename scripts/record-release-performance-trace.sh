@@ -15,6 +15,9 @@ TEST_OVERRIDES_ACTIVE=false
 [[ -z "${SPACETERM_XCRUN:-}${SPACETERM_SHASUM:-}${SPACETERM_CONTINUOUS_CLOCK:-}${SPACETERM_PROCESS_INSPECTOR:-}${SPACETERM_TRACE_VERIFIER:-}${SPACETERM_TEST_RUN_METADATA_WAIT_TENTHS:-}" ]] \
     || TEST_OVERRIDES_ACTIVE=true
 readonly TEST_OVERRIDES_ACTIVE
+EVIDENCE_MODE=production
+[[ "${SPACETERM_PERFORMANCE_TEST_MODE:-0}" != 1 ]] || EVIDENCE_MODE=test-only
+readonly EVIDENCE_MODE
 
 SUBJECT_IDENTITY=""
 RUN_INTENT=""
@@ -65,6 +68,8 @@ EOF
 }
 
 die() { echo "error: $*" >&2; exit 1; }
+[[ "$TEST_OVERRIDES_ACTIVE" == false || "$EVIDENCE_MODE" == test-only ]] \
+    || die "trace test overrides require SPACETERM_PERFORMANCE_TEST_MODE=1"
 require_command() { command -v "$1" >/dev/null 2>&1 || die "required command not found: $1"; }
 is_positive_integer() { [[ "$1" =~ ^[1-9][0-9]*$ ]]; }
 is_uint() { [[ "$1" =~ ^[0-9]+$ ]]; }
@@ -331,10 +336,10 @@ package_bundle_matches() {
 }
 
 validate_run_intent() {
-    readonly RUN_INTENT_KEYS="format_version subject subject_identity_sha256 scenario scenario_plan_sha256 workload_sha256 command_sha256 environment_sha256 font_sha256 initial_grid_sha256 measured_duration_ms process_pid process_start_identity campaign_id session_id nonce native_provisional_observation_sha256 status"
+    readonly RUN_INTENT_KEYS="format_version subject subject_identity_sha256 scenario scenario_plan_sha256 workload_sha256 command_sha256 environment_sha256 font_sha256 initial_grid_sha256 measured_duration_ms process_pid process_start_identity campaign_id session_id nonce native_provisional_observation_sha256 evidence_mode status"
     file_is_immutable_regular "$RUN_INTENT" \
         || die "run intent must be immutable singleton evidence"
-    validate_exact_schema "$RUN_INTENT" "$RUN_INTENT_KEYS" 18 "run intent"
+    validate_exact_schema "$RUN_INTENT" "$RUN_INTENT_KEYS" 19 "run intent"
     [[ "$(kv "$RUN_INTENT" format_version)" == 1 \
         && "$(kv "$RUN_INTENT" status)" == prepared \
         && "$(kv "$RUN_INTENT" subject)" == "$SUBJECT" \
@@ -345,7 +350,8 @@ validate_run_intent() {
         && "$(kv "$RUN_INTENT" process_start_identity)" == "$PROCESS_START_IDENTITY" \
         && "$(kv "$RUN_INTENT" campaign_id)" == "$CAMPAIGN_ID" \
         && "$(kv "$RUN_INTENT" session_id)" == "$SESSION_ID" \
-        && "$(kv "$RUN_INTENT" nonce)" == "$NONCE" ]] \
+        && "$(kv "$RUN_INTENT" nonce)" == "$NONCE" \
+        && "$(kv "$RUN_INTENT" evidence_mode)" == "$EVIDENCE_MODE" ]] \
         || die "run intent does not bind the requested frozen campaign run"
     RUN_WORKLOAD_SHA256="$(kv "$RUN_INTENT" workload_sha256)"
     is_sha256 "$RUN_WORKLOAD_SHA256" || die "run workload hash is invalid"
@@ -372,20 +378,23 @@ wait_for_run_metadata() {
 
 validate_run_metadata() {
     local key
-    readonly RUN_KEYS="format_version subject subject_identity_sha256 scenario scenario_plan_sha256 workload_sha256 command_sha256 environment_sha256 font_sha256 initial_grid_sha256 measured_duration_ms process_pid process_start_identity run_intent_sha256 native_observation_sha256 native_runtime_metadata_sha256 native_failure_actions_sha256 native_failure_action_enabled native_failure_request_count native_failure_result_count native_failure_resource_staged_count native_failure_resource_staged_bytes native_failure_resource_rolled_back_count native_failure_resource_rolled_back_bytes trace_provisional_receipt_sha256 performance_tail_receipt_sha256 performance_quit_receipt_sha256 subject_exit_receipt_sha256 status"
+    readonly RUN_KEYS="format_version subject subject_identity_sha256 scenario scenario_plan_sha256 workload_sha256 command_sha256 environment_sha256 font_sha256 initial_grid_sha256 measured_duration_ms process_pid process_start_identity run_intent_sha256 native_observation_sha256 native_runtime_metadata_sha256 native_failure_actions_sha256 native_failure_action_enabled native_failure_request_count native_failure_result_count native_failure_resource_staged_count native_failure_resource_staged_bytes native_failure_resource_rolled_back_count native_failure_resource_rolled_back_bytes trace_provisional_receipt_sha256 performance_tail_receipt_sha256 performance_quit_receipt_sha256 subject_exit_receipt_sha256 lifecycle_ready_receipt_sha256 lifecycle_registration_receipt_sha256 lifecycle_helper_sha256 terminator_source_sha256 terminator_binary_sha256 evidence_mode status"
     wait_for_run_metadata || return 1
     [[ "$(stat -f '%d:%i' "$RUN_METADATA_PARENT")" == "$RUN_METADATA_PARENT_IDENTITY" ]] \
         || return 1
     file_is_immutable_regular "$RUN_METADATA" || return 1
-    schema_is_exact "$RUN_METADATA" "$RUN_KEYS" 29 || return 1
-    [[ "$(kv "$RUN_METADATA" format_version)" == 3 \
-        && "$(kv "$RUN_METADATA" status)" == complete \
+    schema_is_exact "$RUN_METADATA" "$RUN_KEYS" 35 || return 1
+    [[ "$(kv "$RUN_METADATA" format_version)" == 4 \
+        && "$(kv "$RUN_METADATA" evidence_mode)" == "$EVIDENCE_MODE" \
+        && "$(kv "$RUN_METADATA" status)" == "$([[ "$EVIDENCE_MODE" == production ]] && printf complete || printf test-only)" \
         && "$(kv "$RUN_METADATA" run_intent_sha256)" == "$RUN_INTENT_SHA256" \
         && "$(kv "$RUN_METADATA" trace_provisional_receipt_sha256)" \
             == "$PROVISIONAL_RECEIPT_SHA256" ]] \
         || return 1
     for key in performance_tail_receipt_sha256 performance_quit_receipt_sha256 \
-        subject_exit_receipt_sha256; do
+        subject_exit_receipt_sha256 lifecycle_ready_receipt_sha256 \
+        lifecycle_registration_receipt_sha256 lifecycle_helper_sha256 \
+        terminator_source_sha256 terminator_binary_sha256; do
         is_sha256 "$(kv "$RUN_METADATA" "$key")" || return 1
     done
     for key in subject subject_identity_sha256 scenario scenario_plan_sha256 \
@@ -702,6 +711,7 @@ publish_provisional_receipt() {
         printf 'hangs_export_sha256\t%s\n' "$(sha256 "$HANGS_EXPORT_PATH")"
         printf 'trace_verification_sha256\t%s\n' "$(sha256 "$TRACE_VERIFICATION_PATH")"
         printf 'verifier_sha256\t%s\n' "$(sha256 "$TRACE_VERIFIER")"
+        printf 'evidence_mode\t%s\n' "$EVIDENCE_MODE"
         printf 'status\tcomplete\nauth_algorithm\thmac-sha256\n'
     } > "$unsigned"
     hmac_value="$(python3 - "$unsigned" "$CAMPAIGN_SECRET_FILE" <<'PY'

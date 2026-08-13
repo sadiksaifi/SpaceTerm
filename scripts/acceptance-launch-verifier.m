@@ -85,6 +85,7 @@ typedef struct {
     __strong NSString *runIntent;
     __strong NSString *subjectExitReceipt;
     bool replay;
+    bool externalLifecycle;
 } Options;
 
 typedef struct {
@@ -205,8 +206,8 @@ static NSString *canonical_path(NSString *path) {
 
 static bool parse_options(int argc, const char *argv[], Options *options) {
     NSMutableDictionary<NSString *, NSString *> *values = [NSMutableDictionary dictionary];
-    if (argc != 23 && argc != 35) {
-        return report(@"expected eleven or seventeen named option/value pairs");
+    if (argc != 23 && argc != 25) {
+        return report(@"expected eleven or twelve named option/value pairs");
     }
     for (int index = 1; index < argc; index += 2) {
         NSString *key = [NSString stringWithUTF8String:argv[index]];
@@ -221,22 +222,13 @@ static bool parse_options(int argc, const char *argv[], Options *options) {
         @"--identifier", @"--team-identifier", @"--home", @"--output", @"--mode",
         @"--failure-control"
     ];
-    NSArray<NSString *> *quitKeys = @[
-        @"--quit-control", @"--quit-receipt", @"--tail-receipt",
-        @"--campaign-secret-file", @"--run-intent", @"--subject-exit-receipt"
-    ];
     for (NSString *key in keys) {
         if (values[key] == nil) {
             return report([NSString stringWithFormat:@"missing option %@", key]);
         }
     }
-    bool hasQuitControl = values[@"--quit-control"] != nil;
-    for (NSString *key in quitKeys) {
-        if ((values[key] != nil) != hasQuitControl) {
-            return report(@"performance quit options must be supplied together");
-        }
-    }
-    if (values.count != keys.count + (hasQuitControl ? quitKeys.count : 0)) {
+    bool externalLifecycle = values[@"--external-lifecycle"] != nil;
+    if (values.count != keys.count + (externalLifecycle ? 1 : 0)) {
         return report(@"unknown command-line option");
     }
     NSString *mode = values[@"--mode"];
@@ -255,18 +247,9 @@ static bool parse_options(int argc, const char *argv[], Options *options) {
     if ([mode isEqualToString:@"replay"] && ![failureControl isEqualToString:@"none"]) {
         return report(@"failure control is unavailable during replay");
     }
-    if (hasQuitControl && ([mode isEqualToString:@"replay"] ||
+    if (externalLifecycle && ([mode isEqualToString:@"replay"] ||
             ![failureControl isEqualToString:@"none"])) {
-        return report(@"performance quit is campaign-only and failure control must be none");
-    }
-    if (hasQuitControl &&
-        (![values[@"--quit-control"] isAbsolutePath] ||
-         ![values[@"--quit-receipt"] isAbsolutePath] ||
-         ![values[@"--tail-receipt"] isAbsolutePath] ||
-         ![values[@"--campaign-secret-file"] isAbsolutePath] ||
-         ![values[@"--run-intent"] isAbsolutePath] ||
-         ![values[@"--subject-exit-receipt"] isAbsolutePath])) {
-        return report(@"performance quit paths must be absolute");
+        return report(@"external lifecycle is campaign-only and failure control must be none");
     }
     NSCharacterSet *not_hex =
         [[NSCharacterSet characterSetWithCharactersInString:@"0123456789abcdefABCDEF"] invertedSet];
@@ -285,12 +268,17 @@ static bool parse_options(int argc, const char *argv[], Options *options) {
     options->home = values[@"--home"];
     options->output = values[@"--output"];
     options->failureControl = failureControl;
-    options->quitControl = hasQuitControl ? values[@"--quit-control"] : @"none";
-    options->quitReceipt = hasQuitControl ? values[@"--quit-receipt"] : @"none";
-    options->tailReceipt = hasQuitControl ? values[@"--tail-receipt"] : @"none";
-    options->campaignSecret = hasQuitControl ? values[@"--campaign-secret-file"] : @"none";
-    options->runIntent = hasQuitControl ? values[@"--run-intent"] : @"none";
-    options->subjectExitReceipt = hasQuitControl ? values[@"--subject-exit-receipt"] : @"none";
+    options->quitControl = @"none";
+    options->quitReceipt = @"none";
+    options->tailReceipt = @"none";
+    options->campaignSecret = @"none";
+    options->runIntent = @"none";
+    options->subjectExitReceipt = @"none";
+    options->externalLifecycle = externalLifecycle &&
+        [values[@"--external-lifecycle"] isEqualToString:@"true"];
+    if (externalLifecycle && !options->externalLifecycle) {
+        return report(@"external lifecycle must be true");
+    }
     options->replay = [mode isEqualToString:@"replay"];
     return true;
 }
@@ -1242,7 +1230,7 @@ static int forward_performance_quit(
         return -1;
     }
     uint64_t requested = continuous_nanoseconds();
-    if (!strict_normal_terminate(application) ||
+    if ((!options->externalLifecycle && !strict_normal_terminate(application)) ||
         !write_failure_status(statusFD, @"accepted", clientToken)) return -1;
     quit->requested = true;
     quit->requestContinuousNS = requested;
@@ -1766,7 +1754,7 @@ static bool validate_tail_receipt(
         @"environment_sha256", @"font_sha256", @"initial_grid_sha256",
         @"measured_duration_ms", @"process_pid", @"process_start_identity",
         @"campaign_id", @"session_id", @"nonce",
-        @"native_provisional_observation_sha256", @"status"
+        @"native_provisional_observation_sha256", @"evidence_mode", @"status"
     ];
     NSArray<NSString *> *tailKeys = @[
         @"format_version", @"campaign_id", @"session_id", @"nonce", @"quit_token",
@@ -1774,7 +1762,10 @@ static bool validate_tail_receipt(
         @"subject_process_start_identity", @"driver_receipt_sha256",
         @"driver_events_sha256", @"workload_metadata_sha256", @"workload_events_sha256",
         @"rss_samples_sha256", @"trace_provisional_receipt_sha256",
-        @"tail_completed_continuous_ns", @"terminal_status", @"auth_algorithm",
+        @"tail_completed_continuous_ns", @"appkit_terminator_source_device",
+        @"appkit_terminator_source_inode", @"appkit_terminator_source_sha256",
+        @"appkit_terminator_binary_device", @"appkit_terminator_binary_inode",
+        @"appkit_terminator_binary_sha256", @"evidence_mode", @"terminal_status", @"auth_algorithm",
         @"tail_hmac_sha256"
     ];
     NSDictionary *intent = intentData == nil ? nil : parse_records(intentData, intentKeys);
@@ -1783,9 +1774,11 @@ static bool validate_tail_receipt(
     NSString *start = [NSString stringWithFormat:@"%llu:%llu",
         (unsigned long long)startSeconds, (unsigned long long)startMicroseconds];
     uint64_t tailCompleted = 0;
+    uint64_t sourceDevice = 0, sourceInode = 0, binaryDevice = 0, binaryInode = 0;
     if (intent == nil || tail == nil || secret == nil ||
         ![intent[@"format_version"] isEqualToString:@"1"] ||
         ![intent[@"subject"] isEqualToString:@"spaceterm"] ||
+        ![intent[@"evidence_mode"] isEqualToString:@"production"] ||
         ![intent[@"status"] isEqualToString:@"prepared"] ||
         ![intent[@"process_pid"] isEqualToString:[NSString stringWithFormat:@"%d", pid]] ||
         ![intent[@"process_start_identity"] isEqualToString:start] ||
@@ -1798,6 +1791,14 @@ static bool validate_tail_receipt(
         ![tail[@"subject_identity_sha256"] isEqualToString:intent[@"subject_identity_sha256"]] ||
         ![tail[@"subject_process_pid"] isEqualToString:intent[@"process_pid"]] ||
         ![tail[@"subject_process_start_identity"] isEqualToString:start] ||
+        !canonical_uint64(tail[@"appkit_terminator_source_device"], &sourceDevice) ||
+        !canonical_uint64(tail[@"appkit_terminator_source_inode"], &sourceInode) ||
+        !canonical_uint64(tail[@"appkit_terminator_binary_device"], &binaryDevice) ||
+        !canonical_uint64(tail[@"appkit_terminator_binary_inode"], &binaryInode) ||
+        sourceDevice == 0 || sourceInode == 0 || binaryDevice == 0 || binaryInode == 0 ||
+        !is_lower_hex(tail[@"appkit_terminator_source_sha256"], 64) ||
+        !is_lower_hex(tail[@"appkit_terminator_binary_sha256"], 64) ||
+        ![tail[@"evidence_mode"] isEqualToString:@"production"] ||
         ![tail[@"terminal_status"] isEqualToString:@"tail-complete"] ||
         ![tail[@"auth_algorithm"] isEqualToString:@"hmac-sha256"] ||
         !is_lower_hex(tail[@"tail_hmac_sha256"], 64) ||
@@ -1858,6 +1859,7 @@ static NSData *performance_quit_receipt(
          "subject_process_start_identity\t%llu:%llu\nquit_token\t%@\n"
          "request_continuous_ns\t%llu\nexit_continuous_ns\t%llu\n"
          "termination_method\tappkit-terminate\nruntime_closure_status\tconfirmed\n"
+         "evidence_mode\tproduction\n"
          "status\tcompleted\n",
         quit->campaignID, quit->sessionID, quit->campaignNonce, quit->runIntentSHA256, pid,
         (unsigned long long)startSeconds, (unsigned long long)startMicroseconds, quit->token,
@@ -1884,7 +1886,7 @@ static NSData *performance_subject_exit_receipt(
         @"environment_sha256", @"font_sha256", @"initial_grid_sha256",
         @"measured_duration_ms", @"process_pid", @"process_start_identity",
         @"campaign_id", @"session_id", @"nonce",
-        @"native_provisional_observation_sha256", @"status"
+        @"native_provisional_observation_sha256", @"evidence_mode", @"status"
     ];
     NSDictionary *intent = intentData == nil ? nil : parse_records(intentData, intentKeys);
     if (secret == nil || tail == nil || quitReceipt == nil || quit->subject == nil ||
@@ -1899,6 +1901,7 @@ static NSData *performance_subject_exit_receipt(
          "tail_receipt_sha256\t%@\nquit_receipt_sha256\t%@\n"
          "exit_requested_continuous_ns\t%llu\nprocess_exited_continuous_ns\t%llu\n"
          "exit_status\tnormal\nnative_observation_sha256\t%@\n"
+         "evidence_mode\tproduction\n"
          "auth_algorithm\thmac-sha256\n",
         quit->subject, quit->campaignID, quit->sessionID, quit->campaignNonce,
         quit->runIntentSHA256, intent[@"subject_identity_sha256"],
@@ -2309,7 +2312,7 @@ static int run_verifier(const Options *options) {
     }
     close(peer);
     peer = -1;
-    if ([options->quitControl isEqualToString:@"none"]) {
+    if (!options->externalLifecycle && [options->quitControl isEqualToString:@"none"]) {
         terminate_exact_application(application);
     } else {
         NSDate *terminationDeadline = [NSDate dateWithTimeIntervalSinceNow:kProofTimeoutSeconds];
@@ -2318,25 +2321,31 @@ static int run_verifier(const Options *options) {
         }
     }
     if (!application.terminated ||
-        (![options->quitControl isEqualToString:@"none"] && !quit.requested)) {
+        (!options->externalLifecycle && ![options->quitControl isEqualToString:@"none"] &&
+            !quit.requested)) {
         report(@"observed application could not finish safely");
         goto cleanup;
     }
     if (![options->quitControl isEqualToString:@"none"]) {
-        uint64_t exitContinuousNS = continuous_nanoseconds();
-        NSData *quitReceipt = performance_quit_receipt(
-            &quit, peer_pid, process_start_seconds, process_start_microseconds,
-            exitContinuousNS);
-        NSData *exitReceipt = performance_subject_exit_receipt(options, &quit, peer_pid,
-            process_start_seconds, process_start_microseconds, exitContinuousNS,
-            quitReceipt, observation_data);
-        if (quitReceipt == nil || exitReceipt == nil ||
-            !write_failure_status(quit_status_fd, @"completed", quit.token) ||
-            !publish_exclusive(options->quitReceipt, quitReceipt, &quit_receipt_published) ||
-            !publish_exclusive(options->subjectExitReceipt, exitReceipt,
-                &subject_exit_receipt_published)) {
-            report(@"performance quit receipt could not be published");
+        if (!write_failure_status(quit_status_fd, @"completed", quit.token)) {
+            report(@"performance lifecycle completion could not be acknowledged");
             goto cleanup;
+        }
+        if (!options->externalLifecycle) {
+            uint64_t exitContinuousNS = continuous_nanoseconds();
+            NSData *quitReceipt = performance_quit_receipt(
+                &quit, peer_pid, process_start_seconds, process_start_microseconds,
+                exitContinuousNS);
+            NSData *exitReceipt = performance_subject_exit_receipt(options, &quit, peer_pid,
+                process_start_seconds, process_start_microseconds, exitContinuousNS,
+                quitReceipt, observation_data);
+            if (quitReceipt == nil || exitReceipt == nil ||
+                !publish_exclusive(options->quitReceipt, quitReceipt, &quit_receipt_published) ||
+                !publish_exclusive(options->subjectExitReceipt, exitReceipt,
+                    &subject_exit_receipt_published)) {
+                report(@"performance quit receipt could not be published");
+                goto cleanup;
+            }
         }
     }
     // The native observation is the commit marker. Publish it only after the app consumed the
@@ -2348,7 +2357,7 @@ static int run_verifier(const Options *options) {
 
 cleanup:
     if (result != 0) {
-        if ([options->quitControl isEqualToString:@"none"]) {
+        if (!options->externalLifecycle && [options->quitControl isEqualToString:@"none"]) {
             terminate_exact_application(application);
         }
         if (quit_receipt_published) unlink(options->quitReceipt.fileSystemRepresentation);
