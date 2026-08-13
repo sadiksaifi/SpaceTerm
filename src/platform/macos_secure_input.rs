@@ -2,8 +2,6 @@ use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use super::macos_application::application_is_active;
-
 static NEXT_PANE_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -136,9 +134,8 @@ pub(crate) fn remove_pane(id: SecureInputPaneId) {
     COORDINATOR.with_borrow_mut(|coordinator| coordinator.remove(id));
 }
 
-pub(crate) fn update_application_activation() {
-    COORDINATOR
-        .with_borrow_mut(|coordinator| coordinator.set_application_active(application_is_active()));
+pub(crate) fn update_application_activation(active: bool) {
+    COORDINATOR.with_borrow_mut(|coordinator| coordinator.set_application_active(active));
 }
 
 #[cfg(test)]

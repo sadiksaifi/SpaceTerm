@@ -2,7 +2,6 @@ use std::time::{Duration, Instant};
 
 const BELL_RATE_LIMIT: Duration = Duration::from_millis(100);
 const DOCK_RATE_LIMIT: Duration = Duration::from_secs(1);
-const NOTIFICATION_AGGREGATION: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum AttentionEvent {
@@ -46,6 +45,7 @@ pub(crate) struct AttentionEffects {
     pub(crate) request_dock_attention: bool,
     pub(crate) cancel_dock_attention: bool,
     pub(crate) notification: Option<AttentionEvent>,
+    pub(crate) cancel_notification: bool,
     pub(crate) unread_count: u32,
 }
 
@@ -56,7 +56,6 @@ pub(crate) struct AttentionState {
     visual_bell: bool,
     last_bell: Option<Instant>,
     last_dock: Option<Instant>,
-    last_notification: Option<Instant>,
 }
 
 impl Default for AttentionState {
@@ -73,7 +72,6 @@ impl AttentionState {
             visual_bell: false,
             last_bell: None,
             last_dock: None,
-            last_notification: None,
         }
     }
 
@@ -113,16 +111,8 @@ impl AttentionState {
         if request_dock_attention {
             self.last_dock = Some(now);
         }
-        let notification = (unattended
-            && !facts.application_active
-            && self.policy.notifications
-            && self.last_notification.is_none_or(|last| {
-                now.saturating_duration_since(last) >= NOTIFICATION_AGGREGATION
-            }))
-        .then_some(event);
-        if notification.is_some() {
-            self.last_notification = Some(now);
-        }
+        let notification =
+            (unattended && !facts.application_active && self.policy.notifications).then_some(event);
 
         AttentionEffects {
             visual_bell,
@@ -130,6 +120,7 @@ impl AttentionState {
             request_dock_attention,
             cancel_dock_attention: false,
             notification,
+            cancel_notification: false,
             unread_count: self.unread_count,
         }
     }
@@ -140,6 +131,7 @@ impl AttentionState {
         self.visual_bell = false;
         AttentionEffects {
             cancel_dock_attention,
+            cancel_notification: cancel_dock_attention,
             ..AttentionEffects::default()
         }
     }
@@ -158,7 +150,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn injected_clock_aggregates_repeated_bells_and_native_effects() {
+    fn injected_clock_suppresses_bell_storms_without_suppressing_notification_demand() {
         let epoch = Instant::now();
         let mut state = AttentionState::default();
         let facts = AttentionFacts::default();
@@ -181,7 +173,7 @@ mod tests {
             }
         );
         assert!(later.audio_bell && later.request_dock_attention);
-        assert!(later.notification.is_none());
+        assert!(later.notification.is_some());
         assert_eq!(later.unread_count, 2);
     }
 
@@ -218,6 +210,7 @@ mod tests {
         let cleared = state.clear();
 
         assert!(cleared.cancel_dock_attention);
+        assert!(cleared.cancel_notification);
         assert_eq!(state.unread_count(), 0);
         assert!(!state.visual_bell());
     }

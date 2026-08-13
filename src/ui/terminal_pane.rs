@@ -40,8 +40,12 @@ use super::{
 };
 use crate::domain::{PaneId, WindowId, WorkspaceId};
 use crate::platform::macos_accessibility::post_accessibility_notifications;
-#[cfg(not(test))]
-use crate::platform::macos_application::application_is_active;
+use crate::platform::macos_application;
+use crate::platform::macos_attention::{
+    AttentionPaneId, AttentionSchedules, reconcile_scheduled as reconcile_attention_schedule,
+    register_pane as register_attention_pane, remove_pane as remove_attention_pane,
+    update_application_activation as update_attention_application_activation,
+};
 #[cfg(not(test))]
 use crate::platform::macos_attention::{MacosAttentionPlatform, apply_attention_effects};
 use crate::platform::macos_keyboard::{
@@ -55,7 +59,8 @@ use crate::platform::macos_render_lifecycle::{
 use crate::platform::macos_scroll::current_wheel_phase;
 use crate::platform::macos_secure_input::{
     SecureInputPaneId, register_pane as register_secure_input_pane,
-    remove_pane as remove_secure_input_pane, update_application_activation,
+    remove_pane as remove_secure_input_pane,
+    update_application_activation as update_secure_input_application_activation,
     update_pane as update_secure_input_pane,
 };
 use crate::terminal::attention::AttentionState;
@@ -98,14 +103,65 @@ fn current_application_active(cx: &App) -> bool {
 
 #[cfg(not(test))]
 fn current_application_active(_: &App) -> bool {
-    application_is_active()
+    macos_application::is_active()
 }
 
-fn apply_native_attention(effects: crate::terminal::attention::AttentionEffects) {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct NativeActivity {
+    application_active: bool,
+    operating_system_window_key: bool,
+}
+
+impl NativeActivity {
+    fn current(window: &Window, cx: &App) -> Self {
+        Self {
+            application_active: current_application_active(cx),
+            operating_system_window_key: window.is_window_active(),
+        }
+    }
+}
+
+fn terminal_surface_active(product_focus: TerminalProductFocus, activity: NativeActivity) -> bool {
+    product_focus.active_workspace
+        && product_focus.active_window
+        && activity.operating_system_window_key
+}
+
+fn apply_native_attention(
+    pane: AttentionPaneId,
+    effects: crate::terminal::attention::AttentionEffects,
+    cx: &mut Context<TerminalPane>,
+) {
     #[cfg(not(test))]
-    apply_attention_effects(&mut MacosAttentionPlatform, effects);
+    schedule_attention_retries(
+        apply_attention_effects(&mut MacosAttentionPlatform::new(pane), effects),
+        cx,
+    );
     #[cfg(test)]
-    let _ = effects;
+    let _ = (pane, effects, cx);
+}
+
+fn schedule_attention_retries(schedules: AttentionSchedules, cx: &mut Context<TerminalPane>) {
+    for schedule in schedules.into_array().into_iter().flatten() {
+        cx.spawn(async move |_, cx| {
+            let mut schedule = schedule;
+            loop {
+                cx.background_executor()
+                    .timer(schedule.delay_from(Instant::now()))
+                    .await;
+                let Some(next) = reconcile_attention_schedule(schedule)
+                    .into_array()
+                    .into_iter()
+                    .flatten()
+                    .next()
+                else {
+                    break;
+                };
+                schedule = next;
+            }
+        })
+        .detach();
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -227,6 +283,7 @@ pub(crate) struct TerminalPane {
     attention: AttentionState,
     attention_visual: bool,
     attention_generation: u64,
+    native_attention_pane: Option<AttentionPaneId>,
     hidden_input: bool,
     secure_input_pane: Option<SecureInputPaneId>,
     font_family: SharedString,
@@ -397,6 +454,7 @@ impl TerminalPane {
             attention: AttentionState::default(),
             attention_visual: false,
             attention_generation: 0,
+            native_attention_pane: Some(register_attention_pane()),
             hidden_input: false,
             secure_input_pane: Some(register_secure_input_pane()),
             font_family,
@@ -571,21 +629,21 @@ impl TerminalPane {
     }
 
     pub(crate) fn terminal_input_focused(&self, window: &Window, cx: &App) -> bool {
-        self.terminal_input_focused_for_application_state(window, current_application_active(cx))
+        self.terminal_input_focused_with_activity(window, NativeActivity::current(window, cx))
     }
 
-    fn terminal_input_focused_for_application_state(
+    fn terminal_input_focused_with_activity(
         &self,
         window: &Window,
-        application_active: bool,
+        activity: NativeActivity,
     ) -> bool {
         TerminalFocusCoordinator::is_focused(TerminalFocusFacts {
             active_workspace: self.product_focus.active_workspace,
             active_window: self.product_focus.active_window,
             focused_pane: self.product_focus.focused_pane,
             responder: self.focus_handle.is_focused(window),
-            operating_system_window_key: window.is_window_active(),
-            application_active,
+            operating_system_window_key: activity.operating_system_window_key,
+            application_active: activity.application_active,
             blocker: self
                 .native_modal_open
                 .then_some(TerminalFocusBlocker::Modal)
@@ -599,7 +657,15 @@ impl TerminalPane {
     }
 
     fn sync_terminal_input_focus(&mut self, window: &Window, cx: &App) -> (bool, bool) {
-        let focused = self.terminal_input_focused(window, cx);
+        self.sync_terminal_input_focus_with_activity(window, NativeActivity::current(window, cx))
+    }
+
+    fn sync_terminal_input_focus_with_activity(
+        &mut self,
+        window: &Window,
+        activity: NativeActivity,
+    ) -> (bool, bool) {
+        let focused = self.terminal_input_focused_with_activity(window, activity);
         let focus_gained = !self.terminal_input_focus && focused;
         self.apply_terminal_input_focus(focused);
         (focused, focus_gained)
@@ -650,7 +716,9 @@ impl TerminalPane {
         self.attention_visual = false;
         self.attention_generation = self.attention_generation.wrapping_add(1);
         self._attention_task.take();
-        apply_native_attention(effects);
+        if let Some(pane) = self.native_attention_pane {
+            apply_native_attention(pane, effects, cx);
+        }
         cx.emit(TerminalPaneEvent::AttentionChanged { unread_count: 0 });
     }
 
@@ -790,6 +858,9 @@ impl TerminalPane {
         }
         if let Some(id) = self.secure_input_pane.take() {
             remove_secure_input_pane(id);
+        }
+        if let Some(id) = self.native_attention_pane.take() {
+            remove_attention_pane(id);
         }
     }
 
@@ -1313,7 +1384,9 @@ impl TerminalPane {
                     self.start_visual_bell(cx);
                 }
                 let unread_count = effects.unread_count;
-                apply_native_attention(effects);
+                if let Some(pane) = self.native_attention_pane {
+                    apply_native_attention(pane, effects, cx);
+                }
                 cx.emit(TerminalPaneEvent::AttentionChanged { unread_count });
             }
             SessionEvent::HiddenInputChanged(hidden_input) => {
@@ -1434,9 +1507,6 @@ impl TerminalPane {
         let input = NativeKeyEvent::current_key(action)
             .map(|event| self.keyboard_bridge.translate(event))
             .unwrap_or_else(|| encode_key(event));
-        if !matches!(input, KeyTranslation::Unhandled(_)) {
-            self.clear_attention(cx);
-        }
         if self.ime.marked_text().is_some() {
             if let KeyTranslation::Encoded(input) = &input
                 && input.physical_key != PhysicalKey::Unidentified
@@ -1529,6 +1599,9 @@ impl TerminalPane {
         let resets_cursor_blink = input.action != KeyAction::Release;
         if let Some(session) = &self.session {
             session.key(input);
+            if resets_cursor_blink {
+                self.clear_attention(cx);
+            }
             if resets_cursor_blink && self.screen.cursor.visible && self.screen.cursor.blinking {
                 self.reset_blink_phase();
                 cx.notify();
@@ -2171,7 +2244,7 @@ impl TerminalPane {
                     return;
                 }
                 match outcome {
-                    Ok(Ok(PasteRequestOutcome::Written)) => {}
+                    Ok(Ok(PasteRequestOutcome::Written)) => this.clear_attention(cx),
                     Ok(Ok(PasteRequestOutcome::ConfirmationRequired(confirmation))) => {
                         this.pending_paste = Some(confirmation);
                         cx.notify();
@@ -2324,7 +2397,10 @@ impl TerminalPane {
         self.focus(window);
         cx.notify();
         cx.spawn(async move |this, cx| match receiver.recv().await {
-            Ok(Ok(PasteResolution::Written | PasteResolution::Cancelled)) => {}
+            Ok(Ok(PasteResolution::Written)) => {
+                let _ = this.update(cx, |this, cx| this.clear_attention(cx));
+            }
+            Ok(Ok(PasteResolution::Cancelled)) => {}
             Ok(Ok(PasteResolution::Stale)) => {
                 let _ = this.update(cx, |this, cx| {
                     this.status = Some(
@@ -2799,25 +2875,28 @@ impl Drop for TerminalPane {
 
 impl Render for TerminalPane {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        update_application_activation();
+        let native_activity = NativeActivity::current(window, cx);
+        schedule_attention_retries(
+            update_attention_application_activation(native_activity.application_active),
+            cx,
+        );
+        update_secure_input_application_activation(native_activity.application_active);
         let notifications = AccessibilityNotification::coalesce(&self.accessibility_notifications);
         self.accessibility_notifications.clear();
         post_accessibility_notifications(&notifications, self.accessibility.visible_range());
         let pane = cx.entity().downgrade();
-        let (terminal_input_focused, focus_gained) = self.sync_terminal_input_focus(window, cx);
+        let (terminal_input_focused, focus_gained) =
+            self.sync_terminal_input_focus_with_activity(window, native_activity);
         self.flush_pending_file_insertion(cx);
-        let application_active = current_application_active(cx);
-        let surface_active = self.product_focus.active_workspace
-            && self.product_focus.active_window
-            && window.is_window_active();
+        let surface_active = terminal_surface_active(self.product_focus, native_activity);
         let native_visibility = self
             .runtime_visibility_source
             .as_ref()
             .map(NativeWindowVisibilitySource::current)
             .unwrap_or_else(current_window_visibility);
         let surface_visibility = SurfaceVisibility {
-            application_active,
-            key_window: window.is_window_active(),
+            application_active: native_activity.application_active,
+            key_window: native_activity.operating_system_window_key,
             minimized: native_visibility.minimized,
             occluded: native_visibility.occluded,
             live_resize: native_visibility.live_resize,
@@ -2843,7 +2922,7 @@ impl Render for TerminalPane {
             cx.notify();
         }
         self.surface_active = surface_active;
-        self.application_active = application_active;
+        self.application_active = native_activity.application_active;
         if focus_gained {
             self.clear_attention(cx);
         }
@@ -3795,6 +3874,30 @@ mod tests {
     };
     use crate::terminal::{ScrollbarSnapshot, SessionFailure, TerminalSessionFactory};
 
+    #[test]
+    fn active_application_with_non_key_window_suppresses_inactive_only_notification() {
+        let activity = NativeActivity {
+            application_active: true,
+            operating_system_window_key: false,
+        };
+        let mut attention = AttentionState::default();
+
+        let effects = attention.observe(
+            crate::terminal::attention::AttentionEvent::Bell,
+            AttentionFacts {
+                terminal_input_focus: false,
+                surface_active: terminal_surface_active(TerminalProductFocus::default(), activity),
+                application_active: activity.application_active,
+            },
+            Instant::now(),
+        );
+
+        assert_eq!(
+            (effects.request_dock_attention, effects.notification),
+            (true, None)
+        );
+    }
+
     struct KeyPropagationProbe {
         pane: Entity<TerminalPane>,
         propagated_key_downs: Rc<Cell<usize>>,
@@ -4057,6 +4160,98 @@ mod tests {
 
         pane.update(cx, |pane, cx| pane.clear_attention(cx));
         assert!(!pane.read_with(cx, |pane, _| pane.attention_visual));
+    }
+
+    #[gpui::test]
+    fn accepted_input_method_commit_clears_pending_attention(cx: &mut TestAppContext) {
+        let (pane, cx, _records) = connected_terminal_pane(cx);
+        pane.update(cx, |pane, cx| {
+            pane.terminal_input_focus = false;
+            pane.handle_event(
+                SessionEvent::Attention(crate::terminal::attention::AttentionEvent::Bell),
+                cx,
+            );
+            pane.terminal_input_focus = true;
+        });
+        assert_eq!(
+            pane.read_with(cx, |pane, _| pane.attention.unread_count()),
+            1
+        );
+
+        pane.update(cx, |pane, cx| {
+            pane.send_key_translation(
+                KeyTranslation::Encoded(KeyInput::input_method_commit("界")),
+                cx,
+            );
+        });
+
+        assert_eq!(
+            pane.read_with(cx, |pane, _| pane.attention.unread_count()),
+            0
+        );
+    }
+
+    #[gpui::test]
+    fn accepted_paste_clears_pending_attention(cx: &mut TestAppContext) {
+        let (pane, cx, _records) = terminal_pane_with_paste_response(
+            cx,
+            Ok(PasteRequestOutcome::Written),
+            Ok(PasteResolution::Cancelled),
+        );
+        pane.update(cx, |pane, cx| {
+            pane.terminal_input_focus = false;
+            pane.handle_event(
+                SessionEvent::Attention(crate::terminal::attention::AttentionEvent::Bell),
+                cx,
+            );
+            pane.terminal_input_focus = true;
+        });
+        cx.write_to_clipboard(ClipboardItem::new_string("accepted paste".to_owned()));
+
+        cx.dispatch_action(PasteClipboard);
+        cx.run_until_parked();
+
+        assert_eq!(
+            pane.read_with(cx, |pane, _| pane.attention.unread_count()),
+            0
+        );
+    }
+
+    #[gpui::test]
+    fn stale_guarded_written_paste_does_not_clear_newer_attention(cx: &mut TestAppContext) {
+        let (pane, cx, _records) = terminal_pane_with_paste_response(
+            cx,
+            Ok(PasteRequestOutcome::Written),
+            Ok(PasteResolution::Cancelled),
+        );
+        cx.write_to_clipboard(ClipboardItem::new_string("stale paste".to_owned()));
+
+        cx.dispatch_action(PasteClipboard);
+        pane.update(cx, |pane, cx| {
+            pane.advance_native_service_focus_epoch();
+            pane.terminal_input_focus = false;
+            pane.handle_event(
+                SessionEvent::Attention(
+                    crate::terminal::attention::AttentionEvent::CommandFinished {
+                        exit_status: Some(0),
+                        duration: Duration::from_secs(1),
+                    },
+                ),
+                cx,
+            );
+            pane.terminal_input_focus = true;
+        });
+        assert_eq!(
+            pane.read_with(cx, |pane, _| pane.attention.unread_count()),
+            1
+        );
+
+        cx.run_until_parked();
+
+        assert_eq!(
+            pane.read_with(cx, |pane, _| pane.attention.unread_count()),
+            1
+        );
     }
 
     fn connected_terminal_pane(
