@@ -5,7 +5,8 @@ use gpui::{Bounds, Pixels, Window};
 #[cfg(all(target_os = "macos", not(test)))]
 use crate::terminal::AccessibilitySelectionSender;
 use crate::terminal::{
-    AccessibilityGeometry, AccessibilityNotification, TerminalAccessibilityModel,
+    AccessibilityGeometry, AccessibilityNotification, AccessibilityNotifications,
+    TerminalAccessibilityModel,
 };
 
 pub(crate) const TEXT_AREA_ROLE: &str = "AXTextArea";
@@ -82,7 +83,7 @@ pub(crate) struct MacosAccessibilityUpdate<'a> {
     pub(crate) font_family: &'a str,
     pub(crate) font_size: Pixels,
     pub(crate) focused: bool,
-    pub(crate) notifications: &'a [AccessibilityNotification],
+    pub(crate) notifications: AccessibilityNotifications,
     #[cfg(all(target_os = "macos", not(test)))]
     pub(crate) selection_sender: Option<AccessibilitySelectionSender>,
 }
@@ -161,8 +162,9 @@ mod native {
 
     use super::{
         AccessibilityAttributedText, AccessibilityElementState, AccessibilityFontMetadata,
-        AccessibilityNotification, MacosAccessibilityUpdate, ScreenRect, TEXT_AREA_ROLE,
-        TerminalAccessibilityModel, normalized_font_family, normalized_font_point_size,
+        AccessibilityNotification, AccessibilityNotifications,
+        MacosAccessibilityUpdate, ScreenRect, TEXT_AREA_ROLE, TerminalAccessibilityModel,
+        normalized_font_family, normalized_font_point_size,
         notification_name,
     };
 
@@ -272,7 +274,10 @@ mod native {
             }
         }
 
-        pub(crate) fn update(&mut self, update: MacosAccessibilityUpdate<'_>) {
+        pub(crate) fn update(
+            &mut self,
+            update: MacosAccessibilityUpdate<'_>,
+        ) -> AccessibilityNotifications {
             let MacosAccessibilityUpdate {
                 window,
                 model,
@@ -329,21 +334,20 @@ mod native {
             }
 
             let focus_gained = !was_focused && self.state.focused;
-            if self.state.visible
-                && (focus_gained
-                    || notifications
-                        .iter()
-                        .any(|notification| *notification != AccessibilityNotification::Focus))
-            {
-                let mut native_notifications = notifications
-                    .iter()
-                    .copied()
-                    .filter(|notification| *notification != AccessibilityNotification::Focus)
-                    .collect::<Vec<_>>();
-                if focus_gained {
-                    native_notifications.push(AccessibilityNotification::Focus);
+            if self.state.visible {
+                let mut native_notifications =
+                    notifications.without(AccessibilityNotification::Focus);
+                if self.state.focused
+                    && (focus_gained || notifications.contains(AccessibilityNotification::Focus))
+                {
+                    native_notifications.insert(AccessibilityNotification::Focus);
                 }
-                post_notifications(self.element, native_notifications.into_iter());
+                if !native_notifications.is_empty() {
+                    post_notifications(self.element, native_notifications.iter());
+                }
+                AccessibilityNotifications::default()
+            } else {
+                notifications
             }
         }
     }
@@ -987,28 +991,78 @@ fn normalized_font_point_size(point_size: f32) -> f32 {
 pub(crate) use native::MacosAccessibilityElement;
 
 #[cfg(any(not(target_os = "macos"), test))]
-pub(crate) struct MacosAccessibilityElement;
+pub(crate) struct MacosAccessibilityElement {
+    model: TerminalAccessibilityModel,
+    presented: bool,
+    visible: bool,
+    focused: bool,
+    delivered: AccessibilityNotifications,
+}
 
 #[cfg(any(not(target_os = "macos"), test))]
 impl MacosAccessibilityElement {
-    pub(crate) fn new(_: &gpui::Window, _: TerminalAccessibilityModel, _: &str, _: Pixels) -> Self {
-        Self
+    pub(crate) fn new(
+        _: &gpui::Window,
+        model: TerminalAccessibilityModel,
+        _: &str,
+        _: Pixels,
+    ) -> Self {
+        Self {
+            model,
+            presented: false,
+            visible: false,
+            focused: false,
+            delivered: AccessibilityNotifications::default(),
+        }
     }
 
-    pub(crate) fn set_hierarchy(&mut self, _: bool, _: usize) {}
+    pub(crate) fn set_hierarchy(&mut self, presented: bool, _: usize) {
+        self.presented = presented;
+        self.visible &= presented;
+        self.focused &= presented;
+    }
 
-    pub(crate) fn update(&mut self, update: MacosAccessibilityUpdate<'_>) {
+    pub(crate) fn update(
+        &mut self,
+        update: MacosAccessibilityUpdate<'_>,
+    ) -> AccessibilityNotifications {
         let _ = (
             update.window,
-            update.model,
-            update.bounds,
             update.cell_width,
             update.line_height,
             update.font_family,
             update.font_size,
-            update.focused,
-            update.notifications,
         );
+        let was_focused = self.focused;
+        self.model = update.model.clone();
+        self.visible = self.presented && update.bounds.is_some();
+        self.focused = self.visible && update.focused;
+        if !self.visible {
+            self.delivered = AccessibilityNotifications::default();
+            return update.notifications;
+        }
+        self.delivered = update
+            .notifications
+            .without(AccessibilityNotification::Focus);
+        if self.focused
+            && (!was_focused
+                || update
+                    .notifications
+                    .contains(AccessibilityNotification::Focus))
+        {
+            self.delivered.insert(AccessibilityNotification::Focus);
+        }
+        AccessibilityNotifications::default()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn delivered_notifications(&self) -> AccessibilityNotifications {
+        self.delivered
+    }
+
+    #[cfg(test)]
+    pub(crate) fn model(&self) -> &TerminalAccessibilityModel {
+        &self.model
     }
 }
 

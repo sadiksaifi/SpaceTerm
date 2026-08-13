@@ -547,9 +547,12 @@ regular terminal font name, family, visible name, and logical point size resolve
 actually selected font; backing scale never changes that point size. Candidate and range bounds use
 the same logical cell origin, width, and line height as pointer and renderer geometry. Terminal
 output, Selection, Terminal Input Focus, and Marked Text changes produce typed, coalesced native
-accessibility notifications; notifications carry no terminal contents. Accessibility may request
-terminal-owned selection changes through the Terminal Session, but never mutates the Terminal
-Emulator from the native callback.
+accessibility notifications; a Pane retains
+at most one pending Value, Selection, and Focus fact while it cannot present, then delivers those
+facts against its newest model on the next native presentation. Parent layout membership remains a
+separate synchronous hierarchy notification. Notifications carry no terminal contents.
+Accessibility may request terminal-owned selection changes through the Terminal Session, but never
+mutates the Terminal Emulator from the native callback.
 
 ### Demand-Driven Render Lifecycle
 
