@@ -379,8 +379,12 @@ impl TerminalPane {
         .detach();
         let screen = ScreenSnapshot::empty();
         let accessibility = Arc::new(TerminalAccessibilityModel::from_screen(&screen));
-        let accessibility_element =
-            MacosAccessibilityElement::new(window, accessibility.as_ref().clone());
+        let accessibility_element = MacosAccessibilityElement::new(
+            window,
+            accessibility.as_ref().clone(),
+            font_family.as_ref(),
+            px(DEFAULT_FONT_SIZE),
+        );
         let mut render_lifecycle = RenderLifecycle::new(SurfaceVisibility {
             application_active: false,
             key_window: false,
@@ -1659,6 +1663,8 @@ impl TerminalPane {
             bounds: self.grid_bounds,
             cell_width: self.cell_width,
             line_height: px(self.line_height),
+            font_family: self.font_family.as_ref(),
+            font_size: px(self.font_size),
             focused,
             notifications: &notifications,
             #[cfg(all(target_os = "macos", not(test)))]
@@ -1996,6 +2002,8 @@ impl TerminalPane {
         self.cell_width = measure_cell_width(window, &self.font_family, font_size);
         self.last_geometry = None;
         self.sync_scrollbar(cx);
+        self.accessibility_notifications
+            .push(AccessibilityNotification::Value);
         cx.notify();
     }
 
@@ -4808,6 +4816,27 @@ mod tests {
         let after = pane.read_with(cx, |pane, _cx| pane.font_size());
 
         assert_eq!((before, after), (14.0, 15.0));
+    }
+
+    #[gpui::test]
+    fn font_size_changes_notify_accessibility_when_terminal_text_is_static(
+        cx: &mut TestAppContext,
+    ) {
+        let (pane, cx) = terminal_pane(cx);
+
+        cx.update(|window, cx| {
+            pane.update(cx, |pane, cx| {
+                let accessibility = Arc::clone(&pane.accessibility);
+                pane.accessibility_notifications.clear();
+                pane.set_font_size(15.0, window, cx);
+
+                assert!(Arc::ptr_eq(&pane.accessibility, &accessibility));
+                assert_eq!(
+                    AccessibilityNotification::coalesce(&pane.accessibility_notifications),
+                    vec![AccessibilityNotification::Value]
+                );
+            });
+        });
     }
 
     #[gpui::test]
