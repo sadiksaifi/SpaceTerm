@@ -39,6 +39,8 @@ use super::{
 use crate::domain::{PaneId, WindowId, WorkspaceId};
 use crate::platform::macos_accessibility::post_accessibility_notifications;
 #[cfg(not(test))]
+use crate::platform::macos_application::application_is_active;
+#[cfg(not(test))]
 use crate::platform::macos_attention::{MacosAttentionPlatform, apply_attention_effects};
 use crate::platform::macos_keyboard::{
     KeyTranslation, MacosKeyboardBridge, NativeKeyEvent, NativeKeyEventKind, UnhandledKeyEvent,
@@ -86,6 +88,16 @@ const MAX_PANE_TITLE_CHARACTERS: usize = 256;
 const PRESENTATION_BLINK_INTERVAL: Duration = Duration::from_millis(600);
 const VISUAL_BELL_DURATION: Duration = Duration::from_millis(120);
 const RUNTIME_VISIBILITY_POLL_INTERVAL: Duration = Duration::from_millis(50);
+
+#[cfg(test)]
+fn current_application_active(cx: &App) -> bool {
+    cx.active_window().is_some()
+}
+
+#[cfg(not(test))]
+fn current_application_active(_: &App) -> bool {
+    application_is_active()
+}
 
 fn apply_native_attention(effects: crate::terminal::attention::AttentionEffects) {
     #[cfg(not(test))]
@@ -143,6 +155,7 @@ pub(crate) struct TerminalPane {
     find_editor: Option<FindEditor>,
     find_generation: FindQueryGeneration,
     product_focus: TerminalProductFocus,
+    native_modal_open: bool,
     terminal_input_focus: bool,
     surface_active: bool,
     application_active: bool,
@@ -256,17 +269,17 @@ impl TerminalPane {
         })
         .detach();
         cx.observe_window_activation(window, |pane, window, cx| {
-            pane.sync_terminal_input_focus(window);
+            pane.sync_terminal_input_focus(window, cx);
             cx.notify();
         })
         .detach();
         cx.on_focus(&focus_handle, window, |pane, window, cx| {
-            pane.sync_terminal_input_focus(window);
+            pane.sync_terminal_input_focus(window, cx);
             cx.notify();
         })
         .detach();
         cx.on_blur(&focus_handle, window, |pane, window, cx| {
-            pane.sync_terminal_input_focus(window);
+            pane.sync_terminal_input_focus(window, cx);
             cx.notify();
         })
         .detach();
@@ -294,6 +307,7 @@ impl TerminalPane {
             find_editor: None,
             find_generation: FindQueryGeneration::default(),
             product_focus: TerminalProductFocus::default(),
+            native_modal_open: false,
             terminal_input_focus: false,
             surface_active: false,
             application_active: false,
@@ -341,9 +355,10 @@ impl TerminalPane {
         self.focus_handle.focus(window);
     }
 
-    fn focus_find(&self, window: &mut Window) {
+    fn focus_find(&mut self, window: &mut Window, cx: &App) {
         self.advance_native_service_focus_epoch();
         self.find_focus_handle.focus(window);
+        let _ = self.sync_terminal_input_focus(window, cx);
     }
 
     fn advance_native_service_focus_epoch(&self) {
@@ -351,11 +366,12 @@ impl TerminalPane {
             .set(self.native_service_focus_epoch.get().wrapping_add(1));
     }
 
-    pub(crate) fn set_product_focus(&mut self, product_focus: TerminalProductFocus) {
-        if self.product_focus != product_focus {
-            self.native_service_hierarchy_generation =
-                self.native_service_hierarchy_generation.wrapping_add(1);
+    pub(crate) fn set_product_focus(&mut self, product_focus: TerminalProductFocus) -> bool {
+        if self.product_focus == product_focus {
+            return false;
         }
+        self.native_service_hierarchy_generation =
+            self.native_service_hierarchy_generation.wrapping_add(1);
         if self.product_focus.focused_pane && !product_focus.focused_pane {
             self.end_find_state();
         }
@@ -393,6 +409,10 @@ impl TerminalPane {
         if let Some(observation) = &self.runtime_observation {
             observation.product_visibility(product_focus.active_workspace, pane_visible);
         }
+        if native_service_blocked {
+            self.apply_terminal_input_focus(false);
+        }
+        true
     }
 
     pub(crate) fn synchronize_native_service_hierarchy_generation(&mut self, generation: u64) {
@@ -409,7 +429,7 @@ impl TerminalPane {
                 session.set_find_query(self.find_generation, String::new());
             }
         }
-        self.focus_find(window);
+        self.focus_find(window, cx);
         cx.notify();
     }
 
@@ -434,7 +454,9 @@ impl TerminalPane {
             return;
         }
         self.end_find_state();
-        self.focus(window);
+        self.advance_native_service_focus_epoch();
+        self.focus_handle.focus(window);
+        let _ = self.sync_terminal_input_focus(window, cx);
         cx.notify();
     }
 
@@ -458,30 +480,52 @@ impl TerminalPane {
         }
     }
 
-    pub(crate) fn terminal_input_focused(&self, window: &Window) -> bool {
-        let window_active = window.is_window_active();
-        let blocker = if self.context_menu.is_some() {
-            Some(TerminalFocusBlocker::ContextMenu)
-        } else {
-            self.product_focus.blocker
-        };
+    pub(crate) fn terminal_input_focused(&self, window: &Window, cx: &App) -> bool {
+        self.terminal_input_focused_for_application_state(window, current_application_active(cx))
+    }
+
+    fn terminal_input_focused_for_application_state(
+        &self,
+        window: &Window,
+        application_active: bool,
+    ) -> bool {
         TerminalFocusCoordinator::is_focused(TerminalFocusFacts {
             active_workspace: self.product_focus.active_workspace,
             active_window: self.product_focus.active_window,
             focused_pane: self.product_focus.focused_pane,
             responder: self.focus_handle.is_focused(window),
-            operating_system_window_key: window_active,
-            application_active: window_active,
-            blocker,
+            operating_system_window_key: window.is_window_active(),
+            application_active,
+            blocker: self
+                .native_modal_open
+                .then_some(TerminalFocusBlocker::Modal)
+                .or_else(|| {
+                    self.context_menu
+                        .is_some()
+                        .then_some(TerminalFocusBlocker::ContextMenu)
+                })
+                .or(self.product_focus.blocker),
         })
     }
 
-    fn sync_terminal_input_focus(&mut self, window: &Window) -> (bool, bool) {
-        let focused = self.terminal_input_focused(window);
+    fn sync_terminal_input_focus(&mut self, window: &Window, cx: &App) -> (bool, bool) {
+        let focused = self.terminal_input_focused(window, cx);
         let focus_gained = !self.terminal_input_focus && focused;
+        self.apply_terminal_input_focus(focused);
+        (focused, focus_gained)
+    }
+
+    pub(crate) fn synchronize_terminal_input_focus(&mut self, window: &Window, cx: &App) -> bool {
+        self.sync_terminal_input_focus(window, cx).0
+    }
+
+    fn apply_terminal_input_focus(&mut self, focused: bool) {
         if self.terminal_input_focus != focused {
             self.terminal_input_focus = focused;
             self.advance_native_service_focus_epoch();
+            if !focused {
+                self.keyboard_bridge.reset_pressed_modifiers();
+            }
             self.accessibility_notifications
                 .push(AccessibilityNotification::Focus);
             self.reset_blink_phase();
@@ -505,7 +549,6 @@ impl TerminalPane {
             }
             self.sync_secure_input();
         }
-        (focused, focus_gained)
     }
 
     fn clear_attention(&mut self, cx: &mut Context<Self>) {
@@ -993,7 +1036,7 @@ impl TerminalPane {
             cx.notify();
             return;
         }
-        if !self.terminal_input_focused(window) {
+        if !self.synchronize_terminal_input_focus(window, cx) {
             return;
         }
         let action = if event.is_held {
@@ -1025,7 +1068,7 @@ impl TerminalPane {
     }
 
     fn on_key_up(&mut self, event: &KeyUpEvent, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.terminal_input_focused(window) {
+        if !self.synchronize_terminal_input_focus(window, cx) {
             return;
         }
         let input = NativeKeyEvent::current_key(KeyAction::Release)
@@ -1063,7 +1106,7 @@ impl TerminalPane {
             self.pointer_modifiers = modifiers;
             cx.notify();
         }
-        if !self.terminal_input_focused(window) {
+        if !self.synchronize_terminal_input_focus(window, cx) {
             return;
         }
         let Some(event) = NativeKeyEvent::current_modifier() else {
@@ -1185,6 +1228,9 @@ impl TerminalPane {
         self.pointer_modifiers = input_modifiers(event.modifiers);
         self.focus(window);
         self.clear_attention(cx);
+        if !self.synchronize_terminal_input_focus(window, cx) {
+            return;
+        }
         let Some(button) = pointer_button(event.button) else {
             return;
         };
@@ -1418,7 +1464,7 @@ impl TerminalPane {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> Option<SelectionCopy> {
-        self.sync_terminal_input_focus(window);
+        self.sync_terminal_input_focus(window, cx);
         self.native_service_origin_matches(origin)
             .then(|| self.ordered_selection_copy(cx))
             .flatten()
@@ -1437,7 +1483,7 @@ impl TerminalPane {
             return;
         }
         let paths = read_file_urls().unwrap_or_default();
-        let terminal_input_focused = self.terminal_input_focus;
+        let terminal_input_focused = self.synchronize_terminal_input_focus(window, cx);
         let insertion = if paths.is_empty() {
             let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) else {
                 return;
@@ -1461,7 +1507,7 @@ impl TerminalPane {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        self.sync_terminal_input_focus(window);
+        self.sync_terminal_input_focus(window, cx);
         if !self.native_service_origin_matches(origin) || !self.terminal_input_focus {
             return false;
         }
@@ -1572,7 +1618,7 @@ impl TerminalPane {
             quick_look_eligible,
             link,
         });
-        self.sync_terminal_input_focus(window);
+        self.sync_terminal_input_focus(window, cx);
         cx.notify();
     }
 
@@ -1580,7 +1626,7 @@ impl TerminalPane {
         if self.context_menu.take().is_none() {
             return;
         }
-        self.sync_terminal_input_focus(window);
+        self.sync_terminal_input_focus(window, cx);
         cx.notify();
     }
 
@@ -1607,7 +1653,7 @@ impl TerminalPane {
             link.as_ref(),
         );
         actions.quick_look = menu.quick_look_eligible && link.is_some();
-        self.sync_terminal_input_focus(window);
+        self.sync_terminal_input_focus(window, cx);
 
         match command {
             TerminalContextMenuCommand::Copy if actions.copy => {
@@ -1653,8 +1699,9 @@ impl TerminalPane {
         pane_id: PaneId,
         hierarchy_generation: u64,
         window: &Window,
+        cx: &App,
     ) -> NativeServiceStatus {
-        self.sync_terminal_input_focus(window);
+        self.sync_terminal_input_focus(window, cx);
         let session_available = self.session.is_some();
         let capabilities = NativeServiceCapabilities::new(
             session_available && self.native_context_actions().copy,
@@ -1739,14 +1786,22 @@ impl TerminalPane {
     fn export_diagnostics(
         &mut self,
         _: &ExportTerminalDiagnostics,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.native_modal_open = true;
+        let _ = self.sync_terminal_input_focus(window, cx);
+        cx.notify();
         let directory = std::env::current_dir().unwrap_or_else(|_| std::env::temp_dir());
         let receiver = cx.prompt_for_new_path(&directory, Some("SpaceTerm-diagnostics.txt"));
         let diagnostics = self.diagnostics.clone();
         cx.spawn(async move |this, cx| {
-            let Ok(Ok(Some(path))) = receiver.await else {
+            let response = receiver.await;
+            let _ = this.update(cx, |this, cx| {
+                this.native_modal_open = false;
+                cx.notify();
+            });
+            let Ok(Ok(Some(path))) = response else {
                 return;
             };
             let exported_path = path.clone();
@@ -1797,7 +1852,7 @@ impl TerminalPane {
         let Some(confirmation) = self.pending_paste.take() else {
             return;
         };
-        if !self.terminal_input_focused(window) {
+        if !self.synchronize_terminal_input_focus(window, cx) {
             decision = PasteDecision::Cancel;
         }
         let Some(session) = &self.session else {
@@ -1855,7 +1910,7 @@ impl TerminalPane {
         let Some(request) = self.pending_osc52.take() else {
             return;
         };
-        if !self.terminal_input_focused(window) {
+        if !self.synchronize_terminal_input_focus(window, cx) {
             decision = Osc52AuthorizationDecision::Deny;
         }
         if let Some(session) = &self.session {
@@ -2102,7 +2157,7 @@ impl EntityInputHandler for TerminalPane {
                 reversed: editor.selection_reversed(),
             });
         }
-        if !ignore_disabled_input && !self.terminal_input_focused(window) {
+        if !ignore_disabled_input && !self.terminal_input_focused(window, _cx) {
             return None;
         }
         let range = if self.ime.marked_text().is_some() {
@@ -2158,7 +2213,7 @@ impl EntityInputHandler for TerminalPane {
             cx.notify();
             return;
         }
-        if !self.terminal_input_focused(window) {
+        if !self.synchronize_terminal_input_focus(window, cx) {
             self.ime.cancel();
             return;
         }
@@ -2190,7 +2245,7 @@ impl EntityInputHandler for TerminalPane {
             cx.notify();
             return;
         }
-        if !self.terminal_input_focused(window) {
+        if !self.synchronize_terminal_input_focus(window, cx) {
             self.ime.cancel();
             return;
         }
@@ -2282,8 +2337,9 @@ impl Render for TerminalPane {
         self.accessibility_notifications.clear();
         post_accessibility_notifications(&notifications, self.accessibility.visible_range());
         let pane = cx.entity().downgrade();
-        let (terminal_input_focused, focus_gained) = self.sync_terminal_input_focus(window);
+        let (terminal_input_focused, focus_gained) = self.sync_terminal_input_focus(window, cx);
         self.flush_pending_file_insertion(cx);
+        let application_active = current_application_active(cx);
         let surface_active = self.product_focus.active_workspace
             && self.product_focus.active_window
             && window.is_window_active();
@@ -2293,7 +2349,7 @@ impl Render for TerminalPane {
             .map(NativeWindowVisibilitySource::current)
             .unwrap_or_else(current_window_visibility);
         let surface_visibility = SurfaceVisibility {
-            application_active: window.is_window_active(),
+            application_active,
             key_window: window.is_window_active(),
             minimized: native_visibility.minimized,
             occluded: native_visibility.occluded,
@@ -2320,7 +2376,7 @@ impl Render for TerminalPane {
             cx.notify();
         }
         self.surface_active = surface_active;
-        self.application_active = window.is_window_active();
+        self.application_active = application_active;
         if focus_gained {
             self.clear_attention(cx);
         }
@@ -3186,7 +3242,9 @@ mod tests {
     use std::path::PathBuf;
     use std::rc::Rc;
 
-    use gpui::{Entity, KeyUpEvent, Keystroke, Modifiers, TestAppContext, VisualTestContext};
+    use gpui::{
+        EmptyView, Entity, KeyUpEvent, Keystroke, Modifiers, TestAppContext, VisualTestContext,
+    };
 
     use super::*;
     use crate::terminal::testing::{
@@ -3484,13 +3542,14 @@ mod tests {
         cx: &mut VisualTestContext,
     ) -> NativeServiceOrigin {
         cx.update(|window, cx| {
-            pane.update(cx, |pane, _| {
+            pane.update(cx, |pane, cx| {
                 pane.native_service_status(
                     WorkspaceId::new(1),
                     WindowId::new(1),
                     PaneId::new(1),
                     pane.native_service_hierarchy_generation,
                     window,
+                    cx,
                 )
                 .origin
                 .expect("the connected test terminal must expose its Service origin")
@@ -3603,7 +3662,8 @@ mod tests {
 
     #[gpui::test]
     fn terminal_find_renders_fixed_bar_and_moves_responder_focus(cx: &mut TestAppContext) {
-        let (pane, cx, _records) = connected_terminal_pane(cx);
+        let (pane, cx, records) = connected_terminal_pane(cx);
+        let command_count = records.commands().len();
 
         cx.dispatch_action(OpenTerminalFind);
         cx.run_until_parked();
@@ -3612,6 +3672,69 @@ mod tests {
         assert!(cx.update(|window, app| pane.read_with(app, |pane, _| {
             pane.find_focus_handle.is_focused(window) && !pane.focus_handle.is_focused(window)
         })));
+
+        cx.dispatch_action(CloseTerminalFind);
+        cx.simulate_keystrokes("a");
+        cx.run_until_parked();
+        let commands = records
+            .commands()
+            .into_iter()
+            .skip(command_count)
+            .filter_map(|call| match call.command {
+                command @ (RecordedSessionCommand::Focus(_) | RecordedSessionCommand::Key(_)) => {
+                    Some(command)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+
+        assert!(matches!(commands[0], RecordedSessionCommand::Focus(false)));
+        assert!(matches!(commands[1], RecordedSessionCommand::Focus(true)));
+        assert!(matches!(commands[2], RecordedSessionCommand::Key(_)));
+    }
+
+    #[gpui::test]
+    fn pointer_press_should_follow_synchronous_terminal_focus_admission(cx: &mut TestAppContext) {
+        let (pane, cx, records) = connected_terminal_pane(cx);
+        let command_count = records.commands().len();
+        let position = pane.read_with(cx, |pane, _| {
+            pane.grid_bounds
+                .expect("Terminal grid must be measured")
+                .center()
+        });
+
+        cx.update(|window, cx| {
+            pane.update(cx, |pane, cx| {
+                pane.apply_terminal_input_focus(false);
+                pane.on_mouse_down(
+                    &MouseDownEvent {
+                        position,
+                        modifiers: Modifiers::none(),
+                        button: MouseButton::Left,
+                        click_count: 1,
+                        first_mouse: false,
+                    },
+                    window,
+                    cx,
+                );
+            });
+        });
+        let commands = records
+            .commands()
+            .into_iter()
+            .skip(command_count)
+            .map(|call| call.command)
+            .collect::<Vec<_>>();
+
+        assert!(matches!(commands[0], RecordedSessionCommand::Focus(false)));
+        assert!(matches!(commands[1], RecordedSessionCommand::Focus(true)));
+        assert!(matches!(
+            commands[2],
+            RecordedSessionCommand::Pointer(PointerInput {
+                phase: PointerPhase::Press,
+                ..
+            })
+        ));
     }
 
     #[gpui::test]
@@ -4225,7 +4348,7 @@ mod tests {
             pane.read_with(cx, |pane, _| pane.pending_paste),
             Some(confirmation)
         );
-        assert!(cx.update(|window, cx| pane.read(cx).terminal_input_focused(window)));
+        assert!(cx.update(|window, cx| pane.read(cx).terminal_input_focused(window, cx)));
         assert!(
             records
                 .commands()
@@ -4239,7 +4362,7 @@ mod tests {
             call.command
                 == RecordedSessionCommand::ResolvePaste(confirmation.id, PasteDecision::Confirm)
         }));
-        assert!(cx.update(|window, cx| pane.read(cx).terminal_input_focused(window)));
+        assert!(cx.update(|window, cx| pane.read(cx).terminal_input_focused(window, cx)));
     }
 
     #[gpui::test]
@@ -4299,7 +4422,7 @@ mod tests {
             pane.read_with(cx, |pane, _| pane.pending_osc52),
             Some(request)
         );
-        assert!(cx.update(|window, cx| pane.read(cx).terminal_input_focused(window)));
+        assert!(cx.update(|window, cx| pane.read(cx).terminal_input_focused(window, cx)));
 
         cx.dispatch_action(DenyOsc52Clipboard);
         cx.run_until_parked();
@@ -4310,7 +4433,7 @@ mod tests {
                     Osc52AuthorizationDecision::Deny,
                 )
         }));
-        assert!(cx.update(|window, cx| pane.read(cx).terminal_input_focused(window)));
+        assert!(cx.update(|window, cx| pane.read(cx).terminal_input_focused(window, cx)));
     }
 
     #[gpui::test]
@@ -4559,6 +4682,88 @@ mod tests {
 
         cx.deactivate_window();
         assert_eq!(focus_commands(), vec![false, true, false, true, false]);
+    }
+
+    #[gpui::test]
+    fn non_key_operating_system_window_should_remain_distinct_from_active_application(
+        cx: &mut TestAppContext,
+    ) {
+        let (pane, cx, records) = connected_terminal_pane(cx);
+        let command_count = records.commands().len();
+        let second_window = cx.add_window(|_, _| EmptyView);
+
+        second_window
+            .update(cx, |_, window, _| window.activate_window())
+            .unwrap();
+        cx.run_until_parked();
+        let non_key = cx.update(|window, cx| {
+            assert!(cx.active_window().is_some());
+            assert!(!window.is_window_active());
+            pane.read(cx).terminal_input_focused(window, cx)
+        });
+        assert!(!non_key);
+
+        cx.update(|window, _| window.activate_window());
+        cx.run_until_parked();
+        let focus_edges = records
+            .commands()
+            .into_iter()
+            .skip(command_count)
+            .filter_map(|call| match call.command {
+                RecordedSessionCommand::Focus(focused) => Some((call.session_id, focused)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+
+        assert!(cx.update(|window, cx| pane.read(cx).terminal_input_focused(window, cx)));
+        assert_eq!(focus_edges, [(1, false), (1, true)]);
+    }
+
+    #[gpui::test]
+    fn native_save_panel_should_block_before_prompt_and_restore_after_cancel(
+        cx: &mut TestAppContext,
+    ) {
+        let (pane, cx, records) = connected_terminal_pane(cx);
+        let command_count = records.commands().len();
+
+        cx.update(|window, cx| {
+            pane.update(cx, |pane, cx| {
+                pane.export_diagnostics(&ExportTerminalDiagnostics, window, cx);
+            });
+        });
+
+        let blocked = cx.update(|window, cx| {
+            let pane = pane.read(cx);
+            (
+                pane.native_modal_open,
+                pane.terminal_input_focused(window, cx),
+            )
+        });
+        assert_eq!(
+            (blocked, cx.did_prompt_for_new_path()),
+            ((true, false), true)
+        );
+
+        cx.simulate_new_path_selection(|_| None);
+        cx.run_until_parked();
+
+        let restored = cx.update(|window, cx| {
+            let pane = pane.read(cx);
+            (
+                pane.native_modal_open,
+                pane.terminal_input_focused(window, cx),
+            )
+        });
+        let focus_edges = records
+            .commands()
+            .into_iter()
+            .skip(command_count)
+            .filter_map(|call| match call.command {
+                RecordedSessionCommand::Focus(focused) => Some(focused),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!((restored, focus_edges), ((false, true), vec![false, true]));
     }
 
     #[gpui::test]
@@ -5114,7 +5319,7 @@ mod tests {
                     selection_present: false,
                     quick_look_eligible: false,
                 });
-                pane.sync_terminal_input_focus(window);
+                pane.sync_terminal_input_focus(window, cx);
                 pane.dismiss_context_menu(window, cx);
             });
         });
@@ -5250,7 +5455,7 @@ mod tests {
                     selection_present: false,
                     quick_look_eligible: true,
                 });
-                pane.sync_terminal_input_focus(window);
+                pane.sync_terminal_input_focus(window, cx);
                 pane.perform_context_menu_command(
                     TerminalContextMenuCommand::QuickLook,
                     window,
@@ -5308,7 +5513,7 @@ mod tests {
                     "advanced",
                     8,
                 );
-                pane.sync_terminal_input_focus(window);
+                pane.sync_terminal_input_focus(window, cx);
                 pane.perform_context_menu_command(
                     TerminalContextMenuCommand::QuickLook,
                     window,

@@ -1026,7 +1026,8 @@ impl TerminalEmulator {
     }
 
     pub(crate) fn key(&mut self, input: KeyInput) -> Result<EmulatorAction, String> {
-        if !input.is_modifier_key() {
+        if !input.is_modifier_key() && matches!(input.action, KeyAction::Press | KeyAction::Repeat)
+        {
             self.clear_selection()?;
             self.terminal.scroll_viewport(ScrollViewport::Bottom);
         }
@@ -4056,6 +4057,23 @@ mod tests {
             .key(key(PhysicalKey::A, InputModifiers::default()))
             .unwrap();
 
+        assert_eq!(emulator.selection_text().unwrap(), None);
+    }
+
+    #[test]
+    fn non_modifier_key_release_preserves_selection() {
+        let mut emulator = emulator(12, 3);
+        emulator.feed(b"hello world");
+        select_first_five(&mut emulator, false);
+        let mut released = key(PhysicalKey::A, InputModifiers::default());
+        released.action = KeyAction::Release;
+
+        emulator.key(released).unwrap();
+
+        assert_eq!(emulator.selection_text().unwrap(), Some("hello".to_owned()));
+        emulator
+            .key(key(PhysicalKey::A, InputModifiers::default()))
+            .unwrap();
         assert_eq!(emulator.selection_text().unwrap(), None);
     }
 

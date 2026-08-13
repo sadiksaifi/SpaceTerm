@@ -2,9 +2,7 @@ use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use cocoa::appkit::NSApp;
-use cocoa::base::nil;
-use objc::{msg_send, sel, sel_impl};
+use super::macos_application::application_is_active;
 
 static NEXT_PANE_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -141,18 +139,6 @@ pub(crate) fn remove_pane(id: SecureInputPaneId) {
 pub(crate) fn update_application_activation() {
     COORDINATOR
         .with_borrow_mut(|coordinator| coordinator.set_application_active(application_is_active()));
-}
-
-#[allow(
-    unexpected_cfgs,
-    reason = "objc 0.2's msg_send macro probes its historical cargo-clippy cfg"
-)]
-fn application_is_active() -> bool {
-    // SAFETY: NSApp and isActive are read synchronously on GPUI's AppKit thread.
-    unsafe {
-        let application = NSApp();
-        application != nil && msg_send![application, isActive]
-    }
 }
 
 #[cfg(test)]

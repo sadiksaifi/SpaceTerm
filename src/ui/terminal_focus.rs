@@ -1,16 +1,10 @@
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the blocker vocabulary precedes every planned native surface"
-    )
-)]
 pub(crate) enum TerminalFocusBlocker {
     Sidebar,
     RenameField,
     ContextMenu,
     PaneMenu,
+    WindowMenu,
     TopChrome,
     WindowSelector,
     Modal,
@@ -129,6 +123,7 @@ mod tests {
             TerminalFocusBlocker::RenameField,
             TerminalFocusBlocker::ContextMenu,
             TerminalFocusBlocker::PaneMenu,
+            TerminalFocusBlocker::WindowMenu,
             TerminalFocusBlocker::TopChrome,
             TerminalFocusBlocker::WindowSelector,
             TerminalFocusBlocker::Modal,

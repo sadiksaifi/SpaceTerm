@@ -4,9 +4,9 @@ use std::rc::Rc;
 
 use gpui::prelude::*;
 use gpui::{
-    Action, AnyElement, App, Context, DragMoveEvent, Empty, Entity, FocusHandle, KeyDownEvent,
-    MouseButton, MouseDownEvent, Pixels, Render, ScrollHandle, ScrollWheelEvent, SharedString,
-    WeakEntity, Window, div, point, px, rgba,
+    Action, AnyElement, App, Context, DispatchPhase, DragMoveEvent, Empty, Entity, FocusHandle,
+    KeyDownEvent, MouseButton, MouseDownEvent, MouseExitEvent, Pixels, Render, ScrollHandle,
+    ScrollWheelEvent, SharedString, WeakEntity, Window, canvas, div, point, px, rgba,
 };
 use gpui_symbols::{Icon, SymbolWeight};
 
@@ -90,6 +90,8 @@ pub(crate) struct WorkspaceManager {
     rename_focus: FocusHandle,
     workspace_menu: Option<WorkspaceMenuState>,
     rename: Option<WorkspaceRenameState>,
+    top_chrome_interaction: bool,
+    top_chrome_move_requested: bool,
     pending_final_window_closes: BTreeSet<WorkspaceId>,
 }
 
@@ -122,7 +124,8 @@ impl WorkspaceManager {
             window,
             |manager, _, event: &OverlayScrollbarEvent<f32>, window, cx| match event {
                 OverlayScrollbarEvent::InteractionStarted => {
-                    manager.focus_sidebar(TerminalFocusBlocker::Sidebar, window, cx);
+                    manager.sidebar_focus.focus(window);
+                    manager.sync_terminal_focus_blocker(window, cx);
                 }
                 OverlayScrollbarEvent::OffsetRequested(offset) => {
                     let current_offset = manager.workspace_list_scroll_handle.offset();
@@ -133,6 +136,12 @@ impl WorkspaceManager {
                 }
             },
         )
+        .detach();
+        cx.observe_window_activation(window, |manager, window, cx| {
+            if !window.is_window_active() {
+                manager.set_top_chrome_interaction(false, window, cx);
+            }
+        })
         .detach();
 
         Self {
@@ -147,6 +156,8 @@ impl WorkspaceManager {
             rename_focus: cx.focus_handle(),
             workspace_menu: None,
             rename: None,
+            top_chrome_interaction: false,
+            top_chrome_move_requested: false,
             pending_final_window_closes: BTreeSet::new(),
         }
     }
@@ -196,37 +207,9 @@ impl WorkspaceManager {
     pub(crate) fn focus(&self, window: &mut Window, cx: &mut App) {
         let manager = self.workspaces.active_workspace().payload().clone();
         manager.update(cx, |manager, cx| {
-            manager.set_workspace_focus_blocker(None, cx);
+            manager.set_parent_focus_blocker(None, cx);
             manager.focus(window, cx);
         });
-    }
-
-    fn set_active_focus_blocker(
-        &self,
-        blocker: Option<TerminalFocusBlocker>,
-        cx: &mut Context<Self>,
-    ) {
-        self.workspaces
-            .active_workspace()
-            .payload()
-            .update(cx, |manager, cx| {
-                manager.set_workspace_focus_blocker(blocker, cx);
-            });
-    }
-
-    fn focus_sidebar(
-        &self,
-        blocker: TerminalFocusBlocker,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.set_active_focus_blocker(Some(blocker), cx);
-        self.sidebar_focus.focus(window);
-    }
-
-    fn focus_rename(&self, window: &mut Window, cx: &mut Context<Self>) {
-        self.set_active_focus_blocker(Some(TerminalFocusBlocker::RenameField), cx);
-        self.rename_focus.focus(window);
     }
 
     pub(crate) fn native_service_status(
@@ -235,30 +218,14 @@ impl WorkspaceManager {
         cx: &mut App,
     ) -> NativeServiceStatus {
         let workspace_id = self.workspaces.active_workspace_id();
-        let blocker = self.workspace_focus_blocker(window);
+        let blocker = self.terminal_focus_blocker(window);
         self.workspaces
             .active_workspace()
             .payload()
             .update(cx, |manager, cx| {
-                manager.set_workspace_focus_blocker(blocker, cx);
+                manager.set_parent_focus_blocker(blocker, cx);
                 manager.native_service_status(workspace_id, window, cx)
             })
-    }
-
-    fn workspace_focus_blocker(&self, window: &Window) -> Option<TerminalFocusBlocker> {
-        if self.rename_focus.is_focused(window) {
-            Some(TerminalFocusBlocker::RenameField)
-        } else if self.workspace_menu.is_some() {
-            Some(TerminalFocusBlocker::ContextMenu)
-        } else if self.sidebar_focus.is_focused(window) {
-            Some(TerminalFocusBlocker::Sidebar)
-        } else {
-            None
-        }
-    }
-
-    fn sync_active_focus_blocker(&self, window: &Window, cx: &mut Context<Self>) {
-        self.set_active_focus_blocker(self.workspace_focus_blocker(window), cx);
     }
 
     pub(crate) fn native_service_selection(
@@ -296,6 +263,56 @@ impl WorkspaceManager {
         })
     }
 
+    fn terminal_focus_blocker(&self, window: &Window) -> Option<TerminalFocusBlocker> {
+        self.top_chrome_interaction
+            .then_some(TerminalFocusBlocker::TopChrome)
+            .or(self
+                .rename
+                .as_ref()
+                .map(|_| TerminalFocusBlocker::RenameField))
+            .or(self
+                .workspace_menu
+                .map(|_| TerminalFocusBlocker::ContextMenu))
+            .or(self
+                .sidebar_focus
+                .is_focused(window)
+                .then_some(TerminalFocusBlocker::Sidebar))
+    }
+
+    fn sync_terminal_focus_blocker(&self, window: &Window, cx: &mut Context<Self>) {
+        let blocker = self.terminal_focus_blocker(window);
+        self.workspaces
+            .active_workspace()
+            .payload()
+            .update(cx, |manager, cx| {
+                manager.set_parent_focus_blocker(blocker, cx);
+            });
+    }
+
+    fn set_top_chrome_interaction(
+        &mut self,
+        blocked: bool,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.top_chrome_interaction == blocked {
+            return;
+        }
+        self.top_chrome_interaction = blocked;
+        self.top_chrome_move_requested = false;
+        self.sync_terminal_focus_blocker(window, cx);
+        cx.notify();
+    }
+
+    fn continue_top_chrome_interaction(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.top_chrome_interaction || self.top_chrome_move_requested {
+            return;
+        }
+        self.top_chrome_move_requested = true;
+        window.start_window_move();
+        cx.notify();
+    }
+
     fn set_sidebar_layout(&mut self, visible: bool, width: Pixels, cx: &mut Context<Self>) {
         if self.sidebar_visible == visible && self.sidebar_width == width {
             return;
@@ -324,9 +341,8 @@ impl WorkspaceManager {
             self.set_sidebar_layout(false, minimum_width, cx);
             if was_sidebar_focused {
                 self.focus(window, cx);
-            } else {
-                self.sync_active_focus_blocker(window, cx);
             }
+            self.sync_terminal_focus_blocker(window, cx);
             return;
         }
 
@@ -415,7 +431,7 @@ impl WorkspaceManager {
         next_manager.update(cx, |manager, cx| manager.activate(window, cx));
         self.workspace_menu = None;
         self.rename = None;
-        self.sync_active_focus_blocker(window, cx);
+        self.sync_terminal_focus_blocker(window, cx);
         self.scroll_active_workspace_into_view();
         cx.notify();
     }
@@ -453,7 +469,7 @@ impl WorkspaceManager {
             next_manager.update(cx, |manager, cx| manager.activate(window, cx));
         }
         self.workspace_menu = None;
-        self.sync_active_focus_blocker(window, cx);
+        self.sync_terminal_focus_blocker(window, cx);
         self.scroll_active_workspace_into_view();
         cx.notify();
         true
@@ -527,7 +543,7 @@ impl WorkspaceManager {
         {
             self.rename = None;
         }
-        self.sync_active_focus_blocker(window, cx);
+        self.sync_terminal_focus_blocker(window, cx);
         self.scroll_active_workspace_into_view();
         cx.notify();
     }
@@ -579,7 +595,7 @@ impl WorkspaceManager {
                 {
                     self.rename = None;
                 }
-                self.sync_active_focus_blocker(window, cx);
+                self.sync_terminal_focus_blocker(window, cx);
                 self.scroll_active_workspace_into_view();
                 cx.notify();
             }
@@ -601,17 +617,18 @@ impl WorkspaceManager {
         let sidebar_visible = !self.sidebar_visible;
         self.workspace_menu = None;
         self.rename = None;
-        self.sync_active_focus_blocker(window, cx);
         self.set_sidebar_layout(sidebar_visible, self.sidebar_width, cx);
         if !sidebar_visible && was_sidebar_focused {
             self.focus(window, cx);
         }
+        self.sync_terminal_focus_blocker(window, cx);
     }
 
     fn toggle_sidebar_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.sidebar_focus.is_focused(window) || self.rename_focus.is_focused(window) {
             self.rename = None;
             self.focus(window, cx);
+            self.sync_terminal_focus_blocker(window, cx);
             cx.notify();
             return;
         }
@@ -619,12 +636,14 @@ impl WorkspaceManager {
         if !self.sidebar_visible {
             self.set_sidebar_layout(true, self.sidebar_width, cx);
             cx.defer_in(window, |manager, window, cx| {
-                manager.focus_sidebar(TerminalFocusBlocker::Sidebar, window, cx);
+                manager.sidebar_focus.focus(window);
+                manager.sync_terminal_focus_blocker(window, cx);
             });
             return;
         }
 
-        self.focus_sidebar(TerminalFocusBlocker::Sidebar, window, cx);
+        self.sidebar_focus.focus(window);
+        self.sync_terminal_focus_blocker(window, cx);
         cx.notify();
     }
 
@@ -635,7 +654,8 @@ impl WorkspaceManager {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.focus_sidebar(TerminalFocusBlocker::ContextMenu, window, cx);
+        self.sidebar_focus.focus(window);
+        self.sync_terminal_focus_blocker(window, cx);
         if !self.activate_workspace(workspace_id, window, cx) {
             return;
         }
@@ -650,7 +670,7 @@ impl WorkspaceManager {
                 .clamp(px(TOP_CHROME_HEIGHT + WORKSPACE_MENU_INSET), maximum_top),
         });
         self.rename = None;
-        self.set_active_focus_blocker(Some(TerminalFocusBlocker::ContextMenu), cx);
+        self.sync_terminal_focus_blocker(window, cx);
         cx.notify();
     }
 
@@ -660,22 +680,24 @@ impl WorkspaceManager {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(menu) = self.workspace_menu.take() else {
+        let Some(menu) = self.workspace_menu else {
             return;
         };
-        self.set_active_focus_blocker(Some(TerminalFocusBlocker::Sidebar), cx);
         match command {
             WorkspaceMenuCommand::NewWindow => {
-                if self.activate_workspace(menu.workspace_id, window, cx)
-                    && let Some(workspace) = self.workspaces.workspace(menu.workspace_id)
-                {
+                if let Some(workspace) = self.workspaces.workspace(menu.workspace_id) {
                     workspace
                         .payload()
                         .update(cx, |manager, cx| manager.create_window(window, cx));
                 }
+                self.workspace_menu = None;
+                self.sync_terminal_focus_blocker(window, cx);
+                cx.notify();
             }
             WorkspaceMenuCommand::Rename => {
                 let Some(workspace) = self.workspaces.workspace(menu.workspace_id) else {
+                    self.workspace_menu = None;
+                    self.sync_terminal_focus_blocker(window, cx);
                     return;
                 };
                 self.rename = Some(WorkspaceRenameState {
@@ -683,9 +705,12 @@ impl WorkspaceManager {
                     draft: workspace.name().to_owned(),
                     replace_on_first_input: true,
                 });
+                self.workspace_menu = None;
+                self.sync_terminal_focus_blocker(window, cx);
                 cx.notify();
                 cx.defer_in(window, |manager, window, cx| {
-                    manager.focus_rename(window, cx);
+                    manager.rename_focus.focus(window);
+                    manager.sync_terminal_focus_blocker(window, cx);
                 });
             }
             WorkspaceMenuCommand::Close => self.close_workspace(menu.workspace_id, window, cx),
@@ -717,11 +742,13 @@ impl WorkspaceManager {
                     }
                 }
                 self.rename = None;
-                self.focus_sidebar(TerminalFocusBlocker::Sidebar, window, cx);
+                self.sidebar_focus.focus(window);
+                self.sync_terminal_focus_blocker(window, cx);
             }
             "escape" => {
                 self.rename = None;
-                self.focus_sidebar(TerminalFocusBlocker::Sidebar, window, cx);
+                self.sidebar_focus.focus(window);
+                self.sync_terminal_focus_blocker(window, cx);
             }
             "backspace" => {
                 if rename.replace_on_first_input {
@@ -870,6 +897,11 @@ impl WorkspaceManager {
     }
 
     fn render_top_left_chrome(&self, manager: WeakEntity<Self>) -> AnyElement {
+        let chrome_down_manager = manager.clone();
+        let chrome_capture_manager = manager.clone();
+        let chrome_move_manager = manager.clone();
+        let chrome_up_manager = manager.clone();
+        let chrome_out_manager = manager.clone();
         let toggle_manager = manager;
         div()
             .id("workspace-top-chrome")
@@ -881,7 +913,37 @@ impl WorkspaceManager {
             .h(px(TOP_CHROME_HEIGHT))
             .bg(gpui_color(ACTIVE_THEME.tab_bar_background))
             .occlude()
-            .on_mouse_down(MouseButton::Left, handle_top_chrome_mouse_down)
+            .capture_any_mouse_down(move |event, window, cx| {
+                if event.button == MouseButton::Left && event.click_count == 1 {
+                    let _ = chrome_capture_manager.update(cx, |manager, cx| {
+                        manager.set_top_chrome_interaction(true, window, cx);
+                    });
+                }
+            })
+            .on_mouse_down(MouseButton::Left, move |event, window, cx| {
+                handle_top_chrome_mouse_down(event, window, cx, |blocked, window, cx| {
+                    let _ = chrome_down_manager.update(cx, |manager, cx| {
+                        manager.set_top_chrome_interaction(blocked, window, cx);
+                    });
+                });
+            })
+            .on_mouse_move(move |event, window, cx| {
+                if event.dragging() {
+                    let _ = chrome_move_manager.update(cx, |manager, cx| {
+                        manager.continue_top_chrome_interaction(window, cx);
+                    });
+                }
+            })
+            .on_mouse_up_out(MouseButton::Left, move |_, window, cx| {
+                let _ = chrome_up_manager.update(cx, |manager, cx| {
+                    manager.set_top_chrome_interaction(false, window, cx);
+                });
+            })
+            .on_mouse_up(MouseButton::Left, move |_, window, cx| {
+                let _ = chrome_out_manager.update(cx, |manager, cx| {
+                    manager.set_top_chrome_interaction(false, window, cx);
+                });
+            })
             .child(
                 div()
                     .id("workspace-top-chrome-right-divider")
@@ -986,7 +1048,8 @@ impl WorkspaceManager {
                 .text_color(gpui_color(ACTIVE_THEME.text))
                 .on_click(move |_, window, cx| {
                     let _ = rename_manager.update(cx, |manager, cx| {
-                        manager.focus_rename(window, cx);
+                        manager.rename_focus.focus(window);
+                        manager.sync_terminal_focus_blocker(window, cx);
                     });
                     cx.stop_propagation();
                 })
@@ -1033,7 +1096,7 @@ impl WorkspaceManager {
             .hover(|row| row.bg(gpui_color(ACTIVE_THEME.ghost_element_selected)))
             .on_click(move |_, window, cx| {
                 let _ = click_manager.update(cx, |manager, cx| {
-                    manager.focus_sidebar(TerminalFocusBlocker::Sidebar, window, cx);
+                    manager.sidebar_focus.focus(window);
                     manager.activate_workspace(workspace_id, window, cx);
                 });
                 cx.stop_propagation();
@@ -1231,10 +1294,10 @@ impl WorkspaceManager {
             .left(px(WORKSPACE_MENU_INSET))
             .w(px(WORKSPACE_MENU_WIDTH))
             .h(px(WORKSPACE_MENU_HEIGHT))
-            .on_mouse_down_out(move |_, _, cx| {
+            .on_mouse_down_out(move |_, window, cx| {
                 let _ = dismiss_manager.update(cx, |manager, cx| {
                     if manager.workspace_menu.take().is_some() {
-                        manager.set_active_focus_blocker(Some(TerminalFocusBlocker::Sidebar), cx);
+                        manager.sync_terminal_focus_blocker(window, cx);
                         cx.notify();
                     }
                 });
@@ -1245,9 +1308,12 @@ impl WorkspaceManager {
 }
 
 impl Render for WorkspaceManager {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         debug_assert!(self.workspaces.len() > 0);
+        self.sync_terminal_focus_blocker(window, cx);
         let manager = cx.entity().downgrade();
+        let release_manager = manager.clone();
+        let exit_manager = manager.clone();
         let resize_manager = manager.clone();
         let active_window_manager = self.workspaces.active_workspace().payload().clone();
         if self.sidebar_visible {
@@ -1263,6 +1329,29 @@ impl Render for WorkspaceManager {
             .min_h_0()
             .overflow_hidden()
             .bg(gpui_color(ACTIVE_THEME.terminal_background))
+            .capture_any_mouse_up(move |event, window, cx| {
+                if event.button == MouseButton::Left {
+                    let _ = release_manager.update(cx, |manager, cx| {
+                        manager.set_top_chrome_interaction(false, window, cx);
+                    });
+                }
+            })
+            .child(
+                canvas(
+                    |_, _, _| (),
+                    move |_, _, window, _| {
+                        window.on_mouse_event(move |_: &MouseExitEvent, phase, window, cx| {
+                            if phase == DispatchPhase::Bubble {
+                                let _ = exit_manager.update(cx, |manager, cx| {
+                                    manager.set_top_chrome_interaction(false, window, cx);
+                                });
+                            }
+                        });
+                    },
+                )
+                .absolute()
+                .inset_0(),
+            )
             .on_drag_move::<DraggedWorkspaceSidebar>(move |event: &DragMoveEvent<_>, window, cx| {
                 let pointer_x = event.event.position.x - event.bounds.origin.x;
                 let _ = resize_manager.update(cx, |manager, cx| {
@@ -1429,7 +1518,9 @@ mod tests {
     };
 
     use super::*;
-    use crate::terminal::testing::{TestTerminalSessionFactory, TestTerminalSessionRecords};
+    use crate::terminal::testing::{
+        RecordedSessionCommand, TestTerminalSessionFactory, TestTerminalSessionRecords,
+    };
     use crate::terminal::{SessionEvent, SessionExit};
 
     fn workspace_manager(
@@ -1472,6 +1563,39 @@ mod tests {
         cx.simulate_mouse_down(position, MouseButton::Right, Modifiers::none());
         cx.simulate_mouse_up(position, MouseButton::Right, Modifiers::none());
         cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn workspace_top_chrome_should_restore_after_release_outside_its_hitbox(
+        cx: &mut TestAppContext,
+    ) {
+        let (_manager, records, cx) = workspace_manager(cx);
+        cx.update(|window, _| window.activate_window());
+        cx.run_until_parked();
+        let command_count = records.commands().len();
+        let chrome = cx
+            .debug_bounds("workspace-top-chrome")
+            .expect("Workspace top chrome must be rendered")
+            .center();
+        let outside = cx
+            .debug_bounds("window-manager-content")
+            .expect("Window content must be rendered")
+            .center();
+
+        cx.simulate_mouse_down(chrome, MouseButton::Left, Modifiers::none());
+        cx.simulate_mouse_up(outside, MouseButton::Left, Modifiers::none());
+        cx.run_until_parked();
+
+        let focus_edges = records
+            .commands()
+            .into_iter()
+            .skip(command_count)
+            .filter_map(|call| match call.command {
+                RecordedSessionCommand::Focus(focused) => Some((call.session_id, focused)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(focus_edges, [(1, false), (1, true)]);
     }
 
     fn drag_to(selector: &'static str, destination_x: Pixels, cx: &mut VisualTestContext) {

@@ -29,7 +29,7 @@ use crate::terminal::geometry::TerminalGeometry;
 use crate::terminal::identity;
 #[cfg(test)]
 use crate::terminal::key::OptionAsAltPolicy;
-use crate::terminal::key::{InputModifiers, KeyInput};
+use crate::terminal::key::{InputModifiers, KeyInput, PhysicalKey};
 #[cfg(test)]
 use crate::terminal::osc52::Osc52ClipboardError;
 use crate::terminal::osc52::{
@@ -1240,35 +1240,76 @@ impl SelectionAutoscrollSchedule {
 }
 
 #[derive(Default)]
-struct HeldKeys(Vec<KeyInput>);
+struct HeldKeys {
+    held: Vec<KeyInput>,
+    suppressed_releases: Vec<PhysicalKey>,
+}
 
 impl HeldKeys {
-    fn route(&mut self, input: &KeyInput) {
+    fn route(&mut self, input: &KeyInput) -> bool {
         if input.is_text_input() || input.is_input_method_commit() {
-            return;
+            return true;
         }
         match input.action {
-            crate::terminal::key::KeyAction::Press | crate::terminal::key::KeyAction::Repeat => {
+            crate::terminal::key::KeyAction::Press => {
+                self.suppressed_releases
+                    .retain(|key| *key != input.physical_key);
                 if let Some(held) = self
-                    .0
+                    .held
                     .iter_mut()
                     .find(|held| held.physical_key == input.physical_key)
                 {
                     *held = input.clone();
                 } else {
-                    self.0.push(input.clone());
+                    self.held.push(input.clone());
                 }
+                true
             }
-            crate::terminal::key::KeyAction::Release => self
-                .0
-                .retain(|held| held.physical_key != input.physical_key),
+            crate::terminal::key::KeyAction::Repeat => {
+                if self.suppressed_releases.contains(&input.physical_key) {
+                    return false;
+                }
+                if let Some(held) = self
+                    .held
+                    .iter_mut()
+                    .find(|held| held.physical_key == input.physical_key)
+                {
+                    *held = input.clone();
+                } else {
+                    self.held.push(input.clone());
+                }
+                true
+            }
+            crate::terminal::key::KeyAction::Release => {
+                if self
+                    .held
+                    .iter()
+                    .any(|held| held.physical_key == input.physical_key)
+                {
+                    self.held
+                        .retain(|held| held.physical_key != input.physical_key);
+                    return true;
+                }
+                let Some(index) = self
+                    .suppressed_releases
+                    .iter()
+                    .position(|key| *key == input.physical_key)
+                else {
+                    return true;
+                };
+                self.suppressed_releases.swap_remove(index);
+                false
+            }
         }
     }
 
     fn take_releases(&mut self) -> Vec<KeyInput> {
-        std::mem::take(&mut self.0)
+        std::mem::take(&mut self.held)
             .into_iter()
             .map(|mut input| {
+                if !self.suppressed_releases.contains(&input.physical_key) {
+                    self.suppressed_releases.push(input.physical_key);
+                }
                 input.action = crate::terminal::key::KeyAction::Release;
                 input
             })
@@ -1946,7 +1987,9 @@ impl TerminalWorker {
     }
 
     fn process_key(&mut self, input: KeyInput) -> bool {
-        self.held_keys.route(&input);
+        if !self.held_keys.route(&input) {
+            return true;
+        }
         match self.emulator.key(input) {
             Ok(action) => self.apply_terminal_input_action(action),
             Err(message) => {
@@ -3322,7 +3365,29 @@ mod tests {
         assert!(held.take_releases().is_empty());
 
         let application_shortcut_never_routed = HeldKeys::default();
-        assert!(application_shortcut_never_routed.0.is_empty());
+        assert!(application_shortcut_never_routed.held.is_empty());
+    }
+
+    #[test]
+    fn held_keys_suppress_one_stale_release_but_route_a_new_press_release_pair() {
+        let mut held = HeldKeys::default();
+        let press = text_key(KeyAction::Press);
+        let repeat = text_key(KeyAction::Repeat);
+        let release = text_key(KeyAction::Release);
+
+        assert!(held.route(&press));
+        assert_eq!(held.take_releases().len(), 1);
+        assert!(!held.route(&repeat));
+        assert!(!held.route(&release));
+        assert!(held.route(&release));
+
+        let mut held = HeldKeys::default();
+        assert!(held.route(&press));
+        assert_eq!(held.take_releases().len(), 1);
+        assert!(held.route(&press));
+        assert!(held.route(&release));
+        assert!(held.take_releases().is_empty());
+        assert!(held.suppressed_releases.is_empty());
     }
 
     #[test]
@@ -3399,6 +3464,80 @@ mod tests {
         });
         assert_eq!(records.snapshot().written, once);
 
+        session.shutdown();
+    }
+
+    #[test]
+    fn physical_key_up_after_refocus_is_suppressed_after_synthetic_release() {
+        let (result, reader_steps, records) = start_scripted_session(ScriptedPtyOptions::default());
+        let (mut session, events) = result.unwrap();
+        reader_steps
+            .send(ReaderStep::Bytes(b"\x1b[>11u\x1b[?1004h".to_vec()))
+            .unwrap();
+        records.wait_for("the current focus-in report", |state| {
+            state.written == b"\x1b[I"
+        });
+
+        session.key(text_key(KeyAction::Press));
+        reader_steps
+            .send(ReaderStep::Bytes(b"selected".to_vec()))
+            .unwrap();
+        let SessionEvent::Screen(screen) = receive_event(
+            &events,
+            "the selectable terminal output after the held key press",
+            |event| matches!(event, SessionEvent::Screen(screen) if screen_text(screen).contains("selected")),
+        ) else {
+            unreachable!()
+        };
+        let pointer = |phase, position| PointerInput {
+            generation: screen.generation,
+            phase,
+            button: (phase != PointerPhase::Motion).then_some(PointerButton::Left),
+            position,
+            modifiers: InputModifiers::default(),
+            shift_selection: ShiftSelectionPolicy::default(),
+        };
+        session.pointer(pointer(
+            PointerPhase::Press,
+            SurfacePosition { x: 1.0, y: 1.0 },
+        ));
+        session.pointer(pointer(
+            PointerPhase::Motion,
+            SurfacePosition { x: 63.0, y: 1.0 },
+        ));
+        session.pointer(pointer(
+            PointerPhase::Release,
+            SurfacePosition { x: 63.0, y: 1.0 },
+        ));
+        assert_eq!(
+            session.copy_selection().unwrap().unwrap().plain_text,
+            "selected"
+        );
+
+        session.focus(false);
+        records.wait_for("held release before focus-out", |state| {
+            state.written.ends_with(b"\x1b[97;1:3u\x1b[O")
+        });
+        session.focus(true);
+        records.wait_for("focus-in after synthetic release", |state| {
+            state.written.ends_with(b"\x1b[I")
+        });
+        let before_physical_release = records.snapshot().written;
+
+        session.key(text_key(KeyAction::Release));
+        session.resize(test_geometry());
+        records.wait_for("the suppressed physical release barrier", |state| {
+            !state.resizes.is_empty()
+        });
+
+        assert_eq!(records.snapshot().written, before_physical_release);
+        assert_eq!(
+            session.copy_selection().unwrap().unwrap().plain_text,
+            "selected"
+        );
+
+        session.key(text_key(KeyAction::Press));
+        assert_eq!(session.copy_selection().unwrap(), None);
         session.shutdown();
     }
 
