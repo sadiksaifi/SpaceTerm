@@ -181,7 +181,12 @@ subset; unsupported inputs still receive the protocol-defined rejection behavior
 GPUI caches `RenderImage` values by image ID and content generation, converts RGBA to its BGRA
 upload format once, and explicitly removes stale atlas entries on replacement, deletion, quota
 eviction, screen ownership changes, and Pane release. The cache is application-bounded to 384 MiB.
-Source cropping paints transformed full-image bounds through nested destination and grid masks.
+Candidate resources and immutable placement geometry are staged transactionally; they become
+authoritative only after scene submission succeeds, while a failed attempt retains the last valid
+resource set and Presentation Generation. Unchanged content and placement generations, active
+screen, grid geometry, and backing scale reuse one Arc-backed placement paint plan without
+reconstructing image geometry. Source cropping paints transformed full-image bounds through nested
+destination and grid masks.
 Paint order is terminal base background; images with `z < -1073741824`; cell, search, Selection,
 and Cursor backgrounds; images with `-1073741824 <= z < 0`; glyphs and decorations; images with
 `z >= 0`; then Marked Text and its caret. Equal-z placements use increasing image ID; Marked Text
@@ -288,10 +293,12 @@ blink state; wide spacer tails extend their head cell's decoration without produ
 Invisible cells prepare no foreground decorations, while Selection remains an independent overlay.
 
 Decoration positions derive from the selected terminal font's baseline, ascent, and x-height, and
-their minimum thickness and positions snap to one backing device pixel. GPUI builds quads and curly
-paths during prepaint and clips them to terminal grid bounds. The fixed paint order is background
-and Selection, underline and overline, glyph or generated symbol, then strikethrough; marked-text
-overlays remain above the immutable grid presentation.
+their minimum thickness and positions snap to one backing device pixel. Prepared rows cache flat
+scene primitives for every decoration, including GPUI wavy-underlines for curly strokes, and reuse
+that geometry until row content or layout invalidates it. GPUI clips submission to terminal grid
+bounds. The fixed paint order is background and Selection, underline and overline, glyph or
+generated symbol, then strikethrough; marked-text overlays remain above the immutable grid
+presentation.
 
 ### Terminal Drawing Symbols
 
@@ -303,10 +310,12 @@ faint processing, while Selection remains an independent background overlay.
 
 Each terminal grid owner caches immutable symbol plans by scalar, device-pixel dimensions, cell
 width, and backing scale. Plans are released when scale-dependent rendering state is invalidated
-or the owner is dropped. Their geometry reaches shared device-pixel cell edges without font
-bearings, paints between under-text decorations and strikethrough, participates in text blink
-filtering, and receives the same Cursor block recoloring overlay as shaped glyphs. Logical origins
-still derive from Unified Terminal Geometry so fractional cell widths do not accumulate drift.
+or the owner is dropped. Prepared rows rasterize vector plan primitives into flat, cell-local quads
+only when stable row geometry invalidates. Their geometry reaches shared device-pixel cell edges
+without font bearings, paints between under-text decorations and strikethrough, participates in
+text blink filtering, and receives the same Cursor block recoloring overlay as shaped glyphs.
+Logical origins still derive from Unified Terminal Geometry so fractional cell widths do not
+accumulate drift.
 
 ### Terminal Input Focus
 
@@ -520,7 +529,10 @@ clusters before the right edge, and overlay the immutable grid with an underline
 caret. Candidate-window bounds derive from that caret and the same logical cell geometry used for
 rendering. A nonempty commit clears Marked Text and becomes exactly one typed input-method event on
 the reliable Terminal Session command lane; the worker emits its UTF-8 once in order and never
-tracks it as a held key.
+tracks it as a held key. The Pane and terminal grid cache logical cluster layout and shaped overlay
+geometry by the exact marked-text revision, caret, Cursor origin, grid metrics, font, colors, and
+backing scale, so unrelated frames do not reshape stable composition while every native edit
+invalidates it immediately.
 
 ### Terminal Accessibility
 

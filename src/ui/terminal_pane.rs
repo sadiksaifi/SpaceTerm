@@ -132,6 +132,15 @@ struct TerminalContextMenuState {
     quick_look_eligible: bool,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct PreeditLayoutKey {
+    marked_revision: u64,
+    start_row: usize,
+    start_column: usize,
+    columns: usize,
+    caret_utf16: usize,
+}
+
 pub(crate) struct TerminalPane {
     session_factory: WorkspaceTerminalSessionFactory,
     session: Option<Box<dyn TerminalSessionHandle>>,
@@ -176,10 +185,13 @@ pub(crate) struct TerminalPane {
     shift_selection: ShiftSelectionPolicy,
     wheel_accumulator: WheelAccumulator,
     scrollbar: Entity<OverlayScrollbar<u64>>,
-    render_cache: TerminalGridCache,
+    render_cache: Entity<TerminalGridCache>,
     graphics_cache: Entity<TerminalGraphicsCache>,
     keyboard_bridge: MacosKeyboardBridge,
     ime: TerminalIme,
+    preedit_layout: Option<PreeditLayout>,
+    preedit_layout_key: Option<PreeditLayoutKey>,
+    marked_revision: u64,
     ime_suppressed_keys: Vec<PhysicalKey>,
     pending_file_insertion: Option<NativeInsertion>,
     pending_paste: Option<PasteConfirmation>,
@@ -231,6 +243,7 @@ impl TerminalPane {
         let fallback_title: SharedString =
             normalized_pane_title("", &session_factory.fallback_title()).into();
         let scrollbar = cx.new(|_| OverlayScrollbar::<u64>::new("terminal-scrollbar"));
+        let render_cache = cx.new(|_| TerminalGridCache::new());
         let graphics_cache = cx.new(|_| TerminalGraphicsCache::default());
         cx.on_release(|pane, cx| {
             pane.graphics_cache.update(cx, |cache, cx| cache.clear(cx));
@@ -328,10 +341,13 @@ impl TerminalPane {
             shift_selection: ShiftSelectionPolicy::default(),
             wheel_accumulator: WheelAccumulator::default(),
             scrollbar,
-            render_cache: TerminalGridCache::new(),
+            render_cache,
             graphics_cache,
             keyboard_bridge: MacosKeyboardBridge::new(OptionAsAltPolicy::default()),
             ime: TerminalIme::default(),
+            preedit_layout: None,
+            preedit_layout_key: None,
+            marked_revision: 0,
             ime_suppressed_keys: Vec::new(),
             pending_file_insertion: None,
             pending_paste: None,
@@ -542,6 +558,7 @@ impl TerminalPane {
                         .resolve_osc52_authorization(request.id, Osc52AuthorizationDecision::Deny);
                 }
                 self.ime.cancel();
+                self.invalidate_preedit_layout();
                 self.ime_suppressed_keys.clear();
             }
             if let Some(session) = &self.session {
@@ -585,17 +602,87 @@ impl TerminalPane {
         }
     }
 
-    fn preedit_layout(&self) -> Option<PreeditLayout> {
-        let text = self.ime.marked_text()?;
-        let position = self.screen.cursor.position?;
-        let columns = self.screen.rows.first()?.len();
-        Some(layout_preedit(
-            text,
-            usize::from(position.row),
-            usize::from(position.column),
+    fn preedit_layout(&mut self) -> Option<PreeditLayout> {
+        let Some(text) = self.ime.marked_text() else {
+            self.preedit_layout = None;
+            self.preedit_layout_key = None;
+            return None;
+        };
+        let Some(position) = self.screen.cursor.position else {
+            self.preedit_layout = None;
+            self.preedit_layout_key = None;
+            return None;
+        };
+        let Some(columns) = self.screen.rows.first().map(|row| row.len()) else {
+            self.preedit_layout = None;
+            self.preedit_layout_key = None;
+            return None;
+        };
+        let caret_utf16 = self.ime.selected_range().end;
+        let key = PreeditLayoutKey {
+            marked_revision: self.marked_revision,
+            start_row: usize::from(position.row),
+            start_column: usize::from(position.column),
             columns,
-            self.ime.selected_range().end,
-        ))
+            caret_utf16,
+        };
+        if self.preedit_layout_key.as_ref() != Some(&key) {
+            self.preedit_layout = Some(layout_preedit(
+                text,
+                key.start_row,
+                key.start_column,
+                columns,
+                caret_utf16,
+            ));
+            self.preedit_layout_key = Some(key);
+        }
+        self.preedit_layout.clone()
+    }
+
+    #[cfg(test)]
+    fn mark_for_preedit_cache_test(&mut self, text: &str, selected_utf16: Range<usize>) {
+        self.ime.replace_and_mark(None, text, Some(selected_utf16));
+        self.invalidate_preedit_layout();
+    }
+
+    fn invalidate_preedit_layout(&mut self) {
+        self.marked_revision = self.marked_revision.wrapping_add(1);
+        self.preedit_layout = None;
+        self.preedit_layout_key = None;
+    }
+
+    pub(super) fn graphics_scene_succeeded(
+        &mut self,
+        attempt: super::terminal_graphics::GraphicsAttemptToken,
+        generation: crate::terminal::PresentationGeneration,
+        cx: &mut Context<Self>,
+    ) {
+        if self
+            .graphics_cache
+            .update(cx, |cache, cx| cache.mark_presented(attempt, cx))
+        {
+            self.render_lifecycle.mark_presented(generation);
+        }
+    }
+
+    fn observe_presented_next_frame(
+        &self,
+        generation: crate::terminal::PresentationGeneration,
+        rows: u16,
+        columns: u16,
+    ) {
+        if !self.acceptance_observation_claimed || !self.render_lifecycle.is_presented(generation) {
+            return;
+        }
+        if let Some(observation) = &self.runtime_observation {
+            observation.next_frame(generation.as_u64());
+        }
+        if let Some(observation) =
+            crate::platform::acceptance_observation::prepare_once(rows, columns)
+            && let Err(error) = observation.emit()
+        {
+            eprintln!("failed to emit acceptance observation: {error}");
+        }
     }
 
     pub(crate) fn title(&self) -> SharedString {
@@ -1209,7 +1296,8 @@ impl TerminalPane {
         self.cell_width = measure_cell_width(window, &self.font_family, self.font_size);
         self.last_geometry = None;
         if self.render_lifecycle.update_scale(factor) == ScaleChange::ScaleResources {
-            self.render_cache.invalidate_scale_dependent();
+            self.render_cache
+                .update(cx, |cache, _| cache.invalidate_scale_dependent());
         }
         self.sync_scrollbar(cx);
         cx.notify();
@@ -2193,6 +2281,7 @@ impl EntityInputHandler for TerminalPane {
             return;
         }
         self.ime.cancel();
+        self.invalidate_preedit_layout();
         self.accessibility_notifications
             .push(AccessibilityNotification::Value);
         cx.notify();
@@ -2215,9 +2304,11 @@ impl EntityInputHandler for TerminalPane {
         }
         if !self.synchronize_terminal_input_focus(window, cx) {
             self.ime.cancel();
+            self.invalidate_preedit_layout();
             return;
         }
         self.ime.commit(text);
+        self.invalidate_preedit_layout();
         if let Some(text) = self.ime.take_commit() {
             self.send_key_translation(
                 KeyTranslation::Encoded(KeyInput::input_method_commit(text)),
@@ -2247,10 +2338,12 @@ impl EntityInputHandler for TerminalPane {
         }
         if !self.synchronize_terminal_input_focus(window, cx) {
             self.ime.cancel();
+            self.invalidate_preedit_layout();
             return;
         }
         self.ime
             .replace_and_mark(range, new_text, new_selected_range);
+        self.invalidate_preedit_layout();
         self.accessibility_notifications
             .push(AccessibilityNotification::Value);
         cx.notify();
@@ -2450,13 +2543,31 @@ impl Render for TerminalPane {
             .filter(|snapshot| snapshot.generation == self.find_generation)
             .map_or_else(|| Arc::from([]), |snapshot| snapshot.visible_spans.clone());
         let find_bar = self.render_find_bar(cx);
-        let graphics_snapshot = self.screen.graphics.clone();
-        let graphics = self
-            .graphics_cache
-            .update(cx, |cache, cx| cache.sync(&graphics_snapshot, window, cx));
+        let presentation_generation = self.render_lifecycle.take_frame();
+        let (graphics, graphics_attempt) = if presentation_generation.is_some() {
+            let graphics_snapshot = self.screen.graphics.clone();
+            let active_screen = self.screen.active_screen;
+            let preparation = self.graphics_cache.update(cx, |cache, cx| {
+                cache.sync(active_screen, &graphics_snapshot, window, cx)
+            });
+            let Ok(preparation) = preparation else {
+                return div()
+                    .size_full()
+                    .bg(background)
+                    .child("Terminal graphics unavailable")
+                    .into_any_element();
+            };
+            (preparation.graphics, Some(preparation.token))
+        } else {
+            (
+                self.graphics_cache
+                    .read_with(cx, |cache, _| cache.last_presented()),
+                None,
+            )
+        };
         let terminal_grid = TerminalGridElement::new(
             &self.screen,
-            &mut self.render_cache,
+            self.render_cache.clone(),
             TerminalGridConfiguration {
                 terminal_input_focused,
                 font_family: self.font_family.clone(),
@@ -2470,27 +2581,21 @@ impl Render for TerminalPane {
                 scale_factor: window.scale_factor(),
                 find_spans,
                 graphics,
+                graphics_attempt,
+                graphics_cache: self.graphics_cache.clone(),
+                presentation_generation,
             },
+            cx,
         );
-        if let Some(generation) = self.render_lifecycle.take_frame() {
-            self.render_lifecycle.mark_presented(generation);
-            let observation = self.runtime_observation.clone();
-            if self.acceptance_observation_claimed && self.screen.generation == generation {
-                let rows = self.screen.size.rows;
-                let columns = self.screen.size.cols;
-                let runtime_generation = generation.as_u64();
-                window.on_next_frame(move |_, _| {
-                    if let Some(observation) = &observation {
-                        observation.next_frame(runtime_generation);
-                    }
-                    if let Some(observation) =
-                        crate::platform::acceptance_observation::prepare_once(rows, columns)
-                        && let Err(error) = observation.emit()
-                    {
-                        eprintln!("failed to emit acceptance observation: {error}");
-                    }
+        if let Some(generation) = presentation_generation {
+            let pane = cx.entity().downgrade();
+            let rows = self.screen.size.rows;
+            let columns = self.screen.size.cols;
+            window.on_next_frame(move |_, cx| {
+                let _ = pane.update(cx, |pane, _| {
+                    pane.observe_presented_next_frame(generation, rows, columns);
                 });
-            }
+            });
         }
         let context_menu = self.context_menu.clone().map(|menu| {
             let actions = self.context_menu_actions(&menu);
@@ -2628,6 +2733,7 @@ impl Render for TerminalPane {
                 )
             })
             .when_some(context_menu, |root, menu| root.child(menu))
+            .into_any_element()
     }
 }
 
@@ -4866,6 +4972,35 @@ mod tests {
             ime_candidate_bounds(element_bounds, 5, px(10.0), px(20.0), layout.caret),
             Bounds::new(point(px(30.0), px(40.0)), size(px(10.0), px(20.0)))
         );
+    }
+
+    #[gpui::test]
+    fn unchanged_marked_text_reuses_logical_preedit_clusters(cx: &mut TestAppContext) {
+        let (pane, cx) = terminal_pane(cx);
+        pane.update(cx, |pane, _| {
+            pane.screen = blinking_cursor_screen(true, false);
+            pane.mark_for_preedit_cache_test("かな", 2..2);
+        });
+
+        let first = pane.update(cx, |pane, _| pane.preedit_layout().unwrap());
+        let second = pane.update(cx, |pane, _| pane.preedit_layout().unwrap());
+
+        assert!(Arc::ptr_eq(&first.clusters, &second.clusters));
+    }
+
+    #[gpui::test]
+    fn marked_text_edit_replaces_logical_preedit_clusters(cx: &mut TestAppContext) {
+        let (pane, cx) = terminal_pane(cx);
+        pane.update(cx, |pane, _| {
+            pane.screen = blinking_cursor_screen(true, false);
+            pane.mark_for_preedit_cache_test("か", 1..1);
+        });
+        let first = pane.update(cx, |pane, _| pane.preedit_layout().unwrap());
+        pane.update(cx, |pane, _| pane.mark_for_preedit_cache_test("かな", 2..2));
+
+        let second = pane.update(cx, |pane, _| pane.preedit_layout().unwrap());
+
+        assert!(!Arc::ptr_eq(&first.clusters, &second.clusters));
     }
 
     #[gpui::test]

@@ -1,4 +1,5 @@
 use std::ops::Range;
+use std::sync::Arc;
 
 use libghostty_vt::unicode::grapheme_width;
 
@@ -97,7 +98,7 @@ impl TerminalIme {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct PreeditLayout {
-    pub(super) clusters: Vec<PreeditCluster>,
+    pub(super) clusters: Arc<[PreeditCluster]>,
     pub(super) caret: PreeditPosition,
 }
 
@@ -167,7 +168,7 @@ pub(super) fn layout_preedit(
     }
 
     PreeditLayout {
-        clusters,
+        clusters: Arc::from(clusters),
         caret: caret.unwrap_or(PreeditPosition { row, column }),
     }
 }

@@ -104,6 +104,10 @@ impl RenderLifecycle {
         }
     }
 
+    pub(crate) fn is_presented(&self, generation: PresentationGeneration) -> bool {
+        !self.released && self.presented == Some(generation)
+    }
+
     pub(crate) fn update_scale(&mut self, scale: f32) -> ScaleChange {
         if self.released || !scale.is_finite() || scale <= 0.0 || self.scale == Some(scale) {
             return ScaleChange::Unchanged;
