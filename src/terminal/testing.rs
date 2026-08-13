@@ -2,13 +2,15 @@ use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::sync::Arc;
 
 use super::geometry::TerminalGeometry;
 use super::{
     FindDirection, FindQueryGeneration, KeyInput, Osc52AuthorizationDecision, Osc52AuthorizationId,
     PasteConfirmationId, PasteDecision, PasteRequestOutcome, PasteResolution, PointerInput,
     PresentationGeneration, SelectionCopy, SelectionCopyError, SessionError, SessionEvent,
-    StartedTerminalSession, TerminalSessionFactory, TerminalSessionHandle, WheelInput,
+    StartedTerminalSession, TerminalAccessibilityModel, TerminalSessionFactory,
+    TerminalSessionHandle, WheelInput,
 };
 
 #[derive(Clone, Debug, PartialEq)]
@@ -45,6 +47,8 @@ pub(crate) struct RecordedSessionCall {
 pub(crate) struct TestTerminalSessionRecords {
     starts: Rc<RefCell<Vec<RecordedSessionStart>>>,
     event_senders: Rc<RefCell<BTreeMap<usize, async_channel::Sender<SessionEvent>>>>,
+    accessibility_senders:
+        Rc<RefCell<BTreeMap<usize, async_channel::Sender<Arc<TerminalAccessibilityModel>>>>>,
     dropped_session_ids: Rc<RefCell<Vec<usize>>>,
     commands: Rc<RefCell<Vec<RecordedSessionCall>>>,
 }
@@ -63,6 +67,15 @@ impl TestTerminalSessionRecords {
 
     pub(crate) fn last_event_sender(&self) -> Option<async_channel::Sender<SessionEvent>> {
         self.event_senders
+            .borrow()
+            .last_key_value()
+            .map(|(_, sender)| sender.clone())
+    }
+
+    pub(crate) fn last_accessibility_sender(
+        &self,
+    ) -> Option<async_channel::Sender<Arc<TerminalAccessibilityModel>>> {
+        self.accessibility_senders
             .borrow()
             .last_key_value()
             .map(|(_, sender)| sender.clone())
@@ -170,6 +183,11 @@ impl TerminalSessionFactory for TestTerminalSessionFactory {
             .event_senders
             .borrow_mut()
             .insert(session_id, event_sender);
+        let (accessibility_sender, accessibility) = async_channel::bounded(1);
+        self.records
+            .accessibility_senders
+            .borrow_mut()
+            .insert(session_id, accessibility_sender);
 
         Ok(StartedTerminalSession {
             handle: Box::new(TestTerminalSessionHandle {
@@ -180,6 +198,7 @@ impl TerminalSessionFactory for TestTerminalSessionFactory {
                 paste_resolution: self.paste_resolution.clone(),
             }),
             events,
+            accessibility,
         })
     }
 

@@ -6,7 +6,10 @@ use std::process::Command;
 const GHOSTTY_REPO: &str = "https://github.com/ghostty-org/ghostty.git";
 const GHOSTTY_COMMIT: &str = "a887df42c56f6de86c0fe6da9c4eeca37931e083";
 const BUILD_MANIFEST_DIR: &str = env!("CARGO_MANIFEST_DIR");
-const BUILD_SCRIPT_FILES: &[&str] = &["spaceterm-terminal-effects-build.rs", "build.rs"];
+const BUILD_SCRIPT_FILES: &[&str] = &[
+    "spaceterm-terminal-effects-accessibility-build.rs",
+    "build.rs",
+];
 
 struct SpaceTermPatch {
     relative_path: &'static str,
@@ -21,6 +24,10 @@ const SPACETERM_PATCHES: &[SpaceTermPatch] = &[
     SpaceTermPatch {
         relative_path: "patches/spaceterm-terminal-effects.patch",
         compiled_source: include_bytes!("patches/spaceterm-terminal-effects.patch"),
+    },
+    SpaceTermPatch {
+        relative_path: "patches/spaceterm-accessibility.patch",
+        compiled_source: include_bytes!("patches/spaceterm-accessibility.patch"),
     },
 ];
 
@@ -293,6 +300,65 @@ fn verify_required_source_exports(ghostty_dir: &Path) {
             "src/lib_vt.zig",
             "@export(&c.grid_ref_hyperlink_userdata, .{ .name = \"ghostty_grid_ref_hyperlink_userdata\" });",
         ),
+        (
+            "include/ghostty/vt.h",
+            "#include <ghostty/vt/accessibility.h>",
+        ),
+        (
+            "include/ghostty/vt/accessibility.h",
+            "ghostty_accessibility_state_new(",
+        ),
+        (
+            "include/ghostty/vt/accessibility.h",
+            "ghostty_accessibility_state_free(",
+        ),
+        (
+            "include/ghostty/vt/accessibility.h",
+            "ghostty_accessibility_state_update(",
+        ),
+        (
+            "include/ghostty/vt/accessibility.h",
+            "ghostty_accessibility_state_set_selection(",
+        ),
+        ("src/terminal/c/accessibility.zig", "pub fn state_new("),
+        ("src/terminal/c/accessibility.zig", "pub fn state_free("),
+        ("src/terminal/c/accessibility.zig", "pub fn state_update("),
+        (
+            "src/terminal/c/accessibility.zig",
+            "pub fn state_set_selection(",
+        ),
+        (
+            "src/terminal/c/main.zig",
+            "pub const accessibility_state_new = accessibility.state_new;",
+        ),
+        (
+            "src/terminal/c/main.zig",
+            "pub const accessibility_state_free = accessibility.state_free;",
+        ),
+        (
+            "src/terminal/c/main.zig",
+            "pub const accessibility_state_update = accessibility.state_update;",
+        ),
+        (
+            "src/terminal/c/main.zig",
+            "pub const accessibility_state_set_selection = accessibility.state_set_selection;",
+        ),
+        (
+            "src/lib_vt.zig",
+            "@export(&c.accessibility_state_new, .{ .name = \"ghostty_accessibility_state_new\" });",
+        ),
+        (
+            "src/lib_vt.zig",
+            "@export(&c.accessibility_state_free, .{ .name = \"ghostty_accessibility_state_free\" });",
+        ),
+        (
+            "src/lib_vt.zig",
+            "@export(&c.accessibility_state_update, .{ .name = \"ghostty_accessibility_state_update\" });",
+        ),
+        (
+            "src/lib_vt.zig",
+            "@export(&c.accessibility_state_set_selection, .{ .name = \"ghostty_accessibility_state_set_selection\" });",
+        ),
     ];
 
     for (relative_path, required_source) in REQUIRED_EXPORTS {
@@ -316,7 +382,13 @@ fn verify_required_library_exports(
         return;
     }
 
-    const REQUIRED_SYMBOL: &str = "ghostty_grid_ref_hyperlink_userdata";
+    const REQUIRED_SYMBOLS: &[&str] = &[
+        "ghostty_grid_ref_hyperlink_userdata",
+        "ghostty_accessibility_state_new",
+        "ghostty_accessibility_state_free",
+        "ghostty_accessibility_state_update",
+        "ghostty_accessibility_state_set_selection",
+    ];
     for library in requested_libraries {
         let output = Command::new("nm")
             .arg("-gU")
@@ -329,15 +401,18 @@ fn verify_required_library_exports(
             library.display(),
             String::from_utf8_lossy(&output.stderr)
         );
-        let defines_required_symbol = String::from_utf8_lossy(&output.stdout)
-            .lines()
-            .filter_map(|line| line.split_whitespace().last())
-            .any(|symbol| symbol.trim_start_matches('_') == REQUIRED_SYMBOL);
-        assert!(
-            defines_required_symbol,
-            "built libghostty-vt archive {} does not define external symbol `{REQUIRED_SYMBOL}`",
-            library.display()
-        );
+        let symbols = String::from_utf8_lossy(&output.stdout);
+        for required_symbol in REQUIRED_SYMBOLS {
+            let defines_required_symbol = symbols
+                .lines()
+                .filter_map(|line| line.split_whitespace().last())
+                .any(|symbol| symbol.trim_start_matches('_') == *required_symbol);
+            assert!(
+                defines_required_symbol,
+                "built libghostty-vt archive {} does not define external symbol `{required_symbol}`",
+                library.display()
+            );
+        }
     }
 }
 
@@ -499,28 +574,35 @@ fn apply_spaceterm_patch(src_dir: &Path) {
 }
 
 fn apply_patch(src_dir: &Path, patch: &Path) {
-    let status = Command::new("git")
+    let already_applied = Command::new("git")
+        .args(["apply", "--reverse", "--check"])
+        .arg(&patch)
+        .current_dir(src_dir)
+        .output()
+        .unwrap_or_else(|error| panic!("failed to verify SpaceTerm Ghostty patch: {error}"));
+    if already_applied.status.success() {
+        return;
+    }
+
+    let applies_cleanly = Command::new("git")
         .args(["apply", "--check"])
         .arg(&patch)
         .current_dir(src_dir)
-        .status()
+        .output()
         .unwrap_or_else(|error| panic!("failed to check SpaceTerm Ghostty patch: {error}"));
-    if status.success() {
+    if applies_cleanly.status.success() {
         let mut apply = Command::new("git");
         apply.arg("apply").arg(&patch).current_dir(src_dir);
         run(apply, "apply SpaceTerm Ghostty patch");
         return;
     }
 
-    let already_applied = Command::new("git")
-        .args(["apply", "--reverse", "--check"])
-        .arg(&patch)
-        .current_dir(src_dir)
-        .status()
-        .unwrap_or_else(|error| panic!("failed to verify SpaceTerm Ghostty patch: {error}"));
-    assert!(
-        already_applied.success(),
-        "SpaceTerm Ghostty patch no longer applies cleanly"
+    panic!(
+        "SpaceTerm Ghostty patch {} is neither applicable nor already applied\n\
+         reverse check: {}\nforward check: {}",
+        patch.display(),
+        String::from_utf8_lossy(&already_applied.stderr),
+        String::from_utf8_lossy(&applies_cleanly.stderr)
     );
 }
 

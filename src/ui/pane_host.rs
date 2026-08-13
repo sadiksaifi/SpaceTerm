@@ -273,10 +273,12 @@ impl PaneHost {
     }
 
     pub(crate) fn close_all(&mut self, cx: &mut Context<Self>) {
+        self.active = false;
+        self.menu_pane_id = None;
+        self.sync_terminal_focus(cx);
         for terminal in self.terminal_window.terminals() {
             terminal.update(cx, |terminal, _| terminal.close());
         }
-        self.menu_pane_id = None;
     }
 
     #[cfg(test)]
@@ -402,6 +404,7 @@ impl PaneHost {
             Ok(ClosePaneOutcome::CloseWindow { window_id }) => {
                 self.advance_native_service_hierarchy_generation(cx);
                 self.close_window_requested = true;
+                self.active = false;
                 self.menu_pane_id = None;
                 self.sync_terminal_focus(cx);
                 cx.emit(PaneHostEvent::CloseWindowRequested { window_id });
@@ -412,7 +415,10 @@ impl PaneHost {
                 ..
             }) => {
                 self.advance_native_service_hierarchy_generation(cx);
-                closed_terminal.update(cx, |terminal, _| terminal.close());
+                closed_terminal.update(cx, |terminal, _| {
+                    terminal.set_accessibility_hierarchy(false, usize::MAX);
+                    terminal.close();
+                });
                 self.pane_bounds.remove(&pane_id);
                 self.split_bounds.clear();
                 self.pane_titles.remove(&pane_id);
@@ -509,7 +515,21 @@ impl PaneHost {
             self.native_service_focus_signature = Some(signature);
         }
         let hierarchy_generation = self.native_service_hierarchy_generation;
-        for terminal in self.terminal_window.terminals() {
+        let mut panes = Vec::with_capacity(self.terminal_window.pane_count());
+        collect_pane_order(self.terminal_window.root(), &mut panes);
+        let presented_panes = match self.terminal_window.zoom_state() {
+            ZoomState::Zoomed(pane_id) => vec![pane_id],
+            ZoomState::Restored => panes.clone(),
+        };
+        let presentation_order = presented_panes
+            .into_iter()
+            .enumerate()
+            .map(|(order, pane_id)| (pane_id, order))
+            .collect::<BTreeMap<_, _>>();
+        for pane_id in panes {
+            let Some(terminal) = self.terminal_window.terminal(pane_id) else {
+                continue;
+            };
             let product_focus = TerminalProductFocus {
                 active_workspace: self.active,
                 active_window: self.active,
@@ -521,6 +541,13 @@ impl PaneHost {
             terminal.update(cx, |terminal, cx| {
                 let product_focus_changed = terminal.set_product_focus(product_focus);
                 terminal.synchronize_native_service_hierarchy_generation(hierarchy_generation);
+                terminal.set_accessibility_hierarchy(
+                    self.active && presentation_order.contains_key(&pane_id),
+                    presentation_order
+                        .get(&pane_id)
+                        .copied()
+                        .unwrap_or(usize::MAX),
+                );
                 if product_focus_changed {
                     cx.notify();
                 }
@@ -751,6 +778,16 @@ impl PaneHost {
 }
 
 impl EventEmitter<PaneHostEvent> for PaneHost {}
+
+fn collect_pane_order(tree: PaneTreeRef<'_>, panes: &mut Vec<PaneId>) {
+    match tree.node() {
+        PaneNodeRef::Leaf { pane_id } => panes.push(pane_id),
+        PaneNodeRef::Split { first, second, .. } => {
+            collect_pane_order(first, panes);
+            collect_pane_order(second, panes);
+        }
+    }
+}
 
 impl Render for PaneHost {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {

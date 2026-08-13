@@ -7,7 +7,7 @@ license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 links = "ghostty-vt"
-build = "spaceterm-terminal-effects-build.rs"
+build = "spaceterm-terminal-effects-accessibility-build.rs"
 
 [lib]
 doctest = false

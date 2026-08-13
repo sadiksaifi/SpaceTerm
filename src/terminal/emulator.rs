@@ -6,6 +6,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use libghostty_vt::accessibility as ghostty_accessibility;
 use libghostty_vt::fmt::Format;
 use libghostty_vt::focus::Event as FocusEvent;
 use libghostty_vt::key::Mods;
@@ -29,6 +30,11 @@ use libghostty_vt::terminal::{
 };
 use libghostty_vt::{Error, RenderState, Terminal, TerminalOptions};
 
+use crate::terminal::accessibility::{
+    AccessibilityCell, AccessibilityCellRef, AccessibilityRowId, AccessibilityRowUpdate,
+    AccessibilityScreen, AccessibilitySelectionRefs, AccessibilitySelectionRequest,
+    AccessibilityUpdate, TerminalAccessibilityModel, TerminalAccessibilityState,
+};
 use crate::terminal::attention::AttentionEvent;
 use crate::terminal::find::TerminalFindState;
 use crate::terminal::geometry::{BackingPosition, TerminalGeometry};
@@ -402,6 +408,8 @@ pub(crate) struct ScrollbarSnapshot {
 pub(crate) struct ScreenSnapshot {
     pub(crate) generation: PresentationGeneration,
     pub(crate) rows: Arc<[RowSnapshot]>,
+    /// Soft-wrap markers corresponding one-to-one with the published viewport rows.
+    pub(crate) row_soft_wrapped: Arc<[bool]>,
     pub(crate) background: Color,
     pub(crate) colors: TerminalColorsSnapshot,
     pub(crate) size: ScreenSizeSnapshot,
@@ -422,6 +430,7 @@ pub(crate) struct ScreenSnapshot {
 impl PartialEq for ScreenSnapshot {
     fn eq(&self, other: &Self) -> bool {
         self.rows == other.rows
+            && self.row_soft_wrapped == other.row_soft_wrapped
             && self.generation == other.generation
             && self.background == other.background
             && self.colors == other.colors
@@ -448,6 +457,7 @@ impl ScreenSnapshot {
         Arc::new(Self {
             generation: PresentationGeneration::default(),
             rows: Arc::from([]),
+            row_soft_wrapped: Arc::from([]),
             background: ACTIVE_THEME.terminal_background,
             colors: TerminalColorsSnapshot::themed(),
             size: ScreenSizeSnapshot::default(),
@@ -478,6 +488,7 @@ impl ScreenSnapshot {
         let text_blinking = rows_have_visible_blinking_text(&rows);
         let selection_present = rows_have_selection(&rows);
         Arc::new(Self {
+            row_soft_wrapped: Arc::from(vec![false; rows.len()]),
             rows,
             text_blinking,
             selection_present,
@@ -498,6 +509,7 @@ impl ScreenSnapshot {
         let selection_present = rows_have_selection(&rows);
         Arc::new(Self {
             generation: PresentationGeneration(generation),
+            row_soft_wrapped: Arc::from(vec![false; rows.len()]),
             rows,
             text_blinking,
             selection_present,
@@ -512,6 +524,7 @@ impl ScreenSnapshot {
         Self {
             generation: PresentationGeneration::default(),
             rows: Arc::from([]),
+            row_soft_wrapped: Arc::from([]),
             background: ACTIVE_THEME.terminal_background,
             colors: TerminalColorsSnapshot::themed(),
             size: ScreenSizeSnapshot::default(),
@@ -545,6 +558,9 @@ fn rows_have_selection(rows: &[RowSnapshot]) -> bool {
 
 pub(crate) struct TerminalEmulator {
     terminal: Terminal<'static, 'static>,
+    ghostty_accessibility: ghostty_accessibility::State,
+    accessibility: TerminalAccessibilityState,
+    accessibility_generation: PresentationGeneration,
     render_state: RenderState<'static>,
     rows: RowIterator<'static>,
     cells: CellIterator<'static>,
@@ -837,6 +853,9 @@ impl TerminalEmulator {
 
         Ok(Self {
             terminal,
+            ghostty_accessibility: ghostty_accessibility::State::new()?,
+            accessibility: TerminalAccessibilityState::default(),
+            accessibility_generation: PresentationGeneration::default(),
             render_state: RenderState::new()?,
             rows: RowIterator::new()?,
             cells: CellIterator::new()?,
@@ -1508,6 +1527,50 @@ impl TerminalEmulator {
         Ok(())
     }
 
+    pub(crate) fn set_accessibility_selection(
+        &mut self,
+        request: AccessibilitySelectionRequest,
+    ) -> Result<EmulatorAction, String> {
+        if self
+            .terminal
+            .mode(Mode::SYNC_OUTPUT)
+            .map_err(|error| format!("failed to query synchronized-output mode: {error}"))?
+        {
+            return Ok(EmulatorAction::none());
+        }
+        let Some(selection) = self.accessibility.resolve_selection(&request) else {
+            return Ok(EmulatorAction::none());
+        };
+        let selection = selection.map(|(start, end)| {
+            let convert = |reference: AccessibilityCellRef| ghostty_accessibility::CellRef {
+                row: ghostty_accessibility::RowId {
+                    screen: match reference.row.screen {
+                        AccessibilityScreen::Primary => ghostty_accessibility::Screen::Primary,
+                        AccessibilityScreen::Alternate => ghostty_accessibility::Screen::Alternate,
+                    },
+                    screen_generation: reference.row.screen_generation as u64,
+                    node_serial: reference.row.node_serial,
+                    page_row: reference.row.page_row,
+                },
+                row_revision: reference.row_revision,
+                column: reference.column,
+            };
+            (convert(start), convert(end))
+        });
+        let changed = self
+            .ghostty_accessibility
+            .set_selection(&self.terminal, selection)
+            .map_err(|error| format!("failed to set terminal accessibility selection: {error}"))?;
+        if !changed {
+            return Ok(EmulatorAction::none());
+        }
+        self.active_pointer = None;
+        self.selection_gesture.reset(&self.terminal);
+        self.selection_drag_position = None;
+        self.pointer_mapping_invalidated = false;
+        Ok(EmulatorAction::screen_changed())
+    }
+
     fn selection_press(&mut self, position: SurfacePosition) -> Result<(), String> {
         let point = self.selection_viewport_point(position)?;
         let grid_ref = self
@@ -1723,6 +1786,38 @@ impl TerminalEmulator {
         }
     }
 
+    pub(crate) fn accessibility_snapshot(
+        &mut self,
+        bind_next_presentation: bool,
+    ) -> Result<(Option<Arc<TerminalAccessibilityModel>>, bool), String> {
+        if self
+            .terminal
+            .mode(Mode::SYNC_OUTPUT)
+            .map_err(|error| format!("failed to query synchronized-output mode: {error}"))?
+        {
+            return Ok((None, false));
+        }
+        if bind_next_presentation {
+            self.accessibility_generation = self.presentation_generation.next();
+        }
+        let snapshot = self
+            .ghostty_accessibility
+            .update(
+                &self.terminal,
+                ghostty_accessibility::UpdateOptions {
+                    max_cells: 16_384,
+                    max_rows: 256,
+                },
+            )
+            .map_err(|error| format!("failed to observe retained terminal text: {error}"))?;
+        let more = snapshot.more;
+        let update = accessibility_update(snapshot)?;
+        let model = self
+            .accessibility
+            .apply(update, self.accessibility_generation);
+        Ok((model, more))
+    }
+
     pub(crate) fn snapshot(&mut self) -> Result<Option<Arc<ScreenSnapshot>>, Error> {
         if self.terminal.mode(Mode::SYNC_OUTPUT)? {
             return Ok(None);
@@ -1848,12 +1943,14 @@ impl TerminalEmulator {
             HashMap::<String, Option<crate::terminal::HyperlinkTarget>>::new();
         let mut local_hyperlink_targets =
             HashMap::<Vec<u8>, Option<crate::terminal::HyperlinkTarget>>::new();
+        let mut row_soft_wrapped = Vec::with_capacity(usize::from(rows));
         let mut dirty_rows = Vec::new();
         let mut row_index = 0_u16;
         {
             let mut row_iteration = self.rows.update(&snapshot)?;
 
             while let Some(row) = row_iteration.next() {
+                row_soft_wrapped.push(row.raw_row()?.is_wrapped()?);
                 let rebuild_row = rebuild_all || row.dirty()?;
 
                 if rebuild_row {
@@ -2037,6 +2134,7 @@ impl TerminalEmulator {
         Ok(Some(Arc::new(ScreenSnapshot {
             generation: self.presentation_generation,
             rows: Arc::from(row_cache.clone()),
+            row_soft_wrapped: Arc::from(row_soft_wrapped),
             background: terminal_colors.effective_background(),
             colors: terminal_colors,
             size,
@@ -2064,6 +2162,63 @@ impl Drop for TerminalEmulator {
     fn drop(&mut self) {
         self.selection_gesture.reset(&self.terminal);
     }
+}
+
+fn accessibility_update(
+    snapshot: ghostty_accessibility::Snapshot,
+) -> Result<AccessibilityUpdate, String> {
+    let screen = match snapshot.screen {
+        ghostty_accessibility::Screen::Primary => AccessibilityScreen::Primary,
+        ghostty_accessibility::Screen::Alternate => AccessibilityScreen::Alternate,
+    };
+    let screen_generation = usize::try_from(snapshot.screen_generation)
+        .map_err(|_| "terminal accessibility screen generation exceeded usize".to_owned())?;
+    let row_id = |id: ghostty_accessibility::RowId| AccessibilityRowId {
+        screen,
+        screen_generation,
+        node_serial: id.node_serial,
+        page_row: id.page_row,
+    };
+    let cell_ref = |reference: ghostty_accessibility::CellRef| AccessibilityCellRef {
+        row: row_id(reference.row),
+        row_revision: reference.row_revision,
+        column: reference.column,
+    };
+    Ok(AccessibilityUpdate {
+        revision: snapshot.revision,
+        screen,
+        screen_generation,
+        complete: snapshot.complete,
+        more: snapshot.more,
+        topology: snapshot
+            .topology
+            .map(|topology| topology.into_iter().map(row_id).collect()),
+        visible_lines: snapshot.visible_lines,
+        cursor: snapshot.cursor.map(cell_ref),
+        selection: snapshot
+            .selection
+            .map(|selection| AccessibilitySelectionRefs {
+                start: cell_ref(selection.start),
+                end: cell_ref(selection.end),
+                rectangle: selection.rectangle,
+            }),
+        changed_rows: snapshot
+            .changed_rows
+            .into_iter()
+            .map(|row| AccessibilityRowUpdate {
+                id: row_id(row.id),
+                revision: row.revision,
+                soft_wrapped: row.soft_wrapped,
+                cells: row
+                    .cells
+                    .into_iter()
+                    .map(|cell| {
+                        AccessibilityCell::at_column(cell.text, cell.column, cell.width_cells)
+                    })
+                    .collect(),
+            })
+            .collect(),
+    })
 }
 
 fn mouse_button(button: PointerButton) -> MouseButton {
@@ -2164,6 +2319,7 @@ mod tests {
     use std::fs;
 
     use super::*;
+    use crate::terminal::TerminalAccessibilityModel;
     use crate::terminal::geometry::{
         BackingScale, CellGridSize, LogicalCellSize, TerminalGeometry,
     };
@@ -2206,6 +2362,20 @@ mod tests {
         let snapshot = emulator.snapshot().unwrap().unwrap();
 
         assert_eq!(snapshot.find.as_ref().unwrap().total_matches, 1);
+    }
+
+    #[test]
+    fn accessibility_snapshot_preserves_production_soft_wraps() {
+        let mut emulator = emulator(3, 2);
+        emulator.feed(b"abcdef");
+
+        let snapshot = emulator.snapshot().unwrap().unwrap();
+        let accessibility = TerminalAccessibilityModel::from_screen(&snapshot);
+
+        assert_eq!(snapshot.row_soft_wrapped.as_ref(), &[true, false]);
+        assert_eq!(accessibility.text(), "abcdef");
+        assert_eq!(accessibility.range_for_line(0), Some(0..3));
+        assert_eq!(accessibility.range_for_line(1), Some(3..6));
     }
 
     #[test]
@@ -4024,6 +4194,64 @@ mod tests {
                 .flat_map(|row| row.iter())
                 .all(|cell| !cell.selected)
         );
+    }
+
+    #[test]
+    fn accessibility_selection_requires_the_current_semantic_snapshot() {
+        let mut emulator = emulator(12, 3);
+        emulator.feed(b"hello");
+        let (model, more) = emulator.accessibility_snapshot(true).unwrap();
+        assert!(more);
+        assert!(model.is_none());
+        let (model, more) = emulator.accessibility_snapshot(false).unwrap();
+        assert!(!more);
+        let model = model.unwrap();
+        _ = emulator.snapshot().unwrap();
+        let request = model.selection_request(1..4).unwrap();
+
+        emulator
+            .set_accessibility_selection(AccessibilitySelectionRequest {
+                generation: PresentationGeneration::default(),
+                ..request.clone()
+            })
+            .unwrap();
+        assert_eq!(emulator.selection_text().unwrap(), None);
+
+        emulator.set_accessibility_selection(request).unwrap();
+        assert_eq!(emulator.selection_text().unwrap(), Some("ell".to_owned()));
+    }
+
+    #[test]
+    fn accessibility_selection_rejects_synchronized_output_and_resets_pointer_invalidation() {
+        let mut emulator = emulator(12, 3);
+        emulator.feed(b"hello");
+        let (model, more) = emulator.accessibility_snapshot(true).unwrap();
+        assert!(more);
+        assert!(model.is_none());
+        let (model, more) = emulator.accessibility_snapshot(false).unwrap();
+        assert!(!more);
+        let model = model.unwrap();
+        _ = emulator.snapshot().unwrap();
+        let request = model.selection_request(1..4).unwrap();
+
+        emulator.feed(b"\x1b[?2026hhidden");
+        let action = emulator
+            .set_accessibility_selection(request.clone())
+            .unwrap();
+        assert!(action.bytes.is_empty());
+        assert!(!action.screen_changed);
+        assert_eq!(emulator.selection_text().unwrap(), None);
+
+        emulator.feed(b"\x1b[?2026l");
+        let (model, more) = emulator.accessibility_snapshot(true).unwrap();
+        assert!(!more);
+        let model = model.unwrap();
+        _ = emulator.snapshot().unwrap();
+        emulator.pointer_mapping_invalidated = true;
+        let request = model.selection_request(1..4).unwrap();
+        emulator.set_accessibility_selection(request).unwrap();
+
+        assert!(!emulator.pointer_mapping_invalidated);
     }
 
     #[test]

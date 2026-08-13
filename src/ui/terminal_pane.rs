@@ -39,7 +39,7 @@ use super::{
     ResetTerminalFontSize, TERMINAL_FIND_KEY_CONTEXT, TERMINAL_KEY_CONTEXT,
 };
 use crate::domain::{PaneId, WindowId, WorkspaceId};
-use crate::platform::macos_accessibility::post_accessibility_notifications;
+use crate::platform::macos_accessibility::{MacosAccessibilityElement, MacosAccessibilityUpdate};
 use crate::platform::macos_application;
 use crate::platform::macos_attention::{
     AttentionPaneId, AttentionSchedules, reconcile_scheduled as reconcile_attention_schedule,
@@ -255,7 +255,8 @@ pub(crate) struct TerminalPane {
     native_service_hierarchy_generation: u64,
     screen: Arc<ScreenSnapshot>,
     last_valid_screen: Arc<ScreenSnapshot>,
-    accessibility: TerminalAccessibilityModel,
+    accessibility: Arc<TerminalAccessibilityModel>,
+    accessibility_element: MacosAccessibilityElement,
     accessibility_notifications: Vec<AccessibilityNotification>,
     render_lifecycle: RenderLifecycle,
     pane_state: PaneTerminalState,
@@ -328,6 +329,7 @@ pub(crate) struct TerminalPane {
     _blink_task: Option<Task<()>>,
     _attention_task: Option<Task<()>>,
     _event_task: Option<Task<()>>,
+    _accessibility_task: Option<Task<()>>,
     runtime_visibility_source: Option<NativeWindowVisibilitySource>,
     _runtime_visibility_task: Option<Task<()>>,
 }
@@ -368,7 +370,9 @@ impl TerminalPane {
         })
         .detach();
         let screen = ScreenSnapshot::empty();
-        let accessibility = TerminalAccessibilityModel::from_screen(&screen);
+        let accessibility = Arc::new(TerminalAccessibilityModel::from_screen(&screen));
+        let accessibility_element =
+            MacosAccessibilityElement::new(window, accessibility.as_ref().clone());
         let mut render_lifecycle = RenderLifecycle::new(SurfaceVisibility {
             application_active: false,
             key_window: false,
@@ -427,6 +431,7 @@ impl TerminalPane {
             last_valid_screen: Arc::clone(&screen),
             screen,
             accessibility,
+            accessibility_element,
             accessibility_notifications: Vec::new(),
             render_lifecycle,
             pane_state: PaneTerminalState::default(),
@@ -493,6 +498,7 @@ impl TerminalPane {
             _blink_task: None,
             _attention_task: None,
             _event_task: None,
+            _accessibility_task: None,
             runtime_visibility_source: None,
             _runtime_visibility_task: None,
         }
@@ -565,6 +571,10 @@ impl TerminalPane {
 
     pub(crate) fn synchronize_native_service_hierarchy_generation(&mut self, generation: u64) {
         self.native_service_hierarchy_generation = generation;
+    }
+
+    pub(crate) fn set_accessibility_hierarchy(&mut self, presented: bool, order: usize) {
+        self.accessibility_element.set_hierarchy(presented, order);
     }
 
     fn open_find(&mut self, _: &OpenTerminalFind, window: &mut Window, cx: &mut Context<Self>) {
@@ -682,8 +692,10 @@ impl TerminalPane {
             if !focused {
                 self.keyboard_bridge.reset_pressed_modifiers();
             }
-            self.accessibility_notifications
-                .push(AccessibilityNotification::Focus);
+            if focused {
+                self.accessibility_notifications
+                    .push(AccessibilityNotification::Focus);
+            }
             self.reset_blink_phase();
             if !focused {
                 if let Some(confirmation) = self.pending_paste.take()
@@ -847,11 +859,13 @@ impl TerminalPane {
         self._blink_task.take();
         self._attention_task.take();
         self._event_task.take();
+        self._accessibility_task.take();
         self._runtime_visibility_task.take();
         self.runtime_visibility_source.take();
         self.render_lifecycle.release();
         self.context_menu = None;
         self.quick_look.dismiss();
+        self.accessibility_element.set_hierarchy(false, usize::MAX);
         if self.session.take().is_some() {
             self.native_service_session_identity =
                 self.native_service_session_identity.wrapping_add(1);
@@ -1224,6 +1238,7 @@ impl TerminalPane {
                 self.flush_pending_file_insertion(cx);
                 let receiver = started.events;
                 let observation = self.runtime_observation.clone();
+                let accessibility_receiver = started.accessibility;
                 self._event_task = Some(cx.spawn(async move |this, cx| {
                     while let Ok(event) = receiver.recv().await {
                         let mut events = vec![event];
@@ -1252,6 +1267,22 @@ impl TerminalPane {
                             cx.background_executor()
                                 .timer(Duration::from_millis(1))
                                 .await;
+                        }
+                    }
+                }));
+                self._accessibility_task = Some(cx.spawn(async move |this, cx| {
+                    while let Ok(mut accessibility) = accessibility_receiver.recv().await {
+                        while let Ok(newer) = accessibility_receiver.try_recv() {
+                            accessibility = newer;
+                        }
+                        if this
+                            .update(cx, |this, cx| {
+                                this.handle_accessibility(accessibility);
+                                cx.notify();
+                            })
+                            .is_err()
+                        {
+                            break;
                         }
                     }
                 }));
@@ -1333,6 +1364,27 @@ impl TerminalPane {
         }
     }
 
+    fn sync_native_accessibility(&mut self, window: &Window, focused: bool) {
+        let notifications = AccessibilityNotification::coalesce(&self.accessibility_notifications);
+        self.accessibility_notifications.clear();
+        #[cfg(all(target_os = "macos", not(test)))]
+        let selection_sender = self
+            .session
+            .as_ref()
+            .and_then(|session| session.accessibility_selection_sender());
+        self.accessibility_element.update(MacosAccessibilityUpdate {
+            window,
+            model: self.accessibility.as_ref(),
+            bounds: self.grid_bounds,
+            cell_width: self.cell_width,
+            line_height: px(self.line_height),
+            focused,
+            notifications: &notifications,
+            #[cfg(all(target_os = "macos", not(test)))]
+            selection_sender,
+        });
+    }
+
     fn handle_event(&mut self, event: SessionEvent, cx: &mut Context<Self>) {
         match event {
             SessionEvent::Screen(screen) => {
@@ -1347,16 +1399,6 @@ impl TerminalPane {
                     self.title = title.into();
                     cx.emit(TerminalPaneEvent::TitleChanged(self.title.clone()));
                 }
-                let accessibility = TerminalAccessibilityModel::from_screen(&screen);
-                if accessibility.text() != self.accessibility.text() {
-                    self.accessibility_notifications
-                        .push(AccessibilityNotification::Value);
-                }
-                if accessibility.selection_range() != self.accessibility.selection_range() {
-                    self.accessibility_notifications
-                        .push(AccessibilityNotification::Selection);
-                }
-                self.accessibility = accessibility;
                 let _ = self.render_lifecycle.observe_snapshot(screen.generation);
                 if let Some(observation) = &self.runtime_observation {
                     observation.ui_screen_applied(
@@ -1435,6 +1477,21 @@ impl TerminalPane {
                 self.present_failure(failure, true, None);
             }
         }
+    }
+
+    fn handle_accessibility(&mut self, accessibility: Arc<TerminalAccessibilityModel>) {
+        if accessibility.active_screen() != self.accessibility.active_screen()
+            || !accessibility.shares_document(self.accessibility.as_ref())
+        {
+            self.accessibility_notifications
+                .push(AccessibilityNotification::Value);
+        }
+        if accessibility.selected_or_cursor_range() != self.accessibility.selected_or_cursor_range()
+        {
+            self.accessibility_notifications
+                .push(AccessibilityNotification::Selection);
+        }
+        self.accessibility = accessibility;
     }
 
     fn on_key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
@@ -2676,7 +2733,7 @@ impl EntityInputHandler for TerminalPane {
         {
             return None;
         }
-        let text = self.accessibility.text_for_range(range.clone())?.to_owned();
+        let text = self.accessibility.text_for_range(range.clone())?;
         *adjusted_range = Some(range);
         Some(text)
     }
@@ -2881,9 +2938,6 @@ impl Render for TerminalPane {
             cx,
         );
         update_secure_input_application_activation(native_activity.application_active);
-        let notifications = AccessibilityNotification::coalesce(&self.accessibility_notifications);
-        self.accessibility_notifications.clear();
-        post_accessibility_notifications(&notifications, self.accessibility.visible_range());
         let pane = cx.entity().downgrade();
         let (terminal_input_focused, focus_gained) =
             self.sync_terminal_input_focus_with_activity(window, native_activity);
@@ -3113,11 +3167,14 @@ impl Render for TerminalPane {
 
         div()
             .debug_selector(move || native_context_selector.clone())
-            .on_children_prepainted(move |children, _window, cx| {
+            .on_children_prepainted(move |children, window, cx| {
                 let Some(bounds) = children.first().copied() else {
                     return;
                 };
-                let _ = pane.update(cx, |pane, cx| pane.update_grid_bounds(bounds, cx));
+                let _ = pane.update(cx, |pane, cx| {
+                    pane.update_grid_bounds(bounds, cx);
+                    pane.sync_native_accessibility(window, terminal_input_focused);
+                });
             })
             .id("terminal-pane")
             .relative()
@@ -4277,6 +4334,35 @@ mod tests {
         });
         cx.run_until_parked();
         (pane, cx, records)
+    }
+
+    #[gpui::test]
+    fn accessibility_uses_its_bounded_latest_lane_instead_of_screen_rows(cx: &mut TestAppContext) {
+        let (pane, cx, records) = connected_terminal_pane(cx);
+        records
+            .last_event_sender()
+            .unwrap()
+            .send_blocking(SessionEvent::Screen(blinking_screen()))
+            .unwrap();
+        cx.run_until_parked();
+        assert!(pane.read_with(cx, |pane, _| pane.accessibility.text().is_empty()));
+
+        let sender = records.last_accessibility_sender().unwrap();
+        for text in ["stale", "latest"] {
+            sender
+                .force_send(Arc::new(TerminalAccessibilityModel::new(
+                    vec![crate::terminal::AccessibilityLine::new(
+                        vec![crate::terminal::AccessibilityCell::new(text, 1, false)],
+                        false,
+                    )],
+                    0..1,
+                    Some((0, 0)),
+                )))
+                .unwrap();
+        }
+        cx.run_until_parked();
+
+        assert!(pane.read_with(cx, |pane, _| pane.accessibility.text() == "latest"));
     }
 
     fn connected_terminal_pane_with_key_propagation(
