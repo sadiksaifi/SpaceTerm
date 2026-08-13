@@ -67,6 +67,8 @@ scripts-check:
         scripts/acceptance/freeze-performance-pair.sh \
         scripts/acceptance/freeze-performance-run.sh \
         scripts/acceptance/freeze-performance-subject.sh \
+        scripts/acceptance/native-ax-probe.sh \
+        scripts/acceptance/test-native-ax-probe.sh \
         scripts/acceptance/performance-workload.sh \
         scripts/acceptance/performance-plan.sh \
         scripts/acceptance/test-release-performance-campaign.sh
@@ -81,10 +83,16 @@ scripts-check:
         scripts/acceptance/freeze-performance-pair.sh \
         scripts/acceptance/freeze-performance-run.sh \
         scripts/acceptance/freeze-performance-subject.sh \
+        scripts/acceptance/native-ax-probe.sh \
+        scripts/acceptance/test-native-ax-probe.sh \
         scripts/acceptance/performance-workload.sh \
         scripts/acceptance/performance-plan.sh \
         scripts/acceptance/test-release-performance-campaign.sh
     ./scripts/test-acceptance-identity.sh
+    ./scripts/acceptance/test-native-ax-probe.sh
+    xcrun clang -fobjc-arc -fblocks -std=c17 -fsyntax-only \
+        -Wall -Wextra -Werror -Wpedantic -mmacosx-version-min=11.0 \
+        scripts/acceptance/native-ax-probe.m
     xcrun clang -fobjc-arc -fblocks -fsyntax-only -Wall -Wextra -Werror -Wpedantic \
         -mmacosx-version-min=11.0 \
         scripts/acceptance/performance-driver.m
