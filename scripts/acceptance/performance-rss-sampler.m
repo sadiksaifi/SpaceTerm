@@ -22,6 +22,7 @@
 #include <unistd.h>
 
 static const uint64_t kSampleIntervalMilliseconds = 10000;
+static const uint64_t kFirstSampleDelayMilliseconds = 500;
 static const uint64_t kMaximumDurationMilliseconds = 720000;
 static const uint64_t kMaximumWarmupMilliseconds = 120000;
 static const uint64_t kMaximumSampleLatenessNanoseconds = 1000000000ULL;
@@ -36,10 +37,13 @@ static void handle_signal(int signal_number) {
 static void usage(FILE *stream) {
     fprintf(stream,
             "Usage: performance-rss-sampler --subject-identity FILE \\\n\n"
-            "  --warmup-ms N --duration-ms N --output FILE\n\n"
+            "  --plan-start-continuous-ns N --warmup-ms N --duration-ms N\n"
+            "  --plan-start-gate-sha256 SHA256 --ready-receipt-sha256 SHA256\n"
+            "  --output FILE\n\n"
             "After the requested warm-up, sample the exact frozen process's resident\n"
-            "memory at 10-second intervals from elapsed zero through the requested\n"
-            "duration. The private raw artifact is published atomically only after\n"
+            "memory at 10-second intervals from elapsed 500 ms through 500 ms past\n"
+            "the requested duration. This gives authenticated producer progress time\n"
+            "to publish before sample zero. The artifact is published atomically after\n"
             "the process, executable, bundle, and signing identity remain verified.\n");
 }
 
@@ -106,16 +110,6 @@ static NSString *canonical_path(NSString *path) {
         length:strlen(resolved)];
     free(resolved);
     return result;
-}
-
-static NSString *collapsed_whitespace(NSString *value) {
-    NSArray<NSString *> *parts = [value componentsSeparatedByCharactersInSet:
-        [NSCharacterSet whitespaceAndNewlineCharacterSet]];
-    NSPredicate *not_empty = [NSPredicate predicateWithBlock:^BOOL(NSString *part, NSDictionary *_) {
-        (void)_;
-        return part.length > 0;
-    }];
-    return [[parts filteredArrayUsingPredicate:not_empty] componentsJoinedByString:@" "];
 }
 
 static BOOL same_stat(const struct stat *left, const struct stat *right) {
@@ -400,15 +394,14 @@ static BOOL wait_until(uint64_t deadline) {
                              0,
                              &information,
                              sizeof(information));
-    time_t seconds = (time_t)information.pbi_start_tvsec;
-    struct tm local;
     char rendered[64];
     NSString *rendered_value = nil;
     if (count == sizeof(information) && information.pbi_status != SZOMB
         && information.pbi_uid == geteuid()
-        && localtime_r(&seconds, &local) != NULL
-        && strftime(rendered, sizeof(rendered), "%a %b %e %H:%M:%S %Y", &local) != 0) {
-        rendered_value = collapsed_whitespace([NSString stringWithUTF8String:rendered]);
+        && snprintf(rendered, sizeof(rendered), "%llu:%llu",
+                    (unsigned long long)information.pbi_start_tvsec,
+                    (unsigned long long)information.pbi_start_tvusec) > 0) {
+        rendered_value = [NSString stringWithUTF8String:rendered];
     }
     if (rendered_value == nil || ![rendered_value isEqualToString:self.processStartIdentity]) {
         return fail(error, @"subject-process-start-identity-mismatch");
@@ -596,7 +589,9 @@ static NSDictionary<NSString *, NSString *> *parse_options(int argc,
                                                              const char *argv[],
                                                              NSString **error) {
     NSArray<NSString *> *required = @[
-        @"--subject-identity", @"--warmup-ms", @"--duration-ms", @"--output",
+        @"--subject-identity", @"--plan-start-continuous-ns", @"--warmup-ms",
+        @"--duration-ms", @"--plan-start-gate-sha256",
+        @"--ready-receipt-sha256", @"--output",
     ];
     NSSet<NSString *> *allowed = [NSSet setWithArray:required];
     NSMutableDictionary<NSString *, NSString *> *result = [NSMutableDictionary dictionary];
@@ -747,9 +742,16 @@ int main(int argc, const char *argv[]) {
         }
         uint64_t warmup = 0;
         uint64_t duration = 0;
-        if (!parse_uint(options[@"--warmup-ms"], kMaximumWarmupMilliseconds, &warmup)
+        uint64_t plan_start = 0;
+        if (!parse_uint(options[@"--plan-start-continuous-ns"], UINT64_MAX, &plan_start)
+            || plan_start == 0
+            || !parse_uint(options[@"--warmup-ms"], kMaximumWarmupMilliseconds, &warmup)
             || !parse_uint(options[@"--duration-ms"], kMaximumDurationMilliseconds, &duration)
-            || duration == 0 || duration % kSampleIntervalMilliseconds != 0) {
+            || duration == 0 || duration % kSampleIntervalMilliseconds != 0
+            || warmup + duration + kFirstSampleDelayMilliseconds
+                > (UINT64_MAX - plan_start) / 1000000ULL
+            || !lower_hex(options[@"--plan-start-gate-sha256"], 64, 64)
+            || !lower_hex(options[@"--ready-receipt-sha256"], 64, 64)) {
             fprintf(stderr, "error: duration must be a positive 10,000 ms multiple and bounds apply\n");
             return 64;
         }
@@ -776,6 +778,14 @@ int main(int argc, const char *argv[]) {
             && fprintf(output.stream, "# sample_interval_ms\t%llu\n", kSampleIntervalMilliseconds) >= 0
             && fprintf(output.stream, "# requested_warmup_ms\t%llu\n", warmup) >= 0
             && fprintf(output.stream, "# requested_duration_ms\t%llu\n", duration) >= 0
+            && fprintf(output.stream, "# plan_start_continuous_ns\t%llu\n", plan_start) >= 0
+            && fprintf(output.stream,
+                       "# measurement_start_continuous_ns\t%llu\n",
+                       plan_start + warmup * 1000000ULL) >= 0
+            && fprintf(output.stream, "# plan_start_gate_sha256\t%s\n",
+                       options[@"--plan-start-gate-sha256"].UTF8String) >= 0
+            && fprintf(output.stream, "# ready_receipt_sha256\t%s\n",
+                       options[@"--ready-receipt-sha256"].UTF8String) >= 0
             && fprintf(output.stream,
                        "# subject_identity_sha256\t%s\n",
                        subject.identitySHA256.UTF8String) >= 0;
@@ -786,8 +796,13 @@ int main(int argc, const char *argv[]) {
             return 74;
         }
 
-        uint64_t warmup_started = continuous_nanoseconds();
-        uint64_t warmup_deadline = warmup_started + warmup * 1000000ULL;
+        uint64_t sampler_ready = continuous_nanoseconds();
+        if (plan_start < sampler_ready || plan_start - sampler_ready > 30000000000ULL) {
+            discard_output(&output);
+            fprintf(stderr, "error: plan start must be now through 30 seconds ahead\n");
+            return 64;
+        }
+        uint64_t warmup_deadline = plan_start + warmup * 1000000ULL;
         while (!gInterrupted && continuous_nanoseconds() < warmup_deadline) {
             uint64_t now = continuous_nanoseconds();
             uint64_t next_check = now + kSampleIntervalMilliseconds * 1000000ULL;
@@ -802,11 +817,12 @@ int main(int argc, const char *argv[]) {
             fprintf(stderr, "error: %s\n", reason.UTF8String);
             return 70;
         }
-        uint64_t measurement_started = continuous_nanoseconds();
+        uint64_t measurement_started = warmup_deadline;
         NSUInteger sample_count = (NSUInteger)(duration / kSampleIntervalMilliseconds) + 1;
         BOOL samples_valid = output_valid;
         for (NSUInteger index = 0; index < sample_count && samples_valid; index += 1) {
-            uint64_t scheduled_elapsed = index * kSampleIntervalMilliseconds;
+            uint64_t scheduled_elapsed = kFirstSampleDelayMilliseconds
+                + index * kSampleIntervalMilliseconds;
             uint64_t deadline = measurement_started + scheduled_elapsed * 1000000ULL;
             if (!wait_until(deadline) || ![subject verify:&error]) {
                 samples_valid = NO;

@@ -32,12 +32,43 @@ cleanup() {
     [[ -z "$TEMP" ]] || rm -f -- "$TEMP"
 }
 
-one_line() {
-    tr '\t\r\n' '   ' | awk '{$1=$1; print}'
-}
-
 plist_value() {
     plutil -extract "$2" raw -o - "$1"
+}
+
+kernel_start_identity() {
+    python3 - "$PID" <<'PY'
+import ctypes
+import ctypes.util
+import sys
+
+class ProcBSDInfo(ctypes.Structure):
+    _fields_ = [
+        ("pbi_flags", ctypes.c_uint32), ("pbi_status", ctypes.c_uint32),
+        ("pbi_xstatus", ctypes.c_uint32), ("pbi_pid", ctypes.c_uint32),
+        ("pbi_ppid", ctypes.c_uint32), ("pbi_uid", ctypes.c_uint32),
+        ("pbi_gid", ctypes.c_uint32), ("pbi_ruid", ctypes.c_uint32),
+        ("pbi_rgid", ctypes.c_uint32), ("pbi_svuid", ctypes.c_uint32),
+        ("pbi_svgid", ctypes.c_uint32), ("rfu_1", ctypes.c_uint32),
+        ("pbi_comm", ctypes.c_char * 16), ("pbi_name", ctypes.c_char * 32),
+        ("pbi_nfiles", ctypes.c_uint32), ("pbi_pgid", ctypes.c_uint32),
+        ("pbi_pjobc", ctypes.c_uint32), ("e_tdev", ctypes.c_uint32),
+        ("e_tpgid", ctypes.c_uint32), ("pbi_nice", ctypes.c_int32),
+        ("pbi_start_tvsec", ctypes.c_uint64),
+        ("pbi_start_tvusec", ctypes.c_uint64),
+    ]
+
+libproc = ctypes.CDLL(ctypes.util.find_library("proc"), use_errno=True)
+libproc.proc_pidinfo.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_uint64,
+                                 ctypes.c_void_p, ctypes.c_int]
+information = ProcBSDInfo()
+pid = int(sys.argv[1])
+count = libproc.proc_pidinfo(pid, 3, 0, ctypes.byref(information),
+                             ctypes.sizeof(information))
+if count != ctypes.sizeof(information) or information.pbi_pid != pid:
+    raise SystemExit(1)
+print(f"{information.pbi_start_tvsec}:{information.pbi_start_tvusec}")
+PY
 }
 
 process_value() {
@@ -63,7 +94,7 @@ done
 [[ -d "$APP_BUNDLE" && "$APP_BUNDLE" == *.app ]] \
     || die "app bundle must be an existing .app directory"
 [[ -n "$OUTPUT" && ! -e "$OUTPUT" ]] || die "output path is missing or exists"
-for command in awk codesign plutil ps realpath sed shasum stat tr; do
+for command in awk codesign plutil ps python3 realpath sed shasum stat tr; do
     command -v "$command" >/dev/null 2>&1 || die "required command not found: $command"
 done
 
@@ -82,8 +113,9 @@ process_executable="$(process_value comm)"
     || die "target executable cannot be resolved"
 [[ "$(realpath "$process_executable")" == "$executable" ]] \
     || die "target process does not execute the supplied bundle"
-process_start_identity="$(process_value lstart | one_line)"
-[[ -n "$process_start_identity" ]] || die "target start identity is unavailable"
+process_start_identity="$(kernel_start_identity)"
+[[ "$process_start_identity" =~ ^[1-9][0-9]*:[0-9]+$ ]] \
+    || die "target kernel start identity is unavailable"
 
 codesign --verify --strict "$APP_BUNDLE" >/dev/null 2>&1 \
     || die "bundle signature verification failed"
@@ -120,7 +152,7 @@ executable_inode="$(stat -f '%i' "$executable")"
     || die "executable vnode identity is unavailable"
 
 # Verify the process and executable once more after hashing and signing reads.
-[[ "$(process_value lstart | one_line)" == "$process_start_identity" \
+[[ "$(kernel_start_identity)" == "$process_start_identity" \
     && "$(realpath "$(process_value comm)")" == "$executable" \
     && "$(stat -f '%d' "$executable")" == "$executable_device" \
     && "$(stat -f '%i' "$executable")" == "$executable_inode" \

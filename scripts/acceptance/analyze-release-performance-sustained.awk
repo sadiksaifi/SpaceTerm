@@ -41,6 +41,14 @@ NR == 1 {
     if (key != "format_version" && key != "scenario" \
         && key != "sample_interval_ms" && key != "requested_duration_ms" \
         && key != "subject_identity_sha256" && key != "workload_events_sha256" \
+        && key != "workload_metadata_sha256" \
+        && key != "ready_receipt_sha256" \
+        && key != "plan_start_continuous_ns" \
+        && key != "measurement_start_continuous_ns" \
+        && key != "plan_start_gate_sha256" \
+        && key != "workload_authentication" \
+        && key != "progress_interval_ms" \
+        && key != "maximum_progress_age_ms" \
         && key != "driver_events_sha256" && key != "status") {
         stop_not_run("unknown-metadata-" key)
     }
@@ -91,7 +99,7 @@ END {
         print "reason\t" not_run_reason
         exit 2
     }
-    if (metadata["format_version"] != "3") stop_not_run("unsupported-format-version")
+    if (metadata["format_version"] != "4") stop_not_run("unsupported-format-version")
     if (!(metadata["scenario"] == "ascii" || metadata["scenario"] == "unicode-styles" \
         || metadata["scenario"] == "scrolled" || metadata["scenario"] == "hidden-occluded")) {
         stop_not_run("invalid-scenario")
@@ -104,9 +112,23 @@ END {
         || metadata["requested_duration_ms"] !~ /^[0-9]+$/) {
         stop_not_run("requested-duration-is-not-ten-minutes")
     }
-    for (hash_index = 1; hash_index <= 3; hash_index += 1) {
+    if (metadata["workload_authentication"] != "hmac-sha256" \
+        || metadata["progress_interval_ms"] != "1000" \
+        || metadata["maximum_progress_age_ms"] != "2000") {
+        stop_not_run("workload-progress-authentication-invalid")
+    }
+    if (metadata["plan_start_continuous_ns"] !~ /^[1-9][0-9]*$/ \
+        || metadata["measurement_start_continuous_ns"] !~ /^[1-9][0-9]*$/ \
+        || metadata["measurement_start_continuous_ns"] + 0 \
+            != metadata["plan_start_continuous_ns"] + 60000000000) {
+        stop_not_run("measurement-boundary-invalid")
+    }
+    for (hash_index = 1; hash_index <= 6; hash_index += 1) {
         hash_key = hash_index == 1 ? "subject_identity_sha256" \
-            : hash_index == 2 ? "workload_events_sha256" : "driver_events_sha256"
+            : hash_index == 2 ? "workload_events_sha256" \
+            : hash_index == 3 ? "workload_metadata_sha256" \
+            : hash_index == 4 ? "ready_receipt_sha256" \
+            : hash_index == 5 ? "plan_start_gate_sha256" : "driver_events_sha256"
         if (length(metadata[hash_key]) != 64 || metadata[hash_key] !~ /^[0-9a-f]+$/) {
             stop_not_run("invalid-" hash_key)
         }

@@ -4,6 +4,9 @@ set -euo pipefail
 IFS=$'\n\t'
 export LC_ALL=C
 
+SCRIPT_DIRECTORY="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+readonly SCRIPT_DIRECTORY
+
 SUBJECT=""
 SCENARIO=""
 PLAN=""
@@ -13,16 +16,24 @@ SUBJECT_IDENTITY=""
 RUN_METADATA=""
 WORKLOAD_METADATA=""
 WORKLOAD_EVENTS=""
+READY_RECEIPT=""
 DRIVER_EVENTS=""
 RSS_SAMPLES=""
 RUNTIME_SAMPLES=""
 RUNTIME_EVENTS=""
 RUNTIME_METADATA=""
+FAILURE_ACTIONS=""
 NATIVE_LAUNCH_OBSERVATION=""
 TRACE_METADATA=""
+PLAN_START_GATE=""
 MANUAL_ARTIFACTS=""
 MANUAL_SCREENSHOT=""
 MANUAL_VIDEO=""
+CAMPAIGN_ID=""
+SESSION_ID=""
+NONCE=""
+CAMPAIGN_SECRET_FILE=""
+AUTH_SNAPSHOT_DIR=""
 
 readonly PLAN_HEADER=$'event_id\toffset_ms\taction\targ0\targ1'
 readonly WORKLOAD_HEADER=$'sequence\tcontinuous_ns\tkind\tevent_id\tbyte_count\trows\tcolumns\tpixel_width\tpixel_height\tstatus'
@@ -36,13 +47,17 @@ usage() {
 Usage: $(basename -- "$0") --subject spaceterm|ghostty --scenario NAME \\
   --plan FILE --plan-metadata FILE --pair-metadata FILE \\
   --subject-identity FILE --run-metadata FILE \\
-  --workload-metadata FILE --workload-events FILE \\
+  --workload-metadata FILE --workload-events FILE --ready-receipt FILE \\
+  --campaign-id ID --session-id ID --nonce 64_LOWER_HEX \\
+  --campaign-secret-file FILE \\
   --driver-events FILE --rss-samples FILE --trace-metadata FILE \\
+  --plan-start-gate FILE \\
   --manual-artifacts FILE --manual-screenshot FILE --manual-video FILE \
   [SPACETERM RUNTIME FILES]
 
 SpaceTerm runtime files:
   --runtime-samples FILE --runtime-events FILE --runtime-metadata FILE
+  --failure-actions FILE
   --native-launch-observation FILE
 
 Print a content-free PASS, FAIL, or NOT-RUN verdict for one native release-
@@ -69,6 +84,11 @@ verdict() {
 
 not_run() { verdict NOT-RUN "$1"; }
 fail() { verdict FAIL "$1"; }
+
+# shellcheck disable=SC2329  # invoked by the authentication snapshot trap
+cleanup() {
+    [[ -z "$AUTH_SNAPSHOT_DIR" ]] || rm -rf -- "$AUTH_SNAPSHOT_DIR"
+}
 
 require_file() {
     [[ -f "$2" && -r "$2" ]] || not_run "missing-$1"
@@ -135,6 +155,23 @@ reject_unknown_kv() {
     ' "$file" || not_run "invalid-$label-schema"
 }
 
+require_exact_kv_schema() {
+    local file="$1"
+    local allowed="$2"
+    local label="$3"
+    awk -F '\t' -v allowed="$allowed" '
+        BEGIN {
+            required_count = split(allowed, keys, " ")
+            for (i = 1; i <= required_count; i++) required[keys[i]] = 1
+        }
+        NF != 2 || !($1 in required) || seen[$1]++ { exit 1 }
+        END {
+            if (NR != required_count) exit 1
+            for (key in required) if (!(key in seen)) exit 1
+        }
+    ' "$file" || not_run "invalid-$label-schema"
+}
+
 while (( $# > 0 )); do
     case "$1" in
         --subject) SUBJECT="${2:-}"; shift ;;
@@ -146,13 +183,20 @@ while (( $# > 0 )); do
         --run-metadata) RUN_METADATA="${2:-}"; shift ;;
         --workload-metadata) WORKLOAD_METADATA="${2:-}"; shift ;;
         --workload-events) WORKLOAD_EVENTS="${2:-}"; shift ;;
+        --ready-receipt) READY_RECEIPT="${2:-}"; shift ;;
+        --campaign-id) CAMPAIGN_ID="${2:-}"; shift ;;
+        --session-id) SESSION_ID="${2:-}"; shift ;;
+        --nonce) NONCE="${2:-}"; shift ;;
+        --campaign-secret-file) CAMPAIGN_SECRET_FILE="${2:-}"; shift ;;
         --driver-events) DRIVER_EVENTS="${2:-}"; shift ;;
         --rss-samples) RSS_SAMPLES="${2:-}"; shift ;;
         --runtime-samples) RUNTIME_SAMPLES="${2:-}"; shift ;;
         --runtime-events) RUNTIME_EVENTS="${2:-}"; shift ;;
         --runtime-metadata) RUNTIME_METADATA="${2:-}"; shift ;;
+        --failure-actions) FAILURE_ACTIONS="${2:-}"; shift ;;
         --native-launch-observation) NATIVE_LAUNCH_OBSERVATION="${2:-}"; shift ;;
         --trace-metadata) TRACE_METADATA="${2:-}"; shift ;;
+        --plan-start-gate) PLAN_START_GATE="${2:-}"; shift ;;
         --manual-artifacts) MANUAL_ARTIFACTS="${2:-}"; shift ;;
         --manual-screenshot) MANUAL_SCREENSHOT="${2:-}"; shift ;;
         --manual-video) MANUAL_VIDEO="${2:-}"; shift ;;
@@ -168,7 +212,15 @@ case "$SCENARIO" in
     *) not_run "invalid-scenario" ;;
 esac
 command -v awk >/dev/null 2>&1 || not_run "awk-unavailable"
+command -v mktemp >/dev/null 2>&1 || not_run "mktemp-unavailable"
+command -v python3 >/dev/null 2>&1 || not_run "python3-unavailable"
+command -v rm >/dev/null 2>&1 || not_run "rm-unavailable"
 command -v shasum >/dev/null 2>&1 || not_run "shasum-unavailable"
+[[ "$CAMPAIGN_ID" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$ ]] \
+    || not_run "invalid-campaign-id"
+[[ "$SESSION_ID" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$ ]] \
+    || not_run "invalid-session-id"
+[[ "$NONCE" =~ ^[0-9a-f]{64}$ ]] || not_run "invalid-workload-nonce"
 
 require_file scenario-plan "$PLAN"
 require_file plan-metadata "$PLAN_METADATA"
@@ -177,9 +229,12 @@ require_file subject-identity "$SUBJECT_IDENTITY"
 require_file run-metadata "$RUN_METADATA"
 require_file workload-metadata "$WORKLOAD_METADATA"
 require_file workload-events "$WORKLOAD_EVENTS"
+require_file ready-receipt "$READY_RECEIPT"
+require_file campaign-secret "$CAMPAIGN_SECRET_FILE"
 require_file driver-events "$DRIVER_EVENTS"
 require_file rss-samples "$RSS_SAMPLES"
 require_file trace-metadata "$TRACE_METADATA"
+require_file plan-start-gate "$PLAN_START_GATE"
 require_file manual-artifacts "$MANUAL_ARTIFACTS"
 require_file manual-screenshot "$MANUAL_SCREENSHOT"
 require_file manual-video "$MANUAL_VIDEO"
@@ -187,10 +242,60 @@ if [[ "$SUBJECT" == spaceterm ]]; then
     require_file runtime-samples "$RUNTIME_SAMPLES"
     require_file runtime-events "$RUNTIME_EVENTS"
     require_file runtime-metadata "$RUNTIME_METADATA"
+    require_file failure-actions "$FAILURE_ACTIONS"
     require_file native-launch-observation "$NATIVE_LAUNCH_OBSERVATION"
-elif [[ -n "$RUNTIME_SAMPLES$RUNTIME_EVENTS$RUNTIME_METADATA$NATIVE_LAUNCH_OBSERVATION" ]]; then
+elif [[ -n "$RUNTIME_SAMPLES$RUNTIME_EVENTS$RUNTIME_METADATA$FAILURE_ACTIONS$NATIVE_LAUNCH_OBSERVATION" ]]; then
     not_run "ghostty-must-not-claim-spaceterm-runtime-observations"
 fi
+
+early_warmup_ms="$(kv "$PLAN_METADATA" warmup_ms)"
+early_duration_ms="$(kv "$PLAN_METADATA" measured_duration_ms)"
+[[ "$early_warmup_ms" =~ ^[0-9]+$ && "$early_duration_ms" =~ ^[1-9][0-9]*$ ]] \
+    || not_run "invalid-plan-duration-before-authentication"
+AUTH_SNAPSHOT_DIR="$(mktemp -d "${TMPDIR:-/tmp}/spaceterm-case-auth.XXXXXX")"
+trap cleanup EXIT INT TERM
+verified_metadata="$AUTH_SNAPSHOT_DIR/workload-metadata.tsv"
+verified_events="$AUTH_SNAPSHOT_DIR/workload-events.tsv"
+verified_subject="$AUTH_SNAPSHOT_DIR/subject-identity.tsv"
+python3 "$SCRIPT_DIRECTORY/verify-performance-workload-ready.py" \
+    --ready-receipt "$READY_RECEIPT" --events "$WORKLOAD_EVENTS" \
+    --subject-identity "$SUBJECT_IDENTITY" \
+    --campaign-secret-file "$CAMPAIGN_SECRET_FILE" \
+    --campaign-id "$CAMPAIGN_ID" --session-id "$SESSION_ID" --nonce "$NONCE" \
+    --plan-start-gate "$PLAN_START_GATE" \
+    --expected-plan-start-continuous-ns \
+        "$(awk -F '\t' '$1 == "plan_start_continuous_ns" { print $2 }' "$WORKLOAD_METADATA")" \
+    >/dev/null 2>&1 || not_run "original-workload-readiness-invalid"
+python3 "$SCRIPT_DIRECTORY/verify-performance-workload-auth.py" \
+    --metadata "$WORKLOAD_METADATA" \
+    --events "$WORKLOAD_EVENTS" \
+    --subject-identity "$SUBJECT_IDENTITY" \
+    --campaign-secret-file "$CAMPAIGN_SECRET_FILE" \
+    --ready-receipt "$READY_RECEIPT" \
+    --campaign-id "$CAMPAIGN_ID" \
+    --session-id "$SESSION_ID" \
+    --nonce "$NONCE" \
+    --scenario "$SCENARIO" \
+    --requested-warmup-ms "$early_warmup_ms" \
+    --requested-duration-ms "$early_duration_ms" \
+    --verified-metadata-output "$verified_metadata" \
+    --verified-events-output "$verified_events" \
+    --verified-subject-identity-output "$verified_subject" \
+    >/dev/null 2>&1 || not_run "workload-authentication-invalid"
+python3 "$SCRIPT_DIRECTORY/verify-performance-workload-ready.py" \
+    --ready-receipt "$READY_RECEIPT" \
+    --events "$verified_events" \
+    --subject-identity "$verified_subject" \
+    --campaign-secret-file "$CAMPAIGN_SECRET_FILE" \
+    --campaign-id "$CAMPAIGN_ID" --session-id "$SESSION_ID" --nonce "$NONCE" \
+    --plan-start-gate "$PLAN_START_GATE" \
+    --expected-plan-start-continuous-ns \
+        "$(awk -F '\t' '$1 == "plan_start_continuous_ns" { print $2 }' "$verified_metadata")" \
+    --ignore-events-file-identity \
+    >/dev/null 2>&1 || not_run "workload-readiness-authentication-invalid"
+WORKLOAD_METADATA="$verified_metadata"
+WORKLOAD_EVENTS="$verified_events"
+SUBJECT_IDENTITY="$verified_subject"
 
 [[ "$(head -n 1 "$PLAN")" == "$PLAN_HEADER" ]] || not_run "invalid-plan-header"
 [[ "$(head -n 1 "$WORKLOAD_EVENTS")" == "$WORKLOAD_HEADER" ]] \
@@ -206,10 +311,16 @@ if [[ "$SUBJECT" == spaceterm ]]; then
         || not_run "invalid-runtime-events-header"
 fi
 
-[[ "$(comment_kv "$RSS_SAMPLES" format_version)" == 3 \
+[[ "$(comment_kv "$RSS_SAMPLES" format_version)" == 4 \
     && "$(comment_kv "$RSS_SAMPLES" scenario)" == "$SCENARIO" \
     && "$(comment_kv "$RSS_SAMPLES" subject_identity_sha256)" == "$(sha256 "$SUBJECT_IDENTITY")" \
     && "$(comment_kv "$RSS_SAMPLES" workload_events_sha256)" == "$(sha256 "$WORKLOAD_EVENTS")" \
+    && "$(comment_kv "$RSS_SAMPLES" workload_metadata_sha256)" == "$(sha256 "$WORKLOAD_METADATA")" \
+    && "$(comment_kv "$RSS_SAMPLES" ready_receipt_sha256)" == "$(sha256 "$READY_RECEIPT")" \
+    && "$(comment_kv "$RSS_SAMPLES" plan_start_gate_sha256)" == "$(sha256 "$PLAN_START_GATE")" \
+    && "$(comment_kv "$RSS_SAMPLES" workload_authentication)" == hmac-sha256 \
+    && "$(comment_kv "$RSS_SAMPLES" progress_interval_ms)" == 1000 \
+    && "$(comment_kv "$RSS_SAMPLES" maximum_progress_age_ms)" == 2000 \
     && "$(comment_kv "$RSS_SAMPLES" driver_events_sha256)" == "$(sha256 "$DRIVER_EVENTS")" ]] \
     || not_run "rss-evidence-binding-mismatch"
 
@@ -220,7 +331,7 @@ reject_unknown_kv "$PAIR_METADATA" \
     "format_version pair_id scenario plan_sha256 workload_sha256 command_sha256 environment_sha256 font_sha256 initial_grid_sha256 duration_ms spaceterm_subject_identity_sha256 ghostty_subject_identity_sha256" \
     pair-metadata
 reject_unknown_kv "$WORKLOAD_METADATA" \
-    "format_version scenario producer_sha256 seed_sha256 seed_bytes requested_duration_ms warmup_ms requested_iterations requested_seed_rows emitted_bytes input_events started_continuous_ns ended_continuous_ns status" \
+    "format_version scenario campaign_id session_id nonce subject_identity_sha256 subject_process_pid subject_process_start_identity producer_sha256 producer_pid producer_started_continuous_ns producer_session_id producer_process_group tty_device tty_inode tty_rdev ready_receipt_sha256 events_sha256 auth_algorithm seed_sha256 seed_bytes requested_duration_ms warmup_ms requested_iterations requested_seed_rows emitted_bytes input_events plan_start_continuous_ns started_continuous_ns ended_continuous_ns status events_hmac_sha256" \
     workload-metadata
 reject_unknown_kv "$SUBJECT_IDENTITY" \
     "format_version subject app_bundle_path bundle_identifier bundle_version executable_path executable_sha256 executable_device executable_inode executable_fsid signature_valid signing_identifier team_identifier cdhash process_pid process_start_identity identity_status" \
@@ -228,8 +339,8 @@ reject_unknown_kv "$SUBJECT_IDENTITY" \
 reject_unknown_kv "$RUN_METADATA" \
     "format_version subject subject_identity_sha256 scenario scenario_plan_sha256 workload_sha256 command_sha256 environment_sha256 font_sha256 initial_grid_sha256 measured_duration_ms process_pid process_start_identity status" \
     run-metadata
-reject_unknown_kv "$TRACE_METADATA" \
-    "format_version capture_status incomplete_reason subject_identity_sha256 requested_duration_ms actual_duration_ms target_identity_verified trace_target_pid_verified time_profiler_instrument allocations_instrument hangs_instrument time_profiler_target_verified allocations_target_verified hangs_target_verified time_profiler_rows allocations_rows hangs_rows maximum_main_thread_hang_ms status" \
+require_exact_kv_schema "$TRACE_METADATA" \
+    "format_version capture_status incomplete_reason subject_identity_sha256 run_metadata_sha256 workload_metadata_sha256 workload_ready_receipt_sha256 supplemental_evidence_sha256 requested_duration_ms actual_duration_ms capture_started_continuous_ns capture_ended_continuous_ns target_identity_verified trace_target_pid_verified time_profiler_instrument allocations_instrument hangs_instrument time_profiler_target_verified allocations_target_verified hangs_target_verified time_profiler_rows allocations_rows hangs_rows maximum_main_thread_hang_ms status" \
     trace-metadata
 
 plan_format="$(require_kv "$PLAN_METADATA" format_version plan)"
@@ -304,7 +415,7 @@ for identity_key in executable_device executable_inode executable_fsid process_p
     require_uint "$identity_value" "subject-$identity_key"
 done
 
-[[ "$(require_kv "$WORKLOAD_METADATA" format_version workload)" == 2 ]] \
+[[ "$(require_kv "$WORKLOAD_METADATA" format_version workload)" == 3 ]] \
     || not_run "unsupported-workload-format"
 [[ "$(require_kv "$WORKLOAD_METADATA" scenario workload)" == "$SCENARIO" ]] \
     || not_run "workload-scenario-mismatch"
@@ -322,9 +433,13 @@ require_hash "$producer_hash" producer-sha256
 workload_started="$(require_kv "$WORKLOAD_METADATA" started_continuous_ns workload)"
 workload_ended="$(require_kv "$WORKLOAD_METADATA" ended_continuous_ns workload)"
 workload_emitted="$(require_kv "$WORKLOAD_METADATA" emitted_bytes workload)"
+ready_receipt_hash="$(require_kv "$WORKLOAD_METADATA" ready_receipt_sha256 workload)"
 require_uint "$workload_started" workload-started-continuous-ns
 require_uint "$workload_ended" workload-ended-continuous-ns
 require_uint "$workload_emitted" workload-emitted-bytes
+require_hash "$ready_receipt_hash" workload-ready-receipt-sha256
+[[ "$ready_receipt_hash" == "$(sha256 "$READY_RECEIPT")" ]] \
+    || not_run "workload-ready-receipt-mismatch"
 (( workload_ended > workload_started )) || not_run "invalid-workload-duration"
 actual_workload_ms=$(((workload_ended - workload_started) / 1000000))
 (( actual_workload_ms >= measured_duration_ms \
@@ -332,23 +447,46 @@ actual_workload_ms=$(((workload_ended - workload_started) / 1000000))
     || not_run "workload-does-not-cover-duration"
 
 # All event artifacts are append-only, exact-schema, sequence- and time-ordered.
-awk -F '\t' '
+awk -F '\t' -v measured_start="$workload_started" -v final_bytes="$workload_emitted" '
     NR == 1 { next }
     NF != 10 { exit 1 }
     $1 !~ /^[0-9]+$/ || $2 !~ /^[0-9]+$/ || $5 !~ /^[0-9]+$/ \
         || $6 !~ /^[0-9]+$/ || $7 !~ /^[0-9]+$/ || $8 !~ /^[0-9]+$/ \
         || $9 !~ /^[0-9]+$/ { exit 1 }
-    !($3 == "started" || $3 == "seed-complete" || $3 == "input-read" \
-        || $3 == "input-ack-written" || $3 == "geometry" || $3 == "producer-end") { exit 1 }
+    !($3 == "started" || $3 == "seed-complete" || $3 == "measurement-ready" \
+        || $3 == "input-read" \
+        || $3 == "input-ack-written" || $3 == "geometry" \
+        || $3 == "progress" || $3 == "producer-end") { exit 1 }
     !(($3 == "producer-end" && $10 == "success") \
         || ($3 != "producer-end" && $10 == "ok")) { exit 1 }
     $1 + 0 != NR - 2 || (NR > 2 && $2 + 0 <= prior_time) { exit 1 }
     { prior_time = $2 + 0 }
     $3 == "started" { started += 1; start_row = NR }
     $3 == "seed-complete" { seeds += 1; seed_row = NR }
+    $3 == "measurement-ready" {
+        ready += 1
+        ready_row = NR
+        if ($4 != "none") exit 1
+    }
+    $3 == "progress" {
+        if (ready != 1) exit 1
+        if (progress == 0) first_progress_row = NR
+        expected = sprintf("progress-%06d", progress)
+        if ($4 != expected || $5 + 0 <= 0 || $6 + 0 <= 0 || $7 + 0 <= 0 \
+            || $8 + 0 <= 0 || $9 + 0 <= 0 \
+            || (progress > 0 && ($2 - progress_time > 2000000000 \
+                || $5 + 0 <= progress_bytes))) exit 1
+        if (progress == 0 && $2 + 0 != measured_start) exit 1
+        progress += 1
+        progress_time = $2 + 0
+        progress_bytes = $5 + 0
+    }
     $3 == "producer-end" { ended += 1; end_row = NR }
-    END { exit !(started == 1 && start_row == 2 && seeds == 1 \
-        && seed_row > start_row && ended == 1 && end_row == NR) }
+    END { exit !(started == 1 && start_row == 2 && seeds == 1 && ready == 1 \
+        && seed_row > start_row && ready_row > seed_row \
+        && first_progress_row > ready_row \
+        && progress >= 2 && progress_bytes == final_bytes \
+        && progress_time < $2 + 0 && ended == 1 && end_row == NR) }
 ' "$WORKLOAD_EVENTS" || not_run "invalid-workload-event-stream"
 workload_stream_summary="$(awk -F '\t' '
     NR > 1 && $3 == "started" { started_time = $2 }
@@ -376,7 +514,8 @@ if [[ "$SCENARIO" == scrolled || "$SCENARIO" == resize ]]; then
         || not_run "seed-or-geometry-evidence-incomplete"
 fi
 
-awk -F '\t' '
+subject_process_pid="$(require_kv "$SUBJECT_IDENTITY" process_pid subject)"
+awk -F '\t' -v subject_pid="$subject_process_pid" '
     NR == 1 { next }
     NF != 11 { exit 1 }
     $1 !~ /^[0-9]+$/ || $2 !~ /^[0-9]+$/ || $5 !~ /^[1-9][0-9]*$/ \
@@ -386,29 +525,31 @@ awk -F '\t' '
     !($4 == "input" || $4 == "scroll-rows" || $4 == "minimize" \
         || $4 == "restore" || $4 == "occluder-show" || $4 == "occluder-hide" \
         || $4 == "resize-grid" || $4 == "checkpoint" || $4 == "stop") { exit 1 }
-    $1 + 0 != NR - 2 || (NR > 2 && $2 + 0 <= prior_time) || seen[$3]++ { exit 1 }
+    $1 + 0 != NR - 2 || $5 != subject_pid \
+        || (NR > 2 && $2 + 0 <= prior_time) || seen[$3]++ { exit 1 }
     { prior_time = $2 + 0 }
 ' "$DRIVER_EVENTS" || not_run "invalid-driver-event-stream"
 awk -F '\t' 'NR > 1 && $11 != "verified" { exit 1 }' "$DRIVER_EVENTS" \
     || fail "native-driver-action-failed"
 
-# The driver starts only after observing seed-complete. This binds its plan
-# clock to the producer without inventing a cross-process launch timestamp.
+# The signed readiness receipt authorizes one shared plan-start boundary.
 driver_first_event="$(awk -F '\t' 'NR == 2 { print $2 }' "$DRIVER_EVENTS")"
+plan_started="$(require_kv "$WORKLOAD_METADATA" plan_start_continuous_ns workload)"
 measured_event_id=measured-start
 [[ "$SCENARIO" != resize ]] || measured_event_id=seed-checkpoint
 driver_measured_event="$(awk -F '\t' -v wanted="$measured_event_id" \
     '$3 == wanted { count += 1; value = $2 } \
     END { if (count == 1) print value }' "$DRIVER_EVENTS")"
 require_uint "$driver_first_event" driver-first-event-time
+require_uint "$plan_started" workload-plan-start-time
 require_uint "$driver_measured_event" driver-measured-event-time
-awk -v driver="$driver_first_event" -v seed="$workload_seed_event" \
+awk -v driver="$driver_first_event" -v plan="$plan_started" \
     -v measured="$driver_measured_event" -v workload="$workload_started" '
     BEGIN {
-        seed_skew = driver - seed
+        plan_skew = driver - plan
         measured_skew = measured - workload
-        if (seed_skew < 0 || seed_skew > 2000000000 \
-            || measured_skew < -2000000000 || measured_skew > 2000000000) exit 1
+        if (plan_skew < 0 || plan_skew > 100000000 \
+            || measured_skew < -100000000 || measured_skew > 100000000) exit 1
     }
 ' || not_run "driver-and-producer-clocks-are-not-correlated"
 
@@ -442,23 +583,47 @@ awk -F '\t' '
 input_status="${input_status:-0}"
 [[ "$input_status" != 2 ]] || not_run "input-event-correlation-incomplete"
 [[ "$input_status" != 1 ]] || fail "input-latency-exceeds-250ms"
+(( workload_reads > 0 )) || not_run "target-pane-ingestion-receipt-missing"
 
 [[ "$(require_kv "$TRACE_METADATA" format_version trace)" == 3 ]] \
     || not_run "unsupported-trace-format"
 [[ "$(require_kv "$TRACE_METADATA" capture_status trace)" == CAPTURED \
+    && "$(require_kv "$TRACE_METADATA" incomplete_reason trace)" == none \
     && "$(require_kv "$TRACE_METADATA" status trace)" == complete ]] \
     || not_run "trace-capture-incomplete"
 [[ "$(require_kv "$TRACE_METADATA" subject_identity_sha256 trace)" == "$subject_hash" \
+    && "$(require_kv "$TRACE_METADATA" run_metadata_sha256 trace)" == "$(sha256 "$RUN_METADATA")" \
+    && "$(require_kv "$TRACE_METADATA" workload_metadata_sha256 trace)" == "$(sha256 "$WORKLOAD_METADATA")" \
+    && "$(require_kv "$TRACE_METADATA" workload_ready_receipt_sha256 trace)" == "$(sha256 "$READY_RECEIPT")" \
+    && "$(require_kv "$TRACE_METADATA" supplemental_evidence_sha256 trace)" == "$(sha256 "$PLAN_START_GATE")" \
     && "$(require_kv "$TRACE_METADATA" target_identity_verified trace)" == true \
     && "$(require_kv "$TRACE_METADATA" trace_target_pid_verified trace)" == true ]] \
     || not_run "trace-target-binding-unsupported-or-mismatched"
 trace_requested="$(require_kv "$TRACE_METADATA" requested_duration_ms trace)"
 trace_actual="$(require_kv "$TRACE_METADATA" actual_duration_ms trace)"
+trace_started="$(require_kv "$TRACE_METADATA" capture_started_continuous_ns trace)"
+trace_ended="$(require_kv "$TRACE_METADATA" capture_ended_continuous_ns trace)"
 require_uint "$trace_requested" trace-requested-duration
 require_uint "$trace_actual" trace-actual-duration
+require_uint "$trace_started" trace-started-continuous-ns
+require_uint "$trace_ended" trace-ended-continuous-ns
 (( trace_requested == measured_duration_ms && trace_actual >= measured_duration_ms \
-    && trace_actual <= measured_duration_ms + 2000 )) \
+    && trace_actual <= measured_duration_ms + 3250 )) \
     || not_run "trace-duration-incomplete"
+awk -v trace_start="$trace_started" -v trace_end="$trace_ended" \
+    -v trace_actual_ms="$trace_actual" \
+    -v workload_start="$workload_started" -v workload_end="$workload_ended" '
+    BEGIN {
+        start_lead = workload_start - trace_start
+        timestamp_duration_ms = (trace_end - trace_start) / 1000000
+        duration_error_ms = timestamp_duration_ms - trace_actual_ms
+        if (duration_error_ms < 0) duration_error_ms = -duration_error_ms
+        exit !(start_lead >= 0 && start_lead <= 2000000000 \
+            && trace_start < trace_end && trace_end >= workload_end \
+            && trace_end <= workload_end + 2000000000 \
+            && duration_error_ms <= 100)
+    }
+' || not_run "trace-does-not-temporally-bind-workload"
 for instrument in time_profiler allocations hangs; do
     [[ "$(require_kv "$TRACE_METADATA" "${instrument}_instrument" trace)" == true \
         && "$(require_kv "$TRACE_METADATA" "${instrument}_target_verified" trace)" == true ]] \
@@ -499,11 +664,13 @@ reject_missing_marker "$manual_reviewer"
 
 if [[ "$SUBJECT" == spaceterm ]]; then
     reject_unknown_kv "$NATIVE_LAUNCH_OBSERVATION" \
-        "schema observation.source launch.nonce run.id package.app.sha256 process.pid process.pidversion process.executable.path process.executable.device process.executable.inode process.executable.fsid process.signature.cdhash process.signature.identifier process.signature.team_identifier terminal_font_selected initial_grid.rows initial_grid.columns initial_grid.logical_width initial_grid.logical_height initial_grid.backing_pixel_width initial_grid.backing_pixel_height observation.complete" \
+        "schema observation.source launch.nonce run.id package.app.sha256 runtime.schema runtime.sample_interval_ms runtime.transition_capacity failure.action.schema process.pid process.pidversion process.executable.path process.executable.device process.executable.inode process.executable.fsid process.signature.cdhash process.signature.identifier process.signature.team_identifier terminal_font_selected initial_grid.rows initial_grid.columns initial_grid.logical_width initial_grid.logical_height initial_grid.backing_pixel_width initial_grid.backing_pixel_height observation.complete" \
         native-launch-observation
-    [[ "$(awk 'END { print NR }' "$NATIVE_LAUNCH_OBSERVATION")" == 22 ]] \
+    [[ "$(awk 'END { print NR }' "$NATIVE_LAUNCH_OBSERVATION")" == 26 ]] \
         || not_run "native-launch-observation-record-count-mismatch"
-    for launch_key in launch.nonce package.app.sha256 process.pid process.pidversion \
+    for launch_key in launch.nonce package.app.sha256 runtime.schema \
+        runtime.sample_interval_ms runtime.transition_capacity \
+        process.pid process.pidversion \
         process.executable.path process.executable.device process.executable.inode \
         process.executable.fsid process.signature.cdhash process.signature.identifier \
         process.signature.team_identifier terminal_font_selected initial_grid.rows \
@@ -512,10 +679,31 @@ if [[ "$SUBJECT" == spaceterm ]]; then
         [[ -n "$(require_kv "$NATIVE_LAUNCH_OBSERVATION" "$launch_key" launch)" ]] \
             || not_run "native-launch-observation-missing-$launch_key"
     done
+    [[ "$(require_kv "$NATIVE_LAUNCH_OBSERVATION" launch.nonce launch)" \
+            =~ ^[0-9a-f]{64}$ \
+        && "$(require_kv "$NATIVE_LAUNCH_OBSERVATION" run.id launch)" \
+            =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$ \
+        && "$(require_kv "$NATIVE_LAUNCH_OBSERVATION" process.pidversion launch)" \
+            =~ ^[1-9][0-9]*$ \
+        && "$(require_kv "$NATIVE_LAUNCH_OBSERVATION" process.executable.fsid launch)" \
+            =~ ^-?[0-9]+:-?[0-9]+$ ]] \
+        || not_run "native-launch-observation-value-invalid"
     [[ "$(require_kv "$NATIVE_LAUNCH_OBSERVATION" schema launch)" \
-            == spaceterm.acceptance.native-launch-proof/v2 \
+            == spaceterm.acceptance.native-launch-proof/v4 \
         && "$(require_kv "$NATIVE_LAUNCH_OBSERVATION" observation.source launch)" \
             == production-app \
+        && "$(require_kv "$NATIVE_LAUNCH_OBSERVATION" launch.nonce launch)" \
+            == "$NONCE" \
+        && "$(require_kv "$NATIVE_LAUNCH_OBSERVATION" run.id launch)" \
+            == "$CAMPAIGN_ID" \
+        && "$(require_kv "$NATIVE_LAUNCH_OBSERVATION" runtime.schema launch)" \
+            == spaceterm.acceptance.runtime-stream/v1 \
+        && "$(require_kv "$NATIVE_LAUNCH_OBSERVATION" runtime.sample_interval_ms launch)" \
+            == 1000 \
+        && "$(require_kv "$NATIVE_LAUNCH_OBSERVATION" runtime.transition_capacity launch)" \
+            == 64 \
+        && "$(require_kv "$NATIVE_LAUNCH_OBSERVATION" failure.action.schema launch)" \
+            == spaceterm.acceptance.failure-action/v1 \
         && "$(require_kv "$NATIVE_LAUNCH_OBSERVATION" observation.complete launch)" == true \
         && "$(require_kv "$NATIVE_LAUNCH_OBSERVATION" process.pid launch)" \
             == "$(require_kv "$SUBJECT_IDENTITY" process_pid subject)" \
@@ -531,10 +719,10 @@ if [[ "$SUBJECT" == spaceterm ]]; then
             == "$(require_kv "$SUBJECT_IDENTITY" signing_identifier subject)" ]] \
         || not_run "native-launch-observation-does-not-bind-subject"
     reject_unknown_kv "$RUNTIME_METADATA" \
-        "schema observation.source run.id package.app.sha256 process.pid runtime.samples.path runtime.samples.sha256 runtime.events.path runtime.events.sha256 observer.started_continuous_ns observer.ended_continuous_ns observer.sample_interval_ms observer.transition_capacity observer.sample_count observer.event_count observer.status observation.complete" \
+        "schema observation.source run.id package.app.sha256 process.pid runtime.samples.path runtime.samples.sha256 runtime.events.path runtime.events.sha256 failure.action.schema failure.result.schema failure.actions.path failure.actions.sha256 failure.result_count observer.started_continuous_ns observer.ended_continuous_ns observer.sample_interval_ms observer.transition_capacity observer.sample_count observer.event_count observer.status observation.complete" \
         runtime-metadata
     [[ "$(require_kv "$RUNTIME_METADATA" schema runtime)" \
-            == spaceterm.acceptance.runtime-observation-metadata/v1 \
+            == spaceterm.acceptance.runtime-observation-metadata/v2 \
         && "$(require_kv "$RUNTIME_METADATA" observation.source runtime)" == production-app \
         && "$(require_kv "$RUNTIME_METADATA" observer.status runtime)" == complete \
         && "$(require_kv "$RUNTIME_METADATA" observation.complete runtime)" == true \
@@ -548,9 +736,22 @@ if [[ "$SUBJECT" == spaceterm ]]; then
             == runtime-samples.tsv \
         && "$(require_kv "$RUNTIME_METADATA" runtime.events.path runtime)" \
             == runtime-events.tsv \
+        && "$(require_kv "$RUNTIME_METADATA" failure.action.schema runtime)" \
+            == spaceterm.acceptance.failure-action/v1 \
+        && "$(require_kv "$RUNTIME_METADATA" failure.result.schema runtime)" \
+            == spaceterm.acceptance.failure-action-result/v1 \
+        && "$(require_kv "$RUNTIME_METADATA" failure.actions.path runtime)" \
+            == failure-actions.tsv \
+        && "$(require_kv "$RUNTIME_METADATA" failure.actions.sha256 runtime)" \
+            == "$(sha256 "$FAILURE_ACTIONS")" \
+        && "$(require_kv "$RUNTIME_METADATA" failure.result_count runtime)" == 0 \
         && "$(require_kv "$RUNTIME_METADATA" observer.sample_interval_ms runtime)" == 1000 \
         && "$(require_kv "$RUNTIME_METADATA" observer.transition_capacity runtime)" == 64 ]] \
         || not_run "runtime-observer-incomplete"
+    readonly FAILURE_ACTION_HEADER=$'request_id\tsequence\tcase_id\taction\tresult\tpane_id\tpane_state\tfailure_class\tfailure_recoverability\tfailure_operation\tstate_revision\tlatest_generation\tlast_valid_generation\tvisible_generation\tpending_recovery\tterminal_input_usable\tsession_attached'
+    [[ "$(head -n 1 "$FAILURE_ACTIONS")" == "$FAILURE_ACTION_HEADER" \
+        && "$(awk 'END { print NR }' "$FAILURE_ACTIONS")" == 1 ]] \
+        || not_run "performance-run-has-failure-action-results"
     observer_started="$(require_kv "$RUNTIME_METADATA" observer.started_continuous_ns runtime)"
     observer_ended="$(require_kv "$RUNTIME_METADATA" observer.ended_continuous_ns runtime)"
     require_uint "$observer_started" runtime-observer-started

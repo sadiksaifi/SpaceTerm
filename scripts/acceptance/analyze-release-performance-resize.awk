@@ -71,6 +71,14 @@ NR == 1 {
         && key != "requested_duration_ms" \
         && key != "subject_identity_sha256" \
         && key != "workload_events_sha256" \
+        && key != "workload_metadata_sha256" \
+        && key != "ready_receipt_sha256" \
+        && key != "plan_start_continuous_ns" \
+        && key != "measurement_start_continuous_ns" \
+        && key != "plan_start_gate_sha256" \
+        && key != "workload_authentication" \
+        && key != "progress_interval_ms" \
+        && key != "maximum_progress_age_ms" \
         && key != "driver_events_sha256" \
         && key != "distinct_geometry_count" \
         && key != "geometry_change_count" \
@@ -134,7 +142,7 @@ END {
         print "reason\t" not_run_reason
         exit 2
     }
-    if (metadata["format_version"] != "3") {
+    if (metadata["format_version"] != "4") {
         fail_not_run("unsupported-format-version")
     }
     if (metadata["scenario"] != "resize") {
@@ -148,9 +156,22 @@ END {
         || metadata["requested_duration_ms"] + 0 != required_duration_ms) {
         fail_not_run("requested-duration-is-not-five-minutes")
     }
-    for (required_hash_index = 1; required_hash_index <= 3; required_hash_index += 1) {
+    if (metadata["workload_authentication"] != "hmac-sha256" \
+        || metadata["progress_interval_ms"] != "1000" \
+        || metadata["maximum_progress_age_ms"] != "2000") {
+        fail_not_run("workload-progress-authentication-invalid")
+    }
+    if (metadata["plan_start_continuous_ns"] !~ /^[1-9][0-9]*$/ \
+        || metadata["measurement_start_continuous_ns"] \
+            != metadata["plan_start_continuous_ns"]) {
+        fail_not_run("measurement-boundary-invalid")
+    }
+    for (required_hash_index = 1; required_hash_index <= 6; required_hash_index += 1) {
         required_hash_key = required_hash_index == 1 ? "subject_identity_sha256" \
             : required_hash_index == 2 ? "workload_events_sha256" \
+            : required_hash_index == 3 ? "workload_metadata_sha256" \
+            : required_hash_index == 4 ? "ready_receipt_sha256" \
+            : required_hash_index == 5 ? "plan_start_gate_sha256" \
             : "driver_events_sha256"
         if (length(metadata[required_hash_key]) != 64 \
             || metadata[required_hash_key] !~ /^[0-9a-f]+$/) {
@@ -187,7 +208,7 @@ END {
         fail_not_run("workload-byte-count-has-no-growth")
     }
     resize_delta = resizes[sample_count] - resizes[1]
-    if (resize_delta < required_resize_cycles) {
+    if (resizes[sample_count] < required_resize_cycles) {
         fail_not_run("sampled-resize-count-is-too-small")
     }
     if (resizes[sample_count] > metadata["completed_resize_cycles"] + 0) {

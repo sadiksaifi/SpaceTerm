@@ -48,7 +48,7 @@ static void print_usage(FILE *stream) {
             "  --executable PATH --executable-sha256 SHA256 --app-bundle PATH \\\n\n"
             "  --bundle-identifier ID --signing-identifier ID \\\n\n"
             "  --team-identifier ID|none|- --cdhash HEX --window-number N \\\n\n"
-            "  --scenario-plan PATH --output PATH\n\n"
+            "  --scenario-plan PATH --plan-start-continuous-ns N --output PATH\n\n"
             "Consume a frozen native-performance scenario plan and atomically emit\n"
             "driver-events.tsv. Synthetic input is posted only to the pinned PID;\n"
             "the driver never posts to a global event tap. Accessibility permission\n"
@@ -136,6 +136,14 @@ static BOOL parse_signed(NSString *value, int64_t minimum, int64_t maximum, int6
     return YES;
 }
 
+static BOOL parse_start_identity(NSString *value, uint64_t *seconds,
+                                 uint64_t *microseconds) {
+    NSArray<NSString *> *fields = [value componentsSeparatedByString:@":"];
+    return fields.count == 2
+        && parse_unsigned(fields[0], UINT64_MAX, seconds)
+        && parse_unsigned(fields[1], 999999, microseconds);
+}
+
 static NSString *canonical_path(NSString *path) {
     if (path.length == 0) {
         return nil;
@@ -149,16 +157,6 @@ static NSString *canonical_path(NSString *path) {
         length:strlen(resolved)];
     free(resolved);
     return value;
-}
-
-static NSString *collapsed_whitespace(NSString *value) {
-    NSArray<NSString *> *parts = [value componentsSeparatedByCharactersInSet:
-        [NSCharacterSet whitespaceAndNewlineCharacterSet]];
-    NSPredicate *not_empty = [NSPredicate predicateWithBlock:^BOOL(NSString *part, NSDictionary *_) {
-        (void)_;
-        return part.length > 0;
-    }];
-    return [[parts filteredArrayUsingPredicate:not_empty] componentsJoinedByString:@" "];
 }
 
 static BOOL rect_matches(CGRect observed, CGRect expected, CGFloat tolerance) {
@@ -645,16 +643,12 @@ static BOOL ax_boolean(AXUIElementRef element, CFStringRef attribute, BOOL *valu
     if (![self readProcessInformation:&information error:error]) {
         return NO;
     }
-    time_t seconds = (time_t)information.pbi_start_tvsec;
-    struct tm local;
-    char rendered[64];
-    NSString *rendered_value = nil;
-    if (localtime_r(&seconds, &local) != NULL
-        && strftime(rendered, sizeof(rendered), "%a %b %e %H:%M:%S %Y", &local) != 0) {
-        rendered_value = collapsed_whitespace([NSString stringWithUTF8String:rendered]);
-    }
-    if (rendered_value == nil
-        || ![self.startIdentity isEqualToString:rendered_value]) {
+    uint64_t expected_seconds = 0;
+    uint64_t expected_microseconds = 0;
+    if (!parse_start_identity(self.startIdentity, &expected_seconds,
+                              &expected_microseconds)
+        || expected_seconds != information.pbi_start_tvsec
+        || expected_microseconds != information.pbi_start_tvusec) {
         return set_error(error, @"target-process-start-identity-mismatch");
     }
     self.startSeconds = information.pbi_start_tvsec;
@@ -1599,7 +1593,8 @@ static NSDictionary<NSString *, NSString *> *parse_options(int argc, const char 
         @"--pid", @"--start-identity", @"--executable",
         @"--executable-sha256", @"--app-bundle", @"--bundle-identifier",
         @"--signing-identifier", @"--team-identifier", @"--cdhash",
-        @"--window-number", @"--scenario-plan", @"--output",
+        @"--window-number", @"--scenario-plan", @"--plan-start-continuous-ns",
+        @"--output",
     ];
     NSSet<NSString *> *allowed = [NSSet setWithArray:required];
     NSMutableDictionary<NSString *, NSString *> *options = [NSMutableDictionary dictionary];
@@ -1758,10 +1753,15 @@ int main(int argc, const char *argv[]) {
 
         uint64_t pid_value = 0;
         uint64_t window_number = 0;
+        uint64_t plan_start_continuous_ns = 0;
         if (!parse_unsigned(options[@"--pid"], INT32_MAX, &pid_value) || pid_value == 0
             || !string_is_safe_field(options[@"--start-identity"], 64)
             || !parse_unsigned(options[@"--window-number"], UINT32_MAX, &window_number)
             || window_number == 0
+            || !parse_unsigned(options[@"--plan-start-continuous-ns"],
+                               UINT64_MAX - 2000000000ULL,
+                               &plan_start_continuous_ns)
+            || plan_start_continuous_ns == 0
             || !string_is_hex(options[@"--executable-sha256"], 64, 64)
             || !string_is_hex(options[@"--cdhash"], 40, 128)
             || !string_is_safe_label(options[@"--bundle-identifier"])
@@ -1823,7 +1823,13 @@ int main(int argc, const char *argv[]) {
         sigaction(SIGINT, &action, NULL);
         sigaction(SIGTERM, &action, NULL);
 
-        uint64_t started = continuous_nanoseconds();
+        uint64_t prepared = continuous_nanoseconds();
+        if (prepared > plan_start_continuous_ns + 2000000000ULL) {
+            discard_output(&output);
+            fprintf(stderr, "error: plan start deadline was missed\n");
+            return 65;
+        }
+        uint64_t started = plan_start_continuous_ns;
         BOOL all_succeeded = YES;
         BOOL restoration_succeeded = YES;
         NSUInteger sequence = 0;
@@ -1849,7 +1855,10 @@ int main(int argc, const char *argv[]) {
                     break;
                 }
                 ActionObservation *result = [target execute:event];
-                if (result.eventNanoseconds > deadline + kMaximumDispatchLatenessNanoseconds) {
+                uint64_t maximum_lateness = sequence == 0
+                    ? 2000000000ULL
+                    : kMaximumDispatchLatenessNanoseconds;
+                if (result.eventNanoseconds > deadline + maximum_lateness) {
                     result.succeeded = NO;
                     result.result = @"schedule-deadline-missed";
                 }
