@@ -823,10 +823,9 @@ int main(int argc, const char *argv[]) {
                 samples_valid = NO;
                 break;
             }
-            uint64_t elapsed = (sample_time - measurement_started) / 1000000ULL;
             samples_valid = fprintf(output.stream,
                                     "%llu\t%llu\t%llu\n",
-                                    elapsed,
+                                    scheduled_elapsed,
                                     sample_time,
                                     rss_kib) >= 0;
         }

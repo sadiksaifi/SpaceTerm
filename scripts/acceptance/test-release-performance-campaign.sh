@@ -179,6 +179,7 @@ write_raw_rss() {
     local subject_identity="$1"
     local output="$2"
     local identity_hash="${3:-$(sha256 "$subject_identity")}"
+    local continuous_delay_ns="${4:-0}"
     {
         printf 'elapsed_ms\tcontinuous_ns\trss_kib\n'
         printf '# format_version\t1\n'
@@ -188,7 +189,8 @@ write_raw_rss() {
         printf '# subject_identity_sha256\t%s\n' "$identity_hash"
         for ((index = 0; index <= 60; index += 1)); do
             printf '%d\t%d\t%d\n' "$((index * 10000))" \
-                "$((BASE_CONTINUOUS_NS + 60000000000 + index * 10000000000))" \
+                "$((BASE_CONTINUOUS_NS + 60000000000 + continuous_delay_ns \
+                    + index * 10000000000))" \
                 "$((100000 + index % 2 * 1000))"
         done
         printf '# status\tcomplete\n'
@@ -373,6 +375,8 @@ grep -Fq 'proc_pid_rusage' "$SCRIPT_DIRECTORY/performance-rss-sampler.m" \
     || fail "native RSS sampler does not use exact process rusage"
 grep -Fq 'mach_continuous_time' "$SCRIPT_DIRECTORY/performance-rss-sampler.m" \
     || fail "native RSS sampler does not use a continuous clock"
+grep -Fq 'scheduled_elapsed,' "$SCRIPT_DIRECTORY/performance-rss-sampler.m" \
+    || fail "native RSS sampler does not emit exact scheduled elapsed cadence"
 
 # Plans are deterministic, immutable, ordered, and contain the required cases.
 for scenario in ascii unicode-styles scrolled hidden-occluded resize; do
@@ -479,6 +483,29 @@ write_raw_rss "$GHOSTTY_IDENTITY" "$RAW_RSS"
     --driver-events "$DRIVER_EVENTS" \
     --output "$ASSEMBLED_RSS"
 readonly RAW_RSS ASSEMBLED_RSS
+
+# Normal scheduling delay changes actual continuous time, never the exact
+# scheduled elapsed cadence or final requested-duration boundary.
+DELAYED_RAW_RSS="$TEMP_ROOT/delayed-raw-rss.tsv"
+DELAYED_ASSEMBLED_RSS="$TEMP_ROOT/delayed-assembled-rss.tsv"
+write_raw_rss "$GHOSTTY_IDENTITY" "$DELAYED_RAW_RSS" \
+    "$(sha256 "$GHOSTTY_IDENTITY")" 900000000
+[[ "$(awk -F '\t' '$1 !~ /^#/ && $1 ~ /^[0-9]+$/ { last = $1 } END { print last }' \
+    "$DELAYED_RAW_RSS")" == 600000 ]] \
+    || fail "delayed raw RSS changed the scheduled final boundary"
+"$SCRIPT_DIRECTORY/assemble-release-performance-rss-v3.sh" \
+    --subject-identity "$GHOSTTY_IDENTITY" \
+    --scenario ascii \
+    --requested-warmup-ms 60000 \
+    --requested-duration-ms 600000 \
+    --raw-samples "$DELAYED_RAW_RSS" \
+    --workload-events "$WORKLOAD_EVENTS" \
+    --driver-events "$DRIVER_EVENTS" \
+    --output "$DELAYED_ASSEMBLED_RSS"
+expect_result 0 PASS "scheduled RSS cadence survives normal sampling delay" \
+    run_case ghostty "$GHOSTTY_IDENTITY" "$GHOSTTY_RUN" \
+        "$WORKLOAD_EVENTS" "$DRIVER_EVENTS" "$DELAYED_ASSEMBLED_RSS" \
+        "$GHOSTTY_TRACE" "$MANUAL"
 
 expect_result 0 PASS "valid assembled raw RSS evidence" \
     run_case ghostty "$GHOSTTY_IDENTITY" "$GHOSTTY_RUN" \
