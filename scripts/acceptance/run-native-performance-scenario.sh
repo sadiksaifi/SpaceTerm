@@ -13,6 +13,7 @@ SCENARIO=""
 SCENARIO_PLAN=""
 PLAN_METADATA=""
 RUN_METADATA=""
+RUN_INTENT=""
 WORKLOAD_EVENTS=""
 WORKLOAD_METADATA=""
 WORKLOAD_READY_RECEIPT=""
@@ -23,6 +24,18 @@ DRIVER_INTENT=""
 DRIVER_RECEIPT=""
 RSS_OUTPUT=""
 TRACE_OUTPUT_DIRECTORY=""
+TRACE_PROVISIONAL_RECEIPT=""
+PERFORMANCE_TAIL_RECEIPT=""
+PERFORMANCE_QUIT_CONTROL=""
+PERFORMANCE_QUIT_RECEIPT=""
+SUBJECT_EXIT_RECEIPT=""
+NATIVE_PROVISIONAL_OBSERVATION=""
+NATIVE_OBSERVATION=""
+NATIVE_RUNTIME_METADATA=""
+NATIVE_RUNTIME_SAMPLES=""
+NATIVE_RUNTIME_EVENTS=""
+NATIVE_FAILURE_ACTIONS=""
+NATIVE_CLOSURE_VERIFIER_SHA256=unavailable
 RESULT_OUTPUT=""
 TRACE_RECORDER=""
 CAMPAIGN_SECRET_FILE=""
@@ -62,20 +75,31 @@ TRACE_COMMAND_RUNNER_SHA256=unavailable
 WORKLOAD_READY_VERIFIER_SHA256=unavailable
 WORKLOAD_AUTH_VERIFIER_SHA256=unavailable
 DRIVER_RECEIPT_TOOL_SHA256=unavailable
+TAIL_RECEIPT_TOOL_SHA256=unavailable
+SUBJECT_EXIT_VERIFIER_SHA256=unavailable
+RUN_FINALIZER_SHA256=unavailable
 
 usage() {
     cat <<EOF
 Usage: $(basename -- "$0") --run-directory ABSOLUTE_DIRECTORY \\
   --tools-directory DIRECTORY --subject-identity FILE --window-identity FILE \\
-  --scenario NAME --scenario-plan FILE --plan-metadata FILE --run-metadata FILE \\
+  --scenario NAME --scenario-plan FILE --plan-metadata FILE --run-intent FILE \\
+  --run-metadata ABSENT_FILE \\
   --workload-events ABSENT_OR_ACTIVE_FILE --workload-metadata ABSENT_FILE \\
   --workload-ready-receipt ABSENT_FILE --plan-start-gate ABSENT_FILE \\
   --driver-output ABSENT_FILE --driver-intent ABSENT_FILE \\
   --driver-receipt ABSENT_FILE --rss-output ABSENT_FILE \\
-  --trace-output-directory ABSENT_DIRECTORY --result-output ABSENT_FILE \\
+  --trace-output-directory ABSENT_DIRECTORY --trace-provisional-receipt ABSENT_FILE \\
+  --performance-tail-receipt ABSENT_FILE --performance-quit-control FIFO \\
+  --performance-quit-receipt ABSENT_FILE --subject-exit-receipt ABSENT_FILE \\
+  --result-output ABSENT_FILE \\
   --trace-recorder FILE --campaign-secret-file PRIVATE_FILE \\
   --campaign-id LABEL --session-id LABEL --nonce SHA256 \\
   [--seed-timeout-seconds N]
+
+SpaceTerm additionally requires --native-provisional-observation FILE and pending
+paths for --native-observation, --native-runtime-metadata, --native-runtime-samples,
+--native-runtime-events, and --native-failure-actions. Ghostty rejects those paths.
 
 Wait for the native producer's seed-complete event, authenticate it against the
 frozen run and run-built workload, start the native plan driver and RSS sampler,
@@ -235,6 +259,7 @@ publish_result() {
         printf 'scenario\t%s\n' "$SCENARIO"
         printf 'subject_identity_sha256\t%s\n' "$(sha256 "$SUBJECT_IDENTITY" 2>/dev/null || printf unavailable)"
         printf 'window_identity_sha256\t%s\n' "$(sha256 "$WINDOW_IDENTITY" 2>/dev/null || printf unavailable)"
+        printf 'run_intent_sha256\t%s\n' "$(sha256 "$RUN_INTENT" 2>/dev/null || printf unavailable)"
         printf 'run_metadata_sha256\t%s\n' "$(sha256 "$RUN_METADATA" 2>/dev/null || printf unavailable)"
         printf 'scenario_plan_sha256\t%s\n' "$(sha256 "$SCENARIO_PLAN" 2>/dev/null || printf unavailable)"
         printf 'plan_start_gate_sha256\t%s\n' "$(sha256 "$PLAN_START_GATE" 2>/dev/null || printf unavailable)"
@@ -255,7 +280,19 @@ publish_result() {
         printf 'driver_intent_sha256\t%s\n' "$(sha256 "$DRIVER_INTENT" 2>/dev/null || printf unavailable)"
         printf 'driver_receipt_sha256\t%s\n' "$(sha256 "$DRIVER_RECEIPT" 2>/dev/null || printf unavailable)"
         printf 'driver_receipt_tool_sha256\t%s\n' "$DRIVER_RECEIPT_TOOL_SHA256"
+        printf 'tail_receipt_tool_sha256\t%s\n' "$TAIL_RECEIPT_TOOL_SHA256"
+        printf 'subject_exit_verifier_sha256\t%s\n' "$SUBJECT_EXIT_VERIFIER_SHA256"
+        printf 'run_finalizer_sha256\t%s\n' "$RUN_FINALIZER_SHA256"
+        printf 'native_closure_verifier_sha256\t%s\n' "$NATIVE_CLOSURE_VERIFIER_SHA256"
         printf 'rss_samples_sha256\t%s\n' "$(sha256 "$RSS_OUTPUT" 2>/dev/null || printf unavailable)"
+        printf 'trace_provisional_receipt_sha256\t%s\n' \
+            "$(sha256 "$TRACE_PROVISIONAL_RECEIPT" 2>/dev/null || printf unavailable)"
+        printf 'performance_tail_receipt_sha256\t%s\n' \
+            "$(sha256 "$PERFORMANCE_TAIL_RECEIPT" 2>/dev/null || printf unavailable)"
+        printf 'performance_quit_receipt_sha256\t%s\n' \
+            "$(sha256 "$PERFORMANCE_QUIT_RECEIPT" 2>/dev/null || printf unavailable)"
+        printf 'subject_exit_receipt_sha256\t%s\n' \
+            "$(sha256 "$SUBJECT_EXIT_RECEIPT" 2>/dev/null || printf unavailable)"
         printf 'trace_metadata_sha256\t%s\n' "$(sha256 "${TRACE_OUTPUT_DIRECTORY:-/nonexistent}/$SUBJECT-$SCENARIO-trace-metadata.tsv" 2>/dev/null || printf unavailable)"
         printf 'campaign_id\t%s\n' "$CAMPAIGN_ID"
         printf 'session_id\t%s\n' "$SESSION_ID"
@@ -323,7 +360,11 @@ verify_controller_toolchain() {
         && "$(sha256 "$TRACE_COMMAND_RUNNER")" == "$TRACE_COMMAND_RUNNER_SHA256" \
         && "$(sha256 "$WORKLOAD_READY_VERIFIER")" == "$WORKLOAD_READY_VERIFIER_SHA256" \
         && "$(sha256 "$WORKLOAD_AUTH_VERIFIER")" == "$WORKLOAD_AUTH_VERIFIER_SHA256" \
-        && "$(sha256 "$DRIVER_RECEIPT_TOOL")" == "$DRIVER_RECEIPT_TOOL_SHA256" ]]
+        && "$(sha256 "$DRIVER_RECEIPT_TOOL")" == "$DRIVER_RECEIPT_TOOL_SHA256" \
+        && "$(sha256 "$TAIL_RECEIPT_TOOL")" == "$TAIL_RECEIPT_TOOL_SHA256" \
+        && "$(sha256 "$SUBJECT_EXIT_VERIFIER")" == "$SUBJECT_EXIT_VERIFIER_SHA256" \
+        && "$(sha256 "$RUN_FINALIZER")" == "$RUN_FINALIZER_SHA256" \
+        && "$(sha256 "$NATIVE_CLOSURE_VERIFIER")" == "$NATIVE_CLOSURE_VERIFIER_SHA256" ]]
 }
 
 run_driver_receipt_tool() {
@@ -494,6 +535,7 @@ while (( $# > 0 )); do
         --scenario) SCENARIO="${2:-}"; shift ;;
         --scenario-plan) SCENARIO_PLAN="${2:-}"; shift ;;
         --plan-metadata) PLAN_METADATA="${2:-}"; shift ;;
+        --run-intent) RUN_INTENT="${2:-}"; shift ;;
         --run-metadata) RUN_METADATA="${2:-}"; shift ;;
         --workload-events) WORKLOAD_EVENTS="${2:-}"; shift ;;
         --workload-metadata) WORKLOAD_METADATA="${2:-}"; shift ;;
@@ -504,6 +546,17 @@ while (( $# > 0 )); do
         --driver-receipt) DRIVER_RECEIPT="${2:-}"; shift ;;
         --rss-output) RSS_OUTPUT="${2:-}"; shift ;;
         --trace-output-directory) TRACE_OUTPUT_DIRECTORY="${2:-}"; shift ;;
+        --trace-provisional-receipt) TRACE_PROVISIONAL_RECEIPT="${2:-}"; shift ;;
+        --performance-tail-receipt) PERFORMANCE_TAIL_RECEIPT="${2:-}"; shift ;;
+        --performance-quit-control) PERFORMANCE_QUIT_CONTROL="${2:-}"; shift ;;
+        --performance-quit-receipt) PERFORMANCE_QUIT_RECEIPT="${2:-}"; shift ;;
+        --subject-exit-receipt) SUBJECT_EXIT_RECEIPT="${2:-}"; shift ;;
+        --native-provisional-observation) NATIVE_PROVISIONAL_OBSERVATION="${2:-}"; shift ;;
+        --native-observation) NATIVE_OBSERVATION="${2:-}"; shift ;;
+        --native-runtime-metadata) NATIVE_RUNTIME_METADATA="${2:-}"; shift ;;
+        --native-runtime-samples) NATIVE_RUNTIME_SAMPLES="${2:-}"; shift ;;
+        --native-runtime-events) NATIVE_RUNTIME_EVENTS="${2:-}"; shift ;;
+        --native-failure-actions) NATIVE_FAILURE_ACTIONS="${2:-}"; shift ;;
         --result-output) RESULT_OUTPUT="${2:-}"; shift ;;
         --trace-recorder) TRACE_RECORDER="${2:-}"; shift ;;
         --campaign-secret-file) CAMPAIGN_SECRET_FILE="${2:-}"; shift ;;
@@ -532,14 +585,17 @@ is_positive_uint "$SEED_TIMEOUT_SECONDS" || die "invalid seed timeout"
 TOOLS_DIRECTORY="$(realpath "$TOOLS_DIRECTORY")"
 [[ "$TOOLS_DIRECTORY" == "$RUN_DIRECTORY/"* ]] || die "tools directory is outside the run"
 for input in "$SUBJECT_IDENTITY" "$WINDOW_IDENTITY" "$SCENARIO_PLAN" \
-    "$PLAN_METADATA" "$RUN_METADATA" "$CAMPAIGN_SECRET_FILE"; do
+    "$PLAN_METADATA" "$RUN_INTENT" "$CAMPAIGN_SECRET_FILE"; do
     path_is_within_run "$input" || die "input is outside the run: $input"
 done
+[[ -z "$NATIVE_PROVISIONAL_OBSERVATION" ]] \
+    || path_is_within_run "$NATIVE_PROVISIONAL_OBSERVATION" \
+    || die "native provisional observation is outside the run"
 require_immutable_file "$SUBJECT_IDENTITY" subject-identity
 require_immutable_file "$WINDOW_IDENTITY" window-identity
 require_immutable_file "$SCENARIO_PLAN" scenario-plan
 require_immutable_file "$PLAN_METADATA" plan-metadata
-require_immutable_file "$RUN_METADATA" run-metadata
+require_immutable_file "$RUN_INTENT" run-intent
 require_immutable_file "$TOOLS_DIRECTORY/native-performance-tools.tsv" tools-metadata
 [[ -f "$CAMPAIGN_SECRET_FILE" && ! -L "$CAMPAIGN_SECRET_FILE" ]] \
     || die "campaign secret must be a non-symlink regular file"
@@ -550,7 +606,9 @@ secret_mode="$(stat -f '%Lp' "$CAMPAIGN_SECRET_FILE")"
     || die "campaign secret is too short"
 for output in "$WORKLOAD_EVENTS" "$WORKLOAD_METADATA" "$WORKLOAD_READY_RECEIPT" \
     "$PLAN_START_GATE" "$DRIVER_OUTPUT" "$DRIVER_INTENT" "$DRIVER_RECEIPT" \
-    "$RSS_OUTPUT" \
+    "$RSS_OUTPUT" "$RUN_METADATA" "$TRACE_PROVISIONAL_RECEIPT" \
+    "$PERFORMANCE_TAIL_RECEIPT" "$PERFORMANCE_QUIT_RECEIPT" \
+    "$SUBJECT_EXIT_RECEIPT" \
     "$RESULT_OUTPUT"; do
     path_is_within_run "$output" || die "output is outside the run: $output"
 done
@@ -564,8 +622,17 @@ require_absent_output "$DRIVER_OUTPUT" driver-output
 require_absent_output "$DRIVER_INTENT" driver-intent
 require_absent_output "$DRIVER_RECEIPT" driver-receipt
 require_absent_output "$RSS_OUTPUT" rss-output
+require_absent_output "$RUN_METADATA" run-metadata
+require_absent_output "$TRACE_PROVISIONAL_RECEIPT" trace-provisional-receipt
+require_absent_output "$PERFORMANCE_TAIL_RECEIPT" performance-tail-receipt
+require_absent_output "$PERFORMANCE_QUIT_RECEIPT" performance-quit-receipt
+require_absent_output "$SUBJECT_EXIT_RECEIPT" subject-exit-receipt
 require_absent_output "$RESULT_OUTPUT" result-output
 require_absent_output "$TRACE_OUTPUT_DIRECTORY" trace-output-directory
+path_is_within_run "$PERFORMANCE_QUIT_CONTROL" \
+    || die "performance quit control is outside the run"
+[[ -p "$PERFORMANCE_QUIT_CONTROL" && ! -L "$PERFORMANCE_QUIT_CONTROL" ]] \
+    || die "performance quit control must be the launch verifier FIFO"
 [[ -f "$TRACE_RECORDER" && -x "$TRACE_RECORDER" && ! -L "$TRACE_RECORDER" ]] \
     || die "trace recorder must be an executable non-symlink file"
 
@@ -606,6 +673,15 @@ readonly DRIVER_RECEIPT_TOOL="$SCRIPT_DIRECTORY/performance-driver-receipt.py"
 [[ -f "$DRIVER_RECEIPT_TOOL" && -x "$DRIVER_RECEIPT_TOOL" \
     && ! -L "$DRIVER_RECEIPT_TOOL" ]] \
     || die "driver receipt tool is unavailable"
+readonly TAIL_RECEIPT_TOOL="$SCRIPT_DIRECTORY/performance-tail-receipt.py"
+readonly SUBJECT_EXIT_VERIFIER="$SCRIPT_DIRECTORY/verify-performance-subject-exit.py"
+readonly RUN_FINALIZER="$SCRIPT_DIRECTORY/freeze-performance-run.sh"
+readonly NATIVE_CLOSURE_VERIFIER="$SCRIPT_DIRECTORY/verify-performance-native-closure.py"
+for dependency in "$TAIL_RECEIPT_TOOL" "$SUBJECT_EXIT_VERIFIER" "$RUN_FINALIZER" \
+    "$NATIVE_CLOSURE_VERIFIER"; do
+    [[ -f "$dependency" && -x "$dependency" && ! -L "$dependency" ]] \
+        || die "causal closure tool is unavailable: $dependency"
+done
 TRACE_RECORDER="$(realpath "$TRACE_RECORDER")"
 readonly TRACE_RECORDER
 CANONICAL_TRACE_RECORDER="$(realpath "$SCRIPT_DIRECTORY/../record-release-performance-trace.sh")"
@@ -629,10 +705,16 @@ TRACE_COMMAND_RUNNER_SHA256="$(sha256 "$TRACE_COMMAND_RUNNER")"
 WORKLOAD_READY_VERIFIER_SHA256="$(sha256 "$WORKLOAD_READY_VERIFIER")"
 WORKLOAD_AUTH_VERIFIER_SHA256="$(sha256 "$WORKLOAD_AUTH_VERIFIER")"
 DRIVER_RECEIPT_TOOL_SHA256="$(sha256 "$DRIVER_RECEIPT_TOOL")"
+TAIL_RECEIPT_TOOL_SHA256="$(sha256 "$TAIL_RECEIPT_TOOL")"
+SUBJECT_EXIT_VERIFIER_SHA256="$(sha256 "$SUBJECT_EXIT_VERIFIER")"
+RUN_FINALIZER_SHA256="$(sha256 "$RUN_FINALIZER")"
+NATIVE_CLOSURE_VERIFIER_SHA256="$(sha256 "$NATIVE_CLOSURE_VERIFIER")"
 readonly CONTROLLER_SHA256 PROCESS_GROUP_RUNNER_SHA256 TRACE_RECORDER_SHA256
 readonly TRACE_INSPECTOR_SHA256 TRACE_VERIFIER_SHA256 TRACE_COMMAND_RUNNER_SHA256
 readonly WORKLOAD_READY_VERIFIER_SHA256 WORKLOAD_AUTH_VERIFIER_SHA256
 readonly DRIVER_RECEIPT_TOOL_SHA256
+readonly TAIL_RECEIPT_TOOL_SHA256 SUBJECT_EXIT_VERIFIER_SHA256 RUN_FINALIZER_SHA256
+readonly NATIVE_CLOSURE_VERIFIER_SHA256
 verify_controller_toolchain || die "controller toolchain changed during startup"
 [[ "$(kv "$TOOLS_METADATA" format_version)" == 1 \
     && "$(kv "$TOOLS_METADATA" status)" == complete ]] || die "tools metadata is invalid"
@@ -685,6 +767,18 @@ readonly SUBJECT_HASH PLAN_HASH WORKLOAD_HASH SUBJECT SUBJECT_PID START_IDENTITY
 readonly EXECUTABLE EXECUTABLE_SHA256 APP_BUNDLE BUNDLE_IDENTIFIER
 readonly SIGNING_IDENTIFIER TEAM_IDENTIFIER CDHASH WINDOW_NUMBER WARMUP_MS DURATION_MS
 [[ "$SUBJECT" == spaceterm || "$SUBJECT" == ghostty ]] || die "subject identity is invalid"
+if [[ "$SUBJECT" == spaceterm ]]; then
+    require_immutable_file "$NATIVE_PROVISIONAL_OBSERVATION" native-provisional-observation
+    for output in "$NATIVE_OBSERVATION" "$NATIVE_RUNTIME_METADATA" \
+        "$NATIVE_RUNTIME_SAMPLES" "$NATIVE_RUNTIME_EVENTS" "$NATIVE_FAILURE_ACTIONS"; do
+        path_is_within_run "$output" || die "native closure output is outside the run"
+        [[ ! -e "$output" && ! -L "$output" ]] || die "native closure output exists prematurely"
+    done
+else
+    [[ -z "$NATIVE_PROVISIONAL_OBSERVATION$NATIVE_OBSERVATION$NATIVE_RUNTIME_METADATA" \
+        && -z "$NATIVE_RUNTIME_SAMPLES$NATIVE_RUNTIME_EVENTS$NATIVE_FAILURE_ACTIONS" ]] \
+        || die "Ghostty must not receive SpaceTerm native closure paths"
+fi
 is_positive_uint "$SUBJECT_PID" || die "subject PID is invalid"
 is_positive_uint "$WINDOW_NUMBER" || die "window number is invalid"
 if ! is_uint "$WARMUP_MS" || ! is_positive_uint "$DURATION_MS"; then
@@ -706,23 +800,26 @@ fi
     && "$(kv "$PLAN_METADATA" scenario)" == "$SCENARIO" \
     && "$(kv "$PLAN_METADATA" plan_sha256)" == "$PLAN_HASH" ]] \
     || die "plan metadata does not bind the scenario plan"
-[[ "$(kv "$RUN_METADATA" format_version)" == 1 \
-    && "$(kv "$RUN_METADATA" subject)" == "$SUBJECT" \
-    && "$(kv "$RUN_METADATA" subject_identity_sha256)" == "$SUBJECT_HASH" \
-    && "$(kv "$RUN_METADATA" scenario)" == "$SCENARIO" \
-    && "$(kv "$RUN_METADATA" scenario_plan_sha256)" == "$PLAN_HASH" \
-    && "$(kv "$RUN_METADATA" workload_sha256)" == "$WORKLOAD_HASH" \
-    && "$(kv "$RUN_METADATA" measured_duration_ms)" == "$DURATION_MS" \
-    && "$(kv "$RUN_METADATA" process_pid)" == "$SUBJECT_PID" \
-    && "$(kv "$RUN_METADATA" process_start_identity)" == "$START_IDENTITY" \
-    && "$(kv "$RUN_METADATA" status)" == complete ]] \
-    || die "run metadata does not bind the frozen process and inputs"
+[[ "$(kv "$RUN_INTENT" format_version)" == 1 \
+    && "$(kv "$RUN_INTENT" subject)" == "$SUBJECT" \
+    && "$(kv "$RUN_INTENT" subject_identity_sha256)" == "$SUBJECT_HASH" \
+    && "$(kv "$RUN_INTENT" scenario)" == "$SCENARIO" \
+    && "$(kv "$RUN_INTENT" scenario_plan_sha256)" == "$PLAN_HASH" \
+    && "$(kv "$RUN_INTENT" workload_sha256)" == "$WORKLOAD_HASH" \
+    && "$(kv "$RUN_INTENT" measured_duration_ms)" == "$DURATION_MS" \
+    && "$(kv "$RUN_INTENT" process_pid)" == "$SUBJECT_PID" \
+    && "$(kv "$RUN_INTENT" process_start_identity)" == "$START_IDENTITY" \
+    && "$(kv "$RUN_INTENT" campaign_id)" == "$CAMPAIGN_ID" \
+    && "$(kv "$RUN_INTENT" session_id)" == "$SESSION_ID" \
+    && "$(kv "$RUN_INTENT" nonce)" == "$NONCE" \
+    && "$(kv "$RUN_INTENT" status)" == prepared ]] \
+    || die "run intent does not bind the frozen process and inputs"
 
 trace_help="$($TRACE_RECORDER --help 2>&1)"
-for feature in --subject-identity --run-metadata --workload-metadata \
+for feature in --subject-identity --run-intent --run-metadata --workload-metadata \
     --workload-events --workload-ready-receipt --campaign-secret-file \
     --campaign-id --session-id --nonce \
-    --scenario --warmup-ms --duration-ms --output-directory; do
+    --scenario --warmup-ms --duration-ms --output-directory --provisional-receipt; do
     grep -Fq -- "$feature" <<< "$trace_help" \
         || die "trace recorder lacks required v3 interface: $feature"
 done
@@ -771,7 +868,8 @@ sleep_until "$trace_launch_deadline"
 TRACE_INVOKED_CONTINUOUS_NS="$(continuous_ns)"
 verify_controller_toolchain || abort_run controller-toolchain-changed-before-trace
 spawn_process_group "$TRACE_RECORDER" --subject-identity "$SUBJECT_IDENTITY" \
-    --run-metadata "$RUN_METADATA" --workload-metadata "$WORKLOAD_METADATA" \
+    --run-intent "$RUN_INTENT" --run-metadata "$RUN_METADATA" \
+    --workload-metadata "$WORKLOAD_METADATA" \
     --workload-events "$WORKLOAD_EVENTS" \
     --workload-ready-receipt "$WORKLOAD_READY_RECEIPT" \
     --supplemental-evidence "$PLAN_START_GATE" \
@@ -779,14 +877,17 @@ spawn_process_group "$TRACE_RECORDER" --subject-identity "$SUBJECT_IDENTITY" \
     --campaign-id "$CAMPAIGN_ID" --session-id "$SESSION_ID" --nonce "$NONCE" \
     --scenario "$SCENARIO" --warmup-ms "$WARMUP_MS" --duration-ms "$DURATION_MS" \
     --output-directory "$TRACE_OUTPUT_DIRECTORY" \
+    --provisional-receipt "$TRACE_PROVISIONAL_RECEIPT" \
     || abort_run trace-process-group-launch-failed
 TRACE_PID="$SPAWNED_PID"
 TRACE_PGID="$TRACE_PID"
 
 driver_done=false
 rss_done=false
-trace_done=false
-while [[ "$driver_done" == false || "$rss_done" == false || "$trace_done" == false ]]; do
+trace_provisional_ready=false
+provisional_deadline=$((TRACE_BOUNDARY_CONTINUOUS_NS + DURATION_MS * 1000000 + 15000000000))
+while [[ "$driver_done" == false || "$rss_done" == false \
+    || "$trace_provisional_ready" == false ]]; do
     if [[ "$driver_done" == false ]] && process_has_exited "$DRIVER_PID"; then
         set +e; wait "$DRIVER_PID"; DRIVER_STATUS=$?; set -e
         if process_group_exists "$DRIVER_PGID"; then
@@ -806,17 +907,29 @@ while [[ "$driver_done" == false || "$rss_done" == false || "$trace_done" == fal
         RSS_PID=""; RSS_PGID=""; rss_done=true
         [[ "$RSS_STATUS" == 0 ]] || abort_run rss-sampler-failed
     fi
-    if [[ "$trace_done" == false ]] && process_has_exited "$TRACE_PID"; then
+    if process_has_exited "$TRACE_PID"; then
         set +e; wait "$TRACE_PID"; TRACE_STATUS=$?; set -e
         if process_group_exists "$TRACE_PGID"; then
             terminate_process_group "$TRACE_PGID" ""
             TRACE_STATUS=70
         fi
-        TRACE_PID=""; TRACE_PGID=""; trace_done=true
-        [[ "$TRACE_STATUS" == 0 ]] || abort_run trace-recorder-failed
+        TRACE_PID=""; TRACE_PGID=""
+        abort_run trace-recorder-exited-before-final-run-metadata
     fi
-    [[ "$driver_done" == false || "$rss_done" == false || "$trace_done" == false ]] \
-        && sleep 0.02
+    if [[ "$trace_provisional_ready" == false && -f "$TRACE_PROVISIONAL_RECEIPT" ]]; then
+        require_immutable_file "$TRACE_PROVISIONAL_RECEIPT" trace-provisional-receipt
+        [[ "$(kv "$TRACE_PROVISIONAL_RECEIPT" format_version)" == 1 \
+            && "$(kv "$TRACE_PROVISIONAL_RECEIPT" run_intent_sha256)" == "$(sha256 "$RUN_INTENT")" \
+            && "$(kv "$TRACE_PROVISIONAL_RECEIPT" subject_identity_sha256)" == "$SUBJECT_HASH" \
+            && "$(kv "$TRACE_PROVISIONAL_RECEIPT" capture_status)" == CAPTURED \
+            && "$(kv "$TRACE_PROVISIONAL_RECEIPT" status)" == complete ]] \
+            || abort_run trace-provisional-receipt-invalid
+        trace_provisional_ready=true
+    fi
+    (( $(continuous_ns) < provisional_deadline )) \
+        || abort_run trace-provisional-receipt-timeout
+    [[ "$driver_done" == false || "$rss_done" == false \
+        || "$trace_provisional_ready" == false ]] && sleep 0.02
 done
 
 wait_for_workload_completion
@@ -861,6 +974,104 @@ verify_window_proof postflight
 TAIL_VERIFIED_CONTINUOUS_NS="$(continuous_ns)"
 (( TAIL_VERIFIED_CONTINUOUS_NS >= tail_deadline )) \
     || abort_run post-producer-tail-not-preserved
+
+verify_driver_receipt || abort_run driver-receipt-postflight-failed
+verify_controller_toolchain || abort_run controller-toolchain-changed-before-tail
+quit_token="$(python3 -c 'import secrets; print(secrets.token_hex(32))')"
+"$TAIL_RECEIPT_TOOL" create --campaign-secret-file "$CAMPAIGN_SECRET_FILE" \
+    --campaign-id "$CAMPAIGN_ID" --session-id "$SESSION_ID" --nonce "$NONCE" \
+    --quit-token "$quit_token" --run-intent "$RUN_INTENT" \
+    --subject-identity "$SUBJECT_IDENTITY" --driver-receipt "$DRIVER_RECEIPT" \
+    --driver-events "$DRIVER_OUTPUT" --workload-metadata "$WORKLOAD_METADATA" \
+    --workload-events "$WORKLOAD_EVENTS" --rss-samples "$RSS_OUTPUT" \
+    --workload-ready-receipt "$WORKLOAD_READY_RECEIPT" \
+    --trace-provisional-receipt "$TRACE_PROVISIONAL_RECEIPT" \
+    --tail-completed-continuous-ns "$TAIL_VERIFIED_CONTINUOUS_NS" \
+    --output "$PERFORMANCE_TAIL_RECEIPT" \
+    || abort_run performance-tail-receipt-publication-failed
+require_immutable_file "$PERFORMANCE_TAIL_RECEIPT" performance-tail-receipt
+
+python3 - "$PERFORMANCE_QUIT_CONTROL" "$quit_token" <<'PY' \
+    || abort_run performance-normal-quit-request-failed
+import os, stat, sys
+path, token = sys.argv[1:]
+before = os.lstat(path)
+if not stat.S_ISFIFO(before.st_mode) or stat.S_ISLNK(before.st_mode) \
+        or before.st_uid != os.geteuid() or before.st_mode & 0o077:
+    raise SystemExit(1)
+fd = os.open(path, os.O_WRONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0))
+try:
+    opened = os.fstat(fd)
+    payload = f"tail-complete\t{token}\n".encode("ascii")
+    if before.st_dev != opened.st_dev or before.st_ino != opened.st_ino \
+            or not stat.S_ISFIFO(opened.st_mode) or os.write(fd, payload) != len(payload):
+        raise SystemExit(1)
+finally:
+    os.close(fd)
+PY
+
+closure_deadline=$(( $(continuous_ns) + 60000000000 ))
+while [[ ! -f "$PERFORMANCE_QUIT_RECEIPT" || ! -f "$SUBJECT_EXIT_RECEIPT" \
+    || ( "$SUBJECT" == spaceterm \
+        && ( ! -f "$NATIVE_OBSERVATION" || ! -f "$NATIVE_RUNTIME_METADATA" \
+            || ! -f "$NATIVE_RUNTIME_SAMPLES" || ! -f "$NATIVE_RUNTIME_EVENTS" \
+            || ! -f "$NATIVE_FAILURE_ACTIONS" ) ) ]]; do
+    if process_has_exited "$TRACE_PID"; then
+        set +e; wait "$TRACE_PID"; TRACE_STATUS=$?; set -e
+        TRACE_PID=""; TRACE_PGID=""
+        abort_run trace-recorder-exited-before-causal-run-closure
+    fi
+    (( $(continuous_ns) < closure_deadline )) || abort_run performance-normal-quit-timeout
+    sleep 0.02
+done
+
+exit_verify_arguments=(
+    --campaign-secret-file "$CAMPAIGN_SECRET_FILE" --run-intent "$RUN_INTENT"
+    --subject-identity "$SUBJECT_IDENTITY" --tail-receipt "$PERFORMANCE_TAIL_RECEIPT"
+    --quit-receipt "$PERFORMANCE_QUIT_RECEIPT"
+    --subject-exit-receipt "$SUBJECT_EXIT_RECEIPT"
+)
+finalizer_arguments=(
+    --run-intent "$RUN_INTENT" --subject-identity "$SUBJECT_IDENTITY"
+    --campaign-secret-file "$CAMPAIGN_SECRET_FILE"
+    --trace-provisional-receipt "$TRACE_PROVISIONAL_RECEIPT"
+    --performance-tail-receipt "$PERFORMANCE_TAIL_RECEIPT"
+    --performance-quit-receipt "$PERFORMANCE_QUIT_RECEIPT"
+    --subject-exit-receipt "$SUBJECT_EXIT_RECEIPT"
+    --driver-receipt "$DRIVER_RECEIPT" --driver-events "$DRIVER_OUTPUT"
+    --workload-metadata "$WORKLOAD_METADATA" --workload-events "$WORKLOAD_EVENTS"
+    --workload-ready-receipt "$WORKLOAD_READY_RECEIPT"
+    --rss-samples "$RSS_OUTPUT"
+)
+if [[ "$SUBJECT" == spaceterm ]]; then
+    exit_verify_arguments+=(--native-observation "$NATIVE_OBSERVATION")
+    finalizer_arguments+=(
+        --native-provisional-observation "$NATIVE_PROVISIONAL_OBSERVATION"
+        --native-observation "$NATIVE_OBSERVATION"
+        --native-runtime-metadata "$NATIVE_RUNTIME_METADATA"
+        --native-runtime-samples "$NATIVE_RUNTIME_SAMPLES"
+        --native-runtime-events "$NATIVE_RUNTIME_EVENTS"
+        --native-failure-actions "$NATIVE_FAILURE_ACTIONS"
+    )
+fi
+"$SUBJECT_EXIT_VERIFIER" "${exit_verify_arguments[@]}" >/dev/null \
+    || abort_run performance-subject-exit-receipt-invalid
+"$RUN_FINALIZER" "${finalizer_arguments[@]}" --output "$RUN_METADATA" >/dev/null \
+    || abort_run final-run-metadata-publication-failed
+require_immutable_file "$RUN_METADATA" run-metadata
+
+trace_final_deadline=$(( $(continuous_ns) + 10000000000 ))
+while ! process_has_exited "$TRACE_PID"; do
+    (( $(continuous_ns) < trace_final_deadline )) || abort_run trace-finalization-timeout
+    sleep 0.02
+done
+set +e; wait "$TRACE_PID"; TRACE_STATUS=$?; set -e
+if process_group_exists "$TRACE_PGID"; then
+    terminate_process_group "$TRACE_PGID" ""
+    TRACE_STATUS=70
+fi
+TRACE_PID=""; TRACE_PGID=""
+[[ "$TRACE_STATUS" == 0 ]] || abort_run trace-recorder-failed
 
 [[ -f "$DRIVER_OUTPUT" && ! -L "$DRIVER_OUTPUT" \
     && -f "$DRIVER_INTENT" && ! -L "$DRIVER_INTENT" \

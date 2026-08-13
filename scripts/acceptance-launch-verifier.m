@@ -1,5 +1,6 @@
 #import <AppKit/AppKit.h>
 #import <CommonCrypto/CommonDigest.h>
+#import <CommonCrypto/CommonHMAC.h>
 #import <Foundation/Foundation.h>
 #import <Security/Security.h>
 
@@ -9,6 +10,7 @@
 #include <libproc.h>
 #include <limits.h>
 #include <mach/message.h>
+#include <mach/mach_time.h>
 #include <signal.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -76,6 +78,12 @@ typedef struct {
     __strong NSString *home;
     __strong NSString *output;
     __strong NSString *failureControl;
+    __strong NSString *quitControl;
+    __strong NSString *quitReceipt;
+    __strong NSString *tailReceipt;
+    __strong NSString *campaignSecret;
+    __strong NSString *runIntent;
+    __strong NSString *subjectExitReceipt;
     bool replay;
 } Options;
 
@@ -94,6 +102,43 @@ typedef struct {
     bool hasPendingSampleInterval;
     bool observedFailure;
 } RuntimeCapture;
+
+typedef struct {
+    bool requested;
+    uint64_t requestContinuousNS;
+    __strong NSString *token;
+    __strong NSString *campaignID;
+    __strong NSString *sessionID;
+    __strong NSString *campaignNonce;
+    __strong NSString *runIntentSHA256;
+    __strong NSString *subject;
+} QuitCapture;
+
+static bool validate_tail_receipt(
+    const Options *options,
+    NSString *clientToken,
+    pid_t pid,
+    uint64_t startSeconds,
+    uint64_t startMicroseconds,
+    NSString **campaignID,
+    NSString **sessionID,
+    NSString **campaignNonce,
+    NSString **runIntentSHA256,
+    NSString **subject);
+static bool strict_normal_terminate(NSRunningApplication *application);
+static uint64_t continuous_nanoseconds(void);
+static bool mapped_executable_matches(
+    audit_token_t *token,
+    NSString *expected_path,
+    const struct stat *expected_stat,
+    const struct statfs *expected_fs);
+static bool live_signature_matches(
+    audit_token_t *token,
+    const Options *options,
+    NSString *expected_path,
+    NSString **live_cdhash,
+    NSString **live_identifier,
+    NSString **live_team);
 
 typedef struct {
     __strong NSMutableData *records;
@@ -160,8 +205,8 @@ static NSString *canonical_path(NSString *path) {
 
 static bool parse_options(int argc, const char *argv[], Options *options) {
     NSMutableDictionary<NSString *, NSString *> *values = [NSMutableDictionary dictionary];
-    if (argc != 23) {
-        return report(@"expected eleven named option/value pairs");
+    if (argc != 23 && argc != 35) {
+        return report(@"expected eleven or seventeen named option/value pairs");
     }
     for (int index = 1; index < argc; index += 2) {
         NSString *key = [NSString stringWithUTF8String:argv[index]];
@@ -176,12 +221,22 @@ static bool parse_options(int argc, const char *argv[], Options *options) {
         @"--identifier", @"--team-identifier", @"--home", @"--output", @"--mode",
         @"--failure-control"
     ];
+    NSArray<NSString *> *quitKeys = @[
+        @"--quit-control", @"--quit-receipt", @"--tail-receipt",
+        @"--campaign-secret-file", @"--run-intent", @"--subject-exit-receipt"
+    ];
     for (NSString *key in keys) {
         if (values[key] == nil) {
             return report([NSString stringWithFormat:@"missing option %@", key]);
         }
     }
-    if (values.count != keys.count) {
+    bool hasQuitControl = values[@"--quit-control"] != nil;
+    for (NSString *key in quitKeys) {
+        if ((values[key] != nil) != hasQuitControl) {
+            return report(@"performance quit options must be supplied together");
+        }
+    }
+    if (values.count != keys.count + (hasQuitControl ? quitKeys.count : 0)) {
         return report(@"unknown command-line option");
     }
     NSString *mode = values[@"--mode"];
@@ -200,6 +255,19 @@ static bool parse_options(int argc, const char *argv[], Options *options) {
     if ([mode isEqualToString:@"replay"] && ![failureControl isEqualToString:@"none"]) {
         return report(@"failure control is unavailable during replay");
     }
+    if (hasQuitControl && ([mode isEqualToString:@"replay"] ||
+            ![failureControl isEqualToString:@"none"])) {
+        return report(@"performance quit is campaign-only and failure control must be none");
+    }
+    if (hasQuitControl &&
+        (![values[@"--quit-control"] isAbsolutePath] ||
+         ![values[@"--quit-receipt"] isAbsolutePath] ||
+         ![values[@"--tail-receipt"] isAbsolutePath] ||
+         ![values[@"--campaign-secret-file"] isAbsolutePath] ||
+         ![values[@"--run-intent"] isAbsolutePath] ||
+         ![values[@"--subject-exit-receipt"] isAbsolutePath])) {
+        return report(@"performance quit paths must be absolute");
+    }
     NSCharacterSet *not_hex =
         [[NSCharacterSet characterSetWithCharactersInString:@"0123456789abcdefABCDEF"] invertedSet];
     if (values[@"--cdhash"].length == 0 ||
@@ -217,6 +285,12 @@ static bool parse_options(int argc, const char *argv[], Options *options) {
     options->home = values[@"--home"];
     options->output = values[@"--output"];
     options->failureControl = failureControl;
+    options->quitControl = hasQuitControl ? values[@"--quit-control"] : @"none";
+    options->quitReceipt = hasQuitControl ? values[@"--quit-receipt"] : @"none";
+    options->tailReceipt = hasQuitControl ? values[@"--tail-receipt"] : @"none";
+    options->campaignSecret = hasQuitControl ? values[@"--campaign-secret-file"] : @"none";
+    options->runIntent = hasQuitControl ? values[@"--run-intent"] : @"none";
+    options->subjectExitReceipt = hasQuitControl ? values[@"--subject-exit-receipt"] : @"none";
     options->replay = [mode isEqualToString:@"replay"];
     return true;
 }
@@ -1119,12 +1193,86 @@ static bool parse_failure_result(NSData *data, FailureCapture *capture) {
     return parse_failure_result_with_status(data, capture, -1);
 }
 
+static int forward_performance_quit(
+    int controlFD,
+    int statusFD,
+    const Options *options,
+    QuitCapture *quit,
+    NSRunningApplication *application,
+    audit_token_t *token,
+    NSString *expectedPath,
+    const struct stat *expectedStat,
+    const struct statfs *expectedFS,
+    pid_t peerPID,
+    int pidversion,
+    uint64_t startSeconds,
+    uint64_t startMicroseconds
+) {
+    if (controlFD < 0) return 0;
+    uint8_t bytes[256] = {0};
+    ssize_t count = read(controlFD, bytes, sizeof(bytes));
+    if (count < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) return 0;
+    if (count <= 0 || count >= (ssize_t)sizeof(bytes) || bytes[count - 1] != '\n' ||
+        memchr(bytes, '\n', (size_t)count - 1) != NULL || quit->requested) return -1;
+    NSString *command = [[NSString alloc]
+        initWithBytes:bytes length:(NSUInteger)count - 1 encoding:NSUTF8StringEncoding];
+    NSArray<NSString *> *parts = [command componentsSeparatedByString:@"\t"];
+    NSString *clientToken = parts.count == 2 ? parts[1] : nil;
+    struct proc_bsdinfo process = {0};
+    NSString *liveCDHash = nil;
+    NSString *liveIdentifier = nil;
+    NSString *liveTeam = nil;
+    NSString *campaignID = nil;
+    NSString *sessionID = nil;
+    NSString *campaignNonce = nil;
+    NSString *runIntentSHA256 = nil;
+    NSString *subject = nil;
+    if (parts.count != 2 || ![parts[0] isEqualToString:@"tail-complete"] ||
+        !is_lower_hex(clientToken, 64) || application.processIdentifier != peerPID ||
+        application.terminated || audit_token_to_pid(*token) != peerPID ||
+        audit_token_to_pidversion(*token) != pidversion ||
+        proc_pidinfo(peerPID, PROC_PIDTBSDINFO, 0, &process, sizeof(process)) != sizeof(process) ||
+        process.pbi_start_tvsec != startSeconds ||
+        process.pbi_start_tvusec != startMicroseconds ||
+        !mapped_executable_matches(token, expectedPath, expectedStat, expectedFS) ||
+        !live_signature_matches(token, options, expectedPath,
+            &liveCDHash, &liveIdentifier, &liveTeam) ||
+        !validate_tail_receipt(options, clientToken, peerPID, startSeconds, startMicroseconds,
+            &campaignID, &sessionID, &campaignNonce, &runIntentSHA256, &subject)) {
+        return -1;
+    }
+    uint64_t requested = continuous_nanoseconds();
+    if (!strict_normal_terminate(application) ||
+        !write_failure_status(statusFD, @"accepted", clientToken)) return -1;
+    quit->requested = true;
+    quit->requestContinuousNS = requested;
+    quit->token = clientToken;
+    quit->campaignID = campaignID;
+    quit->sessionID = sessionID;
+    quit->campaignNonce = campaignNonce;
+    quit->runIntentSHA256 = runIntentSHA256;
+    quit->subject = subject;
+    return 1;
+}
+
 static bool read_runtime_stream(
     int fd,
     RuntimeCapture *capture,
     FailureCapture *failure,
     int failureControlFD,
     int failureStatusFD,
+    int quitControlFD,
+    int quitStatusFD,
+    QuitCapture *quit,
+    NSRunningApplication *application,
+    audit_token_t *token,
+    NSString *expectedPath,
+    const struct stat *expectedStat,
+    const struct statfs *expectedFS,
+    pid_t peerPID,
+    int pidversion,
+    uint64_t startSeconds,
+    uint64_t startMicroseconds,
     NSString *nonce,
     const Options *options,
     NSString **status,
@@ -1138,6 +1286,11 @@ static bool read_runtime_stream(
             return false;
         }
         if (forward_failure_control(failureControlFD, fd, nonce, options, failure) < 0) {
+            return false;
+        }
+        if (forward_performance_quit(quitControlFD, quitStatusFD, options, quit,
+                application, token, expectedPath, expectedStat, expectedFS, peerPID,
+                pidversion, startSeconds, startMicroseconds) < 0) {
             return false;
         }
         NSData *frame = read_frame(fd);
@@ -1255,7 +1408,8 @@ static bool live_signature_matches(
     NSDictionary *information = CFBridgingRelease(information_ref);
     NSData *unique = information[(__bridge NSString *)kSecCodeInfoUnique];
     NSString *identifier = information[(__bridge NSString *)kSecCodeInfoIdentifier];
-    NSString *team = information[(__bridge NSString *)kSecCodeInfoTeamIdentifier] ?: @"";
+    NSString *teamValue = information[(__bridge NSString *)kSecCodeInfoTeamIdentifier];
+    NSString *team = teamValue != nil ? teamValue : @"";
     NSURL *main_executable = information[(__bridge NSString *)kSecCodeInfoMainExecutable];
     NSString *main_path = canonical_path(main_executable.path);
     NSString *cdhash = [unique isKindOfClass:NSData.class] ? hex_data(unique) : nil;
@@ -1489,7 +1643,7 @@ static bool publish_exclusive(NSString *output, NSData *data, bool *published) {
     if (fd < 0) {
         return report(@"could not exclusively create temporary observation");
     }
-    bool success = write_all(fd, data.bytes, data.length) && fsync(fd) == 0;
+    bool success = write_all(fd, data.bytes, data.length) && fchmod(fd, 0400) == 0 && fsync(fd) == 0;
     int close_result = close(fd);
     fd = -1;
     success = success && close_result == 0;
@@ -1520,6 +1674,259 @@ static bool output_is_absent(NSString *path) {
     return errno == ENOENT;
 }
 
+static uint64_t continuous_nanoseconds(void) {
+    static mach_timebase_info_data_t timebase = {0};
+    if (timebase.denom == 0) {
+        mach_timebase_info(&timebase);
+    }
+    __uint128_t scaled = (__uint128_t)mach_continuous_time() * timebase.numer;
+    return timebase.denom == 0 ? 0 : (uint64_t)(scaled / timebase.denom);
+}
+
+static NSData *read_stable_private_file(NSString *path, NSUInteger maximumBytes) {
+    struct stat before = {0};
+    if (lstat(path.fileSystemRepresentation, &before) != 0 || !S_ISREG(before.st_mode) ||
+        S_ISLNK(before.st_mode) || before.st_uid != geteuid() ||
+        (before.st_mode & 0222) != 0 ||
+        before.st_nlink != 1 || before.st_size <= 0 || (uint64_t)before.st_size > maximumBytes) {
+        return nil;
+    }
+    int fd = open(path.fileSystemRepresentation, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (fd < 0) return nil;
+    struct stat opened = {0};
+    NSMutableData *data = [NSMutableData dataWithLength:(NSUInteger)before.st_size];
+    size_t offset = 0;
+    while (offset < data.length) {
+        ssize_t count = read(fd, (uint8_t *)data.mutableBytes + offset, data.length - offset);
+        if (count > 0) offset += (size_t)count;
+        else if (count < 0 && errno == EINTR) continue;
+        else break;
+    }
+    struct stat after = {0};
+    bool valid = fstat(fd, &opened) == 0 && fstat(fd, &after) == 0 &&
+        before.st_dev == opened.st_dev && before.st_ino == opened.st_ino &&
+        before.st_dev == after.st_dev && before.st_ino == after.st_ino &&
+        before.st_mode == after.st_mode && before.st_size == after.st_size &&
+        before.st_mtimespec.tv_sec == after.st_mtimespec.tv_sec &&
+        before.st_mtimespec.tv_nsec == after.st_mtimespec.tv_nsec && offset == data.length;
+    close(fd);
+    struct stat current = {0};
+    valid = valid && lstat(path.fileSystemRepresentation, &current) == 0 &&
+        before.st_dev == current.st_dev && before.st_ino == current.st_ino &&
+        before.st_mode == current.st_mode && before.st_size == current.st_size &&
+        before.st_mtimespec.tv_sec == current.st_mtimespec.tv_sec &&
+        before.st_mtimespec.tv_nsec == current.st_mtimespec.tv_nsec;
+    return valid ? data : nil;
+}
+
+static NSData *read_stable_secret_file(NSString *path) {
+    struct stat before = {0};
+    if (lstat(path.fileSystemRepresentation, &before) != 0 || !S_ISREG(before.st_mode) ||
+        S_ISLNK(before.st_mode) || before.st_uid != geteuid() ||
+        (before.st_mode & 077) != 0 || before.st_nlink != 1 ||
+        before.st_size < 32 || before.st_size > 4096) {
+        return nil;
+    }
+    int fd = open(path.fileSystemRepresentation, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (fd < 0) return nil;
+    NSMutableData *data = [NSMutableData dataWithLength:(NSUInteger)before.st_size];
+    size_t offset = 0;
+    while (offset < data.length) {
+        ssize_t count = read(fd, (uint8_t *)data.mutableBytes + offset, data.length - offset);
+        if (count > 0) offset += (size_t)count;
+        else if (count < 0 && errno == EINTR) continue;
+        else break;
+    }
+    struct stat after = {0};
+    bool valid = fstat(fd, &after) == 0 && before.st_dev == after.st_dev &&
+        before.st_ino == after.st_ino && before.st_mode == after.st_mode &&
+        before.st_size == after.st_size && offset == data.length;
+    close(fd);
+    return valid ? data : nil;
+}
+
+static bool validate_tail_receipt(
+    const Options *options,
+    NSString *clientToken,
+    pid_t pid,
+    uint64_t startSeconds,
+    uint64_t startMicroseconds,
+    NSString **campaignID,
+    NSString **sessionID,
+    NSString **campaignNonce,
+    NSString **runIntentSHA256,
+    NSString **subject
+) {
+    NSData *intentData = read_stable_private_file(options->runIntent, 64 * 1024);
+    NSData *tailData = read_stable_private_file(options->tailReceipt, 64 * 1024);
+    NSData *secret = read_stable_secret_file(options->campaignSecret);
+    NSArray<NSString *> *intentKeys = @[
+        @"format_version", @"subject", @"subject_identity_sha256", @"scenario",
+        @"scenario_plan_sha256", @"workload_sha256", @"command_sha256",
+        @"environment_sha256", @"font_sha256", @"initial_grid_sha256",
+        @"measured_duration_ms", @"process_pid", @"process_start_identity",
+        @"campaign_id", @"session_id", @"nonce",
+        @"native_provisional_observation_sha256", @"status"
+    ];
+    NSArray<NSString *> *tailKeys = @[
+        @"format_version", @"campaign_id", @"session_id", @"nonce", @"quit_token",
+        @"run_intent_sha256", @"subject_identity_sha256", @"subject_process_pid",
+        @"subject_process_start_identity", @"driver_receipt_sha256",
+        @"driver_events_sha256", @"workload_metadata_sha256", @"workload_events_sha256",
+        @"rss_samples_sha256", @"trace_provisional_receipt_sha256",
+        @"tail_completed_continuous_ns", @"terminal_status", @"auth_algorithm",
+        @"tail_hmac_sha256"
+    ];
+    NSDictionary *intent = intentData == nil ? nil : parse_records(intentData, intentKeys);
+    NSDictionary *tail = tailData == nil ? nil : parse_records(tailData, tailKeys);
+    NSString *intentHash = intentData == nil ? nil : lower_sha256(intentData).lowercaseString;
+    NSString *start = [NSString stringWithFormat:@"%llu:%llu",
+        (unsigned long long)startSeconds, (unsigned long long)startMicroseconds];
+    uint64_t tailCompleted = 0;
+    if (intent == nil || tail == nil || secret == nil ||
+        ![intent[@"format_version"] isEqualToString:@"1"] ||
+        ![intent[@"subject"] isEqualToString:@"spaceterm"] ||
+        ![intent[@"status"] isEqualToString:@"prepared"] ||
+        ![intent[@"process_pid"] isEqualToString:[NSString stringWithFormat:@"%d", pid]] ||
+        ![intent[@"process_start_identity"] isEqualToString:start] ||
+        ![tail[@"format_version"] isEqualToString:@"1"] ||
+        ![tail[@"campaign_id"] isEqualToString:intent[@"campaign_id"]] ||
+        ![tail[@"session_id"] isEqualToString:intent[@"session_id"]] ||
+        ![tail[@"nonce"] isEqualToString:intent[@"nonce"]] ||
+        ![tail[@"quit_token"] isEqualToString:clientToken] ||
+        ![tail[@"run_intent_sha256"] isEqualToString:intentHash] ||
+        ![tail[@"subject_identity_sha256"] isEqualToString:intent[@"subject_identity_sha256"]] ||
+        ![tail[@"subject_process_pid"] isEqualToString:intent[@"process_pid"]] ||
+        ![tail[@"subject_process_start_identity"] isEqualToString:start] ||
+        ![tail[@"terminal_status"] isEqualToString:@"tail-complete"] ||
+        ![tail[@"auth_algorithm"] isEqualToString:@"hmac-sha256"] ||
+        !is_lower_hex(tail[@"tail_hmac_sha256"], 64) ||
+        !canonical_uint64(tail[@"tail_completed_continuous_ns"], &tailCompleted) ||
+        tailCompleted == 0 || tailCompleted > continuous_nanoseconds()) {
+        return false;
+    }
+    for (NSString *key in @[@"driver_receipt_sha256", @"driver_events_sha256",
+            @"workload_metadata_sha256", @"workload_events_sha256", @"rss_samples_sha256",
+            @"trace_provisional_receipt_sha256"]) {
+        if (!is_lower_hex(tail[key], 64)) return false;
+    }
+    NSString *text = [[NSString alloc] initWithData:tailData encoding:NSUTF8StringEncoding];
+    NSRange signatureRange = [text rangeOfString:@"tail_hmac_sha256\t" options:NSBackwardsSearch];
+    if (signatureRange.location == NSNotFound) return false;
+    NSData *unsignedData = [[text substringToIndex:signatureRange.location]
+        dataUsingEncoding:NSUTF8StringEncoding];
+    NSMutableData *authenticated = [NSMutableData data];
+    const char magic[] = "spaceterm.performance.tail-complete/v1";
+    [authenticated appendBytes:magic length:sizeof(magic)];
+    uint64_t length = CFSwapInt64HostToBig((uint64_t)unsignedData.length);
+    [authenticated appendBytes:&length length:sizeof(length)];
+    [authenticated appendData:unsignedData];
+    uint8_t digest[CC_SHA256_DIGEST_LENGTH];
+    CCHmac(kCCHmacAlgSHA256, secret.bytes, secret.length,
+        authenticated.bytes, authenticated.length, digest);
+    NSData *digestData = [NSData dataWithBytes:digest length:sizeof(digest)];
+    NSString *expected = hex_data(digestData).lowercaseString;
+    if (![expected isEqualToString:tail[@"tail_hmac_sha256"]]) return false;
+    *campaignID = intent[@"campaign_id"];
+    *sessionID = intent[@"session_id"];
+    *campaignNonce = intent[@"nonce"];
+    *runIntentSHA256 = intentHash;
+    *subject = intent[@"subject"];
+    return true;
+}
+
+static bool strict_normal_terminate(NSRunningApplication *application) {
+    if (application == nil || application.terminated || ![application terminate]) return false;
+    return true;
+}
+
+static NSData *performance_quit_receipt(
+    const QuitCapture *quit,
+    pid_t pid,
+    uint64_t startSeconds,
+    uint64_t startMicroseconds,
+    uint64_t exitContinuousNS
+) {
+    if (!quit->requested || quit->token == nil || quit->campaignID == nil ||
+        quit->sessionID == nil || quit->campaignNonce == nil || quit->runIntentSHA256 == nil ||
+        quit->requestContinuousNS == 0 || exitContinuousNS < quit->requestContinuousNS) {
+        return nil;
+    }
+    NSString *record = [NSString stringWithFormat:
+        @"format_version\t1\ncampaign_id\t%@\nsession_id\t%@\nnonce\t%@\n"
+         "run_intent_sha256\t%@\nsubject_process_pid\t%d\n"
+         "subject_process_start_identity\t%llu:%llu\nquit_token\t%@\n"
+         "request_continuous_ns\t%llu\nexit_continuous_ns\t%llu\n"
+         "termination_method\tappkit-terminate\nruntime_closure_status\tconfirmed\n"
+         "status\tcompleted\n",
+        quit->campaignID, quit->sessionID, quit->campaignNonce, quit->runIntentSHA256, pid,
+        (unsigned long long)startSeconds, (unsigned long long)startMicroseconds, quit->token,
+        (unsigned long long)quit->requestContinuousNS, (unsigned long long)exitContinuousNS];
+    return [record dataUsingEncoding:NSUTF8StringEncoding];
+}
+
+static NSData *performance_subject_exit_receipt(
+    const Options *options,
+    const QuitCapture *quit,
+    pid_t pid,
+    uint64_t startSeconds,
+    uint64_t startMicroseconds,
+    uint64_t exitContinuousNS,
+    NSData *quitReceipt,
+    NSData *nativeObservation
+) {
+    NSData *secret = read_stable_secret_file(options->campaignSecret);
+    NSData *tail = read_stable_private_file(options->tailReceipt, 64 * 1024);
+    NSData *intentData = read_stable_private_file(options->runIntent, 64 * 1024);
+    NSArray<NSString *> *intentKeys = @[
+        @"format_version", @"subject", @"subject_identity_sha256", @"scenario",
+        @"scenario_plan_sha256", @"workload_sha256", @"command_sha256",
+        @"environment_sha256", @"font_sha256", @"initial_grid_sha256",
+        @"measured_duration_ms", @"process_pid", @"process_start_identity",
+        @"campaign_id", @"session_id", @"nonce",
+        @"native_provisional_observation_sha256", @"status"
+    ];
+    NSDictionary *intent = intentData == nil ? nil : parse_records(intentData, intentKeys);
+    if (secret == nil || tail == nil || quitReceipt == nil || quit->subject == nil ||
+        intent == nil) return nil;
+    NSString *nativeHash = [quit->subject isEqualToString:@"spaceterm"]
+        ? lower_sha256(nativeObservation).lowercaseString : @"not-applicable";
+    NSString *prefix = [NSString stringWithFormat:
+        @"schema\tspaceterm.acceptance.performance-subject-exit/v1\n"
+         "subject\t%@\ncampaign_id\t%@\nsession_id\t%@\nnonce\t%@\n"
+         "run_intent_sha256\t%@\nsubject_identity_sha256\t%@\n"
+         "process_pid\t%d\nprocess_start_identity\t%llu:%llu\n"
+         "tail_receipt_sha256\t%@\nquit_receipt_sha256\t%@\n"
+         "exit_requested_continuous_ns\t%llu\nprocess_exited_continuous_ns\t%llu\n"
+         "exit_status\tnormal\nnative_observation_sha256\t%@\n"
+         "auth_algorithm\thmac-sha256\n",
+        quit->subject, quit->campaignID, quit->sessionID, quit->campaignNonce,
+        quit->runIntentSHA256, intent[@"subject_identity_sha256"],
+        pid, (unsigned long long)startSeconds, (unsigned long long)startMicroseconds,
+        lower_sha256(tail).lowercaseString, lower_sha256(quitReceipt).lowercaseString,
+        (unsigned long long)quit->requestContinuousNS, (unsigned long long)exitContinuousNS,
+        nativeHash];
+    NSData *prefixData = [prefix dataUsingEncoding:NSUTF8StringEncoding];
+    NSData *statusData = [@"status\tcomplete\n" dataUsingEncoding:NSUTF8StringEncoding];
+    NSMutableData *unsignedData = [prefixData mutableCopy];
+    [unsignedData appendData:statusData];
+    NSMutableData *authenticated = [NSMutableData data];
+    const char magic[] = "spaceterm.acceptance.performance-subject-exit/v1";
+    [authenticated appendBytes:magic length:sizeof(magic)];
+    uint64_t length = CFSwapInt64HostToBig((uint64_t)unsignedData.length);
+    [authenticated appendBytes:&length length:sizeof(length)];
+    [authenticated appendData:unsignedData];
+    uint8_t digest[CC_SHA256_DIGEST_LENGTH];
+    CCHmac(kCCHmacAlgSHA256, secret.bytes, secret.length,
+        authenticated.bytes, authenticated.length, digest);
+    NSString *signature = hex_data([NSData dataWithBytes:digest length:sizeof(digest)]).lowercaseString;
+    NSMutableData *record = [prefixData mutableCopy];
+    [record appendData:[[NSString stringWithFormat:@"receipt_hmac_sha256\t%@\n", signature]
+        dataUsingEncoding:NSUTF8StringEncoding]];
+    [record appendData:statusData];
+    return record;
+}
+
 static void terminate_exact_application(NSRunningApplication *application) {
     if (application == nil || application.terminated) {
         return;
@@ -1545,6 +1952,8 @@ static int run_verifier(const Options *options) {
     int peer = -1;
     int failure_control_fd = -1;
     int failure_status_fd = -1;
+    int quit_control_fd = -1;
+    int quit_status_fd = -1;
     char socket_directory[] = "/tmp/spaceterm-acceptance.XXXXXX";
     NSString *socket_path = nil;
     NSRunningApplication *application = nil;
@@ -1573,6 +1982,7 @@ static int run_verifier(const Options *options) {
     NSString *provisional_observation = nil;
     RuntimeCapture runtime = {0};
     FailureCapture failure = {0};
+    QuitCapture quit = {0};
     NSString *runtime_status = nil;
     NSString *runtime_samples_path = nil;
     NSString *runtime_events_path = nil;
@@ -1594,6 +2004,7 @@ static int run_verifier(const Options *options) {
     NSString *provisional_observation_path = nil;
     NSString *ax_subject_path = nil;
     NSString *failure_status_path = nil;
+    NSString *quit_status_path = nil;
     audit_token_t final_token = INVALID_AUDIT_TOKEN_VALUE;
     socklen_t final_token_length = sizeof(final_token);
     bool samples_published = false;
@@ -1603,6 +2014,8 @@ static int run_verifier(const Options *options) {
     bool observation_published = false;
     bool provisional_observation_published = false;
     bool ax_subject_published = false;
+    bool quit_receipt_published = false;
+    bool subject_exit_receipt_published = false;
 
     expected_app = canonical_path(options->app);
     expected_path = canonical_path(options->executable);
@@ -1619,13 +2032,20 @@ static int run_verifier(const Options *options) {
     if (![options->failureControl isEqualToString:@"none"]) {
         failure_status_path = [options->failureControl stringByAppendingString:@".status"];
     }
+    if (![options->quitControl isEqualToString:@"none"]) {
+        quit_status_path = [options->quitControl stringByAppendingString:@".status"];
+    }
     provisional_observation_path =
         [output_parent stringByAppendingPathComponent:@"native-observation-live.tsv"];
     ax_subject_path = [output_parent stringByAppendingPathComponent:@"ax-subject.tsv"];
     if (!output_is_absent(options->output) || !output_is_absent(runtime_samples_path) ||
         !output_is_absent(runtime_events_path) || !output_is_absent(runtime_metadata_path) ||
         !output_is_absent(failure_actions_path) ||
-        !output_is_absent(provisional_observation_path) || !output_is_absent(ax_subject_path)) {
+        !output_is_absent(provisional_observation_path) || !output_is_absent(ax_subject_path) ||
+        (![options->quitControl isEqualToString:@"none"] &&
+            (!output_is_absent(options->quitReceipt) ||
+             !output_is_absent(options->subjectExitReceipt) ||
+             !output_is_absent(options->quitControl) || !output_is_absent(quit_status_path)))) {
         report(@"runtime observation outputs must not already exist");
         goto cleanup;
     }
@@ -1638,6 +2058,12 @@ static int run_verifier(const Options *options) {
         if (failure_status_fd < 0) {
             goto cleanup;
         }
+    }
+    quit_control_fd = create_failure_control(options->quitControl);
+    if (quit_control_fd == -2) goto cleanup;
+    if (quit_status_path != nil) {
+        quit_status_fd = create_failure_control(quit_status_path);
+        if (quit_status_fd < 0) goto cleanup;
     }
     executable_fd = open(expected_path.fileSystemRepresentation,
         O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
@@ -1807,7 +2233,9 @@ static int run_verifier(const Options *options) {
         options->replay ? kProofTimeoutSeconds : 12.0 * 60.0 * 60.0 + kProofTimeoutSeconds];
 
     if (!read_runtime_stream(peer, &runtime, &failure, failure_control_fd, failure_status_fd,
-            nonce, options, &runtime_status, runtime_deadline)) {
+            quit_control_fd, quit_status_fd, &quit, application, &token, expected_path,
+            &expected_stat, &expected_fs, peer_pid, pidversion, process_start_seconds,
+            process_start_microseconds, nonce, options, &runtime_status, runtime_deadline)) {
         report(interrupted ? @"runtime observation was interrupted" :
             @"production app returned an invalid runtime observation");
         goto cleanup;
@@ -1881,10 +2309,35 @@ static int run_verifier(const Options *options) {
     }
     close(peer);
     peer = -1;
-    terminate_exact_application(application);
-    if (!application.terminated) {
+    if ([options->quitControl isEqualToString:@"none"]) {
+        terminate_exact_application(application);
+    } else {
+        NSDate *terminationDeadline = [NSDate dateWithTimeIntervalSinceNow:kProofTimeoutSeconds];
+        while (!application.terminated && [terminationDeadline timeIntervalSinceNow] > 0) {
+            [NSThread sleepForTimeInterval:0.02];
+        }
+    }
+    if (!application.terminated ||
+        (![options->quitControl isEqualToString:@"none"] && !quit.requested)) {
         report(@"observed application could not finish safely");
         goto cleanup;
+    }
+    if (![options->quitControl isEqualToString:@"none"]) {
+        uint64_t exitContinuousNS = continuous_nanoseconds();
+        NSData *quitReceipt = performance_quit_receipt(
+            &quit, peer_pid, process_start_seconds, process_start_microseconds,
+            exitContinuousNS);
+        NSData *exitReceipt = performance_subject_exit_receipt(options, &quit, peer_pid,
+            process_start_seconds, process_start_microseconds, exitContinuousNS,
+            quitReceipt, observation_data);
+        if (quitReceipt == nil || exitReceipt == nil ||
+            !write_failure_status(quit_status_fd, @"completed", quit.token) ||
+            !publish_exclusive(options->quitReceipt, quitReceipt, &quit_receipt_published) ||
+            !publish_exclusive(options->subjectExitReceipt, exitReceipt,
+                &subject_exit_receipt_published)) {
+            report(@"performance quit receipt could not be published");
+            goto cleanup;
+        }
     }
     // The native observation is the commit marker. Publish it only after the app consumed the
     // acknowledgement, closed the authenticated stream, and terminated cleanly.
@@ -1895,7 +2348,13 @@ static int run_verifier(const Options *options) {
 
 cleanup:
     if (result != 0) {
-        terminate_exact_application(application);
+        if ([options->quitControl isEqualToString:@"none"]) {
+            terminate_exact_application(application);
+        }
+        if (quit_receipt_published) unlink(options->quitReceipt.fileSystemRepresentation);
+        if (subject_exit_receipt_published) {
+            unlink(options->subjectExitReceipt.fileSystemRepresentation);
+        }
         if (observation_published) unlink(options->output.fileSystemRepresentation);
         if (ax_subject_published) unlink(ax_subject_path.fileSystemRepresentation);
         if (provisional_observation_published) {
@@ -1909,12 +2368,18 @@ cleanup:
     if (peer >= 0) close(peer);
     if (failure_control_fd >= 0) close(failure_control_fd);
     if (failure_status_fd >= 0) close(failure_status_fd);
+    if (quit_control_fd >= 0) close(quit_control_fd);
+    if (quit_status_fd >= 0) close(quit_status_fd);
     if (listener >= 0) close(listener);
     if (executable_fd >= 0) close(executable_fd);
     if (socket_path != nil) unlink(socket_path.fileSystemRepresentation);
     if (![options->failureControl isEqualToString:@"none"]) {
         unlink(options->failureControl.fileSystemRepresentation);
-        if (failure_status_path != nil) unlink(failure_status_path.fileSystemRepresentation);
+    }
+    if (failure_status_path != nil) unlink(failure_status_path.fileSystemRepresentation);
+    if (quit_status_path != nil) unlink(quit_status_path.fileSystemRepresentation);
+    if (![options->quitControl isEqualToString:@"none"]) {
+        unlink(options->quitControl.fileSystemRepresentation);
     }
     rmdir(socket_directory);
     return result;

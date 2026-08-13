@@ -56,6 +56,12 @@ Collect options:
   --dmg PATH               Packaged SpaceTerm.dmg (default: dist/SpaceTerm.dmg).
   --run-id ID              Stable run label (default: run directory basename).
   --failure-control PATH   New private FIFO path for mounted-DMG failure actions.
+  --performance-quit-control PATH  Performance-only private normal-quit FIFO.
+  --performance-quit-receipt PATH  New immutable normal-quit receipt path.
+  --performance-tail-receipt PATH  Authenticated tail receipt supplied by runner.
+  --performance-run-intent PATH    Immutable prepared performance run intent.
+  --performance-secret-file PATH   Owner-private performance campaign secret.
+  --subject-exit-receipt PATH      New authenticated normal-exit receipt path.
   --executable ID=PATH     Override discovery for one matrix executable; repeatable.
   -h, --help               Show this help.
 
@@ -852,7 +858,14 @@ collect_native_launch_observation() {
     local team_identifier="$8"
     local mode="$9"
     local failure_control="${10:-none}"
+    local quit_control="${11:-none}"
+    local quit_receipt="${12:-none}"
+    local tail_receipt="${13:-none}"
+    local campaign_secret="${14:-none}"
+    local run_intent="${15:-none}"
+    local subject_exit_receipt="${16:-none}"
     local helper="$launch_root/identity/acceptance-launch-verifier"
+    local -a quit_arguments=()
 
     [[ ! -e "$observation" && ! -L "$observation" ]] \
         || die "native observation output must not already exist: $observation"
@@ -863,6 +876,13 @@ collect_native_launch_observation() {
         -framework Security -framework CoreFoundation -lbsm \
         "$SCRIPT_DIR/acceptance-launch-verifier.m" -o "$helper"
     chmod 0700 "$helper"
+    if [[ "$quit_control" != none ]]; then
+        quit_arguments=(
+            --quit-control "$quit_control" --quit-receipt "$quit_receipt"
+            --tail-receipt "$tail_receipt" --campaign-secret-file "$campaign_secret"
+            --run-intent "$run_intent" --subject-exit-receipt "$subject_exit_receipt"
+        )
+    fi
     if [[ "$mode" == "campaign" ]]; then
         echo "SpaceTerm will remain open from the exact read-only DMG mount." >&2
         echo "Run the acceptance campaign in that window, then quit SpaceTerm to finish collection." >&2
@@ -880,6 +900,7 @@ collect_native_launch_observation() {
         --output "$observation" \
         --mode "$mode" \
         --failure-control "$failure_control" \
+        "${quit_arguments[@]}" \
         >"$launch_root/logs/native-launch.stdout" \
         2> >(tee "$launch_root/logs/native-launch.stderr" >&2) &
     OBSERVATION_HELPER_PID=$!
@@ -1526,6 +1547,12 @@ collect_run() {
     local dmg_path="$REPO_ROOT/dist/$APP_NAME.dmg"
     local run_id=""
     local failure_control="none"
+    local performance_quit_control="none"
+    local performance_quit_receipt="none"
+    local performance_tail_receipt="none"
+    local performance_run_intent="none"
+    local performance_secret_file="none"
+    local subject_exit_receipt="none"
     local -a overrides=()
     local override_count=0
     while (( $# > 0 )); do
@@ -1560,6 +1587,18 @@ collect_run() {
                 failure_control="$2"
                 shift
                 ;;
+            --performance-quit-control|--performance-quit-receipt|--performance-tail-receipt|--performance-run-intent|--performance-secret-file|--subject-exit-receipt)
+                (( $# >= 2 )) || die "$1 requires a path"
+                case "$1" in
+                    --performance-quit-control) performance_quit_control="$2" ;;
+                    --performance-quit-receipt) performance_quit_receipt="$2" ;;
+                    --performance-tail-receipt) performance_tail_receipt="$2" ;;
+                    --performance-run-intent) performance_run_intent="$2" ;;
+                    --performance-secret-file) performance_secret_file="$2" ;;
+                    --subject-exit-receipt) subject_exit_receipt="$2" ;;
+                esac
+                shift
+                ;;
             --executable)
                 (( $# >= 2 )) || die "--executable requires ID=PATH"
                 [[ "$2" == *=* ]] || die "--executable requires ID=PATH"
@@ -1587,6 +1626,22 @@ collect_run() {
             || die "--failure-control is only available for mounted-dmg collection"
         [[ "$failure_control" == /* ]] \
             || die "--failure-control must be an absolute path"
+    fi
+    performance_values="$performance_quit_control$performance_quit_receipt$performance_tail_receipt$performance_run_intent$performance_secret_file$subject_exit_receipt"
+    if [[ "$performance_values" != nonenonenonenonenonenone ]]; then
+        [[ "$origin" == mounted-dmg && "$failure_control" == none \
+            && "$performance_quit_control" != none \
+            && "$performance_quit_receipt" != none \
+            && "$performance_tail_receipt" != none \
+            && "$performance_run_intent" != none \
+            && "$performance_secret_file" != none \
+            && "$subject_exit_receipt" != none ]] \
+            || die "performance normal-quit options require mounted-dmg and must be supplied together"
+        for path in "$performance_quit_control" "$performance_quit_receipt" \
+            "$performance_tail_receipt" "$performance_run_intent" \
+            "$performance_secret_file" "$subject_exit_receipt"; do
+            [[ "$path" == /* ]] || die "performance normal-quit paths must be absolute"
+        done
     fi
     run_dir="$(absolute_new_path "$run_dir")"
     [[ ! -e "$run_dir" && ! -L "$run_dir" ]] \
@@ -1663,7 +1718,10 @@ collect_run() {
             "$(signature_value "$signature_details" Identifier)" \
             "$(signature_value "$signature_details" TeamIdentifier)" \
             campaign \
-            "$failure_control"
+            "$failure_control" \
+            "$performance_quit_control" "$performance_quit_receipt" \
+            "$performance_tail_receipt" "$performance_secret_file" \
+            "$performance_run_intent" "$subject_exit_receipt"
     fi
 
     local display_json="$TEMP_RUN_DIR/identity/displays.plist"

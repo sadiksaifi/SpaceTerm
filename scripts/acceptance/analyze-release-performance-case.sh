@@ -13,18 +13,25 @@ PLAN=""
 PLAN_METADATA=""
 PAIR_METADATA=""
 SUBJECT_IDENTITY=""
+RUN_INTENT=""
 RUN_METADATA=""
 WORKLOAD_METADATA=""
 WORKLOAD_EVENTS=""
 READY_RECEIPT=""
 DRIVER_EVENTS=""
+DRIVER_RECEIPT=""
 RSS_SAMPLES=""
 RUNTIME_SAMPLES=""
 RUNTIME_EVENTS=""
 RUNTIME_METADATA=""
 FAILURE_ACTIONS=""
 NATIVE_LAUNCH_OBSERVATION=""
+NATIVE_PROVISIONAL_OBSERVATION=""
 TRACE_METADATA=""
+TRACE_PROVISIONAL_RECEIPT=""
+PERFORMANCE_TAIL_RECEIPT=""
+PERFORMANCE_QUIT_RECEIPT=""
+SUBJECT_EXIT_RECEIPT=""
 PLAN_START_GATE=""
 MANUAL_ARTIFACTS=""
 MANUAL_SCREENSHOT=""
@@ -46,11 +53,14 @@ usage() {
     cat <<EOF
 Usage: $(basename -- "$0") --subject spaceterm|ghostty --scenario NAME \\
   --plan FILE --plan-metadata FILE --pair-metadata FILE \\
-  --subject-identity FILE --run-metadata FILE \\
+  --subject-identity FILE --run-intent FILE --run-metadata FILE \\
   --workload-metadata FILE --workload-events FILE --ready-receipt FILE \\
   --campaign-id ID --session-id ID --nonce 64_LOWER_HEX \\
   --campaign-secret-file FILE \\
-  --driver-events FILE --rss-samples FILE --trace-metadata FILE \\
+  --driver-events FILE --driver-receipt FILE --rss-samples FILE \\
+  --trace-metadata FILE --trace-provisional-receipt FILE \\
+  --performance-tail-receipt FILE --performance-quit-receipt FILE \\
+  --subject-exit-receipt FILE \\
   --plan-start-gate FILE \\
   --manual-artifacts FILE --manual-screenshot FILE --manual-video FILE \
   [SPACETERM RUNTIME FILES]
@@ -59,6 +69,7 @@ SpaceTerm runtime files:
   --runtime-samples FILE --runtime-events FILE --runtime-metadata FILE
   --failure-actions FILE
   --native-launch-observation FILE
+  --native-provisional-observation FILE
 
 Print a content-free PASS, FAIL, or NOT-RUN verdict for one native release-
 performance case. PASS requires the paired immutable plan and workload,
@@ -172,6 +183,17 @@ require_exact_kv_schema() {
     ' "$file" || not_run "invalid-$label-schema"
 }
 
+require_ordered_kv_schema() {
+    local file="$1"
+    local ordered="$2"
+    local label="$3"
+    awk -F '\t' -v ordered="$ordered" '
+        BEGIN { required_count = split(ordered, keys, " ") }
+        NF != 2 || NR > required_count || $1 != keys[NR] { exit 1 }
+        END { if (NR != required_count) exit 1 }
+    ' "$file" || not_run "invalid-$label-schema"
+}
+
 while (( $# > 0 )); do
     case "$1" in
         --subject) SUBJECT="${2:-}"; shift ;;
@@ -180,6 +202,7 @@ while (( $# > 0 )); do
         --plan-metadata) PLAN_METADATA="${2:-}"; shift ;;
         --pair-metadata) PAIR_METADATA="${2:-}"; shift ;;
         --subject-identity) SUBJECT_IDENTITY="${2:-}"; shift ;;
+        --run-intent) RUN_INTENT="${2:-}"; shift ;;
         --run-metadata) RUN_METADATA="${2:-}"; shift ;;
         --workload-metadata) WORKLOAD_METADATA="${2:-}"; shift ;;
         --workload-events) WORKLOAD_EVENTS="${2:-}"; shift ;;
@@ -189,13 +212,19 @@ while (( $# > 0 )); do
         --nonce) NONCE="${2:-}"; shift ;;
         --campaign-secret-file) CAMPAIGN_SECRET_FILE="${2:-}"; shift ;;
         --driver-events) DRIVER_EVENTS="${2:-}"; shift ;;
+        --driver-receipt) DRIVER_RECEIPT="${2:-}"; shift ;;
         --rss-samples) RSS_SAMPLES="${2:-}"; shift ;;
         --runtime-samples) RUNTIME_SAMPLES="${2:-}"; shift ;;
         --runtime-events) RUNTIME_EVENTS="${2:-}"; shift ;;
         --runtime-metadata) RUNTIME_METADATA="${2:-}"; shift ;;
         --failure-actions) FAILURE_ACTIONS="${2:-}"; shift ;;
         --native-launch-observation) NATIVE_LAUNCH_OBSERVATION="${2:-}"; shift ;;
+        --native-provisional-observation) NATIVE_PROVISIONAL_OBSERVATION="${2:-}"; shift ;;
         --trace-metadata) TRACE_METADATA="${2:-}"; shift ;;
+        --trace-provisional-receipt) TRACE_PROVISIONAL_RECEIPT="${2:-}"; shift ;;
+        --performance-tail-receipt) PERFORMANCE_TAIL_RECEIPT="${2:-}"; shift ;;
+        --performance-quit-receipt) PERFORMANCE_QUIT_RECEIPT="${2:-}"; shift ;;
+        --subject-exit-receipt) SUBJECT_EXIT_RECEIPT="${2:-}"; shift ;;
         --plan-start-gate) PLAN_START_GATE="${2:-}"; shift ;;
         --manual-artifacts) MANUAL_ARTIFACTS="${2:-}"; shift ;;
         --manual-screenshot) MANUAL_SCREENSHOT="${2:-}"; shift ;;
@@ -226,14 +255,20 @@ require_file scenario-plan "$PLAN"
 require_file plan-metadata "$PLAN_METADATA"
 require_file pair-metadata "$PAIR_METADATA"
 require_file subject-identity "$SUBJECT_IDENTITY"
+require_file run-intent "$RUN_INTENT"
 require_file run-metadata "$RUN_METADATA"
 require_file workload-metadata "$WORKLOAD_METADATA"
 require_file workload-events "$WORKLOAD_EVENTS"
 require_file ready-receipt "$READY_RECEIPT"
 require_file campaign-secret "$CAMPAIGN_SECRET_FILE"
 require_file driver-events "$DRIVER_EVENTS"
+require_file driver-receipt "$DRIVER_RECEIPT"
 require_file rss-samples "$RSS_SAMPLES"
 require_file trace-metadata "$TRACE_METADATA"
+require_file trace-provisional-receipt "$TRACE_PROVISIONAL_RECEIPT"
+require_file performance-tail-receipt "$PERFORMANCE_TAIL_RECEIPT"
+require_file performance-quit-receipt "$PERFORMANCE_QUIT_RECEIPT"
+require_file subject-exit-receipt "$SUBJECT_EXIT_RECEIPT"
 require_file plan-start-gate "$PLAN_START_GATE"
 require_file manual-artifacts "$MANUAL_ARTIFACTS"
 require_file manual-screenshot "$MANUAL_SCREENSHOT"
@@ -244,9 +279,35 @@ if [[ "$SUBJECT" == spaceterm ]]; then
     require_file runtime-metadata "$RUNTIME_METADATA"
     require_file failure-actions "$FAILURE_ACTIONS"
     require_file native-launch-observation "$NATIVE_LAUNCH_OBSERVATION"
-elif [[ -n "$RUNTIME_SAMPLES$RUNTIME_EVENTS$RUNTIME_METADATA$FAILURE_ACTIONS$NATIVE_LAUNCH_OBSERVATION" ]]; then
+    require_file native-provisional-observation "$NATIVE_PROVISIONAL_OBSERVATION"
+elif [[ -n "$RUNTIME_SAMPLES$RUNTIME_EVENTS$RUNTIME_METADATA$FAILURE_ACTIONS$NATIVE_LAUNCH_OBSERVATION$NATIVE_PROVISIONAL_OBSERVATION" ]]; then
     not_run "ghostty-must-not-claim-spaceterm-runtime-observations"
 fi
+
+tail_token="$(kv "$PERFORMANCE_TAIL_RECEIPT" quit_token)"
+tail_completed_ns="$(kv "$PERFORMANCE_TAIL_RECEIPT" tail_completed_continuous_ns)"
+python3 "$SCRIPT_DIRECTORY/performance-tail-receipt.py" verify \
+    --campaign-secret-file "$CAMPAIGN_SECRET_FILE" --campaign-id "$CAMPAIGN_ID" \
+    --session-id "$SESSION_ID" --nonce "$NONCE" --quit-token "$tail_token" \
+    --run-intent "$RUN_INTENT" --subject-identity "$SUBJECT_IDENTITY" \
+    --driver-receipt "$DRIVER_RECEIPT" --driver-events "$DRIVER_EVENTS" \
+    --workload-metadata "$WORKLOAD_METADATA" --workload-events "$WORKLOAD_EVENTS" \
+    --workload-ready-receipt "$READY_RECEIPT" \
+    --rss-samples "$RSS_SAMPLES" --trace-provisional-receipt "$TRACE_PROVISIONAL_RECEIPT" \
+    --tail-completed-continuous-ns "$tail_completed_ns" \
+    --receipt "$PERFORMANCE_TAIL_RECEIPT" >/dev/null 2>&1 \
+    || not_run "performance-tail-receipt-invalid"
+exit_arguments=(
+    --campaign-secret-file "$CAMPAIGN_SECRET_FILE" --run-intent "$RUN_INTENT"
+    --subject-identity "$SUBJECT_IDENTITY" --tail-receipt "$PERFORMANCE_TAIL_RECEIPT"
+    --quit-receipt "$PERFORMANCE_QUIT_RECEIPT"
+    --subject-exit-receipt "$SUBJECT_EXIT_RECEIPT"
+)
+if [[ "$SUBJECT" == spaceterm ]]; then
+    exit_arguments+=(--native-observation "$NATIVE_LAUNCH_OBSERVATION")
+fi
+python3 "$SCRIPT_DIRECTORY/verify-performance-subject-exit.py" "${exit_arguments[@]}" \
+    >/dev/null 2>&1 || not_run "performance-subject-exit-invalid"
 
 early_warmup_ms="$(kv "$PLAN_METADATA" warmup_ms)"
 early_duration_ms="$(kv "$PLAN_METADATA" measured_duration_ms)"
@@ -336,8 +397,11 @@ reject_unknown_kv "$WORKLOAD_METADATA" \
 reject_unknown_kv "$SUBJECT_IDENTITY" \
     "format_version subject app_bundle_path bundle_identifier bundle_version executable_path executable_sha256 executable_device executable_inode executable_fsid signature_valid signing_identifier team_identifier cdhash process_pid process_start_identity identity_status" \
     subject-identity
-reject_unknown_kv "$RUN_METADATA" \
-    "format_version subject subject_identity_sha256 scenario scenario_plan_sha256 workload_sha256 command_sha256 environment_sha256 font_sha256 initial_grid_sha256 measured_duration_ms process_pid process_start_identity status" \
+require_ordered_kv_schema "$RUN_INTENT" \
+    "format_version subject subject_identity_sha256 scenario scenario_plan_sha256 workload_sha256 command_sha256 environment_sha256 font_sha256 initial_grid_sha256 measured_duration_ms process_pid process_start_identity campaign_id session_id nonce native_provisional_observation_sha256 status" \
+    run-intent
+require_ordered_kv_schema "$RUN_METADATA" \
+    "format_version subject subject_identity_sha256 scenario scenario_plan_sha256 workload_sha256 command_sha256 environment_sha256 font_sha256 initial_grid_sha256 measured_duration_ms process_pid process_start_identity run_intent_sha256 native_observation_sha256 native_runtime_metadata_sha256 native_failure_actions_sha256 native_failure_action_enabled native_failure_request_count native_failure_result_count native_failure_resource_staged_count native_failure_resource_staged_bytes native_failure_resource_rolled_back_count native_failure_resource_rolled_back_bytes trace_provisional_receipt_sha256 performance_tail_receipt_sha256 performance_quit_receipt_sha256 subject_exit_receipt_sha256 status" \
     run-metadata
 require_exact_kv_schema "$TRACE_METADATA" \
     "format_version capture_status incomplete_reason subject_identity_sha256 run_metadata_sha256 workload_metadata_sha256 workload_ready_receipt_sha256 supplemental_evidence_sha256 requested_duration_ms actual_duration_ms capture_started_continuous_ns capture_ended_continuous_ns target_identity_verified trace_target_pid_verified time_profiler_instrument allocations_instrument hangs_instrument time_profiler_target_verified allocations_target_verified hangs_target_verified time_profiler_rows allocations_rows hangs_rows maximum_main_thread_hang_ms status" \
@@ -391,12 +455,21 @@ for identity_path_key in app_bundle_path executable_path; do
         || not_run "invalid-subject-$identity_path_key"
 done
 
-[[ "$(require_kv "$RUN_METADATA" format_version run)" == 1 \
+[[ "$(require_kv "$RUN_INTENT" format_version intent)" == 1 \
+    && "$(require_kv "$RUN_INTENT" status intent)" == prepared \
+    && "$(require_kv "$RUN_INTENT" subject intent)" == "$SUBJECT" \
+    && "$(require_kv "$RUN_INTENT" campaign_id intent)" == "$CAMPAIGN_ID" \
+    && "$(require_kv "$RUN_INTENT" session_id intent)" == "$SESSION_ID" \
+    && "$(require_kv "$RUN_INTENT" nonce intent)" == "$NONCE" \
+    && "$(require_kv "$RUN_INTENT" subject_identity_sha256 intent)" == "$subject_hash" ]] \
+    || not_run "run-intent-binding-mismatch"
+[[ "$(require_kv "$RUN_METADATA" format_version run)" == 3 \
     && "$(require_kv "$RUN_METADATA" subject run)" == "$SUBJECT" \
     && "$(require_kv "$RUN_METADATA" scenario run)" == "$SCENARIO" \
     && "$(require_kv "$RUN_METADATA" subject_identity_sha256 run)" == "$subject_hash" \
     && "$(require_kv "$RUN_METADATA" scenario_plan_sha256 run)" == "$plan_hash" \
     && "$(require_kv "$RUN_METADATA" measured_duration_ms run)" == "$measured_duration_ms" \
+    && "$(require_kv "$RUN_METADATA" run_intent_sha256 run)" == "$(sha256 "$RUN_INTENT")" \
     && "$(require_kv "$RUN_METADATA" status run)" == complete ]] \
     || not_run "run-metadata-binding-mismatch"
 for parity_key in workload_sha256 command_sha256 environment_sha256 font_sha256 initial_grid_sha256; do
@@ -405,11 +478,64 @@ for parity_key in workload_sha256 command_sha256 environment_sha256 font_sha256 
     [[ "$run_hash" == "$(require_kv "$PAIR_METADATA" "$parity_key" pair)" ]] \
         || not_run "paired-$parity_key-mismatch"
 done
+for common_key in subject subject_identity_sha256 scenario scenario_plan_sha256 workload_sha256 \
+    command_sha256 environment_sha256 font_sha256 initial_grid_sha256 measured_duration_ms \
+    process_pid process_start_identity; do
+    [[ "$(require_kv "$RUN_METADATA" "$common_key" run)" \
+        == "$(require_kv "$RUN_INTENT" "$common_key" intent)" ]] \
+        || not_run "run-intent-final-$common_key-mismatch"
+done
 [[ "$(require_kv "$RUN_METADATA" process_pid run)" \
         == "$(require_kv "$SUBJECT_IDENTITY" process_pid subject)" \
     && "$(require_kv "$RUN_METADATA" process_start_identity run)" \
         == "$(require_kv "$SUBJECT_IDENTITY" process_start_identity subject)" ]] \
     || not_run "run-process-identity-mismatch"
+[[ "$(require_kv "$RUN_METADATA" trace_provisional_receipt_sha256 run)" \
+        == "$(sha256 "$TRACE_PROVISIONAL_RECEIPT")" \
+    && "$(require_kv "$RUN_METADATA" performance_tail_receipt_sha256 run)" \
+        == "$(sha256 "$PERFORMANCE_TAIL_RECEIPT")" \
+    && "$(require_kv "$RUN_METADATA" performance_quit_receipt_sha256 run)" \
+        == "$(sha256 "$PERFORMANCE_QUIT_RECEIPT")" \
+    && "$(require_kv "$RUN_METADATA" subject_exit_receipt_sha256 run)" \
+        == "$(sha256 "$SUBJECT_EXIT_RECEIPT")" ]] \
+    || not_run "run-causal-closure-mismatch"
+if [[ "$SUBJECT" == spaceterm ]]; then
+    [[ "$(require_kv "$RUN_METADATA" native_observation_sha256 run)" \
+            == "$(sha256 "$NATIVE_LAUNCH_OBSERVATION")" \
+        && "$(require_kv "$RUN_METADATA" native_runtime_metadata_sha256 run)" \
+            == "$(sha256 "$RUNTIME_METADATA")" \
+        && "$(require_kv "$RUN_METADATA" native_failure_actions_sha256 run)" \
+            == "$(sha256 "$FAILURE_ACTIONS")" \
+        && "$(require_kv "$RUN_METADATA" native_failure_action_enabled run)" == false \
+        && "$(require_kv "$RUN_METADATA" native_failure_request_count run)" == 0 \
+        && "$(require_kv "$RUN_METADATA" native_failure_result_count run)" == 0 \
+        && "$(require_kv "$RUN_METADATA" native_failure_resource_staged_count run)" == 0 \
+        && "$(require_kv "$RUN_METADATA" native_failure_resource_staged_bytes run)" == 0 \
+        && "$(require_kv "$RUN_METADATA" native_failure_resource_rolled_back_count run)" == 0 \
+        && "$(require_kv "$RUN_METADATA" native_failure_resource_rolled_back_bytes run)" == 0 ]] \
+        || not_run "spaceterm-run-native-closure-mismatch"
+    [[ "$(require_kv "$RUN_INTENT" native_provisional_observation_sha256 intent)" \
+        == "$(sha256 "$NATIVE_PROVISIONAL_OBSERVATION")" ]] \
+        || not_run "spaceterm-intent-provisional-mismatch"
+    python3 "$SCRIPT_DIRECTORY/verify-performance-native-closure.py" \
+        --subject-identity "$SUBJECT_IDENTITY" \
+        --provisional-observation "$NATIVE_PROVISIONAL_OBSERVATION" \
+        --native-observation "$NATIVE_LAUNCH_OBSERVATION" \
+        --runtime-metadata "$RUNTIME_METADATA" --runtime-samples "$RUNTIME_SAMPLES" \
+        --runtime-events "$RUNTIME_EVENTS" --failure-actions "$FAILURE_ACTIONS" \
+        >/dev/null 2>&1 || not_run "spaceterm-native-closure-invalid"
+else
+    [[ "$(require_kv "$RUN_INTENT" native_provisional_observation_sha256 intent)" \
+        == not-applicable ]] || not_run "ghostty-intent-provisional-not-applicable-mismatch"
+    for key in native_observation_sha256 native_runtime_metadata_sha256 \
+        native_failure_actions_sha256 native_failure_action_enabled \
+        native_failure_request_count native_failure_result_count \
+        native_failure_resource_staged_count native_failure_resource_staged_bytes \
+        native_failure_resource_rolled_back_count native_failure_resource_rolled_back_bytes; do
+        [[ "$(require_kv "$RUN_METADATA" "$key" run)" == not-applicable ]] \
+            || not_run "ghostty-native-closure-not-applicable-mismatch"
+    done
+fi
 for identity_key in executable_device executable_inode executable_fsid process_pid; do
     identity_value="$(require_kv "$SUBJECT_IDENTITY" "$identity_key" subject)"
     require_uint "$identity_value" "subject-$identity_key"
@@ -663,17 +789,17 @@ reject_missing_marker "$manual_reviewer"
 [[ -n "$manual_reviewer" ]] || not_run "manual-reviewer-missing"
 
 if [[ "$SUBJECT" == spaceterm ]]; then
-    reject_unknown_kv "$NATIVE_LAUNCH_OBSERVATION" \
-        "schema observation.source launch.nonce run.id package.app.sha256 runtime.schema runtime.sample_interval_ms runtime.transition_capacity failure.action.schema process.pid process.pidversion process.executable.path process.executable.device process.executable.inode process.executable.fsid process.signature.cdhash process.signature.identifier process.signature.team_identifier terminal_font_selected initial_grid.rows initial_grid.columns initial_grid.logical_width initial_grid.logical_height initial_grid.backing_pixel_width initial_grid.backing_pixel_height observation.complete" \
+    require_ordered_kv_schema "$NATIVE_LAUNCH_OBSERVATION" \
+        "schema observation.source launch.nonce run.id package.app.sha256 runtime.schema runtime.sample_interval_ms runtime.transition_capacity failure.action.schema failure.action.enabled process.pid process.pidversion process.executable.path process.executable.device process.executable.inode process.executable.fsid process.signature.cdhash process.signature.identifier process.signature.team_identifier terminal_font_selected initial_grid.rows initial_grid.columns initial_grid.logical_width initial_grid.logical_height initial_grid.backing_pixel_width initial_grid.backing_pixel_height provisional.observation.sha256 runtime.metadata.schema runtime.metadata.path runtime.metadata.sha256 failure.result.schema failure.actions.path failure.actions.sha256 failure.request_count failure.result_count observation.complete" \
         native-launch-observation
-    [[ "$(awk 'END { print NR }' "$NATIVE_LAUNCH_OBSERVATION")" == 26 ]] \
+    [[ "$(awk 'END { print NR }' "$NATIVE_LAUNCH_OBSERVATION")" == 36 ]] \
         || not_run "native-launch-observation-record-count-mismatch"
     for launch_key in launch.nonce package.app.sha256 runtime.schema \
         runtime.sample_interval_ms runtime.transition_capacity \
         process.pid process.pidversion \
         process.executable.path process.executable.device process.executable.inode \
         process.executable.fsid process.signature.cdhash process.signature.identifier \
-        process.signature.team_identifier terminal_font_selected initial_grid.rows \
+        terminal_font_selected initial_grid.rows \
         initial_grid.columns initial_grid.logical_width initial_grid.logical_height \
         initial_grid.backing_pixel_width initial_grid.backing_pixel_height; do
         [[ -n "$(require_kv "$NATIVE_LAUNCH_OBSERVATION" "$launch_key" launch)" ]] \
@@ -689,7 +815,7 @@ if [[ "$SUBJECT" == spaceterm ]]; then
             =~ ^-?[0-9]+:-?[0-9]+$ ]] \
         || not_run "native-launch-observation-value-invalid"
     [[ "$(require_kv "$NATIVE_LAUNCH_OBSERVATION" schema launch)" \
-            == spaceterm.acceptance.native-launch-proof/v4 \
+            == spaceterm.acceptance.native-launch-proof/v5 \
         && "$(require_kv "$NATIVE_LAUNCH_OBSERVATION" observation.source launch)" \
             == production-app \
         && "$(require_kv "$NATIVE_LAUNCH_OBSERVATION" launch.nonce launch)" \
@@ -704,6 +830,23 @@ if [[ "$SUBJECT" == spaceterm ]]; then
             == 64 \
         && "$(require_kv "$NATIVE_LAUNCH_OBSERVATION" failure.action.schema launch)" \
             == spaceterm.acceptance.failure-action/v1 \
+        && "$(require_kv "$NATIVE_LAUNCH_OBSERVATION" failure.action.enabled launch)" == false \
+        && "$(require_kv "$NATIVE_LAUNCH_OBSERVATION" provisional.observation.sha256 launch)" \
+            == "$(sha256 "$NATIVE_PROVISIONAL_OBSERVATION")" \
+        && "$(require_kv "$NATIVE_LAUNCH_OBSERVATION" runtime.metadata.schema launch)" \
+            == spaceterm.acceptance.runtime-observation-metadata/v3 \
+        && "$(require_kv "$NATIVE_LAUNCH_OBSERVATION" runtime.metadata.path launch)" \
+            == runtime-metadata.tsv \
+        && "$(require_kv "$NATIVE_LAUNCH_OBSERVATION" runtime.metadata.sha256 launch)" \
+            == "$(sha256 "$RUNTIME_METADATA")" \
+        && "$(require_kv "$NATIVE_LAUNCH_OBSERVATION" failure.result.schema launch)" \
+            == spaceterm.acceptance.failure-action-result/v2 \
+        && "$(require_kv "$NATIVE_LAUNCH_OBSERVATION" failure.actions.path launch)" \
+            == failure-actions.tsv \
+        && "$(require_kv "$NATIVE_LAUNCH_OBSERVATION" failure.actions.sha256 launch)" \
+            == "$(sha256 "$FAILURE_ACTIONS")" \
+        && "$(require_kv "$NATIVE_LAUNCH_OBSERVATION" failure.request_count launch)" == 0 \
+        && "$(require_kv "$NATIVE_LAUNCH_OBSERVATION" failure.result_count launch)" == 0 \
         && "$(require_kv "$NATIVE_LAUNCH_OBSERVATION" observation.complete launch)" == true \
         && "$(require_kv "$NATIVE_LAUNCH_OBSERVATION" process.pid launch)" \
             == "$(require_kv "$SUBJECT_IDENTITY" process_pid subject)" \
@@ -716,13 +859,16 @@ if [[ "$SUBJECT" == spaceterm ]]; then
             == "$(require_kv "$SUBJECT_IDENTITY" cdhash subject \
                 | tr '[:upper:]' '[:lower:]')" \
         && "$(require_kv "$NATIVE_LAUNCH_OBSERVATION" process.signature.identifier launch)" \
-            == "$(require_kv "$SUBJECT_IDENTITY" signing_identifier subject)" ]] \
+            == "$(require_kv "$SUBJECT_IDENTITY" signing_identifier subject)" \
+        && "$(kv "$NATIVE_LAUNCH_OBSERVATION" process.signature.team_identifier)" \
+            == "$([[ "$(require_kv "$SUBJECT_IDENTITY" team_identifier subject)" == none ]] \
+                && printf '' || require_kv "$SUBJECT_IDENTITY" team_identifier subject)" ]] \
         || not_run "native-launch-observation-does-not-bind-subject"
     reject_unknown_kv "$RUNTIME_METADATA" \
-        "schema observation.source run.id package.app.sha256 process.pid runtime.samples.path runtime.samples.sha256 runtime.events.path runtime.events.sha256 failure.action.schema failure.result.schema failure.actions.path failure.actions.sha256 failure.result_count observer.started_continuous_ns observer.ended_continuous_ns observer.sample_interval_ms observer.transition_capacity observer.sample_count observer.event_count observer.status observation.complete" \
+        "schema observation.source run.id package.app.sha256 process.pid runtime.samples.path runtime.samples.sha256 runtime.events.path runtime.events.sha256 failure.action.schema failure.action.enabled failure.result.schema failure.actions.path failure.actions.sha256 failure.request_count failure.result_count observer.started_continuous_ns observer.ended_continuous_ns observer.sample_interval_ms observer.transition_capacity observer.sample_count observer.event_count observer.status observation.complete" \
         runtime-metadata
     [[ "$(require_kv "$RUNTIME_METADATA" schema runtime)" \
-            == spaceterm.acceptance.runtime-observation-metadata/v2 \
+            == spaceterm.acceptance.runtime-observation-metadata/v3 \
         && "$(require_kv "$RUNTIME_METADATA" observation.source runtime)" == production-app \
         && "$(require_kv "$RUNTIME_METADATA" observer.status runtime)" == complete \
         && "$(require_kv "$RUNTIME_METADATA" observation.complete runtime)" == true \
@@ -738,17 +884,19 @@ if [[ "$SUBJECT" == spaceterm ]]; then
             == runtime-events.tsv \
         && "$(require_kv "$RUNTIME_METADATA" failure.action.schema runtime)" \
             == spaceterm.acceptance.failure-action/v1 \
+        && "$(require_kv "$RUNTIME_METADATA" failure.action.enabled runtime)" == false \
         && "$(require_kv "$RUNTIME_METADATA" failure.result.schema runtime)" \
-            == spaceterm.acceptance.failure-action-result/v1 \
+            == spaceterm.acceptance.failure-action-result/v2 \
         && "$(require_kv "$RUNTIME_METADATA" failure.actions.path runtime)" \
             == failure-actions.tsv \
         && "$(require_kv "$RUNTIME_METADATA" failure.actions.sha256 runtime)" \
             == "$(sha256 "$FAILURE_ACTIONS")" \
+        && "$(require_kv "$RUNTIME_METADATA" failure.request_count runtime)" == 0 \
         && "$(require_kv "$RUNTIME_METADATA" failure.result_count runtime)" == 0 \
         && "$(require_kv "$RUNTIME_METADATA" observer.sample_interval_ms runtime)" == 1000 \
         && "$(require_kv "$RUNTIME_METADATA" observer.transition_capacity runtime)" == 64 ]] \
         || not_run "runtime-observer-incomplete"
-    readonly FAILURE_ACTION_HEADER=$'request_id\tsequence\tcase_id\taction\tresult\tpane_id\tpane_state\tfailure_class\tfailure_recoverability\tfailure_operation\tstate_revision\tlatest_generation\tlast_valid_generation\tvisible_generation\tpending_recovery\tterminal_input_usable\tsession_attached'
+    readonly FAILURE_ACTION_HEADER=$'request_id\tsequence\tcase_id\taction\tresult\tpane_id\tpane_state\tfailure_class\tfailure_recoverability\tfailure_operation\tstate_revision\tlatest_generation\tlast_valid_generation\tvisible_generation\tpending_recovery\tterminal_input_usable\tsession_attached\tresource_staged_count\tresource_staged_bytes\tresource_rolled_back_count\tresource_rolled_back_bytes'
     [[ "$(head -n 1 "$FAILURE_ACTIONS")" == "$FAILURE_ACTION_HEADER" \
         && "$(awk 'END { print NR }' "$FAILURE_ACTIONS")" == 1 ]] \
         || not_run "performance-run-has-failure-action-results"

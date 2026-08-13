@@ -34,7 +34,7 @@ expect_failure() {
     fi
 }
 
-for command in awk bash chmod cp kill mktemp ps rm sed shasum; do
+for command in awk bash chmod cp kill mkfifo mktemp ps rm sed shasum; do
     command -v "$command" >/dev/null 2>&1 || fail "missing command: $command"
 done
 
@@ -125,7 +125,8 @@ SUBJECT="$RUN_DIR/subject.tsv"
 WINDOW="$RUN_DIR/window.tsv"
 PLAN="$RUN_DIR/plan.tsv"
 PLAN_METADATA="$RUN_DIR/plan-metadata.tsv"
-RUN_METADATA="$RUN_DIR/run-metadata.tsv"
+RUN_INTENT="$RUN_DIR/run-intent.tsv"
+NATIVE_PROVISIONAL="$RUN_DIR/native-observation-live.tsv"
 readonly HASH_A=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 readonly HASH_B=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 write_file "$SUBJECT" "$(cat <<EOF
@@ -193,7 +194,37 @@ status	frozen
 EOF
 )"
 WORKLOAD_HASH="$(sha256 "$TOOLS/performance-workload")"
-write_file "$RUN_METADATA" "$(cat <<EOF
+write_file "$NATIVE_PROVISIONAL" "$(cat <<'EOF'
+schema	spaceterm.acceptance.native-launch-proof/v5
+observation.source	production-app
+launch.nonce	dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+run.id	i43-test
+package.app.sha256	aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+runtime.schema	spaceterm.acceptance.runtime-stream/v1
+runtime.sample_interval_ms	1000
+runtime.transition_capacity	64
+failure.action.schema	spaceterm.acceptance.failure-action/v1
+failure.action.enabled	false
+process.pid	999999
+process.pidversion	1
+process.executable.path	/Applications/Fake.app/Contents/MacOS/Fake
+process.executable.device	1
+process.executable.inode	2
+process.executable.fsid	1
+process.signature.cdhash	12345678
+process.signature.identifier	org.example.fake
+process.signature.team_identifier	none
+terminal_font_selected	Test Font
+initial_grid.rows	24
+initial_grid.columns	80
+initial_grid.logical_width	800
+initial_grid.logical_height	600
+initial_grid.backing_pixel_width	800
+initial_grid.backing_pixel_height	600
+observation.complete	true
+EOF
+)"
+write_file "$RUN_INTENT" "$(cat <<EOF
 format_version	1
 subject	spaceterm
 subject_identity_sha256	$SUBJECT_HASH
@@ -207,7 +238,11 @@ initial_grid_sha256	$HASH_B
 measured_duration_ms	10000
 process_pid	999999
 process_start_identity	1:2
-status	complete
+campaign_id	i43-test
+session_id	spaceterm-resize-01
+nonce	cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+native_provisional_observation_sha256	$(sha256 "$NATIVE_PROVISIONAL")
+status	prepared
 EOF
 )"
 
@@ -220,11 +255,14 @@ readonly SESSION_ID=spaceterm-resize-01
 readonly NONCE=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
 
 run_runner() {
-    local tools="$1" suffix="$2"
+    local tools="$1" suffix="$2" window="${3:-$WINDOW}"
+    local quit_control="$RUN_DIR/quit-$suffix.fifo"
+    [[ -e "$quit_control" ]] || mkfifo -m 600 "$quit_control"
     "$RUNNER" --run-directory "$RUN_DIR" --tools-directory "$tools" \
-        --subject-identity "$SUBJECT" --window-identity "$WINDOW" \
+        --subject-identity "$SUBJECT" --window-identity "$window" \
         --scenario resize --scenario-plan "$PLAN" --plan-metadata "$PLAN_METADATA" \
-        --run-metadata "$RUN_METADATA" --workload-events "$RUN_DIR/events-$suffix.tsv" \
+        --run-intent "$RUN_INTENT" --run-metadata "$RUN_DIR/run-$suffix.tsv" \
+        --workload-events "$RUN_DIR/events-$suffix.tsv" \
         --workload-metadata "$RUN_DIR/workload-$suffix.tsv" \
         --workload-ready-receipt "$RUN_DIR/ready-$suffix.tsv" \
         --plan-start-gate "$RUN_DIR/plan-start-$suffix.tsv" \
@@ -233,6 +271,17 @@ run_runner() {
         --driver-receipt "$RUN_DIR/driver-receipt-$suffix.tsv" \
         --rss-output "$RUN_DIR/rss-$suffix.tsv" \
         --trace-output-directory "$RUN_DIR/trace-$suffix" \
+        --trace-provisional-receipt "$RUN_DIR/trace-provisional-$suffix.tsv" \
+        --performance-tail-receipt "$RUN_DIR/tail-$suffix.tsv" \
+        --performance-quit-control "$quit_control" \
+        --performance-quit-receipt "$RUN_DIR/quit-receipt-$suffix.tsv" \
+        --subject-exit-receipt "$RUN_DIR/exit-$suffix.tsv" \
+        --native-provisional-observation "$NATIVE_PROVISIONAL" \
+        --native-observation "$RUN_DIR/native-$suffix.tsv" \
+        --native-runtime-metadata "$RUN_DIR/runtime-metadata-$suffix.tsv" \
+        --native-runtime-samples "$RUN_DIR/runtime-samples-$suffix.tsv" \
+        --native-runtime-events "$RUN_DIR/runtime-events-$suffix.tsv" \
+        --native-failure-actions "$RUN_DIR/failure-actions-$suffix.tsv" \
         --result-output "$RUN_DIR/result-$suffix.tsv" --trace-recorder "$TRACE" \
         --campaign-secret-file "$SECRET" --campaign-id "$CAMPAIGN_ID" \
         --session-id "$SESSION_ID" --nonce "$NONCE" \
@@ -266,65 +315,17 @@ SPACETERM_PERFORMANCE_TEST_MODE=1 SPACETERM_PERFORMANCE_TAIL_MS=0 \
 BAD_WINDOW="$RUN_DIR/bad-window.tsv"
 sed 's/process_pid	999999/process_pid	888888/' "$WINDOW" > "$BAD_WINDOW"
 chmod 0400 "$BAD_WINDOW"
-expect_failure "wrong window owner PID" env SPACETERM_PERFORMANCE_TEST_MODE=1 \
-    SPACETERM_PERFORMANCE_TAIL_MS=0 "$RUNNER" --run-directory "$RUN_DIR" \
-        --tools-directory "$TOOLS" --subject-identity "$SUBJECT" \
-        --window-identity "$BAD_WINDOW" --scenario resize --scenario-plan "$PLAN" \
-        --plan-metadata "$PLAN_METADATA" --run-metadata "$RUN_METADATA" \
-        --workload-events "$RUN_DIR/events-window.tsv" \
-        --workload-metadata "$RUN_DIR/workload-window.tsv" \
-        --workload-ready-receipt "$RUN_DIR/ready-window.tsv" \
-        --plan-start-gate "$RUN_DIR/plan-start-window.tsv" \
-        --driver-output "$RUN_DIR/driver-window.tsv" \
-        --driver-intent "$RUN_DIR/driver-intent-window.tsv" \
-        --driver-receipt "$RUN_DIR/driver-receipt-window.tsv" \
-        --rss-output "$RUN_DIR/rss-window.tsv" \
-        --trace-output-directory "$RUN_DIR/trace-window" \
-        --result-output "$RUN_DIR/result-window.tsv" --trace-recorder "$TRACE" \
-        --campaign-secret-file "$SECRET" --campaign-id "$CAMPAIGN_ID" \
-        --session-id "$SESSION_ID" --nonce "$NONCE" \
-        --seed-timeout-seconds 1
+SPACETERM_PERFORMANCE_TEST_MODE=1 SPACETERM_PERFORMANCE_TAIL_MS=0 \
+    expect_failure "wrong window owner PID" run_runner "$TOOLS" window "$BAD_WINDOW"
 
 BAD_START="$RUN_DIR/bad-start.tsv"
 sed 's/process_start_identity	1:2/process_start_identity	1:3/' "$WINDOW" > "$BAD_START"
 chmod 0400 "$BAD_START"
-expect_failure "stale process generation" env SPACETERM_PERFORMANCE_TEST_MODE=1 \
-    SPACETERM_PERFORMANCE_TAIL_MS=0 "$RUNNER" --run-directory "$RUN_DIR" \
-        --tools-directory "$TOOLS" --subject-identity "$SUBJECT" \
-        --window-identity "$BAD_START" --scenario resize --scenario-plan "$PLAN" \
-        --plan-metadata "$PLAN_METADATA" --run-metadata "$RUN_METADATA" \
-        --workload-events "$RUN_DIR/events-start.tsv" \
-        --workload-metadata "$RUN_DIR/workload-start.tsv" \
-        --workload-ready-receipt "$RUN_DIR/ready-start.tsv" \
-        --plan-start-gate "$RUN_DIR/plan-start-start.tsv" \
-        --driver-output "$RUN_DIR/driver-start.tsv" \
-        --driver-intent "$RUN_DIR/driver-intent-start.tsv" \
-        --driver-receipt "$RUN_DIR/driver-receipt-start.tsv" \
-        --rss-output "$RUN_DIR/rss-start.tsv" \
-        --trace-output-directory "$RUN_DIR/trace-start" \
-        --result-output "$RUN_DIR/result-start.tsv" --trace-recorder "$TRACE" \
-        --campaign-secret-file "$SECRET" --campaign-id "$CAMPAIGN_ID" \
-        --session-id "$SESSION_ID" --nonce "$NONCE" \
-        --seed-timeout-seconds 1
+SPACETERM_PERFORMANCE_TEST_MODE=1 SPACETERM_PERFORMANCE_TAIL_MS=0 \
+    expect_failure "stale process generation" run_runner "$TOOLS" start "$BAD_START"
 
-expect_failure "seed timeout produces no orphans" env SPACETERM_PERFORMANCE_TEST_MODE=1 \
-    SPACETERM_PERFORMANCE_TAIL_MS=0 "$RUNNER" --run-directory "$RUN_DIR" \
-        --tools-directory "$TOOLS" --subject-identity "$SUBJECT" \
-        --window-identity "$WINDOW" --scenario resize --scenario-plan "$PLAN" \
-        --plan-metadata "$PLAN_METADATA" --run-metadata "$RUN_METADATA" \
-        --workload-events "$RUN_DIR/events-timeout.tsv" \
-        --workload-metadata "$RUN_DIR/workload-timeout.tsv" \
-        --workload-ready-receipt "$RUN_DIR/ready-timeout.tsv" \
-        --plan-start-gate "$RUN_DIR/plan-start-timeout.tsv" \
-        --driver-output "$RUN_DIR/driver-timeout.tsv" \
-        --driver-intent "$RUN_DIR/driver-intent-timeout.tsv" \
-        --driver-receipt "$RUN_DIR/driver-receipt-timeout.tsv" \
-        --rss-output "$RUN_DIR/rss-timeout.tsv" \
-        --trace-output-directory "$RUN_DIR/trace-timeout" \
-        --result-output "$RUN_DIR/result-timeout.tsv" --trace-recorder "$TRACE" \
-        --campaign-secret-file "$SECRET" --campaign-id "$CAMPAIGN_ID" \
-        --session-id "$SESSION_ID" --nonce "$NONCE" \
-        --seed-timeout-seconds 1
+SPACETERM_PERFORMANCE_TEST_MODE=1 SPACETERM_PERFORMANCE_TAIL_MS=0 \
+    expect_failure "seed timeout produces no orphans" run_runner "$TOOLS" timeout
 [[ -z "$(jobs -pr)" ]] || fail "orphaned background job after failure"
 [[ "$(awk -F '\t' '$1 == "status" {print $2}' "$RUN_DIR/result-timeout.tsv")" == incomplete ]] \
     || fail "timeout result is not incomplete"
