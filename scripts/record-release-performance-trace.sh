@@ -8,14 +8,16 @@ umask 077
 readonly XCRUN_COMMAND="${SPACETERM_XCRUN:-xcrun}"
 readonly SHASUM_COMMAND="${SPACETERM_SHASUM:-shasum}"
 readonly CONTINUOUS_CLOCK_COMMAND="${SPACETERM_CONTINUOUS_CLOCK:-}"
+readonly RUN_METADATA_WAIT_TENTHS="${SPACETERM_TEST_RUN_METADATA_WAIT_TENTHS:-1200}"
 PROCESS_INSPECTOR="${SPACETERM_PROCESS_INSPECTOR:-}"
 TRACE_VERIFIER="${SPACETERM_TRACE_VERIFIER:-}"
 TEST_OVERRIDES_ACTIVE=false
-[[ -z "${SPACETERM_XCRUN:-}${SPACETERM_SHASUM:-}${SPACETERM_CONTINUOUS_CLOCK:-}${SPACETERM_PROCESS_INSPECTOR:-}${SPACETERM_TRACE_VERIFIER:-}" ]] \
+[[ -z "${SPACETERM_XCRUN:-}${SPACETERM_SHASUM:-}${SPACETERM_CONTINUOUS_CLOCK:-}${SPACETERM_PROCESS_INSPECTOR:-}${SPACETERM_TRACE_VERIFIER:-}${SPACETERM_TEST_RUN_METADATA_WAIT_TENTHS:-}" ]] \
     || TEST_OVERRIDES_ACTIVE=true
 readonly TEST_OVERRIDES_ACTIVE
 
 SUBJECT_IDENTITY=""
+RUN_INTENT=""
 RUN_METADATA=""
 WORKLOAD_METADATA=""
 WORKLOAD_EVENTS=""
@@ -30,15 +32,18 @@ DURATION_MILLISECONDS=""
 WARMUP_MILLISECONDS=""
 OUTPUT_DIRECTORY=""
 CAPTURE_START_NOTIFICATION=""
+PROVISIONAL_RECEIPT=""
 
 usage() {
     cat <<EOF
-Usage: $(basename -- "$0") --subject-identity FILE --run-metadata FILE \\
+Usage: $(basename -- "$0") --subject-identity FILE --run-intent FILE \\
+  --run-metadata PENDING_FILE \\
   --workload-metadata FILE --workload-events FILE --workload-ready-receipt FILE \\
   [--supplemental-evidence FILE] \\
   --campaign-secret-file FILE --campaign-id LABEL --session-id LABEL \\
   --nonce SHA256 --scenario LABEL --warmup-ms N --duration-ms N \\
-  --output-directory NEW_PATH [--capture-start-notification NEW_FILE]
+  --output-directory NEW_PATH --provisional-receipt NEW_FILE \
+  [--capture-start-notification NEW_FILE]
 
 Attach Time Profiler, Allocations, and Hangs to the exact process frozen in a
 subject identity. The finalized privacy-safe v3 metadata binds the live guest
@@ -46,9 +51,10 @@ code, immutable subject/run/workload evidence, continuous capture interval,
 target-scoped trace tables, and measured duration. CAPTURED is evidence state,
 not a performance verdict.
 
-The workload events and metadata may be created during capture. Their canonical
-parent directories are bound before capture, and finalization waits at most five
-seconds after xctrace returns for both immutable regular files. An optional
+The finalized run metadata must be absent at launch. Its canonical private parent
+and exact path are bound to an immutable run intent before capture. Finalization
+waits up to 120 seconds after xctrace for the atomic immutable metadata. Workload
+events and metadata may also be created during capture. An optional
 capture-start notification is published atomically immediately before xctrace is
 launched; the finalized trace interval remains the authoritative coverage proof.
 
@@ -67,7 +73,7 @@ is_sha256() { [[ "$1" =~ ^[0-9a-f]{64}$ ]]; }
 
 doctor() {
     local instruments
-    for command in "$XCRUN_COMMAND" awk basename chmod date find id ln mkdir mv \
+    for command in "$XCRUN_COMMAND" awk basename chmod cp date find id ln mkdir mv \
         codesign plutil python3 realpath rm sleep stat "$SHASUM_COMMAND" xmllint; do
         require_command "$command"
     done
@@ -324,24 +330,90 @@ package_bundle_matches() {
         && codesign --verify --strict "$APP_BUNDLE" >/dev/null 2>&1
 }
 
-validate_run_metadata() {
-    readonly RUN_KEYS="format_version subject subject_identity_sha256 scenario scenario_plan_sha256 workload_sha256 command_sha256 environment_sha256 font_sha256 initial_grid_sha256 measured_duration_ms process_pid process_start_identity status"
-    file_is_immutable_regular "$RUN_METADATA" \
-        || die "run metadata must be an immutable non-symlink regular file"
-    validate_exact_schema "$RUN_METADATA" "$RUN_KEYS" 14 "run metadata"
-    [[ "$(kv "$RUN_METADATA" format_version)" == 1 \
-        && "$(kv "$RUN_METADATA" status)" == complete \
-        && "$(kv "$RUN_METADATA" subject)" == "$SUBJECT" \
-        && "$(kv "$RUN_METADATA" subject_identity_sha256)" == "$SUBJECT_IDENTITY_SHA256" \
-        && "$(kv "$RUN_METADATA" scenario)" == "$SCENARIO" \
-        && "$(kv "$RUN_METADATA" measured_duration_ms)" == "$DURATION_MILLISECONDS" \
-        && "$(kv "$RUN_METADATA" process_pid)" == "$PID" \
-        && "$(kv "$RUN_METADATA" process_start_identity)" == "$PROCESS_START_IDENTITY" ]] \
-        || die "run metadata does not bind the requested frozen subject and scenario"
-    RUN_WORKLOAD_SHA256="$(kv "$RUN_METADATA" workload_sha256)"
+validate_run_intent() {
+    readonly RUN_INTENT_KEYS="format_version subject subject_identity_sha256 scenario scenario_plan_sha256 workload_sha256 command_sha256 environment_sha256 font_sha256 initial_grid_sha256 measured_duration_ms process_pid process_start_identity campaign_id session_id nonce native_provisional_observation_sha256 status"
+    file_is_immutable_regular "$RUN_INTENT" \
+        || die "run intent must be immutable singleton evidence"
+    validate_exact_schema "$RUN_INTENT" "$RUN_INTENT_KEYS" 18 "run intent"
+    [[ "$(kv "$RUN_INTENT" format_version)" == 1 \
+        && "$(kv "$RUN_INTENT" status)" == prepared \
+        && "$(kv "$RUN_INTENT" subject)" == "$SUBJECT" \
+        && "$(kv "$RUN_INTENT" subject_identity_sha256)" == "$SUBJECT_IDENTITY_SHA256" \
+        && "$(kv "$RUN_INTENT" scenario)" == "$SCENARIO" \
+        && "$(kv "$RUN_INTENT" measured_duration_ms)" == "$DURATION_MILLISECONDS" \
+        && "$(kv "$RUN_INTENT" process_pid)" == "$PID" \
+        && "$(kv "$RUN_INTENT" process_start_identity)" == "$PROCESS_START_IDENTITY" \
+        && "$(kv "$RUN_INTENT" campaign_id)" == "$CAMPAIGN_ID" \
+        && "$(kv "$RUN_INTENT" session_id)" == "$SESSION_ID" \
+        && "$(kv "$RUN_INTENT" nonce)" == "$NONCE" ]] \
+        || die "run intent does not bind the requested frozen campaign run"
+    RUN_WORKLOAD_SHA256="$(kv "$RUN_INTENT" workload_sha256)"
     is_sha256 "$RUN_WORKLOAD_SHA256" || die "run workload hash is invalid"
+    if [[ "$SUBJECT" == spaceterm ]]; then
+        is_sha256 "$(kv "$RUN_INTENT" native_provisional_observation_sha256)" \
+            || die "SpaceTerm run intent lacks provisional native evidence"
+    else
+        [[ "$(kv "$RUN_INTENT" native_provisional_observation_sha256)" \
+                == not-applicable ]] \
+            || die "Ghostty run intent contains SpaceTerm native evidence"
+    fi
+    RUN_INTENT_SHA256="$(sha256 "$RUN_INTENT")"
+    readonly RUN_WORKLOAD_SHA256 RUN_INTENT_SHA256
+}
+
+wait_for_run_metadata() {
+    local attempt
+    for ((attempt = 0; attempt <= RUN_METADATA_WAIT_TENTHS; attempt += 1)); do
+        [[ -e "$RUN_METADATA" ]] && return 0
+        (( attempt == RUN_METADATA_WAIT_TENTHS )) || sleep 0.1
+    done
+    return 1
+}
+
+validate_run_metadata() {
+    local key
+    readonly RUN_KEYS="format_version subject subject_identity_sha256 scenario scenario_plan_sha256 workload_sha256 command_sha256 environment_sha256 font_sha256 initial_grid_sha256 measured_duration_ms process_pid process_start_identity run_intent_sha256 native_observation_sha256 native_runtime_metadata_sha256 native_failure_actions_sha256 native_failure_action_enabled native_failure_request_count native_failure_result_count native_failure_resource_staged_count native_failure_resource_staged_bytes native_failure_resource_rolled_back_count native_failure_resource_rolled_back_bytes status"
+    wait_for_run_metadata || return 1
+    [[ "$(stat -f '%d:%i' "$RUN_METADATA_PARENT")" == "$RUN_METADATA_PARENT_IDENTITY" ]] \
+        || return 1
+    file_is_immutable_regular "$RUN_METADATA" || return 1
+    schema_is_exact "$RUN_METADATA" "$RUN_KEYS" 25 || return 1
+    [[ "$(kv "$RUN_METADATA" format_version)" == 2 \
+        && "$(kv "$RUN_METADATA" status)" == complete \
+        && "$(kv "$RUN_METADATA" run_intent_sha256)" == "$RUN_INTENT_SHA256" ]] \
+        || return 1
+    for key in subject subject_identity_sha256 scenario scenario_plan_sha256 \
+        workload_sha256 command_sha256 environment_sha256 font_sha256 \
+        initial_grid_sha256 measured_duration_ms process_pid process_start_identity; do
+        [[ "$(kv "$RUN_METADATA" "$key")" == "$(kv "$RUN_INTENT" "$key")" ]] \
+            || return 1
+    done
+    if [[ "$SUBJECT" == spaceterm ]]; then
+        for key in native_observation_sha256 native_runtime_metadata_sha256 \
+            native_failure_actions_sha256; do
+            is_sha256 "$(kv "$RUN_METADATA" "$key")" || return 1
+        done
+        [[ "$(kv "$RUN_METADATA" native_failure_action_enabled)" == false ]] \
+            || return 1
+        for key in native_failure_request_count native_failure_result_count \
+            native_failure_resource_staged_count native_failure_resource_staged_bytes \
+            native_failure_resource_rolled_back_count \
+            native_failure_resource_rolled_back_bytes; do
+            [[ "$(kv "$RUN_METADATA" "$key")" == 0 ]] || return 1
+        done
+    else
+        for key in native_observation_sha256 native_runtime_metadata_sha256 \
+            native_failure_actions_sha256 native_failure_action_enabled \
+            native_failure_request_count native_failure_result_count \
+            native_failure_resource_staged_count native_failure_resource_staged_bytes \
+            native_failure_resource_rolled_back_count \
+            native_failure_resource_rolled_back_bytes; do
+            [[ "$(kv "$RUN_METADATA" "$key")" == not-applicable ]] || return 1
+        done
+    fi
     RUN_METADATA_SHA256="$(sha256 "$RUN_METADATA")"
-    readonly RUN_WORKLOAD_SHA256 RUN_METADATA_SHA256
+    RUN_METADATA_IDENTITY="$(stat -f '%d:%i' "$RUN_METADATA")"
+    readonly RUN_METADATA_SHA256 RUN_METADATA_IDENTITY
 }
 
 wait_for_workload_evidence() {
@@ -495,7 +567,9 @@ frozen_inputs_match() {
         fi
     fi
     [[ "$(sha256 "$SUBJECT_IDENTITY")" == "$SUBJECT_IDENTITY_SHA256" \
-        && "$(sha256 "$RUN_METADATA")" == "$RUN_METADATA_SHA256" \
+        && "$(sha256 "$RUN_INTENT")" == "$RUN_INTENT_SHA256" \
+        && "$(stat -f '%d:%i' "$RUN_METADATA_PARENT")" \
+            == "$RUN_METADATA_PARENT_IDENTITY" \
         && "$(sha256 "$PACKAGE_EXECUTABLE")" == "$EXPECTED_EXECUTABLE_SHA256" \
         && "$(stat -f '%d' "$PACKAGE_EXECUTABLE")" == "$EXECUTABLE_DEVICE" \
         && "$(stat -f '%i' "$PACKAGE_EXECUTABLE")" == "$EXECUTABLE_INODE" \
@@ -548,7 +622,7 @@ write_metadata() {
         printf 'capture_status\t%s\n' "$capture_status"
         printf 'incomplete_reason\t%s\n' "$incomplete_reason"
         printf 'subject_identity_sha256\t%s\n' "$SUBJECT_IDENTITY_SHA256"
-        printf 'run_metadata_sha256\t%s\n' "$RUN_METADATA_SHA256"
+        printf 'run_metadata_sha256\t%s\n' "$run_metadata_hash"
         printf 'workload_metadata_sha256\t%s\n' "$workload_metadata_hash"
         printf 'workload_ready_receipt_sha256\t%s\n' "$READY_RECEIPT_SHA256"
         printf 'supplemental_evidence_sha256\t%s\n' "$SUPPLEMENTAL_EVIDENCE_SHA256"
@@ -572,10 +646,78 @@ write_metadata() {
     } > "$output"
 }
 
+trace_tree_sha256() {
+    python3 - "$TRACE_PATH" <<'PY'
+import hashlib, os, pathlib, struct, sys, unicodedata
+
+root = pathlib.Path(sys.argv[1])
+digest = hashlib.sha256(b"spaceterm.performance.trace-tree/v1\0")
+entries = []
+for path in root.rglob("*"):
+    if path.is_symlink() or (path.exists() and not path.is_file() and not path.is_dir()):
+        raise SystemExit(1)
+    if path.is_file():
+        relative = unicodedata.normalize("NFC", path.relative_to(root).as_posix())
+        if relative != path.relative_to(root).as_posix():
+            raise SystemExit(1)
+        entries.append((relative.encode("utf-8"), path))
+for encoded, path in sorted(entries):
+    data = path.read_bytes()
+    digest.update(struct.pack(">Q", len(encoded)))
+    digest.update(encoded)
+    digest.update(struct.pack(">Q", len(data)))
+    digest.update(data)
+print(digest.hexdigest())
+PY
+}
+
+publish_provisional_receipt() {
+    local temporary="${PROVISIONAL_RECEIPT}.tmp.$$" unsigned hmac_value
+    [[ "$(stat -f '%d:%i' "$PROVISIONAL_RECEIPT_PARENT")" \
+            == "$PROVISIONAL_RECEIPT_PARENT_IDENTITY" \
+        && ! -e "$PROVISIONAL_RECEIPT" && ! -L "$PROVISIONAL_RECEIPT" ]] \
+        || die "provisional receipt destination changed"
+    unsigned="${temporary}.unsigned"
+    {
+        printf 'format_version\t1\n'
+        printf 'subject_identity_sha256\t%s\n' "$SUBJECT_IDENTITY_SHA256"
+        printf 'run_intent_sha256\t%s\n' "$RUN_INTENT_SHA256"
+        printf 'workload_metadata_sha256\t%s\n' "$WORKLOAD_METADATA_SHA256"
+        printf 'workload_ready_receipt_sha256\t%s\n' "$READY_RECEIPT_SHA256"
+        printf 'supplemental_evidence_sha256\t%s\n' "$SUPPLEMENTAL_EVIDENCE_SHA256"
+        printf 'capture_status\tCAPTURED\nrequested_duration_ms\t%s\n' "$DURATION_MILLISECONDS"
+        printf 'actual_duration_ms\t%s\n' "$actual_duration_ms"
+        printf 'capture_started_continuous_ns\t%s\n' "$capture_started_ns"
+        printf 'capture_ended_continuous_ns\t%s\n' "$capture_ended_ns"
+        printf 'trace_bundle_tree_sha256\t%s\n' "$(trace_tree_sha256)"
+        printf 'toc_sha256\t%s\n' "$(sha256 "$TOC_PATH")"
+        printf 'time_profile_export_sha256\t%s\n' "$(sha256 "$TIME_PROFILE_EXPORT_PATH")"
+        printf 'allocations_export_sha256\t%s\n' "$(sha256 "$ALLOCATIONS_EXPORT_PATH")"
+        printf 'hangs_export_sha256\t%s\n' "$(sha256 "$HANGS_EXPORT_PATH")"
+        printf 'trace_verification_sha256\t%s\n' "$(sha256 "$TRACE_VERIFICATION_PATH")"
+        printf 'verifier_sha256\t%s\n' "$(sha256 "$TRACE_VERIFIER")"
+        printf 'status\tcomplete\nauth_algorithm\thmac-sha256\n'
+    } > "$unsigned"
+    hmac_value="$(python3 - "$unsigned" "$CAMPAIGN_SECRET_FILE" <<'PY'
+import hashlib, hmac, pathlib, struct, sys
+data = pathlib.Path(sys.argv[1]).read_bytes()
+payload = b"spaceterm.performance.trace-provisional/v1\0" + struct.pack(">Q", len(data)) + data
+print(hmac.new(pathlib.Path(sys.argv[2]).read_bytes(), payload, hashlib.sha256).hexdigest())
+PY
+)"
+    cp "$unsigned" "$temporary"
+    printf 'provisional_hmac_sha256\t%s\n' "$hmac_value" >> "$temporary"
+    chmod 0400 "$temporary"
+    ln "$temporary" "$PROVISIONAL_RECEIPT" \
+        || die "provisional receipt path was created concurrently"
+    rm -f -- "$temporary" "$unsigned"
+}
+
 if [[ "${1:-}" == --doctor ]]; then doctor; exit 0; fi
 while (( $# > 0 )); do
     case "$1" in
         --subject-identity) SUBJECT_IDENTITY="${2:-}"; shift ;;
+        --run-intent) RUN_INTENT="${2:-}"; shift ;;
         --run-metadata) RUN_METADATA="${2:-}"; shift ;;
         --workload-metadata) WORKLOAD_METADATA="${2:-}"; shift ;;
         --workload-events) WORKLOAD_EVENTS="${2:-}"; shift ;;
@@ -590,6 +732,7 @@ while (( $# > 0 )); do
         --duration-ms) DURATION_MILLISECONDS="${2:-}"; shift ;;
         --output-directory) OUTPUT_DIRECTORY="${2:-}"; shift ;;
         --capture-start-notification) CAPTURE_START_NOTIFICATION="${2:-}"; shift ;;
+        --provisional-receipt) PROVISIONAL_RECEIPT="${2:-}"; shift ;;
         -h|--help) usage; exit 0 ;;
         *) usage >&2; die "unknown argument: $1" ;;
     esac
@@ -603,11 +746,17 @@ is_safe_label "$SESSION_ID" || die "session ID is invalid"
 is_sha256 "$NONCE" || die "nonce is invalid"
 is_uint "$WARMUP_MILLISECONDS" || die "warmup must be unsigned milliseconds"
 is_positive_integer "$DURATION_MILLISECONDS" || die "duration must be positive milliseconds"
+if ! is_uint "$RUN_METADATA_WAIT_TENTHS" \
+    || (( RUN_METADATA_WAIT_TENTHS > 1200 )); then
+    die "run metadata wait override is invalid"
+fi
 (( DURATION_MILLISECONDS % 1000 == 0 )) || die "duration must be whole seconds"
-[[ -n "$SUBJECT_IDENTITY" && -n "$RUN_METADATA" && -n "$WORKLOAD_METADATA" \
+[[ -n "$SUBJECT_IDENTITY" && -n "$RUN_INTENT" && -n "$RUN_METADATA" \
+    && -n "$WORKLOAD_METADATA" \
     && -n "$WORKLOAD_EVENTS" && -n "$READY_RECEIPT" \
     && -n "$CAMPAIGN_SECRET_FILE" \
-    && -n "$OUTPUT_DIRECTORY" ]] || die "required evidence or output argument is missing"
+    && -n "$OUTPUT_DIRECTORY" && -n "$PROVISIONAL_RECEIPT" ]] \
+    || die "required evidence or output argument is missing"
 [[ ! -e "$OUTPUT_DIRECTORY" ]] || die "output directory already exists"
 
 SCRIPT_DIRECTORY="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
@@ -619,15 +768,21 @@ readonly PROCESS_INSPECTOR TRACE_VERIFIER COMMAND_RUNNER
 [[ -x "$PROCESS_INSPECTOR" && -x "$TRACE_VERIFIER" && -x "$COMMAND_RUNNER" ]] \
     || die "trace verifier tooling is not executable"
 
-[[ ! -L "$SUBJECT_IDENTITY" && ! -L "$RUN_METADATA" \
+[[ ! -L "$SUBJECT_IDENTITY" && ! -L "$RUN_INTENT" \
+    && ( ! -e "$RUN_METADATA" || ! -L "$RUN_METADATA" ) \
     && ( ! -e "$WORKLOAD_EVENTS" || ! -L "$WORKLOAD_EVENTS" ) \
     && ! -L "$READY_RECEIPT" \
     && ( -z "$SUPPLEMENTAL_EVIDENCE" || ! -L "$SUPPLEMENTAL_EVIDENCE" ) \
+    && ( ! -e "$PROVISIONAL_RECEIPT" || ! -L "$PROVISIONAL_RECEIPT" ) \
     && ! -L "$CAMPAIGN_SECRET_FILE" \
     && ( ! -e "$WORKLOAD_METADATA" || ! -L "$WORKLOAD_METADATA" ) ]] \
     || die "evidence inputs must not be symlinks"
 SUBJECT_IDENTITY="$(realpath "$SUBJECT_IDENTITY")"
-RUN_METADATA="$(realpath "$RUN_METADATA")"
+RUN_INTENT="$(realpath "$RUN_INTENT")"
+[[ ! -e "$RUN_METADATA" ]] || die "final run metadata must be absent at capture launch"
+RUN_METADATA="$(canonical_pending_path "$RUN_METADATA")"
+RUN_METADATA_PARENT="$(dirname -- "$RUN_METADATA")"
+RUN_METADATA_PARENT_IDENTITY="$(stat -f '%d:%i' "$RUN_METADATA_PARENT")"
 CAMPAIGN_SECRET_FILE="$(realpath "$CAMPAIGN_SECRET_FILE")"
 READY_RECEIPT="$(realpath "$READY_RECEIPT")"
 if [[ -n "$SUPPLEMENTAL_EVIDENCE" ]]; then
@@ -662,14 +817,21 @@ if [[ -n "$CAPTURE_START_NOTIFICATION" ]]; then
         || die "capture-start notification must not exist"
     CAPTURE_START_NOTIFICATION="$(canonical_pending_path "$CAPTURE_START_NOTIFICATION")"
 fi
-readonly SUBJECT_IDENTITY RUN_METADATA WORKLOAD_METADATA WORKLOAD_EVENTS READY_RECEIPT \
+[[ ! -e "$PROVISIONAL_RECEIPT" ]] || die "provisional receipt must not exist"
+PROVISIONAL_RECEIPT="$(canonical_pending_path "$PROVISIONAL_RECEIPT")"
+PROVISIONAL_RECEIPT_PARENT="$(dirname -- "$PROVISIONAL_RECEIPT")"
+PROVISIONAL_RECEIPT_PARENT_IDENTITY="$(stat -f '%d:%i' "$PROVISIONAL_RECEIPT_PARENT")"
+readonly SUBJECT_IDENTITY RUN_INTENT RUN_METADATA RUN_METADATA_PARENT \
+    RUN_METADATA_PARENT_IDENTITY WORKLOAD_METADATA WORKLOAD_EVENTS READY_RECEIPT \
     CAMPAIGN_SECRET_FILE WORKLOAD_METADATA_PARENT WORKLOAD_EVENTS_PARENT \
     WORKLOAD_METADATA_PARENT_IDENTITY WORKLOAD_EVENTS_PARENT_IDENTITY \
     CAPTURE_START_NOTIFICATION SUPPLEMENTAL_EVIDENCE SUPPLEMENTAL_EVIDENCE_PARENT \
     SUPPLEMENTAL_EVIDENCE_PARENT_IDENTITY SUPPLEMENTAL_WAS_PREEXISTING \
     PRECAPTURE_SUPPLEMENTAL_IDENTITY PRECAPTURE_SUPPLEMENTAL_SHA256
+readonly PROVISIONAL_RECEIPT PROVISIONAL_RECEIPT_PARENT \
+    PROVISIONAL_RECEIPT_PARENT_IDENTITY
 validate_subject_identity
-validate_run_metadata
+validate_run_intent
 validate_campaign_secret
 validate_ready_receipt
 package_bundle_matches || die "frozen application bundle identity does not match"
@@ -767,6 +929,7 @@ workload_valid=false
 if validate_workload_metadata; then workload_valid=true; fi
 supplemental_valid=false
 if validate_supplemental_evidence; then supplemental_valid=true; fi
+run_metadata_valid=false
 workload_metadata_hash="${WORKLOAD_METADATA_SHA256:-0000000000000000000000000000000000000000000000000000000000000000}"
 actual_seconds="$(verification_metric actual_record_duration_seconds)"
 actual_duration_ms="$(awk -v seconds="${actual_seconds:-0}" 'BEGIN { printf "%.0f", seconds * 1000 }')"
@@ -810,6 +973,30 @@ if [[ "$verification_status" == 0 ]]; then
     time_profiler_target_verified=true; allocations_target_verified=true; hangs_target_verified=true
 fi
 
+provisional_ready=false
+if [[ "$record_status" == 0 && "$export_status" == 0 \
+    && "$table_export_status" == 0 && "$verification_status" == 0 ]] \
+    && [[ "$target_identity_verified" == true && "$inputs_frozen" == true \
+        && "$workload_valid" == true && "$supplemental_valid" == true \
+        && "$clock_mapping_verified" == true ]] \
+    && (( capture_started_ns <= MEASUREMENT_START_NS \
+        && MEASUREMENT_START_NS - capture_started_ns <= 2000000000 \
+        && capture_ended_ns >= WORKLOAD_ENDED_NS \
+        && capture_ended_ns - WORKLOAD_ENDED_NS <= 2000000000 )) \
+    && [[ "$TEST_OVERRIDES_ACTIVE" == false ]]; then
+    provisional_ready=true
+    publish_provisional_receipt
+fi
+if validate_run_metadata; then run_metadata_valid=true; fi
+run_metadata_hash="${RUN_METADATA_SHA256:-0000000000000000000000000000000000000000000000000000000000000000}"
+final_inputs_frozen=false
+if [[ "$run_metadata_valid" == true ]] \
+    && frozen_inputs_match \
+    && [[ "$(stat -f '%d:%i' "$RUN_METADATA")" == "$RUN_METADATA_IDENTITY" \
+        && "$(sha256 "$RUN_METADATA")" == "$RUN_METADATA_SHA256" ]]; then
+    final_inputs_frozen=true
+fi
+
 capture_status=INCOMPLETE
 incomplete_reason=none
 metadata_status=incomplete
@@ -830,7 +1017,10 @@ elif (( capture_started_ns > MEASUREMENT_START_NS \
     || capture_ended_ns < WORKLOAD_ENDED_NS \
     || capture_ended_ns - WORKLOAD_ENDED_NS > 2000000000 )); then
     incomplete_reason=trace-workload-interval-mismatch
+elif [[ "$run_metadata_valid" != true ]]; then incomplete_reason=run-metadata-invalid
+elif [[ "$final_inputs_frozen" != true ]]; then incomplete_reason=frozen-input-changed
 elif [[ "$TEST_OVERRIDES_ACTIVE" == true ]]; then incomplete_reason=test-overrides-active
+elif [[ "$provisional_ready" != true ]]; then incomplete_reason=provisional-receipt-not-published
 else
     capture_status=CAPTURED
     metadata_status=complete

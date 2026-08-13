@@ -743,6 +743,15 @@ case "$2" in
             mv -- "$FAKE_XCRUN_REPLACE_FILE_SOURCE_2" \
                 "${FAKE_XCRUN_REPLACE_FILE_TARGET_2:?}"
         fi
+        if [[ -n "${FAKE_XCRUN_PUBLISH_RUN_SOURCE:-}" \
+            && "${FAKE_XCRUN_SKIP_RUN_PUBLISH:-0}" != 1 ]]; then
+            mv -- "$FAKE_XCRUN_PUBLISH_RUN_SOURCE" \
+                "${FAKE_XCRUN_PUBLISH_RUN_TARGET:?}"
+        fi
+        if [[ -n "${FAKE_XCRUN_REPLACE_PUBLISHED_RUN_SOURCE:-}" ]]; then
+            mv -- "$FAKE_XCRUN_REPLACE_PUBLISHED_RUN_SOURCE" \
+                "${FAKE_XCRUN_PUBLISH_RUN_TARGET:?}"
+        fi
         if [[ -n "${FAKE_XCRUN_MUTATE_FILE:-}" ]]; then
             chmod 0600 "$FAKE_XCRUN_MUTATE_FILE"
             printf 'mutated\ttrue\n' >> "$FAKE_XCRUN_MUTATE_FILE"
@@ -1352,17 +1361,21 @@ v3_subject="$TEMP_ROOT/v3-subject.tsv"
 } > "$v3_subject"
 chmod 0444 "$v3_subject"
 v3_subject_hash="$(shasum -a 256 "$v3_subject" | awk '{print $1}')"
-v3_run="$TEMP_ROOT/v3-run.tsv"
+v3_run_intent="$TEMP_ROOT/v3-run-intent.tsv"
 {
     printf 'format_version\t1\nsubject\tspaceterm\nsubject_identity_sha256\t%s\n' "$v3_subject_hash"
     printf 'scenario\tascii\nscenario_plan_sha256\t%s\n' "$V3_HASH_A"
     printf 'workload_sha256\t%s\ncommand_sha256\t%s\n' "$V3_HASH_B" "$V3_HASH_C"
     printf 'environment_sha256\t%s\nfont_sha256\t%s\n' "$V3_HASH_D" "$V3_HASH_E"
     printf 'initial_grid_sha256\t%s\nmeasured_duration_ms\t1000\n' "$V3_HASH_F"
-    printf 'process_pid\t%s\nprocess_start_identity\t%s\nstatus\tcomplete\n' \
+    printf 'process_pid\t%s\nprocess_start_identity\t%s\n' \
         "$v3_target_pid" "$v3_start_identity"
-} > "$v3_run"
-chmod 0444 "$v3_run"
+    printf 'campaign_id\ttrace-campaign\nsession_id\ttrace-session\n'
+    printf 'nonce\t1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef\n'
+    printf 'native_provisional_observation_sha256\t%s\nstatus\tprepared\n' "$V3_HASH_A"
+} > "$v3_run_intent"
+chmod 0444 "$v3_run_intent"
+v3_run_intent_hash="$(shasum -a 256 "$v3_run_intent" | awk '{ print $1 }')"
 
 fake_clock="$TEMP_ROOT/fake-continuous-clock"
 cat > "$fake_clock" <<'EOF'
@@ -1388,6 +1401,29 @@ chmod +x "$fake_clock"
 readonly V3_CAMPAIGN_ID=trace-campaign
 readonly V3_SESSION_ID=trace-session
 readonly V3_NONCE=1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef
+
+write_v3_final_run() {
+    local path="$1" intent_hash="${2:-$v3_run_intent_hash}"
+    {
+        printf 'format_version\t2\n'
+        for key in subject subject_identity_sha256 scenario scenario_plan_sha256 \
+            workload_sha256 command_sha256 environment_sha256 font_sha256 \
+            initial_grid_sha256 measured_duration_ms process_pid process_start_identity; do
+            printf '%s\t%s\n' "$key" "$(metric "$v3_run_intent" "$key")"
+        done
+        printf 'run_intent_sha256\t%s\n' "$intent_hash"
+        printf 'native_observation_sha256\t%s\n' "$V3_HASH_C"
+        printf 'native_runtime_metadata_sha256\t%s\n' "$V3_HASH_D"
+        printf 'native_failure_actions_sha256\t%s\n' "$V3_HASH_E"
+        printf 'native_failure_action_enabled\tfalse\n'
+        printf 'native_failure_request_count\t0\nnative_failure_result_count\t0\n'
+        printf 'native_failure_resource_staged_count\t0\n'
+        printf 'native_failure_resource_staged_bytes\t0\n'
+        printf 'native_failure_resource_rolled_back_count\t0\n'
+        printf 'native_failure_resource_rolled_back_bytes\t0\nstatus\tcomplete\n'
+    } > "$path"
+    chmod 0444 "$path"
+}
 v3_secret="$TEMP_ROOT/v3-secret"
 printf '0123456789abcdef0123456789abcdef\n' > "$v3_secret"
 chmod 0400 "$v3_secret"
@@ -1468,10 +1504,15 @@ run_v3_incomplete() {
     local name="$1" expected="$2" start="${3:-1000000000}" end="${4:-2000000000}"
     shift 4 || true
     local directory="$TEMP_ROOT/v3-$name" workload="$TEMP_ROOT/v3-$name-workload.tsv"
+    local run_metadata="$TEMP_ROOT/v3-$name-run.tsv"
+    local run_source="$TEMP_ROOT/v3-$name-run.pending"
+    local provisional="$TEMP_ROOT/v3-$name-provisional.tsv"
     local recorder_error="$TEMP_ROOT/v3-$name-recorder.err"
+    local late_publisher_pid=""
     local -a scenario_environment=("SPACETERM_TEST_TRACE_SCENARIO=$name")
     local -a recorder_arguments=(
-        --subject-identity "$v3_subject" --run-metadata "$v3_run"
+        --subject-identity "$v3_subject" --run-intent "$v3_run_intent"
+        --run-metadata "$run_metadata" --provisional-receipt "$provisional"
         --workload-metadata "$workload" --workload-events "$v3_events"
         --workload-ready-receipt "$v3_ready"
         --campaign-secret-file "$v3_secret" --campaign-id "$V3_CAMPAIGN_ID"
@@ -1481,9 +1522,44 @@ run_v3_incomplete() {
     local producer_sha256="$V3_HASH_B"
     [[ "$name" != producer-mismatch ]] || producer_sha256="$V3_HASH_A"
     write_v3_workload "$workload" "$start" "$end" "$producer_sha256"
+    write_v3_final_run "$run_source"
+    scenario_environment+=(
+        "FAKE_XCRUN_PUBLISH_RUN_SOURCE=$run_source"
+        "FAKE_XCRUN_PUBLISH_RUN_TARGET=$run_metadata"
+    )
     case "$name" in
         invalid-hmac) scenario_environment+=("FAKE_XCRUN_MUTATE_HMAC_FILE=$workload") ;;
-        mutated-run) scenario_environment+=("FAKE_XCRUN_MUTATE_FILE=$v3_run") ;;
+        mutated-run) scenario_environment+=("FAKE_XCRUN_MUTATE_FILE=$v3_run_intent") ;;
+        cross-intent)
+            chmod 0600 "$run_source"
+            sed -i '' $'s/^run_intent_sha256\t.*/run_intent_sha256\taaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/' "$run_source"
+            chmod 0444 "$run_source"
+            ;;
+        malformed-final)
+            chmod 0600 "$run_source"
+            printf 'unknown\tfield\n' >> "$run_source"
+            chmod 0444 "$run_source"
+            ;;
+        replaced-final)
+            local replacement="$TEMP_ROOT/v3-$name-run.replacement"
+            write_v3_final_run "$replacement" "$V3_HASH_A"
+            scenario_environment+=("FAKE_XCRUN_REPLACE_PUBLISHED_RUN_SOURCE=$replacement")
+            ;;
+        missing-final)
+            scenario_environment+=(
+                "FAKE_XCRUN_SKIP_RUN_PUBLISH=1"
+                "SPACETERM_TEST_RUN_METADATA_WAIT_TENTHS=2"
+            )
+            ;;
+        late-final)
+            scenario_environment+=(
+                "FAKE_XCRUN_SKIP_RUN_PUBLISH=1"
+                "SPACETERM_TEST_RUN_METADATA_WAIT_TENTHS=2"
+            )
+            ( sleep 2; mv -- "$run_source" "$run_metadata" ) &
+            late_publisher_pid=$!
+            TARGET_PIDS+=("$late_publisher_pid")
+            ;;
         mutated-plist-identifier)
             scenario_environment+=("FAKE_XCRUN_MUTATE_PLIST=$trace_app/Contents/Info.plist")
             ;;
@@ -1540,6 +1616,9 @@ run_v3_incomplete() {
         "$SCRIPT_DIRECTORY/record-release-performance-trace.sh" \
         "${recorder_arguments[@]}" \
         --output-directory "$directory" >/dev/null 2>"$recorder_error"; then
+        sed -n '1,80p' "$recorder_error" >&2
+        [[ ! -f "$directory/spaceterm-ascii-trace-metadata.tsv" ]] \
+            || sed -n '1,40p' "$directory/spaceterm-ascii-trace-metadata.tsv" >&2
         fail "v3 trace recorder accepted incomplete $name evidence"
     fi
     local metadata="$directory/spaceterm-ascii-trace-metadata.tsv"
@@ -1551,13 +1630,21 @@ run_v3_incomplete() {
     assert_equal "$expected" "$(metric "$metadata" incomplete_reason)" "$name reason"
     assert_equal 3 "$(metric "$metadata" format_version)" "$name v3 format"
     assert_equal incomplete "$(metric "$metadata" status)" "$name finalization status"
+    [[ ! -e "$provisional" ]] \
+        || fail "$name published a CAPTURED provisional receipt under test overrides"
+    if [[ -n "$late_publisher_pid" ]]; then
+        wait "$late_publisher_pid"
+        forget_target_pid "$late_publisher_pid"
+        assert_equal INCOMPLETE "$(metric "$metadata" capture_status)" \
+            "$name remained incomplete after late evidence appeared"
+    fi
 }
 
 run_v3_incomplete overrides test-overrides-active 1000000000 2000000000
 v3_metadata="$TEMP_ROOT/v3-overrides/spaceterm-ascii-trace-metadata.tsv"
 assert_equal "$v3_subject_hash" "$(metric "$v3_metadata" subject_identity_sha256)" \
     "trace subject binding"
-assert_equal "$(shasum -a 256 "$v3_run" | awk '{print $1}')" \
+assert_equal "$(shasum -a 256 "$TEMP_ROOT/v3-overrides-run.tsv" | awk '{print $1}')" \
     "$(metric "$v3_metadata" run_metadata_sha256)" "trace run binding"
 assert_equal true "$(metric "$v3_metadata" trace_target_pid_verified)" "trace PID binding"
 assert_equal 2 "$(metric "$v3_metadata" time_profiler_rows)" "time profiler rows"
@@ -1578,6 +1665,28 @@ grep -Fq $'\t--attach\t'"$v3_target_pid" "$v3_log" \
     || fail "trace recorder did not attach to the frozen PID"
 grep -Fq $'\t--time-limit\t4s' "$v3_log" \
     || fail "trace recorder omitted its bounded capture envelope"
+
+premature_run="$TEMP_ROOT/v3-premature-run.tsv"
+write_v3_final_run "$premature_run"
+premature_workload="$TEMP_ROOT/v3-premature-workload.tsv"
+write_v3_workload "$premature_workload"
+if env FAKE_XCRUN_LOG="$v3_log" FAKE_XCRUN_TARGET_PID="$v3_target_pid" \
+    FAKE_CLOCK_COUNTER="$TEMP_ROOT/v3-premature-clock" FAKE_INSPECTOR_LIVE_CODE=1 \
+    SPACETERM_CONTINUOUS_CLOCK="$fake_clock" SPACETERM_XCRUN="$fake_xcrun" \
+    SPACETERM_PROCESS_INSPECTOR="$fake_process_inspector" \
+    "$SCRIPT_DIRECTORY/record-release-performance-trace.sh" \
+    --subject-identity "$v3_subject" --run-intent "$v3_run_intent" \
+    --run-metadata "$premature_run" \
+    --provisional-receipt "$TEMP_ROOT/v3-premature-provisional.tsv" \
+    --workload-metadata "$premature_workload" --workload-events "$v3_events" \
+    --workload-ready-receipt "$v3_ready" --campaign-secret-file "$v3_secret" \
+    --campaign-id "$V3_CAMPAIGN_ID" --session-id "$V3_SESSION_ID" \
+    --nonce "$V3_NONCE" --scenario ascii --warmup-ms 0 --duration-ms 1000 \
+    --output-directory "$TEMP_ROOT/v3-premature" >/dev/null 2>&1; then
+    fail "trace recorder accepted run metadata finalized before capture"
+fi
+[[ ! -e "$TEMP_ROOT/v3-premature/spaceterm-ascii-trace-metadata.tsv" ]] \
+    || fail "trace recorder published metadata for a premature final run"
 run_v3_incomplete supplemental test-overrides-active 1000000000 2000000000
 assert_equal "$(shasum -a 256 "$v3_supplemental" | awk '{ print $1 }')" \
     "$(metric "$TEMP_ROOT/v3-supplemental/spaceterm-ascii-trace-metadata.tsv" \
@@ -1598,16 +1707,23 @@ chmod 0444 "$v3_supplemental"
 
 notified_workload="$TEMP_ROOT/v3-notified-workload.tsv"
 write_v3_workload "$notified_workload" 1000000000 2000000000
+notified_run="$TEMP_ROOT/v3-notified-run.tsv"
+notified_run_source="$TEMP_ROOT/v3-notified-run.pending"
+write_v3_final_run "$notified_run_source"
 capture_notification="$TEMP_ROOT/v3-capture-start.tsv"
 notified_directory="$TEMP_ROOT/v3-notified"
 if env FAKE_XCRUN_LOG="$v3_log" FAKE_XCRUN_TARGET_PID="$v3_target_pid" \
     FAKE_XCRUN_SLEEP_SECONDS=1 FAKE_CLOCK_COUNTER="$TEMP_ROOT/v3-notified-clock" \
     FAKE_INSPECTOR_LIVE_CODE=1 \
     FAKE_XCRUN_REQUIRE_NOTIFICATION="$capture_notification" \
+    FAKE_XCRUN_PUBLISH_RUN_SOURCE="$notified_run_source" \
+    FAKE_XCRUN_PUBLISH_RUN_TARGET="$notified_run" \
     SPACETERM_CONTINUOUS_CLOCK="$fake_clock" SPACETERM_XCRUN="$fake_xcrun" \
     SPACETERM_PROCESS_INSPECTOR="$fake_process_inspector" \
     "$SCRIPT_DIRECTORY/record-release-performance-trace.sh" \
-    --subject-identity "$v3_subject" --run-metadata "$v3_run" \
+    --subject-identity "$v3_subject" --run-intent "$v3_run_intent" \
+    --run-metadata "$notified_run" \
+    --provisional-receipt "$TEMP_ROOT/v3-notified-provisional.tsv" \
     --workload-metadata "$notified_workload" --workload-events "$v3_events" \
     --workload-ready-receipt "$v3_ready" \
     --campaign-secret-file "$v3_secret" --campaign-id "$V3_CAMPAIGN_ID" \
@@ -1662,6 +1778,11 @@ run_v3_incomplete coherent-full-envelope test-overrides-active 3000000000 400000
     FAKE_XCRUN_TRACE_DURATION=4 FAKE_XCRUN_END_DATE=2026-08-12T00:00:04Z \
     FAKE_CLOCK_END_NS=5000000000 FAKE_CLOCK_END_EPOCH_NS=1786492804000000000 \
     FAKE_XCRUN_SLEEP_SECONDS=4 FAKE_XCRUN_FULL_ENVELOPE_SAMPLES=1
+run_v3_incomplete cross-intent run-metadata-invalid 1000000000 2000000000
+run_v3_incomplete malformed-final run-metadata-invalid 1000000000 2000000000
+run_v3_incomplete replaced-final run-metadata-invalid 1000000000 2000000000
+run_v3_incomplete missing-final run-metadata-invalid 1000000000 2000000000
+run_v3_incomplete late-final run-metadata-invalid 1000000000 2000000000
 run_v3_incomplete invalid-hmac workload-metadata-invalid 1000000000 2000000000
 run_v3_incomplete producer-mismatch workload-metadata-invalid 1000000000 2000000000
 run_v3_incomplete short-workload workload-metadata-invalid 1000000000 1800000000
@@ -1685,7 +1806,9 @@ expect_v3_input_rejected() {
         SPACETERM_CONTINUOUS_CLOCK="$fake_clock" SPACETERM_XCRUN="$fake_xcrun" \
         SPACETERM_PROCESS_INSPECTOR="$fake_process_inspector" \
         "$SCRIPT_DIRECTORY/record-release-performance-trace.sh" \
-        --subject-identity "$subject" --run-metadata "$v3_run" \
+        --subject-identity "$subject" --run-intent "$v3_run_intent" \
+        --run-metadata "$TEMP_ROOT/v3-input-$name-run.tsv" \
+        --provisional-receipt "$TEMP_ROOT/v3-input-$name-provisional.tsv" \
         --workload-metadata "$workload" --workload-events "$v3_events" \
         --workload-ready-receipt "$v3_ready" \
         --campaign-secret-file "$v3_secret" --campaign-id "$V3_CAMPAIGN_ID" \
@@ -1718,12 +1841,12 @@ for mutation in duplicate unknown malformed downgrade; do
     expect_v3_input_rejected "$mutation" "$v3_mutated"
 done
 
-v3_run_backup="$TEMP_ROOT/v3-run-backup.tsv"
-cp "$v3_run" "$v3_run_backup"
+v3_run_backup="$TEMP_ROOT/v3-run-intent-backup.tsv"
+cp "$v3_run_intent" "$v3_run_backup"
 run_v3_incomplete mutated-run frozen-input-changed 1000000000 2000000000
-chmod 0600 "$v3_run"
-cp "$v3_run_backup" "$v3_run"
-chmod 0444 "$v3_run"
+chmod 0600 "$v3_run_intent"
+cp "$v3_run_backup" "$v3_run_intent"
+chmod 0444 "$v3_run_intent"
 
 # Genuine live guest proof: the real inspector rejects forged code identity
 # and PID generation even though the static copied bundle remains valid.
