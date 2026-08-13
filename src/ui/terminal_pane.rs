@@ -93,7 +93,7 @@ pub(crate) struct TerminalPane {
     session: Option<Box<dyn TerminalSessionHandle>>,
     session_start_attempted: bool,
     screen: Arc<ScreenSnapshot>,
-    accessibility: TerminalAccessibilityModel,
+    accessibility: Arc<TerminalAccessibilityModel>,
     accessibility_element: MacosAccessibilityElement,
     accessibility_notifications: Vec<AccessibilityNotification>,
     render_lifecycle: RenderLifecycle,
@@ -145,6 +145,7 @@ pub(crate) struct TerminalPane {
     _blink_task: Option<Task<()>>,
     _attention_task: Option<Task<()>>,
     _event_task: Option<Task<()>>,
+    _accessibility_task: Option<Task<()>>,
 }
 
 impl TerminalPane {
@@ -167,8 +168,9 @@ impl TerminalPane {
         })
         .detach();
         let screen = ScreenSnapshot::empty();
-        let accessibility = TerminalAccessibilityModel::from_screen(&screen);
-        let accessibility_element = MacosAccessibilityElement::new(window, accessibility.clone());
+        let accessibility = Arc::new(TerminalAccessibilityModel::from_screen(&screen));
+        let accessibility_element =
+            MacosAccessibilityElement::new(window, accessibility.as_ref().clone());
         let mut render_lifecycle = RenderLifecycle::new(SurfaceVisibility {
             application_active: false,
             key_window: false,
@@ -256,6 +258,7 @@ impl TerminalPane {
             _blink_task: None,
             _attention_task: None,
             _event_task: None,
+            _accessibility_task: None,
         }
     }
 
@@ -476,6 +479,7 @@ impl TerminalPane {
         self._blink_task.take();
         self._attention_task.take();
         self._event_task.take();
+        self._accessibility_task.take();
         self.render_lifecycle.release();
         self.session.take();
         if let Some(id) = self.secure_input_pane.take() {
@@ -601,6 +605,7 @@ impl TerminalPane {
                 self.session = Some(started.handle);
                 self.flush_pending_file_insertion(cx);
                 let receiver = started.events;
+                let accessibility_receiver = started.accessibility;
                 self._event_task = Some(cx.spawn(async move |this, cx| {
                     while let Ok(event) = receiver.recv().await {
                         let mut events = vec![event];
@@ -612,6 +617,22 @@ impl TerminalPane {
                                 for event in events {
                                     this.handle_event(event, cx);
                                 }
+                                cx.notify();
+                            })
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                }));
+                self._accessibility_task = Some(cx.spawn(async move |this, cx| {
+                    while let Ok(mut accessibility) = accessibility_receiver.recv().await {
+                        while let Ok(newer) = accessibility_receiver.try_recv() {
+                            accessibility = newer;
+                        }
+                        if this
+                            .update(cx, |this, cx| {
+                                this.handle_accessibility(accessibility);
                                 cx.notify();
                             })
                             .is_err()
@@ -639,7 +660,7 @@ impl TerminalPane {
             .and_then(|session| session.accessibility_selection_sender());
         self.accessibility_element.update(MacosAccessibilityUpdate {
             window,
-            model: &self.accessibility,
+            model: self.accessibility.as_ref(),
             bounds: self.grid_bounds,
             cell_width: self.cell_width,
             line_height: px(self.line_height),
@@ -661,18 +682,6 @@ impl TerminalPane {
                     self.title = title.into();
                     cx.emit(TerminalPaneEvent::TitleChanged(self.title.clone()));
                 }
-                let accessibility = TerminalAccessibilityModel::from_screen(&screen);
-                if accessibility.text() != self.accessibility.text() {
-                    self.accessibility_notifications
-                        .push(AccessibilityNotification::Value);
-                }
-                if accessibility.selected_or_cursor_range()
-                    != self.accessibility.selected_or_cursor_range()
-                {
-                    self.accessibility_notifications
-                        .push(AccessibilityNotification::Selection);
-                }
-                self.accessibility = accessibility;
                 let _ = self.render_lifecycle.observe_snapshot(screen.generation);
                 self.screen = screen;
                 self.sync_scrollbar(cx);
@@ -725,6 +734,21 @@ impl TerminalPane {
                 self.present_failure(failure, true);
             }
         }
+    }
+
+    fn handle_accessibility(&mut self, accessibility: Arc<TerminalAccessibilityModel>) {
+        if accessibility.active_screen() != self.accessibility.active_screen()
+            || !accessibility.shares_document(self.accessibility.as_ref())
+        {
+            self.accessibility_notifications
+                .push(AccessibilityNotification::Value);
+        }
+        if accessibility.selected_or_cursor_range() != self.accessibility.selected_or_cursor_range()
+        {
+            self.accessibility_notifications
+                .push(AccessibilityNotification::Selection);
+        }
+        self.accessibility = accessibility;
     }
 
     fn on_key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
@@ -1610,7 +1634,7 @@ impl EntityInputHandler for TerminalPane {
         {
             return None;
         }
-        let text = self.accessibility.text_for_range(range.clone())?.to_owned();
+        let text = self.accessibility.text_for_range(range.clone())?;
         *adjusted_range = Some(range);
         Some(text)
     }
@@ -2746,6 +2770,35 @@ mod tests {
         });
         cx.run_until_parked();
         (pane, cx, records)
+    }
+
+    #[gpui::test]
+    fn accessibility_uses_its_bounded_latest_lane_instead_of_screen_rows(cx: &mut TestAppContext) {
+        let (pane, cx, records) = connected_terminal_pane(cx);
+        records
+            .last_event_sender()
+            .unwrap()
+            .send_blocking(SessionEvent::Screen(blinking_screen()))
+            .unwrap();
+        cx.run_until_parked();
+        assert!(pane.read_with(cx, |pane, _| pane.accessibility.text().is_empty()));
+
+        let sender = records.last_accessibility_sender().unwrap();
+        for text in ["stale", "latest"] {
+            sender
+                .force_send(Arc::new(TerminalAccessibilityModel::new(
+                    vec![crate::terminal::AccessibilityLine::new(
+                        vec![crate::terminal::AccessibilityCell::new(text, 1, false)],
+                        false,
+                    )],
+                    0..1,
+                    Some((0, 0)),
+                )))
+                .unwrap();
+        }
+        cx.run_until_parked();
+
+        assert!(pane.read_with(cx, |pane, _| pane.accessibility.text() == "latest"));
     }
 
     fn connected_terminal_pane_with_key_propagation(

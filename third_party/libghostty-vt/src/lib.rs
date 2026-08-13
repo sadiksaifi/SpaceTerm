@@ -93,6 +93,7 @@ pub use libghostty_vt_sys as ffi;
 // e.g. Kitty Graphics extensions, Selection APIs
 pub mod terminal;
 
+pub mod accessibility;
 pub mod alloc;
 pub mod build_info;
 pub mod error;

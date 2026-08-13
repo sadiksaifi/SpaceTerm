@@ -73,7 +73,7 @@ impl AccessibilityElementState {
         self.model.selected_or_cursor_range()
     }
 
-    fn selected_text(&self) -> Option<&str> {
+    fn selected_text(&self) -> Option<String> {
         self.model.text_for_range(self.selected_range())
     }
 
@@ -704,13 +704,13 @@ mod native {
     extern "C" fn accessibility_selected_text(this: &Object, _: Sel) -> id {
         state(this)
             .and_then(AccessibilityElementState::selected_text)
-            .map_or(nil, ns_string)
+            .map_or(nil, |text| ns_string(&text))
     }
 
     extern "C" fn accessibility_string_for_range(this: &Object, _: Sel, range: NSRange) -> id {
         state(this)
             .and_then(|state| state.model.text_for_range(rust_range(range)?))
-            .map_or(nil, ns_string)
+            .map_or(nil, |text| ns_string(&text))
     }
 
     extern "C" fn accessibility_range_for_line(this: &Object, _: Sel, line: NSInteger) -> NSRange {
@@ -838,7 +838,7 @@ mod tests {
         assert!(state.focused);
         assert_eq!(state.frame, state.grid);
         assert_eq!(state.selected_range(), 1..3);
-        assert_eq!(state.selected_text(), Some("😀"));
+        assert_eq!(state.selected_text(), Some("😀".to_owned()));
         assert_eq!(
             state.screen_bounds_for_range(1..3),
             Some(ScreenRect {

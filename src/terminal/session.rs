@@ -21,6 +21,7 @@ use crate::platform::macos_pty::{
 use crate::platform::shell_integration::resource_root;
 #[cfg(all(target_os = "macos", not(test)))]
 use crate::terminal::accessibility::AccessibilitySelectionRequest;
+use crate::terminal::accessibility::TerminalAccessibilityModel;
 use crate::terminal::attention::AttentionEvent;
 #[cfg(test)]
 use crate::terminal::emulator::MAX_SYNCHRONIZED_OUTPUT_DURATION;
@@ -52,6 +53,7 @@ const PTY_OUTPUT_QUEUE_CAPACITY: usize = 8;
 const TERMIOS_POLL_INTERVAL: Duration = Duration::from_millis(200);
 const PASTE_CONFIRMATION_TIMEOUT: Duration = Duration::from_secs(30);
 const OSC52_AUTHORIZATION_TIMEOUT: Duration = Duration::from_secs(30);
+const ACCESSIBILITY_NORMAL_COMMAND_BURST: u8 = 8;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub(crate) struct SurfacePosition {
@@ -265,6 +267,7 @@ pub(crate) enum SessionError {
 pub(crate) struct StartedTerminalSession {
     pub(crate) handle: Box<dyn TerminalSessionHandle>,
     pub(crate) events: async_channel::Receiver<SessionEvent>,
+    pub(crate) accessibility: async_channel::Receiver<Arc<TerminalAccessibilityModel>>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -346,10 +349,11 @@ impl TerminalSessionFactory for NativeTerminalSessionFactory {
         geometry: TerminalGeometry,
         working_directory: &Path,
     ) -> Result<StartedTerminalSession, SessionError> {
-        let (session, events) = TerminalSession::start(geometry, working_directory)?;
+        let (session, events, accessibility) = TerminalSession::start(geometry, working_directory)?;
         Ok(StartedTerminalSession {
             handle: Box::new(session),
             events,
+            accessibility,
         })
     }
 
@@ -427,6 +431,12 @@ pub(crate) struct TerminalSession {
     resizes: ResizeMailbox,
     find_queries: FindQueryMailbox,
 }
+
+type StartedSession = (
+    TerminalSession,
+    async_channel::Receiver<SessionEvent>,
+    async_channel::Receiver<Arc<TerminalAccessibilityModel>>,
+);
 
 trait SessionPty: Write + Send {
     fn take_reader(&mut self) -> std::io::Result<Box<dyn Read + Send>>;
@@ -566,7 +576,7 @@ impl TerminalSession {
     pub(crate) fn start(
         geometry: TerminalGeometry,
         working_directory: &Path,
-    ) -> Result<(Self, async_channel::Receiver<SessionEvent>), SessionError> {
+    ) -> Result<StartedSession, SessionError> {
         Self::start_deferred_with(geometry, working_directory, spawn_native_session_pty)
     }
 
@@ -574,7 +584,7 @@ impl TerminalSession {
         geometry: TerminalGeometry,
         working_directory: &Path,
         spawn_pty: impl FnOnce(PtySize, &Path) -> Result<StartedSessionPty, PtyError> + Send + 'static,
-    ) -> Result<(Self, async_channel::Receiver<SessionEvent>), SessionError> {
+    ) -> Result<StartedSession, SessionError> {
         let working_directory = PathBuf::from(working_directory);
         let fallback_title = shell_fallback_title();
         let terminal_name = identity::launch_identity(&resource_root()).term;
@@ -585,6 +595,7 @@ impl TerminalSession {
         let find_queries = FindQueryMailbox::default();
         let worker_find_queries = find_queries.clone();
         let (event_tx, event_rx) = async_channel::bounded(2);
+        let (accessibility_tx, accessibility_rx) = async_channel::bounded(1);
         let deferred_terminator = DeferredPtyTerminator::default();
         let worker_terminator = deferred_terminator.clone();
         let worker_events = event_tx.clone();
@@ -623,7 +634,10 @@ impl TerminalSession {
                         resizes: worker_resizes,
                         find_queries: worker_find_queries,
                     },
-                    event_tx,
+                    TerminalWorkerPublishers {
+                        events: event_tx,
+                        accessibility: accessibility_tx,
+                    },
                     StartupReporter::Events(worker_events),
                 );
             })
@@ -638,6 +652,7 @@ impl TerminalSession {
                 find_queries,
             },
             event_rx,
+            accessibility_rx,
         ))
     }
 
@@ -646,7 +661,7 @@ impl TerminalSession {
         geometry: TerminalGeometry,
         working_directory: &Path,
         spawn_pty: impl FnOnce(PtySize, &Path) -> Result<StartedSessionPty, PtyError>,
-    ) -> Result<(Self, async_channel::Receiver<SessionEvent>), SessionError> {
+    ) -> Result<StartedSession, SessionError> {
         let worker_directory = working_directory.to_owned();
         let terminal_name = identity::launch_identity(&resource_root()).term;
         let StartedSessionPty { pty, terminator } =
@@ -656,6 +671,7 @@ impl TerminalSession {
         // Two slots retain the latest screen and a final lifecycle event without
         // allowing sustained PTY output to build an unbounded UI backlog.
         let (event_tx, event_rx) = async_channel::bounded(2);
+        let (accessibility_tx, accessibility_rx) = async_channel::bounded(1);
         let (startup_tx, startup_rx) = mpsc::sync_channel(1);
         let resizes = ResizeMailbox::default();
         let worker_resizes = resizes.clone();
@@ -679,7 +695,10 @@ impl TerminalSession {
                         resizes: worker_resizes,
                         find_queries: worker_find_queries,
                     },
-                    event_tx,
+                    TerminalWorkerPublishers {
+                        events: event_tx,
+                        accessibility: accessibility_tx,
+                    },
                     StartupReporter::Blocking(startup_tx),
                 )
             })
@@ -695,6 +714,7 @@ impl TerminalSession {
                     find_queries,
                 },
                 event_rx,
+                accessibility_rx,
             )),
             Ok(Err(message)) => {
                 join_worker(worker);
@@ -1003,6 +1023,7 @@ enum Command {
     SelectionCopy(mpsc::SyncSender<Result<Option<SelectionCopy>, SelectionCopyError>>),
     #[cfg(all(target_os = "macos", not(test)))]
     AccessibilitySelection(AccessibilitySelectionRequest),
+    AccessibilityContinue,
     SelectionAutoscrollTick(PresentationGeneration),
     ReaderReady,
     Shutdown,
@@ -1016,9 +1037,11 @@ struct TerminalWorker {
     reader_events: mpsc::Receiver<ReaderEvent>,
     reader_thread: JoinHandle<()>,
     events: async_channel::Sender<SessionEvent>,
+    accessibility: async_channel::Sender<Arc<TerminalAccessibilityModel>>,
     resizes: ResizeMailbox,
     find_queries: FindQueryMailbox,
     pending_command: Option<Command>,
+    accessibility_continuation: AccessibilityContinuationSchedule,
     terminal_input_focused: bool,
     focus_reporting_enabled: bool,
     held_keys: HeldKeys,
@@ -1044,6 +1067,45 @@ struct TerminalWorkerContext {
 struct TerminalWorkerMailboxes {
     resizes: ResizeMailbox,
     find_queries: FindQueryMailbox,
+}
+
+struct TerminalWorkerPublishers {
+    events: async_channel::Sender<SessionEvent>,
+    accessibility: async_channel::Sender<Arc<TerminalAccessibilityModel>>,
+}
+
+#[derive(Default)]
+struct AccessibilityContinuationSchedule {
+    pending: bool,
+    normal_commands: u8,
+}
+
+impl AccessibilityContinuationSchedule {
+    fn update(&mut self, more: bool) {
+        self.pending = more;
+        if !more {
+            self.normal_commands = 0;
+        }
+    }
+
+    fn note_normal_command(&mut self) {
+        if self.pending {
+            self.normal_commands = self.normal_commands.saturating_add(1);
+        }
+    }
+
+    fn must_continue(&self) -> bool {
+        self.pending && self.normal_commands >= ACCESSIBILITY_NORMAL_COMMAND_BURST
+    }
+
+    fn take(&mut self) -> bool {
+        if !self.pending {
+            return false;
+        }
+        self.pending = false;
+        self.normal_commands = 0;
+        true
+    }
 }
 
 struct HiddenInputSchedule {
@@ -1310,7 +1372,7 @@ impl TerminalWorker {
         commands: CommandReceiver<Command>,
         reader_transport: ReaderTransport,
         mailboxes: TerminalWorkerMailboxes,
-        events: async_channel::Sender<SessionEvent>,
+        publishers: TerminalWorkerPublishers,
         startup: StartupReporter,
     ) {
         let TerminalWorkerContext {
@@ -1323,6 +1385,10 @@ impl TerminalWorker {
             resizes,
             find_queries,
         } = mailboxes;
+        let TerminalWorkerPublishers {
+            events,
+            accessibility,
+        } = publishers;
         let ReaderTransport {
             commands: reader_commands,
             events: reader_events,
@@ -1373,9 +1439,11 @@ impl TerminalWorker {
             reader_events: reader_event_rx,
             reader_thread,
             events,
+            accessibility,
             resizes,
             find_queries,
             pending_command: None,
+            accessibility_continuation: AccessibilityContinuationSchedule::default(),
             terminal_input_focused: true,
             focus_reporting_enabled: false,
             held_keys: HeldKeys::default(),
@@ -1417,17 +1485,27 @@ impl TerminalWorker {
     }
 
     fn receive_next_command(&mut self) -> Option<Command> {
+        if self.accessibility_continuation.must_continue() {
+            return self.take_accessibility_continuation();
+        }
         if let Some(command) = self.pending_command.take() {
-            return Some(command);
+            return Some(self.note_normal_command(command));
         }
         if !self.osc52_authorization.is_pending()
             && (!self.deferred_osc52_effects.is_empty() || !self.deferred_output_chunks.is_empty())
         {
-            return Some(Command::ResumeOsc52Output);
+            return Some(self.note_normal_command(Command::ResumeOsc52Output));
         }
         if !self.osc52_authorization.is_pending() && self.deferred_reader_ready {
             self.deferred_reader_ready = false;
-            return Some(Command::ReaderReady);
+            return Some(self.note_normal_command(Command::ReaderReady));
+        }
+        if self.accessibility_continuation.pending {
+            return match self.commands.try_recv() {
+                Ok(command) => Some(self.note_normal_command(command)),
+                Err(mpsc::TryRecvError::Empty) => self.take_accessibility_continuation(),
+                Err(mpsc::TryRecvError::Disconnected) => None,
+            };
         }
 
         loop {
@@ -1444,24 +1522,29 @@ impl TerminalWorker {
             .flatten()
             .min();
             let Some(deadline) = deadline else {
-                return self.commands.recv().ok();
+                let command = self.commands.recv().ok()?;
+                return Some(self.note_normal_command(command));
             };
             let timeout = deadline.saturating_duration_since(Instant::now());
             match self.commands.recv_timeout(timeout) {
-                Ok(command) => return Some(command),
+                Ok(command) => return Some(self.note_normal_command(command)),
                 Err(mpsc::RecvTimeoutError::Timeout) => {
                     let now = Instant::now();
                     if let Some(generation) = self.selection_autoscroll.take_due(now) {
-                        return Some(Command::SelectionAutoscrollTick(generation));
+                        return Some(
+                            self.note_normal_command(Command::SelectionAutoscrollTick(generation)),
+                        );
                     }
                     if self.paste_confirmations.expire(now) {
-                        return Some(Command::PasteConfirmationExpired);
+                        return Some(self.note_normal_command(Command::PasteConfirmationExpired));
                     }
                     if let Some(id) = self.osc52_authorization.expire(now) {
-                        return Some(Command::Osc52AuthorizationExpired(id));
+                        return Some(
+                            self.note_normal_command(Command::Osc52AuthorizationExpired(id)),
+                        );
                     }
                     if now >= self.hidden_input.deadline {
-                        return Some(Command::PollHiddenInput);
+                        return Some(self.note_normal_command(Command::PollHiddenInput));
                     }
                     if synchronized_output_deadline.is_some()
                         && !self.release_synchronized_output_if_due(now)
@@ -1472,6 +1555,19 @@ impl TerminalWorker {
                 Err(mpsc::RecvTimeoutError::Disconnected) => return None,
             }
         }
+    }
+
+    fn note_normal_command(&mut self, command: Command) -> Command {
+        if !matches!(&command, Command::AccessibilityContinue) {
+            self.accessibility_continuation.note_normal_command();
+        }
+        command
+    }
+
+    fn take_accessibility_continuation(&mut self) -> Option<Command> {
+        self.accessibility_continuation
+            .take()
+            .then_some(Command::AccessibilityContinue)
     }
 
     fn process_command(&mut self, command: Command) -> bool {
@@ -1584,6 +1680,7 @@ impl TerminalWorker {
                     }
                 }
             }
+            Command::AccessibilityContinue => self.publish_accessibility(false),
             Command::SelectionAutoscrollTick(generation) => {
                 match self.emulator.selection_autoscroll_tick(generation) {
                     Ok(action) => {
@@ -1997,6 +2094,10 @@ impl TerminalWorker {
     }
 
     fn publish_screen(&mut self) -> bool {
+        if !self.publish_accessibility(true) {
+            return false;
+        }
+
         match self.emulator.snapshot() {
             Ok(Some(snapshot)) => self
                 .events
@@ -2010,6 +2111,26 @@ impl TerminalWorker {
                 false
             }
         }
+    }
+
+    fn publish_accessibility(&mut self, bind_next_presentation: bool) -> bool {
+        let (accessibility, more) =
+            match self.emulator.accessibility_snapshot(bind_next_presentation) {
+                Ok(update) => update,
+                Err(error) => {
+                    self.send_runtime_failure(format!(
+                        "failed to produce terminal accessibility snapshot: {error}"
+                    ));
+                    return false;
+                }
+            };
+        self.accessibility_continuation.update(more);
+        if let Some(accessibility) = accessibility {
+            // Accessibility is an independent best-effort presentation lane. Losing its
+            // receiver must not stop shell IO or lifecycle delivery on the event lane.
+            let _ = self.accessibility.force_send(accessibility);
+        }
+        true
     }
 
     fn release_synchronized_output_if_due(&mut self, now: Instant) -> bool {
@@ -2186,6 +2307,78 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::*;
+
+    #[test]
+    fn accessibility_continuation_runs_after_eight_normal_commands() {
+        let mut schedule = AccessibilityContinuationSchedule::default();
+        schedule.update(true);
+
+        for command in 0..ACCESSIBILITY_NORMAL_COMMAND_BURST {
+            assert!(!schedule.must_continue());
+            schedule.note_normal_command();
+            assert_eq!(
+                schedule.must_continue(),
+                command + 1 == ACCESSIBILITY_NORMAL_COMMAND_BURST
+            );
+        }
+
+        assert!(schedule.take());
+        assert!(!schedule.pending);
+        assert_eq!(schedule.normal_commands, 0);
+    }
+
+    #[test]
+    fn accessibility_continuation_is_cancelled_by_a_complete_update() {
+        let mut schedule = AccessibilityContinuationSchedule::default();
+        schedule.update(true);
+        schedule.note_normal_command();
+        schedule.update(false);
+
+        assert!(!schedule.pending);
+        assert!(!schedule.must_continue());
+        assert!(!schedule.take());
+    }
+
+    #[test]
+    fn repeated_incomplete_observations_do_not_starve_continuation_fairness() {
+        let mut schedule = AccessibilityContinuationSchedule::default();
+        schedule.update(true);
+
+        for _ in 0..ACCESSIBILITY_NORMAL_COMMAND_BURST {
+            schedule.note_normal_command();
+            schedule.update(true);
+        }
+
+        assert!(schedule.must_continue());
+    }
+
+    #[test]
+    fn bounded_accessibility_lane_retains_only_the_latest_snapshot() {
+        let (sender, receiver) = async_channel::bounded(1);
+        let first = Arc::new(TerminalAccessibilityModel::new(
+            vec![crate::terminal::AccessibilityLine::new(
+                vec![crate::terminal::AccessibilityCell::new("first", 1, false)],
+                false,
+            )],
+            0..1,
+            Some((0, 0)),
+        ));
+        let latest = Arc::new(TerminalAccessibilityModel::new(
+            vec![crate::terminal::AccessibilityLine::new(
+                vec![crate::terminal::AccessibilityCell::new("latest", 1, false)],
+                false,
+            )],
+            0..1,
+            Some((0, 0)),
+        ));
+
+        assert!(sender.force_send(first).is_ok());
+        assert!(sender.force_send(latest.clone()).is_ok());
+
+        let received = receiver.try_recv().unwrap();
+        assert!(Arc::ptr_eq(&received, &latest));
+        assert!(receiver.try_recv().is_err());
+    }
 
     #[test]
     fn hidden_input_polling_emits_only_transitions_and_fails_closed() {
@@ -2511,6 +2704,7 @@ mod tests {
         let (_reader_events, reader_event_rx) = mpsc::sync_channel(PTY_OUTPUT_QUEUE_CAPACITY);
         let records = ScriptedPtyRecords::default();
         let (events, receiver) = async_channel::bounded(PTY_OUTPUT_QUEUE_CAPACITY);
+        let (accessibility, _accessibility_receiver) = async_channel::bounded(1);
         let worker = TerminalWorker {
             pty: Box::new(ScriptedPty {
                 reader: None,
@@ -2527,9 +2721,11 @@ mod tests {
             reader_events: reader_event_rx,
             reader_thread: thread::spawn(|| {}),
             events,
+            accessibility,
             resizes: ResizeMailbox::default(),
             find_queries: FindQueryMailbox::default(),
             pending_command: None,
+            accessibility_continuation: AccessibilityContinuationSchedule::default(),
             terminal_input_focused: true,
             focus_reporting_enabled: false,
             held_keys: HeldKeys::default(),
@@ -2683,8 +2879,7 @@ mod tests {
         }
     }
 
-    type ScriptedStart =
-        Result<(TerminalSession, async_channel::Receiver<SessionEvent>), SessionError>;
+    type ScriptedStart = Result<StartedSession, SessionError>;
 
     fn start_scripted_session(
         options: ScriptedPtyOptions,
@@ -2831,7 +3026,7 @@ mod tests {
     #[test]
     fn scripted_output_and_exit_should_preserve_the_latest_screen_before_the_final_event() {
         let (result, reader_steps, records) = start_scripted_session(ScriptedPtyOptions::default());
-        let (mut session, events) = result.unwrap();
+        let (mut session, events, _accessibility) = result.unwrap();
 
         for index in 0..32 {
             reader_steps
@@ -2864,7 +3059,7 @@ mod tests {
     #[test]
     fn shell_exit_should_flush_a_pending_synchronized_output_transaction() {
         let (result, reader_steps, records) = start_scripted_session(ScriptedPtyOptions::default());
-        let (mut session, events) = result.unwrap();
+        let (mut session, events, _accessibility) = result.unwrap();
 
         reader_steps
             .send(ReaderStep::Bytes(b"\x1b[?2026hfinal output".to_vec()))
@@ -2889,7 +3084,7 @@ mod tests {
     fn session_snapshots_reuse_rows_unchanged_by_later_output() {
         let (result, reader_steps, _records) =
             start_scripted_session(ScriptedPtyOptions::default());
-        let (mut session, events) = result.unwrap();
+        let (mut session, events, _accessibility) = result.unwrap();
 
         reader_steps
             .send(ReaderStep::Bytes(b"first row".to_vec()))
@@ -2960,7 +3155,7 @@ mod tests {
         let (release_spawn, release) = mpsc::sync_channel(1);
         let started_at = Instant::now();
 
-        let (mut session, events) = TerminalSession::start_deferred_with(
+        let (mut session, events, _accessibility) = TerminalSession::start_deferred_with(
             test_geometry(),
             Path::new("/scripted"),
             move |size, working_directory| {
@@ -3001,6 +3196,7 @@ mod tests {
         let StartedTerminalSession {
             handle: session,
             events,
+            accessibility: _,
         } = NativeTerminalSessionFactory
             .start(
                 test_geometry(),
@@ -3056,7 +3252,7 @@ mod tests {
     #[test]
     fn scripted_output_should_reach_the_terminal_screen() {
         let (result, reader_steps, records) = start_scripted_session(ScriptedPtyOptions::default());
-        let (mut session, events) = result.unwrap();
+        let (mut session, events, _accessibility) = result.unwrap();
 
         reader_steps
             .send(ReaderStep::Bytes(b"scripted output".to_vec()))
@@ -3195,7 +3391,7 @@ mod tests {
     #[test]
     fn enabling_focus_reporting_emits_current_state_and_deduplicates_edges() {
         let (result, reader_steps, records) = start_scripted_session(ScriptedPtyOptions::default());
-        let (mut session, _events) = result.unwrap();
+        let (mut session, _events, _accessibility) = result.unwrap();
         session.focus(false);
         reader_steps
             .send(ReaderStep::Bytes(b"\x1b[?1004h".to_vec()))
@@ -3244,7 +3440,7 @@ mod tests {
     #[test]
     fn focus_loss_releases_terminal_held_keys_once_before_focus_out() {
         let (result, reader_steps, records) = start_scripted_session(ScriptedPtyOptions::default());
-        let (mut session, _events) = result.unwrap();
+        let (mut session, _events, _accessibility) = result.unwrap();
         reader_steps
             .send(ReaderStep::Bytes(b"\x1b[>11u\x1b[?1004h".to_vec()))
             .unwrap();
@@ -3287,6 +3483,7 @@ mod tests {
 
         let records = ScriptedPtyRecords::default();
         let (events, receiver) = async_channel::bounded(PTY_OUTPUT_QUEUE_CAPACITY);
+        let (accessibility, _accessibility_receiver) = async_channel::bounded(1);
         let mut worker = TerminalWorker {
             pty: Box::new(ScriptedPty {
                 reader: None,
@@ -3303,9 +3500,11 @@ mod tests {
             reader_events: reader_event_rx,
             reader_thread: thread::spawn(|| {}),
             events,
+            accessibility,
             resizes: ResizeMailbox::default(),
             find_queries: FindQueryMailbox::default(),
             pending_command: None,
+            accessibility_continuation: AccessibilityContinuationSchedule::default(),
             terminal_input_focused: true,
             focus_reporting_enabled: false,
             held_keys: HeldKeys::default(),
@@ -3342,6 +3541,7 @@ mod tests {
         let (_reader_events, reader_event_rx) = mpsc::sync_channel(PTY_OUTPUT_QUEUE_CAPACITY);
         let records = ScriptedPtyRecords::default();
         let (events, receiver) = async_channel::bounded(PTY_OUTPUT_QUEUE_CAPACITY);
+        let (accessibility, _accessibility_receiver) = async_channel::bounded(1);
         let mut worker = TerminalWorker {
             pty: Box::new(ScriptedPty {
                 reader: None,
@@ -3358,9 +3558,11 @@ mod tests {
             reader_events: reader_event_rx,
             reader_thread: thread::spawn(|| {}),
             events,
+            accessibility,
             resizes: ResizeMailbox::default(),
             find_queries: FindQueryMailbox::default(),
             pending_command: None,
+            accessibility_continuation: AccessibilityContinuationSchedule::default(),
             terminal_input_focused: true,
             focus_reporting_enabled: false,
             held_keys: HeldKeys::default(),
@@ -3396,7 +3598,7 @@ mod tests {
     #[test]
     fn output_control_output_should_preserve_screen_order_through_the_session_interface() {
         let (result, reader_steps, records) = start_scripted_session(ScriptedPtyOptions::default());
-        let (mut session, events) = result.unwrap();
+        let (mut session, events, _accessibility) = result.unwrap();
 
         reader_steps
             .send(ReaderStep::Bytes(b"first".to_vec()))
@@ -3437,7 +3639,7 @@ mod tests {
     fn copy_selection_should_observe_every_preceding_pointer_event() {
         let (result, reader_steps, _records) =
             start_scripted_session(ScriptedPtyOptions::default());
-        let (mut session, events) = result.unwrap();
+        let (mut session, events, _accessibility) = result.unwrap();
         reader_steps
             .send(ReaderStep::Bytes(b"selected".to_vec()))
             .unwrap();
@@ -3479,7 +3681,7 @@ mod tests {
     fn resize_should_reach_the_pty_with_pixel_dimensions() {
         let (result, _reader_steps, records) =
             start_scripted_session(ScriptedPtyOptions::default());
-        let (mut session, _events) = result.unwrap();
+        let (mut session, _events, _accessibility) = result.unwrap();
         let resized = geometry(100, 30, 9.0, 21.0);
 
         session.resize(resized);
@@ -3493,7 +3695,7 @@ mod tests {
     fn pixel_only_resize_should_reach_the_pty_without_publishing_a_grid_screen() {
         let (result, _reader_steps, records) =
             start_scripted_session(ScriptedPtyOptions::default());
-        let (mut session, events) = result.unwrap();
+        let (mut session, events, _accessibility) = result.unwrap();
         let initial = receive_event(&events, "the initial terminal screen", |event| {
             matches!(event, SessionEvent::Screen(_))
         });
@@ -3517,7 +3719,7 @@ mod tests {
     fn fractional_backing_geometry_should_reach_the_pty_without_per_cell_rounding() {
         let (result, _reader_steps, records) =
             start_scripted_session(ScriptedPtyOptions::default());
-        let (mut session, _events) = result.unwrap();
+        let (mut session, _events, _accessibility) = result.unwrap();
         let resized = TerminalGeometry::from_grid(
             CellGridSize::new(10, 2),
             LogicalCellSize::new(7.5, 20.0),
@@ -3628,7 +3830,7 @@ mod tests {
     #[test]
     fn pending_pty_responses_should_precede_later_input_through_the_session_interface() {
         let (result, reader_steps, records) = start_scripted_session(ScriptedPtyOptions::default());
-        let (mut session, events) = result.unwrap();
+        let (mut session, events, _accessibility) = result.unwrap();
         let resized = geometry(20, 4, 8.0, 18.0);
 
         reader_steps
@@ -3661,7 +3863,7 @@ mod tests {
     #[test]
     fn bracketed_multiline_paste_is_written_without_confirmation() {
         let (result, reader_steps, records) = start_scripted_session(ScriptedPtyOptions::default());
-        let (mut session, events) = result.unwrap();
+        let (mut session, events, _accessibility) = result.unwrap();
 
         reader_steps
             .send(ReaderStep::Bytes(b"\x1b[?2004hX".to_vec()))
@@ -3690,7 +3892,7 @@ mod tests {
     fn control_bearing_paste_is_sanitized_without_confirmation() {
         let (result, _reader_steps, records) =
             start_scripted_session(ScriptedPtyOptions::default());
-        let (mut session, _events) = result.unwrap();
+        let (mut session, _events, _accessibility) = result.unwrap();
 
         assert_eq!(
             session
@@ -3707,7 +3909,7 @@ mod tests {
     #[test]
     fn bracketed_paste_with_a_closing_fence_still_requires_confirmation() {
         let (result, reader_steps, records) = start_scripted_session(ScriptedPtyOptions::default());
-        let (mut session, events) = result.unwrap();
+        let (mut session, events, _accessibility) = result.unwrap();
 
         reader_steps
             .send(ReaderStep::Bytes(b"\x1b[?2004hX".to_vec()))
@@ -3736,7 +3938,7 @@ mod tests {
     fn unsafe_paste_is_immutable_until_confirmation_and_uses_exact_unbracketed_bytes() {
         let (result, _reader_steps, records) =
             start_scripted_session(ScriptedPtyOptions::default());
-        let (mut session, _events) = result.unwrap();
+        let (mut session, _events, _accessibility) = result.unwrap();
         let mut caller_copy = "one\r\ntw\x03o".to_owned();
 
         let outcome = session
@@ -3765,7 +3967,7 @@ mod tests {
     fn cancelled_paste_writes_no_pty_bytes() {
         let (result, _reader_steps, records) =
             start_scripted_session(ScriptedPtyOptions::default());
-        let (mut session, _events) = result.unwrap();
+        let (mut session, _events, _accessibility) = result.unwrap();
         let outcome = session
             .request_paste("first\nsecond".to_owned())
             .recv_blocking()
@@ -3790,7 +3992,7 @@ mod tests {
     fn focus_loss_invalidates_pending_paste_before_confirmation() {
         let (result, _reader_steps, records) =
             start_scripted_session(ScriptedPtyOptions::default());
-        let (mut session, _events) = result.unwrap();
+        let (mut session, _events, _accessibility) = result.unwrap();
         let outcome = session
             .request_paste("first\nsecond".to_owned())
             .recv_blocking()
@@ -3817,7 +4019,7 @@ mod tests {
     fn only_one_unsafe_paste_can_await_confirmation() {
         let (result, _reader_steps, records) =
             start_scripted_session(ScriptedPtyOptions::default());
-        let (mut session, _events) = result.unwrap();
+        let (mut session, _events, _accessibility) = result.unwrap();
         let first = session
             .request_paste("first\ncommand".to_owned())
             .recv_blocking()
@@ -3858,7 +4060,7 @@ mod tests {
             write_error: Some("write unavailable".to_owned()),
             ..ScriptedPtyOptions::default()
         });
-        let (mut session, events) = result.unwrap();
+        let (mut session, events, _accessibility) = result.unwrap();
 
         let _ = session.request_paste("input".to_owned()).recv_blocking();
         let event = receive_event(&events, "the PTY write failure", |event| {
@@ -3893,7 +4095,7 @@ mod tests {
             exit_code: 7,
             ..ScriptedPtyOptions::default()
         });
-        let (mut session, events) = result.unwrap();
+        let (mut session, events, _accessibility) = result.unwrap();
 
         reader_steps
             .send(ReaderStep::Error("read unavailable".to_owned()))
@@ -3922,7 +4124,7 @@ mod tests {
             wait_error: Some("wait unavailable".to_owned()),
             ..ScriptedPtyOptions::default()
         });
-        let (mut session, events) = result.unwrap();
+        let (mut session, events, _accessibility) = result.unwrap();
 
         reader_steps
             .send(ReaderStep::Error("read unavailable".to_owned()))
@@ -3952,7 +4154,7 @@ mod tests {
             wait_error: Some("wait unavailable".to_owned()),
             ..ScriptedPtyOptions::default()
         });
-        let (mut session, events) = result.unwrap();
+        let (mut session, events, _accessibility) = result.unwrap();
 
         reader_steps.send(ReaderStep::Eof).unwrap();
         let event = receive_event(&events, "the shell wait failure", |event| {
@@ -3980,7 +4182,7 @@ mod tests {
             wait_times_out: true,
             ..ScriptedPtyOptions::default()
         });
-        let (mut session, events) = result.unwrap();
+        let (mut session, events, _accessibility) = result.unwrap();
 
         reader_steps.send(ReaderStep::Eof).unwrap();
         let event = receive_event(&events, "the bounded shell wait failure", |event| {
@@ -4016,7 +4218,7 @@ mod tests {
             exit_code: 7,
             ..ScriptedPtyOptions::default()
         });
-        let (mut session, events) = result.unwrap();
+        let (mut session, events, _accessibility) = result.unwrap();
 
         reader_steps.send(ReaderStep::Eof).unwrap();
         let event = receive_event(&events, "the scripted shell exit", |event| {
@@ -4041,7 +4243,7 @@ mod tests {
             termination_releases_reader: false,
             ..ScriptedPtyOptions::default()
         });
-        let (mut session, _events) = result.unwrap();
+        let (mut session, _events, _accessibility) = result.unwrap();
         let (completed, completion) = mpsc::sync_channel(1);
 
         let shutdown_thread = thread::spawn(move || {
@@ -4103,7 +4305,7 @@ mod tests {
             termination_releases_reader: false,
             ..ScriptedPtyOptions::default()
         });
-        let (session, _events) = result.unwrap();
+        let (session, _events, _accessibility) = result.unwrap();
         let (completed, completion) = mpsc::sync_channel(1);
 
         let drop_thread = thread::spawn(move || {
@@ -4166,6 +4368,7 @@ mod tests {
         let StartedTerminalSession {
             handle: session,
             events,
+            accessibility: _,
         } = NativeTerminalSessionFactory
             .start(size, &std::env::current_dir().unwrap())
             .unwrap();
@@ -4225,6 +4428,7 @@ mod tests {
         let StartedTerminalSession {
             handle: session,
             events,
+            accessibility: _,
         } = NativeTerminalSessionFactory
             .start(size, &std::env::current_dir().unwrap())
             .unwrap();
@@ -4291,7 +4495,7 @@ mod tests {
     fn worker_autoscroll_ticks_publish_scrollback_without_more_pointer_motion() {
         let (result, reader_steps, _records) =
             start_scripted_session(ScriptedPtyOptions::default());
-        let (mut session, events) = result.unwrap();
+        let (mut session, events, _accessibility) = result.unwrap();
         let mut output = Vec::new();
         for row in 0..30 {
             output.extend_from_slice(format!("row {row:02}\r\n").as_bytes());

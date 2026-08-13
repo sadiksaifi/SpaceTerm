@@ -1,0 +1,861 @@
+diff --git a/include/ghostty/vt.h b/include/ghostty/vt.h
+index 404059123..f4e5aee65 100644
+--- a/include/ghostty/vt.h
++++ b/include/ghostty/vt.h
+@@ -127,7 +127,8 @@
+ extern "C" {
+ #endif
+ 
+ #include <ghostty/vt/types.h>
++#include <ghostty/vt/accessibility.h>
+ #include <ghostty/vt/allocator.h>
+ #include <ghostty/vt/build_info.h>
+ #include <ghostty/vt/color.h>
+diff --git a/include/ghostty/vt/accessibility.h b/include/ghostty/vt/accessibility.h
+new file mode 100644
+index 000000000..172f23eac
+--- /dev/null
++++ b/include/ghostty/vt/accessibility.h
+@@ -0,0 +1,133 @@
++#ifndef GHOSTTY_VT_ACCESSIBILITY_H
++#define GHOSTTY_VT_ACCESSIBILITY_H
++
++#include <stdbool.h>
++#include <stddef.h>
++#include <stdint.h>
++
++#include <ghostty/vt/types.h>
++
++typedef struct GhosttyAccessibilityState GhosttyAccessibilityState;
++
++typedef enum {
++  GHOSTTY_ACCESSIBILITY_SCREEN_PRIMARY = 0,
++  GHOSTTY_ACCESSIBILITY_SCREEN_ALTERNATE = 1,
++} GhosttyAccessibilityScreen;
++
++typedef enum {
++  GHOSTTY_ACCESSIBILITY_CELL_WIDE_NARROW = 0,
++  GHOSTTY_ACCESSIBILITY_CELL_WIDE_WIDE = 1,
++  GHOSTTY_ACCESSIBILITY_CELL_WIDE_SPACER_TAIL = 2,
++  GHOSTTY_ACCESSIBILITY_CELL_WIDE_SPACER_HEAD = 3,
++} GhosttyAccessibilityCellWide;
++
++typedef struct {
++  GhosttyAccessibilityScreen screen;
++  uint64_t screen_generation;
++  uint64_t node_serial;
++  uint16_t page_row;
++} GhosttyAccessibilityRowId;
++
++typedef struct {
++  GhosttyAccessibilityRowId row;
++  uint64_t row_revision;
++  uint16_t column;
++} GhosttyAccessibilityCellRef;
++
++typedef struct {
++  size_t size;
++  size_t max_cells;
++  size_t max_rows;
++} GhosttyAccessibilityUpdateOptions;
++
++typedef struct {
++  size_t size;
++  uint64_t revision;
++  GhosttyAccessibilityScreen screen;
++  uint64_t screen_generation;
++  bool complete;
++  bool more;
++  bool topology_changed;
++  uint64_t topology_epoch;
++  bool topology_complete;
++  size_t visible_start;
++  size_t visible_len;
++  bool has_cursor;
++  GhosttyAccessibilityCellRef cursor;
++  bool has_selection;
++  GhosttyAccessibilityCellRef selection_start;
++  GhosttyAccessibilityCellRef selection_end;
++  bool selection_rectangle;
++} GhosttyAccessibilitySnapshot;
++
++typedef struct {
++  GhosttyAccessibilityRowId id;
++  uint64_t revision;
++  bool soft_wrapped;
++} GhosttyAccessibilityRow;
++
++typedef struct {
++  uint16_t column;
++  GhosttyAccessibilityCellWide wide;
++  uint32_t codepoint;
++  const uint32_t* extra_codepoints;
++  size_t extra_codepoints_len;
++} GhosttyAccessibilityCell;
++
++typedef bool (*GhosttyAccessibilityTopologyCallback)(
++    void* userdata,
++    const GhosttyAccessibilityRowId* row);
++typedef bool (*GhosttyAccessibilityRowCallback)(
++    void* userdata,
++    const GhosttyAccessibilityRow* row);
++typedef bool (*GhosttyAccessibilityCellCallback)(
++    void* userdata,
++    const GhosttyAccessibilityCell* cell);
++
++/**
++ * Create persistent incremental accessibility state.
++ *
++ * The state is independent of a terminal, is not thread-safe, and must be
++ * freed with ghostty_accessibility_state_free.
++ */
++GHOSTTY_API GhosttyResult ghostty_accessibility_state_new(
++    GhosttyAccessibilityState** out_state);
++GHOSTTY_API void ghostty_accessibility_state_free(
++    GhosttyAccessibilityState* state);
++
++/**
++ * Observe terminal dirty state and extract a bounded semantic delta.
++ *
++ * Call this before Ghostty render-state update clears page/row dirty bits.
++ * max_cells and max_rows are hard-clamped to 16384 and 256 respectively.
++ * Compressed pages are decoded into temporary storage and remain compressed.
++ * Topology callbacks are chunked within max_rows. topology_epoch identifies
++ * one replacement topology and topology_complete marks its final chunk; row
++ * extraction begins only on a later call after that topology is complete.
++ * Callback pointers are borrowed only for the duration of this call.
++ */
++GHOSTTY_API GhosttyResult ghostty_accessibility_state_update(
++    GhosttyAccessibilityState* state,
++    GhosttyTerminal terminal,
++    const GhosttyAccessibilityUpdateOptions* options,
++    void* userdata,
++    GhosttyAccessibilityTopologyCallback topology_callback,
++    GhosttyAccessibilityRowCallback row_callback,
++    GhosttyAccessibilityCellCallback cell_callback,
++    GhosttyAccessibilitySnapshot* out_snapshot);
++
++/**
++ * Replace or clear the active terminal selection.
++ *
++ * Non-NULL endpoints must name the active screen generation and exact current
++ * row revisions from a complete snapshot. A stale request succeeds with
++ * out_changed=false and does not mutate the terminal.
++ */
++GHOSTTY_API GhosttyResult ghostty_accessibility_state_set_selection(
++    GhosttyAccessibilityState* state,
++    GhosttyTerminal terminal,
++    const GhosttyAccessibilityCellRef* start,
++    const GhosttyAccessibilityCellRef* end,
++    bool* out_changed);
++
++#endif /* GHOSTTY_VT_ACCESSIBILITY_H */
+diff --git a/src/lib_vt.zig b/src/lib_vt.zig
+index e01cdbb89..3984476bb 100644
+--- a/src/lib_vt.zig
++++ b/src/lib_vt.zig
+@@ -245,6 +245,10 @@ comptime {
+         @export(&c.render_state_row_cells_get_multi, .{ .name = "ghostty_render_state_row_cells_get_multi" });
+         @export(&c.render_state_row_cells_free, .{ .name = "ghostty_render_state_row_cells_free" });
+         @export(&c.render_state_free, .{ .name = "ghostty_render_state_free" });
++        @export(&c.accessibility_state_new, .{ .name = "ghostty_accessibility_state_new" });
++        @export(&c.accessibility_state_free, .{ .name = "ghostty_accessibility_state_free" });
++        @export(&c.accessibility_state_update, .{ .name = "ghostty_accessibility_state_update" });
++        @export(&c.accessibility_state_set_selection, .{ .name = "ghostty_accessibility_state_set_selection" });
+         @export(&c.terminal_new, .{ .name = "ghostty_terminal_new" });
+         @export(&c.terminal_free, .{ .name = "ghostty_terminal_free" });
+         @export(&c.terminal_reset, .{ .name = "ghostty_terminal_reset" });
+diff --git a/src/terminal/c/accessibility.zig b/src/terminal/c/accessibility.zig
+new file mode 100644
+index 000000000..73d31354f
+--- /dev/null
++++ b/src/terminal/c/accessibility.zig
+@@ -0,0 +1,671 @@
++const std = @import("std");
++const lib = @import("../lib.zig");
++const PageList = @import("../PageList.zig");
++const Selection = @import("../Selection.zig");
++const point = @import("../point.zig");
++const terminal_c = @import("terminal.zig");
++const Result = @import("result.zig").Result;
++
++const max_cells_per_update: usize = 16_384;
++const max_rows_per_update: usize = 256;
++
++pub const Screen = enum(c_int) { primary = 0, alternate = 1 };
++pub const CellWide = enum(c_int) {
++    narrow = 0,
++    wide = 1,
++    spacer_tail = 2,
++    spacer_head = 3,
++};
++
++pub const RowId = extern struct {
++    screen: Screen = .primary,
++    screen_generation: u64 = 0,
++    node_serial: u64 = 0,
++    page_row: u16 = 0,
++};
++
++pub const CellRef = extern struct {
++    row: RowId = .{},
++    row_revision: u64 = 0,
++    column: u16 = 0,
++};
++
++pub const UpdateOptions = extern struct {
++    size: usize = @sizeOf(UpdateOptions),
++    max_cells: usize = max_cells_per_update,
++    max_rows: usize = max_rows_per_update,
++};
++
++pub const Snapshot = extern struct {
++    size: usize = @sizeOf(Snapshot),
++    revision: u64 = 0,
++    screen: Screen = .primary,
++    screen_generation: u64 = 0,
++    complete: bool = false,
++    more: bool = false,
++    topology_changed: bool = false,
++    topology_epoch: u64 = 0,
++    topology_complete: bool = false,
++    visible_start: usize = 0,
++    visible_len: usize = 0,
++    has_cursor: bool = false,
++    cursor: CellRef = .{},
++    has_selection: bool = false,
++    selection_start: CellRef = .{},
++    selection_end: CellRef = .{},
++    selection_rectangle: bool = false,
++};
++
++pub const Row = extern struct {
++    id: RowId,
++    revision: u64,
++    soft_wrapped: bool,
++};
++
++pub const Cell = extern struct {
++    column: u16,
++    wide: CellWide,
++    codepoint: u32,
++    extra_codepoints: ?[*]const u32,
++    extra_codepoints_len: usize,
++};
++
++pub const TopologyCallback = *const fn (?*anyopaque, *const RowId) callconv(lib.calling_conv) bool;
++pub const RowCallback = *const fn (?*anyopaque, *const Row) callconv(lib.calling_conv) bool;
++pub const CellCallback = *const fn (?*anyopaque, *const Cell) callconv(lib.calling_conv) bool;
++
++comptime {
++    if (@sizeOf(Screen) != @sizeOf(c_int) or @alignOf(Screen) != @alignOf(c_int))
++        @compileError("Screen must retain C int ABI");
++    if (@intFromEnum(Screen.primary) != 0 or @intFromEnum(Screen.alternate) != 1)
++        @compileError("Screen discriminants must match GhosttyAccessibilityScreen");
++}
++
++fn screenIndex(screen: Screen) usize {
++    return switch (screen) {
++        .primary => 0,
++        .alternate => 1,
++    };
++}
++
++const PageInfo = struct {
++    serial: u64,
++    first_row: u32,
++    page_row_start: u16,
++    rows: u16,
++    cols: u16,
++};
++
++const RowState = struct {
++    id: RowId,
++    revision: u64 = 0,
++    semantic_hash: u64 = 0,
++    pending: bool = false,
++};
++
++const ScreenState = struct {
++    generation: u64 = 0,
++    initialized: bool = false,
++    pages: std.ArrayListUnmanaged(PageInfo) = .empty,
++    rows: std.ArrayListUnmanaged(RowState) = .empty,
++    pending: std.ArrayListUnmanaged(RowId) = .empty,
++    pending_index: usize = 0,
++    topology_epoch: u64 = 0,
++    topology_generation: u64 = 0,
++    topology_pages: std.ArrayListUnmanaged(PageInfo) = .empty,
++    topology_rows: std.ArrayListUnmanaged(RowState) = .empty,
++    topology_pending: std.ArrayListUnmanaged(RowId) = .empty,
++    topology_page_index: usize = 0,
++    topology_page_row: usize = 0,
++    topology_active: bool = false,
++
++    fn deinit(self: *ScreenState, alloc: std.mem.Allocator) void {
++        self.pages.deinit(alloc);
++        self.rows.deinit(alloc);
++        self.pending.deinit(alloc);
++        self.topology_pages.deinit(alloc);
++        self.topology_rows.deinit(alloc);
++        self.topology_pending.deinit(alloc);
++    }
++
++    fn row(self: *ScreenState, id: RowId) ?*RowState {
++        return findRow(self.pages.items, self.rows.items, self.generation, id);
++    }
++
++    fn topologyRow(self: *ScreenState, id: RowId) ?*RowState {
++        return findRow(
++            self.topology_pages.items,
++            self.topology_rows.items,
++            self.topology_generation,
++            id,
++        );
++    }
++
++    fn beginTopology(
++        self: *ScreenState,
++        alloc: std.mem.Allocator,
++        pages: []const PageInfo,
++        generation: u64,
++        epoch: u64,
++    ) !void {
++        self.topology_active = true;
++        self.topology_epoch = epoch;
++        self.topology_generation = generation;
++        self.topology_pages.clearRetainingCapacity();
++        try self.topology_pages.appendSlice(alloc, pages);
++        self.topology_rows.clearRetainingCapacity();
++        self.topology_pending.clearRetainingCapacity();
++        self.topology_page_index = 0;
++        self.topology_page_row = if (pages.len == 0) 0 else pages[0].page_row_start;
++    }
++
++    fn nextTopologyId(self: *ScreenState, screen: Screen) ?RowId {
++        while (self.topology_page_index < self.topology_pages.items.len) {
++            const page = self.topology_pages.items[self.topology_page_index];
++            const page_end: usize = @as(usize, page.page_row_start) + page.rows;
++            if (self.topology_page_row < page_end) {
++                const id: RowId = .{
++                    .screen = screen,
++                    .screen_generation = self.topology_generation,
++                    .node_serial = page.serial,
++                    .page_row = @intCast(self.topology_page_row),
++                };
++                self.topology_page_row += 1;
++                return id;
++            }
++            self.topology_page_index += 1;
++            if (self.topology_page_index < self.topology_pages.items.len) {
++                self.topology_page_row =
++                    self.topology_pages.items[self.topology_page_index].page_row_start;
++            }
++        }
++        return null;
++    }
++
++    fn topologyComplete(self: *const ScreenState) bool {
++        if (self.topology_page_index >= self.topology_pages.items.len) return true;
++        if (self.topology_page_index + 1 != self.topology_pages.items.len) return false;
++        const page = self.topology_pages.items[self.topology_page_index];
++        return self.topology_page_row >= @as(usize, page.page_row_start) + page.rows;
++    }
++
++    fn appendTopologyRow(self: *ScreenState, alloc: std.mem.Allocator, id: RowId) !void {
++        var previous = if (self.row(id)) |row_state| row_state.* else RowState{ .id = id };
++        previous.pending = previous.pending or previous.revision == 0;
++        try self.topology_rows.append(alloc, previous);
++        if (previous.pending) try self.topology_pending.append(alloc, id);
++    }
++
++    fn finishTopology(self: *ScreenState) void {
++        std.mem.swap(@TypeOf(self.pages), &self.pages, &self.topology_pages);
++        std.mem.swap(@TypeOf(self.rows), &self.rows, &self.topology_rows);
++        std.mem.swap(@TypeOf(self.pending), &self.pending, &self.topology_pending);
++        self.topology_pages.clearRetainingCapacity();
++        self.topology_rows.clearRetainingCapacity();
++        self.topology_pending.clearRetainingCapacity();
++        self.generation = self.topology_generation;
++        self.initialized = true;
++        self.pending_index = 0;
++        self.topology_page_index = 0;
++        self.topology_page_row = 0;
++        self.topology_active = false;
++    }
++};
++
++pub const State = struct {
++    alloc: std.mem.Allocator,
++    revision: u64 = 0,
++    topology_epoch: u64 = 0,
++    screens: [2]ScreenState = .{ .{}, .{} },
++
++    fn deinit(self: *State) void {
++        for (&self.screens) |*screen| screen.deinit(self.alloc);
++    }
++};
++
++pub fn state_new(out_state: ?**State) callconv(lib.calling_conv) Result {
++    const out = out_state orelse return .invalid_value;
++    const alloc = lib.alloc.default(null);
++    const state = alloc.create(State) catch return .out_of_memory;
++    state.* = .{ .alloc = alloc };
++    out.* = state;
++    return .success;
++}
++
++pub fn state_free(state_: ?*State) callconv(lib.calling_conv) void {
++    const state = state_ orelse return;
++    const alloc = state.alloc;
++    state.deinit();
++    alloc.destroy(state);
++}
++
++pub fn state_update(
++    state_: ?*State,
++    terminal_: terminal_c.Terminal,
++    options_: ?*const UpdateOptions,
++    userdata: ?*anyopaque,
++    topology_callback_: ?TopologyCallback,
++    row_callback_: ?RowCallback,
++    cell_callback_: ?CellCallback,
++    out_snapshot_: ?*Snapshot,
++) callconv(lib.calling_conv) Result {
++    const state = state_ orelse return .invalid_value;
++    const t = terminal_c.zigTerminal(terminal_) orelse return .invalid_value;
++    const options = options_ orelse return .invalid_value;
++    const topology_callback = topology_callback_ orelse return .invalid_value;
++    const row_callback = row_callback_ orelse return .invalid_value;
++    const cell_callback = cell_callback_ orelse return .invalid_value;
++    const out = out_snapshot_ orelse return .invalid_value;
++    if (options.size < @sizeOf(UpdateOptions) or out.size < @sizeOf(Snapshot)) return .invalid_value;
++    if (options.max_cells == 0 or options.max_rows == 0) return .invalid_value;
++
++    const screen_tag: Screen = if (t.screens.active_key == .primary) .primary else .alternate;
++    const screen_index = screenIndex(screen_tag);
++    const screen_generation: u64 = @intCast(t.screens.generation(t.screens.active_key));
++    const screen = t.screens.active;
++    const current = &state.screens[screen_index];
++
++    var observed: std.ArrayListUnmanaged(PageInfo) = .empty;
++    defer observed.deinit(state.alloc);
++    var first_row: u32 = 0;
++    var page_it = screen.pages.pageIterator(.right_down, topPoint(screen_tag), null);
++    while (page_it.next()) |chunk| {
++        const rows: u16 = chunk.end - chunk.start;
++        const cols: u16 = chunk.node.cols();
++        if (cols > max_cells_per_update) return .invalid_value;
++        observed.append(state.alloc, .{
++            .serial = chunk.node.serial,
++            .first_row = first_row,
++            .page_row_start = chunk.start,
++            .rows = rows,
++            .cols = cols,
++        }) catch return .out_of_memory;
++        first_row += @intCast(rows);
++    }
++
++    const compared_pages = if (current.topology_active)
++        current.topology_pages.items
++    else
++        current.pages.items;
++    const compared_generation = if (current.topology_active)
++        current.topology_generation
++    else
++        current.generation;
++    const topology_changed = (!current.initialized and !current.topology_active) or
++        compared_generation != screen_generation or
++        !pagesEql(compared_pages, observed.items);
++    if (topology_changed) {
++        state.topology_epoch +%= 1;
++        if (state.topology_epoch == 0) state.topology_epoch = 1;
++        current.beginTopology(
++            state.alloc,
++            observed.items,
++            screen_generation,
++            state.topology_epoch,
++        ) catch return .out_of_memory;
++    }
++    observeDirtyRows(current, screen, state.alloc, screen_tag) catch return .out_of_memory;
++
++    state.revision +%= 1;
++    const scrollbar = screen.pages.scrollbar();
++    out.* = .{
++        .revision = state.revision,
++        .screen = screen_tag,
++        .screen_generation = screen_generation,
++        .topology_epoch = current.topology_epoch,
++        .visible_start = scrollbar.offset,
++        .visible_len = scrollbar.len,
++    };
++
++    const max_cells = @min(options.max_cells, max_cells_per_update);
++    const max_rows = @min(options.max_rows, max_rows_per_update);
++    if (current.topology_active) {
++        var topology_rows_used: usize = 0;
++        while (topology_rows_used < max_rows) {
++            const id = current.nextTopologyId(screen_tag) orelse break;
++            current.appendTopologyRow(state.alloc, id) catch return .out_of_memory;
++            if (!topology_callback(userdata, &id)) return .invalid_value;
++            topology_rows_used += 1;
++        }
++        out.topology_changed = topology_rows_used != 0;
++        if (current.topologyComplete()) {
++            current.finishTopology();
++            out.topology_complete = true;
++        }
++        out.complete = false;
++        out.more = true;
++        return .success;
++    }
++
++    var cells_used: usize = 0;
++    var rows_used: usize = 0;
++    while (current.pending_index < current.pending.items.len and rows_used < max_rows) {
++        const first = current.pending.items[current.pending_index];
++        const node = findNode(&screen.pages, screen_tag, first.node_serial) orelse {
++            if (current.row(first)) |row_state| row_state.pending = false;
++            current.pending_index += 1;
++            continue;
++        };
++        var preserved = node.pagePreservingState(t.gpa()) catch return .out_of_memory;
++        defer preserved.deinit();
++        const page = preserved.page();
++        const pending_before = current.pending_index;
++        while (current.pending_index < current.pending.items.len and rows_used < max_rows) {
++            const id = current.pending.items[current.pending_index];
++            if (id.node_serial != first.node_serial) break;
++            const cols: usize = @intCast(node.cols());
++            const cell_work = cols * 2;
++            if (cell_work > max_cells) return .invalid_value;
++            if (cells_used + cell_work > max_cells) break;
++            const row_state = current.row(id) orelse {
++                current.pending_index += 1;
++                continue;
++            };
++            const row_ptr = &page.rows.ptr(page.memory)[id.page_row];
++            const semantic_hash = semanticHash(page, row_ptr);
++            const changed = row_state.revision == 0 or row_state.semantic_hash != semantic_hash;
++            if (changed) {
++                row_state.revision = state.revision;
++                row_state.semantic_hash = semantic_hash;
++            }
++            if (!changed) {
++                row_state.pending = false;
++                current.pending_index += 1;
++                cells_used += cell_work;
++                rows_used += 1;
++                continue;
++            }
++            const row_value: Row = .{
++                .id = id,
++                .revision = row_state.revision,
++                .soft_wrapped = row_ptr.wrap,
++            };
++            if (!row_callback(userdata, &row_value)) return .invalid_value;
++            const cells = page.getCells(row_ptr);
++            for (cells[0..semanticCellEnd(cells)], 0..) |*cell, column| {
++                if (cell.wide == .spacer_tail or cell.wide == .spacer_head) continue;
++                const codepoint: u32 = if (cell.hasText()) cell.codepoint() else ' ';
++                const extra = if (cell.hasGrapheme()) page.lookupGrapheme(cell) else null;
++                const cell_value: Cell = .{
++                    .column = @intCast(column),
++                    .wide = if (cell.wide == .wide) .wide else .narrow,
++                    .codepoint = codepoint,
++                    .extra_codepoints = if (extra) |values| @ptrCast(values.ptr) else null,
++                    .extra_codepoints_len = if (extra) |values| values.len else 0,
++                };
++                if (!cell_callback(userdata, &cell_value)) return .invalid_value;
++            }
++            row_state.pending = false;
++            current.pending_index += 1;
++            cells_used += cell_work;
++            rows_used += 1;
++        }
++        if (current.pending_index == pending_before or cells_used >= max_cells) break;
++    }
++
++    const complete = current.pending_index >= current.pending.items.len;
++    out.complete = complete;
++    out.more = !complete;
++    if (complete) {
++        current.pending.clearRetainingCapacity();
++        current.pending_index = 0;
++        setCursorAndSelection(out, current, screen);
++    }
++    return .success;
++}
++
++pub fn state_set_selection(
++    state_: ?*State,
++    terminal_: terminal_c.Terminal,
++    start_: ?*const CellRef,
++    end_: ?*const CellRef,
++    out_changed_: ?*bool,
++) callconv(lib.calling_conv) Result {
++    const state = state_ orelse return .invalid_value;
++    const t = terminal_c.zigTerminal(terminal_) orelse return .invalid_value;
++    const out_changed = out_changed_ orelse return .invalid_value;
++    out_changed.* = false;
++    const screen_tag: Screen = if (t.screens.active_key == .primary) .primary else .alternate;
++    const current = &state.screens[screenIndex(screen_tag)];
++    if (!current.initialized or current.topology_active or current.pending.items.len != 0)
++        return .success;
++    const live_generation: u64 = @intCast(t.screens.generation(t.screens.active_key));
++    if (current.generation != live_generation) return .success;
++
++    if (start_ == null and end_ == null) {
++        if (t.screens.active.selection != null) {
++            t.screens.active.clearSelection();
++            out_changed.* = true;
++        }
++        return .success;
++    }
++    const start = (start_ orelse return .invalid_value).*;
++    const end = (end_ orelse return .invalid_value).*;
++    const start_pin = (livePinForRef(t, current, screen_tag, start) catch
++        return .out_of_memory) orelse return .success;
++    const end_pin = (livePinForRef(t, current, screen_tag, end) catch
++        return .out_of_memory) orelse return .success;
++    t.screens.active.select(Selection.init(start_pin, end_pin, false)) catch return .out_of_memory;
++    out_changed.* = true;
++    return .success;
++}
++
++fn pagesEql(a: []const PageInfo, b: []const PageInfo) bool {
++    if (a.len != b.len) return false;
++    for (a, b) |lhs, rhs| {
++        if (lhs.serial != rhs.serial or lhs.first_row != rhs.first_row or
++            lhs.page_row_start != rhs.page_row_start or lhs.rows != rhs.rows or
++            lhs.cols != rhs.cols) return false;
++    }
++    return true;
++}
++
++fn rowIdEql(a: RowId, b: RowId) bool {
++    return a.screen == b.screen and a.screen_generation == b.screen_generation and
++        a.node_serial == b.node_serial and a.page_row == b.page_row;
++}
++
++fn findRow(
++    pages: []const PageInfo,
++    rows: []RowState,
++    generation: u64,
++    id: RowId,
++) ?*RowState {
++    if (id.screen_generation != generation) return null;
++    for (pages) |page| {
++        if (page.serial != id.node_serial or id.page_row < page.page_row_start or
++            id.page_row - page.page_row_start >= page.rows) continue;
++        const index: usize = @intCast(page.first_row + id.page_row - page.page_row_start);
++        if (index >= rows.len) return null;
++        return &rows[index];
++    }
++    return null;
++}
++
++fn observeDirtyRows(
++    state: *ScreenState,
++    screen: anytype,
++    alloc: std.mem.Allocator,
++    screen_tag: Screen,
++) !void {
++    try observeDirtyRegion(state, screen, alloc, screen_tag, .{ .active = .{} });
++    try observeDirtyRegion(state, screen, alloc, screen_tag, .{ .viewport = .{} });
++}
++
++fn observeDirtyRegion(
++    state: *ScreenState,
++    screen: anytype,
++    alloc: std.mem.Allocator,
++    screen_tag: Screen,
++    top: point.Point,
++) !void {
++    var it = screen.pages.pageIterator(.right_down, top, null);
++    while (it.next()) |chunk| {
++        const page = chunk.node.pageIfResident() orelse continue;
++        const rows = page.rows.ptr(page.memory)[chunk.start..chunk.end];
++        for (rows, chunk.start..) |row, page_row| {
++            if (!page.dirty and !row.dirty) continue;
++            const committed_id: RowId = .{
++                .screen = screen_tag,
++                .screen_generation = state.generation,
++                .node_serial = chunk.node.serial,
++                .page_row = @intCast(page_row),
++            };
++            if (state.row(committed_id)) |row_state| {
++                if (!row_state.pending) {
++                    row_state.pending = true;
++                    try state.pending.append(alloc, committed_id);
++                }
++            }
++            if (state.topology_active) {
++                var topology_id = committed_id;
++                topology_id.screen_generation = state.topology_generation;
++                if (state.topologyRow(topology_id)) |row_state| {
++                    if (!row_state.pending) {
++                        row_state.pending = true;
++                        try state.topology_pending.append(alloc, topology_id);
++                    }
++                }
++            }
++        }
++    }
++}
++
++fn topPoint(screen: Screen) point.Point {
++    return if (screen == .primary) .{ .screen = .{} } else .{ .viewport = .{} };
++}
++
++fn findNode(pages: *const PageList, screen: Screen, serial: u64) ?*PageList.List.Node {
++    var it = pages.pageIterator(.right_down, topPoint(screen), null);
++    while (it.next()) |chunk| if (chunk.node.serial == serial) return chunk.node;
++    return null;
++}
++
++fn findNodeForRow(
++    pages: *const PageList,
++    screen: Screen,
++    serial: u64,
++    page_row: u16,
++) ?*PageList.List.Node {
++    var it = pages.pageIterator(.right_down, topPoint(screen), null);
++    while (it.next()) |chunk| {
++        if (chunk.node.serial == serial and page_row >= chunk.start and page_row < chunk.end)
++            return chunk.node;
++    }
++    return null;
++}
++
++fn documentRow(pages: *const PageList, screen: Screen, id: RowId) ?u32 {
++    var first_row: u32 = 0;
++    var it = pages.pageIterator(.right_down, topPoint(screen), null);
++    while (it.next()) |chunk| {
++        if (chunk.node.serial == id.node_serial and id.page_row >= chunk.start and
++            id.page_row < chunk.end)
++        {
++            return first_row + id.page_row - chunk.start;
++        }
++        first_row += @intCast(chunk.end - chunk.start);
++    }
++    return null;
++}
++
++fn semanticHash(page: anytype, row: anytype) u64 {
++    var hash = std.hash.Wyhash.init(0);
++    const wrapped: u8 = @intFromBool(row.wrap);
++    hash.update(&.{wrapped});
++    const cells = page.getCells(row);
++    for (cells[0..semanticCellEnd(cells)]) |*cell| {
++        if (cell.wide == .spacer_tail or cell.wide == .spacer_head) continue;
++        const wide: u8 = if (cell.wide == .wide) 2 else 1;
++        hash.update(&.{wide});
++        const codepoint: u32 = if (cell.hasText()) cell.codepoint() else ' ';
++        hash.update(std.mem.asBytes(&codepoint));
++        if (cell.hasGrapheme()) {
++            for (page.lookupGrapheme(cell).?) |extra| {
++                const value: u32 = extra;
++                hash.update(std.mem.asBytes(&value));
++            }
++        }
++    }
++    return hash.final();
++}
++
++fn semanticCellEnd(cells: anytype) usize {
++    var end = cells.len;
++    while (end > 0) {
++        const cell = &cells[end - 1];
++        if (cell.wide == .spacer_tail or cell.wide == .spacer_head or
++            (!cell.hasText() and !cell.hasGrapheme()))
++        {
++            end -= 1;
++            continue;
++        }
++        break;
++    }
++    return end;
++}
++
++fn validRef(state: *ScreenState, ref: CellRef) bool {
++    if (ref.row.screen_generation != state.generation) return false;
++    const row = state.row(ref.row) orelse return false;
++    const page = for (state.pages.items) |page| {
++        if (page.serial == ref.row.node_serial and ref.row.page_row >= page.page_row_start and
++            ref.row.page_row - page.page_row_start < page.rows) break page;
++    } else return false;
++    return row.revision != 0 and row.revision == ref.row_revision and ref.column < page.cols;
++}
++
++fn livePinForRef(
++    t: anytype,
++    state: *ScreenState,
++    screen: Screen,
++    ref: CellRef,
++) std.mem.Allocator.Error!?PageList.Pin {
++    if (!validRef(state, ref) or ref.row.screen != screen) return null;
++    const node = findNodeForRow(
++        &t.screens.active.pages,
++        screen,
++        ref.row.node_serial,
++        ref.row.page_row,
++    ) orelse return null;
++    if (ref.row.page_row >= node.rows() or ref.column >= node.cols()) return null;
++    var preserved = try node.pagePreservingState(t.gpa());
++    defer preserved.deinit();
++    const page = preserved.page();
++    const row_ptr = &page.rows.ptr(page.memory)[ref.row.page_row];
++    const row_state = state.row(ref.row) orelse return null;
++    if (semanticHash(page, row_ptr) != row_state.semantic_hash) return null;
++    const document_row = documentRow(&t.screens.active.pages, screen, ref.row) orelse return null;
++    return t.screens.active.pages.pin(if (screen == .primary)
++        .{ .screen = .{ .x = ref.column, .y = document_row } }
++    else
++        .{ .viewport = .{ .x = ref.column, .y = document_row } });
++}
++
++fn refForPin(state: *ScreenState, pin: PageList.Pin) ?CellRef {
++    const id: RowId = .{
++        .screen = state.rows.items[0].id.screen,
++        .screen_generation = state.generation,
++        .node_serial = pin.node.serial,
++        .page_row = pin.y,
++    };
++    const row = state.row(id) orelse return null;
++    if (row.revision == 0) return null;
++    return .{ .row = id, .row_revision = row.revision, .column = pin.x };
++}
++
++fn setCursorAndSelection(out: *Snapshot, state: *ScreenState, screen: anytype) void {
++    if (state.rows.items.len == 0) return;
++    if (refForPin(state, screen.cursor.page_pin.*)) |cursor| {
++        out.has_cursor = true;
++        out.cursor = cursor;
++    }
++    if (screen.selection) |selection| {
++        const start = refForPin(state, selection.topLeft(screen)) orelse return;
++        const end = refForPin(state, selection.bottomRight(screen)) orelse return;
++        out.has_selection = true;
++        out.selection_start = start;
++        out.selection_end = end;
++        out.selection_rectangle = selection.rectangle;
++    }
++}
+diff --git a/src/terminal/c/main.zig b/src/terminal/c/main.zig
+index 37dc57684..f22d27470 100644
+--- a/src/terminal/c/main.zig
++++ b/src/terminal/c/main.zig
+@@ -1,7 +1,12 @@
+ const lib = @import("../lib.zig");
+ const CAllocator = lib.alloc.Allocator;
+ 
+ const buildpkg = @import("build_info.zig");
++const accessibility = @import("accessibility.zig");
++pub const accessibility_state_new = accessibility.state_new;
++pub const accessibility_state_free = accessibility.state_free;
++pub const accessibility_state_update = accessibility.state_update;
++pub const accessibility_state_set_selection = accessibility.state_set_selection;
+ pub const allocator = @import("allocator.zig");
+ pub const cell = @import("cell.zig");
+ pub const color = @import("color.zig");
