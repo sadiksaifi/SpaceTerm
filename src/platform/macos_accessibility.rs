@@ -38,6 +38,7 @@ impl ScreenRect {
 #[derive(Clone, Debug)]
 struct AccessibilityElementState {
     model: TerminalAccessibilityModel,
+    font: Option<AccessibilityFontMetadata>,
     frame: ScreenRect,
     grid: ScreenRect,
     cell_width: f32,
@@ -56,12 +57,30 @@ struct AccessibilityElementState {
     parent: cocoa::base::id,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+struct AccessibilityFontMetadata {
+    requested_family: String,
+    requested_point_size: f32,
+    name: String,
+    family: Option<String>,
+    visible_name: Option<String>,
+    point_size: f32,
+}
+
+#[derive(Debug, PartialEq)]
+struct AccessibilityAttributedText<'a> {
+    text: String,
+    font: &'a AccessibilityFontMetadata,
+}
+
 pub(crate) struct MacosAccessibilityUpdate<'a> {
     pub(crate) window: &'a Window,
     pub(crate) model: &'a TerminalAccessibilityModel,
     pub(crate) bounds: Option<Bounds<Pixels>>,
     pub(crate) cell_width: Pixels,
     pub(crate) line_height: Pixels,
+    pub(crate) font_family: &'a str,
+    pub(crate) font_size: Pixels,
     pub(crate) focused: bool,
     pub(crate) notifications: &'a [AccessibilityNotification],
     #[cfg(all(target_os = "macos", not(test)))]
@@ -69,12 +88,34 @@ pub(crate) struct MacosAccessibilityUpdate<'a> {
 }
 
 impl AccessibilityElementState {
+    fn font_request_changed(&self, family: &str, point_size: f32) -> bool {
+        let family = normalized_font_family(family);
+        let point_size = normalized_font_point_size(point_size);
+        self.font.as_ref().is_none_or(|font| {
+            font.requested_family != family || font.requested_point_size != point_size
+        })
+    }
+
     fn selected_range(&self) -> Range<usize> {
         self.model.selected_or_cursor_range()
     }
 
     fn selected_text(&self) -> Option<String> {
         self.model.text_for_range(self.selected_range())
+    }
+
+    fn string_for_range(&self, range: Range<usize>) -> Option<String> {
+        self.model.text_for_range(range)
+    }
+
+    fn attributed_text_for_range(
+        &self,
+        range: Range<usize>,
+    ) -> Option<AccessibilityAttributedText<'_>> {
+        Some(AccessibilityAttributedText {
+            text: self.string_for_range(range)?,
+            font: self.font.as_ref()?,
+        })
     }
 
     fn screen_bounds_for_range(&self, range: Range<usize>) -> Option<ScreenRect> {
@@ -103,27 +144,44 @@ impl AccessibilityElementState {
 mod native {
     use std::cell::RefCell;
     use std::collections::HashMap;
-    use std::ffi::c_void;
+    use std::ffi::{CStr, c_void};
     use std::ops::Range;
     use std::sync::OnceLock;
 
     use cocoa::base::{id, nil};
     use cocoa::foundation::{
-        NSArray, NSAutoreleasePool, NSInteger, NSPoint, NSRect, NSSize, NSString, NSUInteger,
+        NSArray, NSAutoreleasePool, NSDictionary, NSInteger, NSPoint, NSRect, NSSize, NSString,
+        NSUInteger,
     };
     use gpui::{Bounds, Pixels, Window};
     use objc::declare::ClassDecl;
     use objc::runtime::{BOOL, Class, NO, Object, Sel, YES};
-    use objc::{Encode, Encoding, msg_send, sel, sel_impl};
+    use objc::{Encode, Encoding, class, msg_send, sel, sel_impl};
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
     use super::{
-        AccessibilityElementState, AccessibilityNotification, MacosAccessibilityUpdate, ScreenRect,
-        TEXT_AREA_ROLE, TerminalAccessibilityModel, notification_name,
+        AccessibilityAttributedText, AccessibilityElementState, AccessibilityFontMetadata,
+        AccessibilityNotification, MacosAccessibilityUpdate, ScreenRect, TEXT_AREA_ROLE,
+        TerminalAccessibilityModel, normalized_font_family, normalized_font_point_size,
+        notification_name,
     };
 
     const STATE_IVAR: &str = "spacetermAccessibilityState";
     const LAYOUT_CHANGED: &str = "AXLayoutChanged";
+
+    #[link(name = "AppKit", kind = "framework")]
+    unsafe extern "C" {
+        #[link_name = "NSAccessibilityFontTextAttribute"]
+        static AX_FONT_TEXT_ATTRIBUTE: id;
+        #[link_name = "NSAccessibilityFontNameKey"]
+        static AX_FONT_NAME_KEY: id;
+        #[link_name = "NSAccessibilityFontFamilyKey"]
+        static AX_FONT_FAMILY_KEY: id;
+        #[link_name = "NSAccessibilityVisibleNameKey"]
+        static AX_VISIBLE_NAME_KEY: id;
+        #[link_name = "NSAccessibilityFontSizeKey"]
+        static AX_FONT_SIZE_KEY: id;
+    }
 
     #[repr(C)]
     #[derive(Clone, Copy, Debug)]
@@ -160,11 +218,17 @@ mod native {
     }
 
     impl MacosAccessibilityElement {
-        pub(crate) fn new(window: &Window, model: TerminalAccessibilityModel) -> Self {
+        pub(crate) fn new(
+            window: &Window,
+            model: TerminalAccessibilityModel,
+            font_family: &str,
+            font_size: Pixels,
+        ) -> Self {
             let parent = native_view(window).unwrap_or(nil);
             retain(parent);
             let mut state = Box::new(AccessibilityElementState {
                 model,
+                font: resolve_font_metadata(font_family, f32::from(font_size)),
                 frame: ScreenRect::default(),
                 grid: ScreenRect::default(),
                 cell_width: 1.0,
@@ -215,6 +279,8 @@ mod native {
                 bounds,
                 cell_width,
                 line_height,
+                font_family,
+                font_size,
                 focused,
                 notifications,
                 selection_sender,
@@ -236,6 +302,14 @@ mod native {
             self.state.selection_sender = selection_sender;
             self.state.cell_width = f32::from(cell_width);
             self.state.line_height = f32::from(line_height);
+            let point_size = f32::from(font_size);
+            let requested_family = normalized_font_family(font_family);
+            if self
+                .state
+                .font_request_changed(requested_family, point_size)
+            {
+                self.state.font = resolve_font_metadata(requested_family, point_size);
+            }
             let bounds = bounds.and_then(|bounds| screen_rect(parent, bounds));
             self.state.visible = self.state.presented && bounds.is_some();
             self.state.focused = self.state.visible && focused;
@@ -353,6 +427,11 @@ mod native {
                 class.add_method(
                     sel!(accessibilityStringForRange:),
                     accessibility_string_for_range as extern "C" fn(&Object, Sel, NSRange) -> id,
+                );
+                class.add_method(
+                    sel!(accessibilityAttributedStringForRange:),
+                    accessibility_attributed_string_for_range
+                        as extern "C" fn(&Object, Sel, NSRange) -> id,
                 );
                 class.add_method(
                     sel!(accessibilityRangeForLine:),
@@ -621,7 +700,7 @@ mod native {
 
     fn invalid_range() -> NSRange {
         NSRange {
-            location: NSUInteger::MAX,
+            location: NSInteger::MAX as NSUInteger,
             length: 0,
         }
     }
@@ -630,6 +709,118 @@ mod native {
         // SAFETY: The autoreleased NSString survives the synchronous accessibility query under
         // AppKit's surrounding autorelease pool.
         unsafe { NSString::alloc(nil).init_str(value).autorelease() }
+    }
+
+    fn ns_attributed_string(value: &AccessibilityAttributedText<'_>) -> id {
+        // SAFETY: AppKit owns the surrounding autorelease pool for this synchronous callback. The
+        // returned object is autoreleased, and its dictionaries retain every transient value.
+        unsafe {
+            let font_name = ns_string(&value.font.name);
+            let point_size: id = msg_send![class!(NSNumber),
+                numberWithDouble:f64::from(value.font.point_size)
+            ];
+            let mut font_values = vec![font_name, point_size];
+            let mut font_keys = vec![AX_FONT_NAME_KEY, AX_FONT_SIZE_KEY];
+            if let Some(family) = value.font.family.as_deref() {
+                font_values.push(ns_string(family));
+                font_keys.push(AX_FONT_FAMILY_KEY);
+            }
+            if let Some(visible_name) = value.font.visible_name.as_deref() {
+                font_values.push(ns_string(visible_name));
+                font_keys.push(AX_VISIBLE_NAME_KEY);
+            }
+            let font_attributes = NSDictionary::dictionaryWithObjects_forKeys_count_(
+                nil,
+                font_values.as_ptr(),
+                font_keys.as_ptr(),
+                font_values.len() as NSUInteger,
+            );
+            let attributes = NSDictionary::dictionaryWithObject_forKey_(
+                nil,
+                font_attributes,
+                AX_FONT_TEXT_ATTRIBUTE,
+            );
+            let string = ns_string(&value.text);
+            let attributed: id = msg_send![class!(NSAttributedString), alloc];
+            let attributed: id = msg_send![attributed, initWithString:string attributes:attributes];
+            let attributed: id = msg_send![attributed, autorelease];
+            attributed
+        }
+    }
+
+    fn resolve_font_metadata(
+        requested_family: &str,
+        point_size: f32,
+    ) -> Option<AccessibilityFontMetadata> {
+        let requested_family = normalized_font_family(requested_family);
+        let point_size = normalized_font_point_size(point_size);
+        // SAFETY: This path runs with the other synchronous AppKit updates on the main thread.
+        // Every borrowed NSFont name is copied into Rust before the local pool is drained.
+        unsafe {
+            let pool = NSAutoreleasePool::new(nil);
+            let requested = NSString::alloc(nil)
+                .init_str(requested_family)
+                .autorelease();
+            let manager: id = msg_send![class!(NSFontManager), sharedFontManager];
+            let upright_regular = 0x0100_0004_u64 as NSUInteger;
+            let mut font: id = msg_send![manager,
+                fontWithFamily:requested
+                traits:upright_regular
+                weight:5 as NSInteger
+                size:f64::from(point_size)
+            ];
+            if font == nil {
+                font = msg_send![class!(NSFont), fontWithName:requested size:f64::from(point_size)];
+            }
+            if font == nil {
+                let menlo = NSString::alloc(nil).init_str("Menlo").autorelease();
+                font = msg_send![manager,
+                    fontWithFamily:menlo
+                    traits:upright_regular
+                    weight:5 as NSInteger
+                    size:f64::from(point_size)
+                ];
+            }
+            if font == nil {
+                font = msg_send![class!(NSFont),
+                    monospacedSystemFontOfSize:f64::from(point_size)
+                    weight:0.0_f64
+                ];
+            }
+
+            let metadata = if font == nil {
+                None
+            } else {
+                let name: id = msg_send![font, fontName];
+                let family: id = msg_send![font, familyName];
+                let visible_name: id = msg_send![font, displayName];
+                let resolved_size: f64 = msg_send![font, pointSize];
+                copy_ns_string(name).map(|name| AccessibilityFontMetadata {
+                    requested_family: requested_family.to_owned(),
+                    requested_point_size: point_size,
+                    name,
+                    family: copy_ns_string(family),
+                    visible_name: copy_ns_string(visible_name),
+                    point_size: resolved_size as f32,
+                })
+            };
+            pool.drain();
+            metadata
+        }
+    }
+
+    unsafe fn copy_ns_string(value: id) -> Option<String> {
+        if value == nil {
+            return None;
+        }
+        // SAFETY: `value` is an NSString borrowed from a live NSFont. UTF8String remains valid
+        // until the caller copies it and drains its local autorelease pool.
+        let pointer = unsafe { value.UTF8String() };
+        (!pointer.is_null()).then(|| {
+            unsafe { CStr::from_ptr(pointer) }
+                .to_string_lossy()
+                .into_owned()
+        })
     }
 
     extern "C" fn is_accessibility_element(this: &Object, _: Sel) -> BOOL {
@@ -709,8 +900,18 @@ mod native {
 
     extern "C" fn accessibility_string_for_range(this: &Object, _: Sel, range: NSRange) -> id {
         state(this)
-            .and_then(|state| state.model.text_for_range(rust_range(range)?))
+            .and_then(|state| state.string_for_range(rust_range(range)?))
             .map_or(nil, |text| ns_string(&text))
+    }
+
+    extern "C" fn accessibility_attributed_string_for_range(
+        this: &Object,
+        _: Sel,
+        range: NSRange,
+    ) -> id {
+        state(this)
+            .and_then(|state| state.attributed_text_for_range(rust_range(range)?))
+            .map_or(nil, |text| ns_attributed_string(&text))
     }
 
     extern "C" fn accessibility_range_for_line(this: &Object, _: Sel, line: NSInteger) -> NSRange {
@@ -766,6 +967,22 @@ mod native {
     }
 }
 
+fn normalized_font_family(family: &str) -> &str {
+    if family.trim().is_empty() {
+        "Menlo"
+    } else {
+        family
+    }
+}
+
+fn normalized_font_point_size(point_size: f32) -> f32 {
+    if point_size.is_finite() && point_size > 0.0 {
+        point_size
+    } else {
+        1.0
+    }
+}
+
 #[cfg(all(target_os = "macos", not(test)))]
 pub(crate) use native::MacosAccessibilityElement;
 
@@ -774,7 +991,7 @@ pub(crate) struct MacosAccessibilityElement;
 
 #[cfg(any(not(target_os = "macos"), test))]
 impl MacosAccessibilityElement {
-    pub(crate) fn new(_: &gpui::Window, _: TerminalAccessibilityModel) -> Self {
+    pub(crate) fn new(_: &gpui::Window, _: TerminalAccessibilityModel, _: &str, _: Pixels) -> Self {
         Self
     }
 
@@ -787,6 +1004,8 @@ impl MacosAccessibilityElement {
             update.bounds,
             update.cell_width,
             update.line_height,
+            update.font_family,
+            update.font_size,
             update.focused,
             update.notifications,
         );
@@ -811,6 +1030,14 @@ mod tests {
                 0..1,
                 Some((0, 3)),
             ),
+            font: Some(AccessibilityFontMetadata {
+                requested_family: "JetBrainsMono Nerd Font".to_owned(),
+                requested_point_size: 14.0,
+                name: "JetBrainsMonoNF-Regular".to_owned(),
+                family: Some("JetBrainsMono Nerd Font".to_owned()),
+                visible_name: Some("JetBrainsMono NF Regular".to_owned()),
+                point_size: 14.0,
+            }),
             frame: ScreenRect {
                 x: 100.0,
                 y: 200.0,
@@ -851,6 +1078,35 @@ mod tests {
         assert_eq!(state.range_for_screen_point(120.0, 210.0), Some(1..3));
         assert_eq!(state.range_for_screen_point(130.0, 210.0), None);
         assert_eq!(state.range_for_screen_point(120.0, 220.0), None);
+    }
+
+    #[test]
+    fn attributed_text_uses_the_resolved_font_without_expanding_its_range() {
+        let state = state();
+
+        assert_eq!(
+            state.attributed_text_for_range(1..3),
+            Some(AccessibilityAttributedText {
+                text: "😀".to_owned(),
+                font: state.font.as_ref().unwrap(),
+            })
+        );
+        assert_eq!(state.attributed_text_for_range(1..2), None);
+        assert_eq!(state.attributed_text_for_range(0..4), None);
+    }
+
+    #[test]
+    fn font_metadata_changes_only_with_the_selected_family_or_logical_point_size() {
+        let mut state = state();
+        state.font.as_mut().unwrap().point_size = 13.5;
+
+        assert!(!state.font_request_changed("JetBrainsMono Nerd Font", 14.0));
+        assert!(state.font_request_changed("JetBrainsMono Nerd Font", 15.0));
+        assert!(state.font_request_changed("Menlo", 14.0));
+        state.cell_width = 20.0;
+        state.line_height = 40.0;
+        assert!(!state.font_request_changed("JetBrainsMono Nerd Font", 14.0));
+        assert_eq!(state.font.as_ref().unwrap().point_size, 13.5);
     }
 
     #[test]

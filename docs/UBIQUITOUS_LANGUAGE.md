@@ -54,7 +54,7 @@
 | **Paste Payload** | An immutable, size-bounded text insertion candidate owned by the Terminal Session worker from normalization through encoding or cancellation. | clipboard contents, typed key input |
 | **File Insertion** | Ordered native file URLs converted to absolute POSIX-shell-quoted paths before becoming a Paste Payload. | raw URL paste, direct PTY write |
 | **Native Terminal Service** | A macOS Services, contextual-action, Quick Look, pasteboard, or drag/drop adapter that requests existing Selection, Terminal Hyperlink, File Insertion, and Paste Payload policies without mutating the Terminal Emulator. | independent input path, direct PTY service |
-| **Terminal Accessibility Model** | A Pane-owned native editable text-area projection whose UTF-16 ranges map visible and retained terminal text, Selection, Cursor, and bounds back to logical terminal cells. | flattened cell string, screen-reader transcript |
+| **Terminal Accessibility Model** | A Pane-owned native editable text-area projection whose cell-atomic UTF-16 ranges map visible and retained terminal text, selected terminal font metadata, Selection, Cursor, and bounds back to logical terminal cells. | flattened cell string, screen-reader transcript |
 | **Render Lifecycle** | Pane-owned visibility, animation, scale, and newest-generation presentation state that schedules frames only when its native surface can present them. | render loop, global animation timer |
 | **Terminal Failure** | A typed PTY, Terminal Emulator, presentation, platform, or renderer-resource fault with an explicit recoverability class and no terminal contents or secrets. | stderr message, shell exit |
 | **Local Diagnostics** | A bounded content-free sequence of Terminal Failure identifiers and unhandled keyboard event kind, action, and native key code written only after explicit user export. | telemetry, crash upload, terminal log |
@@ -93,7 +93,7 @@
 - A multiline **Paste Payload** requires **Paste Confirmation** only when bracketed-paste mode is inactive; an embedded closing fence always requires confirmation, while encoder-replaced control bytes alone do not.
 - A **Paste Confirmation** is cancelled by focus or hierarchy loss, timeout, Terminal Session shutdown, explicit cancellation, or a stale identity, and cancellation writes no PTY bytes.
 - A **Native Terminal Service** may submit a **Paste Payload** only while its Pane owns **Terminal Input Focus**, and may offer Quick Look only for an existing validated local-file **Terminal Hyperlink**.
-- A **Terminal Accessibility Model** observes immutable terminal state and may request worker-owned Selection changes, but never mutates the Terminal Emulator directly.
+- A **Terminal Accessibility Model** treats each retained text-bearing cell as one complete accessibility grapheme, rejects string reads that would expose only part of that cell, normalizes Selection requests to complete intersected cells, observes immutable terminal state, and may request worker-owned Selection changes, but never mutates the Terminal Emulator directly.
 - A **Render Lifecycle** coalesces hidden Terminal Presentations to the newest **Presentation Generation** and schedules exactly one frame when visibility returns.
 - A recoverable **Terminal Failure** preserves the last valid **Presentation Generation** when possible; a fatal one requires closing the Pane and restarting its command.
 - **Local Diagnostics** never contain terminal, clipboard, environment, path, secret, logical-key, or typed-key values and never leave the machine automatically.

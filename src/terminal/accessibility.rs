@@ -359,7 +359,7 @@ impl AccessibilityDocument {
         None
     }
 
-    fn is_boundary(&self, index: usize) -> bool {
+    fn is_text_boundary(&self, index: usize) -> bool {
         if index == self.len_utf16 {
             return true;
         }
@@ -373,14 +373,18 @@ impl AccessibilityDocument {
             return false;
         };
         let local = index.saturating_sub(start);
-        local >= row.len_utf16 || row.byte_for_utf16(local).is_some()
+        local >= row.len_utf16
+            || row
+                .cells
+                .iter()
+                .any(|cell| cell.utf16.start == local || cell.utf16.end == local)
     }
 
     fn text_for_range(&self, range: Range<usize>) -> Option<String> {
         if range.start > range.end
             || range.end > self.len_utf16
-            || !self.is_boundary(range.start)
-            || !self.is_boundary(range.end)
+            || !self.is_text_boundary(range.start)
+            || !self.is_text_boundary(range.end)
         {
             return None;
         }
@@ -698,11 +702,8 @@ impl TerminalAccessibilityModel {
     }
 
     pub(crate) fn range_for_index(&self, index: usize) -> Option<Range<usize>> {
-        if index > self.len_utf16() {
+        if index >= self.len_utf16() {
             return None;
-        }
-        if index == self.len_utf16() {
-            return Some(index..index);
         }
         let line = self.line_for_index(index)?;
         let row_start = self.data.document.row_start(line)?;
@@ -726,9 +727,12 @@ impl TerminalAccessibilityModel {
         if range.start > range.end || range.end > self.len_utf16() {
             return None;
         }
-        if !range.is_empty() && self.resolve_selection_range(range.clone()).is_none() {
-            return None;
-        }
+        let range = if range.is_empty() {
+            range
+        } else {
+            let (start, end) = self.resolve_selection_range(range)?;
+            range_for_refs(&self.data.document, start, end)?
+        };
         Some(AccessibilitySelectionRequest {
             generation: self.data.generation,
             content_revision: self.data.content_revision,
@@ -1229,7 +1233,7 @@ mod tests {
     fn line_and_range_conversion_are_stable_at_utf16_boundaries() {
         let model = TerminalAccessibilityModel::new(
             vec![
-                AccessibilityLine::new(vec![cell("😀a", 2, false)], false),
+                AccessibilityLine::new(vec![cell("😀", 2, false), cell("a", 1, false)], false),
                 AccessibilityLine::new(vec![cell("b", 1, false)], false),
             ],
             0..2,
@@ -1239,8 +1243,94 @@ mod tests {
         assert_eq!(model.line_for_index(2), Some(0));
         assert_eq!(model.line_for_index(4), Some(1));
         assert_eq!(model.range_for_index(3), Some(3..4));
+        assert_eq!(model.range_for_index(5), None);
         assert_eq!(model.text_for_range(1..2), None);
         assert_eq!(model.text_for_range(0..2), Some("😀".to_owned()));
+    }
+
+    #[test]
+    fn string_ranges_reject_partial_combining_and_zwj_terminal_graphemes() {
+        let model = TerminalAccessibilityModel::new(
+            vec![AccessibilityLine::new(
+                vec![
+                    cell("A\u{301}", 1, false),
+                    cell("👨\u{200d}👩\u{200d}👧\u{200d}👦", 2, false),
+                    cell("x", 1, false),
+                ],
+                false,
+            )],
+            0..1,
+            None,
+        );
+
+        assert_eq!(model.range_for_index(1), Some(0..2));
+        assert_eq!(model.range_for_index(12), Some(2..13));
+        assert_eq!(model.text_for_range(0..1), None);
+        assert_eq!(model.text_for_range(1..2), None);
+        assert_eq!(model.text_for_range(2..4), None);
+        assert_eq!(model.text_for_range(4..5), None);
+        assert_eq!(model.text_for_range(0..2), Some("A\u{301}".to_owned()));
+        assert_eq!(
+            model.text_for_range(2..13),
+            Some("👨\u{200d}👩\u{200d}👧\u{200d}👦".to_owned())
+        );
+    }
+
+    #[test]
+    fn range_for_index_rejects_the_document_end_and_out_of_bounds_indices() {
+        let model = TerminalAccessibilityModel::new(
+            vec![AccessibilityLine::new(vec![cell("😀", 2, false)], false)],
+            0..1,
+            None,
+        );
+
+        assert_eq!(model.range_for_index(2), None);
+        assert_eq!(model.range_for_index(3), None);
+        let reversed = 2..model.len_utf16().saturating_sub(1);
+        assert_eq!(model.text_for_range(reversed.clone()), None);
+        assert_eq!(model.text_for_range(0..3), None);
+        assert_eq!(model.selection_request(reversed), None);
+        assert_eq!(model.selection_request(0..3), None);
+    }
+
+    #[test]
+    fn family_zwj_partial_ranges_keep_selection_bounds_and_hit_testing_cell_atomic() {
+        let model = TerminalAccessibilityModel::new(
+            vec![AccessibilityLine::new(
+                vec![cell("👨\u{200d}👩\u{200d}👧\u{200d}👦", 2, false)],
+                false,
+            )],
+            0..1,
+            None,
+        );
+        let geometry = AccessibilityGeometry::new(4.0, 8.0, 10.0, 20.0).unwrap();
+
+        assert_eq!(model.selection_request(4..5).unwrap().range, 0..11);
+        assert_eq!(
+            model.bounds_for_range(4..5, geometry),
+            Some((4.0, 8.0, 20.0, 20.0))
+        );
+        assert_eq!(model.range_for_point(5.0, 9.0, geometry), Some(0..11));
+        assert_eq!(model.range_for_point(15.0, 9.0, geometry), Some(0..11));
+    }
+
+    #[test]
+    fn string_ranges_preserve_complete_wide_emoji_and_hard_line_boundaries() {
+        let model = TerminalAccessibilityModel::new(
+            vec![
+                AccessibilityLine::new(vec![cell("界", 2, false)], false),
+                AccessibilityLine::new(vec![cell("👩\u{200d}💻", 2, false)], false),
+            ],
+            0..2,
+            None,
+        );
+
+        assert_eq!(model.text(), "界\n👩\u{200d}💻");
+        assert_eq!(model.range_for_index(0), Some(0..1));
+        assert_eq!(model.range_for_index(1), Some(1..2));
+        assert_eq!(model.range_for_index(4), Some(2..7));
+        assert_eq!(model.text_for_range(1..2), Some("\n".to_owned()));
+        assert_eq!(model.text_for_range(2..7), Some("👩\u{200d}💻".to_owned()));
     }
 
     #[test]
@@ -1541,11 +1631,50 @@ mod tests {
             state.resolve_selection(&request),
             Some(Some((cell_ref, cell_ref)))
         );
-        let stale = AccessibilitySelectionRequest {
+        let stale_generation = AccessibilitySelectionRequest {
             generation: PresentationGeneration::test(6),
+            ..request.clone()
+        };
+        assert_eq!(state.resolve_selection(&stale_generation), None);
+
+        let current = state
+            .apply(
+                AccessibilityUpdate {
+                    revision: 2,
+                    screen: AccessibilityScreen::Primary,
+                    screen_generation: 1,
+                    complete: true,
+                    more: false,
+                    topology: None,
+                    visible_lines: 0..1,
+                    cursor: Some(AccessibilityCellRef {
+                        row_revision: 2,
+                        ..cell_ref
+                    }),
+                    selection: None,
+                    changed_rows: vec![AccessibilityRowUpdate {
+                        id,
+                        revision: 2,
+                        soft_wrapped: false,
+                        cells: vec![
+                            AccessibilityCell::at_column("B", 0, 1),
+                            AccessibilityCell::at_column("😀", 1, 2),
+                        ],
+                    }],
+                },
+                PresentationGeneration::test(8),
+            )
+            .unwrap();
+        let stale_revision = AccessibilitySelectionRequest {
+            generation: PresentationGeneration::test(8),
             ..request
         };
-        assert_eq!(state.resolve_selection(&stale), None);
+        assert_eq!(state.resolve_selection(&stale_revision), None);
+        assert!(
+            state
+                .resolve_selection(&current.selection_request(1..2).unwrap())
+                .is_some()
+        );
     }
 
     #[test]
@@ -1590,6 +1719,51 @@ mod tests {
                 )
                 .is_none()
         );
+        assert_eq!(state.resolve_selection(&request), None);
+    }
+
+    #[test]
+    fn selection_is_rejected_after_the_active_accessibility_screen_changes() {
+        let primary_id = row_id(AccessibilityScreen::Primary, 1, 10, 0);
+        let alternate_id = row_id(AccessibilityScreen::Alternate, 2, 20, 0);
+        let mut state = TerminalAccessibilityState::default();
+        let primary = state
+            .apply(
+                AccessibilityUpdate {
+                    revision: 1,
+                    screen: AccessibilityScreen::Primary,
+                    screen_generation: 1,
+                    complete: true,
+                    more: false,
+                    topology: Some(vec![primary_id]),
+                    visible_lines: 0..1,
+                    cursor: None,
+                    selection: None,
+                    changed_rows: vec![update_row(primary_id, 1, "primary", false)],
+                },
+                PresentationGeneration::test(1),
+            )
+            .unwrap();
+        let request = primary.selection_request(0..1).unwrap();
+
+        state
+            .apply(
+                AccessibilityUpdate {
+                    revision: 2,
+                    screen: AccessibilityScreen::Alternate,
+                    screen_generation: 2,
+                    complete: true,
+                    more: false,
+                    topology: Some(vec![alternate_id]),
+                    visible_lines: 0..1,
+                    cursor: None,
+                    selection: None,
+                    changed_rows: vec![update_row(alternate_id, 1, "alternate", false)],
+                },
+                PresentationGeneration::test(2),
+            )
+            .unwrap();
+
         assert_eq!(state.resolve_selection(&request), None);
     }
 
@@ -1665,8 +1839,42 @@ mod tests {
         );
 
         let normalized = model.selection_request(1..2).unwrap();
-        assert!(model.resolve_selection_range(normalized.range).is_some());
+        assert_eq!(normalized.range, 0..2);
         assert!(model.selection_request(2..3).is_none());
+    }
+
+    #[test]
+    fn stale_row_revision_selection_refs_do_not_publish_a_selection() {
+        let id = row_id(AccessibilityScreen::Primary, 1, 10, 0);
+        let stale = AccessibilityCellRef {
+            row: id,
+            row_revision: 2,
+            column: 0,
+        };
+        let mut state = TerminalAccessibilityState::default();
+        let model = state
+            .apply(
+                AccessibilityUpdate {
+                    revision: 1,
+                    screen: AccessibilityScreen::Primary,
+                    screen_generation: 1,
+                    complete: true,
+                    more: false,
+                    topology: Some(vec![id]),
+                    visible_lines: 0..1,
+                    cursor: None,
+                    selection: Some(AccessibilitySelectionRefs {
+                        start: stale,
+                        end: stale,
+                        rectangle: false,
+                    }),
+                    changed_rows: vec![update_row(id, 1, "x", false)],
+                },
+                PresentationGeneration::test(1),
+            )
+            .unwrap();
+
+        assert_eq!(model.selection_range(), None);
     }
 
     #[test]

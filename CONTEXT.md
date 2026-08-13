@@ -527,11 +527,17 @@ tracks it as a held key.
 Each Pane exposes one native editable text-area model whose canonical indexes are UTF-16 code
 units, matching AppKit. The model preserves complete grapheme text while mapping wide-cell spacer
 tails, combining sequences, hard lines, soft wraps, the visible range, Selection, and Cursor back
-to logical terminal cells. Candidate and range bounds use the same logical cell origin, width, and
-line height as pointer and renderer geometry. Terminal output, Selection, Terminal Input Focus,
-and Marked Text changes produce typed, coalesced native accessibility notifications; notifications
-carry no terminal contents. Accessibility may request terminal-owned selection changes through the
-Terminal Session, but never mutates the Terminal Emulator from the native callback.
+to logical terminal cells. A retained text-bearing cell is the canonical accessibility grapheme:
+range-for-index covers its complete UTF-16 span, partial string queries that would detach one of its
+components are rejected, and partial Selection requests normalize to complete intersected cells.
+Attributed range queries expose only the requested complete text together with the concrete
+regular terminal font name, family, visible name, and logical point size resolved from the Pane's
+actually selected font; backing scale never changes that point size. Candidate and range bounds use
+the same logical cell origin, width, and line height as pointer and renderer geometry. Terminal
+output, Selection, Terminal Input Focus, and Marked Text changes produce typed, coalesced native
+accessibility notifications; notifications carry no terminal contents. Accessibility may request
+terminal-owned selection changes through the Terminal Session, but never mutates the Terminal
+Emulator from the native callback.
 
 ### Demand-Driven Render Lifecycle
 
