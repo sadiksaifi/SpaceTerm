@@ -826,6 +826,33 @@ impl TerminalPane {
         }
     }
 
+    fn schedule_presented_frame_observation(
+        &self,
+        generation: crate::terminal::PresentationGeneration,
+        rows: u16,
+        columns: u16,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.acceptance_observation_claimed {
+            return;
+        }
+        #[cfg(not(test))]
+        {
+            let pane = cx.entity().downgrade();
+            window.on_next_frame(move |_, cx| {
+                let _ = pane.update(cx, |pane, _| {
+                    pane.observe_presented_frame(generation, rows, columns);
+                });
+            });
+            window.request_animation_frame();
+        }
+        #[cfg(test)]
+        cx.defer_in(window, move |pane, _, _| {
+            pane.observe_presented_frame(generation, rows, columns);
+        });
+    }
+
     pub(crate) fn title(&self) -> SharedString {
         self.title.clone()
     }
@@ -1090,12 +1117,7 @@ impl TerminalPane {
         {
             cx.notify();
         }
-        let pane = cx.entity().downgrade();
-        window.on_next_frame(move |_, cx| {
-            let _ = pane.update(cx, |pane, _| {
-                pane.observe_presented_frame(generation, rows, columns);
-            });
-        });
+        self.schedule_presented_frame_observation(generation, rows, columns, window, cx);
     }
 
     pub(super) fn presentation_failed(
@@ -3000,7 +3022,18 @@ impl Render for TerminalPane {
         let fallback_graphics = self
             .graphics_cache
             .read_with(cx, |cache, _| cache.last_presented());
-        let presentation_generation = self.render_lifecycle.take_frame();
+        let recovery = self
+            .recovery_retry_requested
+            .filter(|recovery| self.pending_recovery == Some(*recovery))
+            .filter(|recovery| {
+                matches!(
+                    recovery.action,
+                    RecoveryAction::Presentation | RecoveryAction::RendererResources
+                )
+            });
+        let presentation_generation = self.render_lifecycle.take_frame().or_else(|| {
+            recovery.and_then(|_| self.render_lifecycle.retry_frame(display_screen.generation))
+        });
         let graphics_attempt_allowed = !recovery_holds_presentation
             && presentation_generation == Some(display_screen.generation);
         let (graphics, graphics_attempt, graphics_attempted) =
@@ -3029,9 +3062,6 @@ impl Render for TerminalPane {
             display_screen = Arc::clone(&self.last_valid_screen);
         }
         let presentation_operation = graphics_attempt.map(|_| {
-            let recovery = self
-                .recovery_retry_requested
-                .filter(|recovery| self.pending_recovery == Some(*recovery));
             let operation = self.begin_operation(display_screen.generation, recovery);
             self.latest_presentation_operation = Some(operation.id);
             operation

@@ -98,6 +98,23 @@ impl RenderLifecycle {
             .filter(|latest| Some(*latest) != self.presented)
     }
 
+    pub(crate) fn retry_frame(
+        &mut self,
+        generation: PresentationGeneration,
+    ) -> Option<PresentationGeneration> {
+        if !self.visibility.presentable() || self.released {
+            return None;
+        }
+        match self.latest {
+            Some(latest) if latest != generation => None,
+            Some(_) => Some(generation),
+            None => {
+                self.latest = Some(generation);
+                Some(generation)
+            }
+        }
+    }
+
     pub(crate) fn mark_presented(&mut self, generation: PresentationGeneration) {
         if !self.released && self.latest.is_some_and(|latest| generation <= latest) {
             self.presented = Some(generation);
@@ -247,5 +264,38 @@ mod tests {
         lifecycle.release();
         assert!(!lifecycle.effects().animations_active);
         assert_eq!(lifecycle.take_frame(), None);
+    }
+
+    #[test]
+    fn visible_retry_authorizes_the_same_presented_generation_without_resetting_it() {
+        let generation = PresentationGeneration::test(4);
+        let mut lifecycle = RenderLifecycle::new(visible());
+        lifecycle.observe_snapshot(generation);
+        lifecycle.mark_presented(generation);
+
+        assert_eq!(lifecycle.take_frame(), None);
+        assert_eq!(lifecycle.retry_frame(generation), Some(generation));
+        assert!(lifecycle.is_presented(generation));
+        assert_eq!(lifecycle.take_frame(), None);
+    }
+
+    #[test]
+    fn retry_initializes_only_the_current_generation_and_refuses_hidden_or_released_surfaces() {
+        let generation = PresentationGeneration::test(3);
+        let mut initial = RenderLifecycle::new(visible());
+        assert_eq!(initial.retry_frame(generation), Some(generation));
+        assert_eq!(initial.retry_frame(PresentationGeneration::test(4)), None);
+
+        let mut hidden = RenderLifecycle::new(SurfaceVisibility {
+            occluded: true,
+            ..visible()
+        });
+        hidden.observe_snapshot(generation);
+        assert_eq!(hidden.retry_frame(generation), None);
+
+        let mut released = RenderLifecycle::new(visible());
+        released.observe_snapshot(generation);
+        released.release();
+        assert_eq!(released.retry_frame(generation), None);
     }
 }
