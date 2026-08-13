@@ -849,7 +849,7 @@ impl TerminalSession {
             .map_err(|_| SelectionCopyError::WorkerStopped)?
     }
 
-    fn shutdown(&mut self) {
+    fn request_shutdown(&mut self) {
         // Request termination before transferring sole responsibility to off-thread PTY cleanup.
         if let Some(terminator) = self.terminator.take()
             && let Err(error) = terminator.terminate()
@@ -861,9 +861,21 @@ impl TerminalSession {
         {
             // The worker already stopped, so there is nothing left to signal.
         }
+    }
+
+    fn shutdown(&mut self) {
+        self.request_shutdown();
         // Dropping a JoinHandle detaches the worker. It still owns the PTY and reader
         // cleanup, but a close operation must never block its GPUI caller on either thread.
         drop(self.worker.take());
+    }
+
+    #[cfg(test)]
+    fn shutdown_and_join(&mut self) {
+        self.request_shutdown();
+        if let Some(worker) = self.worker.take() {
+            join_worker(worker);
+        }
     }
 }
 
@@ -2306,6 +2318,22 @@ mod tests {
     }
     use crate::terminal::geometry::{BackingScale, CellGridSize, LogicalCellSize};
     use crate::terminal::key::{KeyAction, PhysicalKey};
+
+    struct JoinedRealPtySession(TerminalSession);
+
+    impl std::ops::Deref for JoinedRealPtySession {
+        type Target = TerminalSession;
+
+        fn deref(&self) -> &Self::Target {
+            &self.0
+        }
+    }
+
+    impl Drop for JoinedRealPtySession {
+        fn drop(&mut self) {
+            self.0.shutdown_and_join();
+        }
+    }
 
     fn geometry(cols: u16, rows: u16, cell_width: f32, cell_height: f32) -> TerminalGeometry {
         TerminalGeometry::from_grid(
@@ -4273,13 +4301,11 @@ mod tests {
 
     #[test]
     fn real_shell_output_round_trips_through_the_pty_and_emulator() {
+        let _isolation = crate::platform::macos_pty::lock_real_pty_test();
         let size = test_geometry();
-        let StartedTerminalSession {
-            handle: session,
-            events,
-        } = NativeTerminalSessionFactory
-            .start(size, &std::env::current_dir().unwrap())
-            .unwrap();
+        let (session, events) =
+            TerminalSession::start(size, &std::env::current_dir().unwrap(), None).unwrap();
+        let session = JoinedRealPtySession(session);
 
         // The command renders a red X. The echoed command contains an X too, but
         // only the shell's output passes through the SGR sequence and becomes red.
@@ -4323,7 +4349,6 @@ mod tests {
             }
         }
 
-        drop(session);
         assert!(
             saw_red_x,
             "did not receive colored output from the real shell"
@@ -4332,13 +4357,11 @@ mod tests {
 
     #[test]
     fn real_shell_exit_command_emits_an_exited_event() {
+        let _isolation = crate::platform::macos_pty::lock_real_pty_test();
         let size = test_geometry();
-        let StartedTerminalSession {
-            handle: session,
-            events,
-        } = NativeTerminalSessionFactory
-            .start(size, &std::env::current_dir().unwrap())
-            .unwrap();
+        let (session, events) =
+            TerminalSession::start(size, &std::env::current_dir().unwrap(), None).unwrap();
+        let session = JoinedRealPtySession(session);
 
         let request = session
             .request_paste("exit\n".to_owned())
