@@ -76,6 +76,17 @@ impl RenderLifecycle {
         self.effects_with_redraw(restored && self.has_pending_frame())
     }
 
+    pub(crate) fn update_product_visibility(
+        &mut self,
+        workspace_visible: bool,
+        pane_visible: bool,
+    ) -> RenderLifecycleEffects {
+        let mut visibility = self.visibility;
+        visibility.workspace_visible = workspace_visible;
+        visibility.pane_visible = pane_visible;
+        self.update_visibility(visibility)
+    }
+
     pub(crate) fn effects(&self) -> RenderLifecycleEffects {
         self.effects_with_redraw(false)
     }
@@ -160,6 +171,30 @@ mod tests {
         );
         lifecycle.mark_presented(PresentationGeneration::test(2));
         assert!(!lifecycle.update_visibility(visible()).request_redraw);
+    }
+
+    #[test]
+    fn product_visibility_updates_unrendered_zoomed_panes() {
+        let mut lifecycle = RenderLifecycle::new(visible());
+        lifecycle.observe_snapshot(PresentationGeneration::test(1));
+        lifecycle.mark_presented(PresentationGeneration::test(1));
+        lifecycle.update_product_visibility(true, false);
+        assert!(
+            !lifecycle
+                .observe_snapshot(PresentationGeneration::test(2))
+                .request_redraw
+        );
+        assert!(lifecycle.take_frame().is_none());
+
+        assert!(
+            lifecycle
+                .update_product_visibility(true, true)
+                .request_redraw
+        );
+        assert_eq!(
+            lifecycle.take_frame(),
+            Some(PresentationGeneration::test(2))
+        );
     }
 
     #[test]

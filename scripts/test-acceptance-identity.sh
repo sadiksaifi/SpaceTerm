@@ -176,6 +176,9 @@ write_native_observation_fixture() {
         "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
     write_record "$observation" "run.id" "i43-proof"
     write_record "$observation" "package.app.sha256" "$app_sha256"
+    write_record "$observation" "runtime.schema" "spaceterm.acceptance.runtime-stream/v1"
+    write_record "$observation" "runtime.sample_interval_ms" "1000"
+    write_record "$observation" "runtime.transition_capacity" "64"
     write_record "$observation" "process.pid" "1234"
     write_record "$observation" "process.pidversion" "7"
     write_record "$observation" "process.executable.path" \
@@ -194,6 +197,39 @@ write_native_observation_fixture() {
     write_record "$observation" "initial_grid.backing_pixel_width" "1601"
     write_record "$observation" "initial_grid.backing_pixel_height" "960"
     write_record "$observation" "observation.complete" "true"
+    write_runtime_observation_fixture "$observation" "$app_sha256"
+}
+
+write_runtime_observation_fixture() {
+    local observation="$1"
+    local app_sha256="$2"
+    local parent samples events metadata
+    parent="$(dirname -- "$observation")"
+    samples="$parent/runtime-samples.tsv"
+    events="$parent/runtime-events.tsv"
+    metadata="$parent/runtime-metadata.tsv"
+    printf '%s\n' "$RUNTIME_SAMPLES_HEADER" > "$samples"
+    printf '%s\n' $'0\t1\t1\t1\t1\t0\t0\t1\t1\t1\t1\t1\t1\t1\t1\t1\t0\t0\t1\t1\t0\t24\t24\t0\t0\t0\t0\t0\t0\t24\t80\t1600\t960\t0\texited\t0' >> "$samples"
+    printf '%s\n' "$RUNTIME_EVENTS_HEADER" > "$events"
+    printf '%s\n' $'0\t1\tsession-exited\t1\t1\t0' >> "$events"
+    : > "$metadata"
+    write_record "$metadata" "schema" "$RUNTIME_OBSERVATION_METADATA_SCHEMA"
+    write_record "$metadata" "observation.source" "production-app"
+    write_record "$metadata" "run.id" "i43-proof"
+    write_record "$metadata" "package.app.sha256" "$app_sha256"
+    write_record "$metadata" "process.pid" "1234"
+    write_record "$metadata" "runtime.samples.path" "runtime-samples.tsv"
+    write_record "$metadata" "runtime.samples.sha256" "$(sha256_file "$samples")"
+    write_record "$metadata" "runtime.events.path" "runtime-events.tsv"
+    write_record "$metadata" "runtime.events.sha256" "$(sha256_file "$events")"
+    write_record "$metadata" "observer.started_continuous_ns" "1"
+    write_record "$metadata" "observer.ended_continuous_ns" "1"
+    write_record "$metadata" "observer.sample_interval_ms" "1000"
+    write_record "$metadata" "observer.transition_capacity" "64"
+    write_record "$metadata" "observer.sample_count" "1"
+    write_record "$metadata" "observer.event_count" "1"
+    write_record "$metadata" "observer.status" "complete"
+    write_record "$metadata" "observation.complete" "true"
 }
 
 test_native_observation_is_hashed_bound_and_font_consistent() {
@@ -207,6 +243,13 @@ test_native_observation_is_hashed_bound_and_font_consistent() {
     mkdir -p -- "$run_dir/identity"
     write_native_observation_fixture "$observation" "$app_sha256"
     validate_native_observation "$observation" "$app_sha256"
+    validate_runtime_observation "$observation"
+    sed -i '' 's/observer.status\tcomplete/observer.status\tnot-run/' \
+        "$run_dir/identity/runtime-metadata.tsv"
+    if (validate_runtime_observation "$observation") >/dev/null 2>&1; then
+        fail "runtime observation accepted NOT-RUN metadata as complete"
+    fi
+    write_native_observation_fixture "$observation" "$app_sha256"
     sed -i '' 's/observation.complete\ttrue/observation.complete\tfalse/' "$observation"
     if (validate_native_observation "$observation" "$app_sha256") >/dev/null 2>&1; then
         fail "native observation accepted an incomplete authenticated envelope"
@@ -294,6 +337,12 @@ test_native_launcher_has_required_authenticated_bindings() {
         || fail "native launcher forwards the harness environment into the Shell Process"
     xcrun clang -fobjc-arc -fblocks -Wall -Wextra -Werror \
         -mmacosx-version-min=11.0 -fsyntax-only "$launcher"
+    local helper="$TEMP_TEST_DIR/acceptance-launch-verifier-tests"
+    xcrun clang -fobjc-arc -fblocks -Wall -Wextra -Werror \
+        -mmacosx-version-min=11.0 -framework AppKit -framework Foundation \
+        -framework Security -framework CoreFoundation -lbsm \
+        "$launcher" -o "$helper"
+    "$helper" --self-test
 }
 
 test_replay_must_match_recorded_runtime_facts() {
@@ -301,7 +350,8 @@ test_replay_must_match_recorded_runtime_facts() {
     local replayed="$TEMP_TEST_DIR/replayed-runtime.tsv"
     local key value
     for key in \
-        run.id package.app.sha256 process.signature.cdhash process.signature.identifier \
+        run.id package.app.sha256 runtime.schema runtime.sample_interval_ms \
+        runtime.transition_capacity process.signature.cdhash process.signature.identifier \
         process.signature.team_identifier terminal_font_selected \
         initial_grid.rows initial_grid.columns \
         initial_grid.logical_width initial_grid.logical_height \
@@ -309,6 +359,9 @@ test_replay_must_match_recorded_runtime_facts() {
         case "$key" in
             run.id) value="i43-proof" ;;
             package.app.sha256) value="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" ;;
+            runtime.schema) value="spaceterm.acceptance.runtime-stream/v1" ;;
+            runtime.sample_interval_ms) value="1000" ;;
+            runtime.transition_capacity) value="64" ;;
             process.signature.cdhash) value="ABCDEF0123456789" ;;
             process.signature.identifier) value="dev.sadiksaifi.spaceterm" ;;
             process.signature.team_identifier) value="" ;;

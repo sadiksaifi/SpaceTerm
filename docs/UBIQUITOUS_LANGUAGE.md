@@ -27,6 +27,7 @@
 | Term | Definition | Aliases to avoid |
 | --- | --- | --- |
 | **Terminal Session** | The live terminal runtime owned by a Pane, joining terminal emulation, a PTY, and a Shell Process. | Session, Workspace session |
+| **Runtime Observation** | An acceptance-only, authenticated, content-free stream of bounded numeric and closed-enum facts from one production Pane and Terminal Session; collection failure means NOT-RUN rather than PASS or FAIL. | telemetry, terminal transcript, runtime log |
 | **Terminal Emulator** | The state machine that interprets terminal output and maintains the visible grid and Scrollback. | Terminal Session, Pane |
 | **PTY** | The macOS pseudoterminal that connects a Terminal Emulator to its Shell Process. | Terminal, shell |
 | **Shell Process** | The command interpreter process launched for a Pane through its PTY. | Terminal, session |
@@ -95,6 +96,7 @@
 - A **Native Terminal Service** may submit a **Paste Payload** only while its Pane owns **Terminal Input Focus**, and may offer Quick Look only for an existing validated local-file **Terminal Hyperlink**.
 - A **Terminal Accessibility Model** observes immutable terminal state and may request worker-owned Selection changes, but never mutates the Terminal Emulator directly.
 - A **Render Lifecycle** coalesces hidden Terminal Presentations to the newest **Presentation Generation** and schedules exactly one frame when visibility returns.
+- A **Runtime Observation** is dormant without an authenticated mounted-app launch, never reaches a PTY or Shell Process, and never contains terminal content or derived content identity.
 - A recoverable **Terminal Failure** preserves the last valid **Presentation Generation** when possible; a fatal one requires closing the Pane and restarting its command.
 - **Local Diagnostics** never contain terminal, clipboard, environment, path, secret, logical-key, or typed-key values and never leave the machine automatically.
 - **OSC 52 Authorization** exposes only access direction, target, and byte count to UI; clipboard contents remain inside the worker-owned native-service operation and are never diagnostic metadata.

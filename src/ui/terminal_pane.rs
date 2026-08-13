@@ -36,7 +36,9 @@ use crate::platform::macos_keyboard::{
     KeyTranslation, MacosKeyboardBridge, NativeKeyEvent, NativeKeyEventKind, UnhandledKeyEvent,
 };
 use crate::platform::macos_pasteboard::read_file_urls;
-use crate::platform::macos_render_lifecycle::current_window_visibility;
+use crate::platform::macos_render_lifecycle::{
+    NativeWindowVisibility, NativeWindowVisibilitySource, current_window_visibility,
+};
 use crate::platform::macos_scroll::current_wheel_phase;
 use crate::platform::macos_secure_input::{
     SecureInputPaneId, register_pane as register_secure_input_pane,
@@ -72,6 +74,7 @@ const MIN_ROWS: u16 = 2;
 const MAX_PANE_TITLE_CHARACTERS: usize = 256;
 const PRESENTATION_BLINK_INTERVAL: Duration = Duration::from_millis(600);
 const VISUAL_BELL_DURATION: Duration = Duration::from_millis(120);
+const RUNTIME_VISIBILITY_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 fn apply_native_attention(effects: crate::terminal::attention::AttentionEffects) {
     #[cfg(not(test))]
@@ -93,6 +96,7 @@ pub(crate) struct TerminalPane {
     session: Option<Box<dyn TerminalSessionHandle>>,
     session_start_attempted: bool,
     acceptance_observation_claimed: bool,
+    runtime_observation: Option<crate::terminal::RuntimeObservation>,
     screen: Arc<ScreenSnapshot>,
     accessibility: TerminalAccessibilityModel,
     accessibility_notifications: Vec<AccessibilityNotification>,
@@ -148,6 +152,8 @@ pub(crate) struct TerminalPane {
     _blink_task: Option<Task<()>>,
     _attention_task: Option<Task<()>>,
     _event_task: Option<Task<()>>,
+    runtime_visibility_source: Option<NativeWindowVisibilitySource>,
+    _runtime_visibility_task: Option<Task<()>>,
 }
 
 impl TerminalPane {
@@ -209,6 +215,7 @@ impl TerminalPane {
             session: None,
             session_start_attempted: false,
             acceptance_observation_claimed: false,
+            runtime_observation: None,
             screen,
             accessibility,
             accessibility_notifications: Vec::new(),
@@ -258,6 +265,8 @@ impl TerminalPane {
             _blink_task: None,
             _attention_task: None,
             _event_task: None,
+            runtime_visibility_source: None,
+            _runtime_visibility_task: None,
         }
     }
 
@@ -289,6 +298,13 @@ impl TerminalPane {
             session.resolve_osc52_authorization(request.id, Osc52AuthorizationDecision::Deny);
         }
         self.product_focus = product_focus;
+        let pane_visible = product_focus.active_window && product_focus.pane_visible;
+        let _ = self
+            .render_lifecycle
+            .update_product_visibility(product_focus.active_workspace, pane_visible);
+        if let Some(observation) = &self.runtime_observation {
+            observation.product_visibility(product_focus.active_workspace, pane_visible);
+        }
     }
 
     fn open_find(&mut self, _: &OpenTerminalFind, window: &mut Window, cx: &mut Context<Self>) {
@@ -457,6 +473,9 @@ impl TerminalPane {
 
     pub(crate) fn close(&mut self) {
         self.end_find_state();
+        if let Some(observation) = &self.runtime_observation {
+            observation.pane_released();
+        }
         if let Some(confirmation) = self.pending_paste.take()
             && let Some(session) = &self.session
         {
@@ -472,6 +491,8 @@ impl TerminalPane {
         self._blink_task.take();
         self._attention_task.take();
         self._event_task.take();
+        self._runtime_visibility_task.take();
+        self.runtime_visibility_source.take();
         self.render_lifecycle.release();
         self.session.take();
         if let Some(id) = self.secure_input_pane.take() {
@@ -591,11 +612,14 @@ impl TerminalPane {
         }
         self.session_start_attempted = true;
 
-        self.acceptance_observation_claimed =
-            crate::platform::acceptance_observation::claim_session(
-                self.font_family.as_ref(),
-                observation_geometry(geometry),
-            );
+        self.runtime_observation = crate::platform::acceptance_observation::claim_session(
+            self.font_family.as_ref(),
+            observation_geometry(geometry),
+        );
+        self.acceptance_observation_claimed = self.runtime_observation.is_some();
+        if self.acceptance_observation_claimed {
+            self.start_runtime_visibility_monitor(cx);
+        }
 
         match self.session_factory.start(geometry) {
             Ok(started) => {
@@ -608,11 +632,19 @@ impl TerminalPane {
                 self.session = Some(started.handle);
                 self.flush_pending_file_insertion(cx);
                 let receiver = started.events;
+                let observation = self.runtime_observation.clone();
                 self._event_task = Some(cx.spawn(async move |this, cx| {
                     while let Ok(event) = receiver.recv().await {
                         let mut events = vec![event];
-                        while let Ok(event) = receiver.try_recv() {
-                            events.push(event);
+                        if let Some(observation) = &observation {
+                            if let Ok(event) = receiver.try_recv() {
+                                events.push(event);
+                            }
+                            observation.ui_dispatch(events.len(), receiver.len());
+                        } else {
+                            while let Ok(event) = receiver.try_recv() {
+                                events.push(event);
+                            }
                         }
                         if this
                             .update(cx, |this, cx| {
@@ -625,6 +657,11 @@ impl TerminalPane {
                         {
                             break;
                         }
+                        if observation.is_some() {
+                            cx.background_executor()
+                                .timer(Duration::from_millis(1))
+                                .await;
+                        }
                     }
                 }));
             }
@@ -636,9 +673,77 @@ impl TerminalPane {
         }
     }
 
+    fn start_runtime_visibility_monitor(&mut self, cx: &mut Context<Self>) {
+        let Some(source) = NativeWindowVisibilitySource::capture() else {
+            if let Some(observation) = &self.runtime_observation {
+                observation.fail();
+            }
+            return;
+        };
+        self.runtime_visibility_source = Some(source);
+        self._runtime_visibility_task = Some(cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(RUNTIME_VISIBILITY_POLL_INTERVAL)
+                    .await;
+                if this
+                    .update(cx, |pane, cx| {
+                        let Some(native) = pane
+                            .runtime_visibility_source
+                            .as_ref()
+                            .map(NativeWindowVisibilitySource::current)
+                        else {
+                            return;
+                        };
+                        pane.update_runtime_visibility(native, cx);
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        }));
+    }
+
+    fn update_runtime_visibility(
+        &mut self,
+        native: NativeWindowVisibility,
+        cx: &mut Context<Self>,
+    ) {
+        let surface = SurfaceVisibility {
+            application_active: self.application_active,
+            key_window: self.product_focus.active_window,
+            minimized: native.minimized,
+            occluded: native.occluded,
+            live_resize: native.live_resize,
+            workspace_visible: self.product_focus.active_workspace,
+            pane_visible: self.product_focus.active_window && self.product_focus.pane_visible,
+        };
+        let effects = self.render_lifecycle.update_visibility(surface);
+        if let Some(observation) = &self.runtime_observation {
+            observation.visibility(crate::terminal::RuntimeVisibility {
+                presentable: !surface.minimized
+                    && !surface.occluded
+                    && surface.workspace_visible
+                    && surface.pane_visible,
+                minimized: surface.minimized,
+                occluded: surface.occluded,
+                workspace_visible: surface.workspace_visible,
+                pane_visible: surface.pane_visible,
+                live_resize: surface.live_resize,
+            });
+        }
+        if effects.request_redraw {
+            cx.notify();
+        }
+    }
+
     fn handle_event(&mut self, event: SessionEvent, cx: &mut Context<Self>) {
         match event {
             SessionEvent::Screen(screen) => {
+                if let Some(observation) = &self.runtime_observation {
+                    observation.ui_screen_received();
+                }
                 if screen.generation < self.screen.generation {
                     return;
                 }
@@ -658,6 +763,15 @@ impl TerminalPane {
                 }
                 self.accessibility = accessibility;
                 let _ = self.render_lifecycle.observe_snapshot(screen.generation);
+                if let Some(observation) = &self.runtime_observation {
+                    observation.ui_screen_applied(
+                        screen.generation.as_u64(),
+                        screen.scrollbar.total_rows,
+                        screen.scrollbar.visible_rows,
+                        screen.scrollbar.offset_rows,
+                        screen.selection_present,
+                    );
+                }
                 self.screen = screen;
                 self.sync_scrollbar(cx);
             }
@@ -1800,16 +1914,35 @@ impl Render for TerminalPane {
         let surface_active = self.product_focus.active_workspace
             && self.product_focus.active_window
             && window.is_window_active();
-        let native_visibility = current_window_visibility();
-        let lifecycle_effects = self.render_lifecycle.update_visibility(SurfaceVisibility {
+        let native_visibility = self
+            .runtime_visibility_source
+            .as_ref()
+            .map(NativeWindowVisibilitySource::current)
+            .unwrap_or_else(current_window_visibility);
+        let surface_visibility = SurfaceVisibility {
             application_active: window.is_window_active(),
             key_window: window.is_window_active(),
             minimized: native_visibility.minimized,
             occluded: native_visibility.occluded,
             live_resize: native_visibility.live_resize,
             workspace_visible: self.product_focus.active_workspace,
-            pane_visible: self.product_focus.active_window,
-        });
+            pane_visible: self.product_focus.active_window && self.product_focus.pane_visible,
+        };
+        let lifecycle_effects = self.render_lifecycle.update_visibility(surface_visibility);
+        if let Some(observation) = &self.runtime_observation {
+            observation.visibility(crate::terminal::RuntimeVisibility {
+                presentable: !surface_visibility.minimized
+                    && !surface_visibility.occluded
+                    && surface_visibility.workspace_visible
+                    && surface_visibility.pane_visible,
+                minimized: surface_visibility.minimized,
+                occluded: surface_visibility.occluded,
+                workspace_visible: surface_visibility.workspace_visible,
+                pane_visible: surface_visibility.pane_visible,
+                live_resize: surface_visibility.live_resize,
+            });
+            observation.render_started(self.screen.generation.as_u64());
+        }
         if lifecycle_effects.request_redraw {
             cx.notify();
         }
@@ -1912,10 +2045,15 @@ impl Render for TerminalPane {
         );
         if let Some(generation) = self.render_lifecycle.take_frame() {
             self.render_lifecycle.mark_presented(generation);
+            let observation = self.runtime_observation.clone();
             if self.acceptance_observation_claimed && self.screen.generation == generation {
                 let rows = self.screen.size.rows;
                 let columns = self.screen.size.cols;
+                let runtime_generation = generation.as_u64();
                 window.on_next_frame(move |_, _| {
+                    if let Some(observation) = &observation {
+                        observation.next_frame(runtime_generation);
+                    }
                     if let Some(observation) =
                         crate::platform::acceptance_observation::prepare_once(rows, columns)
                         && let Err(error) = observation.emit()

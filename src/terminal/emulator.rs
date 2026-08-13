@@ -184,6 +184,10 @@ impl PresentationGeneration {
     pub(crate) const fn test(value: u64) -> Self {
         Self(value)
     }
+
+    pub(crate) const fn as_u64(self) -> u64 {
+        self.0
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -3866,13 +3870,26 @@ mod tests {
         let alternate = emulator.snapshot().unwrap().unwrap();
         assert_eq!(alternate.active_screen, ActiveScreenSnapshot::Alternate);
         assert!(!alternate.selection_present);
+        assert!(
+            alternate
+                .rows
+                .iter()
+                .flat_map(|row| row.iter())
+                .all(|cell| !cell.selected)
+        );
         assert!(alternate.damage.selection_presence);
 
         emulator.feed(b"\x1b[?1049l");
         let restored = emulator.snapshot().unwrap().unwrap();
         assert_eq!(restored.active_screen, ActiveScreenSnapshot::Primary);
-        assert!(restored.selection_present);
-        assert!(restored.damage.selection_presence);
+        assert!(!restored.selection_present);
+        assert!(
+            restored
+                .rows
+                .iter()
+                .flat_map(|row| row.iter())
+                .all(|cell| !cell.selected)
+        );
     }
 
     #[test]
