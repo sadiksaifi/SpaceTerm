@@ -21,6 +21,8 @@ use super::terminal_context_menu::{
     TERMINAL_CONTEXT_MENU_HEIGHT, TERMINAL_CONTEXT_MENU_WIDTH, TerminalContextMenuCommand,
     render_terminal_context_menu,
 };
+#[cfg(test)]
+use super::terminal_element::PaintPreflightFault;
 use super::terminal_element::{
     TerminalGridCache, TerminalGridConfiguration, TerminalGridElement, terminal_grid_content_bounds,
 };
@@ -28,7 +30,7 @@ use super::terminal_find::{FindEditor, FindInputElement};
 use super::terminal_focus::{
     TerminalFocusBlocker, TerminalFocusCoordinator, TerminalFocusFacts, TerminalProductFocus,
 };
-use super::terminal_graphics::TerminalGraphicsCache;
+use super::terminal_graphics::{GraphicsAttemptToken, TerminalGraphicsCache};
 use super::terminal_ime::{PreeditLayout, PreeditPosition, TerminalIme, layout_preedit};
 use super::{
     AllowOsc52Clipboard, CancelUnsafePaste, CloseTerminalFind, ConfirmUnsafePaste, CopySelection,
@@ -141,6 +143,51 @@ struct PreeditLayoutKey {
     caret_utf16: usize,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RecoveryAction {
+    Presentation,
+    RendererResources,
+    StartSession,
+    CopySelection,
+    ExportDiagnostics,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct RecoveryToken {
+    revision: u64,
+    action: RecoveryAction,
+    generation: crate::terminal::PresentationGeneration,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct OperationToken {
+    id: u64,
+    state_revision: u64,
+    generation: crate::terminal::PresentationGeneration,
+    recovery: Option<RecoveryToken>,
+}
+
+#[derive(Default)]
+struct SelectionPasteboard {
+    #[cfg(test)]
+    fail_next_write: bool,
+}
+
+impl SelectionPasteboard {
+    fn write(&mut self, copy: SelectionCopy, cx: &mut App) -> Result<(), String> {
+        #[cfg(test)]
+        if std::mem::take(&mut self.fail_next_write) {
+            return Err("injected native pasteboard failure".to_owned());
+        }
+        write_selection_copy(copy, cx)
+    }
+
+    #[cfg(test)]
+    fn fail_next_write(&mut self) {
+        self.fail_next_write = true;
+    }
+}
+
 pub(crate) struct TerminalPane {
     session_factory: WorkspaceTerminalSessionFactory,
     session: Option<Box<dyn TerminalSessionHandle>>,
@@ -151,10 +198,19 @@ pub(crate) struct TerminalPane {
     native_service_focus_epoch: Cell<u64>,
     native_service_hierarchy_generation: u64,
     screen: Arc<ScreenSnapshot>,
+    last_valid_screen: Arc<ScreenSnapshot>,
     accessibility: TerminalAccessibilityModel,
     accessibility_notifications: Vec<AccessibilityNotification>,
     render_lifecycle: RenderLifecycle,
     pane_state: PaneTerminalState,
+    pending_recovery: Option<RecoveryToken>,
+    recovery_retry_requested: Option<RecoveryToken>,
+    state_revision: u64,
+    next_operation_id: u64,
+    latest_presentation_operation: Option<u64>,
+    latest_export_operation: Option<u64>,
+    #[cfg(test)]
+    scene_submission_attempts: Vec<crate::terminal::PresentationGeneration>,
     diagnostics: DiagnosticBundle,
     status: Option<String>,
     fallback_title: SharedString,
@@ -186,7 +242,11 @@ pub(crate) struct TerminalPane {
     wheel_accumulator: WheelAccumulator,
     scrollbar: Entity<OverlayScrollbar<u64>>,
     render_cache: Entity<TerminalGridCache>,
+    fallback_render_cache: Entity<TerminalGridCache>,
+    #[cfg(test)]
+    paint_fault: Option<PaintPreflightFault>,
     graphics_cache: Entity<TerminalGraphicsCache>,
+    selection_pasteboard: SelectionPasteboard,
     keyboard_bridge: MacosKeyboardBridge,
     ime: TerminalIme,
     preedit_layout: Option<PreeditLayout>,
@@ -244,6 +304,7 @@ impl TerminalPane {
             normalized_pane_title("", &session_factory.fallback_title()).into();
         let scrollbar = cx.new(|_| OverlayScrollbar::<u64>::new("terminal-scrollbar"));
         let render_cache = cx.new(|_| TerminalGridCache::new());
+        let fallback_render_cache = cx.new(|_| TerminalGridCache::new());
         let graphics_cache = cx.new(|_| TerminalGraphicsCache::default());
         cx.on_release(|pane, cx| {
             pane.graphics_cache.update(cx, |cache, cx| cache.clear(cx));
@@ -306,11 +367,20 @@ impl TerminalPane {
             native_service_session_identity: 0,
             native_service_focus_epoch: Cell::new(0),
             native_service_hierarchy_generation: 0,
+            last_valid_screen: Arc::clone(&screen),
             screen,
             accessibility,
             accessibility_notifications: Vec::new(),
             render_lifecycle,
             pane_state: PaneTerminalState::default(),
+            pending_recovery: None,
+            recovery_retry_requested: None,
+            state_revision: 0,
+            next_operation_id: 0,
+            latest_presentation_operation: None,
+            latest_export_operation: None,
+            #[cfg(test)]
+            scene_submission_attempts: Vec::new(),
             diagnostics: DiagnosticBundle::default(),
             status: None,
             title: fallback_title.clone(),
@@ -342,7 +412,11 @@ impl TerminalPane {
             wheel_accumulator: WheelAccumulator::default(),
             scrollbar,
             render_cache,
+            fallback_render_cache,
+            #[cfg(test)]
+            paint_fault: None,
             graphics_cache,
+            selection_pasteboard: SelectionPasteboard::default(),
             keyboard_bridge: MacosKeyboardBridge::new(OptionAsAltPolicy::default()),
             ime: TerminalIme::default(),
             preedit_layout: None,
@@ -651,21 +725,7 @@ impl TerminalPane {
         self.preedit_layout_key = None;
     }
 
-    pub(super) fn graphics_scene_succeeded(
-        &mut self,
-        attempt: super::terminal_graphics::GraphicsAttemptToken,
-        generation: crate::terminal::PresentationGeneration,
-        cx: &mut Context<Self>,
-    ) {
-        if self
-            .graphics_cache
-            .update(cx, |cache, cx| cache.mark_presented(attempt, cx))
-        {
-            self.render_lifecycle.mark_presented(generation);
-        }
-    }
-
-    fn observe_presented_next_frame(
+    fn observe_presented_frame(
         &self,
         generation: crate::terminal::PresentationGeneration,
         rows: u16,
@@ -797,13 +857,231 @@ impl TerminalPane {
             .update(cx, |scrollbar, cx| scrollbar.sync(metrics, cx));
     }
 
-    fn present_failure(&mut self, failure: TerminalFailure, preserve_frame: bool) {
-        self.diagnostics.record(&failure);
-        self.pane_state = PaneTerminalState::failed(
+    fn last_valid_presentation(&self) -> crate::terminal::PresentationGeneration {
+        self.last_valid_screen.generation
+    }
+
+    fn present_failure(
+        &mut self,
+        failure: TerminalFailure,
+        preserve_frame: bool,
+        recovery: Option<RecoveryAction>,
+    ) -> bool {
+        self.present_failure_at(failure, preserve_frame, recovery, self.screen.generation)
+    }
+
+    fn present_failure_at(
+        &mut self,
+        failure: TerminalFailure,
+        preserve_frame: bool,
+        recovery: Option<RecoveryAction>,
+        generation: crate::terminal::PresentationGeneration,
+    ) -> bool {
+        if matches!(self.pane_state, PaneTerminalState::Exited(_))
+            || self
+                .pane_state
+                .failure()
+                .is_some_and(TerminalFailure::is_fatal)
+        {
+            return false;
+        }
+        let state = PaneTerminalState::failed(
             failure.clone(),
-            preserve_frame.then_some(self.screen.generation),
+            preserve_frame.then(|| self.last_valid_presentation()),
         );
-        self.status = Some(failure.to_string());
+        if self.pane_state == state
+            && self.pending_recovery.is_some_and(|pending| {
+                recovery == Some(pending.action) && generation == pending.generation
+            })
+        {
+            return false;
+        }
+        self.state_revision = self.state_revision.wrapping_add(1);
+        self.diagnostics.record(&failure);
+        self.pane_state = state;
+        self.pending_recovery = recovery.map(|action| RecoveryToken {
+            revision: self.state_revision,
+            action,
+            generation,
+        });
+        self.recovery_retry_requested = None;
+        self.status = None;
+        true
+    }
+
+    fn clear_recovery(&mut self, expected: RecoveryToken) -> bool {
+        if self.pending_recovery != Some(expected)
+            || self.state_revision != expected.revision
+            || self
+                .pane_state
+                .failure()
+                .is_none_or(TerminalFailure::is_fatal)
+        {
+            return false;
+        }
+        self.state_revision = self.state_revision.wrapping_add(1);
+        self.pending_recovery = None;
+        self.recovery_retry_requested = None;
+        self.pane_state = PaneTerminalState::Running;
+        self.status = None;
+        true
+    }
+
+    fn begin_operation(
+        &mut self,
+        generation: crate::terminal::PresentationGeneration,
+        recovery: Option<RecoveryToken>,
+    ) -> OperationToken {
+        self.next_operation_id = self.next_operation_id.wrapping_add(1);
+        OperationToken {
+            id: self.next_operation_id,
+            state_revision: self.state_revision,
+            generation,
+            recovery,
+        }
+    }
+
+    fn operation_is_current(&self, operation: OperationToken, latest: Option<u64>) -> bool {
+        latest == Some(operation.id)
+            && self.state_revision == operation.state_revision
+            && operation
+                .recovery
+                .is_none_or(|recovery| self.pending_recovery == Some(recovery))
+    }
+
+    fn authoritative_status(&self) -> Option<String> {
+        match &self.pane_state {
+            PaneTerminalState::Running => self.status.clone(),
+            PaneTerminalState::Exited(exit) => Some(exit.to_string()),
+            PaneTerminalState::Failed { failure, .. } => Some(failure.to_string()),
+        }
+    }
+
+    pub(super) fn record_scene_submission_attempt(
+        &mut self,
+        generation: crate::terminal::PresentationGeneration,
+    ) {
+        #[cfg(test)]
+        self.scene_submission_attempts.push(generation);
+        #[cfg(not(test))]
+        let _ = generation;
+    }
+
+    pub(super) fn presentation_succeeded(
+        &mut self,
+        operation: OperationToken,
+        graphics_attempt: GraphicsAttemptToken,
+        screen: Arc<ScreenSnapshot>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let generation = screen.generation;
+        if operation.generation != generation
+            || !self.operation_is_current(operation, self.latest_presentation_operation)
+        {
+            return;
+        }
+        let graphics_presented = self
+            .graphics_cache
+            .update(cx, |cache, cx| cache.mark_presented(graphics_attempt, cx));
+        if !graphics_presented {
+            self.renderer_resource_failed(operation, graphics_attempt, cx);
+            return;
+        }
+        let rows = screen.size.rows;
+        let columns = screen.size.cols;
+        self.render_lifecycle.mark_presented(generation);
+        if generation >= self.last_valid_screen.generation {
+            self.last_valid_screen = screen;
+        }
+        if let Some(recovery) = operation.recovery
+            && generation >= recovery.generation
+            && matches!(
+                recovery.action,
+                RecoveryAction::Presentation | RecoveryAction::RendererResources
+            )
+            && self.clear_recovery(recovery)
+        {
+            cx.notify();
+        }
+        let pane = cx.entity().downgrade();
+        window.on_next_frame(move |_, cx| {
+            let _ = pane.update(cx, |pane, _| {
+                pane.observe_presented_frame(generation, rows, columns);
+            });
+        });
+    }
+
+    pub(super) fn presentation_failed(
+        &mut self,
+        operation: OperationToken,
+        graphics_attempt: GraphicsAttemptToken,
+        cx: &mut Context<Self>,
+    ) {
+        self.graphics_cache.update(cx, |cache, cx| {
+            cache.rollback(graphics_attempt, None, cx);
+        });
+        if !self.operation_is_current(operation, self.latest_presentation_operation) {
+            return;
+        }
+        if self.present_failure_at(
+            TerminalFailure::presentation("paint-terminal-presentation"),
+            true,
+            Some(RecoveryAction::Presentation),
+            operation.generation,
+        ) {
+            cx.notify();
+        }
+    }
+
+    pub(super) fn renderer_resource_failed(
+        &mut self,
+        operation: OperationToken,
+        graphics_attempt: GraphicsAttemptToken,
+        cx: &mut Context<Self>,
+    ) {
+        self.graphics_cache.update(cx, |cache, cx| {
+            cache.rollback(graphics_attempt, None, cx);
+        });
+        if !self.operation_is_current(operation, self.latest_presentation_operation) {
+            return;
+        }
+        if self.present_failure_at(
+            TerminalFailure::resource("paint-terminal-graphics"),
+            true,
+            Some(RecoveryAction::RendererResources),
+            operation.generation,
+        ) {
+            cx.notify();
+        }
+    }
+
+    fn retry_recovery(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(pending) = self.pending_recovery else {
+            return;
+        };
+        match pending.action {
+            RecoveryAction::Presentation => {
+                self.recovery_retry_requested = Some(pending);
+                self.retry_presentation(window, cx);
+            }
+            RecoveryAction::RendererResources => {
+                self.recovery_retry_requested = Some(pending);
+                cx.notify();
+            }
+            RecoveryAction::StartSession => {
+                self.recovery_retry_requested = Some(pending);
+                self.session_start_attempted = false;
+                self.last_geometry = None;
+                cx.notify();
+            }
+            RecoveryAction::CopySelection => {
+                self.copy_selection_with_recovery(Some(pending), window, cx);
+            }
+            RecoveryAction::ExportDiagnostics => {
+                self.export_diagnostics_with_recovery(Some(pending), window, cx);
+            }
+        }
     }
 
     fn reveal_scrollbar(&self, cx: &mut Context<Self>) {
@@ -856,6 +1134,13 @@ impl TerminalPane {
 
         match self.session_factory.start(geometry) {
             Ok(started) => {
+                if self
+                    .recovery_retry_requested
+                    .filter(|recovery| recovery.action == RecoveryAction::StartSession)
+                    .is_some_and(|recovery| self.clear_recovery(recovery))
+                {
+                    cx.notify();
+                }
                 started.handle.focus(self.terminal_input_focus);
                 if let Some(editor) = &self.find_editor {
                     started
@@ -902,7 +1187,11 @@ impl TerminalPane {
             }
             Err(error) => {
                 let _ = error;
-                self.present_failure(TerminalFailure::platform("start-session-worker"), false);
+                self.present_failure(
+                    TerminalFailure::platform("start-session-worker"),
+                    false,
+                    Some(RecoveryAction::StartSession),
+                );
                 cx.notify();
             }
         }
@@ -1047,9 +1336,20 @@ impl TerminalPane {
             SessionEvent::Exited(status) => {
                 self.context_menu = None;
                 self.quick_look.dismiss();
+                if matches!(self.pane_state, PaneTerminalState::Exited(_))
+                    || self
+                        .pane_state
+                        .failure()
+                        .is_some_and(TerminalFailure::is_fatal)
+                {
+                    return;
+                }
                 self.hidden_input = false;
                 self.sync_secure_input();
-                self.status = Some(status.to_string());
+                self.state_revision = self.state_revision.wrapping_add(1);
+                self.pending_recovery = None;
+                self.recovery_retry_requested = None;
+                self.status = None;
                 self.pane_state = PaneTerminalState::exited(status);
                 cx.emit(TerminalPaneEvent::Exited);
             }
@@ -1059,7 +1359,7 @@ impl TerminalPane {
                 self.hidden_input = false;
                 self.sync_secure_input();
                 let failure = TerminalFailure::from_session(&failure);
-                self.present_failure(failure, true);
+                self.present_failure(failure, true, None);
             }
         }
     }
@@ -1279,24 +1579,41 @@ impl TerminalPane {
     }
 
     fn update_backing_scale(&mut self, factor: f32, window: &mut Window, cx: &mut Context<Self>) {
+        self.apply_backing_scale(factor, false, window, cx);
+    }
+
+    fn retry_presentation(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.apply_backing_scale(window.scale_factor(), true, window, cx);
+    }
+
+    fn apply_backing_scale(
+        &mut self,
+        factor: f32,
+        force_resources: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(backing_scale) = BackingScale::new(factor) else {
-            let failure = TerminalFailure::presentation("update-backing-scale");
-            self.diagnostics.record(&failure);
-            self.pane_state =
-                PaneTerminalState::failed(failure.clone(), Some(self.screen.generation));
-            self.status = Some(failure.to_string());
+            self.present_failure(
+                TerminalFailure::presentation("update-backing-scale"),
+                true,
+                Some(RecoveryAction::Presentation),
+            );
             cx.notify();
             return;
         };
-        if self.backing_scale == backing_scale {
+        if self.backing_scale == backing_scale && !force_resources {
             return;
         }
 
         self.backing_scale = backing_scale;
         self.cell_width = measure_cell_width(window, &self.font_family, self.font_size);
         self.last_geometry = None;
-        if self.render_lifecycle.update_scale(factor) == ScaleChange::ScaleResources {
+        let scale_change = self.render_lifecycle.update_scale(factor);
+        if force_resources || scale_change == ScaleChange::ScaleResources {
             self.render_cache
+                .update(cx, |cache, _| cache.invalidate_scale_dependent());
+            self.fallback_render_cache
                 .update(cx, |cache, _| cache.invalidate_scale_dependent());
         }
         self.sync_scrollbar(cx);
@@ -1508,6 +1825,15 @@ impl TerminalPane {
     }
 
     fn copy_selection(&mut self, _: &CopySelection, window: &mut Window, cx: &mut Context<Self>) {
+        self.copy_selection_with_recovery(None, window, cx);
+    }
+
+    fn copy_selection_with_recovery(
+        &mut self,
+        recovery: Option<RecoveryToken>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.find_focus_handle.is_focused(window)
             && let Some(editor) = &self.find_editor
             && !editor.selection().is_empty()
@@ -1516,15 +1842,25 @@ impl TerminalPane {
             cx.write_to_clipboard(ClipboardItem::new_string(text));
             return;
         }
-        if let Some(copy) = self.ordered_selection_copy(cx)
-            && let Err(error) = write_selection_copy(copy, cx)
-        {
-            let _ = error;
-            self.present_failure(
-                TerminalFailure::platform("write-selection-pasteboard"),
-                true,
-            );
-            cx.notify();
+        match self.ordered_selection_copy(cx) {
+            Some(copy) => {
+                if let Err(error) = self.selection_pasteboard.write(copy, cx) {
+                    let _ = error;
+                    self.present_failure(
+                        TerminalFailure::platform("write-selection-pasteboard"),
+                        true,
+                        Some(RecoveryAction::CopySelection),
+                    );
+                    cx.notify();
+                } else if recovery.is_some_and(|recovery| self.clear_recovery(recovery)) {
+                    cx.notify();
+                }
+            }
+            None => {
+                if recovery.is_some_and(|recovery| self.clear_recovery(recovery)) {
+                    cx.notify();
+                }
+            }
         }
     }
 
@@ -1533,12 +1869,20 @@ impl TerminalPane {
         match session.copy_selection() {
             Ok(Some(copy)) if !copy.plain_text.is_empty() => Some(copy),
             Err(SelectionCopyError::Formatting) => {
-                self.present_failure(TerminalFailure::emulator("format-terminal-selection"), true);
+                self.present_failure(
+                    TerminalFailure::emulator("format-terminal-selection"),
+                    true,
+                    None,
+                );
                 cx.notify();
                 None
             }
             Err(SelectionCopyError::WorkerStopped) => {
-                self.present_failure(TerminalFailure::resource("receive-selection-reply"), true);
+                self.present_failure(
+                    TerminalFailure::resource("receive-selection-reply"),
+                    true,
+                    Some(RecoveryAction::CopySelection),
+                );
                 cx.notify();
                 None
             }
@@ -1771,7 +2115,7 @@ impl TerminalPane {
             return;
         };
         if self.quick_look.preview(&target).is_err() {
-            self.present_failure(TerminalFailure::platform("preview-local-file"), true);
+            self.present_failure(TerminalFailure::platform("preview-local-file"), true, None);
             cx.notify();
         }
     }
@@ -1877,9 +2221,20 @@ impl TerminalPane {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.export_diagnostics_with_recovery(None, window, cx);
+    }
+
+    fn export_diagnostics_with_recovery(
+        &mut self,
+        recovery: Option<RecoveryToken>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.native_modal_open = true;
         let _ = self.sync_terminal_input_focus(window, cx);
         cx.notify();
+        let operation = self.begin_operation(self.screen.generation, recovery);
+        self.latest_export_operation = Some(operation.id);
         let directory = std::env::current_dir().unwrap_or_else(|_| std::env::temp_dir());
         let receiver = cx.prompt_for_new_path(&directory, Some("SpaceTerm-diagnostics.txt"));
         let diagnostics = self.diagnostics.clone();
@@ -1898,19 +2253,38 @@ impl TerminalPane {
                 .spawn(async move { diagnostics.export(&exported_path) })
                 .await;
             let _ = this.update(cx, |this, cx| {
-                this.status = Some(if result.is_ok() {
-                    format!("Diagnostics exported to {}", path.display())
-                } else {
-                    let failure = TerminalFailure::resource("export-diagnostics-file");
-                    this.diagnostics.record(&failure);
-                    this.pane_state =
-                        PaneTerminalState::failed(failure.clone(), Some(this.screen.generation));
-                    failure.to_string()
-                });
-                cx.notify();
+                this.finish_export(operation, result, path, cx);
             });
         })
         .detach();
+    }
+
+    fn finish_export(
+        &mut self,
+        operation: OperationToken,
+        result: std::io::Result<()>,
+        path: PathBuf,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.operation_is_current(operation, self.latest_export_operation) {
+            return;
+        }
+        if result.is_ok() {
+            if let Some(recovery) = operation.recovery {
+                self.clear_recovery(recovery);
+            }
+            if matches!(self.pane_state, PaneTerminalState::Running) {
+                self.status = Some(format!("Diagnostics exported to {}", path.display()));
+            }
+        } else {
+            self.present_failure_at(
+                TerminalFailure::resource("export-diagnostics-file"),
+                true,
+                Some(RecoveryAction::ExportDiagnostics),
+                operation.generation,
+            );
+        }
+        cx.notify();
     }
 
     fn confirm_unsafe_paste(
@@ -2478,25 +2852,70 @@ impl Render for TerminalPane {
             terminal_input_focused,
             cx,
         );
-        let background = gpui_color(self.screen.background);
-        let status = self.status.clone();
-        let diagnostics_available =
-            self.pane_state.failure().is_some() && self.diagnostics.record_count() > 0;
-        let last_valid_frame_preserved = self.pane_state.last_valid_frame().is_some();
-        let export_pane = cx.entity().downgrade();
-        let hovered_link = self.current_hovered_link().cloned();
+        let recovery_holds_presentation = self.pending_recovery.is_some_and(|pending| {
+            matches!(
+                pending.action,
+                RecoveryAction::Presentation | RecoveryAction::RendererResources
+            ) && self.recovery_retry_requested != Some(pending)
+        });
+        let mut display_screen = if recovery_holds_presentation {
+            Arc::clone(&self.last_valid_screen)
+        } else {
+            Arc::clone(&self.screen)
+        };
+        let fallback_graphics = self
+            .graphics_cache
+            .read_with(cx, |cache, _| cache.last_presented());
+        let presentation_generation = self.render_lifecycle.take_frame();
+        let graphics_attempt_allowed = !recovery_holds_presentation
+            && presentation_generation == Some(display_screen.generation);
+        let (graphics, graphics_attempt, graphics_attempted) =
+            self.graphics_cache.update(cx, |cache, cx| {
+                if !graphics_attempt_allowed {
+                    return (cache.last_presented(), None, false);
+                }
+                match cache.sync(
+                    display_screen.active_screen,
+                    &display_screen.graphics,
+                    window,
+                    cx,
+                ) {
+                    Ok(preparation) => (preparation.graphics, Some(preparation.token), true),
+                    Err(_) => (cache.last_presented(), None, true),
+                }
+            });
+        if graphics_attempted && graphics_attempt.is_none() {
+            if self.present_failure(
+                TerminalFailure::resource("prepare-terminal-graphics"),
+                true,
+                Some(RecoveryAction::RendererResources),
+            ) {
+                cx.notify();
+            }
+            display_screen = Arc::clone(&self.last_valid_screen);
+        }
+        let presentation_operation = graphics_attempt.map(|_| {
+            let recovery = self
+                .recovery_retry_requested
+                .filter(|recovery| self.pending_recovery == Some(*recovery));
+            let operation = self.begin_operation(display_screen.generation, recovery);
+            self.latest_presentation_operation = Some(operation.id);
+            operation
+        });
+        let displaying_current = Arc::ptr_eq(&display_screen, &self.screen);
+        let display_render_cache = if displaying_current {
+            self.render_cache.clone()
+        } else {
+            self.fallback_render_cache.clone()
+        };
+        let background = gpui_color(display_screen.background);
+        let hovered_link = displaying_current
+            .then(|| self.current_hovered_link().cloned())
+            .flatten();
         let native_context_actions = self.native_context_actions();
-        let native_context_selector = format!(
-            "terminal-native-context-copy-{}-open-{}-quick-look-{}-failure-{}-last-frame-{}",
-            native_context_actions.copy,
-            native_context_actions.open_link,
-            native_context_actions.quick_look,
-            diagnostics_available,
-            last_valid_frame_preserved,
-        );
         let link_cell_width = self.cell_width;
         let link_line_height = self.line_height;
-        let link_rows = self.screen.rows.clone();
+        let link_rows = display_screen.rows.clone();
         let link_highlights = hovered_link.as_ref().map_or_else(Vec::new, |hovered| {
             link_rows
                 .iter()
@@ -2530,44 +2949,37 @@ impl Render for TerminalPane {
         self.sync_scrollbar(cx);
         let scrollbar = self.scrollbar.clone();
         let pointer_uses_text_cursor = pointer_uses_text_cursor(
-            self.screen.mouse_tracking,
+            display_screen.mouse_tracking,
             self.pointer_modifiers.shift,
             self.shift_selection,
         );
-        let preedit = self.preedit_layout();
+        let preedit = displaying_current.then(|| self.preedit_layout()).flatten();
         let attention_visual = self.attention_visual;
         let find_spans = self
             .find_editor
             .as_ref()
-            .and_then(|_| self.screen.find.as_ref())
+            .and_then(|_| display_screen.find.as_ref())
             .filter(|snapshot| snapshot.generation == self.find_generation)
             .map_or_else(|| Arc::from([]), |snapshot| snapshot.visible_spans.clone());
         let find_bar = self.render_find_bar(cx);
-        let presentation_generation = self.render_lifecycle.take_frame();
-        let (graphics, graphics_attempt) = if presentation_generation.is_some() {
-            let graphics_snapshot = self.screen.graphics.clone();
-            let active_screen = self.screen.active_screen;
-            let preparation = self.graphics_cache.update(cx, |cache, cx| {
-                cache.sync(active_screen, &graphics_snapshot, window, cx)
-            });
-            let Ok(preparation) = preparation else {
-                return div()
-                    .size_full()
-                    .bg(background)
-                    .child("Terminal graphics unavailable")
-                    .into_any_element();
-            };
-            (preparation.graphics, Some(preparation.token))
-        } else {
-            (
-                self.graphics_cache
-                    .read_with(cx, |cache, _| cache.last_presented()),
-                None,
-            )
-        };
+        let status = self.authoritative_status();
+        let diagnostics_available =
+            self.pane_state.failure().is_some() && self.diagnostics.record_count() > 0;
+        let recovery_available = self.pending_recovery.is_some();
+        let last_valid_frame_preserved = self.pane_state.last_valid_frame().is_some();
+        let export_pane = cx.entity().downgrade();
+        let retry_pane = cx.entity().downgrade();
+        let native_context_selector = format!(
+            "terminal-native-context-copy-{}-open-{}-quick-look-{}-failure-{}-last-frame-{}",
+            native_context_actions.copy,
+            native_context_actions.open_link,
+            native_context_actions.quick_look,
+            diagnostics_available,
+            last_valid_frame_preserved,
+        );
         let terminal_grid = TerminalGridElement::new(
-            &self.screen,
-            self.render_cache.clone(),
+            &display_screen,
+            display_render_cache,
             TerminalGridConfiguration {
                 terminal_input_focused,
                 font_family: self.font_family.clone(),
@@ -2581,22 +2993,31 @@ impl Render for TerminalPane {
                 scale_factor: window.scale_factor(),
                 find_spans,
                 graphics,
+                presentation_operation,
                 graphics_attempt,
                 graphics_cache: self.graphics_cache.clone(),
-                presentation_generation,
+                fallback: (presentation_operation.is_some()
+                    && !Arc::ptr_eq(&display_screen, &self.last_valid_screen))
+                .then(|| {
+                    (
+                        Arc::clone(&self.last_valid_screen),
+                        self.fallback_render_cache.clone(),
+                        fallback_graphics,
+                    )
+                }),
+                paint_fault: {
+                    #[cfg(test)]
+                    {
+                        self.paint_fault.take()
+                    }
+                    #[cfg(not(test))]
+                    {
+                        None
+                    }
+                },
             },
             cx,
         );
-        if let Some(generation) = presentation_generation {
-            let pane = cx.entity().downgrade();
-            let rows = self.screen.size.rows;
-            let columns = self.screen.size.cols;
-            window.on_next_frame(move |_, cx| {
-                let _ = pane.update(cx, |pane, _| {
-                    pane.observe_presented_next_frame(generation, rows, columns);
-                });
-            });
-        }
         let context_menu = self.context_menu.clone().map(|menu| {
             let actions = self.context_menu_actions(&menu);
             render_terminal_context_menu(
@@ -2710,6 +3131,22 @@ impl Render for TerminalPane {
                         .flex_col()
                         .gap(px(6.0))
                         .child(status)
+                        .when(recovery_available, |status| {
+                            status.child(
+                                div()
+                                    .id("retry-terminal-recovery")
+                                    .debug_selector(|| "retry-terminal-recovery".to_owned())
+                                    .cursor_pointer()
+                                    .text_color(gpui_color(ACTIVE_THEME.link_text_hover))
+                                    .on_click(move |_, window, cx| {
+                                        let _ = retry_pane.update(cx, |pane, cx| {
+                                            pane.retry_recovery(window, cx);
+                                        });
+                                        cx.stop_propagation();
+                                    })
+                                    .child("Retry"),
+                            )
+                        })
                         .when(diagnostics_available, |status| {
                             status.child(
                                 div()
@@ -3487,6 +3924,102 @@ mod tests {
         );
         Arc::make_mut(&mut screen).selection_present = selection_present;
         screen
+    }
+
+    fn graphics_screen(generation: u64, image_id: u32) -> Arc<ScreenSnapshot> {
+        graphics_screen_with_images(generation, &[image_id])
+    }
+
+    fn graphics_screen_with_images(generation: u64, image_ids: &[u32]) -> Arc<ScreenSnapshot> {
+        let mut screen = ScreenSnapshot::from_test_parts_at(
+            Arc::from([]),
+            ScrollbarSnapshot::default(),
+            "graphics",
+            generation,
+        );
+        Arc::make_mut(&mut screen).graphics = crate::terminal::GraphicsSnapshot {
+            generation,
+            placement_generation: generation,
+            images: image_ids
+                .iter()
+                .map(|image_id| {
+                    Arc::new(crate::terminal::ImageSnapshot {
+                        key: crate::terminal::ImageKey {
+                            image_id: *image_id,
+                            generation,
+                        },
+                        width: 1,
+                        height: 1,
+                        rgba: Arc::from([10, 20, 30, 255]),
+                    })
+                })
+                .collect::<Vec<_>>()
+                .into(),
+            placements: image_ids
+                .iter()
+                .enumerate()
+                .map(
+                    |(index, image_id)| crate::terminal::ImagePlacementSnapshot {
+                        image: crate::terminal::ImageKey {
+                            image_id: *image_id,
+                            generation,
+                        },
+                        placement_id: index as u32,
+                        z: 0,
+                        viewport_col: index as i32,
+                        viewport_row: 0,
+                        cell_offset_x: 0,
+                        cell_offset_y: 0,
+                        source_x: 0,
+                        source_y: 0,
+                        source_width: 1,
+                        source_height: 1,
+                        destination_width: 1,
+                        destination_height: 1,
+                        unicode_placeholder: false,
+                    },
+                )
+                .collect::<Vec<_>>()
+                .into(),
+        };
+        screen
+    }
+
+    fn text_screen(generation: u64, rows: &[&str]) -> Arc<ScreenSnapshot> {
+        let rows = rows
+            .iter()
+            .map(|row| {
+                row.chars()
+                    .map(|character| crate::terminal::CellSnapshot {
+                        text: character.to_string(),
+                        foreground_source: crate::terminal::TerminalColor::Default,
+                        background_source: crate::terminal::TerminalColor::Default,
+                        inverse: false,
+                        bold: false,
+                        faint: false,
+                        italic: false,
+                        blinking: false,
+                        invisible: false,
+                        underline: crate::terminal::TerminalUnderlineSnapshot::None,
+                        underline_source: crate::terminal::TerminalColor::Default,
+                        strikethrough: false,
+                        overline: false,
+                        selected: false,
+                        spacer_tail: false,
+                        semantic_content: crate::terminal::CellSemanticSnapshot::Output,
+                        hyperlink: None,
+                    })
+                    .collect::<Vec<_>>()
+                    .into()
+            })
+            .collect::<Vec<_>>()
+            .into();
+        ScreenSnapshot::from_test_parts_at(
+            rows,
+            ScrollbarSnapshot::default(),
+            "text preflight",
+            generation,
+        )
     }
 
     fn terminal_pane(cx: &mut TestAppContext) -> (Entity<TerminalPane>, &mut VisualTestContext) {
@@ -4622,7 +5155,7 @@ mod tests {
                 pane.blink_generation,
                 pane.blink_phase_visible,
                 pane.diagnostics.record_count(),
-                pane.status.clone(),
+                pane.authoritative_status(),
                 pane.pane_state.clone(),
             )
         });
@@ -5884,6 +6417,585 @@ mod tests {
     }
 
     #[gpui::test]
+    fn presentation_failure_retry_preserves_and_restores_the_current_presentation(
+        cx: &mut TestAppContext,
+    ) {
+        let (pane, cx, _records) = connected_terminal_pane(cx);
+        let generation = pane.read_with(cx, |pane, _| pane.screen.generation);
+
+        cx.update(|window, cx| {
+            pane.update(cx, |pane, cx| {
+                pane.update_backing_scale(f32::NAN, window, cx);
+            });
+        });
+        cx.run_until_parked();
+
+        assert_eq!(
+            pane.read_with(cx, |pane, _| (
+                pane.screen.generation,
+                pane.pane_state.last_valid_frame(),
+                pane.pane_state
+                    .failure()
+                    .map(crate::terminal::TerminalFailure::class),
+                pane.session.is_some(),
+            )),
+            (
+                generation,
+                Some(generation),
+                Some(crate::terminal::FailureClass::Presentation),
+                true,
+            )
+        );
+
+        let retry = cx
+            .debug_bounds("retry-terminal-recovery")
+            .expect("recoverable presentation failure should expose Retry");
+        cx.simulate_click(retry.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        assert_eq!(
+            pane.read_with(cx, |pane, _| (
+                pane.pane_state.clone(),
+                pane.status.clone(),
+                pane.screen.generation,
+                pane.session.is_some(),
+            )),
+            (PaneTerminalState::Running, None, generation, true)
+        );
+    }
+
+    #[gpui::test]
+    fn second_row_preflight_failure_submits_only_the_last_valid_generation(
+        cx: &mut TestAppContext,
+    ) {
+        let (pane, cx, records) = connected_terminal_pane(cx);
+        let events = records.last_event_sender().unwrap();
+        events
+            .try_send(SessionEvent::Screen(text_screen(1, &["old", "frame"])))
+            .unwrap();
+        cx.run_until_parked();
+        let submissions_before = pane.read_with(cx, |pane, _| pane.scene_submission_attempts.len());
+
+        pane.update(cx, |pane, _| {
+            pane.paint_fault = Some(PaintPreflightFault::Row(1));
+        });
+        events
+            .try_send(SessionEvent::Screen(text_screen(2, &["new", "frame"])))
+            .unwrap();
+        cx.run_until_parked();
+
+        assert_eq!(
+            pane.read_with(cx, |pane, _| (
+                pane.screen.generation,
+                pane.last_valid_screen.generation,
+                pane.pane_state.last_valid_frame(),
+                pane.pane_state.failure().map(TerminalFailure::class),
+            )),
+            (
+                crate::terminal::PresentationGeneration::test(2),
+                crate::terminal::PresentationGeneration::test(1),
+                Some(crate::terminal::PresentationGeneration::test(1)),
+                Some(crate::terminal::FailureClass::Presentation),
+            )
+        );
+        let submissions = pane.read_with(cx, |pane, _| {
+            pane.scene_submission_attempts[submissions_before..].to_vec()
+        });
+        assert!(!submissions.contains(&crate::terminal::PresentationGeneration::test(2)));
+        assert_eq!(
+            submissions.last(),
+            Some(&crate::terminal::PresentationGeneration::test(1))
+        );
+    }
+
+    #[gpui::test]
+    fn failed_candidate_is_unobserved_and_retry_observes_the_committed_generation_once(
+        cx: &mut TestAppContext,
+    ) {
+        let (pane, cx, records) = connected_terminal_pane(cx);
+        let events = records.last_event_sender().unwrap();
+        events
+            .try_send(SessionEvent::Screen(text_screen(1, &["old"])))
+            .unwrap();
+        cx.run_until_parked();
+        let observation = crate::terminal::RuntimeObservation::new();
+        pane.update(cx, |pane, _| {
+            pane.acceptance_observation_claimed = true;
+            pane.runtime_observation = Some(observation.clone());
+            pane.paint_fault = Some(PaintPreflightFault::Row(0));
+        });
+        let before = observation.sample();
+
+        events
+            .try_send(SessionEvent::Screen(text_screen(2, &["new"])))
+            .unwrap();
+        cx.run_until_parked();
+
+        let failed = observation.sample();
+        assert_eq!(failed.next_frame_count, before.next_frame_count);
+        assert_eq!(
+            pane.read_with(cx, |pane, _| pane.last_valid_screen.generation),
+            crate::terminal::PresentationGeneration::test(1)
+        );
+
+        let retry = cx
+            .debug_bounds("retry-terminal-recovery")
+            .expect("failed candidate should expose Retry");
+        cx.simulate_click(retry.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        let retried = observation.sample();
+        assert_eq!(retried.next_frame_count, before.next_frame_count + 1);
+        assert_eq!(retried.next_frame_generation, 2);
+        assert_eq!(
+            pane.read_with(cx, |pane, _| pane.last_valid_screen.generation),
+            crate::terminal::PresentationGeneration::test(2)
+        );
+    }
+
+    #[gpui::test]
+    fn candidate_and_fallback_use_isolated_render_caches(cx: &mut TestAppContext) {
+        let (pane, cx, _records) = connected_terminal_pane(cx);
+
+        let (candidate, fallback) = pane.read_with(cx, |pane, _| {
+            (
+                pane.render_cache.entity_id(),
+                pane.fallback_render_cache.entity_id(),
+            )
+        });
+
+        assert_ne!(candidate, fallback);
+    }
+
+    #[gpui::test]
+    fn second_glyph_preflight_failure_submits_only_the_last_valid_generation(
+        cx: &mut TestAppContext,
+    ) {
+        let (pane, cx, records) = connected_terminal_pane(cx);
+        let events = records.last_event_sender().unwrap();
+        events
+            .try_send(SessionEvent::Screen(text_screen(1, &["old"])))
+            .unwrap();
+        cx.run_until_parked();
+        let submissions_before = pane.read_with(cx, |pane, _| pane.scene_submission_attempts.len());
+
+        pane.update(cx, |pane, _| {
+            pane.paint_fault = Some(PaintPreflightFault::Glyph(1));
+        });
+        events
+            .try_send(SessionEvent::Screen(text_screen(2, &["new"])))
+            .unwrap();
+        cx.run_until_parked();
+
+        assert_eq!(
+            pane.read_with(cx, |pane, _| (
+                pane.screen.generation,
+                pane.last_valid_screen.generation,
+                pane.pane_state.failure().map(TerminalFailure::class),
+            )),
+            (
+                crate::terminal::PresentationGeneration::test(2),
+                crate::terminal::PresentationGeneration::test(1),
+                Some(crate::terminal::FailureClass::Presentation),
+            )
+        );
+        let submissions = pane.read_with(cx, |pane, _| {
+            pane.scene_submission_attempts[submissions_before..].to_vec()
+        });
+        assert!(!submissions.contains(&crate::terminal::PresentationGeneration::test(2)));
+    }
+
+    #[gpui::test]
+    fn second_image_preflight_failure_rolls_back_the_unpresented_generation(
+        cx: &mut TestAppContext,
+    ) {
+        let (pane, cx, records) = connected_terminal_pane(cx);
+        let events = records.last_event_sender().unwrap();
+        events
+            .try_send(SessionEvent::Screen(graphics_screen(1, 1)))
+            .unwrap();
+        cx.run_until_parked();
+        let submissions_before = pane.read_with(cx, |pane, _| pane.scene_submission_attempts.len());
+
+        pane.update(cx, |pane, _| {
+            pane.paint_fault = Some(PaintPreflightFault::Image(1));
+        });
+        events
+            .try_send(SessionEvent::Screen(graphics_screen_with_images(
+                2,
+                &[2, 3],
+            )))
+            .unwrap();
+        cx.run_until_parked();
+
+        let cache = pane.read_with(cx, |pane, _| pane.graphics_cache.clone());
+        assert_eq!(
+            (
+                pane.read_with(cx, |pane, _| pane.last_valid_screen.generation),
+                pane.read_with(cx, |pane, _| {
+                    pane.pane_state.failure().map(TerminalFailure::class)
+                }),
+                cache.read_with(cx, |cache, _| cache.cached_image_keys()),
+                cache.read_with(cx, |cache, _| cache.staged_image_keys()),
+            ),
+            (
+                crate::terminal::PresentationGeneration::test(1),
+                Some(crate::terminal::FailureClass::Resource),
+                vec![crate::terminal::ImageKey {
+                    image_id: 1,
+                    generation: 1,
+                }],
+                Vec::new(),
+            )
+        );
+        let submissions = pane.read_with(cx, |pane, _| {
+            pane.scene_submission_attempts[submissions_before..].to_vec()
+        });
+        assert!(!submissions.contains(&crate::terminal::PresentationGeneration::test(2)));
+    }
+
+    #[gpui::test]
+    fn graphics_post_mutation_failures_remain_quota_bounded_for_changing_keys(
+        cx: &mut TestAppContext,
+    ) {
+        let (pane, cx, records) = connected_terminal_pane(cx);
+        records
+            .last_event_sender()
+            .unwrap()
+            .try_send(SessionEvent::Screen(graphics_screen(1, 1)))
+            .unwrap();
+        cx.run_until_parked();
+        let cache = pane.read_with(cx, |pane, _| pane.graphics_cache.clone());
+        let retained = cache.read_with(cx, |cache, _| cache.retained_bytes());
+
+        for generation in 2..18 {
+            let screen = graphics_screen(generation, generation as u32);
+            let result = cx.update(|window, cx| {
+                cache.update(cx, |cache, cx| {
+                    cache.fail_after_staging();
+                    cache.sync(screen.active_screen, &screen.graphics, window, cx)
+                })
+            });
+            assert!(result.is_err());
+            assert_eq!(
+                cache.read_with(cx, |cache, _| (
+                    cache.cached_image_keys(),
+                    cache.staged_image_keys(),
+                    cache.retained_bytes(),
+                )),
+                (
+                    vec![crate::terminal::ImageKey {
+                        image_id: 1,
+                        generation: 1,
+                    }],
+                    Vec::new(),
+                    retained,
+                )
+            );
+        }
+    }
+
+    #[gpui::test]
+    fn stale_graphics_attempt_cannot_roll_back_a_newer_same_generation_stage(
+        cx: &mut TestAppContext,
+    ) {
+        let (pane, cx, records) = connected_terminal_pane(cx);
+        records
+            .last_event_sender()
+            .unwrap()
+            .try_send(SessionEvent::Screen(graphics_screen(1, 1)))
+            .unwrap();
+        cx.run_until_parked();
+        let cache = pane.read_with(cx, |pane, _| pane.graphics_cache.clone());
+        let screen_a = graphics_screen(2, 2);
+        let screen_b = graphics_screen(2, 3);
+        let attempt_a = cx.update(|window, cx| {
+            cache
+                .update(cx, |cache, cx| {
+                    cache.sync(screen_a.active_screen, &screen_a.graphics, window, cx)
+                })
+                .unwrap()
+                .token
+        });
+        let attempt_b = cx.update(|window, cx| {
+            cache
+                .update(cx, |cache, cx| {
+                    cache.sync(screen_b.active_screen, &screen_b.graphics, window, cx)
+                })
+                .unwrap()
+                .token
+        });
+
+        cache.update(cx, |cache, cx| {
+            assert!(!cache.rollback(attempt_a, None, cx));
+            assert_eq!(
+                cache.staged_image_keys(),
+                vec![crate::terminal::ImageKey {
+                    image_id: 3,
+                    generation: 2,
+                }]
+            );
+            assert!(cache.mark_presented(attempt_b, cx));
+        });
+        assert_eq!(
+            cache.read_with(cx, |cache, _| cache.cached_image_keys()),
+            vec![crate::terminal::ImageKey {
+                image_id: 3,
+                generation: 2,
+            }]
+        );
+    }
+
+    #[gpui::test]
+    fn stale_recoverable_and_export_completions_cannot_mask_a_fatal_failure(
+        cx: &mut TestAppContext,
+    ) {
+        let (pane, cx, _records) = connected_terminal_pane(cx);
+        let (recovery, export) = pane.update(cx, |pane, _| {
+            pane.present_failure(
+                TerminalFailure::platform("recoverable-operation"),
+                true,
+                Some(RecoveryAction::CopySelection),
+            );
+            let recovery = pane.pending_recovery.unwrap();
+            let export = pane.begin_operation(pane.screen.generation, None);
+            pane.latest_export_operation = Some(export.id);
+            (recovery, export)
+        });
+        pane.update(cx, |pane, cx| {
+            pane.handle_event(
+                SessionEvent::Failed(SessionFailure::PtyRead {
+                    read_error: "unavailable".to_owned(),
+                    exit_status: "exit code 7".to_owned(),
+                }),
+                cx,
+            );
+            assert!(!pane.clear_recovery(recovery));
+            pane.finish_export(export, Ok(()), PathBuf::from("stale"), cx);
+            pane.finish_export(
+                export,
+                Err(std::io::Error::other("stale failure")),
+                PathBuf::from("stale"),
+                cx,
+            );
+            pane.handle_event(
+                SessionEvent::Exited(crate::terminal::SessionExit::Success),
+                cx,
+            );
+        });
+
+        assert_eq!(
+            pane.read_with(cx, |pane, _| (
+                pane.pane_state.failure().map(TerminalFailure::class),
+                pane.pending_recovery,
+                pane.authoritative_status(),
+            )),
+            (
+                Some(crate::terminal::FailureClass::Pty),
+                None,
+                Some(
+                    "PTY failed during read-shell-output. Close this Pane and restart the terminal command."
+                        .to_owned(),
+                ),
+            )
+        );
+    }
+
+    #[gpui::test]
+    fn newer_same_action_and_export_tokens_reject_stale_completions(cx: &mut TestAppContext) {
+        let (pane, cx, _records) = connected_terminal_pane(cx);
+        pane.update(cx, |pane, cx| {
+            pane.present_failure_at(
+                TerminalFailure::resource("first-renderer-attempt"),
+                true,
+                Some(RecoveryAction::RendererResources),
+                crate::terminal::PresentationGeneration::test(1),
+            );
+            let first_recovery = pane.pending_recovery.unwrap();
+            pane.present_failure_at(
+                TerminalFailure::resource("second-renderer-attempt"),
+                true,
+                Some(RecoveryAction::RendererResources),
+                crate::terminal::PresentationGeneration::test(2),
+            );
+            let second_recovery = pane.pending_recovery.unwrap();
+            assert!(!pane.clear_recovery(first_recovery));
+            assert_eq!(pane.pending_recovery, Some(second_recovery));
+
+            let first_export = pane.begin_operation(pane.screen.generation, None);
+            let second_export = pane.begin_operation(pane.screen.generation, None);
+            pane.latest_export_operation = Some(second_export.id);
+            pane.finish_export(
+                first_export,
+                Err(std::io::Error::other("stale export")),
+                PathBuf::from("stale"),
+                cx,
+            );
+            assert_eq!(pane.pending_recovery, Some(second_recovery));
+            assert_eq!(
+                pane.pane_state.failure().map(TerminalFailure::operation),
+                Some("second-renderer-attempt")
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn normal_exit_remains_distinct_from_stale_failures(cx: &mut TestAppContext) {
+        let (pane, cx, _records) = connected_terminal_pane(cx);
+        pane.update(cx, |pane, cx| {
+            pane.handle_event(
+                SessionEvent::Exited(crate::terminal::SessionExit::Success),
+                cx,
+            );
+            pane.present_failure(
+                TerminalFailure::resource("stale-resource-operation"),
+                true,
+                Some(RecoveryAction::RendererResources),
+            );
+            pane.handle_event(
+                SessionEvent::Failed(SessionFailure::Runtime("stale fatal".to_owned())),
+                cx,
+            );
+        });
+        assert_eq!(
+            pane.read_with(cx, |pane, _| (
+                pane.pane_state.clone(),
+                pane.pending_recovery,
+                pane.authoritative_status(),
+            )),
+            (
+                PaneTerminalState::exited(crate::terminal::SessionExit::Success),
+                None,
+                Some("Shell exited successfully".to_owned()),
+            )
+        );
+    }
+
+    #[gpui::test]
+    fn renderer_resource_retry_retains_the_previous_gpu_cache_until_success(
+        cx: &mut TestAppContext,
+    ) {
+        let (pane, cx, records) = connected_terminal_pane(cx);
+        let events = records
+            .last_event_sender()
+            .expect("the connected Pane should own a Terminal Session");
+        events
+            .try_send(SessionEvent::Screen(graphics_screen(1, 1)))
+            .unwrap();
+        cx.run_until_parked();
+
+        pane.update(cx, |pane, cx| {
+            pane.graphics_cache
+                .update(cx, |cache, _| cache.fail_next_sync());
+        });
+        events
+            .try_send(SessionEvent::Screen(graphics_screen(2, 2)))
+            .unwrap();
+        cx.run_until_parked();
+
+        let cache = pane.read_with(cx, |pane, _| pane.graphics_cache.clone());
+        assert_eq!(
+            (
+                pane.read_with(cx, |pane, _| pane.screen.generation),
+                pane.read_with(cx, |pane, _| pane.pane_state.last_valid_frame()),
+                pane.read_with(cx, |pane, _| {
+                    pane.pane_state
+                        .failure()
+                        .map(crate::terminal::TerminalFailure::class)
+                }),
+                cache.read_with(cx, |cache, _| cache.cached_image_keys()),
+            ),
+            (
+                crate::terminal::PresentationGeneration::test(2),
+                Some(crate::terminal::PresentationGeneration::test(1)),
+                Some(crate::terminal::FailureClass::Resource),
+                vec![crate::terminal::ImageKey {
+                    image_id: 1,
+                    generation: 1,
+                }],
+            )
+        );
+
+        let retry = cx
+            .debug_bounds("retry-terminal-recovery")
+            .expect("recoverable renderer failure should expose Retry");
+        cx.simulate_click(retry.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        assert_eq!(
+            (
+                pane.read_with(cx, |pane, _| pane.pane_state.clone()),
+                pane.read_with(cx, |pane, _| pane.status.clone()),
+                cache.read_with(cx, |cache, _| cache.cached_image_keys()),
+            ),
+            (
+                PaneTerminalState::Running,
+                None,
+                vec![crate::terminal::ImageKey {
+                    image_id: 2,
+                    generation: 2,
+                }],
+            )
+        );
+    }
+
+    #[gpui::test]
+    fn native_platform_retry_keeps_the_session_usable_and_clears_transient_failure(
+        cx: &mut TestAppContext,
+    ) {
+        let (pane, cx, records) = terminal_pane_with_selection_copy(
+            cx,
+            SelectionCopy {
+                plain_text: "recovered selection".to_owned(),
+                html: None,
+            },
+        );
+        pane.update(cx, |pane, _| {
+            pane.selection_pasteboard.fail_next_write();
+        });
+
+        cx.simulate_keystrokes("cmd-c");
+        cx.run_until_parked();
+
+        assert_eq!(
+            pane.read_with(cx, |pane, _| (
+                pane.pane_state
+                    .failure()
+                    .map(crate::terminal::TerminalFailure::class),
+                pane.session.is_some(),
+            )),
+            (Some(crate::terminal::FailureClass::Platform), true)
+        );
+        let retry = cx
+            .debug_bounds("retry-terminal-recovery")
+            .expect("recoverable native failure should expose Retry");
+        cx.simulate_click(retry.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        let copy_requests = records
+            .commands()
+            .iter()
+            .filter(|call| matches!(call.command, RecordedSessionCommand::RequestSelectionCopy))
+            .count();
+        assert_eq!(
+            (
+                pane.read_with(cx, |pane, _| pane.pane_state.clone()),
+                pane.read_with(cx, |pane, _| pane.status.clone()),
+                pane.read_with(cx, |pane, _| pane.session.is_some()),
+                cx.read_from_clipboard().and_then(|item| item.text()),
+                copy_requests,
+            ),
+            (
+                PaneTerminalState::Running,
+                None,
+                true,
+                Some("recovered selection".to_owned()),
+                2,
+            )
+        );
+    }
+
+    #[gpui::test]
     fn terminal_failure_should_keep_the_pane_visible_with_a_failure_status(
         cx: &mut TestAppContext,
     ) {
@@ -5922,7 +7034,7 @@ mod tests {
 
         let state = pane.read_with(cx, |pane, _| {
             (
-                pane.status.clone(),
+                pane.authoritative_status(),
                 pane.session.is_some(),
                 pane.pane_state
                     .failure()
@@ -5947,6 +7059,7 @@ mod tests {
             (0, Vec::new())
         );
         assert!(cx.debug_bounds("terminal-status").is_some());
+        assert!(cx.debug_bounds("retry-terminal-recovery").is_none());
         let export = cx
             .debug_bounds("export-terminal-diagnostics")
             .expect("typed failure should expose explicit diagnostic export");

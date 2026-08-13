@@ -110,6 +110,10 @@ impl TerminalFailure {
     pub(crate) const fn operation(&self) -> &'static str {
         self.operation
     }
+
+    pub(crate) const fn is_fatal(&self) -> bool {
+        matches!(self.recoverability, Recoverability::Fatal)
+    }
 }
 
 impl fmt::Display for TerminalFailure {

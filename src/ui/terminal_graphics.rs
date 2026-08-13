@@ -51,6 +51,10 @@ pub(crate) struct TerminalGraphicsCache {
     presented: PreparedGraphics,
     staged: Option<StagedGraphics>,
     next_attempt: u64,
+    #[cfg(test)]
+    fail_next_sync: bool,
+    #[cfg(test)]
+    fail_after_staging: bool,
 }
 
 struct StagedGraphics {
@@ -78,25 +82,28 @@ impl TerminalGraphicsCache {
         &mut self,
         active_screen: ActiveScreenSnapshot,
         snapshot: &GraphicsSnapshot,
-        window: &mut Window,
+        current_window: &mut Window,
         cx: &mut App,
     ) -> Result<GraphicsPreparation, GraphicsResourceError> {
-        self.rollback_any_staged(Some(window), cx);
+        self.rollback_any_staged(Some(current_window), cx);
+        #[cfg(test)]
+        if std::mem::take(&mut self.fail_next_sync) {
+            return Err(GraphicsResourceError::Injected);
+        }
 
         if self.presented.matches(active_screen, snapshot) {
-            self.next_attempt = self.next_attempt.wrapping_add(1);
-            let token = GraphicsAttemptToken {
-                id: self.next_attempt,
-                screen: active_screen,
-                generation: snapshot.generation,
-                placement_generation: snapshot.placement_generation,
-            };
+            let token = self.next_token(active_screen, snapshot)?;
             self.staged = Some(StagedGraphics {
                 token,
                 additions: HashMap::new(),
                 prepared: self.presented.clone(),
                 retain: None,
             });
+            #[cfg(test)]
+            if std::mem::take(&mut self.fail_after_staging) {
+                self.rollback(token, Some(current_window), cx);
+                return Err(GraphicsResourceError::InjectedAfterStaging);
+            }
             return Ok(GraphicsPreparation {
                 token,
                 graphics: self.presented.clone(),
@@ -117,6 +124,7 @@ impl TerminalGraphicsCache {
         {
             return Err(GraphicsResourceError::MissingImage);
         }
+        let token = self.next_token(active_screen, snapshot)?;
 
         let mut additions = HashMap::new();
         for image in snapshot.images.iter() {
@@ -126,7 +134,7 @@ impl TerminalGraphicsCache {
                 .is_some_and(|cached| cached.matches(image));
             if !reusable {
                 let cached = upload_image(Arc::clone(image)).inspect_err(|_| {
-                    drop_staged_images(std::mem::take(&mut additions), window, cx);
+                    drop_staged_images(std::mem::take(&mut additions), current_window, cx);
                 })?;
                 additions.insert(image.key, Arc::new(cached));
             }
@@ -141,7 +149,7 @@ impl TerminalGraphicsCache {
             });
             let Some(image) = image else {
                 drop(placements);
-                drop_staged_images(additions, window, cx);
+                drop_staged_images(additions, current_window, cx);
                 return Err(GraphicsResourceError::MissingImage);
             };
             placements.push(PreparedPlacement {
@@ -150,23 +158,37 @@ impl TerminalGraphicsCache {
             });
         }
         let prepared = PreparedGraphics::new(active_screen, snapshot, Arc::from(placements));
-
-        self.next_attempt = self.next_attempt.wrapping_add(1);
-        let token = GraphicsAttemptToken {
-            id: self.next_attempt,
-            screen: active_screen,
-            generation: snapshot.generation,
-            placement_generation: snapshot.placement_generation,
-        };
         self.staged = Some(StagedGraphics {
             token,
             additions,
             prepared: prepared.clone(),
             retain: Some(retain),
         });
+        #[cfg(test)]
+        if std::mem::take(&mut self.fail_after_staging) {
+            self.rollback(token, Some(current_window), cx);
+            return Err(GraphicsResourceError::InjectedAfterStaging);
+        }
         Ok(GraphicsPreparation {
             token,
             graphics: prepared,
+        })
+    }
+
+    fn next_token(
+        &mut self,
+        active_screen: ActiveScreenSnapshot,
+        snapshot: &GraphicsSnapshot,
+    ) -> Result<GraphicsAttemptToken, GraphicsResourceError> {
+        self.next_attempt = self
+            .next_attempt
+            .checked_add(1)
+            .ok_or(GraphicsResourceError::AttemptExhausted)?;
+        Ok(GraphicsAttemptToken {
+            id: self.next_attempt,
+            screen: active_screen,
+            generation: snapshot.generation,
+            placement_generation: snapshot.placement_generation,
         })
     }
 
@@ -203,30 +225,78 @@ impl TerminalGraphicsCache {
     pub(crate) fn rollback(
         &mut self,
         token: GraphicsAttemptToken,
-        window: Option<&mut Window>,
+        current_window: Option<&mut Window>,
         cx: &mut App,
     ) -> bool {
         if self.staged.as_ref().map(|staged| staged.token) != Some(token) {
             return false;
         }
-        self.rollback_any_staged(window, cx);
+        self.rollback_any_staged(current_window, cx);
         true
     }
 
-    fn rollback_any_staged(&mut self, window: Option<&mut Window>, cx: &mut App) {
+    fn rollback_any_staged(&mut self, mut current_window: Option<&mut Window>, cx: &mut App) {
         let Some(staged) = self.staged.take() else {
             return;
         };
         drop(staged.prepared);
-        drop_staged_images_optional(staged.additions, window, cx);
+        for (_, image) in staged.additions {
+            cx.drop_image(
+                Arc::clone(&image.render_image),
+                current_window.as_deref_mut(),
+            );
+        }
     }
 
     pub(crate) fn clear(&mut self, cx: &mut App) {
         self.rollback_any_staged(None, cx);
-        self.presented = PreparedGraphics::default();
         for (_, image) in self.images.drain() {
             cx.drop_image(Arc::clone(&image.render_image), None);
         }
+        self.presented = PreparedGraphics::default();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fail_next_sync(&mut self) {
+        self.fail_next_sync = true;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fail_after_staging(&mut self) {
+        self.fail_after_staging = true;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn cached_image_keys(&self) -> Vec<ImageKey> {
+        let mut keys = self.images.keys().copied().collect::<Vec<_>>();
+        keys.sort_unstable();
+        keys
+    }
+
+    #[cfg(test)]
+    pub(crate) fn staged_image_keys(&self) -> Vec<ImageKey> {
+        let mut keys = self
+            .staged
+            .iter()
+            .flat_map(|staged| staged.additions.keys())
+            .copied()
+            .collect::<Vec<_>>();
+        keys.sort_unstable();
+        keys
+    }
+
+    #[cfg(test)]
+    pub(crate) fn retained_bytes(&self) -> usize {
+        self.images
+            .values()
+            .map(|image| image._reservation.0)
+            .sum::<usize>()
+            + self
+                .staged
+                .iter()
+                .flat_map(|staged| staged.additions.values())
+                .map(|image| image._reservation.0)
+                .sum::<usize>()
     }
 }
 
@@ -249,21 +319,17 @@ fn drop_staged_images(
     }
 }
 
-fn drop_staged_images_optional(
-    images: HashMap<ImageKey, Arc<CachedImage>>,
-    mut window: Option<&mut Window>,
-    cx: &mut App,
-) {
-    for (_, image) in images {
-        cx.drop_image(Arc::clone(&image.render_image), window.as_deref_mut());
-    }
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum GraphicsResourceError {
     Capacity,
     InvalidImage,
     MissingImage,
+    AttemptExhausted,
+    Paint,
+    #[cfg(test)]
+    Injected,
+    #[cfg(test)]
+    InjectedAfterStaging,
 }
 
 fn upload_image(image: Arc<ImageSnapshot>) -> Result<CachedImage, GraphicsResourceError> {
@@ -515,45 +581,62 @@ impl GraphicsPaintPlan {
         Arc::ptr_eq(&self.paints, &other.paints)
     }
 
-    pub(crate) fn paint_layer(&self, layer: GraphicsLayer, window: &mut Window) -> bool {
-        let mut succeeded = true;
+    #[cfg(test)]
+    pub(crate) fn image_count(&self) -> usize {
+        self.paints.len()
+    }
+
+    pub(crate) fn paint_layer(
+        &self,
+        layer: GraphicsLayer,
+        window: &mut Window,
+    ) -> Result<(), GraphicsResourceError> {
+        let mut failed = false;
         for paint in self.paints.iter().filter(|paint| paint.layer == layer) {
             window.with_content_mask(
                 Some(ContentMask {
                     bounds: paint.destination,
                 }),
                 |window| {
-                    if let Err(error) = window.paint_image(
-                        paint.full_image,
-                        Default::default(),
-                        Arc::clone(&paint.image),
-                        0,
-                        false,
-                    ) {
-                        succeeded = false;
-                        eprintln!("failed to paint terminal graphic: {error:#}");
+                    if window
+                        .paint_image(
+                            paint.full_image,
+                            Default::default(),
+                            Arc::clone(&paint.image),
+                            0,
+                            false,
+                        )
+                        .is_err()
+                    {
+                        failed = true;
                     }
                 },
             );
         }
-        succeeded
+        if failed {
+            Err(GraphicsResourceError::Paint)
+        } else {
+            Ok(())
+        }
     }
 
-    pub(crate) fn preflight_layer(&self, layer: GraphicsLayer, window: &mut Window) -> bool {
-        self.paints
-            .iter()
-            .filter(|paint| paint.layer == layer)
-            .all(|paint| {
-                window
-                    .paint_image(
-                        Bounds::new(point(px(0.0), px(0.0)), size(px(0.0), px(0.0))),
-                        Default::default(),
-                        Arc::clone(&paint.image),
-                        0,
-                        false,
-                    )
-                    .is_ok()
-            })
+    pub(crate) fn preflight_layer(
+        &self,
+        layer: GraphicsLayer,
+        window: &mut Window,
+    ) -> Result<(), GraphicsResourceError> {
+        for paint in self.paints.iter().filter(|paint| paint.layer == layer) {
+            window
+                .paint_image(
+                    Bounds::new(point(px(0.0), px(0.0)), size(px(0.0), px(0.0))),
+                    Default::default(),
+                    Arc::clone(&paint.image),
+                    0,
+                    false,
+                )
+                .map_err(|_| GraphicsResourceError::Paint)?;
+        }
+        Ok(())
     }
 }
 
