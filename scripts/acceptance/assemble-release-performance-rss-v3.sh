@@ -293,6 +293,7 @@ awk -F '\t' -v OFS='\t' \
             || raw_metadata["format_version"] != "1" \
             || raw_metadata["sample_interval_ms"] != "10000" \
             || raw_metadata["requested_warmup_ms"] != warmup \
+            || raw_metadata["measurement_start_continuous_ns"] !~ /^[1-9][0-9]*$/ \
             || raw_metadata["requested_duration_ms"] != duration \
             || raw_metadata["plan_start_continuous_ns"] != plan_start \
             || raw_metadata["measurement_start_continuous_ns"] \
@@ -305,6 +306,8 @@ awk -F '\t' -v OFS='\t' \
                 > 100000000 \
             || raw_metadata["subject_identity_sha256"] != identity_hash \
             || raw_status != "complete" || raw_status_row != FNR \
+            || sample_time[1] < raw_metadata["measurement_start_continuous_ns"] \
+            || sample_time[1] - raw_metadata["measurement_start_continuous_ns"] > 1000000000 \
             || sample_elapsed[1] > 1000 \
             || sample_elapsed[sample_count] < duration \
             || sample_elapsed[sample_count] > duration + 1000) exit 13

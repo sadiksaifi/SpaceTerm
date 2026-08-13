@@ -65,11 +65,14 @@ scripts-check:
         scripts/acceptance/analyze-release-performance-case.sh \
         scripts/acceptance/failure-action-driver.sh \
         scripts/acceptance/assemble-release-performance-rss-v3.sh \
+        scripts/acceptance/build-native-performance-tools.sh \
         scripts/acceptance/freeze-performance-pair.sh \
         scripts/acceptance/freeze-performance-run.sh \
         scripts/acceptance/freeze-performance-subject.sh \
         scripts/acceptance/performance-workload.sh \
         scripts/acceptance/performance-plan.sh \
+        scripts/acceptance/run-native-performance-scenario.sh \
+        scripts/acceptance/test-native-performance-runner.sh \
         scripts/acceptance/test-release-performance-campaign.sh
     shellcheck -x scripts/acceptance-identity.sh scripts/test-acceptance-identity.sh \
         scripts/package-macos.sh scripts/verify-macos-package.sh \
@@ -80,11 +83,14 @@ scripts-check:
         scripts/acceptance/analyze-release-performance-case.sh \
         scripts/acceptance/failure-action-driver.sh \
         scripts/acceptance/assemble-release-performance-rss-v3.sh \
+        scripts/acceptance/build-native-performance-tools.sh \
         scripts/acceptance/freeze-performance-pair.sh \
         scripts/acceptance/freeze-performance-run.sh \
         scripts/acceptance/freeze-performance-subject.sh \
         scripts/acceptance/performance-workload.sh \
         scripts/acceptance/performance-plan.sh \
+        scripts/acceptance/run-native-performance-scenario.sh \
+        scripts/acceptance/test-native-performance-runner.sh \
         scripts/acceptance/test-release-performance-campaign.sh
     ./scripts/test-acceptance-identity.sh
     xcrun clang -fobjc-arc -fblocks -fsyntax-only -Wall -Wextra -Werror -Wpedantic \
@@ -93,16 +99,30 @@ scripts-check:
     xcrun clang -fobjc-arc -fblocks -fsyntax-only -Wall -Wextra -Werror -Wpedantic \
         -mmacosx-version-min=11.0 \
         scripts/acceptance/performance-rss-sampler.m
+    xcrun clang -fobjc-arc -fblocks -fsyntax-only -Wall -Wextra -Werror -Wpedantic \
+        -mmacosx-version-min=11.0 \
+        scripts/acceptance/performance-window-resolver.m
     xcrun clang -std=c17 -fsyntax-only -Wall -Wextra -Werror -Wpedantic \
         -mmacosx-version-min=11.0 \
         scripts/acceptance/performance-workload.c
-    python3 -c 'import pathlib; [compile(path.read_text(), path.name, "exec") for path in map(pathlib.Path, ["scripts/inspect-release-performance-process.py", "scripts/run-release-performance-command.py", "scripts/verify-release-performance-trace.py", "scripts/acceptance/verify-performance-workload-auth.py", "scripts/acceptance/verify-performance-workload-ready.py"])]'
+    python3 -c 'import pathlib; [compile(path.read_text(), path.name, "exec") for path in map(pathlib.Path, ["scripts/acceptance/run-performance-process-group.py", "scripts/inspect-release-performance-process.py", "scripts/run-release-performance-command.py", "scripts/verify-release-performance-trace.py", "scripts/acceptance/verify-performance-workload-auth.py", "scripts/acceptance/verify-performance-workload-ready.py"])]'
     plutil -lint packaging/macos/Info.plist
 
 # Run focused checks for the release-performance workload and evidence tools.
 performance-tools-check:
     ./scripts/test-release-performance-tools.sh
     ./scripts/acceptance/test-release-performance-campaign.sh
+    ./scripts/acceptance/test-native-performance-runner.sh
+
+# Compile the native performance tools into one absent run-owned directory.
+performance-native-tools run_dir output_dir architecture:
+    ./scripts/acceptance/build-native-performance-tools.sh \
+        --run-directory "{{ run_dir }}" --output-directory "{{ output_dir }}" \
+        --architecture "{{ architecture }}"
+
+# Run one authenticated native performance scenario against a frozen subject.
+performance-native-run *arguments:
+    ./scripts/acceptance/run-native-performance-scenario.sh {{ arguments }}
 
 # Check the local Instruments and RSS prerequisites used for release acceptance.
 performance-doctor:

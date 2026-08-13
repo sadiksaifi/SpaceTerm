@@ -103,7 +103,8 @@ done
 
 process_pid="$(kv "$SUBJECT_IDENTITY" process_pid)"
 process_start_identity="$(kv "$SUBJECT_IDENTITY" process_start_identity)"
-[[ "$process_pid" =~ ^[1-9][0-9]*$ && -n "$process_start_identity" ]] \
+[[ "$process_pid" =~ ^[1-9][0-9]*$ \
+    && "$process_start_identity" =~ ^[0-9]+:[0-9]+$ ]] \
     || die "subject process identity is invalid"
 
 mkdir -p -- "$(dirname -- "$OUTPUT")"
