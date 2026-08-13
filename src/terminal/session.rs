@@ -42,7 +42,7 @@ use crate::terminal::paste::{
     PreparedPaste,
 };
 use crate::terminal::selection::{SelectionCopy, SelectionCopyOptions};
-use crate::terminal::{FindDirection, FindQueryGeneration};
+use crate::terminal::{FindDirection, FindQueryGeneration, RuntimeObservation};
 
 const FINAL_CHILD_WAIT_TIMEOUT: Duration = Duration::from_secs(2);
 const PTY_READ_BUFFER_SIZE: usize = 16 * 1024;
@@ -319,7 +319,9 @@ impl TerminalSessionFactory for NativeTerminalSessionFactory {
         geometry: TerminalGeometry,
         working_directory: &Path,
     ) -> Result<StartedTerminalSession, SessionError> {
-        let (session, events) = TerminalSession::start(geometry, working_directory)?;
+        let observation =
+            crate::platform::acceptance_observation::take_runtime_session_observation();
+        let (session, events) = TerminalSession::start(geometry, working_directory, observation)?;
         Ok(StartedTerminalSession {
             handle: Box::new(session),
             events,
@@ -399,6 +401,7 @@ pub(crate) struct TerminalSession {
     terminator: Option<Box<dyn SessionPtyTerminator>>,
     resizes: ResizeMailbox,
     find_queries: FindQueryMailbox,
+    runtime_observation: Option<RuntimeObservation>,
 }
 
 trait SessionPty: Write + Send {
@@ -539,13 +542,20 @@ impl TerminalSession {
     pub(crate) fn start(
         geometry: TerminalGeometry,
         working_directory: &Path,
+        runtime_observation: Option<RuntimeObservation>,
     ) -> Result<(Self, async_channel::Receiver<SessionEvent>), SessionError> {
-        Self::start_deferred_with(geometry, working_directory, spawn_native_session_pty)
+        Self::start_deferred_with(
+            geometry,
+            working_directory,
+            runtime_observation,
+            spawn_native_session_pty,
+        )
     }
 
     fn start_deferred_with(
         geometry: TerminalGeometry,
         working_directory: &Path,
+        runtime_observation: Option<RuntimeObservation>,
         spawn_pty: impl FnOnce(PtySize, &Path) -> Result<StartedSessionPty, PtyError> + Send + 'static,
     ) -> Result<(Self, async_channel::Receiver<SessionEvent>), SessionError> {
         let working_directory = PathBuf::from(working_directory);
@@ -561,6 +571,7 @@ impl TerminalSession {
         let deferred_terminator = DeferredPtyTerminator::default();
         let worker_terminator = deferred_terminator.clone();
         let worker_events = event_tx.clone();
+        let worker_observation = runtime_observation.clone();
 
         let worker = thread::Builder::new()
             .name("spaceterm-terminal".to_owned())
@@ -575,6 +586,7 @@ impl TerminalSession {
                                     stage: SessionStartupStage::Pty,
                                     message: error.to_string(),
                                 }),
+                                worker_observation.as_ref(),
                             );
                             return;
                         }
@@ -596,8 +608,11 @@ impl TerminalSession {
                         resizes: worker_resizes,
                         find_queries: worker_find_queries,
                     },
-                    event_tx,
-                    StartupReporter::Events(worker_events),
+                    TerminalWorkerPublishers {
+                        events: event_tx,
+                        runtime_observation: worker_observation.clone(),
+                    },
+                    StartupReporter::Events(worker_events, worker_observation),
                 );
             })
             .map_err(SessionError::SpawnWorker)?;
@@ -609,6 +624,7 @@ impl TerminalSession {
                 terminator: Some(Box::new(deferred_terminator)),
                 resizes,
                 find_queries,
+                runtime_observation,
             },
             event_rx,
         ))
@@ -652,7 +668,10 @@ impl TerminalSession {
                         resizes: worker_resizes,
                         find_queries: worker_find_queries,
                     },
-                    event_tx,
+                    TerminalWorkerPublishers {
+                        events: event_tx,
+                        runtime_observation: None,
+                    },
                     StartupReporter::Blocking(startup_tx),
                 )
             })
@@ -666,6 +685,7 @@ impl TerminalSession {
                     terminator: Some(terminator),
                     resizes,
                     find_queries,
+                    runtime_observation: None,
                 },
                 event_rx,
             )),
@@ -697,11 +717,15 @@ impl TerminalSession {
     }
 
     pub(crate) fn resize(&self, geometry: TerminalGeometry) {
-        if let Some(commands) = &self.commands
-            && self.resizes.replace(geometry)
-            && commands.send(Command::Resize).is_err()
-        {
-            eprintln!("terminal resize was dropped because the worker has stopped");
+        if let Some(commands) = &self.commands {
+            let should_notify = self.resizes.replace(geometry);
+            let notification_delivered = should_notify && commands.send(Command::Resize).is_ok();
+            if let Some(observation) = &self.runtime_observation {
+                observation.resize_requested(notification_delivered, !should_notify);
+            }
+            if should_notify && !notification_delivered {
+                eprintln!("terminal resize was dropped because the worker has stopped");
+            }
         }
     }
 
@@ -994,6 +1018,7 @@ struct TerminalWorker {
     deferred_output_chunks: VecDeque<Vec<u8>>,
     deferred_reader_ready: bool,
     hidden_input: HiddenInputSchedule,
+    runtime_observation: Option<RuntimeObservation>,
 }
 
 struct TerminalWorkerContext {
@@ -1006,6 +1031,11 @@ struct TerminalWorkerContext {
 struct TerminalWorkerMailboxes {
     resizes: ResizeMailbox,
     find_queries: FindQueryMailbox,
+}
+
+struct TerminalWorkerPublishers {
+    events: async_channel::Sender<SessionEvent>,
+    runtime_observation: Option<RuntimeObservation>,
 }
 
 struct HiddenInputSchedule {
@@ -1237,7 +1267,10 @@ impl HeldKeys {
 enum StartupReporter {
     #[cfg(test)]
     Blocking(mpsc::SyncSender<Result<(), String>>),
-    Events(async_channel::Sender<SessionEvent>),
+    Events(
+        async_channel::Sender<SessionEvent>,
+        Option<RuntimeObservation>,
+    ),
 }
 
 impl StartupReporter {
@@ -1247,10 +1280,11 @@ impl StartupReporter {
             Self::Blocking(startup) => {
                 let _ = startup.send(Err(message));
             }
-            Self::Events(events) => {
+            Self::Events(events, observation) => {
                 send_session_event(
                     events,
                     SessionEvent::Failed(SessionFailure::Startup { stage, message }),
+                    observation.as_ref(),
                 );
             }
         }
@@ -1260,7 +1294,7 @@ impl StartupReporter {
         match self {
             #[cfg(test)]
             Self::Blocking(startup) => startup.send(Ok(())).is_ok(),
-            Self::Events(_) => true,
+            Self::Events(_, _) => true,
         }
     }
 }
@@ -1272,7 +1306,7 @@ impl TerminalWorker {
         commands: CommandReceiver<Command>,
         reader_transport: ReaderTransport,
         mailboxes: TerminalWorkerMailboxes,
-        events: async_channel::Sender<SessionEvent>,
+        publishers: TerminalWorkerPublishers,
         startup: StartupReporter,
     ) {
         let TerminalWorkerContext {
@@ -1285,6 +1319,10 @@ impl TerminalWorker {
             resizes,
             find_queries,
         } = mailboxes;
+        let TerminalWorkerPublishers {
+            events,
+            runtime_observation,
+        } = publishers;
         let ReaderTransport {
             commands: reader_commands,
             events: reader_events,
@@ -1351,7 +1389,12 @@ impl TerminalWorker {
             deferred_output_chunks: VecDeque::new(),
             deferred_reader_ready: false,
             hidden_input: HiddenInputSchedule::new(Instant::now()),
+            runtime_observation,
         };
+
+        if let Some(observation) = &worker.runtime_observation {
+            observation.worker_started(initial_geometry);
+        }
 
         if !startup.succeeded() {
             worker.finish();
@@ -1463,6 +1506,9 @@ impl TerminalWorker {
 
                 match result {
                     Ok(()) => {
+                        if let Some(observation) = &self.runtime_observation {
+                            observation.resize_applied(geometry);
+                        }
                         self.apply_emulator_action(EmulatorAction::screen_changed())
                             && self.refresh_selection_autoscroll()
                     }
@@ -1551,7 +1597,11 @@ impl TerminalWorker {
                     .hidden_input
                     .update(Instant::now(), self.pty.hidden_input())
                 {
-                    send_session_event(&self.events, SessionEvent::HiddenInputChanged(active))
+                    send_session_event(
+                        &self.events,
+                        SessionEvent::HiddenInputChanged(active),
+                        self.runtime_observation.as_ref(),
+                    )
                 } else {
                     true
                 }
@@ -1618,7 +1668,7 @@ impl TerminalWorker {
 
         match self.emulator.paste(payload.into_text()) {
             Ok(action) => {
-                let applied = self.apply_emulator_action(action);
+                let applied = self.apply_terminal_input_action(action);
                 if applied {
                     let _ = reply.try_send(Ok(PasteResolution::Written));
                 }
@@ -1640,7 +1690,7 @@ impl TerminalWorker {
     ) -> bool {
         match self.emulator.paste(payload.into_text()) {
             Ok(action) => {
-                let applied = self.apply_emulator_action(action);
+                let applied = self.apply_terminal_input_action(action);
                 if applied {
                     let _ = reply.try_send(Ok(outcome));
                 }
@@ -1886,7 +1936,7 @@ impl TerminalWorker {
     fn process_key(&mut self, input: KeyInput) -> bool {
         self.held_keys.route(&input);
         match self.emulator.key(input) {
-            Ok(action) => self.apply_emulator_action(action),
+            Ok(action) => self.apply_terminal_input_action(action),
             Err(message) => {
                 self.send_runtime_failure(message);
                 false
@@ -1933,6 +1983,21 @@ impl TerminalWorker {
             && (!action.screen_changed || self.publish_screen())
     }
 
+    fn apply_terminal_input_action(&mut self, action: EmulatorAction) -> bool {
+        if !self.write_pending_pty_responses() {
+            return false;
+        }
+        if !action.bytes.is_empty() {
+            if !self.write_pty(&action.bytes) {
+                return false;
+            }
+            if let Some(observation) = &self.runtime_observation {
+                observation.terminal_input_accepted();
+            }
+        }
+        !action.screen_changed || self.publish_screen()
+    }
+
     fn write_pending_pty_responses(&mut self) -> bool {
         let responses = self.emulator.take_pty_responses();
         responses.is_empty() || self.write_pty(&responses)
@@ -1948,10 +2013,32 @@ impl TerminalWorker {
 
     fn publish_screen(&mut self) -> bool {
         match self.emulator.snapshot() {
-            Ok(Some(snapshot)) => self
-                .events
-                .force_send(SessionEvent::Screen(snapshot))
-                .is_ok(),
+            Ok(Some(snapshot)) => {
+                if let Some(observation) = &self.runtime_observation {
+                    observation.screen_published(snapshot.generation.as_u64());
+                }
+                match self.events.force_send(SessionEvent::Screen(snapshot)) {
+                    Ok(evicted) => {
+                        if let Some(observation) = &self.runtime_observation {
+                            let evicted_event = evicted.is_some();
+                            let superseded_screen =
+                                matches!(evicted, Some(SessionEvent::Screen(_)));
+                            observation.screen_enqueued(
+                                self.events.len(),
+                                evicted_event,
+                                superseded_screen,
+                            );
+                        }
+                        true
+                    }
+                    Err(_) => {
+                        if let Some(observation) = &self.runtime_observation {
+                            observation.event_send_failed();
+                        }
+                        false
+                    }
+                }
+            }
             Ok(None) => true,
             Err(error) => {
                 self.send_runtime_failure(format!(
@@ -1993,7 +2080,7 @@ impl TerminalWorker {
     }
 
     fn send_terminal_event(&self, event: SessionEvent) -> bool {
-        send_session_event(&self.events, event)
+        send_session_event(&self.events, event, self.runtime_observation.as_ref())
     }
 
     fn finish(self) {
@@ -2011,12 +2098,16 @@ impl TerminalWorker {
             held_keys: _held_keys,
             selection_autoscroll: _selection_autoscroll,
             paste_confirmations: _paste_confirmations,
+            runtime_observation,
             ..
         } = self;
         // SpawnedPty's Drop terminates and reaps a live shell for the native Adapter.
         drop(reader_events);
         drop(pty);
         join_reader(reader_thread);
+        if let Some(observation) = &runtime_observation {
+            observation.session_exited(exit_class_code(&SessionExit::GracefulShutdown));
+        }
     }
 }
 
@@ -2107,11 +2198,73 @@ fn classify_shell_exit(exit: ShellExit) -> SessionExit {
     }
 }
 
-fn send_session_event(events: &async_channel::Sender<SessionEvent>, event: SessionEvent) -> bool {
+fn exit_class_code(exit: &SessionExit) -> u64 {
+    match exit {
+        SessionExit::Success => 1,
+        SessionExit::ExitCode(_) => 2,
+        SessionExit::Signal(_) => 3,
+        SessionExit::GracefulShutdown => 4,
+        SessionExit::ForcedShutdown => 5,
+    }
+}
+
+fn failure_class_code(failure: &SessionFailure) -> u64 {
+    match failure {
+        SessionFailure::Startup { stage, .. } => match stage {
+            SessionStartupStage::Pty => 1,
+            SessionStartupStage::Reader => 2,
+            SessionStartupStage::ReaderThread => 3,
+            SessionStartupStage::Emulator => 4,
+        },
+        SessionFailure::Runtime(_) => 5,
+        SessionFailure::PtyRead { .. } => 6,
+        SessionFailure::ShellWait { .. } => 7,
+    }
+}
+
+fn send_session_event(
+    events: &async_channel::Sender<SessionEvent>,
+    event: SessionEvent,
+    observation: Option<&RuntimeObservation>,
+) -> bool {
+    if let Some(observation) = observation {
+        match &event {
+            SessionEvent::Exited(exit) => observation.session_exited(exit_class_code(exit)),
+            SessionEvent::Failed(failure) => {
+                observation.session_failed(failure_class_code(failure));
+            }
+            _ => {}
+        }
+    }
     match events.try_send(event) {
-        Ok(()) => true,
-        Err(async_channel::TrySendError::Full(event)) => events.force_send(event).is_ok(),
-        Err(async_channel::TrySendError::Closed(_)) => false,
+        Ok(()) => {
+            if let Some(observation) = observation {
+                observation.event_enqueued(events.len(), false, false);
+            }
+            true
+        }
+        Err(async_channel::TrySendError::Full(event)) => match events.force_send(event) {
+            Ok(evicted) => {
+                if let Some(observation) = observation {
+                    let evicted_event = evicted.is_some();
+                    let superseded_screen = matches!(evicted, Some(SessionEvent::Screen(_)));
+                    observation.event_enqueued(events.len(), evicted_event, superseded_screen);
+                }
+                true
+            }
+            Err(_) => {
+                if let Some(observation) = observation {
+                    observation.event_send_failed();
+                }
+                false
+            }
+        },
+        Err(async_channel::TrySendError::Closed(_)) => {
+            if let Some(observation) = observation {
+                observation.event_send_failed();
+            }
+            false
+        }
     }
 }
 
@@ -2493,6 +2646,7 @@ mod tests {
             deferred_output_chunks: VecDeque::new(),
             deferred_reader_ready: false,
             hidden_input: HiddenInputSchedule::new(Instant::now()),
+            runtime_observation: None,
         };
         (worker, receiver, records)
     }
@@ -2913,6 +3067,7 @@ mod tests {
         let (mut session, events) = TerminalSession::start_deferred_with(
             test_geometry(),
             Path::new("/scripted"),
+            None,
             move |size, working_directory| {
                 assert_eq!(size, pty_size(test_geometry()));
                 assert_eq!(working_directory, Path::new("/scripted"));
@@ -3269,6 +3424,7 @@ mod tests {
             deferred_output_chunks: VecDeque::new(),
             deferred_reader_ready: false,
             hidden_input: HiddenInputSchedule::new(Instant::now()),
+            runtime_observation: None,
         };
 
         assert!(worker.process_reader_events());
@@ -3324,6 +3480,7 @@ mod tests {
             deferred_output_chunks: VecDeque::new(),
             deferred_reader_ready: false,
             hidden_input: HiddenInputSchedule::new(Instant::now()),
+            runtime_observation: None,
         };
         assert!(worker.publish_screen());
         let _ = receiver.try_recv().unwrap();
@@ -3501,6 +3658,7 @@ mod tests {
             terminator: None,
             resizes: resizes.clone(),
             find_queries: FindQueryMailbox::default(),
+            runtime_observation: None,
         };
         let pixel_only = TerminalGeometry::from_grid(
             CellGridSize::new(80, 24),
@@ -3533,6 +3691,7 @@ mod tests {
             terminator: None,
             resizes: ResizeMailbox::default(),
             find_queries: find_queries.clone(),
+            runtime_observation: None,
         };
 
         session.set_find_query(FindQueryGeneration::test(1), "n".to_owned());
@@ -3561,6 +3720,7 @@ mod tests {
             terminator: None,
             resizes: ResizeMailbox::default(),
             find_queries: find_queries.clone(),
+            runtime_observation: None,
         };
 
         session.set_find_query(FindQueryGeneration::test(1), "needle".to_owned());
@@ -4102,6 +4262,7 @@ mod tests {
             terminator: None,
             resizes: ResizeMailbox::default(),
             find_queries: FindQueryMailbox::default(),
+            runtime_observation: None,
         };
 
         assert_eq!(

@@ -16,6 +16,7 @@ pub(crate) mod metadata;
 mod native_services;
 pub(crate) mod osc52;
 mod paste;
+mod runtime_observation;
 mod selection;
 mod session;
 #[cfg(test)]
@@ -56,6 +57,11 @@ pub(crate) use osc52::{
 pub(crate) use paste::{PasteConfirmation, PasteDecision, PasteRequestOutcome, PasteResolution};
 #[cfg(test)]
 pub(crate) use paste::{PasteConfirmationId, PasteRisk};
+#[cfg(test)]
+pub(crate) use runtime_observation::RuntimeEventKind;
+pub(crate) use runtime_observation::{
+    RuntimeLifecycle, RuntimeObservation, RuntimeSample, RuntimeTransition, RuntimeVisibility,
+};
 pub(crate) use selection::SelectionCopy;
 #[cfg_attr(
     not(test),

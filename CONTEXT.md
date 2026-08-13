@@ -545,6 +545,27 @@ live-resizing the surface. Display moves and backing-scale changes preserve logi
 invalidate only scale-dependent prepared rows and symbol geometry. Pane destruction releases
 render caches and cancels every owned presentation task and native resource.
 
+### Authenticated Runtime Observation
+
+Release acceptance may activate one dormant, content-free Runtime Observation through the private
+Unix socket already authenticated to the exact mounted SpaceTerm process. The launch capability is
+removed from the environment before GPUI or any Terminal Session starts and is never inherited by
+a PTY or Shell Process. One claimed production Pane and its Terminal Session publish only bounded
+numeric counters, closed lifecycle and visibility states, geometry, and Presentation Generations;
+terminal cells or hashes, titles, commands, paths, environment, key identity, clipboard data,
+Selection text, and hyperlink metadata are outside the protocol.
+
+Worker, UI, and render critical paths update atomics and a fixed-capacity transition queue only.
+While observation is active, a Pane-owned main-thread monitor samples its retained exact AppKit
+window at bounded 50-millisecond intervals so minimize, occlusion, and live-resize facts continue
+to advance even after AppKit suspends rendering; ordinary launches do not create that monitor.
+One background writer samples the latest state at one-second absolute deadlines on the original
+authenticated socket, then performs a bounded final drain and acknowledgement during application
+shutdown. A transition drop, deadline miss, counter overflow, transport or writer failure, unknown
+schema, invalid ordering, or missing terminal lifecycle makes the observation **NOT-RUN**; it never
+changes runtime behavior to manufacture a passing result. External acceptance analysis owns
+PASS/FAIL decisions, RSS sampling, traces, and process identity artifacts.
+
 ### Typed Terminal Failures and Local Diagnostics
 
 Normal Shell Process exit is distinct from PTY, Terminal Emulator, presentation, macOS platform,

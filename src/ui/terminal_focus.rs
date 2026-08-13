@@ -31,6 +31,7 @@ pub(crate) struct TerminalFocusFacts {
 pub(crate) struct TerminalProductFocus {
     pub(crate) active_workspace: bool,
     pub(crate) active_window: bool,
+    pub(crate) pane_visible: bool,
     pub(crate) focused_pane: bool,
     pub(crate) blocker: Option<TerminalFocusBlocker>,
 }
@@ -40,6 +41,7 @@ impl Default for TerminalProductFocus {
         Self {
             active_workspace: true,
             active_window: true,
+            pane_visible: true,
             focused_pane: true,
             blocker: None,
         }

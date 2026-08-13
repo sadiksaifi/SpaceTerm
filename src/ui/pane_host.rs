@@ -177,12 +177,14 @@ impl PaneHost {
     pub(crate) fn activate_without_focus(&mut self, cx: &mut Context<Self>) {
         self.active = true;
         self.menu_pane_id = None;
+        self.sync_terminal_focus(cx);
         cx.notify();
     }
 
     pub(crate) fn deactivate(&mut self, cx: &mut Context<Self>) {
         self.active = false;
         self.menu_pane_id = None;
+        self.sync_terminal_focus(cx);
         cx.notify();
     }
 
@@ -392,11 +394,20 @@ impl PaneHost {
             .terminal_window
             .terminal(self.terminal_window.focused_pane_id())
             .map(Entity::entity_id);
+        let visible_terminal_id = match self.terminal_window.zoom_state() {
+            ZoomState::Restored => None,
+            ZoomState::Zoomed(pane_id) => self
+                .terminal_window
+                .terminal(pane_id)
+                .map(Entity::entity_id),
+        };
         let blocker = self.menu_pane_id.map(|_| TerminalFocusBlocker::PaneMenu);
         for terminal in self.terminal_window.terminals() {
             let product_focus = TerminalProductFocus {
                 active_workspace: self.active,
                 active_window: self.active,
+                pane_visible: self.active
+                    && visible_terminal_id.is_none_or(|visible| visible == terminal.entity_id()),
                 focused_pane: Some(terminal.entity_id()) == focused_terminal_id,
                 blocker,
             };

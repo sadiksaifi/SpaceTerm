@@ -6,7 +6,10 @@ export LC_ALL=C
 
 readonly ACCEPTANCE_IDENTITY_SCHEMA="spaceterm.acceptance.run-identity/v1"
 readonly ACCEPTANCE_PUBLIC_IDENTITY_SCHEMA="spaceterm.acceptance.run-identity-public/v1"
-readonly NATIVE_OBSERVATION_SCHEMA="spaceterm.acceptance.native-launch-proof/v2"
+readonly NATIVE_OBSERVATION_SCHEMA="spaceterm.acceptance.native-launch-proof/v3"
+readonly RUNTIME_OBSERVATION_METADATA_SCHEMA="spaceterm.acceptance.runtime-observation-metadata/v1"
+readonly RUNTIME_SAMPLES_HEADER=$'sequence\tcontinuous_ns\tworker_generation\tscreens_published\tscreens_enqueued\tscreens_superseded\tevent_queue_length\tevent_queue_high_water\tui_dispatches\tui_screen_events\tui_drain_high_water\tui_latest_generation\trender_latest_generation\tnext_frame_generation\tnext_frame_count\tpresentable\tminimized\toccluded\tworkspace_visible\tpane_visible\tlive_resize\tviewport_total_rows\tviewport_visible_rows\tviewport_offset_rows\tselection_present\tresize_requests\tresize_notifications\tresize_applied\tresize_coalesced\tpty_rows\tpty_columns\tpty_pixel_width\tpty_pixel_height\tterminal_inputs_accepted\tlifecycle\tobserver_drops'
+readonly RUNTIME_EVENTS_HEADER=$'sequence\tcontinuous_ns\tkind\tgeneration\taux0\taux1'
 readonly APP_NAME="SpaceTerm"
 readonly MOUNTED_DMG_APP_PATH="dmg:/SpaceTerm.app"
 readonly PUBLIC_APP_BUNDLE_TOKEN="\$APP_BUNDLE"
@@ -429,6 +432,7 @@ validate_native_observation() {
     validate_manifest_syntax "$observation"
     for key in \
         schema observation.source launch.nonce run.id package.app.sha256 \
+        runtime.schema runtime.sample_interval_ms runtime.transition_capacity \
         process.pid process.pidversion process.executable.path \
         process.executable.device process.executable.inode process.executable.fsid \
         process.signature.cdhash process.signature.identifier \
@@ -439,7 +443,7 @@ validate_native_observation() {
         observation.complete; do
         require_manifest_key "$observation" "$key"
     done
-    [[ "$(awk 'END { print NR }' "$observation")" == "22" ]] \
+    [[ "$(awk 'END { print NR }' "$observation")" == "25" ]] \
         || die "native observation contains unexpected records"
     [[ "$(manifest_value "$observation" schema)" == "$NATIVE_OBSERVATION_SCHEMA" ]] \
         || die "unsupported native observation schema"
@@ -451,6 +455,11 @@ validate_native_observation() {
         || die "native observation run ID is invalid"
     [[ "$(manifest_value "$observation" package.app.sha256)" == "$app_sha256" ]] \
         || die "native observation does not describe the exact application bundle"
+    [[ "$(manifest_value "$observation" runtime.schema)" == \
+        "spaceterm.acceptance.runtime-stream/v1" && \
+        "$(manifest_value "$observation" runtime.sample_interval_ms)" == "1000" && \
+        "$(manifest_value "$observation" runtime.transition_capacity)" == "64" ]] \
+        || die "native observation runtime stream contract is invalid"
     for key in process.pid process.pidversion process.executable.device process.executable.inode; do
         [[ "$(manifest_value "$observation" "$key")" =~ ^[1-9][0-9]*$ ]] \
             || die "native observation $key must be a positive integer"
@@ -479,6 +488,69 @@ validate_native_observation() {
         || die "native observation is incomplete"
 }
 
+validate_runtime_observation() {
+    local native_observation="$1"
+    local parent metadata samples events key
+    parent="$(dirname -- "$native_observation")"
+    metadata="$parent/runtime-metadata.tsv"
+    samples="$parent/runtime-samples.tsv"
+    events="$parent/runtime-events.tsv"
+    for key in "$metadata" "$samples" "$events"; do
+        [[ -f "$key" && ! -L "$key" ]] \
+            || die "runtime observation artifact is missing or symlinked: $key"
+    done
+    validate_manifest_syntax "$metadata"
+    for key in \
+        schema observation.source run.id package.app.sha256 process.pid \
+        runtime.samples.path runtime.samples.sha256 runtime.events.path runtime.events.sha256 \
+        observer.started_continuous_ns observer.ended_continuous_ns \
+        observer.sample_interval_ms observer.transition_capacity observer.sample_count \
+        observer.event_count observer.status observation.complete; do
+        require_manifest_key "$metadata" "$key"
+    done
+    [[ "$(awk 'END { print NR }' "$metadata")" == "17" ]] \
+        || die "runtime observation metadata contains unexpected records"
+    [[ "$(manifest_value "$metadata" schema)" == "$RUNTIME_OBSERVATION_METADATA_SCHEMA" && \
+        "$(manifest_value "$metadata" observation.source)" == "production-app" && \
+        "$(manifest_value "$metadata" run.id)" == \
+            "$(manifest_value "$native_observation" run.id)" && \
+        "$(manifest_value "$metadata" package.app.sha256)" == \
+            "$(manifest_value "$native_observation" package.app.sha256)" && \
+        "$(manifest_value "$metadata" process.pid)" == \
+            "$(manifest_value "$native_observation" process.pid)" ]] \
+        || die "runtime observation metadata is not bound to the native observation"
+    [[ "$(manifest_value "$metadata" runtime.samples.path)" == "runtime-samples.tsv" && \
+        "$(manifest_value "$metadata" runtime.events.path)" == "runtime-events.tsv" && \
+        "$(manifest_value "$metadata" runtime.samples.sha256)" =~ ^[0-9a-f]{64}$ && \
+        "$(manifest_value "$metadata" runtime.events.sha256)" =~ ^[0-9a-f]{64}$ && \
+        "$(manifest_value "$metadata" runtime.samples.sha256)" == "$(sha256_file "$samples")" && \
+        "$(manifest_value "$metadata" runtime.events.sha256)" == "$(sha256_file "$events")" ]] \
+        || die "runtime observation artifact binding is invalid"
+    [[ "$(manifest_value "$metadata" observer.started_continuous_ns)" =~ ^[1-9][0-9]*$ && \
+        "$(manifest_value "$metadata" observer.ended_continuous_ns)" =~ ^[1-9][0-9]*$ && \
+        "$(manifest_value "$metadata" observer.sample_count)" =~ ^[1-9][0-9]*$ && \
+        "$(manifest_value "$metadata" observer.event_count)" =~ ^(0|[1-9][0-9]*)$ && \
+        "$(manifest_value "$metadata" observer.sample_count)" -le 43201 && \
+        "$(manifest_value "$metadata" observer.event_count)" -le 65536 ]] \
+        || die "runtime observation metadata counters are invalid"
+    [[ "$(manifest_value "$metadata" observer.sample_interval_ms)" == "1000" && \
+        "$(manifest_value "$metadata" observer.transition_capacity)" == "64" && \
+        "$(manifest_value "$metadata" observer.status)" == "complete" && \
+        "$(manifest_value "$metadata" observation.complete)" == "true" ]] \
+        || die "runtime observation is NOT-RUN"
+    [[ "$(head -n 1 "$samples")" == "$RUNTIME_SAMPLES_HEADER" && \
+        "$(head -n 1 "$events")" == "$RUNTIME_EVENTS_HEADER" ]] \
+        || die "runtime observation header is invalid"
+    [[ "$(wc -c < "$samples" | tr -d '[:space:]')" -le 33554432 && \
+        "$(wc -c < "$events" | tr -d '[:space:]')" -le 16777216 ]] \
+        || die "runtime observation artifact exceeds its bound"
+    [[ "$(( $(awk 'END { print NR }' "$samples") - 1 ))" == \
+        "$(manifest_value "$metadata" observer.sample_count)" && \
+        "$(( $(awk 'END { print NR }' "$events") - 1 ))" == \
+        "$(manifest_value "$metadata" observer.event_count)" ]] \
+        || die "runtime observation row count is invalid"
+}
+
 collect_native_launch_observation() {
     local app="$1"
     local app_sha256="$2"
@@ -494,6 +566,7 @@ collect_native_launch_observation() {
     [[ ! -e "$observation" && ! -L "$observation" ]] \
         || die "native observation output must not already exist: $observation"
     mkdir -p -- "$launch_root/identity" "$launch_root/logs" "$launch_root/workspace"
+    chmod 0700 "$launch_root/identity"
     xcrun clang -fobjc-arc -fblocks -Wall -Wextra -Werror \
         -mmacosx-version-min=11.0 -framework AppKit -framework Foundation \
         -framework Security -framework CoreFoundation -lbsm \
@@ -524,6 +597,7 @@ collect_native_launch_observation() {
     OBSERVATION_HELPER_PID=""
     rm -f -- "$helper"
     validate_native_observation "$observation" "$app_sha256"
+    validate_runtime_observation "$observation"
 }
 
 compare_runtime_observations() {
@@ -531,7 +605,8 @@ compare_runtime_observations() {
     local replayed="$2"
     local key
     for key in \
-        run.id package.app.sha256 process.signature.cdhash process.signature.identifier \
+        run.id package.app.sha256 runtime.schema runtime.sample_interval_ms \
+        runtime.transition_capacity process.signature.cdhash process.signature.identifier \
         process.signature.team_identifier terminal_font_selected \
         initial_grid.rows initial_grid.columns \
         initial_grid.logical_width initial_grid.logical_height \
@@ -641,6 +716,7 @@ verify_native_observation_identity() {
     validate_native_observation \
         "$observation" \
         "$(manifest_value "$manifest" package.app.sha256)"
+    validate_runtime_observation "$observation"
     [[ "$(manifest_value "$observation" run.id)" == "$(manifest_value "$manifest" run.id)" ]] \
         || die "native observation run ID disagrees with the acceptance manifest"
     [[ "$(manifest_value "$observation" process.signature.cdhash | tr '[:lower:]' '[:upper:]')" == \
