@@ -20,6 +20,10 @@ use crate::terminal::identity;
 const CHILD_EXIT_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const GRACEFUL_SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(250);
 const FORCED_SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(250);
+// Real PTY cases fork nested test executables and login shells while asserting subsecond process-
+// group cleanup. Serial execution keeps those OS-backed cases independent of runner scheduling.
+#[cfg(test)]
+static REAL_PTY_TEST_LOCK: Mutex<()> = Mutex::new(());
 const FOREIGN_RUNTIME_ENVIRONMENT: &[&str] = &[
     "GHOSTTY_BIN_DIR",
     "GHOSTTY_RESOURCES_DIR",
@@ -49,6 +53,13 @@ const FOREIGN_RUNTIME_ENVIRONMENT: &[&str] = &[
     "ZELLIJ_PANE_ID",
     "ZELLIJ_SESSION_NAME",
 ];
+
+#[cfg(test)]
+pub(crate) fn lock_real_pty_test() -> std::sync::MutexGuard<'static, ()> {
+    REAL_PTY_TEST_LOCK
+        .lock()
+        .expect("a previous real PTY test panicked while it owned OS process resources")
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ShutdownDisposition {
@@ -770,7 +781,8 @@ mod tests {
         let status = pty.wait_for_child(Duration::from_secs(2)).unwrap();
         assert!(
             status.status.success(),
-            "controlled PTY child failed: {output}"
+            "controlled PTY child failed ({}): {output}",
+            status.status,
         );
         let report = output
             .lines()
@@ -789,6 +801,7 @@ mod tests {
 
     #[test]
     fn controlled_child_should_observe_initialized_terminal_state_before_interaction() {
+        let _isolation = lock_real_pty_test();
         let working_directory = env::current_dir().unwrap();
         let size = PtySize {
             rows: 31,
@@ -836,6 +849,7 @@ mod tests {
 
     #[test]
     fn concurrent_terminal_sessions_should_own_distinct_process_groups() {
+        let _isolation = lock_real_pty_test();
         let working_directory = env::current_dir().unwrap();
         let size = PtySize {
             rows: 24,
@@ -872,6 +886,7 @@ mod tests {
 
     #[test]
     fn stubborn_process_group_should_receive_bounded_forced_shutdown() {
+        let _isolation = lock_real_pty_test();
         let working_directory = env::current_dir().unwrap();
         let mut command = CommandBuilder::new("/bin/sh");
         command.args([
@@ -924,6 +939,7 @@ mod tests {
 
     #[test]
     fn responsive_process_group_should_finish_during_the_grace_window() {
+        let _isolation = lock_real_pty_test();
         let working_directory = env::current_dir().unwrap();
         let mut command = CommandBuilder::new("/bin/sh");
         command.args([
