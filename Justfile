@@ -61,20 +61,46 @@ scripts-check:
         scripts/release-performance-workload.sh \
         scripts/sample-release-performance-rss.sh \
         scripts/record-release-performance-trace.sh \
-        scripts/test-release-performance-tools.sh
+        scripts/test-release-performance-tools.sh \
+        scripts/acceptance/analyze-release-performance-case.sh \
+        scripts/acceptance/assemble-release-performance-rss-v3.sh \
+        scripts/acceptance/freeze-performance-pair.sh \
+        scripts/acceptance/freeze-performance-run.sh \
+        scripts/acceptance/freeze-performance-subject.sh \
+        scripts/acceptance/performance-workload.sh \
+        scripts/acceptance/performance-plan.sh \
+        scripts/acceptance/test-release-performance-campaign.sh
     shellcheck -x scripts/acceptance-identity.sh scripts/test-acceptance-identity.sh \
         scripts/package-macos.sh scripts/verify-macos-package.sh \
         scripts/release-performance-workload.sh \
         scripts/sample-release-performance-rss.sh \
         scripts/record-release-performance-trace.sh \
-        scripts/test-release-performance-tools.sh
+        scripts/test-release-performance-tools.sh \
+        scripts/acceptance/analyze-release-performance-case.sh \
+        scripts/acceptance/assemble-release-performance-rss-v3.sh \
+        scripts/acceptance/freeze-performance-pair.sh \
+        scripts/acceptance/freeze-performance-run.sh \
+        scripts/acceptance/freeze-performance-subject.sh \
+        scripts/acceptance/performance-workload.sh \
+        scripts/acceptance/performance-plan.sh \
+        scripts/acceptance/test-release-performance-campaign.sh
     ./scripts/test-acceptance-identity.sh
+    xcrun clang -fobjc-arc -fblocks -fsyntax-only -Wall -Wextra -Werror -Wpedantic \
+        -mmacosx-version-min=11.0 \
+        scripts/acceptance/performance-driver.m
+    xcrun clang -fobjc-arc -fblocks -fsyntax-only -Wall -Wextra -Werror -Wpedantic \
+        -mmacosx-version-min=11.0 \
+        scripts/acceptance/performance-rss-sampler.m
+    xcrun clang -std=c17 -fsyntax-only -Wall -Wextra -Werror -Wpedantic \
+        -mmacosx-version-min=11.0 \
+        scripts/acceptance/performance-workload.c
     python3 -c 'import pathlib; [compile(path.read_text(), path.name, "exec") for path in map(pathlib.Path, ["scripts/inspect-release-performance-process.py", "scripts/run-release-performance-command.py", "scripts/verify-release-performance-trace.py"])]'
     plutil -lint packaging/macos/Info.plist
 
 # Run focused checks for the release-performance workload and evidence tools.
 performance-tools-check:
     ./scripts/test-release-performance-tools.sh
+    ./scripts/acceptance/test-release-performance-campaign.sh
 
 # Check the local Instruments and RSS prerequisites used for release acceptance.
 performance-doctor:
