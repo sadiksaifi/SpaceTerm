@@ -20,6 +20,15 @@ TERMINATOR_BINARY_DEVICE="$(stat -f '%d' "$TERMINATOR_BINARY")"
 TERMINATOR_BINARY_INODE="$(stat -f '%i' "$TERMINATOR_BINARY")"
 TERMINATOR_BINARY_SHA256="$(shasum -a 256 "$TERMINATOR_BINARY" | awk '{ print $1 }')"
 LIFECYCLE_HELPER="$SCRIPT_DIRECTORY/performance-subject-lifecycle.py"
+PROCESS_INSPECTOR="$SCRIPT_DIRECTORY/../inspect-release-performance-process.py"
+LIFECYCLE_HELPER_DEVICE="$(stat -f '%d' "$LIFECYCLE_HELPER")"
+LIFECYCLE_HELPER_INODE="$(stat -f '%i' "$LIFECYCLE_HELPER")"
+LIFECYCLE_HELPER_SHA256="$(shasum -a 256 "$LIFECYCLE_HELPER" | awk '{ print $1 }')"
+PROCESS_INSPECTOR_DEVICE="$(stat -f '%d' "$PROCESS_INSPECTOR")"
+PROCESS_INSPECTOR_INODE="$(stat -f '%i' "$PROCESS_INSPECTOR")"
+PROCESS_INSPECTOR_SHA256="$(shasum -a 256 "$PROCESS_INSPECTOR" | awk '{ print $1 }')"
+TERMINATOR_PROCESS_PID=99
+TERMINATOR_PROCESS_START_IDENTITY=10:20
 
 fail() { echo "test failure: $*" >&2; exit 1; }
 sha256() { shasum -a 256 "$1" | awk '{ print $1 }'; }
@@ -332,94 +341,28 @@ signature = hmac.new(secret.read_bytes(), payload, hashlib.sha256).hexdigest()
 output.write_bytes(unsigned + f"provisional_hmac_sha256\t{signature}\n".encode())
 PY
     chmod 0400 "$TEMP_ROOT/$prefix-trace-provisional.tsv"
-    "$SCRIPT_DIRECTORY/performance-tail-receipt.py" create \
-        --campaign-secret-file "$SECRET" --campaign-id campaign-a --session-id session-a \
-        --nonce "$NONCE" --quit-token "$token" --run-intent "$intent" \
-        --subject-identity "$identity" \
-        --driver-receipt "$TEMP_ROOT/$prefix-driver-receipt.tsv" \
-        --driver-events "$TEMP_ROOT/$prefix-driver-events.tsv" \
-        --workload-metadata "$TEMP_ROOT/$prefix-workload-metadata.tsv" \
-        --workload-events "$TEMP_ROOT/$prefix-workload-events.tsv" \
-        --workload-ready-receipt "$TEMP_ROOT/$prefix-ready.tsv" \
-        --rss-samples "$TEMP_ROOT/$prefix-rss-samples.tsv" \
-        --trace-provisional-receipt "$TEMP_ROOT/$prefix-trace-provisional.tsv" \
-        --tail-completed-continuous-ns 5000003000 \
-        --appkit-terminator-source "$TERMINATOR_SOURCE" \
-        --appkit-terminator-binary "$TERMINATOR_BINARY" \
-        --output "$TEMP_ROOT/$prefix-tail.tsv"
-    cat > "$TEMP_ROOT/$prefix-quit.tsv" <<EOF
-format_version	1
-campaign_id	campaign-a
-session_id	session-a
-nonce	$NONCE
-run_intent_sha256	$(sha256 "$intent")
-subject_process_pid	1234
-subject_process_start_identity	100:200
-quit_token	$token
-request_continuous_ns	5000003100
-exit_continuous_ns	5000003200
-termination_method	appkit-terminate
-runtime_closure_status	confirmed
-appkit_terminator_source_device	$TERMINATOR_SOURCE_DEVICE
-appkit_terminator_source_inode	$TERMINATOR_SOURCE_INODE
-appkit_terminator_source_sha256	$TERMINATOR_SOURCE_SHA256
-appkit_terminator_binary_device	$TERMINATOR_BINARY_DEVICE
-appkit_terminator_binary_inode	$TERMINATOR_BINARY_INODE
-appkit_terminator_binary_sha256	$TERMINATOR_BINARY_SHA256
-evidence_mode	production
-status	completed
-EOF
-    chmod 0400 "$TEMP_ROOT/$prefix-quit.tsv"
-    python3 - "$TEMP_ROOT/$prefix-exit.tsv" "$SECRET" "$prefix" "$identity" "$intent" \
-        "$TEMP_ROOT/$prefix-tail.tsv" "$TEMP_ROOT/$prefix-quit.tsv" "$native_observation" \
-        "$terminator_source" "$terminator_binary" <<'PY'
-import hashlib, hmac, pathlib, struct, sys
-output, secret, subject_name, identity, intent, tail, quit_receipt = map(pathlib.Path, sys.argv[1:8])
-native_arg = sys.argv[8]
-sha = lambda path: hashlib.sha256(path.read_bytes()).hexdigest()
-values = dict(line.split("\t", 1) for line in intent.read_text().splitlines())
-native_hash = sha(pathlib.Path(native_arg)) if subject_name.name == "spaceterm" else "not-applicable"
-rows = [
-    ("schema", "spaceterm.acceptance.performance-subject-exit/v1"),
-    ("subject", subject_name.name), ("campaign_id", values["campaign_id"]),
-    ("session_id", values["session_id"]), ("nonce", values["nonce"]),
-    ("run_intent_sha256", sha(intent)), ("subject_identity_sha256", sha(identity)),
-    ("process_pid", values["process_pid"]),
-    ("process_start_identity", values["process_start_identity"]),
-    ("tail_receipt_sha256", sha(tail)), ("quit_receipt_sha256", sha(quit_receipt)),
-    ("exit_requested_continuous_ns", "5000003100"),
-    ("process_exited_continuous_ns", "5000003200"),
-    ("exit_status", "normal"), ("native_observation_sha256", native_hash),
-    ("appkit_terminator_source_device", str(pathlib.Path(sys.argv[9]).stat().st_dev)),
-    ("appkit_terminator_source_inode", str(pathlib.Path(sys.argv[9]).stat().st_ino)),
-    ("appkit_terminator_source_sha256", sha(pathlib.Path(sys.argv[9]))),
-    ("appkit_terminator_binary_device", str(pathlib.Path(sys.argv[10]).stat().st_dev)),
-    ("appkit_terminator_binary_inode", str(pathlib.Path(sys.argv[10]).stat().st_ino)),
-    ("appkit_terminator_binary_sha256", sha(pathlib.Path(sys.argv[10]))),
-    ("evidence_mode", "production"),
-    ("auth_algorithm", "hmac-sha256"),
-]
-status = ("status", "complete")
-unsigned = b"".join(f"{key}\t{value}\n".encode() for key, value in rows + [status])
-payload = b"spaceterm.acceptance.performance-subject-exit/v1\0" + struct.pack(">Q", len(unsigned)) + unsigned
-signature = hmac.new(secret.read_bytes(), payload, hashlib.sha256).hexdigest()
-output.write_bytes(b"".join(f"{key}\t{value}\n".encode() for key, value in rows)
-    + f"receipt_hmac_sha256\t{signature}\nstatus\tcomplete\n".encode())
-PY
-    chmod 0400 "$TEMP_ROOT/$prefix-exit.tsv"
     python3 - "$TEMP_ROOT/$prefix-lifecycle-ready.tsv" \
         "$TEMP_ROOT/$prefix-lifecycle-registration.tsv" "$SECRET" "$prefix" "$identity" \
         "$intent" "$TEMP_ROOT/$prefix-tail.tsv" "$TEMP_ROOT/$prefix-workload-metadata.tsv" \
         "$TEMP_ROOT/$prefix-workload-events.tsv" "$TEMP_ROOT/$prefix-ready.tsv" \
         "$TEMP_ROOT/$prefix-quit.tsv" "$TEMP_ROOT/$prefix-exit.tsv" "$native_observation" \
-        "$terminator_source" "$terminator_binary" "$token" <<'PY'
+        "$LIFECYCLE_HELPER" "$PROCESS_INSPECTOR" "$terminator_source" \
+        "$terminator_binary" "$token" <<'PY'
 import hashlib,hmac,pathlib,struct,sys
 (ready_out,reg_out,secret_path,subject_name,identity_path,intent_path,tail_path,
  workload_path,events_path,workload_ready_path,quit_path,exit_path,native_path,
- source_path,binary_path,token)=map(pathlib.Path,sys.argv[1:])
+ helper_path,inspector_path,source_path,binary_path,token)=map(pathlib.Path,sys.argv[1:])
 secret=secret_path.read_bytes(); sha=lambda path:hashlib.sha256(path.read_bytes()).hexdigest()
 identity=dict(line.split("\t",1) for line in identity_path.read_text().splitlines())
-tool=[("appkit_terminator_source_device",str(source_path.stat().st_dev)),
+tool=[("lifecycle_helper_device",str(helper_path.stat().st_dev)),
+ ("lifecycle_helper_inode",str(helper_path.stat().st_ino)),
+ ("lifecycle_helper_sha256",sha(helper_path)),
+ ("process_inspector_device",str(inspector_path.stat().st_dev)),
+ ("process_inspector_inode",str(inspector_path.stat().st_ino)),
+ ("process_inspector_sha256",sha(inspector_path)),
+ ("appkit_terminator_process_pid","99"),
+ ("appkit_terminator_process_start_identity","10:20"),
+ ("appkit_terminator_source_device",str(source_path.stat().st_dev)),
  ("appkit_terminator_source_inode",str(source_path.stat().st_ino)),
  ("appkit_terminator_source_sha256",sha(source_path)),
  ("appkit_terminator_binary_device",str(binary_path.stat().st_dev)),
@@ -452,6 +395,99 @@ reg_out.write_bytes(signed(reg,"registration_hmac_sha256",b"spaceterm.acceptance
 PY
     chmod 0400 "$TEMP_ROOT/$prefix-lifecycle-ready.tsv" \
         "$TEMP_ROOT/$prefix-lifecycle-registration.tsv"
+    "$SCRIPT_DIRECTORY/performance-tail-receipt.py" create \
+        --campaign-secret-file "$SECRET" --campaign-id campaign-a --session-id session-a \
+        --nonce "$NONCE" --quit-token "$token" --run-intent "$intent" \
+        --subject-identity "$identity" \
+        --driver-receipt "$TEMP_ROOT/$prefix-driver-receipt.tsv" \
+        --driver-events "$TEMP_ROOT/$prefix-driver-events.tsv" \
+        --workload-metadata "$TEMP_ROOT/$prefix-workload-metadata.tsv" \
+        --workload-events "$TEMP_ROOT/$prefix-workload-events.tsv" \
+        --workload-ready-receipt "$TEMP_ROOT/$prefix-ready.tsv" \
+        --rss-samples "$TEMP_ROOT/$prefix-rss-samples.tsv" \
+        --trace-provisional-receipt "$TEMP_ROOT/$prefix-trace-provisional.tsv" \
+        --lifecycle-ready-receipt "$TEMP_ROOT/$prefix-lifecycle-ready.tsv" \
+        --tail-completed-continuous-ns 5000003000 \
+        --appkit-terminator-source "$TERMINATOR_SOURCE" \
+        --appkit-terminator-binary "$TERMINATOR_BINARY" \
+        --output "$TEMP_ROOT/$prefix-tail.tsv"
+    cat > "$TEMP_ROOT/$prefix-quit.tsv" <<EOF
+format_version	1
+campaign_id	campaign-a
+session_id	session-a
+nonce	$NONCE
+run_intent_sha256	$(sha256 "$intent")
+subject_process_pid	1234
+subject_process_start_identity	100:200
+quit_token	$token
+request_continuous_ns	5000003100
+exit_continuous_ns	5000003200
+termination_method	appkit-terminate
+runtime_closure_status	confirmed
+lifecycle_helper_device	$LIFECYCLE_HELPER_DEVICE
+lifecycle_helper_inode	$LIFECYCLE_HELPER_INODE
+lifecycle_helper_sha256	$LIFECYCLE_HELPER_SHA256
+process_inspector_device	$PROCESS_INSPECTOR_DEVICE
+process_inspector_inode	$PROCESS_INSPECTOR_INODE
+process_inspector_sha256	$PROCESS_INSPECTOR_SHA256
+appkit_terminator_process_pid	$TERMINATOR_PROCESS_PID
+appkit_terminator_process_start_identity	$TERMINATOR_PROCESS_START_IDENTITY
+appkit_terminator_source_device	$TERMINATOR_SOURCE_DEVICE
+appkit_terminator_source_inode	$TERMINATOR_SOURCE_INODE
+appkit_terminator_source_sha256	$TERMINATOR_SOURCE_SHA256
+appkit_terminator_binary_device	$TERMINATOR_BINARY_DEVICE
+appkit_terminator_binary_inode	$TERMINATOR_BINARY_INODE
+appkit_terminator_binary_sha256	$TERMINATOR_BINARY_SHA256
+evidence_mode	production
+status	completed
+EOF
+    chmod 0400 "$TEMP_ROOT/$prefix-quit.tsv"
+    python3 - "$TEMP_ROOT/$prefix-exit.tsv" "$SECRET" "$prefix" "$identity" "$intent" \
+        "$TEMP_ROOT/$prefix-tail.tsv" "$TEMP_ROOT/$prefix-quit.tsv" "$native_observation" \
+        "$LIFECYCLE_HELPER" "$PROCESS_INSPECTOR" "$terminator_source" \
+        "$terminator_binary" <<'PY'
+import hashlib, hmac, pathlib, struct, sys
+output, secret, subject_name, identity, intent, tail, quit_receipt = map(pathlib.Path, sys.argv[1:8])
+native_arg = sys.argv[8]
+sha = lambda path: hashlib.sha256(path.read_bytes()).hexdigest()
+values = dict(line.split("\t", 1) for line in intent.read_text().splitlines())
+native_hash = sha(pathlib.Path(native_arg)) if subject_name.name == "spaceterm" else "not-applicable"
+rows = [
+    ("schema", "spaceterm.acceptance.performance-subject-exit/v1"),
+    ("subject", subject_name.name), ("campaign_id", values["campaign_id"]),
+    ("session_id", values["session_id"]), ("nonce", values["nonce"]),
+    ("run_intent_sha256", sha(intent)), ("subject_identity_sha256", sha(identity)),
+    ("process_pid", values["process_pid"]),
+    ("process_start_identity", values["process_start_identity"]),
+    ("tail_receipt_sha256", sha(tail)), ("quit_receipt_sha256", sha(quit_receipt)),
+    ("exit_requested_continuous_ns", "5000003100"),
+    ("process_exited_continuous_ns", "5000003200"),
+    ("exit_status", "normal"), ("native_observation_sha256", native_hash),
+    ("lifecycle_helper_device", str(pathlib.Path(sys.argv[9]).stat().st_dev)),
+    ("lifecycle_helper_inode", str(pathlib.Path(sys.argv[9]).stat().st_ino)),
+    ("lifecycle_helper_sha256", sha(pathlib.Path(sys.argv[9]))),
+    ("process_inspector_device", str(pathlib.Path(sys.argv[10]).stat().st_dev)),
+    ("process_inspector_inode", str(pathlib.Path(sys.argv[10]).stat().st_ino)),
+    ("process_inspector_sha256", sha(pathlib.Path(sys.argv[10]))),
+    ("appkit_terminator_process_pid", "99"),
+    ("appkit_terminator_process_start_identity", "10:20"),
+    ("appkit_terminator_source_device", str(pathlib.Path(sys.argv[11]).stat().st_dev)),
+    ("appkit_terminator_source_inode", str(pathlib.Path(sys.argv[11]).stat().st_ino)),
+    ("appkit_terminator_source_sha256", sha(pathlib.Path(sys.argv[11]))),
+    ("appkit_terminator_binary_device", str(pathlib.Path(sys.argv[12]).stat().st_dev)),
+    ("appkit_terminator_binary_inode", str(pathlib.Path(sys.argv[12]).stat().st_ino)),
+    ("appkit_terminator_binary_sha256", sha(pathlib.Path(sys.argv[12]))),
+    ("evidence_mode", "production"),
+    ("auth_algorithm", "hmac-sha256"),
+]
+status = ("status", "complete")
+unsigned = b"".join(f"{key}\t{value}\n".encode() for key, value in rows + [status])
+payload = b"spaceterm.acceptance.performance-subject-exit/v1\0" + struct.pack(">Q", len(unsigned)) + unsigned
+signature = hmac.new(secret.read_bytes(), payload, hashlib.sha256).hexdigest()
+output.write_bytes(b"".join(f"{key}\t{value}\n".encode() for key, value in rows)
+    + f"receipt_hmac_sha256\t{signature}\nstatus\tcomplete\n".encode())
+PY
+    chmod 0400 "$TEMP_ROOT/$prefix-exit.tsv"
 }
 
 write_causal_closure spaceterm "$SPACETERM_INTENT" "$SPACETERM_SUBJECT" "$FINAL" \

@@ -64,6 +64,44 @@ sha256() {
     shasum -a 256 "$1" | awk '{ print $1 }'
 }
 
+trace_tree_sha256() {
+    python3 - "$1" <<'PY'
+import hashlib, pathlib, struct, sys, unicodedata
+root = pathlib.Path(sys.argv[1])
+if not root.is_dir() or root.is_symlink(): raise SystemExit(1)
+digest = hashlib.sha256(b"spaceterm.performance.trace-tree/v1\0")
+entries = []
+for path in root.rglob("*"):
+    if path.is_symlink() or (path.exists() and not path.is_file() and not path.is_dir()):
+        raise SystemExit(1)
+    if path.is_file():
+        relative = unicodedata.normalize("NFC", path.relative_to(root).as_posix())
+        if relative != path.relative_to(root).as_posix(): raise SystemExit(1)
+        entries.append((relative.encode(), path))
+for encoded, path in sorted(entries):
+    data = path.read_bytes()
+    digest.update(struct.pack(">Q", len(encoded))); digest.update(encoded)
+    digest.update(struct.pack(">Q", len(data))); digest.update(data)
+print(digest.hexdigest())
+PY
+}
+
+freeze_case_report() {
+    local output="$1" label="$2"
+    shift 2
+    local temporary="$output.tmp" actual_exit=0
+    "$@" > "$temporary" || actual_exit=$?
+    if [[ "$actual_exit" != 0 \
+        || "$(wc -l < "$temporary" | tr -d ' ')" != 14 \
+        || "$(awk -F '\t' '$1 == "format_version" {print $2}' "$temporary")" != 2 \
+        || "$(awk -F '\t' '$1 == "result" {print $2}' "$temporary")" != CASE-COMPLETE ]]; then
+        sed 's/^/  /' "$temporary" >&2
+        fail "$label did not produce an exact14 v2 CASE-COMPLETE report"
+    fi
+    chmod 0400 "$temporary"
+    mv -- "$temporary" "$output"
+}
+
 publish_plan_start_gate() {
     local events="$1"
     local gate="$2"
@@ -540,6 +578,7 @@ write_trace_metadata() {
         printf 'maximum_main_thread_hang_ms\t0\n'
         printf 'status\tcomplete\n'
     } > "$output"
+    chmod 0400 "$output"
 }
 
 write_manual_artifacts() {
@@ -556,6 +595,7 @@ write_manual_artifacts() {
         printf 'reviewer\tacceptance-operator\n'
         printf 'result\t%s\n' "$result"
     } > "$output"
+    chmod 0400 "$output"
 }
 
 write_native_provisional() {
@@ -710,10 +750,10 @@ freeze_run_intent() {
 
 write_trace_provisional() {
     local identity="$1" intent="$2" workload_metadata="$3"
-    local ready_receipt="$4" plan_start_gate="$5" output="$6"
+    local ready_receipt="$4" plan_start_gate="$5" output="$6" trace_archive="$7"
     python3 - "$identity" "$intent" "$workload_metadata" "$ready_receipt" \
         "$plan_start_gate" "$CAMPAIGN_SECRET_FILE" "$output" \
-        "$BASE_CONTINUOUS_NS" <<'PY'
+        "$BASE_CONTINUOUS_NS" "$trace_archive" <<'PY'
 import hashlib
 import hmac
 import pathlib
@@ -722,7 +762,17 @@ import sys
 
 identity, intent, workload, ready, gate, secret, output = map(pathlib.Path, sys.argv[1:8])
 base = int(sys.argv[8])
+trace_archive = pathlib.Path(sys.argv[9])
 digest = lambda path: hashlib.sha256(path.read_bytes()).hexdigest()
+tree = hashlib.sha256(b"spaceterm.performance.trace-tree/v1\0")
+entries = []
+for path in trace_archive.rglob("*"):
+    if path.is_file():
+        entries.append((path.relative_to(trace_archive).as_posix().encode(), path))
+for encoded, path in sorted(entries):
+    data = path.read_bytes()
+    tree.update(struct.pack(">Q", len(encoded))); tree.update(encoded)
+    tree.update(struct.pack(">Q", len(data))); tree.update(data)
 rows = [
     ("format_version", "1"),
     ("subject_identity_sha256", digest(identity)),
@@ -735,7 +785,7 @@ rows = [
     ("actual_duration_ms", "600001"),
     ("capture_started_continuous_ns", str(base + 60_000_000_000)),
     ("capture_ended_continuous_ns", str(base + 660_100_000_000)),
-    ("trace_bundle_tree_sha256", "a" * 64),
+    ("trace_bundle_tree_sha256", tree.hexdigest()),
     ("toc_sha256", "b" * 64),
     ("time_profile_export_sha256", "c" * 64),
     ("allocations_export_sha256", "d" * 64),
@@ -757,7 +807,7 @@ PY
 write_normal_exit_closure() {
     local subject="$1" identity="$2" intent="$3" tail="$4" quit="$5"
     local exit_receipt="$6" native_observation="${7:-}"
-    local terminator_source="$8" terminator_binary="$9"
+    local terminator_source="$8" terminator_binary="$9" lifecycle_ready="${10}"
     local quit_token tail_ns request_ns exit_ns
     local session nonce
     session="$(awk -F '\t' '$1 == "session_id" {print $2}' "$intent")"
@@ -779,6 +829,11 @@ write_normal_exit_closure() {
         printf 'exit_continuous_ns\t%s\n' "$exit_ns"
         printf 'termination_method\tappkit-terminate\n'
         printf 'runtime_closure_status\tconfirmed\n'
+        for key in lifecycle_helper_device lifecycle_helper_inode lifecycle_helper_sha256 \
+            process_inspector_device process_inspector_inode process_inspector_sha256 \
+            appkit_terminator_process_pid appkit_terminator_process_start_identity; do
+            printf '%s\t%s\n' "$key" "$(awk -F '\t' -v wanted="$key" '$1 == wanted {print $2}' "$lifecycle_ready")"
+        done
         printf 'appkit_terminator_source_device\t%s\n' "$(stat -f '%d' "$terminator_source")"
         printf 'appkit_terminator_source_inode\t%s\n' "$(stat -f '%i' "$terminator_source")"
         printf 'appkit_terminator_source_sha256\t%s\n' "$(sha256 "$terminator_source")"
@@ -791,14 +846,14 @@ write_normal_exit_closure() {
     chmod 0400 "$quit"
     python3 - "$subject" "$identity" "$intent" "$tail" "$quit" "$exit_receipt" \
         "$CAMPAIGN_SECRET_FILE" "$request_ns" "$exit_ns" "$native_observation" \
-        "$terminator_source" "$terminator_binary" <<'PY'
+        "$terminator_source" "$terminator_binary" "$lifecycle_ready" <<'PY'
 import hashlib
 import hmac
 import pathlib
 import struct
 import sys
 
-subject, identity_name, intent_name, tail_name, quit_name, output_name, secret_name, requested, exited, native_name, source_name, binary_name = sys.argv[1:]
+subject, identity_name, intent_name, tail_name, quit_name, output_name, secret_name, requested, exited, native_name, source_name, binary_name, ready_name = sys.argv[1:]
 identity = pathlib.Path(identity_name)
 intent = pathlib.Path(intent_name)
 tail = pathlib.Path(tail_name)
@@ -807,6 +862,7 @@ output = pathlib.Path(output_name)
 secret = pathlib.Path(secret_name)
 digest = lambda path: hashlib.sha256(path.read_bytes()).hexdigest()
 intent_values = dict(line.split("\t", 1) for line in intent.read_text().splitlines())
+ready_values = dict(line.split("\t", 1) for line in pathlib.Path(ready_name).read_text().splitlines())
 native_hash = digest(pathlib.Path(native_name)) if subject == "spaceterm" else "not-applicable"
 rows = [
     ("schema", "spaceterm.acceptance.performance-subject-exit/v1"),
@@ -824,6 +880,10 @@ rows = [
     ("process_exited_continuous_ns", exited),
     ("exit_status", "normal"),
     ("native_observation_sha256", native_hash),
+    *((key, ready_values[key]) for key in (
+        "lifecycle_helper_device", "lifecycle_helper_inode", "lifecycle_helper_sha256",
+        "process_inspector_device", "process_inspector_inode", "process_inspector_sha256",
+        "appkit_terminator_process_pid", "appkit_terminator_process_start_identity")),
     ("appkit_terminator_source_device", str(pathlib.Path(source_name).stat().st_dev)),
     ("appkit_terminator_source_inode", str(pathlib.Path(source_name).stat().st_ino)),
     ("appkit_terminator_source_sha256", digest(pathlib.Path(source_name))),
@@ -849,20 +909,30 @@ write_lifecycle_receipts() {
     local subject="$1" identity="$2" intent="$3" tail="$4" workload="$5" events="$6"
     local ready="$7" quit="$8" exit_receipt="$9" native="${10}"
     local source="${11}" binary="${12}" token="${13}" ready_output="${14}" registration_output="${15}"
+    local helper="$SCRIPT_DIRECTORY/performance-subject-lifecycle.py"
+    local inspector="$SCRIPT_DIRECTORY/../inspect-release-performance-process.py"
     python3 - "$subject" "$identity" "$intent" "$tail" "$workload" "$events" "$ready" \
-        "$quit" "$exit_receipt" "$native" "$source" "$binary" "$token" \
+        "$quit" "$exit_receipt" "$native" "$source" "$binary" "$helper" "$inspector" "$token" \
         "$ready_output" "$registration_output" "$CAMPAIGN_SECRET_FILE" <<'PY'
 import hashlib,hmac,pathlib,struct,sys
 (subject,identity_name,intent_name,tail_name,workload_name,events_name,ready_name,
- quit_name,exit_name,native_name,source_name,binary_name,token,ready_output,
+ quit_name,exit_name,native_name,source_name,binary_name,helper_name,inspector_name,token,ready_output,
  registration_output,secret_name)=sys.argv[1:]
 paths=[pathlib.Path(value) for value in (identity_name,intent_name,tail_name,workload_name,
- events_name,ready_name,quit_name,exit_name,source_name,binary_name)]
-identity,intent,tail,workload,events,ready,quit_receipt,exit_receipt,source,binary=paths
+ events_name,ready_name,quit_name,exit_name,source_name,binary_name,helper_name,inspector_name)]
+identity,intent,tail,workload,events,ready,quit_receipt,exit_receipt,source,binary,helper,inspector=paths
 secret=pathlib.Path(secret_name).read_bytes(); digest=lambda path:hashlib.sha256(path.read_bytes()).hexdigest()
 values=dict(line.split("\t",1) for line in identity.read_text().splitlines())
 intent_values=dict(line.split("\t",1) for line in intent.read_text().splitlines())
-tool=[("appkit_terminator_source_device",str(source.stat().st_dev)),
+tool=[("lifecycle_helper_device",str(helper.stat().st_dev)),
+ ("lifecycle_helper_inode",str(helper.stat().st_ino)),
+ ("lifecycle_helper_sha256",digest(helper)),
+ ("process_inspector_device",str(inspector.stat().st_dev)),
+ ("process_inspector_inode",str(inspector.stat().st_ino)),
+ ("process_inspector_sha256",digest(inspector)),
+ ("appkit_terminator_process_pid","99"),
+ ("appkit_terminator_process_start_identity","10:20"),
+ ("appkit_terminator_source_device",str(source.stat().st_dev)),
  ("appkit_terminator_source_inode",str(source.stat().st_ino)),
  ("appkit_terminator_source_sha256",digest(source)),
  ("appkit_terminator_binary_device",str(binary.stat().st_dev)),
@@ -916,6 +986,7 @@ build_causal_closure() {
     local lifecycle_registration="$TEMP_ROOT/$prefix-lifecycle-registration.tsv"
     local run_metadata="$TEMP_ROOT/$prefix-run.tsv"
     local trace_metadata="$TEMP_ROOT/$prefix-trace.tsv"
+    local trace_archive="$TEMP_ROOT/$subject-ascii.trace"
     local run_session run_nonce
     run_session="$(awk -F '\t' '$1 == "session_id" {print $2}' "$intent")"
     run_nonce="$(awk -F '\t' '$1 == "nonce" {print $2}' "$intent")"
@@ -943,8 +1014,13 @@ build_causal_closure() {
         --scenario-plan "$PLAN" --plan-start-continuous-ns "$BASE_CONTINUOUS_NS" \
         --subject-identity "$identity" --window-identity "$window_identity" \
         --intent "$driver_intent" --receipt-output "$driver_receipt"
+    if [[ ! -d "$trace_archive" ]]; then
+        mkdir -m 0700 "$trace_archive"
+        printf 'fixture trace payload: %s\n' "$subject" > "$trace_archive/payload.bin"
+        chmod 0400 "$trace_archive/payload.bin"
+    fi
     write_trace_provisional "$identity" "$intent" "$workload_metadata" \
-        "$ready_receipt" "$plan_start_gate" "$trace_provisional"
+        "$ready_receipt" "$plan_start_gate" "$trace_provisional" "$trace_archive"
     local tail_ns quit_token
     tail_ns="$(( $(awk -F '\t' '$1 == "ended_continuous_ns" { print $2 }' "$workload_metadata") + 5000000000 ))"
     quit_token="$(sha256 "$driver_receipt")"
@@ -953,6 +1029,11 @@ build_causal_closure() {
         printf 'fixture AppKit terminator binary\n' > "$terminator_binary"
         chmod 0500 "$terminator_binary"
     fi
+    write_lifecycle_receipts "$subject" "$identity" "$intent" "$tail_receipt" \
+        "$workload_metadata" "$workload_events" "$ready_receipt" "$quit_receipt" \
+        "$exit_receipt" "$native_observation" \
+        "$SCRIPT_DIRECTORY/performance-appkit-terminate.m" "$terminator_binary" \
+        "$quit_token" "$lifecycle_ready" "$lifecycle_registration"
     "$SCRIPT_DIRECTORY/performance-tail-receipt.py" create \
         --campaign-secret-file "$CAMPAIGN_SECRET_FILE" \
         --campaign-id "$CAMPAIGN_ID" --session-id "$run_session" --nonce "$run_nonce" \
@@ -961,18 +1042,15 @@ build_causal_closure() {
         --driver-events "$driver_events" --workload-metadata "$workload_metadata" \
         --workload-events "$workload_events" --workload-ready-receipt "$ready_receipt" \
         --rss-samples "$rss_samples" --trace-provisional-receipt "$trace_provisional" \
+        --lifecycle-ready-receipt "$lifecycle_ready" \
         --appkit-terminator-source \
             "$SCRIPT_DIRECTORY/performance-appkit-terminate.m" \
         --appkit-terminator-binary "$terminator_binary" \
         --tail-completed-continuous-ns "$tail_ns" --output "$tail_receipt"
     write_normal_exit_closure "$subject" "$identity" "$intent" "$tail_receipt" \
         "$quit_receipt" "$exit_receipt" "$native_observation" \
-        "$SCRIPT_DIRECTORY/performance-appkit-terminate.m" "$terminator_binary"
-    write_lifecycle_receipts "$subject" "$identity" "$intent" "$tail_receipt" \
-        "$workload_metadata" "$workload_events" "$ready_receipt" "$quit_receipt" \
-        "$exit_receipt" "$native_observation" \
         "$SCRIPT_DIRECTORY/performance-appkit-terminate.m" "$terminator_binary" \
-        "$quit_token" "$lifecycle_ready" "$lifecycle_registration"
+        "$lifecycle_ready"
     local -a final_arguments=(
         --run-intent "$intent"
         --subject-identity "$identity"
@@ -1697,7 +1775,7 @@ TAMPERED_EVENTS="$TEMP_ROOT/tampered-events.tsv"
 cp "$WORKLOAD_EVENTS" "$TAMPERED_EVENTS"
 chmod u+w "$TAMPERED_EVENTS"
 sed -i '' 's/progress-000010/progress-000099/' "$TAMPERED_EVENTS"
-chmod 0444 "$TAMPERED_EVENTS"
+chmod 0400 "$TAMPERED_EVENTS"
 expect_progress_assembly_failure "events altered after authentication" "$TAMPERED_EVENTS" \
     "$WORKLOAD_METADATA" "$RAW_RSS"
 
@@ -1750,6 +1828,22 @@ expect_result 0 CASE-COMPLETE "valid authenticated SpaceTerm runtime case" \
         --failure-actions "$FAILURE_ACTIONS" \
         --native-launch-observation "$NATIVE_LAUNCH"
 
+# Freeze the two exact14 content-free reports before constructing the pair
+# result. The pair HMAC then binds the immutable evidence that each analyzer
+# actually used, rather than files that could be swapped between analyses.
+GHOSTTY_CASE_REPORT="$TEMP_ROOT/ghostty-case-report.tsv"
+SPACETERM_CASE_REPORT="$TEMP_ROOT/spaceterm-case-report.tsv"
+freeze_case_report "$GHOSTTY_CASE_REPORT" "Ghostty case report" \
+    run_case ghostty "$GHOSTTY_IDENTITY" "$GHOSTTY_RUN" \
+        "$WORKLOAD_EVENTS" "$DRIVER_EVENTS" "$GHOSTTY_RSS" "$GHOSTTY_TRACE" "$MANUAL"
+freeze_case_report "$SPACETERM_CASE_REPORT" "SpaceTerm case report" \
+    run_case spaceterm "$SPACETERM_IDENTITY" "$SPACETERM_RUN" \
+        "$WORKLOAD_EVENTS" "$DRIVER_EVENTS" "$SPACETERM_RSS" \
+        "$SPACETERM_TRACE" "$MANUAL" \
+        --runtime-samples "$RUNTIME_SAMPLES" --runtime-events "$RUNTIME_EVENTS" \
+        --runtime-metadata "$RUNTIME_METADATA" --failure-actions "$FAILURE_ACTIONS" \
+        --native-launch-observation "$NATIVE_LAUNCH"
+
 # Final release acceptance is pair-scoped. Reuse both complete production-mode
 # subject bundles above, whose distinct session/nonce values prevent replay.
 PAIR_RESULT="$TEMP_ROOT/pair-result.tsv"
@@ -1762,10 +1856,12 @@ for pair_subject in spaceterm ghostty; do
         pair_identity="$SPACETERM_IDENTITY"; pair_intent="$SPACETERM_INTENT"
         pair_run="$SPACETERM_RUN"; pair_gate="$SPACETERM_PLAN_START_GATE"
         pair_workload="$SPACETERM_WORKLOAD_METADATA"; pair_ready="$SPACETERM_READY_RECEIPT"
+        pair_trace="$SPACETERM_TRACE"; pair_case_report="$SPACETERM_CASE_REPORT"
     else
         pair_identity="$GHOSTTY_IDENTITY"; pair_intent="$GHOSTTY_INTENT"
         pair_run="$GHOSTTY_RUN"; pair_gate="$PLAN_START_GATE"
         pair_workload="$WORKLOAD_METADATA"; pair_ready="$READY_RECEIPT"
+        pair_trace="$GHOSTTY_TRACE"; pair_case_report="$GHOSTTY_CASE_REPORT"
     fi
     pair_result_arguments+=(
         "--$pair_subject-subject-identity" "$pair_identity"
@@ -1788,6 +1884,12 @@ for pair_subject in spaceterm ghostty; do
         "--$pair_subject-tail-receipt" "$TEMP_ROOT/$pair_subject-tail.tsv"
         "--$pair_subject-quit-receipt" "$TEMP_ROOT/$pair_subject-quit.tsv"
         "--$pair_subject-exit-receipt" "$TEMP_ROOT/$pair_subject-exit.tsv"
+        "--$pair_subject-case-report" "$pair_case_report"
+        "--$pair_subject-trace-metadata" "$pair_trace"
+        "--$pair_subject-trace-archive" "$TEMP_ROOT/$pair_subject-ascii.trace"
+        "--$pair_subject-manual-artifacts" "$MANUAL"
+        "--$pair_subject-manual-screenshot" "$MANUAL_SCREENSHOT"
+        "--$pair_subject-manual-video" "$MANUAL_VIDEO"
     )
 done
 pair_result_arguments+=(
@@ -1802,7 +1904,8 @@ pair_result_arguments+=(
     --appkit-terminator-binary "$TEMP_ROOT/performance-appkit-terminate"
 )
 chmod 0400 "$DRIVER_EVENTS" "$WORKLOAD_EVENTS" "$WORKLOAD_METADATA" \
-    "$SPACETERM_WORKLOAD_METADATA" "$READY_RECEIPT" "$SPACETERM_READY_RECEIPT"
+    "$SPACETERM_WORKLOAD_METADATA" "$READY_RECEIPT" "$SPACETERM_READY_RECEIPT" \
+    "$MANUAL_SCREENSHOT" "$MANUAL_VIDEO"
 "$SCRIPT_DIRECTORY/performance-pair-result.py" create \
     "${pair_result_arguments[@]}" --output "$PAIR_RESULT"
 
@@ -1851,6 +1954,8 @@ for pair_subject in spaceterm ghostty; do
         "--$pair_subject-manual-video" "$MANUAL_VIDEO"
         "--$pair_subject-lifecycle-ready-receipt" "$TEMP_ROOT/$pair_subject-lifecycle-ready.tsv"
         "--$pair_subject-lifecycle-registration" "$TEMP_ROOT/$pair_subject-lifecycle-registration.tsv"
+        "--$pair_subject-case-report" \
+            "$([[ "$pair_subject" == spaceterm ]] && printf '%s' "$SPACETERM_CASE_REPORT" || printf '%s' "$GHOSTTY_CASE_REPORT")"
     )
 done
 pair_analyzer_arguments+=(
@@ -2033,6 +2138,7 @@ REUSED_TRACE="$TEMP_ROOT/reused-trace.tsv"
 cp "$GHOSTTY_TRACE" "$REUSED_TRACE"
 chmod u+w "$REUSED_TRACE"
 sed -i '' "s/run_metadata_sha256.*/run_metadata_sha256\t$HASH_C/" "$REUSED_TRACE"
+chmod 0400 "$REUSED_TRACE"
 expect_result 2 NOT-RUN "trace reused from another run" \
     run_case ghostty "$GHOSTTY_IDENTITY" "$GHOSTTY_RUN" \
         "$WORKLOAD_EVENTS" "$DRIVER_EVENTS" "$GHOSTTY_RSS" \

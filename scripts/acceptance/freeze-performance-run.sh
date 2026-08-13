@@ -228,6 +228,7 @@ tail_completed_ns="$(kv "$PERFORMANCE_TAIL_RECEIPT" tail_completed_continuous_ns
     --workload-events "$WORKLOAD_EVENTS" --workload-ready-receipt "$WORKLOAD_READY_RECEIPT" \
     --rss-samples "$RSS_SAMPLES" \
     --trace-provisional-receipt "$TRACE_PROVISIONAL_RECEIPT" \
+    --lifecycle-ready-receipt "$PERFORMANCE_LIFECYCLE_READY_RECEIPT" \
     --appkit-terminator-source "$APPKIT_TERMINATOR_SOURCE" \
     --appkit-terminator-binary "$APPKIT_TERMINATOR_BINARY" \
     --tail-completed-continuous-ns "$tail_completed_ns" \
@@ -299,6 +300,7 @@ lifecycle_arguments=(
     --workload-ready-receipt "$WORKLOAD_READY_RECEIPT"
     --quit-receipt "$PERFORMANCE_QUIT_RECEIPT"
     --subject-exit-receipt "$SUBJECT_EXIT_RECEIPT"
+    --subject-lifecycle-helper "$SUBJECT_LIFECYCLE_HELPER"
     --appkit-terminator-source "$APPKIT_TERMINATOR_SOURCE"
     --appkit-terminator-binary "$APPKIT_TERMINATOR_BINARY"
 )

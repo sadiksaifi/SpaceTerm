@@ -59,6 +59,17 @@ DRIVER_STATUS=-1
 RSS_STATUS=-1
 TRACE_STATUS=-1
 LIFECYCLE_STATUS=-1
+LIFECYCLE_SOURCE_FD=""
+LIFECYCLE_INSPECTOR_FD=""
+LIFECYCLE_TERMINATOR_FD=""
+LIFECYCLE_STARTUP_FD=""
+# Fixed descriptors are required because the system Bash 3.2 does not support
+# dynamic `exec {name}<file` redirections. They remain open across the process
+# group launcher so the lifecycle helper and bridge execute the pinned vnodes.
+readonly LIFECYCLE_SOURCE_FD_NUMBER=6
+readonly LIFECYCLE_INSPECTOR_FD_NUMBER=7
+readonly LIFECYCLE_TERMINATOR_FD_NUMBER=8
+readonly LIFECYCLE_STARTUP_FD_NUMBER=9
 QUIT_TOKEN=""
 SEED_CONTINUOUS_NS=0
 MEASUREMENT_READY_CONTINUOUS_NS=0
@@ -226,6 +237,14 @@ cleanup_children() {
     RSS_PID=""; RSS_PGID=""
     DRIVER_PID=""; DRIVER_PGID=""
     LIFECYCLE_PID=""; LIFECYCLE_PGID=""
+    close_lifecycle_parent_fds
+}
+
+close_lifecycle_parent_fds() {
+    [[ -z "$LIFECYCLE_STARTUP_FD" ]] || { exec 9<&- || true; LIFECYCLE_STARTUP_FD=""; }
+    [[ -z "$LIFECYCLE_TERMINATOR_FD" ]] || { exec 8<&- || true; LIFECYCLE_TERMINATOR_FD=""; }
+    [[ -z "$LIFECYCLE_INSPECTOR_FD" ]] || { exec 7<&- || true; LIFECYCLE_INSPECTOR_FD=""; }
+    [[ -z "$LIFECYCLE_SOURCE_FD" ]] || { exec 6<&- || true; LIFECYCLE_SOURCE_FD=""; }
 }
 
 restore_termios() {
@@ -518,10 +537,32 @@ wait_for_authenticated_ready() {
 }
 
 start_subject_lifecycle() {
-    local native_path=not-applicable deadline now lifecycle_timeout_seconds
+    local native_path=not-applicable deadline now lifecycle_timeout_seconds startup_fifo
     [[ "$SUBJECT" != spaceterm ]] || native_path="$NATIVE_OBSERVATION"
     lifecycle_timeout_seconds=$(( (WARMUP_MS + DURATION_MS) / 1000 + 180 ))
-    spawn_process_group "$SUBJECT_LIFECYCLE" \
+    for descriptor in 6 7 8 9; do
+        [[ ! -e "/dev/fd/$descriptor" ]] \
+            || abort_run "lifecycle-reserved-fd-$descriptor-occupied"
+    done
+    exec 6< "$SUBJECT_LIFECYCLE" \
+        || abort_run lifecycle-source-fd-open-failed
+    LIFECYCLE_SOURCE_FD=$LIFECYCLE_SOURCE_FD_NUMBER
+    exec 7< "$TRACE_INSPECTOR" \
+        || abort_run lifecycle-inspector-fd-open-failed
+    LIFECYCLE_INSPECTOR_FD=$LIFECYCLE_INSPECTOR_FD_NUMBER
+    exec 8< "$APPKIT_TERMINATOR" \
+        || abort_run lifecycle-terminator-fd-open-failed
+    LIFECYCLE_TERMINATOR_FD=$LIFECYCLE_TERMINATOR_FD_NUMBER
+    startup_fifo="$RUN_DIRECTORY/.performance-lifecycle-startup.$$.fifo"
+    [[ ! -e "$startup_fifo" && ! -L "$startup_fifo" ]] \
+        || abort_run lifecycle-startup-control-exists
+    mkfifo -m 600 "$startup_fifo" || abort_run lifecycle-startup-control-create-failed
+    exec 9<> "$startup_fifo" \
+        || abort_run lifecycle-startup-fd-open-failed
+    LIFECYCLE_STARTUP_FD=$LIFECYCLE_STARTUP_FD_NUMBER
+    rm -- "$startup_fifo"
+    spawn_process_group /bin/sh -c \
+        'exec /usr/bin/python3 - "$@" <&6' performance-subject-lifecycle \
         --subject-identity "$SUBJECT_IDENTITY" \
         --campaign-secret-file "$CAMPAIGN_SECRET_FILE" \
         --campaign-id "$CAMPAIGN_ID" --session-id "$SESSION_ID" --nonce "$NONCE" \
@@ -537,6 +578,10 @@ start_subject_lifecycle() {
         --trace-provisional-receipt "$TRACE_PROVISIONAL_RECEIPT" \
         --plan-start-gate "$PLAN_START_GATE" \
         --process-inspector "$TRACE_INSPECTOR" \
+        --process-inspector-fd "$LIFECYCLE_INSPECTOR_FD" \
+        --expected-process-inspector-device "$(stat -f '%d' "$TRACE_INSPECTOR")" \
+        --expected-process-inspector-inode "$(stat -f '%i' "$TRACE_INSPECTOR")" \
+        --expected-process-inspector-sha256 "$TRACE_INSPECTOR_SHA256" \
         --appkit-terminator-source "$APPKIT_TERMINATOR_SOURCE" \
         --appkit-terminator "$APPKIT_TERMINATOR" \
         --expected-appkit-terminator-source-device "$APPKIT_TERMINATOR_SOURCE_DEVICE" \
@@ -545,10 +590,22 @@ start_subject_lifecycle() {
         --expected-appkit-terminator-binary-device "$APPKIT_TERMINATOR_BINARY_DEVICE" \
         --expected-appkit-terminator-binary-inode "$APPKIT_TERMINATOR_BINARY_INODE" \
         --expected-appkit-terminator-binary-sha256 "$APPKIT_TERMINATOR_BINARY_SHA256" \
+        --appkit-terminator-fd "$LIFECYCLE_TERMINATOR_FD" \
+        --self-source-fd "$LIFECYCLE_SOURCE_FD" \
+        --expected-lifecycle-helper-device "$(stat -f '%d' "$SUBJECT_LIFECYCLE")" \
+        --expected-lifecycle-helper-inode "$(stat -f '%i' "$SUBJECT_LIFECYCLE")" \
+        --expected-lifecycle-helper-sha256 "$SUBJECT_LIFECYCLE_SHA256" \
+        --startup-command-fd "$LIFECYCLE_STARTUP_FD" \
         --timeout-seconds "$lifecycle_timeout_seconds" \
         || abort_run lifecycle-process-group-launch-failed
     LIFECYCLE_PID="$SPAWNED_PID"
     LIFECYCLE_PGID="$LIFECYCLE_PID"
+    printf S >&"$LIFECYCLE_STARTUP_FD" \
+        || abort_run lifecycle-startup-command-failed
+    # The lifecycle helper inherited all four pinned descriptors. Close the
+    # runner's copies before launching workload/driver/RSS/trace children so
+    # no unrelated process can access the lifecycle controls or tool vnodes.
+    close_lifecycle_parent_fds
     deadline=$(( $(continuous_ns) + 5000000000 ))
     while [[ ! -f "$PERFORMANCE_LIFECYCLE_READY_RECEIPT" ]]; do
         process_has_exited "$LIFECYCLE_PID" && abort_run lifecycle-helper-exited-before-ready
@@ -563,14 +620,22 @@ start_subject_lifecycle() {
         "$APPKIT_TERMINATOR_SOURCE_DEVICE" "$APPKIT_TERMINATOR_SOURCE_INODE" \
         "$APPKIT_TERMINATOR_SOURCE_SHA256" "$APPKIT_TERMINATOR_BINARY_DEVICE" \
         "$APPKIT_TERMINATOR_BINARY_INODE" "$APPKIT_TERMINATOR_BINARY_SHA256" \
+        "$(stat -f '%d' "$SUBJECT_LIFECYCLE")" "$(stat -f '%i' "$SUBJECT_LIFECYCLE")" \
+        "$SUBJECT_LIFECYCLE_SHA256" "$(stat -f '%d' "$TRACE_INSPECTOR")" \
+        "$(stat -f '%i' "$TRACE_INSPECTOR")" "$TRACE_INSPECTOR_SHA256" \
         "$PERFORMANCE_LIFECYCLE_CONTROL" <<'PY' \
         || abort_run lifecycle-ready-authentication-failed
 import hashlib, hmac, os, pathlib, stat, struct, sys
 ready, secret, subject, campaign, session, nonce, subject_hash, pid, start, executable_hash, \
- source_device, source_inode, source_hash, binary_device, binary_inode, binary_hash, control = sys.argv[1:]
+ source_device, source_inode, source_hash, binary_device, binary_inode, binary_hash, \
+ helper_device, helper_inode, helper_hash, inspector_device, inspector_inode, inspector_hash, \
+ control = sys.argv[1:]
 keys = ["schema","subject","campaign_id","session_id","nonce","subject_identity_sha256",
     "process_pid","process_start_identity","executable_sha256","ready_continuous_ns",
     "registration_control_device","registration_control_inode",
+    "lifecycle_helper_device","lifecycle_helper_inode","lifecycle_helper_sha256",
+    "process_inspector_device","process_inspector_inode","process_inspector_sha256",
+    "appkit_terminator_process_pid","appkit_terminator_process_start_identity",
     "appkit_terminator_source_device","appkit_terminator_source_inode",
     "appkit_terminator_source_sha256","appkit_terminator_binary_device",
     "appkit_terminator_binary_inode","appkit_terminator_binary_sha256","evidence_mode",
@@ -588,6 +653,11 @@ required = {b"schema":b"spaceterm.acceptance.performance-lifecycle-ready/v1",
     b"subject":subject.encode(),b"campaign_id":campaign.encode(),b"session_id":session.encode(),
     b"nonce":nonce.encode(),b"subject_identity_sha256":subject_hash.encode(),b"process_pid":pid.encode(),
     b"process_start_identity":start.encode(),b"executable_sha256":executable_hash.encode(),
+    b"lifecycle_helper_device":helper_device.encode(),b"lifecycle_helper_inode":helper_inode.encode(),
+    b"lifecycle_helper_sha256":helper_hash.encode(),
+    b"process_inspector_device":inspector_device.encode(),
+    b"process_inspector_inode":inspector_inode.encode(),
+    b"process_inspector_sha256":inspector_hash.encode(),
     b"appkit_terminator_source_device":source_device.encode(),
     b"appkit_terminator_source_inode":source_inode.encode(),
     b"appkit_terminator_source_sha256":source_hash.encode(),
@@ -597,6 +667,8 @@ required = {b"schema":b"spaceterm.acceptance.performance-lifecycle-ready/v1",
     b"evidence_mode":(b"test-only" if os.environ.get("SPACETERM_PERFORMANCE_TEST_MODE")=="1" else b"production"),
     b"auth_algorithm":b"hmac-sha256",b"status":b"ready"}
 if any(values.get(k) != v for k,v in required.items()) or values.get(b"receipt_hmac_sha256") != expected \
+        or not values.get(b"appkit_terminator_process_pid",b"").isdigit() \
+        or b":" not in values.get(b"appkit_terminator_process_start_identity",b"") \
         or not stat.S_ISFIFO(control_stat.st_mode) or stat.S_ISLNK(control_stat.st_mode) \
         or int(values[b"registration_control_device"]) != control_stat.st_dev \
         or int(values[b"registration_control_inode"]) != control_stat.st_ino:
@@ -606,8 +678,10 @@ PY
 
 register_subject_lifecycle() {
     QUIT_TOKEN="$(python3 -c 'import secrets; print(secrets.token_hex(32))')"
-    local native_path=not-applicable
+    local native_path=not-applicable bridge_pid bridge_start
     [[ "$SUBJECT" != spaceterm ]] || native_path="$NATIVE_OBSERVATION"
+    bridge_pid="$(kv "$PERFORMANCE_LIFECYCLE_READY_RECEIPT" appkit_terminator_process_pid)"
+    bridge_start="$(kv "$PERFORMANCE_LIFECYCLE_READY_RECEIPT" appkit_terminator_process_start_identity)"
     python3 - "$PERFORMANCE_LIFECYCLE_REGISTRATION" "$CAMPAIGN_SECRET_FILE" \
         "$CAMPAIGN_ID" "$SESSION_ID" "$NONCE" "$QUIT_TOKEN" "$SUBJECT_HASH" \
         "$SUBJECT_PID" "$START_IDENTITY" "$RUN_INTENT" "$PERFORMANCE_TAIL_RECEIPT" \
@@ -615,12 +689,17 @@ register_subject_lifecycle() {
         "$PERFORMANCE_QUIT_RECEIPT" "$SUBJECT_EXIT_RECEIPT" "$native_path" \
         "$APPKIT_TERMINATOR_SOURCE_DEVICE" "$APPKIT_TERMINATOR_SOURCE_INODE" \
         "$APPKIT_TERMINATOR_SOURCE_SHA256" "$APPKIT_TERMINATOR_BINARY_DEVICE" \
-        "$APPKIT_TERMINATOR_BINARY_INODE" "$APPKIT_TERMINATOR_BINARY_SHA256" <<'PY' \
+        "$APPKIT_TERMINATOR_BINARY_INODE" "$APPKIT_TERMINATOR_BINARY_SHA256" \
+        "$(stat -f '%d' "$SUBJECT_LIFECYCLE")" "$(stat -f '%i' "$SUBJECT_LIFECYCLE")" \
+        "$SUBJECT_LIFECYCLE_SHA256" "$(stat -f '%d' "$TRACE_INSPECTOR")" \
+        "$(stat -f '%i' "$TRACE_INSPECTOR")" "$TRACE_INSPECTOR_SHA256" \
+        "$bridge_pid" "$bridge_start" <<'PY' \
         || abort_run lifecycle-registration-publication-failed
 import hashlib,hmac,os,pathlib,struct,sys
 (target,secret,campaign,session,nonce,token,subject_hash,pid,start,intent,tail,metadata,events,
  ready,quit,exit_receipt,native,source_device,source_inode,source_hash,binary_device,
- binary_inode,binary_hash)=sys.argv[1:]
+ binary_inode,binary_hash,helper_device,helper_inode,helper_hash,inspector_device,
+ inspector_inode,inspector_hash,bridge_pid,bridge_start)=sys.argv[1:]
 rows=[("format_version","1"),("campaign_id",campaign),("session_id",session),("nonce",nonce),
  ("registration_token",token),("subject_identity_sha256",subject_hash),("process_pid",pid),
  ("process_start_identity",start),("run_intent_path",str(pathlib.Path(intent).resolve())),
@@ -632,6 +711,11 @@ rows=[("format_version","1"),("campaign_id",campaign),("session_id",session),("n
  ("quit_receipt_path",str(pathlib.Path(quit).resolve())),
  ("subject_exit_receipt_path",str(pathlib.Path(exit_receipt).resolve())),
  ("native_observation_path",native if native=="not-applicable" else str(pathlib.Path(native).resolve())),
+ ("lifecycle_helper_device",helper_device),("lifecycle_helper_inode",helper_inode),
+ ("lifecycle_helper_sha256",helper_hash),("process_inspector_device",inspector_device),
+ ("process_inspector_inode",inspector_inode),("process_inspector_sha256",inspector_hash),
+ ("appkit_terminator_process_pid",bridge_pid),
+ ("appkit_terminator_process_start_identity",bridge_start),
  ("appkit_terminator_source_device",source_device),
  ("appkit_terminator_source_inode",source_inode),
  ("appkit_terminator_source_sha256",source_hash),
@@ -1195,6 +1279,7 @@ verify_controller_toolchain || abort_run controller-toolchain-changed-before-tai
     --workload-events "$WORKLOAD_EVENTS" --rss-samples "$RSS_OUTPUT" \
     --workload-ready-receipt "$WORKLOAD_READY_RECEIPT" \
     --trace-provisional-receipt "$TRACE_PROVISIONAL_RECEIPT" \
+    --lifecycle-ready-receipt "$PERFORMANCE_LIFECYCLE_READY_RECEIPT" \
     --appkit-terminator-source "$APPKIT_TERMINATOR_SOURCE" \
     --appkit-terminator-binary "$APPKIT_TERMINATOR" \
     --tail-completed-continuous-ns "$TAIL_VERIFIED_CONTINUOUS_NS" \

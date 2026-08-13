@@ -13,10 +13,11 @@ import stat
 import struct
 import subprocess
 import sys
+import unicodedata
 from pathlib import Path
 
 
-MAGIC = b"spaceterm.performance.pair-result/v2\0"
+MAGIC = b"spaceterm.performance.pair-result/v3\0"
 READY_MAGIC = b"spaceterm.acceptance.performance-lifecycle-ready/v1\0"
 REGISTRATION_MAGIC = b"spaceterm.acceptance.performance-lifecycle-registration/v1\0"
 SAFE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,79}\Z")
@@ -64,6 +65,9 @@ TAIL_KEYS = (
     "subject_process_start_identity", "driver_receipt_sha256", "driver_events_sha256",
     "workload_metadata_sha256", "workload_events_sha256", "rss_samples_sha256",
     "trace_provisional_receipt_sha256", "tail_completed_continuous_ns",
+    "lifecycle_helper_device", "lifecycle_helper_inode", "lifecycle_helper_sha256",
+    "process_inspector_device", "process_inspector_inode", "process_inspector_sha256",
+    "appkit_terminator_process_pid", "appkit_terminator_process_start_identity",
     "appkit_terminator_source_device", "appkit_terminator_source_inode",
     "appkit_terminator_source_sha256", "appkit_terminator_binary_device",
     "appkit_terminator_binary_inode", "appkit_terminator_binary_sha256",
@@ -73,7 +77,10 @@ QUIT_KEYS = (
     "format_version", "campaign_id", "session_id", "nonce", "run_intent_sha256",
     "subject_process_pid", "subject_process_start_identity", "quit_token",
     "request_continuous_ns", "exit_continuous_ns", "termination_method",
-    "runtime_closure_status", "appkit_terminator_source_device",
+    "runtime_closure_status", "lifecycle_helper_device", "lifecycle_helper_inode",
+    "lifecycle_helper_sha256", "process_inspector_device", "process_inspector_inode",
+    "process_inspector_sha256", "appkit_terminator_process_pid",
+    "appkit_terminator_process_start_identity", "appkit_terminator_source_device",
     "appkit_terminator_source_inode", "appkit_terminator_source_sha256",
     "appkit_terminator_binary_device", "appkit_terminator_binary_inode",
     "appkit_terminator_binary_sha256", "evidence_mode", "status",
@@ -83,6 +90,9 @@ EXIT_KEYS = (
     "subject_identity_sha256", "process_pid", "process_start_identity",
     "tail_receipt_sha256", "quit_receipt_sha256", "exit_requested_continuous_ns",
     "process_exited_continuous_ns", "exit_status", "native_observation_sha256",
+    "lifecycle_helper_device", "lifecycle_helper_inode", "lifecycle_helper_sha256",
+    "process_inspector_device", "process_inspector_inode", "process_inspector_sha256",
+    "appkit_terminator_process_pid", "appkit_terminator_process_start_identity",
     "appkit_terminator_source_device", "appkit_terminator_source_inode",
     "appkit_terminator_source_sha256", "appkit_terminator_binary_device",
     "appkit_terminator_binary_inode", "appkit_terminator_binary_sha256",
@@ -102,11 +112,34 @@ TRACE_KEYS = (
     "verifier_sha256", "evidence_mode", "status", "auth_algorithm",
     "provisional_hmac_sha256",
 )
+FINAL_TRACE_KEYS = (
+    "format_version", "capture_status", "incomplete_reason", "subject_identity_sha256",
+    "run_metadata_sha256", "workload_metadata_sha256", "workload_ready_receipt_sha256",
+    "supplemental_evidence_sha256", "requested_duration_ms", "actual_duration_ms",
+    "capture_started_continuous_ns", "capture_ended_continuous_ns",
+    "target_identity_verified", "trace_target_pid_verified", "time_profiler_instrument",
+    "allocations_instrument", "hangs_instrument", "time_profiler_target_verified",
+    "allocations_target_verified", "hangs_target_verified", "time_profiler_rows",
+    "allocations_rows", "hangs_rows", "maximum_main_thread_hang_ms", "status",
+)
+CASE_REPORT_KEYS = (
+    "format_version", "subject", "scenario", "session_id", "nonce",
+    "run_intent_sha256", "run_metadata_sha256", "trace_metadata_sha256",
+    "trace_archive_sha256", "manual_artifacts_sha256", "manual_screenshot_sha256",
+    "manual_video_sha256", "result", "reason",
+)
+MANUAL_KEYS = (
+    "format_version", "screenshot_sha256", "video_sha256", "final_content_review",
+    "anchor_review", "restoration_review", "geometry_review", "reviewer", "result",
+)
 READY_KEYS = (
     "schema", "subject", "campaign_id", "session_id", "nonce",
     "subject_identity_sha256", "process_pid", "process_start_identity",
     "executable_sha256", "ready_continuous_ns", "registration_control_device",
-    "registration_control_inode", "appkit_terminator_source_device",
+    "registration_control_inode", "lifecycle_helper_device", "lifecycle_helper_inode",
+    "lifecycle_helper_sha256", "process_inspector_device", "process_inspector_inode",
+    "process_inspector_sha256", "appkit_terminator_process_pid",
+    "appkit_terminator_process_start_identity", "appkit_terminator_source_device",
     "appkit_terminator_source_inode", "appkit_terminator_source_sha256",
     "appkit_terminator_binary_device", "appkit_terminator_binary_inode",
     "appkit_terminator_binary_sha256", "evidence_mode", "auth_algorithm",
@@ -118,6 +151,9 @@ REGISTRATION_KEYS = (
     "run_intent_sha256", "tail_receipt_path", "workload_metadata_path",
     "workload_events_path", "workload_ready_receipt_path", "quit_receipt_path",
     "subject_exit_receipt_path", "native_observation_path",
+    "lifecycle_helper_device", "lifecycle_helper_inode", "lifecycle_helper_sha256",
+    "process_inspector_device", "process_inspector_inode", "process_inspector_sha256",
+    "appkit_terminator_process_pid", "appkit_terminator_process_start_identity",
     "appkit_terminator_source_device", "appkit_terminator_source_inode",
     "appkit_terminator_source_sha256", "appkit_terminator_binary_device",
     "appkit_terminator_binary_inode", "appkit_terminator_binary_sha256",
@@ -134,6 +170,9 @@ RESULT_KEYS = (
     "spaceterm_driver_source_sha256", "spaceterm_driver_controller_sha256",
     "spaceterm_plan_start_gate_sha256", "spaceterm_tail_receipt_sha256",
     "spaceterm_quit_receipt_sha256", "spaceterm_exit_receipt_sha256",
+    "spaceterm_case_report_sha256", "spaceterm_trace_metadata_sha256",
+    "spaceterm_trace_archive_sha256", "spaceterm_manual_artifacts_sha256",
+    "spaceterm_manual_screenshot_sha256", "spaceterm_manual_video_sha256",
     "ghostty_session_id", "ghostty_nonce", "ghostty_run_intent_sha256",
     "ghostty_run_metadata_sha256", "ghostty_driver_intent_sha256",
     "ghostty_driver_events_sha256", "ghostty_driver_receipt_sha256",
@@ -141,6 +180,9 @@ RESULT_KEYS = (
     "ghostty_driver_source_sha256", "ghostty_driver_controller_sha256",
     "ghostty_plan_start_gate_sha256", "ghostty_tail_receipt_sha256",
     "ghostty_quit_receipt_sha256", "ghostty_exit_receipt_sha256",
+    "ghostty_case_report_sha256", "ghostty_trace_metadata_sha256",
+    "ghostty_trace_archive_sha256", "ghostty_manual_artifacts_sha256",
+    "ghostty_manual_screenshot_sha256", "ghostty_manual_video_sha256",
     "spaceterm_lifecycle_ready_receipt_sha256",
     "spaceterm_lifecycle_registration_receipt_sha256",
     "ghostty_lifecycle_ready_receipt_sha256",
@@ -205,6 +247,73 @@ def stable_read(
     return data
 
 
+def stable_file_digest(path_text: str) -> str:
+    path = Path(path_text)
+    before = path.lstat()
+    if not stat.S_ISREG(before.st_mode) or stat.S_ISLNK(before.st_mode) \
+            or before.st_uid != os.geteuid() or before.st_mode & 0o222:
+        raise Invalid("unsafe-media")
+    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        opened = os.fstat(descriptor); hasher = hashlib.sha256()
+        while True:
+            chunk = os.read(descriptor, 1024 * 1024)
+            if not chunk: break
+            hasher.update(chunk)
+        after = os.fstat(descriptor)
+    finally:
+        os.close(descriptor)
+    current = path.lstat()
+    fields = ("st_dev", "st_ino", "st_mode", "st_uid", "st_size", "st_mtime_ns", "st_ctime_ns")
+    if any(getattr(before, key) != getattr(other, key)
+           for other in (opened, after, current) for key in fields):
+        raise Invalid("media-changed")
+    return hasher.hexdigest()
+
+
+def stable_trace_tree(path_text: str) -> str:
+    root = Path(path_text)
+    before = root.lstat()
+    if not stat.S_ISDIR(before.st_mode) or stat.S_ISLNK(before.st_mode) \
+            or before.st_uid != os.geteuid() or before.st_mode & 0o022:
+        raise Invalid("unsafe-trace-archive")
+    digestor = hashlib.sha256(b"spaceterm.performance.trace-tree/v1\0")
+    entries: list[tuple[bytes, Path]] = []
+    for path in root.rglob("*"):
+        info = path.lstat()
+        if stat.S_ISLNK(info.st_mode) or not (stat.S_ISREG(info.st_mode) or stat.S_ISDIR(info.st_mode)):
+            raise Invalid("unsafe-trace-entry")
+        if stat.S_ISREG(info.st_mode):
+            relative = unicodedata.normalize("NFC", path.relative_to(root).as_posix())
+            if relative != path.relative_to(root).as_posix():
+                raise Invalid("noncanonical-trace-entry")
+            entries.append((relative.encode(), path))
+    for encoded, path in sorted(entries):
+        file_before = path.lstat()
+        digestor.update(struct.pack(">Q", len(encoded))); digestor.update(encoded)
+        digestor.update(struct.pack(">Q", file_before.st_size))
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        try:
+            opened = os.fstat(descriptor)
+            while True:
+                chunk = os.read(descriptor, 1024 * 1024)
+                if not chunk: break
+                digestor.update(chunk)
+            file_after = os.fstat(descriptor)
+        finally:
+            os.close(descriptor)
+        current = path.lstat()
+        fields = ("st_dev", "st_ino", "st_mode", "st_uid", "st_size", "st_mtime_ns", "st_ctime_ns")
+        if any(getattr(file_before, key) != getattr(other, key)
+               for other in (opened, file_after, current) for key in fields):
+            raise Invalid("trace-entry-changed")
+    after = root.lstat()
+    if (before.st_dev, before.st_ino, before.st_mtime_ns, before.st_ctime_ns) \
+            != (after.st_dev, after.st_ino, after.st_mtime_ns, after.st_ctime_ns):
+        raise Invalid("trace-archive-changed")
+    return digestor.hexdigest()
+
+
 def parse(data: bytes, keys: tuple[str, ...], *, hmac_key: str | None = None) \
         -> tuple[dict[str, str], bytes]:
     if not data.endswith(b"\n") or b"\0" in data or b"\r" in data:
@@ -255,6 +364,12 @@ def add_common(parser: argparse.ArgumentParser) -> None:
         parser.add_argument(f"--{subject}-tail-receipt", required=True)
         parser.add_argument(f"--{subject}-quit-receipt", required=True)
         parser.add_argument(f"--{subject}-exit-receipt", required=True)
+        parser.add_argument(f"--{subject}-case-report", required=True)
+        parser.add_argument(f"--{subject}-trace-metadata", required=True)
+        parser.add_argument(f"--{subject}-trace-archive", required=True)
+        parser.add_argument(f"--{subject}-manual-artifacts", required=True)
+        parser.add_argument(f"--{subject}-manual-screenshot", required=True)
+        parser.add_argument(f"--{subject}-manual-video", required=True)
     parser.add_argument("--spaceterm-native-provisional-observation", required=True)
     parser.add_argument("--spaceterm-native-observation", required=True)
     parser.add_argument("--spaceterm-native-runtime-metadata", required=True)
@@ -262,6 +377,9 @@ def add_common(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--spaceterm-native-runtime-events", required=True)
     parser.add_argument("--spaceterm-native-failure-actions", required=True)
     parser.add_argument("--common-lifecycle-helper", required=True)
+    parser.add_argument("--process-inspector", default=str(
+        Path(__file__).resolve().parent.parent / "inspect-release-performance-process.py"
+    ))
     parser.add_argument("--appkit-terminator-source", required=True)
     parser.add_argument("--appkit-terminator-binary", required=True)
 
@@ -282,8 +400,10 @@ def arguments() -> argparse.Namespace:
 
 def verify_run(
     args: argparse.Namespace, secret: bytes, pair: dict[str, str], subject: str,
-    helper_data: bytes, terminator_source_data: bytes, terminator_binary_data: bytes,
-    terminator_source_stat: os.stat_result, terminator_binary_stat: os.stat_result,
+    helper_data: bytes, inspector_data: bytes, terminator_source_data: bytes,
+    terminator_binary_data: bytes, helper_stat: os.stat_result,
+    inspector_stat: os.stat_result, terminator_source_stat: os.stat_result,
+    terminator_binary_stat: os.stat_result,
 ) -> dict[str, str]:
     prefix = subject.replace("-", "_")
     intent_data = stable_read(getattr(args, f"{prefix}_run_intent"))
@@ -330,6 +450,12 @@ def verify_run(
     tail_data = stable_read(getattr(args, f"{prefix}_tail_receipt"), private=True)
     quit_data = stable_read(getattr(args, f"{prefix}_quit_receipt"), private=True)
     exit_data = stable_read(getattr(args, f"{prefix}_exit_receipt"), private=True)
+    case_report_data = stable_read(getattr(args, f"{prefix}_case_report"), private=True)
+    final_trace_data = stable_read(getattr(args, f"{prefix}_trace_metadata"), private=True)
+    manual_data = stable_read(getattr(args, f"{prefix}_manual_artifacts"), private=True)
+    trace_archive_hash = stable_trace_tree(getattr(args, f"{prefix}_trace_archive"))
+    screenshot_hash = stable_file_digest(getattr(args, f"{prefix}_manual_screenshot"))
+    video_hash = stable_file_digest(getattr(args, f"{prefix}_manual_video"))
     intent, _ = parse(intent_data, INTENT_KEYS)
     identity, _ = parse(subject_data, SUBJECT_KEYS)
     run, _ = parse(run_data, RUN_KEYS)
@@ -348,6 +474,9 @@ def verify_run(
     exit_receipt, exit_unsigned = parse(
         exit_data, EXIT_KEYS, hmac_key="receipt_hmac_sha256"
     )
+    case_report, _ = parse(case_report_data, CASE_REPORT_KEYS)
+    final_trace, _ = parse(final_trace_data, FINAL_TRACE_KEYS)
+    manual, _ = parse(manual_data, MANUAL_KEYS)
     gate, gate_unsigned = parse(gate_data, GATE_KEYS, hmac_key="start_gate_hmac_sha256")
     intent_hash = digest(intent_data)
     identity_key = f"{subject}_subject_identity_sha256"
@@ -358,6 +487,35 @@ def verify_run(
         "initial_grid_sha256": "initial_grid_sha256",
         "measured_duration_ms": "duration_ms",
     }
+    if case_report["format_version"] != "2" or case_report["subject"] != subject \
+            or case_report["scenario"] != pair["scenario"] \
+            or case_report["session_id"] != intent["session_id"] \
+            or case_report["nonce"] != intent["nonce"] \
+            or case_report["run_intent_sha256"] != intent_hash \
+            or case_report["run_metadata_sha256"] != digest(run_data) \
+            or case_report["trace_metadata_sha256"] != digest(final_trace_data) \
+            or case_report["trace_archive_sha256"] != trace_archive_hash \
+            or case_report["manual_artifacts_sha256"] != digest(manual_data) \
+            or case_report["manual_screenshot_sha256"] != screenshot_hash \
+            or case_report["manual_video_sha256"] != video_hash \
+            or case_report["result"] != "CASE-COMPLETE" \
+            or case_report["reason"] != "all-required-evidence-complete":
+        raise Invalid(f"{subject}-case-report-binding")
+    if final_trace["format_version"] != "3" or final_trace["capture_status"] != "CAPTURED" \
+            or final_trace["incomplete_reason"] != "none" \
+            or final_trace["subject_identity_sha256"] != digest(subject_data) \
+            or final_trace["run_metadata_sha256"] != digest(run_data) \
+            or final_trace["workload_metadata_sha256"] != digest(workload_metadata_data) \
+            or final_trace["workload_ready_receipt_sha256"] != digest(workload_ready_data) \
+            or final_trace["supplemental_evidence_sha256"] != digest(gate_data) \
+            or final_trace["status"] != "complete":
+        raise Invalid(f"{subject}-final-trace-binding")
+    if manual["format_version"] != "1" or manual["screenshot_sha256"] != screenshot_hash \
+            or manual["video_sha256"] != video_hash or manual["result"] != "PASS" \
+            or any(manual[key] != "PASS" for key in (
+                "final_content_review", "anchor_review", "restoration_review", "geometry_review",
+            )):
+        raise Invalid(f"{subject}-manual-binding")
     if intent["format_version"] != "1" or intent["status"] != "prepared" \
             or intent["evidence_mode"] != "production" \
             or intent["subject"] != subject or intent["campaign_id"] != args.campaign_id \
@@ -382,6 +540,12 @@ def verify_run(
     if any(intent[key] != pair[pair_key] for key, pair_key in shared.items()):
         raise Invalid(f"{subject}-pair-input-binding")
     tool_values = {
+        "lifecycle_helper_device": str(helper_stat.st_dev),
+        "lifecycle_helper_inode": str(helper_stat.st_ino),
+        "lifecycle_helper_sha256": digest(helper_data),
+        "process_inspector_device": str(inspector_stat.st_dev),
+        "process_inspector_inode": str(inspector_stat.st_ino),
+        "process_inspector_sha256": digest(inspector_data),
         "appkit_terminator_source_device": str(terminator_source_stat.st_dev),
         "appkit_terminator_source_inode": str(terminator_source_stat.st_ino),
         "appkit_terminator_source_sha256": digest(terminator_source_data),
@@ -389,6 +553,12 @@ def verify_run(
         "appkit_terminator_binary_inode": str(terminator_binary_stat.st_ino),
         "appkit_terminator_binary_sha256": digest(terminator_binary_data),
     }
+    bridge_values = {
+        "appkit_terminator_process_pid": lifecycle_ready["appkit_terminator_process_pid"],
+        "appkit_terminator_process_start_identity":
+            lifecycle_ready["appkit_terminator_process_start_identity"],
+    }
+    tool_values.update(bridge_values)
     if lifecycle_ready["schema"] \
             != "spaceterm.acceptance.performance-lifecycle-ready/v1" \
             or lifecycle_ready["subject"] != subject \
@@ -510,6 +680,8 @@ def verify_run(
             or int(trace["actual_duration_ms"]) < int(pair["duration_ms"]) \
             or int(trace["actual_duration_ms"]) > int(pair["duration_ms"]) + 2000:
         raise Invalid(f"{subject}-trace-provisional-binding")
+    if trace["trace_bundle_tree_sha256"] != trace_archive_hash:
+        raise Invalid(f"{subject}-trace-archive-binding")
     expected_trace = hmac.new(
         secret,
         b"spaceterm.performance.trace-provisional/v1\0"
@@ -706,6 +878,12 @@ def verify_run(
         "plan_start_gate_sha256": digest(gate_data),
         "tail_receipt_sha256": digest(tail_data), "quit_receipt_sha256": digest(quit_data),
         "exit_receipt_sha256": digest(exit_data),
+        "case_report_sha256": digest(case_report_data),
+        "trace_metadata_sha256": digest(final_trace_data),
+        "trace_archive_sha256": trace_archive_hash,
+        "manual_artifacts_sha256": digest(manual_data),
+        "manual_screenshot_sha256": screenshot_hash,
+        "manual_video_sha256": video_hash,
         "lifecycle_ready_receipt_sha256": digest(lifecycle_ready_data),
         "lifecycle_registration_receipt_sha256": digest(lifecycle_registration_data),
     }
@@ -718,12 +896,15 @@ def build(args: argparse.Namespace) -> bytes:
     pair_data = stable_read(args.pair_metadata)
     plan_data = stable_read(args.scenario_plan, 4 * 1024 * 1024)
     helper_data = stable_read(args.common_lifecycle_helper, 4 * 1024 * 1024, mutable=True)
+    inspector_data = stable_read(args.process_inspector, 4 * 1024 * 1024, mutable=True)
     terminator_source_data = stable_read(
         args.appkit_terminator_source, 4 * 1024 * 1024, mutable=True
     )
     terminator_binary_data = stable_read(
         args.appkit_terminator_binary, 512 * 1024 * 1024
     )
+    helper_stat = Path(args.common_lifecycle_helper).lstat()
+    inspector_stat = Path(args.process_inspector).lstat()
     canonical_directory = Path(__file__).resolve(strict=True).parent
     if Path(args.common_lifecycle_helper).resolve(strict=True) \
             != canonical_directory / "performance-subject-lifecycle.py" \
@@ -743,18 +924,20 @@ def build(args: argparse.Namespace) -> bytes:
     if digest(plan_data) != pair["plan_sha256"]:
         raise Invalid("scenario-plan-binding")
     spaceterm = verify_run(
-        args, secret, pair, "spaceterm", helper_data, terminator_source_data,
-        terminator_binary_data, terminator_source_stat, terminator_binary_stat,
+        args, secret, pair, "spaceterm", helper_data, inspector_data,
+        terminator_source_data, terminator_binary_data, helper_stat, inspector_stat,
+        terminator_source_stat, terminator_binary_stat,
     )
     ghostty = verify_run(
-        args, secret, pair, "ghostty", helper_data, terminator_source_data,
-        terminator_binary_data, terminator_source_stat, terminator_binary_stat,
+        args, secret, pair, "ghostty", helper_data, inspector_data,
+        terminator_source_data, terminator_binary_data, helper_stat, inspector_stat,
+        terminator_source_stat, terminator_binary_stat,
     )
     if spaceterm["session_id"] == ghostty["session_id"] \
             or spaceterm["nonce"] == ghostty["nonce"]:
         raise Invalid("paired-run-replay")
     values = {
-        "format_version": "2", "campaign_id": args.campaign_id,
+        "format_version": "3", "campaign_id": args.campaign_id,
         "pair_metadata_sha256": digest(pair_data),
         "scenario_plan_sha256": pair["plan_sha256"],
         "workload_sha256": pair["workload_sha256"],

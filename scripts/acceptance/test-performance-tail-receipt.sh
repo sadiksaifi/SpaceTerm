@@ -153,6 +153,31 @@ TERMINATOR_BINARY="$TEMP_ROOT/performance-appkit-terminate"
 printf '%s\n' '// fixture' > "$TERMINATOR_SOURCE"
 printf '%s\n' '#!/bin/sh' 'exit 0' > "$TERMINATOR_BINARY"
 chmod 0500 "$TERMINATOR_BINARY"
+LIFECYCLE_READY="$TEMP_ROOT/lifecycle-ready.tsv"
+python3 - "$LIFECYCLE_READY" "$SECRET" "$SUBJECT" "$TERMINATOR_SOURCE" "$TERMINATOR_BINARY" <<'PY'
+import hashlib,hmac,pathlib,struct,sys
+output,secret,subject,source,binary=map(pathlib.Path,sys.argv[1:])
+sha=lambda p:hashlib.sha256(p.read_bytes()).hexdigest()
+rows=[("schema","spaceterm.acceptance.performance-lifecycle-ready/v1"),("subject","spaceterm"),
+ ("campaign_id","campaign-a"),("session_id","session-a"),("nonce","a"*64),
+ ("subject_identity_sha256",sha(subject)),("process_pid","4242"),("process_start_identity","100:200"),
+ ("executable_sha256","c"*64),("ready_continuous_ns","1"),("registration_control_device","1"),
+ ("registration_control_inode","1"),("lifecycle_helper_device","1"),("lifecycle_helper_inode","2"),
+ ("lifecycle_helper_sha256","d"*64),("process_inspector_device","1"),("process_inspector_inode","3"),
+ ("process_inspector_sha256","e"*64),("appkit_terminator_process_pid","99"),
+ ("appkit_terminator_process_start_identity","10:20"),
+ ("appkit_terminator_source_device",str(source.stat().st_dev)),
+ ("appkit_terminator_source_inode",str(source.stat().st_ino)),("appkit_terminator_source_sha256",sha(source)),
+ ("appkit_terminator_binary_device",str(binary.stat().st_dev)),
+ ("appkit_terminator_binary_inode",str(binary.stat().st_ino)),("appkit_terminator_binary_sha256",sha(binary)),
+ ("evidence_mode","test-only"),("auth_algorithm","hmac-sha256"),("status","ready")]
+unsigned=b"".join(f"{k}\t{v}\n".encode() for k,v in rows)
+sig=hmac.new(secret.read_bytes(),b"spaceterm.acceptance.performance-lifecycle-ready/v1\0"
+ +struct.pack(">Q",len(unsigned))+unsigned,hashlib.sha256).hexdigest()
+output.write_bytes(b"".join(f"{k}\t{v}\n".encode() for k,v in rows[:-1])
+ +f"receipt_hmac_sha256\t{sig}\n".encode()+f"status\t{rows[-1][1]}\n".encode())
+PY
+chmod 0400 "$LIFECYCLE_READY"
 common=(
     --campaign-secret-file "$SECRET" --campaign-id campaign-a --session-id session-a
     --nonce "$NONCE" --quit-token "$TOKEN" --run-intent "$INTENT"
@@ -161,6 +186,7 @@ common=(
     --workload-metadata "$WORKLOAD_METADATA" --workload-events "$WORKLOAD_EVENTS"
     --workload-ready-receipt "$WORKLOAD_READY" --rss-samples "$TEMP_ROOT/rss-samples.tsv"
     --trace-provisional-receipt "$TRACE"
+    --lifecycle-ready-receipt "$LIFECYCLE_READY"
     --tail-completed-continuous-ns 5000003000
     --appkit-terminator-source "$TERMINATOR_SOURCE"
     --appkit-terminator-binary "$TERMINATOR_BINARY"

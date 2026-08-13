@@ -333,6 +333,13 @@ SPACETERM_PERFORMANCE_TEST_MODE=1 SPACETERM_PERFORMANCE_TAIL_MS=0 \
     expect_failure "stale process generation" run_runner "$TOOLS" start "$BAD_START"
 
 SPACETERM_PERFORMANCE_TEST_MODE=1 SPACETERM_PERFORMANCE_TAIL_MS=0 \
+    expect_failure "occupied lifecycle descriptor" \
+    run_runner "$TOOLS" occupied-fd 6< "$SUBJECT"
+[[ "$(awk -F '\t' '$1 == "result_reason" {print $2}' \
+    "$RUN_DIR/result-occupied-fd.tsv")" == lifecycle-reserved-fd-6-occupied ]] \
+    || fail "occupied lifecycle descriptor did not fail closed"
+
+SPACETERM_PERFORMANCE_TEST_MODE=1 SPACETERM_PERFORMANCE_TAIL_MS=0 \
     expect_failure "seed timeout produces no orphans" run_runner "$TOOLS" timeout
 [[ -z "$(jobs -pr)" ]] || fail "orphaned background job after failure"
 [[ "$(awk -F '\t' '$1 == "status" {print $2}' "$RUN_DIR/result-timeout.tsv")" == incomplete ]] \

@@ -305,6 +305,12 @@ write_run_closure() {
     local workload_ready="$TEMP_ROOT/$subject-workload-ready.tsv"
     local lifecycle_ready="$TEMP_ROOT/$subject-lifecycle-ready.tsv"
     local lifecycle_registration="$TEMP_ROOT/$subject-lifecycle-registration.tsv"
+    local final_trace="$TEMP_ROOT/$subject-trace-metadata.tsv"
+    local trace_archive="$TEMP_ROOT/$subject-ascii.trace"
+    local manual="$TEMP_ROOT/$subject-manual.tsv"
+    local screenshot="$TEMP_ROOT/$subject-screenshot.png"
+    local video="$TEMP_ROOT/$subject-video.mov"
+    local case_report="$TEMP_ROOT/$subject-case-report.tsv"
     local pid token native_hash native_runtime native_failures native_value
     pid="$(awk -F '\t' '$1 == "process_pid" {print $2}' "$identity")"
     token="$(printf '%064d' "$([[ "$subject" == spaceterm ]] && echo 1 || echo 2)")"
@@ -318,6 +324,12 @@ write_run_closure() {
     printf 'fixture\tworkload-metadata\n' > "$workload_metadata"
     printf 'fixture\tworkload-events\n' > "$workload_events"
     printf 'fixture\tworkload-ready\n' > "$workload_ready"
+    mkdir -m 0700 "$trace_archive"
+    printf 'trace payload %s\n' "$subject" > "$trace_archive/payload"
+    chmod 0400 "$trace_archive/payload"
+    printf 'screenshot %s\n' "$subject" > "$screenshot"
+    printf 'video %s\n' "$subject" > "$video"
+    chmod 0400 "$screenshot" "$video"
     chmod 0400 "$workload_metadata" "$workload_events" "$workload_ready"
     local native_path=not-applicable
     [[ "$subject" != spaceterm ]] || native_path="$SPACETERM_NATIVE_OBSERVATION"
@@ -328,20 +340,43 @@ write_run_closure() {
         "$native_runtime" "$native_failures" "$native_value" \
         "$workload_metadata" "$workload_events" "$workload_ready" \
         "$lifecycle_ready" "$lifecycle_registration" "$native_path" \
-        "$LIFECYCLE_HELPER" "$TERMINATOR_SOURCE" "$TERMINATOR_BINARY" <<'PY'
+        "$LIFECYCLE_HELPER" "$TERMINATOR_SOURCE" "$TERMINATOR_BINARY" \
+        "$final_trace" "$trace_archive" "$manual" "$screenshot" "$video" "$case_report" <<'PY'
 import hashlib, hmac, os, pathlib, struct, sys
 (secret_path, subject, identity_path, intent_path, driver_receipt_path,
  driver_events_path, gate_path, trace_path, tail_path, quit_path, exit_path, run_path, token,
  native_hash, native_runtime, native_failures, native_value, workload_metadata,
  workload_events, workload_ready, lifecycle_ready, lifecycle_registration, native_path,
- helper_path, terminator_source, terminator_binary) = sys.argv[1:]
+ helper_path, terminator_source, terminator_binary, final_trace_path, trace_archive,
+ manual_path, screenshot_path, video_path, case_report_path) = sys.argv[1:]
 read = lambda path: pathlib.Path(path).read_bytes()
 sha = lambda path: hashlib.sha256(read(path)).hexdigest()
 secret = read(secret_path)
+def trace_tree(root_text):
+    root=pathlib.Path(root_text); value=hashlib.sha256(b"spaceterm.performance.trace-tree/v1\0")
+    entries=[]
+    for path in root.rglob("*"):
+        if path.is_file(): entries.append((path.relative_to(root).as_posix().encode(),path))
+    for encoded,path in sorted(entries):
+        data=path.read_bytes(); value.update(struct.pack(">Q",len(encoded))); value.update(encoded)
+        value.update(struct.pack(">Q",len(data))); value.update(data)
+    return value.hexdigest()
+trace_archive_hash=trace_tree(trace_archive)
 intent_values = dict(line.split("\t", 1) for line in pathlib.Path(intent_path).read_text().splitlines())
 identity_values = dict(line.split("\t", 1) for line in pathlib.Path(identity_path).read_text().splitlines())
 source_stat, binary_stat = os.stat(terminator_source), os.stat(terminator_binary)
+helper_stat = os.stat(helper_path)
+inspector_path = str(pathlib.Path(helper_path).parent.parent / "inspect-release-performance-process.py")
+inspector_stat = os.stat(inspector_path)
 tools = [
+    ("lifecycle_helper_device", str(helper_stat.st_dev)),
+    ("lifecycle_helper_inode", str(helper_stat.st_ino)),
+    ("lifecycle_helper_sha256", sha(helper_path)),
+    ("process_inspector_device", str(inspector_stat.st_dev)),
+    ("process_inspector_inode", str(inspector_stat.st_ino)),
+    ("process_inspector_sha256", sha(inspector_path)),
+    ("appkit_terminator_process_pid", "99" if subject == "spaceterm" else "100"),
+    ("appkit_terminator_process_start_identity", "10:20"),
     ("appkit_terminator_source_device", str(source_stat.st_dev)),
     ("appkit_terminator_source_inode", str(source_stat.st_ino)),
     ("appkit_terminator_source_sha256", sha(terminator_source)),
@@ -357,7 +392,7 @@ trace_rows = [
     ("requested_duration_ms", "2000"), ("actual_duration_ms", "2000"),
     ("capture_started_continuous_ns", "1000000000"),
     ("capture_ended_continuous_ns", "3000000000"),
-    ("trace_bundle_tree_sha256", "8" * 64), ("toc_sha256", "9" * 64),
+    ("trace_bundle_tree_sha256", trace_archive_hash), ("toc_sha256", "9" * 64),
     ("time_profile_export_sha256", "a" * 64),
     ("allocations_export_sha256", "b" * 64), ("hangs_export_sha256", "c" * 64),
     ("trace_verification_sha256", "d" * 64), ("verifier_sha256", "f" * 64),
@@ -493,7 +528,32 @@ run_rows = [("format_version", "4"), *common, ("run_intent_sha256", sha(intent_p
     ("evidence_mode", "production"),
     ("status", "complete")]
 pathlib.Path(run_path).write_bytes(b"".join(f"{key}\t{value}\n".encode() for key,value in run_rows))
+final_trace_rows=[("format_version","3"),("capture_status","CAPTURED"),("incomplete_reason","none"),
+ ("subject_identity_sha256",sha(identity_path)),("run_metadata_sha256",sha(run_path)),
+ ("workload_metadata_sha256",sha(workload_metadata)),("workload_ready_receipt_sha256",sha(workload_ready)),
+ ("supplemental_evidence_sha256",sha(gate_path)),("requested_duration_ms","2000"),
+ ("actual_duration_ms","2000"),("capture_started_continuous_ns","1000000000"),
+ ("capture_ended_continuous_ns","3000000000"),("target_identity_verified","true"),
+ ("trace_target_pid_verified","true"),("time_profiler_instrument","true"),
+ ("allocations_instrument","true"),("hangs_instrument","true"),
+ ("time_profiler_target_verified","true"),("allocations_target_verified","true"),
+ ("hangs_target_verified","true"),("time_profiler_rows","1"),("allocations_rows","1"),
+ ("hangs_rows","1"),("maximum_main_thread_hang_ms","0"),("status","complete")]
+pathlib.Path(final_trace_path).write_bytes(b"".join(f"{k}\t{v}\n".encode() for k,v in final_trace_rows))
+manual_rows=[("format_version","1"),("screenshot_sha256",sha(screenshot_path)),
+ ("video_sha256",sha(video_path)),("final_content_review","PASS"),("anchor_review","PASS"),
+ ("restoration_review","PASS"),("geometry_review","PASS"),("reviewer","fixture"),("result","PASS")]
+pathlib.Path(manual_path).write_bytes(b"".join(f"{k}\t{v}\n".encode() for k,v in manual_rows))
+case_rows=[("format_version","2"),("subject",subject),("scenario","ascii"),
+ ("session_id",intent_values["session_id"]),("nonce",intent_values["nonce"]),
+ ("run_intent_sha256",sha(intent_path)),("run_metadata_sha256",sha(run_path)),
+ ("trace_metadata_sha256",sha(final_trace_path)),("trace_archive_sha256",trace_archive_hash),
+ ("manual_artifacts_sha256",sha(manual_path)),("manual_screenshot_sha256",sha(screenshot_path)),
+ ("manual_video_sha256",sha(video_path)),("result","CASE-COMPLETE"),
+ ("reason","all-required-evidence-complete")]
+pathlib.Path(case_report_path).write_bytes(b"".join(f"{k}\t{v}\n".encode() for k,v in case_rows))
 for path in (trace_path, tail_path, quit_path, exit_path, lifecycle_ready, lifecycle_registration): os.chmod(path, 0o400)
+for path in (final_trace_path,manual_path,case_report_path): os.chmod(path,0o400)
 os.chmod(run_path, 0o444)
 PY
 }
@@ -529,6 +589,12 @@ for subject in spaceterm ghostty; do
         "--$subject-tail-receipt" "$TEMP_ROOT/$subject-tail.tsv"
         "--$subject-quit-receipt" "$TEMP_ROOT/$subject-quit.tsv"
         "--$subject-exit-receipt" "$TEMP_ROOT/$subject-exit.tsv"
+        "--$subject-case-report" "$TEMP_ROOT/$subject-case-report.tsv"
+        "--$subject-trace-metadata" "$TEMP_ROOT/$subject-trace-metadata.tsv"
+        "--$subject-trace-archive" "$TEMP_ROOT/$subject-ascii.trace"
+        "--$subject-manual-artifacts" "$TEMP_ROOT/$subject-manual.tsv"
+        "--$subject-manual-screenshot" "$TEMP_ROOT/$subject-screenshot.png"
+        "--$subject-manual-video" "$TEMP_ROOT/$subject-video.mov"
     )
 done
 pair_arguments+=(
@@ -545,7 +611,7 @@ pair_arguments+=(
 
 "$TOOL" create "${pair_arguments[@]}" --output "$RESULT"
 "$TOOL" verify "${pair_arguments[@]}" --receipt "$RESULT"
-[[ "$(wc -l < "$RESULT" | tr -d ' ')" == 50 ]] || fail "pair result is not exact50"
+[[ "$(wc -l < "$RESULT" | tr -d ' ')" == 62 ]] || fail "pair result is not exact62"
 [[ "$(stat -f '%Lp' "$RESULT")" == 400 ]] || fail "pair result is not private"
 python3 - "$SECRET" "$RESULT" <<'PY'
 import hashlib
@@ -564,6 +630,9 @@ expected_keys = (
     "spaceterm_driver_source_sha256", "spaceterm_driver_controller_sha256",
     "spaceterm_plan_start_gate_sha256", "spaceterm_tail_receipt_sha256",
     "spaceterm_quit_receipt_sha256", "spaceterm_exit_receipt_sha256",
+    "spaceterm_case_report_sha256", "spaceterm_trace_metadata_sha256",
+    "spaceterm_trace_archive_sha256", "spaceterm_manual_artifacts_sha256",
+    "spaceterm_manual_screenshot_sha256", "spaceterm_manual_video_sha256",
     "ghostty_session_id", "ghostty_nonce", "ghostty_run_intent_sha256",
     "ghostty_run_metadata_sha256", "ghostty_driver_intent_sha256",
     "ghostty_driver_events_sha256", "ghostty_driver_receipt_sha256",
@@ -571,6 +640,9 @@ expected_keys = (
     "ghostty_driver_source_sha256", "ghostty_driver_controller_sha256",
     "ghostty_plan_start_gate_sha256", "ghostty_tail_receipt_sha256",
     "ghostty_quit_receipt_sha256", "ghostty_exit_receipt_sha256",
+    "ghostty_case_report_sha256", "ghostty_trace_metadata_sha256",
+    "ghostty_trace_archive_sha256", "ghostty_manual_artifacts_sha256",
+    "ghostty_manual_screenshot_sha256", "ghostty_manual_video_sha256",
     "spaceterm_lifecycle_ready_receipt_sha256",
     "spaceterm_lifecycle_registration_receipt_sha256",
     "ghostty_lifecycle_ready_receipt_sha256",
@@ -583,12 +655,12 @@ secret = open(sys.argv[1], "rb").read()
 rows = open(sys.argv[2], "rb").readlines()
 keys = tuple(row.split(b"\t", 1)[0].decode("ascii") for row in rows)
 if keys != expected_keys:
-    raise SystemExit("pair result key order is not the frozen exact50 schema")
+    raise SystemExit("pair result key order is not the frozen exact62 schema")
 unsigned = b"".join(rows[:-1])
 actual = rows[-1].rstrip(b"\n").split(b"\t", 1)[1].decode("ascii")
 expected = hmac.new(
     secret,
-    b"spaceterm.performance.pair-result/v2\0"
+    b"spaceterm.performance.pair-result/v3\0"
     + struct.pack(">Q", len(unsigned)) + unsigned,
     hashlib.sha256,
 ).hexdigest()

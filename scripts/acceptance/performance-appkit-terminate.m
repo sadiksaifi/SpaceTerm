@@ -10,7 +10,7 @@
 static void usage(void) {
     fprintf(stderr, "usage: performance-appkit-terminate --pid PID "
         "--process-start-identity SEC:USEC --bundle-identifier ID "
-        "--executable ABSOLUTE_PATH --timeout-seconds N\n");
+        "--executable ABSOLUTE_PATH --timeout-seconds N [--command-fd FD]\n");
 }
 
 static BOOL parse_positive(const char *text, unsigned long long *value) {
@@ -40,6 +40,7 @@ int main(int argc, const char *argv[]) {
         const char *bundle_text = NULL;
         const char *executable_text = NULL;
         const char *timeout_text = NULL;
+        const char *command_fd_text = NULL;
         for (int index = 1; index < argc; index += 2) {
             if (index + 1 >= argc) { usage(); return 2; }
             if (strcmp(argv[index], "--pid") == 0) pid_text = argv[index + 1];
@@ -47,14 +48,19 @@ int main(int argc, const char *argv[]) {
             else if (strcmp(argv[index], "--bundle-identifier") == 0) bundle_text = argv[index + 1];
             else if (strcmp(argv[index], "--executable") == 0) executable_text = argv[index + 1];
             else if (strcmp(argv[index], "--timeout-seconds") == 0) timeout_text = argv[index + 1];
+            else if (strcmp(argv[index], "--command-fd") == 0) command_fd_text = argv[index + 1];
             else { usage(); return 2; }
         }
-        unsigned long long pid_value = 0, timeout_value = 0;
+        unsigned long long pid_value = 0, timeout_value = 0, command_fd_value = 0;
         unsigned long long expected_seconds = 0, expected_microseconds = 0;
         if (!parse_positive(pid_text, &pid_value) || pid_value > INT_MAX
             || !parse_positive(timeout_text, &timeout_value) || timeout_value > 120
             || start_text == NULL || bundle_text == NULL || executable_text == NULL
             || executable_text[0] != '/') {
+            usage(); return 2;
+        }
+        if (command_fd_text != NULL
+            && (!parse_positive(command_fd_text, &command_fd_value) || command_fd_value > INT_MAX)) {
             usage(); return 2;
         }
         char trailing = '\0';
@@ -78,6 +84,23 @@ int main(int argc, const char *argv[]) {
             || ![application.bundleIdentifier isEqualToString:expectedBundle]
             || ![actualExecutable isEqualToString:expectedExecutable]) {
             fprintf(stderr, "AppKit identity does not match frozen subject\n"); return 3;
+        }
+        if (command_fd_text != NULL) {
+            char command = '\0';
+            ssize_t count;
+            do { count = read((int)command_fd_value, &command, 1); } while (count < 0 && errno == EINTR);
+            if (count != 1 || command != 'Q'
+                || !read_start(pid, &actual_seconds, &actual_microseconds)
+                || actual_seconds != expected_seconds || actual_microseconds != expected_microseconds) {
+                fprintf(stderr, "termination command or exact process identity is invalid\n"); return 3;
+            }
+            application = [NSRunningApplication runningApplicationWithProcessIdentifier:pid];
+            actualExecutable = application.executableURL.path.stringByStandardizingPath;
+            if (application == nil || application.processIdentifier != pid
+                || ![application.bundleIdentifier isEqualToString:expectedBundle]
+                || ![actualExecutable isEqualToString:expectedExecutable]) {
+                fprintf(stderr, "AppKit identity changed before termination\n"); return 3;
+            }
         }
         if (![application terminate]) {
             fprintf(stderr, "normal AppKit termination was refused\n"); return 4;

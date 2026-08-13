@@ -21,7 +21,11 @@ READY_KEYS = (
     "schema", "subject", "campaign_id", "session_id", "nonce",
     "subject_identity_sha256", "process_pid", "process_start_identity",
     "executable_sha256", "ready_continuous_ns", "registration_control_device",
-    "registration_control_inode", "appkit_terminator_source_device",
+    "registration_control_inode",
+    "lifecycle_helper_device", "lifecycle_helper_inode", "lifecycle_helper_sha256",
+    "process_inspector_device", "process_inspector_inode", "process_inspector_sha256",
+    "appkit_terminator_process_pid", "appkit_terminator_process_start_identity",
+    "appkit_terminator_source_device",
     "appkit_terminator_source_inode", "appkit_terminator_source_sha256",
     "appkit_terminator_binary_device", "appkit_terminator_binary_inode",
     "appkit_terminator_binary_sha256", "evidence_mode", "auth_algorithm",
@@ -33,6 +37,9 @@ REGISTER_KEYS = (
     "run_intent_sha256", "tail_receipt_path", "workload_metadata_path",
     "workload_events_path", "workload_ready_receipt_path", "quit_receipt_path",
     "subject_exit_receipt_path", "native_observation_path",
+    "lifecycle_helper_device", "lifecycle_helper_inode", "lifecycle_helper_sha256",
+    "process_inspector_device", "process_inspector_inode", "process_inspector_sha256",
+    "appkit_terminator_process_pid", "appkit_terminator_process_start_identity",
     "appkit_terminator_source_device", "appkit_terminator_source_inode",
     "appkit_terminator_source_sha256", "appkit_terminator_binary_device",
     "appkit_terminator_binary_inode", "appkit_terminator_binary_sha256",
@@ -128,6 +135,10 @@ def arguments() -> argparse.Namespace:
     parser.add_argument("--quit-receipt", required=True)
     parser.add_argument("--subject-exit-receipt", required=True)
     parser.add_argument("--native-observation")
+    parser.add_argument("--subject-lifecycle-helper", required=True)
+    parser.add_argument("--process-inspector", default=str(
+        Path(__file__).resolve().parent.parent / "inspect-release-performance-process.py"
+    ))
     parser.add_argument("--appkit-terminator-source", required=True)
     parser.add_argument("--appkit-terminator-binary", required=True)
     return parser.parse_args()
@@ -179,10 +190,18 @@ def verify(args: argparse.Namespace) -> None:
     native = "not-applicable" if args.native_observation is None else canonical(args.native_observation)
     if registration["native_observation_path"] != native:
         raise Invalid("native-path-binding")
-    tools = {**tool_values(args.appkit_terminator_source, "appkit_terminator_source", False),
+    tools = {**tool_values(args.subject_lifecycle_helper, "lifecycle_helper", True),
+             **tool_values(args.process_inspector, "process_inspector", True),
+             **tool_values(args.appkit_terminator_source, "appkit_terminator_source", False),
              **tool_values(args.appkit_terminator_binary, "appkit_terminator_binary", True)}
     if any(ready[key] != value or registration[key] != value for key, value in tools.items()):
         raise Invalid("terminator-binding")
+    if POSITIVE.fullmatch(ready["appkit_terminator_process_pid"]) is None \
+            or ":" not in ready["appkit_terminator_process_start_identity"] \
+            or any(ready[key] != registration[key] for key in (
+                "appkit_terminator_process_pid", "appkit_terminator_process_start_identity",
+            )):
+        raise Invalid("terminator-process-binding")
     for values, unsigned, field, magic in (
         (ready, ready_unsigned, "receipt_hmac_sha256", READY_MAGIC),
         (registration, registration_unsigned, "registration_hmac_sha256", REGISTER_MAGIC),

@@ -98,26 +98,17 @@ def fixture(root, subject):
     for key in ("driver-receipt","driver-events","rss"): write(paths[key], key.encode()+b"\n")
     write(paths["native"], b"native-final\n")
     token = ("d" if subject == "spaceterm" else "e") * 64
-    fixture_env = os.environ.copy()
-    fixture_env["SPACETERM_PERFORMANCE_TEST_MODE"] = "1"
-    subprocess.run([HERE/"performance-tail-receipt.py","create","--campaign-secret-file",root/"secret",
-        "--campaign-id","campaign-a","--session-id",f"session-{subject}","--nonce",NONCE,
-        "--quit-token",token,"--run-intent",paths["intent"],"--subject-identity",paths["subject"],
-        "--driver-receipt",paths["driver-receipt"],"--driver-events",paths["driver-events"],
-        "--workload-metadata",paths["metadata"],"--workload-events",paths["events"],
-        "--workload-ready-receipt",paths["ready"],"--rss-samples",paths["rss"],
-        "--trace-provisional-receipt",paths["trace"],
-        "--appkit-terminator-source",root/"terminator.m",
-        "--appkit-terminator-binary",root/"terminator",
-        "--tail-completed-continuous-ns","5000003000",
-        "--output",paths["tail"]], check=True, env=fixture_env)
     return paths, token, identity, intent
 
 
 def run_case(root, subject, *, swap_terminator=False):
     paths, token, identity, intent = fixture(root, subject)
     control = root/f"{subject}-control.fifo"
-    command = [HERE/"performance-subject-lifecycle.py","--subject-identity",paths["subject"],
+    helper = HERE/"performance-subject-lifecycle.py"
+    inspector = HERE.parent/"inspect-release-performance-process.py"
+    helper_fd=os.open(helper,os.O_RDONLY); inspector_fd=os.open(inspector,os.O_RDONLY)
+    terminator_fd=os.open(root/"terminator",os.O_RDONLY); startup_read,startup_write=os.pipe()
+    command = [helper,"--subject-identity",paths["subject"],
         "--campaign-secret-file",root/"secret","--campaign-id","campaign-a",
         "--session-id",f"session-{subject}","--nonce",NONCE,"--live-ready-receipt",paths["lifecycle-ready"],
         "--registration-control",control,"--quit-receipt",paths["quit"],
@@ -135,13 +126,43 @@ def run_case(root, subject, *, swap_terminator=False):
         "--expected-appkit-terminator-binary-device",str((root/"terminator").stat().st_dev),
         "--expected-appkit-terminator-binary-inode",str((root/"terminator").stat().st_ino),
         "--expected-appkit-terminator-binary-sha256",sha((root/"terminator").read_bytes()),
+        "--appkit-terminator-fd",str(terminator_fd),"--self-source-fd",str(helper_fd),
+        "--expected-lifecycle-helper-device",str(helper.stat().st_dev),
+        "--expected-lifecycle-helper-inode",str(helper.stat().st_ino),
+        "--expected-lifecycle-helper-sha256",sha(helper.read_bytes()),
+        "--process-inspector",inspector,"--process-inspector-fd",str(inspector_fd),
+        "--expected-process-inspector-device",str(inspector.stat().st_dev),
+        "--expected-process-inspector-inode",str(inspector.stat().st_ino),
+        "--expected-process-inspector-sha256",sha(inspector.read_bytes()),
+        "--startup-command-fd",str(startup_read),
         "--timeout-seconds","3"]
     env = os.environ.copy(); env.update(SPACETERM_PERFORMANCE_TEST_MODE="1",
         SPACETERM_TEST_LIFECYCLE_IDENTITY="valid",SPACETERM_TEST_LIFECYCLE_TERMINATION="normal")
     process = subprocess.Popen(command, env=env, stdout=subprocess.PIPE,
-                               stderr=subprocess.PIPE)
+                               stderr=subprocess.PIPE,
+                               pass_fds=(helper_fd,inspector_fd,terminator_fd,startup_read))
+    os.close(startup_read); os.write(startup_write,b"S"); os.close(startup_write)
     deadline=time.time()+3
-    while not control.exists() and time.time()<deadline: time.sleep(.01)
+    while (not control.exists() or not paths["lifecycle-ready"].exists()) \
+            and time.time()<deadline:
+        time.sleep(.01)
+    if not paths["lifecycle-ready"].exists():
+        _, error = process.communicate(timeout=5)
+        os.close(helper_fd); os.close(inspector_fd); os.close(terminator_fd)
+        raise AssertionError(error.decode())
+    lifecycle_ready_values=dict(line.split("\t",1) for line in paths["lifecycle-ready"].read_text().splitlines())
+    subprocess.run([HERE/"performance-tail-receipt.py","create","--campaign-secret-file",root/"secret",
+        "--campaign-id","campaign-a","--session-id",f"session-{subject}","--nonce",NONCE,
+        "--quit-token",token,"--run-intent",paths["intent"],"--subject-identity",paths["subject"],
+        "--driver-receipt",paths["driver-receipt"],"--driver-events",paths["driver-events"],
+        "--workload-metadata",paths["metadata"],"--workload-events",paths["events"],
+        "--workload-ready-receipt",paths["ready"],"--rss-samples",paths["rss"],
+        "--trace-provisional-receipt",paths["trace"],
+        "--lifecycle-ready-receipt",paths["lifecycle-ready"],
+        "--appkit-terminator-source",root/"terminator.m",
+        "--appkit-terminator-binary",root/"terminator",
+        "--tail-completed-continuous-ns","5000003000",
+        "--output",paths["tail"]], check=True, env=env)
     source_stat=(root/"terminator.m").stat(); binary_stat=(root/"terminator").stat()
     source_hash=sha((root/"terminator.m").read_bytes())
     binary_hash=sha((root/"terminator").read_bytes())
@@ -158,6 +179,10 @@ def run_case(root, subject, *, swap_terminator=False):
         ("workload_ready_receipt_path",str(paths["ready"])),("quit_receipt_path",str(paths["quit"])),
         ("subject_exit_receipt_path",str(paths["exit"])),
         ("native_observation_path",str(paths["native"]) if subject=="spaceterm" else "not-applicable"),
+        *( (key,lifecycle_ready_values[key]) for key in (
+            "lifecycle_helper_device","lifecycle_helper_inode","lifecycle_helper_sha256",
+            "process_inspector_device","process_inspector_inode","process_inspector_sha256",
+            "appkit_terminator_process_pid","appkit_terminator_process_start_identity") ),
         ("appkit_terminator_source_device",str(source_stat.st_dev)),
         ("appkit_terminator_source_inode",str(source_stat.st_ino)),
         ("appkit_terminator_source_sha256",source_hash),
@@ -173,13 +198,15 @@ def run_case(root, subject, *, swap_terminator=False):
     write(paths["registration"],contents)
     with control.open("w") as stream: stream.write(f"register\t{token}\t{paths['registration']}\n")
     _, error=process.communicate(timeout=5); status=process.returncode
+    os.close(helper_fd); os.close(inspector_fd); os.close(terminator_fd)
     if swap_terminator:
         assert status != 0
         assert b"tail-binding-appkit_terminator_binary_inode" in error \
-            or b"terminator-tool-replaced" in error
+            or b"terminator-tool-replaced" in error \
+            or b"lifecycle-terminator-path-binding" in error, error
         assert not paths["quit"].exists() and not paths["exit"].exists()
         return
-    assert status==0
+    assert status==0,error
     assert paths["quit"].exists() and paths["exit"].exists()
     assert paths["quit"].read_bytes().count(b"status\tcompleted\n")==1
     assert paths["exit"].read_bytes().count(b"status\tcomplete\n")==1

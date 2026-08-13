@@ -33,6 +33,9 @@ TAIL_KEYS = (
     "subject_process_start_identity", "driver_receipt_sha256", "driver_events_sha256",
     "workload_metadata_sha256", "workload_events_sha256", "rss_samples_sha256",
     "trace_provisional_receipt_sha256", "tail_completed_continuous_ns",
+    "lifecycle_helper_device", "lifecycle_helper_inode", "lifecycle_helper_sha256",
+    "process_inspector_device", "process_inspector_inode", "process_inspector_sha256",
+    "appkit_terminator_process_pid", "appkit_terminator_process_start_identity",
     "appkit_terminator_source_device", "appkit_terminator_source_inode",
     "appkit_terminator_source_sha256", "appkit_terminator_binary_device",
     "appkit_terminator_binary_inode", "appkit_terminator_binary_sha256",
@@ -52,7 +55,11 @@ READY_KEYS = (
     "schema", "subject", "campaign_id", "session_id", "nonce",
     "subject_identity_sha256", "process_pid", "process_start_identity",
     "executable_sha256", "ready_continuous_ns", "registration_control_device",
-    "registration_control_inode", "appkit_terminator_source_device",
+    "registration_control_inode", "lifecycle_helper_device",
+    "lifecycle_helper_inode", "lifecycle_helper_sha256",
+    "process_inspector_device", "process_inspector_inode", "process_inspector_sha256",
+    "appkit_terminator_process_pid", "appkit_terminator_process_start_identity",
+    "appkit_terminator_source_device",
     "appkit_terminator_source_inode", "appkit_terminator_source_sha256",
     "appkit_terminator_binary_device", "appkit_terminator_binary_inode",
     "appkit_terminator_binary_sha256", "evidence_mode", "auth_algorithm",
@@ -64,6 +71,9 @@ REGISTER_KEYS = (
     "run_intent_sha256", "tail_receipt_path", "workload_metadata_path",
     "workload_events_path", "workload_ready_receipt_path", "quit_receipt_path",
     "subject_exit_receipt_path", "native_observation_path",
+    "lifecycle_helper_device", "lifecycle_helper_inode", "lifecycle_helper_sha256",
+    "process_inspector_device", "process_inspector_inode", "process_inspector_sha256",
+    "appkit_terminator_process_pid", "appkit_terminator_process_start_identity",
     "appkit_terminator_source_device", "appkit_terminator_source_inode",
     "appkit_terminator_source_sha256", "appkit_terminator_binary_device",
     "appkit_terminator_binary_inode", "appkit_terminator_binary_sha256",
@@ -86,7 +96,10 @@ QUIT_KEYS = (
     "format_version", "campaign_id", "session_id", "nonce", "run_intent_sha256",
     "subject_process_pid", "subject_process_start_identity", "quit_token",
     "request_continuous_ns", "exit_continuous_ns", "termination_method",
-    "runtime_closure_status", "appkit_terminator_source_device",
+    "runtime_closure_status", "lifecycle_helper_device", "lifecycle_helper_inode",
+    "lifecycle_helper_sha256", "process_inspector_device", "process_inspector_inode",
+    "process_inspector_sha256", "appkit_terminator_process_pid",
+    "appkit_terminator_process_start_identity", "appkit_terminator_source_device",
     "appkit_terminator_source_inode", "appkit_terminator_source_sha256",
     "appkit_terminator_binary_device", "appkit_terminator_binary_inode",
     "appkit_terminator_binary_sha256", "evidence_mode", "status",
@@ -96,6 +109,9 @@ EXIT_KEYS = (
     "subject_identity_sha256", "process_pid", "process_start_identity",
     "tail_receipt_sha256", "quit_receipt_sha256", "exit_requested_continuous_ns",
     "process_exited_continuous_ns", "exit_status", "native_observation_sha256",
+    "lifecycle_helper_device", "lifecycle_helper_inode", "lifecycle_helper_sha256",
+    "process_inspector_device", "process_inspector_inode", "process_inspector_sha256",
+    "appkit_terminator_process_pid", "appkit_terminator_process_start_identity",
     "appkit_terminator_source_device", "appkit_terminator_source_inode",
     "appkit_terminator_source_sha256", "appkit_terminator_binary_device",
     "appkit_terminator_binary_inode", "appkit_terminator_binary_sha256",
@@ -103,6 +119,7 @@ EXIT_KEYS = (
 )
 HEX = re.compile(r"[0-9a-f]{64}\Z")
 SAFE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,79}\Z")
+PROC_PIDPATHINFO_MAXSIZE = 4096
 
 
 class Invalid(Exception):
@@ -150,6 +167,25 @@ def snapshot_tool(path_text: str, *, executable: bool) -> ToolIdentity:
     return ToolIdentity(path, before.st_dev, before.st_ino, hasher.hexdigest())
 
 
+def snapshot_fd(fd: int, path_text: str) -> ToolIdentity:
+    before = os.fstat(fd)
+    if not stat.S_ISREG(before.st_mode) or before.st_uid != os.geteuid() \
+            or before.st_mode & 0o022 or before.st_size <= 0:
+        raise Invalid("unsafe-lifecycle-helper-fd")
+    os.lseek(fd, 0, os.SEEK_SET)
+    hasher = hashlib.sha256()
+    while True:
+        chunk = os.read(fd, 1024 * 1024)
+        if not chunk:
+            break
+        hasher.update(chunk)
+    after = os.fstat(fd)
+    fields = ("st_dev", "st_ino", "st_mode", "st_uid", "st_size", "st_mtime_ns", "st_ctime_ns")
+    if any(getattr(before, key) != getattr(after, key) for key in fields):
+        raise Invalid("lifecycle-helper-fd-changed")
+    return ToolIdentity(Path(path_text), before.st_dev, before.st_ino, hasher.hexdigest())
+
+
 def expected_tool(args: argparse.Namespace) -> tuple[ToolIdentity, ToolIdentity]:
     source = snapshot_tool(args.appkit_terminator_source, executable=False)
     binary = snapshot_tool(args.appkit_terminator, executable=True)
@@ -178,8 +214,12 @@ def recheck_tool(expected: ToolIdentity, *, executable: bool) -> None:
         raise Invalid("terminator-tool-replaced")
 
 
-def tool_values(source: ToolIdentity, binary: ToolIdentity) -> dict[str, str]:
-    return {
+def tool_values(source: ToolIdentity, binary: ToolIdentity,
+                helper: ToolIdentity | None = None,
+                inspector: ToolIdentity | None = None,
+                bridge_pid: int | None = None,
+                bridge_start: str | None = None) -> dict[str, str]:
+    values = {
         "appkit_terminator_source_device": str(source.device),
         "appkit_terminator_source_inode": str(source.inode),
         "appkit_terminator_source_sha256": source.sha256,
@@ -187,6 +227,24 @@ def tool_values(source: ToolIdentity, binary: ToolIdentity) -> dict[str, str]:
         "appkit_terminator_binary_inode": str(binary.inode),
         "appkit_terminator_binary_sha256": binary.sha256,
     }
+    if helper is not None:
+        values.update({
+            "lifecycle_helper_device": str(helper.device),
+            "lifecycle_helper_inode": str(helper.inode),
+            "lifecycle_helper_sha256": helper.sha256,
+        })
+    if inspector is not None:
+        values.update({
+            "process_inspector_device": str(inspector.device),
+            "process_inspector_inode": str(inspector.inode),
+            "process_inspector_sha256": inspector.sha256,
+        })
+    if bridge_pid is not None and bridge_start is not None:
+        values.update({
+            "appkit_terminator_process_pid": str(bridge_pid),
+            "appkit_terminator_process_start_identity": bridge_start,
+        })
+    return values
 
 
 def clock_ns() -> int:
@@ -285,12 +343,20 @@ def publish(path_text: str, data: bytes) -> None:
         temporary.unlink(missing_ok=True)
 
 
+def run_inspector(args: argparse.Namespace, arguments: list[str]) -> subprocess.CompletedProcess[str]:
+    os.lseek(args.process_inspector_fd, 0, os.SEEK_SET)
+    return subprocess.run(
+        ["/usr/bin/python3", "-", *arguments], stdin=args.process_inspector_fd,
+        check=False, capture_output=True, text=True,
+    )
+
+
 def verify_live(args: argparse.Namespace, subject: dict[str, str]) -> None:
     if os.environ.get("SPACETERM_PERFORMANCE_TEST_MODE") == "1":
         if os.environ.get("SPACETERM_TEST_LIFECYCLE_IDENTITY") != "valid":
             raise Invalid("test-live-identity")
         return
-    command = [args.process_inspector, "--pid", subject["process_pid"],
+    command = ["--pid", subject["process_pid"],
         "--expected-executable", subject["executable_path"],
         "--expected-sha256", subject["executable_sha256"],
         "--expected-device", subject["executable_device"],
@@ -299,22 +365,63 @@ def verify_live(args: argparse.Namespace, subject: dict[str, str]) -> None:
         "--expected-signing-identifier", subject["signing_identifier"],
         "--expected-team-identifier", subject["team_identifier"],
         "--expected-cdhash", subject["cdhash"]]
-    completed = subprocess.run(command, check=False, capture_output=True, text=True)
+    completed = run_inspector(args, command)
     if completed.returncode or "live_code_identity_verified\ttrue" not in completed.stdout:
         raise Invalid("live-code-identity")
 
 
-def request_normal_termination(args: argparse.Namespace, subject: dict[str, str]) -> None:
+def bridge_identity(args: argparse.Namespace, pid: int, expected: ToolIdentity) -> str | None:
+    verified = run_inspector(args, ["--pid", str(pid), "--expected-executable",
+        str(expected.path), "--expected-sha256", expected.sha256,
+        "--expected-device", str(expected.device), "--expected-inode", str(expected.inode)])
+    if verified.returncode or "live_code_identity_verified\ttrue" not in verified.stdout:
+        return None
+    started = run_inspector(args, ["--pid", str(pid), "--print-start-identity"])
+    if started.returncode:
+        return None
+    rows = [line.split("\t", 1) for line in started.stdout.splitlines()]
+    values = {row[0]: row[1] for row in rows if len(row) == 2}
+    return values.get("process_start_identity")
+
+
+def start_termination_bridge(args: argparse.Namespace, subject: dict[str, str],
+                             expected: ToolIdentity) \
+        -> tuple[subprocess.Popen[bytes] | None, int, str]:
     if os.environ.get("SPACETERM_PERFORMANCE_TEST_MODE") == "1":
         if os.environ.get("SPACETERM_TEST_LIFECYCLE_TERMINATION") != "normal":
             raise Invalid("normal-termination-refused")
-        return
-    completed = subprocess.run([args.appkit_terminator, "--pid", subject["process_pid"],
+        return None, -1, "1:1"
+    read_fd, write_fd = os.pipe()
+    pinned_executable = f"/dev/fd/{args.appkit_terminator_fd}"
+    process = subprocess.Popen([args.appkit_terminator, "--pid", subject["process_pid"],
         "--process-start-identity", subject["process_start_identity"],
         "--bundle-identifier", subject["bundle_identifier"],
         "--executable", subject["executable_path"],
-        "--timeout-seconds", str(min(args.timeout_seconds, 120))], check=False)
-    if completed.returncode:
+        "--timeout-seconds", str(min(args.timeout_seconds, 120)),
+        "--command-fd", str(read_fd)], executable=pinned_executable,
+        pass_fds=(read_fd, args.appkit_terminator_fd))
+    os.close(read_fd)
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline and process.poll() is None:
+        start = bridge_identity(args, process.pid, expected)
+        if start is not None:
+            return process, write_fd, start
+        time.sleep(0.01)
+    os.close(write_fd)
+    process.terminate()
+    process.wait(timeout=2)
+    raise Invalid("termination-bridge-identity")
+
+
+def request_normal_termination(process: subprocess.Popen[bytes] | None, write_fd: int) -> None:
+    if process is None:
+        return
+    try:
+        if os.write(write_fd, b"Q") != 1:
+            raise Invalid("termination-command-write")
+    finally:
+        os.close(write_fd)
+    if process.wait(timeout=120) != 0:
         raise Invalid("normal-termination-refused")
 
 
@@ -324,8 +431,9 @@ def process_absent(args: argparse.Namespace, subject: dict[str, str], deadline: 
             raise Invalid("process-not-absent")
         return
     while time.monotonic() < deadline:
-        completed = subprocess.run([args.process_inspector, "--pid", subject["process_pid"],
-            "--print-start-identity"], check=False, capture_output=True)
+        completed = run_inspector(
+            args, ["--pid", subject["process_pid"], "--print-start-identity"],
+        )
         if completed.returncode:
             return
         time.sleep(0.02)
@@ -347,6 +455,10 @@ def arguments() -> argparse.Namespace:
     parser.add_argument("--trace-provisional-receipt", required=True); parser.add_argument("--plan-start-gate", required=True)
     here = Path(__file__).resolve().parent
     parser.add_argument("--process-inspector", default=str(here.parent / "inspect-release-performance-process.py"))
+    parser.add_argument("--process-inspector-fd", required=True, type=int)
+    parser.add_argument("--expected-process-inspector-device", required=True, type=int)
+    parser.add_argument("--expected-process-inspector-inode", required=True, type=int)
+    parser.add_argument("--expected-process-inspector-sha256", required=True)
     parser.add_argument("--appkit-terminator-source", required=True)
     parser.add_argument("--appkit-terminator", default=str(here / "performance-appkit-terminate"))
     parser.add_argument("--expected-appkit-terminator-source-device", required=True, type=int)
@@ -355,6 +467,12 @@ def arguments() -> argparse.Namespace:
     parser.add_argument("--expected-appkit-terminator-binary-device", required=True, type=int)
     parser.add_argument("--expected-appkit-terminator-binary-inode", required=True, type=int)
     parser.add_argument("--expected-appkit-terminator-binary-sha256", required=True)
+    parser.add_argument("--appkit-terminator-fd", required=True, type=int)
+    parser.add_argument("--self-source-fd", required=True, type=int)
+    parser.add_argument("--expected-lifecycle-helper-device", required=True, type=int)
+    parser.add_argument("--expected-lifecycle-helper-inode", required=True, type=int)
+    parser.add_argument("--expected-lifecycle-helper-sha256", required=True)
+    parser.add_argument("--startup-command-fd", required=True, type=int)
     return parser.parse_args()
 
 
@@ -362,20 +480,46 @@ def main() -> int:
     args = arguments()
     evidence_mode = "test-only" if os.environ.get("SPACETERM_PERFORMANCE_TEST_MODE") == "1" else "production"
     control_fd = -1
+    bridge_process: subprocess.Popen[bytes] | None = None
+    bridge_write_fd = -1
     try:
         if not 1 <= args.timeout_seconds <= 1800 or SAFE.fullmatch(args.campaign_id) is None \
                 or SAFE.fullmatch(args.session_id) is None or HEX.fullmatch(args.nonce) is None:
             raise Invalid("arguments")
+        if os.read(args.startup_command_fd, 1) != b"S":
+            raise Invalid("lifecycle-startup-command")
+        os.close(args.startup_command_fd)
         secret = read(args.campaign_secret_file, 4096, private=True)
         if len(secret) < 32:
             raise Invalid("secret")
         terminator_source, terminator_binary = expected_tool(args)
+        lifecycle_helper = snapshot_fd(args.self_source_fd, str(Path(__file__).resolve()))
+        if lifecycle_helper.device != args.expected_lifecycle_helper_device \
+                or lifecycle_helper.inode != args.expected_lifecycle_helper_inode \
+                or lifecycle_helper.sha256 != args.expected_lifecycle_helper_sha256:
+            raise Invalid("lifecycle-helper-provenance")
+        process_inspector = snapshot_fd(args.process_inspector_fd, args.process_inspector)
+        if process_inspector.device != args.expected_process_inspector_device \
+                or process_inspector.inode != args.expected_process_inspector_inode \
+                or process_inspector.sha256 != args.expected_process_inspector_sha256:
+            raise Invalid("process-inspector-provenance")
+        pinned_terminator = snapshot_fd(args.appkit_terminator_fd, args.appkit_terminator)
+        if pinned_terminator != terminator_binary:
+            raise Invalid("terminator-retained-fd-provenance")
         subject_data = read(args.subject_identity)
         subject, _ = parse(subject_data, SUBJECT_KEYS)
         if subject["format_version"] != "1" or subject["identity_status"] != "frozen" \
                 or subject["subject"] not in ("spaceterm", "ghostty"):
             raise Invalid("subject")
         verify_live(args, subject)
+        bridge_process, bridge_write_fd, bridge_start = start_termination_bridge(
+            args, subject, terminator_binary,
+        )
+        bridge_pid = os.getpid() if bridge_process is None else bridge_process.pid
+        evidence_tools = tool_values(
+            terminator_source, terminator_binary, lifecycle_helper, process_inspector,
+            bridge_pid, bridge_start,
+        )
         control = Path(args.registration_control)
         if not control.is_absolute() or control.exists() or control.is_symlink():
             raise Invalid("control-exists")
@@ -389,7 +533,8 @@ def main() -> int:
             "executable_sha256": subject["executable_sha256"], "ready_continuous_ns": str(clock_ns()),
             "registration_control_device": str(control_stat.st_dev),
             "registration_control_inode": str(control_stat.st_ino),
-            **tool_values(terminator_source, terminator_binary), "evidence_mode": evidence_mode,
+            **evidence_tools,
+            "evidence_mode": evidence_mode,
             "auth_algorithm": "hmac-sha256",
             "status": "ready"}
         publish(args.live_ready_receipt, encode_signed(READY_KEYS, ready_values,
@@ -416,7 +561,7 @@ def main() -> int:
                 or registration["process_pid"] != subject["process_pid"] \
                 or registration["process_start_identity"] != subject["process_start_identity"] \
                 or any(registration[key] != value for key, value in
-                       tool_values(terminator_source, terminator_binary).items()) \
+                       evidence_tools.items()) \
                 or not hmac.compare_digest(registration["registration_hmac_sha256"],
                     sign(secret, REGISTER_MAGIC, unsigned)):
             raise Invalid("registration")
@@ -443,8 +588,7 @@ def main() -> int:
         while not tail_path.exists() and time.monotonic() < deadline: time.sleep(0.02)
         tail_data = read(str(tail_path), private=True)
         tail, _ = parse(tail_data, TAIL_KEYS)
-        if any(tail[key] != value for key, value in
-               tool_values(terminator_source, terminator_binary).items()):
+        if any(tail[key] != value for key, value in evidence_tools.items()):
             raise Invalid("tail-terminator-provenance")
         workload_data = read(args.workload_metadata)
         workload, _ = parse(workload_data, WORKLOAD_KEYS)
@@ -459,6 +603,7 @@ def main() -> int:
             "--workload-ready-receipt", args.workload_ready_receipt,
             "--rss-samples", args.rss_samples,
             "--trace-provisional-receipt", args.trace_provisional_receipt,
+            "--lifecycle-ready-receipt", args.live_ready_receipt,
             "--appkit-terminator-source", args.appkit_terminator_source,
             "--appkit-terminator-binary", args.appkit_terminator,
             "--tail-completed-continuous-ns", tail_completed, "--receipt", str(tail_path)], check=True)
@@ -472,8 +617,18 @@ def main() -> int:
         verify_live(args, subject)
         recheck_tool(terminator_source, executable=False)
         recheck_tool(terminator_binary, executable=True)
-        requested_ns = clock_ns(); request_normal_termination(args, subject)
+        if snapshot_fd(args.appkit_terminator_fd, args.appkit_terminator) != terminator_binary \
+                or (evidence_mode == "production" \
+                    and bridge_identity(args, bridge_pid, terminator_binary) != bridge_start):
+            raise Invalid("termination-bridge-changed-before-command")
+        requested_ns = clock_ns()
+        request_normal_termination(bridge_process, bridge_write_fd)
+        bridge_process = None; bridge_write_fd = -1
         process_absent(args, subject, deadline); exited_ns = clock_ns()
+        if snapshot_fd(args.self_source_fd, str(Path(__file__).resolve())) != lifecycle_helper \
+                or snapshot_fd(args.process_inspector_fd, args.process_inspector) != process_inspector \
+                or snapshot_fd(args.appkit_terminator_fd, args.appkit_terminator) != terminator_binary:
+            raise Invalid("retained-tool-fd-changed-after-termination")
         recheck_tool(terminator_source, executable=False)
         recheck_tool(terminator_binary, executable=True)
         native_hash = "not-applicable"
@@ -487,7 +642,8 @@ def main() -> int:
             "quit_token": registration["registration_token"], "request_continuous_ns": str(requested_ns),
             "exit_continuous_ns": str(exited_ns), "termination_method": "appkit-terminate",
             "runtime_closure_status": "confirmed",
-            **tool_values(terminator_source, terminator_binary), "evidence_mode": evidence_mode,
+            **evidence_tools,
+            "evidence_mode": evidence_mode,
             "status": "completed"}
         quit_data = b"".join(f"{key}\t{quit_values[key]}\n".encode() for key in QUIT_KEYS)
         publish(args.quit_receipt, quit_data)
@@ -499,13 +655,22 @@ def main() -> int:
             "quit_receipt_sha256": digest(quit_data), "exit_requested_continuous_ns": str(requested_ns),
             "process_exited_continuous_ns": str(exited_ns), "exit_status": "normal",
             "native_observation_sha256": native_hash,
-            **tool_values(terminator_source, terminator_binary), "evidence_mode": evidence_mode,
+            **evidence_tools,
+            "evidence_mode": evidence_mode,
             "auth_algorithm": "hmac-sha256", "status": "complete"}
         publish(args.subject_exit_receipt, encode_signed(EXIT_KEYS, exit_values,
             "receipt_hmac_sha256", EXIT_MAGIC, secret))
     except (Invalid, OSError, UnicodeError, ValueError, subprocess.SubprocessError) as error:
         print(f"performance subject lifecycle failed: {error}", file=sys.stderr); return 1
     finally:
+        if bridge_write_fd >= 0:
+            os.close(bridge_write_fd)
+        if bridge_process is not None and bridge_process.poll() is None:
+            bridge_process.terminate()
+            try:
+                bridge_process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                bridge_process.kill(); bridge_process.wait()
         if control_fd >= 0: os.close(control_fd)
         try: Path(args.registration_control).unlink()
         except OSError: pass

@@ -51,6 +51,11 @@ SESSION_ID=""
 NONCE=""
 CAMPAIGN_SECRET_FILE=""
 AUTH_SNAPSHOT_DIR=""
+TRACE_METADATA_SHA256="unavailable"
+TRACE_ARCHIVE_SHA256="unavailable"
+MANUAL_ARTIFACTS_SHA256="unavailable"
+MANUAL_SCREENSHOT_SHA256="unavailable"
+MANUAL_VIDEO_SHA256="unavailable"
 
 readonly PLAN_HEADER=$'event_id\toffset_ms\taction\targ0\targ1'
 readonly WORKLOAD_HEADER=$'sequence\tcontinuous_ns\tkind\tevent_id\tbyte_count\trows\tcolumns\tpixel_width\tpixel_height\tstatus'
@@ -95,7 +100,7 @@ EOF
 verdict() {
     local result="$1"
     local reason="$2"
-    printf 'format_version\t1\n'
+    printf 'format_version\t2\n'
     printf 'subject\t%s\n' "${SUBJECT:-unknown}"
     printf 'scenario\t%s\n' "${SCENARIO:-unknown}"
     printf 'session_id\t%s\n' "${SESSION_ID:-unknown}"
@@ -110,6 +115,11 @@ verdict() {
     else
         printf 'run_metadata_sha256\tunavailable\n'
     fi
+    printf 'trace_metadata_sha256\t%s\n' "$TRACE_METADATA_SHA256"
+    printf 'trace_archive_sha256\t%s\n' "$TRACE_ARCHIVE_SHA256"
+    printf 'manual_artifacts_sha256\t%s\n' "$MANUAL_ARTIFACTS_SHA256"
+    printf 'manual_screenshot_sha256\t%s\n' "$MANUAL_SCREENSHOT_SHA256"
+    printf 'manual_video_sha256\t%s\n' "$MANUAL_VIDEO_SHA256"
     printf 'result\t%s\n' "$result"
     printf 'reason\t%s\n' "$reason"
     case "$result" in
@@ -134,6 +144,28 @@ require_file() {
 
 sha256() {
     shasum -a 256 "$1" | awk '{ print $1 }'
+}
+
+trace_tree_sha256() {
+    python3 - "$1" <<'PY'
+import hashlib, pathlib, struct, sys, unicodedata
+root = pathlib.Path(sys.argv[1])
+if not root.is_dir() or root.is_symlink(): raise SystemExit(1)
+digest = hashlib.sha256(b"spaceterm.performance.trace-tree/v1\0")
+entries = []
+for path in root.rglob("*"):
+    if path.is_symlink() or (path.exists() and not path.is_file() and not path.is_dir()):
+        raise SystemExit(1)
+    if path.is_file():
+        relative = unicodedata.normalize("NFC", path.relative_to(root).as_posix())
+        if relative != path.relative_to(root).as_posix(): raise SystemExit(1)
+        entries.append((relative.encode(), path))
+for encoded, path in sorted(entries):
+    data = path.read_bytes()
+    digest.update(struct.pack(">Q", len(encoded))); digest.update(encoded)
+    digest.update(struct.pack(">Q", len(data))); digest.update(data)
+print(digest.hexdigest())
+PY
 }
 
 kv() {
@@ -320,6 +352,9 @@ require_file plan-start-gate "$PLAN_START_GATE"
 require_file manual-artifacts "$MANUAL_ARTIFACTS"
 require_file manual-screenshot "$MANUAL_SCREENSHOT"
 require_file manual-video "$MANUAL_VIDEO"
+TRACE_ARCHIVE="$(dirname -- "$TRACE_METADATA")/$SUBJECT-$SCENARIO.trace"
+TRACE_ARCHIVE_SHA256="$(trace_tree_sha256 "$TRACE_ARCHIVE")" \
+    || not_run "trace-archive-invalid"
 
 canonical_path() {
     local directory base
@@ -368,6 +403,7 @@ python3 "$SCRIPT_DIRECTORY/performance-tail-receipt.py" verify \
     --workload-metadata "$WORKLOAD_METADATA" --workload-events "$WORKLOAD_EVENTS" \
     --workload-ready-receipt "$READY_RECEIPT" \
     --rss-samples "$RSS_SAMPLES" --trace-provisional-receipt "$TRACE_PROVISIONAL_RECEIPT" \
+    --lifecycle-ready-receipt "$PERFORMANCE_LIFECYCLE_READY_RECEIPT" \
     --tail-completed-continuous-ns "$tail_completed_ns" \
     --appkit-terminator-source "$APPKIT_TERMINATOR_SOURCE" \
     --appkit-terminator-binary "$APPKIT_TERMINATOR_BINARY" \
@@ -391,6 +427,7 @@ lifecycle_arguments=(
     --workload-ready-receipt "$READY_RECEIPT"
     --quit-receipt "$PERFORMANCE_QUIT_RECEIPT"
     --subject-exit-receipt "$SUBJECT_EXIT_RECEIPT"
+    --subject-lifecycle-helper "$SUBJECT_LIFECYCLE_HELPER"
     --appkit-terminator-source "$APPKIT_TERMINATOR_SOURCE"
     --appkit-terminator-binary "$APPKIT_TERMINATOR_BINARY"
 )
@@ -413,6 +450,26 @@ trap cleanup EXIT INT TERM
 verified_metadata="$AUTH_SNAPSHOT_DIR/workload-metadata.tsv"
 verified_events="$AUTH_SNAPSHOT_DIR/workload-events.tsv"
 verified_subject="$AUTH_SNAPSHOT_DIR/subject-identity.tsv"
+verified_trace="$AUTH_SNAPSHOT_DIR/trace-metadata.tsv"
+verified_manual="$AUTH_SNAPSHOT_DIR/manual-artifacts.tsv"
+trace_source_hash="$(sha256 "$TRACE_METADATA")"
+manual_source_hash="$(sha256 "$MANUAL_ARTIFACTS")"
+cp -- "$TRACE_METADATA" "$verified_trace" \
+    || not_run "trace-metadata-snapshot-failed"
+cp -- "$MANUAL_ARTIFACTS" "$verified_manual" \
+    || not_run "manual-artifacts-snapshot-failed"
+TRACE_METADATA_SHA256="$(sha256 "$verified_trace")"
+MANUAL_ARTIFACTS_SHA256="$(sha256 "$verified_manual")"
+[[ "$TRACE_METADATA_SHA256" == "$trace_source_hash" \
+    && "$TRACE_METADATA_SHA256" == "$(sha256 "$TRACE_METADATA")" ]] \
+    || not_run "trace-metadata-changed-during-snapshot"
+[[ "$MANUAL_ARTIFACTS_SHA256" == "$manual_source_hash" \
+    && "$MANUAL_ARTIFACTS_SHA256" == "$(sha256 "$MANUAL_ARTIFACTS")" ]] \
+    || not_run "manual-artifacts-changed-during-snapshot"
+MANUAL_SCREENSHOT_SHA256="$(sha256 "$MANUAL_SCREENSHOT")"
+MANUAL_VIDEO_SHA256="$(sha256 "$MANUAL_VIDEO")"
+TRACE_METADATA="$verified_trace"
+MANUAL_ARTIFACTS="$verified_manual"
 python3 "$SCRIPT_DIRECTORY/verify-performance-workload-ready.py" \
     --ready-receipt "$READY_RECEIPT" --events "$WORKLOAD_EVENTS" \
     --subject-identity "$SUBJECT_IDENTITY" \
@@ -833,6 +890,9 @@ input_status="${input_status:-0}"
     && "$(require_kv "$TRACE_METADATA" target_identity_verified trace)" == true \
     && "$(require_kv "$TRACE_METADATA" trace_target_pid_verified trace)" == true ]] \
     || not_run "trace-target-binding-unsupported-or-mismatched"
+[[ "$TRACE_ARCHIVE_SHA256" \
+    == "$(require_kv "$TRACE_PROVISIONAL_RECEIPT" trace_bundle_tree_sha256 trace-provisional)" ]] \
+    || not_run "trace-archive-provisional-mismatch"
 trace_requested="$(require_kv "$TRACE_METADATA" requested_duration_ms trace)"
 trace_actual="$(require_kv "$TRACE_METADATA" actual_duration_ms trace)"
 trace_started="$(require_kv "$TRACE_METADATA" capture_started_continuous_ns trace)"
@@ -888,9 +948,9 @@ for artifact_hash in screenshot_sha256 video_sha256; do
     require_hash "$hash_value" "manual-$artifact_hash"
 done
 [[ "$(require_kv "$MANUAL_ARTIFACTS" screenshot_sha256 manual)" \
-        == "$(sha256 "$MANUAL_SCREENSHOT")" \
+        == "$MANUAL_SCREENSHOT_SHA256" \
     && "$(require_kv "$MANUAL_ARTIFACTS" video_sha256 manual)" \
-        == "$(sha256 "$MANUAL_VIDEO")" ]] \
+        == "$MANUAL_VIDEO_SHA256" ]] \
     || not_run "manual-artifact-file-hash-mismatch"
 manual_reviewer="$(require_kv "$MANUAL_ARTIFACTS" reviewer manual)"
 reject_missing_marker "$manual_reviewer"

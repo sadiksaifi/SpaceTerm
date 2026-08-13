@@ -50,6 +50,7 @@ SPACETERM_NATIVE_LAUNCH_OBSERVATION=""
 SPACETERM_NATIVE_PROVISIONAL_OBSERVATION=""
 SPACETERM_LIFECYCLE_READY_RECEIPT=""
 SPACETERM_LIFECYCLE_REGISTRATION=""
+SPACETERM_CASE_REPORT=""
 
 GHOSTTY_SUBJECT_IDENTITY=""
 GHOSTTY_RUN_INTENT=""
@@ -78,6 +79,7 @@ GHOSTTY_MANUAL_SCREENSHOT=""
 GHOSTTY_MANUAL_VIDEO=""
 GHOSTTY_LIFECYCLE_READY_RECEIPT=""
 GHOSTTY_LIFECYCLE_REGISTRATION=""
+GHOSTTY_CASE_REPORT=""
 COMMON_LIFECYCLE_HELPER=""
 APPKIT_TERMINATOR_SOURCE=""
 APPKIT_TERMINATOR_BINARY=""
@@ -180,6 +182,7 @@ while (( $# > 0 )); do
         --spaceterm-native-provisional-observation) SPACETERM_NATIVE_PROVISIONAL_OBSERVATION="${2:-}"; shift ;;
         --spaceterm-lifecycle-ready-receipt) SPACETERM_LIFECYCLE_READY_RECEIPT="${2:-}"; shift ;;
         --spaceterm-lifecycle-registration) SPACETERM_LIFECYCLE_REGISTRATION="${2:-}"; shift ;;
+        --spaceterm-case-report) SPACETERM_CASE_REPORT="${2:-}"; shift ;;
         --ghostty-subject-identity) GHOSTTY_SUBJECT_IDENTITY="${2:-}"; shift ;;
         --ghostty-run-intent) GHOSTTY_RUN_INTENT="${2:-}"; shift ;;
         --ghostty-run-metadata) GHOSTTY_RUN_METADATA="${2:-}"; shift ;;
@@ -207,6 +210,7 @@ while (( $# > 0 )); do
         --ghostty-manual-video) GHOSTTY_MANUAL_VIDEO="${2:-}"; shift ;;
         --ghostty-lifecycle-ready-receipt) GHOSTTY_LIFECYCLE_READY_RECEIPT="${2:-}"; shift ;;
         --ghostty-lifecycle-registration) GHOSTTY_LIFECYCLE_REGISTRATION="${2:-}"; shift ;;
+        --ghostty-case-report) GHOSTTY_CASE_REPORT="${2:-}"; shift ;;
         --common-lifecycle-helper) COMMON_LIFECYCLE_HELPER="${2:-}"; shift ;;
         --appkit-terminator-source) APPKIT_TERMINATOR_SOURCE="${2:-}"; shift ;;
         --appkit-terminator-binary) APPKIT_TERMINATOR_BINARY="${2:-}"; shift ;;
@@ -250,6 +254,12 @@ pair_arguments=(
     --spaceterm-workload-ready-receipt "$SPACETERM_READY_RECEIPT"
     --spaceterm-lifecycle-ready-receipt "$SPACETERM_LIFECYCLE_READY_RECEIPT"
     --spaceterm-lifecycle-registration "$SPACETERM_LIFECYCLE_REGISTRATION"
+    --spaceterm-case-report "$SPACETERM_CASE_REPORT"
+    --spaceterm-trace-metadata "$SPACETERM_TRACE_METADATA"
+    --spaceterm-trace-archive "$(dirname -- "$SPACETERM_TRACE_METADATA")/spaceterm-$SCENARIO.trace"
+    --spaceterm-manual-artifacts "$SPACETERM_MANUAL_ARTIFACTS"
+    --spaceterm-manual-screenshot "$SPACETERM_MANUAL_SCREENSHOT"
+    --spaceterm-manual-video "$SPACETERM_MANUAL_VIDEO"
     --spaceterm-tail-receipt "$SPACETERM_PERFORMANCE_TAIL_RECEIPT"
     --spaceterm-quit-receipt "$SPACETERM_PERFORMANCE_QUIT_RECEIPT"
     --spaceterm-exit-receipt "$SPACETERM_SUBJECT_EXIT_RECEIPT"
@@ -270,6 +280,12 @@ pair_arguments=(
     --ghostty-workload-ready-receipt "$GHOSTTY_READY_RECEIPT"
     --ghostty-lifecycle-ready-receipt "$GHOSTTY_LIFECYCLE_READY_RECEIPT"
     --ghostty-lifecycle-registration "$GHOSTTY_LIFECYCLE_REGISTRATION"
+    --ghostty-case-report "$GHOSTTY_CASE_REPORT"
+    --ghostty-trace-metadata "$GHOSTTY_TRACE_METADATA"
+    --ghostty-trace-archive "$(dirname -- "$GHOSTTY_TRACE_METADATA")/ghostty-$SCENARIO.trace"
+    --ghostty-manual-artifacts "$GHOSTTY_MANUAL_ARTIFACTS"
+    --ghostty-manual-screenshot "$GHOSTTY_MANUAL_SCREENSHOT"
+    --ghostty-manual-video "$GHOSTTY_MANUAL_VIDEO"
     --ghostty-tail-receipt "$GHOSTTY_PERFORMANCE_TAIL_RECEIPT"
     --ghostty-quit-receipt "$GHOSTTY_PERFORMANCE_QUIT_RECEIPT"
     --ghostty-exit-receipt "$GHOSTTY_SUBJECT_EXIT_RECEIPT"
@@ -312,6 +328,8 @@ run_case() {
     local driver_events driver_intent driver_receipt window driver_binary driver_source
     local driver_controller rss trace trace_provisional tail quit exit_receipt gate manual
     local screenshot video
+    local expected_report
+    local expected_trace_hash expected_manual_hash expected_screenshot_hash expected_video_hash
     if [[ "$subject" == spaceterm ]]; then
         identity="$SPACETERM_SUBJECT_IDENTITY"; intent="$SPACETERM_RUN_INTENT"
         metadata="$SPACETERM_RUN_METADATA"; workload_metadata="$SPACETERM_WORKLOAD_METADATA"
@@ -327,6 +345,7 @@ run_case() {
         exit_receipt="$SPACETERM_SUBJECT_EXIT_RECEIPT"; gate="$SPACETERM_PLAN_START_GATE"
         manual="$SPACETERM_MANUAL_ARTIFACTS"; screenshot="$SPACETERM_MANUAL_SCREENSHOT"
         video="$SPACETERM_MANUAL_VIDEO"
+        expected_report="$SPACETERM_CASE_REPORT"
     else
         identity="$GHOSTTY_SUBJECT_IDENTITY"; intent="$GHOSTTY_RUN_INTENT"
         metadata="$GHOSTTY_RUN_METADATA"; workload_metadata="$GHOSTTY_WORKLOAD_METADATA"
@@ -341,7 +360,13 @@ run_case() {
         exit_receipt="$GHOSTTY_SUBJECT_EXIT_RECEIPT"; gate="$GHOSTTY_PLAN_START_GATE"
         manual="$GHOSTTY_MANUAL_ARTIFACTS"; screenshot="$GHOSTTY_MANUAL_SCREENSHOT"
         video="$GHOSTTY_MANUAL_VIDEO"
+        expected_report="$GHOSTTY_CASE_REPORT"
     fi
+    expected_trace_hash="$(sha256 "$trace")" || not_run "$subject-trace-unavailable"
+    expected_manual_hash="$(sha256 "$manual")" || not_run "$subject-manual-unavailable"
+    expected_screenshot_hash="$(sha256 "$screenshot")" \
+        || not_run "$subject-screenshot-unavailable"
+    expected_video_hash="$(sha256 "$video")" || not_run "$subject-video-unavailable"
     local -a arguments=(
         --subject "$subject" --scenario "$SCENARIO" --plan "$PLAN"
         --plan-metadata "$PLAN_METADATA" --pair-metadata "$PAIR_METADATA"
@@ -378,8 +403,8 @@ run_case() {
     "$CASE_ANALYZER" "${arguments[@]}" > "$output" || status=$?
     case "$status" in
         0)
-            [[ "$(wc -l < "$output" | tr -d ' ')" == 9 \
-                && "$(kv "$output" format_version)" == 1 \
+            [[ "$(wc -l < "$output" | tr -d ' ')" == 14 \
+                && "$(kv "$output" format_version)" == 2 \
                 && "$(kv "$output" subject)" == "$subject" \
                 && "$(kv "$output" scenario)" == "$SCENARIO" \
                 && "$(kv "$output" session_id)" \
@@ -390,9 +415,21 @@ run_case() {
                     == "$(kv "$PAIR_RESULT_SNAPSHOT" "${subject}_run_intent_sha256")" \
                 && "$(kv "$output" run_metadata_sha256)" \
                     == "$(kv "$PAIR_RESULT_SNAPSHOT" "${subject}_run_metadata_sha256")" \
+                && "$(kv "$output" trace_metadata_sha256)" == "$expected_trace_hash" \
+                && "$(kv "$output" manual_artifacts_sha256)" == "$expected_manual_hash" \
+                && "$(kv "$output" manual_screenshot_sha256)" == "$expected_screenshot_hash" \
+                && "$(kv "$output" manual_video_sha256)" == "$expected_video_hash" \
+                && "$(sha256 "$trace")" == "$expected_trace_hash" \
+                && "$(sha256 "$manual")" == "$expected_manual_hash" \
+                && "$(sha256 "$screenshot")" == "$expected_screenshot_hash" \
+                && "$(sha256 "$video")" == "$expected_video_hash" \
                 && "$(kv "$output" result)" == CASE-COMPLETE \
                 && "$(kv "$output" reason)" == all-required-evidence-complete ]] \
                 || not_run "$subject-case-report-invalid"
+            [[ -f "$expected_report" && ! -L "$expected_report" \
+                && "$(stat -f '%Lp' "$expected_report")" == 400 \
+                && "$(sha256 "$output")" == "$(sha256 "$expected_report")" ]] \
+                || not_run "$subject-frozen-case-report-mismatch"
             ;;
         1) fail "$subject-case-failed" ;;
         2) not_run "$subject-case-not-runnable" ;;

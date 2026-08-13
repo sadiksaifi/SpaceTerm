@@ -26,6 +26,9 @@ KEYS = (
     "subject_process_start_identity", "driver_receipt_sha256", "driver_events_sha256",
     "workload_metadata_sha256", "workload_events_sha256", "rss_samples_sha256",
     "trace_provisional_receipt_sha256", "tail_completed_continuous_ns",
+    "lifecycle_helper_device", "lifecycle_helper_inode", "lifecycle_helper_sha256",
+    "process_inspector_device", "process_inspector_inode", "process_inspector_sha256",
+    "appkit_terminator_process_pid", "appkit_terminator_process_start_identity",
     "appkit_terminator_source_device", "appkit_terminator_source_inode",
     "appkit_terminator_source_sha256", "appkit_terminator_binary_device",
     "appkit_terminator_binary_inode", "appkit_terminator_binary_sha256",
@@ -68,6 +71,21 @@ READY_KEYS = (
     "measurement_ready_continuous_ns", "measurement_ready_byte_count", "auth_algorithm",
     "ready_hmac_sha256",
 )
+LIFECYCLE_READY_MAGIC = b"spaceterm.acceptance.performance-lifecycle-ready/v1\0"
+LIFECYCLE_READY_KEYS = (
+    "schema", "subject", "campaign_id", "session_id", "nonce",
+    "subject_identity_sha256", "process_pid", "process_start_identity",
+    "executable_sha256", "ready_continuous_ns", "registration_control_device",
+    "registration_control_inode", "lifecycle_helper_device", "lifecycle_helper_inode",
+    "lifecycle_helper_sha256", "process_inspector_device", "process_inspector_inode",
+    "process_inspector_sha256", "appkit_terminator_process_pid",
+    "appkit_terminator_process_start_identity", "appkit_terminator_source_device",
+    "appkit_terminator_source_inode", "appkit_terminator_source_sha256",
+    "appkit_terminator_binary_device", "appkit_terminator_binary_inode",
+    "appkit_terminator_binary_sha256", "evidence_mode", "auth_algorithm",
+    "receipt_hmac_sha256", "status",
+)
+LIFECYCLE_TOOL_KEYS = LIFECYCLE_READY_KEYS[12:26]
 
 
 class Invalid(Exception):
@@ -171,6 +189,7 @@ def add_common(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--workload-ready-receipt", required=True)
     parser.add_argument("--rss-samples", required=True)
     parser.add_argument("--trace-provisional-receipt", required=True)
+    parser.add_argument("--lifecycle-ready-receipt", required=True)
     parser.add_argument("--tail-completed-continuous-ns", required=True)
     parser.add_argument("--appkit-terminator-source")
     parser.add_argument("--appkit-terminator-binary")
@@ -199,7 +218,7 @@ def build(
     secret = stable_read(args.campaign_secret_file, 4096, private=True)
     if len(secret) < 32:
         raise Invalid("secret-too-short")
-    tool_keys = KEYS[16:22]
+    tool_keys = KEYS[16:30]
     if (args.appkit_terminator_source is None) != (args.appkit_terminator_binary is None):
         raise Invalid("incomplete-terminator-tool")
     if args.appkit_terminator_source is not None:
@@ -213,10 +232,14 @@ def build(
                 and Path(args.appkit_terminator_source).resolve(strict=True) \
                 != Path(__file__).resolve().with_name("performance-appkit-terminate.m"):
             raise Invalid("non-production-terminator-source")
-        tool = dict(zip(tool_keys, (
-            source_device, source_inode, source_sha256,
-            binary_device, binary_inode, binary_sha256,
-        )))
+        tool = {
+            "appkit_terminator_source_device": source_device,
+            "appkit_terminator_source_inode": source_inode,
+            "appkit_terminator_source_sha256": source_sha256,
+            "appkit_terminator_binary_device": binary_device,
+            "appkit_terminator_binary_inode": binary_inode,
+            "appkit_terminator_binary_sha256": binary_sha256,
+        }
     elif asserted_tool is not None:
         tool = {key: asserted_tool[key] for key in tool_keys}
         if any(POSITIVE.fullmatch(tool[key]) is None for key in (
@@ -245,7 +268,7 @@ def build(
     artifact_names = (
         "driver_receipt", "driver_events", "workload_metadata", "workload_events",
         "workload_ready_receipt",
-        "rss_samples", "trace_provisional_receipt",
+        "rss_samples", "trace_provisional_receipt", "lifecycle_ready_receipt",
     )
     artifacts = {
         name: stable_read(getattr(args, name), 64 * 1024 * 1024) for name in artifact_names
@@ -253,6 +276,34 @@ def build(
     trace, trace_unsigned = parse(artifacts["trace_provisional_receipt"], TRACE_KEYS)
     workload, workload_unsigned = parse(artifacts["workload_metadata"], WORKLOAD_KEYS)
     ready, ready_unsigned = parse(artifacts["workload_ready_receipt"], READY_KEYS)
+    lifecycle_ready, _ = parse(
+        artifacts["lifecycle_ready_receipt"], LIFECYCLE_READY_KEYS,
+    )
+    lifecycle_ready_unsigned = b"".join(
+        f"{key}\t{lifecycle_ready[key]}\n".encode()
+        for key in LIFECYCLE_READY_KEYS if key != "receipt_hmac_sha256"
+    )
+    if lifecycle_ready["schema"] != "spaceterm.acceptance.performance-lifecycle-ready/v1" \
+            or lifecycle_ready["campaign_id"] != args.campaign_id \
+            or lifecycle_ready["session_id"] != args.session_id \
+            or lifecycle_ready["nonce"] != args.nonce \
+            or lifecycle_ready["subject_identity_sha256"] != digest(subject_data) \
+            or lifecycle_ready["evidence_mode"] != evidence_mode \
+            or lifecycle_ready["auth_algorithm"] != "hmac-sha256" \
+            or lifecycle_ready["status"] != "ready":
+        raise Invalid("lifecycle-ready-binding")
+    expected_lifecycle_hmac = hmac.new(
+        secret, LIFECYCLE_READY_MAGIC + struct.pack(">Q", len(lifecycle_ready_unsigned))
+        + lifecycle_ready_unsigned, hashlib.sha256,
+    ).hexdigest()
+    if not hmac.compare_digest(
+        lifecycle_ready["receipt_hmac_sha256"], expected_lifecycle_hmac,
+    ):
+        raise Invalid("lifecycle-ready-authentication")
+    asserted_lifecycle_tool = {key: lifecycle_ready[key] for key in LIFECYCLE_TOOL_KEYS}
+    if any(key in tool and tool[key] != value for key, value in asserted_lifecycle_tool.items()):
+        raise Invalid("lifecycle-terminator-path-binding")
+    tool.update(asserted_lifecycle_tool)
     if trace["format_version"] != "1" or trace["capture_status"] != "CAPTURED" \
             or trace["status"] != "complete" or trace["evidence_mode"] != evidence_mode \
             or trace["auth_algorithm"] != "hmac-sha256" \

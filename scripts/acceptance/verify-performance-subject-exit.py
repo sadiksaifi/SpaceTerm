@@ -32,6 +32,9 @@ TAIL_KEYS = (
     "subject_process_start_identity", "driver_receipt_sha256", "driver_events_sha256",
     "workload_metadata_sha256", "workload_events_sha256", "rss_samples_sha256",
     "trace_provisional_receipt_sha256", "tail_completed_continuous_ns",
+    "lifecycle_helper_device", "lifecycle_helper_inode", "lifecycle_helper_sha256",
+    "process_inspector_device", "process_inspector_inode", "process_inspector_sha256",
+    "appkit_terminator_process_pid", "appkit_terminator_process_start_identity",
     "appkit_terminator_source_device", "appkit_terminator_source_inode",
     "appkit_terminator_source_sha256", "appkit_terminator_binary_device",
     "appkit_terminator_binary_inode", "appkit_terminator_binary_sha256",
@@ -41,7 +44,10 @@ QUIT_KEYS = (
     "format_version", "campaign_id", "session_id", "nonce", "run_intent_sha256",
     "subject_process_pid", "subject_process_start_identity", "quit_token",
     "request_continuous_ns", "exit_continuous_ns", "termination_method",
-    "runtime_closure_status", "appkit_terminator_source_device",
+    "runtime_closure_status", "lifecycle_helper_device", "lifecycle_helper_inode",
+    "lifecycle_helper_sha256", "process_inspector_device", "process_inspector_inode",
+    "process_inspector_sha256", "appkit_terminator_process_pid",
+    "appkit_terminator_process_start_identity", "appkit_terminator_source_device",
     "appkit_terminator_source_inode", "appkit_terminator_source_sha256",
     "appkit_terminator_binary_device", "appkit_terminator_binary_inode",
     "appkit_terminator_binary_sha256", "evidence_mode", "status",
@@ -51,6 +57,9 @@ EXIT_KEYS = (
     "subject_identity_sha256", "process_pid", "process_start_identity",
     "tail_receipt_sha256", "quit_receipt_sha256", "exit_requested_continuous_ns",
     "process_exited_continuous_ns", "exit_status", "native_observation_sha256",
+    "lifecycle_helper_device", "lifecycle_helper_inode", "lifecycle_helper_sha256",
+    "process_inspector_device", "process_inspector_inode", "process_inspector_sha256",
+    "appkit_terminator_process_pid", "appkit_terminator_process_start_identity",
     "appkit_terminator_source_device", "appkit_terminator_source_inode",
     "appkit_terminator_source_sha256", "appkit_terminator_binary_device",
     "appkit_terminator_binary_inode", "appkit_terminator_binary_sha256",
@@ -181,6 +190,9 @@ def verify(args: argparse.Namespace) -> None:
     quit_receipt, _ = parse(quit_data, QUIT_KEYS)
     receipt, unsigned = parse(exit_data, EXIT_KEYS)
     tool_keys = (
+        "lifecycle_helper_device", "lifecycle_helper_inode", "lifecycle_helper_sha256",
+        "process_inspector_device", "process_inspector_inode", "process_inspector_sha256",
+        "appkit_terminator_process_pid", "appkit_terminator_process_start_identity",
         "appkit_terminator_source_device", "appkit_terminator_source_inode",
         "appkit_terminator_source_sha256", "appkit_terminator_binary_device",
         "appkit_terminator_binary_inode", "appkit_terminator_binary_sha256",
@@ -217,6 +229,10 @@ def verify(args: argparse.Namespace) -> None:
     if any(tail[key] != quit_receipt[key] or tail[key] != receipt[key]
            for key in tool_keys):
         raise Invalid("terminator-provenance-binding")
+    if UINT.fullmatch(receipt["appkit_terminator_process_pid"]) is None \
+            or receipt["appkit_terminator_process_pid"] == "0" \
+            or START.fullmatch(receipt["appkit_terminator_process_start_identity"]) is None:
+        raise Invalid("terminator-process-identity")
     if (args.appkit_terminator_source is None) != (args.appkit_terminator_binary is None):
         raise Invalid("incomplete-terminator-tool")
     if args.appkit_terminator_source is not None:
@@ -224,7 +240,7 @@ def verify(args: argparse.Namespace) -> None:
             **tool_identity(args.appkit_terminator_source, executable=False),
             **tool_identity(args.appkit_terminator_binary, executable=True),
         }
-        if any(receipt[key] != actual_tool[key] for key in tool_keys):
+        if any(receipt[key] != value for key, value in actual_tool.items()):
             raise Invalid("terminator-provenance-file-binding")
     elif evidence_mode == "production":
         raise Invalid("missing-production-terminator-tool")
