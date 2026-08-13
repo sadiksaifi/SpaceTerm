@@ -76,6 +76,8 @@ scripts-check:
         scripts/acceptance/freeze-render-profile-intent.sh \
         scripts/acceptance/freeze-render-profile-tool-bundle.sh \
         scripts/acceptance/freeze-render-profile-workload.sh \
+        scripts/acceptance/native-ax-probe.sh \
+        scripts/acceptance/test-native-ax-probe.sh \
         scripts/acceptance/performance-workload.sh \
         scripts/acceptance/performance-plan.sh \
         scripts/acceptance/run-native-performance-scenario.sh \
@@ -110,6 +112,8 @@ scripts-check:
         scripts/acceptance/freeze-render-profile-intent.sh \
         scripts/acceptance/freeze-render-profile-tool-bundle.sh \
         scripts/acceptance/freeze-render-profile-workload.sh \
+        scripts/acceptance/native-ax-probe.sh \
+        scripts/acceptance/test-native-ax-probe.sh \
         scripts/acceptance/performance-workload.sh \
         scripts/acceptance/performance-plan.sh \
         scripts/acceptance/run-native-performance-scenario.sh \
@@ -125,6 +129,10 @@ scripts-check:
         scripts/acceptance/test-release-performance-campaign.sh \
         scripts/acceptance/test-issue-43-campaign-evidence.sh
     ./scripts/test-acceptance-identity.sh
+    ./scripts/acceptance/test-native-ax-probe.sh
+    xcrun clang -fobjc-arc -fblocks -std=c17 -fsyntax-only \
+        -Wall -Wextra -Werror -Wpedantic -mmacosx-version-min=11.0 \
+        scripts/acceptance/native-ax-probe.m
     xcrun clang -fobjc-arc -fblocks -fsyntax-only -Wall -Wextra -Werror -Wpedantic \
         -mmacosx-version-min=11.0 \
         scripts/acceptance/performance-driver.m

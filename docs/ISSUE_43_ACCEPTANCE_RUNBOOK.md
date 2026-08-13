@@ -271,6 +271,103 @@ the provisional launch observation and binds the package application-tree hash, 
 time, executable vnode/filesystem, read-only mount, and live signature; pass this file directly to
 the native AX probe and never reconstruct it from a PID or process-name scan.
 
+### Native accessibility probe
+
+`scripts/acceptance/native-ax-probe.sh` provides privacy-safe, run-owned structured evidence for
+the targeted Pane's macOS accessibility contract. It never launches or discovers an application.
+Before running it, the authenticated mounted-DMG launch controller must freeze an owner-private
+`spaceterm.acceptance.ax-subject/v1` record for the live process. The record binds the run and
+launch nonce to the exact PID/start time, mounted bundle, executable vnode/filesystem, bundle
+identifier, application digest, and live signing identity. The probe independently revalidates
+those facts before querying, before changing Selection, and after observing notifications.
+
+The launch controller's live-subject record is canonical tab-separated UTF-8, uses the same `%25`,
+`%09`, `%0d`, and `%0a` value encoding as `run-identity.tsv`, has mode `0600` in an owner-private
+real directory, and contains exactly these records (the controller supplies the values; do not
+reconstruct them by process-name lookup):
+
+The final `native-observation.tsv` is published only after SpaceTerm exits and is therefore not
+this live input. The mounted-DMG launch controller instead publishes the owner-private siblings
+`identity/native-observation-live.tsv` and `identity/ax-subject.tsv` after authenticating its Unix
+peer and before the campaign begins. The subject's `launch.observation.sha256` hashes the exact
+provisional observation bytes. Never derive either record with `pgrep`, a bundle-name scan, or a
+caller-supplied PID alone.
+
+```text
+schema	spaceterm.acceptance.ax-subject/v1
+run.id	<run ID>
+launch.nonce	<64 lowercase hex>
+package.app.sha256	<bundle-tree SHA-256>
+package.app.path	<canonical mounted SpaceTerm.app path>
+package.app.bundle.identifier	io.github.sadiksaifi.spaceterm
+package.app.executable.path	<canonical mounted SpaceTerm executable path>
+process.pid	<positive PID>
+process.start.tv-sec	<proc start seconds>
+process.start.tv-usec	<proc start microseconds>
+process.executable.device	<decimal st_dev>
+process.executable.inode	<decimal st_ino>
+process.executable.fsid	<signed decimal fsid0>:<signed decimal fsid1>
+process.signature.cdhash	<lowercase live CDHash>
+process.signature.identifier	<live signing identifier>
+process.signature.team-identifier	<live Team ID or empty>
+process.mount.read-only	true
+launch.controller	acceptance-launch-verifier
+launch.source	mounted-dmg
+launch.observation.sha256	<SHA-256 of the authenticated provisional launch observation>
+launch.observation.complete	true
+```
+
+That provisional observation has exactly 27 records. Its authenticated failure-action section is
+`failure.action.schema` followed by `failure.action.enabled`; the latter is exactly `true` when the
+controller configured failure control and `false` for an ordinary campaign or replay.
+
+Compile once into the owner-private run staging directory, then use explicit Pane count/order and
+visible UTF-16 coordinates. Selection mutation additionally requires expected before/after ranges,
+a bounded observation interval, and at least one Pane-scoped Selection notification:
+
+```text
+scripts/acceptance/native-ax-probe.sh compile "$RUN_STAGING"
+scripts/acceptance/native-ax-probe.sh run "$RUN_STAGING" \
+  --identity "$RUN_STAGING/identity/ax-subject.tsv" \
+  --output "$RUN_STAGING/capability/capability-accessibility--spaceterm--01--ax.tsv" \
+  --expected-run-id "$RUN_ID" \
+  --expected-failure-action-enabled <true|false matching controller invocation> \
+  --privacy fixture-sentinel \
+  --fixture-file "$RUN_STAGING/identity/ax-fixture-before.txt" \
+  --fixture-sha256 <lowercase SHA-256> \
+  --expected-pane-count 1 --pane-order 0 \
+  --probe-line 0 --probe-index 0 --probe-range 0:1 \
+  --expected-before-selected 0:0 --set-selected 0:1 \
+  --expected-after-selected 0:1 --observe-ms 2000 --expect-selection 1
+```
+
+Use `metadata-only` privacy unless the Pane contains only a deterministic fixture. Text-bearing
+queries require the explicit `fixture-sentinel` mode, an owner-private exact fixture file, and its
+precomputed SHA-256. The probe compares values in memory and emits only approved hashes, UTF-16
+lengths, ranges, geometry, booleans, notification counts, and monotonic timestamps. A mismatch
+produces no acceptance artifact. Do not use shell history, ordinary terminal content, clipboard
+content, credentials, paths, or other user data as the fixture.
+
+`--expect-focus` requires the exact target Pane to regain focus. Focus changes to other elements
+owned by the same authenticated process are retained as informational focus-away observations but
+do not satisfy that minimum.
+
+For Selection mutation, the probe re-queries and hashes the exact approved fixture immediately
+before setting `AXSelectedTextRange`, confirms that Pane identity/order and every observable
+generation guard still match, drains pre-dispatch AX events, resets a `mach_continuous_time`
+baseline, installs the Pane-scoped Selection subscription only after that guard, and counts only
+a notification delivered between Selection dispatch and the continuous deadline. It then
+re-queries the expected range. This proves the public native path did not act on a stale observed Pane. It does
+not manufacture an internally stale Presentation Generation: that rejection remains covered by
+the deterministic Terminal Session tests because AppKit stamps a new public request from the
+current model. Do not describe ordinary numeric-range reuse as native stale-generation proof.
+
+This helper supplements but cannot replace the `capability-accessibility` row's manual inspection
+with Accessibility Inspector and VoiceOver. Accessibility Inspector remains the visual hierarchy
+and property cross-check. VoiceOver remains the end-to-end spoken-navigation, editing, Selection,
+Cursor, soft-wrap, Scrollback, and Pane-boundary check; neither result may be inferred from a green
+probe. Record the manual artifacts separately.
+
 ## Campaign procedure
 
 1. Confirm issue #42's conformance prerequisite is satisfied at the candidate SHA.
