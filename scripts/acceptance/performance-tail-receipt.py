@@ -238,7 +238,8 @@ def build(args: argparse.Namespace) -> tuple[bytes, bytes]:
             or ready["events_prefix_sha256"] \
                 != digest(artifacts["workload_events"][:prefix_bytes]):
         raise Invalid("workload-ready-prefix-binding")
-    if int(args.tail_completed_continuous_ns) < int(workload["ended_continuous_ns"]) + 5_000_000_000:
+    tail_delta = int(args.tail_completed_continuous_ns) - int(workload["ended_continuous_ns"])
+    if tail_delta < 5_000_000_000 or tail_delta > 15_000_000_000:
         raise Invalid("tail-duration")
     values = {
         "format_version": "1", "campaign_id": args.campaign_id,

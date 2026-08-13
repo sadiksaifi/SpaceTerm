@@ -159,6 +159,8 @@ common=(
 "$TOOL" verify "${common[@]}" --receipt "$RECEIPT"
 expect_failure "correctly signed early tail" "$TOOL" create \
     "${common[@]/5000003000/4000003000}" --output "$TEMP_ROOT/early-tail.tsv"
+expect_failure "correctly signed stale tail" "$TOOL" create \
+    "${common[@]/5000003000/16000003000}" --output "$TEMP_ROOT/stale-tail.tsv"
 expect_failure "replayed token" "$TOOL" verify \
     "${common[@]/$TOKEN/dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd}" \
     --receipt "$RECEIPT"
