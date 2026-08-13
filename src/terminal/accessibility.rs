@@ -145,11 +145,65 @@ pub(crate) enum AccessibilityNotification {
 }
 
 impl AccessibilityNotification {
-    pub(crate) fn coalesce(notifications: &[Self]) -> Vec<Self> {
-        [Self::Value, Self::Selection, Self::Focus]
+    const fn bit(self) -> u8 {
+        match self {
+            Self::Value => 1 << 0,
+            Self::Selection => 1 << 1,
+            Self::Focus => 1 << 2,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct AccessibilityNotifications(u8);
+
+impl AccessibilityNotifications {
+    const ORDERED: [AccessibilityNotification; 3] = [
+        AccessibilityNotification::Value,
+        AccessibilityNotification::Selection,
+        AccessibilityNotification::Focus,
+    ];
+
+    pub(crate) fn insert(&mut self, notification: AccessibilityNotification) {
+        self.0 |= notification.bit();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn extend(
+        &mut self,
+        notifications: impl IntoIterator<Item = AccessibilityNotification>,
+    ) {
+        for notification in notifications {
+            self.insert(notification);
+        }
+    }
+
+    pub(crate) fn contains(self, notification: AccessibilityNotification) -> bool {
+        self.0 & notification.bit() != 0
+    }
+
+    pub(crate) fn without(mut self, notification: AccessibilityNotification) -> Self {
+        self.0 &= !notification.bit();
+        self
+    }
+
+    pub(crate) fn iter(self) -> impl Iterator<Item = AccessibilityNotification> {
+        Self::ORDERED
             .into_iter()
-            .filter(|candidate| notifications.contains(candidate))
-            .collect()
+            .filter(move |notification| self.contains(*notification))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn len(self) -> usize {
+        self.iter().count()
+    }
+
+    pub(crate) fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+
+    pub(crate) fn take(&mut self) -> Self {
+        std::mem::take(self)
     }
 }
 
@@ -1671,18 +1725,43 @@ mod tests {
 
     #[test]
     fn notifications_are_typed_and_coalesced() {
+        let mut notifications = AccessibilityNotifications::default();
+        notifications.extend([
+            AccessibilityNotification::Value,
+            AccessibilityNotification::Selection,
+            AccessibilityNotification::Value,
+            AccessibilityNotification::Focus,
+        ]);
+
         assert_eq!(
-            AccessibilityNotification::coalesce(&[
-                AccessibilityNotification::Value,
-                AccessibilityNotification::Selection,
-                AccessibilityNotification::Value,
-                AccessibilityNotification::Focus,
-            ]),
+            notifications.iter().collect::<Vec<_>>(),
             vec![
                 AccessibilityNotification::Value,
                 AccessibilityNotification::Selection,
                 AccessibilityNotification::Focus
             ]
         );
+        assert_eq!(
+            (
+                std::mem::size_of::<AccessibilityNotifications>(),
+                notifications.len()
+            ),
+            (1, 3)
+        );
+    }
+
+    #[test]
+    fn notification_state_stays_fixed_capacity_under_sustained_updates() {
+        let mut notifications = AccessibilityNotifications::default();
+        for _ in 0..100_000 {
+            notifications.extend(AccessibilityNotifications::ORDERED);
+        }
+
+        assert_eq!(notifications.len(), 3);
+        assert_eq!(
+            notifications.take().iter().collect::<Vec<_>>(),
+            AccessibilityNotifications::ORDERED
+        );
+        assert!(notifications.is_empty());
     }
 }

@@ -541,9 +541,12 @@ units, matching AppKit. The model preserves complete grapheme text while mapping
 tails, combining sequences, hard lines, soft wraps, the visible range, Selection, and Cursor back
 to logical terminal cells. Candidate and range bounds use the same logical cell origin, width, and
 line height as pointer and renderer geometry. Terminal output, Selection, Terminal Input Focus,
-and Marked Text changes produce typed, coalesced native accessibility notifications; notifications
-carry no terminal contents. Accessibility may request terminal-owned selection changes through the
-Terminal Session, but never mutates the Terminal Emulator from the native callback.
+and Marked Text changes produce typed, coalesced native accessibility notifications; a Pane retains
+at most one pending Value, Selection, and Focus fact while it cannot present, then delivers those
+facts against its newest model on the next native presentation. Parent layout membership remains a
+separate synchronous hierarchy notification. Notifications carry no terminal contents.
+Accessibility may request terminal-owned selection changes through the Terminal Session, but never
+mutates the Terminal Emulator from the native callback.
 
 ### Demand-Driven Render Lifecycle
 

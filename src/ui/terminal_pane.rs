@@ -70,9 +70,9 @@ use crate::terminal::geometry::{
     TerminalGeometry,
 };
 use crate::terminal::{
-    AccessibilityGeometry, AccessibilityNotification, AttentionFacts, DiagnosticBundle,
-    DiagnosticKeyEventKind, FindDirection, FindQueryGeneration, InputModifiers, KeyAction,
-    KeyInput, NativeContextActions, NativeInsertion, NativeServiceCapabilities,
+    AccessibilityGeometry, AccessibilityNotification, AccessibilityNotifications, AttentionFacts,
+    DiagnosticBundle, DiagnosticKeyEventKind, FindDirection, FindQueryGeneration, InputModifiers,
+    KeyAction, KeyInput, NativeContextActions, NativeInsertion, NativeServiceCapabilities,
     NativeServiceOrigin, NativeServiceStatus, OptionAsAltPolicy, Osc52Access,
     Osc52AuthorizationDecision, Osc52AuthorizationRequest, Osc52Target, PaneTerminalState,
     PasteConfirmation, PasteDecision, PasteRequestOutcome, PasteResolution, PhysicalKey,
@@ -258,7 +258,7 @@ pub(crate) struct TerminalPane {
     last_valid_screen: Arc<ScreenSnapshot>,
     accessibility: Arc<TerminalAccessibilityModel>,
     accessibility_element: MacosAccessibilityElement,
-    accessibility_notifications: Vec<AccessibilityNotification>,
+    pending_accessibility_notifications: AccessibilityNotifications,
     render_lifecycle: RenderLifecycle,
     pane_state: PaneTerminalState,
     pending_recovery: Option<RecoveryToken>,
@@ -433,7 +433,7 @@ impl TerminalPane {
             screen,
             accessibility,
             accessibility_element,
-            accessibility_notifications: Vec::new(),
+            pending_accessibility_notifications: AccessibilityNotifications::default(),
             render_lifecycle,
             pane_state: PaneTerminalState::default(),
             pending_recovery: None,
@@ -694,8 +694,8 @@ impl TerminalPane {
                 self.keyboard_bridge.reset_pressed_modifiers();
             }
             if focused {
-                self.accessibility_notifications
-                    .push(AccessibilityNotification::Focus);
+                self.pending_accessibility_notifications
+                    .insert(AccessibilityNotification::Focus);
             }
             self.reset_blink_phase();
             if !focused {
@@ -1388,24 +1388,24 @@ impl TerminalPane {
     }
 
     fn sync_native_accessibility(&mut self, window: &Window, focused: bool) {
-        let notifications = AccessibilityNotification::coalesce(&self.accessibility_notifications);
-        self.accessibility_notifications.clear();
+        let notifications = self.pending_accessibility_notifications.take();
         #[cfg(all(target_os = "macos", not(test)))]
         let selection_sender = self
             .session
             .as_ref()
             .and_then(|session| session.accessibility_selection_sender());
-        self.accessibility_element.update(MacosAccessibilityUpdate {
-            window,
-            model: self.accessibility.as_ref(),
-            bounds: self.grid_bounds,
-            cell_width: self.cell_width,
-            line_height: px(self.line_height),
-            focused,
-            notifications: &notifications,
-            #[cfg(all(target_os = "macos", not(test)))]
-            selection_sender,
-        });
+        self.pending_accessibility_notifications =
+            self.accessibility_element.update(MacosAccessibilityUpdate {
+                window,
+                model: self.accessibility.as_ref(),
+                bounds: self.grid_bounds,
+                cell_width: self.cell_width,
+                line_height: px(self.line_height),
+                focused,
+                notifications,
+                #[cfg(all(target_os = "macos", not(test)))]
+                selection_sender,
+            });
     }
 
     fn handle_event(&mut self, event: SessionEvent, cx: &mut Context<Self>) {
@@ -1506,13 +1506,13 @@ impl TerminalPane {
         if accessibility.active_screen() != self.accessibility.active_screen()
             || !accessibility.shares_document(self.accessibility.as_ref())
         {
-            self.accessibility_notifications
-                .push(AccessibilityNotification::Value);
+            self.pending_accessibility_notifications
+                .insert(AccessibilityNotification::Value);
         }
         if accessibility.selected_or_cursor_range() != self.accessibility.selected_or_cursor_range()
         {
-            self.accessibility_notifications
-                .push(AccessibilityNotification::Selection);
+            self.pending_accessibility_notifications
+                .insert(AccessibilityNotification::Selection);
         }
         self.accessibility = accessibility;
     }
@@ -2812,8 +2812,8 @@ impl EntityInputHandler for TerminalPane {
         }
         self.ime.cancel();
         self.invalidate_preedit_layout();
-        self.accessibility_notifications
-            .push(AccessibilityNotification::Value);
+        self.pending_accessibility_notifications
+            .insert(AccessibilityNotification::Value);
         cx.notify();
     }
 
@@ -2845,8 +2845,8 @@ impl EntityInputHandler for TerminalPane {
                 cx,
             );
         }
-        self.accessibility_notifications
-            .push(AccessibilityNotification::Value);
+        self.pending_accessibility_notifications
+            .insert(AccessibilityNotification::Value);
         cx.notify();
     }
 
@@ -2874,8 +2874,8 @@ impl EntityInputHandler for TerminalPane {
         self.ime
             .replace_and_mark(range, new_text, new_selected_range);
         self.invalidate_preedit_layout();
-        self.accessibility_notifications
-            .push(AccessibilityNotification::Value);
+        self.pending_accessibility_notifications
+            .insert(AccessibilityNotification::Value);
         cx.notify();
     }
 
@@ -4394,6 +4394,362 @@ mod tests {
         cx.run_until_parked();
 
         assert!(pane.read_with(cx, |pane, _| pane.accessibility.text() == "latest"));
+    }
+
+    fn accessibility_model(index: usize) -> Arc<TerminalAccessibilityModel> {
+        Arc::new(TerminalAccessibilityModel::new(
+            vec![crate::terminal::AccessibilityLine::new(
+                vec![
+                    crate::terminal::AccessibilityCell::new(format!("update-{index}"), 1, false),
+                    crate::terminal::AccessibilityCell::new("x", 1, false),
+                ],
+                false,
+            )],
+            0..1,
+            Some((0, if index.is_multiple_of(2) { 0 } else { 1 })),
+        ))
+    }
+
+    fn prepare_accessibility_presentation(pane: &Entity<TerminalPane>, cx: &mut VisualTestContext) {
+        cx.update(|window, cx| {
+            pane.update(cx, |pane, _| {
+                pane.set_accessibility_hierarchy(true, 0);
+                pane.sync_native_accessibility(window, false);
+            });
+        });
+    }
+
+    fn visible_surface() -> SurfaceVisibility {
+        SurfaceVisibility {
+            application_active: true,
+            key_window: true,
+            minimized: false,
+            occluded: false,
+            live_resize: false,
+            workspace_visible: true,
+            pane_visible: true,
+        }
+    }
+
+    #[gpui::test]
+    fn minimized_pane_coalesces_sustained_accessibility_updates_until_restore(
+        cx: &mut TestAppContext,
+    ) {
+        let (pane, cx) = terminal_pane(cx);
+        prepare_accessibility_presentation(&pane, cx);
+        pane.update(cx, |pane, _| {
+            pane.render_lifecycle.update_visibility(SurfaceVisibility {
+                minimized: true,
+                ..visible_surface()
+            });
+            for index in 0..4_096 {
+                pane.handle_accessibility(accessibility_model(index));
+            }
+        });
+
+        assert_eq!(
+            pane.read_with(cx, |pane, _| {
+                (
+                    pane.pending_accessibility_notifications.len(),
+                    pane.pending_accessibility_notifications
+                        .contains(AccessibilityNotification::Value),
+                    pane.pending_accessibility_notifications
+                        .contains(AccessibilityNotification::Selection),
+                    pane.accessibility.text().to_owned(),
+                )
+            }),
+            (2, true, true, "update-4095x".to_owned())
+        );
+
+        cx.update(|window, cx| {
+            pane.update(cx, |pane, _| {
+                pane.render_lifecycle.update_visibility(visible_surface());
+                pane.sync_native_accessibility(window, false);
+            });
+        });
+        assert_eq!(
+            pane.read_with(cx, |pane, _| {
+                (
+                    pane.pending_accessibility_notifications.is_empty(),
+                    pane.accessibility_element
+                        .delivered_notifications()
+                        .iter()
+                        .collect::<Vec<_>>(),
+                    pane.accessibility_element.model().text().to_owned(),
+                )
+            }),
+            (
+                true,
+                vec![
+                    AccessibilityNotification::Value,
+                    AccessibilityNotification::Selection,
+                ],
+                "update-4095x".to_owned(),
+            )
+        );
+    }
+
+    #[gpui::test]
+    fn occluded_pane_coalesces_sustained_accessibility_updates_until_restore(
+        cx: &mut TestAppContext,
+    ) {
+        let (pane, cx) = terminal_pane(cx);
+        prepare_accessibility_presentation(&pane, cx);
+        pane.update(cx, |pane, _| {
+            pane.render_lifecycle.update_visibility(SurfaceVisibility {
+                occluded: true,
+                ..visible_surface()
+            });
+            for index in 0..4_096 {
+                pane.handle_accessibility(accessibility_model(index));
+            }
+        });
+
+        assert_eq!(
+            pane.read_with(cx, |pane, _| {
+                (
+                    pane.pending_accessibility_notifications.len(),
+                    pane.accessibility.text().to_owned(),
+                )
+            }),
+            (2, "update-4095x".to_owned())
+        );
+
+        cx.update(|window, cx| {
+            pane.update(cx, |pane, _| {
+                pane.render_lifecycle.update_visibility(visible_surface());
+                pane.sync_native_accessibility(window, false);
+            });
+        });
+        assert_eq!(
+            pane.read_with(cx, |pane, _| {
+                (
+                    pane.pending_accessibility_notifications.is_empty(),
+                    pane.accessibility_element
+                        .delivered_notifications()
+                        .iter()
+                        .collect::<Vec<_>>(),
+                    pane.accessibility_element.model().text().to_owned(),
+                )
+            }),
+            (
+                true,
+                vec![
+                    AccessibilityNotification::Value,
+                    AccessibilityNotification::Selection,
+                ],
+                "update-4095x".to_owned(),
+            )
+        );
+    }
+
+    #[gpui::test]
+    fn zoom_hidden_pane_retains_only_bounded_accessibility_state_until_restore(
+        cx: &mut TestAppContext,
+    ) {
+        let (pane, cx) = terminal_pane(cx);
+        prepare_accessibility_presentation(&pane, cx);
+        pane.update(cx, |pane, _| {
+            pane.set_product_focus(TerminalProductFocus {
+                pane_visible: false,
+                focused_pane: false,
+                ..TerminalProductFocus::default()
+            });
+            pane.set_accessibility_hierarchy(false, usize::MAX);
+            for index in 0..4_096 {
+                pane.handle_accessibility(accessibility_model(index));
+            }
+        });
+        cx.update(|window, cx| {
+            pane.update(cx, |pane, _| pane.sync_native_accessibility(window, false));
+        });
+
+        assert_eq!(
+            pane.read_with(cx, |pane, _| {
+                (
+                    pane.pending_accessibility_notifications.len(),
+                    pane.accessibility_element
+                        .delivered_notifications()
+                        .is_empty(),
+                    pane.accessibility.text().to_owned(),
+                )
+            }),
+            (2, true, "update-4095x".to_owned())
+        );
+
+        pane.update(cx, |pane, _| {
+            pane.set_product_focus(TerminalProductFocus::default());
+            pane.set_accessibility_hierarchy(true, 0);
+        });
+        cx.update(|window, cx| {
+            pane.update(cx, |pane, _| pane.sync_native_accessibility(window, false));
+        });
+        assert_eq!(
+            pane.read_with(cx, |pane, _| {
+                (
+                    pane.pending_accessibility_notifications.is_empty(),
+                    pane.accessibility_element
+                        .delivered_notifications()
+                        .iter()
+                        .collect::<Vec<_>>(),
+                    pane.accessibility_element.model().text().to_owned(),
+                )
+            }),
+            (
+                true,
+                vec![
+                    AccessibilityNotification::Value,
+                    AccessibilityNotification::Selection,
+                ],
+                "update-4095x".to_owned(),
+            )
+        );
+    }
+
+    #[gpui::test]
+    fn inactive_workspace_retains_only_bounded_accessibility_state_until_restore(
+        cx: &mut TestAppContext,
+    ) {
+        let (pane, cx) = terminal_pane(cx);
+        prepare_accessibility_presentation(&pane, cx);
+        pane.update(cx, |pane, _| {
+            pane.set_product_focus(TerminalProductFocus {
+                active_workspace: false,
+                active_window: false,
+                pane_visible: false,
+                focused_pane: false,
+                blocker: None,
+            });
+            pane.set_accessibility_hierarchy(false, usize::MAX);
+            for index in 0..4_096 {
+                pane.handle_accessibility(accessibility_model(index));
+            }
+        });
+        cx.update(|window, cx| {
+            pane.update(cx, |pane, _| pane.sync_native_accessibility(window, false));
+        });
+
+        assert_eq!(
+            pane.read_with(cx, |pane, _| {
+                (
+                    pane.pending_accessibility_notifications.len(),
+                    pane.accessibility_element
+                        .delivered_notifications()
+                        .is_empty(),
+                    pane.accessibility.text().to_owned(),
+                )
+            }),
+            (2, true, "update-4095x".to_owned())
+        );
+
+        pane.update(cx, |pane, _| {
+            pane.set_product_focus(TerminalProductFocus::default());
+            pane.set_accessibility_hierarchy(true, 0);
+        });
+        cx.update(|window, cx| {
+            pane.update(cx, |pane, _| pane.sync_native_accessibility(window, false));
+        });
+        assert_eq!(
+            pane.read_with(cx, |pane, _| {
+                (
+                    pane.pending_accessibility_notifications.is_empty(),
+                    pane.accessibility_element
+                        .delivered_notifications()
+                        .iter()
+                        .collect::<Vec<_>>(),
+                    pane.accessibility_element.model().text().to_owned(),
+                )
+            }),
+            (
+                true,
+                vec![
+                    AccessibilityNotification::Value,
+                    AccessibilityNotification::Selection,
+                ],
+                "update-4095x".to_owned(),
+            )
+        );
+    }
+
+    #[gpui::test]
+    fn hidden_focus_gain_is_delivered_once_when_the_pane_becomes_presented(
+        cx: &mut TestAppContext,
+    ) {
+        let (pane, cx) = terminal_pane(cx);
+        prepare_accessibility_presentation(&pane, cx);
+        pane.update(cx, |pane, _| {
+            pane.set_accessibility_hierarchy(false, usize::MAX);
+            pane.apply_terminal_input_focus(false);
+            pane.apply_terminal_input_focus(true);
+        });
+        cx.update(|window, cx| {
+            pane.update(cx, |pane, _| pane.sync_native_accessibility(window, true));
+        });
+        assert!(pane.read_with(cx, |pane, _| {
+            pane.pending_accessibility_notifications
+                .contains(AccessibilityNotification::Focus)
+                && pane
+                    .accessibility_element
+                    .delivered_notifications()
+                    .is_empty()
+        }));
+
+        pane.update(cx, |pane, _| pane.set_accessibility_hierarchy(true, 0));
+        cx.update(|window, cx| {
+            pane.update(cx, |pane, _| pane.sync_native_accessibility(window, true));
+        });
+
+        assert_eq!(
+            pane.read_with(cx, |pane, _| {
+                (
+                    pane.pending_accessibility_notifications.is_empty(),
+                    pane.accessibility_element
+                        .delivered_notifications()
+                        .iter()
+                        .collect::<Vec<_>>(),
+                )
+            }),
+            (true, vec![AccessibilityNotification::Focus])
+        );
+    }
+
+    #[gpui::test]
+    fn focus_out_and_in_between_presentations_delivers_one_retained_focus_notification(
+        cx: &mut TestAppContext,
+    ) {
+        let (pane, cx) = terminal_pane(cx);
+        prepare_accessibility_presentation(&pane, cx);
+        cx.update(|window, cx| {
+            pane.update(cx, |pane, _| {
+                pane.apply_terminal_input_focus(true);
+                pane.sync_native_accessibility(window, true);
+            });
+        });
+
+        cx.update(|window, cx| {
+            pane.update(cx, |pane, pane_cx| {
+                pane.set_product_focus(TerminalProductFocus {
+                    blocker: Some(TerminalFocusBlocker::Modal),
+                    ..TerminalProductFocus::default()
+                });
+                pane.set_product_focus(TerminalProductFocus::default());
+                assert!(pane.synchronize_terminal_input_focus(window, pane_cx));
+                pane.sync_native_accessibility(window, true);
+            });
+        });
+
+        assert_eq!(
+            pane.read_with(cx, |pane, _| {
+                (
+                    pane.pending_accessibility_notifications.is_empty(),
+                    pane.accessibility_element
+                        .delivered_notifications()
+                        .iter()
+                        .collect::<Vec<_>>(),
+                )
+            }),
+            (true, vec![AccessibilityNotification::Focus])
+        );
     }
 
     fn connected_terminal_pane_with_key_propagation(
