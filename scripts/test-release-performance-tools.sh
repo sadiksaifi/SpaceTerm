@@ -1404,8 +1404,9 @@ readonly V3_NONCE=1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcd
 
 write_v3_final_run() {
     local path="$1" intent_hash="${2:-$v3_run_intent_hash}"
+    local provisional_hash="${3:-$V3_HASH_F}"
     {
-        printf 'format_version\t2\n'
+        printf 'format_version\t3\n'
         for key in subject subject_identity_sha256 scenario scenario_plan_sha256 \
             workload_sha256 command_sha256 environment_sha256 font_sha256 \
             initial_grid_sha256 measured_duration_ms process_pid process_start_identity; do
@@ -1420,7 +1421,11 @@ write_v3_final_run() {
         printf 'native_failure_resource_staged_count\t0\n'
         printf 'native_failure_resource_staged_bytes\t0\n'
         printf 'native_failure_resource_rolled_back_count\t0\n'
-        printf 'native_failure_resource_rolled_back_bytes\t0\nstatus\tcomplete\n'
+        printf 'native_failure_resource_rolled_back_bytes\t0\n'
+        printf 'trace_provisional_receipt_sha256\t%s\n' "$provisional_hash"
+        printf 'performance_tail_receipt_sha256\t%s\n' "$V3_HASH_A"
+        printf 'performance_quit_receipt_sha256\t%s\n' "$V3_HASH_B"
+        printf 'subject_exit_receipt_sha256\t%s\nstatus\tcomplete\n' "$V3_HASH_C"
     } > "$path"
     chmod 0444 "$path"
 }
@@ -1644,7 +1649,7 @@ run_v3_incomplete overrides test-overrides-active 1000000000 2000000000
 v3_metadata="$TEMP_ROOT/v3-overrides/spaceterm-ascii-trace-metadata.tsv"
 assert_equal "$v3_subject_hash" "$(metric "$v3_metadata" subject_identity_sha256)" \
     "trace subject binding"
-assert_equal "$(shasum -a 256 "$TEMP_ROOT/v3-overrides-run.tsv" | awk '{print $1}')" \
+assert_equal 0000000000000000000000000000000000000000000000000000000000000000 \
     "$(metric "$v3_metadata" run_metadata_sha256)" "trace run binding"
 assert_equal true "$(metric "$v3_metadata" trace_target_pid_verified)" "trace PID binding"
 assert_equal 2 "$(metric "$v3_metadata" time_profiler_rows)" "time profiler rows"
@@ -1778,11 +1783,11 @@ run_v3_incomplete coherent-full-envelope test-overrides-active 3000000000 400000
     FAKE_XCRUN_TRACE_DURATION=4 FAKE_XCRUN_END_DATE=2026-08-12T00:00:04Z \
     FAKE_CLOCK_END_NS=5000000000 FAKE_CLOCK_END_EPOCH_NS=1786492804000000000 \
     FAKE_XCRUN_SLEEP_SECONDS=4 FAKE_XCRUN_FULL_ENVELOPE_SAMPLES=1
-run_v3_incomplete cross-intent run-metadata-invalid 1000000000 2000000000
-run_v3_incomplete malformed-final run-metadata-invalid 1000000000 2000000000
-run_v3_incomplete replaced-final run-metadata-invalid 1000000000 2000000000
-run_v3_incomplete missing-final run-metadata-invalid 1000000000 2000000000
-run_v3_incomplete late-final run-metadata-invalid 1000000000 2000000000
+run_v3_incomplete cross-intent test-overrides-active 1000000000 2000000000
+run_v3_incomplete malformed-final test-overrides-active 1000000000 2000000000
+run_v3_incomplete replaced-final test-overrides-active 1000000000 2000000000
+run_v3_incomplete missing-final test-overrides-active 1000000000 2000000000
+run_v3_incomplete late-final test-overrides-active 1000000000 2000000000
 run_v3_incomplete invalid-hmac workload-metadata-invalid 1000000000 2000000000
 run_v3_incomplete producer-mismatch workload-metadata-invalid 1000000000 2000000000
 run_v3_incomplete short-workload workload-metadata-invalid 1000000000 1800000000

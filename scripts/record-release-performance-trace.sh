@@ -372,16 +372,22 @@ wait_for_run_metadata() {
 
 validate_run_metadata() {
     local key
-    readonly RUN_KEYS="format_version subject subject_identity_sha256 scenario scenario_plan_sha256 workload_sha256 command_sha256 environment_sha256 font_sha256 initial_grid_sha256 measured_duration_ms process_pid process_start_identity run_intent_sha256 native_observation_sha256 native_runtime_metadata_sha256 native_failure_actions_sha256 native_failure_action_enabled native_failure_request_count native_failure_result_count native_failure_resource_staged_count native_failure_resource_staged_bytes native_failure_resource_rolled_back_count native_failure_resource_rolled_back_bytes status"
+    readonly RUN_KEYS="format_version subject subject_identity_sha256 scenario scenario_plan_sha256 workload_sha256 command_sha256 environment_sha256 font_sha256 initial_grid_sha256 measured_duration_ms process_pid process_start_identity run_intent_sha256 native_observation_sha256 native_runtime_metadata_sha256 native_failure_actions_sha256 native_failure_action_enabled native_failure_request_count native_failure_result_count native_failure_resource_staged_count native_failure_resource_staged_bytes native_failure_resource_rolled_back_count native_failure_resource_rolled_back_bytes trace_provisional_receipt_sha256 performance_tail_receipt_sha256 performance_quit_receipt_sha256 subject_exit_receipt_sha256 status"
     wait_for_run_metadata || return 1
     [[ "$(stat -f '%d:%i' "$RUN_METADATA_PARENT")" == "$RUN_METADATA_PARENT_IDENTITY" ]] \
         || return 1
     file_is_immutable_regular "$RUN_METADATA" || return 1
-    schema_is_exact "$RUN_METADATA" "$RUN_KEYS" 25 || return 1
-    [[ "$(kv "$RUN_METADATA" format_version)" == 2 \
+    schema_is_exact "$RUN_METADATA" "$RUN_KEYS" 29 || return 1
+    [[ "$(kv "$RUN_METADATA" format_version)" == 3 \
         && "$(kv "$RUN_METADATA" status)" == complete \
-        && "$(kv "$RUN_METADATA" run_intent_sha256)" == "$RUN_INTENT_SHA256" ]] \
+        && "$(kv "$RUN_METADATA" run_intent_sha256)" == "$RUN_INTENT_SHA256" \
+        && "$(kv "$RUN_METADATA" trace_provisional_receipt_sha256)" \
+            == "$PROVISIONAL_RECEIPT_SHA256" ]] \
         || return 1
+    for key in performance_tail_receipt_sha256 performance_quit_receipt_sha256 \
+        subject_exit_receipt_sha256; do
+        is_sha256 "$(kv "$RUN_METADATA" "$key")" || return 1
+    done
     for key in subject subject_identity_sha256 scenario scenario_plan_sha256 \
         workload_sha256 command_sha256 environment_sha256 font_sha256 \
         initial_grid_sha256 measured_duration_ms process_pid process_start_identity; do
@@ -711,6 +717,8 @@ PY
     ln "$temporary" "$PROVISIONAL_RECEIPT" \
         || die "provisional receipt path was created concurrently"
     rm -f -- "$temporary" "$unsigned"
+    PROVISIONAL_RECEIPT_SHA256="$(sha256 "$PROVISIONAL_RECEIPT")"
+    readonly PROVISIONAL_RECEIPT_SHA256
 }
 
 if [[ "${1:-}" == --doctor ]]; then doctor; exit 0; fi
@@ -985,9 +993,13 @@ if [[ "$record_status" == 0 && "$export_status" == 0 \
         && capture_ended_ns - WORKLOAD_ENDED_NS <= 2000000000 )) \
     && [[ "$TEST_OVERRIDES_ACTIVE" == false ]]; then
     provisional_ready=true
+    [[ ! -e "$RUN_METADATA" ]] \
+        || die "final run metadata appeared before provisional publication"
     publish_provisional_receipt
 fi
-if validate_run_metadata; then run_metadata_valid=true; fi
+if [[ "$provisional_ready" == true ]] && validate_run_metadata; then
+    run_metadata_valid=true
+fi
 run_metadata_hash="${RUN_METADATA_SHA256:-0000000000000000000000000000000000000000000000000000000000000000}"
 final_inputs_frozen=false
 if [[ "$run_metadata_valid" == true ]] \
@@ -1017,13 +1029,18 @@ elif (( capture_started_ns > MEASUREMENT_START_NS \
     || capture_ended_ns < WORKLOAD_ENDED_NS \
     || capture_ended_ns - WORKLOAD_ENDED_NS > 2000000000 )); then
     incomplete_reason=trace-workload-interval-mismatch
+elif [[ "$TEST_OVERRIDES_ACTIVE" == true ]]; then incomplete_reason=test-overrides-active
 elif [[ "$run_metadata_valid" != true ]]; then incomplete_reason=run-metadata-invalid
 elif [[ "$final_inputs_frozen" != true ]]; then incomplete_reason=frozen-input-changed
-elif [[ "$TEST_OVERRIDES_ACTIVE" == true ]]; then incomplete_reason=test-overrides-active
 elif [[ "$provisional_ready" != true ]]; then incomplete_reason=provisional-receipt-not-published
 else
     capture_status=CAPTURED
     metadata_status=complete
+fi
+
+if [[ "$provisional_ready" == true && "$run_metadata_valid" != true ]]; then
+    echo "error: final run metadata did not causally bind the provisional trace" >&2
+    exit 1
 fi
 
 write_metadata "$METADATA_TEMP"
