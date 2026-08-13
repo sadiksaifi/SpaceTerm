@@ -194,9 +194,7 @@ pub(crate) struct TerminalGridConfiguration {
 pub(crate) enum PaintPreflightFault {
     #[cfg(test)]
     Row(usize),
-    #[cfg(test)]
     Glyph(usize),
-    #[cfg(test)]
     Image(usize),
 }
 
@@ -485,7 +483,6 @@ impl TerminalPaintBatch {
                 .rows
                 .get(index)
                 .map(|_| PaintBatchFailure::Presentation),
-            #[cfg(test)]
             PaintPreflightFault::Glyph(index) => self
                 .rows
                 .iter()
@@ -515,7 +512,6 @@ impl TerminalPaintBatch {
                 .flat_map(|text| text.line.text.chars())
                 .nth(index)
                 .map(|_| PaintBatchFailure::Presentation),
-            #[cfg(test)]
             PaintPreflightFault::Image(index) => (index < self.graphics.image_count())
                 .then_some(PaintBatchFailure::RendererResources),
         }

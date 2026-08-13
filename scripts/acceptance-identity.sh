@@ -4,12 +4,15 @@ set -euo pipefail
 IFS=$'\n\t'
 export LC_ALL=C
 
-readonly ACCEPTANCE_IDENTITY_SCHEMA="spaceterm.acceptance.run-identity/v1"
-readonly ACCEPTANCE_PUBLIC_IDENTITY_SCHEMA="spaceterm.acceptance.run-identity-public/v1"
-readonly NATIVE_OBSERVATION_SCHEMA="spaceterm.acceptance.native-launch-proof/v3"
-readonly RUNTIME_OBSERVATION_METADATA_SCHEMA="spaceterm.acceptance.runtime-observation-metadata/v1"
+readonly ACCEPTANCE_IDENTITY_SCHEMA="spaceterm.acceptance.run-identity/v2"
+readonly ACCEPTANCE_PUBLIC_IDENTITY_SCHEMA="spaceterm.acceptance.run-identity-public/v2"
+readonly NATIVE_OBSERVATION_SCHEMA="spaceterm.acceptance.native-launch-proof/v5"
+readonly RUNTIME_OBSERVATION_METADATA_SCHEMA="spaceterm.acceptance.runtime-observation-metadata/v3"
+readonly FAILURE_ACTION_SCHEMA="spaceterm.acceptance.failure-action/v1"
+readonly FAILURE_ACTION_RESULT_SCHEMA="spaceterm.acceptance.failure-action-result/v2"
 readonly RUNTIME_SAMPLES_HEADER=$'sequence\tcontinuous_ns\tworker_generation\tscreens_published\tscreens_enqueued\tscreens_superseded\tevent_queue_length\tevent_queue_high_water\tui_dispatches\tui_screen_events\tui_drain_high_water\tui_latest_generation\trender_latest_generation\tnext_frame_generation\tnext_frame_count\tpresentable\tminimized\toccluded\tworkspace_visible\tpane_visible\tlive_resize\tviewport_total_rows\tviewport_visible_rows\tviewport_offset_rows\tselection_present\tresize_requests\tresize_notifications\tresize_applied\tresize_coalesced\tpty_rows\tpty_columns\tpty_pixel_width\tpty_pixel_height\tterminal_inputs_accepted\tlifecycle\tobserver_drops'
 readonly RUNTIME_EVENTS_HEADER=$'sequence\tcontinuous_ns\tkind\tgeneration\taux0\taux1'
+readonly FAILURE_ACTIONS_HEADER=$'request_id\tsequence\tcase_id\taction\tresult\tpane_id\tpane_state\tfailure_class\tfailure_recoverability\tfailure_operation\tstate_revision\tlatest_generation\tlast_valid_generation\tvisible_generation\tpending_recovery\tterminal_input_usable\tsession_attached\tresource_staged_count\tresource_staged_bytes\tresource_rolled_back_count\tresource_rolled_back_bytes'
 readonly APP_NAME="SpaceTerm"
 readonly MOUNTED_DMG_APP_PATH="dmg:/SpaceTerm.app"
 readonly PUBLIC_APP_BUNDLE_TOKEN="\$APP_BUNDLE"
@@ -52,6 +55,7 @@ Collect options:
   --app PATH               Packaged SpaceTerm.app (default: dist/SpaceTerm.app).
   --dmg PATH               Packaged SpaceTerm.dmg (default: dist/SpaceTerm.dmg).
   --run-id ID              Stable run label (default: run directory basename).
+  --failure-control PATH   New private FIFO path for mounted-DMG failure actions.
   --executable ID=PATH     Override discovery for one matrix executable; repeatable.
   -h, --help               Show this help.
 
@@ -425,6 +429,40 @@ positive_number() {
     awk -v value="$value" 'BEGIN { exit !(value > 0) }'
 }
 
+canonical_decimal_at_most() {
+    local value="$1"
+    local maximum="$2"
+    [[ "$value" =~ ^(0|[1-9][0-9]*)$ ]] || return 1
+    if (( ${#value} < ${#maximum} )); then
+        return 0
+    fi
+    if (( ${#value} > ${#maximum} )); then
+        return 1
+    fi
+    [[ "$value" == "$maximum" || "$value" < "$maximum" ]]
+}
+
+provisional_native_observation_sha256() {
+    local observation="$1"
+    local key
+    {
+        for key in \
+            schema observation.source launch.nonce run.id package.app.sha256 \
+            runtime.schema runtime.sample_interval_ms runtime.transition_capacity \
+            failure.action.schema failure.action.enabled \
+            process.pid process.pidversion process.executable.path \
+            process.executable.device process.executable.inode process.executable.fsid \
+            process.signature.cdhash process.signature.identifier \
+            process.signature.team_identifier terminal_font_selected \
+            initial_grid.rows initial_grid.columns initial_grid.logical_width \
+            initial_grid.logical_height initial_grid.backing_pixel_width \
+            initial_grid.backing_pixel_height; do
+            printf '%s\t%s\n' "$key" "$(manifest_encoded_value "$observation" "$key")"
+        done
+        printf 'observation.complete\ttrue\n'
+    } | shasum -a 256 | awk '{ print $1 }'
+}
+
 validate_native_observation() {
     local observation="$1"
     local app_sha256="$2"
@@ -433,6 +471,11 @@ validate_native_observation() {
     for key in \
         schema observation.source launch.nonce run.id package.app.sha256 \
         runtime.schema runtime.sample_interval_ms runtime.transition_capacity \
+        failure.action.schema failure.action.enabled \
+        provisional.observation.sha256 \
+        runtime.metadata.schema runtime.metadata.path runtime.metadata.sha256 \
+        failure.result.schema failure.actions.path failure.actions.sha256 \
+        failure.request_count failure.result_count \
         process.pid process.pidversion process.executable.path \
         process.executable.device process.executable.inode process.executable.fsid \
         process.signature.cdhash process.signature.identifier \
@@ -443,7 +486,7 @@ validate_native_observation() {
         observation.complete; do
         require_manifest_key "$observation" "$key"
     done
-    [[ "$(awk 'END { print NR }' "$observation")" == "25" ]] \
+    [[ "$(awk 'END { print NR }' "$observation")" == "36" ]] \
         || die "native observation contains unexpected records"
     [[ "$(manifest_value "$observation" schema)" == "$NATIVE_OBSERVATION_SCHEMA" ]] \
         || die "unsupported native observation schema"
@@ -458,8 +501,26 @@ validate_native_observation() {
     [[ "$(manifest_value "$observation" runtime.schema)" == \
         "spaceterm.acceptance.runtime-stream/v1" && \
         "$(manifest_value "$observation" runtime.sample_interval_ms)" == "1000" && \
-        "$(manifest_value "$observation" runtime.transition_capacity)" == "64" ]] \
+        "$(manifest_value "$observation" runtime.transition_capacity)" == "64" && \
+        "$(manifest_value "$observation" failure.action.schema)" == \
+            "$FAILURE_ACTION_SCHEMA" && \
+        "$(manifest_value "$observation" failure.action.enabled)" =~ ^(true|false)$ ]] \
         || die "native observation runtime stream contract is invalid"
+    [[ "$(manifest_value "$observation" provisional.observation.sha256)" =~ \
+            ^[0-9a-f]{64}$ && \
+        "$(manifest_value "$observation" provisional.observation.sha256)" == \
+            "$(provisional_native_observation_sha256 "$observation")" && \
+        "$(manifest_value "$observation" runtime.metadata.schema)" == \
+            "$RUNTIME_OBSERVATION_METADATA_SCHEMA" && \
+        "$(manifest_value "$observation" runtime.metadata.path)" == "runtime-metadata.tsv" && \
+        "$(manifest_value "$observation" runtime.metadata.sha256)" =~ ^[0-9a-f]{64}$ && \
+        "$(manifest_value "$observation" failure.result.schema)" == \
+            "$FAILURE_ACTION_RESULT_SCHEMA" && \
+        "$(manifest_value "$observation" failure.actions.path)" == "failure-actions.tsv" && \
+        "$(manifest_value "$observation" failure.actions.sha256)" =~ ^[0-9a-f]{64}$ && \
+        "$(manifest_value "$observation" failure.request_count)" =~ ^(0|[1-9][0-9]*)$ && \
+        "$(manifest_value "$observation" failure.result_count)" =~ ^(0|[1-9][0-9]*)$ ]] \
+        || die "native observation runtime closure is invalid"
     for key in process.pid process.pidversion process.executable.device process.executable.inode; do
         [[ "$(manifest_value "$observation" "$key")" =~ ^[1-9][0-9]*$ ]] \
             || die "native observation $key must be a positive integer"
@@ -490,12 +551,13 @@ validate_native_observation() {
 
 validate_runtime_observation() {
     local native_observation="$1"
-    local parent metadata samples events key
+    local parent metadata samples events failure_actions key
     parent="$(dirname -- "$native_observation")"
     metadata="$parent/runtime-metadata.tsv"
     samples="$parent/runtime-samples.tsv"
     events="$parent/runtime-events.tsv"
-    for key in "$metadata" "$samples" "$events"; do
+    failure_actions="$parent/failure-actions.tsv"
+    for key in "$metadata" "$samples" "$events" "$failure_actions"; do
         [[ -f "$key" && ! -L "$key" ]] \
             || die "runtime observation artifact is missing or symlinked: $key"
     done
@@ -503,12 +565,14 @@ validate_runtime_observation() {
     for key in \
         schema observation.source run.id package.app.sha256 process.pid \
         runtime.samples.path runtime.samples.sha256 runtime.events.path runtime.events.sha256 \
+        failure.action.schema failure.action.enabled failure.result.schema \
+        failure.actions.path failure.actions.sha256 failure.request_count failure.result_count \
         observer.started_continuous_ns observer.ended_continuous_ns \
         observer.sample_interval_ms observer.transition_capacity observer.sample_count \
         observer.event_count observer.status observation.complete; do
         require_manifest_key "$metadata" "$key"
     done
-    [[ "$(awk 'END { print NR }' "$metadata")" == "17" ]] \
+    [[ "$(awk 'END { print NR }' "$metadata")" == "24" ]] \
         || die "runtime observation metadata contains unexpected records"
     [[ "$(manifest_value "$metadata" schema)" == "$RUNTIME_OBSERVATION_METADATA_SCHEMA" && \
         "$(manifest_value "$metadata" observation.source)" == "production-app" && \
@@ -517,38 +581,264 @@ validate_runtime_observation() {
         "$(manifest_value "$metadata" package.app.sha256)" == \
             "$(manifest_value "$native_observation" package.app.sha256)" && \
         "$(manifest_value "$metadata" process.pid)" == \
-            "$(manifest_value "$native_observation" process.pid)" ]] \
+            "$(manifest_value "$native_observation" process.pid)" && \
+        "$(manifest_value "$metadata" failure.action.schema)" == \
+            "$FAILURE_ACTION_SCHEMA" && \
+        "$(manifest_value "$metadata" failure.action.enabled)" =~ ^(true|false)$ && \
+        "$(manifest_value "$metadata" failure.result.schema)" == \
+            "$FAILURE_ACTION_RESULT_SCHEMA" ]] \
         || die "runtime observation metadata is not bound to the native observation"
     [[ "$(manifest_value "$metadata" runtime.samples.path)" == "runtime-samples.tsv" && \
         "$(manifest_value "$metadata" runtime.events.path)" == "runtime-events.tsv" && \
         "$(manifest_value "$metadata" runtime.samples.sha256)" =~ ^[0-9a-f]{64}$ && \
         "$(manifest_value "$metadata" runtime.events.sha256)" =~ ^[0-9a-f]{64}$ && \
         "$(manifest_value "$metadata" runtime.samples.sha256)" == "$(sha256_file "$samples")" && \
-        "$(manifest_value "$metadata" runtime.events.sha256)" == "$(sha256_file "$events")" ]] \
+        "$(manifest_value "$metadata" runtime.events.sha256)" == "$(sha256_file "$events")" && \
+        "$(manifest_value "$metadata" failure.actions.path)" == "failure-actions.tsv" && \
+        "$(manifest_value "$metadata" failure.actions.sha256)" =~ ^[0-9a-f]{64}$ && \
+        "$(manifest_value "$metadata" failure.actions.sha256)" == \
+            "$(sha256_file "$failure_actions")" ]] \
         || die "runtime observation artifact binding is invalid"
-    [[ "$(manifest_value "$metadata" observer.started_continuous_ns)" =~ ^[1-9][0-9]*$ && \
-        "$(manifest_value "$metadata" observer.ended_continuous_ns)" =~ ^[1-9][0-9]*$ && \
-        "$(manifest_value "$metadata" observer.sample_count)" =~ ^[1-9][0-9]*$ && \
-        "$(manifest_value "$metadata" observer.event_count)" =~ ^(0|[1-9][0-9]*)$ && \
-        "$(manifest_value "$metadata" observer.sample_count)" -le 43201 && \
-        "$(manifest_value "$metadata" observer.event_count)" -le 65536 ]] \
-        || die "runtime observation metadata counters are invalid"
+    [[ "$(manifest_value "$native_observation" runtime.metadata.schema)" == \
+            "$(manifest_value "$metadata" schema)" && \
+        "$(manifest_value "$native_observation" runtime.metadata.path)" == \
+            "runtime-metadata.tsv" && \
+        "$(manifest_value "$native_observation" runtime.metadata.sha256)" == \
+            "$(sha256_file "$metadata")" && \
+        "$(manifest_value "$native_observation" failure.action.enabled)" == \
+            "$(manifest_value "$metadata" failure.action.enabled)" && \
+        "$(manifest_value "$native_observation" failure.result.schema)" == \
+            "$(manifest_value "$metadata" failure.result.schema)" && \
+        "$(manifest_value "$native_observation" failure.actions.path)" == \
+            "$(manifest_value "$metadata" failure.actions.path)" && \
+        "$(manifest_value "$native_observation" failure.actions.sha256)" == \
+            "$(manifest_value "$metadata" failure.actions.sha256)" && \
+        "$(manifest_value "$native_observation" failure.request_count)" == \
+            "$(manifest_value "$metadata" failure.request_count)" && \
+        "$(manifest_value "$native_observation" failure.result_count)" == \
+            "$(manifest_value "$metadata" failure.result_count)" ]] \
+        || die "native observation runtime closure does not match its artifacts"
+    if ! { \
+        [[ "$(manifest_value "$metadata" observer.started_continuous_ns)" =~ ^[1-9][0-9]*$ && \
+            "$(manifest_value "$metadata" observer.ended_continuous_ns)" =~ ^[1-9][0-9]*$ ]] && \
+            canonical_decimal_at_most \
+                "$(manifest_value "$metadata" observer.sample_count)" 43201 && \
+            [[ "$(manifest_value "$metadata" observer.sample_count)" != "0" ]] && \
+            canonical_decimal_at_most \
+                "$(manifest_value "$metadata" observer.event_count)" 65536; \
+    }; then
+        die "runtime observation metadata counters are invalid"
+    fi
     [[ "$(manifest_value "$metadata" observer.sample_interval_ms)" == "1000" && \
         "$(manifest_value "$metadata" observer.transition_capacity)" == "64" && \
         "$(manifest_value "$metadata" observer.status)" == "complete" && \
         "$(manifest_value "$metadata" observation.complete)" == "true" ]] \
         || die "runtime observation is NOT-RUN"
     [[ "$(head -n 1 "$samples")" == "$RUNTIME_SAMPLES_HEADER" && \
-        "$(head -n 1 "$events")" == "$RUNTIME_EVENTS_HEADER" ]] \
+        "$(head -n 1 "$events")" == "$RUNTIME_EVENTS_HEADER" && \
+        "$(head -n 1 "$failure_actions")" == "$FAILURE_ACTIONS_HEADER" ]] \
         || die "runtime observation header is invalid"
     [[ "$(wc -c < "$samples" | tr -d '[:space:]')" -le 33554432 && \
-        "$(wc -c < "$events" | tr -d '[:space:]')" -le 16777216 ]] \
+        "$(wc -c < "$events" | tr -d '[:space:]')" -le 16777216 && \
+        "$(wc -c < "$failure_actions" | tr -d '[:space:]')" -le 262144 ]] \
         || die "runtime observation artifact exceeds its bound"
     [[ "$(( $(awk 'END { print NR }' "$samples") - 1 ))" == \
         "$(manifest_value "$metadata" observer.sample_count)" && \
         "$(( $(awk 'END { print NR }' "$events") - 1 ))" == \
-        "$(manifest_value "$metadata" observer.event_count)" ]] \
+        "$(manifest_value "$metadata" observer.event_count)" && \
+        "$(( $(awk 'END { print NR }' "$failure_actions") - 1 ))" == \
+        "$(manifest_value "$metadata" failure.result_count)" ]] \
         || die "runtime observation row count is invalid"
+    if ! { \
+        canonical_decimal_at_most \
+            "$(manifest_value "$metadata" failure.request_count)" 64 && \
+            canonical_decimal_at_most \
+                "$(manifest_value "$metadata" failure.result_count)" 256; \
+    }; then
+        die "failure action counters are invalid"
+    fi
+    local failure_counts observed_request_count observed_result_count
+    failure_counts="$(awk -F '\t' '
+        function canonical_decimal(value) {
+            return value ~ /^(0|[1-9][0-9]*)$/
+        }
+        function decimal_less(left, right) {
+            if (length(left) != length(right)) return length(left) < length(right)
+            return ("x" left) < ("x" right)
+        }
+        function decimal_greater(left, right) {
+            return decimal_less(right, left)
+        }
+        function decimal_equal(left, right) {
+            return length(left) == length(right) && ("x" left) == ("x" right)
+        }
+        function state_matches(case_id, action, class, recoverability, operation, pending) {
+            if (action == "armed" ||
+                (action == "completed" &&
+                    (case_id == "normal-exit-control" || case_id !~ /-fatal$/))) {
+                return class == "none" && recoverability == "none" &&
+                    operation == "none" && pending == "none"
+            }
+            if (case_id == "presentation-invalid-scale")
+                return class == "presentation" && recoverability == "recoverable" &&
+                    operation == "update-backing-scale" && pending == "presentation"
+            if (case_id == "presentation-glyph")
+                return class == "presentation" && recoverability == "recoverable" &&
+                    operation == "paint-terminal-presentation" && pending == "presentation"
+            if (case_id == "renderer-image-preflight")
+                return class == "resource" && recoverability == "recoverable" &&
+                    operation == "paint-terminal-graphics" && pending == "renderer-resources"
+            if (case_id ~ /^renderer-resource-/)
+                return class == "resource" && recoverability == "recoverable" &&
+                    operation == "prepare-terminal-graphics" && pending == "renderer-resources"
+            if (case_id == "pasteboard-write")
+                return class == "platform" && recoverability == "recoverable" &&
+                    operation == "write-selection-pasteboard" && pending == "copy-selection"
+            if (case_id == "pty-fatal")
+                return class == "pty" && recoverability == "fatal" &&
+                    operation == "read-shell-output" && pending == "none"
+            if (case_id == "emulator-fatal")
+                return class == "emulator" && recoverability == "fatal" &&
+                    operation == "session-runtime" && pending == "none"
+            return 0
+        }
+        function finish_group() {
+            seen_request[request_id] = 1
+            request_count++
+            expected_sequence++
+            phase = 0
+            request_id = ""
+        }
+        NR == 1 { next }
+        NF != 21 { exit 1 }
+        $1 !~ /^[0-9a-f]{64}$/ || !canonical_decimal($2) { exit 1 }
+        $3 !~ /^(presentation-invalid-scale|presentation-glyph|renderer-image-preflight|renderer-resource-before-sync|renderer-resource-after-staging|pasteboard-write|pty-fatal|emulator-fatal|normal-exit-control)$/ { exit 1 }
+        $4 !~ /^(armed|injected|retry-requested|completed)$/ ||
+        $5 !~ /^(accepted|failed-state|recovered|closed|exited)$/ { exit 1 }
+        !canonical_decimal($6) || $7 !~ /^(running|failed|exited)$/ { exit 1 }
+        $8 !~ /^(pty|emulator|presentation|platform|resource|none)$/ ||
+        $9 !~ /^(recoverable|fatal|none)$/ { exit 1 }
+        $10 !~ /^(read-shell-output|session-runtime|update-backing-scale|paint-terminal-presentation|paint-terminal-graphics|prepare-terminal-graphics|write-selection-pasteboard|none)$/ { exit 1 }
+        !canonical_decimal($11) || !canonical_decimal($12) ||
+        !canonical_decimal($13) || ($14 != "unavailable" && !canonical_decimal($14)) { exit 1 }
+        $15 !~ /^(presentation|renderer-resources|copy-selection|none)$/ ||
+        $16 !~ /^[01]$/ || $17 !~ /^[01]$/ { exit 1 }
+        !canonical_decimal($18) || !canonical_decimal($19) ||
+            !canonical_decimal($20) || !canonical_decimal($21) ||
+            decimal_greater($18, "65536") || decimal_greater($20, "65536") ||
+            decimal_greater($19, "402653184") || decimal_greater($21, "402653184") {
+            exit 1
+        }
+        decimal_less($12, $13) || ($14 != "unavailable" && decimal_less($12, $14)) {
+            exit 1
+        }
+        !state_matches($3, $4, $8, $9, $10, $15) { exit 1 }
+        {
+            after_staging = $3 == "renderer-resource-after-staging"
+            if ((!after_staging &&
+                    ($18 != "0" || $19 != "0" || $20 != "0" || $21 != "0")) ||
+                (after_staging && $4 == "armed" &&
+                    ($18 != "0" || $19 != "0" || $20 != "0" || $21 != "0")) ||
+                (after_staging && $4 != "armed" &&
+                    ($18 == "0" || $19 == "0" || !decimal_equal($20, $18) ||
+                        !decimal_equal($21, $19)))) exit 1
+            if (after_staging && $4 == "injected") {
+                injected_staged_count = $18
+                injected_staged_bytes = $19
+            } else if (after_staging && $4 != "armed" &&
+                (!decimal_equal($18, injected_staged_count) ||
+                    !decimal_equal($19, injected_staged_bytes))) exit 1
+        }
+        phase == 0 {
+            if ($2 != expected_sequence || seen_request[$1] ||
+                $4 != "armed" || $5 != "accepted" || $7 != "running" ||
+                $17 != 1) exit 1
+            request_id = $1
+            case_id = $3
+            pane_id = $6
+            last_revision = $11
+            phase = 1
+            result_count++
+            next
+        }
+        $1 != request_id || $2 != expected_sequence || $3 != case_id ||
+            !decimal_equal($6, pane_id) ||
+            decimal_less($11, last_revision) { exit 1 }
+        {
+            last_revision = $11
+            result_count++
+        }
+        phase == 1 && case_id == "normal-exit-control" {
+            if ($4 != "completed" || $5 != "exited" || $7 != "exited" ||
+                $17 != 1) exit 1
+            finish_group()
+            next
+        }
+        phase == 1 {
+            if ($4 != "injected" || $5 != "failed-state" || $7 != "failed" ||
+                $17 != 1) exit 1
+            fatal = case_id ~ /-fatal$/
+            if ((fatal && $16 != 0) ||
+                (case_id == "pasteboard-write" && $16 != 1)) exit 1
+            if (!fatal && ($14 == "unavailable" || !decimal_equal($14, $13))) exit 1
+            injected_latest = $12
+            injected_last_valid = $13
+            injected_visible = $14
+            phase = 2
+            next
+        }
+        phase == 2 && case_id ~ /-fatal$/ {
+            if ($4 != "completed" || $5 != "closed" || $7 != "failed" ||
+                $16 != 0 || $17 != 0) exit 1
+            finish_group()
+            next
+        }
+        phase == 2 {
+            if ($4 != "retry-requested" || $5 != "accepted" || $7 != "failed" ||
+                $17 != 1 || $14 == "unavailable") exit 1
+            if (case_id == "pasteboard-write") {
+                if (decimal_less($12, injected_latest) ||
+                    decimal_less($13, injected_last_valid) ||
+                    decimal_less($14, injected_visible) || !decimal_equal($14, $13) ||
+                    $16 != 1) exit 1
+                injected_latest = $12
+                injected_last_valid = $13
+                injected_visible = $14
+            } else if (!decimal_equal($12, injected_latest) ||
+                !decimal_equal($13, injected_last_valid) ||
+                !decimal_equal($14, injected_visible)) exit 1
+            phase = 3
+            next
+        }
+        phase == 3 {
+            if ($4 != "completed" || $5 != "recovered" || $7 != "running" ||
+                $17 != 1 || $14 == "unavailable") exit 1
+            if (case_id == "pasteboard-write") {
+                if (decimal_less($12, injected_latest) ||
+                    decimal_less($13, injected_last_valid) ||
+                    decimal_less($14, injected_visible) || !decimal_equal($14, $13) ||
+                    $16 != 1) exit 1
+            } else if (!decimal_equal($12, injected_latest) ||
+                !decimal_equal($13, $12) || !decimal_equal($14, $12)) exit 1
+            finish_group()
+            next
+        }
+        { exit 1 }
+        END {
+            if (phase != 0) exit 1
+            printf "%d:%d\n", request_count, result_count
+        }
+    ' "$failure_actions")" \
+        || die "failure action artifact contains invalid or noncanonical data"
+    observed_request_count="${failure_counts%%:*}"
+    observed_result_count="${failure_counts#*:}"
+    [[ "$observed_request_count" == "$(manifest_value "$metadata" failure.request_count)" && \
+        "$observed_result_count" == "$(manifest_value "$metadata" failure.result_count)" ]] \
+        || die "failure action grouped counts disagree with runtime metadata"
+    if [[ "$(manifest_value "$metadata" failure.action.enabled)" == "false" ]]; then
+        [[ "$observed_request_count" == "0" && "$observed_result_count" == "0" ]] \
+            || die "disabled failure actions contain authenticated result records"
+    fi
 }
 
 collect_native_launch_observation() {
@@ -561,6 +851,7 @@ collect_native_launch_observation() {
     local identifier="$7"
     local team_identifier="$8"
     local mode="$9"
+    local failure_control="${10:-none}"
     local helper="$launch_root/identity/acceptance-launch-verifier"
 
     [[ ! -e "$observation" && ! -L "$observation" ]] \
@@ -575,6 +866,7 @@ collect_native_launch_observation() {
     if [[ "$mode" == "campaign" ]]; then
         echo "SpaceTerm will remain open from the exact read-only DMG mount." >&2
         echo "Run the acceptance campaign in that window, then quit SpaceTerm to finish collection." >&2
+        echo "Live acceptance staging root: $launch_root" >&2
     fi
     "$helper" \
         --app "$app" \
@@ -587,8 +879,9 @@ collect_native_launch_observation() {
         --home "$launch_root/workspace" \
         --output "$observation" \
         --mode "$mode" \
+        --failure-control "$failure_control" \
         >"$launch_root/logs/native-launch.stdout" \
-        2>"$launch_root/logs/native-launch.stderr" &
+        2> >(tee "$launch_root/logs/native-launch.stderr" >&2) &
     OBSERVATION_HELPER_PID=$!
     if ! wait "$OBSERVATION_HELPER_PID"; then
         OBSERVATION_HELPER_PID=""
@@ -606,7 +899,8 @@ compare_runtime_observations() {
     local key
     for key in \
         run.id package.app.sha256 runtime.schema runtime.sample_interval_ms \
-        runtime.transition_capacity process.signature.cdhash process.signature.identifier \
+        runtime.transition_capacity failure.action.schema \
+        process.signature.cdhash process.signature.identifier \
         process.signature.team_identifier terminal_font_selected \
         initial_grid.rows initial_grid.columns \
         initial_grid.logical_width initial_grid.logical_height \
@@ -660,6 +954,13 @@ write_native_observation_identity() {
         write_record "$manifest" "native.observation.sha256" ""
         write_record "$manifest" "native.observation.source" "unobserved"
         for key in \
+            provisional.observation.sha256 \
+            runtime.metadata.schema runtime.metadata.path runtime.metadata.sha256 \
+            failure.action.enabled failure.result.schema failure.actions.path \
+            failure.actions.sha256 failure.request_count failure.result_count; do
+            write_record "$manifest" "native.$key" ""
+        done
+        for key in \
             rows columns logical_width logical_height \
             backing_pixel_width backing_pixel_height; do
             write_record "$manifest" "host.initial_grid.$key" ""
@@ -672,6 +973,26 @@ write_native_observation_identity() {
     write_record "$manifest" "native.observation.sha256" "$(sha256_file "$observation")"
     write_record "$manifest" "native.observation.source" \
         "$(manifest_value "$observation" observation.source)"
+    write_record "$manifest" "native.provisional.observation.sha256" \
+        "$(manifest_value "$observation" provisional.observation.sha256)"
+    write_record "$manifest" "native.runtime.metadata.schema" \
+        "$(manifest_value "$observation" runtime.metadata.schema)"
+    write_record "$manifest" "native.runtime.metadata.path" \
+        "identity/$(manifest_value "$observation" runtime.metadata.path)"
+    write_record "$manifest" "native.runtime.metadata.sha256" \
+        "$(manifest_value "$observation" runtime.metadata.sha256)"
+    write_record "$manifest" "native.failure.action.enabled" \
+        "$(manifest_value "$observation" failure.action.enabled)"
+    write_record "$manifest" "native.failure.result.schema" \
+        "$(manifest_value "$observation" failure.result.schema)"
+    write_record "$manifest" "native.failure.actions.path" \
+        "identity/$(manifest_value "$observation" failure.actions.path)"
+    write_record "$manifest" "native.failure.actions.sha256" \
+        "$(manifest_value "$observation" failure.actions.sha256)"
+    write_record "$manifest" "native.failure.request_count" \
+        "$(manifest_value "$observation" failure.request_count)"
+    write_record "$manifest" "native.failure.result_count" \
+        "$(manifest_value "$observation" failure.result_count)"
     for key in \
         rows columns logical_width logical_height \
         backing_pixel_width backing_pixel_height; do
@@ -700,6 +1021,16 @@ verify_native_observation_identity() {
             [[ -z "$(manifest_value "$manifest" "host.initial_grid.$key")" ]] \
                 || die "unobserved native identity contains an initial-grid claim"
         done
+        for key in \
+            native.provisional.observation.sha256 \
+            native.runtime.metadata.schema native.runtime.metadata.path \
+            native.runtime.metadata.sha256 native.failure.action.enabled \
+            native.failure.result.schema native.failure.actions.path \
+            native.failure.actions.sha256 native.failure.request_count \
+            native.failure.result_count; do
+            [[ -z "$(manifest_value "$manifest" "$key")" ]] \
+                || die "unobserved native identity contains runtime closure: $key"
+        done
         return
     fi
     [[ "$source" == "production-app" && "$path" == "identity/native-observation.tsv" ]] \
@@ -717,6 +1048,21 @@ verify_native_observation_identity() {
         "$observation" \
         "$(manifest_value "$manifest" package.app.sha256)"
     validate_runtime_observation "$observation"
+    local closure_key
+    for closure_key in \
+        provisional.observation.sha256 \
+        runtime.metadata.schema runtime.metadata.sha256 failure.action.enabled \
+        failure.result.schema failure.actions.sha256 failure.request_count \
+        failure.result_count; do
+        [[ "$(manifest_value "$manifest" "native.$closure_key")" == \
+            "$(manifest_value "$observation" "$closure_key")" ]] \
+            || die "native closure disagrees with run identity: $closure_key"
+    done
+    [[ "$(manifest_value "$manifest" native.runtime.metadata.path)" == \
+        "identity/$(manifest_value "$observation" runtime.metadata.path)" && \
+        "$(manifest_value "$manifest" native.failure.actions.path)" == \
+        "identity/$(manifest_value "$observation" failure.actions.path)" ]] \
+        || die "native closure artifact paths disagree with run identity"
     [[ "$(manifest_value "$observation" run.id)" == "$(manifest_value "$manifest" run.id)" ]] \
         || die "native observation run ID disagrees with the acceptance manifest"
     [[ "$(manifest_value "$observation" process.signature.cdhash | tr '[:lower:]' '[:upper:]')" == \
@@ -1013,6 +1359,11 @@ validate_manifest_schema() {
         host.machine.model host.machine.architecture host.cpu host.memory_bytes \
         host.display.count host.display.summary_path host.display.summary_sha256 \
         native.observation.path native.observation.sha256 native.observation.source \
+        native.provisional.observation.sha256 \
+        native.runtime.metadata.schema native.runtime.metadata.path \
+        native.runtime.metadata.sha256 native.failure.action.enabled \
+        native.failure.result.schema native.failure.actions.path \
+        native.failure.actions.sha256 native.failure.request_count native.failure.result_count \
         host.terminal_font_selected host.initial_grid.rows host.initial_grid.columns \
         host.initial_grid.logical_width host.initial_grid.logical_height \
         host.initial_grid.backing_pixel_width host.initial_grid.backing_pixel_height \
@@ -1174,6 +1525,7 @@ collect_run() {
     local app_path="$REPO_ROOT/dist/$APP_NAME.app"
     local dmg_path="$REPO_ROOT/dist/$APP_NAME.dmg"
     local run_id=""
+    local failure_control="none"
     local -a overrides=()
     local override_count=0
     while (( $# > 0 )); do
@@ -1203,6 +1555,11 @@ collect_run() {
                 run_id="$2"
                 shift
                 ;;
+            --failure-control)
+                (( $# >= 2 )) || die "--failure-control requires a path"
+                failure_control="$2"
+                shift
+                ;;
             --executable)
                 (( $# >= 2 )) || die "--executable requires ID=PATH"
                 [[ "$2" == *=* ]] || die "--executable requires ID=PATH"
@@ -1225,6 +1582,12 @@ collect_run() {
         app-bundle|mounted-dmg|source-build) ;;
         *) die "--origin must be app-bundle, mounted-dmg, or source-build" ;;
     esac
+    if [[ "$failure_control" != "none" ]]; then
+        [[ "$origin" == "mounted-dmg" ]] \
+            || die "--failure-control is only available for mounted-dmg collection"
+        [[ "$failure_control" == /* ]] \
+            || die "--failure-control must be an absolute path"
+    fi
     run_dir="$(absolute_new_path "$run_dir")"
     [[ ! -e "$run_dir" && ! -L "$run_dir" ]] \
         || die "run directory already exists or is a symlink: $run_dir"
@@ -1299,7 +1662,8 @@ collect_run() {
             "$(signature_value "$signature_details" CDHash)" \
             "$(signature_value "$signature_details" Identifier)" \
             "$(signature_value "$signature_details" TeamIdentifier)" \
-            campaign
+            campaign \
+            "$failure_control"
     fi
 
     local display_json="$TEMP_RUN_DIR/identity/displays.plist"

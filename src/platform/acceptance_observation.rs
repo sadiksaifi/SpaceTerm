@@ -1,6 +1,6 @@
 use std::env;
 use std::fmt::Write as _;
-use std::fs::Metadata;
+use std::fs::{File, Metadata};
 use std::io::{self, Read, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::{FileTypeExt, MetadataExt};
@@ -11,18 +11,24 @@ use std::sync::{Mutex, OnceLock};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use crate::terminal::{RuntimeLifecycle, RuntimeObservation, RuntimeSample, RuntimeTransition};
+use crate::terminal::{
+    FailureClass, Recoverability, RuntimeLifecycle, RuntimeObservation, RuntimeSample,
+    RuntimeTransition,
+};
 
 const SOCKET_ENV: &str = "SPACETERM_ACCEPTANCE_SOCKET";
-const CHALLENGE_SCHEMA: &str = "spaceterm.acceptance.native-launch-challenge/v2";
-const OBSERVATION_SCHEMA: &str = "spaceterm.acceptance.native-launch-proof/v3";
+const CHALLENGE_SCHEMA: &str = "spaceterm.acceptance.native-launch-challenge/v5";
+const OBSERVATION_SCHEMA: &str = "spaceterm.acceptance.native-launch-proof/v5";
 const RUNTIME_SCHEMA: &str = "spaceterm.acceptance.runtime-stream/v1";
 const RUNTIME_TICK_SCHEMA: &str = "spaceterm.acceptance.runtime-tick/v1";
 const RUNTIME_COMPLETE_SCHEMA: &str = "spaceterm.acceptance.runtime-complete/v1";
 const RUNTIME_ACK_SCHEMA: &str = "spaceterm.acceptance.runtime-ack/v1";
 const RUNTIME_CLOSED_SCHEMA: &str = "spaceterm.acceptance.runtime-closed/v1";
+const FAILURE_ACTION_SCHEMA: &str = "spaceterm.acceptance.failure-action/v1";
+const FAILURE_ACTION_RESULT_SCHEMA: &str = "spaceterm.acceptance.failure-action-result/v2";
 const SAMPLE_INTERVAL: Duration = Duration::from_secs(1);
 const SAMPLE_LATE_TOLERANCE: Duration = Duration::from_millis(250);
+const FAILURE_ACTION_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const TRANSITION_CAPACITY: usize = 64;
 const MAX_FRAME_BYTES: usize = 16 * 1024;
 const SOCKET_TIMEOUT: Duration = Duration::from_secs(30);
@@ -60,9 +66,14 @@ struct ObservationRequest {
     nonce: String,
     run_id: String,
     app_sha256: String,
+    failure_actions_enabled: bool,
     initial: Option<ObservationSelection>,
     runtime: RuntimeObservation,
     runtime_session_pending: bool,
+    failure_action_sender: Option<async_channel::Sender<FailureActionRequest>>,
+    failure_action_receiver: Option<async_channel::Receiver<FailureActionRequest>>,
+    failure_result_sender: Option<mpsc::Sender<FailureActionEvent>>,
+    failure_result_receiver: Option<mpsc::Receiver<FailureActionEvent>>,
 }
 
 #[derive(Debug)]
@@ -72,9 +83,184 @@ pub(crate) struct PreparedObservation {
 }
 
 #[derive(Debug)]
+pub(crate) struct ClaimedObservation {
+    pub(crate) runtime: RuntimeObservation,
+    pub(crate) failure_actions: Option<FailureActionController>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct FailureActionController {
+    commands: async_channel::Receiver<FailureActionRequest>,
+    results: mpsc::Sender<FailureActionEvent>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct FailureActionRequest {
+    pub(crate) id: String,
+    pub(crate) sequence: u64,
+    pub(crate) case: FailureActionCase,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum FailureActionCase {
+    PresentationInvalidScale,
+    PresentationGlyph,
+    RendererImagePreflight,
+    RendererResourceBeforeSync,
+    RendererResourceAfterStaging,
+    PasteboardWrite,
+    PtyFatal,
+    EmulatorFatal,
+    NormalExitControl,
+}
+
+impl FailureActionCase {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::PresentationInvalidScale => "presentation-invalid-scale",
+            Self::PresentationGlyph => "presentation-glyph",
+            Self::RendererImagePreflight => "renderer-image-preflight",
+            Self::RendererResourceBeforeSync => "renderer-resource-before-sync",
+            Self::RendererResourceAfterStaging => "renderer-resource-after-staging",
+            Self::PasteboardWrite => "pasteboard-write",
+            Self::PtyFatal => "pty-fatal",
+            Self::EmulatorFatal => "emulator-fatal",
+            Self::NormalExitControl => "normal-exit-control",
+        }
+    }
+
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "presentation-invalid-scale" => Some(Self::PresentationInvalidScale),
+            "presentation-glyph" => Some(Self::PresentationGlyph),
+            "renderer-image-preflight" => Some(Self::RendererImagePreflight),
+            "renderer-resource-before-sync" => Some(Self::RendererResourceBeforeSync),
+            "renderer-resource-after-staging" => Some(Self::RendererResourceAfterStaging),
+            "pasteboard-write" => Some(Self::PasteboardWrite),
+            "pty-fatal" => Some(Self::PtyFatal),
+            "emulator-fatal" => Some(Self::EmulatorFatal),
+            "normal-exit-control" => Some(Self::NormalExitControl),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum FailureActionPhase {
+    Armed,
+    Injected,
+    RetryRequested,
+    Completed,
+}
+
+impl FailureActionPhase {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Armed => "armed",
+            Self::Injected => "injected",
+            Self::RetryRequested => "retry-requested",
+            Self::Completed => "completed",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum FailureActionResult {
+    Accepted,
+    FailedState,
+    Recovered,
+    Closed,
+    Exited,
+}
+
+impl FailureActionResult {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Accepted => "accepted",
+            Self::FailedState => "failed-state",
+            Self::Recovered => "recovered",
+            Self::Closed => "closed",
+            Self::Exited => "exited",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum FailurePaneState {
+    Running,
+    Failed,
+    Exited,
+}
+
+impl FailurePaneState {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Running => "running",
+            Self::Failed => "failed",
+            Self::Exited => "exited",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum FailurePendingRecovery {
+    Presentation,
+    RendererResources,
+    CopySelection,
+    None,
+}
+
+impl FailurePendingRecovery {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Presentation => "presentation",
+            Self::RendererResources => "renderer-resources",
+            Self::CopySelection => "copy-selection",
+            Self::None => "none",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct FailureActionEvent {
+    pub(crate) request: FailureActionRequest,
+    pub(crate) phase: FailureActionPhase,
+    pub(crate) result: FailureActionResult,
+    pub(crate) pane_identity: u64,
+    pub(crate) pane_state: FailurePaneState,
+    pub(crate) failure_class: Option<FailureClass>,
+    pub(crate) recoverability: Option<Recoverability>,
+    pub(crate) failure_operation: Option<&'static str>,
+    pub(crate) state_revision: u64,
+    pub(crate) latest_generation: u64,
+    pub(crate) last_valid_generation: u64,
+    pub(crate) visible_generation: Option<u64>,
+    pub(crate) pending_recovery: FailurePendingRecovery,
+    pub(crate) terminal_input_usable: bool,
+    pub(crate) session_attached: bool,
+    pub(crate) resource_staged_count: u64,
+    pub(crate) resource_staged_bytes: u64,
+    pub(crate) resource_rolled_back_count: u64,
+    pub(crate) resource_rolled_back_bytes: u64,
+}
+
+#[derive(Debug)]
 struct RuntimeWriter {
     shutdown: mpsc::Sender<()>,
     thread: JoinHandle<Result<(), RuntimeWriterError>>,
+}
+
+struct FailureTransport {
+    nonce: String,
+    run_id: String,
+    app_sha256: String,
+    requests: Option<async_channel::Sender<FailureActionRequest>>,
+    results: Option<mpsc::Receiver<FailureActionEvent>>,
+}
+
+#[derive(Default)]
+struct IncomingFrames {
+    bytes: Vec<u8>,
 }
 
 #[derive(Clone, Copy, Debug, thiserror::Error)]
@@ -91,25 +277,66 @@ struct ObservationSelection {
     geometry: ObservationGeometry,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PackagedExecutableIdentity {
+    device: u64,
+    inode: u64,
+}
+
 pub(crate) fn configure_from_environment() -> Result<(), AcceptanceObservationError> {
     let socket_path = take_socket_environment()?;
     let Some(socket_path) = socket_path else {
         return Ok(());
     };
+    let packaged_executable = packaged_executable_identity()?;
     let mut stream = connect_private_socket(&socket_path)?;
     let challenge = read_frame(&mut stream)?;
-    let (nonce, run_id, app_sha256) = parse_challenge(&challenge)?;
+    let (nonce, run_id, app_sha256, failure_actions_enabled) =
+        parse_challenge(&challenge, packaged_executable)?;
+    let (
+        failure_action_sender,
+        failure_action_receiver,
+        failure_result_sender,
+        failure_result_receiver,
+    ) = failure_channels(failure_actions_enabled);
     REQUEST
         .set(Mutex::new(Some(ObservationRequest {
             stream,
             nonce,
             run_id,
             app_sha256,
+            failure_actions_enabled,
             initial: None,
             runtime: RuntimeObservation::new(),
             runtime_session_pending: false,
+            failure_action_sender,
+            failure_action_receiver,
+            failure_result_sender,
+            failure_result_receiver,
         })))
         .map_err(|_| AcceptanceObservationError::ConfiguredTwice)
+}
+
+#[allow(clippy::type_complexity)]
+fn failure_channels(
+    enabled: bool,
+) -> (
+    Option<async_channel::Sender<FailureActionRequest>>,
+    Option<async_channel::Receiver<FailureActionRequest>>,
+    Option<mpsc::Sender<FailureActionEvent>>,
+    Option<mpsc::Receiver<FailureActionEvent>>,
+) {
+    if !enabled {
+        return (None, None, None, None);
+    }
+    let (action_sender, action_receiver) = async_channel::bounded(1);
+    let (result_sender, result_receiver) = mpsc::channel();
+    (
+        Some(action_sender),
+        Some(action_receiver),
+        Some(result_sender),
+        Some(result_receiver),
+    )
 }
 
 pub(crate) fn take_runtime_session_observation() -> Option<RuntimeObservation> {
@@ -128,7 +355,7 @@ pub(crate) fn take_runtime_session_observation() -> Option<RuntimeObservation> {
 pub(crate) fn claim_session(
     selected_font: &str,
     geometry: ObservationGeometry,
-) -> Option<RuntimeObservation> {
+) -> Option<ClaimedObservation> {
     let request = REQUEST.get()?;
     let mut request = request
         .lock()
@@ -142,7 +369,35 @@ pub(crate) fn claim_session(
         geometry,
     });
     request.runtime_session_pending = true;
-    Some(request.runtime.clone())
+    Some(ClaimedObservation {
+        runtime: request.runtime.clone(),
+        failure_actions: request
+            .failure_action_receiver
+            .take()
+            .zip(request.failure_result_sender.clone())
+            .map(|(commands, results)| FailureActionController { commands, results }),
+    })
+}
+
+impl FailureActionController {
+    pub(crate) async fn receive(&self) -> Option<FailureActionRequest> {
+        self.commands.recv().await.ok()
+    }
+
+    pub(crate) fn emit(&self, event: FailureActionEvent) -> bool {
+        self.results.send(event).is_ok()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_channel() -> (
+        Self,
+        async_channel::Sender<FailureActionRequest>,
+        mpsc::Receiver<FailureActionEvent>,
+    ) {
+        let (requests, commands) = async_channel::bounded(1);
+        let (results, events) = mpsc::channel();
+        (Self { commands, results }, requests, events)
+    }
 }
 
 pub(crate) fn update_geometry(geometry: ObservationGeometry) {
@@ -188,7 +443,19 @@ impl PreparedObservation {
             executable_metadata.ino(),
         );
         write_frame(&mut self.request.stream, record.as_bytes())?;
-        start_runtime_writer(self.request.stream, self.request.runtime.clone())?;
+        let failure_action_sender = self.request.failure_action_sender.clone();
+        let failure_result_receiver = self.request.failure_result_receiver.take();
+        start_runtime_writer(
+            self.request.stream,
+            self.request.runtime.clone(),
+            FailureTransport {
+                nonce: self.request.nonce,
+                run_id: self.request.run_id,
+                app_sha256: self.request.app_sha256,
+                requests: failure_action_sender,
+                results: failure_result_receiver,
+            },
+        )?;
         Ok(())
     }
 }
@@ -215,13 +482,14 @@ pub(crate) fn finish_runtime_observation() -> Result<(), AcceptanceObservationEr
 fn start_runtime_writer(
     mut stream: UnixStream,
     observation: RuntimeObservation,
+    failure: FailureTransport,
 ) -> Result<(), AcceptanceObservationError> {
-    stream.set_read_timeout(Some(FINAL_ACK_TIMEOUT))?;
+    stream.set_read_timeout(Some(FAILURE_ACTION_POLL_INTERVAL))?;
     stream.set_write_timeout(Some(SOCKET_TIMEOUT))?;
     let (shutdown, receiver) = mpsc::channel();
     let thread = thread::Builder::new()
         .name("spaceterm-acceptance-observer".to_owned())
-        .spawn(move || run_runtime_writer(&mut stream, &observation, &receiver))?;
+        .spawn(move || run_runtime_writer(&mut stream, &observation, &receiver, failure))?;
     RUNTIME_WRITER
         .set(Mutex::new(Some(RuntimeWriter { shutdown, thread })))
         .map_err(|_| AcceptanceObservationError::ConfiguredTwice)
@@ -231,11 +499,14 @@ fn run_runtime_writer(
     stream: &mut UnixStream,
     observation: &RuntimeObservation,
     shutdown: &mpsc::Receiver<()>,
+    failure: FailureTransport,
 ) -> Result<(), RuntimeWriterError> {
     let mut sequence = 0_u64;
     let mut deadline = Instant::now();
     let mut started_ns = None;
     let mut event_count = 0_u64;
+    let mut expected_action_sequence = 0_u64;
+    let mut incoming = IncomingFrames::default();
 
     let last_periodic_ns = loop {
         let now = Instant::now();
@@ -243,25 +514,69 @@ fn run_runtime_writer(
             observation.fail();
             deadline = now;
         }
-        let transitions = observation.drain_transitions();
-        let sample = observation.sample();
-        started_ns.get_or_insert(sample.continuous_ns);
-        event_count = event_count
-            .checked_add(transitions.len() as u64)
-            .ok_or(RuntimeWriterError::Protocol)?;
-        write_frame(
-            stream,
-            format_runtime_tick(sequence, sample, &transitions).as_bytes(),
-        )
-        .map_err(|_| RuntimeWriterError::Transport)?;
-        sequence = sequence
-            .checked_add(1)
-            .ok_or(RuntimeWriterError::Protocol)?;
-        deadline += SAMPLE_INTERVAL;
+        if now >= deadline {
+            let transitions = observation.drain_transitions();
+            let sample = observation.sample();
+            started_ns.get_or_insert(sample.continuous_ns);
+            event_count = event_count
+                .checked_add(transitions.len() as u64)
+                .ok_or(RuntimeWriterError::Protocol)?;
+            write_frame(
+                stream,
+                format_runtime_tick(sequence, sample, &transitions).as_bytes(),
+            )
+            .map_err(|_| RuntimeWriterError::Transport)?;
+            sequence = sequence
+                .checked_add(1)
+                .ok_or(RuntimeWriterError::Protocol)?;
+            deadline += SAMPLE_INTERVAL;
+        }
 
-        match shutdown.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
-            Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => break sample.continuous_ns,
-            Err(mpsc::RecvTimeoutError::Timeout) => {}
+        let frames = incoming
+            .read_available(stream)
+            .map_err(|error| match error.kind() {
+                io::ErrorKind::InvalidData => RuntimeWriterError::Protocol,
+                _ => RuntimeWriterError::Transport,
+            })?;
+        if failure.requests.is_none() && !frames.is_empty() {
+            return Err(RuntimeWriterError::Protocol);
+        }
+        for frame in frames {
+            let request = parse_failure_action(
+                &frame,
+                &failure.nonce,
+                &failure.run_id,
+                &failure.app_sha256,
+                expected_action_sequence,
+            )
+            .map_err(|_| RuntimeWriterError::Protocol)?;
+            failure
+                .requests
+                .as_ref()
+                .ok_or(RuntimeWriterError::Protocol)?
+                .try_send(request)
+                .map_err(|_| RuntimeWriterError::Protocol)?;
+            expected_action_sequence = expected_action_sequence
+                .checked_add(1)
+                .ok_or(RuntimeWriterError::Protocol)?;
+        }
+        if let Some(results) = &failure.results {
+            while let Ok(result) = results.try_recv() {
+                write_frame(stream, format_failure_action_result(&result).as_bytes())
+                    .map_err(|_| RuntimeWriterError::Transport)?;
+            }
+        }
+
+        match shutdown.try_recv() {
+            Ok(()) | Err(mpsc::TryRecvError::Disconnected) => {
+                break observation.sample().continuous_ns;
+            }
+            Err(mpsc::TryRecvError::Empty) => {
+                thread::sleep(
+                    FAILURE_ACTION_POLL_INTERVAL
+                        .min(deadline.saturating_duration_since(Instant::now())),
+                );
+            }
         }
     };
 
@@ -279,6 +594,12 @@ fn run_runtime_writer(
             break;
         }
         thread::sleep(Duration::from_millis(10));
+    }
+    if let Some(results) = &failure.results {
+        while let Ok(result) = results.try_recv() {
+            write_frame(stream, format_failure_action_result(&result).as_bytes())
+                .map_err(|_| RuntimeWriterError::Transport)?;
+        }
     }
     let transitions = observation.seal_and_drain_transitions();
     let sample = observation.sample();
@@ -304,6 +625,9 @@ fn run_runtime_writer(
         },
     );
     write_frame(stream, complete.as_bytes()).map_err(|_| RuntimeWriterError::Transport)?;
+    stream
+        .set_read_timeout(Some(FINAL_ACK_TIMEOUT))
+        .map_err(|_| RuntimeWriterError::Transport)?;
     let ack = read_frame(stream).map_err(|_| RuntimeWriterError::Transport)?;
     if ack != format!("schema\t{RUNTIME_ACK_SCHEMA}\nstatus\taccepted\n").as_bytes() {
         return Err(RuntimeWriterError::Protocol);
@@ -405,6 +729,31 @@ fn take_socket_environment() -> Result<Option<PathBuf>, AcceptanceObservationErr
         .transpose()
 }
 
+fn packaged_executable_identity() -> Result<PackagedExecutableIdentity, AcceptanceObservationError>
+{
+    let executable = env::current_exe()?.canonicalize()?;
+    if !executable.ends_with(Path::new("SpaceTerm.app/Contents/MacOS/SpaceTerm")) {
+        return Err(AcceptanceObservationError::InvalidChallenge);
+    }
+    let file = File::open(&executable)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() {
+        return Err(AcceptanceObservationError::InvalidChallenge);
+    }
+    let mut filesystem = std::mem::MaybeUninit::<libc::statfs>::zeroed();
+    if unsafe { libc::fstatfs(file.as_raw_fd(), filesystem.as_mut_ptr()) } != 0 {
+        return Err(io::Error::last_os_error().into());
+    }
+    let filesystem = unsafe { filesystem.assume_init() };
+    if filesystem.f_flags & u32::try_from(libc::MNT_RDONLY).unwrap_or_default() == 0 {
+        return Err(AcceptanceObservationError::InvalidChallenge);
+    }
+    Ok(PackagedExecutableIdentity {
+        device: metadata.dev(),
+        inode: metadata.ino(),
+    })
+}
+
 fn connect_private_socket(path: &Path) -> Result<UnixStream, AcceptanceObservationError> {
     if !path.is_absolute() {
         return Err(AcceptanceObservationError::InvalidSocket);
@@ -467,9 +816,187 @@ fn write_frame(stream: &mut UnixStream, payload: &[u8]) -> io::Result<()> {
     stream.flush()
 }
 
+impl IncomingFrames {
+    fn read_available(&mut self, stream: &mut UnixStream) -> io::Result<Vec<Vec<u8>>> {
+        let mut chunk = [0_u8; 4096];
+        loop {
+            match stream.read(&mut chunk) {
+                Ok(0) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::UnexpectedEof,
+                        "acceptance action stream closed",
+                    ));
+                }
+                Ok(length) => {
+                    self.bytes.extend_from_slice(&chunk[..length]);
+                    if self.bytes.len() > MAX_FRAME_BYTES + 4 {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "acceptance action frame exceeds the bound",
+                        ));
+                    }
+                }
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                Err(error) => return Err(error),
+            }
+        }
+
+        let mut frames = Vec::new();
+        loop {
+            if self.bytes.len() < 4 {
+                break;
+            }
+            let length = u32::from_be_bytes(
+                self.bytes[..4]
+                    .try_into()
+                    .expect("a four-byte frame prefix was checked"),
+            ) as usize;
+            if !(1..=MAX_FRAME_BYTES).contains(&length) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "invalid acceptance action frame length",
+                ));
+            }
+            if self.bytes.len() < length + 4 {
+                break;
+            }
+            frames.push(self.bytes[4..length + 4].to_vec());
+            self.bytes.drain(..length + 4);
+        }
+        Ok(frames)
+    }
+}
+
+fn parse_failure_action(
+    frame: &[u8],
+    expected_nonce: &str,
+    expected_run_id: &str,
+    expected_app_sha256: &str,
+    expected_sequence: u64,
+) -> Result<FailureActionRequest, AcceptanceObservationError> {
+    let frame =
+        std::str::from_utf8(frame).map_err(|_| AcceptanceObservationError::InvalidChallenge)?;
+    let records = parse_records(frame)?;
+    let [
+        schema,
+        nonce,
+        run_id,
+        app_sha256,
+        request_id,
+        sequence,
+        case,
+        once,
+    ] = records.as_slice()
+    else {
+        return Err(AcceptanceObservationError::InvalidChallenge);
+    };
+    let parsed_sequence = sequence
+        .1
+        .parse::<u64>()
+        .map_err(|_| AcceptanceObservationError::InvalidChallenge)?;
+    if case.0 != "case.id" {
+        return Err(AcceptanceObservationError::InvalidChallenge);
+    }
+    let case =
+        FailureActionCase::parse(&case.1).ok_or(AcceptanceObservationError::InvalidChallenge)?;
+    if schema != &("schema", FAILURE_ACTION_SCHEMA.to_owned())
+        || nonce != &("launch.nonce", expected_nonce.to_owned())
+        || run_id != &("run.id", expected_run_id.to_owned())
+        || app_sha256 != &("package.app.sha256", expected_app_sha256.to_owned())
+        || request_id.0 != "request.id"
+        || !is_lower_hex(&request_id.1, 64)
+        || sequence.0 != "sequence"
+        || parsed_sequence != expected_sequence
+        || once != &("request.once", "true".to_owned())
+    {
+        return Err(AcceptanceObservationError::InvalidChallenge);
+    }
+    Ok(FailureActionRequest {
+        id: request_id.1.clone(),
+        sequence: parsed_sequence,
+        case,
+    })
+}
+
+fn format_failure_action_result(event: &FailureActionEvent) -> String {
+    let failure = event.failure_class.map_or("none", failure_class_name);
+    let recoverability = event.recoverability.map_or("none", recoverability_name);
+    let operation = event.failure_operation.unwrap_or("none");
+    let visible = event
+        .visible_generation
+        .map_or_else(|| "unavailable".to_owned(), |value| value.to_string());
+    format!(
+        concat!(
+            "schema\t{}\n",
+            "request.id\t{}\n",
+            "sequence\t{}\n",
+            "case.id\t{}\n",
+            "action\t{}\n",
+            "result\t{}\n",
+            "pane.id\t{}\n",
+            "pane.state\t{}\n",
+            "failure.class\t{}\n",
+            "failure.recoverability\t{}\n",
+            "failure.operation\t{}\n",
+            "state.revision\t{}\n",
+            "latest.generation\t{}\n",
+            "last_valid.generation\t{}\n",
+            "visible.generation\t{}\n",
+            "pending_recovery\t{}\n",
+            "terminal_input_usable\t{}\n",
+            "session_attached\t{}\n",
+            "resource.staged_count\t{}\n",
+            "resource.staged_bytes\t{}\n",
+            "resource.rolled_back_count\t{}\n",
+            "resource.rolled_back_bytes\t{}\n",
+        ),
+        FAILURE_ACTION_RESULT_SCHEMA,
+        event.request.id,
+        event.request.sequence,
+        event.request.case.as_str(),
+        event.phase.as_str(),
+        event.result.as_str(),
+        event.pane_identity,
+        event.pane_state.as_str(),
+        failure,
+        recoverability,
+        operation,
+        event.state_revision,
+        event.latest_generation,
+        event.last_valid_generation,
+        visible,
+        event.pending_recovery.as_str(),
+        bool_digit(event.terminal_input_usable),
+        bool_digit(event.session_attached),
+        event.resource_staged_count,
+        event.resource_staged_bytes,
+        event.resource_rolled_back_count,
+        event.resource_rolled_back_bytes,
+    )
+}
+
+const fn failure_class_name(class: FailureClass) -> &'static str {
+    match class {
+        FailureClass::Pty => "pty",
+        FailureClass::Emulator => "emulator",
+        FailureClass::Presentation => "presentation",
+        FailureClass::Platform => "platform",
+        FailureClass::Resource => "resource",
+    }
+}
+
+const fn recoverability_name(recoverability: Recoverability) -> &'static str {
+    match recoverability {
+        Recoverability::Recoverable => "recoverable",
+        Recoverability::Fatal => "fatal",
+    }
+}
+
 fn parse_challenge(
     challenge: &[u8],
-) -> Result<(String, String, String), AcceptanceObservationError> {
+    packaged_executable: PackagedExecutableIdentity,
+) -> Result<(String, String, String, bool), AcceptanceObservationError> {
     let challenge =
         std::str::from_utf8(challenge).map_err(|_| AcceptanceObservationError::InvalidChallenge)?;
     let records = parse_records(challenge)?;
@@ -478,9 +1005,13 @@ fn parse_challenge(
         nonce,
         run_id,
         app_sha256,
+        executable_device,
+        executable_inode,
         runtime_schema,
         sample_interval,
         transition_capacity,
+        failure_action_schema,
+        failure_action_enabled,
     ] = records.as_slice()
     else {
         return Err(AcceptanceObservationError::InvalidChallenge);
@@ -492,6 +1023,16 @@ fn parse_challenge(
         || !is_run_id(&run_id.1)
         || app_sha256.0 != "package.app.sha256"
         || !is_lower_hex(&app_sha256.1, 64)
+        || executable_device
+            != &(
+                "package.app.executable.device",
+                packaged_executable.device.to_string(),
+            )
+        || executable_inode
+            != &(
+                "package.app.executable.inode",
+                packaged_executable.inode.to_string(),
+            )
         || runtime_schema != &("runtime.schema", RUNTIME_SCHEMA.to_owned())
         || sample_interval
             != &(
@@ -503,10 +1044,18 @@ fn parse_challenge(
                 "runtime.transition_capacity",
                 TRANSITION_CAPACITY.to_string(),
             )
+        || failure_action_schema != &("failure.action.schema", FAILURE_ACTION_SCHEMA.to_owned())
+        || failure_action_enabled.0 != "failure.action.enabled"
+        || !matches!(failure_action_enabled.1.as_str(), "true" | "false")
     {
         return Err(AcceptanceObservationError::InvalidChallenge);
     }
-    Ok((nonce.1.clone(), run_id.1.clone(), app_sha256.1.clone()))
+    Ok((
+        nonce.1.clone(),
+        run_id.1.clone(),
+        app_sha256.1.clone(),
+        failure_action_enabled.1 == "true",
+    ))
 }
 
 fn parse_records(value: &str) -> Result<Vec<(&str, String)>, AcceptanceObservationError> {
@@ -552,6 +1101,11 @@ fn format_observation(
         (
             "runtime.transition_capacity",
             TRANSITION_CAPACITY.to_string(),
+        ),
+        ("failure.action.schema", FAILURE_ACTION_SCHEMA.to_owned()),
+        (
+            "failure.action.enabled",
+            request.failure_actions_enabled.to_string(),
         ),
         ("process.pid", std::process::id().to_string()),
         (
@@ -652,6 +1206,8 @@ mod tests {
     use super::*;
 
     fn request(stream: UnixStream) -> ObservationRequest {
+        let (failure_action_sender, failure_action_receiver) = async_channel::bounded(1);
+        let (failure_result_sender, failure_result_receiver) = mpsc::channel();
         ObservationRequest {
             stream,
             nonce: "a".repeat(64),
@@ -660,21 +1216,59 @@ mod tests {
             initial: None,
             runtime: RuntimeObservation::new(),
             runtime_session_pending: false,
+            failure_actions_enabled: true,
+            failure_action_sender: Some(failure_action_sender),
+            failure_action_receiver: Some(failure_action_receiver),
+            failure_result_sender: Some(failure_result_sender),
+            failure_result_receiver: Some(failure_result_receiver),
         }
     }
 
     #[test]
     fn challenge_should_be_exact_and_bounded() {
+        let packaged_executable = PackagedExecutableIdentity {
+            device: 17,
+            inode: 19,
+        };
         let challenge = format!(
-            "schema\t{CHALLENGE_SCHEMA}\nlaunch.nonce\t{}\nrun.id\ti43-proof\npackage.app.sha256\t{}\nruntime.schema\t{RUNTIME_SCHEMA}\nruntime.sample_interval_ms\t1000\nruntime.transition_capacity\t64\n",
+            "schema\t{CHALLENGE_SCHEMA}\nlaunch.nonce\t{}\nrun.id\ti43-proof\npackage.app.sha256\t{}\npackage.app.executable.device\t17\npackage.app.executable.inode\t19\nruntime.schema\t{RUNTIME_SCHEMA}\nruntime.sample_interval_ms\t1000\nruntime.transition_capacity\t64\nfailure.action.schema\t{FAILURE_ACTION_SCHEMA}\nfailure.action.enabled\ttrue\n",
             "a".repeat(64),
             "b".repeat(64),
         );
-        let (_, run_id, _) = parse_challenge(challenge.as_bytes()).unwrap();
+        let (_, run_id, _, enabled) =
+            parse_challenge(challenge.as_bytes(), packaged_executable).unwrap();
         assert_eq!(run_id, "i43-proof");
+        assert!(enabled);
+        let disabled = challenge.replace(
+            "failure.action.enabled\ttrue",
+            "failure.action.enabled\tfalse",
+        );
+        assert!(
+            !parse_challenge(disabled.as_bytes(), packaged_executable)
+                .unwrap()
+                .3
+        );
+        let disabled_channels = failure_channels(false);
+        assert!(disabled_channels.0.is_none());
+        assert!(disabled_channels.1.is_none());
+        assert!(disabled_channels.2.is_none());
+        assert!(disabled_channels.3.is_none());
 
-        assert!(parse_challenge(format!("{challenge}extra\ttrue\n").as_bytes()).is_err());
-        assert!(parse_challenge(challenge.trim_end().as_bytes()).is_err());
+        assert!(
+            parse_challenge(
+                format!("{challenge}extra\ttrue\n").as_bytes(),
+                packaged_executable
+            )
+            .is_err()
+        );
+        assert!(parse_challenge(challenge.trim_end().as_bytes(), packaged_executable).is_err());
+        assert!(
+            parse_challenge(
+                challenge.replace("device\t17", "device\t18").as_bytes(),
+                packaged_executable
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -699,6 +1293,7 @@ mod tests {
         assert!(record.contains("observation.source\tproduction-app\n"));
         assert!(record.contains("initial_grid.logical_width\t800.5\n"));
         assert!(record.contains("process.executable.inode\t11\n"));
+        assert!(record.contains("failure.action.schema\tspaceterm.acceptance.failure-action/v1\n"));
         assert!(record.contains("observation.complete\ttrue\n"));
         assert!(!record.contains("terminal.content"));
     }
@@ -782,5 +1377,85 @@ mod tests {
         assert_eq!(decode_value("100%25%09ok").unwrap(), "100%\tok");
         assert!(decode_value("%2f").is_err());
         assert!(decode_value("%").is_err());
+    }
+
+    #[test]
+    fn failure_action_should_require_exact_authentication_order_and_one_shot_sequence() {
+        let nonce = "a".repeat(64);
+        let app_sha256 = "b".repeat(64);
+        let request_id = "c".repeat(64);
+        let frame = format!(
+            "schema\t{FAILURE_ACTION_SCHEMA}\nlaunch.nonce\t{nonce}\nrun.id\ti43-proof\npackage.app.sha256\t{app_sha256}\nrequest.id\t{request_id}\nsequence\t0\ncase.id\tpresentation-glyph\nrequest.once\ttrue\n"
+        );
+        let request =
+            parse_failure_action(frame.as_bytes(), &nonce, "i43-proof", &app_sha256, 0).unwrap();
+        assert_eq!(request.case, FailureActionCase::PresentationGlyph);
+        assert!(
+            parse_failure_action(frame.as_bytes(), &nonce, "i43-proof", &app_sha256, 1).is_err()
+        );
+        assert!(
+            parse_failure_action(
+                frame
+                    .replace("request.once\ttrue", "request.once\tfalse")
+                    .as_bytes(),
+                &nonce,
+                "i43-proof",
+                &app_sha256,
+                0,
+            )
+            .is_err()
+        );
+        assert!(
+            parse_failure_action(
+                frame
+                    .replace("presentation-glyph", "arbitrary-failure")
+                    .as_bytes(),
+                &nonce,
+                "i43-proof",
+                &app_sha256,
+                0,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn failure_result_schema_should_be_content_free_and_closed() {
+        let event = FailureActionEvent {
+            request: FailureActionRequest {
+                id: "c".repeat(64),
+                sequence: 0,
+                case: FailureActionCase::PasteboardWrite,
+            },
+            phase: FailureActionPhase::Injected,
+            result: FailureActionResult::FailedState,
+            pane_identity: 7,
+            pane_state: FailurePaneState::Failed,
+            failure_class: Some(FailureClass::Platform),
+            recoverability: Some(Recoverability::Recoverable),
+            failure_operation: Some("write-selection-pasteboard"),
+            state_revision: 2,
+            latest_generation: 9,
+            last_valid_generation: 8,
+            visible_generation: Some(8),
+            pending_recovery: FailurePendingRecovery::CopySelection,
+            terminal_input_usable: true,
+            session_attached: true,
+            resource_staged_count: 0,
+            resource_staged_bytes: 0,
+            resource_rolled_back_count: 0,
+            resource_rolled_back_bytes: 0,
+        };
+        let result = format_failure_action_result(&event);
+        assert!(result.starts_with("schema\tspaceterm.acceptance.failure-action-result/v2\n"));
+        assert!(result.contains("failure.class\tplatform\n"));
+        for canary in [
+            "terminal canary",
+            "clipboard canary",
+            "/private/path/canary",
+            "environment canary",
+        ] {
+            assert!(!result.contains(canary));
+        }
     }
 }

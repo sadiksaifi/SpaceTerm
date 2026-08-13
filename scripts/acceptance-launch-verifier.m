@@ -28,14 +28,24 @@ static const NSUInteger kMaximumRuntimeSampleBytes = 32 * 1024 * 1024;
 static const NSUInteger kMaximumRuntimeEventBytes = 16 * 1024 * 1024;
 static const uint64_t kRuntimeSampleIntervalMilliseconds = 1000;
 static const uint64_t kRuntimeTransitionCapacity = 64;
+static const uint64_t kMaximumFailureActions = 64;
+static const NSUInteger kMaximumFailureActionBytes = 256 * 1024;
 static const NSTimeInterval kProofTimeoutSeconds = 30.0;
 static volatile sig_atomic_t interrupted = 0;
+
+static NSString *make_nonce(void);
+static NSString *lower_sha256(NSData *data);
+static bool publish_exclusive(NSString *output, NSData *data, bool *published);
 
 static NSString *const kRuntimeSchema = @"spaceterm.acceptance.runtime-stream/v1";
 static NSString *const kRuntimeTickSchema = @"spaceterm.acceptance.runtime-tick/v1";
 static NSString *const kRuntimeCompleteSchema = @"spaceterm.acceptance.runtime-complete/v1";
 static NSString *const kRuntimeAckSchema = @"spaceterm.acceptance.runtime-ack/v1";
 static NSString *const kRuntimeClosedSchema = @"spaceterm.acceptance.runtime-closed/v1";
+static NSString *const kFailureActionSchema = @"spaceterm.acceptance.failure-action/v1";
+static NSString *const kFailureActionResultSchema =
+    @"spaceterm.acceptance.failure-action-result/v2";
+static NSString *const kAXSubjectSchema = @"spaceterm.acceptance.ax-subject/v1";
 
 static NSString *const kRuntimeSampleHeader =
     @"sequence\tcontinuous_ns\tworker_generation\tscreens_published\tscreens_enqueued\t"
@@ -48,6 +58,12 @@ static NSString *const kRuntimeSampleHeader =
      "pty_pixel_width\tpty_pixel_height\tterminal_inputs_accepted\tlifecycle\tobserver_drops\n";
 static NSString *const kRuntimeEventHeader =
     @"sequence\tcontinuous_ns\tkind\tgeneration\taux0\taux1\n";
+static NSString *const kFailureActionHeader =
+    @"request_id\tsequence\tcase_id\taction\tresult\tpane_id\tpane_state\t"
+     "failure_class\tfailure_recoverability\tfailure_operation\tstate_revision\t"
+     "latest_generation\tlast_valid_generation\tvisible_generation\tpending_recovery\t"
+     "terminal_input_usable\tsession_attached\tresource_staged_count\t"
+     "resource_staged_bytes\tresource_rolled_back_count\tresource_rolled_back_bytes\n";
 
 typedef struct {
     __strong NSString *app;
@@ -59,6 +75,7 @@ typedef struct {
     __strong NSString *teamIdentifier;
     __strong NSString *home;
     __strong NSString *output;
+    __strong NSString *failureControl;
     bool replay;
 } Options;
 
@@ -77,6 +94,24 @@ typedef struct {
     bool hasPendingSampleInterval;
     bool observedFailure;
 } RuntimeCapture;
+
+typedef struct {
+    __strong NSMutableData *records;
+    __strong NSString *pendingRequestID;
+    __strong NSString *pendingCaseID;
+    __strong NSString *pendingClientToken;
+    uint64_t pendingSequence;
+    uint64_t nextSequence;
+    uint64_t resultCount;
+    uint64_t pendingPaneID;
+    uint64_t lastStateRevision;
+    uint64_t injectedLatest;
+    uint64_t injectedLastValid;
+    uint64_t injectedVisible;
+    uint64_t injectedResourceCount;
+    uint64_t injectedResourceBytes;
+    NSUInteger pendingPhase;
+} FailureCapture;
 
 static void handle_signal(int signal_number) {
     (void)signal_number;
@@ -125,8 +160,8 @@ static NSString *canonical_path(NSString *path) {
 
 static bool parse_options(int argc, const char *argv[], Options *options) {
     NSMutableDictionary<NSString *, NSString *> *values = [NSMutableDictionary dictionary];
-    if (argc != 21) {
-        return report(@"expected ten named option/value pairs");
+    if (argc != 23) {
+        return report(@"expected eleven named option/value pairs");
     }
     for (int index = 1; index < argc; index += 2) {
         NSString *key = [NSString stringWithUTF8String:argv[index]];
@@ -138,7 +173,8 @@ static bool parse_options(int argc, const char *argv[], Options *options) {
     }
     NSArray<NSString *> *keys = @[
         @"--app", @"--executable", @"--run-id", @"--app-sha256", @"--cdhash",
-        @"--identifier", @"--team-identifier", @"--home", @"--output", @"--mode"
+        @"--identifier", @"--team-identifier", @"--home", @"--output", @"--mode",
+        @"--failure-control"
     ];
     for (NSString *key in keys) {
         if (values[key] == nil) {
@@ -157,6 +193,13 @@ static bool parse_options(int argc, const char *argv[], Options *options) {
         !is_run_id(values[@"--run-id"]) || !is_lower_hex(values[@"--app-sha256"], 64)) {
         return report(@"invalid path, run ID, or application hash");
     }
+    NSString *failureControl = values[@"--failure-control"];
+    if (![failureControl isEqualToString:@"none"] && !failureControl.isAbsolutePath) {
+        return report(@"failure control must be none or an absolute path");
+    }
+    if ([mode isEqualToString:@"replay"] && ![failureControl isEqualToString:@"none"]) {
+        return report(@"failure control is unavailable during replay");
+    }
     NSCharacterSet *not_hex =
         [[NSCharacterSet characterSetWithCharactersInString:@"0123456789abcdefABCDEF"] invertedSet];
     if (values[@"--cdhash"].length == 0 ||
@@ -173,6 +216,7 @@ static bool parse_options(int argc, const char *argv[], Options *options) {
     options->teamIdentifier = values[@"--team-identifier"];
     options->home = values[@"--home"];
     options->output = values[@"--output"];
+    options->failureControl = failureControl;
     options->replay = [mode isEqualToString:@"replay"];
     return true;
 }
@@ -385,15 +429,23 @@ static bool positive_number(NSString *value) {
     return [scanner scanDouble:&number] && scanner.isAtEnd && isfinite(number) && number > 0;
 }
 
-static NSData *challenge_data(NSString *nonce, const Options *options) {
+static NSData *challenge_data(
+    NSString *nonce,
+    const Options *options,
+    const struct stat *executable
+) {
     NSString *challenge = [NSString stringWithFormat:
-        @"schema\tspaceterm.acceptance.native-launch-challenge/v2\n"
+        @"schema\tspaceterm.acceptance.native-launch-challenge/v5\n"
          "launch.nonce\t%@\nrun.id\t%@\npackage.app.sha256\t%@\n"
+         "package.app.executable.device\t%llu\npackage.app.executable.inode\t%llu\n"
          "runtime.schema\t%@\nruntime.sample_interval_ms\t%llu\n"
-         "runtime.transition_capacity\t%llu\n",
-        nonce, options->runID, options->appSHA256, kRuntimeSchema,
+         "runtime.transition_capacity\t%llu\nfailure.action.schema\t%@\n"
+         "failure.action.enabled\t%@\n",
+        nonce, options->runID, options->appSHA256, (unsigned long long)executable->st_dev,
+        (unsigned long long)executable->st_ino, kRuntimeSchema,
         (unsigned long long)kRuntimeSampleIntervalMilliseconds,
-        (unsigned long long)kRuntimeTransitionCapacity];
+        (unsigned long long)kRuntimeTransitionCapacity, kFailureActionSchema,
+        [options->failureControl isEqualToString:@"none"] ? @"false" : @"true"];
     return [challenge dataUsingEncoding:NSUTF8StringEncoding];
 }
 
@@ -408,7 +460,9 @@ static NSDictionary<NSString *, NSString *> *validate_response(
     NSArray<NSString *> *keys = @[
         @"schema", @"observation.source", @"launch.nonce", @"run.id",
         @"package.app.sha256", @"runtime.schema", @"runtime.sample_interval_ms",
-        @"runtime.transition_capacity", @"process.pid", @"process.executable.path",
+        @"runtime.transition_capacity", @"failure.action.schema", @"failure.action.enabled",
+        @"process.pid",
+        @"process.executable.path",
         @"process.executable.device", @"process.executable.inode", @"terminal_font_selected",
         @"initial_grid.rows", @"initial_grid.columns", @"initial_grid.logical_width",
         @"initial_grid.logical_height", @"initial_grid.backing_pixel_width",
@@ -420,7 +474,7 @@ static NSDictionary<NSString *, NSString *> *validate_response(
     NSString *expected_inode = [NSString stringWithFormat:@"%llu",
         (unsigned long long)expected_stat->st_ino];
     if (records == nil ||
-        ![records[@"schema"] isEqualToString:@"spaceterm.acceptance.native-launch-proof/v3"] ||
+        ![records[@"schema"] isEqualToString:@"spaceterm.acceptance.native-launch-proof/v5"] ||
         ![records[@"observation.source"] isEqualToString:@"production-app"] ||
         ![records[@"launch.nonce"] isEqualToString:nonce] ||
         ![records[@"run.id"] isEqualToString:options->runID] ||
@@ -428,6 +482,9 @@ static NSDictionary<NSString *, NSString *> *validate_response(
         ![records[@"runtime.schema"] isEqualToString:kRuntimeSchema] ||
         ![records[@"runtime.sample_interval_ms"] isEqualToString:@"1000"] ||
         ![records[@"runtime.transition_capacity"] isEqualToString:@"64"] ||
+        ![records[@"failure.action.schema"] isEqualToString:kFailureActionSchema] ||
+        ![records[@"failure.action.enabled"] isEqualToString:
+            [options->failureControl isEqualToString:@"none"] ? @"false" : @"true"] ||
         !positive_integer(records[@"process.pid"]) ||
         records[@"process.pid"].intValue != peer_pid ||
         ![records[@"process.executable.path"] isEqualToString:expected_path] ||
@@ -683,17 +740,404 @@ static bool initialize_runtime_capture(RuntimeCapture *capture) {
         append_bounded(capture->events, kRuntimeEventHeader, kMaximumRuntimeEventBytes);
 }
 
+static bool is_failure_case(NSString *value) {
+    return [@[
+        @"presentation-invalid-scale", @"presentation-glyph",
+        @"renderer-image-preflight", @"renderer-resource-before-sync",
+        @"renderer-resource-after-staging", @"pasteboard-write", @"pty-fatal",
+        @"emulator-fatal", @"normal-exit-control"
+    ] containsObject:value];
+}
+
+static int create_failure_control(NSString *path) {
+    if ([path isEqualToString:@"none"]) {
+        return -1;
+    }
+    NSString *parent = path.stringByDeletingLastPathComponent;
+    struct stat parent_status = {0};
+    struct stat existing = {0};
+    if (lstat(parent.fileSystemRepresentation, &parent_status) != 0 ||
+        !S_ISDIR(parent_status.st_mode) || S_ISLNK(parent_status.st_mode) ||
+        parent_status.st_uid != geteuid() || (parent_status.st_mode & 077) != 0 ||
+        lstat(path.fileSystemRepresentation, &existing) == 0 || errno != ENOENT ||
+        mkfifo(path.fileSystemRepresentation, 0600) != 0) {
+        report(@"failure control path is not a new FIFO in an owner-private directory");
+        return -2;
+    }
+    int fd = open(path.fileSystemRepresentation, O_RDWR | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW);
+    struct stat fifo_status = {0};
+    if (fd < 0 || fstat(fd, &fifo_status) != 0 || !S_ISFIFO(fifo_status.st_mode) ||
+        fifo_status.st_uid != geteuid() || (fifo_status.st_mode & 077) != 0) {
+        if (fd >= 0) close(fd);
+        unlink(path.fileSystemRepresentation);
+        report(@"failure control FIFO could not be authenticated");
+        return -2;
+    }
+    return fd;
+}
+
+static bool initialize_failure_capture(FailureCapture *capture) {
+    capture->records = [NSMutableData data];
+    return append_bounded(
+        capture->records, kFailureActionHeader, kMaximumFailureActionBytes);
+}
+
+static int forward_failure_control(
+    int controlFD,
+    int peerFD,
+    NSString *nonce,
+    const Options *options,
+    FailureCapture *capture
+) {
+    if (controlFD < 0) {
+        return 0;
+    }
+    uint8_t bytes[256] = {0};
+    ssize_t count = read(controlFD, bytes, sizeof(bytes));
+    if (count < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+        return 0;
+    }
+    if (count <= 0 || count >= (ssize_t)sizeof(bytes) || bytes[count - 1] != '\n' ||
+        memchr(bytes, '\n', (size_t)count - 1) != NULL || capture->pendingRequestID != nil ||
+        capture->nextSequence >= kMaximumFailureActions) {
+        return -1;
+    }
+    NSData *commandData = [NSData dataWithBytes:bytes length:(NSUInteger)count - 1];
+    NSString *command = [[NSString alloc] initWithData:commandData encoding:NSUTF8StringEncoding];
+    NSArray<NSString *> *parts = [command componentsSeparatedByString:@"\t"];
+    NSString *caseID = parts.count == 2 ? parts[0] : nil;
+    NSString *clientToken = parts.count == 2 ? parts[1] : nil;
+    NSString *requestID = make_nonce();
+    if (!is_failure_case(caseID) || !is_lower_hex(clientToken, 64) || requestID == nil) {
+        return -1;
+    }
+    NSString *frame = [NSString stringWithFormat:
+        @"schema\t%@\nlaunch.nonce\t%@\nrun.id\t%@\npackage.app.sha256\t%@\n"
+         "request.id\t%@\nsequence\t%llu\ncase.id\t%@\nrequest.once\ttrue\n",
+        kFailureActionSchema, nonce, options->runID, options->appSHA256, requestID,
+        (unsigned long long)capture->nextSequence, caseID];
+    NSData *frameData = [frame dataUsingEncoding:NSUTF8StringEncoding];
+    if (frameData == nil || !write_frame(peerFD, frameData)) {
+        return -1;
+    }
+    capture->pendingRequestID = requestID;
+    capture->pendingCaseID = caseID;
+    capture->pendingClientToken = clientToken;
+    capture->pendingSequence = capture->nextSequence;
+    capture->nextSequence++;
+    capture->pendingPhase = 0;
+    return 1;
+}
+
+static bool value_is_one_of(NSString *value, NSArray<NSString *> *allowed) {
+    return value != nil && [allowed containsObject:value];
+}
+
+static bool validate_failure_state(
+    NSDictionary<NSString *, NSString *> *records,
+    NSString *caseID,
+    NSString *action
+) {
+    NSString *class = records[@"failure.class"];
+    NSString *recoverability = records[@"failure.recoverability"];
+    NSString *operation = records[@"failure.operation"];
+    NSString *pending = records[@"pending_recovery"];
+    if ([action isEqualToString:@"armed"] ||
+        ([action isEqualToString:@"completed"] &&
+            ([caseID isEqualToString:@"normal-exit-control"] ||
+                ![caseID hasSuffix:@"fatal"]))) {
+        return [class isEqualToString:@"none"] &&
+            [recoverability isEqualToString:@"none"] &&
+            [operation isEqualToString:@"none"] && [pending isEqualToString:@"none"];
+    }
+    if ([caseID isEqualToString:@"presentation-invalid-scale"]) {
+        return [class isEqualToString:@"presentation"] &&
+            [recoverability isEqualToString:@"recoverable"] &&
+            [operation isEqualToString:@"update-backing-scale"] &&
+            [pending isEqualToString:@"presentation"];
+    }
+    if ([caseID isEqualToString:@"presentation-glyph"]) {
+        return [class isEqualToString:@"presentation"] &&
+            [recoverability isEqualToString:@"recoverable"] &&
+            [operation isEqualToString:@"paint-terminal-presentation"] &&
+            [pending isEqualToString:@"presentation"];
+    }
+    if ([caseID isEqualToString:@"renderer-image-preflight"]) {
+        return [class isEqualToString:@"resource"] &&
+            [recoverability isEqualToString:@"recoverable"] &&
+            [operation isEqualToString:@"paint-terminal-graphics"] &&
+            [pending isEqualToString:@"renderer-resources"];
+    }
+    if ([caseID hasPrefix:@"renderer-resource-"]) {
+        return [class isEqualToString:@"resource"] &&
+            [recoverability isEqualToString:@"recoverable"] &&
+            [operation isEqualToString:@"prepare-terminal-graphics"] &&
+            [pending isEqualToString:@"renderer-resources"];
+    }
+    if ([caseID isEqualToString:@"pasteboard-write"]) {
+        return [class isEqualToString:@"platform"] &&
+            [recoverability isEqualToString:@"recoverable"] &&
+            [operation isEqualToString:@"write-selection-pasteboard"] &&
+            [pending isEqualToString:@"copy-selection"];
+    }
+    if ([caseID isEqualToString:@"pty-fatal"]) {
+        return [class isEqualToString:@"pty"] && [recoverability isEqualToString:@"fatal"] &&
+            [operation isEqualToString:@"read-shell-output"] &&
+            [pending isEqualToString:@"none"];
+    }
+    if ([caseID isEqualToString:@"emulator-fatal"]) {
+        return [class isEqualToString:@"emulator"] &&
+            [recoverability isEqualToString:@"fatal"] &&
+            [operation isEqualToString:@"session-runtime"] &&
+            [pending isEqualToString:@"none"];
+    }
+    return false;
+}
+
+static bool write_failure_status(int fd, NSString *status, NSString *clientToken) {
+    if (fd < 0) {
+        return true;
+    }
+    NSData *record = [[NSString stringWithFormat:@"%@\t%@\n", status, clientToken]
+        dataUsingEncoding:NSUTF8StringEncoding];
+    return record != nil &&
+        write(fd, record.bytes, record.length) == (ssize_t)record.length;
+}
+
+static bool parse_failure_result_with_status(
+    NSData *data,
+    FailureCapture *capture,
+    int statusFD
+) {
+    NSArray<NSString *> *keys = @[
+        @"schema", @"request.id", @"sequence", @"case.id", @"action", @"result",
+        @"pane.id", @"pane.state", @"failure.class", @"failure.recoverability",
+        @"failure.operation", @"state.revision", @"latest.generation",
+        @"last_valid.generation", @"visible.generation", @"pending_recovery",
+        @"terminal_input_usable", @"session_attached", @"resource.staged_count",
+        @"resource.staged_bytes", @"resource.rolled_back_count",
+        @"resource.rolled_back_bytes"
+    ];
+    NSDictionary<NSString *, NSString *> *records = parse_records(data, keys);
+    uint64_t sequence = 0;
+    uint64_t paneID = 0;
+    uint64_t stateRevision = 0;
+    uint64_t latest = 0;
+    uint64_t lastValid = 0;
+    uint64_t visible = 0;
+    uint64_t inputUsable = 0;
+    uint64_t sessionAttached = 0;
+    uint64_t stagedCount = 0;
+    uint64_t stagedBytes = 0;
+    uint64_t rolledBackCount = 0;
+    uint64_t rolledBackBytes = 0;
+    NSString *action = records[@"action"];
+    NSString *result = records[@"result"];
+    bool visibleAvailable = ![records[@"visible.generation"] isEqualToString:@"unavailable"];
+    if (records == nil || capture->pendingRequestID == nil ||
+        ![records[@"schema"] isEqualToString:kFailureActionResultSchema] ||
+        ![records[@"request.id"] isEqualToString:capture->pendingRequestID] ||
+        ![records[@"case.id"] isEqualToString:capture->pendingCaseID] ||
+        !canonical_uint64(records[@"sequence"], &sequence) ||
+        sequence != capture->pendingSequence || !canonical_uint64(records[@"pane.id"], &paneID) ||
+        !canonical_uint64(records[@"state.revision"], &stateRevision) ||
+        !canonical_uint64(records[@"latest.generation"], &latest) ||
+        !canonical_uint64(records[@"last_valid.generation"], &lastValid) ||
+        (visibleAvailable && !canonical_uint64(records[@"visible.generation"], &visible)) ||
+        !canonical_bool_digit(records[@"terminal_input_usable"], &inputUsable) ||
+        !canonical_bool_digit(records[@"session_attached"], &sessionAttached) ||
+        !canonical_uint64(records[@"resource.staged_count"], &stagedCount) ||
+        !canonical_uint64(records[@"resource.staged_bytes"], &stagedBytes) ||
+        !canonical_uint64(records[@"resource.rolled_back_count"], &rolledBackCount) ||
+        !canonical_uint64(records[@"resource.rolled_back_bytes"], &rolledBackBytes) ||
+        stagedCount > 65536 || rolledBackCount > 65536 ||
+        stagedBytes > 402653184 || rolledBackBytes > 402653184 ||
+        !value_is_one_of(records[@"pane.state"], @[@"running", @"failed", @"exited"]) ||
+        !value_is_one_of(action, @[@"armed", @"injected", @"retry-requested", @"completed"]) ||
+        !value_is_one_of(result, @[@"accepted", @"failed-state", @"recovered", @"closed", @"exited"]) ||
+        latest < lastValid || (visibleAvailable && visible > latest) ||
+        !validate_failure_state(records, capture->pendingCaseID, action)) {
+        return false;
+    }
+    if ((capture->pendingPhase != 0 && paneID != capture->pendingPaneID) ||
+        (capture->pendingPhase != 0 && stateRevision < capture->lastStateRevision)) {
+        return false;
+    }
+
+    BOOL phaseStateValid = NO;
+    if ([action isEqualToString:@"armed"] && [result isEqualToString:@"accepted"]) {
+        phaseStateValid = [records[@"pane.state"] isEqualToString:@"running"] &&
+            sessionAttached == 1;
+    } else if ([action isEqualToString:@"injected"] &&
+        [result isEqualToString:@"failed-state"]) {
+        phaseStateValid = [records[@"pane.state"] isEqualToString:@"failed"] &&
+            sessionAttached == 1 &&
+            (![capture->pendingCaseID hasSuffix:@"fatal"] || inputUsable == 0) &&
+            (![capture->pendingCaseID isEqualToString:@"pasteboard-write"] || inputUsable == 1);
+    } else if ([action isEqualToString:@"retry-requested"] &&
+        [result isEqualToString:@"accepted"]) {
+        phaseStateValid = [records[@"pane.state"] isEqualToString:@"failed"] &&
+            sessionAttached == 1;
+    } else if ([action isEqualToString:@"completed"] &&
+        [result isEqualToString:@"recovered"]) {
+        phaseStateValid = [records[@"pane.state"] isEqualToString:@"running"] &&
+            sessionAttached == 1;
+    } else if ([action isEqualToString:@"completed"] &&
+        [result isEqualToString:@"closed"]) {
+        phaseStateValid = [records[@"pane.state"] isEqualToString:@"failed"] &&
+            sessionAttached == 0 && inputUsable == 0;
+    } else if ([action isEqualToString:@"completed"] &&
+        [result isEqualToString:@"exited"]) {
+        phaseStateValid = [records[@"pane.state"] isEqualToString:@"exited"] &&
+            sessionAttached == 1;
+    }
+    if (!phaseStateValid) {
+        return false;
+    }
+
+    NSUInteger nextPhase = capture->pendingPhase;
+    if (capture->pendingPhase == 0 && [action isEqualToString:@"armed"] &&
+        [result isEqualToString:@"accepted"]) {
+        nextPhase = 1;
+    } else if (capture->pendingPhase == 1 && [action isEqualToString:@"injected"] &&
+        [result isEqualToString:@"failed-state"]) {
+        nextPhase = 2;
+    } else if (capture->pendingPhase == 1 &&
+        [capture->pendingCaseID isEqualToString:@"normal-exit-control"] &&
+        [action isEqualToString:@"completed"] && [result isEqualToString:@"exited"]) {
+        nextPhase = 4;
+    } else if (capture->pendingPhase == 2 && [action isEqualToString:@"retry-requested"] &&
+        [result isEqualToString:@"accepted"]) {
+        nextPhase = 3;
+    } else if (capture->pendingPhase == 2 && [capture->pendingCaseID hasSuffix:@"fatal"] &&
+        [action isEqualToString:@"completed"] && [result isEqualToString:@"closed"]) {
+        nextPhase = 4;
+    } else if (capture->pendingPhase == 3 && [action isEqualToString:@"completed"] &&
+        [result isEqualToString:@"recovered"]) {
+        nextPhase = 4;
+    } else {
+        return false;
+    }
+
+    if ([action isEqualToString:@"injected"] && ![capture->pendingCaseID hasSuffix:@"fatal"] &&
+        (!visibleAvailable || visible != lastValid)) {
+        return false;
+    }
+    if ([action isEqualToString:@"injected"]) {
+        capture->injectedLatest = latest;
+        capture->injectedLastValid = lastValid;
+        capture->injectedVisible = visible;
+    }
+    BOOL afterStaging = [capture->pendingCaseID isEqualToString:
+        @"renderer-resource-after-staging"];
+    if ((!afterStaging && (stagedCount != 0 || stagedBytes != 0 ||
+            rolledBackCount != 0 || rolledBackBytes != 0)) ||
+        (afterStaging && [action isEqualToString:@"armed"] &&
+            (stagedCount != 0 || stagedBytes != 0 || rolledBackCount != 0 ||
+                rolledBackBytes != 0)) ||
+        (afterStaging && ![action isEqualToString:@"armed"] &&
+            (stagedCount == 0 || stagedBytes == 0 || rolledBackCount != stagedCount ||
+                rolledBackBytes != stagedBytes))) {
+        return false;
+    }
+    if (afterStaging && [action isEqualToString:@"injected"]) {
+        capture->injectedResourceCount = stagedCount;
+        capture->injectedResourceBytes = stagedBytes;
+    } else if (afterStaging && ![action isEqualToString:@"armed"] &&
+        (stagedCount != capture->injectedResourceCount ||
+            stagedBytes != capture->injectedResourceBytes)) {
+        return false;
+    }
+    BOOL pasteboard = [capture->pendingCaseID isEqualToString:@"pasteboard-write"];
+    if ([action isEqualToString:@"retry-requested"] &&
+        ((!pasteboard &&
+             (latest != capture->injectedLatest || lastValid != capture->injectedLastValid ||
+                 !visibleAvailable || visible != capture->injectedVisible)) ||
+            (pasteboard &&
+                (latest < capture->injectedLatest || lastValid < capture->injectedLastValid ||
+                    !visibleAvailable || visible < capture->injectedVisible ||
+                    visible != lastValid || inputUsable != 1 || sessionAttached != 1)))) {
+        return false;
+    }
+    if ([action isEqualToString:@"completed"] &&
+        [result isEqualToString:@"recovered"] &&
+        ((!pasteboard &&
+             (!visibleAvailable || latest != capture->injectedLatest || lastValid != latest ||
+                 visible != latest)) ||
+            (pasteboard &&
+                (!visibleAvailable || latest < capture->injectedLatest ||
+                    lastValid < capture->injectedLastValid || lastValid > latest ||
+                    visible < capture->injectedVisible || visible != lastValid ||
+                    inputUsable != 1 || sessionAttached != 1)))) {
+        return false;
+    }
+    if ([action isEqualToString:@"completed"] && [capture->pendingCaseID hasSuffix:@"fatal"] &&
+        (sessionAttached != 0 || ![records[@"pane.state"] isEqualToString:@"failed"])) {
+        return false;
+    }
+    NSString *row = [NSString stringWithFormat:
+        @"%@\t%@\t%@\t%@\t%@\t%@\t%@\t%@\t%@\t%@\t%@\t%@\t%@\t%@\t%@\t%@\t%@\t%@\t%@\t%@\t%@\n",
+        records[@"request.id"], records[@"sequence"], records[@"case.id"], action, result,
+        records[@"pane.id"], records[@"pane.state"], records[@"failure.class"],
+        records[@"failure.recoverability"], records[@"failure.operation"],
+        records[@"state.revision"], records[@"latest.generation"],
+        records[@"last_valid.generation"], records[@"visible.generation"],
+        records[@"pending_recovery"], records[@"terminal_input_usable"],
+        records[@"session_attached"], records[@"resource.staged_count"],
+        records[@"resource.staged_bytes"], records[@"resource.rolled_back_count"],
+        records[@"resource.rolled_back_bytes"]];
+    if (!append_bounded(capture->records, row, kMaximumFailureActionBytes)) {
+        return false;
+    }
+    if (([action isEqualToString:@"armed"] &&
+            !write_failure_status(statusFD, @"accepted", capture->pendingClientToken)) ||
+        ([action isEqualToString:@"completed"] &&
+            !write_failure_status(statusFD, @"completed", capture->pendingClientToken))) {
+        return false;
+    }
+    capture->resultCount++;
+    capture->pendingPaneID = paneID;
+    capture->lastStateRevision = stateRevision;
+    capture->pendingPhase = nextPhase;
+    if (nextPhase == 4) {
+        capture->pendingRequestID = nil;
+        capture->pendingCaseID = nil;
+        capture->pendingClientToken = nil;
+        capture->pendingPhase = 0;
+        capture->pendingPaneID = 0;
+        capture->lastStateRevision = 0;
+        capture->injectedLatest = 0;
+        capture->injectedLastValid = 0;
+        capture->injectedVisible = 0;
+        capture->injectedResourceCount = 0;
+        capture->injectedResourceBytes = 0;
+    }
+    return capture->resultCount <= kMaximumFailureActions * 4;
+}
+
+static bool parse_failure_result(NSData *data, FailureCapture *capture) {
+    return parse_failure_result_with_status(data, capture, -1);
+}
+
 static bool read_runtime_stream(
     int fd,
     RuntimeCapture *capture,
+    FailureCapture *failure,
+    int failureControlFD,
+    int failureStatusFD,
+    NSString *nonce,
+    const Options *options,
     NSString **status,
     NSDate *deadline
 ) {
-    if (!initialize_runtime_capture(capture)) {
+    if (!initialize_runtime_capture(capture) || !initialize_failure_capture(failure)) {
         return false;
     }
     while (!interrupted) {
         if (deadline != nil && [deadline timeIntervalSinceNow] <= 0) {
+            return false;
+        }
+        if (forward_failure_control(failureControlFD, fd, nonce, options, failure) < 0) {
             return false;
         }
         NSData *frame = read_frame(fd);
@@ -706,7 +1150,12 @@ static bool read_runtime_stream(
                 return false;
             }
         } else if ([text hasPrefix:@"schema\tspaceterm.acceptance.runtime-complete/v1\n"]) {
-            return parse_runtime_complete(frame, capture, status);
+            return failure->pendingRequestID == nil &&
+                parse_runtime_complete(frame, capture, status);
+        } else if ([text hasPrefix:@"schema\tspaceterm.acceptance.failure-action-result/v2\n"]) {
+            if (!parse_failure_result_with_status(frame, failure, failureStatusFD)) {
+                return false;
+            }
         } else {
             return false;
         }
@@ -857,6 +1306,8 @@ static NSString *final_observation(
         @[@"runtime.schema", response[@"runtime.schema"]],
         @[@"runtime.sample_interval_ms", response[@"runtime.sample_interval_ms"]],
         @[@"runtime.transition_capacity", response[@"runtime.transition_capacity"]],
+        @[@"failure.action.schema", response[@"failure.action.schema"]],
+        @[@"failure.action.enabled", response[@"failure.action.enabled"]],
         @[@"process.pid", response[@"process.pid"]],
         @[@"process.pidversion", [NSString stringWithFormat:@"%d", pidversion]],
         @[@"process.executable.path", response[@"process.executable.path"]],
@@ -882,6 +1333,82 @@ static NSString *final_observation(
     return result;
 }
 
+static NSString *final_observation_with_closure(
+    NSString *baseObservation,
+    NSString *provisionalObservationSHA256,
+    NSString *metadataSHA256,
+    NSString *failureActionsSHA256,
+    uint64_t failureRequestCount,
+    uint64_t failureResultCount
+) {
+    NSString *prefix = [baseObservation substringToIndex:
+        baseObservation.length - @"observation.complete\ttrue\n".length];
+    return [prefix stringByAppendingFormat:
+        @"provisional.observation.sha256\t%@\n"
+         "runtime.metadata.schema\tspaceterm.acceptance.runtime-observation-metadata/v3\n"
+         "runtime.metadata.path\truntime-metadata.tsv\nruntime.metadata.sha256\t%@\n"
+         "failure.result.schema\t%@\nfailure.actions.path\tfailure-actions.tsv\n"
+         "failure.actions.sha256\t%@\nfailure.request_count\t%llu\n"
+         "failure.result_count\t%llu\nobservation.complete\ttrue\n",
+        provisionalObservationSHA256, metadataSHA256, kFailureActionResultSchema,
+        failureActionsSHA256,
+        (unsigned long long)failureRequestCount, (unsigned long long)failureResultCount];
+}
+
+static NSData *ax_subject_identity(
+    const Options *options,
+    NSString *nonce,
+    NSString *appPath,
+    NSString *executablePath,
+    pid_t pid,
+    const struct proc_bsdinfo *process,
+    const struct stat *executable,
+    const struct statfs *filesystem,
+    NSString *cdhash,
+    NSString *identifier,
+    NSString *team,
+    NSString *launchObservationSHA256
+) {
+    NSBundle *bundle = [NSBundle bundleWithPath:appPath];
+    NSString *bundleIdentifier = bundle.bundleIdentifier;
+    if (bundleIdentifier.length == 0) {
+        return nil;
+    }
+    NSArray<NSArray<NSString *> *> *records = @[
+        @[@"schema", kAXSubjectSchema],
+        @[@"run.id", options->runID],
+        @[@"launch.nonce", nonce],
+        @[@"package.app.sha256", options->appSHA256],
+        @[@"package.app.path", appPath],
+        @[@"package.app.bundle.identifier", bundleIdentifier],
+        @[@"package.app.executable.path", executablePath],
+        @[@"process.pid", [NSString stringWithFormat:@"%d", pid]],
+        @[@"process.start.tv-sec", [NSString stringWithFormat:@"%llu",
+            (unsigned long long)process->pbi_start_tvsec]],
+        @[@"process.start.tv-usec", [NSString stringWithFormat:@"%llu",
+            (unsigned long long)process->pbi_start_tvusec]],
+        @[@"process.executable.device", [NSString stringWithFormat:@"%llu",
+            (unsigned long long)executable->st_dev]],
+        @[@"process.executable.inode", [NSString stringWithFormat:@"%llu",
+            (unsigned long long)executable->st_ino]],
+        @[@"process.executable.fsid", [NSString stringWithFormat:@"%d:%d",
+            filesystem->f_fsid.val[0], filesystem->f_fsid.val[1]]],
+        @[@"process.signature.cdhash", cdhash.lowercaseString],
+        @[@"process.signature.identifier", identifier],
+        @[@"process.signature.team-identifier", team],
+        @[@"process.mount.read-only", @"true"],
+        @[@"launch.controller", @"acceptance-launch-verifier"],
+        @[@"launch.source", @"mounted-dmg"],
+        @[@"launch.observation.sha256", launchObservationSHA256],
+        @[@"launch.observation.complete", @"true"],
+    ];
+    NSMutableString *result = [NSMutableString string];
+    for (NSArray<NSString *> *record in records) {
+        [result appendFormat:@"%@\t%@\n", record[0], encode_value(record[1])];
+    }
+    return [result dataUsingEncoding:NSUTF8StringEncoding];
+}
+
 static NSString *lower_sha256(NSData *data) {
     uint8_t digest[CC_SHA256_DIGEST_LENGTH];
 #pragma clang diagnostic push
@@ -903,10 +1430,12 @@ static NSData *runtime_metadata(
     RuntimeCapture *capture,
     NSString *status,
     NSString *samplesSHA256,
-    NSString *eventsSHA256
+    NSString *eventsSHA256,
+    FailureCapture *failure,
+    NSString *failureSHA256
 ) {
     NSArray<NSArray<NSString *> *> *records = @[
-        @[@"schema", @"spaceterm.acceptance.runtime-observation-metadata/v1"],
+        @[@"schema", @"spaceterm.acceptance.runtime-observation-metadata/v3"],
         @[@"observation.source", @"production-app"],
         @[@"run.id", options->runID],
         @[@"package.app.sha256", options->appSHA256],
@@ -915,6 +1444,15 @@ static NSData *runtime_metadata(
         @[@"runtime.samples.sha256", samplesSHA256],
         @[@"runtime.events.path", @"runtime-events.tsv"],
         @[@"runtime.events.sha256", eventsSHA256],
+        @[@"failure.action.schema", kFailureActionSchema],
+        @[@"failure.action.enabled", response[@"failure.action.enabled"]],
+        @[@"failure.result.schema", kFailureActionResultSchema],
+        @[@"failure.actions.path", @"failure-actions.tsv"],
+        @[@"failure.actions.sha256", failureSHA256],
+        @[@"failure.request_count", [NSString stringWithFormat:@"%llu",
+            (unsigned long long)failure->nextSequence]],
+        @[@"failure.result_count", [NSString stringWithFormat:@"%llu",
+            (unsigned long long)failure->resultCount]],
         @[@"observer.started_continuous_ns", [NSString stringWithFormat:@"%llu",
             (unsigned long long)capture->firstContinuousNS]],
         @[@"observer.ended_continuous_ns", [NSString stringWithFormat:@"%llu",
@@ -1005,6 +1543,8 @@ static int run_verifier(const Options *options) {
     int executable_fd = -1;
     int listener = -1;
     int peer = -1;
+    int failure_control_fd = -1;
+    int failure_status_fd = -1;
     char socket_directory[] = "/tmp/spaceterm-acceptance.XXXXXX";
     NSString *socket_path = nil;
     NSRunningApplication *application = nil;
@@ -1030,25 +1570,39 @@ static int run_verifier(const Options *options) {
     NSData *response_data = nil;
     NSDictionary<NSString *, NSString *> *response = nil;
     NSString *observation = nil;
+    NSString *provisional_observation = nil;
     RuntimeCapture runtime = {0};
+    FailureCapture failure = {0};
     NSString *runtime_status = nil;
     NSString *runtime_samples_path = nil;
     NSString *runtime_events_path = nil;
     NSString *runtime_metadata_path = nil;
+    NSString *failure_actions_path = nil;
     NSString *samples_sha256 = nil;
     NSString *events_sha256 = nil;
+    NSString *failure_actions_sha256 = nil;
+    NSString *metadata_sha256 = nil;
     NSData *metadata = nil;
     NSData *observation_data = nil;
+    NSData *provisional_observation_data = nil;
+    NSData *ax_subject_data = nil;
+    NSString *provisional_observation_sha256 = nil;
     NSData *ack = nil;
     NSString *closed = nil;
     NSDate *runtime_deadline = nil;
     NSString *output_parent = nil;
+    NSString *provisional_observation_path = nil;
+    NSString *ax_subject_path = nil;
+    NSString *failure_status_path = nil;
     audit_token_t final_token = INVALID_AUDIT_TOKEN_VALUE;
     socklen_t final_token_length = sizeof(final_token);
     bool samples_published = false;
     bool events_published = false;
     bool metadata_published = false;
+    bool failure_actions_published = false;
     bool observation_published = false;
+    bool provisional_observation_published = false;
+    bool ax_subject_published = false;
 
     expected_app = canonical_path(options->app);
     expected_path = canonical_path(options->executable);
@@ -1061,10 +1615,29 @@ static int run_verifier(const Options *options) {
     runtime_samples_path = [output_parent stringByAppendingPathComponent:@"runtime-samples.tsv"];
     runtime_events_path = [output_parent stringByAppendingPathComponent:@"runtime-events.tsv"];
     runtime_metadata_path = [output_parent stringByAppendingPathComponent:@"runtime-metadata.tsv"];
+    failure_actions_path = [output_parent stringByAppendingPathComponent:@"failure-actions.tsv"];
+    if (![options->failureControl isEqualToString:@"none"]) {
+        failure_status_path = [options->failureControl stringByAppendingString:@".status"];
+    }
+    provisional_observation_path =
+        [output_parent stringByAppendingPathComponent:@"native-observation-live.tsv"];
+    ax_subject_path = [output_parent stringByAppendingPathComponent:@"ax-subject.tsv"];
     if (!output_is_absent(options->output) || !output_is_absent(runtime_samples_path) ||
-        !output_is_absent(runtime_events_path) || !output_is_absent(runtime_metadata_path)) {
+        !output_is_absent(runtime_events_path) || !output_is_absent(runtime_metadata_path) ||
+        !output_is_absent(failure_actions_path) ||
+        !output_is_absent(provisional_observation_path) || !output_is_absent(ax_subject_path)) {
         report(@"runtime observation outputs must not already exist");
         goto cleanup;
+    }
+    failure_control_fd = create_failure_control(options->failureControl);
+    if (failure_control_fd == -2) {
+        goto cleanup;
+    }
+    if (failure_status_path != nil) {
+        failure_status_fd = create_failure_control(failure_status_path);
+        if (failure_status_fd < 0) {
+            goto cleanup;
+        }
     }
     executable_fd = open(expected_path.fileSystemRepresentation,
         O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
@@ -1171,7 +1744,7 @@ static int run_verifier(const Options *options) {
         goto cleanup;
     }
     nonce = make_nonce();
-    if (nonce == nil || !write_frame(peer, challenge_data(nonce, options))) {
+    if (nonce == nil || !write_frame(peer, challenge_data(nonce, options, &expected_stat))) {
         report(@"could not send the authenticated launch challenge");
         goto cleanup;
     }
@@ -1183,15 +1756,58 @@ static int run_verifier(const Options *options) {
         report(@"production app returned an invalid or stale launch observation");
         goto cleanup;
     }
+    struct proc_bsdinfo process = {0};
+    if (proc_pidinfo(peer_pid, PROC_PIDTBSDINFO, 0, &process, sizeof(process)) !=
+            sizeof(process) ||
+        process.pbi_uid != geteuid()) {
+        report(@"authenticated application process start identity is unavailable");
+        goto cleanup;
+    }
+    uint64_t process_start_seconds = process.pbi_start_tvsec;
+    uint64_t process_start_microseconds = process.pbi_start_tvusec;
+    provisional_observation = final_observation(
+        response, pidversion, &expected_fs, live_cdhash, live_identifier, live_team);
+    provisional_observation_data =
+        [provisional_observation dataUsingEncoding:NSUTF8StringEncoding];
+    provisional_observation_sha256 = lower_sha256(provisional_observation_data);
+    ax_subject_data = ax_subject_identity(options, nonce, expected_app, expected_path, peer_pid, &process,
+        &expected_stat, &expected_fs, live_cdhash, live_identifier, live_team,
+        provisional_observation_sha256);
+    if (provisional_observation_data == nil ||
+        !is_lower_hex(provisional_observation_sha256, 64) || ax_subject_data == nil ||
+        !publish_exclusive(provisional_observation_path, provisional_observation_data,
+            &provisional_observation_published) ||
+        !publish_exclusive(ax_subject_path, ax_subject_data, &ax_subject_published)) {
+        report(@"live accessibility subject identity could not be published");
+        goto cleanup;
+    }
+    if (!mapped_executable_matches(&token, expected_path, &expected_stat, &expected_fs) ||
+        proc_pidinfo(peer_pid, PROC_PIDTBSDINFO, 0, &process, sizeof(process)) !=
+            sizeof(process) ||
+        process.pbi_start_tvsec != process_start_seconds ||
+        process.pbi_start_tvusec != process_start_microseconds ||
+        !live_signature_matches(&token, options, expected_path,
+            &live_cdhash, &live_identifier, &live_team)) {
+        report(@"live accessibility subject changed while it was published");
+        goto cleanup;
+    }
     if (options->replay) {
         [application terminate];
     } else {
-        fprintf(stderr, "authenticated mounted app is ready; quit it after acceptance completes\n");
+        fprintf(stderr,
+            "authenticated mounted app is ready; AX subject: %s; quit it after acceptance completes\n",
+            ax_subject_path.fileSystemRepresentation);
+        if (failure_control_fd >= 0) {
+            fprintf(stderr, "authenticated failure control is ready: %s; status: %s\n",
+                options->failureControl.fileSystemRepresentation,
+                failure_status_path.fileSystemRepresentation);
+        }
     }
     runtime_deadline = [NSDate dateWithTimeIntervalSinceNow:
         options->replay ? kProofTimeoutSeconds : 12.0 * 60.0 * 60.0 + kProofTimeoutSeconds];
 
-    if (!read_runtime_stream(peer, &runtime, &runtime_status, runtime_deadline)) {
+    if (!read_runtime_stream(peer, &runtime, &failure, failure_control_fd, failure_status_fd,
+            nonce, options, &runtime_status, runtime_deadline)) {
         report(interrupted ? @"runtime observation was interrupted" :
             @"production app returned an invalid runtime observation");
         goto cleanup;
@@ -1211,20 +1827,34 @@ static int run_verifier(const Options *options) {
 
     samples_sha256 = lower_sha256(runtime.samples);
     events_sha256 = lower_sha256(runtime.events);
-    if (!is_lower_hex(samples_sha256, 64) || !is_lower_hex(events_sha256, 64)) {
+    failure_actions_sha256 = lower_sha256(failure.records);
+    if (!is_lower_hex(samples_sha256, 64) || !is_lower_hex(events_sha256, 64) ||
+        !is_lower_hex(failure_actions_sha256, 64)) {
         report(@"runtime observation checksums could not be computed");
         goto cleanup;
     }
     metadata = runtime_metadata(
-        options, response, &runtime, runtime_status, samples_sha256, events_sha256);
-    observation = final_observation(
-        response, pidversion, &expected_fs, live_cdhash, live_identifier, live_team);
+        options, response, &runtime, runtime_status, samples_sha256, events_sha256,
+        &failure, failure_actions_sha256);
+    if (metadata == nil) {
+        goto cleanup;
+    }
+    metadata_sha256 = lower_sha256(metadata);
+    observation = final_observation_with_closure(
+        final_observation(response, pidversion, &expected_fs, live_cdhash, live_identifier,
+            live_team),
+        provisional_observation_sha256, metadata_sha256, failure_actions_sha256,
+        failure.nextSequence, failure.resultCount);
     observation_data = [observation dataUsingEncoding:NSUTF8StringEncoding];
-    if (metadata == nil || observation_data == nil ||
+    if (!is_lower_hex(metadata_sha256, 64) || observation_data == nil ||
         !publish_exclusive(runtime_samples_path, runtime.samples, &samples_published)) {
         goto cleanup;
     }
     if (!publish_exclusive(runtime_events_path, runtime.events, &events_published)) {
+        goto cleanup;
+    }
+    if (!publish_exclusive(
+            failure_actions_path, failure.records, &failure_actions_published)) {
         goto cleanup;
     }
     if (!publish_exclusive(runtime_metadata_path, metadata, &metadata_published)) {
@@ -1267,14 +1897,25 @@ cleanup:
     if (result != 0) {
         terminate_exact_application(application);
         if (observation_published) unlink(options->output.fileSystemRepresentation);
+        if (ax_subject_published) unlink(ax_subject_path.fileSystemRepresentation);
+        if (provisional_observation_published) {
+            unlink(provisional_observation_path.fileSystemRepresentation);
+        }
         if (metadata_published) unlink(runtime_metadata_path.fileSystemRepresentation);
+        if (failure_actions_published) unlink(failure_actions_path.fileSystemRepresentation);
         if (events_published) unlink(runtime_events_path.fileSystemRepresentation);
         if (samples_published) unlink(runtime_samples_path.fileSystemRepresentation);
     }
     if (peer >= 0) close(peer);
+    if (failure_control_fd >= 0) close(failure_control_fd);
+    if (failure_status_fd >= 0) close(failure_status_fd);
     if (listener >= 0) close(listener);
     if (executable_fd >= 0) close(executable_fd);
     if (socket_path != nil) unlink(socket_path.fileSystemRepresentation);
+    if (![options->failureControl isEqualToString:@"none"]) {
+        unlink(options->failureControl.fileSystemRepresentation);
+        if (failure_status_path != nil) unlink(failure_status_path.fileSystemRepresentation);
+    }
     rmdir(socket_directory);
     return result;
 }
@@ -1331,10 +1972,109 @@ static bool self_test_failure(NSString *name) {
     return report([NSString stringWithFormat:@"self-test failed: %@", name]);
 }
 
+static NSData *self_test_failure_result(
+    NSString *requestID,
+    NSString *sequence,
+    NSString *caseID,
+    NSString *action,
+    NSString *result,
+    NSString *paneState,
+    NSString *failureClass,
+    NSString *recoverability,
+    NSString *operation,
+    NSString *latest,
+    NSString *lastValid,
+    NSString *visible,
+    NSString *pending,
+    NSString *inputUsable,
+    NSString *sessionAttached
+) {
+    NSString *frame = [NSString stringWithFormat:
+        @"schema\t%@\nrequest.id\t%@\nsequence\t%@\ncase.id\t%@\naction\t%@\n"
+         "result\t%@\npane.id\t1\npane.state\t%@\nfailure.class\t%@\n"
+         "failure.recoverability\t%@\nfailure.operation\t%@\nstate.revision\t1\n"
+         "latest.generation\t%@\nlast_valid.generation\t%@\nvisible.generation\t%@\n"
+         "pending_recovery\t%@\nterminal_input_usable\t%@\nsession_attached\t%@\n"
+         "resource.staged_count\t0\nresource.staged_bytes\t0\n"
+         "resource.rolled_back_count\t0\nresource.rolled_back_bytes\t0\n",
+        kFailureActionResultSchema, requestID, sequence, caseID, action, result, paneState,
+        failureClass, recoverability, operation, latest, lastValid, visible, pending,
+        inputUsable, sessionAttached];
+    return [frame dataUsingEncoding:NSUTF8StringEncoding];
+}
+
+static bool self_test_ax_subject_schema(void) {
+    Options options = {
+        .runID = @"i43-ax",
+        .appSHA256 = [@"a" stringByPaddingToLength:64 withString:@"a" startingAtIndex:0],
+        .executable = @"/Volumes/SpaceTerm/SpaceTerm.app/Contents/MacOS/SpaceTerm",
+    };
+    struct proc_bsdinfo process = {0};
+    process.pbi_start_tvsec = 11;
+    process.pbi_start_tvusec = 12;
+    struct stat executable = {0};
+    executable.st_dev = 13;
+    executable.st_ino = 14;
+    struct statfs filesystem = {0};
+    filesystem.f_fsid.val[0] = 15;
+    filesystem.f_fsid.val[1] = -16;
+    NSString *nonce = [@"b" stringByPaddingToLength:64 withString:@"b" startingAtIndex:0];
+    NSString *observationSHA =
+        [@"c" stringByPaddingToLength:64 withString:@"c" startingAtIndex:0];
+    NSData *data = ax_subject_identity(&options, nonce,
+        @"/System/Applications/Utilities/Terminal.app",
+        @"/System/Applications/Utilities/Terminal.app/Contents/MacOS/SpaceTerm",
+        17, &process, &executable,
+        &filesystem, @"0123456789ABCDEF0123456789ABCDEF01234567", @"test.identifier", @"",
+        observationSHA);
+    if (data == nil) {
+        return false;
+    }
+    NSArray<NSString *> *keys = @[
+        @"schema", @"run.id", @"launch.nonce", @"package.app.sha256", @"package.app.path",
+        @"package.app.bundle.identifier", @"package.app.executable.path", @"process.pid",
+        @"process.start.tv-sec", @"process.start.tv-usec", @"process.executable.device",
+        @"process.executable.inode", @"process.executable.fsid", @"process.signature.cdhash",
+        @"process.signature.identifier", @"process.signature.team-identifier",
+        @"process.mount.read-only", @"launch.controller", @"launch.source",
+        @"launch.observation.sha256", @"launch.observation.complete"
+    ];
+    NSDictionary<NSString *, NSString *> *records = parse_records(data, keys);
+    return records != nil && [records[@"schema"] isEqualToString:kAXSubjectSchema] &&
+        [records[@"package.app.bundle.identifier"] isEqualToString:@"com.apple.Terminal"] &&
+        [records[@"package.app.executable.path"] isEqualToString:
+            @"/System/Applications/Utilities/Terminal.app/Contents/MacOS/SpaceTerm"] &&
+        [records[@"process.start.tv-sec"] isEqualToString:@"11"] &&
+        [records[@"process.start.tv-usec"] isEqualToString:@"12"] &&
+        [records[@"process.executable.fsid"] isEqualToString:@"15:-16"] &&
+        [records[@"process.signature.cdhash"]
+            isEqualToString:@"0123456789abcdef0123456789abcdef01234567"] &&
+        [records[@"launch.observation.sha256"] isEqualToString:observationSHA];
+}
+
+static bool initialize_self_test_failure_capture(
+    FailureCapture *capture,
+    NSString *caseID
+) {
+    if (!initialize_failure_capture(capture)) {
+        return false;
+    }
+    capture->pendingRequestID = [@"a" stringByPaddingToLength:64
+        withString:@"a" startingAtIndex:0];
+    capture->pendingCaseID = caseID;
+    capture->pendingClientToken = [@"f" stringByPaddingToLength:64
+        withString:@"f" startingAtIndex:0];
+    capture->pendingSequence = 0;
+    return true;
+}
+
 static int verifier_self_test(void) {
     NSArray<NSString *> *emptyEvents = @[];
     NSMutableArray<NSString *> *sample = self_test_sample(@"1000000000", @"running");
     NSData *base = self_test_tick(@"0", @"0", sample, emptyEvents);
+    if (!self_test_ax_subject_schema()) {
+        return self_test_failure(@"AX subject exact schema") ? 0 : 1;
+    }
 
     NSString *unknownSchemaText = [[NSString alloc] initWithData:base
         encoding:NSUTF8StringEncoding];
@@ -1453,6 +2193,111 @@ static int verifier_self_test(void) {
         parse_runtime_complete(self_test_complete(@"1000000000", @"1000000000",
             @"1", @"0", @"complete"), &dropped, &status)) {
         return self_test_failure(@"observer drops completion") ? 0 : 1;
+    }
+
+    NSString *requestID = [@"a" stringByPaddingToLength:64
+        withString:@"a" startingAtIndex:0];
+    FailureCapture failure = {0};
+    if (!initialize_self_test_failure_capture(&failure, @"presentation-invalid-scale") ||
+        !parse_failure_result(self_test_failure_result(requestID, @"0",
+            @"presentation-invalid-scale", @"armed", @"accepted", @"running", @"none",
+            @"none", @"none", @"4", @"4", @"4", @"none", @"1", @"1"), &failure) ||
+        parse_failure_result(self_test_failure_result(requestID, @"0",
+            @"presentation-invalid-scale", @"armed", @"accepted", @"running", @"none",
+            @"none", @"none", @"4", @"4", @"4", @"none", @"1", @"1"), &failure)) {
+        return self_test_failure(@"failure action replay or order") ? 0 : 1;
+    }
+    if (!parse_failure_result(self_test_failure_result(requestID, @"0",
+            @"presentation-invalid-scale", @"injected", @"failed-state", @"failed",
+            @"presentation", @"recoverable", @"update-backing-scale", @"4", @"4",
+            @"4", @"presentation", @"1", @"1"), &failure) ||
+        parse_failure_result(self_test_failure_result(requestID, @"0",
+            @"presentation-invalid-scale", @"completed", @"recovered", @"running",
+            @"none", @"none", @"none", @"4", @"4", @"4", @"none", @"1", @"1"),
+            &failure) ||
+        !parse_failure_result(self_test_failure_result(requestID, @"0",
+            @"presentation-invalid-scale", @"retry-requested", @"accepted", @"failed",
+            @"presentation", @"recoverable", @"update-backing-scale", @"4", @"4",
+            @"4", @"presentation", @"1", @"1"), &failure) ||
+        !parse_failure_result(self_test_failure_result(requestID, @"0",
+            @"presentation-invalid-scale", @"completed", @"recovered", @"running",
+            @"none", @"none", @"none", @"4", @"4", @"4", @"none", @"1", @"1"),
+            &failure) || failure.pendingRequestID != nil) {
+        return self_test_failure(@"failure action recovery sequence") ? 0 : 1;
+    }
+    FailureCapture paneBound = {0};
+    if (!initialize_self_test_failure_capture(&paneBound, @"presentation-invalid-scale") ||
+        !parse_failure_result(self_test_failure_result(requestID, @"0",
+            @"presentation-invalid-scale", @"armed", @"accepted", @"running", @"none",
+            @"none", @"none", @"4", @"4", @"4", @"none", @"1", @"1"), &paneBound)) {
+        return self_test_failure(@"pane binding setup") ? 0 : 1;
+    }
+    NSString *switchedPane = [[[NSString alloc] initWithData:self_test_failure_result(requestID,
+        @"0", @"presentation-invalid-scale", @"injected", @"failed-state", @"failed",
+        @"presentation", @"recoverable", @"update-backing-scale", @"4", @"4", @"4",
+        @"presentation", @"1", @"1") encoding:NSUTF8StringEncoding]
+        stringByReplacingOccurrencesOfString:@"pane.id\t1\n" withString:@"pane.id\t2\n"];
+    if (parse_failure_result(
+            [switchedPane dataUsingEncoding:NSUTF8StringEncoding], &paneBound)) {
+        return self_test_failure(@"failure action switched Pane") ? 0 : 1;
+    }
+    FailureCapture revisionBound = {0};
+    NSString *armedRevisionTwo = [[[NSString alloc] initWithData:self_test_failure_result(requestID,
+        @"0", @"presentation-invalid-scale", @"armed", @"accepted", @"running", @"none",
+        @"none", @"none", @"4", @"4", @"4", @"none", @"1", @"1")
+        encoding:NSUTF8StringEncoding]
+        stringByReplacingOccurrencesOfString:@"state.revision\t1\n"
+        withString:@"state.revision\t2\n"];
+    if (!initialize_self_test_failure_capture(&revisionBound, @"presentation-invalid-scale") ||
+        !parse_failure_result(
+            [armedRevisionTwo dataUsingEncoding:NSUTF8StringEncoding], &revisionBound) ||
+        parse_failure_result(self_test_failure_result(requestID, @"0",
+            @"presentation-invalid-scale", @"injected", @"failed-state", @"failed",
+            @"presentation", @"recoverable", @"update-backing-scale", @"4", @"4", @"4",
+            @"presentation", @"1", @"1"), &revisionBound)) {
+        return self_test_failure(@"failure action revision regression") ? 0 : 1;
+    }
+    FailureCapture fatal = {0};
+    if (!initialize_self_test_failure_capture(&fatal, @"pty-fatal") ||
+        !parse_failure_result(self_test_failure_result(requestID, @"0", @"pty-fatal",
+            @"armed", @"accepted", @"running", @"none", @"none", @"none", @"7", @"7",
+            @"7", @"none", @"1", @"1"), &fatal) ||
+        !parse_failure_result(self_test_failure_result(requestID, @"0", @"pty-fatal",
+            @"injected", @"failed-state", @"failed", @"pty", @"fatal",
+            @"read-shell-output", @"7", @"7", @"7", @"none", @"0", @"1"), &fatal) ||
+        parse_failure_result(self_test_failure_result(requestID, @"0", @"pty-fatal",
+            @"completed", @"closed", @"failed", @"pty", @"fatal", @"read-shell-output",
+            @"7", @"7", @"7", @"none", @"0", @"1"), &fatal) ||
+        !parse_failure_result(self_test_failure_result(requestID, @"0", @"pty-fatal",
+            @"completed", @"closed", @"failed", @"pty", @"fatal", @"read-shell-output",
+            @"7", @"7", @"7", @"none", @"0", @"0"), &fatal)) {
+        return self_test_failure(@"fatal close authentication") ? 0 : 1;
+    }
+    FailureCapture stagedRollback = {0};
+    if (!initialize_self_test_failure_capture(
+            &stagedRollback, @"renderer-resource-after-staging") ||
+        !parse_failure_result(self_test_failure_result(requestID, @"0",
+            @"renderer-resource-after-staging", @"armed", @"accepted", @"running",
+            @"none", @"none", @"none", @"5", @"5", @"5", @"none", @"1", @"1"),
+            &stagedRollback)) {
+        return self_test_failure(@"resource rollback setup") ? 0 : 1;
+    }
+    NSData *zeroRollback = self_test_failure_result(requestID, @"0",
+        @"renderer-resource-after-staging", @"injected", @"failed-state", @"failed",
+        @"resource", @"recoverable", @"prepare-terminal-graphics", @"5", @"5", @"5",
+        @"renderer-resources", @"1", @"1");
+    NSString *rollbackText = [[NSString alloc] initWithData:zeroRollback
+        encoding:NSUTF8StringEncoding];
+    rollbackText = [rollbackText stringByReplacingOccurrencesOfString:
+        @"resource.staged_count\t0\nresource.staged_bytes\t0\n"
+         "resource.rolled_back_count\t0\nresource.rolled_back_bytes\t0\n"
+        withString:
+        @"resource.staged_count\t1\nresource.staged_bytes\t4\n"
+         "resource.rolled_back_count\t1\nresource.rolled_back_bytes\t4\n"];
+    if (parse_failure_result(zeroRollback, &stagedRollback) ||
+        !parse_failure_result(
+            [rollbackText dataUsingEncoding:NSUTF8StringEncoding], &stagedRollback)) {
+        return self_test_failure(@"resource rollback proof") ? 0 : 1;
     }
     return 0;
 }

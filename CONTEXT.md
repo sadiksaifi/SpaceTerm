@@ -567,6 +567,32 @@ numeric counters, closed lifecycle and visibility states, geometry, and Presenta
 terminal cells or hashes, titles, commands, paths, environment, key identity, clipboard data,
 Selection text, and hyperlink metadata are outside the protocol.
 
+The trusted same-UID mounted-DMG acceptance verifier extends that authenticated app peer with an
+**Acceptance Failure Action** channel. The app independently requires its own canonical packaged
+executable vnode to be on a read-only mount and bound into the challenge before it constructs the
+controller; arbitrary ordinary, source, or writable-bundle launches are inert. Its challenge commits to
+`spaceterm.acceptance.failure-action/v1`; the verifier accepts one fixed, content-free case name
+from an owner-private FIFO, generates the nonce-bound request identity and monotonic sequence, and
+forwards the request exactly once. The claimed production Pane accepts at most one request at a
+time and reports closed-enum `armed`, `injected`, `retry-requested`, and `completed` facts under
+`spaceterm.acceptance.failure-action-result/v2`. No request or result field can carry terminal,
+clipboard, path, environment, command, or arbitrary diagnostic content. Without the authenticated
+launch challenge this controller is not constructed, so ordinary launches cannot reach an
+injection Seam. The challenge and proof carry an exact authenticated `failure.action.enabled`
+fact; when it is false the app allocates neither action channels nor a Pane controller. The result
+schema's four bounded resource counters prove a real staged-image mutation and equal rollback for
+the after-staging case and remain zero for every other case. The owner-private driver sends an
+opaque one-request correlation nonce and accepts only fixed `accepted` and `completed` statuses
+echoing that nonce, so stale receipts cannot authorize another request and the next case cannot be
+submitted before authoritative completion.
+
+This is not cryptographic mutual authentication of the dynamically compiled verifier. Another
+same-UID process could launch its own exact read-only mounted SpaceTerm instance with a conforming
+private peer and trigger only that instance; it cannot mint evidence accepted by the official
+verifier, affect another SpaceTerm instance, or persist a global injection setting. Campaign
+evidence therefore trusts the official verifier as the same-UID controller and relies on its live
+peer, package, process, nonce, sequence, and artifact authentication.
+
 Worker, UI, and render critical paths update atomics and a fixed-capacity transition queue only.
 While observation is active, a Pane-owned main-thread monitor samples its retained exact AppKit
 window at bounded 50-millisecond intervals so minimize, occlusion, and live-resize facts continue
@@ -577,6 +603,21 @@ shutdown. A transition drop, deadline miss, counter overflow, transport or write
 schema, invalid ordering, or missing terminal lifecycle makes the observation **NOT-RUN**; it never
 changes runtime behavior to manufacture a passing result. External acceptance analysis owns
 PASS/FAIL decisions, RSS sampling, traces, and process identity artifacts.
+
+Acceptance Failure Actions exercise the real presentation, glyph/image preflight,
+renderer-resource synchronization, pasteboard-write, PTY, and Terminal Emulator failure mappings.
+Recoverable actions must retain the last valid Presentation Generation through visible failure and
+retry before reporting recovery. Fatal actions report the typed failed state and Pane-close receipt;
+the campaign must separately prove the real PID/PGID was reaped and that a replacement Pane runs a
+new command. The normal-exit control only arms observation: the operator enters real `exit 0`, and
+no exit is injected.
+
+After authenticating that same mounted-app peer, the verifier also publishes the provisional
+native launch observation and its owner-private `spaceterm.acceptance.ax-subject/v1` live-subject
+record before UI acceptance begins. The record binds the launch nonce, run and application-tree
+digest to the exact process start time, executable vnode/filesystem identity, read-only mounted
+bundle, and live code signature. Native accessibility probes must consume and independently
+revalidate that record; they never discover a process by name or accept a caller-selected PID.
 
 ### Typed Terminal Failures and Local Diagnostics
 

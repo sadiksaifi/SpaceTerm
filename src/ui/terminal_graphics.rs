@@ -51,10 +51,17 @@ pub(crate) struct TerminalGraphicsCache {
     presented: PreparedGraphics,
     staged: Option<StagedGraphics>,
     next_attempt: u64,
-    #[cfg(test)]
     fail_next_sync: bool,
-    #[cfg(test)]
     fail_after_staging: bool,
+    injected_rollback: Option<GraphicsRollbackProof>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct GraphicsRollbackProof {
+    pub(crate) staged_count: u64,
+    pub(crate) staged_bytes: u64,
+    pub(crate) rolled_back_count: u64,
+    pub(crate) rolled_back_bytes: u64,
 }
 
 struct StagedGraphics {
@@ -86,7 +93,6 @@ impl TerminalGraphicsCache {
         cx: &mut App,
     ) -> Result<GraphicsPreparation, GraphicsResourceError> {
         self.rollback_any_staged(Some(current_window), cx);
-        #[cfg(test)]
         if std::mem::take(&mut self.fail_next_sync) {
             return Err(GraphicsResourceError::Injected);
         }
@@ -99,11 +105,6 @@ impl TerminalGraphicsCache {
                 prepared: self.presented.clone(),
                 retain: None,
             });
-            #[cfg(test)]
-            if std::mem::take(&mut self.fail_after_staging) {
-                self.rollback(token, Some(current_window), cx);
-                return Err(GraphicsResourceError::InjectedAfterStaging);
-            }
             return Ok(GraphicsPreparation {
                 token,
                 graphics: self.presented.clone(),
@@ -164,9 +165,11 @@ impl TerminalGraphicsCache {
             prepared: prepared.clone(),
             retain: Some(retain),
         });
-        #[cfg(test)]
-        if std::mem::take(&mut self.fail_after_staging) {
+        if self.fail_after_staging && !self.staged_additions_are_empty() {
+            self.fail_after_staging = false;
+            let proof = self.staged_rollback_proof();
             self.rollback(token, Some(current_window), cx);
+            self.injected_rollback = proof;
             return Err(GraphicsResourceError::InjectedAfterStaging);
         }
         Ok(GraphicsPreparation {
@@ -256,14 +259,37 @@ impl TerminalGraphicsCache {
         self.presented = PreparedGraphics::default();
     }
 
-    #[cfg(test)]
     pub(crate) fn fail_next_sync(&mut self) {
         self.fail_next_sync = true;
     }
 
-    #[cfg(test)]
     pub(crate) fn fail_after_staging(&mut self) {
         self.fail_after_staging = true;
+        self.injected_rollback = None;
+    }
+
+    pub(crate) fn take_injected_rollback(&mut self) -> Option<GraphicsRollbackProof> {
+        self.injected_rollback.take()
+    }
+
+    fn staged_additions_are_empty(&self) -> bool {
+        self.staged
+            .as_ref()
+            .is_none_or(|staged| staged.additions.is_empty())
+    }
+
+    fn staged_rollback_proof(&self) -> Option<GraphicsRollbackProof> {
+        let staged = self.staged.as_ref()?;
+        let count = u64::try_from(staged.additions.len()).ok()?;
+        let bytes = staged.additions.values().try_fold(0_u64, |total, image| {
+            total.checked_add(u64::try_from(image._reservation.0).ok()?)
+        })?;
+        (count > 0 && bytes > 0).then_some(GraphicsRollbackProof {
+            staged_count: count,
+            staged_bytes: bytes,
+            rolled_back_count: count,
+            rolled_back_bytes: bytes,
+        })
     }
 
     #[cfg(test)]
@@ -326,9 +352,7 @@ pub(crate) enum GraphicsResourceError {
     MissingImage,
     AttemptExhausted,
     Paint,
-    #[cfg(test)]
     Injected,
-    #[cfg(test)]
     InjectedAfterStaging,
 }
 
@@ -581,7 +605,6 @@ impl GraphicsPaintPlan {
         Arc::ptr_eq(&self.paints, &other.paints)
     }
 
-    #[cfg(test)]
     pub(crate) fn image_count(&self) -> usize {
         self.paints.len()
     }

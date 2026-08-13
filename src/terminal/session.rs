@@ -276,6 +276,12 @@ pub(crate) enum SelectionCopyError {
     WorkerStopped,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum AcceptanceSessionFailure {
+    Pty,
+    Emulator,
+}
+
 #[derive(Clone, Debug)]
 #[cfg(all(target_os = "macos", not(test)))]
 pub(crate) struct AccessibilitySelectionSender {
@@ -322,6 +328,7 @@ pub(crate) trait TerminalSessionHandle {
         decision: Osc52AuthorizationDecision,
     );
     fn copy_selection(&self) -> Result<Option<SelectionCopy>, SelectionCopyError>;
+    fn inject_acceptance_failure(&self, failure: AcceptanceSessionFailure);
     #[cfg(all(target_os = "macos", not(test)))]
     fn accessibility_selection_sender(&self) -> Option<AccessibilitySelectionSender> {
         None
@@ -987,6 +994,14 @@ impl TerminalSessionHandle for TerminalSession {
         Self::copy_selection(self)
     }
 
+    fn inject_acceptance_failure(&self, failure: AcceptanceSessionFailure) {
+        if let Some(commands) = &self.commands
+            && commands.send(Command::AcceptanceFailure(failure)).is_err()
+        {
+            eprintln!("acceptance failure injection was dropped because the worker has stopped");
+        }
+    }
+
     #[cfg(all(target_os = "macos", not(test)))]
     fn accessibility_selection_sender(&self) -> Option<AccessibilitySelectionSender> {
         self.commands
@@ -1059,6 +1074,7 @@ enum Command {
     AccessibilityContinue,
     SelectionAutoscrollTick(PresentationGeneration),
     ReaderReady,
+    AcceptanceFailure(AcceptanceSessionFailure),
     Shutdown,
     PollHiddenInput,
 }
@@ -1780,6 +1796,21 @@ impl TerminalWorker {
                         false
                     }
                 }
+            }
+            Command::AcceptanceFailure(failure) => {
+                let event = match failure {
+                    AcceptanceSessionFailure::Pty => {
+                        SessionEvent::Failed(SessionFailure::PtyRead {
+                            read_error: "acceptance-injected".to_owned(),
+                            exit_status: "acceptance-injected".to_owned(),
+                        })
+                    }
+                    AcceptanceSessionFailure::Emulator => SessionEvent::Failed(
+                        SessionFailure::Runtime("acceptance-injected".to_owned()),
+                    ),
+                };
+                self.send_terminal_event(event);
+                false
             }
             Command::Shutdown => false,
             Command::PollHiddenInput => {
@@ -4404,6 +4435,47 @@ mod tests {
             (state.terminations, state.pty_drops, state.terminator_drops),
             (1, 1, 1)
         );
+    }
+
+    #[test]
+    fn authenticated_acceptance_failures_use_typed_session_paths_and_stop_the_worker() {
+        for (injected, expected) in [
+            (
+                AcceptanceSessionFailure::Pty,
+                SessionFailure::PtyRead {
+                    read_error: "acceptance-injected".to_owned(),
+                    exit_status: "acceptance-injected".to_owned(),
+                },
+            ),
+            (
+                AcceptanceSessionFailure::Emulator,
+                SessionFailure::Runtime("acceptance-injected".to_owned()),
+            ),
+        ] {
+            let (result, _reader_steps, records) =
+                start_scripted_session(ScriptedPtyOptions::default());
+            let (mut session, events, _accessibility) = result.unwrap();
+
+            session.inject_acceptance_failure(injected);
+            let event = receive_event(&events, "the authenticated acceptance failure", |event| {
+                matches!(event, SessionEvent::Failed(_))
+            });
+            let SessionEvent::Failed(failure) = event else {
+                unreachable!("the event predicate accepts only terminal failures")
+            };
+            assert_eq!(failure, expected);
+            let state = records.wait_for("the injected worker to release ownership", |state| {
+                state.pty_drops == 1
+            });
+            assert_eq!(state.pty_drops, 1);
+
+            session.shutdown();
+            let state = records.snapshot();
+            assert_eq!(
+                (state.terminations, state.pty_drops, state.terminator_drops),
+                (1, 1, 1)
+            );
+        }
     }
 
     #[test]

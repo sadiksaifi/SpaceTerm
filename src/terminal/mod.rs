@@ -36,11 +36,9 @@ pub(crate) use emulator::{
 };
 #[cfg(test)]
 pub(crate) use emulator::{CellSemanticSnapshot, ScrollbarSnapshot};
-#[cfg(test)]
-pub(crate) use failure::FailureClass;
 pub(crate) use failure::{
-    DiagnosticBundle, DiagnosticKeyEventKind, PaneTerminalState, TerminalFailure,
-    UnhandledKeyDiagnostic,
+    DiagnosticBundle, DiagnosticKeyEventKind, FailureClass, PaneTerminalState, Recoverability,
+    TerminalFailure, UnhandledKeyDiagnostic,
 };
 pub(crate) use find::{
     FindDirection, FindHighlightSpan, FindQueryGeneration, TerminalFindSnapshot,
@@ -80,17 +78,10 @@ pub(crate) use session::AccessibilitySelectionSender;
     )
 )]
 pub(crate) use session::SessionFailure;
-#[cfg_attr(
-    not(test),
-    expect(
-        unused_imports,
-        reason = "SessionExit is part of the crate-visible SessionEvent interface"
-    )
-)]
 pub(crate) use session::{
-    NativeTerminalSessionFactory, PointerButton, PointerInput, PointerPhase, SelectionCopyError,
-    SessionEvent, SessionExit, ShiftSelectionPolicy, SurfacePosition, TerminalSessionFactory,
-    TerminalSessionHandle, WheelInput, WheelPhase,
+    AcceptanceSessionFailure, NativeTerminalSessionFactory, PointerButton, PointerInput,
+    PointerPhase, SelectionCopyError, SessionEvent, SessionExit, ShiftSelectionPolicy,
+    SurfacePosition, TerminalSessionFactory, TerminalSessionHandle, WheelInput, WheelPhase,
 };
 #[cfg(test)]
 pub(crate) use session::{SessionError, StartedTerminalSession};

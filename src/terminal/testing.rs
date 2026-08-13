@@ -6,11 +6,11 @@ use std::sync::Arc;
 
 use super::geometry::TerminalGeometry;
 use super::{
-    FindDirection, FindQueryGeneration, KeyInput, Osc52AuthorizationDecision, Osc52AuthorizationId,
-    PasteConfirmationId, PasteDecision, PasteRequestOutcome, PasteResolution, PointerInput,
-    PresentationGeneration, SelectionCopy, SelectionCopyError, SessionError, SessionEvent,
-    StartedTerminalSession, TerminalAccessibilityModel, TerminalSessionFactory,
-    TerminalSessionHandle, WheelInput,
+    AcceptanceSessionFailure, FindDirection, FindQueryGeneration, KeyInput,
+    Osc52AuthorizationDecision, Osc52AuthorizationId, PasteConfirmationId, PasteDecision,
+    PasteRequestOutcome, PasteResolution, PointerInput, PresentationGeneration, SelectionCopy,
+    SelectionCopyError, SessionError, SessionEvent, StartedTerminalSession,
+    TerminalAccessibilityModel, TerminalSessionFactory, TerminalSessionHandle, WheelInput,
 };
 
 #[derive(Clone, Debug, PartialEq)]
@@ -35,6 +35,7 @@ pub(crate) enum RecordedSessionCommand {
     ResolvePaste(PasteConfirmationId, PasteDecision),
     ResolveOsc52Authorization(Osc52AuthorizationId, Osc52AuthorizationDecision),
     RequestSelectionCopy,
+    InjectAcceptanceFailure(AcceptanceSessionFailure),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -307,5 +308,9 @@ impl TerminalSessionHandle for TestTerminalSessionHandle {
     fn copy_selection(&self) -> Result<Option<SelectionCopy>, SelectionCopyError> {
         self.record(RecordedSessionCommand::RequestSelectionCopy);
         self.selection_response.clone()
+    }
+
+    fn inject_acceptance_failure(&self, failure: AcceptanceSessionFailure) {
+        self.record(RecordedSessionCommand::InjectAcceptanceFailure(failure));
     }
 }

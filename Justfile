@@ -63,6 +63,7 @@ scripts-check:
         scripts/record-release-performance-trace.sh \
         scripts/test-release-performance-tools.sh \
         scripts/acceptance/analyze-release-performance-case.sh \
+        scripts/acceptance/failure-action-driver.sh \
         scripts/acceptance/assemble-release-performance-rss-v3.sh \
         scripts/acceptance/freeze-performance-pair.sh \
         scripts/acceptance/freeze-performance-run.sh \
@@ -77,6 +78,7 @@ scripts-check:
         scripts/record-release-performance-trace.sh \
         scripts/test-release-performance-tools.sh \
         scripts/acceptance/analyze-release-performance-case.sh \
+        scripts/acceptance/failure-action-driver.sh \
         scripts/acceptance/assemble-release-performance-rss-v3.sh \
         scripts/acceptance/freeze-performance-pair.sh \
         scripts/acceptance/freeze-performance-run.sh \
@@ -152,6 +154,10 @@ acceptance-identity run_dir origin="app-bundle":
 # Launch the exact mounted DMG app and create a final-capable identity from its runtime proof.
 acceptance-mounted-dmg-identity run_dir:
     ./scripts/acceptance-identity.sh collect --run-dir "{{ run_dir }}" --origin mounted-dmg --app "{{ app_bundle }}" --dmg "{{ disk_image }}"
+
+# Launch an authenticated mounted-DMG campaign with a private fixed-command failure FIFO.
+acceptance-mounted-dmg-failure-identity run_dir control_path:
+    ./scripts/acceptance-identity.sh collect --run-dir "{{ run_dir }}" --origin mounted-dmg --app "{{ app_bundle }}" --dmg "{{ disk_image }}" --failure-control "{{ control_path }}"
 
 # Verify an existing acceptance-run identity against its source and package artifacts.
 verify-acceptance-identity run_dir:

@@ -229,6 +229,48 @@ is not automated, execute it manually and record the same inputs and observation
 never changes the pass criteria and does not replace the required native visual, interaction,
 accessibility, or profiling evidence.
 
+For authenticated failure runs, create an owner-private directory, choose an absent absolute FIFO
+path within it, and launch the mounted-DMG collector:
+
+```sh
+just acceptance-mounted-dmg-failure-identity <new-run-dir> <absolute-control-fifo>
+```
+
+The collector prints `Live acceptance staging root: <path>` before it blocks. Use that exact
+owner-private root for live probe inputs/outputs; it is atomically renamed to the requested run
+directory after the app quits. Wait until verifier stderr reports
+`authenticated failure control is ready: <path>; status: <path>.status`. Do not create
+or open the FIFO yourself. Arm one case at a time, and do not send the next case until the current
+action reaches its required completion:
+
+```sh
+scripts/acceptance/failure-action-driver.sh \
+  --control <absolute-control-fifo> \
+  --case <fixed-case-id>
+```
+
+The driver sends only the fixed case name and an opaque one-request correlation nonce, waits for
+the verifier's fixed `accepted` status echoing that nonce, and returns only after the authoritative
+completed receipt produces fixed `completed` with the same nonce. The verifier owns launch authentication, request IDs,
+monotonic sequence numbers, and the exact app peer; replay, app-bundle, source-build, and ordinary
+launches cannot enable this path. Preserve `identity/failure-actions.tsv`, its metadata hash, and
+the native recording for every action. A rejected command, replay, out-of-order result, unknown
+schema, second pending action, incomplete phase sequence, or missing final result makes collection
+`NOT-RUN`.
+
+Trust boundary: the official verifier is the trusted same-UID campaign controller, not a
+cryptographically authenticated server. SpaceTerm independently requires its exact canonical
+packaged executable vnode on a read-only mount and rejects source/writable instances. A different
+same-UID controller could trigger only an exact mounted instance it launches itself, but cannot
+produce evidence authenticated and published by this verifier, affect another instance, or leave
+a persistent/global injection setting.
+
+The same verifier publishes `identity/native-observation-live.tsv` and the exact owner-private
+`identity/ax-subject.tsv` before reporting that the mounted app is ready. The AX subject hashes
+the provisional launch observation and binds the package application-tree hash, process start
+time, executable vnode/filesystem, read-only mount, and live signature; pass this file directly to
+the native AX probe and never reconstruct it from a PID or process-name scan.
+
 ## Campaign procedure
 
 1. Confirm issue #42's conformance prerequisite is satisfied at the candidate SHA.
@@ -322,7 +364,28 @@ Exercise every row through the production packaged path, not only test reducers.
 ## Failure-recovery matrix
 
 Inject or reproduce each failure through the production Seam where practical. Record the trigger,
-visible state, retained Presentation Generation, recovery action, and post-recovery result.
+visible state, retained Presentation Generation, recovery action, and post-recovery result. The
+authenticated driver exposes these fixed, content-free cases:
+
+| Driver case | Production Seam and required action result |
+| --- | --- |
+| `presentation-invalid-scale` | Invalid backing-scale update; visible recoverable presentation failure retains the last valid generation, Retry completes as recovered. |
+| `presentation-glyph` | Glyph paint preflight; requires a visible glyph, then the same recoverable presentation/retry sequence. |
+| `renderer-image-preflight` | Image paint preflight; requires an actual visible Terminal Image, then a recoverable renderer-resource failure and successful Retry. |
+| `renderer-resource-before-sync` | Resource synchronization fails before sync; retained visible generation and Retry must recover. |
+| `renderer-resource-after-staging` | Display a new or replaced Terminal Image after arming. The Seam remains armed across empty/reused syncs and fails only after a real nonempty stage; the receipt must show positive staged keys/bytes and exactly equal rollback counts before Retry recovers. |
+| `pasteboard-write` | Arms the next real Selection copy; perform Copy, confirm terminal input/session remain usable, then Retry succeeds. |
+| `pty-fatal` | Emits the real typed fatal PTY failure; close the Pane to complete the authenticated action as closed. |
+| `emulator-fatal` | Emits the real typed fatal Terminal Emulator/Session failure; close the Pane to complete the authenticated action as closed. |
+| `normal-exit-control` | Arms observation only; enter real `exit 0` in the terminal and require completion as exited. |
+
+Recoverable result order is `armed/accepted`, `injected/failed-state`,
+`retry-requested/accepted`, `completed/recovered`. Fatal result order is `armed/accepted`,
+`injected/failed-state`, `completed/closed`. Normal exit is `armed/accepted`,
+`completed/exited`. Run fatal cases last or in separate launches because closing the claimed Pane
+ends its action controller. The authenticated fatal result proves failure presentation and close
+receipt only: separately capture PID/PGID identity and reap after close, then create a replacement
+Pane and run a new command as native campaign evidence.
 
 | Case ID | Required acceptance |
 | --- | --- |

@@ -50,6 +50,12 @@ Requirements:
   the relationship in `redaction_notes`;
 - compute the hash after the final safe artifact is produced.
 
+The authenticated runtime observer's `identity/failure-actions.tsv` is a protocol-fixed exception
+to the case-artifact filename pattern. Preserve its name and bytes, validate it against its runtime
+metadata before copying the identity directory, and include it as a privacy-reviewed payload row
+in `artifacts.tsv`. The effective `package-identity` record owns this shared identity artifact;
+action-backed failure records reference their exact request ID and sequence within it.
+
 ## Payload manifest and control digests
 
 `artifacts.tsv` has one header and one row per immutable payload artifact:
@@ -106,6 +112,60 @@ Finalize and verify the bundle in this order:
 `control.sha256`. The final GitHub comment is the external anchor for that digest. An artifact
 with a missing hash, `PENDING`/`REJECTED` privacy review, or inaccessible public URL cannot support
 a final PASS.
+
+## Authenticated failure-action artifact
+
+Failure injection is valid only when the mounted-DMG native observation binds the exact app
+process, launch nonce, run ID, and app-bundle hash to these schemas:
+
+```text
+request: spaceterm.acceptance.failure-action/v1
+result:  spaceterm.acceptance.failure-action-result/v2
+```
+
+The verifier creates the owner-private control FIFO, accepts one allowlisted case name, and creates
+the request ID and monotonic sequence itself. The request is one-shot and travels on the same
+authenticated app peer as Runtime Observation. The app returns only fixed state fields; arbitrary
+terminal, clipboard, command, path, environment, or diagnostic content is invalid. Ordinary,
+replay, source-build, and app-bundle collections cannot enable or forward an action.
+
+`identity/failure-actions.tsv` has this exact header:
+
+```text
+request_id	sequence	case_id	action	result	pane_id	pane_state	failure_class	failure_recoverability	failure_operation	state_revision	latest_generation	last_valid_generation	visible_generation	pending_recovery	terminal_input_usable	session_attached	resource_staged_count	resource_staged_bytes	resource_rolled_back_count	resource_rolled_back_bytes
+```
+
+Its sibling `runtime-metadata.tsv` must use
+`spaceterm.acceptance.runtime-observation-metadata/v3` and commit to
+`failure.action.schema`, `failure.action.enabled`, `failure.result.schema`,
+`failure.actions.path`, `failure.actions.sha256`, `failure.request_count`, and
+`failure.result_count`. The final 36-record native observation also records
+`provisional.observation.sha256`, the digest of the exact 27-record live observation consumed by
+the AX campaign; the immutable run identity copies it. Validators reconstruct those exact live
+bytes from the final launch/package/process/session/mode fields and require the digest to match,
+then transitively bind the exact metadata bytes and failure fields. Validate the artifact hash, exact header,
+canonical numeric/boolean fields, request identity, strict sequence and phase order, and bounded
+row count before treating an action as run. Authentication, replay, ordering, schema, phase, hash,
+or completion failure is `NOT-RUN`, never a failure result.
+
+The only valid result sequences are:
+
+| Case class | Exact ordered results |
+| --- | --- |
+| Recoverable presentation/resource/platform | `armed/accepted`, `injected/failed-state`, `retry-requested/accepted`, `completed/recovered` |
+| Fatal PTY or emulator | `armed/accepted`, `injected/failed-state`, `completed/closed` |
+| Normal-exit control | `armed/accepted`, `completed/exited` |
+
+For recoverable render actions, the injected and retry rows must show the last valid Presentation
+Generation still visible, and `completed` is emitted only after the recovered generation is
+observed on the next native frame. Pasteboard generations may advance monotonically while every
+phase proves the Terminal Session and terminal input remain usable. The after-staging resource
+case additionally requires positive staged resource/byte counts and equal rolled-back counts in
+every post-injection row; all four resource counters are zero for other cases. Fatal rows
+prove the typed failed state and authenticated close receipt only; attach separate PID/PGID reap
+evidence and evidence that a replacement Pane starts and runs a new command. For
+`normal-exit-control`, the recording must show the operator entering real `exit 0` after arming;
+the action does not inject exit.
 
 ## Campaign record
 
@@ -451,6 +511,33 @@ owned_processes_remaining: <integer or not-applicable>
 diagnostics_bytes: <integer or not-applicable>
 diagnostics_content_audit: <PASS|FAIL|not-applicable>
 ```
+
+For every action-backed row, also add:
+
+```yaml
+failure_action_case: <fixed driver case ID>
+failure_action_request_schema: spaceterm.acceptance.failure-action/v1
+failure_action_result_schema: spaceterm.acceptance.failure-action-result/v2
+failure_actions_artifact_id: <artifact_id for identity/failure-actions.tsv>
+failure_action_request_id: <opaque request ID from the artifact>
+failure_action_sequence: <canonical integer>
+failure_action_results: <exact ordered action/result pairs>
+authenticated_app_peer: true
+```
+
+For `failure-pty-fatal` and `failure-emulator-session-fatal`, add external proof fields; the action
+artifact cannot satisfy them:
+
+```yaml
+fatal_external_evidence:
+  pid_pgid_before_artifact_id: <artifact_id>
+  pid_pgid_reaped_after_close_artifact_id: <artifact_id>
+  replacement_pane_command_artifact_id: <artifact_id>
+```
+
+For `failure-normal-exit`, set `injection_or_trigger` to the armed control followed by real
+operator-entered `exit 0`; never describe the exit as injected. The diagnostics-only failure row
+may set action-specific fields to `not-applicable`.
 
 ## Performance evidence extension
 

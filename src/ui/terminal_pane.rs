@@ -21,7 +21,6 @@ use super::terminal_context_menu::{
     TERMINAL_CONTEXT_MENU_HEIGHT, TERMINAL_CONTEXT_MENU_WIDTH, TerminalContextMenuCommand,
     render_terminal_context_menu,
 };
-#[cfg(test)]
 use super::terminal_element::PaintPreflightFault;
 use super::terminal_element::{
     TerminalGridCache, TerminalGridConfiguration, TerminalGridElement, terminal_grid_content_bounds,
@@ -30,7 +29,9 @@ use super::terminal_find::{FindEditor, FindInputElement};
 use super::terminal_focus::{
     TerminalFocusBlocker, TerminalFocusCoordinator, TerminalFocusFacts, TerminalProductFocus,
 };
-use super::terminal_graphics::{GraphicsAttemptToken, TerminalGraphicsCache};
+use super::terminal_graphics::{
+    GraphicsAttemptToken, GraphicsRollbackProof, TerminalGraphicsCache,
+};
 use super::terminal_ime::{PreeditLayout, PreeditPosition, TerminalIme, layout_preedit};
 use super::{
     AllowOsc52Clipboard, CancelUnsafePaste, CloseTerminalFind, ConfirmUnsafePaste, CopySelection,
@@ -39,6 +40,10 @@ use super::{
     ResetTerminalFontSize, TERMINAL_FIND_KEY_CONTEXT, TERMINAL_KEY_CONTEXT,
 };
 use crate::domain::{PaneId, WindowId, WorkspaceId};
+use crate::platform::acceptance_observation::{
+    FailureActionCase, FailureActionController, FailureActionEvent, FailureActionPhase,
+    FailureActionRequest, FailureActionResult, FailurePaneState, FailurePendingRecovery,
+};
 use crate::platform::macos_accessibility::{MacosAccessibilityElement, MacosAccessibilityUpdate};
 #[cfg(not(test))]
 use crate::platform::macos_application;
@@ -226,20 +231,17 @@ pub(super) struct OperationToken {
 
 #[derive(Default)]
 struct SelectionPasteboard {
-    #[cfg(test)]
     fail_next_write: bool,
 }
 
 impl SelectionPasteboard {
     fn write(&mut self, copy: SelectionCopy, cx: &mut App) -> Result<(), String> {
-        #[cfg(test)]
         if std::mem::take(&mut self.fail_next_write) {
             return Err("injected native pasteboard failure".to_owned());
         }
         write_selection_copy(copy, cx)
     }
 
-    #[cfg(test)]
     fn fail_next_write(&mut self) {
         self.fail_next_write = true;
     }
@@ -251,6 +253,11 @@ pub(crate) struct TerminalPane {
     session_start_attempted: bool,
     acceptance_observation_claimed: bool,
     runtime_observation: Option<crate::terminal::RuntimeObservation>,
+    failure_actions: Option<FailureActionController>,
+    failure_action_request: Option<FailureActionRequest>,
+    failure_action_trigger_pending: bool,
+    failure_action_recovery_frame: Option<(u64, crate::terminal::PresentationGeneration)>,
+    failure_action_resource_rollback: GraphicsRollbackProof,
     native_service_session_identity: u64,
     native_service_focus_epoch: Cell<u64>,
     native_service_hierarchy_generation: u64,
@@ -302,7 +309,6 @@ pub(crate) struct TerminalPane {
     scrollbar: Entity<OverlayScrollbar<u64>>,
     render_cache: Entity<TerminalGridCache>,
     fallback_render_cache: Entity<TerminalGridCache>,
-    #[cfg(test)]
     paint_fault: Option<PaintPreflightFault>,
     graphics_cache: Entity<TerminalGraphicsCache>,
     selection_pasteboard: SelectionPasteboard,
@@ -333,6 +339,7 @@ pub(crate) struct TerminalPane {
     _accessibility_task: Option<Task<()>>,
     runtime_visibility_source: Option<NativeWindowVisibilitySource>,
     _runtime_visibility_task: Option<Task<()>>,
+    _failure_action_task: Option<Task<()>>,
 }
 
 impl TerminalPane {
@@ -426,6 +433,11 @@ impl TerminalPane {
             session_start_attempted: false,
             acceptance_observation_claimed: false,
             runtime_observation: None,
+            failure_actions: None,
+            failure_action_request: None,
+            failure_action_trigger_pending: false,
+            failure_action_recovery_frame: None,
+            failure_action_resource_rollback: GraphicsRollbackProof::default(),
             native_service_session_identity: 0,
             native_service_focus_epoch: Cell::new(0),
             native_service_hierarchy_generation: 0,
@@ -477,7 +489,6 @@ impl TerminalPane {
             scrollbar,
             render_cache,
             fallback_render_cache,
-            #[cfg(test)]
             paint_fault: None,
             graphics_cache,
             selection_pasteboard: SelectionPasteboard::default(),
@@ -502,6 +513,7 @@ impl TerminalPane {
             _accessibility_task: None,
             runtime_visibility_source: None,
             _runtime_visibility_task: None,
+            _failure_action_task: None,
         }
     }
 
@@ -807,7 +819,7 @@ impl TerminalPane {
     }
 
     fn observe_presented_frame(
-        &self,
+        &mut self,
         generation: crate::terminal::PresentationGeneration,
         rows: u16,
         columns: u16,
@@ -817,6 +829,20 @@ impl TerminalPane {
         }
         if let Some(observation) = &self.runtime_observation {
             observation.next_frame(generation.as_u64());
+        }
+        if self.failure_action_request.as_ref().is_some_and(|request| {
+            self.failure_action_recovery_frame == Some((request.sequence, generation))
+                && !self.failure_action_trigger_pending
+                && matches!(
+                    request.case,
+                    FailureActionCase::PresentationInvalidScale
+                        | FailureActionCase::PresentationGlyph
+                        | FailureActionCase::RendererImagePreflight
+                        | FailureActionCase::RendererResourceBeforeSync
+                        | FailureActionCase::RendererResourceAfterStaging
+                )
+        }) {
+            self.complete_failure_action(FailureActionResult::Recovered);
         }
         if let Some(observation) =
             crate::platform::acceptance_observation::prepare_once(rows, columns)
@@ -894,10 +920,28 @@ impl TerminalPane {
         self.context_menu = None;
         self.quick_look.dismiss();
         self.accessibility_element.set_hierarchy(false, usize::MAX);
-        if self.session.take().is_some() {
+        let session_was_attached = self.session.take().is_some();
+        if self.failure_action_request.as_ref().is_some_and(|request| {
+            matches!(
+                request.case,
+                FailureActionCase::PtyFatal | FailureActionCase::EmulatorFatal
+            )
+        }) && self
+            .pane_state
+            .failure()
+            .is_some_and(TerminalFailure::is_fatal)
+        {
+            self.emit_failure_action(FailureActionPhase::Completed, FailureActionResult::Closed);
+            self.failure_action_request = None;
+            self.failure_action_trigger_pending = false;
+            self.failure_action_recovery_frame = None;
+        }
+        if session_was_attached {
             self.native_service_session_identity =
                 self.native_service_session_identity.wrapping_add(1);
         }
+        self._failure_action_task.take();
+        self.failure_actions.take();
         if let Some(id) = self.secure_input_pane.take() {
             remove_secure_input_pane(id);
         }
@@ -1115,6 +1159,11 @@ impl TerminalPane {
             )
             && self.clear_recovery(recovery)
         {
+            if !self.failure_action_trigger_pending
+                && let Some(request) = &self.failure_action_request
+            {
+                self.failure_action_recovery_frame = Some((request.sequence, generation));
+            }
             cx.notify();
         }
         self.schedule_presented_frame_observation(generation, rows, columns, window, cx);
@@ -1138,6 +1187,7 @@ impl TerminalPane {
             Some(RecoveryAction::Presentation),
             operation.generation,
         ) {
+            self.emit_injected_failure_if_matching();
             cx.notify();
         }
     }
@@ -1160,6 +1210,7 @@ impl TerminalPane {
             Some(RecoveryAction::RendererResources),
             operation.generation,
         ) {
+            self.emit_injected_failure_if_matching();
             cx.notify();
         }
     }
@@ -1168,6 +1219,12 @@ impl TerminalPane {
         let Some(pending) = self.pending_recovery else {
             return;
         };
+        if self.failure_action_request.is_some() {
+            self.emit_failure_action(
+                FailureActionPhase::RetryRequested,
+                FailureActionResult::Accepted,
+            );
+        }
         match pending.action {
             RecoveryAction::Presentation => {
                 self.recovery_retry_requested = Some(pending);
@@ -1231,13 +1288,16 @@ impl TerminalPane {
         }
         self.session_start_attempted = true;
 
-        self.runtime_observation = crate::platform::acceptance_observation::claim_session(
+        let claimed = crate::platform::acceptance_observation::claim_session(
             self.font_family.as_ref(),
             observation_geometry(geometry),
         );
+        self.runtime_observation = claimed.as_ref().map(|claimed| claimed.runtime.clone());
+        self.failure_actions = claimed.and_then(|claimed| claimed.failure_actions);
         self.acceptance_observation_claimed = self.runtime_observation.is_some();
         if self.acceptance_observation_claimed {
             self.start_runtime_visibility_monitor(cx);
+            self.start_failure_action_monitor(cx);
         }
 
         match self.session_factory.start(geometry) {
@@ -1352,6 +1412,204 @@ impl TerminalPane {
                 }
             }
         }));
+    }
+
+    fn start_failure_action_monitor(&mut self, cx: &mut Context<Self>) {
+        let Some(controller) = self.failure_actions.clone() else {
+            return;
+        };
+        self._failure_action_task = Some(cx.spawn(async move |this, cx| {
+            while let Some(request) = controller.receive().await {
+                if this
+                    .update(cx, |pane, cx| {
+                        pane.arm_failure_action(request, cx);
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        }));
+    }
+
+    fn arm_failure_action(&mut self, request: FailureActionRequest, cx: &mut Context<Self>) {
+        if self.failure_action_request.is_some() {
+            if let Some(observation) = &self.runtime_observation {
+                observation.fail();
+            }
+            return;
+        }
+        let case = request.case;
+        self.failure_action_request = Some(request);
+        self.failure_action_trigger_pending = true;
+        self.failure_action_recovery_frame = None;
+        self.failure_action_resource_rollback = GraphicsRollbackProof::default();
+        self.emit_failure_action(FailureActionPhase::Armed, FailureActionResult::Accepted);
+        match case {
+            FailureActionCase::PresentationInvalidScale => {
+                self.failure_action_trigger_pending = true;
+            }
+            FailureActionCase::PresentationGlyph => {
+                self.paint_fault = Some(PaintPreflightFault::Glyph(0));
+                self.failure_action_trigger_pending = true;
+            }
+            FailureActionCase::RendererImagePreflight => {
+                self.paint_fault = Some(PaintPreflightFault::Image(0));
+                self.failure_action_trigger_pending = true;
+            }
+            FailureActionCase::RendererResourceBeforeSync => {
+                self.graphics_cache
+                    .update(cx, |cache, _| cache.fail_next_sync());
+                self.failure_action_trigger_pending = true;
+            }
+            FailureActionCase::RendererResourceAfterStaging => {
+                self.graphics_cache
+                    .update(cx, |cache, _| cache.fail_after_staging());
+                self.failure_action_trigger_pending = true;
+            }
+            FailureActionCase::PasteboardWrite => {
+                self.selection_pasteboard.fail_next_write();
+            }
+            FailureActionCase::PtyFatal => {
+                if let Some(session) = &self.session {
+                    session
+                        .inject_acceptance_failure(crate::terminal::AcceptanceSessionFailure::Pty);
+                } else if let Some(observation) = &self.runtime_observation {
+                    observation.fail();
+                }
+            }
+            FailureActionCase::EmulatorFatal => {
+                if let Some(session) = &self.session {
+                    session.inject_acceptance_failure(
+                        crate::terminal::AcceptanceSessionFailure::Emulator,
+                    );
+                } else if let Some(observation) = &self.runtime_observation {
+                    observation.fail();
+                }
+            }
+            FailureActionCase::NormalExitControl => {}
+        }
+        cx.notify();
+    }
+
+    fn trigger_immediate_failure_action(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(request) = self.failure_action_request.as_ref() else {
+            return;
+        };
+        if request.case != FailureActionCase::PresentationInvalidScale
+            || !self.failure_action_trigger_pending
+        {
+            return;
+        }
+        self.apply_backing_scale(f32::NAN, false, window, cx);
+        self.emit_injected_failure_if_matching();
+    }
+
+    fn emit_injected_failure_if_matching(&mut self) {
+        let Some(request) = self.failure_action_request.as_ref() else {
+            return;
+        };
+        let Some(failure) = self.pane_state.failure() else {
+            return;
+        };
+        let matches = match request.case {
+            FailureActionCase::PresentationInvalidScale => {
+                failure.class() == crate::terminal::FailureClass::Presentation
+                    && failure.operation() == "update-backing-scale"
+            }
+            FailureActionCase::PresentationGlyph => {
+                failure.class() == crate::terminal::FailureClass::Presentation
+                    && failure.operation() == "paint-terminal-presentation"
+            }
+            FailureActionCase::RendererImagePreflight => {
+                failure.class() == crate::terminal::FailureClass::Resource
+                    && failure.operation() == "paint-terminal-graphics"
+            }
+            FailureActionCase::RendererResourceBeforeSync
+            | FailureActionCase::RendererResourceAfterStaging => {
+                failure.class() == crate::terminal::FailureClass::Resource
+                    && failure.operation() == "prepare-terminal-graphics"
+            }
+            FailureActionCase::PasteboardWrite => {
+                failure.class() == crate::terminal::FailureClass::Platform
+                    && failure.operation() == "write-selection-pasteboard"
+            }
+            FailureActionCase::PtyFatal => {
+                failure.class() == crate::terminal::FailureClass::Pty
+                    && failure.operation() == "read-shell-output"
+            }
+            FailureActionCase::EmulatorFatal => {
+                failure.class() == crate::terminal::FailureClass::Emulator
+                    && failure.operation() == "session-runtime"
+            }
+            FailureActionCase::NormalExitControl => false,
+        };
+        if matches && self.failure_action_trigger_pending {
+            self.failure_action_trigger_pending = false;
+            self.emit_failure_action(
+                FailureActionPhase::Injected,
+                FailureActionResult::FailedState,
+            );
+        }
+    }
+
+    fn complete_failure_action(&mut self, result: FailureActionResult) {
+        self.emit_failure_action(FailureActionPhase::Completed, result);
+        self.failure_action_request = None;
+        self.failure_action_trigger_pending = false;
+        self.failure_action_recovery_frame = None;
+    }
+
+    fn emit_failure_action(&self, phase: FailureActionPhase, result: FailureActionResult) {
+        let (Some(controller), Some(request)) =
+            (&self.failure_actions, &self.failure_action_request)
+        else {
+            return;
+        };
+        let failure = self.pane_state.failure();
+        let session_attached = self.session.is_some();
+        let pane_state = match &self.pane_state {
+            PaneTerminalState::Running => FailurePaneState::Running,
+            PaneTerminalState::Failed { .. } => FailurePaneState::Failed,
+            PaneTerminalState::Exited(_) => FailurePaneState::Exited,
+        };
+        let pending_recovery = match self.pending_recovery.map(|pending| pending.action) {
+            Some(RecoveryAction::Presentation) => FailurePendingRecovery::Presentation,
+            Some(RecoveryAction::RendererResources) => FailurePendingRecovery::RendererResources,
+            Some(RecoveryAction::CopySelection) => FailurePendingRecovery::CopySelection,
+            Some(RecoveryAction::StartSession | RecoveryAction::ExportDiagnostics) | None => {
+                FailurePendingRecovery::None
+            }
+        };
+        let emitted = controller.emit(FailureActionEvent {
+            request: request.clone(),
+            phase,
+            result,
+            pane_identity: self.native_service_session_identity,
+            pane_state,
+            failure_class: failure.map(TerminalFailure::class),
+            recoverability: failure.map(TerminalFailure::recoverability),
+            failure_operation: failure.map(TerminalFailure::operation),
+            state_revision: self.state_revision,
+            latest_generation: self.screen.generation.as_u64(),
+            last_valid_generation: self.last_valid_screen.generation.as_u64(),
+            visible_generation: self
+                .render_lifecycle
+                .presented_generation()
+                .map(crate::terminal::PresentationGeneration::as_u64),
+            pending_recovery,
+            terminal_input_usable: self.terminal_input_focus
+                && session_attached
+                && failure.is_none_or(|failure| !failure.is_fatal()),
+            session_attached,
+            resource_staged_count: self.failure_action_resource_rollback.staged_count,
+            resource_staged_bytes: self.failure_action_resource_rollback.staged_bytes,
+            resource_rolled_back_count: self.failure_action_resource_rollback.rolled_back_count,
+            resource_rolled_back_bytes: self.failure_action_resource_rollback.rolled_back_bytes,
+        });
+        if !emitted && let Some(observation) = &self.runtime_observation {
+            observation.fail();
+        }
     }
 
     fn update_runtime_visibility(
@@ -1488,7 +1746,15 @@ impl TerminalPane {
                 self.pending_recovery = None;
                 self.recovery_retry_requested = None;
                 self.status = None;
+                let normal_exit_control =
+                    self.failure_action_request.as_ref().is_some_and(|request| {
+                        request.case == FailureActionCase::NormalExitControl
+                            && matches!(status, crate::terminal::SessionExit::Success)
+                    });
                 self.pane_state = PaneTerminalState::exited(status);
+                if normal_exit_control {
+                    self.complete_failure_action(FailureActionResult::Exited);
+                }
                 cx.emit(TerminalPaneEvent::Exited);
             }
             SessionEvent::Failed(failure) => {
@@ -1497,7 +1763,9 @@ impl TerminalPane {
                 self.hidden_input = false;
                 self.sync_secure_input();
                 let failure = TerminalFailure::from_session(&failure);
-                self.present_failure(failure, true, None);
+                if self.present_failure(failure, true, None) {
+                    self.emit_injected_failure_if_matching();
+                }
             }
         }
     }
@@ -1995,24 +2263,25 @@ impl TerminalPane {
             cx.write_to_clipboard(ClipboardItem::new_string(text));
             return;
         }
-        match self.ordered_selection_copy(cx) {
-            Some(copy) => {
-                if let Err(error) = self.selection_pasteboard.write(copy, cx) {
-                    let _ = error;
-                    self.present_failure(
-                        TerminalFailure::platform("write-selection-pasteboard"),
-                        true,
-                        Some(RecoveryAction::CopySelection),
-                    );
-                    cx.notify();
-                } else if recovery.is_some_and(|recovery| self.clear_recovery(recovery)) {
-                    cx.notify();
+        if let Some(copy) = self.ordered_selection_copy(cx) {
+            if let Err(error) = self.selection_pasteboard.write(copy, cx) {
+                let _ = error;
+                self.present_failure(
+                    TerminalFailure::platform("write-selection-pasteboard"),
+                    true,
+                    Some(RecoveryAction::CopySelection),
+                );
+                self.emit_injected_failure_if_matching();
+                cx.notify();
+            } else if recovery.is_some_and(|recovery| self.clear_recovery(recovery)) {
+                if self
+                    .failure_action_request
+                    .as_ref()
+                    .is_some_and(|request| request.case == FailureActionCase::PasteboardWrite)
+                {
+                    self.complete_failure_action(FailureActionResult::Recovered);
                 }
-            }
-            None => {
-                if recovery.is_some_and(|recovery| self.clear_recovery(recovery)) {
-                    cx.notify();
-                }
+                cx.notify();
             }
         }
     }
@@ -2955,6 +3224,7 @@ impl Drop for TerminalPane {
 
 impl Render for TerminalPane {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.trigger_immediate_failure_action(window, cx);
         let native_activity = NativeActivity::current(window, cx);
         schedule_attention_retries(
             update_attention_application_activation(native_activity.application_active),
@@ -3031,15 +3301,36 @@ impl Render for TerminalPane {
                     RecoveryAction::Presentation | RecoveryAction::RendererResources
                 )
             });
-        let presentation_generation = self.render_lifecycle.take_frame().or_else(|| {
-            recovery.and_then(|_| self.render_lifecycle.retry_frame(display_screen.generation))
-        });
+        let acceptance_retry = self
+            .failure_action_request
+            .as_ref()
+            .filter(|_| self.failure_action_trigger_pending)
+            .is_some_and(|request| {
+                matches!(
+                    request.case,
+                    FailureActionCase::PresentationGlyph
+                        | FailureActionCase::RendererImagePreflight
+                        | FailureActionCase::RendererResourceBeforeSync
+                        | FailureActionCase::RendererResourceAfterStaging
+                )
+            });
+        let presentation_generation = self
+            .render_lifecycle
+            .take_frame()
+            .or_else(|| {
+                recovery.and_then(|_| self.render_lifecycle.retry_frame(display_screen.generation))
+            })
+            .or_else(|| {
+                acceptance_retry
+                    .then(|| self.render_lifecycle.retry_frame(display_screen.generation))
+                    .flatten()
+            });
         let graphics_attempt_allowed = !recovery_holds_presentation
             && presentation_generation == Some(display_screen.generation);
-        let (graphics, graphics_attempt, graphics_attempted) =
+        let (graphics, graphics_attempt, graphics_attempted, injected_rollback) =
             self.graphics_cache.update(cx, |cache, cx| {
                 if !graphics_attempt_allowed {
-                    return (cache.last_presented(), None, false);
+                    return (cache.last_presented(), None, false, None);
                 }
                 match cache.sync(
                     display_screen.active_screen,
@@ -3047,16 +3338,25 @@ impl Render for TerminalPane {
                     window,
                     cx,
                 ) {
-                    Ok(preparation) => (preparation.graphics, Some(preparation.token), true),
-                    Err(_) => (cache.last_presented(), None, true),
+                    Ok(preparation) => (preparation.graphics, Some(preparation.token), true, None),
+                    Err(_) => (
+                        cache.last_presented(),
+                        None,
+                        true,
+                        cache.take_injected_rollback(),
+                    ),
                 }
             });
+        if let Some(proof) = injected_rollback {
+            self.failure_action_resource_rollback = proof;
+        }
         if graphics_attempted && graphics_attempt.is_none() {
             if self.present_failure(
                 TerminalFailure::resource("prepare-terminal-graphics"),
                 true,
                 Some(RecoveryAction::RendererResources),
             ) {
+                self.emit_injected_failure_if_matching();
                 cx.notify();
             }
             display_screen = Arc::clone(&self.last_valid_screen);
@@ -3169,16 +3469,7 @@ impl Render for TerminalPane {
                         fallback_graphics,
                     )
                 }),
-                paint_fault: {
-                    #[cfg(test)]
-                    {
-                        self.paint_fault.take()
-                    }
-                    #[cfg(not(test))]
-                    {
-                        None
-                    }
-                },
+                paint_fault: self.paint_fault.take(),
             },
             cx,
         );
@@ -6866,6 +7157,125 @@ mod tests {
     }
 
     #[gpui::test]
+    fn ordinary_pane_has_no_failure_action_monitor_or_armed_seam(cx: &mut TestAppContext) {
+        let (pane, cx, _) = connected_terminal_pane(cx);
+        assert!(pane.read_with(cx, |pane, _| {
+            pane.failure_actions.is_none()
+                && pane._failure_action_task.is_none()
+                && pane.failure_action_request.is_none()
+                && pane.failure_action_recovery_frame.is_none()
+                && pane.paint_fault.is_none()
+                && pane.failure_action_resource_rollback == GraphicsRollbackProof::default()
+        }));
+    }
+
+    #[gpui::test]
+    fn failure_action_monitor_holds_one_request_until_matching_presented_frame(
+        cx: &mut TestAppContext,
+    ) {
+        let (pane, cx, _) = connected_terminal_pane(cx);
+        let (controller, requests, events) = FailureActionController::test_channel();
+        let first = FailureActionRequest {
+            id: "a".repeat(64),
+            sequence: 0,
+            case: FailureActionCase::PresentationGlyph,
+        };
+        let second = FailureActionRequest {
+            id: "b".repeat(64),
+            sequence: 1,
+            case: FailureActionCase::NormalExitControl,
+        };
+        pane.update(cx, |pane, cx| {
+            pane.failure_actions = Some(controller);
+            pane.acceptance_observation_claimed = true;
+            pane.start_failure_action_monitor(cx);
+        });
+        requests.try_send(first.clone()).unwrap();
+        cx.run_until_parked();
+        assert_eq!(events.try_recv().unwrap().phase, FailureActionPhase::Armed);
+        assert_eq!(
+            pane.read_with(cx, |pane, _| pane.failure_action_request.clone()),
+            Some(first.clone())
+        );
+
+        pane.update(cx, |pane, cx| {
+            pane.present_failure_at(
+                TerminalFailure::presentation("paint-terminal-presentation"),
+                true,
+                Some(RecoveryAction::Presentation),
+                crate::terminal::PresentationGeneration::test(2),
+            );
+            pane.emit_injected_failure_if_matching();
+            pane.failure_action_recovery_frame =
+                Some((0, crate::terminal::PresentationGeneration::test(2)));
+            pane.render_lifecycle
+                .observe_snapshot(crate::terminal::PresentationGeneration::test(2));
+            pane.render_lifecycle
+                .mark_presented(crate::terminal::PresentationGeneration::test(2));
+            pane.pane_state = PaneTerminalState::Running;
+            pane.pending_recovery = None;
+            pane.observe_presented_frame(crate::terminal::PresentationGeneration::test(1), 24, 80);
+            assert!(pane.failure_action_request.is_some());
+            pane.observe_presented_frame(crate::terminal::PresentationGeneration::test(2), 24, 80);
+            cx.notify();
+        });
+        let emitted = std::iter::from_fn(|| events.try_recv().ok()).collect::<Vec<_>>();
+        assert_eq!(
+            emitted.iter().map(|event| event.phase).collect::<Vec<_>>(),
+            vec![FailureActionPhase::Injected, FailureActionPhase::Completed]
+        );
+        requests.try_send(second.clone()).unwrap();
+        cx.run_until_parked();
+        assert_eq!(
+            pane.read_with(cx, |pane, _| pane.failure_action_request.clone()),
+            Some(second)
+        );
+        assert_eq!(events.try_recv().unwrap().phase, FailureActionPhase::Armed);
+    }
+
+    #[gpui::test]
+    fn fatal_failure_action_close_is_detached_once_and_stops_monitor(cx: &mut TestAppContext) {
+        let (pane, cx, _) = connected_terminal_pane(cx);
+        let (controller, requests, events) = FailureActionController::test_channel();
+        pane.update(cx, |pane, cx| {
+            pane.failure_actions = Some(controller);
+            pane.start_failure_action_monitor(cx);
+        });
+        requests
+            .try_send(FailureActionRequest {
+                id: "c".repeat(64),
+                sequence: 0,
+                case: FailureActionCase::PtyFatal,
+            })
+            .unwrap();
+        cx.run_until_parked();
+        pane.update(cx, |pane, cx| {
+            pane.handle_event(
+                SessionEvent::Failed(crate::terminal::SessionFailure::PtyRead {
+                    read_error: "acceptance-injected".to_owned(),
+                    exit_status: "acceptance-injected".to_owned(),
+                }),
+                cx,
+            );
+            pane.close();
+            pane.close();
+        });
+        cx.run_until_parked();
+        let emitted = std::iter::from_fn(|| events.try_recv().ok()).collect::<Vec<_>>();
+        assert_eq!(
+            emitted.iter().map(|event| event.phase).collect::<Vec<_>>(),
+            vec![
+                FailureActionPhase::Armed,
+                FailureActionPhase::Injected,
+                FailureActionPhase::Completed,
+            ]
+        );
+        assert!(!emitted.last().unwrap().session_attached);
+        assert!(!emitted.last().unwrap().terminal_input_usable);
+        assert!(requests.is_closed());
+    }
+
+    #[gpui::test]
     fn candidate_and_fallback_use_isolated_render_caches(cx: &mut TestAppContext) {
         let (pane, cx, _records) = connected_terminal_pane(cx);
 
@@ -6989,6 +7399,16 @@ mod tests {
                 })
             });
             assert!(result.is_err());
+            let rollback = cache.update(cx, |cache, _| cache.take_injected_rollback());
+            assert_eq!(
+                rollback,
+                Some(GraphicsRollbackProof {
+                    staged_count: 1,
+                    staged_bytes: 4,
+                    rolled_back_count: 1,
+                    rolled_back_bytes: 4,
+                })
+            );
             assert_eq!(
                 cache.read_with(cx, |cache, _| (
                     cache.cached_image_keys(),
@@ -7005,6 +7425,50 @@ mod tests {
                 )
             );
         }
+    }
+
+    #[gpui::test]
+    fn after_staging_failure_action_reports_actual_bounded_rollback(cx: &mut TestAppContext) {
+        let (pane, cx, records) = connected_terminal_pane(cx);
+        let session_events = records.last_event_sender().unwrap();
+        session_events
+            .try_send(SessionEvent::Screen(graphics_screen(1, 1)))
+            .unwrap();
+        cx.run_until_parked();
+        let (controller, requests, action_events) = FailureActionController::test_channel();
+        pane.update(cx, |pane, cx| {
+            pane.failure_actions = Some(controller);
+            pane.start_failure_action_monitor(cx);
+        });
+        requests
+            .try_send(FailureActionRequest {
+                id: "f".repeat(64),
+                sequence: 0,
+                case: FailureActionCase::RendererResourceAfterStaging,
+            })
+            .unwrap();
+        cx.run_until_parked();
+        let armed = action_events.try_recv().unwrap();
+        assert_eq!(armed.phase, FailureActionPhase::Armed);
+        assert_eq!(armed.resource_staged_count, 0);
+        assert_eq!(armed.resource_rolled_back_count, 0);
+
+        session_events
+            .try_send(SessionEvent::Screen(graphics_screen(2, 2)))
+            .unwrap();
+        cx.run_until_parked();
+        let injected = action_events.try_recv().unwrap();
+        assert_eq!(injected.phase, FailureActionPhase::Injected);
+        assert!(injected.resource_staged_count > 0);
+        assert!(injected.resource_staged_bytes > 0);
+        assert_eq!(
+            injected.resource_rolled_back_count,
+            injected.resource_staged_count
+        );
+        assert_eq!(
+            injected.resource_rolled_back_bytes,
+            injected.resource_staged_bytes
+        );
     }
 
     #[gpui::test]
@@ -7305,6 +7769,99 @@ mod tests {
                 2,
             )
         );
+    }
+
+    #[gpui::test]
+    fn pasteboard_failure_action_completes_only_after_a_real_retry_write(cx: &mut TestAppContext) {
+        let (pane, cx, _) = terminal_pane_with_selection_copy(
+            cx,
+            SelectionCopy {
+                plain_text: "acceptance selection".to_owned(),
+                html: None,
+            },
+        );
+        let (controller, requests, events) = FailureActionController::test_channel();
+        pane.update(cx, |pane, cx| {
+            pane.failure_actions = Some(controller);
+            pane.start_failure_action_monitor(cx);
+        });
+        requests
+            .try_send(FailureActionRequest {
+                id: "d".repeat(64),
+                sequence: 0,
+                case: FailureActionCase::PasteboardWrite,
+            })
+            .unwrap();
+        cx.run_until_parked();
+        cx.simulate_keystrokes("cmd-c");
+        cx.run_until_parked();
+        let before_retry = std::iter::from_fn(|| events.try_recv().ok()).collect::<Vec<_>>();
+        assert_eq!(
+            before_retry
+                .iter()
+                .map(|event| event.phase)
+                .collect::<Vec<_>>(),
+            vec![FailureActionPhase::Armed, FailureActionPhase::Injected]
+        );
+        assert!(pane.read_with(cx, |pane, _| pane.failure_action_request.is_some()));
+
+        let retry = cx
+            .debug_bounds("retry-terminal-recovery")
+            .expect("pasteboard failure action should expose Retry");
+        cx.simulate_click(retry.center(), Modifiers::none());
+        cx.run_until_parked();
+        let retried = std::iter::from_fn(|| events.try_recv().ok()).collect::<Vec<_>>();
+        assert_eq!(
+            retried.iter().map(|event| event.phase).collect::<Vec<_>>(),
+            vec![
+                FailureActionPhase::RetryRequested,
+                FailureActionPhase::Completed,
+            ]
+        );
+        assert!(retried.last().unwrap().terminal_input_usable);
+        assert!(retried.last().unwrap().session_attached);
+        assert!(pane.read_with(cx, |pane, _| pane.failure_action_request.is_none()));
+    }
+
+    #[gpui::test]
+    fn pasteboard_failure_action_does_not_complete_without_a_selection(cx: &mut TestAppContext) {
+        let (pane, cx, _) = connected_terminal_pane(cx);
+        let (controller, requests, events) = FailureActionController::test_channel();
+        pane.update(cx, |pane, cx| {
+            pane.failure_actions = Some(controller);
+            pane.start_failure_action_monitor(cx);
+        });
+        requests
+            .try_send(FailureActionRequest {
+                id: "e".repeat(64),
+                sequence: 0,
+                case: FailureActionCase::PasteboardWrite,
+            })
+            .unwrap();
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            pane.update(cx, |pane, cx| {
+                pane.present_failure(
+                    TerminalFailure::platform("write-selection-pasteboard"),
+                    true,
+                    Some(RecoveryAction::CopySelection),
+                );
+                pane.emit_injected_failure_if_matching();
+                pane.retry_recovery(window, cx);
+            });
+        });
+        let phases = std::iter::from_fn(|| events.try_recv().ok())
+            .map(|event| event.phase)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            phases,
+            vec![
+                FailureActionPhase::Armed,
+                FailureActionPhase::Injected,
+                FailureActionPhase::RetryRequested,
+            ]
+        );
+        assert!(pane.read_with(cx, |pane, _| pane.failure_action_request.is_some()));
     }
 
     #[gpui::test]
