@@ -1,8 +1,10 @@
-//! The complete framework-independent Vague theme used by SpaceTerm.
+//! The complete framework-independent Vague Pro theme used by SpaceTerm.
 //!
-//! Every color from the canonical Vague palette is represented here, including
+//! Every color from the canonical Vague Pro palette is represented here, including
 //! currently unused syntax, collaboration, editor, and status colors. GPUI and
 //! libghostty-vt adapters must consume these tokens rather than define colors.
+//!
+//! Palette source: <https://github.com/sadiksaifi/vague-pro-zed>.
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct Color {
@@ -57,13 +59,14 @@ pub(crate) struct SyntaxStyle {
 
 #[expect(
     dead_code,
-    reason = "the complete Vague syntax palette is retained for future consumers"
+    reason = "the complete Vague Pro syntax palette is retained for future consumers"
 )]
 pub(crate) struct SyntaxTheme {
     pub(crate) comment: SyntaxStyle,
     pub(crate) comment_doc: SyntaxStyle,
     pub(crate) string: SyntaxStyle,
     pub(crate) string_special: SyntaxStyle,
+    pub(crate) string_special_symbol: SyntaxStyle,
     pub(crate) string_escape: SyntaxStyle,
     pub(crate) string_regex: SyntaxStyle,
     pub(crate) link_text: SyntaxStyle,
@@ -72,8 +75,10 @@ pub(crate) struct SyntaxTheme {
     pub(crate) number: SyntaxStyle,
     pub(crate) boolean: SyntaxStyle,
     pub(crate) constant: SyntaxStyle,
+    pub(crate) constant_builtin: SyntaxStyle,
     pub(crate) character: SyntaxStyle,
     pub(crate) character_special: SyntaxStyle,
+    pub(crate) variable: SyntaxStyle,
     pub(crate) variable_parameter: SyntaxStyle,
     pub(crate) variable_member: SyntaxStyle,
     pub(crate) variable_special: SyntaxStyle,
@@ -84,6 +89,8 @@ pub(crate) struct SyntaxTheme {
     pub(crate) function_method: SyntaxStyle,
     pub(crate) function_method_call: SyntaxStyle,
     pub(crate) keyword: SyntaxStyle,
+    pub(crate) keyword_control: SyntaxStyle,
+    pub(crate) keyword_operator_regex: SyntaxStyle,
     pub(crate) label: SyntaxStyle,
     pub(crate) title: SyntaxStyle,
     pub(crate) operator: SyntaxStyle,
@@ -94,19 +101,34 @@ pub(crate) struct SyntaxTheme {
     pub(crate) hint: SyntaxStyle,
     pub(crate) type_: SyntaxStyle,
     pub(crate) type_builtin: SyntaxStyle,
+    pub(crate) type_class: SyntaxStyle,
     pub(crate) enum_: SyntaxStyle,
     pub(crate) namespace: SyntaxStyle,
+    pub(crate) variant: SyntaxStyle,
     pub(crate) tag: SyntaxStyle,
+    pub(crate) tag_component_jsx: SyntaxStyle,
+    pub(crate) tag_doctype: SyntaxStyle,
     pub(crate) tag_attribute: SyntaxStyle,
     pub(crate) tag_delimiter: SyntaxStyle,
     pub(crate) attribute: SyntaxStyle,
     pub(crate) attribute_builtin: SyntaxStyle,
+    pub(crate) attribute_jsx: SyntaxStyle,
     pub(crate) punctuation: SyntaxStyle,
     pub(crate) punctuation_special: SyntaxStyle,
     pub(crate) punctuation_delimiter: SyntaxStyle,
+    pub(crate) punctuation_bracket: SyntaxStyle,
     pub(crate) punctuation_list_marker: SyntaxStyle,
+    pub(crate) punctuation_markup: SyntaxStyle,
+    pub(crate) text_jsx: SyntaxStyle,
     pub(crate) emphasis: SyntaxStyle,
     pub(crate) emphasis_strong: SyntaxStyle,
+    pub(crate) embedded: SyntaxStyle,
+    pub(crate) primary: SyntaxStyle,
+    pub(crate) predictive: SyntaxStyle,
+    pub(crate) selector: SyntaxStyle,
+    pub(crate) selector_pseudo: SyntaxStyle,
+    pub(crate) diff_plus: SyntaxStyle,
+    pub(crate) diff_minus: SyntaxStyle,
 }
 
 #[expect(
@@ -121,7 +143,7 @@ pub(crate) struct PlayerTheme {
 
 #[expect(
     dead_code,
-    reason = "all canonical Vague roles are defined before every UI consumer exists"
+    reason = "all canonical Vague Pro roles are defined before every UI consumer exists"
 )]
 pub(crate) struct Theme {
     pub(crate) accents: [Color; 7],
@@ -177,7 +199,6 @@ pub(crate) struct Theme {
     pub(crate) renamed_border: Color,
     pub(crate) renamed_background: Color,
     pub(crate) status_bar_foreground: Color,
-    pub(crate) tab_active_foreground: Color,
     pub(crate) text: Color,
     pub(crate) text_accent: Color,
     pub(crate) text_disabled: Color,
@@ -320,9 +341,9 @@ impl Theme {
     }
 }
 
-pub(crate) const ACTIVE_THEME: &Theme = &VAGUE;
+pub(crate) const ACTIVE_THEME: &Theme = &VAGUE_PRO;
 
-pub(crate) static VAGUE: Theme = Theme {
+pub(crate) static VAGUE_PRO: Theme = Theme {
     accents: [
         Color::rgb(0x7e_98_e8),
         Color::rgb(0x6e_94_b2),
@@ -339,9 +360,9 @@ pub(crate) static VAGUE: Theme = Theme {
             font_style: None,
         },
         comment_doc: SyntaxStyle {
-            color: Color::rgb(0x60_60_79),
+            color: Color::rgb(0x87_87_87),
             font_weight: None,
-            font_style: None,
+            font_style: Some(FontStyle::Italic),
         },
         string: SyntaxStyle {
             color: Color::rgb(0xe8_b5_89),
@@ -350,6 +371,11 @@ pub(crate) static VAGUE: Theme = Theme {
         },
         string_special: SyntaxStyle {
             color: Color::rgb(0xe8_b5_89),
+            font_weight: None,
+            font_style: None,
+        },
+        string_special_symbol: SyntaxStyle {
+            color: Color::rgb(0xb4_d4_cf),
             font_weight: None,
             font_style: None,
         },
@@ -393,6 +419,11 @@ pub(crate) static VAGUE: Theme = Theme {
             font_weight: None,
             font_style: None,
         },
+        constant_builtin: SyntaxStyle {
+            color: Color::rgb(0xe0_a3_63),
+            font_weight: Some(700),
+            font_style: None,
+        },
         character: SyntaxStyle {
             color: Color::rgb(0xe8_b5_89),
             font_weight: None,
@@ -400,6 +431,11 @@ pub(crate) static VAGUE: Theme = Theme {
         },
         character_special: SyntaxStyle {
             color: Color::rgb(0x6e_94_b2),
+            font_weight: None,
+            font_style: None,
+        },
+        variable: SyntaxStyle {
+            color: Color::rgb(0xae_ae_d1),
             font_weight: None,
             font_style: None,
         },
@@ -419,7 +455,7 @@ pub(crate) static VAGUE: Theme = Theme {
             font_style: None,
         },
         property: SyntaxStyle {
-            color: Color::rgb(0xc3_c3_d5),
+            color: Color::rgb(0x9b_b4_bc),
             font_weight: None,
             font_style: None,
         },
@@ -434,7 +470,7 @@ pub(crate) static VAGUE: Theme = Theme {
             font_style: None,
         },
         function_macro: SyntaxStyle {
-            color: Color::rgb(0xae_ae_d1),
+            color: Color::rgb(0x7f_a5_63),
             font_weight: None,
             font_style: None,
         },
@@ -444,12 +480,22 @@ pub(crate) static VAGUE: Theme = Theme {
             font_style: None,
         },
         function_method_call: SyntaxStyle {
-            color: Color::rgb(0x9b_b4_bc),
+            color: Color::rgb(0xbb_9d_bd),
             font_weight: None,
             font_style: None,
         },
         keyword: SyntaxStyle {
             color: Color::rgb(0x6e_94_b2),
+            font_weight: None,
+            font_style: None,
+        },
+        keyword_control: SyntaxStyle {
+            color: Color::rgb(0xbb_9d_bd),
+            font_weight: None,
+            font_style: None,
+        },
+        keyword_operator_regex: SyntaxStyle {
+            color: Color::rgb(0x90_a0_b5),
             font_weight: None,
             font_style: None,
         },
@@ -474,7 +520,7 @@ pub(crate) static VAGUE: Theme = Theme {
             font_style: None,
         },
         constructor: SyntaxStyle {
-            color: Color::rgb(0xae_ae_d1),
+            color: Color::rgb(0xe8_b5_89),
             font_weight: None,
             font_style: None,
         },
@@ -503,8 +549,13 @@ pub(crate) static VAGUE: Theme = Theme {
             font_weight: Some(700),
             font_style: None,
         },
+        type_class: SyntaxStyle {
+            color: Color::rgb(0xb4_d4_cf),
+            font_weight: None,
+            font_style: None,
+        },
         enum_: SyntaxStyle {
-            color: Color::rgb(0x9b_b4_bc),
+            color: Color::rgb(0xbb_9d_bd),
             font_weight: None,
             font_style: None,
         },
@@ -513,13 +564,28 @@ pub(crate) static VAGUE: Theme = Theme {
             font_weight: None,
             font_style: None,
         },
+        variant: SyntaxStyle {
+            color: Color::rgb(0x7f_a5_63),
+            font_weight: None,
+            font_style: None,
+        },
         tag: SyntaxStyle {
             color: Color::rgb(0x9b_b4_bc),
             font_weight: None,
             font_style: None,
         },
+        tag_component_jsx: SyntaxStyle {
+            color: Color::rgb(0xb4_d4_cf),
+            font_weight: None,
+            font_style: None,
+        },
+        tag_doctype: SyntaxStyle {
+            color: Color::rgb(0xe0_a3_63),
+            font_weight: None,
+            font_style: None,
+        },
         tag_attribute: SyntaxStyle {
-            color: Color::rgb(0xae_ae_d1),
+            color: Color::rgb(0xbb_9d_bd),
             font_weight: None,
             font_style: None,
         },
@@ -529,12 +595,17 @@ pub(crate) static VAGUE: Theme = Theme {
             font_style: None,
         },
         attribute: SyntaxStyle {
-            color: Color::rgb(0xae_ae_d1),
+            color: Color::rgb(0xbb_9d_bd),
             font_weight: None,
             font_style: None,
         },
         attribute_builtin: SyntaxStyle {
             color: Color::rgb(0x9b_b4_bc),
+            font_weight: None,
+            font_style: None,
+        },
+        attribute_jsx: SyntaxStyle {
+            color: Color::rgb(0xbb_9d_bd),
             font_weight: None,
             font_style: None,
         },
@@ -553,8 +624,23 @@ pub(crate) static VAGUE: Theme = Theme {
             font_weight: None,
             font_style: None,
         },
+        punctuation_bracket: SyntaxStyle {
+            color: Color::rgb(0x90_a0_b5),
+            font_weight: None,
+            font_style: None,
+        },
         punctuation_list_marker: SyntaxStyle {
             color: Color::rgb(0xc4_82_82),
+            font_weight: None,
+            font_style: None,
+        },
+        punctuation_markup: SyntaxStyle {
+            color: Color::rgb(0xc4_82_82),
+            font_weight: None,
+            font_style: None,
+        },
+        text_jsx: SyntaxStyle {
+            color: Color::rgb(0xcd_cd_cd),
             font_weight: None,
             font_style: None,
         },
@@ -566,6 +652,41 @@ pub(crate) static VAGUE: Theme = Theme {
         emphasis_strong: SyntaxStyle {
             color: Color::rgb(0xcd_cd_cd),
             font_weight: Some(700),
+            font_style: None,
+        },
+        embedded: SyntaxStyle {
+            color: Color::rgb(0xcd_cd_cd),
+            font_weight: None,
+            font_style: None,
+        },
+        primary: SyntaxStyle {
+            color: Color::rgb(0xcd_cd_cd),
+            font_weight: None,
+            font_style: None,
+        },
+        predictive: SyntaxStyle {
+            color: Color::rgb(0x60_60_79),
+            font_weight: None,
+            font_style: Some(FontStyle::Italic),
+        },
+        selector: SyntaxStyle {
+            color: Color::rgb(0x7f_a5_63),
+            font_weight: None,
+            font_style: None,
+        },
+        selector_pseudo: SyntaxStyle {
+            color: Color::rgb(0xbb_9d_bd),
+            font_weight: None,
+            font_style: None,
+        },
+        diff_plus: SyntaxStyle {
+            color: Color::rgb(0x7f_a5_63),
+            font_weight: None,
+            font_style: None,
+        },
+        diff_minus: SyntaxStyle {
+            color: Color::rgb(0xd8_64_7e),
+            font_weight: None,
             font_style: None,
         },
     },
@@ -661,20 +782,19 @@ pub(crate) static VAGUE: Theme = Theme {
     renamed_border: Color::rgb(0xbb_9d_bd),
     renamed_background: Color::rgba(0xbb_9d_bd_1a),
     status_bar_foreground: Color::rgb(0xcd_cd_cd),
-    tab_active_foreground: Color::rgb(0x6e_94_b2),
     text: Color::rgb(0xcd_cd_cd),
     text_accent: Color::rgb(0x6e_94_b2),
     text_disabled: Color::rgb(0x60_60_79),
-    text_muted: Color::rgb(0xcd_cd_cd),
+    text_muted: Color::rgb(0x87_87_87),
     text_placeholder: Color::rgb(0x60_60_79),
     element_background: Color::rgb(0x14_14_15),
     element_active: Color::rgb(0x25_25_30),
     element_disabled: Color::rgb(0x14_14_15),
-    element_hover: Color::rgb(0x60_60_79),
+    element_hover: Color::rgb(0x25_25_30),
     element_selected: Color::rgb(0x25_25_30),
-    ghost_element_background: Color::rgb(0x14_14_15),
+    ghost_element_background: Color::rgba(0x00_00_00_00),
     ghost_element_disabled: Color::rgb(0x14_14_15),
-    ghost_element_hover: Color::rgb(0x14_14_15),
+    ghost_element_hover: Color::rgb(0x25_25_30),
     ghost_element_active: Color::rgb(0x25_25_30),
     ghost_element_selected: Color::rgb(0x25_25_30),
     icon_accent: Color::rgb(0x6e_94_b2),
@@ -684,7 +804,7 @@ pub(crate) static VAGUE: Theme = Theme {
     icon_placeholder: Color::rgb(0xc3_c3_d5),
     debugger_accent: Color::rgb(0xd8_64_7e),
     scrollbar_thumb_background: Color::rgba(0x33_37_38_78),
-    scrollbar_thumb_hover_background: Color::rgba(0x33_37_38_78),
+    scrollbar_thumb_hover_background: Color::rgba(0x60_60_79_78),
     scrollbar_track_border: Color::rgba(0x00_00_00_00),
     scrollbar_thumb_border: Color::rgba(0x00_00_00_00),
     drop_target_background: Color::rgba(0x40_50_65_80),
@@ -696,7 +816,7 @@ pub(crate) static VAGUE: Theme = Theme {
     editor_gutter_background: Color::rgb(0x14_14_15),
     editor_line_number: Color::rgb(0x60_60_79),
     editor_highlighted_line_background: Color::rgb(0x25_25_30),
-    editor_invisible: Color::rgb(0x25_25_30),
+    editor_invisible: Color::rgb(0x60_60_79),
     editor_subheader_background: Color::rgb(0x14_14_15),
     editor_wrap_guide: Color::rgba(0x25_25_30_0d),
     editor_document_highlight_bracket_background: Color::rgba(0x33_37_38_aa),
@@ -708,13 +828,13 @@ pub(crate) static VAGUE: Theme = Theme {
     panel_background: Color::rgb(0x14_14_15),
     panel_focused_border: Color::rgb(0x6e_94_b2),
     panel_indent_guide: Color::rgb(0x25_25_30),
-    panel_indent_guide_hover: Color::rgb(0x25_25_30),
+    panel_indent_guide_hover: Color::rgb(0x40_50_65),
     panel_indent_guide_active: Color::rgb(0x60_60_79),
-    search_match_background: Color::rgba(0x40_50_65_1a),
-    search_current_match_background: Color::rgba(0x6e_94_b2_66),
+    search_match_background: Color::rgba(0x6e_94_b2_66),
+    search_current_match_background: Color::rgba(0xe8_b5_89_66),
     status_bar_background: Color::rgb(0x14_14_15),
     surface_background: Color::rgb(0x14_14_15),
-    tab_active_background: Color::rgb(0x14_14_15),
+    tab_active_background: Color::rgb(0x25_25_30),
     tab_inactive_background: Color::rgb(0x14_14_15),
     tab_bar_background: Color::rgb(0x14_14_15),
     title_bar_background: Color::rgb(0x14_14_15),
@@ -766,14 +886,42 @@ mod tests {
     }
 
     #[test]
-    fn vague_terminal_palette_has_normal_bright_and_dim_variants() {
+    fn vague_pro_terminal_palette_has_normal_bright_and_dim_variants() {
         assert_eq!(
             (
-                VAGUE.terminal_normal().len(),
-                VAGUE.terminal_bright().len(),
-                VAGUE.terminal_dim().len(),
+                VAGUE_PRO.terminal_normal().len(),
+                VAGUE_PRO.terminal_bright().len(),
+                VAGUE_PRO.terminal_dim().len(),
             ),
             (8, 8, 8)
+        );
+    }
+
+    #[test]
+    fn vague_pro_interface_tokens_match_upstream() {
+        assert_eq!(
+            (
+                VAGUE_PRO.text_muted.rgba_hex(),
+                VAGUE_PRO.element_hover.rgba_hex(),
+                VAGUE_PRO.ghost_element_background.rgba_hex(),
+                VAGUE_PRO.scrollbar_thumb_hover_background.rgba_hex(),
+                VAGUE_PRO.editor_invisible.rgba_hex(),
+                VAGUE_PRO.panel_indent_guide_hover.rgba_hex(),
+                VAGUE_PRO.search_match_background.rgba_hex(),
+                VAGUE_PRO.search_current_match_background.rgba_hex(),
+                VAGUE_PRO.tab_active_background.rgba_hex(),
+            ),
+            (
+                0x87_87_87_ff,
+                0x25_25_30_ff,
+                0x00_00_00_00,
+                0x60_60_79_78,
+                0x60_60_79_ff,
+                0x40_50_65_ff,
+                0x6e_94_b2_66,
+                0xe8_b5_89_66,
+                0x25_25_30_ff,
+            )
         );
     }
 }
