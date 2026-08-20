@@ -491,7 +491,7 @@ impl WindowManager {
             }))
             .text_size(px(12.0))
             .text_color(gpui_color(if active {
-                ACTIVE_THEME.tab_active_foreground
+                ACTIVE_THEME.text_accent
             } else {
                 ACTIVE_THEME.text_muted
             }))
