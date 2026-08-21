@@ -44,7 +44,8 @@ static void handle_signal(int signal_number) {
 
 static void print_usage(FILE *stream) {
     fprintf(stream,
-            "Usage: performance-driver --pid PID --start-identity STRING \\\n\n"
+            "Usage: performance-driver --self-test\n"
+            "  performance-driver --pid PID --start-identity STRING \\\n\n"
             "  --executable PATH --executable-sha256 SHA256 --app-bundle PATH \\\n\n"
             "  --bundle-identifier ID --signing-identifier ID \\\n\n"
             "  --team-identifier ID|none|- --cdhash HEX --window-number N \\\n\n"
@@ -522,13 +523,16 @@ static NSInteger window_integer(NSDictionary *info, CFStringRef key, NSInteger f
     return [value isKindOfClass:[NSNumber class]] ? [value integerValue] : fallback;
 }
 
-static BOOL ax_window_number(AXUIElementRef window, CGWindowID *number) {
+static BOOL ax_window_number(AXUIElementRef window, CGWindowID *number, BOOL *present) {
     CFTypeRef raw = NULL;
     AXError status = AXUIElementCopyAttributeValue(window, CFSTR("AXWindowNumber"), &raw);
+    if (status == kAXErrorAttributeUnsupported || status == kAXErrorNoValue) {
+        if (raw != NULL) CFRelease(raw);
+        *present = NO;
+        return YES;
+    }
     if (status != kAXErrorSuccess || raw == NULL) {
-        if (raw != NULL) {
-            CFRelease(raw);
-        }
+        if (raw != NULL) CFRelease(raw);
         return NO;
     }
     BOOL valid = CFGetTypeID(raw) == CFNumberGetTypeID();
@@ -542,6 +546,7 @@ static BOOL ax_window_number(AXUIElementRef window, CGWindowID *number) {
         return NO;
     }
     *number = (CGWindowID)value;
+    *present = YES;
     return YES;
 }
 
@@ -557,6 +562,165 @@ static BOOL ax_boolean(AXUIElementRef element, CFStringRef attribute, BOOL *valu
     *value = CFBooleanGetValue((CFBooleanRef)raw);
     CFRelease(raw);
     return YES;
+}
+
+static BOOL ax_string(AXUIElementRef element, CFStringRef attribute, NSString **value) {
+    CFTypeRef raw = NULL;
+    AXError status = AXUIElementCopyAttributeValue(element, attribute, &raw);
+    if (status != kAXErrorSuccess || raw == NULL || CFGetTypeID(raw) != CFStringGetTypeID()) {
+        if (raw != NULL) CFRelease(raw);
+        return NO;
+    }
+    *value = CFBridgingRelease(raw);
+    return YES;
+}
+
+static BOOL ax_point(AXUIElementRef element, CFStringRef attribute, CGPoint *value) {
+    CFTypeRef raw = NULL;
+    AXError status = AXUIElementCopyAttributeValue(element, attribute, &raw);
+    BOOL valid = status == kAXErrorSuccess && raw != NULL
+        && CFGetTypeID(raw) == AXValueGetTypeID()
+        && AXValueGetValue((AXValueRef)raw, kAXValueTypeCGPoint, value);
+    if (raw != NULL) CFRelease(raw);
+    return valid;
+}
+
+static BOOL ax_size(AXUIElementRef element, CFStringRef attribute, CGSize *value) {
+    CFTypeRef raw = NULL;
+    AXError status = AXUIElementCopyAttributeValue(element, attribute, &raw);
+    BOOL valid = status == kAXErrorSuccess && raw != NULL
+        && CFGetTypeID(raw) == AXValueGetTypeID()
+        && AXValueGetValue((AXValueRef)raw, kAXValueTypeCGSize, value);
+    if (raw != NULL) CFRelease(raw);
+    return valid;
+}
+
+static NSArray<NSDictionary *> *select_driver_windows(
+    NSArray<NSDictionary *> *candidates,
+    pid_t targetPID,
+    CGWindowID targetNumber,
+    CGRect targetBounds
+) {
+    NSPredicate *eligible = [NSPredicate predicateWithBlock:
+        ^BOOL(NSDictionary *candidate, NSDictionary *_) {
+            (void)_;
+            NSNumber *number = candidate[@"number"];
+            CGRect bounds = CGRectMake(
+                [candidate[@"x"] doubleValue], [candidate[@"y"] doubleValue],
+                [candidate[@"width"] doubleValue], [candidate[@"height"] doubleValue]);
+            return [candidate[@"owner"] intValue] == targetPID
+                && [candidate[@"role"] isEqualToString:(__bridge NSString *)kAXWindowRole]
+                && [candidate[@"subrole"] isEqualToString:
+                    (__bridge NSString *)kAXStandardWindowSubrole]
+                && ![candidate[@"minimized"] boolValue]
+                && (number == nil || number.unsignedIntValue == targetNumber)
+                && CGRectEqualToRect(bounds, targetBounds);
+        }];
+    NSArray<NSDictionary *> *matches = [candidates filteredArrayUsingPredicate:eligible];
+    if (matches.count <= 1) return matches;
+    NSPredicate *focusedMain = [NSPredicate predicateWithBlock:
+        ^BOOL(NSDictionary *candidate, NSDictionary *_) {
+            (void)_;
+            return [candidate[@"main"] boolValue] && [candidate[@"focused"] boolValue];
+        }];
+    return [matches filteredArrayUsingPredicate:focusedMain];
+}
+
+static NSDictionary *ax_window_candidate(AXUIElementRef window) {
+    pid_t owner = 0;
+    CGWindowID number = 0;
+    BOOL numberPresent = NO;
+    BOOL minimized = YES;
+    BOOL main = NO;
+    BOOL focused = NO;
+    NSString *role = nil;
+    NSString *subrole = nil;
+    CGPoint position = CGPointZero;
+    CGSize size = CGSizeZero;
+    if (AXUIElementGetPid(window, &owner) != kAXErrorSuccess
+        || !ax_window_number(window, &number, &numberPresent)
+        || !ax_boolean(window, kAXMinimizedAttribute, &minimized)
+        || !ax_boolean(window, kAXMainAttribute, &main)
+        || !ax_boolean(window, kAXFocusedAttribute, &focused)
+        || !ax_string(window, kAXRoleAttribute, &role)
+        || !ax_string(window, kAXSubroleAttribute, &subrole)
+        || !ax_point(window, kAXPositionAttribute, &position)
+        || !ax_size(window, kAXSizeAttribute, &size)
+        || !isfinite(position.x) || !isfinite(position.y)
+        || !isfinite(size.width) || !isfinite(size.height)
+        || size.width <= 0.0 || size.height <= 0.0) return nil;
+    NSMutableDictionary *candidate = [@{
+        @"element": (__bridge id)window, @"owner": @(owner), @"role": role,
+        @"subrole": subrole, @"minimized": @(minimized), @"main": @(main),
+        @"focused": @(focused), @"x": @(position.x), @"y": @(position.y),
+        @"width": @(size.width), @"height": @(size.height),
+    } mutableCopy];
+    if (numberPresent) candidate[@"number"] = @(number);
+    return candidate;
+}
+
+static NSDictionary *driver_ax_fixture(
+    pid_t owner,
+    NSString *role,
+    NSString *subrole,
+    BOOL minimized,
+    BOOL main,
+    BOOL focused,
+    NSNumber *number,
+    CGRect bounds
+) {
+    NSMutableDictionary *candidate = [@{
+        @"owner": @(owner), @"role": role, @"subrole": subrole,
+        @"minimized": @(minimized), @"main": @(main), @"focused": @(focused),
+        @"x": @(bounds.origin.x), @"y": @(bounds.origin.y),
+        @"width": @(bounds.size.width), @"height": @(bounds.size.height),
+    } mutableCopy];
+    if (number != nil) candidate[@"number"] = number;
+    return candidate;
+}
+
+static BOOL driver_window_self_test(void) {
+    const pid_t pid = 123;
+    const CGWindowID number = 42;
+    CGRect bounds = CGRectMake(35, 39, 1472, 937);
+    NSString *windowRole = (__bridge NSString *)kAXWindowRole;
+    NSString *standard = (__bridge NSString *)kAXStandardWindowSubrole;
+    NSDictionary *gpui = driver_ax_fixture(
+        pid, windowRole, standard, NO, YES, YES, nil, bounds);
+    NSDictionary *numbered = driver_ax_fixture(
+        pid, windowRole, standard, NO, YES, YES, @42, bounds);
+    if (select_driver_windows(@[gpui], pid, number, bounds).count != 1
+        || select_driver_windows(@[numbered], pid, number, bounds).count != 1) return NO;
+
+    NSDictionary *proxy = driver_ax_fixture(
+        pid, (__bridge NSString *)kAXApplicationRole, standard, NO, YES, YES, nil, bounds);
+    NSDictionary *foreign = driver_ax_fixture(
+        pid + 1, windowRole, standard, NO, YES, YES, nil, bounds);
+    NSDictionary *nonstandard = driver_ax_fixture(
+        pid, windowRole, (__bridge NSString *)kAXDialogSubrole, NO, YES, YES, nil, bounds);
+    NSDictionary *minimized = driver_ax_fixture(
+        pid, windowRole, standard, YES, YES, YES, nil, bounds);
+    NSDictionary *wrongNumber = driver_ax_fixture(
+        pid, windowRole, standard, NO, YES, YES, @43, bounds);
+    if (select_driver_windows(@[proxy], pid, number, bounds).count != 0
+        || select_driver_windows(@[foreign], pid, number, bounds).count != 0
+        || select_driver_windows(@[nonstandard], pid, number, bounds).count != 0
+        || select_driver_windows(@[minimized], pid, number, bounds).count != 0
+        || select_driver_windows(@[wrongNumber], pid, number, bounds).count != 0) return NO;
+
+    CGRect secondBounds = CGRectMake(1600, 39, 800, 600);
+    NSDictionary *background = driver_ax_fixture(
+        pid, windowRole, standard, NO, NO, NO, nil, secondBounds);
+    NSArray *selected = select_driver_windows(@[gpui, background], pid, number, bounds);
+    if (selected.count != 1) return NO;
+    NSDictionary *duplicateBackground = driver_ax_fixture(
+        pid, windowRole, standard, NO, NO, NO, nil, bounds);
+    if (select_driver_windows(@[gpui, duplicateBackground], pid, number, bounds).count != 1) {
+        return NO;
+    }
+    NSDictionary *ambiguousMain = driver_ax_fixture(
+        pid, windowRole, standard, NO, YES, YES, nil, bounds);
+    return select_driver_windows(@[gpui, ambiguousMain], pid, number, bounds).count == 2;
 }
 
 @interface DriverTarget : NSObject {
@@ -860,16 +1024,20 @@ static BOOL ax_boolean(AXUIElementRef element, CFStringRef attribute, BOOL *valu
     NSInteger owner = window_integer(info, kCGWindowOwnerPID, -1);
     NSInteger number = window_integer(info, kCGWindowNumber, -1);
     NSInteger layer = window_integer(info, kCGWindowLayer, -1);
-    if (info == nil || owner != self.pid || number != self.windowNumber || layer != 0) {
+    NSInteger onscreen = window_integer(info, kCGWindowIsOnscreen, 0);
+    NSNumber *alpha = info[(__bridge id)kCGWindowAlpha];
+    CGRect bounds = CGRectZero;
+    if (info == nil || owner != self.pid || number != self.windowNumber || layer != 0
+        || onscreen != 1 || ![alpha isKindOfClass:NSNumber.class] || alpha.doubleValue <= 0.0
+        || !window_bounds(info, &bounds)) {
         return set_error(error, @"target-window-identity-mismatch");
     }
-    pid_t ax_pid = 0;
-    CGWindowID ax_number = 0;
-    if (_windowElement == NULL
-        || AXUIElementGetPid(_windowElement, &ax_pid) != kAXErrorSuccess
-        || ax_pid != self.pid
-        || !ax_window_number(_windowElement, &ax_number)
-        || ax_number != self.windowNumber) {
+    NSDictionary *candidate = _windowElement == NULL
+        ? nil : ax_window_candidate(_windowElement);
+    NSArray<NSDictionary *> *selected = candidate == nil ? @[]
+        : select_driver_windows(@[candidate], self.pid, self.windowNumber, bounds);
+    if (selected.count != 1
+        || !CFEqual((__bridge CFTypeRef)selected[0][@"element"], _windowElement)) {
         return set_error(error, @"target-accessibility-window-mismatch");
     }
     return YES;
@@ -880,41 +1048,43 @@ static BOOL ax_boolean(AXUIElementRef element, CFStringRef attribute, BOOL *valu
     if (_applicationElement == NULL) {
         return set_error(error, @"target-accessibility-application-unavailable");
     }
-    CFTypeRef raw_windows = NULL;
-    AXError status = AXUIElementCopyAttributeValue(
-        _applicationElement,
-        kAXWindowsAttribute,
-        &raw_windows);
-    if (status != kAXErrorSuccess || raw_windows == NULL
-        || CFGetTypeID(raw_windows) != CFArrayGetTypeID()) {
-        if (raw_windows != NULL) {
-            CFRelease(raw_windows);
+    for (NSUInteger attempt = 0; attempt < 100; attempt++) {
+        NSDictionary *info = copy_window_info(self.windowNumber);
+        CGRect bounds = CGRectZero;
+        if (info == nil
+            || window_integer(info, kCGWindowOwnerPID, -1) != self.pid
+            || window_integer(info, kCGWindowNumber, -1) != self.windowNumber
+            || window_integer(info, kCGWindowLayer, -1) != 0
+            || window_integer(info, kCGWindowIsOnscreen, 0) != 1
+            || !window_bounds(info, &bounds)) {
+            return set_error(error, @"target-window-identity-mismatch");
         }
-        return set_error(error, @"target-accessibility-windows-unavailable");
-    }
-    CFArrayRef windows = (CFArrayRef)raw_windows;
-    CFIndex match_count = 0;
-    AXUIElementRef match = NULL;
-    for (CFIndex index = 0; index < CFArrayGetCount(windows); index += 1) {
-        CFTypeRef candidate = CFArrayGetValueAtIndex(windows, index);
-        if (CFGetTypeID(candidate) != AXUIElementGetTypeID()) {
-            continue;
+        CFTypeRef rawWindows = NULL;
+        AXError status = AXUIElementCopyAttributeValue(
+            _applicationElement, kAXWindowsAttribute, &rawWindows);
+        if (status == kAXErrorSuccess && rawWindows != NULL
+            && CFGetTypeID(rawWindows) == CFArrayGetTypeID()) {
+            NSMutableArray<NSDictionary *> *candidates = [NSMutableArray array];
+            CFArrayRef windows = (CFArrayRef)rawWindows;
+            for (CFIndex index = 0; index < CFArrayGetCount(windows); index++) {
+                CFTypeRef rawCandidate = CFArrayGetValueAtIndex(windows, index);
+                if (CFGetTypeID(rawCandidate) != AXUIElementGetTypeID()) continue;
+                NSDictionary *candidate = ax_window_candidate((AXUIElementRef)rawCandidate);
+                if (candidate != nil) [candidates addObject:candidate];
+            }
+            NSArray<NSDictionary *> *selected = select_driver_windows(
+                candidates, self.pid, self.windowNumber, bounds);
+            if (selected.count == 1) {
+                _windowElement = (AXUIElementRef)CFRetain(
+                    (__bridge CFTypeRef)selected[0][@"element"]);
+                CFRelease(rawWindows);
+                return YES;
+            }
         }
-        CGWindowID candidate_number = 0;
-        if (ax_window_number((AXUIElementRef)candidate, &candidate_number)
-            && candidate_number == self.windowNumber) {
-            match_count += 1;
-            match = (AXUIElementRef)candidate;
-        }
+        if (rawWindows != NULL) CFRelease(rawWindows);
+        pump_run_loop(50);
     }
-    if (match_count == 1) {
-        _windowElement = (AXUIElementRef)CFRetain(match);
-    }
-    CFRelease(raw_windows);
-    if (match_count != 1) {
-        return set_error(error, @"target-accessibility-window-not-unique");
-    }
-    return YES;
+    return set_error(error, @"target-accessibility-window-not-unique");
 }
 
 - (BOOL)windowIsMinimized:(BOOL *)minimized {
@@ -973,9 +1143,14 @@ static BOOL ax_boolean(AXUIElementRef element, CFStringRef attribute, BOOL *valu
         }
         return NO;
     }
-    CGWindowID number = 0;
-    BOOL matches = ax_window_number((AXUIElementRef)raw, &number)
-        && number == self.windowNumber;
+    NSDictionary *info = copy_window_info(self.windowNumber);
+    CGRect bounds = CGRectZero;
+    NSDictionary *candidate = ax_window_candidate((AXUIElementRef)raw);
+    NSArray<NSDictionary *> *selected = info == nil || candidate == nil
+        || !window_bounds(info, &bounds) ? @[]
+        : select_driver_windows(@[candidate], self.pid, self.windowNumber, bounds);
+    BOOL matches = selected.count == 1
+        && CFEqual((__bridge CFTypeRef)selected[0][@"element"], raw);
     CFRelease(raw);
     return matches;
 }
@@ -1739,6 +1914,9 @@ int main(int argc, const char *argv[]) {
     @autoreleasepool {
         umask(077);
         setlocale(LC_ALL, "C");
+        if (argc == 2 && strcmp(argv[1], "--self-test") == 0) {
+            return driver_window_self_test() ? 0 : 1;
+        }
         if (argc == 2 && (strcmp(argv[1], "--help") == 0 || strcmp(argv[1], "-h") == 0)) {
             print_usage(stdout);
             return 0;
