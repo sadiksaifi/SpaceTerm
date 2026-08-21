@@ -1,6 +1,6 @@
 # SpaceTerm
 
-A native macOS terminal implemented as one Rust application crate.
+A native macOS terminal implemented as a Rust application with one internal UI library.
 
 ## Required Context
 
@@ -23,9 +23,9 @@ A native macOS terminal implemented as one Rust application crate.
 
 ## Architecture
 
-- Shape: one macOS-only Rust application crate.
+- Shape: one macOS-only Rust application crate plus `crates/spaceterm-ui` for reusable controls.
 - Entry points: `src/main.rs` and `src/app.rs`.
-- Seams: `src/domain`, `src/ui`, `src/terminal`, and `src/platform`.
+- Seams: `src/domain`, `src/ui`, `src/terminal`, `src/platform`, and `crates/spaceterm-ui`.
 - Packaging: `Justfile`, `scripts/`, `packaging/macos`, and `assets/macos`.
 
 ## Working Rules

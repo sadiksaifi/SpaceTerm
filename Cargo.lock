@@ -5138,8 +5138,17 @@ dependencies = [
  "portable-pty",
  "raw-window-handle",
  "smallvec",
+ "spaceterm-ui",
  "thiserror 2.0.19",
  "unicode-bidi",
+]
+
+[[package]]
+name = "spaceterm-ui"
+version = "0.0.0"
+dependencies = [
+ "gpui",
+ "unicode-segmentation",
 ]
 
 [[package]]
