@@ -891,7 +891,7 @@ collect_native_launch_observation() {
         --output "$observation" \
         --mode "$mode" \
         --failure-control "$failure_control" \
-        "${lifecycle_arguments[@]}" \
+        ${lifecycle_arguments[@]+"${lifecycle_arguments[@]}"} \
         >"$launch_root/logs/native-launch.stdout" \
         2> >(tee "$launch_root/logs/native-launch.stderr" >&2) &
     OBSERVATION_HELPER_PID=$!

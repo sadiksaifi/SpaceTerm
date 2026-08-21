@@ -884,6 +884,56 @@ test_public_manifest_redacts_account_paths() {
     fi
 }
 
+test_native_launch_lifecycle_arguments_are_bash_32_nounset_safe() (
+    validate_native_observation() { :; }
+    validate_runtime_observation() { :; }
+    xcrun() {
+        local previous="" argument output=""
+        for argument in "$@"; do
+            if [[ "$previous" == "-o" ]]; then
+                output="$argument"
+                break
+            fi
+            previous="$argument"
+        done
+        [[ -n "$output" ]] || return 1
+        cat > "$output" <<'SH'
+#!/bin/bash
+set -euo pipefail
+: > "${SPACETERM_TEST_LAUNCH_OBSERVATION:?}"
+printf '%s\n' "$@" > "${SPACETERM_TEST_LAUNCH_ARGUMENTS:?}"
+SH
+        chmod 0700 "$output"
+    }
+
+    local app="$TEMP_TEST_DIR/lifecycle-app/SpaceTerm.app"
+    mkdir -p -- "$app/Contents/MacOS"
+    local launch_root="$TEMP_TEST_DIR/no-lifecycle-launch"
+    export SPACETERM_TEST_LAUNCH_OBSERVATION="$launch_root/native-observation.tsv"
+    export SPACETERM_TEST_LAUNCH_ARGUMENTS="$TEMP_TEST_DIR/no-lifecycle-arguments.txt"
+    collect_native_launch_observation \
+        "$app" "$(printf 'a%.0s' {1..64})" "i43-no-lifecycle" \
+        "$SPACETERM_TEST_LAUNCH_OBSERVATION" "$launch_root" \
+        "abcdef" "io.github.sadiksaifi.spaceterm" "" "replay" "none" "none"
+    if grep -Fxq -- "--external-lifecycle" "$SPACETERM_TEST_LAUNCH_ARGUMENTS"; then
+        fail "native launch emitted external lifecycle arguments for the ordinary path"
+    fi
+
+    launch_root="$TEMP_TEST_DIR/external-lifecycle-launch"
+    export SPACETERM_TEST_LAUNCH_OBSERVATION="$launch_root/native-observation.tsv"
+    export SPACETERM_TEST_LAUNCH_ARGUMENTS="$TEMP_TEST_DIR/external-lifecycle-arguments.txt"
+    collect_native_launch_observation \
+        "$app" "$(printf 'b%.0s' {1..64})" "i43-external-lifecycle" \
+        "$SPACETERM_TEST_LAUNCH_OBSERVATION" "$launch_root" \
+        "abcdef" "io.github.sadiksaifi.spaceterm" "" "replay" "none" \
+        "$TEMP_TEST_DIR/quit-control.fifo"
+    awk '
+        $0 == "--external-lifecycle" { count += 1; getline; if ($0 != "true") exit 1 }
+        END { exit count != 1 }
+    ' "$SPACETERM_TEST_LAUNCH_ARGUMENTS" \
+        || fail "native launch did not emit the exact external lifecycle argument pair"
+)
+
 test_value_encoding_round_trips
 test_bundle_tree_hash_is_stable_and_content_sensitive
 test_display_summary_excludes_serial_and_computes_scale
@@ -902,4 +952,5 @@ test_native_launcher_has_required_authenticated_bindings
 test_replay_must_match_recorded_runtime_facts
 test_workspace_cleanliness_is_an_initial_invariant
 test_public_manifest_redacts_account_paths
+test_native_launch_lifecycle_arguments_are_bash_32_nounset_safe
 echo "acceptance identity tests passed"
