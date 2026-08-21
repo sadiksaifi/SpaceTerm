@@ -1062,7 +1062,7 @@ impl WorkspaceManager {
                 .truncate()
                 .text_size(px(SIDEBAR_NAME_TEXT_SIZE))
                 .text_color(gpui_color(if active {
-                    ACTIVE_THEME.tab_active_foreground
+                    ACTIVE_THEME.text_accent
                 } else {
                     ACTIVE_THEME.text
                 }))

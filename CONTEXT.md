@@ -16,7 +16,7 @@ tmux, but SpaceTerm is not a tmux client and has no tmux-style server/client mod
 - Use a macOS PTY to launch and communicate with shells.
 - Use `gpui-symbols` for native macOS SF Symbols.
 - Support macOS only; do not create Linux or Windows abstractions.
-- Treat Vague as the only application and terminal theme and as the source of all brand colors.
+- Treat Vague Pro as the only application and terminal theme and as the source of all brand colors.
   Reuse the tokens in `src/theme.rs`; never hardcode or redefine colors in UI, terminal, platform,
   or domain code.
 - Prefer `JetBrainsMono Nerd Font` for terminal text and use a sensible system monospace fallback
@@ -76,7 +76,7 @@ abstractions only when they create a meaningful Seam, Leverage, or Locality.
 
 The Overlay Scrollbar is a compact vertical control that presents scroll position without reserving
 layout space. It owns thumb geometry, transient visibility, hover retention, drag capture, and
-Vague-themed rendering. Terminal Scrollback and the Workspace list adapt their native offset units
+Vague Pro-themed rendering. Terminal Scrollback and the Workspace list adapt their native offset units
 at its Interface.
 
 ### Identity Ownership
@@ -216,7 +216,7 @@ BEL and the transition to finished Command Metadata become typed Terminal Attent
 owning Terminal Session lane; they never carry command text. Each Pane reduces only its own events
 against explicit Terminal Input Focus, active-surface, key-window, and application facts using an
 injected monotonic clock. Repeated bells are suppressed within 100 milliseconds, Dock requests are
-limited to one per second, and inactive-only notifications aggregate for five seconds. Vague visual
+limited to one per second, and inactive-only notifications aggregate for five seconds. Vague Pro visual
 bells and Pane/Window unread indicators never move focus. Focus gain or accepted key input clears
 eligible state and cancels the outstanding native Dock request. AppKit audio, Dock, and notification
 effects sit behind one testable platform Seam and native notification policy.
