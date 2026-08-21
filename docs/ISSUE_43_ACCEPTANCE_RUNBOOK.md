@@ -229,6 +229,37 @@ is not automated, execute it manually and record the same inputs and observation
 never changes the pass criteria and does not replace the required native visual, interaction,
 accessibility, or profiling evidence.
 
+The native performance controller intentionally does not launch the workload. The workload must
+own the subject terminal's foreground PTY so its output, input acknowledgements, geometry, and
+termios restoration are observations of that exact terminal. For each SpaceTerm or Ghostty run:
+
+1. Start `run-native-performance-scenario.sh` with the frozen subject, plan, and run-intent paths.
+2. Wait until its authenticated lifecycle registration receipt exists.
+3. Execute the following command inside that same subject's terminal PTY, using the exact paths and
+   bindings from the run intent. Do not run it in the controller shell or through a pipe.
+
+```sh
+<repo>/scripts/acceptance/performance-workload.sh \
+  --producer <run>/tools/performance-workload -- \
+  --scenario <scenario> \
+  --events <run>/<subject>/workload-events.tsv \
+  --metrics <run>/<subject>/workload-metadata.tsv \
+  --campaign-id <campaign-id> \
+  --session-id <session-id> \
+  --nonce <nonce> \
+  --subject-identity <run>/<subject>/subject.tsv \
+  --campaign-secret-file <run>/campaign-secret.bin \
+  --ready-receipt <run>/<subject>/workload-ready.tsv \
+  --plan-start-gate <run>/<subject>/plan-start.tsv \
+  --duration-seconds <measured-duration-seconds>
+```
+
+For `scrolled` and `resize`, also pass the plan's exact `required_seed_rows` as `--resize-lines`.
+The producer publishes authenticated readiness and then waits for the controller's plan-start
+gate. Missing the PTY command is `workload-producer-not-started`; an incomplete metadata artifact
+before readiness is `workload-producer-exited-before-ready`; events without readiness are
+`workload-ready-receipt-timeout-after-events`. Stop the case on any of these classifications.
+
 For authenticated failure runs, create an owner-private directory, choose an absent absolute FIFO
 path within it, and launch the mounted-DMG collector:
 

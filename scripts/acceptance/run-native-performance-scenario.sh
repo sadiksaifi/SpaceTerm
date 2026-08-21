@@ -558,8 +558,21 @@ wait_for_authenticated_ready() {
     deadline=$(( $(continuous_ns) + SEED_TIMEOUT_SECONDS * 1000000000 ))
     while [[ ! -f "$WORKLOAD_READY_RECEIPT" ]]; do
         [[ ! -L "$WORKLOAD_READY_RECEIPT" ]] || abort_run workload-ready-receipt-is-symlink
+        [[ ! -L "$WORKLOAD_EVENTS" ]] || abort_run workload-events-is-symlink
+        if [[ -e "$WORKLOAD_METADATA" || -L "$WORKLOAD_METADATA" ]]; then
+            [[ -f "$WORKLOAD_METADATA" && ! -L "$WORKLOAD_METADATA" ]] \
+                || abort_run workload-metadata-is-not-regular
+            abort_run workload-producer-exited-before-ready
+        fi
         now="$(continuous_ns)"
-        (( now < deadline )) || abort_run workload-ready-receipt-timeout
+        if (( now >= deadline )); then
+            if [[ ! -e "$WORKLOAD_EVENTS" && ! -L "$WORKLOAD_EVENTS" ]]; then
+                abort_run workload-producer-not-started
+            fi
+            [[ -f "$WORKLOAD_EVENTS" && ! -L "$WORKLOAD_EVENTS" ]] \
+                || abort_run workload-events-is-not-regular
+            abort_run workload-ready-receipt-timeout-after-events
+        fi
         sleep 0.02
     done
     "$WORKLOAD_READY_VERIFIER" --ready-receipt "$WORKLOAD_READY_RECEIPT" \

@@ -349,8 +349,54 @@ SPACETERM_PERFORMANCE_TEST_MODE=1 SPACETERM_PERFORMANCE_TAIL_MS=0 \
 [[ "$(awk -F '\t' '$1 == "status" {print $2}' "$RUN_DIR/result-timeout.tsv")" == incomplete ]] \
     || fail "timeout result is not incomplete"
 observed_reason="$(awk -F '\t' '$1 == "result_reason" {print $2}' "$RUN_DIR/result-timeout.tsv")"
-[[ "$observed_reason" == workload-ready-receipt-timeout ]] \
+[[ "$observed_reason" == workload-producer-not-started ]] \
     || { sed 's/^/  /' "$TEMP_ROOT/failure.stderr" >&2; \
-        fail "timeout result did not reach authenticated readiness wait: $observed_reason"; }
+        fail "missing PTY producer was not classified: $observed_reason"; }
+rm -f -- "$RUN_DIR/performance-subject-lifecycle.py"
+
+FAKE_PTY_PRODUCER="$TEMP_ROOT/fake-pty-producer.sh"
+cat > "$FAKE_PTY_PRODUCER" <<'EOF'
+#!/bin/bash
+set -euo pipefail
+printf 'sequence\tcontinuous_ns\tkind\tevent_id\tbyte_count\trows\tcolumns\tpixel_width\tpixel_height\tstatus\n' > "$1"
+chmod 0400 "$1"
+if [[ "$3" == metadata ]]; then
+    printf 'format_version\t3\nstatus\tincomplete\n' > "$2"
+    chmod 0400 "$2"
+fi
+EOF
+chmod 0500 "$FAKE_PTY_PRODUCER"
+
+run_runner_with_fake_pty() {
+    local suffix="$1" mode="$2" controller_pid reason
+    SPACETERM_PERFORMANCE_TEST_MODE=1 SPACETERM_PERFORMANCE_TAIL_MS=0 \
+        run_runner "$TOOLS" "$suffix" >"$TEMP_ROOT/$suffix.stdout" \
+            2>"$TEMP_ROOT/$suffix.stderr" &
+    controller_pid=$!
+    for _ in {1..500}; do
+        [[ -f "$RUN_DIR/lifecycle-registration-$suffix.tsv" ]] && break
+        kill -0 "$controller_pid" 2>/dev/null || break
+        sleep 0.01
+    done
+    [[ -f "$RUN_DIR/lifecycle-registration-$suffix.tsv" ]] \
+        || fail "$suffix controller did not reach lifecycle registration"
+    script -q /dev/null "$FAKE_PTY_PRODUCER" \
+        "$RUN_DIR/events-$suffix.tsv" "$RUN_DIR/workload-$suffix.tsv" "$mode" \
+        >/dev/null
+    if wait "$controller_pid"; then
+        fail "$suffix fake PTY producer unexpectedly completed the controller"
+    fi
+    reason="$(awk -F '\t' '$1 == "result_reason" {print $2}' \
+        "$RUN_DIR/result-$suffix.tsv")"
+    rm -f -- "$RUN_DIR/performance-subject-lifecycle.py"
+    printf '%s\n' "$reason"
+}
+
+[[ "$(run_runner_with_fake_pty events-only events)" \
+    == workload-ready-receipt-timeout-after-events ]] \
+    || fail "events-only PTY producer was not classified"
+[[ "$(run_runner_with_fake_pty early-exit metadata)" \
+    == workload-producer-exited-before-ready ]] \
+    || fail "early-exit PTY producer was not classified"
 
 echo "native performance runner tests passed"
