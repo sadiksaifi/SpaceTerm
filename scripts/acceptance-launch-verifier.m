@@ -34,6 +34,7 @@ static const uint64_t kMaximumFailureActions = 64;
 static const NSUInteger kMaximumFailureActionBytes = 256 * 1024;
 static const NSTimeInterval kProofTimeoutSeconds = 30.0;
 static volatile sig_atomic_t interrupted = 0;
+static NSString *runtime_parse_diagnostic = nil;
 
 static NSString *make_nonce(void);
 static NSString *lower_sha256(NSData *data);
@@ -620,6 +621,32 @@ static bool is_runtime_lifecycle(NSString *value, uint64_t *code) {
     return true;
 }
 
+static NSString *runtime_lifecycle_name(uint64_t code) {
+    NSArray<NSString *> *values = @[
+        @"starting", @"running", @"exited", @"failed", @"observer-failed"
+    ];
+    return code < values.count ? values[(NSUInteger)code] : @"unknown";
+}
+
+static bool runtime_reject(
+    NSString *frame,
+    NSUInteger expectedRecords,
+    NSUInteger actualRecords,
+    NSString *firstKey,
+    NSString *classification,
+    RuntimeCapture *capture,
+    uint64_t lifecycle
+) {
+    runtime_parse_diagnostic = [NSString stringWithFormat:
+        @"frame=%@ expected-records=%lu actual-records=%lu first-key=%@ "
+         "classification=%@ lifecycle=%@ captured-samples=%llu captured-events=%llu",
+        frame, (unsigned long)expectedRecords, (unsigned long)actualRecords, firstKey,
+        classification, runtime_lifecycle_name(lifecycle),
+        (unsigned long long)capture->sampleCount,
+        (unsigned long long)capture->eventCount];
+    return false;
+}
+
 static bool lifecycle_transition_is_valid(uint64_t before, uint64_t after) {
     switch (before) {
         case 0: return true;
@@ -654,42 +681,84 @@ static bool runtime_event_aux_is_valid(
 
 static bool parse_runtime_tick(NSData *data, RuntimeCapture *capture) {
     NSString *text = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
-    if (text == nil || ![text hasSuffix:@"\n"] || capture->sampleCount >= kMaximumRuntimeSamples) {
-        return false;
+    uint64_t priorLifecycle = capture->hasSample ? capture->previousSample[33] : 0;
+    if (text == nil || ![text hasSuffix:@"\n"]) {
+        return runtime_reject(@"tick", 4, 0, @"frame", @"encoding-or-terminator",
+            capture, priorLifecycle);
     }
     NSArray<NSString *> *lines = [[text substringToIndex:text.length - 1]
         componentsSeparatedByString:@"\n"];
-    if (lines.count < 4 ||
-        ![exact_record_value(lines[0], @"schema") isEqualToString:kRuntimeTickSchema]) {
-        return false;
+    if (capture->sampleCount >= kMaximumRuntimeSamples) {
+        return runtime_reject(@"tick", 4, lines.count, @"sequence", @"sample-bound",
+            capture, priorLifecycle);
+    }
+    if (lines.count < 4) {
+        return runtime_reject(@"tick", 4, lines.count, @"sample", @"missing-record",
+            capture, priorLifecycle);
+    }
+    if (![exact_record_value(lines[0], @"schema") isEqualToString:kRuntimeTickSchema]) {
+        return runtime_reject(@"tick", 4, lines.count, @"schema",
+            @"missing-extra-or-misordered-key", capture, priorLifecycle);
     }
     uint64_t sequence = 0;
     uint64_t frameEventCount = 0;
-    if (!canonical_uint64(exact_record_value(lines[1], @"sequence"), &sequence) ||
-        sequence != capture->sampleCount ||
-        !canonical_uint64(exact_record_value(lines[2], @"event_count"), &frameEventCount) ||
-        frameEventCount > kRuntimeTransitionCapacity ||
-        frameEventCount > kMaximumRuntimeEvents - capture->eventCount ||
-        lines.count != (NSUInteger)(4 + frameEventCount)) {
-        return false;
+    if (!canonical_uint64(exact_record_value(lines[1], @"sequence"), &sequence)) {
+        return runtime_reject(@"tick", 4, lines.count, @"sequence",
+            @"missing-misordered-or-noncanonical", capture, priorLifecycle);
+    }
+    if (sequence != capture->sampleCount) {
+        return runtime_reject(@"tick", 4, lines.count, @"sequence", @"state-mismatch",
+            capture, priorLifecycle);
+    }
+    if (!canonical_uint64(exact_record_value(lines[2], @"event_count"), &frameEventCount)) {
+        return runtime_reject(@"tick", 4, lines.count, @"event_count",
+            @"missing-misordered-or-noncanonical", capture, priorLifecycle);
+    }
+    NSUInteger expectedRecords = (NSUInteger)(4 + frameEventCount);
+    if (frameEventCount > kRuntimeTransitionCapacity ||
+        frameEventCount > kMaximumRuntimeEvents - capture->eventCount) {
+        return runtime_reject(@"tick", expectedRecords, lines.count, @"event_count",
+            @"capacity", capture, priorLifecycle);
+    }
+    if (lines.count != expectedRecords) {
+        return runtime_reject(@"tick", expectedRecords, lines.count, @"event",
+            @"missing-or-extra-record", capture, priorLifecycle);
     }
 
     NSArray<NSString *> *sample = [lines[3] componentsSeparatedByString:@"\t"];
     if (sample.count != 36 || ![sample[0] isEqualToString:@"sample"]) {
-        return false;
+        return runtime_reject(@"tick", 36, sample.count, @"sample",
+            sample.count == 36 ? @"misordered-key" : @"missing-or-extra-column",
+            capture, priorLifecycle);
     }
+    NSArray<NSString *> *sampleFields = @[
+        @"continuous_ns", @"worker_generation", @"screens_published",
+        @"screens_enqueued", @"screens_superseded", @"event_queue_length",
+        @"event_queue_high_water", @"ui_dispatches", @"ui_screen_events",
+        @"ui_drain_high_water", @"ui_latest_generation", @"render_latest_generation",
+        @"next_frame_generation", @"next_frame_count", @"presentable", @"minimized",
+        @"occluded", @"workspace_visible", @"pane_visible", @"live_resize",
+        @"viewport_total_rows", @"viewport_visible_rows", @"viewport_offset_rows",
+        @"selection_present", @"resize_requests", @"resize_notifications",
+        @"resize_applied", @"resize_coalesced", @"pty_rows", @"pty_columns",
+        @"pty_pixel_width", @"pty_pixel_height", @"terminal_inputs_accepted",
+        @"lifecycle", @"observer_drops"
+    ];
     uint64_t current[35] = {0};
     for (NSUInteger index = 0; index < 35; index++) {
         if (index == 33) {
             if (!is_runtime_lifecycle(sample[index + 1], &current[index])) {
-                return false;
+                return runtime_reject(@"tick", 36, sample.count, sampleFields[index],
+                    @"invalid-enum", capture, priorLifecycle);
             }
         } else if ((index >= 14 && index <= 19) || index == 23) {
             if (!canonical_bool_digit(sample[index + 1], &current[index])) {
-                return false;
+                return runtime_reject(@"tick", 36, sample.count, sampleFields[index],
+                    @"noncanonical-boolean", capture, priorLifecycle);
             }
         } else if (!canonical_uint64(sample[index + 1], &current[index])) {
-            return false;
+            return runtime_reject(@"tick", 36, sample.count, sampleFields[index],
+                @"noncanonical-unsigned", capture, priorLifecycle);
         }
     }
 
@@ -697,18 +766,33 @@ static bool parse_runtime_tick(NSData *data, RuntimeCapture *capture) {
         1, 2, 3, 4, 6, 7, 8, 9, 10, 11, 12, 13,
         24, 25, 26, 27, 32, 34,
     };
-    if (current[0] == 0 || (capture->hasSample && current[0] < capture->lastContinuousNS) ||
-        current[5] > 2 || current[6] > 2 || current[9] > 2 || current[5] > current[6] ||
-        current[21] > current[20] || current[22] > current[20] - current[21] ||
-        (capture->hasSample && !lifecycle_transition_is_valid(
-            capture->previousSample[33], current[33]))) {
-        return false;
+    if (current[0] == 0 || (capture->hasSample && current[0] < capture->lastContinuousNS)) {
+        return runtime_reject(@"tick", 36, sample.count, @"continuous_ns",
+            @"zero-or-regression", capture, current[33]);
+    }
+    if (current[5] > 2 || current[6] > 2 || current[5] > current[6]) {
+        return runtime_reject(@"tick", 36, sample.count, @"event_queue_length",
+            @"bounded-state", capture, current[33]);
+    }
+    if (current[9] > 2) {
+        return runtime_reject(@"tick", 36, sample.count, @"ui_drain_high_water",
+            @"bounded-state", capture, current[33]);
+    }
+    if (current[21] > current[20] || current[22] > current[20] - current[21]) {
+        return runtime_reject(@"tick", 36, sample.count, @"viewport_visible_rows",
+            @"relational-invariant", capture, current[33]);
+    }
+    if (capture->hasSample &&
+        !lifecycle_transition_is_valid(capture->previousSample[33], current[33])) {
+        return runtime_reject(@"tick", 36, sample.count, @"lifecycle",
+            @"invalid-transition", capture, current[33]);
     }
     if (capture->hasSample) {
         for (NSUInteger index = 0; index < sizeof(monotonic) / sizeof(monotonic[0]); index++) {
             NSUInteger field = monotonic[index];
             if (current[field] < capture->previousSample[field]) {
-                return false;
+                return runtime_reject(@"tick", 36, sample.count, sampleFields[field],
+                    @"monotonic-regression", capture, current[33]);
             }
         }
     }
@@ -718,7 +802,8 @@ static bool parse_runtime_tick(NSData *data, RuntimeCapture *capture) {
     NSString *sampleRow = [NSString stringWithFormat:@"%llu\t%@\n",
         (unsigned long long)sequence, samplePayload];
     if (!append_bounded(capture->samples, sampleRow, kMaximumRuntimeSampleBytes)) {
-        return false;
+        return runtime_reject(@"tick", 36, sample.count, @"sample", @"byte-bound",
+            capture, current[33]);
     }
 
     for (uint64_t index = 0; index < frameEventCount; index++) {
@@ -729,25 +814,43 @@ static bool parse_runtime_tick(NSData *data, RuntimeCapture *capture) {
         uint64_t generation = 0;
         uint64_t aux0 = 0;
         uint64_t aux1 = 0;
-        if (event.count != 7 || ![event[0] isEqualToString:@"event"] ||
-            !canonical_uint64(event[1], &eventSequence) ||
-            eventSequence != capture->eventCount ||
-            !canonical_uint64(event[2], &eventContinuousNS) || eventContinuousNS == 0 ||
+        if (event.count != 7 || ![event[0] isEqualToString:@"event"]) {
+            return runtime_reject(@"tick-event", 7, event.count, @"event",
+                event.count == 7 ? @"misordered-key" : @"missing-or-extra-column",
+                capture, current[33]);
+        }
+        if (!canonical_uint64(event[1], &eventSequence) ||
+            eventSequence != capture->eventCount) {
+            return runtime_reject(@"tick-event", 7, event.count, @"sequence",
+                @"noncanonical-or-state-mismatch", capture, current[33]);
+        }
+        if (!canonical_uint64(event[2], &eventContinuousNS) || eventContinuousNS == 0 ||
             (capture->hasEvent && eventContinuousNS < capture->lastEventContinuousNS) ||
-            !is_runtime_event_kind(event[3]) ||
-            !canonical_uint64(event[4], &generation) ||
-            !canonical_uint64(event[5], &aux0) ||
+            eventContinuousNS > current[0]) {
+            return runtime_reject(@"tick-event", 7, event.count, @"continuous_ns",
+                @"noncanonical-or-order", capture, current[33]);
+        }
+        if (!is_runtime_event_kind(event[3])) {
+            return runtime_reject(@"tick-event", 7, event.count, @"kind",
+                @"invalid-enum", capture, current[33]);
+        }
+        if (!canonical_uint64(event[4], &generation) || generation > current[1]) {
+            return runtime_reject(@"tick-event", 7, event.count, @"generation",
+                @"noncanonical-or-ahead", capture, current[33]);
+        }
+        if (!canonical_uint64(event[5], &aux0) ||
             !canonical_uint64(event[6], &aux1) ||
-            eventContinuousNS > current[0] || generation > current[1] ||
             !runtime_event_aux_is_valid(event[3], aux0, aux1)) {
-            return false;
+            return runtime_reject(@"tick-event", 7, event.count, @"aux",
+                @"noncanonical-or-kind-mismatch", capture, current[33]);
         }
         NSString *eventRow = [NSString stringWithFormat:@"%llu\t%llu\t%@\t%llu\t%llu\t%llu\n",
             (unsigned long long)eventSequence, (unsigned long long)eventContinuousNS, event[3],
             (unsigned long long)generation, (unsigned long long)aux0,
             (unsigned long long)aux1];
         if (!append_bounded(capture->events, eventRow, kMaximumRuntimeEventBytes)) {
-            return false;
+            return runtime_reject(@"tick-event", 7, event.count, @"event", @"byte-bound",
+                capture, current[33]);
         }
         capture->lastEventContinuousNS = eventContinuousNS;
         capture->hasEvent = true;
@@ -763,7 +866,8 @@ static bool parse_runtime_tick(NSData *data, RuntimeCapture *capture) {
         if (capture->hasPendingSampleInterval &&
             (capture->pendingSampleIntervalNS < 750000000 ||
                 capture->pendingSampleIntervalNS > 1250000000)) {
-            return false;
+            return runtime_reject(@"tick", 36, sample.count, @"continuous_ns",
+                @"cadence", capture, current[33]);
         }
         capture->pendingSampleIntervalNS = current[0] - capture->lastContinuousNS;
         capture->hasPendingSampleInterval = true;
@@ -787,37 +891,107 @@ static bool parse_runtime_complete(
         @"schema", @"observer.started_continuous_ns", @"observer.ended_continuous_ns",
         @"observer.sample_count", @"observer.event_count", @"observer.status"
     ];
+    NSString *text = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+    NSArray<NSString *> *lines = text != nil && [text hasSuffix:@"\n"]
+        ? [[text substringToIndex:text.length - 1] componentsSeparatedByString:@"\n"]
+        : @[];
+    if (text == nil || ![text hasSuffix:@"\n"] || lines.count != keys.count) {
+        return runtime_reject(@"complete", keys.count, lines.count, @"frame",
+            text == nil || ![text hasSuffix:@"\n"]
+                ? @"encoding-or-terminator" : @"missing-or-extra-record",
+            capture, capture->hasSample ? capture->previousSample[33] : 0);
+    }
+    for (NSUInteger index = 0; index < keys.count; index++) {
+        NSArray<NSString *> *parts = [lines[index] componentsSeparatedByString:@"\t"];
+        if (parts.count != 2 || ![parts[0] isEqualToString:keys[index]]) {
+            return runtime_reject(@"complete", keys.count, lines.count, keys[index],
+                @"missing-extra-or-misordered-key", capture,
+                capture->hasSample ? capture->previousSample[33] : 0);
+        }
+    }
     NSDictionary<NSString *, NSString *> *records = parse_records(data, keys);
     uint64_t started = 0;
     uint64_t ended = 0;
     uint64_t samples = 0;
     uint64_t events = 0;
-    if (records == nil ||
-        ![records[@"schema"] isEqualToString:kRuntimeCompleteSchema] ||
-        !canonical_uint64(records[@"observer.started_continuous_ns"], &started) ||
-        !canonical_uint64(records[@"observer.ended_continuous_ns"], &ended) ||
-        !canonical_uint64(records[@"observer.sample_count"], &samples) ||
-        !canonical_uint64(records[@"observer.event_count"], &events) ||
-        (![records[@"observer.status"] isEqualToString:@"complete"] &&
-            ![records[@"observer.status"] isEqualToString:@"not-run"]) ||
-        !capture->hasSample || started != capture->firstContinuousNS ||
-        ended != capture->lastContinuousNS || samples != capture->sampleCount ||
-        events != capture->eventCount ||
-        ([records[@"observer.status"] isEqualToString:@"complete"] &&
-            (capture->observedFailure ||
-                (capture->previousSample[33] != 2 && capture->previousSample[33] != 3) ||
-                capture->previousSample[3] > capture->previousSample[2] ||
-                capture->previousSample[4] > capture->previousSample[3] ||
-                capture->previousSample[8] > capture->previousSample[3] ||
-                capture->previousSample[10] > capture->previousSample[1] ||
-                capture->previousSample[11] > capture->previousSample[10] ||
-                capture->previousSample[12] > capture->previousSample[11] ||
-                capture->previousSample[12] < capture->previousSample[1] ||
-                capture->previousSample[25] > capture->previousSample[24] ||
-                capture->previousSample[26] > capture->previousSample[25] ||
-                capture->previousSample[27] > capture->previousSample[24] ||
-                capture->previousSample[34] != 0))) {
-        return false;
+    uint64_t lifecycle = capture->hasSample ? capture->previousSample[33] : 0;
+    if (records == nil) {
+        return runtime_reject(@"complete", keys.count, lines.count, @"value",
+            @"noncanonical-encoding", capture, lifecycle);
+    }
+    if (![records[@"schema"] isEqualToString:kRuntimeCompleteSchema]) {
+        return runtime_reject(@"complete", keys.count, lines.count, @"schema",
+            @"value-mismatch", capture, lifecycle);
+    }
+#define REQUIRE_COMPLETE_UINT(FIELD, TARGET) \
+    do { \
+        if (!canonical_uint64(records[FIELD], &TARGET)) { \
+            return runtime_reject(@"complete", keys.count, lines.count, FIELD, \
+                @"noncanonical-unsigned", capture, lifecycle); \
+        } \
+    } while (0)
+    REQUIRE_COMPLETE_UINT(@"observer.started_continuous_ns", started);
+    REQUIRE_COMPLETE_UINT(@"observer.ended_continuous_ns", ended);
+    REQUIRE_COMPLETE_UINT(@"observer.sample_count", samples);
+    REQUIRE_COMPLETE_UINT(@"observer.event_count", events);
+#undef REQUIRE_COMPLETE_UINT
+    if (![records[@"observer.status"] isEqualToString:@"complete"] &&
+        ![records[@"observer.status"] isEqualToString:@"not-run"]) {
+        return runtime_reject(@"complete", keys.count, lines.count, @"observer.status",
+            @"invalid-enum", capture, lifecycle);
+    }
+    if (!capture->hasSample) {
+        return runtime_reject(@"complete", keys.count, lines.count, @"observer.sample_count",
+            @"empty-stream", capture, lifecycle);
+    }
+    if (started != capture->firstContinuousNS) {
+        return runtime_reject(@"complete", keys.count, lines.count,
+            @"observer.started_continuous_ns", @"state-mismatch", capture, lifecycle);
+    }
+    if (ended != capture->lastContinuousNS) {
+        return runtime_reject(@"complete", keys.count, lines.count,
+            @"observer.ended_continuous_ns", @"state-mismatch", capture, lifecycle);
+    }
+    if (samples != capture->sampleCount) {
+        return runtime_reject(@"complete", keys.count, lines.count,
+            @"observer.sample_count", @"state-mismatch", capture, lifecycle);
+    }
+    if (events != capture->eventCount) {
+        return runtime_reject(@"complete", keys.count, lines.count,
+            @"observer.event_count", @"state-mismatch", capture, lifecycle);
+    }
+    if ([records[@"observer.status"] isEqualToString:@"complete"] &&
+        capture->observedFailure) {
+        return runtime_reject(@"complete", keys.count, lines.count, @"observer.status",
+            @"failure-state-mismatch", capture, lifecycle);
+    }
+    if ([records[@"observer.status"] isEqualToString:@"complete"] &&
+        lifecycle != 2 && lifecycle != 3) {
+        return runtime_reject(@"complete", keys.count, lines.count, @"lifecycle",
+            @"nonterminal-complete", capture, lifecycle);
+    }
+    static const NSUInteger left[] = {3, 4, 8, 10, 11, 12, 12, 25, 26, 27};
+    static const NSUInteger right[] = {2, 3, 3, 1, 10, 11, 1, 24, 25, 24};
+    NSArray<NSString *> *invariantFields = @[
+        @"screens_enqueued", @"screens_superseded", @"ui_screen_events",
+        @"ui_latest_generation", @"render_latest_generation", @"next_frame_generation",
+        @"next_frame_generation", @"resize_notifications", @"resize_applied",
+        @"resize_coalesced"
+    ];
+    if ([records[@"observer.status"] isEqualToString:@"complete"]) {
+        for (NSUInteger index = 0; index < sizeof(left) / sizeof(left[0]); index++) {
+            bool invalid = index == 6
+                ? capture->previousSample[left[index]] < capture->previousSample[right[index]]
+                : capture->previousSample[left[index]] > capture->previousSample[right[index]];
+            if (invalid) {
+                return runtime_reject(@"complete", keys.count, lines.count,
+                    invariantFields[index], @"closure-invariant", capture, lifecycle);
+            }
+        }
+        if (capture->previousSample[34] != 0) {
+            return runtime_reject(@"complete", keys.count, lines.count, @"observer_drops",
+                @"closure-invariant", capture, lifecycle);
+        }
     }
     *status = records[@"observer.status"];
     return true;
@@ -1294,7 +1468,11 @@ static bool read_runtime_stream(
     NSString **status,
     NSDate *deadline
 ) {
+    runtime_parse_diagnostic = nil;
     if (!initialize_runtime_capture(capture) || !initialize_failure_capture(failure)) {
+        runtime_parse_diagnostic = @"frame=stream expected-records=1 actual-records=0 "
+            "first-key=capture classification=initialization lifecycle=unknown "
+            "captured-samples=0 captured-events=0";
         return false;
     }
     while (!interrupted) {
@@ -1311,6 +1489,13 @@ static bool read_runtime_stream(
         }
         NSData *frame = read_frame(fd);
         if (frame == nil) {
+            runtime_parse_diagnostic = [NSString stringWithFormat:
+                @"frame=stream expected-records=1 actual-records=0 first-key=frame "
+                 "classification=transport-or-frame-bound lifecycle=%@ "
+                 "captured-samples=%llu captured-events=%llu",
+                runtime_lifecycle_name(capture->hasSample ? capture->previousSample[33] : 0),
+                (unsigned long long)capture->sampleCount,
+                (unsigned long long)capture->eventCount];
             return false;
         }
         NSString *text = [[NSString alloc] initWithData:frame encoding:NSUTF8StringEncoding];
@@ -1326,6 +1511,17 @@ static bool read_runtime_stream(
                 return false;
             }
         } else {
+            NSUInteger lineCount = text != nil && [text hasSuffix:@"\n"]
+                ? [[text substringToIndex:text.length - 1]
+                    componentsSeparatedByString:@"\n"].count : 0;
+            runtime_parse_diagnostic = [NSString stringWithFormat:
+                @"frame=unknown expected-records=1 actual-records=%lu first-key=schema "
+                 "classification=unknown-frame-schema lifecycle=%@ "
+                 "captured-samples=%llu captured-events=%llu",
+                (unsigned long)lineCount,
+                runtime_lifecycle_name(capture->hasSample ? capture->previousSample[33] : 0),
+                (unsigned long long)capture->sampleCount,
+                (unsigned long long)capture->eventCount];
             return false;
         }
     }
@@ -2321,6 +2517,10 @@ static int run_verifier(const Options *options) {
             quit_control_fd, quit_status_fd, &quit, application, &token, expected_path,
             &expected_stat, &expected_fs, peer_pid, pidversion, process_start_seconds,
             process_start_microseconds, nonce, options, &runtime_status, runtime_deadline)) {
+        if (runtime_parse_diagnostic != nil) {
+            report([@"runtime stream diagnostic: "
+                stringByAppendingString:runtime_parse_diagnostic]);
+        }
         report(interrupted ? @"runtime observation was interrupted" :
             @"production app returned an invalid runtime observation");
         goto cleanup;
