@@ -163,19 +163,11 @@ release_staged_dmg() {
     STAGED_DMG_SHA256=""
 }
 
-mount_dmg() {
-    local dmg="$1"
-    local mount_point="$2"
-    local attach_plist entity_index entity_mount entity_device
-    [[ ! -e "$mount_point" ]] || die "DMG mount point already exists: $mount_point"
-    mkdir -p -- "$mount_point"
-    attach_plist="$(mktemp "${TMPDIR:-/tmp}/spaceterm-dmg-attach.XXXXXX")"
-    hdiutil attach -plist -nobrowse -readonly -mountpoint "$mount_point" "$dmg" \
-        > "$attach_plist" \
-        || die "failed to mount DMG: $dmg"
-    MOUNT_POINT="$mount_point"
-    DMG_MOUNTED=1
-    entity_index=0
+attached_mount_device() {
+    local attach_plist="$1"
+    local expected_mount="$2"
+    local entity_index=0
+    local entity_mount entity_device canonical_entity_mount matched_device=""
     while (( entity_index < 64 )); do
         entity_mount="$(/usr/libexec/PlistBuddy \
             -c "Print :system-entities:$entity_index:mount-point" "$attach_plist" 2>/dev/null \
@@ -183,15 +175,45 @@ mount_dmg() {
         entity_device="$(/usr/libexec/PlistBuddy \
             -c "Print :system-entities:$entity_index:dev-entry" "$attach_plist" 2>/dev/null \
             || true)"
-        if [[ "$entity_mount" == "$mount_point" && "$entity_device" == /dev/disk* ]]; then
-            MOUNT_DEVICE="$entity_device"
-            break
-        fi
         [[ -n "$entity_mount$entity_device" ]] || break
+        if [[ -n "$entity_mount" ]]; then
+            [[ -d "$entity_mount" && "$entity_device" == /dev/disk* ]] || return 1
+            canonical_entity_mount="$(cd -- "$entity_mount" && pwd -P)"
+            if [[ "$canonical_entity_mount" == "$expected_mount" ]]; then
+                [[ -z "$matched_device" ]] || return 1
+                matched_device="$entity_device"
+            fi
+        fi
         entity_index=$((entity_index + 1))
     done
+    [[ -n "$matched_device" ]] || return 1
+    printf '%s' "$matched_device"
+}
+
+mount_dmg() {
+    local dmg="$1"
+    local mount_point="$2"
+    local attach_plist mount_device mount_filesystem_device device_node_identity mount_flags
+    [[ ! -e "$mount_point" ]] || die "DMG mount point already exists: $mount_point"
+    mkdir -p -- "$mount_point"
+    mount_point="$(cd -- "$mount_point" && pwd -P)"
+    attach_plist="$(mktemp "${TMPDIR:-/tmp}/spaceterm-dmg-attach.XXXXXX")"
+    hdiutil attach -plist -nobrowse -readonly -mountpoint "$mount_point" "$dmg" \
+        > "$attach_plist" \
+        || die "failed to mount DMG: $dmg"
+    MOUNT_POINT="$mount_point"
+    DMG_MOUNTED=1
+    mount_device="$(attached_mount_device "$attach_plist" "$mount_point" || true)"
     rm -f -- "$attach_plist"
-    [[ -n "$MOUNT_DEVICE" ]] || die "could not bind DMG mount to its attached device"
+    [[ -n "$mount_device" && -e "$mount_device" ]] \
+        || die "could not bind DMG mount to its attached device"
+    mount_filesystem_device="$(stat -f '%d' "$mount_point")"
+    device_node_identity="$(stat -f '%r' "$mount_device")"
+    [[ "$mount_filesystem_device" == "$device_node_identity" ]] \
+        || die "DMG mount filesystem does not match its attached device"
+    mount_flags="$(stat -f '%f' "$mount_point")"
+    (( (mount_flags & 1) == 1 )) || die "DMG mount is not read-only"
+    MOUNT_DEVICE="$mount_device"
 }
 
 detach_dmg() {

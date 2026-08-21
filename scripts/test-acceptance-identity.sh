@@ -125,6 +125,37 @@ test_mounted_dmg_app_cannot_escape_through_a_symlink() {
     MOUNT_POINT=""
 }
 
+test_apfs_attach_structure_binds_the_canonical_mounted_entity() {
+    local mount="$TEMP_TEST_DIR/recorded-apfs-mount"
+    local canonical_mount recorded_mount plist duplicate
+    mkdir -p -- "$mount"
+    canonical_mount="$(cd -- "$mount" && pwd -P)"
+    recorded_mount="$mount/../recorded-apfs-mount"
+    plist="$TEMP_TEST_DIR/recorded-apfs-attach.plist"
+    printf '%s\n' \
+        '<?xml version="1.0" encoding="UTF-8"?>' \
+        '<plist version="1.0"><dict><key>system-entities</key><array>' \
+        '<dict><key>dev-entry</key><string>/dev/disk13</string></dict>' \
+        '<dict><key>dev-entry</key><string>/dev/disk13s1</string></dict>' \
+        '<dict><key>dev-entry</key><string>/dev/disk14</string></dict>' \
+        "<dict><key>dev-entry</key><string>/dev/disk14s1</string><key>mount-point</key><string>$recorded_mount</string></dict>" \
+        '</array></dict></plist>' > "$plist"
+
+    assert_eq "$(attached_mount_device "$plist" "$canonical_mount")" "/dev/disk14s1"
+
+    duplicate="$TEMP_TEST_DIR/recorded-apfs-duplicate.plist"
+    cp -- "$plist" "$duplicate"
+    /usr/libexec/PlistBuddy -c \
+        "Add :system-entities:4 dict" "$duplicate"
+    /usr/libexec/PlistBuddy -c \
+        "Add :system-entities:4:dev-entry string /dev/disk15s1" "$duplicate"
+    /usr/libexec/PlistBuddy -c \
+        "Add :system-entities:4:mount-point string $recorded_mount" "$duplicate"
+    if attached_mount_device "$duplicate" "$canonical_mount" >/dev/null 2>&1; then
+        fail "APFS attach parser accepted duplicate mounted entities"
+    fi
+}
+
 write_final_readiness_manifest() {
     local manifest="$1"
     local origin="$2"
@@ -941,6 +972,7 @@ test_manifest_syntax_rejects_duplicate_keys
 test_font_matching_requires_an_exact_family
 test_mounted_dmg_origin_rejects_a_dist_app_claim
 test_mounted_dmg_app_cannot_escape_through_a_symlink
+test_apfs_attach_structure_binds_the_canonical_mounted_entity
 test_final_readiness_requires_mounted_origin_and_native_geometry
 test_native_observation_is_hashed_bound_and_font_consistent
 test_failure_action_groups_are_revalidated_offline
