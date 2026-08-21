@@ -62,6 +62,7 @@ scripts-check:
         scripts/sample-release-performance-rss.sh \
         scripts/record-release-performance-trace.sh \
         scripts/test-release-performance-tools.sh \
+        scripts/acceptance/analyze-release-render-profile-case.sh \
         scripts/acceptance/analyze-release-performance-case.sh \
         scripts/acceptance/analyze-release-performance-pair.sh \
         scripts/acceptance/failure-action-driver.sh \
@@ -71,6 +72,10 @@ scripts-check:
         scripts/acceptance/freeze-performance-run-intent.sh \
         scripts/acceptance/freeze-performance-run.sh \
         scripts/acceptance/freeze-performance-subject.sh \
+        scripts/acceptance/finalize-render-profile-evidence.sh \
+        scripts/acceptance/freeze-render-profile-intent.sh \
+        scripts/acceptance/freeze-render-profile-tool-bundle.sh \
+        scripts/acceptance/freeze-render-profile-workload.sh \
         scripts/acceptance/performance-workload.sh \
         scripts/acceptance/performance-plan.sh \
         scripts/acceptance/run-native-performance-scenario.sh \
@@ -79,6 +84,10 @@ scripts-check:
         scripts/acceptance/test-performance-run-metadata-v3.sh \
         scripts/acceptance/test-performance-tail-receipt.sh \
         scripts/acceptance/test-native-performance-runner.sh \
+        scripts/acceptance/test-render-evidence-validators.sh \
+        scripts/acceptance/test-render-profile-evidence-protocol.sh \
+        scripts/acceptance/test-render-profile-tool-bundle.sh \
+        scripts/acceptance/test-release-render-profile-campaign.sh \
         scripts/acceptance/test-release-performance-campaign.sh
     shellcheck -x scripts/acceptance-identity.sh scripts/test-acceptance-identity.sh \
         scripts/package-macos.sh scripts/verify-macos-package.sh \
@@ -86,6 +95,7 @@ scripts-check:
         scripts/sample-release-performance-rss.sh \
         scripts/record-release-performance-trace.sh \
         scripts/test-release-performance-tools.sh \
+        scripts/acceptance/analyze-release-render-profile-case.sh \
         scripts/acceptance/analyze-release-performance-case.sh \
         scripts/acceptance/analyze-release-performance-pair.sh \
         scripts/acceptance/failure-action-driver.sh \
@@ -95,6 +105,10 @@ scripts-check:
         scripts/acceptance/freeze-performance-run-intent.sh \
         scripts/acceptance/freeze-performance-run.sh \
         scripts/acceptance/freeze-performance-subject.sh \
+        scripts/acceptance/finalize-render-profile-evidence.sh \
+        scripts/acceptance/freeze-render-profile-intent.sh \
+        scripts/acceptance/freeze-render-profile-tool-bundle.sh \
+        scripts/acceptance/freeze-render-profile-workload.sh \
         scripts/acceptance/performance-workload.sh \
         scripts/acceptance/performance-plan.sh \
         scripts/acceptance/run-native-performance-scenario.sh \
@@ -103,6 +117,10 @@ scripts-check:
         scripts/acceptance/test-performance-run-metadata-v3.sh \
         scripts/acceptance/test-performance-tail-receipt.sh \
         scripts/acceptance/test-native-performance-runner.sh \
+        scripts/acceptance/test-render-evidence-validators.sh \
+        scripts/acceptance/test-render-profile-evidence-protocol.sh \
+        scripts/acceptance/test-render-profile-tool-bundle.sh \
+        scripts/acceptance/test-release-render-profile-campaign.sh \
         scripts/acceptance/test-release-performance-campaign.sh
     ./scripts/test-acceptance-identity.sh
     xcrun clang -fobjc-arc -fblocks -fsyntax-only -Wall -Wextra -Werror -Wpedantic \
@@ -120,7 +138,7 @@ scripts-check:
     xcrun clang -std=c17 -fsyntax-only -Wall -Wextra -Werror -Wpedantic \
         -mmacosx-version-min=11.0 \
         scripts/acceptance/performance-workload.c
-    python3 -c 'import pathlib; [compile(path.read_text(), path.name, "exec") for path in map(pathlib.Path, ["scripts/acceptance/performance-driver-receipt.py", "scripts/acceptance/performance-pair-result.py", "scripts/acceptance/performance-subject-lifecycle.py", "scripts/acceptance/performance-tail-receipt.py", "scripts/acceptance/run-performance-process-group.py", "scripts/inspect-release-performance-process.py", "scripts/run-release-performance-command.py", "scripts/verify-release-performance-trace.py", "scripts/acceptance/verify-performance-lifecycle-receipts.py", "scripts/acceptance/verify-performance-native-closure.py", "scripts/acceptance/verify-performance-subject-exit.py", "scripts/acceptance/verify-performance-workload-auth.py", "scripts/acceptance/verify-performance-workload-ready.py"])]'
+    python3 -c 'import pathlib; [compile(path.read_text(), path.name, "exec") for path in map(pathlib.Path, ["scripts/acceptance/performance-driver-receipt.py", "scripts/acceptance/performance-pair-result.py", "scripts/acceptance/performance-subject-lifecycle.py", "scripts/acceptance/performance-tail-receipt.py", "scripts/acceptance/run-performance-process-group.py", "scripts/inspect-release-performance-process.py", "scripts/run-release-performance-command.py", "scripts/verify-release-performance-trace.py", "scripts/acceptance/verify-performance-lifecycle-receipts.py", "scripts/acceptance/verify-performance-native-closure.py", "scripts/acceptance/verify-performance-subject-exit.py", "scripts/acceptance/verify-performance-workload-auth.py", "scripts/acceptance/verify-performance-workload-ready.py", "scripts/acceptance/archive-render-trace.py", "scripts/acceptance/render-profile-hmac.py", "scripts/acceptance/render-trace-receipt.py", "scripts/acceptance/test-archive-render-trace.py", "scripts/acceptance/test-render-trace-receipt.py", "scripts/acceptance/verify-render-action-video.py", "scripts/acceptance/verify-render-trace-archive.py"])]'
     plutil -lint packaging/macos/Info.plist
 
 # Run focused checks for the release-performance workload and evidence tools.
@@ -133,6 +151,12 @@ performance-tools-check:
     ./scripts/acceptance/test-performance-run-metadata-v3.sh
     ./scripts/acceptance/test-performance-tail-receipt.sh
     ./scripts/acceptance/test-native-performance-runner.sh
+    ./scripts/acceptance/test-render-evidence-validators.sh
+    ./scripts/acceptance/test-render-profile-evidence-protocol.sh
+    ./scripts/acceptance/test-render-profile-tool-bundle.sh
+    ./scripts/acceptance/test-archive-render-trace.py
+    ./scripts/acceptance/test-render-trace-receipt.py
+    ./scripts/acceptance/test-release-render-profile-campaign.sh
 
 # Compile the native performance tools into one absent run-owned directory.
 performance-native-tools run_dir output_dir architecture:
@@ -151,7 +175,6 @@ performance-pair-finalize *arguments:
 # Emit the only release-performance PASS after both complete cases and pair replay.
 performance-pair-analyze *arguments:
     ./scripts/acceptance/analyze-release-performance-pair.sh {{ arguments }}
-
 # Check the local Instruments and RSS prerequisites used for release acceptance.
 performance-doctor:
     @./scripts/sample-release-performance-rss.sh --doctor

@@ -1687,6 +1687,22 @@ run_v3_incomplete() {
 }
 
 run_v3_incomplete overrides test-overrides-active 1000000000 2000000000
+recorder_fake_path="$TEMP_ROOT/recorder-fake-path"
+recorder_fake_path_marker="$TEMP_ROOT/recorder-fake-path-marker"
+mkdir -p "$recorder_fake_path"
+for injected_tool in awk python3 realpath shasum stat; do
+    {
+        printf '#!/bin/bash\n'
+        # shellcheck disable=SC2016 # Preserve $0 for the injected child.
+        printf 'printf "%%s\\n" "$0" >> %q\n' "$recorder_fake_path_marker"
+        printf 'exit 99\n'
+    } > "$recorder_fake_path/$injected_tool"
+    chmod 0755 "$recorder_fake_path/$injected_tool"
+done
+run_v3_incomplete recorder-path test-overrides-active 1000000000 2000000000 \
+    "PATH=$recorder_fake_path:/usr/bin:/bin:/usr/sbin:/sbin"
+[[ ! -e "$recorder_fake_path_marker" ]] \
+    || fail "trace recorder invoked an injected PATH primitive"
 v3_metadata="$TEMP_ROOT/v3-overrides/spaceterm-ascii-trace-metadata.tsv"
 assert_equal "$v3_subject_hash" "$(metric "$v3_metadata" subject_identity_sha256)" \
     "trace subject binding"

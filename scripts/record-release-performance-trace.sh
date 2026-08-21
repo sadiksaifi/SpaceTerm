@@ -1,12 +1,33 @@
 #!/bin/bash
+# shellcheck disable=SC2016 # Awk programs intentionally use literal dollar fields.
 
 set -euo pipefail
 IFS=$'\n\t'
 export LC_ALL=C
 umask 077
 
-readonly XCRUN_COMMAND="${SPACETERM_XCRUN:-xcrun}"
-readonly SHASUM_COMMAND="${SPACETERM_SHASUM:-shasum}"
+readonly TRUSTED_SYSTEM_PATH="/usr/bin:/bin:/usr/sbin:/sbin"
+export PATH="$TRUSTED_SYSTEM_PATH"
+readonly AWK_COMMAND=/usr/bin/awk
+readonly BASENAME_COMMAND=/usr/bin/basename
+readonly CHMOD_COMMAND=/bin/chmod
+readonly CODESIGN_COMMAND=/usr/bin/codesign
+readonly DIRNAME_COMMAND=/usr/bin/dirname
+readonly FIND_COMMAND=/usr/bin/find
+readonly GREP_COMMAND=/usr/bin/grep
+readonly ID_COMMAND=/usr/bin/id
+readonly LN_COMMAND=/bin/ln
+readonly MKDIR_COMMAND=/bin/mkdir
+readonly PLUTIL_COMMAND=/usr/bin/plutil
+readonly PYTHON_COMMAND=/usr/bin/python3
+readonly REALPATH_COMMAND=/bin/realpath
+readonly RM_COMMAND=/bin/rm
+readonly SLEEP_COMMAND=/bin/sleep
+readonly STAT_COMMAND=/usr/bin/stat
+readonly TR_COMMAND=/usr/bin/tr
+readonly WC_COMMAND=/usr/bin/wc
+readonly XCRUN_COMMAND="${SPACETERM_XCRUN:-/usr/bin/xcrun}"
+readonly SHASUM_COMMAND="${SPACETERM_SHASUM:-/usr/bin/shasum}"
 readonly CONTINUOUS_CLOCK_COMMAND="${SPACETERM_CONTINUOUS_CLOCK:-}"
 readonly RUN_METADATA_WAIT_TENTHS="${SPACETERM_TEST_RUN_METADATA_WAIT_TENTHS:-1200}"
 PROCESS_INSPECTOR="${SPACETERM_PROCESS_INSPECTOR:-}"
@@ -26,6 +47,15 @@ WORKLOAD_METADATA=""
 WORKLOAD_EVENTS=""
 READY_RECEIPT=""
 SUPPLEMENTAL_EVIDENCE=""
+CAPTURE_MODE=workload-v3
+SCENARIO_PLAN=""
+RENDER_INTENT=""
+RENDER_EVIDENCE=""
+CAMPAIGN_MANIFEST=""
+RENDER_TOOL_BUNDLE_MANIFEST=""
+EXPECTED_SOURCE_COMMIT=""
+TRUSTED_SOURCE_REPOSITORY=""
+TRACE_ANCHOR_RECEIPT=""
 CAMPAIGN_SECRET_FILE=""
 CAMPAIGN_ID=""
 SESSION_ID=""
@@ -37,16 +67,28 @@ OUTPUT_DIRECTORY=""
 CAPTURE_START_NOTIFICATION=""
 PROVISIONAL_RECEIPT=""
 
+RENDER_EVIDENCE_TIMEOUT_SECONDS=600
+RENDER_SECRET_FINGERPRINT=""
+RENDER_HMAC_KEY_IDENTIFIER=""
+RENDER_HMAC_DIGEST=""
+
 usage() {
-    cat <<EOF
-Usage: $(basename -- "$0") --subject-identity FILE --run-intent FILE \\
-  --run-metadata PENDING_FILE \\
-  --workload-metadata FILE --workload-events FILE --workload-ready-receipt FILE \\
-  [--supplemental-evidence FILE] \\
+    /bin/cat <<EOF
+Usage: $("$BASENAME_COMMAND" -- "$0") --subject-identity FILE --run-intent FILE \\
+  --run-metadata PENDING_FILE --provisional-receipt PENDING_FILE \\
+  [--evidence-mode workload-v3 --workload-metadata FILE \\
+   --workload-events FILE --workload-ready-receipt FILE [--supplemental-evidence FILE]] \\
+  [--evidence-mode render-profile-v1 --scenario-plan FILE \\
+   --render-intent FILE --render-evidence PENDING_FILE \\
+   --campaign-manifest FILE --trace-anchor-receipt PENDING_FILE \\
+   --render-tool-bundle-manifest FILE --expected-source-commit SHA1 \\
+   --trusted-source-repository DIRECTORY \\
+   [--workload-metadata FILE --workload-events FILE \\
+    --workload-ready-receipt FILE]] \\
   --campaign-secret-file FILE --campaign-id LABEL --session-id LABEL \\
   --nonce SHA256 --scenario LABEL --warmup-ms N --duration-ms N \\
-  --output-directory NEW_PATH --provisional-receipt NEW_FILE \
-  [--capture-start-notification NEW_FILE]
+  --output-directory NEW_PATH [--capture-start-notification NEW_FILE] \\
+  [--render-evidence-timeout-seconds N]
 
 Attach Time Profiler, Allocations, and Hangs to the exact process frozen in a
 subject identity. The finalized privacy-safe v3 metadata binds the live guest
@@ -60,6 +102,11 @@ waits up to 120 seconds after xctrace for the atomic immutable metadata. Workloa
 events and metadata may also be created during capture. An optional
 capture-start notification is published atomically immediately before xctrace is
 launched; the finalized trace interval remains the authoritative coverage proof.
+Render-profile mode instead authenticates the immutable pre-capture intent and
+the pending post-capture final evidence, waiting up to 600 seconds by default for
+large video hashing/finalization (configurable from 1 to 3600 seconds). Only
+perf-render-sustained-output also requires the authenticated workload-v3 producer
+evidence. The other render scenarios reject normal workload evidence.
 
 Options:
   --doctor  Verify Xcode Instruments and metadata prerequisites.
@@ -78,13 +125,17 @@ is_sha256() { [[ "$1" =~ ^[0-9a-f]{64}$ ]]; }
 
 doctor() {
     local instruments
-    for command in "$XCRUN_COMMAND" awk basename chmod cp date find id ln mkdir mv \
-        codesign plutil python3 realpath rm sleep stat "$SHASUM_COMMAND" xmllint; do
+    for command in "$XCRUN_COMMAND" "$AWK_COMMAND" "$BASENAME_COMMAND" \
+        "$CHMOD_COMMAND" "$CODESIGN_COMMAND" "$FIND_COMMAND" "$GREP_COMMAND" \
+        "$ID_COMMAND" "$LN_COMMAND" "$MKDIR_COMMAND" "$PLUTIL_COMMAND" \
+        "$PYTHON_COMMAND" "$REALPATH_COMMAND" "$RM_COMMAND" "$SLEEP_COMMAND" \
+        "$STAT_COMMAND" "$SHASUM_COMMAND" /bin/cp /bin/date /bin/mv \
+        /usr/bin/xmllint; do
         require_command "$command"
     done
     instruments="$("$XCRUN_COMMAND" xctrace list instruments)"
     for instrument in "Time Profiler" "Allocations" "Hangs"; do
-        grep -Fxq "$instrument" <<< "$instruments" \
+        "$GREP_COMMAND" -Fxq "$instrument" <<< "$instruments" \
             || die "required xctrace instrument is unavailable: $instrument"
     done
     "$XCRUN_COMMAND" xcodebuild -version >/dev/null
@@ -93,20 +144,20 @@ doctor() {
 
 kv() {
     local file="$1" key="$2"
-    awk -F '\t' -v wanted="$key" '
+    "$AWK_COMMAND" -F '\t' -v wanted="$key" '
         NF != 2 { bad = 1 }
         $1 == wanted { count += 1; value = $2 }
         END { if (!bad && count == 1) print value }
     ' "$file"
 }
 
-sha256() { "$SHASUM_COMMAND" -a 256 "$1" | awk '{ print $1 }'; }
+sha256() { "$SHASUM_COMMAND" -a 256 "$1" | "$AWK_COMMAND" '{ print $1 }'; }
 
 clock_anchor() {
     if [[ -n "$CONTINUOUS_CLOCK_COMMAND" ]]; then
         "$CONTINUOUS_CLOCK_COMMAND"
     else
-        python3 - <<'PY'
+        "$PYTHON_COMMAND" - <<'PY'
 import ctypes
 import time
 
@@ -127,19 +178,87 @@ PY
 }
 
 file_is_immutable_regular() {
-    [[ -f "$1" && ! -L "$1" && ! -w "$1" && "$(stat -f '%l' "$1")" == 1 ]]
+    [[ -f "$1" && ! -L "$1" && ! -w "$1" \
+        && "$("$STAT_COMMAND" -f '%l' "$1")" == 1 ]]
+}
+
+trusted_tool_file() {
+    local path="$1" mode owner links
+    [[ "$path" == /* && -f "$path" && ! -L "$path" && -x "$path" ]] || return 1
+    mode="$("$STAT_COMMAND" -f '%Lp' "$path")"
+    owner="$("$STAT_COMMAND" -f '%u' "$path")"
+    links="$("$STAT_COMMAND" -f '%l' "$path")"
+    if [[ "$path" == /usr/bin/* || "$path" == /bin/* \
+        || "$path" == /usr/sbin/* || "$path" == /sbin/* ]]; then
+        [[ "$owner" == 0 && "$mode" =~ ^[0-7]{3,4}$ ]] || return 1
+        (( (8#$mode & 022) == 0 ))
+    else
+        [[ "$links" == 1 && "$mode" =~ ^[0-7]{3,4}$ ]] || return 1
+        (( (8#$mode & 0222) == 0 ))
+    fi
+}
+
+render_recorder_tool_identity_snapshot() {
+    local tool
+    for tool in "$HMAC_HELPER" "$TRACE_RECEIPT_HELPER" "$PROCESS_INSPECTOR" \
+        "${BASH_SOURCE[0]}" \
+        "$TRACE_VERIFIER" "$COMMAND_RUNNER" "$XCRUN_COMMAND" "$SHASUM_COMMAND" \
+        "$AWK_COMMAND" "$BASENAME_COMMAND" "$CHMOD_COMMAND" "$CODESIGN_COMMAND" \
+        "$DIRNAME_COMMAND" "$FIND_COMMAND" "$GREP_COMMAND" "$ID_COMMAND" \
+        "$LN_COMMAND" "$MKDIR_COMMAND" "$PLUTIL_COMMAND" "$PYTHON_COMMAND" \
+        "$REALPATH_COMMAND" "$RM_COMMAND" "$SLEEP_COMMAND" "$STAT_COMMAND" \
+        "$TR_COMMAND" "$WC_COMMAND"; do
+        trusted_tool_file "$tool" || return 1
+        printf '%s\t%s\t%s\n' "$tool" \
+            "$("$STAT_COMMAND" -f '%d:%i:%z:%m:%c' "$tool")" "$(sha256 "$tool")"
+    done
+}
+
+verify_recorder_tool_bundle() {
+    "$PYTHON_COMMAND" - "$RENDER_TOOL_BUNDLE_MANIFEST" "$EXPECTED_SOURCE_COMMIT" \
+        "$TRUSTED_SOURCE_REPOSITORY" "${BASH_SOURCE[0]}" "$HMAC_HELPER" \
+        "$TRACE_RECEIPT_HELPER" "$PROCESS_INSPECTOR" "$TRACE_VERIFIER" \
+        "$COMMAND_RUNNER" <<'PY'
+import hashlib, pathlib, stat, subprocess, sys
+manifest_raw, commit, repository_raw, recorder_raw, hmac_raw, receipt_raw, inspector_raw, verifier_raw, runner_raw = sys.argv[1:]
+names = "record_release_performance_trace freeze_render_profile_intent finalize_render_profile_evidence render_profile_hmac render_trace_receipt analyze_release_render_profile_case archive_render_trace verify_render_action_video verify_render_trace_archive verify_release_performance_trace inspect_release_performance_process run_release_performance_command freeze_render_profile_tool_bundle".split()
+relatives = "scripts/record-release-performance-trace.sh scripts/acceptance/freeze-render-profile-intent.sh scripts/acceptance/finalize-render-profile-evidence.sh scripts/acceptance/render-profile-hmac.py scripts/acceptance/render-trace-receipt.py scripts/acceptance/analyze-release-render-profile-case.sh scripts/acceptance/archive-render-trace.py scripts/acceptance/verify-render-action-video.py scripts/acceptance/verify-render-trace-archive.py scripts/verify-release-performance-trace.py scripts/inspect-release-performance-process.py scripts/run-release-performance-command.py scripts/acceptance/freeze-render-profile-tool-bundle.sh".split()
+keys = ["format_version", "schema", "source_commit", "tool_count"]
+for name in names: keys += [f"{name}_source_path", f"{name}_source_sha256", f"{name}_bundle_path", f"{name}_bundle_sha256"]
+def frozen(raw, executable=False):
+    path = pathlib.Path(raw); before = path.lstat()
+    if (not path.is_absolute() or path.is_symlink() or path.resolve(strict=True) != path or not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or before.st_mode & 0o222 or executable and not before.st_mode & 0o111): raise SystemExit(1)
+    body = path.read_bytes(); after = path.lstat()
+    if (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns) != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns): raise SystemExit(1)
+    return path, body
+_, payload = frozen(manifest_raw); lines = payload.splitlines()
+if not payload.endswith(b"\n") or len(lines) != len(keys): raise SystemExit(1)
+values = {}
+for key, line in zip(keys, lines):
+    try: actual, value = line.split(b"\t", 1); actual = actual.decode("ascii"); value = value.decode()
+    except (ValueError, UnicodeDecodeError): raise SystemExit(1)
+    if actual != key or not value or "\t" in value or "\r" in value: raise SystemExit(1)
+    values[key] = value
+repository = pathlib.Path(repository_raw)
+if (not repository.is_absolute() or repository.is_symlink() or repository.resolve(strict=True) != repository or values["format_version"] != "1" or values["schema"] != "spaceterm.render-profile-tool-bundle/v1" or values["source_commit"] != commit or values["tool_count"] != "13"): raise SystemExit(1)
+invoked = {"record_release_performance_trace": recorder_raw, "render_profile_hmac": hmac_raw, "render_trace_receipt": receipt_raw, "inspect_release_performance_process": inspector_raw, "verify_release_performance_trace": verifier_raw, "run_release_performance_command": runner_raw}
+for name, relative in zip(names, relatives):
+    bundle, body = frozen(values[f"{name}_bundle_path"], executable=True)
+    blob = subprocess.run(["/usr/bin/git", "--no-replace-objects", "-C", str(repository), "show", f"{commit}:{relative}"], capture_output=True, env={"PATH":"/usr/bin:/bin", "HOME":"/var/empty", "GIT_NO_REPLACE_OBJECTS":"1", "LC_ALL":"C"}); digest = hashlib.sha256(blob.stdout).hexdigest()
+    if (blob.returncode or pathlib.Path(values[f"{name}_source_path"]) != repository / relative or values[f"{name}_source_sha256"] != digest or values[f"{name}_bundle_sha256"] != digest or hashlib.sha256(body).hexdigest() != digest or name in invoked and pathlib.Path(invoked[name]).resolve(strict=True) != bundle): raise SystemExit(1)
+PY
 }
 
 canonical_pending_path() {
     local path="$1" leaf parent mode
-    leaf="$(basename -- "$path")"
+    leaf="$("$BASENAME_COMMAND" -- "$path")"
     [[ -n "$leaf" && "$leaf" != . && "$leaf" != .. \
         && "$leaf" != *$'\n'* && "$leaf" != *$'\t'* ]] \
         || die "pending evidence path is invalid"
-    parent="$(realpath "$(dirname -- "$path")")" \
+    parent="$("$REALPATH_COMMAND" "$("$DIRNAME_COMMAND" -- "$path")")" \
         || die "pending evidence parent is unavailable"
     [[ -d "$parent" ]] || die "pending evidence parent is unavailable"
-    mode="$(stat -f '%Lp' "$parent")"
+    mode="$("$STAT_COMMAND" -f '%Lp' "$parent")"
     [[ "$mode" =~ ^[0-7]{3,4}$ ]] || die "pending evidence parent mode is invalid"
     (( (8#$mode & 077) == 0 )) || die "pending evidence parent must be private"
     printf '%s/%s\n' "$parent" "$leaf"
@@ -148,15 +267,15 @@ canonical_pending_path() {
 validate_campaign_secret() {
     local mode owner
     [[ -f "$CAMPAIGN_SECRET_FILE" && ! -L "$CAMPAIGN_SECRET_FILE" \
-        && "$(stat -f '%l' "$CAMPAIGN_SECRET_FILE")" == 1 ]] \
+        && "$("$STAT_COMMAND" -f '%l' "$CAMPAIGN_SECRET_FILE")" == 1 ]] \
         || die "campaign secret must be a non-symlink singleton regular file"
-    mode="$(stat -f '%Lp' "$CAMPAIGN_SECRET_FILE")"
-    owner="$(stat -f '%u' "$CAMPAIGN_SECRET_FILE")"
-    [[ "$mode" =~ ^[0-7]{3,4}$ && "$owner" == "$(id -u)" ]] \
+    mode="$("$STAT_COMMAND" -f '%Lp' "$CAMPAIGN_SECRET_FILE")"
+    owner="$("$STAT_COMMAND" -f '%u' "$CAMPAIGN_SECRET_FILE")"
+    [[ "$mode" =~ ^[0-7]{3,4}$ && "$owner" == "$("$ID_COMMAND" -u)" ]] \
         || die "campaign secret ownership or mode is invalid"
     (( (8#$mode & 077) == 0 && (8#$mode & 0200) == 0 )) \
         || die "campaign secret must be private and immutable"
-    CAMPAIGN_SECRET_IDENTITY="$(stat -f '%d:%i' "$CAMPAIGN_SECRET_FILE")"
+    CAMPAIGN_SECRET_IDENTITY="$("$STAT_COMMAND" -f '%d:%i' "$CAMPAIGN_SECRET_FILE")"
     CAMPAIGN_SECRET_SHA256="$(sha256 "$CAMPAIGN_SECRET_FILE")"
     readonly CAMPAIGN_SECRET_IDENTITY CAMPAIGN_SECRET_SHA256
 }
@@ -170,13 +289,13 @@ validate_supplemental_evidence() {
     local attempt
     for attempt in {1..51}; do
         [[ -e "$SUPPLEMENTAL_EVIDENCE" ]] && break
-        (( attempt == 51 )) || sleep 0.1
+        (( attempt == 51 )) || "$SLEEP_COMMAND" 0.1
     done
-    [[ "$(stat -f '%d:%i' "$SUPPLEMENTAL_EVIDENCE_PARENT")" \
+    [[ "$("$STAT_COMMAND" -f '%d:%i' "$SUPPLEMENTAL_EVIDENCE_PARENT")" \
             == "$SUPPLEMENTAL_EVIDENCE_PARENT_IDENTITY" ]] || return 1
     file_is_immutable_regular "$SUPPLEMENTAL_EVIDENCE" || return 1
     if [[ "$SUPPLEMENTAL_WAS_PREEXISTING" == true ]]; then
-        [[ "$(stat -f '%d:%i' "$SUPPLEMENTAL_EVIDENCE")" \
+        [[ "$("$STAT_COMMAND" -f '%d:%i' "$SUPPLEMENTAL_EVIDENCE")" \
                 == "$PRECAPTURE_SUPPLEMENTAL_IDENTITY" \
             && "$(sha256 "$SUPPLEMENTAL_EVIDENCE")" \
                 == "$PRECAPTURE_SUPPLEMENTAL_SHA256" ]] || return 1
@@ -198,7 +317,7 @@ validate_ready_receipt() {
         && "$(kv "$READY_RECEIPT" subject_identity_sha256)" == "$SUBJECT_IDENTITY_SHA256" \
         && "$(kv "$READY_RECEIPT" auth_algorithm)" == hmac-sha256 ]] \
         || die "workload ready receipt binding is invalid"
-    python3 - "$READY_RECEIPT" "$WORKLOAD_EVENTS" "$CAMPAIGN_SECRET_FILE" <<'PY' \
+    "$PYTHON_COMMAND" - "$READY_RECEIPT" "$WORKLOAD_EVENTS" "$CAMPAIGN_SECRET_FILE" <<'PY' \
         || die "workload ready receipt authentication is invalid"
 import hashlib, hmac, os, pathlib, struct, sys
 
@@ -224,7 +343,7 @@ if not hmac.compare_digest(fields[b"ready_hmac_sha256"], actual):
     raise SystemExit(1)
 PY
     READY_RECEIPT_SHA256="$(sha256 "$READY_RECEIPT")"
-    READY_RECEIPT_IDENTITY="$(stat -f '%d:%i' "$READY_RECEIPT")"
+    READY_RECEIPT_IDENTITY="$("$STAT_COMMAND" -f '%d:%i' "$READY_RECEIPT")"
     READY_PRODUCER_PID="$(kv "$READY_RECEIPT" producer_pid)"
     READY_PRODUCER_STARTED_NS="$(kv "$READY_RECEIPT" producer_started_continuous_ns)"
     READY_PRODUCER_SESSION_ID="$(kv "$READY_RECEIPT" producer_session_id)"
@@ -249,7 +368,7 @@ validate_exact_schema() {
 
 schema_is_exact() {
     local file="$1" allowed="$2" expected_count="$3"
-    awk -F '\t' -v allowed="$allowed" -v expected="$expected_count" '
+    "$AWK_COMMAND" -F '\t' -v allowed="$allowed" -v expected="$expected_count" '
         BEGIN {
             count = split(allowed, keys, " ")
             for (i = 1; i <= count; i += 1) valid[keys[i]] = 1
@@ -258,6 +377,156 @@ schema_is_exact() {
             || $1 != keys[NR] || seen[$1]++ { bad = 1 }
         END { exit bad || NR != expected }
     ' "$file"
+}
+
+render_hmac() {
+    local domain="$1" file="$2" last_key="$3"
+    local output fingerprint identifier digest
+    output="$(/usr/bin/python3 "$HMAC_HELPER" --secret "$CAMPAIGN_SECRET_FILE" \
+        --domain "$domain" --artifact "$file" --last-key "$last_key")" \
+        || return 1
+    [[ "$(printf '%s\n' "$output" | "$WC_COMMAND" -l | "$TR_COMMAND" -d ' ')" == 3 ]] || return 1
+    fingerprint="$(printf '%s\n' "$output" | "$AWK_COMMAND" -F '\t' \
+        '$1 == "secret_fingerprint" { count += 1; value = $2 } \
+        END { if (count == 1) print value }')"
+    identifier="$(printf '%s\n' "$output" | "$AWK_COMMAND" -F '\t' \
+        '$1 == "key_identifier_sha256" { count += 1; value = $2 } \
+        END { if (count == 1) print value }')"
+    digest="$(printf '%s\n' "$output" | "$AWK_COMMAND" -F '\t' \
+        '$1 == "hmac_sha256" { count += 1; value = $2 } \
+        END { if (count == 1) print value }')"
+    [[ -n "$fingerprint" && "$identifier" =~ ^[0-9a-f]{64}$ \
+        && "$digest" =~ ^[0-9a-f]{64}$ ]] || return 1
+    if [[ -n "$RENDER_SECRET_FINGERPRINT" ]]; then
+        [[ "$fingerprint" == "$RENDER_SECRET_FINGERPRINT" \
+            && "$identifier" == "$RENDER_HMAC_KEY_IDENTIFIER" ]] || return 1
+    else
+        RENDER_SECRET_FINGERPRINT="$fingerprint"
+        RENDER_HMAC_KEY_IDENTIFIER="$identifier"
+    fi
+    RENDER_HMAC_DIGEST="$digest"
+}
+
+validate_render_intent() {
+    readonly RENDER_INTENT_KEYS="format_version canonicalization auth_domain scenario subject campaign_id session_id nonce plan_sha256 plan_metadata_sha256 pair_metadata_sha256 run_intent_sha256 command_sha256 environment_sha256 font_sha256 initial_grid_sha256 subject_identity_sha256 subject_process_pid subject_process_start_identity expected_driver_events_path expected_driver_parent_device expected_driver_parent_inode action_video_path action_video_parent_device action_video_parent_inode final_metadata_path final_metadata_parent_device final_metadata_parent_inode warmup_ms measured_duration_ms required_action_count action_interval_ms hmac_key_identifier_sha256 intent_hmac_sha256"
+    file_is_immutable_regular "$SCENARIO_PLAN" \
+        || die "render scenario plan must be immutable singleton evidence"
+    file_is_immutable_regular "$RENDER_INTENT" \
+        || die "render intent must be immutable singleton evidence"
+    validate_exact_schema "$RENDER_INTENT" "$RENDER_INTENT_KEYS" 35 "render intent"
+    render_hmac SPACETERM_RENDER_PROFILE_INTENT_V1 \
+        "$RENDER_INTENT" intent_hmac_sha256 \
+        || die "render intent authentication is invalid"
+    expected_intent_hmac="$RENDER_HMAC_DIGEST"
+    [[ "$(kv "$RENDER_INTENT" format_version)" == 1 \
+        && "$(kv "$RENDER_INTENT" canonicalization)" \
+            == utf8-lf-tab-kv-fixed-order-domain-nul-v1 \
+        && "$(kv "$RENDER_INTENT" auth_domain)" == SPACETERM_RENDER_PROFILE_INTENT_V1 \
+        && "$(kv "$RENDER_INTENT" scenario)" == "$SCENARIO" \
+        && "$(kv "$RENDER_INTENT" subject)" == "$SUBJECT" \
+        && "$(kv "$RENDER_INTENT" campaign_id)" == "$CAMPAIGN_ID" \
+        && "$(kv "$RENDER_INTENT" session_id)" == "$SESSION_ID" \
+        && "$(kv "$RENDER_INTENT" nonce)" == "$NONCE" \
+        && "$(kv "$RENDER_INTENT" plan_sha256)" == "$(sha256 "$SCENARIO_PLAN")" \
+        && "$(kv "$RENDER_INTENT" run_intent_sha256)" == "$RUN_INTENT_SHA256" \
+        && "$(kv "$RENDER_INTENT" command_sha256)" == "$(kv "$RUN_INTENT" command_sha256)" \
+        && "$(kv "$RENDER_INTENT" environment_sha256)" \
+            == "$(kv "$RUN_INTENT" environment_sha256)" \
+        && "$(kv "$RENDER_INTENT" font_sha256)" == "$(kv "$RUN_INTENT" font_sha256)" \
+        && "$(kv "$RENDER_INTENT" initial_grid_sha256)" \
+            == "$(kv "$RUN_INTENT" initial_grid_sha256)" \
+        && "$(kv "$RENDER_INTENT" subject_identity_sha256)" == "$SUBJECT_IDENTITY_SHA256" \
+        && "$(kv "$RENDER_INTENT" subject_process_pid)" == "$PID" \
+        && "$(kv "$RENDER_INTENT" subject_process_start_identity)" \
+            == "$PROCESS_START_IDENTITY" \
+        && "$(kv "$RENDER_INTENT" warmup_ms)" == "$WARMUP_MILLISECONDS" \
+        && "$(kv "$RENDER_INTENT" measured_duration_ms)" == "$DURATION_MILLISECONDS" \
+        && "$(kv "$RENDER_INTENT" final_metadata_path)" == "$RENDER_EVIDENCE" \
+        && "$(kv "$RENDER_INTENT" final_metadata_parent_device):$(kv "$RENDER_INTENT" final_metadata_parent_inode)" \
+            == "$RENDER_EVIDENCE_PARENT_IDENTITY" \
+        && "$(kv "$RENDER_INTENT" hmac_key_identifier_sha256)" \
+            == "$RENDER_HMAC_KEY_IDENTIFIER" \
+        && "$(kv "$RENDER_INTENT" intent_hmac_sha256)" == "$expected_intent_hmac" ]] \
+        || die "render intent binding is invalid"
+    RENDER_INTENT_SHA256="$(sha256 "$RENDER_INTENT")"
+    RENDER_INTENT_IDENTITY="$("$STAT_COMMAND" -f '%d:%i' "$RENDER_INTENT")"
+    SCENARIO_PLAN_SHA256="$(sha256 "$SCENARIO_PLAN")"
+    SCENARIO_PLAN_IDENTITY="$("$STAT_COMMAND" -f '%d:%i' "$SCENARIO_PLAN")"
+    readonly RENDER_INTENT_SHA256 RENDER_INTENT_IDENTITY SCENARIO_PLAN_SHA256 \
+        SCENARIO_PLAN_IDENTITY
+}
+
+validate_render_evidence() {
+    readonly RENDER_EVIDENCE_KEYS="format_version canonicalization auth_domain intent_sha256 scenario subject campaign_id session_id nonce subject_identity_sha256 subject_process_pid subject_process_start_identity driver_events_path driver_events_device driver_events_inode driver_events_sha256 action_video_path action_video_device action_video_inode action_video_sha256 render_workload_metadata_sha256 required_action_count completed_action_count action_interval_ms started_continuous_ns ended_continuous_ns measured_span_ns result hmac_key_identifier_sha256 evidence_hmac_sha256"
+    local attempt expected_hmac
+    local maximum_attempts=$((RENDER_EVIDENCE_TIMEOUT_SECONDS * 10 + 1))
+    for ((attempt = 1; attempt <= maximum_attempts; attempt += 1)); do
+        [[ -e "$RENDER_EVIDENCE" ]] && break
+        (( attempt == maximum_attempts )) || "$SLEEP_COMMAND" 0.1
+    done
+    [[ "$("$STAT_COMMAND" -f '%d:%i' "$RENDER_EVIDENCE_PARENT")" \
+        == "$RENDER_EVIDENCE_PARENT_IDENTITY" ]] || return 1
+    file_is_immutable_regular "$RENDER_EVIDENCE" || return 1
+    schema_is_exact "$RENDER_EVIDENCE" "$RENDER_EVIDENCE_KEYS" 31 || return 1
+    render_hmac SPACETERM_RENDER_PROFILE_EVIDENCE_V1 \
+        "$RENDER_EVIDENCE" evidence_hmac_sha256 || return 1
+    expected_hmac="$RENDER_HMAC_DIGEST"
+    [[ "$(kv "$RENDER_EVIDENCE" format_version)" == 1 \
+        && "$(kv "$RENDER_EVIDENCE" canonicalization)" \
+            == utf8-lf-tab-kv-fixed-order-domain-nul-v1 \
+        && "$(kv "$RENDER_EVIDENCE" auth_domain)" \
+            == SPACETERM_RENDER_PROFILE_EVIDENCE_V1 \
+        && "$(kv "$RENDER_EVIDENCE" intent_sha256)" == "$RENDER_INTENT_SHA256" \
+        && "$(kv "$RENDER_EVIDENCE" scenario)" == "$SCENARIO" \
+        && "$(kv "$RENDER_EVIDENCE" subject)" == "$SUBJECT" \
+        && "$(kv "$RENDER_EVIDENCE" campaign_id)" == "$CAMPAIGN_ID" \
+        && "$(kv "$RENDER_EVIDENCE" session_id)" == "$SESSION_ID" \
+        && "$(kv "$RENDER_EVIDENCE" nonce)" == "$NONCE" \
+        && "$(kv "$RENDER_EVIDENCE" subject_identity_sha256)" == "$SUBJECT_IDENTITY_SHA256" \
+        && "$(kv "$RENDER_EVIDENCE" subject_process_pid)" == "$PID" \
+        && "$(kv "$RENDER_EVIDENCE" subject_process_start_identity)" \
+            == "$PROCESS_START_IDENTITY" \
+        && "$(kv "$RENDER_EVIDENCE" driver_events_path)" \
+            == "$(kv "$RENDER_INTENT" expected_driver_events_path)" \
+        && "$(kv "$RENDER_EVIDENCE" action_video_path)" \
+            == "$(kv "$RENDER_INTENT" action_video_path)" \
+        && "$(kv "$RENDER_EVIDENCE" required_action_count)" \
+            == "$(kv "$RENDER_INTENT" required_action_count)" \
+        && "$(kv "$RENDER_EVIDENCE" completed_action_count)" \
+            == "$(kv "$RENDER_INTENT" required_action_count)" \
+        && "$(kv "$RENDER_EVIDENCE" action_interval_ms)" \
+            == "$(kv "$RENDER_INTENT" action_interval_ms)" \
+        && "$(kv "$RENDER_EVIDENCE" result)" == verified \
+        && "$(kv "$RENDER_EVIDENCE" hmac_key_identifier_sha256)" \
+            == "$(kv "$RENDER_INTENT" hmac_key_identifier_sha256)" \
+        && "$(kv "$RENDER_EVIDENCE" evidence_hmac_sha256)" == "$expected_hmac" ]] \
+        || return 1
+    local referenced path device inode digest
+    for referenced in driver_events action_video; do
+        path="$(kv "$RENDER_EVIDENCE" "${referenced}_path")"
+        device="$(kv "$RENDER_EVIDENCE" "${referenced}_device")"
+        inode="$(kv "$RENDER_EVIDENCE" "${referenced}_inode")"
+        digest="$(kv "$RENDER_EVIDENCE" "${referenced}_sha256")"
+        [[ "$path" == /* && -f "$path" && ! -L "$path" && ! -w "$path" \
+            && "$("$STAT_COMMAND" -f '%l' "$path")" == 1 \
+            && "$("$STAT_COMMAND" -f '%d' "$path")" == "$device" \
+            && "$("$STAT_COMMAND" -f '%i' "$path")" == "$inode" \
+            && "$(sha256 "$path")" == "$digest" ]] || return 1
+    done
+    local started ended span
+    started="$(kv "$RENDER_EVIDENCE" started_continuous_ns)"
+    ended="$(kv "$RENDER_EVIDENCE" ended_continuous_ns)"
+    span="$(kv "$RENDER_EVIDENCE" measured_span_ns)"
+    is_uint "$started" && is_uint "$ended" && is_uint "$span" \
+        && (( ended > started && span == ended - started \
+            && span >= DURATION_MILLISECONDS * 1000000 \
+            && span <= (DURATION_MILLISECONDS + 2000) * 1000000 )) || return 1
+    RENDER_MEASUREMENT_START_NS="$started"
+    RENDER_MEASUREMENT_END_NS="$ended"
+    SUPPLEMENTAL_EVIDENCE_SHA256="$(sha256 "$RENDER_EVIDENCE")"
+    RENDER_EVIDENCE_IDENTITY="$("$STAT_COMMAND" -f '%d:%i' "$RENDER_EVIDENCE")"
+    readonly RENDER_MEASUREMENT_START_NS RENDER_MEASUREMENT_END_NS \
+        SUPPLEMENTAL_EVIDENCE_SHA256 RENDER_EVIDENCE_IDENTITY
 }
 
 validate_subject_identity() {
@@ -276,7 +545,7 @@ validate_subject_identity() {
     BUNDLE_IDENTIFIER="$(kv "$SUBJECT_IDENTITY" bundle_identifier)"
     BUNDLE_VERSION="$(kv "$SUBJECT_IDENTITY" bundle_version)"
     PACKAGE_EXECUTABLE="$(kv "$SUBJECT_IDENTITY" executable_path)"
-    BUNDLE_EXECUTABLE_NAME="$(basename -- "$PACKAGE_EXECUTABLE")"
+    BUNDLE_EXECUTABLE_NAME="$("$BASENAME_COMMAND" -- "$PACKAGE_EXECUTABLE")"
     EXPECTED_EXECUTABLE_SHA256="$(kv "$SUBJECT_IDENTITY" executable_sha256)"
     EXECUTABLE_DEVICE="$(kv "$SUBJECT_IDENTITY" executable_device)"
     EXECUTABLE_INODE="$(kv "$SUBJECT_IDENTITY" executable_inode)"
@@ -302,8 +571,8 @@ validate_subject_identity() {
     [[ "$APP_BUNDLE" == /* && "$APP_BUNDLE" == *.app && -d "$APP_BUNDLE" \
         && "$PACKAGE_EXECUTABLE" == /* && -f "$PACKAGE_EXECUTABLE" \
         && -x "$PACKAGE_EXECUTABLE" ]] || die "subject bundle or executable is unavailable"
-    app_canonical="$(realpath "$APP_BUNDLE")"
-    executable_canonical="$(realpath "$PACKAGE_EXECUTABLE")"
+    app_canonical="$("$REALPATH_COMMAND" "$APP_BUNDLE")"
+    executable_canonical="$("$REALPATH_COMMAND" "$PACKAGE_EXECUTABLE")"
     [[ "$PACKAGE_EXECUTABLE" == "$APP_BUNDLE"/Contents/MacOS/* \
         && "$executable_canonical" == "$app_canonical"/Contents/MacOS/* ]] \
         || die "subject executable is outside its application bundle"
@@ -322,17 +591,17 @@ validate_subject_identity() {
 
 package_bundle_matches() {
     local current_version
-    current_version="$(plutil -extract CFBundleShortVersionString raw -o - \
-        "$APP_INFO_PLIST" 2>/dev/null || true)+$(plutil -extract CFBundleVersion \
+    current_version="$("$PLUTIL_COMMAND" -extract CFBundleShortVersionString raw -o - \
+        "$APP_INFO_PLIST" 2>/dev/null || true)+$("$PLUTIL_COMMAND" -extract CFBundleVersion \
         raw -o - "$APP_INFO_PLIST" 2>/dev/null || true)"
-    [[ "$(plutil -extract CFBundleIdentifier raw -o - "$APP_INFO_PLIST" \
+    [[ "$("$PLUTIL_COMMAND" -extract CFBundleIdentifier raw -o - "$APP_INFO_PLIST" \
             2>/dev/null || true)" == "$BUNDLE_IDENTIFIER" \
         && "$current_version" == "$BUNDLE_VERSION" \
-        && "$(plutil -extract CFBundleExecutable raw -o - "$APP_INFO_PLIST" \
+        && "$("$PLUTIL_COMMAND" -extract CFBundleExecutable raw -o - "$APP_INFO_PLIST" \
             2>/dev/null || true)" == "$BUNDLE_EXECUTABLE_NAME" \
-        && "$(realpath "$APP_BUNDLE/Contents/MacOS/$BUNDLE_EXECUTABLE_NAME" \
+        && "$("$REALPATH_COMMAND" "$APP_BUNDLE/Contents/MacOS/$BUNDLE_EXECUTABLE_NAME" \
             2>/dev/null || true)" == "$PACKAGE_EXECUTABLE" ]] \
-        && codesign --verify --strict "$APP_BUNDLE" >/dev/null 2>&1
+        && "$CODESIGN_COMMAND" --verify --strict "$APP_BUNDLE" >/dev/null 2>&1
 }
 
 validate_run_intent() {
@@ -435,7 +704,7 @@ wait_for_workload_evidence() {
     local attempt
     for attempt in {1..51}; do
         [[ -e "$WORKLOAD_METADATA" && -e "$WORKLOAD_EVENTS" ]] && return 0
-        (( attempt == 51 )) || sleep 0.1
+        (( attempt == 51 )) || "$SLEEP_COMMAND" 0.1
     done
     return 1
 }
@@ -444,14 +713,14 @@ validate_workload_metadata() {
     local secret_mode
     readonly WORKLOAD_KEYS="format_version scenario campaign_id session_id nonce subject_identity_sha256 subject_process_pid subject_process_start_identity producer_sha256 producer_pid producer_started_continuous_ns producer_session_id producer_process_group tty_device tty_inode tty_rdev ready_receipt_sha256 events_sha256 auth_algorithm seed_sha256 seed_bytes requested_duration_ms warmup_ms requested_iterations requested_seed_rows emitted_bytes input_events plan_start_continuous_ns started_continuous_ns ended_continuous_ns status events_hmac_sha256"
     wait_for_workload_evidence || return 1
-    [[ "$(stat -f '%d:%i' "$WORKLOAD_METADATA_PARENT")" \
+    [[ "$("$STAT_COMMAND" -f '%d:%i' "$WORKLOAD_METADATA_PARENT")" \
             == "$WORKLOAD_METADATA_PARENT_IDENTITY" \
-        && "$(stat -f '%d:%i' "$WORKLOAD_EVENTS_PARENT")" \
+        && "$("$STAT_COMMAND" -f '%d:%i' "$WORKLOAD_EVENTS_PARENT")" \
             == "$WORKLOAD_EVENTS_PARENT_IDENTITY" ]] || return 1
     file_is_immutable_regular "$WORKLOAD_METADATA" || return 1
     file_is_immutable_regular "$WORKLOAD_EVENTS" || return 1
     [[ -f "$CAMPAIGN_SECRET_FILE" && ! -L "$CAMPAIGN_SECRET_FILE" ]] || return 1
-    secret_mode="$(stat -f '%Lp' "$CAMPAIGN_SECRET_FILE")"
+    secret_mode="$("$STAT_COMMAND" -f '%Lp' "$CAMPAIGN_SECRET_FILE")"
     [[ "$secret_mode" =~ ^[0-7]{3,4}$ ]] || return 1
     (( (8#$secret_mode & 077) == 0 )) || return 1
     schema_is_exact "$WORKLOAD_METADATA" "$WORKLOAD_KEYS" 32 || return 1
@@ -472,15 +741,15 @@ validate_workload_metadata() {
         && "$(kv "$WORKLOAD_METADATA" tty_device)" == "$READY_TTY_DEVICE" \
         && "$(kv "$WORKLOAD_METADATA" tty_inode)" == "$READY_TTY_INODE" \
         && "$(kv "$WORKLOAD_METADATA" tty_rdev)" == "$READY_TTY_RDEV" \
-        && "$(stat -f '%d' "$WORKLOAD_EVENTS")" == "$READY_EVENTS_DEVICE" \
-        && "$(stat -f '%i' "$WORKLOAD_EVENTS")" == "$READY_EVENTS_INODE" \
+        && "$("$STAT_COMMAND" -f '%d' "$WORKLOAD_EVENTS")" == "$READY_EVENTS_DEVICE" \
+        && "$("$STAT_COMMAND" -f '%i' "$WORKLOAD_EVENTS")" == "$READY_EVENTS_INODE" \
         && "$(kv "$WORKLOAD_METADATA" events_sha256)" == "$(sha256 "$WORKLOAD_EVENTS")" \
         && "$(kv "$WORKLOAD_METADATA" auth_algorithm)" == hmac-sha256 \
         && "$(kv "$WORKLOAD_METADATA" warmup_ms)" == "$WARMUP_MILLISECONDS" \
         && "$(kv "$WORKLOAD_METADATA" requested_duration_ms)" == "$DURATION_MILLISECONDS" \
         && "$(kv "$WORKLOAD_METADATA" status)" == complete ]] || return 1
     PLAN_START_NS="$(kv "$WORKLOAD_METADATA" plan_start_continuous_ns)"
-    MEASUREMENT_START_NS="$(python3 - "$PLAN_START_NS" "$WARMUP_MILLISECONDS" <<'PY'
+    MEASUREMENT_START_NS="$("$PYTHON_COMMAND" - "$PLAN_START_NS" "$WARMUP_MILLISECONDS" <<'PY'
 import sys
 plan, warmup = map(int, sys.argv[1:])
 print(plan + warmup * 1_000_000)
@@ -493,7 +762,7 @@ PY
         && (( WORKLOAD_STARTED_NS >= MEASUREMENT_START_NS \
             && WORKLOAD_STARTED_NS - MEASUREMENT_START_NS <= 100000000 \
             && WORKLOAD_ENDED_NS > WORKLOAD_STARTED_NS )) || return 1
-    python3 - "$DURATION_MILLISECONDS" \
+    "$PYTHON_COMMAND" - "$DURATION_MILLISECONDS" \
         "$(kv "$WORKLOAD_METADATA" producer_started_continuous_ns)" \
         "$PLAN_START_NS" "$MEASUREMENT_START_NS" "$WORKLOAD_STARTED_NS" \
         "$WORKLOAD_ENDED_NS" "$READY_MEASUREMENT_NS" <<'PY' \
@@ -510,7 +779,8 @@ if not (producer_started <= ready_measurement <= plan_start <= measurement_start
 if not requested_ms * 1_000_000 <= duration <= (requested_ms + 2_000) * 1_000_000:
     raise SystemExit(1)
 PY
-    python3 - "$WORKLOAD_METADATA" "$WORKLOAD_EVENTS" "$CAMPAIGN_SECRET_FILE" <<'PY' \
+    "$PYTHON_COMMAND" - "$WORKLOAD_METADATA" "$WORKLOAD_EVENTS" "$CAMPAIGN_SECRET_FILE" \
+        "$RENDER_REQUIRES_WORKLOAD" <<'PY' \
         || return 1
 import hashlib
 import hmac
@@ -521,6 +791,7 @@ import sys
 metadata = pathlib.Path(sys.argv[1]).read_bytes()
 events = pathlib.Path(sys.argv[2]).read_bytes()
 secret = pathlib.Path(sys.argv[3]).read_bytes()
+render_sustained = sys.argv[4] == "true"
 if len(secret) < 32 or not metadata.endswith(b"\n"):
     raise SystemExit(1)
 lines = metadata.splitlines(keepends=True)
@@ -538,6 +809,68 @@ authenticated = (
 actual = hmac.new(secret, authenticated, hashlib.sha256).hexdigest()
 if not hmac.compare_digest(expected, actual):
     raise SystemExit(1)
+
+if render_sustained:
+    fields = dict(line.rstrip(b"\n").split(b"\t", 1) for line in lines)
+    decimal_keys = (
+        b"seed_bytes", b"requested_duration_ms", b"warmup_ms",
+        b"requested_iterations", b"requested_seed_rows", b"emitted_bytes",
+        b"input_events", b"producer_started_continuous_ns",
+        b"started_continuous_ns", b"ended_continuous_ns",
+    )
+    if any(not fields[key].isascii() or not fields[key].isdigit()
+           for key in decimal_keys):
+        raise SystemExit(1)
+    numbers = {key: int(fields[key]) for key in decimal_keys}
+    if not (
+        numbers[b"seed_bytes"] > 0
+        and numbers[b"emitted_bytes"] > numbers[b"seed_bytes"]
+        and numbers[b"requested_iterations"] == 0
+        and numbers[b"requested_seed_rows"] == 0
+        and numbers[b"input_events"] == 0
+    ):
+        raise SystemExit(1)
+
+    event_lines = events.splitlines()
+    expected_header = (
+        b"sequence\tcontinuous_ns\tkind\tevent_id\tbyte_count\trows\tcolumns\t"
+        b"pixel_width\tpixel_height\tstatus"
+    )
+    if not events.endswith(b"\n") or not event_lines or event_lines[0] != expected_header:
+        raise SystemExit(1)
+    rows = []
+    for sequence, line in enumerate(event_lines[1:]):
+        columns = line.split(b"\t")
+        if len(columns) != 10 or any(not columns[index].isdigit()
+                                     for index in (0, 1, 4, 5, 6, 7, 8)):
+            raise SystemExit(1)
+        if int(columns[0]) != sequence or int(columns[5]) <= 0 or int(columns[6]) <= 0:
+            raise SystemExit(1)
+        rows.append(columns)
+    if len(rows) < 4 or any(
+        int(rows[index][1]) <= int(rows[index - 1][1])
+        for index in range(1, len(rows))
+    ):
+        raise SystemExit(1)
+    kinds = [row[2] for row in rows]
+    if (
+        rows[0][2:] != [b"started", b"none", b"0", rows[0][5], rows[0][6],
+                        rows[0][7], rows[0][8], b"ok"]
+        or kinds[1] != b"geometry"
+        or kinds.count(b"seed-complete") != 1
+        or kinds[-1] != b"producer-end"
+        or any(kind not in {b"started", b"geometry", b"seed-complete", b"producer-end"}
+               for kind in kinds)
+        or rows[-1][3] != b"none"
+        or rows[-1][9] != b"success"
+        or int(rows[-1][4]) != numbers[b"emitted_bytes"]
+        or int(rows[kinds.index(b"seed-complete")][4]) != numbers[b"seed_bytes"]
+        or int(rows[0][1]) != numbers[b"producer_started_continuous_ns"]
+        or int(rows[-1][1]) != numbers[b"ended_continuous_ns"]
+        or not (int(rows[kinds.index(b"seed-complete")][1])
+                < numbers[b"started_continuous_ns"] < numbers[b"ended_continuous_ns"])
+    ):
+        raise SystemExit(1)
 PY
     WORKLOAD_METADATA_SHA256="$(sha256 "$WORKLOAD_METADATA")"
     readonly PLAN_START_NS MEASUREMENT_START_NS WORKLOAD_STARTED_NS WORKLOAD_ENDED_NS \
@@ -560,44 +893,60 @@ process_identity() {
 target_identity_matches() {
     local result
     result="$(process_identity 2>/dev/null || true)"
-    [[ "$(awk -F '\t' '$1 == "identity_token" { print $2 }' <<< "$result")" \
+    [[ "$("$AWK_COMMAND" -F '\t' '$1 == "identity_token" { print $2 }' <<< "$result")" \
             == "$TARGET_IDENTITY_TOKEN" \
-        && "$(awk -F '\t' '$1 == "live_code_identity_verified" { print $2 }' \
+        && "$("$AWK_COMMAND" -F '\t' '$1 == "live_code_identity_verified" { print $2 }' \
             <<< "$result")" == true ]]
 }
 
 frozen_inputs_match() {
     local supplemental_parent_matches=true
     if [[ -n "$SUPPLEMENTAL_EVIDENCE" \
-        && "$(stat -f '%d:%i' "$SUPPLEMENTAL_EVIDENCE_PARENT")" \
+        && "$("$STAT_COMMAND" -f '%d:%i' "$SUPPLEMENTAL_EVIDENCE_PARENT")" \
             != "$SUPPLEMENTAL_EVIDENCE_PARENT_IDENTITY" ]]; then
         supplemental_parent_matches=false
     fi
     if [[ "$SUPPLEMENTAL_WAS_PREEXISTING" == true ]]; then
-        if [[ "$(stat -f '%d:%i' "$SUPPLEMENTAL_EVIDENCE")" \
+        if [[ "$("$STAT_COMMAND" -f '%d:%i' "$SUPPLEMENTAL_EVIDENCE")" \
                 != "$PRECAPTURE_SUPPLEMENTAL_IDENTITY" \
             || "$(sha256 "$SUPPLEMENTAL_EVIDENCE")" \
                 != "$PRECAPTURE_SUPPLEMENTAL_SHA256" ]]; then
             supplemental_parent_matches=false
         fi
     fi
+    local mode_inputs_match=true
+    if [[ "$WORKLOAD_EVIDENCE_REQUIRED" == true ]]; then
+        [[ "$("$STAT_COMMAND" -f '%d:%i' "$READY_RECEIPT")" == "$READY_RECEIPT_IDENTITY" \
+            && "$(sha256 "$READY_RECEIPT")" == "$READY_RECEIPT_SHA256" \
+            && "$("$STAT_COMMAND" -f '%d:%i' "$WORKLOAD_METADATA_PARENT")" \
+                == "$WORKLOAD_METADATA_PARENT_IDENTITY" \
+            && "$("$STAT_COMMAND" -f '%d:%i' "$WORKLOAD_EVENTS_PARENT")" \
+                == "$WORKLOAD_EVENTS_PARENT_IDENTITY" ]] || mode_inputs_match=false
+    fi
+    if [[ "$CAPTURE_MODE" == render-profile-v1 ]]; then
+        [[ "$("$STAT_COMMAND" -f '%d:%i' "$RENDER_INTENT")" == "$RENDER_INTENT_IDENTITY" \
+            && "$(sha256 "$RENDER_INTENT")" == "$RENDER_INTENT_SHA256" \
+            && "$("$STAT_COMMAND" -f '%d:%i' "$SCENARIO_PLAN")" == "$SCENARIO_PLAN_IDENTITY" \
+            && "$(sha256 "$SCENARIO_PLAN")" == "$SCENARIO_PLAN_SHA256" \
+            && "$("$STAT_COMMAND" -f '%d:%i' "$RENDER_EVIDENCE_PARENT")" \
+                == "$RENDER_EVIDENCE_PARENT_IDENTITY" \
+            && "$("$STAT_COMMAND" -f '%d:%i' "$RENDER_EVIDENCE")" \
+                == "$RENDER_EVIDENCE_IDENTITY" \
+            && "$(sha256 "$RENDER_EVIDENCE")" \
+                == "$SUPPLEMENTAL_EVIDENCE_SHA256" ]] || mode_inputs_match=false
+    fi
     [[ "$(sha256 "$SUBJECT_IDENTITY")" == "$SUBJECT_IDENTITY_SHA256" \
         && "$(sha256 "$RUN_INTENT")" == "$RUN_INTENT_SHA256" \
         && "$(stat -f '%d:%i' "$RUN_METADATA_PARENT")" \
             == "$RUN_METADATA_PARENT_IDENTITY" \
         && "$(sha256 "$PACKAGE_EXECUTABLE")" == "$EXPECTED_EXECUTABLE_SHA256" \
-        && "$(stat -f '%d' "$PACKAGE_EXECUTABLE")" == "$EXECUTABLE_DEVICE" \
-        && "$(stat -f '%i' "$PACKAGE_EXECUTABLE")" == "$EXECUTABLE_INODE" \
-        && "$(stat -f '%d:%i' "$CAMPAIGN_SECRET_FILE")" \
+        && "$("$STAT_COMMAND" -f '%d' "$PACKAGE_EXECUTABLE")" == "$EXECUTABLE_DEVICE" \
+        && "$("$STAT_COMMAND" -f '%i' "$PACKAGE_EXECUTABLE")" == "$EXECUTABLE_INODE" \
+        && "$("$STAT_COMMAND" -f '%d:%i' "$CAMPAIGN_SECRET_FILE")" \
             == "$CAMPAIGN_SECRET_IDENTITY" \
         && "$(sha256 "$CAMPAIGN_SECRET_FILE")" == "$CAMPAIGN_SECRET_SHA256" \
-        && "$(stat -f '%d:%i' "$READY_RECEIPT")" == "$READY_RECEIPT_IDENTITY" \
-        && "$(sha256 "$READY_RECEIPT")" == "$READY_RECEIPT_SHA256" \
         && "$supplemental_parent_matches" == true \
-        && "$(stat -f '%d:%i' "$WORKLOAD_METADATA_PARENT")" \
-            == "$WORKLOAD_METADATA_PARENT_IDENTITY" \
-        && "$(stat -f '%d:%i' "$WORKLOAD_EVENTS_PARENT")" \
-            == "$WORKLOAD_EVENTS_PARENT_IDENTITY" ]] \
+        && "$mode_inputs_match" == true ]] \
         && package_bundle_matches
 }
 
@@ -610,15 +959,15 @@ publish_capture_start_notification() {
         printf 'scenario\t%s\nprocess_pid\t%s\n' "$SCENARIO" "$PID"
         printf 'launched_continuous_ns\t%s\nstatus\tlaunched\n' "$wrapper_started_ns"
     } > "$temporary"
-    chmod 0400 "$temporary"
-    ln "$temporary" "$CAPTURE_START_NOTIFICATION" \
+    "$CHMOD_COMMAND" 0400 "$temporary"
+    "$LN_COMMAND" "$temporary" "$CAPTURE_START_NOTIFICATION" \
         || die "capture-start notification path was created concurrently"
-    rm -f -- "$temporary"
+    "$RM_COMMAND" -f -- "$temporary"
 }
 
 trace_bundle_has_data() {
     [[ -d "$TRACE_PATH" ]] \
-        && [[ -n "$(find "$TRACE_PATH" -type f -size +0c -print -quit 2>/dev/null)" ]]
+        && [[ -n "$("$FIND_COMMAND" "$TRACE_PATH" -type f -size +0c -print -quit 2>/dev/null)" ]]
 }
 
 export_trace_table() {
@@ -627,7 +976,7 @@ export_trace_table() {
 
 verification_metric() {
     [[ -f "$TRACE_VERIFICATION_PATH" ]] || return 0
-    awk -F '\t' -v key="$1" '$1 == key { print $2 }' "$TRACE_VERIFICATION_PATH"
+    "$AWK_COMMAND" -F '\t' -v key="$1" '$1 == key { print $2 }' "$TRACE_VERIFICATION_PATH"
 }
 
 write_metadata() {
@@ -741,6 +1090,15 @@ while (( $# > 0 )); do
         --workload-events) WORKLOAD_EVENTS="${2:-}"; shift ;;
         --workload-ready-receipt) READY_RECEIPT="${2:-}"; shift ;;
         --supplemental-evidence) SUPPLEMENTAL_EVIDENCE="${2:-}"; shift ;;
+        --evidence-mode) CAPTURE_MODE="${2:-}"; shift ;;
+        --scenario-plan) SCENARIO_PLAN="${2:-}"; shift ;;
+        --render-intent) RENDER_INTENT="${2:-}"; shift ;;
+        --render-evidence) RENDER_EVIDENCE="${2:-}"; shift ;;
+        --campaign-manifest) CAMPAIGN_MANIFEST="${2:-}"; shift ;;
+        --render-tool-bundle-manifest) RENDER_TOOL_BUNDLE_MANIFEST="${2:-}"; shift ;;
+        --expected-source-commit) EXPECTED_SOURCE_COMMIT="${2:-}"; shift ;;
+        --trusted-source-repository) TRUSTED_SOURCE_REPOSITORY="${2:-}"; shift ;;
+        --trace-anchor-receipt) TRACE_ANCHOR_RECEIPT="${2:-}"; shift ;;
         --campaign-secret-file) CAMPAIGN_SECRET_FILE="${2:-}"; shift ;;
         --campaign-id) CAMPAIGN_ID="${2:-}"; shift ;;
         --session-id) SESSION_ID="${2:-}"; shift ;;
@@ -751,6 +1109,7 @@ while (( $# > 0 )); do
         --output-directory) OUTPUT_DIRECTORY="${2:-}"; shift ;;
         --capture-start-notification) CAPTURE_START_NOTIFICATION="${2:-}"; shift ;;
         --provisional-receipt) PROVISIONAL_RECEIPT="${2:-}"; shift ;;
+        --render-evidence-timeout-seconds) RENDER_EVIDENCE_TIMEOUT_SECONDS="${2:-}"; shift ;;
         -h|--help) usage; exit 0 ;;
         *) usage >&2; die "unknown argument: $1" ;;
     esac
@@ -758,6 +1117,8 @@ while (( $# > 0 )); do
 done
 
 doctor >/dev/null
+[[ "$CAPTURE_MODE" == workload-v3 || "$CAPTURE_MODE" == render-profile-v1 ]] \
+    || die "evidence mode is invalid"
 is_safe_label "$SCENARIO" || die "scenario label is invalid"
 is_safe_label "$CAMPAIGN_ID" || die "campaign ID is invalid"
 is_safe_label "$SESSION_ID" || die "session ID is invalid"
@@ -769,44 +1130,107 @@ if ! is_uint "$RUN_METADATA_WAIT_TENTHS" \
     die "run metadata wait override is invalid"
 fi
 (( DURATION_MILLISECONDS % 1000 == 0 )) || die "duration must be whole seconds"
+is_positive_integer "$RENDER_EVIDENCE_TIMEOUT_SECONDS" \
+    || die "render evidence timeout must be positive seconds"
+(( RENDER_EVIDENCE_TIMEOUT_SECONDS <= 3600 )) \
+    || die "render evidence timeout exceeds the one-hour safety bound"
+RENDER_REQUIRES_WORKLOAD=false
+if [[ "$CAPTURE_MODE" == render-profile-v1 \
+    && "$SCENARIO" == perf-render-sustained-output ]]; then
+    RENDER_REQUIRES_WORKLOAD=true
+fi
+WORKLOAD_EVIDENCE_REQUIRED=false
+if [[ "$CAPTURE_MODE" == workload-v3 || "$RENDER_REQUIRES_WORKLOAD" == true ]]; then
+    WORKLOAD_EVIDENCE_REQUIRED=true
+fi
+readonly RENDER_REQUIRES_WORKLOAD WORKLOAD_EVIDENCE_REQUIRED
 [[ -n "$SUBJECT_IDENTITY" && -n "$RUN_INTENT" && -n "$RUN_METADATA" \
-    && -n "$WORKLOAD_METADATA" \
-    && -n "$WORKLOAD_EVENTS" && -n "$READY_RECEIPT" \
-    && -n "$CAMPAIGN_SECRET_FILE" \
-    && -n "$OUTPUT_DIRECTORY" && -n "$PROVISIONAL_RECEIPT" ]] \
+    && -n "$CAMPAIGN_SECRET_FILE" && -n "$OUTPUT_DIRECTORY" \
+    && -n "$PROVISIONAL_RECEIPT" ]] \
     || die "required evidence or output argument is missing"
+if [[ "$CAPTURE_MODE" == workload-v3 ]]; then
+    [[ -n "$WORKLOAD_METADATA" && -n "$WORKLOAD_EVENTS" && -n "$READY_RECEIPT" \
+        && -z "$SCENARIO_PLAN$RENDER_INTENT$RENDER_EVIDENCE" ]] \
+        || die "workload-v3 evidence arguments are incomplete or mixed"
+else
+    [[ -n "$SCENARIO_PLAN" && -n "$RENDER_INTENT" && -n "$RENDER_EVIDENCE" \
+        && -n "$CAMPAIGN_MANIFEST" && -n "$TRACE_ANCHOR_RECEIPT" \
+        && ( "$TEST_OVERRIDES_ACTIVE" == true \
+            || ( -n "$RENDER_TOOL_BUNDLE_MANIFEST" \
+                && "$EXPECTED_SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ \
+                && -d "$TRUSTED_SOURCE_REPOSITORY" && ! -L "$TRUSTED_SOURCE_REPOSITORY" ) ) \
+        && -z "$SUPPLEMENTAL_EVIDENCE" ]] \
+        || die "render-profile-v1 evidence arguments are incomplete or mixed"
+    if [[ "$RENDER_REQUIRES_WORKLOAD" == true ]]; then
+        [[ -n "$WORKLOAD_METADATA" && -n "$WORKLOAD_EVENTS" \
+            && -n "$READY_RECEIPT" ]] \
+            || die "sustained render profile requires workload-v3 evidence"
+    else
+        [[ -z "$WORKLOAD_METADATA$WORKLOAD_EVENTS$READY_RECEIPT" ]] \
+            || die "non-output render profile rejects workload-v3 evidence"
+    fi
+fi
 [[ ! -e "$OUTPUT_DIRECTORY" ]] || die "output directory already exists"
 
-SCRIPT_DIRECTORY="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+SCRIPT_DIRECTORY="$(cd -- "$("$DIRNAME_COMMAND" -- "${BASH_SOURCE[0]}")" && pwd -P)"
 readonly SCRIPT_DIRECTORY
+HMAC_HELPER="$SCRIPT_DIRECTORY/acceptance/render-profile-hmac.py"
+TRACE_RECEIPT_HELPER="$SCRIPT_DIRECTORY/acceptance/render-trace-receipt.py"
+readonly HMAC_HELPER
 PROCESS_INSPECTOR="${PROCESS_INSPECTOR:-$SCRIPT_DIRECTORY/inspect-release-performance-process.py}"
 TRACE_VERIFIER="${TRACE_VERIFIER:-$SCRIPT_DIRECTORY/verify-release-performance-trace.py}"
 COMMAND_RUNNER="$SCRIPT_DIRECTORY/run-release-performance-command.py"
 readonly PROCESS_INSPECTOR TRACE_VERIFIER COMMAND_RUNNER
 [[ -x "$PROCESS_INSPECTOR" && -x "$TRACE_VERIFIER" && -x "$COMMAND_RUNNER" ]] \
     || die "trace verifier tooling is not executable"
+[[ -f "$HMAC_HELPER" && ! -L "$HMAC_HELPER" && -x "$HMAC_HELPER" ]] \
+    || die "render authentication helper is unavailable"
+[[ -f "$TRACE_RECEIPT_HELPER" && ! -L "$TRACE_RECEIPT_HELPER" \
+    && -x "$TRACE_RECEIPT_HELPER" ]] \
+    || die "render trace receipt helper is unavailable"
 
 [[ ! -L "$SUBJECT_IDENTITY" && ! -L "$RUN_INTENT" \
     && ( ! -e "$RUN_METADATA" || ! -L "$RUN_METADATA" ) \
-    && ( ! -e "$WORKLOAD_EVENTS" || ! -L "$WORKLOAD_EVENTS" ) \
-    && ! -L "$READY_RECEIPT" \
     && ( -z "$SUPPLEMENTAL_EVIDENCE" || ! -L "$SUPPLEMENTAL_EVIDENCE" ) \
     && ( ! -e "$PROVISIONAL_RECEIPT" || ! -L "$PROVISIONAL_RECEIPT" ) \
     && ! -L "$CAMPAIGN_SECRET_FILE" \
-    && ( ! -e "$WORKLOAD_METADATA" || ! -L "$WORKLOAD_METADATA" ) ]] \
+    && ( -z "$WORKLOAD_EVENTS" || ! -e "$WORKLOAD_EVENTS" || ! -L "$WORKLOAD_EVENTS" ) \
+    && ( -z "$WORKLOAD_METADATA" || ! -e "$WORKLOAD_METADATA" || ! -L "$WORKLOAD_METADATA" ) \
+    && ( -z "$READY_RECEIPT" || ! -L "$READY_RECEIPT" ) \
+    && ( -z "$SCENARIO_PLAN" || ! -L "$SCENARIO_PLAN" ) \
+    && ( -z "$RENDER_INTENT" || ! -L "$RENDER_INTENT" ) \
+    && ( -z "$CAMPAIGN_MANIFEST" || ! -L "$CAMPAIGN_MANIFEST" ) \
+    && ( -z "$TRACE_ANCHOR_RECEIPT" || ! -e "$TRACE_ANCHOR_RECEIPT" \
+        || ! -L "$TRACE_ANCHOR_RECEIPT" ) \
+    && ( -z "$RENDER_EVIDENCE" || ! -e "$RENDER_EVIDENCE" \
+        || ! -L "$RENDER_EVIDENCE" ) ]] \
     || die "evidence inputs must not be symlinks"
-SUBJECT_IDENTITY="$(realpath "$SUBJECT_IDENTITY")"
-RUN_INTENT="$(realpath "$RUN_INTENT")"
+SUBJECT_IDENTITY="$("$REALPATH_COMMAND" "$SUBJECT_IDENTITY")"
+RUN_INTENT="$("$REALPATH_COMMAND" "$RUN_INTENT")"
 [[ ! -e "$RUN_METADATA" ]] || die "final run metadata must be absent at capture launch"
 RUN_METADATA="$(canonical_pending_path "$RUN_METADATA")"
-RUN_METADATA_PARENT="$(dirname -- "$RUN_METADATA")"
-RUN_METADATA_PARENT_IDENTITY="$(stat -f '%d:%i' "$RUN_METADATA_PARENT")"
-CAMPAIGN_SECRET_FILE="$(realpath "$CAMPAIGN_SECRET_FILE")"
-READY_RECEIPT="$(realpath "$READY_RECEIPT")"
-if [[ -n "$SUPPLEMENTAL_EVIDENCE" ]]; then
+RUN_METADATA_PARENT="$("$DIRNAME_COMMAND" -- "$RUN_METADATA")"
+RUN_METADATA_PARENT_IDENTITY="$("$STAT_COMMAND" -f '%d:%i' "$RUN_METADATA_PARENT")"
+CAMPAIGN_SECRET_FILE="$("$REALPATH_COMMAND" "$CAMPAIGN_SECRET_FILE")"
+if [[ "$CAPTURE_MODE" == render-profile-v1 ]]; then
+    CAMPAIGN_MANIFEST="$("$REALPATH_COMMAND" "$CAMPAIGN_MANIFEST")"
+    file_is_immutable_regular "$CAMPAIGN_MANIFEST" \
+        || die "campaign manifest must be immutable singleton evidence"
+    TRACE_ANCHOR_RECEIPT="$(canonical_pending_path "$TRACE_ANCHOR_RECEIPT")"
+    if [[ "$TEST_OVERRIDES_ACTIVE" == false ]]; then
+        RENDER_TOOL_BUNDLE_MANIFEST="$("$REALPATH_COMMAND" "$RENDER_TOOL_BUNDLE_MANIFEST")"
+        TRUSTED_SOURCE_REPOSITORY="$("$REALPATH_COMMAND" "$TRUSTED_SOURCE_REPOSITORY")"
+        file_is_immutable_regular "$RENDER_TOOL_BUNDLE_MANIFEST" \
+            || die "render tool bundle manifest must be immutable singleton evidence"
+    fi
+fi
+if [[ "$WORKLOAD_EVIDENCE_REQUIRED" == true ]]; then
+    READY_RECEIPT="$("$REALPATH_COMMAND" "$READY_RECEIPT")"
+fi
+if [[ "$CAPTURE_MODE" == workload-v3 && -n "$SUPPLEMENTAL_EVIDENCE" ]]; then
     SUPPLEMENTAL_EVIDENCE="$(canonical_pending_path "$SUPPLEMENTAL_EVIDENCE")"
-    SUPPLEMENTAL_EVIDENCE_PARENT="$(dirname -- "$SUPPLEMENTAL_EVIDENCE")"
-    SUPPLEMENTAL_EVIDENCE_PARENT_IDENTITY="$(stat -f '%d:%i' "$SUPPLEMENTAL_EVIDENCE_PARENT")"
+    SUPPLEMENTAL_EVIDENCE_PARENT="$("$DIRNAME_COMMAND" -- "$SUPPLEMENTAL_EVIDENCE")"
+    SUPPLEMENTAL_EVIDENCE_PARENT_IDENTITY="$("$STAT_COMMAND" -f '%d:%i' "$SUPPLEMENTAL_EVIDENCE_PARENT")"
     SUPPLEMENTAL_WAS_PREEXISTING=false
     PRECAPTURE_SUPPLEMENTAL_IDENTITY=none
     PRECAPTURE_SUPPLEMENTAL_SHA256=none
@@ -814,7 +1238,7 @@ if [[ -n "$SUPPLEMENTAL_EVIDENCE" ]]; then
         file_is_immutable_regular "$SUPPLEMENTAL_EVIDENCE" \
             || die "preexisting supplemental evidence must be immutable singleton evidence"
         SUPPLEMENTAL_WAS_PREEXISTING=true
-        PRECAPTURE_SUPPLEMENTAL_IDENTITY="$(stat -f '%d:%i' "$SUPPLEMENTAL_EVIDENCE")"
+        PRECAPTURE_SUPPLEMENTAL_IDENTITY="$("$STAT_COMMAND" -f '%d:%i' "$SUPPLEMENTAL_EVIDENCE")"
         PRECAPTURE_SUPPLEMENTAL_SHA256="$(sha256 "$SUPPLEMENTAL_EVIDENCE")"
     fi
 else
@@ -824,12 +1248,30 @@ else
     PRECAPTURE_SUPPLEMENTAL_IDENTITY=none
     PRECAPTURE_SUPPLEMENTAL_SHA256=none
 fi
-WORKLOAD_METADATA="$(canonical_pending_path "$WORKLOAD_METADATA")"
-WORKLOAD_EVENTS="$(canonical_pending_path "$WORKLOAD_EVENTS")"
-WORKLOAD_METADATA_PARENT="$(dirname -- "$WORKLOAD_METADATA")"
-WORKLOAD_EVENTS_PARENT="$(dirname -- "$WORKLOAD_EVENTS")"
-WORKLOAD_METADATA_PARENT_IDENTITY="$(stat -f '%d:%i' "$WORKLOAD_METADATA_PARENT")"
-WORKLOAD_EVENTS_PARENT_IDENTITY="$(stat -f '%d:%i' "$WORKLOAD_EVENTS_PARENT")"
+if [[ "$WORKLOAD_EVIDENCE_REQUIRED" == true ]]; then
+    WORKLOAD_METADATA="$(canonical_pending_path "$WORKLOAD_METADATA")"
+    WORKLOAD_EVENTS="$(canonical_pending_path "$WORKLOAD_EVENTS")"
+    WORKLOAD_METADATA_PARENT="$("$DIRNAME_COMMAND" -- "$WORKLOAD_METADATA")"
+    WORKLOAD_EVENTS_PARENT="$("$DIRNAME_COMMAND" -- "$WORKLOAD_EVENTS")"
+    WORKLOAD_METADATA_PARENT_IDENTITY="$("$STAT_COMMAND" -f '%d:%i' "$WORKLOAD_METADATA_PARENT")"
+    WORKLOAD_EVENTS_PARENT_IDENTITY="$("$STAT_COMMAND" -f '%d:%i' "$WORKLOAD_EVENTS_PARENT")"
+else
+    WORKLOAD_METADATA_PARENT=none
+    WORKLOAD_EVENTS_PARENT=none
+    WORKLOAD_METADATA_PARENT_IDENTITY=none
+    WORKLOAD_EVENTS_PARENT_IDENTITY=none
+fi
+if [[ "$CAPTURE_MODE" == render-profile-v1 ]]; then
+    SCENARIO_PLAN="$("$REALPATH_COMMAND" "$SCENARIO_PLAN")"
+    RENDER_INTENT="$("$REALPATH_COMMAND" "$RENDER_INTENT")"
+    RENDER_EVIDENCE="$(canonical_pending_path "$RENDER_EVIDENCE")"
+    RENDER_EVIDENCE_PARENT="$("$DIRNAME_COMMAND" -- "$RENDER_EVIDENCE")"
+    RENDER_EVIDENCE_PARENT_IDENTITY="$("$STAT_COMMAND" -f '%d:%i' "$RENDER_EVIDENCE_PARENT")"
+    [[ ! -e "$RENDER_EVIDENCE" ]] || die "render evidence already exists"
+else
+    RENDER_EVIDENCE_PARENT=none
+    RENDER_EVIDENCE_PARENT_IDENTITY=none
+fi
 if [[ -n "$CAPTURE_START_NOTIFICATION" ]]; then
     [[ ! -e "$CAPTURE_START_NOTIFICATION" && ! -L "$CAPTURE_START_NOTIFICATION" ]] \
         || die "capture-start notification must not exist"
@@ -845,19 +1287,60 @@ readonly SUBJECT_IDENTITY RUN_INTENT RUN_METADATA RUN_METADATA_PARENT \
     WORKLOAD_METADATA_PARENT_IDENTITY WORKLOAD_EVENTS_PARENT_IDENTITY \
     CAPTURE_START_NOTIFICATION SUPPLEMENTAL_EVIDENCE SUPPLEMENTAL_EVIDENCE_PARENT \
     SUPPLEMENTAL_EVIDENCE_PARENT_IDENTITY SUPPLEMENTAL_WAS_PREEXISTING \
-    PRECAPTURE_SUPPLEMENTAL_IDENTITY PRECAPTURE_SUPPLEMENTAL_SHA256
+    PRECAPTURE_SUPPLEMENTAL_IDENTITY PRECAPTURE_SUPPLEMENTAL_SHA256 \
+    CAPTURE_MODE SCENARIO_PLAN RENDER_INTENT RENDER_EVIDENCE \
+    CAMPAIGN_MANIFEST TRACE_ANCHOR_RECEIPT TRACE_RECEIPT_HELPER \
+    RENDER_TOOL_BUNDLE_MANIFEST EXPECTED_SOURCE_COMMIT TRUSTED_SOURCE_REPOSITORY \
+    RENDER_EVIDENCE_PARENT RENDER_EVIDENCE_PARENT_IDENTITY \
+    RENDER_EVIDENCE_TIMEOUT_SECONDS
 readonly PROVISIONAL_RECEIPT PROVISIONAL_RECEIPT_PARENT \
     PROVISIONAL_RECEIPT_PARENT_IDENTITY
 validate_subject_identity
 validate_run_intent
+if [[ "$CAPTURE_MODE" == render-profile-v1 && "$TEST_OVERRIDES_ACTIVE" == false ]]; then
+    verify_recorder_tool_bundle \
+        || die "trace recorder is not the selected frozen bundle tool"
+    RENDER_RECORDER_TOOL_IDENTITY_SNAPSHOT="$(render_recorder_tool_identity_snapshot)" \
+        || die "render recorder tools must be immutable trusted executables"
+    readonly RENDER_RECORDER_TOOL_IDENTITY_SNAPSHOT
+fi
 validate_campaign_secret
-validate_ready_receipt
+if [[ "$WORKLOAD_EVIDENCE_REQUIRED" == true ]]; then
+    validate_ready_receipt
+else
+    READY_RECEIPT_SHA256=0000000000000000000000000000000000000000000000000000000000000000
+    WORKLOAD_METADATA_SHA256=0000000000000000000000000000000000000000000000000000000000000000
+    readonly READY_RECEIPT_SHA256 WORKLOAD_METADATA_SHA256
+fi
+if [[ "$CAPTURE_MODE" == render-profile-v1 ]]; then
+    validate_render_intent
+    "$TRACE_RECEIPT_HELPER" verify-case \
+        --manifest "$CAMPAIGN_MANIFEST" \
+        --render-tool-bundle-manifest "$RENDER_TOOL_BUNDLE_MANIFEST" \
+        --expected-source-commit "$EXPECTED_SOURCE_COMMIT" \
+        --trusted-source-repository "$TRUSTED_SOURCE_REPOSITORY" \
+        --campaign-secret-file "$CAMPAIGN_SECRET_FILE" \
+        --subject-identity "$SUBJECT_IDENTITY" \
+        --render-intent "$RENDER_INTENT" \
+        --campaign-id "$CAMPAIGN_ID" \
+        --session-id "$SESSION_ID" \
+        --nonce "$NONCE" \
+        --scenario "$SCENARIO" \
+        --subject "$SUBJECT" \
+        --render-profile-hmac "$HMAC_HELPER" \
+        --render-trace-receipt-helper "$TRACE_RECEIPT_HELPER" \
+        --process-inspector "$PROCESS_INSPECTOR" \
+        --trace-verifier "$TRACE_VERIFIER" \
+        --command-runner "$COMMAND_RUNNER" \
+        >/dev/null \
+        || die "campaign manifest does not bind the requested render case tuple"
+fi
 package_bundle_matches || die "frozen application bundle identity does not match"
 
 identity_output="$(process_identity)"
-TARGET_IDENTITY_TOKEN="$(awk -F '\t' '$1 == "identity_token" { print $2 }' <<< "$identity_output")"
+TARGET_IDENTITY_TOKEN="$("$AWK_COMMAND" -F '\t' '$1 == "identity_token" { print $2 }' <<< "$identity_output")"
 [[ -n "$TARGET_IDENTITY_TOKEN" \
-    && "$(awk -F '\t' '$1 == "live_code_identity_verified" { print $2 }' \
+    && "$("$AWK_COMMAND" -F '\t' '$1 == "live_code_identity_verified" { print $2 }' \
         <<< "$identity_output")" == true ]] || die "live target code identity is unavailable"
 readonly TARGET_IDENTITY_TOKEN
 
@@ -873,9 +1356,9 @@ readonly RECORD_ELAPSED_PATH="$PRIVATE_EXPORT_DIRECTORY/record-elapsed-seconds.t
 readonly METADATA_PATH="$OUTPUT_DIRECTORY/${ARTIFACT_PREFIX}-trace-metadata.tsv"
 readonly METADATA_TEMP="${METADATA_PATH}.tmp.$$"
 
-mkdir -m 700 -- "$OUTPUT_DIRECTORY"
-mkdir -m 700 -- "$PRIVATE_EXPORT_DIRECTORY"
-cleanup() { rm -f -- "$METADATA_TEMP"; }
+"$MKDIR_COMMAND" -m 700 -- "$OUTPUT_DIRECTORY"
+"$MKDIR_COMMAND" -m 700 -- "$PRIVATE_EXPORT_DIRECTORY"
+cleanup() { "$RM_COMMAND" -f -- "$METADATA_TEMP"; }
 trap cleanup EXIT
 trap 'cleanup; trap - EXIT INT TERM; exit 130' INT TERM
 
@@ -910,7 +1393,7 @@ if ! is_uint "$wrapper_ended_ns" || ! is_uint "$wrapper_ended_epoch_ns" \
 fi
 end_anchor_precise=false
 (( end_anchor_width_ns <= 10000000 )) && end_anchor_precise=true
-record_elapsed="$(tr -d '[:space:]' < "$RECORD_ELAPSED_PATH" 2>/dev/null || true)"
+record_elapsed="$("$TR_COMMAND" -d '[:space:]' < "$RECORD_ELAPSED_PATH" 2>/dev/null || true)"
 [[ "$record_elapsed" =~ ^[0-9]+([.][0-9]+)?$ ]] || record_elapsed=0
 
 target_identity_verified=false
@@ -944,13 +1427,36 @@ if (( table_export_status == 0 )); then
 fi
 
 workload_valid=false
-if validate_workload_metadata; then workload_valid=true; fi
+render_evidence_valid=false
+if [[ "$WORKLOAD_EVIDENCE_REQUIRED" == true ]]; then
+    if validate_workload_metadata; then workload_valid=true; fi
+else
+    workload_valid=true
+fi
+if [[ "$CAPTURE_MODE" == render-profile-v1 ]]; then
+    if validate_render_evidence; then render_evidence_valid=true; fi
+fi
+render_workload_intervals_match=true
+if [[ "$RENDER_REQUIRES_WORKLOAD" == true \
+    && "$workload_valid" == true && "$render_evidence_valid" == true ]]; then
+    start_delta=$((WORKLOAD_STARTED_NS - RENDER_MEASUREMENT_START_NS))
+    end_delta=$((WORKLOAD_ENDED_NS - RENDER_MEASUREMENT_END_NS))
+    (( start_delta >= 0 )) || start_delta=$((-start_delta))
+    (( end_delta >= 0 )) || end_delta=$((-end_delta))
+    if (( start_delta > 250000000 || end_delta > 250000000 )); then
+        render_workload_intervals_match=false
+    fi
+fi
 supplemental_valid=false
-if validate_supplemental_evidence; then supplemental_valid=true; fi
 run_metadata_valid=false
+if [[ "$CAPTURE_MODE" == workload-v3 ]]; then
+    if validate_supplemental_evidence; then supplemental_valid=true; fi
+else
+    supplemental_valid="$render_evidence_valid"
+fi
 workload_metadata_hash="${WORKLOAD_METADATA_SHA256:-0000000000000000000000000000000000000000000000000000000000000000}"
 actual_seconds="$(verification_metric actual_record_duration_seconds)"
-actual_duration_ms="$(awk -v seconds="${actual_seconds:-0}" 'BEGIN { printf "%.0f", seconds * 1000 }')"
+actual_duration_ms="$("$AWK_COMMAND" -v seconds="${actual_seconds:-0}" 'BEGIN { printf "%.0f", seconds * 1000 }')"
 trace_started_epoch_ns="$(verification_metric trace_started_epoch_ns)"
 trace_ended_epoch_ns="$(verification_metric trace_ended_epoch_ns)"
 clock_mapping_verified=false
@@ -991,16 +1497,28 @@ if [[ "$verification_status" == 0 ]]; then
     time_profiler_target_verified=true; allocations_target_verified=true; hangs_target_verified=true
 fi
 
+provisional_interval_valid=false
+if [[ "$CAPTURE_MODE" == workload-v3 && "$workload_valid" == true ]] \
+    && (( capture_started_ns <= MEASUREMENT_START_NS \
+        && MEASUREMENT_START_NS - capture_started_ns <= 2000000000 \
+        && capture_ended_ns >= WORKLOAD_ENDED_NS \
+        && capture_ended_ns - WORKLOAD_ENDED_NS <= 2000000000 )); then
+    provisional_interval_valid=true
+elif [[ "$CAPTURE_MODE" == render-profile-v1 && "$render_evidence_valid" == true ]] \
+    && (( capture_started_ns <= RENDER_MEASUREMENT_START_NS \
+        && RENDER_MEASUREMENT_START_NS - capture_started_ns <= 2000000000 \
+        && capture_ended_ns >= RENDER_MEASUREMENT_END_NS \
+        && capture_ended_ns - RENDER_MEASUREMENT_END_NS <= 2000000000 )); then
+    provisional_interval_valid=true
+fi
 provisional_ready=false
 if [[ "$record_status" == 0 && "$export_status" == 0 \
     && "$table_export_status" == 0 && "$verification_status" == 0 ]] \
     && [[ "$target_identity_verified" == true && "$inputs_frozen" == true \
         && "$workload_valid" == true && "$supplemental_valid" == true \
         && "$clock_mapping_verified" == true ]] \
-    && (( capture_started_ns <= MEASUREMENT_START_NS \
-        && MEASUREMENT_START_NS - capture_started_ns <= 2000000000 \
-        && capture_ended_ns >= WORKLOAD_ENDED_NS \
-        && capture_ended_ns - WORKLOAD_ENDED_NS <= 2000000000 )) \
+    && [[ "$provisional_interval_valid" == true \
+        && "$render_workload_intervals_match" == true ]] \
     && [[ "$TEST_OVERRIDES_ACTIVE" == false ]]; then
     provisional_ready=true
     [[ ! -e "$RUN_METADATA" ]] \
@@ -1033,11 +1551,25 @@ elif [[ "$verification_status" != 0 ]]; then
     incomplete_reason="${incomplete_reason:-trace-evidence-not-verifiable}"
 elif [[ "$workload_valid" != true ]]; then incomplete_reason=workload-metadata-invalid
 elif [[ "$supplemental_valid" != true ]]; then incomplete_reason=supplemental-evidence-invalid
+elif [[ "$render_workload_intervals_match" != true ]]; then
+    incomplete_reason=render-workload-interval-mismatch
 elif [[ "$clock_mapping_verified" != true ]]; then incomplete_reason=trace-clock-correlation-invalid
-elif (( capture_started_ns > MEASUREMENT_START_NS \
+elif [[ "$CAPTURE_MODE" == workload-v3 ]] && (( capture_started_ns > MEASUREMENT_START_NS \
     || MEASUREMENT_START_NS - capture_started_ns > 2000000000 \
     || capture_ended_ns < WORKLOAD_ENDED_NS \
     || capture_ended_ns - WORKLOAD_ENDED_NS > 2000000000 )); then
+    incomplete_reason=trace-workload-interval-mismatch
+elif [[ "$CAPTURE_MODE" == render-profile-v1 ]] \
+    && (( capture_started_ns > RENDER_MEASUREMENT_START_NS \
+        || RENDER_MEASUREMENT_START_NS - capture_started_ns > 2000000000 \
+        || capture_ended_ns < RENDER_MEASUREMENT_END_NS \
+        || capture_ended_ns - RENDER_MEASUREMENT_END_NS > 2000000000 )); then
+    incomplete_reason=trace-render-interval-mismatch
+elif [[ "$RENDER_REQUIRES_WORKLOAD" == true ]] \
+    && (( capture_started_ns > MEASUREMENT_START_NS \
+        || MEASUREMENT_START_NS - capture_started_ns > 2000000000 \
+        || capture_ended_ns < WORKLOAD_ENDED_NS \
+        || capture_ended_ns - WORKLOAD_ENDED_NS > 2000000000 )); then
     incomplete_reason=trace-workload-interval-mismatch
 elif [[ "$TEST_OVERRIDES_ACTIVE" == true ]]; then incomplete_reason=test-overrides-active
 elif [[ "$run_metadata_valid" != true ]]; then incomplete_reason=run-metadata-invalid
@@ -1054,13 +1586,51 @@ if [[ "$provisional_ready" == true && "$run_metadata_valid" != true ]]; then
 fi
 
 write_metadata "$METADATA_TEMP"
-chmod 0444 "$METADATA_TEMP"
-ln "$METADATA_TEMP" "$METADATA_PATH" || die "metadata path was created concurrently"
-rm -f -- "$METADATA_TEMP"
+"$CHMOD_COMMAND" 0444 "$METADATA_TEMP"
+"$LN_COMMAND" "$METADATA_TEMP" "$METADATA_PATH" || die "metadata path was created concurrently"
+"$RM_COMMAND" -f -- "$METADATA_TEMP"
 trap - EXIT INT TERM
 if [[ "$capture_status" != CAPTURED ]]; then
     echo "error: trace capture is incomplete: $incomplete_reason" >&2
     exit 1
+fi
+if [[ "$CAPTURE_MODE" == render-profile-v1 ]]; then
+    if [[ "$TEST_OVERRIDES_ACTIVE" == false ]]; then
+        [[ "$(render_recorder_tool_identity_snapshot)" \
+            == "$RENDER_RECORDER_TOOL_IDENTITY_SNAPSHOT" ]] \
+            || die "render recorder tool identity changed during capture"
+    fi
+    "$TRACE_RECEIPT_HELPER" anchor \
+        --manifest "$CAMPAIGN_MANIFEST" \
+        --render-tool-bundle-manifest "$RENDER_TOOL_BUNDLE_MANIFEST" \
+        --expected-source-commit "$EXPECTED_SOURCE_COMMIT" \
+        --trusted-source-repository "$TRUSTED_SOURCE_REPOSITORY" \
+        --campaign-secret-file "$CAMPAIGN_SECRET_FILE" \
+        --subject-identity "$SUBJECT_IDENTITY" \
+        --run-metadata "$RUN_METADATA" \
+        --render-intent "$RENDER_INTENT" \
+        --render-evidence "$RENDER_EVIDENCE" \
+        --trace-metadata "$METADATA_PATH" \
+        --trace-started-epoch-ns "$trace_started_epoch_ns" \
+        --trace-ended-epoch-ns "$trace_ended_epoch_ns" \
+        --start-anchor-continuous-ns "$wrapper_started_ns" \
+        --start-anchor-epoch-ns "$wrapper_started_epoch_ns" \
+        --start-anchor-width-ns "$start_anchor_width_ns" \
+        --end-anchor-continuous-ns "$wrapper_ended_ns" \
+        --end-anchor-epoch-ns "$wrapper_ended_epoch_ns" \
+        --end-anchor-width-ns "$end_anchor_width_ns" \
+        --render-profile-hmac "$HMAC_HELPER" \
+        --render-trace-receipt-helper "$TRACE_RECEIPT_HELPER" \
+        --process-inspector "$PROCESS_INSPECTOR" \
+        --trace-verifier "$TRACE_VERIFIER" \
+        --command-runner "$COMMAND_RUNNER" \
+        --output "$TRACE_ANCHOR_RECEIPT" \
+        || die "authenticated render trace anchor receipt could not be finalized"
+    if [[ "$TEST_OVERRIDES_ACTIVE" == false ]]; then
+        [[ "$(render_recorder_tool_identity_snapshot)" \
+            == "$RENDER_RECORDER_TOOL_IDENTITY_SNAPSHOT" ]] \
+            || die "render recorder tool identity changed during anchor finalization"
+    fi
 fi
 printf 'Trace: %s\nMetadata: %s\nTable of contents: %s\n' \
     "$TRACE_PATH" "$METADATA_PATH" "$TOC_PATH"

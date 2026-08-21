@@ -66,7 +66,10 @@ done
 
 [[ "$PAIR_ID" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || die "invalid pair ID"
 case "$SCENARIO" in
-    ascii|unicode-styles|scrolled|hidden-occluded|resize) ;;
+    ascii|unicode-styles|scrolled|hidden-occluded|resize \
+        |perf-render-idle-cursor-blink|perf-render-text-blink \
+        |perf-render-sustained-output|perf-render-selection \
+        |perf-render-marked-text|perf-render-live-resize) ;;
     *) die "invalid scenario" ;;
 esac
 for command in awk chmod ln mkdir rm shasum; do
@@ -80,7 +83,8 @@ done
 [[ -n "$OUTPUT" && ! -e "$OUTPUT" ]] || die "output path is missing or exists"
 
 plan_hash="$(sha256 "$PLAN")"
-[[ "$(kv "$PLAN_METADATA" format_version)" == 1 \
+plan_format="$(kv "$PLAN_METADATA" format_version)"
+[[ ( "$plan_format" == 1 || "$plan_format" == 2 ) \
     && "$(kv "$PLAN_METADATA" scenario)" == "$SCENARIO" \
     && "$(kv "$PLAN_METADATA" plan_sha256)" == "$plan_hash" ]] \
     || die "plan metadata does not bind the supplied plan and scenario"
