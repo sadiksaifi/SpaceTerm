@@ -65,7 +65,7 @@ verify that unsupported media cannot read host files or produce a false capabili
 | `xterm-mouse-tracking` | [XTerm mouse tracking](https://invisible-island.net/xterm/ctlseqs/ctlseqs.html) |
 | `spaceterm-selection-contract` | [SpaceTerm transactional presentation decision](../CONTEXT.md#transactional-terminal-presentation) |
 | `apple-scroll-phases-and-xterm` | [Apple scroll wheel events](https://developer.apple.com/documentation/appkit/nsevent) and [XTerm mouse tracking](https://invisible-island.net/xterm/ctlseqs/ctlseqs.html) |
-| `vte-osc-8` | [VTE OSC 8 hyperlinks](https://gnome.pages.gitlab.gnome.org/vte/gtk4/hyperlinks.html) |
+| `vte-osc-8` | [VTE OSC 8 hyperlinks](https://gnome.pages.gitlab.gnome.org/vte/gtk4/hyperlinks.html) and [RFC 8089 local file URIs](https://www.rfc-editor.org/rfc/rfc8089.html) |
 | `apple-pasteboard` | [Apple pasteboard programming guide](https://developer.apple.com/library/archive/documentation/Cocoa/Conceptual/PasteboardGuide106/Articles/pbConcepts.html) |
 | `xterm-bracketed-paste` | [XTerm bracketed paste mode](https://invisible-island.net/xterm/ctlseqs/ctlseqs.html) |
 | `apple-file-url-and-posix-shell` | [Apple file URLs](https://developer.apple.com/documentation/foundation/url) and [POSIX shell command language](https://pubs.opengroup.org/onlinepubs/9799919799/utilities/V3_chap02.html) |
@@ -79,6 +79,17 @@ verify that unsupported media cannot read host files or produce a false capabili
 | `apple-window-visibility` | [Apple window occlusion state](https://developer.apple.com/documentation/appkit/nswindow/occlusionstate) |
 | `spaceterm-failure-contract` | [SpaceTerm error-handling principle](../CONTEXT.md#error-handling) |
 | `kitty-graphics-protocol` | [Kitty graphics protocol](https://sw.kovidgoyal.net/kitty/graphics-protocol/) and [SpaceTerm static graphics decision](../CONTEXT.md#static-kitty-graphics) |
+
+For `links.osc-8`, the oracle is the pinned libghostty semantic dispatch: a resolver runs exactly
+once for each accepted OSC 8 start, after any earlier accepted OSC 7 effect in the same byte stream.
+Web URIs pass through byte-for-byte. Valid local `file:` URIs retain their original URI and receive
+bounded resolver-only metadata containing the emission-time canonical path and filesystem identity.
+That metadata follows libghostty's retained hyperlink entry but never participates in terminal text,
+formatting, copy, accessibility, or diagnostics; snapshots decode it without filesystem access.
+PTY bytes cannot attach metadata. Invalid, remote, missing, non-regular, malformed, or oversized
+local targets end the active link and emit no replacement.
+Chunk boundaries, ignored OSC C0 bytes, ESC/CAN/SUB termination, Ground UTF-8, non-Ground C1 OSC,
+and `0x9c` OSC payload handling follow the pinned emulator without a parallel parser.
 
 ## Fixture matrix
 

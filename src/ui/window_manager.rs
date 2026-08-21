@@ -1,10 +1,12 @@
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, App, Context, Entity, EventEmitter, MouseButton, MouseDownEvent, Pixels, Point,
-    Render, ScrollHandle, SharedString, Window, div, px, rgba,
+    AnyElement, App, Context, DispatchPhase, Entity, EventEmitter, MouseButton, MouseDownEvent,
+    MouseExitEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Render, ScrollHandle,
+    SharedString, Window, canvas, div, px, rgba,
 };
 use gpui_symbols::{Icon, SymbolWeight};
 
+use super::terminal_focus::TerminalFocusBlocker;
 use super::{
     ActivateWindow1, ActivateWindow2, ActivateWindow3, ActivateWindow4, ActivateWindow5,
     ActivateWindow6, ActivateWindow7, ActivateWindow8, ActivateWindow9, CloseTarget, CloseWindow,
@@ -13,9 +15,11 @@ use super::{
     handle_top_chrome_mouse_down, render_pane_action_menu,
 };
 use crate::domain::{
-    CloseWindowOutcome, SplitAxis, WindowCollection, WindowError, WindowId, ZoomState,
+    CloseWindowOutcome, SplitAxis, WindowCollection, WindowError, WindowId, WorkspaceId, ZoomState,
 };
-use crate::terminal::WorkspaceTerminalSessionFactory;
+use crate::terminal::{
+    NativeServiceOrigin, NativeServiceStatus, SelectionCopy, WorkspaceTerminalSessionFactory,
+};
 use crate::theme::{ACTIVE_THEME, Color};
 
 const WINDOW_BAR_HEIGHT: f32 = TOP_CHROME_HEIGHT;
@@ -50,6 +54,10 @@ pub(crate) struct WindowManager {
     sidebar_visible: bool,
     sidebar_width: Pixels,
     window_menu: Option<WindowMenuState>,
+    parent_focus_blocker: Option<TerminalFocusBlocker>,
+    window_selector_pressed: Option<WindowId>,
+    top_chrome_interaction: bool,
+    top_chrome_move_requested: bool,
     window_bar_scroll_handle: ScrollHandle,
     close_workspace_requested: bool,
 }
@@ -67,6 +75,12 @@ impl WindowManager {
         let windows = WindowCollection::new(|window_id| {
             Self::create_pane_host(window_id, session_factory.clone(), window, cx)
         });
+        cx.observe_window_activation(window, |manager, window, cx| {
+            if !window.is_window_active() {
+                manager.set_top_chrome_interaction(false, cx);
+            }
+        })
+        .detach();
 
         Self {
             windows,
@@ -75,6 +89,10 @@ impl WindowManager {
             sidebar_visible: true,
             sidebar_width: px(WORKSPACE_SIDEBAR_DEFAULT_WIDTH),
             window_menu: None,
+            parent_focus_blocker: None,
+            window_selector_pressed: None,
+            top_chrome_interaction: false,
+            top_chrome_move_requested: false,
             window_bar_scroll_handle: ScrollHandle::new(),
             close_workspace_requested: false,
         }
@@ -111,6 +129,56 @@ impl WindowManager {
         }
     }
 
+    pub(crate) fn native_service_status(
+        &self,
+        workspace_id: WorkspaceId,
+        window: &Window,
+        cx: &mut App,
+    ) -> NativeServiceStatus {
+        if !self.active {
+            return NativeServiceStatus::default();
+        }
+        let blocker = self.terminal_focus_blocker();
+        self.windows.active_window().update(cx, |pane_host, cx| {
+            pane_host.set_focus_branch(true, blocker, cx);
+            pane_host.native_service_status(workspace_id, window, cx)
+        })
+    }
+
+    pub(crate) fn native_service_selection(
+        &self,
+        origin: NativeServiceOrigin,
+        window: &Window,
+        cx: &mut App,
+    ) -> Option<SelectionCopy> {
+        if !self.active || self.windows.active_window_id() != origin.window_id() {
+            return None;
+        }
+        self.windows
+            .window(origin.window_id())?
+            .update(cx, |pane_host, cx| {
+                pane_host.native_service_selection(origin, window, cx)
+            })
+    }
+
+    pub(crate) fn insert_native_service_text(
+        &self,
+        origin: NativeServiceOrigin,
+        text: String,
+        window: &Window,
+        cx: &mut App,
+    ) -> bool {
+        if !self.active || self.windows.active_window_id() != origin.window_id() {
+            return false;
+        }
+        let Some(pane_host) = self.windows.window(origin.window_id()) else {
+            return false;
+        };
+        pane_host.update(cx, |pane_host, cx| {
+            pane_host.insert_native_service_text(origin, text, window, cx)
+        })
+    }
+
     pub(crate) fn activate(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.activate_without_focus(cx);
         self.focus(window, cx);
@@ -121,6 +189,7 @@ impl WindowManager {
         self.windows
             .active_window()
             .update(cx, |pane_host, cx| pane_host.activate_without_focus(cx));
+        self.sync_terminal_focus_blocker(cx);
     }
 
     pub(crate) fn deactivate(&mut self, cx: &mut Context<Self>) {
@@ -128,6 +197,11 @@ impl WindowManager {
         self.windows
             .active_window()
             .update(cx, |pane_host, cx| pane_host.deactivate(cx));
+        self.window_menu = None;
+        self.window_selector_pressed = None;
+        self.top_chrome_interaction = false;
+        self.top_chrome_move_requested = false;
+        self.sync_terminal_focus_blocker(cx);
     }
 
     pub(crate) fn close_all(&self, cx: &mut App) {
@@ -149,6 +223,100 @@ impl WindowManager {
         }
     }
 
+    pub(crate) fn set_parent_focus_blocker(
+        &mut self,
+        blocker: Option<TerminalFocusBlocker>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.parent_focus_blocker == blocker {
+            return;
+        }
+        self.parent_focus_blocker = blocker;
+        self.sync_terminal_focus_blocker(cx);
+        cx.notify();
+    }
+
+    fn terminal_focus_blocker(&self) -> Option<TerminalFocusBlocker> {
+        self.parent_focus_blocker
+            .or(self
+                .top_chrome_interaction
+                .then_some(TerminalFocusBlocker::TopChrome))
+            .or(self
+                .window_selector_pressed
+                .map(|_| TerminalFocusBlocker::WindowSelector))
+            .or(self.window_menu.map(|menu| {
+                if menu.left.is_some() {
+                    TerminalFocusBlocker::ContextMenu
+                } else {
+                    TerminalFocusBlocker::WindowMenu
+                }
+            }))
+    }
+
+    fn sync_terminal_focus_blocker(&self, cx: &mut Context<Self>) {
+        let blocker = self.terminal_focus_blocker();
+        let active_window_id = self.windows.active_window_id();
+        for (window_id, pane_host) in self.windows.iter() {
+            let active = self.active && window_id == active_window_id;
+            pane_host.update(cx, |pane_host, cx| {
+                pane_host.set_focus_branch(active, blocker, cx);
+            });
+        }
+    }
+
+    fn set_top_chrome_interaction(&mut self, blocked: bool, cx: &mut Context<Self>) {
+        if self.top_chrome_interaction == blocked {
+            return;
+        }
+        self.top_chrome_interaction = blocked;
+        self.top_chrome_move_requested = false;
+        self.sync_terminal_focus_blocker(cx);
+        cx.notify();
+    }
+
+    fn continue_top_chrome_interaction(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.top_chrome_interaction || self.top_chrome_move_requested {
+            return;
+        }
+        self.top_chrome_move_requested = true;
+        window.start_window_move();
+        cx.notify();
+    }
+
+    fn finish_top_chrome_interaction(&mut self, cx: &mut Context<Self>) {
+        self.set_top_chrome_interaction(false, cx);
+    }
+
+    fn begin_window_selector(&mut self, window_id: WindowId, cx: &mut Context<Self>) {
+        self.window_selector_pressed = Some(window_id);
+        self.sync_terminal_focus_blocker(cx);
+        cx.notify();
+    }
+
+    fn cancel_window_selector(&mut self, window_id: WindowId, cx: &mut Context<Self>) {
+        if self.window_selector_pressed != Some(window_id) {
+            return;
+        }
+        self.window_selector_pressed = None;
+        self.sync_terminal_focus_blocker(cx);
+        cx.notify();
+    }
+
+    fn commit_window_selector(
+        &mut self,
+        window_id: WindowId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.window_selector_pressed != Some(window_id) {
+            return;
+        }
+        let _ = self.activate_window(window_id, window, cx);
+        self.window_selector_pressed = None;
+        self.sync_terminal_focus_blocker(cx);
+        cx.notify();
+    }
+
     pub(crate) fn sidebar_detail(&self, cx: &App) -> SharedString {
         let title = self.windows.active_window().read(cx).window_title();
         if self.windows.len() == 1 {
@@ -165,6 +333,14 @@ impl WindowManager {
             .focused_terminal_is_focused(window, cx)
     }
 
+    #[cfg(test)]
+    pub(crate) fn focused_terminal_has_input_focus(&self, window: &Window, cx: &App) -> bool {
+        self.windows
+            .active_window()
+            .read(cx)
+            .focused_terminal_has_input_focus(window, cx)
+    }
+
     fn scroll_active_window_into_view(&self) {
         let active_window_id = self.windows.active_window_id();
         if let Some(index) = self
@@ -177,6 +353,9 @@ impl WindowManager {
     }
 
     pub(crate) fn create_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.window_menu = None;
+        self.window_selector_pressed = None;
+        self.sync_terminal_focus_blocker(cx);
         let previous_window = self.windows.active_window().clone();
         let session_factory = self.session_factory.clone();
         let result = self.windows.create_window(|window_id| {
@@ -199,13 +378,23 @@ impl WindowManager {
         } else {
             pane_host.update(cx, |pane_host, cx| pane_host.deactivate(cx));
         }
-        self.window_menu = None;
+        self.sync_terminal_focus_blocker(cx);
         self.scroll_active_window_into_view();
         cx.emit(WindowManagerEvent::PresentationChanged);
         cx.notify();
     }
 
     fn activate_window(
+        &mut self,
+        window_id: WindowId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        self.window_menu = None;
+        self.activate_window_preserving_menu(window_id, window, cx)
+    }
+
+    fn activate_window_preserving_menu(
         &mut self,
         window_id: WindowId,
         window: &mut Window,
@@ -225,12 +414,16 @@ impl WindowManager {
         if previous_window_id != window_id {
             previous_window.update(cx, |pane_host, cx| pane_host.deactivate(cx));
         }
+        let blocker = self.terminal_focus_blocker();
+        next_window.update(cx, |pane_host, cx| {
+            pane_host.set_focus_branch(self.active, blocker, cx);
+        });
         if self.active {
             next_window.update(cx, |pane_host, cx| pane_host.activate(window, cx));
         } else {
             next_window.update(cx, |pane_host, cx| pane_host.deactivate(cx));
         }
-        self.window_menu = None;
+        self.sync_terminal_focus_blocker(cx);
         self.scroll_active_window_into_view();
         cx.emit(WindowManagerEvent::PresentationChanged);
         cx.notify();
@@ -254,7 +447,6 @@ impl WindowManager {
         }
 
         let was_active = self.windows.active_window_id() == window_id;
-        self.window_menu = None;
         match self.windows.close_window(window_id) {
             Ok(CloseWindowOutcome::WindowClosed {
                 closed_window_id,
@@ -271,6 +463,9 @@ impl WindowManager {
                         active_window.update(cx, |pane_host, cx| pane_host.deactivate(cx));
                     }
                 }
+                self.window_menu = None;
+                self.window_selector_pressed = None;
+                self.sync_terminal_focus_blocker(cx);
                 debug_assert_eq!(active_window_id, self.windows.active_window_id());
                 self.scroll_active_window_into_view();
                 cx.emit(WindowManagerEvent::PresentationChanged);
@@ -278,9 +473,16 @@ impl WindowManager {
             }
             Ok(CloseWindowOutcome::CloseWorkspace { final_window_id }) => {
                 self.close_workspace_requested = true;
+                self.window_menu = None;
+                self.window_selector_pressed = None;
                 cx.emit(WindowManagerEvent::FinalWindowCloseRequested { final_window_id });
             }
-            Err(error) => Self::report_window_error("close", error),
+            Err(error) => {
+                self.window_menu = None;
+                self.window_selector_pressed = None;
+                self.sync_terminal_focus_blocker(cx);
+                Self::report_window_error("close", error);
+            }
         }
     }
 
@@ -291,10 +493,13 @@ impl WindowManager {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.activate_window(window_id, window, cx) {
+        self.window_menu = Some(WindowMenuState { window_id, left });
+        self.sync_terminal_focus_blocker(cx);
+        if !self.activate_window_preserving_menu(window_id, window, cx) {
+            self.window_menu = None;
+            self.sync_terminal_focus_blocker(cx);
             return;
         }
-        self.window_menu = Some(WindowMenuState { window_id, left });
         cx.notify();
     }
 
@@ -305,6 +510,7 @@ impl WindowManager {
             .is_some_and(|menu| menu.window_id == window_id && menu.left.is_none())
         {
             self.window_menu = None;
+            self.sync_terminal_focus_blocker(cx);
             cx.notify();
             return;
         }
@@ -334,10 +540,12 @@ impl WindowManager {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(menu) = self.window_menu.take() else {
+        let Some(menu) = self.window_menu else {
             return;
         };
         let Some(pane_host) = self.windows.window(menu.window_id).cloned() else {
+            self.window_menu = None;
+            self.sync_terminal_focus_blocker(cx);
             return;
         };
 
@@ -353,11 +561,15 @@ impl WindowManager {
             }
             PaneActionMenuCommand::Close => self.close_window(menu.window_id, window, cx),
         }
+        if self.window_menu.take().is_some() {
+            self.sync_terminal_focus_blocker(cx);
+        }
         cx.notify();
     }
 
     fn dismiss_window_menu(&mut self, cx: &mut Context<Self>) {
         if self.window_menu.take().is_some() {
+            self.sync_terminal_focus_blocker(cx);
             cx.notify();
         }
     }
@@ -458,6 +670,8 @@ impl WindowManager {
         active: bool,
         manager: gpui::WeakEntity<Self>,
     ) -> AnyElement {
+        let press_manager = manager.clone();
+        let release_manager = manager.clone();
         let click_manager = manager.clone();
         let context_manager = manager.clone();
         let close_manager = manager;
@@ -496,10 +710,20 @@ impl WindowManager {
                 ACTIVE_THEME.text_muted
             }))
             .hover(|item| item.bg(gpui_color(ACTIVE_THEME.ghost_element_selected)))
-            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+                let _ = press_manager.update(cx, |manager, cx| {
+                    manager.begin_window_selector(window_id, cx);
+                });
+                cx.stop_propagation();
+            })
+            .on_mouse_up_out(MouseButton::Left, move |_, _, cx| {
+                let _ = release_manager.update(cx, |manager, cx| {
+                    manager.cancel_window_selector(window_id, cx);
+                });
+            })
             .on_click(move |_, window, cx| {
                 let _ = click_manager.update(cx, |manager, cx| {
-                    manager.activate_window(window_id, window, cx);
+                    manager.commit_window_selector(window_id, window, cx);
                 });
                 cx.stop_propagation();
             })
@@ -618,6 +842,11 @@ impl WindowManager {
             ));
         }
 
+        let chrome_down_manager = manager.clone();
+        let chrome_event_manager = manager.clone();
+        let chrome_move_manager = manager.clone();
+        let chrome_up_manager = manager.clone();
+        let chrome_out_manager = manager.clone();
         let create_manager = manager.clone();
         let menu_manager = manager;
         div()
@@ -633,7 +862,71 @@ impl WindowManager {
             .items_center()
             .pr(px(WINDOW_CONTROL_SIZE + WINDOW_CONTROL_INSET * 2.0))
             .bg(gpui_color(ACTIVE_THEME.tab_bar_background))
-            .on_mouse_down(MouseButton::Left, handle_top_chrome_mouse_down)
+            .on_mouse_down(MouseButton::Left, move |event, window, cx| {
+                handle_top_chrome_mouse_down(event, window, cx, |blocked, _, cx| {
+                    let _ = chrome_down_manager.update(cx, |manager, cx| {
+                        manager.set_top_chrome_interaction(blocked, cx);
+                    });
+                });
+            })
+            .on_mouse_move(move |event, window, cx| {
+                if event.dragging() {
+                    let _ = chrome_move_manager.update(cx, |manager, cx| {
+                        manager.continue_top_chrome_interaction(window, cx);
+                    });
+                }
+            })
+            .on_mouse_up_out(MouseButton::Left, move |_, _, cx| {
+                let _ = chrome_up_manager.update(cx, |manager, cx| {
+                    manager.finish_top_chrome_interaction(cx);
+                });
+            })
+            .on_mouse_up(MouseButton::Left, move |_, _, cx| {
+                let _ = chrome_out_manager.update(cx, |manager, cx| {
+                    manager.finish_top_chrome_interaction(cx);
+                });
+            })
+            .child(
+                canvas(
+                    |_, _, _| (),
+                    move |chrome_bounds, _, window, _| {
+                        let down_manager = chrome_event_manager.clone();
+                        window.on_mouse_event(move |event: &MouseDownEvent, phase, _, cx| {
+                            if phase != DispatchPhase::Capture
+                                || event.button != MouseButton::Left
+                                || !chrome_bounds.contains(&event.position)
+                            {
+                                return;
+                            }
+                            let blocked = event.click_count == 1;
+                            let _ = down_manager.update(cx, |manager, cx| {
+                                manager.set_top_chrome_interaction(blocked, cx);
+                            });
+                        });
+
+                        let move_manager = chrome_event_manager.clone();
+                        window.on_mouse_event(move |event: &MouseMoveEvent, phase, window, cx| {
+                            if phase == DispatchPhase::Capture && event.dragging() {
+                                let _ = move_manager.update(cx, |manager, cx| {
+                                    manager.continue_top_chrome_interaction(window, cx);
+                                });
+                            }
+                        });
+
+                        let up_manager = chrome_event_manager.clone();
+                        window.on_mouse_event(move |event: &MouseUpEvent, phase, _, cx| {
+                            if phase == DispatchPhase::Capture && event.button == MouseButton::Left
+                            {
+                                let _ = up_manager.update(cx, |manager, cx| {
+                                    manager.finish_top_chrome_interaction(cx);
+                                });
+                            }
+                        });
+                    },
+                )
+                .absolute()
+                .inset_0(),
+            )
             .child(
                 div()
                     .id("window-bar-divider")
@@ -757,6 +1050,8 @@ impl Render for WindowManager {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         debug_assert!(self.windows.len() > 0);
         let manager = cx.entity().downgrade();
+        let release_manager = manager.clone();
+        let exit_manager = manager.clone();
         let active_window = self.windows.active_window().clone();
         let window_bar = self.render_window_bar(manager.clone(), cx);
 
@@ -772,6 +1067,29 @@ impl Render for WindowManager {
             .flex_col()
             .overflow_hidden()
             .bg(gpui_color(ACTIVE_THEME.terminal_background))
+            .capture_any_mouse_up(move |event, _, cx| {
+                if event.button == MouseButton::Left {
+                    let _ = release_manager.update(cx, |manager, cx| {
+                        manager.finish_top_chrome_interaction(cx);
+                    });
+                }
+            })
+            .child(
+                canvas(
+                    |_, _, _| (),
+                    move |_, _, window, _| {
+                        window.on_mouse_event(move |_: &MouseExitEvent, phase, _, cx| {
+                            if phase == DispatchPhase::Bubble {
+                                let _ = exit_manager.update(cx, |manager, cx| {
+                                    manager.finish_top_chrome_interaction(cx);
+                                });
+                            }
+                        });
+                    },
+                )
+                .absolute()
+                .inset_0(),
+            )
             .on_action(cx.listener(Self::on_create_window))
             .on_action(cx.listener(Self::on_activate_window_1))
             .on_action(cx.listener(Self::on_activate_window_2))
@@ -847,7 +1165,9 @@ mod tests {
 
     use super::*;
     use crate::domain::PaneId;
-    use crate::terminal::testing::{TestTerminalSessionFactory, TestTerminalSessionRecords};
+    use crate::terminal::testing::{
+        RecordedSessionCommand, TestTerminalSessionFactory, TestTerminalSessionRecords,
+    };
     use crate::terminal::{ScreenSnapshot, SessionEvent, SessionExit, TerminalSessionFactory};
 
     fn window_manager(
@@ -868,6 +1188,7 @@ mod tests {
         let (manager, cx) =
             cx.add_window_view(|window, cx| WindowManager::new(session_factory, window, cx));
         cx.update(|window, cx| {
+            window.activate_window();
             manager.update(cx, |manager, cx| manager.focus(window, cx));
         });
         cx.run_until_parked();
@@ -1324,6 +1645,48 @@ mod tests {
             )
         });
         assert_eq!(state, (WindowId::new(1), Some((WindowId::new(1), true))));
+        let services_blocked = cx.update(|window, cx| {
+            manager.update(cx, |manager, cx| {
+                !manager
+                    .native_service_status(WorkspaceId::new(1), window, cx)
+                    .capabilities
+                    .return_text
+            })
+        });
+        assert!(services_blocked);
+    }
+
+    #[gpui::test]
+    fn inactive_window_context_menu_should_not_transiently_focus_its_terminal(
+        cx: &mut TestAppContext,
+    ) {
+        let (manager, records, cx) = window_manager(cx);
+        click("create-window-button", cx);
+        let command_count = records.commands().len();
+
+        right_click("window-item-1-inactive", cx);
+
+        let state = cx.update(|window, cx| {
+            let manager = manager.read(cx);
+            (
+                manager.windows.active_window_id(),
+                manager.focused_terminal_is_focused(window, cx),
+                manager.focused_terminal_has_input_focus(window, cx),
+            )
+        });
+        let focus_edges = records
+            .commands()
+            .into_iter()
+            .skip(command_count)
+            .filter_map(|call| match call.command {
+                RecordedSessionCommand::Focus(focused) => Some((call.session_id, focused)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            (state, focus_edges),
+            ((WindowId::new(1), true, false), vec![(2, false)])
+        );
     }
 
     #[gpui::test]
@@ -1341,6 +1704,36 @@ mod tests {
     }
 
     #[gpui::test]
+    fn window_menu_blocks_services_and_invalidates_the_previous_focus_branch(
+        cx: &mut TestAppContext,
+    ) {
+        let (manager, _records, cx) = window_manager(cx);
+        let before = cx.update(|window, cx| {
+            manager.update(cx, |manager, cx| {
+                manager.native_service_status(WorkspaceId::new(1), window, cx)
+            })
+        });
+
+        click("window-menu-button", cx);
+        let blocked = cx.update(|window, cx| {
+            manager.update(cx, |manager, cx| {
+                manager.native_service_status(WorkspaceId::new(1), window, cx)
+            })
+        });
+        click("window-menu-button", cx);
+        let restored = cx.update(|window, cx| {
+            manager.update(cx, |manager, cx| {
+                manager.native_service_status(WorkspaceId::new(1), window, cx)
+            })
+        });
+
+        assert!(before.capabilities.return_text);
+        assert!(!blocked.capabilities.return_text);
+        assert!(restored.capabilities.return_text);
+        assert_ne!(before.origin, restored.origin);
+    }
+
+    #[gpui::test]
     fn top_ellipsis_should_toggle_its_open_menu_closed(cx: &mut TestAppContext) {
         let (manager, _records, cx) = window_manager(cx);
         click("window-menu-button", cx);
@@ -1349,6 +1742,162 @@ mod tests {
 
         let menu = manager.read_with(cx, |manager, _| manager.window_menu);
         assert_eq!(menu, None);
+    }
+
+    #[gpui::test]
+    fn window_menu_should_block_and_restore_input_without_changing_focused_pane(
+        cx: &mut TestAppContext,
+    ) {
+        let (manager, records, cx) = window_manager(cx);
+        let command_count = records.commands().len();
+        let focused_pane_id = manager.read_with(cx, |manager, cx| {
+            manager.windows.active_window().read(cx).focused_pane_id()
+        });
+
+        click("window-menu-button", cx);
+
+        let menu_open = cx.update(|window, cx| {
+            let manager = manager.read(cx);
+            (
+                manager.windows.active_window().read(cx).focused_pane_id(),
+                manager.focused_terminal_is_focused(window, cx),
+                manager.focused_terminal_has_input_focus(window, cx),
+            )
+        });
+        assert_eq!(menu_open, (focused_pane_id, true, false));
+
+        click("window-menu-button", cx);
+        cx.simulate_keystrokes("a");
+
+        let commands = records
+            .commands()
+            .into_iter()
+            .skip(command_count)
+            .map(|call| (call.session_id, call.command))
+            .collect::<Vec<_>>();
+        assert!(matches!(
+            commands[0],
+            (1, RecordedSessionCommand::Focus(false))
+        ));
+        assert!(matches!(
+            commands[1],
+            (1, RecordedSessionCommand::Focus(true))
+        ));
+        assert!(matches!(commands[2], (1, RecordedSessionCommand::Key(_))));
+    }
+
+    #[gpui::test]
+    fn top_chrome_mouse_down_should_block_until_release_without_changing_focused_pane(
+        cx: &mut TestAppContext,
+    ) {
+        let (manager, records, cx) = window_manager(cx);
+        let command_count = records.commands().len();
+        let chrome = cx
+            .debug_bounds("window-bar")
+            .expect("top chrome must be rendered")
+            .center();
+        let focused_pane_id = manager.read_with(cx, |manager, cx| {
+            manager.windows.active_window().read(cx).focused_pane_id()
+        });
+
+        cx.simulate_mouse_down(chrome, MouseButton::Left, Modifiers::none());
+        cx.run_until_parked();
+        let blocked = cx.update(|window, cx| {
+            let manager = manager.read(cx);
+            (
+                manager.windows.active_window().read(cx).focused_pane_id(),
+                manager.focused_terminal_is_focused(window, cx),
+                manager.focused_terminal_has_input_focus(window, cx),
+            )
+        });
+        assert_eq!(blocked, (focused_pane_id, true, false));
+
+        cx.simulate_mouse_move(chrome, None, Modifiers::none());
+        cx.run_until_parked();
+        assert!(!cx.update(|window, cx| {
+            manager
+                .read(cx)
+                .focused_terminal_has_input_focus(window, cx)
+        }));
+
+        let outside_chrome = cx
+            .debug_bounds("window-manager-content")
+            .expect("Window content must be rendered")
+            .center();
+        cx.simulate_mouse_up(outside_chrome, MouseButton::Left, Modifiers::none());
+        cx.run_until_parked();
+        cx.simulate_mouse_down(chrome, MouseButton::Left, Modifiers::none());
+        cx.simulate_event(MouseExitEvent {
+            position: chrome,
+            pressed_button: Some(MouseButton::Left),
+            modifiers: Modifiers::none(),
+        });
+        let focus_edges = records
+            .commands()
+            .into_iter()
+            .skip(command_count)
+            .filter_map(|call| match call.command {
+                RecordedSessionCommand::Focus(focused) => Some((call.session_id, focused)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(focus_edges, [(1, false), (1, true), (1, false), (1, true)]);
+    }
+
+    #[gpui::test]
+    fn window_selector_press_should_block_before_activation_and_restore_selected_terminal(
+        cx: &mut TestAppContext,
+    ) {
+        let (manager, records, cx) = window_manager(cx);
+        click("create-window-button", cx);
+        let command_count = records.commands().len();
+        let position = cx
+            .debug_bounds("window-item-1-inactive")
+            .expect("inactive Window selector must be rendered")
+            .center();
+        let focused_pane_id = manager.read_with(cx, |manager, cx| {
+            manager.windows.active_window().read(cx).focused_pane_id()
+        });
+
+        cx.simulate_mouse_move(position, None, Modifiers::none());
+        cx.simulate_mouse_down(position, MouseButton::Left, Modifiers::none());
+        cx.run_until_parked();
+
+        let pressed = cx.update(|window, cx| {
+            let manager = manager.read(cx);
+            (
+                manager.windows.active_window_id(),
+                manager.windows.active_window().read(cx).focused_pane_id(),
+                manager.focused_terminal_is_focused(window, cx),
+                manager.focused_terminal_has_input_focus(window, cx),
+            )
+        });
+        assert_eq!(pressed, (WindowId::new(2), focused_pane_id, true, false));
+
+        cx.simulate_mouse_up(position, MouseButton::Left, Modifiers::none());
+        cx.run_until_parked();
+
+        let selected = cx.update(|window, cx| {
+            let manager = manager.read(cx);
+            (
+                manager.windows.active_window_id(),
+                manager.focused_terminal_is_focused(window, cx),
+                manager.focused_terminal_has_input_focus(window, cx),
+            )
+        });
+        let focus_edges = records
+            .commands()
+            .into_iter()
+            .skip(command_count)
+            .filter_map(|call| match call.command {
+                RecordedSessionCommand::Focus(focused) => Some((call.session_id, focused)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            (selected, focus_edges),
+            ((WindowId::new(1), true, true), vec![(2, false), (1, true)])
+        );
     }
 
     #[gpui::test]

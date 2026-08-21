@@ -27,6 +27,8 @@
 | Term | Definition | Aliases to avoid |
 | --- | --- | --- |
 | **Terminal Session** | The live terminal runtime owned by a Pane, joining terminal emulation, a PTY, and a Shell Process. | Session, Workspace session |
+| **Runtime Observation** | An acceptance-only, authenticated, content-free stream of bounded numeric and closed-enum facts from one production Pane and Terminal Session; collection failure means NOT-RUN rather than PASS or FAIL. | telemetry, terminal transcript, runtime log |
+| **Acceptance Failure Action** | A nonce-bound, sequenced, one-shot request from the authenticated mounted-app verifier that selects one fixed production failure Seam and returns only closed-enum state facts; it does not exist during an ordinary launch. | test flag, debug command, arbitrary fault payload |
 | **Terminal Emulator** | The state machine that interprets terminal output and maintains the visible grid and Scrollback. | Terminal Session, Pane |
 | **PTY** | The macOS pseudoterminal that connects a Terminal Emulator to its Shell Process. | Terminal, shell |
 | **Shell Process** | The command interpreter process launched for a Pane through its PTY. | Terminal, session |
@@ -54,7 +56,7 @@
 | **Paste Payload** | An immutable, size-bounded text insertion candidate owned by the Terminal Session worker from normalization through encoding or cancellation. | clipboard contents, typed key input |
 | **File Insertion** | Ordered native file URLs converted to absolute POSIX-shell-quoted paths before becoming a Paste Payload. | raw URL paste, direct PTY write |
 | **Native Terminal Service** | A macOS Services, contextual-action, Quick Look, pasteboard, or drag/drop adapter that requests existing Selection, Terminal Hyperlink, File Insertion, and Paste Payload policies without mutating the Terminal Emulator. | independent input path, direct PTY service |
-| **Terminal Accessibility Model** | A Pane-owned native editable text-area projection whose UTF-16 ranges map visible and retained terminal text, Selection, Cursor, and bounds back to logical terminal cells. | flattened cell string, screen-reader transcript |
+| **Terminal Accessibility Model** | A Pane-owned native editable text-area projection whose cell-atomic UTF-16 ranges map visible and retained terminal text, selected terminal font metadata, Selection, Cursor, and bounds back to logical terminal cells. | flattened cell string, screen-reader transcript |
 | **Render Lifecycle** | Pane-owned visibility, animation, scale, and newest-generation presentation state that schedules frames only when its native surface can present them. | render loop, global animation timer |
 | **Terminal Failure** | A typed PTY, Terminal Emulator, presentation, platform, or renderer-resource fault with an explicit recoverability class and no terminal contents or secrets. | stderr message, shell exit |
 | **Local Diagnostics** | A bounded content-free sequence of Terminal Failure identifiers and unhandled keyboard event kind, action, and native key code written only after explicit user export. | telemetry, crash upload, terminal log |
@@ -93,8 +95,12 @@
 - A multiline **Paste Payload** requires **Paste Confirmation** only when bracketed-paste mode is inactive; an embedded closing fence always requires confirmation, while encoder-replaced control bytes alone do not.
 - A **Paste Confirmation** is cancelled by focus or hierarchy loss, timeout, Terminal Session shutdown, explicit cancellation, or a stale identity, and cancellation writes no PTY bytes.
 - A **Native Terminal Service** may submit a **Paste Payload** only while its Pane owns **Terminal Input Focus**, and may offer Quick Look only for an existing validated local-file **Terminal Hyperlink**.
-- A **Terminal Accessibility Model** observes immutable terminal state and may request worker-owned Selection changes, but never mutates the Terminal Emulator directly.
+- A **Terminal Accessibility Model** treats each retained text-bearing cell as one complete accessibility grapheme, rejects string reads that would expose only part of that cell, normalizes Selection requests to complete intersected cells, observes immutable terminal state, and may request worker-owned Selection changes, but never mutates the Terminal Emulator directly.
 - A **Render Lifecycle** coalesces hidden Terminal Presentations to the newest **Presentation Generation** and schedules exactly one frame when visibility returns.
+- A **Runtime Observation** is dormant without an authenticated mounted-app launch, never reaches a PTY or Shell Process, and never contains terminal content or derived content identity.
+- An **Acceptance Failure Action** travels on the same authenticated app peer as its **Runtime Observation**, permits only one pending fixed case, and cannot carry terminal, clipboard, path, environment, or command content.
+- Recoverable **Acceptance Failure Actions** complete only after the last valid **Presentation Generation** remains visible through retry; fatal actions complete at authenticated Pane-close receipt, while PID/PGID reap and a replacement Pane's command remain external campaign evidence.
+- The normal-exit **Acceptance Failure Action** observes a real operator-entered `exit 0`; it never injects Shell Process exit.
 - A recoverable **Terminal Failure** preserves the last valid **Presentation Generation** when possible; a fatal one requires closing the Pane and restarting its command.
 - **Local Diagnostics** never contain terminal, clipboard, environment, path, secret, logical-key, or typed-key values and never leave the machine automatically.
 - **OSC 52 Authorization** exposes only access direction, target, and byte count to UI; clipboard contents remain inside the worker-owned native-service operation and are never diagnostic metadata.

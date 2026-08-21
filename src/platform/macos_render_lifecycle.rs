@@ -14,6 +14,59 @@ pub(crate) struct NativeWindowVisibility {
     pub(crate) live_resize: bool,
 }
 
+pub(crate) struct NativeWindowVisibilitySource {
+    #[cfg(not(test))]
+    window: id,
+}
+
+impl NativeWindowVisibilitySource {
+    pub(crate) fn capture() -> Option<Self> {
+        #[cfg(not(test))]
+        // SAFETY: observation claims the production Pane during AppKit layout on the main thread.
+        // Retaining that Pane's exact native window keeps later minimize/occlusion polls from
+        // accidentally following a different main window during activation changes.
+        unsafe {
+            let window: id = msg_send![NSApp(), mainWindow];
+            if window == nil {
+                return None;
+            }
+            let _: id = msg_send![window, retain];
+            Some(Self { window })
+        }
+        #[cfg(test)]
+        {
+            Some(Self {})
+        }
+    }
+
+    pub(crate) fn current(&self) -> NativeWindowVisibility {
+        #[cfg(not(test))]
+        // SAFETY: the source retains this NSWindow and is queried synchronously from GPUI's main
+        // thread by the observation-only monitor.
+        unsafe {
+            let minimized: bool = msg_send![self.window, isMiniaturized];
+            let occlusion_state: u64 = msg_send![self.window, occlusionState];
+            let live_resize: bool = msg_send![self.window, inLiveResize];
+            from_native(minimized, occlusion_state, live_resize)
+        }
+        #[cfg(test)]
+        {
+            from_native(false, NS_WINDOW_OCCLUSION_STATE_VISIBLE, false)
+        }
+    }
+}
+
+#[cfg(not(test))]
+impl Drop for NativeWindowVisibilitySource {
+    fn drop(&mut self) {
+        // SAFETY: capture retained this exact NSWindow and TerminalPane drops the source on GPUI's
+        // main thread.
+        unsafe {
+            let _: () = msg_send![self.window, release];
+        }
+    }
+}
+
 fn from_native(minimized: bool, occlusion_state: u64, live_resize: bool) -> NativeWindowVisibility {
     NativeWindowVisibility {
         minimized,

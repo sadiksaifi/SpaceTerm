@@ -1,9 +1,12 @@
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::mem;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use libghostty_vt::accessibility as ghostty_accessibility;
 use libghostty_vt::fmt::Format;
 use libghostty_vt::focus::Event as FocusEvent;
 use libghostty_vt::key::Mods;
@@ -21,9 +24,17 @@ use libghostty_vt::selection::gesture::{
     ReleaseEvent,
 };
 use libghostty_vt::style::{PaletteIndex, RgbColor, StyleColor, Underline};
-use libghostty_vt::terminal::{Mode, Point, PointCoordinate, ScrollViewport};
+use libghostty_vt::terminal::{
+    HyperlinkResolution, Mode, Point, PointCoordinate, ProgressState, ScrollViewport,
+    SemanticPromptAction,
+};
 use libghostty_vt::{Error, RenderState, Terminal, TerminalOptions};
 
+use crate::terminal::accessibility::{
+    AccessibilityCell, AccessibilityCellRef, AccessibilityRowId, AccessibilityRowUpdate,
+    AccessibilityScreen, AccessibilitySelectionRefs, AccessibilitySelectionRequest,
+    AccessibilityUpdate, TerminalAccessibilityModel, TerminalAccessibilityState,
+};
 use crate::terminal::attention::AttentionEvent;
 use crate::terminal::find::TerminalFindState;
 use crate::terminal::geometry::{BackingPosition, TerminalGeometry};
@@ -31,6 +42,7 @@ use crate::terminal::graphics::{
     APC_TRANSMISSION_LIMIT, GraphicsReservation, GraphicsSnapshot, GraphicsState,
     IMAGE_STORAGE_LIMIT, starts_apc,
 };
+use crate::terminal::hyperlink::{HyperlinkTarget, has_file_scheme};
 use crate::terminal::identity::{self, XtGetTcapObserver};
 use crate::terminal::key::{InputModifiers, KeyAction, KeyInput, OptionAsAltPolicy, PhysicalKey};
 use crate::terminal::keyboard_protocol::KeyboardProtocolEncoder;
@@ -183,6 +195,10 @@ impl PresentationGeneration {
     #[cfg(test)]
     pub(crate) const fn test(value: u64) -> Self {
         Self(value)
+    }
+
+    pub(crate) const fn as_u64(self) -> u64 {
+        self.0
     }
 }
 
@@ -343,6 +359,7 @@ pub(crate) struct SnapshotDamage {
     pub(crate) active_screen: bool,
     pub(crate) resize: bool,
     pub(crate) mouse_tracking: bool,
+    pub(crate) selection_presence: bool,
     pub(crate) search: bool,
     pub(crate) graphics_content: bool,
     pub(crate) graphics_geometry: bool,
@@ -360,6 +377,7 @@ impl SnapshotDamage {
             active_screen: true,
             resize: true,
             mouse_tracking: true,
+            selection_presence: true,
             search: false,
             graphics_content: true,
             graphics_geometry: true,
@@ -390,6 +408,8 @@ pub(crate) struct ScrollbarSnapshot {
 pub(crate) struct ScreenSnapshot {
     pub(crate) generation: PresentationGeneration,
     pub(crate) rows: Arc<[RowSnapshot]>,
+    /// Soft-wrap markers corresponding one-to-one with the published viewport rows.
+    pub(crate) row_soft_wrapped: Arc<[bool]>,
     pub(crate) background: Color,
     pub(crate) colors: TerminalColorsSnapshot,
     pub(crate) size: ScreenSizeSnapshot,
@@ -399,6 +419,7 @@ pub(crate) struct ScreenSnapshot {
     pub(crate) cursor: CursorSnapshot,
     pub(crate) text_blinking: bool,
     pub(crate) mouse_tracking: bool,
+    pub(crate) selection_present: bool,
     pub(crate) title: Arc<str>,
     pub(crate) metadata: Arc<TerminalMetadataSnapshot>,
     pub(crate) find: Option<Arc<TerminalFindSnapshot>>,
@@ -409,6 +430,7 @@ pub(crate) struct ScreenSnapshot {
 impl PartialEq for ScreenSnapshot {
     fn eq(&self, other: &Self) -> bool {
         self.rows == other.rows
+            && self.row_soft_wrapped == other.row_soft_wrapped
             && self.generation == other.generation
             && self.background == other.background
             && self.colors == other.colors
@@ -419,6 +441,7 @@ impl PartialEq for ScreenSnapshot {
             && self.cursor == other.cursor
             && self.text_blinking == other.text_blinking
             && self.mouse_tracking == other.mouse_tracking
+            && self.selection_present == other.selection_present
             && self.title == other.title
             && self.metadata == other.metadata
             && self.find == other.find
@@ -434,6 +457,7 @@ impl ScreenSnapshot {
         Arc::new(Self {
             generation: PresentationGeneration::default(),
             rows: Arc::from([]),
+            row_soft_wrapped: Arc::from([]),
             background: ACTIVE_THEME.terminal_background,
             colors: TerminalColorsSnapshot::themed(),
             size: ScreenSizeSnapshot::default(),
@@ -446,6 +470,7 @@ impl ScreenSnapshot {
             },
             text_blinking: false,
             mouse_tracking: false,
+            selection_present: false,
             title: Arc::from(""),
             metadata: MetadataTracker::new("", "", None, Instant::now()).snapshot(),
             find: None,
@@ -461,9 +486,12 @@ impl ScreenSnapshot {
         title: impl Into<Arc<str>>,
     ) -> Arc<Self> {
         let text_blinking = rows_have_visible_blinking_text(&rows);
+        let selection_present = rows_have_selection(&rows);
         Arc::new(Self {
+            row_soft_wrapped: Arc::from(vec![false; rows.len()]),
             rows,
             text_blinking,
+            selection_present,
             scrollbar,
             title: title.into(),
             ..Self::empty_value()
@@ -478,10 +506,13 @@ impl ScreenSnapshot {
         generation: u64,
     ) -> Arc<Self> {
         let text_blinking = rows_have_visible_blinking_text(&rows);
+        let selection_present = rows_have_selection(&rows);
         Arc::new(Self {
             generation: PresentationGeneration(generation),
+            row_soft_wrapped: Arc::from(vec![false; rows.len()]),
             rows,
             text_blinking,
+            selection_present,
             scrollbar,
             title: title.into(),
             ..Self::empty_value()
@@ -493,6 +524,7 @@ impl ScreenSnapshot {
         Self {
             generation: PresentationGeneration::default(),
             rows: Arc::from([]),
+            row_soft_wrapped: Arc::from([]),
             background: ACTIVE_THEME.terminal_background,
             colors: TerminalColorsSnapshot::themed(),
             size: ScreenSizeSnapshot::default(),
@@ -502,6 +534,7 @@ impl ScreenSnapshot {
             cursor: CursorSnapshot::default(),
             text_blinking: false,
             mouse_tracking: false,
+            selection_present: false,
             title: Arc::from(""),
             metadata: MetadataTracker::new("", "", None, Instant::now()).snapshot(),
             find: None,
@@ -518,8 +551,16 @@ fn rows_have_visible_blinking_text(rows: &[RowSnapshot]) -> bool {
     })
 }
 
+#[cfg(test)]
+fn rows_have_selection(rows: &[RowSnapshot]) -> bool {
+    rows.iter().any(|row| row.iter().any(|cell| cell.selected))
+}
+
 pub(crate) struct TerminalEmulator {
     terminal: Terminal<'static, 'static>,
+    ghostty_accessibility: ghostty_accessibility::State,
+    accessibility: TerminalAccessibilityState,
+    accessibility_generation: PresentationGeneration,
     render_state: RenderState<'static>,
     rows: RowIterator<'static>,
     cells: CellIterator<'static>,
@@ -534,8 +575,7 @@ pub(crate) struct TerminalEmulator {
     selection_release: ReleaseEvent<'static>,
     selection_autoscroll_tick: AutoscrollTickEvent<'static>,
     pty_responses: Rc<RefCell<Vec<u8>>>,
-    pending_title: Rc<RefCell<Option<Arc<str>>>>,
-    pending_directory: Rc<RefCell<Option<Arc<str>>>>,
+    pending_metadata: Rc<RefCell<Vec<MetadataEvent>>>,
     pending_attention: Rc<RefCell<Vec<AttentionEvent>>>,
     title: Arc<str>,
     metadata: MetadataTracker,
@@ -553,6 +593,7 @@ pub(crate) struct TerminalEmulator {
     cached_scrollbar: Option<ScrollbarSnapshot>,
     cached_active_screen: Option<ActiveScreenSnapshot>,
     cached_mouse_tracking: Option<bool>,
+    cached_selection_present: Option<bool>,
     cached_metadata_revision: Option<u64>,
     geometry: TerminalGeometry,
     active_pointer: Option<ActivePointer>,
@@ -562,6 +603,13 @@ pub(crate) struct TerminalEmulator {
     presentation_generation: PresentationGeneration,
     synchronized_output_started: Option<Instant>,
     find: TerminalFindState,
+}
+
+enum MetadataEvent {
+    Title(Arc<str>),
+    Directory(Arc<str>),
+    SemanticPrompt(String),
+    Progress { state: u8, value: Option<u8> },
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -666,8 +714,12 @@ impl TerminalEmulator {
         let grid = geometry.grid();
         let cell = geometry.backing_cell_size();
         let pty_responses = Rc::new(RefCell::new(Vec::new()));
-        let pending_title = Rc::new(RefCell::new(None));
-        let pending_directory = Rc::new(RefCell::new(None));
+        let pending_metadata = Rc::new(RefCell::new(Vec::new()));
+        let trusted_directory = Rc::new(RefCell::new(
+            Path::new(initial_directory)
+                .is_absolute()
+                .then(|| PathBuf::from(initial_directory)),
+        ));
         let pending_attention = Rc::new(RefCell::new(Vec::new()));
         set_png_decoder(Some(Box::new(RustPngDecoder::new())))?;
         let mut terminal: Terminal<'static, 'static> = Terminal::new(TerminalOptions {
@@ -690,19 +742,99 @@ impl TerminalEmulator {
             move |_, data| pty_responses.borrow_mut().extend_from_slice(data)
         })?;
         terminal.on_title_changed({
-            let pending_title = Rc::clone(&pending_title);
+            let pending_metadata = Rc::clone(&pending_metadata);
             move |terminal| {
                 if let Ok(title) = terminal.title() {
-                    *pending_title.borrow_mut() = Some(Arc::from(title));
+                    pending_metadata
+                        .borrow_mut()
+                        .push(MetadataEvent::Title(Arc::from(title)));
                 }
             }
         })?;
         terminal.on_pwd_changed({
-            let pending_directory = Rc::clone(&pending_directory);
+            let pending_metadata = Rc::clone(&pending_metadata);
+            let trusted_directory = Rc::clone(&trusted_directory);
+            let local_hostname = local_hostname.map(ToOwned::to_owned);
             move |terminal| {
                 if let Ok(directory) = terminal.pwd() {
-                    *pending_directory.borrow_mut() = Some(Arc::from(directory));
+                    *trusted_directory.borrow_mut() =
+                        crate::terminal::metadata::parse_osc7_directory(
+                            directory,
+                            local_hostname.as_deref(),
+                        )
+                        .map(|metadata| PathBuf::from(metadata.path.as_ref()));
+                    pending_metadata
+                        .borrow_mut()
+                        .push(MetadataEvent::Directory(Arc::from(directory)));
                 }
+            }
+        })?;
+        terminal.on_hyperlink_resolve({
+            let trusted_directory = Rc::clone(&trusted_directory);
+            let local_hostname = local_hostname.map(ToOwned::to_owned);
+            move |_, uri| {
+                if !has_file_scheme(uri) {
+                    return HyperlinkResolution::Passthrough;
+                }
+                let Some(directory) = trusted_directory.borrow().clone() else {
+                    return HyperlinkResolution::Suppress;
+                };
+                let Ok(uri) = std::str::from_utf8(uri) else {
+                    return HyperlinkResolution::Suppress;
+                };
+                let Some(target) =
+                    HyperlinkTarget::osc8(uri, &directory, local_hostname.as_deref())
+                else {
+                    return HyperlinkResolution::Suppress;
+                };
+                let Some(userdata) = target.local_emission_metadata() else {
+                    return HyperlinkResolution::Suppress;
+                };
+                HyperlinkResolution::Replace {
+                    uri: uri.as_bytes().to_vec(),
+                    userdata,
+                }
+            }
+        })?;
+        terminal.on_semantic_prompt({
+            let pending_metadata = Rc::clone(&pending_metadata);
+            move |_, action, options| {
+                let Ok(options) = std::str::from_utf8(options) else {
+                    return;
+                };
+                let action = match action {
+                    SemanticPromptAction::FreshLine => "L",
+                    SemanticPromptAction::FreshLineNewPrompt => "A",
+                    SemanticPromptAction::NewCommand => "N",
+                    SemanticPromptAction::PromptStart => "P",
+                    SemanticPromptAction::EndPromptStartInput => "B",
+                    SemanticPromptAction::EndPromptStartInputTerminateEol => "I",
+                    SemanticPromptAction::EndInputStartOutput => "C",
+                    SemanticPromptAction::EndCommand => "D",
+                };
+                let value = if options.is_empty() {
+                    action.to_owned()
+                } else {
+                    format!("{action};{options}")
+                };
+                pending_metadata
+                    .borrow_mut()
+                    .push(MetadataEvent::SemanticPrompt(value));
+            }
+        })?;
+        terminal.on_progress_report({
+            let pending_metadata = Rc::clone(&pending_metadata);
+            move |_, state, value| {
+                let state = match state {
+                    ProgressState::Remove => 0,
+                    ProgressState::Set => 1,
+                    ProgressState::Error => 2,
+                    ProgressState::Indeterminate => 3,
+                    ProgressState::Pause => 4,
+                };
+                pending_metadata
+                    .borrow_mut()
+                    .push(MetadataEvent::Progress { state, value });
             }
         })?;
         terminal.on_xtversion(|_| Some(identity::XTVERSION))?;
@@ -721,6 +853,9 @@ impl TerminalEmulator {
 
         Ok(Self {
             terminal,
+            ghostty_accessibility: ghostty_accessibility::State::new()?,
+            accessibility: TerminalAccessibilityState::default(),
+            accessibility_generation: PresentationGeneration::default(),
             render_state: RenderState::new()?,
             rows: RowIterator::new()?,
             cells: CellIterator::new()?,
@@ -735,8 +870,7 @@ impl TerminalEmulator {
             selection_release: ReleaseEvent::new()?,
             selection_autoscroll_tick: AutoscrollTickEvent::new()?,
             pty_responses,
-            pending_title,
-            pending_directory,
+            pending_metadata,
             pending_attention,
             title,
             metadata,
@@ -754,6 +888,7 @@ impl TerminalEmulator {
             cached_scrollbar: None,
             cached_active_screen: None,
             cached_mouse_tracking: None,
+            cached_selection_present: None,
             cached_metadata_revision: None,
             geometry,
             active_pointer: None,
@@ -796,7 +931,24 @@ impl TerminalEmulator {
                         crate::terminal::metadata::CommandState::Finished { .. }
                     )
                 });
-        self.metadata.feed(bytes, now);
+        let synchronized_before = self.terminal.mode(Mode::SYNC_OUTPUT).unwrap_or(false);
+        self.terminal.vt_write(bytes);
+        for event in self.pending_metadata.borrow_mut().drain(..) {
+            match event {
+                MetadataEvent::Title(title) => {
+                    self.metadata.set_reported_title(&title);
+                }
+                MetadataEvent::Directory(directory) => {
+                    self.metadata.set_reported_directory(&directory);
+                }
+                MetadataEvent::SemanticPrompt(value) => {
+                    self.metadata.apply_semantic_prompt(&value, now);
+                }
+                MetadataEvent::Progress { state, value } => {
+                    self.metadata.apply_progress_report(state, value);
+                }
+            }
+        }
         if !command_was_finished
             && let Some(command) = &self.metadata.snapshot().command
             && let crate::terminal::metadata::CommandState::Finished {
@@ -811,8 +963,6 @@ impl TerminalEmulator {
                     duration,
                 });
         }
-        let synchronized_before = self.terminal.mode(Mode::SYNC_OUTPUT).unwrap_or(false);
-        self.terminal.vt_write(bytes);
         if !bytes.is_empty() {
             self.find.invalidate();
         }
@@ -895,7 +1045,8 @@ impl TerminalEmulator {
     }
 
     pub(crate) fn key(&mut self, input: KeyInput) -> Result<EmulatorAction, String> {
-        if !input.is_modifier_key() {
+        if !input.is_modifier_key() && matches!(input.action, KeyAction::Press | KeyAction::Repeat)
+        {
             self.clear_selection()?;
             self.terminal.scroll_viewport(ScrollViewport::Bottom);
         }
@@ -1376,6 +1527,50 @@ impl TerminalEmulator {
         Ok(())
     }
 
+    pub(crate) fn set_accessibility_selection(
+        &mut self,
+        request: AccessibilitySelectionRequest,
+    ) -> Result<EmulatorAction, String> {
+        if self
+            .terminal
+            .mode(Mode::SYNC_OUTPUT)
+            .map_err(|error| format!("failed to query synchronized-output mode: {error}"))?
+        {
+            return Ok(EmulatorAction::none());
+        }
+        let Some(selection) = self.accessibility.resolve_selection(&request) else {
+            return Ok(EmulatorAction::none());
+        };
+        let selection = selection.map(|(start, end)| {
+            let convert = |reference: AccessibilityCellRef| ghostty_accessibility::CellRef {
+                row: ghostty_accessibility::RowId {
+                    screen: match reference.row.screen {
+                        AccessibilityScreen::Primary => ghostty_accessibility::Screen::Primary,
+                        AccessibilityScreen::Alternate => ghostty_accessibility::Screen::Alternate,
+                    },
+                    screen_generation: reference.row.screen_generation as u64,
+                    node_serial: reference.row.node_serial,
+                    page_row: reference.row.page_row,
+                },
+                row_revision: reference.row_revision,
+                column: reference.column,
+            };
+            (convert(start), convert(end))
+        });
+        let changed = self
+            .ghostty_accessibility
+            .set_selection(&self.terminal, selection)
+            .map_err(|error| format!("failed to set terminal accessibility selection: {error}"))?;
+        if !changed {
+            return Ok(EmulatorAction::none());
+        }
+        self.active_pointer = None;
+        self.selection_gesture.reset(&self.terminal);
+        self.selection_drag_position = None;
+        self.pointer_mapping_invalidated = false;
+        Ok(EmulatorAction::screen_changed())
+    }
+
     fn selection_press(&mut self, position: SurfacePosition) -> Result<(), String> {
         let point = self.selection_viewport_point(position)?;
         let grid_ref = self
@@ -1591,6 +1786,38 @@ impl TerminalEmulator {
         }
     }
 
+    pub(crate) fn accessibility_snapshot(
+        &mut self,
+        bind_next_presentation: bool,
+    ) -> Result<(Option<Arc<TerminalAccessibilityModel>>, bool), String> {
+        if self
+            .terminal
+            .mode(Mode::SYNC_OUTPUT)
+            .map_err(|error| format!("failed to query synchronized-output mode: {error}"))?
+        {
+            return Ok((None, false));
+        }
+        if bind_next_presentation {
+            self.accessibility_generation = self.presentation_generation.next();
+        }
+        let snapshot = self
+            .ghostty_accessibility
+            .update(
+                &self.terminal,
+                ghostty_accessibility::UpdateOptions {
+                    max_cells: 16_384,
+                    max_rows: 256,
+                },
+            )
+            .map_err(|error| format!("failed to observe retained terminal text: {error}"))?;
+        let more = snapshot.more;
+        let update = accessibility_update(snapshot)?;
+        let model = self
+            .accessibility
+            .apply(update, self.accessibility_generation);
+        Ok((model, more))
+    }
+
     pub(crate) fn snapshot(&mut self) -> Result<Option<Arc<ScreenSnapshot>>, Error> {
         if self.terminal.mode(Mode::SYNC_OUTPUT)? {
             return Ok(None);
@@ -1600,14 +1827,6 @@ impl TerminalEmulator {
             .refresh(&self.terminal, self.geometry.grid().cols)?;
         let find_changed = self.find.is_changed();
 
-        let pending_title = self.pending_title.borrow_mut().take();
-        if let Some(title) = pending_title {
-            self.metadata.set_reported_title(&title);
-        }
-        let pending_directory = self.pending_directory.borrow_mut().take();
-        if let Some(directory) = pending_directory {
-            self.metadata.set_reported_directory(&directory);
-        }
         let metadata = self.metadata.snapshot();
         let title = Arc::clone(&metadata.title.value);
         let title_changed = title != self.title;
@@ -1653,6 +1872,7 @@ impl TerminalEmulator {
         let graphics_content_changed = previous_graphics.generation != graphics.generation;
         let graphics_geometry_changed = previous_graphics.placements != graphics.placements;
         let mouse_tracking = self.terminal.is_mouse_tracking()?;
+        let selection_present = self.terminal.has_selection()?;
         let row_cache = match active_screen {
             ActiveScreenSnapshot::Primary => &self.primary_row_cache,
             ActiveScreenSnapshot::Alternate => &self.alternate_row_cache,
@@ -1702,6 +1922,7 @@ impl TerminalEmulator {
                 active_screen: self.cached_active_screen != Some(active_screen),
                 resize: self.cached_cols != cols || self.cached_rows != rows,
                 mouse_tracking: self.cached_mouse_tracking != Some(mouse_tracking),
+                selection_presence: self.cached_selection_present != Some(selection_present),
                 search: find_changed,
                 graphics_content: graphics_content_changed,
                 graphics_geometry: graphics_geometry_changed,
@@ -1718,17 +1939,25 @@ impl TerminalEmulator {
         } else {
             row_cache.clone()
         };
+        let mut web_hyperlink_targets =
+            HashMap::<String, Option<crate::terminal::HyperlinkTarget>>::new();
+        let mut local_hyperlink_targets =
+            HashMap::<Vec<u8>, Option<crate::terminal::HyperlinkTarget>>::new();
+        let mut row_soft_wrapped = Vec::with_capacity(usize::from(rows));
         let mut dirty_rows = Vec::new();
         let mut row_index = 0_u16;
         {
             let mut row_iteration = self.rows.update(&snapshot)?;
 
             while let Some(row) = row_iteration.next() {
+                row_soft_wrapped.push(row.raw_row()?.is_wrapped()?);
                 let rebuild_row = rebuild_all || row.dirty()?;
 
                 if rebuild_row {
                     let selection = row.selection()?;
                     let mut rendered_cells = Vec::with_capacity(usize::from(cols));
+                    let mut hyperlink_uri = [0; crate::terminal::hyperlink::MAX_LINK_BYTES];
+                    let mut hyperlink_userdata = [0; crate::terminal::hyperlink::MAX_LINK_BYTES];
                     let mut column_index = 0_u16;
                     let mut cell_iteration = self.cells.update(row)?;
 
@@ -1761,12 +1990,34 @@ impl TerminalEmulator {
                                     x: column_index,
                                     y: u32::from(row_index),
                                 }))?;
-                            let mut uri = vec![0; crate::terminal::hyperlink::MAX_LINK_BYTES];
-                            reference
-                                .hyperlink_uri(&mut uri)
-                                .ok()
-                                .and_then(|length| std::str::from_utf8(&uri[..length]).ok())
-                                .and_then(crate::terminal::HyperlinkTarget::url)
+                            let uri_length = reference.hyperlink_uri(&mut hyperlink_uri).ok();
+                            let userdata_length =
+                                reference.hyperlink_userdata(&mut hyperlink_userdata).ok();
+                            uri_length
+                                .zip(userdata_length)
+                                .and_then(|(uri_length, userdata_length)| {
+                                    let uri = std::str::from_utf8(&hyperlink_uri[..uri_length]).ok()?;
+                                    if userdata_length == 0 {
+                                        if let Some(target) = web_hyperlink_targets.get(uri) {
+                                            return target.clone();
+                                        }
+                                        let target = crate::terminal::HyperlinkTarget::url(uri);
+                                        web_hyperlink_targets
+                                            .insert(uri.to_owned(), target.clone());
+                                        return target;
+                                    }
+                                    if !has_file_scheme(uri.as_bytes()) {
+                                        return None;
+                                    }
+                                    let userdata = &hyperlink_userdata[..userdata_length];
+                                    if let Some(target) = local_hyperlink_targets.get(userdata) {
+                                        return target.clone();
+                                    }
+                                    let target = crate::terminal::HyperlinkTarget::from_local_emission_metadata(userdata);
+                                    local_hyperlink_targets
+                                        .insert(userdata.to_vec(), target.clone());
+                                    target
+                                })
                         } else {
                             None
                         };
@@ -1870,6 +2121,7 @@ impl TerminalEmulator {
         self.cached_scrollbar = Some(scrollbar);
         self.cached_active_screen = Some(active_screen);
         self.cached_mouse_tracking = Some(mouse_tracking);
+        self.cached_selection_present = Some(selection_present);
         self.cached_metadata_revision = Some(metadata.revision);
         self.title = Arc::clone(&title);
 
@@ -1882,6 +2134,7 @@ impl TerminalEmulator {
         Ok(Some(Arc::new(ScreenSnapshot {
             generation: self.presentation_generation,
             rows: Arc::from(row_cache.clone()),
+            row_soft_wrapped: Arc::from(row_soft_wrapped),
             background: terminal_colors.effective_background(),
             colors: terminal_colors,
             size,
@@ -1891,6 +2144,7 @@ impl TerminalEmulator {
             cursor,
             text_blinking,
             mouse_tracking,
+            selection_present,
             title,
             metadata,
             find,
@@ -1908,6 +2162,63 @@ impl Drop for TerminalEmulator {
     fn drop(&mut self) {
         self.selection_gesture.reset(&self.terminal);
     }
+}
+
+fn accessibility_update(
+    snapshot: ghostty_accessibility::Snapshot,
+) -> Result<AccessibilityUpdate, String> {
+    let screen = match snapshot.screen {
+        ghostty_accessibility::Screen::Primary => AccessibilityScreen::Primary,
+        ghostty_accessibility::Screen::Alternate => AccessibilityScreen::Alternate,
+    };
+    let screen_generation = usize::try_from(snapshot.screen_generation)
+        .map_err(|_| "terminal accessibility screen generation exceeded usize".to_owned())?;
+    let row_id = |id: ghostty_accessibility::RowId| AccessibilityRowId {
+        screen,
+        screen_generation,
+        node_serial: id.node_serial,
+        page_row: id.page_row,
+    };
+    let cell_ref = |reference: ghostty_accessibility::CellRef| AccessibilityCellRef {
+        row: row_id(reference.row),
+        row_revision: reference.row_revision,
+        column: reference.column,
+    };
+    Ok(AccessibilityUpdate {
+        revision: snapshot.revision,
+        screen,
+        screen_generation,
+        complete: snapshot.complete,
+        more: snapshot.more,
+        topology: snapshot
+            .topology
+            .map(|topology| topology.into_iter().map(row_id).collect()),
+        visible_lines: snapshot.visible_lines,
+        cursor: snapshot.cursor.map(cell_ref),
+        selection: snapshot
+            .selection
+            .map(|selection| AccessibilitySelectionRefs {
+                start: cell_ref(selection.start),
+                end: cell_ref(selection.end),
+                rectangle: selection.rectangle,
+            }),
+        changed_rows: snapshot
+            .changed_rows
+            .into_iter()
+            .map(|row| AccessibilityRowUpdate {
+                id: row_id(row.id),
+                revision: row.revision,
+                soft_wrapped: row.soft_wrapped,
+                cells: row
+                    .cells
+                    .into_iter()
+                    .map(|cell| {
+                        AccessibilityCell::at_column(cell.text, cell.column, cell.width_cells)
+                    })
+                    .collect(),
+            })
+            .collect(),
+    })
 }
 
 fn mouse_button(button: PointerButton) -> MouseButton {
@@ -2005,7 +2316,10 @@ fn ghostty_color(color: Color) -> RgbColor {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use super::*;
+    use crate::terminal::TerminalAccessibilityModel;
     use crate::terminal::geometry::{
         BackingScale, CellGridSize, LogicalCellSize, TerminalGeometry,
     };
@@ -2048,6 +2362,20 @@ mod tests {
         let snapshot = emulator.snapshot().unwrap().unwrap();
 
         assert_eq!(snapshot.find.as_ref().unwrap().total_matches, 1);
+    }
+
+    #[test]
+    fn accessibility_snapshot_preserves_production_soft_wraps() {
+        let mut emulator = emulator(3, 2);
+        emulator.feed(b"abcdef");
+
+        let snapshot = emulator.snapshot().unwrap().unwrap();
+        let accessibility = TerminalAccessibilityModel::from_screen(&snapshot);
+
+        assert_eq!(snapshot.row_soft_wrapped.as_ref(), &[true, false]);
+        assert_eq!(accessibility.text(), "abcdef");
+        assert_eq!(accessibility.range_for_line(0), Some(0..3));
+        assert_eq!(accessibility.range_for_line(1), Some(3..6));
     }
 
     #[test]
@@ -3785,6 +4113,148 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_preserves_selection_presence_when_selected_content_is_offscreen() {
+        let mut emulator = emulator(10, 2);
+        emulator.feed(b"one\r\ntwo\r\nthree\r\nfour\r\nfive");
+        let presented = emulator.snapshot().unwrap().unwrap();
+
+        let mut pointer = current_pointer(
+            &emulator,
+            pointer(
+                PointerPhase::Press,
+                Some(PointerButton::Left),
+                2.0,
+                21.0,
+                false,
+            ),
+        );
+        emulator.pointer(pointer).unwrap();
+        pointer.phase = PointerPhase::Motion;
+        pointer.button = None;
+        pointer.position.x = 48.0;
+        emulator.pointer(pointer).unwrap();
+        pointer.phase = PointerPhase::Release;
+        pointer.button = Some(PointerButton::Left);
+        emulator.pointer(pointer).unwrap();
+        let selected = emulator.snapshot().unwrap().unwrap();
+        assert!(selected.selection_present);
+
+        let action = emulator.scroll_to_at(0, selected.generation);
+        assert!(action.screen_changed);
+        let scrolled = emulator.snapshot().unwrap().unwrap();
+
+        assert!(scrolled.selection_present);
+        assert!(
+            scrolled
+                .rows
+                .iter()
+                .flat_map(|row| row.iter())
+                .all(|cell| !cell.selected)
+        );
+        assert!(scrolled.generation > presented.generation);
+
+        emulator.clear_selection().unwrap();
+        let cleared = emulator.snapshot().unwrap().unwrap();
+        assert!(!cleared.selection_present);
+        assert!(cleared.damage.selection_presence);
+    }
+
+    #[test]
+    fn snapshot_selection_presence_reflects_screen_switch_clearing() {
+        let mut emulator = emulator(12, 2);
+        emulator.feed(b"hello world");
+        select_first_five(&mut emulator, false);
+
+        let primary = emulator.snapshot().unwrap().unwrap();
+        assert_eq!(primary.active_screen, ActiveScreenSnapshot::Primary);
+        assert!(primary.selection_present);
+
+        emulator.feed(b"\x1b[?1049h");
+        let alternate = emulator.snapshot().unwrap().unwrap();
+        assert_eq!(alternate.active_screen, ActiveScreenSnapshot::Alternate);
+        assert!(!alternate.selection_present);
+        assert!(
+            alternate
+                .rows
+                .iter()
+                .flat_map(|row| row.iter())
+                .all(|cell| !cell.selected)
+        );
+        assert!(alternate.damage.selection_presence);
+
+        emulator.feed(b"\x1b[?1049l");
+        let restored = emulator.snapshot().unwrap().unwrap();
+        assert_eq!(restored.active_screen, ActiveScreenSnapshot::Primary);
+        assert!(!restored.selection_present);
+        assert!(!restored.damage.selection_presence);
+        assert!(
+            restored
+                .rows
+                .iter()
+                .flat_map(|row| row.iter())
+                .all(|cell| !cell.selected)
+        );
+    }
+
+    #[test]
+    fn accessibility_selection_requires_the_current_semantic_snapshot() {
+        let mut emulator = emulator(12, 3);
+        emulator.feed(b"hello");
+        let (model, more) = emulator.accessibility_snapshot(true).unwrap();
+        assert!(more);
+        assert!(model.is_none());
+        let (model, more) = emulator.accessibility_snapshot(false).unwrap();
+        assert!(!more);
+        let model = model.unwrap();
+        _ = emulator.snapshot().unwrap();
+        let request = model.selection_request(1..4).unwrap();
+
+        emulator
+            .set_accessibility_selection(AccessibilitySelectionRequest {
+                generation: PresentationGeneration::default(),
+                ..request.clone()
+            })
+            .unwrap();
+        assert_eq!(emulator.selection_text().unwrap(), None);
+
+        emulator.set_accessibility_selection(request).unwrap();
+        assert_eq!(emulator.selection_text().unwrap(), Some("ell".to_owned()));
+    }
+
+    #[test]
+    fn accessibility_selection_rejects_synchronized_output_and_resets_pointer_invalidation() {
+        let mut emulator = emulator(12, 3);
+        emulator.feed(b"hello");
+        let (model, more) = emulator.accessibility_snapshot(true).unwrap();
+        assert!(more);
+        assert!(model.is_none());
+        let (model, more) = emulator.accessibility_snapshot(false).unwrap();
+        assert!(!more);
+        let model = model.unwrap();
+        _ = emulator.snapshot().unwrap();
+        let request = model.selection_request(1..4).unwrap();
+
+        emulator.feed(b"\x1b[?2026hhidden");
+        let action = emulator
+            .set_accessibility_selection(request.clone())
+            .unwrap();
+        assert!(action.bytes.is_empty());
+        assert!(!action.screen_changed);
+        assert_eq!(emulator.selection_text().unwrap(), None);
+
+        emulator.feed(b"\x1b[?2026l");
+        let (model, more) = emulator.accessibility_snapshot(true).unwrap();
+        assert!(!more);
+        let model = model.unwrap();
+        _ = emulator.snapshot().unwrap();
+        emulator.pointer_mapping_invalidated = true;
+        let request = model.selection_request(1..4).unwrap();
+        emulator.set_accessibility_selection(request).unwrap();
+
+        assert!(!emulator.pointer_mapping_invalidated);
+    }
+
+    #[test]
     fn modifier_key_transitions_should_preserve_selection_for_application_shortcuts() {
         let mut emulator = emulator(12, 3);
         emulator.feed(b"hello world");
@@ -3815,6 +4285,23 @@ mod tests {
             .key(key(PhysicalKey::A, InputModifiers::default()))
             .unwrap();
 
+        assert_eq!(emulator.selection_text().unwrap(), None);
+    }
+
+    #[test]
+    fn non_modifier_key_release_preserves_selection() {
+        let mut emulator = emulator(12, 3);
+        emulator.feed(b"hello world");
+        select_first_five(&mut emulator, false);
+        let mut released = key(PhysicalKey::A, InputModifiers::default());
+        released.action = KeyAction::Release;
+
+        emulator.key(released).unwrap();
+
+        assert_eq!(emulator.selection_text().unwrap(), Some("hello".to_owned()));
+        emulator
+            .key(key(PhysicalKey::A, InputModifiers::default()))
+            .unwrap();
         assert_eq!(emulator.selection_text().unwrap(), None);
     }
 
@@ -4345,6 +4832,150 @@ mod tests {
 
         assert_eq!(identities.len(), 8);
         assert!(identities.iter().all(|identity| *identity == identities[0]));
+    }
+
+    #[test]
+    fn osc8_relative_file_targets_bind_to_the_directory_at_emission() {
+        let directory = std::env::temp_dir().join(format!(
+            "spaceterm-emulator-local-link-first-{}",
+            std::process::id()
+        ));
+        let second_directory = std::env::temp_dir().join(format!(
+            "spaceterm-emulator-local-link-second-{}",
+            std::process::id()
+        ));
+        _ = fs::remove_dir_all(&directory);
+        _ = fs::remove_dir_all(&second_directory);
+        fs::create_dir_all(&directory).unwrap();
+        fs::create_dir_all(&second_directory).unwrap();
+        let file = directory.join("preview.txt");
+        let second_file = second_directory.join("preview.txt");
+        fs::write(&file, b"preview").unwrap();
+        fs::write(&second_file, b"preview").unwrap();
+        let mut emulator = TerminalEmulator::new_with_metadata(
+            geometry(16, 2, 10.0, 20.0),
+            directory.to_str().unwrap(),
+            "zsh",
+            Some("mac.local"),
+            identity::TERM_FALLBACK,
+            Instant::now(),
+        )
+        .unwrap();
+
+        emulator.feed(b"\x1b]8;;file:prev");
+        emulator.feed(b"iew.txt\x07first\x1b]8;;\x07 \x1b]7;FiLe://local");
+        emulator.feed(
+            format!(
+                "host{}\x07\x1b]8;;file:preview.txt\x07second\x1b]8;;\x07",
+                second_directory.to_str().unwrap()
+            )
+            .as_bytes(),
+        );
+        let replacement = directory.join("replacement.txt");
+        fs::write(&replacement, b"replacement").unwrap();
+        fs::rename(&replacement, &file).unwrap();
+        let snapshot = emulator.snapshot().unwrap().unwrap();
+        let values = snapshot.rows[0]
+            .iter()
+            .map(|cell| cell.hyperlink.as_ref().map(|link| link.value.as_str()))
+            .collect::<Vec<_>>();
+
+        assert!(
+            values[..5]
+                .iter()
+                .all(|value| { *value == Some(file.canonicalize().unwrap().to_str().unwrap()) })
+        );
+        assert!(values[6..12].iter().all(|value| {
+            *value == Some(second_file.canonicalize().unwrap().to_str().unwrap())
+        }));
+        let first_link = snapshot.rows[0][0].hyperlink.as_ref().unwrap();
+        assert_eq!(
+            first_link.value,
+            file.canonicalize().unwrap().to_str().unwrap()
+        );
+        assert_eq!(first_link.activation_url(), None);
+        fs::remove_dir_all(directory).unwrap();
+        fs::remove_dir_all(second_directory).unwrap();
+    }
+
+    #[test]
+    fn ground_utf8_containing_9d_is_printed_without_starting_c1_osc() {
+        let mut emulator = emulator(24, 2);
+
+        emulator.feed("before\u{075d}after".as_bytes());
+        let snapshot = emulator.snapshot().unwrap().unwrap();
+        let text = snapshot.rows[0]
+            .iter()
+            .map(|cell| cell.text.as_str())
+            .collect::<String>();
+
+        assert!(text.starts_with("before\u{075d}after"));
+        assert!(snapshot.rows[0].iter().all(|cell| cell.hyperlink.is_none()));
+    }
+
+    #[test]
+    fn raw_9d_in_ground_does_not_introduce_an_osc8_link() {
+        let mut emulator = emulator(32, 2);
+
+        emulator.feed(b"\x9d8;;file:/tmp/not-a-link\x07visible");
+        let snapshot = emulator.snapshot().unwrap().unwrap();
+
+        assert!(
+            snapshot
+                .rows
+                .iter()
+                .flat_map(|row| row.iter())
+                .all(|cell| cell.hyperlink.is_none())
+        );
+    }
+
+    #[test]
+    fn rejected_local_osc8_start_ends_a_previously_active_link() {
+        let mut emulator = emulator(16, 2);
+
+        emulator
+            .feed(b"\x1b]8;;https://example.test\x07web\x1b]8;;file:missing\x07plain\x1b]8;;\x07");
+        let snapshot = emulator.snapshot().unwrap().unwrap();
+
+        assert!(
+            snapshot.rows[0][..3]
+                .iter()
+                .all(|cell| cell.hyperlink.is_some())
+        );
+        assert!(
+            snapshot.rows[0][3..8]
+                .iter()
+                .all(|cell| cell.hyperlink.is_none())
+        );
+    }
+
+    #[test]
+    fn unsupported_terminal_uri_cannot_attach_resolver_only_local_metadata() {
+        let mut emulator = emulator(16, 2);
+
+        emulator.feed(b"\x1b]8;;unsupported:terminal-controlled-metadata\x07plain\x1b]8;;\x07");
+        let snapshot = emulator.snapshot().unwrap().unwrap();
+
+        assert!(
+            snapshot.rows[0][..5]
+                .iter()
+                .all(|cell| cell.hyperlink.is_none())
+        );
+    }
+
+    #[test]
+    fn c1_st_inside_osc_is_payload_in_the_pinned_terminal_stream() {
+        let mut emulator = emulator(24, 2);
+
+        emulator.feed(b"\x1b]8;;file:missing\x9cNOT_VISIBLE\x07visible");
+        let snapshot = emulator.snapshot().unwrap().unwrap();
+        let text = snapshot.rows[0]
+            .iter()
+            .map(|cell| cell.text.as_str())
+            .collect::<String>();
+
+        assert!(text.starts_with("visible"));
+        assert!(!text.contains("NOT_VISIBLE"));
     }
 
     #[test]

@@ -3,7 +3,6 @@ use std::time::{Duration, Instant};
 
 const MAX_TITLE_CHARS: usize = 256;
 const MAX_COMMAND_CHARS: usize = 4096;
-const MAX_OSC_BYTES: usize = 8192;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum DirectoryProvenance {
@@ -88,10 +87,6 @@ pub(crate) struct MetadataTracker {
     local_hostname: Option<Arc<str>>,
     epoch: Instant,
     command_started: Option<Instant>,
-    ground_escape: bool,
-    osc_buffer: Option<Vec<u8>>,
-    osc_escape: bool,
-    osc_overflow: bool,
 }
 
 impl MetadataTracker {
@@ -120,61 +115,7 @@ impl MetadataTracker {
             local_hostname: local_hostname.map(Arc::from),
             epoch,
             command_started: None,
-            ground_escape: false,
-            osc_buffer: None,
-            osc_escape: false,
-            osc_overflow: false,
         }
-    }
-
-    pub(crate) fn feed(&mut self, bytes: &[u8], now: Instant) -> bool {
-        let mut changed = false;
-        for &byte in bytes {
-            if self.osc_buffer.is_some() || self.osc_overflow {
-                if self.osc_escape {
-                    self.osc_escape = false;
-                    if byte == b'\\' {
-                        if !self.osc_overflow {
-                            let payload = self.osc_buffer.take().unwrap_or_default();
-                            changed |= self.apply_osc(&payload, now);
-                        }
-                        self.reset_osc();
-                        continue;
-                    }
-                    if !self.push_osc(0x1b) || !self.push_osc(byte) {
-                        self.enter_overflow();
-                    }
-                    continue;
-                }
-                match byte {
-                    0x07 | 0x9c => {
-                        if !self.osc_overflow {
-                            let payload = self.osc_buffer.take().unwrap_or_default();
-                            changed |= self.apply_osc(&payload, now);
-                        }
-                        self.reset_osc();
-                    }
-                    0x1b => self.osc_escape = true,
-                    _ if !self.push_osc(byte) => self.enter_overflow(),
-                    _ => {}
-                }
-                continue;
-            }
-
-            if self.ground_escape {
-                self.ground_escape = false;
-                if byte == b']' {
-                    self.osc_buffer = Some(Vec::new());
-                } else if byte == 0x1b {
-                    self.ground_escape = true;
-                }
-            } else if byte == 0x1b {
-                self.ground_escape = true;
-            } else if byte == 0x9d {
-                self.osc_buffer = Some(Vec::new());
-            }
-        }
-        changed
     }
 
     pub(crate) fn snapshot(&self) -> Arc<TerminalMetadataSnapshot> {
@@ -221,45 +162,7 @@ impl MetadataTracker {
         self.update(|snapshot| snapshot.freshness = MetadataFreshness::Stale)
     }
 
-    fn push_osc(&mut self, byte: u8) -> bool {
-        let Some(buffer) = self.osc_buffer.as_mut() else {
-            return false;
-        };
-        if buffer.len() >= MAX_OSC_BYTES {
-            return false;
-        }
-        buffer.push(byte);
-        true
-    }
-
-    fn enter_overflow(&mut self) {
-        self.osc_buffer = None;
-        self.osc_overflow = true;
-    }
-
-    fn reset_osc(&mut self) {
-        self.osc_buffer = None;
-        self.osc_escape = false;
-        self.osc_overflow = false;
-    }
-
-    fn apply_osc(&mut self, payload: &[u8], now: Instant) -> bool {
-        let Ok(payload) = std::str::from_utf8(payload) else {
-            return false;
-        };
-        let Some((kind, value)) = payload.split_once(';') else {
-            return false;
-        };
-        match kind {
-            "0" | "2" => self.set_reported_title(value),
-            "7" => self.set_reported_directory(value),
-            "9" => self.apply_progress(value),
-            "133" => self.apply_semantic_prompt(value, now),
-            _ => false,
-        }
-    }
-
-    fn apply_semantic_prompt(&mut self, value: &str, now: Instant) -> bool {
+    pub(crate) fn apply_semantic_prompt(&mut self, value: &str, now: Instant) -> bool {
         let mut fields = value.split(';');
         let Some(action) = fields.next() else {
             return false;
@@ -305,19 +208,8 @@ impl MetadataTracker {
         }
     }
 
-    fn apply_progress(&mut self, value: &str) -> bool {
-        let mut fields = value.split(';');
-        if fields.next() != Some("4") {
-            return false;
-        }
-        let Some(state) = fields.next().and_then(|value| value.parse::<u8>().ok()) else {
-            return false;
-        };
-        let progress = fields
-            .next()
-            .and_then(|value| value.parse::<u8>().ok())
-            .unwrap_or(0)
-            .min(100);
+    pub(crate) fn apply_progress_report(&mut self, state: u8, progress: Option<u8>) -> bool {
+        let progress = progress.unwrap_or(0).min(100);
         let progress = match state {
             0 => ProgressMetadata::None,
             1 => ProgressMetadata::Normal(progress),
@@ -382,7 +274,10 @@ pub(crate) fn parse_osc7_directory(
     value: &str,
     local_hostname: Option<&str>,
 ) -> Option<DirectoryMetadata> {
-    let remainder = value.strip_prefix("file://")?;
+    let remainder = value
+        .get(..7)?
+        .eq_ignore_ascii_case("file://")
+        .then(|| &value[7..])?;
     let slash = remainder.find('/')?;
     let (authority, path) = remainder.split_at(slash);
     let authority_is_local = authority.is_empty()
@@ -469,7 +364,7 @@ mod tests {
     #[test]
     fn osc7_accepts_only_local_absolute_file_urls() {
         let local =
-            parse_osc7_directory("file://mac.local/Users/me/My%20Project", Some("mac.local"))
+            parse_osc7_directory("FiLe://MAC.LOCAL/Users/me/My%20Project", Some("mac.local"))
                 .expect("local OSC 7 should be accepted");
         assert_eq!(local.path.as_ref(), "/Users/me/My Project");
         assert_eq!(local.provenance, DirectoryProvenance::Osc7);
@@ -481,16 +376,14 @@ mod tests {
     }
 
     #[test]
-    fn osc133_and_progress_are_parsed_across_chunks_with_injected_time() {
+    fn accepted_semantic_and_progress_events_update_metadata() {
         let epoch = Instant::now();
         let mut tracker = MetadataTracker::new("/tmp", "zsh", Some("mac.local"), epoch);
 
-        assert!(!tracker.feed(b"ordinary output", epoch));
-        assert!(!tracker.feed(
-            b"\x1b]133;C;cmdline=cargo%20test\x1b",
-            epoch + Duration::from_secs(2)
-        ));
-        assert!(tracker.feed(b"\\", epoch + Duration::from_secs(2)));
+        assert!(
+            tracker
+                .apply_semantic_prompt("C;cmdline=cargo%20test", epoch + Duration::from_secs(2),)
+        );
         assert_eq!(tracker.snapshot().prompt_zone, PromptZone::CommandOutput);
         assert_eq!(
             tracker.snapshot().command,
@@ -500,10 +393,8 @@ mod tests {
             })
         );
 
-        assert!(tracker.feed(
-            b"\x1b]9;4;1;140\x07\x1b]133;D;7\x07",
-            epoch + Duration::from_secs(5),
-        ));
+        assert!(tracker.apply_progress_report(1, Some(140)));
+        assert!(tracker.apply_semantic_prompt("D;7", epoch + Duration::from_secs(5)));
         assert_eq!(tracker.snapshot().progress, ProgressMetadata::Normal(100));
         assert_eq!(
             tracker.snapshot().command,
@@ -515,22 +406,6 @@ mod tests {
                 },
             })
         );
-    }
-
-    #[test]
-    fn invalid_or_oversized_sequences_cannot_replace_last_valid_metadata() {
-        let epoch = Instant::now();
-        let mut tracker = MetadataTracker::new("/tmp", "zsh", Some("mac.local"), epoch);
-        assert!(tracker.feed(b"\x1b]7;file:///Users/me\x07", epoch));
-        let valid = tracker.snapshot();
-
-        assert!(!tracker.feed(b"\x1b]7;file://remote.example/private\x07", epoch));
-        let oversized = format!("\x1b]133;C;cmdline={}\x07", "x".repeat(MAX_OSC_BYTES + 1));
-        assert!(!tracker.feed(oversized.as_bytes(), epoch));
-        assert!(Arc::ptr_eq(&valid, &tracker.snapshot()));
-
-        assert!(tracker.feed(b"\x1b]9;4;4;25\x07", epoch));
-        assert_eq!(tracker.snapshot().progress, ProgressMetadata::Paused(25));
     }
 
     #[test]

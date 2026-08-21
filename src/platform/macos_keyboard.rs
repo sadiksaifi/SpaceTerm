@@ -254,6 +254,10 @@ impl MacosKeyboardBridge {
         }
     }
 
+    pub(crate) fn reset_pressed_modifiers(&mut self) {
+        self.pressed_modifier_key_codes.clear();
+    }
+
     pub(crate) fn modifier_transition(&mut self, mut event: NativeKeyEvent) -> KeyTranslation {
         let unhandled = UnhandledKeyEvent {
             kind: NativeKeyEventKind::FlagsChanged,
@@ -623,6 +627,40 @@ mod tests {
                 Some((PhysicalKey::ShiftRight, KeyAction::Release)),
             ]
         );
+    }
+
+    #[test]
+    fn focus_loss_reset_allows_the_next_physical_modifier_press() {
+        let mut bridge = MacosKeyboardBridge::new(OptionAsAltPolicy::Both);
+        let shift = |active| NativeKeyEvent {
+            action: KeyAction::Press,
+            native_key_code: 56,
+            characters: None,
+            characters_ignoring_modifiers: None,
+            unmodified_characters: None,
+            characters_without_option: None,
+            modifiers: NativeModifiers {
+                shift: active,
+                shift_left: active,
+                ..NativeModifiers::default()
+            },
+        };
+
+        assert!(matches!(
+            bridge.modifier_transition(shift(true)),
+            KeyTranslation::Encoded(KeyInput {
+                action: KeyAction::Press,
+                ..
+            })
+        ));
+        bridge.reset_pressed_modifiers();
+        assert!(matches!(
+            bridge.modifier_transition(shift(true)),
+            KeyTranslation::Encoded(KeyInput {
+                action: KeyAction::Press,
+                ..
+            })
+        ));
     }
 
     #[test]

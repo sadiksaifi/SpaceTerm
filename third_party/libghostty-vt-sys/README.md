@@ -18,3 +18,12 @@ Raw FFI bindings for libghostty-vt.
   `libghostty-vt-static` pkg-config module instead.
 - libghostty-vt is pre-1.0, so these bindings do not guarantee compatibility
   with arbitrary installed C API revisions.
+
+## SpaceTerm patch ledger
+
+- `spaceterm-kitty-graphics.patch` exposes the bounded Kitty graphics seams used by SpaceTerm.
+- `spaceterm-terminal-effects.patch` adds synchronous, bounded accepted-event effects for OSC 8
+  URI resolution, OSC 133 semantic prompts, and ConEmu progress. Hyperlink input/output memory is
+  callback-scoped and copied by libghostty before return; bounded resolver-only hyperlink metadata
+  follows the retained page entry without entering formatted terminal content. Absent callbacks
+  preserve upstream behavior exactly.

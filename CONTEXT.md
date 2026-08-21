@@ -181,7 +181,12 @@ subset; unsupported inputs still receive the protocol-defined rejection behavior
 GPUI caches `RenderImage` values by image ID and content generation, converts RGBA to its BGRA
 upload format once, and explicitly removes stale atlas entries on replacement, deletion, quota
 eviction, screen ownership changes, and Pane release. The cache is application-bounded to 384 MiB.
-Source cropping paints transformed full-image bounds through nested destination and grid masks.
+Candidate resources and immutable placement geometry are staged transactionally; they become
+authoritative only after scene submission succeeds, while a failed attempt retains the last valid
+resource set and Presentation Generation. Unchanged content and placement generations, active
+screen, grid geometry, and backing scale reuse one Arc-backed placement paint plan without
+reconstructing image geometry. Source cropping paints transformed full-image bounds through nested
+destination and grid masks.
 Paint order is terminal base background; images with `z < -1073741824`; cell, search, Selection,
 and Cursor backgrounds; images with `-1073741824 <= z < 0`; glyphs and decorations; images with
 `z >= 0`; then Marked Text and its caret. Equal-z placements use increasing image ID; Marked Text
@@ -288,10 +293,12 @@ blink state; wide spacer tails extend their head cell's decoration without produ
 Invisible cells prepare no foreground decorations, while Selection remains an independent overlay.
 
 Decoration positions derive from the selected terminal font's baseline, ascent, and x-height, and
-their minimum thickness and positions snap to one backing device pixel. GPUI builds quads and curly
-paths during prepaint and clips them to terminal grid bounds. The fixed paint order is background
-and Selection, underline and overline, glyph or generated symbol, then strikethrough; marked-text
-overlays remain above the immutable grid presentation.
+their minimum thickness and positions snap to one backing device pixel. Prepared rows cache flat
+scene primitives for every decoration, including GPUI wavy-underlines for curly strokes, and reuse
+that geometry until row content or layout invalidates it. GPUI clips submission to terminal grid
+bounds. The fixed paint order is background and Selection, underline and overline, glyph or
+generated symbol, then strikethrough; marked-text overlays remain above the immutable grid
+presentation.
 
 ### Terminal Drawing Symbols
 
@@ -303,10 +310,12 @@ faint processing, while Selection remains an independent background overlay.
 
 Each terminal grid owner caches immutable symbol plans by scalar, device-pixel dimensions, cell
 width, and backing scale. Plans are released when scale-dependent rendering state is invalidated
-or the owner is dropped. Their geometry reaches shared device-pixel cell edges without font
-bearings, paints between under-text decorations and strikethrough, participates in text blink
-filtering, and receives the same Cursor block recoloring overlay as shaped glyphs. Logical origins
-still derive from Unified Terminal Geometry so fractional cell widths do not accumulate drift.
+or the owner is dropped. Prepared rows rasterize vector plan primitives into flat, cell-local quads
+only when stable row geometry invalidates. Their geometry reaches shared device-pixel cell edges
+without font bearings, paints between under-text decorations and strikethrough, participates in
+text blink filtering, and receives the same Cursor block recoloring overlay as shaped glyphs.
+Logical origins still derive from Unified Terminal Geometry so fractional cell widths do not
+accumulate drift.
 
 ### Terminal Input Focus
 
@@ -520,18 +529,30 @@ clusters before the right edge, and overlay the immutable grid with an underline
 caret. Candidate-window bounds derive from that caret and the same logical cell geometry used for
 rendering. A nonempty commit clears Marked Text and becomes exactly one typed input-method event on
 the reliable Terminal Session command lane; the worker emits its UTF-8 once in order and never
-tracks it as a held key.
+tracks it as a held key. The Pane and terminal grid cache logical cluster layout and shaped overlay
+geometry by the exact marked-text revision, caret, Cursor origin, grid metrics, font, colors, and
+backing scale, so unrelated frames do not reshape stable composition while every native edit
+invalidates it immediately.
 
 ### Terminal Accessibility
 
 Each Pane exposes one native editable text-area model whose canonical indexes are UTF-16 code
 units, matching AppKit. The model preserves complete grapheme text while mapping wide-cell spacer
 tails, combining sequences, hard lines, soft wraps, the visible range, Selection, and Cursor back
-to logical terminal cells. Candidate and range bounds use the same logical cell origin, width, and
-line height as pointer and renderer geometry. Terminal output, Selection, Terminal Input Focus,
-and Marked Text changes produce typed, coalesced native accessibility notifications; notifications
-carry no terminal contents. Accessibility may request terminal-owned selection changes through the
-Terminal Session, but never mutates the Terminal Emulator from the native callback.
+to logical terminal cells. A retained text-bearing cell is the canonical accessibility grapheme:
+range-for-index covers its complete UTF-16 span, partial string queries that would detach one of its
+components are rejected, and partial Selection requests normalize to complete intersected cells.
+Attributed range queries expose only the requested complete text together with the concrete
+regular terminal font name, family, visible name, and logical point size resolved from the Pane's
+actually selected font; backing scale never changes that point size. Candidate and range bounds use
+the same logical cell origin, width, and line height as pointer and renderer geometry. Terminal
+output, Selection, Terminal Input Focus, and Marked Text changes produce typed, coalesced native
+accessibility notifications; a Pane retains
+at most one pending Value, Selection, and Focus fact while it cannot present, then delivers those
+facts against its newest model on the next native presentation. Parent layout membership remains a
+separate synchronous hierarchy notification. Notifications carry no terminal contents.
+Accessibility may request terminal-owned selection changes through the Terminal Session, but never
+mutates the Terminal Emulator from the native callback.
 
 ### Demand-Driven Render Lifecycle
 
@@ -544,6 +565,68 @@ Window, Workspace, and Pane can present them and while AppKit is not minimizing,
 live-resizing the surface. Display moves and backing-scale changes preserve logical grid state and
 invalidate only scale-dependent prepared rows and symbol geometry. Pane destruction releases
 render caches and cancels every owned presentation task and native resource.
+
+### Authenticated Runtime Observation
+
+Release acceptance may activate one dormant, content-free Runtime Observation through the private
+Unix socket already authenticated to the exact mounted SpaceTerm process. The launch capability is
+removed from the environment before GPUI or any Terminal Session starts and is never inherited by
+a PTY or Shell Process. One claimed production Pane and its Terminal Session publish only bounded
+numeric counters, closed lifecycle and visibility states, geometry, and Presentation Generations;
+terminal cells or hashes, titles, commands, paths, environment, key identity, clipboard data,
+Selection text, and hyperlink metadata are outside the protocol.
+
+The trusted same-UID mounted-DMG acceptance verifier extends that authenticated app peer with an
+**Acceptance Failure Action** channel. The app independently requires its own canonical packaged
+executable vnode to be on a read-only mount and bound into the challenge before it constructs the
+controller; arbitrary ordinary, source, or writable-bundle launches are inert. Its challenge commits to
+`spaceterm.acceptance.failure-action/v1`; the verifier accepts one fixed, content-free case name
+from an owner-private FIFO, generates the nonce-bound request identity and monotonic sequence, and
+forwards the request exactly once. The claimed production Pane accepts at most one request at a
+time and reports closed-enum `armed`, `injected`, `retry-requested`, and `completed` facts under
+`spaceterm.acceptance.failure-action-result/v2`. No request or result field can carry terminal,
+clipboard, path, environment, command, or arbitrary diagnostic content. Without the authenticated
+launch challenge this controller is not constructed, so ordinary launches cannot reach an
+injection Seam. The challenge and proof carry an exact authenticated `failure.action.enabled`
+fact; when it is false the app allocates neither action channels nor a Pane controller. The result
+schema's four bounded resource counters prove a real staged-image mutation and equal rollback for
+the after-staging case and remain zero for every other case. The owner-private driver sends an
+opaque one-request correlation nonce and accepts only fixed `accepted` and `completed` statuses
+echoing that nonce, so stale receipts cannot authorize another request and the next case cannot be
+submitted before authoritative completion.
+
+This is not cryptographic mutual authentication of the dynamically compiled verifier. Another
+same-UID process could launch its own exact read-only mounted SpaceTerm instance with a conforming
+private peer and trigger only that instance; it cannot mint evidence accepted by the official
+verifier, affect another SpaceTerm instance, or persist a global injection setting. Campaign
+evidence therefore trusts the official verifier as the same-UID controller and relies on its live
+peer, package, process, nonce, sequence, and artifact authentication.
+
+Worker, UI, and render critical paths update atomics and a fixed-capacity transition queue only.
+While observation is active, a Pane-owned main-thread monitor samples its retained exact AppKit
+window at bounded 50-millisecond intervals so minimize, occlusion, and live-resize facts continue
+to advance even after AppKit suspends rendering; ordinary launches do not create that monitor.
+One background writer samples the latest state at one-second absolute deadlines on the original
+authenticated socket, then performs a bounded final drain and acknowledgement during application
+shutdown. A transition drop, deadline miss, counter overflow, transport or writer failure, unknown
+schema, invalid ordering, or missing terminal lifecycle makes the observation **NOT-RUN**; it never
+changes runtime behavior to manufacture a passing result. External acceptance analysis owns
+PASS/FAIL decisions, RSS sampling, traces, and process identity artifacts.
+
+Acceptance Failure Actions exercise the real presentation, glyph/image preflight,
+renderer-resource synchronization, pasteboard-write, PTY, and Terminal Emulator failure mappings.
+Recoverable actions must retain the last valid Presentation Generation through visible failure and
+retry before reporting recovery. Fatal actions report the typed failed state and Pane-close receipt;
+the campaign must separately prove the real PID/PGID was reaped and that a replacement Pane runs a
+new command. The normal-exit control only arms observation: the operator enters real `exit 0`, and
+no exit is injected.
+
+After authenticating that same mounted-app peer, the verifier also publishes the provisional
+native launch observation and its owner-private `spaceterm.acceptance.ax-subject/v1` live-subject
+record before UI acceptance begins. The record binds the launch nonce, run and application-tree
+digest to the exact process start time, executable vnode/filesystem identity, read-only mounted
+bundle, and live code signature. Native accessibility probes must consume and independently
+revalidate that record; they never discover a process by name or accept a caller-selected PID.
 
 ### Typed Terminal Failures and Local Diagnostics
 

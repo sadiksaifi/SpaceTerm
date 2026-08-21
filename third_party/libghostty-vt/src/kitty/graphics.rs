@@ -206,7 +206,10 @@ pub use ffi::KittyGraphicsPlacementRenderInfo as PlacementRenderInfo;
 
 /// Renderer-ready geometry for one normal or Unicode-placeholder placement.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[expect(missing_docs, reason = "field meanings mirror the documented native ABI")]
+#[expect(
+    missing_docs,
+    reason = "field meanings mirror the documented native ABI"
+)]
 pub struct ResolvedPlacement {
     pub image_id: u32,
     pub placement_id: u32,

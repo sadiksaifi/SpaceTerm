@@ -86,6 +86,11 @@ fn main() {
 }
 
 const PREFIXES: &[(&str, &str)] = &[
+    ("GhosttyAccessibilityScreen", "GHOSTTY_ACCESSIBILITY_SCREEN"),
+    (
+        "GhosttyAccessibilityCellWide",
+        "GHOSTTY_ACCESSIBILITY_CELL_WIDE",
+    ),
     ("GhosttyOptimizeMode", "GHOSTTY_OPTIMIZE"),
     ("GhosttyKeyEncoderOption", "GHOSTTY_KEY_ENCODER_OPT"),
     ("GhosttyMouseTrackingMode", "GHOSTTY_MOUSE_TRACKING"),

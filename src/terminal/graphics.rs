@@ -78,6 +78,7 @@ pub(crate) struct ImagePlacementSnapshot {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(crate) struct GraphicsSnapshot {
     pub(crate) generation: u64,
+    pub(crate) placement_generation: u64,
     pub(crate) images: Arc<[Arc<ImageSnapshot>]>,
     pub(crate) placements: Arc<[ImagePlacementSnapshot]>,
 }
@@ -123,18 +124,54 @@ impl GraphicsState {
         self.image_cache.retain(|key, _| current_keys.contains(key));
         images.sort_unstable_by_key(|image| image.key);
         placements.sort_unstable_by_key(|placement| (placement.z, placement.image.image_id));
-        let next = GraphicsSnapshot {
-            generation,
-            images: Arc::from(images),
-            placements: Arc::from(placements),
-        };
-        self.published = next.clone();
-        Ok(next)
+        Ok(self.publish_collections(generation, images, placements))
     }
 
     pub(crate) fn published(&self) -> &GraphicsSnapshot {
         &self.published
     }
+
+    fn publish_collections(
+        &mut self,
+        generation: u64,
+        images: Vec<Arc<ImageSnapshot>>,
+        placements: Vec<ImagePlacementSnapshot>,
+    ) -> GraphicsSnapshot {
+        let images = if image_snapshots_match(&self.published.images, &images) {
+            Arc::clone(&self.published.images)
+        } else {
+            Arc::from(images)
+        };
+        let placements = if self.published.placements.as_ref() == placements.as_slice() {
+            Arc::clone(&self.published.placements)
+        } else {
+            Arc::from(placements)
+        };
+        let placement_generation = if Arc::ptr_eq(&placements, &self.published.placements) {
+            self.published.placement_generation
+        } else {
+            self.published.placement_generation.saturating_add(1)
+        };
+        let next = GraphicsSnapshot {
+            generation,
+            placement_generation,
+            images,
+            placements,
+        };
+        self.published = next.clone();
+        next
+    }
+}
+
+fn image_snapshots_match(
+    published: &Arc<[Arc<ImageSnapshot>]>,
+    candidate: &[Arc<ImageSnapshot>],
+) -> bool {
+    published.len() == candidate.len()
+        && published
+            .iter()
+            .zip(candidate)
+            .all(|(published, candidate)| Arc::ptr_eq(published, candidate))
 }
 
 fn copy_image(
@@ -208,6 +245,37 @@ pub(crate) fn starts_apc(previous_byte: Option<u8>, bytes: &[u8]) -> bool {
 mod tests {
     use super::*;
 
+    fn image(image_id: u32) -> Arc<ImageSnapshot> {
+        Arc::new(ImageSnapshot {
+            key: ImageKey {
+                image_id,
+                generation: 1,
+            },
+            width: 1,
+            height: 1,
+            rgba: Arc::from([0, 0, 0, 255]),
+        })
+    }
+
+    fn placement(image: &ImageSnapshot, viewport_row: i32) -> ImagePlacementSnapshot {
+        ImagePlacementSnapshot {
+            image: image.key,
+            placement_id: 1,
+            z: 0,
+            viewport_col: 0,
+            viewport_row,
+            cell_offset_x: 0,
+            cell_offset_y: 0,
+            source_x: 0,
+            source_y: 0,
+            source_width: 1,
+            source_height: 1,
+            destination_width: 1,
+            destination_height: 1,
+            unicode_placeholder: false,
+        }
+    }
+
     #[test]
     fn recognizes_apc_across_worker_reads() {
         assert!(starts_apc(None, b"text\x1b_G"));
@@ -224,5 +292,33 @@ mod tests {
         drop(first);
         assert!(GraphicsReservation::try_acquire().is_some());
         drop(second);
+    }
+
+    #[test]
+    fn unchanged_graphics_reuse_collection_arcs_and_placement_generation() {
+        let image = image(1);
+        let placement = placement(&image, 0);
+        let mut state = GraphicsState::default();
+        let first = state.publish_collections(1, vec![Arc::clone(&image)], vec![placement.clone()]);
+
+        let second = state.publish_collections(1, vec![image], vec![placement]);
+
+        assert!(Arc::ptr_eq(&first.images, &second.images));
+        assert!(Arc::ptr_eq(&first.placements, &second.placements));
+        assert_eq!(first.placement_generation, second.placement_generation);
+    }
+
+    #[test]
+    fn geometry_change_advances_only_the_placement_generation() {
+        let image = image(1);
+        let mut state = GraphicsState::default();
+        let first =
+            state.publish_collections(8, vec![Arc::clone(&image)], vec![placement(&image, 0)]);
+
+        let second = state.publish_collections(8, vec![image.clone()], vec![placement(&image, 1)]);
+
+        assert_eq!(first.generation, second.generation);
+        assert!(second.placement_generation > first.placement_generation);
+        assert!(!Arc::ptr_eq(&first.placements, &second.placements));
     }
 }

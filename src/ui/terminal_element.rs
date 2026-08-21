@@ -3,8 +3,8 @@ use std::sync::Arc;
 use gpui::{
     App, BorderStyle, Bounds, ContentMask, Element, ElementId, ElementInputHandler, Entity,
     FocusHandle, Font, FontFallbacks, FontFeatures, GlobalElementId, InspectorElementId,
-    IntoElement, LayoutId, PaintQuad, Path, PathBuilder, Pixels, ShapedLine, SharedString, Style,
-    TextRun, UnderlineStyle, Window, fill, font, outline, point, px, relative, rgba, size,
+    IntoElement, LayoutId, PaintQuad, Pixels, ShapedLine, SharedString, Style, TextRun,
+    UnderlineStyle, Window, fill, font, outline, point, px, relative, rgba, size,
 };
 use unicode_bidi::{BidiClass, bidi_class};
 
@@ -14,10 +14,14 @@ use crate::terminal::{
 };
 use crate::theme::{ACTIVE_THEME, Color};
 
-use super::terminal_graphics::{GraphicsLayer, GraphicsPaintPlan, PreparedGraphics};
+use super::terminal_graphics::{
+    GraphicsAttemptToken, GraphicsLayer, GraphicsPaintPlan, PreparedGraphics, TerminalGraphicsCache,
+};
 use super::terminal_ime::PreeditLayout;
-use super::terminal_pane::TerminalPane;
-use super::terminal_symbols::{SymbolPlan, SymbolPlanCache, SymbolPrimitive, terminal_symbol};
+use super::terminal_pane::{OperationToken, TerminalPane};
+use super::terminal_symbols::{
+    DevicePoint, SymbolPlan, SymbolPlanCache, SymbolPrimitive, terminal_symbol,
+};
 
 #[derive(Clone, Copy)]
 struct TerminalGridMetrics {
@@ -36,6 +40,8 @@ pub(crate) struct TerminalGridCache {
     line_height: Option<Pixels>,
     scale_factor_bits: Option<u32>,
     symbol_plans: SymbolPlanCache,
+    prepared_geometry: Vec<Option<PreparedRowCacheEntry<PreparedRow>>>,
+    preedit: Option<PreparedPreedit>,
 }
 
 impl TerminalGridCache {
@@ -50,6 +56,8 @@ impl TerminalGridCache {
             line_height: None,
             scale_factor_bits: None,
             symbol_plans: SymbolPlanCache::default(),
+            prepared_geometry: Vec::new(),
+            preedit: None,
         }
     }
 
@@ -63,6 +71,8 @@ impl TerminalGridCache {
         self.line_height = None;
         self.scale_factor_bits = None;
         self.symbol_plans.invalidate_scale_dependent();
+        self.prepared_geometry.clear();
+        self.preedit = None;
     }
 
     fn prepare(
@@ -131,12 +141,14 @@ pub(crate) struct TerminalGridElement {
     background: Color,
     foreground: Color,
     rows: Arc<[Arc<RowPaintInput>]>,
+    cache: Entity<TerminalGridCache>,
     columns: usize,
     font_size: Pixels,
     line_height: Pixels,
     cell_width: Pixels,
     cursor: Option<(CursorPositionSnapshot, CellSnapshot)>,
     cursor_style: CursorSnapshot,
+    cursor_preparation_style: CursorSnapshot,
     font_family: SharedString,
     preedit: Option<PreeditLayout>,
     focus_handle: FocusHandle,
@@ -145,6 +157,13 @@ pub(crate) struct TerminalGridElement {
     find_spans: Arc<[FindHighlightSpan]>,
     graphics: PreparedGraphics,
     scale_factor: f32,
+    presentation: Arc<ScreenSnapshot>,
+    presentation_operation: Option<OperationToken>,
+    graphics_attempt: Option<GraphicsAttemptToken>,
+    graphics_cache: Entity<TerminalGraphicsCache>,
+    fallback: Option<Box<TerminalGridElement>>,
+    fallback_generation: Option<crate::terminal::PresentationGeneration>,
+    paint_fault: Option<PaintPreflightFault>,
 }
 
 pub(crate) struct TerminalGridConfiguration {
@@ -160,14 +179,64 @@ pub(crate) struct TerminalGridConfiguration {
     pub(crate) scale_factor: f32,
     pub(crate) find_spans: Arc<[FindHighlightSpan]>,
     pub(crate) graphics: PreparedGraphics,
+    pub(crate) presentation_operation: Option<OperationToken>,
+    pub(crate) graphics_attempt: Option<GraphicsAttemptToken>,
+    pub(crate) graphics_cache: Entity<TerminalGraphicsCache>,
+    pub(crate) fallback: Option<(
+        Arc<ScreenSnapshot>,
+        Entity<TerminalGridCache>,
+        PreparedGraphics,
+    )>,
+    pub(crate) paint_fault: Option<PaintPreflightFault>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum PaintPreflightFault {
+    #[cfg(test)]
+    Row(usize),
+    Glyph(usize),
+    Image(usize),
 }
 
 impl TerminalGridElement {
     pub(crate) fn new(
         screen: &Arc<ScreenSnapshot>,
-        cache: &mut TerminalGridCache,
-        configuration: TerminalGridConfiguration,
+        cache: Entity<TerminalGridCache>,
+        mut configuration: TerminalGridConfiguration,
+        cx: &mut App,
     ) -> Self {
+        let fallback = configuration
+            .fallback
+            .take()
+            .map(|(screen, fallback_cache, graphics)| {
+                Box::new(Self::new(
+                    &screen,
+                    fallback_cache,
+                    TerminalGridConfiguration {
+                        terminal_input_focused: configuration.terminal_input_focused,
+                        font_family: configuration.font_family.clone(),
+                        font_size: configuration.font_size,
+                        line_height: configuration.line_height,
+                        cell_width: configuration.cell_width,
+                        preedit: None,
+                        focus_handle: configuration.focus_handle.clone(),
+                        input: configuration.input.clone(),
+                        blink_phase_visible: configuration.blink_phase_visible,
+                        scale_factor: configuration.scale_factor,
+                        find_spans: Arc::from([]),
+                        graphics,
+                        presentation_operation: None,
+                        graphics_attempt: None,
+                        graphics_cache: configuration.graphics_cache.clone(),
+                        fallback: None,
+                        paint_fault: None,
+                    },
+                    cx,
+                ))
+            });
+        let fallback_generation = fallback
+            .as_ref()
+            .map(|fallback| fallback.presentation.generation);
         let cursor = screen.cursor.position.and_then(|position| {
             screen
                 .rows
@@ -181,14 +250,10 @@ impl TerminalGridElement {
             configuration.terminal_input_focused,
             configuration.blink_phase_visible,
         );
-        Self {
-            background: screen.background,
-            foreground: if screen.colors.reversed {
-                screen.colors.background
-            } else {
-                screen.colors.foreground
-            },
-            rows: cache.prepare(
+        let cursor_preparation_style =
+            presented_cursor_style(screen.cursor, configuration.terminal_input_focused, true);
+        let rows = cache.update(cx, |cache, _| {
+            cache.prepare(
                 &screen.rows,
                 &screen.colors,
                 &configuration.font_family,
@@ -198,13 +263,24 @@ impl TerminalGridElement {
                     line_height: configuration.line_height,
                     scale_factor: configuration.scale_factor,
                 },
-            ),
+            )
+        });
+        Self {
+            background: screen.background,
+            foreground: if screen.colors.reversed {
+                screen.colors.background
+            } else {
+                screen.colors.foreground
+            },
+            rows,
+            cache,
             columns: screen.rows.first().map_or(0, |row| row.len()),
             font_size: configuration.font_size,
             line_height: configuration.line_height,
             cell_width: configuration.cell_width,
             cursor,
             cursor_style,
+            cursor_preparation_style,
             font_family: configuration.font_family,
             preedit: configuration.preedit,
             focus_handle: configuration.focus_handle,
@@ -213,6 +289,13 @@ impl TerminalGridElement {
             find_spans: configuration.find_spans,
             graphics: configuration.graphics,
             scale_factor: configuration.scale_factor,
+            presentation: Arc::clone(screen),
+            presentation_operation: configuration.presentation_operation,
+            graphics_attempt: configuration.graphics_attempt,
+            graphics_cache: configuration.graphics_cache,
+            fallback,
+            fallback_generation,
+            paint_fault: configuration.paint_fault,
         }
     }
 }
@@ -231,33 +314,696 @@ fn presented_cursor_style(
     negotiated
 }
 
+#[derive(Clone)]
 struct PreparedText {
     line: ShapedLine,
     origin: gpui::Point<Pixels>,
+    blinking: bool,
 }
 
 struct PreparedRow {
     text: Vec<PreparedText>,
     symbols: PreparedDecorations,
-    overlay_symbols: PreparedDecorations,
     backgrounds: Vec<PaintQuad>,
+    selections: Vec<PaintQuad>,
     under_text_decorations: PreparedDecorations,
     over_text_decorations: PreparedDecorations,
-    overlay_text: Vec<PreparedText>,
-    overlay_backgrounds: Vec<PaintQuad>,
-    overlay_caret: Option<PaintQuad>,
+    cursor_text: Vec<PreparedText>,
+    cursor_symbols: PreparedDecorations,
+}
+
+struct PreparedFrameRow {
+    stable: Arc<PreparedRow>,
+    find_backgrounds: Vec<PaintQuad>,
+    cursor_background: Option<PaintQuad>,
+    cursor_overlay_visible: bool,
+    preedit: Option<PreparedPreeditRow>,
+}
+
+#[derive(Clone, Debug)]
+struct PreparedPreeditKey {
+    clusters: Arc<[super::terminal_ime::PreeditCluster]>,
+    caret: super::terminal_ime::PreeditPosition,
+    visible_rows: usize,
+    grid_left: Pixels,
+    grid_top: Pixels,
+    font_family: SharedString,
+    font_size: Pixels,
+    cell_width: Pixels,
+    line_height: Pixels,
+    foreground: Color,
+    background: Color,
+    caret_color: Color,
+    scale_factor_bits: u32,
+}
+
+impl PartialEq for PreparedPreeditKey {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.clusters, &other.clusters)
+            && self.caret == other.caret
+            && self.visible_rows == other.visible_rows
+            && self.grid_left == other.grid_left
+            && self.grid_top == other.grid_top
+            && self.font_family == other.font_family
+            && self.font_size == other.font_size
+            && self.cell_width == other.cell_width
+            && self.line_height == other.line_height
+            && self.foreground == other.foreground
+            && self.background == other.background
+            && self.caret_color == other.caret_color
+            && self.scale_factor_bits == other.scale_factor_bits
+    }
+}
+
+struct PreparedPreedit {
+    key: PreparedPreeditKey,
+    rows: Arc<[PreparedPreeditRow]>,
+}
+
+#[derive(Clone, Default)]
+struct PreparedPreeditRow {
+    text: Arc<[PreparedText]>,
+    backgrounds: Arc<[PaintQuad]>,
+    caret: Option<PaintQuad>,
+}
+
+impl PreparedFrameRow {
+    fn new(stable: Arc<PreparedRow>) -> Self {
+        Self {
+            stable,
+            find_backgrounds: Vec::new(),
+            cursor_background: None,
+            cursor_overlay_visible: false,
+            preedit: None,
+        }
+    }
 }
 
 pub(crate) struct PrepaintState {
+    candidate: TerminalPaintBatch,
+    fallback: Option<TerminalPaintBatch>,
+}
+
+struct TerminalPaintBatch {
     surface: Option<PaintQuad>,
-    rows: Vec<PreparedRow>,
+    grid_bounds: Bounds<Pixels>,
+    rows: Vec<PreparedFrameRow>,
     graphics: GraphicsPaintPlan,
+    blink_phase_visible: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PaintBatchFailure {
+    Presentation,
+    RendererResources,
+}
+
+impl TerminalPaintBatch {
+    fn preflight(
+        &self,
+        line_height: Pixels,
+        fault: Option<PaintPreflightFault>,
+        window: &mut Window,
+        _cx: &mut App,
+    ) -> Result<(), PaintBatchFailure> {
+        if let Some(failure) = self.injected_failure(fault) {
+            return Err(failure);
+        }
+        // GPUI has no public paint transaction. Warming the exact glyph and image
+        // resources through offscreen preparation geometry exercises every
+        // fallible paint seam without submitting commands to the visible grid.
+        let offscreen = px(-1_000_000.0);
+        let preflight_mask = ContentMask {
+            bounds: Bounds::new(point(offscreen, offscreen), size(px(2.0), px(2.0))),
+        };
+        window.with_content_mask(Some(preflight_mask), |window| {
+            self.graphics
+                .preflight_layer(GraphicsLayer::BelowBackground, window)
+                .map_err(|_| PaintBatchFailure::RendererResources)?;
+            self.graphics
+                .preflight_layer(GraphicsLayer::BelowText, window)
+                .map_err(|_| PaintBatchFailure::RendererResources)?;
+            for row in &self.rows {
+                for text in
+                    row.stable.text.iter().filter(|text| {
+                        text_fragment_visible(text.blinking, self.blink_phase_visible)
+                    })
+                {
+                    preflight_text(text, line_height, window)
+                        .map_err(|_| PaintBatchFailure::Presentation)?;
+                }
+                if row.cursor_overlay_visible {
+                    for text in row.stable.cursor_text.iter().filter(|text| {
+                        text_fragment_visible(text.blinking, self.blink_phase_visible)
+                    }) {
+                        preflight_text(text, line_height, window)
+                            .map_err(|_| PaintBatchFailure::Presentation)?;
+                    }
+                }
+            }
+            self.graphics
+                .preflight_layer(GraphicsLayer::AboveText, window)
+                .map_err(|_| PaintBatchFailure::RendererResources)?;
+            for row in &self.rows {
+                if let Some(preedit) = &row.preedit {
+                    for text in preedit.text.iter() {
+                        preflight_text(text, line_height, window)
+                            .map_err(|_| PaintBatchFailure::Presentation)?;
+                    }
+                }
+            }
+            Ok(())
+        })
+    }
+
+    fn injected_failure(&self, fault: Option<PaintPreflightFault>) -> Option<PaintBatchFailure> {
+        match fault? {
+            #[cfg(test)]
+            PaintPreflightFault::Row(index) => self
+                .rows
+                .get(index)
+                .map(|_| PaintBatchFailure::Presentation),
+            PaintPreflightFault::Glyph(index) => self
+                .rows
+                .iter()
+                .flat_map(|row| {
+                    row.stable
+                        .text
+                        .iter()
+                        .filter(|text| {
+                            text_fragment_visible(text.blinking, self.blink_phase_visible)
+                        })
+                        .chain(
+                            row.cursor_overlay_visible
+                                .then_some(&row.stable.cursor_text)
+                                .into_iter()
+                                .flat_map(|text| text.iter())
+                                .filter(|text| {
+                                    text_fragment_visible(text.blinking, self.blink_phase_visible)
+                                }),
+                        )
+                        .chain(
+                            row.preedit
+                                .as_ref()
+                                .into_iter()
+                                .flat_map(|preedit| preedit.text.iter()),
+                        )
+                })
+                .flat_map(|text| text.line.text.chars())
+                .nth(index)
+                .map(|_| PaintBatchFailure::Presentation),
+            PaintPreflightFault::Image(index) => (index < self.graphics.image_count())
+                .then_some(PaintBatchFailure::RendererResources),
+        }
+    }
+
+    fn submit(
+        &self,
+        grid_bounds: Bounds<Pixels>,
+        line_height: Pixels,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Result<(), PaintBatchFailure> {
+        if let Some(surface) = &self.surface {
+            window.paint_quad(surface.clone());
+        }
+        window.with_content_mask(
+            Some(ContentMask {
+                bounds: grid_bounds,
+            }),
+            |window| {
+                self.graphics
+                    .paint_layer(GraphicsLayer::BelowBackground, window)
+                    .map_err(|_| PaintBatchFailure::RendererResources)?;
+                for row in &self.rows {
+                    for background in &row.stable.backgrounds {
+                        window.paint_quad(background.clone());
+                    }
+                    for background in &row.find_backgrounds {
+                        window.paint_quad(background.clone());
+                    }
+                    for background in &row.stable.selections {
+                        window.paint_quad(background.clone());
+                    }
+                    if let Some(background) = &row.cursor_background {
+                        window.paint_quad(background.clone());
+                    }
+                }
+                self.graphics
+                    .paint_layer(GraphicsLayer::BelowText, window)
+                    .map_err(|_| PaintBatchFailure::RendererResources)?;
+                for row in &self.rows {
+                    paint_prepared_decorations(
+                        &row.stable.under_text_decorations,
+                        self.blink_phase_visible,
+                        window,
+                    );
+                    paint_prepared_decorations(
+                        &row.stable.symbols,
+                        self.blink_phase_visible,
+                        window,
+                    );
+                    for text in row.stable.text.iter().filter(|text| {
+                        text_fragment_visible(text.blinking, self.blink_phase_visible)
+                    }) {
+                        text.line
+                            .paint(text.origin, line_height, window, cx)
+                            .map_err(|_| PaintBatchFailure::Presentation)?;
+                    }
+                    if row.cursor_overlay_visible {
+                        paint_prepared_decorations(
+                            &row.stable.cursor_symbols,
+                            self.blink_phase_visible,
+                            window,
+                        );
+                        for text in row.stable.cursor_text.iter().filter(|text| {
+                            text_fragment_visible(text.blinking, self.blink_phase_visible)
+                        }) {
+                            text.line
+                                .paint(text.origin, line_height, window, cx)
+                                .map_err(|_| PaintBatchFailure::Presentation)?;
+                        }
+                    }
+                    paint_prepared_decorations(
+                        &row.stable.over_text_decorations,
+                        self.blink_phase_visible,
+                        window,
+                    );
+                }
+                self.graphics
+                    .paint_layer(GraphicsLayer::AboveText, window)
+                    .map_err(|_| PaintBatchFailure::RendererResources)?;
+                // Marked Text remains above every image layer.
+                for row in &self.rows {
+                    if let Some(preedit) = &row.preedit {
+                        for background in preedit.backgrounds.iter() {
+                            window.paint_quad(background.clone());
+                        }
+                        for text in preedit.text.iter() {
+                            text.line
+                                .paint(text.origin, line_height, window, cx)
+                                .map_err(|_| PaintBatchFailure::Presentation)?;
+                        }
+                        if let Some(caret) = &preedit.caret {
+                            window.paint_quad(caret.clone());
+                        }
+                    }
+                }
+                Ok(())
+            },
+        )
+    }
+}
+
+fn preflight_text(
+    text: &PreparedText,
+    line_height: Pixels,
+    window: &mut Window,
+) -> gpui::Result<()> {
+    let layout = &*text.line;
+    let baseline = (line_height - layout.ascent - layout.descent) / 2.0 + layout.ascent;
+    let mut glyph_origin = text.origin;
+    let mut previous_position = gpui::Point::default();
+    for run in &layout.runs {
+        for glyph in &run.glyphs {
+            glyph_origin += glyph.position - previous_position;
+            previous_position = glyph.position;
+            let origin = glyph_origin + point(px(0.0), baseline);
+            if glyph.is_emoji {
+                window.paint_emoji(origin, run.font_id, glyph.id, layout.font_size)?;
+            } else {
+                window.paint_glyph(
+                    origin,
+                    run.font_id,
+                    glyph.id,
+                    layout.font_size,
+                    rgba(0).into(),
+                )?;
+            }
+        }
+    }
+    Ok(())
 }
 
 #[derive(Default)]
 struct PreparedDecorations {
-    quads: Vec<PaintQuad>,
-    paths: Vec<(Path<Pixels>, Color)>,
+    // GPUI consumes Path and rebuilds its scaled vertex Vec during paint. Flat scene primitives
+    // keep stable decorations reusable through the row Arc without cloning heap geometry.
+    quads: Vec<PreparedQuad>,
+    underlines: Vec<PreparedUnderline>,
+}
+
+struct PreparedQuad {
+    quad: PaintQuad,
+    blinking: bool,
+}
+
+struct PreparedUnderline {
+    origin: gpui::Point<Pixels>,
+    width: Pixels,
+    style: UnderlineStyle,
+    blinking: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct PreparedRowKey {
+    grid_left: Pixels,
+    row_top: Pixels,
+    font_size: Pixels,
+    cell_width: Pixels,
+    line_height: Pixels,
+    decoration_metrics: DecorationMetrics,
+    cursor: Option<PreparedCursorKey>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PreparedCursorKey {
+    position: CursorPositionSnapshot,
+    style: CursorSnapshot,
+}
+
+struct PreparedGridLayout<'a> {
+    grid_left: Pixels,
+    grid_top: Pixels,
+    font_size: Pixels,
+    cell_width: Pixels,
+    line_height: Pixels,
+    font_family: &'a SharedString,
+    decoration_metrics: DecorationMetrics,
+}
+
+struct PreparedRowCacheEntry<T> {
+    source: Arc<RowPaintInput>,
+    key: PreparedRowKey,
+    prepared: Arc<T>,
+}
+
+fn reuse_or_prepare_row<T>(
+    cached: &mut Option<PreparedRowCacheEntry<T>>,
+    source: &Arc<RowPaintInput>,
+    key: PreparedRowKey,
+    prepare: impl FnOnce() -> T,
+) -> Arc<T> {
+    if let Some(cached) = cached
+        && Arc::ptr_eq(&cached.source, source)
+        && cached.key == key
+    {
+        return Arc::clone(&cached.prepared);
+    }
+
+    let prepared = Arc::new(prepare());
+    *cached = Some(PreparedRowCacheEntry {
+        source: Arc::clone(source),
+        key,
+        prepared: Arc::clone(&prepared),
+    });
+    prepared
+}
+
+impl TerminalGridCache {
+    fn prepare_visible_geometry(
+        &mut self,
+        rows: &Arc<[Arc<RowPaintInput>]>,
+        visible_rows: usize,
+        layout: PreparedGridLayout<'_>,
+        cursor: Option<&(CursorPositionSnapshot, CellSnapshot)>,
+        cursor_style: CursorSnapshot,
+        window: &mut Window,
+    ) -> Vec<Arc<PreparedRow>> {
+        self.prepared_geometry.resize_with(rows.len(), || None);
+        self.prepared_geometry.truncate(rows.len());
+
+        rows.iter()
+            .take(visible_rows)
+            .enumerate()
+            .map(|(row_index, source)| {
+                let row_top = layout.grid_top + layout.line_height * row_index as f32;
+                let cursor = cursor
+                    .filter(|(position, _)| usize::from(position.row) == row_index)
+                    .filter(|_| cursor_style.visible);
+                let key = PreparedRowKey {
+                    grid_left: layout.grid_left,
+                    row_top,
+                    font_size: layout.font_size,
+                    cell_width: layout.cell_width,
+                    line_height: layout.line_height,
+                    decoration_metrics: layout.decoration_metrics,
+                    cursor: cursor.map(|(position, _)| PreparedCursorKey {
+                        position: *position,
+                        style: cursor_style,
+                    }),
+                };
+                reuse_or_prepare_row(&mut self.prepared_geometry[row_index], source, key, || {
+                    prepare_stable_row(
+                        source,
+                        key,
+                        layout.font_family,
+                        cursor,
+                        cursor_style,
+                        window,
+                    )
+                })
+            })
+            .collect()
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn prepare_preedit(
+        &mut self,
+        layout: Option<&PreeditLayout>,
+        visible_rows: usize,
+        grid_left: Pixels,
+        grid_top: Pixels,
+        font_family: &SharedString,
+        font_size: Pixels,
+        cell_width: Pixels,
+        line_height: Pixels,
+        foreground: Color,
+        background: Color,
+        caret_color: Color,
+        scale_factor: f32,
+        window: &mut Window,
+    ) -> Option<Arc<[PreparedPreeditRow]>> {
+        let Some(layout) = layout else {
+            self.preedit = None;
+            return None;
+        };
+        let key = PreparedPreeditKey {
+            clusters: Arc::clone(&layout.clusters),
+            caret: layout.caret,
+            visible_rows,
+            grid_left,
+            grid_top,
+            font_family: font_family.clone(),
+            font_size,
+            cell_width,
+            line_height,
+            foreground,
+            background,
+            caret_color,
+            scale_factor_bits: scale_factor.to_bits(),
+        };
+        if let Some(cached) = &self.preedit
+            && cached.key == key
+        {
+            return Some(Arc::clone(&cached.rows));
+        }
+
+        let mut rows = (0..visible_rows)
+            .map(|_| PreparedPreeditRow::default())
+            .collect::<Vec<_>>();
+        for (row_index, row) in rows.iter_mut().enumerate() {
+            let row_top = grid_top + line_height * row_index as f32;
+            let clusters = layout
+                .clusters
+                .iter()
+                .filter(|cluster| cluster.row == row_index);
+            let mut text = Vec::new();
+            let mut backgrounds = Vec::new();
+            for cluster in clusters {
+                let cluster_left = grid_left + cell_width * cluster.column as f32;
+                let width_cells = usize::from(cluster.width).max(1);
+                backgrounds.push(fill(
+                    Bounds::new(
+                        point(cluster_left, row_top),
+                        size(cell_width * width_cells as f32, line_height),
+                    ),
+                    gpui_color(background),
+                ));
+                let color = gpui_color(foreground).into();
+                text.push(PreparedText {
+                    line: window.text_system().shape_line(
+                        cluster.text.clone().into(),
+                        font_size,
+                        &[TextRun {
+                            len: cluster.text.len(),
+                            font: terminal_cell_font(font_family, false, false),
+                            color,
+                            background_color: None,
+                            underline: Some(UnderlineStyle {
+                                thickness: px(1.0),
+                                color: Some(color),
+                                wavy: false,
+                            }),
+                            strikethrough: None,
+                        }],
+                        None,
+                    ),
+                    origin: point(cluster_left, row_top),
+                    blinking: false,
+                });
+            }
+            row.text = Arc::from(text);
+            row.backgrounds = Arc::from(backgrounds);
+            if layout.caret.row == row_index {
+                let caret_left = grid_left + cell_width * layout.caret.column as f32;
+                row.caret = Some(fill(
+                    Bounds::new(point(caret_left, row_top), size(px(1.0), line_height)),
+                    gpui_color(caret_color),
+                ));
+            }
+        }
+        let rows = Arc::from(rows);
+        self.preedit = Some(PreparedPreedit {
+            key,
+            rows: Arc::clone(&rows),
+        });
+        Some(rows)
+    }
+}
+
+fn prepare_stable_row(
+    row: &RowPaintInput,
+    key: PreparedRowKey,
+    font_family: &SharedString,
+    cursor: Option<&(CursorPositionSnapshot, CellSnapshot)>,
+    cursor_style: CursorSnapshot,
+    window: &mut Window,
+) -> PreparedRow {
+    let text = row
+        .fragments
+        .iter()
+        .map(|fragment| PreparedText {
+            line: window.text_system().shape_line(
+                fragment.text.clone(),
+                key.font_size,
+                &fragment.runs,
+                fragment.force_cell_width.then_some(key.cell_width),
+            ),
+            origin: point(
+                key.grid_left + key.cell_width * fragment.start as f32,
+                key.row_top,
+            ),
+            blinking: fragment.blinking,
+        })
+        .collect();
+    let backgrounds = prepare_background_geometry(
+        &row.backgrounds,
+        key.row_top,
+        key.grid_left,
+        key.cell_width,
+        key.line_height,
+    );
+    let selections = prepare_background_geometry(
+        &row.selections,
+        key.row_top,
+        key.grid_left,
+        key.cell_width,
+        key.line_height,
+    );
+    let under_text_decorations = prepare_decoration_geometry(
+        &row.under_text_decorations,
+        key.row_top,
+        key.grid_left,
+        key.cell_width,
+        key.decoration_metrics,
+    );
+    let over_text_decorations = prepare_decoration_geometry(
+        &row.over_text_decorations,
+        key.row_top,
+        key.grid_left,
+        key.cell_width,
+        key.decoration_metrics,
+    );
+    let symbols = prepare_symbol_geometry(&row.symbols, key.row_top, key.grid_left, key.cell_width);
+
+    let mut cursor_text = Vec::new();
+    let mut cursor_symbols = PreparedDecorations::default();
+    if let Some((position, cell)) = cursor {
+        let cursor_left = key.grid_left + key.cell_width * f32::from(position.column);
+        let plan = cursor_paint_plan(
+            true,
+            cursor_style.shape,
+            point(cursor_left, key.row_top),
+            key.cell_width,
+            key.line_height,
+            position.width_cells,
+        );
+        let recolor_text = plan.is_some_and(|plan| plan.recolor_text);
+        if recolor_text && !cell.spacer_tail && !cell.invisible {
+            if let Some(symbol) = row
+                .symbols
+                .iter()
+                .find(|symbol| symbol.start == usize::from(position.column))
+            {
+                let mut symbol = symbol.clone();
+                symbol.color = cursor_style.text_color;
+                cursor_symbols =
+                    prepare_symbol_geometry(&[symbol], key.row_top, key.grid_left, key.cell_width);
+            } else {
+                cursor_text.push(PreparedText {
+                    line: window.text_system().shape_line(
+                        cell.text.clone().into(),
+                        key.font_size,
+                        &[TextRun {
+                            len: cell.text.len(),
+                            font: terminal_cell_font(font_family, cell.bold, cell.italic),
+                            color: gpui_color(cursor_style.text_color).into(),
+                            background_color: None,
+                            underline: None,
+                            strikethrough: None,
+                        }],
+                        force_cell_width_for_cell(&cell.text, position.width_cells)
+                            .then_some(key.cell_width),
+                    ),
+                    origin: point(cursor_left, key.row_top),
+                    blinking: cell.blinking,
+                });
+            }
+        }
+    }
+
+    PreparedRow {
+        text,
+        symbols,
+        backgrounds,
+        selections,
+        under_text_decorations,
+        over_text_decorations,
+        cursor_text,
+        cursor_symbols,
+    }
+}
+
+fn paint_prepared_decorations(
+    prepared: &PreparedDecorations,
+    blink_phase_visible: bool,
+    window: &mut Window,
+) {
+    for prepared in prepared
+        .quads
+        .iter()
+        .filter(|prepared| text_fragment_visible(prepared.blinking, blink_phase_visible))
+    {
+        window.paint_quad(prepared.quad.clone());
+    }
+    for prepared in prepared
+        .underlines
+        .iter()
+        .filter(|prepared| text_fragment_visible(prepared.blinking, blink_phase_visible))
+    {
+        window.paint_underline(prepared.origin, prepared.width, &prepared.style);
+    }
 }
 
 impl IntoElement for TerminalGridElement {
@@ -317,112 +1063,62 @@ impl Element for TerminalGridElement {
         let x_height = window.text_system().x_height(font_id, self.font_size);
         let decoration_metrics =
             decoration_metrics(baseline, ascent, x_height, window.scale_factor());
+        let rows = Arc::clone(&self.rows);
+        let cursor = self.cursor.as_ref();
+        let cursor_preparation_style = self.cursor_preparation_style;
+        let font_family = self.font_family.clone();
+        let (stable_rows, preedit_rows) = self.cache.update(_cx, |cache, _| {
+            let stable_rows = cache.prepare_visible_geometry(
+                &rows,
+                visible_rows,
+                PreparedGridLayout {
+                    grid_left,
+                    grid_top: bounds.top(),
+                    font_size: self.font_size,
+                    cell_width: self.cell_width,
+                    line_height: self.line_height,
+                    font_family: &font_family,
+                    decoration_metrics,
+                },
+                cursor,
+                cursor_preparation_style,
+                window,
+            );
+            let preedit_rows = cache.prepare_preedit(
+                self.preedit.as_ref(),
+                visible_rows,
+                grid_left,
+                bounds.top(),
+                &font_family,
+                self.font_size,
+                self.cell_width,
+                self.line_height,
+                self.foreground,
+                self.background,
+                self.cursor_style.color,
+                self.scale_factor,
+                window,
+            );
+            (stable_rows, preedit_rows)
+        });
 
-        for (row_index, row) in self.rows.iter().take(visible_rows).enumerate() {
+        for (row_index, stable) in stable_rows.into_iter().enumerate() {
             let row_top = bounds.top() + self.line_height * row_index as f32;
-            let text = row
-                .fragments
-                .iter()
-                .filter(|fragment| {
-                    text_fragment_visible(fragment.blinking, self.blink_phase_visible)
-                })
-                .map(|fragment| PreparedText {
-                    line: window.text_system().shape_line(
-                        fragment.text.clone(),
-                        self.font_size,
-                        &fragment.runs,
-                        fragment.force_cell_width.then_some(self.cell_width),
-                    ),
-                    origin: point(grid_left + self.cell_width * fragment.start as f32, row_top),
-                })
-                .collect();
-            let mut backgrounds = presentation_backgrounds(row, row_index, &self.find_spans)
-                .iter()
-                .map(|span| {
-                    fill(
-                        Bounds::new(
-                            point(grid_left + self.cell_width * span.start as f32, row_top),
-                            size(self.cell_width * span.len as f32, self.line_height),
-                        ),
-                        gpui_color(span.color),
-                    )
-                })
-                .collect::<Vec<_>>();
-            let under_text_decorations = prepare_decoration_geometry(
-                &row.under_text_decorations,
+            let find_backgrounds = prepare_background_geometry(
+                &find_background_spans(row_index, &self.find_spans),
                 row_top,
                 grid_left,
                 self.cell_width,
-                decoration_metrics,
-                self.blink_phase_visible,
+                self.line_height,
             );
-            let over_text_decorations = prepare_decoration_geometry(
-                &row.over_text_decorations,
-                row_top,
-                grid_left,
-                self.cell_width,
-                decoration_metrics,
-                self.blink_phase_visible,
-            );
-            let symbols = prepare_symbol_geometry(
-                &row.symbols,
-                row_top,
-                grid_left,
-                self.cell_width,
-                self.blink_phase_visible,
-            );
-
-            let mut text: Vec<PreparedText> = text;
-            let mut overlay_text = Vec::new();
-            let mut overlay_symbols = PreparedDecorations::default();
-            let mut overlay_backgrounds = Vec::new();
-            let mut overlay_caret = None;
-            if let Some(preedit) = &self.preedit {
-                for cluster in preedit
-                    .clusters
-                    .iter()
-                    .filter(|cluster| cluster.row == row_index)
-                {
-                    let cluster_left = grid_left + self.cell_width * cluster.column as f32;
-                    let width_cells = usize::from(cluster.width).max(1);
-                    overlay_backgrounds.push(fill(
-                        Bounds::new(
-                            point(cluster_left, row_top),
-                            size(self.cell_width * width_cells as f32, self.line_height),
-                        ),
-                        gpui_color(self.background),
-                    ));
-                    let color = gpui_color(self.foreground).into();
-                    overlay_text.push(PreparedText {
-                        line: window.text_system().shape_line(
-                            cluster.text.clone().into(),
-                            self.font_size,
-                            &[TextRun {
-                                len: cluster.text.len(),
-                                font: terminal_cell_font(&self.font_family, false, false),
-                                color,
-                                background_color: None,
-                                underline: Some(UnderlineStyle {
-                                    thickness: px(1.0),
-                                    color: Some(color),
-                                    wavy: false,
-                                }),
-                                strikethrough: None,
-                            }],
-                            None,
-                        ),
-                        origin: point(cluster_left, row_top),
-                    });
-                }
-                if preedit.caret.row == row_index {
-                    let caret_left = grid_left + self.cell_width * preedit.caret.column as f32;
-                    overlay_caret = Some(fill(
-                        Bounds::new(point(caret_left, row_top), size(px(1.0), self.line_height)),
-                        gpui_color(self.cursor_style.color),
-                    ));
-                }
-            } else if self.cursor_style.visible
-                && let Some((position, cell)) = &self.cursor
+            let mut cursor_background = None;
+            let mut cursor_overlay_visible = false;
+            if preedit_rows
+                .as_ref()
+                .and_then(|rows| rows.get(row_index))
+                .is_none()
+                && self.cursor_style.visible
+                && let Some((position, _)) = &self.cursor
                 && usize::from(position.row) == row_index
             {
                 let cursor_left = grid_left + self.cell_width * f32::from(position.column);
@@ -435,7 +1131,7 @@ impl Element for TerminalGridElement {
                     position.width_cells,
                 )
                 .expect("a visible cursor always produces a paint plan");
-                backgrounds.push(match plan.paint {
+                cursor_background = Some(match plan.paint {
                     CursorPaint::Fill => fill(plan.bounds, gpui_color(self.cursor_style.color)),
                     CursorPaint::Outline => outline(
                         plan.bounds,
@@ -443,61 +1139,18 @@ impl Element for TerminalGridElement {
                         BorderStyle::default(),
                     ),
                 });
-
-                if plan.recolor_text
-                    && !cell.spacer_tail
-                    && !cell.invisible
-                    && text_fragment_visible(cell.blinking, self.blink_phase_visible)
-                {
-                    if let Some(symbol) = row
-                        .symbols
-                        .iter()
-                        .find(|symbol| symbol.start == usize::from(position.column))
-                    {
-                        let mut symbol = symbol.clone();
-                        symbol.color = self.cursor_style.text_color;
-                        overlay_symbols = prepare_symbol_geometry(
-                            &[symbol],
-                            row_top,
-                            grid_left,
-                            self.cell_width,
-                            self.blink_phase_visible,
-                        );
-                    } else {
-                        let cursor_font =
-                            terminal_cell_font(&self.font_family, cell.bold, cell.italic);
-                        text.push(PreparedText {
-                            line: window.text_system().shape_line(
-                                cell.text.clone().into(),
-                                self.font_size,
-                                &[TextRun {
-                                    len: cell.text.len(),
-                                    font: cursor_font,
-                                    color: gpui_color(self.cursor_style.text_color).into(),
-                                    background_color: None,
-                                    underline: None,
-                                    strikethrough: None,
-                                }],
-                                force_cell_width_for_cell(&cell.text, position.width_cells)
-                                    .then_some(self.cell_width),
-                            ),
-                            origin: point(cursor_left, row_top),
-                        });
-                    }
-                }
+                cursor_overlay_visible = plan.recolor_text;
             }
 
-            prepared_rows.push(PreparedRow {
-                text,
-                symbols,
-                overlay_symbols,
-                backgrounds,
-                under_text_decorations,
-                over_text_decorations,
-                overlay_text,
-                overlay_backgrounds,
-                overlay_caret,
-            });
+            let mut frame = PreparedFrameRow::new(stable);
+            frame.find_backgrounds = find_backgrounds;
+            frame.cursor_background = cursor_background;
+            frame.cursor_overlay_visible = cursor_overlay_visible;
+            frame.preedit = preedit_rows
+                .as_ref()
+                .and_then(|rows| rows.get(row_index))
+                .cloned();
+            prepared_rows.push(frame);
         }
 
         let grid_bounds = terminal_grid_content_bounds(bounds, self.columns, self.cell_width);
@@ -508,8 +1161,9 @@ impl Element for TerminalGridElement {
                 (self.line_height * visible_rows as f32).min(grid_bounds.size.height),
             ),
         );
-        PrepaintState {
+        let candidate = TerminalPaintBatch {
             surface: Some(fill(bounds, gpui_color(self.background))),
+            grid_bounds,
             rows: prepared_rows,
             graphics: self.graphics.paint_plan(
                 grid_bounds,
@@ -517,6 +1171,17 @@ impl Element for TerminalGridElement {
                 self.line_height,
                 self.scale_factor,
             ),
+            blink_phase_visible: self.blink_phase_visible,
+        };
+        let fallback = self.fallback.as_mut().map(|fallback| {
+            let mut request_layout = ();
+            fallback
+                .prepaint(None, None, bounds, &mut request_layout, window, _cx)
+                .candidate
+        });
+        PrepaintState {
+            candidate,
+            fallback,
         }
     }
 
@@ -530,93 +1195,75 @@ impl Element for TerminalGridElement {
         window: &mut Window,
         cx: &mut App,
     ) {
-        if let Some(surface) = prepaint.surface.take() {
-            window.paint_quad(surface);
+        let mut failure = prepaint
+            .candidate
+            .preflight(self.line_height, self.paint_fault.take(), window, cx)
+            .err();
+        let mut submitted_generation = None;
+        if failure.is_none() {
+            match prepaint.candidate.submit(
+                prepaint.candidate.grid_bounds,
+                self.line_height,
+                window,
+                cx,
+            ) {
+                Ok(()) => submitted_generation = Some(self.presentation.generation),
+                Err(submission_failure) => failure = Some(submission_failure),
+            }
         }
-        let grid_bounds = terminal_grid_content_bounds(bounds, self.columns, self.cell_width);
-        let grid_bounds = Bounds::new(
-            grid_bounds.origin,
-            size(
-                grid_bounds.size.width,
-                (self.line_height * prepaint.rows.len() as f32).min(grid_bounds.size.height),
-            ),
-        );
-        window.with_content_mask(
-            Some(ContentMask {
-                bounds: grid_bounds,
-            }),
-            |window| {
-                prepaint
-                    .graphics
-                    .paint_layer(GraphicsLayer::BelowBackground, window);
-                for row in &mut prepaint.rows {
-                    for background in row.backgrounds.drain(..) {
-                        window.paint_quad(background);
-                    }
-                }
-                prepaint
-                    .graphics
-                    .paint_layer(GraphicsLayer::BelowText, window);
-                for row in &mut prepaint.rows {
-                    for quad in row.under_text_decorations.quads.drain(..) {
-                        window.paint_quad(quad);
-                    }
-                    for (path, color) in row.under_text_decorations.paths.drain(..) {
-                        window.paint_path(path, gpui_color(color));
-                    }
-                    for quad in row.symbols.quads.drain(..) {
-                        window.paint_quad(quad);
-                    }
-                    for (path, color) in row.symbols.paths.drain(..) {
-                        window.paint_path(path, gpui_color(color));
-                    }
-                    for text in row.text.drain(..) {
-                        if let Err(error) =
-                            text.line.paint(text.origin, self.line_height, window, cx)
-                        {
-                            eprintln!("failed to paint terminal row: {error:#}");
-                        }
-                    }
-                    for quad in row.overlay_symbols.quads.drain(..) {
-                        window.paint_quad(quad);
-                    }
-                    for (path, color) in row.overlay_symbols.paths.drain(..) {
-                        window.paint_path(path, gpui_color(color));
-                    }
-                    for quad in row.over_text_decorations.quads.drain(..) {
-                        window.paint_quad(quad);
-                    }
-                    for (path, color) in row.over_text_decorations.paths.drain(..) {
-                        window.paint_path(path, gpui_color(color));
-                    }
-                }
-                prepaint
-                    .graphics
-                    .paint_layer(GraphicsLayer::AboveText, window);
-                // IME remains above every image layer so marked text and its
-                // caret are always usable while an above-text image is shown.
-                for row in &mut prepaint.rows {
-                    for background in row.overlay_backgrounds.drain(..) {
-                        window.paint_quad(background);
-                    }
-                    for text in row.overlay_text.drain(..) {
-                        if let Err(error) =
-                            text.line.paint(text.origin, self.line_height, window, cx)
-                        {
-                            eprintln!("failed to paint marked terminal text: {error:#}");
-                        }
-                    }
-                    if let Some(caret) = row.overlay_caret.take() {
-                        window.paint_quad(caret);
-                    }
-                }
-            },
-        );
+        if failure.is_some()
+            && let Some(graphics_attempt) = self.graphics_attempt
+        {
+            self.graphics_cache.update(cx, |cache, cx| {
+                cache.rollback(graphics_attempt, Some(window), cx);
+            });
+        }
+        if failure.is_some()
+            && let Some(fallback) = &prepaint.fallback
+            && fallback
+                .preflight(self.line_height, None, window, cx)
+                .is_ok()
+            && fallback
+                .submit(fallback.grid_bounds, self.line_height, window, cx)
+                .is_ok()
+        {
+            submitted_generation = self.fallback_generation;
+        }
         window.handle_input(
             &self.focus_handle,
             ElementInputHandler::new(bounds, self.input.clone()),
             cx,
         );
+        let pane = self.input.clone();
+        let presentation = Arc::clone(&self.presentation);
+        if let (Some(operation), Some(graphics_attempt)) =
+            (self.presentation_operation, self.graphics_attempt)
+        {
+            window.defer(cx, move |window, cx| {
+                pane.update(cx, |pane, cx| {
+                    if let Some(generation) = submitted_generation {
+                        pane.record_scene_submission_attempt(generation);
+                    }
+                    match failure {
+                        Some(PaintBatchFailure::RendererResources) => {
+                            pane.renderer_resource_failed(operation, graphics_attempt, cx);
+                        }
+                        Some(PaintBatchFailure::Presentation) => {
+                            pane.presentation_failed(operation, graphics_attempt, cx);
+                        }
+                        None => {
+                            pane.presentation_succeeded(
+                                operation,
+                                graphics_attempt,
+                                presentation,
+                                window,
+                                cx,
+                            );
+                        }
+                    }
+                });
+            });
+        }
     }
 }
 
@@ -758,18 +1405,29 @@ struct BackgroundSpan {
     color: Color,
 }
 
+#[cfg(test)]
 fn presentation_backgrounds(
     row: &RowPaintInput,
     row_index: usize,
     find_spans: &[FindHighlightSpan],
 ) -> Vec<BackgroundSpan> {
     let mut backgrounds = row.backgrounds.clone();
-    for current in [false, true] {
-        backgrounds.extend(
+    backgrounds.extend(find_background_spans(row_index, find_spans));
+    backgrounds.extend(row.selections.iter().copied());
+    backgrounds
+}
+
+fn find_background_spans(
+    row_index: usize,
+    find_spans: &[FindHighlightSpan],
+) -> Vec<BackgroundSpan> {
+    [false, true]
+        .into_iter()
+        .flat_map(|current| {
             find_spans
                 .iter()
-                .filter(|span| usize::from(span.row) == row_index && span.current == current)
-                .map(|span| BackgroundSpan {
+                .filter(move |span| usize::from(span.row) == row_index && span.current == current)
+                .map(move |span| BackgroundSpan {
                     start: usize::from(span.start_column),
                     len: usize::from(
                         span.end_column
@@ -781,11 +1439,30 @@ fn presentation_backgrounds(
                     } else {
                         ACTIVE_THEME.search_match_background
                     },
-                }),
-        );
-    }
-    backgrounds.extend(row.selections.iter().copied());
-    backgrounds
+                })
+        })
+        .collect()
+}
+
+fn prepare_background_geometry(
+    spans: &[BackgroundSpan],
+    row_top: Pixels,
+    grid_left: Pixels,
+    cell_width: Pixels,
+    line_height: Pixels,
+) -> Vec<PaintQuad> {
+    spans
+        .iter()
+        .map(|span| {
+            fill(
+                Bounds::new(
+                    point(grid_left + cell_width * span.start as f32, row_top),
+                    size(cell_width * span.len as f32, line_height),
+                ),
+                gpui_color(span.color),
+            )
+        })
+        .collect()
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -846,21 +1523,20 @@ fn prepare_decoration_geometry(
     grid_left: Pixels,
     cell_width: Pixels,
     metrics: DecorationMetrics,
-    blink_phase_visible: bool,
 ) -> PreparedDecorations {
     let mut prepared = PreparedDecorations::default();
-    for span in spans
-        .iter()
-        .filter(|span| text_fragment_visible(span.blinking, blink_phase_visible))
-    {
+    for span in spans {
         let left = grid_left + cell_width * span.start as f32;
         let right = left + cell_width * span.len as f32;
         let width = right - left;
         let mut push_line = |y: Pixels| {
-            prepared.quads.push(fill(
-                Bounds::new(point(left, row_top + y), size(width, metrics.thickness)),
-                gpui_color(span.color),
-            ));
+            prepared.quads.push(PreparedQuad {
+                quad: fill(
+                    Bounds::new(point(left, row_top + y), size(width, metrics.thickness)),
+                    gpui_color(span.color),
+                ),
+                blinking: span.blinking,
+            });
         };
 
         match span.kind {
@@ -875,13 +1551,16 @@ fn prepare_decoration_geometry(
                 let mut x = left;
                 while x < right {
                     let dot_width = metrics.thickness.min(right - x);
-                    prepared.quads.push(fill(
-                        Bounds::new(
-                            point(x, row_top + metrics.underline_y),
-                            size(dot_width, metrics.thickness),
+                    prepared.quads.push(PreparedQuad {
+                        quad: fill(
+                            Bounds::new(
+                                point(x, row_top + metrics.underline_y),
+                                size(dot_width, metrics.thickness),
+                            ),
+                            gpui_color(span.color),
                         ),
-                        gpui_color(span.color),
-                    ));
+                        blinking: span.blinking,
+                    });
                     x += metrics.device_pixel * 2.0;
                 }
             }
@@ -890,36 +1569,30 @@ fn prepare_decoration_geometry(
                 let mut x = left;
                 while x < right {
                     let width = dash_width.min(right - x);
-                    prepared.quads.push(fill(
-                        Bounds::new(
-                            point(x, row_top + metrics.underline_y),
-                            size(width, metrics.thickness),
+                    prepared.quads.push(PreparedQuad {
+                        quad: fill(
+                            Bounds::new(
+                                point(x, row_top + metrics.underline_y),
+                                size(width, metrics.thickness),
+                            ),
+                            gpui_color(span.color),
                         ),
-                        gpui_color(span.color),
-                    ));
+                        blinking: span.blinking,
+                    });
                     x += dash_width + metrics.device_pixel * 2.0;
                 }
             }
             DecorationKind::Underline(TerminalUnderlineSnapshot::Curly) => {
-                let mut builder = PathBuilder::stroke(metrics.thickness);
-                let center_y = row_top + metrics.underline_y + metrics.wave_amplitude;
-                let half_wave = (cell_width / 4.0).max(metrics.device_pixel * 2.0);
-                let mut x = left;
-                let mut rise = true;
-                builder.move_to(point(x, center_y));
-                while x < right {
-                    x = (x + half_wave).min(right);
-                    let y = if rise {
-                        center_y - metrics.wave_amplitude
-                    } else {
-                        center_y + metrics.wave_amplitude
-                    };
-                    builder.line_to(point(x, y));
-                    rise = !rise;
-                }
-                if let Ok(path) = builder.build() {
-                    prepared.paths.push((path, span.color));
-                }
+                prepared.underlines.push(PreparedUnderline {
+                    origin: point(left, row_top + metrics.underline_y),
+                    width,
+                    style: UnderlineStyle {
+                        thickness: metrics.thickness,
+                        color: Some(gpui_color(span.color).into()),
+                        wavy: true,
+                    },
+                    blinking: span.blinking,
+                });
             }
             DecorationKind::Underline(TerminalUnderlineSnapshot::None) => {}
             DecorationKind::Overline => push_line(metrics.overline_y),
@@ -934,13 +1607,9 @@ fn prepare_symbol_geometry(
     row_top: Pixels,
     grid_left: Pixels,
     cell_width: Pixels,
-    blink_phase_visible: bool,
 ) -> PreparedDecorations {
     let mut prepared = PreparedDecorations::default();
-    for symbol in symbols
-        .iter()
-        .filter(|symbol| text_fragment_visible(symbol.blinking, blink_phase_visible))
-    {
+    for symbol in symbols {
         debug_assert!(matches!(symbol.width_cells, 1 | 2));
         let scale = symbol.plan.scale_factor;
         let origin = point(grid_left + cell_width * symbol.start as f32, row_top);
@@ -952,72 +1621,206 @@ fn prepare_symbol_geometry(
                     width,
                     height,
                     alpha,
-                } => prepared.quads.push(fill(
-                    Bounds::new(
-                        point(
-                            origin.x + px(f32::from(*x) / scale),
-                            origin.y + px(f32::from(*y) / scale),
+                } => prepared.quads.push(PreparedQuad {
+                    quad: fill(
+                        Bounds::new(
+                            point(
+                                origin.x + px(f32::from(*x) / scale),
+                                origin.y + px(f32::from(*y) / scale),
+                            ),
+                            size(
+                                px(f32::from(*width) / scale),
+                                px(f32::from(*height) / scale),
+                            ),
                         ),
-                        size(
-                            px(f32::from(*width) / scale),
-                            px(f32::from(*height) / scale),
-                        ),
+                        gpui_color(symbol_color_with_alpha(symbol.color, *alpha)),
                     ),
-                    gpui_color(symbol_color_with_alpha(symbol.color, *alpha)),
-                )),
+                    blinking: symbol.blinking,
+                }),
                 SymbolPrimitive::Polygon { points, alpha } => {
-                    let mut points = points.iter();
-                    let Some(first) = points.next() else {
-                        continue;
+                    let context = DeviceRasterContext {
+                        cell_width: symbol.plan.width_device,
+                        cell_height: symbol.plan.height_device,
+                        origin,
+                        scale,
+                        color: symbol_color_with_alpha(symbol.color, *alpha),
+                        blinking: symbol.blinking,
                     };
-                    let mut builder = PathBuilder::fill();
-                    builder.move_to(point(
-                        origin.x + px(first.x / scale),
-                        origin.y + px(first.y / scale),
-                    ));
-                    for vertex in points {
-                        builder.line_to(point(
-                            origin.x + px(vertex.x / scale),
-                            origin.y + px(vertex.y / scale),
-                        ));
-                    }
-                    builder.close();
-                    if let Ok(path) = builder.build() {
-                        prepared
-                            .paths
-                            .push((path, symbol_color_with_alpha(symbol.color, *alpha)));
-                    }
+                    push_device_polygon_quads(&mut prepared, points, &context);
                 }
                 SymbolPrimitive::Stroke {
                     points,
                     thickness,
                     alpha,
                 } => {
-                    let mut points = points.iter();
-                    let Some(first) = points.next() else {
-                        continue;
+                    let context = DeviceRasterContext {
+                        cell_width: symbol.plan.width_device,
+                        cell_height: symbol.plan.height_device,
+                        origin,
+                        scale,
+                        color: symbol_color_with_alpha(symbol.color, *alpha),
+                        blinking: symbol.blinking,
                     };
-                    let mut builder = PathBuilder::stroke(px(f32::from(*thickness) / scale));
-                    builder.move_to(point(
-                        origin.x + px(first.x / scale),
-                        origin.y + px(first.y / scale),
-                    ));
-                    for vertex in points {
-                        builder.line_to(point(
-                            origin.x + px(vertex.x / scale),
-                            origin.y + px(vertex.y / scale),
-                        ));
-                    }
-                    if let Ok(path) = builder.build() {
-                        prepared
-                            .paths
-                            .push((path, symbol_color_with_alpha(symbol.color, *alpha)));
-                    }
+                    push_device_stroke_quads(&mut prepared, points, *thickness, &context);
                 }
             }
         }
     }
     prepared
+}
+
+struct DeviceRasterContext {
+    cell_width: u16,
+    cell_height: u16,
+    origin: gpui::Point<Pixels>,
+    scale: f32,
+    color: Color,
+    blinking: bool,
+}
+
+fn push_device_polygon_quads(
+    prepared: &mut PreparedDecorations,
+    points: &[DevicePoint],
+    context: &DeviceRasterContext,
+) {
+    if points.len() < 3 {
+        return;
+    }
+
+    let top = points
+        .iter()
+        .map(|point| point.y)
+        .fold(f32::INFINITY, f32::min)
+        .floor()
+        .max(0.0) as u16;
+    let bottom = points
+        .iter()
+        .map(|point| point.y)
+        .fold(f32::NEG_INFINITY, f32::max)
+        .ceil()
+        .min(f32::from(context.cell_height)) as u16;
+    let mut intersections = Vec::with_capacity(points.len());
+    for y in top..bottom {
+        intersections.clear();
+        let sample_y = f32::from(y) + 0.5;
+        for index in 0..points.len() {
+            let start = points[index];
+            let end = points[(index + 1) % points.len()];
+            if (start.y <= sample_y && end.y > sample_y)
+                || (end.y <= sample_y && start.y > sample_y)
+            {
+                intersections
+                    .push(start.x + (sample_y - start.y) * (end.x - start.x) / (end.y - start.y));
+            }
+        }
+        intersections.sort_by(f32::total_cmp);
+        for pair in intersections.chunks_exact(2) {
+            push_device_quad(
+                prepared,
+                pair[0],
+                f32::from(y),
+                pair[1] - pair[0],
+                1.0,
+                context,
+            );
+        }
+    }
+}
+
+fn push_device_stroke_quads(
+    prepared: &mut PreparedDecorations,
+    points: &[DevicePoint],
+    thickness: u16,
+    context: &DeviceRasterContext,
+) {
+    let thickness = f32::from(thickness.max(1));
+    let offset = (thickness / 2.0).floor();
+    let mut covered =
+        vec![false; usize::from(context.cell_width) * usize::from(context.cell_height)];
+    for segment in points.windows(2) {
+        let start = segment[0];
+        let end = segment[1];
+        let delta_x = end.x - start.x;
+        let delta_y = end.y - start.y;
+        let samples = (delta_x.abs().max(delta_y.abs()).ceil() as usize).max(1);
+        for sample in 0..=samples {
+            let progress = sample as f32 / samples as f32;
+            let left = ((start.x + delta_x * progress).round() - offset)
+                .clamp(0.0, (f32::from(context.cell_width) - thickness).max(0.0));
+            let top = ((start.y + delta_y * progress).round() - offset)
+                .clamp(0.0, (f32::from(context.cell_height) - thickness).max(0.0));
+            let right = (left + thickness).ceil().min(f32::from(context.cell_width)) as usize;
+            let bottom = (top + thickness).ceil().min(f32::from(context.cell_height)) as usize;
+            for y in top.floor() as usize..bottom {
+                for x in left.floor() as usize..right {
+                    covered[y * usize::from(context.cell_width) + x] = true;
+                }
+            }
+        }
+    }
+    push_covered_device_runs(prepared, &covered, context);
+}
+
+fn push_covered_device_runs(
+    prepared: &mut PreparedDecorations,
+    covered: &[bool],
+    context: &DeviceRasterContext,
+) {
+    let width = usize::from(context.cell_width);
+    for y in 0..usize::from(context.cell_height) {
+        let mut x = 0;
+        while x < width {
+            if !covered[y * width + x] {
+                x += 1;
+                continue;
+            }
+            let start = x;
+            while x < width && covered[y * width + x] {
+                x += 1;
+            }
+            push_device_quad(
+                prepared,
+                start as f32,
+                y as f32,
+                (x - start) as f32,
+                1.0,
+                context,
+            );
+        }
+    }
+}
+
+fn push_device_quad(
+    prepared: &mut PreparedDecorations,
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+    context: &DeviceRasterContext,
+) {
+    let left = x.clamp(0.0, f32::from(context.cell_width));
+    let top = y.clamp(0.0, f32::from(context.cell_height));
+    let right = (x + width).clamp(0.0, f32::from(context.cell_width));
+    let bottom = (y + height).clamp(0.0, f32::from(context.cell_height));
+    if right <= left || bottom <= top {
+        return;
+    }
+    prepared.quads.push(PreparedQuad {
+        quad: fill(
+            Bounds::new(
+                point(
+                    context.origin.x + px(left / context.scale),
+                    context.origin.y + px(top / context.scale),
+                ),
+                size(
+                    px((right - left) / context.scale),
+                    px((bottom - top) / context.scale),
+                ),
+            ),
+            gpui_color(context.color),
+        ),
+        blinking: context.blinking,
+    });
 }
 
 fn symbol_color_with_alpha(mut color: Color, primitive_alpha: u8) -> Color {
@@ -1361,7 +2164,10 @@ fn gpui_color(color: Color) -> gpui::Rgba {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
+
     use super::*;
+    use crate::ui::terminal_ime::layout_preedit;
 
     fn colors() -> crate::terminal::TerminalColorsSnapshot {
         let mut palette = [Color::rgb(0); 256];
@@ -1403,6 +2209,36 @@ mod tests {
             cell_width: px(8.0),
             line_height: px(20.0),
             scale_factor: 1.0,
+        }
+    }
+
+    fn prepared_row_key(cursor: Option<PreparedCursorKey>) -> PreparedRowKey {
+        PreparedRowKey {
+            grid_left: px(0.0),
+            row_top: px(0.0),
+            font_size: px(14.0),
+            cell_width: px(8.0),
+            line_height: px(20.0),
+            decoration_metrics: decoration_metrics(px(15.0), px(11.0), px(8.0), 2.0),
+            cursor,
+        }
+    }
+
+    fn prepared_preedit_key(layout: &PreeditLayout, visible_rows: usize) -> PreparedPreeditKey {
+        PreparedPreeditKey {
+            clusters: Arc::clone(&layout.clusters),
+            caret: layout.caret,
+            visible_rows,
+            grid_left: px(0.0),
+            grid_top: px(0.0),
+            font_family: "Menlo".into(),
+            font_size: px(14.0),
+            cell_width: px(8.0),
+            line_height: px(20.0),
+            foreground: Color::rgb(0xff_ff_ff),
+            background: Color::rgb(0),
+            caret_color: Color::rgb(0xff_ff_ff),
+            scale_factor_bits: 2.0f32.to_bits(),
         }
     }
 
@@ -1767,15 +2603,14 @@ mod tests {
                 .all(|span| span.color == colors().background && span.blinking)
         );
         let metrics = decoration_metrics(px(15.0), px(11.0), px(8.0), 2.0);
-        let hidden = prepare_decoration_geometry(
+        let prepared = prepare_decoration_geometry(
             &input.under_text_decorations,
             px(0.0),
             px(0.0),
             px(8.0),
             metrics,
-            false,
         );
-        assert!(hidden.quads.is_empty() && hidden.paths.is_empty());
+        assert!(prepared.quads.iter().all(|quad| quad.blinking));
 
         decorated.invisible = true;
         let invisible = Arc::<[CellSnapshot]>::from([decorated]);
@@ -1808,9 +2643,8 @@ mod tests {
             color: Color::rgb(0x12_34_56),
             blinking: false,
         };
-        let prepare = |kind| {
-            prepare_decoration_geometry(&[span(kind)], px(0.0), px(0.0), px(8.0), metrics, true)
-        };
+        let prepare =
+            |kind| prepare_decoration_geometry(&[span(kind)], px(0.0), px(0.0), px(8.0), metrics);
 
         let single = prepare(crate::terminal::TerminalUnderlineSnapshot::Single);
         let double = prepare(crate::terminal::TerminalUnderlineSnapshot::Double);
@@ -1818,22 +2652,23 @@ mod tests {
         let dotted = prepare(crate::terminal::TerminalUnderlineSnapshot::Dotted);
         let dashed = prepare(crate::terminal::TerminalUnderlineSnapshot::Dashed);
 
-        assert_eq!((single.quads.len(), single.paths.len()), (1, 0));
-        assert_eq!((double.quads.len(), double.paths.len()), (2, 0));
-        assert_eq!((curly.quads.len(), curly.paths.len()), (0, 1));
+        assert_eq!(single.quads.len(), 1);
+        assert_eq!(double.quads.len(), 2);
+        assert_eq!(curly.underlines.len(), 1);
+        assert!(curly.underlines[0].style.wavy);
         assert!(dotted.quads.len() > dashed.quads.len());
         assert!(dashed.quads.len() > single.quads.len());
         assert!(
             single
                 .quads
                 .iter()
-                .all(|quad| quad.bounds.right() <= px(16.0))
+                .all(|quad| quad.quad.bounds.right() <= px(16.0))
         );
         assert!(
             double
                 .quads
                 .iter()
-                .all(|quad| quad.bounds.right() <= px(16.0))
+                .all(|quad| quad.quad.bounds.right() <= px(16.0))
         );
     }
 
@@ -1972,7 +2807,7 @@ mod tests {
     }
 
     #[test]
-    fn symbol_prepaint_obeys_blink_phase_and_preserves_terminal_width() {
+    fn symbol_prepaint_preserves_blink_demand_and_terminal_width() {
         let mut block = cell("█");
         block.blinking = true;
         let mut tail = block.clone();
@@ -1981,13 +2816,13 @@ mod tests {
         let row = Arc::<[CellSnapshot]>::from([block, tail]);
         let input = prepare_row(&row, &colors(), &"Menlo".into(), None);
 
-        let hidden = prepare_symbol_geometry(&input.symbols, px(10.0), px(5.0), px(8.0), false);
-        let visible = prepare_symbol_geometry(&input.symbols, px(10.0), px(5.0), px(8.0), true);
+        let prepared = prepare_symbol_geometry(&input.symbols, px(10.0), px(5.0), px(8.0));
 
-        assert!(hidden.quads.is_empty() && hidden.paths.is_empty());
-        assert_eq!(visible.quads.len(), 1);
+        assert!(prepared.quads[0].blinking);
+        assert!(!text_fragment_visible(prepared.quads[0].blinking, false));
+        assert_eq!(prepared.quads.len(), 1);
         assert_eq!(
-            visible.quads[0].bounds,
+            prepared.quads[0].quad.bounds,
             Bounds::new(point(px(5.0), px(10.0)), size(px(16.0), px(20.0)))
         );
     }
@@ -1997,9 +2832,25 @@ mod tests {
         let row = Arc::<[CellSnapshot]>::from([cell("a"), cell("a"), cell("█")]);
         let input = prepare_row(&row, &colors(), &"Menlo".into(), None);
 
-        let visible = prepare_symbol_geometry(&input.symbols, px(10.0), px(5.0), px(8.25), true);
+        let visible = prepare_symbol_geometry(&input.symbols, px(10.0), px(5.0), px(8.25));
 
-        assert_eq!(visible.quads[0].bounds.origin.x, px(21.5));
+        assert_eq!(visible.quads[0].quad.bounds.origin.x, px(21.5));
+    }
+
+    #[test]
+    fn vector_symbols_prepare_flat_cell_local_quads() {
+        let row = Arc::<[CellSnapshot]>::from([cell("\u{e0b0}"), cell("\u{e0b1}")]);
+        let input = prepare_row(&row, &colors(), &"Menlo".into(), None);
+
+        let prepared = prepare_symbol_geometry(&input.symbols, px(10.0), px(5.0), px(8.0));
+
+        assert!(prepared.quads.len() > 2);
+        assert!(prepared.quads.iter().all(|prepared| {
+            prepared.quad.bounds.left() >= px(5.0)
+                && prepared.quad.bounds.right() <= px(21.0)
+                && prepared.quad.bounds.top() >= px(10.0)
+                && prepared.quad.bounds.bottom() <= px(30.0)
+        }));
     }
 
     #[test]
@@ -2054,6 +2905,167 @@ mod tests {
 
         assert!(Arc::ptr_eq(&first[0], &second[0]));
         assert!(!Arc::ptr_eq(&first[1], &second[1]));
+    }
+
+    #[test]
+    fn preedit_shape_cache_key_reuses_only_the_same_logical_cluster_snapshot() {
+        let layout = layout_preedit("かな", 0, 0, 80, 2);
+        let first = prepared_preedit_key(&layout, 24);
+        let second = prepared_preedit_key(&layout, 24);
+        let equal_content_new_snapshot = layout_preedit("かな", 0, 0, 80, 2);
+        let replaced = prepared_preedit_key(&equal_content_new_snapshot, 24);
+
+        assert_eq!(first, second);
+        assert_ne!(first, replaced);
+    }
+
+    #[test]
+    fn preedit_shape_cache_key_invalidates_when_visible_height_changes() {
+        let layout = layout_preedit("かな", 0, 0, 80, 2);
+        let first = prepared_preedit_key(&layout, 24);
+        let resized = prepared_preedit_key(&layout, 25);
+
+        assert_ne!(first, resized);
+    }
+
+    #[test]
+    fn blink_frames_reuse_the_stable_geometry_buffer_without_clone_or_rebuild() {
+        let source = Arc::new(prepare_row(
+            &Arc::from([cell("a")]),
+            &colors(),
+            &"Menlo".into(),
+            None,
+        ));
+        let builds = Cell::new(0);
+        let mut cached = None;
+        let stable = reuse_or_prepare_row(&mut cached, &source, prepared_row_key(None), || {
+            builds.set(builds.get() + 1);
+            PreparedRow {
+                text: Vec::new(),
+                symbols: PreparedDecorations::default(),
+                backgrounds: Vec::new(),
+                selections: Vec::new(),
+                under_text_decorations: PreparedDecorations {
+                    quads: vec![PreparedQuad {
+                        quad: fill(
+                            Bounds::new(point(px(0.0), px(0.0)), size(px(8.0), px(1.0))),
+                            gpui_color(Color::rgb(0xff_ff_ff)),
+                        ),
+                        blinking: true,
+                    }],
+                    underlines: Vec::new(),
+                },
+                over_text_decorations: PreparedDecorations::default(),
+                cursor_text: Vec::new(),
+                cursor_symbols: PreparedDecorations::default(),
+            }
+        });
+        let stable_buffer = stable.under_text_decorations.quads.as_ptr();
+
+        for _phase in [false, true] {
+            let stable = reuse_or_prepare_row(&mut cached, &source, prepared_row_key(None), || {
+                builds.set(builds.get() + 1);
+                panic!("blink phase must not rebuild stable row geometry")
+            });
+            let frame = PreparedFrameRow::new(Arc::clone(&stable));
+            assert!(Arc::ptr_eq(&stable, &frame.stable));
+            assert_eq!(
+                frame.stable.under_text_decorations.quads.as_ptr(),
+                stable_buffer
+            );
+        }
+
+        assert_eq!(builds.get(), 1);
+    }
+
+    #[test]
+    fn shaped_geometry_cache_invalidates_when_row_identity_changes() {
+        let first_source = Arc::new(prepare_row(
+            &Arc::from([cell("a")]),
+            &colors(),
+            &"Menlo".into(),
+            None,
+        ));
+        let second_source = Arc::new(prepare_row(
+            &Arc::from([cell("b")]),
+            &colors(),
+            &"Menlo".into(),
+            None,
+        ));
+        let mut cached = None;
+        let first = reuse_or_prepare_row(&mut cached, &first_source, prepared_row_key(None), || ());
+        let second =
+            reuse_or_prepare_row(&mut cached, &second_source, prepared_row_key(None), || ());
+
+        assert!(!Arc::ptr_eq(&first, &second));
+    }
+
+    #[test]
+    fn shaped_geometry_cache_invalidates_when_layout_geometry_changes() {
+        let source = Arc::new(prepare_row(
+            &Arc::from([cell("a")]),
+            &colors(),
+            &"Menlo".into(),
+            None,
+        ));
+        let mut cached = None;
+        let first_key = prepared_row_key(None);
+        let first = reuse_or_prepare_row(&mut cached, &source, first_key, || ());
+        let second = reuse_or_prepare_row(
+            &mut cached,
+            &source,
+            PreparedRowKey {
+                cell_width: px(9.0),
+                ..first_key
+            },
+            || (),
+        );
+
+        assert!(!Arc::ptr_eq(&first, &second));
+    }
+
+    #[test]
+    fn shaped_geometry_cache_limits_cursor_invalidation_to_the_cursor_row() {
+        let source = Arc::new(prepare_row(
+            &Arc::from([cell("a")]),
+            &colors(),
+            &"Menlo".into(),
+            None,
+        ));
+        let cursor = PreparedCursorKey {
+            position: CursorPositionSnapshot {
+                row: 0,
+                column: 0,
+                width_cells: 1,
+            },
+            style: CursorSnapshot {
+                visible: true,
+                ..CursorSnapshot::default()
+            },
+        };
+        let mut cursor_row = None;
+        let mut unchanged_row = None;
+        let before = reuse_or_prepare_row(&mut cursor_row, &source, prepared_row_key(None), || ());
+        let after = reuse_or_prepare_row(
+            &mut cursor_row,
+            &source,
+            prepared_row_key(Some(cursor)),
+            || (),
+        );
+        let unchanged_before =
+            reuse_or_prepare_row(&mut unchanged_row, &source, prepared_row_key(None), || ());
+        let unchanged_after =
+            reuse_or_prepare_row(&mut unchanged_row, &source, prepared_row_key(None), || {
+                panic!("a cursor on another row must not invalidate stable geometry")
+            });
+
+        assert_eq!(
+            (
+                Arc::ptr_eq(&before, &after),
+                Arc::ptr_eq(&unchanged_before, &unchanged_after),
+            ),
+            (false, true)
+        );
     }
 
     #[test]
