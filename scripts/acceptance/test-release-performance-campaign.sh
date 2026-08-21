@@ -909,7 +909,7 @@ write_lifecycle_receipts() {
     local subject="$1" identity="$2" intent="$3" tail="$4" workload="$5" events="$6"
     local ready="$7" quit="$8" exit_receipt="$9" native="${10}"
     local source="${11}" binary="${12}" token="${13}" ready_output="${14}" registration_output="${15}"
-    local helper="$SCRIPT_DIRECTORY/performance-subject-lifecycle.py"
+    local helper="${16}"
     local inspector="$SCRIPT_DIRECTORY/../inspect-release-performance-process.py"
     python3 - "$subject" "$identity" "$intent" "$tail" "$workload" "$events" "$ready" \
         "$quit" "$exit_receipt" "$native" "$source" "$binary" "$helper" "$inspector" "$token" \
@@ -984,12 +984,15 @@ build_causal_closure() {
     local exit_receipt="$TEMP_ROOT/$prefix-exit.tsv"
     local lifecycle_ready="$TEMP_ROOT/$prefix-lifecycle-ready.tsv"
     local lifecycle_registration="$TEMP_ROOT/$prefix-lifecycle-registration.tsv"
+    local lifecycle_helper="$TEMP_ROOT/$prefix-lifecycle-helper.py"
     local run_metadata="$TEMP_ROOT/$prefix-run.tsv"
     local trace_metadata="$TEMP_ROOT/$prefix-trace.tsv"
     local trace_archive="$TEMP_ROOT/$subject-ascii.trace"
     local run_session run_nonce
     run_session="$(awk -F '\t' '$1 == "session_id" {print $2}' "$intent")"
     run_nonce="$(awk -F '\t' '$1 == "nonce" {print $2}' "$intent")"
+    cp -- "$SCRIPT_DIRECTORY/performance-subject-lifecycle.py" "$lifecycle_helper"
+    chmod 0500 "$lifecycle_helper"
     printf 'fixture native driver binary: %s\n' "$prefix" > "$driver_binary"
     chmod 0500 "$driver_binary"
     write_window_identity "$subject" "$identity" "$window_identity"
@@ -1033,7 +1036,7 @@ build_causal_closure() {
         "$workload_metadata" "$workload_events" "$ready_receipt" "$quit_receipt" \
         "$exit_receipt" "$native_observation" \
         "$SCRIPT_DIRECTORY/performance-appkit-terminate.m" "$terminator_binary" \
-        "$quit_token" "$lifecycle_ready" "$lifecycle_registration"
+        "$quit_token" "$lifecycle_ready" "$lifecycle_registration" "$lifecycle_helper"
     "$SCRIPT_DIRECTORY/performance-tail-receipt.py" create \
         --campaign-secret-file "$CAMPAIGN_SECRET_FILE" \
         --campaign-id "$CAMPAIGN_ID" --session-id "$run_session" --nonce "$run_nonce" \
@@ -1074,7 +1077,14 @@ build_causal_closure() {
         --rss-samples "$rss_samples"
         --performance-lifecycle-ready-receipt "$lifecycle_ready"
         --performance-lifecycle-registration "$lifecycle_registration"
-        --subject-lifecycle-helper "$SCRIPT_DIRECTORY/performance-subject-lifecycle.py"
+        --subject-lifecycle-helper "$lifecycle_helper"
+        --common-lifecycle-helper "$SCRIPT_DIRECTORY/performance-subject-lifecycle.py"
+        --expected-common-lifecycle-helper-device \
+            "$(stat -f '%d' "$SCRIPT_DIRECTORY/performance-subject-lifecycle.py")"
+        --expected-common-lifecycle-helper-inode \
+            "$(stat -f '%i' "$SCRIPT_DIRECTORY/performance-subject-lifecycle.py")"
+        --expected-common-lifecycle-helper-sha256 \
+            "$(sha256 "$SCRIPT_DIRECTORY/performance-subject-lifecycle.py")"
         --appkit-terminator-source "$SCRIPT_DIRECTORY/performance-appkit-terminate.m"
         --appkit-terminator-binary "$terminator_binary"
         --output "$run_metadata"
@@ -1176,7 +1186,8 @@ run_case() {
         --subject-exit-receipt "$exit_receipt" \
         --performance-lifecycle-ready-receipt "$lifecycle_ready" \
         --performance-lifecycle-registration "$lifecycle_registration" \
-        --subject-lifecycle-helper "$SCRIPT_DIRECTORY/performance-subject-lifecycle.py" \
+        --subject-lifecycle-helper "$TEMP_ROOT/$causal_prefix-lifecycle-helper.py" \
+        --common-lifecycle-helper "$SCRIPT_DIRECTORY/performance-subject-lifecycle.py" \
         --appkit-terminator-source "$SCRIPT_DIRECTORY/performance-appkit-terminate.m" \
         --appkit-terminator-binary "$TEMP_ROOT/performance-appkit-terminate" \
         --plan-start-gate "$plan_start_gate" \
@@ -1881,6 +1892,7 @@ for pair_subject in spaceterm ghostty; do
         "--$pair_subject-workload-ready-receipt" "$pair_ready"
         "--$pair_subject-lifecycle-ready-receipt" "$TEMP_ROOT/$pair_subject-lifecycle-ready.tsv"
         "--$pair_subject-lifecycle-registration" "$TEMP_ROOT/$pair_subject-lifecycle-registration.tsv"
+        "--$pair_subject-lifecycle-helper" "$TEMP_ROOT/$pair_subject-lifecycle-helper.py"
         "--$pair_subject-tail-receipt" "$TEMP_ROOT/$pair_subject-tail.tsv"
         "--$pair_subject-quit-receipt" "$TEMP_ROOT/$pair_subject-quit.tsv"
         "--$pair_subject-exit-receipt" "$TEMP_ROOT/$pair_subject-exit.tsv"
@@ -1954,6 +1966,7 @@ for pair_subject in spaceterm ghostty; do
         "--$pair_subject-manual-video" "$MANUAL_VIDEO"
         "--$pair_subject-lifecycle-ready-receipt" "$TEMP_ROOT/$pair_subject-lifecycle-ready.tsv"
         "--$pair_subject-lifecycle-registration" "$TEMP_ROOT/$pair_subject-lifecycle-registration.tsv"
+        "--$pair_subject-lifecycle-helper" "$TEMP_ROOT/$pair_subject-lifecycle-helper.py"
         "--$pair_subject-case-report" \
             "$([[ "$pair_subject" == spaceterm ]] && printf '%s' "$SPACETERM_CASE_REPORT" || printf '%s' "$GHOSTTY_CASE_REPORT")"
     )

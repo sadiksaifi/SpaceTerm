@@ -34,6 +34,10 @@ RSS_SAMPLES=""
 PERFORMANCE_LIFECYCLE_READY_RECEIPT=""
 PERFORMANCE_LIFECYCLE_REGISTRATION=""
 SUBJECT_LIFECYCLE_HELPER=""
+COMMON_LIFECYCLE_HELPER=""
+EXPECTED_COMMON_LIFECYCLE_HELPER_DEVICE=""
+EXPECTED_COMMON_LIFECYCLE_HELPER_INODE=""
+EXPECTED_COMMON_LIFECYCLE_HELPER_SHA256=""
 APPKIT_TERMINATOR_SOURCE=""
 APPKIT_TERMINATOR_BINARY=""
 OUTPUT=""
@@ -56,6 +60,10 @@ Usage: $(basename -- "$0") --run-intent FILE --subject-identity FILE \\
   --workload-ready-receipt FILE \\
   --performance-lifecycle-ready-receipt FILE \\
   --performance-lifecycle-registration FILE --subject-lifecycle-helper FILE \\
+  --common-lifecycle-helper FILE \\
+  --expected-common-lifecycle-helper-device INTEGER \\
+  --expected-common-lifecycle-helper-inode INTEGER \\
+  --expected-common-lifecycle-helper-sha256 SHA256 \\
   --appkit-terminator-source FILE --appkit-terminator-binary FILE \\
   --output ABSENT_FILE [SPACETERM NATIVE CLOSURE]
 
@@ -120,6 +128,10 @@ while (( $# > 0 )); do
         --performance-lifecycle-ready-receipt) PERFORMANCE_LIFECYCLE_READY_RECEIPT="${2:-}"; shift ;;
         --performance-lifecycle-registration) PERFORMANCE_LIFECYCLE_REGISTRATION="${2:-}"; shift ;;
         --subject-lifecycle-helper) SUBJECT_LIFECYCLE_HELPER="${2:-}"; shift ;;
+        --common-lifecycle-helper) COMMON_LIFECYCLE_HELPER="${2:-}"; shift ;;
+        --expected-common-lifecycle-helper-device) EXPECTED_COMMON_LIFECYCLE_HELPER_DEVICE="${2:-}"; shift ;;
+        --expected-common-lifecycle-helper-inode) EXPECTED_COMMON_LIFECYCLE_HELPER_INODE="${2:-}"; shift ;;
+        --expected-common-lifecycle-helper-sha256) EXPECTED_COMMON_LIFECYCLE_HELPER_SHA256="${2:-}"; shift ;;
         --appkit-terminator-source) APPKIT_TERMINATOR_SOURCE="${2:-}"; shift ;;
         --appkit-terminator-binary) APPKIT_TERMINATOR_BINARY="${2:-}"; shift ;;
         --output) OUTPUT="${2:-}"; shift ;;
@@ -129,7 +141,7 @@ while (( $# > 0 )); do
     shift
 done
 
-for command in awk chmod ln mkdir rm shasum; do
+for command in awk chmod ln mkdir rm shasum stat; do
     command -v "$command" >/dev/null 2>&1 || die "required command not found: $command"
 done
 [[ -f "$RUN_INTENT" && ! -L "$RUN_INTENT" \
@@ -142,7 +154,8 @@ for input in "$CAMPAIGN_SECRET_FILE" "$TRACE_PROVISIONAL_RECEIPT" \
     "$SCENARIO_PLAN" "$PLAN_START_GATE" \
     "$WORKLOAD_METADATA" "$WORKLOAD_EVENTS" "$WORKLOAD_READY_RECEIPT" "$RSS_SAMPLES" \
     "$PERFORMANCE_LIFECYCLE_READY_RECEIPT" "$PERFORMANCE_LIFECYCLE_REGISTRATION" \
-    "$SUBJECT_LIFECYCLE_HELPER" "$APPKIT_TERMINATOR_SOURCE" "$APPKIT_TERMINATOR_BINARY"; do
+    "$SUBJECT_LIFECYCLE_HELPER" "$COMMON_LIFECYCLE_HELPER" \
+    "$APPKIT_TERMINATOR_SOURCE" "$APPKIT_TERMINATOR_BINARY"; do
     [[ -f "$input" && ! -L "$input" ]] || die "causal run-closure artifact is unavailable"
 done
 [[ -n "$OUTPUT" && ! -e "$OUTPUT" && ! -L "$OUTPUT" ]] \
@@ -170,11 +183,33 @@ canonical_path() {
 [[ "$(canonical_path "$DRIVER_SOURCE")" == "$SCRIPT_DIRECTORY/performance-driver.m" \
     && "$(canonical_path "$DRIVER_CONTROLLER")" \
         == "$SCRIPT_DIRECTORY/run-native-performance-scenario.sh" \
-    && "$(canonical_path "$SUBJECT_LIFECYCLE_HELPER")" \
+    && "$(canonical_path "$COMMON_LIFECYCLE_HELPER")" \
         == "$SCRIPT_DIRECTORY/performance-subject-lifecycle.py" \
     && "$(canonical_path "$APPKIT_TERMINATOR_SOURCE")" \
         == "$SCRIPT_DIRECTORY/performance-appkit-terminate.m" ]] \
     || die "driver or lifecycle source is not canonical"
+run_directory="$(cd -- "$(dirname -- "$RUN_INTENT")" && pwd -P)" \
+    || die "run directory is unavailable"
+subject_lifecycle_helper_path="$(canonical_path "$SUBJECT_LIFECYCLE_HELPER")" \
+    || die "run-owned lifecycle helper is unavailable"
+common_lifecycle_helper_path="$(canonical_path "$COMMON_LIFECYCLE_HELPER")" \
+    || die "common lifecycle helper is unavailable"
+[[ "$(dirname -- "$subject_lifecycle_helper_path")" == "$run_directory" \
+    && "$subject_lifecycle_helper_path" != "$common_lifecycle_helper_path" \
+    && "$EXPECTED_COMMON_LIFECYCLE_HELPER_DEVICE" =~ ^[1-9][0-9]*$ \
+    && "$EXPECTED_COMMON_LIFECYCLE_HELPER_INODE" =~ ^[1-9][0-9]*$ \
+    && "$EXPECTED_COMMON_LIFECYCLE_HELPER_SHA256" =~ ^[0-9a-f]{64}$ \
+    && "$(stat -f '%d' "$COMMON_LIFECYCLE_HELPER")" \
+        == "$EXPECTED_COMMON_LIFECYCLE_HELPER_DEVICE" \
+    && "$(stat -f '%i' "$COMMON_LIFECYCLE_HELPER")" \
+        == "$EXPECTED_COMMON_LIFECYCLE_HELPER_INODE" \
+    && "$(sha256 "$COMMON_LIFECYCLE_HELPER")" \
+        == "$EXPECTED_COMMON_LIFECYCLE_HELPER_SHA256" \
+    && "$(sha256 "$SUBJECT_LIFECYCLE_HELPER")" \
+        == "$EXPECTED_COMMON_LIFECYCLE_HELPER_SHA256" \
+    && "$(stat -f '%d:%i' "$SUBJECT_LIFECYCLE_HELPER")" \
+        != "$EXPECTED_COMMON_LIFECYCLE_HELPER_DEVICE:$EXPECTED_COMMON_LIFECYCLE_HELPER_INODE" ]] \
+    || die "run-owned lifecycle helper does not bind the frozen canonical source"
 readonly GATE_KEYS="format_version campaign_id session_id nonce ready_receipt_sha256 plan_start_continuous_ns start_gate_hmac_sha256"
 exact_schema "$PLAN_START_GATE" "$GATE_KEYS" 7 || die "plan start gate schema is invalid"
 plan_start_continuous_ns="$(kv "$PLAN_START_GATE" plan_start_continuous_ns)"

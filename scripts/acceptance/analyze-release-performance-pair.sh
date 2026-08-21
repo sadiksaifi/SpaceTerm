@@ -50,6 +50,7 @@ SPACETERM_NATIVE_LAUNCH_OBSERVATION=""
 SPACETERM_NATIVE_PROVISIONAL_OBSERVATION=""
 SPACETERM_LIFECYCLE_READY_RECEIPT=""
 SPACETERM_LIFECYCLE_REGISTRATION=""
+SPACETERM_LIFECYCLE_HELPER=""
 SPACETERM_CASE_REPORT=""
 
 GHOSTTY_SUBJECT_IDENTITY=""
@@ -79,6 +80,7 @@ GHOSTTY_MANUAL_SCREENSHOT=""
 GHOSTTY_MANUAL_VIDEO=""
 GHOSTTY_LIFECYCLE_READY_RECEIPT=""
 GHOSTTY_LIFECYCLE_REGISTRATION=""
+GHOSTTY_LIFECYCLE_HELPER=""
 GHOSTTY_CASE_REPORT=""
 COMMON_LIFECYCLE_HELPER=""
 APPKIT_TERMINATOR_SOURCE=""
@@ -108,8 +110,9 @@ SpaceTerm additionally requires prefixed --runtime-samples, --runtime-events,
 --runtime-metadata, --failure-actions, --native-launch-observation, and
 --native-provisional-observation.
 
-Both subjects also require prefixed --lifecycle-ready-receipt and
---lifecycle-registration. The pair requires --common-lifecycle-helper,
+Both subjects also require prefixed --lifecycle-ready-receipt,
+--lifecycle-registration, and the run-owned --lifecycle-helper. The pair
+requires --common-lifecycle-helper,
 --appkit-terminator-source, and --appkit-terminator-binary.
 EOF
 }
@@ -182,6 +185,7 @@ while (( $# > 0 )); do
         --spaceterm-native-provisional-observation) SPACETERM_NATIVE_PROVISIONAL_OBSERVATION="${2:-}"; shift ;;
         --spaceterm-lifecycle-ready-receipt) SPACETERM_LIFECYCLE_READY_RECEIPT="${2:-}"; shift ;;
         --spaceterm-lifecycle-registration) SPACETERM_LIFECYCLE_REGISTRATION="${2:-}"; shift ;;
+        --spaceterm-lifecycle-helper) SPACETERM_LIFECYCLE_HELPER="${2:-}"; shift ;;
         --spaceterm-case-report) SPACETERM_CASE_REPORT="${2:-}"; shift ;;
         --ghostty-subject-identity) GHOSTTY_SUBJECT_IDENTITY="${2:-}"; shift ;;
         --ghostty-run-intent) GHOSTTY_RUN_INTENT="${2:-}"; shift ;;
@@ -210,6 +214,7 @@ while (( $# > 0 )); do
         --ghostty-manual-video) GHOSTTY_MANUAL_VIDEO="${2:-}"; shift ;;
         --ghostty-lifecycle-ready-receipt) GHOSTTY_LIFECYCLE_READY_RECEIPT="${2:-}"; shift ;;
         --ghostty-lifecycle-registration) GHOSTTY_LIFECYCLE_REGISTRATION="${2:-}"; shift ;;
+        --ghostty-lifecycle-helper) GHOSTTY_LIFECYCLE_HELPER="${2:-}"; shift ;;
         --ghostty-case-report) GHOSTTY_CASE_REPORT="${2:-}"; shift ;;
         --common-lifecycle-helper) COMMON_LIFECYCLE_HELPER="${2:-}"; shift ;;
         --appkit-terminator-source) APPKIT_TERMINATOR_SOURCE="${2:-}"; shift ;;
@@ -254,6 +259,7 @@ pair_arguments=(
     --spaceterm-workload-ready-receipt "$SPACETERM_READY_RECEIPT"
     --spaceterm-lifecycle-ready-receipt "$SPACETERM_LIFECYCLE_READY_RECEIPT"
     --spaceterm-lifecycle-registration "$SPACETERM_LIFECYCLE_REGISTRATION"
+    --spaceterm-lifecycle-helper "$SPACETERM_LIFECYCLE_HELPER"
     --spaceterm-case-report "$SPACETERM_CASE_REPORT"
     --spaceterm-trace-metadata "$SPACETERM_TRACE_METADATA"
     --spaceterm-trace-archive "$(dirname -- "$SPACETERM_TRACE_METADATA")/spaceterm-$SCENARIO.trace"
@@ -280,6 +286,7 @@ pair_arguments=(
     --ghostty-workload-ready-receipt "$GHOSTTY_READY_RECEIPT"
     --ghostty-lifecycle-ready-receipt "$GHOSTTY_LIFECYCLE_READY_RECEIPT"
     --ghostty-lifecycle-registration "$GHOSTTY_LIFECYCLE_REGISTRATION"
+    --ghostty-lifecycle-helper "$GHOSTTY_LIFECYCLE_HELPER"
     --ghostty-case-report "$GHOSTTY_CASE_REPORT"
     --ghostty-trace-metadata "$GHOSTTY_TRACE_METADATA"
     --ghostty-trace-archive "$(dirname -- "$GHOSTTY_TRACE_METADATA")/ghostty-$SCENARIO.trace"
@@ -385,7 +392,9 @@ run_case() {
             "$([[ "$subject" == spaceterm ]] && printf '%s' "$SPACETERM_LIFECYCLE_READY_RECEIPT" || printf '%s' "$GHOSTTY_LIFECYCLE_READY_RECEIPT")"
         --performance-lifecycle-registration \
             "$([[ "$subject" == spaceterm ]] && printf '%s' "$SPACETERM_LIFECYCLE_REGISTRATION" || printf '%s' "$GHOSTTY_LIFECYCLE_REGISTRATION")"
-        --subject-lifecycle-helper "$COMMON_LIFECYCLE_HELPER"
+        --subject-lifecycle-helper \
+            "$([[ "$subject" == spaceterm ]] && printf '%s' "$SPACETERM_LIFECYCLE_HELPER" || printf '%s' "$GHOSTTY_LIFECYCLE_HELPER")"
+        --common-lifecycle-helper "$COMMON_LIFECYCLE_HELPER"
         --appkit-terminator-source "$APPKIT_TERMINATOR_SOURCE"
         --appkit-terminator-binary "$APPKIT_TERMINATOR_BINARY"
         --manual-artifacts "$manual" --manual-screenshot "$screenshot" --manual-video "$video"

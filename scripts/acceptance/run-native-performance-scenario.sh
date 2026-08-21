@@ -63,6 +63,7 @@ LIFECYCLE_SOURCE_FD=""
 LIFECYCLE_INSPECTOR_FD=""
 LIFECYCLE_TERMINATOR_FD=""
 LIFECYCLE_STARTUP_FD=""
+LIFECYCLE_HELPER_COPY=""
 # Fixed descriptors are required because the system Bash 3.2 does not support
 # dynamic `exec {name}<file` redirections. They remain open across the process
 # group launcher so the lifecycle helper and bridge execute the pinned vnodes.
@@ -257,6 +258,45 @@ cleanup_temp() {
     fi
 }
 
+publish_lifecycle_helper_copy() {
+    LIFECYCLE_HELPER_COPY="$RUN_DIRECTORY/performance-subject-lifecycle.py"
+    require_absent_output "$LIFECYCLE_HELPER_COPY" lifecycle-helper-copy
+    /usr/bin/python3 - "$SUBJECT_LIFECYCLE" "$LIFECYCLE_HELPER_COPY" <<'PY' \
+        || abort_run lifecycle-helper-copy-publication-failed
+import os, pathlib, stat, sys
+source, target = map(pathlib.Path, sys.argv[1:])
+before = source.lstat()
+if not stat.S_ISREG(before.st_mode) or stat.S_ISLNK(before.st_mode) or before.st_mode & 0o022:
+    raise SystemExit(1)
+source_fd = os.open(source, os.O_RDONLY | os.O_NOFOLLOW)
+target_fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o500)
+try:
+    opened = os.fstat(source_fd)
+    while True:
+        chunk = os.read(source_fd, 1024 * 1024)
+        if not chunk:
+            break
+        offset = 0
+        while offset < len(chunk):
+            written = os.write(target_fd, chunk[offset:])
+            if written <= 0:
+                raise OSError("short-write")
+            offset += written
+    after = os.fstat(source_fd)
+    fields = ("st_dev", "st_ino", "st_mode", "st_uid", "st_nlink", "st_size",
+              "st_mtime_ns", "st_ctime_ns")
+    if any(getattr(before, key) != getattr(other, key)
+           for other in (opened, after, source.lstat()) for key in fields):
+        raise OSError("source-changed")
+    os.fchmod(target_fd, 0o500)
+    os.fsync(target_fd)
+finally:
+    os.close(source_fd)
+    os.close(target_fd)
+PY
+    require_immutable_file "$LIFECYCLE_HELPER_COPY" lifecycle-helper-copy
+}
+
 on_signal() {
     EXIT_TRAP_ACTIVE=false
     trap - EXIT INT TERM HUP
@@ -403,6 +443,8 @@ verify_controller_toolchain() {
         && "$(sha256 "$RUN_FINALIZER")" == "$RUN_FINALIZER_SHA256" \
         && "$(sha256 "$NATIVE_CLOSURE_VERIFIER")" == "$NATIVE_CLOSURE_VERIFIER_SHA256" \
         && "$(sha256 "$SUBJECT_LIFECYCLE")" == "$SUBJECT_LIFECYCLE_SHA256" \
+        && "$(stat -f '%d:%i' "$SUBJECT_LIFECYCLE")" == \
+            "$SUBJECT_LIFECYCLE_DEVICE:$SUBJECT_LIFECYCLE_INODE" \
         && "$(sha256 "$APPKIT_TERMINATOR_SOURCE")" == "$APPKIT_TERMINATOR_SOURCE_SHA256" \
         && "$(sha256 "$APPKIT_TERMINATOR")" == "$APPKIT_TERMINATOR_BINARY_SHA256" \
         && "$(stat -f '%d:%i' "$APPKIT_TERMINATOR_SOURCE")" == \
@@ -544,7 +586,8 @@ start_subject_lifecycle() {
         [[ ! -e "/dev/fd/$descriptor" ]] \
             || abort_run "lifecycle-reserved-fd-$descriptor-occupied"
     done
-    exec 6< "$SUBJECT_LIFECYCLE" \
+    publish_lifecycle_helper_copy
+    exec 6< "$LIFECYCLE_HELPER_COPY" \
         || abort_run lifecycle-source-fd-open-failed
     LIFECYCLE_SOURCE_FD=$LIFECYCLE_SOURCE_FD_NUMBER
     exec 7< "$TRACE_INSPECTOR" \
@@ -561,8 +604,7 @@ start_subject_lifecycle() {
         || abort_run lifecycle-startup-fd-open-failed
     LIFECYCLE_STARTUP_FD=$LIFECYCLE_STARTUP_FD_NUMBER
     rm -- "$startup_fifo"
-    spawn_process_group /bin/sh -c \
-        'exec /usr/bin/python3 - "$@" <&6' performance-subject-lifecycle \
+    spawn_process_group /usr/bin/python3 "$LIFECYCLE_HELPER_COPY" \
         --subject-identity "$SUBJECT_IDENTITY" \
         --campaign-secret-file "$CAMPAIGN_SECRET_FILE" \
         --campaign-id "$CAMPAIGN_ID" --session-id "$SESSION_ID" --nonce "$NONCE" \
@@ -592,9 +634,12 @@ start_subject_lifecycle() {
         --expected-appkit-terminator-binary-sha256 "$APPKIT_TERMINATOR_BINARY_SHA256" \
         --appkit-terminator-fd "$LIFECYCLE_TERMINATOR_FD" \
         --self-source-fd "$LIFECYCLE_SOURCE_FD" \
-        --expected-lifecycle-helper-device "$(stat -f '%d' "$SUBJECT_LIFECYCLE")" \
-        --expected-lifecycle-helper-inode "$(stat -f '%i' "$SUBJECT_LIFECYCLE")" \
+        --self-source-path "$LIFECYCLE_HELPER_COPY" \
+        --expected-lifecycle-helper-device "$(stat -f '%d' "$LIFECYCLE_HELPER_COPY")" \
+        --expected-lifecycle-helper-inode "$(stat -f '%i' "$LIFECYCLE_HELPER_COPY")" \
         --expected-lifecycle-helper-sha256 "$SUBJECT_LIFECYCLE_SHA256" \
+        --tail-receipt-tool "$TAIL_RECEIPT_TOOL" \
+        --workload-ready-verifier "$WORKLOAD_READY_VERIFIER" \
         --startup-command-fd "$LIFECYCLE_STARTUP_FD" \
         --timeout-seconds "$lifecycle_timeout_seconds" \
         || abort_run lifecycle-process-group-launch-failed
@@ -620,7 +665,7 @@ start_subject_lifecycle() {
         "$APPKIT_TERMINATOR_SOURCE_DEVICE" "$APPKIT_TERMINATOR_SOURCE_INODE" \
         "$APPKIT_TERMINATOR_SOURCE_SHA256" "$APPKIT_TERMINATOR_BINARY_DEVICE" \
         "$APPKIT_TERMINATOR_BINARY_INODE" "$APPKIT_TERMINATOR_BINARY_SHA256" \
-        "$(stat -f '%d' "$SUBJECT_LIFECYCLE")" "$(stat -f '%i' "$SUBJECT_LIFECYCLE")" \
+        "$(stat -f '%d' "$LIFECYCLE_HELPER_COPY")" "$(stat -f '%i' "$LIFECYCLE_HELPER_COPY")" \
         "$SUBJECT_LIFECYCLE_SHA256" "$(stat -f '%d' "$TRACE_INSPECTOR")" \
         "$(stat -f '%i' "$TRACE_INSPECTOR")" "$TRACE_INSPECTOR_SHA256" \
         "$PERFORMANCE_LIFECYCLE_CONTROL" <<'PY' \
@@ -690,7 +735,7 @@ register_subject_lifecycle() {
         "$APPKIT_TERMINATOR_SOURCE_DEVICE" "$APPKIT_TERMINATOR_SOURCE_INODE" \
         "$APPKIT_TERMINATOR_SOURCE_SHA256" "$APPKIT_TERMINATOR_BINARY_DEVICE" \
         "$APPKIT_TERMINATOR_BINARY_INODE" "$APPKIT_TERMINATOR_BINARY_SHA256" \
-        "$(stat -f '%d' "$SUBJECT_LIFECYCLE")" "$(stat -f '%i' "$SUBJECT_LIFECYCLE")" \
+        "$(stat -f '%d' "$LIFECYCLE_HELPER_COPY")" "$(stat -f '%i' "$LIFECYCLE_HELPER_COPY")" \
         "$SUBJECT_LIFECYCLE_SHA256" "$(stat -f '%d' "$TRACE_INSPECTOR")" \
         "$(stat -f '%i' "$TRACE_INSPECTOR")" "$TRACE_INSPECTOR_SHA256" \
         "$bridge_pid" "$bridge_start" <<'PY' \
@@ -982,6 +1027,8 @@ SUBJECT_EXIT_VERIFIER_SHA256="$(sha256 "$SUBJECT_EXIT_VERIFIER")"
 RUN_FINALIZER_SHA256="$(sha256 "$RUN_FINALIZER")"
 NATIVE_CLOSURE_VERIFIER_SHA256="$(sha256 "$NATIVE_CLOSURE_VERIFIER")"
 SUBJECT_LIFECYCLE_SHA256="$(sha256 "$SUBJECT_LIFECYCLE")"
+SUBJECT_LIFECYCLE_DEVICE="$(stat -f '%d' "$SUBJECT_LIFECYCLE")"
+SUBJECT_LIFECYCLE_INODE="$(stat -f '%i' "$SUBJECT_LIFECYCLE")"
 APPKIT_TERMINATOR_SOURCE_DEVICE="$(stat -f '%d' "$APPKIT_TERMINATOR_SOURCE")"
 APPKIT_TERMINATOR_SOURCE_INODE="$(stat -f '%i' "$APPKIT_TERMINATOR_SOURCE")"
 APPKIT_TERMINATOR_SOURCE_SHA256="$(sha256 "$APPKIT_TERMINATOR_SOURCE")"
@@ -994,7 +1041,7 @@ readonly WORKLOAD_READY_VERIFIER_SHA256 WORKLOAD_AUTH_VERIFIER_SHA256
 readonly DRIVER_RECEIPT_TOOL_SHA256
 readonly TAIL_RECEIPT_TOOL_SHA256 SUBJECT_EXIT_VERIFIER_SHA256 RUN_FINALIZER_SHA256
 readonly NATIVE_CLOSURE_VERIFIER_SHA256
-readonly SUBJECT_LIFECYCLE_SHA256
+readonly SUBJECT_LIFECYCLE_SHA256 SUBJECT_LIFECYCLE_DEVICE SUBJECT_LIFECYCLE_INODE
 readonly APPKIT_TERMINATOR_SOURCE_DEVICE APPKIT_TERMINATOR_SOURCE_INODE
 readonly APPKIT_TERMINATOR_SOURCE_SHA256 APPKIT_TERMINATOR_BINARY_DEVICE
 readonly APPKIT_TERMINATOR_BINARY_INODE APPKIT_TERMINATOR_BINARY_SHA256
@@ -1344,7 +1391,11 @@ finalizer_arguments=(
     --rss-samples "$RSS_OUTPUT"
     --performance-lifecycle-ready-receipt "$PERFORMANCE_LIFECYCLE_READY_RECEIPT"
     --performance-lifecycle-registration "$PERFORMANCE_LIFECYCLE_REGISTRATION"
-    --subject-lifecycle-helper "$SUBJECT_LIFECYCLE"
+    --subject-lifecycle-helper "$LIFECYCLE_HELPER_COPY"
+    --common-lifecycle-helper "$SUBJECT_LIFECYCLE"
+    --expected-common-lifecycle-helper-device "$SUBJECT_LIFECYCLE_DEVICE"
+    --expected-common-lifecycle-helper-inode "$SUBJECT_LIFECYCLE_INODE"
+    --expected-common-lifecycle-helper-sha256 "$SUBJECT_LIFECYCLE_SHA256"
     --appkit-terminator-source "$APPKIT_TERMINATOR_SOURCE"
     --appkit-terminator-binary "$APPKIT_TERMINATOR"
 )

@@ -202,10 +202,6 @@ def expected_tool(args: argparse.Namespace) -> tuple[ToolIdentity, ToolIdentity]
                 or identity.device != device or identity.inode != inode \
                 or identity.sha256 != sha256:
             raise Invalid("terminator-tool-provenance")
-    if os.environ.get("SPACETERM_PERFORMANCE_TEST_MODE") != "1":
-        canonical_source = Path(__file__).resolve().with_name("performance-appkit-terminate.m")
-        if source.path.resolve(strict=True) != canonical_source:
-            raise Invalid("non-production-terminator-source")
     return source, binary
 
 
@@ -392,13 +388,12 @@ def start_termination_bridge(args: argparse.Namespace, subject: dict[str, str],
             raise Invalid("normal-termination-refused")
         return None, -1, "1:1"
     read_fd, write_fd = os.pipe()
-    pinned_executable = f"/dev/fd/{args.appkit_terminator_fd}"
     process = subprocess.Popen([args.appkit_terminator, "--pid", subject["process_pid"],
         "--process-start-identity", subject["process_start_identity"],
         "--bundle-identifier", subject["bundle_identifier"],
         "--executable", subject["executable_path"],
         "--timeout-seconds", str(min(args.timeout_seconds, 120)),
-        "--command-fd", str(read_fd)], executable=pinned_executable,
+        "--command-fd", str(read_fd)], executable=args.appkit_terminator,
         pass_fds=(read_fd, args.appkit_terminator_fd))
     os.close(read_fd)
     deadline = time.monotonic() + 5
@@ -469,10 +464,13 @@ def arguments() -> argparse.Namespace:
     parser.add_argument("--expected-appkit-terminator-binary-sha256", required=True)
     parser.add_argument("--appkit-terminator-fd", required=True, type=int)
     parser.add_argument("--self-source-fd", required=True, type=int)
+    parser.add_argument("--self-source-path", required=True)
     parser.add_argument("--expected-lifecycle-helper-device", required=True, type=int)
     parser.add_argument("--expected-lifecycle-helper-inode", required=True, type=int)
     parser.add_argument("--expected-lifecycle-helper-sha256", required=True)
     parser.add_argument("--startup-command-fd", required=True, type=int)
+    parser.add_argument("--tail-receipt-tool", required=True)
+    parser.add_argument("--workload-ready-verifier", required=True)
     return parser.parse_args()
 
 
@@ -493,7 +491,7 @@ def main() -> int:
         if len(secret) < 32:
             raise Invalid("secret")
         terminator_source, terminator_binary = expected_tool(args)
-        lifecycle_helper = snapshot_fd(args.self_source_fd, str(Path(__file__).resolve()))
+        lifecycle_helper = snapshot_fd(args.self_source_fd, args.self_source_path)
         if lifecycle_helper.device != args.expected_lifecycle_helper_device \
                 or lifecycle_helper.inode != args.expected_lifecycle_helper_inode \
                 or lifecycle_helper.sha256 != args.expected_lifecycle_helper_sha256:
@@ -593,7 +591,7 @@ def main() -> int:
         workload_data = read(args.workload_metadata)
         workload, _ = parse(workload_data, WORKLOAD_KEYS)
         tail_completed = tail["tail_completed_continuous_ns"]
-        subprocess.run([str(Path(__file__).with_name("performance-tail-receipt.py")), "verify",
+        subprocess.run([args.tail_receipt_tool, "verify",
             "--campaign-secret-file", args.campaign_secret_file, "--campaign-id", args.campaign_id,
             "--session-id", args.session_id, "--nonce", args.nonce,
             "--quit-token", registration["registration_token"], "--run-intent", registration["run_intent_path"],
@@ -607,7 +605,7 @@ def main() -> int:
             "--appkit-terminator-source", args.appkit_terminator_source,
             "--appkit-terminator-binary", args.appkit_terminator,
             "--tail-completed-continuous-ns", tail_completed, "--receipt", str(tail_path)], check=True)
-        subprocess.run([str(Path(__file__).with_name("verify-performance-workload-ready.py")),
+        subprocess.run([args.workload_ready_verifier,
             "--ready-receipt", args.workload_ready_receipt, "--events", args.workload_events,
             "--subject-identity", args.subject_identity,
             "--campaign-secret-file", args.campaign_secret_file,
@@ -625,7 +623,7 @@ def main() -> int:
         request_normal_termination(bridge_process, bridge_write_fd)
         bridge_process = None; bridge_write_fd = -1
         process_absent(args, subject, deadline); exited_ns = clock_ns()
-        if snapshot_fd(args.self_source_fd, str(Path(__file__).resolve())) != lifecycle_helper \
+        if snapshot_fd(args.self_source_fd, args.self_source_path) != lifecycle_helper \
                 or snapshot_fd(args.process_inspector_fd, args.process_inspector) != process_inspector \
                 or snapshot_fd(args.appkit_terminator_fd, args.appkit_terminator) != terminator_binary:
             raise Invalid("retained-tool-fd-changed-after-termination")

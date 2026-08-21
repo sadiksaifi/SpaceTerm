@@ -40,6 +40,7 @@ SUBJECT_EXIT_RECEIPT=""
 PERFORMANCE_LIFECYCLE_READY_RECEIPT=""
 PERFORMANCE_LIFECYCLE_REGISTRATION=""
 SUBJECT_LIFECYCLE_HELPER=""
+COMMON_LIFECYCLE_HELPER=""
 APPKIT_TERMINATOR_SOURCE=""
 APPKIT_TERMINATOR_BINARY=""
 PLAN_START_GATE=""
@@ -80,6 +81,7 @@ Usage: $(basename -- "$0") --subject spaceterm|ghostty --scenario NAME \\
   --subject-exit-receipt FILE \\
   --performance-lifecycle-ready-receipt FILE \\
   --performance-lifecycle-registration FILE --subject-lifecycle-helper FILE \\
+  --common-lifecycle-helper FILE \\
   --appkit-terminator-source FILE --appkit-terminator-binary FILE \\
   --plan-start-gate FILE \\
   --manual-artifacts FILE --manual-screenshot FILE --manual-video FILE \
@@ -292,6 +294,7 @@ while (( $# > 0 )); do
         --performance-lifecycle-ready-receipt) PERFORMANCE_LIFECYCLE_READY_RECEIPT="${2:-}"; shift ;;
         --performance-lifecycle-registration) PERFORMANCE_LIFECYCLE_REGISTRATION="${2:-}"; shift ;;
         --subject-lifecycle-helper) SUBJECT_LIFECYCLE_HELPER="${2:-}"; shift ;;
+        --common-lifecycle-helper) COMMON_LIFECYCLE_HELPER="${2:-}"; shift ;;
         --appkit-terminator-source) APPKIT_TERMINATOR_SOURCE="${2:-}"; shift ;;
         --appkit-terminator-binary) APPKIT_TERMINATOR_BINARY="${2:-}"; shift ;;
         --plan-start-gate) PLAN_START_GATE="${2:-}"; shift ;;
@@ -346,6 +349,7 @@ require_file subject-exit-receipt "$SUBJECT_EXIT_RECEIPT"
 require_file performance-lifecycle-ready-receipt "$PERFORMANCE_LIFECYCLE_READY_RECEIPT"
 require_file performance-lifecycle-registration "$PERFORMANCE_LIFECYCLE_REGISTRATION"
 require_file subject-lifecycle-helper "$SUBJECT_LIFECYCLE_HELPER"
+require_file common-lifecycle-helper "$COMMON_LIFECYCLE_HELPER"
 require_file appkit-terminator-source "$APPKIT_TERMINATOR_SOURCE"
 require_file appkit-terminator-binary "$APPKIT_TERMINATOR_BINARY"
 require_file plan-start-gate "$PLAN_START_GATE"
@@ -365,11 +369,19 @@ canonical_path() {
 [[ "$(canonical_path "$DRIVER_SOURCE")" == "$SCRIPT_DIRECTORY/performance-driver.m" \
     && "$(canonical_path "$DRIVER_CONTROLLER")" \
         == "$SCRIPT_DIRECTORY/run-native-performance-scenario.sh" \
-    && "$(canonical_path "$SUBJECT_LIFECYCLE_HELPER")" \
+    && "$(canonical_path "$COMMON_LIFECYCLE_HELPER")" \
         == "$SCRIPT_DIRECTORY/performance-subject-lifecycle.py" \
     && "$(canonical_path "$APPKIT_TERMINATOR_SOURCE")" \
         == "$SCRIPT_DIRECTORY/performance-appkit-terminate.m" ]] \
     || not_run "noncanonical-performance-toolchain"
+run_directory="$(cd -- "$(dirname -- "$RUN_INTENT")" && pwd -P)" \
+    || not_run "run-directory-unavailable"
+subject_lifecycle_helper_path="$(canonical_path "$SUBJECT_LIFECYCLE_HELPER")" \
+    || not_run "run-owned-lifecycle-helper-unavailable"
+[[ "$(dirname -- "$subject_lifecycle_helper_path")" == "$run_directory" \
+    && "$subject_lifecycle_helper_path" != "$(canonical_path "$COMMON_LIFECYCLE_HELPER")" \
+    && "$(sha256 "$SUBJECT_LIFECYCLE_HELPER")" == "$(sha256 "$COMMON_LIFECYCLE_HELPER")" ]] \
+    || not_run "run-owned-lifecycle-helper-invalid"
 plan_start_continuous_ns="$(kv "$PLAN_START_GATE" plan_start_continuous_ns)"
 [[ "$plan_start_continuous_ns" =~ ^[1-9][0-9]*$ ]] \
     || not_run "invalid-driver-plan-start-gate"

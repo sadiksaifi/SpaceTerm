@@ -24,6 +24,11 @@ PROCESS_INSPECTOR="$SCRIPT_DIRECTORY/../inspect-release-performance-process.py"
 LIFECYCLE_HELPER_DEVICE="$(stat -f '%d' "$LIFECYCLE_HELPER")"
 LIFECYCLE_HELPER_INODE="$(stat -f '%i' "$LIFECYCLE_HELPER")"
 LIFECYCLE_HELPER_SHA256="$(shasum -a 256 "$LIFECYCLE_HELPER" | awk '{ print $1 }')"
+SPACETERM_LIFECYCLE_HELPER="$TEMP_ROOT/spaceterm-lifecycle-helper.py"
+GHOSTTY_LIFECYCLE_HELPER="$TEMP_ROOT/ghostty-lifecycle-helper.py"
+cp -- "$LIFECYCLE_HELPER" "$SPACETERM_LIFECYCLE_HELPER"
+cp -- "$LIFECYCLE_HELPER" "$GHOSTTY_LIFECYCLE_HELPER"
+chmod 0500 "$SPACETERM_LIFECYCLE_HELPER" "$GHOSTTY_LIFECYCLE_HELPER"
 PROCESS_INSPECTOR_DEVICE="$(stat -f '%d' "$PROCESS_INSPECTOR")"
 PROCESS_INSPECTOR_INODE="$(stat -f '%i' "$PROCESS_INSPECTOR")"
 PROCESS_INSPECTOR_SHA256="$(shasum -a 256 "$PROCESS_INSPECTOR" | awk '{ print $1 }')"
@@ -211,6 +216,7 @@ chmod 0600 "$SECRET"
 write_causal_closure() {
     local prefix="$1" intent="$2" identity="$3" native_observation="$4"
     local terminator_source="$5" terminator_binary="$6"
+    local lifecycle_helper="$TEMP_ROOT/$prefix-lifecycle-helper.py"
     local token
     token="$(printf '%064d' "$([[ "$prefix" == spaceterm ]] && echo 1 || echo 2)")"
     printf '%s-rss-samples\n' "$prefix" > "$TEMP_ROOT/$prefix-rss-samples.tsv"
@@ -346,7 +352,7 @@ PY
         "$intent" "$TEMP_ROOT/$prefix-tail.tsv" "$TEMP_ROOT/$prefix-workload-metadata.tsv" \
         "$TEMP_ROOT/$prefix-workload-events.tsv" "$TEMP_ROOT/$prefix-ready.tsv" \
         "$TEMP_ROOT/$prefix-quit.tsv" "$TEMP_ROOT/$prefix-exit.tsv" "$native_observation" \
-        "$LIFECYCLE_HELPER" "$PROCESS_INSPECTOR" "$terminator_source" \
+        "$lifecycle_helper" "$PROCESS_INSPECTOR" "$terminator_source" \
         "$terminator_binary" "$token" <<'PY'
 import hashlib,hmac,pathlib,struct,sys
 (ready_out,reg_out,secret_path,subject_name,identity_path,intent_path,tail_path,
@@ -424,8 +430,8 @@ request_continuous_ns	5000003100
 exit_continuous_ns	5000003200
 termination_method	appkit-terminate
 runtime_closure_status	confirmed
-lifecycle_helper_device	$LIFECYCLE_HELPER_DEVICE
-lifecycle_helper_inode	$LIFECYCLE_HELPER_INODE
+lifecycle_helper_device	$(stat -f '%d' "$lifecycle_helper")
+lifecycle_helper_inode	$(stat -f '%i' "$lifecycle_helper")
 lifecycle_helper_sha256	$LIFECYCLE_HELPER_SHA256
 process_inspector_device	$PROCESS_INSPECTOR_DEVICE
 process_inspector_inode	$PROCESS_INSPECTOR_INODE
@@ -444,7 +450,7 @@ EOF
     chmod 0400 "$TEMP_ROOT/$prefix-quit.tsv"
     python3 - "$TEMP_ROOT/$prefix-exit.tsv" "$SECRET" "$prefix" "$identity" "$intent" \
         "$TEMP_ROOT/$prefix-tail.tsv" "$TEMP_ROOT/$prefix-quit.tsv" "$native_observation" \
-        "$LIFECYCLE_HELPER" "$PROCESS_INSPECTOR" "$terminator_source" \
+        "$lifecycle_helper" "$PROCESS_INSPECTOR" "$terminator_source" \
         "$terminator_binary" <<'PY'
 import hashlib, hmac, pathlib, struct, sys
 output, secret, subject_name, identity, intent, tail, quit_receipt = map(pathlib.Path, sys.argv[1:8])
@@ -515,7 +521,11 @@ SPACETERM_CAUSAL=(
     --rss-samples "$TEMP_ROOT/spaceterm-rss-samples.tsv"
     --performance-lifecycle-ready-receipt "$TEMP_ROOT/spaceterm-lifecycle-ready.tsv"
     --performance-lifecycle-registration "$TEMP_ROOT/spaceterm-lifecycle-registration.tsv"
-    --subject-lifecycle-helper "$LIFECYCLE_HELPER"
+    --subject-lifecycle-helper "$SPACETERM_LIFECYCLE_HELPER"
+    --common-lifecycle-helper "$LIFECYCLE_HELPER"
+    --expected-common-lifecycle-helper-device "$LIFECYCLE_HELPER_DEVICE"
+    --expected-common-lifecycle-helper-inode "$LIFECYCLE_HELPER_INODE"
+    --expected-common-lifecycle-helper-sha256 "$LIFECYCLE_HELPER_SHA256"
     --appkit-terminator-source "$TERMINATOR_SOURCE"
     --appkit-terminator-binary "$TERMINATOR_BINARY"
 )
@@ -540,7 +550,11 @@ GHOSTTY_CAUSAL=(
     --rss-samples "$TEMP_ROOT/ghostty-rss-samples.tsv"
     --performance-lifecycle-ready-receipt "$TEMP_ROOT/ghostty-lifecycle-ready.tsv"
     --performance-lifecycle-registration "$TEMP_ROOT/ghostty-lifecycle-registration.tsv"
-    --subject-lifecycle-helper "$LIFECYCLE_HELPER"
+    --subject-lifecycle-helper "$GHOSTTY_LIFECYCLE_HELPER"
+    --common-lifecycle-helper "$LIFECYCLE_HELPER"
+    --expected-common-lifecycle-helper-device "$LIFECYCLE_HELPER_DEVICE"
+    --expected-common-lifecycle-helper-inode "$LIFECYCLE_HELPER_INODE"
+    --expected-common-lifecycle-helper-sha256 "$LIFECYCLE_HELPER_SHA256"
     --appkit-terminator-source "$TERMINATOR_SOURCE"
     --appkit-terminator-binary "$TERMINATOR_BINARY"
 )
@@ -572,6 +586,29 @@ GHOSTTY_RUN="$TEMP_ROOT/ghostty-run.tsv"
     --subject-identity "$GHOSTTY_SUBJECT" "${GHOSTTY_CAUSAL[@]}" --output "$GHOSTTY_RUN" >/dev/null
 [[ "$(awk -F '\t' '$2 == "not-applicable" {count++} END {print count}' "$GHOSTTY_RUN")" == 10 ]] \
     || fail "Ghostty final metadata does not contain ten N/A fields"
+WRONG_LIFECYCLE_COPY="$TEMP_ROOT/wrong-lifecycle-copy.py"
+cp -- "$LIFECYCLE_HELPER" "$WRONG_LIFECYCLE_COPY"
+chmod 0500 "$WRONG_LIFECYCLE_COPY"
+expect_failure "unregistered lifecycle helper copy" \
+    "$SCRIPT_DIRECTORY/freeze-performance-run.sh" --run-intent "$SPACETERM_INTENT" \
+    --subject-identity "$SPACETERM_SUBJECT" \
+    "${SPACETERM_CAUSAL[@]/$SPACETERM_LIFECYCLE_HELPER/$WRONG_LIFECYCLE_COPY}" \
+    "${closure_args[@]}" --output "$TEMP_ROOT/wrong-copy-run.tsv"
+mkdir -m 0700 "$TEMP_ROOT/outside-run"
+MOVED_LIFECYCLE_HELPER="$TEMP_ROOT/outside-run/spaceterm-lifecycle-helper.py"
+mv -- "$SPACETERM_LIFECYCLE_HELPER" "$MOVED_LIFECYCLE_HELPER"
+expect_failure "registered lifecycle helper outside run directory" \
+    "$SCRIPT_DIRECTORY/freeze-performance-run.sh" --run-intent "$SPACETERM_INTENT" \
+    --subject-identity "$SPACETERM_SUBJECT" \
+    "${SPACETERM_CAUSAL[@]/$SPACETERM_LIFECYCLE_HELPER/$MOVED_LIFECYCLE_HELPER}" \
+    "${closure_args[@]}" --output "$TEMP_ROOT/wrong-path-run.tsv"
+mv -- "$MOVED_LIFECYCLE_HELPER" "$SPACETERM_LIFECYCLE_HELPER"
+WRONG_LIFECYCLE_HASH=0000000000000000000000000000000000000000000000000000000000000000
+expect_failure "wrong frozen lifecycle helper hash" \
+    "$SCRIPT_DIRECTORY/freeze-performance-run.sh" --run-intent "$SPACETERM_INTENT" \
+    --subject-identity "$SPACETERM_SUBJECT" \
+    "${SPACETERM_CAUSAL[@]/$LIFECYCLE_HELPER_SHA256/$WRONG_LIFECYCLE_HASH}" \
+    "${closure_args[@]}" --output "$TEMP_ROOT/wrong-hash-run.tsv"
 BAD_LIFECYCLE_READY="$TEMP_ROOT/bad-lifecycle-ready.tsv"
 sed 's/status\tready/status\tforged/' "$TEMP_ROOT/spaceterm-lifecycle-ready.tsv" \
     > "$BAD_LIFECYCLE_READY"

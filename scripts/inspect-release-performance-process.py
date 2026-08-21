@@ -14,7 +14,9 @@ from typing import NoReturn
 
 
 PROC_PIDTBSDINFO = 3
+PROC_PIDREGIONPATHINFO = 8
 PROC_PIDPATHINFO_MAXSIZE = 4096
+MAXPATHLEN = 1024
 SZOMB = 5
 K_CF_NUMBER_SINT32_TYPE = 3
 K_CF_STRING_ENCODING_UTF8 = 0x08000100
@@ -49,6 +51,57 @@ class ProcBSDInfo(ctypes.Structure):
         ("pbi_start_tvsec", ctypes.c_uint64),
         ("pbi_start_tvusec", ctypes.c_uint64),
     ]
+
+
+class ProcRegionInfo(ctypes.Structure):
+    _fields_ = [
+        ("pri_protection", ctypes.c_uint32), ("pri_max_protection", ctypes.c_uint32),
+        ("pri_inheritance", ctypes.c_uint32), ("pri_flags", ctypes.c_uint32),
+        ("pri_offset", ctypes.c_uint64), ("pri_behavior", ctypes.c_uint32),
+        ("pri_user_wired_count", ctypes.c_uint32), ("pri_user_tag", ctypes.c_uint32),
+        ("pri_pages_resident", ctypes.c_uint32),
+        ("pri_pages_shared_now_private", ctypes.c_uint32),
+        ("pri_pages_swapped_out", ctypes.c_uint32),
+        ("pri_pages_dirtied", ctypes.c_uint32), ("pri_ref_count", ctypes.c_uint32),
+        ("pri_shadow_depth", ctypes.c_uint32), ("pri_share_mode", ctypes.c_uint32),
+        ("pri_private_pages_resident", ctypes.c_uint32),
+        ("pri_shared_pages_resident", ctypes.c_uint32), ("pri_obj_id", ctypes.c_uint32),
+        ("pri_depth", ctypes.c_uint32), ("pri_address", ctypes.c_uint64),
+        ("pri_size", ctypes.c_uint64),
+    ]
+
+
+class VInfoStat(ctypes.Structure):
+    _fields_ = [
+        ("vst_dev", ctypes.c_uint32), ("vst_mode", ctypes.c_uint16),
+        ("vst_nlink", ctypes.c_uint16), ("vst_ino", ctypes.c_uint64),
+        ("vst_uid", ctypes.c_uint32), ("vst_gid", ctypes.c_uint32),
+        ("vst_atime", ctypes.c_int64), ("vst_atimensec", ctypes.c_int64),
+        ("vst_mtime", ctypes.c_int64), ("vst_mtimensec", ctypes.c_int64),
+        ("vst_ctime", ctypes.c_int64), ("vst_ctimensec", ctypes.c_int64),
+        ("vst_birthtime", ctypes.c_int64), ("vst_birthtimensec", ctypes.c_int64),
+        ("vst_size", ctypes.c_int64), ("vst_blocks", ctypes.c_int64),
+        ("vst_blksize", ctypes.c_int32), ("vst_flags", ctypes.c_uint32),
+        ("vst_gen", ctypes.c_uint32), ("vst_rdev", ctypes.c_uint32),
+        ("vst_qspare", ctypes.c_int64 * 2),
+    ]
+
+
+class Fsid(ctypes.Structure):
+    _fields_ = [("val", ctypes.c_int32 * 2)]
+
+
+class VnodeInfo(ctypes.Structure):
+    _fields_ = [("vi_stat", VInfoStat), ("vi_type", ctypes.c_int32),
+                ("vi_pad", ctypes.c_int32), ("vi_fsid", Fsid)]
+
+
+class VnodeInfoPath(ctypes.Structure):
+    _fields_ = [("vip_vi", VnodeInfo), ("vip_path", ctypes.c_char * MAXPATHLEN)]
+
+
+class ProcRegionWithPathInfo(ctypes.Structure):
+    _fields_ = [("prp_prinfo", ProcRegionInfo), ("prp_vip", VnodeInfoPath)]
 
 
 def fail(message: str) -> NoReturn:
@@ -98,34 +151,36 @@ def process_path(libproc: ctypes.CDLL, pid: int) -> str:
     return os.path.realpath(os.fsdecode(path.value))
 
 
-def mapped_text_identity(pid: int, expected_path: str) -> tuple[int, int]:
-    result = subprocess.run(
-        ["/usr/sbin/lsof", "-a", "-p", str(pid), "-d", "txt", "-FnDi"],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
-        fail("live executable vnode is unavailable")
-    records: list[dict[str, str]] = []
-    current: dict[str, str] = {}
-    for line in result.stdout.splitlines():
-        if line.startswith("f"):
-            if current:
-                records.append(current)
-            current = {"f": line[1:]}
-        elif line:
-            current[line[0]] = line[1:]
-    if current:
-        records.append(current)
+def mapped_text_identity(libproc: ctypes.CDLL, pid: int, expected_path: str) \
+        -> tuple[int, int]:
     expected_stat = os.stat(expected_path, follow_symlinks=False)
-    matching = [
-        record
-        for record in records
-        if record.get("n")
-        and os.path.realpath(record["n"]) == expected_path
-        and record.get("i") == str(expected_stat.st_ino)
-    ]
+    expected_fsid = os.statvfs(expected_path).f_fsid
+    address = 0
+    matching: set[tuple[int, int, int, int]] = set()
+    for _ in range(65536):
+        region = ProcRegionWithPathInfo()
+        result = libproc.proc_pidinfo(
+            pid, PROC_PIDREGIONPATHINFO, address,
+            ctypes.byref(region), ctypes.sizeof(region),
+        )
+        if result == 0:
+            break
+        if result != ctypes.sizeof(region):
+            fail("live executable vnode is unavailable")
+        raw_path = bytes(region.prp_vip.vip_path).split(b"\0", 1)[0]
+        if raw_path and os.path.realpath(os.fsdecode(raw_path)) == expected_path:
+            vnode = region.prp_vip.vip_vi
+            identity = (vnode.vi_stat.vst_dev, vnode.vi_stat.vst_ino,
+                        vnode.vi_fsid.val[0], vnode.vi_fsid.val[1])
+            if identity[:2] != (expected_stat.st_dev, expected_stat.st_ino) \
+                    or identity[2] != expected_fsid:
+                fail("live executable vnode does not match the frozen package")
+            matching.add(identity)
+        next_address = (region.prp_prinfo.pri_address
+                        + region.prp_prinfo.pri_size)
+        if region.prp_prinfo.pri_size == 0 or next_address <= address:
+            fail("live executable region traversal is invalid")
+        address = next_address
     if len(matching) != 1:
         fail("live executable vnode does not match the frozen package")
     return expected_stat.st_dev, expected_stat.st_ino
@@ -364,6 +419,10 @@ def main() -> None:
     if arguments.pid <= 0:
         fail("PID must be positive")
     libproc = ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
+    libproc.proc_pidinfo.argtypes = [
+        ctypes.c_int, ctypes.c_int, ctypes.c_uint64, ctypes.c_void_p, ctypes.c_int,
+    ]
+    libproc.proc_pidinfo.restype = ctypes.c_int
     first = bsd_info(libproc, arguments.pid)
     if arguments.print_start_identity:
         print(
@@ -384,7 +443,10 @@ def main() -> None:
             arguments.expected_cdhash,
         )
     )
-    if not supplied_trace_identity and any(
+    supplied_vnode_identity = (
+        arguments.expected_device is not None and arguments.expected_inode is not None
+    )
+    if not supplied_trace_identity and not supplied_vnode_identity and any(
         value is not None
         for value in (
             arguments.expected_device,
@@ -401,12 +463,12 @@ def main() -> None:
     if sha256(expected_path) != expected_hash:
         fail("frozen executable hash mismatch")
     first_path = process_path(libproc, arguments.pid)
-    device, inode = mapped_text_identity(arguments.pid, expected_path)
+    device, inode = mapped_text_identity(libproc, arguments.pid, expected_path)
     identifier, team, cdhash, live_path = live_code_identity(
         arguments.pid, expected_path
     )
     final_path = process_path(libproc, arguments.pid)
-    final_device, final_inode = mapped_text_identity(arguments.pid, expected_path)
+    final_device, final_inode = mapped_text_identity(libproc, arguments.pid, expected_path)
     second = bsd_info(libproc, arguments.pid)
     first_token = (first.pbi_pid, first.pbi_start_tvsec, first.pbi_start_tvusec)
     second_token = (second.pbi_pid, second.pbi_start_tvsec, second.pbi_start_tvusec)
@@ -417,6 +479,10 @@ def main() -> None:
         or live_path != expected_path
         or (device, inode) != (final_device, final_inode)
         or sha256(expected_path) != expected_hash
+    ):
+        fail("live process or dynamic code identity does not match the frozen subject")
+    if supplied_vnode_identity and (
+        device != arguments.expected_device or inode != arguments.expected_inode
     ):
         fail("live process or dynamic code identity does not match the frozen subject")
     if supplied_trace_identity:
@@ -430,8 +496,6 @@ def main() -> None:
         bounded_unsigned(start_fields[1], maximum=999_999)
         if (
             arguments.expected_start_identity != expected_start
-            or device != arguments.expected_device
-            or inode != arguments.expected_inode
             or identifier != arguments.expected_signing_identifier
             or team != arguments.expected_team_identifier
             or cdhash != arguments.expected_cdhash.lower()

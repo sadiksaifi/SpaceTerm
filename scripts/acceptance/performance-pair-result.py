@@ -13,6 +13,7 @@ import stat
 import struct
 import subprocess
 import sys
+import tempfile
 import unicodedata
 from pathlib import Path
 
@@ -24,6 +25,7 @@ SAFE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,79}\Z")
 HEX = re.compile(r"[0-9a-f]{64}\Z")
 POSITIVE = re.compile(r"[1-9][0-9]*\Z")
 START = re.compile(r"[1-9][0-9]*:[0-9]+\Z")
+DRIVER_EVENT_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,95}\Z")
 PAIR_KEYS = (
     "format_version", "pair_id", "scenario", "plan_sha256", "workload_sha256",
     "command_sha256", "environment_sha256", "font_sha256", "initial_grid_sha256",
@@ -122,6 +124,34 @@ FINAL_TRACE_KEYS = (
     "allocations_target_verified", "hangs_target_verified", "time_profiler_rows",
     "allocations_rows", "hangs_rows", "maximum_main_thread_hang_ms", "status",
 )
+DRIVER_INTENT_KEYS = (
+    "format_version", "campaign_id", "session_id", "nonce",
+    "driver_output_path", "driver_output_parent_device", "driver_output_parent_inode",
+    "driver_binary_path", "driver_binary_device", "driver_binary_inode",
+    "driver_binary_size", "driver_binary_sha256", "driver_source_sha256",
+    "controller_sha256", "scenario_plan_sha256", "plan_start_continuous_ns",
+    "subject_identity_sha256", "subject_process_pid", "subject_process_start_identity",
+    "window_identity_sha256", "window_number", "auth_algorithm", "intent_hmac_sha256",
+)
+DRIVER_RECEIPT_KEYS = (
+    "format_version", "campaign_id", "session_id", "nonce", "intent_sha256",
+    "driver_output_device", "driver_output_inode", "driver_output_size",
+    "driver_events_sha256", "event_row_count", "first_continuous_ns",
+    "last_continuous_ns", "terminal_event_id", "terminal_action", "terminal_result",
+    "auth_algorithm", "receipt_hmac_sha256",
+)
+WINDOW_KEYS = (
+    "format_version", "subject_identity_sha256", "subject", "process_pid",
+    "process_start_identity", "bundle_identifier", "executable_sha256", "window_number",
+    "window_owner_pid_verified", "window_layer", "window_onscreen", "window_minimized",
+    "window_x", "window_y", "window_width", "window_height", "resolved_continuous_ns",
+    "selector_kind", "status",
+)
+DRIVER_PLAN_HEADER = b"event_id\toffset_ms\taction\targ0\targ1"
+DRIVER_EVENT_HEADER = (
+    b"sequence\tcontinuous_ns\tevent_id\taction\ttarget_pid\twindow_number\t"
+    b"requested_a\trequested_b\tobserved_a\tobserved_b\tresult"
+)
 CASE_REPORT_KEYS = (
     "format_version", "subject", "scenario", "session_id", "nonce",
     "run_intent_sha256", "run_metadata_sha256", "trace_metadata_sha256",
@@ -201,10 +231,10 @@ def digest(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def stable_read(
+def stable_read_material(
     path_text: str, maximum: int = 64 * 1024, *, private: bool = False,
     secret: bool = False, mutable: bool = False,
-) -> bytes:
+) -> tuple[bytes, os.stat_result, str]:
     path = Path(path_text)
     before = path.lstat()
     if not stat.S_ISREG(before.st_mode) or stat.S_ISLNK(before.st_mode) \
@@ -244,7 +274,16 @@ def stable_read(
            for other in (opened, after, current) for key in fields) \
             or len(data) != before.st_size or len(data) > maximum:
         raise Invalid("input-changed")
-    return data
+    return data, before, str(path.resolve(strict=True))
+
+
+def stable_read(
+    path_text: str, maximum: int = 64 * 1024, *, private: bool = False,
+    secret: bool = False, mutable: bool = False,
+) -> bytes:
+    return stable_read_material(
+        path_text, maximum, private=private, secret=secret, mutable=mutable,
+    )[0]
 
 
 def stable_file_digest(path_text: str) -> str:
@@ -279,15 +318,22 @@ def stable_trace_tree(path_text: str) -> str:
         raise Invalid("unsafe-trace-archive")
     digestor = hashlib.sha256(b"spaceterm.performance.trace-tree/v1\0")
     entries: list[tuple[bytes, Path]] = []
+    directories: dict[Path, os.stat_result] = {root: before}
+    observed: list[tuple[str, str]] = []
     for path in root.rglob("*"):
         info = path.lstat()
         if stat.S_ISLNK(info.st_mode) or not (stat.S_ISREG(info.st_mode) or stat.S_ISDIR(info.st_mode)):
             raise Invalid("unsafe-trace-entry")
+        relative_text = path.relative_to(root).as_posix()
+        relative = unicodedata.normalize("NFC", relative_text)
+        if relative != relative_text:
+            raise Invalid("noncanonical-trace-entry")
+        entry_type = "file" if stat.S_ISREG(info.st_mode) else "directory"
+        observed.append((relative, entry_type))
         if stat.S_ISREG(info.st_mode):
-            relative = unicodedata.normalize("NFC", path.relative_to(root).as_posix())
-            if relative != path.relative_to(root).as_posix():
-                raise Invalid("noncanonical-trace-entry")
             entries.append((relative.encode(), path))
+        else:
+            directories[path] = info
     for encoded, path in sorted(entries):
         file_before = path.lstat()
         digestor.update(struct.pack(">Q", len(encoded))); digestor.update(encoded)
@@ -307,10 +353,24 @@ def stable_trace_tree(path_text: str) -> str:
         if any(getattr(file_before, key) != getattr(other, key)
                for other in (opened, file_after, current) for key in fields):
             raise Invalid("trace-entry-changed")
-    after = root.lstat()
-    if (before.st_dev, before.st_ino, before.st_mtime_ns, before.st_ctime_ns) \
-            != (after.st_dev, after.st_ino, after.st_mtime_ns, after.st_ctime_ns):
-        raise Invalid("trace-archive-changed")
+    rescanned: list[tuple[str, str]] = []
+    for path in root.rglob("*"):
+        info = path.lstat()
+        if stat.S_ISLNK(info.st_mode) or not (stat.S_ISREG(info.st_mode) or stat.S_ISDIR(info.st_mode)):
+            raise Invalid("unsafe-trace-entry")
+        relative = path.relative_to(root).as_posix()
+        rescanned.append((relative, "file" if stat.S_ISREG(info.st_mode) else "directory"))
+    if sorted(observed) != sorted(rescanned):
+        raise Invalid("trace-entry-set-changed")
+    directory_fields = (
+        "st_dev", "st_ino", "st_mode", "st_uid", "st_nlink", "st_size",
+        "st_mtime_ns", "st_ctime_ns",
+    )
+    for directory, directory_before in directories.items():
+        directory_after = directory.lstat()
+        if any(getattr(directory_before, key) != getattr(directory_after, key)
+               for key in directory_fields):
+            raise Invalid("trace-directory-changed")
     return digestor.hexdigest()
 
 
@@ -361,6 +421,7 @@ def add_common(parser: argparse.ArgumentParser) -> None:
         parser.add_argument(f"--{subject}-workload-ready-receipt", required=True)
         parser.add_argument(f"--{subject}-lifecycle-ready-receipt", required=True)
         parser.add_argument(f"--{subject}-lifecycle-registration", required=True)
+        parser.add_argument(f"--{subject}-lifecycle-helper", required=True)
         parser.add_argument(f"--{subject}-tail-receipt", required=True)
         parser.add_argument(f"--{subject}-quit-receipt", required=True)
         parser.add_argument(f"--{subject}-exit-receipt", required=True)
@@ -398,14 +459,164 @@ def arguments() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def unsigned_integer(value: str, *, positive: bool = False) -> int:
+    pattern = POSITIVE if positive else re.compile(r"0|[1-9][0-9]*\Z")
+    if pattern.fullmatch(value) is None:
+        raise Invalid("driver-invalid-integer")
+    result = int(value)
+    if result > (1 << 64) - 1:
+        raise Invalid("driver-integer-overflow")
+    return result
+
+
+def driver_plan(data: bytes) -> list[tuple[str, int, str]]:
+    if not data.endswith(b"\n") or b"\0" in data or b"\r" in data:
+        raise Invalid("driver-plan-encoding")
+    lines = data[:-1].split(b"\n")
+    if len(lines) < 2 or lines[0] != DRIVER_PLAN_HEADER or len(lines) > 4097:
+        raise Invalid("driver-plan-schema")
+    result: list[tuple[str, int, str]] = []
+    seen: set[str] = set()
+    prior = -1
+    for raw in lines[1:]:
+        fields = raw.split(b"\t")
+        if len(fields) != 5:
+            raise Invalid("driver-plan-row")
+        try:
+            event_id, offset_text, action = (field.decode("ascii") for field in fields[:3])
+        except UnicodeDecodeError as error:
+            raise Invalid("driver-plan-text") from error
+        offset = unsigned_integer(offset_text)
+        if DRIVER_EVENT_ID.fullmatch(event_id) is None or event_id in seen \
+                or offset > 720000 or offset < prior:
+            raise Invalid("driver-plan-order")
+        result.append((event_id, offset, action)); seen.add(event_id); prior = offset
+    if result[-1][2] != "stop":
+        raise Invalid("driver-plan-terminal")
+    return result
+
+
+def verify_driver_snapshot(
+    *, secret: bytes, campaign_id: str, session_id: str, nonce: str,
+    subject_data: bytes, window_data: bytes, plan_data: bytes, plan_start: str,
+    intent_data: bytes, receipt_data: bytes, events_data: bytes,
+    events_stat: os.stat_result, events_path: str, binary_data: bytes,
+    binary_stat: os.stat_result, binary_path: str, source_data: bytes,
+    controller_data: bytes,
+) -> None:
+    intent, intent_unsigned = parse(
+        intent_data, DRIVER_INTENT_KEYS, hmac_key="intent_hmac_sha256",
+    )
+    receipt, receipt_unsigned = parse(
+        receipt_data, DRIVER_RECEIPT_KEYS, hmac_key="receipt_hmac_sha256",
+    )
+    identity, _ = parse(subject_data, SUBJECT_KEYS)
+    window, _ = parse(window_data, WINDOW_KEYS)
+    events_parent = Path(events_path).parent.stat()
+    intent_expected = {
+        "format_version": "1", "campaign_id": campaign_id,
+        "session_id": session_id, "nonce": nonce,
+        "driver_output_path": events_path,
+        "driver_output_parent_device": str(events_parent.st_dev),
+        "driver_output_parent_inode": str(events_parent.st_ino),
+        "driver_binary_path": binary_path,
+        "driver_binary_device": str(binary_stat.st_dev),
+        "driver_binary_inode": str(binary_stat.st_ino),
+        "driver_binary_size": str(binary_stat.st_size),
+        "driver_binary_sha256": digest(binary_data),
+        "driver_source_sha256": digest(source_data),
+        "controller_sha256": digest(controller_data),
+        "scenario_plan_sha256": digest(plan_data),
+        "plan_start_continuous_ns": plan_start,
+        "subject_identity_sha256": digest(subject_data),
+        "subject_process_pid": identity["process_pid"],
+        "subject_process_start_identity": identity["process_start_identity"],
+        "window_identity_sha256": digest(window_data),
+        "window_number": window["window_number"], "auth_algorithm": "hmac-sha256",
+    }
+    if any(intent[key] != value for key, value in intent_expected.items()) \
+            or window["subject_identity_sha256"] != digest(subject_data) \
+            or window["process_pid"] != identity["process_pid"] \
+            or window["process_start_identity"] != identity["process_start_identity"] \
+            or window["window_owner_pid_verified"] != "true" \
+            or window["window_layer"] != "0" or window["window_onscreen"] != "true" \
+            or window["window_minimized"] != "false" or window["status"] != "frozen":
+        raise Invalid("driver-intent-binding")
+    expected_intent_hmac = hmac.new(
+        secret, b"spaceterm.performance.driver-intent/v1\0"
+        + struct.pack(">Q", len(intent_unsigned)) + intent_unsigned, hashlib.sha256,
+    ).hexdigest()
+    if not hmac.compare_digest(intent["intent_hmac_sha256"], expected_intent_hmac):
+        raise Invalid("driver-intent-authentication")
+    plan = driver_plan(plan_data)
+    if not events_data.endswith(b"\n") or b"\0" in events_data or b"\r" in events_data:
+        raise Invalid("driver-events-encoding")
+    lines = events_data[:-1].split(b"\n")
+    if len(lines) != len(plan) + 1 or lines[0] != DRIVER_EVENT_HEADER:
+        raise Invalid("driver-events-schema")
+    first = last = 0
+    terminal: list[str] = []
+    plan_start_ns = unsigned_integer(plan_start, positive=True)
+    for sequence, (raw, expected) in enumerate(zip(lines[1:], plan)):
+        fields = raw.split(b"\t")
+        if len(fields) != 11:
+            raise Invalid("driver-event-width")
+        try:
+            decoded = [field.decode("utf-8") for field in fields]
+        except UnicodeDecodeError as error:
+            raise Invalid("driver-event-text") from error
+        timestamp = unsigned_integer(decoded[1], positive=True)
+        event_id, offset_ms, action = expected
+        tolerance = 2_000_000_000 if sequence == 0 else 250_000_000
+        deadline = plan_start_ns + offset_ms * 1_000_000
+        if decoded[0] != str(sequence) or decoded[2] != event_id \
+                or decoded[3] != action or decoded[4] != identity["process_pid"] \
+                or decoded[5] != window["window_number"] or decoded[10] != "verified" \
+                or timestamp < deadline or timestamp > deadline + tolerance \
+                or (sequence > 0 and timestamp <= last):
+            raise Invalid("driver-event-binding")
+        if sequence == 0:
+            first = timestamp
+        last = timestamp; terminal = decoded
+    receipt_expected = {
+        "format_version": "1", "campaign_id": campaign_id,
+        "session_id": session_id, "nonce": nonce, "intent_sha256": digest(intent_data),
+        "driver_output_device": str(events_stat.st_dev),
+        "driver_output_inode": str(events_stat.st_ino),
+        "driver_output_size": str(events_stat.st_size),
+        "driver_events_sha256": digest(events_data), "event_row_count": str(len(plan)),
+        "first_continuous_ns": str(first), "last_continuous_ns": str(last),
+        "terminal_event_id": terminal[2], "terminal_action": terminal[3],
+        "terminal_result": terminal[10], "auth_algorithm": "hmac-sha256",
+    }
+    if terminal[3] != "stop" or any(receipt[key] != value
+                                      for key, value in receipt_expected.items()):
+        raise Invalid("driver-receipt-binding")
+    authenticated = (
+        b"spaceterm.performance.driver-events/v1\0"
+        + struct.pack(">Q", len(intent_data)) + intent_data
+        + struct.pack(">Q", len(events_data)) + events_data
+        + struct.pack(">Q", len(receipt_unsigned)) + receipt_unsigned
+    )
+    expected_receipt_hmac = hmac.new(secret, authenticated, hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(receipt["receipt_hmac_sha256"], expected_receipt_hmac):
+        raise Invalid("driver-receipt-authentication")
+
+
 def verify_run(
     args: argparse.Namespace, secret: bytes, pair: dict[str, str], subject: str,
-    helper_data: bytes, inspector_data: bytes, terminator_source_data: bytes,
+    plan_data: bytes, expected_helper_hash: str,
+    inspector_data: bytes, terminator_source_data: bytes,
     terminator_binary_data: bytes, helper_stat: os.stat_result,
     inspector_stat: os.stat_result, terminator_source_stat: os.stat_result,
     terminator_binary_stat: os.stat_result,
 ) -> dict[str, str]:
     prefix = subject.replace("-", "_")
+    helper_data = stable_read(
+        getattr(args, f"{prefix}_lifecycle_helper"), 4 * 1024 * 1024, mutable=True,
+    )
+    if digest(helper_data) != expected_helper_hash:
+        raise Invalid(f"{subject}-lifecycle-helper-code-mismatch")
     intent_data = stable_read(getattr(args, f"{prefix}_run_intent"))
     subject_data = stable_read(getattr(args, f"{prefix}_subject_identity"))
     run_data = stable_read(getattr(args, f"{prefix}_run_metadata"))
@@ -413,13 +624,13 @@ def verify_run(
     driver_intent_data = stable_read(
         getattr(args, f"{prefix}_driver_intent"), private=True
     )
-    driver_events_data = stable_read(
+    driver_events_data, driver_events_stat, driver_events_path = stable_read_material(
         getattr(args, f"{prefix}_driver_events"), 64 * 1024 * 1024, private=True
     )
     driver_receipt_data = stable_read(
         getattr(args, f"{prefix}_driver_receipt"), private=True
     )
-    driver_binary_data = stable_read(
+    driver_binary_data, driver_binary_stat, driver_binary_path = stable_read_material(
         getattr(args, f"{prefix}_driver_binary"), 512 * 1024 * 1024
     )
     driver_source_data = stable_read(
@@ -508,7 +719,26 @@ def verify_run(
             or final_trace["workload_metadata_sha256"] != digest(workload_metadata_data) \
             or final_trace["workload_ready_receipt_sha256"] != digest(workload_ready_data) \
             or final_trace["supplemental_evidence_sha256"] != digest(gate_data) \
-            or final_trace["status"] != "complete":
+            or final_trace["status"] != "complete" \
+            or final_trace["requested_duration_ms"] != pair["duration_ms"] \
+            or any(final_trace[key] != "true" for key in (
+                "target_identity_verified", "trace_target_pid_verified",
+                "time_profiler_instrument", "allocations_instrument", "hangs_instrument",
+                "time_profiler_target_verified", "allocations_target_verified",
+                "hangs_target_verified",
+            )) \
+            or any(re.fullmatch(r"0|[1-9][0-9]*", final_trace[key]) is None for key in (
+                "requested_duration_ms", "actual_duration_ms",
+                "capture_started_continuous_ns", "capture_ended_continuous_ns",
+                "time_profiler_rows", "allocations_rows", "hangs_rows",
+            )) \
+            or re.fullmatch(r"[0-9]+(?:\.[0-9]+)?",
+                            final_trace["maximum_main_thread_hang_ms"]) is None \
+            or float(final_trace["maximum_main_thread_hang_ms"]) > 250 \
+            or int(final_trace["actual_duration_ms"]) < int(pair["duration_ms"]) \
+            or int(final_trace["actual_duration_ms"]) > int(pair["duration_ms"]) + 3250 \
+            or int(final_trace["capture_ended_continuous_ns"]) \
+                <= int(final_trace["capture_started_continuous_ns"]):
         raise Invalid(f"{subject}-final-trace-binding")
     if manual["format_version"] != "1" or manual["screenshot_sha256"] != screenshot_hash \
             or manual["video_sha256"] != video_hash or manual["result"] != "PASS" \
@@ -690,29 +920,16 @@ def verify_run(
     ).hexdigest()
     if not hmac.compare_digest(trace["provisional_hmac_sha256"], expected_trace):
         raise Invalid(f"{subject}-trace-provisional-authentication")
-    driver_tool = canonical_directory / "performance-driver-receipt.py"
-    command = [
-        sys.executable, str(driver_tool), "verify",
-        "--campaign-secret-file", args.campaign_secret_file,
-        "--campaign-id", args.campaign_id,
-        "--session-id", intent["session_id"], "--nonce", intent["nonce"],
-        "--driver-output", getattr(args, f"{prefix}_driver_events"),
-        "--driver-binary", getattr(args, f"{prefix}_driver_binary"),
-        "--driver-source", getattr(args, f"{prefix}_driver_source"),
-        "--controller", getattr(args, f"{prefix}_driver_controller"),
-        "--scenario-plan", args.scenario_plan,
-        "--plan-start-continuous-ns", gate["plan_start_continuous_ns"],
-        "--subject-identity", getattr(args, f"{prefix}_subject_identity"),
-        "--window-identity", getattr(args, f"{prefix}_window_identity"),
-        "--intent", getattr(args, f"{prefix}_driver_intent"),
-        "--receipt", getattr(args, f"{prefix}_driver_receipt"),
-    ]
-    completed = subprocess.run(
-        command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL, close_fds=True, check=False,
+    verify_driver_snapshot(
+        secret=secret, campaign_id=args.campaign_id, session_id=intent["session_id"],
+        nonce=intent["nonce"], subject_data=subject_data, window_data=window_data,
+        plan_data=plan_data, plan_start=gate["plan_start_continuous_ns"],
+        intent_data=driver_intent_data, receipt_data=driver_receipt_data,
+        events_data=driver_events_data, events_stat=driver_events_stat,
+        events_path=driver_events_path, binary_data=driver_binary_data,
+        binary_stat=driver_binary_stat, binary_path=driver_binary_path,
+        source_data=driver_source_data, controller_data=driver_controller_data,
     )
-    if completed.returncode != 0:
-        raise Invalid(f"{subject}-driver-evidence-invalid")
     common = (
         "subject", "subject_identity_sha256", "scenario", "scenario_plan_sha256",
         "workload_sha256", "command_sha256", "environment_sha256", "font_sha256",
@@ -762,7 +979,6 @@ def verify_run(
         native_failures_data = stable_read(
             args.spaceterm_native_failure_actions, 64 * 1024 * 1024, private=True
         )
-        del native_samples_data, native_events_data
         if intent["native_provisional_observation_sha256"] \
                 != digest(native_provisional_data) \
                 or run["native_observation_sha256"] != digest(native_observation_data) \
@@ -773,24 +989,66 @@ def verify_run(
                 or exit_receipt["native_observation_sha256"] \
                     != digest(native_observation_data):
             raise Invalid("spaceterm-native-final-binding")
-        native_verifier = Path(__file__).resolve(strict=True).parent \
-            / "verify-performance-native-closure.py"
-        native_command = [
-            sys.executable, str(native_verifier),
-            "--subject-identity", args.spaceterm_subject_identity,
-            "--provisional-observation", args.spaceterm_native_provisional_observation,
-            "--native-observation", args.spaceterm_native_observation,
-            "--runtime-metadata", args.spaceterm_native_runtime_metadata,
-            "--runtime-samples", args.spaceterm_native_runtime_samples,
-            "--runtime-events", args.spaceterm_native_runtime_events,
-            "--failure-actions", args.spaceterm_native_failure_actions,
-        ]
-        completed = subprocess.run(
-            native_command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL, close_fds=True, check=False,
-        )
+        native_verifier = canonical_directory / "verify-performance-native-closure.py"
+        snapshot_material = {
+            "subject.tsv": subject_data,
+            "provisional.tsv": native_provisional_data,
+            "native-observation.tsv": native_observation_data,
+            "runtime-metadata.tsv": native_metadata_data,
+            "runtime-samples.tsv": native_samples_data,
+            "runtime-events.tsv": native_events_data,
+            "failure-actions.tsv": native_failures_data,
+        }
+        with tempfile.TemporaryDirectory(prefix="spaceterm-native-replay-") as temporary:
+            snapshot_root = Path(temporary); snapshot_root.chmod(0o700)
+            for name, data in snapshot_material.items():
+                snapshot = snapshot_root / name
+                descriptor = os.open(
+                    snapshot, os.O_WRONLY | os.O_CREAT | os.O_EXCL
+                    | getattr(os, "O_NOFOLLOW", 0), 0o400,
+                )
+                try:
+                    offset = 0
+                    while offset < len(data):
+                        written = os.write(descriptor, data[offset:])
+                        if written <= 0:
+                            raise OSError("snapshot-short-write")
+                        offset += written
+                    os.fchmod(descriptor, 0o400); os.fsync(descriptor)
+                finally:
+                    os.close(descriptor)
+            native_command = [
+                sys.executable, str(native_verifier),
+                "--subject-identity", str(snapshot_root / "subject.tsv"),
+                "--provisional-observation", str(snapshot_root / "provisional.tsv"),
+                "--native-observation", str(snapshot_root / "native-observation.tsv"),
+                "--runtime-metadata", str(snapshot_root / "runtime-metadata.tsv"),
+                "--runtime-samples", str(snapshot_root / "runtime-samples.tsv"),
+                "--runtime-events", str(snapshot_root / "runtime-events.tsv"),
+                "--failure-actions", str(snapshot_root / "failure-actions.tsv"),
+            ]
+            completed = subprocess.run(
+                native_command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL, close_fds=True, check=False,
+            )
         if completed.returncode != 0:
             raise Invalid("spaceterm-native-closure-invalid")
+        native_postflight = (
+            (args.spaceterm_subject_identity, subject_data, 64 * 1024, False),
+            (args.spaceterm_native_provisional_observation, native_provisional_data,
+             64 * 1024, True),
+            (args.spaceterm_native_observation, native_observation_data, 64 * 1024, True),
+            (args.spaceterm_native_runtime_metadata, native_metadata_data, 64 * 1024, True),
+            (args.spaceterm_native_runtime_samples, native_samples_data,
+             64 * 1024 * 1024, True),
+            (args.spaceterm_native_runtime_events, native_events_data,
+             64 * 1024 * 1024, True),
+            (args.spaceterm_native_failure_actions, native_failures_data,
+             64 * 1024 * 1024, True),
+        )
+        if any(stable_read(path, maximum, private=private) != expected
+               for path, expected, maximum, private in native_postflight):
+            raise Invalid("spaceterm-native-closure-changed-after-replay")
     elif intent["native_provisional_observation_sha256"] != "not-applicable" \
             or any(run[key] != "not-applicable" for key in native_keys) \
             or exit_receipt["native_observation_sha256"] != "not-applicable":
@@ -865,6 +1123,47 @@ def verify_run(
             or times[1] != times[3] or times[2] != times[4] \
             or not int(times[2]) >= int(times[1]) >= int(times[0]):
         raise Invalid(f"{subject}-exit-timing")
+    postflight = (
+        (getattr(args, f"{prefix}_run_intent"), intent_data, 64 * 1024, False, False),
+        (getattr(args, f"{prefix}_subject_identity"), subject_data, 64 * 1024, False, False),
+        (getattr(args, f"{prefix}_run_metadata"), run_data, 64 * 1024, False, False),
+        (getattr(args, f"{prefix}_window_identity"), window_data, 64 * 1024, False, False),
+        (getattr(args, f"{prefix}_driver_intent"), driver_intent_data, 64 * 1024, True, False),
+        (getattr(args, f"{prefix}_driver_events"), driver_events_data,
+         64 * 1024 * 1024, True, False),
+        (getattr(args, f"{prefix}_driver_receipt"), driver_receipt_data, 64 * 1024, True, False),
+        (getattr(args, f"{prefix}_driver_binary"), driver_binary_data,
+         512 * 1024 * 1024, False, False),
+        (getattr(args, f"{prefix}_driver_source"), driver_source_data,
+         4 * 1024 * 1024, False, True),
+        (getattr(args, f"{prefix}_driver_controller"), driver_controller_data,
+         4 * 1024 * 1024, False, True),
+        (getattr(args, f"{prefix}_plan_start_gate"), gate_data, 64 * 1024, True, False),
+        (getattr(args, f"{prefix}_trace_provisional_receipt"), trace_data,
+         64 * 1024, True, False),
+        (getattr(args, f"{prefix}_workload_metadata"), workload_metadata_data,
+         64 * 1024, True, False),
+        (getattr(args, f"{prefix}_workload_events"), workload_events_data,
+         64 * 1024 * 1024, True, False),
+        (getattr(args, f"{prefix}_workload_ready_receipt"), workload_ready_data,
+         64 * 1024, True, False),
+        (getattr(args, f"{prefix}_lifecycle_ready_receipt"), lifecycle_ready_data,
+         64 * 1024, True, False),
+        (getattr(args, f"{prefix}_lifecycle_registration"), lifecycle_registration_data,
+         64 * 1024, True, False),
+        (getattr(args, f"{prefix}_tail_receipt"), tail_data, 64 * 1024, True, False),
+        (getattr(args, f"{prefix}_quit_receipt"), quit_data, 64 * 1024, True, False),
+        (getattr(args, f"{prefix}_exit_receipt"), exit_data, 64 * 1024, True, False),
+        (getattr(args, f"{prefix}_case_report"), case_report_data, 64 * 1024, True, False),
+        (getattr(args, f"{prefix}_trace_metadata"), final_trace_data, 64 * 1024, True, False),
+        (getattr(args, f"{prefix}_manual_artifacts"), manual_data, 64 * 1024, True, False),
+    )
+    if any(stable_read(path, maximum, private=private, mutable=mutable) != expected
+           for path, expected, maximum, private, mutable in postflight) \
+            or stable_trace_tree(getattr(args, f"{prefix}_trace_archive")) != trace_archive_hash \
+            or stable_file_digest(getattr(args, f"{prefix}_manual_screenshot")) != screenshot_hash \
+            or stable_file_digest(getattr(args, f"{prefix}_manual_video")) != video_hash:
+        raise Invalid(f"{subject}-evidence-changed-after-replay")
     return {
         "session_id": intent["session_id"], "nonce": intent["nonce"],
         "run_intent_sha256": intent_hash, "run_metadata_sha256": digest(run_data),
@@ -903,7 +1202,6 @@ def build(args: argparse.Namespace) -> bytes:
     terminator_binary_data = stable_read(
         args.appkit_terminator_binary, 512 * 1024 * 1024
     )
-    helper_stat = Path(args.common_lifecycle_helper).lstat()
     inspector_stat = Path(args.process_inspector).lstat()
     canonical_directory = Path(__file__).resolve(strict=True).parent
     if Path(args.common_lifecycle_helper).resolve(strict=True) \
@@ -924,13 +1222,15 @@ def build(args: argparse.Namespace) -> bytes:
     if digest(plan_data) != pair["plan_sha256"]:
         raise Invalid("scenario-plan-binding")
     spaceterm = verify_run(
-        args, secret, pair, "spaceterm", helper_data, inspector_data,
-        terminator_source_data, terminator_binary_data, helper_stat, inspector_stat,
+        args, secret, pair, "spaceterm", plan_data, digest(helper_data), inspector_data,
+        terminator_source_data, terminator_binary_data,
+        Path(args.spaceterm_lifecycle_helper).lstat(), inspector_stat,
         terminator_source_stat, terminator_binary_stat,
     )
     ghostty = verify_run(
-        args, secret, pair, "ghostty", helper_data, inspector_data,
-        terminator_source_data, terminator_binary_data, helper_stat, inspector_stat,
+        args, secret, pair, "ghostty", plan_data, digest(helper_data), inspector_data,
+        terminator_source_data, terminator_binary_data,
+        Path(args.ghostty_lifecycle_helper).lstat(), inspector_stat,
         terminator_source_stat, terminator_binary_stat,
     )
     if spaceterm["session_id"] == ghostty["session_id"] \

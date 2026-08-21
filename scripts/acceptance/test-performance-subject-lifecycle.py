@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-import hashlib, hmac, os, pathlib, stat, struct, subprocess, tempfile, time
+import hashlib, hmac, os, pathlib, platform, shutil, stat, struct, subprocess, tempfile, time
 
 HERE = pathlib.Path(__file__).resolve().parent
 NONCE = "a" * 64
@@ -15,6 +15,92 @@ def signed(magic, items, key):
                          hashlib.sha256).hexdigest()
     return unsigned + f"{key}\t{signature}\n".encode()
 def write(path, data, mode=0o400): path.write_bytes(data); path.chmod(mode)
+
+
+def mapped_executable_fixture(root):
+    source = root / "blocking-bridge.c"
+    source.write_text("#include <unistd.h>\nint main(void) { sleep(30); return 0; }\n")
+    source.chmod(0o400)
+    clang = pathlib.Path(subprocess.check_output(
+        ["/usr/bin/xcrun", "--sdk", "macosx", "--find", "clang"], text=True,
+    ).strip())
+    sdk = subprocess.check_output(
+        ["/usr/bin/xcrun", "--sdk", "macosx", "--show-sdk-path"], text=True,
+    ).strip()
+    sdk_version = subprocess.check_output(
+        ["/usr/bin/xcrun", "--sdk", "macosx", "--show-sdk-version"], text=True,
+    ).strip()
+    compiled = root / "compiled-bridge"
+    subprocess.run([
+        clang, "-std=c17", "-O2", "-Wall", "-Wextra", "-Werror", "-Wpedantic",
+        "-arch", platform.machine(), "-isysroot", sdk, "-mmacosx-version-min=11.0",
+        "-Wl,-dead_strip", source, "-o", compiled,
+    ], check=True)
+    compiled.chmod(0o500)
+    bridge = root / "run-owned-bridge"
+    source_fd = os.open(compiled, os.O_RDONLY | os.O_NOFOLLOW)
+    target_fd = os.open(bridge, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o500)
+    try:
+        while True:
+            chunk = os.read(source_fd, 1024 * 1024)
+            if not chunk: break
+            assert os.write(target_fd, chunk) == len(chunk)
+        os.fchmod(target_fd, 0o500); os.fsync(target_fd)
+    finally:
+        os.close(source_fd); os.close(target_fd)
+    provenance = rows([
+        ("source_sha256", sha(source.read_bytes())),
+        ("compiler_sha256", sha(clang.read_bytes())),
+        ("sdk_path_sha256", sha(sdk.encode())),
+        ("sdk_version", sdk_version),
+        ("binary_sha256", sha(bridge.read_bytes())),
+    ])
+    write(root / "mapped-fixture-provenance.tsv", provenance)
+    inspector = HERE.parent / "inspect-release-performance-process.py"
+
+    def inspect(process, expected=bridge):
+        file_stat = expected.stat()
+        return subprocess.run([
+            inspector, "--pid", str(process.pid), "--expected-executable", expected,
+            "--expected-sha256", sha(expected.read_bytes()),
+            "--expected-device", str(file_stat.st_dev),
+            "--expected-inode", str(file_stat.st_ino),
+        ], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+    retained_fd = os.open(bridge, os.O_RDONLY | os.O_NOFOLLOW)
+    process = subprocess.Popen([bridge])
+    try:
+        deadline = time.time() + 3
+        while time.time() < deadline and process.poll() is None:
+            verified = inspect(process)
+            if verified.returncode == 0: break
+            time.sleep(0.02)
+        assert verified.returncode == 0, verified.stderr
+        backup = root / "bridge-original"
+        replacement = root / "bridge-replacement"
+        os.replace(bridge, backup)
+        shutil.copyfile(backup, replacement); replacement.chmod(0o500)
+        os.replace(replacement, bridge)
+        assert inspect(process).returncode != 0
+        os.replace(backup, bridge)
+        assert inspect(process).returncode == 0
+        assert os.fstat(retained_fd).st_ino == bridge.stat().st_ino
+    finally:
+        os.close(retained_fd)
+        process.terminate(); process.wait(timeout=3)
+
+    original = root / "prelaunch-original"
+    os.replace(bridge, original)
+    shutil.copyfile(original, bridge); bridge.chmod(0o500)
+    replacement_process = subprocess.Popen([bridge])
+    launched_replacement = root / "launched-replacement"
+    try:
+        time.sleep(0.05)
+        os.replace(bridge, launched_replacement)
+        os.replace(original, bridge)
+        assert inspect(replacement_process).returncode != 0
+    finally:
+        replacement_process.terminate(); replacement_process.wait(timeout=3)
 
 
 def fixture(root, subject):
@@ -127,6 +213,7 @@ def run_case(root, subject, *, swap_terminator=False):
         "--expected-appkit-terminator-binary-inode",str((root/"terminator").stat().st_ino),
         "--expected-appkit-terminator-binary-sha256",sha((root/"terminator").read_bytes()),
         "--appkit-terminator-fd",str(terminator_fd),"--self-source-fd",str(helper_fd),
+        "--self-source-path",str(helper),
         "--expected-lifecycle-helper-device",str(helper.stat().st_dev),
         "--expected-lifecycle-helper-inode",str(helper.stat().st_ino),
         "--expected-lifecycle-helper-sha256",sha(helper.read_bytes()),
@@ -135,6 +222,8 @@ def run_case(root, subject, *, swap_terminator=False):
         "--expected-process-inspector-inode",str(inspector.stat().st_ino),
         "--expected-process-inspector-sha256",sha(inspector.read_bytes()),
         "--startup-command-fd",str(startup_read),
+        "--tail-receipt-tool",HERE/"performance-tail-receipt.py",
+        "--workload-ready-verifier",HERE/"verify-performance-workload-ready.py",
         "--timeout-seconds","3"]
     env = os.environ.copy(); env.update(SPACETERM_PERFORMANCE_TEST_MODE="1",
         SPACETERM_TEST_LIFECYCLE_IDENTITY="valid",SPACETERM_TEST_LIFECYCLE_TERMINATION="normal")
@@ -226,6 +315,8 @@ def run_case(root, subject, *, swap_terminator=False):
 def main():
     with tempfile.TemporaryDirectory(prefix="spaceterm-lifecycle-") as temporary:
         top=pathlib.Path(temporary); top.chmod(0o700)
+        mapped_root=top/"mapped"; mapped_root.mkdir(mode=0o700)
+        mapped_executable_fixture(mapped_root)
         for name, subject, swap in (("space","spaceterm",False),("ghost","ghostty",False),
                                     ("swap","ghostty",True)):
             root=top/name; root.mkdir(mode=0o700); write(root/"secret",SECRET,0o600)

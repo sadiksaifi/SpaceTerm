@@ -586,6 +586,7 @@ for subject in spaceterm ghostty; do
         "--$subject-workload-ready-receipt" "$TEMP_ROOT/$subject-workload-ready.tsv"
         "--$subject-lifecycle-ready-receipt" "$TEMP_ROOT/$subject-lifecycle-ready.tsv"
         "--$subject-lifecycle-registration" "$TEMP_ROOT/$subject-lifecycle-registration.tsv"
+        "--$subject-lifecycle-helper" "$LIFECYCLE_HELPER"
         "--$subject-tail-receipt" "$TEMP_ROOT/$subject-tail.tsv"
         "--$subject-quit-receipt" "$TEMP_ROOT/$subject-quit.tsv"
         "--$subject-exit-receipt" "$TEMP_ROOT/$subject-exit.tsv"
@@ -736,6 +737,33 @@ expect_failure "cross-subject trace swap" "$TOOL" verify \
 expect_failure "native observation swap" "$TOOL" verify \
     "${pair_arguments[@]/$SPACETERM_NATIVE_OBSERVATION/$SPACETERM_NATIVE_PROVISIONAL}" \
     --receipt "$RESULT"
+
+python3 - "$TOOL" <<'PY' || fail "nested trace mutation was not rejected"
+import importlib.util, pathlib, tempfile
+tool = pathlib.Path(__import__('sys').argv[1])
+spec = importlib.util.spec_from_file_location("performance_pair_result", tool)
+module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
+with tempfile.TemporaryDirectory(prefix="spaceterm-trace-tree-") as temporary:
+    root = pathlib.Path(temporary); root.chmod(0o700)
+    nested = root / "nested"; nested.mkdir(mode=0o700)
+    payload = nested / "payload"; payload.write_bytes(b"trace\n"); payload.chmod(0o400)
+    original = pathlib.Path.rglob
+    calls = 0
+    def mutating_rglob(self, pattern):
+        global calls
+        calls += 1
+        if calls == 2:
+            added = nested / "added-after-first-walk"
+            added.write_bytes(b"late\n"); added.chmod(0o400)
+        return original(self, pattern)
+    pathlib.Path.rglob = mutating_rglob
+    try:
+        module.stable_trace_tree(str(root))
+    except module.Invalid:
+        pass
+    else:
+        raise SystemExit(1)
+PY
 
 # A wrapper invocation without either complete case bundle can never expose PASS.
 PAIR_WRAPPER_OUTPUT="$TEMP_ROOT/pair-wrapper-output.tsv"
