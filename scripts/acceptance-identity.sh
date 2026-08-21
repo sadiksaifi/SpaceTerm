@@ -887,7 +887,13 @@ collect_native_launch_observation() {
     local mode="$9"
     local failure_control="${10:-none}"
     local quit_control="${11:-none}"
+    local quit_receipt="${12:-none}"
+    local tail_receipt="${13:-none}"
+    local campaign_secret="${14:-none}"
+    local run_intent="${15:-none}"
+    local subject_exit_receipt="${16:-none}"
     local helper="$launch_root/identity/acceptance-launch-verifier"
+    local lifecycle_path
     local -a lifecycle_arguments=()
 
     [[ ! -e "$observation" && ! -L "$observation" ]] \
@@ -899,8 +905,25 @@ collect_native_launch_observation() {
         -framework Security -framework CoreFoundation -lbsm \
         "$SCRIPT_DIR/acceptance-launch-verifier.m" -o "$helper"
     chmod 0700 "$helper"
-    if [[ "$quit_control" != none ]]; then
-        lifecycle_arguments=(--external-lifecycle true)
+    if [[ "$quit_control" == none ]]; then
+        [[ "$quit_receipt$tail_receipt$campaign_secret$run_intent$subject_exit_receipt" \
+            == nonenonenonenonenone ]] \
+            || die "performance lifecycle options must be supplied together"
+    else
+        for lifecycle_path in "$quit_control" "$quit_receipt" "$tail_receipt" \
+            "$campaign_secret" "$run_intent" "$subject_exit_receipt"; do
+            [[ "$lifecycle_path" == /* ]] \
+                || die "performance lifecycle paths must be absolute"
+        done
+        lifecycle_arguments=(
+            --quit-control "$quit_control"
+            --quit-receipt "$quit_receipt"
+            --tail-receipt "$tail_receipt"
+            --campaign-secret-file "$campaign_secret"
+            --run-intent "$run_intent"
+            --subject-exit-receipt "$subject_exit_receipt"
+            --external-lifecycle true
+        )
     fi
     if [[ "$mode" == "campaign" ]]; then
         echo "SpaceTerm will remain open from the exact read-only DMG mount." >&2

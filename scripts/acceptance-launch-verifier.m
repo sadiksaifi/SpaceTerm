@@ -270,8 +270,8 @@ static NSString *canonical_path(NSString *path) {
 
 static bool parse_options(int argc, const char *argv[], Options *options) {
     NSMutableDictionary<NSString *, NSString *> *values = [NSMutableDictionary dictionary];
-    if (argc != 23 && argc != 25) {
-        return report(@"expected eleven or twelve named option/value pairs");
+    if (argc != 23 && argc != 37) {
+        return report(@"expected eleven or eighteen named option/value pairs");
     }
     for (int index = 1; index < argc; index += 2) {
         NSString *key = [NSString stringWithUTF8String:argv[index]];
@@ -286,13 +286,23 @@ static bool parse_options(int argc, const char *argv[], Options *options) {
         @"--identifier", @"--team-identifier", @"--home", @"--output", @"--mode",
         @"--failure-control"
     ];
+    NSArray<NSString *> *lifecycleKeys = @[
+        @"--quit-control", @"--quit-receipt", @"--tail-receipt",
+        @"--campaign-secret-file", @"--run-intent", @"--subject-exit-receipt",
+        @"--external-lifecycle"
+    ];
     for (NSString *key in keys) {
         if (values[key] == nil) {
             return report([NSString stringWithFormat:@"missing option %@", key]);
         }
     }
-    bool externalLifecycle = values[@"--external-lifecycle"] != nil;
-    if (values.count != keys.count + (externalLifecycle ? 1 : 0)) {
+    bool hasQuitControl = values[@"--quit-control"] != nil;
+    for (NSString *key in lifecycleKeys) {
+        if ((values[key] != nil) != hasQuitControl) {
+            return report(@"performance lifecycle options must be supplied together");
+        }
+    }
+    if (values.count != keys.count + (hasQuitControl ? lifecycleKeys.count : 0)) {
         return report(@"unknown command-line option");
     }
     NSString *mode = values[@"--mode"];
@@ -311,9 +321,19 @@ static bool parse_options(int argc, const char *argv[], Options *options) {
     if ([mode isEqualToString:@"replay"] && ![failureControl isEqualToString:@"none"]) {
         return report(@"failure control is unavailable during replay");
     }
-    if (externalLifecycle && ([mode isEqualToString:@"replay"] ||
+    if (hasQuitControl && ([mode isEqualToString:@"replay"] ||
             ![failureControl isEqualToString:@"none"])) {
-        return report(@"external lifecycle is campaign-only and failure control must be none");
+        return report(@"performance lifecycle is campaign-only and failure control must be none");
+    }
+    if (hasQuitControl &&
+        (![values[@"--quit-control"] isAbsolutePath] ||
+         ![values[@"--quit-receipt"] isAbsolutePath] ||
+         ![values[@"--tail-receipt"] isAbsolutePath] ||
+         ![values[@"--campaign-secret-file"] isAbsolutePath] ||
+         ![values[@"--run-intent"] isAbsolutePath] ||
+         ![values[@"--subject-exit-receipt"] isAbsolutePath] ||
+         ![values[@"--external-lifecycle"] isEqualToString:@"true"])) {
+        return report(@"performance lifecycle paths and external flag are invalid");
     }
     NSCharacterSet *not_hex =
         [[NSCharacterSet characterSetWithCharactersInString:@"0123456789abcdefABCDEF"] invertedSet];
@@ -332,17 +352,13 @@ static bool parse_options(int argc, const char *argv[], Options *options) {
     options->home = values[@"--home"];
     options->output = values[@"--output"];
     options->failureControl = failureControl;
-    options->quitControl = @"none";
-    options->quitReceipt = @"none";
-    options->tailReceipt = @"none";
-    options->campaignSecret = @"none";
-    options->runIntent = @"none";
-    options->subjectExitReceipt = @"none";
-    options->externalLifecycle = externalLifecycle &&
-        [values[@"--external-lifecycle"] isEqualToString:@"true"];
-    if (externalLifecycle && !options->externalLifecycle) {
-        return report(@"external lifecycle must be true");
-    }
+    options->quitControl = hasQuitControl ? values[@"--quit-control"] : @"none";
+    options->quitReceipt = hasQuitControl ? values[@"--quit-receipt"] : @"none";
+    options->tailReceipt = hasQuitControl ? values[@"--tail-receipt"] : @"none";
+    options->campaignSecret = hasQuitControl ? values[@"--campaign-secret-file"] : @"none";
+    options->runIntent = hasQuitControl ? values[@"--run-intent"] : @"none";
+    options->subjectExitReceipt = hasQuitControl ? values[@"--subject-exit-receipt"] : @"none";
+    options->externalLifecycle = hasQuitControl;
     options->replay = [mode isEqualToString:@"replay"];
     return true;
 }

@@ -960,18 +960,51 @@ SH
     fi
 
     launch_root="$TEMP_TEST_DIR/external-lifecycle-launch"
+    local quit_control="$TEMP_TEST_DIR/quit-control.fifo"
+    local quit_receipt="$TEMP_TEST_DIR/quit-receipt.tsv"
+    local tail_receipt="$TEMP_TEST_DIR/tail-receipt.tsv"
+    local campaign_secret="$TEMP_TEST_DIR/campaign-secret.bin"
+    local run_intent="$TEMP_TEST_DIR/run-intent.tsv"
+    local subject_exit="$TEMP_TEST_DIR/subject-exit.tsv"
     export SPACETERM_TEST_LAUNCH_OBSERVATION="$launch_root/native-observation.tsv"
     export SPACETERM_TEST_LAUNCH_ARGUMENTS="$TEMP_TEST_DIR/external-lifecycle-arguments.txt"
     collect_native_launch_observation \
         "$app" "$(printf 'b%.0s' {1..64})" "i43-external-lifecycle" \
         "$SPACETERM_TEST_LAUNCH_OBSERVATION" "$launch_root" \
-        "abcdef" "io.github.sadiksaifi.spaceterm" "" "replay" "none" \
-        "$TEMP_TEST_DIR/quit-control.fifo"
-    awk '
-        $0 == "--external-lifecycle" { count += 1; getline; if ($0 != "true") exit 1 }
-        END { exit count != 1 }
-    ' "$SPACETERM_TEST_LAUNCH_ARGUMENTS" \
-        || fail "native launch did not emit the exact external lifecycle argument pair"
+        "abcdef" "io.github.sadiksaifi.spaceterm" "" "campaign" "none" \
+        "$quit_control" "$quit_receipt" "$tail_receipt" "$campaign_secret" \
+        "$run_intent" "$subject_exit"
+    while IFS=$'\t' read -r expected_key expected_value; do
+        awk -v expected_key="$expected_key" -v expected_value="$expected_value" '
+            $0 == expected_key { count += 1; getline; if ($0 != expected_value) exit 1 }
+            END { exit count != 1 }
+        ' "$SPACETERM_TEST_LAUNCH_ARGUMENTS" \
+            || fail "native launch omitted or changed lifecycle argument: $expected_key"
+    done <<EOF
+--quit-control	$quit_control
+--quit-receipt	$quit_receipt
+--tail-receipt	$tail_receipt
+--campaign-secret-file	$campaign_secret
+--run-intent	$run_intent
+--subject-exit-receipt	$subject_exit
+--external-lifecycle	true
+EOF
+
+    if (collect_native_launch_observation \
+        "$app" "$(printf 'c%.0s' {1..64})" "i43-partial-lifecycle" \
+        "$TEMP_TEST_DIR/partial-observation.tsv" "$TEMP_TEST_DIR/partial-lifecycle-launch" \
+        "abcdef" "io.github.sadiksaifi.spaceterm" "" "campaign" "none" \
+        "$TEMP_TEST_DIR/partial-control.fifo") >/dev/null 2>&1; then
+        fail "native launch accepted a partial lifecycle group"
+    fi
+    if (collect_native_launch_observation \
+        "$app" "$(printf 'd%.0s' {1..64})" "i43-missing-control" \
+        "$TEMP_TEST_DIR/missing-control-observation.tsv" \
+        "$TEMP_TEST_DIR/missing-control-lifecycle-launch" \
+        "abcdef" "io.github.sadiksaifi.spaceterm" "" "campaign" "none" "none" \
+        "$TEMP_TEST_DIR/orphan-receipt.tsv") >/dev/null 2>&1; then
+        fail "native launch accepted lifecycle artifacts without a control"
+    fi
 )
 
 test_value_encoding_round_trips
