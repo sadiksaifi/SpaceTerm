@@ -34,6 +34,8 @@ static const uint64_t kResizeMaximumLatenessNanoseconds = 20000000ULL;
 static const CGFloat kResizeDeltaTolerance = 8.0;
 static const CGFloat kRestorationTolerance = 1.0;
 static const uint64_t kMaximumDispatchLatenessNanoseconds = 250000000ULL;
+static const uint64_t kAccessibilityWindowRetryNanoseconds = 5000000000ULL;
+static const uint64_t kAccessibilityWindowRetryIntervalMilliseconds = 50;
 static const int64_t kDriverEventTag = 0x5350414345544552LL;
 static volatile sig_atomic_t gInterrupted = 0;
 
@@ -523,6 +525,56 @@ static NSInteger window_integer(NSDictionary *info, CFStringRef key, NSInteger f
     return [value isKindOfClass:[NSNumber class]] ? [value integerValue] : fallback;
 }
 
+typedef NS_ENUM(NSUInteger, DriverWindowClassification) {
+    DriverWindowVerified,
+    DriverWindowAXQueryUnavailable,
+    DriverWindowAXPublicationMissing,
+    DriverWindowAXPublicationProxy,
+    DriverWindowAXOwnerMismatch,
+    DriverWindowAXRoleMismatch,
+    DriverWindowAXSubroleMismatch,
+    DriverWindowAXMinimizedMismatch,
+    DriverWindowAXNumberMismatch,
+    DriverWindowAXBoundsMismatch,
+    DriverWindowAXFocusAmbiguous,
+};
+
+static NSString *driver_window_classification(DriverWindowClassification classification) {
+    switch (classification) {
+        case DriverWindowVerified:
+            return @"verified";
+        case DriverWindowAXQueryUnavailable:
+            return @"target-accessibility-window-query-unavailable";
+        case DriverWindowAXPublicationMissing:
+            return @"target-accessibility-window-publication-missing";
+        case DriverWindowAXPublicationProxy:
+            return @"target-accessibility-window-publication-proxy";
+        case DriverWindowAXOwnerMismatch:
+            return @"target-accessibility-window-owner-mismatch";
+        case DriverWindowAXRoleMismatch:
+            return @"target-accessibility-window-role-mismatch";
+        case DriverWindowAXSubroleMismatch:
+            return @"target-accessibility-window-subrole-mismatch";
+        case DriverWindowAXMinimizedMismatch:
+            return @"target-accessibility-window-minimized-mismatch";
+        case DriverWindowAXNumberMismatch:
+            return @"target-accessibility-window-number-mismatch";
+        case DriverWindowAXBoundsMismatch:
+            return @"target-accessibility-window-bounds-mismatch";
+        case DriverWindowAXFocusAmbiguous:
+            return @"target-accessibility-window-focus-ambiguity";
+    }
+    return @"target-accessibility-window-classification-invalid";
+}
+
+static BOOL driver_window_classification_is_transient(
+    DriverWindowClassification classification
+) {
+    return classification == DriverWindowAXQueryUnavailable
+        || classification == DriverWindowAXPublicationMissing
+        || classification == DriverWindowAXPublicationProxy;
+}
+
 static BOOL ax_window_number(AXUIElementRef window, CGWindowID *number, BOOL *present) {
     CFTypeRef raw = NULL;
     AXError status = AXUIElementCopyAttributeValue(window, CFSTR("AXWindowNumber"), &raw);
@@ -595,54 +647,131 @@ static BOOL ax_size(AXUIElementRef element, CFStringRef attribute, CGSize *value
     return valid;
 }
 
-static NSArray<NSDictionary *> *select_driver_windows(
+static DriverWindowClassification select_driver_window(
     NSArray<NSDictionary *> *candidates,
     pid_t targetPID,
     CGWindowID targetNumber,
-    CGRect targetBounds
+    CGRect targetBounds,
+    NSDictionary **selected
 ) {
-    NSPredicate *eligible = [NSPredicate predicateWithBlock:
+    if (selected != NULL) *selected = nil;
+    if (candidates.count == 0) {
+        return DriverWindowAXPublicationMissing;
+    }
+    BOOL queryUnavailable = NO;
+    NSMutableArray<NSDictionary *> *knownCandidates = [NSMutableArray array];
+    for (NSDictionary *candidate in candidates) {
+        if ([candidate[@"query_error"] boolValue]) {
+            queryUnavailable = YES;
+            continue;
+        }
+        NSNumber *owner = candidate[@"owner"];
+        if (![owner isKindOfClass:NSNumber.class] || owner.intValue != targetPID) {
+            return DriverWindowAXOwnerMismatch;
+        }
+        [knownCandidates addObject:candidate];
+    }
+    if (knownCandidates.count == 0) return DriverWindowAXQueryUnavailable;
+    NSPredicate *windows = [NSPredicate predicateWithBlock:
+        ^BOOL(NSDictionary *candidate, NSDictionary *_) {
+            (void)_;
+            return [candidate[@"role"] isEqualToString:(__bridge NSString *)kAXWindowRole];
+        }];
+    NSArray<NSDictionary *> *windowCandidates =
+        [knownCandidates filteredArrayUsingPredicate:windows];
+    if (windowCandidates.count == 0) {
+        if (queryUnavailable) return DriverWindowAXQueryUnavailable;
+        NSPredicate *proxies = [NSPredicate predicateWithBlock:
+            ^BOOL(NSDictionary *candidate, NSDictionary *_) {
+                (void)_;
+                return [candidate[@"role"] isEqualToString:
+                    (__bridge NSString *)kAXApplicationRole];
+            }];
+        return [candidates filteredArrayUsingPredicate:proxies].count > 0
+            ? DriverWindowAXPublicationProxy : DriverWindowAXRoleMismatch;
+    }
+    NSPredicate *standard = [NSPredicate predicateWithBlock:
+        ^BOOL(NSDictionary *candidate, NSDictionary *_) {
+            (void)_;
+            return [candidate[@"subrole"] isEqualToString:
+                (__bridge NSString *)kAXStandardWindowSubrole];
+        }];
+    NSArray<NSDictionary *> *standardCandidates =
+        [windowCandidates filteredArrayUsingPredicate:standard];
+    if (standardCandidates.count == 0) return queryUnavailable
+        ? DriverWindowAXQueryUnavailable : DriverWindowAXSubroleMismatch;
+    NSPredicate *restored = [NSPredicate predicateWithBlock:
+        ^BOOL(NSDictionary *candidate, NSDictionary *_) {
+            (void)_;
+            return ![candidate[@"minimized"] boolValue];
+        }];
+    NSArray<NSDictionary *> *restoredCandidates =
+        [standardCandidates filteredArrayUsingPredicate:restored];
+    if (restoredCandidates.count == 0) return queryUnavailable
+        ? DriverWindowAXQueryUnavailable : DriverWindowAXMinimizedMismatch;
+    NSPredicate *numbered = [NSPredicate predicateWithBlock:
         ^BOOL(NSDictionary *candidate, NSDictionary *_) {
             (void)_;
             NSNumber *number = candidate[@"number"];
+            return number == nil || number.unsignedIntValue == targetNumber;
+        }];
+    NSArray<NSDictionary *> *numberCandidates =
+        [restoredCandidates filteredArrayUsingPredicate:numbered];
+    if (numberCandidates.count == 0) return queryUnavailable
+        ? DriverWindowAXQueryUnavailable : DriverWindowAXNumberMismatch;
+    NSPredicate *boundsMatch = [NSPredicate predicateWithBlock:
+        ^BOOL(NSDictionary *candidate, NSDictionary *_) {
+            (void)_;
             CGRect bounds = CGRectMake(
                 [candidate[@"x"] doubleValue], [candidate[@"y"] doubleValue],
                 [candidate[@"width"] doubleValue], [candidate[@"height"] doubleValue]);
-            return [candidate[@"owner"] intValue] == targetPID
-                && [candidate[@"role"] isEqualToString:(__bridge NSString *)kAXWindowRole]
-                && [candidate[@"subrole"] isEqualToString:
-                    (__bridge NSString *)kAXStandardWindowSubrole]
-                && ![candidate[@"minimized"] boolValue]
-                && (number == nil || number.unsignedIntValue == targetNumber)
-                && CGRectEqualToRect(bounds, targetBounds);
+            return CGRectEqualToRect(bounds, targetBounds);
         }];
-    NSArray<NSDictionary *> *matches = [candidates filteredArrayUsingPredicate:eligible];
-    if (matches.count <= 1) return matches;
+    NSArray<NSDictionary *> *matches =
+        [numberCandidates filteredArrayUsingPredicate:boundsMatch];
+    if (matches.count == 0) return queryUnavailable
+        ? DriverWindowAXQueryUnavailable : DriverWindowAXBoundsMismatch;
+    if (matches.count == 1) {
+        if (queryUnavailable) return DriverWindowAXQueryUnavailable;
+        if (selected != NULL) *selected = matches[0];
+        return DriverWindowVerified;
+    }
     NSPredicate *focusedMain = [NSPredicate predicateWithBlock:
         ^BOOL(NSDictionary *candidate, NSDictionary *_) {
             (void)_;
             return [candidate[@"main"] boolValue] && [candidate[@"focused"] boolValue];
         }];
-    return [matches filteredArrayUsingPredicate:focusedMain];
+    NSArray<NSDictionary *> *focusedMainMatches =
+        [matches filteredArrayUsingPredicate:focusedMain];
+    if (focusedMainMatches.count == 1) {
+        if (queryUnavailable) return DriverWindowAXQueryUnavailable;
+        if (selected != NULL) *selected = focusedMainMatches[0];
+        return DriverWindowVerified;
+    }
+    return DriverWindowAXFocusAmbiguous;
 }
 
-static NSDictionary *ax_window_candidate(AXUIElementRef window) {
+static NSDictionary *ax_window_candidate(AXUIElementRef window, pid_t targetPID) {
     pid_t owner = 0;
+    NSString *role = nil;
+    if (AXUIElementGetPid(window, &owner) != kAXErrorSuccess) return nil;
+    if (owner != targetPID) return @{ @"owner": @(owner) };
+    if (!ax_string(window, kAXRoleAttribute, &role)) return nil;
+    if (![role isEqualToString:(__bridge NSString *)kAXWindowRole]) {
+        return @{ @"owner": @(owner), @"role": role };
+    }
     CGWindowID number = 0;
     BOOL numberPresent = NO;
     BOOL minimized = YES;
     BOOL main = NO;
     BOOL focused = NO;
-    NSString *role = nil;
     NSString *subrole = nil;
     CGPoint position = CGPointZero;
     CGSize size = CGSizeZero;
-    if (AXUIElementGetPid(window, &owner) != kAXErrorSuccess
-        || !ax_window_number(window, &number, &numberPresent)
+    if (!ax_window_number(window, &number, &numberPresent)
         || !ax_boolean(window, kAXMinimizedAttribute, &minimized)
         || !ax_boolean(window, kAXMainAttribute, &main)
         || !ax_boolean(window, kAXFocusedAttribute, &focused)
-        || !ax_string(window, kAXRoleAttribute, &role)
         || !ax_string(window, kAXSubroleAttribute, &subrole)
         || !ax_point(window, kAXPositionAttribute, &position)
         || !ax_size(window, kAXSizeAttribute, &size)
@@ -657,6 +786,34 @@ static NSDictionary *ax_window_candidate(AXUIElementRef window) {
     } mutableCopy];
     if (numberPresent) candidate[@"number"] = @(number);
     return candidate;
+}
+
+static NSArray<NSDictionary *> *driver_ax_candidates(AXUIElementRef application,
+                                                      pid_t targetPID) {
+    if (application == NULL) return @[ @{ @"query_error": @YES } ];
+    CFTypeRef rawWindows = NULL;
+    AXError status = AXUIElementCopyAttributeValue(
+        application, kAXWindowsAttribute, &rawWindows);
+    if (status != kAXErrorSuccess || rawWindows == NULL
+        || CFGetTypeID(rawWindows) != CFArrayGetTypeID()) {
+        if (rawWindows != NULL) CFRelease(rawWindows);
+        return @[ @{ @"query_error": @YES } ];
+    }
+    NSMutableArray<NSDictionary *> *candidates = [NSMutableArray array];
+    CFArrayRef windows = (CFArrayRef)rawWindows;
+    for (CFIndex index = 0; index < CFArrayGetCount(windows); index++) {
+        CFTypeRef rawCandidate = CFArrayGetValueAtIndex(windows, index);
+        if (CFGetTypeID(rawCandidate) != AXUIElementGetTypeID()) {
+            [candidates addObject:@{ @"query_error": @YES }];
+            continue;
+        }
+        NSDictionary *candidate = ax_window_candidate(
+            (AXUIElementRef)rawCandidate, targetPID);
+        [candidates addObject:candidate != nil
+            ? candidate : @{ @"query_error": @YES }];
+    }
+    CFRelease(rawWindows);
+    return candidates;
 }
 
 static NSDictionary *driver_ax_fixture(
@@ -679,6 +836,29 @@ static NSDictionary *driver_ax_fixture(
     return candidate;
 }
 
+static BOOL driver_fixture_sequence_settles(
+    NSArray<NSArray<NSDictionary *> *> *observations,
+    NSArray<NSString *> *expectedClassifications,
+    pid_t targetPID,
+    CGWindowID targetNumber,
+    CGRect targetBounds
+) {
+    NSMutableArray<NSString *> *classifications = [NSMutableArray array];
+    BOOL settled = NO;
+    for (NSArray<NSDictionary *> *candidates in observations) {
+        NSDictionary *selected = nil;
+        DriverWindowClassification classification = select_driver_window(
+            candidates, targetPID, targetNumber, targetBounds, &selected);
+        [classifications addObject:driver_window_classification(classification)];
+        if (classification == DriverWindowVerified) {
+            settled = selected != nil;
+            break;
+        }
+        if (!driver_window_classification_is_transient(classification)) return NO;
+    }
+    return settled && [classifications isEqualToArray:expectedClassifications];
+}
+
 static BOOL driver_window_self_test(void) {
     const pid_t pid = 123;
     const CGWindowID number = 42;
@@ -689,8 +869,13 @@ static BOOL driver_window_self_test(void) {
         pid, windowRole, standard, NO, YES, YES, nil, bounds);
     NSDictionary *numbered = driver_ax_fixture(
         pid, windowRole, standard, NO, YES, YES, @42, bounds);
-    if (select_driver_windows(@[gpui], pid, number, bounds).count != 1
-        || select_driver_windows(@[numbered], pid, number, bounds).count != 1) return NO;
+    NSDictionary *selected = nil;
+    if (select_driver_window(@[gpui], pid, number, bounds, &selected)
+            != DriverWindowVerified
+        || selected != gpui
+        || select_driver_window(@[numbered], pid, number, bounds, &selected)
+            != DriverWindowVerified
+        || selected != numbered) return NO;
 
     NSDictionary *proxy = driver_ax_fixture(
         pid, (__bridge NSString *)kAXApplicationRole, standard, NO, YES, YES, nil, bounds);
@@ -702,25 +887,49 @@ static BOOL driver_window_self_test(void) {
         pid, windowRole, standard, YES, YES, YES, nil, bounds);
     NSDictionary *wrongNumber = driver_ax_fixture(
         pid, windowRole, standard, NO, YES, YES, @43, bounds);
-    if (select_driver_windows(@[proxy], pid, number, bounds).count != 0
-        || select_driver_windows(@[foreign], pid, number, bounds).count != 0
-        || select_driver_windows(@[nonstandard], pid, number, bounds).count != 0
-        || select_driver_windows(@[minimized], pid, number, bounds).count != 0
-        || select_driver_windows(@[wrongNumber], pid, number, bounds).count != 0) return NO;
+    if (select_driver_window(@[proxy], pid, number, bounds, &selected)
+            != DriverWindowAXPublicationProxy
+        || select_driver_window(@[foreign], pid, number, bounds, &selected)
+            != DriverWindowAXOwnerMismatch
+        || select_driver_window(@[nonstandard], pid, number, bounds, &selected)
+            != DriverWindowAXSubroleMismatch
+        || select_driver_window(@[minimized], pid, number, bounds, &selected)
+            != DriverWindowAXMinimizedMismatch
+        || select_driver_window(@[wrongNumber], pid, number, bounds, &selected)
+            != DriverWindowAXNumberMismatch) return NO;
 
     CGRect secondBounds = CGRectMake(1600, 39, 800, 600);
     NSDictionary *background = driver_ax_fixture(
         pid, windowRole, standard, NO, NO, NO, nil, secondBounds);
-    NSArray *selected = select_driver_windows(@[gpui, background], pid, number, bounds);
-    if (selected.count != 1) return NO;
+    if (select_driver_window(@[gpui, background], pid, number, bounds, &selected)
+            != DriverWindowVerified
+        || selected != gpui
+        || select_driver_window(@[background], pid, number, bounds, &selected)
+            != DriverWindowAXBoundsMismatch) return NO;
     NSDictionary *duplicateBackground = driver_ax_fixture(
         pid, windowRole, standard, NO, NO, NO, nil, bounds);
-    if (select_driver_windows(@[gpui, duplicateBackground], pid, number, bounds).count != 1) {
-        return NO;
-    }
+    if (select_driver_window(@[gpui, duplicateBackground], pid, number, bounds, &selected)
+            != DriverWindowVerified
+        || selected != gpui) return NO;
     NSDictionary *ambiguousMain = driver_ax_fixture(
         pid, windowRole, standard, NO, YES, YES, nil, bounds);
-    return select_driver_windows(@[gpui, ambiguousMain], pid, number, bounds).count == 2;
+    if (select_driver_window(@[gpui, ambiguousMain], pid, number, bounds, &selected)
+            != DriverWindowAXFocusAmbiguous) return NO;
+
+    NSArray<NSArray<NSDictionary *> *> *sustainedOutputSequence = @[
+        @[],
+        @[proxy],
+        @[ @{ @"query_error": @YES } ],
+        @[gpui],
+    ];
+    NSArray<NSString *> *expectedSequence = @[
+        @"target-accessibility-window-publication-missing",
+        @"target-accessibility-window-publication-proxy",
+        @"target-accessibility-window-query-unavailable",
+        @"verified",
+    ];
+    return driver_fixture_sequence_settles(
+        sustainedOutputSequence, expectedSequence, pid, number, bounds);
 }
 
 @interface DriverTarget : NSObject {
@@ -1020,27 +1229,58 @@ static BOOL driver_window_self_test(void) {
 }
 
 - (BOOL)verifyWindow:(NSString **)error {
-    NSDictionary *info = copy_window_info(self.windowNumber);
-    NSInteger owner = window_integer(info, kCGWindowOwnerPID, -1);
-    NSInteger number = window_integer(info, kCGWindowNumber, -1);
-    NSInteger layer = window_integer(info, kCGWindowLayer, -1);
-    NSInteger onscreen = window_integer(info, kCGWindowIsOnscreen, 0);
-    NSNumber *alpha = info[(__bridge id)kCGWindowAlpha];
-    CGRect bounds = CGRectZero;
-    if (info == nil || owner != self.pid || number != self.windowNumber || layer != 0
-        || onscreen != 1 || ![alpha isKindOfClass:NSNumber.class] || alpha.doubleValue <= 0.0
-        || !window_bounds(info, &bounds)) {
-        return set_error(error, @"target-window-identity-mismatch");
+    uint64_t deadline = continuous_nanoseconds() + kAccessibilityWindowRetryNanoseconds;
+    DriverWindowClassification lastClassification = DriverWindowAXQueryUnavailable;
+    while (!gInterrupted) {
+        if (![self verifyFastIdentity:error]) return NO;
+        NSDictionary *info = copy_window_info(self.windowNumber);
+        if (info == nil) return set_error(error, @"target-window-unavailable");
+        if (window_integer(info, kCGWindowOwnerPID, -1) != self.pid) {
+            return set_error(error, @"target-window-owner-mismatch");
+        }
+        if (window_integer(info, kCGWindowNumber, -1) != self.windowNumber) {
+            return set_error(error, @"target-window-number-mismatch");
+        }
+        if (window_integer(info, kCGWindowLayer, -1) != 0) {
+            return set_error(error, @"target-window-layer-mismatch");
+        }
+        if (window_integer(info, kCGWindowIsOnscreen, 0) != 1) {
+            return set_error(error, @"target-window-onscreen-mismatch");
+        }
+        NSNumber *alpha = info[(__bridge id)kCGWindowAlpha];
+        if (![alpha isKindOfClass:NSNumber.class] || alpha.doubleValue <= 0.0) {
+            return set_error(error, @"target-window-alpha-mismatch");
+        }
+        CGRect bounds = CGRectZero;
+        if (!window_bounds(info, &bounds)) {
+            return set_error(error, @"target-window-bounds-unavailable");
+        }
+
+        NSArray<NSDictionary *> *candidates = driver_ax_candidates(
+            _applicationElement, self.pid);
+        NSDictionary *selected = nil;
+        DriverWindowClassification classification = select_driver_window(
+            candidates, self.pid, self.windowNumber, bounds, &selected);
+        if (classification == DriverWindowVerified && selected != nil) {
+            AXUIElementRef selectedElement = (__bridge AXUIElementRef)selected[@"element"];
+            if (selectedElement == NULL) {
+                return set_error(error, @"target-accessibility-window-query-unavailable");
+            }
+            if (_windowElement == NULL || !CFEqual(_windowElement, selectedElement)) {
+                if (_windowElement != NULL) CFRelease(_windowElement);
+                _windowElement = (AXUIElementRef)CFRetain(selectedElement);
+            }
+            return YES;
+        }
+        if (!driver_window_classification_is_transient(classification)) {
+            return set_error(error, driver_window_classification(classification));
+        }
+        lastClassification = classification;
+        if (continuous_nanoseconds() >= deadline) break;
+        pump_run_loop(kAccessibilityWindowRetryIntervalMilliseconds);
     }
-    NSDictionary *candidate = _windowElement == NULL
-        ? nil : ax_window_candidate(_windowElement);
-    NSArray<NSDictionary *> *selected = candidate == nil ? @[]
-        : select_driver_windows(@[candidate], self.pid, self.windowNumber, bounds);
-    if (selected.count != 1
-        || !CFEqual((__bridge CFTypeRef)selected[0][@"element"], _windowElement)) {
-        return set_error(error, @"target-accessibility-window-mismatch");
-    }
-    return YES;
+    return set_error(error, gInterrupted
+        ? @"interrupted" : driver_window_classification(lastClassification));
 }
 
 - (BOOL)findAccessibilityWindow:(NSString **)error {
@@ -1048,43 +1288,7 @@ static BOOL driver_window_self_test(void) {
     if (_applicationElement == NULL) {
         return set_error(error, @"target-accessibility-application-unavailable");
     }
-    for (NSUInteger attempt = 0; attempt < 100; attempt++) {
-        NSDictionary *info = copy_window_info(self.windowNumber);
-        CGRect bounds = CGRectZero;
-        if (info == nil
-            || window_integer(info, kCGWindowOwnerPID, -1) != self.pid
-            || window_integer(info, kCGWindowNumber, -1) != self.windowNumber
-            || window_integer(info, kCGWindowLayer, -1) != 0
-            || window_integer(info, kCGWindowIsOnscreen, 0) != 1
-            || !window_bounds(info, &bounds)) {
-            return set_error(error, @"target-window-identity-mismatch");
-        }
-        CFTypeRef rawWindows = NULL;
-        AXError status = AXUIElementCopyAttributeValue(
-            _applicationElement, kAXWindowsAttribute, &rawWindows);
-        if (status == kAXErrorSuccess && rawWindows != NULL
-            && CFGetTypeID(rawWindows) == CFArrayGetTypeID()) {
-            NSMutableArray<NSDictionary *> *candidates = [NSMutableArray array];
-            CFArrayRef windows = (CFArrayRef)rawWindows;
-            for (CFIndex index = 0; index < CFArrayGetCount(windows); index++) {
-                CFTypeRef rawCandidate = CFArrayGetValueAtIndex(windows, index);
-                if (CFGetTypeID(rawCandidate) != AXUIElementGetTypeID()) continue;
-                NSDictionary *candidate = ax_window_candidate((AXUIElementRef)rawCandidate);
-                if (candidate != nil) [candidates addObject:candidate];
-            }
-            NSArray<NSDictionary *> *selected = select_driver_windows(
-                candidates, self.pid, self.windowNumber, bounds);
-            if (selected.count == 1) {
-                _windowElement = (AXUIElementRef)CFRetain(
-                    (__bridge CFTypeRef)selected[0][@"element"]);
-                CFRelease(rawWindows);
-                return YES;
-            }
-        }
-        if (rawWindows != NULL) CFRelease(rawWindows);
-        pump_run_loop(50);
-    }
-    return set_error(error, @"target-accessibility-window-not-unique");
+    return [self verifyWindow:error];
 }
 
 - (BOOL)windowIsMinimized:(BOOL *)minimized {
@@ -1145,12 +1349,14 @@ static BOOL driver_window_self_test(void) {
     }
     NSDictionary *info = copy_window_info(self.windowNumber);
     CGRect bounds = CGRectZero;
-    NSDictionary *candidate = ax_window_candidate((AXUIElementRef)raw);
-    NSArray<NSDictionary *> *selected = info == nil || candidate == nil
-        || !window_bounds(info, &bounds) ? @[]
-        : select_driver_windows(@[candidate], self.pid, self.windowNumber, bounds);
-    BOOL matches = selected.count == 1
-        && CFEqual((__bridge CFTypeRef)selected[0][@"element"], raw);
+    NSDictionary *candidate = ax_window_candidate((AXUIElementRef)raw, self.pid);
+    NSDictionary *selected = nil;
+    DriverWindowClassification classification = info == nil || candidate == nil
+        || !window_bounds(info, &bounds) ? DriverWindowAXQueryUnavailable
+        : select_driver_window(
+            @[candidate], self.pid, self.windowNumber, bounds, &selected);
+    BOOL matches = classification == DriverWindowVerified && selected != nil
+        && CFEqual((__bridge CFTypeRef)selected[@"element"], raw);
     CFRelease(raw);
     return matches;
 }
