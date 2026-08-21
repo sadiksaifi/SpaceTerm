@@ -34,6 +34,7 @@ const MAX_FRAME_BYTES: usize = 16 * 1024;
 const SOCKET_TIMEOUT: Duration = Duration::from_secs(30);
 const FINAL_ACK_TIMEOUT: Duration = Duration::from_secs(5);
 const TERMINAL_LIFECYCLE_TIMEOUT: Duration = Duration::from_secs(5);
+const NORMAL_QUIT_CLASS_CODE: u64 = 4;
 
 static REQUEST: OnceLock<Mutex<Option<ObservationRequest>>> = OnceLock::new();
 static RUNTIME_WRITER: OnceLock<Mutex<Option<RuntimeWriter>>> = OnceLock::new();
@@ -246,6 +247,7 @@ pub(crate) struct FailureActionEvent {
 
 #[derive(Debug)]
 struct RuntimeWriter {
+    observation: RuntimeObservation,
     shutdown: mpsc::Sender<()>,
     thread: JoinHandle<Result<(), RuntimeWriterError>>,
 }
@@ -464,12 +466,20 @@ pub(crate) fn finish_runtime_observation() -> Result<(), AcceptanceObservationEr
     let Some(writer) = RUNTIME_WRITER.get() else {
         return Ok(());
     };
-    let mut writer = writer
+    finish_runtime_writer_slot(writer)
+}
+
+fn finish_runtime_writer_slot(
+    slot: &Mutex<Option<RuntimeWriter>>,
+) -> Result<(), AcceptanceObservationError> {
+    let Some(writer) = slot
         .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let Some(writer) = writer.take() else {
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take()
+    else {
         return Ok(());
     };
+    writer.observation.session_exited(NORMAL_QUIT_CLASS_CODE);
     let _ = writer.shutdown.send(());
     match writer.thread.join() {
         Ok(Ok(())) => Ok(()),
@@ -480,19 +490,35 @@ pub(crate) fn finish_runtime_observation() -> Result<(), AcceptanceObservationEr
 }
 
 fn start_runtime_writer(
-    mut stream: UnixStream,
+    stream: UnixStream,
     observation: RuntimeObservation,
     failure: FailureTransport,
 ) -> Result<(), AcceptanceObservationError> {
+    let writer = spawn_runtime_writer(stream, observation, failure)?;
+    RUNTIME_WRITER
+        .set(Mutex::new(Some(writer)))
+        .map_err(|_| AcceptanceObservationError::ConfiguredTwice)
+}
+
+fn spawn_runtime_writer(
+    mut stream: UnixStream,
+    observation: RuntimeObservation,
+    failure: FailureTransport,
+) -> Result<RuntimeWriter, AcceptanceObservationError> {
     stream.set_read_timeout(Some(FAILURE_ACTION_POLL_INTERVAL))?;
     stream.set_write_timeout(Some(SOCKET_TIMEOUT))?;
     let (shutdown, receiver) = mpsc::channel();
     let thread = thread::Builder::new()
         .name("spaceterm-acceptance-observer".to_owned())
-        .spawn(move || run_runtime_writer(&mut stream, &observation, &receiver, failure))?;
-    RUNTIME_WRITER
-        .set(Mutex::new(Some(RuntimeWriter { shutdown, thread })))
-        .map_err(|_| AcceptanceObservationError::ConfiguredTwice)
+        .spawn({
+            let observation = observation.clone();
+            move || run_runtime_writer(&mut stream, &observation, &receiver, failure)
+        })?;
+    Ok(RuntimeWriter {
+        observation,
+        shutdown,
+        thread,
+    })
 }
 
 fn run_runtime_writer(
@@ -1204,6 +1230,10 @@ fn is_run_id(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::terminal::geometry::{
+        BackingScale, CellGridSize, LogicalCellSize, TerminalGeometry,
+    };
+    use std::sync::Arc;
 
     fn request(stream: UnixStream) -> ObservationRequest {
         let (failure_action_sender, failure_action_receiver) = async_channel::bounded(1);
@@ -1222,6 +1252,129 @@ mod tests {
             failure_result_sender: Some(failure_result_sender),
             failure_result_receiver: Some(failure_result_receiver),
         }
+    }
+
+    fn running_observation() -> RuntimeObservation {
+        let observation = RuntimeObservation::new();
+        observation.worker_started(TerminalGeometry::from_grid(
+            CellGridSize::new(80, 24),
+            LogicalCellSize::new(10.0, 20.0),
+            BackingScale::new(2.0).unwrap(),
+        ));
+        observation
+    }
+
+    fn runtime_writer_fixture(
+        observation: RuntimeObservation,
+    ) -> (Arc<Mutex<Option<RuntimeWriter>>>, UnixStream) {
+        let (writer_stream, peer) = UnixStream::pair().unwrap();
+        peer.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        peer.set_write_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let writer = spawn_runtime_writer(
+            writer_stream,
+            observation,
+            FailureTransport {
+                nonce: "a".repeat(64),
+                run_id: "i43-proof".to_owned(),
+                app_sha256: "b".repeat(64),
+                requests: None,
+                results: None,
+            },
+        )
+        .unwrap();
+        (Arc::new(Mutex::new(Some(writer))), peer)
+    }
+
+    fn read_text_frame(peer: &mut UnixStream) -> String {
+        String::from_utf8(read_frame(peer).unwrap()).unwrap()
+    }
+
+    fn accept_runtime_closure(peer: &mut UnixStream) -> Vec<String> {
+        let mut frames = Vec::new();
+        loop {
+            let frame = read_text_frame(peer);
+            let complete = frame.starts_with(&format!("schema\t{RUNTIME_COMPLETE_SCHEMA}\n"));
+            frames.push(frame);
+            if complete {
+                break;
+            }
+        }
+        write_frame(
+            peer,
+            format!("schema\t{RUNTIME_ACK_SCHEMA}\nstatus\taccepted\n").as_bytes(),
+        )
+        .unwrap();
+        assert_eq!(
+            read_text_frame(peer),
+            format!("schema\t{RUNTIME_CLOSED_SCHEMA}\nstatus\tconfirmed\n")
+        );
+        frames
+    }
+
+    #[test]
+    fn normal_app_quit_should_close_the_runtime_stream_before_process_teardown() {
+        let (slot, mut peer) = runtime_writer_fixture(running_observation());
+        let initial = read_text_frame(&mut peer);
+        assert!(initial.contains("\trunning\t0\n"));
+
+        let finalizer_slot = Arc::clone(&slot);
+        let finalizer = thread::spawn(move || finish_runtime_writer_slot(&finalizer_slot));
+        let frames = accept_runtime_closure(&mut peer);
+        let final_tick = frames
+            .iter()
+            .find(|frame| frame.starts_with(&format!("schema\t{RUNTIME_TICK_SCHEMA}\n")))
+            .expect("normal quit must emit a final tick");
+        assert!(final_tick.contains("\texited\t0\n"));
+        assert!(final_tick.contains("\tsession-exited\t"));
+        let complete = frames.last().unwrap();
+        assert_eq!(complete.lines().count(), 6);
+        assert!(complete.contains("observer.status\tcomplete\n"));
+        assert!(finalizer.join().unwrap().is_ok());
+
+        let mut trailing = [0_u8; 1];
+        assert_eq!(peer.read(&mut trailing).unwrap(), 0);
+    }
+
+    #[test]
+    fn duplicate_runtime_finalization_should_be_inert() {
+        let (slot, mut peer) = runtime_writer_fixture(running_observation());
+        let _ = read_text_frame(&mut peer);
+        let finalizer_slot = Arc::clone(&slot);
+        let finalizer = thread::spawn(move || finish_runtime_writer_slot(&finalizer_slot));
+        let _ = accept_runtime_closure(&mut peer);
+        assert!(finalizer.join().unwrap().is_ok());
+        assert!(finish_runtime_writer_slot(&slot).is_ok());
+    }
+
+    #[test]
+    fn forced_terminal_exit_should_not_be_reclassified_by_app_quit() {
+        let observation = running_observation();
+        let (slot, mut peer) = runtime_writer_fixture(observation.clone());
+        let _ = read_text_frame(&mut peer);
+        observation.session_exited(5);
+
+        let finalizer_slot = Arc::clone(&slot);
+        let finalizer = thread::spawn(move || finish_runtime_writer_slot(&finalizer_slot));
+        let frames = accept_runtime_closure(&mut peer);
+        let final_tick = frames
+            .iter()
+            .find(|frame| frame.starts_with(&format!("schema\t{RUNTIME_TICK_SCHEMA}\n")))
+            .expect("forced exit must emit a final tick");
+        assert!(final_tick.contains("\texited\t0\n"));
+        assert!(final_tick.contains("\tsession-exited\t"));
+        assert!(final_tick.lines().any(|line| line.ends_with("\t5\t0")));
+        assert!(finalizer.join().unwrap().is_ok());
+    }
+
+    #[test]
+    fn disconnected_verifier_should_fail_finalization_without_a_duplicate_attempt() {
+        let (slot, mut peer) = runtime_writer_fixture(running_observation());
+        let _ = read_text_frame(&mut peer);
+        drop(peer);
+
+        assert!(finish_runtime_writer_slot(&slot).is_err());
+        assert!(finish_runtime_writer_slot(&slot).is_ok());
     }
 
     #[test]

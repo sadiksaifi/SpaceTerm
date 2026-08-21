@@ -48,6 +48,13 @@ pub(crate) fn init(cx: &mut App) {
     cx.on_action(|_: &CopyTerminalSelection, cx| {
         cx.defer(|cx| cx.dispatch_action(&CopySelection));
     });
+    cx.on_app_quit(|_| {
+        if let Err(error) = crate::platform::acceptance_observation::finish_runtime_observation() {
+            eprintln!("acceptance runtime observation did not complete: {error}");
+        }
+        async {}
+    })
+    .detach();
     cx.set_menus(vec![
         Menu {
             name: "SpaceTerm".into(),
