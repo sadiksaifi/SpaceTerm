@@ -162,10 +162,9 @@ mod native {
 
     use super::{
         AccessibilityAttributedText, AccessibilityElementState, AccessibilityFontMetadata,
-        AccessibilityNotification, AccessibilityNotifications,
-        MacosAccessibilityUpdate, ScreenRect, TEXT_AREA_ROLE, TerminalAccessibilityModel,
-        normalized_font_family, normalized_font_point_size,
-        notification_name,
+        AccessibilityNotification, AccessibilityNotifications, MacosAccessibilityUpdate,
+        ScreenRect, TEXT_AREA_ROLE, TerminalAccessibilityModel, normalized_font_family,
+        normalized_font_point_size, notification_name,
     };
 
     const STATE_IVAR: &str = "spacetermAccessibilityState";
