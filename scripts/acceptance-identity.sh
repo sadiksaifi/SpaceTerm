@@ -193,7 +193,7 @@ attached_mount_device() {
 mount_dmg() {
     local dmg="$1"
     local mount_point="$2"
-    local attach_plist mount_device mount_filesystem_device device_node_identity mount_flags
+    local attach_plist mount_device mount_verifier
     [[ ! -e "$mount_point" ]] || die "DMG mount point already exists: $mount_point"
     mkdir -p -- "$mount_point"
     mount_point="$(cd -- "$mount_point" && pwd -P)"
@@ -207,13 +207,19 @@ mount_dmg() {
     rm -f -- "$attach_plist"
     [[ -n "$mount_device" && -e "$mount_device" ]] \
         || die "could not bind DMG mount to its attached device"
-    mount_filesystem_device="$(stat -f '%d' "$mount_point")"
-    device_node_identity="$(stat -f '%r' "$mount_device")"
-    [[ "$mount_filesystem_device" == "$device_node_identity" ]] \
-        || die "DMG mount filesystem does not match its attached device"
-    mount_flags="$(stat -f '%f' "$mount_point")"
-    (( (mount_flags & 1) == 1 )) || die "DMG mount is not read-only"
     MOUNT_DEVICE="$mount_device"
+    mount_verifier="${attach_plist}.mount-verifier"
+    if ! xcrun clang -std=c17 -Wall -Wextra -Werror -Wpedantic \
+        -mmacosx-version-min=11.0 \
+        "$SCRIPT_DIR/acceptance/verify-mounted-filesystem.c" -o "$mount_verifier"; then
+        rm -f -- "$mount_verifier"
+        die "could not build native DMG mount verifier"
+    fi
+    if ! "$mount_verifier" "$mount_point" "$mount_device"; then
+        rm -f -- "$mount_verifier"
+        die "DMG mount failed native device or read-only verification"
+    fi
+    rm -f -- "$mount_verifier"
 }
 
 detach_dmg() {

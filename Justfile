@@ -147,6 +147,9 @@ scripts-check:
         scripts/acceptance/performance-appkit-terminate.m
     xcrun clang -std=c17 -fsyntax-only -Wall -Wextra -Werror -Wpedantic \
         -mmacosx-version-min=11.0 \
+        scripts/acceptance/verify-mounted-filesystem.c
+    xcrun clang -std=c17 -fsyntax-only -Wall -Wextra -Werror -Wpedantic \
+        -mmacosx-version-min=11.0 \
         scripts/acceptance/performance-workload.c
     python3 -c 'import pathlib; [compile(path.read_text(), path.name, "exec") for path in map(pathlib.Path, ["scripts/acceptance/performance-driver-receipt.py", "scripts/acceptance/performance-pair-result.py", "scripts/acceptance/performance-subject-lifecycle.py", "scripts/acceptance/performance-tail-receipt.py", "scripts/acceptance/run-performance-process-group.py", "scripts/inspect-release-performance-process.py", "scripts/run-release-performance-command.py", "scripts/verify-release-performance-trace.py", "scripts/acceptance/verify-performance-lifecycle-receipts.py", "scripts/acceptance/verify-performance-native-closure.py", "scripts/acceptance/verify-performance-subject-exit.py", "scripts/acceptance/verify-performance-workload-auth.py", "scripts/acceptance/verify-performance-workload-ready.py", "scripts/acceptance/archive-render-trace.py", "scripts/acceptance/render-profile-hmac.py", "scripts/acceptance/render-trace-receipt.py", "scripts/acceptance/test-archive-render-trace.py", "scripts/acceptance/test-render-trace-receipt.py", "scripts/acceptance/verify-render-action-video.py", "scripts/acceptance/verify-render-trace-archive.py", "scripts/acceptance/issue-43-campaign-evidence.py"])]'
     ./scripts/acceptance/test-issue-43-campaign-evidence.sh

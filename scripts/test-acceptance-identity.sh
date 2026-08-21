@@ -156,6 +156,15 @@ test_apfs_attach_structure_binds_the_canonical_mounted_entity() {
     fi
 }
 
+test_native_mount_verifier_checks_device_and_read_only_flags() {
+    local helper="$TEMP_TEST_DIR/verify-mounted-filesystem"
+    xcrun clang -std=c17 -Wall -Wextra -Werror -Wpedantic \
+        -mmacosx-version-min=11.0 \
+        "$TEST_SCRIPT_DIR/acceptance/verify-mounted-filesystem.c" -o "$helper"
+    "$helper" --self-test \
+        || fail "native mounted-filesystem identity self-test failed"
+}
+
 write_final_readiness_manifest() {
     local manifest="$1"
     local origin="$2"
@@ -973,6 +982,7 @@ test_font_matching_requires_an_exact_family
 test_mounted_dmg_origin_rejects_a_dist_app_claim
 test_mounted_dmg_app_cannot_escape_through_a_symlink
 test_apfs_attach_structure_binds_the_canonical_mounted_entity
+test_native_mount_verifier_checks_device_and_read_only_flags
 test_final_readiness_requires_mounted_origin_and_native_geometry
 test_native_observation_is_hashed_bound_and_font_consistent
 test_failure_action_groups_are_revalidated_offline
