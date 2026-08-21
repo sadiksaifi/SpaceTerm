@@ -4,11 +4,12 @@ use std::rc::Rc;
 
 use gpui::prelude::*;
 use gpui::{
-    Action, AnyElement, App, Context, DispatchPhase, DragMoveEvent, Empty, Entity, FocusHandle,
-    KeyDownEvent, MouseButton, MouseDownEvent, MouseExitEvent, Pixels, Render, ScrollHandle,
+    Action, AnyElement, App, Context, DispatchPhase, DragMoveEvent, Empty, Entity, EntityId,
+    FocusHandle, MouseButton, MouseDownEvent, MouseExitEvent, Pixels, Render, ScrollHandle,
     ScrollWheelEvent, SharedString, WeakEntity, Window, canvas, div, point, px, rgba,
 };
 use gpui_symbols::{Icon, SymbolWeight};
+use spaceterm_ui::{TextInput, TextInputEvent, TextInputStyle};
 
 use super::overlay_scrollbar::{OverlayScrollbar, OverlayScrollbarEvent, ScrollMetrics};
 use super::terminal_focus::TerminalFocusBlocker;
@@ -68,11 +69,10 @@ struct WorkspaceMenuState {
     top: Pixels,
 }
 
-#[derive(Debug, Eq, PartialEq)]
 struct WorkspaceRenameState {
     workspace_id: WorkspaceId,
-    draft: String,
-    replace_on_first_input: bool,
+    input: Entity<TextInput>,
+    focus_handle: FocusHandle,
 }
 
 #[derive(Clone, Copy)]
@@ -87,7 +87,6 @@ pub(crate) struct WorkspaceManager {
     workspace_list_scroll_handle: ScrollHandle,
     scrollbar: Entity<OverlayScrollbar<f32>>,
     sidebar_focus: FocusHandle,
-    rename_focus: FocusHandle,
     workspace_menu: Option<WorkspaceMenuState>,
     rename: Option<WorkspaceRenameState>,
     top_chrome_interaction: bool,
@@ -153,7 +152,6 @@ impl WorkspaceManager {
             workspace_list_scroll_handle: ScrollHandle::new(),
             scrollbar,
             sidebar_focus: cx.focus_handle(),
-            rename_focus: cx.focus_handle(),
             workspace_menu: None,
             rename: None,
             top_chrome_interaction: false,
@@ -279,6 +277,12 @@ impl WorkspaceManager {
                 .then_some(TerminalFocusBlocker::Sidebar))
     }
 
+    fn rename_is_focused(&self, window: &Window) -> bool {
+        self.rename
+            .as_ref()
+            .is_some_and(|rename| rename.focus_handle.is_focused(window))
+    }
+
     fn sync_terminal_focus_blocker(&self, window: &Window, cx: &mut Context<Self>) {
         let blocker = self.terminal_focus_blocker(window);
         self.workspaces
@@ -335,7 +339,7 @@ impl WorkspaceManager {
         let minimum_width = px(WORKSPACE_SIDEBAR_MINIMUM_WIDTH);
         if pointer_x < minimum_width {
             let was_sidebar_focused =
-                self.sidebar_focus.is_focused(window) || self.rename_focus.is_focused(window);
+                self.sidebar_focus.is_focused(window) || self.rename_is_focused(window);
             self.workspace_menu = None;
             self.rename = None;
             self.set_sidebar_layout(false, minimum_width, cx);
@@ -458,7 +462,7 @@ impl WorkspaceManager {
         }
 
         let preserve_sidebar_focus =
-            self.sidebar_focus.is_focused(window) || self.rename_focus.is_focused(window);
+            self.sidebar_focus.is_focused(window) || self.rename_is_focused(window);
         if previous_workspace_id != workspace_id {
             previous_manager.update(cx, |manager, cx| manager.deactivate(cx));
             self.rename = None;
@@ -529,7 +533,7 @@ impl WorkspaceManager {
 
         if was_active {
             let active_manager = self.workspaces.active_workspace().payload().clone();
-            if self.sidebar_focus.is_focused(window) || self.rename_focus.is_focused(window) {
+            if self.sidebar_focus.is_focused(window) || self.rename_is_focused(window) {
                 active_manager.update(cx, |manager, cx| manager.activate_without_focus(cx));
             } else {
                 active_manager.update(cx, |manager, cx| manager.activate(window, cx));
@@ -578,8 +582,7 @@ impl WorkspaceManager {
 
                 if was_active {
                     let active_manager = self.workspaces.active_workspace().payload().clone();
-                    if self.sidebar_focus.is_focused(window) || self.rename_focus.is_focused(window)
-                    {
+                    if self.sidebar_focus.is_focused(window) || self.rename_is_focused(window) {
                         active_manager.update(cx, |manager, cx| manager.activate_without_focus(cx));
                     } else {
                         active_manager.update(cx, |manager, cx| manager.activate(window, cx));
@@ -613,7 +616,7 @@ impl WorkspaceManager {
 
     fn toggle_sidebar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let was_sidebar_focused =
-            self.sidebar_focus.is_focused(window) || self.rename_focus.is_focused(window);
+            self.sidebar_focus.is_focused(window) || self.rename_is_focused(window);
         let sidebar_visible = !self.sidebar_visible;
         self.workspace_menu = None;
         self.rename = None;
@@ -625,7 +628,7 @@ impl WorkspaceManager {
     }
 
     fn toggle_sidebar_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.sidebar_focus.is_focused(window) || self.rename_focus.is_focused(window) {
+        if self.sidebar_focus.is_focused(window) || self.rename_is_focused(window) {
             self.rename = None;
             self.focus(window, cx);
             self.sync_terminal_focus_blocker(window, cx);
@@ -700,16 +703,61 @@ impl WorkspaceManager {
                     self.sync_terminal_focus_blocker(window, cx);
                     return;
                 };
+                let input = cx.new(|cx| {
+                    TextInput::new(
+                        workspace.name(),
+                        TextInputStyle::new(
+                            gpui_color(ACTIVE_THEME.text).into(),
+                            gpui_color(ACTIVE_THEME.text_placeholder).into(),
+                            gpui_color(ACTIVE_THEME.players[0].selection).into(),
+                            gpui_color(ACTIVE_THEME.players[0].cursor).into(),
+                        ),
+                        window,
+                        cx,
+                    )
+                });
+                let input_id = input.entity_id();
+                cx.subscribe_in(
+                    &input,
+                    window,
+                    move |_manager, _, event: &TextInputEvent, window, cx| match event {
+                        TextInputEvent::Submitted(value) => {
+                            let value = value.clone();
+                            cx.defer_in(window, move |manager, window, cx| {
+                                manager.finish_rename(input_id, Some(value), true, window, cx);
+                            });
+                        }
+                        TextInputEvent::Cancelled => {
+                            cx.defer_in(window, move |manager, window, cx| {
+                                manager.finish_rename(input_id, None, true, window, cx);
+                            });
+                        }
+                        TextInputEvent::Blurred(value) => {
+                            let value = value.clone();
+                            cx.defer_in(window, move |manager, window, cx| {
+                                manager.finish_rename(input_id, Some(value), false, window, cx);
+                            });
+                        }
+                        TextInputEvent::Changed(_) => {}
+                    },
+                )
+                .detach();
                 self.rename = Some(WorkspaceRenameState {
                     workspace_id: menu.workspace_id,
-                    draft: workspace.name().to_owned(),
-                    replace_on_first_input: true,
+                    focus_handle: input.read(cx).focus_handle(),
+                    input,
                 });
                 self.workspace_menu = None;
                 self.sync_terminal_focus_blocker(window, cx);
                 cx.notify();
                 cx.defer_in(window, |manager, window, cx| {
-                    manager.rename_focus.focus(window);
+                    let Some(rename) = &manager.rename else {
+                        return;
+                    };
+                    let input = rename.input.clone();
+                    let focus_handle = rename.focus_handle.clone();
+                    input.update(cx, |input, cx| input.select_all(cx));
+                    focus_handle.focus(window);
                     manager.sync_terminal_focus_blocker(window, cx);
                 });
             }
@@ -717,64 +765,36 @@ impl WorkspaceManager {
         }
     }
 
-    fn on_rename_key_down(
+    fn finish_rename(
         &mut self,
-        event: &KeyDownEvent,
+        input_id: EntityId,
+        value: Option<String>,
+        restore_sidebar_focus: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.rename_focus.is_focused(window) {
-            return;
-        }
-        let Some(rename) = self.rename.as_mut() else {
+        let Some(rename) = self.rename.as_ref() else {
             return;
         };
-        match event.keystroke.key.as_str() {
-            "enter" => {
-                let name = rename.draft.trim();
-                if !name.is_empty() {
-                    let workspace_id = rename.workspace_id;
-                    if let Err(error) = self
-                        .workspaces
-                        .rename_workspace(workspace_id, name.to_owned())
-                    {
-                        Self::report_workspace_error("rename", error);
-                    }
-                }
-                self.rename = None;
-                self.sidebar_focus.focus(window);
-                self.sync_terminal_focus_blocker(window, cx);
-            }
-            "escape" => {
-                self.rename = None;
-                self.sidebar_focus.focus(window);
-                self.sync_terminal_focus_blocker(window, cx);
-            }
-            "backspace" => {
-                if rename.replace_on_first_input {
-                    rename.draft.clear();
-                    rename.replace_on_first_input = false;
-                } else {
-                    rename.draft.pop();
-                }
-            }
-            _ if !event.keystroke.modifiers.control
-                && !event.keystroke.modifiers.alt
-                && !event.keystroke.modifiers.platform =>
-            {
-                if let Some(text) = &event.keystroke.key_char {
-                    if rename.replace_on_first_input {
-                        rename.draft.clear();
-                        rename.replace_on_first_input = false;
-                    }
-                    rename.draft.extend(text.chars().filter(|character| {
-                        !character.is_control() && *character != '\n' && *character != '\r'
-                    }));
-                }
-            }
-            _ => {}
+        if rename.input.entity_id() != input_id {
+            return;
         }
-        cx.stop_propagation();
+        let workspace_id = rename.workspace_id;
+        if let Some(value) = value {
+            let name = value.trim();
+            if !name.is_empty()
+                && let Err(error) = self
+                    .workspaces
+                    .rename_workspace(workspace_id, name.to_owned())
+            {
+                Self::report_workspace_error("rename", error);
+            }
+        }
+        self.rename = None;
+        if restore_sidebar_focus {
+            self.sidebar_focus.focus(window);
+        }
+        self.sync_terminal_focus_blocker(window, cx);
         cx.notify();
     }
 
@@ -1019,22 +1039,17 @@ impl WorkspaceManager {
         manager: WeakEntity<Self>,
     ) -> AnyElement {
         let click_manager = manager.clone();
-        let rename_manager = manager.clone();
         let context_manager = manager;
-        let renaming = self
+        let rename = self
             .rename
             .as_ref()
-            .is_some_and(|rename| rename.workspace_id == workspace_id);
-        let first_line = if renaming {
-            let draft = self
-                .rename
-                .as_ref()
-                .map(|rename| rename.draft.clone())
-                .unwrap_or_default();
+            .filter(|rename| rename.workspace_id == workspace_id);
+        let first_line = if let Some(rename) = rename {
+            let input = rename.input.clone();
+            let focus_handle = rename.focus_handle.clone();
             div()
                 .id(("workspace-rename-input", workspace_id.get()))
                 .debug_selector(move || format!("workspace-rename-input-{}", workspace_id.get()))
-                .track_focus(&self.rename_focus)
                 .h(px(22.0))
                 .w_full()
                 .px(px(5.0))
@@ -1045,16 +1060,13 @@ impl WorkspaceManager {
                 .border(px(1.0))
                 .border_color(gpui_color(ACTIVE_THEME.panel_focused_border))
                 .bg(gpui_color(ACTIVE_THEME.element_background))
+                .text_size(px(SIDEBAR_NAME_TEXT_SIZE))
                 .text_color(gpui_color(ACTIVE_THEME.text))
                 .on_click(move |_, window, cx| {
-                    let _ = rename_manager.update(cx, |manager, cx| {
-                        manager.rename_focus.focus(window);
-                        manager.sync_terminal_focus_blocker(window, cx);
-                    });
+                    focus_handle.focus(window);
                     cx.stop_propagation();
                 })
-                .on_key_down(|_, _, _| {})
-                .child(format!("{draft}│"))
+                .child(input)
                 .into_any_element()
         } else {
             div()
@@ -1394,7 +1406,6 @@ impl Render for WorkspaceManager {
             .on_action(cx.listener(Self::forward_active_terminal_action::<FindNext>))
             .on_action(cx.listener(Self::forward_active_terminal_action::<FindPrevious>))
             .on_action(cx.listener(Self::forward_active_terminal_action::<CloseTerminalFind>))
-            .on_key_down(cx.listener(Self::on_rename_key_down))
             .child(active_window_manager)
             .child(self.render_top_left_chrome(manager.clone()))
             .when(self.sidebar_visible, |root| {
@@ -2321,7 +2332,7 @@ mod tests {
 
         right_click("workspace-row-1-active", cx);
         click("workspace-menu-row-rename", cx);
-        cx.simulate_keystrokes("D e v enter");
+        cx.simulate_keystrokes("cmd-a D e v enter");
         cx.run_until_parked();
         let name = manager.read_with(cx, |manager, _| {
             manager.workspaces.active_workspace().name().to_owned()
@@ -2343,12 +2354,12 @@ mod tests {
         let focus_state = cx.update(|window, cx| {
             let manager = manager.read(cx);
             (
-                manager.rename_focus.is_focused(window),
+                manager.rename_is_focused(window),
                 manager.sidebar_focus.is_focused(window),
                 manager.rename.is_some(),
             )
         });
-        cx.simulate_keystrokes("D e v enter");
+        cx.simulate_keystrokes("cmd-a D e v enter");
         cx.run_until_parked();
 
         let rename_state = manager.read_with(cx, |manager, _| {
@@ -2360,6 +2371,28 @@ mod tests {
         });
         assert_eq!(focus_state, (true, false, true));
         assert_eq!(rename_state, (WorkspaceId::new(1), "Dev".to_owned(), true));
+    }
+
+    #[gpui::test]
+    fn blurring_inline_rename_should_commit_the_edited_name(cx: &mut TestAppContext) {
+        let (manager, _records, cx) = workspace_manager(cx);
+        cx.update(|window, _| window.activate_window());
+        cx.run_until_parked();
+        right_click("workspace-row-1-active", cx);
+        click("workspace-menu-row-rename", cx);
+        cx.simulate_keystrokes("cmd-a D e v");
+
+        let sidebar_focus = manager.read_with(cx, |manager, _| manager.sidebar_focus.clone());
+        cx.update(|window, _| sidebar_focus.focus(window));
+        cx.run_until_parked();
+
+        let rename_state = manager.read_with(cx, |manager, _| {
+            (
+                manager.workspaces.active_workspace().name().to_owned(),
+                manager.rename.is_none(),
+            )
+        });
+        assert_eq!(rename_state, ("Dev".to_owned(), true));
     }
 
     #[gpui::test]

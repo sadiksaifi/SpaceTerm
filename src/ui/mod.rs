@@ -107,6 +107,7 @@ pub(crate) fn handle_top_chrome_mouse_down(
 }
 
 pub(crate) fn init(cx: &mut App) {
+    spaceterm_ui::init(cx);
     cx.bind_keys([
         KeyBinding::new("cmd-c", CopySelection, Some(TERMINAL_KEY_CONTEXT)),
         KeyBinding::new("cmd-v", PasteClipboard, Some(TERMINAL_KEY_CONTEXT)),

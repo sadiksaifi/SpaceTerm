@@ -12,6 +12,8 @@ tmux, but SpaceTerm is not a tmux client and has no tmux-style server/client mod
 ## Technology decisions
 
 - Use Rust 2024 and GPUI for native UI and GPU rendering.
+- Keep the executable in the root application crate and reusable GPUI controls in the internal
+  `spaceterm-ui` library crate.
 - Use `libghostty-vt` for terminal emulation.
 - Use a macOS PTY to launch and communicate with shells.
 - Use `gpui-symbols` for native macOS SF Symbols.
@@ -26,7 +28,8 @@ tmux, but SpaceTerm is not a tmux client and has no tmux-style server/client mod
 
 - Build the interface directly with GPUI as a compact, Zed-like desktop experience.
 - Use `gpui-symbols` for icons and native macOS menus and system dialogs where appropriate.
-- Keep reusable SpaceTerm controls in a small internal UI Module.
+- Keep reusable SpaceTerm controls in the small internal `spaceterm-ui` crate. Application UI
+  Modules compose those controls with product behavior and Vague Pro presentation.
 
 ## Architecture principles
 
@@ -67,10 +70,19 @@ makes failure impossible. Never silently ignore PTY, process, or terminal-emulat
 
 ### Simplicity
 
-Prefer one application crate with well-designed Modules over a workspace of small crates. Add
-abstractions only when they create a meaningful Seam, Leverage, or Locality.
+Prefer the root application crate plus the single internal UI library over a workspace of many
+small crates. Add another crate only when it creates a meaningful Seam, Leverage, or Locality.
 
 ## Current architectural decisions
+
+### Internal UI Library
+
+`spaceterm-ui` owns reusable GPUI control mechanics behind narrow, application-independent
+Interfaces. It may own text editing, focus, keyboard, pointer, accessibility, and rendering
+mechanisms, but it never defines product colors or imports application, terminal, platform, or
+domain Modules. The root application injects Vague Pro paint inputs and owns surrounding chrome,
+product policy, and reactions to control events. Application-specific composition remains in
+`src/ui`; controls move into the library only when their behavior has reusable depth.
 
 ### Overlay Scrollbar
 
