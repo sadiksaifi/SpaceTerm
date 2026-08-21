@@ -20,7 +20,7 @@ use super::terminal_graphics::{
 use super::terminal_ime::PreeditLayout;
 use super::terminal_pane::{OperationToken, TerminalPane};
 use super::terminal_symbols::{
-    DevicePoint, SymbolPlan, SymbolPlanCache, SymbolPrimitive, terminal_symbol,
+    DevicePoint, SymbolPlanCache, SymbolPrimitive, TerminalSymbol, terminal_symbol,
 };
 
 #[derive(Clone, Copy)]
@@ -113,14 +113,7 @@ impl TerminalGridCache {
                 {
                     Arc::clone(&self.prepared_rows[index])
                 } else {
-                    Arc::new(prepare_row_cached(
-                        row,
-                        colors,
-                        font_family,
-                        cursor_column,
-                        &mut self.symbol_plans,
-                        metrics,
-                    ))
+                    Arc::new(prepare_row_cached(row, colors, font_family, cursor_column))
                 }
             })
             .collect::<Vec<_>>();
@@ -669,9 +662,11 @@ struct PreparedUnderline {
 struct PreparedRowKey {
     grid_left: Pixels,
     row_top: Pixels,
+    row_bottom: Pixels,
     font_size: Pixels,
     cell_width: Pixels,
     line_height: Pixels,
+    scale_factor_bits: u32,
     decoration_metrics: DecorationMetrics,
     cursor: Option<PreparedCursorKey>,
 }
@@ -688,6 +683,7 @@ struct PreparedGridLayout<'a> {
     font_size: Pixels,
     cell_width: Pixels,
     line_height: Pixels,
+    scale_factor: f32,
     font_family: &'a SharedString,
     decoration_metrics: DecorationMetrics,
 }
@@ -738,15 +734,19 @@ impl TerminalGridCache {
             .enumerate()
             .map(|(row_index, source)| {
                 let row_top = layout.grid_top + layout.line_height * row_index as f32;
+                let row_bottom =
+                    layout.grid_top + layout.line_height * row_index.saturating_add(1) as f32;
                 let cursor = cursor
                     .filter(|(position, _)| usize::from(position.row) == row_index)
                     .filter(|_| cursor_style.visible);
                 let key = PreparedRowKey {
                     grid_left: layout.grid_left,
                     row_top,
+                    row_bottom,
                     font_size: layout.font_size,
                     cell_width: layout.cell_width,
                     line_height: layout.line_height,
+                    scale_factor_bits: layout.scale_factor.to_bits(),
                     decoration_metrics: layout.decoration_metrics,
                     cursor: cursor.map(|(position, _)| PreparedCursorKey {
                         position: *position,
@@ -760,6 +760,7 @@ impl TerminalGridCache {
                         layout.font_family,
                         cursor,
                         cursor_style,
+                        &mut self.symbol_plans,
                         window,
                     )
                 })
@@ -878,6 +879,7 @@ fn prepare_stable_row(
     font_family: &SharedString,
     cursor: Option<&(CursorPositionSnapshot, CellSnapshot)>,
     cursor_style: CursorSnapshot,
+    symbol_plans: &mut SymbolPlanCache,
     window: &mut Window,
 ) -> PreparedRow {
     let text = row
@@ -925,7 +927,15 @@ fn prepare_stable_row(
         key.cell_width,
         key.decoration_metrics,
     );
-    let symbols = prepare_symbol_geometry(&row.symbols, key.row_top, key.grid_left, key.cell_width);
+    let symbols = prepare_symbol_geometry(
+        &row.symbols,
+        key.row_top,
+        key.row_bottom,
+        key.grid_left,
+        key.cell_width,
+        f32::from_bits(key.scale_factor_bits),
+        symbol_plans,
+    );
 
     let mut cursor_text = Vec::new();
     let mut cursor_symbols = PreparedDecorations::default();
@@ -948,8 +958,15 @@ fn prepare_stable_row(
             {
                 let mut symbol = symbol.clone();
                 symbol.color = cursor_style.text_color;
-                cursor_symbols =
-                    prepare_symbol_geometry(&[symbol], key.row_top, key.grid_left, key.cell_width);
+                cursor_symbols = prepare_symbol_geometry(
+                    &[symbol],
+                    key.row_top,
+                    key.row_bottom,
+                    key.grid_left,
+                    key.cell_width,
+                    f32::from_bits(key.scale_factor_bits),
+                    symbol_plans,
+                );
             } else {
                 cursor_text.push(PreparedText {
                     line: window.text_system().shape_line(
@@ -1077,6 +1094,7 @@ impl Element for TerminalGridElement {
                     font_size: self.font_size,
                     cell_width: self.cell_width,
                     line_height: self.line_height,
+                    scale_factor: self.scale_factor,
                     font_family: &font_family,
                     decoration_metrics,
                 },
@@ -1299,7 +1317,7 @@ struct SymbolPaintInput {
     width_cells: u8,
     color: Color,
     blinking: bool,
-    plan: Arc<SymbolPlan>,
+    symbol: TerminalSymbol,
 }
 
 struct TextFragment {
@@ -1605,15 +1623,32 @@ fn prepare_decoration_geometry(
 fn prepare_symbol_geometry(
     symbols: &[SymbolPaintInput],
     row_top: Pixels,
+    row_bottom: Pixels,
     grid_left: Pixels,
     cell_width: Pixels,
+    scale_factor: f32,
+    symbol_plans: &mut SymbolPlanCache,
 ) -> PreparedDecorations {
     let mut prepared = PreparedDecorations::default();
     for symbol in symbols {
         debug_assert!(matches!(symbol.width_cells, 1 | 2));
-        let scale = symbol.plan.scale_factor;
-        let origin = point(grid_left + cell_width * symbol.start as f32, row_top);
-        for primitive in &symbol.plan.primitives {
+        let bounds = snapped_symbol_bounds(
+            grid_left,
+            row_top,
+            row_bottom,
+            cell_width,
+            symbol.start,
+            symbol.width_cells,
+            scale_factor,
+        );
+        let plan = symbol_plans.get(
+            symbol.symbol,
+            bounds.width_device,
+            bounds.height_device,
+            bounds.scale_factor,
+        );
+        let origin = bounds.origin();
+        for primitive in &plan.primitives {
             match primitive {
                 SymbolPrimitive::Rect {
                     x,
@@ -1625,12 +1660,12 @@ fn prepare_symbol_geometry(
                     quad: fill(
                         Bounds::new(
                             point(
-                                origin.x + px(f32::from(*x) / scale),
-                                origin.y + px(f32::from(*y) / scale),
+                                origin.x + px(f32::from(*x) / bounds.scale_factor),
+                                origin.y + px(f32::from(*y) / bounds.scale_factor),
                             ),
                             size(
-                                px(f32::from(*width) / scale),
-                                px(f32::from(*height) / scale),
+                                px(f32::from(*width) / bounds.scale_factor),
+                                px(f32::from(*height) / bounds.scale_factor),
                             ),
                         ),
                         gpui_color(symbol_color_with_alpha(symbol.color, *alpha)),
@@ -1639,10 +1674,10 @@ fn prepare_symbol_geometry(
                 }),
                 SymbolPrimitive::Polygon { points, alpha } => {
                     let context = DeviceRasterContext {
-                        cell_width: symbol.plan.width_device,
-                        cell_height: symbol.plan.height_device,
+                        cell_width: plan.width_device,
+                        cell_height: plan.height_device,
                         origin,
-                        scale,
+                        scale: bounds.scale_factor,
                         color: symbol_color_with_alpha(symbol.color, *alpha),
                         blinking: symbol.blinking,
                     };
@@ -1654,10 +1689,10 @@ fn prepare_symbol_geometry(
                     alpha,
                 } => {
                     let context = DeviceRasterContext {
-                        cell_width: symbol.plan.width_device,
-                        cell_height: symbol.plan.height_device,
+                        cell_width: plan.width_device,
+                        cell_height: plan.height_device,
                         origin,
-                        scale,
+                        scale: bounds.scale_factor,
                         color: symbol_color_with_alpha(symbol.color, *alpha),
                         blinking: symbol.blinking,
                     };
@@ -1667,6 +1702,63 @@ fn prepare_symbol_geometry(
         }
     }
     prepared
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct SnappedSymbolBounds {
+    left_device: i32,
+    top_device: i32,
+    width_device: u16,
+    height_device: u16,
+    scale_factor: f32,
+}
+
+impl SnappedSymbolBounds {
+    fn origin(self) -> gpui::Point<Pixels> {
+        point(
+            px(self.left_device as f32 / self.scale_factor),
+            px(self.top_device as f32 / self.scale_factor),
+        )
+    }
+}
+
+fn snapped_symbol_bounds(
+    grid_left: Pixels,
+    row_top: Pixels,
+    row_bottom: Pixels,
+    cell_width: Pixels,
+    start: usize,
+    width_cells: u8,
+    scale_factor: f32,
+) -> SnappedSymbolBounds {
+    let scale_factor = if scale_factor.is_finite() && scale_factor > 0.0 {
+        scale_factor
+    } else {
+        1.0
+    };
+    let start = start as f32;
+    let end = start + f32::from(width_cells.max(1));
+    let left_device =
+        ((f32::from(grid_left) + f32::from(cell_width) * start) * scale_factor).round() as i32;
+    let right_device =
+        ((f32::from(grid_left) + f32::from(cell_width) * end) * scale_factor).round() as i32;
+    // Snap cumulative endpoints so adjacent cells reuse one device-pixel boundary instead of
+    // accumulating an independently rounded cell width or line height.
+    let top_device = (f32::from(row_top) * scale_factor).round() as i32;
+    let bottom_device = (f32::from(row_bottom) * scale_factor).round() as i32;
+    let width_device = right_device
+        .saturating_sub(left_device)
+        .clamp(1, i32::from(u16::MAX)) as u16;
+    let height_device = bottom_device
+        .saturating_sub(top_device)
+        .clamp(1, i32::from(u16::MAX)) as u16;
+    SnappedSymbolBounds {
+        left_device,
+        top_device,
+        width_device,
+        height_device,
+        scale_factor,
+    }
 }
 
 struct DeviceRasterContext {
@@ -1849,18 +1941,7 @@ fn prepare_row(
     font_family: &SharedString,
     cursor_column: Option<usize>,
 ) -> RowPaintInput {
-    prepare_row_cached(
-        row,
-        colors,
-        font_family,
-        cursor_column,
-        &mut SymbolPlanCache::default(),
-        TerminalGridMetrics {
-            cell_width: px(8.0),
-            line_height: px(20.0),
-            scale_factor: 1.0,
-        },
-    )
+    prepare_row_cached(row, colors, font_family, cursor_column)
 }
 
 fn prepare_row_cached(
@@ -1868,8 +1949,6 @@ fn prepare_row_cached(
     colors: &TerminalColorsSnapshot,
     font_family: &SharedString,
     cursor_column: Option<usize>,
-    symbol_plans: &mut SymbolPlanCache,
-    metrics: TerminalGridMetrics,
 ) -> RowPaintInput {
     let mut fragments = Vec::new();
     let mut symbols = Vec::new();
@@ -1972,13 +2051,7 @@ fn prepare_row_cached(
                 width_cells,
                 color,
                 blinking: cell.blinking,
-                plan: symbol_plans.get(
-                    symbol,
-                    f32::from(metrics.cell_width),
-                    f32::from(metrics.line_height),
-                    width_cells,
-                    metrics.scale_factor,
-                ),
+                symbol,
             });
             continue;
         }
@@ -2216,9 +2289,11 @@ mod tests {
         PreparedRowKey {
             grid_left: px(0.0),
             row_top: px(0.0),
+            row_bottom: px(20.0),
             font_size: px(14.0),
             cell_width: px(8.0),
             line_height: px(20.0),
+            scale_factor_bits: 2.0f32.to_bits(),
             decoration_metrics: decoration_metrics(px(15.0), px(11.0), px(8.0), 2.0),
             cursor,
         }
@@ -2815,8 +2890,17 @@ mod tests {
         tail.spacer_tail = true;
         let row = Arc::<[CellSnapshot]>::from([block, tail]);
         let input = prepare_row(&row, &colors(), &"Menlo".into(), None);
+        let mut symbol_plans = SymbolPlanCache::default();
 
-        let prepared = prepare_symbol_geometry(&input.symbols, px(10.0), px(5.0), px(8.0));
+        let prepared = prepare_symbol_geometry(
+            &input.symbols,
+            px(10.0),
+            px(30.0),
+            px(5.0),
+            px(8.0),
+            1.0,
+            &mut symbol_plans,
+        );
 
         assert!(prepared.quads[0].blinking);
         assert!(!text_fragment_visible(prepared.quads[0].blinking, false));
@@ -2828,21 +2912,40 @@ mod tests {
     }
 
     #[test]
-    fn symbol_prepaint_uses_fractional_logical_cell_origins() {
+    fn symbol_prepaint_snaps_origins_to_backing_pixels() {
         let row = Arc::<[CellSnapshot]>::from([cell("a"), cell("a"), cell("█")]);
         let input = prepare_row(&row, &colors(), &"Menlo".into(), None);
+        let mut symbol_plans = SymbolPlanCache::default();
 
-        let visible = prepare_symbol_geometry(&input.symbols, px(10.0), px(5.0), px(8.25));
+        let visible = prepare_symbol_geometry(
+            &input.symbols,
+            px(10.1),
+            px(30.1),
+            px(5.1),
+            px(8.25),
+            2.0,
+            &mut symbol_plans,
+        );
 
         assert_eq!(visible.quads[0].quad.bounds.origin.x, px(21.5));
+        assert_eq!(visible.quads[0].quad.bounds.origin.y, px(10.0));
     }
 
     #[test]
     fn vector_symbols_prepare_flat_cell_local_quads() {
         let row = Arc::<[CellSnapshot]>::from([cell("\u{e0b0}"), cell("\u{e0b1}")]);
         let input = prepare_row(&row, &colors(), &"Menlo".into(), None);
+        let mut symbol_plans = SymbolPlanCache::default();
 
-        let prepared = prepare_symbol_geometry(&input.symbols, px(10.0), px(5.0), px(8.0));
+        let prepared = prepare_symbol_geometry(
+            &input.symbols,
+            px(10.0),
+            px(30.0),
+            px(5.0),
+            px(8.0),
+            1.0,
+            &mut symbol_plans,
+        );
 
         assert!(prepared.quads.len() > 2);
         assert!(prepared.quads.iter().all(|prepared| {
@@ -2851,6 +2954,50 @@ mod tests {
                 && prepared.quad.bounds.top() >= px(10.0)
                 && prepared.quad.bounds.bottom() <= px(30.0)
         }));
+    }
+
+    #[test]
+    fn adjacent_symbol_bounds_share_backing_pixel_edges() {
+        let first = snapped_symbol_bounds(px(5.1), px(10.1), px(30.35), px(8.25), 0, 1, 2.0);
+        let second = snapped_symbol_bounds(px(5.1), px(10.1), px(30.35), px(8.25), 1, 1, 2.0);
+        let next_row = snapped_symbol_bounds(px(5.1), px(30.35), px(50.6), px(8.25), 0, 1, 2.0);
+
+        assert_eq!(
+            first.left_device + i32::from(first.width_device),
+            second.left_device
+        );
+        assert_eq!(
+            first.top_device + i32::from(first.height_device),
+            next_row.top_device
+        );
+        assert_eq!((first.width_device, second.width_device), (17, 16));
+    }
+
+    #[test]
+    fn adjacent_full_block_quads_share_backing_pixel_edges() {
+        let row = Arc::<[CellSnapshot]>::from([cell("█"), cell("█"), cell("█")]);
+        let input = prepare_row(&row, &colors(), &"Menlo".into(), None);
+        let mut symbol_plans = SymbolPlanCache::default();
+
+        let prepared = prepare_symbol_geometry(
+            &input.symbols,
+            px(10.1),
+            px(30.35),
+            px(5.1),
+            px(8.25),
+            2.0,
+            &mut symbol_plans,
+        );
+
+        assert_eq!(prepared.quads.len(), 3);
+        assert_eq!(
+            prepared.quads[0].quad.bounds.right(),
+            prepared.quads[1].quad.bounds.left()
+        );
+        assert_eq!(
+            prepared.quads[1].quad.bounds.right(),
+            prepared.quads[2].quad.bounds.left()
+        );
     }
 
     #[test]

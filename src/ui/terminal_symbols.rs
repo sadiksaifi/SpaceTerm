@@ -118,15 +118,11 @@ impl SymbolPlanCache {
     pub(super) fn get(
         &mut self,
         symbol: TerminalSymbol,
-        cell_width: f32,
-        line_height: f32,
-        width_cells: u8,
+        width_device: u16,
+        height_device: u16,
         scale_factor: f32,
     ) -> Arc<SymbolPlan> {
         let scale_factor = valid_scale_factor(scale_factor);
-        let width_device =
-            scaled_dimension(cell_width * f32::from(width_cells.max(1)), scale_factor);
-        let height_device = scaled_dimension(line_height, scale_factor);
         let key = SymbolPlanKey {
             symbol,
             width_device,
@@ -226,6 +222,7 @@ fn valid_scale_factor(scale_factor: f32) -> f32 {
     }
 }
 
+#[cfg(test)]
 fn scaled_dimension(logical: f32, scale_factor: f32) -> u16 {
     if !logical.is_finite() || logical <= 0.0 {
         return 1;
@@ -826,9 +823,9 @@ mod tests {
         let symbol = terminal_symbol("").unwrap();
         let mut cache = SymbolPlanCache::default();
 
-        let first = cache.get(symbol, 9.0, 20.0, 1, 2.0);
-        let same = cache.get(symbol, 9.0, 20.0, 1, 2.0);
-        let wide = cache.get(symbol, 9.0, 20.0, 2, 2.0);
+        let first = cache.get(symbol, 18, 40, 2.0);
+        let same = cache.get(symbol, 18, 40, 2.0);
+        let wide = cache.get(symbol, 36, 40, 2.0);
 
         assert!(Arc::ptr_eq(&first, &same));
         assert!(!Arc::ptr_eq(&first, &wide));
