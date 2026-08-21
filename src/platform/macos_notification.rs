@@ -6,13 +6,11 @@ use std::sync::atomic::{AtomicBool, AtomicU32};
 
 #[cfg(not(test))]
 use block::ConcreteBlock;
-#[cfg(not(test))]
 use cocoa::base::{id, nil};
 #[cfg(not(test))]
 use cocoa::foundation::{NSArray, NSAutoreleasePool, NSInteger, NSString, NSUInteger};
 #[cfg(not(test))]
 use objc::runtime::{BOOL, NO};
-#[cfg(not(test))]
 use objc::{class, msg_send, sel, sel_impl};
 
 const NOTIFICATION_IDENTIFIER: &str = "io.github.sadiksaifi.spaceterm.terminal-attention";
@@ -27,6 +25,34 @@ static LATEST_AGGREGATE_COUNT: AtomicU32 = AtomicU32::new(0);
 #[cfg(not(test))]
 static AUTHORIZATION_REQUEST_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
 static NATIVE_NOTIFICATION_LOCK: Mutex<()> = Mutex::new(());
+
+fn process_has_application_bundle_identity() -> bool {
+    // SAFETY: NSBundle owns both returned objects. SpaceTerm only checks their presence and does
+    // not retain either pointer beyond this synchronous call.
+    unsafe {
+        let bundle: id = msg_send![class!(NSBundle), mainBundle];
+        if bundle == nil {
+            return false;
+        }
+        let identifier: id = msg_send![bundle, bundleIdentifier];
+        identifier != nil
+    }
+}
+
+#[cfg(not(test))]
+fn notification_center() -> Option<id> {
+    if !process_has_application_bundle_identity() {
+        return None;
+    }
+    // SAFETY: UserNotifications accepts this call only for a process with application bundle
+    // identity. The returned singleton remains owned by the framework.
+    unsafe {
+        Some(msg_send![
+            class!(UNUserNotificationCenter),
+            currentNotificationCenter
+        ])
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum NotificationAuthorization {
@@ -98,11 +124,13 @@ pub(crate) fn deliver_terminal_attention(aggregate_count: u32) {
 
 #[cfg(not(test))]
 fn query_settings(generation: u64, aggregate_count: u32) {
+    let Some(center) = notification_center() else {
+        return;
+    };
     // SAFETY: UserNotifications owns a copied heap block for this asynchronous query. The block
     // captures only Copy values, reads borrowed callback objects synchronously, and never touches
     // GPUI state. A provisional request is noninterrupting and cannot move terminal focus.
     unsafe {
-        let center: id = msg_send![class!(UNUserNotificationCenter), currentNotificationCenter];
         let settings = ConcreteBlock::new(move |settings: id| {
             if NOTIFICATION_GENERATION.load(Ordering::Acquire) != generation || settings == nil {
                 return;
@@ -128,6 +156,9 @@ fn query_settings(generation: u64, aggregate_count: u32) {
 
 #[cfg(not(test))]
 fn request_provisional_authorization() {
+    let Some(center) = notification_center() else {
+        return;
+    };
     if AUTHORIZATION_REQUEST_IN_FLIGHT
         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
         .is_err()
@@ -143,7 +174,6 @@ fn request_provisional_authorization() {
     // SAFETY: The copied block captures no borrowed state. Callback arguments are read only during
     // invocation, no panic may cross the block trampoline, and all follow-up state is atomic.
     unsafe {
-        let center: id = msg_send![class!(UNUserNotificationCenter), currentNotificationCenter];
         let completion = ConcreteBlock::new(move |granted: BOOL, error: id| {
             AUTHORIZATION_REQUEST_IN_FLIGHT.store(false, Ordering::Release);
             if granted == NO || error != nil {
@@ -178,12 +208,14 @@ fn submit_notification(generation: u64, aggregate_count: u32) {
     if NOTIFICATION_GENERATION.load(Ordering::Acquire) != generation {
         return;
     }
+    let Some(center) = notification_center() else {
+        return;
+    };
 
     // SAFETY: This callback owns an autorelease pool, releases every +1 object, and submits only
     // immutable NSString-backed content. UserNotifications retains the request synchronously.
     unsafe {
         let pool = NSAutoreleasePool::new(nil);
-        let center: id = msg_send![class!(UNUserNotificationCenter), currentNotificationCenter];
         let content: id = msg_send![class!(UNMutableNotificationContent), new];
         let title = NSString::alloc(nil).init_str("SpaceTerm").autorelease();
         let body = NSString::alloc(nil)
@@ -220,11 +252,13 @@ pub(crate) fn clear_terminal_attention() {
 
 #[cfg(not(test))]
 fn clear_delivered_notification() {
+    let Some(center) = notification_center() else {
+        return;
+    };
     // SAFETY: All temporary Objective-C objects stay within an autorelease pool. The center copies
     // the identifier array synchronously and no terminal or Pane data crosses the native boundary.
     unsafe {
         let pool = NSAutoreleasePool::new(nil);
-        let center: id = msg_send![class!(UNUserNotificationCenter), currentNotificationCenter];
         let identifier = NSString::alloc(nil)
             .init_str(NOTIFICATION_IDENTIFIER)
             .autorelease();
@@ -247,6 +281,11 @@ mod tests {
     use objc::runtime::BOOL;
 
     use super::*;
+
+    #[test]
+    fn unbundled_test_process_has_no_native_notification_identity() {
+        assert!(!process_has_application_bundle_identity());
+    }
 
     #[test]
     fn authorized_and_provisional_policy_permits_only_enabled_native_surfaces() {
