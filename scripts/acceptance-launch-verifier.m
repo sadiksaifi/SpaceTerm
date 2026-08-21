@@ -103,7 +103,15 @@ typedef struct {
     bool hasEvent;
     bool hasPendingSampleInterval;
     bool observedFailure;
+    bool observedExit;
 } RuntimeCapture;
+
+typedef NS_ENUM(NSUInteger, ExactProcessState) {
+    ExactProcessStateUnknown,
+    ExactProcessStateLive,
+    ExactProcessStateAbsent,
+    ExactProcessStateReplaced,
+};
 
 typedef struct {
     bool requested;
@@ -857,6 +865,8 @@ static bool parse_runtime_tick(NSData *data, RuntimeCapture *capture) {
         capture->eventCount++;
         if ([event[3] isEqualToString:@"observer-failed"]) {
             capture->observedFailure = true;
+        } else if ([event[3] isEqualToString:@"session-exited"]) {
+            capture->observedExit = true;
         }
     }
 
@@ -2154,22 +2164,90 @@ static NSData *performance_subject_exit_receipt(
     return record;
 }
 
-static void terminate_exact_application(NSRunningApplication *application) {
-    if (application == nil || application.terminated) {
-        return;
+static ExactProcessState exact_process_state(
+    pid_t pid,
+    uint64_t startSeconds,
+    uint64_t startMicroseconds
+) {
+    if (pid <= 0 || startSeconds == 0) {
+        return ExactProcessStateUnknown;
+    }
+    struct proc_bsdinfo process = {0};
+    int size = proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &process, sizeof(process));
+    if (size == sizeof(process)) {
+        if (process.pbi_uid != geteuid() || process.pbi_start_tvsec != startSeconds ||
+            process.pbi_start_tvusec != startMicroseconds) {
+            return ExactProcessStateReplaced;
+        }
+        return ExactProcessStateLive;
+    }
+    if (size != 0) {
+        return ExactProcessStateUnknown;
+    }
+    errno = 0;
+    if (kill(pid, 0) < 0 && errno == ESRCH) {
+        return ExactProcessStateAbsent;
+    }
+    return ExactProcessStateUnknown;
+}
+
+static bool wait_for_exact_process_exit(
+    pid_t pid,
+    uint64_t startSeconds,
+    uint64_t startMicroseconds,
+    NSTimeInterval timeout
+) {
+    NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:timeout];
+    do {
+        ExactProcessState state = exact_process_state(pid, startSeconds, startMicroseconds);
+        if (state == ExactProcessStateAbsent) return true;
+        if (state == ExactProcessStateReplaced) return false;
+        [NSThread sleepForTimeInterval:0.02];
+    } while ([deadline timeIntervalSinceNow] > 0);
+    return exact_process_state(pid, startSeconds, startMicroseconds) == ExactProcessStateAbsent;
+}
+
+static bool terminate_exact_application(
+    NSRunningApplication *application,
+    pid_t pid,
+    uint64_t startSeconds,
+    uint64_t startMicroseconds
+) {
+    ExactProcessState state = exact_process_state(pid, startSeconds, startMicroseconds);
+    if (state == ExactProcessStateAbsent) {
+        return true;
+    }
+    if (application == nil || state != ExactProcessStateLive) {
+        return false;
     }
     [application terminate];
-    NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:5.0];
-    while (!application.terminated && [deadline timeIntervalSinceNow] > 0) {
-        [NSThread sleepForTimeInterval:0.05];
+    if (wait_for_exact_process_exit(pid, startSeconds, startMicroseconds, 5.0)) {
+        return true;
     }
-    if (!application.terminated) {
+    if (exact_process_state(pid, startSeconds, startMicroseconds) == ExactProcessStateLive) {
         [application forceTerminate];
-        deadline = [NSDate dateWithTimeIntervalSinceNow:5.0];
-        while (!application.terminated && [deadline timeIntervalSinceNow] > 0) {
-            [NSThread sleepForTimeInterval:0.05];
-        }
     }
+    return wait_for_exact_process_exit(pid, startSeconds, startMicroseconds, 5.0);
+}
+
+static bool termination_evidence_is_valid(
+    ExactProcessState processState,
+    bool observedExit,
+    bool authenticatedQuitRequired,
+    bool authenticatedQuitRequested
+) {
+    return processState == ExactProcessStateAbsent && observedExit &&
+        (!authenticatedQuitRequired || authenticatedQuitRequested);
+}
+
+static NSString *exact_process_state_name(ExactProcessState state) {
+    switch (state) {
+        case ExactProcessStateLive: return @"live";
+        case ExactProcessStateAbsent: return @"absent";
+        case ExactProcessStateReplaced: return @"replaced";
+        case ExactProcessStateUnknown: return @"unknown";
+    }
+    return @"unknown";
 }
 
 static void terminate_exact_mounted_path_processes(
@@ -2215,7 +2293,8 @@ static void terminate_exact_mounted_path_processes(
             ![canonical_path(application.executableURL.path) isEqualToString:expected_path]) {
             continue;
         }
-        terminate_exact_application(application);
+        terminate_exact_application(application, pid,
+            process.pbi_start_tvsec, process.pbi_start_tvusec);
     }
     free(pids);
 }
@@ -2229,6 +2308,10 @@ static int run_verifier(const Options *options) {
     int failure_status_fd = -1;
     int quit_control_fd = -1;
     int quit_status_fd = -1;
+    pid_t peer_pid = 0;
+    int pidversion = 0;
+    uint64_t process_start_seconds = 0;
+    uint64_t process_start_microseconds = 0;
     char socket_directory[] = "/tmp/spaceterm-acceptance.XXXXXX";
     NSString *socket_path = nil;
     NSRunningApplication *application = nil;
@@ -2419,8 +2502,8 @@ static int run_verifier(const Options *options) {
         report(@"Unix peer has no valid audit token");
         goto cleanup;
     }
-    pid_t peer_pid = audit_token_to_pid(token);
-    int pidversion = audit_token_to_pidversion(token);
+    peer_pid = audit_token_to_pid(token);
+    pidversion = audit_token_to_pidversion(token);
     if (peer_pid <= 0 || pidversion <= 0 || audit_token_to_euid(token) != geteuid() ||
         !mapped_executable_matches(&token, expected_path, &expected_stat, &expected_fs)) {
         report(@"Unix peer is not the exact mounted application process");
@@ -2470,8 +2553,8 @@ static int run_verifier(const Options *options) {
         report(@"authenticated application process start identity is unavailable");
         goto cleanup;
     }
-    uint64_t process_start_seconds = process.pbi_start_tvsec;
-    uint64_t process_start_microseconds = process.pbi_start_tvusec;
+    process_start_seconds = process.pbi_start_tvsec;
+    process_start_microseconds = process.pbi_start_tvusec;
     provisional_observation = final_observation(
         response, pidversion, &expected_fs, live_cdhash, live_identifier, live_team);
     provisional_observation_data =
@@ -2594,17 +2677,28 @@ static int run_verifier(const Options *options) {
     }
     close(peer);
     peer = -1;
-    if (!options->externalLifecycle && [options->quitControl isEqualToString:@"none"]) {
-        terminate_exact_application(application);
-    } else {
-        NSDate *terminationDeadline = [NSDate dateWithTimeIntervalSinceNow:kProofTimeoutSeconds];
-        while (!application.terminated && [terminationDeadline timeIntervalSinceNow] > 0) {
-            [NSThread sleepForTimeInterval:0.02];
-        }
-    }
-    if (!application.terminated ||
-        (!options->externalLifecycle && ![options->quitControl isEqualToString:@"none"] &&
-            !quit.requested)) {
+    bool processExited = !options->externalLifecycle &&
+        [options->quitControl isEqualToString:@"none"]
+        ? terminate_exact_application(application, peer_pid,
+            process_start_seconds, process_start_microseconds)
+        : wait_for_exact_process_exit(peer_pid, process_start_seconds,
+            process_start_microseconds, kProofTimeoutSeconds);
+    bool authenticatedQuitRequired = !options->externalLifecycle &&
+        ![options->quitControl isEqualToString:@"none"];
+    ExactProcessState finalProcessState = exact_process_state(
+        peer_pid, process_start_seconds, process_start_microseconds);
+    if (!processExited || !termination_evidence_is_valid(
+            finalProcessState,
+            runtime.observedExit, authenticatedQuitRequired, quit.requested)) {
+        report([NSString stringWithFormat:
+            @"termination diagnostic: observer-status=%@ lifecycle=%@ observed-exit=%@ "
+             "quit-required=%@ quit-requested=%@ process-exited=%@ process-state=%@ "
+             "ack=accepted close=confirmed",
+            runtime_status, runtime_lifecycle_name(runtime.previousSample[33]),
+            runtime.observedExit ? @"true" : @"false",
+            authenticatedQuitRequired ? @"true" : @"false",
+            quit.requested ? @"true" : @"false", processExited ? @"true" : @"false",
+            exact_process_state_name(finalProcessState)]);
         report(@"observed application could not finish safely");
         goto cleanup;
     }
@@ -2640,7 +2734,13 @@ static int run_verifier(const Options *options) {
 cleanup:
     if (result != 0) {
         if (!options->externalLifecycle && [options->quitControl isEqualToString:@"none"]) {
-            terminate_exact_application(application);
+            if (peer_pid > 0 && process_start_seconds > 0) {
+                terminate_exact_application(application, peer_pid,
+                    process_start_seconds, process_start_microseconds);
+            } else if (expected_app != nil && expected_path != nil) {
+                terminate_exact_mounted_path_processes(
+                    expected_app, expected_path, &expected_stat, &expected_fs);
+            }
         }
         if (quit_receipt_published) unlink(options->quitReceipt.fileSystemRepresentation);
         if (subject_exit_receipt_published) {
@@ -2816,6 +2916,16 @@ static bool self_test_launch_completion_authority(void) {
         !launch_completion_permits_peer(true, false, 124, 123);
 }
 
+static bool self_test_termination_evidence(void) {
+    return termination_evidence_is_valid(ExactProcessStateAbsent, true, false, false) &&
+        termination_evidence_is_valid(ExactProcessStateAbsent, true, true, true) &&
+        !termination_evidence_is_valid(ExactProcessStateLive, true, false, false) &&
+        !termination_evidence_is_valid(ExactProcessStateReplaced, true, false, false) &&
+        !termination_evidence_is_valid(ExactProcessStateUnknown, true, false, false) &&
+        !termination_evidence_is_valid(ExactProcessStateAbsent, false, false, false) &&
+        !termination_evidence_is_valid(ExactProcessStateAbsent, true, true, false);
+}
+
 static bool initialize_self_test_failure_capture(
     FailureCapture *capture,
     NSString *caseID
@@ -2838,6 +2948,9 @@ static int verifier_self_test(void) {
     NSData *base = self_test_tick(@"0", @"0", sample, emptyEvents);
     if (!self_test_launch_completion_authority()) {
         return self_test_failure(@"missing, delayed, or contradictory launch completion") ? 0 : 1;
+    }
+    if (!self_test_termination_evidence()) {
+        return self_test_failure(@"kernel-authoritative application termination") ? 0 : 1;
     }
     if (!self_test_ax_subject_schema()) {
         return self_test_failure(@"AX subject exact schema") ? 0 : 1;
