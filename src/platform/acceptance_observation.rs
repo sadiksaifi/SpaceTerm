@@ -1,4 +1,6 @@
+use std::collections::BTreeMap;
 use std::env;
+use std::ffi::OsString;
 use std::fmt::Write as _;
 use std::fs::{File, Metadata};
 use std::io::{self, Read, Write};
@@ -59,6 +61,8 @@ pub(crate) enum AcceptanceObservationError {
     ConfiguredTwice,
     #[error("acceptance observation failed: {0}")]
     Io(#[from] io::Error),
+    #[error("acceptance launch environment is not clean")]
+    InvalidEnvironment,
 }
 
 #[derive(Debug)]
@@ -290,6 +294,7 @@ pub(crate) fn configure_from_environment() -> Result<(), AcceptanceObservationEr
     let Some(socket_path) = socket_path else {
         return Ok(());
     };
+    sanitize_acceptance_process_environment()?;
     let packaged_executable = packaged_executable_identity()?;
     let mut stream = connect_private_socket(&socket_path)?;
     let challenge = read_frame(&mut stream)?;
@@ -736,6 +741,112 @@ fn format_sample_records(output: &mut String, sample: RuntimeSample) {
 
 fn bool_digit(value: bool) -> String {
     u8::from(value).to_string()
+}
+
+const ACCEPTANCE_ENVIRONMENT_KEYS: &[&str] = &[
+    "USER",
+    "LOGNAME",
+    "SHELL",
+    "PATH",
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    "LC_MESSAGES",
+    "TMPDIR",
+    "HOME",
+    "XDG_CONFIG_HOME",
+    "XDG_DATA_HOME",
+    "XDG_STATE_HOME",
+    "XDG_CACHE_HOME",
+];
+
+fn clean_acceptance_environment(
+    variables: impl IntoIterator<Item = (OsString, OsString)>,
+) -> Result<BTreeMap<OsString, OsString>, AcceptanceObservationError> {
+    let mut result = BTreeMap::new();
+    for (key, value) in variables {
+        let Some(key_text) = key.to_str() else {
+            continue;
+        };
+        if ACCEPTANCE_ENVIRONMENT_KEYS.contains(&key_text) {
+            result.insert(key, value);
+        }
+    }
+    let home = result
+        .get(&OsString::from("HOME"))
+        .map(PathBuf::from)
+        .ok_or(AcceptanceObservationError::InvalidEnvironment)?;
+    if !home.is_absolute() {
+        return Err(AcceptanceObservationError::InvalidEnvironment);
+    }
+    let home_source_metadata = home
+        .symlink_metadata()
+        .map_err(|_| AcceptanceObservationError::InvalidEnvironment)?;
+    if home_source_metadata.file_type().is_symlink() {
+        return Err(AcceptanceObservationError::InvalidEnvironment);
+    }
+    let home = home
+        .canonicalize()
+        .map_err(|_| AcceptanceObservationError::InvalidEnvironment)?;
+    let home_metadata = home
+        .symlink_metadata()
+        .map_err(|_| AcceptanceObservationError::InvalidEnvironment)?;
+    if !home_metadata.is_dir()
+        || home_metadata.file_type().is_symlink()
+        || !is_private_owner(&home_metadata)
+    {
+        return Err(AcceptanceObservationError::InvalidEnvironment);
+    }
+    for key in [
+        "XDG_CONFIG_HOME",
+        "XDG_DATA_HOME",
+        "XDG_STATE_HOME",
+        "XDG_CACHE_HOME",
+    ] {
+        let path = result
+            .get(&OsString::from(key))
+            .map(PathBuf::from)
+            .ok_or(AcceptanceObservationError::InvalidEnvironment)?;
+        let source_metadata = path
+            .symlink_metadata()
+            .map_err(|_| AcceptanceObservationError::InvalidEnvironment)?;
+        if source_metadata.file_type().is_symlink() {
+            return Err(AcceptanceObservationError::InvalidEnvironment);
+        }
+        let path = path
+            .canonicalize()
+            .map_err(|_| AcceptanceObservationError::InvalidEnvironment)?;
+        let metadata = path
+            .symlink_metadata()
+            .map_err(|_| AcceptanceObservationError::InvalidEnvironment)?;
+        if !path.starts_with(&home)
+            || !metadata.is_dir()
+            || metadata.file_type().is_symlink()
+            || !is_private_owner(&metadata)
+        {
+            return Err(AcceptanceObservationError::InvalidEnvironment);
+        }
+    }
+    if !result.contains_key(&OsString::from("PATH")) {
+        return Err(AcceptanceObservationError::InvalidEnvironment);
+    }
+    Ok(result)
+}
+
+fn sanitize_acceptance_process_environment() -> Result<(), AcceptanceObservationError> {
+    let current = env::vars_os().collect::<Vec<_>>();
+    let clean = clean_acceptance_environment(current.iter().cloned())?;
+    // SAFETY: configure_from_environment runs at the first instruction in main, before GPUI or any
+    // application worker thread exists. Replacing the environment here cannot race another thread.
+    unsafe {
+        for (key, _) in &current {
+            env::remove_var(key);
+        }
+        for (key, value) in clean {
+            env::set_var(key, value);
+        }
+    }
+    Ok(())
 }
 
 fn take_socket_environment() -> Result<Option<PathBuf>, AcceptanceObservationError> {
@@ -1233,7 +1344,10 @@ mod tests {
     use crate::terminal::geometry::{
         BackingScale, CellGridSize, LogicalCellSize, TerminalGeometry,
     };
+    use std::os::unix::fs::PermissionsExt;
+    use std::process::Command;
     use std::sync::Arc;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     fn request(stream: UnixStream) -> ObservationRequest {
         let (failure_action_sender, failure_action_receiver) = async_channel::bounded(1);
@@ -1310,6 +1424,97 @@ mod tests {
             format!("schema\t{RUNTIME_CLOSED_SCHEMA}\nstatus\tconfirmed\n")
         );
         frames
+    }
+
+    #[test]
+    fn clean_environment_should_isolate_real_zsh_and_bash_from_hostile_startup_overrides() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = env::temp_dir().join(format!(
+            "spaceterm-acceptance-environment-{}-{unique}",
+            std::process::id()
+        ));
+        let home = root.join("home");
+        let config = home.join(".xdg/config");
+        let data = home.join(".xdg/data");
+        let state = home.join(".xdg/state");
+        let cache = home.join(".xdg/cache");
+        let hostile = root.join("permanent-sentinel");
+        for path in [&home, &config, &data, &state, &cache, &hostile] {
+            std::fs::create_dir_all(path).unwrap();
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let marker = hostile.join("startup-was-read");
+        std::fs::write(
+            hostile.join(".zshenv"),
+            format!(
+                "print -r -- PERMANENT_SENTINEL\nprint -r -- TRUST_PROMPT\n: > {}\n",
+                marker.display()
+            ),
+        )
+        .unwrap();
+        let bash_environment = hostile.join("bash-env");
+        std::fs::write(
+            &bash_environment,
+            format!(
+                "printf 'PERMANENT_SENTINEL\\nTRUST_PROMPT\\n'\n: > {}\n",
+                marker.display()
+            ),
+        )
+        .unwrap();
+
+        let variables = [
+            ("USER", "fixture-user".to_owned()),
+            ("LOGNAME", "fixture-user".to_owned()),
+            ("SHELL", "/bin/zsh".to_owned()),
+            ("PATH", "/usr/bin:/bin".to_owned()),
+            ("LANG", "C".to_owned()),
+            ("LC_ALL", "C".to_owned()),
+            ("TMPDIR", root.to_string_lossy().into_owned()),
+            ("HOME", home.to_string_lossy().into_owned()),
+            ("XDG_CONFIG_HOME", config.to_string_lossy().into_owned()),
+            ("XDG_DATA_HOME", data.to_string_lossy().into_owned()),
+            ("XDG_STATE_HOME", state.to_string_lossy().into_owned()),
+            ("XDG_CACHE_HOME", cache.to_string_lossy().into_owned()),
+            ("ZDOTDIR", hostile.to_string_lossy().into_owned()),
+            ("BASH_ENV", bash_environment.to_string_lossy().into_owned()),
+            ("ENV", bash_environment.to_string_lossy().into_owned()),
+            ("INPUTRC", bash_environment.to_string_lossy().into_owned()),
+            ("HISTFILE", marker.to_string_lossy().into_owned()),
+            ("MISE_CONFIG_DIR", hostile.to_string_lossy().into_owned()),
+            (
+                "MISE_TRUSTED_CONFIG_PATHS",
+                hostile.to_string_lossy().into_owned(),
+            ),
+        ]
+        .into_iter()
+        .map(|(key, value)| (OsString::from(key), OsString::from(value)));
+        let clean = clean_acceptance_environment(variables).unwrap();
+
+        let zsh = Command::new("/bin/zsh")
+            .arg("-c")
+            .arg("printf ZSH_CLEAN; : > \"$XDG_STATE_HOME/zsh-write\"")
+            .env_clear()
+            .envs(&clean)
+            .output()
+            .unwrap();
+        let bash = Command::new("/bin/bash")
+            .arg("-c")
+            .arg("printf BASH_CLEAN; : > \"$XDG_STATE_HOME/bash-write\"")
+            .env_clear()
+            .envs(&clean)
+            .output()
+            .unwrap();
+        assert_eq!(zsh.stdout, b"ZSH_CLEAN");
+        assert!(zsh.stderr.is_empty());
+        assert_eq!(bash.stdout, b"BASH_CLEAN");
+        assert!(bash.stderr.is_empty());
+        assert!(!marker.exists());
+        assert!(state.join("zsh-write").is_file());
+        assert!(state.join("bash-write").is_file());
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

@@ -40,6 +40,61 @@ static NSString *make_nonce(void);
 static NSString *lower_sha256(NSData *data);
 static bool publish_exclusive(NSString *output, NSData *data, bool *published);
 
+static NSArray<NSString *> *launch_environment_passthrough_keys(void) {
+    return @[
+        @"USER", @"LOGNAME", @"SHELL", @"PATH", @"LANG", @"LC_ALL", @"LC_CTYPE",
+        @"LC_MESSAGES", @"TMPDIR"
+    ];
+}
+
+static NSDictionary<NSString *, NSString *> *clean_launch_environment(
+    NSString *home,
+    NSString *socketPath,
+    NSDictionary<NSString *, NSString *> *hostEnvironment
+) {
+    if (home.length == 0 || socketPath.length == 0) return nil;
+    NSMutableDictionary<NSString *, NSString *> *result = [NSMutableDictionary dictionary];
+    for (NSString *key in launch_environment_passthrough_keys()) {
+        NSString *value = hostEnvironment[key];
+        if ([value isKindOfClass:NSString.class] && value.length > 0) result[key] = value;
+    }
+    result[@"HOME"] = home;
+    result[@"XDG_CONFIG_HOME"] = [home stringByAppendingPathComponent:@".xdg/config"];
+    result[@"XDG_DATA_HOME"] = [home stringByAppendingPathComponent:@".xdg/data"];
+    result[@"XDG_STATE_HOME"] = [home stringByAppendingPathComponent:@".xdg/state"];
+    result[@"XDG_CACHE_HOME"] = [home stringByAppendingPathComponent:@".xdg/cache"];
+    result[@"SPACETERM_ACCEPTANCE_SOCKET"] = socketPath;
+    return result;
+}
+
+static bool prepare_clean_launch_directories(
+    NSDictionary<NSString *, NSString *> *environment
+) {
+    NSString *home = environment[@"HOME"];
+    NSString *xdgRoot = home == nil ? @"" : [home stringByAppendingPathComponent:@".xdg"];
+    NSArray<NSString *> *paths = @[
+        home == nil ? @"" : home, xdgRoot,
+        environment[@"XDG_CONFIG_HOME"] == nil ? @"" : environment[@"XDG_CONFIG_HOME"],
+        environment[@"XDG_DATA_HOME"] == nil ? @"" : environment[@"XDG_DATA_HOME"],
+        environment[@"XDG_STATE_HOME"] == nil ? @"" : environment[@"XDG_STATE_HOME"],
+        environment[@"XDG_CACHE_HOME"] == nil ? @"" : environment[@"XDG_CACHE_HOME"]
+    ];
+    for (NSString *path in paths) {
+        if (path.length == 0 || ![path hasPrefix:@"/"]) return false;
+        if (mkdir(path.fileSystemRepresentation, 0700) != 0 && errno != EEXIST) return false;
+        if (chmod(path.fileSystemRepresentation, 0700) != 0) return false;
+        struct stat status = {0};
+        if (lstat(path.fileSystemRepresentation, &status) != 0 ||
+            !S_ISDIR(status.st_mode) || S_ISLNK(status.st_mode) ||
+            status.st_uid != geteuid() || (status.st_mode & 077) != 0) return false;
+    }
+    for (NSString *key in @[
+            @"XDG_CONFIG_HOME", @"XDG_DATA_HOME", @"XDG_STATE_HOME", @"XDG_CACHE_HOME"]) {
+        if (![environment[key] hasPrefix:[home stringByAppendingString:@"/"]]) return false;
+    }
+    return true;
+}
+
 static NSString *const kRuntimeSchema = @"spaceterm.acceptance.runtime-stream/v1";
 static NSString *const kRuntimeTickSchema = @"spaceterm.acceptance.runtime-tick/v1";
 static NSString *const kRuntimeCompleteSchema = @"spaceterm.acceptance.runtime-complete/v1";
@@ -2459,12 +2514,15 @@ static int run_verifier(const Options *options) {
         goto cleanup;
     }
 
-    // Do not forward the verifier's environment into the app or its Shell Process. LaunchServices
-    // supplies the normal GUI environment; only the clean campaign HOME and socket capability are
-    // explicit additions, and the app removes the socket variable before starting GPUI.
-    environment = [NSMutableDictionary dictionary];
-    environment[@"SPACETERM_ACCEPTANCE_SOCKET"] = socket_path;
-    environment[@"HOME"] = options->home;
+    // LaunchServices may merge its GUI environment even when configuration.environment is sparse.
+    // Pass only the required host keys plus run-owned roots; the acceptance app independently
+    // applies the same allowlist before GPUI can create a Shell Process.
+    environment = [clean_launch_environment(
+        options->home, socket_path, NSProcessInfo.processInfo.environment) mutableCopy];
+    if (environment == nil || !prepare_clean_launch_directories(environment)) {
+        report(@"clean launch environment could not be prepared");
+        goto cleanup;
+    }
     configuration = [NSWorkspaceOpenConfiguration configuration];
     configuration.createsNewApplicationInstance = YES;
     configuration.allowsRunningApplicationSubstitution = NO;
@@ -2926,6 +2984,26 @@ static bool self_test_termination_evidence(void) {
         !termination_evidence_is_valid(ExactProcessStateAbsent, true, true, false);
 }
 
+static bool self_test_clean_launch_environment(void) {
+    NSDictionary *host = @{
+        @"USER": @"fixture-user", @"PATH": @"/usr/bin:/bin",
+        @"ZDOTDIR": @"/permanent/sentinel", @"BASH_ENV": @"/permanent/sentinel",
+        @"MISE_CONFIG_DIR": @"/permanent/sentinel", @"HISTFILE": @"/permanent/sentinel"
+    };
+    NSDictionary *result = clean_launch_environment(
+        @"/run-owned/home", @"/run-owned/socket", host);
+    return result.count == 8 && [result[@"USER"] isEqualToString:@"fixture-user"] &&
+        [result[@"PATH"] isEqualToString:@"/usr/bin:/bin"] &&
+        [result[@"HOME"] isEqualToString:@"/run-owned/home"] &&
+        [result[@"XDG_CONFIG_HOME"] isEqualToString:@"/run-owned/home/.xdg/config"] &&
+        [result[@"XDG_DATA_HOME"] isEqualToString:@"/run-owned/home/.xdg/data"] &&
+        [result[@"XDG_STATE_HOME"] isEqualToString:@"/run-owned/home/.xdg/state"] &&
+        [result[@"XDG_CACHE_HOME"] isEqualToString:@"/run-owned/home/.xdg/cache"] &&
+        [result[@"SPACETERM_ACCEPTANCE_SOCKET"] isEqualToString:@"/run-owned/socket"] &&
+        result[@"ZDOTDIR"] == nil && result[@"BASH_ENV"] == nil &&
+        result[@"MISE_CONFIG_DIR"] == nil && result[@"HISTFILE"] == nil;
+}
+
 static bool initialize_self_test_failure_capture(
     FailureCapture *capture,
     NSString *caseID
@@ -2951,6 +3029,9 @@ static int verifier_self_test(void) {
     }
     if (!self_test_termination_evidence()) {
         return self_test_failure(@"kernel-authoritative application termination") ? 0 : 1;
+    }
+    if (!self_test_clean_launch_environment()) {
+        return self_test_failure(@"clean launch environment allowlist") ? 0 : 1;
     }
     if (!self_test_ax_subject_schema()) {
         return self_test_failure(@"AX subject exact schema") ? 0 : 1;
