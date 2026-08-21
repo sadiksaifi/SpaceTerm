@@ -875,7 +875,7 @@ impl TerminalPane {
                     pane.observe_presented_frame(generation, rows, columns);
                 });
             });
-            window.request_animation_frame();
+            cx.notify();
         }
         #[cfg(test)]
         cx.defer_in(window, move |pane, _, _| {
