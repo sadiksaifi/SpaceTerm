@@ -88,7 +88,8 @@ scripts-check:
         scripts/acceptance/test-render-profile-evidence-protocol.sh \
         scripts/acceptance/test-render-profile-tool-bundle.sh \
         scripts/acceptance/test-release-render-profile-campaign.sh \
-        scripts/acceptance/test-release-performance-campaign.sh
+        scripts/acceptance/test-release-performance-campaign.sh \
+        scripts/acceptance/test-issue-43-campaign-evidence.sh
     shellcheck -x scripts/acceptance-identity.sh scripts/test-acceptance-identity.sh \
         scripts/package-macos.sh scripts/verify-macos-package.sh \
         scripts/release-performance-workload.sh \
@@ -121,7 +122,8 @@ scripts-check:
         scripts/acceptance/test-render-profile-evidence-protocol.sh \
         scripts/acceptance/test-render-profile-tool-bundle.sh \
         scripts/acceptance/test-release-render-profile-campaign.sh \
-        scripts/acceptance/test-release-performance-campaign.sh
+        scripts/acceptance/test-release-performance-campaign.sh \
+        scripts/acceptance/test-issue-43-campaign-evidence.sh
     ./scripts/test-acceptance-identity.sh
     xcrun clang -fobjc-arc -fblocks -fsyntax-only -Wall -Wextra -Werror -Wpedantic \
         -mmacosx-version-min=11.0 \
@@ -138,7 +140,8 @@ scripts-check:
     xcrun clang -std=c17 -fsyntax-only -Wall -Wextra -Werror -Wpedantic \
         -mmacosx-version-min=11.0 \
         scripts/acceptance/performance-workload.c
-    python3 -c 'import pathlib; [compile(path.read_text(), path.name, "exec") for path in map(pathlib.Path, ["scripts/acceptance/performance-driver-receipt.py", "scripts/acceptance/performance-pair-result.py", "scripts/acceptance/performance-subject-lifecycle.py", "scripts/acceptance/performance-tail-receipt.py", "scripts/acceptance/run-performance-process-group.py", "scripts/inspect-release-performance-process.py", "scripts/run-release-performance-command.py", "scripts/verify-release-performance-trace.py", "scripts/acceptance/verify-performance-lifecycle-receipts.py", "scripts/acceptance/verify-performance-native-closure.py", "scripts/acceptance/verify-performance-subject-exit.py", "scripts/acceptance/verify-performance-workload-auth.py", "scripts/acceptance/verify-performance-workload-ready.py", "scripts/acceptance/archive-render-trace.py", "scripts/acceptance/render-profile-hmac.py", "scripts/acceptance/render-trace-receipt.py", "scripts/acceptance/test-archive-render-trace.py", "scripts/acceptance/test-render-trace-receipt.py", "scripts/acceptance/verify-render-action-video.py", "scripts/acceptance/verify-render-trace-archive.py"])]'
+    python3 -c 'import pathlib; [compile(path.read_text(), path.name, "exec") for path in map(pathlib.Path, ["scripts/acceptance/performance-driver-receipt.py", "scripts/acceptance/performance-pair-result.py", "scripts/acceptance/performance-subject-lifecycle.py", "scripts/acceptance/performance-tail-receipt.py", "scripts/acceptance/run-performance-process-group.py", "scripts/inspect-release-performance-process.py", "scripts/run-release-performance-command.py", "scripts/verify-release-performance-trace.py", "scripts/acceptance/verify-performance-lifecycle-receipts.py", "scripts/acceptance/verify-performance-native-closure.py", "scripts/acceptance/verify-performance-subject-exit.py", "scripts/acceptance/verify-performance-workload-auth.py", "scripts/acceptance/verify-performance-workload-ready.py", "scripts/acceptance/archive-render-trace.py", "scripts/acceptance/render-profile-hmac.py", "scripts/acceptance/render-trace-receipt.py", "scripts/acceptance/test-archive-render-trace.py", "scripts/acceptance/test-render-trace-receipt.py", "scripts/acceptance/verify-render-action-video.py", "scripts/acceptance/verify-render-trace-archive.py", "scripts/acceptance/issue-43-campaign-evidence.py"])]'
+    ./scripts/acceptance/test-issue-43-campaign-evidence.sh
     plutil -lint packaging/macos/Info.plist
 
 # Run focused checks for the release-performance workload and evidence tools.
@@ -237,3 +240,47 @@ verify-acceptance-identity run_dir:
 # Verify that an acceptance identity is complete enough for final evidence.
 verify-final-acceptance-identity run_dir:
     ./scripts/acceptance-identity.sh verify --run-dir "{{ run_dir }}" --final
+
+# Bind the unique authenticated hidden collector root to an issue #43 campaign.
+issue-43-campaign-init run_id:
+    ./scripts/acceptance/issue-43-campaign-evidence.py init --run-id "{{ run_id }}"
+
+# Freeze the privacy-normalized issue #43 campaign metadata document.
+issue-43-campaign-set-metadata run_id input:
+    ./scripts/acceptance/issue-43-campaign-evidence.py set-metadata --run-id "{{ run_id }}" --input "{{ input }}"
+
+# Append one immutable subject-scoped issue #43 case record.
+issue-43-campaign-record run_id input:
+    ./scripts/acceptance/issue-43-campaign-evidence.py record --run-id "{{ run_id }}" --input "{{ input }}"
+
+# Register one immutable, already-uploaded issue #43 payload artifact.
+issue-43-campaign-add-artifact run_id input:
+    ./scripts/acceptance/issue-43-campaign-evidence.py add-artifact --run-id "{{ run_id }}" --input "{{ input }}"
+
+# Register one artifact in the authenticated privacy-review batch.
+issue-43-campaign-review-artifact run_id artifact_id reviewer review_url reviewed_utc:
+    ./scripts/acceptance/issue-43-campaign-evidence.py review-artifact --run-id "{{ run_id }}" --artifact-id "{{ artifact_id }}" --decision PASS --reviewer-role artifact-privacy-reviewer --reviewer "github:{{ reviewer }}" --review-url "{{ review_url }}" --reviewed-utc "{{ reviewed_utc }}" --attestation "I manually inspected the exact published bytes and found no prohibited content"
+
+# Register one case in the authenticated observation-review batch.
+issue-43-campaign-review-record run_id record_id reviewer review_url reviewed_utc:
+    ./scripts/acceptance/issue-43-campaign-evidence.py review-record --run-id "{{ run_id }}" --record-id "{{ record_id }}" --decision PASS --reviewer-role case-observation-reviewer --reviewer "github:{{ reviewer }}" --review-url "{{ review_url }}" --reviewed-utc "{{ reviewed_utc }}" --attestation "I manually opened the exact reviewed artifact bytes, verified the canonical record and full artifact manifest, and checked every named issue 43 requirement clause and interaction"
+
+# Render the exact GitHub comment to post before registering a complete review batch.
+issue-43-campaign-review-batch-proposal run_id kind reviewer:
+    ./scripts/acceptance/issue-43-campaign-evidence.py review-batch-proposal --run-id "{{ run_id }}" --kind "{{ kind }}" --reviewer "github:{{ reviewer }}"
+
+# Capture publishable authenticated identity evidence after the collector's final rename.
+issue-43-campaign-capture-identity run_id:
+    ./scripts/acceptance/issue-43-campaign-evidence.py capture-identity-evidence --run-id "{{ run_id }}"
+
+# Freeze the acyclic issue #43 payload manifest and control digests after collector rename.
+issue-43-campaign-finalize run_id:
+    ./scripts/acceptance/issue-43-campaign-evidence.py finalize --run-id "{{ run_id }}"
+
+# Generate the final issue comment after uploading all three control files.
+issue-43-campaign-comment run_id campaign_url artifacts_url control_url:
+    ./scripts/acceptance/issue-43-campaign-evidence.py comment --run-id "{{ run_id }}" --campaign-url "{{ campaign_url }}" --artifacts-url "{{ artifacts_url }}" --control-url "{{ control_url }}"
+
+# Replay against the expected detached digest copied from the posted GitHub issue comment.
+verify-issue-43-campaign run_dir expected_control_sha256 issue_comment_url:
+    ./scripts/acceptance/issue-43-campaign-evidence.py verify --run-dir "{{ run_dir }}" --require-comment --expected-control-sha256 "{{ expected_control_sha256 }}" --issue-comment-url "{{ issue_comment_url }}" --fetch-public
