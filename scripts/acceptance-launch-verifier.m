@@ -311,15 +311,13 @@ static bool wait_for_fd(int fd, bool writing, NSTimeInterval timeout) {
     return false;
 }
 
-static bool wait_for_launch(dispatch_semaphore_t launched) {
-    NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:kProofTimeoutSeconds];
-    while (!interrupted && [deadline timeIntervalSinceNow] > 0) {
-        if (dispatch_semaphore_wait(
-                launched, dispatch_time(DISPATCH_TIME_NOW, 100 * NSEC_PER_MSEC)) == 0) {
-            return true;
-        }
-    }
-    return false;
+static bool launch_completion_permits_peer(
+    bool delivered,
+    bool failed,
+    pid_t completion_pid,
+    pid_t peer_pid
+) {
+    return !delivered || (!failed && completion_pid > 0 && completion_pid == peer_pid);
 }
 
 static bool write_all(int fd, const uint8_t *bytes, size_t length) {
@@ -535,34 +533,64 @@ static NSDictionary<NSString *, NSString *> *validate_response(
         (unsigned long long)expected_stat->st_dev];
     NSString *expected_inode = [NSString stringWithFormat:@"%llu",
         (unsigned long long)expected_stat->st_ino];
-    if (records == nil ||
-        ![records[@"schema"] isEqualToString:@"spaceterm.acceptance.native-launch-proof/v5"] ||
-        ![records[@"observation.source"] isEqualToString:@"production-app"] ||
-        ![records[@"launch.nonce"] isEqualToString:nonce] ||
-        ![records[@"run.id"] isEqualToString:options->runID] ||
-        ![records[@"package.app.sha256"] isEqualToString:options->appSHA256] ||
-        ![records[@"runtime.schema"] isEqualToString:kRuntimeSchema] ||
-        ![records[@"runtime.sample_interval_ms"] isEqualToString:@"1000"] ||
-        ![records[@"runtime.transition_capacity"] isEqualToString:@"64"] ||
-        ![records[@"failure.action.schema"] isEqualToString:kFailureActionSchema] ||
-        ![records[@"failure.action.enabled"] isEqualToString:
-            [options->failureControl isEqualToString:@"none"] ? @"false" : @"true"] ||
-        !positive_integer(records[@"process.pid"]) ||
-        records[@"process.pid"].intValue != peer_pid ||
-        ![records[@"process.executable.path"] isEqualToString:expected_path] ||
-        ![records[@"process.executable.device"] isEqualToString:expected_device] ||
-        ![records[@"process.executable.inode"] isEqualToString:expected_inode] ||
-        records[@"terminal_font_selected"].length == 0 ||
-        records[@"terminal_font_selected"].length > 256 ||
-        !positive_integer(records[@"initial_grid.rows"]) ||
-        !positive_integer(records[@"initial_grid.columns"]) ||
-        !positive_number(records[@"initial_grid.logical_width"]) ||
-        !positive_number(records[@"initial_grid.logical_height"]) ||
-        !positive_integer(records[@"initial_grid.backing_pixel_width"]) ||
-        !positive_integer(records[@"initial_grid.backing_pixel_height"]) ||
-        ![records[@"observation.complete"] isEqualToString:@"true"]) {
+#define REQUIRE_RESPONSE(CONDITION, FIELD) \
+    do { \
+        if (!(CONDITION)) { \
+            report([NSString stringWithFormat:@"launch observation mismatch: %@", FIELD]); \
+            return nil; \
+        } \
+    } while (0)
+    if (records == nil) {
+        NSString *text = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+        NSUInteger count = text == nil ? 0 : [text componentsSeparatedByString:@"\n"].count - 1;
+        report([NSString stringWithFormat:
+            @"launch observation mismatch: exact-schema (%lu records)",
+            (unsigned long)count]);
         return nil;
     }
+    REQUIRE_RESPONSE([records[@"schema"] isEqualToString:
+        @"spaceterm.acceptance.native-launch-proof/v5"], @"schema");
+    REQUIRE_RESPONSE([records[@"observation.source"] isEqualToString:@"production-app"],
+        @"observation.source");
+    REQUIRE_RESPONSE([records[@"launch.nonce"] isEqualToString:nonce], @"launch.nonce");
+    REQUIRE_RESPONSE([records[@"run.id"] isEqualToString:options->runID], @"run.id");
+    REQUIRE_RESPONSE([records[@"package.app.sha256"] isEqualToString:options->appSHA256],
+        @"package.app.sha256");
+    REQUIRE_RESPONSE([records[@"runtime.schema"] isEqualToString:kRuntimeSchema],
+        @"runtime.schema");
+    REQUIRE_RESPONSE([records[@"runtime.sample_interval_ms"] isEqualToString:@"1000"],
+        @"runtime.sample_interval_ms");
+    REQUIRE_RESPONSE([records[@"runtime.transition_capacity"] isEqualToString:@"64"],
+        @"runtime.transition_capacity");
+    REQUIRE_RESPONSE([records[@"failure.action.schema"] isEqualToString:kFailureActionSchema],
+        @"failure.action.schema");
+    REQUIRE_RESPONSE([records[@"failure.action.enabled"] isEqualToString:
+        [options->failureControl isEqualToString:@"none"] ? @"false" : @"true"],
+        @"failure.action.enabled");
+    REQUIRE_RESPONSE(positive_integer(records[@"process.pid"]) &&
+        records[@"process.pid"].intValue == peer_pid, @"process.pid");
+    REQUIRE_RESPONSE([records[@"process.executable.path"] isEqualToString:expected_path],
+        @"process.executable.path");
+    REQUIRE_RESPONSE([records[@"process.executable.device"] isEqualToString:expected_device],
+        @"process.executable.device");
+    REQUIRE_RESPONSE([records[@"process.executable.inode"] isEqualToString:expected_inode],
+        @"process.executable.inode");
+    REQUIRE_RESPONSE(records[@"terminal_font_selected"].length > 0 &&
+        records[@"terminal_font_selected"].length <= 256, @"terminal_font_selected");
+    REQUIRE_RESPONSE(positive_integer(records[@"initial_grid.rows"]), @"initial_grid.rows");
+    REQUIRE_RESPONSE(positive_integer(records[@"initial_grid.columns"]),
+        @"initial_grid.columns");
+    REQUIRE_RESPONSE(positive_number(records[@"initial_grid.logical_width"]),
+        @"initial_grid.logical_width");
+    REQUIRE_RESPONSE(positive_number(records[@"initial_grid.logical_height"]),
+        @"initial_grid.logical_height");
+    REQUIRE_RESPONSE(positive_integer(records[@"initial_grid.backing_pixel_width"]),
+        @"initial_grid.backing_pixel_width");
+    REQUIRE_RESPONSE(positive_integer(records[@"initial_grid.backing_pixel_height"]),
+        @"initial_grid.backing_pixel_height");
+    REQUIRE_RESPONSE([records[@"observation.complete"] isEqualToString:@"true"],
+        @"observation.complete");
+#undef REQUIRE_RESPONSE
     return records;
 }
 
@@ -1948,6 +1976,54 @@ static void terminate_exact_application(NSRunningApplication *application) {
     }
 }
 
+static void terminate_exact_mounted_path_processes(
+    NSString *expected_app,
+    NSString *expected_path,
+    const struct stat *expected_stat,
+    const struct statfs *expected_fs
+) {
+    int capacity = proc_listallpids(NULL, 0);
+    if (capacity <= 0) {
+        return;
+    }
+    pid_t *pids = calloc((size_t)capacity, sizeof(pid_t));
+    if (pids == NULL) {
+        return;
+    }
+    int count = proc_listallpids(pids, capacity * (int)sizeof(pid_t));
+    for (int index = 0; index < count; index++) {
+        pid_t pid = pids[index];
+        struct proc_bsdinfo process = {0};
+        char path[PROC_PIDPATHINFO_MAXSIZE] = {0};
+        if (pid <= 0 || proc_pidinfo(pid, PROC_PIDTBSDINFO, 0,
+                &process, sizeof(process)) != sizeof(process) ||
+            process.pbi_uid != geteuid() || proc_pidpath(pid, path, sizeof(path)) <= 0) {
+            continue;
+        }
+        NSString *canonical = canonical_path([NSString stringWithUTF8String:path]);
+        struct stat executable = {0};
+        struct statfs filesystem = {0};
+        if (![canonical isEqualToString:expected_path] ||
+            stat(path, &executable) != 0 || statfs(path, &filesystem) != 0 ||
+            executable.st_dev != expected_stat->st_dev ||
+            executable.st_ino != expected_stat->st_ino ||
+            filesystem.f_fsid.val[0] != expected_fs->f_fsid.val[0] ||
+            filesystem.f_fsid.val[1] != expected_fs->f_fsid.val[1] ||
+            (filesystem.f_flags & MNT_RDONLY) == 0) {
+            continue;
+        }
+        NSRunningApplication *application =
+            [NSRunningApplication runningApplicationWithProcessIdentifier:pid];
+        if (application == nil ||
+            ![canonical_path(application.bundleURL.path) isEqualToString:expected_app] ||
+            ![canonical_path(application.executableURL.path) isEqualToString:expected_path]) {
+            continue;
+        }
+        terminate_exact_application(application);
+    }
+    free(pids);
+}
+
 static int run_verifier(const Options *options) {
     int result = 1;
     int executable_fd = -1;
@@ -2019,6 +2095,7 @@ static int run_verifier(const Options *options) {
     bool ax_subject_published = false;
     bool quit_receipt_published = false;
     bool subject_exit_receipt_published = false;
+    bool launch_completion_delivered = false;
 
     expected_app = canonical_path(options->app);
     expected_path = canonical_path(options->executable);
@@ -2120,31 +2197,18 @@ static int run_verifier(const Options *options) {
         openApplicationAtURL:[NSURL fileURLWithPath:expected_app isDirectory:YES]
         configuration:configuration
         completionHandler:launch_completion];
-    if (!wait_for_launch(launched)) {
-        // NSWorkspace offers no cancellation. Give a bounded late completion a chance to return
-        // the exact instance so cleanup can terminate it; never hang a signal trap indefinitely.
-        if (dispatch_semaphore_wait(
-                launched, dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC)) == 0) {
-            application = launched_application;
-        }
-        report(interrupted ? @"LaunchServices launch was interrupted" :
-            @"LaunchServices launch timed out");
-        goto cleanup;
-    }
-    if (launch_error != nil || launched_application == nil ||
-        launched_application.processIdentifier <= 0) {
-        report(@"LaunchServices did not launch the exact application");
-        goto cleanup;
-    }
-    application = launched_application;
-    opened_app = canonical_path(application.bundleURL.path);
-    opened_executable = canonical_path(application.executableURL.path);
-    if (![opened_app isEqualToString:expected_app] || ![opened_executable isEqualToString:expected_path]) {
-        report(@"LaunchServices substituted a different application or executable");
+    launch_completion_delivered =
+        dispatch_semaphore_wait(launched, DISPATCH_TIME_NOW) == 0;
+    if (launch_completion_delivered && (launch_error != nil || launched_application == nil ||
+            launched_application.processIdentifier <= 0)) {
+        report(@"LaunchServices immediately rejected the application launch");
         goto cleanup;
     }
     if (!wait_for_fd(listener, false, kProofTimeoutSeconds)) {
-        report(@"production app did not connect to the verifier");
+        terminate_exact_mounted_path_processes(
+            expected_app, expected_path, &expected_stat, &expected_fs);
+        report(interrupted ? @"LaunchServices launch was interrupted" :
+            @"production app did not connect to the verifier");
         goto cleanup;
     }
     peer = accept(listener, NULL, NULL);
@@ -2161,10 +2225,28 @@ static int run_verifier(const Options *options) {
     }
     pid_t peer_pid = audit_token_to_pid(token);
     int pidversion = audit_token_to_pidversion(token);
-    if (peer_pid != application.processIdentifier || pidversion <= 0 ||
-        audit_token_to_euid(token) != geteuid() ||
+    if (peer_pid <= 0 || pidversion <= 0 || audit_token_to_euid(token) != geteuid() ||
         !mapped_executable_matches(&token, expected_path, &expected_stat, &expected_fs)) {
         report(@"Unix peer is not the exact mounted application process");
+        goto cleanup;
+    }
+    application = [NSRunningApplication runningApplicationWithProcessIdentifier:peer_pid];
+    opened_app = canonical_path(application.bundleURL.path);
+    opened_executable = canonical_path(application.executableURL.path);
+    if (application == nil || ![opened_app isEqualToString:expected_app] ||
+        ![opened_executable isEqualToString:expected_path]) {
+        report(@"Unix peer does not resolve to the exact mounted application");
+        goto cleanup;
+    }
+    if (!launch_completion_delivered) {
+        launch_completion_delivered =
+            dispatch_semaphore_wait(launched, DISPATCH_TIME_NOW) == 0;
+    }
+    pid_t completion_pid = launched_application == nil
+        ? 0 : launched_application.processIdentifier;
+    if (!launch_completion_permits_peer(
+            launch_completion_delivered, launch_error != nil, completion_pid, peer_pid)) {
+        report(@"LaunchServices completion contradicts the authenticated application peer");
         goto cleanup;
     }
     if (!live_signature_matches(&token, options, expected_path,
@@ -2526,6 +2608,14 @@ static bool self_test_ax_subject_schema(void) {
         [records[@"launch.observation.sha256"] isEqualToString:observationSHA];
 }
 
+static bool self_test_launch_completion_authority(void) {
+    return launch_completion_permits_peer(false, false, 0, 123) &&
+        launch_completion_permits_peer(true, false, 123, 123) &&
+        !launch_completion_permits_peer(true, true, 123, 123) &&
+        !launch_completion_permits_peer(true, false, 0, 123) &&
+        !launch_completion_permits_peer(true, false, 124, 123);
+}
+
 static bool initialize_self_test_failure_capture(
     FailureCapture *capture,
     NSString *caseID
@@ -2546,6 +2636,9 @@ static int verifier_self_test(void) {
     NSArray<NSString *> *emptyEvents = @[];
     NSMutableArray<NSString *> *sample = self_test_sample(@"1000000000", @"running");
     NSData *base = self_test_tick(@"0", @"0", sample, emptyEvents);
+    if (!self_test_launch_completion_authority()) {
+        return self_test_failure(@"missing, delayed, or contradictory launch completion") ? 0 : 1;
+    }
     if (!self_test_ax_subject_schema()) {
         return self_test_failure(@"AX subject exact schema") ? 0 : 1;
     }
