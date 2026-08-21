@@ -101,6 +101,8 @@ for tool in performance-workload performance-driver performance-rss-sampler \
     [[ -x "$TOOLS/$tool" && ! -L "$TOOLS/$tool" ]] || fail "missing native tool: $tool"
     "$TOOLS/$tool" --help >/dev/null
 done
+"$TOOLS/performance-window-resolver" --self-test \
+    || fail "native window resolver GPUI/CG mapping fixtures failed"
 [[ -x "$TOOLS/performance-appkit-terminate" && ! -L "$TOOLS/performance-appkit-terminate" ]] \
     || fail "missing native tool: performance-appkit-terminate"
 

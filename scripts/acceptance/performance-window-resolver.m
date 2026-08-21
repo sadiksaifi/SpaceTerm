@@ -7,6 +7,7 @@
 #include <fcntl.h>
 #include <libproc.h>
 #include <locale.h>
+#include <math.h>
 #include <mach/mach_time.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -27,7 +28,8 @@ static BOOL fail(NSString **error, NSString *reason) {
 
 static void usage(FILE *stream) {
     fprintf(stream,
-            "Usage: performance-window-resolver --subject-identity FILE \\\n\n"
+            "Usage: performance-window-resolver --self-test\n"
+            "  performance-window-resolver --subject-identity FILE \\\n\n"
             "  [--window-number N] --output FILE\n\n"
             "Resolve exactly one eligible visible layer-zero window owned by the\n"
             "frozen packaged subject. An explicit window number disambiguates only\n"
@@ -146,9 +148,14 @@ static uint64_t continuous_nanoseconds(void) {
     return (uint64_t)(scaled / timebase.denom);
 }
 
-static BOOL ax_window_number(AXUIElementRef window, CGWindowID *number) {
+static BOOL ax_window_number(AXUIElementRef window, CGWindowID *number, BOOL *present) {
     CFTypeRef raw = NULL;
     AXError status = AXUIElementCopyAttributeValue(window, CFSTR("AXWindowNumber"), &raw);
+    if (status == kAXErrorAttributeUnsupported || status == kAXErrorNoValue) {
+        if (raw != NULL) CFRelease(raw);
+        *present = NO;
+        return YES;
+    }
     if (status != kAXErrorSuccess || raw == NULL || CFGetTypeID(raw) != CFNumberGetTypeID()) {
         if (raw != NULL) CFRelease(raw);
         return NO;
@@ -159,6 +166,7 @@ static BOOL ax_window_number(AXUIElementRef window, CGWindowID *number) {
     CFRelease(raw);
     if (!valid) return NO;
     *number = (CGWindowID)value;
+    *present = YES;
     return YES;
 }
 
@@ -172,6 +180,119 @@ static BOOL ax_boolean(AXUIElementRef element, CFStringRef attribute, BOOL *valu
     *value = CFBooleanGetValue((CFBooleanRef)raw);
     CFRelease(raw);
     return YES;
+}
+
+static BOOL ax_string(AXUIElementRef element, CFStringRef attribute, NSString **value) {
+    CFTypeRef raw = NULL;
+    AXError status = AXUIElementCopyAttributeValue(element, attribute, &raw);
+    if (status != kAXErrorSuccess || raw == NULL || CFGetTypeID(raw) != CFStringGetTypeID()) {
+        if (raw != NULL) CFRelease(raw);
+        return NO;
+    }
+    *value = CFBridgingRelease(raw);
+    return YES;
+}
+
+static BOOL ax_point(AXUIElementRef element, CFStringRef attribute, CGPoint *value) {
+    CFTypeRef raw = NULL;
+    AXError status = AXUIElementCopyAttributeValue(element, attribute, &raw);
+    BOOL valid = status == kAXErrorSuccess && raw != NULL
+        && CFGetTypeID(raw) == AXValueGetTypeID()
+        && AXValueGetValue((AXValueRef)raw, kAXValueTypeCGPoint, value);
+    if (raw != NULL) CFRelease(raw);
+    return valid;
+}
+
+static BOOL ax_size(AXUIElementRef element, CFStringRef attribute, CGSize *value) {
+    CFTypeRef raw = NULL;
+    AXError status = AXUIElementCopyAttributeValue(element, attribute, &raw);
+    BOOL valid = status == kAXErrorSuccess && raw != NULL
+        && CFGetTypeID(raw) == AXValueGetTypeID()
+        && AXValueGetValue((AXValueRef)raw, kAXValueTypeCGSize, value);
+    if (raw != NULL) CFRelease(raw);
+    return valid;
+}
+
+static BOOL finite_bounds(NSDictionary *candidate) {
+    double x = [candidate[@"x"] doubleValue];
+    double y = [candidate[@"y"] doubleValue];
+    double width = [candidate[@"width"] doubleValue];
+    double height = [candidate[@"height"] doubleValue];
+    return isfinite(x) && isfinite(y) && isfinite(width) && isfinite(height)
+        && width > 0.0 && height > 0.0;
+}
+
+static BOOL same_bounds(NSDictionary *left, NSDictionary *right) {
+    return [left[@"x"] doubleValue] == [right[@"x"] doubleValue]
+        && [left[@"y"] doubleValue] == [right[@"y"] doubleValue]
+        && [left[@"width"] doubleValue] == [right[@"width"] doubleValue]
+        && [left[@"height"] doubleValue] == [right[@"height"] doubleValue];
+}
+
+static NSArray<NSDictionary *> *one_to_one_windows(
+    NSArray<NSDictionary *> *rawAX,
+    NSArray<NSDictionary *> *rawCG,
+    pid_t subjectPID
+) {
+    NSPredicate *eligibleAXPredicate = [NSPredicate predicateWithBlock:
+        ^BOOL(NSDictionary *candidate, NSDictionary *_) {
+            (void)_;
+            return [candidate[@"owner"] intValue] == subjectPID
+                && [candidate[@"role"] isEqualToString:(__bridge NSString *)kAXWindowRole]
+                && [candidate[@"subrole"] isEqualToString:
+                    (__bridge NSString *)kAXStandardWindowSubrole]
+                && ![candidate[@"minimized"] boolValue] && finite_bounds(candidate);
+        }];
+    NSPredicate *eligibleCGPredicate = [NSPredicate predicateWithBlock:
+        ^BOOL(NSDictionary *candidate, NSDictionary *_) {
+            (void)_;
+            return [candidate[@"owner"] intValue] == subjectPID
+                && [candidate[@"number"] unsignedIntValue] > 0
+                && [candidate[@"layer"] integerValue] == 0
+                && [candidate[@"onscreen"] boolValue]
+                && [candidate[@"alpha"] doubleValue] > 0.0 && finite_bounds(candidate);
+        }];
+    NSArray<NSDictionary *> *ax = [rawAX filteredArrayUsingPredicate:eligibleAXPredicate];
+    NSArray<NSDictionary *> *cg = [rawCG filteredArrayUsingPredicate:eligibleCGPredicate];
+    if (ax.count == 0 || ax.count != cg.count) return @[];
+
+    NSMutableArray<NSNumber *> *axDegrees = [NSMutableArray arrayWithCapacity:ax.count];
+    NSMutableArray<NSNumber *> *cgDegrees = [NSMutableArray arrayWithCapacity:cg.count];
+    for (NSUInteger index = 0; index < ax.count; index++) [axDegrees addObject:@0];
+    for (NSUInteger index = 0; index < cg.count; index++) [cgDegrees addObject:@0];
+    for (NSUInteger axIndex = 0; axIndex < ax.count; axIndex++) {
+        NSDictionary *axWindow = ax[axIndex];
+        NSNumber *axNumber = axWindow[@"number"];
+        for (NSUInteger cgIndex = 0; cgIndex < cg.count; cgIndex++) {
+            NSDictionary *cgWindow = cg[cgIndex];
+            BOOL numberMatches = axNumber == nil
+                || [axNumber isEqualToNumber:cgWindow[@"number"]];
+            if (numberMatches && same_bounds(axWindow, cgWindow)) {
+                axDegrees[axIndex] = @([axDegrees[axIndex] unsignedIntegerValue] + 1);
+                cgDegrees[cgIndex] = @([cgDegrees[cgIndex] unsignedIntegerValue] + 1);
+            }
+        }
+    }
+    for (NSNumber *degree in axDegrees) if (degree.unsignedIntegerValue != 1) return @[];
+    for (NSNumber *degree in cgDegrees) if (degree.unsignedIntegerValue != 1) return @[];
+    NSMutableArray<NSDictionary *> *mapped = [NSMutableArray arrayWithCapacity:cg.count];
+    for (NSDictionary *cgWindow in cg) {
+        NSDictionary *matchedAX = nil;
+        for (NSDictionary *axWindow in ax) {
+            NSNumber *axNumber = axWindow[@"number"];
+            if ((axNumber == nil || [axNumber isEqualToNumber:cgWindow[@"number"]])
+                && same_bounds(axWindow, cgWindow)) {
+                matchedAX = axWindow;
+                break;
+            }
+        }
+        if (matchedAX == nil) return @[];
+        NSMutableDictionary *result = [cgWindow mutableCopy];
+        result[@"ax_main"] = matchedAX[@"main"] == nil ? @NO : matchedAX[@"main"];
+        result[@"ax_focused"] = matchedAX[@"focused"] == nil ? @NO : matchedAX[@"focused"];
+        [mapped addObject:result];
+    }
+    return mapped;
 }
 
 @interface FrozenSubject : NSObject {
@@ -452,7 +573,7 @@ static NSArray<NSDictionary *> *eligible_windows(FrozenSubject *subject, NSStrin
         fail(error, @"accessibility-window-list-unavailable");
         return nil;
     }
-    NSMutableSet<NSNumber *> *eligibleAX = [NSMutableSet set];
+    NSMutableArray<NSDictionary *> *axCandidates = [NSMutableArray array];
     CFArrayRef axWindows = (CFArrayRef)rawAX;
     for (CFIndex index = 0; index < CFArrayGetCount(axWindows); index += 1) {
         CFTypeRef value = CFArrayGetValueAtIndex(axWindows, index);
@@ -460,11 +581,31 @@ static NSArray<NSDictionary *> *eligible_windows(FrozenSubject *subject, NSStrin
         AXUIElementRef window = (AXUIElementRef)value;
         pid_t owner = 0;
         CGWindowID number = 0;
+        BOOL numberPresent = NO;
         BOOL minimized = YES;
+        BOOL main = NO;
+        BOOL focused = NO;
+        NSString *role = nil;
+        NSString *subrole = nil;
+        CGPoint position = CGPointZero;
+        CGSize size = CGSizeZero;
         if (AXUIElementGetPid(window, &owner) == kAXErrorSuccess
-            && owner == subject.pid && ax_window_number(window, &number)
-            && ax_boolean(window, kAXMinimizedAttribute, &minimized) && !minimized) {
-            [eligibleAX addObject:@(number)];
+            && ax_window_number(window, &number, &numberPresent)
+            && ax_boolean(window, kAXMinimizedAttribute, &minimized)
+            && ax_boolean(window, kAXMainAttribute, &main)
+            && ax_boolean(window, kAXFocusedAttribute, &focused)
+            && ax_string(window, kAXRoleAttribute, &role)
+            && ax_string(window, kAXSubroleAttribute, &subrole)
+            && ax_point(window, kAXPositionAttribute, &position)
+            && ax_size(window, kAXSizeAttribute, &size)) {
+            NSMutableDictionary *candidate = [@{
+                @"owner": @(owner), @"role": role, @"subrole": subrole,
+                @"minimized": @(minimized), @"main": @(main), @"focused": @(focused),
+                @"x": @(position.x), @"y": @(position.y),
+                @"width": @(size.width), @"height": @(size.height),
+            } mutableCopy];
+            if (numberPresent) candidate[@"number"] = @(number);
+            [axCandidates addObject:candidate];
         }
     }
     CFRelease(rawAX);
@@ -477,7 +618,7 @@ static NSArray<NSDictionary *> *eligible_windows(FrozenSubject *subject, NSStrin
         return nil;
     }
     NSArray *windows = CFBridgingRelease(rawCG);
-    NSMutableArray<NSDictionary *> *eligible = [NSMutableArray array];
+    NSMutableArray<NSDictionary *> *cgCandidates = [NSMutableArray array];
     for (id value in windows) {
         if (![value isKindOfClass:[NSDictionary class]]) continue;
         NSDictionary *window = value;
@@ -492,18 +633,146 @@ static NSArray<NSDictionary *> *eligible_windows(FrozenSubject *subject, NSStrin
             && CGRectMakeWithDictionaryRepresentation(
                 (__bridge CFDictionaryRef)rawBounds, &bounds)
             && bounds.size.width > 0 && bounds.size.height > 0;
-        if (owner.intValue == subject.pid && number.unsignedIntValue > 0
-            && layer.integerValue == 0 && onscreen.boolValue
-            && alpha.doubleValue > 0.0 && validBounds
-            && [eligibleAX containsObject:number]) {
-            [eligible addObject:@{
-                @"number": number,
-                @"x": @(bounds.origin.x), @"y": @(bounds.origin.y),
-                @"width": @(bounds.size.width), @"height": @(bounds.size.height),
-            }];
-        }
+        if (!validBounds) continue;
+        [cgCandidates addObject:@{
+            @"owner": owner == nil ? @0 : owner,
+            @"number": number == nil ? @0 : number,
+            @"layer": layer == nil ? @(-1) : layer,
+            @"onscreen": onscreen == nil ? @NO : onscreen,
+            @"alpha": alpha == nil ? @0 : alpha,
+            @"x": @(bounds.origin.x), @"y": @(bounds.origin.y),
+            @"width": @(bounds.size.width), @"height": @(bounds.size.height),
+        }];
     }
-    return eligible;
+    return one_to_one_windows(axCandidates, cgCandidates, subject.pid);
+}
+
+static NSArray<NSDictionary *> *select_windows(
+    NSArray<NSDictionary *> *candidates,
+    BOOL hasSelector,
+    uint64_t selector
+) {
+    if (hasSelector) {
+        NSPredicate *matches = [NSPredicate predicateWithBlock:
+            ^BOOL(NSDictionary *window, NSDictionary *_) {
+                (void)_;
+                return [window[@"number"] unsignedLongLongValue] == selector;
+            }];
+        return [candidates filteredArrayUsingPredicate:matches];
+    }
+    if (candidates.count <= 1) return candidates;
+    NSPredicate *focusedMain = [NSPredicate predicateWithBlock:
+        ^BOOL(NSDictionary *window, NSDictionary *_) {
+            (void)_;
+            return [window[@"ax_main"] boolValue] && [window[@"ax_focused"] boolValue];
+        }];
+    return [candidates filteredArrayUsingPredicate:focusedMain];
+}
+
+static NSArray<NSDictionary *> *resolve_windows_with_retry(
+    FrozenSubject *subject,
+    BOOL hasSelector,
+    uint64_t selector,
+    NSString **error
+) {
+    for (NSUInteger attempt = 0; attempt < 100; attempt++) {
+        NSArray<NSDictionary *> *candidates = eligible_windows(subject, error);
+        if (candidates == nil) return nil;
+        NSArray<NSDictionary *> *selected = select_windows(candidates, hasSelector, selector);
+        if (selected.count == 1) return selected;
+        usleep(50000);
+    }
+    return @[];
+}
+
+static NSDictionary *ax_fixture(
+    pid_t owner,
+    NSString *subrole,
+    BOOL minimized,
+    NSNumber *number,
+    double x,
+    double y,
+    double width,
+    double height
+) {
+    NSMutableDictionary *candidate = [@{
+        @"owner": @(owner), @"role": (__bridge NSString *)kAXWindowRole,
+        @"subrole": subrole, @"minimized": @(minimized), @"main": @YES, @"focused": @YES,
+        @"x": @(x), @"y": @(y), @"width": @(width), @"height": @(height),
+    } mutableCopy];
+    if (number != nil) candidate[@"number"] = number;
+    return candidate;
+}
+
+static NSDictionary *cg_fixture(
+    pid_t owner,
+    uint32_t number,
+    NSInteger layer,
+    BOOL onscreen,
+    double x,
+    double y,
+    double width,
+    double height
+) {
+    return @{
+        @"owner": @(owner), @"number": @(number), @"layer": @(layer),
+        @"onscreen": @(onscreen), @"alpha": @1,
+        @"x": @(x), @"y": @(y), @"width": @(width), @"height": @(height),
+    };
+}
+
+static BOOL resolver_self_test(void) {
+    const pid_t subject = 123;
+    NSString *standard = (__bridge NSString *)kAXStandardWindowSubrole;
+    NSDictionary *gpui = ax_fixture(subject, standard, NO, nil, 35, 39, 1472, 937);
+    NSDictionary *numbered = ax_fixture(subject, standard, NO, @42, 35, 39, 1472, 937);
+    NSDictionary *cg = cg_fixture(subject, 42, 0, YES, 35, 39, 1472, 937);
+    if (one_to_one_windows(@[gpui], @[cg], subject).count != 1
+        || one_to_one_windows(@[numbered], @[cg], subject).count != 1) return NO;
+    NSMutableDictionary *applicationProxy = [gpui mutableCopy];
+    applicationProxy[@"role"] = (__bridge NSString *)kAXApplicationRole;
+    if (one_to_one_windows(@[applicationProxy], @[cg], subject).count != 0) return NO;
+
+    NSMutableDictionary *backgroundAX = [[ax_fixture(
+        subject, standard, NO, nil, 1600, 39, 800, 600) mutableCopy] mutableCopy];
+    backgroundAX[@"main"] = @NO;
+    backgroundAX[@"focused"] = @NO;
+    NSDictionary *backgroundCG = cg_fixture(subject, 43, 0, YES, 1600, 39, 800, 600);
+    NSArray<NSDictionary *> *twoWindows = one_to_one_windows(
+        @[gpui, backgroundAX], @[cg, backgroundCG], subject);
+    if (twoWindows.count != 2
+        || [select_windows(twoWindows, NO, 0).firstObject[@"number"] unsignedIntValue] != 42
+        || select_windows(twoWindows, NO, 0).count != 1
+        || [select_windows(twoWindows, YES, 43).firstObject[@"number"] unsignedIntValue] != 43
+        || select_windows(twoWindows, YES, 43).count != 1) return NO;
+    NSMutableDictionary *ambiguousAX = [backgroundAX mutableCopy];
+    ambiguousAX[@"main"] = @YES;
+    ambiguousAX[@"focused"] = @YES;
+    NSArray<NSDictionary *> *ambiguousWindows = one_to_one_windows(
+        @[gpui, ambiguousAX], @[cg, backgroundCG], subject);
+    if (select_windows(ambiguousWindows, NO, 0).count != 2) return NO;
+
+    NSDictionary *foreignAX = ax_fixture(subject + 1, standard, NO, nil, 35, 39, 1472, 937);
+    NSDictionary *foreignCG = cg_fixture(subject + 1, 42, 0, YES, 35, 39, 1472, 937);
+    NSDictionary *hiddenCG = cg_fixture(subject, 42, 0, NO, 35, 39, 1472, 937);
+    NSDictionary *layeredCG = cg_fixture(subject, 42, 1, YES, 35, 39, 1472, 937);
+    NSDictionary *nonstandardAX = ax_fixture(
+        subject, (__bridge NSString *)kAXDialogSubrole, NO, nil, 35, 39, 1472, 937);
+    NSDictionary *minimizedAX = ax_fixture(subject, standard, YES, nil, 35, 39, 1472, 937);
+    NSDictionary *wrongNumberAX = ax_fixture(subject, standard, NO, @43, 35, 39, 1472, 937);
+    if (one_to_one_windows(@[foreignAX], @[cg], subject).count != 0
+        || one_to_one_windows(@[gpui], @[foreignCG], subject).count != 0
+        || one_to_one_windows(@[gpui], @[hiddenCG], subject).count != 0
+        || one_to_one_windows(@[gpui], @[layeredCG], subject).count != 0
+        || one_to_one_windows(@[nonstandardAX], @[cg], subject).count != 0
+        || one_to_one_windows(@[minimizedAX], @[cg], subject).count != 0
+        || one_to_one_windows(@[wrongNumberAX], @[cg], subject).count != 0) return NO;
+
+    NSDictionary *cgDuplicate = cg_fixture(subject, 44, 0, YES, 35, 39, 1472, 937);
+    NSDictionary *axDuplicate = ax_fixture(subject, standard, NO, nil, 35, 39, 1472, 937);
+    return one_to_one_windows(@[gpui], @[cg, cgDuplicate], subject).count == 0
+        && one_to_one_windows(@[gpui, axDuplicate], @[cg], subject).count == 0
+        && one_to_one_windows(@[gpui, axDuplicate], @[cg, cgDuplicate], subject).count == 0;
 }
 
 static BOOL publish(NSString *path, NSData *data, NSString **error) {
@@ -557,6 +826,9 @@ int main(int argc, const char *argv[]) {
     @autoreleasepool {
         umask(077);
         setlocale(LC_ALL, "C");
+        if (argc == 2 && strcmp(argv[1], "--self-test") == 0) {
+            return resolver_self_test() ? 0 : 1;
+        }
         if (argc == 2 && (strcmp(argv[1], "--help") == 0 || strcmp(argv[1], "-h") == 0)) {
             usage(stdout);
             return 0;
@@ -598,20 +870,13 @@ int main(int argc, const char *argv[]) {
             fprintf(stderr, "error: %s\n", error.UTF8String);
             return 65;
         }
-        NSArray<NSDictionary *> *candidates = eligible_windows(subject, &error);
-        if (candidates == nil) {
+        NSArray<NSDictionary *> *selected = resolve_windows_with_retry(
+            subject, hasSelector, selector, &error);
+        if (selected == nil) {
             fprintf(stderr, "error: %s\n", error.UTF8String);
             return 65;
         }
-        NSArray<NSDictionary *> *selected = candidates;
-        if (hasSelector) {
-            NSPredicate *matches = [NSPredicate predicateWithBlock:^BOOL(NSDictionary *window, NSDictionary *_) {
-                (void)_;
-                return [window[@"number"] unsignedLongLongValue] == selector;
-            }];
-            selected = [candidates filteredArrayUsingPredicate:matches];
-        }
-        if (selected.count != 1 || (!hasSelector && candidates.count != 1)) {
+        if (selected.count != 1) {
             fprintf(stderr, "error: %s\n",
                     hasSelector ? "explicit-window-is-not-exactly-one-eligible-window"
                                 : "eligible-visible-window-is-not-unique");
@@ -623,12 +888,15 @@ int main(int argc, const char *argv[]) {
             return 65;
         }
         NSArray<NSDictionary *> *finalCandidates = eligible_windows(subject, &error);
-        NSPredicate *sameNumber = [NSPredicate predicateWithBlock:^BOOL(NSDictionary *candidate, NSDictionary *_) {
+        NSPredicate *sameIdentity = [NSPredicate predicateWithBlock:^BOOL(NSDictionary *candidate, NSDictionary *_) {
             (void)_;
-            return [candidate[@"number"] isEqual:window[@"number"]];
+            return [candidate[@"number"] isEqual:window[@"number"]]
+                && same_bounds(candidate, window)
+                && [candidate[@"ax_main"] isEqual:window[@"ax_main"]]
+                && [candidate[@"ax_focused"] isEqual:window[@"ax_focused"]];
         }];
         NSArray<NSDictionary *> *finalMatches = finalCandidates == nil
-            ? nil : [finalCandidates filteredArrayUsingPredicate:sameNumber];
+            ? nil : [finalCandidates filteredArrayUsingPredicate:sameIdentity];
         if (finalMatches.count != 1) {
             fprintf(stderr, "error: window-identity-changed-during-resolution\n");
             return 66;
