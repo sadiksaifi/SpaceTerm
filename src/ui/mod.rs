@@ -73,7 +73,9 @@ actions!(
         ActivateWorkspace9,
         ClosePane,
         CloseWindow,
+        CloseWorkspace,
         CreateWorkspace,
+        OpenLocalProject,
         ToggleSidebar,
         ToggleSidebarFocus,
         OpenTerminalFind,
@@ -173,6 +175,7 @@ pub(crate) fn init(cx: &mut App) {
         KeyBinding::new("cmd-w", ClosePane, Some(TERMINAL_KEY_CONTEXT)),
         KeyBinding::new("cmd-shift-w", CloseWindow, Some(TERMINAL_KEY_CONTEXT)),
         KeyBinding::new("cmd-n", CreateWorkspace, Some(TERMINAL_KEY_CONTEXT)),
+        KeyBinding::new("cmd-o", OpenLocalProject, Some(TERMINAL_KEY_CONTEXT)),
         KeyBinding::new("cmd-b", ToggleSidebar, Some(TERMINAL_KEY_CONTEXT)),
         KeyBinding::new(
             "cmd-shift-e",

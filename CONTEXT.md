@@ -654,13 +654,60 @@ Logical and typed key text never enters diagnostics. SpaceTerm performs no autom
 telemetry or crash upload. A local diagnostic file is created only after the user explicitly
 chooses Export Terminal Diagnostics and confirms a path through the native save panel.
 
+### Workspace Kinds and Directory Ownership
+
+Every Workspace carries one immutable Workspace Kind chosen at creation. New Workspace (⌘N)
+creates an Ad Hoc Workspace that always begins at HOME regardless of any other Workspace's
+current directory, while Open Local Project (⌘O) presents the native macOS directory-only picker
+and creates a Local Project Workspace anchored at the exact selected directory. Kinds are never
+converted, and all kind state is runtime-only: directories, names, and availability persist
+nowhere across launches.
+
+An Ad Hoc Workspace owns a dynamic Workspace Directory, the start directory of every new Window
+and Pane. Trusted Terminal Metadata Reported Working Directories update that directory only
+through the Ad Hoc Workspace's single invisible Directory Authority Pane. Directory Authority
+begins as the first Window's initial Pane, never transfers on Split Pane, promotes to the first
+remaining Pane in Pane Layout order when its Pane closes, promotes to the root Pane of the first
+remaining Window when its Window closes, and promotion adopts the promoted Pane's last report
+only when it is still a valid local directory. Invalid, remote, missing, and non-directory
+reports never replace the last valid Workspace Directory. A Local Project Workspace has no
+authority; its directory is permanently its immutable Project Root.
+
+A Workspace Directory may become unavailable. Owned Terminal Sessions keep running, but new
+Window and Pane creation fails with a typed error surfaced as a transient sidebar notice.
+Availability is refreshed by filesystem checks at open and activation, every child creation
+consults the same directory source before allocating entities, nothing watches the filesystem
+continuously, and later successful validation or adoption clears the unavailable state.
+
+Automatic naming derives from the Workspace Directory basename, uses "Default" at HOME, and
+numbers unrenamed duplicates in sidebar order ("Default", "Default 2"); the numbering is
+recalculated dynamically as Workspaces are created, renamed, or closed. A custom name stops
+automatic changes without freezing the secondary path, duplicate names are allowed, and clearing
+a name restores automation. Explicitly closing the final Workspace replaces it with a fresh Ad
+Hoc Workspace at HOME.
+
+Open Local Project deduplicates selections by canonical stat-based filesystem identity, so
+symlinks, aliases, trailing separators, and spelling variants of an already open Project Root
+activate the existing Local Project Workspace instead of creating one while it keeps its original
+display path; an Ad Hoc Workspace at the same path coexists distinctly. Cancellation and unusable
+selections leave the hierarchy unchanged. The sidebar presents each Workspace's kind icon,
+display name, aggregate Window and Pane counts, HOME-compacted middle-truncated path, and
+warning icon treatment while its directory is unavailable; the search placeholder is
+intentionally non-filtering pending real search, and the header hosts the Open Local Project
+control.
+
 ### Workspace-Bound Terminal Creation
 
-`WorkspaceCollection` owns default Workspace naming and passes the exact stored Workspace root into
-payload construction. `WorkspaceTerminalSessionFactory` binds the existing dynamic Terminal Session
-factory Seam to that root, and Windows, Pane hosts, and terminal Panes carry only this scoped Module.
-Terminal creation therefore cannot select a working directory independently of its owning
-Workspace, and no additional provider trait or global state is introduced.
+`WorkspaceCollection` owns default Workspace naming and passes the exact stored Workspace
+Directory into payload construction. Each Workspace exposes one per-Workspace directory source,
+and `WorkspaceTerminalSessionFactory` binds the dynamic Terminal Session factory Seam to that
+source so Windows and Pane hosts resolve the current Workspace Directory again at every session
+start rather than freezing creation-time state. Child creation gates on the same source and is
+rejected with a typed error surfaced as a transient notice while the directory is unavailable;
+Local Project Workspaces stay permanently bound to their Project Root. Windows, Pane hosts, and
+terminal Panes carry only this scoped Module, Terminal creation cannot select a working
+directory independently of its owning Workspace, and no additional provider trait or global state
+is introduced.
 
 ### Cross-Hierarchy Close Escalation
 

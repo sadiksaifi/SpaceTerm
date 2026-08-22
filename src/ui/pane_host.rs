@@ -1,4 +1,6 @@
 use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
 use gpui::prelude::*;
 use gpui::{
@@ -8,6 +10,7 @@ use gpui::{
 use gpui_symbols::{Icon, SymbolWeight};
 
 use super::terminal_focus::{TerminalFocusBlocker, TerminalProductFocus};
+use super::workspace_manager::{WorkspaceDirectorySource, WorkspaceDirectoryUnavailable};
 use super::{
     ClosePane, CloseTarget, FocusPaneDown, FocusPaneLeft, FocusPaneRight, FocusPaneUp,
     PANE_ACTION_MENU_HEIGHT, PANE_ACTION_MENU_WIDTH, PaneActionMenuCommand, SplitDown, SplitRight,
@@ -42,16 +45,31 @@ struct DraggedSplit {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum PaneHostEvent {
-    CloseWindowRequested { window_id: WindowId },
-    PresentationChanged { window_id: WindowId },
+    CloseWindowRequested {
+        window_id: WindowId,
+    },
+    PresentationChanged {
+        window_id: WindowId,
+    },
+    ChildCreationBlocked,
+    PaneReportedDirectoryChanged {
+        window_id: WindowId,
+        pane_id: PaneId,
+    },
+    PaneClosed {
+        window_id: WindowId,
+        closed_pane_id: PaneId,
+    },
 }
 
 pub(crate) struct PaneHost {
     terminal_window: TerminalWindow<Entity<TerminalPane>>,
     session_factory: WorkspaceTerminalSessionFactory,
+    directory_gate: Option<Rc<dyn WorkspaceDirectorySource>>,
     pane_bounds: BTreeMap<PaneId, Bounds<Pixels>>,
     split_bounds: BTreeMap<SplitId, Bounds<Pixels>>,
     pane_titles: BTreeMap<PaneId, gpui::SharedString>,
+    pane_directories: BTreeMap<PaneId, PathBuf>,
     pane_attention: BTreeMap<PaneId, u32>,
     menu_pane_id: Option<PaneId>,
     active: bool,
@@ -65,6 +83,7 @@ impl PaneHost {
     pub(crate) fn new(
         window_id: WindowId,
         session_factory: WorkspaceTerminalSessionFactory,
+        directory_gate: Option<Rc<dyn WorkspaceDirectorySource>>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -86,9 +105,11 @@ impl PaneHost {
         Self {
             terminal_window,
             session_factory,
+            directory_gate,
             pane_bounds: BTreeMap::new(),
             split_bounds: BTreeMap::new(),
             pane_titles: BTreeMap::from([(initial_pane_id, initial_title)]),
+            pane_directories: BTreeMap::new(),
             pane_attention: BTreeMap::from([(initial_pane_id, 0)]),
             menu_pane_id: None,
             active: true,
@@ -122,6 +143,14 @@ impl PaneHost {
                     host.pane_attention.insert(pane_id, *unread_count);
                     cx.emit(PaneHostEvent::PresentationChanged {
                         window_id: host.terminal_window.id(),
+                    });
+                    cx.notify();
+                }
+                TerminalPaneEvent::ReportedWorkingDirectoryChanged(directory) => {
+                    host.pane_directories.insert(pane_id, directory.clone());
+                    cx.emit(PaneHostEvent::PaneReportedDirectoryChanged {
+                        window_id: host.terminal_window.id(),
+                        pane_id,
                     });
                     cx.notify();
                 }
@@ -213,6 +242,20 @@ impl PaneHost {
 
     pub(crate) fn pane_count(&self) -> usize {
         self.terminal_window.pane_count()
+    }
+
+    pub(crate) fn pane_reported_directory(&self, pane_id: PaneId) -> Option<&Path> {
+        self.pane_directories.get(&pane_id).map(PathBuf::as_path)
+    }
+
+    pub(crate) fn ordered_panes(&self) -> Vec<PaneId> {
+        let mut panes = Vec::with_capacity(self.terminal_window.pane_count());
+        collect_pane_order(self.terminal_window.root(), &mut panes);
+        panes
+    }
+
+    pub(crate) fn first_pane_in_layout_order(&self) -> Option<PaneId> {
+        self.ordered_panes().first().copied()
     }
 
     pub(crate) fn window_title(&self) -> gpui::SharedString {
@@ -352,6 +395,12 @@ impl PaneHost {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if let Some(directory_gate) = &self.directory_gate
+            && let Err(WorkspaceDirectoryUnavailable) = directory_gate.resolve()
+        {
+            cx.emit(PaneHostEvent::ChildCreationBlocked);
+            return;
+        }
         let Some(target_bounds) = self.pane_bounds.get(&target_pane_id).copied() else {
             eprintln!("cannot split Pane {target_pane_id} before its bounds are measured");
             return;
@@ -407,6 +456,10 @@ impl PaneHost {
                 self.active = false;
                 self.menu_pane_id = None;
                 self.sync_terminal_focus(cx);
+                cx.emit(PaneHostEvent::PaneClosed {
+                    window_id,
+                    closed_pane_id: pane_id,
+                });
                 cx.emit(PaneHostEvent::CloseWindowRequested { window_id });
             }
             Ok(ClosePaneOutcome::PaneClosed {
@@ -422,9 +475,14 @@ impl PaneHost {
                 self.pane_bounds.remove(&pane_id);
                 self.split_bounds.clear();
                 self.pane_titles.remove(&pane_id);
+                self.pane_directories.remove(&pane_id);
                 self.pane_attention.remove(&pane_id);
                 self.menu_pane_id = None;
                 self.sync_terminal_focus(cx);
+                cx.emit(PaneHostEvent::PaneClosed {
+                    window_id: self.terminal_window.id(),
+                    closed_pane_id: pane_id,
+                });
                 cx.emit(PaneHostEvent::PresentationChanged {
                     window_id: self.terminal_window.id(),
                 });
@@ -1101,7 +1159,7 @@ fn gpui_color(color: Color) -> gpui::Rgba {
 #[cfg(test)]
 mod tests {
     use std::cell::Cell;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::rc::Rc;
     use std::sync::Arc;
 
@@ -1117,6 +1175,16 @@ mod tests {
     use crate::terminal::{
         ScreenSnapshot, ScrollbarSnapshot, SessionEvent, SessionExit, TerminalSessionFactory,
     };
+    use crate::ui::workspace_manager::{WorkspaceDirectorySource, WorkspaceDirectoryUnavailable};
+
+    /// A directory source that is permanently unavailable.
+    struct UnavailableDirectoryGate;
+
+    impl WorkspaceDirectorySource for UnavailableDirectoryGate {
+        fn resolve(&self) -> Result<PathBuf, WorkspaceDirectoryUnavailable> {
+            Err(WorkspaceDirectoryUnavailable)
+        }
+    }
 
     fn test_session_factory() -> WorkspaceTerminalSessionFactory {
         WorkspaceTerminalSessionFactory::new(
@@ -1146,7 +1214,7 @@ mod tests {
         cx.update(crate::ui::init);
         let session_factory = test_session_factory();
         let (host, cx) = cx.add_window_view(|window, cx| {
-            PaneHost::new(WindowId::new(1), session_factory, window, cx)
+            PaneHost::new(WindowId::new(1), session_factory, None, window, cx)
         });
 
         split_test_pane(&host, PaneId::new(1), SplitAxis::Horizontal, cx);
@@ -1167,7 +1235,7 @@ mod tests {
     fn attention_remains_scoped_to_its_owning_pane_and_window_title(cx: &mut TestAppContext) {
         cx.update(crate::ui::init);
         let (host, cx) = cx.add_window_view(|window, cx| {
-            PaneHost::new(WindowId::new(1), test_session_factory(), window, cx)
+            PaneHost::new(WindowId::new(1), test_session_factory(), None, window, cx)
         });
 
         host.update(cx, |host, _| {
@@ -1203,7 +1271,7 @@ mod tests {
     fn single_pane_should_not_render_a_pane_header(cx: &mut TestAppContext) {
         let session_factory = test_session_factory();
         let (_host, cx) = cx.add_window_view(|window, cx| {
-            PaneHost::new(WindowId::new(1), session_factory, window, cx)
+            PaneHost::new(WindowId::new(1), session_factory, None, window, cx)
         });
 
         assert!(cx.debug_bounds("pane-header-1-focused").is_none());
@@ -1213,7 +1281,7 @@ mod tests {
     fn terminal_input_focus_tracks_pane_menu_and_native_window_activation(cx: &mut TestAppContext) {
         let session_factory = test_session_factory();
         let (host, cx) = cx.add_window_view(|window, cx| {
-            PaneHost::new(WindowId::new(1), session_factory, window, cx)
+            PaneHost::new(WindowId::new(1), session_factory, None, window, cx)
         });
         cx.update(|window, app| {
             window.activate_window();
@@ -1268,7 +1336,7 @@ mod tests {
         let session_factory =
             WorkspaceTerminalSessionFactory::new(session_factory, test_workspace_root());
         let (host, cx) = cx.add_window_view(|window, cx| {
-            PaneHost::new(WindowId::new(1), session_factory, window, cx)
+            PaneHost::new(WindowId::new(1), session_factory, None, window, cx)
         });
         cx.update(|window, _| window.activate_window());
         cx.run_until_parked();
@@ -1307,6 +1375,54 @@ mod tests {
     }
 
     #[gpui::test]
+    fn unavailable_workspace_directory_should_block_splitting_without_mutating_the_layout(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(crate::ui::init);
+        let records = TestTerminalSessionRecords::default();
+        let session_factory: Rc<dyn TerminalSessionFactory> =
+            Rc::new(TestTerminalSessionFactory::new(records.clone()));
+        let session_factory =
+            WorkspaceTerminalSessionFactory::new(session_factory, test_workspace_root());
+        let directory_gate: Option<Rc<dyn WorkspaceDirectorySource>> =
+            Some(Rc::new(UnavailableDirectoryGate));
+        let (host, cx) = cx.add_window_view(|window, cx| {
+            PaneHost::new(
+                WindowId::new(1),
+                session_factory,
+                directory_gate,
+                window,
+                cx,
+            )
+        });
+        cx.run_until_parked();
+        let blocked_events = Rc::new(Cell::new(0));
+        let blocked_events_for_subscription = Rc::clone(&blocked_events);
+        host.update(cx, |_, cx| {
+            cx.subscribe(&host, move |_, _, event: &PaneHostEvent, _| {
+                if matches!(event, PaneHostEvent::ChildCreationBlocked) {
+                    blocked_events_for_subscription.update(|count| count + 1);
+                }
+            })
+            .detach();
+        });
+
+        split_test_pane(&host, PaneId::new(1), SplitAxis::Horizontal, cx);
+
+        let state = host.read_with(cx, |host, _| host.terminal_window.pane_count());
+        assert_eq!(state, 1);
+        assert_eq!(blocked_events.get(), 1);
+        assert_eq!(
+            records
+                .starts()
+                .into_iter()
+                .map(|start| start.working_directory)
+                .collect::<Vec<_>>(),
+            vec![test_workspace_root()],
+        );
+    }
+
+    #[gpui::test]
     fn initial_and_split_panes_should_start_in_the_workspace_root(cx: &mut TestAppContext) {
         let workspace_root = PathBuf::from("/tmp/spaceterm-explicit-workspace-root");
         let records = TestTerminalSessionRecords::default();
@@ -1315,7 +1431,7 @@ mod tests {
         let session_factory =
             WorkspaceTerminalSessionFactory::new(session_factory, workspace_root.clone());
         let (host, cx) = cx.add_window_view(|window, cx| {
-            PaneHost::new(WindowId::new(1), session_factory, window, cx)
+            PaneHost::new(WindowId::new(1), session_factory, None, window, cx)
         });
 
         cx.update(|window, cx| {
@@ -1339,7 +1455,7 @@ mod tests {
     fn split_panes_should_render_compact_focused_and_unfocused_headers(cx: &mut TestAppContext) {
         let session_factory = test_session_factory();
         let (host, cx) = cx.add_window_view(|window, cx| {
-            PaneHost::new(WindowId::new(1), session_factory, window, cx)
+            PaneHost::new(WindowId::new(1), session_factory, None, window, cx)
         });
 
         cx.update(|window, cx| {
@@ -1366,7 +1482,7 @@ mod tests {
     fn focusing_another_pane_should_move_the_focused_header_state(cx: &mut TestAppContext) {
         let session_factory = test_session_factory();
         let (host, cx) = cx.add_window_view(|window, cx| {
-            PaneHost::new(WindowId::new(1), session_factory, window, cx)
+            PaneHost::new(WindowId::new(1), session_factory, None, window, cx)
         });
 
         cx.update(|window, cx| {
@@ -1393,7 +1509,7 @@ mod tests {
         let session_factory =
             WorkspaceTerminalSessionFactory::new(session_factory, test_workspace_root());
         let (host, cx) = cx.add_window_view(|window, cx| {
-            PaneHost::new(WindowId::new(1), session_factory, window, cx)
+            PaneHost::new(WindowId::new(1), session_factory, None, window, cx)
         });
         cx.update(|window, cx| {
             window.activate_window();
@@ -1440,7 +1556,7 @@ mod tests {
         let session_factory =
             WorkspaceTerminalSessionFactory::new(session_factory, test_workspace_root());
         let (host, cx) = cx.add_window_view(|window, cx| {
-            PaneHost::new(WindowId::new(1), session_factory, window, cx)
+            PaneHost::new(WindowId::new(1), session_factory, None, window, cx)
         });
         cx.update(|window, cx| {
             window.activate_window();
@@ -1485,7 +1601,7 @@ mod tests {
         let session_factory =
             WorkspaceTerminalSessionFactory::new(session_factory, test_workspace_root());
         let (host, cx) = cx.add_window_view(|window, cx| {
-            PaneHost::new(WindowId::new(1), session_factory, window, cx)
+            PaneHost::new(WindowId::new(1), session_factory, None, window, cx)
         });
         cx.update(|window, cx| {
             window.activate_window();
@@ -1540,7 +1656,7 @@ mod tests {
         let session_factory =
             WorkspaceTerminalSessionFactory::new(session_factory, test_workspace_root());
         let (host, cx) = cx.add_window_view(|window, cx| {
-            PaneHost::new(WindowId::new(1), session_factory, window, cx)
+            PaneHost::new(WindowId::new(1), session_factory, None, window, cx)
         });
         cx.update(|window, cx| {
             host.update(cx, |host, cx| {
@@ -1654,7 +1770,7 @@ mod tests {
         let session_factory =
             WorkspaceTerminalSessionFactory::new(session_factory, test_workspace_root());
         let (host, cx) = cx.add_window_view(|window, cx| {
-            PaneHost::new(WindowId::new(1), session_factory, window, cx)
+            PaneHost::new(WindowId::new(1), session_factory, None, window, cx)
         });
 
         cx.update(|window, cx| {
@@ -1693,7 +1809,7 @@ mod tests {
         let session_factory =
             WorkspaceTerminalSessionFactory::new(session_factory, test_workspace_root());
         let (host, cx) = cx.add_window_view(|window, cx| {
-            PaneHost::new(WindowId::new(1), session_factory, window, cx)
+            PaneHost::new(WindowId::new(1), session_factory, None, window, cx)
         });
 
         cx.update(|window, cx| {
@@ -1729,12 +1845,14 @@ mod tests {
         let session_factory =
             WorkspaceTerminalSessionFactory::new(session_factory, test_workspace_root());
         let (host, cx) = cx.add_window_view(|window, cx| {
-            PaneHost::new(WindowId::new(1), session_factory, window, cx)
+            PaneHost::new(WindowId::new(1), session_factory, None, window, cx)
         });
         let close_requests_for_subscription = Rc::clone(&close_requests);
         host.update(cx, |_, cx| {
-            cx.subscribe(&host, move |_, _, _: &PaneHostEvent, _| {
-                close_requests_for_subscription.update(|count| count + 1);
+            cx.subscribe(&host, move |_, _, event: &PaneHostEvent, _| {
+                if matches!(event, PaneHostEvent::CloseWindowRequested { .. }) {
+                    close_requests_for_subscription.update(|count| count + 1);
+                }
             })
             .detach();
         });
@@ -1761,7 +1879,7 @@ mod tests {
         let presentation_changes = Rc::new(Cell::new(0));
         let session_factory = test_session_factory();
         let (host, cx) = cx.add_window_view(|window, cx| {
-            PaneHost::new(WindowId::new(1), session_factory, window, cx)
+            PaneHost::new(WindowId::new(1), session_factory, None, window, cx)
         });
         let presentation_changes_for_subscription = Rc::clone(&presentation_changes);
         host.update(cx, |_, cx| {
@@ -1786,7 +1904,7 @@ mod tests {
         let presentation_changes = Rc::new(Cell::new(0));
         let session_factory = test_session_factory();
         let (host, cx) = cx.add_window_view(|window, cx| {
-            PaneHost::new(WindowId::new(1), session_factory, window, cx)
+            PaneHost::new(WindowId::new(1), session_factory, None, window, cx)
         });
         split_test_pane(&host, PaneId::new(1), SplitAxis::Horizontal, cx);
         let presentation_changes_for_subscription = Rc::clone(&presentation_changes);
@@ -1817,7 +1935,7 @@ mod tests {
         let session_factory =
             WorkspaceTerminalSessionFactory::new(session_factory, test_workspace_root());
         let (host, cx) = cx.add_window_view(|window, cx| {
-            PaneHost::new(WindowId::new(1), session_factory, window, cx)
+            PaneHost::new(WindowId::new(1), session_factory, None, window, cx)
         });
 
         cx.update(|window, cx| {
@@ -1852,7 +1970,7 @@ mod tests {
         let session_factory =
             WorkspaceTerminalSessionFactory::new(session_factory, test_workspace_root());
         let (host, cx) = cx.add_window_view(|window, cx| {
-            PaneHost::new(WindowId::new(1), session_factory, window, cx)
+            PaneHost::new(WindowId::new(1), session_factory, None, window, cx)
         });
 
         cx.update(|window, cx| {
@@ -1905,7 +2023,7 @@ mod tests {
         let session_factory =
             WorkspaceTerminalSessionFactory::new(session_factory, test_workspace_root());
         let (host, cx) = cx.add_window_view(|window, cx| {
-            PaneHost::new(WindowId::new(1), session_factory, window, cx)
+            PaneHost::new(WindowId::new(1), session_factory, None, window, cx)
         });
 
         cx.update(|window, cx| {
@@ -1943,7 +2061,7 @@ mod tests {
         let session_factory =
             WorkspaceTerminalSessionFactory::new(session_factory, test_workspace_root());
         let (host, cx) = cx.add_window_view(|window, cx| {
-            PaneHost::new(WindowId::new(1), session_factory, window, cx)
+            PaneHost::new(WindowId::new(1), session_factory, None, window, cx)
         });
 
         cx.update(|window, cx| {
@@ -2008,7 +2126,7 @@ mod tests {
         let session_factory =
             WorkspaceTerminalSessionFactory::new(session_factory, test_workspace_root());
         let (host, cx) = cx.add_window_view(|window, cx| {
-            PaneHost::new(WindowId::new(1), session_factory, window, cx)
+            PaneHost::new(WindowId::new(1), session_factory, None, window, cx)
         });
 
         cx.update(|window, cx| {
@@ -2094,5 +2212,159 @@ mod tests {
             MINIMUM_PANE_WIDTH >= menu_right + PANE_CONTROL_INSET
                 && MINIMUM_PANE_HEIGHT >= menu_bottom + PANE_CONTROL_INSET
         );
+    }
+
+    /// A screen snapshot whose Terminal Metadata reports `directory` as the
+    /// Reported Working Directory.
+    fn screen_with_reported_directory(directory: &Path) -> Arc<ScreenSnapshot> {
+        use crate::terminal::metadata::{
+            DirectoryMetadata, DirectoryProvenance, MetadataFreshness, ProgressMetadata,
+            PromptZone, TerminalMetadataSnapshot, TitleMetadata, TitleProvenance,
+        };
+        let mut screen = Arc::unwrap_or_clone(ScreenSnapshot::from_test_parts(
+            Arc::from([]),
+            Default::default(),
+            "",
+        ));
+        screen.metadata = Arc::new(TerminalMetadataSnapshot {
+            revision: 0,
+            freshness: MetadataFreshness::Live,
+            title: TitleMetadata {
+                value: Arc::from(""),
+                provenance: TitleProvenance::Fallback,
+            },
+            directory: DirectoryMetadata {
+                path: Arc::from(directory.to_string_lossy().as_ref()),
+                provenance: DirectoryProvenance::Osc7,
+            },
+            prompt_zone: PromptZone::Unknown,
+            command: None,
+            progress: ProgressMetadata::None,
+        });
+        Arc::new(screen)
+    }
+
+    fn send_reported_directory(
+        records: &TestTerminalSessionRecords,
+        session_id: usize,
+        directory: &Path,
+    ) {
+        records
+            .event_sender(session_id)
+            .unwrap_or_else(|| panic!("session {session_id} must have started"))
+            .try_send(SessionEvent::Screen(screen_with_reported_directory(
+                directory,
+            )))
+            .expect("the Reported Working Directory snapshot must be delivered");
+    }
+
+    #[gpui::test]
+    fn reported_working_directories_should_track_panes_in_layout_order_and_clear_on_close(
+        cx: &mut TestAppContext,
+    ) {
+        let records = TestTerminalSessionRecords::default();
+        let session_factory: Rc<dyn TerminalSessionFactory> =
+            Rc::new(TestTerminalSessionFactory::new(records.clone()).with_fallback_title("zsh"));
+        let session_factory =
+            WorkspaceTerminalSessionFactory::new(session_factory, test_workspace_root());
+        let (host, cx) = cx.add_window_view(|window, cx| {
+            PaneHost::new(WindowId::new(1), session_factory, None, window, cx)
+        });
+        split_test_pane(&host, PaneId::new(1), SplitAxis::Horizontal, cx);
+
+        send_reported_directory(&records, 2, Path::new("/tmp/spaceterm-report-split"));
+        send_reported_directory(&records, 1, Path::new("/tmp/spaceterm-report-root"));
+        send_reported_directory(&records, 1, Path::new("/tmp/spaceterm-report-root"));
+        cx.run_until_parked();
+
+        let state = host.read_with(cx, |host, _| {
+            (
+                host.pane_reported_directory(PaneId::new(1))
+                    .map(Path::to_path_buf),
+                host.pane_reported_directory(PaneId::new(2))
+                    .map(Path::to_path_buf),
+                host.ordered_panes(),
+                host.first_pane_in_layout_order(),
+            )
+        });
+        assert_eq!(
+            state,
+            (
+                Some(PathBuf::from("/tmp/spaceterm-report-root")),
+                Some(PathBuf::from("/tmp/spaceterm-report-split")),
+                vec![PaneId::new(1), PaneId::new(2)],
+                Some(PaneId::new(1)),
+            )
+        );
+
+        cx.update(|window, cx| {
+            host.update(cx, |host, cx| host.close_pane(PaneId::new(1), window, cx));
+        });
+        cx.run_until_parked();
+
+        let after_close = host.read_with(cx, |host, _| {
+            (
+                host.pane_reported_directory(PaneId::new(1)).is_none(),
+                host.pane_reported_directory(PaneId::new(2))
+                    .map(Path::to_path_buf),
+                host.ordered_panes(),
+                host.first_pane_in_layout_order(),
+            )
+        });
+        assert_eq!(
+            after_close,
+            (
+                true,
+                Some(PathBuf::from("/tmp/spaceterm-report-split")),
+                vec![PaneId::new(2)],
+                Some(PaneId::new(2)),
+            )
+        );
+    }
+
+    #[gpui::test]
+    fn pane_hosts_should_emit_one_report_event_per_change_and_one_closed_event(
+        cx: &mut TestAppContext,
+    ) {
+        let records = TestTerminalSessionRecords::default();
+        let session_factory: Rc<dyn TerminalSessionFactory> =
+            Rc::new(TestTerminalSessionFactory::new(records.clone()).with_fallback_title("zsh"));
+        let session_factory =
+            WorkspaceTerminalSessionFactory::new(session_factory, test_workspace_root());
+        let (host, cx) = cx.add_window_view(|window, cx| {
+            PaneHost::new(WindowId::new(1), session_factory, None, window, cx)
+        });
+        let report_events = Rc::new(Cell::new(0));
+        let closed_events = Rc::new(Cell::new(0));
+        {
+            let report_events = Rc::clone(&report_events);
+            let closed_events = Rc::clone(&closed_events);
+            host.update(cx, |_, cx| {
+                cx.subscribe(&host, move |_, _, event: &PaneHostEvent, _| match event {
+                    PaneHostEvent::PaneReportedDirectoryChanged { .. } => {
+                        report_events.update(|count| count + 1);
+                    }
+                    PaneHostEvent::PaneClosed { .. } => closed_events.update(|count| count + 1),
+                    _ => {}
+                })
+                .detach();
+            });
+        }
+
+        send_reported_directory(&records, 1, Path::new("/tmp/spaceterm-report-first"));
+        cx.run_until_parked();
+        send_reported_directory(&records, 1, Path::new("/tmp/spaceterm-report-first"));
+        cx.run_until_parked();
+        send_reported_directory(&records, 1, Path::new("/tmp/spaceterm-report-second"));
+        cx.run_until_parked();
+
+        assert_eq!(report_events.get(), 2);
+
+        cx.update(|window, cx| {
+            host.update(cx, |host, cx| host.close_pane(PaneId::new(1), window, cx));
+        });
+        cx.run_until_parked();
+
+        assert_eq!(closed_events.get(), 1);
     }
 }

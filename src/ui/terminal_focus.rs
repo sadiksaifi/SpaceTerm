@@ -2,6 +2,7 @@
 pub(crate) enum TerminalFocusBlocker {
     Sidebar,
     RenameField,
+    SearchField,
     ContextMenu,
     PaneMenu,
     WindowMenu,
@@ -121,6 +122,7 @@ mod tests {
         let blockers = [
             TerminalFocusBlocker::Sidebar,
             TerminalFocusBlocker::RenameField,
+            TerminalFocusBlocker::SearchField,
             TerminalFocusBlocker::ContextMenu,
             TerminalFocusBlocker::PaneMenu,
             TerminalFocusBlocker::WindowMenu,

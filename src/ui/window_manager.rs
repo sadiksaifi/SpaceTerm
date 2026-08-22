@@ -5,8 +5,11 @@ use gpui::{
     SharedString, Window, canvas, div, px, rgba,
 };
 use gpui_symbols::{Icon, SymbolWeight};
+use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
 use super::terminal_focus::TerminalFocusBlocker;
+use super::workspace_manager::{WorkspaceDirectorySource, WorkspaceDirectoryUnavailable};
 use super::{
     ActivateWindow1, ActivateWindow2, ActivateWindow3, ActivateWindow4, ActivateWindow5,
     ActivateWindow6, ActivateWindow7, ActivateWindow8, ActivateWindow9, CloseTarget, CloseWindow,
@@ -15,7 +18,8 @@ use super::{
     handle_top_chrome_mouse_down, render_pane_action_menu,
 };
 use crate::domain::{
-    CloseWindowOutcome, SplitAxis, WindowCollection, WindowError, WindowId, WorkspaceId, ZoomState,
+    CloseWindowOutcome, PaneId, SplitAxis, WindowCollection, WindowError, WindowId, WorkspaceId,
+    ZoomState,
 };
 use crate::terminal::{
     NativeServiceOrigin, NativeServiceStatus, SelectionCopy, WorkspaceTerminalSessionFactory,
@@ -43,13 +47,28 @@ struct WindowMenuState {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum WindowManagerEvent {
-    FinalWindowCloseRequested { final_window_id: WindowId },
+    FinalWindowCloseRequested {
+        final_window_id: WindowId,
+    },
     PresentationChanged,
+    ChildCreationBlocked,
+    PaneReportedDirectoryChanged {
+        window_id: WindowId,
+        pane_id: PaneId,
+    },
+    PaneClosed {
+        window_id: WindowId,
+        closed_pane_id: PaneId,
+    },
+    WindowClosed {
+        window_id: WindowId,
+    },
 }
 
 pub(crate) struct WindowManager {
     windows: WindowCollection<Entity<PaneHost>>,
     session_factory: WorkspaceTerminalSessionFactory,
+    directory_gate: Rc<dyn WorkspaceDirectorySource>,
     active: bool,
     sidebar_visible: bool,
     sidebar_width: Pixels,
@@ -69,11 +88,18 @@ impl WindowManager {
 
     pub(crate) fn new(
         session_factory: WorkspaceTerminalSessionFactory,
+        directory_gate: Rc<dyn WorkspaceDirectorySource>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         let windows = WindowCollection::new(|window_id| {
-            Self::create_pane_host(window_id, session_factory.clone(), window, cx)
+            Self::create_pane_host(
+                window_id,
+                session_factory.clone(),
+                directory_gate.clone(),
+                window,
+                cx,
+            )
         });
         cx.observe_window_activation(window, |manager, window, cx| {
             if !window.is_window_active() {
@@ -85,6 +111,7 @@ impl WindowManager {
         Self {
             windows,
             session_factory,
+            directory_gate,
             active: true,
             sidebar_visible: true,
             sidebar_width: px(WORKSPACE_SIDEBAR_DEFAULT_WIDTH),
@@ -101,10 +128,12 @@ impl WindowManager {
     fn create_pane_host(
         window_id: WindowId,
         session_factory: WorkspaceTerminalSessionFactory,
+        directory_gate: Rc<dyn WorkspaceDirectorySource>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Entity<PaneHost> {
-        let pane_host = cx.new(|cx| PaneHost::new(window_id, session_factory, window, cx));
+        let pane_host = cx
+            .new(|cx| PaneHost::new(window_id, session_factory, Some(directory_gate), window, cx));
         debug_assert_eq!(pane_host.read(cx).window_id(), window_id);
         cx.subscribe_in(
             &pane_host,
@@ -113,9 +142,27 @@ impl WindowManager {
                 PaneHostEvent::CloseWindowRequested { window_id } => {
                     manager.close_window(*window_id, window, cx);
                 }
+                PaneHostEvent::ChildCreationBlocked => {
+                    cx.emit(WindowManagerEvent::ChildCreationBlocked);
+                }
                 PaneHostEvent::PresentationChanged { .. } => {
                     cx.emit(WindowManagerEvent::PresentationChanged);
                     cx.notify();
+                }
+                PaneHostEvent::PaneReportedDirectoryChanged { window_id, pane_id } => {
+                    cx.emit(WindowManagerEvent::PaneReportedDirectoryChanged {
+                        window_id: *window_id,
+                        pane_id: *pane_id,
+                    });
+                }
+                PaneHostEvent::PaneClosed {
+                    window_id,
+                    closed_pane_id,
+                } => {
+                    cx.emit(WindowManagerEvent::PaneClosed {
+                        window_id: *window_id,
+                        closed_pane_id: *closed_pane_id,
+                    });
                 }
             },
         )
@@ -317,12 +364,59 @@ impl WindowManager {
         cx.notify();
     }
 
-    pub(crate) fn sidebar_detail(&self, cx: &App) -> SharedString {
-        let title = self.windows.active_window().read(cx).window_title();
-        if self.windows.len() == 1 {
-            return title;
-        }
-        format!("{title} · {} Windows", self.windows.len()).into()
+    /// Aggregate Workspace-wide (Window, Pane) counts across every owned
+    /// Window, in Window order.
+    pub(crate) fn aggregate_counts(&self, cx: &App) -> (usize, usize) {
+        (
+            self.windows.len(),
+            self.windows
+                .iter()
+                .map(|(_, pane_host)| pane_host.read(cx).pane_count())
+                .sum(),
+        )
+    }
+
+    pub(crate) fn ordered_window_ids(&self) -> Vec<WindowId> {
+        self.windows
+            .iter()
+            .map(|(window_id, _)| window_id)
+            .collect()
+    }
+
+    /// The (Window, Pane) pair that owns Directory Authority for a freshly
+    /// materialized Workspace: the first Window's initial Pane.
+    pub(crate) fn first_authority_pane(&self, cx: &App) -> Option<(WindowId, PaneId)> {
+        let window_id = self.ordered_window_ids().first().copied()?;
+        let pane_id = self.first_pane_in_layout_order(window_id, cx)?;
+        Some((window_id, pane_id))
+    }
+
+    pub(crate) fn contains_window(&self, window_id: WindowId) -> bool {
+        self.windows.window(window_id).is_some()
+    }
+
+    pub(crate) fn first_pane_in_layout_order(
+        &self,
+        window_id: WindowId,
+        cx: &App,
+    ) -> Option<PaneId> {
+        self.windows
+            .window(window_id)?
+            .read(cx)
+            .first_pane_in_layout_order()
+    }
+
+    pub(crate) fn pane_reported_directory(
+        &self,
+        window_id: WindowId,
+        pane_id: PaneId,
+        cx: &App,
+    ) -> Option<PathBuf> {
+        self.windows
+            .window(window_id)?
+            .read(cx)
+            .pane_reported_directory(pane_id)
+            .map(Path::to_path_buf)
     }
 
     #[cfg(test)]
@@ -353,13 +447,19 @@ impl WindowManager {
     }
 
     pub(crate) fn create_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Err(WorkspaceDirectoryUnavailable) = self.directory_gate.resolve() {
+            cx.emit(WindowManagerEvent::ChildCreationBlocked);
+            cx.notify();
+            return;
+        }
         self.window_menu = None;
         self.window_selector_pressed = None;
         self.sync_terminal_focus_blocker(cx);
         let previous_window = self.windows.active_window().clone();
         let session_factory = self.session_factory.clone();
+        let directory_gate = self.directory_gate.clone();
         let result = self.windows.create_window(|window_id| {
-            Self::create_pane_host(window_id, session_factory, window, cx)
+            Self::create_pane_host(window_id, session_factory, directory_gate, window, cx)
         });
         let window_id = match result {
             Ok(window_id) => window_id,
@@ -468,6 +568,9 @@ impl WindowManager {
                 self.sync_terminal_focus_blocker(cx);
                 debug_assert_eq!(active_window_id, self.windows.active_window_id());
                 self.scroll_active_window_into_view();
+                cx.emit(WindowManagerEvent::WindowClosed {
+                    window_id: closed_window_id,
+                });
                 cx.emit(WindowManagerEvent::PresentationChanged);
                 cx.notify();
             }
@@ -1169,6 +1272,20 @@ mod tests {
         RecordedSessionCommand, TestTerminalSessionFactory, TestTerminalSessionRecords,
     };
     use crate::terminal::{ScreenSnapshot, SessionEvent, SessionExit, TerminalSessionFactory};
+    use crate::ui::workspace_manager::{
+        DynamicWorkspaceDirectorySource, WorkspaceDirectorySource, WorkspaceDirectoryUnavailable,
+    };
+    use std::cell::RefCell;
+
+    /// A directory source whose availability tests control directly.
+    #[derive(Clone)]
+    struct ToggleableDirectoryGate(Rc<RefCell<Option<PathBuf>>>);
+
+    impl WorkspaceDirectorySource for ToggleableDirectoryGate {
+        fn resolve(&self) -> Result<PathBuf, WorkspaceDirectoryUnavailable> {
+            self.0.borrow().clone().ok_or(WorkspaceDirectoryUnavailable)
+        }
+    }
 
     fn window_manager(
         cx: &mut TestAppContext,
@@ -1185,8 +1302,12 @@ mod tests {
             session_factory,
             PathBuf::from("/tmp/spaceterm-window-manager-test"),
         );
-        let (manager, cx) =
-            cx.add_window_view(|window, cx| WindowManager::new(session_factory, window, cx));
+        let directory_gate = DynamicWorkspaceDirectorySource::available(PathBuf::from(
+            "/tmp/spaceterm-window-manager-test",
+        ));
+        let (manager, cx) = cx.add_window_view(|window, cx| {
+            WindowManager::new(session_factory, Rc::new(directory_gate), window, cx)
+        });
         cx.update(|window, cx| {
             window.activate_window();
             manager.update(cx, |manager, cx| manager.focus(window, cx));
@@ -1214,6 +1335,97 @@ mod tests {
         cx.simulate_mouse_down(position, MouseButton::Right, Modifiers::none());
         cx.simulate_mouse_up(position, MouseButton::Right, Modifiers::none());
         cx.run_until_parked();
+    }
+
+    /// A screen snapshot whose Terminal Metadata reports `directory` as the
+    /// Reported Working Directory.
+    fn screen_with_reported_directory(directory: &Path) -> Arc<ScreenSnapshot> {
+        use crate::terminal::metadata::{
+            DirectoryMetadata, DirectoryProvenance, MetadataFreshness, ProgressMetadata,
+            PromptZone, TerminalMetadataSnapshot, TitleMetadata, TitleProvenance,
+        };
+        let mut screen = Arc::unwrap_or_clone(ScreenSnapshot::from_test_parts(
+            Arc::from([]),
+            Default::default(),
+            "",
+        ));
+        screen.metadata = Arc::new(TerminalMetadataSnapshot {
+            revision: 0,
+            freshness: MetadataFreshness::Live,
+            title: TitleMetadata {
+                value: Arc::from(""),
+                provenance: TitleProvenance::Fallback,
+            },
+            directory: DirectoryMetadata {
+                path: Arc::from(directory.to_string_lossy().as_ref()),
+                provenance: DirectoryProvenance::Osc7,
+            },
+            prompt_zone: PromptZone::Unknown,
+            command: None,
+            progress: ProgressMetadata::None,
+        });
+        Arc::new(screen)
+    }
+
+    #[gpui::test]
+    fn window_managers_should_forward_pane_reports_and_close_notifications(
+        cx: &mut TestAppContext,
+    ) {
+        let (manager, records, cx) = window_manager(cx);
+        let forwarded = Rc::new(RefCell::new(Vec::new()));
+        {
+            let forwarded = Rc::clone(&forwarded);
+            manager.update(cx, |_, cx| {
+                cx.subscribe(&manager, move |_, _, event: &WindowManagerEvent, _| {
+                    if matches!(
+                        event,
+                        WindowManagerEvent::PaneReportedDirectoryChanged { .. }
+                            | WindowManagerEvent::PaneClosed { .. }
+                            | WindowManagerEvent::WindowClosed { .. }
+                    ) {
+                        forwarded.borrow_mut().push(*event);
+                    }
+                })
+                .detach();
+            });
+        }
+        cx.update(|window, cx| {
+            manager.update(cx, |manager, cx| manager.create_window(window, cx));
+        });
+        cx.run_until_parked();
+
+        records
+            .event_sender(1)
+            .expect("the initial Window session was not started")
+            .try_send(SessionEvent::Screen(screen_with_reported_directory(
+                Path::new("/tmp/spaceterm-forward-report"),
+            )))
+            .expect("the report must be delivered");
+        cx.run_until_parked();
+
+        records
+            .event_sender(1)
+            .expect("the initial Window session must remain started")
+            .try_send(SessionEvent::Exited(SessionExit::Success))
+            .expect("the exit must be delivered");
+        cx.run_until_parked();
+
+        assert_eq!(
+            *forwarded.borrow(),
+            vec![
+                WindowManagerEvent::PaneReportedDirectoryChanged {
+                    window_id: WindowId::new(1),
+                    pane_id: PaneId::new(1),
+                },
+                WindowManagerEvent::PaneClosed {
+                    window_id: WindowId::new(1),
+                    closed_pane_id: PaneId::new(1),
+                },
+                WindowManagerEvent::WindowClosed {
+                    window_id: WindowId::new(1),
+                },
+            ]
+        );
     }
 
     #[gpui::test]
@@ -1356,6 +1568,66 @@ mod tests {
             )
         });
         assert_eq!(state, (2, WindowId::new(2), Vec::new()));
+    }
+
+    #[gpui::test]
+    fn unavailable_workspace_directory_should_block_window_creation_and_emit_child_creation_blocked(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(crate::ui::init);
+        let records = TestTerminalSessionRecords::default();
+        let session_factory: Rc<dyn TerminalSessionFactory> =
+            Rc::new(TestTerminalSessionFactory::new(records.clone()));
+        let session_factory = WorkspaceTerminalSessionFactory::new(
+            session_factory,
+            PathBuf::from("/tmp/spaceterm-window-manager-test"),
+        );
+        let directory_gate = ToggleableDirectoryGate(Rc::new(RefCell::new(Some(PathBuf::from(
+            "/tmp/spaceterm-window-manager-test",
+        )))));
+        let (manager, cx) = cx.add_window_view(|window, cx| {
+            WindowManager::new(session_factory, Rc::new(directory_gate.clone()), window, cx)
+        });
+        let blocked_events = Rc::new(Cell::new(0));
+        let blocked_events_for_subscription = Rc::clone(&blocked_events);
+        manager.update(cx, |_, cx| {
+            cx.subscribe(&manager, move |_, _, event: &WindowManagerEvent, _| {
+                if matches!(event, WindowManagerEvent::ChildCreationBlocked) {
+                    blocked_events_for_subscription.update(|count| count + 1);
+                }
+            })
+            .detach();
+        });
+        cx.run_until_parked();
+
+        directory_gate.0.borrow_mut().take();
+        cx.update(|window, cx| {
+            manager.update(cx, |manager, cx| manager.create_window(window, cx));
+        });
+        cx.run_until_parked();
+
+        let blocked_state = manager.read_with(cx, |manager, _| {
+            (manager.windows.len(), manager.windows.active_window_id())
+        });
+        assert_eq!(blocked_state, (1, WindowId::new(1)));
+        assert_eq!(blocked_events.get(), 1);
+        assert_eq!(records.starts().len(), 1);
+
+        directory_gate
+            .0
+            .borrow_mut()
+            .replace(PathBuf::from("/tmp/spaceterm-window-manager-test"));
+        cx.update(|window, cx| {
+            manager.update(cx, |manager, cx| manager.create_window(window, cx));
+        });
+        cx.run_until_parked();
+
+        let restored_state = manager.read_with(cx, |manager, _| {
+            (manager.windows.len(), manager.windows.active_window_id())
+        });
+        assert_eq!(restored_state, (2, WindowId::new(2)));
+        assert_eq!(blocked_events.get(), 1);
+        assert_eq!(records.starts().len(), 2);
     }
 
     #[gpui::test]

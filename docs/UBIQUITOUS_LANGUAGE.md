@@ -6,6 +6,12 @@
 | --- | --- | --- |
 | **SpaceTerm** | The macOS terminal application that owns all Workspaces. | tmux client, terminal client |
 | **Workspace** | A named top-level scope containing one or more Windows and a root working directory. | Session, attached session, project |
+| **Workspace Kind** | The immutable classification of a Workspace, either Ad Hoc or Local Project, fixed at creation and never converted. | Project type, workspace mode |
+| **Ad Hoc Workspace** | A Workspace created by New Workspace, a fresh launch, or final replacement; it always begins at HOME and owns a dynamic Workspace Directory. | Scratch session, home workspace |
+| **Local Project Workspace** | A Workspace created through Open Local Project from exactly one selected local directory; it owns an immutable Project Root. | Imported project, opened folder |
+| **Workspace Directory** | The directory every new Window and Pane in the Workspace starts in; dynamic for an Ad Hoc Workspace, permanently the Project Root for a Local Project, and possibly unavailable. | Working directory, cwd |
+| **Directory Authority** | The single Pane whose trusted Reported Working Directory updates an Ad Hoc Workspace's Workspace Directory; it is invisible in chrome and promotes deterministically when it closes. | Authoritative pane UI, cwd watcher |
+| **Project Root** | The exact user-selected directory preserved immutably as a Local Project Workspace's identity anchor. | Project folder, root folder |
 | **Window** | An ordered terminal work area that belongs to exactly one Workspace and contains a Pane Layout. | Tab, session, macOS window |
 | **Pane** | A terminal region that is one leaf of exactly one Window's Pane Layout. | Window, tab, split |
 | **Pane Layout** | The recursive arrangement of Panes and Splits within a Window. | Grid, pane tree |
@@ -68,6 +74,7 @@
 | Term | Definition | Aliases to avoid |
 | --- | --- | --- |
 | **Create Workspace** | Add and activate a new Workspace with its initial Window and Pane. | Start session, attach session |
+| **Open Local Project** | Present the native macOS directory-only picker and open exactly one selected local directory as a Local Project Workspace; canonical filesystem identity deduplicates equivalent selections by activating the existing Workspace while preserving its original display path, and cancellation or an unusable selection leaves the hierarchy unchanged. | Import project, open folder |
 | **Close Workspace** | Remove a Workspace and its owned terminal runtimes, replacing it when it is the last Workspace. | Detach session, delete session |
 | **Create Window** | Add and activate a new Window in the Active Workspace. | New tab, link Window |
 | **Close Window** | Remove a Window and its owned terminal runtimes, escalating through its Workspace when it is the final Window. | Close tab, detach Window |
@@ -113,12 +120,19 @@
 - **Terminal Capability Identity** selects `xterm-spaceterm` only with a discoverable packaged entry and otherwise retains `xterm-256color`; the default **Compatibility Identity** changes only `TERM_PROGRAM`, never SpaceTerm's terminfo, protocol replies, or supported capability set.
 - A **Shell Process** receives no inherited foreign terminal-emulator or multiplexer resource, window, socket, session, or remote-control marker; **Compatibility Identity** cannot bind it to the runtime that launched SpaceTerm.
 - **Terminal Attention** remains scoped to its owning Pane and Window; focus gain or accepted input clears it, while repeated native effects are rate-limited and notifications occur only when SpaceTerm is inactive.
-- A **Reported Working Directory** accepts only a local absolute `file://` report and retains its last valid provenance when a malformed or remote report arrives.
+- A **Reported Working Directory** accepts only a local absolute `file://` report carried by trusted **Terminal Metadata**, retains its last valid provenance when a malformed or remote report arrives, and reaches its **Workspace** only through **Directory Authority** adoption; no process-level inspection observes Shell Process directories.
 - A **Pane** belongs to exactly one **Window** and owns one **Terminal Session**.
 - A **Split** has exactly two child **Pane Layouts**; each child is either another **Split** or a **Pane**.
 - Closing any hierarchy entity closes every **Terminal Session**, **PTY**, and **Shell Process** it owns.
 - Closing the final **Window** closes its **Workspace** when another Workspace remains, or closes the **Operating-System Window** when it is globally final.
 - Explicitly closing the final **Workspace** replaces it; escalation from its final **Window** closes the **Operating-System Window** instead.
+- A **Workspace Kind** is fixed at creation and runtime-only: kinds are never converted, never persisted, and never restored across launches.
+- An **Ad Hoc Workspace** always begins at HOME regardless of current context, while explicitly closing the final **Workspace** replaces it with an Ad Hoc Workspace at HOME.
+- A **Local Project Workspace** keeps every new **Window** and **Pane** inside its **Project Root**; no reported or promoted directory can move its **Workspace Directory**.
+- **Directory Authority** begins as the initial Pane of a Workspace's first Window, survives Split Pane without transfer, promotes to the first remaining Pane in Pane Layout order when its Pane closes, promotes to the root Pane of the first remaining Window when its Window closes, and each promotion immediately adopts the promoted Pane's valid **Reported Working Directory**, retaining the previous **Workspace Directory** otherwise.
+- Only reports accepted from **Directory Authority** replace an Ad Hoc Workspace's dynamic **Workspace Directory**; invalid, remote, missing, and non-directory reports never replace the last valid value.
+- An unavailable **Workspace Directory** keeps owned Terminal Sessions running and fails child creation with an actionable error; availability is revalidated against the filesystem at open and activation, consulted again at every child creation without continuous watching, and clears once later validation succeeds.
+- Automatic **Workspace** naming derives from the **Workspace Directory** basename ("Default" at HOME) and numbers unrenamed duplicates in sidebar order ("Default", "Default 2"); a custom name stops automatic changes without freezing the secondary path, duplicate names are allowed, and clearing a name restores automation.
 - No operation may leave an orphaned **PTY** or **Shell Process**.
 - Active and focused identities always reference entities still owned by their parent.
 

@@ -175,6 +175,7 @@ pub(crate) enum TerminalPaneEvent {
     FocusRequested,
     TitleChanged(SharedString),
     AttentionChanged { unread_count: u32 },
+    ReportedWorkingDirectoryChanged(PathBuf),
     Exited,
 }
 
@@ -280,6 +281,7 @@ pub(crate) struct TerminalPane {
     status: Option<String>,
     fallback_title: SharedString,
     title: SharedString,
+    reported_working_directory: Option<PathBuf>,
     focus_handle: FocusHandle,
     find_focus_handle: FocusHandle,
     find_editor: Option<FindEditor>,
@@ -464,6 +466,7 @@ impl TerminalPane {
             status: None,
             title: fallback_title.clone(),
             fallback_title,
+            reported_working_directory: None,
             focus_handle,
             find_focus_handle,
             find_editor: None,
@@ -1685,6 +1688,16 @@ impl TerminalPane {
                 if self.title.as_ref() != title {
                     self.title = title.into();
                     cx.emit(TerminalPaneEvent::TitleChanged(self.title.clone()));
+                }
+                let reported_working_directory =
+                    PathBuf::from(screen.metadata.directory.path.as_ref());
+                if self.reported_working_directory.as_deref()
+                    != Some(reported_working_directory.as_path())
+                {
+                    self.reported_working_directory = Some(reported_working_directory.clone());
+                    cx.emit(TerminalPaneEvent::ReportedWorkingDirectoryChanged(
+                        reported_working_directory,
+                    ));
                 }
                 let _ = self.render_lifecycle.observe_snapshot(screen.generation);
                 if let Some(observation) = &self.runtime_observation {

@@ -8,7 +8,8 @@ use gpui::{
 
 use crate::terminal::{NativeTerminalSessionFactory, TerminalSessionFactory};
 use crate::ui::{
-    CopySelection, ExportTerminalDiagnostics, FindNext, FindPrevious, OpenTerminalFind,
+    ClosePane, CloseWindow, CloseWorkspace, CopySelection, CreateWindow, CreateWorkspace,
+    ExportTerminalDiagnostics, FindNext, FindPrevious, OpenLocalProject, OpenTerminalFind,
     WorkspaceManager,
 };
 
@@ -55,12 +56,28 @@ pub(crate) fn init(cx: &mut App) {
         async {}
     })
     .detach();
-    cx.set_menus(vec![
+    cx.set_menus(default_menus());
+}
+
+fn default_menus() -> Vec<Menu> {
+    vec![
+        Menu {
+            name: "File".into(),
+            items: vec![
+                MenuItem::action("New Workspace", CreateWorkspace),
+                MenuItem::action("Open Local Project…", OpenLocalProject),
+                MenuItem::action("New Window", CreateWindow),
+                MenuItem::separator(),
+                MenuItem::action("Close Pane", ClosePane),
+                MenuItem::action("Close Window", CloseWindow),
+                MenuItem::action("Close Workspace", CloseWorkspace),
+                MenuItem::separator(),
+                MenuItem::action("Export Terminal Diagnostics…", ExportTerminalDiagnostics),
+            ],
+        },
         Menu {
             name: "SpaceTerm".into(),
             items: vec![
-                MenuItem::action("Export Terminal Diagnostics…", ExportTerminalDiagnostics),
-                MenuItem::separator(),
                 MenuItem::os_submenu("Services", SystemMenuType::Services),
                 MenuItem::separator(),
                 MenuItem::action("Hide SpaceTerm", HideApplication),
@@ -92,7 +109,7 @@ pub(crate) fn init(cx: &mut App) {
                 MenuItem::action("Toggle Full Screen", ToggleFullScreen),
             ],
         },
-    ]);
+    ]
 }
 
 fn minimize_active_window(_: &MinimizeWindow, cx: &mut App) {
@@ -184,6 +201,91 @@ mod tests {
             ("ctrl-cmd-f", ToggleFullScreen.name()),
             ("fn-f", ToggleFullScreen.name()),
             ("cmd-c", CopyTerminalSelection.name()),
+        ];
+        let actual = cx.update(|cx| {
+            expected
+                .iter()
+                .map(|(shortcut, _)| {
+                    let keystroke = Keystroke::parse(shortcut).unwrap_or_else(|error| {
+                        panic!("invalid test shortcut {shortcut}: {error}")
+                    });
+                    let bindings = cx.all_bindings_for_input(&[keystroke]);
+                    (
+                        *shortcut,
+                        bindings
+                            .last()
+                            .map(|binding| binding.action().name())
+                            .unwrap_or(""),
+                    )
+                })
+                .collect::<Vec<_>>()
+        });
+
+        assert_eq!(actual.as_slice(), expected);
+    }
+
+    #[test]
+    fn default_menus_should_present_the_standard_file_menu() {
+        let menus = default_menus();
+        let names = menus
+            .iter()
+            .map(|menu| menu.name.to_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(names, ["File", "SpaceTerm", "Edit", "Window"]);
+
+        let file_items = menus[0]
+            .items
+            .iter()
+            .map(|item| match item {
+                MenuItem::Action { name, action, .. } => {
+                    Some((name.to_string(), action.name().to_owned()))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let expected_file_items = vec![
+            Some((
+                "New Workspace".to_owned(),
+                CreateWorkspace.name().to_owned(),
+            )),
+            Some((
+                "Open Local Project…".to_owned(),
+                OpenLocalProject.name().to_owned(),
+            )),
+            Some(("New Window".to_owned(), CreateWindow.name().to_owned())),
+            None,
+            Some(("Close Pane".to_owned(), ClosePane.name().to_owned())),
+            Some(("Close Window".to_owned(), CloseWindow.name().to_owned())),
+            Some((
+                "Close Workspace".to_owned(),
+                CloseWorkspace.name().to_owned(),
+            )),
+            None,
+            Some((
+                "Export Terminal Diagnostics…".to_owned(),
+                ExportTerminalDiagnostics.name().to_owned(),
+            )),
+        ];
+        assert_eq!(file_items, expected_file_items);
+        assert!(matches!(menus[0].items[3], MenuItem::Separator));
+        assert!(matches!(menus[0].items[7], MenuItem::Separator));
+
+        let export_is_absent_from_the_application_menu = !menus[1].items.iter().any(|item| {
+            matches!(item, MenuItem::Action { name, .. } if name.as_ref() == "Export Terminal Diagnostics…")
+        });
+        assert!(export_is_absent_from_the_application_menu);
+    }
+
+    #[gpui::test]
+    fn file_menu_shortcuts_should_remain_bound_to_their_actions(cx: &mut TestAppContext) {
+        cx.update(crate::ui::init);
+        cx.update(init);
+        let expected = [
+            ("cmd-n", CreateWorkspace.name()),
+            ("cmd-o", OpenLocalProject.name()),
+            ("cmd-t", CreateWindow.name()),
+            ("cmd-w", ClosePane.name()),
+            ("cmd-shift-w", CloseWindow.name()),
         ];
         let actual = cx.update(|cx| {
             expected
