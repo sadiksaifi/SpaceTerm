@@ -4,6 +4,7 @@
 //! colors and surrounding chrome from its canonical theme.
 
 mod button;
+mod command_palette;
 mod menu;
 mod middle_truncated_text;
 mod overlay_scrollbar;
@@ -15,6 +16,12 @@ pub use button::{
     Button, ButtonActivation, ButtonActivationSource, ButtonMetrics, ButtonPaint, ButtonRole,
     ButtonShape, ButtonSize, ButtonSizes, ButtonTheme, ButtonVariant, ButtonVariantStyle,
     ButtonVariants, IconButton,
+};
+pub use command_palette::{
+    CommandPalette, CommandPaletteAccessory, CommandPaletteActivation,
+    CommandPaletteActivationSource, CommandPaletteCloseReason, CommandPaletteEvent,
+    CommandPaletteGeneration, CommandPaletteItem, CommandPaletteLifecycleEvent,
+    CommandPaletteMetrics, CommandPalettePaint, CommandPaletteQuery, CommandPaletteTheme,
 };
 pub use menu::{
     ContextMenu, ContextMenuOpenRequest, Menu, MenuActivation, MenuActivationSource, MenuAlignment,
@@ -34,10 +41,13 @@ pub fn init(
     button_theme: ButtonTheme,
     scrollbar_theme: ScrollbarTheme,
     menu_theme: MenuTheme,
+    command_palette_theme: CommandPaletteTheme,
 ) {
     cx.set_global(button_theme);
     cx.set_global(scrollbar_theme);
     cx.set_global(menu_theme);
+    cx.set_global(command_palette_theme);
     text_input::init(cx);
     menu::init(cx);
+    command_palette::init(cx);
 }

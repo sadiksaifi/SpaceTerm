@@ -1,4 +1,5 @@
 mod button_theme;
+mod command_palette_theme;
 mod menu_theme;
 mod pane_action_menu;
 mod pane_host;
@@ -114,6 +115,7 @@ pub(crate) fn init(cx: &mut App) {
         button_theme::theme(),
         scrollbar_theme::theme(),
         menu_theme::theme(),
+        command_palette_theme::theme(),
     );
     cx.bind_keys([
         KeyBinding::new("cmd-n", CreateWorkspace, None),
@@ -224,6 +226,7 @@ mod tests {
             cx.has_global::<spaceterm_ui::ButtonTheme>()
                 && cx.has_global::<spaceterm_ui::ScrollbarTheme>()
                 && cx.has_global::<spaceterm_ui::MenuTheme>()
+                && cx.has_global::<spaceterm_ui::CommandPaletteTheme>()
         }));
     }
 

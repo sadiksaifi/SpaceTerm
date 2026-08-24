@@ -88,6 +88,13 @@ paint and metric catalog, then owns surrounding chrome, product policy, and reac
 events. Application-specific composition remains in `src/ui`; controls move into the library only
 when their behavior has reusable depth.
 
+The internal library's Command Palette is an entity-backed, Operating-System Window-owned
+transient control. It owns query editing, static semantic matching, stable typed selection,
+keyboard and pointer navigation, focus restoration, and lifecycle events while callers own item
+identity, asynchronous result production, and product actions. Its rows use fixed leading, text,
+and trailing semantic slots rather than caller-painted layouts, and the application installs its
+Vague Pro presentation catalog.
+
 ### Overlay Scrollbar
 
 The Overlay Scrollbar is a compact vertical control that presents scroll position without reserving

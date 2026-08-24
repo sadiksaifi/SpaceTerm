@@ -1,6 +1,7 @@
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum TerminalFocusBlocker {
     Sidebar,
+    CommandPalette,
     RenameField,
     ContextMenu,
     PaneMenu,
@@ -120,6 +121,7 @@ mod tests {
     fn every_temporary_ui_owner_blocks_terminal_input_focus() {
         let blockers = [
             TerminalFocusBlocker::Sidebar,
+            TerminalFocusBlocker::CommandPalette,
             TerminalFocusBlocker::RenameField,
             TerminalFocusBlocker::ContextMenu,
             TerminalFocusBlocker::PaneMenu,

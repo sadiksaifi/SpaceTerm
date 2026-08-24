@@ -1461,6 +1461,38 @@ fn release_window(owner: &WeakEntity<MenuState>, window_id: WindowId, cx: &mut A
     });
 }
 
+struct MenuReplacement {
+    lifecycle: Option<MenuLifecycleHandler>,
+    restore_focus: Option<WeakFocusHandle>,
+}
+
+pub(crate) struct MenuReplacementFocus(pub(crate) Option<WeakFocusHandle>);
+
+pub(crate) fn dismiss_active_menu_for_replacement(
+    window: &Window,
+    cx: &mut App,
+) -> Option<MenuReplacementFocus> {
+    if !cx.has_global::<MenuCoordinator>() {
+        return None;
+    }
+    let window_id = window.window_handle().window_id();
+    let owner = cx
+        .global::<MenuCoordinator>()
+        .owners
+        .get(&window_id)
+        .cloned()?;
+    let replacement = owner
+        .update(cx, |state, cx| state.replace_without_lifecycle(cx))
+        .ok()
+        .flatten();
+    release_window(&owner, window_id, cx);
+    let replacement = replacement?;
+    if let Some(handler) = replacement.lifecycle {
+        handler(&MenuLifecycleEvent::Closed(MenuCloseReason::Replaced), cx);
+    }
+    Some(MenuReplacementFocus(replacement.restore_focus))
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum OpenDirection {
     First,
@@ -1709,7 +1741,7 @@ impl MenuState {
     fn replace_without_lifecycle(
         &mut self,
         cx: &mut gpui::Context<Self>,
-    ) -> Option<MenuLifecycleHandler> {
+    ) -> Option<MenuReplacement> {
         if !self.open {
             return None;
         }
@@ -1725,9 +1757,12 @@ impl MenuState {
         self.invalidate_submenu_task();
         self.pointer_button = None;
         self.pointer_press = None;
-        self.restore_focus = None;
+        let restore_focus = self.restore_focus.take();
         cx.notify();
-        self.lifecycle.clone()
+        Some(MenuReplacement {
+            lifecycle: self.lifecycle.clone(),
+            restore_focus,
+        })
     }
 
     fn emit_lifecycle(&self, event: MenuLifecycleEvent, cx: &mut App) {
@@ -2080,15 +2115,21 @@ fn open_menu(
         return;
     }
     let previous = reserve_window(&entity, window, cx);
-    let replaced_lifecycle = previous.and_then(|previous| {
+    let replacement = previous.and_then(|previous| {
         previous
             .update(cx, |state, cx| state.replace_without_lifecycle(cx))
             .ok()
             .flatten()
     });
-    let opened = entity.update(cx, |state, cx| state.open(anchor, direction, window, cx));
+    let opened = entity.update(cx, |state, cx| {
+        let opened = state.open(anchor, direction, window, cx);
+        if opened && let Some(replacement) = &replacement {
+            state.restore_focus = replacement.restore_focus.clone();
+        }
+        opened
+    });
     if opened {
-        if let Some(handler) = replaced_lifecycle {
+        if let Some(handler) = replacement.and_then(|replacement| replacement.lifecycle) {
             handler(&MenuLifecycleEvent::Closed(MenuCloseReason::Replaced), cx);
         }
     } else {
@@ -3446,6 +3487,33 @@ mod tests {
         cx.simulate_keystrokes("space");
         cx.run_until_parked();
         assert_eq!(lifecycle.borrow().last(), Some(&MenuLifecycleEvent::Opened),);
+    }
+
+    #[gpui::test]
+    fn explicit_replacement_should_close_the_window_menu_without_restoring_focus(
+        cx: &mut TestAppContext,
+    ) {
+        let (root, lifecycle, _, cx) = lifecycle_window(cx);
+        let focus = root.read_with(cx, |root, _| root.other_focus.clone());
+        cx.update(|window, _| focus.focus(window));
+        let trigger = cx
+            .debug_bounds("lifecycle-trigger")
+            .unwrap_or_else(|| panic!("lifecycle trigger not painted"));
+        cx.simulate_click(trigger.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        let dismissed = cx.update(|window, cx| dismiss_active_menu_for_replacement(window, cx));
+        cx.run_until_parked();
+
+        assert!(dismissed.is_some());
+        assert!(!cx.update(|window, _| focus.is_focused(window)));
+        assert_eq!(
+            lifecycle.borrow().as_slice(),
+            [
+                MenuLifecycleEvent::Opened,
+                MenuLifecycleEvent::Closed(MenuCloseReason::Replaced),
+            ]
+        );
     }
 
     #[gpui::test]
