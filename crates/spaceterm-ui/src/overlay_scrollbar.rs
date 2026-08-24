@@ -2,12 +2,10 @@ use std::time::Duration;
 
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, Context, DispatchPhase, Empty, EventEmitter, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, Pixels, Render, SharedString, Task, Window, canvas, div, px,
-    rgba,
+    AnyElement, Context, DispatchPhase, Empty, EventEmitter, Global, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, Pixels, Render, Rgba, SharedString, Task, Window, canvas, div,
+    px,
 };
-
-use crate::theme::ACTIVE_THEME;
 
 const THUMB_WIDTH: f32 = 5.0;
 const HITBOX_HORIZONTAL_PADDING: f32 = 4.0;
@@ -16,8 +14,22 @@ const THUMB_RIGHT_INSET: f32 = 4.0;
 const MINIMUM_THUMB_HEIGHT: f32 = 24.0;
 const OVERLAY_SCROLLBAR_HIDE_DELAY: Duration = Duration::from_secs(2);
 
-pub(super) trait ScrollOffset: Copy + std::fmt::Debug + PartialEq + 'static {
+mod sealed {
+    pub trait Sealed {}
+
+    impl Sealed for u64 {}
+    impl Sealed for f32 {}
+}
+
+/// An offset unit supported by [`OverlayScrollbar`].
+///
+/// The sealed implementations preserve exact endpoint and rounding behavior for row-based `u64`
+/// offsets and continuous pixel-based `f32` offsets.
+pub trait ScrollOffset: sealed::Sealed + Copy + std::fmt::Debug + PartialEq + 'static {
+    #[doc(hidden)]
     fn as_f64(self) -> f64;
+
+    #[doc(hidden)]
     fn for_progress(maximum: Self, progress: f64) -> Self;
 }
 
@@ -47,14 +59,18 @@ impl ScrollOffset for f32 {
     }
 }
 
+/// An interaction emitted by an [`OverlayScrollbar`].
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(super) enum OverlayScrollbarEvent<O> {
+pub enum OverlayScrollbarEvent<O> {
+    /// The user pressed the scrollbar thumb and began an interaction.
     InteractionStarted,
+    /// The dragged thumb requested a new content offset.
     OffsetRequested(O),
 }
 
+/// A snapshot of one vertical scroll range in the caller's native offset unit.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(super) struct ScrollMetrics<O> {
+pub struct ScrollMetrics<O> {
     track_top_px: f32,
     track_height_px: f32,
     viewport_fraction: f64,
@@ -63,7 +79,10 @@ pub(super) struct ScrollMetrics<O> {
 }
 
 impl ScrollMetrics<u64> {
-    pub(super) fn for_rows(
+    /// Adapts a row-based scroll range to scrollbar metrics.
+    ///
+    /// Returns `None` when the track is invalid, no rows are visible, or all rows fit.
+    pub fn for_rows(
         track_top_px: f32,
         track_height_px: f32,
         total_rows: u64,
@@ -89,7 +108,10 @@ impl ScrollMetrics<u64> {
 }
 
 impl ScrollMetrics<f32> {
-    pub(super) fn for_pixels(
+    /// Adapts a pixel-based scroll range to scrollbar metrics.
+    ///
+    /// Returns `None` when the track or offsets are invalid, or no scrolling is possible.
+    pub fn for_pixels(
         track_top_px: f32,
         track_height_px: f32,
         maximum_offset_px: f32,
@@ -173,6 +195,35 @@ impl ThumbGeometry {
     }
 }
 
+/// Application-owned colors installed for every overlay scrollbar.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ScrollbarTheme {
+    thumb: Rgba,
+    hovered_thumb: Rgba,
+    dragging_thumb: Rgba,
+}
+
+impl ScrollbarTheme {
+    /// Creates scrollbar paint for the normal, hovered, and dragging states.
+    pub fn new(thumb: Rgba, hovered_thumb: Rgba, dragging_thumb: Rgba) -> Self {
+        Self {
+            thumb,
+            hovered_thumb,
+            dragging_thumb,
+        }
+    }
+
+    fn resolve(self, dragging: bool) -> (Rgba, Rgba) {
+        if dragging {
+            (self.dragging_thumb, self.dragging_thumb)
+        } else {
+            (self.thumb, self.hovered_thumb)
+        }
+    }
+}
+
+impl Global for ScrollbarTheme {}
+
 #[derive(Clone, Copy, Debug)]
 struct ScrollbarDrag<O> {
     grab_fraction: f64,
@@ -183,7 +234,12 @@ struct ScrollbarDrag<O> {
     reset_on_finish: bool,
 }
 
-pub(super) struct OverlayScrollbar<O: ScrollOffset> {
+/// A compact vertical scrollbar that overlays content without reserving layout space.
+///
+/// The control owns thumb geometry, transient visibility, hover retention, drag capture, and
+/// offset mapping. Callers adapt their scroll model through [`ScrollMetrics`] and apply requested
+/// offsets received through [`OverlayScrollbarEvent`].
+pub struct OverlayScrollbar<O: ScrollOffset> {
     name: &'static str,
     metrics: Option<ScrollMetrics<O>>,
     visible: bool,
@@ -194,7 +250,8 @@ pub(super) struct OverlayScrollbar<O: ScrollOffset> {
 }
 
 impl<O: ScrollOffset> OverlayScrollbar<O> {
-    pub(super) fn new(name: &'static str) -> Self {
+    /// Creates a hidden scrollbar with a stable name used for element identity and diagnostics.
+    pub fn new(name: &'static str) -> Self {
         Self {
             name,
             metrics: None,
@@ -206,11 +263,13 @@ impl<O: ScrollOffset> OverlayScrollbar<O> {
         }
     }
 
-    pub(super) fn sync(&mut self, metrics: Option<ScrollMetrics<O>>, cx: &mut Context<Self>) {
+    /// Synchronizes the scroll range without changing transient visibility.
+    pub fn sync(&mut self, metrics: Option<ScrollMetrics<O>>, cx: &mut Context<Self>) {
         self.set_metrics(metrics, cx);
     }
 
-    pub(super) fn reveal(&mut self, metrics: Option<ScrollMetrics<O>>, cx: &mut Context<Self>) {
+    /// Synchronizes the scroll range and reveals the thumb until the hide delay elapses.
+    pub fn reveal(&mut self, metrics: Option<ScrollMetrics<O>>, cx: &mut Context<Self>) {
         self.set_metrics(metrics, cx);
         self.reveal_current(cx);
     }
@@ -262,7 +321,8 @@ impl<O: ScrollOffset> OverlayScrollbar<O> {
         cx.notify();
     }
 
-    pub(super) fn reset(&mut self, cx: &mut Context<Self>) {
+    /// Clears metrics, interaction state, and transient visibility.
+    pub fn reset(&mut self, cx: &mut Context<Self>) {
         let had_metrics = self.metrics.take().is_some();
         let had_drag = self.drag.take().is_some();
         let changed = had_metrics || self.visible || self.hovered || had_drag;
@@ -418,16 +478,7 @@ impl<O: ScrollOffset> OverlayScrollbar<O> {
         let thumb_id: SharedString = format!("{}-thumb", self.name).into();
         let hitbox_id: SharedString = format!("{}-thumb-hitbox", self.name).into();
         let dragging = self.drag.is_some();
-        let thumb_color = if dragging {
-            ACTIVE_THEME.icon
-        } else {
-            ACTIVE_THEME.scrollbar_thumb_background
-        };
-        let hover_color = if dragging {
-            ACTIVE_THEME.icon
-        } else {
-            ACTIVE_THEME.icon_accent
-        };
+        let (thumb_color, hover_color) = cx.global::<ScrollbarTheme>().resolve(dragging);
         let group = thumb_id.clone();
         let hover_group = group.clone();
         let thumb_debug = thumb_id.clone();
@@ -458,10 +509,8 @@ impl<O: ScrollOffset> OverlayScrollbar<O> {
                     .w(px(THUMB_WIDTH))
                     .h_full()
                     .rounded(px(THUMB_WIDTH / 2.0))
-                    .bg(rgba(thumb_color.rgba_hex()))
-                    .group_hover(hover_group, move |thumb| {
-                        thumb.bg(rgba(hover_color.rgba_hex()))
-                    }),
+                    .bg(thumb_color)
+                    .group_hover(hover_group, move |thumb| thumb.bg(hover_color)),
             )
             .child(
                 canvas(
@@ -526,9 +575,20 @@ impl<O: ScrollOffset> Render for OverlayScrollbar<O> {
 
 #[cfg(test)]
 mod tests {
-    use gpui::TestAppContext;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    use gpui::{Modifiers, TestAppContext, rgba};
 
     use super::*;
+
+    fn test_theme() -> ScrollbarTheme {
+        ScrollbarTheme::new(
+            rgba(0x33_37_38_78),
+            rgba(0x6e_94_b2_ff),
+            rgba(0xcd_cd_cd_ff),
+        )
+    }
 
     #[test]
     fn row_metrics_should_map_top_middle_and_bottom_geometry() {
@@ -782,6 +842,7 @@ mod tests {
 
     #[gpui::test]
     fn hover_should_retain_visibility_until_the_pointer_leaves(cx: &mut TestAppContext) {
+        cx.set_global(test_theme());
         let (scrollbar, cx) =
             cx.add_window_view(|_, _| OverlayScrollbar::<f32>::new("test-scrollbar"));
         let metrics = ScrollMetrics::for_pixels(0.0, 200.0, 800.0, 0.0);
@@ -810,5 +871,43 @@ mod tests {
         assert!(scrollbar.read_with(cx, |scrollbar, _| {
             !scrollbar.visible && !scrollbar.hovered
         }));
+    }
+
+    #[gpui::test]
+    fn drag_should_emit_interaction_before_the_mapped_offset(cx: &mut TestAppContext) {
+        cx.set_global(test_theme());
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let (scrollbar, cx) =
+            cx.add_window_view(|_, _| OverlayScrollbar::<u64>::new("test-scrollbar"));
+        let recorded_events = Rc::clone(&events);
+        scrollbar.update(cx, |_, cx| {
+            cx.subscribe(&scrollbar, move |_, _, event, _| {
+                recorded_events.borrow_mut().push(*event);
+            })
+            .detach();
+        });
+        scrollbar.update(cx, |scrollbar, cx| {
+            scrollbar.reveal(ScrollMetrics::for_rows(0.0, 200.0, 100, 20, 0), cx);
+        });
+        cx.run_until_parked();
+
+        let thumb = cx
+            .debug_bounds("test-scrollbar-thumb-hitbox")
+            .expect("the scrollbar hitbox was not rendered");
+        let start = thumb.center();
+        let destination = gpui::point(start.x, start.y + px(80.0));
+        cx.simulate_mouse_move(start, None, Modifiers::none());
+        cx.simulate_mouse_down(start, MouseButton::Left, Modifiers::none());
+        cx.simulate_mouse_move(destination, MouseButton::Left, Modifiers::none());
+        cx.simulate_mouse_up(destination, MouseButton::Left, Modifiers::none());
+        cx.run_until_parked();
+
+        assert_eq!(
+            events.borrow().as_slice(),
+            [
+                OverlayScrollbarEvent::InteractionStarted,
+                OverlayScrollbarEvent::OffsetRequested(40),
+            ]
+        );
     }
 }

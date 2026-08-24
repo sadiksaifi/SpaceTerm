@@ -11,12 +11,12 @@ use gpui::{
 };
 use gpui_symbols::{Icon, RenderingMode, SymbolWeight};
 use spaceterm_ui::{
-    Button, ButtonShape, ButtonSize, ButtonVariant, IconButton, MiddleTruncatedText, TextInput,
-    TextInputEvent, TextInputStyle,
+    Button, ButtonShape, ButtonSize, ButtonVariant, IconButton, MiddleTruncatedText,
+    OverlayScrollbar, OverlayScrollbarEvent, ScrollMetrics, TextInput, TextInputEvent,
+    TextInputStyle,
 };
 
 use super::button_theme;
-use super::overlay_scrollbar::{OverlayScrollbar, OverlayScrollbarEvent, ScrollMetrics};
 use super::terminal_focus::TerminalFocusBlocker;
 use super::{
     ActivateWindow1, ActivateWindow2, ActivateWindow3, ActivateWindow4, ActivateWindow5,
