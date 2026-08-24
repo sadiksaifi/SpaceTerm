@@ -2139,9 +2139,9 @@ mod tests {
         assert_eq!(
             (first_row_height, last_row_height, menu_size),
             (
-                Some(px(28.0)),
-                Some(px(28.0)),
-                Some(size(px(248.0), px(125.0)))
+                Some(px(26.0)),
+                Some(px(26.0)),
+                Some(size(px(240.0), px(119.0)))
             )
         );
     }

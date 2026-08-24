@@ -227,13 +227,13 @@ pub struct MenuPlacementConfig {
 }
 
 impl MenuPlacementConfig {
-    /// Creates placement with a four-pixel trigger offset and eight-pixel viewport margin.
+    /// Creates placement with a four-pixel trigger offset and twelve-pixel viewport margin.
     pub fn new(placement: MenuPlacement, alignment: MenuAlignment) -> Self {
         Self {
             placement,
             alignment,
             offset: px(4.0),
-            viewport_margin: px(8.0),
+            viewport_margin: px(12.0),
         }
     }
 
@@ -546,6 +546,8 @@ impl<A> MenuRadioOption<A> {
     }
 
     /// Adds a leading icon built with the resolved row foreground color.
+    ///
+    /// The selected radio mark replaces the icon within the shared leading slot.
     pub fn icon(mut self, build: impl Fn(Rgba) -> AnyElement + 'static) -> Self {
         self.item.icon = Some(Rc::new(build));
         self
@@ -696,6 +698,8 @@ impl<A> MenuEntry<A> {
     }
 
     /// Adds a leading icon built with the resolved row foreground color.
+    ///
+    /// A selected checkbox or radio mark replaces the icon within the shared leading slot.
     pub fn icon(mut self, build: impl Fn(Rgba) -> AnyElement + 'static) -> Self {
         match &mut self.kind {
             MenuEntryKind::Item(item) => item.icon = Some(Rc::new(build)),
@@ -853,6 +857,8 @@ impl<T> PickerOption<T> {
     }
 
     /// Adds a leading icon built with the resolved row foreground color.
+    ///
+    /// The selected option mark replaces the icon within the shared leading slot.
     pub fn icon(mut self, build: impl Fn(Rgba) -> AnyElement + 'static) -> Self {
         self.icon = Some(Rc::new(build));
         self
@@ -2304,7 +2310,7 @@ fn render_panel(
 ) -> AnyElement {
     let panel_selector: SharedString = format!("menu-panel-{depth}").into();
     let panel_debug_selector = panel_selector.clone();
-    let mut panel = div()
+    let panel = div()
         .id(panel_selector)
         .debug_selector(move || panel_debug_selector.to_string())
         .absolute()
@@ -2312,33 +2318,43 @@ fn render_panel(
         .top(bounds.top())
         .w(bounds.size.width)
         .h(bounds.size.height)
-        .py(style.metrics.panel_padding)
-        .overflow_y_scroll()
+        .overflow_hidden()
         .rounded(style.metrics.corner_radius)
+        .shadow_md()
         .border(style.metrics.border_width)
         .border_color(style.paint.border)
         .bg(style.paint.background)
         .text_size(style.metrics.font_size)
         .block_mouse_except_scroll()
         .cursor_default();
+    let mut content = div()
+        .id(("menu-panel-scroll", depth))
+        .absolute()
+        .top(style.metrics.panel_padding)
+        .bottom(style.metrics.panel_padding)
+        .left_0()
+        .right_0()
+        .overflow_y_scroll();
 
     for (index, entry) in entries.into_iter().enumerate() {
         match entry.kind {
             InternalEntryKind::Separator => {
-                panel = panel.child(
+                content = content.child(
                     div()
                         .h(style.metrics.separator_height)
-                        .px(style.metrics.horizontal_padding)
+                        .pl(separator_leading_inset(style.metrics))
+                        .pr(style.metrics.horizontal_padding + style.metrics.panel_padding)
                         .flex()
                         .items_center()
                         .child(div().h(px(1.0)).w_full().bg(style.paint.separator)),
                 );
             }
             InternalEntryKind::Heading(label) => {
-                panel = panel.child(
+                content = content.child(
                     div()
                         .h(style.metrics.section_height)
-                        .px(style.metrics.horizontal_padding)
+                        .pl(separator_leading_inset(style.metrics))
+                        .pr(style.metrics.horizontal_padding + style.metrics.panel_padding)
                         .flex()
                         .items_center()
                         .text_color(style.paint.muted)
@@ -2356,7 +2372,7 @@ fn render_panel(
                 debug_selector,
                 activate,
             } => {
-                panel = panel.child(render_row(
+                content = content.child(render_row(
                     state.clone(),
                     depth,
                     index,
@@ -2382,7 +2398,7 @@ fn render_panel(
                 debug_selector,
                 ..
             } => {
-                panel = panel.child(render_row(
+                content = content.child(render_row(
                     state.clone(),
                     depth,
                     index,
@@ -2401,7 +2417,7 @@ fn render_panel(
             }
         }
     }
-    panel.into_any_element()
+    panel.child(content).into_any_element()
 }
 
 #[expect(
@@ -2424,15 +2440,9 @@ fn render_row(
     highlighted: bool,
     style: MenuStyle,
 ) -> AnyElement {
-    let foreground = if disabled {
-        style.paint.disabled
-    } else if highlighted {
-        style.paint.selected_foreground
-    } else if destructive {
-        style.paint.destructive
-    } else {
-        style.paint.foreground
-    };
+    let foreground = row_foreground(style.paint, disabled, destructive, highlighted);
+    let secondary_foreground =
+        row_secondary_foreground(style.paint, disabled, destructive, highlighted);
     let hover_state = state.clone();
     let pointer_state = state;
     let logical_name = label.clone();
@@ -2441,10 +2451,12 @@ fn render_row(
         .debug_selector(move || debug_selector.unwrap_or_else(|| logical_name.to_string()))
         .relative()
         .h(style.metrics.row_height)
+        .mx(style.metrics.panel_padding)
         .px(style.metrics.horizontal_padding)
         .flex()
         .items_center()
         .gap(style.metrics.gap)
+        .rounded(row_corner_radius(style.metrics))
         .text_color(foreground)
         .cursor_default()
         .when(highlighted, |row| row.bg(style.paint.selected_background))
@@ -2455,49 +2467,30 @@ fn render_row(
                 });
             })
         });
-    let indicator = match mark {
-        EntryMark::Checkbox(true) => "✓",
-        EntryMark::Radio { selected: true, .. } => "●",
-        _ => "",
-    };
+    let mut leading = div()
+        .w(style.metrics.indicator_width)
+        .flex_shrink_0()
+        .flex()
+        .items_center()
+        .justify_center();
+    if let Some(indicator) = mark_indicator(mark) {
+        leading = leading.child(indicator);
+    } else if let Some(icon) = icon {
+        leading = leading.child(icon(foreground));
+    }
     row = row
-        .child(
-            div()
-                .w(style.metrics.indicator_width)
-                .flex_shrink_0()
-                .child(indicator),
-        )
-        .when_some(icon, |row, icon| {
-            row.child(
-                div()
-                    .w(style.metrics.indicator_width)
-                    .flex_shrink_0()
-                    .child(icon(foreground)),
-            )
-        })
+        .child(leading)
         .child(div().min_w_0().flex_grow().truncate().child(label))
         .when_some(shortcut, |row, shortcut| {
             row.child(
                 div()
                     .text_size(style.metrics.shortcut_font_size)
-                    .text_color(if disabled {
-                        style.paint.disabled
-                    } else {
-                        style.paint.muted
-                    })
+                    .text_color(secondary_foreground)
                     .child(shortcut),
             )
         })
         .when(submenu, |row| {
-            row.child(
-                div()
-                    .text_color(if disabled {
-                        style.paint.disabled
-                    } else {
-                        style.paint.muted
-                    })
-                    .child("›"),
-            )
+            row.child(div().text_color(secondary_foreground).child("›"))
         });
     if !disabled {
         let down_state = pointer_state.clone();
@@ -2558,6 +2551,55 @@ fn render_row(
         row = row.child(pointer_tracker);
     }
     row.into_any_element()
+}
+
+fn mark_indicator(mark: EntryMark) -> Option<&'static str> {
+    match mark {
+        EntryMark::None => None,
+        EntryMark::Checkbox(true) => Some("✓"),
+        EntryMark::Checkbox(false) => None,
+        EntryMark::Radio { selected: true, .. } => Some("●"),
+        EntryMark::Radio {
+            selected: false, ..
+        } => None,
+    }
+}
+
+fn row_foreground(paint: MenuPaint, disabled: bool, destructive: bool, highlighted: bool) -> Rgba {
+    if disabled {
+        paint.disabled
+    } else if destructive {
+        paint.destructive
+    } else if highlighted {
+        paint.selected_foreground
+    } else {
+        paint.foreground
+    }
+}
+
+fn row_secondary_foreground(
+    paint: MenuPaint,
+    disabled: bool,
+    destructive: bool,
+    highlighted: bool,
+) -> Rgba {
+    if disabled {
+        paint.disabled
+    } else if destructive {
+        paint.destructive
+    } else if highlighted {
+        paint.selected_foreground
+    } else {
+        paint.muted
+    }
+}
+
+fn row_corner_radius(metrics: MenuMetrics) -> Pixels {
+    (metrics.corner_radius - metrics.panel_padding).max(px(0.0))
+}
+
+fn separator_leading_inset(metrics: MenuMetrics) -> Pixels {
+    metrics.panel_padding + metrics.horizontal_padding + metrics.indicator_width + metrics.gap
 }
 
 fn panel_size(entries: &[InternalEntry], metrics: MenuMetrics) -> gpui::Size<Pixels> {
@@ -2755,6 +2797,11 @@ mod tests {
     }
 
     #[test]
+    fn default_placement_margin_should_preserve_the_panel_shadow() {
+        assert_eq!(MenuPlacementConfig::default().viewport_margin, px(12.0));
+    }
+
+    #[test]
     fn root_placement_should_flip_above_when_below_overflows() {
         let anchor = Bounds::new(point(px(20.0), px(170.0)), size(px(40.0), px(20.0)));
         let placed = place_root(
@@ -2928,6 +2975,55 @@ mod tests {
             px(220.0)
         );
         assert_eq!(theme.resolve(MenuSize::Wide).metrics.panel_width, px(248.0));
+    }
+
+    #[test]
+    fn rows_should_use_one_leading_slot_and_leave_unselected_icons_visible() {
+        assert_eq!(mark_indicator(EntryMark::None), None);
+        assert_eq!(mark_indicator(EntryMark::Checkbox(false)), None);
+        assert_eq!(mark_indicator(EntryMark::Checkbox(true)), Some("✓"));
+        assert_eq!(
+            mark_indicator(EntryMark::Radio {
+                selected: false,
+                index: 0,
+            }),
+            None
+        );
+        assert_eq!(
+            mark_indicator(EntryMark::Radio {
+                selected: true,
+                index: 0,
+            }),
+            Some("●")
+        );
+    }
+
+    #[test]
+    fn highlighted_destructive_rows_should_preserve_danger_color() {
+        let paint = test_theme().paint;
+
+        assert_eq!(row_foreground(paint, false, true, true), paint.destructive);
+        assert_eq!(
+            row_secondary_foreground(paint, false, true, true),
+            paint.destructive
+        );
+        assert_eq!(
+            row_secondary_foreground(paint, false, false, true),
+            paint.selected_foreground
+        );
+    }
+
+    #[test]
+    fn row_and_separator_geometry_should_follow_the_panel_content_grid() {
+        let metrics = MenuMetrics::new(px(196.0), px(26.0))
+            .horizontal_padding(px(6.0))
+            .indicator_width(px(16.0))
+            .gap(px(6.0))
+            .corner_radius(px(8.0))
+            .panel_spacing(px(3.0), px(2.0));
+
+        assert_eq!(row_corner_radius(metrics), px(5.0));
+        assert_eq!(separator_leading_inset(metrics), px(31.0));
     }
 
     #[test]

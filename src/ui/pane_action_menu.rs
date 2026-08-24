@@ -1,6 +1,6 @@
 use gpui::prelude::*;
 use gpui::{AnyElement, Rgba, px};
-use gpui_symbols::Icon;
+use gpui_symbols::{Icon, SymbolWeight};
 use spaceterm_ui::MenuEntry;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -68,7 +68,8 @@ fn close_presentation(close_target: CloseTarget) -> (&'static str, &'static str,
 pub(crate) fn sf_symbol(name: &'static str) -> impl Fn(Rgba) -> AnyElement {
     move |foreground| {
         Icon::new(name)
-            .size(px(15.0))
+            .weight(SymbolWeight::Regular)
+            .size(px(14.0))
             .color(foreground)
             .into_any_element()
     }
