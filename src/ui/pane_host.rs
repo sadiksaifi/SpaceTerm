@@ -7,7 +7,9 @@ use gpui::{
     MouseDownEvent, Pixels, Point, PromptButton, PromptLevel, Render, Window, div, px, rgba,
 };
 use gpui_symbols::{Icon, SymbolWeight};
+use spaceterm_ui::IconButton;
 
+use super::button_styles;
 use super::terminal_focus::{TerminalFocusBlocker, TerminalProductFocus};
 use super::{
     ClosePane, CloseTarget, FocusPaneDown, FocusPaneLeft, FocusPaneRight, FocusPaneUp,
@@ -933,28 +935,23 @@ fn render_pane_header(
             .items_center()
             .gap(px(7.0))
             .child(
-                div()
-                    .id(("pane-zoom-restore", pane_id.get()))
-                    .debug_selector(move || format!("pane-zoom-restore-{}", pane_id.get()))
-                    .size(px(20.0))
-                    .flex_shrink_0()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded(px(4.0))
-                    .cursor_pointer()
-                    .occlude()
-                    .hover(|button| button.bg(gpui_color(ACTIVE_THEME.ghost_element_hover)))
-                    .on_click(move |_, window, cx| {
-                        let _ = host.update(cx, |host, cx| host.toggle_zoom(window, cx));
-                        cx.stop_propagation();
-                    })
-                    .child(
+                IconButton::new(
+                    ("pane-zoom-restore", pane_id.get()),
+                    "Restore Panes",
+                    button_styles::ghost_icon(px(20.0), px(4.0)),
+                    |foreground| {
                         Icon::new("arrow.down.right.and.arrow.up.left")
                             .weight(SymbolWeight::Medium)
                             .size(px(13.0))
-                            .color(gpui_color(ACTIVE_THEME.icon)),
-                    ),
+                            .color(foreground)
+                            .into_any_element()
+                    },
+                )
+                .debug_selector(format!("pane-zoom-restore-{}", pane_id.get()))
+                .tooltip(|_, cx| button_styles::tooltip("Restore Panes", cx))
+                .on_activate(move |_, window, cx| {
+                    let _ = host.update(cx, |host, cx| host.toggle_zoom(window, cx));
+                }),
             )
             .child(
                 div()
@@ -1059,42 +1056,37 @@ fn render_menu_button(
 ) -> AnyElement {
     let button_host = host;
     div()
-        .id(("pane-menu-button", pane_id.get()))
-        .debug_selector(|| format!("pane-menu-button-{}", pane_id.get()))
         .absolute()
         .top_0()
         .right_0()
-        .size(px(PANE_CONTROL_SIZE))
-        .flex()
-        .items_center()
-        .justify_center()
-        .rounded(px(6.0))
-        .cursor_pointer()
-        .occlude()
         .when(!focused, |button| {
             button
                 .opacity(0.0)
                 .group_hover(pane_group.to_owned(), |button| button.opacity(1.0))
         })
-        .hover(|button| {
-            button
-                .opacity(1.0)
-                .bg(gpui_color(ACTIVE_THEME.ghost_element_hover))
-        })
-        .on_click(move |_, window, cx| {
-            let terminal = button_host
-                .update(cx, |host, cx| host.toggle_menu(pane_id, cx))
-                .ok()
-                .flatten();
-            if let Some(terminal) = terminal {
-                terminal.update(cx, |terminal, _| terminal.focus(window));
-            }
-            cx.stop_propagation();
-        })
         .child(
-            Icon::new("ellipsis")
-                .size(px(16.0))
-                .color(gpui_color(ACTIVE_THEME.icon)),
+            IconButton::new(
+                ("pane-menu-button", pane_id.get()),
+                "Open Pane Actions",
+                button_styles::ghost_icon(px(PANE_CONTROL_SIZE), px(6.0)),
+                |foreground| {
+                    Icon::new("ellipsis")
+                        .size(px(16.0))
+                        .color(foreground)
+                        .into_any_element()
+                },
+            )
+            .debug_selector(format!("pane-menu-button-{}", pane_id.get()))
+            .tooltip(|_, cx| button_styles::tooltip("Pane Actions", cx))
+            .on_activate(move |_, window, cx| {
+                let terminal = button_host
+                    .update(cx, |host, cx| host.toggle_menu(pane_id, cx))
+                    .ok()
+                    .flatten();
+                if let Some(terminal) = terminal {
+                    terminal.update(cx, |terminal, _| terminal.focus(window));
+                }
+            }),
         )
         .into_any_element()
 }

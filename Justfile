@@ -28,7 +28,7 @@ run:
 
 # Compile all targets and features without running tests.
 check:
-    cargo check --all-targets --all-features --locked
+    cargo check --workspace --all-targets --all-features --locked
 
 # Format all Rust sources.
 fmt:
@@ -40,11 +40,11 @@ fmt-check:
 
 # Run the complete test suite.
 test:
-    cargo test --all-targets --all-features --locked
+    cargo test --workspace --all-targets --all-features --locked
 
 # Run tests whose names contain the supplied filter.
 test-one filter:
-    cargo test --all-targets --all-features --locked "{{ filter }}"
+    cargo test --workspace --all-targets --all-features --locked "{{ filter }}"
 
 # Run the conventional terminal capability and protocol conformance corpus.
 conformance:
@@ -52,7 +52,7 @@ conformance:
 
 # Run Clippy with warnings treated as errors.
 clippy:
-    cargo clippy --all-targets --all-features --locked -- -D warnings
+    cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 
 # Validate the macOS packaging scripts.
 scripts-check:

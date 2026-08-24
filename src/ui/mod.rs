@@ -1,3 +1,4 @@
+mod button_styles;
 mod overlay_scrollbar;
 mod pane_action_menu;
 mod pane_host;
@@ -87,6 +88,8 @@ actions!(
 
 pub(crate) const TERMINAL_KEY_CONTEXT: &str = "TerminalPane";
 pub(crate) const TERMINAL_FIND_KEY_CONTEXT: &str = "TerminalFind";
+pub(crate) const TERMINAL_PASTE_CONFIRMATION_KEY_CONTEXT: &str = "TerminalPasteConfirmation";
+pub(crate) const TERMINAL_OSC52_AUTHORIZATION_KEY_CONTEXT: &str = "TerminalOsc52Authorization";
 pub(crate) const TOP_CHROME_HEIGHT: f32 = 36.0;
 pub(crate) const WORKSPACE_SIDEBAR_DEFAULT_WIDTH: f32 = 240.0;
 pub(crate) const WORKSPACE_SIDEBAR_MINIMUM_WIDTH: f32 = 180.0;
@@ -127,6 +130,26 @@ pub(crate) fn init(cx: &mut App) {
         KeyBinding::new("enter", FindNext, Some(TERMINAL_FIND_KEY_CONTEXT)),
         KeyBinding::new("shift-enter", FindPrevious, Some(TERMINAL_FIND_KEY_CONTEXT)),
         KeyBinding::new("escape", CloseTerminalFind, Some(TERMINAL_FIND_KEY_CONTEXT)),
+        KeyBinding::new(
+            "enter",
+            ConfirmUnsafePaste,
+            Some(TERMINAL_PASTE_CONFIRMATION_KEY_CONTEXT),
+        ),
+        KeyBinding::new(
+            "escape",
+            CancelUnsafePaste,
+            Some(TERMINAL_PASTE_CONFIRMATION_KEY_CONTEXT),
+        ),
+        KeyBinding::new(
+            "cmd-enter",
+            AllowOsc52Clipboard,
+            Some(TERMINAL_OSC52_AUTHORIZATION_KEY_CONTEXT),
+        ),
+        KeyBinding::new(
+            "escape",
+            DenyOsc52Clipboard,
+            Some(TERMINAL_OSC52_AUTHORIZATION_KEY_CONTEXT),
+        ),
         KeyBinding::new(
             "cmd-=",
             IncreaseTerminalFontSize,

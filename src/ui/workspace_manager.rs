@@ -10,8 +10,11 @@ use gpui::{
     px, rgba,
 };
 use gpui_symbols::{Icon, RenderingMode, SymbolWeight};
-use spaceterm_ui::{MiddleTruncatedText, TextInput, TextInputEvent, TextInputStyle};
+use spaceterm_ui::{
+    Button, IconButton, MiddleTruncatedText, TextInput, TextInputEvent, TextInputStyle,
+};
 
+use super::button_styles;
 use super::overlay_scrollbar::{OverlayScrollbar, OverlayScrollbarEvent, ScrollMetrics};
 use super::terminal_focus::TerminalFocusBlocker;
 use super::{
@@ -1489,30 +1492,28 @@ impl WorkspaceManager {
             )
             .child(
                 div()
-                    .id("toggle-sidebar-button")
-                    .debug_selector(|| "toggle-sidebar-button".to_owned())
                     .absolute()
                     .top(px(SIDEBAR_TOGGLE_INSET))
                     .right(px(SIDEBAR_TOGGLE_INSET))
-                    .size(px(SIDEBAR_TOGGLE_SIZE))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded(px(6.0))
-                    .cursor_pointer()
-                    .occlude()
-                    .hover(|button| button.bg(gpui_color(ACTIVE_THEME.ghost_element_selected)))
-                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .on_click(move |_, window, cx| {
-                        let _ = toggle_manager.update(cx, |manager, cx| {
-                            manager.toggle_sidebar(window, cx);
-                        });
-                        cx.stop_propagation();
-                    })
                     .child(
-                        Icon::new("sidebar.left")
-                            .size(px(14.0))
-                            .color(gpui_color(ACTIVE_THEME.icon)),
+                        IconButton::new(
+                            "toggle-sidebar-button",
+                            "Toggle Sidebar",
+                            button_styles::ghost_icon(px(SIDEBAR_TOGGLE_SIZE), px(6.0)),
+                            |foreground| {
+                                Icon::new("sidebar.left")
+                                    .size(px(14.0))
+                                    .color(foreground)
+                                    .into_any_element()
+                            },
+                        )
+                        .debug_selector("toggle-sidebar-button")
+                        .tooltip(|_, cx| button_styles::tooltip("Toggle Sidebar", cx))
+                        .on_activate(move |_, window, cx| {
+                            let _ = toggle_manager.update(cx, |manager, cx| {
+                                manager.toggle_sidebar(window, cx);
+                            });
+                        }),
                     ),
             )
             .child(
@@ -1819,39 +1820,31 @@ impl WorkspaceManager {
                     .child(div().min_w_0().flex_1().child(search_input)),
             )
             .child(
-                div()
-                    .id("open-local-project-button")
-                    .debug_selector(|| "open-local-project-button".to_owned())
-                    .size(px(30.0))
-                    .flex_shrink_0()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded(px(5.0))
-                    .border(px(1.0))
-                    .border_color(gpui_color(ACTIVE_THEME.border))
-                    .bg(gpui_color(ACTIVE_THEME.element_background))
-                    .cursor_pointer()
-                    .hover(|button| button.bg(gpui_color(ACTIVE_THEME.element_hover)))
-                    .tooltip(|_, cx| {
-                        cx.new(|_| WorkspaceSidebarTooltip {
-                            text: "Open Local Project…".into(),
-                        })
-                        .into()
-                    })
-                    .on_click(move |_, window, cx| {
-                        let _ = picker_manager.update(cx, |manager, cx| {
-                            manager.open_local_project(window, cx);
-                        });
-                        cx.stop_propagation();
-                    })
-                    .child(
+                IconButton::new(
+                    "open-local-project-button",
+                    "Open Local Project",
+                    button_styles::bordered_icon(),
+                    |foreground| {
                         Icon::new("folder.fill.badge.plus")
                             .size(px(17.0))
                             .weight(SymbolWeight::Semibold)
                             .rendering_mode(RenderingMode::Monochrome)
-                            .color(gpui_color(ACTIVE_THEME.icon)),
-                    ),
+                            .color(foreground)
+                            .into_any_element()
+                    },
+                )
+                .debug_selector("open-local-project-button")
+                .tooltip(|_, cx| {
+                    cx.new(|_| WorkspaceSidebarTooltip {
+                        text: "Open Local Project…".into(),
+                    })
+                    .into()
+                })
+                .on_activate(move |_, window, cx| {
+                    let _ = picker_manager.update(cx, |manager, cx| {
+                        manager.open_local_project(window, cx);
+                    });
+                }),
             );
         div()
             .id("workspace-sidebar")
@@ -1872,43 +1865,36 @@ impl WorkspaceManager {
             .child(rows)
             .child(
                 div()
-                    .id("create-workspace-button")
-                    .debug_selector(|| "create-workspace-button".to_owned())
                     .relative()
                     .w_full()
                     .h(px(NEW_WORKSPACE_BUTTON_HEIGHT))
                     .flex_shrink_0()
-                    .px(px(SIDEBAR_ROW_HORIZONTAL_PADDING))
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(px(8.0))
-                    .cursor_pointer()
-                    .text_size(px(12.0))
-                    .text_color(gpui_color(ACTIVE_THEME.text_muted))
-                    .hover(|button| {
-                        button
-                            .bg(gpui_color(ACTIVE_THEME.ghost_element_selected))
-                            .text_color(gpui_color(ACTIVE_THEME.text))
-                    })
-                    .on_click(move |_, window, cx| {
-                        let _ = create_manager.update(cx, |manager, cx| {
-                            manager.create_workspace(window, cx);
-                        });
-                        cx.stop_propagation();
-                    })
                     .child(
-                        Icon::new("plus")
-                            .size(px(13.0))
-                            .color(gpui_color(ACTIVE_THEME.icon)),
-                    )
-                    .child("New Workspace")
-                    .child(div().flex_grow())
-                    .child(
-                        div()
-                            .text_size(px(10.0))
-                            .text_color(gpui_color(ACTIVE_THEME.icon))
-                            .child("⌘N"),
+                        Button::new(
+                            "create-workspace-button",
+                            "New Workspace",
+                            button_styles::sidebar_action(),
+                        )
+                        .full_width(true)
+                        .debug_selector("create-workspace-button")
+                        .leading(|_| {
+                            Icon::new("plus")
+                                .size(px(13.0))
+                                .color(gpui_color(ACTIVE_THEME.icon))
+                                .into_any_element()
+                        })
+                        .trailing(|_| {
+                            div()
+                                .text_size(px(10.0))
+                                .text_color(gpui_color(ACTIVE_THEME.icon))
+                                .child("⌘N")
+                                .into_any_element()
+                        })
+                        .on_activate(move |_, window, cx| {
+                            let _ = create_manager.update(cx, |manager, cx| {
+                                manager.create_workspace(window, cx);
+                            });
+                        }),
                     )
                     .child(
                         div()
@@ -2667,6 +2653,28 @@ mod tests {
                     gpui::size(second_row.size.width, px(CHROME_DIVIDER_SIZE)),
                 ),
             )
+        );
+    }
+
+    #[gpui::test]
+    fn sidebar_action_buttons_should_toggle_sidebar_and_create_workspace(cx: &mut TestAppContext) {
+        let (manager, _records, cx) = workspace_manager(cx);
+
+        click("toggle-sidebar-button", cx);
+        assert!(!manager.read_with(cx, |manager, _| manager.sidebar_visible));
+
+        cx.simulate_keystrokes("cmd-b");
+        cx.run_until_parked();
+        click("create-workspace-button", cx);
+
+        assert_eq!(
+            manager.read_with(cx, |manager, _| {
+                (
+                    manager.workspaces.len(),
+                    manager.workspaces.active_workspace_id(),
+                )
+            }),
+            (2, WorkspaceId::new(2))
         );
     }
 
