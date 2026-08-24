@@ -5,7 +5,13 @@
 | Term | Definition | Aliases to avoid |
 | --- | --- | --- |
 | **SpaceTerm** | The macOS terminal application that owns all Workspaces. | tmux client, terminal client |
-| **Workspace** | A named top-level scope containing one or more Windows and a root working directory. | Session, attached session, project |
+| **Workspace** | A named top-level scope of one immutable Workspace Kind that owns one Workspace Directory and one or more Windows. | Session, attached session, project |
+| **Workspace Kind** | The immutable runtime-only classification of a Workspace as Ad Hoc or Local Project. | mode, converted Workspace |
+| **Ad Hoc Workspace** | A Workspace created at `HOME` whose Workspace Directory follows its Directory Authority. | default project, temporary session |
+| **Local Project Workspace** | A Workspace opened from a native directory selection whose Project Root never changes. | repository, Git project |
+| **Workspace Directory** | The authoritative exact local directory used to start every future Terminal Session owned by a Workspace. | Focused Pane directory, fallback directory |
+| **Directory Authority** | The one Pane whose valid live Reported Working Directory may change an Ad Hoc Workspace's Workspace Directory. | focused Pane, active Pane |
+| **Project Root** | The exact originally selected directory and canonical filesystem identity owned immutably by a Local Project Workspace. | Git root, repository root |
 | **Window** | An ordered terminal work area that belongs to exactly one Workspace and contains a Pane Layout. | Tab, session, macOS window |
 | **Pane** | A terminal region that is one leaf of exactly one Window's Pane Layout. | Window, tab, split |
 | **Pane Layout** | The recursive arrangement of Panes and Splits within a Window. | Grid, pane tree |
@@ -68,6 +74,7 @@
 | Term | Definition | Aliases to avoid |
 | --- | --- | --- |
 | **Create Workspace** | Add and activate a new Workspace with its initial Window and Pane. | Start session, attach session |
+| **Open Local Project** | Select one readable local directory and create or activate its Local Project Workspace. | Open repository, convert Workspace |
 | **Close Workspace** | Remove a Workspace and its owned terminal runtimes, replacing it when it is the last Workspace. | Detach session, delete session |
 | **Create Window** | Add and activate a new Window in the Active Workspace. | New tab, link Window |
 | **Close Window** | Remove a Window and its owned terminal runtimes, escalating through its Workspace when it is the final Window. | Close tab, detach Window |
@@ -81,6 +88,13 @@
 ## Relationships
 
 - **SpaceTerm** owns one or more **Workspaces** and has exactly one **Active Workspace**.
+- A **Workspace Kind** is fixed for the lifetime of its runtime-only **Workspace** and is never persisted.
+- An **Ad Hoc Workspace** starts at `HOME`; its **Directory Authority** is initially the first Pane of its first Window.
+- A **Local Project Workspace** preserves its exact selected **Project Root** and deduplicates equivalent selections by macOS device/file identity.
+- Only the **Directory Authority** may update an Ad Hoc **Workspace Directory**. Closing it promotes the first remaining Pane in Pane Layout order, or the root Pane of the first remaining Window when its Window closes.
+- A valid promoted Pane report is adopted immediately. A missing or invalid report retains the previous Workspace Directory.
+- Create Window and Split Pane revalidate the **Workspace Directory** before mutation. Unavailability blocks new children without stopping existing Terminal Sessions and clears after successful validation.
+- Automatic Workspace names use the Workspace Directory basename, `Default` for `HOME`, and `/` for filesystem root. Only unrenamed Ad Hoc Workspaces sharing one identity are numbered in sidebar order; empty rename input clears a custom name and duplicate custom names are valid.
 - A **Workspace** owns one or more **Windows** and has exactly one **Active Window**.
 - A **Window** belongs to exactly one **Workspace** and cannot be linked, shared, or attached elsewhere.
 - A **Window** owns one or more **Panes**, exactly one **Focused Pane**, and one arbitrarily nested **Pane Layout**.

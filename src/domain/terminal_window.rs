@@ -246,6 +246,10 @@ impl<T> TerminalWindow<T> {
         PaneTreeRef { node: &self.root }
     }
 
+    pub(crate) fn root_pane_id(&self) -> PaneId {
+        self.root.first_pane_id()
+    }
+
     pub(crate) fn terminal(&self, pane_id: PaneId) -> Option<&T> {
         self.terminals.get(&pane_id)
     }

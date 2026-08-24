@@ -73,7 +73,9 @@ actions!(
         ActivateWorkspace9,
         ClosePane,
         CloseWindow,
+        CloseWorkspace,
         CreateWorkspace,
+        OpenLocalProject,
         ToggleSidebar,
         ToggleSidebarFocus,
         OpenTerminalFind,
@@ -109,6 +111,11 @@ pub(crate) fn handle_top_chrome_mouse_down(
 pub(crate) fn init(cx: &mut App) {
     spaceterm_ui::init(cx);
     cx.bind_keys([
+        KeyBinding::new("cmd-n", CreateWorkspace, None),
+        KeyBinding::new("cmd-o", OpenLocalProject, None),
+        KeyBinding::new("cmd-t", CreateWindow, None),
+        KeyBinding::new("cmd-w", ClosePane, None),
+        KeyBinding::new("cmd-shift-w", CloseWindow, None),
         KeyBinding::new("cmd-c", CopySelection, Some(TERMINAL_KEY_CONTEXT)),
         KeyBinding::new("cmd-v", PasteClipboard, Some(TERMINAL_KEY_CONTEXT)),
         KeyBinding::new("cmd-f", OpenTerminalFind, Some(TERMINAL_KEY_CONTEXT)),
@@ -151,7 +158,6 @@ pub(crate) fn init(cx: &mut App) {
             TogglePaneZoom,
             Some(TERMINAL_KEY_CONTEXT),
         ),
-        KeyBinding::new("cmd-t", CreateWindow, Some(TERMINAL_KEY_CONTEXT)),
         KeyBinding::new("cmd-1", ActivateWindow1, Some(TERMINAL_KEY_CONTEXT)),
         KeyBinding::new("cmd-2", ActivateWindow2, Some(TERMINAL_KEY_CONTEXT)),
         KeyBinding::new("cmd-3", ActivateWindow3, Some(TERMINAL_KEY_CONTEXT)),
@@ -170,9 +176,6 @@ pub(crate) fn init(cx: &mut App) {
         KeyBinding::new("ctrl-7", ActivateWorkspace7, Some(TERMINAL_KEY_CONTEXT)),
         KeyBinding::new("ctrl-8", ActivateWorkspace8, Some(TERMINAL_KEY_CONTEXT)),
         KeyBinding::new("ctrl-9", ActivateWorkspace9, Some(TERMINAL_KEY_CONTEXT)),
-        KeyBinding::new("cmd-w", ClosePane, Some(TERMINAL_KEY_CONTEXT)),
-        KeyBinding::new("cmd-shift-w", CloseWindow, Some(TERMINAL_KEY_CONTEXT)),
-        KeyBinding::new("cmd-n", CreateWorkspace, Some(TERMINAL_KEY_CONTEXT)),
         KeyBinding::new("cmd-b", ToggleSidebar, Some(TERMINAL_KEY_CONTEXT)),
         KeyBinding::new(
             "cmd-shift-e",
@@ -226,6 +229,38 @@ mod tests {
             ("cmd-f", OpenTerminalFind.name()),
             ("cmd-g", FindNext.name()),
             ("cmd-shift-g", FindPrevious.name()),
+        ];
+        let actual = cx.update(|cx| {
+            expected
+                .iter()
+                .map(|(shortcut, _)| {
+                    let keystroke = Keystroke::parse(shortcut).unwrap_or_else(|error| {
+                        panic!("invalid test shortcut {shortcut}: {error}")
+                    });
+                    let bindings = cx.all_bindings_for_input(&[keystroke]);
+                    (
+                        *shortcut,
+                        bindings
+                            .last()
+                            .map(|binding| binding.action().name())
+                            .unwrap_or(""),
+                    )
+                })
+                .collect::<Vec<_>>()
+        });
+
+        assert_eq!(actual.as_slice(), expected);
+    }
+
+    #[gpui::test]
+    fn workspace_and_hierarchy_shortcuts_should_be_global(cx: &mut TestAppContext) {
+        cx.update(init);
+        let expected = [
+            ("cmd-n", CreateWorkspace.name()),
+            ("cmd-o", OpenLocalProject.name()),
+            ("cmd-t", CreateWindow.name()),
+            ("cmd-w", ClosePane.name()),
+            ("cmd-shift-w", CloseWindow.name()),
         ];
         let actual = cx.update(|cx| {
             expected
