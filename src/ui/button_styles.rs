@@ -34,34 +34,6 @@ pub(super) fn ghost_icon(height: Pixels, corner_radius: Pixels) -> ButtonStyle {
     .corner_radius(corner_radius)
 }
 
-pub(super) fn bordered_icon() -> ButtonStyle {
-    ButtonStyle::new(
-        paint(
-            ACTIVE_THEME.element_background,
-            ACTIVE_THEME.icon,
-            ACTIVE_THEME.border,
-        ),
-        paint(
-            ACTIVE_THEME.element_hover,
-            ACTIVE_THEME.icon,
-            ACTIVE_THEME.border,
-        ),
-        paint(
-            ACTIVE_THEME.element_active,
-            ACTIVE_THEME.icon,
-            ACTIVE_THEME.border_selected,
-        ),
-        paint(
-            ACTIVE_THEME.element_disabled,
-            ACTIVE_THEME.icon_disabled,
-            ACTIVE_THEME.border_disabled,
-        ),
-        gpui_color(ACTIVE_THEME.border_focused),
-    )
-    .height(px(30.0))
-    .corner_radius(px(5.0))
-}
-
 pub(super) fn action() -> ButtonStyle {
     ButtonStyle::new(
         paint(
