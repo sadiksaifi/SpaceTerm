@@ -1823,7 +1823,7 @@ impl WorkspaceManager {
                 IconButton::new(
                     "open-local-project-button",
                     "Open Local Project",
-                    button_styles::ghost_icon(px(30.0), px(5.0)),
+                    button_styles::bordered_icon(),
                     |foreground| {
                         Icon::new("folder.fill.badge.plus")
                             .size(px(17.0))
