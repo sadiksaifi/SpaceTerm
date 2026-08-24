@@ -1,8 +1,8 @@
 mod button_theme;
-mod overlay_scrollbar;
 mod pane_action_menu;
 mod pane_host;
 mod render_lifecycle;
+mod scrollbar_theme;
 mod terminal_context_menu;
 mod terminal_element;
 mod terminal_find;
@@ -112,7 +112,7 @@ pub(crate) fn handle_top_chrome_mouse_down(
 }
 
 pub(crate) fn init(cx: &mut App) {
-    spaceterm_ui::init(cx, button_theme::theme());
+    spaceterm_ui::init(cx, button_theme::theme(), scrollbar_theme::theme());
     cx.bind_keys([
         KeyBinding::new("cmd-n", CreateWorkspace, None),
         KeyBinding::new("cmd-o", OpenLocalProject, None),
@@ -215,10 +215,13 @@ mod tests {
     use super::*;
 
     #[gpui::test]
-    fn ui_init_should_install_the_button_theme(cx: &mut TestAppContext) {
+    fn ui_init_should_install_control_themes(cx: &mut TestAppContext) {
         cx.update(init);
 
-        assert!(cx.update(|cx| cx.has_global::<spaceterm_ui::ButtonTheme>()));
+        assert!(cx.update(|cx| {
+            cx.has_global::<spaceterm_ui::ButtonTheme>()
+                && cx.has_global::<spaceterm_ui::ScrollbarTheme>()
+        }));
     }
 
     #[gpui::test]

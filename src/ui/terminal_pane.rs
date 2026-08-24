@@ -14,10 +14,12 @@ use gpui::{
     size,
 };
 use gpui_symbols::{Icon, SymbolWeight};
-use spaceterm_ui::{Button, ButtonRole, ButtonSize, ButtonVariant, IconButton};
+use spaceterm_ui::{
+    Button, ButtonRole, ButtonSize, ButtonVariant, IconButton, OverlayScrollbar,
+    OverlayScrollbarEvent, ScrollMetrics,
+};
 
 use super::button_theme;
-use super::overlay_scrollbar::{OverlayScrollbar, OverlayScrollbarEvent, ScrollMetrics};
 use super::render_lifecycle::{RenderLifecycle, ScaleChange, SurfaceVisibility};
 use super::terminal_context_menu::{
     TERMINAL_CONTEXT_MENU_HEIGHT, TERMINAL_CONTEXT_MENU_WIDTH, TerminalContextMenuCommand,
