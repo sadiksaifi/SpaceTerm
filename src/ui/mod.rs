@@ -74,6 +74,7 @@ actions!(
         CloseWindow,
         CloseWorkspace,
         CreateWorkspace,
+        SearchWorkspaces,
         OpenLocalProject,
         ToggleSidebar,
         ToggleSidebarFocus,
@@ -119,6 +120,7 @@ pub(crate) fn init(cx: &mut App) {
     );
     cx.bind_keys([
         KeyBinding::new("cmd-n", CreateWorkspace, None),
+        KeyBinding::new("cmd-p", SearchWorkspaces, None),
         KeyBinding::new("cmd-o", OpenLocalProject, None),
         KeyBinding::new("cmd-t", CreateWindow, None),
         KeyBinding::new("cmd-w", ClosePane, None),
@@ -296,6 +298,7 @@ mod tests {
         cx.update(init);
         let expected = [
             ("cmd-n", CreateWorkspace.name()),
+            ("cmd-p", SearchWorkspaces.name()),
             ("cmd-o", OpenLocalProject.name()),
             ("cmd-t", CreateWindow.name()),
             ("cmd-w", ClosePane.name()),

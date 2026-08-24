@@ -2,17 +2,20 @@ use std::{ops::Range, rc::Rc};
 
 use gpui::{
     AnyElement, App, AppContext as _, Corner, Entity, EventEmitter, Global, HitboxBehavior,
-    InteractiveElement as _, IntoElement, KeyBinding, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, ParentElement as _, Pixels, Render, Rgba, ScrollStrategy, SharedString,
-    StatefulInteractiveElement as _, Styled as _, Subscription, UniformListScrollHandle,
-    WeakEntity, WeakFocusHandle, Window, actions, anchored, canvas, deferred, div,
-    prelude::FluentBuilder as _, px, uniform_list,
+    InteractiveElement as _, IntoElement, KeyBinding, ListAlignment, ListState, MouseButton,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _, Pixels, Render, Rgba,
+    SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, WeakEntity,
+    WeakFocusHandle, Window, actions, anchored, canvas, div, list, prelude::FluentBuilder as _, px,
 };
 
-use crate::{TextInput, TextInputEvent, TextInputStyle};
+use crate::{
+    TextInput, TextInputEvent, TextInputStyle,
+    button::{ButtonSize, ButtonVariant, IconButton},
+    menu::{Menu, MenuActivation, MenuEntry, MenuSize},
+    overlay_scrollbar::{OverlayScrollbar, OverlayScrollbarEvent, ScrollMetrics},
+};
 
 const KEY_CONTEXT: &str = "SpaceTermCommandPalette";
-const OVERLAY_PRIORITY: usize = 2;
 
 actions!(
     spaceterm_command_palette,
@@ -137,6 +140,10 @@ pub enum CommandPaletteEvent<I> {
     Activated(CommandPaletteActivation<I>),
     /// The query changed or a refresh was explicitly requested.
     QueryChanged(CommandPaletteQuery),
+    /// A search-line control was activated.
+    HeaderAction(SharedString),
+    /// A footer actions-menu entry was activated.
+    MenuAction(SharedString),
 }
 
 /// A standardized trailing row accessory.
@@ -154,6 +161,70 @@ pub enum CommandPaletteAccessory {
 
 type IconBuilder = Rc<dyn Fn(Rgba) -> AnyElement>;
 
+/// One control rendered at the trailing edge of the command-palette search line.
+///
+/// The caller owns the icon and the identity it receives back through
+/// [`CommandPaletteEvent::HeaderAction`]; the palette owns the control's size and paint.
+#[derive(Clone)]
+pub struct CommandPaletteAction {
+    id: SharedString,
+    accessibility_name: SharedString,
+    icon: IconBuilder,
+    disabled: bool,
+    debug_selector: Option<String>,
+}
+
+impl CommandPaletteAction {
+    /// Creates an enabled search-line control with a mandatory logical accessibility name.
+    pub fn new(
+        id: impl Into<SharedString>,
+        accessibility_name: impl Into<SharedString>,
+        icon: impl Fn(Rgba) -> AnyElement + 'static,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            accessibility_name: accessibility_name.into(),
+            icon: Rc::new(icon),
+            disabled: false,
+            debug_selector: None,
+        }
+    }
+
+    /// Controls whether the control can activate.
+    pub fn disabled(mut self, disabled: bool) -> Self {
+        self.disabled = disabled;
+        self
+    }
+
+    /// Adds a stable selector used by GPUI interaction tests.
+    pub fn debug_selector(mut self, selector: impl Into<String>) -> Self {
+        self.debug_selector = Some(selector.into());
+        self
+    }
+
+    /// Returns the caller-owned identity reported on activation.
+    pub fn id(&self) -> &SharedString {
+        &self.id
+    }
+}
+
+/// One footer hint pairing a key presentation with the action it performs.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CommandPaletteHint {
+    label: SharedString,
+    key: SharedString,
+}
+
+impl CommandPaletteHint {
+    /// Creates a hint such as `Open` paired with `\u{23ce}`.
+    pub fn new(label: impl Into<SharedString>, key: impl Into<SharedString>) -> Self {
+        Self {
+            label: label.into(),
+            key: key.into(),
+        }
+    }
+}
+
 /// One typed semantic command-palette item.
 ///
 /// Item identities must remain stable. Later items with a duplicate identity are discarded so
@@ -163,6 +234,7 @@ pub struct CommandPaletteItem<I> {
     id: I,
     label: SharedString,
     description: Option<SharedString>,
+    section: Option<SharedString>,
     keywords: Vec<SharedString>,
     disabled: bool,
     leading_icon: Option<IconBuilder>,
@@ -177,6 +249,7 @@ impl<I> CommandPaletteItem<I> {
             id,
             label: label.into(),
             description: None,
+            section: None,
             keywords: Vec::new(),
             disabled: false,
             leading_icon: None,
@@ -188,6 +261,15 @@ impl<I> CommandPaletteItem<I> {
     /// Adds one line of secondary descriptive text.
     pub fn description(mut self, value: impl Into<SharedString>) -> Self {
         self.description = Some(value.into());
+        self
+    }
+
+    /// Groups the item under a heading shown when the section changes between adjacent rows.
+    ///
+    /// Items are grouped in provider order, so a caller that wants one heading per section must
+    /// supply that section's items contiguously.
+    pub fn section(mut self, value: impl Into<SharedString>) -> Self {
+        self.section = Some(value.into());
         self
     }
 
@@ -236,6 +318,11 @@ impl<I> CommandPaletteItem<I> {
         self.description.as_ref().map(AsRef::as_ref)
     }
 
+    /// Returns the optional grouping section.
+    pub fn section_text(&self) -> Option<&str> {
+        self.section.as_ref().map(AsRef::as_ref)
+    }
+
     /// Returns whether navigation and activation skip this item.
     pub fn is_disabled(&self) -> bool {
         self.disabled
@@ -247,6 +334,7 @@ struct CommandPaletteMatch {
     item_index: usize,
     score: i64,
     label_highlights: Vec<Range<usize>>,
+    description_highlights: Vec<Range<usize>>,
 }
 
 fn match_command_palette_items<I>(
@@ -266,6 +354,7 @@ fn match_command_palette_items<I>(
                 item_index,
                 score: 0,
                 label_highlights: Vec::new(),
+                description_highlights: Vec::new(),
             })
             .collect();
     }
@@ -274,10 +363,13 @@ fn match_command_palette_items<I>(
         .iter()
         .enumerate()
         .filter_map(|(item_index, item)| {
-            match_item(item, &tokens).map(|(score, label_highlights)| CommandPaletteMatch {
-                item_index,
-                score,
-                label_highlights,
+            match_item(item, &tokens).map(|(score, label_highlights, description_highlights)| {
+                CommandPaletteMatch {
+                    item_index,
+                    score,
+                    label_highlights,
+                    description_highlights,
+                }
             })
         })
         .collect::<Vec<_>>();
@@ -312,10 +404,9 @@ fn search_units(text: &str) -> Vec<SearchUnit> {
     units
 }
 
-fn match_item<I>(
-    item: &CommandPaletteItem<I>,
-    tokens: &[Vec<char>],
-) -> Option<(i64, Vec<Range<usize>>)> {
+type ItemMatch = (i64, Vec<Range<usize>>, Vec<Range<usize>>);
+
+fn match_item<I>(item: &CommandPaletteItem<I>, tokens: &[Vec<char>]) -> Option<ItemMatch> {
     let label_units = search_units(item.label.as_ref());
     let description_units = item.description.as_ref().map(|text| search_units(text));
     let keyword_units: Vec<_> = item
@@ -324,7 +415,8 @@ fn match_item<I>(
         .map(|keyword| search_units(keyword))
         .collect();
     let mut score = 0;
-    let mut highlights = Vec::new();
+    let mut label_highlights = Vec::new();
+    let mut description_highlights = Vec::new();
 
     for token in tokens {
         let mut best =
@@ -347,13 +439,18 @@ fn match_item<I>(
         }
         let (token_score, field, matched) = best?;
         score += token_score;
-        if field == 0 {
-            highlights.extend(matched.ranges);
+        match field {
+            0 => label_highlights.extend(matched.ranges),
+            1 => description_highlights.extend(matched.ranges),
+            _ => {}
         }
     }
 
-    highlights.sort_by_key(|range| (range.start, range.end));
-    Some((score, merge_ranges(highlights)))
+    Some((
+        score,
+        merge_ranges(label_highlights),
+        merge_ranges(description_highlights),
+    ))
 }
 
 struct FuzzyMatch {
@@ -441,20 +538,26 @@ fn merge_ranges(mut ranges: Vec<Range<usize>>) -> Vec<Range<usize>> {
 pub struct CommandPalettePaint {
     background: Rgba,
     border: Rgba,
+    separator: Rgba,
     foreground: Rgba,
     muted: Rgba,
     disabled: Rgba,
+    hover_background: Rgba,
     selected_background: Rgba,
     selected_foreground: Rgba,
     match_foreground: Rgba,
-    input_background: Rgba,
-    input_border: Rgba,
+    section_foreground: Rgba,
+    footer_foreground: Rgba,
+    footer_key_foreground: Rgba,
     input_selection: Rgba,
     caret: Rgba,
 }
 
 impl CommandPalettePaint {
-    /// Creates the complete bounded paint catalog.
+    /// Creates the core paint catalog.
+    ///
+    /// Separator, hover, section, and footer colors default to the closest core value so a caller
+    /// only overrides what its theme distinguishes.
     #[expect(
         clippy::too_many_arguments,
         reason = "the bounded paint catalog is clearer than nested untyped color groups"
@@ -468,25 +571,51 @@ impl CommandPalettePaint {
         selected_background: Rgba,
         selected_foreground: Rgba,
         match_foreground: Rgba,
-        input_background: Rgba,
-        input_border: Rgba,
         input_selection: Rgba,
         caret: Rgba,
     ) -> Self {
         Self {
             background,
             border,
+            separator: border,
             foreground,
             muted,
             disabled,
+            hover_background: selected_background,
             selected_background,
             selected_foreground,
             match_foreground,
-            input_background,
-            input_border,
+            section_foreground: muted,
+            footer_foreground: muted,
+            footer_key_foreground: disabled,
             input_selection,
             caret,
         }
+    }
+
+    /// Sets the hairline color used under the editor, above the footer, and between sections.
+    pub fn separator(mut self, color: Rgba) -> Self {
+        self.separator = color;
+        self
+    }
+
+    /// Sets the pointer-hover row background, which stays distinct from the selected background.
+    pub fn hover_background(mut self, color: Rgba) -> Self {
+        self.hover_background = color;
+        self
+    }
+
+    /// Sets the section heading foreground.
+    pub fn section_foreground(mut self, color: Rgba) -> Self {
+        self.section_foreground = color;
+        self
+    }
+
+    /// Sets the footer hint label and key foregrounds.
+    pub fn footer(mut self, foreground: Rgba, key_foreground: Rgba) -> Self {
+        self.footer_foreground = foreground;
+        self.footer_key_foreground = key_foreground;
+        self
     }
 }
 
@@ -500,13 +629,21 @@ pub struct CommandPaletteMetrics {
     panel_padding: Pixels,
     input_height: Pixels,
     row_height: Pixels,
+    row_line_gap: Pixels,
+    section_height: Pixels,
+    separator_height: Pixels,
+    footer_height: Pixels,
     horizontal_padding: Pixels,
     leading_width: Pixels,
     gap: Pixels,
     corner_radius: Pixels,
     border_width: Pixels,
+    input_size: Pixels,
     label_size: Pixels,
     secondary_size: Pixels,
+    accessory_padding: Pixels,
+    accessory_line_padding: Pixels,
+    accessory_radius: Pixels,
 }
 
 impl CommandPaletteMetrics {
@@ -514,19 +651,27 @@ impl CommandPaletteMetrics {
     pub fn new(panel_width: Pixels, row_height: Pixels) -> Self {
         Self {
             panel_width,
-            maximum_height: px(420.0),
-            top_offset: px(64.0),
+            maximum_height: px(480.0),
+            top_offset: px(52.0),
             viewport_margin: px(16.0),
-            panel_padding: px(6.0),
-            input_height: px(38.0),
+            panel_padding: px(4.0),
+            input_height: px(42.0),
             row_height,
-            horizontal_padding: px(10.0),
+            row_line_gap: px(2.0),
+            section_height: px(22.0),
+            separator_height: px(9.0),
+            footer_height: px(30.0),
+            horizontal_padding: px(12.0),
             leading_width: px(18.0),
-            gap: px(8.0),
-            corner_radius: px(10.0),
+            gap: px(10.0),
+            corner_radius: px(8.0),
             border_width: px(1.0),
+            input_size: px(14.0),
             label_size: px(13.0),
             secondary_size: px(11.0),
+            accessory_padding: px(5.0),
+            accessory_line_padding: px(2.0),
+            accessory_radius: px(4.0),
         }
     }
 
@@ -563,6 +708,25 @@ impl CommandPaletteMetrics {
         self
     }
 
+    /// Sets the gap between a row's label line and its description line.
+    pub fn row_line_gap(mut self, gap: Pixels) -> Self {
+        self.row_line_gap = gap;
+        self
+    }
+
+    /// Sets section heading and section separator heights.
+    pub fn section_spacing(mut self, section_height: Pixels, separator_height: Pixels) -> Self {
+        self.section_height = section_height;
+        self.separator_height = separator_height;
+        self
+    }
+
+    /// Sets the hint and actions footer height.
+    pub fn footer_height(mut self, height: Pixels) -> Self {
+        self.footer_height = height;
+        self
+    }
+
     /// Sets panel corner radius and stable border width.
     pub fn panel_shape(mut self, corner_radius: Pixels, border_width: Pixels) -> Self {
         self.corner_radius = corner_radius;
@@ -570,11 +734,35 @@ impl CommandPaletteMetrics {
         self
     }
 
-    /// Sets primary and secondary row font sizes.
-    pub fn font_sizes(mut self, label: Pixels, secondary: Pixels) -> Self {
+    /// Sets editor, primary, and secondary font sizes.
+    pub fn font_sizes(mut self, input: Pixels, label: Pixels, secondary: Pixels) -> Self {
+        self.input_size = input;
         self.label_size = label;
         self.secondary_size = secondary;
         self
+    }
+
+    /// Sets the padded status accessory shape.
+    pub fn accessory_shape(
+        mut self,
+        padding: Pixels,
+        line_padding: Pixels,
+        radius: Pixels,
+    ) -> Self {
+        self.accessory_padding = padding;
+        self.accessory_line_padding = line_padding;
+        self.accessory_radius = radius;
+        self
+    }
+
+    /// Returns the shared left edge of the editor, headings, status text, and row content.
+    fn content_leading_inset(&self) -> Pixels {
+        self.panel_padding + self.horizontal_padding
+    }
+
+    /// Returns the concentric radius for an inset row inside the outer panel.
+    fn row_corner_radius(&self) -> Pixels {
+        (self.corner_radius - self.panel_padding).max(px(0.0))
     }
 }
 
@@ -603,6 +791,11 @@ pub struct CommandPalette<I: Clone + Eq + 'static> {
     no_results_text: SharedString,
     items: Vec<CommandPaletteItem<I>>,
     matches: Vec<CommandPaletteMatch>,
+    rows: Vec<PaletteRow>,
+    header_actions: Vec<CommandPaletteAction>,
+    hints: Vec<CommandPaletteHint>,
+    actions_menu: Vec<MenuEntry<SharedString>>,
+    actions_menu_label: SharedString,
     selected: Option<I>,
     preferred: Option<I>,
     query: String,
@@ -610,11 +803,22 @@ pub struct CommandPalette<I: Clone + Eq + 'static> {
     loading: bool,
     open: bool,
     input: Entity<TextInput>,
+    scrollbar: Entity<OverlayScrollbar<f32>>,
     restore_focus: Option<WeakFocusHandle>,
     restore_on_activation: Option<WeakFocusHandle>,
     pointer_press: Option<I>,
-    scroll_handle: UniformListScrollHandle,
+    list: ListState,
+    scrollbar_reveal_pending: bool,
     _input_subscription: Subscription,
+    _scrollbar_subscription: Subscription,
+}
+
+/// One presented list row. Section headings and separators are derived, never caller-painted.
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum PaletteRow {
+    Section(SharedString),
+    Separator,
+    Item(usize),
 }
 
 impl<I: Clone + Eq + 'static> EventEmitter<CommandPaletteEvent<I>> for CommandPalette<I> {}
@@ -655,10 +859,28 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
                 TextInputEvent::Cancelled => {
                     palette.close(CommandPaletteCloseReason::Escape, window, cx);
                 }
-                TextInputEvent::Blurred(_) if palette.open => {
+                // The palette's own footer menu takes focus while the palette must stay open, so
+                // a blur is only a dismissal when no menu owns this Operating-System Window.
+                TextInputEvent::Blurred(_)
+                    if palette.open && !crate::menu::window_menu_is_open(window, cx) =>
+                {
                     palette.close(CommandPaletteCloseReason::FocusLost, window, cx);
                 }
                 TextInputEvent::Blurred(_) => {}
+            },
+        );
+        let scrollbar = cx.new(|_| OverlayScrollbar::<f32>::new("command-palette-scrollbar"));
+        let scrollbar_subscription = cx.subscribe_in(
+            &scrollbar,
+            window,
+            |palette, _, event: &OverlayScrollbarEvent<f32>, _, cx| match event {
+                OverlayScrollbarEvent::InteractionStarted => palette.list.scrollbar_drag_started(),
+                OverlayScrollbarEvent::OffsetRequested(offset) => {
+                    palette
+                        .list
+                        .set_offset_from_scrollbar(gpui::point(px(0.0), px(-*offset)));
+                    cx.notify();
+                }
             },
         );
         cx.observe_window_activation(window, |palette, window, cx| {
@@ -678,10 +900,17 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
         let items = unique_items(items);
         let matches = match_command_palette_items(&items, "");
         let selected = first_enabled_id(&items, &matches);
-        Self {
+        let rows = build_rows(&items, &matches);
+        let list = ListState::new(rows.len(), ListAlignment::Top, px(0.0));
+        let mut palette = Self {
             no_results_text: "No matching items".into(),
             items,
             matches,
+            rows,
+            header_actions: Vec::new(),
+            hints: Vec::new(),
+            actions_menu: Vec::new(),
+            actions_menu_label: "Actions\u{2026}".into(),
             selected,
             preferred: None,
             query: String::new(),
@@ -689,12 +918,30 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
             loading: false,
             open: false,
             input,
+            scrollbar,
             restore_focus: None,
             restore_on_activation: None,
             pointer_press: None,
-            scroll_handle: UniformListScrollHandle::new(),
+            list,
+            scrollbar_reveal_pending: false,
             _input_subscription: input_subscription,
-        }
+            _scrollbar_subscription: scrollbar_subscription,
+        };
+        palette.install_scroll_handler(cx);
+        palette
+    }
+
+    fn install_scroll_handler(&mut self, cx: &mut gpui::Context<Self>) {
+        let palette = cx.entity().downgrade();
+        // GPUI dispatches this handler while it holds the list state's mutable borrow, so the
+        // handler must not read that state. It only records the request; the next render reads
+        // the scroll geometry and reveals the scrollbar.
+        self.list.set_scroll_handler(move |_, _, cx| {
+            let _ = palette.update(cx, |palette, cx| {
+                palette.scrollbar_reveal_pending = true;
+                cx.notify();
+            });
+        });
     }
 
     /// Sets the identity preferred when no stable enabled selection remains.
@@ -711,6 +958,47 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
         cx: &mut gpui::Context<Self>,
     ) {
         self.no_results_text = text.into();
+        cx.notify();
+    }
+
+    /// Replaces the controls rendered at the trailing edge of the search line.
+    ///
+    /// Activating one emits [`CommandPaletteEvent::HeaderAction`] with the caller's identity.
+    pub fn set_header_actions(
+        &mut self,
+        actions: Vec<CommandPaletteAction>,
+        cx: &mut gpui::Context<Self>,
+    ) {
+        self.header_actions = actions;
+        cx.notify();
+    }
+
+    /// Replaces the footer hints. An empty list removes the footer unless an actions menu remains.
+    pub fn set_hints(&mut self, hints: Vec<CommandPaletteHint>, cx: &mut gpui::Context<Self>) {
+        self.hints = hints;
+        cx.notify();
+    }
+
+    /// Replaces the footer actions menu. An empty list removes its trigger.
+    ///
+    /// Activating an entry emits [`CommandPaletteEvent::MenuAction`]. The palette stays open while
+    /// the menu holds focus and closes only once the caller acts on the entry.
+    pub fn set_actions_menu(
+        &mut self,
+        entries: Vec<MenuEntry<SharedString>>,
+        cx: &mut gpui::Context<Self>,
+    ) {
+        self.actions_menu = entries;
+        cx.notify();
+    }
+
+    /// Replaces the footer actions-menu trigger label, which is also its accessibility name.
+    pub fn set_actions_menu_label(
+        &mut self,
+        label: impl Into<SharedString>,
+        cx: &mut gpui::Context<Self>,
+    ) {
+        self.actions_menu_label = label.into();
         cx.notify();
     }
 
@@ -864,7 +1152,35 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
 
     fn recompute_matches(&mut self) {
         self.matches = match_command_palette_items(&self.items, &self.query);
+        self.rows = build_rows(&self.items, &self.matches);
+        self.list.reset(self.rows.len());
         self.repair_selection();
+    }
+
+    /// Returns the list row index presenting `position`, which section headings shift.
+    fn row_index_for_match(&self, position: usize) -> Option<usize> {
+        self.rows
+            .iter()
+            .position(|row| *row == PaletteRow::Item(position))
+    }
+
+    fn scrollbar_metrics(&self) -> Option<ScrollMetrics<f32>> {
+        let track_height = f32::from(self.list.viewport_bounds().size.height);
+        let maximum_offset = f32::from(self.list.max_offset_for_scrollbar().height);
+        let offset = f32::from(-self.list.scroll_px_offset_for_scrollbar().y);
+        ScrollMetrics::for_pixels(0.0, track_height, maximum_offset, offset)
+    }
+
+    fn sync_scrollbar(&self, cx: &mut gpui::Context<Self>) {
+        let metrics = self.scrollbar_metrics();
+        self.scrollbar
+            .update(cx, |scrollbar, cx| scrollbar.sync(metrics, cx));
+    }
+
+    fn reveal_scrollbar(&self, cx: &mut gpui::Context<Self>) {
+        let metrics = self.scrollbar_metrics();
+        self.scrollbar
+            .update(cx, |scrollbar, cx| scrollbar.reveal(metrics, cx));
     }
 
     fn repair_selection(&mut self) {
@@ -953,8 +1269,9 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
             .map(|item| item.id.clone());
         if next.is_some() && self.selected != next {
             self.selected = next;
-            self.scroll_handle
-                .scroll_to_item(position, ScrollStrategy::Center);
+            if let Some(row) = self.row_index_for_match(position) {
+                self.list.scroll_to_reveal_item(row);
+            }
             cx.notify();
         }
     }
@@ -1020,6 +1337,8 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
         self.open = false;
         self.loading = false;
         self.pointer_press = None;
+        self.scrollbar
+            .update(cx, |scrollbar, cx| scrollbar.reset(cx));
         let restore_focus = self.restore_focus.take();
         if reason == CommandPaletteCloseReason::Deactivated {
             self.restore_on_activation = restore_focus;
@@ -1037,6 +1356,33 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
         cx.notify();
         true
     }
+}
+
+/// Flattens matches into presented rows, inserting a heading whenever the section changes.
+fn build_rows<I>(
+    items: &[CommandPaletteItem<I>],
+    matches: &[CommandPaletteMatch],
+) -> Vec<PaletteRow> {
+    let mut rows = Vec::with_capacity(matches.len());
+    let mut current: Option<SharedString> = None;
+    let mut started = false;
+    for (position, matched) in matches.iter().enumerate() {
+        let Some(item) = items.get(matched.item_index) else {
+            continue;
+        };
+        if !started || item.section != current {
+            if started {
+                rows.push(PaletteRow::Separator);
+            }
+            if let Some(section) = item.section.clone() {
+                rows.push(PaletteRow::Section(section));
+            }
+            current = item.section.clone();
+        }
+        started = true;
+        rows.push(PaletteRow::Item(position));
+    }
+    rows
 }
 
 fn unique_items<I: Clone + Eq>(items: Vec<CommandPaletteItem<I>>) -> Vec<CommandPaletteItem<I>> {
@@ -1070,33 +1416,39 @@ impl<I: Clone + Eq + 'static> Render for CommandPalette<I> {
             return div().into_any_element();
         }
         let theme = *cx.global::<CommandPaletteTheme>();
-        let viewport = window.viewport_size();
-        let available_width = (viewport.width - theme.metrics.viewport_margin * 2.0).max(px(0.0));
-        let panel_width = theme.metrics.panel_width.min(available_width);
-        let left = ((viewport.width - panel_width) / 2.0).max(px(0.0));
-        let top = theme
-            .metrics
-            .top_offset
-            .min((viewport.height - theme.metrics.viewport_margin).max(px(0.0)));
-        let result_rows = if self.loading || self.matches.is_empty() {
-            1
+        let metrics = theme.metrics;
+        if std::mem::take(&mut self.scrollbar_reveal_pending) {
+            self.reveal_scrollbar(cx);
         } else {
-            self.matches.len()
+            self.sync_scrollbar(cx);
+        }
+        let viewport = window.viewport_size();
+        let available_width = (viewport.width - metrics.viewport_margin * 2.0).max(px(0.0));
+        let panel_width = metrics.panel_width.min(available_width);
+        let left = ((viewport.width - panel_width) / 2.0).max(px(0.0));
+        let top = metrics
+            .top_offset
+            .min((viewport.height - metrics.viewport_margin).max(px(0.0)));
+
+        let footer = self.has_footer();
+        let content_height = if self.loading || self.matches.is_empty() {
+            metrics.row_height
+        } else {
+            rows_height(&self.rows, metrics)
         };
-        let desired_height = theme.metrics.panel_padding * 3.0
-            + theme.metrics.input_height
-            + theme.metrics.row_height * result_rows;
-        let available_height = (viewport.height - top - theme.metrics.viewport_margin).max(px(0.0));
-        let panel_height = desired_height
-            .min(theme.metrics.maximum_height)
+        let chrome_height = chrome_height(metrics, footer);
+        let available_height = (viewport.height - top - metrics.viewport_margin).max(px(0.0));
+        let panel_height = (chrome_height + content_height)
+            .min(metrics.maximum_height)
             .min(available_height);
+        let list_height = (panel_height - chrome_height).max(px(0.0));
 
         let panel_bounds = gpui::Bounds::new(
             gpui::point(left, top),
             gpui::size(panel_width, panel_height),
         );
         let outside = self.render_outside_tracker(panel_bounds, cx);
-        let panel = self.render_panel(panel_width, panel_height, theme, cx);
+        let panel = self.render_panel(panel_width, panel_height, list_height, theme, cx);
         let overlay = div()
             .relative()
             .w(viewport.width)
@@ -1121,19 +1473,23 @@ impl<I: Clone + Eq + 'static> Render for CommandPalette<I> {
                 cx.stop_propagation();
             }));
 
-        deferred(
-            anchored()
-                .anchor(Corner::TopLeft)
-                .position(gpui::point(px(0.0), px(0.0)))
-                .snap_to_window()
-                .child(overlay),
-        )
-        .with_priority(OVERLAY_PRIORITY)
-        .into_any_element()
+        // The palette is not itself deferred: GPUI collects deferred draws once per frame, so a
+        // deferred palette could not host its own deferred footer menu. Its owner renders it last,
+        // and the anchored full-window layer keeps it above the surrounding chrome.
+        anchored()
+            .anchor(Corner::TopLeft)
+            .position(gpui::point(px(0.0), px(0.0)))
+            .snap_to_window()
+            .child(overlay)
+            .into_any_element()
     }
 }
 
 impl<I: Clone + Eq + 'static> CommandPalette<I> {
+    fn has_footer(&self) -> bool {
+        !self.hints.is_empty() || !self.actions_menu.is_empty()
+    }
+
     fn render_outside_tracker(
         &self,
         panel_bounds: gpui::Bounds<Pixels>,
@@ -1145,6 +1501,11 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
             move |_, _, window, _| {
                 window.on_mouse_event(move |event: &MouseDownEvent, phase, window, cx| {
                     if !phase.capture() || panel_bounds.contains(&event.position) {
+                        return;
+                    }
+                    // A menu opened from this palette paints outside the panel and owns its own
+                    // dismissal, so an outside press while it is open is not a palette dismissal.
+                    if crate::menu::window_menu_is_open(window, cx) {
                         return;
                     }
                     window.prevent_default();
@@ -1164,27 +1525,15 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
         &self,
         width: Pixels,
         height: Pixels,
+        list_height: Pixels,
         theme: CommandPaletteTheme,
         cx: &mut gpui::Context<Self>,
     ) -> AnyElement {
         let paint = theme.paint;
         let metrics = theme.metrics;
-        let input = div()
-            .h(metrics.input_height)
-            .mx(metrics.panel_padding)
-            .mt(metrics.panel_padding)
-            .px(metrics.horizontal_padding)
-            .flex()
-            .items_center()
-            .rounded((metrics.corner_radius - metrics.panel_padding).max(px(0.0)))
-            .border(metrics.border_width)
-            .border_color(paint.input_border)
-            .bg(paint.input_background)
-            .text_size(metrics.label_size)
-            .child(self.input.clone());
-
         let content = if self.loading {
-            status_row("Loading…", "command-palette-loading", metrics, paint).into_any_element()
+            status_row("Loading\u{2026}", "command-palette-loading", metrics, paint)
+                .into_any_element()
         } else if self.matches.is_empty() {
             status_row(
                 self.no_results_text.clone(),
@@ -1194,39 +1543,15 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
             )
             .into_any_element()
         } else {
-            let items = Rc::new(self.items.clone());
-            let matches = Rc::new(self.matches.clone());
-            let selected = self.selected.clone();
-            let palette = cx.entity().downgrade();
-            uniform_list(
-                "command-palette-results",
-                matches.len(),
-                move |range, _, _| {
-                    range
-                        .filter_map(|position| {
-                            let matched = matches.get(position)?.clone();
-                            let item = items.get(matched.item_index)?.clone();
-                            Some(render_row(
-                                palette.clone(),
-                                position,
-                                item.clone(),
-                                matched.label_highlights,
-                                selected.as_ref() == Some(&item.id),
-                                theme,
-                            ))
-                        })
-                        .collect::<Vec<_>>()
-                },
-            )
-            .track_scroll(self.scroll_handle.clone())
-            .h((height - metrics.input_height - metrics.panel_padding * 3.0).max(px(0.0)))
-            .into_any_element()
+            self.render_results(list_height, theme, cx)
         };
 
         div()
             .debug_selector(|| "command-palette-panel".to_owned())
             .w(width)
             .h(height)
+            .flex()
+            .flex_col()
             .overflow_hidden()
             .rounded(metrics.corner_radius)
             .shadow_lg()
@@ -1234,11 +1559,272 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
             .border_color(paint.border)
             .bg(paint.background)
             .block_mouse_except_scroll()
-            .child(input)
-            .child(div().h(metrics.panel_padding))
-            .child(content)
+            .child(self.render_editor(theme, cx))
+            .child(separator_line(metrics, paint))
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .py(metrics.panel_padding)
+                    .child(content),
+            )
+            .when(self.has_footer(), |panel| {
+                panel
+                    .child(separator_line(metrics, paint))
+                    .child(self.render_footer(theme, cx))
+            })
             .into_any_element()
     }
+
+    /// Renders the borderless search line and its trailing controls as one continuous surface.
+    fn render_editor(
+        &self,
+        theme: CommandPaletteTheme,
+        cx: &mut gpui::Context<Self>,
+    ) -> AnyElement {
+        let metrics = theme.metrics;
+        let palette = cx.entity().downgrade();
+        div()
+            .debug_selector(|| "command-palette-editor".to_owned())
+            .w_full()
+            .h(metrics.input_height)
+            .flex_shrink_0()
+            .pl(metrics.content_leading_inset())
+            .pr(metrics.panel_padding)
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(metrics.gap)
+            .text_size(metrics.input_size)
+            .child(div().min_w_0().flex_1().child(self.input.clone()))
+            .when(!self.header_actions.is_empty(), |editor| {
+                editor.child(
+                    div()
+                        .flex_shrink_0()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .children(
+                            self.header_actions
+                                .iter()
+                                .enumerate()
+                                .map(|(index, action)| {
+                                    render_header_action(palette.clone(), index, action)
+                                }),
+                        ),
+                )
+            })
+            .into_any_element()
+    }
+
+    fn render_results(
+        &self,
+        list_height: Pixels,
+        theme: CommandPaletteTheme,
+        cx: &mut gpui::Context<Self>,
+    ) -> AnyElement {
+        let items = Rc::new(self.items.clone());
+        let matches = Rc::new(self.matches.clone());
+        let rows = Rc::new(self.rows.clone());
+        let selected = self.selected.clone();
+        let leading_reserved = self.items.iter().any(|item| item.leading_icon.is_some());
+        let palette = cx.entity().downgrade();
+        div()
+            .relative()
+            .size_full()
+            .child(
+                list(self.list.clone(), move |index, _, _| {
+                    let Some(row) = rows.get(index) else {
+                        return div().into_any_element();
+                    };
+                    match row {
+                        PaletteRow::Section(label) => {
+                            render_section(label.clone(), theme).into_any_element()
+                        }
+                        PaletteRow::Separator => render_row_separator(theme).into_any_element(),
+                        PaletteRow::Item(position) => matches
+                            .get(*position)
+                            .and_then(|matched| {
+                                items.get(matched.item_index).map(|item| {
+                                    render_row(
+                                        palette.clone(),
+                                        *position,
+                                        item.clone(),
+                                        matched.label_highlights.clone(),
+                                        matched.description_highlights.clone(),
+                                        selected.as_ref() == Some(&item.id),
+                                        leading_reserved,
+                                        theme,
+                                    )
+                                })
+                            })
+                            .unwrap_or_else(|| div().into_any_element()),
+                    }
+                })
+                .h(list_height)
+                .w_full(),
+            )
+            .child(self.scrollbar.clone())
+            .into_any_element()
+    }
+
+    fn render_footer(
+        &self,
+        theme: CommandPaletteTheme,
+        cx: &mut gpui::Context<Self>,
+    ) -> AnyElement {
+        let paint = theme.paint;
+        let metrics = theme.metrics;
+        let palette = cx.entity().downgrade();
+        div()
+            .debug_selector(|| "command-palette-footer".to_owned())
+            .w_full()
+            .h(metrics.footer_height)
+            .flex_shrink_0()
+            .px(metrics.content_leading_inset())
+            .flex()
+            .flex_row()
+            .items_center()
+            .justify_end()
+            .gap(metrics.gap)
+            .children(
+                self.hints
+                    .iter()
+                    .map(|hint| render_hint(hint, metrics, paint)),
+            )
+            .when(!self.actions_menu.is_empty(), |footer| {
+                let label = self.actions_menu_label.clone();
+                footer.child(
+                    Menu::new(
+                        "command-palette-actions-menu",
+                        label,
+                        self.actions_menu.clone(),
+                    )
+                    .size(MenuSize::Regular)
+                    .debug_selector("command-palette-actions-menu")
+                    .on_activate(
+                        move |activation: &MenuActivation<SharedString>, _, cx| {
+                            let action = activation.action().clone();
+                            let _ = palette.update(cx, |_, cx| {
+                                cx.emit(CommandPaletteEvent::<I>::MenuAction(action));
+                            });
+                        },
+                    ),
+                )
+            })
+            .into_any_element()
+    }
+}
+
+fn chrome_height(metrics: CommandPaletteMetrics, footer: bool) -> Pixels {
+    let footer_height = if footer {
+        metrics.border_width + metrics.footer_height
+    } else {
+        px(0.0)
+    };
+    metrics.panel_padding * 2.0 + metrics.input_height + metrics.border_width + footer_height
+}
+
+fn rows_height(rows: &[PaletteRow], metrics: CommandPaletteMetrics) -> Pixels {
+    rows.iter().fold(px(0.0), |height, row| {
+        height
+            + match row {
+                PaletteRow::Section(_) => metrics.section_height,
+                PaletteRow::Separator => metrics.separator_height,
+                PaletteRow::Item(_) => metrics.row_height,
+            }
+    })
+}
+
+fn separator_line(metrics: CommandPaletteMetrics, paint: CommandPalettePaint) -> impl IntoElement {
+    div()
+        .w_full()
+        .h(metrics.border_width)
+        .flex_shrink_0()
+        .bg(paint.separator)
+}
+
+fn render_hint(
+    hint: &CommandPaletteHint,
+    metrics: CommandPaletteMetrics,
+    paint: CommandPalettePaint,
+) -> impl IntoElement {
+    div()
+        .flex_shrink_0()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(metrics.accessory_padding)
+        .text_size(metrics.secondary_size)
+        .child(
+            div()
+                .text_color(paint.footer_foreground)
+                .child(hint.label.clone()),
+        )
+        .child(
+            div()
+                .text_color(paint.footer_key_foreground)
+                .child(hint.key.clone()),
+        )
+}
+
+/// Renders one search-line control as a ghost icon button from the installed button catalog.
+fn render_header_action<I: Clone + Eq + 'static>(
+    palette: WeakEntity<CommandPalette<I>>,
+    index: usize,
+    action: &CommandPaletteAction,
+) -> AnyElement {
+    let id = action.id.clone();
+    let icon = action.icon.clone();
+    let mut button = IconButton::new(
+        ("command-palette-header-action", index),
+        action.accessibility_name.clone(),
+        move |foreground| icon(foreground),
+    )
+    .variant(ButtonVariant::Ghost)
+    .size(ButtonSize::Compact)
+    .disabled(action.disabled)
+    // The editor keeps keyboard focus so the query stays live while a control is pressed.
+    .tab_stop(false)
+    .on_activate(move |_, _, cx| {
+        let id = id.clone();
+        let _ = palette.update(cx, |_, cx| {
+            cx.emit(CommandPaletteEvent::<I>::HeaderAction(id));
+        });
+    });
+    if let Some(selector) = action.debug_selector.clone() {
+        button = button.debug_selector(selector);
+    }
+    button.into_any_element()
+}
+
+fn render_section(label: SharedString, theme: CommandPaletteTheme) -> impl IntoElement {
+    let metrics = theme.metrics;
+    div()
+        .w_full()
+        .h(metrics.section_height)
+        .pl(metrics.content_leading_inset())
+        .flex()
+        .items_center()
+        .text_size(metrics.secondary_size)
+        .text_color(theme.paint.section_foreground)
+        .child(label)
+}
+
+fn render_row_separator(theme: CommandPaletteTheme) -> impl IntoElement {
+    let metrics = theme.metrics;
+    div()
+        .w_full()
+        .h(metrics.separator_height)
+        .px(metrics.panel_padding)
+        .flex()
+        .items_center()
+        .child(
+            div()
+                .w_full()
+                .h(metrics.border_width)
+                .bg(theme.paint.separator),
+        )
 }
 
 fn status_row(
@@ -1249,8 +1835,9 @@ fn status_row(
 ) -> impl IntoElement {
     div()
         .debug_selector(move || debug_selector.to_owned())
+        .w_full()
         .h(metrics.row_height)
-        .px(metrics.horizontal_padding + metrics.panel_padding)
+        .px(metrics.content_leading_inset())
         .flex()
         .items_center()
         .text_size(metrics.secondary_size)
@@ -1258,12 +1845,18 @@ fn status_row(
         .child(text.into())
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one row's complete presentation inputs are clearer than an intermediate struct"
+)]
 fn render_row<I: Clone + Eq + 'static>(
     palette: WeakEntity<CommandPalette<I>>,
     position: usize,
     item: CommandPaletteItem<I>,
-    highlights: Vec<Range<usize>>,
+    label_highlights: Vec<Range<usize>>,
+    description_highlights: Vec<Range<usize>>,
     selected: bool,
+    leading_reserved: bool,
     theme: CommandPaletteTheme,
 ) -> AnyElement {
     let paint = theme.paint;
@@ -1277,13 +1870,11 @@ fn render_row<I: Clone + Eq + 'static>(
     };
     let secondary = if item.disabled {
         paint.disabled
-    } else if selected {
-        paint.selected_foreground
     } else {
         paint.muted
     };
-    let match_foreground = if selected {
-        paint.selected_foreground
+    let match_foreground = if item.disabled {
+        paint.disabled
     } else {
         paint.match_foreground
     };
@@ -1295,16 +1886,19 @@ fn render_row<I: Clone + Eq + 'static>(
         .id(("command-palette-row", position))
         .debug_selector(move || debug_selector.unwrap_or_else(|| logical_name.to_string()))
         .relative()
+        .w_full()
         .h(metrics.row_height)
-        .mx(metrics.panel_padding)
         .px(metrics.horizontal_padding)
         .flex()
         .items_center()
         .gap(metrics.gap)
-        .rounded((metrics.corner_radius - metrics.panel_padding).max(px(0.0)))
+        .rounded(metrics.row_corner_radius())
         .text_color(foreground)
         .cursor_default()
         .when(selected, |row| row.bg(paint.selected_background))
+        .when(!item.disabled && !selected, |row| {
+            row.hover(|row| row.bg(paint.hover_background))
+        })
         .when(!item.disabled, |row| {
             let id = id.clone();
             row.on_hover(move |hovered, _, cx| {
@@ -1314,46 +1908,65 @@ fn render_row<I: Clone + Eq + 'static>(
             })
         });
 
-    let mut leading = div()
-        .w(metrics.leading_width)
-        .flex_shrink_0()
-        .flex()
-        .items_center()
-        .justify_center();
-    if let Some(icon) = item.leading_icon.clone() {
-        leading = leading.child(icon(foreground));
+    if leading_reserved {
+        let mut leading = div()
+            .w(metrics.leading_width)
+            .flex_shrink_0()
+            .flex()
+            .items_center()
+            .justify_center();
+        if let Some(icon) = item.leading_icon.clone() {
+            leading = leading.child(icon(foreground));
+        }
+        row = row.child(leading);
     }
-    let label = highlighted_label(
-        item.label.clone(),
-        &highlights,
-        foreground,
-        match_foreground,
-    );
+
+    let label_line = div()
+        .w_full()
+        .min_w_0()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(metrics.gap)
+        .child(div().min_w_0().flex_1().child(highlighted_text(
+            item.label.clone(),
+            &label_highlights,
+            foreground,
+            match_foreground,
+            metrics.label_size,
+        )))
+        .when_some(item.trailing.clone(), |line, accessory| {
+            line.child(render_accessory(
+                accessory,
+                secondary,
+                paint.selected_background,
+                metrics,
+            ))
+        });
     let text = div()
         .min_w_0()
-        .flex_grow()
+        .flex_1()
         .flex()
         .flex_col()
         .justify_center()
-        .child(label)
+        .gap(metrics.row_line_gap)
+        .child(label_line)
         .when_some(item.description.clone(), |text, description| {
             text.child(
                 div()
-                    .truncate()
-                    .text_size(metrics.secondary_size)
-                    .text_color(secondary)
-                    .child(description),
+                    .w_full()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .child(highlighted_text(
+                        description,
+                        &description_highlights,
+                        secondary,
+                        match_foreground,
+                        metrics.secondary_size,
+                    )),
             )
         });
-    row = row.child(leading).child(text);
-    if let Some(accessory) = item.trailing.clone() {
-        row = row.child(render_accessory(
-            accessory,
-            secondary,
-            paint.selected_background,
-            metrics,
-        ));
-    }
+    row = row.child(text);
 
     if !item.disabled {
         let down_palette = palette.clone();
@@ -1413,36 +2026,42 @@ fn render_row<I: Clone + Eq + 'static>(
             .inset_0(),
         );
     }
-    row.into_any_element()
+    div()
+        .w_full()
+        .px(metrics.panel_padding)
+        .child(row)
+        .into_any_element()
 }
 
-fn highlighted_label(
-    label: SharedString,
+fn highlighted_text(
+    text: SharedString,
     ranges: &[Range<usize>],
     foreground: Rgba,
     highlight: Rgba,
+    size: Pixels,
 ) -> AnyElement {
-    let text = label.as_ref();
+    let source = text.as_ref();
     let mut content = div()
         .min_w_0()
         .flex()
         .items_center()
         .truncate()
+        .text_size(size)
         .text_color(foreground);
     let mut cursor = 0;
     for range in ranges {
         if range.start > cursor {
-            content = content.child(text[cursor..range.start].to_owned());
+            content = content.child(source[cursor..range.start].to_owned());
         }
         content = content.child(
             div()
                 .text_color(highlight)
-                .child(text[range.clone()].to_owned()),
+                .child(source[range.clone()].to_owned()),
         );
         cursor = range.end;
     }
-    if cursor < text.len() {
-        content = content.child(text[cursor..].to_owned());
+    if cursor < source.len() {
+        content = content.child(source[cursor..].to_owned());
     }
     content.into_any_element()
 }
@@ -1462,9 +2081,9 @@ fn render_accessory(
             .into_any_element(),
         CommandPaletteAccessory::Status(text) => div()
             .flex_shrink_0()
-            .px(px(5.0))
-            .py(px(2.0))
-            .rounded(px(4.0))
+            .px(metrics.accessory_padding)
+            .py(metrics.accessory_line_padding)
+            .rounded(metrics.accessory_radius)
             .bg(status_background)
             .text_size(metrics.secondary_size)
             .text_color(color)
@@ -1474,7 +2093,7 @@ fn render_accessory(
             .flex_shrink_0()
             .text_size(metrics.secondary_size)
             .text_color(color)
-            .child("✓")
+            .child("\u{2713}")
             .into_any_element(),
     }
 }
@@ -1484,8 +2103,8 @@ mod tests {
     use std::{cell::RefCell, rc::Rc};
 
     use gpui::{
-        Context, Entity, FocusHandle, Modifiers, Render, TestAppContext, VisualTestContext, Window,
-        point, rgba,
+        Context, Entity, FocusHandle, Modifiers, Render, ScrollDelta, ScrollWheelEvent,
+        TestAppContext, TouchPhase, VisualTestContext, Window, point, rgba,
     };
 
     use super::*;
@@ -1501,11 +2120,13 @@ mod tests {
                 rgba(0x252530ff),
                 rgba(0xffffffff),
                 rgba(0x7e98e8ff),
-                rgba(0x141415ff),
-                rgba(0x405065ff),
                 rgba(0x6e94b266),
                 rgba(0xcdcdcdff),
-            ),
+            )
+            .separator(rgba(0x252530ff))
+            .hover_background(rgba(0x1c1c24ff))
+            .section_foreground(rgba(0x878787ff))
+            .footer(rgba(0x878787ff), rgba(0x606079ff)),
             CommandPaletteMetrics::new(px(420.0), px(40.0)).panel_geometry(px(260.0), px(24.0)),
         )
     }
@@ -1632,8 +2253,53 @@ mod tests {
         &'a mut VisualTestContext,
     );
 
+    fn install_control_themes(cx: &mut TestAppContext) {
+        let variant = crate::button::ButtonVariantStyle::new(
+            crate::button::ButtonPaint::new(rgba(0x00000000), rgba(0xcdcdcdff), rgba(0x00000000)),
+            crate::button::ButtonPaint::new(rgba(0x252530ff), rgba(0xcdcdcdff), rgba(0x00000000)),
+            crate::button::ButtonPaint::new(rgba(0x252530ff), rgba(0xcdcdcdff), rgba(0x00000000)),
+            crate::button::ButtonPaint::new(rgba(0x141415ff), rgba(0x606079ff), rgba(0x00000000)),
+        );
+        let button_metrics = crate::button::ButtonMetrics::new(px(24.0));
+        cx.set_global(crate::button::ButtonTheme::new(
+            crate::button::ButtonVariants::new(
+                variant, variant, variant, variant, variant, variant,
+            ),
+            crate::button::ButtonSizes::new(
+                button_metrics,
+                button_metrics,
+                button_metrics,
+                button_metrics,
+            ),
+            rgba(0x405065ff),
+        ));
+        let menu_paint = crate::menu::MenuPaint::new(
+            rgba(0x141415ff),
+            rgba(0x252530ff),
+            rgba(0xcdcdcdff),
+            rgba(0x878787ff),
+            rgba(0x606079ff),
+            rgba(0x252530ff),
+            rgba(0xcdcdcdff),
+            rgba(0xd8647eff),
+            rgba(0x252530ff),
+        );
+        let menu_metrics = crate::menu::MenuMetrics::new(px(160.0), px(26.0));
+        cx.set_global(crate::menu::MenuTheme::new(
+            menu_paint,
+            crate::menu::MenuSizes::new(menu_metrics, menu_metrics, menu_metrics),
+        ));
+        cx.update(crate::menu::init);
+        cx.set_global(crate::overlay_scrollbar::ScrollbarTheme::new(
+            rgba(0x33373878),
+            rgba(0x60607978),
+            rgba(0xcdcdcdff),
+        ));
+    }
+
     fn palette_window(cx: &mut TestAppContext) -> PaletteWindow<'_> {
         cx.set_global(test_theme());
+        install_control_themes(cx);
         cx.update(crate::text_input::init);
         cx.update(super::init);
         let events = Rc::new(RefCell::new(Vec::new()));
@@ -1673,6 +2339,209 @@ mod tests {
         });
         cx.run_until_parked();
         prior
+    }
+
+    #[gpui::test]
+    fn wheel_scrolling_the_results_should_not_reenter_the_list_state(cx: &mut TestAppContext) {
+        let (root, palette, _, _, cx) = palette_window(cx);
+        open_palette(&root, &palette, cx);
+
+        // Overflow the panel so the list actually scrolls and notifies its scroll handler.
+        palette.update(cx, |palette, cx| {
+            palette.set_items(
+                (0..64)
+                    .map(|index| CommandPaletteItem::new(index, format!("Command {index}")))
+                    .collect(),
+                cx,
+            );
+        });
+        cx.run_until_parked();
+
+        let panel = cx
+            .debug_bounds("command-palette-panel")
+            .expect("the palette panel was not rendered");
+        cx.simulate_event(ScrollWheelEvent {
+            position: panel.center(),
+            delta: ScrollDelta::Pixels(point(px(0.0), px(-240.0))),
+            modifiers: Modifiers::none(),
+            touch_phase: TouchPhase::Moved,
+        });
+        cx.run_until_parked();
+
+        assert!(
+            palette.read_with(cx, |palette, _| palette.is_open()),
+            "wheel scrolling the results closed the palette"
+        );
+        assert!(
+            cx.debug_bounds("command-palette-panel").is_some(),
+            "the palette stopped rendering after a wheel scroll"
+        );
+    }
+
+    #[gpui::test]
+    fn selected_row_highlight_should_span_the_panel_inset(cx: &mut TestAppContext) {
+        let (root, palette, _, _, cx) = palette_window(cx);
+        open_palette(&root, &palette, cx);
+
+        let metrics = test_theme().metrics;
+        let panel = cx
+            .debug_bounds("command-palette-panel")
+            .expect("the palette panel was not rendered");
+        let row = cx
+            .debug_bounds("row-open")
+            .expect("the selected row was not rendered");
+
+        assert_eq!(
+            row.size.width,
+            panel.size.width - metrics.panel_padding * 2.0 - metrics.border_width * 2.0,
+            "the selected row did not span the panel inset: {row:?} in {panel:?}"
+        );
+    }
+
+    #[gpui::test]
+    fn editor_and_row_content_should_share_one_leading_edge(cx: &mut TestAppContext) {
+        let (root, palette, _, _, cx) = palette_window(cx);
+        open_palette(&root, &palette, cx);
+
+        let metrics = test_theme().metrics;
+        let editor = cx
+            .debug_bounds("command-palette-editor")
+            .expect("the palette editor was not rendered");
+        let row = cx
+            .debug_bounds("row-open")
+            .expect("the first row was not rendered");
+
+        assert_eq!(
+            editor.left() + metrics.content_leading_inset(),
+            row.left() + metrics.horizontal_padding,
+            "the editor text and row content did not share a leading edge: {editor:?} {row:?}"
+        );
+    }
+
+    #[gpui::test]
+    fn footer_should_render_only_with_hints_or_an_actions_menu(cx: &mut TestAppContext) {
+        let (root, palette, _, _, cx) = palette_window(cx);
+        open_palette(&root, &palette, cx);
+
+        assert!(
+            cx.debug_bounds("command-palette-footer").is_none(),
+            "a palette without hints or an actions menu rendered a footer"
+        );
+
+        palette.update(cx, |palette, cx| {
+            palette.set_hints(vec![CommandPaletteHint::new("Open", "\u{21b5}")], cx);
+        });
+        cx.run_until_parked();
+
+        assert!(
+            cx.debug_bounds("command-palette-footer").is_some(),
+            "a palette with hints did not render a footer"
+        );
+    }
+
+    #[gpui::test]
+    fn header_action_press_should_emit_its_caller_identity(cx: &mut TestAppContext) {
+        let (root, palette, events, _, cx) = palette_window(cx);
+        open_palette(&root, &palette, cx);
+
+        palette.update(cx, |palette, cx| {
+            palette.set_header_actions(
+                vec![
+                    CommandPaletteAction::new("toggle-ignored", "Toggle ignored", |_| {
+                        div().into_any_element()
+                    })
+                    .debug_selector("header-toggle-ignored"),
+                ],
+                cx,
+            );
+        });
+        cx.run_until_parked();
+
+        let button = cx
+            .debug_bounds("header-toggle-ignored")
+            .expect("the search-line control was not rendered");
+        cx.simulate_click(button.center(), Modifiers::default());
+        cx.run_until_parked();
+
+        assert!(
+            events
+                .borrow()
+                .contains(&CommandPaletteEvent::HeaderAction("toggle-ignored".into())),
+            "the search-line control did not emit its caller identity: {:?}",
+            events.borrow()
+        );
+        assert!(
+            palette.read_with(cx, |palette, _| palette.is_open()),
+            "pressing a search-line control closed the palette"
+        );
+    }
+
+    #[gpui::test]
+    fn actions_menu_should_take_focus_without_closing_the_palette(cx: &mut TestAppContext) {
+        let (root, palette, _, _, cx) = palette_window(cx);
+        open_palette(&root, &palette, cx);
+
+        palette.update(cx, |palette, cx| {
+            palette.set_actions_menu(
+                vec![MenuEntry::action(
+                    "Copy path",
+                    SharedString::from("copy-path"),
+                )],
+                cx,
+            );
+        });
+        cx.run_until_parked();
+
+        let trigger = cx
+            .debug_bounds("command-palette-actions-menu")
+            .expect("the actions menu trigger was not rendered");
+        cx.simulate_click(trigger.center(), Modifiers::default());
+        cx.run_until_parked();
+
+        assert!(
+            palette.read_with(cx, |palette, _| palette.is_open()),
+            "opening the actions menu closed the palette"
+        );
+    }
+
+    #[gpui::test]
+    fn section_boundaries_should_emit_one_heading_each(cx: &mut TestAppContext) {
+        let (root, palette, _, _, cx) = palette_window(cx);
+        open_palette(&root, &palette, cx);
+
+        palette.update(cx, |palette, cx| {
+            palette.set_items(
+                vec![
+                    CommandPaletteItem::new(1, "Recent One").section("Recent"),
+                    CommandPaletteItem::new(2, "Recent Two").section("Recent"),
+                    CommandPaletteItem::new(3, "All One").section("All"),
+                ],
+                cx,
+            );
+        });
+        cx.run_until_parked();
+
+        let rows = palette.read_with(cx, |palette, _| palette.rows.clone());
+        assert_eq!(
+            rows,
+            vec![
+                PaletteRow::Section("Recent".into()),
+                PaletteRow::Item(0),
+                PaletteRow::Item(1),
+                PaletteRow::Separator,
+                PaletteRow::Section("All".into()),
+                PaletteRow::Item(2),
+            ]
+        );
+    }
+
+    #[test]
+    fn description_matches_should_report_their_own_highlight_ranges() {
+        let items = vec![CommandPaletteItem::new(1, "Open").description("Choose a directory")];
+        let matches = match_command_palette_items(&items, "directory");
+
+        assert!(matches[0].label_highlights.is_empty());
+        assert_eq!(matches[0].description_highlights, vec![9..18]);
     }
 
     #[gpui::test]

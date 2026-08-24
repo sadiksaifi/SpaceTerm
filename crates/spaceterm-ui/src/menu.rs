@@ -477,10 +477,12 @@ type MenuLifecycleHandler = Rc<dyn Fn(&MenuLifecycleEvent, &mut App)>;
 type ContextOpenHandler = Rc<dyn Fn(&ContextMenuOpenRequest, &mut Window, &mut App) -> bool>;
 
 /// One semantic entry in a menu tree.
+#[derive(Clone)]
 pub struct MenuEntry<A> {
     kind: MenuEntryKind<A>,
 }
 
+#[derive(Clone)]
 enum MenuEntryKind<A> {
     Item(MenuItem<A>),
     Separator,
@@ -494,6 +496,7 @@ enum MenuEntryKind<A> {
     },
 }
 
+#[derive(Clone)]
 struct MenuItem<A> {
     label: SharedString,
     action: A,
@@ -1467,6 +1470,23 @@ struct MenuReplacement {
 }
 
 pub(crate) struct MenuReplacementFocus(pub(crate) Option<WeakFocusHandle>);
+
+/// Returns whether this Operating-System Window currently owns an open menu.
+///
+/// A transient owner such as the Command Palette stays open while one of its own menus holds
+/// focus. The coordinator reserves the window before the menu takes focus, so this answer is
+/// already correct when the displaced owner observes its blur.
+pub(crate) fn window_menu_is_open(window: &Window, cx: &App) -> bool {
+    if !cx.has_global::<MenuCoordinator>() {
+        return false;
+    }
+    let window_id = window.window_handle().window_id();
+    cx.global::<MenuCoordinator>()
+        .owners
+        .get(&window_id)
+        .and_then(WeakEntity::upgrade)
+        .is_some_and(|owner| owner.read(cx).open)
+}
 
 pub(crate) fn dismiss_active_menu_for_replacement(
     window: &Window,

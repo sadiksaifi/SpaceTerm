@@ -11,11 +11,11 @@ use gpui::{
 };
 use gpui_symbols::{Icon, RenderingMode, SymbolWeight};
 use spaceterm_ui::{
-    Button, ButtonShape, ButtonSize, ButtonVariant, CommandPalette, CommandPaletteCloseReason,
-    CommandPaletteEvent, CommandPaletteItem, CommandPaletteLifecycleEvent, ContextMenu, IconButton,
-    MenuCloseReason, MenuEntry, MenuLifecycleEvent, MenuSize, MiddleTruncatedText,
-    OverlayScrollbar, OverlayScrollbarEvent, ScrollMetrics, TextInput, TextInputEvent,
-    TextInputStyle,
+    Button, ButtonShape, ButtonSize, ButtonVariant, CommandPalette, CommandPaletteAccessory,
+    CommandPaletteCloseReason, CommandPaletteEvent, CommandPaletteHint, CommandPaletteItem,
+    CommandPaletteLifecycleEvent, ContextMenu, IconButton, MenuCloseReason, MenuEntry,
+    MenuLifecycleEvent, MenuSize, MiddleTruncatedText, OverlayScrollbar, OverlayScrollbarEvent,
+    ScrollMetrics, TextInput, TextInputEvent, TextInputStyle,
 };
 
 use super::button_theme;
@@ -27,8 +27,8 @@ use super::{
     ActivateWorkspace6, ActivateWorkspace7, ActivateWorkspace8, ActivateWorkspace9, ClosePane,
     CloseTerminalFind, CloseWindow, CloseWorkspace, CopySelection, CreateWindow, CreateWorkspace,
     FindNext, FindPrevious, FocusPaneDown, FocusPaneLeft, FocusPaneRight, FocusPaneUp,
-    OpenLocalProject, OpenTerminalFind, SplitDown, SplitRight, TERMINAL_KEY_CONTEXT,
-    TOP_CHROME_HEIGHT, TogglePaneZoom, ToggleSidebar, ToggleSidebarFocus,
+    OpenLocalProject, OpenTerminalFind, SearchWorkspaces, SplitDown, SplitRight,
+    TERMINAL_KEY_CONTEXT, TOP_CHROME_HEIGHT, TogglePaneZoom, ToggleSidebar, ToggleSidebarFocus,
     WORKSPACE_SIDEBAR_DEFAULT_WIDTH, WORKSPACE_SIDEBAR_MINIMUM_WIDTH, WindowManager,
     WindowManagerEvent, handle_top_chrome_mouse_down,
 };
@@ -217,6 +217,13 @@ impl WorkspaceManager {
         let workspace_search = cx.new(|cx| {
             let mut palette = CommandPalette::new("Search Workspaces", Vec::new(), window, cx);
             palette.set_no_results_text("No matching Workspaces", cx);
+            palette.set_hints(
+                vec![
+                    CommandPaletteHint::new("Open", "\u{21b5}"),
+                    CommandPaletteHint::new("Dismiss", "esc"),
+                ],
+                cx,
+            );
             palette
         });
         let workspace_search_subscription = cx.subscribe_in(
@@ -558,11 +565,34 @@ impl WorkspaceManager {
                     .then_some(TerminalFocusBlocker::Sidebar)))
     }
 
-    fn workspace_search_items(&self) -> Vec<CommandPaletteItem<WorkspaceId>> {
+    fn workspace_search_items(&self, cx: &App) -> Vec<CommandPaletteItem<WorkspaceId>> {
         self.workspaces
             .iter()
             .map(|workspace| {
+                let (window_count, pane_count) = workspace.payload().read(cx).aggregate_counts(cx);
+                let path =
+                    compact_home_path(workspace.working_directory(), &self.default_workspace_root);
+                let available = matches!(
+                    workspace.availability(),
+                    WorkspaceDirectoryAvailability::Available
+                );
+                let local_project = matches!(workspace.kind(), WorkspaceKind::LocalProject { .. });
+                let icon_color = gpui_color(if available {
+                    ACTIVE_THEME.icon
+                } else {
+                    ACTIVE_THEME.warning
+                });
                 CommandPaletteItem::new(workspace.id(), workspace.name().to_owned())
+                    .description(path)
+                    .leading_icon(move |_| {
+                        Icon::new(if local_project { "folder" } else { "terminal" })
+                            .size(px(SIDEBAR_ROW_ICON_SIZE))
+                            .color(icon_color)
+                            .into_any_element()
+                    })
+                    .trailing(CommandPaletteAccessory::Text(
+                        format!("{window_count}W · {pane_count}P").into(),
+                    ))
                     .debug_selector(format!("workspace-search-result-{}", workspace.id().get()))
             })
             .collect()
@@ -585,11 +615,11 @@ impl WorkspaceManager {
         let manager = cx.entity().downgrade();
         window.defer(cx, move |window, cx| {
             let request = manager
-                .update(cx, |manager, _| {
+                .update(cx, |manager, cx| {
                     (manager.workspace_search_open_request == Some(request_generation)).then(|| {
                         (
                             manager.workspace_search.clone(),
-                            manager.workspace_search_items(),
+                            manager.workspace_search_items(cx),
                             manager.workspaces.active_workspace_id(),
                         )
                     })
@@ -655,7 +685,10 @@ impl WorkspaceManager {
                     cx.notify();
                 }
             }
-            CommandPaletteEvent::QueryChanged(_) => {}
+            // The Workspace palette installs no search-line controls or actions menu.
+            CommandPaletteEvent::QueryChanged(_)
+            | CommandPaletteEvent::HeaderAction(_)
+            | CommandPaletteEvent::MenuAction(_) => {}
         }
     }
 
@@ -1395,6 +1428,18 @@ impl WorkspaceManager {
         self.create_workspace(window, cx);
     }
 
+    fn on_search_workspaces(
+        &mut self,
+        _: &SearchWorkspaces,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.workspace_search.read(cx).is_open() {
+            return;
+        }
+        self.open_workspace_search(window, cx);
+    }
+
     fn on_open_local_project(
         &mut self,
         _: &OpenLocalProject,
@@ -2121,6 +2166,7 @@ impl Render for WorkspaceManager {
                 });
             })
             .on_action(cx.listener(Self::on_create_workspace))
+            .on_action(cx.listener(Self::on_search_workspaces))
             .on_action(cx.listener(Self::on_open_local_project))
             .on_action(cx.listener(Self::on_close_workspace))
             .on_action(cx.listener(Self::on_activate_workspace_1))
@@ -2524,6 +2570,65 @@ mod tests {
             restored,
             (true, Some(TerminalFocusBlocker::Sidebar)),
             "closing the replacement palette must not restore the invisible menu focus owner"
+        );
+    }
+
+    #[gpui::test]
+    fn command_p_should_open_workspace_search(cx: &mut TestAppContext) {
+        let (manager, _, cx) = workspace_manager(cx);
+
+        cx.simulate_keystrokes("cmd-p");
+        cx.run_until_parked();
+
+        assert!(
+            manager.read_with(cx, |manager, cx| manager
+                .workspace_search
+                .read(cx)
+                .is_open()),
+            "cmd-p did not open Workspace search"
+        );
+        assert!(cx.debug_bounds("command-palette-panel").is_some());
+
+        // A second press while open must not reopen and clear the query.
+        cx.simulate_keystrokes("a");
+        cx.run_until_parked();
+        cx.simulate_keystrokes("cmd-p");
+        cx.run_until_parked();
+
+        assert_eq!(
+            manager.read_with(cx, |manager, cx| manager
+                .workspace_search
+                .read(cx)
+                .query()
+                .to_owned()),
+            "a",
+            "a repeated cmd-p reopened the palette and discarded the query"
+        );
+    }
+
+    #[gpui::test]
+    #[gpui::test]
+    fn workspace_search_rows_should_carry_the_sidebar_path_and_counts(cx: &mut TestAppContext) {
+        let (manager, _, cx) = workspace_manager(cx);
+        click("search-workspaces-button", cx);
+
+        let items = manager.read_with(cx, |manager, cx| manager.workspace_search_items(cx));
+        let active = manager.read_with(cx, |manager, _| manager.workspaces.active_workspace_id());
+        let item = items
+            .iter()
+            .find(|item| *item.id() == active)
+            .expect("the Active Workspace was missing from the search items");
+
+        assert!(
+            item.description_text().is_some_and(|path| !path.is_empty()),
+            "a Workspace search row carried no path: {:?}",
+            item.description_text()
+        );
+        let selector: &'static str =
+            Box::leak(format!("workspace-search-result-{}", active.get()).into_boxed_str());
+        assert!(
+            cx.debug_bounds(selector).is_some(),
+            "the Workspace search row was not rendered"
         );
     }
 

@@ -18,9 +18,9 @@ pub use button::{
     ButtonVariants, IconButton,
 };
 pub use command_palette::{
-    CommandPalette, CommandPaletteAccessory, CommandPaletteActivation,
+    CommandPalette, CommandPaletteAccessory, CommandPaletteAction, CommandPaletteActivation,
     CommandPaletteActivationSource, CommandPaletteCloseReason, CommandPaletteEvent,
-    CommandPaletteGeneration, CommandPaletteItem, CommandPaletteLifecycleEvent,
+    CommandPaletteGeneration, CommandPaletteHint, CommandPaletteItem, CommandPaletteLifecycleEvent,
     CommandPaletteMetrics, CommandPalettePaint, CommandPaletteQuery, CommandPaletteTheme,
 };
 pub use menu::{

@@ -10,7 +10,7 @@ use crate::terminal::{NativeTerminalSessionFactory, TerminalSessionFactory};
 use crate::ui::{
     ClosePane, CloseWindow, CloseWorkspace, CopySelection, CreateWindow, CreateWorkspace,
     ExportTerminalDiagnostics, FindNext, FindPrevious, OpenLocalProject, OpenTerminalFind,
-    WorkspaceManager,
+    SearchWorkspaces, WorkspaceManager,
 };
 
 actions!(
@@ -100,6 +100,7 @@ fn file_menu() -> Menu {
         name: "File".into(),
         items: vec![
             MenuItem::action("New Workspace", CreateWorkspace),
+            MenuItem::action("Search Workspaces…", SearchWorkspaces),
             MenuItem::action("Open Local Project…", OpenLocalProject),
             MenuItem::action("New Window", CreateWindow),
             MenuItem::separator(),
@@ -244,6 +245,7 @@ mod tests {
             labels,
             vec![
                 "New Workspace",
+                "Search Workspaces…",
                 "Open Local Project…",
                 "New Window",
                 "|",

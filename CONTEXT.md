@@ -95,6 +95,16 @@ identity, asynchronous result production, and product actions. Its rows use fixe
 and trailing semantic slots rather than caller-painted layouts, and the application installs its
 Vague Pro presentation catalog.
 
+The palette presents one continuous surface: a borderless editor above a hairline, a
+variable-height virtualized result list, and an optional hint and actions footer. Search-line
+controls, footer hints, section headings, and the footer actions menu are typed caller values, not
+caller-painted elements, so the palette remains the only owner of their size and paint. Rows are
+grouped only where adjacent items report different sections. The palette renders its own anchored
+full-window layer without deferring it, because GPUI collects deferred draws once per frame and a
+deferred palette could not host the deferred menu overlay its footer owns; its owner therefore
+renders it last. While a menu owns the Operating-System Window, palette blur and outside presses
+are not dismissals.
+
 ### Overlay Scrollbar
 
 The Overlay Scrollbar is a compact vertical control that presents scroll position without reserving
