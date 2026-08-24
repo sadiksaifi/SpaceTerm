@@ -1,5 +1,8 @@
 pub(crate) mod acceptance_observation;
 
+pub(crate) mod local_project_picker;
+pub(crate) mod workspace_directory;
+
 #[cfg(target_os = "macos")]
 pub(crate) mod macos_attention;
 

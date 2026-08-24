@@ -174,6 +174,7 @@ fn schedule_attention_retries(schedules: AttentionSchedules, cx: &mut Context<Te
 pub(crate) enum TerminalPaneEvent {
     FocusRequested,
     TitleChanged(SharedString),
+    ReportedWorkingDirectoryChanged(PathBuf),
     AttentionChanged { unread_count: u32 },
     Exited,
 }
@@ -885,6 +886,14 @@ impl TerminalPane {
 
     pub(crate) fn title(&self) -> SharedString {
         self.title.clone()
+    }
+
+    pub(crate) fn reported_working_directory(&self) -> Option<PathBuf> {
+        use crate::terminal::metadata::MetadataFreshness;
+
+        (self.screen.metadata.freshness == MetadataFreshness::Live)
+            .then(|| PathBuf::from(self.screen.metadata.directory.path.as_ref()))
+            .filter(|path| path.is_absolute())
     }
 
     #[cfg(test)]
@@ -1685,6 +1694,15 @@ impl TerminalPane {
                 if self.title.as_ref() != title {
                     self.title = title.into();
                     cx.emit(TerminalPaneEvent::TitleChanged(self.title.clone()));
+                }
+                if screen.metadata.freshness == crate::terminal::metadata::MetadataFreshness::Live
+                    && (self.screen.metadata.directory.path != screen.metadata.directory.path
+                        || self.screen.metadata.freshness != screen.metadata.freshness)
+                {
+                    let path = PathBuf::from(screen.metadata.directory.path.as_ref());
+                    if path.is_absolute() {
+                        cx.emit(TerminalPaneEvent::ReportedWorkingDirectoryChanged(path));
+                    }
                 }
                 let _ = self.render_lifecycle.observe_snapshot(screen.generation);
                 if let Some(observation) = &self.runtime_observation {
@@ -4247,7 +4265,7 @@ fn single_char(value: &str) -> Option<char> {
 
 #[cfg(test)]
 mod tests {
-    use std::cell::Cell;
+    use std::cell::{Cell, RefCell};
     use std::path::PathBuf;
     use std::rc::Rc;
 
@@ -4530,6 +4548,79 @@ mod tests {
         });
         cx.run_until_parked();
         (pane, cx)
+    }
+
+    fn directory_screen(
+        generation: u64,
+        path: &str,
+        freshness: crate::terminal::metadata::MetadataFreshness,
+    ) -> Arc<ScreenSnapshot> {
+        let mut screen = ScreenSnapshot::from_test_parts_at(
+            Arc::from([]),
+            ScrollbarSnapshot::default(),
+            "directory",
+            generation,
+        );
+        {
+            let screen = Arc::make_mut(&mut screen);
+            let metadata = Arc::make_mut(&mut screen.metadata);
+            metadata.directory.path = Arc::from(path);
+            metadata.freshness = freshness;
+        }
+        screen
+    }
+
+    #[gpui::test]
+    fn only_live_absolute_directory_metadata_should_emit_workspace_reports(
+        cx: &mut TestAppContext,
+    ) {
+        let (pane, cx) = terminal_pane(cx);
+        let reports = Rc::new(RefCell::new(Vec::new()));
+        let observed_reports = Rc::clone(&reports);
+        pane.update(cx, |_, cx| {
+            cx.subscribe(&pane, move |_, _, event: &TerminalPaneEvent, _| {
+                if let TerminalPaneEvent::ReportedWorkingDirectoryChanged(path) = event {
+                    observed_reports.borrow_mut().push(path.clone());
+                }
+            })
+            .detach();
+        });
+
+        pane.update(cx, |pane, cx| {
+            pane.handle_event(
+                SessionEvent::Screen(directory_screen(
+                    1,
+                    "/Users/test/live",
+                    crate::terminal::metadata::MetadataFreshness::Live,
+                )),
+                cx,
+            );
+            pane.handle_event(
+                SessionEvent::Screen(directory_screen(
+                    2,
+                    "/Users/test/stale",
+                    crate::terminal::metadata::MetadataFreshness::Stale,
+                )),
+                cx,
+            );
+            pane.handle_event(
+                SessionEvent::Screen(directory_screen(
+                    3,
+                    "remote-or-relative",
+                    crate::terminal::metadata::MetadataFreshness::Live,
+                )),
+                cx,
+            );
+        });
+
+        assert_eq!(
+            reports.borrow().as_slice(),
+            [PathBuf::from("/Users/test/live")]
+        );
+        assert_eq!(
+            pane.read_with(cx, |pane, _| pane.reported_working_directory()),
+            None
+        );
     }
 
     #[gpui::test]

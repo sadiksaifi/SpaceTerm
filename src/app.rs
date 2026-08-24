@@ -8,7 +8,8 @@ use gpui::{
 
 use crate::terminal::{NativeTerminalSessionFactory, TerminalSessionFactory};
 use crate::ui::{
-    CopySelection, ExportTerminalDiagnostics, FindNext, FindPrevious, OpenTerminalFind,
+    ClosePane, CloseWindow, CloseWorkspace, CopySelection, CreateWindow, CreateWorkspace,
+    ExportTerminalDiagnostics, FindNext, FindPrevious, OpenLocalProject, OpenTerminalFind,
     WorkspaceManager,
 };
 
@@ -59,8 +60,6 @@ pub(crate) fn init(cx: &mut App) {
         Menu {
             name: "SpaceTerm".into(),
             items: vec![
-                MenuItem::action("Export Terminal Diagnostics…", ExportTerminalDiagnostics),
-                MenuItem::separator(),
                 MenuItem::os_submenu("Services", SystemMenuType::Services),
                 MenuItem::separator(),
                 MenuItem::action("Hide SpaceTerm", HideApplication),
@@ -70,6 +69,7 @@ pub(crate) fn init(cx: &mut App) {
                 MenuItem::action("Quit SpaceTerm", QuitApplication),
             ],
         },
+        file_menu(),
         Menu {
             name: "Edit".into(),
             items: vec![
@@ -93,6 +93,23 @@ pub(crate) fn init(cx: &mut App) {
             ],
         },
     ]);
+}
+
+fn file_menu() -> Menu {
+    Menu {
+        name: "File".into(),
+        items: vec![
+            MenuItem::action("New Workspace", CreateWorkspace),
+            MenuItem::action("Open Local Project…", OpenLocalProject),
+            MenuItem::action("New Window", CreateWindow),
+            MenuItem::separator(),
+            MenuItem::action("Close Pane", ClosePane),
+            MenuItem::action("Close Window", CloseWindow),
+            MenuItem::action("Close Workspace", CloseWorkspace),
+            MenuItem::separator(),
+            MenuItem::action("Export Terminal Diagnostics…", ExportTerminalDiagnostics),
+        ],
+    }
 }
 
 fn minimize_active_window(_: &MinimizeWindow, cx: &mut App) {
@@ -166,7 +183,7 @@ pub(crate) fn open(cx: &mut App) {
 
 #[cfg(test)]
 mod tests {
-    use gpui::{Action, ClipboardItem, Keystroke, TestAppContext};
+    use gpui::{Action, ClipboardItem, Keystroke, OwnedMenuItem, TestAppContext};
 
     use super::*;
     use crate::terminal::testing::{TestTerminalSessionFactory, TestTerminalSessionRecords};
@@ -205,6 +222,38 @@ mod tests {
         });
 
         assert_eq!(actual.as_slice(), expected);
+    }
+
+    #[gpui::test]
+    fn file_menu_should_use_the_workspace_directory_action_order(cx: &mut TestAppContext) {
+        let labels = cx.update(|_| {
+            let file = file_menu().owned();
+            file.items
+                .iter()
+                .map(|item| match item {
+                    OwnedMenuItem::Action { name, .. } => name.clone(),
+                    OwnedMenuItem::Separator => "|".to_owned(),
+                    OwnedMenuItem::Submenu(_) | OwnedMenuItem::SystemMenu(_) => {
+                        "submenu".to_owned()
+                    }
+                })
+                .collect::<Vec<_>>()
+        });
+
+        assert_eq!(
+            labels,
+            vec![
+                "New Workspace",
+                "Open Local Project…",
+                "New Window",
+                "|",
+                "Close Pane",
+                "Close Window",
+                "Close Workspace",
+                "|",
+                "Export Terminal Diagnostics…",
+            ]
+        );
     }
 
     #[gpui::test]

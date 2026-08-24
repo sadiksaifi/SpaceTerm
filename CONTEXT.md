@@ -656,11 +656,29 @@ chooses Export Terminal Diagnostics and confirms a path through the native save 
 
 ### Workspace-Bound Terminal Creation
 
-`WorkspaceCollection` owns default Workspace naming and passes the exact stored Workspace root into
-payload construction. `WorkspaceTerminalSessionFactory` binds the existing dynamic Terminal Session
-factory Seam to that root, and Windows, Pane hosts, and terminal Panes carry only this scoped Module.
-Terminal creation therefore cannot select a working directory independently of its owning
-Workspace, and no additional provider trait or global state is introduced.
+Every runtime-only Workspace has an immutable Workspace Kind. New Workspace creates an Ad Hoc
+Workspace at `HOME`; Open Local Project creates a Local Project Workspace from one native,
+directory-only selection. The Workspace owns the exact selected or reported Workspace Directory and
+its canonical macOS device/file identity. Equivalent Local Project selections activate the existing
+Workspace, while an Ad Hoc Workspace at that identity remains distinct. No Workspace state is
+persisted or watched.
+
+An Ad Hoc Workspace's initial Pane is its Directory Authority. Valid live Reported Working Directory
+changes from that Pane update the Workspace Directory even when its Workspace or Window is inactive.
+Closing the authority Pane promotes the first remaining Pane in Pane Layout order; closing its Window
+promotes the root Pane of the first remaining Window. A promoted Pane's current valid report is
+adopted immediately. Local Project reports never change its immutable Project Root.
+
+`WorkspaceTerminalSessionFactory` binds each creation operation to the Workspace-owned exact path.
+Local Project children always start at Project Root; Ad Hoc children start at the latest Workspace
+Directory. Create Window and Split Pane revalidate existence, readability, directory type, and
+filesystem identity before hierarchy mutation. Failure leaves running Terminal Sessions intact,
+marks the Workspace unavailable, and blocks only new children until validation succeeds.
+
+Without a custom name, Workspace names follow the directory basename, use `Default` for the `HOME`
+identity and `/` for the filesystem root, and number only unrenamed Ad Hoc Workspaces with the same
+identity in sidebar order. An empty trimmed rename clears the custom name; duplicate custom names are
+valid.
 
 ### Cross-Hierarchy Close Escalation
 

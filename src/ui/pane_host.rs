@@ -1,9 +1,10 @@
 use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 
 use gpui::prelude::*;
 use gpui::{
     AnyElement, App, Bounds, Context, DefiniteLength, DragMoveEvent, Empty, Entity, EventEmitter,
-    MouseDownEvent, Pixels, Point, Render, Window, div, px, rgba,
+    MouseDownEvent, Pixels, Point, PromptButton, PromptLevel, Render, Window, div, px, rgba,
 };
 use gpui_symbols::{Icon, SymbolWeight};
 
@@ -15,7 +16,7 @@ use super::{
 };
 use crate::domain::{
     ClosePaneOutcome, FocusDirection, PaneId, PaneNodeRef, PaneSize, PaneTreeRef, SplitAxis,
-    SplitId, TerminalWindow, WindowId, WorkspaceId, ZoomState,
+    SplitId, TerminalWindow, WindowId, WorkspaceDirectoryIdentity, WorkspaceId, ZoomState,
 };
 use crate::terminal::{
     NativeServiceOrigin, NativeServiceStatus, SelectionCopy, WorkspaceTerminalSessionFactory,
@@ -40,10 +41,31 @@ struct DraggedSplit {
     split_id: SplitId,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum PaneHostEvent {
-    CloseWindowRequested { window_id: WindowId },
-    PresentationChanged { window_id: WindowId },
+    CloseWindowRequested {
+        window_id: WindowId,
+    },
+    PresentationChanged {
+        window_id: WindowId,
+    },
+    ReportedWorkingDirectoryChanged {
+        window_id: WindowId,
+        pane_id: PaneId,
+        path: PathBuf,
+    },
+    PaneClosed {
+        window_id: WindowId,
+        pane_id: PaneId,
+        promoted_pane_id: PaneId,
+        promoted_directory: Option<PathBuf>,
+    },
+    DirectoryAvailable {
+        identity: crate::domain::WorkspaceDirectoryIdentity,
+    },
+    DirectoryUnavailable {
+        reason: String,
+    },
 }
 
 pub(crate) struct PaneHost {
@@ -117,6 +139,13 @@ impl PaneHost {
                         window_id: host.terminal_window.id(),
                     });
                     cx.notify();
+                }
+                TerminalPaneEvent::ReportedWorkingDirectoryChanged(path) => {
+                    cx.emit(PaneHostEvent::ReportedWorkingDirectoryChanged {
+                        window_id: host.terminal_window.id(),
+                        pane_id,
+                        path: path.clone(),
+                    });
                 }
                 TerminalPaneEvent::AttentionChanged { unread_count } => {
                     host.pane_attention.insert(pane_id, *unread_count);
@@ -213,6 +242,25 @@ impl PaneHost {
 
     pub(crate) fn pane_count(&self) -> usize {
         self.terminal_window.pane_count()
+    }
+
+    pub(crate) fn root_pane_id(&self) -> PaneId {
+        self.terminal_window.root_pane_id()
+    }
+
+    pub(crate) fn reported_working_directory(&self, pane_id: PaneId, cx: &App) -> Option<PathBuf> {
+        self.terminal_window
+            .terminal(pane_id)
+            .and_then(|terminal| terminal.read(cx).reported_working_directory())
+    }
+
+    pub(crate) fn set_workspace_directory(
+        &mut self,
+        path: &Path,
+        identity: WorkspaceDirectoryIdentity,
+    ) {
+        self.session_factory
+            .set_working_directory(path.to_path_buf(), identity);
     }
 
     pub(crate) fn window_title(&self) -> gpui::SharedString {
@@ -360,6 +408,29 @@ impl PaneHost {
             eprintln!("cannot split Pane {target_pane_id} with invalid measured bounds");
             return;
         };
+        match self.session_factory.validate_working_directory() {
+            Ok(directory) => cx.emit(PaneHostEvent::DirectoryAvailable {
+                identity: directory.identity(),
+            }),
+            Err(error) => {
+                let reason = error.to_string();
+                cx.emit(PaneHostEvent::DirectoryUnavailable {
+                    reason: reason.clone(),
+                });
+                let detail = format!(
+                    "Cannot create a Pane at {} because {reason}. Restore the directory or use another Workspace.",
+                    self.session_factory.working_directory().display()
+                );
+                drop(window.prompt(
+                    PromptLevel::Warning,
+                    "Workspace Directory Unavailable",
+                    Some(&detail),
+                    &[PromptButton::ok("OK")],
+                    cx,
+                ));
+                return;
+            }
+        }
         let session_factory = self.session_factory.clone();
         let result = self.terminal_window.split_pane(
             target_pane_id,
@@ -423,10 +494,21 @@ impl PaneHost {
                 self.split_bounds.clear();
                 self.pane_titles.remove(&pane_id);
                 self.pane_attention.remove(&pane_id);
+                let promoted_pane_id = self.terminal_window.root_pane_id();
+                let promoted_directory = self
+                    .terminal_window
+                    .terminal(promoted_pane_id)
+                    .and_then(|terminal| terminal.read(cx).reported_working_directory());
                 self.menu_pane_id = None;
                 self.sync_terminal_focus(cx);
                 cx.emit(PaneHostEvent::PresentationChanged {
                     window_id: self.terminal_window.id(),
+                });
+                cx.emit(PaneHostEvent::PaneClosed {
+                    window_id: self.terminal_window.id(),
+                    pane_id,
+                    promoted_pane_id,
+                    promoted_directory,
                 });
                 cx.notify();
                 if self.active

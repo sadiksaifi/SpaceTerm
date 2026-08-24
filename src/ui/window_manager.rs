@@ -1,8 +1,10 @@
+use std::path::{Path, PathBuf};
+
 use gpui::prelude::*;
 use gpui::{
     AnyElement, App, Context, DispatchPhase, Entity, EventEmitter, MouseButton, MouseDownEvent,
-    MouseExitEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Render, ScrollHandle,
-    SharedString, Window, canvas, div, px, rgba,
+    MouseExitEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, PromptButton, PromptLevel, Render,
+    ScrollHandle, SharedString, Window, canvas, div, px, rgba,
 };
 use gpui_symbols::{Icon, SymbolWeight};
 
@@ -15,7 +17,8 @@ use super::{
     handle_top_chrome_mouse_down, render_pane_action_menu,
 };
 use crate::domain::{
-    CloseWindowOutcome, SplitAxis, WindowCollection, WindowError, WindowId, WorkspaceId, ZoomState,
+    CloseWindowOutcome, PaneId, SplitAxis, WindowCollection, WindowError, WindowId,
+    WorkspaceDirectoryIdentity, WorkspaceId, ZoomState,
 };
 use crate::terminal::{
     NativeServiceOrigin, NativeServiceStatus, SelectionCopy, WorkspaceTerminalSessionFactory,
@@ -41,10 +44,35 @@ struct WindowMenuState {
     left: Option<Pixels>,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum WindowManagerEvent {
-    FinalWindowCloseRequested { final_window_id: WindowId },
+    FinalWindowCloseRequested {
+        final_window_id: WindowId,
+    },
     PresentationChanged,
+    ReportedWorkingDirectoryChanged {
+        window_id: WindowId,
+        pane_id: PaneId,
+        path: PathBuf,
+    },
+    PaneClosed {
+        window_id: WindowId,
+        pane_id: PaneId,
+        promoted_pane_id: PaneId,
+        promoted_directory: Option<PathBuf>,
+    },
+    WindowClosed {
+        window_id: WindowId,
+        promoted_window_id: WindowId,
+        promoted_pane_id: PaneId,
+        promoted_directory: Option<PathBuf>,
+    },
+    DirectoryAvailable {
+        identity: WorkspaceDirectoryIdentity,
+    },
+    DirectoryUnavailable {
+        reason: String,
+    },
 }
 
 pub(crate) struct WindowManager {
@@ -116,6 +144,36 @@ impl WindowManager {
                 PaneHostEvent::PresentationChanged { .. } => {
                     cx.emit(WindowManagerEvent::PresentationChanged);
                     cx.notify();
+                }
+                PaneHostEvent::ReportedWorkingDirectoryChanged {
+                    window_id,
+                    pane_id,
+                    path,
+                } => cx.emit(WindowManagerEvent::ReportedWorkingDirectoryChanged {
+                    window_id: *window_id,
+                    pane_id: *pane_id,
+                    path: path.clone(),
+                }),
+                PaneHostEvent::PaneClosed {
+                    window_id,
+                    pane_id,
+                    promoted_pane_id,
+                    promoted_directory,
+                } => cx.emit(WindowManagerEvent::PaneClosed {
+                    window_id: *window_id,
+                    pane_id: *pane_id,
+                    promoted_pane_id: *promoted_pane_id,
+                    promoted_directory: promoted_directory.clone(),
+                }),
+                PaneHostEvent::DirectoryAvailable { identity } => {
+                    cx.emit(WindowManagerEvent::DirectoryAvailable {
+                        identity: *identity,
+                    });
+                }
+                PaneHostEvent::DirectoryUnavailable { reason } => {
+                    cx.emit(WindowManagerEvent::DirectoryUnavailable {
+                        reason: reason.clone(),
+                    });
                 }
             },
         )
@@ -207,6 +265,30 @@ impl WindowManager {
     pub(crate) fn close_all(&self, cx: &mut App) {
         for (_, pane_host) in self.windows.iter() {
             pane_host.update(cx, |pane_host, cx| pane_host.close_all(cx));
+        }
+    }
+
+    pub(crate) fn aggregate_counts(&self, cx: &App) -> (usize, usize) {
+        let panes = self
+            .windows
+            .iter()
+            .map(|(_, pane_host)| pane_host.read(cx).pane_count())
+            .sum();
+        (self.windows.len(), panes)
+    }
+
+    pub(crate) fn set_workspace_directory(
+        &mut self,
+        path: &Path,
+        identity: WorkspaceDirectoryIdentity,
+        cx: &mut Context<Self>,
+    ) {
+        self.session_factory
+            .set_working_directory(path.to_path_buf(), identity);
+        for (_, pane_host) in self.windows.iter() {
+            pane_host.update(cx, |pane_host, _| {
+                pane_host.set_workspace_directory(path, identity)
+            });
         }
     }
 
@@ -317,6 +399,7 @@ impl WindowManager {
         cx.notify();
     }
 
+    #[cfg(test)]
     pub(crate) fn sidebar_detail(&self, cx: &App) -> SharedString {
         let title = self.windows.active_window().read(cx).window_title();
         if self.windows.len() == 1 {
@@ -356,6 +439,29 @@ impl WindowManager {
         self.window_menu = None;
         self.window_selector_pressed = None;
         self.sync_terminal_focus_blocker(cx);
+        match self.session_factory.validate_working_directory() {
+            Ok(directory) => cx.emit(WindowManagerEvent::DirectoryAvailable {
+                identity: directory.identity(),
+            }),
+            Err(error) => {
+                let reason = error.to_string();
+                cx.emit(WindowManagerEvent::DirectoryUnavailable {
+                    reason: reason.clone(),
+                });
+                let detail = format!(
+                    "Cannot create a Window at {} because {reason}. Restore the directory or use another Workspace.",
+                    self.session_factory.working_directory().display()
+                );
+                drop(window.prompt(
+                    PromptLevel::Warning,
+                    "Workspace Directory Unavailable",
+                    Some(&detail),
+                    &[PromptButton::ok("OK")],
+                    cx,
+                ));
+                return;
+            }
+        }
         let previous_window = self.windows.active_window().clone();
         let session_factory = self.session_factory.clone();
         let result = self.windows.create_window(|window_id| {
@@ -455,6 +561,13 @@ impl WindowManager {
             }) => {
                 debug_assert_eq!(closed_window_id, window_id);
                 payload.update(cx, |pane_host, cx| pane_host.close_all(cx));
+                let Some((promoted_window_id, promoted_host)) = self.windows.iter().next() else {
+                    unreachable!("closing one of multiple Windows must leave a promotion candidate")
+                };
+                let promoted_pane_id = promoted_host.read(cx).root_pane_id();
+                let promoted_directory = promoted_host
+                    .read(cx)
+                    .reported_working_directory(promoted_pane_id, cx);
                 if was_active {
                     let active_window = self.windows.active_window().clone();
                     if self.active {
@@ -469,6 +582,12 @@ impl WindowManager {
                 debug_assert_eq!(active_window_id, self.windows.active_window_id());
                 self.scroll_active_window_into_view();
                 cx.emit(WindowManagerEvent::PresentationChanged);
+                cx.emit(WindowManagerEvent::WindowClosed {
+                    window_id,
+                    promoted_window_id,
+                    promoted_pane_id,
+                    promoted_directory,
+                });
                 cx.notify();
             }
             Ok(CloseWindowOutcome::CloseWorkspace { final_window_id }) => {
