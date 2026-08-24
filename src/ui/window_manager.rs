@@ -3,20 +3,25 @@ use std::path::{Path, PathBuf};
 use gpui::prelude::*;
 use gpui::{
     AnyElement, App, Context, DispatchPhase, Entity, EventEmitter, MouseButton, MouseDownEvent,
-    MouseExitEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, PromptButton, PromptLevel, Render,
+    MouseExitEvent, MouseMoveEvent, MouseUpEvent, Pixels, PromptButton, PromptLevel, Render,
     ScrollHandle, SharedString, Window, canvas, div, px, rgba,
 };
 use gpui_symbols::{Icon, SymbolWeight};
-use spaceterm_ui::{ButtonSize, ButtonVariant, IconButton};
+use spaceterm_ui::{
+    ButtonSize, ButtonVariant, ContextMenu, IconButton, Menu, MenuAlignment, MenuCloseReason,
+    MenuLifecycleEvent, MenuPlacement, MenuPlacementConfig, MenuSize,
+};
 
 use super::button_theme;
+use super::pane_action_menu::{
+    CloseTarget, PaneActionMenuCommand, pane_action_menu_entries, sf_symbol,
+};
 use super::terminal_focus::TerminalFocusBlocker;
 use super::{
     ActivateWindow1, ActivateWindow2, ActivateWindow3, ActivateWindow4, ActivateWindow5,
-    ActivateWindow6, ActivateWindow7, ActivateWindow8, ActivateWindow9, CloseTarget, CloseWindow,
-    CreateWindow, PANE_ACTION_MENU_HEIGHT, PANE_ACTION_MENU_WIDTH, PaneActionMenuCommand, PaneHost,
-    PaneHostEvent, TERMINAL_KEY_CONTEXT, TOP_CHROME_HEIGHT, WORKSPACE_SIDEBAR_DEFAULT_WIDTH,
-    handle_top_chrome_mouse_down, render_pane_action_menu,
+    ActivateWindow6, ActivateWindow7, ActivateWindow8, ActivateWindow9, CloseWindow, CreateWindow,
+    PaneHost, PaneHostEvent, TERMINAL_KEY_CONTEXT, TOP_CHROME_HEIGHT,
+    WORKSPACE_SIDEBAR_DEFAULT_WIDTH, handle_top_chrome_mouse_down,
 };
 use crate::domain::{
     CloseWindowOutcome, PaneId, SplitAxis, WindowCollection, WindowError, WindowId,
@@ -36,13 +41,17 @@ const WINDOW_ITEM_RIGHT_PADDING: f32 = 6.0;
 const WINDOW_CLOSE_ICON_SIZE: f32 = 12.0;
 const WINDOW_CONTROL_SIZE: f32 = 28.0;
 const WINDOW_CONTROL_INSET: f32 = 4.0;
-const WINDOW_MENU_BAR_OVERLAP: f32 = 8.0;
-const WINDOW_MENU_TOP: f32 = WINDOW_BAR_HEIGHT - WINDOW_MENU_BAR_OVERLAP;
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WindowMenuInvocation {
+    Explicit,
+    Context,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct WindowMenuState {
     window_id: WindowId,
-    left: Option<Pixels>,
+    invocation: WindowMenuInvocation,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -327,12 +336,9 @@ impl WindowManager {
             .or(self
                 .window_selector_pressed
                 .map(|_| TerminalFocusBlocker::WindowSelector))
-            .or(self.window_menu.map(|menu| {
-                if menu.left.is_some() {
-                    TerminalFocusBlocker::ContextMenu
-                } else {
-                    TerminalFocusBlocker::WindowMenu
-                }
+            .or(self.window_menu.map(|menu| match menu.invocation {
+                WindowMenuInvocation::Explicit => TerminalFocusBlocker::WindowMenu,
+                WindowMenuInvocation::Context => TerminalFocusBlocker::ContextMenu,
             }))
     }
 
@@ -606,69 +612,77 @@ impl WindowManager {
         }
     }
 
-    fn open_window_menu(
+    fn prepare_context_menu(
         &mut self,
         window_id: WindowId,
-        left: Option<Pixels>,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) {
-        self.window_menu = Some(WindowMenuState { window_id, left });
+    ) -> bool {
+        self.window_menu = Some(WindowMenuState {
+            window_id,
+            invocation: WindowMenuInvocation::Context,
+        });
         self.sync_terminal_focus_blocker(cx);
         if !self.activate_window_preserving_menu(window_id, window, cx) {
             self.window_menu = None;
             self.sync_terminal_focus_blocker(cx);
-            return;
+            return false;
         }
         cx.notify();
+        true
     }
 
-    fn toggle_active_window_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let window_id = self.windows.active_window_id();
-        if self
-            .window_menu
-            .is_some_and(|menu| menu.window_id == window_id && menu.left.is_none())
-        {
-            self.window_menu = None;
-            self.sync_terminal_focus_blocker(cx);
-            cx.notify();
-            return;
-        }
-        self.open_window_menu(window_id, None, window, cx);
-    }
-
-    fn open_context_menu(
+    fn handle_menu_lifecycle(
         &mut self,
         window_id: WindowId,
-        event: &MouseDownEvent,
-        window: &mut Window,
+        invocation: WindowMenuInvocation,
+        event: MenuLifecycleEvent,
         cx: &mut Context<Self>,
     ) {
-        let content_width = window.bounds().size.width;
-        let maximum_left = (content_width - px(PANE_ACTION_MENU_WIDTH + WINDOW_CONTROL_INSET))
-            .max(px(WINDOW_CONTROL_INSET));
-        let left = event
-            .position
-            .x
-            .clamp(px(WINDOW_CONTROL_INSET), maximum_left);
-        self.open_window_menu(window_id, Some(left), window, cx);
+        let owner = WindowMenuState {
+            window_id,
+            invocation,
+        };
+        match event {
+            MenuLifecycleEvent::Opened => self.window_menu = Some(owner),
+            MenuLifecycleEvent::Closed(MenuCloseReason::Activated) => {
+                if self.window_menu != Some(owner) {
+                    return;
+                }
+            }
+            MenuLifecycleEvent::Closed(_) => {
+                if self.window_menu != Some(owner) {
+                    return;
+                }
+                self.window_menu = None;
+            }
+        }
+        self.sync_terminal_focus_blocker(cx);
+        cx.notify();
     }
 
     fn perform_menu_command(
         &mut self,
         command: PaneActionMenuCommand,
+        window_id: WindowId,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(menu) = self.window_menu else {
-            return;
-        };
-        let Some(pane_host) = self.windows.window(menu.window_id).cloned() else {
+        let invocation = self
+            .window_menu
+            .filter(|menu| menu.window_id == window_id)
+            .map_or(WindowMenuInvocation::Explicit, |menu| menu.invocation);
+        self.window_menu = Some(WindowMenuState {
+            window_id,
+            invocation,
+        });
+        self.sync_terminal_focus_blocker(cx);
+
+        let Some(pane_host) = self.windows.window(window_id).cloned() else {
             self.window_menu = None;
             self.sync_terminal_focus_blocker(cx);
             return;
         };
-
         match command {
             PaneActionMenuCommand::SplitRight => pane_host.update(cx, |pane_host, cx| {
                 pane_host.split_focused(SplitAxis::Horizontal, window, cx);
@@ -679,19 +693,12 @@ impl WindowManager {
             PaneActionMenuCommand::ToggleZoom => {
                 pane_host.update(cx, |pane_host, cx| pane_host.toggle_zoom(window, cx));
             }
-            PaneActionMenuCommand::Close => self.close_window(menu.window_id, window, cx),
+            PaneActionMenuCommand::Close => self.close_window(window_id, window, cx),
         }
         if self.window_menu.take().is_some() {
             self.sync_terminal_focus_blocker(cx);
         }
         cx.notify();
-    }
-
-    fn dismiss_window_menu(&mut self, cx: &mut Context<Self>) {
-        if self.window_menu.take().is_some() {
-            self.sync_terminal_focus_blocker(cx);
-            cx.notify();
-        }
     }
 
     fn on_close_window(&mut self, _: &CloseWindow, window: &mut Window, cx: &mut Context<Self>) {
@@ -789,14 +796,28 @@ impl WindowManager {
         title: SharedString,
         active: bool,
         manager: gpui::WeakEntity<Self>,
+        cx: &App,
     ) -> AnyElement {
         let press_manager = manager.clone();
         let release_manager = manager.clone();
         let click_manager = manager.clone();
-        let context_manager = manager.clone();
+        let context_open_manager = manager.clone();
+        let context_activation_manager = manager.clone();
+        let context_lifecycle_manager = manager.clone();
         let close_manager = manager;
         let window_group = format!("window-item-{}", window_id.get());
-        div()
+        let (zoomed, zoom_enabled) = self
+            .windows
+            .window(window_id)
+            .map(|pane_host| {
+                let pane_host = pane_host.read(cx);
+                (
+                    matches!(pane_host.zoom_state(), ZoomState::Zoomed(_)),
+                    pane_host.pane_count() > 1,
+                )
+            })
+            .unwrap_or((false, false));
+        let item = div()
             .id(("window-item", window_id.get()))
             .debug_selector(move || {
                 format!(
@@ -844,12 +865,6 @@ impl WindowManager {
             .on_click(move |_, window, cx| {
                 let _ = click_manager.update(cx, |manager, cx| {
                     manager.commit_window_selector(window_id, window, cx);
-                });
-                cx.stop_propagation();
-            })
-            .on_mouse_down(MouseButton::Right, move |event, window, cx| {
-                let _ = context_manager.update(cx, |manager, cx| {
-                    manager.open_context_menu(window_id, event, window, cx);
                 });
                 cx.stop_propagation();
             })
@@ -932,8 +947,42 @@ impl WindowManager {
                         .h(px(WINDOW_BAR_DIVIDER_SIZE))
                         .bg(gpui_color(ACTIVE_THEME.panel_focused_border)),
                 )
-            })
-            .into_any_element()
+            });
+
+        ContextMenu::new(
+            ("window-context-menu", window_id.get()),
+            "Window Actions",
+            div()
+                .w(px(WINDOW_ITEM_WIDTH))
+                .h(px(WINDOW_BAR_HEIGHT))
+                .flex_none()
+                .child(item),
+            pane_action_menu_entries("window-menu", zoomed, zoom_enabled, CloseTarget::Window),
+        )
+        .size(MenuSize::Wide)
+        .placement(
+            MenuPlacementConfig::new(MenuPlacement::Bottom, MenuAlignment::Start).offset(px(0.0)),
+        )
+        .on_open_request(move |_, window, cx| {
+            context_open_manager
+                .update(cx, |manager, cx| {
+                    manager.prepare_context_menu(window_id, window, cx)
+                })
+                .unwrap_or(false)
+        })
+        .on_activate(move |activation, window, cx| {
+            let command = *activation.action();
+            let _ = context_activation_manager.update(cx, |manager, cx| {
+                manager.perform_menu_command(command, window_id, window, cx);
+            });
+        })
+        .on_lifecycle(move |event, cx| {
+            let event = *event;
+            let _ = context_lifecycle_manager.update(cx, |manager, cx| {
+                manager.handle_menu_lifecycle(window_id, WindowMenuInvocation::Context, event, cx);
+            });
+        })
+        .into_any_element()
     }
 
     fn render_window_bar(&self, manager: gpui::WeakEntity<Self>, cx: &App) -> AnyElement {
@@ -955,6 +1004,7 @@ impl WindowManager {
                 pane_host.read(cx).window_title(),
                 window_id == active_window_id,
                 manager.clone(),
+                cx,
             ));
         }
 
@@ -964,7 +1014,19 @@ impl WindowManager {
         let chrome_up_manager = manager.clone();
         let chrome_out_manager = manager.clone();
         let create_manager = manager.clone();
-        let menu_manager = manager;
+        let menu_activation_manager = manager.clone();
+        let menu_lifecycle_manager = manager;
+        let (zoomed, zoom_enabled) = self
+            .windows
+            .window(active_window_id)
+            .map(|pane_host| {
+                let pane_host = pane_host.read(cx);
+                (
+                    matches!(pane_host.zoom_state(), ZoomState::Zoomed(_)),
+                    pane_host.pane_count() > 1,
+                )
+            })
+            .unwrap_or((false, false));
         div()
             .id("window-bar")
             .debug_selector(|| "window-bar".to_owned())
@@ -1078,77 +1140,43 @@ impl WindowManager {
                     .top(px(WINDOW_CONTROL_INSET))
                     .right(px(WINDOW_CONTROL_INSET))
                     .child(
-                        IconButton::new(
-                            "window-menu-button",
-                            "Open Window Actions",
-                            |foreground| {
-                                Icon::new("ellipsis")
-                                    .size(px(16.0))
-                                    .color(foreground)
-                                    .into_any_element()
-                            },
+                        Menu::new(
+                            "window-menu-button-control",
+                            "Window Actions",
+                            pane_action_menu_entries(
+                                "window-menu",
+                                zoomed,
+                                zoom_enabled,
+                                CloseTarget::Window,
+                            ),
                         )
-                        .variant(ButtonVariant::Ghost)
-                        .size(ButtonSize::Regular)
+                        .icon_trigger(sf_symbol("ellipsis"))
+                        .size(MenuSize::Wide)
+                        .placement(
+                            MenuPlacementConfig::new(MenuPlacement::Bottom, MenuAlignment::End)
+                                .offset(px(0.0)),
+                        )
                         .debug_selector("window-menu-button")
-                        .tooltip(|_, cx| button_theme::tooltip("Window Actions", cx))
-                        .on_activate(move |_, window, cx| {
-                            let _ = menu_manager.update(cx, |manager, cx| {
-                                manager.toggle_active_window_menu(window, cx);
+                        .on_activate(move |activation, window, cx| {
+                            let command = *activation.action();
+                            let _ = menu_activation_manager.update(cx, |manager, cx| {
+                                manager.perform_menu_command(command, active_window_id, window, cx);
+                            });
+                        })
+                        .on_lifecycle(move |event, cx| {
+                            let event = *event;
+                            let _ = menu_lifecycle_manager.update(cx, |manager, cx| {
+                                manager.handle_menu_lifecycle(
+                                    active_window_id,
+                                    WindowMenuInvocation::Explicit,
+                                    event,
+                                    cx,
+                                );
                             });
                         }),
                     ),
             )
             .into_any_element()
-    }
-
-    fn render_window_menu(
-        &self,
-        menu: WindowMenuState,
-        manager: gpui::WeakEntity<Self>,
-        cx: &App,
-    ) -> AnyElement {
-        let Some((zoomed, zoom_enabled)) = self.windows.window(menu.window_id).map(|pane_host| {
-            let pane_host = pane_host.read(cx);
-            (
-                matches!(pane_host.zoom_state(), ZoomState::Zoomed(_)),
-                pane_host.pane_count() > 1,
-            )
-        }) else {
-            return div().into_any_element();
-        };
-        let dismiss_manager = manager.clone();
-        let menu_element = render_pane_action_menu(
-            ("window-menu", menu.window_id.get()),
-            zoomed,
-            zoom_enabled,
-            CloseTarget::Window,
-            manager,
-            |manager, command, window, cx| {
-                manager.perform_menu_command(command, window, cx);
-            },
-        );
-        let controls = div()
-            .id(("window-menu-controls", menu.window_id.get()))
-            .debug_selector(move || format!("window-menu-controls-{}", menu.window_id.get()))
-            .absolute()
-            .top(px(WINDOW_MENU_TOP))
-            .w(px(PANE_ACTION_MENU_WIDTH))
-            .h(px(PANE_ACTION_MENU_HEIGHT))
-            .on_mouse_down_out(move |event, window, cx| {
-                if window_menu_button_contains(event.position, window.bounds().size.width) {
-                    return;
-                }
-                let _ = dismiss_manager.update(cx, |manager, cx| {
-                    manager.dismiss_window_menu(cx);
-                });
-            })
-            .child(menu_element);
-        match menu.left {
-            Some(left) => controls.left(left),
-            None => controls.right(px(WINDOW_CONTROL_INSET)),
-        }
-        .into_any_element()
     }
 }
 
@@ -1236,9 +1264,6 @@ impl Render for WindowManager {
                     .when(self.sidebar_visible, |body| body.ml(self.sidebar_width))
                     .child(active_window),
             )
-            .when_some(self.window_menu, |root, menu| {
-                root.child(self.render_window_menu(menu, manager, cx))
-            })
     }
 }
 
@@ -1246,15 +1271,6 @@ impl EventEmitter<WindowManagerEvent> for WindowManager {}
 
 fn gpui_color(color: Color) -> gpui::Rgba {
     rgba(color.rgba_hex())
-}
-
-fn window_menu_button_contains(position: Point<Pixels>, content_width: Pixels) -> bool {
-    let left = content_width - px(WINDOW_CONTROL_INSET + WINDOW_CONTROL_SIZE);
-    let right = content_width - px(WINDOW_CONTROL_INSET);
-    let top = px(WINDOW_CONTROL_INSET);
-    let bottom = top + px(WINDOW_CONTROL_SIZE);
-
-    position.x >= left && position.x <= right && position.y >= top && position.y <= bottom
 }
 
 #[cfg(test)]
@@ -1747,10 +1763,16 @@ mod tests {
                 manager.windows.active_window_id(),
                 manager
                     .window_menu
-                    .map(|menu| (menu.window_id, menu.left.is_some())),
+                    .map(|menu| (menu.window_id, menu.invocation)),
             )
         });
-        assert_eq!(state, (WindowId::new(1), Some((WindowId::new(1), true))));
+        assert_eq!(
+            state,
+            (
+                WindowId::new(1),
+                Some((WindowId::new(1), WindowMenuInvocation::Context))
+            )
+        );
         let services_blocked = cx.update(|window, cx| {
             manager.update(cx, |manager, cx| {
                 !manager
@@ -1791,7 +1813,7 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(
             (state, focus_edges),
-            ((WindowId::new(1), true, false), vec![(2, false)])
+            ((WindowId::new(1), false, false), vec![(2, false)])
         );
     }
 
@@ -1804,13 +1826,16 @@ mod tests {
 
         let menu = manager.read_with(cx, |manager, _| manager.window_menu);
         assert_eq!(
-            menu.map(|menu| (menu.window_id, menu.left)),
-            Some((WindowId::new(2), None))
+            menu,
+            Some(WindowMenuState {
+                window_id: WindowId::new(2),
+                invocation: WindowMenuInvocation::Explicit,
+            })
         );
     }
 
     #[gpui::test]
-    fn window_menu_blocks_services_and_invalidates_the_previous_focus_branch(
+    fn window_menu_keeps_services_blocked_until_terminal_focus_is_restored(
         cx: &mut TestAppContext,
     ) {
         let (manager, _records, cx) = window_manager(cx);
@@ -1827,6 +1852,15 @@ mod tests {
             })
         });
         click("window-menu-button", cx);
+        let trigger_focused = cx.update(|window, cx| {
+            manager.update(cx, |manager, cx| {
+                manager.native_service_status(WorkspaceId::new(1), window, cx)
+            })
+        });
+        let pane_host = manager.read_with(cx, |manager, _| manager.windows.active_window().clone());
+        cx.update(|window, cx| {
+            pane_host.update(cx, |pane_host, cx| pane_host.focus(window, cx));
+        });
         let restored = cx.update(|window, cx| {
             manager.update(cx, |manager, cx| {
                 manager.native_service_status(WorkspaceId::new(1), window, cx)
@@ -1835,6 +1869,7 @@ mod tests {
 
         assert!(before.capabilities.return_text);
         assert!(!blocked.capabilities.return_text);
+        assert!(!trigger_focused.capabilities.return_text);
         assert!(restored.capabilities.return_text);
         assert_ne!(before.origin, restored.origin);
     }
@@ -1851,7 +1886,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn window_menu_should_block_and_restore_input_without_changing_focused_pane(
+    fn window_menu_should_restore_its_trigger_without_changing_the_focused_pane(
         cx: &mut TestAppContext,
     ) {
         let (manager, records, cx) = window_manager(cx);
@@ -1870,21 +1905,33 @@ mod tests {
                 manager.focused_terminal_has_input_focus(window, cx),
             )
         });
-        assert_eq!(menu_open, (focused_pane_id, true, false));
+        assert_eq!(menu_open, (focused_pane_id, false, false));
 
         click("window-menu-button", cx);
         cx.simulate_keystrokes("a");
 
-        let commands = records
+        let trigger_commands = records
             .commands()
             .into_iter()
             .skip(command_count)
             .map(|call| (call.session_id, call.command))
             .collect::<Vec<_>>();
         assert!(matches!(
-            commands[0],
-            (1, RecordedSessionCommand::Focus(false))
+            trigger_commands.as_slice(),
+            [(1, RecordedSessionCommand::Focus(false))]
         ));
+
+        let pane_host = manager.read_with(cx, |manager, _| manager.windows.active_window().clone());
+        cx.update(|window, cx| {
+            pane_host.update(cx, |pane_host, cx| pane_host.focus(window, cx));
+        });
+        cx.simulate_keystrokes("a");
+        let commands = records
+            .commands()
+            .into_iter()
+            .skip(command_count)
+            .map(|call| (call.session_id, call.command))
+            .collect::<Vec<_>>();
         assert!(matches!(
             commands[1],
             (1, RecordedSessionCommand::Focus(true))
@@ -2055,24 +2102,33 @@ mod tests {
     }
 
     #[gpui::test]
-    fn open_single_pane_window_menu_should_enable_zoom_after_split_shortcut(
+    fn target_focus_change_should_dismiss_menu_and_refresh_zoom_when_reopened(
         cx: &mut TestAppContext,
     ) {
         let (manager, _records, cx) = window_manager(cx);
         click("window-menu-button", cx);
 
-        cx.simulate_keystrokes("cmd-d");
+        let pane_host = manager.read_with(cx, |manager, _| manager.windows.active_window().clone());
+        cx.update(|window, cx| {
+            pane_host.update(cx, |pane_host, cx| {
+                pane_host.split_focused(SplitAxis::Horizontal, window, cx);
+            });
+        });
         cx.run_until_parked();
+        assert!(manager.read_with(cx, |manager, _| manager.window_menu.is_none()));
+
+        click("window-menu-button", cx);
         click("window-menu-row-toggle-zoom", cx);
 
         let state = manager.read_with(cx, |manager, cx| {
             (
                 manager.window_menu.is_none(),
                 manager.windows.active_window().read(cx).zoom_state(),
+                manager.windows.active_window().read(cx).pane_count(),
             )
         });
         assert!(
-            matches!(state, (true, ZoomState::Zoomed(_))),
+            matches!(state, (true, ZoomState::Zoomed(_), 2)),
             "the open Window menu did not use the target PaneHost's live zoom state: {state:?}"
         );
     }
@@ -2310,38 +2366,20 @@ mod tests {
     }
 
     #[gpui::test]
-    fn window_menu_should_overlap_the_bar_and_clamp_inside_the_content_width(
-        cx: &mut TestAppContext,
-    ) {
+    fn window_context_menu_should_stay_inside_the_operating_system_window(cx: &mut TestAppContext) {
         let (_manager, _records, cx) = window_manager(cx);
         right_click("window-item-1-active", cx);
 
-        let bar = cx
-            .debug_bounds("window-bar")
-            .expect("the Window bar was not rendered");
-        let menu = cx
-            .debug_bounds("window-menu-1")
+        let row = cx
+            .debug_bounds("window-menu-row-split-right")
             .expect("the Window menu was not rendered");
-        let item = cx
-            .debug_bounds("window-item-1-active")
-            .expect("the Window item was not rendered");
         let root = cx
             .debug_bounds("window-manager")
             .expect("the Window manager was not rendered");
-        let local_pointer_x = item.center().x - root.origin.x;
-        let maximum_left = (root.size.width - px(PANE_ACTION_MENU_WIDTH + WINDOW_CONTROL_INSET))
-            .max(px(WINDOW_CONTROL_INSET));
-        let expected_menu_x =
-            root.origin.x + local_pointer_x.clamp(px(WINDOW_CONTROL_INSET), maximum_left);
 
-        assert_eq!(
-            (
-                bar.origin.y + bar.size.height - menu.origin.y,
-                menu.origin.x,
-                menu.origin.x >= root.origin.x,
-                menu.origin.x + menu.size.width <= root.origin.x + root.size.width,
-            ),
-            (px(WINDOW_MENU_BAR_OVERLAP), expected_menu_x, true, true)
-        );
+        assert!(row.origin.x >= root.origin.x);
+        assert!(row.origin.y >= root.origin.y);
+        assert!(row.right() <= root.right());
+        assert!(row.bottom() <= root.bottom());
     }
 }

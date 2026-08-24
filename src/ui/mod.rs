@@ -1,4 +1,5 @@
 mod button_theme;
+mod menu_theme;
 mod pane_action_menu;
 mod pane_host;
 mod render_lifecycle;
@@ -16,10 +17,6 @@ mod workspace_manager;
 
 use gpui::{App, KeyBinding, MouseDownEvent, Window, actions};
 
-pub(crate) use pane_action_menu::{
-    CloseTarget, PANE_ACTION_MENU_HEIGHT, PANE_ACTION_MENU_WIDTH, PaneActionMenuCommand,
-    render_pane_action_menu,
-};
 pub(crate) use pane_host::{PaneHost, PaneHostEvent};
 #[cfg(test)]
 pub(crate) use render_lifecycle::{RenderLifecycle, ScaleChange, SurfaceVisibility};
@@ -112,7 +109,12 @@ pub(crate) fn handle_top_chrome_mouse_down(
 }
 
 pub(crate) fn init(cx: &mut App) {
-    spaceterm_ui::init(cx, button_theme::theme(), scrollbar_theme::theme());
+    spaceterm_ui::init(
+        cx,
+        button_theme::theme(),
+        scrollbar_theme::theme(),
+        menu_theme::theme(),
+    );
     cx.bind_keys([
         KeyBinding::new("cmd-n", CreateWorkspace, None),
         KeyBinding::new("cmd-o", OpenLocalProject, None),
@@ -221,6 +223,7 @@ mod tests {
         assert!(cx.update(|cx| {
             cx.has_global::<spaceterm_ui::ButtonTheme>()
                 && cx.has_global::<spaceterm_ui::ScrollbarTheme>()
+                && cx.has_global::<spaceterm_ui::MenuTheme>()
         }));
     }
 

@@ -5,15 +5,14 @@ use std::rc::Rc;
 use gpui::prelude::*;
 use gpui::{
     Action, AnyElement, App, Context, DispatchPhase, DragMoveEvent, Empty, Entity, EntityId,
-    FocusHandle, MouseButton, MouseDownEvent, MouseExitEvent, Pixels, PromptButton, PromptLevel,
-    Render, ScrollHandle, ScrollWheelEvent, SharedString, WeakEntity, Window, canvas, div, point,
-    px, rgba,
+    FocusHandle, MouseButton, MouseExitEvent, Pixels, PromptButton, PromptLevel, Render,
+    ScrollHandle, ScrollWheelEvent, SharedString, WeakEntity, Window, canvas, div, point, px, rgba,
 };
 use gpui_symbols::{Icon, RenderingMode, SymbolWeight};
 use spaceterm_ui::{
-    Button, ButtonShape, ButtonSize, ButtonVariant, IconButton, MiddleTruncatedText,
-    OverlayScrollbar, OverlayScrollbarEvent, ScrollMetrics, TextInput, TextInputEvent,
-    TextInputStyle,
+    Button, ButtonShape, ButtonSize, ButtonVariant, ContextMenu, IconButton, MenuCloseReason,
+    MenuEntry, MenuLifecycleEvent, MenuSize, MiddleTruncatedText, OverlayScrollbar,
+    OverlayScrollbarEvent, ScrollMetrics, TextInput, TextInputEvent, TextInputStyle,
 };
 
 use super::button_theme;
@@ -55,16 +54,6 @@ const CHROME_DIVIDER_SIZE: f32 = 1.0;
 const SIDEBAR_RESIZE_HIT_SIZE: f32 = 8.0;
 const SIDEBAR_MAXIMUM_WIDTH: f32 = 420.0;
 const TERMINAL_CONTENT_MINIMUM_WIDTH: f32 = 240.0;
-const WORKSPACE_MENU_WIDTH: f32 = 208.0;
-const WORKSPACE_MENU_ROW_HEIGHT: f32 = 28.0;
-const WORKSPACE_MENU_SEPARATOR_SIZE: f32 = 1.0;
-const WORKSPACE_MENU_BORDER_SIZE: f32 = 1.0;
-const WORKSPACE_MENU_HEIGHT: f32 = WORKSPACE_MENU_ROW_HEIGHT * 3.0
-    + WORKSPACE_MENU_SEPARATOR_SIZE
-    + WORKSPACE_MENU_BORDER_SIZE * 2.0;
-const WORKSPACE_MENU_INSET: f32 = 4.0;
-const WORKSPACE_MENU_CORNER_RADIUS: f32 = 8.0;
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum WorkspaceMenuCommand {
     NewWindow,
@@ -72,10 +61,9 @@ enum WorkspaceMenuCommand {
     Close,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct WorkspaceMenuState {
     workspace_id: WorkspaceId,
-    top: Pixels,
 }
 
 struct WorkspaceRenameState {
@@ -631,7 +619,6 @@ impl WorkspaceManager {
         if pointer_x < minimum_width {
             let was_sidebar_focused =
                 self.sidebar_focus.is_focused(window) || self.rename_is_focused(window);
-            self.workspace_menu = None;
             self.rename = None;
             self.set_sidebar_layout(false, minimum_width, cx);
             if was_sidebar_focused {
@@ -733,7 +720,6 @@ impl WorkspaceManager {
 
         previous_manager.update(cx, |manager, cx| manager.deactivate(cx));
         next_manager.update(cx, |manager, cx| manager.activate(window, cx));
-        self.workspace_menu = None;
         self.rename = None;
         self.sync_terminal_focus_blocker(window, cx);
         self.scroll_active_workspace_into_view();
@@ -744,7 +730,6 @@ impl WorkspaceManager {
         if self.local_project_picker_open {
             return;
         }
-        self.workspace_menu = None;
         self.rename = None;
         self.local_project_picker_open = true;
         self.sync_terminal_focus_blocker(window, cx);
@@ -948,7 +933,6 @@ impl WorkspaceManager {
         } else {
             next_manager.update(cx, |manager, cx| manager.activate(window, cx));
         }
-        self.workspace_menu = None;
         self.sync_terminal_focus_blocker(window, cx);
         self.scroll_active_workspace_into_view();
         cx.notify();
@@ -1029,7 +1013,6 @@ impl WorkspaceManager {
                 active_manager.update(cx, |manager, cx| manager.activate(window, cx));
             }
         }
-        self.workspace_menu = None;
         if self
             .rename
             .as_ref()
@@ -1080,7 +1063,6 @@ impl WorkspaceManager {
                 }
                 debug_assert_eq!(active_workspace_id, self.workspaces.active_workspace_id());
                 self.pending_final_window_closes.remove(&workspace_id);
-                self.workspace_menu = None;
                 if self
                     .rename
                     .as_ref()
@@ -1108,7 +1090,6 @@ impl WorkspaceManager {
         let was_sidebar_focused =
             self.sidebar_focus.is_focused(window) || self.rename_is_focused(window);
         let sidebar_visible = !self.sidebar_visible;
-        self.workspace_menu = None;
         self.rename = None;
         self.set_sidebar_layout(sidebar_visible, self.sidebar_width, cx);
         if !sidebar_visible && was_sidebar_focused {
@@ -1140,56 +1121,76 @@ impl WorkspaceManager {
         cx.notify();
     }
 
-    fn open_workspace_menu(
+    fn request_workspace_menu(
         &mut self,
         workspace_id: WorkspaceId,
-        event: &MouseDownEvent,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) {
+    ) -> bool {
         self.sidebar_focus.focus(window);
-        self.sync_terminal_focus_blocker(window, cx);
-        if !self.activate_workspace(workspace_id, window, cx) {
-            return;
-        }
-        let maximum_top = (window.bounds().size.height
-            - px(WORKSPACE_MENU_HEIGHT + WORKSPACE_MENU_INSET))
-        .max(px(TOP_CHROME_HEIGHT + WORKSPACE_MENU_INSET));
-        self.workspace_menu = Some(WorkspaceMenuState {
-            workspace_id,
-            top: event
-                .position
-                .y
-                .clamp(px(TOP_CHROME_HEIGHT + WORKSPACE_MENU_INSET), maximum_top),
-        });
         self.rename = None;
         self.sync_terminal_focus_blocker(window, cx);
+        let activated = self.activate_workspace(workspace_id, window, cx);
+        if !activated {
+            self.sync_terminal_focus_blocker(window, cx);
+            cx.notify();
+        }
+        activated
+    }
+
+    fn handle_workspace_menu_lifecycle(
+        &mut self,
+        workspace_id: WorkspaceId,
+        event: MenuLifecycleEvent,
+        cx: &mut Context<Self>,
+    ) {
+        let blocker = match event {
+            MenuLifecycleEvent::Opened => {
+                self.workspace_menu = Some(WorkspaceMenuState { workspace_id });
+                Some(TerminalFocusBlocker::ContextMenu)
+            }
+            MenuLifecycleEvent::Closed(reason)
+                if self
+                    .workspace_menu
+                    .is_some_and(|menu| menu.workspace_id == workspace_id) =>
+            {
+                self.workspace_menu = None;
+                Some(if reason == MenuCloseReason::Activated {
+                    TerminalFocusBlocker::ContextMenu
+                } else {
+                    TerminalFocusBlocker::Sidebar
+                })
+            }
+            MenuLifecycleEvent::Closed(_) => return,
+        };
+        self.workspaces
+            .active_workspace()
+            .payload()
+            .update(cx, |manager, cx| {
+                manager.set_parent_focus_blocker(blocker, cx);
+            });
         cx.notify();
     }
 
     fn perform_workspace_menu_command(
         &mut self,
+        workspace_id: WorkspaceId,
         command: WorkspaceMenuCommand,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(menu) = self.workspace_menu else {
-            return;
-        };
         match command {
             WorkspaceMenuCommand::NewWindow => {
-                if let Some(workspace) = self.workspaces.workspace(menu.workspace_id) {
+                if let Some(workspace) = self.workspaces.workspace(workspace_id) {
                     workspace
                         .payload()
                         .update(cx, |manager, cx| manager.create_window(window, cx));
                 }
-                self.workspace_menu = None;
                 self.sync_terminal_focus_blocker(window, cx);
                 cx.notify();
             }
             WorkspaceMenuCommand::Rename => {
-                let Some(workspace) = self.workspaces.workspace(menu.workspace_id) else {
-                    self.workspace_menu = None;
+                let Some(workspace) = self.workspaces.workspace(workspace_id) else {
                     self.sync_terminal_focus_blocker(window, cx);
                     return;
                 };
@@ -1233,11 +1234,10 @@ impl WorkspaceManager {
                 )
                 .detach();
                 self.rename = Some(WorkspaceRenameState {
-                    workspace_id: menu.workspace_id,
+                    workspace_id,
                     focus_handle: input.read(cx).focus_handle(),
                     input,
                 });
-                self.workspace_menu = None;
                 self.sync_terminal_focus_blocker(window, cx);
                 cx.notify();
                 cx.defer_in(window, |manager, window, cx| {
@@ -1251,7 +1251,7 @@ impl WorkspaceManager {
                     manager.sync_terminal_focus_blocker(window, cx);
                 });
             }
-            WorkspaceMenuCommand::Close => self.close_workspace(menu.workspace_id, window, cx),
+            WorkspaceMenuCommand::Close => self.close_workspace(workspace_id, window, cx),
         }
     }
 
@@ -1546,7 +1546,7 @@ impl WorkspaceManager {
             active,
         } = row;
         let click_manager = manager.clone();
-        let context_manager = manager;
+        let accessibility_name = format!("Workspace actions for {name}");
         let rename = self
             .rename
             .as_ref()
@@ -1594,7 +1594,7 @@ impl WorkspaceManager {
             .max(8.0) as usize;
         let tooltip_text = tooltip;
 
-        div()
+        let row = div()
             .id(("workspace-row", workspace_id.get()))
             .debug_selector(move || {
                 format!(
@@ -1612,7 +1612,6 @@ impl WorkspaceManager {
             .flex_row()
             .items_center()
             .gap(px(10.0))
-            .cursor_pointer()
             .block_mouse_except_scroll()
             .when(active, |row| {
                 row.bg(gpui_color(ACTIVE_THEME.element_selected))
@@ -1628,12 +1627,6 @@ impl WorkspaceManager {
                 let _ = click_manager.update(cx, |manager, cx| {
                     manager.sidebar_focus.focus(window);
                     manager.activate_workspace(workspace_id, window, cx);
-                });
-                cx.stop_propagation();
-            })
-            .on_mouse_down(MouseButton::Right, move |event, window, cx| {
-                let _ = context_manager.update(cx, |manager, cx| {
-                    manager.open_workspace_menu(workspace_id, event, window, cx);
                 });
                 cx.stop_propagation();
             })
@@ -1718,6 +1711,44 @@ impl WorkspaceManager {
                     .w_full()
                     .h(px(CHROME_DIVIDER_SIZE))
                     .bg(gpui_color(ACTIVE_THEME.border)),
+            )
+            .into_any_element();
+
+        let open_manager = manager.clone();
+        let lifecycle_manager = manager.clone();
+        let activate_manager = manager;
+        div()
+            .id(("workspace-menu", workspace_id.get()))
+            .debug_selector(move || format!("workspace-menu-{}", workspace_id.get()))
+            .w_full()
+            .flex_shrink_0()
+            .child(
+                ContextMenu::new(
+                    ("workspace-menu-controls", workspace_id.get()),
+                    accessibility_name,
+                    row,
+                    workspace_menu_entries(),
+                )
+                .size(MenuSize::Small)
+                .debug_selector(format!("workspace-menu-controls-{}", workspace_id.get()))
+                .on_open_request(move |_, window, cx| {
+                    open_manager
+                        .update(cx, |manager, cx| {
+                            manager.request_workspace_menu(workspace_id, window, cx)
+                        })
+                        .unwrap_or(false)
+                })
+                .on_lifecycle(move |event, cx| {
+                    let _ = lifecycle_manager.update(cx, |manager, cx| {
+                        manager.handle_workspace_menu_lifecycle(workspace_id, *event, cx);
+                    });
+                })
+                .on_activate(move |activation, window, cx| {
+                    let command = *activation.action();
+                    let _ = activate_manager.update(cx, |manager, cx| {
+                        manager.perform_workspace_menu_command(workspace_id, command, window, cx);
+                    });
+                }),
             )
             .into_any_element()
     }
@@ -1932,32 +1963,6 @@ impl WorkspaceManager {
             )
             .into_any_element()
     }
-
-    fn render_workspace_menu(
-        &self,
-        menu: WorkspaceMenuState,
-        manager: WeakEntity<Self>,
-    ) -> AnyElement {
-        let dismiss_manager = manager.clone();
-        div()
-            .id(("workspace-menu-controls", menu.workspace_id.get()))
-            .debug_selector(move || format!("workspace-menu-controls-{}", menu.workspace_id.get()))
-            .absolute()
-            .top(menu.top)
-            .left(px(WORKSPACE_MENU_INSET))
-            .w(px(WORKSPACE_MENU_WIDTH))
-            .h(px(WORKSPACE_MENU_HEIGHT))
-            .on_mouse_down_out(move |_, window, cx| {
-                let _ = dismiss_manager.update(cx, |manager, cx| {
-                    if manager.workspace_menu.take().is_some() {
-                        manager.sync_terminal_focus_blocker(window, cx);
-                        cx.notify();
-                    }
-                });
-            })
-            .child(render_workspace_menu_content(menu.workspace_id, manager))
-            .into_any_element()
-    }
 }
 
 impl Render for WorkspaceManager {
@@ -2052,112 +2057,44 @@ impl Render for WorkspaceManager {
             .child(active_window_manager)
             .child(self.render_top_left_chrome(manager.clone()))
             .when(self.sidebar_visible, |root| {
-                root.child(self.render_sidebar(manager.clone(), cx))
-            })
-            .when_some(self.workspace_menu, |root, menu| {
-                root.child(self.render_workspace_menu(menu, manager))
+                root.child(self.render_sidebar(manager, cx))
             })
     }
 }
 
-fn render_workspace_menu_content(
-    workspace_id: WorkspaceId,
-    manager: WeakEntity<WorkspaceManager>,
-) -> AnyElement {
-    let mut menu = div()
-        .id(("workspace-menu", workspace_id.get()))
-        .debug_selector(move || format!("workspace-menu-{}", workspace_id.get()))
-        .w(px(WORKSPACE_MENU_WIDTH))
-        .flex()
-        .flex_col()
-        .overflow_hidden()
-        .rounded(px(WORKSPACE_MENU_CORNER_RADIUS))
-        .border(px(WORKSPACE_MENU_BORDER_SIZE))
-        .border_color(gpui_color(ACTIVE_THEME.border))
-        .bg(gpui_color(ACTIVE_THEME.elevated_surface_background))
-        .occlude();
-    for command in [
-        WorkspaceMenuCommand::NewWindow,
-        WorkspaceMenuCommand::Rename,
-        WorkspaceMenuCommand::Close,
-    ] {
-        if command == WorkspaceMenuCommand::Close {
-            menu = menu.child(
-                div()
-                    .h(px(WORKSPACE_MENU_SEPARATOR_SIZE))
-                    .bg(gpui_color(ACTIVE_THEME.border)),
-            );
-        }
-        menu = menu.child(render_workspace_menu_row(command, manager.clone()));
-    }
-    menu.into_any_element()
-}
-
-fn render_workspace_menu_row(
-    command: WorkspaceMenuCommand,
-    manager: WeakEntity<WorkspaceManager>,
-) -> AnyElement {
-    let (name, icon, label, shortcut, destructive) = match command {
-        WorkspaceMenuCommand::NewWindow => (
-            "new-window",
-            "plus.rectangle.on.rectangle",
-            "New Window",
-            "⌘T",
-            false,
-        ),
-        WorkspaceMenuCommand::Rename => ("rename", "pencil", "Rename Workspace", "", false),
-        WorkspaceMenuCommand::Close => ("close", "xmark", "Close Workspace", "", true),
-    };
-    let foreground = if destructive {
-        ACTIVE_THEME.error
-    } else {
-        ACTIVE_THEME.text
-    };
-    div()
-        .id(command as usize)
-        .debug_selector(move || format!("workspace-menu-row-{name}"))
-        .h(px(WORKSPACE_MENU_ROW_HEIGHT))
-        .px(px(6.0))
-        .flex()
-        .flex_row()
-        .items_center()
-        .gap(px(8.0))
-        .cursor_pointer()
-        .text_size(px(13.0))
-        .text_color(gpui_color(foreground))
-        .hover(|row| row.bg(gpui_color(ACTIVE_THEME.element_hover)))
-        .on_click(move |_, window, cx| {
-            let _ = manager.update(cx, |manager, cx| {
-                manager.perform_workspace_menu_command(command, window, cx);
-            });
-            cx.stop_propagation();
-        })
-        .child(
-            div()
-                .w(px(18.0))
-                .flex()
-                .items_center()
-                .justify_center()
-                .child(
-                    Icon::new(icon)
-                        .weight(SymbolWeight::Regular)
-                        .size(px(14.0))
-                        .color(gpui_color(if destructive {
-                            ACTIVE_THEME.error
-                        } else {
-                            ACTIVE_THEME.icon
-                        })),
-                ),
-        )
-        .child(label)
-        .child(div().flex_grow())
-        .child(
-            div()
-                .text_size(px(10.0))
-                .text_color(gpui_color(ACTIVE_THEME.icon))
-                .child(shortcut),
-        )
-        .into_any_element()
+fn workspace_menu_entries() -> Vec<MenuEntry<WorkspaceMenuCommand>> {
+    vec![
+        MenuEntry::action("New Window", WorkspaceMenuCommand::NewWindow)
+            .shortcut("⌘T")
+            .icon(|foreground| {
+                Icon::new("plus.rectangle.on.rectangle")
+                    .weight(SymbolWeight::Regular)
+                    .size(px(14.0))
+                    .color(foreground)
+                    .into_any_element()
+            })
+            .debug_selector("workspace-menu-row-new-window"),
+        MenuEntry::action("Rename Workspace", WorkspaceMenuCommand::Rename)
+            .icon(|foreground| {
+                Icon::new("pencil")
+                    .weight(SymbolWeight::Regular)
+                    .size(px(14.0))
+                    .color(foreground)
+                    .into_any_element()
+            })
+            .debug_selector("workspace-menu-row-rename"),
+        MenuEntry::separator(),
+        MenuEntry::action("Close Workspace", WorkspaceMenuCommand::Close)
+            .destructive(true)
+            .icon(|foreground| {
+                Icon::new("xmark")
+                    .weight(SymbolWeight::Regular)
+                    .size(px(14.0))
+                    .color(foreground)
+                    .into_any_element()
+            })
+            .debug_selector("workspace-menu-row-close"),
+    ]
 }
 
 fn gpui_color(color: Color) -> gpui::Rgba {
@@ -3057,9 +2994,21 @@ mod tests {
         });
         assert_eq!(
             state,
-            (WorkspaceId::new(1), true, Some(WorkspaceId::new(1)), false)
+            (WorkspaceId::new(1), false, Some(WorkspaceId::new(1)), false)
         );
-        assert!(cx.debug_bounds("workspace-menu-1").is_some());
+        assert!(cx.debug_bounds("menu-panel-0").is_some());
+
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        let dismissed = cx.update(|window, cx| {
+            let manager = manager.read(cx);
+            (
+                manager.workspace_menu,
+                manager.sidebar_focus.is_focused(window),
+                manager.terminal_focus_blocker(window),
+            )
+        });
+        assert_eq!(dismissed, (None, true, Some(TerminalFocusBlocker::Sidebar)));
     }
 
     #[gpui::test]
