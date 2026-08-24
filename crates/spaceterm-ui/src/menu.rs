@@ -2342,8 +2342,7 @@ fn render_panel(
                 content = content.child(
                     div()
                         .h(style.metrics.separator_height)
-                        .pl(separator_leading_inset(style.metrics))
-                        .pr(style.metrics.horizontal_padding + style.metrics.panel_padding)
+                        .mx(style.metrics.panel_padding)
                         .flex()
                         .items_center()
                         .child(div().h(px(1.0)).w_full().bg(style.paint.separator)),
@@ -2353,7 +2352,7 @@ fn render_panel(
                 content = content.child(
                     div()
                         .h(style.metrics.section_height)
-                        .pl(separator_leading_inset(style.metrics))
+                        .pl(content_leading_inset(style.metrics))
                         .pr(style.metrics.horizontal_padding + style.metrics.panel_padding)
                         .flex()
                         .items_center()
@@ -2595,10 +2594,11 @@ fn row_secondary_foreground(
 }
 
 fn row_corner_radius(metrics: MenuMetrics) -> Pixels {
+    // Keep the inset highlight concentric with the outer panel instead of reusing the outer radius.
     (metrics.corner_radius - metrics.panel_padding).max(px(0.0))
 }
 
-fn separator_leading_inset(metrics: MenuMetrics) -> Pixels {
+fn content_leading_inset(metrics: MenuMetrics) -> Pixels {
     metrics.panel_padding + metrics.horizontal_padding + metrics.indicator_width + metrics.gap
 }
 
@@ -2615,7 +2615,7 @@ fn panel_size(entries: &[InternalEntry], metrics: MenuMetrics) -> gpui::Size<Pix
     });
     size(
         metrics.panel_width,
-        content_height + metrics.panel_padding * 2.0,
+        content_height + (metrics.panel_padding + metrics.border_width) * 2.0,
     )
 }
 
@@ -3022,8 +3022,19 @@ mod tests {
             .corner_radius(px(8.0))
             .panel_spacing(px(3.0), px(2.0));
 
+        let entries = vec![
+            inert("New Window", false),
+            inert("Rename Workspace", false),
+            InternalEntry {
+                kind: InternalEntryKind::Separator,
+            },
+            inert("Close Workspace", false),
+        ];
+
         assert_eq!(row_corner_radius(metrics), px(5.0));
-        assert_eq!(separator_leading_inset(metrics), px(31.0));
+        assert_eq!(content_leading_inset(metrics), px(31.0));
+        assert_eq!(metrics.panel_padding, px(3.0));
+        assert_eq!(panel_size(&entries, metrics), size(px(196.0), px(95.0)));
     }
 
     #[test]

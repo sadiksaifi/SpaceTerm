@@ -5,7 +5,7 @@ use crate::theme::{ACTIVE_THEME, Color};
 
 pub(super) fn theme() -> MenuTheme {
     let paint = MenuPaint::new(
-        gpui_color(ACTIVE_THEME.title_bar_inactive_background),
+        gpui_color(ACTIVE_THEME.elevated_surface_background),
         gpui_color(ACTIVE_THEME.border),
         gpui_color(ACTIVE_THEME.text),
         gpui_color(ACTIVE_THEME.icon),

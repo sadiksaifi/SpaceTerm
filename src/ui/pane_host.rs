@@ -2141,7 +2141,7 @@ mod tests {
             (
                 Some(px(26.0)),
                 Some(px(26.0)),
-                Some(size(px(240.0), px(119.0)))
+                Some(size(px(240.0), px(121.0)))
             )
         );
     }
