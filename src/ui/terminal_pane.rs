@@ -15,16 +15,13 @@ use gpui::{
 };
 use gpui_symbols::{Icon, SymbolWeight};
 use spaceterm_ui::{
-    Button, ButtonRole, ButtonSize, ButtonVariant, IconButton, OverlayScrollbar,
-    OverlayScrollbarEvent, ScrollMetrics,
+    Button, ButtonRole, ButtonSize, ButtonVariant, ContextMenu, IconButton, MenuLifecycleEvent,
+    MenuSize, OverlayScrollbar, OverlayScrollbarEvent, ScrollMetrics,
 };
 
 use super::button_theme;
 use super::render_lifecycle::{RenderLifecycle, ScaleChange, SurfaceVisibility};
-use super::terminal_context_menu::{
-    TERMINAL_CONTEXT_MENU_HEIGHT, TERMINAL_CONTEXT_MENU_WIDTH, TerminalContextMenuCommand,
-    render_terminal_context_menu,
-};
+use super::terminal_context_menu::{TerminalContextMenuCommand, terminal_context_menu_entries};
 use super::terminal_element::PaintPreflightFault;
 use super::terminal_element::{
     TerminalGridCache, TerminalGridConfiguration, TerminalGridElement, terminal_grid_content_bounds,
@@ -193,8 +190,6 @@ struct PasteRequestGuard {
 
 #[derive(Clone, Debug, PartialEq)]
 struct TerminalContextMenuState {
-    left: Pixels,
-    top: Pixels,
     generation: crate::terminal::PresentationGeneration,
     position: SurfacePosition,
     link: Option<crate::terminal::HyperlinkTarget>,
@@ -1815,13 +1810,6 @@ impl TerminalPane {
     }
 
     fn on_key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
-        if self.context_menu.is_some() {
-            if event.keystroke.key == "escape" {
-                self.dismiss_context_menu(window, cx);
-                cx.stop_propagation();
-            }
-            return;
-        }
         if self.find_focus_handle.is_focused(window) && self.find_editor.is_some() {
             let key = event.keystroke.key.as_str();
             let extend = event.keystroke.modifiers.shift;
@@ -2099,17 +2087,6 @@ impl TerminalPane {
             return;
         };
 
-        if opens_terminal_context_menu(
-            button,
-            self.screen.mouse_tracking,
-            event.modifiers.shift,
-            self.shift_selection,
-        ) {
-            self.open_context_menu(event, position, window, cx);
-            cx.stop_propagation();
-            return;
-        }
-
         if button == PointerButton::Left
             && event.modifiers.platform
             && let Some(link) = self.link_at(position)
@@ -2224,8 +2201,6 @@ impl TerminalPane {
         cx: &mut Context<Self>,
     ) {
         if self.context_menu.is_some() {
-            // The occluding menu owns this release. Its child listener runs
-            // later in capture, so the Pane must not stop propagation here.
             return;
         }
         self.on_mouse_up(event, window, cx);
@@ -2480,23 +2455,36 @@ impl TerminalPane {
         actions
     }
 
-    fn open_context_menu(
+    fn request_context_menu(
         &mut self,
-        event: &MouseDownEvent,
-        position: SurfacePosition,
+        request: &spaceterm_ui::ContextMenuOpenRequest,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) {
-        let Some(bounds) = self.grid_bounds else {
-            return;
+    ) -> bool {
+        let modifiers = window.modifiers();
+        if !opens_terminal_context_menu(
+            PointerButton::Right,
+            self.screen.mouse_tracking,
+            modifiers.shift,
+            self.shift_selection,
+        ) {
+            return false;
+        }
+        let Some(position) = self.surface_position(request.position(), false) else {
+            return false;
         };
-        let (left, top) = terminal_context_menu_origin(bounds, event.position);
+
+        self.pointer_modifiers = input_modifiers(modifiers);
+        self.focus(window);
+        self.clear_attention(cx);
+        if !self.synchronize_terminal_input_focus(window, cx) {
+            return false;
+        }
+
         let link = self.link_at(position);
         let quick_look_eligible =
             NativeContextActions::from_presence(false, link.as_ref()).quick_look;
         self.context_menu = Some(TerminalContextMenuState {
-            left,
-            top,
             generation: self.screen.generation,
             position,
             selection_present: self.screen.selection_present,
@@ -2505,25 +2493,32 @@ impl TerminalPane {
         });
         self.sync_terminal_input_focus(window, cx);
         cx.notify();
+        true
     }
 
-    fn dismiss_context_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.context_menu.take().is_none() {
-            return;
+    fn context_menu_closed(&mut self, cx: &mut Context<Self>) {
+        if self.context_menu.take().is_some() {
+            cx.notify();
         }
-        self.sync_terminal_input_focus(window, cx);
-        cx.notify();
+    }
+
+    fn context_menu_available(&self) -> bool {
+        matches!(self.pane_state, PaneTerminalState::Running)
+            && self.product_focus.active_workspace
+            && self.product_focus.active_window
+            && self.product_focus.focused_pane
+            && self.product_focus.blocker.is_none()
+            && !self.native_modal_open
     }
 
     fn perform_context_menu_command(
         &mut self,
+        menu: TerminalContextMenuState,
         command: TerminalContextMenuCommand,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(menu) = self.context_menu.take() else {
-            return;
-        };
+        self.context_menu = None;
         let current = self.link_at(menu.position);
         let link = revalidated_context_link(
             menu.generation,
@@ -3505,18 +3500,54 @@ impl Render for TerminalPane {
             },
             cx,
         );
-        let context_menu = self.context_menu.clone().map(|menu| {
-            let actions = self.context_menu_actions(&menu);
-            render_terminal_context_menu(
-                menu.left,
-                menu.top,
-                actions,
-                cx.entity().downgrade(),
-                |pane, command, window, cx| {
-                    pane.perform_context_menu_command(command, window, cx);
-                },
-                |pane, window, cx| pane.dismiss_context_menu(window, cx),
-            )
+        let context_menu_target = self.context_menu.clone();
+        let context_menu_actions = context_menu_target
+            .as_ref()
+            .map_or(native_context_actions, |menu| {
+                self.context_menu_actions(menu)
+            });
+        let context_menu_available = self.context_menu_available();
+        let context_menu_entries = terminal_context_menu_entries(context_menu_actions);
+        let context_open_pane = pane.clone();
+        let context_activation_pane = pane.clone();
+        let context_activation_target = context_menu_target.clone();
+        let context_lifecycle_pane = pane.clone();
+        let context_target_size = self
+            .grid_bounds
+            .map_or(size(px(1.0), px(1.0)), |bounds| bounds.size);
+        let context_menu = ContextMenu::new(
+            "terminal-context-menu",
+            "Terminal context actions",
+            div()
+                .w(context_target_size.width)
+                .h(context_target_size.height),
+            context_menu_entries,
+        )
+        .size(MenuSize::Regular)
+        .disabled(!context_menu_available)
+        .debug_selector("terminal-context-menu")
+        .on_open_request(move |request, window, cx| {
+            context_open_pane
+                .update(cx, |pane, cx| {
+                    pane.request_context_menu(request, window, cx)
+                })
+                .unwrap_or(false)
+        })
+        .on_activate(move |activation, window, cx| {
+            let Some(target) = context_activation_target.clone() else {
+                return;
+            };
+            let command = *activation.action();
+            let _ = context_activation_pane.update(cx, |pane, cx| {
+                pane.perform_context_menu_command(target, command, window, cx);
+            });
+        })
+        .on_lifecycle(move |event, cx| {
+            if matches!(event, MenuLifecycleEvent::Closed(_)) {
+                let _ = context_lifecycle_pane.update(cx, |pane, cx| {
+                    pane.context_menu_closed(cx);
+                });
+            }
         });
 
         div()
@@ -3653,7 +3684,15 @@ impl Render for TerminalPane {
                         }),
                 )
             })
-            .when_some(context_menu, |root, menu| root.child(menu))
+            .child(
+                div()
+                    .absolute()
+                    .left(px(HORIZONTAL_PADDING))
+                    .right(px(HORIZONTAL_PADDING))
+                    .top(px(VERTICAL_PADDING))
+                    .bottom(px(VERTICAL_PADDING))
+                    .child(context_menu),
+            )
             .into_any_element()
     }
 }
@@ -4002,20 +4041,6 @@ fn revalidated_context_link<'a>(
         clicked_generation == current_generation
             && current.is_some_and(|current| current.identity == clicked.identity)
     })
-}
-
-fn terminal_context_menu_origin(
-    bounds: Bounds<Pixels>,
-    clicked: gpui::Point<Pixels>,
-) -> (Pixels, Pixels) {
-    let local_x = clicked.x - bounds.origin.x;
-    let local_y = clicked.y - bounds.origin.y;
-    let maximum_left = (bounds.size.width - px(TERMINAL_CONTEXT_MENU_WIDTH)).max(px(0.0));
-    let maximum_top = (bounds.size.height - px(TERMINAL_CONTEXT_MENU_HEIGHT)).max(px(0.0));
-    (
-        local_x.clamp(px(0.0), maximum_left) + px(HORIZONTAL_PADDING),
-        local_y.clamp(px(0.0), maximum_top) + px(VERTICAL_PADDING),
-    )
 }
 
 fn hovered_link_for_generation(
@@ -7120,8 +7145,6 @@ mod tests {
         let (current, stale) = pane.update(cx, |pane, _| {
             pane.screen = context_action_screen(None, true);
             let mut menu = TerminalContextMenuState {
-                left: px(0.0),
-                top: px(0.0),
                 generation: pane.screen.generation,
                 position: SurfacePosition::default(),
                 link: None,
@@ -7144,8 +7167,6 @@ mod tests {
         cx.update(|window, cx| {
             pane.update(cx, |pane, cx| {
                 pane.context_menu = Some(TerminalContextMenuState {
-                    left: px(0.0),
-                    top: px(0.0),
                     generation: pane.screen.generation,
                     position: SurfacePosition::default(),
                     link: None,
@@ -7153,7 +7174,8 @@ mod tests {
                     quick_look_eligible: false,
                 });
                 pane.sync_terminal_input_focus(window, cx);
-                pane.dismiss_context_menu(window, cx);
+                pane.context_menu_closed(cx);
+                pane.sync_terminal_input_focus(window, cx);
             });
         });
 
@@ -7253,6 +7275,36 @@ mod tests {
     }
 
     #[gpui::test]
+    fn context_menu_keys_never_reach_the_terminal_session(cx: &mut TestAppContext) {
+        let (pane, cx, records) = connected_terminal_pane(cx);
+        pane.update(cx, |pane, cx| {
+            pane.screen = context_action_screen(None, true);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        let click = pane.read_with(cx, |pane, _| {
+            let bounds = pane.grid_bounds.expect("terminal grid was painted");
+            bounds.center()
+        });
+
+        cx.simulate_mouse_down(click, MouseButton::Right, Modifiers::none());
+        cx.simulate_mouse_up(click, MouseButton::Right, Modifiers::none());
+        cx.run_until_parked();
+        assert!(pane.read_with(cx, |pane, _| pane.context_menu.is_some()));
+
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+
+        assert!(pane.read_with(cx, |pane, _| pane.context_menu.is_none()));
+        assert!(
+            records
+                .commands()
+                .iter()
+                .all(|call| !matches!(call.command, RecordedSessionCommand::Key(_)))
+        );
+    }
+
+    #[gpui::test]
     fn quick_look_command_revalidates_then_calls_the_retained_presenter(cx: &mut TestAppContext) {
         let directory = std::env::temp_dir().join(format!(
             "spaceterm-context-quick-look-{}",
@@ -7279,17 +7331,17 @@ mod tests {
                     previews: Rc::clone(&previews),
                     dismissals: Rc::clone(&dismissals),
                 });
-                pane.context_menu = Some(TerminalContextMenuState {
-                    left: px(0.0),
-                    top: px(0.0),
+                let menu = TerminalContextMenuState {
                     generation: pane.screen.generation,
                     position: SurfacePosition::default(),
                     link: Some(link),
                     selection_present: false,
                     quick_look_eligible: true,
-                });
+                };
+                pane.context_menu = Some(menu.clone());
                 pane.sync_terminal_input_focus(window, cx);
                 pane.perform_context_menu_command(
+                    menu,
                     TerminalContextMenuCommand::QuickLook,
                     window,
                     cx,
@@ -7331,15 +7383,14 @@ mod tests {
                     previews: Rc::clone(&previews),
                     dismissals: Rc::clone(&dismissals),
                 });
-                pane.context_menu = Some(TerminalContextMenuState {
-                    left: px(0.0),
-                    top: px(0.0),
+                let menu = TerminalContextMenuState {
                     generation: clicked_screen.generation,
                     position: SurfacePosition::default(),
                     link: Some(link),
                     selection_present: false,
                     quick_look_eligible: true,
-                });
+                };
+                pane.context_menu = Some(menu.clone());
                 pane.screen = ScreenSnapshot::from_test_parts_at(
                     clicked_screen.rows.clone(),
                     ScrollbarSnapshot::default(),
@@ -7348,6 +7399,7 @@ mod tests {
                 );
                 pane.sync_terminal_input_focus(window, cx);
                 pane.perform_context_menu_command(
+                    menu,
                     TerminalContextMenuCommand::QuickLook,
                     window,
                     cx,
@@ -7432,8 +7484,6 @@ mod tests {
                 dismissals: Rc::clone(&dismissals),
             });
             pane.context_menu = Some(TerminalContextMenuState {
-                left: px(0.0),
-                top: px(0.0),
                 generation: pane.screen.generation,
                 position: SurfacePosition::default(),
                 link: None,
@@ -7448,18 +7498,6 @@ mod tests {
 
         assert_eq!(dismissals.get(), 1);
         assert!(pane.read_with(cx, |pane, _| pane.context_menu.is_none()));
-    }
-
-    #[test]
-    fn context_menu_stays_within_terminal_surface() {
-        let bounds = Bounds {
-            origin: point(px(40.0), px(60.0)),
-            size: size(px(300.0), px(180.0)),
-        };
-        let (left, top) = terminal_context_menu_origin(bounds, point(px(330.0), px(230.0)));
-
-        assert_eq!(left, px(84.0));
-        assert_eq!(top, px(102.0));
     }
 
     #[gpui::test]

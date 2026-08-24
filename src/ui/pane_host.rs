@@ -7,14 +7,19 @@ use gpui::{
     MouseDownEvent, Pixels, Point, PromptButton, PromptLevel, Render, Window, div, px, rgba,
 };
 use gpui_symbols::{Icon, SymbolWeight};
-use spaceterm_ui::{ButtonSize, ButtonVariant, IconButton};
+use spaceterm_ui::{
+    ButtonSize, ButtonVariant, IconButton, Menu, MenuAlignment, MenuCloseReason,
+    MenuLifecycleEvent, MenuPlacement, MenuPlacementConfig, MenuSize,
+};
 
 use super::button_theme;
+use super::pane_action_menu::{
+    CloseTarget, PaneActionMenuCommand, pane_action_menu_entries, sf_symbol,
+};
 use super::terminal_focus::{TerminalFocusBlocker, TerminalProductFocus};
 use super::{
-    ClosePane, CloseTarget, FocusPaneDown, FocusPaneLeft, FocusPaneRight, FocusPaneUp,
-    PANE_ACTION_MENU_HEIGHT, PANE_ACTION_MENU_WIDTH, PaneActionMenuCommand, SplitDown, SplitRight,
-    TERMINAL_KEY_CONTEXT, TerminalPane, TerminalPaneEvent, TogglePaneZoom, render_pane_action_menu,
+    ClosePane, FocusPaneDown, FocusPaneLeft, FocusPaneRight, FocusPaneUp, SplitDown, SplitRight,
+    TERMINAL_KEY_CONTEXT, TerminalPane, TerminalPaneEvent, TogglePaneZoom,
 };
 use crate::domain::{
     ClosePaneOutcome, FocusDirection, PaneId, PaneNodeRef, PaneSize, PaneTreeRef, SplitAxis,
@@ -25,7 +30,6 @@ use crate::terminal::{
 };
 use crate::theme::{ACTIVE_THEME, Color};
 
-const MINIMUM_PANE_WIDTH: f32 = PANE_ACTION_MENU_WIDTH + PANE_CONTROL_INSET * 2.0;
 const DIVIDER_SIZE: f32 = 1.0;
 const DIVIDER_HIT_SIZE: f32 = 8.0;
 const PANE_HEADER_HEIGHT: f32 = 32.0;
@@ -33,10 +37,13 @@ const PANE_HEADER_HORIZONTAL_PADDING: f32 = 12.0;
 const PANE_CONTROL_INSET: f32 = 4.0;
 const PANE_CONTROL_TOP: f32 = 2.0;
 const PANE_CONTROL_SIZE: f32 = 28.0;
-const PANE_MENU_HEADER_OVERLAP: f32 = 8.0;
-const PANE_MENU_TOP: f32 = PANE_HEADER_HEIGHT - PANE_CONTROL_TOP - PANE_MENU_HEADER_OVERLAP;
-const MENU_TOP: f32 = PANE_CONTROL_TOP + PANE_MENU_TOP;
-const MINIMUM_PANE_HEIGHT: f32 = MENU_TOP + PANE_ACTION_MENU_HEIGHT + PANE_CONTROL_INSET;
+const MINIMUM_PANE_WIDTH: f32 = PANE_HEADER_HORIZONTAL_PADDING * 2.0 + PANE_CONTROL_SIZE;
+const MINIMUM_PANE_HEIGHT: f32 = PANE_HEADER_HEIGHT + PANE_CONTROL_INSET;
+
+const _: () = assert!(
+    MINIMUM_PANE_WIDTH >= PANE_CONTROL_SIZE + PANE_CONTROL_INSET * 2.0
+        && MINIMUM_PANE_HEIGHT >= PANE_CONTROL_TOP + PANE_CONTROL_SIZE + PANE_CONTROL_INSET
+);
 
 #[derive(Clone, Copy)]
 struct DraggedSplit {
@@ -562,22 +569,44 @@ impl PaneHost {
         }
     }
 
-    fn toggle_menu(
+    fn handle_menu_lifecycle(
         &mut self,
         pane_id: PaneId,
+        event: MenuLifecycleEvent,
         cx: &mut Context<Self>,
-    ) -> Option<Entity<TerminalPane>> {
-        if let Err(error) = self.terminal_window.focus_pane(pane_id) {
-            eprintln!("failed to focus Pane: {error}");
-            return None;
+    ) {
+        match event {
+            MenuLifecycleEvent::Opened => {
+                if let Err(error) = self.terminal_window.focus_pane(pane_id) {
+                    eprintln!("failed to focus Pane: {error}");
+                    return;
+                }
+                self.menu_pane_id = Some(pane_id);
+                self.sync_terminal_focus(cx);
+            }
+            MenuLifecycleEvent::Closed(reason) => {
+                if self.menu_pane_id != Some(pane_id) {
+                    return;
+                }
+                self.menu_pane_id = None;
+                self.sync_terminal_focus_with_menu_blocker(
+                    reason == MenuCloseReason::Activated,
+                    cx,
+                );
+            }
         }
-        self.menu_pane_id = (self.menu_pane_id != Some(pane_id)).then_some(pane_id);
-        self.sync_terminal_focus(cx);
         cx.notify();
-        self.terminal_window.terminal(pane_id).cloned()
     }
 
     fn sync_terminal_focus(&mut self, cx: &mut Context<Self>) {
+        self.sync_terminal_focus_with_menu_blocker(self.menu_pane_id.is_some(), cx);
+    }
+
+    fn sync_terminal_focus_with_menu_blocker(
+        &mut self,
+        menu_blocked: bool,
+        cx: &mut Context<Self>,
+    ) {
         let focused_terminal_id = self
             .terminal_window
             .terminal(self.terminal_window.focused_pane_id())
@@ -589,9 +618,8 @@ impl PaneHost {
                 .terminal(pane_id)
                 .map(Entity::entity_id),
         };
-        let blocker = self
-            .menu_pane_id
-            .map(|_| TerminalFocusBlocker::PaneMenu)
+        let blocker = menu_blocked
+            .then_some(TerminalFocusBlocker::PaneMenu)
             .or(self.focus_branch_blocker);
         let signature = (self.active, self.terminal_window.focused_pane_id(), blocker);
         if self.native_service_focus_signature != Some(signature) {
@@ -657,6 +685,9 @@ impl PaneHost {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.menu_pane_id = Some(pane_id);
+        self.sync_terminal_focus(cx);
+
         match command {
             PaneActionMenuCommand::SplitRight => {
                 self.split_pane(pane_id, SplitAxis::Horizontal, window, cx)
@@ -798,7 +829,6 @@ impl PaneHost {
                 pane.child(render_pane_controls(
                     pane_id,
                     focused,
-                    self.menu_pane_id == Some(pane_id),
                     zoomed,
                     &pane_group,
                     host.clone(),
@@ -1049,99 +1079,51 @@ fn render_divider(split_id: SplitId, axis: SplitAxis) -> AnyElement {
     divider.child(hit_target).into_any_element()
 }
 
-fn render_menu_button(
-    pane_id: PaneId,
-    focused: bool,
-    pane_group: &str,
-    host: gpui::WeakEntity<PaneHost>,
-) -> AnyElement {
-    let button_host = host;
-    div()
-        .absolute()
-        .top_0()
-        .right_0()
-        .when(!focused, |button| {
-            button
-                .opacity(0.0)
-                .group_hover(pane_group.to_owned(), |button| button.opacity(1.0))
-        })
-        .child(
-            IconButton::new(
-                ("pane-menu-button", pane_id.get()),
-                "Open Pane Actions",
-                |foreground| {
-                    Icon::new("ellipsis")
-                        .size(px(16.0))
-                        .color(foreground)
-                        .into_any_element()
-                },
-            )
-            .variant(ButtonVariant::Ghost)
-            .size(ButtonSize::Regular)
-            .debug_selector(format!("pane-menu-button-{}", pane_id.get()))
-            .tooltip(|_, cx| button_theme::tooltip("Pane Actions", cx))
-            .on_activate(move |_, window, cx| {
-                let terminal = button_host
-                    .update(cx, |host, cx| host.toggle_menu(pane_id, cx))
-                    .ok()
-                    .flatten();
-                if let Some(terminal) = terminal {
-                    terminal.update(cx, |terminal, _| terminal.focus(window));
-                }
-            }),
-        )
-        .into_any_element()
-}
-
 fn render_pane_controls(
     pane_id: PaneId,
     focused: bool,
-    show_menu: bool,
     zoomed: bool,
     pane_group: &str,
     host: gpui::WeakEntity<PaneHost>,
 ) -> AnyElement {
-    let dismiss_host = host.clone();
+    let activation_host = host.clone();
+    let lifecycle_host = host;
 
     div()
         .id(("pane-controls", pane_id.get()))
         .absolute()
         .top(px(PANE_CONTROL_TOP))
         .right(px(PANE_CONTROL_INSET))
-        .w(px(if show_menu {
-            PANE_ACTION_MENU_WIDTH
-        } else {
-            PANE_CONTROL_SIZE
-        }))
-        .h(px(if show_menu {
-            PANE_MENU_TOP + PANE_ACTION_MENU_HEIGHT
-        } else {
-            PANE_CONTROL_SIZE
-        }))
-        .when(show_menu, |controls| {
-            controls.on_mouse_down_out(move |_, _, cx| {
-                let _ = dismiss_host.update(cx, |host, cx| {
-                    host.menu_pane_id = None;
-                    host.sync_terminal_focus(cx);
-                    cx.notify();
+        .when(!focused, |controls| {
+            controls
+                .opacity(0.0)
+                .group_hover(pane_group.to_owned(), |controls| controls.opacity(1.0))
+        })
+        .child(
+            Menu::new(
+                ("pane-menu", pane_id.get()),
+                "Pane Actions",
+                pane_action_menu_entries("pane-menu", zoomed, true, CloseTarget::Pane),
+            )
+            .icon_trigger(sf_symbol("ellipsis"))
+            .size(MenuSize::Wide)
+            .placement(
+                MenuPlacementConfig::new(MenuPlacement::Bottom, MenuAlignment::End).offset(px(0.0)),
+            )
+            .debug_selector(format!("pane-menu-button-{}", pane_id.get()))
+            .on_activate(move |activation, window, cx| {
+                let command = *activation.action();
+                let _ = activation_host.update(cx, |host, cx| {
+                    host.perform_menu_command(command, pane_id, window, cx);
                 });
             })
-        })
-        .when(show_menu, |controls| {
-            controls.child(div().absolute().top(px(PANE_MENU_TOP)).right_0().child(
-                render_pane_action_menu(
-                    ("pane-menu", pane_id.get()),
-                    zoomed,
-                    true,
-                    CloseTarget::Pane,
-                    host.clone(),
-                    move |host, command, window, cx| {
-                        host.perform_menu_command(command, pane_id, window, cx);
-                    },
-                ),
-            ))
-        })
-        .child(render_menu_button(pane_id, focused, pane_group, host))
+            .on_lifecycle(move |event, cx| {
+                let event = *event;
+                let _ = lifecycle_host.update(cx, |host, cx| {
+                    host.handle_menu_lifecycle(pane_id, event, cx);
+                });
+            }),
+        )
         .into_any_element()
 }
 
@@ -1277,6 +1259,7 @@ mod tests {
 
     #[gpui::test]
     fn single_pane_should_not_render_a_pane_header(cx: &mut TestAppContext) {
+        cx.update(crate::ui::init);
         let session_factory = test_session_factory();
         let (_host, cx) = cx.add_window_view(|window, cx| {
             PaneHost::new(WindowId::new(1), session_factory, window, cx)
@@ -1286,14 +1269,20 @@ mod tests {
     }
 
     #[gpui::test]
-    fn terminal_input_focus_tracks_pane_menu_and_native_window_activation(cx: &mut TestAppContext) {
+    fn pane_menu_restores_its_trigger_before_terminal_input_can_be_refocused(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(crate::ui::init);
         let session_factory = test_session_factory();
         let (host, cx) = cx.add_window_view(|window, cx| {
             PaneHost::new(WindowId::new(1), session_factory, window, cx)
         });
         cx.update(|window, app| {
             window.activate_window();
-            host.update(app, |host, app| host.focus(window, app));
+            host.update(app, |host, app| {
+                host.focus(window, app);
+                host.split_focused(SplitAxis::Horizontal, window, app);
+            });
         });
         cx.run_until_parked();
 
@@ -1301,28 +1290,28 @@ mod tests {
             cx.update(|window, app| host.read(app).focused_terminal_has_input_focus(window, app));
         assert!(initial);
 
-        cx.update(|_window, app| {
-            host.update(app, |host, app| {
-                let focused_pane_id = host.terminal_window.focused_pane_id();
-                let _ = host.toggle_menu(focused_pane_id, app);
-            });
-        });
+        let menu_button = cx
+            .debug_bounds("pane-menu-button-2")
+            .expect("focused Pane menu button must be rendered")
+            .center();
+        cx.simulate_click(menu_button, Modifiers::none());
         cx.run_until_parked();
         let menu_open = cx.update(|window, app| {
             (
                 host.read(app).focused_pane_id(),
+                host.read(app).menu_pane_id,
                 host.read(app).focused_terminal_has_input_focus(window, app),
             )
         });
-        assert_eq!(menu_open, (PaneId::new(1), false));
+        assert_eq!(menu_open, (PaneId::new(2), Some(PaneId::new(2)), false));
 
-        cx.update(|_window, app| {
-            host.update(app, |host, app| {
-                let focused_pane_id = host.terminal_window.focused_pane_id();
-                let _ = host.toggle_menu(focused_pane_id, app);
-            });
-        });
+        cx.simulate_click(menu_button, Modifiers::none());
         cx.run_until_parked();
+        assert!(!cx.update(|window, app| {
+            host.read(app).focused_terminal_has_input_focus(window, app)
+        }));
+
+        cx.update(|window, app| host.read(app).focus(window, app));
         assert!(cx.update(|window, app| {
             host.read(app).focused_terminal_has_input_focus(window, app)
         }));
@@ -1334,7 +1323,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn pane_menu_mouse_down_should_not_restore_terminal_before_command_completion(
+    fn pane_menu_activation_should_not_restore_terminal_before_command_completion(
         cx: &mut TestAppContext,
     ) {
         cx.update(crate::ui::init);
@@ -1370,6 +1359,20 @@ mod tests {
         cx.simulate_mouse_down(menu_row, MouseButton::Left, Modifiers::none());
         cx.run_until_parked();
 
+        let focus_edges_before_activation = records
+            .commands()
+            .into_iter()
+            .skip(command_count)
+            .filter_map(|call| match call.command {
+                RecordedSessionCommand::Focus(focused) => Some(focused),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(focus_edges_before_activation, [false]);
+
+        cx.simulate_mouse_up(menu_row, MouseButton::Left, Modifiers::none());
+        cx.run_until_parked();
+
         let focus_edges = records
             .commands()
             .into_iter()
@@ -1379,7 +1382,11 @@ mod tests {
                 _ => None,
             })
             .collect::<Vec<_>>();
-        assert_eq!(focus_edges, [false]);
+        assert_eq!(
+            focus_edges.iter().position(|focused| *focused),
+            focus_edges.len().checked_sub(1)
+        );
+        assert_eq!(host.read_with(cx, |host, _| host.pane_count()), 3);
     }
 
     #[gpui::test]
@@ -1804,6 +1811,7 @@ mod tests {
 
     #[gpui::test]
     fn exited_last_terminal_session_should_request_window_close(cx: &mut TestAppContext) {
+        cx.update(crate::ui::init);
         let close_requests = Rc::new(Cell::new(0));
         let records = TestTerminalSessionRecords::default();
         let session_factory: Rc<dyn TerminalSessionFactory> =
@@ -1840,6 +1848,7 @@ mod tests {
 
     #[gpui::test]
     fn single_pane_toggle_zoom_should_not_emit_presentation_changed(cx: &mut TestAppContext) {
+        cx.update(crate::ui::init);
         let presentation_changes = Rc::new(Cell::new(0));
         let session_factory = test_session_factory();
         let (host, cx) = cx.add_window_view(|window, cx| {
@@ -2088,7 +2097,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn pane_menu_should_render_compact_row_and_menu_heights(cx: &mut TestAppContext) {
+    fn pane_menu_should_render_wide_compact_menu(cx: &mut TestAppContext) {
         cx.update(crate::ui::init);
         let records = TestTerminalSessionRecords::default();
         let session_factory: Rc<dyn TerminalSessionFactory> =
@@ -2125,28 +2134,14 @@ mod tests {
         let last_row_height = cx
             .debug_bounds("pane-menu-row-close-pane")
             .map(|bounds| bounds.size.height);
-        let menu_height = cx
-            .debug_bounds("pane-menu-2")
-            .map(|bounds| bounds.size.height);
-        let header_overlap = cx.debug_bounds("pane-menu-2").and_then(|menu_bounds| {
-            cx.debug_bounds("pane-header-2-focused")
-                .map(|header_bounds| {
-                    header_bounds.origin.y + header_bounds.size.height - menu_bounds.origin.y
-                })
-        });
+        let menu_size = cx.debug_bounds("menu-panel-0").map(|bounds| bounds.size);
 
         assert_eq!(
-            (
-                first_row_height,
-                last_row_height,
-                menu_height,
-                header_overlap,
-            ),
+            (first_row_height, last_row_height, menu_size),
             (
                 Some(px(28.0)),
                 Some(px(28.0)),
-                Some(px(115.0)),
-                Some(px(PANE_MENU_HEADER_OVERLAP))
+                Some(size(px(248.0), px(125.0)))
             )
         );
     }
@@ -2170,17 +2165,6 @@ mod tests {
         assert_eq!(
             split_ratio_for_pointer(SplitAxis::Vertical, split_bounds, pointer),
             Some(0.25)
-        );
-    }
-
-    #[test]
-    fn minimum_pane_size_should_contain_the_complete_menu() {
-        let menu_right = PANE_CONTROL_INSET + PANE_ACTION_MENU_WIDTH;
-        let menu_bottom = MENU_TOP + PANE_ACTION_MENU_HEIGHT;
-
-        assert!(
-            MINIMUM_PANE_WIDTH >= menu_right + PANE_CONTROL_INSET
-                && MINIMUM_PANE_HEIGHT >= menu_bottom + PANE_CONTROL_INSET
         );
     }
 }

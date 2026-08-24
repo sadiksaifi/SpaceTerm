@@ -17,7 +17,9 @@ tmux, but SpaceTerm is not a tmux client and has no tmux-style server/client mod
 - Use `libghostty-vt` for terminal emulation.
 - Use a macOS PTY to launch and communicate with shells.
 - Use `gpui-symbols` for native macOS SF Symbols.
-- Support macOS only; do not create Linux or Windows abstractions.
+- Ship the SpaceTerm application on macOS and keep native platform integration macOS-specific.
+  Reusable `spaceterm-ui` controls render entirely through GPUI and remain platform-neutral for
+  possible future Linux and Windows support; do not create speculative platform adapters.
 - Treat Vague Pro as the only application and terminal theme and as the source of all brand colors.
   Reuse the tokens in `src/theme.rs`; never hardcode or redefine colors in UI, terminal, platform,
   or domain code.
