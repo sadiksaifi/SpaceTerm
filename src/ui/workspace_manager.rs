@@ -44,7 +44,14 @@ use crate::theme::{ACTIVE_THEME, Color};
 
 const SIDEBAR_TOGGLE_INSET: f32 = 4.0;
 const SIDEBAR_ROW_HEIGHT: f32 = 58.0;
-const SIDEBAR_SEARCH_HEIGHT: f32 = 40.0;
+// Vertical breathing room above and below the header's 28px `ButtonSize::Regular` actions. The
+// header height is derived from it so the two cannot drift apart.
+const SIDEBAR_HEADER_ACTION_PADDING: f32 = 6.0;
+const SIDEBAR_HEADER_HEIGHT: f32 = 28.0 + SIDEBAR_HEADER_ACTION_PADDING * 2.0;
+const SIDEBAR_HEADER_TRAILING_PADDING: f32 = SIDEBAR_TOGGLE_INSET;
+// The header actions carry their own horizontal padding inside a 28px control box, which already
+// leaves roughly 15px between the two glyphs. Any additional gap reads as a gulf at this size.
+const SIDEBAR_HEADER_ACTION_GAP: f32 = 0.0;
 const SIDEBAR_ROW_HORIZONTAL_PADDING: f32 = 12.0;
 const SIDEBAR_ROW_ICON_SIZE: f32 = 14.0;
 const SIDEBAR_NAME_TEXT_SIZE: f32 = 13.0;
@@ -117,9 +124,6 @@ pub(crate) struct WorkspaceManager {
     workspace_list_scroll_handle: ScrollHandle,
     scrollbar: Entity<OverlayScrollbar<f32>>,
     sidebar_focus: FocusHandle,
-    search_input: Entity<TextInput>,
-    search_focus: FocusHandle,
-    search_query: String,
     workspace_menu: Option<WorkspaceMenuState>,
     rename: Option<WorkspaceRenameState>,
     top_chrome_interaction: bool,
@@ -176,33 +180,6 @@ impl WorkspaceManager {
             let _ = workspaces.set_directory_unavailable(workspaces.active_workspace_id(), reason);
         }
         let scrollbar = cx.new(|_| OverlayScrollbar::<f32>::new("workspace-scrollbar"));
-        let search_input = cx.new(|cx| {
-            TextInput::new(
-                "",
-                TextInputStyle::new(
-                    gpui_color(ACTIVE_THEME.text).into(),
-                    gpui_color(ACTIVE_THEME.text_placeholder).into(),
-                    gpui_color(ACTIVE_THEME.players[0].selection).into(),
-                    gpui_color(ACTIVE_THEME.players[0].cursor).into(),
-                ),
-                window,
-                cx,
-            )
-            .placeholder("Search Workspaces")
-        });
-        let search_focus = search_input.read(cx).focus_handle();
-        cx.subscribe_in(
-            &search_input,
-            window,
-            |manager, _, event: &TextInputEvent, _, cx| {
-                if let TextInputEvent::Changed(value) = event {
-                    manager.search_query.clone_from(value);
-                    // TODO(https://github.com/sadiksaifi/SpaceTerm/issues/126): Filter Workspace rows from the stored search query in a follow-up.
-                    cx.notify();
-                }
-            },
-        )
-        .detach();
         cx.subscribe_in(
             &scrollbar,
             window,
@@ -240,9 +217,6 @@ impl WorkspaceManager {
             workspace_list_scroll_handle: ScrollHandle::new(),
             scrollbar,
             sidebar_focus: cx.focus_handle(),
-            search_input,
-            search_focus,
-            search_query: String::new(),
             workspace_menu: None,
             rename: None,
             top_chrome_interaction: false,
@@ -546,10 +520,6 @@ impl WorkspaceManager {
                 .or(self
                     .workspace_menu
                     .map(|_| TerminalFocusBlocker::ContextMenu))
-                .or(self
-                    .search_focus
-                    .is_focused(window)
-                    .then_some(TerminalFocusBlocker::Sidebar))
                 .or(self
                     .sidebar_focus
                     .is_focused(window)
@@ -1804,71 +1774,69 @@ impl WorkspaceManager {
         let scrollbar = self.scrollbar.clone();
         let create_manager = manager.clone();
         let picker_manager = manager.clone();
-        let search_input = self.search_input.clone();
-        let search_focus = self.search_focus.clone();
-        let search_toolbar = div()
-            .id("workspace-search-toolbar")
-            .debug_selector(|| "workspace-search-toolbar".to_owned())
+        let header = div()
+            .id("workspace-sidebar-header")
+            .debug_selector(|| "workspace-sidebar-header".to_owned())
             .w_full()
-            .h(px(SIDEBAR_SEARCH_HEIGHT))
+            .h(px(SIDEBAR_HEADER_HEIGHT))
             .flex_shrink_0()
-            .px(px(8.0))
+            .pl(px(SIDEBAR_ROW_HORIZONTAL_PADDING))
+            .pr(px(SIDEBAR_HEADER_TRAILING_PADDING))
             .flex()
             .flex_row()
             .items_center()
-            .gap(px(6.0))
+            .gap(px(SIDEBAR_HEADER_ACTION_GAP))
             .border_b(px(CHROME_DIVIDER_SIZE))
             .border_color(gpui_color(ACTIVE_THEME.border))
             .child(
                 div()
-                    .id("workspace-search-input")
-                    .debug_selector(|| "workspace-search-input".to_owned())
+                    .id("workspace-sidebar-header-title")
+                    .debug_selector(|| "workspace-sidebar-header-title".to_owned())
                     .min_w_0()
                     .flex_1()
-                    .h(px(28.0))
-                    .px(px(7.0))
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(px(5.0))
-                    .rounded(px(5.0))
-                    .border(px(1.0))
-                    .border_color(gpui_color(ACTIVE_THEME.border))
-                    .bg(gpui_color(ACTIVE_THEME.element_background))
-                    .text_size(px(12.0))
-                    .on_click(move |_, window, cx| {
-                        search_focus.focus(window);
-                        cx.stop_propagation();
-                    })
-                    .child(
+                    .truncate()
+                    .text_size(px(SIDEBAR_NAME_TEXT_SIZE))
+                    .text_color(gpui_color(ACTIVE_THEME.text_muted))
+                    .child("Workspaces"),
+            )
+            .child(
+                IconButton::new(
+                    "search-workspaces-button",
+                    "Search Workspaces",
+                    |foreground| {
                         Icon::new("magnifyingglass")
-                            .size(px(11.0))
-                            .color(gpui_color(ACTIVE_THEME.icon)),
-                    )
-                    .child(div().min_w_0().flex_1().child(search_input)),
+                            .size(px(13.0))
+                            .weight(SymbolWeight::Medium)
+                            .rendering_mode(RenderingMode::Monochrome)
+                            .color(foreground)
+                            .into_any_element()
+                    },
+                )
+                .variant(ButtonVariant::Ghost)
+                .size(ButtonSize::Regular)
+                .debug_selector("search-workspaces-button")
+                .tooltip(|_, cx| button_theme::tooltip("Search Workspaces", cx))
+                .on_activate(|_, _, _| {
+                    // TODO(https://github.com/sadiksaifi/SpaceTerm/issues/126): Open Workspace search and filter the rows.
+                }),
             )
             .child(
                 IconButton::new(
                     "open-local-project-button",
                     "Open Local Project",
                     |foreground| {
-                        Icon::new("folder.fill.badge.plus")
-                            .size(px(17.0))
-                            .weight(SymbolWeight::Semibold)
+                        Icon::new("folder.badge.plus")
+                            .size(px(15.0))
+                            .weight(SymbolWeight::Medium)
                             .rendering_mode(RenderingMode::Monochrome)
                             .color(foreground)
                             .into_any_element()
                     },
                 )
-                .variant(ButtonVariant::Outline)
+                .variant(ButtonVariant::Ghost)
                 .size(ButtonSize::Regular)
                 .debug_selector("open-local-project-button")
-                .tooltip(|_, cx| {
-                    cx.new(|_| WorkspaceSidebarTooltip {
-                        text: "Open Local Project…".into(),
-                    })
-                    .into()
-                })
+                .tooltip(|_, cx| button_theme::tooltip("Open Local Project…", cx))
                 .on_activate(move |_, window, cx| {
                     let _ = picker_manager.update(cx, |manager, cx| {
                         manager.open_local_project(window, cx);
@@ -1890,7 +1858,7 @@ impl WorkspaceManager {
             .track_focus(&self.sidebar_focus)
             .bg(gpui_color(ACTIVE_THEME.panel_background))
             .occlude()
-            .child(search_toolbar)
+            .child(header)
             .child(rows)
             .child(
                 div()
@@ -2311,24 +2279,74 @@ mod tests {
     }
 
     #[gpui::test]
-    fn search_input_should_store_text_without_filtering_and_keep_global_actions_available(
-        cx: &mut TestAppContext,
-    ) {
+    fn search_button_should_stay_inert_and_keep_global_actions_available(cx: &mut TestAppContext) {
         let (manager, _, cx) = workspace_manager(cx);
 
-        click("workspace-search-input", cx);
-        cx.simulate_keystrokes("project");
-        cx.run_until_parked();
-        let after_search = manager.read_with(cx, |manager, _| {
-            (manager.search_query.clone(), manager.workspaces.len())
-        });
+        click("search-workspaces-button", cx);
+        let after_search = manager.read_with(cx, |manager, _| manager.workspaces.len());
         cx.simulate_keystrokes("cmd-n");
         cx.run_until_parked();
 
-        assert_eq!(after_search, ("project".to_owned(), 1));
+        assert_eq!(after_search, 1);
         assert_eq!(
             manager.read_with(cx, |manager, _| manager.workspaces.len()),
             2
+        );
+    }
+
+    #[gpui::test]
+    fn sidebar_header_should_align_its_title_and_actions_with_the_surrounding_chrome(
+        cx: &mut TestAppContext,
+    ) {
+        let (_manager, _, cx) = workspace_manager(cx);
+
+        let header = cx
+            .debug_bounds("workspace-sidebar-header")
+            .expect("the Workspace sidebar header was not rendered");
+        let title = cx
+            .debug_bounds("workspace-sidebar-header-title")
+            .expect("the Workspace sidebar header title was not rendered");
+        let search = cx
+            .debug_bounds("search-workspaces-button")
+            .expect("the Search Workspaces button was not rendered");
+        let picker = cx
+            .debug_bounds("open-local-project-button")
+            .expect("the Open Local Project button was not rendered");
+        let active_row = cx
+            .debug_bounds("workspace-row-1-active")
+            .expect("the Active Workspace row was not rendered");
+        let toggle = cx
+            .debug_bounds("toggle-sidebar-button")
+            .expect("the sidebar toggle was not rendered");
+
+        assert_eq!(header.size.height, px(SIDEBAR_HEADER_HEIGHT));
+        // Read the action height back from the painted button so a change to the shared button
+        // theme cannot silently eat the header's vertical breathing room.
+        assert_eq!(
+            header.size.height,
+            picker.size.height + px(SIDEBAR_HEADER_ACTION_PADDING * 2.0),
+            "the header no longer leaves even breathing room above and below its actions"
+        );
+        assert_eq!(
+            title.origin.x,
+            active_row.origin.x + px(SIDEBAR_ROW_HORIZONTAL_PADDING)
+        );
+        assert!(
+            title.origin.x + title.size.width <= search.origin.x,
+            "the header title overlapped the Search Workspaces button: {title:?} {search:?}"
+        );
+        assert!(
+            search.origin.x + search.size.width <= picker.origin.x,
+            "the header actions were out of order: {search:?} {picker:?}"
+        );
+        assert_eq!(
+            picker.origin.x + picker.size.width,
+            toggle.origin.x + toggle.size.width,
+            "the header actions were not flush with the sidebar toggle above them"
+        );
+        assert!(
+            header.origin.y + header.size.height <= active_row.origin.y,
+            "the header overlapped the first Workspace row: {header:?} {active_row:?}"
         );
     }
 

@@ -22,6 +22,7 @@ thiserror = "2.0.17"
 unicode-bidi = "=0.3.18"
 
 [patch.crates-io]
+gpui-symbols = { path = "third_party/gpui-symbols" }
 libghostty-vt = { path = "third_party/libghostty-vt" }
 libghostty-vt-sys = { path = "third_party/libghostty-vt-sys" }
 
