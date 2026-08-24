@@ -11,10 +11,11 @@ use gpui::{
 };
 use gpui_symbols::{Icon, RenderingMode, SymbolWeight};
 use spaceterm_ui::{
-    Button, IconButton, MiddleTruncatedText, TextInput, TextInputEvent, TextInputStyle,
+    Button, ButtonShape, ButtonSize, ButtonVariant, IconButton, MiddleTruncatedText, TextInput,
+    TextInputEvent, TextInputStyle,
 };
 
-use super::button_styles;
+use super::button_theme;
 use super::overlay_scrollbar::{OverlayScrollbar, OverlayScrollbarEvent, ScrollMetrics};
 use super::terminal_focus::TerminalFocusBlocker;
 use super::{
@@ -43,7 +44,6 @@ use crate::terminal::{
 use crate::theme::{ACTIVE_THEME, Color};
 
 const SIDEBAR_TOGGLE_INSET: f32 = 4.0;
-const SIDEBAR_TOGGLE_SIZE: f32 = 28.0;
 const SIDEBAR_ROW_HEIGHT: f32 = 58.0;
 const SIDEBAR_SEARCH_HEIGHT: f32 = 40.0;
 const SIDEBAR_ROW_HORIZONTAL_PADDING: f32 = 12.0;
@@ -1496,19 +1496,16 @@ impl WorkspaceManager {
                     .top(px(SIDEBAR_TOGGLE_INSET))
                     .right(px(SIDEBAR_TOGGLE_INSET))
                     .child(
-                        IconButton::new(
-                            "toggle-sidebar-button",
-                            "Toggle Sidebar",
-                            button_styles::ghost_icon(px(SIDEBAR_TOGGLE_SIZE), px(6.0)),
-                            |foreground| {
-                                Icon::new("sidebar.left")
-                                    .size(px(14.0))
-                                    .color(foreground)
-                                    .into_any_element()
-                            },
-                        )
+                        IconButton::new("toggle-sidebar-button", "Toggle Sidebar", |foreground| {
+                            Icon::new("sidebar.left")
+                                .size(px(14.0))
+                                .color(foreground)
+                                .into_any_element()
+                        })
+                        .variant(ButtonVariant::Ghost)
+                        .size(ButtonSize::Regular)
                         .debug_selector("toggle-sidebar-button")
-                        .tooltip(|_, cx| button_styles::tooltip("Toggle Sidebar", cx))
+                        .tooltip(|_, cx| button_theme::tooltip("Toggle Sidebar", cx))
                         .on_activate(move |_, window, cx| {
                             let _ = toggle_manager.update(cx, |manager, cx| {
                                 manager.toggle_sidebar(window, cx);
@@ -1823,7 +1820,6 @@ impl WorkspaceManager {
                 IconButton::new(
                     "open-local-project-button",
                     "Open Local Project",
-                    button_styles::bordered_icon(),
                     |foreground| {
                         Icon::new("folder.fill.badge.plus")
                             .size(px(17.0))
@@ -1833,6 +1829,8 @@ impl WorkspaceManager {
                             .into_any_element()
                     },
                 )
+                .variant(ButtonVariant::Outline)
+                .size(ButtonSize::Regular)
                 .debug_selector("open-local-project-button")
                 .tooltip(|_, cx| {
                     cx.new(|_| WorkspaceSidebarTooltip {
@@ -1870,31 +1868,30 @@ impl WorkspaceManager {
                     .h(px(NEW_WORKSPACE_BUTTON_HEIGHT))
                     .flex_shrink_0()
                     .child(
-                        Button::new(
-                            "create-workspace-button",
-                            "New Workspace",
-                            button_styles::sidebar_action(),
-                        )
-                        .full_width(true)
-                        .debug_selector("create-workspace-button")
-                        .leading(|_| {
-                            Icon::new("plus")
-                                .size(px(13.0))
-                                .color(gpui_color(ACTIVE_THEME.icon))
-                                .into_any_element()
-                        })
-                        .trailing(|_| {
-                            div()
-                                .text_size(px(10.0))
-                                .text_color(gpui_color(ACTIVE_THEME.icon))
-                                .child("⌘N")
-                                .into_any_element()
-                        })
-                        .on_activate(move |_, window, cx| {
-                            let _ = create_manager.update(cx, |manager, cx| {
-                                manager.create_workspace(window, cx);
-                            });
-                        }),
+                        Button::new("create-workspace-button", "New Workspace")
+                            .variant(ButtonVariant::Ghost)
+                            .size(ButtonSize::Large)
+                            .shape(ButtonShape::Square)
+                            .full_width(true)
+                            .debug_selector("create-workspace-button")
+                            .leading(|_| {
+                                Icon::new("plus")
+                                    .size(px(13.0))
+                                    .color(gpui_color(ACTIVE_THEME.icon))
+                                    .into_any_element()
+                            })
+                            .trailing(|_| {
+                                div()
+                                    .text_size(px(10.0))
+                                    .text_color(gpui_color(ACTIVE_THEME.icon))
+                                    .child("⌘N")
+                                    .into_any_element()
+                            })
+                            .on_activate(move |_, window, cx| {
+                                let _ = create_manager.update(cx, |manager, cx| {
+                                    manager.create_workspace(window, cx);
+                                });
+                            }),
                     )
                     .child(
                         div()
@@ -2657,7 +2654,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn sidebar_action_buttons_should_toggle_sidebar_and_create_workspace(cx: &mut TestAppContext) {
+    fn sidebar_buttons_should_toggle_sidebar_and_create_workspace(cx: &mut TestAppContext) {
         let (manager, _records, cx) = workspace_manager(cx);
 
         click("toggle-sidebar-button", cx);

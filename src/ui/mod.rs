@@ -1,4 +1,4 @@
-mod button_styles;
+mod button_theme;
 mod overlay_scrollbar;
 mod pane_action_menu;
 mod pane_host;
@@ -112,7 +112,7 @@ pub(crate) fn handle_top_chrome_mouse_down(
 }
 
 pub(crate) fn init(cx: &mut App) {
-    spaceterm_ui::init(cx);
+    spaceterm_ui::init(cx, button_theme::theme());
     cx.bind_keys([
         KeyBinding::new("cmd-n", CreateWorkspace, None),
         KeyBinding::new("cmd-o", OpenLocalProject, None),
@@ -213,6 +213,13 @@ mod tests {
     use gpui::{Action, Keystroke, TestAppContext};
 
     use super::*;
+
+    #[gpui::test]
+    fn ui_init_should_install_the_button_theme(cx: &mut TestAppContext) {
+        cx.update(init);
+
+        assert!(cx.update(|cx| cx.has_global::<spaceterm_ui::ButtonTheme>()));
+    }
 
     #[gpui::test]
     fn terminal_zoom_shortcuts_should_bind_font_size_actions(cx: &mut TestAppContext) {

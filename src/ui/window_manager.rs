@@ -7,9 +7,9 @@ use gpui::{
     ScrollHandle, SharedString, Window, canvas, div, px, rgba,
 };
 use gpui_symbols::{Icon, SymbolWeight};
-use spaceterm_ui::IconButton;
+use spaceterm_ui::{ButtonSize, ButtonVariant, IconButton};
 
-use super::button_styles;
+use super::button_theme;
 use super::terminal_focus::TerminalFocusBlocker;
 use super::{
     ActivateWindow1, ActivateWindow2, ActivateWindow3, ActivateWindow4, ActivateWindow5,
@@ -33,7 +33,6 @@ const WINDOW_ITEM_WIDTH: f32 = 132.0;
 const WINDOW_ITEM_MINIMUM_WIDTH: f32 = 84.0;
 const WINDOW_ITEM_MAXIMUM_WIDTH: f32 = 160.0;
 const WINDOW_ITEM_RIGHT_PADDING: f32 = 6.0;
-const WINDOW_CLOSE_CONTROL_SIZE: f32 = 20.0;
 const WINDOW_CLOSE_ICON_SIZE: f32 = 12.0;
 const WINDOW_CONTROL_SIZE: f32 = 28.0;
 const WINDOW_CONTROL_INSET: f32 = 4.0;
@@ -876,7 +875,6 @@ impl WindowManager {
                         IconButton::new(
                             ("window-close-button", window_id.get()),
                             "Close Window",
-                            button_styles::ghost_icon(px(WINDOW_CLOSE_CONTROL_SIZE), px(4.0)),
                             |foreground| {
                                 Icon::new("xmark")
                                     .weight(SymbolWeight::Medium)
@@ -885,8 +883,10 @@ impl WindowManager {
                                     .into_any_element()
                             },
                         )
+                        .variant(ButtonVariant::Ghost)
+                        .size(ButtonSize::Compact)
                         .debug_selector(format!("window-close-button-{}", window_id.get()))
-                        .tooltip(|_, cx| button_styles::tooltip("Close Window", cx))
+                        .tooltip(|_, cx| button_theme::tooltip("Close Window", cx))
                         .on_activate(move |_, window, cx| {
                             let _ = close_manager.update(cx, |manager, cx| {
                                 manager.close_window(window_id, window, cx);
@@ -1056,19 +1056,16 @@ impl WindowManager {
             )
             .child(items)
             .child(
-                IconButton::new(
-                    "create-window-button",
-                    "Create Window",
-                    button_styles::ghost_icon(px(WINDOW_CONTROL_SIZE), px(6.0)),
-                    |foreground| {
-                        Icon::new("plus")
-                            .size(px(14.0))
-                            .color(foreground)
-                            .into_any_element()
-                    },
-                )
+                IconButton::new("create-window-button", "Create Window", |foreground| {
+                    Icon::new("plus")
+                        .size(px(14.0))
+                        .color(foreground)
+                        .into_any_element()
+                })
+                .variant(ButtonVariant::Ghost)
+                .size(ButtonSize::Regular)
                 .debug_selector("create-window-button")
-                .tooltip(|_, cx| button_styles::tooltip("Create Window", cx))
+                .tooltip(|_, cx| button_theme::tooltip("Create Window", cx))
                 .on_activate(move |_, window, cx| {
                     let _ = create_manager.update(cx, |manager, cx| {
                         manager.create_window(window, cx);
@@ -1084,7 +1081,6 @@ impl WindowManager {
                         IconButton::new(
                             "window-menu-button",
                             "Open Window Actions",
-                            button_styles::ghost_icon(px(WINDOW_CONTROL_SIZE), px(6.0)),
                             |foreground| {
                                 Icon::new("ellipsis")
                                     .size(px(16.0))
@@ -1092,8 +1088,10 @@ impl WindowManager {
                                     .into_any_element()
                             },
                         )
+                        .variant(ButtonVariant::Ghost)
+                        .size(ButtonSize::Regular)
                         .debug_selector("window-menu-button")
-                        .tooltip(|_, cx| button_styles::tooltip("Window Actions", cx))
+                        .tooltip(|_, cx| button_theme::tooltip("Window Actions", cx))
                         .on_activate(move |_, window, cx| {
                             let _ = menu_manager.update(cx, |manager, cx| {
                                 manager.toggle_active_window_menu(window, cx);
@@ -1650,7 +1648,7 @@ mod tests {
             ),
             (
                 px(WINDOW_ITEM_RIGHT_PADDING),
-                gpui::size(px(WINDOW_CLOSE_CONTROL_SIZE), px(WINDOW_CLOSE_CONTROL_SIZE)),
+                gpui::size(px(20.0), px(20.0)),
             )
         );
     }

@@ -80,9 +80,11 @@ small crates. Add another crate only when it creates a meaningful Seam, Leverage
 `spaceterm-ui` owns reusable GPUI control mechanics behind narrow, application-independent
 Interfaces. It may own text editing, focus, keyboard, pointer, accessibility, and rendering
 mechanisms, but it never defines product colors or imports application, terminal, platform, or
-domain Modules. The root application injects Vague Pro paint inputs and owns surrounding chrome,
-product policy, and reactions to control events. Application-specific composition remains in
-`src/ui`; controls move into the library only when their behavior has reusable depth.
+domain Modules. Reusable controls expose bounded visual variants and native control sizes rather
+than accepting one-off call-site paint definitions. The root application installs the Vague Pro
+paint and metric catalog, then owns surrounding chrome, product policy, and reactions to control
+events. Application-specific composition remains in `src/ui`; controls move into the library only
+when their behavior has reusable depth.
 
 ### Overlay Scrollbar
 

@@ -1,11 +1,11 @@
 use std::rc::Rc;
 
 use gpui::{
-    AnyElement, AnyView, App, ElementId, FocusHandle, HitboxBehavior, InteractiveElement as _,
-    IntoElement, KeyDownEvent, KeyUpEvent, MouseButton, MouseDownEvent, MouseExitEvent,
-    MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, RenderOnce, Rgba, SharedString,
-    StatefulInteractiveElement as _, Styled as _, Window, canvas, div, prelude::FluentBuilder as _,
-    px,
+    AnyElement, AnyView, App, ElementId, FocusHandle, Global, HitboxBehavior,
+    InteractiveElement as _, IntoElement, KeyDownEvent, KeyUpEvent, MouseButton, MouseDownEvent,
+    MouseExitEvent, MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, RenderOnce, Rgba,
+    SharedString, StatefulInteractiveElement as _, Styled as _, Window, canvas, div,
+    prelude::FluentBuilder as _, px,
 };
 
 /// The semantic intent of a button action.
@@ -48,6 +48,48 @@ impl ButtonActivation {
     }
 }
 
+/// A bounded visual treatment from the installed button theme.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum ButtonVariant {
+    /// The highest-emphasis action in the current context.
+    Primary,
+    /// A neutral filled action.
+    #[default]
+    Secondary,
+    /// A neutral action with a persistent border.
+    Outline,
+    /// A low-emphasis action that appears primarily on interaction.
+    Ghost,
+    /// An action with destructive consequences.
+    Destructive,
+    /// A compact text-only command. Navigation remains a separate link control.
+    Link,
+}
+
+/// Standard control sizes shared by text and icon buttons.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum ButtonSize {
+    /// Dense controls embedded in compact chrome.
+    Compact,
+    /// Small controls used by prompts and toolbars.
+    #[default]
+    Small,
+    /// Regular controls used by primary application chrome.
+    Regular,
+    /// Full-height controls used by prominent rows and footers.
+    Large,
+}
+
+/// The button's outer silhouette.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum ButtonShape {
+    /// Use the theme's radius for the selected control size.
+    #[default]
+    Rounded,
+    /// Render without rounded corners.
+    Square,
+}
+
 /// Paint values for one visual button state.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ButtonPaint {
@@ -82,17 +124,55 @@ impl ButtonPaint {
     }
 }
 
-/// Application-owned presentation for a reusable button.
-///
-/// SpaceTerm's UI library owns interaction behavior and compact layout mechanics. Callers inject
-/// every paint value so this type never defines product colors.
+/// Paints for every interactive state of one visual variant.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct ButtonStyle {
+pub struct ButtonVariantStyle {
     normal: ButtonPaint,
     hovered: ButtonPaint,
     pressed: ButtonPaint,
     disabled: ButtonPaint,
-    focus_border: Rgba,
+}
+
+impl ButtonVariantStyle {
+    /// Creates a variant style from application-owned theme colors.
+    pub fn new(
+        normal: ButtonPaint,
+        hovered: ButtonPaint,
+        pressed: ButtonPaint,
+        disabled: ButtonPaint,
+    ) -> Self {
+        Self {
+            normal,
+            hovered,
+            pressed,
+            disabled,
+        }
+    }
+
+    /// Returns the normal-state paint.
+    pub fn normal(self) -> ButtonPaint {
+        self.normal
+    }
+
+    /// Returns the hover-state paint.
+    pub fn hovered(self) -> ButtonPaint {
+        self.hovered
+    }
+
+    /// Returns the pressed-state paint.
+    pub fn pressed(self) -> ButtonPaint {
+        self.pressed
+    }
+
+    /// Returns the disabled-state paint.
+    pub fn disabled(self) -> ButtonPaint {
+        self.disabled
+    }
+}
+
+/// Layout metrics for one standard control size.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ButtonMetrics {
     height: Pixels,
     horizontal_padding: Pixels,
     gap: Pixels,
@@ -101,22 +181,11 @@ pub struct ButtonStyle {
     font_size: Pixels,
 }
 
-impl ButtonStyle {
-    /// Creates a compact button style with application-owned paint values.
-    pub fn new(
-        normal: ButtonPaint,
-        hovered: ButtonPaint,
-        pressed: ButtonPaint,
-        disabled: ButtonPaint,
-        focus_border: Rgba,
-    ) -> Self {
+impl ButtonMetrics {
+    /// Creates metrics for a control height with compact native defaults.
+    pub fn new(height: Pixels) -> Self {
         Self {
-            normal,
-            hovered,
-            pressed,
-            disabled,
-            focus_border,
-            height: px(24.0),
+            height,
             horizontal_padding: px(8.0),
             gap: px(6.0),
             corner_radius: px(5.0),
@@ -125,25 +194,19 @@ impl ButtonStyle {
         }
     }
 
-    /// Sets the fixed control height. Icon buttons use the same value for width.
-    pub fn height(mut self, height: Pixels) -> Self {
-        self.height = height;
-        self
-    }
-
     /// Sets horizontal padding for text buttons.
     pub fn horizontal_padding(mut self, padding: Pixels) -> Self {
         self.horizontal_padding = padding;
         self
     }
 
-    /// Sets spacing between a text button's label and optional decorations.
+    /// Sets spacing between a text button's label and decorations.
     pub fn gap(mut self, gap: Pixels) -> Self {
         self.gap = gap;
         self
     }
 
-    /// Sets the control's corner radius.
+    /// Sets the rounded shape's corner radius.
     pub fn corner_radius(mut self, radius: Pixels) -> Self {
         self.corner_radius = radius;
         self
@@ -155,11 +218,149 @@ impl ButtonStyle {
         self
     }
 
-    /// Sets the text button label size.
+    /// Sets the text label size.
     pub fn font_size(mut self, size: Pixels) -> Self {
         self.font_size = size;
         self
     }
+}
+
+/// The complete set of visual variants required by the button API.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ButtonVariants {
+    primary: ButtonVariantStyle,
+    secondary: ButtonVariantStyle,
+    outline: ButtonVariantStyle,
+    ghost: ButtonVariantStyle,
+    destructive: ButtonVariantStyle,
+    link: ButtonVariantStyle,
+}
+
+impl ButtonVariants {
+    /// Creates a complete bounded variant catalog.
+    pub fn new(
+        primary: ButtonVariantStyle,
+        secondary: ButtonVariantStyle,
+        outline: ButtonVariantStyle,
+        ghost: ButtonVariantStyle,
+        destructive: ButtonVariantStyle,
+        link: ButtonVariantStyle,
+    ) -> Self {
+        Self {
+            primary,
+            secondary,
+            outline,
+            ghost,
+            destructive,
+            link,
+        }
+    }
+
+    fn resolve(self, variant: ButtonVariant) -> ButtonVariantStyle {
+        match variant {
+            ButtonVariant::Primary => self.primary,
+            ButtonVariant::Secondary => self.secondary,
+            ButtonVariant::Outline => self.outline,
+            ButtonVariant::Ghost => self.ghost,
+            ButtonVariant::Destructive => self.destructive,
+            ButtonVariant::Link => self.link,
+        }
+    }
+}
+
+/// The complete set of standard button metrics.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ButtonSizes {
+    compact: ButtonMetrics,
+    small: ButtonMetrics,
+    regular: ButtonMetrics,
+    large: ButtonMetrics,
+}
+
+impl ButtonSizes {
+    /// Creates the standard size catalog.
+    pub fn new(
+        compact: ButtonMetrics,
+        small: ButtonMetrics,
+        regular: ButtonMetrics,
+        large: ButtonMetrics,
+    ) -> Self {
+        Self {
+            compact,
+            small,
+            regular,
+            large,
+        }
+    }
+
+    fn resolve(self, size: ButtonSize) -> ButtonMetrics {
+        match size {
+            ButtonSize::Compact => self.compact,
+            ButtonSize::Small => self.small,
+            ButtonSize::Regular => self.regular,
+            ButtonSize::Large => self.large,
+        }
+    }
+}
+
+/// Application-owned presentation installed once for every reusable button.
+///
+/// The component owns interaction semantics and a bounded visual vocabulary while the application
+/// supplies product colors and native control metrics from its canonical theme.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ButtonTheme {
+    variants: ButtonVariants,
+    sizes: ButtonSizes,
+    focus_border: Rgba,
+}
+
+impl ButtonTheme {
+    /// Creates a complete button theme.
+    pub fn new(variants: ButtonVariants, sizes: ButtonSizes, focus_border: Rgba) -> Self {
+        Self {
+            variants,
+            sizes,
+            focus_border,
+        }
+    }
+
+    fn resolve(self, variant: ButtonVariant, size: ButtonSize, shape: ButtonShape) -> ButtonStyle {
+        let variant = self.variants.resolve(variant);
+        let metrics = self.sizes.resolve(size);
+        ButtonStyle {
+            normal: variant.normal,
+            hovered: variant.hovered,
+            pressed: variant.pressed,
+            disabled: variant.disabled,
+            focus_border: self.focus_border,
+            height: metrics.height,
+            horizontal_padding: metrics.horizontal_padding,
+            gap: metrics.gap,
+            corner_radius: match shape {
+                ButtonShape::Rounded => metrics.corner_radius,
+                ButtonShape::Square => px(0.0),
+            },
+            border_width: metrics.border_width,
+            font_size: metrics.font_size,
+        }
+    }
+}
+
+impl Global for ButtonTheme {}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct ButtonStyle {
+    normal: ButtonPaint,
+    hovered: ButtonPaint,
+    pressed: ButtonPaint,
+    disabled: ButtonPaint,
+    focus_border: Rgba,
+    height: Pixels,
+    horizontal_padding: Pixels,
+    gap: Pixels,
+    corner_radius: Pixels,
+    border_width: Pixels,
+    font_size: Pixels,
 }
 
 type ActivationHandler = Rc<dyn Fn(&ButtonActivation, &mut Window, &mut App)>;
@@ -177,15 +378,11 @@ pub struct Button {
 }
 
 impl Button {
-    /// Creates a text button. Its visible label is also its logical accessibility name.
-    pub fn new(
-        id: impl Into<ElementId>,
-        label: impl Into<SharedString>,
-        style: ButtonStyle,
-    ) -> Self {
+    /// Creates a small secondary text button. Its label is also its logical accessibility name.
+    pub fn new(id: impl Into<ElementId>, label: impl Into<SharedString>) -> Self {
         let label = label.into();
         Self {
-            core: ButtonCore::new(id.into(), label.clone(), style),
+            core: ButtonCore::new(id.into(), label.clone()),
             label,
             leading: None,
             trailing: None,
@@ -208,6 +405,24 @@ impl Button {
     /// Makes the button fill the available width.
     pub fn full_width(mut self, full_width: bool) -> Self {
         self.full_width = full_width;
+        self
+    }
+
+    /// Selects a bounded visual treatment from the installed button theme.
+    pub fn variant(mut self, variant: ButtonVariant) -> Self {
+        self.core.variant = variant;
+        self
+    }
+
+    /// Selects a standard native control size.
+    pub fn size(mut self, size: ButtonSize) -> Self {
+        self.core.size = size;
+        self
+    }
+
+    /// Selects the outer silhouette independently from visual emphasis.
+    pub fn shape(mut self, shape: ButtonShape) -> Self {
+        self.core.shape = shape;
         self
     }
 
@@ -256,7 +471,7 @@ impl Button {
 
 impl RenderOnce for Button {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
-        let style = self.core.style;
+        let style = self.core.resolve_style(cx);
         let full_width = self.full_width;
         let has_trailing = self.trailing.is_some();
         let content = move |foreground| {
@@ -279,7 +494,8 @@ impl RenderOnce for Button {
                 .into_any_element()
         };
 
-        self.core.render(false, full_width, content, window, cx)
+        self.core
+            .render(style, false, full_width, content, window, cx)
     }
 }
 
@@ -295,17 +511,34 @@ pub struct IconButton {
 }
 
 impl IconButton {
-    /// Creates an icon-only button with a mandatory logical accessibility name.
+    /// Creates a small secondary icon button with a mandatory logical accessibility name.
     pub fn new(
         id: impl Into<ElementId>,
         accessibility_name: impl Into<SharedString>,
-        style: ButtonStyle,
         icon: impl FnOnce(Rgba) -> AnyElement + 'static,
     ) -> Self {
         Self {
-            core: ButtonCore::new(id.into(), accessibility_name.into(), style),
+            core: ButtonCore::new(id.into(), accessibility_name.into()),
             icon: Box::new(icon),
         }
+    }
+
+    /// Selects a bounded visual treatment from the installed button theme.
+    pub fn variant(mut self, variant: ButtonVariant) -> Self {
+        self.core.variant = variant;
+        self
+    }
+
+    /// Selects a standard native control size.
+    pub fn size(mut self, size: ButtonSize) -> Self {
+        self.core.size = size;
+        self
+    }
+
+    /// Selects the outer silhouette independently from visual emphasis.
+    pub fn shape(mut self, shape: ButtonShape) -> Self {
+        self.core.shape = shape;
+        self
     }
 
     /// Assigns the semantic intent of the action.
@@ -350,14 +583,17 @@ impl IconButton {
 
 impl RenderOnce for IconButton {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
-        self.core.render(true, false, self.icon, window, cx)
+        let style = self.core.resolve_style(cx);
+        self.core.render(style, true, false, self.icon, window, cx)
     }
 }
 
 struct ButtonCore {
     id: ElementId,
     accessibility_name: SharedString,
-    style: ButtonStyle,
+    variant: ButtonVariant,
+    size: ButtonSize,
+    shape: ButtonShape,
     role: ButtonRole,
     disabled: bool,
     tab_stop: bool,
@@ -367,11 +603,13 @@ struct ButtonCore {
 }
 
 impl ButtonCore {
-    fn new(id: ElementId, accessibility_name: SharedString, style: ButtonStyle) -> Self {
+    fn new(id: ElementId, accessibility_name: SharedString) -> Self {
         Self {
             id,
             accessibility_name,
-            style,
+            variant: ButtonVariant::default(),
+            size: ButtonSize::default(),
+            shape: ButtonShape::default(),
             role: ButtonRole::Normal,
             disabled: false,
             tab_stop: false,
@@ -381,8 +619,14 @@ impl ButtonCore {
         }
     }
 
+    fn resolve_style(&self, cx: &App) -> ButtonStyle {
+        cx.global::<ButtonTheme>()
+            .resolve(self.variant, self.size, self.shape)
+    }
+
     fn render(
         self,
+        style: ButtonStyle,
         icon_only: bool,
         full_width: bool,
         build_content: impl FnOnce(Rgba) -> AnyElement + 'static,
@@ -404,9 +648,9 @@ impl ButtonCore {
             )
         };
         let focused = focus_handle.is_focused(window);
-        let paint = resolve_paint(self.style, enabled, pressed, hovered);
+        let paint = resolve_paint(style, enabled, pressed, hovered);
         let border = if focused {
-            self.style.focus_border
+            style.focus_border
         } else {
             paint.border
         };
@@ -507,18 +751,16 @@ impl ButtonCore {
             .flex_shrink_0()
             .items_center()
             .justify_center()
-            .h(self.style.height)
-            .when(icon_only, |button| button.w(self.style.height))
-            .when(!icon_only, |button| {
-                button.px(self.style.horizontal_padding)
-            })
+            .h(style.height)
+            .when(icon_only, |button| button.w(style.height))
+            .when(!icon_only, |button| button.px(style.horizontal_padding))
             .when(full_width, |button| button.w_full())
-            .rounded(self.style.corner_radius)
-            .border(self.style.border_width)
+            .rounded(style.corner_radius)
+            .border(style.border_width)
             .border_color(border)
             .bg(paint.background)
             .text_color(paint.foreground)
-            .text_size(self.style.font_size)
+            .text_size(style.font_size)
             .cursor_default()
             .block_mouse_except_scroll()
             .track_focus(&focus_handle)
@@ -771,13 +1013,30 @@ mod tests {
 
     use super::*;
 
-    fn test_style() -> ButtonStyle {
-        ButtonStyle::new(
+    fn test_variant_style() -> ButtonVariantStyle {
+        ButtonVariantStyle::new(
             ButtonPaint::new(rgba(0x101010ff), rgba(0xffffffff), rgba(0x202020ff)),
             ButtonPaint::new(rgba(0x303030ff), rgba(0xffffffff), rgba(0x404040ff)),
             ButtonPaint::new(rgba(0x505050ff), rgba(0xffffffff), rgba(0x606060ff)),
             ButtonPaint::new(rgba(0x707070ff), rgba(0x808080ff), rgba(0x909090ff)),
+        )
+    }
+
+    fn test_theme() -> ButtonTheme {
+        let variant = test_variant_style();
+        let metrics = ButtonMetrics::new(px(24.0));
+        ButtonTheme::new(
+            ButtonVariants::new(variant, variant, variant, variant, variant, variant),
+            ButtonSizes::new(metrics, metrics, metrics, metrics),
             rgba(0x00aaffff),
+        )
+    }
+
+    fn test_style() -> ButtonStyle {
+        test_theme().resolve(
+            ButtonVariant::Secondary,
+            ButtonSize::Small,
+            ButtonShape::Rounded,
         )
     }
 
@@ -789,6 +1048,40 @@ mod tests {
         assert_eq!(resolve_paint(style, true, true, true), style.pressed);
         assert_eq!(resolve_paint(style, true, false, true), style.hovered);
         assert_eq!(resolve_paint(style, true, false, false), style.normal);
+    }
+
+    #[test]
+    fn theme_should_resolve_variant_size_and_shape_independently() {
+        let base = test_variant_style();
+        let destructive = ButtonVariantStyle::new(
+            ButtonPaint::new(rgba(0xaa0000ff), rgba(0xffffffff), rgba(0xbb0000ff)),
+            base.hovered,
+            base.pressed,
+            base.disabled,
+        );
+        let compact = ButtonMetrics::new(px(20.0)).corner_radius(px(4.0));
+        let large = ButtonMetrics::new(px(40.0)).corner_radius(px(8.0));
+        let theme = ButtonTheme::new(
+            ButtonVariants::new(base, base, base, base, destructive, base),
+            ButtonSizes::new(compact, compact, compact, large),
+            rgba(0x00aaffff),
+        );
+
+        let rounded = theme.resolve(
+            ButtonVariant::Destructive,
+            ButtonSize::Large,
+            ButtonShape::Rounded,
+        );
+        let square = theme.resolve(
+            ButtonVariant::Destructive,
+            ButtonSize::Large,
+            ButtonShape::Square,
+        );
+
+        assert_eq!(rounded.normal, destructive.normal);
+        assert_eq!(rounded.height, px(40.0));
+        assert_eq!(rounded.corner_radius, px(8.0));
+        assert_eq!(square.corner_radius, px(0.0));
     }
 
     #[test]
@@ -871,7 +1164,7 @@ mod tests {
                 .size_full()
                 .child(div().track_focus(&self.other_focus).child("Other"))
                 .child(
-                    Button::new("test-button", "Activate", test_style())
+                    Button::new("test-button", "Activate")
                         .disabled(self.disabled)
                         .tab_stop(self.tab_stop)
                         .debug_selector("test-button")
@@ -894,6 +1187,7 @@ mod tests {
     );
 
     fn button_window(cx: &mut TestAppContext, disabled: bool, tab_stop: bool) -> ButtonWindow<'_> {
+        cx.set_global(test_theme());
         let activations = Rc::new(Cell::new(0));
         let last_source = Rc::new(Cell::new(None));
         let root_activations = activations.clone();

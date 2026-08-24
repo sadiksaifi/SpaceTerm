@@ -14,9 +14,9 @@ use gpui::{
     size,
 };
 use gpui_symbols::{Icon, SymbolWeight};
-use spaceterm_ui::{Button, ButtonRole, IconButton};
+use spaceterm_ui::{Button, ButtonRole, ButtonSize, ButtonVariant, IconButton};
 
-use super::button_styles;
+use super::button_theme;
 use super::overlay_scrollbar::{OverlayScrollbar, OverlayScrollbarEvent, ScrollMetrics};
 use super::render_lifecycle::{RenderLifecycle, ScaleChange, SurfaceVisibility};
 use super::terminal_context_menu::{
@@ -3005,21 +3005,18 @@ fn find_icon_button(
     enabled: bool,
     on_activate: impl Fn(&mut Window, &mut App) + 'static,
 ) -> AnyElement {
-    IconButton::new(
-        id,
-        accessibility_name,
-        button_styles::ghost_icon(px(22.0), px(4.0)),
-        move |foreground| {
-            Icon::new(symbol)
-                .weight(SymbolWeight::Medium)
-                .size(px(11.0))
-                .color(foreground)
-                .into_any_element()
-        },
-    )
+    IconButton::new(id, accessibility_name, move |foreground| {
+        Icon::new(symbol)
+            .weight(SymbolWeight::Medium)
+            .size(px(11.0))
+            .color(foreground)
+            .into_any_element()
+    })
+    .variant(ButtonVariant::Ghost)
+    .size(ButtonSize::Small)
     .disabled(!enabled)
     .debug_selector(id)
-    .tooltip(move |_, cx| button_styles::tooltip(accessibility_name, cx))
+    .tooltip(move |_, cx| button_theme::tooltip(accessibility_name, cx))
     .on_activate(move |_, window, cx| on_activate(window, cx))
     .into_any_element()
 }
@@ -3624,31 +3621,24 @@ impl Render for TerminalPane {
                         .child(status)
                         .when(recovery_available, |status| {
                             status.child(
-                                Button::new(
-                                    "retry-terminal-recovery",
-                                    "Retry",
-                                    button_styles::text_link(),
-                                )
-                                .debug_selector("retry-terminal-recovery")
-                                .on_activate(
-                                    move |_, window, cx| {
+                                Button::new("retry-terminal-recovery", "Retry")
+                                    .variant(ButtonVariant::Link)
+                                    .size(ButtonSize::Compact)
+                                    .debug_selector("retry-terminal-recovery")
+                                    .on_activate(move |_, window, cx| {
                                         let _ = retry_pane.update(cx, |pane, cx| {
                                             pane.retry_recovery(window, cx);
                                         });
-                                    },
-                                ),
+                                    }),
                             )
                         })
                         .when(diagnostics_available, |status| {
                             status.child(
-                                Button::new(
-                                    "export-terminal-diagnostics",
-                                    "Export Diagnostics…",
-                                    button_styles::text_link(),
-                                )
-                                .debug_selector("export-terminal-diagnostics")
-                                .on_activate(
-                                    move |_, window, cx| {
+                                Button::new("export-terminal-diagnostics", "Export Diagnostics…")
+                                    .variant(ButtonVariant::Link)
+                                    .size(ButtonSize::Compact)
+                                    .debug_selector("export-terminal-diagnostics")
+                                    .on_activate(move |_, window, cx| {
                                         let _ = export_pane.update(cx, |pane, cx| {
                                             pane.export_diagnostics(
                                                 &ExportTerminalDiagnostics,
@@ -3656,8 +3646,7 @@ impl Render for TerminalPane {
                                                 cx,
                                             );
                                         });
-                                    },
-                                ),
+                                    }),
                             )
                         }),
                 )
@@ -3711,7 +3700,9 @@ fn render_paste_confirmation(
             confirmation.byte_len, confirmation.line_count
         ))
         .child(
-            Button::new("cancel-unsafe-paste", "Cancel", button_styles::action())
+            Button::new("cancel-unsafe-paste", "Cancel")
+                .variant(ButtonVariant::Secondary)
+                .size(ButtonSize::Small)
                 .role(ButtonRole::Cancel)
                 .debug_selector("cancel-unsafe-paste")
                 .on_activate(move |_, window, cx| {
@@ -3721,7 +3712,9 @@ fn render_paste_confirmation(
                 }),
         )
         .child(
-            Button::new("confirm-unsafe-paste", "Paste", button_styles::action())
+            Button::new("confirm-unsafe-paste", "Paste")
+                .variant(ButtonVariant::Primary)
+                .size(ButtonSize::Small)
                 .debug_selector("confirm-unsafe-paste")
                 .on_activate(move |_, window, cx| {
                     let _ = pane.update(cx, |pane, cx| {
@@ -3773,7 +3766,9 @@ fn render_osc52_authorization(
         .occlude()
         .child(detail)
         .child(
-            Button::new("deny-osc52-clipboard", "Deny", button_styles::action())
+            Button::new("deny-osc52-clipboard", "Deny")
+                .variant(ButtonVariant::Secondary)
+                .size(ButtonSize::Small)
                 .role(ButtonRole::Cancel)
                 .debug_selector("deny-osc52-clipboard")
                 .on_activate(move |_, window, cx| {
@@ -3783,7 +3778,9 @@ fn render_osc52_authorization(
                 }),
         )
         .child(
-            Button::new("allow-osc52-clipboard", "Allow", button_styles::action())
+            Button::new("allow-osc52-clipboard", "Allow")
+                .variant(ButtonVariant::Primary)
+                .size(ButtonSize::Small)
                 .debug_selector("allow-osc52-clipboard")
                 .on_activate(move |_, window, cx| {
                     let _ = pane.update(cx, |pane, cx| {

@@ -10,13 +10,15 @@ mod text_input;
 use gpui::App;
 
 pub use button::{
-    Button, ButtonActivation, ButtonActivationSource, ButtonPaint, ButtonRole, ButtonStyle,
-    IconButton,
+    Button, ButtonActivation, ButtonActivationSource, ButtonMetrics, ButtonPaint, ButtonRole,
+    ButtonShape, ButtonSize, ButtonSizes, ButtonTheme, ButtonVariant, ButtonVariantStyle,
+    ButtonVariants, IconButton,
 };
 pub use middle_truncated_text::MiddleTruncatedText;
 pub use text_input::{TextInput, TextInputEvent, TextInputStyle};
 
-/// Registers actions and macOS key bindings used by SpaceTerm controls.
-pub fn init(cx: &mut App) {
+/// Registers shared control state, actions, and macOS key bindings.
+pub fn init(cx: &mut App, button_theme: ButtonTheme) {
+    cx.set_global(button_theme);
     text_input::init(cx);
 }
