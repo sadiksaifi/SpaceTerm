@@ -14,7 +14,9 @@ use gpui::{
     size,
 };
 use gpui_symbols::{Icon, SymbolWeight};
+use spaceterm_ui::{Button, ButtonRole, ButtonSize, ButtonVariant, IconButton};
 
+use super::button_theme;
 use super::overlay_scrollbar::{OverlayScrollbar, OverlayScrollbarEvent, ScrollMetrics};
 use super::render_lifecycle::{RenderLifecycle, ScaleChange, SurfaceVisibility};
 use super::terminal_context_menu::{
@@ -38,6 +40,7 @@ use super::{
     DecreaseTerminalFontSize, DenyOsc52Clipboard, ExportTerminalDiagnostics, FindNext,
     FindPrevious, IncreaseTerminalFontSize, OpenTerminalFind, PasteClipboard,
     ResetTerminalFontSize, TERMINAL_FIND_KEY_CONTEXT, TERMINAL_KEY_CONTEXT,
+    TERMINAL_OSC52_AUTHORIZATION_KEY_CONTEXT, TERMINAL_PASTE_CONFIRMATION_KEY_CONTEXT,
 };
 use crate::domain::{PaneId, WindowId, WorkspaceId};
 use crate::platform::acceptance_observation::{
@@ -2959,6 +2962,7 @@ impl TerminalPane {
                 )
                 .child(find_icon_button(
                     "terminal-find-previous",
+                    "Find Previous",
                     "chevron.up",
                     has_results,
                     move |window, cx| {
@@ -2969,6 +2973,7 @@ impl TerminalPane {
                 ))
                 .child(find_icon_button(
                     "terminal-find-next",
+                    "Find Next",
                     "chevron.down",
                     has_results,
                     move |window, cx| {
@@ -2979,6 +2984,7 @@ impl TerminalPane {
                 ))
                 .child(find_icon_button(
                     "terminal-find-close",
+                    "Close Find",
                     "xmark",
                     true,
                     move |window, cx| {
@@ -2994,34 +3000,25 @@ impl TerminalPane {
 
 fn find_icon_button(
     id: &'static str,
+    accessibility_name: &'static str,
     symbol: &'static str,
     enabled: bool,
-    on_click: impl Fn(&mut Window, &mut App) + 'static,
+    on_activate: impl Fn(&mut Window, &mut App) + 'static,
 ) -> AnyElement {
-    div()
-        .id(id)
-        .debug_selector(move || id.to_owned())
-        .size(px(22.0))
-        .flex()
-        .items_center()
-        .justify_center()
-        .rounded(px(4.0))
-        .cursor_pointer()
-        .when(!enabled, |button| button.opacity(0.45))
-        .hover(|button| button.bg(gpui_color(ACTIVE_THEME.ghost_element_hover)))
-        .on_click(move |_, window, cx| {
-            if enabled {
-                on_click(window, cx);
-            }
-            cx.stop_propagation();
-        })
-        .child(
-            Icon::new(symbol)
-                .weight(SymbolWeight::Medium)
-                .size(px(11.0))
-                .color(gpui_color(ACTIVE_THEME.icon)),
-        )
-        .into_any_element()
+    IconButton::new(id, accessibility_name, move |foreground| {
+        Icon::new(symbol)
+            .weight(SymbolWeight::Medium)
+            .size(px(11.0))
+            .color(foreground)
+            .into_any_element()
+    })
+    .variant(ButtonVariant::Ghost)
+    .size(ButtonSize::Small)
+    .disabled(!enabled)
+    .debug_selector(id)
+    .tooltip(move |_, cx| button_theme::tooltip(accessibility_name, cx))
+    .on_activate(move |_, window, cx| on_activate(window, cx))
+    .into_any_element()
 }
 
 impl EventEmitter<TerminalPaneEvent> for TerminalPane {}
@@ -3436,6 +3433,13 @@ impl Render for TerminalPane {
         });
         let paste_confirmation = self.pending_paste;
         let osc52_authorization = self.pending_osc52;
+        let key_context = if paste_confirmation.is_some() {
+            TERMINAL_PASTE_CONFIRMATION_KEY_CONTEXT
+        } else if osc52_authorization.is_some() {
+            TERMINAL_OSC52_AUTHORIZATION_KEY_CONTEXT
+        } else {
+            TERMINAL_KEY_CONTEXT
+        };
         self.sync_scrollbar(cx);
         let scrollbar = self.scrollbar.clone();
         let pointer_uses_text_cursor = pointer_uses_text_cursor(
@@ -3534,7 +3538,7 @@ impl Render for TerminalPane {
             .when(pointer_uses_text_cursor, |root| root.cursor_text())
             .when(!pointer_uses_text_cursor, |root| root.cursor_default())
             .when(hovered_link.is_some(), |root| root.cursor_pointer())
-            .key_context(TERMINAL_KEY_CONTEXT)
+            .key_context(key_context)
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(Self::copy_selection))
             .on_action(cx.listener(Self::paste_clipboard))
@@ -3617,28 +3621,24 @@ impl Render for TerminalPane {
                         .child(status)
                         .when(recovery_available, |status| {
                             status.child(
-                                div()
-                                    .id("retry-terminal-recovery")
-                                    .debug_selector(|| "retry-terminal-recovery".to_owned())
-                                    .cursor_pointer()
-                                    .text_color(gpui_color(ACTIVE_THEME.link_text_hover))
-                                    .on_click(move |_, window, cx| {
+                                Button::new("retry-terminal-recovery", "Retry")
+                                    .variant(ButtonVariant::Link)
+                                    .size(ButtonSize::Compact)
+                                    .debug_selector("retry-terminal-recovery")
+                                    .on_activate(move |_, window, cx| {
                                         let _ = retry_pane.update(cx, |pane, cx| {
                                             pane.retry_recovery(window, cx);
                                         });
-                                        cx.stop_propagation();
-                                    })
-                                    .child("Retry"),
+                                    }),
                             )
                         })
                         .when(diagnostics_available, |status| {
                             status.child(
-                                div()
-                                    .id("export-terminal-diagnostics")
-                                    .debug_selector(|| "export-terminal-diagnostics".to_owned())
-                                    .cursor_pointer()
-                                    .text_color(gpui_color(ACTIVE_THEME.link_text_hover))
-                                    .on_click(move |_, window, cx| {
+                                Button::new("export-terminal-diagnostics", "Export Diagnostics…")
+                                    .variant(ButtonVariant::Link)
+                                    .size(ButtonSize::Compact)
+                                    .debug_selector("export-terminal-diagnostics")
+                                    .on_activate(move |_, window, cx| {
                                         let _ = export_pane.update(cx, |pane, cx| {
                                             pane.export_diagnostics(
                                                 &ExportTerminalDiagnostics,
@@ -3646,9 +3646,7 @@ impl Render for TerminalPane {
                                                 cx,
                                             );
                                         });
-                                        cx.stop_propagation();
-                                    })
-                                    .child("Export Diagnostics…"),
+                                    }),
                             )
                         }),
                 )
@@ -3702,35 +3700,26 @@ fn render_paste_confirmation(
             confirmation.byte_len, confirmation.line_count
         ))
         .child(
-            div()
-                .id("cancel-unsafe-paste")
-                .cursor_pointer()
-                .px(px(8.0))
-                .py(px(4.0))
-                .rounded(px(5.0))
-                .bg(gpui_color(ACTIVE_THEME.element_active))
-                .child("Cancel")
-                .on_click(move |_, window, cx| {
+            Button::new("cancel-unsafe-paste", "Cancel")
+                .variant(ButtonVariant::Secondary)
+                .size(ButtonSize::Small)
+                .role(ButtonRole::Cancel)
+                .debug_selector("cancel-unsafe-paste")
+                .on_activate(move |_, window, cx| {
                     let _ = cancel_pane.update(cx, |pane, cx| {
                         pane.cancel_unsafe_paste(&CancelUnsafePaste, window, cx);
                     });
-                    cx.stop_propagation();
                 }),
         )
         .child(
-            div()
-                .id("confirm-unsafe-paste")
-                .cursor_pointer()
-                .px(px(8.0))
-                .py(px(4.0))
-                .rounded(px(5.0))
-                .bg(gpui_color(ACTIVE_THEME.element_active))
-                .child("Paste")
-                .on_click(move |_, window, cx| {
+            Button::new("confirm-unsafe-paste", "Paste")
+                .variant(ButtonVariant::Primary)
+                .size(ButtonSize::Small)
+                .debug_selector("confirm-unsafe-paste")
+                .on_activate(move |_, window, cx| {
                     let _ = pane.update(cx, |pane, cx| {
                         pane.confirm_unsafe_paste(&ConfirmUnsafePaste, window, cx);
                     });
-                    cx.stop_propagation();
                 }),
         )
 }
@@ -3777,35 +3766,26 @@ fn render_osc52_authorization(
         .occlude()
         .child(detail)
         .child(
-            div()
-                .id("deny-osc52-clipboard")
-                .cursor_pointer()
-                .px(px(8.0))
-                .py(px(4.0))
-                .rounded(px(5.0))
-                .bg(gpui_color(ACTIVE_THEME.element_active))
-                .child("Deny")
-                .on_click(move |_, window, cx| {
+            Button::new("deny-osc52-clipboard", "Deny")
+                .variant(ButtonVariant::Secondary)
+                .size(ButtonSize::Small)
+                .role(ButtonRole::Cancel)
+                .debug_selector("deny-osc52-clipboard")
+                .on_activate(move |_, window, cx| {
                     let _ = deny_pane.update(cx, |pane, cx| {
                         pane.deny_osc52_clipboard(&DenyOsc52Clipboard, window, cx);
                     });
-                    cx.stop_propagation();
                 }),
         )
         .child(
-            div()
-                .id("allow-osc52-clipboard")
-                .cursor_pointer()
-                .px(px(8.0))
-                .py(px(4.0))
-                .rounded(px(5.0))
-                .bg(gpui_color(ACTIVE_THEME.element_active))
-                .child("Allow")
-                .on_click(move |_, window, cx| {
+            Button::new("allow-osc52-clipboard", "Allow")
+                .variant(ButtonVariant::Primary)
+                .size(ButtonSize::Small)
+                .debug_selector("allow-osc52-clipboard")
+                .on_activate(move |_, window, cx| {
                     let _ = pane.update(cx, |pane, cx| {
                         pane.allow_osc52_clipboard(&AllowOsc52Clipboard, window, cx);
                     });
-                    cx.stop_propagation();
                 }),
         )
 }
@@ -5414,6 +5394,37 @@ mod tests {
     }
 
     #[gpui::test]
+    fn terminal_find_buttons_should_disable_navigation_without_results_and_close_find(
+        cx: &mut TestAppContext,
+    ) {
+        let (pane, cx, records) = connected_terminal_pane(cx);
+        cx.dispatch_action(OpenTerminalFind);
+        cx.run_until_parked();
+        let command_count = records.commands().len();
+
+        for selector in ["terminal-find-previous", "terminal-find-next"] {
+            let button = cx
+                .debug_bounds(selector)
+                .unwrap_or_else(|| panic!("{selector} was not rendered"));
+            cx.simulate_click(button.center(), Modifiers::none());
+        }
+        let close = cx
+            .debug_bounds("terminal-find-close")
+            .expect("the Find close button was not rendered");
+        cx.simulate_click(close.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        assert!(pane.read_with(cx, |pane, _| pane.find_editor.is_none()));
+        assert!(
+            records
+                .commands()
+                .into_iter()
+                .skip(command_count)
+                .all(|call| !matches!(call.command, RecordedSessionCommand::NavigateFind(_, _)))
+        );
+    }
+
+    #[gpui::test]
     fn pointer_press_should_follow_synchronous_terminal_focus_admission(cx: &mut TestAppContext) {
         let (pane, cx, records) = connected_terminal_pane(cx);
         let command_count = records.commands().len();
@@ -6076,13 +6087,81 @@ mod tests {
                 .any(|call| { matches!(call.command, RecordedSessionCommand::RequestPaste(_)) })
         );
 
-        cx.dispatch_action(ConfirmUnsafePaste);
+        let confirm = cx
+            .debug_bounds("confirm-unsafe-paste")
+            .expect("unsafe Paste should expose its confirmation button");
+        cx.simulate_click(confirm.center(), Modifiers::none());
         cx.run_until_parked();
         assert!(records.commands().iter().any(|call| {
             call.command
                 == RecordedSessionCommand::ResolvePaste(confirmation.id, PasteDecision::Confirm)
         }));
         assert!(cx.update(|window, cx| pane.read(cx).terminal_input_focused(window, cx)));
+    }
+
+    #[gpui::test]
+    fn unsafe_paste_prompt_enter_should_confirm_without_moving_responder_focus(
+        cx: &mut TestAppContext,
+    ) {
+        let confirmation = PasteConfirmation {
+            id: crate::terminal::PasteConfirmationId::new(6),
+            byte_len: 12,
+            line_count: 2,
+            risk: crate::terminal::PasteRisk {
+                multiline: true,
+                control_bytes: false,
+                closing_fence: false,
+            },
+        };
+        let (pane, cx, records) = terminal_pane_with_paste_response(
+            cx,
+            Ok(PasteRequestOutcome::ConfirmationRequired(confirmation)),
+            Ok(PasteResolution::Written),
+        );
+        cx.write_to_clipboard(ClipboardItem::new_string("first\nsecond".to_owned()));
+        cx.dispatch_action(PasteClipboard);
+        cx.run_until_parked();
+
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+
+        assert!(records.commands().iter().any(|call| {
+            call.command
+                == RecordedSessionCommand::ResolvePaste(confirmation.id, PasteDecision::Confirm)
+        }));
+        assert!(cx.update(|window, cx| pane.read(cx).terminal_input_focused(window, cx)));
+    }
+
+    #[gpui::test]
+    fn unsafe_paste_prompt_escape_should_cancel_without_moving_responder_focus(
+        cx: &mut TestAppContext,
+    ) {
+        let confirmation = PasteConfirmation {
+            id: crate::terminal::PasteConfirmationId::new(8),
+            byte_len: 12,
+            line_count: 2,
+            risk: crate::terminal::PasteRisk {
+                multiline: true,
+                control_bytes: false,
+                closing_fence: false,
+            },
+        };
+        let (_pane, cx, records) = terminal_pane_with_paste_response(
+            cx,
+            Ok(PasteRequestOutcome::ConfirmationRequired(confirmation)),
+            Ok(PasteResolution::Cancelled),
+        );
+        cx.write_to_clipboard(ClipboardItem::new_string("first\nsecond".to_owned()));
+        cx.dispatch_action(PasteClipboard);
+        cx.run_until_parked();
+
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+
+        assert!(records.commands().iter().any(|call| {
+            call.command
+                == RecordedSessionCommand::ResolvePaste(confirmation.id, PasteDecision::Cancel)
+        }));
     }
 
     #[gpui::test]
@@ -6144,7 +6223,10 @@ mod tests {
         );
         assert!(cx.update(|window, cx| pane.read(cx).terminal_input_focused(window, cx)));
 
-        cx.dispatch_action(DenyOsc52Clipboard);
+        let deny = cx
+            .debug_bounds("deny-osc52-clipboard")
+            .expect("OSC 52 authorization should expose its denial button");
+        cx.simulate_click(deny.center(), Modifiers::none());
         cx.run_until_parked();
         assert!(records.commands().iter().any(|call| {
             call.command
@@ -7276,6 +7358,65 @@ mod tests {
         pane.update(cx, |pane, _| pane.close());
         assert_eq!(dismissals.get(), 1);
         std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[gpui::test]
+    fn osc52_prompt_command_enter_should_allow_without_moving_responder_focus(
+        cx: &mut TestAppContext,
+    ) {
+        let (pane, cx, records) = connected_terminal_pane(cx);
+        let request = Osc52AuthorizationRequest {
+            id: crate::terminal::Osc52AuthorizationId::new(10),
+            access: Osc52Access::Write,
+            target: Osc52Target::Standard,
+            byte_len: 42,
+        };
+        records
+            .last_event_sender()
+            .unwrap()
+            .send_blocking(SessionEvent::Osc52Authorization(request))
+            .unwrap();
+        cx.run_until_parked();
+
+        cx.simulate_keystrokes("cmd-enter");
+        cx.run_until_parked();
+
+        assert!(records.commands().iter().any(|call| {
+            call.command
+                == RecordedSessionCommand::ResolveOsc52Authorization(
+                    request.id,
+                    Osc52AuthorizationDecision::Allow,
+                )
+        }));
+        assert!(cx.update(|window, cx| pane.read(cx).terminal_input_focused(window, cx)));
+    }
+
+    #[gpui::test]
+    fn osc52_prompt_escape_should_choose_the_safe_denial_action(cx: &mut TestAppContext) {
+        let (_pane, cx, records) = connected_terminal_pane(cx);
+        let request = Osc52AuthorizationRequest {
+            id: crate::terminal::Osc52AuthorizationId::new(12),
+            access: Osc52Access::Read,
+            target: Osc52Target::Standard,
+            byte_len: 0,
+        };
+        records
+            .last_event_sender()
+            .unwrap()
+            .send_blocking(SessionEvent::Osc52Authorization(request))
+            .unwrap();
+        cx.run_until_parked();
+
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+
+        assert!(records.commands().iter().any(|call| {
+            call.command
+                == RecordedSessionCommand::ResolveOsc52Authorization(
+                    request.id,
+                    Osc52AuthorizationDecision::Deny,
+                )
+        }));
     }
 
     #[gpui::test]

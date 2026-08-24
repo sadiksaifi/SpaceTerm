@@ -7,7 +7,9 @@ use gpui::{
     ScrollHandle, SharedString, Window, canvas, div, px, rgba,
 };
 use gpui_symbols::{Icon, SymbolWeight};
+use spaceterm_ui::{ButtonSize, ButtonVariant, IconButton};
 
+use super::button_theme;
 use super::terminal_focus::TerminalFocusBlocker;
 use super::{
     ActivateWindow1, ActivateWindow2, ActivateWindow3, ActivateWindow4, ActivateWindow5,
@@ -31,7 +33,6 @@ const WINDOW_ITEM_WIDTH: f32 = 132.0;
 const WINDOW_ITEM_MINIMUM_WIDTH: f32 = 84.0;
 const WINDOW_ITEM_MAXIMUM_WIDTH: f32 = 160.0;
 const WINDOW_ITEM_RIGHT_PADDING: f32 = 6.0;
-const WINDOW_CLOSE_CONTROL_SIZE: f32 = 20.0;
 const WINDOW_CLOSE_ICON_SIZE: f32 = 12.0;
 const WINDOW_CONTROL_SIZE: f32 = 28.0;
 const WINDOW_CONTROL_INSET: f32 = 4.0;
@@ -863,38 +864,34 @@ impl WindowManager {
             )
             .child(
                 div()
-                    .id(("window-close-button", window_id.get()))
-                    .debug_selector(move || format!("window-close-button-{}", window_id.get()))
-                    .size(px(WINDOW_CLOSE_CONTROL_SIZE))
                     .ml(px(4.0))
                     .flex_shrink_0()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded(px(4.0))
-                    .cursor_pointer()
-                    .block_mouse_except_scroll()
                     .when(!active, |button| {
                         button
                             .opacity(0.0)
                             .group_hover(window_group, |button| button.opacity(1.0))
                     })
-                    .hover(|button| {
-                        button
-                            .opacity(1.0)
-                            .bg(gpui_color(ACTIVE_THEME.ghost_element_hover))
-                    })
-                    .on_click(move |_, window, cx| {
-                        let _ = close_manager.update(cx, |manager, cx| {
-                            manager.close_window(window_id, window, cx);
-                        });
-                        cx.stop_propagation();
-                    })
                     .child(
-                        Icon::new("xmark")
-                            .weight(SymbolWeight::Medium)
-                            .size(px(WINDOW_CLOSE_ICON_SIZE))
-                            .color(gpui_color(ACTIVE_THEME.icon)),
+                        IconButton::new(
+                            ("window-close-button", window_id.get()),
+                            "Close Window",
+                            |foreground| {
+                                Icon::new("xmark")
+                                    .weight(SymbolWeight::Medium)
+                                    .size(px(WINDOW_CLOSE_ICON_SIZE))
+                                    .color(foreground)
+                                    .into_any_element()
+                            },
+                        )
+                        .variant(ButtonVariant::Ghost)
+                        .size(ButtonSize::Compact)
+                        .debug_selector(format!("window-close-button-{}", window_id.get()))
+                        .tooltip(|_, cx| button_theme::tooltip("Close Window", cx))
+                        .on_activate(move |_, window, cx| {
+                            let _ = close_manager.update(cx, |manager, cx| {
+                                manager.close_window(window_id, window, cx);
+                            });
+                        }),
                     ),
             )
             .child(
@@ -1059,57 +1056,47 @@ impl WindowManager {
             )
             .child(items)
             .child(
-                div()
-                    .id("create-window-button")
-                    .debug_selector(|| "create-window-button".to_owned())
-                    .size(px(WINDOW_CONTROL_SIZE))
-                    .flex_shrink_0()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded(px(6.0))
-                    .cursor_pointer()
-                    .occlude()
-                    .hover(|button| button.bg(gpui_color(ACTIVE_THEME.ghost_element_selected)))
-                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .on_click(move |_, window, cx| {
-                        let _ = create_manager.update(cx, |manager, cx| {
-                            manager.create_window(window, cx);
-                        });
-                        cx.stop_propagation();
-                    })
-                    .child(
-                        Icon::new("plus")
-                            .size(px(14.0))
-                            .color(gpui_color(ACTIVE_THEME.icon)),
-                    ),
+                IconButton::new("create-window-button", "Create Window", |foreground| {
+                    Icon::new("plus")
+                        .size(px(14.0))
+                        .color(foreground)
+                        .into_any_element()
+                })
+                .variant(ButtonVariant::Ghost)
+                .size(ButtonSize::Regular)
+                .debug_selector("create-window-button")
+                .tooltip(|_, cx| button_theme::tooltip("Create Window", cx))
+                .on_activate(move |_, window, cx| {
+                    let _ = create_manager.update(cx, |manager, cx| {
+                        manager.create_window(window, cx);
+                    });
+                }),
             )
             .child(
                 div()
-                    .id("window-menu-button")
-                    .debug_selector(|| "window-menu-button".to_owned())
                     .absolute()
                     .top(px(WINDOW_CONTROL_INSET))
                     .right(px(WINDOW_CONTROL_INSET))
-                    .size(px(WINDOW_CONTROL_SIZE))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded(px(6.0))
-                    .cursor_pointer()
-                    .occlude()
-                    .hover(|button| button.bg(gpui_color(ACTIVE_THEME.ghost_element_selected)))
-                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .on_click(move |_, window, cx| {
-                        let _ = menu_manager.update(cx, |manager, cx| {
-                            manager.toggle_active_window_menu(window, cx);
-                        });
-                        cx.stop_propagation();
-                    })
                     .child(
-                        Icon::new("ellipsis")
-                            .size(px(16.0))
-                            .color(gpui_color(ACTIVE_THEME.icon)),
+                        IconButton::new(
+                            "window-menu-button",
+                            "Open Window Actions",
+                            |foreground| {
+                                Icon::new("ellipsis")
+                                    .size(px(16.0))
+                                    .color(foreground)
+                                    .into_any_element()
+                            },
+                        )
+                        .variant(ButtonVariant::Ghost)
+                        .size(ButtonSize::Regular)
+                        .debug_selector("window-menu-button")
+                        .tooltip(|_, cx| button_theme::tooltip("Window Actions", cx))
+                        .on_activate(move |_, window, cx| {
+                            let _ = menu_manager.update(cx, |manager, cx| {
+                                manager.toggle_active_window_menu(window, cx);
+                            });
+                        }),
                     ),
             )
             .into_any_element()
@@ -1661,7 +1648,7 @@ mod tests {
             ),
             (
                 px(WINDOW_ITEM_RIGHT_PADDING),
-                gpui::size(px(WINDOW_CLOSE_CONTROL_SIZE), px(WINDOW_CLOSE_CONTROL_SIZE)),
+                gpui::size(px(20.0), px(20.0)),
             )
         );
     }

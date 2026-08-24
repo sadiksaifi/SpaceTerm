@@ -7,7 +7,9 @@ use gpui::{
     MouseDownEvent, Pixels, Point, PromptButton, PromptLevel, Render, Window, div, px, rgba,
 };
 use gpui_symbols::{Icon, SymbolWeight};
+use spaceterm_ui::{ButtonSize, ButtonVariant, IconButton};
 
+use super::button_theme;
 use super::terminal_focus::{TerminalFocusBlocker, TerminalProductFocus};
 use super::{
     ClosePane, CloseTarget, FocusPaneDown, FocusPaneLeft, FocusPaneRight, FocusPaneUp,
@@ -933,28 +935,24 @@ fn render_pane_header(
             .items_center()
             .gap(px(7.0))
             .child(
-                div()
-                    .id(("pane-zoom-restore", pane_id.get()))
-                    .debug_selector(move || format!("pane-zoom-restore-{}", pane_id.get()))
-                    .size(px(20.0))
-                    .flex_shrink_0()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded(px(4.0))
-                    .cursor_pointer()
-                    .occlude()
-                    .hover(|button| button.bg(gpui_color(ACTIVE_THEME.ghost_element_hover)))
-                    .on_click(move |_, window, cx| {
-                        let _ = host.update(cx, |host, cx| host.toggle_zoom(window, cx));
-                        cx.stop_propagation();
-                    })
-                    .child(
+                IconButton::new(
+                    ("pane-zoom-restore", pane_id.get()),
+                    "Restore Panes",
+                    |foreground| {
                         Icon::new("arrow.down.right.and.arrow.up.left")
                             .weight(SymbolWeight::Medium)
                             .size(px(13.0))
-                            .color(gpui_color(ACTIVE_THEME.icon)),
-                    ),
+                            .color(foreground)
+                            .into_any_element()
+                    },
+                )
+                .variant(ButtonVariant::Ghost)
+                .size(ButtonSize::Compact)
+                .debug_selector(format!("pane-zoom-restore-{}", pane_id.get()))
+                .tooltip(|_, cx| button_theme::tooltip("Restore Panes", cx))
+                .on_activate(move |_, window, cx| {
+                    let _ = host.update(cx, |host, cx| host.toggle_zoom(window, cx));
+                }),
             )
             .child(
                 div()
@@ -1059,42 +1057,38 @@ fn render_menu_button(
 ) -> AnyElement {
     let button_host = host;
     div()
-        .id(("pane-menu-button", pane_id.get()))
-        .debug_selector(|| format!("pane-menu-button-{}", pane_id.get()))
         .absolute()
         .top_0()
         .right_0()
-        .size(px(PANE_CONTROL_SIZE))
-        .flex()
-        .items_center()
-        .justify_center()
-        .rounded(px(6.0))
-        .cursor_pointer()
-        .occlude()
         .when(!focused, |button| {
             button
                 .opacity(0.0)
                 .group_hover(pane_group.to_owned(), |button| button.opacity(1.0))
         })
-        .hover(|button| {
-            button
-                .opacity(1.0)
-                .bg(gpui_color(ACTIVE_THEME.ghost_element_hover))
-        })
-        .on_click(move |_, window, cx| {
-            let terminal = button_host
-                .update(cx, |host, cx| host.toggle_menu(pane_id, cx))
-                .ok()
-                .flatten();
-            if let Some(terminal) = terminal {
-                terminal.update(cx, |terminal, _| terminal.focus(window));
-            }
-            cx.stop_propagation();
-        })
         .child(
-            Icon::new("ellipsis")
-                .size(px(16.0))
-                .color(gpui_color(ACTIVE_THEME.icon)),
+            IconButton::new(
+                ("pane-menu-button", pane_id.get()),
+                "Open Pane Actions",
+                |foreground| {
+                    Icon::new("ellipsis")
+                        .size(px(16.0))
+                        .color(foreground)
+                        .into_any_element()
+                },
+            )
+            .variant(ButtonVariant::Ghost)
+            .size(ButtonSize::Regular)
+            .debug_selector(format!("pane-menu-button-{}", pane_id.get()))
+            .tooltip(|_, cx| button_theme::tooltip("Pane Actions", cx))
+            .on_activate(move |_, window, cx| {
+                let terminal = button_host
+                    .update(cx, |host, cx| host.toggle_menu(pane_id, cx))
+                    .ok()
+                    .flatten();
+                if let Some(terminal) = terminal {
+                    terminal.update(cx, |terminal, _| terminal.focus(window));
+                }
+            }),
         )
         .into_any_element()
 }
@@ -1390,6 +1384,7 @@ mod tests {
 
     #[gpui::test]
     fn initial_and_split_panes_should_start_in_the_workspace_root(cx: &mut TestAppContext) {
+        cx.update(crate::ui::init);
         let workspace_root = PathBuf::from("/tmp/spaceterm-explicit-workspace-root");
         let records = TestTerminalSessionRecords::default();
         let session_factory: Rc<dyn TerminalSessionFactory> =
@@ -1419,6 +1414,7 @@ mod tests {
 
     #[gpui::test]
     fn split_panes_should_render_compact_focused_and_unfocused_headers(cx: &mut TestAppContext) {
+        cx.update(crate::ui::init);
         let session_factory = test_session_factory();
         let (host, cx) = cx.add_window_view(|window, cx| {
             PaneHost::new(WindowId::new(1), session_factory, window, cx)
@@ -1446,6 +1442,7 @@ mod tests {
 
     #[gpui::test]
     fn focusing_another_pane_should_move_the_focused_header_state(cx: &mut TestAppContext) {
+        cx.update(crate::ui::init);
         let session_factory = test_session_factory();
         let (host, cx) = cx.add_window_view(|window, cx| {
             PaneHost::new(WindowId::new(1), session_factory, window, cx)
@@ -1616,6 +1613,7 @@ mod tests {
 
     #[gpui::test]
     fn terminal_scrollbar_interaction_should_focus_its_owning_pane(cx: &mut TestAppContext) {
+        cx.update(crate::ui::init);
         let records = TestTerminalSessionRecords::default();
         let session_factory: Rc<dyn TerminalSessionFactory> =
             Rc::new(TestTerminalSessionFactory::new(records.clone()).with_fallback_title("zsh"));
@@ -1730,6 +1728,7 @@ mod tests {
 
     #[gpui::test]
     fn terminal_title_event_should_update_the_pane_header_snapshot(cx: &mut TestAppContext) {
+        cx.update(crate::ui::init);
         let records = TestTerminalSessionRecords::default();
         let session_factory: Rc<dyn TerminalSessionFactory> =
             Rc::new(TestTerminalSessionFactory::new(records.clone()).with_fallback_title("zsh"));
@@ -1769,6 +1768,7 @@ mod tests {
     fn exited_terminal_session_should_close_its_pane_and_focus_the_neighbor(
         cx: &mut TestAppContext,
     ) {
+        cx.update(crate::ui::init);
         let records = TestTerminalSessionRecords::default();
         let session_factory: Rc<dyn TerminalSessionFactory> =
             Rc::new(TestTerminalSessionFactory::new(records.clone()));
@@ -1865,6 +1865,7 @@ mod tests {
 
     #[gpui::test]
     fn successful_toggle_zoom_should_emit_one_presentation_changed(cx: &mut TestAppContext) {
+        cx.update(crate::ui::init);
         let presentation_changes = Rc::new(Cell::new(0));
         let session_factory = test_session_factory();
         let (host, cx) = cx.add_window_view(|window, cx| {
@@ -1893,6 +1894,7 @@ mod tests {
     fn zoom_restore_button_should_restore_panes_without_sending_terminal_pointer_input(
         cx: &mut TestAppContext,
     ) {
+        cx.update(crate::ui::init);
         let records = TestTerminalSessionRecords::default();
         let session_factory: Rc<dyn TerminalSessionFactory> =
             Rc::new(TestTerminalSessionFactory::new(records.clone()));
@@ -1928,6 +1930,7 @@ mod tests {
     fn menu_click_should_execute_command_without_sending_terminal_pointer_input(
         cx: &mut TestAppContext,
     ) {
+        cx.update(crate::ui::init);
         let records = TestTerminalSessionRecords::default();
         let session_factory: Rc<dyn TerminalSessionFactory> =
             Rc::new(TestTerminalSessionFactory::new(records.clone()));
@@ -1981,6 +1984,7 @@ mod tests {
     fn ellipsis_click_should_toggle_menu_without_sending_terminal_pointer_input(
         cx: &mut TestAppContext,
     ) {
+        cx.update(crate::ui::init);
         let records = TestTerminalSessionRecords::default();
         let session_factory: Rc<dyn TerminalSessionFactory> =
             Rc::new(TestTerminalSessionFactory::new(records.clone()));
@@ -2019,6 +2023,7 @@ mod tests {
 
     #[gpui::test]
     fn opening_nonfocused_pane_menu_should_focus_and_zoom_the_target_pane(cx: &mut TestAppContext) {
+        cx.update(crate::ui::init);
         let records = TestTerminalSessionRecords::default();
         let session_factory: Rc<dyn TerminalSessionFactory> =
             Rc::new(TestTerminalSessionFactory::new(records.clone()));
@@ -2084,6 +2089,7 @@ mod tests {
 
     #[gpui::test]
     fn pane_menu_should_render_compact_row_and_menu_heights(cx: &mut TestAppContext) {
+        cx.update(crate::ui::init);
         let records = TestTerminalSessionRecords::default();
         let session_factory: Rc<dyn TerminalSessionFactory> =
             Rc::new(TestTerminalSessionFactory::new(records));
