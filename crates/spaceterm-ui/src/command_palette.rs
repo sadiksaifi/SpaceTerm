@@ -3034,6 +3034,58 @@ mod tests {
     }
 
     #[gpui::test]
+    fn actions_menu_external_focus_should_close_the_palette(cx: &mut TestAppContext) {
+        let (root, palette, events, _, cx) = palette_window(cx);
+        open_palette(&root, &palette, cx);
+        let intruder = root.read_with(cx, |root, _| root.intruder_focus.clone());
+        cx.update(|window, cx| {
+            root.update(cx, |_, cx| {
+                let intruder = intruder.clone();
+                cx.subscribe_in(
+                    &palette,
+                    window,
+                    move |_, _, event: &CommandPaletteEvent<u8>, window, _| {
+                        if matches!(event, CommandPaletteEvent::MenuAction(_)) {
+                            intruder.focus(window);
+                        }
+                    },
+                )
+                .detach();
+            });
+            palette.update(cx, |palette, cx| {
+                palette.set_actions_menu(
+                    vec![
+                        MenuEntry::action(
+                            "Focus external control",
+                            SharedString::from("focus-external"),
+                        )
+                        .debug_selector("command-palette-focus-external"),
+                    ],
+                    cx,
+                );
+            });
+        });
+        cx.run_until_parked();
+
+        let trigger = cx
+            .debug_bounds("command-palette-actions-menu")
+            .expect("the actions menu trigger was not rendered");
+        cx.simulate_click(trigger.center(), Modifiers::default());
+        cx.run_until_parked();
+        let entry = cx
+            .debug_bounds("command-palette-focus-external")
+            .expect("the actions menu entry was not rendered");
+        cx.simulate_click(entry.center(), Modifiers::default());
+        cx.run_until_parked();
+
+        assert!(!palette.read_with(cx, |palette, _| palette.is_open()));
+        assert!(cx.update(|window, _| intruder.is_focused(window)));
+        assert!(events.borrow().contains(&CommandPaletteEvent::Lifecycle(
+            CommandPaletteLifecycleEvent::Closed(CommandPaletteCloseReason::FocusLost)
+        )));
+    }
+
+    #[gpui::test]
     fn section_boundaries_should_emit_one_heading_each(cx: &mut TestAppContext) {
         let (root, palette, _, _, cx) = palette_window(cx);
         open_palette(&root, &palette, cx);
