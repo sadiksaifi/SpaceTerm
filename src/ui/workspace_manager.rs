@@ -12,7 +12,7 @@ use gpui_symbols::{Icon, RenderingMode, SymbolWeight};
 use spaceterm_ui::{
     Button, ButtonShape, ButtonSize, ButtonVariant, ContextMenu, IconButton, MenuEntry,
     MenuLifecycleEvent, MenuSize, MiddleTruncatedText, OverlayScrollbar, OverlayScrollbarEvent,
-    ScrollMetrics, TextInput, TextInputEvent, TextInputStyle,
+    ScrollMetrics, TextInput, TextInputEvent, TextInputVariant,
 };
 
 use super::button_theme;
@@ -78,6 +78,7 @@ struct WorkspaceRenameState {
     workspace_id: WorkspaceId,
     input: Entity<TextInput>,
     focus_handle: FocusHandle,
+    context_menu_open: bool,
 }
 
 struct WorkspaceSidebarTooltip {
@@ -1260,24 +1261,22 @@ impl WorkspaceManager {
                 };
                 let input = cx.new(|cx| {
                     TextInput::new(
+                        "workspace-rename-input",
+                        "Workspace name",
                         workspace.name(),
-                        TextInputStyle::new(
-                            gpui_color(ACTIVE_THEME.text).into(),
-                            gpui_color(ACTIVE_THEME.text_placeholder).into(),
-                            gpui_color(ACTIVE_THEME.players[0].selection).into(),
-                            gpui_color(ACTIVE_THEME.players[0].cursor).into(),
-                        ),
                         window,
                         cx,
                     )
+                    .variant(TextInputVariant::Bare)
+                    .debug_selector("workspace-rename-input")
                 });
                 let input_id = input.entity_id();
                 cx.subscribe_in(
                     &input,
                     window,
-                    move |_manager, _, event: &TextInputEvent, window, cx| match event {
-                        TextInputEvent::Submitted(value) => {
-                            let value = value.clone();
+                    move |manager, input, event: &TextInputEvent, window, cx| match event {
+                        TextInputEvent::Submitted => {
+                            let value = input.read(cx).value().to_owned();
                             cx.defer_in(window, move |manager, window, cx| {
                                 manager.finish_rename(input_id, Some(value), true, window, cx);
                             });
@@ -1287,13 +1286,43 @@ impl WorkspaceManager {
                                 manager.finish_rename(input_id, None, true, window, cx);
                             });
                         }
-                        TextInputEvent::Blurred(value) => {
-                            let value = value.clone();
-                            cx.defer_in(window, move |manager, window, cx| {
-                                manager.finish_rename(input_id, Some(value), false, window, cx);
-                            });
+                        TextInputEvent::FocusLost => {
+                            let menu_open = manager
+                                .rename
+                                .as_ref()
+                                .filter(|rename| rename.input.entity_id() == input_id)
+                                .is_some_and(|rename| rename.context_menu_open);
+                            if !menu_open {
+                                let value = input.read(cx).value().to_owned();
+                                cx.defer_in(window, move |manager, window, cx| {
+                                    manager.finish_rename(input_id, Some(value), false, window, cx);
+                                });
+                            }
                         }
-                        TextInputEvent::Changed(_) => {}
+                        TextInputEvent::ContextMenuOpened => {
+                            if let Some(rename) = &mut manager.rename
+                                && rename.input.entity_id() == input_id
+                            {
+                                rename.context_menu_open = true;
+                            }
+                        }
+                        TextInputEvent::ContextMenuClosed => {
+                            let should_finish = manager
+                                .rename
+                                .as_mut()
+                                .filter(|rename| rename.input.entity_id() == input_id)
+                                .is_some_and(|rename| {
+                                    rename.context_menu_open = false;
+                                    !rename.focus_handle.is_focused(window)
+                                });
+                            if should_finish {
+                                let value = input.read(cx).value().to_owned();
+                                cx.defer_in(window, move |manager, window, cx| {
+                                    manager.finish_rename(input_id, Some(value), false, window, cx);
+                                });
+                            }
+                        }
+                        _ => {}
                     },
                 )
                 .detach();
@@ -1301,6 +1330,7 @@ impl WorkspaceManager {
                     workspace_id,
                     focus_handle: input.read(cx).focus_handle(),
                     input,
+                    context_menu_open: false,
                 });
                 self.sync_terminal_focus_blocker(window, cx);
                 cx.notify();
@@ -1625,6 +1655,7 @@ impl WorkspaceManager {
             .rename
             .as_ref()
             .filter(|rename| rename.workspace_id == workspace_id);
+        let renaming = rename.is_some();
         let first_line = if let Some(rename) = rename {
             let input = rename.input.clone();
             let focus_handle = rename.focus_handle.clone();
@@ -1787,6 +1818,16 @@ impl WorkspaceManager {
                     .bg(gpui_color(ACTIVE_THEME.border)),
             )
             .into_any_element();
+
+        if renaming {
+            return div()
+                .id(("workspace-menu", workspace_id.get()))
+                .debug_selector(move || format!("workspace-menu-{}", workspace_id.get()))
+                .w_full()
+                .flex_shrink_0()
+                .child(row)
+                .into_any_element();
+        }
 
         let open_manager = manager.clone();
         let lifecycle_manager = manager.clone();
@@ -3474,6 +3515,13 @@ mod tests {
         right_click("workspace-row-1-active", cx);
         click("workspace-menu-row-rename", cx);
 
+        let input_bounds = cx
+            .debug_bounds("workspace-rename-input")
+            .expect("the shared rename input should be rendered");
+        assert!(
+            input_bounds.size.width > px(0.0) && input_bounds.size.height > px(0.0),
+            "the shared rename input collapsed inside its context-menu decorator: {input_bounds:?}"
+        );
         click("workspace-rename-input-1", cx);
         let focus_state = cx.update(|window, cx| {
             let manager = manager.read(cx);
@@ -3495,6 +3543,105 @@ mod tests {
         });
         assert_eq!(focus_state, (true, false, true));
         assert_eq!(rename_state, (WorkspaceId::new(1), "Dev".to_owned(), true));
+    }
+
+    #[gpui::test]
+    fn dismissing_inline_rename_context_menu_should_preserve_editor_until_submission(
+        cx: &mut TestAppContext,
+    ) {
+        let (manager, _records, cx) = workspace_manager(cx);
+        right_click("workspace-row-1-active", cx);
+        click("workspace-menu-row-rename", cx);
+        cx.simulate_keystrokes("cmd-a D e v");
+        cx.run_until_parked();
+        assert_eq!(
+            manager.read_with(cx, |manager, cx| manager
+                .rename
+                .as_ref()
+                .expect("rename editor should remain active")
+                .input
+                .read(cx)
+                .value()
+                .to_owned()),
+            "Dev"
+        );
+        right_click("workspace-rename-input", cx);
+        assert!(manager.read_with(cx, |manager, _| manager.rename.is_some()));
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+
+        let state_before_submit = cx.update(|window, cx| {
+            let manager = manager.read(cx);
+            (
+                manager.rename.is_some(),
+                manager.rename_is_focused(window),
+                manager.workspaces.active_workspace().name().to_owned(),
+            )
+        });
+        assert_eq!(
+            state_before_submit,
+            (true, true, "Default".to_owned()),
+            "dismissing the owned menu must not commit or destroy the editor"
+        );
+
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        let state_after_submit = manager.read_with(cx, |manager, _| {
+            (
+                manager.rename.is_none(),
+                manager.workspaces.active_workspace().name().to_owned(),
+            )
+        });
+        assert_eq!(state_after_submit, (true, "Dev".to_owned()));
+    }
+
+    #[gpui::test]
+    fn activating_inline_rename_context_menu_should_preserve_editor_until_submission(
+        cx: &mut TestAppContext,
+    ) {
+        let (manager, _records, cx) = workspace_manager(cx);
+        right_click("workspace-row-1-active", cx);
+        click("workspace-menu-row-rename", cx);
+        cx.simulate_keystrokes("cmd-a D e v");
+        cx.run_until_parked();
+        assert_eq!(
+            manager.read_with(cx, |manager, cx| manager
+                .rename
+                .as_ref()
+                .expect("rename editor should remain active")
+                .input
+                .read(cx)
+                .value()
+                .to_owned()),
+            "Dev"
+        );
+        right_click("workspace-rename-input", cx);
+        cx.simulate_keystrokes("end enter");
+        cx.run_until_parked();
+
+        let state_before_submit = cx.update(|window, cx| {
+            let manager = manager.read(cx);
+            (
+                manager.rename.is_some(),
+                manager.rename_is_focused(window),
+                manager.workspaces.active_workspace().name().to_owned(),
+            )
+        });
+        assert_eq!(
+            state_before_submit,
+            (true, true, "Default".to_owned()),
+            "activating the owned menu must not commit or destroy the editor"
+        );
+
+        cx.simulate_keystrokes("O p s enter");
+        cx.run_until_parked();
+        let state_after_submit = manager.read_with(cx, |manager, _| {
+            (
+                manager.rename.is_none(),
+                manager.workspaces.active_workspace().name().to_owned(),
+            )
+        });
+        assert_eq!(state_after_submit, (true, "Ops".to_owned()));
     }
 
     #[gpui::test]

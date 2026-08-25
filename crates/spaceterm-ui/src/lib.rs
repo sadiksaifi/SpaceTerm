@@ -36,22 +36,29 @@ pub use overlay_scrollbar::{
 };
 pub use text_input::{
     Copy as EditCopy, Cut as EditCut, Paste as EditPaste, Redo as EditRedo,
-    SelectAll as EditSelectAll, TextInput, TextInputEvent, TextInputStyle, TextInputTabBehavior,
-    Undo as EditUndo,
+    SelectAll as EditSelectAll, TextInput, TextInputChangeSource, TextInputComposition,
+    TextInputEvent, TextInputKeybindingProfile, TextInputMetrics, TextInputPaint,
+    TextInputSelection, TextInputTabBehavior, TextInputTheme, TextInputValueChanged,
+    TextInputVariant, TextInputVariants, Undo as EditUndo, install_text_input_keybindings,
 };
 
-/// Registers shared control themes, actions, and macOS key bindings.
+/// Installs shared control themes and platform-neutral control behavior.
+///
+/// Applications select a text-input keybinding profile separately with
+/// [`install_text_input_keybindings`].
 pub fn init(
     cx: &mut App,
     button_theme: ButtonTheme,
     scrollbar_theme: ScrollbarTheme,
     menu_theme: MenuTheme,
     command_palette_theme: CommandPaletteTheme,
+    text_input_theme: TextInputTheme,
 ) {
     cx.set_global(button_theme);
     cx.set_global(scrollbar_theme);
     cx.set_global(menu_theme);
     cx.set_global(command_palette_theme);
+    cx.set_global(text_input_theme);
     text_input::init(cx);
     menu::init(cx);
     command_palette::init(cx);

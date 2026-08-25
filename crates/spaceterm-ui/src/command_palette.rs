@@ -9,7 +9,7 @@ use gpui::{
 };
 
 use crate::{
-    TextInput, TextInputEvent, TextInputStyle, TextInputTabBehavior,
+    TextInput, TextInputEvent, TextInputTabBehavior, TextInputVariant,
     button::{ButtonSize, ButtonVariant, IconButton},
     menu::{Menu, MenuActivation, MenuEntry, MenuSize},
     overlay_scrollbar::{OverlayScrollbar, OverlayScrollbarEvent, ScrollMetrics},
@@ -576,8 +576,6 @@ pub struct CommandPalettePaint {
     section_foreground: Rgba,
     footer_foreground: Rgba,
     footer_key_foreground: Rgba,
-    input_selection: Rgba,
-    caret: Rgba,
 }
 
 impl CommandPalettePaint {
@@ -598,8 +596,6 @@ impl CommandPalettePaint {
         selected_background: Rgba,
         selected_foreground: Rgba,
         match_foreground: Rgba,
-        input_selection: Rgba,
-        caret: Rgba,
     ) -> Self {
         Self {
             background,
@@ -615,8 +611,6 @@ impl CommandPalettePaint {
             section_foreground: muted,
             footer_foreground: muted,
             footer_key_foreground: disabled,
-            input_selection,
-            caret,
         }
     }
 
@@ -1033,37 +1027,40 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
         cx: &mut gpui::Context<Self>,
     ) -> Self {
         let placeholder = placeholder.into();
-        let paint = cx.global::<CommandPaletteTheme>().paint;
         let input_placeholder = placeholder.clone();
         let input = cx.new(|cx| {
             TextInput::new(
+                "command-palette-input",
+                "Command palette query",
                 "",
-                TextInputStyle::new(
-                    paint.foreground.into(),
-                    paint.muted.into(),
-                    paint.input_selection.into(),
-                    paint.caret.into(),
-                ),
                 window,
                 cx,
             )
             .placeholder(input_placeholder)
+            .variant(TextInputVariant::Bare)
             .tab_behavior(TextInputTabBehavior::Propagate)
+            .debug_selector("command-palette-input")
         });
         let input_subscription = cx.subscribe_in(
             &input,
             window,
-            |palette, _, event: &TextInputEvent, window, cx| match event {
-                TextInputEvent::Changed(query) => palette.update_query(query.clone(), cx),
-                TextInputEvent::Submitted(_) => {
+            |palette, input, event: &TextInputEvent, window, cx| match event {
+                TextInputEvent::ValueChanged(_) => {
+                    palette.update_query(input.read(cx).value().to_owned(), cx);
+                }
+                TextInputEvent::Submitted => {
                     palette.activate_selected(CommandPaletteActivationSource::Keyboard, window, cx)
                 }
                 TextInputEvent::Cancelled => {
                     palette.close(CommandPaletteCloseReason::Escape, window, cx);
                 }
-                // The palette's own footer menu takes focus while the palette must stay open, so
-                // a blur is only a dismissal when no menu owns this Operating-System Window.
-                TextInputEvent::Blurred(_) => {}
+                TextInputEvent::TabForwardRequested => {
+                    palette.focus_next_control(window, cx);
+                }
+                TextInputEvent::TabBackwardRequested => {
+                    palette.focus_previous_control(window, cx);
+                }
+                _ => {}
             },
         );
         let focus_scope = cx.focus_handle();
@@ -1370,10 +1367,10 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
 
     /// Replaces the editor query and emits one generation-bearing query event.
     pub fn set_query(&mut self, query: impl Into<String>, cx: &mut gpui::Context<Self>) {
-        let query = query.into();
         self.input
-            .update(cx, |input, cx| input.set_value(query.clone(), cx));
-        self.update_query(query, cx);
+            .update(cx, |input, cx| input.set_value(query.into(), cx));
+        let accepted_query = self.input.read(cx).value().to_owned();
+        self.update_query(accepted_query, cx);
     }
 
     fn update_query(&mut self, query: String, cx: &mut gpui::Context<Self>) {
@@ -2535,8 +2532,6 @@ mod tests {
                 rgba(0x252530ff),
                 rgba(0xffffffff),
                 rgba(0x7e98e8ff),
-                rgba(0x6e94b266),
-                rgba(0xcdcdcdff),
             )
             .separator(rgba(0x252530ff))
             .hover_background(rgba(0x1c1c24ff))
@@ -2821,6 +2816,29 @@ mod tests {
             rgba(0x60607978),
             rgba(0xcdcdcdff),
         ));
+        let input_paint = crate::text_input::TextInputPaint::new(
+            rgba(0xcdcdcdff),
+            rgba(0x878787ff),
+            rgba(0x6e94b266),
+            rgba(0xcdcdcdff),
+            rgba(0x606079ff),
+            rgba(0x606079ff),
+        );
+        cx.set_global(crate::text_input::TextInputTheme::new(
+            crate::text_input::TextInputVariants::new(input_paint, input_paint),
+            crate::text_input::TextInputMetrics::new(
+                px(1.0),
+                px(2.0),
+                std::time::Duration::from_millis(16),
+                px(20.0),
+            ),
+        ));
+        cx.update(|cx| {
+            crate::text_input::install_text_input_keybindings(
+                cx,
+                crate::text_input::TextInputKeybindingProfile::MacOs,
+            );
+        });
     }
 
     fn palette_window(cx: &mut TestAppContext) -> PaletteWindow<'_> {
@@ -3402,7 +3420,9 @@ mod tests {
     }
 
     #[gpui::test]
-    fn tab_navigation_should_remain_inside_the_palette(cx: &mut TestAppContext) {
+    fn tab_navigation_should_reach_header_controls_and_return_to_the_query(
+        cx: &mut TestAppContext,
+    ) {
         let (root, palette, _, _, cx) = palette_window(cx);
         open_palette(&root, &palette, cx);
         palette.update(cx, |palette, cx| {
@@ -3415,10 +3435,29 @@ mod tests {
         });
         cx.run_until_parked();
 
-        cx.simulate_keystrokes("tab shift-tab x");
+        cx.simulate_keystrokes("tab");
+        cx.run_until_parked();
+        assert!(!cx.update(|window, cx| {
+            palette
+                .read(cx)
+                .input
+                .read(cx)
+                .focus_handle()
+                .is_focused(window)
+        }));
+
+        cx.simulate_keystrokes("shift-tab x");
         cx.run_until_parked();
 
         assert!(palette.read_with(cx, |palette, _| palette.is_open()));
+        assert!(cx.update(|window, cx| {
+            palette
+                .read(cx)
+                .input
+                .read(cx)
+                .focus_handle()
+                .is_focused(window)
+        }));
         assert_eq!(
             palette.read_with(cx, |palette, _| palette.query().to_owned()),
             "x"
@@ -3524,6 +3563,27 @@ mod tests {
                 .iter()
                 .any(|event| matches!(event, CommandPaletteEvent::Activated(_)))
         );
+    }
+
+    #[gpui::test]
+    fn programmatic_query_uses_the_inputs_normalized_bounded_value(cx: &mut TestAppContext) {
+        let (_, palette, events, _, cx) = palette_window(cx);
+        palette.update(cx, |palette, cx| palette.set_query("open\r\nwindow", cx));
+        assert_eq!(
+            palette.read_with(cx, |palette, _| palette.query().to_owned()),
+            "open window"
+        );
+        events.borrow_mut().clear();
+
+        palette.update(cx, |palette, cx| {
+            palette.set_query("x".repeat(65 * 1024), cx)
+        });
+
+        assert_eq!(
+            palette.read_with(cx, |palette, _| palette.query().to_owned()),
+            "open window"
+        );
+        assert!(events.borrow().is_empty());
     }
 
     #[gpui::test]
