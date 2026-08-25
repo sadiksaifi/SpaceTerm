@@ -1468,7 +1468,7 @@ fn reserve_window(
 ) -> (MenuReservation, Option<WeakEntity<MenuState>>) {
     let window_id = window.window_handle().window_id();
     let weak = owner.downgrade();
-    cx.update_global::<MenuCoordinator, _>(|coordinator, _| {
+    let reservation = cx.update_global::<MenuCoordinator, _>(|coordinator, _| {
         coordinator.next_reservation = coordinator.next_reservation.wrapping_add(1);
         let reservation = MenuReservation(coordinator.next_reservation);
         let previous = coordinator
@@ -1483,11 +1483,18 @@ fn reserve_window(
             .map(|ownership| ownership.owner)
             .filter(|previous| previous != &weak);
         (reservation, previous)
-    })
+    });
+    crate::tooltip::set_window_tooltip_suppression(
+        window_id,
+        crate::tooltip::TooltipSuppression::Menu,
+        true,
+        cx,
+    );
+    reservation
 }
 
 fn release_window(reservation: MenuReservation, window_id: WindowId, cx: &mut App) {
-    cx.update_global::<MenuCoordinator, _>(|coordinator, _| {
+    let menu_remains = cx.update_global::<MenuCoordinator, _>(|coordinator, _| {
         if coordinator
             .owners
             .get(&window_id)
@@ -1498,7 +1505,16 @@ fn release_window(reservation: MenuReservation, window_id: WindowId, cx: &mut Ap
         coordinator
             .owners
             .retain(|_, ownership| ownership.owner.upgrade().is_some());
+        coordinator.owners.contains_key(&window_id)
     });
+    if !menu_remains {
+        crate::tooltip::set_window_tooltip_suppression(
+            window_id,
+            crate::tooltip::TooltipSuppression::Menu,
+            false,
+            cx,
+        );
+    }
 }
 
 struct MenuReplacement {
@@ -3327,6 +3343,25 @@ mod tests {
                 action: "open",
                 source: MenuActivationSource::Pointer
             }]
+        );
+    }
+
+    #[gpui::test]
+    fn open_menu_should_suppress_tooltips_until_the_menu_closes(cx: &mut TestAppContext) {
+        let (_, _, cx) = menu_window(cx);
+        let trigger = cx
+            .debug_bounds("menu-trigger")
+            .unwrap_or_else(|| panic!("trigger not painted"));
+
+        cx.simulate_click(trigger.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert!(cx.update(|window, cx| { crate::tooltip::window_tooltips_suppressed(window, cx) }));
+
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+
+        assert!(
+            !cx.update(|window, cx| { crate::tooltip::window_tooltips_suppressed(window, cx) })
         );
     }
 

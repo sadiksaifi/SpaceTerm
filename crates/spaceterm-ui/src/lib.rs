@@ -10,6 +10,7 @@ mod middle_truncated_text;
 mod overlay_scrollbar;
 mod resize_handle;
 mod text_input;
+mod tooltip;
 mod window_drag_region;
 
 use gpui::App;
@@ -47,6 +48,9 @@ pub use text_input::{
     TextInputSelection, TextInputTabBehavior, TextInputTheme, TextInputValueChanged,
     TextInputVariant, TextInputVariants, Undo as EditUndo, install_text_input_keybindings,
 };
+pub use tooltip::{
+    Tooltip, TooltipLayer, TooltipMetrics, TooltipPaint, TooltipTarget, TooltipTheme,
+};
 pub use window_drag_region::{
     WindowDragFinishReason, WindowDragInteractionId, WindowDragRegion, WindowDragRegionEvent,
     WindowDragRegionResponse, WindowDragRegionStatus,
@@ -56,6 +60,10 @@ pub use window_drag_region::{
 ///
 /// Applications select a text-input keybinding profile separately with
 /// [`install_text_input_keybindings`].
+#[expect(
+    clippy::too_many_arguments,
+    reason = "installation accepts one explicit application-owned theme per reusable control family"
+)]
 pub fn init(
     cx: &mut App,
     button_theme: ButtonTheme,
@@ -64,6 +72,7 @@ pub fn init(
     menu_theme: MenuTheme,
     command_palette_theme: CommandPaletteTheme,
     text_input_theme: TextInputTheme,
+    tooltip_theme: TooltipTheme,
 ) {
     cx.set_global(button_theme);
     cx.set_global(scrollbar_theme);
@@ -71,7 +80,9 @@ pub fn init(
     cx.set_global(menu_theme);
     cx.set_global(command_palette_theme);
     cx.set_global(text_input_theme);
+    cx.set_global(tooltip_theme);
     text_input::init(cx);
     menu::init(cx);
     command_palette::init(cx);
+    tooltip::init(cx);
 }

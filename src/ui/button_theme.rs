@@ -1,7 +1,4 @@
-use gpui::{
-    AnyView, App, AppContext as _, Context, IntoElement, ParentElement as _, Render, Rgba,
-    SharedString, Styled as _, Window, div, px, rgba,
-};
+use gpui::{Rgba, px, rgba};
 use spaceterm_ui::{
     ButtonMetrics, ButtonPaint, ButtonSizes, ButtonTheme, ButtonVariantStyle, ButtonVariants,
 };
@@ -147,30 +144,6 @@ pub(super) fn theme() -> ButtonTheme {
         ),
         gpui_color(ACTIVE_THEME.border_focused),
     )
-}
-
-pub(super) fn tooltip(text: impl Into<SharedString>, cx: &mut App) -> AnyView {
-    cx.new(|_| ButtonTooltip { text: text.into() }).into()
-}
-
-struct ButtonTooltip {
-    text: SharedString,
-}
-
-impl Render for ButtonTooltip {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .max_w(px(280.0))
-            .px(px(8.0))
-            .py(px(5.0))
-            .rounded(px(5.0))
-            .border(px(1.0))
-            .border_color(gpui_color(ACTIVE_THEME.border))
-            .bg(gpui_color(ACTIVE_THEME.elevated_surface_background))
-            .text_size(px(11.0))
-            .text_color(gpui_color(ACTIVE_THEME.text))
-            .child(self.text.clone())
-    }
 }
 
 fn outline() -> ButtonVariantStyle {
