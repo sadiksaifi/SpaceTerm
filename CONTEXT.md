@@ -32,6 +32,10 @@ tmux, but SpaceTerm is not a tmux client and has no tmux-style server/client mod
 - Use `gpui-symbols` for icons and native macOS menus and system dialogs where appropriate.
 - Keep reusable SpaceTerm controls in the small internal `spaceterm-ui` crate. Application UI
   Modules compose those controls with product behavior and Vague Pro presentation.
+- Use the application-owned Workspace Picker as the primary Open Local Project selection
+  mechanism. It is a live, keyboard-first, one-level filesystem navigator that preserves typed
+  path spelling and performs no indexing, recents, persistence, filesystem watching, or fuzzy
+  matching. Finder is available only as an explicit fallback from the picker.
 
 ## Architecture principles
 
@@ -709,14 +713,19 @@ Logical and typed key text never enters diagnostics. SpaceTerm performs no autom
 telemetry or crash upload. A local diagnostic file is created only after the user explicitly
 chooses Export Terminal Diagnostics and confirms a path through the native save panel.
 
-### Workspace-Bound Terminal Creation
+### Workspace Picker and Workspace-Bound Terminal Creation
 
 Every runtime-only Workspace has an immutable Workspace Kind. New Workspace creates an Ad Hoc
-Workspace at `HOME`; Open Local Project creates a Local Project Workspace from one native,
-directory-only selection. The Workspace owns the exact selected or reported Workspace Directory and
-its canonical macOS device/file identity. Equivalent Local Project selections activate the existing
-Workspace, while an Ad Hoc Workspace at that identity remains distinct. No Workspace state is
-persisted or watched.
+Workspace at `HOME`; Open Local Project creates a Local Project Workspace from one directory
+confirmed through the in-app Workspace Picker. The picker is the canonical selection path and
+Finder is an explicit fallback retained behind its footer. Both paths complete the same background
+validation before Workspace activation.
+
+The Workspace owns the exact selected or typed Workspace Directory spelling, including a selected
+symlink path, and its canonical macOS device/file identity. Equivalent Local Project selections
+activate the existing Workspace, while an Ad Hoc Workspace at that identity remains distinct. The
+picker starts at `HOME` on every open and retains no recents, index, persistence, or filesystem
+watcher. No Workspace state is persisted or watched.
 
 An Ad Hoc Workspace's initial Pane is its Directory Authority. Valid live Reported Working Directory
 changes from that Pane update the Workspace Directory even when its Workspace or Window is inactive.

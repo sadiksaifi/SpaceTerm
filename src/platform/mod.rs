@@ -2,6 +2,7 @@ pub(crate) mod acceptance_observation;
 
 pub(crate) mod local_project_picker;
 pub(crate) mod workspace_directory;
+pub(crate) mod workspace_picker_filesystem;
 
 #[cfg(target_os = "macos")]
 pub(crate) mod macos_attention;
@@ -38,6 +39,9 @@ pub(crate) mod macos_scroll;
 
 #[cfg(target_os = "macos")]
 pub(crate) mod macos_services;
+
+#[cfg(target_os = "macos")]
+pub(crate) mod macos_system_settings;
 
 #[cfg(target_os = "macos")]
 pub(crate) mod macos_window_drag;

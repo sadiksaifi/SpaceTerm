@@ -26,6 +26,8 @@
 | **Active Window** | The one Window selected within a Workspace. | Tab, selected Window, focused Window |
 | **Focused Pane** | The one Pane selected by a Window for Pane operations and focus restoration. | Active Pane, selected Pane, Terminal Input Focus |
 | **Terminal Input Focus** | Transient truth that a Pane may accept terminal key input because its Workspace and Window are Active, it is the Focused Pane and current responder, its Operating-System Window and SpaceTerm are active, and no temporary UI owner blocks it. | Focused Pane, selected terminal |
+| **Workspace Picker** | The transient in-app, keyboard-first, one-level filesystem navigator that is the primary Open Local Project selection mechanism and blocks Terminal Input Focus while open. | project index, recent projects, file browser |
+| **Finder Fallback** | The explicit native directory chooser opened only from the Workspace Picker footer; it returns to the unchanged picker on cancellation and uses the same validation path on selection. | primary project picker, canonical selection path |
 | **Zoomed Pane** | The Focused Pane temporarily shown alone while its Window's Pane Layout remains intact. | Maximized Window, fullscreen Pane |
 
 ## Terminal runtime
@@ -74,7 +76,7 @@
 | Term | Definition | Aliases to avoid |
 | --- | --- | --- |
 | **Create Workspace** | Add and activate a new Workspace with its initial Window and Pane. | Start session, attach session |
-| **Open Local Project** | Select one readable local directory and create or activate its Local Project Workspace. | Open repository, convert Workspace |
+| **Open Local Project** | Confirm one readable local directory through the Workspace Picker, or its explicit Finder Fallback, and create or activate its Local Project Workspace. | Open repository, convert Workspace |
 | **Close Workspace** | Remove a Workspace and its owned terminal runtimes, replacing it when it is the last Workspace. | Detach session, delete session |
 | **Create Window** | Add and activate a new Window in the Active Workspace. | New tab, link Window |
 | **Close Window** | Remove a Window and its owned terminal runtimes, escalating through its Workspace when it is the final Window. | Close tab, detach Window |
@@ -90,7 +92,9 @@
 - **SpaceTerm** owns one or more **Workspaces** and has exactly one **Active Workspace**.
 - A **Workspace Kind** is fixed for the lifetime of its runtime-only **Workspace** and is never persisted.
 - An **Ad Hoc Workspace** starts at `HOME`; its **Directory Authority** is initially the first Pane of its first Window.
-- A **Local Project Workspace** preserves its exact selected **Project Root** and deduplicates equivalent selections by macOS device/file identity.
+- A **Local Project Workspace** preserves its exact selected or typed **Project Root** spelling and deduplicates equivalent selections by macOS device/file identity.
+- The **Workspace Picker** is the primary **Open Local Project** path. It starts at `HOME` on every open, performs live one-level directory reads, and owns no recents, index, persistence, fuzzy matching, or filesystem watching.
+- The **Finder Fallback** remains behind the open **Workspace Picker**; cancellation restores the picker unchanged, while selection joins the same background validation and Local Project identity-deduplication flow.
 - Only the **Directory Authority** may update an Ad Hoc **Workspace Directory**. Closing it promotes the first remaining Pane in Pane Layout order, or the root Pane of the first remaining Window when its Window closes.
 - A valid promoted Pane report is adopted immediately. A missing or invalid report retains the previous Workspace Directory.
 - Create Window and Split Pane revalidate the **Workspace Directory** before mutation. Unavailability blocks new children without stopping existing Terminal Sessions and clears after successful validation.

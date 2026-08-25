@@ -1527,7 +1527,7 @@ pub(crate) struct MenuReplacementFocus(pub(crate) Option<WeakFocusHandle>);
 /// A transient owner such as the Command Palette stays open while one of its own menus holds
 /// focus. The coordinator reserves the window before the menu takes focus, so this answer is
 /// already correct when the displaced owner observes its blur.
-pub(crate) fn window_menu_is_open(window: &Window, cx: &App) -> bool {
+pub fn window_menu_is_open(window: &Window, cx: &App) -> bool {
     if !cx.has_global::<MenuCoordinator>() {
         return false;
     }
@@ -1537,6 +1537,21 @@ pub(crate) fn window_menu_is_open(window: &Window, cx: &App) -> bool {
         .get(&window_id)
         .and_then(|ownership| ownership.owner.upgrade())
         .is_some_and(|owner| owner.read(cx).open)
+}
+
+/// Dismisses the menu owned by this Operating-System Window and restores its displaced focus.
+///
+/// Returns `true` only when an open menu was dismissed. Application-owned transients use this
+/// before capturing focus so the menu cannot remain above or restore focus through the new owner.
+pub fn dismiss_active_menu(window: &mut Window, cx: &mut App) -> bool {
+    let Some(MenuReplacementFocus(restore_focus)) = dismiss_active_menu_for_replacement(window, cx)
+    else {
+        return false;
+    };
+    if let Some(focus) = restore_focus.and_then(|focus| focus.upgrade()) {
+        focus.focus(window);
+    }
+    true
 }
 
 pub(crate) fn dismiss_active_menu_for_replacement(

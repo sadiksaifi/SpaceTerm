@@ -1,12 +1,13 @@
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::rc::Rc;
+use std::sync::Arc;
 
 use gpui::prelude::*;
 use gpui::{
     Action, AnyElement, App, Context, DispatchPhase, Entity, EntityId, FocusHandle, MouseButton,
-    MouseMoveEvent, MouseUpEvent, Pixels, PromptButton, PromptLevel, Render, ScrollHandle,
-    ScrollWheelEvent, SharedString, WeakEntity, Window, canvas, div, point, px, rgba,
+    MouseMoveEvent, MouseUpEvent, Pixels, Render, ScrollHandle, ScrollWheelEvent, SharedString,
+    WeakEntity, Window, canvas, div, point, px, rgba,
 };
 use gpui_symbols::{Icon, RenderingMode, SymbolWeight};
 use spaceterm_ui::{
@@ -19,6 +20,7 @@ use spaceterm_ui::{
 
 use super::button_theme;
 use super::terminal_focus::TerminalFocusBlocker;
+use super::workspace_picker::{WorkspacePicker, WorkspacePickerEvent};
 use super::workspace_search::{WorkspaceSearch, WorkspaceSearchEvent, WorkspaceSearchItem};
 use super::{
     ActivateWindow1, ActivateWindow2, ActivateWindow3, ActivateWindow4, ActivateWindow5,
@@ -38,11 +40,13 @@ use crate::domain::{
     WorkspaceDirectoryIdentity, WorkspaceError, WorkspaceId, WorkspaceKind,
 };
 use crate::platform::local_project_picker::{LocalProjectPicker, NativeLocalProjectPicker};
+use crate::platform::macos_system_settings::MacosSystemSettingsOpener;
 use crate::platform::macos_window_drag::{
     MacosOperatingSystemWindowDragPlatform, OperatingSystemWindowDragError,
     OperatingSystemWindowDragPlatform,
 };
 use crate::platform::workspace_directory::validate_workspace_directory;
+use crate::platform::workspace_picker_filesystem::NativeWorkspacePickerFilesystem;
 use crate::terminal::{
     NativeServiceOrigin, NativeServiceStatus, SelectionCopy, TerminalSessionFactory,
     WorkspaceTerminalSessionFactory,
@@ -122,7 +126,7 @@ pub(crate) struct WorkspaceManager {
     default_workspace_root: PathBuf,
     default_workspace_identity: WorkspaceDirectoryIdentity,
     local_project_picker: Rc<dyn LocalProjectPicker>,
-    local_project_picker_open: bool,
+    workspace_picker: Entity<WorkspacePicker>,
     sidebar_visible: bool,
     sidebar_width: Pixels,
     workspace_list_scroll_handle: ScrollHandle,
@@ -254,6 +258,25 @@ impl WorkspaceManager {
             },
         )
         .detach();
+        let workspace_picker_home =
+            Self::workspace_picker_starting_directory(&default_workspace_root);
+        let workspace_picker = cx.new(|cx| {
+            WorkspacePicker::new(
+                workspace_picker_home,
+                Arc::new(NativeWorkspacePickerFilesystem),
+                Rc::new(MacosSystemSettingsOpener::default()),
+                window,
+                cx,
+            )
+        });
+        cx.subscribe_in(
+            &workspace_picker,
+            window,
+            |manager, _, event: &WorkspacePickerEvent, window, cx| {
+                manager.handle_workspace_picker_event(event, window, cx);
+            },
+        )
+        .detach();
 
         Self {
             workspaces,
@@ -261,7 +284,7 @@ impl WorkspaceManager {
             default_workspace_root,
             default_workspace_identity,
             local_project_picker,
-            local_project_picker_open: false,
+            workspace_picker,
             sidebar_visible: true,
             sidebar_width: px(WORKSPACE_SIDEBAR_DEFAULT_WIDTH),
             workspace_list_scroll_handle: ScrollHandle::new(),
@@ -576,7 +599,9 @@ impl WorkspaceManager {
     }
 
     fn terminal_focus_blocker(&self, window: &Window, cx: &App) -> Option<TerminalFocusBlocker> {
-        self.local_project_picker_open
+        self.workspace_picker
+            .read(cx)
+            .blocks_terminal_input()
             .then_some(TerminalFocusBlocker::Modal)
             .or(self
                 .workspace_search
@@ -918,70 +943,111 @@ impl WorkspaceManager {
         cx.notify();
     }
 
-    fn open_local_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.local_project_picker_open {
-            return;
-        }
-        self.rename = None;
-        self.local_project_picker_open = true;
-        self.sync_terminal_focus_blocker(window, cx);
-        cx.notify();
-
-        let selection = self.local_project_picker.pick(cx);
-        cx.spawn_in(window, async move |manager, cx| {
-            let result = selection.await;
-            let _ = manager.update_in(cx, |manager, window, cx| {
-                manager.local_project_picker_open = false;
-                match result {
-                    Ok(Some(path)) => manager.open_selected_local_project(path, window, cx),
-                    Ok(None) => {
-                        manager.sync_terminal_focus_blocker(window, cx);
-                        cx.notify();
-                    }
-                    Err(error) => {
-                        manager.show_directory_warning(
-                            "Local Project could not be opened",
-                            &error,
-                            window,
-                            cx,
-                        );
-                        manager.sync_terminal_focus_blocker(window, cx);
-                        cx.notify();
-                    }
-                }
-            });
-        })
-        .detach();
+    fn workspace_picker_starting_directory(configured_home: &std::path::Path) -> PathBuf {
+        configured_home.to_path_buf()
     }
 
-    fn open_selected_local_project(
+    fn open_local_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.workspace_picker.read(cx).is_open() {
+            self.workspace_picker.read(cx).refocus_path(window, cx);
+            return;
+        }
+        if spaceterm_ui::window_menu_is_open(window, cx) {
+            let manager = cx.entity();
+            window.defer(cx, move |window, cx| {
+                spaceterm_ui::dismiss_active_menu(window, cx);
+                manager.update(cx, |manager, cx| {
+                    manager.present_workspace_picker(window, cx)
+                });
+            });
+            return;
+        }
+        self.present_workspace_picker(window, cx);
+    }
+
+    fn present_workspace_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.workspace_picker.read(cx).is_open() {
+            self.workspace_picker.read(cx).refocus_path(window, cx);
+            return;
+        }
+        if self.rename_is_focused(window) {
+            self.sidebar_focus.focus(window);
+        }
+        self.rename = None;
+        self.workspace_menu = None;
+        self.workspace_search
+            .update(cx, |search, cx| search.dismiss(window, cx));
+        self.workspace_picker
+            .update(cx, |picker, cx| picker.open(window, cx));
+        self.sync_terminal_focus_blocker(window, cx);
+        cx.notify();
+    }
+
+    fn handle_workspace_picker_event(
         &mut self,
-        selected_path: PathBuf,
+        event: &WorkspacePickerEvent,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let directory = match validate_workspace_directory(&selected_path) {
-            Ok(directory) => directory,
-            Err(error) => {
-                self.show_directory_warning(
-                    "Local Project directory is unavailable",
-                    &format!("Restore {} and try again. {error}", selected_path.display()),
-                    window,
-                    cx,
-                );
+        match event {
+            WorkspacePickerEvent::StateChanged => {
                 self.sync_terminal_focus_blocker(window, cx);
                 cx.notify();
-                return;
             }
-        };
+            WorkspacePickerEvent::ScrimDismissed => {
+                self.suppress_sidebar_pointer_until_release = true;
+                cx.notify();
+            }
+            WorkspacePickerEvent::FinderRequested => {
+                let selection = self.local_project_picker.pick(cx);
+                cx.spawn_in(window, async move |manager, cx| {
+                    let result = selection.await;
+                    let _ = manager.update_in(cx, |manager, window, cx| {
+                        match result {
+                            Ok(Some(path)) => manager.workspace_picker.update(cx, |picker, cx| {
+                                picker.validate_finder_selection(path, window, cx)
+                            }),
+                            Ok(None) => manager
+                                .workspace_picker
+                                .update(cx, |picker, cx| picker.finder_cancelled(window, cx)),
+                            Err(_) => manager
+                                .workspace_picker
+                                .update(cx, |picker, cx| picker.finder_failed(window, cx)),
+                        };
+                        manager.sync_terminal_focus_blocker(window, cx);
+                        cx.notify();
+                    });
+                })
+                .detach();
+            }
+            WorkspacePickerEvent::Confirmed(directory) => {
+                let activated =
+                    self.activate_validated_local_project(directory.clone(), window, cx);
+                let picker = self.workspace_picker.clone();
+                window.defer(cx, move |window, cx| {
+                    picker.update(cx, |picker, cx| {
+                        if activated {
+                            picker.complete_activation(window, cx);
+                        } else {
+                            picker.activation_failed(window, cx);
+                        }
+                    });
+                });
+            }
+        }
+    }
 
+    fn activate_validated_local_project(
+        &mut self,
+        directory: ValidatedWorkspaceDirectory,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
         if let Some(workspace_id) = self
             .workspaces
             .local_project_workspace(directory.identity())
         {
-            self.revalidate_local_project(workspace_id);
-            self.activate_workspace(workspace_id, window, cx);
-            return;
+            return self.activate_workspace(workspace_id, window, cx);
         }
 
         let previous_manager = self.workspaces.active_workspace().payload().clone();
@@ -1012,7 +1078,7 @@ impl WorkspaceManager {
             Ok(workspace_id) => workspace_id,
             Err(error) => {
                 Self::report_workspace_error("open Local Project", error);
-                return;
+                return false;
             }
         };
         let Some(next_manager) = self
@@ -1028,6 +1094,7 @@ impl WorkspaceManager {
         self.scroll_active_workspace_into_view();
         self.refresh_workspace_search(cx);
         cx.notify();
+        true
     }
 
     fn revalidate_local_project(&mut self, workspace_id: WorkspaceId) {
@@ -1057,22 +1124,6 @@ impl WorkspaceManager {
                     .set_directory_unavailable(workspace_id, error.to_string());
             }
         }
-    }
-
-    fn show_directory_warning(
-        &self,
-        message: &str,
-        detail: &str,
-        window: &mut Window,
-        cx: &mut App,
-    ) {
-        drop(window.prompt(
-            PromptLevel::Warning,
-            message,
-            Some(detail),
-            &[PromptButton::ok("OK")],
-            cx,
-        ));
     }
 
     fn default_workspace_directory(&self) -> (ValidatedWorkspaceDirectory, Option<String>) {
@@ -2321,6 +2372,7 @@ impl Render for WorkspaceManager {
                 )
             })
             .child(self.workspace_search.clone())
+            .child(self.workspace_picker.clone())
     }
 }
 
@@ -2500,17 +2552,56 @@ mod tests {
         std::env::temp_dir().join(format!("spaceterm-workspace-manager-{name}-{nonce}"))
     }
 
+    fn choose_local_project_with_finder(cx: &mut VisualTestContext) {
+        click("open-local-project-button", cx);
+        cx.run_until_parked();
+        click("workspace-picker-finder", cx);
+        cx.run_until_parked();
+    }
+
     #[gpui::test]
     fn cancelled_local_project_picker_should_leave_hierarchy_unchanged(cx: &mut TestAppContext) {
         let (manager, records, cx) = workspace_manager_with_picker([Ok(None)], cx);
 
-        click("open-local-project-button", cx);
+        choose_local_project_with_finder(cx);
 
         assert_eq!(
             manager.read_with(cx, |manager, _| manager.workspaces.len()),
             1
         );
         assert_eq!(records.starts().len(), 1);
+    }
+
+    #[gpui::test]
+    fn all_open_actions_present_the_in_app_workspace_picker_and_keep_modal_blocking(
+        cx: &mut TestAppContext,
+    ) {
+        let (manager, _, cx) = workspace_manager(cx);
+
+        click("open-local-project-button", cx);
+        let sidebar_state = cx.update(|window, cx| {
+            let manager = manager.read(cx);
+            (
+                manager.workspace_picker.read(cx).is_open(),
+                manager.terminal_focus_blocker(window, cx),
+            )
+        });
+        cx.simulate_keystrokes("cmd-o");
+        let repeated_state = cx.update(|window, cx| {
+            let manager = manager.read(cx);
+            (
+                manager.workspace_picker.read(cx).is_open(),
+                manager.terminal_focus_blocker(window, cx),
+            )
+        });
+
+        assert_eq!(
+            (sidebar_state, repeated_state),
+            (
+                (true, Some(TerminalFocusBlocker::Modal)),
+                (true, Some(TerminalFocusBlocker::Modal)),
+            )
+        );
     }
 
     #[gpui::test]
@@ -2525,8 +2616,8 @@ mod tests {
         let selections = [Ok(Some(project.clone())), Ok(Some(equivalent))];
         let (manager, records, cx) = workspace_manager_with_picker(selections, cx);
 
-        click("open-local-project-button", cx);
-        click("open-local-project-button", cx);
+        choose_local_project_with_finder(cx);
+        choose_local_project_with_finder(cx);
         cx.simulate_keystrokes("cmd-t");
         cx.run_until_parked();
         cx.simulate_keystrokes("cmd-d");
@@ -2559,8 +2650,11 @@ mod tests {
         let parked = root.join("parked");
         fs::create_dir_all(&project).unwrap();
         let (manager, records, cx) = workspace_manager_with_picker([Ok(Some(project.clone()))], cx);
-        click("open-local-project-button", cx);
+        choose_local_project_with_finder(cx);
         assert_eq!(records.starts().len(), 2);
+        assert!(!manager.read_with(cx, |manager, cx| {
+            manager.workspace_picker.read(cx).is_open()
+        }));
 
         fs::rename(&project, &parked).unwrap();
         cx.simulate_keystrokes("cmd-t");
@@ -2593,7 +2687,7 @@ mod tests {
         let missing = temporary_directory("missing");
         let (manager, records, cx) = workspace_manager_with_picker([Ok(Some(missing))], cx);
 
-        click("open-local-project-button", cx);
+        choose_local_project_with_finder(cx);
 
         assert_eq!(
             manager.read_with(cx, |manager, _| manager.workspaces.len()),

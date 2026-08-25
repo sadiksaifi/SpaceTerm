@@ -251,6 +251,7 @@ pub(crate) struct Theme {
     pub(crate) search_current_match_background: Color,
     pub(crate) status_bar_background: Color,
     pub(crate) surface_background: Color,
+    pub(crate) overlay_scrim: Color,
     pub(crate) tab_active_background: Color,
     pub(crate) tab_inactive_background: Color,
     pub(crate) tab_bar_background: Color,
@@ -834,6 +835,7 @@ pub(crate) static VAGUE_PRO: Theme = Theme {
     search_current_match_background: Color::rgba(0xe8_b5_89_66),
     status_bar_background: Color::rgb(0x14_14_15),
     surface_background: Color::rgb(0x14_14_15),
+    overlay_scrim: Color::rgba(0x00_00_00_99),
     tab_active_background: Color::rgb(0x25_25_30),
     tab_inactive_background: Color::rgb(0x14_14_15),
     tab_bar_background: Color::rgb(0x14_14_15),
@@ -895,6 +897,11 @@ mod tests {
             ),
             (8, 8, 8)
         );
+    }
+
+    #[test]
+    fn vague_pro_overlay_scrim_is_canonical_and_translucent() {
+        assert_eq!(VAGUE_PRO.overlay_scrim.rgba_hex(), 0x00_00_00_99);
     }
 
     #[test]

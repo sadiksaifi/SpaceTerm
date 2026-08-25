@@ -30,7 +30,7 @@ pub use menu::{
     ContextMenu, ContextMenuOpenRequest, Menu, MenuActivation, MenuActivationSource, MenuAlignment,
     MenuCloseReason, MenuEntry, MenuLifecycleEvent, MenuMetrics, MenuPaint, MenuPlacement,
     MenuPlacementConfig, MenuRadioOption, MenuSize, MenuSizes, MenuTheme, Picker, PickerBuildError,
-    PickerChange, PickerOption,
+    PickerChange, PickerOption, dismiss_active_menu, window_menu_is_open,
 };
 pub use middle_truncated_text::MiddleTruncatedText;
 pub use overlay_scrollbar::{

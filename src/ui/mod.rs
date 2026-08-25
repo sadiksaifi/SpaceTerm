@@ -16,6 +16,7 @@ mod terminal_symbols;
 mod text_input_theme;
 mod window_manager;
 mod workspace_manager;
+mod workspace_picker;
 mod workspace_search;
 
 use gpui::{App, KeyBinding, actions};
@@ -99,6 +100,7 @@ pub(crate) const WORKSPACE_SIDEBAR_DEFAULT_WIDTH: f32 = 240.0;
 pub(crate) const WORKSPACE_SIDEBAR_MINIMUM_WIDTH: f32 = 180.0;
 
 pub(crate) fn init(cx: &mut App) {
+    workspace_picker::init(cx);
     spaceterm_ui::init(
         cx,
         button_theme::theme(),

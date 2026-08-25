@@ -173,6 +173,12 @@ impl WorkspaceSearch {
         });
     }
 
+    pub(super) fn dismiss(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.cancel_pending_open(cx);
+        self.palette
+            .update(cx, |palette, cx| palette.dismiss(window, cx));
+    }
+
     pub(super) fn refresh_items(
         &mut self,
         items: Vec<WorkspaceSearchItem>,
