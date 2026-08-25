@@ -278,16 +278,13 @@ impl RenderOnce for WindowDragRegion {
                     cx.stop_propagation();
                 });
 
-                window.on_mouse_event(move |event: &MouseExitEvent, phase, window, cx| {
+                window.on_mouse_event(move |_: &MouseExitEvent, phase, window, cx| {
                     if !phase.capture() || !exit_state.read(cx).owns_pointer_stream() {
                         return;
                     }
-                    let reason = if event.pressed_button == Some(MouseButton::Left) {
-                        WindowDragFinishReason::PointerExited
-                    } else {
-                        WindowDragFinishReason::PointerButtonLost
-                    };
-                    let events = exit_state.update(cx, |state, _| state.finish(reason));
+                    let events = exit_state.update(cx, |state, _| {
+                        state.finish(WindowDragFinishReason::PointerExited)
+                    });
                     window.prevent_default();
                     emit_events(exit_handler.clone(), events, window, cx);
                     cx.stop_propagation();
@@ -710,6 +707,7 @@ mod tests {
     struct TestRoot {
         events: Rc<RefCell<Vec<WindowDragRegionEvent>>>,
         parent_events: Rc<RefCell<Vec<MouseButton>>>,
+        parent_moves: Rc<RefCell<usize>>,
         child_presses: Rc<RefCell<usize>>,
         disabled: bool,
         show: bool,
@@ -722,6 +720,7 @@ mod tests {
             let region_events = Rc::clone(&self.events);
             let parent_down_events = Rc::clone(&self.parent_events);
             let parent_up_events = Rc::clone(&self.parent_events);
+            let parent_moves = Rc::clone(&self.parent_moves);
             let child_presses = Rc::clone(&self.child_presses);
             let content = div().relative().size_full().child(
                 div()
@@ -756,6 +755,7 @@ mod tests {
                 .on_mouse_up(MouseButton::Left, move |event, _, _| {
                     parent_up_events.borrow_mut().push(event.button);
                 })
+                .on_mouse_move(move |_, _, _| *parent_moves.borrow_mut() += 1)
                 .when(self.show, |root| root.child(region))
                 .when(self.overlay, |root| {
                     root.child(
@@ -844,6 +844,7 @@ mod tests {
         root: Entity<TestRoot>,
         events: Rc<RefCell<Vec<WindowDragRegionEvent>>>,
         parent_events: Rc<RefCell<Vec<MouseButton>>>,
+        parent_moves: Rc<RefCell<usize>>,
         child_presses: Rc<RefCell<usize>>,
         cx: &'a mut VisualTestContext,
     }
@@ -851,13 +852,16 @@ mod tests {
     fn drag_window(cx: &mut TestAppContext) -> DragWindow<'_> {
         let events = Rc::new(RefCell::new(Vec::new()));
         let parent_events = Rc::new(RefCell::new(Vec::new()));
+        let parent_moves = Rc::new(RefCell::new(0));
         let child_presses = Rc::new(RefCell::new(0));
         let root_events = Rc::clone(&events);
         let root_parent_events = Rc::clone(&parent_events);
+        let root_parent_moves = Rc::clone(&parent_moves);
         let root_child_presses = Rc::clone(&child_presses);
         let (root, cx) = cx.add_window_view(move |_, _| TestRoot {
             events: root_events,
             parent_events: root_parent_events,
+            parent_moves: root_parent_moves,
             child_presses: root_child_presses,
             disabled: false,
             show: true,
@@ -870,6 +874,7 @@ mod tests {
             root,
             events,
             parent_events,
+            parent_moves,
             child_presses,
             cx,
         }
@@ -918,6 +923,48 @@ mod tests {
             ]
         ));
         assert!(parent_events.borrow().is_empty());
+    }
+
+    #[gpui::test]
+    fn macos_exit_without_a_reported_button_should_suppress_held_motion_and_release(
+        cx: &mut TestAppContext,
+    ) {
+        let DragWindow {
+            events,
+            parent_events,
+            parent_moves,
+            cx,
+            ..
+        } = drag_window(cx);
+        let start = point(
+            region_bounds(cx).right() - px(80.0),
+            region_bounds(cx).center().y,
+        );
+        let outside = point(region_bounds(cx).right() + px(20.0), start.y);
+
+        cx.simulate_mouse_down(start, MouseButton::Left, Modifiers::none());
+        cx.simulate_event(MouseExitEvent {
+            position: outside,
+            pressed_button: None,
+            modifiers: Modifiers::none(),
+        });
+        cx.simulate_mouse_move(start, MouseButton::Left, Modifiers::none());
+        cx.simulate_mouse_up(start, MouseButton::Left, Modifiers::none());
+
+        assert!(matches!(
+            events.borrow().as_slice(),
+            [
+                WindowDragRegionEvent::InteractionStarted { .. },
+                WindowDragRegionEvent::InteractionFinished {
+                    reason: WindowDragFinishReason::PointerExited,
+                    ..
+                }
+            ]
+        ));
+        assert_eq!(
+            (*parent_moves.borrow(), parent_events.borrow().len()),
+            (0, 0)
+        );
     }
 
     #[gpui::test]
