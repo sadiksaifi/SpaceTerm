@@ -381,6 +381,11 @@ fn match_command_palette_items<I>(
             .collect();
     }
 
+    let mut section_groups = vec![0usize; items.len()];
+    for item_index in 1..items.len() {
+        section_groups[item_index] = section_groups[item_index - 1]
+            + usize::from(items[item_index].section != items[item_index - 1].section);
+    }
     let mut matches = items
         .iter()
         .enumerate()
@@ -396,9 +401,9 @@ fn match_command_palette_items<I>(
         })
         .collect::<Vec<_>>();
     matches.sort_by(|left, right| {
-        right
-            .score
-            .cmp(&left.score)
+        section_groups[left.item_index]
+            .cmp(&section_groups[right.item_index])
+            .then_with(|| right.score.cmp(&left.score))
             .then_with(|| left.item_index.cmp(&right.item_index))
     });
     matches
@@ -3059,6 +3064,25 @@ mod tests {
                 PaletteRow::Section("All".into()),
                 PaletteRow::Item(2),
             ]
+        );
+    }
+
+    #[test]
+    fn scored_queries_should_preserve_contiguous_section_order() {
+        let items = vec![
+            CommandPaletteItem::new(1, "Open Alpha Workspace").section("Recent"),
+            CommandPaletteItem::new(2, "Another Alpha Workspace").section("Recent"),
+            CommandPaletteItem::new(3, "Alpha").section("All"),
+            CommandPaletteItem::new(4, "Alpha Command").section("All"),
+        ];
+        let matches = match_command_palette_items(&items, "alpha");
+
+        assert_eq!(
+            matches
+                .iter()
+                .map(|matched| items[matched.item_index].section_text().unwrap_or_default())
+                .collect::<Vec<_>>(),
+            vec!["Recent", "Recent", "All", "All"],
         );
     }
 
