@@ -5432,7 +5432,13 @@ mod tests {
         let input = terminal_find_input(&pane, cx);
 
         assert!(cx.debug_bounds("terminal-find-bar").is_some());
-        assert!(cx.debug_bounds("terminal-find-input").is_some());
+        let input_bounds = cx
+            .debug_bounds("terminal-find-input")
+            .expect("the shared Find input should be rendered");
+        assert!(
+            input_bounds.size.width > px(0.0) && input_bounds.size.height > px(0.0),
+            "the shared Find input collapsed inside its context-menu decorator: {input_bounds:?}"
+        );
         assert!(input.read_with(cx, |input, _| input.is_focused()));
         assert!(pane.read_with(cx, |pane, _| pane.native_service_focus_epoch.get()) > focus_epoch);
         assert!(cx.update(|window, app| {

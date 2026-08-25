@@ -2095,6 +2095,7 @@ impl Render for TextInput {
             editor,
             entries,
         )
+        .fill_parent_width()
         .disabled(!self.enabled)
         .on_open_request(move |_, _, cx| {
             menu_open

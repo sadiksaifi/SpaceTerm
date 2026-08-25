@@ -3515,6 +3515,13 @@ mod tests {
         right_click("workspace-row-1-active", cx);
         click("workspace-menu-row-rename", cx);
 
+        let input_bounds = cx
+            .debug_bounds("workspace-rename-input")
+            .expect("the shared rename input should be rendered");
+        assert!(
+            input_bounds.size.width > px(0.0) && input_bounds.size.height > px(0.0),
+            "the shared rename input collapsed inside its context-menu decorator: {input_bounds:?}"
+        );
         click("workspace-rename-input-1", cx);
         let focus_state = cx.update(|window, cx| {
             let manager = manager.read(cx);

@@ -824,6 +824,16 @@ impl<T: IntoElement + 'static, A: Clone + 'static> ContextMenu<T, A> {
         self.core.on_context_open = Some(Rc::new(handler));
         self
     }
+
+    /// Makes the context-menu decorator fill the width allocated by its parent.
+    ///
+    /// Use this for children such as editors whose percentage width requires a definite
+    /// containing block. Intrinsically sized context-menu targets retain their natural width by
+    /// default.
+    pub fn fill_parent_width(mut self) -> Self {
+        self.core.fill_parent_width = true;
+        self
+    }
 }
 
 impl<T: IntoElement + 'static, A: Clone + 'static> RenderOnce for ContextMenu<T, A> {
@@ -1083,6 +1093,7 @@ struct MenuControl<A> {
     placement: MenuPlacementConfig,
     disabled: bool,
     icon_trigger: bool,
+    fill_parent_width: bool,
     debug_selector: Option<String>,
     on_activate: Option<TypedActivationHandler<A>>,
     on_lifecycle: Option<MenuLifecycleHandler>,
@@ -1105,6 +1116,7 @@ impl<A> MenuControl<A> {
             placement: MenuPlacementConfig::default(),
             disabled: false,
             icon_trigger: false,
+            fill_parent_width: false,
             debug_selector: None,
             on_activate: None,
             on_lifecycle: None,
@@ -1237,6 +1249,7 @@ impl<A: Clone + 'static> MenuControl<A> {
         .inset_0();
 
         let key_state = state.downgrade();
+        let fill_parent_width = self.fill_parent_width;
         let debug_selector = self.debug_selector;
         let accessibility_name = self.accessibility_name;
         let mut trigger = div()
@@ -1246,6 +1259,7 @@ impl<A: Clone + 'static> MenuControl<A> {
             })
             .relative()
             .cursor_default()
+            .when(fill_parent_width, |trigger| trigger.w_full())
             .when(!open && self.kind != TriggerKind::Context, |trigger| {
                 trigger.track_focus(&focus_handle)
             })
@@ -1307,6 +1321,7 @@ impl<A: Clone + 'static> MenuControl<A> {
 
         div()
             .relative()
+            .when(fill_parent_width, |root| root.w_full())
             .child(trigger)
             .when(open, |root| root.child(render_overlay(state, window, cx)))
             .into_any_element()
