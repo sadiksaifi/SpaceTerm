@@ -21,7 +21,8 @@ pub use command_palette::{
     CommandPalette, CommandPaletteAccessory, CommandPaletteAction, CommandPaletteActivation,
     CommandPaletteActivationSource, CommandPaletteCloseReason, CommandPaletteEvent,
     CommandPaletteGeneration, CommandPaletteHint, CommandPaletteItem, CommandPaletteLifecycleEvent,
-    CommandPaletteMetrics, CommandPalettePaint, CommandPaletteQuery, CommandPaletteTheme,
+    CommandPaletteMetrics, CommandPalettePaint, CommandPaletteQuery,
+    CommandPaletteReplacementFocus, CommandPaletteTheme,
 };
 pub use menu::{
     ContextMenu, ContextMenuOpenRequest, Menu, MenuActivation, MenuActivationSource, MenuAlignment,

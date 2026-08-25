@@ -118,6 +118,11 @@ pub enum CommandPaletteLifecycleEvent {
     Closed(CommandPaletteCloseReason),
 }
 
+/// The original focus owner transferred through a command-palette replacement chain.
+pub struct CommandPaletteReplacementFocus {
+    restore_focus: Option<WeakFocusHandle>,
+}
+
 /// Monotonic identity for the current command-palette query.
 #[derive(Clone, Copy, Debug, Default, Eq, Ord, PartialEq, PartialOrd)]
 pub struct CommandPaletteGeneration(u64);
@@ -1205,14 +1210,39 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
     ///
     /// Returns `true` only for an actual closed-to-open transition.
     pub fn open(&mut self, window: &mut Window, cx: &mut gpui::Context<Self>) -> bool {
+        self.open_with_replacement(None, window, cx)
+    }
+
+    /// Opens the palette as the next owner in a replacement chain.
+    ///
+    /// The transferred focus owner is restored when this palette later closes normally.
+    pub fn open_replacing(
+        &mut self,
+        replacement: CommandPaletteReplacementFocus,
+        window: &mut Window,
+        cx: &mut gpui::Context<Self>,
+    ) -> bool {
+        self.open_with_replacement(Some(replacement), window, cx)
+    }
+
+    fn open_with_replacement(
+        &mut self,
+        replacement: Option<CommandPaletteReplacementFocus>,
+        window: &mut Window,
+        cx: &mut gpui::Context<Self>,
+    ) -> bool {
         if self.open {
             self.input.read(cx).focus_handle().focus(window);
             return false;
         }
         self.restore_on_activation = None;
-        self.restore_focus = match crate::menu::dismiss_active_menu_for_replacement(window, cx) {
-            Some(crate::menu::MenuReplacementFocus(focus)) => focus,
-            None => window.focused(cx).map(|focus| focus.downgrade()),
+        let menu_replacement = crate::menu::dismiss_active_menu_for_replacement(window, cx);
+        self.restore_focus = match replacement {
+            Some(replacement) => replacement.restore_focus,
+            None => match menu_replacement {
+                Some(crate::menu::MenuReplacementFocus(focus)) => focus,
+                None => window.focused(cx).map(|focus| focus.downgrade()),
+            },
         };
         self.open = true;
         self.pointer_press = None;
@@ -1247,8 +1277,12 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
         &mut self,
         window: &mut Window,
         cx: &mut gpui::Context<Self>,
-    ) -> bool {
+    ) -> Option<CommandPaletteReplacementFocus> {
+        let replacement = CommandPaletteReplacementFocus {
+            restore_focus: self.restore_focus.clone(),
+        };
         self.close(CommandPaletteCloseReason::Replaced, window, cx)
+            .then_some(replacement)
     }
 
     /// Returns whether the transient overlay is open.
@@ -3031,12 +3065,14 @@ mod tests {
 
         cx.update(|window, _| window.focus_next());
         cx.run_until_parked();
-        assert!(!cx.update(|window, cx| palette
-            .read(cx)
-            .input
-            .read(cx)
-            .focus_handle()
-            .is_focused(window)));
+        assert!(!cx.update(|window, cx| {
+            palette
+                .read(cx)
+                .input
+                .read(cx)
+                .focus_handle()
+                .is_focused(window)
+        }));
 
         cx.simulate_keystrokes("escape");
         cx.run_until_parked();
@@ -3336,7 +3372,7 @@ mod tests {
 
         cx.update(|window, cx| {
             palette.update(cx, |palette, cx| {
-                palette.dismiss_for_replacement(window, cx);
+                let _ = palette.dismiss_for_replacement(window, cx);
             });
         });
         cx.run_until_parked();
@@ -3345,6 +3381,29 @@ mod tests {
         assert!(events.borrow().contains(&CommandPaletteEvent::Lifecycle(
             CommandPaletteLifecycleEvent::Closed(CommandPaletteCloseReason::Replaced)
         )));
+    }
+
+    #[gpui::test]
+    fn replacement_chain_should_restore_the_original_focus_owner(cx: &mut TestAppContext) {
+        let (root, palette, _, _, cx) = palette_window(cx);
+        let prior = open_palette(&root, &palette, cx);
+
+        let replacement = cx
+            .update(|window, cx| {
+                palette.update(cx, |palette, cx| {
+                    palette.dismiss_for_replacement(window, cx)
+                })
+            })
+            .expect("an open palette should transfer its restoration focus");
+        cx.update(|window, cx| {
+            palette.update(cx, |palette, cx| {
+                palette.open_replacing(replacement, window, cx);
+                palette.dismiss(window, cx);
+            });
+        });
+        cx.run_until_parked();
+
+        assert!(cx.update(|window, _| prior.is_focused(window)));
     }
 
     #[gpui::test]
