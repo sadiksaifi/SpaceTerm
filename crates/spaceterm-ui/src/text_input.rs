@@ -608,6 +608,7 @@ impl TextInput {
 
     /// Selects the complete value.
     pub fn select_all(&mut self, cx: &mut Context<Self>) {
+        self.record_composition_history();
         self.buffer.select_all();
         self.wake_caret(cx);
     }
@@ -652,6 +653,10 @@ impl TextInput {
 
     fn finish_composition(&mut self) {
         self.buffer.marked = None;
+        self.record_composition_history();
+    }
+
+    fn record_composition_history(&mut self) {
         if let Some(snapshot) = self.composition_snapshot.take()
             && snapshot.text != self.buffer.text
         {
@@ -685,11 +690,13 @@ impl TextInput {
     }
 
     fn backspace(&mut self, _: &Backspace, _: &mut Window, cx: &mut Context<Self>) {
+        self.record_composition_history();
         let changed = self.buffer.delete_backward();
         self.emit_change(changed, cx);
     }
 
     fn delete_forward(&mut self, _: &DeleteForward, _: &mut Window, cx: &mut Context<Self>) {
+        self.record_composition_history();
         let changed = self.buffer.delete_forward();
         self.emit_change(changed, cx);
     }
@@ -700,11 +707,13 @@ impl TextInput {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.record_composition_history();
         let changed = self.buffer.delete_to_beginning();
         self.emit_change(changed, cx);
     }
 
     fn delete_to_end(&mut self, _: &DeleteToEnd, _: &mut Window, cx: &mut Context<Self>) {
+        self.record_composition_history();
         let changed = self.buffer.delete_to_end();
         self.emit_change(changed, cx);
     }
@@ -715,11 +724,13 @@ impl TextInput {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.record_composition_history();
         let changed = self.buffer.delete_previous_word();
         self.emit_change(changed, cx);
     }
 
     fn delete_next_word(&mut self, _: &DeleteNextWord, _: &mut Window, cx: &mut Context<Self>) {
+        self.record_composition_history();
         let changed = self.buffer.delete_next_word();
         self.emit_change(changed, cx);
     }
@@ -731,6 +742,7 @@ impl TextInput {
             return;
         }
         cx.global_mut::<TextKillRing>().0 = self.buffer.text[range.clone()].to_owned();
+        self.record_composition_history();
         let changed = self.buffer.replace(range, "", EditKind::Atomic);
         self.emit_change(changed, cx);
     }
@@ -775,31 +787,37 @@ impl TextInput {
             self.wake_caret(cx);
             return;
         }
+        self.record_composition_history();
         let changed = self.buffer.replace_selection(&killed, EditKind::Atomic);
         self.emit_change(changed, cx);
     }
 
     fn transpose(&mut self, _: &Transpose, _: &mut Window, cx: &mut Context<Self>) {
+        self.record_composition_history();
         let changed = self.buffer.transpose();
         self.emit_change(changed, cx);
     }
 
     fn move_left(&mut self, _: &MoveLeft, _: &mut Window, cx: &mut Context<Self>) {
+        self.record_composition_history();
         self.buffer.move_left(false);
         self.wake_caret(cx);
     }
 
     fn move_right(&mut self, _: &MoveRight, _: &mut Window, cx: &mut Context<Self>) {
+        self.record_composition_history();
         self.buffer.move_right(false);
         self.wake_caret(cx);
     }
 
     fn move_to_beginning(&mut self, _: &MoveToBeginning, _: &mut Window, cx: &mut Context<Self>) {
+        self.record_composition_history();
         self.buffer.move_to_beginning(false);
         self.wake_caret(cx);
     }
 
     fn move_to_end(&mut self, _: &MoveToEnd, _: &mut Window, cx: &mut Context<Self>) {
+        self.record_composition_history();
         self.buffer.move_to_end(false);
         self.wake_caret(cx);
     }
@@ -810,21 +828,25 @@ impl TextInput {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.record_composition_history();
         self.buffer.move_to_previous_word(false);
         self.wake_caret(cx);
     }
 
     fn move_to_next_word(&mut self, _: &MoveToNextWord, _: &mut Window, cx: &mut Context<Self>) {
+        self.record_composition_history();
         self.buffer.move_to_next_word(false);
         self.wake_caret(cx);
     }
 
     fn select_left(&mut self, _: &SelectLeft, _: &mut Window, cx: &mut Context<Self>) {
+        self.record_composition_history();
         self.buffer.move_left(true);
         self.wake_caret(cx);
     }
 
     fn select_right(&mut self, _: &SelectRight, _: &mut Window, cx: &mut Context<Self>) {
+        self.record_composition_history();
         self.buffer.move_right(true);
         self.wake_caret(cx);
     }
@@ -835,11 +857,13 @@ impl TextInput {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.record_composition_history();
         self.buffer.move_to_beginning(true);
         self.wake_caret(cx);
     }
 
     fn select_to_end(&mut self, _: &SelectToEnd, _: &mut Window, cx: &mut Context<Self>) {
+        self.record_composition_history();
         self.buffer.move_to_end(true);
         self.wake_caret(cx);
     }
@@ -850,6 +874,7 @@ impl TextInput {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.record_composition_history();
         self.buffer.move_to_previous_word(true);
         self.wake_caret(cx);
     }
@@ -860,6 +885,7 @@ impl TextInput {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.record_composition_history();
         self.buffer.move_to_next_word(true);
         self.wake_caret(cx);
     }
@@ -878,6 +904,7 @@ impl TextInput {
     fn cut(&mut self, _: &Cut, _: &mut Window, cx: &mut Context<Self>) {
         if let Some(text) = self.buffer.selected_text().map(ToOwned::to_owned) {
             cx.write_to_clipboard(ClipboardItem::new_string(text));
+            self.record_composition_history();
             let changed = self.buffer.replace_selection("", EditKind::Atomic);
             self.emit_change(changed, cx);
         }
@@ -886,6 +913,7 @@ impl TextInput {
 
     fn paste(&mut self, _: &Paste, _: &mut Window, cx: &mut Context<Self>) {
         if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
+            self.record_composition_history();
             let changed = self.buffer.replace_selection(&text, EditKind::Atomic);
             self.emit_change(changed, cx);
         }
@@ -893,6 +921,7 @@ impl TextInput {
     }
 
     fn undo(&mut self, _: &Undo, _: &mut Window, cx: &mut Context<Self>) {
+        self.record_composition_history();
         if self.buffer.undo() {
             cx.emit(TextInputEvent::Changed(self.buffer.text.clone()));
         }
@@ -900,6 +929,7 @@ impl TextInput {
     }
 
     fn redo(&mut self, _: &Redo, _: &mut Window, cx: &mut Context<Self>) {
+        self.record_composition_history();
         if self.buffer.redo() {
             cx.emit(TextInputEvent::Changed(self.buffer.text.clone()));
         }
@@ -963,6 +993,7 @@ impl TextInput {
         cx: &mut Context<Self>,
     ) {
         self.focus_handle.focus(window);
+        self.record_composition_history();
         let offset = self.index_for_mouse_position(event.position);
         match event.click_count {
             1 if event.modifiers.shift => self.buffer.select_to(offset),
@@ -1891,6 +1922,26 @@ mod tests {
         assert_eq!(
             input.read_with(cx, |input, _| input.value().to_owned()),
             "Workspace"
+        );
+    }
+
+    #[gpui::test]
+    fn edit_after_composition_should_undo_to_the_completed_composition(cx: &mut TestAppContext) {
+        let (input, cx) = text_input(cx, "Workspace");
+        cx.update(|window, cx| {
+            input.update(cx, |input, cx| {
+                input.replace_and_mark_text_in_range(None, "日本", None, window, cx);
+                input.select_all(cx);
+                cx.write_to_clipboard(ClipboardItem::new_string("Replacement".to_owned()));
+                input.paste(&Paste, window, cx);
+                input.on_blur(window, cx);
+                input.undo(&Undo, window, cx);
+            });
+        });
+
+        assert_eq!(
+            input.read_with(cx, |input, _| input.value().to_owned()),
+            "Workspace日本"
         );
     }
 
