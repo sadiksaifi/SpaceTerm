@@ -1590,15 +1590,15 @@ impl TextInput {
         }
         gesture.latest_position = event.position;
         self.pointer_gesture = Some(gesture);
-        let offset = self.index_for_mouse_position(event.position);
-        self.buffer.select_from_anchor(gesture.anchor, offset);
         if self.pointer_is_outside_horizontally(event.position) {
             self.start_autoscroll(gesture.generation, cx);
         } else {
             self.autoscroll_generation = None;
             self.autoscroll_task = None;
+            let offset = self.index_for_mouse_position(event.position);
+            self.buffer.select_from_anchor(gesture.anchor, offset);
+            self.restart_caret(cx);
         }
-        self.restart_caret(cx);
         cx.stop_propagation();
     }
 
@@ -1658,7 +1658,15 @@ impl TextInput {
                                 .max(px(0.0))
                         });
                         input.scroll = (input.scroll + step).clamp(px(0.0), max_scroll);
-                        let offset = input.index_for_mouse_position(gesture.latest_position);
+                        let edge_position = point(
+                            if overflow < px(0.0) {
+                                bounds.left()
+                            } else {
+                                bounds.right()
+                            },
+                            gesture.latest_position.y,
+                        );
+                        let offset = input.index_for_mouse_position(edge_position);
                         input.buffer.select_from_anchor(gesture.anchor, offset);
                         cx.notify();
                         true
@@ -3128,6 +3136,7 @@ mod tests {
         let start = point(bounds.left() + px(4.0), bounds.center().y);
         let outside = point(bounds.right() + px(40.0), bounds.center().y);
         cx.simulate_mouse_down(start, MouseButton::Left, Modifiers::none());
+        cx.simulate_mouse_move(bounds.center(), MouseButton::Left, Modifiers::none());
         cx.simulate_mouse_move(outside, MouseButton::Left, Modifiers::none());
         cx.simulate_mouse_up(outside, MouseButton::Left, Modifiers::none());
         cx.run_until_parked();
@@ -3170,7 +3179,15 @@ mod tests {
         let start = point(bounds.left() + px(2.0), bounds.center().y);
         let outside = point(bounds.right() + px(50.0), bounds.center().y);
         cx.simulate_mouse_down(start, MouseButton::Left, Modifiers::none());
+        cx.run_until_parked();
+        let before_deadline = input.read_with(cx, |input, _| (input.scroll, input.selection()));
         cx.simulate_mouse_move(outside, MouseButton::Left, Modifiers::none());
+        cx.run_until_parked();
+        let pending_deadline = input.read_with(cx, |input, _| (input.scroll, input.selection()));
+        assert_eq!(
+            pending_deadline, before_deadline,
+            "outside drag must wait for the first bounded autoscroll deadline"
+        );
         cx.executor().advance_clock(Duration::from_millis(16));
         cx.run_until_parked();
         let first = input.read_with(cx, |input, _| input.scroll);
