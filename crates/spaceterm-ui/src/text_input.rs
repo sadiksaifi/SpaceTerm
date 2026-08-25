@@ -1685,6 +1685,34 @@ impl TextInput {
         }));
     }
 
+    fn reconcile_scroll(
+        &mut self,
+        line: &ShapedLine,
+        bounds: Bounds<Pixels>,
+        metrics: TextInputMetrics,
+    ) -> Pixels {
+        if bounds.size.width <= px(0.0) {
+            self.scroll = px(0.0);
+            return self.scroll;
+        }
+        let caret_x = if self.buffer.text.is_empty() {
+            px(0.0)
+        } else {
+            line.x_for_index(self.buffer.selection.cursor())
+        };
+        let mut scroll = self
+            .scroll
+            .min((line.width - bounds.size.width + metrics.scroll_padding).max(px(0.0)));
+        if caret_x - scroll > bounds.size.width - metrics.scroll_padding {
+            scroll = caret_x - bounds.size.width + metrics.scroll_padding;
+        }
+        if caret_x - scroll < px(0.0) {
+            scroll = caret_x;
+        }
+        self.scroll = scroll.max(px(0.0));
+        self.scroll
+    }
+
     fn index_for_mouse_position(&self, position: Point<Pixels>) -> usize {
         if self.buffer.text.is_empty() {
             return 0;
@@ -1943,14 +1971,15 @@ impl EntityInputHandler for TextInput {
         cx: &mut Context<Self>,
     ) -> Option<Bounds<Pixels>> {
         let line = self.rebuild_geometry(bounds, window, cx);
+        let scroll = self.reconcile_scroll(&line, bounds, cx.global::<TextInputTheme>().metrics);
         let range = utf16_query_range_to_bytes(&self.buffer.text, range_utf16);
         Some(Bounds::from_corners(
             point(
-                bounds.left() + line.x_for_index(range.start) - self.scroll,
+                bounds.left() + line.x_for_index(range.start) - scroll,
                 bounds.top(),
             ),
             point(
-                bounds.left() + line.x_for_index(range.end) - self.scroll,
+                bounds.left() + line.x_for_index(range.end) - scroll,
                 bounds.bottom(),
             ),
         ))
@@ -1963,9 +1992,10 @@ impl EntityInputHandler for TextInput {
     ) -> Option<usize> {
         let bounds = self.last_bounds?;
         let line = self.rebuild_geometry(bounds, window, cx);
+        let scroll = self.reconcile_scroll(&line, bounds, cx.global::<TextInputTheme>().metrics);
         let index = clamp_grapheme_boundary(
             &self.buffer.text,
-            line.closest_index_for_x(point.x - bounds.left() + self.scroll),
+            line.closest_index_for_x(point.x - bounds.left() + scroll),
             false,
         );
         Some(byte_offset_to_utf16(&self.buffer.text, index))
@@ -2153,16 +2183,7 @@ impl Element for TextElement {
             } else {
                 line.x_for_index(input.buffer.selection.cursor())
             };
-            let mut scroll = input
-                .scroll
-                .min((line.width - bounds.size.width + theme.metrics.scroll_padding).max(px(0.0)));
-            if caret_x - scroll > bounds.size.width - theme.metrics.scroll_padding {
-                scroll = caret_x - bounds.size.width + theme.metrics.scroll_padding;
-            }
-            if caret_x - scroll < px(0.0) {
-                scroll = caret_x;
-            }
-            scroll = scroll.max(px(0.0));
+            let scroll = input.reconcile_scroll(&line, bounds, theme.metrics);
             let active = input.enabled && input.focused && input.window_active;
             let (caret, selection) = if active && !input.buffer.selection.is_empty() {
                 (
@@ -3347,6 +3368,50 @@ mod tests {
         });
         assert!(marked_bounds.size.width > px(0.0));
         assert_eq!(character, 5);
+    }
+
+    #[gpui::test]
+    fn synchronous_marked_update_reconciles_horizontal_scroll_for_candidate_geometry(
+        cx: &mut TestAppContext,
+    ) {
+        const LONG_VALUE: &str = concat!(
+            "abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz",
+            "abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz",
+            "abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz",
+            "abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz",
+            "abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz",
+            "abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz",
+        );
+        let (input, cx) = input(cx, LONG_VALUE);
+        let bounds = cx
+            .debug_bounds("test-input")
+            .expect("input should be painted");
+        assert!(input.read_with(cx, |input, _| input.scroll > px(0.0)));
+
+        let (candidate, character) = cx.update(|window, cx| {
+            input.update(cx, |input, cx| {
+                input.replace_and_mark_text_in_range(
+                    Some(0..LONG_VALUE.len()),
+                    "日本",
+                    Some(2..2),
+                    window,
+                    cx,
+                );
+                let candidate = input
+                    .bounds_for_range(2..2, bounds, window, cx)
+                    .expect("candidate bounds should exist");
+                let character = input
+                    .character_index_for_point(candidate.bottom_right(), window, cx)
+                    .expect("candidate point should map to current text");
+                (candidate, character)
+            })
+        });
+
+        assert!(
+            candidate.left() >= bounds.left() && candidate.right() <= bounds.right(),
+            "candidate geometry used stale scroll: candidate={candidate:?}, input={bounds:?}"
+        );
+        assert_eq!(character, 2);
     }
 
     #[gpui::test]
