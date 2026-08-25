@@ -88,6 +88,26 @@ paint and metric catalog, then owns surrounding chrome, product policy, and reac
 events. Application-specific composition remains in `src/ui`; controls move into the library only
 when their behavior has reusable depth.
 
+The internal library's Command Palette is an entity-backed, Operating-System Window-owned
+transient control. It owns query editing, static semantic matching, stable typed selection,
+keyboard and pointer navigation, focus restoration, and lifecycle events while callers own item
+identity, asynchronous result production, and product actions. Its rows use fixed leading, text,
+and trailing semantic slots rather than caller-painted layouts, and the application installs its
+Vague Pro presentation catalog.
+
+The palette presents one continuous surface: a borderless editor above a hairline, a
+variable-height virtualized result list, and an optional hint and actions footer. Search-line
+controls, footer hints, section headings, and the footer actions menu are typed caller values, not
+caller-painted elements, so the palette remains the only owner of their size and paint. Rows are
+grouped only where adjacent items report different sections. The palette renders its own anchored
+full-window layer without deferring it, because GPUI collects deferred draws once per frame and a
+deferred palette could not host the deferred menu overlay its footer owns; its owner therefore
+renders it last. While a menu owns the Operating-System Window, palette blur and outside presses
+are not dismissals. Activating a Command Palette or Menu first establishes internal closed and
+focus state, then delivers the typed activation while caller-owned transient blocking remains
+continuous, and finally publishes the activated close lifecycle event; non-activation close
+ordering is unchanged.
+
 ### Overlay Scrollbar
 
 The Overlay Scrollbar is a compact vertical control that presents scroll position without reserving

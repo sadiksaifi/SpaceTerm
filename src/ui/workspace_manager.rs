@@ -10,13 +10,14 @@ use gpui::{
 };
 use gpui_symbols::{Icon, RenderingMode, SymbolWeight};
 use spaceterm_ui::{
-    Button, ButtonShape, ButtonSize, ButtonVariant, ContextMenu, IconButton, MenuCloseReason,
-    MenuEntry, MenuLifecycleEvent, MenuSize, MiddleTruncatedText, OverlayScrollbar,
-    OverlayScrollbarEvent, ScrollMetrics, TextInput, TextInputEvent, TextInputStyle,
+    Button, ButtonShape, ButtonSize, ButtonVariant, ContextMenu, IconButton, MenuEntry,
+    MenuLifecycleEvent, MenuSize, MiddleTruncatedText, OverlayScrollbar, OverlayScrollbarEvent,
+    ScrollMetrics, TextInput, TextInputEvent, TextInputStyle,
 };
 
 use super::button_theme;
 use super::terminal_focus::TerminalFocusBlocker;
+use super::workspace_search::{WorkspaceSearch, WorkspaceSearchEvent, WorkspaceSearchItem};
 use super::{
     ActivateWindow1, ActivateWindow2, ActivateWindow3, ActivateWindow4, ActivateWindow5,
     ActivateWindow6, ActivateWindow7, ActivateWindow8, ActivateWindow9, ActivateWorkspace1,
@@ -24,8 +25,8 @@ use super::{
     ActivateWorkspace6, ActivateWorkspace7, ActivateWorkspace8, ActivateWorkspace9, ClosePane,
     CloseTerminalFind, CloseWindow, CloseWorkspace, CopySelection, CreateWindow, CreateWorkspace,
     FindNext, FindPrevious, FocusPaneDown, FocusPaneLeft, FocusPaneRight, FocusPaneUp,
-    OpenLocalProject, OpenTerminalFind, SplitDown, SplitRight, TERMINAL_KEY_CONTEXT,
-    TOP_CHROME_HEIGHT, TogglePaneZoom, ToggleSidebar, ToggleSidebarFocus,
+    OpenLocalProject, OpenTerminalFind, SearchWorkspaces, SplitDown, SplitRight,
+    TERMINAL_KEY_CONTEXT, TOP_CHROME_HEIGHT, TogglePaneZoom, ToggleSidebar, ToggleSidebarFocus,
     WORKSPACE_SIDEBAR_DEFAULT_WIDTH, WORKSPACE_SIDEBAR_MINIMUM_WIDTH, WindowManager,
     WindowManagerEvent, handle_top_chrome_mouse_down,
 };
@@ -124,6 +125,7 @@ pub(crate) struct WorkspaceManager {
     workspace_list_scroll_handle: ScrollHandle,
     scrollbar: Entity<OverlayScrollbar<f32>>,
     sidebar_focus: FocusHandle,
+    workspace_search: Entity<WorkspaceSearch>,
     workspace_menu: Option<WorkspaceMenuState>,
     rename: Option<WorkspaceRenameState>,
     top_chrome_interaction: bool,
@@ -204,6 +206,15 @@ impl WorkspaceManager {
             }
         })
         .detach();
+        let workspace_search = cx.new(|cx| WorkspaceSearch::new(window, cx));
+        cx.subscribe_in(
+            &workspace_search,
+            window,
+            |manager, _, event: &WorkspaceSearchEvent, window, cx| {
+                manager.handle_workspace_search_event(event, window, cx);
+            },
+        )
+        .detach();
 
         Self {
             workspaces,
@@ -217,6 +228,7 @@ impl WorkspaceManager {
             workspace_list_scroll_handle: ScrollHandle::new(),
             scrollbar,
             sidebar_focus: cx.focus_handle(),
+            workspace_search,
             workspace_menu: None,
             rename: None,
             top_chrome_interaction: false,
@@ -256,7 +268,10 @@ impl WorkspaceManager {
                         });
                     }
                 }
-                WindowManagerEvent::PresentationChanged => cx.notify(),
+                WindowManagerEvent::PresentationChanged => {
+                    workspace_manager.refresh_workspace_search(cx);
+                    cx.notify();
+                }
                 WindowManagerEvent::ReportedWorkingDirectoryChanged {
                     window_id,
                     pane_id,
@@ -295,12 +310,14 @@ impl WorkspaceManager {
                     let _ = workspace_manager
                         .workspaces
                         .set_directory_available(workspace_id, *identity);
+                    workspace_manager.refresh_workspace_search(cx);
                     cx.notify();
                 }
                 WindowManagerEvent::DirectoryUnavailable { reason } => {
                     let _ = workspace_manager
                         .workspaces
                         .set_directory_unavailable(workspace_id, reason.clone());
+                    workspace_manager.refresh_workspace_search(cx);
                     cx.notify();
                 }
             },
@@ -328,6 +345,7 @@ impl WorkspaceManager {
                     )
                     .unwrap_or(false)
                 {
+                    self.refresh_workspace_search(cx);
                     cx.notify();
                 }
                 return;
@@ -349,6 +367,7 @@ impl WorkspaceManager {
         manager.update(cx, |manager, cx| {
             manager.set_workspace_directory(&path, identity, cx);
         });
+        self.refresh_workspace_search(cx);
         cx.notify();
     }
 
@@ -395,6 +414,7 @@ impl WorkspaceManager {
         manager.update(cx, |manager, cx| {
             manager.set_workspace_directory(&path, identity, cx)
         });
+        self.refresh_workspace_search(cx);
         cx.notify();
     }
 
@@ -441,6 +461,7 @@ impl WorkspaceManager {
         manager.update(cx, |manager, cx| {
             manager.set_workspace_directory(&path, identity, cx)
         });
+        self.refresh_workspace_search(cx);
         cx.notify();
     }
 
@@ -462,7 +483,7 @@ impl WorkspaceManager {
         cx: &mut App,
     ) -> NativeServiceStatus {
         let workspace_id = self.workspaces.active_workspace_id();
-        let blocker = self.terminal_focus_blocker(window);
+        let blocker = self.terminal_focus_blocker(window, cx);
         self.workspaces
             .active_workspace()
             .payload()
@@ -507,9 +528,14 @@ impl WorkspaceManager {
         })
     }
 
-    fn terminal_focus_blocker(&self, window: &Window) -> Option<TerminalFocusBlocker> {
+    fn terminal_focus_blocker(&self, window: &Window, cx: &App) -> Option<TerminalFocusBlocker> {
         self.local_project_picker_open
             .then_some(TerminalFocusBlocker::Modal)
+            .or(self
+                .workspace_search
+                .read(cx)
+                .blocks_terminal_input()
+                .then_some(TerminalFocusBlocker::CommandPalette))
             .or(self
                 .top_chrome_interaction
                 .then_some(TerminalFocusBlocker::TopChrome)
@@ -526,6 +552,69 @@ impl WorkspaceManager {
                     .then_some(TerminalFocusBlocker::Sidebar)))
     }
 
+    fn workspace_search_items(&self, cx: &App) -> Vec<WorkspaceSearchItem> {
+        self.workspaces
+            .iter()
+            .map(|workspace| {
+                let (window_count, pane_count) = workspace.payload().read(cx).aggregate_counts(cx);
+                WorkspaceSearchItem::new(
+                    workspace.id(),
+                    workspace.name().to_owned(),
+                    compact_home_path(workspace.working_directory(), &self.default_workspace_root),
+                    matches!(workspace.kind(), WorkspaceKind::LocalProject { .. }),
+                    matches!(
+                        workspace.availability(),
+                        WorkspaceDirectoryAvailability::Available
+                    ),
+                    window_count,
+                    pane_count,
+                )
+            })
+            .collect()
+    }
+
+    fn refresh_workspace_search(&self, cx: &mut Context<Self>) {
+        if !self.workspace_search.read(cx).blocks_terminal_input() {
+            return;
+        }
+        let items = self.workspace_search_items(cx);
+        self.workspace_search
+            .update(cx, |search, cx| search.refresh_items(items, cx));
+    }
+
+    fn open_workspace_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.rename_is_focused(window) {
+            self.sidebar_focus.focus(window);
+        }
+        self.rename = None;
+        self.workspace_menu = None;
+        let items = self.workspace_search_items(cx);
+        self.workspace_search
+            .update(cx, |search, cx| search.open(items, window, cx));
+        self.sync_terminal_focus_blocker(window, cx);
+        cx.notify();
+    }
+
+    fn handle_workspace_search_event(
+        &mut self,
+        event: &WorkspaceSearchEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match event {
+            WorkspaceSearchEvent::StateChanged => {
+                self.sync_terminal_focus_blocker(window, cx);
+                cx.notify();
+            }
+            WorkspaceSearchEvent::WorkspaceSelected(workspace_id) => {
+                if !self.activate_workspace(*workspace_id, window, cx) {
+                    self.sync_terminal_focus_blocker(window, cx);
+                    cx.notify();
+                }
+            }
+        }
+    }
+
     fn rename_is_focused(&self, window: &Window) -> bool {
         self.rename
             .as_ref()
@@ -533,7 +622,7 @@ impl WorkspaceManager {
     }
 
     fn sync_terminal_focus_blocker(&self, window: &Window, cx: &mut Context<Self>) {
-        let blocker = self.terminal_focus_blocker(window);
+        let blocker = self.terminal_focus_blocker(window, cx);
         self.workspaces
             .active_workspace()
             .payload()
@@ -693,6 +782,7 @@ impl WorkspaceManager {
         self.rename = None;
         self.sync_terminal_focus_blocker(window, cx);
         self.scroll_active_workspace_into_view();
+        self.refresh_workspace_search(cx);
         cx.notify();
     }
 
@@ -802,6 +892,7 @@ impl WorkspaceManager {
         next_manager.update(cx, |manager, cx| manager.activate(window, cx));
         self.sync_terminal_focus_blocker(window, cx);
         self.scroll_active_workspace_into_view();
+        self.refresh_workspace_search(cx);
         cx.notify();
     }
 
@@ -905,6 +996,7 @@ impl WorkspaceManager {
         }
         self.sync_terminal_focus_blocker(window, cx);
         self.scroll_active_workspace_into_view();
+        self.refresh_workspace_search(cx);
         cx.notify();
         true
     }
@@ -992,6 +1084,7 @@ impl WorkspaceManager {
         }
         self.sync_terminal_focus_blocker(window, cx);
         self.scroll_active_workspace_into_view();
+        self.refresh_workspace_search(cx);
         cx.notify();
     }
 
@@ -1042,6 +1135,7 @@ impl WorkspaceManager {
                 }
                 self.sync_terminal_focus_blocker(window, cx);
                 self.scroll_active_workspace_into_view();
+                self.refresh_workspace_search(cx);
                 cx.notify();
             }
             FinalWindowCloseOutcome::CloseOperatingSystemWindow {
@@ -1119,14 +1213,14 @@ impl WorkspaceManager {
                 self.workspace_menu = Some(WorkspaceMenuState { workspace_id });
                 Some(TerminalFocusBlocker::ContextMenu)
             }
-            MenuLifecycleEvent::Closed(reason)
+            MenuLifecycleEvent::Closed(_)
                 if self
                     .workspace_menu
                     .is_some_and(|menu| menu.workspace_id == workspace_id) =>
             {
                 self.workspace_menu = None;
-                Some(if reason == MenuCloseReason::Activated {
-                    TerminalFocusBlocker::ContextMenu
+                Some(if self.rename.is_some() {
+                    TerminalFocusBlocker::RenameField
                 } else {
                     TerminalFocusBlocker::Sidebar
                 })
@@ -1250,6 +1344,7 @@ impl WorkspaceManager {
             self.sidebar_focus.focus(window);
         }
         self.sync_terminal_focus_blocker(window, cx);
+        self.refresh_workspace_search(cx);
         cx.notify();
     }
 
@@ -1260,6 +1355,15 @@ impl WorkspaceManager {
         cx: &mut Context<Self>,
     ) {
         self.create_workspace(window, cx);
+    }
+
+    fn on_search_workspaces(
+        &mut self,
+        _: &SearchWorkspaces,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_workspace_search(window, cx);
     }
 
     fn on_open_local_project(
@@ -1773,6 +1877,7 @@ impl WorkspaceManager {
 
         let scrollbar = self.scrollbar.clone();
         let create_manager = manager.clone();
+        let search_manager = manager.clone();
         let picker_manager = manager.clone();
         let header = div()
             .id("workspace-sidebar-header")
@@ -1816,8 +1921,10 @@ impl WorkspaceManager {
                 .size(ButtonSize::Regular)
                 .debug_selector("search-workspaces-button")
                 .tooltip(|_, cx| button_theme::tooltip("Search Workspaces", cx))
-                .on_activate(|_, _, _| {
-                    // TODO(https://github.com/sadiksaifi/SpaceTerm/issues/126): Open Workspace search and filter the rows.
+                .on_activate(move |_, window, cx| {
+                    let _ = search_manager.update(cx, |manager, cx| {
+                        manager.open_workspace_search(window, cx);
+                    });
                 }),
             )
             .child(
@@ -1985,6 +2092,7 @@ impl Render for WorkspaceManager {
                 });
             })
             .on_action(cx.listener(Self::on_create_workspace))
+            .on_action(cx.listener(Self::on_search_workspaces))
             .on_action(cx.listener(Self::on_open_local_project))
             .on_action(cx.listener(Self::on_close_workspace))
             .on_action(cx.listener(Self::on_activate_workspace_1))
@@ -2027,6 +2135,7 @@ impl Render for WorkspaceManager {
             .when(self.sidebar_visible, |root| {
                 root.child(self.render_sidebar(manager, cx))
             })
+            .child(self.workspace_search.clone())
     }
 }
 
@@ -2279,19 +2388,205 @@ mod tests {
     }
 
     #[gpui::test]
-    fn search_button_should_stay_inert_and_keep_global_actions_available(cx: &mut TestAppContext) {
+    fn workspace_search_should_open_and_block_terminal_input_focus(cx: &mut TestAppContext) {
         let (manager, _, cx) = workspace_manager(cx);
 
         click("search-workspaces-button", cx);
-        let after_search = manager.read_with(cx, |manager, _| manager.workspaces.len());
-        cx.simulate_keystrokes("cmd-n");
+
+        let state = cx.update(|window, cx| {
+            let manager = manager.read(cx);
+            (
+                manager.workspace_search.read(cx).blocks_terminal_input(),
+                manager.terminal_focus_blocker(window, cx),
+                manager
+                    .workspaces
+                    .active_workspace()
+                    .payload()
+                    .read(cx)
+                    .focused_terminal_is_focused(window, cx),
+            )
+        });
+        assert_eq!(
+            state,
+            (true, Some(TerminalFocusBlocker::CommandPalette), false)
+        );
+        assert!(cx.debug_bounds("command-palette-panel").is_some());
+    }
+
+    #[gpui::test]
+    fn workspace_search_should_replace_an_open_workspace_context_menu(cx: &mut TestAppContext) {
+        let (manager, _, cx) = workspace_manager(cx);
+        right_click("workspace-row-1-active", cx);
+        assert!(cx.debug_bounds("menu-panel-0").is_some());
+
+        cx.update(|window, cx| {
+            manager.update(cx, |manager, cx| {
+                manager.open_workspace_search(window, cx);
+            });
+        });
         cx.run_until_parked();
 
-        assert_eq!(after_search, 1);
+        assert!(cx.debug_bounds("menu-panel-0").is_none());
+        assert!(cx.debug_bounds("command-palette-panel").is_some());
+        assert!(manager.read_with(cx, |manager, _| manager.workspace_menu.is_none()));
+
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+
+        let restored = cx.update(|window, cx| {
+            let manager = manager.read(cx);
+            (
+                manager.sidebar_focus.is_focused(window),
+                manager.terminal_focus_blocker(window, cx),
+            )
+        });
         assert_eq!(
-            manager.read_with(cx, |manager, _| manager.workspaces.len()),
-            2
+            restored,
+            (true, Some(TerminalFocusBlocker::Sidebar)),
+            "closing the replacement palette must not restore the invisible menu focus owner"
         );
+    }
+
+    #[gpui::test]
+    fn workspace_search_from_inline_rename_should_restore_sidebar_focus(cx: &mut TestAppContext) {
+        let (manager, _, cx) = workspace_manager(cx);
+        right_click("workspace-row-1-active", cx);
+        click("workspace-menu-row-rename", cx);
+        assert!(cx.update(|window, cx| manager.read(cx).rename_is_focused(window)));
+
+        cx.update(|window, cx| {
+            manager.update(cx, |manager, cx| {
+                manager.open_workspace_search(window, cx);
+            });
+        });
+        cx.run_until_parked();
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+
+        let restored = cx.update(|window, cx| {
+            let manager = manager.read(cx);
+            (
+                manager.rename.is_none(),
+                manager.sidebar_focus.is_focused(window),
+                manager.terminal_focus_blocker(window, cx),
+            )
+        });
+        assert_eq!(restored, (true, true, Some(TerminalFocusBlocker::Sidebar)));
+    }
+
+    #[gpui::test]
+    fn workspace_search_escape_should_restore_terminal_focus(cx: &mut TestAppContext) {
+        let (manager, _, cx) = workspace_manager(cx);
+        let terminal_was_focused = cx.update(|window, cx| {
+            manager
+                .read(cx)
+                .workspaces
+                .active_workspace()
+                .payload()
+                .read(cx)
+                .focused_terminal_is_focused(window, cx)
+        });
+
+        click("search-workspaces-button", cx);
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+
+        let restored = cx.update(|window, cx| {
+            let manager = manager.read(cx);
+            (
+                manager.workspace_search.read(cx).blocks_terminal_input(),
+                manager.terminal_focus_blocker(window, cx),
+                manager
+                    .workspaces
+                    .active_workspace()
+                    .payload()
+                    .read(cx)
+                    .focused_terminal_is_focused(window, cx),
+            )
+        });
+        assert_eq!(
+            (terminal_was_focused, restored),
+            (true, (false, None, true))
+        );
+        assert!(cx.debug_bounds("command-palette-panel").is_none());
+    }
+
+    #[gpui::test]
+    fn open_workspace_search_should_remove_a_workspace_after_its_final_session_exits(
+        cx: &mut TestAppContext,
+    ) {
+        let (manager, records, cx) = workspace_manager(cx);
+        let inactive_sender = records
+            .event_sender(1)
+            .expect("the initial Workspace terminal session must have started");
+        cx.simulate_keystrokes("cmd-n");
+        cx.run_until_parked();
+        manager.update(cx, |manager, cx| {
+            manager
+                .workspaces
+                .rename_workspace(WorkspaceId::new(1), "Alpha Workspace".to_owned())
+                .expect("the inactive Workspace must remain owned");
+            cx.notify();
+        });
+
+        click("search-workspaces-button", cx);
+        cx.simulate_keystrokes("a l p h a");
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("workspace-search-result-1").is_some());
+
+        inactive_sender
+            .try_send(SessionEvent::Exited(SessionExit::Success))
+            .expect("the inactive shell exit must be delivered");
+        cx.run_until_parked();
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+
+        let state = manager.read_with(cx, |manager, _| {
+            (
+                manager.workspaces.workspace(WorkspaceId::new(1)).is_none(),
+                manager.workspaces.active_workspace_id(),
+            )
+        });
+        assert_eq!(state, (true, WorkspaceId::new(2)));
+        assert!(cx.debug_bounds("command-palette-panel").is_some());
+    }
+
+    #[gpui::test]
+    fn workspace_search_selection_should_activate_the_matching_workspace(cx: &mut TestAppContext) {
+        let (manager, _, cx) = workspace_manager(cx);
+        cx.simulate_keystrokes("cmd-n");
+        cx.run_until_parked();
+        manager.update(cx, |manager, cx| {
+            manager
+                .workspaces
+                .rename_workspace(WorkspaceId::new(1), "Alpha Workspace".to_owned())
+                .unwrap();
+            manager
+                .workspaces
+                .rename_workspace(WorkspaceId::new(2), "Beta Workspace".to_owned())
+                .unwrap();
+            cx.notify();
+        });
+
+        click("search-workspaces-button", cx);
+        cx.simulate_keystrokes("a l p h a enter");
+        cx.run_until_parked();
+
+        let state = cx.update(|window, cx| {
+            let manager = manager.read(cx);
+            (
+                manager.workspaces.active_workspace_id(),
+                manager.workspace_search.read(cx).blocks_terminal_input(),
+                manager.terminal_focus_blocker(window, cx),
+                manager
+                    .workspaces
+                    .active_workspace()
+                    .payload()
+                    .read(cx)
+                    .focused_terminal_is_focused(window, cx),
+            )
+        });
+        assert_eq!(state, (WorkspaceId::new(1), false, None, true));
     }
 
     #[gpui::test]
@@ -3023,7 +3318,7 @@ mod tests {
             (
                 manager.workspace_menu,
                 manager.sidebar_focus.is_focused(window),
-                manager.terminal_focus_blocker(window),
+                manager.terminal_focus_blocker(window, cx),
             )
         });
         assert_eq!(dismissed, (None, true, Some(TerminalFocusBlocker::Sidebar)));

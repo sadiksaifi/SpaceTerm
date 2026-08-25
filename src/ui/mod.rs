@@ -1,4 +1,5 @@
 mod button_theme;
+mod command_palette_theme;
 mod menu_theme;
 mod pane_action_menu;
 mod pane_host;
@@ -14,8 +15,10 @@ mod terminal_pane;
 mod terminal_symbols;
 mod window_manager;
 mod workspace_manager;
+mod workspace_search;
 
 use gpui::{App, KeyBinding, MouseDownEvent, Window, actions};
+use spaceterm_ui::{EditCopy, EditPaste};
 
 pub(crate) use pane_host::{PaneHost, PaneHostEvent};
 #[cfg(test)]
@@ -73,6 +76,7 @@ actions!(
         CloseWindow,
         CloseWorkspace,
         CreateWorkspace,
+        SearchWorkspaces,
         OpenLocalProject,
         ToggleSidebar,
         ToggleSidebarFocus,
@@ -114,15 +118,17 @@ pub(crate) fn init(cx: &mut App) {
         button_theme::theme(),
         scrollbar_theme::theme(),
         menu_theme::theme(),
+        command_palette_theme::theme(),
     );
     cx.bind_keys([
         KeyBinding::new("cmd-n", CreateWorkspace, None),
+        KeyBinding::new("cmd-p", SearchWorkspaces, None),
         KeyBinding::new("cmd-o", OpenLocalProject, None),
         KeyBinding::new("cmd-t", CreateWindow, None),
         KeyBinding::new("cmd-w", ClosePane, None),
         KeyBinding::new("cmd-shift-w", CloseWindow, None),
-        KeyBinding::new("cmd-c", CopySelection, Some(TERMINAL_KEY_CONTEXT)),
-        KeyBinding::new("cmd-v", PasteClipboard, Some(TERMINAL_KEY_CONTEXT)),
+        KeyBinding::new("cmd-c", EditCopy, Some(TERMINAL_KEY_CONTEXT)),
+        KeyBinding::new("cmd-v", EditPaste, Some(TERMINAL_KEY_CONTEXT)),
         KeyBinding::new("cmd-f", OpenTerminalFind, Some(TERMINAL_KEY_CONTEXT)),
         KeyBinding::new("cmd-g", FindNext, Some(TERMINAL_KEY_CONTEXT)),
         KeyBinding::new("cmd-shift-g", FindPrevious, Some(TERMINAL_KEY_CONTEXT)),
@@ -224,6 +230,7 @@ mod tests {
             cx.has_global::<spaceterm_ui::ButtonTheme>()
                 && cx.has_global::<spaceterm_ui::ScrollbarTheme>()
                 && cx.has_global::<spaceterm_ui::MenuTheme>()
+                && cx.has_global::<spaceterm_ui::CommandPaletteTheme>()
         }));
     }
 
@@ -293,6 +300,7 @@ mod tests {
         cx.update(init);
         let expected = [
             ("cmd-n", CreateWorkspace.name()),
+            ("cmd-p", SearchWorkspaces.name()),
             ("cmd-o", OpenLocalProject.name()),
             ("cmd-t", CreateWindow.name()),
             ("cmd-w", ClosePane.name()),
