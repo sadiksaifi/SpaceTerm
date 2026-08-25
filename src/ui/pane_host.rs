@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use gpui::prelude::*;
 use gpui::{
     AnyElement, App, Bounds, Context, DefiniteLength, Entity, EventEmitter, MouseDownEvent, Pixels,
-    PromptButton, PromptLevel, Render, Window, div, px, rgba,
+    PromptButton, PromptLevel, Render, Window, deferred, div, px, rgba,
 };
 use gpui_symbols::{Icon, SymbolWeight};
 use spaceterm_ui::{
@@ -931,7 +931,12 @@ impl PaneHost {
 
         split
             .child(split_child(first, axis, ratio))
-            .child(render_divider(split_id, axis, current_offset, host))
+            .child(deferred(render_divider(
+                split_id,
+                axis,
+                current_offset,
+                host,
+            )))
             .child(split_child(second, axis, 1.0 - ratio))
             .into_any_element()
     }
@@ -2234,6 +2239,52 @@ mod tests {
             "the shared handle did not grow the first Pane"
         );
         assert_eq!((state.1, state.2, records.pointer_count()), (None, true, 0));
+    }
+
+    #[gpui::test]
+    fn integrated_split_resize_handle_should_own_both_outer_hitbox_edges(cx: &mut TestAppContext) {
+        cx.update(crate::ui::init);
+        let records = TestTerminalSessionRecords::default();
+        let session_factory: Rc<dyn TerminalSessionFactory> =
+            Rc::new(TestTerminalSessionFactory::new(records.clone()));
+        let session_factory =
+            WorkspaceTerminalSessionFactory::new(session_factory, test_workspace_root());
+        let (host, cx) = cx.add_window_view(|window, cx| {
+            PaneHost::new(WindowId::new(1), session_factory, window, cx)
+        });
+        cx.update(|window, cx| {
+            window.activate_window();
+            host.update(cx, |host, cx| {
+                host.split_focused(SplitAxis::Horizontal, window, cx);
+                host.focus(window, cx);
+            });
+        });
+        cx.run_until_parked();
+        let handle = cx
+            .debug_bounds("split-divider-1-hitbox")
+            .expect("the integrated split ResizeHandle was rendered");
+        let edges = [
+            point(handle.left() + px(0.5), handle.center().y),
+            point(handle.right() - px(0.5), handle.center().y),
+        ];
+
+        for edge in edges {
+            cx.simulate_mouse_move(edge, None, Modifiers::none());
+            cx.simulate_mouse_down(edge, MouseButton::Left, Modifiers::none());
+            assert_eq!(
+                host.read_with(cx, |host, _| host.resizing_split_id),
+                Some(SplitId::new(1)),
+                "the split handle did not own outer hitbox edge {edge:?}"
+            );
+            cx.simulate_mouse_up(edge, MouseButton::Left, Modifiers::none());
+            assert_eq!(
+                host.read_with(cx, |host, _| host.resizing_split_id),
+                None,
+                "the split handle did not release outer hitbox edge {edge:?}"
+            );
+        }
+
+        assert_eq!(records.pointer_count(), 0);
     }
 
     #[test]
