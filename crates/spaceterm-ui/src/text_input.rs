@@ -816,6 +816,8 @@ pub struct TextInput {
     context_menu_open: bool,
     #[cfg(test)]
     shape_count: usize,
+    #[cfg(test)]
+    value_shape_clone_count: usize,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -874,6 +876,8 @@ impl TextInput {
             context_menu_open: false,
             #[cfg(test)]
             shape_count: 0,
+            #[cfg(test)]
+            value_shape_clone_count: 0,
             _subscriptions: subscriptions,
         }
     }
@@ -1744,11 +1748,6 @@ impl TextInput {
         let theme = *cx.global::<TextInputTheme>();
         let paint = theme.variants.paint(self.variant);
         let empty = self.buffer.text.is_empty();
-        let display: SharedString = if empty {
-            self.placeholder.clone()
-        } else {
-            self.buffer.text.clone().into()
-        };
         let color: gpui::Hsla = if self.enabled {
             if empty { paint.placeholder } else { paint.text }
         } else if empty {
@@ -1785,6 +1784,15 @@ impl TextInput {
         {
             return cache.line.clone();
         }
+        let display: SharedString = if empty {
+            self.placeholder.clone()
+        } else {
+            #[cfg(test)]
+            {
+                self.value_shape_clone_count += 1;
+            }
+            self.buffer.text.clone().into()
+        };
         let base = TextRun {
             len: display.len(),
             font,
@@ -3452,11 +3460,24 @@ mod tests {
     #[gpui::test]
     fn caret_phase_changes_reuse_stable_shaping(cx: &mut TestAppContext) {
         let (input, cx) = input(cx, "stable shaping");
-        let before = input.read_with(cx, |input, _| input.shape_count);
+        let before = input.read_with(cx, |input, _| {
+            (input.shape_count, input.value_shape_clone_count)
+        });
         cx.executor().advance_clock(CARET_BLINK_INTERVAL);
         cx.run_until_parked();
-        let after = input.read_with(cx, |input, _| input.shape_count);
-        assert_eq!(after, before);
+        let after_cache_hit = input.read_with(cx, |input, _| {
+            (input.shape_count, input.value_shape_clone_count)
+        });
+        assert_eq!(after_cache_hit, before);
+
+        input.update(cx, |input, cx| {
+            assert!(input.set_value("changed shaping", cx));
+        });
+        cx.run_until_parked();
+        let after_value_change = input.read_with(cx, |input, _| {
+            (input.shape_count, input.value_shape_clone_count)
+        });
+        assert_eq!(after_value_change, (before.0 + 1, before.1 + 1));
     }
 
     #[gpui::test]
