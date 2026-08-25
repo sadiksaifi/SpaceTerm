@@ -80,6 +80,8 @@ impl WorkspaceSearchItem {
 pub(super) struct WorkspaceSearch {
     palette: Entity<CommandPalette<WorkspaceId>>,
     open: bool,
+    open_generation: Option<u64>,
+    activation_generation: Option<u64>,
     pending_open: Option<u64>,
     next_open_generation: u64,
 }
@@ -116,6 +118,8 @@ impl WorkspaceSearch {
         Self {
             palette,
             open: false,
+            open_generation: None,
+            activation_generation: None,
             pending_open: None,
             next_open_generation: 0,
         }
@@ -187,21 +191,29 @@ impl WorkspaceSearch {
     ) {
         match event {
             CommandPaletteEvent::Lifecycle(CommandPaletteLifecycleEvent::Opened) => {
+                let generation = self.pending_open.take().unwrap_or_else(|| {
+                    self.next_open_generation = self.next_open_generation.wrapping_add(1);
+                    self.next_open_generation
+                });
                 self.open = true;
-                self.pending_open = None;
+                self.open_generation = Some(generation);
                 cx.emit(WorkspaceSearchEvent::StateChanged);
                 cx.notify();
             }
             CommandPaletteEvent::Lifecycle(CommandPaletteLifecycleEvent::Closed(_)) => {
-                cx.defer_in(window, |search, _, cx| {
+                let closing_generation = self.activation_generation.take().or(self.open_generation);
+                cx.defer_in(window, move |search, _, cx| {
+                    if search.open_generation != closing_generation {
+                        return;
+                    }
                     search.open = false;
-                    search.pending_open = None;
+                    search.open_generation = None;
                     cx.emit(WorkspaceSearchEvent::StateChanged);
                     cx.notify();
                 });
             }
             CommandPaletteEvent::Activated(activation) => {
-                self.pending_open = None;
+                self.activation_generation = self.open_generation;
                 cx.emit(WorkspaceSearchEvent::WorkspaceSelected(
                     *activation.item_id(),
                 ));
@@ -245,6 +257,7 @@ mod tests {
         search: Entity<WorkspaceSearch>,
         prior_focus: FocusHandle,
         events: Rc<RefCell<Vec<(WorkspaceSearchEvent, bool)>>>,
+        reopen_on_selection: bool,
     }
 
     impl WorkspaceSearchHarness {
@@ -252,12 +265,33 @@ mod tests {
             let search = cx.new(|cx| WorkspaceSearch::new(window, cx));
             let events = Rc::new(RefCell::new(Vec::new()));
             let received_events = Rc::clone(&events);
-            cx.subscribe(
+            cx.subscribe_in(
                 &search,
-                move |_, search, event: &WorkspaceSearchEvent, cx| {
+                window,
+                move |harness, search, event: &WorkspaceSearchEvent, window, cx| {
                     received_events
                         .borrow_mut()
                         .push((event.clone(), search.read(cx).blocks_terminal_input()));
+                    if matches!(event, WorkspaceSearchEvent::WorkspaceSelected(_))
+                        && harness.reopen_on_selection
+                    {
+                        harness.reopen_on_selection = false;
+                        search.update(cx, |search, cx| {
+                            search.open(
+                                vec![WorkspaceSearchItem::new(
+                                    WorkspaceId::new(9),
+                                    "Reopened".to_owned(),
+                                    "/reopened".to_owned(),
+                                    false,
+                                    true,
+                                    1,
+                                    1,
+                                )],
+                                window,
+                                cx,
+                            );
+                        });
+                    }
                 },
             )
             .detach();
@@ -265,6 +299,7 @@ mod tests {
                 search,
                 prior_focus: cx.focus_handle(),
                 events,
+                reopen_on_selection: false,
             }
         }
     }
@@ -487,6 +522,26 @@ mod tests {
                 (WorkspaceSearchEvent::StateChanged, false),
             ]
         );
+    }
+
+    #[gpui::test]
+    fn activation_reopen_should_ignore_the_old_close_and_keep_blocking(cx: &mut TestAppContext) {
+        let (harness, search, cx) = workspace_search(cx);
+        open(&search, vec![item(7, "Target", "/target")], cx);
+        harness.update(cx, |harness, _| harness.reopen_on_selection = true);
+
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+
+        let state = search.read_with(cx, |search, cx| {
+            (
+                search.open,
+                search.pending_open(),
+                search.palette().read(cx).is_open(),
+                search.blocks_terminal_input(),
+            )
+        });
+        assert_eq!(state, (true, None, true, true));
     }
 
     #[gpui::test]

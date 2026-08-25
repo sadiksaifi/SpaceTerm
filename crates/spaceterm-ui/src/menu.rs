@@ -1145,7 +1145,7 @@ impl<A: Clone + 'static> MenuControl<A> {
             }) as InternalActivation
         });
         let state = window.use_keyed_state(self.id.clone(), cx, MenuState::new);
-        let closed_while_synchronizing = state.update(cx, |state, cx| {
+        let closed_reservation = state.update(cx, |state, cx| {
             let should_close = state.open && !enabled;
             state.synchronize(
                 entries,
@@ -1156,13 +1156,12 @@ impl<A: Clone + 'static> MenuControl<A> {
                 self.kind == TriggerKind::Context,
                 lifecycle.clone(),
             );
-            if should_close {
-                state.dismiss(MenuCloseReason::Disabled, true, Some(window), cx);
-            }
             should_close
+                .then(|| state.dismiss(MenuCloseReason::Disabled, true, Some(window), cx))
+                .flatten()
         });
-        if closed_while_synchronizing {
-            release_window(&state.downgrade(), window.window_handle().window_id(), cx);
+        if let Some(reservation) = closed_reservation {
+            release_window(reservation, window.window_handle().window_id(), cx);
         }
 
         let (open, focus_handle) = {
@@ -1432,9 +1431,18 @@ fn convert_entries<A: Clone + 'static>(
     converted
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct MenuReservation(u64);
+
+struct MenuOwnership {
+    owner: WeakEntity<MenuState>,
+    reservation: MenuReservation,
+}
+
 #[derive(Default)]
 struct MenuCoordinator {
-    owners: HashMap<WindowId, WeakEntity<MenuState>>,
+    owners: HashMap<WindowId, MenuOwnership>,
+    next_reservation: u64,
 }
 impl Global for MenuCoordinator {}
 
@@ -1442,25 +1450,39 @@ fn reserve_window(
     owner: &Entity<MenuState>,
     window: &mut Window,
     cx: &mut App,
-) -> Option<WeakEntity<MenuState>> {
+) -> (MenuReservation, Option<WeakEntity<MenuState>>) {
     let window_id = window.window_handle().window_id();
     let weak = owner.downgrade();
     cx.update_global::<MenuCoordinator, _>(|coordinator, _| {
-        coordinator
+        coordinator.next_reservation = coordinator.next_reservation.wrapping_add(1);
+        let reservation = MenuReservation(coordinator.next_reservation);
+        let previous = coordinator
             .owners
-            .insert(window_id, weak.clone())
-            .filter(|previous| previous != &weak)
+            .insert(
+                window_id,
+                MenuOwnership {
+                    owner: weak.clone(),
+                    reservation,
+                },
+            )
+            .map(|ownership| ownership.owner)
+            .filter(|previous| previous != &weak);
+        (reservation, previous)
     })
 }
 
-fn release_window(owner: &WeakEntity<MenuState>, window_id: WindowId, cx: &mut App) {
+fn release_window(reservation: MenuReservation, window_id: WindowId, cx: &mut App) {
     cx.update_global::<MenuCoordinator, _>(|coordinator, _| {
-        if coordinator.owners.get(&window_id) == Some(owner) {
+        if coordinator
+            .owners
+            .get(&window_id)
+            .is_some_and(|ownership| ownership.reservation == reservation)
+        {
             coordinator.owners.remove(&window_id);
         }
         coordinator
             .owners
-            .retain(|_, owner| owner.upgrade().is_some());
+            .retain(|_, ownership| ownership.owner.upgrade().is_some());
     });
 }
 
@@ -1471,6 +1493,8 @@ struct MenuReplacement {
 
 struct MenuDismissal {
     lifecycle: Option<MenuLifecycleHandler>,
+    open_generation: u64,
+    reservation: Option<MenuReservation>,
 }
 
 impl MenuDismissal {
@@ -1496,7 +1520,7 @@ pub(crate) fn window_menu_is_open(window: &Window, cx: &App) -> bool {
     cx.global::<MenuCoordinator>()
         .owners
         .get(&window_id)
-        .and_then(WeakEntity::upgrade)
+        .and_then(|ownership| ownership.owner.upgrade())
         .is_some_and(|owner| owner.read(cx).open)
 }
 
@@ -1508,16 +1532,16 @@ pub(crate) fn dismiss_active_menu_for_replacement(
         return None;
     }
     let window_id = window.window_handle().window_id();
-    let owner = cx
+    let (owner, reservation) = cx
         .global::<MenuCoordinator>()
         .owners
         .get(&window_id)
-        .cloned()?;
+        .map(|ownership| (ownership.owner.clone(), ownership.reservation))?;
     let replacement = owner
         .update(cx, |state, cx| state.replace_without_lifecycle(cx))
         .ok()
         .flatten();
-    release_window(&owner, window_id, cx);
+    release_window(reservation, window_id, cx);
     let replacement = replacement?;
     if let Some(handler) = replacement.lifecycle {
         handler(&MenuLifecycleEvent::Closed(MenuCloseReason::Replaced), cx);
@@ -1540,6 +1564,8 @@ struct MenuState {
     freeze_entries_while_open: bool,
     awaiting_context_snapshot: bool,
     open: bool,
+    open_generation: u64,
+    reservation: Option<MenuReservation>,
     trigger_bounds: Option<Bounds<Pixels>>,
     context_anchor: Option<Point<Pixels>>,
     restore_focus: Option<WeakFocusHandle>,
@@ -1560,23 +1586,27 @@ impl MenuState {
         let focus_handle = cx.focus_handle();
         cx.on_blur(&focus_handle, window, |state, window, cx| {
             if state.open {
-                let owner = cx.entity().downgrade();
                 let window_id = window.window_handle().window_id();
-                state.dismiss(MenuCloseReason::Outside, false, None, cx);
-                release_window(&owner, window_id, cx);
+                if let Some(reservation) = state.dismiss(MenuCloseReason::Outside, false, None, cx)
+                {
+                    release_window(reservation, window_id, cx);
+                }
             }
         })
         .detach();
         cx.observe_window_activation(window, |state, window, cx| {
             if state.open && !window.is_window_active() {
-                let owner = cx.entity().downgrade();
                 let window_id = window.window_handle().window_id();
-                state.dismiss(MenuCloseReason::Deactivated, false, None, cx);
-                release_window(&owner, window_id, cx);
+                if let Some(reservation) =
+                    state.dismiss(MenuCloseReason::Deactivated, false, None, cx)
+                {
+                    release_window(reservation, window_id, cx);
+                }
             }
         })
         .detach();
         cx.on_release(|state, cx| {
+            let reservation = state.reservation.take();
             if state.open {
                 state.open = false;
                 state.emit_lifecycle(
@@ -1584,10 +1614,8 @@ impl MenuState {
                     cx,
                 );
             }
-            if let Some(window_id) = state.window_id.take() {
-                cx.update_global::<MenuCoordinator, _>(|coordinator, _| {
-                    coordinator.owners.remove(&window_id);
-                });
+            if let (Some(window_id), Some(reservation)) = (state.window_id.take(), reservation) {
+                release_window(reservation, window_id, cx);
             }
         })
         .detach();
@@ -1614,6 +1642,8 @@ impl MenuState {
             freeze_entries_while_open: false,
             awaiting_context_snapshot: false,
             open: false,
+            open_generation: 0,
+            reservation: None,
             trigger_bounds: None,
             context_anchor: None,
             restore_focus: None,
@@ -1701,6 +1731,7 @@ impl MenuState {
         &mut self,
         context_anchor: Option<Point<Pixels>>,
         direction: OpenDirection,
+        reservation: Option<MenuReservation>,
         window: &mut Window,
         cx: &mut gpui::Context<Self>,
     ) -> bool {
@@ -1716,6 +1747,8 @@ impl MenuState {
         self.window_id = Some(window.window_handle().window_id());
         self.context_anchor = context_anchor;
         self.open = true;
+        self.open_generation = self.open_generation.wrapping_add(1);
+        self.reservation = reservation;
         self.awaiting_context_snapshot = self.freeze_entries_while_open;
         self.active_path.clear();
         self.highlighted.clear();
@@ -1739,12 +1772,11 @@ impl MenuState {
         restore: bool,
         window: Option<&mut Window>,
         cx: &mut gpui::Context<Self>,
-    ) -> bool {
-        let Some(dismissal) = self.begin_dismiss(restore, window, cx) else {
-            return false;
-        };
+    ) -> Option<MenuReservation> {
+        let dismissal = self.begin_dismiss(restore, window, cx)?;
+        let reservation = dismissal.reservation;
         dismissal.finish(reason, cx);
-        true
+        reservation
     }
 
     fn begin_dismiss(
@@ -1758,6 +1790,7 @@ impl MenuState {
         }
         self.open = false;
         self.awaiting_context_snapshot = false;
+        let reservation = self.reservation.take();
         self.window_id = None;
         self.context_anchor = None;
         self.active_path.clear();
@@ -1781,6 +1814,8 @@ impl MenuState {
         cx.notify();
         Some(MenuDismissal {
             lifecycle: self.lifecycle.clone(),
+            open_generation: self.open_generation,
+            reservation,
         })
     }
 
@@ -1793,6 +1828,7 @@ impl MenuState {
         }
         self.open = false;
         self.awaiting_context_snapshot = false;
+        self.reservation = None;
         self.window_id = None;
         self.context_anchor = None;
         self.active_path.clear();
@@ -2155,12 +2191,13 @@ fn open_menu(
     let Some(entity) = state.upgrade() else {
         return;
     };
-    let can_open =
-        entity.read(cx).enabled && (anchor.is_some() || entity.read(cx).trigger_bounds.is_some());
+    let can_open = !entity.read(cx).open
+        && entity.read(cx).enabled
+        && (anchor.is_some() || entity.read(cx).trigger_bounds.is_some());
     if !can_open {
         return;
     }
-    let previous = reserve_window(&entity, window, cx);
+    let (reservation, previous) = reserve_window(&entity, window, cx);
     let replacement = previous.and_then(|previous| {
         previous
             .update(cx, |state, cx| state.replace_without_lifecycle(cx))
@@ -2168,7 +2205,7 @@ fn open_menu(
             .flatten()
     });
     let opened = entity.update(cx, |state, cx| {
-        let opened = state.open(anchor, direction, window, cx);
+        let opened = state.open(anchor, direction, Some(reservation), window, cx);
         if opened && let Some(replacement) = &replacement {
             state.restore_focus = replacement.restore_focus.clone();
         }
@@ -2179,7 +2216,7 @@ fn open_menu(
             handler(&MenuLifecycleEvent::Closed(MenuCloseReason::Replaced), cx);
         }
     } else {
-        release_window(&entity.downgrade(), window.window_handle().window_id(), cx);
+        release_window(reservation, window.window_handle().window_id(), cx);
     }
 }
 
@@ -2191,13 +2228,14 @@ fn dismiss_menu(
     cx: &mut App,
 ) {
     let window_id = window.window_handle().window_id();
-    let closed = state
+    let reservation = state
         .update(cx, |menu, cx| {
             menu.dismiss(reason, restore, Some(window), cx)
         })
-        .unwrap_or(false);
-    if closed {
-        release_window(state, window_id, cx);
+        .ok()
+        .flatten();
+    if let Some(reservation) = reservation {
+        release_window(reservation, window_id, cx);
     }
 }
 
@@ -2217,8 +2255,17 @@ fn activate_menu(
         return;
     };
     activation(source, window, cx);
-    release_window(state, window_id, cx);
-    dismissal.finish(MenuCloseReason::Activated, cx);
+    if let Some(reservation) = dismissal.reservation {
+        release_window(reservation, window_id, cx);
+    }
+    let superseded = state
+        .read_with(cx, |menu, _| {
+            menu.open_generation != dismissal.open_generation
+        })
+        .unwrap_or(false);
+    if !superseded {
+        dismissal.finish(MenuCloseReason::Activated, cx);
+    }
 }
 
 fn render_overlay(state: Entity<MenuState>, window: &mut Window, cx: &mut App) -> AnyElement {
@@ -3772,7 +3819,7 @@ mod tests {
                     false,
                     lifecycle,
                 );
-                state.open(None, OpenDirection::First, window, cx);
+                state.open(None, OpenDirection::First, None, window, cx);
             });
         });
         cx.run_until_parked();
@@ -3869,6 +3916,7 @@ mod tests {
                 state.open(
                     Some(point(px(24.0), px(24.0))),
                     OpenDirection::First,
+                    None,
                     window,
                     cx,
                 );
@@ -3959,6 +4007,84 @@ mod tests {
                 (1, MenuLifecycleEvent::Opened),
                 (2, MenuLifecycleEvent::Opened),
                 (1, MenuLifecycleEvent::Closed(MenuCloseReason::Replaced)),
+            ]
+        );
+    }
+
+    #[gpui::test]
+    fn same_menu_reopen_during_activation_should_keep_new_reservation_and_lifecycle(
+        cx: &mut TestAppContext,
+    ) {
+        let (root, cx) = state_harness(cx);
+        let state = root.read_with(cx, |root, _| root.first.clone());
+        let weak_state = state.downgrade();
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let lifecycle_events = events.clone();
+        let style = test_theme().resolve(MenuSize::Regular);
+        cx.update(|window, app| {
+            state.update(app, |state, _| {
+                state.trigger_bounds = Some(Bounds::new(
+                    point(px(10.0), px(10.0)),
+                    size(px(20.0), px(20.0)),
+                ));
+                state.synchronize(
+                    vec![inert("Reopen", false)],
+                    style,
+                    MenuPlacementConfig::default(),
+                    true,
+                    true,
+                    false,
+                    Some(Rc::new(move |event, _| {
+                        lifecycle_events
+                            .borrow_mut()
+                            .push(ActivationOrderEvent::Lifecycle(*event));
+                    })),
+                );
+            });
+            open_menu(&weak_state, None, OpenDirection::First, window, app);
+        });
+
+        let activation_events = events.clone();
+        let reopening_state = weak_state.clone();
+        let activation: InternalActivation = Rc::new(move |_, window, cx| {
+            activation_events
+                .borrow_mut()
+                .push(ActivationOrderEvent::Activation);
+            open_menu(&reopening_state, None, OpenDirection::First, window, cx);
+        });
+        cx.update(|window, app| {
+            activate_menu(
+                &weak_state,
+                &activation,
+                MenuActivationSource::Keyboard,
+                window,
+                app,
+            );
+        });
+
+        let state_is_coherent = cx.update(|window, app| {
+            let window_id = window.window_handle().window_id();
+            let reservation = state.read(app).reservation;
+            let owns_window = app
+                .global::<MenuCoordinator>()
+                .owners
+                .get(&window_id)
+                .is_some_and(|ownership| {
+                    ownership.owner == weak_state && Some(ownership.reservation) == reservation
+                });
+            (
+                state.read(app).open,
+                owns_window,
+                window_menu_is_open(window, app),
+            )
+        });
+        assert_eq!(state_is_coherent, (true, true, true));
+        assert_eq!(
+            events.borrow().as_slice(),
+            [
+                ActivationOrderEvent::Lifecycle(MenuLifecycleEvent::Opened),
+                ActivationOrderEvent::Activation,
+                ActivationOrderEvent::Lifecycle(MenuLifecycleEvent::Opened),
             ]
         );
     }
