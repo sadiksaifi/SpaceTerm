@@ -131,9 +131,15 @@ impl WorkspaceSearch {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let items = items
+            .into_iter()
+            .map(WorkspaceSearchItem::into_palette_item)
+            .collect();
         if self.open {
-            self.palette
-                .update(cx, |palette, cx| palette.open(window, cx));
+            self.palette.update(cx, |palette, cx| {
+                palette.set_items(items, cx);
+                palette.open(window, cx);
+            });
             return;
         }
 
@@ -145,10 +151,6 @@ impl WorkspaceSearch {
 
         let search = cx.entity();
         let palette = self.palette.clone();
-        let items = items
-            .into_iter()
-            .map(WorkspaceSearchItem::into_palette_item)
-            .collect();
         window.defer(cx, move |window, cx| {
             if search.read(cx).pending_open != Some(generation) {
                 return;
@@ -431,6 +433,29 @@ mod tests {
                 .query()
                 .to_owned()),
             "a"
+        );
+    }
+
+    #[gpui::test]
+    fn repeated_open_while_visible_should_refresh_items_and_preserve_the_query(
+        cx: &mut TestAppContext,
+    ) {
+        let (_, search, cx) = workspace_search(cx);
+        open(&search, vec![item(1, "Stale", "/stale")], cx);
+        cx.simulate_keystrokes("c");
+        cx.run_until_parked();
+
+        open(&search, vec![item(2, "Current", "/current")], cx);
+
+        assert_eq!(
+            search.read_with(cx, |search, cx| {
+                let palette = search.palette();
+                (
+                    palette.read(cx).query().to_owned(),
+                    palette.read(cx).selected_item_id().copied(),
+                )
+            }),
+            ("c".to_owned(), Some(WorkspaceId::new(2)))
         );
     }
 
