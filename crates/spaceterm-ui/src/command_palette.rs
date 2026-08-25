@@ -1608,6 +1608,11 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
         }
         self.pointer_press = None;
         inside
+            && self.matches.iter().any(|matched| {
+                self.items
+                    .get(matched.item_index)
+                    .is_some_and(|item| !item.disabled && item.id == *id)
+            })
     }
 
     fn focus_next_control(&self, window: &mut Window, cx: &mut gpui::Context<Self>) {
@@ -1654,10 +1659,11 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
         let Some(item_id) = self.selected.clone() else {
             return;
         };
-        let enabled = self
-            .items
-            .iter()
-            .any(|item| item.id == item_id && !item.disabled);
+        let enabled = self.matches.iter().any(|matched| {
+            self.items
+                .get(matched.item_index)
+                .is_some_and(|item| item.id == item_id && !item.disabled)
+        });
         if !enabled {
             return;
         }
@@ -3318,6 +3324,36 @@ mod tests {
         cx.simulate_mouse_move(second, MouseButton::Left, Modifiers::default());
         cx.simulate_mouse_up(second, MouseButton::Left, Modifiers::default());
         cx.run_until_parked();
+
+        assert!(palette.read_with(cx, |palette, _| palette.is_open()));
+        assert!(
+            !events
+                .borrow()
+                .iter()
+                .any(|event| matches!(event, CommandPaletteEvent::Activated(_)))
+        );
+    }
+
+    #[gpui::test]
+    fn pointer_release_should_not_activate_a_row_removed_by_a_query_change(
+        cx: &mut TestAppContext,
+    ) {
+        let (root, palette, events, _, cx) = palette_window(cx);
+        open_palette(&root, &palette, cx);
+        cx.update(|window, cx| {
+            palette.update(cx, |palette, cx| {
+                palette.pointer_down(3, cx);
+                palette.set_query("open", cx);
+                if palette.pointer_up(&3, true) {
+                    palette.selected = Some(3);
+                    palette.activate_selected(
+                        CommandPaletteActivationSource::Pointer,
+                        window,
+                        cx,
+                    );
+                }
+            });
+        });
 
         assert!(palette.read_with(cx, |palette, _| palette.is_open()));
         assert!(
