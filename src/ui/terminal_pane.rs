@@ -5505,6 +5505,55 @@ mod tests {
     }
 
     #[gpui::test]
+    fn terminal_find_enter_and_escape_work_after_each_button_receives_tab_focus(
+        cx: &mut TestAppContext,
+    ) {
+        let (pane, cx, records) = connected_terminal_pane(cx);
+
+        for tab_count in 1..=3 {
+            cx.dispatch_action(OpenTerminalFind);
+            pane.update(cx, |pane, cx| {
+                Arc::make_mut(&mut pane.screen).find =
+                    Some(Arc::new(crate::terminal::TerminalFindSnapshot {
+                        generation: pane.find_generation,
+                        total_matches: 1,
+                        current_match: Some(1),
+                        visible_spans: Arc::from([]),
+                    }));
+                cx.notify();
+            });
+            cx.run_until_parked();
+            let command_count = records.commands().len();
+
+            for _ in 0..tab_count {
+                cx.simulate_keystrokes("tab");
+            }
+            cx.simulate_keystrokes("enter escape");
+            cx.run_until_parked();
+
+            assert!(
+                pane.read_with(cx, |pane, _| pane.find_input.is_none()),
+                "Escape did not close Find after tabbing to button {tab_count}"
+            );
+            let commands = records.commands();
+            assert!(
+                commands.iter().skip(command_count).any(|call| matches!(
+                    call.command,
+                    RecordedSessionCommand::NavigateFind(_, FindDirection::Next)
+                )),
+                "Enter did not navigate after tabbing to button {tab_count}"
+            );
+            assert!(
+                commands
+                    .iter()
+                    .skip(command_count)
+                    .any(|call| matches!(call.command, RecordedSessionCommand::EndFind(_))),
+                "Escape did not end Find after tabbing to button {tab_count}"
+            );
+        }
+    }
+
+    #[gpui::test]
     fn terminal_find_tab_delegates_to_its_composite_controls(cx: &mut TestAppContext) {
         let (pane, cx, records) = connected_terminal_pane(cx);
         cx.dispatch_action(OpenTerminalFind);
