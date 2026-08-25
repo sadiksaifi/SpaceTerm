@@ -105,7 +105,10 @@ propagation. A retained read-only status handle lets application policy derive w
 owns an interaction without duplicating its pointer lifecycle. The control adds no presentation.
 The application owns top-chrome layout and paint, Terminal Input Focus coordination, actual
 Operating-System Window movement, and zoom, maximize, restore, or preference policy for double
-activation.
+activation. One injected macOS platform adapter retains the original primary mouse-down, targets
+the exact GPUI-backed Operating-System Window, and hands accepted movement to AppKit. The adapter's
+accepted response ends the control-owned active interaction because native movement may consume the
+pointer release.
 
 The internal library's Text Input is an entity-backed, platform-neutral single-line editor with
 stable identity and a mandatory logical name. It exclusively owns bounded text, directional

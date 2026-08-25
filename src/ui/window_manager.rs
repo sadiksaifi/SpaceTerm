@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
 use gpui::prelude::*;
 use gpui::{
@@ -9,7 +10,7 @@ use gpui_symbols::{Icon, SymbolWeight};
 use spaceterm_ui::{
     ButtonSize, ButtonVariant, ContextMenu, IconButton, Menu, MenuAlignment, MenuLifecycleEvent,
     MenuPlacement, MenuPlacementConfig, MenuSize, WindowDragRegion, WindowDragRegionEvent,
-    WindowDragRegionStatus,
+    WindowDragRegionResponse, WindowDragRegionStatus,
 };
 
 use super::button_theme;
@@ -26,6 +27,11 @@ use super::{
 use crate::domain::{
     CloseWindowOutcome, PaneId, SplitAxis, WindowCollection, WindowError, WindowId,
     WorkspaceDirectoryIdentity, WorkspaceId, ZoomState,
+};
+#[cfg(test)]
+use crate::platform::macos_window_drag::MacosOperatingSystemWindowDragPlatform;
+use crate::platform::macos_window_drag::{
+    OperatingSystemWindowDragError, OperatingSystemWindowDragPlatform,
 };
 use crate::terminal::{
     NativeServiceOrigin, NativeServiceStatus, SelectionCopy, WorkspaceTerminalSessionFactory,
@@ -94,6 +100,7 @@ pub(crate) struct WindowManager {
     window_menu: Option<WindowMenuState>,
     parent_focus_blocker: Option<TerminalFocusBlocker>,
     window_selector_pressed: Option<WindowId>,
+    operating_system_window_drag_platform: Rc<dyn OperatingSystemWindowDragPlatform>,
     window_drag_status: WindowDragRegionStatus,
     window_bar_scroll_handle: ScrollHandle,
     close_workspace_requested: bool,
@@ -104,8 +111,23 @@ impl WindowManager {
         eprintln!("failed to {operation} Window: {error}");
     }
 
+    #[cfg(test)]
     pub(crate) fn new(
         session_factory: WorkspaceTerminalSessionFactory,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        Self::new_with_operating_system_window_drag_platform(
+            session_factory,
+            Rc::new(MacosOperatingSystemWindowDragPlatform::default()),
+            window,
+            cx,
+        )
+    }
+
+    pub(crate) fn new_with_operating_system_window_drag_platform(
+        session_factory: WorkspaceTerminalSessionFactory,
+        operating_system_window_drag_platform: Rc<dyn OperatingSystemWindowDragPlatform>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -121,6 +143,7 @@ impl WindowManager {
             window_menu: None,
             parent_focus_blocker: None,
             window_selector_pressed: None,
+            operating_system_window_drag_platform,
             window_drag_status: WindowDragRegionStatus::new(),
             window_bar_scroll_handle: ScrollHandle::new(),
             close_workspace_requested: false,
@@ -348,15 +371,49 @@ impl WindowManager {
         event: WindowDragRegionEvent,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) {
+    ) -> WindowDragRegionResponse {
         match event {
-            WindowDragRegionEvent::InteractionStarted { .. }
-            | WindowDragRegionEvent::InteractionFinished { .. } => {
+            WindowDragRegionEvent::InteractionStarted { .. } => {
+                if let Err(error) = self
+                    .operating_system_window_drag_platform
+                    .interaction_started()
+                {
+                    Self::report_operating_system_window_drag_error("begin", error);
+                }
                 self.sync_terminal_focus_blocker(cx);
+                WindowDragRegionResponse::Continue
             }
-            WindowDragRegionEvent::MoveRequested { .. } => window.start_window_move(),
-            WindowDragRegionEvent::DoubleActivationRequested => window.titlebar_double_click(),
+            WindowDragRegionEvent::MoveRequested { .. } => {
+                match self
+                    .operating_system_window_drag_platform
+                    .start_window_move(window)
+                {
+                    Ok(()) => WindowDragRegionResponse::OperatingSystemWindowMoveStarted,
+                    Err(error) => {
+                        Self::report_operating_system_window_drag_error("start", error);
+                        WindowDragRegionResponse::Continue
+                    }
+                }
+            }
+            WindowDragRegionEvent::DoubleActivationRequested => {
+                self.operating_system_window_drag_platform
+                    .double_activation_requested(window);
+                WindowDragRegionResponse::Continue
+            }
+            WindowDragRegionEvent::InteractionFinished { .. } => {
+                self.operating_system_window_drag_platform
+                    .interaction_finished();
+                self.sync_terminal_focus_blocker(cx);
+                WindowDragRegionResponse::Continue
+            }
         }
+    }
+
+    fn report_operating_system_window_drag_error(
+        operation: &str,
+        error: OperatingSystemWindowDragError,
+    ) {
+        eprintln!("failed to {operation} Operating-System Window drag: {error}");
     }
 
     fn begin_window_selector(&mut self, window_id: WindowId, cx: &mut Context<Self>) {
@@ -1090,9 +1147,11 @@ impl WindowManager {
         .debug_selector("window-bar-drag-region")
         .on_event(move |event, window, cx| {
             let event = *event;
-            let _ = drag_manager.update(cx, |manager, cx| {
-                manager.handle_operating_system_window_drag_event(event, window, cx);
-            });
+            drag_manager
+                .update(cx, |manager, cx| {
+                    manager.handle_operating_system_window_drag_event(event, window, cx)
+                })
+                .unwrap_or_default()
         });
 
         div()
@@ -1185,12 +1244,13 @@ mod tests {
     use std::sync::Arc;
 
     use gpui::{
-        Modifiers, MouseExitEvent, ScrollDelta, ScrollWheelEvent, TestAppContext, TouchPhase,
-        VisualTestContext, point,
+        Modifiers, MouseDownEvent, MouseExitEvent, MouseUpEvent, ScrollDelta, ScrollWheelEvent,
+        TestAppContext, TouchPhase, VisualTestContext, point,
     };
 
     use super::*;
     use crate::domain::PaneId;
+    use crate::platform::macos_window_drag::RecordingOperatingSystemWindowDragPlatform;
     use crate::terminal::testing::{
         RecordedSessionCommand, TestTerminalSessionFactory, TestTerminalSessionRecords,
     };
@@ -1219,6 +1279,39 @@ mod tests {
         });
         cx.run_until_parked();
         (manager, records, cx)
+    }
+
+    fn window_manager_with_operating_system_window_drag_platform(
+        cx: &mut TestAppContext,
+    ) -> (
+        Entity<WindowManager>,
+        Rc<RecordingOperatingSystemWindowDragPlatform>,
+        &mut VisualTestContext,
+    ) {
+        cx.update(crate::ui::init);
+        let records = TestTerminalSessionRecords::default();
+        let session_factory: Rc<dyn TerminalSessionFactory> =
+            Rc::new(TestTerminalSessionFactory::new(records));
+        let session_factory = WorkspaceTerminalSessionFactory::new(
+            session_factory,
+            PathBuf::from("/tmp/spaceterm-window-manager-drag-test"),
+        );
+        let platform = Rc::new(RecordingOperatingSystemWindowDragPlatform::default());
+        let injected_platform = Rc::clone(&platform);
+        let (manager, cx) = cx.add_window_view(move |window, cx| {
+            WindowManager::new_with_operating_system_window_drag_platform(
+                session_factory,
+                injected_platform,
+                window,
+                cx,
+            )
+        });
+        cx.update(|window, cx| {
+            window.activate_window();
+            manager.update(cx, |manager, cx| manager.focus(window, cx));
+        });
+        cx.run_until_parked();
+        (manager, platform, cx)
     }
 
     fn click(selector: &'static str, cx: &mut VisualTestContext) {
@@ -1865,6 +1958,51 @@ mod tests {
             (1, RecordedSessionCommand::Focus(true))
         ));
         assert!(matches!(commands[2], (1, RecordedSessionCommand::Key(_))));
+    }
+
+    #[gpui::test]
+    fn window_chrome_should_forward_threshold_crossing_and_double_activation_to_platform_policy(
+        cx: &mut TestAppContext,
+    ) {
+        let (_manager, platform, cx) =
+            window_manager_with_operating_system_window_drag_platform(cx);
+        let chrome = cx
+            .debug_bounds("window-bar-drag-region")
+            .expect("Window drag region must be rendered")
+            .center();
+
+        cx.simulate_mouse_down(chrome, MouseButton::Left, Modifiers::none());
+        cx.simulate_mouse_move(
+            point(chrome.x + px(2.0), chrome.y),
+            MouseButton::Left,
+            Modifiers::none(),
+        );
+        cx.simulate_mouse_move(
+            point(chrome.x + px(8.0), chrome.y),
+            MouseButton::Left,
+            Modifiers::none(),
+        );
+        cx.simulate_mouse_move(
+            point(chrome.x + px(16.0), chrome.y),
+            MouseButton::Left,
+            Modifiers::none(),
+        );
+        cx.simulate_mouse_up(chrome, MouseButton::Left, Modifiers::none());
+        cx.simulate_event(MouseDownEvent {
+            button: MouseButton::Left,
+            position: chrome,
+            modifiers: Modifiers::none(),
+            click_count: 2,
+            first_mouse: false,
+        });
+        cx.simulate_event(MouseUpEvent {
+            button: MouseButton::Left,
+            position: chrome,
+            modifiers: Modifiers::none(),
+            click_count: 2,
+        });
+
+        assert_eq!(platform.counts(), (1, 1, 1, 1));
     }
 
     #[gpui::test]

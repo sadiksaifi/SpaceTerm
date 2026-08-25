@@ -49,7 +49,7 @@ pub use text_input::{
 };
 pub use window_drag_region::{
     WindowDragFinishReason, WindowDragInteractionId, WindowDragRegion, WindowDragRegionEvent,
-    WindowDragRegionStatus,
+    WindowDragRegionResponse, WindowDragRegionStatus,
 };
 
 /// Installs shared control themes and platform-neutral control behavior.

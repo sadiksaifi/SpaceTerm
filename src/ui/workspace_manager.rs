@@ -14,7 +14,7 @@ use spaceterm_ui::{
     MenuLifecycleEvent, MenuSize, MiddleTruncatedText, OverlayScrollbar, OverlayScrollbarEvent,
     ResizeAxis, ResizeFinishReason, ResizeHandle, ResizeHandleEvent, ResizeInputSource,
     ScrollMetrics, TextInput, TextInputEvent, TextInputVariant, WindowDragRegion,
-    WindowDragRegionEvent, WindowDragRegionStatus,
+    WindowDragRegionEvent, WindowDragRegionResponse, WindowDragRegionStatus,
 };
 
 use super::button_theme;
@@ -38,6 +38,10 @@ use crate::domain::{
     WorkspaceDirectoryIdentity, WorkspaceError, WorkspaceId, WorkspaceKind,
 };
 use crate::platform::local_project_picker::{LocalProjectPicker, NativeLocalProjectPicker};
+use crate::platform::macos_window_drag::{
+    MacosOperatingSystemWindowDragPlatform, OperatingSystemWindowDragError,
+    OperatingSystemWindowDragPlatform,
+};
 use crate::platform::workspace_directory::validate_workspace_directory;
 use crate::terminal::{
     NativeServiceOrigin, NativeServiceStatus, SelectionCopy, TerminalSessionFactory,
@@ -129,6 +133,7 @@ pub(crate) struct WorkspaceManager {
     rename: Option<WorkspaceRenameState>,
     sidebar_resize_interaction: bool,
     suppress_sidebar_pointer_until_release: bool,
+    operating_system_window_drag_platform: Rc<dyn OperatingSystemWindowDragPlatform>,
     window_drag_status: WindowDragRegionStatus,
     pending_final_window_closes: BTreeSet<WorkspaceId>,
 }
@@ -140,15 +145,17 @@ impl WorkspaceManager {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        Self::new_with_local_project_picker(
+        Self::new_with_adapters(
             session_factory,
             default_workspace_root,
             Rc::new(NativeLocalProjectPicker),
+            Rc::new(MacosOperatingSystemWindowDragPlatform::default()),
             window,
             cx,
         )
     }
 
+    #[cfg(test)]
     fn new_with_local_project_picker(
         session_factory: Rc<dyn TerminalSessionFactory>,
         default_workspace_root: PathBuf,
@@ -156,10 +163,47 @@ impl WorkspaceManager {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        Self::new_with_adapters(
+            session_factory,
+            default_workspace_root,
+            local_project_picker,
+            Rc::new(MacosOperatingSystemWindowDragPlatform::default()),
+            window,
+            cx,
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new_with_operating_system_window_drag_platform(
+        session_factory: Rc<dyn TerminalSessionFactory>,
+        default_workspace_root: PathBuf,
+        operating_system_window_drag_platform: Rc<dyn OperatingSystemWindowDragPlatform>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        Self::new_with_adapters(
+            session_factory,
+            default_workspace_root,
+            Rc::new(NativeLocalProjectPicker),
+            operating_system_window_drag_platform,
+            window,
+            cx,
+        )
+    }
+
+    fn new_with_adapters(
+        session_factory: Rc<dyn TerminalSessionFactory>,
+        default_workspace_root: PathBuf,
+        local_project_picker: Rc<dyn LocalProjectPicker>,
+        operating_system_window_drag_platform: Rc<dyn OperatingSystemWindowDragPlatform>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let (default_directory, initial_directory_error) =
             initial_workspace_directory(default_workspace_root.clone());
         let default_workspace_identity = default_directory.identity();
         let initial_workspace_identity = default_directory.identity();
+        let initial_window_drag_platform = Rc::clone(&operating_system_window_drag_platform);
         let mut workspaces = WorkspaceCollection::new_ad_hoc(
             default_directory,
             DirectoryAuthority::initial(),
@@ -173,6 +217,7 @@ impl WorkspaceManager {
                     .with_directory_identity(initial_workspace_identity),
                     true,
                     px(WORKSPACE_SIDEBAR_DEFAULT_WIDTH),
+                    Rc::clone(&initial_window_drag_platform),
                     window,
                     cx,
                 )
@@ -227,6 +272,7 @@ impl WorkspaceManager {
             rename: None,
             sidebar_resize_interaction: false,
             suppress_sidebar_pointer_until_release: false,
+            operating_system_window_drag_platform,
             window_drag_status: WindowDragRegionStatus::new(),
             pending_final_window_closes: BTreeSet::new(),
         }
@@ -237,11 +283,17 @@ impl WorkspaceManager {
         session_factory: WorkspaceTerminalSessionFactory,
         sidebar_visible: bool,
         sidebar_width: Pixels,
+        operating_system_window_drag_platform: Rc<dyn OperatingSystemWindowDragPlatform>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Entity<WindowManager> {
         let manager = cx.new(|cx| {
-            let mut manager = WindowManager::new(session_factory, window, cx);
+            let mut manager = WindowManager::new_with_operating_system_window_drag_platform(
+                session_factory,
+                operating_system_window_drag_platform,
+                window,
+                cx,
+            );
             manager.set_sidebar_layout(sidebar_visible, sidebar_width, cx);
             manager
         });
@@ -635,15 +687,49 @@ impl WorkspaceManager {
         event: WindowDragRegionEvent,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) {
+    ) -> WindowDragRegionResponse {
         match event {
-            WindowDragRegionEvent::InteractionStarted { .. }
-            | WindowDragRegionEvent::InteractionFinished { .. } => {
+            WindowDragRegionEvent::InteractionStarted { .. } => {
+                if let Err(error) = self
+                    .operating_system_window_drag_platform
+                    .interaction_started()
+                {
+                    Self::report_operating_system_window_drag_error("begin", error);
+                }
                 self.sync_terminal_focus_blocker(window, cx);
+                WindowDragRegionResponse::Continue
             }
-            WindowDragRegionEvent::MoveRequested { .. } => window.start_window_move(),
-            WindowDragRegionEvent::DoubleActivationRequested => window.titlebar_double_click(),
+            WindowDragRegionEvent::MoveRequested { .. } => {
+                match self
+                    .operating_system_window_drag_platform
+                    .start_window_move(window)
+                {
+                    Ok(()) => WindowDragRegionResponse::OperatingSystemWindowMoveStarted,
+                    Err(error) => {
+                        Self::report_operating_system_window_drag_error("start", error);
+                        WindowDragRegionResponse::Continue
+                    }
+                }
+            }
+            WindowDragRegionEvent::DoubleActivationRequested => {
+                self.operating_system_window_drag_platform
+                    .double_activation_requested(window);
+                WindowDragRegionResponse::Continue
+            }
+            WindowDragRegionEvent::InteractionFinished { .. } => {
+                self.operating_system_window_drag_platform
+                    .interaction_finished();
+                self.sync_terminal_focus_blocker(window, cx);
+                WindowDragRegionResponse::Continue
+            }
         }
+    }
+
+    fn report_operating_system_window_drag_error(
+        operation: &str,
+        error: OperatingSystemWindowDragError,
+    ) {
+        eprintln!("failed to {operation} Operating-System Window drag: {error}");
     }
 
     fn set_sidebar_layout(&mut self, visible: bool, width: Pixels, cx: &mut Context<Self>) {
@@ -779,6 +865,7 @@ impl WorkspaceManager {
     fn create_workspace(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let previous_manager = self.workspaces.active_workspace().payload().clone();
         let session_factory = Rc::clone(&self.session_factory);
+        let window_drag_platform = Rc::clone(&self.operating_system_window_drag_platform);
         let sidebar_visible = self.sidebar_visible;
         let sidebar_width = self.sidebar_width;
         let (directory, unavailable_reason) = self.default_workspace_directory();
@@ -796,6 +883,7 @@ impl WorkspaceManager {
                     .with_directory_identity(directory_identity),
                     sidebar_visible,
                     sidebar_width,
+                    window_drag_platform,
                     window,
                     cx,
                 )
@@ -898,6 +986,7 @@ impl WorkspaceManager {
 
         let previous_manager = self.workspaces.active_workspace().payload().clone();
         let session_factory = Rc::clone(&self.session_factory);
+        let window_drag_platform = Rc::clone(&self.operating_system_window_drag_platform);
         let sidebar_visible = self.sidebar_visible;
         let sidebar_width = self.sidebar_width;
         let project_root_identity = directory.identity();
@@ -913,6 +1002,7 @@ impl WorkspaceManager {
                     .with_directory_identity(project_root_identity),
                     sidebar_visible,
                     sidebar_width,
+                    window_drag_platform,
                     window,
                     cx,
                 )
@@ -1064,6 +1154,7 @@ impl WorkspaceManager {
     ) {
         let was_active = self.workspaces.active_workspace_id() == workspace_id;
         let session_factory = Rc::clone(&self.session_factory);
+        let window_drag_platform = Rc::clone(&self.operating_system_window_drag_platform);
         let sidebar_visible = self.sidebar_visible;
         let sidebar_width = self.sidebar_width;
         let (replacement, unavailable_reason) = self.default_workspace_directory();
@@ -1082,6 +1173,7 @@ impl WorkspaceManager {
                     .with_directory_identity(replacement_identity),
                     sidebar_visible,
                     sidebar_width,
+                    window_drag_platform,
                     window,
                     cx,
                 )
@@ -1616,9 +1708,11 @@ impl WorkspaceManager {
         .debug_selector("workspace-top-chrome-drag-region")
         .on_event(move |event, window, cx| {
             let event = *event;
-            let _ = drag_manager.update(cx, |manager, cx| {
-                manager.handle_operating_system_window_drag_event(event, window, cx);
-            });
+            drag_manager
+                .update(cx, |manager, cx| {
+                    manager.handle_operating_system_window_drag_event(event, window, cx)
+                })
+                .unwrap_or_default()
         });
 
         div()
@@ -2306,12 +2400,13 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use gpui::{
-        Modifiers, ScrollDelta, ScrollWheelEvent, TestAppContext, TouchPhase, VisualTestContext,
-        point,
+        Modifiers, MouseDownEvent, MouseUpEvent, ScrollDelta, ScrollWheelEvent, TestAppContext,
+        TouchPhase, VisualTestContext, point,
     };
 
     use super::*;
     use crate::platform::local_project_picker::ScriptedLocalProjectPicker;
+    use crate::platform::macos_window_drag::RecordingOperatingSystemWindowDragPlatform;
     use crate::terminal::testing::{
         RecordedSessionCommand, TestTerminalSessionFactory, TestTerminalSessionRecords,
     };
@@ -2336,6 +2431,35 @@ mod tests {
         });
         cx.run_until_parked();
         (manager, records, cx)
+    }
+
+    fn workspace_manager_with_operating_system_window_drag_platform(
+        cx: &mut TestAppContext,
+    ) -> (
+        Entity<WorkspaceManager>,
+        Rc<RecordingOperatingSystemWindowDragPlatform>,
+        &mut VisualTestContext,
+    ) {
+        cx.update(crate::ui::init);
+        let records = TestTerminalSessionRecords::default();
+        let session_factory: Rc<dyn TerminalSessionFactory> =
+            Rc::new(TestTerminalSessionFactory::new(records).with_fallback_title("zsh"));
+        let platform = Rc::new(RecordingOperatingSystemWindowDragPlatform::default());
+        let injected_platform = Rc::clone(&platform);
+        let (manager, cx) = cx.add_window_view(move |window, cx| {
+            WorkspaceManager::new_with_operating_system_window_drag_platform(
+                session_factory,
+                PathBuf::from("/Users/test"),
+                injected_platform,
+                window,
+                cx,
+            )
+        });
+        cx.update(|window, cx| {
+            manager.update(cx, |manager, cx| manager.focus(window, cx));
+        });
+        cx.run_until_parked();
+        (manager, platform, cx)
     }
 
     fn workspace_manager_with_picker(
@@ -2755,6 +2879,51 @@ mod tests {
         cx.simulate_mouse_down(position, MouseButton::Right, Modifiers::none());
         cx.simulate_mouse_up(position, MouseButton::Right, Modifiers::none());
         cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn workspace_chrome_should_forward_threshold_crossing_and_double_activation_to_platform_policy(
+        cx: &mut TestAppContext,
+    ) {
+        let (_manager, platform, cx) =
+            workspace_manager_with_operating_system_window_drag_platform(cx);
+        let chrome = cx
+            .debug_bounds("workspace-top-chrome-drag-region")
+            .expect("Workspace drag region must be rendered")
+            .center();
+
+        cx.simulate_mouse_down(chrome, MouseButton::Left, Modifiers::none());
+        cx.simulate_mouse_move(
+            point(chrome.x + px(2.0), chrome.y),
+            MouseButton::Left,
+            Modifiers::none(),
+        );
+        cx.simulate_mouse_move(
+            point(chrome.x + px(8.0), chrome.y),
+            MouseButton::Left,
+            Modifiers::none(),
+        );
+        cx.simulate_mouse_move(
+            point(chrome.x + px(16.0), chrome.y),
+            MouseButton::Left,
+            Modifiers::none(),
+        );
+        cx.simulate_mouse_up(chrome, MouseButton::Left, Modifiers::none());
+        cx.simulate_event(MouseDownEvent {
+            button: MouseButton::Left,
+            position: chrome,
+            modifiers: Modifiers::none(),
+            click_count: 2,
+            first_mouse: false,
+        });
+        cx.simulate_event(MouseUpEvent {
+            button: MouseButton::Left,
+            position: chrome,
+            modifiers: Modifiers::none(),
+            click_count: 2,
+        });
+
+        assert_eq!(platform.counts(), (1, 1, 1, 1));
     }
 
     #[gpui::test]

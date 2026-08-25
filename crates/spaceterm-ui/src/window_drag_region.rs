@@ -67,6 +67,8 @@ pub enum WindowDragFinishReason {
     PointerButtonLost,
     /// The pointer left the Operating-System Window during the interaction.
     PointerExited,
+    /// The application handed movement to the Operating-System Window system.
+    OperatingSystemWindowMoveStarted,
     /// The Operating-System Window became inactive.
     WindowDeactivated,
     /// The region became disabled while it owned the interaction.
@@ -108,7 +110,28 @@ pub enum WindowDragRegionEvent {
     },
 }
 
-type WindowDragHandler = Rc<dyn Fn(&WindowDragRegionEvent, &mut Window, &mut App)>;
+/// How the application handled a [`WindowDragRegionEvent`].
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum WindowDragRegionResponse {
+    /// The control continues to own the pointer interaction.
+    #[default]
+    Continue,
+    /// The Operating-System Window system accepted the move interaction.
+    ///
+    /// The control ends its active interaction immediately because a native handoff may consume the
+    /// eventual pointer release. Stray motion and release remain suppressed until release or the
+    /// next clean primary press.
+    OperatingSystemWindowMoveStarted,
+}
+
+impl From<()> for WindowDragRegionResponse {
+    fn from((): ()) -> Self {
+        Self::Continue
+    }
+}
+
+type WindowDragHandler =
+    Rc<dyn Fn(&WindowDragRegionEvent, &mut Window, &mut App) -> WindowDragRegionResponse>;
 
 /// A platform-neutral interaction region for requesting an Operating-System Window move.
 ///
@@ -196,11 +219,16 @@ impl WindowDragRegion {
     }
 
     /// Handles ordered interaction and policy-neutral move requests.
-    pub fn on_event(
+    pub fn on_event<R>(
         mut self,
-        handler: impl Fn(&WindowDragRegionEvent, &mut Window, &mut App) + 'static,
-    ) -> Self {
-        self.on_event = Some(Rc::new(handler));
+        handler: impl Fn(&WindowDragRegionEvent, &mut Window, &mut App) -> R + 'static,
+    ) -> Self
+    where
+        R: Into<WindowDragRegionResponse>,
+    {
+        self.on_event = Some(Rc::new(move |event, window, cx| {
+            handler(event, window, cx).into()
+        }));
         self
     }
 }
@@ -261,7 +289,13 @@ impl RenderOnce for WindowDragRegion {
                         state.pointer_move(event.position, event.pressed_button)
                     });
                     window.prevent_default();
-                    emit_events(move_handler.clone(), events, window, cx);
+                    let response = emit_events(move_handler.clone(), events, window, cx);
+                    if response == WindowDragRegionResponse::OperatingSystemWindowMoveStarted {
+                        let events = move_state.update(cx, |state, _| {
+                            state.finish(WindowDragFinishReason::OperatingSystemWindowMoveStarted)
+                        });
+                        emit_events(move_handler.clone(), events, window, cx);
+                    }
                     cx.stop_propagation();
                 });
 
@@ -322,13 +356,18 @@ fn emit_events(
     events: Vec<WindowDragRegionEvent>,
     window: &mut Window,
     cx: &mut App,
-) {
+) -> WindowDragRegionResponse {
     let Some(handler) = handler else {
-        return;
+        return WindowDragRegionResponse::Continue;
     };
+    let mut move_response = WindowDragRegionResponse::Continue;
     for event in events {
-        handler(&event, window, cx);
+        let response = handler(&event, window, cx);
+        if matches!(event, WindowDragRegionEvent::MoveRequested { .. }) {
+            move_response = response;
+        }
     }
+    move_response
 }
 
 fn schedule_events(
@@ -341,7 +380,7 @@ fn schedule_events(
         return;
     }
     window.defer(cx, move |window, cx| {
-        emit_events(handler, events, window, cx);
+        let _ = emit_events(handler, events, window, cx);
     });
 }
 
