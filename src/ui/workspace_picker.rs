@@ -287,7 +287,7 @@ struct RefreshCompletion {
     probe: WorkspacePickerExactPathProbe,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Eq, PartialEq)]
 enum ValidationKind {
     Typed,
     Finder,
@@ -297,7 +297,8 @@ enum ValidationKind {
 struct ValidationCompletion {
     lifecycle_generation: u64,
     operation_generation: u64,
-    expected_typed_path: Option<PathBuf>,
+    kind: ValidationKind,
+    expected_input_path: Option<PathBuf>,
     result: Result<ValidatedWorkspaceDirectory, WorkspacePickerFilesystemError>,
 }
 
@@ -487,7 +488,29 @@ impl WorkspacePicker {
         cx: &mut Context<Self>,
     ) {
         if self.open && self.busy == Some(WorkspacePickerBusy::Finder) {
+            self.bind_finder_selection_to_input(&path, cx);
             self.start_validation(path, ValidationKind::Finder, window, cx);
+        }
+    }
+
+    fn bind_finder_selection_to_input(&mut self, path: &Path, cx: &mut Context<Self>) {
+        let prefer_tilde = self
+            .parsed
+            .as_ref()
+            .is_some_and(|parsed| parsed.display().starts_with("~/"));
+        let Some(display) = display_workspace_directory_with_style(path, &self.home, prefer_tilde)
+        else {
+            return;
+        };
+        let Ok(parsed) = parse_workspace_path(&display, &self.home) else {
+            return;
+        };
+        let accepted = self.input.update(cx, |input, cx| {
+            input.set_value(display.clone(), cx);
+            input.value() == display
+        });
+        if accepted {
+            self.parsed = Some(parsed);
         }
     }
 
@@ -799,8 +822,14 @@ impl WorkspacePicker {
             ValidationKind::Typed | ValidationKind::Finder => WorkspacePickerBusy::Validating,
         });
         self.set_input_editable_deferred(false, window, cx);
-        let expected_typed_path =
-            matches!(kind, ValidationKind::Typed | ValidationKind::Creation).then(|| path.clone());
+        let expected_input_path = match kind {
+            ValidationKind::Typed | ValidationKind::Creation => Some(path.clone()),
+            ValidationKind::Finder => self
+                .parsed
+                .as_ref()
+                .filter(|parsed| parsed.exact_path() == path)
+                .map(|_| path.clone()),
+        };
         let filesystem = Arc::clone(&self.filesystem);
         let background = cx.background_spawn(async move {
             let result = if matches!(kind, ValidationKind::Creation) {
@@ -813,7 +842,8 @@ impl WorkspacePicker {
             ValidationCompletion {
                 lifecycle_generation,
                 operation_generation,
-                expected_typed_path,
+                kind,
+                expected_input_path,
                 result,
             }
         });
@@ -833,7 +863,7 @@ impl WorkspacePicker {
             || self.lifecycle_generation != completion.lifecycle_generation
             || self.operation_generation != completion.operation_generation
             || completion
-                .expected_typed_path
+                .expected_input_path
                 .as_deref()
                 .is_some_and(|expected| {
                     self.parsed.as_ref().map(ParsedWorkspacePath::exact_path) != Some(expected)
@@ -848,7 +878,13 @@ impl WorkspacePicker {
             }
             Err(error) => {
                 self.busy = None;
-                self.status = status_for_error(error);
+                self.status = if completion.kind == ValidationKind::Finder
+                    && completion.expected_input_path.is_none()
+                {
+                    WorkspacePickerStatus::Other
+                } else {
+                    status_for_error(error)
+                };
                 self.input
                     .update(cx, |input, cx| input.set_editable(true, cx));
                 cx.emit(WorkspacePickerEvent::StateChanged);
@@ -1388,10 +1424,160 @@ fn gpui_color(color: Color) -> gpui::Rgba {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::VecDeque;
+    use std::sync::Mutex;
+
+    use gpui::{TestAppContext, VisualTestContext};
+
     use super::*;
+    use crate::domain::WorkspaceDirectoryIdentity;
+    use crate::platform::macos_system_settings::SystemSettingsOpenError;
+
+    #[derive(Default)]
+    struct ScriptedWorkspacePickerFilesystemState {
+        readable_paths: Vec<PathBuf>,
+        probed_paths: Vec<PathBuf>,
+        created_paths: Vec<PathBuf>,
+        validated_paths: Vec<PathBuf>,
+        validation_results:
+            VecDeque<Result<ValidatedWorkspaceDirectory, WorkspacePickerFilesystemError>>,
+    }
+
+    #[derive(Clone, Default)]
+    struct ScriptedWorkspacePickerFilesystem {
+        state: Arc<Mutex<ScriptedWorkspacePickerFilesystemState>>,
+    }
+
+    impl ScriptedWorkspacePickerFilesystem {
+        fn new(
+            readable_paths: impl IntoIterator<Item = PathBuf>,
+            validation_results: impl IntoIterator<
+                Item = Result<ValidatedWorkspaceDirectory, WorkspacePickerFilesystemError>,
+            >,
+        ) -> Self {
+            Self {
+                state: Arc::new(Mutex::new(ScriptedWorkspacePickerFilesystemState {
+                    readable_paths: readable_paths.into_iter().collect(),
+                    validation_results: validation_results.into_iter().collect(),
+                    ..ScriptedWorkspacePickerFilesystemState::default()
+                })),
+            }
+        }
+
+        fn clear_records(&self) {
+            let mut state = self.state.lock().unwrap();
+            state.probed_paths.clear();
+            state.created_paths.clear();
+            state.validated_paths.clear();
+        }
+
+        fn records(&self) -> (Vec<PathBuf>, Vec<PathBuf>, Vec<PathBuf>) {
+            let state = self.state.lock().unwrap();
+            (
+                state.probed_paths.clone(),
+                state.created_paths.clone(),
+                state.validated_paths.clone(),
+            )
+        }
+    }
+
+    impl WorkspacePickerFilesystem for ScriptedWorkspacePickerFilesystem {
+        fn list_directories(
+            &self,
+            _directory: &Path,
+            _hide_dot_prefixed: bool,
+        ) -> Result<Vec<WorkspacePickerDirectoryEntry>, WorkspacePickerFilesystemError> {
+            Ok(Vec::new())
+        }
+
+        fn probe_exact_path(&self, path: &Path) -> WorkspacePickerExactPathProbe {
+            let mut state = self.state.lock().unwrap();
+            state.probed_paths.push(path.to_path_buf());
+            if state.readable_paths.iter().any(|readable| readable == path) {
+                WorkspacePickerExactPathProbe::ReadableDirectory
+            } else {
+                WorkspacePickerExactPathProbe::Unavailable(WorkspacePickerFilesystemError::Missing)
+            }
+        }
+
+        fn create_dir_all(&self, path: &Path) -> Result<(), WorkspacePickerFilesystemError> {
+            self.state
+                .lock()
+                .unwrap()
+                .created_paths
+                .push(path.to_path_buf());
+            Ok(())
+        }
+
+        fn validate_workspace_directory(
+            &self,
+            path: &Path,
+        ) -> Result<ValidatedWorkspaceDirectory, WorkspacePickerFilesystemError> {
+            let mut state = self.state.lock().unwrap();
+            state.validated_paths.push(path.to_path_buf());
+            state
+                .validation_results
+                .pop_front()
+                .unwrap_or(Err(WorkspacePickerFilesystemError::Other))
+        }
+    }
+
+    struct TestSystemSettingsOpener;
+
+    impl SystemSettingsOpener for TestSystemSettingsOpener {
+        fn open_files_and_folders(&self) -> Result<(), SystemSettingsOpenError> {
+            Ok(())
+        }
+    }
+
+    struct WorkspacePickerHarness {
+        picker: Entity<WorkspacePicker>,
+    }
+
+    impl Render for WorkspacePickerHarness {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().size_full().child(self.picker.clone())
+        }
+    }
 
     fn home() -> PathBuf {
         PathBuf::from("/Users/tester")
+    }
+
+    fn workspace_picker(
+        filesystem: Arc<ScriptedWorkspacePickerFilesystem>,
+        cx: &mut TestAppContext,
+    ) -> (Entity<WorkspacePicker>, &mut VisualTestContext) {
+        cx.update(crate::ui::init);
+        let injected_filesystem: Arc<dyn WorkspacePickerFilesystem + Send + Sync> = filesystem;
+        let system_settings: Rc<dyn SystemSettingsOpener> = Rc::new(TestSystemSettingsOpener);
+        let (harness, cx) = cx.add_window_view(move |window, cx| {
+            let picker = cx.new(|cx| {
+                WorkspacePicker::new(home(), injected_filesystem, system_settings, window, cx)
+            });
+            WorkspacePickerHarness { picker }
+        });
+        let picker = harness.read_with(cx, |harness, _| harness.picker.clone());
+        cx.update(|window, cx| {
+            window.activate_window();
+            picker.update(cx, |picker, cx| {
+                picker.open(window, cx);
+            });
+        });
+        cx.run_until_parked();
+        (picker, cx)
+    }
+
+    fn set_input(picker: &Entity<WorkspacePicker>, value: &str, cx: &mut VisualTestContext) {
+        cx.update(|window, cx| {
+            picker.update(cx, |picker, cx| {
+                picker
+                    .input
+                    .update(cx, |input, cx| input.set_value(value, cx));
+                picker.refresh_for_input(value.to_owned(), window, cx);
+            });
+        });
+        cx.run_until_parked();
     }
 
     #[test]
@@ -1599,5 +1785,107 @@ mod tests {
         let rows = filter_workspace_picker_rows(&parsed, &[]);
 
         assert_eq!(repair_workspace_picker_selection(None, &rows), None);
+    }
+
+    #[gpui::test]
+    fn stale_finder_validation_completion_does_not_overwrite_newer_typed_path(
+        cx: &mut TestAppContext,
+    ) {
+        let current_path = PathBuf::from("/current-typed-path");
+        let filesystem = Arc::new(ScriptedWorkspacePickerFilesystem::new(
+            [home(), current_path.clone()],
+            [],
+        ));
+        let (picker, cx) = workspace_picker(filesystem, cx);
+        let (lifecycle_generation, stale_operation_generation) = picker
+            .read_with(cx, |picker, _| {
+                (picker.lifecycle_generation, picker.operation_generation)
+            });
+        set_input(&picker, "/current-typed-path/", cx);
+
+        picker.update(cx, |picker, cx| {
+            picker.finish_validation(
+                ValidationCompletion {
+                    lifecycle_generation,
+                    operation_generation: stale_operation_generation,
+                    kind: ValidationKind::Finder,
+                    expected_input_path: Some(PathBuf::from("/stale-finder-path")),
+                    result: Err(WorkspacePickerFilesystemError::Missing),
+                },
+                cx,
+            );
+        });
+
+        assert_eq!(
+            picker.read_with(cx, |picker, cx| {
+                (
+                    picker.input.read(cx).value().to_owned(),
+                    picker
+                        .parsed
+                        .as_ref()
+                        .map(|parsed| parsed.exact_path().to_path_buf()),
+                    picker.status,
+                    picker.busy,
+                )
+            }),
+            (
+                "/current-typed-path/".to_owned(),
+                Some(current_path),
+                WorkspacePickerStatus::Readable,
+                None,
+            )
+        );
+    }
+
+    #[gpui::test]
+    fn finder_validation_failure_keeps_retry_and_creation_bound_to_selected_path(
+        cx: &mut TestAppContext,
+    ) {
+        let typed_path = PathBuf::from("/typed-before-finder");
+        let finder_path = PathBuf::from("/selected-with-finder");
+        let filesystem = Arc::new(ScriptedWorkspacePickerFilesystem::new(
+            [home(), typed_path.clone()],
+            [
+                Err(WorkspacePickerFilesystemError::Missing),
+                Ok(ValidatedWorkspaceDirectory::new(
+                    finder_path.clone(),
+                    WorkspaceDirectoryIdentity::new(7, 11),
+                )),
+            ],
+        ));
+        let (picker, cx) = workspace_picker(Arc::clone(&filesystem), cx);
+        set_input(&picker, "/typed-before-finder/", cx);
+        filesystem.clear_records();
+
+        cx.update(|window, cx| {
+            picker.update(cx, |picker, cx| {
+                picker.request_finder(window, cx);
+                picker.validate_finder_selection(finder_path.clone(), window, cx);
+            });
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            picker.update(cx, |picker, cx| picker.retry(window, cx));
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            picker.update(cx, |picker, cx| picker.confirm_typed_path(window, cx));
+        });
+        assert!(cx.has_pending_prompt());
+        cx.simulate_prompt_answer("Create & Add");
+        cx.run_until_parked();
+
+        let input = picker.read_with(cx, |picker, cx| picker.input.read(cx).value().to_owned());
+        assert_eq!(
+            (input, filesystem.records()),
+            (
+                "/selected-with-finder/".to_owned(),
+                (
+                    vec![finder_path.clone()],
+                    vec![finder_path.clone()],
+                    vec![finder_path.clone(), finder_path],
+                ),
+            )
+        );
     }
 }
