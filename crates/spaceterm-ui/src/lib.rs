@@ -8,6 +8,7 @@ mod command_palette;
 mod menu;
 mod middle_truncated_text;
 mod overlay_scrollbar;
+mod resize_handle;
 mod text_input;
 
 use gpui::App;
@@ -34,6 +35,10 @@ pub use middle_truncated_text::MiddleTruncatedText;
 pub use overlay_scrollbar::{
     OverlayScrollbar, OverlayScrollbarEvent, ScrollMetrics, ScrollOffset, ScrollbarTheme,
 };
+pub use resize_handle::{
+    ResizeAxis, ResizeFinishReason, ResizeHandle, ResizeHandleEvent, ResizeHandleMetrics,
+    ResizeHandlePaint, ResizeHandleTheme, ResizeInputSource, ResizeInteractionId,
+};
 pub use text_input::{
     Copy as EditCopy, Cut as EditCut, Paste as EditPaste, Redo as EditRedo,
     SelectAll as EditSelectAll, TextInput, TextInputChangeSource, TextInputComposition,
@@ -50,12 +55,14 @@ pub fn init(
     cx: &mut App,
     button_theme: ButtonTheme,
     scrollbar_theme: ScrollbarTheme,
+    resize_handle_theme: ResizeHandleTheme,
     menu_theme: MenuTheme,
     command_palette_theme: CommandPaletteTheme,
     text_input_theme: TextInputTheme,
 ) {
     cx.set_global(button_theme);
     cx.set_global(scrollbar_theme);
+    cx.set_global(resize_handle_theme);
     cx.set_global(menu_theme);
     cx.set_global(command_palette_theme);
     cx.set_global(text_input_theme);

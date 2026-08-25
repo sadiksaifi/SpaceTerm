@@ -88,6 +88,15 @@ paint and metric catalog, then owns surrounding chrome, product policy, and reac
 events. Application-specific composition remains in `src/ui`; controls move into the library only
 when their behavior has reusable depth.
 
+The internal library's Resize Handle is a keyed, platform-neutral GPUI divider with a mandatory
+logical name and an explicitly named movement axis. It owns the enlarged pointer hitbox, resize
+cursor, hover, press and keyboard-focus presentation, pointer capture, cumulative displacement,
+keyboard steps, reset activation, and ordered typed interaction and cancellation lifecycle. It
+requests logical values while preserving the caller's authoritative value throughout an active
+interaction. The application owns Pane Layout ratios, Pane minimum dimensions, Workspace sidebar
+bounds and collapse policy, terminal focus coordination, and every other product-specific resize
+policy.
+
 The internal library's Text Input is an entity-backed, platform-neutral single-line editor with
 stable identity and a mandatory logical name. It exclusively owns bounded text, directional
 grapheme Selection, input-method composition, undo and redo, clipboard editing, pointer capture
