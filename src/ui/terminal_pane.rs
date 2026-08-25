@@ -15,8 +15,9 @@ use gpui::{
 };
 use gpui_symbols::{Icon, SymbolWeight};
 use spaceterm_ui::{
-    Button, ButtonRole, ButtonSize, ButtonVariant, ContextMenu, EditCopy, EditPaste, IconButton,
-    MenuLifecycleEvent, MenuSize, OverlayScrollbar, OverlayScrollbarEvent, ScrollMetrics,
+    Button, ButtonRole, ButtonSize, ButtonVariant, ContextMenu, EditCopy, EditCut, EditPaste,
+    EditSelectAll, IconButton, MenuLifecycleEvent, MenuSize, OverlayScrollbar,
+    OverlayScrollbarEvent, ScrollMetrics,
 };
 
 use super::button_theme;
@@ -2259,6 +2260,33 @@ impl TerminalPane {
         self.copy_selection_with_recovery(None, window, cx);
     }
 
+    fn edit_cut(&mut self, _: &EditCut, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.find_focus_handle.is_focused(window) {
+            return;
+        }
+        let Some(editor) = &mut self.find_editor else {
+            return;
+        };
+        let selection = editor.selection();
+        if selection.is_empty() {
+            return;
+        }
+        let (text, _) = editor.text_for_range(selection.clone());
+        cx.write_to_clipboard(ClipboardItem::new_string(text));
+        editor.replace(Some(selection), "");
+        self.find_query_changed();
+        cx.notify();
+    }
+
+    fn edit_select_all(&mut self, _: &EditSelectAll, window: &mut Window, cx: &mut Context<Self>) {
+        if self.find_focus_handle.is_focused(window)
+            && let Some(editor) = &mut self.find_editor
+        {
+            editor.select_all();
+            cx.notify();
+        }
+    }
+
     fn copy_selection_with_recovery(
         &mut self,
         recovery: Option<RecoveryToken>,
@@ -3583,6 +3611,8 @@ impl Render for TerminalPane {
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(Self::copy_selection))
             .on_action(cx.listener(Self::edit_copy))
+            .on_action(cx.listener(Self::edit_cut))
+            .on_action(cx.listener(Self::edit_select_all))
             .on_action(cx.listener(Self::paste_clipboard))
             .on_action(cx.listener(Self::edit_paste))
             .on_action(cx.listener(Self::export_diagnostics))
@@ -5336,6 +5366,43 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(commands, ["set:", "set:日本", "next", "previous", "end"]);
         assert!(pane.read_with(cx, |pane, _| pane.find_editor.is_none()));
+    }
+
+    #[gpui::test]
+    fn terminal_find_should_handle_native_select_all_and_cut(cx: &mut TestAppContext) {
+        let (pane, cx, _) = connected_terminal_pane(cx);
+        cx.dispatch_action(OpenTerminalFind);
+        cx.update(|window, app| {
+            pane.update(app, |pane, pane_cx| {
+                pane.replace_text_in_range(None, "needle", window, pane_cx);
+            });
+        });
+
+        cx.dispatch_action(spaceterm_ui::EditSelectAll);
+        assert_eq!(
+            pane.read_with(cx, |pane, _| pane
+                .find_editor
+                .as_ref()
+                .expect("Terminal Find should remain open")
+                .selection()),
+            0..6
+        );
+
+        cx.dispatch_action(spaceterm_ui::EditCut);
+
+        assert_eq!(
+            cx.read_from_clipboard().and_then(|item| item.text()),
+            Some("needle".to_owned())
+        );
+        assert_eq!(
+            pane.read_with(cx, |pane, _| pane
+                .find_editor
+                .as_ref()
+                .expect("Terminal Find should remain open")
+                .text()
+                .to_owned()),
+            ""
+        );
     }
 
     #[gpui::test]
