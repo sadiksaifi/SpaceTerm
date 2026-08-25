@@ -1695,6 +1695,7 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
         }
         self.open = false;
         self.loading = false;
+        self.generation.0 = self.generation.0.wrapping_add(1);
         self.pointer_press = None;
         self.pointer_suppressed = false;
         self.hover_suppressed = false;
@@ -3452,6 +3453,30 @@ mod tests {
             palette.read_with(cx, |palette, _| palette.generation()),
             second
         );
+    }
+
+    #[gpui::test]
+    fn closed_palette_should_reject_results_from_the_dismissed_generation(
+        cx: &mut TestAppContext,
+    ) {
+        let (root, palette, _, _, cx) = palette_window(cx);
+        open_palette(&root, &palette, cx);
+        let dismissed_generation = palette.read_with(cx, |palette, _| palette.generation());
+        cx.update(|window, cx| {
+            palette.update(cx, |palette, cx| {
+                palette.dismiss(window, cx);
+            });
+        });
+
+        let applied = palette.update(cx, |palette, cx| {
+            palette.apply_items(
+                dismissed_generation,
+                vec![CommandPaletteItem::new(9, "Stale")],
+                cx,
+            )
+        });
+
+        assert!(!applied);
     }
 
     #[gpui::test]
