@@ -620,18 +620,16 @@ impl WorkspaceManager {
                         (
                             manager.workspace_search.clone(),
                             manager.workspace_search_items(cx),
-                            manager.workspaces.active_workspace_id(),
                         )
                     })
                 })
                 .ok()
                 .flatten();
-            let Some((palette, items, preferred)) = request else {
+            let Some((palette, items)) = request else {
                 return;
             };
             let (opened, is_open) = palette.update(cx, |palette, cx| {
                 palette.set_items(items, cx);
-                palette.set_preferred_item(Some(preferred), cx);
                 let opened = palette.open(window, cx);
                 (opened, palette.is_open())
             });
@@ -2659,8 +2657,8 @@ mod tests {
         let palette = manager.read_with(cx, |manager, _| manager.workspace_search.clone());
         assert_eq!(
             palette.read_with(cx, |palette, _| palette.selected_item_id().copied()),
-            Some(WorkspaceId::new(3)),
-            "the Active Workspace should be preferred for an empty query"
+            Some(WorkspaceId::new(1)),
+            "the first Workspace should be selected for an empty query"
         );
 
         cx.simulate_keystrokes("a l p h a");
