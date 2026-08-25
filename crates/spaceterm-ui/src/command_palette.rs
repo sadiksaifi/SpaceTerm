@@ -1811,6 +1811,7 @@ impl<I: Clone + Eq + 'static> Render for CommandPalette<I> {
             .tab_group()
             .child(outside)
             .child(div().absolute().left(left).top(top).child(panel))
+            .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
             .when(self.pointer_suppressed, |overlay| {
                 overlay.child(
                     canvas(
@@ -2702,12 +2703,16 @@ mod tests {
 
     impl Render for TestRoot {
         fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-            let underlay = self.underlay_presses.clone();
+            let underlay_press = self.underlay_presses.clone();
+            let underlay_scroll = self.underlay_presses.clone();
             div()
                 .relative()
                 .size_full()
                 .on_mouse_down(MouseButton::Left, move |_, _, _| {
-                    *underlay.borrow_mut() += 1;
+                    *underlay_press.borrow_mut() += 1;
+                })
+                .on_scroll_wheel(move |_, _, _| {
+                    *underlay_scroll.borrow_mut() += 1;
                 })
                 .child(
                     div()
@@ -3454,6 +3459,38 @@ mod tests {
         cx.run_until_parked();
 
         assert!(!palette.read_with(cx, |palette, _| palette.is_open()));
+        assert_eq!(*underlay.borrow(), 0);
+    }
+
+    #[gpui::test]
+    fn palette_wheel_events_should_not_reach_the_underlay(cx: &mut TestAppContext) {
+        let (root, palette, _, underlay, cx) = palette_window(cx);
+        open_palette(&root, &palette, cx);
+        let panel = cx.debug_bounds("command-palette-panel").unwrap_or_default();
+        let outside = point(panel.left() - px(8.0), panel.bottom() + px(8.0));
+
+        cx.simulate_event(ScrollWheelEvent {
+            position: outside,
+            delta: ScrollDelta::Pixels(point(px(0.0), px(-20.0))),
+            modifiers: Modifiers::none(),
+            touch_phase: TouchPhase::Moved,
+        });
+        cx.run_until_parked();
+        assert_eq!(*underlay.borrow(), 0);
+
+        palette.update(cx, |palette, cx| palette.set_loading(true, cx));
+        cx.run_until_parked();
+        let status = cx
+            .debug_bounds("command-palette-loading")
+            .unwrap_or_default();
+        cx.simulate_event(ScrollWheelEvent {
+            position: status.center(),
+            delta: ScrollDelta::Pixels(point(px(0.0), px(-20.0))),
+            modifiers: Modifiers::none(),
+            touch_phase: TouchPhase::Moved,
+        });
+        cx.run_until_parked();
+
         assert_eq!(*underlay.borrow(), 0);
     }
 
