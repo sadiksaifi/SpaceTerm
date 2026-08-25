@@ -549,6 +549,7 @@ pub struct TextInput {
     blinking: bool,
     tab_behavior: TextInputTabBehavior,
     composition_snapshot: Option<Snapshot>,
+    context_menu_open: bool,
 }
 
 impl EventEmitter<TextInputEvent> for TextInput {}
@@ -578,6 +579,7 @@ impl TextInput {
             blinking: false,
             tab_behavior: TextInputTabBehavior::default(),
             composition_snapshot: None,
+            context_menu_open: false,
         }
     }
 
@@ -640,12 +642,12 @@ impl TextInput {
         cx.notify();
     }
 
-    fn on_blur(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn on_blur(&mut self, _: &mut Window, cx: &mut Context<Self>) {
         self.focused = false;
         self.caret_visible = true;
         self.finish_composition();
         self.buffer.history.break_group();
-        if !crate::menu::window_menu_is_open(window, cx) {
+        if !self.context_menu_open {
             cx.emit(TextInputEvent::Blurred(self.buffer.text.clone()));
         }
         cx.notify();
@@ -1195,6 +1197,8 @@ impl Render for TextInput {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let entity = cx.entity();
         let menu_id = entity.entity_id();
+        let menu_open_entity = entity.downgrade();
+        let menu_lifecycle_entity = entity.downgrade();
         let menu_entity = entity.downgrade();
         let has_selection = !self.buffer.selection.is_empty();
         let entries = vec![
@@ -1261,6 +1265,17 @@ impl Render for TextInput {
             editor,
             entries,
         )
+        .on_open_request(move |_, _, cx| {
+            menu_open_entity
+                .update(cx, |input, _| input.context_menu_open = true)
+                .is_ok()
+        })
+        .on_lifecycle(move |event, cx| {
+            if matches!(event, crate::menu::MenuLifecycleEvent::Closed(_)) {
+                let _ =
+                    menu_lifecycle_entity.update(cx, |input, _| input.context_menu_open = false);
+            }
+        })
         .on_activate(
             move |activation: &MenuActivation<TextInputMenuAction>, window, cx| {
                 let action = *activation.action();
@@ -1600,7 +1615,9 @@ fn byte_range_to_utf16(text: &str, range: Range<usize>) -> Range<usize> {
 
 #[cfg(test)]
 mod tests {
-    use gpui::{TestAppContext, VisualTestContext, hsla, px, rgba};
+    use std::{cell::RefCell, rc::Rc};
+
+    use gpui::{Modifiers, TestAppContext, VisualTestContext, hsla, px, rgba};
 
     use super::*;
 
@@ -1615,6 +1632,29 @@ mod tests {
                 .size_full()
                 .child(self.input.clone())
                 .child(div().track_focus(&self.other_focus).child("Other"))
+        }
+    }
+
+    struct MenuBlurTestRoot {
+        input: Entity<TextInput>,
+    }
+
+    impl Render for MenuBlurTestRoot {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .size_full()
+                .flex()
+                .flex_col()
+                .child(div().h(px(30.0)).child(self.input.clone()))
+                .child(
+                    crate::menu::Menu::new(
+                        "unrelated-menu",
+                        "Unrelated menu",
+                        vec![MenuEntry::action("Action", ())],
+                    )
+                    .debug_selector("unrelated-menu-target")
+                    .on_activate(|_, _, _| {}),
+                )
         }
     }
 
@@ -1942,6 +1982,54 @@ mod tests {
         assert_eq!(
             input.read_with(cx, |input, _| input.value().to_owned()),
             "Workspace日本"
+        );
+    }
+
+    #[gpui::test]
+    fn unrelated_menu_focus_should_emit_blur(cx: &mut TestAppContext) {
+        install_menu_theme(cx);
+        cx.update(super::init);
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let recorded_events = events.clone();
+        let (root, cx) = cx.add_window_view(move |window, cx| {
+            let input = cx.new(|cx| {
+                TextInput::new(
+                    "Workspace",
+                    TextInputStyle::new(
+                        hsla(0.0, 0.0, 0.9, 1.0),
+                        hsla(0.0, 0.0, 0.5, 1.0),
+                        hsla(0.6, 0.5, 0.5, 0.4),
+                        hsla(0.0, 0.0, 0.9, 1.0),
+                    ),
+                    window,
+                    cx,
+                )
+            });
+            cx.subscribe(&input, move |_, _, event: &TextInputEvent, _| {
+                recorded_events.borrow_mut().push(event.clone());
+            })
+            .detach();
+            MenuBlurTestRoot { input }
+        });
+        let input = root.read_with(cx, |root, _| root.input.clone());
+        cx.update(|window, cx| {
+            window.activate_window();
+            input.read(cx).focus_handle().focus(window);
+        });
+        cx.run_until_parked();
+
+        let menu = cx
+            .debug_bounds("unrelated-menu-target")
+            .unwrap_or_else(|| panic!("unrelated menu trigger not painted"));
+        cx.simulate_click(menu.center(), Modifiers::default());
+        cx.run_until_parked();
+
+        assert!(cx.update(|window, cx| crate::menu::window_menu_is_open(window, cx)));
+        assert!(!cx.update(|window, cx| input.read(cx).focus_handle().is_focused(window)));
+        assert!(
+            events
+                .borrow()
+                .contains(&TextInputEvent::Blurred("Workspace".to_owned()))
         );
     }
 
