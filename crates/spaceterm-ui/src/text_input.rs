@@ -3365,6 +3365,8 @@ mod tests {
         cx.simulate_keystrokes("escape");
         cx.run_until_parked();
         assert!(events.borrow().contains(&TextInputEvent::ContextMenuClosed));
+        assert!(cx.update(|window, cx| input.read(cx).focus_handle().is_focused(window)));
+        assert!(input.read_with(cx, |input, _| input.is_focused()));
     }
 
     #[gpui::test]
