@@ -9,7 +9,7 @@ use gpui::{
 };
 
 use crate::{
-    TextInput, TextInputEvent, TextInputStyle,
+    TextInput, TextInputEvent, TextInputStyle, TextInputTabBehavior,
     button::{ButtonSize, ButtonVariant, IconButton},
     menu::{Menu, MenuActivation, MenuEntry, MenuSize},
     overlay_scrollbar::{OverlayScrollbar, OverlayScrollbarEvent, ScrollMetrics},
@@ -19,15 +19,31 @@ const KEY_CONTEXT: &str = "SpaceTermCommandPalette";
 
 actions!(
     spaceterm_command_palette,
-    [MoveUp, MoveDown, MoveHome, MoveEnd]
+    [
+        MoveUp,
+        MoveDown,
+        MovePageUp,
+        MovePageDown,
+        Activate,
+        Dismiss,
+        FocusNext,
+        FocusPrevious
+    ]
 );
 
 pub(crate) fn init(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("up", MoveUp, Some(KEY_CONTEXT)),
+        KeyBinding::new("ctrl-p", MoveUp, Some(KEY_CONTEXT)),
         KeyBinding::new("down", MoveDown, Some(KEY_CONTEXT)),
-        KeyBinding::new("home", MoveHome, Some(KEY_CONTEXT)),
-        KeyBinding::new("end", MoveEnd, Some(KEY_CONTEXT)),
+        KeyBinding::new("ctrl-n", MoveDown, Some(KEY_CONTEXT)),
+        KeyBinding::new("pageup", MovePageUp, Some(KEY_CONTEXT)),
+        KeyBinding::new("pagedown", MovePageDown, Some(KEY_CONTEXT)),
+        KeyBinding::new("ctrl-m", Activate, Some(KEY_CONTEXT)),
+        KeyBinding::new("cmd-.", Dismiss, Some(KEY_CONTEXT)),
+        KeyBinding::new("ctrl-g", Dismiss, Some(KEY_CONTEXT)),
+        KeyBinding::new("tab", FocusNext, Some(KEY_CONTEXT)),
+        KeyBinding::new("shift-tab", FocusPrevious, Some(KEY_CONTEXT)),
     ]);
 }
 
@@ -803,13 +819,16 @@ pub struct CommandPalette<I: Clone + Eq + 'static> {
     loading: bool,
     open: bool,
     input: Entity<TextInput>,
+    focus_scope: gpui::FocusHandle,
     scrollbar: Entity<OverlayScrollbar<f32>>,
     restore_focus: Option<WeakFocusHandle>,
     restore_on_activation: Option<WeakFocusHandle>,
     pointer_press: Option<I>,
     list: ListState,
     scrollbar_reveal_pending: bool,
+    selection_reveal_pending: bool,
     _input_subscription: Subscription,
+    _focus_subscription: Subscription,
     _scrollbar_subscription: Subscription,
 }
 
@@ -847,6 +866,7 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
                 cx,
             )
             .placeholder(input_placeholder)
+            .tab_behavior(TextInputTabBehavior::Propagate)
         });
         let input_subscription = cx.subscribe_in(
             &input,
@@ -861,14 +881,15 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
                 }
                 // The palette's own footer menu takes focus while the palette must stay open, so
                 // a blur is only a dismissal when no menu owns this Operating-System Window.
-                TextInputEvent::Blurred(_)
-                    if palette.open && !crate::menu::window_menu_is_open(window, cx) =>
-                {
-                    palette.close(CommandPaletteCloseReason::FocusLost, window, cx);
-                }
                 TextInputEvent::Blurred(_) => {}
             },
         );
+        let focus_scope = cx.focus_handle();
+        let focus_subscription = cx.on_focus_out(&focus_scope, window, |palette, _, window, cx| {
+            if palette.open && !crate::menu::window_menu_is_open(window, cx) {
+                palette.close(CommandPaletteCloseReason::FocusLost, window, cx);
+            }
+        });
         let scrollbar = cx.new(|_| OverlayScrollbar::<f32>::new("command-palette-scrollbar"));
         let scrollbar_subscription = cx.subscribe_in(
             &scrollbar,
@@ -918,13 +939,16 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
             loading: false,
             open: false,
             input,
+            focus_scope,
             scrollbar,
             restore_focus: None,
             restore_on_activation: None,
             pointer_press: None,
             list,
             scrollbar_reveal_pending: false,
+            selection_reveal_pending: false,
             _input_subscription: input_subscription,
+            _focus_subscription: focus_subscription,
             _scrollbar_subscription: scrollbar_subscription,
         };
         palette.install_scroll_handler(cx);
@@ -1024,6 +1048,7 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
             self.recompute_matches();
         }
         self.repair_selection();
+        self.selection_reveal_pending = true;
         self.input.read(cx).focus_handle().focus(window);
         cx.emit(CommandPaletteEvent::Lifecycle(
             CommandPaletteLifecycleEvent::Opened,
@@ -1155,6 +1180,7 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
         self.rows = build_rows(&self.items, &self.matches);
         self.list.reset(self.rows.len());
         self.repair_selection();
+        self.selection_reveal_pending = true;
     }
 
     /// Returns the list row index presenting `position`, which section headings shift.
@@ -1226,15 +1252,32 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
         self.select_match_position(enabled[next], cx);
     }
 
-    fn move_edge(&mut self, first: bool, cx: &mut gpui::Context<Self>) {
+    fn move_page(&mut self, direction: isize, cx: &mut gpui::Context<Self>) {
         let enabled = self.enabled_match_positions();
-        let position = if first {
-            enabled.first().copied()
+        if enabled.is_empty() {
+            return;
+        }
+        let current = self
+            .selected_match_position()
+            .and_then(|current| enabled.iter().position(|position| *position == current))
+            .unwrap_or(if direction < 0 { enabled.len() - 1 } else { 0 });
+        let viewport_height = f32::from(self.list.viewport_bounds().size.height);
+        let row_height = f32::from(cx.global::<CommandPaletteTheme>().metrics.row_height);
+        let page = (viewport_height / row_height).floor().max(1.0) as usize;
+        let next = if direction < 0 {
+            current.saturating_sub(page)
         } else {
-            enabled.last().copied()
+            current.saturating_add(page).min(enabled.len() - 1)
         };
-        if let Some(position) = position {
-            self.select_match_position(position, cx);
+        self.select_match_position(enabled[next], cx);
+    }
+
+    fn reveal_selected(&mut self) {
+        let Some(position) = self.selected_match_position() else {
+            return;
+        };
+        if let Some(row) = self.row_index_for_match(position) {
+            self.list.scroll_to_reveal_item(row);
         }
     }
 
@@ -1297,6 +1340,38 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
         }
         self.pointer_press = None;
         inside
+    }
+
+    fn focus_next_control(&self, window: &mut Window, cx: &mut gpui::Context<Self>) {
+        window.focus_next();
+        if !self.focus_scope.contains_focused(window, cx) {
+            self.input.read(cx).focus_handle().focus(window);
+        }
+        cx.stop_propagation();
+    }
+
+    fn focus_previous_control(&self, window: &mut Window, cx: &mut gpui::Context<Self>) {
+        window.focus_prev();
+        if self.focus_scope.contains_focused(window, cx) {
+            cx.stop_propagation();
+            return;
+        }
+
+        let input_focus = self.input.read(cx).focus_handle();
+        input_focus.focus(window);
+        let mut last_internal = input_focus;
+        let maximum_steps = self.header_actions.len() + usize::from(!self.actions_menu.is_empty());
+        for _ in 0..maximum_steps {
+            window.focus_next();
+            if !self.focus_scope.contains_focused(window, cx) {
+                last_internal.focus(window);
+                break;
+            }
+            if let Some(focused) = window.focused(cx) {
+                last_internal = focused;
+            }
+        }
+        cx.stop_propagation();
     }
 
     fn activate_selected(
@@ -1422,6 +1497,15 @@ impl<I: Clone + Eq + 'static> Render for CommandPalette<I> {
         } else {
             self.sync_scrollbar(cx);
         }
+        if std::mem::take(&mut self.selection_reveal_pending) {
+            let palette = cx.entity().downgrade();
+            window.on_next_frame(move |_, cx| {
+                let _ = palette.update(cx, |palette, cx| {
+                    palette.reveal_selected();
+                    cx.notify();
+                });
+            });
+        }
         let viewport = window.viewport_size();
         let available_width = (viewport.width - metrics.viewport_margin * 2.0).max(px(0.0));
         let panel_width = metrics.panel_width.min(available_width);
@@ -1454,6 +1538,8 @@ impl<I: Clone + Eq + 'static> Render for CommandPalette<I> {
             .w(viewport.width)
             .h(viewport.height)
             .key_context(KEY_CONTEXT)
+            .track_focus(&self.focus_scope)
+            .tab_group()
             .child(outside)
             .child(div().absolute().left(left).top(top).child(panel))
             .on_action(cx.listener(|palette, _: &MoveUp, _, cx| {
@@ -1464,13 +1550,27 @@ impl<I: Clone + Eq + 'static> Render for CommandPalette<I> {
                 palette.move_selection(1, cx);
                 cx.stop_propagation();
             }))
-            .on_action(cx.listener(|palette, _: &MoveHome, _, cx| {
-                palette.move_edge(true, cx);
+            .on_action(cx.listener(|palette, _: &MovePageUp, _, cx| {
+                palette.move_page(-1, cx);
                 cx.stop_propagation();
             }))
-            .on_action(cx.listener(|palette, _: &MoveEnd, _, cx| {
-                palette.move_edge(false, cx);
+            .on_action(cx.listener(|palette, _: &MovePageDown, _, cx| {
+                palette.move_page(1, cx);
                 cx.stop_propagation();
+            }))
+            .on_action(cx.listener(|palette, _: &Activate, window, cx| {
+                palette.activate_selected(CommandPaletteActivationSource::Keyboard, window, cx);
+                cx.stop_propagation();
+            }))
+            .on_action(cx.listener(|palette, _: &Dismiss, window, cx| {
+                palette.close(CommandPaletteCloseReason::Escape, window, cx);
+                cx.stop_propagation();
+            }))
+            .on_action(cx.listener(|palette, _: &FocusNext, window, cx| {
+                palette.focus_next_control(window, cx);
+            }))
+            .on_action(cx.listener(|palette, _: &FocusPrevious, window, cx| {
+                palette.focus_previous_control(window, cx);
             }));
 
         // The palette is not itself deferred: GPUI collects deferred draws once per frame, so a
@@ -1784,8 +1884,7 @@ fn render_header_action<I: Clone + Eq + 'static>(
     .variant(ButtonVariant::Ghost)
     .size(ButtonSize::Compact)
     .disabled(action.disabled)
-    // The editor keeps keyboard focus so the query stays live while a control is pressed.
-    .tab_stop(false)
+    .tab_stop(true)
     .on_activate(move |_, _, cx| {
         let id = id.clone();
         let _ = palette.update(cx, |_, cx| {
@@ -2560,16 +2659,76 @@ mod tests {
     }
 
     #[gpui::test]
+    fn command_period_should_close_and_restore_exact_prior_focus(cx: &mut TestAppContext) {
+        let (root, palette, _, _, cx) = palette_window(cx);
+        let prior = open_palette(&root, &palette, cx);
+
+        cx.simulate_keystrokes("cmd-.");
+        cx.run_until_parked();
+
+        assert!(!palette.read_with(cx, |palette, _| palette.is_open()));
+        assert!(cx.update(|window, _| prior.is_focused(window)));
+    }
+
+    #[gpui::test]
     fn navigation_should_wrap_and_skip_disabled_items(cx: &mut TestAppContext) {
         let (root, palette, _, _, cx) = palette_window(cx);
         open_palette(&root, &palette, cx);
 
-        cx.simulate_keystrokes("down down up");
+        cx.simulate_keystrokes("ctrl-n ctrl-n ctrl-p");
         cx.run_until_parked();
 
         assert_eq!(
             palette.read_with(cx, |palette, _| palette.selected_item_id().copied()),
             Some(3)
+        );
+    }
+
+    #[gpui::test]
+    fn page_navigation_should_move_by_the_visible_result_count(cx: &mut TestAppContext) {
+        let (root, palette, _, _, cx) = palette_window(cx);
+        open_palette(&root, &palette, cx);
+        palette.update(cx, |palette, cx| {
+            palette.set_items(
+                (0u8..32)
+                    .map(|id| CommandPaletteItem::new(id, format!("Command {id}")))
+                    .collect(),
+                cx,
+            );
+        });
+        cx.run_until_parked();
+
+        cx.simulate_keystrokes("pagedown");
+        cx.run_until_parked();
+
+        assert!(
+            palette
+                .read_with(cx, |palette, _| palette.selected_item_id().copied())
+                .is_some_and(|selected| selected > 0)
+        );
+    }
+
+    #[gpui::test]
+    fn tab_navigation_should_remain_inside_the_palette(cx: &mut TestAppContext) {
+        let (root, palette, _, _, cx) = palette_window(cx);
+        open_palette(&root, &palette, cx);
+        palette.update(cx, |palette, cx| {
+            palette.set_header_actions(
+                vec![CommandPaletteAction::new("refresh", "Refresh", |_| {
+                    div().into_any_element()
+                })],
+                cx,
+            );
+        });
+        cx.run_until_parked();
+
+        cx.simulate_keystrokes("tab shift-tab x");
+        cx.run_until_parked();
+
+        assert!(palette.read_with(cx, |palette, _| palette.is_open()));
+        assert_eq!(
+            palette.read_with(cx, |palette, _| palette.query().to_owned()),
+            "x"
         );
     }
 
@@ -2586,6 +2745,27 @@ mod tests {
             palette.read_with(cx, |palette, _| palette.selected_item_id().copied()),
             Some(3)
         );
+    }
+
+    #[gpui::test]
+    fn opening_should_reveal_a_preferred_item_below_the_initial_viewport(cx: &mut TestAppContext) {
+        let (root, palette, _, _, cx) = palette_window(cx);
+        palette.update(cx, |palette, cx| {
+            palette.set_items(
+                (0u8..32)
+                    .map(|id| {
+                        CommandPaletteItem::new(id, format!("Command {id}"))
+                            .debug_selector(format!("row-{id}"))
+                    })
+                    .collect(),
+                cx,
+            );
+            palette.set_preferred_item(Some(31), cx);
+        });
+
+        open_palette(&root, &palette, cx);
+
+        assert!(cx.debug_bounds("row-31").is_some());
     }
 
     #[gpui::test]

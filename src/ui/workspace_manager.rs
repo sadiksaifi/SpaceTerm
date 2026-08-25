@@ -1435,9 +1435,11 @@ impl WorkspaceManager {
         cx: &mut Context<Self>,
     ) {
         if self.workspace_search.read(cx).is_open() {
-            return;
+            self.workspace_search
+                .update(cx, |palette, cx| palette.open(window, cx));
+        } else {
+            self.open_workspace_search(window, cx);
         }
-        self.open_workspace_search(window, cx);
     }
 
     fn on_open_local_project(

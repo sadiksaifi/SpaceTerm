@@ -15,8 +15,8 @@ use gpui::{
 };
 use gpui_symbols::{Icon, SymbolWeight};
 use spaceterm_ui::{
-    Button, ButtonRole, ButtonSize, ButtonVariant, ContextMenu, IconButton, MenuLifecycleEvent,
-    MenuSize, OverlayScrollbar, OverlayScrollbarEvent, ScrollMetrics,
+    Button, ButtonRole, ButtonSize, ButtonVariant, ContextMenu, EditCopy, EditPaste, IconButton,
+    MenuLifecycleEvent, MenuSize, OverlayScrollbar, OverlayScrollbarEvent, ScrollMetrics,
 };
 
 use super::button_theme;
@@ -2255,6 +2255,10 @@ impl TerminalPane {
         self.copy_selection_with_recovery(None, window, cx);
     }
 
+    fn edit_copy(&mut self, _: &EditCopy, window: &mut Window, cx: &mut Context<Self>) {
+        self.copy_selection_with_recovery(None, window, cx);
+    }
+
     fn copy_selection_with_recovery(
         &mut self,
         recovery: Option<RecoveryToken>,
@@ -2328,6 +2332,10 @@ impl TerminalPane {
         self.native_service_origin_matches(origin)
             .then(|| self.ordered_selection_copy(cx))
             .flatten()
+    }
+
+    fn edit_paste(&mut self, _: &EditPaste, window: &mut Window, cx: &mut Context<Self>) {
+        self.paste_clipboard(&PasteClipboard, window, cx);
     }
 
     fn paste_clipboard(&mut self, _: &PasteClipboard, window: &mut Window, cx: &mut Context<Self>) {
@@ -3574,7 +3582,9 @@ impl Render for TerminalPane {
             .key_context(key_context)
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(Self::copy_selection))
+            .on_action(cx.listener(Self::edit_copy))
             .on_action(cx.listener(Self::paste_clipboard))
+            .on_action(cx.listener(Self::edit_paste))
             .on_action(cx.listener(Self::export_diagnostics))
             .on_drop(cx.listener(Self::insert_dropped_files))
             .on_action(cx.listener(Self::confirm_unsafe_paste))

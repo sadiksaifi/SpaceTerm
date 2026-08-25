@@ -5,10 +5,11 @@ use gpui::{
     App, AppContext, Bounds, KeyBinding, Menu, MenuItem, SystemMenuType, TitlebarOptions,
     WindowBounds, WindowOptions, actions, point, px, size,
 };
+use spaceterm_ui::{EditCopy, EditCut, EditPaste, EditRedo, EditSelectAll, EditUndo};
 
 use crate::terminal::{NativeTerminalSessionFactory, TerminalSessionFactory};
 use crate::ui::{
-    ClosePane, CloseWindow, CloseWorkspace, CopySelection, CreateWindow, CreateWorkspace,
+    ClosePane, CloseWindow, CloseWorkspace, CreateWindow, CreateWorkspace,
     ExportTerminalDiagnostics, FindNext, FindPrevious, OpenLocalProject, OpenTerminalFind,
     SearchWorkspaces, WorkspaceManager,
 };
@@ -21,8 +22,7 @@ actions!(
         HideOtherApplications,
         ShowAllApplications,
         MinimizeWindow,
-        ToggleFullScreen,
-        CopyTerminalSelection
+        ToggleFullScreen
     ]
 );
 
@@ -38,7 +38,6 @@ pub(crate) fn init(cx: &mut App) {
         KeyBinding::new("cmd-m", MinimizeWindow, None),
         KeyBinding::new("ctrl-cmd-f", ToggleFullScreen, None),
         KeyBinding::new("fn-f", ToggleFullScreen, None),
-        KeyBinding::new("cmd-c", CopyTerminalSelection, None),
     ]);
     cx.on_action(|_: &QuitApplication, cx| cx.quit());
     cx.on_action(|_: &HideApplication, cx| cx.hide());
@@ -46,9 +45,6 @@ pub(crate) fn init(cx: &mut App) {
     cx.on_action(|_: &ShowAllApplications, cx| cx.unhide_other_apps());
     cx.on_action(minimize_active_window);
     cx.on_action(toggle_active_window_full_screen);
-    cx.on_action(|_: &CopyTerminalSelection, cx| {
-        cx.defer(|cx| cx.dispatch_action(&CopySelection));
-    });
     cx.on_app_quit(|_| {
         if let Err(error) = crate::platform::acceptance_observation::finish_runtime_observation() {
             eprintln!("acceptance runtime observation did not complete: {error}");
@@ -73,7 +69,13 @@ pub(crate) fn init(cx: &mut App) {
         Menu {
             name: "Edit".into(),
             items: vec![
-                MenuItem::action("Copy", CopyTerminalSelection),
+                MenuItem::action("Undo", EditUndo),
+                MenuItem::action("Redo", EditRedo),
+                MenuItem::separator(),
+                MenuItem::action("Cut", EditCut),
+                MenuItem::action("Copy", EditCopy),
+                MenuItem::action("Paste", EditPaste),
+                MenuItem::action("Select All", EditSelectAll),
                 MenuItem::separator(),
                 MenuItem::submenu(Menu {
                     name: "Find".into(),
@@ -201,7 +203,6 @@ mod tests {
             ("cmd-m", MinimizeWindow.name()),
             ("ctrl-cmd-f", ToggleFullScreen.name()),
             ("fn-f", ToggleFullScreen.name()),
-            ("cmd-c", CopyTerminalSelection.name()),
         ];
         let actual = cx.update(|cx| {
             expected

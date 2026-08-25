@@ -33,7 +33,11 @@ pub use middle_truncated_text::MiddleTruncatedText;
 pub use overlay_scrollbar::{
     OverlayScrollbar, OverlayScrollbarEvent, ScrollMetrics, ScrollOffset, ScrollbarTheme,
 };
-pub use text_input::{TextInput, TextInputEvent, TextInputStyle};
+pub use text_input::{
+    Copy as EditCopy, Cut as EditCut, Paste as EditPaste, Redo as EditRedo,
+    SelectAll as EditSelectAll, TextInput, TextInputEvent, TextInputStyle, TextInputTabBehavior,
+    Undo as EditUndo,
+};
 
 /// Registers shared control themes, actions, and macOS key bindings.
 pub fn init(

@@ -4,7 +4,7 @@ use std::time::Duration;
 use gpui::prelude::*;
 use gpui::{
     App, Bounds, ClipboardItem, ContentMask, Context, CursorStyle, Element, ElementId,
-    ElementInputHandler, Entity, EntityInputHandler, EventEmitter, FocusHandle, Focusable,
+    ElementInputHandler, Entity, EntityInputHandler, EventEmitter, FocusHandle, Focusable, Global,
     GlobalElementId, Hsla, InspectorElementId, IntoElement, KeyBinding, LayoutId, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point, Render, ShapedLine,
     SharedString, Style, TextRun, UTF16Selection, UnderlineStyle, Window, actions, div, fill,
@@ -12,12 +12,19 @@ use gpui::{
 };
 use unicode_segmentation::UnicodeSegmentation as _;
 
+use crate::menu::{ContextMenu, MenuActivation, MenuEntry};
+
 const KEY_CONTEXT: &str = "SpaceTermTextInput";
 const CARET_BLINK_INTERVAL: Duration = Duration::from_millis(530);
 const CARET_WIDTH: Pixels = px(1.0);
 const SCROLL_PADDING: Pixels = px(2.0);
 const HISTORY_LIMIT: usize = 128;
 const HISTORY_BYTE_LIMIT: usize = 256 * 1024;
+
+#[derive(Default)]
+struct TextKillRing(String);
+
+impl Global for TextKillRing {}
 
 actions!(
     spaceterm_text_input,
@@ -28,6 +35,11 @@ actions!(
         DeleteToEnd,
         DeletePreviousWord,
         DeleteNextWord,
+        KillToBeginning,
+        KillToEnd,
+        KillPreviousWord,
+        Yank,
+        Transpose,
         MoveLeft,
         MoveRight,
         MoveToBeginning,
@@ -55,6 +67,7 @@ actions!(
 );
 
 pub(crate) fn init(cx: &mut App) {
+    cx.set_global(TextKillRing::default());
     cx.bind_keys([
         KeyBinding::new("backspace", Backspace, Some(KEY_CONTEXT)),
         KeyBinding::new("delete", DeleteForward, Some(KEY_CONTEXT)),
@@ -64,7 +77,11 @@ pub(crate) fn init(cx: &mut App) {
         KeyBinding::new("alt-delete", DeleteNextWord, Some(KEY_CONTEXT)),
         KeyBinding::new("ctrl-h", Backspace, Some(KEY_CONTEXT)),
         KeyBinding::new("ctrl-d", DeleteForward, Some(KEY_CONTEXT)),
-        KeyBinding::new("ctrl-k", DeleteToEnd, Some(KEY_CONTEXT)),
+        KeyBinding::new("ctrl-u", KillToBeginning, Some(KEY_CONTEXT)),
+        KeyBinding::new("ctrl-k", KillToEnd, Some(KEY_CONTEXT)),
+        KeyBinding::new("ctrl-w", KillPreviousWord, Some(KEY_CONTEXT)),
+        KeyBinding::new("ctrl-y", Yank, Some(KEY_CONTEXT)),
+        KeyBinding::new("ctrl-t", Transpose, Some(KEY_CONTEXT)),
         KeyBinding::new("left", MoveLeft, Some(KEY_CONTEXT)),
         KeyBinding::new("right", MoveRight, Some(KEY_CONTEXT)),
         KeyBinding::new("ctrl-b", MoveLeft, Some(KEY_CONTEXT)),
@@ -72,17 +89,23 @@ pub(crate) fn init(cx: &mut App) {
         KeyBinding::new("home", MoveToBeginning, Some(KEY_CONTEXT)),
         KeyBinding::new("end", MoveToEnd, Some(KEY_CONTEXT)),
         KeyBinding::new("cmd-left", MoveToBeginning, Some(KEY_CONTEXT)),
+        KeyBinding::new("cmd-up", MoveToBeginning, Some(KEY_CONTEXT)),
         KeyBinding::new("cmd-right", MoveToEnd, Some(KEY_CONTEXT)),
+        KeyBinding::new("cmd-down", MoveToEnd, Some(KEY_CONTEXT)),
         KeyBinding::new("ctrl-a", MoveToBeginning, Some(KEY_CONTEXT)),
         KeyBinding::new("ctrl-e", MoveToEnd, Some(KEY_CONTEXT)),
         KeyBinding::new("alt-left", MoveToPreviousWord, Some(KEY_CONTEXT)),
         KeyBinding::new("alt-right", MoveToNextWord, Some(KEY_CONTEXT)),
         KeyBinding::new("shift-left", SelectLeft, Some(KEY_CONTEXT)),
+        KeyBinding::new("ctrl-shift-b", SelectLeft, Some(KEY_CONTEXT)),
         KeyBinding::new("shift-right", SelectRight, Some(KEY_CONTEXT)),
+        KeyBinding::new("ctrl-shift-f", SelectRight, Some(KEY_CONTEXT)),
         KeyBinding::new("shift-home", SelectToBeginning, Some(KEY_CONTEXT)),
         KeyBinding::new("shift-end", SelectToEnd, Some(KEY_CONTEXT)),
         KeyBinding::new("cmd-shift-left", SelectToBeginning, Some(KEY_CONTEXT)),
+        KeyBinding::new("cmd-shift-up", SelectToBeginning, Some(KEY_CONTEXT)),
         KeyBinding::new("cmd-shift-right", SelectToEnd, Some(KEY_CONTEXT)),
+        KeyBinding::new("cmd-shift-down", SelectToEnd, Some(KEY_CONTEXT)),
         KeyBinding::new("ctrl-shift-a", SelectToBeginning, Some(KEY_CONTEXT)),
         KeyBinding::new("ctrl-shift-e", SelectToEnd, Some(KEY_CONTEXT)),
         KeyBinding::new("alt-shift-left", SelectToPreviousWord, Some(KEY_CONTEXT)),
@@ -120,6 +143,26 @@ impl TextInputStyle {
             caret,
         }
     }
+}
+
+/// How Tab and Shift-Tab behave while a [`TextInput`] owns focus.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum TextInputTabBehavior {
+    /// Move through the Operating-System Window's normal tab order.
+    #[default]
+    MoveFocus,
+    /// Leave traversal to a containing composite control.
+    Propagate,
+}
+
+#[derive(Clone, Copy)]
+enum TextInputMenuAction {
+    Undo,
+    Redo,
+    Cut,
+    Copy,
+    Paste,
+    SelectAll,
 }
 
 /// Events emitted by a [`TextInput`].
@@ -438,6 +481,36 @@ impl TextBuffer {
         )
     }
 
+    fn transpose(&mut self) -> bool {
+        if !self.selection.is_empty() || self.marked.is_some() {
+            return false;
+        }
+        let cursor = self.selection.cursor();
+        if cursor == 0 || self.text.is_empty() {
+            return false;
+        }
+        let (left_start, split, right_end) = if cursor == self.text.len() {
+            let split = previous_grapheme_boundary(&self.text, cursor);
+            let left_start = previous_grapheme_boundary(&self.text, split);
+            (left_start, split, cursor)
+        } else {
+            (
+                previous_grapheme_boundary(&self.text, cursor),
+                cursor,
+                next_grapheme_boundary(&self.text, cursor),
+            )
+        };
+        if left_start == split || split == right_end {
+            return false;
+        }
+        let replacement = format!(
+            "{}{}",
+            &self.text[split..right_end],
+            &self.text[left_start..split]
+        );
+        self.replace(left_start..right_end, &replacement, EditKind::Atomic)
+    }
+
     fn selected_text(&self) -> Option<&str> {
         (!self.selection.is_empty()).then(|| &self.text[self.selection.range.clone()])
     }
@@ -474,6 +547,8 @@ pub struct TextInput {
     focused: bool,
     caret_visible: bool,
     blinking: bool,
+    tab_behavior: TextInputTabBehavior,
+    composition_snapshot: Option<Snapshot>,
 }
 
 impl EventEmitter<TextInputEvent> for TextInput {}
@@ -501,12 +576,20 @@ impl TextInput {
             focused: false,
             caret_visible: true,
             blinking: false,
+            tab_behavior: TextInputTabBehavior::default(),
+            composition_snapshot: None,
         }
     }
 
     /// Sets the placeholder displayed when the value is empty.
     pub fn placeholder(mut self, placeholder: impl Into<SharedString>) -> Self {
         self.placeholder = placeholder.into();
+        self
+    }
+
+    /// Selects whether this editor or its containing composite control owns Tab traversal.
+    pub fn tab_behavior(mut self, behavior: TextInputTabBehavior) -> Self {
+        self.tab_behavior = behavior;
         self
     }
 
@@ -518,6 +601,7 @@ impl TextInput {
     /// Replaces the value without emitting a change event.
     pub fn set_value(&mut self, value: impl Into<String>, cx: &mut Context<Self>) {
         self.buffer = TextBuffer::new(single_line_text(&value.into()));
+        self.composition_snapshot = None;
         self.scroll = px(0.0);
         self.wake_caret(cx);
     }
@@ -555,13 +639,24 @@ impl TextInput {
         cx.notify();
     }
 
-    fn on_blur(&mut self, _: &mut Window, cx: &mut Context<Self>) {
+    fn on_blur(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.focused = false;
         self.caret_visible = true;
-        self.buffer.marked = None;
+        self.finish_composition();
         self.buffer.history.break_group();
-        cx.emit(TextInputEvent::Blurred(self.buffer.text.clone()));
+        if !crate::menu::window_menu_is_open(window, cx) {
+            cx.emit(TextInputEvent::Blurred(self.buffer.text.clone()));
+        }
         cx.notify();
+    }
+
+    fn finish_composition(&mut self) {
+        self.buffer.marked = None;
+        if let Some(snapshot) = self.composition_snapshot.take()
+            && snapshot.text != self.buffer.text
+        {
+            self.buffer.history.record(snapshot, EditKind::Atomic);
+        }
     }
 
     fn run_caret_blink(cx: &mut Context<Self>) {
@@ -626,6 +721,66 @@ impl TextInput {
 
     fn delete_next_word(&mut self, _: &DeleteNextWord, _: &mut Window, cx: &mut Context<Self>) {
         let changed = self.buffer.delete_next_word();
+        self.emit_change(changed, cx);
+    }
+
+    fn kill(&mut self, range: Range<usize>, cx: &mut Context<Self>) {
+        let range = normalized_byte_range(&self.buffer.text, range);
+        if range.is_empty() {
+            self.wake_caret(cx);
+            return;
+        }
+        cx.global_mut::<TextKillRing>().0 = self.buffer.text[range.clone()].to_owned();
+        let changed = self.buffer.replace(range, "", EditKind::Atomic);
+        self.emit_change(changed, cx);
+    }
+
+    fn kill_to_beginning(&mut self, _: &KillToBeginning, _: &mut Window, cx: &mut Context<Self>) {
+        let range = if !self.buffer.selection.is_empty() {
+            self.buffer.selection.range.clone()
+        } else if let Some(marked) = self.buffer.marked.clone() {
+            marked
+        } else {
+            0..self.buffer.selection.cursor()
+        };
+        self.kill(range, cx);
+    }
+
+    fn kill_to_end(&mut self, _: &KillToEnd, _: &mut Window, cx: &mut Context<Self>) {
+        let range = if !self.buffer.selection.is_empty() {
+            self.buffer.selection.range.clone()
+        } else if let Some(marked) = self.buffer.marked.clone() {
+            marked
+        } else {
+            self.buffer.selection.cursor()..self.buffer.text.len()
+        };
+        self.kill(range, cx);
+    }
+
+    fn kill_previous_word(&mut self, _: &KillPreviousWord, _: &mut Window, cx: &mut Context<Self>) {
+        let range = if !self.buffer.selection.is_empty() {
+            self.buffer.selection.range.clone()
+        } else if let Some(marked) = self.buffer.marked.clone() {
+            marked
+        } else {
+            let cursor = self.buffer.selection.cursor();
+            previous_word_start(&self.buffer.text, cursor)..cursor
+        };
+        self.kill(range, cx);
+    }
+
+    fn yank(&mut self, _: &Yank, _: &mut Window, cx: &mut Context<Self>) {
+        let killed = cx.global::<TextKillRing>().0.clone();
+        if killed.is_empty() {
+            self.wake_caret(cx);
+            return;
+        }
+        let changed = self.buffer.replace_selection(&killed, EditKind::Atomic);
+        self.emit_change(changed, cx);
+    }
+
+    fn transpose(&mut self, _: &Transpose, _: &mut Window, cx: &mut Context<Self>) {
+        let changed = self.buffer.transpose();
         self.emit_change(changed, cx);
     }
 
@@ -758,19 +913,37 @@ impl TextInput {
     }
 
     fn cancel(&mut self, _: &Cancel, _: &mut Window, cx: &mut Context<Self>) {
+        if self.buffer.marked.is_some() {
+            if let Some(snapshot) = self.composition_snapshot.take() {
+                let changed = snapshot.text != self.buffer.text;
+                self.buffer.restore(snapshot);
+                if changed {
+                    cx.emit(TextInputEvent::Changed(self.buffer.text.clone()));
+                }
+            } else {
+                self.buffer.marked = None;
+            }
+            self.wake_caret(cx);
+            cx.stop_propagation();
+            return;
+        }
         self.buffer.history.break_group();
         cx.emit(TextInputEvent::Cancelled);
         cx.stop_propagation();
     }
 
     fn focus_next(&mut self, _: &FocusNext, window: &mut Window, cx: &mut Context<Self>) {
-        window.focus_next();
-        cx.stop_propagation();
+        if self.tab_behavior == TextInputTabBehavior::MoveFocus {
+            window.focus_next();
+            cx.stop_propagation();
+        }
     }
 
     fn focus_previous(&mut self, _: &FocusPrevious, window: &mut Window, cx: &mut Context<Self>) {
-        window.focus_prev();
-        cx.stop_propagation();
+        if self.tab_behavior == TextInputTabBehavior::MoveFocus {
+            window.focus_prev();
+            cx.stop_propagation();
+        }
     }
 
     fn show_character_palette(
@@ -880,7 +1053,7 @@ impl EntityInputHandler for TextInput {
     }
 
     fn unmark_text(&mut self, _: &mut Window, _: &mut Context<Self>) {
-        self.buffer.marked = None;
+        self.finish_composition();
         self.buffer.history.break_group();
     }
 
@@ -902,7 +1075,9 @@ impl EntityInputHandler for TextInput {
             EditKind::Insert
         };
         let changed = if had_marked_text {
-            self.buffer.replace_without_history(range, text)
+            let changed = self.buffer.replace_without_history(range, text);
+            self.finish_composition();
+            changed
         } else {
             self.buffer.replace(range, text, kind)
         };
@@ -926,16 +1101,13 @@ impl EntityInputHandler for TextInput {
             .or_else(|| self.buffer.marked.clone())
             .unwrap_or_else(|| self.buffer.selection.range.clone());
         let starts_composition = self.buffer.marked.is_none();
-        let before = starts_composition.then(|| self.buffer.snapshot());
+        if starts_composition {
+            self.composition_snapshot = Some(self.buffer.snapshot());
+        }
         let range = normalized_byte_range(&self.buffer.text, range);
         let start = range.start;
         let old = self.buffer.text[range.clone()].to_owned();
         self.buffer.text.replace_range(range, &replacement);
-        if let Some(snapshot) = before
-            && old != replacement
-        {
-            self.buffer.history.record(snapshot, EditKind::Atomic);
-        }
         let end = start + replacement.len();
         self.buffer.marked = (!replacement.is_empty()).then_some(start..end);
         self.buffer.selection = selected_utf16.map_or_else(
@@ -991,7 +1163,22 @@ impl EntityInputHandler for TextInput {
 impl Render for TextInput {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let entity = cx.entity();
-        div()
+        let menu_id = entity.entity_id();
+        let menu_entity = entity.downgrade();
+        let has_selection = !self.buffer.selection.is_empty();
+        let entries = vec![
+            MenuEntry::action("Undo", TextInputMenuAction::Undo)
+                .disabled(self.buffer.history.undo.is_empty()),
+            MenuEntry::action("Redo", TextInputMenuAction::Redo)
+                .disabled(self.buffer.history.redo.is_empty()),
+            MenuEntry::separator(),
+            MenuEntry::action("Cut", TextInputMenuAction::Cut).disabled(!has_selection),
+            MenuEntry::action("Copy", TextInputMenuAction::Copy).disabled(!has_selection),
+            MenuEntry::action("Paste", TextInputMenuAction::Paste),
+            MenuEntry::action("Select All", TextInputMenuAction::SelectAll)
+                .disabled(self.buffer.text.is_empty()),
+        ];
+        let editor = div()
             .size_full()
             .min_w_0()
             .key_context(KEY_CONTEXT)
@@ -1003,6 +1190,11 @@ impl Render for TextInput {
             .on_action(cx.listener(Self::delete_to_end))
             .on_action(cx.listener(Self::delete_previous_word))
             .on_action(cx.listener(Self::delete_next_word))
+            .on_action(cx.listener(Self::kill_to_beginning))
+            .on_action(cx.listener(Self::kill_to_end))
+            .on_action(cx.listener(Self::kill_previous_word))
+            .on_action(cx.listener(Self::yank))
+            .on_action(cx.listener(Self::transpose))
             .on_action(cx.listener(Self::move_left))
             .on_action(cx.listener(Self::move_right))
             .on_action(cx.listener(Self::move_to_beginning))
@@ -1030,7 +1222,27 @@ impl Render for TextInput {
             .on_mouse_move(cx.listener(Self::on_mouse_move))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
-            .child(TextElement { input: entity })
+            .child(TextElement { input: entity });
+
+        ContextMenu::new(
+            ("text-input-context-menu", menu_id),
+            "Text editing",
+            editor,
+            entries,
+        )
+        .on_activate(
+            move |activation: &MenuActivation<TextInputMenuAction>, window, cx| {
+                let action = *activation.action();
+                let _ = menu_entity.update(cx, |input, cx| match action {
+                    TextInputMenuAction::Undo => input.undo(&Undo, window, cx),
+                    TextInputMenuAction::Redo => input.redo(&Redo, window, cx),
+                    TextInputMenuAction::Cut => input.cut(&Cut, window, cx),
+                    TextInputMenuAction::Copy => input.copy(&Copy, window, cx),
+                    TextInputMenuAction::Paste => input.paste(&Paste, window, cx),
+                    TextInputMenuAction::SelectAll => input.on_select_all(&SelectAll, window, cx),
+                });
+            },
+        )
     }
 }
 
@@ -1357,7 +1569,7 @@ fn byte_range_to_utf16(text: &str, range: Range<usize>) -> Range<usize> {
 
 #[cfg(test)]
 mod tests {
-    use gpui::{TestAppContext, VisualTestContext, hsla};
+    use gpui::{TestAppContext, VisualTestContext, hsla, px, rgba};
 
     use super::*;
 
@@ -1375,10 +1587,31 @@ mod tests {
         }
     }
 
+    fn install_menu_theme(cx: &mut TestAppContext) {
+        let paint = crate::menu::MenuPaint::new(
+            rgba(0x141415ff),
+            rgba(0x252530ff),
+            rgba(0xcdcdcdff),
+            rgba(0x878787ff),
+            rgba(0x606079ff),
+            rgba(0x252530ff),
+            rgba(0xcdcdcdff),
+            rgba(0xd8647eff),
+            rgba(0x252530ff),
+        );
+        let metrics = crate::menu::MenuMetrics::new(px(160.0), px(26.0));
+        cx.set_global(crate::menu::MenuTheme::new(
+            paint,
+            crate::menu::MenuSizes::new(metrics, metrics, metrics),
+        ));
+        cx.update(crate::menu::init);
+    }
+
     fn text_input<'a>(
         cx: &'a mut TestAppContext,
         value: &'static str,
     ) -> (Entity<TextInput>, &'a mut VisualTestContext) {
+        install_menu_theme(cx);
         cx.update(super::init);
         let (input, cx) = cx.add_window_view(move |window, cx| {
             TextInput::new(
@@ -1409,6 +1642,15 @@ mod tests {
         buffer.delete_backward();
 
         assert_eq!(buffer.text, "");
+    }
+
+    #[test]
+    fn transpose_should_swap_complete_graphemes() {
+        let mut buffer = TextBuffer::new("e\u{301}👩‍💻".to_owned());
+
+        buffer.transpose();
+
+        assert_eq!(buffer.text, "👩‍💻e\u{301}");
     }
 
     #[test]
@@ -1531,7 +1773,21 @@ mod tests {
     }
 
     #[gpui::test]
+    fn control_k_and_y_should_share_the_application_kill_ring(cx: &mut TestAppContext) {
+        let (input, cx) = text_input(cx, "abc");
+
+        cx.simulate_keystrokes("ctrl-b ctrl-k ctrl-y");
+        cx.run_until_parked();
+
+        assert_eq!(
+            input.read_with(cx, |input, _| input.value().to_owned()),
+            "abc"
+        );
+    }
+
+    #[gpui::test]
     fn focus_callbacks_should_track_blur(cx: &mut TestAppContext) {
+        install_menu_theme(cx);
         cx.update(super::init);
         let mut input = None;
         let mut other_focus = None;

@@ -17,6 +17,7 @@ mod window_manager;
 mod workspace_manager;
 
 use gpui::{App, KeyBinding, MouseDownEvent, Window, actions};
+use spaceterm_ui::{EditCopy, EditPaste};
 
 pub(crate) use pane_host::{PaneHost, PaneHostEvent};
 #[cfg(test)]
@@ -125,8 +126,8 @@ pub(crate) fn init(cx: &mut App) {
         KeyBinding::new("cmd-t", CreateWindow, None),
         KeyBinding::new("cmd-w", ClosePane, None),
         KeyBinding::new("cmd-shift-w", CloseWindow, None),
-        KeyBinding::new("cmd-c", CopySelection, Some(TERMINAL_KEY_CONTEXT)),
-        KeyBinding::new("cmd-v", PasteClipboard, Some(TERMINAL_KEY_CONTEXT)),
+        KeyBinding::new("cmd-c", EditCopy, Some(TERMINAL_KEY_CONTEXT)),
+        KeyBinding::new("cmd-v", EditPaste, Some(TERMINAL_KEY_CONTEXT)),
         KeyBinding::new("cmd-f", OpenTerminalFind, Some(TERMINAL_KEY_CONTEXT)),
         KeyBinding::new("cmd-g", FindNext, Some(TERMINAL_KEY_CONTEXT)),
         KeyBinding::new("cmd-shift-g", FindPrevious, Some(TERMINAL_KEY_CONTEXT)),
