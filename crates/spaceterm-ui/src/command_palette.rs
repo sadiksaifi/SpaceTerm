@@ -825,6 +825,7 @@ pub struct CommandPalette<I: Clone + Eq + 'static> {
     restore_on_activation: Option<WeakFocusHandle>,
     pointer_press: Option<I>,
     pointer_suppressed: bool,
+    hover_suppressed: bool,
     pointer_anchor: gpui::Point<Pixels>,
     list: ListState,
     scrollbar_reveal_pending: bool,
@@ -1113,6 +1114,7 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
             restore_on_activation: None,
             pointer_press: None,
             pointer_suppressed: false,
+            hover_suppressed: false,
             pointer_anchor: gpui::point(px(0.0), px(0.0)),
             list,
             scrollbar_reveal_pending: false,
@@ -1212,6 +1214,7 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
         self.open = true;
         self.pointer_press = None;
         self.pointer_suppressed = true;
+        self.hover_suppressed = true;
         self.pointer_anchor = window.mouse_position();
         self.selected = None;
         if !self.query.is_empty() {
@@ -1498,15 +1501,30 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
 
     fn suppress_pointer(&mut self, position: gpui::Point<Pixels>, cx: &mut gpui::Context<Self>) {
         self.pointer_anchor = position;
-        if !self.pointer_suppressed {
+        if !self.pointer_suppressed || !self.hover_suppressed {
             self.pointer_suppressed = true;
+            self.hover_suppressed = true;
             cx.notify();
         }
     }
 
-    fn resume_pointer(&mut self, cx: &mut gpui::Context<Self>) {
-        if self.pointer_suppressed {
+    fn suppress_hover_for_scroll(
+        &mut self,
+        position: gpui::Point<Pixels>,
+        cx: &mut gpui::Context<Self>,
+    ) {
+        self.pointer_anchor = position;
+        if self.pointer_suppressed || !self.hover_suppressed {
             self.pointer_suppressed = false;
+            self.hover_suppressed = true;
+            cx.notify();
+        }
+    }
+
+    fn resume_pointer_interaction(&mut self, cx: &mut gpui::Context<Self>) {
+        if self.pointer_suppressed || self.hover_suppressed {
+            self.pointer_suppressed = false;
+            self.hover_suppressed = false;
             cx.notify();
         }
     }
@@ -1516,10 +1534,10 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
         position: gpui::Point<Pixels>,
         cx: &mut gpui::Context<Self>,
     ) -> bool {
-        if self.pointer_suppressed && position == self.pointer_anchor {
+        if (self.pointer_suppressed || self.hover_suppressed) && position == self.pointer_anchor {
             return false;
         }
-        self.resume_pointer(cx);
+        self.resume_pointer_interaction(cx);
         true
     }
 
@@ -1542,29 +1560,8 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
         }
     }
 
-    fn sync_pointer_selection(
-        &mut self,
-        pointer_position: gpui::Point<Pixels>,
-        cx: &mut gpui::Context<Self>,
-    ) {
-        if self.pointer_suppressed {
-            return;
-        }
-        let viewport = self.list.viewport_bounds();
-        if !viewport.contains(&pointer_position) {
-            return;
-        }
-
-        let metrics = cx.global::<CommandPaletteTheme>().metrics;
-        let content_y =
-            pointer_position.y - viewport.top() - self.list.scroll_px_offset_for_scrollbar().y;
-        if let Some(position) = self.presented_results.item_at_y(content_y, metrics) {
-            self.select_match_position(position, cx);
-        }
-    }
-
     fn pointer_down(&mut self, id: I, cx: &mut gpui::Context<Self>) {
-        self.resume_pointer(cx);
+        self.resume_pointer_interaction(cx);
         self.pointer_press = Some(id);
     }
 
@@ -1663,6 +1660,7 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
         self.loading = false;
         self.pointer_press = None;
         self.pointer_suppressed = false;
+        self.hover_suppressed = false;
         self.scrollbar
             .update(cx, |scrollbar, cx| scrollbar.reset(cx));
         let restore_focus = self.restore_focus.take();
@@ -1846,10 +1844,8 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
                 let scroll_palette = palette.clone();
                 window.on_mouse_event(move |event: &ScrollWheelEvent, phase, _, cx| {
                     if phase.capture() {
-                        let _ = scroll_palette.update(cx, |palette, cx| palette.resume_pointer(cx));
-                    } else if phase.bubble() {
                         let _ = scroll_palette.update(cx, |palette, cx| {
-                            palette.sync_pointer_selection(event.position, cx);
+                            palette.suppress_hover_for_scroll(event.position, cx);
                         });
                     }
                 });
@@ -1857,7 +1853,9 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
                     if !phase.capture() {
                         return;
                     }
-                    let _ = palette.update(cx, |palette, cx| palette.resume_pointer(cx));
+                    let _ = palette.update(cx, |palette, cx| {
+                        palette.resume_pointer_interaction(cx);
+                    });
                     if panel_bounds.contains(&event.position) {
                         return;
                     }
@@ -1985,7 +1983,7 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
         let matches = Rc::new(self.matches.clone());
         let presented_results = Rc::new(self.presented_results.clone());
         let selected = self.selected.clone();
-        let pointer_suppressed = self.pointer_suppressed;
+        let hover_suppressed = self.pointer_suppressed || self.hover_suppressed;
         let leading_reserved = self.items.iter().any(|item| item.leading_icon.is_some());
         let palette = cx.entity().downgrade();
         div()
@@ -2015,7 +2013,7 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
                                         matched.label_highlights.clone(),
                                         matched.description_highlights.clone(),
                                         selected.as_ref() == Some(&item.id),
-                                        pointer_suppressed,
+                                        hover_suppressed,
                                         leading_reserved,
                                         row_height,
                                         theme,
@@ -2212,7 +2210,7 @@ fn render_row<I: Clone + Eq + 'static>(
     label_highlights: Vec<Range<usize>>,
     description_highlights: Vec<Range<usize>>,
     selected: bool,
-    pointer_suppressed: bool,
+    hover_suppressed: bool,
     leading_reserved: bool,
     height: Pixels,
     theme: CommandPaletteTheme,
@@ -2236,7 +2234,7 @@ fn render_row<I: Clone + Eq + 'static>(
     } else {
         paint.match_foreground
     };
-    let active_background = if pointer_suppressed {
+    let active_background = if hover_suppressed {
         paint.selected_background
     } else {
         paint.hover_background
@@ -2794,6 +2792,8 @@ mod tests {
         let panel = cx
             .debug_bounds("command-palette-panel")
             .expect("the palette panel was not rendered");
+        let selected_before_scroll =
+            palette.read_with(cx, |palette, _| palette.selected_item_id().copied());
         cx.simulate_event(ScrollWheelEvent {
             position: panel.center(),
             delta: ScrollDelta::Pixels(point(px(0.0), px(-240.0))),
@@ -2810,12 +2810,25 @@ mod tests {
             cx.debug_bounds("command-palette-panel").is_some(),
             "the palette stopped rendering after a wheel scroll"
         );
-        assert!(
-            palette
-                .read_with(cx, |palette, _| palette.selected_item_id().copied())
-                .is_some_and(|selected| selected > 0),
-            "wheel scrolling did not move selection to the row under the pointer"
+        assert_eq!(
+            palette.read_with(cx, |palette, _| palette.selected_item_id().copied()),
+            selected_before_scroll,
+            "wheel scrolling changed selection under a stationary pointer"
         );
+        assert!(palette.read_with(cx, |palette, _| palette.hover_suppressed));
+        assert!(!palette.read_with(cx, |palette, _| palette.pointer_suppressed));
+
+        cx.simulate_mouse_move(panel.center(), None, Modifiers::none());
+        cx.run_until_parked();
+        assert!(palette.read_with(cx, |palette, _| palette.hover_suppressed));
+
+        cx.simulate_mouse_move(
+            panel.center() + point(px(1.0), px(0.0)),
+            None,
+            Modifiers::none(),
+        );
+        cx.run_until_parked();
+        assert!(!palette.read_with(cx, |palette, _| palette.hover_suppressed));
     }
 
     #[gpui::test]
