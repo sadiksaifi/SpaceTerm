@@ -626,7 +626,7 @@ impl TerminalPane {
                         TextInputEvent::Submitted => {
                             pane.find_next(&FindNext, window, cx);
                         }
-                        TextInputEvent::Cancelled => {
+                        TextInputEvent::Cancelled | TextInputEvent::CompositionCancelled => {
                             cx.defer_in(window, move |pane, window, cx| {
                                 if pane
                                     .find_input
@@ -647,7 +647,6 @@ impl TerminalPane {
                         TextInputEvent::FocusLost
                         | TextInputEvent::CompositionStarted
                         | TextInputEvent::CompositionCommitted
-                        | TextInputEvent::CompositionCancelled
                         | TextInputEvent::ContextMenuOpened
                         | TextInputEvent::ContextMenuClosed => {}
                     }
@@ -5502,6 +5501,29 @@ mod tests {
             call.command,
             RecordedSessionCommand::NavigateFind(_, FindDirection::Next)
         )));
+        assert!(
+            records
+                .commands()
+                .iter()
+                .any(|call| matches!(call.command, RecordedSessionCommand::EndFind(_)))
+        );
+    }
+
+    #[gpui::test]
+    fn one_escape_closes_terminal_find_during_active_composition(cx: &mut TestAppContext) {
+        let (pane, cx, records) = connected_terminal_pane(cx);
+        cx.dispatch_action(OpenTerminalFind);
+        let input = terminal_find_input(&pane, cx);
+        cx.update(|window, cx| {
+            input.update(cx, |input, cx| {
+                input.replace_and_mark_text_in_range(None, "に", None, window, cx);
+            });
+        });
+
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+
+        assert!(pane.read_with(cx, |pane, _| pane.find_input.is_none()));
         assert!(
             records
                 .commands()
