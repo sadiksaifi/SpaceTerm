@@ -8,8 +8,8 @@ use gpui::{
 };
 use gpui_symbols::{Icon, SymbolWeight};
 use spaceterm_ui::{
-    ButtonSize, ButtonVariant, ContextMenu, IconButton, Menu, MenuAlignment, MenuCloseReason,
-    MenuLifecycleEvent, MenuPlacement, MenuPlacementConfig, MenuSize,
+    ButtonSize, ButtonVariant, ContextMenu, IconButton, Menu, MenuAlignment, MenuLifecycleEvent,
+    MenuPlacement, MenuPlacementConfig, MenuSize,
 };
 
 use super::button_theme;
@@ -645,11 +645,6 @@ impl WindowManager {
         };
         match event {
             MenuLifecycleEvent::Opened => self.window_menu = Some(owner),
-            MenuLifecycleEvent::Closed(MenuCloseReason::Activated) => {
-                if self.window_menu != Some(owner) {
-                    return;
-                }
-            }
             MenuLifecycleEvent::Closed(_) => {
                 if self.window_menu != Some(owner) {
                     return;

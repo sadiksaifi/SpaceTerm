@@ -8,8 +8,8 @@ use gpui::{
 };
 use gpui_symbols::{Icon, SymbolWeight};
 use spaceterm_ui::{
-    ButtonSize, ButtonVariant, IconButton, Menu, MenuAlignment, MenuCloseReason,
-    MenuLifecycleEvent, MenuPlacement, MenuPlacementConfig, MenuSize,
+    ButtonSize, ButtonVariant, IconButton, Menu, MenuAlignment, MenuLifecycleEvent, MenuPlacement,
+    MenuPlacementConfig, MenuSize,
 };
 
 use super::button_theme;
@@ -584,15 +584,12 @@ impl PaneHost {
                 self.menu_pane_id = Some(pane_id);
                 self.sync_terminal_focus(cx);
             }
-            MenuLifecycleEvent::Closed(reason) => {
+            MenuLifecycleEvent::Closed(_) => {
                 if self.menu_pane_id != Some(pane_id) {
                     return;
                 }
                 self.menu_pane_id = None;
-                self.sync_terminal_focus_with_menu_blocker(
-                    reason == MenuCloseReason::Activated,
-                    cx,
-                );
+                self.sync_terminal_focus(cx);
             }
         }
         cx.notify();

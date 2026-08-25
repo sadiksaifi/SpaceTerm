@@ -1469,6 +1469,18 @@ struct MenuReplacement {
     restore_focus: Option<WeakFocusHandle>,
 }
 
+struct MenuDismissal {
+    lifecycle: Option<MenuLifecycleHandler>,
+}
+
+impl MenuDismissal {
+    fn finish(self, reason: MenuCloseReason, cx: &mut App) {
+        if let Some(handler) = self.lifecycle {
+            handler(&MenuLifecycleEvent::Closed(reason), cx);
+        }
+    }
+}
+
 pub(crate) struct MenuReplacementFocus(pub(crate) Option<WeakFocusHandle>);
 
 /// Returns whether this Operating-System Window currently owns an open menu.
@@ -1728,8 +1740,21 @@ impl MenuState {
         window: Option<&mut Window>,
         cx: &mut gpui::Context<Self>,
     ) -> bool {
-        if !self.open {
+        let Some(dismissal) = self.begin_dismiss(restore, window, cx) else {
             return false;
+        };
+        dismissal.finish(reason, cx);
+        true
+    }
+
+    fn begin_dismiss(
+        &mut self,
+        restore: bool,
+        window: Option<&mut Window>,
+        cx: &mut gpui::Context<Self>,
+    ) -> Option<MenuDismissal> {
+        if !self.open {
+            return None;
         }
         self.open = false;
         self.awaiting_context_snapshot = false;
@@ -1753,9 +1778,10 @@ impl MenuState {
         } else {
             self.restore_focus = None;
         }
-        self.emit_lifecycle(MenuLifecycleEvent::Closed(reason), cx);
         cx.notify();
-        true
+        Some(MenuDismissal {
+            lifecycle: self.lifecycle.clone(),
+        })
     }
 
     fn replace_without_lifecycle(
@@ -2175,6 +2201,26 @@ fn dismiss_menu(
     }
 }
 
+fn activate_menu(
+    state: &WeakEntity<MenuState>,
+    activation: &InternalActivation,
+    source: MenuActivationSource,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let window_id = window.window_handle().window_id();
+    let dismissal = state
+        .update(cx, |menu, cx| menu.begin_dismiss(true, Some(window), cx))
+        .ok()
+        .flatten();
+    let Some(dismissal) = dismissal else {
+        return;
+    };
+    activation(source, window, cx);
+    release_window(state, window_id, cx);
+    dismissal.finish(MenuCloseReason::Activated, cx);
+}
+
 fn render_overlay(state: Entity<MenuState>, window: &mut Window, cx: &mut App) -> AnyElement {
     let menu = state.read(cx);
     let viewport = window.viewport_size();
@@ -2317,14 +2363,13 @@ fn render_overlay(state: Entity<MenuState>, window: &mut Window, cx: &mut App) -
                 .ok()
                 .flatten();
             if let Some(activation) = activation {
-                dismiss_menu(
+                activate_menu(
                     &activate_state,
-                    MenuCloseReason::Activated,
-                    true,
+                    &activation,
+                    MenuActivationSource::Keyboard,
                     window,
                     cx,
                 );
-                activation(MenuActivationSource::Keyboard, window, cx);
             } else {
                 let _ = activate_state.update(cx, |state, cx| state.open_submenu(cx));
             }
@@ -2594,8 +2639,13 @@ fn render_row(
                     }
                     window.prevent_default();
                     if let Some(activation) = &activation {
-                        dismiss_menu(&up_state, MenuCloseReason::Activated, true, window, cx);
-                        activation(MenuActivationSource::Pointer, window, cx);
+                        activate_menu(
+                            &up_state,
+                            activation,
+                            MenuActivationSource::Pointer,
+                            window,
+                            cx,
+                        );
                     } else if submenu {
                         let _ = up_state.update(cx, |state, cx| {
                             state.invalidate_submenu_task();
@@ -3405,6 +3455,80 @@ mod tests {
                 value: 2,
                 source: MenuActivationSource::Keyboard,
             }]
+        );
+    }
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum ActivationOrderEvent {
+        Lifecycle(MenuLifecycleEvent),
+        Activation,
+    }
+
+    struct ActivationOrderRoot {
+        events: Rc<RefCell<Vec<ActivationOrderEvent>>>,
+        callback_had_focus: Rc<Cell<bool>>,
+    }
+
+    impl Render for ActivationOrderRoot {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let activation_events = self.events.clone();
+            let lifecycle_events = self.events.clone();
+            let callback_had_focus = self.callback_had_focus.clone();
+            Menu::new(
+                "activation-order-menu",
+                "Activation order",
+                vec![MenuEntry::action("Run", ())],
+            )
+            .debug_selector("activation-order-trigger")
+            .on_activate(move |_, window, cx| {
+                callback_had_focus.set(window.focused(cx).is_some());
+                activation_events
+                    .borrow_mut()
+                    .push(ActivationOrderEvent::Activation);
+            })
+            .on_lifecycle(move |event, _| {
+                lifecycle_events
+                    .borrow_mut()
+                    .push(ActivationOrderEvent::Lifecycle(*event));
+            })
+        }
+    }
+
+    #[gpui::test]
+    fn activation_callback_should_run_after_internal_focus_restore_and_before_final_close(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(super::init);
+        cx.set_global(test_theme());
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let callback_had_focus = Rc::new(Cell::new(false));
+        let root_events = events.clone();
+        let root_callback_had_focus = callback_had_focus.clone();
+        let (_, cx) = cx.add_window_view(move |_, _| ActivationOrderRoot {
+            events: root_events,
+            callback_had_focus: root_callback_had_focus,
+        });
+        cx.update(|window, _| window.activate_window());
+        cx.run_until_parked();
+
+        let trigger = cx
+            .debug_bounds("activation-order-trigger")
+            .unwrap_or_else(|| panic!("activation-order trigger not painted"));
+        cx.simulate_click(trigger.center(), Modifiers::none());
+        cx.run_until_parked();
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+
+        assert!(callback_had_focus.get());
+        assert_eq!(
+            events.borrow().as_slice(),
+            [
+                ActivationOrderEvent::Lifecycle(MenuLifecycleEvent::Opened),
+                ActivationOrderEvent::Activation,
+                ActivationOrderEvent::Lifecycle(MenuLifecycleEvent::Closed(
+                    MenuCloseReason::Activated,
+                )),
+            ]
         );
     }
 

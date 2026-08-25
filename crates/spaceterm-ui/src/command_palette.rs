@@ -807,7 +807,7 @@ pub struct CommandPalette<I: Clone + Eq + 'static> {
     no_results_text: SharedString,
     items: Vec<CommandPaletteItem<I>>,
     matches: Vec<CommandPaletteMatch>,
-    rows: Vec<PaletteRow>,
+    presented_results: PresentedResults,
     header_actions: Vec<CommandPaletteAction>,
     hints: Vec<CommandPaletteHint>,
     actions_menu: Vec<MenuEntry<SharedString>>,
@@ -834,13 +834,178 @@ pub struct CommandPalette<I: Clone + Eq + 'static> {
     _scrollbar_subscription: Subscription,
 }
 
-/// One presented list row. Section headings and separators are derived, never caller-painted.
-#[derive(Clone, Debug, Eq, PartialEq)]
-enum PaletteRow {
-    Section(SharedString),
-    Separator,
-    Item(usize),
+mod presented_results {
+    use gpui::{Pixels, SharedString, px};
+
+    use super::{CommandPaletteItem, CommandPaletteMatch, CommandPaletteMetrics};
+
+    /// One presented list row. Section headings and separators are derived, never caller-painted.
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    pub(super) enum PaletteRow {
+        Section(SharedString),
+        Separator,
+        Item(usize),
+    }
+
+    impl PaletteRow {
+        pub(super) fn height(&self, metrics: CommandPaletteMetrics) -> Pixels {
+            match self {
+                Self::Section(_) => metrics.section_height,
+                Self::Separator => metrics.separator_height,
+                Self::Item(_) => metrics.row_height,
+            }
+        }
+    }
+
+    #[derive(Clone, Debug, Default, Eq, PartialEq)]
+    pub(super) struct PresentedResults {
+        rows: Vec<PaletteRow>,
+    }
+
+    impl PresentedResults {
+        pub(super) fn new<I>(
+            items: &[CommandPaletteItem<I>],
+            matches: &[CommandPaletteMatch],
+        ) -> Self {
+            let mut rows = Vec::with_capacity(matches.len());
+            let mut current: Option<SharedString> = None;
+            let mut started = false;
+            for (position, matched) in matches.iter().enumerate() {
+                let Some(item) = items.get(matched.item_index) else {
+                    continue;
+                };
+                if !started || item.section != current {
+                    if started {
+                        rows.push(PaletteRow::Separator);
+                    }
+                    if let Some(section) = item.section.clone() {
+                        rows.push(PaletteRow::Section(section));
+                    }
+                    current = item.section.clone();
+                }
+                started = true;
+                rows.push(PaletteRow::Item(position));
+            }
+            Self { rows }
+        }
+
+        pub(super) fn len(&self) -> usize {
+            self.rows.len()
+        }
+
+        #[cfg(test)]
+        pub(super) fn rows(&self) -> &[PaletteRow] {
+            &self.rows
+        }
+
+        pub(super) fn row(&self, index: usize) -> Option<&PaletteRow> {
+            self.rows.get(index)
+        }
+
+        pub(super) fn total_height(&self, metrics: CommandPaletteMetrics) -> Pixels {
+            self.rows
+                .iter()
+                .fold(px(0.0), |height, row| height + row.height(metrics))
+        }
+
+        pub(super) fn list_index_for_match(&self, position: usize) -> Option<usize> {
+            self.rows
+                .iter()
+                .position(|row| *row == PaletteRow::Item(position))
+        }
+
+        pub(super) fn row_at_y(
+            &self,
+            content_y: Pixels,
+            metrics: CommandPaletteMetrics,
+        ) -> Option<(usize, &PaletteRow)> {
+            if content_y < px(0.0) {
+                return None;
+            }
+            let mut row_top = px(0.0);
+            self.rows.iter().enumerate().find(|(_, row)| {
+                let row_bottom = row_top + row.height(metrics);
+                let contains = content_y >= row_top && content_y < row_bottom;
+                row_top = row_bottom;
+                contains
+            })
+        }
+
+        pub(super) fn item_at_y(
+            &self,
+            content_y: Pixels,
+            metrics: CommandPaletteMetrics,
+        ) -> Option<usize> {
+            match self.row_at_y(content_y, metrics)?.1 {
+                PaletteRow::Item(position) => Some(*position),
+                PaletteRow::Section(_) | PaletteRow::Separator => None,
+            }
+        }
+
+        pub(super) fn page_target(
+            &self,
+            current: Option<usize>,
+            enabled: &[usize],
+            viewport_height: Pixels,
+            direction: isize,
+            metrics: CommandPaletteMetrics,
+        ) -> Option<usize> {
+            let edge = if direction < 0 {
+                *enabled.last()?
+            } else {
+                *enabled.first()?
+            };
+            let current = current
+                .filter(|position| enabled.contains(position))
+                .unwrap_or(edge);
+            let current_enabled_index = enabled.iter().position(|position| *position == current)?;
+            let current_top = self.item_top(current, metrics)?;
+            let target_y = if direction < 0 {
+                (current_top - viewport_height).max(px(0.0))
+            } else {
+                current_top + viewport_height.max(px(0.0))
+            };
+
+            if direction < 0 {
+                let candidates = &enabled[..current_enabled_index];
+                candidates
+                    .iter()
+                    .copied()
+                    .find(|position| {
+                        self.item_top(*position, metrics)
+                            .is_some_and(|top| top >= target_y)
+                    })
+                    .or_else(|| candidates.last().copied())
+                    .or(Some(current))
+            } else {
+                let candidates = &enabled[current_enabled_index + 1..];
+                candidates
+                    .iter()
+                    .copied()
+                    .take_while(|position| {
+                        self.item_top(*position, metrics)
+                            .is_some_and(|top| top <= target_y)
+                    })
+                    .last()
+                    .or_else(|| candidates.first().copied())
+                    .or(Some(current))
+            }
+        }
+
+        fn item_top(&self, position: usize, metrics: CommandPaletteMetrics) -> Option<Pixels> {
+            let mut top = px(0.0);
+            for row in &self.rows {
+                if *row == PaletteRow::Item(position) {
+                    return Some(top);
+                }
+                top += row.height(metrics);
+            }
+            None
+        }
+    }
 }
+
+use presented_results::{PaletteRow, PresentedResults};
 
 impl<I: Clone + Eq + 'static> EventEmitter<CommandPaletteEvent<I>> for CommandPalette<I> {}
 
@@ -923,13 +1088,14 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
         let items = unique_items(items);
         let matches = match_command_palette_items(&items, "");
         let selected = first_enabled_id(&items, &matches);
-        let rows = build_rows(&items, &matches);
-        let list = ListState::new(rows.len(), ListAlignment::Top, px(0.0)).measure_all();
+        let presented_results = PresentedResults::new(&items, &matches);
+        let list =
+            ListState::new(presented_results.len(), ListAlignment::Top, px(0.0)).measure_all();
         let mut palette = Self {
             no_results_text: "No matching items".into(),
             items,
             matches,
-            rows,
+            presented_results,
             header_actions: Vec::new(),
             hints: Vec::new(),
             actions_menu: Vec::new(),
@@ -1183,17 +1349,10 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
 
     fn recompute_matches(&mut self) {
         self.matches = match_command_palette_items(&self.items, &self.query);
-        self.rows = build_rows(&self.items, &self.matches);
-        self.list.reset(self.rows.len());
+        self.presented_results = PresentedResults::new(&self.items, &self.matches);
+        self.list.reset(self.presented_results.len());
         self.repair_selection();
         self.selection_reveal_pending = true;
-    }
-
-    /// Returns the list row index presenting `position`, which section headings shift.
-    fn row_index_for_match(&self, position: usize) -> Option<usize> {
-        self.rows
-            .iter()
-            .position(|row| *row == PaletteRow::Item(position))
     }
 
     fn scrollbar_metrics(&self) -> Option<ScrollMetrics<f32>> {
@@ -1265,26 +1424,24 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
         if enabled.is_empty() {
             return;
         }
-        let current = self
-            .selected_match_position()
-            .and_then(|current| enabled.iter().position(|position| *position == current))
-            .unwrap_or(if direction < 0 { enabled.len() - 1 } else { 0 });
-        let viewport_height = f32::from(self.list.viewport_bounds().size.height);
-        let row_height = f32::from(cx.global::<CommandPaletteTheme>().metrics.row_height);
-        let page = (viewport_height / row_height).floor().max(1.0) as usize;
-        let next = if direction < 0 {
-            current.saturating_sub(page)
-        } else {
-            current.saturating_add(page).min(enabled.len() - 1)
-        };
-        self.select_match_position(enabled[next], cx);
+        let metrics = cx.global::<CommandPaletteTheme>().metrics;
+        let next = self.presented_results.page_target(
+            self.selected_match_position(),
+            &enabled,
+            self.list.viewport_bounds().size.height,
+            direction,
+            metrics,
+        );
+        if let Some(next) = next {
+            self.select_match_position(next, cx);
+        }
     }
 
     fn reveal_selected(&mut self) {
         let Some(position) = self.selected_match_position() else {
             return;
         };
-        if let Some(row) = self.row_index_for_match(position) {
+        if let Some(row) = self.presented_results.list_index_for_match(position) {
             self.list.scroll_to_reveal_item(row);
         }
     }
@@ -1320,7 +1477,7 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
             .map(|item| item.id.clone());
         if next.is_some() && self.selected != next {
             self.selected = next;
-            if let Some(row) = self.row_index_for_match(position) {
+            if let Some(row) = self.presented_results.list_index_for_match(position) {
                 self.list.scroll_to_reveal_item(row);
             }
             cx.notify();
@@ -1389,23 +1546,7 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
         let metrics = cx.global::<CommandPaletteTheme>().metrics;
         let content_y =
             pointer_position.y - viewport.top() - self.list.scroll_px_offset_for_scrollbar().y;
-        let mut row_top = px(0.0);
-        let mut target = None;
-        for row in &self.rows {
-            let height = match row {
-                PaletteRow::Section(_) => metrics.section_height,
-                PaletteRow::Separator => metrics.separator_height,
-                PaletteRow::Item(_) => metrics.row_height,
-            };
-            if content_y >= row_top && content_y < row_top + height {
-                if let PaletteRow::Item(position) = row {
-                    target = Some(*position);
-                }
-                break;
-            }
-            row_top += height;
-        }
-        if let Some(position) = target {
+        if let Some(position) = self.presented_results.item_at_y(content_y, metrics) {
             self.select_match_position(position, cx);
         }
     }
@@ -1474,14 +1615,30 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
         if !enabled {
             return;
         }
-        self.close(CommandPaletteCloseReason::Activated, window, cx);
+        if !self.begin_close(CommandPaletteCloseReason::Activated, window, cx) {
+            return;
+        }
         cx.emit(CommandPaletteEvent::Activated(CommandPaletteActivation {
             item_id,
             source,
         }));
+        self.finish_close(CommandPaletteCloseReason::Activated, cx);
     }
 
     fn close(
+        &mut self,
+        reason: CommandPaletteCloseReason,
+        window: &mut Window,
+        cx: &mut gpui::Context<Self>,
+    ) -> bool {
+        if !self.begin_close(reason, window, cx) {
+            return false;
+        }
+        self.finish_close(reason, cx);
+        true
+    }
+
+    fn begin_close(
         &mut self,
         reason: CommandPaletteCloseReason,
         window: &mut Window,
@@ -1507,39 +1664,15 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
                 focus.focus(window);
             }
         }
+        true
+    }
+
+    fn finish_close(&self, reason: CommandPaletteCloseReason, cx: &mut gpui::Context<Self>) {
         cx.emit(CommandPaletteEvent::Lifecycle(
             CommandPaletteLifecycleEvent::Closed(reason),
         ));
         cx.notify();
-        true
     }
-}
-
-/// Flattens matches into presented rows, inserting a heading whenever the section changes.
-fn build_rows<I>(
-    items: &[CommandPaletteItem<I>],
-    matches: &[CommandPaletteMatch],
-) -> Vec<PaletteRow> {
-    let mut rows = Vec::with_capacity(matches.len());
-    let mut current: Option<SharedString> = None;
-    let mut started = false;
-    for (position, matched) in matches.iter().enumerate() {
-        let Some(item) = items.get(matched.item_index) else {
-            continue;
-        };
-        if !started || item.section != current {
-            if started {
-                rows.push(PaletteRow::Separator);
-            }
-            if let Some(section) = item.section.clone() {
-                rows.push(PaletteRow::Section(section));
-            }
-            current = item.section.clone();
-        }
-        started = true;
-        rows.push(PaletteRow::Item(position));
-    }
-    rows
 }
 
 fn unique_items<I: Clone + Eq>(items: Vec<CommandPaletteItem<I>>) -> Vec<CommandPaletteItem<I>> {
@@ -1600,7 +1733,7 @@ impl<I: Clone + Eq + 'static> Render for CommandPalette<I> {
         let content_height = if self.loading || self.matches.is_empty() {
             metrics.row_height
         } else {
-            rows_height(&self.rows, metrics)
+            self.presented_results.total_height(metrics)
         };
         let chrome_height = chrome_height(metrics, footer);
         let available_height = (viewport.height - top - metrics.viewport_margin).max(px(0.0));
@@ -1838,7 +1971,7 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
     ) -> AnyElement {
         let items = Rc::new(self.items.clone());
         let matches = Rc::new(self.matches.clone());
-        let rows = Rc::new(self.rows.clone());
+        let presented_results = Rc::new(self.presented_results.clone());
         let selected = self.selected.clone();
         let pointer_suppressed = self.pointer_suppressed;
         let leading_reserved = self.items.iter().any(|item| item.leading_icon.is_some());
@@ -1848,14 +1981,17 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
             .size_full()
             .child(
                 list(self.list.clone(), move |index, _, _| {
-                    let Some(row) = rows.get(index) else {
+                    let Some(row) = presented_results.row(index) else {
                         return div().into_any_element();
                     };
+                    let row_height = row.height(theme.metrics);
                     match row {
                         PaletteRow::Section(label) => {
-                            render_section(label.clone(), theme).into_any_element()
+                            render_section(label.clone(), row_height, theme).into_any_element()
                         }
-                        PaletteRow::Separator => render_row_separator(theme).into_any_element(),
+                        PaletteRow::Separator => {
+                            render_row_separator(row_height, theme).into_any_element()
+                        }
                         PaletteRow::Item(position) => matches
                             .get(*position)
                             .and_then(|matched| {
@@ -1869,6 +2005,7 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
                                         selected.as_ref() == Some(&item.id),
                                         pointer_suppressed,
                                         leading_reserved,
+                                        row_height,
                                         theme,
                                     )
                                 })
@@ -1940,17 +2077,6 @@ fn chrome_height(metrics: CommandPaletteMetrics, footer: bool) -> Pixels {
     metrics.panel_padding * 2.0 + metrics.input_height + metrics.border_width + footer_height
 }
 
-fn rows_height(rows: &[PaletteRow], metrics: CommandPaletteMetrics) -> Pixels {
-    rows.iter().fold(px(0.0), |height, row| {
-        height
-            + match row {
-                PaletteRow::Section(_) => metrics.section_height,
-                PaletteRow::Separator => metrics.separator_height,
-                PaletteRow::Item(_) => metrics.row_height,
-            }
-    })
-}
-
 fn separator_line(metrics: CommandPaletteMetrics, paint: CommandPalettePaint) -> impl IntoElement {
     div()
         .w_full()
@@ -2012,11 +2138,15 @@ fn render_header_action<I: Clone + Eq + 'static>(
     button.into_any_element()
 }
 
-fn render_section(label: SharedString, theme: CommandPaletteTheme) -> impl IntoElement {
+fn render_section(
+    label: SharedString,
+    height: Pixels,
+    theme: CommandPaletteTheme,
+) -> impl IntoElement {
     let metrics = theme.metrics;
     div()
         .w_full()
-        .h(metrics.section_height)
+        .h(height)
         .pl(metrics.content_leading_inset())
         .flex()
         .items_center()
@@ -2025,11 +2155,11 @@ fn render_section(label: SharedString, theme: CommandPaletteTheme) -> impl IntoE
         .child(label)
 }
 
-fn render_row_separator(theme: CommandPaletteTheme) -> impl IntoElement {
+fn render_row_separator(height: Pixels, theme: CommandPaletteTheme) -> impl IntoElement {
     let metrics = theme.metrics;
     div()
         .w_full()
-        .h(metrics.separator_height)
+        .h(height)
         .px(metrics.panel_padding)
         .flex()
         .items_center()
@@ -2072,6 +2202,7 @@ fn render_row<I: Clone + Eq + 'static>(
     selected: bool,
     pointer_suppressed: bool,
     leading_reserved: bool,
+    height: Pixels,
     theme: CommandPaletteTheme,
 ) -> AnyElement {
     let paint = theme.paint;
@@ -2107,7 +2238,7 @@ fn render_row<I: Clone + Eq + 'static>(
         .debug_selector(move || debug_selector.unwrap_or_else(|| logical_name.to_string()))
         .relative()
         .w_full()
-        .h(metrics.row_height)
+        .h(height)
         .px(metrics.horizontal_padding)
         .flex()
         .items_center()
@@ -2361,6 +2492,80 @@ mod tests {
                 .keywords(["remove"])
                 .debug_selector("row-close"),
         ]
+    }
+
+    fn sectioned_results() -> (PresentedResults, CommandPaletteMetrics) {
+        let items = vec![
+            CommandPaletteItem::new(1, "Recent One").section("Recent"),
+            CommandPaletteItem::new(2, "Recent Two").section("Recent"),
+            CommandPaletteItem::new(3, "All One").section("All"),
+            CommandPaletteItem::new(4, "All Two").section("All"),
+            CommandPaletteItem::new(5, "All Three").section("All"),
+        ];
+        let matches = match_command_palette_items(&items, "");
+        (
+            PresentedResults::new(&items, &matches),
+            CommandPaletteMetrics::new(px(420.0), px(40.0)),
+        )
+    }
+
+    #[test]
+    fn presented_results_should_own_section_order_and_match_mapping() {
+        let (results, _) = sectioned_results();
+
+        assert_eq!(
+            (results.rows(), results.list_index_for_match(2)),
+            (
+                &[
+                    PaletteRow::Section("Recent".into()),
+                    PaletteRow::Item(0),
+                    PaletteRow::Item(1),
+                    PaletteRow::Separator,
+                    PaletteRow::Section("All".into()),
+                    PaletteRow::Item(2),
+                    PaletteRow::Item(3),
+                    PaletteRow::Item(4),
+                ][..],
+                Some(5),
+            )
+        );
+    }
+
+    #[test]
+    fn presented_results_should_measure_and_hit_test_every_row_kind() {
+        let (results, metrics) = sectioned_results();
+
+        assert_eq!(
+            (
+                results.total_height(metrics),
+                results.row_at_y(px(0.0), metrics).map(|(index, _)| index),
+                results.item_at_y(px(22.0), metrics),
+                results.item_at_y(px(105.0), metrics),
+                results.item_at_y(px(133.0), metrics),
+                results.row_at_y(px(253.0), metrics),
+            ),
+            (px(253.0), Some(0), Some(0), None, Some(2), None)
+        );
+    }
+
+    #[test]
+    fn page_target_should_include_section_and_separator_heights() {
+        let (results, metrics) = sectioned_results();
+
+        assert_eq!(
+            results.page_target(Some(0), &[0, 1, 2, 3, 4], px(120.0), 1, metrics),
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn page_target_should_skip_disabled_matches_without_ignoring_their_height() {
+        let (results, metrics) = sectioned_results();
+
+        assert_eq!(
+            results.page_target(Some(4), &[0, 2, 4], px(120.0), -1, metrics),
+            Some(2)
+        );
     }
 
     #[test]
@@ -2744,7 +2949,7 @@ mod tests {
         });
         cx.run_until_parked();
 
-        let rows = palette.read_with(cx, |palette, _| palette.rows.clone());
+        let rows = palette.read_with(cx, |palette, _| palette.presented_results.rows().to_vec());
         assert_eq!(
             rows,
             vec![
@@ -2984,20 +3189,29 @@ mod tests {
     }
 
     #[gpui::test]
-    fn return_should_emit_typed_keyboard_activation(cx: &mut TestAppContext) {
+    fn activation_should_restore_focus_then_emit_activation_before_final_close(
+        cx: &mut TestAppContext,
+    ) {
         let (root, palette, events, _, cx) = palette_window(cx);
         let prior = open_palette(&root, &palette, cx);
+        events.borrow_mut().clear();
 
         cx.simulate_keystrokes("enter");
         cx.run_until_parked();
 
-        assert!(events.borrow().contains(&CommandPaletteEvent::Activated(
-            CommandPaletteActivation {
-                item_id: 1,
-                source: CommandPaletteActivationSource::Keyboard,
-            }
-        )));
         assert!(cx.update(|window, _| prior.is_focused(window)));
+        assert_eq!(
+            events.borrow().as_slice(),
+            [
+                CommandPaletteEvent::Activated(CommandPaletteActivation {
+                    item_id: 1,
+                    source: CommandPaletteActivationSource::Keyboard,
+                }),
+                CommandPaletteEvent::Lifecycle(CommandPaletteLifecycleEvent::Closed(
+                    CommandPaletteCloseReason::Activated,
+                )),
+            ]
+        );
     }
 
     #[gpui::test]

@@ -103,7 +103,10 @@ grouped only where adjacent items report different sections. The palette renders
 full-window layer without deferring it, because GPUI collects deferred draws once per frame and a
 deferred palette could not host the deferred menu overlay its footer owns; its owner therefore
 renders it last. While a menu owns the Operating-System Window, palette blur and outside presses
-are not dismissals.
+are not dismissals. Activating a Command Palette or Menu first establishes internal closed and
+focus state, then delivers the typed activation while caller-owned transient blocking remains
+continuous, and finally publishes the activated close lifecycle event; non-activation close
+ordering is unchanged.
 
 ### Overlay Scrollbar
 

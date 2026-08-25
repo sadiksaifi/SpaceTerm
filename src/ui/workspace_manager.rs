@@ -12,10 +12,10 @@ use gpui::{
 use gpui_symbols::{Icon, RenderingMode, SymbolWeight};
 use spaceterm_ui::{
     Button, ButtonShape, ButtonSize, ButtonVariant, CommandPalette, CommandPaletteAccessory,
-    CommandPaletteCloseReason, CommandPaletteEvent, CommandPaletteHint, CommandPaletteItem,
-    CommandPaletteLifecycleEvent, ContextMenu, IconButton, MenuCloseReason, MenuEntry,
-    MenuLifecycleEvent, MenuSize, MiddleTruncatedText, OverlayScrollbar, OverlayScrollbarEvent,
-    ScrollMetrics, TextInput, TextInputEvent, TextInputStyle,
+    CommandPaletteEvent, CommandPaletteHint, CommandPaletteItem, CommandPaletteLifecycleEvent,
+    ContextMenu, IconButton, MenuEntry, MenuLifecycleEvent, MenuSize, MiddleTruncatedText,
+    OverlayScrollbar, OverlayScrollbarEvent, ScrollMetrics, TextInput, TextInputEvent,
+    TextInputStyle,
 };
 
 use super::button_theme;
@@ -131,7 +131,6 @@ pub(crate) struct WorkspaceManager {
     workspace_search_open: bool,
     workspace_search_open_request: Option<u64>,
     workspace_search_request_generation: u64,
-    workspace_search_activation_pending: bool,
     _workspace_search_subscription: Subscription,
     workspace_menu: Option<WorkspaceMenuState>,
     rename: Option<WorkspaceRenameState>,
@@ -250,7 +249,6 @@ impl WorkspaceManager {
             workspace_search_open: false,
             workspace_search_open_request: None,
             workspace_search_request_generation: 0,
-            workspace_search_activation_pending: false,
             _workspace_search_subscription: workspace_search_subscription,
             workspace_menu: None,
             rename: None,
@@ -545,10 +543,10 @@ impl WorkspaceManager {
     fn terminal_focus_blocker(&self, window: &Window) -> Option<TerminalFocusBlocker> {
         self.local_project_picker_open
             .then_some(TerminalFocusBlocker::Modal)
-            .or((self.workspace_search_open
-                || self.workspace_search_open_request.is_some()
-                || self.workspace_search_activation_pending)
-                .then_some(TerminalFocusBlocker::CommandPalette))
+            .or(
+                (self.workspace_search_open || self.workspace_search_open_request.is_some())
+                    .then_some(TerminalFocusBlocker::CommandPalette),
+            )
             .or(self
                 .top_chrome_interaction
                 .then_some(TerminalFocusBlocker::TopChrome)
@@ -608,7 +606,6 @@ impl WorkspaceManager {
             self.workspace_search_request_generation.wrapping_add(1);
         let request_generation = self.workspace_search_request_generation;
         self.workspace_search_open_request = Some(request_generation);
-        self.workspace_search_activation_pending = false;
         self.sync_terminal_focus_blocker(window, cx);
         cx.notify();
 
@@ -663,21 +660,17 @@ impl WorkspaceManager {
             CommandPaletteEvent::Lifecycle(CommandPaletteLifecycleEvent::Opened) => {
                 self.workspace_search_open = true;
                 self.workspace_search_open_request = None;
-                self.workspace_search_activation_pending = false;
                 self.sync_terminal_focus_blocker(window, cx);
                 cx.notify();
             }
-            CommandPaletteEvent::Lifecycle(CommandPaletteLifecycleEvent::Closed(reason)) => {
+            CommandPaletteEvent::Lifecycle(CommandPaletteLifecycleEvent::Closed(_)) => {
                 self.workspace_search_open = false;
                 self.workspace_search_open_request = None;
-                self.workspace_search_activation_pending =
-                    *reason == CommandPaletteCloseReason::Activated;
                 self.sync_terminal_focus_blocker(window, cx);
                 cx.notify();
             }
             CommandPaletteEvent::Activated(activation) => {
                 self.workspace_search_open_request = None;
-                self.workspace_search_activation_pending = false;
                 if !self.activate_workspace(*activation.item_id(), window, cx) {
                     self.sync_terminal_focus_blocker(window, cx);
                     cx.notify();
@@ -1283,14 +1276,14 @@ impl WorkspaceManager {
                 self.workspace_menu = Some(WorkspaceMenuState { workspace_id });
                 Some(TerminalFocusBlocker::ContextMenu)
             }
-            MenuLifecycleEvent::Closed(reason)
+            MenuLifecycleEvent::Closed(_)
                 if self
                     .workspace_menu
                     .is_some_and(|menu| menu.workspace_id == workspace_id) =>
             {
                 self.workspace_menu = None;
-                Some(if reason == MenuCloseReason::Activated {
-                    TerminalFocusBlocker::ContextMenu
+                Some(if self.rename.is_some() {
+                    TerminalFocusBlocker::RenameField
                 } else {
                     TerminalFocusBlocker::Sidebar
                 })
