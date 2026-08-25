@@ -2129,7 +2129,10 @@ fn chrome_height(metrics: CommandPaletteMetrics, footer: bool) -> Pixels {
     } else {
         px(0.0)
     };
-    metrics.panel_padding * 2.0 + metrics.input_height + metrics.border_width + footer_height
+    metrics.panel_padding * 2.0
+        + metrics.input_height
+        + metrics.border_width * 3.0
+        + footer_height
 }
 
 fn separator_line(metrics: CommandPaletteMetrics, paint: CommandPalettePaint) -> impl IntoElement {
@@ -2878,6 +2881,28 @@ mod tests {
         );
         cx.run_until_parked();
         assert!(!palette.read_with(cx, |palette, _| palette.hover_suppressed));
+    }
+
+    #[gpui::test]
+    fn exact_fit_panel_height_should_include_its_outer_borders(cx: &mut TestAppContext) {
+        let (root, palette, _, _, cx) = palette_window(cx);
+        open_palette(&root, &palette, cx);
+
+        let metrics = test_theme().metrics;
+        let content_height = palette.read_with(cx, |palette, _| {
+            palette.presented_results.total_height(metrics)
+        });
+        let panel = cx
+            .debug_bounds("command-palette-panel")
+            .expect("the palette panel was not rendered");
+
+        assert_eq!(
+            panel.size.height,
+            content_height
+                + metrics.input_height
+                + metrics.panel_padding * 2.0
+                + metrics.border_width * 3.0,
+        );
     }
 
     #[gpui::test]
