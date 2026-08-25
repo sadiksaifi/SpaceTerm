@@ -2134,10 +2134,7 @@ fn chrome_height(metrics: CommandPaletteMetrics, footer: bool) -> Pixels {
     } else {
         px(0.0)
     };
-    metrics.panel_padding * 2.0
-        + metrics.input_height
-        + metrics.border_width * 3.0
-        + footer_height
+    metrics.panel_padding * 2.0 + metrics.input_height + metrics.border_width * 3.0 + footer_height
 }
 
 fn separator_line(metrics: CommandPaletteMetrics, paint: CommandPalettePaint) -> impl IntoElement {
@@ -3400,11 +3397,7 @@ mod tests {
                 palette.set_query("open", cx);
                 if palette.pointer_up(&3, true) {
                     palette.selected = Some(3);
-                    palette.activate_selected(
-                        CommandPaletteActivationSource::Pointer,
-                        window,
-                        cx,
-                    );
+                    palette.activate_selected(CommandPaletteActivationSource::Pointer, window, cx);
                 }
             });
         });
@@ -3578,9 +3571,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn closed_palette_should_reject_results_from_the_dismissed_generation(
-        cx: &mut TestAppContext,
-    ) {
+    fn closed_palette_should_reject_results_from_the_dismissed_generation(cx: &mut TestAppContext) {
         let (root, palette, _, _, cx) = palette_window(cx);
         open_palette(&root, &palette, cx);
         let dismissed_generation = palette.read_with(cx, |palette, _| palette.generation());
