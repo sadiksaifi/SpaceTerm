@@ -39,6 +39,7 @@ pub(super) struct FindEditor {
     selection: Range<usize>,
     selection_reversed: bool,
     marked: Option<Range<usize>>,
+    composition_snapshot: Option<FindSnapshot>,
     history: FindHistory,
 }
 
@@ -60,9 +61,9 @@ impl FindEditor {
     }
 
     pub(super) fn select_all(&mut self) {
+        self.finish_composition();
         self.selection = 0..self.utf16_len();
         self.selection_reversed = false;
-        self.marked = None;
     }
 
     pub(super) fn text_for_range(&self, range: Range<usize>) -> (String, Range<usize>) {
@@ -73,6 +74,7 @@ impl FindEditor {
     }
 
     pub(super) fn replace(&mut self, range: Option<Range<usize>>, text: &str) {
+        let commits_composition = self.composition_snapshot.is_some();
         let replacement = range
             .or_else(|| self.marked.clone())
             .unwrap_or_else(|| self.selection.clone());
@@ -81,12 +83,17 @@ impl FindEditor {
         let text = single_line_text(text);
         let inserted_utf16 = text.encode_utf16().count();
         if self.text[replacement.clone()] != text {
-            self.record_history();
+            if !commits_composition {
+                self.record_history();
+            }
             self.text.replace_range(replacement, &text);
         }
         self.selection = start_utf16 + inserted_utf16..start_utf16 + inserted_utf16;
         self.selection_reversed = false;
         self.marked = None;
+        if commits_composition {
+            self.record_composition_history();
+        }
     }
 
     pub(super) fn replace_and_mark(
@@ -95,7 +102,7 @@ impl FindEditor {
         text: &str,
         selected: Option<Range<usize>>,
     ) {
-        let starts_composition = self.marked.is_none();
+        let starts_composition = self.composition_snapshot.is_none();
         let replacement = range
             .or_else(|| self.marked.clone())
             .unwrap_or_else(|| self.selection.clone());
@@ -103,10 +110,10 @@ impl FindEditor {
         let start_utf16 = byte_offset_to_utf16(&self.text, replacement.start);
         let text = single_line_text(text);
         let inserted_utf16 = text.encode_utf16().count();
+        if starts_composition {
+            self.composition_snapshot = Some(self.snapshot());
+        }
         if self.text[replacement.clone()] != text {
-            if starts_composition {
-                self.record_history();
-            }
             self.text.replace_range(replacement, &text);
         }
         let marked = start_utf16..start_utf16 + inserted_utf16;
@@ -118,10 +125,11 @@ impl FindEditor {
     }
 
     pub(super) fn unmark(&mut self) {
-        self.marked = None;
+        self.finish_composition();
     }
 
     pub(super) fn undo(&mut self) -> bool {
+        self.finish_composition();
         let Some(snapshot) = self.history.undo.pop() else {
             return false;
         };
@@ -132,6 +140,7 @@ impl FindEditor {
     }
 
     pub(super) fn redo(&mut self) -> bool {
+        self.finish_composition();
         let Some(snapshot) = self.history.redo.pop() else {
             return false;
         };
@@ -142,7 +151,8 @@ impl FindEditor {
     }
 
     pub(super) fn delete_backward(&mut self) -> bool {
-        if !self.selection.is_empty() || self.marked.is_some() {
+        self.finish_composition();
+        if !self.selection.is_empty() {
             self.replace(None, "");
             return true;
         }
@@ -155,7 +165,8 @@ impl FindEditor {
     }
 
     pub(super) fn delete_forward(&mut self) -> bool {
-        if !self.selection.is_empty() || self.marked.is_some() {
+        self.finish_composition();
+        if !self.selection.is_empty() {
             self.replace(None, "");
             return true;
         }
@@ -168,6 +179,7 @@ impl FindEditor {
     }
 
     pub(super) fn move_left(&mut self, extend: bool) {
+        self.finish_composition();
         if extend {
             let head = if self.selection_reversed {
                 self.selection.start
@@ -184,10 +196,10 @@ impl FindEditor {
             self.selection = next..next;
             self.selection_reversed = false;
         }
-        self.marked = None;
     }
 
     pub(super) fn move_right(&mut self, extend: bool) {
+        self.finish_composition();
         if extend {
             let head = if self.selection_reversed {
                 self.selection.start
@@ -204,20 +216,20 @@ impl FindEditor {
             self.selection = next..next;
             self.selection_reversed = false;
         }
-        self.marked = None;
     }
 
     pub(super) fn move_to_start(&mut self, extend: bool) {
+        self.finish_composition();
         if extend {
             self.extend_selection(0);
         } else {
             self.selection = 0..0;
             self.selection_reversed = false;
         }
-        self.marked = None;
     }
 
     pub(super) fn move_to_end(&mut self, extend: bool) {
+        self.finish_composition();
         let end = self.utf16_len();
         if extend {
             self.extend_selection(end);
@@ -225,7 +237,6 @@ impl FindEditor {
             self.selection = end..end;
             self.selection_reversed = false;
         }
-        self.marked = None;
     }
 
     fn utf16_len(&self) -> usize {
@@ -244,11 +255,25 @@ impl FindEditor {
         self.history.record(self.snapshot());
     }
 
+    fn finish_composition(&mut self) {
+        self.marked = None;
+        self.record_composition_history();
+    }
+
+    fn record_composition_history(&mut self) {
+        if let Some(snapshot) = self.composition_snapshot.take()
+            && snapshot.text != self.text
+        {
+            self.history.record(snapshot);
+        }
+    }
+
     fn restore(&mut self, snapshot: FindSnapshot) {
         self.text = snapshot.text;
         self.selection = snapshot.selection;
         self.selection_reversed = snapshot.selection_reversed;
         self.marked = None;
+        self.composition_snapshot = None;
     }
 
     fn extend_selection(&mut self, head: usize) {
@@ -440,6 +465,18 @@ mod tests {
         assert_eq!(editor.text(), "e\u{301}");
         assert!(editor.delete_backward());
         assert_eq!(editor.text(), "");
+    }
+
+    #[test]
+    fn editor_committed_composition_should_undo_in_one_step() {
+        let mut editor = FindEditor::default();
+        editor.replace(None, "x");
+        editor.replace_and_mark(None, "に", None);
+
+        editor.replace(None, "日");
+        assert!(editor.undo());
+
+        assert_eq!(editor.text(), "x");
     }
 
     #[test]
