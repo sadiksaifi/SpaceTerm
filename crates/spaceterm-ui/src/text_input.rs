@@ -1557,8 +1557,8 @@ impl TextInput {
             return;
         }
         self.focus_handle.focus(window);
-        self.commit_composition(cx);
         let offset = self.index_for_mouse_position(event.position);
+        self.commit_composition(cx);
         match event.click_count {
             1 if event.modifiers.shift => self.buffer.select_to(offset),
             1 => self.buffer.move_to(offset),
@@ -3090,13 +3090,28 @@ mod tests {
     fn pointer_press_commits_composition_before_starting_selection(cx: &mut TestAppContext) {
         let (input, _, events, cx) = input_with_events(cx, "abcdef", false);
         mark_text(&input, cx, "日");
-        let bounds = cx
-            .debug_bounds("test-input")
-            .expect("input should be painted");
-        cx.simulate_mouse_down(bounds.center(), MouseButton::Left, Modifiers::none());
-        cx.simulate_mouse_up(bounds.center(), MouseButton::Left, Modifiers::none());
+        let click_position = input.read_with(cx, |input, _| {
+            let bounds = input.last_bounds.expect("input should be painted");
+            let geometry = input
+                .geometry
+                .as_ref()
+                .expect("marked text should have current geometry");
+            point(
+                bounds.left() + geometry.line.x_for_index(1) - input.scroll,
+                bounds.center().y,
+            )
+        });
+        cx.simulate_mouse_down(click_position, MouseButton::Left, Modifiers::none());
+        cx.simulate_mouse_up(click_position, MouseButton::Left, Modifiers::none());
         cx.run_until_parked();
-        assert!(input.read_with(cx, |input, _| input.composition().is_none()));
+        assert_eq!(
+            input.read_with(cx, |input, _| (
+                input.composition().is_none(),
+                input.selection().range(),
+            )),
+            (true, 1..1),
+            "composition commit must preserve the click's hit-tested position"
+        );
         assert!(
             events
                 .borrow()
