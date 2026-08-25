@@ -12,7 +12,7 @@ use gpui_symbols::{Icon, RenderingMode, SymbolWeight};
 use spaceterm_ui::{
     Button, ButtonShape, ButtonSize, ButtonVariant, ContextMenu, IconButton, MenuEntry,
     MenuLifecycleEvent, MenuSize, MiddleTruncatedText, OverlayScrollbar, OverlayScrollbarEvent,
-    ScrollMetrics, TextInput, TextInputEvent, TextInputStyle,
+    ScrollMetrics, TextInput, TextInputEvent, TextInputVariant,
 };
 
 use super::button_theme;
@@ -78,6 +78,7 @@ struct WorkspaceRenameState {
     workspace_id: WorkspaceId,
     input: Entity<TextInput>,
     focus_handle: FocusHandle,
+    context_menu_open: bool,
 }
 
 struct WorkspaceSidebarTooltip {
@@ -1260,24 +1261,22 @@ impl WorkspaceManager {
                 };
                 let input = cx.new(|cx| {
                     TextInput::new(
+                        "workspace-rename-input",
+                        "Workspace name",
                         workspace.name(),
-                        TextInputStyle::new(
-                            gpui_color(ACTIVE_THEME.text).into(),
-                            gpui_color(ACTIVE_THEME.text_placeholder).into(),
-                            gpui_color(ACTIVE_THEME.players[0].selection).into(),
-                            gpui_color(ACTIVE_THEME.players[0].cursor).into(),
-                        ),
                         window,
                         cx,
                     )
+                    .variant(TextInputVariant::Bare)
+                    .debug_selector("workspace-rename-input")
                 });
                 let input_id = input.entity_id();
                 cx.subscribe_in(
                     &input,
                     window,
-                    move |_manager, _, event: &TextInputEvent, window, cx| match event {
-                        TextInputEvent::Submitted(value) => {
-                            let value = value.clone();
+                    move |manager, input, event: &TextInputEvent, window, cx| match event {
+                        TextInputEvent::Submitted => {
+                            let value = input.read(cx).value().to_owned();
                             cx.defer_in(window, move |manager, window, cx| {
                                 manager.finish_rename(input_id, Some(value), true, window, cx);
                             });
@@ -1287,13 +1286,43 @@ impl WorkspaceManager {
                                 manager.finish_rename(input_id, None, true, window, cx);
                             });
                         }
-                        TextInputEvent::Blurred(value) => {
-                            let value = value.clone();
-                            cx.defer_in(window, move |manager, window, cx| {
-                                manager.finish_rename(input_id, Some(value), false, window, cx);
-                            });
+                        TextInputEvent::FocusLost => {
+                            let menu_open = manager
+                                .rename
+                                .as_ref()
+                                .filter(|rename| rename.input.entity_id() == input_id)
+                                .is_some_and(|rename| rename.context_menu_open);
+                            if !menu_open {
+                                let value = input.read(cx).value().to_owned();
+                                cx.defer_in(window, move |manager, window, cx| {
+                                    manager.finish_rename(input_id, Some(value), false, window, cx);
+                                });
+                            }
                         }
-                        TextInputEvent::Changed(_) => {}
+                        TextInputEvent::ContextMenuOpened => {
+                            if let Some(rename) = &mut manager.rename
+                                && rename.input.entity_id() == input_id
+                            {
+                                rename.context_menu_open = true;
+                            }
+                        }
+                        TextInputEvent::ContextMenuClosed => {
+                            let should_finish = manager
+                                .rename
+                                .as_mut()
+                                .filter(|rename| rename.input.entity_id() == input_id)
+                                .is_some_and(|rename| {
+                                    rename.context_menu_open = false;
+                                    !input.read(cx).is_focused()
+                                });
+                            if should_finish {
+                                let value = input.read(cx).value().to_owned();
+                                cx.defer_in(window, move |manager, window, cx| {
+                                    manager.finish_rename(input_id, Some(value), false, window, cx);
+                                });
+                            }
+                        }
+                        _ => {}
                     },
                 )
                 .detach();
@@ -1301,6 +1330,7 @@ impl WorkspaceManager {
                     workspace_id,
                     focus_handle: input.read(cx).focus_handle(),
                     input,
+                    context_menu_open: false,
                 });
                 self.sync_terminal_focus_blocker(window, cx);
                 cx.notify();

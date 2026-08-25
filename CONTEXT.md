@@ -88,6 +88,15 @@ paint and metric catalog, then owns surrounding chrome, product policy, and reac
 events. Application-specific composition remains in `src/ui`; controls move into the library only
 when their behavior has reusable depth.
 
+The internal library's Text Input is an entity-backed, platform-neutral single-line editor with
+stable identity and a mandatory logical name. It exclusively owns bounded text, directional
+grapheme Selection, input-method composition, undo and redo, clipboard editing, pointer capture
+and horizontal autoscroll, focus, caret scheduling, and cached shaping. Typed content-free events
+carry monotonic revisions and semantic edit sources; callers read the current value only when
+needed. The application installs its Vague Pro variants and explicitly selects a platform
+keybinding profile, while labels, borders, validation, search icons, and composite lifecycle policy
+remain outside the editor.
+
 The internal library's Command Palette is an entity-backed, Operating-System Window-owned
 transient control. It owns query editing, static semantic matching, stable typed selection,
 keyboard and pointer navigation, focus restoration, and lifecycle events while callers own item

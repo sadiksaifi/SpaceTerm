@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+#[cfg(test)]
 use gpui::ClipboardItem;
 use gpui::prelude::*;
 use gpui::{
@@ -15,9 +16,9 @@ use gpui::{
 };
 use gpui_symbols::{Icon, SymbolWeight};
 use spaceterm_ui::{
-    Button, ButtonRole, ButtonSize, ButtonVariant, ContextMenu, EditCopy, EditCut, EditPaste,
-    EditRedo, EditSelectAll, EditUndo, IconButton, MenuLifecycleEvent, MenuSize, OverlayScrollbar,
-    OverlayScrollbarEvent, ScrollMetrics,
+    Button, ButtonRole, ButtonSize, ButtonVariant, ContextMenu, EditCopy, EditPaste, IconButton,
+    MenuLifecycleEvent, MenuSize, OverlayScrollbar, OverlayScrollbarEvent, ScrollMetrics,
+    TextInput, TextInputEvent, TextInputTabBehavior, TextInputVariant,
 };
 
 use super::button_theme;
@@ -27,7 +28,6 @@ use super::terminal_element::PaintPreflightFault;
 use super::terminal_element::{
     TerminalGridCache, TerminalGridConfiguration, TerminalGridElement, terminal_grid_content_bounds,
 };
-use super::terminal_find::{FindEditor, FindInputElement};
 use super::terminal_focus::{
     TerminalFocusBlocker, TerminalFocusCoordinator, TerminalFocusFacts, TerminalProductFocus,
 };
@@ -38,9 +38,10 @@ use super::terminal_ime::{PreeditLayout, PreeditPosition, TerminalIme, layout_pr
 use super::{
     AllowOsc52Clipboard, CancelUnsafePaste, CloseTerminalFind, ConfirmUnsafePaste, CopySelection,
     DecreaseTerminalFontSize, DenyOsc52Clipboard, ExportTerminalDiagnostics, FindNext,
-    FindPrevious, IncreaseTerminalFontSize, OpenTerminalFind, PasteClipboard,
-    ResetTerminalFontSize, TERMINAL_FIND_KEY_CONTEXT, TERMINAL_KEY_CONTEXT,
-    TERMINAL_OSC52_AUTHORIZATION_KEY_CONTEXT, TERMINAL_PASTE_CONFIRMATION_KEY_CONTEXT,
+    FindPrevious, FocusNextTerminalFindControl, FocusPreviousTerminalFindControl,
+    IncreaseTerminalFontSize, OpenTerminalFind, PasteClipboard, ResetTerminalFontSize,
+    TERMINAL_FIND_KEY_CONTEXT, TERMINAL_KEY_CONTEXT, TERMINAL_OSC52_AUTHORIZATION_KEY_CONTEXT,
+    TERMINAL_PASTE_CONFIRMATION_KEY_CONTEXT,
 };
 use crate::domain::{PaneId, WindowId, WorkspaceId};
 use crate::platform::acceptance_observation::{
@@ -283,8 +284,7 @@ pub(crate) struct TerminalPane {
     fallback_title: SharedString,
     title: SharedString,
     focus_handle: FocusHandle,
-    find_focus_handle: FocusHandle,
-    find_editor: Option<FindEditor>,
+    find_input: Option<Entity<TextInput>>,
     find_generation: FindQueryGeneration,
     product_focus: TerminalProductFocus,
     native_modal_open: bool,
@@ -365,7 +365,6 @@ impl TerminalPane {
         cx: &mut Context<Self>,
     ) -> Self {
         let focus_handle = cx.focus_handle();
-        let find_focus_handle = cx.focus_handle();
         let font_family = terminal_font(cx);
         let cell_width = measure_cell_width(window, &font_family, DEFAULT_FONT_SIZE);
         let backing_scale = BackingScale::new(window.scale_factor()).unwrap_or(BackingScale::ONE);
@@ -467,8 +466,7 @@ impl TerminalPane {
             title: fallback_title.clone(),
             fallback_title,
             focus_handle,
-            find_focus_handle,
-            find_editor: None,
+            find_input: None,
             find_generation: FindQueryGeneration::default(),
             product_focus: TerminalProductFocus::default(),
             native_modal_open: false,
@@ -529,9 +527,10 @@ impl TerminalPane {
     }
 
     fn focus_find(&mut self, window: &mut Window, cx: &App) {
-        self.advance_native_service_focus_epoch();
-        self.find_focus_handle.focus(window);
-        let _ = self.sync_terminal_input_focus(window, cx);
+        let Some(input) = &self.find_input else {
+            return;
+        };
+        input.read(cx).focus_handle().focus(window);
     }
 
     fn advance_native_service_focus_epoch(&self) {
@@ -597,14 +596,66 @@ impl TerminalPane {
     }
 
     fn open_find(&mut self, _: &OpenTerminalFind, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(editor) = &mut self.find_editor {
-            editor.select_all();
+        if let Some(input) = &self.find_input {
+            input.update(cx, |input, cx| input.select_all(cx));
         } else {
-            self.find_editor = Some(FindEditor::default());
-            self.find_generation = self.find_generation.next();
-            if let Some(session) = &self.session {
-                session.set_find_query(self.find_generation, String::new());
-            }
+            let input = cx.new(|cx| {
+                TextInput::new("terminal-find-input", "Terminal Find query", "", window, cx)
+                    .placeholder("Find")
+                    .variant(TextInputVariant::Bare)
+                    .tab_behavior(TextInputTabBehavior::Propagate)
+                    .debug_selector("terminal-find-input")
+            });
+            let input_id = input.entity_id();
+            cx.subscribe_in(
+                &input,
+                window,
+                move |pane, input, event: &TextInputEvent, window, cx| {
+                    let is_current = input.entity_id() == input_id
+                        && pane
+                            .find_input
+                            .as_ref()
+                            .is_some_and(|current| current.entity_id() == input_id);
+                    if !is_current {
+                        return;
+                    }
+                    match event {
+                        TextInputEvent::ValueChanged(_) => {
+                            pane.find_query_changed(input.read(cx).value().to_owned());
+                        }
+                        TextInputEvent::Submitted => {
+                            pane.find_next(&FindNext, window, cx);
+                        }
+                        TextInputEvent::Cancelled => {
+                            cx.defer_in(window, move |pane, window, cx| {
+                                if pane
+                                    .find_input
+                                    .as_ref()
+                                    .is_some_and(|current| current.entity_id() == input_id)
+                                {
+                                    pane.close_find(&CloseTerminalFind, window, cx);
+                                }
+                            });
+                        }
+                        TextInputEvent::FocusGained => {
+                            pane.advance_native_service_focus_epoch();
+                            let _ = pane.sync_terminal_input_focus(window, cx);
+                            cx.notify();
+                        }
+                        TextInputEvent::TabForwardRequested => window.focus_next(),
+                        TextInputEvent::TabBackwardRequested => window.focus_prev(),
+                        TextInputEvent::FocusLost
+                        | TextInputEvent::CompositionStarted
+                        | TextInputEvent::CompositionCommitted
+                        | TextInputEvent::CompositionCancelled
+                        | TextInputEvent::ContextMenuOpened
+                        | TextInputEvent::ContextMenuClosed => {}
+                    }
+                },
+            )
+            .detach();
+            self.find_input = Some(input);
+            self.find_query_changed(String::new());
         }
         self.focus_find(window, cx);
         cx.notify();
@@ -612,7 +663,7 @@ impl TerminalPane {
 
     fn find_next(&mut self, _: &FindNext, _window: &mut Window, _cx: &mut Context<Self>) {
         if let Some(session) = &self.session
-            && self.find_editor.is_some()
+            && self.find_input.is_some()
         {
             session.navigate_find(self.find_generation, FindDirection::Next);
         }
@@ -620,14 +671,14 @@ impl TerminalPane {
 
     fn find_previous(&mut self, _: &FindPrevious, _window: &mut Window, _cx: &mut Context<Self>) {
         if let Some(session) = &self.session
-            && self.find_editor.is_some()
+            && self.find_input.is_some()
         {
             session.navigate_find(self.find_generation, FindDirection::Previous);
         }
     }
 
     fn close_find(&mut self, _: &CloseTerminalFind, window: &mut Window, cx: &mut Context<Self>) {
-        if self.find_editor.is_none() {
+        if self.find_input.is_none() {
             return;
         }
         self.end_find_state();
@@ -638,7 +689,7 @@ impl TerminalPane {
     }
 
     fn end_find_state(&mut self) {
-        if self.find_editor.take().is_none() {
+        if self.find_input.take().is_none() {
             return;
         }
         self.find_generation = self.find_generation.next();
@@ -647,13 +698,13 @@ impl TerminalPane {
         }
     }
 
-    fn find_query_changed(&mut self) {
-        let Some(editor) = &self.find_editor else {
+    fn find_query_changed(&mut self, query: String) {
+        if self.find_input.is_none() {
             return;
-        };
+        }
         self.find_generation = self.find_generation.next();
         if let Some(session) = &self.session {
-            session.set_find_query(self.find_generation, editor.text().to_owned());
+            session.set_find_query(self.find_generation, query);
         }
     }
 
@@ -1324,10 +1375,10 @@ impl TerminalPane {
                     cx.notify();
                 }
                 started.handle.focus(self.terminal_input_focus);
-                if let Some(editor) = &self.find_editor {
+                if let Some(input) = &self.find_input {
                     started
                         .handle
-                        .set_find_query(self.find_generation, editor.text().to_owned());
+                        .set_find_query(self.find_generation, input.read(cx).value().to_owned());
                 }
                 self.native_service_session_identity =
                     self.native_service_session_identity.wrapping_add(1);
@@ -1811,57 +1862,6 @@ impl TerminalPane {
     }
 
     fn on_key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
-        if self.find_focus_handle.is_focused(window) && self.find_editor.is_some() {
-            let key = event.keystroke.key.as_str();
-            let extend = event.keystroke.modifiers.shift;
-            let changed = match key {
-                "backspace" => self
-                    .find_editor
-                    .as_mut()
-                    .is_some_and(FindEditor::delete_backward),
-                "delete" => self
-                    .find_editor
-                    .as_mut()
-                    .is_some_and(FindEditor::delete_forward),
-                "left" => {
-                    if let Some(editor) = &mut self.find_editor {
-                        editor.move_left(extend);
-                    }
-                    false
-                }
-                "right" => {
-                    if let Some(editor) = &mut self.find_editor {
-                        editor.move_right(extend);
-                    }
-                    false
-                }
-                "home" | "up" => {
-                    if let Some(editor) = &mut self.find_editor {
-                        editor.move_to_start(extend);
-                    }
-                    false
-                }
-                "end" | "down" => {
-                    if let Some(editor) = &mut self.find_editor {
-                        editor.move_to_end(extend);
-                    }
-                    false
-                }
-                "a" if event.keystroke.modifiers.platform => {
-                    if let Some(editor) = &mut self.find_editor {
-                        editor.select_all();
-                    }
-                    false
-                }
-                _ => return,
-            };
-            if changed {
-                self.find_query_changed();
-            }
-            cx.stop_propagation();
-            cx.notify();
-            return;
-        }
         if !self.synchronize_terminal_input_focus(window, cx) {
             return;
         }
@@ -2256,69 +2256,18 @@ impl TerminalPane {
         self.copy_selection_with_recovery(None, window, cx);
     }
 
-    fn edit_undo(&mut self, _: &EditUndo, window: &mut Window, cx: &mut Context<Self>) {
-        if self.find_focus_handle.is_focused(window)
-            && self.find_editor.as_mut().is_some_and(FindEditor::undo)
-        {
-            self.find_query_changed();
-            cx.notify();
-        }
-    }
-
-    fn edit_redo(&mut self, _: &EditRedo, window: &mut Window, cx: &mut Context<Self>) {
-        if self.find_focus_handle.is_focused(window)
-            && self.find_editor.as_mut().is_some_and(FindEditor::redo)
-        {
-            self.find_query_changed();
-            cx.notify();
-        }
-    }
-
     fn edit_copy(&mut self, _: &EditCopy, window: &mut Window, cx: &mut Context<Self>) {
-        self.copy_selection_with_recovery(None, window, cx);
-    }
-
-    fn edit_cut(&mut self, _: &EditCut, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.find_focus_handle.is_focused(window) {
-            return;
-        }
-        let Some(editor) = &mut self.find_editor else {
-            return;
-        };
-        let selection = editor.selection();
-        if selection.is_empty() {
-            return;
-        }
-        let (text, _) = editor.text_for_range(selection.clone());
-        cx.write_to_clipboard(ClipboardItem::new_string(text));
-        editor.replace(Some(selection), "");
-        self.find_query_changed();
-        cx.notify();
-    }
-
-    fn edit_select_all(&mut self, _: &EditSelectAll, window: &mut Window, cx: &mut Context<Self>) {
-        if self.find_focus_handle.is_focused(window)
-            && let Some(editor) = &mut self.find_editor
-        {
-            editor.select_all();
-            cx.notify();
+        if self.focus_handle.is_focused(window) {
+            self.copy_selection_with_recovery(None, window, cx);
         }
     }
 
     fn copy_selection_with_recovery(
         &mut self,
         recovery: Option<RecoveryToken>,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.find_focus_handle.is_focused(window)
-            && let Some(editor) = &self.find_editor
-            && !editor.selection().is_empty()
-        {
-            let (text, _) = editor.text_for_range(editor.selection());
-            cx.write_to_clipboard(ClipboardItem::new_string(text));
-            return;
-        }
         if let Some(copy) = self.ordered_selection_copy(cx) {
             if let Err(error) = self.selection_pasteboard.write(copy, cx) {
                 let _ = error;
@@ -2381,21 +2330,12 @@ impl TerminalPane {
     }
 
     fn edit_paste(&mut self, _: &EditPaste, window: &mut Window, cx: &mut Context<Self>) {
-        self.paste_clipboard(&PasteClipboard, window, cx);
+        if self.focus_handle.is_focused(window) {
+            self.paste_clipboard(&PasteClipboard, window, cx);
+        }
     }
 
     fn paste_clipboard(&mut self, _: &PasteClipboard, window: &mut Window, cx: &mut Context<Self>) {
-        if self.find_focus_handle.is_focused(window) && self.find_editor.is_some() {
-            let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) else {
-                return;
-            };
-            if let Some(editor) = &mut self.find_editor {
-                editor.replace(None, &text);
-            }
-            self.find_query_changed();
-            cx.notify();
-            return;
-        }
         let paths = read_file_urls().unwrap_or_default();
         let terminal_input_focused = self.synchronize_terminal_input_focus(window, cx);
         let insertion = if paths.is_empty() {
@@ -2913,7 +2853,7 @@ impl TerminalPane {
     }
 
     fn render_find_bar(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let editor = self.find_editor.as_ref()?;
+        let input = self.find_input.as_ref()?.clone();
         let snapshot = self
             .screen
             .find
@@ -2932,23 +2872,10 @@ impl TerminalPane {
             },
         );
         let has_results = snapshot.is_some_and(|snapshot| snapshot.total_matches > 0);
-        let text: SharedString = if editor.text().is_empty() {
-            "Find".into()
-        } else {
-            editor.text().to_owned().into()
-        };
-        let text_color = if editor.text().is_empty() {
-            ACTIVE_THEME.text_muted
-        } else {
-            ACTIVE_THEME.text
-        };
         let pane = cx.entity().downgrade();
         let previous_pane = pane.clone();
         let next_pane = pane.clone();
         let close_pane = pane.clone();
-        let input_pane = pane.clone();
-        let focus_handle = self.find_focus_handle.clone();
-        let input_focus_handle = focus_handle.clone();
 
         Some(
             div()
@@ -2972,11 +2899,18 @@ impl TerminalPane {
                 .shadow_md()
                 .block_mouse_except_scroll()
                 .key_context(TERMINAL_FIND_KEY_CONTEXT)
-                .track_focus(&focus_handle)
+                .tab_group()
+                .on_action(|_: &FocusNextTerminalFindControl, window, cx| {
+                    window.focus_next();
+                    cx.stop_propagation();
+                })
+                .on_action(|_: &FocusPreviousTerminalFindControl, window, cx| {
+                    window.focus_prev();
+                    cx.stop_propagation();
+                })
                 .child(
                     div()
-                        .id("terminal-find-input")
-                        .debug_selector(|| "terminal-find-input".to_owned())
+                        .id("terminal-find-field")
                         .relative()
                         .h(px(24.0))
                         .min_w(px(60.0))
@@ -2988,20 +2922,9 @@ impl TerminalPane {
                         .rounded(px(4.0))
                         .bg(gpui_color(ACTIVE_THEME.element_background))
                         .text_size(px(13.0))
-                        .text_color(gpui_color(text_color))
+                        .text_color(gpui_color(ACTIVE_THEME.text))
                         .whitespace_nowrap()
-                        .on_click(move |_, window, cx| {
-                            let _ = input_pane.update(cx, |pane, _| {
-                                pane.advance_native_service_focus_epoch();
-                            });
-                            input_focus_handle.focus(window);
-                            cx.stop_propagation();
-                        })
-                        .child(text)
-                        .child(div().absolute().inset_0().child(FindInputElement::new(
-                            self.find_focus_handle.clone(),
-                            cx.entity(),
-                        ))),
+                        .child(input),
                 )
                 .child(
                     div()
@@ -3066,6 +2989,7 @@ fn find_icon_button(
     .variant(ButtonVariant::Ghost)
     .size(ButtonSize::Small)
     .disabled(!enabled)
+    .tab_stop(true)
     .debug_selector(id)
     .tooltip(move |_, cx| button_theme::tooltip(accessibility_name, cx))
     .on_activate(move |_, window, cx| on_activate(window, cx))
@@ -3082,13 +3006,6 @@ impl EntityInputHandler for TerminalPane {
         _window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> Option<String> {
-        if self.find_focus_handle.is_focused(_window)
-            && let Some(editor) = &self.find_editor
-        {
-            let (text, adjusted) = editor.text_for_range(range);
-            *adjusted_range = Some(adjusted);
-            return Some(text);
-        }
         if self.ime.marked_text().is_some() {
             let (text, adjusted) = self.ime.text_for_utf16_range(range)?;
             *adjusted_range = Some(adjusted);
@@ -3110,14 +3027,6 @@ impl EntityInputHandler for TerminalPane {
         window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> Option<UTF16Selection> {
-        if self.find_focus_handle.is_focused(window)
-            && let Some(editor) = &self.find_editor
-        {
-            return Some(UTF16Selection {
-                range: editor.selection(),
-                reversed: editor.selection_reversed(),
-            });
-        }
         if !ignore_disabled_input && !self.terminal_input_focused(window, _cx) {
             return None;
         }
@@ -3139,20 +3048,10 @@ impl EntityInputHandler for TerminalPane {
         _window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> Option<Range<usize>> {
-        if self.find_focus_handle.is_focused(_window) {
-            return self.find_editor.as_ref().and_then(FindEditor::marked_range);
-        }
         self.ime.marked_range()
     }
 
-    fn unmark_text(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.find_focus_handle.is_focused(window)
-            && let Some(editor) = &mut self.find_editor
-        {
-            editor.unmark();
-            cx.notify();
-            return;
-        }
+    fn unmark_text(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         self.ime.cancel();
         self.invalidate_preedit_layout();
         self.pending_accessibility_notifications
@@ -3167,14 +3066,6 @@ impl EntityInputHandler for TerminalPane {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.find_focus_handle.is_focused(window)
-            && let Some(editor) = &mut self.find_editor
-        {
-            editor.replace(_range, text);
-            self.find_query_changed();
-            cx.notify();
-            return;
-        }
         if !self.synchronize_terminal_input_focus(window, cx) {
             self.ime.cancel();
             self.invalidate_preedit_layout();
@@ -3201,14 +3092,6 @@ impl EntityInputHandler for TerminalPane {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.find_focus_handle.is_focused(window)
-            && let Some(editor) = &mut self.find_editor
-        {
-            editor.replace_and_mark(range, new_text, new_selected_range);
-            self.find_query_changed();
-            cx.notify();
-            return;
-        }
         if !self.synchronize_terminal_input_focus(window, cx) {
             self.ime.cancel();
             self.invalidate_preedit_layout();
@@ -3229,9 +3112,6 @@ impl EntityInputHandler for TerminalPane {
         _window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> Option<Bounds<Pixels>> {
-        if self.find_focus_handle.is_focused(_window) && self.find_editor.is_some() {
-            return Some(element_bounds);
-        }
         if let Some(marked_text) = self.ime.marked_text() {
             let position = self.screen.cursor.position?;
             let columns = self.screen.rows.first()?.len();
@@ -3270,11 +3150,6 @@ impl EntityInputHandler for TerminalPane {
         _window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> Option<usize> {
-        if self.find_focus_handle.is_focused(_window)
-            && let Some(editor) = &self.find_editor
-        {
-            return Some(editor.selection().end);
-        }
         if self.ime.marked_text().is_some() {
             return Some(self.ime.selected_range().end);
         }
@@ -3501,7 +3376,7 @@ impl Render for TerminalPane {
         let preedit = displaying_current.then(|| self.preedit_layout()).flatten();
         let attention_visual = self.attention_visual;
         let find_spans = self
-            .find_editor
+            .find_input
             .as_ref()
             .and_then(|_| display_screen.find.as_ref())
             .filter(|snapshot| snapshot.generation == self.find_generation)
@@ -3628,11 +3503,7 @@ impl Render for TerminalPane {
             .key_context(key_context)
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(Self::copy_selection))
-            .on_action(cx.listener(Self::edit_undo))
-            .on_action(cx.listener(Self::edit_redo))
             .on_action(cx.listener(Self::edit_copy))
-            .on_action(cx.listener(Self::edit_cut))
-            .on_action(cx.listener(Self::edit_select_all))
             .on_action(cx.listener(Self::paste_clipboard))
             .on_action(cx.listener(Self::edit_paste))
             .on_action(cx.listener(Self::export_diagnostics))
@@ -5355,16 +5226,36 @@ mod tests {
         });
     }
 
+    fn terminal_find_input(
+        pane: &Entity<TerminalPane>,
+        cx: &mut VisualTestContext,
+    ) -> Entity<TextInput> {
+        pane.read_with(cx, |pane, _| {
+            pane.find_input
+                .clone()
+                .expect("Terminal Find should remain open")
+        })
+    }
+
+    fn replace_terminal_find_input(
+        input: &Entity<TextInput>,
+        text: &str,
+        cx: &mut VisualTestContext,
+    ) {
+        cx.update(|window, cx| {
+            input.update(cx, |input, cx| {
+                input.replace_text_in_range(None, text, window, cx);
+            });
+        });
+    }
+
     #[gpui::test]
     fn terminal_find_open_edit_navigate_and_close_are_pane_scoped(cx: &mut TestAppContext) {
         let (pane, cx, records) = connected_terminal_pane(cx);
 
         cx.dispatch_action(OpenTerminalFind);
-        cx.update(|window, app| {
-            pane.update(app, |pane, pane_cx| {
-                pane.replace_text_in_range(None, "日本", window, pane_cx);
-            });
-        });
+        let input = terminal_find_input(&pane, cx);
+        replace_terminal_find_input(&input, "日本", cx);
         cx.dispatch_action(FindNext);
         cx.dispatch_action(FindPrevious);
         cx.dispatch_action(CloseTerminalFind);
@@ -5373,39 +5264,57 @@ mod tests {
             .commands()
             .into_iter()
             .filter_map(|call| match call.command {
-                RecordedSessionCommand::SetFindQuery(_, query) => Some(format!("set:{query}")),
-                RecordedSessionCommand::NavigateFind(_, FindDirection::Next) => {
-                    Some("next".to_owned())
+                RecordedSessionCommand::SetFindQuery(generation, query) => {
+                    Some((format!("set:{query}"), generation))
                 }
-                RecordedSessionCommand::NavigateFind(_, FindDirection::Previous) => {
-                    Some("previous".to_owned())
+                RecordedSessionCommand::NavigateFind(generation, FindDirection::Next) => {
+                    Some(("next".to_owned(), generation))
                 }
-                RecordedSessionCommand::EndFind(_) => Some("end".to_owned()),
+                RecordedSessionCommand::NavigateFind(generation, FindDirection::Previous) => {
+                    Some(("previous".to_owned(), generation))
+                }
+                RecordedSessionCommand::EndFind(generation) => Some(("end".to_owned(), generation)),
                 _ => None,
             })
             .collect::<Vec<_>>();
-        assert_eq!(commands, ["set:", "set:日本", "next", "previous", "end"]);
-        assert!(pane.read_with(cx, |pane, _| pane.find_editor.is_none()));
+        assert_eq!(
+            commands
+                .iter()
+                .map(|(name, _)| name.as_str())
+                .collect::<Vec<_>>(),
+            ["set:", "set:日本", "next", "previous", "end"]
+        );
+        assert!(commands[0].1 < commands[1].1);
+        assert_eq!(commands[1].1, commands[2].1);
+        assert_eq!(commands[2].1, commands[3].1);
+        assert!(commands[3].1 < commands[4].1);
+        assert!(pane.read_with(cx, |pane, _| pane.find_input.is_none()));
     }
 
     #[gpui::test]
     fn terminal_find_should_handle_native_select_all_and_cut(cx: &mut TestAppContext) {
-        let (pane, cx, _) = connected_terminal_pane(cx);
+        let (pane, cx, records) = connected_terminal_pane(cx);
         cx.dispatch_action(OpenTerminalFind);
-        cx.update(|window, app| {
-            pane.update(app, |pane, pane_cx| {
-                pane.replace_text_in_range(None, "needle", window, pane_cx);
-            });
-        });
+        let input = terminal_find_input(&pane, cx);
+        replace_terminal_find_input(&input, "needle", cx);
+        let command_count = records.commands().len();
 
         cx.dispatch_action(spaceterm_ui::EditSelectAll);
         assert_eq!(
-            pane.read_with(cx, |pane, _| pane
-                .find_editor
-                .as_ref()
-                .expect("Terminal Find should remain open")
-                .selection()),
+            input.read_with(cx, |input, _| input.selection().range()),
             0..6
+        );
+        cx.dispatch_action(spaceterm_ui::EditCopy);
+        assert_eq!(
+            cx.read_from_clipboard().and_then(|item| item.text()),
+            Some("needle".to_owned())
+        );
+        assert!(
+            records
+                .commands()
+                .into_iter()
+                .skip(command_count)
+                .all(|call| !matches!(call.command, RecordedSessionCommand::RequestSelectionCopy))
         );
 
         cx.dispatch_action(spaceterm_ui::EditCut);
@@ -5414,68 +5323,43 @@ mod tests {
             cx.read_from_clipboard().and_then(|item| item.text()),
             Some("needle".to_owned())
         );
-        assert_eq!(
-            pane.read_with(cx, |pane, _| pane
-                .find_editor
-                .as_ref()
-                .expect("Terminal Find should remain open")
-                .text()
-                .to_owned()),
-            ""
-        );
+        assert_eq!(input.read_with(cx, |input, _| input.value().to_owned()), "");
     }
 
     #[gpui::test]
     fn terminal_find_should_handle_native_undo_and_redo(cx: &mut TestAppContext) {
         let (pane, cx, _) = connected_terminal_pane(cx);
         cx.dispatch_action(OpenTerminalFind);
-        cx.update(|window, app| {
-            pane.update(app, |pane, pane_cx| {
-                pane.replace_text_in_range(None, "needle", window, pane_cx);
-            });
-        });
+        let input = terminal_find_input(&pane, cx);
+        replace_terminal_find_input(&input, "needle", cx);
 
         cx.dispatch_action(spaceterm_ui::EditUndo);
-        assert_eq!(
-            pane.read_with(cx, |pane, _| pane
-                .find_editor
-                .as_ref()
-                .expect("Terminal Find should remain open")
-                .text()
-                .to_owned()),
-            ""
-        );
+        assert_eq!(input.read_with(cx, |input, _| input.value().to_owned()), "");
 
         cx.dispatch_action(spaceterm_ui::EditRedo);
         assert_eq!(
-            pane.read_with(cx, |pane, _| pane
-                .find_editor
-                .as_ref()
-                .expect("Terminal Find should remain open")
-                .text()
-                .to_owned()),
+            input.read_with(cx, |input, _| input.value().to_owned()),
             "needle"
         );
     }
 
     #[gpui::test]
-    fn repeated_terminal_find_selects_the_existing_query(cx: &mut TestAppContext) {
+    fn repeated_terminal_find_selects_and_refocuses_the_existing_query(cx: &mut TestAppContext) {
         let (pane, cx, records) = connected_terminal_pane(cx);
         cx.dispatch_action(OpenTerminalFind);
-        cx.update(|window, app| {
-            pane.update(app, |pane, pane_cx| {
-                pane.replace_text_in_range(None, "needle", window, pane_cx);
-            });
-        });
+        let input = terminal_find_input(&pane, cx);
+        replace_terminal_find_input(&input, "needle", cx);
+        cx.update(|window, cx| pane.update(cx, |pane, _| pane.focus(window)));
 
         cx.dispatch_action(OpenTerminalFind);
 
+        let reopened = terminal_find_input(&pane, cx);
+        assert_eq!(reopened.entity_id(), input.entity_id());
         assert_eq!(
-            pane.read_with(cx, |pane, _| {
-                pane.find_editor.as_ref().unwrap().selection()
-            }),
+            reopened.read_with(cx, |input, _| input.selection().range()),
             0..6
         );
+        assert!(reopened.read_with(cx, |input, _| input.is_focused()));
         assert_eq!(
             records
                 .commands()
@@ -5484,6 +5368,26 @@ mod tests {
                 .count(),
             2
         );
+    }
+
+    #[gpui::test]
+    fn dropped_old_terminal_find_input_cannot_change_a_later_find(cx: &mut TestAppContext) {
+        let (pane, cx, records) = connected_terminal_pane(cx);
+        cx.dispatch_action(OpenTerminalFind);
+        let old_input = terminal_find_input(&pane, cx);
+        cx.dispatch_action(CloseTerminalFind);
+        cx.dispatch_action(OpenTerminalFind);
+        let new_input = terminal_find_input(&pane, cx);
+        let command_count = records.commands().len();
+
+        replace_terminal_find_input(&old_input, "stale", cx);
+
+        assert_ne!(old_input.entity_id(), new_input.entity_id());
+        assert_eq!(
+            new_input.read_with(cx, |input, _| input.value().to_owned()),
+            ""
+        );
+        assert_eq!(records.commands().len(), command_count);
     }
 
     #[gpui::test]
@@ -5508,7 +5412,7 @@ mod tests {
             });
         });
 
-        assert!(pane.read_with(cx, |pane, _| pane.find_editor.is_none()));
+        assert!(pane.read_with(cx, |pane, _| pane.find_input.is_none()));
         assert!(
             records
                 .commands()
@@ -5518,17 +5422,22 @@ mod tests {
     }
 
     #[gpui::test]
-    fn terminal_find_renders_fixed_bar_and_moves_responder_focus(cx: &mut TestAppContext) {
+    fn terminal_find_renders_shared_input_and_moves_responder_focus(cx: &mut TestAppContext) {
         let (pane, cx, records) = connected_terminal_pane(cx);
         let command_count = records.commands().len();
+        let focus_epoch = pane.read_with(cx, |pane, _| pane.native_service_focus_epoch.get());
 
         cx.dispatch_action(OpenTerminalFind);
         cx.run_until_parked();
+        let input = terminal_find_input(&pane, cx);
 
         assert!(cx.debug_bounds("terminal-find-bar").is_some());
-        assert!(cx.update(|window, app| pane.read_with(app, |pane, _| {
-            pane.find_focus_handle.is_focused(window) && !pane.focus_handle.is_focused(window)
-        })));
+        assert!(cx.debug_bounds("terminal-find-input").is_some());
+        assert!(input.read_with(cx, |input, _| input.is_focused()));
+        assert!(pane.read_with(cx, |pane, _| pane.native_service_focus_epoch.get()) > focus_epoch);
+        assert!(cx.update(|window, app| {
+            pane.read_with(app, |pane, _| !pane.focus_handle.is_focused(window))
+        }));
 
         cx.dispatch_action(CloseTerminalFind);
         cx.simulate_keystrokes("a");
@@ -5548,6 +5457,102 @@ mod tests {
         assert!(matches!(commands[0], RecordedSessionCommand::Focus(false)));
         assert!(matches!(commands[1], RecordedSessionCommand::Focus(true)));
         assert!(matches!(commands[2], RecordedSessionCommand::Key(_)));
+    }
+
+    #[gpui::test]
+    fn terminal_click_restores_terminal_responder_without_closing_find(cx: &mut TestAppContext) {
+        let (pane, cx, _) = connected_terminal_pane(cx);
+        cx.dispatch_action(OpenTerminalFind);
+        let input = terminal_find_input(&pane, cx);
+        let terminal = pane.read_with(cx, |pane, _| {
+            pane.grid_bounds
+                .expect("Terminal grid must be measured")
+                .center()
+        });
+
+        cx.simulate_click(terminal, Modifiers::none());
+        cx.run_until_parked();
+
+        assert!(pane.read_with(cx, |pane, _| pane.find_input.is_some()));
+        assert!(!input.read_with(cx, |input, _| input.is_focused()));
+        assert!(cx.update(|window, app| {
+            pane.read_with(app, |pane, _| pane.focus_handle.is_focused(window))
+        }));
+    }
+
+    #[gpui::test]
+    fn terminal_find_submit_navigates_and_escape_cancels(cx: &mut TestAppContext) {
+        let (pane, cx, records) = connected_terminal_pane(cx);
+        cx.dispatch_action(OpenTerminalFind);
+
+        cx.simulate_keystrokes("enter escape");
+        cx.run_until_parked();
+
+        assert!(pane.read_with(cx, |pane, _| pane.find_input.is_none()));
+        assert!(cx.update(|window, app| {
+            pane.read_with(app, |pane, _| pane.focus_handle.is_focused(window))
+        }));
+        assert!(records.commands().iter().any(|call| matches!(
+            call.command,
+            RecordedSessionCommand::NavigateFind(_, FindDirection::Next)
+        )));
+        assert!(
+            records
+                .commands()
+                .iter()
+                .any(|call| matches!(call.command, RecordedSessionCommand::EndFind(_)))
+        );
+    }
+
+    #[gpui::test]
+    fn terminal_find_tab_delegates_to_its_composite_controls(cx: &mut TestAppContext) {
+        let (pane, cx, records) = connected_terminal_pane(cx);
+        cx.dispatch_action(OpenTerminalFind);
+        let input = terminal_find_input(&pane, cx);
+
+        cx.simulate_keystrokes("tab");
+        cx.run_until_parked();
+        assert!(!input.read_with(cx, |input, _| input.is_focused()));
+        assert!(!cx.update(|window, cx| pane.read(cx).terminal_input_focused(window, cx)));
+
+        cx.simulate_keystrokes("shift-tab x");
+        cx.run_until_parked();
+
+        assert!(input.read_with(cx, |input, _| input.is_focused()));
+        assert_eq!(
+            input.read_with(cx, |input, _| input.value().to_owned()),
+            "x"
+        );
+        assert!(records.commands().iter().any(|call| matches!(
+            &call.command,
+            RecordedSessionCommand::SetFindQuery(_, query) if query == "x"
+        )));
+    }
+
+    #[gpui::test]
+    fn terminal_find_ime_candidate_geometry_comes_from_shared_input(cx: &mut TestAppContext) {
+        let (pane, cx, _) = connected_terminal_pane(cx);
+        cx.dispatch_action(OpenTerminalFind);
+        cx.run_until_parked();
+        let input = terminal_find_input(&pane, cx);
+        let input_bounds = cx
+            .debug_bounds("terminal-find-input")
+            .expect("the shared Find input was not rendered");
+
+        let candidate = cx.update(|window, cx| {
+            input.update(cx, |input, cx| {
+                input.replace_and_mark_text_in_range(None, "に", Some(1..1), window, cx);
+                input
+                    .bounds_for_range(1..1, input_bounds, window, cx)
+                    .expect("the shared input should expose candidate geometry")
+            })
+        });
+
+        assert!(input.read_with(cx, |input, _| input.composition().is_some()));
+        assert!(pane.read_with(cx, |pane, _| pane.find_input.is_some()));
+        assert!(candidate.left() > input_bounds.left());
+        assert_eq!(candidate.top(), input_bounds.top());
+        assert_eq!(candidate.bottom(), input_bounds.bottom());
     }
 
     #[gpui::test]
@@ -5571,7 +5576,7 @@ mod tests {
         cx.simulate_click(close.center(), Modifiers::none());
         cx.run_until_parked();
 
-        assert!(pane.read_with(cx, |pane, _| pane.find_editor.is_none()));
+        assert!(pane.read_with(cx, |pane, _| pane.find_input.is_none()));
         assert!(
             records
                 .commands()
@@ -6094,7 +6099,7 @@ mod tests {
             pane.update(cx, |pane, cx| {
                 let accepted =
                     pane.insert_native_service_text(origin, "first\nsecond".to_owned(), window, cx);
-                pane.focus_find(window, cx);
+                pane.open_find(&OpenTerminalFind, window, cx);
                 accepted
             })
         });
@@ -6160,7 +6165,7 @@ mod tests {
 
         let accepted = cx.update(|window, cx| {
             pane.update(cx, |pane, cx| {
-                pane.focus_find(window, cx);
+                pane.open_find(&OpenTerminalFind, window, cx);
                 pane.focus(window);
                 pane.insert_native_service_text(origin, "stale return".to_owned(), window, cx)
             })

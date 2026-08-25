@@ -14,8 +14,6 @@ pub(super) fn theme() -> CommandPaletteTheme {
             gpui_color(ACTIVE_THEME.element_selected),
             gpui_color(ACTIVE_THEME.text),
             gpui_color(ACTIVE_THEME.text_accent),
-            gpui_color(ACTIVE_THEME.players[0].selection),
-            gpui_color(ACTIVE_THEME.players[0].cursor),
         )
         .separator(gpui_color(ACTIVE_THEME.border_variant))
         .hover_background(gpui_color(ACTIVE_THEME.ghost_element_selected))
