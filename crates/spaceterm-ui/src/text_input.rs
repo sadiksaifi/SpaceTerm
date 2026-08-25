@@ -1786,6 +1786,115 @@ mod tests {
     }
 
     #[gpui::test]
+    fn committed_multi_update_composition_should_undo_in_one_step(cx: &mut TestAppContext) {
+        let (input, cx) = text_input(cx, "Workspace");
+
+        cx.update(|window, cx| {
+            input.update(cx, |input, cx| {
+                input.replace_and_mark_text_in_range(None, "日", None, window, cx);
+                input.replace_and_mark_text_in_range(None, "日本", None, window, cx);
+                input.replace_text_in_range(None, "日本", window, cx);
+            });
+        });
+
+        assert_eq!(
+            input.read_with(cx, |input, _| (
+                input.value().to_owned(),
+                input.buffer.marked.clone(),
+            )),
+            ("Workspace日本".to_owned(), None)
+        );
+
+        cx.simulate_keystrokes("cmd-z");
+        cx.run_until_parked();
+
+        assert_eq!(
+            input.read_with(cx, |input, _| input.value().to_owned()),
+            "Workspace"
+        );
+    }
+
+    #[gpui::test]
+    fn cancelling_composition_should_restore_the_replaced_selection(cx: &mut TestAppContext) {
+        let (input, cx) = text_input(cx, "Workspace");
+        input.update(cx, |input, cx| input.select_all(cx));
+        cx.update(|window, cx| {
+            input.update(cx, |input, cx| {
+                input.replace_and_mark_text_in_range(None, "開発", None, window, cx);
+            });
+        });
+
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+
+        assert_eq!(
+            input.read_with(cx, |input, _| (
+                input.value().to_owned(),
+                input.buffer.selection.range.clone(),
+                input.buffer.marked.clone(),
+            )),
+            ("Workspace".to_owned(), 0..9, None)
+        );
+    }
+
+    #[gpui::test]
+    fn empty_marked_text_should_commit_as_one_undoable_edit(cx: &mut TestAppContext) {
+        let (input, cx) = text_input(cx, "Workspace");
+        input.update(cx, |input, cx| input.select_all(cx));
+        cx.update(|window, cx| {
+            input.update(cx, |input, cx| {
+                input.replace_and_mark_text_in_range(None, "", None, window, cx);
+                input.unmark_text(window, cx);
+            });
+        });
+
+        assert_eq!(
+            input.read_with(cx, |input, _| (
+                input.value().to_owned(),
+                input.buffer.marked.clone(),
+            )),
+            ("".to_owned(), None)
+        );
+
+        cx.simulate_keystrokes("cmd-z");
+        cx.run_until_parked();
+
+        assert_eq!(
+            input.read_with(cx, |input, _| input.value().to_owned()),
+            "Workspace"
+        );
+    }
+
+    #[gpui::test]
+    fn blur_during_composition_should_commit_one_undoable_edit(cx: &mut TestAppContext) {
+        let (input, cx) = text_input(cx, "Workspace");
+        cx.update(|window, cx| {
+            input.update(cx, |input, cx| {
+                input.replace_and_mark_text_in_range(None, "日本", None, window, cx);
+                input.on_blur(window, cx);
+            });
+        });
+
+        assert_eq!(
+            input.read_with(cx, |input, _| (
+                input.value().to_owned(),
+                input.buffer.marked.clone(),
+                input.composition_snapshot.is_none(),
+            )),
+            ("Workspace日本".to_owned(), None, true)
+        );
+
+        cx.update(|window, cx| {
+            input.update(cx, |input, cx| input.undo(&Undo, window, cx));
+        });
+
+        assert_eq!(
+            input.read_with(cx, |input, _| input.value().to_owned()),
+            "Workspace"
+        );
+    }
+
+    #[gpui::test]
     fn focus_callbacks_should_track_blur(cx: &mut TestAppContext) {
         install_menu_theme(cx);
         cx.update(super::init);
