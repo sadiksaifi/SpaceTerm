@@ -15,6 +15,7 @@ mod terminal_pane;
 mod terminal_symbols;
 mod window_manager;
 mod workspace_manager;
+mod workspace_search;
 
 use gpui::{App, KeyBinding, MouseDownEvent, Window, actions};
 use spaceterm_ui::{EditCopy, EditPaste};
