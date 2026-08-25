@@ -18,7 +18,7 @@ mod window_manager;
 mod workspace_manager;
 mod workspace_search;
 
-use gpui::{App, KeyBinding, MouseDownEvent, Window, actions};
+use gpui::{App, KeyBinding, actions};
 use spaceterm_ui::{EditCopy, EditPaste};
 
 pub(crate) use pane_host::{PaneHost, PaneHostEvent};
@@ -97,23 +97,6 @@ pub(crate) const TERMINAL_OSC52_AUTHORIZATION_KEY_CONTEXT: &str = "TerminalOsc52
 pub(crate) const TOP_CHROME_HEIGHT: f32 = 36.0;
 pub(crate) const WORKSPACE_SIDEBAR_DEFAULT_WIDTH: f32 = 240.0;
 pub(crate) const WORKSPACE_SIDEBAR_MINIMUM_WIDTH: f32 = 180.0;
-
-pub(crate) fn handle_top_chrome_mouse_down(
-    event: &MouseDownEvent,
-    window: &mut Window,
-    cx: &mut App,
-    mut set_terminal_focus_blocked: impl FnMut(bool, &Window, &mut App),
-) {
-    match event.click_count {
-        1 => set_terminal_focus_blocked(true, window, cx),
-        2 => {
-            set_terminal_focus_blocked(false, window, cx);
-            window.titlebar_double_click();
-        }
-        _ => {}
-    }
-    cx.stop_propagation();
-}
 
 pub(crate) fn init(cx: &mut App) {
     spaceterm_ui::init(
