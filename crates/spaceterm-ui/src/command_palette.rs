@@ -2,10 +2,10 @@ use std::{ops::Range, rc::Rc};
 
 use gpui::{
     AnyElement, App, AppContext as _, Corner, CursorStyle, Entity, EventEmitter, Global,
-    HitboxBehavior, InteractiveElement as _, IntoElement, KeyBinding, ListAlignment, ListState,
-    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _, Pixels, Render,
-    Rgba, ScrollWheelEvent, SharedString, Styled as _, Subscription, WeakEntity, WeakFocusHandle,
-    Window, actions, anchored, canvas, div, list, prelude::FluentBuilder as _, px,
+    HitboxBehavior, InteractiveElement as _, IntoElement, KeyBinding, ListAlignment, ListOffset,
+    ListState, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _,
+    Pixels, Render, Rgba, ScrollWheelEvent, SharedString, Styled as _, Subscription, WeakEntity,
+    WeakFocusHandle, Window, actions, anchored, canvas, div, list, prelude::FluentBuilder as _, px,
 };
 
 use crate::{
@@ -1220,6 +1220,7 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
             self.recompute_matches();
         }
         self.repair_selection();
+        self.reveal_selected();
         self.selection_reveal_pending = true;
         self.input.read(cx).focus_handle().focus(window);
         cx.emit(CommandPaletteEvent::Lifecycle(
@@ -1352,6 +1353,7 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
         self.presented_results = PresentedResults::new(&self.items, &self.matches);
         self.list.reset(self.presented_results.len());
         self.repair_selection();
+        self.reveal_selected();
         self.selection_reveal_pending = true;
     }
 
@@ -1441,8 +1443,18 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
         let Some(position) = self.selected_match_position() else {
             return;
         };
-        if let Some(row) = self.presented_results.list_index_for_match(position) {
-            self.list.scroll_to_reveal_item(row);
+        let Some(row) = self.presented_results.list_index_for_match(position) else {
+            return;
+        };
+        let item_is_visible = self.list.bounds_for_item(row).is_some_and(|item_bounds| {
+            let viewport = self.list.viewport_bounds();
+            item_bounds.top() >= viewport.top() && item_bounds.bottom() <= viewport.bottom()
+        });
+        if !item_is_visible {
+            self.list.scroll_to(ListOffset {
+                item_ix: row,
+                offset_in_item: px(0.0),
+            });
         }
     }
 
@@ -3083,7 +3095,6 @@ mod tests {
         cx: &mut TestAppContext,
     ) {
         let (root, palette, _, _, cx) = palette_window(cx);
-        open_palette(&root, &palette, cx);
         palette.update(cx, |palette, cx| {
             palette.set_items(
                 (0u8..32)
@@ -3095,7 +3106,7 @@ mod tests {
                 cx,
             );
         });
-        cx.run_until_parked();
+        open_palette(&root, &palette, cx);
 
         cx.simulate_keystrokes(&vec!["down"; 12].join(" "));
         cx.run_until_parked();

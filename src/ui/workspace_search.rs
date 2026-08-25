@@ -101,8 +101,8 @@ impl WorkspaceSearch {
         cx.subscribe_in(
             &palette,
             window,
-            |search, _, event: &CommandPaletteEvent<WorkspaceId>, _, cx| {
-                search.reduce_palette_event(event, cx);
+            |search, _, event: &CommandPaletteEvent<WorkspaceId>, window, cx| {
+                search.reduce_palette_event(event, window, cx);
             },
         )
         .detach();
@@ -182,6 +182,7 @@ impl WorkspaceSearch {
     fn reduce_palette_event(
         &mut self,
         event: &CommandPaletteEvent<WorkspaceId>,
+        window: &Window,
         cx: &mut Context<Self>,
     ) {
         match event {
@@ -192,10 +193,12 @@ impl WorkspaceSearch {
                 cx.notify();
             }
             CommandPaletteEvent::Lifecycle(CommandPaletteLifecycleEvent::Closed(_)) => {
-                self.open = false;
-                self.pending_open = None;
-                cx.emit(WorkspaceSearchEvent::StateChanged);
-                cx.notify();
+                cx.defer_in(window, |search, _, cx| {
+                    search.open = false;
+                    search.pending_open = None;
+                    cx.emit(WorkspaceSearchEvent::StateChanged);
+                    cx.notify();
+                });
             }
             CommandPaletteEvent::Activated(activation) => {
                 self.pending_open = None;
@@ -465,18 +468,17 @@ mod tests {
     }
 
     #[gpui::test]
-    fn activation_should_block_during_selection_and_unblock_after_close(
-        cx: &mut TestAppContext,
-    ) {
+    fn activation_should_block_during_selection_and_unblock_after_close(cx: &mut TestAppContext) {
         let (harness, search, cx) = workspace_search(cx);
         open(&search, vec![item(7, "Target", "/target")], cx);
-        harness.read(cx).events.borrow_mut().clear();
+        harness.read_with(cx, |harness, _| harness.events.borrow_mut().clear());
 
         cx.simulate_keystrokes("enter");
         cx.run_until_parked();
 
+        let events = harness.read_with(cx, |harness, _| harness.events.borrow().clone());
         assert_eq!(
-            harness.read(cx).events.borrow().as_slice(),
+            events.as_slice(),
             [
                 (
                     WorkspaceSearchEvent::WorkspaceSelected(WorkspaceId::new(7)),
@@ -514,14 +516,10 @@ mod tests {
         cx.simulate_click(position, Modifiers::none());
         cx.run_until_parked();
 
-        assert_eq!(
-            harness
-                .read(cx)
-                .events
-                .borrow()
-                .last()
-                .map(|(event, _)| event.clone()),
-            Some(WorkspaceSearchEvent::WorkspaceSelected(WorkspaceId::new(4)))
-        );
+        assert!(harness.read_with(cx, |harness, _| {
+            harness.events.borrow().iter().any(|(event, _)| {
+                *event == WorkspaceSearchEvent::WorkspaceSelected(WorkspaceId::new(4))
+            })
+        }));
     }
 }
