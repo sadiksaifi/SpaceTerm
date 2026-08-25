@@ -565,6 +565,9 @@ impl WorkspaceManager {
     }
 
     fn open_workspace_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.rename_is_focused(window) {
+            self.sidebar_focus.focus(window);
+        }
         self.rename = None;
         self.workspace_menu = None;
         let items = self.workspace_search_items(cx);
@@ -2418,6 +2421,33 @@ mod tests {
             (true, Some(TerminalFocusBlocker::Sidebar)),
             "closing the replacement palette must not restore the invisible menu focus owner"
         );
+    }
+
+    #[gpui::test]
+    fn workspace_search_from_inline_rename_should_restore_sidebar_focus(cx: &mut TestAppContext) {
+        let (manager, _, cx) = workspace_manager(cx);
+        right_click("workspace-row-1-active", cx);
+        click("workspace-menu-row-rename", cx);
+        assert!(cx.update(|window, cx| manager.read(cx).rename_is_focused(window)));
+
+        cx.update(|window, cx| {
+            manager.update(cx, |manager, cx| {
+                manager.open_workspace_search(window, cx);
+            });
+        });
+        cx.run_until_parked();
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+
+        let restored = cx.update(|window, cx| {
+            let manager = manager.read(cx);
+            (
+                manager.rename.is_none(),
+                manager.sidebar_focus.is_focused(window),
+                manager.terminal_focus_blocker(window, cx),
+            )
+        });
+        assert_eq!(restored, (true, true, Some(TerminalFocusBlocker::Sidebar)));
     }
 
     #[gpui::test]
