@@ -569,20 +569,24 @@ fn update_target_hover(
     window: &mut Window,
     cx: &mut App,
 ) {
-    if hovered {
-        let generation = state.update(cx, |state, cx| state.begin_hover(cx));
-        let Some(generation) = generation else {
-            return;
-        };
-        let weak = state.downgrade();
-        let task = window.spawn(cx, async move |cx| {
-            cx.background_executor().timer(TOOLTIP_SHOW_DELAY).await;
-            let _ = cx.update(|window, cx| show_target(&weak, generation, window, cx));
-        });
-        state.update(cx, |state, _| state.retain_task(generation, task));
-    } else {
+    if !hovered {
         dismiss_target(state, window, cx);
+        return;
     }
+    if !state.read(cx).can_begin_hover() {
+        return;
+    }
+
+    let generation = state.update(cx, |state, cx| state.begin_hover(cx));
+    let Some(generation) = generation else {
+        return;
+    };
+    let weak = state.downgrade();
+    let task = window.spawn(cx, async move |cx| {
+        cx.background_executor().timer(TOOLTIP_SHOW_DELAY).await;
+        let _ = cx.update(|window, cx| show_target(&weak, generation, window, cx));
+    });
+    state.update(cx, |state, _| state.retain_task(generation, task));
 }
 
 fn show_target(
@@ -623,6 +627,10 @@ fn show_target(
 }
 
 fn dismiss_target(state: &gpui::Entity<TooltipTargetState>, window: &mut Window, cx: &mut App) {
+    if !state.read(cx).needs_dismissal() {
+        return;
+    }
+
     let release = state.update(cx, |state, cx| state.dismiss(cx));
     if let Some((window_id, reservation)) = release {
         release_window(window_id, reservation, cx);
@@ -807,6 +815,9 @@ impl TooltipTargetState {
         enabled: bool,
         cx: &mut gpui::Context<Self>,
     ) -> Option<(WindowId, TooltipReservation)> {
+        if self.enabled == enabled {
+            return None;
+        }
         self.enabled = enabled;
         if enabled { None } else { self.dismiss(cx) }
     }
@@ -822,11 +833,15 @@ impl TooltipTargetState {
         self.visible
     }
 
+    fn can_begin_hover(&self) -> bool {
+        self.enabled && !self.hovered && !self.visible && self.task.is_none()
+    }
+
     fn begin_hover(&mut self, cx: &mut gpui::Context<Self>) -> Option<u64> {
-        self.hovered = true;
-        if !self.enabled || self.visible || self.task.is_some() {
+        if !self.can_begin_hover() {
             return None;
         }
+        self.hovered = true;
         self.generation = self.generation.wrapping_add(1);
         cx.notify();
         Some(self.generation)
@@ -871,6 +886,10 @@ impl TooltipTargetState {
         true
     }
 
+    fn needs_dismissal(&self) -> bool {
+        self.hovered || self.visible || self.task.is_some() || self.ownership.is_some()
+    }
+
     fn dismiss(&mut self, cx: &mut gpui::Context<Self>) -> Option<(WindowId, TooltipReservation)> {
         self.hovered = false;
         self.dismiss_without_release(cx)
@@ -880,14 +899,14 @@ impl TooltipTargetState {
         &mut self,
         cx: &mut gpui::Context<Self>,
     ) -> Option<(WindowId, TooltipReservation)> {
-        let changed = self.visible || self.task.is_some();
+        if !self.visible && self.task.is_none() && self.ownership.is_none() {
+            return None;
+        }
         self.generation = self.generation.wrapping_add(1);
         self.visible = false;
         self.task.take();
         let ownership = self.ownership.take();
-        if changed {
-            cx.notify();
-        }
+        cx.notify();
         ownership
     }
 }
@@ -1094,8 +1113,8 @@ fn clamp_bounds(mut bounds: Bounds<Pixels>, limits: Bounds<Pixels>) -> Bounds<Pi
 #[cfg(test)]
 mod tests {
     use gpui::{
-        Context, Entity, FocusHandle, InteractiveElement as _, Modifiers, MouseButton, Render,
-        TestAppContext, VisualTestContext, rgba, size,
+        AppContext as _, Context, Entity, FocusHandle, InteractiveElement as _, Modifiers,
+        MouseButton, Render, TestAppContext, VisualTestContext, rgba, size,
     };
 
     use super::*;
@@ -1274,6 +1293,39 @@ mod tests {
         cx.simulate_mouse_move(center, None, Modifiers::default());
         cx.executor().advance_clock(TOOLTIP_SHOW_DELAY);
         cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn repeated_non_hover_events_should_not_mutate_or_schedule_an_idle_target(
+        cx: &mut TestAppContext,
+    ) {
+        let (_, cx) = tooltip_window(cx);
+        let state = cx.update(|window, cx| {
+            cx.new(|cx| {
+                let mut state = TooltipTargetState::new(window, cx);
+                state.synchronize(true, cx);
+                state
+            })
+        });
+        let initial_generation = state.read_with(cx, |state, _| state.generation);
+
+        cx.update(|window, cx| {
+            for _ in 0..3 {
+                update_target_hover(&state, false, window, cx);
+            }
+        });
+        cx.run_until_parked();
+
+        assert_eq!(
+            state.read_with(cx, |state, _| (
+                state.generation,
+                state.hovered,
+                state.visible,
+                state.task.is_some(),
+                state.ownership.is_some(),
+            )),
+            (initial_generation, false, false, false, false),
+        );
     }
 
     #[gpui::test]
