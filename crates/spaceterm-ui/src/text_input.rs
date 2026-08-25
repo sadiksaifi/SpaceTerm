@@ -1924,7 +1924,7 @@ impl EntityInputHandler for TextInput {
         if !self.can_edit() {
             return;
         }
-        let range = range_utf16
+        let marked_range = range_utf16
             .map(|range| utf16_replacement_range_to_bytes(&self.buffer.text, range))
             .or_else(|| {
                 self.composition
@@ -1932,36 +1932,48 @@ impl EntityInputHandler for TextInput {
                     .map(|state| state.marked_range.clone())
             })
             .unwrap_or_else(|| self.buffer.selection.range.clone());
-        let replacement_len = normalized_single_line_len(text);
+        let range = normalize_byte_range(&self.buffer.text, marked_range.clone());
+        let prefix = &self.buffer.text[range.start..marked_range.start];
+        let suffix = &self.buffer.text[marked_range.end..range.end];
+        let marked_replacement_len = normalized_single_line_len(text);
+        let replacement_len = prefix.len() + marked_replacement_len + suffix.len();
         if !self
             .buffer
             .can_replace(&range, replacement_len, self.input_length_limit)
         {
             return;
         }
-        let replacement = normalize_single_line(text);
+        let marked_replacement = normalize_single_line(text);
+        let selected_range = selected_utf16
+            .map(|selected| utf16_selection_range_to_bytes(&marked_replacement, selected));
+        let marked_start = range.start + prefix.len();
+        let replacement = if prefix.is_empty() && suffix.is_empty() {
+            marked_replacement
+        } else {
+            let mut replacement = String::with_capacity(replacement_len);
+            replacement.push_str(prefix);
+            replacement.push_str(&marked_replacement);
+            replacement.push_str(suffix);
+            replacement
+        };
         if self.composition.is_none() {
             self.composition = Some(CompositionState {
                 original: self.buffer.snapshot(),
-                marked_range: range.clone(),
+                marked_range: marked_range.clone(),
             });
             cx.emit(TextInputEvent::CompositionStarted);
         }
-        let start = range.start;
         let changed =
             self.buffer
                 .replace_without_history(range, &replacement, self.input_length_limit);
         if let Some(composition) = &mut self.composition {
-            composition.marked_range = start..start + replacement.len();
+            composition.marked_range = marked_start..marked_start + marked_replacement_len;
         }
-        self.buffer.selection = selected_utf16.map_or_else(
-            || Selection::caret(start + replacement.len()),
-            |selected| {
-                let relative = utf16_selection_range_to_bytes(&replacement, selected);
-                Selection {
-                    range: start + relative.start..start + relative.end,
-                    reversed: false,
-                }
+        self.buffer.selection = selected_range.map_or_else(
+            || Selection::caret(marked_start + marked_replacement_len),
+            |selected| Selection {
+                range: marked_start + selected.start..marked_start + selected.end,
+                reversed: false,
             },
         );
         if changed {
@@ -3152,6 +3164,30 @@ mod tests {
                 }),
                 TextInputEvent::CompositionCancelled,
             ]
+        );
+    }
+
+    #[gpui::test]
+    fn repeated_combining_mark_updates_preserve_adjacent_grapheme_and_ranges(
+        cx: &mut TestAppContext,
+    ) {
+        let (input, cx) = input(cx, "e");
+        cx.update(|window, cx| {
+            input.update(cx, |input, cx| {
+                input.replace_and_mark_text_in_range(None, "\u{301}", None, window, cx);
+                input.replace_and_mark_text_in_range(None, "\u{308}", None, window, cx);
+            });
+        });
+
+        assert_eq!(
+            input.read_with(cx, |input, _| (
+                input.value().to_owned(),
+                input.composition().map(|composition| (
+                    composition.marked_range(),
+                    composition.selection().range(),
+                )),
+            )),
+            ("e\u{308}".to_owned(), Some((1..3, 3..3)))
         );
     }
 
