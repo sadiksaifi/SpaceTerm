@@ -135,11 +135,11 @@ impl WorkspaceSearch {
             .into_iter()
             .map(WorkspaceSearchItem::into_palette_item)
             .collect();
+        self.palette
+            .update(cx, |palette, cx| palette.set_items(items, cx));
         if self.open {
-            self.palette.update(cx, |palette, cx| {
-                palette.set_items(items, cx);
-                palette.open(window, cx);
-            });
+            self.palette
+                .update(cx, |palette, cx| palette.open(window, cx));
             return;
         }
 
@@ -157,7 +157,6 @@ impl WorkspaceSearch {
             }
 
             let (opened, is_open) = palette.update(cx, |palette, cx| {
-                palette.set_items(items, cx);
                 let opened = palette.open(window, cx);
                 (opened, palette.is_open())
             });
@@ -172,6 +171,22 @@ impl WorkspaceSearch {
                 });
             }
         });
+    }
+
+    pub(super) fn refresh_items(
+        &mut self,
+        items: Vec<WorkspaceSearchItem>,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.blocks_terminal_input() {
+            return;
+        }
+        let items = items
+            .into_iter()
+            .map(WorkspaceSearchItem::into_palette_item)
+            .collect();
+        self.palette
+            .update(cx, |palette, cx| palette.set_items(items, cx));
     }
 
     pub(super) fn blocks_terminal_input(&self) -> bool {

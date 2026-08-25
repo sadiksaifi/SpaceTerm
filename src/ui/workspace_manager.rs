@@ -268,7 +268,10 @@ impl WorkspaceManager {
                         });
                     }
                 }
-                WindowManagerEvent::PresentationChanged => cx.notify(),
+                WindowManagerEvent::PresentationChanged => {
+                    workspace_manager.refresh_workspace_search(cx);
+                    cx.notify();
+                }
                 WindowManagerEvent::ReportedWorkingDirectoryChanged {
                     window_id,
                     pane_id,
@@ -307,12 +310,14 @@ impl WorkspaceManager {
                     let _ = workspace_manager
                         .workspaces
                         .set_directory_available(workspace_id, *identity);
+                    workspace_manager.refresh_workspace_search(cx);
                     cx.notify();
                 }
                 WindowManagerEvent::DirectoryUnavailable { reason } => {
                     let _ = workspace_manager
                         .workspaces
                         .set_directory_unavailable(workspace_id, reason.clone());
+                    workspace_manager.refresh_workspace_search(cx);
                     cx.notify();
                 }
             },
@@ -340,6 +345,7 @@ impl WorkspaceManager {
                     )
                     .unwrap_or(false)
                 {
+                    self.refresh_workspace_search(cx);
                     cx.notify();
                 }
                 return;
@@ -361,6 +367,7 @@ impl WorkspaceManager {
         manager.update(cx, |manager, cx| {
             manager.set_workspace_directory(&path, identity, cx);
         });
+        self.refresh_workspace_search(cx);
         cx.notify();
     }
 
@@ -407,6 +414,7 @@ impl WorkspaceManager {
         manager.update(cx, |manager, cx| {
             manager.set_workspace_directory(&path, identity, cx)
         });
+        self.refresh_workspace_search(cx);
         cx.notify();
     }
 
@@ -453,6 +461,7 @@ impl WorkspaceManager {
         manager.update(cx, |manager, cx| {
             manager.set_workspace_directory(&path, identity, cx)
         });
+        self.refresh_workspace_search(cx);
         cx.notify();
     }
 
@@ -562,6 +571,15 @@ impl WorkspaceManager {
                 )
             })
             .collect()
+    }
+
+    fn refresh_workspace_search(&self, cx: &mut Context<Self>) {
+        if !self.workspace_search.read(cx).blocks_terminal_input() {
+            return;
+        }
+        let items = self.workspace_search_items(cx);
+        self.workspace_search
+            .update(cx, |search, cx| search.refresh_items(items, cx));
     }
 
     fn open_workspace_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -764,6 +782,7 @@ impl WorkspaceManager {
         self.rename = None;
         self.sync_terminal_focus_blocker(window, cx);
         self.scroll_active_workspace_into_view();
+        self.refresh_workspace_search(cx);
         cx.notify();
     }
 
@@ -873,6 +892,7 @@ impl WorkspaceManager {
         next_manager.update(cx, |manager, cx| manager.activate(window, cx));
         self.sync_terminal_focus_blocker(window, cx);
         self.scroll_active_workspace_into_view();
+        self.refresh_workspace_search(cx);
         cx.notify();
     }
 
@@ -976,6 +996,7 @@ impl WorkspaceManager {
         }
         self.sync_terminal_focus_blocker(window, cx);
         self.scroll_active_workspace_into_view();
+        self.refresh_workspace_search(cx);
         cx.notify();
         true
     }
@@ -1063,6 +1084,7 @@ impl WorkspaceManager {
         }
         self.sync_terminal_focus_blocker(window, cx);
         self.scroll_active_workspace_into_view();
+        self.refresh_workspace_search(cx);
         cx.notify();
     }
 
@@ -1113,6 +1135,7 @@ impl WorkspaceManager {
                 }
                 self.sync_terminal_focus_blocker(window, cx);
                 self.scroll_active_workspace_into_view();
+                self.refresh_workspace_search(cx);
                 cx.notify();
             }
             FinalWindowCloseOutcome::CloseOperatingSystemWindow {
@@ -1321,6 +1344,7 @@ impl WorkspaceManager {
             self.sidebar_focus.focus(window);
         }
         self.sync_terminal_focus_blocker(window, cx);
+        self.refresh_workspace_search(cx);
         cx.notify();
     }
 
@@ -2485,6 +2509,46 @@ mod tests {
             (true, (false, None, true))
         );
         assert!(cx.debug_bounds("command-palette-panel").is_none());
+    }
+
+    #[gpui::test]
+    fn open_workspace_search_should_remove_a_workspace_after_its_final_session_exits(
+        cx: &mut TestAppContext,
+    ) {
+        let (manager, records, cx) = workspace_manager(cx);
+        let inactive_sender = records
+            .event_sender(1)
+            .expect("the initial Workspace terminal session must have started");
+        cx.simulate_keystrokes("cmd-n");
+        cx.run_until_parked();
+        manager.update(cx, |manager, cx| {
+            manager
+                .workspaces
+                .rename_workspace(WorkspaceId::new(1), "Alpha Workspace".to_owned())
+                .expect("the inactive Workspace must remain owned");
+            cx.notify();
+        });
+
+        click("search-workspaces-button", cx);
+        cx.simulate_keystrokes("a l p h a");
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("workspace-search-result-1").is_some());
+
+        inactive_sender
+            .try_send(SessionEvent::Exited(SessionExit::Success))
+            .expect("the inactive shell exit must be delivered");
+        cx.run_until_parked();
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+
+        let state = manager.read_with(cx, |manager, _| {
+            (
+                manager.workspaces.workspace(WorkspaceId::new(1)).is_none(),
+                manager.workspaces.active_workspace_id(),
+            )
+        });
+        assert_eq!(state, (true, WorkspaceId::new(2)));
+        assert!(cx.debug_bounds("command-palette-panel").is_some());
     }
 
     #[gpui::test]
