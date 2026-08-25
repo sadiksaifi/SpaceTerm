@@ -1831,7 +1831,6 @@ impl EntityInputHandler for TextInput {
         if !self.can_edit() {
             return;
         }
-        let normalized = normalize_single_line(text);
         let had_composition = self.composition.is_some();
         let range = range_utf16
             .map(|range| utf16_replacement_range_to_bytes(&self.buffer.text, range))
@@ -1841,12 +1840,18 @@ impl EntityInputHandler for TextInput {
                     .map(|state| state.marked_range.clone())
             })
             .unwrap_or_else(|| self.buffer.selection.range.clone());
+        let normalized_len = normalized_single_line_len(text);
         if !self
             .buffer
-            .can_replace(&range, normalized.len(), self.input_length_limit)
+            .can_replace(&range, normalized_len, self.input_length_limit)
         {
+            if had_composition && self.commit_composition(cx) {
+                self.rebuild_geometry(self.last_bounds.unwrap_or_default(), window, cx);
+                self.restart_caret(cx);
+            }
             return;
         }
+        let normalized = normalize_single_line(text);
         let changed = if had_composition {
             self.buffer
                 .replace_without_history(range, &normalized, self.input_length_limit)
@@ -1883,7 +1888,6 @@ impl EntityInputHandler for TextInput {
         if !self.can_edit() {
             return;
         }
-        let replacement = normalize_single_line(text);
         let range = range_utf16
             .map(|range| utf16_replacement_range_to_bytes(&self.buffer.text, range))
             .or_else(|| {
@@ -1892,12 +1896,14 @@ impl EntityInputHandler for TextInput {
                     .map(|state| state.marked_range.clone())
             })
             .unwrap_or_else(|| self.buffer.selection.range.clone());
+        let replacement_len = normalized_single_line_len(text);
         if !self
             .buffer
-            .can_replace(&range, replacement.len(), self.input_length_limit)
+            .can_replace(&range, replacement_len, self.input_length_limit)
         {
             return;
         }
+        let replacement = normalize_single_line(text);
         if self.composition.is_none() {
             self.composition = Some(CompositionState {
                 original: self.buffer.snapshot(),
@@ -2930,6 +2936,50 @@ mod tests {
                 input.buffer.history.undo.len(),
             )),
             ("safe".into(), 0, true, 0)
+        );
+    }
+
+    #[gpui::test]
+    fn oversized_final_input_method_commit_ends_active_composition_atomically(
+        cx: &mut TestAppContext,
+    ) {
+        let (input, _, events, cx) = input_with_events(cx, "safe", false);
+        mark_text(&input, cx, "日");
+        events.borrow_mut().clear();
+        let before = input.read_with(cx, |input, _| {
+            (
+                input.value().to_owned(),
+                input.revision(),
+                input.selection(),
+            )
+        });
+
+        cx.update(|window, cx| {
+            input.update(cx, |input, cx| {
+                input.replace_text_in_range(None, &"x".repeat(DEFAULT_VALUE_LIMIT + 1), window, cx);
+            });
+        });
+
+        assert_eq!(
+            input.read_with(cx, |input, _| (
+                input.value().to_owned(),
+                input.revision(),
+                input.selection(),
+                input.composition().is_none(),
+                input.buffer.history.undo.len(),
+            )),
+            (before.0, before.1, before.2, true, 1),
+            "a rejected final commit must end composition without replacing accepted marked text"
+        );
+        assert_eq!(
+            events.borrow().as_slice(),
+            &[TextInputEvent::CompositionCommitted]
+        );
+
+        cx.update(|window, cx| input.update(cx, |input, cx| input.undo(&Undo, window, cx)));
+        assert_eq!(
+            input.read_with(cx, |input, _| input.value().to_owned()),
+            "safe"
         );
     }
 
