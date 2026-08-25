@@ -800,6 +800,7 @@ pub struct TextInput {
     focused: bool,
     window_active: bool,
     buffer: TextBuffer,
+    initial_value_source: Option<String>,
     revision: u64,
     composition: Option<CompositionState>,
     geometry: Option<GeometryCache>,
@@ -837,7 +838,9 @@ impl TextInput {
             cx.observe_window_activation(window, Self::on_window_activation),
         ];
         let normalized = normalize_single_line(&initial_value.into());
-        let normalized = truncate_grapheme(&normalized, DEFAULT_VALUE_LIMIT).to_owned();
+        let normalized = truncate_grapheme(&normalized, HARD_VALUE_LIMIT).to_owned();
+        let default_value = truncate_grapheme(&normalized, DEFAULT_VALUE_LIMIT).to_owned();
+        let initial_value_source = (default_value != normalized).then_some(normalized);
         let accessibility_name = accessibility_name.into();
         Self {
             id: id.into(),
@@ -854,7 +857,8 @@ impl TextInput {
             focus_handle,
             focused: false,
             window_active: window.is_window_active(),
-            buffer: TextBuffer::new(normalized),
+            buffer: TextBuffer::new(default_value),
+            initial_value_source,
             revision: 0,
             composition: None,
             geometry: None,
@@ -920,7 +924,11 @@ impl TextInput {
     /// grapheme-safely truncated before the entity can emit events.
     pub fn input_length_limit(mut self, limit: Option<usize>) -> Self {
         self.input_length_limit = limit.unwrap_or(HARD_VALUE_LIMIT).min(HARD_VALUE_LIMIT);
-        let value = truncate_grapheme(&self.buffer.text, self.input_length_limit).to_owned();
+        let source = self
+            .initial_value_source
+            .as_deref()
+            .unwrap_or(&self.buffer.text);
+        let value = truncate_grapheme(source, self.input_length_limit).to_owned();
         if value != self.buffer.text {
             self.buffer = TextBuffer::new(value);
         }
@@ -1952,6 +1960,7 @@ impl EntityInputHandler for TextInput {
 
 impl Render for TextInput {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.initial_value_source = None;
         let entity = cx.entity();
         let has_selection = !self.buffer.selection.is_empty();
         let can_edit = self.can_edit();
@@ -2566,6 +2575,41 @@ mod tests {
                 input.replace_and_mark_text_in_range(None, text, None, window, cx);
             });
         });
+    }
+
+    #[gpui::test]
+    fn configured_larger_limit_preserves_initial_value_above_default_limit(
+        cx: &mut TestAppContext,
+    ) {
+        install_theme(cx);
+        let value = "é".repeat(DEFAULT_VALUE_LIMIT / 2 + 1024);
+        let expected = value.clone();
+        let (input, cx) = cx.add_window_view(move |window, cx| {
+            TextInput::new("test-input", "Test input", value, window, cx)
+                .input_length_limit(Some(128 * 1024))
+        });
+        cx.run_until_parked();
+
+        assert_eq!(
+            input.read_with(cx, |input, _| input.value().to_owned()),
+            expected
+        );
+    }
+
+    #[gpui::test]
+    fn removing_default_limit_preserves_initial_value_above_default_limit(cx: &mut TestAppContext) {
+        install_theme(cx);
+        let value = "é".repeat(DEFAULT_VALUE_LIMIT / 2 + 1024);
+        let expected = value.clone();
+        let (input, cx) = cx.add_window_view(move |window, cx| {
+            TextInput::new("test-input", "Test input", value, window, cx).input_length_limit(None)
+        });
+        cx.run_until_parked();
+
+        assert_eq!(
+            input.read_with(cx, |input, _| input.value().to_owned()),
+            expected
+        );
     }
 
     #[test]
