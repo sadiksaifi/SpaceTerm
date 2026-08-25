@@ -4,6 +4,7 @@ mod menu_theme;
 mod pane_action_menu;
 mod pane_host;
 mod render_lifecycle;
+mod resize_handle_theme;
 mod scrollbar_theme;
 mod terminal_context_menu;
 mod terminal_element;
@@ -119,6 +120,7 @@ pub(crate) fn init(cx: &mut App) {
         cx,
         button_theme::theme(),
         scrollbar_theme::theme(),
+        resize_handle_theme::theme(),
         menu_theme::theme(),
         command_palette_theme::theme(),
         text_input_theme::theme(),
@@ -246,6 +248,7 @@ mod tests {
         assert!(cx.update(|cx| {
             cx.has_global::<spaceterm_ui::ButtonTheme>()
                 && cx.has_global::<spaceterm_ui::ScrollbarTheme>()
+                && cx.has_global::<spaceterm_ui::ResizeHandleTheme>()
                 && cx.has_global::<spaceterm_ui::MenuTheme>()
                 && cx.has_global::<spaceterm_ui::CommandPaletteTheme>()
                 && cx.has_global::<spaceterm_ui::TextInputTheme>()

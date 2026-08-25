@@ -3,13 +3,13 @@ use std::path::{Path, PathBuf};
 
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, App, Bounds, Context, DefiniteLength, DragMoveEvent, Empty, Entity, EventEmitter,
-    MouseDownEvent, Pixels, Point, PromptButton, PromptLevel, Render, Window, div, px, rgba,
+    AnyElement, App, Bounds, Context, DefiniteLength, Entity, EventEmitter, MouseDownEvent, Pixels,
+    PromptButton, PromptLevel, Render, Window, div, px, rgba,
 };
 use gpui_symbols::{Icon, SymbolWeight};
 use spaceterm_ui::{
     ButtonSize, ButtonVariant, IconButton, Menu, MenuAlignment, MenuLifecycleEvent, MenuPlacement,
-    MenuPlacementConfig, MenuSize,
+    MenuPlacementConfig, MenuSize, ResizeAxis, ResizeHandle, ResizeHandleEvent, ResizeInputSource,
 };
 
 use super::button_theme;
@@ -30,8 +30,7 @@ use crate::terminal::{
 };
 use crate::theme::{ACTIVE_THEME, Color};
 
-const DIVIDER_SIZE: f32 = 1.0;
-const DIVIDER_HIT_SIZE: f32 = 8.0;
+const DIVIDER_SIZE: f32 = super::resize_handle_theme::VISIBLE_THICKNESS;
 const PANE_HEADER_HEIGHT: f32 = 32.0;
 const PANE_HEADER_HORIZONTAL_PADDING: f32 = 12.0;
 const PANE_CONTROL_INSET: f32 = 4.0;
@@ -44,11 +43,6 @@ const _: () = assert!(
     MINIMUM_PANE_WIDTH >= PANE_CONTROL_SIZE + PANE_CONTROL_INSET * 2.0
         && MINIMUM_PANE_HEIGHT >= PANE_CONTROL_TOP + PANE_CONTROL_SIZE + PANE_CONTROL_INSET
 );
-
-#[derive(Clone, Copy)]
-struct DraggedSplit {
-    split_id: SplitId,
-}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum PaneHostEvent {
@@ -85,6 +79,7 @@ pub(crate) struct PaneHost {
     pane_titles: BTreeMap<PaneId, gpui::SharedString>,
     pane_attention: BTreeMap<PaneId, u32>,
     menu_pane_id: Option<PaneId>,
+    resizing_split_id: Option<SplitId>,
     active: bool,
     focus_branch_blocker: Option<TerminalFocusBlocker>,
     native_service_hierarchy_generation: u64,
@@ -122,6 +117,7 @@ impl PaneHost {
             pane_titles: BTreeMap::from([(initial_pane_id, initial_title)]),
             pane_attention: BTreeMap::from([(initial_pane_id, 0)]),
             menu_pane_id: None,
+            resizing_split_id: None,
             active: true,
             focus_branch_blocker: None,
             native_service_hierarchy_generation: 0,
@@ -548,11 +544,13 @@ impl PaneHost {
         &mut self,
         split_id: SplitId,
         axis: SplitAxis,
-        bounds: Bounds<Pixels>,
-        pointer: Point<Pixels>,
+        requested_offset: f32,
         cx: &mut Context<Self>,
     ) {
-        let Some(requested_ratio) = split_ratio_for_pointer(axis, bounds, pointer) else {
+        let Some(bounds) = self.split_bounds.get(&split_id).copied() else {
+            return;
+        };
+        let Some(requested_ratio) = split_ratio_for_offset(axis, bounds, requested_offset) else {
             return;
         };
         let Ok(available_size) = pane_size(bounds) else {
@@ -566,6 +564,59 @@ impl PaneHost {
         ) {
             Ok(_) => cx.notify(),
             Err(error) => eprintln!("failed to resize split: {error}"),
+        }
+    }
+
+    fn reset_split(&mut self, split_id: SplitId, cx: &mut Context<Self>) {
+        let Some(bounds) = self.split_bounds.get(&split_id).copied() else {
+            return;
+        };
+        let Ok(available_size) = pane_size(bounds) else {
+            return;
+        };
+        match self
+            .terminal_window
+            .resize_split(split_id, available_size, DIVIDER_SIZE, 0.5)
+        {
+            Ok(_) => cx.notify(),
+            Err(error) => eprintln!("failed to reset split: {error}"),
+        }
+    }
+
+    fn handle_resize_event(
+        &mut self,
+        split_id: SplitId,
+        axis: SplitAxis,
+        event: ResizeHandleEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match event {
+            ResizeHandleEvent::InteractionStarted { .. } => {
+                self.resizing_split_id = Some(split_id);
+                self.sync_terminal_focus(cx);
+                cx.notify();
+            }
+            ResizeHandleEvent::ResizeRequested {
+                requested_value, ..
+            } => self.resize_split(split_id, axis, requested_value, cx),
+            ResizeHandleEvent::ResetRequested { source } => {
+                self.reset_split(split_id, cx);
+                if source == ResizeInputSource::Pointer && self.active {
+                    self.focus(window, cx);
+                }
+            }
+            ResizeHandleEvent::InteractionFinished { source, .. } => {
+                if self.resizing_split_id != Some(split_id) {
+                    return;
+                }
+                self.resizing_split_id = None;
+                self.sync_terminal_focus(cx);
+                cx.notify();
+                if source == ResizeInputSource::Pointer && self.active {
+                    self.focus(window, cx);
+                }
+            }
         }
     }
 
@@ -617,6 +668,10 @@ impl PaneHost {
         };
         let blocker = menu_blocked
             .then_some(TerminalFocusBlocker::PaneMenu)
+            .or(self
+                .resizing_split_id
+                .is_some()
+                .then_some(TerminalFocusBlocker::PaneResize))
             .or(self.focus_branch_blocker);
         let signature = (self.active, self.terminal_window.focused_pane_id(), blocker);
         if self.native_service_focus_signature != Some(signature) {
@@ -845,44 +900,38 @@ impl PaneHost {
         let (first, second) = children;
         let first = self.render_tree(first, host.clone());
         let second = self.render_tree(second, host.clone());
-        let drag_host = host.clone();
-        let measure_host = host;
+        let measure_host = host.clone();
         let mut split = div()
             .on_children_prepainted(move |children, _, cx| {
                 let (Some(first), Some(last)) = (children.first(), children.last()) else {
                     return;
                 };
                 let bounds = first.union(last);
-                let _ = measure_host.update(cx, |host, _| {
-                    host.split_bounds.insert(split_id, bounds);
+                let _ = measure_host.update(cx, |host, cx| {
+                    if host.split_bounds.insert(split_id, bounds) != Some(bounds) {
+                        cx.notify();
+                    }
                 });
             })
             .id(("split", split_id.get()))
             .size_full()
             .min_w_0()
             .min_h_0()
-            .flex()
-            .on_drag_move::<DraggedSplit>(move |event: &DragMoveEvent<DraggedSplit>, _, cx| {
-                if event.drag(cx).split_id != split_id {
-                    return;
-                }
-                let _ = drag_host.update(cx, |host, cx| {
-                    let bounds = host
-                        .split_bounds
-                        .get(&split_id)
-                        .copied()
-                        .unwrap_or(event.bounds);
-                    host.resize_split(split_id, axis, bounds, event.event.position, cx);
-                });
-            });
+            .flex();
         split = match axis {
             SplitAxis::Horizontal => split.flex_row(),
             SplitAxis::Vertical => split.flex_col(),
         };
 
+        let current_offset = self
+            .split_bounds
+            .get(&split_id)
+            .and_then(|bounds| split_content_extent(axis, *bounds))
+            .map_or(0.0, |extent| extent * ratio);
+
         split
             .child(split_child(first, axis, ratio))
-            .child(render_divider(split_id, axis))
+            .child(render_divider(split_id, axis, current_offset, host))
             .child(split_child(second, axis, 1.0 - ratio))
             .into_any_element()
     }
@@ -1044,36 +1093,31 @@ fn split_child(child: AnyElement, axis: SplitAxis, ratio: f32) -> impl IntoEleme
     }
 }
 
-fn render_divider(split_id: SplitId, axis: SplitAxis) -> AnyElement {
-    let mut divider = div()
-        .id(("split-divider", split_id.get()))
-        .relative()
-        .flex_shrink_0()
-        .bg(gpui_color(ACTIVE_THEME.border));
-    divider = match axis {
-        SplitAxis::Horizontal => divider.w(px(DIVIDER_SIZE)).h_full(),
-        SplitAxis::Vertical => divider.h(px(DIVIDER_SIZE)).w_full(),
-    };
-
-    let mut hit_target = div()
-        .id(("split-divider-hit", split_id.get()))
-        .absolute()
-        .block_mouse_except_scroll()
-        .on_drag(DraggedSplit { split_id }, |_, _, _, cx| cx.new(|_| Empty));
-    hit_target = match axis {
-        SplitAxis::Horizontal => hit_target
-            .left(px(-(DIVIDER_HIT_SIZE - DIVIDER_SIZE) / 2.0))
-            .w(px(DIVIDER_HIT_SIZE))
-            .h_full()
-            .cursor_col_resize(),
-        SplitAxis::Vertical => hit_target
-            .top(px(-(DIVIDER_HIT_SIZE - DIVIDER_SIZE) / 2.0))
-            .h(px(DIVIDER_HIT_SIZE))
-            .w_full()
-            .cursor_row_resize(),
-    };
-
-    divider.child(hit_target).into_any_element()
+fn render_divider(
+    split_id: SplitId,
+    axis: SplitAxis,
+    current_offset: f32,
+    host: gpui::WeakEntity<PaneHost>,
+) -> AnyElement {
+    ResizeHandle::new(
+        ("split-divider", split_id.get()),
+        "Resize Pane split",
+        match axis {
+            SplitAxis::Horizontal => ResizeAxis::Horizontal,
+            SplitAxis::Vertical => ResizeAxis::Vertical,
+        },
+        current_offset,
+    )
+    .tab_stop(true)
+    .reset_on_double_click(true)
+    .debug_selector(format!("split-divider-{}", split_id.get()))
+    .on_event(move |event, window, cx| {
+        let event = *event;
+        let _ = host.update(cx, |host, cx| {
+            host.handle_resize_event(split_id, axis, event, window, cx);
+        });
+    })
+    .into_any_element()
 }
 
 fn render_pane_controls(
@@ -1128,25 +1172,23 @@ fn pane_size(bounds: Bounds<Pixels>) -> Result<PaneSize, crate::domain::PaneSize
     PaneSize::new(f32::from(bounds.size.width), f32::from(bounds.size.height))
 }
 
-fn split_ratio_for_pointer(
+fn split_content_extent(axis: SplitAxis, bounds: Bounds<Pixels>) -> Option<f32> {
+    let extent = match axis {
+        SplitAxis::Horizontal => f32::from(bounds.size.width),
+        SplitAxis::Vertical => f32::from(bounds.size.height),
+    } - DIVIDER_SIZE;
+    (extent > 0.0).then_some(extent)
+}
+
+fn split_ratio_for_offset(
     axis: SplitAxis,
     bounds: Bounds<Pixels>,
-    pointer: Point<Pixels>,
+    requested_offset: f32,
 ) -> Option<f32> {
-    let (position, origin, extent) = match axis {
-        SplitAxis::Horizontal => (
-            f32::from(pointer.x),
-            f32::from(bounds.origin.x),
-            f32::from(bounds.size.width),
-        ),
-        SplitAxis::Vertical => (
-            f32::from(pointer.y),
-            f32::from(bounds.origin.y),
-            f32::from(bounds.size.height),
-        ),
-    };
-    let content_extent = extent - DIVIDER_SIZE;
-    (content_extent > 0.0).then_some((position - origin) / content_extent)
+    let content_extent = split_content_extent(axis, bounds)?;
+    requested_offset
+        .is_finite()
+        .then_some(requested_offset / content_extent)
 }
 
 fn gpui_color(color: Color) -> gpui::Rgba {
@@ -2143,24 +2185,73 @@ mod tests {
         );
     }
 
+    #[gpui::test]
+    fn shared_resize_handle_should_resize_split_without_leaking_terminal_input(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(crate::ui::init);
+        let records = TestTerminalSessionRecords::default();
+        let session_factory: Rc<dyn TerminalSessionFactory> =
+            Rc::new(TestTerminalSessionFactory::new(records.clone()));
+        let session_factory =
+            WorkspaceTerminalSessionFactory::new(session_factory, test_workspace_root());
+        let (host, cx) = cx.add_window_view(|window, cx| {
+            PaneHost::new(WindowId::new(1), session_factory, window, cx)
+        });
+        cx.update(|window, cx| {
+            window.activate_window();
+            host.update(cx, |host, cx| {
+                host.split_focused(SplitAxis::Horizontal, window, cx);
+                host.focus(window, cx);
+            });
+        });
+        cx.run_until_parked();
+        let handle = cx
+            .debug_bounds("split-divider-1-hitbox")
+            .expect("the shared split ResizeHandle was rendered");
+        let start = handle.center();
+        let destination = point(start.x + px(60.0), start.y + px(40.0));
+
+        cx.simulate_mouse_down(start, MouseButton::Left, Modifiers::none());
+        cx.simulate_mouse_move(destination, MouseButton::Left, Modifiers::none());
+        cx.simulate_mouse_up(destination, MouseButton::Left, Modifiers::none());
+        cx.run_until_parked();
+
+        let state = cx.update(|window, cx| {
+            let host = host.read(cx);
+            let ratio = match host.terminal_window.root().node() {
+                PaneNodeRef::Split { ratio, .. } => ratio,
+                PaneNodeRef::Leaf { .. } => 0.0,
+            };
+            (
+                ratio,
+                host.resizing_split_id,
+                host.focused_terminal_has_input_focus(window, cx),
+            )
+        });
+        assert!(
+            state.0 > 0.5,
+            "the shared handle did not grow the first Pane"
+        );
+        assert_eq!((state.1, state.2, records.pointer_count()), (None, true, 0));
+    }
+
     #[test]
-    fn split_ratio_should_follow_horizontal_pointer_position() {
+    fn split_ratio_should_follow_horizontal_requested_offset() {
         let split_bounds = bounds(point(px(10.0), px(20.0)), size(px(401.0), px(200.0)));
-        let pointer = point(px(110.0), px(80.0));
 
         assert_eq!(
-            split_ratio_for_pointer(SplitAxis::Horizontal, split_bounds, pointer),
+            split_ratio_for_offset(SplitAxis::Horizontal, split_bounds, 100.0),
             Some(0.25)
         );
     }
 
     #[test]
-    fn split_ratio_should_follow_vertical_pointer_position() {
+    fn split_ratio_should_follow_vertical_requested_offset() {
         let split_bounds = bounds(point(px(10.0), px(20.0)), size(px(400.0), px(201.0)));
-        let pointer = point(px(110.0), px(70.0));
 
         assert_eq!(
-            split_ratio_for_pointer(SplitAxis::Vertical, split_bounds, pointer),
+            split_ratio_for_offset(SplitAxis::Vertical, split_bounds, 50.0),
             Some(0.25)
         );
     }

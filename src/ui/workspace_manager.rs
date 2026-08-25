@@ -4,15 +4,16 @@ use std::rc::Rc;
 
 use gpui::prelude::*;
 use gpui::{
-    Action, AnyElement, App, Context, DispatchPhase, DragMoveEvent, Empty, Entity, EntityId,
-    FocusHandle, MouseButton, MouseExitEvent, Pixels, PromptButton, PromptLevel, Render,
-    ScrollHandle, ScrollWheelEvent, SharedString, WeakEntity, Window, canvas, div, point, px, rgba,
+    Action, AnyElement, App, Context, DispatchPhase, Entity, EntityId, FocusHandle, MouseButton,
+    MouseExitEvent, Pixels, PromptButton, PromptLevel, Render, ScrollHandle, ScrollWheelEvent,
+    SharedString, WeakEntity, Window, canvas, div, point, px, rgba,
 };
 use gpui_symbols::{Icon, RenderingMode, SymbolWeight};
 use spaceterm_ui::{
     Button, ButtonShape, ButtonSize, ButtonVariant, ContextMenu, IconButton, MenuEntry,
     MenuLifecycleEvent, MenuSize, MiddleTruncatedText, OverlayScrollbar, OverlayScrollbarEvent,
-    ScrollMetrics, TextInput, TextInputEvent, TextInputVariant,
+    ResizeAxis, ResizeHandle, ResizeHandleEvent, ResizeInputSource, ScrollMetrics, TextInput,
+    TextInputEvent, TextInputVariant,
 };
 
 use super::button_theme;
@@ -58,8 +59,7 @@ const SIDEBAR_ROW_ICON_SIZE: f32 = 14.0;
 const SIDEBAR_NAME_TEXT_SIZE: f32 = 13.0;
 const SIDEBAR_DETAIL_TEXT_SIZE: f32 = 11.0;
 const NEW_WORKSPACE_BUTTON_HEIGHT: f32 = 40.0;
-const CHROME_DIVIDER_SIZE: f32 = 1.0;
-const SIDEBAR_RESIZE_HIT_SIZE: f32 = 8.0;
+const CHROME_DIVIDER_SIZE: f32 = super::resize_handle_theme::VISIBLE_THICKNESS;
 const SIDEBAR_MAXIMUM_WIDTH: f32 = 420.0;
 const TERMINAL_CONTENT_MINIMUM_WIDTH: f32 = 240.0;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -111,9 +111,6 @@ impl Render for WorkspaceSidebarTooltip {
     }
 }
 
-#[derive(Clone, Copy)]
-struct DraggedWorkspaceSidebar;
-
 pub(crate) struct WorkspaceManager {
     workspaces: WorkspaceCollection<Entity<WindowManager>>,
     session_factory: Rc<dyn TerminalSessionFactory>,
@@ -129,6 +126,7 @@ pub(crate) struct WorkspaceManager {
     workspace_search: Entity<WorkspaceSearch>,
     workspace_menu: Option<WorkspaceMenuState>,
     rename: Option<WorkspaceRenameState>,
+    sidebar_resize_interaction: bool,
     top_chrome_interaction: bool,
     top_chrome_move_requested: bool,
     pending_final_window_closes: BTreeSet<WorkspaceId>,
@@ -232,6 +230,7 @@ impl WorkspaceManager {
             workspace_search,
             workspace_menu: None,
             rename: None,
+            sidebar_resize_interaction: false,
             top_chrome_interaction: false,
             top_chrome_move_requested: false,
             pending_final_window_closes: BTreeSet::new(),
@@ -541,6 +540,9 @@ impl WorkspaceManager {
                 .top_chrome_interaction
                 .then_some(TerminalFocusBlocker::TopChrome)
                 .or(self
+                    .sidebar_resize_interaction
+                    .then_some(TerminalFocusBlocker::SidebarResize))
+                .or(self
                     .rename
                     .as_ref()
                     .map(|_| TerminalFocusBlocker::RenameField))
@@ -674,9 +676,14 @@ impl WorkspaceManager {
         cx.notify();
     }
 
-    fn resize_sidebar(&mut self, pointer_x: Pixels, window: &mut Window, cx: &mut Context<Self>) {
+    fn resize_sidebar(
+        &mut self,
+        requested_width: Pixels,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let minimum_width = px(WORKSPACE_SIDEBAR_MINIMUM_WIDTH);
-        if pointer_x < minimum_width {
+        if requested_width < minimum_width {
             let was_sidebar_focused =
                 self.sidebar_focus.is_focused(window) || self.rename_is_focused(window);
             self.rename = None;
@@ -691,7 +698,46 @@ impl WorkspaceManager {
         let maximum_width = (window.bounds().size.width - px(TERMINAL_CONTENT_MINIMUM_WIDTH))
             .min(px(SIDEBAR_MAXIMUM_WIDTH))
             .max(minimum_width);
-        self.set_sidebar_layout(true, pointer_x.clamp(minimum_width, maximum_width), cx);
+        self.set_sidebar_layout(
+            true,
+            requested_width.clamp(minimum_width, maximum_width),
+            cx,
+        );
+    }
+
+    fn handle_sidebar_resize_event(
+        &mut self,
+        event: ResizeHandleEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match event {
+            ResizeHandleEvent::InteractionStarted { .. } => {
+                self.sidebar_resize_interaction = true;
+                self.sync_terminal_focus_blocker(window, cx);
+                cx.notify();
+            }
+            ResizeHandleEvent::ResizeRequested {
+                requested_value, ..
+            } => self.resize_sidebar(px(requested_value), window, cx),
+            ResizeHandleEvent::ResetRequested { source } => {
+                self.resize_sidebar(px(WORKSPACE_SIDEBAR_DEFAULT_WIDTH), window, cx);
+                if source == ResizeInputSource::Pointer {
+                    self.focus(window, cx);
+                }
+            }
+            ResizeHandleEvent::InteractionFinished { source, .. } => {
+                if !self.sidebar_resize_interaction {
+                    return;
+                }
+                self.sidebar_resize_interaction = false;
+                self.sync_terminal_focus_blocker(window, cx);
+                cx.notify();
+                if source == ResizeInputSource::Pointer {
+                    self.focus(window, cx);
+                }
+            }
+        }
     }
 
     fn scroll_active_workspace_into_view(&self) {
@@ -1574,17 +1620,6 @@ impl WorkspaceManager {
             })
             .child(
                 div()
-                    .id("workspace-top-chrome-right-divider")
-                    .debug_selector(|| "workspace-top-chrome-right-divider".to_owned())
-                    .absolute()
-                    .top_0()
-                    .right_0()
-                    .h_full()
-                    .w(px(CHROME_DIVIDER_SIZE))
-                    .bg(gpui_color(ACTIVE_THEME.border)),
-            )
-            .child(
-                div()
                     .id("workspace-top-chrome-bottom-divider")
                     .debug_selector(|| "workspace-top-chrome-bottom-divider".to_owned())
                     .absolute()
@@ -1616,19 +1651,6 @@ impl WorkspaceManager {
                             });
                         }),
                     ),
-            )
-            .child(
-                div()
-                    .id("workspace-top-chrome-resize-handle")
-                    .debug_selector(|| "workspace-top-chrome-resize-handle".to_owned())
-                    .absolute()
-                    .top_0()
-                    .right(px(-(SIDEBAR_RESIZE_HIT_SIZE - CHROME_DIVIDER_SIZE) / 2.0))
-                    .h_full()
-                    .w(px(SIDEBAR_RESIZE_HIT_SIZE))
-                    .block_mouse_except_scroll()
-                    .cursor_col_resize()
-                    .on_drag(DraggedWorkspaceSidebar, |_, _, _, cx| cx.new(|_| Empty)),
             )
             .into_any_element()
     }
@@ -2053,31 +2075,48 @@ impl WorkspaceManager {
                     ),
             )
             .child(scrollbar)
-            .child(
-                div()
-                    .id("workspace-sidebar-right-divider")
-                    .debug_selector(|| "workspace-sidebar-right-divider".to_owned())
-                    .absolute()
-                    .top_0()
-                    .right_0()
-                    .h_full()
-                    .w(px(CHROME_DIVIDER_SIZE))
-                    .bg(gpui_color(ACTIVE_THEME.border)),
-            )
-            .child(
-                div()
-                    .id("workspace-sidebar-resize-handle")
-                    .debug_selector(|| "workspace-sidebar-resize-handle".to_owned())
-                    .absolute()
-                    .top_0()
-                    .right(px(-(SIDEBAR_RESIZE_HIT_SIZE - CHROME_DIVIDER_SIZE) / 2.0))
-                    .h_full()
-                    .w(px(SIDEBAR_RESIZE_HIT_SIZE))
-                    .block_mouse_except_scroll()
-                    .cursor_col_resize()
-                    .on_drag(DraggedWorkspaceSidebar, |_, _, _, cx| cx.new(|_| Empty)),
-            )
             .into_any_element()
+    }
+
+    fn render_sidebar_resize_handle(
+        &self,
+        selector: &'static str,
+        top_chrome: bool,
+        manager: WeakEntity<Self>,
+    ) -> AnyElement {
+        let current_width = f32::from(self.sidebar_width);
+        let handle = ResizeHandle::new(
+            selector,
+            "Resize Workspace sidebar",
+            ResizeAxis::Horizontal,
+            current_width,
+        )
+        .tab_stop(true)
+        .reset_on_double_click(true)
+        .debug_selector(selector)
+        .on_event(move |event, window, cx| {
+            let event = *event;
+            let _ = manager.update(cx, |manager, cx| {
+                manager.handle_sidebar_resize_event(event, window, cx);
+            });
+        });
+        let wrapper = div()
+            .absolute()
+            .left(self.sidebar_width - px(CHROME_DIVIDER_SIZE / 2.0))
+            .w(px(CHROME_DIVIDER_SIZE));
+        if top_chrome {
+            wrapper
+                .top_0()
+                .h(px(TOP_CHROME_HEIGHT))
+                .child(handle)
+                .into_any_element()
+        } else {
+            wrapper
+                .top(px(TOP_CHROME_HEIGHT))
+                .bottom_0()
+                .child(handle)
+                .into_any_element()
+        }
     }
 }
 
@@ -2088,7 +2127,6 @@ impl Render for WorkspaceManager {
         let manager = cx.entity().downgrade();
         let release_manager = manager.clone();
         let exit_manager = manager.clone();
-        let resize_manager = manager.clone();
         let active_window_manager = self.workspaces.active_workspace().payload().clone();
         if self.sidebar_visible {
             self.sync_scrollbar(cx);
@@ -2126,12 +2164,6 @@ impl Render for WorkspaceManager {
                 .absolute()
                 .inset_0(),
             )
-            .on_drag_move::<DraggedWorkspaceSidebar>(move |event: &DragMoveEvent<_>, window, cx| {
-                let pointer_x = event.event.position.x - event.bounds.origin.x;
-                let _ = resize_manager.update(cx, |manager, cx| {
-                    manager.resize_sidebar(pointer_x, window, cx);
-                });
-            })
             .on_action(cx.listener(Self::on_create_workspace))
             .on_action(cx.listener(Self::on_search_workspaces))
             .on_action(cx.listener(Self::on_open_local_project))
@@ -2173,8 +2205,19 @@ impl Render for WorkspaceManager {
             .on_action(cx.listener(Self::forward_active_terminal_action::<CloseTerminalFind>))
             .child(active_window_manager)
             .child(self.render_top_left_chrome(manager.clone()))
+            .child(self.render_sidebar_resize_handle(
+                "workspace-top-chrome-resize-handle",
+                true,
+                manager.clone(),
+            ))
             .when(self.sidebar_visible, |root| {
-                root.child(self.render_sidebar(manager, cx))
+                root.child(self.render_sidebar(manager.clone(), cx)).child(
+                    self.render_sidebar_resize_handle(
+                        "workspace-sidebar-resize-handle",
+                        false,
+                        manager,
+                    ),
+                )
             })
             .child(self.workspace_search.clone())
     }
@@ -2773,11 +2816,11 @@ mod tests {
             .debug_bounds("workspace-row-1-active")
             .expect("the Active Workspace row was not rendered");
         let sidebar_divider = cx
-            .debug_bounds("workspace-sidebar-right-divider")
-            .expect("the sidebar divider overlay was not rendered");
+            .debug_bounds("workspace-sidebar-resize-handle-divider")
+            .expect("the shared sidebar divider was not rendered");
         let top_chrome_divider = cx
-            .debug_bounds("workspace-top-chrome-right-divider")
-            .expect("the fixed top-chrome divider was not rendered");
+            .debug_bounds("workspace-top-chrome-resize-handle-divider")
+            .expect("the shared fixed top-chrome divider was not rendered");
         let content = cx
             .debug_bounds("window-manager-content")
             .expect("the active Window content was not rendered");
@@ -2790,10 +2833,10 @@ mod tests {
                 sidebar.size.width,
                 active_row.origin.x,
                 active_row.size.width,
-                sidebar_divider.origin.x + sidebar_divider.size.width,
+                sidebar_divider.center().x,
                 sidebar_divider.origin.y,
                 sidebar_divider.size,
-                top_chrome_divider.origin.x + top_chrome_divider.size.width,
+                top_chrome_divider.center().x,
                 top_chrome_divider.size.height,
                 content.origin.x,
             ),
@@ -2859,6 +2902,121 @@ mod tests {
                 root.origin.x + resized_width,
             )
         );
+    }
+
+    #[gpui::test]
+    fn shared_sidebar_handle_should_clamp_to_the_application_maximum(cx: &mut TestAppContext) {
+        let (manager, _records, cx) = workspace_manager(cx);
+        let root = cx
+            .debug_bounds("workspace-manager")
+            .expect("the Workspace manager was not rendered");
+        let maximum = cx.update(|window, _| {
+            (window.bounds().size.width - px(TERMINAL_CONTENT_MINIMUM_WIDTH))
+                .min(px(SIDEBAR_MAXIMUM_WIDTH))
+                .max(px(WORKSPACE_SIDEBAR_MINIMUM_WIDTH))
+        });
+
+        drag_to(
+            "workspace-sidebar-resize-handle",
+            root.origin.x + px(10_000.0),
+            cx,
+        );
+
+        assert_eq!(
+            manager.read_with(cx, |manager, _| manager.sidebar_width),
+            maximum
+        );
+    }
+
+    #[gpui::test]
+    fn sidebar_resize_interaction_should_block_then_restore_terminal_focus(
+        cx: &mut TestAppContext,
+    ) {
+        let (manager, _records, cx) = workspace_manager(cx);
+        let start = cx
+            .debug_bounds("workspace-sidebar-resize-handle-hitbox")
+            .expect("the shared sidebar handle was rendered")
+            .center();
+
+        cx.simulate_mouse_down(start, MouseButton::Left, Modifiers::none());
+        let active = cx.update(|window, cx| {
+            let manager = manager.read(cx);
+            (
+                manager.sidebar_resize_interaction,
+                manager.terminal_focus_blocker(window, cx),
+                manager
+                    .workspaces
+                    .active_workspace()
+                    .payload()
+                    .read(cx)
+                    .focused_terminal_is_focused(window, cx),
+            )
+        });
+        assert_eq!(
+            active,
+            (true, Some(TerminalFocusBlocker::SidebarResize), false)
+        );
+
+        cx.simulate_mouse_up(start, MouseButton::Left, Modifiers::none());
+        cx.run_until_parked();
+        let finished = cx.update(|window, cx| {
+            let manager = manager.read(cx);
+            (
+                manager.sidebar_resize_interaction,
+                manager.terminal_focus_blocker(window, cx),
+                manager
+                    .workspaces
+                    .active_workspace()
+                    .payload()
+                    .read(cx)
+                    .focused_terminal_is_focused(window, cx),
+            )
+        });
+        assert_eq!(finished, (false, None, true));
+    }
+
+    #[gpui::test]
+    fn double_clicking_sidebar_handle_should_request_default_width(cx: &mut TestAppContext) {
+        let (manager, _records, cx) = workspace_manager(cx);
+        cx.update(|window, cx| {
+            manager.update(cx, |manager, cx| {
+                manager.resize_sidebar(px(320.0), window, cx);
+            });
+        });
+        cx.run_until_parked();
+        let position = cx
+            .debug_bounds("workspace-top-chrome-resize-handle-hitbox")
+            .expect("the persistent shared sidebar handle was rendered")
+            .center();
+
+        cx.simulate_event(gpui::MouseDownEvent {
+            button: MouseButton::Left,
+            position,
+            modifiers: Modifiers::none(),
+            click_count: 2,
+            first_mouse: false,
+        });
+        cx.simulate_event(gpui::MouseUpEvent {
+            button: MouseButton::Left,
+            position,
+            modifiers: Modifiers::none(),
+            click_count: 2,
+        });
+        cx.run_until_parked();
+
+        let state = cx.update(|window, cx| {
+            let manager = manager.read(cx);
+            (
+                manager.sidebar_width,
+                manager
+                    .workspaces
+                    .active_workspace()
+                    .payload()
+                    .read(cx)
+                    .focused_terminal_is_focused(window, cx),
+            )
+        });
+        assert_eq!(state, (px(WORKSPACE_SIDEBAR_DEFAULT_WIDTH), true));
     }
 
     #[gpui::test]
