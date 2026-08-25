@@ -816,9 +816,10 @@ impl Global for CommandPaletteTheme {}
 /// keeps arbitrary row painting outside the accessibility seam.
 pub struct CommandPalette<I: Clone + Eq + 'static> {
     no_results_text: SharedString,
-    items: Vec<CommandPaletteItem<I>>,
-    matches: Vec<CommandPaletteMatch>,
-    presented_results: PresentedResults,
+    items: Rc<[CommandPaletteItem<I>]>,
+    matches: Rc<[CommandPaletteMatch]>,
+    presented_results: Rc<PresentedResults>,
+    leading_reserved: bool,
     header_actions: Vec<CommandPaletteAction>,
     hints: Vec<CommandPaletteHint>,
     actions_menu: Vec<MenuEntry<SharedString>>,
@@ -1099,10 +1100,11 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
             }
         })
         .detach();
-        let items = unique_items(items);
-        let matches = match_command_palette_items(&items, "");
+        let items: Rc<[CommandPaletteItem<I>]> = unique_items(items).into();
+        let matches: Rc<[CommandPaletteMatch]> = match_command_palette_items(&items, "").into();
         let selected = first_enabled_id(&items, &matches);
-        let presented_results = PresentedResults::new(&items, &matches);
+        let presented_results = Rc::new(PresentedResults::new(&items, &matches));
+        let leading_reserved = items.iter().any(|item| item.leading_icon.is_some());
         let list =
             ListState::new(presented_results.len(), ListAlignment::Top, px(0.0)).measure_all();
         let mut palette = Self {
@@ -1110,6 +1112,7 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
             items,
             matches,
             presented_results,
+            leading_reserved,
             header_actions: Vec::new(),
             hints: Vec::new(),
             actions_menu: Vec::new(),
@@ -1312,7 +1315,8 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
 
     /// Replaces items immediately and preserves selection by stable identity when possible.
     pub fn set_items(&mut self, items: Vec<CommandPaletteItem<I>>, cx: &mut gpui::Context<Self>) {
-        self.items = unique_items(items);
+        self.items = unique_items(items).into();
+        self.leading_reserved = self.items.iter().any(|item| item.leading_icon.is_some());
         self.loading = false;
         self.recompute_matches();
         cx.notify();
@@ -1394,8 +1398,8 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
     }
 
     fn recompute_matches(&mut self) {
-        self.matches = match_command_palette_items(&self.items, &self.query);
-        self.presented_results = PresentedResults::new(&self.items, &self.matches);
+        self.matches = match_command_palette_items(&self.items, &self.query).into();
+        self.presented_results = Rc::new(PresentedResults::new(&self.items, &self.matches));
         self.list.reset(self.presented_results.len());
         self.repair_selection();
         self.reveal_selected();
@@ -2029,12 +2033,12 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
         theme: CommandPaletteTheme,
         cx: &mut gpui::Context<Self>,
     ) -> AnyElement {
-        let items = Rc::new(self.items.clone());
-        let matches = Rc::new(self.matches.clone());
-        let presented_results = Rc::new(self.presented_results.clone());
+        let items = Rc::clone(&self.items);
+        let matches = Rc::clone(&self.matches);
+        let presented_results = Rc::clone(&self.presented_results);
         let selected = self.selected.clone();
         let hover_suppressed = self.pointer_suppressed || self.hover_suppressed;
-        let leading_reserved = self.items.iter().any(|item| item.leading_icon.is_some());
+        let leading_reserved = self.leading_reserved;
         let palette = cx.entity().downgrade();
         div()
             .relative()
@@ -2059,9 +2063,9 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
                                     render_row(
                                         palette.clone(),
                                         *position,
-                                        item.clone(),
-                                        matched.label_highlights.clone(),
-                                        matched.description_highlights.clone(),
+                                        item,
+                                        &matched.label_highlights,
+                                        &matched.description_highlights,
                                         selected.as_ref() == Some(&item.id),
                                         hover_suppressed,
                                         leading_reserved,
@@ -2256,9 +2260,9 @@ fn status_row(
 fn render_row<I: Clone + Eq + 'static>(
     palette: WeakEntity<CommandPalette<I>>,
     position: usize,
-    item: CommandPaletteItem<I>,
-    label_highlights: Vec<Range<usize>>,
-    description_highlights: Vec<Range<usize>>,
+    item: &CommandPaletteItem<I>,
+    label_highlights: &[Range<usize>],
+    description_highlights: &[Range<usize>],
     selected: bool,
     hover_suppressed: bool,
     leading_reserved: bool,
@@ -2338,7 +2342,7 @@ fn render_row<I: Clone + Eq + 'static>(
         .gap(metrics.gap)
         .child(div().min_w_0().flex_1().child(highlighted_text(
             item.label.clone(),
-            &label_highlights,
+            label_highlights,
             foreground,
             match_foreground,
             metrics.label_size,
@@ -2367,7 +2371,7 @@ fn render_row<I: Clone + Eq + 'static>(
                     .overflow_hidden()
                     .child(highlighted_text(
                         description,
-                        &description_highlights,
+                        description_highlights,
                         secondary,
                         match_foreground,
                         metrics.secondary_size,
@@ -2380,7 +2384,7 @@ fn render_row<I: Clone + Eq + 'static>(
         let down_palette = palette.clone();
         let up_palette = palette;
         let down_id = item.id.clone();
-        let up_id = item.id;
+        let up_id = item.id.clone();
         row = row.child(
             canvas(
                 |bounds, window, _| window.insert_hitbox(bounds, HitboxBehavior::Normal),
@@ -2508,7 +2512,10 @@ fn render_accessory(
 
 #[cfg(test)]
 mod tests {
-    use std::{cell::RefCell, rc::Rc};
+    use std::{
+        cell::{Cell, RefCell},
+        rc::Rc,
+    };
 
     use gpui::{
         Context, Entity, FocusHandle, Modifiers, Render, ScrollDelta, ScrollWheelEvent,
@@ -2699,6 +2706,39 @@ mod tests {
         assert_eq!(match_command_palette_items(&items, "open project").len(), 1);
     }
 
+    struct CloneCountingId {
+        value: u16,
+        clones: Rc<Cell<usize>>,
+    }
+
+    impl Clone for CloneCountingId {
+        fn clone(&self) -> Self {
+            self.clones.set(self.clones.get() + 1);
+            Self {
+                value: self.value,
+                clones: Rc::clone(&self.clones),
+            }
+        }
+    }
+
+    impl PartialEq for CloneCountingId {
+        fn eq(&self, other: &Self) -> bool {
+            self.value == other.value
+        }
+    }
+
+    impl Eq for CloneCountingId {}
+
+    struct CloneCountingRoot {
+        palette: Entity<CommandPalette<CloneCountingId>>,
+    }
+
+    impl Render for CloneCountingRoot {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().size_full().child(self.palette.clone())
+        }
+    }
+
     struct TestRoot {
         palette: Entity<CommandPalette<u8>>,
         other_focus: FocusHandle,
@@ -2883,6 +2923,55 @@ mod tests {
         );
         cx.run_until_parked();
         assert!(!palette.read_with(cx, |palette, _| palette.hover_suppressed));
+    }
+
+    #[gpui::test]
+    fn wheel_scroll_should_not_clone_offscreen_items(cx: &mut TestAppContext) {
+        cx.set_global(test_theme());
+        install_control_themes(cx);
+        cx.update(crate::text_input::init);
+        cx.update(super::init);
+        let offscreen_clones = Rc::new(Cell::new(0));
+        let tracked_clones = Rc::clone(&offscreen_clones);
+        let (root, cx) = cx.add_window_view(move |window, cx| {
+            let items = (0..64)
+                .map(|value| {
+                    let clones = if value == 63 {
+                        Rc::clone(&tracked_clones)
+                    } else {
+                        Rc::new(Cell::new(0))
+                    };
+                    CommandPaletteItem::new(
+                        CloneCountingId { value, clones },
+                        format!("Command {value}"),
+                    )
+                })
+                .collect();
+            let palette = cx.new(|cx| CommandPalette::new("Search", items, window, cx));
+            CloneCountingRoot { palette }
+        });
+        let palette = root.read_with(cx, |root, _| root.palette.clone());
+        cx.update(|window, _| window.activate_window());
+        cx.update(|window, cx| {
+            palette.update(cx, |palette, cx| {
+                palette.open(window, cx);
+            });
+        });
+        cx.run_until_parked();
+        offscreen_clones.set(0);
+
+        let panel = cx
+            .debug_bounds("command-palette-panel")
+            .expect("the palette panel was not rendered");
+        cx.simulate_event(ScrollWheelEvent {
+            position: panel.center(),
+            delta: ScrollDelta::Pixels(point(px(0.0), px(-24.0))),
+            modifiers: Modifiers::none(),
+            touch_phase: TouchPhase::Moved,
+        });
+        cx.run_until_parked();
+
+        assert_eq!(offscreen_clones.get(), 0);
     }
 
     #[gpui::test]
