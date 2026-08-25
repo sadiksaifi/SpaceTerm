@@ -1,15 +1,16 @@
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, App, Context, DispatchPhase, Entity, EventEmitter, MouseButton, MouseDownEvent,
-    MouseExitEvent, MouseMoveEvent, MouseUpEvent, Pixels, PromptButton, PromptLevel, Render,
-    ScrollHandle, SharedString, Window, canvas, div, px, rgba,
+    AnyElement, App, Context, Entity, EventEmitter, MouseButton, Pixels, PromptButton, PromptLevel,
+    Render, ScrollHandle, SharedString, Window, div, px, rgba,
 };
 use gpui_symbols::{Icon, SymbolWeight};
 use spaceterm_ui::{
     ButtonSize, ButtonVariant, ContextMenu, IconButton, Menu, MenuAlignment, MenuLifecycleEvent,
-    MenuPlacement, MenuPlacementConfig, MenuSize,
+    MenuPlacement, MenuPlacementConfig, MenuSize, WindowDragRegion, WindowDragRegionEvent,
+    WindowDragRegionResponse, WindowDragRegionStatus,
 };
 
 use super::button_theme;
@@ -21,11 +22,16 @@ use super::{
     ActivateWindow1, ActivateWindow2, ActivateWindow3, ActivateWindow4, ActivateWindow5,
     ActivateWindow6, ActivateWindow7, ActivateWindow8, ActivateWindow9, CloseWindow, CreateWindow,
     PaneHost, PaneHostEvent, TERMINAL_KEY_CONTEXT, TOP_CHROME_HEIGHT,
-    WORKSPACE_SIDEBAR_DEFAULT_WIDTH, handle_top_chrome_mouse_down,
+    WORKSPACE_SIDEBAR_DEFAULT_WIDTH,
 };
 use crate::domain::{
     CloseWindowOutcome, PaneId, SplitAxis, WindowCollection, WindowError, WindowId,
     WorkspaceDirectoryIdentity, WorkspaceId, ZoomState,
+};
+#[cfg(test)]
+use crate::platform::macos_window_drag::MacosOperatingSystemWindowDragPlatform;
+use crate::platform::macos_window_drag::{
+    OperatingSystemWindowDragError, OperatingSystemWindowDragPlatform,
 };
 use crate::terminal::{
     NativeServiceOrigin, NativeServiceStatus, SelectionCopy, WorkspaceTerminalSessionFactory,
@@ -94,8 +100,8 @@ pub(crate) struct WindowManager {
     window_menu: Option<WindowMenuState>,
     parent_focus_blocker: Option<TerminalFocusBlocker>,
     window_selector_pressed: Option<WindowId>,
-    top_chrome_interaction: bool,
-    top_chrome_move_requested: bool,
+    operating_system_window_drag_platform: Rc<dyn OperatingSystemWindowDragPlatform>,
+    window_drag_status: WindowDragRegionStatus,
     window_bar_scroll_handle: ScrollHandle,
     close_workspace_requested: bool,
 }
@@ -105,21 +111,29 @@ impl WindowManager {
         eprintln!("failed to {operation} Window: {error}");
     }
 
+    #[cfg(test)]
     pub(crate) fn new(
         session_factory: WorkspaceTerminalSessionFactory,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        Self::new_with_operating_system_window_drag_platform(
+            session_factory,
+            Rc::new(MacosOperatingSystemWindowDragPlatform::default()),
+            window,
+            cx,
+        )
+    }
+
+    pub(crate) fn new_with_operating_system_window_drag_platform(
+        session_factory: WorkspaceTerminalSessionFactory,
+        operating_system_window_drag_platform: Rc<dyn OperatingSystemWindowDragPlatform>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         let windows = WindowCollection::new(|window_id| {
             Self::create_pane_host(window_id, session_factory.clone(), window, cx)
         });
-        cx.observe_window_activation(window, |manager, window, cx| {
-            if !window.is_window_active() {
-                manager.set_top_chrome_interaction(false, cx);
-            }
-        })
-        .detach();
-
         Self {
             windows,
             session_factory,
@@ -129,8 +143,8 @@ impl WindowManager {
             window_menu: None,
             parent_focus_blocker: None,
             window_selector_pressed: None,
-            top_chrome_interaction: false,
-            top_chrome_move_requested: false,
+            operating_system_window_drag_platform,
+            window_drag_status: WindowDragRegionStatus::new(),
             window_bar_scroll_handle: ScrollHandle::new(),
             close_workspace_requested: false,
         }
@@ -267,8 +281,6 @@ impl WindowManager {
             .update(cx, |pane_host, cx| pane_host.deactivate(cx));
         self.window_menu = None;
         self.window_selector_pressed = None;
-        self.top_chrome_interaction = false;
-        self.top_chrome_move_requested = false;
         self.sync_terminal_focus_blocker(cx);
     }
 
@@ -331,7 +343,8 @@ impl WindowManager {
     fn terminal_focus_blocker(&self) -> Option<TerminalFocusBlocker> {
         self.parent_focus_blocker
             .or(self
-                .top_chrome_interaction
+                .window_drag_status
+                .is_active()
                 .then_some(TerminalFocusBlocker::TopChrome))
             .or(self
                 .window_selector_pressed
@@ -353,27 +366,54 @@ impl WindowManager {
         }
     }
 
-    fn set_top_chrome_interaction(&mut self, blocked: bool, cx: &mut Context<Self>) {
-        if self.top_chrome_interaction == blocked {
-            return;
+    fn handle_operating_system_window_drag_event(
+        &mut self,
+        event: WindowDragRegionEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> WindowDragRegionResponse {
+        match event {
+            WindowDragRegionEvent::InteractionStarted { .. } => {
+                if let Err(error) = self
+                    .operating_system_window_drag_platform
+                    .interaction_started()
+                {
+                    Self::report_operating_system_window_drag_error("begin", error);
+                }
+                self.sync_terminal_focus_blocker(cx);
+                WindowDragRegionResponse::Continue
+            }
+            WindowDragRegionEvent::MoveRequested { .. } => {
+                match self
+                    .operating_system_window_drag_platform
+                    .start_window_move(window)
+                {
+                    Ok(()) => WindowDragRegionResponse::OperatingSystemWindowMoveStarted,
+                    Err(error) => {
+                        Self::report_operating_system_window_drag_error("start", error);
+                        WindowDragRegionResponse::Continue
+                    }
+                }
+            }
+            WindowDragRegionEvent::DoubleActivationRequested => {
+                self.operating_system_window_drag_platform
+                    .double_activation_requested(window);
+                WindowDragRegionResponse::Continue
+            }
+            WindowDragRegionEvent::InteractionFinished { .. } => {
+                self.operating_system_window_drag_platform
+                    .interaction_finished();
+                self.sync_terminal_focus_blocker(cx);
+                WindowDragRegionResponse::Continue
+            }
         }
-        self.top_chrome_interaction = blocked;
-        self.top_chrome_move_requested = false;
-        self.sync_terminal_focus_blocker(cx);
-        cx.notify();
     }
 
-    fn continue_top_chrome_interaction(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.top_chrome_interaction || self.top_chrome_move_requested {
-            return;
-        }
-        self.top_chrome_move_requested = true;
-        window.start_window_move();
-        cx.notify();
-    }
-
-    fn finish_top_chrome_interaction(&mut self, cx: &mut Context<Self>) {
-        self.set_top_chrome_interaction(false, cx);
+    fn report_operating_system_window_drag_error(
+        operation: &str,
+        error: OperatingSystemWindowDragError,
+    ) {
+        eprintln!("failed to {operation} Operating-System Window drag: {error}");
     }
 
     fn begin_window_selector(&mut self, window_id: WindowId, cx: &mut Context<Self>) {
@@ -991,8 +1031,7 @@ impl WindowManager {
             .flex()
             .flex_row()
             .overflow_x_scroll()
-            .track_scroll(&self.window_bar_scroll_handle)
-            .occlude();
+            .track_scroll(&self.window_bar_scroll_handle);
         for (window_id, pane_host) in self.windows.iter() {
             items = items.child(self.render_window_item(
                 window_id,
@@ -1003,11 +1042,7 @@ impl WindowManager {
             ));
         }
 
-        let chrome_down_manager = manager.clone();
-        let chrome_event_manager = manager.clone();
-        let chrome_move_manager = manager.clone();
-        let chrome_up_manager = manager.clone();
-        let chrome_out_manager = manager.clone();
+        let drag_manager = manager.clone();
         let create_manager = manager.clone();
         let menu_activation_manager = manager.clone();
         let menu_lifecycle_manager = manager;
@@ -1022,84 +1057,15 @@ impl WindowManager {
                 )
             })
             .unwrap_or((false, false));
-        div()
-            .id("window-bar")
-            .debug_selector(|| "window-bar".to_owned())
+        let content = div()
             .relative()
-            .h(px(WINDOW_BAR_HEIGHT))
+            .size_full()
             .min_w_0()
-            .flex_1()
-            .flex_shrink_0()
             .flex()
             .flex_row()
             .items_center()
             .pr(px(WINDOW_CONTROL_SIZE + WINDOW_CONTROL_INSET * 2.0))
             .bg(gpui_color(ACTIVE_THEME.tab_bar_background))
-            .on_mouse_down(MouseButton::Left, move |event, window, cx| {
-                handle_top_chrome_mouse_down(event, window, cx, |blocked, _, cx| {
-                    let _ = chrome_down_manager.update(cx, |manager, cx| {
-                        manager.set_top_chrome_interaction(blocked, cx);
-                    });
-                });
-            })
-            .on_mouse_move(move |event, window, cx| {
-                if event.dragging() {
-                    let _ = chrome_move_manager.update(cx, |manager, cx| {
-                        manager.continue_top_chrome_interaction(window, cx);
-                    });
-                }
-            })
-            .on_mouse_up_out(MouseButton::Left, move |_, _, cx| {
-                let _ = chrome_up_manager.update(cx, |manager, cx| {
-                    manager.finish_top_chrome_interaction(cx);
-                });
-            })
-            .on_mouse_up(MouseButton::Left, move |_, _, cx| {
-                let _ = chrome_out_manager.update(cx, |manager, cx| {
-                    manager.finish_top_chrome_interaction(cx);
-                });
-            })
-            .child(
-                canvas(
-                    |_, _, _| (),
-                    move |chrome_bounds, _, window, _| {
-                        let down_manager = chrome_event_manager.clone();
-                        window.on_mouse_event(move |event: &MouseDownEvent, phase, _, cx| {
-                            if phase != DispatchPhase::Capture
-                                || event.button != MouseButton::Left
-                                || !chrome_bounds.contains(&event.position)
-                            {
-                                return;
-                            }
-                            let blocked = event.click_count == 1;
-                            let _ = down_manager.update(cx, |manager, cx| {
-                                manager.set_top_chrome_interaction(blocked, cx);
-                            });
-                        });
-
-                        let move_manager = chrome_event_manager.clone();
-                        window.on_mouse_event(move |event: &MouseMoveEvent, phase, window, cx| {
-                            if phase == DispatchPhase::Capture && event.dragging() {
-                                let _ = move_manager.update(cx, |manager, cx| {
-                                    manager.continue_top_chrome_interaction(window, cx);
-                                });
-                            }
-                        });
-
-                        let up_manager = chrome_event_manager.clone();
-                        window.on_mouse_event(move |event: &MouseUpEvent, phase, _, cx| {
-                            if phase == DispatchPhase::Capture && event.button == MouseButton::Left
-                            {
-                                let _ = up_manager.update(cx, |manager, cx| {
-                                    manager.finish_top_chrome_interaction(cx);
-                                });
-                            }
-                        });
-                    },
-                )
-                .absolute()
-                .inset_0(),
-            )
             .child(
                 div()
                     .id("window-bar-divider")
@@ -1170,7 +1136,34 @@ impl WindowManager {
                             });
                         }),
                     ),
-            )
+            );
+
+        let drag_region = WindowDragRegion::new(
+            "window-bar-drag-region",
+            "Move Operating-System Window from Window chrome",
+            content,
+        )
+        .status(self.window_drag_status.clone())
+        .debug_selector("window-bar-drag-region")
+        .on_event(move |event, window, cx| {
+            let event = *event;
+            drag_manager
+                .update(cx, |manager, cx| {
+                    manager.handle_operating_system_window_drag_event(event, window, cx)
+                })
+                .unwrap_or_default()
+        });
+
+        div()
+            .id("window-bar")
+            .debug_selector(|| "window-bar".to_owned())
+            .relative()
+            .h(px(WINDOW_BAR_HEIGHT))
+            .min_w_0()
+            .flex_1()
+            .flex_shrink_0()
+            .bg(gpui_color(ACTIVE_THEME.tab_bar_background))
+            .child(drag_region)
             .into_any_element()
     }
 }
@@ -1179,8 +1172,6 @@ impl Render for WindowManager {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         debug_assert!(self.windows.len() > 0);
         let manager = cx.entity().downgrade();
-        let release_manager = manager.clone();
-        let exit_manager = manager.clone();
         let active_window = self.windows.active_window().clone();
         let window_bar = self.render_window_bar(manager.clone(), cx);
 
@@ -1196,29 +1187,6 @@ impl Render for WindowManager {
             .flex_col()
             .overflow_hidden()
             .bg(gpui_color(ACTIVE_THEME.terminal_background))
-            .capture_any_mouse_up(move |event, _, cx| {
-                if event.button == MouseButton::Left {
-                    let _ = release_manager.update(cx, |manager, cx| {
-                        manager.finish_top_chrome_interaction(cx);
-                    });
-                }
-            })
-            .child(
-                canvas(
-                    |_, _, _| (),
-                    move |_, _, window, _| {
-                        window.on_mouse_event(move |_: &MouseExitEvent, phase, _, cx| {
-                            if phase == DispatchPhase::Bubble {
-                                let _ = exit_manager.update(cx, |manager, cx| {
-                                    manager.finish_top_chrome_interaction(cx);
-                                });
-                            }
-                        });
-                    },
-                )
-                .absolute()
-                .inset_0(),
-            )
             .on_action(cx.listener(Self::on_create_window))
             .on_action(cx.listener(Self::on_activate_window_1))
             .on_action(cx.listener(Self::on_activate_window_2))
@@ -1276,12 +1244,13 @@ mod tests {
     use std::sync::Arc;
 
     use gpui::{
-        Modifiers, ScrollDelta, ScrollWheelEvent, TestAppContext, TouchPhase, VisualTestContext,
-        point,
+        Modifiers, MouseDownEvent, MouseExitEvent, MouseUpEvent, ScrollDelta, ScrollWheelEvent,
+        TestAppContext, TouchPhase, VisualTestContext, point,
     };
 
     use super::*;
     use crate::domain::PaneId;
+    use crate::platform::macos_window_drag::RecordingOperatingSystemWindowDragPlatform;
     use crate::terminal::testing::{
         RecordedSessionCommand, TestTerminalSessionFactory, TestTerminalSessionRecords,
     };
@@ -1310,6 +1279,39 @@ mod tests {
         });
         cx.run_until_parked();
         (manager, records, cx)
+    }
+
+    fn window_manager_with_operating_system_window_drag_platform(
+        cx: &mut TestAppContext,
+    ) -> (
+        Entity<WindowManager>,
+        Rc<RecordingOperatingSystemWindowDragPlatform>,
+        &mut VisualTestContext,
+    ) {
+        cx.update(crate::ui::init);
+        let records = TestTerminalSessionRecords::default();
+        let session_factory: Rc<dyn TerminalSessionFactory> =
+            Rc::new(TestTerminalSessionFactory::new(records));
+        let session_factory = WorkspaceTerminalSessionFactory::new(
+            session_factory,
+            PathBuf::from("/tmp/spaceterm-window-manager-drag-test"),
+        );
+        let platform = Rc::new(RecordingOperatingSystemWindowDragPlatform::default());
+        let injected_platform = Rc::clone(&platform);
+        let (manager, cx) = cx.add_window_view(move |window, cx| {
+            WindowManager::new_with_operating_system_window_drag_platform(
+                session_factory,
+                injected_platform,
+                window,
+                cx,
+            )
+        });
+        cx.update(|window, cx| {
+            window.activate_window();
+            manager.update(cx, |manager, cx| manager.focus(window, cx));
+        });
+        cx.run_until_parked();
+        (manager, platform, cx)
     }
 
     fn click(selector: &'static str, cx: &mut VisualTestContext) {
@@ -1881,6 +1883,30 @@ mod tests {
     }
 
     #[gpui::test]
+    fn window_menu_outside_press_should_preempt_the_background_drag_region(
+        cx: &mut TestAppContext,
+    ) {
+        let (manager, _records, cx) = window_manager(cx);
+        click("window-menu-button", cx);
+        let chrome = cx
+            .debug_bounds("window-bar")
+            .expect("Window chrome was not rendered")
+            .center();
+
+        cx.simulate_click(chrome, Modifiers::none());
+        cx.run_until_parked();
+
+        let state = manager.read_with(cx, |manager, _| {
+            (
+                manager.window_menu,
+                manager.window_drag_status.is_active(),
+                manager.terminal_focus_blocker(),
+            )
+        });
+        assert_eq!(state, (None, false, None));
+    }
+
+    #[gpui::test]
     fn window_menu_should_restore_its_trigger_without_changing_the_focused_pane(
         cx: &mut TestAppContext,
     ) {
@@ -1935,6 +1961,51 @@ mod tests {
     }
 
     #[gpui::test]
+    fn window_chrome_should_forward_threshold_crossing_and_double_activation_to_platform_policy(
+        cx: &mut TestAppContext,
+    ) {
+        let (_manager, platform, cx) =
+            window_manager_with_operating_system_window_drag_platform(cx);
+        let chrome = cx
+            .debug_bounds("window-bar-drag-region")
+            .expect("Window drag region must be rendered")
+            .center();
+
+        cx.simulate_mouse_down(chrome, MouseButton::Left, Modifiers::none());
+        cx.simulate_mouse_move(
+            point(chrome.x + px(2.0), chrome.y),
+            MouseButton::Left,
+            Modifiers::none(),
+        );
+        cx.simulate_mouse_move(
+            point(chrome.x + px(8.0), chrome.y),
+            MouseButton::Left,
+            Modifiers::none(),
+        );
+        cx.simulate_mouse_move(
+            point(chrome.x + px(16.0), chrome.y),
+            MouseButton::Left,
+            Modifiers::none(),
+        );
+        cx.simulate_mouse_up(chrome, MouseButton::Left, Modifiers::none());
+        cx.simulate_event(MouseDownEvent {
+            button: MouseButton::Left,
+            position: chrome,
+            modifiers: Modifiers::none(),
+            click_count: 2,
+            first_mouse: false,
+        });
+        cx.simulate_event(MouseUpEvent {
+            button: MouseButton::Left,
+            position: chrome,
+            modifiers: Modifiers::none(),
+            click_count: 2,
+        });
+
+        assert_eq!(platform.counts(), (1, 1, 1, 1));
+    }
+
+    #[gpui::test]
     fn top_chrome_mouse_down_should_block_until_release_without_changing_focused_pane(
         cx: &mut TestAppContext,
     ) {
@@ -1960,9 +2031,24 @@ mod tests {
         });
         assert_eq!(blocked, (focused_pane_id, true, false));
 
+        let services_blocked = cx.update(|window, cx| {
+            manager.update(cx, |manager, cx| {
+                manager.native_service_status(WorkspaceId::new(1), window, cx)
+            })
+        });
+        manager.update(cx, |_, cx| cx.notify());
+        cx.run_until_parked();
+        let rerender_blocked = cx.update(|window, cx| {
+            !manager
+                .read(cx)
+                .focused_terminal_has_input_focus(window, cx)
+        });
+        assert!(!services_blocked.capabilities.return_text);
+        assert!(rerender_blocked);
+
         cx.simulate_mouse_move(chrome, None, Modifiers::none());
         cx.run_until_parked();
-        assert!(!cx.update(|window, cx| {
+        assert!(cx.update(|window, cx| {
             manager
                 .read(cx)
                 .focused_terminal_has_input_focus(window, cx)

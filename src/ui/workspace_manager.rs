@@ -5,15 +5,16 @@ use std::rc::Rc;
 use gpui::prelude::*;
 use gpui::{
     Action, AnyElement, App, Context, DispatchPhase, Entity, EntityId, FocusHandle, MouseButton,
-    MouseExitEvent, MouseMoveEvent, MouseUpEvent, Pixels, PromptButton, PromptLevel, Render,
-    ScrollHandle, ScrollWheelEvent, SharedString, WeakEntity, Window, canvas, div, point, px, rgba,
+    MouseMoveEvent, MouseUpEvent, Pixels, PromptButton, PromptLevel, Render, ScrollHandle,
+    ScrollWheelEvent, SharedString, WeakEntity, Window, canvas, div, point, px, rgba,
 };
 use gpui_symbols::{Icon, RenderingMode, SymbolWeight};
 use spaceterm_ui::{
     Button, ButtonShape, ButtonSize, ButtonVariant, ContextMenu, IconButton, MenuEntry,
     MenuLifecycleEvent, MenuSize, MiddleTruncatedText, OverlayScrollbar, OverlayScrollbarEvent,
     ResizeAxis, ResizeFinishReason, ResizeHandle, ResizeHandleEvent, ResizeInputSource,
-    ScrollMetrics, TextInput, TextInputEvent, TextInputVariant,
+    ScrollMetrics, TextInput, TextInputEvent, TextInputVariant, WindowDragRegion,
+    WindowDragRegionEvent, WindowDragRegionResponse, WindowDragRegionStatus,
 };
 
 use super::button_theme;
@@ -29,7 +30,7 @@ use super::{
     OpenLocalProject, OpenTerminalFind, SearchWorkspaces, SplitDown, SplitRight,
     TERMINAL_KEY_CONTEXT, TOP_CHROME_HEIGHT, TogglePaneZoom, ToggleSidebar, ToggleSidebarFocus,
     WORKSPACE_SIDEBAR_DEFAULT_WIDTH, WORKSPACE_SIDEBAR_MINIMUM_WIDTH, WindowManager,
-    WindowManagerEvent, handle_top_chrome_mouse_down,
+    WindowManagerEvent,
 };
 use crate::domain::{
     CloseWorkspaceOutcome, DirectoryAuthority, FinalWindowCloseOutcome,
@@ -37,6 +38,10 @@ use crate::domain::{
     WorkspaceDirectoryIdentity, WorkspaceError, WorkspaceId, WorkspaceKind,
 };
 use crate::platform::local_project_picker::{LocalProjectPicker, NativeLocalProjectPicker};
+use crate::platform::macos_window_drag::{
+    MacosOperatingSystemWindowDragPlatform, OperatingSystemWindowDragError,
+    OperatingSystemWindowDragPlatform,
+};
 use crate::platform::workspace_directory::validate_workspace_directory;
 use crate::terminal::{
     NativeServiceOrigin, NativeServiceStatus, SelectionCopy, TerminalSessionFactory,
@@ -128,8 +133,8 @@ pub(crate) struct WorkspaceManager {
     rename: Option<WorkspaceRenameState>,
     sidebar_resize_interaction: bool,
     suppress_sidebar_pointer_until_release: bool,
-    top_chrome_interaction: bool,
-    top_chrome_move_requested: bool,
+    operating_system_window_drag_platform: Rc<dyn OperatingSystemWindowDragPlatform>,
+    window_drag_status: WindowDragRegionStatus,
     pending_final_window_closes: BTreeSet<WorkspaceId>,
 }
 
@@ -140,15 +145,17 @@ impl WorkspaceManager {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        Self::new_with_local_project_picker(
+        Self::new_with_adapters(
             session_factory,
             default_workspace_root,
             Rc::new(NativeLocalProjectPicker),
+            Rc::new(MacosOperatingSystemWindowDragPlatform::default()),
             window,
             cx,
         )
     }
 
+    #[cfg(test)]
     fn new_with_local_project_picker(
         session_factory: Rc<dyn TerminalSessionFactory>,
         default_workspace_root: PathBuf,
@@ -156,10 +163,47 @@ impl WorkspaceManager {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        Self::new_with_adapters(
+            session_factory,
+            default_workspace_root,
+            local_project_picker,
+            Rc::new(MacosOperatingSystemWindowDragPlatform::default()),
+            window,
+            cx,
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new_with_operating_system_window_drag_platform(
+        session_factory: Rc<dyn TerminalSessionFactory>,
+        default_workspace_root: PathBuf,
+        operating_system_window_drag_platform: Rc<dyn OperatingSystemWindowDragPlatform>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        Self::new_with_adapters(
+            session_factory,
+            default_workspace_root,
+            Rc::new(NativeLocalProjectPicker),
+            operating_system_window_drag_platform,
+            window,
+            cx,
+        )
+    }
+
+    fn new_with_adapters(
+        session_factory: Rc<dyn TerminalSessionFactory>,
+        default_workspace_root: PathBuf,
+        local_project_picker: Rc<dyn LocalProjectPicker>,
+        operating_system_window_drag_platform: Rc<dyn OperatingSystemWindowDragPlatform>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let (default_directory, initial_directory_error) =
             initial_workspace_directory(default_workspace_root.clone());
         let default_workspace_identity = default_directory.identity();
         let initial_workspace_identity = default_directory.identity();
+        let initial_window_drag_platform = Rc::clone(&operating_system_window_drag_platform);
         let mut workspaces = WorkspaceCollection::new_ad_hoc(
             default_directory,
             DirectoryAuthority::initial(),
@@ -173,6 +217,7 @@ impl WorkspaceManager {
                     .with_directory_identity(initial_workspace_identity),
                     true,
                     px(WORKSPACE_SIDEBAR_DEFAULT_WIDTH),
+                    Rc::clone(&initial_window_drag_platform),
                     window,
                     cx,
                 )
@@ -199,12 +244,6 @@ impl WorkspaceManager {
                 }
             },
         )
-        .detach();
-        cx.observe_window_activation(window, |manager, window, cx| {
-            if !window.is_window_active() {
-                manager.set_top_chrome_interaction(false, window, cx);
-            }
-        })
         .detach();
         let workspace_search = cx.new(|cx| WorkspaceSearch::new(window, cx));
         cx.subscribe_in(
@@ -233,8 +272,8 @@ impl WorkspaceManager {
             rename: None,
             sidebar_resize_interaction: false,
             suppress_sidebar_pointer_until_release: false,
-            top_chrome_interaction: false,
-            top_chrome_move_requested: false,
+            operating_system_window_drag_platform,
+            window_drag_status: WindowDragRegionStatus::new(),
             pending_final_window_closes: BTreeSet::new(),
         }
     }
@@ -244,11 +283,17 @@ impl WorkspaceManager {
         session_factory: WorkspaceTerminalSessionFactory,
         sidebar_visible: bool,
         sidebar_width: Pixels,
+        operating_system_window_drag_platform: Rc<dyn OperatingSystemWindowDragPlatform>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Entity<WindowManager> {
         let manager = cx.new(|cx| {
-            let mut manager = WindowManager::new(session_factory, window, cx);
+            let mut manager = WindowManager::new_with_operating_system_window_drag_platform(
+                session_factory,
+                operating_system_window_drag_platform,
+                window,
+                cx,
+            );
             manager.set_sidebar_layout(sidebar_visible, sidebar_width, cx);
             manager
         });
@@ -539,22 +584,23 @@ impl WorkspaceManager {
                 .blocks_terminal_input()
                 .then_some(TerminalFocusBlocker::CommandPalette))
             .or(self
-                .top_chrome_interaction
-                .then_some(TerminalFocusBlocker::TopChrome)
-                .or(self
-                    .sidebar_resize_interaction
-                    .then_some(TerminalFocusBlocker::SidebarResize))
-                .or(self
-                    .rename
-                    .as_ref()
-                    .map(|_| TerminalFocusBlocker::RenameField))
-                .or(self
-                    .workspace_menu
-                    .map(|_| TerminalFocusBlocker::ContextMenu))
-                .or(self
-                    .sidebar_focus
-                    .is_focused(window)
-                    .then_some(TerminalFocusBlocker::Sidebar)))
+                .window_drag_status
+                .is_active()
+                .then_some(TerminalFocusBlocker::TopChrome))
+            .or(self
+                .sidebar_resize_interaction
+                .then_some(TerminalFocusBlocker::SidebarResize))
+            .or(self
+                .rename
+                .as_ref()
+                .map(|_| TerminalFocusBlocker::RenameField))
+            .or(self
+                .workspace_menu
+                .map(|_| TerminalFocusBlocker::ContextMenu))
+            .or(self
+                .sidebar_focus
+                .is_focused(window)
+                .then_some(TerminalFocusBlocker::Sidebar))
     }
 
     fn workspace_search_items(&self, cx: &App) -> Vec<WorkspaceSearchItem> {
@@ -636,28 +682,54 @@ impl WorkspaceManager {
             });
     }
 
-    fn set_top_chrome_interaction(
+    fn handle_operating_system_window_drag_event(
         &mut self,
-        blocked: bool,
-        window: &Window,
+        event: WindowDragRegionEvent,
+        window: &mut Window,
         cx: &mut Context<Self>,
-    ) {
-        if self.top_chrome_interaction == blocked {
-            return;
+    ) -> WindowDragRegionResponse {
+        match event {
+            WindowDragRegionEvent::InteractionStarted { .. } => {
+                if let Err(error) = self
+                    .operating_system_window_drag_platform
+                    .interaction_started()
+                {
+                    Self::report_operating_system_window_drag_error("begin", error);
+                }
+                self.sync_terminal_focus_blocker(window, cx);
+                WindowDragRegionResponse::Continue
+            }
+            WindowDragRegionEvent::MoveRequested { .. } => {
+                match self
+                    .operating_system_window_drag_platform
+                    .start_window_move(window)
+                {
+                    Ok(()) => WindowDragRegionResponse::OperatingSystemWindowMoveStarted,
+                    Err(error) => {
+                        Self::report_operating_system_window_drag_error("start", error);
+                        WindowDragRegionResponse::Continue
+                    }
+                }
+            }
+            WindowDragRegionEvent::DoubleActivationRequested => {
+                self.operating_system_window_drag_platform
+                    .double_activation_requested(window);
+                WindowDragRegionResponse::Continue
+            }
+            WindowDragRegionEvent::InteractionFinished { .. } => {
+                self.operating_system_window_drag_platform
+                    .interaction_finished();
+                self.sync_terminal_focus_blocker(window, cx);
+                WindowDragRegionResponse::Continue
+            }
         }
-        self.top_chrome_interaction = blocked;
-        self.top_chrome_move_requested = false;
-        self.sync_terminal_focus_blocker(window, cx);
-        cx.notify();
     }
 
-    fn continue_top_chrome_interaction(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.top_chrome_interaction || self.top_chrome_move_requested {
-            return;
-        }
-        self.top_chrome_move_requested = true;
-        window.start_window_move();
-        cx.notify();
+    fn report_operating_system_window_drag_error(
+        operation: &str,
+        error: OperatingSystemWindowDragError,
+    ) {
+        eprintln!("failed to {operation} Operating-System Window drag: {error}");
     }
 
     fn set_sidebar_layout(&mut self, visible: bool, width: Pixels, cx: &mut Context<Self>) {
@@ -793,6 +865,7 @@ impl WorkspaceManager {
     fn create_workspace(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let previous_manager = self.workspaces.active_workspace().payload().clone();
         let session_factory = Rc::clone(&self.session_factory);
+        let window_drag_platform = Rc::clone(&self.operating_system_window_drag_platform);
         let sidebar_visible = self.sidebar_visible;
         let sidebar_width = self.sidebar_width;
         let (directory, unavailable_reason) = self.default_workspace_directory();
@@ -810,6 +883,7 @@ impl WorkspaceManager {
                     .with_directory_identity(directory_identity),
                     sidebar_visible,
                     sidebar_width,
+                    window_drag_platform,
                     window,
                     cx,
                 )
@@ -912,6 +986,7 @@ impl WorkspaceManager {
 
         let previous_manager = self.workspaces.active_workspace().payload().clone();
         let session_factory = Rc::clone(&self.session_factory);
+        let window_drag_platform = Rc::clone(&self.operating_system_window_drag_platform);
         let sidebar_visible = self.sidebar_visible;
         let sidebar_width = self.sidebar_width;
         let project_root_identity = directory.identity();
@@ -927,6 +1002,7 @@ impl WorkspaceManager {
                     .with_directory_identity(project_root_identity),
                     sidebar_visible,
                     sidebar_width,
+                    window_drag_platform,
                     window,
                     cx,
                 )
@@ -1078,6 +1154,7 @@ impl WorkspaceManager {
     ) {
         let was_active = self.workspaces.active_workspace_id() == workspace_id;
         let session_factory = Rc::clone(&self.session_factory);
+        let window_drag_platform = Rc::clone(&self.operating_system_window_drag_platform);
         let sidebar_visible = self.sidebar_visible;
         let sidebar_width = self.sidebar_width;
         let (replacement, unavailable_reason) = self.default_workspace_directory();
@@ -1096,6 +1173,7 @@ impl WorkspaceManager {
                     .with_directory_identity(replacement_identity),
                     sidebar_visible,
                     sidebar_width,
+                    window_drag_platform,
                     window,
                     cx,
                 )
@@ -1582,53 +1660,11 @@ impl WorkspaceManager {
     }
 
     fn render_top_left_chrome(&self, manager: WeakEntity<Self>) -> AnyElement {
-        let chrome_down_manager = manager.clone();
-        let chrome_capture_manager = manager.clone();
-        let chrome_move_manager = manager.clone();
-        let chrome_up_manager = manager.clone();
-        let chrome_out_manager = manager.clone();
+        let drag_manager = manager.clone();
         let toggle_manager = manager;
-        div()
-            .id("workspace-top-chrome")
-            .debug_selector(|| "workspace-top-chrome".to_owned())
-            .absolute()
-            .top_0()
-            .left_0()
-            .w(self.sidebar_width)
-            .h(px(TOP_CHROME_HEIGHT))
-            .bg(gpui_color(ACTIVE_THEME.tab_bar_background))
-            .occlude()
-            .capture_any_mouse_down(move |event, window, cx| {
-                if event.button == MouseButton::Left && event.click_count == 1 {
-                    let _ = chrome_capture_manager.update(cx, |manager, cx| {
-                        manager.set_top_chrome_interaction(true, window, cx);
-                    });
-                }
-            })
-            .on_mouse_down(MouseButton::Left, move |event, window, cx| {
-                handle_top_chrome_mouse_down(event, window, cx, |blocked, window, cx| {
-                    let _ = chrome_down_manager.update(cx, |manager, cx| {
-                        manager.set_top_chrome_interaction(blocked, window, cx);
-                    });
-                });
-            })
-            .on_mouse_move(move |event, window, cx| {
-                if event.dragging() {
-                    let _ = chrome_move_manager.update(cx, |manager, cx| {
-                        manager.continue_top_chrome_interaction(window, cx);
-                    });
-                }
-            })
-            .on_mouse_up_out(MouseButton::Left, move |_, window, cx| {
-                let _ = chrome_up_manager.update(cx, |manager, cx| {
-                    manager.set_top_chrome_interaction(false, window, cx);
-                });
-            })
-            .on_mouse_up(MouseButton::Left, move |_, window, cx| {
-                let _ = chrome_out_manager.update(cx, |manager, cx| {
-                    manager.set_top_chrome_interaction(false, window, cx);
-                });
-            })
+        let content = div()
+            .relative()
+            .size_full()
             .child(
                 div()
                     .id("workspace-top-chrome-bottom-divider")
@@ -1662,7 +1698,34 @@ impl WorkspaceManager {
                             });
                         }),
                     ),
-            )
+            );
+        let drag_region = WindowDragRegion::new(
+            "workspace-top-chrome-drag-region",
+            "Move Operating-System Window from Workspace chrome",
+            content,
+        )
+        .status(self.window_drag_status.clone())
+        .debug_selector("workspace-top-chrome-drag-region")
+        .on_event(move |event, window, cx| {
+            let event = *event;
+            drag_manager
+                .update(cx, |manager, cx| {
+                    manager.handle_operating_system_window_drag_event(event, window, cx)
+                })
+                .unwrap_or_default()
+        });
+
+        div()
+            .id("workspace-top-chrome")
+            .debug_selector(|| "workspace-top-chrome".to_owned())
+            .absolute()
+            .top_0()
+            .left_0()
+            .w(self.sidebar_width)
+            .h(px(TOP_CHROME_HEIGHT))
+            .bg(gpui_color(ACTIVE_THEME.tab_bar_background))
+            .occlude()
+            .child(drag_region)
             .into_any_element()
     }
 
@@ -2136,8 +2199,6 @@ impl Render for WorkspaceManager {
         debug_assert!(self.workspaces.len() > 0);
         self.sync_terminal_focus_blocker(window, cx);
         let manager = cx.entity().downgrade();
-        let release_manager = manager.clone();
-        let exit_manager = manager.clone();
         let suppressed_move_manager = manager.clone();
         let suppressed_up_manager = manager.clone();
         let active_window_manager = self.workspaces.active_workspace().payload().clone();
@@ -2154,13 +2215,6 @@ impl Render for WorkspaceManager {
             .min_h_0()
             .overflow_hidden()
             .bg(gpui_color(ACTIVE_THEME.terminal_background))
-            .capture_any_mouse_up(move |event, window, cx| {
-                if event.button == MouseButton::Left {
-                    let _ = release_manager.update(cx, |manager, cx| {
-                        manager.set_top_chrome_interaction(false, window, cx);
-                    });
-                }
-            })
             .child(
                 canvas(
                     |_, _, _| (),
@@ -2204,13 +2258,6 @@ impl Render for WorkspaceManager {
                             if suppressed {
                                 window.prevent_default();
                                 cx.stop_propagation();
-                            }
-                        });
-                        window.on_mouse_event(move |_: &MouseExitEvent, phase, window, cx| {
-                            if phase == DispatchPhase::Bubble {
-                                let _ = exit_manager.update(cx, |manager, cx| {
-                                    manager.set_top_chrome_interaction(false, window, cx);
-                                });
                             }
                         });
                     },
@@ -2353,12 +2400,13 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use gpui::{
-        Modifiers, ScrollDelta, ScrollWheelEvent, TestAppContext, TouchPhase, VisualTestContext,
-        point,
+        Modifiers, MouseDownEvent, MouseUpEvent, ScrollDelta, ScrollWheelEvent, TestAppContext,
+        TouchPhase, VisualTestContext, point,
     };
 
     use super::*;
     use crate::platform::local_project_picker::ScriptedLocalProjectPicker;
+    use crate::platform::macos_window_drag::RecordingOperatingSystemWindowDragPlatform;
     use crate::terminal::testing::{
         RecordedSessionCommand, TestTerminalSessionFactory, TestTerminalSessionRecords,
     };
@@ -2383,6 +2431,35 @@ mod tests {
         });
         cx.run_until_parked();
         (manager, records, cx)
+    }
+
+    fn workspace_manager_with_operating_system_window_drag_platform(
+        cx: &mut TestAppContext,
+    ) -> (
+        Entity<WorkspaceManager>,
+        Rc<RecordingOperatingSystemWindowDragPlatform>,
+        &mut VisualTestContext,
+    ) {
+        cx.update(crate::ui::init);
+        let records = TestTerminalSessionRecords::default();
+        let session_factory: Rc<dyn TerminalSessionFactory> =
+            Rc::new(TestTerminalSessionFactory::new(records).with_fallback_title("zsh"));
+        let platform = Rc::new(RecordingOperatingSystemWindowDragPlatform::default());
+        let injected_platform = Rc::clone(&platform);
+        let (manager, cx) = cx.add_window_view(move |window, cx| {
+            WorkspaceManager::new_with_operating_system_window_drag_platform(
+                session_factory,
+                PathBuf::from("/Users/test"),
+                injected_platform,
+                window,
+                cx,
+            )
+        });
+        cx.update(|window, cx| {
+            manager.update(cx, |manager, cx| manager.focus(window, cx));
+        });
+        cx.run_until_parked();
+        (manager, platform, cx)
     }
 
     fn workspace_manager_with_picker(
@@ -2805,10 +2882,55 @@ mod tests {
     }
 
     #[gpui::test]
+    fn workspace_chrome_should_forward_threshold_crossing_and_double_activation_to_platform_policy(
+        cx: &mut TestAppContext,
+    ) {
+        let (_manager, platform, cx) =
+            workspace_manager_with_operating_system_window_drag_platform(cx);
+        let chrome = cx
+            .debug_bounds("workspace-top-chrome-drag-region")
+            .expect("Workspace drag region must be rendered")
+            .center();
+
+        cx.simulate_mouse_down(chrome, MouseButton::Left, Modifiers::none());
+        cx.simulate_mouse_move(
+            point(chrome.x + px(2.0), chrome.y),
+            MouseButton::Left,
+            Modifiers::none(),
+        );
+        cx.simulate_mouse_move(
+            point(chrome.x + px(8.0), chrome.y),
+            MouseButton::Left,
+            Modifiers::none(),
+        );
+        cx.simulate_mouse_move(
+            point(chrome.x + px(16.0), chrome.y),
+            MouseButton::Left,
+            Modifiers::none(),
+        );
+        cx.simulate_mouse_up(chrome, MouseButton::Left, Modifiers::none());
+        cx.simulate_event(MouseDownEvent {
+            button: MouseButton::Left,
+            position: chrome,
+            modifiers: Modifiers::none(),
+            click_count: 2,
+            first_mouse: false,
+        });
+        cx.simulate_event(MouseUpEvent {
+            button: MouseButton::Left,
+            position: chrome,
+            modifiers: Modifiers::none(),
+            click_count: 2,
+        });
+
+        assert_eq!(platform.counts(), (1, 1, 1, 1));
+    }
+
+    #[gpui::test]
     fn workspace_top_chrome_should_restore_after_release_outside_its_hitbox(
         cx: &mut TestAppContext,
     ) {
-        let (_manager, records, cx) = workspace_manager(cx);
+        let (manager, records, cx) = workspace_manager(cx);
         cx.update(|window, _| window.activate_window());
         cx.run_until_parked();
         let command_count = records.commands().len();
@@ -2822,6 +2944,22 @@ mod tests {
             .center();
 
         cx.simulate_mouse_down(chrome, MouseButton::Left, Modifiers::none());
+        let services_blocked = cx.update(|window, cx| {
+            manager.update(cx, |manager, cx| manager.native_service_status(window, cx))
+        });
+        manager.update(cx, |_, cx| cx.notify());
+        cx.run_until_parked();
+        assert!(!services_blocked.capabilities.return_text);
+        assert!(cx.update(|window, cx| {
+            !manager
+                .read(cx)
+                .workspaces
+                .active_workspace()
+                .payload()
+                .read(cx)
+                .focused_terminal_has_input_focus(window, cx)
+        }));
+
         cx.simulate_mouse_up(outside, MouseButton::Left, Modifiers::none());
         cx.run_until_parked();
 

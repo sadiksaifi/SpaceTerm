@@ -40,6 +40,9 @@ pub(crate) mod macos_scroll;
 pub(crate) mod macos_services;
 
 #[cfg(target_os = "macos")]
+pub(crate) mod macos_window_drag;
+
+#[cfg(target_os = "macos")]
 pub(crate) mod shell_integration;
 
 #[cfg(not(target_os = "macos"))]

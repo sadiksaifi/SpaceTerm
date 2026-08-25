@@ -10,6 +10,7 @@ mod middle_truncated_text;
 mod overlay_scrollbar;
 mod resize_handle;
 mod text_input;
+mod window_drag_region;
 
 use gpui::App;
 
@@ -45,6 +46,10 @@ pub use text_input::{
     TextInputEvent, TextInputKeybindingProfile, TextInputMetrics, TextInputPaint,
     TextInputSelection, TextInputTabBehavior, TextInputTheme, TextInputValueChanged,
     TextInputVariant, TextInputVariants, Undo as EditUndo, install_text_input_keybindings,
+};
+pub use window_drag_region::{
+    WindowDragFinishReason, WindowDragInteractionId, WindowDragRegion, WindowDragRegionEvent,
+    WindowDragRegionResponse, WindowDragRegionStatus,
 };
 
 /// Installs shared control themes and platform-neutral control behavior.
