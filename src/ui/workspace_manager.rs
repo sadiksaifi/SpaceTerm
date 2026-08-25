@@ -5,15 +5,15 @@ use std::rc::Rc;
 use gpui::prelude::*;
 use gpui::{
     Action, AnyElement, App, Context, DispatchPhase, Entity, EntityId, FocusHandle, MouseButton,
-    MouseExitEvent, Pixels, PromptButton, PromptLevel, Render, ScrollHandle, ScrollWheelEvent,
-    SharedString, WeakEntity, Window, canvas, div, point, px, rgba,
+    MouseExitEvent, MouseMoveEvent, MouseUpEvent, Pixels, PromptButton, PromptLevel, Render,
+    ScrollHandle, ScrollWheelEvent, SharedString, WeakEntity, Window, canvas, div, point, px, rgba,
 };
 use gpui_symbols::{Icon, RenderingMode, SymbolWeight};
 use spaceterm_ui::{
     Button, ButtonShape, ButtonSize, ButtonVariant, ContextMenu, IconButton, MenuEntry,
     MenuLifecycleEvent, MenuSize, MiddleTruncatedText, OverlayScrollbar, OverlayScrollbarEvent,
-    ResizeAxis, ResizeHandle, ResizeHandleEvent, ResizeInputSource, ScrollMetrics, TextInput,
-    TextInputEvent, TextInputVariant,
+    ResizeAxis, ResizeFinishReason, ResizeHandle, ResizeHandleEvent, ResizeInputSource,
+    ScrollMetrics, TextInput, TextInputEvent, TextInputVariant,
 };
 
 use super::button_theme;
@@ -127,6 +127,7 @@ pub(crate) struct WorkspaceManager {
     workspace_menu: Option<WorkspaceMenuState>,
     rename: Option<WorkspaceRenameState>,
     sidebar_resize_interaction: bool,
+    suppress_sidebar_pointer_until_release: bool,
     top_chrome_interaction: bool,
     top_chrome_move_requested: bool,
     pending_final_window_closes: BTreeSet<WorkspaceId>,
@@ -231,6 +232,7 @@ impl WorkspaceManager {
             workspace_menu: None,
             rename: None,
             sidebar_resize_interaction: false,
+            suppress_sidebar_pointer_until_release: false,
             top_chrome_interaction: false,
             top_chrome_move_requested: false,
             pending_final_window_closes: BTreeSet::new(),
@@ -712,8 +714,11 @@ impl WorkspaceManager {
         cx: &mut Context<Self>,
     ) {
         match event {
-            ResizeHandleEvent::InteractionStarted { .. } => {
+            ResizeHandleEvent::InteractionStarted { source, .. } => {
                 self.sidebar_resize_interaction = true;
+                if source == ResizeInputSource::Pointer {
+                    self.suppress_sidebar_pointer_until_release = false;
+                }
                 self.sync_terminal_focus_blocker(window, cx);
                 cx.notify();
             }
@@ -726,7 +731,13 @@ impl WorkspaceManager {
                     self.focus(window, cx);
                 }
             }
-            ResizeHandleEvent::InteractionFinished { source, .. } => {
+            ResizeHandleEvent::InteractionFinished { source, reason, .. } => {
+                if source == ResizeInputSource::Pointer {
+                    self.suppress_sidebar_pointer_until_release = !matches!(
+                        reason,
+                        ResizeFinishReason::Completed | ResizeFinishReason::PointerButtonLost
+                    );
+                }
                 if !self.sidebar_resize_interaction {
                     return;
                 }
@@ -2127,6 +2138,8 @@ impl Render for WorkspaceManager {
         let manager = cx.entity().downgrade();
         let release_manager = manager.clone();
         let exit_manager = manager.clone();
+        let suppressed_move_manager = manager.clone();
+        let suppressed_up_manager = manager.clone();
         let active_window_manager = self.workspaces.active_workspace().payload().clone();
         if self.sidebar_visible {
             self.sync_scrollbar(cx);
@@ -2152,6 +2165,47 @@ impl Render for WorkspaceManager {
                 canvas(
                     |_, _, _| (),
                     move |_, _, window, _| {
+                        window.on_mouse_event(move |event: &MouseMoveEvent, phase, window, cx| {
+                            if phase != DispatchPhase::Capture {
+                                return;
+                            }
+                            let suppressed = suppressed_move_manager
+                                .update(cx, |manager, cx| {
+                                    if !manager.suppress_sidebar_pointer_until_release {
+                                        return false;
+                                    }
+                                    if event.pressed_button != Some(MouseButton::Left) {
+                                        manager.suppress_sidebar_pointer_until_release = false;
+                                        cx.notify();
+                                    }
+                                    true
+                                })
+                                .unwrap_or(false);
+                            if suppressed {
+                                window.prevent_default();
+                                cx.stop_propagation();
+                            }
+                        });
+                        window.on_mouse_event(move |event: &MouseUpEvent, phase, window, cx| {
+                            if phase != DispatchPhase::Capture || event.button != MouseButton::Left
+                            {
+                                return;
+                            }
+                            let suppressed = suppressed_up_manager
+                                .update(cx, |manager, cx| {
+                                    if !manager.suppress_sidebar_pointer_until_release {
+                                        return false;
+                                    }
+                                    manager.suppress_sidebar_pointer_until_release = false;
+                                    cx.notify();
+                                    true
+                                })
+                                .unwrap_or(false);
+                            if suppressed {
+                                window.prevent_default();
+                                cx.stop_propagation();
+                            }
+                        });
                         window.on_mouse_event(move |_: &MouseExitEvent, phase, window, cx| {
                             if phase == DispatchPhase::Bubble {
                                 let _ = exit_manager.update(cx, |manager, cx| {
@@ -3060,6 +3114,49 @@ mod tests {
                 root.origin.x + px(WORKSPACE_SIDEBAR_MINIMUM_WIDTH),
             )
         );
+    }
+
+    #[gpui::test]
+    fn collapsed_sidebar_resize_should_not_leak_held_pointer_events_to_terminal_session(
+        cx: &mut TestAppContext,
+    ) {
+        let (manager, records, cx) = workspace_manager(cx);
+        let root = cx
+            .debug_bounds("workspace-manager")
+            .expect("the Workspace manager was rendered");
+        let handle = cx
+            .debug_bounds("workspace-sidebar-resize-handle-hitbox")
+            .expect("the sidebar resize handle was rendered");
+        let start = handle.center();
+        let collapse = point(
+            root.origin.x + px(WORKSPACE_SIDEBAR_MINIMUM_WIDTH - 20.0),
+            start.y,
+        );
+
+        cx.simulate_mouse_down(start, MouseButton::Left, Modifiers::none());
+        cx.simulate_mouse_move(
+            point(start.x - px(12.0), start.y),
+            MouseButton::Left,
+            Modifiers::none(),
+        );
+        cx.simulate_mouse_move(collapse, MouseButton::Left, Modifiers::none());
+        cx.run_until_parked();
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        let sidebar_visible = manager.read_with(cx, |manager, _| manager.sidebar_visible);
+        assert!(
+            !sidebar_visible,
+            "the sidebar resize did not collapse the body"
+        );
+        let terminal = cx
+            .debug_bounds("window-manager-content")
+            .expect("the Terminal Session content was rendered")
+            .center();
+        cx.simulate_mouse_move(terminal, MouseButton::Left, Modifiers::none());
+        cx.simulate_mouse_up(terminal, MouseButton::Left, Modifiers::none());
+        cx.run_until_parked();
+
+        assert_eq!(records.pointer_count(), 0);
     }
 
     #[gpui::test]

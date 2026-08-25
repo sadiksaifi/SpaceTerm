@@ -87,6 +87,12 @@ pub enum ResizeFinishReason {
     HandleRemoved,
 }
 
+impl ResizeFinishReason {
+    fn suppresses_pointer_until_release(self) -> bool {
+        !matches!(self, Self::Completed | Self::PointerButtonLost)
+    }
+}
+
 /// A typed request emitted by [`ResizeHandle`].
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum ResizeHandleEvent {
@@ -453,7 +459,7 @@ impl RenderOnce for ResizeHandle {
                 });
 
                 window.on_mouse_event(move |event: &MouseMoveEvent, phase, window, cx| {
-                    if !phase.capture() || move_state.read(cx).pointer.is_none() {
+                    if !phase.capture() || !move_state.read(cx).owns_pointer_stream() {
                         return;
                     }
                     let events = move_state.update(cx, |state, cx| {
@@ -467,13 +473,11 @@ impl RenderOnce for ResizeHandle {
                 window.on_mouse_event(move |event: &MouseUpEvent, phase, window, cx| {
                     if !phase.capture()
                         || event.button != MouseButton::Left
-                        || up_state.read(cx).pointer.is_none()
+                        || !up_state.read(cx).owns_pointer_stream()
                     {
                         return;
                     }
-                    let events = up_state.update(cx, |state, cx| {
-                        state.finish_pointer(ResizeFinishReason::Completed, false, cx)
-                    });
+                    let events = up_state.update(cx, |state, cx| state.pointer_up(cx));
                     window.prevent_default();
                     emit_events(up_handler.clone(), events, window, cx);
                     cx.stop_propagation();
@@ -615,6 +619,7 @@ struct ResizeHandleState {
     enabled: bool,
     hovered: bool,
     pointer: Option<PointerInteraction>,
+    suppress_pointer_until_release: bool,
     next_interaction_id: u64,
     handler: Option<ResizeHandler>,
 }
@@ -651,6 +656,7 @@ impl ResizeHandleState {
             enabled: false,
             hovered: false,
             pointer: None,
+            suppress_pointer_until_release: false,
             next_interaction_id: 1,
             handler: None,
         }
@@ -706,12 +712,16 @@ impl ResizeHandleState {
         id
     }
 
+    fn owns_pointer_stream(&self) -> bool {
+        self.pointer.is_some() || self.suppress_pointer_until_release
+    }
+
     fn pointer_down(
         &mut self,
         position: Point<Pixels>,
         cx: &mut gpui::Context<Self>,
     ) -> Vec<ResizeHandleEvent> {
-        if !self.enabled || self.pointer.is_some() {
+        if !self.enabled || self.owns_pointer_stream() {
             return Vec::new();
         }
         let coordinate = self.axis.coordinate(position);
@@ -739,6 +749,13 @@ impl ResizeHandleState {
         pressed_button: Option<MouseButton>,
         cx: &mut gpui::Context<Self>,
     ) -> Vec<ResizeHandleEvent> {
+        if self.suppress_pointer_until_release {
+            if pressed_button != Some(MouseButton::Left) {
+                self.suppress_pointer_until_release = false;
+                cx.notify();
+            }
+            return Vec::new();
+        }
         if self.pointer.is_none() {
             return Vec::new();
         }
@@ -767,6 +784,15 @@ impl ResizeHandleState {
         }]
     }
 
+    fn pointer_up(&mut self, cx: &mut gpui::Context<Self>) -> Vec<ResizeHandleEvent> {
+        if self.suppress_pointer_until_release {
+            self.suppress_pointer_until_release = false;
+            cx.notify();
+            return Vec::new();
+        }
+        self.finish_pointer(ResizeFinishReason::Completed, false, cx)
+    }
+
     fn finish_pointer(
         &mut self,
         reason: ResizeFinishReason,
@@ -788,6 +814,7 @@ impl ResizeHandleState {
         let Some(pointer) = self.pointer.take() else {
             return Vec::new();
         };
+        self.suppress_pointer_until_release = reason.suppresses_pointer_until_release();
         let mut events = Vec::with_capacity(if restore { 2 } else { 1 });
         if restore && pointer.last_requested_value != Some(pointer.original_value) {
             events.push(ResizeHandleEvent::ResizeRequested {
@@ -813,7 +840,7 @@ impl ResizeHandleState {
         if event.keystroke.key == "escape" && !event.keystroke.modifiers.modified() {
             return self.finish_pointer(ResizeFinishReason::Escape, true, cx);
         }
-        if self.pointer.is_some() {
+        if self.owns_pointer_stream() {
             return Vec::new();
         }
         let modifiers = event.keystroke.modifiers;
@@ -996,6 +1023,35 @@ mod tests {
         (root, events, cx)
     }
 
+    struct CancellationRoot {
+        leaked_events: Rc<RefCell<usize>>,
+    }
+
+    impl Render for CancellationRoot {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let move_leaks = Rc::clone(&self.leaked_events);
+            let up_leaks = Rc::clone(&self.leaked_events);
+            div()
+                .relative()
+                .size_full()
+                .on_mouse_move(move |_, _, _| *move_leaks.borrow_mut() += 1)
+                .on_mouse_up(MouseButton::Left, move |_, _, _| {
+                    *up_leaks.borrow_mut() += 1;
+                })
+                .child(
+                    ResizeHandle::new(
+                        "cancel-resize",
+                        "Cancel resize",
+                        ResizeAxis::Horizontal,
+                        100.0,
+                    )
+                    .tab_stop(true)
+                    .debug_selector("cancel-resize")
+                    .on_event(|_, _, _| {}),
+                )
+        }
+    }
+
     struct MultipleRoot {
         first_events: Rc<RefCell<Vec<ResizeHandleEvent>>>,
         second_events: Rc<RefCell<Vec<ResizeHandleEvent>>>,
@@ -1148,6 +1204,7 @@ mod tests {
                 ..
             })
         ));
+        cx.simulate_mouse_up(start, MouseButton::Left, Modifiers::none());
 
         root.update(cx, |root, cx| {
             root.disabled = false;
@@ -1194,6 +1251,32 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[gpui::test]
+    fn escape_should_keep_pointer_motion_and_release_from_reaching_ancestors(
+        cx: &mut TestAppContext,
+    ) {
+        cx.set_global(test_theme());
+        let leaked_events = Rc::new(RefCell::new(0));
+        let root_events = Rc::clone(&leaked_events);
+        let (_, cx) = cx.add_window_view(move |_, _| CancellationRoot {
+            leaked_events: root_events,
+        });
+        cx.update(|window, _| window.activate_window());
+        cx.run_until_parked();
+        let start = cx
+            .debug_bounds("cancel-resize-hitbox")
+            .expect("the cancellation test handle was rendered")
+            .center();
+        let destination = point(start.x + px(20.0), start.y);
+
+        cx.simulate_mouse_down(start, MouseButton::Left, Modifiers::none());
+        cx.simulate_keystrokes("escape");
+        cx.simulate_mouse_move(destination, MouseButton::Left, Modifiers::none());
+        cx.simulate_mouse_up(destination, MouseButton::Left, Modifiers::none());
+
+        assert_eq!(*leaked_events.borrow(), 0);
     }
 
     #[gpui::test]
