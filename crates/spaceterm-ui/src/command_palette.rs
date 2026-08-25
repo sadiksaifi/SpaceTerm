@@ -40,6 +40,7 @@ pub(crate) fn init(cx: &mut App) {
         KeyBinding::new("pageup", MovePageUp, Some(KEY_CONTEXT)),
         KeyBinding::new("pagedown", MovePageDown, Some(KEY_CONTEXT)),
         KeyBinding::new("ctrl-m", Activate, Some(KEY_CONTEXT)),
+        KeyBinding::new("escape", Dismiss, Some(KEY_CONTEXT)),
         KeyBinding::new("cmd-.", Dismiss, Some(KEY_CONTEXT)),
         KeyBinding::new("ctrl-g", Dismiss, Some(KEY_CONTEXT)),
         KeyBinding::new("tab", FocusNext, Some(KEY_CONTEXT)),
@@ -3012,6 +3013,35 @@ mod tests {
         assert!(events.borrow().contains(&CommandPaletteEvent::Lifecycle(
             CommandPaletteLifecycleEvent::Closed(CommandPaletteCloseReason::Escape)
         )));
+    }
+
+    #[gpui::test]
+    fn escape_should_close_after_focus_moves_to_a_header_action(cx: &mut TestAppContext) {
+        let (root, palette, _, _, cx) = palette_window(cx);
+        palette.update(cx, |palette, cx| {
+            palette.set_header_actions(
+                vec![CommandPaletteAction::new("refresh", "Refresh", |_| {
+                    div().into_any_element()
+                })],
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        open_palette(&root, &palette, cx);
+
+        cx.update(|window, _| window.focus_next());
+        cx.run_until_parked();
+        assert!(!cx.update(|window, cx| palette
+            .read(cx)
+            .input
+            .read(cx)
+            .focus_handle()
+            .is_focused(window)));
+
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+
+        assert!(!palette.read_with(cx, |palette, _| palette.is_open()));
     }
 
     #[gpui::test]
