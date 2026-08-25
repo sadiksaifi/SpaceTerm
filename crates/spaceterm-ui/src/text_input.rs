@@ -10,8 +10,8 @@ use std::{ops::Range, time::Duration};
 
 use gpui::prelude::*;
 use gpui::{
-    App, Bounds, ClipboardItem, ContentMask, Context, CursorStyle, DispatchPhase, Element,
-    ElementId, ElementInputHandler, Entity, EntityInputHandler, EventEmitter, FocusHandle,
+    App, Bounds, ClipboardEntry, ClipboardItem, ContentMask, Context, CursorStyle, DispatchPhase,
+    Element, ElementId, ElementInputHandler, Entity, EntityInputHandler, EventEmitter, FocusHandle,
     Focusable, Font, Global, GlobalElementId, InspectorElementId, IntoElement, KeyBinding,
     LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point,
     Render, Rgba, ShapedLine, SharedString, Style, Subscription, Task, TextRun, UTF16Selection,
@@ -814,10 +814,13 @@ pub struct TextInput {
     caret_visible: bool,
     caret_task: Option<Task<()>>,
     context_menu_open: bool,
+    paste_available: bool,
     #[cfg(test)]
     shape_count: usize,
     #[cfg(test)]
     value_shape_clone_count: usize,
+    #[cfg(test)]
+    clipboard_read_count: usize,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -874,10 +877,13 @@ impl TextInput {
             caret_visible: true,
             caret_task: None,
             context_menu_open: false,
+            paste_available: false,
             #[cfg(test)]
             shape_count: 0,
             #[cfg(test)]
             value_shape_clone_count: 0,
+            #[cfg(test)]
+            clipboard_read_count: 0,
             _subscriptions: subscriptions,
         }
     }
@@ -1063,6 +1069,16 @@ impl TextInput {
                 replacement_len,
                 self.input_length_limit,
             )
+    }
+    fn refresh_paste_availability(&mut self, cx: &mut Context<Self>) {
+        #[cfg(test)]
+        {
+            self.clipboard_read_count += 1;
+        }
+        self.paste_available = cx
+            .read_from_clipboard()
+            .and_then(bounded_clipboard_text)
+            .is_some_and(|text| self.can_accept_paste(&text));
     }
     fn advance_revision(
         &mut self,
@@ -1476,7 +1492,7 @@ impl TextInput {
         cx.stop_propagation();
     }
     fn paste(&mut self, _: &Paste, _: &mut Window, cx: &mut Context<Self>) {
-        if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text())
+        if let Some(text) = cx.read_from_clipboard().and_then(bounded_clipboard_text)
             && self.can_accept_paste(&text)
         {
             self.replace_selection_normalized(
@@ -2024,10 +2040,7 @@ impl Render for TextInput {
         let entity = cx.entity();
         let has_selection = !self.buffer.selection.is_empty();
         let can_edit = self.can_edit();
-        let can_paste = cx
-            .read_from_clipboard()
-            .and_then(|item| item.text())
-            .is_some_and(|text| self.can_accept_paste(&text));
+        let can_paste = self.paste_available;
         let entries = vec![
             MenuEntry::action("Undo", TextInputMenuAction::Undo)
                 .disabled(!can_edit || self.buffer.history.undo.is_empty()),
@@ -2111,9 +2124,11 @@ impl Render for TextInput {
                     if !input.enabled {
                         return false;
                     }
+                    input.refresh_paste_availability(cx);
                     input.context_menu_open = true;
                     input.cancel_pointer_gesture();
                     cx.emit(TextInputEvent::ContextMenuOpened);
+                    cx.notify();
                     true
                 })
                 .unwrap_or(false)
@@ -2389,6 +2404,30 @@ fn next_word_end(text: &str, offset: usize) -> usize {
         .map(|(index, word)| offset + index + word.len())
         .unwrap_or(text.len())
 }
+fn bounded_clipboard_text(item: ClipboardItem) -> Option<String> {
+    let mut text = None::<String>;
+    for entry in item.into_entries() {
+        let ClipboardEntry::String(string) = entry else {
+            continue;
+        };
+        let part = string.into_text();
+        if text
+            .as_ref()
+            .map_or(0, String::len)
+            .saturating_add(part.len())
+            > CLIPBOARD_INSERTION_LIMIT
+        {
+            return None;
+        }
+        if let Some(text) = &mut text {
+            text.push_str(&part);
+        } else {
+            text = Some(part);
+        }
+    }
+    text
+}
+
 fn word_range_at(text: &str, offset: usize) -> Range<usize> {
     if text.is_empty() {
         return 0..0;
@@ -2920,6 +2959,34 @@ mod tests {
             input.editable = false;
             assert!(!input.can_accept_paste("x"));
         });
+    }
+
+    #[gpui::test]
+    fn caret_renders_do_not_materialize_clipboard_for_paste_availability(cx: &mut TestAppContext) {
+        let (input, cx) = input(cx, "safe");
+        cx.write_to_clipboard(ClipboardItem::new_string(
+            "x".repeat(CLIPBOARD_INSERTION_LIMIT + 1),
+        ));
+        let reads_before_blink = input.read_with(cx, |input, _| input.clipboard_read_count);
+
+        cx.executor().advance_clock(CARET_BLINK_INTERVAL);
+        cx.run_until_parked();
+
+        assert_eq!(
+            input.read_with(cx, |input, _| input.clipboard_read_count),
+            reads_before_blink
+        );
+
+        let bounds = cx
+            .debug_bounds("test-input")
+            .expect("input should be painted");
+        cx.simulate_mouse_down(bounds.center(), MouseButton::Right, Modifiers::none());
+        cx.simulate_mouse_up(bounds.center(), MouseButton::Right, Modifiers::none());
+        cx.run_until_parked();
+        assert_eq!(
+            input.read_with(cx, |input, _| input.clipboard_read_count),
+            reads_before_blink + 1
+        );
     }
 
     #[gpui::test]
