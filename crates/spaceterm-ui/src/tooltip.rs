@@ -4,8 +4,8 @@ use std::{
 };
 
 use gpui::{
-    AnyElement, App, AvailableSpace, BorrowAppContext as _, Bounds, Display, Element, ElementId,
-    Global, GlobalElementId, Hitbox, HitboxBehavior, InspectorElementId, InteractiveElement as _,
+    AnyElement, App, BorrowAppContext as _, Bounds, Display, Element, ElementId, Global,
+    GlobalElementId, Hitbox, HitboxBehavior, InspectorElementId, InteractiveElement as _,
     IntoElement, KeyDownEvent, LayoutId, MouseDownEvent, MouseExitEvent, MouseMoveEvent,
     ParentElement as _, Pixels, Point, RenderOnce, Rgba, ScrollWheelEvent, SharedString, Size,
     Style, Styled as _, Task, WeakEntity, Window, WindowId, deferred, div, point,
@@ -192,11 +192,18 @@ impl Tooltip {
     }
 
     /// Attaches this tooltip to an arbitrary GPUI element without changing that element's layout.
-    pub fn attach(self, target: impl IntoElement) -> TooltipTarget {
+    ///
+    /// `visibility` must match the wrapped element's effective layout-preserving visibility.
+    pub fn attach(
+        self,
+        target: impl IntoElement,
+        visibility: TooltipTargetVisibility,
+    ) -> TooltipTarget {
         TooltipTarget {
             tooltip: self,
             target: target.into_any_element(),
             disabled: false,
+            visibility,
         }
     }
 }
@@ -215,16 +222,32 @@ fn nonempty_bounded_text(text: SharedString, maximum_characters: usize) -> Optio
     (!text.is_empty()).then(|| bounded_text(text, maximum_characters))
 }
 
+/// The effective layout-preserving visibility of a wrapped tooltip target.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TooltipTargetVisibility {
+    /// The wrapped target paints and may be hit-tested.
+    Visible,
+    /// The wrapped target preserves layout but neither paints nor accepts tooltip hit-testing.
+    Hidden,
+}
+
+impl TooltipTargetVisibility {
+    fn is_visible(self) -> bool {
+        self == Self::Visible
+    }
+}
+
 /// A layout-transparent adapter that attaches a [`Tooltip`] to any GPUI element.
 ///
-/// Disabled targets never schedule or present tooltips. The adapter owns only transient tooltip
-/// mechanics; the wrapped element retains its own layout, cursor, focus, accessibility name, and
-/// pointer behavior.
+/// Disabled or hidden targets never schedule or present tooltips. The adapter owns only transient
+/// tooltip mechanics; the wrapped element retains its own layout, cursor, focus, accessibility
+/// name, and pointer behavior.
 #[derive(IntoElement)]
 pub struct TooltipTarget {
     tooltip: Tooltip,
     target: AnyElement,
     disabled: bool,
+    visibility: TooltipTargetVisibility,
 }
 
 impl TooltipTarget {
@@ -264,7 +287,8 @@ impl RenderOnce for TooltipLayer {
 impl RenderOnce for TooltipTarget {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let state = window.use_keyed_state(self.tooltip.id.clone(), cx, TooltipTargetState::new);
-        let enabled = !self.disabled && !self.tooltip.text.is_empty();
+        let visible = self.visibility.is_visible();
+        let enabled = visible && !self.disabled && !self.tooltip.text.is_empty();
         let release = state.update(cx, |state, cx| state.synchronize(enabled, cx));
         if let Some((window_id, reservation)) = release {
             release_window(window_id, reservation, cx);
@@ -276,7 +300,11 @@ impl RenderOnce for TooltipTarget {
             if state.visible && state.target_bounds.is_some() {
                 TooltipOverlay::new(
                     owner,
-                    render_surface(&self.tooltip, cx.global::<TooltipTheme>()),
+                    render_surface(
+                        &self.tooltip,
+                        cx.global::<TooltipTheme>(),
+                        window.viewport_size(),
+                    ),
                     cx.global::<TooltipTheme>().metrics,
                 )
                 .into_any_element()
@@ -294,13 +322,15 @@ impl RenderOnce for TooltipTarget {
             target: self.target,
             overlay,
             state,
+            visible,
         }
     }
 }
 
-fn render_surface(tooltip: &Tooltip, theme: &TooltipTheme) -> AnyElement {
+fn render_surface(tooltip: &Tooltip, theme: &TooltipTheme, viewport: Size<Pixels>) -> AnyElement {
     let paint = theme.paint;
     let metrics = theme.metrics;
+    let available = available_tooltip_size(viewport, metrics.viewport_margin);
     let keyboard = tooltip.keyboard_equivalent.clone();
     let primary = div()
         .flex()
@@ -334,7 +364,8 @@ fn render_surface(tooltip: &Tooltip, theme: &TooltipTheme) -> AnyElement {
             let selector = tooltip.debug_selector.clone();
             move || selector.to_string()
         })
-        .max_w(metrics.maximum_width)
+        .max_w(metrics.maximum_width.min(available.width))
+        .max_h(available.height)
         .px(metrics.horizontal_padding)
         .py(metrics.vertical_padding)
         .flex()
@@ -428,6 +459,7 @@ struct TooltipTargetElement {
     target: AnyElement,
     overlay: Option<AnyElement>,
     state: gpui::Entity<TooltipTargetState>,
+    visible: bool,
 }
 
 struct TooltipTargetLayout {
@@ -435,7 +467,7 @@ struct TooltipTargetLayout {
 }
 
 struct TooltipTargetPrepaint {
-    hitbox: Hitbox,
+    hitbox: Option<Hitbox>,
 }
 
 impl IntoElement for TooltipTargetElement {
@@ -482,9 +514,12 @@ impl Element for TooltipTargetElement {
         window: &mut Window,
         cx: &mut App,
     ) -> Self::PrepaintState {
-        let hitbox = window.insert_hitbox(bounds, HitboxBehavior::Normal);
+        let hitbox = self
+            .visible
+            .then(|| window.insert_hitbox(bounds, HitboxBehavior::Normal));
         let state = self.state.clone();
-        let refresh = state.update(cx, |state, cx| state.update_bounds(bounds, cx));
+        let target_bounds = self.visible.then_some(bounds);
+        let refresh = state.update(cx, |state, cx| state.update_bounds(target_bounds, cx));
         if refresh {
             window.refresh();
         }
@@ -492,7 +527,7 @@ impl Element for TooltipTargetElement {
         if let (Some(overlay), Some(layout_id)) =
             (self.overlay.as_mut(), request_layout.overlay_layout)
         {
-            window.compute_layout(layout_id, AvailableSpace::min_size(), cx);
+            window.compute_layout(layout_id, window.viewport_size().into(), cx);
             overlay.prepaint_at(window.layout_bounds(layout_id).origin, window, cx);
         }
         TooltipTargetPrepaint { hitbox }
@@ -509,7 +544,9 @@ impl Element for TooltipTargetElement {
         cx: &mut App,
     ) {
         self.target.paint(window, cx);
-        register_target_handlers(self.state.clone(), prepaint.hitbox.clone(), window, cx);
+        if let Some(hitbox) = prepaint.hitbox.clone() {
+            register_target_handlers(self.state.clone(), hitbox, window, cx);
+        }
         if let Some(overlay) = self.overlay.as_mut() {
             overlay.paint(window, cx);
         }
@@ -581,10 +618,13 @@ fn update_target_hover(
     let Some(generation) = generation else {
         return;
     };
+    let window_id = window.window_handle().window_id();
+    let suppression_epoch = tooltip_suppression_epoch(window_id, cx);
     let weak = state.downgrade();
     let task = window.spawn(cx, async move |cx| {
         cx.background_executor().timer(TOOLTIP_SHOW_DELAY).await;
-        let _ = cx.update(|window, cx| show_target(&weak, generation, window, cx));
+        let _ =
+            cx.update(|window, cx| show_target(&weak, generation, suppression_epoch, window, cx));
     });
     state.update(cx, |state, _| state.retain_task(generation, task));
 }
@@ -592,10 +632,15 @@ fn update_target_hover(
 fn show_target(
     state: &WeakEntity<TooltipTargetState>,
     generation: u64,
+    suppression_epoch: u64,
     window: &mut Window,
     cx: &mut App,
 ) {
-    if tooltip_suppressed(window.window_handle().window_id(), cx) || !window.is_window_active() {
+    let window_id = window.window_handle().window_id();
+    if tooltip_suppressed(window_id, cx)
+        || tooltip_suppression_epoch(window_id, cx) != suppression_epoch
+        || !window.is_window_active()
+    {
         let _ = state.update(cx, |state, cx| state.cancel_generation(generation, cx));
         return;
     }
@@ -656,6 +701,7 @@ pub(crate) enum TooltipSuppression {
 struct TooltipCoordinator {
     owners: HashMap<WindowId, TooltipOwnership>,
     suppressions: HashMap<WindowId, HashSet<TooltipSuppression>>,
+    suppression_epochs: HashMap<WindowId, u64>,
     next_reservation: u64,
 }
 
@@ -736,6 +782,14 @@ fn tooltip_suppressed(window_id: WindowId, cx: &App) -> bool {
             .is_some_and(|reasons| !reasons.is_empty())
 }
 
+fn tooltip_suppression_epoch(window_id: WindowId, cx: &App) -> u64 {
+    cx.global::<TooltipCoordinator>()
+        .suppression_epochs
+        .get(&window_id)
+        .copied()
+        .unwrap_or_default()
+}
+
 pub(crate) fn set_window_tooltip_suppression(
     window_id: WindowId,
     reason: TooltipSuppression,
@@ -747,11 +801,15 @@ pub(crate) fn set_window_tooltip_suppression(
     }
     let displaced = cx.update_global::<TooltipCoordinator, _>(|coordinator, _| {
         if suppressed {
-            coordinator
+            let inserted = coordinator
                 .suppressions
                 .entry(window_id)
                 .or_default()
                 .insert(reason);
+            if inserted {
+                let epoch = coordinator.suppression_epochs.entry(window_id).or_default();
+                *epoch = epoch.wrapping_add(1);
+            }
             coordinator
                 .owners
                 .remove(&window_id)
@@ -822,11 +880,15 @@ impl TooltipTargetState {
         if enabled { None } else { self.dismiss(cx) }
     }
 
-    fn update_bounds(&mut self, bounds: Bounds<Pixels>, cx: &mut gpui::Context<Self>) -> bool {
-        if self.target_bounds == Some(bounds) {
+    fn update_bounds(
+        &mut self,
+        bounds: Option<Bounds<Pixels>>,
+        cx: &mut gpui::Context<Self>,
+    ) -> bool {
+        if self.target_bounds == bounds {
             return false;
         }
-        self.target_bounds = Some(bounds);
+        self.target_bounds = bounds;
         if self.visible {
             cx.notify();
         }
@@ -959,8 +1021,12 @@ impl Element for TooltipOverlay {
         cx: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
         let child_layout = self.child.request_layout(window, cx);
+        let available =
+            available_tooltip_size(window.viewport_size(), self.metrics.viewport_margin);
         let style = Style {
             display: Display::Flex,
+            max_size: gpui::size(available.width.into(), available.height.into()),
+            overflow: point(gpui::Overflow::Hidden, gpui::Overflow::Hidden),
             ..Style::default()
         };
         let layout = window.request_layout(style, [child_layout], cx);
@@ -1031,6 +1097,13 @@ enum TooltipSide {
     Left,
 }
 
+fn available_tooltip_size(viewport: Size<Pixels>, margin: Pixels) -> Size<Pixels> {
+    Size {
+        width: (viewport.width - margin * 2.0).max(px(0.0)),
+        height: (viewport.height - margin * 2.0).max(px(0.0)),
+    }
+}
+
 fn place_tooltip(
     target: Bounds<Pixels>,
     panel: Size<Pixels>,
@@ -1039,6 +1112,7 @@ fn place_tooltip(
     margin: Pixels,
     pointer: Point<Pixels>,
 ) -> Bounds<Pixels> {
+    let panel = panel.min(&available_tooltip_size(viewport, margin));
     let sides = [
         TooltipSide::Bottom,
         TooltipSide::Top,
@@ -1047,10 +1121,7 @@ fn place_tooltip(
     ];
     let limits = Bounds::new(
         point(margin, margin),
-        Size {
-            width: (viewport.width - margin * 2.0).max(px(0.0)),
-            height: (viewport.height - margin * 2.0).max(px(0.0)),
-        },
+        available_tooltip_size(viewport, margin),
     );
     let candidates = sides.map(|side| candidate_bounds(target, panel, gap, side));
     if let Some(candidate) = candidates
@@ -1114,7 +1185,8 @@ fn clamp_bounds(mut bounds: Bounds<Pixels>, limits: Bounds<Pixels>) -> Bounds<Pi
 mod tests {
     use gpui::{
         AppContext as _, Context, Entity, FocusHandle, InteractiveElement as _, Modifiers,
-        MouseButton, Render, TestAppContext, VisualTestContext, rgba, size,
+        MouseButton, Render, TestAppContext, VisualTestContext, WindowBounds, WindowOptions, rgba,
+        size,
     };
 
     use super::*;
@@ -1165,17 +1237,26 @@ mod tests {
     }
 
     #[test]
-    fn placement_should_clamp_an_oversized_panel_inside_the_viewport_margin() {
+    fn placement_should_constrain_an_oversized_panel_inside_the_viewport_margin() {
+        let viewport = size(px(200.0), px(100.0));
+        let margin = px(8.0);
         let placed = place_tooltip(
             Bounds::new(point(px(2.0), px(2.0)), size(px(8.0), px(8.0))),
             size(px(500.0), px(500.0)),
-            size(px(200.0), px(100.0)),
+            viewport,
             px(6.0),
-            px(8.0),
+            margin,
             point(px(4.0), px(4.0)),
         );
+        let limits = Bounds::new(
+            point(margin, margin),
+            available_tooltip_size(viewport, margin),
+        );
 
-        assert_eq!(placed.origin, point(px(8.0), px(8.0)));
+        assert!(
+            contains_bounds(limits, placed),
+            "{placed:?} escaped {limits:?}"
+        );
     }
 
     #[test]
@@ -1213,13 +1294,21 @@ mod tests {
     struct TestRoot {
         show_target: bool,
         disabled: bool,
+        target_visibility: TooltipTargetVisibility,
         target_left: Pixels,
         second_target: bool,
+        long_detail: bool,
         focus_handle: FocusHandle,
     }
 
     impl Render for TestRoot {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let detail: SharedString = if self.long_detail {
+                "Long ".repeat(MAX_DETAIL_CHARACTERS / "Long ".len()).into()
+            } else {
+                "Secondary detail".into()
+            };
+            let target_visibility = self.target_visibility;
             let content = div()
                 .relative()
                 .size_full()
@@ -1228,7 +1317,7 @@ mod tests {
                     root.child(
                         div().absolute().left(self.target_left).top(px(80.0)).child(
                             Tooltip::new("test-tooltip-target", "Primary help")
-                                .detail("Secondary detail")
+                                .detail(detail)
                                 .keyboard_equivalent("⌘K")
                                 .debug_selector("test-tooltip")
                                 .attach(
@@ -1237,7 +1326,12 @@ mod tests {
                                         .debug_selector(|| "test-tooltip-button".to_owned())
                                         .w(px(80.0))
                                         .h(px(24.0))
-                                        .bg(rgba(0x404040ff)),
+                                        .bg(rgba(0x404040ff))
+                                        .when(
+                                            target_visibility == TooltipTargetVisibility::Hidden,
+                                            |target| target.invisible(),
+                                        ),
+                                    target_visibility,
                                 )
                                 .disabled(self.disabled),
                         ),
@@ -1255,6 +1349,7 @@ mod tests {
                                         .w(px(80.0))
                                         .h(px(24.0))
                                         .bg(rgba(0x505050ff)),
+                                    TooltipTargetVisibility::Visible,
                                 ),
                         ),
                     )
@@ -1269,8 +1364,10 @@ mod tests {
         let (root, cx) = cx.add_window_view(|_, cx| TestRoot {
             show_target: true,
             disabled: false,
+            target_visibility: TooltipTargetVisibility::Visible,
             target_left: px(80.0),
             second_target: false,
+            long_detail: false,
             focus_handle: cx.focus_handle(),
         });
         let focus_handle = root.read_with(cx, |root, _| root.focus_handle.clone());
@@ -1431,6 +1528,98 @@ mod tests {
     }
 
     #[gpui::test]
+    fn layout_preserving_hidden_target_should_cancel_a_pending_tooltip(cx: &mut TestAppContext) {
+        let (root, cx) = tooltip_window(cx);
+        let center = target_center(cx, "test-tooltip-button");
+        cx.simulate_mouse_move(center, None, Modifiers::default());
+        cx.executor().advance_clock(TOOLTIP_SHOW_DELAY / 2);
+
+        root.update(cx, |root, cx| {
+            root.target_visibility = TooltipTargetVisibility::Hidden;
+            cx.notify();
+        });
+        cx.run_until_parked();
+        cx.executor().advance_clock(TOOLTIP_SHOW_DELAY);
+        cx.run_until_parked();
+
+        assert!(cx.debug_bounds("test-tooltip").is_none());
+    }
+
+    #[gpui::test]
+    fn layout_preserving_hidden_target_should_cancel_visible_state_and_not_hit_test(
+        cx: &mut TestAppContext,
+    ) {
+        let (root, cx) = tooltip_window(cx);
+        hover_for_show_delay(cx, "test-tooltip-button");
+        let center = target_center(cx, "test-tooltip-button");
+
+        root.update(cx, |root, cx| {
+            root.target_visibility = TooltipTargetVisibility::Hidden;
+            cx.notify();
+        });
+        cx.run_until_parked();
+        cx.simulate_mouse_move(point(px(10.0), px(10.0)), None, Modifiers::default());
+        cx.simulate_mouse_move(center, None, Modifiers::default());
+        cx.executor().advance_clock(TOOLTIP_SHOW_DELAY);
+        cx.run_until_parked();
+
+        assert!(cx.debug_bounds("test-tooltip").is_none());
+    }
+
+    #[gpui::test]
+    fn tooltip_surface_should_fit_inside_a_minimum_width_viewport(cx: &mut TestAppContext) {
+        let mut theme = test_theme();
+        theme.metrics = TooltipMetrics::new(px(480.0));
+        cx.set_global(theme);
+        cx.update(init);
+        let window = cx.update(|cx| {
+            cx.open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(Bounds::new(
+                        point(px(0.0), px(0.0)),
+                        size(px(480.0), px(260.0)),
+                    ))),
+                    ..WindowOptions::default()
+                },
+                |_, cx| {
+                    cx.new(|cx| TestRoot {
+                        show_target: true,
+                        disabled: false,
+                        target_visibility: TooltipTargetVisibility::Visible,
+                        target_left: px(80.0),
+                        second_target: false,
+                        long_detail: true,
+                        focus_handle: cx.focus_handle(),
+                    })
+                },
+            )
+            .unwrap_or_else(|error| panic!("tooltip test window failed: {error}"))
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.update(|window, _| window.activate_window());
+        cx.run_until_parked();
+        hover_for_show_delay(&mut cx, "test-tooltip-button");
+        let tooltip = cx
+            .debug_bounds("test-tooltip")
+            .unwrap_or_else(|| panic!("tooltip was not painted"));
+        let (viewport, margin) = cx.update(|window, cx| {
+            (
+                window.viewport_size(),
+                cx.global::<TooltipTheme>().metrics.viewport_margin,
+            )
+        });
+        let limits = Bounds::new(
+            point(margin, margin),
+            available_tooltip_size(viewport, margin),
+        );
+
+        assert!(
+            contains_bounds(limits, tooltip),
+            "{tooltip:?} escaped {limits:?}"
+        );
+    }
+
+    #[gpui::test]
     fn adjacent_targets_should_transfer_the_single_window_owner(cx: &mut TestAppContext) {
         let (root, cx) = tooltip_window(cx);
         root.update(cx, |root, cx| {
@@ -1467,6 +1656,37 @@ mod tests {
         let owner_count = cx.update(|_, cx| cx.global::<TooltipCoordinator>().owners.len());
 
         assert_eq!(owner_count, 0);
+    }
+
+    #[gpui::test]
+    fn opening_and_closing_suppression_before_the_deadline_should_require_fresh_hover(
+        cx: &mut TestAppContext,
+    ) {
+        let (_, cx) = tooltip_window(cx);
+        let center = target_center(cx, "test-tooltip-button");
+        let window_id = cx.update(|window, _| window.window_handle().window_id());
+        cx.simulate_mouse_move(center, None, Modifiers::default());
+        cx.executor().advance_clock(TOOLTIP_SHOW_DELAY / 2);
+
+        cx.update(|_, cx| {
+            set_window_tooltip_suppression(window_id, TooltipSuppression::Menu, true, cx);
+            set_window_tooltip_suppression(window_id, TooltipSuppression::Menu, false, cx);
+        });
+        cx.executor().advance_clock(TOOLTIP_SHOW_DELAY);
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("test-tooltip").is_none());
+
+        cx.simulate_mouse_move(point(px(10.0), px(10.0)), None, Modifiers::default());
+        cx.simulate_mouse_move(center, None, Modifiers::default());
+        cx.executor()
+            .advance_clock(TOOLTIP_SHOW_DELAY - Duration::from_millis(1));
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("test-tooltip").is_none());
+
+        cx.executor().advance_clock(Duration::from_millis(1));
+        cx.run_until_parked();
+
+        assert!(cx.debug_bounds("test-tooltip").is_some());
     }
 
     #[gpui::test]

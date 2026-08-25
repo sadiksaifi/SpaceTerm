@@ -7,7 +7,7 @@ use gpui::{
     Styled as _, Window, canvas, div, prelude::FluentBuilder as _, px,
 };
 
-use crate::tooltip::Tooltip;
+use crate::tooltip::{Tooltip, TooltipTargetVisibility};
 
 /// The semantic intent of a button action.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -797,7 +797,10 @@ impl ButtonCore {
             .child(pointer_tracker);
 
         if let Some(tooltip) = tooltip {
-            tooltip.attach(button).disabled(!enabled).into_any_element()
+            tooltip
+                .attach(button, TooltipTargetVisibility::Visible)
+                .disabled(!enabled)
+                .into_any_element()
         } else {
             button.into_any_element()
         }

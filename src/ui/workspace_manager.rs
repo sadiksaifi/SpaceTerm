@@ -44,7 +44,8 @@ use spaceterm_ui::{
     MenuLifecycleEvent, MenuSize, MiddleTruncatedText, OverlayScrollbar, OverlayScrollbarEvent,
     ResizeAxis, ResizeFinishReason, ResizeHandle, ResizeHandleEvent, ResizeInputSource,
     ScrollMetrics, TextInput, TextInputEvent, TextInputVariant, Tooltip, TooltipLayer,
-    WindowDragRegion, WindowDragRegionEvent, WindowDragRegionResponse, WindowDragRegionStatus,
+    TooltipTargetVisibility, WindowDragRegion, WindowDragRegionEvent, WindowDragRegionResponse,
+    WindowDragRegionStatus,
 };
 
 const SIDEBAR_TOGGLE_INSET: f32 = 4.0;
@@ -1898,7 +1899,7 @@ impl WorkspaceManager {
         let row = Tooltip::new(("workspace-row-tooltip", workspace_id.get()), tooltip_label)
             .detail(tooltip_text)
             .debug_selector(format!("workspace-row-tooltip-{}", workspace_id.get()))
-            .attach(row_content)
+            .attach(row_content, TooltipTargetVisibility::Visible)
             .into_any_element();
 
         if renaming {

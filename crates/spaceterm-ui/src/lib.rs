@@ -49,7 +49,8 @@ pub use text_input::{
     TextInputVariant, TextInputVariants, Undo as EditUndo, install_text_input_keybindings,
 };
 pub use tooltip::{
-    Tooltip, TooltipLayer, TooltipMetrics, TooltipPaint, TooltipTarget, TooltipTheme,
+    Tooltip, TooltipLayer, TooltipMetrics, TooltipPaint, TooltipTarget, TooltipTargetVisibility,
+    TooltipTheme,
 };
 pub use window_drag_region::{
     WindowDragFinishReason, WindowDragInteractionId, WindowDragRegion, WindowDragRegionEvent,
