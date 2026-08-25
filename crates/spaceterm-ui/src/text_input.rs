@@ -550,6 +550,7 @@ pub struct TextInput {
     tab_behavior: TextInputTabBehavior,
     composition_snapshot: Option<Snapshot>,
     context_menu_open: bool,
+    context_menu_blur_pending: bool,
 }
 
 impl EventEmitter<TextInputEvent> for TextInput {}
@@ -580,6 +581,7 @@ impl TextInput {
             tab_behavior: TextInputTabBehavior::default(),
             composition_snapshot: None,
             context_menu_open: false,
+            context_menu_blur_pending: false,
         }
     }
 
@@ -634,6 +636,7 @@ impl TextInput {
 
     fn on_focus(&mut self, _: &mut Window, cx: &mut Context<Self>) {
         self.focused = true;
+        self.context_menu_blur_pending = false;
         self.caret_visible = true;
         if !self.blinking {
             self.blinking = true;
@@ -647,7 +650,10 @@ impl TextInput {
         self.caret_visible = true;
         self.finish_composition();
         self.buffer.history.break_group();
-        if !self.context_menu_open {
+        if self.context_menu_open {
+            self.context_menu_blur_pending = true;
+        } else {
+            self.context_menu_blur_pending = false;
             cx.emit(TextInputEvent::Blurred(self.buffer.text.clone()));
         }
         cx.notify();
@@ -1272,8 +1278,13 @@ impl Render for TextInput {
         })
         .on_lifecycle(move |event, cx| {
             if matches!(event, crate::menu::MenuLifecycleEvent::Closed(_)) {
-                let _ =
-                    menu_lifecycle_entity.update(cx, |input, _| input.context_menu_open = false);
+                let _ = menu_lifecycle_entity.update(cx, |input, cx| {
+                    input.context_menu_open = false;
+                    if input.context_menu_blur_pending && !input.focused {
+                        input.context_menu_blur_pending = false;
+                        cx.emit(TextInputEvent::Blurred(input.buffer.text.clone()));
+                    }
+                });
             }
         })
         .on_activate(
@@ -1982,6 +1993,59 @@ mod tests {
         assert_eq!(
             input.read_with(cx, |input, _| input.value().to_owned()),
             "Workspace日本"
+        );
+    }
+
+    #[gpui::test]
+    fn context_menu_deactivation_should_emit_deferred_blur(cx: &mut TestAppContext) {
+        install_menu_theme(cx);
+        cx.update(super::init);
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let recorded_events = events.clone();
+        let (root, cx) = cx.add_window_view(move |window, cx| {
+            let input = cx.new(|cx| {
+                TextInput::new(
+                    "Workspace",
+                    TextInputStyle::new(
+                        hsla(0.0, 0.0, 0.9, 1.0),
+                        hsla(0.0, 0.0, 0.5, 1.0),
+                        hsla(0.6, 0.5, 0.5, 0.4),
+                        hsla(0.0, 0.0, 0.9, 1.0),
+                    ),
+                    window,
+                    cx,
+                )
+            });
+            cx.subscribe(&input, move |_, _, event: &TextInputEvent, _| {
+                recorded_events.borrow_mut().push(event.clone());
+            })
+            .detach();
+            MenuBlurTestRoot { input }
+        });
+        let input = root.read_with(cx, |root, _| root.input.clone());
+        cx.update(|window, cx| {
+            window.activate_window();
+            input.read(cx).focus_handle().focus(window);
+        });
+        cx.run_until_parked();
+
+        let bounds = input
+            .read_with(cx, |input, _| input.last_bounds)
+            .unwrap_or_else(|| panic!("text input was not painted"));
+        cx.simulate_mouse_down(bounds.center(), MouseButton::Right, Modifiers::none());
+        cx.simulate_mouse_up(bounds.center(), MouseButton::Right, Modifiers::none());
+        cx.run_until_parked();
+
+        assert!(cx.update(|window, cx| crate::menu::window_menu_is_open(window, cx)));
+        assert!(events.borrow().is_empty());
+
+        cx.deactivate_window();
+        cx.update(|window, _| window.activate_window());
+        cx.run_until_parked();
+
+        assert_eq!(
+            events.borrow().as_slice(),
+            &[TextInputEvent::Blurred("Workspace".to_owned())]
         );
     }
 
