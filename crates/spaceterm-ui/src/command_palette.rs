@@ -915,6 +915,7 @@ mod presented_results {
                 .position(|row| *row == PaletteRow::Item(position))
         }
 
+        #[cfg(test)]
         pub(super) fn row_at_y(
             &self,
             content_y: Pixels,
@@ -932,6 +933,7 @@ mod presented_results {
             })
         }
 
+        #[cfg(test)]
         pub(super) fn item_at_y(
             &self,
             content_y: Pixels,
@@ -3121,7 +3123,7 @@ mod tests {
         });
         open_palette(&root, &palette, cx);
 
-        cx.simulate_keystrokes(&vec!["down"; 12].join(" "));
+        cx.simulate_keystrokes(&["down"; 12].join(" "));
         cx.run_until_parked();
 
         assert_eq!(
