@@ -1895,17 +1895,15 @@ impl EntityInputHandler for TextInput {
             self.buffer
                 .replace(range, normalized, EditKind::Insert, self.input_length_limit)
         };
-        if changed {
-            self.advance_revision(
-                if had_composition {
-                    TextInputChangeSource::InputMethodComposition
-                } else {
-                    TextInputChangeSource::Keyboard
-                },
-                true,
-                cx,
-            );
-        }
+        self.finish_edit(
+            changed,
+            if had_composition {
+                TextInputChangeSource::InputMethodComposition
+            } else {
+                TextInputChangeSource::Keyboard
+            },
+            cx,
+        );
         if had_composition {
             self.commit_composition(cx);
         }
@@ -1976,9 +1974,7 @@ impl EntityInputHandler for TextInput {
                 reversed: false,
             },
         );
-        if changed {
-            self.advance_revision(TextInputChangeSource::InputMethodComposition, true, cx);
-        }
+        self.finish_edit(changed, TextInputChangeSource::InputMethodComposition, cx);
         self.rebuild_geometry(self.last_bounds.unwrap_or_default(), window, cx);
         cx.notify();
     }
@@ -3057,6 +3053,40 @@ mod tests {
             input.composition().is_none()
                 && input.caret_visible
                 && input.caret_generation > generation
+        }));
+    }
+
+    #[gpui::test]
+    fn selection_only_and_unchanged_ime_commits_restart_hidden_caret(cx: &mut TestAppContext) {
+        let (input, cx) = input(cx, "abc");
+        mark_text(&input, cx, "日");
+        let selection_update_generation = input.update(cx, |input, _| {
+            input.caret_visible = false;
+            input.caret_generation
+        });
+
+        cx.update(|window, cx| {
+            input.update(cx, |input, cx| {
+                input.replace_and_mark_text_in_range(None, "日", Some(0..0), window, cx);
+            });
+        });
+        assert!(input.read_with(cx, |input, _| {
+            input.caret_visible && input.caret_generation > selection_update_generation
+        }));
+
+        let commit_generation = input.update(cx, |input, _| {
+            input.caret_visible = false;
+            input.caret_generation
+        });
+        cx.update(|window, cx| {
+            input.update(cx, |input, cx| {
+                input.replace_text_in_range(None, "日", window, cx);
+            });
+        });
+        assert!(input.read_with(cx, |input, _| {
+            input.composition().is_none()
+                && input.caret_visible
+                && input.caret_generation > commit_generation
         }));
     }
 
