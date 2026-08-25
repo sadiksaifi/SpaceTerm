@@ -8,12 +8,38 @@ use libghostty_vt::unicode::grapheme_width;
 
 use super::terminal_pane::TerminalPane;
 
+const HISTORY_LIMIT: usize = 128;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct FindSnapshot {
+    text: String,
+    selection: Range<usize>,
+    selection_reversed: bool,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct FindHistory {
+    undo: Vec<FindSnapshot>,
+    redo: Vec<FindSnapshot>,
+}
+
+impl FindHistory {
+    fn record(&mut self, snapshot: FindSnapshot) {
+        if self.undo.len() == HISTORY_LIMIT {
+            self.undo.remove(0);
+        }
+        self.undo.push(snapshot);
+        self.redo.clear();
+    }
+}
+
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(super) struct FindEditor {
     text: String,
     selection: Range<usize>,
     selection_reversed: bool,
     marked: Option<Range<usize>>,
+    history: FindHistory,
 }
 
 impl FindEditor {
@@ -54,7 +80,10 @@ impl FindEditor {
         let start_utf16 = byte_offset_to_utf16(&self.text, replacement.start);
         let text = single_line_text(text);
         let inserted_utf16 = text.encode_utf16().count();
-        self.text.replace_range(replacement, &text);
+        if self.text[replacement.clone()] != text {
+            self.record_history();
+            self.text.replace_range(replacement, &text);
+        }
         self.selection = start_utf16 + inserted_utf16..start_utf16 + inserted_utf16;
         self.selection_reversed = false;
         self.marked = None;
@@ -66,6 +95,7 @@ impl FindEditor {
         text: &str,
         selected: Option<Range<usize>>,
     ) {
+        let starts_composition = self.marked.is_none();
         let replacement = range
             .or_else(|| self.marked.clone())
             .unwrap_or_else(|| self.selection.clone());
@@ -73,7 +103,12 @@ impl FindEditor {
         let start_utf16 = byte_offset_to_utf16(&self.text, replacement.start);
         let text = single_line_text(text);
         let inserted_utf16 = text.encode_utf16().count();
-        self.text.replace_range(replacement, &text);
+        if self.text[replacement.clone()] != text {
+            if starts_composition {
+                self.record_history();
+            }
+            self.text.replace_range(replacement, &text);
+        }
         let marked = start_utf16..start_utf16 + inserted_utf16;
         let selected = selected.unwrap_or(inserted_utf16..inserted_utf16);
         self.selection = (start_utf16 + selected.start.min(inserted_utf16))
@@ -84,6 +119,26 @@ impl FindEditor {
 
     pub(super) fn unmark(&mut self) {
         self.marked = None;
+    }
+
+    pub(super) fn undo(&mut self) -> bool {
+        let Some(snapshot) = self.history.undo.pop() else {
+            return false;
+        };
+        let current = self.snapshot();
+        self.history.redo.push(current);
+        self.restore(snapshot);
+        true
+    }
+
+    pub(super) fn redo(&mut self) -> bool {
+        let Some(snapshot) = self.history.redo.pop() else {
+            return false;
+        };
+        let current = self.snapshot();
+        self.history.undo.push(current);
+        self.restore(snapshot);
+        true
     }
 
     pub(super) fn delete_backward(&mut self) -> bool {
@@ -175,6 +230,25 @@ impl FindEditor {
 
     fn utf16_len(&self) -> usize {
         self.text.encode_utf16().count()
+    }
+
+    fn snapshot(&self) -> FindSnapshot {
+        FindSnapshot {
+            text: self.text.clone(),
+            selection: self.selection.clone(),
+            selection_reversed: self.selection_reversed,
+        }
+    }
+
+    fn record_history(&mut self) {
+        self.history.record(self.snapshot());
+    }
+
+    fn restore(&mut self, snapshot: FindSnapshot) {
+        self.text = snapshot.text;
+        self.selection = snapshot.selection;
+        self.selection_reversed = snapshot.selection_reversed;
+        self.marked = None;
     }
 
     fn extend_selection(&mut self, head: usize) {
