@@ -1266,7 +1266,7 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
             header_actions: Vec::new(),
             hints: Vec::new(),
             actions_menu: Vec::new(),
-            actions_menu_label: "Actions\u{2026}".into(),
+            actions_menu_label: "Actions".into(),
             confirm: None,
             matching: CommandPaletteMatching::Semantic,
             activation: CommandPaletteActivationPolicy::Close,
@@ -3481,7 +3481,7 @@ mod tests {
         palette.update(cx, |palette, cx| {
             palette.set_actions_menu(
                 vec![
-                    MenuEntry::action("Choose with Finder\u{2026}", "finder".into())
+                    MenuEntry::action("Choose with Finder", "finder".into())
                         .debug_selector("footer-finder"),
                 ],
                 cx,
@@ -3582,7 +3582,7 @@ mod tests {
         palette.update(cx, |palette, cx| {
             palette.set_actions_menu(
                 vec![
-                    MenuEntry::action("Choose with Finder\u{2026}", "finder".into())
+                    MenuEntry::action("Choose with Finder", "finder".into())
                         .debug_selector("footer-finder"),
                 ],
                 cx,
@@ -3629,7 +3629,7 @@ mod tests {
         palette.update(cx, |palette, cx| {
             palette.set_actions_menu(
                 vec![
-                    MenuEntry::action("Choose with Finder\u{2026}", "finder".into())
+                    MenuEntry::action("Choose with Finder", "finder".into())
                         .debug_selector("footer-finder"),
                 ],
                 cx,
@@ -3672,7 +3672,7 @@ mod tests {
         palette.update(cx, |palette, cx| {
             palette.set_actions_menu(
                 vec![
-                    MenuEntry::action("Choose with Finder\u{2026}", "finder".into())
+                    MenuEntry::action("Choose with Finder", "finder".into())
                         .debug_selector("footer-finder"),
                     MenuEntry::action("Retry", "retry".into()),
                 ],

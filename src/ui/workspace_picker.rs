@@ -860,7 +860,7 @@ impl WorkspacePicker {
 
     fn actions_menu(&self) -> Vec<MenuEntry<SharedString>> {
         let mut entries = vec![
-            MenuEntry::action("Choose with Finder\u{2026}", FINDER_ACTION.into())
+            MenuEntry::action("Choose with Finder", FINDER_ACTION.into())
                 .disabled(self.busy.is_some())
                 .debug_selector(FINDER_ACTION),
         ];
