@@ -65,7 +65,7 @@ impl DirectoryAuthority {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum WorkspaceKind {
-    AdHoc {
+    Scratch {
         directory_authority: DirectoryAuthority,
     },
     LocalProject {
@@ -209,7 +209,7 @@ impl<T> WorkspaceCollection<T> {
             working_directory,
             WorkspaceDirectoryIdentity::new(0, 0),
         );
-        let mut collection = Self::new_ad_hoc(
+        let mut collection = Self::new_scratch(
             directory,
             DirectoryAuthority::initial(),
             create_initial_payload,
@@ -219,7 +219,7 @@ impl<T> WorkspaceCollection<T> {
         collection
     }
 
-    pub(crate) fn new_ad_hoc(
+    pub(crate) fn new_scratch(
         directory: ValidatedWorkspaceDirectory,
         directory_authority: DirectoryAuthority,
         create_initial_payload: impl FnOnce(WorkspaceId, &Path) -> T,
@@ -231,7 +231,7 @@ impl<T> WorkspaceCollection<T> {
                 id: initial_workspace_id,
                 name: String::new(),
                 custom_name: None,
-                kind: WorkspaceKind::AdHoc {
+                kind: WorkspaceKind::Scratch {
                     directory_authority,
                 },
                 working_directory: directory.path,
@@ -301,7 +301,7 @@ impl<T> WorkspaceCollection<T> {
             id: workspace_id,
             name: name.clone(),
             custom_name: Some(name),
-            kind: WorkspaceKind::AdHoc {
+            kind: WorkspaceKind::Scratch {
                 directory_authority: DirectoryAuthority::initial(),
             },
             working_directory,
@@ -314,14 +314,14 @@ impl<T> WorkspaceCollection<T> {
         Ok(workspace_id)
     }
 
-    pub(crate) fn create_ad_hoc_workspace(
+    pub(crate) fn create_scratch_workspace(
         &mut self,
         directory: ValidatedWorkspaceDirectory,
         directory_authority: DirectoryAuthority,
         create_payload: impl FnOnce(WorkspaceId, &Path) -> T,
     ) -> Result<WorkspaceId, WorkspaceError> {
         self.create_workspace_entry(
-            WorkspaceKind::AdHoc {
+            WorkspaceKind::Scratch {
                 directory_authority,
             },
             directory,
@@ -384,7 +384,7 @@ impl<T> WorkspaceCollection<T> {
         let Some(workspace) = self.workspace_mut(workspace_id) else {
             return Err(WorkspaceError::WorkspaceNotFound(workspace_id));
         };
-        let WorkspaceKind::AdHoc {
+        let WorkspaceKind::Scratch {
             directory_authority,
         } = &workspace.kind
         else {
@@ -412,7 +412,7 @@ impl<T> WorkspaceCollection<T> {
         let Some(workspace) = self.workspace_mut(workspace_id) else {
             return Err(WorkspaceError::WorkspaceNotFound(workspace_id));
         };
-        let WorkspaceKind::AdHoc {
+        let WorkspaceKind::Scratch {
             directory_authority,
         } = &workspace.kind
         else {
@@ -435,7 +435,7 @@ impl<T> WorkspaceCollection<T> {
         let Some(workspace) = self.workspace_mut(workspace_id) else {
             return Err(WorkspaceError::WorkspaceNotFound(workspace_id));
         };
-        let WorkspaceKind::AdHoc {
+        let WorkspaceKind::Scratch {
             directory_authority,
         } = &mut workspace.kind
         else {
@@ -464,7 +464,7 @@ impl<T> WorkspaceCollection<T> {
         let Some(workspace) = self.workspace_mut(workspace_id) else {
             return Err(WorkspaceError::WorkspaceNotFound(workspace_id));
         };
-        let WorkspaceKind::AdHoc {
+        let WorkspaceKind::Scratch {
             directory_authority,
         } = &mut workspace.kind
         else {
@@ -526,7 +526,7 @@ impl<T> WorkspaceCollection<T> {
         )
     }
 
-    pub(crate) fn close_workspace_with_ad_hoc_replacement(
+    pub(crate) fn close_workspace_with_scratch_replacement(
         &mut self,
         workspace_id: WorkspaceId,
         replacement: ValidatedWorkspaceDirectory,
@@ -575,7 +575,7 @@ impl<T> WorkspaceCollection<T> {
                     id: replacement_workspace_id,
                     name: replacement_name,
                     custom_name: None,
-                    kind: WorkspaceKind::AdHoc {
+                    kind: WorkspaceKind::Scratch {
                         directory_authority,
                     },
                     working_directory: replacement.path,
@@ -693,14 +693,14 @@ impl<T> WorkspaceCollection<T> {
                     workspace.directory_identity,
                     self.home_identity,
                 );
-                if !matches!(workspace.kind, WorkspaceKind::AdHoc { .. }) {
+                if !matches!(workspace.kind, WorkspaceKind::Scratch { .. }) {
                     return base;
                 }
                 let ordinal = self.workspaces[..index]
                     .iter()
                     .filter(|candidate| {
                         candidate.custom_name.is_none()
-                            && matches!(candidate.kind, WorkspaceKind::AdHoc { .. })
+                            && matches!(candidate.kind, WorkspaceKind::Scratch { .. })
                             && candidate.directory_identity == workspace.directory_identity
                     })
                     .count()
@@ -785,10 +785,10 @@ mod tests {
     fn workspace_kinds_own_distinct_directory_policies() {
         let authority =
             DirectoryAuthority::new(super::super::WindowId::new(4), super::super::PaneId::new(7));
-        let mut workspaces = WorkspaceCollection::new_ad_hoc(
+        let mut workspaces = WorkspaceCollection::new_scratch(
             validated("/Users/test", 10),
             authority,
-            |_, _| "ad hoc",
+            |_, _| "scratch",
         );
         let project_id = workspaces
             .create_local_project_workspace(validated("/Users/test/project", 20), |_, _| "project")
@@ -796,7 +796,7 @@ mod tests {
 
         assert!(matches!(
             workspaces.workspace(WorkspaceId::new(1)).unwrap().kind(),
-            WorkspaceKind::AdHoc { directory_authority } if *directory_authority == authority
+            WorkspaceKind::Scratch { directory_authority } if *directory_authority == authority
         ));
         assert!(matches!(
             workspaces.workspace(project_id).unwrap().kind(),
@@ -810,14 +810,14 @@ mod tests {
     }
 
     #[test]
-    fn automatic_names_number_only_matching_unrenamed_ad_hoc_workspaces() {
-        let mut workspaces = WorkspaceCollection::new_ad_hoc(
+    fn automatic_names_number_only_matching_unrenamed_scratch_workspaces() {
+        let mut workspaces = WorkspaceCollection::new_scratch(
             validated("/Users/test", 10),
             DirectoryAuthority::initial(),
             |_, _| (),
         );
         let second = workspaces
-            .create_ad_hoc_workspace(
+            .create_scratch_workspace(
                 validated("/private/alternate-home-spelling", 10),
                 DirectoryAuthority::initial(),
                 |_, _| (),
@@ -854,11 +854,11 @@ mod tests {
     }
 
     #[test]
-    fn local_project_identity_deduplicates_without_merging_ad_hoc() {
-        let mut workspaces = WorkspaceCollection::new_ad_hoc(
+    fn local_project_identity_deduplicates_without_merging_scratch() {
+        let mut workspaces = WorkspaceCollection::new_scratch(
             validated("/selected/project", 20),
             DirectoryAuthority::initial(),
-            |_, _| "ad hoc",
+            |_, _| "scratch",
         );
         let created = workspaces
             .create_local_project_workspace(validated("/selected/project", 20), |_, _| "project")
@@ -886,7 +886,7 @@ mod tests {
         let promoted =
             DirectoryAuthority::new(super::super::WindowId::new(1), super::super::PaneId::new(2));
         let mut workspaces =
-            WorkspaceCollection::new_ad_hoc(validated("/previous", 10), first, |_, _| ());
+            WorkspaceCollection::new_scratch(validated("/previous", 10), first, |_, _| ());
 
         assert!(
             !workspaces

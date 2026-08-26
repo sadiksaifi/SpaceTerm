@@ -189,7 +189,7 @@ impl WorkspaceManager {
         let default_workspace_identity = default_directory.identity();
         let initial_workspace_identity = default_directory.identity();
         let initial_window_drag_platform = Rc::clone(&operating_system_window_drag_platform);
-        let mut workspaces = WorkspaceCollection::new_ad_hoc(
+        let mut workspaces = WorkspaceCollection::new_scratch(
             default_directory,
             DirectoryAuthority::initial(),
             |workspace_id, workspace_root| {
@@ -878,7 +878,7 @@ impl WorkspaceManager {
         let sidebar_width = self.sidebar_width;
         let (directory, unavailable_reason) = self.default_workspace_directory();
         let directory_identity = directory.identity();
-        let result = self.workspaces.create_ad_hoc_workspace(
+        let result = self.workspaces.create_scratch_workspace(
             directory,
             DirectoryAuthority::initial(),
             |workspace_id, workspace_root| {
@@ -1191,7 +1191,7 @@ impl WorkspaceManager {
         let sidebar_width = self.sidebar_width;
         let (replacement, unavailable_reason) = self.default_workspace_directory();
         let replacement_identity = replacement.identity();
-        let outcome = self.workspaces.close_workspace_with_ad_hoc_replacement(
+        let outcome = self.workspaces.close_workspace_with_scratch_replacement(
             workspace_id,
             replacement,
             DirectoryAuthority::initial(),
