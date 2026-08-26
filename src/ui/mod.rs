@@ -101,7 +101,6 @@ pub(crate) const WORKSPACE_SIDEBAR_DEFAULT_WIDTH: f32 = 240.0;
 pub(crate) const WORKSPACE_SIDEBAR_MINIMUM_WIDTH: f32 = 180.0;
 
 pub(crate) fn init(cx: &mut App) {
-    workspace_picker::init(cx);
     spaceterm_ui::init(
         cx,
         button_theme::theme(),

@@ -244,7 +244,8 @@ impl WorkspaceSearch {
             }
             CommandPaletteEvent::QueryChanged(_)
             | CommandPaletteEvent::HeaderAction(_)
-            | CommandPaletteEvent::MenuAction(_) => {}
+            | CommandPaletteEvent::MenuAction(_)
+            | CommandPaletteEvent::Confirmed => {}
         }
     }
 

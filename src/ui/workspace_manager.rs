@@ -645,6 +645,8 @@ impl WorkspaceManager {
         }
         self.rename = None;
         self.workspace_menu = None;
+        self.workspace_picker
+            .update(cx, |picker, cx| picker.dismiss(window, cx));
         let items = self.workspace_search_items(cx);
         self.workspace_search
             .update(cx, |search, cx| search.open(items, window, cx));
@@ -930,7 +932,8 @@ impl WorkspaceManager {
 
     fn open_local_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.workspace_picker.read(cx).is_open() {
-            self.workspace_picker.read(cx).refocus_path(window, cx);
+            self.workspace_picker
+                .update(cx, |picker, cx| picker.refocus_path(window, cx));
             return;
         }
         if spaceterm_ui::window_menu_is_open(window, cx) {
@@ -948,7 +951,8 @@ impl WorkspaceManager {
 
     fn present_workspace_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.workspace_picker.read(cx).is_open() {
-            self.workspace_picker.read(cx).refocus_path(window, cx);
+            self.workspace_picker
+                .update(cx, |picker, cx| picker.refocus_path(window, cx));
             return;
         }
         if self.rename_is_focused(window) {
@@ -973,10 +977,6 @@ impl WorkspaceManager {
         match event {
             WorkspacePickerEvent::StateChanged => {
                 self.sync_terminal_focus_blocker(window, cx);
-                cx.notify();
-            }
-            WorkspacePickerEvent::ScrimDismissed => {
-                self.suppress_sidebar_pointer_until_release = true;
                 cx.notify();
             }
             WorkspacePickerEvent::FinderRequested => {

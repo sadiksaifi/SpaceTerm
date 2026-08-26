@@ -721,6 +721,32 @@ impl<A> MenuEntry<A> {
         }
         self
     }
+
+    /// Returns this entry's presentation when it is one ordinary action.
+    ///
+    /// A caller that would otherwise wrap a lone entry in a disclosure uses this to offer the
+    /// action directly instead. Separators, sections, and submenus report nothing.
+    pub(crate) fn plain_action(&self) -> Option<PlainMenuAction<'_, A>> {
+        match &self.kind {
+            MenuEntryKind::Item(item) => Some(PlainMenuAction {
+                label: &item.label,
+                action: &item.action,
+                disabled: item.disabled,
+                debug_selector: item.debug_selector.as_deref(),
+            }),
+            MenuEntryKind::Separator
+            | MenuEntryKind::Section { .. }
+            | MenuEntryKind::Submenu { .. } => None,
+        }
+    }
+}
+
+/// One ordinary menu action a caller may present outside a menu.
+pub(crate) struct PlainMenuAction<'entry, A> {
+    pub(crate) label: &'entry SharedString,
+    pub(crate) action: &'entry A,
+    pub(crate) disabled: bool,
+    pub(crate) debug_selector: Option<&'entry str>,
 }
 
 /// A button-triggered action menu.

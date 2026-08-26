@@ -22,8 +22,9 @@ pub use button::{
 };
 pub use command_palette::{
     CommandPalette, CommandPaletteAccessory, CommandPaletteAction, CommandPaletteActivation,
-    CommandPaletteActivationSource, CommandPaletteCloseReason, CommandPaletteEvent,
-    CommandPaletteGeneration, CommandPaletteHint, CommandPaletteItem, CommandPaletteLifecycleEvent,
+    CommandPaletteActivationPolicy, CommandPaletteActivationSource, CommandPaletteCloseReason,
+    CommandPaletteConfirm, CommandPaletteEvent, CommandPaletteGeneration, CommandPaletteHint,
+    CommandPaletteItem, CommandPaletteLifecycleEvent, CommandPaletteMatching,
     CommandPaletteMetrics, CommandPalettePaint, CommandPaletteQuery,
     CommandPaletteReplacementFocus, CommandPaletteTheme,
 };

@@ -5,15 +5,13 @@ use std::sync::Arc;
 
 use gpui::prelude::*;
 use gpui::{
-    Action, App, Bounds, Context, Corner, Entity, EventEmitter, KeyBinding, KeyDownEvent,
-    ListAlignment, ListState, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels,
-    PromptButton, PromptLevel, Render, ScrollWheelEvent, WeakFocusHandle, Window, actions,
-    anchored, canvas, div, list, px,
+    Action, App, Context, Entity, EventEmitter, PromptButton, PromptLevel, Render, SharedString,
+    Window, div, px,
 };
-use gpui_symbols::{Icon, SymbolWeight};
+use gpui_symbols::Icon;
 use spaceterm_ui::{
-    Button, ButtonSize, ButtonVariant, IconButton, OverlayScrollbar, OverlayScrollbarEvent,
-    ScrollMetrics, TextInput, TextInputEvent, TextInputTabBehavior, TextInputVariant,
+    CommandPalette, CommandPaletteActivationPolicy, CommandPaletteConfirm, CommandPaletteEvent,
+    CommandPaletteItem, CommandPaletteLifecycleEvent, CommandPaletteMatching, MenuEntry,
 };
 
 use super::{
@@ -34,40 +32,11 @@ use crate::platform::workspace_picker_filesystem::{
 };
 use crate::theme::{ACTIVE_THEME, Color};
 
-const KEY_CONTEXT: &str = "WorkspacePicker";
-const PANEL_MAX_WIDTH: f32 = 680.0;
-const PANEL_MAX_HEIGHT: f32 = 500.0;
-const WINDOW_INSET: f32 = 16.0;
-const ROW_HEIGHT: f32 = 34.0;
-
-actions!(
-    workspace_picker,
-    [
-        PickerMoveUp,
-        PickerMoveDown,
-        PickerConfirmTyped,
-        PickerDismiss,
-        PickerFocusNext,
-        PickerFocusPrevious
-    ]
-);
-
-pub(super) fn init(cx: &mut App) {
-    cx.bind_keys([
-        KeyBinding::new("up", PickerMoveUp, Some(KEY_CONTEXT)),
-        KeyBinding::new("ctrl-p", PickerMoveUp, Some(KEY_CONTEXT)),
-        KeyBinding::new("down", PickerMoveDown, Some(KEY_CONTEXT)),
-        KeyBinding::new("ctrl-n", PickerMoveDown, Some(KEY_CONTEXT)),
-        KeyBinding::new("cmd-enter", PickerConfirmTyped, Some(KEY_CONTEXT)),
-        KeyBinding::new("escape", PickerDismiss, Some(KEY_CONTEXT)),
-        KeyBinding::new("tab", PickerFocusNext, Some(KEY_CONTEXT)),
-        KeyBinding::new("shift-tab", PickerFocusPrevious, Some(KEY_CONTEXT)),
-    ]);
-}
-
-fn block_parent_action<A: Action>(_: &A, _: &mut Window, cx: &mut App) {
-    cx.stop_propagation();
-}
+const HOME_DISPLAY: &str = "~/";
+const ROW_ICON_SIZE: f32 = 14.0;
+const FINDER_ACTION: &str = "workspace-picker-finder";
+const RETRY_ACTION: &str = "workspace-picker-retry";
+const SYSTEM_SETTINGS_ACTION: &str = "workspace-picker-open-system-settings";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum WorkspacePathFormatError {
@@ -108,6 +77,7 @@ impl ParsedWorkspacePath {
         &self.enumeration_directory
     }
 
+    #[cfg(test)]
     pub(super) fn leaf_filter(&self) -> &str {
         &self.leaf_filter
     }
@@ -172,7 +142,7 @@ fn display_workspace_directory_with_style(
     prefer_tilde: bool,
 ) -> Option<String> {
     if prefer_tilde && path == home {
-        return Some("~/".to_owned());
+        return Some(HOME_DISPLAY.to_owned());
     }
     if prefer_tilde && let Ok(relative) = path.strip_prefix(home) {
         let relative = relative.to_str()?;
@@ -186,42 +156,15 @@ fn display_workspace_directory_with_style(
     })
 }
 
-pub(super) fn parent_workspace_directory(
-    parsed: &ParsedWorkspacePath,
-    home: &Path,
-) -> Option<(PathBuf, String)> {
-    let parent = parsed.exact_path.parent()?.to_path_buf();
-    let display =
-        display_workspace_directory_with_style(&parent, home, parsed.display.starts_with("~/"))?;
-    Some((parent, display))
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(super) enum WorkspacePickerRow {
-    Parent { path: PathBuf },
-    Directory(WorkspacePickerDirectoryEntry),
-}
-
-impl WorkspacePickerRow {
-    pub(super) fn path(&self) -> &Path {
-        match self {
-            Self::Parent { path } => path,
-            Self::Directory(entry) => entry.path(),
-        }
-    }
-
-    pub(super) fn name(&self) -> &str {
-        match self {
-            Self::Parent { .. } => "..",
-            Self::Directory(entry) => entry.name(),
-        }
-    }
-}
-
+/// Returns the directories the typed leaf selects, in stable presentation order.
+///
+/// The picker owns this filter because its query is a path rather than a search term: only a
+/// case-insensitive prefix of the final segment matches, and no parent entry is produced. Moving
+/// up a level is editing the path.
 pub(super) fn filter_workspace_picker_rows(
     parsed: &ParsedWorkspacePath,
     entries: &[WorkspacePickerDirectoryEntry],
-) -> Vec<WorkspacePickerRow> {
+) -> Vec<WorkspacePickerDirectoryEntry> {
     let folded_filter = parsed.leaf_filter.to_lowercase();
     let mut directories = entries
         .iter()
@@ -236,36 +179,12 @@ pub(super) fn filter_workspace_picker_rows(
             folded
         }
     });
-
-    let mut rows = Vec::with_capacity(directories.len().saturating_add(1));
-    if let Some(parent) = parsed.enumeration_directory.parent() {
-        rows.push(WorkspacePickerRow::Parent {
-            path: parent.to_path_buf(),
-        });
-    }
-    rows.extend(directories.into_iter().map(WorkspacePickerRow::Directory));
-    rows
-}
-
-pub(super) fn repair_workspace_picker_selection(
-    previous: Option<&Path>,
-    rows: &[WorkspacePickerRow],
-) -> Option<PathBuf> {
-    if let Some(previous) = previous
-        && rows.iter().any(|row| row.path() == previous)
-    {
-        return Some(previous.to_path_buf());
-    }
-    rows.iter().find_map(|row| match row {
-        WorkspacePickerRow::Parent { .. } => None,
-        WorkspacePickerRow::Directory(entry) => Some(entry.path().to_path_buf()),
-    })
+    directories
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) enum WorkspacePickerEvent {
     StateChanged,
-    ScrimDismissed,
     FinderRequested,
     Confirmed(ValidatedWorkspaceDirectory),
 }
@@ -321,24 +240,24 @@ struct ValidationCompletion {
     result: Result<ValidatedWorkspaceDirectory, WorkspacePickerFilesystemError>,
 }
 
+/// The Workspace Picker presents live one-level directory reads through the application's Command
+/// Palette, so it shares that transient's chrome, focus restoration, and dismissal exactly.
+///
+/// It owns only what is specific to choosing a Project Root: typed path spelling, the guarded
+/// filesystem reads, folder creation, validation, and the Finder Fallback.
 pub(super) struct WorkspacePicker {
     home: PathBuf,
     filesystem: Arc<dyn WorkspacePickerFilesystem + Send + Sync>,
     system_settings: Rc<dyn SystemSettingsOpener>,
-    input: Entity<TextInput>,
-    focus_scope: gpui::FocusHandle,
-    list: ListState,
-    scrollbar: Entity<OverlayScrollbar<f32>>,
+    palette: Entity<CommandPalette<PathBuf>>,
     open: bool,
     lifecycle_generation: u64,
     operation_generation: u64,
     parsed: Option<ParsedWorkspacePath>,
     snapshot: Option<LoadedDirectorySnapshot>,
-    rows: Vec<WorkspacePickerRow>,
-    selected_path: Option<PathBuf>,
+    rows: Vec<WorkspacePickerDirectoryEntry>,
     status: WorkspacePickerStatus,
     busy: Option<WorkspacePickerBusy>,
-    restore_focus: Option<WeakFocusHandle>,
 }
 
 impl EventEmitter<WorkspacePickerEvent> for WorkspacePicker {}
@@ -351,78 +270,36 @@ impl WorkspacePicker {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let input = cx.new(|cx| {
-            TextInput::new("workspace-picker-path", "Workspace path", "~/", window, cx)
-                .variant(TextInputVariant::Bare)
-                .tab_behavior(TextInputTabBehavior::Propagate)
-                .debug_selector("workspace-picker-path-input")
+        let palette = cx.new(|cx| {
+            let mut palette = CommandPalette::new("Workspace path", Vec::new(), window, cx);
+            // The query is an address, not a search term, so the picker filters and orders its own
+            // rows, and activating one descends instead of completing the operation.
+            palette.set_matching(CommandPaletteMatching::Caller, cx);
+            palette.set_activation(CommandPaletteActivationPolicy::Continue, cx);
+            palette
         });
         cx.subscribe_in(
-            &input,
+            &palette,
             window,
-            |picker, input, event: &TextInputEvent, window, cx| match event {
-                TextInputEvent::ValueChanged(_) => {
-                    let value = input.read(cx).value().to_owned();
-                    picker.refresh_for_input(value, window, cx);
-                }
-                TextInputEvent::Submitted => picker.submit(window, cx),
-                TextInputEvent::Cancelled => {
-                    picker.dismiss(window, cx);
-                }
-                TextInputEvent::TabForwardRequested => picker.descend_selected(window, cx),
-                TextInputEvent::TabBackwardRequested => window.focus_prev(),
-                _ => {}
+            |picker, _, event: &CommandPaletteEvent<PathBuf>, window, cx| {
+                picker.reduce_palette_event(event, window, cx);
             },
         )
-        .detach();
-
-        let scrollbar = cx.new(|_| OverlayScrollbar::<f32>::new("workspace-picker-scrollbar"));
-        cx.subscribe_in(
-            &scrollbar,
-            window,
-            |picker, _, event: &OverlayScrollbarEvent<f32>, _, cx| match event {
-                OverlayScrollbarEvent::InteractionStarted => picker.list.scrollbar_drag_started(),
-                OverlayScrollbarEvent::OffsetRequested(offset) => {
-                    picker
-                        .list
-                        .set_offset_from_scrollbar(gpui::point(px(0.0), px(-*offset)));
-                    cx.notify();
-                }
-            },
-        )
-        .detach();
-
-        cx.observe_window_activation(window, |picker, window, cx| {
-            if picker.open
-                && window.is_window_active()
-                && !matches!(
-                    picker.busy,
-                    Some(WorkspacePickerBusy::Finder | WorkspacePickerBusy::CreationPrompt)
-                )
-            {
-                picker.input.read(cx).focus_handle().focus(window);
-            }
-        })
         .detach();
 
         Self {
             home,
             filesystem,
             system_settings,
-            input,
-            focus_scope: cx.focus_handle(),
-            list: ListState::new(0, ListAlignment::Top, px(0.0)).measure_all(),
-            scrollbar,
+            palette,
             open: false,
             lifecycle_generation: 0,
             operation_generation: 0,
             parsed: None,
             snapshot: None,
             rows: Vec::new(),
-            selected_path: None,
             status: WorkspacePickerStatus::Loading,
             busy: None,
-            restore_focus: None,
         }
     }
 
@@ -433,25 +310,21 @@ impl WorkspacePicker {
         }
         self.lifecycle_generation = self.lifecycle_generation.wrapping_add(1);
         self.operation_generation = self.operation_generation.wrapping_add(1);
-        self.restore_focus = window.focused(cx).map(|focus| focus.downgrade());
-        self.open = true;
         self.busy = None;
         self.snapshot = None;
+        self.parsed = None;
         self.rows.clear();
-        self.selected_path = None;
-        self.list.reset(0);
-        self.input.update(cx, |input, cx| {
-            input.set_editable(true, cx);
-            input.set_value("~/", cx)
+        self.status = WorkspacePickerStatus::Loading;
+        self.palette.update(cx, |palette, cx| {
+            if palette.open(window, cx) {
+                // Every open starts at HOME; the picker retains no recents or last location.
+                palette.set_query(HOME_DISPLAY, cx);
+            }
         });
-        self.input.read(cx).focus_handle().focus(window);
-        self.refresh_for_input("~/".to_owned(), window, cx);
-        cx.emit(WorkspacePickerEvent::StateChanged);
-        cx.notify();
         true
     }
 
-    pub(super) const fn is_open(&self) -> bool {
+    pub(super) fn is_open(&self) -> bool {
         self.open
     }
 
@@ -459,39 +332,31 @@ impl WorkspacePicker {
         self.open
     }
 
-    pub(super) fn refocus_path(&self, window: &mut Window, cx: &App) {
+    pub(super) fn refocus_path(&self, window: &mut Window, cx: &mut Context<Self>) {
         if self.open {
-            self.input.read(cx).focus_handle().focus(window);
+            self.palette
+                .update(cx, |palette, cx| palette.focus_editor(window, cx));
         }
     }
 
     #[cfg(test)]
-    pub(super) fn path_input_is_focused(&self, window: &Window, cx: &App) -> bool {
-        self.input.read(cx).focus_handle().is_focused(window)
+    pub(super) fn path_input_is_focused(&self, window: &Window, cx: &gpui::App) -> bool {
+        self.palette.read(cx).editor_is_focused(window, cx)
     }
 
     pub(super) fn dismiss(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        if !self.open || self.busy.is_some() {
+        if !self.open {
             return false;
         }
-        self.close_and_restore_focus(window, cx)
-    }
-
-    fn dismiss_from_scrim(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        if !self.dismiss(window, cx) {
-            return false;
-        }
-        cx.emit(WorkspacePickerEvent::ScrimDismissed);
-        true
+        self.palette
+            .update(cx, |palette, cx| palette.dismiss(window, cx))
     }
 
     pub(super) fn finder_cancelled(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.open && self.busy == Some(WorkspacePickerBusy::Finder) {
             self.busy = None;
-            self.set_input_editable_deferred(true, window, cx);
             self.refocus_path(window, cx);
-            cx.emit(WorkspacePickerEvent::StateChanged);
-            cx.notify();
+            self.publish(cx);
         }
     }
 
@@ -499,10 +364,8 @@ impl WorkspacePicker {
         if self.open && self.busy == Some(WorkspacePickerBusy::Finder) {
             self.busy = None;
             self.status = WorkspacePickerStatus::Other;
-            self.set_input_editable_deferred(true, window, cx);
             self.refocus_path(window, cx);
-            cx.emit(WorkspacePickerEvent::StateChanged);
-            cx.notify();
+            self.publish(cx);
         }
     }
 
@@ -522,15 +385,15 @@ impl WorkspacePicker {
         let prefer_tilde = self
             .parsed
             .as_ref()
-            .is_some_and(|parsed| parsed.display().starts_with("~/"));
+            .is_some_and(|parsed| parsed.display().starts_with(HOME_DISPLAY));
         let Some(display) = self.representable_directory_display(path, prefer_tilde, cx) else {
             return;
         };
         let Ok(parsed) = parse_workspace_path(&display, &self.home) else {
             return;
         };
-        self.input
-            .update(cx, |input, cx| input.set_value(display, cx));
+        self.palette
+            .update(cx, |palette, cx| palette.set_query(display, cx));
         self.parsed = Some(parsed);
     }
 
@@ -538,12 +401,12 @@ impl WorkspacePicker {
         &self,
         path: &Path,
         prefer_tilde: bool,
-        cx: &App,
+        cx: &Context<Self>,
     ) -> Option<String> {
         let display = display_workspace_directory_with_style(path, &self.home, prefer_tilde)?;
-        self.input
+        self.palette
             .read(cx)
-            .can_set_value_exactly(&display)
+            .can_set_query_exactly(&display, cx)
             .then_some(display)
     }
 
@@ -556,35 +419,59 @@ impl WorkspacePicker {
             return false;
         }
         self.busy = None;
-        self.restore_focus = None;
-        self.close_and_restore_focus(window, cx)
+        self.palette.update(cx, |palette, cx| {
+            palette.dismiss_without_restoring_focus(window, cx)
+        })
     }
 
     pub(super) fn activation_failed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.open && self.busy == Some(WorkspacePickerBusy::AwaitingActivation) {
             self.busy = None;
             self.status = WorkspacePickerStatus::Other;
-            self.set_input_editable_deferred(true, window, cx);
             self.refocus_path(window, cx);
-            cx.emit(WorkspacePickerEvent::StateChanged);
-            cx.notify();
+            self.publish(cx);
         }
     }
 
-    fn close_and_restore_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        self.open = false;
-        self.set_input_editable_deferred(true, window, cx);
-        self.lifecycle_generation = self.lifecycle_generation.wrapping_add(1);
-        self.operation_generation = self.operation_generation.wrapping_add(1);
-        self.busy = None;
-        self.scrollbar
-            .update(cx, |scrollbar, cx| scrollbar.reset(cx));
-        if let Some(focus) = self.restore_focus.take().and_then(|focus| focus.upgrade()) {
-            focus.focus(window);
+    fn reduce_palette_event(
+        &mut self,
+        event: &CommandPaletteEvent<PathBuf>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match event {
+            CommandPaletteEvent::Lifecycle(CommandPaletteLifecycleEvent::Opened) => {
+                self.open = true;
+                self.publish(cx);
+            }
+            CommandPaletteEvent::Lifecycle(CommandPaletteLifecycleEvent::Closed(_)) => {
+                self.open = false;
+                self.busy = None;
+                self.snapshot = None;
+                self.parsed = None;
+                self.rows.clear();
+                self.lifecycle_generation = self.lifecycle_generation.wrapping_add(1);
+                self.operation_generation = self.operation_generation.wrapping_add(1);
+                cx.emit(WorkspacePickerEvent::StateChanged);
+                cx.notify();
+            }
+            CommandPaletteEvent::QueryChanged(query) => {
+                let value = query.text().to_owned();
+                self.refresh_for_input(value, window, cx);
+            }
+            CommandPaletteEvent::Activated(activation) => {
+                let path = activation.item_id().clone();
+                self.descend_to(path, window, cx);
+            }
+            CommandPaletteEvent::Confirmed => self.confirm_typed_path(window, cx),
+            CommandPaletteEvent::MenuAction(action) => match action.as_ref() {
+                FINDER_ACTION => self.request_finder(cx),
+                RETRY_ACTION => self.retry(window, cx),
+                SYSTEM_SETTINGS_ACTION => self.open_system_settings(cx),
+                _ => {}
+            },
+            CommandPaletteEvent::HeaderAction(_) => {}
         }
-        cx.emit(WorkspacePickerEvent::StateChanged);
-        cx.notify();
-        true
     }
 
     fn refresh_for_input(&mut self, value: String, window: &mut Window, cx: &mut Context<Self>) {
@@ -597,8 +484,8 @@ impl WorkspacePicker {
                 self.parsed = None;
                 self.status = WorkspacePickerStatus::Invalid(error);
                 self.operation_generation = self.operation_generation.wrapping_add(1);
-                cx.emit(WorkspacePickerEvent::StateChanged);
-                cx.notify();
+                self.clear_rows(cx);
+                self.publish(cx);
                 return;
             }
         };
@@ -609,7 +496,7 @@ impl WorkspacePicker {
         });
         self.parsed = Some(parsed.clone());
         if !listing_needed {
-            self.rebuild_rows();
+            self.rebuild_rows(cx);
         }
         self.status = WorkspacePickerStatus::Loading;
         self.operation_generation = self.operation_generation.wrapping_add(1);
@@ -638,8 +525,7 @@ impl WorkspacePicker {
             });
         })
         .detach();
-        cx.emit(WorkspacePickerEvent::StateChanged);
-        cx.notify();
+        self.publish(cx);
     }
 
     fn finish_refresh(&mut self, completion: RefreshCompletion, cx: &mut Context<Self>) {
@@ -657,13 +543,14 @@ impl WorkspacePicker {
 
         let listing_error = match completion.listing {
             Some(Ok(mut entries)) => {
-                entries.retain(|entry| self.input.read(cx).can_set_value_exactly(entry.name()));
+                let palette = self.palette.clone();
+                entries.retain(|entry| palette.read(cx).can_set_query_exactly(entry.name(), cx));
                 self.snapshot = Some(LoadedDirectorySnapshot {
                     directory: completion.parsed.enumeration_directory.clone(),
                     hide_dot_prefixed: completion.hide_dot_prefixed,
                     entries,
                 });
-                self.rebuild_rows();
+                self.rebuild_rows(cx);
                 None
             }
             Some(Err(error)) => Some(error),
@@ -682,11 +569,19 @@ impl WorkspacePicker {
                 WorkspacePickerExactPathProbe::Unavailable(error) => status_for_error(error),
             },
         };
-        cx.emit(WorkspacePickerEvent::StateChanged);
-        cx.notify();
+        if matches!(
+            self.status,
+            WorkspacePickerStatus::Missing
+                | WorkspacePickerStatus::NotDirectory
+                | WorkspacePickerStatus::PermissionDenied
+                | WorkspacePickerStatus::Other
+        ) {
+            self.clear_rows(cx);
+        }
+        self.publish(cx);
     }
 
-    fn rebuild_rows(&mut self) {
+    fn rebuild_rows(&mut self, cx: &mut Context<Self>) {
         let (Some(parsed), Some(snapshot)) = (self.parsed.as_ref(), self.snapshot.as_ref()) else {
             return;
         };
@@ -696,47 +591,26 @@ impl WorkspacePicker {
             return;
         }
         self.rows = filter_workspace_picker_rows(parsed, &snapshot.entries);
-        self.selected_path =
-            repair_workspace_picker_selection(self.selected_path.as_deref(), &self.rows);
-        self.list.reset(self.rows.len());
-        self.reveal_selected();
+        let items = self
+            .rows
+            .iter()
+            .cloned()
+            .map(directory_palette_item)
+            .collect();
+        self.palette
+            .update(cx, |palette, cx| palette.set_items(items, cx));
     }
 
-    fn reveal_selected(&mut self) {
-        if let Some(index) = self.selected_index() {
-            self.list.scroll_to_reveal_item(index);
-        }
+    fn clear_rows(&mut self, cx: &mut Context<Self>) {
+        self.rows.clear();
+        self.palette
+            .update(cx, |palette, cx| palette.set_items(Vec::new(), cx));
     }
 
-    fn selected_index(&self) -> Option<usize> {
-        let selected = self.selected_path.as_ref()?;
-        self.rows.iter().position(|row| row.path() == selected)
-    }
-
-    fn move_selection(&mut self, delta: isize, cx: &mut Context<Self>) {
-        if self.rows.is_empty() {
-            return;
-        }
-        let next = match self.selected_index() {
-            Some(index) => index.saturating_add_signed(delta).min(self.rows.len() - 1),
-            None if delta < 0 => self.rows.len() - 1,
-            None => 0,
-        };
-        self.selected_path = Some(self.rows[next].path().to_path_buf());
-        self.list.scroll_to_reveal_item(next);
-        cx.notify();
-    }
-
-    fn submit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.selected_path.is_some() {
-            self.descend_selected(window, cx);
-        } else {
-            self.confirm_typed_path(window, cx);
-        }
-    }
-
+    /// Descends into the row the palette has selected.
+    #[cfg(test)]
     fn descend_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(path) = self.selected_path.clone() else {
+        let Some(path) = self.palette.read(cx).selected_item_id().cloned() else {
             return;
         };
         self.descend_to(path, window, cx);
@@ -746,27 +620,15 @@ impl WorkspacePicker {
         let prefer_tilde = self
             .parsed
             .as_ref()
-            .is_some_and(|parsed| parsed.display().starts_with("~/"));
+            .is_some_and(|parsed| parsed.display().starts_with(HOME_DISPLAY));
         let Some(display) = self.representable_directory_display(&path, prefer_tilde, cx) else {
             self.status = WorkspacePickerStatus::Other;
-            cx.notify();
+            self.publish(cx);
             return;
         };
-        self.input
-            .update(cx, |input, cx| input.set_value(display.clone(), cx));
-        self.refresh_for_input(display, window, cx);
+        self.palette
+            .update(cx, |palette, cx| palette.set_query(display, cx));
         self.refocus_path(window, cx);
-    }
-
-    fn navigate_parent(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        let Some(parsed) = self.parsed.as_ref() else {
-            return false;
-        };
-        let Some((path, _)) = parent_workspace_directory(parsed, &self.home) else {
-            return false;
-        };
-        self.descend_to(path, window, cx);
-        true
     }
 
     fn confirm_typed_path(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -794,7 +656,6 @@ impl WorkspacePicker {
         cx: &mut Context<Self>,
     ) {
         self.busy = Some(WorkspacePickerBusy::CreationPrompt);
-        self.set_input_editable_deferred(false, window, cx);
         let detail = format!(
             "Create {}? Missing parent folders will also be created.",
             parsed.display()
@@ -828,16 +689,13 @@ impl WorkspacePicker {
                     );
                 } else {
                     picker.busy = None;
-                    picker.set_input_editable_deferred(true, window, cx);
                     picker.refocus_path(window, cx);
-                    cx.emit(WorkspacePickerEvent::StateChanged);
-                    cx.notify();
+                    picker.publish(cx);
                 }
             });
         })
         .detach();
-        cx.emit(WorkspacePickerEvent::StateChanged);
-        cx.notify();
+        self.publish(cx);
     }
 
     fn start_validation(
@@ -854,7 +712,6 @@ impl WorkspacePicker {
             ValidationKind::Creation => WorkspacePickerBusy::Creating,
             ValidationKind::Typed | ValidationKind::Finder => WorkspacePickerBusy::Validating,
         });
-        self.set_input_editable_deferred(false, window, cx);
         let expected_input_path = match kind {
             ValidationKind::Typed | ValidationKind::Creation => Some(path.clone()),
             ValidationKind::Finder => self
@@ -887,8 +744,7 @@ impl WorkspacePicker {
             });
         })
         .detach();
-        cx.emit(WorkspacePickerEvent::StateChanged);
-        cx.notify();
+        self.publish(cx);
     }
 
     fn finish_validation(&mut self, completion: ValidationCompletion, cx: &mut Context<Self>) {
@@ -907,7 +763,9 @@ impl WorkspacePicker {
         match completion.result {
             Ok(directory) => {
                 self.busy = Some(WorkspacePickerBusy::AwaitingActivation);
+                self.sync_palette(cx);
                 cx.emit(WorkspacePickerEvent::Confirmed(directory));
+                cx.notify();
             }
             Err(error) => {
                 self.busy = None;
@@ -918,39 +776,22 @@ impl WorkspacePicker {
                 } else {
                     status_for_error(error)
                 };
-                self.input
-                    .update(cx, |input, cx| input.set_editable(true, cx));
-                cx.emit(WorkspacePickerEvent::StateChanged);
+                self.publish(cx);
             }
         }
-        cx.notify();
     }
 
-    fn request_finder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn request_finder(&mut self, cx: &mut Context<Self>) {
         if self.open && self.busy.is_none() {
             self.busy = Some(WorkspacePickerBusy::Finder);
-            self.set_input_editable_deferred(false, window, cx);
             cx.emit(WorkspacePickerEvent::FinderRequested);
-            cx.emit(WorkspacePickerEvent::StateChanged);
-            cx.notify();
+            self.publish(cx);
         }
-    }
-
-    fn set_input_editable_deferred(
-        &self,
-        editable: bool,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let input = self.input.clone();
-        window.defer(cx, move |_, cx| {
-            input.update(cx, |input, cx| input.set_editable(editable, cx));
-        });
     }
 
     fn retry(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.open && self.busy.is_none() {
-            let value = self.input.read(cx).value().to_owned();
+            let value = self.palette.read(cx).query().to_owned();
             self.snapshot = None;
             self.refresh_for_input(value, window, cx);
         }
@@ -959,38 +800,8 @@ impl WorkspacePicker {
     fn open_system_settings(&mut self, cx: &mut Context<Self>) {
         if self.system_settings.open_files_and_folders().is_err() {
             self.status = WorkspacePickerStatus::Other;
-            cx.notify();
+            self.publish(cx);
         }
-    }
-
-    fn boundary_key_down(
-        &mut self,
-        event: &KeyDownEvent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> bool {
-        if !self.input.read(cx).focus_handle().is_focused(window)
-            || event.keystroke.modifiers.modified()
-        {
-            return false;
-        }
-        let (selection, value_len) = {
-            let input = self.input.read(cx);
-            (input.selection(), input.value().len())
-        };
-        let should_navigate = if event.keystroke.key == "left" {
-            selection.is_empty() && selection.caret() == 0
-        } else if event.keystroke.key == "backspace" {
-            selection.is_empty()
-                && selection.caret() == value_len
-                && self
-                    .parsed
-                    .as_ref()
-                    .is_some_and(|parsed| parsed.leaf_filter().is_empty())
-        } else {
-            false
-        };
-        should_navigate && self.navigate_parent(window, cx)
     }
 
     fn can_confirm(&self) -> bool {
@@ -1009,402 +820,80 @@ impl WorkspacePicker {
         }
     }
 
-    fn inline_message(&self) -> Option<(&'static str, Option<&'static str>)> {
+    /// The one line shown when the current path lists nothing.
+    ///
+    /// A missing folder needs no separate warning: the confirm control already reads
+    /// `Create & Add`.
+    fn empty_text(&self) -> &'static str {
         match self.status {
-            WorkspacePickerStatus::Missing => Some((
-                "No such folder.",
-                Some("Missing parent folders will also be created."),
-            )),
-            WorkspacePickerStatus::NotDirectory => Some(("Not a folder.", None)),
-            WorkspacePickerStatus::Other => None,
-            WorkspacePickerStatus::Invalid(error) => Some((error.message(), None)),
-            _ => None,
+            WorkspacePickerStatus::Loading => "Reading\u{2026}",
+            WorkspacePickerStatus::Missing => "No such folder",
+            WorkspacePickerStatus::NotDirectory => "Not a folder",
+            WorkspacePickerStatus::PermissionDenied => {
+                "SpaceTerm needs permission to read this folder"
+            }
+            WorkspacePickerStatus::Other => "SpaceTerm couldn\u{2019}t read this folder",
+            WorkspacePickerStatus::Invalid(error) => error.message(),
+            WorkspacePickerStatus::Readable => "No folders here",
         }
     }
 
-    fn scrollbar_metrics(&self) -> Option<ScrollMetrics<f32>> {
-        let track_height = f32::from(self.list.viewport_bounds().size.height);
-        let maximum_offset = f32::from(self.list.max_offset_for_scrollbar().height);
-        let offset = f32::from(-self.list.scroll_px_offset_for_scrollbar().y);
-        ScrollMetrics::for_pixels(0.0, track_height, maximum_offset, offset)
+    fn actions_menu(&self) -> Vec<MenuEntry<SharedString>> {
+        let mut entries = vec![
+            MenuEntry::action("Choose with Finder\u{2026}", FINDER_ACTION.into())
+                .disabled(self.busy.is_some())
+                .debug_selector(FINDER_ACTION),
+        ];
+        if self.status == WorkspacePickerStatus::PermissionDenied {
+            entries.push(MenuEntry::separator());
+            entries.push(
+                MenuEntry::action("Retry", RETRY_ACTION.into())
+                    .disabled(self.busy.is_some())
+                    .debug_selector(RETRY_ACTION),
+            );
+            entries.push(
+                MenuEntry::action("Open System Settings", SYSTEM_SETTINGS_ACTION.into())
+                    .debug_selector(SYSTEM_SETTINGS_ACTION),
+            );
+        }
+        entries
     }
 
-    fn render_add_button(
-        &self,
-        id: &'static str,
-        selector: &'static str,
-        picker: gpui::WeakEntity<Self>,
-    ) -> Button {
-        Button::new(id, self.confirmation_label())
-            .variant(ButtonVariant::Primary)
-            .size(ButtonSize::Small)
+    fn sync_palette(&self, cx: &mut Context<Self>) {
+        let confirm = CommandPaletteConfirm::new(self.confirmation_label())
             .disabled(!self.can_confirm())
-            .tab_stop(true)
-            .debug_selector(selector)
-            .trailing(|foreground| {
-                div()
-                    .text_size(px(10.0))
-                    .text_color(foreground)
-                    .child("⌘↵")
-                    .into_any_element()
-            })
-            .on_activate(move |_, window, cx| {
-                let _ = picker.update(cx, |picker, cx| picker.confirm_typed_path(window, cx));
-            })
+            .debug_selector("workspace-picker-confirm");
+        let empty_text = self.empty_text();
+        let actions = self.actions_menu();
+        let loading = self.busy.is_some();
+        self.palette.update(cx, |palette, cx| {
+            palette.set_confirm(Some(confirm), cx);
+            palette.set_no_results_text(empty_text, cx);
+            palette.set_actions_menu(actions, cx);
+            palette.set_loading(loading, cx);
+        });
     }
 
-    fn render_rows(&self, height: Pixels, cx: &mut Context<Self>) -> gpui::AnyElement {
-        let rows: Rc<[WorkspacePickerRow]> = self.rows.clone().into();
-        let selected = self.selected_path.clone();
-        let picker = cx.entity().downgrade();
-        div()
-            .relative()
-            .size_full()
-            .child(
-                list(self.list.clone(), move |index, _, _| {
-                    let Some(row) = rows.get(index).cloned() else {
-                        return div().into_any_element();
-                    };
-                    let path = row.path().to_path_buf();
-                    let selected = selected.as_deref() == Some(path.as_path());
-                    let click_picker = picker.clone();
-                    div()
-                        .id(("workspace-picker-row", index))
-                        .debug_selector(move || format!("workspace-picker-row-{index}"))
-                        .w_full()
-                        .h(px(ROW_HEIGHT))
-                        .px_3()
-                        .flex()
-                        .items_center()
-                        .gap_2()
-                        .rounded(px(5.0))
-                        .cursor_default()
-                        .when(selected, |row| {
-                            row.bg(gpui_color(ACTIVE_THEME.element_selected))
-                        })
-                        .child(
-                            Icon::new(if matches!(row, WorkspacePickerRow::Parent { .. }) {
-                                "arrow.up"
-                            } else {
-                                "folder"
-                            })
-                            .size(px(13.0))
-                            .color(gpui_color(ACTIVE_THEME.icon_muted)),
-                        )
-                        .child(format!(
-                            "{}{}",
-                            row.name(),
-                            if matches!(row, WorkspacePickerRow::Directory(_)) {
-                                "/"
-                            } else {
-                                ""
-                            }
-                        ))
-                        .on_mouse_down(MouseButton::Left, move |event, window, cx| {
-                            window.prevent_default();
-                            let path = path.clone();
-                            let _ = click_picker.update(cx, |picker, cx| {
-                                picker.selected_path = Some(path.clone());
-                                picker.reveal_selected();
-                                if event.click_count >= 2 {
-                                    picker.descend_to(path, window, cx);
-                                } else {
-                                    cx.notify();
-                                }
-                            });
-                            cx.stop_propagation();
-                        })
-                        .into_any_element()
-                })
-                .h(height)
-                .w_full(),
-            )
-            .child(self.scrollbar.clone())
-            .into_any_element()
-    }
-
-    fn render_read_failure_body(&self) -> gpui::AnyElement {
-        div()
-            .debug_selector(|| "workspace-picker-read-failure".to_owned())
-            .size_full()
-            .flex()
-            .items_center()
-            .justify_center()
-            .child("SpaceTerm couldn’t read this folder")
-            .into_any_element()
-    }
-
-    fn render_permission_body(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
-        let retry_picker = cx.entity().downgrade();
-        let settings_picker = retry_picker.clone();
-        div()
-            .debug_selector(|| "workspace-picker-permission".to_owned())
-            .size_full()
-            .flex()
-            .flex_col()
-            .items_center()
-            .justify_center()
-            .gap_3()
-            .child("SpaceTerm needs permission to read this folder")
-            .child(
-                div()
-                    .flex()
-                    .gap_2()
-                    .child(
-                        Button::new("workspace-picker-retry", "Retry")
-                            .tab_stop(true)
-                            .on_activate(move |_, window, cx| {
-                                let _ =
-                                    retry_picker.update(cx, |picker, cx| picker.retry(window, cx));
-                            }),
-                    )
-                    .child(
-                        Button::new(
-                            "workspace-picker-open-system-settings",
-                            "Open System Settings",
-                        )
-                        .tab_stop(true)
-                        .on_activate(move |_, _, cx| {
-                            let _ = settings_picker
-                                .update(cx, |picker, cx| picker.open_system_settings(cx));
-                        }),
-                    ),
-            )
-            .into_any_element()
-    }
-
-    fn render_panel(
-        &self,
-        width: Pixels,
-        height: Pixels,
-        cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
-        let picker = cx.entity().downgrade();
-        let back_picker = picker.clone();
-        let finder_picker = picker.clone();
-        let capture_picker = picker.clone();
-        let list_height = (height - px(166.0)).max(px(0.0));
-        let inline_message = self.inline_message();
-        let body = match self.status {
-            WorkspacePickerStatus::PermissionDenied => self.render_permission_body(cx),
-            WorkspacePickerStatus::Other => self.render_read_failure_body(),
-            _ => self.render_rows(list_height, cx),
-        };
-        let back_disabled = self
-            .parsed
-            .as_ref()
-            .and_then(|parsed| parent_workspace_directory(parsed, &self.home))
-            .is_none();
-
-        div()
-            .debug_selector(|| "workspace-picker-panel".to_owned())
-            .w(width)
-            .h(height)
-            .flex()
-            .flex_col()
-            .overflow_hidden()
-            .rounded(px(10.0))
-            .border_1()
-            .border_color(gpui_color(ACTIVE_THEME.border_variant))
-            .bg(gpui_color(ACTIVE_THEME.elevated_surface_background))
-            .text_color(gpui_color(ACTIVE_THEME.text))
-            .text_size(px(13.0))
-            .child(
-                div()
-                    .w_full()
-                    .flex_shrink_0()
-                    .px_3()
-                    .py_2()
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .border_b_1()
-                    .border_color(gpui_color(ACTIVE_THEME.border_variant))
-                    .child(
-                        div()
-                            .w_full()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .capture_key_down(move |event, window, cx| {
-                                let consumed = capture_picker
-                                    .update(cx, |picker, cx| {
-                                        picker.boundary_key_down(event, window, cx)
-                                    })
-                                    .unwrap_or(false);
-                                if consumed {
-                                    window.prevent_default();
-                                    cx.stop_propagation();
-                                }
-                            })
-                            .child(
-                                IconButton::new(
-                                    "workspace-picker-back",
-                                    "Parent folder",
-                                    |foreground| {
-                                        Icon::new("chevron.left")
-                                            .weight(SymbolWeight::Semibold)
-                                            .size(px(14.0))
-                                            .color(foreground)
-                                            .into_any_element()
-                                    },
-                                )
-                                .disabled(back_disabled)
-                                .tab_stop(true)
-                                .debug_selector("workspace-picker-back")
-                                .on_activate(
-                                    move |_, window, cx| {
-                                        let _ = back_picker.update(cx, |picker, cx| {
-                                            picker.navigate_parent(window, cx)
-                                        });
-                                    },
-                                ),
-                            )
-                            .child(div().min_w_0().flex_1().child(self.input.clone()))
-                            .child(self.render_add_button(
-                                "workspace-picker-header-add",
-                                "workspace-picker-header-add",
-                                picker.clone(),
-                            )),
-                    )
-                    .when_some(inline_message, |header, (message, detail)| {
-                        header.child(
-                            div()
-                                .pl(px(34.0))
-                                .text_size(px(11.0))
-                                .text_color(gpui_color(ACTIVE_THEME.warning))
-                                .child(message)
-                                .when_some(detail, |line, detail| line.child(format!(" {detail}"))),
-                        )
-                    }),
-            )
-            .child(
-                div()
-                    .min_h_0()
-                    .flex_1()
-                    .flex()
-                    .flex_col()
-                    .child(
-                        div()
-                            .h(px(30.0))
-                            .flex_shrink_0()
-                            .px_4()
-                            .flex()
-                            .items_center()
-                            .text_size(px(10.0))
-                            .text_color(gpui_color(ACTIVE_THEME.text_muted))
-                            .child("DIRECTORIES"),
-                    )
-                    .child(body),
-            )
-            .child(
-                div()
-                    .w_full()
-                    .h(px(66.0))
-                    .flex_shrink_0()
-                    .px_3()
-                    .py_2()
-                    .flex()
-                    .flex_col()
-                    .justify_between()
-                    .border_t_1()
-                    .border_color(gpui_color(ACTIVE_THEME.border_variant))
-                    .child(
-                        div()
-                            .text_size(px(10.0))
-                            .text_color(gpui_color(ACTIVE_THEME.text_muted))
-                            .child("↑↓ navigate   Tab complete   ↵ open   ⌘↵ add   Esc close"),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .justify_end()
-                            .gap_2()
-                            .child(
-                                Button::new("workspace-picker-finder", "Choose with Finder…")
-                                    .tab_stop(true)
-                                    .disabled(self.busy.is_some())
-                                    .debug_selector("workspace-picker-finder")
-                                    .on_activate(move |_, window, cx| {
-                                        let _ = finder_picker.update(cx, |picker, cx| {
-                                            picker.request_finder(window, cx)
-                                        });
-                                    }),
-                            )
-                            .child(self.render_add_button(
-                                "workspace-picker-footer-add",
-                                "workspace-picker-footer-add",
-                                picker,
-                            )),
-                    ),
-            )
-            .into_any_element()
-    }
-
-    fn render_outside_tracker(
-        &self,
-        panel_bounds: Bounds<Pixels>,
-        cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
-        let picker = cx.entity().downgrade();
-        canvas(
-            |_, _, _| (),
-            move |_, _, window, _| {
-                window.on_mouse_event(move |event: &MouseDownEvent, phase, window, cx| {
-                    if !phase.capture()
-                        || event.button != MouseButton::Left
-                        || panel_bounds.contains(&event.position)
-                    {
-                        return;
-                    }
-                    window.prevent_default();
-                    let _ = picker.update(cx, |picker, cx| picker.dismiss_from_scrim(window, cx));
-                    cx.stop_propagation();
-                });
-            },
-        )
-        .absolute()
-        .inset_0()
-        .into_any_element()
+    fn publish(&mut self, cx: &mut Context<Self>) {
+        self.sync_palette(cx);
+        cx.emit(WorkspacePickerEvent::StateChanged);
+        cx.notify();
     }
 }
 
-impl Render for WorkspacePicker {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if !self.open {
-            return div().into_any_element();
-        }
-        self.scrollbar.update(cx, |scrollbar, cx| {
-            scrollbar.sync(self.scrollbar_metrics(), cx)
-        });
-        let viewport = window.viewport_size();
-        let width = px(PANEL_MAX_WIDTH).min((viewport.width - px(WINDOW_INSET * 2.0)).max(px(0.0)));
-        let height =
-            px(PANEL_MAX_HEIGHT).min((viewport.height - px(WINDOW_INSET * 2.0)).max(px(0.0)));
-        let left = ((viewport.width - width) / 2.0).max(px(0.0));
-        let top = ((viewport.height - height) / 2.0).max(px(0.0));
-        let bounds = Bounds::new(gpui::point(left, top), gpui::size(width, height));
-        let outside = self.render_outside_tracker(bounds, cx);
-        let panel = self.render_panel(width, height, cx);
+/// Keeps a hierarchy shortcut from mutating Workspaces, Windows, or Panes behind the open picker.
+///
+/// The Command Palette owns focus, pointer, and dismissal isolation, but the application's
+/// hierarchy actions are registered above it and would otherwise still fire.
+fn block_parent_action<A: Action>(_: &A, _: &mut Window, cx: &mut App) {
+    cx.stop_propagation();
+}
 
-        anchored()
-            .anchor(Corner::TopLeft)
-            .position(gpui::point(px(0.0), px(0.0)))
-            .snap_to_window()
-            .child(
-                div()
-                    .debug_selector(|| "workspace-picker-overlay".to_owned())
-                    .relative()
-                    .w(viewport.width)
-                    .h(viewport.height)
-                    .key_context(KEY_CONTEXT)
-                    .track_focus(&self.focus_scope)
-                    .tab_group()
-                    .bg(gpui_color(ACTIVE_THEME.overlay_scrim))
-                    .occlude()
-                    .child(outside)
-                    .child(div().absolute().left(left).top(top).child(panel))
+impl Render for WorkspacePicker {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .when(self.open, |picker| {
+                picker
                     .capture_action(block_parent_action::<CreateWorkspace>)
                     .capture_action(block_parent_action::<SearchWorkspaces>)
                     .capture_action(block_parent_action::<CloseWorkspace>)
@@ -1443,73 +932,29 @@ impl Render for WorkspacePicker {
                     .capture_action(block_parent_action::<FindNext>)
                     .capture_action(block_parent_action::<FindPrevious>)
                     .capture_action(block_parent_action::<CloseTerminalFind>)
-                    .on_mouse_down(MouseButton::Left, |_, window, cx| {
-                        window.prevent_default();
-                        cx.stop_propagation();
-                    })
-                    .on_mouse_down(MouseButton::Right, |_, window, cx| {
-                        window.prevent_default();
-                        cx.stop_propagation();
-                    })
-                    .on_mouse_down(MouseButton::Middle, |_, window, cx| {
-                        window.prevent_default();
-                        cx.stop_propagation();
-                    })
-                    .on_mouse_move(|_: &MouseMoveEvent, window, cx| {
-                        window.prevent_default();
-                        cx.stop_propagation();
-                    })
-                    .on_mouse_up(MouseButton::Left, |_: &MouseUpEvent, window, cx| {
-                        window.prevent_default();
-                        cx.stop_propagation();
-                    })
-                    .on_mouse_up(MouseButton::Right, |_: &MouseUpEvent, window, cx| {
-                        window.prevent_default();
-                        cx.stop_propagation();
-                    })
-                    .on_mouse_up(MouseButton::Middle, |_: &MouseUpEvent, window, cx| {
-                        window.prevent_default();
-                        cx.stop_propagation();
-                    })
-                    .on_scroll_wheel(|_: &ScrollWheelEvent, window, cx| {
-                        window.prevent_default();
-                        cx.stop_propagation();
-                    })
-                    .on_action(cx.listener(|picker, _: &PickerMoveUp, _, cx| {
-                        picker.move_selection(-1, cx);
-                        cx.stop_propagation();
-                    }))
-                    .on_action(cx.listener(|picker, _: &PickerMoveDown, _, cx| {
-                        picker.move_selection(1, cx);
-                        cx.stop_propagation();
-                    }))
-                    .on_action(cx.listener(|picker, _: &PickerConfirmTyped, window, cx| {
-                        picker.confirm_typed_path(window, cx);
-                        cx.stop_propagation();
-                    }))
-                    .on_action(cx.listener(|picker, _: &PickerDismiss, window, cx| {
-                        if picker.dismiss(window, cx) {
-                            cx.stop_propagation();
-                        }
-                    }))
-                    .on_action(cx.listener(|_, _: &PickerFocusNext, window, cx| {
-                        window.focus_next();
-                        cx.stop_propagation();
-                    }))
-                    .on_action(cx.listener(|_, _: &PickerFocusPrevious, window, cx| {
-                        window.focus_prev();
-                        cx.stop_propagation();
-                    })),
-            )
-            .into_any_element()
+            })
+            .child(self.palette.clone())
     }
+}
+
+fn directory_palette_item(entry: WorkspacePickerDirectoryEntry) -> CommandPaletteItem<PathBuf> {
+    let icon_color = gpui_color(ACTIVE_THEME.icon_muted);
+    let selector = format!("workspace-picker-row-{}", entry.name());
+    CommandPaletteItem::new(entry.path().to_path_buf(), format!("{}/", entry.name()))
+        .leading_icon(move |_| {
+            Icon::new("folder")
+                .size(px(ROW_ICON_SIZE))
+                .color(icon_color)
+                .into_any_element()
+        })
+        .debug_selector(selector)
 }
 
 fn status_for_error(error: WorkspacePickerFilesystemError) -> WorkspacePickerStatus {
     match error {
-        WorkspacePickerFilesystemError::PermissionDenied => WorkspacePickerStatus::PermissionDenied,
         WorkspacePickerFilesystemError::Missing => WorkspacePickerStatus::Missing,
         WorkspacePickerFilesystemError::NotDirectory => WorkspacePickerStatus::NotDirectory,
+        WorkspacePickerFilesystemError::PermissionDenied => WorkspacePickerStatus::PermissionDenied,
         WorkspacePickerFilesystemError::Other => WorkspacePickerStatus::Other,
     }
 }
@@ -1520,11 +965,10 @@ fn gpui_color(color: Color) -> gpui::Rgba {
 
 #[cfg(test)]
 mod tests {
-    use std::cell::Cell;
     use std::collections::VecDeque;
     use std::sync::Mutex;
 
-    use gpui::{Modifiers, TestAppContext, VisualTestContext};
+    use gpui::{TestAppContext, VisualTestContext, div};
 
     use super::*;
     use crate::domain::WorkspaceDirectoryIdentity;
@@ -1534,6 +978,7 @@ mod tests {
     struct ScriptedWorkspacePickerFilesystemState {
         readable_paths: Vec<PathBuf>,
         listed_entries: Vec<WorkspacePickerDirectoryEntry>,
+        listing_error: Option<WorkspacePickerFilesystemError>,
         probed_paths: Vec<PathBuf>,
         created_paths: Vec<PathBuf>,
         validated_paths: Vec<PathBuf>,
@@ -1569,6 +1014,10 @@ mod tests {
             self.state.lock().unwrap().listed_entries = entries.into_iter().collect();
         }
 
+        fn set_listing_error(&self, error: WorkspacePickerFilesystemError) {
+            self.state.lock().unwrap().listing_error = Some(error);
+        }
+
         fn clear_records(&self) {
             let mut state = self.state.lock().unwrap();
             state.probed_paths.clear();
@@ -1592,7 +1041,10 @@ mod tests {
             _directory: &Path,
             _hide_dot_prefixed: bool,
         ) -> Result<Vec<WorkspacePickerDirectoryEntry>, WorkspacePickerFilesystemError> {
-            Ok(self.state.lock().unwrap().listed_entries.clone())
+            let state = self.state.lock().unwrap();
+            state
+                .listing_error
+                .map_or_else(|| Ok(state.listed_entries.clone()), Err)
         }
 
         fn probe_exact_path(&self, path: &Path) -> WorkspacePickerExactPathProbe {
@@ -1645,40 +1097,6 @@ mod tests {
         }
     }
 
-    #[derive(Default)]
-    struct UnderlayPointerEvents {
-        moves: Cell<usize>,
-        releases: Cell<usize>,
-    }
-
-    struct PointerIsolationHarness {
-        picker: Entity<WorkspacePicker>,
-        underlay_events: Rc<UnderlayPointerEvents>,
-    }
-
-    impl Render for PointerIsolationHarness {
-        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-            let move_events = Rc::clone(&self.underlay_events);
-            let release_events = Rc::clone(&self.underlay_events);
-            div()
-                .size_full()
-                .child(
-                    div()
-                        .absolute()
-                        .inset_0()
-                        .on_mouse_move(move |_, _, _| {
-                            move_events.moves.set(move_events.moves.get() + 1);
-                        })
-                        .on_mouse_up(MouseButton::Left, move |_, _, _| {
-                            release_events
-                                .releases
-                                .set(release_events.releases.get() + 1);
-                        }),
-                )
-                .child(self.picker.clone())
-        }
-    }
-
     fn home() -> PathBuf {
         PathBuf::from("/Users/tester")
     }
@@ -1708,15 +1126,28 @@ mod tests {
     }
 
     fn set_input(picker: &Entity<WorkspacePicker>, value: &str, cx: &mut VisualTestContext) {
-        cx.update(|window, cx| {
+        cx.update(|_, cx| {
             picker.update(cx, |picker, cx| {
                 picker
-                    .input
-                    .update(cx, |input, cx| input.set_value(value, cx));
-                picker.refresh_for_input(value.to_owned(), window, cx);
+                    .palette
+                    .update(cx, |palette, cx| palette.set_query(value, cx));
             });
         });
         cx.run_until_parked();
+    }
+
+    fn path_bar(picker: &Entity<WorkspacePicker>, cx: &mut VisualTestContext) -> String {
+        picker.read_with(cx, |picker, cx| picker.palette.read(cx).query().to_owned())
+    }
+
+    fn row_names(picker: &Entity<WorkspacePicker>, cx: &mut VisualTestContext) -> Vec<String> {
+        picker.read_with(cx, |picker, _| {
+            picker
+                .rows
+                .iter()
+                .map(|entry| entry.name().to_owned())
+                .collect()
+        })
     }
 
     #[test]
@@ -1822,41 +1253,35 @@ mod tests {
     }
 
     #[test]
-    fn workspace_picker_parent_navigation_preserves_home_display_until_leaving_home() {
-        let nested = parse_workspace_path("~/Projects/SpaceTerm/", &home()).unwrap();
-        let home_path = parse_workspace_path("~/", &home()).unwrap();
-
+    fn workspace_picker_display_keeps_home_relative_spelling_inside_home() {
         assert_eq!(
-            parent_workspace_directory(&nested, &home()),
-            Some((
-                PathBuf::from("/Users/tester/Projects"),
-                "~/Projects/".to_owned(),
-            ))
+            display_workspace_directory_with_style(
+                &home().join("Projects/SpaceTerm"),
+                &home(),
+                true
+            ),
+            Some("~/Projects/SpaceTerm/".to_owned())
         );
         assert_eq!(
-            parent_workspace_directory(&home_path, &home()),
-            Some((PathBuf::from("/Users"), "/Users/".to_owned()))
+            display_workspace_directory_with_style(&home(), &home(), true),
+            Some("~/".to_owned())
         );
     }
 
     #[test]
-    fn workspace_picker_parent_navigation_preserves_absolute_style_inside_home() {
-        let parsed = parse_workspace_path("/Users/tester/Projects/SpaceTerm", &home()).unwrap();
-
+    fn workspace_picker_display_keeps_absolute_spelling_even_inside_home() {
         assert_eq!(
-            parent_workspace_directory(&parsed, &home()),
-            Some((
-                PathBuf::from("/Users/tester/Projects"),
-                "/Users/tester/Projects/".to_owned(),
-            ))
+            display_workspace_directory_with_style(
+                &home().join("Projects/SpaceTerm"),
+                &home(),
+                false
+            ),
+            Some("/Users/tester/Projects/SpaceTerm/".to_owned())
         );
-    }
-
-    #[test]
-    fn workspace_picker_root_has_no_parent_navigation() {
-        let root = parse_workspace_path("/", &home()).unwrap();
-
-        assert_eq!(parent_workspace_directory(&root, &home()), None);
+        assert_eq!(
+            display_workspace_directory_with_style(&PathBuf::from("/"), &home(), true),
+            Some("/".to_owned())
+        );
     }
 
     #[test]
@@ -1896,54 +1321,33 @@ mod tests {
 
         assert_eq!(
             rows.iter()
-                .map(WorkspacePickerRow::name)
+                .map(WorkspacePickerDirectoryEntry::name)
                 .collect::<Vec<_>>(),
-            vec!["..", "SpaceTerm", "spaceTerm", "Spatial"]
+            vec!["SpaceTerm", "spaceTerm", "Spatial"]
         );
     }
 
     #[test]
-    fn workspace_picker_parent_row_is_unfiltered_and_root_has_no_parent_row() {
+    fn workspace_picker_rows_never_include_a_parent_entry() {
         let filtered = parse_workspace_path("~/Projects/no-match", &home()).unwrap();
-        let root = parse_workspace_path("/", &home()).unwrap();
+        let nested = parse_workspace_path("~/Projects/", &home()).unwrap();
         let entries = [WorkspacePickerDirectoryEntry::new(
             "SpaceTerm".to_owned(),
             home().join("Projects/SpaceTerm"),
         )];
 
+        assert!(
+            filter_workspace_picker_rows(&filtered, &entries).is_empty(),
+            "a leaf matching nothing still produced a row"
+        );
         assert_eq!(
-            filter_workspace_picker_rows(&filtered, &entries),
-            vec![WorkspacePickerRow::Parent { path: home() }]
+            filter_workspace_picker_rows(&nested, &entries)
+                .iter()
+                .map(WorkspacePickerDirectoryEntry::name)
+                .collect::<Vec<_>>(),
+            vec!["SpaceTerm"],
+            "a nested directory listing gained an entry it did not read"
         );
-        assert!(filter_workspace_picker_rows(&root, &[]).is_empty());
-    }
-
-    #[test]
-    fn workspace_picker_selection_preserves_exact_path_or_uses_first_folder() {
-        let parsed = parse_workspace_path("~/Projects/s", &home()).unwrap();
-        let first = home().join("Projects/SpaceTerm");
-        let second = home().join("Projects/spatial");
-        let rows = filter_workspace_picker_rows(
-            &parsed,
-            &[
-                WorkspacePickerDirectoryEntry::new("spatial".to_owned(), second.clone()),
-                WorkspacePickerDirectoryEntry::new("SpaceTerm".to_owned(), first.clone()),
-            ],
-        );
-
-        assert_eq!(
-            repair_workspace_picker_selection(Some(&second), &rows),
-            Some(second)
-        );
-        assert_eq!(repair_workspace_picker_selection(None, &rows), Some(first));
-    }
-
-    #[test]
-    fn workspace_picker_selection_is_empty_when_only_parent_row_remains() {
-        let parsed = parse_workspace_path("~/Projects/no-match", &home()).unwrap();
-        let rows = filter_workspace_picker_rows(&parsed, &[]);
-
-        assert_eq!(repair_workspace_picker_selection(None, &rows), None);
     }
 
     #[gpui::test]
@@ -1968,14 +1372,7 @@ mod tests {
             WorkspacePickerDirectoryEntry::new("project\nx".to_owned(), unrepresentable_path),
         ]);
         let (picker, cx) = workspace_picker(Arc::clone(&filesystem), cx);
-        let initial_rows = picker.read_with(cx, |picker, _| {
-            picker
-                .rows
-                .iter()
-                .map(WorkspacePickerRow::name)
-                .map(str::to_owned)
-                .collect::<Vec<_>>()
-        });
+        let initial_rows = row_names(&picker, cx);
         filesystem.clear_records();
 
         cx.update(|window, cx| {
@@ -1987,11 +1384,12 @@ mod tests {
         });
         cx.run_until_parked();
 
+        let path_bar = path_bar(&picker, cx);
         assert_eq!(
-            picker.read_with(cx, |picker, cx| {
+            picker.read_with(cx, |picker, _| {
                 (
                     initial_rows,
-                    picker.input.read(cx).value().to_owned(),
+                    path_bar,
                     picker
                         .parsed
                         .as_ref()
@@ -2000,7 +1398,7 @@ mod tests {
                 )
             }),
             (
-                vec!["..".to_owned(), "project x".to_owned()],
+                vec!["project x".to_owned()],
                 "~/project x/".to_owned(),
                 Some(representable_path.clone()),
                 (
@@ -2029,16 +1427,17 @@ mod tests {
 
         cx.update(|window, cx| {
             picker.update(cx, |picker, cx| {
-                picker.request_finder(window, cx);
+                picker.request_finder(cx);
                 picker.validate_finder_selection(finder_path.clone(), window, cx);
             });
         });
         cx.run_until_parked();
 
+        let path_bar = path_bar(&picker, cx);
         assert_eq!(
-            picker.read_with(cx, |picker, cx| {
+            picker.read_with(cx, |picker, _| {
                 (
-                    picker.input.read(cx).value().to_owned(),
+                    path_bar,
                     picker
                         .parsed
                         .as_ref()
@@ -2057,54 +1456,125 @@ mod tests {
     }
 
     #[gpui::test]
-    fn workspace_picker_shift_tab_leaves_the_path_and_tab_returns_from_a_button(
-        cx: &mut TestAppContext,
-    ) {
-        let filesystem = Arc::new(ScriptedWorkspacePickerFilesystem::default());
+    fn workspace_picker_should_present_exactly_one_confirm_control(cx: &mut TestAppContext) {
+        let filesystem = Arc::new(ScriptedWorkspacePickerFilesystem::new([home()], []));
         let (picker, cx) = workspace_picker(filesystem, cx);
-        assert!(cx.update(|window, cx| { picker.read(cx).path_input_is_focused(window, cx) }));
 
-        cx.simulate_keystrokes("shift-tab");
-        assert!(!cx.update(|window, cx| { picker.read(cx).path_input_is_focused(window, cx) }));
-
-        cx.simulate_keystrokes("tab");
-        assert!(cx.update(|window, cx| { picker.read(cx).path_input_is_focused(window, cx) }));
+        assert!(
+            cx.debug_bounds("workspace-picker-confirm").is_some(),
+            "the picker did not render its confirm control"
+        );
+        // The confirm control and the Finder Fallback are the only footer actions; the old panel
+        // repeated the confirm in its header as well.
+        assert!(
+            cx.debug_bounds("workspace-picker-header-add").is_none(),
+            "the picker rendered a second confirm control in its header"
+        );
+        assert!(
+            cx.debug_bounds("workspace-picker-panel").is_none(),
+            "the picker rendered its own panel instead of the Command Palette"
+        );
+        assert_eq!(
+            picker.read_with(cx, |picker, _| picker.confirmation_label()),
+            "Add"
+        );
     }
 
     #[gpui::test]
-    fn workspace_picker_overlay_occludes_underlay_pointer_movement_and_release(
-        cx: &mut TestAppContext,
-    ) {
-        cx.update(crate::ui::init);
-        let filesystem: Arc<dyn WorkspacePickerFilesystem + Send + Sync> =
-            Arc::new(ScriptedWorkspacePickerFilesystem::default());
-        let system_settings: Rc<dyn SystemSettingsOpener> = Rc::new(TestSystemSettingsOpener);
-        let underlay_events = Rc::new(UnderlayPointerEvents::default());
-        let harness_events = Rc::clone(&underlay_events);
-        let (harness, cx) = cx.add_window_view(move |window, cx| {
-            let picker =
-                cx.new(|cx| WorkspacePicker::new(home(), filesystem, system_settings, window, cx));
-            PointerIsolationHarness {
-                picker,
-                underlay_events: harness_events,
-            }
+    fn a_missing_folder_should_be_expressed_only_by_the_confirm_label(cx: &mut TestAppContext) {
+        let filesystem = Arc::new(ScriptedWorkspacePickerFilesystem::new([home()], []));
+        let (picker, cx) = workspace_picker(filesystem, cx);
+
+        set_input(&picker, "~/jkasdf", cx);
+
+        assert_eq!(
+            picker.read_with(cx, |picker, _| (
+                picker.status,
+                picker.confirmation_label(),
+                picker.can_confirm(),
+                picker.empty_text(),
+            )),
+            (
+                WorkspacePickerStatus::Missing,
+                "Create & Add",
+                true,
+                "No such folder",
+            )
+        );
+    }
+
+    #[gpui::test]
+    fn the_finder_fallback_should_be_one_click_from_the_footer(cx: &mut TestAppContext) {
+        let filesystem = Arc::new(ScriptedWorkspacePickerFilesystem::new([home()], []));
+        let (picker, cx) = workspace_picker(filesystem, cx);
+
+        assert_eq!(
+            picker.read_with(cx, |picker, _| picker.actions_menu().len()),
+            1
+        );
+        assert!(
+            cx.debug_bounds("workspace-picker-finder").is_some(),
+            "the Finder Fallback was not offered directly"
+        );
+        assert!(
+            cx.debug_bounds("command-palette-actions-menu").is_none(),
+            "the lone Finder Fallback was hidden behind a disclosure"
+        );
+    }
+
+    #[gpui::test]
+    fn an_unreadable_folder_should_offer_recovery_from_the_actions_menu(cx: &mut TestAppContext) {
+        let filesystem = Arc::new(ScriptedWorkspacePickerFilesystem::new([home()], []));
+        filesystem.set_listing_error(WorkspacePickerFilesystemError::PermissionDenied);
+        let (picker, cx) = workspace_picker(Arc::clone(&filesystem), cx);
+
+        set_input(&picker, "/locked/", cx);
+
+        let (status, empty_text, actions) = picker.read_with(cx, |picker, _| {
+            (
+                picker.status,
+                picker.empty_text(),
+                picker.actions_menu().len(),
+            )
         });
-        let picker = harness.read_with(cx, |harness, _| harness.picker.clone());
+        assert_eq!(
+            (status, empty_text),
+            (
+                WorkspacePickerStatus::PermissionDenied,
+                "SpaceTerm needs permission to read this folder",
+            )
+        );
+        // Choose with Finder, a separator, Retry, and Open System Settings; only a readable folder
+        // leaves the Finder Fallback alone in the footer.
+        assert_eq!(actions, 4);
+        assert!(
+            cx.debug_bounds("workspace-picker-permission").is_none(),
+            "the picker rendered a centred permission body instead of using its empty state"
+        );
+    }
+
+    #[gpui::test]
+    fn activating_a_row_should_descend_without_closing_the_picker(cx: &mut TestAppContext) {
+        let nested = home().join("Projects");
+        let filesystem = Arc::new(ScriptedWorkspacePickerFilesystem::new(
+            [home(), nested.clone()],
+            [],
+        ));
+        filesystem.set_listed_entries([WorkspacePickerDirectoryEntry::new(
+            "Projects".to_owned(),
+            nested.clone(),
+        )]);
+        let (picker, cx) = workspace_picker(filesystem, cx);
+
         cx.update(|window, cx| {
-            window.activate_window();
-            picker.update(cx, |picker, cx| {
-                picker.open(window, cx);
-            });
+            picker.update(cx, |picker, cx| picker.descend_selected(window, cx));
         });
         cx.run_until_parked();
 
-        let scrim = gpui::point(px(4.0), px(4.0));
-        cx.simulate_mouse_move(scrim, MouseButton::Left, Modifiers::none());
-        cx.simulate_mouse_up(scrim, MouseButton::Left, Modifiers::none());
-
-        assert_eq!(
-            (underlay_events.moves.get(), underlay_events.releases.get()),
-            (0, 0)
+        assert_eq!(path_bar(&picker, cx), "~/Projects/".to_owned());
+        assert!(
+            picker.read_with(cx, |picker, _| picker.is_open()),
+            "descending into a folder closed the picker"
         );
     }
 
@@ -2137,10 +1607,11 @@ mod tests {
             );
         });
 
+        let path_bar = path_bar(&picker, cx);
         assert_eq!(
-            picker.read_with(cx, |picker, cx| {
+            picker.read_with(cx, |picker, _| {
                 (
-                    picker.input.read(cx).value().to_owned(),
+                    path_bar,
                     picker
                         .parsed
                         .as_ref()
@@ -2180,7 +1651,7 @@ mod tests {
 
         cx.update(|window, cx| {
             picker.update(cx, |picker, cx| {
-                picker.request_finder(window, cx);
+                picker.request_finder(cx);
                 picker.validate_finder_selection(finder_path.clone(), window, cx);
             });
         });
@@ -2196,7 +1667,7 @@ mod tests {
         cx.simulate_prompt_answer("Create & Add");
         cx.run_until_parked();
 
-        let input = picker.read_with(cx, |picker, cx| picker.input.read(cx).value().to_owned());
+        let input = path_bar(&picker, cx);
         assert_eq!(
             (input, filesystem.records()),
             (
