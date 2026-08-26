@@ -5,9 +5,9 @@ use std::sync::Arc;
 
 use gpui::prelude::*;
 use gpui::{
-    App, Bounds, Context, Corner, Entity, EventEmitter, KeyBinding, KeyDownEvent, ListAlignment,
-    ListState, MouseButton, MouseDownEvent, Pixels, PromptButton, PromptLevel, Render,
-    ScrollWheelEvent, WeakFocusHandle, Window, actions, anchored, canvas, div, list, px,
+    Action, App, Bounds, Context, Corner, Entity, EventEmitter, KeyBinding, KeyDownEvent,
+    ListAlignment, ListState, MouseButton, MouseDownEvent, Pixels, PromptButton, PromptLevel,
+    Render, ScrollWheelEvent, WeakFocusHandle, Window, actions, anchored, canvas, div, list, px,
 };
 use gpui_symbols::{Icon, SymbolWeight};
 use spaceterm_ui::{
@@ -15,6 +15,16 @@ use spaceterm_ui::{
     ScrollMetrics, TextInput, TextInputEvent, TextInputTabBehavior, TextInputVariant,
 };
 
+use super::{
+    ActivateWindow1, ActivateWindow2, ActivateWindow3, ActivateWindow4, ActivateWindow5,
+    ActivateWindow6, ActivateWindow7, ActivateWindow8, ActivateWindow9, ActivateWorkspace1,
+    ActivateWorkspace2, ActivateWorkspace3, ActivateWorkspace4, ActivateWorkspace5,
+    ActivateWorkspace6, ActivateWorkspace7, ActivateWorkspace8, ActivateWorkspace9, ClosePane,
+    CloseTerminalFind, CloseWindow, CloseWorkspace, CopySelection, CreateWindow, CreateWorkspace,
+    FindNext, FindPrevious, FocusPaneDown, FocusPaneLeft, FocusPaneRight, FocusPaneUp,
+    OpenTerminalFind, SearchWorkspaces, SplitDown, SplitRight, TogglePaneZoom, ToggleSidebar,
+    ToggleSidebarFocus,
+};
 use crate::domain::ValidatedWorkspaceDirectory;
 use crate::platform::macos_system_settings::SystemSettingsOpener;
 use crate::platform::workspace_picker_filesystem::{
@@ -48,6 +58,10 @@ pub(super) fn init(cx: &mut App) {
         KeyBinding::new("cmd-enter", PickerConfirmTyped, Some(KEY_CONTEXT)),
         KeyBinding::new("escape", PickerDismiss, Some(KEY_CONTEXT)),
     ]);
+}
+
+fn block_parent_action<A: Action>(_: &A, _: &mut Window, cx: &mut App) {
+    cx.stop_propagation();
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -443,6 +457,11 @@ impl WorkspacePicker {
         if self.open {
             self.input.read(cx).focus_handle().focus(window);
         }
+    }
+
+    #[cfg(test)]
+    pub(super) fn path_input_is_focused(&self, window: &Window, cx: &App) -> bool {
+        self.input.read(cx).focus_handle().is_focused(window)
     }
 
     pub(super) fn dismiss(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
@@ -1371,6 +1390,44 @@ impl Render for WorkspacePicker {
                     .bg(gpui_color(ACTIVE_THEME.overlay_scrim))
                     .child(outside)
                     .child(div().absolute().left(left).top(top).child(panel))
+                    .capture_action(block_parent_action::<CreateWorkspace>)
+                    .capture_action(block_parent_action::<SearchWorkspaces>)
+                    .capture_action(block_parent_action::<CloseWorkspace>)
+                    .capture_action(block_parent_action::<ActivateWorkspace1>)
+                    .capture_action(block_parent_action::<ActivateWorkspace2>)
+                    .capture_action(block_parent_action::<ActivateWorkspace3>)
+                    .capture_action(block_parent_action::<ActivateWorkspace4>)
+                    .capture_action(block_parent_action::<ActivateWorkspace5>)
+                    .capture_action(block_parent_action::<ActivateWorkspace6>)
+                    .capture_action(block_parent_action::<ActivateWorkspace7>)
+                    .capture_action(block_parent_action::<ActivateWorkspace8>)
+                    .capture_action(block_parent_action::<ActivateWorkspace9>)
+                    .capture_action(block_parent_action::<ToggleSidebar>)
+                    .capture_action(block_parent_action::<ToggleSidebarFocus>)
+                    .capture_action(block_parent_action::<CopySelection>)
+                    .capture_action(block_parent_action::<CreateWindow>)
+                    .capture_action(block_parent_action::<ActivateWindow1>)
+                    .capture_action(block_parent_action::<ActivateWindow2>)
+                    .capture_action(block_parent_action::<ActivateWindow3>)
+                    .capture_action(block_parent_action::<ActivateWindow4>)
+                    .capture_action(block_parent_action::<ActivateWindow5>)
+                    .capture_action(block_parent_action::<ActivateWindow6>)
+                    .capture_action(block_parent_action::<ActivateWindow7>)
+                    .capture_action(block_parent_action::<ActivateWindow8>)
+                    .capture_action(block_parent_action::<ActivateWindow9>)
+                    .capture_action(block_parent_action::<ClosePane>)
+                    .capture_action(block_parent_action::<CloseWindow>)
+                    .capture_action(block_parent_action::<SplitRight>)
+                    .capture_action(block_parent_action::<SplitDown>)
+                    .capture_action(block_parent_action::<FocusPaneLeft>)
+                    .capture_action(block_parent_action::<FocusPaneRight>)
+                    .capture_action(block_parent_action::<FocusPaneUp>)
+                    .capture_action(block_parent_action::<FocusPaneDown>)
+                    .capture_action(block_parent_action::<TogglePaneZoom>)
+                    .capture_action(block_parent_action::<OpenTerminalFind>)
+                    .capture_action(block_parent_action::<FindNext>)
+                    .capture_action(block_parent_action::<FindPrevious>)
+                    .capture_action(block_parent_action::<CloseTerminalFind>)
                     .on_mouse_down(MouseButton::Left, |_, window, cx| {
                         window.prevent_default();
                         cx.stop_propagation();

@@ -2605,6 +2605,66 @@ mod tests {
     }
 
     #[gpui::test]
+    fn workspace_picker_should_block_parent_shortcuts_and_keep_path_focus(cx: &mut TestAppContext) {
+        let (manager, records, cx) = workspace_manager(cx);
+        cx.simulate_keystrokes("cmd-n");
+        click("open-local-project-button", cx);
+        let baseline = manager.read_with(cx, |manager, cx| {
+            (
+                manager.workspaces.len(),
+                manager
+                    .workspaces
+                    .active_workspace()
+                    .payload()
+                    .read(cx)
+                    .aggregate_counts(cx),
+                records.starts().len(),
+            )
+        });
+
+        cx.simulate_keystrokes("cmd-n");
+        assert_eq!(
+            manager.read_with(cx, |manager, _| manager.workspaces.len()),
+            baseline.0
+        );
+
+        cx.simulate_keystrokes("cmd-p");
+        let focus_state = cx.update(|window, cx| {
+            let manager = manager.read(cx);
+            (
+                manager.workspace_search.read(cx).blocks_terminal_input(),
+                manager
+                    .workspace_picker
+                    .read(cx)
+                    .path_input_is_focused(window, cx),
+                manager
+                    .workspaces
+                    .active_workspace()
+                    .payload()
+                    .read(cx)
+                    .focused_terminal_is_focused(window, cx),
+            )
+        });
+        assert_eq!(focus_state, (false, true, false));
+
+        cx.simulate_keystrokes("cmd-t");
+        cx.simulate_keystrokes("cmd-w");
+        let hierarchy = manager.read_with(cx, |manager, cx| {
+            (
+                manager.workspaces.len(),
+                manager
+                    .workspaces
+                    .active_workspace()
+                    .payload()
+                    .read(cx)
+                    .aggregate_counts(cx),
+                records.starts().len(),
+            )
+        });
+        assert_eq!(hierarchy, baseline);
+    }
+
+    #[gpui::test]
     fn equivalent_local_project_selections_should_preserve_the_first_path_and_deduplicate(
         cx: &mut TestAppContext,
     ) {
