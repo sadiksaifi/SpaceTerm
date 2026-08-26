@@ -5203,7 +5203,7 @@ mod tests {
         cx.simulate_keystrokes("cmd-=");
         let after = pane.read_with(cx, |pane, _cx| pane.font_size());
 
-        assert_eq!((before, after), (14.0, 15.0));
+        assert_eq!((before, after), (18.0, 19.0));
     }
 
     #[gpui::test]
@@ -6000,7 +6000,7 @@ mod tests {
         cx.simulate_keystrokes("cmd--");
         let after = pane.read_with(cx, |pane, _cx| pane.font_size());
 
-        assert_eq!((before, after), (14.0, 13.0));
+        assert_eq!((before, after), (18.0, 17.0));
     }
 
     #[gpui::test]
