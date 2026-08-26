@@ -1863,7 +1863,9 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
         let input_focus = self.input.read(cx).focus_handle();
         input_focus.focus(window);
         let mut last_internal = input_focus;
-        let maximum_steps = self.header_actions.len() + usize::from(!self.actions_menu.is_empty());
+        let maximum_steps = self.header_actions.len()
+            + usize::from(!self.actions_menu.is_empty())
+            + usize::from(self.confirm.is_some());
         for _ in 0..maximum_steps {
             window.focus_next();
             if !self.focus_scope.contains_focused(window, cx) {
@@ -4159,6 +4161,28 @@ mod tests {
                 .focus_handle()
                 .is_focused(window)
         }));
+        assert_eq!(
+            palette.read_with(cx, |palette, _| palette.query().to_owned()),
+            "x"
+        );
+    }
+
+    #[gpui::test]
+    fn shift_tab_from_query_should_reach_a_confirm_only_footer(cx: &mut TestAppContext) {
+        let (root, palette, _, _, cx) = palette_window(cx);
+        palette.update(cx, |palette, cx| {
+            palette.set_confirm(Some(CommandPaletteConfirm::new("Add")), cx);
+        });
+        open_palette(&root, &palette, cx);
+
+        cx.simulate_keystrokes("shift-tab");
+        cx.run_until_parked();
+
+        assert!(!cx.update(|window, cx| palette.read(cx).editor_is_focused(window, cx)));
+
+        cx.simulate_keystrokes("tab x");
+        cx.run_until_parked();
+
         assert_eq!(
             palette.read_with(cx, |palette, _| palette.query().to_owned()),
             "x"
