@@ -26,6 +26,8 @@
 | **Active Window** | The one Window selected within a Workspace. | Tab, selected Window, focused Window |
 | **Focused Pane** | The one Pane selected by a Window for Pane operations and focus restoration. | Active Pane, selected Pane, Terminal Input Focus |
 | **Terminal Input Focus** | Transient truth that a Pane may accept terminal key input because its Workspace and Window are Active, it is the Focused Pane and current responder, its Operating-System Window and SpaceTerm are active, and no temporary UI owner blocks it. | Focused Pane, selected terminal |
+| **Workspace Chip** | The Active Workspace's icon, name, and pinned state shown in the top-left chrome only while the sidebar is hidden; it is a label, never a control. | breadcrumb, workspace switcher |
+| **Workspace Chip** | The Active Workspace's icon, name, and pinned state shown in the top-left chrome only while the sidebar is hidden; it is a label, never a control. | breadcrumb, workspace switcher |
 | **New Workspace Panel** | The transient chooser that presents every Workspace Source as one row and performs no lifecycle action itself; it blocks Terminal Input Focus while open. | New Workspace command, workspace wizard |
 | **Workspace Source** | The one row of the New Workspace Panel that produces a Workspace: Scratch, Local Project, or Remote Project. | Workspace Kind, project type |
 | **Workspace Picker** | The transient in-app, keyboard-first, one-level filesystem navigator that is the primary Open Local Project selection mechanism and blocks Terminal Input Focus while open. | project index, recent projects, file browser |
@@ -98,6 +100,8 @@
 - A **Local Project Workspace** preserves its exact selected or typed **Project Root** spelling and deduplicates equivalent selections by macOS device/file identity.
 - The **Workspace Picker** is the primary **Open Local Project** path. It starts at `HOME` on every open, performs live one-level directory reads, and owns no recents, index, persistence, fuzzy matching, or filesystem watching.
 - A **Workspace Source** names the origin a Workspace is created from; a **Workspace Kind** is what the created Workspace immutably is. Remote Project is a listed Source with no selection path yet.
+- A **Workspace Chip** never duplicates the sidebar: it appears only while the sidebar is hidden, because an Active row already names the **Active Workspace**.
+- A **Workspace Chip** never duplicates the sidebar: it appears only while the sidebar is hidden, because an Active row already names the **Active Workspace**.
 - The **New Workspace Panel** performs no lifecycle action. Choosing Local Project replaces it with the **Workspace Picker**, and Escape there returns to the panel while any other dismissal ends the flow.
 - The **Finder Fallback** remains behind the open **Workspace Picker**; cancellation restores the picker unchanged, while selection joins the same background validation and Local Project identity-deduplication flow.
 - Only the **Directory Authority** may update a Scratch **Workspace Directory**. Closing it promotes the first remaining Pane in Pane Layout order, or the root Pane of the first remaining Window when its Window closes.

@@ -65,6 +65,11 @@ const SIDEBAR_HEADER_TRAILING_PADDING: f32 = SIDEBAR_TOGGLE_INSET;
 const SIDEBAR_HEADER_ACTION_GAP: f32 = 0.0;
 const SIDEBAR_ROW_HORIZONTAL_PADDING: f32 = 12.0;
 const SIDEBAR_ROW_ICON_SIZE: f32 = 14.0;
+const SIDEBAR_ROW_PIN_ICON_SIZE: f32 = 9.0;
+/// Clearance for the native traffic lights that share the top-left chrome strip.
+const TRAFFIC_LIGHT_CLEARANCE: f32 = 82.0;
+const WORKSPACE_CHIP_ICON_SIZE: f32 = 11.0;
+const WORKSPACE_CHIP_TEXT_SIZE: f32 = 11.0;
 const SIDEBAR_NAME_TEXT_SIZE: f32 = 13.0;
 const SIDEBAR_DETAIL_TEXT_SIZE: f32 = 11.0;
 const NEW_WORKSPACE_BUTTON_HEIGHT: f32 = 40.0;
@@ -1796,12 +1801,87 @@ impl WorkspaceManager {
         window.dispatch_action(action.boxed_clone(), cx);
     }
 
+    /// The Active Workspace's identity, shown in the top-left chrome only while the sidebar is
+    /// hidden.
+    ///
+    /// With the sidebar open its highlighted row already answers "which Workspace is this", so the
+    /// chip would be duplicate chrome; with it closed nothing on screen does.
+    fn render_workspace_chip(&self) -> AnyElement {
+        let workspace = self.workspaces.active_workspace();
+        let local_project = matches!(workspace.kind(), WorkspaceKind::LocalProject { .. });
+        let available = workspace.availability().is_available();
+        let name = workspace.name().to_owned();
+        let path = compact_home_path(workspace.working_directory(), &self.default_workspace_root);
+        let foreground = gpui_color(if available {
+            ACTIVE_THEME.text
+        } else {
+            ACTIVE_THEME.warning
+        });
+        let icon_color = gpui_color(if !available {
+            ACTIVE_THEME.warning
+        } else if local_project {
+            ACTIVE_THEME.icon
+        } else {
+            ACTIVE_THEME.icon_muted
+        });
+        let tooltip_detail = path.clone();
+
+        let chip = div()
+            .id("workspace-chip")
+            .debug_selector(|| "workspace-chip".to_owned())
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(5.0))
+            .min_w_0()
+            .child(
+                Icon::new(if local_project { "folder" } else { "terminal" })
+                    .size(px(WORKSPACE_CHIP_ICON_SIZE))
+                    .color(icon_color),
+            )
+            .child(
+                div()
+                    .min_w_0()
+                    .truncate()
+                    .text_size(px(WORKSPACE_CHIP_TEXT_SIZE))
+                    .text_color(foreground)
+                    .child(name.clone()),
+            )
+            .when(local_project, |chip| {
+                chip.child(
+                    Icon::new("pin.fill")
+                        .size(px(SIDEBAR_ROW_PIN_ICON_SIZE))
+                        .color(gpui_color(ACTIVE_THEME.icon_muted)),
+                )
+            });
+
+        Tooltip::new("workspace-chip-tooltip", name)
+            .detail(tooltip_detail)
+            .debug_selector("workspace-chip-tooltip")
+            .attach(chip, TooltipTargetVisibility::Visible)
+            .into_any_element()
+    }
+
     fn render_top_left_chrome(&self, manager: WeakEntity<Self>) -> AnyElement {
         let drag_manager = manager.clone();
         let toggle_manager = manager;
         let content = div()
             .relative()
             .size_full()
+            .when(!self.sidebar_visible, |chrome| {
+                chrome.child(
+                    div()
+                        .absolute()
+                        .top_0()
+                        .bottom_0()
+                        .left(px(TRAFFIC_LIGHT_CLEARANCE))
+                        .right(px(TRAFFIC_LIGHT_CLEARANCE / 2.0))
+                        .flex()
+                        .items_center()
+                        .min_w_0()
+                        .child(self.render_workspace_chip()),
+                )
+            })
             .child(
                 div()
                     .id("workspace-top-chrome-bottom-divider")
@@ -2029,16 +2109,51 @@ impl WorkspaceManager {
                             ),
                     )
                     .child(
+                        // The path carries the Workspace Kind: a Local Project is pinned to it,
+                        // so it reads as settled text with a pin, while a Scratch Workspace's
+                        // path follows its Directory Authority and stays muted. Watching one move
+                        // once teaches the difference that no label explains as well.
                         div()
                             .w_full()
-                            .overflow_hidden()
-                            .text_size(px(SIDEBAR_DETAIL_TEXT_SIZE))
-                            .text_color(gpui_color(if available {
-                                ACTIVE_THEME.text_muted
-                            } else {
-                                ACTIVE_THEME.warning
-                            }))
-                            .child(MiddleTruncatedText::new(path, maximum_path_characters)),
+                            .min_w_0()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap(px(4.0))
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .flex_1()
+                                    .overflow_hidden()
+                                    .text_size(px(SIDEBAR_DETAIL_TEXT_SIZE))
+                                    .text_color(gpui_color(if !available {
+                                        ACTIVE_THEME.warning
+                                    } else if local_project {
+                                        ACTIVE_THEME.text
+                                    } else {
+                                        ACTIVE_THEME.text_muted
+                                    }))
+                                    .child(MiddleTruncatedText::new(path, maximum_path_characters)),
+                            )
+                            .when(local_project, |line| {
+                                line.child(
+                                    div()
+                                        .id(("workspace-row-pin", workspace_id.get()))
+                                        .debug_selector(move || {
+                                            format!("workspace-row-pin-{}", workspace_id.get())
+                                        })
+                                        .flex_shrink_0()
+                                        .child(
+                                            Icon::new("pin.fill")
+                                                .size(px(SIDEBAR_ROW_PIN_ICON_SIZE))
+                                                .color(gpui_color(if available {
+                                                    ACTIVE_THEME.icon_muted
+                                                } else {
+                                                    ACTIVE_THEME.warning
+                                                })),
+                                        ),
+                                )
+                            }),
                     ),
             )
             .child(
@@ -3207,6 +3322,12 @@ mod tests {
         cx.run_until_parked();
     }
 
+    fn redraw(cx: &mut VisualTestContext) {
+        cx.run_until_parked();
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+    }
+
     fn right_click(selector: &'static str, cx: &mut VisualTestContext) {
         let position = cx
             .debug_bounds(selector)
@@ -3695,6 +3816,92 @@ mod tests {
                 )
             }),
             (1, true)
+        );
+    }
+
+    #[gpui::test]
+    fn only_a_pinned_workspace_row_should_carry_a_pin(cx: &mut TestAppContext) {
+        let project = temporary_directory("pinned-project");
+        fs::create_dir_all(&project).unwrap();
+        let (manager, _, cx) = workspace_manager_with_picker([Ok(Some(project))], cx);
+
+        choose_with_finder_fallback(cx);
+
+        let (scratch_id, project_id) = manager.read_with(cx, |manager, _| {
+            let mut scratch = None;
+            let mut project = None;
+            for workspace in manager.workspaces.iter() {
+                match workspace.kind() {
+                    WorkspaceKind::Scratch { .. } => scratch = Some(workspace.id().get()),
+                    WorkspaceKind::LocalProject { .. } => project = Some(workspace.id().get()),
+                }
+            }
+            (
+                scratch.expect("the initial Scratch Workspace must remain"),
+                project.expect("the Local Project Workspace was not created"),
+            )
+        });
+
+        assert!(
+            cx.debug_bounds(format!("workspace-row-pin-{project_id}").leak())
+                .is_some(),
+            "the Local Project row lost the pin that says its directory never moves"
+        );
+        assert!(
+            cx.debug_bounds(format!("workspace-row-pin-{scratch_id}").leak())
+                .is_none(),
+            "a Scratch Workspace must not claim a pinned directory"
+        );
+    }
+
+    #[gpui::test]
+    fn the_workspace_chip_should_appear_only_while_the_sidebar_is_hidden(cx: &mut TestAppContext) {
+        let (manager, _, cx) = workspace_manager(cx);
+
+        assert!(
+            cx.debug_bounds("workspace-chip").is_none(),
+            "the sidebar already answers which Workspace is active"
+        );
+
+        click("toggle-sidebar-button", cx);
+
+        assert!(!manager.read_with(cx, |manager, _| manager.sidebar_visible));
+        assert!(
+            cx.debug_bounds("workspace-chip").is_some(),
+            "nothing named the Active Workspace once the sidebar closed"
+        );
+
+        cx.simulate_keystrokes("cmd-b");
+        redraw(cx);
+
+        assert!(
+            cx.debug_bounds("workspace-chip").is_none(),
+            "the chip outlived the sidebar it stands in for"
+        );
+    }
+
+    #[gpui::test]
+    fn the_workspace_chip_should_follow_the_active_workspace(cx: &mut TestAppContext) {
+        let (manager, _, cx) = workspace_manager(cx);
+
+        click("toggle-sidebar-button", cx);
+        cx.simulate_keystrokes("cmd-n");
+        redraw(cx);
+
+        let chip = cx
+            .debug_bounds("workspace-chip")
+            .expect("the chip was not rendered for the new Active Workspace");
+        let toggle = cx
+            .debug_bounds("toggle-sidebar-button")
+            .expect("the sidebar toggle was not rendered");
+
+        assert_eq!(
+            manager.read_with(cx, |manager, _| manager.workspaces.len()),
+            2
+        );
+        assert!(
+            chip.origin.x + chip.size.width <= toggle.origin.x,
+            "the chip overlapped the sidebar toggle: {chip:?} {toggle:?}"
         );
     }
 
