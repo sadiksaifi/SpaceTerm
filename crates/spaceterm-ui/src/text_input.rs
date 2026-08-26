@@ -959,6 +959,12 @@ impl TextInput {
     pub fn value(&self) -> &str {
         &self.buffer.text
     }
+    /// Returns whether [`Self::set_value`] would preserve `value` byte-for-byte.
+    pub fn can_set_value_exactly(&self, value: &str) -> bool {
+        value.len() <= self.input_length_limit
+            && value.len() <= HARD_VALUE_LIMIT
+            && !value.chars().any(requires_single_line_normalization)
+    }
     /// Returns the monotonic content revision.
     pub fn revision(&self) -> u64 {
         self.revision
@@ -2336,6 +2342,10 @@ fn marked_text_runs(display: &str, marked: Option<Range<usize>>, base: TextRun) 
     .collect()
 }
 
+fn requires_single_line_normalization(ch: char) -> bool {
+    matches!(ch, '\r' | '\n' | '\t' | '\u{2028}' | '\u{2029}') || ch.is_control()
+}
+
 fn visit_normalized_single_line(text: &str, mut visit: impl FnMut(char)) {
     let mut chars = text.chars().peekable();
     while let Some(ch) = chars.next() {
@@ -2346,8 +2356,7 @@ fn visit_normalized_single_line(text: &str, mut visit: impl FnMut(char)) {
                 }
                 visit(' ');
             }
-            '\n' | '\t' | '\u{2028}' | '\u{2029}' => visit(' '),
-            ch if ch.is_control() => visit(' '),
+            ch if requires_single_line_normalization(ch) => visit(' '),
             ch => visit(ch),
         }
     }

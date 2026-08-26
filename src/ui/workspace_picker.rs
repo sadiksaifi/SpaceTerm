@@ -523,20 +523,28 @@ impl WorkspacePicker {
             .parsed
             .as_ref()
             .is_some_and(|parsed| parsed.display().starts_with("~/"));
-        let Some(display) = display_workspace_directory_with_style(path, &self.home, prefer_tilde)
-        else {
+        let Some(display) = self.representable_directory_display(path, prefer_tilde, cx) else {
             return;
         };
         let Ok(parsed) = parse_workspace_path(&display, &self.home) else {
             return;
         };
-        let accepted = self.input.update(cx, |input, cx| {
-            input.set_value(display.clone(), cx);
-            input.value() == display
-        });
-        if accepted {
-            self.parsed = Some(parsed);
-        }
+        self.input
+            .update(cx, |input, cx| input.set_value(display, cx));
+        self.parsed = Some(parsed);
+    }
+
+    fn representable_directory_display(
+        &self,
+        path: &Path,
+        prefer_tilde: bool,
+        cx: &App,
+    ) -> Option<String> {
+        let display = display_workspace_directory_with_style(path, &self.home, prefer_tilde)?;
+        self.input
+            .read(cx)
+            .can_set_value_exactly(&display)
+            .then_some(display)
     }
 
     pub(super) fn complete_activation(
@@ -648,7 +656,8 @@ impl WorkspacePicker {
         }
 
         let listing_error = match completion.listing {
-            Some(Ok(entries)) => {
+            Some(Ok(mut entries)) => {
+                entries.retain(|entry| self.input.read(cx).can_set_value_exactly(entry.name()));
                 self.snapshot = Some(LoadedDirectorySnapshot {
                     directory: completion.parsed.enumeration_directory.clone(),
                     hide_dot_prefixed: completion.hide_dot_prefixed,
@@ -738,8 +747,7 @@ impl WorkspacePicker {
             .parsed
             .as_ref()
             .is_some_and(|parsed| parsed.display().starts_with("~/"));
-        let Some(display) = display_workspace_directory_with_style(&path, &self.home, prefer_tilde)
-        else {
+        let Some(display) = self.representable_directory_display(&path, prefer_tilde, cx) else {
             self.status = WorkspacePickerStatus::Other;
             cx.notify();
             return;
@@ -1525,6 +1533,7 @@ mod tests {
     #[derive(Default)]
     struct ScriptedWorkspacePickerFilesystemState {
         readable_paths: Vec<PathBuf>,
+        listed_entries: Vec<WorkspacePickerDirectoryEntry>,
         probed_paths: Vec<PathBuf>,
         created_paths: Vec<PathBuf>,
         validated_paths: Vec<PathBuf>,
@@ -1553,6 +1562,13 @@ mod tests {
             }
         }
 
+        fn set_listed_entries(
+            &self,
+            entries: impl IntoIterator<Item = WorkspacePickerDirectoryEntry>,
+        ) {
+            self.state.lock().unwrap().listed_entries = entries.into_iter().collect();
+        }
+
         fn clear_records(&self) {
             let mut state = self.state.lock().unwrap();
             state.probed_paths.clear();
@@ -1576,7 +1592,7 @@ mod tests {
             _directory: &Path,
             _hide_dot_prefixed: bool,
         ) -> Result<Vec<WorkspacePickerDirectoryEntry>, WorkspacePickerFilesystemError> {
-            Ok(Vec::new())
+            Ok(self.state.lock().unwrap().listed_entries.clone())
         }
 
         fn probe_exact_path(&self, path: &Path) -> WorkspacePickerExactPathProbe {
@@ -1928,6 +1944,116 @@ mod tests {
         let rows = filter_workspace_picker_rows(&parsed, &[]);
 
         assert_eq!(repair_workspace_picker_selection(None, &rows), None);
+    }
+
+    #[gpui::test]
+    fn workspace_picker_omits_unrepresentable_sibling_before_navigation_and_validation(
+        cx: &mut TestAppContext,
+    ) {
+        let representable_path = home().join("project x");
+        let unrepresentable_path = home().join("project\nx");
+        let filesystem = Arc::new(ScriptedWorkspacePickerFilesystem::new(
+            [
+                home(),
+                representable_path.clone(),
+                unrepresentable_path.clone(),
+            ],
+            [Ok(ValidatedWorkspaceDirectory::new(
+                representable_path.clone(),
+                WorkspaceDirectoryIdentity::new(7, 11),
+            ))],
+        ));
+        filesystem.set_listed_entries([
+            WorkspacePickerDirectoryEntry::new("project x".to_owned(), representable_path.clone()),
+            WorkspacePickerDirectoryEntry::new("project\nx".to_owned(), unrepresentable_path),
+        ]);
+        let (picker, cx) = workspace_picker(Arc::clone(&filesystem), cx);
+        let initial_rows = picker.read_with(cx, |picker, _| {
+            picker
+                .rows
+                .iter()
+                .map(WorkspacePickerRow::name)
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        });
+        filesystem.clear_records();
+
+        cx.update(|window, cx| {
+            picker.update(cx, |picker, cx| picker.descend_selected(window, cx));
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            picker.update(cx, |picker, cx| picker.confirm_typed_path(window, cx));
+        });
+        cx.run_until_parked();
+
+        assert_eq!(
+            picker.read_with(cx, |picker, cx| {
+                (
+                    initial_rows,
+                    picker.input.read(cx).value().to_owned(),
+                    picker
+                        .parsed
+                        .as_ref()
+                        .map(|parsed| parsed.exact_path().to_path_buf()),
+                    filesystem.records(),
+                )
+            }),
+            (
+                vec!["..".to_owned(), "project x".to_owned()],
+                "~/project x/".to_owned(),
+                Some(representable_path.clone()),
+                (
+                    vec![representable_path.clone()],
+                    Vec::new(),
+                    vec![representable_path],
+                ),
+            )
+        );
+    }
+
+    #[gpui::test]
+    fn finder_validation_accepts_unrepresentable_path_without_rebinding_the_path_bar(
+        cx: &mut TestAppContext,
+    ) {
+        let finder_path = home().join("project\nx");
+        let filesystem = Arc::new(ScriptedWorkspacePickerFilesystem::new(
+            [home()],
+            [Ok(ValidatedWorkspaceDirectory::new(
+                finder_path.clone(),
+                WorkspaceDirectoryIdentity::new(7, 11),
+            ))],
+        ));
+        let (picker, cx) = workspace_picker(Arc::clone(&filesystem), cx);
+        filesystem.clear_records();
+
+        cx.update(|window, cx| {
+            picker.update(cx, |picker, cx| {
+                picker.request_finder(window, cx);
+                picker.validate_finder_selection(finder_path.clone(), window, cx);
+            });
+        });
+        cx.run_until_parked();
+
+        assert_eq!(
+            picker.read_with(cx, |picker, cx| {
+                (
+                    picker.input.read(cx).value().to_owned(),
+                    picker
+                        .parsed
+                        .as_ref()
+                        .map(|parsed| parsed.exact_path().to_path_buf()),
+                    picker.busy,
+                    filesystem.records(),
+                )
+            }),
+            (
+                "~/".to_owned(),
+                Some(home()),
+                Some(WorkspacePickerBusy::AwaitingActivation),
+                (Vec::new(), Vec::new(), vec![finder_path]),
+            )
+        );
     }
 
     #[gpui::test]
