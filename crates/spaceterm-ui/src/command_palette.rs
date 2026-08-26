@@ -114,6 +114,13 @@ impl CommandPaletteCloseReason {
             Self::Activated | Self::Escape | Self::Outside | Self::Programmatic
         )
     }
+
+    const fn is_implicit_dismissal(self) -> bool {
+        matches!(
+            self,
+            Self::Escape | Self::Outside | Self::FocusLost | Self::Deactivated
+        )
+    }
 }
 
 /// One exact command-palette lifecycle transition.
@@ -947,6 +954,7 @@ pub struct CommandPalette<I: Clone + Eq + 'static> {
     query: String,
     generation: CommandPaletteGeneration,
     loading: bool,
+    dismissible: bool,
     open: bool,
     input: Entity<TextInput>,
     focus_scope: gpui::FocusHandle,
@@ -1267,6 +1275,7 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
             query: String::new(),
             generation: CommandPaletteGeneration::default(),
             loading: false,
+            dismissible: true,
             open: false,
             input,
             focus_scope,
@@ -1549,6 +1558,22 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
             self.loading = loading;
             cx.notify();
         }
+    }
+
+    /// Controls whether user, focus, or window transitions may dismiss the open palette.
+    ///
+    /// Explicit owner dismissal, replacement, completion, and item activation remain available.
+    pub fn set_dismissible(&mut self, dismissible: bool, cx: &mut gpui::Context<Self>) {
+        if self.dismissible != dismissible {
+            self.dismissible = dismissible;
+            cx.notify();
+        }
+    }
+
+    /// Controls user editing without preventing owner-driven query updates.
+    pub fn set_query_editable(&mut self, editable: bool, cx: &mut gpui::Context<Self>) {
+        self.input
+            .update(cx, |input, cx| input.set_editable(editable, cx));
     }
 
     /// Requests a refresh for the current query and returns its new generation.
@@ -1935,7 +1960,7 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
         window: &mut Window,
         cx: &mut gpui::Context<Self>,
     ) -> bool {
-        if !self.open {
+        if !self.open || (!self.dismissible && reason.is_implicit_dismissal()) {
             return false;
         }
         self.open = false;
@@ -4391,6 +4416,61 @@ mod tests {
                 source: CommandPaletteActivationSource::Pointer,
             }
         )));
+    }
+
+    #[gpui::test]
+    fn implicit_dismissal_lock_should_retain_palette_until_explicit_completion(
+        cx: &mut TestAppContext,
+    ) {
+        let (root, palette, events, _, cx) = palette_window(cx);
+        open_palette(&root, &palette, cx);
+        palette.update(cx, |palette, cx| palette.set_dismissible(false, cx));
+
+        cx.simulate_keystrokes("escape");
+        let panel = cx.debug_bounds("command-palette-panel").unwrap_or_default();
+        let outside = point(panel.left() - px(8.0), panel.bottom() + px(8.0));
+        cx.simulate_click(outside, Modifiers::default());
+        let intruder = root.read_with(cx, |root, _| root.intruder_focus.clone());
+        cx.update(|window, _| intruder.focus(window));
+        cx.deactivate_window();
+        cx.run_until_parked();
+
+        assert!(palette.read_with(cx, |palette, _| palette.is_open()));
+        assert!(!events.borrow().iter().any(|event| matches!(
+            event,
+            CommandPaletteEvent::Lifecycle(CommandPaletteLifecycleEvent::Closed(_))
+        )));
+
+        cx.update(|window, cx| {
+            palette.update(cx, |palette, cx| {
+                palette.dismiss_without_restoring_focus(window, cx);
+            });
+        });
+
+        assert!(!palette.read_with(cx, |palette, _| palette.is_open()));
+    }
+
+    #[gpui::test]
+    fn read_only_query_should_reject_user_edits_but_accept_owner_updates(cx: &mut TestAppContext) {
+        let (root, palette, _, _, cx) = palette_window(cx);
+        open_palette(&root, &palette, cx);
+        palette.update(cx, |palette, cx| {
+            palette.set_query("locked", cx);
+            palette.set_query_editable(false, cx);
+        });
+
+        cx.simulate_keystrokes("cmd-a x");
+        cx.run_until_parked();
+        assert_eq!(
+            palette.read_with(cx, |palette, _| palette.query().to_owned()),
+            "locked"
+        );
+
+        palette.update(cx, |palette, cx| palette.set_query("owner", cx));
+        assert_eq!(
+            palette.read_with(cx, |palette, _| palette.query().to_owned()),
+            "owner"
+        );
     }
 
     #[gpui::test]

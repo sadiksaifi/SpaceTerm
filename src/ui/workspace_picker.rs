@@ -316,6 +316,8 @@ impl WorkspacePicker {
         self.rows.clear();
         self.status = WorkspacePickerStatus::Loading;
         self.palette.update(cx, |palette, cx| {
+            palette.set_query_editable(true, cx);
+            palette.set_dismissible(true, cx);
             if palette.open(window, cx) {
                 // Every open starts at HOME; the picker retains no recents or last location.
                 palette.set_query(HOME_DISPLAY, cx);
@@ -345,7 +347,7 @@ impl WorkspacePicker {
     }
 
     pub(super) fn dismiss(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        if !self.open {
+        if !self.open || self.busy.is_some() {
             return false;
         }
         self.palette
@@ -355,8 +357,8 @@ impl WorkspacePicker {
     pub(super) fn finder_cancelled(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.open && self.busy == Some(WorkspacePickerBusy::Finder) {
             self.busy = None;
-            self.refocus_path(window, cx);
             self.publish(cx);
+            self.refocus_path(window, cx);
         }
     }
 
@@ -364,8 +366,8 @@ impl WorkspacePicker {
         if self.open && self.busy == Some(WorkspacePickerBusy::Finder) {
             self.busy = None;
             self.status = WorkspacePickerStatus::Other;
-            self.refocus_path(window, cx);
             self.publish(cx);
+            self.refocus_path(window, cx);
         }
     }
 
@@ -428,8 +430,8 @@ impl WorkspacePicker {
         if self.open && self.busy == Some(WorkspacePickerBusy::AwaitingActivation) {
             self.busy = None;
             self.status = WorkspacePickerStatus::Other;
-            self.refocus_path(window, cx);
             self.publish(cx);
+            self.refocus_path(window, cx);
         }
     }
 
@@ -661,6 +663,7 @@ impl WorkspacePicker {
         cx: &mut Context<Self>,
     ) {
         self.busy = Some(WorkspacePickerBusy::CreationPrompt);
+        self.publish(cx);
         let detail = format!(
             "Create {}? Missing parent folders will also be created.",
             parsed.display()
@@ -694,13 +697,12 @@ impl WorkspacePicker {
                     );
                 } else {
                     picker.busy = None;
-                    picker.refocus_path(window, cx);
                     picker.publish(cx);
+                    picker.refocus_path(window, cx);
                 }
             });
         })
         .detach();
-        self.publish(cx);
     }
 
     fn start_validation(
@@ -744,15 +746,20 @@ impl WorkspacePicker {
         });
         cx.spawn_in(window, async move |picker, cx| {
             let completion = background.await;
-            let _ = picker.update_in(cx, |picker, _, cx| {
-                picker.finish_validation(completion, cx);
+            let _ = picker.update_in(cx, |picker, window, cx| {
+                picker.finish_validation(completion, window, cx);
             });
         })
         .detach();
         self.publish(cx);
     }
 
-    fn finish_validation(&mut self, completion: ValidationCompletion, cx: &mut Context<Self>) {
+    fn finish_validation(
+        &mut self,
+        completion: ValidationCompletion,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if !self.open
             || self.lifecycle_generation != completion.lifecycle_generation
             || self.operation_generation != completion.operation_generation
@@ -782,6 +789,7 @@ impl WorkspacePicker {
                     status_for_error(error)
                 };
                 self.publish(cx);
+                self.refocus_path(window, cx);
             }
         }
     }
@@ -789,8 +797,8 @@ impl WorkspacePicker {
     fn request_finder(&mut self, cx: &mut Context<Self>) {
         if self.open && self.busy.is_none() {
             self.busy = Some(WorkspacePickerBusy::Finder);
-            cx.emit(WorkspacePickerEvent::FinderRequested);
             self.publish(cx);
+            cx.emit(WorkspacePickerEvent::FinderRequested);
         }
     }
 
@@ -876,6 +884,8 @@ impl WorkspacePicker {
             palette.set_no_results_text(empty_text, cx);
             palette.set_actions_menu(actions, cx);
             palette.set_loading(loading, cx);
+            palette.set_query_editable(!loading, cx);
+            palette.set_dismissible(!loading, cx);
         });
     }
 
@@ -973,7 +983,7 @@ mod tests {
     use std::collections::VecDeque;
     use std::sync::Mutex;
 
-    use gpui::{TestAppContext, VisualTestContext, div};
+    use gpui::{Keystroke, TestAppContext, VisualTestContext, div};
 
     use super::*;
     use crate::domain::WorkspaceDirectoryIdentity;
@@ -1626,6 +1636,204 @@ mod tests {
     }
 
     #[gpui::test]
+    fn finder_cancellation_should_survive_key_window_transitions(cx: &mut TestAppContext) {
+        let filesystem = Arc::new(ScriptedWorkspacePickerFilesystem::new([home()], []));
+        let (picker, cx) = workspace_picker(filesystem, cx);
+        let original_query = path_bar(&picker, cx);
+
+        picker.update(cx, |picker, cx| picker.request_finder(cx));
+        cx.deactivate_window();
+        cx.run_until_parked();
+        let retained_while_inactive =
+            picker.read_with(cx, |picker, _| (picker.is_open(), picker.busy));
+
+        cx.update(|window, _| window.activate_window());
+        cx.update(|window, cx| {
+            picker.update(cx, |picker, cx| picker.finder_cancelled(window, cx));
+        });
+        cx.run_until_parked();
+
+        assert_eq!(
+            retained_while_inactive,
+            (true, Some(WorkspacePickerBusy::Finder))
+        );
+        assert_eq!(path_bar(&picker, cx), original_query);
+        assert!(picker.read_with(cx, |picker, _| picker.is_open()));
+        assert!(cx.update(|window, cx| picker.read(cx).path_input_is_focused(window, cx)));
+    }
+
+    #[gpui::test]
+    fn finder_completion_should_survive_key_window_transitions(cx: &mut TestAppContext) {
+        let selected = home().join("Projects");
+        let filesystem = Arc::new(ScriptedWorkspacePickerFilesystem::new(
+            [home(), selected.clone()],
+            [Ok(ValidatedWorkspaceDirectory::new(
+                selected.clone(),
+                WorkspaceDirectoryIdentity::new(7, 11),
+            ))],
+        ));
+        let (picker, cx) = workspace_picker(filesystem, cx);
+
+        picker.update(cx, |picker, cx| picker.request_finder(cx));
+        cx.deactivate_window();
+        cx.run_until_parked();
+        cx.update(|window, _| window.activate_window());
+        cx.update(|window, cx| {
+            picker.update(cx, |picker, cx| {
+                picker.validate_finder_selection(selected, window, cx);
+            });
+        });
+        cx.run_until_parked();
+
+        assert_eq!(
+            picker.read_with(cx, |picker, _| (picker.is_open(), picker.busy)),
+            (true, Some(WorkspacePickerBusy::AwaitingActivation))
+        );
+    }
+
+    #[gpui::test]
+    fn creation_prompt_cancellation_should_survive_key_window_transitions(cx: &mut TestAppContext) {
+        let filesystem = Arc::new(ScriptedWorkspacePickerFilesystem::new([home()], []));
+        let (picker, cx) = workspace_picker(filesystem, cx);
+        set_input(&picker, "~/new-project", cx);
+
+        cx.update(|window, cx| {
+            picker.update(cx, |picker, cx| picker.confirm_typed_path(window, cx));
+        });
+        assert!(cx.has_pending_prompt());
+        cx.deactivate_window();
+        cx.run_until_parked();
+        cx.update(|window, _| window.activate_window());
+        cx.simulate_prompt_answer("Cancel");
+        cx.run_until_parked();
+
+        assert_eq!(path_bar(&picker, cx), "~/new-project");
+        assert_eq!(
+            picker.read_with(cx, |picker, _| (picker.is_open(), picker.busy)),
+            (true, None)
+        );
+        assert!(cx.update(|window, cx| picker.read(cx).path_input_is_focused(window, cx)));
+    }
+
+    #[gpui::test]
+    fn creation_prompt_completion_should_survive_key_window_transitions(cx: &mut TestAppContext) {
+        let path = home().join("new-project");
+        let filesystem = Arc::new(ScriptedWorkspacePickerFilesystem::new(
+            [home()],
+            [Ok(ValidatedWorkspaceDirectory::new(
+                path.clone(),
+                WorkspaceDirectoryIdentity::new(7, 11),
+            ))],
+        ));
+        let (picker, cx) = workspace_picker(Arc::clone(&filesystem), cx);
+        set_input(&picker, "~/new-project", cx);
+        filesystem.clear_records();
+
+        cx.update(|window, cx| {
+            picker.update(cx, |picker, cx| picker.confirm_typed_path(window, cx));
+        });
+        assert!(cx.has_pending_prompt());
+        cx.deactivate_window();
+        cx.run_until_parked();
+        cx.update(|window, _| window.activate_window());
+        cx.simulate_prompt_answer("Create & Add");
+        cx.run_until_parked();
+
+        assert_eq!(
+            (
+                picker.read_with(cx, |picker, _| (picker.is_open(), picker.busy)),
+                filesystem.records(),
+            ),
+            (
+                (true, Some(WorkspacePickerBusy::AwaitingActivation)),
+                (Vec::new(), vec![path.clone()], vec![path]),
+            )
+        );
+    }
+
+    #[gpui::test]
+    fn pending_validation_should_reject_query_mutation_and_dismissal(cx: &mut TestAppContext) {
+        let path = home().join("Projects");
+        let filesystem = Arc::new(ScriptedWorkspacePickerFilesystem::new(
+            [home(), path.clone()],
+            [Ok(ValidatedWorkspaceDirectory::new(
+                path.clone(),
+                WorkspaceDirectoryIdentity::new(7, 11),
+            ))],
+        ));
+        let (picker, cx) = workspace_picker(filesystem, cx);
+        set_input(&picker, "~/Projects/", cx);
+
+        cx.update(|window, cx| {
+            picker.update(cx, |picker, cx| picker.confirm_typed_path(window, cx));
+            for key in ["cmd-a", "x", "escape"] {
+                window.dispatch_keystroke(Keystroke::parse(key).unwrap(), cx);
+            }
+        });
+        let programmatic_dismissed =
+            cx.update(|window, cx| picker.update(cx, |picker, cx| picker.dismiss(window, cx)));
+        let retained = picker.read_with(cx, |picker, _| {
+            (
+                picker.is_open(),
+                picker.busy,
+                picker
+                    .parsed
+                    .as_ref()
+                    .map(|parsed| parsed.exact_path().to_path_buf()),
+            )
+        });
+        let query = path_bar(&picker, cx);
+        cx.run_until_parked();
+
+        assert!(!programmatic_dismissed);
+        assert_eq!(
+            (query, retained),
+            (
+                "~/Projects/".to_owned(),
+                (true, Some(WorkspacePickerBusy::Validating), Some(path)),
+            )
+        );
+        assert_eq!(
+            picker.read_with(cx, |picker, _| picker.busy),
+            Some(WorkspacePickerBusy::AwaitingActivation)
+        );
+    }
+
+    #[gpui::test]
+    fn background_creation_should_survive_dismissal_until_confirmation(cx: &mut TestAppContext) {
+        let path = home().join("new-project");
+        let filesystem = Arc::new(ScriptedWorkspacePickerFilesystem::new(
+            [home()],
+            [Ok(ValidatedWorkspaceDirectory::new(
+                path,
+                WorkspaceDirectoryIdentity::new(7, 11),
+            ))],
+        ));
+        let (picker, cx) = workspace_picker(filesystem, cx);
+        set_input(&picker, "~/new-project", cx);
+
+        cx.update(|window, cx| {
+            picker.update(cx, |picker, cx| picker.confirm_typed_path(window, cx));
+        });
+        cx.simulate_prompt_answer("Create & Add");
+        assert!(cx.executor().tick(), "prompt completion did not run");
+        cx.update(|window, cx| {
+            window.dispatch_keystroke(Keystroke::parse("escape").unwrap(), cx);
+        });
+        let programmatic_dismissed =
+            cx.update(|window, cx| picker.update(cx, |picker, cx| picker.dismiss(window, cx)));
+        let retained = picker.read_with(cx, |picker, _| (picker.is_open(), picker.busy));
+        cx.run_until_parked();
+
+        assert!(!programmatic_dismissed);
+        assert_eq!(retained, (true, Some(WorkspacePickerBusy::Creating)));
+        assert_eq!(
+            picker.read_with(cx, |picker, _| picker.busy),
+            Some(WorkspacePickerBusy::AwaitingActivation)
+        );
+    }
+
+    #[gpui::test]
     fn stale_finder_validation_completion_does_not_overwrite_newer_typed_path(
         cx: &mut TestAppContext,
     ) {
@@ -1641,17 +1849,20 @@ mod tests {
             });
         set_input(&picker, "/current-typed-path/", cx);
 
-        picker.update(cx, |picker, cx| {
-            picker.finish_validation(
-                ValidationCompletion {
-                    lifecycle_generation,
-                    operation_generation: stale_operation_generation,
-                    kind: ValidationKind::Finder,
-                    expected_input_path: Some(PathBuf::from("/stale-finder-path")),
-                    result: Err(WorkspacePickerFilesystemError::Missing),
-                },
-                cx,
-            );
+        cx.update(|window, cx| {
+            picker.update(cx, |picker, cx| {
+                picker.finish_validation(
+                    ValidationCompletion {
+                        lifecycle_generation,
+                        operation_generation: stale_operation_generation,
+                        kind: ValidationKind::Finder,
+                        expected_input_path: Some(PathBuf::from("/stale-finder-path")),
+                        result: Err(WorkspacePickerFilesystemError::Missing),
+                    },
+                    window,
+                    cx,
+                );
+            });
         });
 
         let path_bar = path_bar(&picker, cx);

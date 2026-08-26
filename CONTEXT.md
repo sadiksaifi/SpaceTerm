@@ -159,7 +159,10 @@ publishing a new query and new items. Both default to the searching behavior. Th
 full-window layer without deferring it, because GPUI collects deferred draws once per frame and a
 deferred palette could not host the deferred menu overlay its footer owns; its owner therefore
 renders it last. While a menu owns the Operating-System Window, palette blur and outside presses
-are not dismissals. Activating a Command Palette or Menu first establishes internal closed and
+are not dismissals. A caller with a native or pending operation may temporarily make the query
+read-only and reject Escape, outside, focus-loss, and Operating-System Window deactivation
+closures; explicit owner completion and replacement remain authoritative. Activating a Command
+Palette or Menu first establishes internal closed and
 focus state, then delivers the typed activation while caller-owned transient blocking remains
 continuous, and finally publishes the activated close lifecycle event; non-activation close
 ordering is unchanged.
@@ -744,7 +747,10 @@ validation before Workspace activation.
 
 The picker composes the Command Palette with caller-owned matching and continuing activation. The
 typed path is the palette query and the only way to change directory: activating a row descends by
-rewriting that query, and moving up a level is editing it. The picker publishes one primary confirm
+rewriting that query, and moving up a level is editing it. Finder, folder-creation confirmation,
+validation, creation, and Workspace activation make that query read-only and retain the picker
+until their cancellation, failure, or explicit completion restores an authoritative state. The
+picker publishes one primary confirm
 whose label alone distinguishes adding an existing folder from creating a missing one, offers the
 Finder Fallback directly in its footer and gathers it with permission recovery into a menu only
 when an unreadable folder adds those entries, and states an
