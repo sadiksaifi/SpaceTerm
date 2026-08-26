@@ -556,6 +556,17 @@ impl WorkspacePicker {
             Some(Err(error)) => Some(error),
             None => None,
         };
+        // The status describes the exact typed path; only a failed read of the enumeration
+        // directory may replace its rows. A missing leaf still filters the directory that holds
+        // it, and missing ancestry keeps the last directory that did read.
+        let unreadable_listing = matches!(
+            listing_error,
+            Some(
+                WorkspacePickerFilesystemError::PermissionDenied
+                    | WorkspacePickerFilesystemError::NotDirectory
+                    | WorkspacePickerFilesystemError::Other
+            )
+        );
         self.status = match listing_error {
             Some(WorkspacePickerFilesystemError::PermissionDenied) => {
                 WorkspacePickerStatus::PermissionDenied
@@ -569,13 +580,7 @@ impl WorkspacePicker {
                 WorkspacePickerExactPathProbe::Unavailable(error) => status_for_error(error),
             },
         };
-        if matches!(
-            self.status,
-            WorkspacePickerStatus::Missing
-                | WorkspacePickerStatus::NotDirectory
-                | WorkspacePickerStatus::PermissionDenied
-                | WorkspacePickerStatus::Other
-        ) {
+        if unreadable_listing {
             self.clear_rows(cx);
         }
         self.publish(cx);
@@ -1500,6 +1505,48 @@ mod tests {
                 true,
                 "No such folder",
             )
+        );
+    }
+
+    #[gpui::test]
+    fn a_partial_leaf_should_still_list_the_directory_that_holds_it(cx: &mut TestAppContext) {
+        let documents = home().join("Documents");
+        let filesystem = Arc::new(ScriptedWorkspacePickerFilesystem::new(
+            [home(), documents.clone()],
+            [],
+        ));
+        filesystem.set_listed_entries([WorkspacePickerDirectoryEntry::new(
+            "Documents".to_owned(),
+            documents,
+        )]);
+        let (picker, cx) = workspace_picker(filesystem, cx);
+
+        set_input(&picker, "~/Doc", cx);
+
+        // `~/Doc` names no folder, but it filters `~/`, so the match it selects must stay listed.
+        assert_eq!(row_names(&picker, cx), vec!["Documents".to_owned()]);
+        assert_eq!(
+            picker.read_with(cx, |picker, _| picker.status),
+            WorkspacePickerStatus::Missing
+        );
+    }
+
+    #[gpui::test]
+    fn an_unreadable_directory_should_replace_its_rows(cx: &mut TestAppContext) {
+        let filesystem = Arc::new(ScriptedWorkspacePickerFilesystem::new([home()], []));
+        filesystem.set_listed_entries([WorkspacePickerDirectoryEntry::new(
+            "Documents".to_owned(),
+            home().join("Documents"),
+        )]);
+        let (picker, cx) = workspace_picker(Arc::clone(&filesystem), cx);
+        assert_eq!(row_names(&picker, cx), vec!["Documents".to_owned()]);
+
+        filesystem.set_listing_error(WorkspacePickerFilesystemError::PermissionDenied);
+        set_input(&picker, "/locked/", cx);
+
+        assert!(
+            row_names(&picker, cx).is_empty(),
+            "an unreadable directory kept rows it did not read"
         );
     }
 
