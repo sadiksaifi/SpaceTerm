@@ -1,18 +1,6 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use gpui::prelude::*;
-use gpui::{
-    AnyElement, App, Bounds, Context, DefiniteLength, Entity, EventEmitter, MouseDownEvent, Pixels,
-    PromptButton, PromptLevel, Render, Window, deferred, div, px, rgba,
-};
-use gpui_symbols::{Icon, SymbolWeight};
-use spaceterm_ui::{
-    ButtonSize, ButtonVariant, IconButton, Menu, MenuAlignment, MenuLifecycleEvent, MenuPlacement,
-    MenuPlacementConfig, MenuSize, ResizeAxis, ResizeHandle, ResizeHandleEvent, ResizeInputSource,
-};
-
-use super::button_theme;
 use super::pane_action_menu::{
     CloseTarget, PaneActionMenuCommand, pane_action_menu_entries, sf_symbol,
 };
@@ -29,6 +17,17 @@ use crate::terminal::{
     NativeServiceOrigin, NativeServiceStatus, SelectionCopy, WorkspaceTerminalSessionFactory,
 };
 use crate::theme::{ACTIVE_THEME, Color};
+use gpui::prelude::*;
+use gpui::{
+    AnyElement, App, Bounds, Context, DefiniteLength, Entity, EventEmitter, MouseDownEvent, Pixels,
+    PromptButton, PromptLevel, Render, Window, deferred, div, px, rgba,
+};
+use gpui_symbols::{Icon, SymbolWeight};
+use spaceterm_ui::{
+    ButtonSize, ButtonVariant, IconButton, Menu, MenuAlignment, MenuLifecycleEvent, MenuPlacement,
+    MenuPlacementConfig, MenuSize, ResizeAxis, ResizeHandle, ResizeHandleEvent, ResizeInputSource,
+    Tooltip,
+};
 
 const DIVIDER_SIZE: f32 = super::resize_handle_theme::VISIBLE_THICKNESS;
 const PANE_HEADER_HEIGHT: f32 = 32.0;
@@ -1030,7 +1029,13 @@ fn render_pane_header(
                 .variant(ButtonVariant::Ghost)
                 .size(ButtonSize::Compact)
                 .debug_selector(format!("pane-zoom-restore-{}", pane_id.get()))
-                .tooltip(|_, cx| button_theme::tooltip("Restore Panes", cx))
+                .tooltip(
+                    Tooltip::new(
+                        ("pane-zoom-restore-tooltip", pane_id.get()),
+                        "Restore Panes",
+                    )
+                    .debug_selector(format!("pane-zoom-restore-tooltip-{}", pane_id.get())),
+                )
                 .on_activate(move |_, window, cx| {
                     let _ = host.update(cx, |host, cx| host.toggle_zoom(window, cx));
                 }),

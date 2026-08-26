@@ -1097,6 +1097,16 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
             }
         })
         .detach();
+        let window_id = window.window_handle().window_id();
+        cx.on_release(move |_, cx| {
+            crate::tooltip::set_window_tooltip_suppression(
+                window_id,
+                crate::tooltip::TooltipSuppression::CommandPalette,
+                false,
+                cx,
+            );
+        })
+        .detach();
         let items: Rc<[CommandPaletteItem<I>]> = unique_items(items).into();
         let matches: Rc<[CommandPaletteMatch]> = match_command_palette_items(&items, "").into();
         let selected = first_enabled_id(&items, &matches);
@@ -1250,6 +1260,12 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
             },
         };
         self.open = true;
+        crate::tooltip::set_window_tooltip_suppression(
+            window.window_handle().window_id(),
+            crate::tooltip::TooltipSuppression::CommandPalette,
+            true,
+            cx,
+        );
         self.pointer_press = None;
         self.pointer_suppressed = true;
         self.hover_suppressed = true;
@@ -1706,6 +1722,12 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
             return false;
         }
         self.open = false;
+        crate::tooltip::set_window_tooltip_suppression(
+            window.window_handle().window_id(),
+            crate::tooltip::TooltipSuppression::CommandPalette,
+            false,
+            cx,
+        );
         self.loading = false;
         self.generation.0 = self.generation.0.wrapping_add(1);
         self.pointer_press = None;
@@ -3255,11 +3277,15 @@ mod tests {
     fn escape_should_close_and_restore_exact_prior_focus(cx: &mut TestAppContext) {
         let (root, palette, events, _, cx) = palette_window(cx);
         let prior = open_palette(&root, &palette, cx);
+        assert!(cx.update(|window, cx| { crate::tooltip::window_tooltips_suppressed(window, cx) }));
 
         cx.simulate_keystrokes("escape");
         cx.run_until_parked();
 
         assert!(!palette.read_with(cx, |palette, _| palette.is_open()));
+        assert!(
+            !cx.update(|window, cx| { crate::tooltip::window_tooltips_suppressed(window, cx) })
+        );
         assert!(cx.update(|window, _| prior.is_focused(window)));
         assert!(events.borrow().contains(&CommandPaletteEvent::Lifecycle(
             CommandPaletteLifecycleEvent::Closed(CommandPaletteCloseReason::Escape)

@@ -4,24 +4,6 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-#[cfg(test)]
-use gpui::ClipboardItem;
-use gpui::prelude::*;
-use gpui::{
-    AnyElement, App, Bounds, Context, Entity, EntityInputHandler, EventEmitter, ExternalPaths,
-    FocusHandle, IntoElement, KeyDownEvent, KeyUpEvent, ModifiersChangedEvent, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Render, ScrollDelta, ScrollWheelEvent,
-    SharedString, Task, TextRun, UTF16Selection, Window, div, font, point, px, relative, rgba,
-    size,
-};
-use gpui_symbols::{Icon, SymbolWeight};
-use spaceterm_ui::{
-    Button, ButtonRole, ButtonSize, ButtonVariant, ContextMenu, EditCopy, EditPaste, IconButton,
-    MenuLifecycleEvent, MenuSize, OverlayScrollbar, OverlayScrollbarEvent, ScrollMetrics,
-    TextInput, TextInputEvent, TextInputTabBehavior, TextInputVariant,
-};
-
-use super::button_theme;
 use super::render_lifecycle::{RenderLifecycle, ScaleChange, SurfaceVisibility};
 use super::terminal_context_menu::{TerminalContextMenuCommand, terminal_context_menu_entries};
 use super::terminal_element::PaintPreflightFault;
@@ -91,6 +73,22 @@ use crate::terminal::{
     WheelInput, WheelPhase, WorkspaceTerminalSessionFactory,
 };
 use crate::theme::{ACTIVE_THEME, Color};
+#[cfg(test)]
+use gpui::ClipboardItem;
+use gpui::prelude::*;
+use gpui::{
+    AnyElement, App, Bounds, Context, Entity, EntityInputHandler, EventEmitter, ExternalPaths,
+    FocusHandle, IntoElement, KeyDownEvent, KeyUpEvent, ModifiersChangedEvent, MouseButton,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Render, ScrollDelta, ScrollWheelEvent,
+    SharedString, Task, TextRun, UTF16Selection, Window, div, font, point, px, relative, rgba,
+    size,
+};
+use gpui_symbols::{Icon, SymbolWeight};
+use spaceterm_ui::{
+    Button, ButtonRole, ButtonSize, ButtonVariant, ContextMenu, EditCopy, EditPaste, IconButton,
+    MenuLifecycleEvent, MenuSize, OverlayScrollbar, OverlayScrollbarEvent, ScrollMetrics,
+    TextInput, TextInputEvent, TextInputTabBehavior, TextInputVariant, Tooltip,
+};
 
 const DEFAULT_FONT_SIZE: f32 = 14.0;
 const DEFAULT_LINE_HEIGHT: f32 = 20.0;
@@ -2990,7 +2988,13 @@ fn find_icon_button(
     .disabled(!enabled)
     .tab_stop(true)
     .debug_selector(id)
-    .tooltip(move |_, cx| button_theme::tooltip(accessibility_name, cx))
+    .tooltip(
+        Tooltip::new(
+            SharedString::from(format!("{id}-tooltip")),
+            accessibility_name,
+        )
+        .debug_selector(format!("{id}-tooltip")),
+    )
     .on_activate(move |_, window, cx| on_activate(window, cx))
     .into_any_element()
 }

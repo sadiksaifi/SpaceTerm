@@ -14,6 +14,7 @@ mod terminal_ime;
 mod terminal_pane;
 mod terminal_symbols;
 mod text_input_theme;
+mod tooltip_theme;
 mod window_manager;
 mod workspace_manager;
 mod workspace_search;
@@ -107,6 +108,7 @@ pub(crate) fn init(cx: &mut App) {
         menu_theme::theme(),
         command_palette_theme::theme(),
         text_input_theme::theme(),
+        tooltip_theme::theme(),
     );
     spaceterm_ui::install_text_input_keybindings(
         cx,
