@@ -1123,22 +1123,23 @@ fn place_tooltip(
         point(margin, margin),
         available_tooltip_size(viewport, margin),
     );
-    let candidates = sides.map(|side| candidate_bounds(target, panel, gap, side));
-    if let Some(candidate) = candidates
+    let candidates = sides.map(|side| {
+        let candidate = candidate_bounds(target, panel, gap, side);
+        (side, clamp_cross_axis(candidate, limits, side))
+    });
+    if let Some((_, candidate)) = candidates.iter().copied().find(|(side, candidate)| {
+        fits_primary_axis(limits, *candidate, *side) && !candidate.contains(&pointer)
+    }) {
+        return candidate;
+    }
+    if let Some((_, candidate)) = candidates
         .iter()
         .copied()
-        .find(|candidate| contains_bounds(limits, *candidate) && !candidate.contains(&pointer))
+        .find(|(side, candidate)| fits_primary_axis(limits, *candidate, *side))
     {
         return candidate;
     }
-    if let Some(candidate) = candidates
-        .iter()
-        .copied()
-        .find(|candidate| contains_bounds(limits, *candidate))
-    {
-        return candidate;
-    }
-    clamp_bounds(candidates[0], limits)
+    clamp_bounds(candidates[0].1, limits)
 }
 
 fn candidate_bounds(
@@ -1164,6 +1165,7 @@ fn candidate_bounds(
     Bounds::new(origin, panel)
 }
 
+#[cfg(test)]
 fn contains_bounds(container: Bounds<Pixels>, child: Bounds<Pixels>) -> bool {
     child.left() >= container.left()
         && child.top() >= container.top()
@@ -1171,14 +1173,62 @@ fn contains_bounds(container: Bounds<Pixels>, child: Bounds<Pixels>) -> bool {
         && child.bottom() <= container.bottom()
 }
 
-fn clamp_bounds(mut bounds: Bounds<Pixels>, limits: Bounds<Pixels>) -> Bounds<Pixels> {
-    let maximum_x = (limits.right() - bounds.size.width).max(limits.left());
-    let maximum_y = (limits.bottom() - bounds.size.height).max(limits.top());
-    bounds.origin.x =
-        px(f32::from(bounds.origin.x).clamp(f32::from(limits.left()), f32::from(maximum_x)));
-    bounds.origin.y =
-        px(f32::from(bounds.origin.y).clamp(f32::from(limits.top()), f32::from(maximum_y)));
+fn fits_primary_axis(limits: Bounds<Pixels>, candidate: Bounds<Pixels>, side: TooltipSide) -> bool {
+    match side {
+        TooltipSide::Bottom | TooltipSide::Top => {
+            candidate.top() >= limits.top() && candidate.bottom() <= limits.bottom()
+        }
+        TooltipSide::Right | TooltipSide::Left => {
+            candidate.left() >= limits.left() && candidate.right() <= limits.right()
+        }
+    }
+}
+
+fn clamp_cross_axis(
+    mut bounds: Bounds<Pixels>,
+    limits: Bounds<Pixels>,
+    side: TooltipSide,
+) -> Bounds<Pixels> {
+    match side {
+        TooltipSide::Bottom | TooltipSide::Top => {
+            bounds.origin.x = clamp_axis_origin(
+                bounds.origin.x,
+                bounds.size.width,
+                limits.left(),
+                limits.right(),
+            );
+        }
+        TooltipSide::Right | TooltipSide::Left => {
+            bounds.origin.y = clamp_axis_origin(
+                bounds.origin.y,
+                bounds.size.height,
+                limits.top(),
+                limits.bottom(),
+            );
+        }
+    }
     bounds
+}
+
+fn clamp_bounds(mut bounds: Bounds<Pixels>, limits: Bounds<Pixels>) -> Bounds<Pixels> {
+    bounds.origin.x = clamp_axis_origin(
+        bounds.origin.x,
+        bounds.size.width,
+        limits.left(),
+        limits.right(),
+    );
+    bounds.origin.y = clamp_axis_origin(
+        bounds.origin.y,
+        bounds.size.height,
+        limits.top(),
+        limits.bottom(),
+    );
+    bounds
+}
+
+fn clamp_axis_origin(origin: Pixels, length: Pixels, minimum: Pixels, maximum: Pixels) -> Pixels {
+    let maximum_origin = (maximum - length).max(minimum);
+    px(f32::from(origin).clamp(f32::from(minimum), f32::from(maximum_origin)))
 }
 
 #[cfg(test)]
@@ -1234,6 +1284,25 @@ mod tests {
         );
 
         assert_eq!(placed.bottom(), target.top() - px(6.0));
+    }
+
+    #[test]
+    fn placement_should_clamp_cross_axis_before_flipping_above_a_wide_target() {
+        let target = Bounds::new(point(px(0.0), px(220.0)), size(px(240.0), px(20.0)));
+
+        let placed = place_tooltip(
+            target,
+            size(px(464.0), px(30.0)),
+            size(px(480.0), px(260.0)),
+            px(6.0),
+            px(8.0),
+            target.center(),
+        );
+
+        assert_eq!(
+            placed,
+            Bounds::new(point(px(8.0), px(184.0)), size(px(464.0), px(30.0)))
+        );
     }
 
     #[test]
