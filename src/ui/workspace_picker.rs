@@ -142,7 +142,7 @@ pub(super) fn parse_workspace_path(
 fn expand_workspace_path(display: &str, home: &Path) -> PathBuf {
     match display.strip_prefix("~/") {
         Some("") => home.to_path_buf(),
-        Some(remainder) => home.join(remainder),
+        Some(remainder) => home.join(remainder.trim_start_matches('/')),
         None => PathBuf::from(display),
     }
 }
@@ -1612,6 +1612,26 @@ mod tests {
                 Path::new("/Users/tester/Projects/SpaceTerm"),
                 Path::new("/Users/tester/Projects"),
                 "SpaceTerm",
+            )
+        );
+    }
+
+    #[test]
+    fn workspace_picker_path_parser_keeps_repeated_slashes_after_tilde_home_relative() {
+        let parsed = parse_workspace_path("~//tmp/project", &home()).unwrap();
+
+        assert_eq!(
+            (
+                parsed.display(),
+                parsed.exact_path(),
+                parsed.enumeration_directory(),
+                parsed.leaf_filter(),
+            ),
+            (
+                "~//tmp/project",
+                Path::new("/Users/tester/tmp/project"),
+                Path::new("/Users/tester/tmp"),
+                "project",
             )
         );
     }
