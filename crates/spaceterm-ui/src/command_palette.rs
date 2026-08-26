@@ -3484,6 +3484,42 @@ mod tests {
     }
 
     #[gpui::test]
+    fn lone_decorated_footer_entries_should_stay_behind_a_disclosure(cx: &mut TestAppContext) {
+        let (root, palette, _, _, cx) = palette_window(cx);
+        open_palette(&root, &palette, cx);
+        let decorated = vec![
+            (
+                "checkbox",
+                MenuEntry::checkbox("Show hidden", false, "checkbox".into()),
+            ),
+            (
+                "destructive",
+                MenuEntry::action("Delete", "destructive".into()).destructive(true),
+            ),
+            (
+                "shortcut",
+                MenuEntry::action("Retry", "shortcut".into()).shortcut("⌘R"),
+            ),
+            (
+                "icon",
+                MenuEntry::action("Finder", "icon".into()).icon(|_| div().into_any_element()),
+            ),
+        ];
+
+        for (decoration, entry) in decorated {
+            palette.update(cx, |palette, cx| {
+                palette.set_actions_menu(vec![entry], cx);
+            });
+            cx.run_until_parked();
+
+            assert!(
+                cx.debug_bounds("command-palette-actions-menu").is_some(),
+                "a lone {decoration} entry lost its menu presentation"
+            );
+        }
+    }
+
+    #[gpui::test]
     fn a_row_without_a_description_should_take_the_single_line_height(cx: &mut TestAppContext) {
         let (root, palette, _, _, cx) = palette_window(cx);
         open_palette(&root, &palette, cx);

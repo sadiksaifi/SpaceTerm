@@ -728,13 +728,21 @@ impl<A> MenuEntry<A> {
     /// action directly instead. Separators, sections, and submenus report nothing.
     pub(crate) fn plain_action(&self) -> Option<PlainMenuAction<'_, A>> {
         match &self.kind {
-            MenuEntryKind::Item(item) => Some(PlainMenuAction {
-                label: &item.label,
-                action: &item.action,
-                disabled: item.disabled,
-                debug_selector: item.debug_selector.as_deref(),
-            }),
-            MenuEntryKind::Separator
+            MenuEntryKind::Item(item)
+                if !item.destructive
+                    && item.shortcut.is_none()
+                    && item.icon.is_none()
+                    && item.mark == EntryMark::None =>
+            {
+                Some(PlainMenuAction {
+                    label: &item.label,
+                    action: &item.action,
+                    disabled: item.disabled,
+                    debug_selector: item.debug_selector.as_deref(),
+                })
+            }
+            MenuEntryKind::Item(_)
+            | MenuEntryKind::Separator
             | MenuEntryKind::Section { .. }
             | MenuEntryKind::Submenu { .. } => None,
         }
