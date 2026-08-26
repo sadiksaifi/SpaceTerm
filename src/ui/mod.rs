@@ -1,6 +1,7 @@
 mod button_theme;
 mod command_palette_theme;
 mod menu_theme;
+mod new_workspace_panel;
 mod pane_action_menu;
 mod pane_host;
 mod render_lifecycle;
@@ -80,6 +81,7 @@ actions!(
         CloseWorkspace,
         CreateScratchWorkspace,
         SearchWorkspaces,
+        ShowNewWorkspacePanel,
         OpenLocalProject,
         ToggleSidebar,
         ToggleSidebarFocus,
@@ -118,7 +120,8 @@ pub(crate) fn init(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("cmd-n", CreateScratchWorkspace, None),
         KeyBinding::new("cmd-p", SearchWorkspaces, None),
-        KeyBinding::new("cmd-o", OpenLocalProject, None),
+        KeyBinding::new("cmd-o", ShowNewWorkspacePanel, None),
+        KeyBinding::new("shift-cmd-o", OpenLocalProject, None),
         KeyBinding::new("cmd-t", CreateWindow, None),
         KeyBinding::new("cmd-w", ClosePane, None),
         KeyBinding::new("cmd-shift-w", CloseWindow, None),
@@ -308,7 +311,8 @@ mod tests {
         let expected = [
             ("cmd-n", CreateScratchWorkspace.name()),
             ("cmd-p", SearchWorkspaces.name()),
-            ("cmd-o", OpenLocalProject.name()),
+            ("cmd-o", ShowNewWorkspacePanel.name()),
+            ("shift-cmd-o", OpenLocalProject.name()),
             ("cmd-t", CreateWindow.name()),
             ("cmd-w", ClosePane.name()),
             ("cmd-shift-w", CloseWindow.name()),

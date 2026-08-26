@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
 
+use super::new_workspace_panel::{NewWorkspacePanel, NewWorkspacePanelEvent, NewWorkspaceSource};
 use super::terminal_focus::TerminalFocusBlocker;
 use super::workspace_picker::{WorkspacePicker, WorkspacePickerEvent};
 use super::workspace_search::{WorkspaceSearch, WorkspaceSearchEvent, WorkspaceSearchItem};
@@ -13,10 +14,10 @@ use super::{
     ActivateWorkspace6, ActivateWorkspace7, ActivateWorkspace8, ActivateWorkspace9, ClosePane,
     CloseTerminalFind, CloseWindow, CloseWorkspace, CopySelection, CreateScratchWorkspace,
     CreateWindow, FindNext, FindPrevious, FocusPaneDown, FocusPaneLeft, FocusPaneRight,
-    FocusPaneUp, OpenLocalProject, OpenTerminalFind, SearchWorkspaces, SplitDown, SplitRight,
-    TERMINAL_KEY_CONTEXT, TOP_CHROME_HEIGHT, TogglePaneZoom, ToggleSidebar, ToggleSidebarFocus,
-    WORKSPACE_SIDEBAR_DEFAULT_WIDTH, WORKSPACE_SIDEBAR_MINIMUM_WIDTH, WindowManager,
-    WindowManagerEvent,
+    FocusPaneUp, OpenLocalProject, OpenTerminalFind, SearchWorkspaces, ShowNewWorkspacePanel,
+    SplitDown, SplitRight, TERMINAL_KEY_CONTEXT, TOP_CHROME_HEIGHT, TogglePaneZoom, ToggleSidebar,
+    ToggleSidebarFocus, WORKSPACE_SIDEBAR_DEFAULT_WIDTH, WORKSPACE_SIDEBAR_MINIMUM_WIDTH,
+    WindowManager, WindowManagerEvent,
 };
 use crate::domain::{
     CloseWorkspaceOutcome, DirectoryAuthority, FinalWindowCloseOutcome,
@@ -114,6 +115,8 @@ pub(crate) struct WorkspaceManager {
     scrollbar: Entity<OverlayScrollbar<f32>>,
     sidebar_focus: FocusHandle,
     workspace_search: Entity<WorkspaceSearch>,
+    new_workspace_panel: Entity<NewWorkspacePanel>,
+    picker_entered_from_panel: bool,
     workspace_menu: Option<WorkspaceMenuState>,
     rename: Option<WorkspaceRenameState>,
     sidebar_resize_interaction: bool,
@@ -258,6 +261,15 @@ impl WorkspaceManager {
             },
         )
         .detach();
+        let new_workspace_panel = cx.new(|cx| NewWorkspacePanel::new(window, cx));
+        cx.subscribe_in(
+            &new_workspace_panel,
+            window,
+            |manager, _, event: &NewWorkspacePanelEvent, window, cx| {
+                manager.handle_new_workspace_panel_event(event, window, cx);
+            },
+        )
+        .detach();
 
         Self {
             workspaces,
@@ -272,6 +284,8 @@ impl WorkspaceManager {
             scrollbar,
             sidebar_focus: cx.focus_handle(),
             workspace_search,
+            new_workspace_panel,
+            picker_entered_from_panel: false,
             workspace_menu: None,
             rename: None,
             sidebar_resize_interaction: false,
@@ -585,6 +599,11 @@ impl WorkspaceManager {
             .blocks_terminal_input()
             .then_some(TerminalFocusBlocker::Modal)
             .or(self
+                .new_workspace_panel
+                .read(cx)
+                .blocks_terminal_input()
+                .then_some(TerminalFocusBlocker::CommandPalette))
+            .or(self
                 .workspace_search
                 .read(cx)
                 .blocks_terminal_input()
@@ -645,6 +664,9 @@ impl WorkspaceManager {
         }
         self.rename = None;
         self.workspace_menu = None;
+        self.picker_entered_from_panel = false;
+        self.new_workspace_panel
+            .update(cx, |panel, cx| panel.dismiss(window, cx));
         self.workspace_picker
             .update(cx, |picker, cx| picker.dismiss(window, cx));
         let items = self.workspace_search_items(cx);
@@ -962,10 +984,70 @@ impl WorkspaceManager {
         self.workspace_menu = None;
         self.workspace_search
             .update(cx, |search, cx| search.dismiss(window, cx));
+        self.new_workspace_panel
+            .update(cx, |panel, cx| panel.dismiss(window, cx));
         self.workspace_picker
             .update(cx, |picker, cx| picker.open(window, cx));
         self.sync_terminal_focus_blocker(window, cx);
         cx.notify();
+    }
+
+    fn show_new_workspace_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.new_workspace_panel.read(cx).is_open() {
+            return;
+        }
+        if spaceterm_ui::window_menu_is_open(window, cx) {
+            let manager = cx.entity();
+            window.defer(cx, move |window, cx| {
+                spaceterm_ui::dismiss_active_menu(window, cx);
+                manager.update(cx, |manager, cx| {
+                    manager.present_new_workspace_panel(window, cx)
+                });
+            });
+            return;
+        }
+        self.present_new_workspace_panel(window, cx);
+    }
+
+    fn present_new_workspace_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.rename_is_focused(window) {
+            self.sidebar_focus.focus(window);
+        }
+        self.rename = None;
+        self.workspace_menu = None;
+        self.picker_entered_from_panel = false;
+        self.workspace_search
+            .update(cx, |search, cx| search.dismiss(window, cx));
+        self.workspace_picker
+            .update(cx, |picker, cx| picker.dismiss(window, cx));
+        self.new_workspace_panel
+            .update(cx, |panel, cx| panel.open(window, cx));
+        self.sync_terminal_focus_blocker(window, cx);
+        cx.notify();
+    }
+
+    fn handle_new_workspace_panel_event(
+        &mut self,
+        event: &NewWorkspacePanelEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match event {
+            NewWorkspacePanelEvent::StateChanged => {
+                self.sync_terminal_focus_blocker(window, cx);
+                cx.notify();
+            }
+            NewWorkspacePanelEvent::SourceSelected(source) => match source {
+                NewWorkspaceSource::LocalProject => {
+                    self.picker_entered_from_panel = true;
+                    self.present_workspace_picker(window, cx);
+                }
+                NewWorkspaceSource::Scratch => self.create_scratch_workspace(window, cx),
+                // The palette never activates a disabled row; Remote Project has no selection
+                // path until SSH Workspaces exist.
+                NewWorkspaceSource::RemoteProject => {}
+            },
+        }
     }
 
     fn handle_workspace_picker_event(
@@ -978,6 +1060,19 @@ impl WorkspaceManager {
             WorkspacePickerEvent::StateChanged => {
                 self.sync_terminal_focus_blocker(window, cx);
                 cx.notify();
+            }
+            WorkspacePickerEvent::Escaped => {
+                if !self.picker_entered_from_panel {
+                    return;
+                }
+                // Reopening is deferred so the picker finishes closing first; otherwise the two
+                // palettes would contend for the responder and the panel would open unfocused.
+                let manager = cx.entity();
+                window.defer(cx, move |window, cx| {
+                    manager.update(cx, |manager, cx| {
+                        manager.present_new_workspace_panel(window, cx)
+                    });
+                });
             }
             WorkspacePickerEvent::FinderRequested => {
                 let selection = self.finder_fallback.choose(cx);
@@ -1002,6 +1097,7 @@ impl WorkspaceManager {
                 .detach();
             }
             WorkspacePickerEvent::Confirmed(directory) => {
+                self.picker_entered_from_panel = false;
                 let activated =
                     self.activate_validated_local_project(directory.clone(), window, cx);
                 let picker = self.workspace_picker.clone();
@@ -1572,6 +1668,15 @@ impl WorkspaceManager {
         self.open_local_project(window, cx);
     }
 
+    fn on_show_new_workspace_panel(
+        &mut self,
+        _: &ShowNewWorkspacePanel,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.show_new_workspace_panel(window, cx);
+    }
+
     fn on_close_workspace(
         &mut self,
         _: &CloseWorkspace,
@@ -2051,9 +2156,8 @@ impl WorkspaceManager {
         }
 
         let scrollbar = self.scrollbar.clone();
-        let create_manager = manager.clone();
+        let panel_manager = manager.clone();
         let search_manager = manager.clone();
-        let picker_manager = manager.clone();
         let header = div()
             .id("workspace-sidebar-header")
             .debug_selector(|| "workspace-sidebar-header".to_owned())
@@ -2105,33 +2209,6 @@ impl WorkspaceManager {
                         manager.open_workspace_search(window, cx);
                     });
                 }),
-            )
-            .child(
-                IconButton::new(
-                    "open-local-project-button",
-                    "Open Local Project",
-                    |foreground| {
-                        Icon::new("folder.badge.plus")
-                            .size(px(15.0))
-                            .weight(SymbolWeight::Medium)
-                            .rendering_mode(RenderingMode::Monochrome)
-                            .color(foreground)
-                            .into_any_element()
-                    },
-                )
-                .variant(ButtonVariant::Ghost)
-                .size(ButtonSize::Regular)
-                .debug_selector("open-local-project-button")
-                .tooltip(
-                    Tooltip::new("open-local-project-tooltip", "Open Local Project…")
-                        .keyboard_equivalent("⌘O")
-                        .debug_selector("open-local-project-tooltip"),
-                )
-                .on_activate(move |_, window, cx| {
-                    let _ = picker_manager.update(cx, |manager, cx| {
-                        manager.open_local_project(window, cx);
-                    });
-                }),
             );
         div()
             .id("workspace-sidebar")
@@ -2157,12 +2234,12 @@ impl WorkspaceManager {
                     .h(px(NEW_WORKSPACE_BUTTON_HEIGHT))
                     .flex_shrink_0()
                     .child(
-                        Button::new("create-scratch-workspace-button", "New Scratch Workspace")
+                        Button::new("new-workspace-button", "New Workspace")
                             .variant(ButtonVariant::Ghost)
                             .size(ButtonSize::Large)
                             .shape(ButtonShape::Square)
                             .full_width(true)
-                            .debug_selector("create-scratch-workspace-button")
+                            .debug_selector("new-workspace-button")
                             .leading(|_| {
                                 Icon::new("plus")
                                     .size(px(13.0))
@@ -2173,21 +2250,19 @@ impl WorkspaceManager {
                                 div()
                                     .text_size(px(10.0))
                                     .text_color(gpui_color(ACTIVE_THEME.icon))
-                                    .child("⌘N")
+                                    .child("⌘O")
                                     .into_any_element()
                             })
                             .on_activate(move |_, window, cx| {
-                                let _ = create_manager.update(cx, |manager, cx| {
-                                    manager.create_scratch_workspace(window, cx);
+                                let _ = panel_manager.update(cx, |manager, cx| {
+                                    manager.show_new_workspace_panel(window, cx);
                                 });
                             }),
                     )
                     .child(
                         div()
-                            .id("create-scratch-workspace-button-top-divider")
-                            .debug_selector(|| {
-                                "create-scratch-workspace-button-top-divider".to_owned()
-                            })
+                            .id("new-workspace-button-top-divider")
+                            .debug_selector(|| "new-workspace-button-top-divider".to_owned())
                             .absolute()
                             .top_0()
                             .left_0()
@@ -2316,6 +2391,7 @@ impl Render for WorkspaceManager {
             .on_action(cx.listener(Self::on_create_scratch_workspace))
             .on_action(cx.listener(Self::on_search_workspaces))
             .on_action(cx.listener(Self::on_open_local_project))
+            .on_action(cx.listener(Self::on_show_new_workspace_panel))
             .on_action(cx.listener(Self::on_close_workspace))
             .on_action(cx.listener(Self::on_activate_workspace_1))
             .on_action(cx.listener(Self::on_activate_workspace_2))
@@ -2369,6 +2445,7 @@ impl Render for WorkspaceManager {
                 )
             })
             .child(self.workspace_search.clone())
+            .child(self.new_workspace_panel.clone())
             .child(self.workspace_picker.clone());
         TooltipLayer::new(content)
     }
@@ -2550,9 +2627,18 @@ mod tests {
         std::env::temp_dir().join(format!("spaceterm-workspace-manager-{name}-{nonce}"))
     }
 
-    fn choose_with_finder_fallback(cx: &mut VisualTestContext) {
-        click("open-local-project-button", cx);
+    fn open_workspace_picker(cx: &mut VisualTestContext) {
+        cx.simulate_keystrokes("shift-cmd-o");
         cx.run_until_parked();
+    }
+
+    fn open_new_workspace_panel(cx: &mut VisualTestContext) {
+        cx.simulate_keystrokes("cmd-o");
+        cx.run_until_parked();
+    }
+
+    fn choose_with_finder_fallback(cx: &mut VisualTestContext) {
+        open_workspace_picker(cx);
         click("workspace-picker-finder", cx);
         cx.run_until_parked();
     }
@@ -2571,24 +2657,24 @@ mod tests {
     }
 
     #[gpui::test]
-    fn all_open_actions_present_the_in_app_workspace_picker_and_keep_modal_blocking(
+    fn every_new_workspace_entry_point_should_present_the_panel_and_block_terminal_input(
         cx: &mut TestAppContext,
     ) {
         let (manager, _, cx) = workspace_manager(cx);
 
-        click("open-local-project-button", cx);
+        click("new-workspace-button", cx);
         let sidebar_state = cx.update(|window, cx| {
             let manager = manager.read(cx);
             (
-                manager.workspace_picker.read(cx).is_open(),
+                manager.new_workspace_panel.read(cx).is_open(),
                 manager.terminal_focus_blocker(window, cx),
             )
         });
-        cx.simulate_keystrokes("cmd-o");
+        open_new_workspace_panel(cx);
         let repeated_state = cx.update(|window, cx| {
             let manager = manager.read(cx);
             (
-                manager.workspace_picker.read(cx).is_open(),
+                manager.new_workspace_panel.read(cx).is_open(),
                 manager.terminal_focus_blocker(window, cx),
             )
         });
@@ -2596,9 +2682,115 @@ mod tests {
         assert_eq!(
             (sidebar_state, repeated_state),
             (
-                (true, Some(TerminalFocusBlocker::Modal)),
-                (true, Some(TerminalFocusBlocker::Modal)),
+                (true, Some(TerminalFocusBlocker::CommandPalette)),
+                (true, Some(TerminalFocusBlocker::CommandPalette)),
             )
+        );
+    }
+
+    #[gpui::test]
+    fn shift_cmd_o_should_present_the_workspace_picker_without_the_panel(cx: &mut TestAppContext) {
+        let (manager, _, cx) = workspace_manager(cx);
+
+        open_workspace_picker(cx);
+
+        assert_eq!(
+            cx.update(|window, cx| {
+                let manager = manager.read(cx);
+                (
+                    manager.workspace_picker.read(cx).is_open(),
+                    manager.new_workspace_panel.read(cx).is_open(),
+                    manager.terminal_focus_blocker(window, cx),
+                )
+            }),
+            (true, false, Some(TerminalFocusBlocker::Modal))
+        );
+    }
+
+    #[gpui::test]
+    fn choosing_local_project_should_replace_the_panel_with_the_workspace_picker(
+        cx: &mut TestAppContext,
+    ) {
+        let (manager, _, cx) = workspace_manager(cx);
+
+        open_new_workspace_panel(cx);
+        click("new-workspace-source-local-project", cx);
+
+        assert_eq!(
+            cx.update(|window, cx| {
+                let manager = manager.read(cx);
+                (
+                    manager.workspace_picker.read(cx).is_open(),
+                    manager.new_workspace_panel.read(cx).is_open(),
+                    manager.terminal_focus_blocker(window, cx),
+                )
+            }),
+            (true, false, Some(TerminalFocusBlocker::Modal))
+        );
+    }
+
+    #[gpui::test]
+    fn choosing_scratch_should_create_a_workspace_and_close_the_panel(cx: &mut TestAppContext) {
+        let (manager, _, cx) = workspace_manager(cx);
+
+        open_new_workspace_panel(cx);
+        click("new-workspace-source-scratch", cx);
+
+        assert_eq!(
+            cx.update(|window, cx| {
+                let manager = manager.read(cx);
+                (
+                    manager.workspaces.len(),
+                    manager.new_workspace_panel.read(cx).is_open(),
+                    manager.terminal_focus_blocker(window, cx),
+                )
+            }),
+            (2, false, None)
+        );
+    }
+
+    #[gpui::test]
+    fn escape_should_step_back_from_the_picker_to_the_panel_that_opened_it(
+        cx: &mut TestAppContext,
+    ) {
+        let (manager, _, cx) = workspace_manager(cx);
+
+        open_new_workspace_panel(cx);
+        click("new-workspace-source-local-project", cx);
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+
+        assert_eq!(
+            cx.update(|window, cx| {
+                let manager = manager.read(cx);
+                (
+                    manager.workspace_picker.read(cx).is_open(),
+                    manager.new_workspace_panel.read(cx).is_open(),
+                    manager.terminal_focus_blocker(window, cx),
+                )
+            }),
+            (false, true, Some(TerminalFocusBlocker::CommandPalette))
+        );
+    }
+
+    #[gpui::test]
+    fn escape_should_close_a_picker_that_no_panel_opened(cx: &mut TestAppContext) {
+        let (manager, _, cx) = workspace_manager(cx);
+
+        open_workspace_picker(cx);
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+
+        assert_eq!(
+            cx.update(|window, cx| {
+                let manager = manager.read(cx);
+                (
+                    manager.workspace_picker.read(cx).is_open(),
+                    manager.new_workspace_panel.read(cx).is_open(),
+                    manager.terminal_focus_blocker(window, cx),
+                )
+            }),
+            (false, false, None)
         );
     }
 
@@ -2606,7 +2798,7 @@ mod tests {
     fn workspace_picker_should_block_parent_shortcuts_and_keep_path_focus(cx: &mut TestAppContext) {
         let (manager, records, cx) = workspace_manager(cx);
         cx.simulate_keystrokes("cmd-n");
-        click("open-local-project-button", cx);
+        open_workspace_picker(cx);
         let baseline = manager.read_with(cx, |manager, cx| {
             (
                 manager.workspaces.len(),
@@ -2971,9 +3163,6 @@ mod tests {
         let search = cx
             .debug_bounds("search-workspaces-button")
             .expect("the Search Workspaces button was not rendered");
-        let picker = cx
-            .debug_bounds("open-local-project-button")
-            .expect("the Open Local Project button was not rendered");
         let active_row = cx
             .debug_bounds("workspace-row-1-active")
             .expect("the Active Workspace row was not rendered");
@@ -2986,7 +3175,7 @@ mod tests {
         // theme cannot silently eat the header's vertical breathing room.
         assert_eq!(
             header.size.height,
-            picker.size.height + px(SIDEBAR_HEADER_ACTION_PADDING * 2.0),
+            search.size.height + px(SIDEBAR_HEADER_ACTION_PADDING * 2.0),
             "the header no longer leaves even breathing room above and below its actions"
         );
         assert_eq!(
@@ -2997,12 +3186,8 @@ mod tests {
             title.origin.x + title.size.width <= search.origin.x,
             "the header title overlapped the Search Workspaces button: {title:?} {search:?}"
         );
-        assert!(
-            search.origin.x + search.size.width <= picker.origin.x,
-            "the header actions were out of order: {search:?} {picker:?}"
-        );
         assert_eq!(
-            picker.origin.x + picker.size.width,
+            search.origin.x + search.size.width,
             toggle.origin.x + toggle.size.width,
             "the header actions were not flush with the sidebar toggle above them"
         );
@@ -3490,7 +3675,9 @@ mod tests {
     }
 
     #[gpui::test]
-    fn sidebar_buttons_should_toggle_sidebar_and_create_scratch_workspace(cx: &mut TestAppContext) {
+    fn sidebar_buttons_should_toggle_sidebar_and_present_the_new_workspace_panel(
+        cx: &mut TestAppContext,
+    ) {
         let (manager, _records, cx) = workspace_manager(cx);
 
         click("toggle-sidebar-button", cx);
@@ -3498,16 +3685,35 @@ mod tests {
 
         cx.simulate_keystrokes("cmd-b");
         cx.run_until_parked();
-        click("create-scratch-workspace-button", cx);
+        click("new-workspace-button", cx);
 
         assert_eq!(
-            manager.read_with(cx, |manager, _| {
+            manager.read_with(cx, |manager, cx| {
+                (
+                    manager.workspaces.len(),
+                    manager.new_workspace_panel.read(cx).is_open(),
+                )
+            }),
+            (1, true)
+        );
+    }
+
+    #[gpui::test]
+    fn cmd_n_should_create_a_scratch_workspace_without_the_panel(cx: &mut TestAppContext) {
+        let (manager, _records, cx) = workspace_manager(cx);
+
+        cx.simulate_keystrokes("cmd-n");
+        cx.run_until_parked();
+
+        assert_eq!(
+            manager.read_with(cx, |manager, cx| {
                 (
                     manager.workspaces.len(),
                     manager.workspaces.active_workspace_id(),
+                    manager.new_workspace_panel.read(cx).is_open(),
                 )
             }),
-            (2, WorkspaceId::new(2))
+            (2, WorkspaceId::new(2), false)
         );
     }
 
@@ -3515,10 +3721,10 @@ mod tests {
     fn new_workspace_button_should_start_with_a_full_width_divider(cx: &mut TestAppContext) {
         let (_manager, _records, cx) = workspace_manager(cx);
         let button = cx
-            .debug_bounds("create-scratch-workspace-button")
+            .debug_bounds("new-workspace-button")
             .expect("the New Workspace button was not rendered");
         let divider = cx
-            .debug_bounds("create-scratch-workspace-button-top-divider")
+            .debug_bounds("new-workspace-button-top-divider")
             .expect("the New Workspace button divider was not rendered");
 
         assert_eq!(
@@ -3678,7 +3884,7 @@ mod tests {
             .debug_bounds("workspace-list")
             .expect("the overflowing Workspace list was not rendered");
         let button = cx
-            .debug_bounds("create-scratch-workspace-button")
+            .debug_bounds("new-workspace-button")
             .expect("the New Workspace button was not rendered");
         assert_eq!(
             (

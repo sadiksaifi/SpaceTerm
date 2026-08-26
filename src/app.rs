@@ -11,7 +11,7 @@ use crate::terminal::{NativeTerminalSessionFactory, TerminalSessionFactory};
 use crate::ui::{
     ClosePane, CloseWindow, CloseWorkspace, CreateScratchWorkspace, CreateWindow,
     ExportTerminalDiagnostics, FindNext, FindPrevious, OpenLocalProject, OpenTerminalFind,
-    SearchWorkspaces, WorkspaceManager,
+    SearchWorkspaces, ShowNewWorkspacePanel, WorkspaceManager,
 };
 
 actions!(
@@ -101,9 +101,10 @@ fn file_menu() -> Menu {
     Menu {
         name: "File".into(),
         items: vec![
+            MenuItem::action("New Workspace…", ShowNewWorkspacePanel),
             MenuItem::action("New Scratch Workspace", CreateScratchWorkspace),
-            MenuItem::action("Search Workspaces…", SearchWorkspaces),
             MenuItem::action("Open Local Project…", OpenLocalProject),
+            MenuItem::action("Search Workspaces…", SearchWorkspaces),
             MenuItem::action("New Window", CreateWindow),
             MenuItem::separator(),
             MenuItem::action("Close Pane", ClosePane),
@@ -245,9 +246,10 @@ mod tests {
         assert_eq!(
             labels,
             vec![
+                "New Workspace…",
                 "New Scratch Workspace",
-                "Search Workspaces…",
                 "Open Local Project…",
+                "Search Workspaces…",
                 "New Window",
                 "|",
                 "Close Pane",
