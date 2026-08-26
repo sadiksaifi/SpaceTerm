@@ -747,9 +747,10 @@ Scratch Workspace at `HOME`; Open Local Project creates a Local Project Workspac
 confirmed through the in-app Workspace Picker. Remote Project is listed and unavailable, so the
 panel states the whole model before an SSH selection path exists.
 
-A trailing ellipsis marks a command whose surface has not opened yet, so it belongs to the macOS
-menu bar and not to the panel: inside a chooser every row already leads onward, and marking only
-some of them leaves the list ragged for no gain.
+A trailing ellipsis on a command label belongs to the macOS menu bar alone. SpaceTerm's own
+surfaces never carry one: inside a chooser every row already leads onward, so marking some and not
+others only leaves a list ragged. An ellipsis still marks progress in a status line, where it says
+an operation is running rather than that a command will ask for more.
 
 Choosing Local Project replaces the panel with the Workspace Picker. Escape there returns to the
 panel that presented it; any other dismissal ends the flow, and confirming a directory completes

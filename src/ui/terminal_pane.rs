@@ -3601,7 +3601,7 @@ impl Render for TerminalPane {
                         })
                         .when(diagnostics_available, |status| {
                             status.child(
-                                Button::new("export-terminal-diagnostics", "Export Diagnostics…")
+                                Button::new("export-terminal-diagnostics", "Export Diagnostics")
                                     .variant(ButtonVariant::Link)
                                     .size(ButtonSize::Compact)
                                     .debug_selector("export-terminal-diagnostics")
