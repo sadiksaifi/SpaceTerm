@@ -90,7 +90,7 @@ use spaceterm_ui::{
     TextInput, TextInputEvent, TextInputTabBehavior, TextInputVariant, Tooltip,
 };
 
-const DEFAULT_FONT_SIZE: f32 = 14.0;
+const DEFAULT_FONT_SIZE: f32 = 18.0;
 const DEFAULT_LINE_HEIGHT: f32 = 20.0;
 const MIN_FONT_SIZE: f32 = 8.0;
 const MAX_FONT_SIZE: f32 = 32.0;
