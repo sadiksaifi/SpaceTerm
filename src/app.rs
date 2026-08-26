@@ -9,7 +9,7 @@ use spaceterm_ui::{EditCopy, EditCut, EditPaste, EditRedo, EditSelectAll, EditUn
 
 use crate::terminal::{NativeTerminalSessionFactory, TerminalSessionFactory};
 use crate::ui::{
-    ClosePane, CloseWindow, CloseWorkspace, CreateWindow, CreateWorkspace,
+    ClosePane, CloseWindow, CloseWorkspace, CreateScratchWorkspace, CreateWindow,
     ExportTerminalDiagnostics, FindNext, FindPrevious, OpenLocalProject, OpenTerminalFind,
     SearchWorkspaces, WorkspaceManager,
 };
@@ -101,7 +101,7 @@ fn file_menu() -> Menu {
     Menu {
         name: "File".into(),
         items: vec![
-            MenuItem::action("New Workspace", CreateWorkspace),
+            MenuItem::action("New Scratch Workspace", CreateScratchWorkspace),
             MenuItem::action("Search Workspaces…", SearchWorkspaces),
             MenuItem::action("Open Local Project…", OpenLocalProject),
             MenuItem::action("New Window", CreateWindow),
@@ -245,7 +245,7 @@ mod tests {
         assert_eq!(
             labels,
             vec![
-                "New Workspace",
+                "New Scratch Workspace",
                 "Search Workspaces…",
                 "Open Local Project…",
                 "New Window",

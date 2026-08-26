@@ -11,9 +11,9 @@ use super::{
     ActivateWindow6, ActivateWindow7, ActivateWindow8, ActivateWindow9, ActivateWorkspace1,
     ActivateWorkspace2, ActivateWorkspace3, ActivateWorkspace4, ActivateWorkspace5,
     ActivateWorkspace6, ActivateWorkspace7, ActivateWorkspace8, ActivateWorkspace9, ClosePane,
-    CloseTerminalFind, CloseWindow, CloseWorkspace, CopySelection, CreateWindow, CreateWorkspace,
-    FindNext, FindPrevious, FocusPaneDown, FocusPaneLeft, FocusPaneRight, FocusPaneUp,
-    OpenLocalProject, OpenTerminalFind, SearchWorkspaces, SplitDown, SplitRight,
+    CloseTerminalFind, CloseWindow, CloseWorkspace, CopySelection, CreateScratchWorkspace,
+    CreateWindow, FindNext, FindPrevious, FocusPaneDown, FocusPaneLeft, FocusPaneRight,
+    FocusPaneUp, OpenLocalProject, OpenTerminalFind, SearchWorkspaces, SplitDown, SplitRight,
     TERMINAL_KEY_CONTEXT, TOP_CHROME_HEIGHT, TogglePaneZoom, ToggleSidebar, ToggleSidebarFocus,
     WORKSPACE_SIDEBAR_DEFAULT_WIDTH, WORKSPACE_SIDEBAR_MINIMUM_WIDTH, WindowManager,
     WindowManagerEvent,
@@ -870,7 +870,7 @@ impl WorkspaceManager {
         self.reveal_scrollbar(cx);
     }
 
-    fn create_workspace(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn create_scratch_workspace(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let previous_manager = self.workspaces.active_workspace().payload().clone();
         let session_factory = Rc::clone(&self.session_factory);
         let window_drag_platform = Rc::clone(&self.operating_system_window_drag_platform);
@@ -1545,13 +1545,13 @@ impl WorkspaceManager {
         cx.notify();
     }
 
-    fn on_create_workspace(
+    fn on_create_scratch_workspace(
         &mut self,
-        _: &CreateWorkspace,
+        _: &CreateScratchWorkspace,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.create_workspace(window, cx);
+        self.create_scratch_workspace(window, cx);
     }
 
     fn on_search_workspaces(
@@ -2157,12 +2157,12 @@ impl WorkspaceManager {
                     .h(px(NEW_WORKSPACE_BUTTON_HEIGHT))
                     .flex_shrink_0()
                     .child(
-                        Button::new("create-workspace-button", "New Workspace")
+                        Button::new("create-scratch-workspace-button", "New Scratch Workspace")
                             .variant(ButtonVariant::Ghost)
                             .size(ButtonSize::Large)
                             .shape(ButtonShape::Square)
                             .full_width(true)
-                            .debug_selector("create-workspace-button")
+                            .debug_selector("create-scratch-workspace-button")
                             .leading(|_| {
                                 Icon::new("plus")
                                     .size(px(13.0))
@@ -2178,14 +2178,16 @@ impl WorkspaceManager {
                             })
                             .on_activate(move |_, window, cx| {
                                 let _ = create_manager.update(cx, |manager, cx| {
-                                    manager.create_workspace(window, cx);
+                                    manager.create_scratch_workspace(window, cx);
                                 });
                             }),
                     )
                     .child(
                         div()
-                            .id("create-workspace-button-top-divider")
-                            .debug_selector(|| "create-workspace-button-top-divider".to_owned())
+                            .id("create-scratch-workspace-button-top-divider")
+                            .debug_selector(|| {
+                                "create-scratch-workspace-button-top-divider".to_owned()
+                            })
                             .absolute()
                             .top_0()
                             .left_0()
@@ -2311,7 +2313,7 @@ impl Render for WorkspaceManager {
                 .absolute()
                 .inset_0(),
             )
-            .on_action(cx.listener(Self::on_create_workspace))
+            .on_action(cx.listener(Self::on_create_scratch_workspace))
             .on_action(cx.listener(Self::on_search_workspaces))
             .on_action(cx.listener(Self::on_open_local_project))
             .on_action(cx.listener(Self::on_close_workspace))
@@ -3488,7 +3490,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn sidebar_buttons_should_toggle_sidebar_and_create_workspace(cx: &mut TestAppContext) {
+    fn sidebar_buttons_should_toggle_sidebar_and_create_scratch_workspace(cx: &mut TestAppContext) {
         let (manager, _records, cx) = workspace_manager(cx);
 
         click("toggle-sidebar-button", cx);
@@ -3496,7 +3498,7 @@ mod tests {
 
         cx.simulate_keystrokes("cmd-b");
         cx.run_until_parked();
-        click("create-workspace-button", cx);
+        click("create-scratch-workspace-button", cx);
 
         assert_eq!(
             manager.read_with(cx, |manager, _| {
@@ -3513,10 +3515,10 @@ mod tests {
     fn new_workspace_button_should_start_with_a_full_width_divider(cx: &mut TestAppContext) {
         let (_manager, _records, cx) = workspace_manager(cx);
         let button = cx
-            .debug_bounds("create-workspace-button")
+            .debug_bounds("create-scratch-workspace-button")
             .expect("the New Workspace button was not rendered");
         let divider = cx
-            .debug_bounds("create-workspace-button-top-divider")
+            .debug_bounds("create-scratch-workspace-button-top-divider")
             .expect("the New Workspace button divider was not rendered");
 
         assert_eq!(
@@ -3676,7 +3678,7 @@ mod tests {
             .debug_bounds("workspace-list")
             .expect("the overflowing Workspace list was not rendered");
         let button = cx
-            .debug_bounds("create-workspace-button")
+            .debug_bounds("create-scratch-workspace-button")
             .expect("the New Workspace button was not rendered");
         assert_eq!(
             (

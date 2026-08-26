@@ -289,7 +289,7 @@ impl<T> WorkspaceCollection<T> {
     }
 
     #[cfg(test)]
-    pub(crate) fn create_workspace(
+    pub(crate) fn create_scratch_workspace_unchecked(
         &mut self,
         working_directory: PathBuf,
         create_payload: impl FnOnce(WorkspaceId, &Path) -> T,
@@ -948,10 +948,10 @@ mod tests {
     fn iter_should_preserve_workspace_creation_order() {
         let mut workspaces = new_workspaces("first payload");
         workspaces
-            .create_workspace(PathBuf::from("/second"), |_, _| "second payload")
+            .create_scratch_workspace_unchecked(PathBuf::from("/second"), |_, _| "second payload")
             .unwrap();
         workspaces
-            .create_workspace(PathBuf::from("/third"), |_, _| "third payload")
+            .create_scratch_workspace_unchecked(PathBuf::from("/third"), |_, _| "third payload")
             .unwrap();
 
         let ordered_ids = workspaces
@@ -970,11 +970,11 @@ mod tests {
     }
 
     #[test]
-    fn create_workspace_should_create_and_activate_the_new_workspace() {
+    fn create_scratch_workspace_unchecked_should_create_and_activate_the_new_workspace() {
         let mut workspaces = new_workspaces("first payload");
 
         let created = workspaces
-            .create_workspace(PathBuf::from("/second"), |_, _| "second payload")
+            .create_scratch_workspace_unchecked(PathBuf::from("/second"), |_, _| "second payload")
             .unwrap();
 
         assert_eq!(
@@ -994,17 +994,17 @@ mod tests {
     }
 
     #[test]
-    fn create_workspace_should_choose_the_first_available_default_name() {
+    fn create_scratch_workspace_unchecked_should_choose_the_first_available_default_name() {
         let mut workspaces = new_workspaces("first payload");
         workspaces
-            .create_workspace(PathBuf::from("/second"), |_, _| "second payload")
+            .create_scratch_workspace_unchecked(PathBuf::from("/second"), |_, _| "second payload")
             .unwrap();
         workspaces
             .rename_workspace(WorkspaceId::new(1), "Projects".to_owned())
             .unwrap();
 
         workspaces
-            .create_workspace(PathBuf::from("/third"), |_, _| "third payload")
+            .create_scratch_workspace_unchecked(PathBuf::from("/third"), |_, _| "third payload")
             .unwrap();
 
         let names = workspaces
@@ -1015,21 +1015,25 @@ mod tests {
     }
 
     #[test]
-    fn create_workspace_should_assign_its_name_and_propagate_the_exact_working_directory() {
+    fn create_scratch_workspace_unchecked_should_assign_its_name_and_propagate_the_exact_working_directory()
+     {
         let mut workspaces = new_workspaces("first payload");
         let working_directory = PathBuf::from("/Users/test/projects");
         let observed_pointer = Cell::new(std::ptr::null());
 
         workspaces
-            .create_workspace(working_directory, |_, payload_working_directory| {
-                observed_pointer.set(
-                    payload_working_directory
-                        .as_os_str()
-                        .as_encoded_bytes()
-                        .as_ptr(),
-                );
-                "second payload"
-            })
+            .create_scratch_workspace_unchecked(
+                working_directory,
+                |_, payload_working_directory| {
+                    observed_pointer.set(
+                        payload_working_directory
+                            .as_os_str()
+                            .as_encoded_bytes()
+                            .as_ptr(),
+                    );
+                    "second payload"
+                },
+            )
             .unwrap();
 
         let stored_working_directory = workspaces.active_workspace().working_directory();
@@ -1051,15 +1055,17 @@ mod tests {
     }
 
     #[test]
-    fn create_workspace_should_reject_exhausted_ids_before_creating_its_payload() {
+    fn create_scratch_workspace_unchecked_should_reject_exhausted_ids_before_creating_its_payload()
+    {
         let mut workspaces = new_workspaces("first payload");
         workspaces.next_workspace_id = u64::MAX;
         let creations = Cell::new(0);
 
-        let result = workspaces.create_workspace(PathBuf::from("/second"), |_, _| {
-            creations.update(|count| count + 1);
-            "second payload"
-        });
+        let result =
+            workspaces.create_scratch_workspace_unchecked(PathBuf::from("/second"), |_, _| {
+                creations.update(|count| count + 1);
+                "second payload"
+            });
 
         assert_eq!(
             (result, creations.get(), workspaces.len()),
@@ -1071,7 +1077,7 @@ mod tests {
     fn activate_workspace_should_select_an_owned_workspace() {
         let mut workspaces = new_workspaces("first payload");
         workspaces
-            .create_workspace(PathBuf::from("/second"), |_, _| "second payload")
+            .create_scratch_workspace_unchecked(PathBuf::from("/second"), |_, _| "second payload")
             .unwrap();
 
         workspaces.activate_workspace(WorkspaceId::new(1)).unwrap();
@@ -1104,7 +1110,7 @@ mod tests {
     fn rename_workspace_should_update_only_the_requested_workspace_name() {
         let mut workspaces = new_workspaces("first payload");
         workspaces
-            .create_workspace(PathBuf::from("/second"), |_, _| "second payload")
+            .create_scratch_workspace_unchecked(PathBuf::from("/second"), |_, _| "second payload")
             .unwrap();
 
         workspaces
@@ -1137,7 +1143,7 @@ mod tests {
     fn non_final_close_should_not_allocate_a_replacement_workspace_id() {
         let mut workspaces = new_workspaces("first payload");
         workspaces
-            .create_workspace(PathBuf::from("/second"), |_, _| "second payload")
+            .create_scratch_workspace_unchecked(PathBuf::from("/second"), |_, _| "second payload")
             .unwrap();
         workspaces.next_workspace_id = u64::MAX;
 
@@ -1163,7 +1169,7 @@ mod tests {
     fn closed_workspace_ids_should_not_be_reused() {
         let mut workspaces = new_workspaces("first payload");
         let second = workspaces
-            .create_workspace(PathBuf::from("/second"), |_, _| "second payload")
+            .create_scratch_workspace_unchecked(PathBuf::from("/second"), |_, _| "second payload")
             .unwrap();
         workspaces
             .close_workspace(second, PathBuf::from("/replacement"), |_, _| {
@@ -1172,7 +1178,7 @@ mod tests {
             .unwrap();
 
         let third = workspaces
-            .create_workspace(PathBuf::from("/third"), |_, _| "third payload")
+            .create_scratch_workspace_unchecked(PathBuf::from("/third"), |_, _| "third payload")
             .unwrap();
 
         assert_eq!(third, WorkspaceId::new(3));
@@ -1182,10 +1188,10 @@ mod tests {
     fn close_workspace_should_focus_the_next_workspace_when_closing_the_active_middle_workspace() {
         let mut workspaces = new_workspaces("first payload");
         workspaces
-            .create_workspace(PathBuf::from("/second"), |_, _| "second payload")
+            .create_scratch_workspace_unchecked(PathBuf::from("/second"), |_, _| "second payload")
             .unwrap();
         workspaces
-            .create_workspace(PathBuf::from("/third"), |_, _| "third payload")
+            .create_scratch_workspace_unchecked(PathBuf::from("/third"), |_, _| "third payload")
             .unwrap();
         workspaces.activate_workspace(WorkspaceId::new(2)).unwrap();
 
@@ -1212,7 +1218,7 @@ mod tests {
     {
         let mut workspaces = new_workspaces("first payload");
         workspaces
-            .create_workspace(PathBuf::from("/second"), |_, _| "second payload")
+            .create_scratch_workspace_unchecked(PathBuf::from("/second"), |_, _| "second payload")
             .unwrap();
 
         let outcome = workspaces
@@ -1319,7 +1325,7 @@ mod tests {
     fn final_window_close_should_remove_a_non_final_workspace_without_allocating_a_replacement() {
         let mut workspaces = new_workspaces("first payload");
         workspaces
-            .create_workspace(PathBuf::from("/second"), |_, _| "second payload")
+            .create_scratch_workspace_unchecked(PathBuf::from("/second"), |_, _| "second payload")
             .unwrap();
         workspaces.next_workspace_id = u64::MAX;
 
@@ -1370,7 +1376,7 @@ mod tests {
             drops: Rc::clone(&drops),
         });
         workspaces
-            .create_workspace(PathBuf::from("/second"), |_, _| DropProbe {
+            .create_scratch_workspace_unchecked(PathBuf::from("/second"), |_, _| DropProbe {
                 drops: Rc::clone(&drops),
             })
             .unwrap();

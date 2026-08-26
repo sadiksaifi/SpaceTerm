@@ -78,7 +78,7 @@ actions!(
         ClosePane,
         CloseWindow,
         CloseWorkspace,
-        CreateWorkspace,
+        CreateScratchWorkspace,
         SearchWorkspaces,
         OpenLocalProject,
         ToggleSidebar,
@@ -116,7 +116,7 @@ pub(crate) fn init(cx: &mut App) {
         spaceterm_ui::TextInputKeybindingProfile::MacOs,
     );
     cx.bind_keys([
-        KeyBinding::new("cmd-n", CreateWorkspace, None),
+        KeyBinding::new("cmd-n", CreateScratchWorkspace, None),
         KeyBinding::new("cmd-p", SearchWorkspaces, None),
         KeyBinding::new("cmd-o", OpenLocalProject, None),
         KeyBinding::new("cmd-t", CreateWindow, None),
@@ -306,7 +306,7 @@ mod tests {
     fn workspace_and_hierarchy_shortcuts_should_be_global(cx: &mut TestAppContext) {
         cx.update(init);
         let expected = [
-            ("cmd-n", CreateWorkspace.name()),
+            ("cmd-n", CreateScratchWorkspace.name()),
             ("cmd-p", SearchWorkspaces.name()),
             ("cmd-o", OpenLocalProject.name()),
             ("cmd-t", CreateWindow.name()),
