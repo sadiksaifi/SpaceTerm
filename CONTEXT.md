@@ -114,6 +114,16 @@ the exact GPUI-backed Operating-System Window, and hands accepted movement to Ap
 accepted response ends the control-owned active interaction because native movement may consume the
 pointer release.
 
+The internal library's Tooltip is a keyed, platform-neutral, Operating-System Window-scoped
+transient for bounded primary, secondary, and keyboard-equivalent text. It owns delayed hover,
+cancellation generations, single-window presentation ownership, target-anchored placement with
+flipping and clamping, pointer-transparent rendering, and suppression beneath menus and the Command
+Palette. A layout-transparent target adapter supports arbitrary GPUI elements, while one root layer
+observes keyboard input without consuming it. Disabled or removed targets, pointer activation,
+window deactivation, dragging, and higher-priority transients cancel pending and visible tooltips.
+The application supplies Vague Pro paint and metrics and retains every target's independent logical
+accessibility name; interactive help remains a Menu or popover rather than a Tooltip.
+
 The internal library's Text Input is an entity-backed, platform-neutral single-line editor with
 stable identity and a mandatory logical name. It exclusively owns bounded text, directional
 grapheme Selection, input-method composition, undo and redo, clipboard editing, pointer capture

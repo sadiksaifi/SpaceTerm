@@ -1,19 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
-use gpui::prelude::*;
-use gpui::{
-    AnyElement, App, Context, Entity, EventEmitter, MouseButton, Pixels, PromptButton, PromptLevel,
-    Render, ScrollHandle, SharedString, Window, div, px, rgba,
-};
-use gpui_symbols::{Icon, SymbolWeight};
-use spaceterm_ui::{
-    ButtonSize, ButtonVariant, ContextMenu, IconButton, Menu, MenuAlignment, MenuLifecycleEvent,
-    MenuPlacement, MenuPlacementConfig, MenuSize, WindowDragRegion, WindowDragRegionEvent,
-    WindowDragRegionResponse, WindowDragRegionStatus,
-};
-
-use super::button_theme;
 use super::pane_action_menu::{
     CloseTarget, PaneActionMenuCommand, pane_action_menu_entries, sf_symbol,
 };
@@ -37,6 +24,17 @@ use crate::terminal::{
     NativeServiceOrigin, NativeServiceStatus, SelectionCopy, WorkspaceTerminalSessionFactory,
 };
 use crate::theme::{ACTIVE_THEME, Color};
+use gpui::prelude::*;
+use gpui::{
+    AnyElement, App, Context, Entity, EventEmitter, MouseButton, Pixels, PromptButton, PromptLevel,
+    Render, ScrollHandle, SharedString, Window, div, px, rgba,
+};
+use gpui_symbols::{Icon, SymbolWeight};
+use spaceterm_ui::{
+    ButtonSize, ButtonVariant, ContextMenu, IconButton, Menu, MenuAlignment, MenuLifecycleEvent,
+    MenuPlacement, MenuPlacementConfig, MenuSize, Tooltip, WindowDragRegion, WindowDragRegionEvent,
+    WindowDragRegionResponse, WindowDragRegionStatus,
+};
 
 const WINDOW_BAR_HEIGHT: f32 = TOP_CHROME_HEIGHT;
 const WINDOW_BAR_DIVIDER_SIZE: f32 = 1.0;
@@ -936,7 +934,13 @@ impl WindowManager {
                         .variant(ButtonVariant::Ghost)
                         .size(ButtonSize::Compact)
                         .debug_selector(format!("window-close-button-{}", window_id.get()))
-                        .tooltip(|_, cx| button_theme::tooltip("Close Window", cx))
+                        .tooltip(
+                            Tooltip::new(("window-close-tooltip", window_id.get()), "Close Window")
+                                .debug_selector(format!(
+                                    "window-close-tooltip-{}",
+                                    window_id.get()
+                                )),
+                        )
                         .on_activate(move |_, window, cx| {
                             let _ = close_manager.update(cx, |manager, cx| {
                                 manager.close_window(window_id, window, cx);
@@ -1088,7 +1092,11 @@ impl WindowManager {
                 .variant(ButtonVariant::Ghost)
                 .size(ButtonSize::Regular)
                 .debug_selector("create-window-button")
-                .tooltip(|_, cx| button_theme::tooltip("Create Window", cx))
+                .tooltip(
+                    Tooltip::new("create-window-tooltip", "Create Window")
+                        .keyboard_equivalent("⌘T")
+                        .debug_selector("create-window-tooltip"),
+                )
                 .on_activate(move |_, window, cx| {
                     let _ = create_manager.update(cx, |manager, cx| {
                         manager.create_window(window, cx);

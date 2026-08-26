@@ -3,22 +3,6 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use gpui::prelude::*;
-use gpui::{
-    Action, AnyElement, App, Context, DispatchPhase, Entity, EntityId, FocusHandle, MouseButton,
-    MouseMoveEvent, MouseUpEvent, Pixels, Render, ScrollHandle, ScrollWheelEvent, SharedString,
-    WeakEntity, Window, canvas, div, point, px, rgba,
-};
-use gpui_symbols::{Icon, RenderingMode, SymbolWeight};
-use spaceterm_ui::{
-    Button, ButtonShape, ButtonSize, ButtonVariant, ContextMenu, IconButton, MenuEntry,
-    MenuLifecycleEvent, MenuSize, MiddleTruncatedText, OverlayScrollbar, OverlayScrollbarEvent,
-    ResizeAxis, ResizeFinishReason, ResizeHandle, ResizeHandleEvent, ResizeInputSource,
-    ScrollMetrics, TextInput, TextInputEvent, TextInputVariant, WindowDragRegion,
-    WindowDragRegionEvent, WindowDragRegionResponse, WindowDragRegionStatus,
-};
-
-use super::button_theme;
 use super::terminal_focus::TerminalFocusBlocker;
 use super::workspace_picker::{WorkspacePicker, WorkspacePickerEvent};
 use super::workspace_search::{WorkspaceSearch, WorkspaceSearchEvent, WorkspaceSearchItem};
@@ -52,6 +36,21 @@ use crate::terminal::{
     WorkspaceTerminalSessionFactory,
 };
 use crate::theme::{ACTIVE_THEME, Color};
+use gpui::prelude::*;
+use gpui::{
+    Action, AnyElement, App, Context, DispatchPhase, Entity, EntityId, FocusHandle, MouseButton,
+    MouseMoveEvent, MouseUpEvent, Pixels, Render, ScrollHandle, ScrollWheelEvent, SharedString,
+    WeakEntity, Window, canvas, div, point, px, rgba,
+};
+use gpui_symbols::{Icon, RenderingMode, SymbolWeight};
+use spaceterm_ui::{
+    Button, ButtonShape, ButtonSize, ButtonVariant, ContextMenu, IconButton, MenuEntry,
+    MenuLifecycleEvent, MenuSize, MiddleTruncatedText, OverlayScrollbar, OverlayScrollbarEvent,
+    ResizeAxis, ResizeFinishReason, ResizeHandle, ResizeHandleEvent, ResizeInputSource,
+    ScrollMetrics, TextInput, TextInputEvent, TextInputVariant, Tooltip, TooltipLayer,
+    TooltipTargetVisibility, WindowDragRegion, WindowDragRegionEvent, WindowDragRegionResponse,
+    WindowDragRegionStatus,
+};
 
 const SIDEBAR_TOGGLE_INSET: f32 = 4.0;
 const SIDEBAR_ROW_HEIGHT: f32 = 58.0;
@@ -90,10 +89,6 @@ struct WorkspaceRenameState {
     context_menu_open: bool,
 }
 
-struct WorkspaceSidebarTooltip {
-    text: SharedString,
-}
-
 struct WorkspaceRowViewModel {
     workspace_id: WorkspaceId,
     name: SharedString,
@@ -104,20 +99,6 @@ struct WorkspaceRowViewModel {
     window_count: usize,
     pane_count: usize,
     active: bool,
-}
-
-impl Render for WorkspaceSidebarTooltip {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .max_w(px(480.0))
-            .px(px(8.0))
-            .py(px(5.0))
-            .rounded(px(5.0))
-            .bg(gpui_color(ACTIVE_THEME.elevated_surface_background))
-            .text_size(px(11.0))
-            .text_color(gpui_color(ACTIVE_THEME.text))
-            .child(self.text.clone())
-    }
 }
 
 pub(crate) struct WorkspaceManager {
@@ -1742,7 +1723,10 @@ impl WorkspaceManager {
                         .variant(ButtonVariant::Ghost)
                         .size(ButtonSize::Regular)
                         .debug_selector("toggle-sidebar-button")
-                        .tooltip(|_, cx| button_theme::tooltip("Toggle Sidebar", cx))
+                        .tooltip(
+                            Tooltip::new("toggle-sidebar-tooltip", "Toggle Sidebar")
+                                .debug_selector("toggle-sidebar-tooltip"),
+                        )
                         .on_activate(move |_, window, cx| {
                             let _ = toggle_manager.update(cx, |manager, cx| {
                                 manager.toggle_sidebar(window, cx);
@@ -1845,8 +1829,13 @@ impl WorkspaceManager {
             .floor()
             .max(8.0) as usize;
         let tooltip_text = tooltip;
+        let tooltip_label = if available {
+            "Workspace Directory"
+        } else {
+            "Workspace unavailable"
+        };
 
-        let row = div()
+        let row_content = div()
             .id(("workspace-row", workspace_id.get()))
             .debug_selector(move || {
                 format!(
@@ -1869,12 +1858,6 @@ impl WorkspaceManager {
                 row.bg(gpui_color(ACTIVE_THEME.element_selected))
             })
             .hover(|row| row.bg(gpui_color(ACTIVE_THEME.ghost_element_selected)))
-            .tooltip(move |_, cx| {
-                cx.new(|_| WorkspaceSidebarTooltip {
-                    text: tooltip_text.clone(),
-                })
-                .into()
-            })
             .on_click(move |_, window, cx| {
                 let _ = click_manager.update(cx, |manager, cx| {
                     manager.sidebar_focus.focus(window);
@@ -1963,7 +1946,11 @@ impl WorkspaceManager {
                     .w_full()
                     .h(px(CHROME_DIVIDER_SIZE))
                     .bg(gpui_color(ACTIVE_THEME.border)),
-            )
+            );
+        let row = Tooltip::new(("workspace-row-tooltip", workspace_id.get()), tooltip_label)
+            .detail(tooltip_text)
+            .debug_selector(format!("workspace-row-tooltip-{}", workspace_id.get()))
+            .attach(row_content, TooltipTargetVisibility::Visible)
             .into_any_element();
 
         if renaming {
@@ -2108,7 +2095,11 @@ impl WorkspaceManager {
                 .variant(ButtonVariant::Ghost)
                 .size(ButtonSize::Regular)
                 .debug_selector("search-workspaces-button")
-                .tooltip(|_, cx| button_theme::tooltip("Search Workspaces", cx))
+                .tooltip(
+                    Tooltip::new("search-workspaces-tooltip", "Search Workspaces")
+                        .keyboard_equivalent("⌘P")
+                        .debug_selector("search-workspaces-tooltip"),
+                )
                 .on_activate(move |_, window, cx| {
                     let _ = search_manager.update(cx, |manager, cx| {
                         manager.open_workspace_search(window, cx);
@@ -2131,7 +2122,11 @@ impl WorkspaceManager {
                 .variant(ButtonVariant::Ghost)
                 .size(ButtonSize::Regular)
                 .debug_selector("open-local-project-button")
-                .tooltip(|_, cx| button_theme::tooltip("Open Local Project…", cx))
+                .tooltip(
+                    Tooltip::new("open-local-project-tooltip", "Open Local Project…")
+                        .keyboard_equivalent("⌘O")
+                        .debug_selector("open-local-project-tooltip"),
+                )
                 .on_activate(move |_, window, cx| {
                     let _ = picker_manager.update(cx, |manager, cx| {
                         manager.open_local_project(window, cx);
@@ -2256,7 +2251,7 @@ impl Render for WorkspaceManager {
         if self.sidebar_visible {
             self.sync_scrollbar(cx);
         }
-        div()
+        let content = div()
             .id("workspace-manager")
             .debug_selector(|| "workspace-manager".to_owned())
             .key_context(TERMINAL_KEY_CONTEXT)
@@ -2372,7 +2367,8 @@ impl Render for WorkspaceManager {
                 )
             })
             .child(self.workspace_search.clone())
-            .child(self.workspace_picker.clone())
+            .child(self.workspace_picker.clone());
+        TooltipLayer::new(content)
     }
 }
 

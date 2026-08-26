@@ -1,12 +1,13 @@
 use std::rc::Rc;
 
 use gpui::{
-    AnyElement, AnyView, App, ElementId, FocusHandle, Global, HitboxBehavior,
-    InteractiveElement as _, IntoElement, KeyDownEvent, KeyUpEvent, MouseButton, MouseDownEvent,
-    MouseExitEvent, MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, RenderOnce, Rgba,
-    SharedString, StatefulInteractiveElement as _, Styled as _, Window, canvas, div,
-    prelude::FluentBuilder as _, px,
+    AnyElement, App, ElementId, FocusHandle, Global, HitboxBehavior, InteractiveElement as _,
+    IntoElement, KeyDownEvent, KeyUpEvent, MouseButton, MouseDownEvent, MouseExitEvent,
+    MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, RenderOnce, Rgba, SharedString,
+    Styled as _, Window, canvas, div, prelude::FluentBuilder as _, px,
 };
+
+use crate::tooltip::{Tooltip, TooltipTargetVisibility};
 
 /// The semantic intent of a button action.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -365,7 +366,6 @@ struct ButtonStyle {
 
 type ActivationHandler = Rc<dyn Fn(&ButtonActivation, &mut Window, &mut App)>;
 type ContentBuilder = Box<dyn FnOnce(Rgba) -> AnyElement>;
-type TooltipBuilder = Rc<dyn Fn(&mut Window, &mut App) -> AnyView>;
 
 /// A reusable text action button with native desktop press semantics.
 #[derive(IntoElement)]
@@ -453,9 +453,9 @@ impl Button {
         self
     }
 
-    /// Adds a lazily constructed tooltip.
-    pub fn tooltip(mut self, build: impl Fn(&mut Window, &mut App) -> AnyView + 'static) -> Self {
-        self.core.tooltip = Some(Rc::new(build));
+    /// Attaches bounded semantic tooltip content.
+    pub fn tooltip(mut self, tooltip: Tooltip) -> Self {
+        self.core.tooltip = Some(tooltip);
         self
     }
 
@@ -565,9 +565,9 @@ impl IconButton {
         self
     }
 
-    /// Adds a lazily constructed tooltip.
-    pub fn tooltip(mut self, build: impl Fn(&mut Window, &mut App) -> AnyView + 'static) -> Self {
-        self.core.tooltip = Some(Rc::new(build));
+    /// Attaches bounded semantic tooltip content.
+    pub fn tooltip(mut self, tooltip: Tooltip) -> Self {
+        self.core.tooltip = Some(tooltip);
         self
     }
 
@@ -598,7 +598,7 @@ struct ButtonCore {
     disabled: bool,
     tab_stop: bool,
     debug_selector: Option<String>,
-    tooltip: Option<TooltipBuilder>,
+    tooltip: Option<Tooltip>,
     on_activate: Option<ActivationHandler>,
 }
 
@@ -741,7 +741,7 @@ impl ButtonCore {
         let tooltip = self.tooltip;
         let content = build_content(paint.foreground);
 
-        div()
+        let button = div()
             .id(self.id)
             .debug_selector(move || {
                 debug_selector.unwrap_or_else(|| self.accessibility_name.to_string())
@@ -794,10 +794,16 @@ impl ButtonCore {
                 cx.stop_propagation();
             })
             .child(content)
-            .child(pointer_tracker)
-            .when_some(tooltip, |button, build| {
-                button.tooltip(move |window, cx| build(window, cx))
-            })
+            .child(pointer_tracker);
+
+        if let Some(tooltip) = tooltip {
+            tooltip
+                .attach(button, TooltipTargetVisibility::Visible)
+                .disabled(!enabled)
+                .into_any_element()
+        } else {
+            button.into_any_element()
+        }
     }
 }
 
@@ -1085,6 +1091,16 @@ mod tests {
     }
 
     #[test]
+    fn typed_tooltip_should_integrate_with_text_and_icon_buttons() {
+        let button =
+            Button::new("button", "Button").tooltip(Tooltip::new("button-tooltip", "Button help"));
+        let icon = IconButton::new("icon", "Icon", |_| div().into_any_element())
+            .tooltip(Tooltip::new("icon-tooltip", "Icon help"));
+
+        assert!(button.core.tooltip.is_some() && icon.core.tooltip.is_some());
+    }
+
+    #[test]
     fn pointer_release_inside_should_activate() {
         let mut state = ButtonInteraction::default();
 
@@ -1168,6 +1184,7 @@ mod tests {
                         .disabled(self.disabled)
                         .tab_stop(self.tab_stop)
                         .debug_selector("test-button")
+                        .tooltip(Tooltip::new("test-button-tooltip", "Activate"))
                         .on_activate(move |activation, _, _| {
                             activations.set(activations.get() + 1);
                             last_source.set(Some(activation.source()));
