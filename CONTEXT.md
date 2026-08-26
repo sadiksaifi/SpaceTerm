@@ -747,6 +747,10 @@ Scratch Workspace at `HOME`; Open Local Project creates a Local Project Workspac
 confirmed through the in-app Workspace Picker. Remote Project is listed and unavailable, so the
 panel states the whole model before an SSH selection path exists.
 
+A trailing ellipsis marks a command whose surface has not opened yet, so it belongs to the macOS
+menu bar and not to the panel: inside a chooser every row already leads onward, and marking only
+some of them leaves the list ragged for no gain.
+
 Choosing Local Project replaces the panel with the Workspace Picker. Escape there returns to the
 panel that presented it; any other dismissal ends the flow, and confirming a directory completes
 it. Reaching the picker without the panel leaves nothing to step back to. The picker is the canonical selection path and

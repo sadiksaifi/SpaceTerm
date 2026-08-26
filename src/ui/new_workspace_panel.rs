@@ -23,9 +23,9 @@ impl NewWorkspaceSource {
     /// thing on the panel and another on the control that opened it.
     const fn label(self) -> &'static str {
         match self {
-            Self::LocalProject => "Local Project…",
+            Self::LocalProject => "Local Project",
             Self::Scratch => "Scratch Workspace",
-            Self::RemoteProject => "Remote over SSH…",
+            Self::RemoteProject => "Remote over SSH",
         }
     }
 

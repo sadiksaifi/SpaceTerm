@@ -2234,9 +2234,7 @@ impl WorkspaceManager {
                     .h(px(NEW_WORKSPACE_BUTTON_HEIGHT))
                     .flex_shrink_0()
                     .child(
-                        // The ellipsis is load-bearing: it is the macOS signal that the control
-                        // needs further input, so the panel is not a surprise.
-                        Button::new("new-workspace-button", "New Workspace…")
+                        Button::new("new-workspace-button", "New Workspace")
                             .variant(ButtonVariant::Ghost)
                             .size(ButtonSize::Large)
                             .shape(ButtonShape::Square)
