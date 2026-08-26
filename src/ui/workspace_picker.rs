@@ -6,8 +6,9 @@ use std::sync::Arc;
 use gpui::prelude::*;
 use gpui::{
     Action, App, Bounds, Context, Corner, Entity, EventEmitter, KeyBinding, KeyDownEvent,
-    ListAlignment, ListState, MouseButton, MouseDownEvent, Pixels, PromptButton, PromptLevel,
-    Render, ScrollWheelEvent, WeakFocusHandle, Window, actions, anchored, canvas, div, list, px,
+    ListAlignment, ListState, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels,
+    PromptButton, PromptLevel, Render, ScrollWheelEvent, WeakFocusHandle, Window, actions,
+    anchored, canvas, div, list, px,
 };
 use gpui_symbols::{Icon, SymbolWeight};
 use spaceterm_ui::{
@@ -45,7 +46,9 @@ actions!(
         PickerMoveUp,
         PickerMoveDown,
         PickerConfirmTyped,
-        PickerDismiss
+        PickerDismiss,
+        PickerFocusNext,
+        PickerFocusPrevious
     ]
 );
 
@@ -57,6 +60,8 @@ pub(super) fn init(cx: &mut App) {
         KeyBinding::new("ctrl-n", PickerMoveDown, Some(KEY_CONTEXT)),
         KeyBinding::new("cmd-enter", PickerConfirmTyped, Some(KEY_CONTEXT)),
         KeyBinding::new("escape", PickerDismiss, Some(KEY_CONTEXT)),
+        KeyBinding::new("tab", PickerFocusNext, Some(KEY_CONTEXT)),
+        KeyBinding::new("shift-tab", PickerFocusPrevious, Some(KEY_CONTEXT)),
     ]);
 }
 
@@ -365,6 +370,7 @@ impl WorkspacePicker {
                     picker.dismiss(window, cx);
                 }
                 TextInputEvent::TabForwardRequested => picker.descend_selected(window, cx),
+                TextInputEvent::TabBackwardRequested => window.focus_prev(),
                 _ => {}
             },
         )
@@ -1388,6 +1394,7 @@ impl Render for WorkspacePicker {
                     .track_focus(&self.focus_scope)
                     .tab_group()
                     .bg(gpui_color(ACTIVE_THEME.overlay_scrim))
+                    .occlude()
                     .child(outside)
                     .child(div().absolute().left(left).top(top).child(panel))
                     .capture_action(block_parent_action::<CreateWorkspace>)
@@ -1440,6 +1447,22 @@ impl Render for WorkspacePicker {
                         window.prevent_default();
                         cx.stop_propagation();
                     })
+                    .on_mouse_move(|_: &MouseMoveEvent, window, cx| {
+                        window.prevent_default();
+                        cx.stop_propagation();
+                    })
+                    .on_mouse_up(MouseButton::Left, |_: &MouseUpEvent, window, cx| {
+                        window.prevent_default();
+                        cx.stop_propagation();
+                    })
+                    .on_mouse_up(MouseButton::Right, |_: &MouseUpEvent, window, cx| {
+                        window.prevent_default();
+                        cx.stop_propagation();
+                    })
+                    .on_mouse_up(MouseButton::Middle, |_: &MouseUpEvent, window, cx| {
+                        window.prevent_default();
+                        cx.stop_propagation();
+                    })
                     .on_scroll_wheel(|_: &ScrollWheelEvent, window, cx| {
                         window.prevent_default();
                         cx.stop_propagation();
@@ -1460,6 +1483,14 @@ impl Render for WorkspacePicker {
                         if picker.dismiss(window, cx) {
                             cx.stop_propagation();
                         }
+                    }))
+                    .on_action(cx.listener(|_, _: &PickerFocusNext, window, cx| {
+                        window.focus_next();
+                        cx.stop_propagation();
+                    }))
+                    .on_action(cx.listener(|_, _: &PickerFocusPrevious, window, cx| {
+                        window.focus_prev();
+                        cx.stop_propagation();
                     })),
             )
             .into_any_element()
@@ -1481,10 +1512,11 @@ fn gpui_color(color: Color) -> gpui::Rgba {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
     use std::collections::VecDeque;
     use std::sync::Mutex;
 
-    use gpui::{TestAppContext, VisualTestContext};
+    use gpui::{Modifiers, TestAppContext, VisualTestContext};
 
     use super::*;
     use crate::domain::WorkspaceDirectoryIdentity;
@@ -1594,6 +1626,40 @@ mod tests {
     impl Render for WorkspacePickerHarness {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
             div().size_full().child(self.picker.clone())
+        }
+    }
+
+    #[derive(Default)]
+    struct UnderlayPointerEvents {
+        moves: Cell<usize>,
+        releases: Cell<usize>,
+    }
+
+    struct PointerIsolationHarness {
+        picker: Entity<WorkspacePicker>,
+        underlay_events: Rc<UnderlayPointerEvents>,
+    }
+
+    impl Render for PointerIsolationHarness {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let move_events = Rc::clone(&self.underlay_events);
+            let release_events = Rc::clone(&self.underlay_events);
+            div()
+                .size_full()
+                .child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .on_mouse_move(move |_, _, _| {
+                            move_events.moves.set(move_events.moves.get() + 1);
+                        })
+                        .on_mouse_up(MouseButton::Left, move |_, _, _| {
+                            release_events
+                                .releases
+                                .set(release_events.releases.get() + 1);
+                        }),
+                )
+                .child(self.picker.clone())
         }
     }
 
@@ -1862,6 +1928,58 @@ mod tests {
         let rows = filter_workspace_picker_rows(&parsed, &[]);
 
         assert_eq!(repair_workspace_picker_selection(None, &rows), None);
+    }
+
+    #[gpui::test]
+    fn workspace_picker_shift_tab_leaves_the_path_and_tab_returns_from_a_button(
+        cx: &mut TestAppContext,
+    ) {
+        let filesystem = Arc::new(ScriptedWorkspacePickerFilesystem::default());
+        let (picker, cx) = workspace_picker(filesystem, cx);
+        assert!(cx.update(|window, cx| { picker.read(cx).path_input_is_focused(window, cx) }));
+
+        cx.simulate_keystrokes("shift-tab");
+        assert!(!cx.update(|window, cx| { picker.read(cx).path_input_is_focused(window, cx) }));
+
+        cx.simulate_keystrokes("tab");
+        assert!(cx.update(|window, cx| { picker.read(cx).path_input_is_focused(window, cx) }));
+    }
+
+    #[gpui::test]
+    fn workspace_picker_overlay_occludes_underlay_pointer_movement_and_release(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(crate::ui::init);
+        let filesystem: Arc<dyn WorkspacePickerFilesystem + Send + Sync> =
+            Arc::new(ScriptedWorkspacePickerFilesystem::default());
+        let system_settings: Rc<dyn SystemSettingsOpener> = Rc::new(TestSystemSettingsOpener);
+        let underlay_events = Rc::new(UnderlayPointerEvents::default());
+        let harness_events = Rc::clone(&underlay_events);
+        let (harness, cx) = cx.add_window_view(move |window, cx| {
+            let picker =
+                cx.new(|cx| WorkspacePicker::new(home(), filesystem, system_settings, window, cx));
+            PointerIsolationHarness {
+                picker,
+                underlay_events: harness_events,
+            }
+        });
+        let picker = harness.read_with(cx, |harness, _| harness.picker.clone());
+        cx.update(|window, cx| {
+            window.activate_window();
+            picker.update(cx, |picker, cx| {
+                picker.open(window, cx);
+            });
+        });
+        cx.run_until_parked();
+
+        let scrim = gpui::point(px(4.0), px(4.0));
+        cx.simulate_mouse_move(scrim, MouseButton::Left, Modifiers::none());
+        cx.simulate_mouse_up(scrim, MouseButton::Left, Modifiers::none());
+
+        assert_eq!(
+            (underlay_events.moves.get(), underlay_events.releases.get()),
+            (0, 0)
+        );
     }
 
     #[gpui::test]
