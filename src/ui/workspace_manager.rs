@@ -2045,8 +2045,9 @@ impl WorkspaceManager {
             .hover(|row| row.bg(gpui_color(ACTIVE_THEME.ghost_element_selected)))
             .on_click(move |_, window, cx| {
                 let _ = click_manager.update(cx, |manager, cx| {
-                    manager.sidebar_focus.focus(window);
-                    manager.activate_workspace(workspace_id, window, cx);
+                    if manager.activate_workspace(workspace_id, window, cx) {
+                        manager.focus(window, cx);
+                    }
                 });
                 cx.stop_propagation();
             })
@@ -4257,18 +4258,51 @@ mod tests {
     }
 
     #[gpui::test]
-    fn clicking_an_inactive_workspace_should_retain_sidebar_focus(cx: &mut TestAppContext) {
+    fn clicking_an_inactive_workspace_should_restore_its_focused_pane(cx: &mut TestAppContext) {
         let (manager, _records, cx) = workspace_manager(cx);
-        cx.simulate_keystrokes("cmd-n");
+        cx.simulate_keystrokes("cmd-d cmd-n");
         cx.run_until_parked();
 
         click("workspace-row-1-inactive", cx);
 
         let state = cx.update(|window, cx| {
             let manager = manager.read(cx);
+            let active_workspace = manager.workspaces.active_workspace().payload().read(cx);
             (
                 manager.workspaces.active_workspace_id(),
                 manager.sidebar_focus.is_focused(window),
+                manager.terminal_focus_blocker(window, cx),
+                active_workspace.sidebar_detail(cx),
+                active_workspace.focused_terminal_is_focused(window, cx),
+            )
+        });
+        assert_eq!(
+            state,
+            (
+                WorkspaceId::new(1),
+                false,
+                None,
+                SharedString::from("2 Panes"),
+                true,
+            )
+        );
+    }
+
+    #[gpui::test]
+    fn clicking_the_active_workspace_should_restore_terminal_focus_from_the_sidebar(
+        cx: &mut TestAppContext,
+    ) {
+        let (manager, _records, cx) = workspace_manager(cx);
+        cx.simulate_keystrokes("cmd-shift-e");
+        cx.run_until_parked();
+
+        click("workspace-row-1-active", cx);
+
+        let state = cx.update(|window, cx| {
+            let manager = manager.read(cx);
+            (
+                manager.sidebar_focus.is_focused(window),
+                manager.terminal_focus_blocker(window, cx),
                 manager
                     .workspaces
                     .active_workspace()
@@ -4277,7 +4311,7 @@ mod tests {
                     .focused_terminal_is_focused(window, cx),
             )
         });
-        assert_eq!(state, (WorkspaceId::new(1), true, false));
+        assert_eq!(state, (false, None, true));
     }
 
     #[gpui::test]
