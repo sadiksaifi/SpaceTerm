@@ -23,7 +23,7 @@ use crate::domain::{
     ValidatedWorkspaceDirectory, WorkspaceCollection, WorkspaceDirectoryAvailability,
     WorkspaceDirectoryIdentity, WorkspaceError, WorkspaceId, WorkspaceKind,
 };
-use crate::platform::local_project_picker::{LocalProjectPicker, NativeLocalProjectPicker};
+use crate::platform::finder_fallback::{FinderFallback, NativeFinderFallback};
 use crate::platform::macos_system_settings::MacosSystemSettingsOpener;
 use crate::platform::macos_window_drag::{
     MacosOperatingSystemWindowDragPlatform, OperatingSystemWindowDragError,
@@ -106,7 +106,7 @@ pub(crate) struct WorkspaceManager {
     session_factory: Rc<dyn TerminalSessionFactory>,
     default_workspace_root: PathBuf,
     default_workspace_identity: WorkspaceDirectoryIdentity,
-    local_project_picker: Rc<dyn LocalProjectPicker>,
+    finder_fallback: Rc<dyn FinderFallback>,
     workspace_picker: Entity<WorkspacePicker>,
     sidebar_visible: bool,
     sidebar_width: Pixels,
@@ -133,7 +133,7 @@ impl WorkspaceManager {
         Self::new_with_adapters(
             session_factory,
             default_workspace_root,
-            Rc::new(NativeLocalProjectPicker),
+            Rc::new(NativeFinderFallback),
             Rc::new(MacosOperatingSystemWindowDragPlatform::default()),
             window,
             cx,
@@ -141,17 +141,17 @@ impl WorkspaceManager {
     }
 
     #[cfg(test)]
-    fn new_with_local_project_picker(
+    fn new_with_finder_fallback(
         session_factory: Rc<dyn TerminalSessionFactory>,
         default_workspace_root: PathBuf,
-        local_project_picker: Rc<dyn LocalProjectPicker>,
+        finder_fallback: Rc<dyn FinderFallback>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         Self::new_with_adapters(
             session_factory,
             default_workspace_root,
-            local_project_picker,
+            finder_fallback,
             Rc::new(MacosOperatingSystemWindowDragPlatform::default()),
             window,
             cx,
@@ -169,7 +169,7 @@ impl WorkspaceManager {
         Self::new_with_adapters(
             session_factory,
             default_workspace_root,
-            Rc::new(NativeLocalProjectPicker),
+            Rc::new(NativeFinderFallback),
             operating_system_window_drag_platform,
             window,
             cx,
@@ -179,7 +179,7 @@ impl WorkspaceManager {
     fn new_with_adapters(
         session_factory: Rc<dyn TerminalSessionFactory>,
         default_workspace_root: PathBuf,
-        local_project_picker: Rc<dyn LocalProjectPicker>,
+        finder_fallback: Rc<dyn FinderFallback>,
         operating_system_window_drag_platform: Rc<dyn OperatingSystemWindowDragPlatform>,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -264,7 +264,7 @@ impl WorkspaceManager {
             session_factory,
             default_workspace_root,
             default_workspace_identity,
-            local_project_picker,
+            finder_fallback,
             workspace_picker,
             sidebar_visible: true,
             sidebar_width: px(WORKSPACE_SIDEBAR_DEFAULT_WIDTH),
@@ -980,7 +980,7 @@ impl WorkspaceManager {
                 cx.notify();
             }
             WorkspacePickerEvent::FinderRequested => {
-                let selection = self.local_project_picker.pick(cx);
+                let selection = self.finder_fallback.choose(cx);
                 cx.spawn_in(window, async move |manager, cx| {
                     let result = selection.await;
                     let _ = manager.update_in(cx, |manager, window, cx| {
@@ -2453,7 +2453,7 @@ mod tests {
     };
 
     use super::*;
-    use crate::platform::local_project_picker::ScriptedLocalProjectPicker;
+    use crate::platform::finder_fallback::ScriptedFinderFallback;
     use crate::platform::macos_window_drag::RecordingOperatingSystemWindowDragPlatform;
     use crate::terminal::testing::{
         RecordedSessionCommand, TestTerminalSessionFactory, TestTerminalSessionRecords,
@@ -2522,13 +2522,13 @@ mod tests {
         let records = TestTerminalSessionRecords::default();
         let session_factory: Rc<dyn TerminalSessionFactory> =
             Rc::new(TestTerminalSessionFactory::new(records.clone()).with_fallback_title("zsh"));
-        let picker: Rc<dyn LocalProjectPicker> =
-            Rc::new(ScriptedLocalProjectPicker::new(selections));
+        let finder_fallback: Rc<dyn FinderFallback> =
+            Rc::new(ScriptedFinderFallback::new(selections));
         let (manager, cx) = cx.add_window_view(|window, cx| {
-            WorkspaceManager::new_with_local_project_picker(
+            WorkspaceManager::new_with_finder_fallback(
                 session_factory,
                 PathBuf::from("/Users/test"),
-                picker,
+                finder_fallback,
                 window,
                 cx,
             )
@@ -2548,7 +2548,7 @@ mod tests {
         std::env::temp_dir().join(format!("spaceterm-workspace-manager-{name}-{nonce}"))
     }
 
-    fn choose_local_project_with_finder(cx: &mut VisualTestContext) {
+    fn choose_with_finder_fallback(cx: &mut VisualTestContext) {
         click("open-local-project-button", cx);
         cx.run_until_parked();
         click("workspace-picker-finder", cx);
@@ -2556,10 +2556,10 @@ mod tests {
     }
 
     #[gpui::test]
-    fn cancelled_local_project_picker_should_leave_hierarchy_unchanged(cx: &mut TestAppContext) {
+    fn cancelled_finder_fallback_should_leave_hierarchy_unchanged(cx: &mut TestAppContext) {
         let (manager, records, cx) = workspace_manager_with_picker([Ok(None)], cx);
 
-        choose_local_project_with_finder(cx);
+        choose_with_finder_fallback(cx);
 
         assert_eq!(
             manager.read_with(cx, |manager, _| manager.workspaces.len()),
@@ -2672,8 +2672,8 @@ mod tests {
         let selections = [Ok(Some(project.clone())), Ok(Some(equivalent))];
         let (manager, records, cx) = workspace_manager_with_picker(selections, cx);
 
-        choose_local_project_with_finder(cx);
-        choose_local_project_with_finder(cx);
+        choose_with_finder_fallback(cx);
+        choose_with_finder_fallback(cx);
         cx.simulate_keystrokes("cmd-t");
         cx.run_until_parked();
         cx.simulate_keystrokes("cmd-d");
@@ -2706,7 +2706,7 @@ mod tests {
         let parked = root.join("parked");
         fs::create_dir_all(&project).unwrap();
         let (manager, records, cx) = workspace_manager_with_picker([Ok(Some(project.clone()))], cx);
-        choose_local_project_with_finder(cx);
+        choose_with_finder_fallback(cx);
         assert_eq!(records.starts().len(), 2);
         assert!(!manager.read_with(cx, |manager, cx| {
             manager.workspace_picker.read(cx).is_open()
@@ -2743,7 +2743,7 @@ mod tests {
         let missing = temporary_directory("missing");
         let (manager, records, cx) = workspace_manager_with_picker([Ok(Some(missing))], cx);
 
-        choose_local_project_with_finder(cx);
+        choose_with_finder_fallback(cx);
 
         assert_eq!(
             manager.read_with(cx, |manager, _| manager.workspaces.len()),

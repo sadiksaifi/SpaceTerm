@@ -1,6 +1,6 @@
 pub(crate) mod acceptance_observation;
 
-pub(crate) mod local_project_picker;
+pub(crate) mod finder_fallback;
 pub(crate) mod workspace_directory;
 pub(crate) mod workspace_picker_filesystem;
 
