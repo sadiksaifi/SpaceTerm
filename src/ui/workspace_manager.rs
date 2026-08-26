@@ -11,9 +11,9 @@ use super::{
     ActivateWindow6, ActivateWindow7, ActivateWindow8, ActivateWindow9, ActivateWorkspace1,
     ActivateWorkspace2, ActivateWorkspace3, ActivateWorkspace4, ActivateWorkspace5,
     ActivateWorkspace6, ActivateWorkspace7, ActivateWorkspace8, ActivateWorkspace9, ClosePane,
-    CloseTerminalFind, CloseWindow, CloseWorkspace, CopySelection, CreateWindow, CreateWorkspace,
-    FindNext, FindPrevious, FocusPaneDown, FocusPaneLeft, FocusPaneRight, FocusPaneUp,
-    OpenLocalProject, OpenTerminalFind, SearchWorkspaces, SplitDown, SplitRight,
+    CloseTerminalFind, CloseWindow, CloseWorkspace, CopySelection, CreateScratchWorkspace,
+    CreateWindow, FindNext, FindPrevious, FocusPaneDown, FocusPaneLeft, FocusPaneRight,
+    FocusPaneUp, OpenLocalProject, OpenTerminalFind, SearchWorkspaces, SplitDown, SplitRight,
     TERMINAL_KEY_CONTEXT, TOP_CHROME_HEIGHT, TogglePaneZoom, ToggleSidebar, ToggleSidebarFocus,
     WORKSPACE_SIDEBAR_DEFAULT_WIDTH, WORKSPACE_SIDEBAR_MINIMUM_WIDTH, WindowManager,
     WindowManagerEvent,
@@ -23,7 +23,7 @@ use crate::domain::{
     ValidatedWorkspaceDirectory, WorkspaceCollection, WorkspaceDirectoryAvailability,
     WorkspaceDirectoryIdentity, WorkspaceError, WorkspaceId, WorkspaceKind,
 };
-use crate::platform::local_project_picker::{LocalProjectPicker, NativeLocalProjectPicker};
+use crate::platform::finder_fallback::{FinderFallback, NativeFinderFallback};
 use crate::platform::macos_system_settings::MacosSystemSettingsOpener;
 use crate::platform::macos_window_drag::{
     MacosOperatingSystemWindowDragPlatform, OperatingSystemWindowDragError,
@@ -106,7 +106,7 @@ pub(crate) struct WorkspaceManager {
     session_factory: Rc<dyn TerminalSessionFactory>,
     default_workspace_root: PathBuf,
     default_workspace_identity: WorkspaceDirectoryIdentity,
-    local_project_picker: Rc<dyn LocalProjectPicker>,
+    finder_fallback: Rc<dyn FinderFallback>,
     workspace_picker: Entity<WorkspacePicker>,
     sidebar_visible: bool,
     sidebar_width: Pixels,
@@ -133,7 +133,7 @@ impl WorkspaceManager {
         Self::new_with_adapters(
             session_factory,
             default_workspace_root,
-            Rc::new(NativeLocalProjectPicker),
+            Rc::new(NativeFinderFallback),
             Rc::new(MacosOperatingSystemWindowDragPlatform::default()),
             window,
             cx,
@@ -141,17 +141,17 @@ impl WorkspaceManager {
     }
 
     #[cfg(test)]
-    fn new_with_local_project_picker(
+    fn new_with_finder_fallback(
         session_factory: Rc<dyn TerminalSessionFactory>,
         default_workspace_root: PathBuf,
-        local_project_picker: Rc<dyn LocalProjectPicker>,
+        finder_fallback: Rc<dyn FinderFallback>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         Self::new_with_adapters(
             session_factory,
             default_workspace_root,
-            local_project_picker,
+            finder_fallback,
             Rc::new(MacosOperatingSystemWindowDragPlatform::default()),
             window,
             cx,
@@ -169,7 +169,7 @@ impl WorkspaceManager {
         Self::new_with_adapters(
             session_factory,
             default_workspace_root,
-            Rc::new(NativeLocalProjectPicker),
+            Rc::new(NativeFinderFallback),
             operating_system_window_drag_platform,
             window,
             cx,
@@ -179,7 +179,7 @@ impl WorkspaceManager {
     fn new_with_adapters(
         session_factory: Rc<dyn TerminalSessionFactory>,
         default_workspace_root: PathBuf,
-        local_project_picker: Rc<dyn LocalProjectPicker>,
+        finder_fallback: Rc<dyn FinderFallback>,
         operating_system_window_drag_platform: Rc<dyn OperatingSystemWindowDragPlatform>,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -189,7 +189,7 @@ impl WorkspaceManager {
         let default_workspace_identity = default_directory.identity();
         let initial_workspace_identity = default_directory.identity();
         let initial_window_drag_platform = Rc::clone(&operating_system_window_drag_platform);
-        let mut workspaces = WorkspaceCollection::new_ad_hoc(
+        let mut workspaces = WorkspaceCollection::new_scratch(
             default_directory,
             DirectoryAuthority::initial(),
             |workspace_id, workspace_root| {
@@ -264,7 +264,7 @@ impl WorkspaceManager {
             session_factory,
             default_workspace_root,
             default_workspace_identity,
-            local_project_picker,
+            finder_fallback,
             workspace_picker,
             sidebar_visible: true,
             sidebar_width: px(WORKSPACE_SIDEBAR_DEFAULT_WIDTH),
@@ -870,7 +870,7 @@ impl WorkspaceManager {
         self.reveal_scrollbar(cx);
     }
 
-    fn create_workspace(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn create_scratch_workspace(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let previous_manager = self.workspaces.active_workspace().payload().clone();
         let session_factory = Rc::clone(&self.session_factory);
         let window_drag_platform = Rc::clone(&self.operating_system_window_drag_platform);
@@ -878,7 +878,7 @@ impl WorkspaceManager {
         let sidebar_width = self.sidebar_width;
         let (directory, unavailable_reason) = self.default_workspace_directory();
         let directory_identity = directory.identity();
-        let result = self.workspaces.create_ad_hoc_workspace(
+        let result = self.workspaces.create_scratch_workspace(
             directory,
             DirectoryAuthority::initial(),
             |workspace_id, workspace_root| {
@@ -980,7 +980,7 @@ impl WorkspaceManager {
                 cx.notify();
             }
             WorkspacePickerEvent::FinderRequested => {
-                let selection = self.local_project_picker.pick(cx);
+                let selection = self.finder_fallback.choose(cx);
                 cx.spawn_in(window, async move |manager, cx| {
                     let result = selection.await;
                     let _ = manager.update_in(cx, |manager, window, cx| {
@@ -1191,7 +1191,7 @@ impl WorkspaceManager {
         let sidebar_width = self.sidebar_width;
         let (replacement, unavailable_reason) = self.default_workspace_directory();
         let replacement_identity = replacement.identity();
-        let outcome = self.workspaces.close_workspace_with_ad_hoc_replacement(
+        let outcome = self.workspaces.close_workspace_with_scratch_replacement(
             workspace_id,
             replacement,
             DirectoryAuthority::initial(),
@@ -1545,13 +1545,13 @@ impl WorkspaceManager {
         cx.notify();
     }
 
-    fn on_create_workspace(
+    fn on_create_scratch_workspace(
         &mut self,
-        _: &CreateWorkspace,
+        _: &CreateScratchWorkspace,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.create_workspace(window, cx);
+        self.create_scratch_workspace(window, cx);
     }
 
     fn on_search_workspaces(
@@ -2157,12 +2157,12 @@ impl WorkspaceManager {
                     .h(px(NEW_WORKSPACE_BUTTON_HEIGHT))
                     .flex_shrink_0()
                     .child(
-                        Button::new("create-workspace-button", "New Workspace")
+                        Button::new("create-scratch-workspace-button", "New Scratch Workspace")
                             .variant(ButtonVariant::Ghost)
                             .size(ButtonSize::Large)
                             .shape(ButtonShape::Square)
                             .full_width(true)
-                            .debug_selector("create-workspace-button")
+                            .debug_selector("create-scratch-workspace-button")
                             .leading(|_| {
                                 Icon::new("plus")
                                     .size(px(13.0))
@@ -2178,14 +2178,16 @@ impl WorkspaceManager {
                             })
                             .on_activate(move |_, window, cx| {
                                 let _ = create_manager.update(cx, |manager, cx| {
-                                    manager.create_workspace(window, cx);
+                                    manager.create_scratch_workspace(window, cx);
                                 });
                             }),
                     )
                     .child(
                         div()
-                            .id("create-workspace-button-top-divider")
-                            .debug_selector(|| "create-workspace-button-top-divider".to_owned())
+                            .id("create-scratch-workspace-button-top-divider")
+                            .debug_selector(|| {
+                                "create-scratch-workspace-button-top-divider".to_owned()
+                            })
                             .absolute()
                             .top_0()
                             .left_0()
@@ -2311,7 +2313,7 @@ impl Render for WorkspaceManager {
                 .absolute()
                 .inset_0(),
             )
-            .on_action(cx.listener(Self::on_create_workspace))
+            .on_action(cx.listener(Self::on_create_scratch_workspace))
             .on_action(cx.listener(Self::on_search_workspaces))
             .on_action(cx.listener(Self::on_open_local_project))
             .on_action(cx.listener(Self::on_close_workspace))
@@ -2453,7 +2455,7 @@ mod tests {
     };
 
     use super::*;
-    use crate::platform::local_project_picker::ScriptedLocalProjectPicker;
+    use crate::platform::finder_fallback::ScriptedFinderFallback;
     use crate::platform::macos_window_drag::RecordingOperatingSystemWindowDragPlatform;
     use crate::terminal::testing::{
         RecordedSessionCommand, TestTerminalSessionFactory, TestTerminalSessionRecords,
@@ -2522,13 +2524,13 @@ mod tests {
         let records = TestTerminalSessionRecords::default();
         let session_factory: Rc<dyn TerminalSessionFactory> =
             Rc::new(TestTerminalSessionFactory::new(records.clone()).with_fallback_title("zsh"));
-        let picker: Rc<dyn LocalProjectPicker> =
-            Rc::new(ScriptedLocalProjectPicker::new(selections));
+        let finder_fallback: Rc<dyn FinderFallback> =
+            Rc::new(ScriptedFinderFallback::new(selections));
         let (manager, cx) = cx.add_window_view(|window, cx| {
-            WorkspaceManager::new_with_local_project_picker(
+            WorkspaceManager::new_with_finder_fallback(
                 session_factory,
                 PathBuf::from("/Users/test"),
-                picker,
+                finder_fallback,
                 window,
                 cx,
             )
@@ -2548,7 +2550,7 @@ mod tests {
         std::env::temp_dir().join(format!("spaceterm-workspace-manager-{name}-{nonce}"))
     }
 
-    fn choose_local_project_with_finder(cx: &mut VisualTestContext) {
+    fn choose_with_finder_fallback(cx: &mut VisualTestContext) {
         click("open-local-project-button", cx);
         cx.run_until_parked();
         click("workspace-picker-finder", cx);
@@ -2556,10 +2558,10 @@ mod tests {
     }
 
     #[gpui::test]
-    fn cancelled_local_project_picker_should_leave_hierarchy_unchanged(cx: &mut TestAppContext) {
+    fn cancelled_finder_fallback_should_leave_hierarchy_unchanged(cx: &mut TestAppContext) {
         let (manager, records, cx) = workspace_manager_with_picker([Ok(None)], cx);
 
-        choose_local_project_with_finder(cx);
+        choose_with_finder_fallback(cx);
 
         assert_eq!(
             manager.read_with(cx, |manager, _| manager.workspaces.len()),
@@ -2672,8 +2674,8 @@ mod tests {
         let selections = [Ok(Some(project.clone())), Ok(Some(equivalent))];
         let (manager, records, cx) = workspace_manager_with_picker(selections, cx);
 
-        choose_local_project_with_finder(cx);
-        choose_local_project_with_finder(cx);
+        choose_with_finder_fallback(cx);
+        choose_with_finder_fallback(cx);
         cx.simulate_keystrokes("cmd-t");
         cx.run_until_parked();
         cx.simulate_keystrokes("cmd-d");
@@ -2706,7 +2708,7 @@ mod tests {
         let parked = root.join("parked");
         fs::create_dir_all(&project).unwrap();
         let (manager, records, cx) = workspace_manager_with_picker([Ok(Some(project.clone()))], cx);
-        choose_local_project_with_finder(cx);
+        choose_with_finder_fallback(cx);
         assert_eq!(records.starts().len(), 2);
         assert!(!manager.read_with(cx, |manager, cx| {
             manager.workspace_picker.read(cx).is_open()
@@ -2743,7 +2745,7 @@ mod tests {
         let missing = temporary_directory("missing");
         let (manager, records, cx) = workspace_manager_with_picker([Ok(Some(missing))], cx);
 
-        choose_local_project_with_finder(cx);
+        choose_with_finder_fallback(cx);
 
         assert_eq!(
             manager.read_with(cx, |manager, _| manager.workspaces.len()),
@@ -3488,7 +3490,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn sidebar_buttons_should_toggle_sidebar_and_create_workspace(cx: &mut TestAppContext) {
+    fn sidebar_buttons_should_toggle_sidebar_and_create_scratch_workspace(cx: &mut TestAppContext) {
         let (manager, _records, cx) = workspace_manager(cx);
 
         click("toggle-sidebar-button", cx);
@@ -3496,7 +3498,7 @@ mod tests {
 
         cx.simulate_keystrokes("cmd-b");
         cx.run_until_parked();
-        click("create-workspace-button", cx);
+        click("create-scratch-workspace-button", cx);
 
         assert_eq!(
             manager.read_with(cx, |manager, _| {
@@ -3513,10 +3515,10 @@ mod tests {
     fn new_workspace_button_should_start_with_a_full_width_divider(cx: &mut TestAppContext) {
         let (_manager, _records, cx) = workspace_manager(cx);
         let button = cx
-            .debug_bounds("create-workspace-button")
+            .debug_bounds("create-scratch-workspace-button")
             .expect("the New Workspace button was not rendered");
         let divider = cx
-            .debug_bounds("create-workspace-button-top-divider")
+            .debug_bounds("create-scratch-workspace-button-top-divider")
             .expect("the New Workspace button divider was not rendered");
 
         assert_eq!(
@@ -3676,7 +3678,7 @@ mod tests {
             .debug_bounds("workspace-list")
             .expect("the overflowing Workspace list was not rendered");
         let button = cx
-            .debug_bounds("create-workspace-button")
+            .debug_bounds("create-scratch-workspace-button")
             .expect("the New Workspace button was not rendered");
         assert_eq!(
             (

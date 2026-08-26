@@ -4,17 +4,17 @@ use std::pin::Pin;
 
 use gpui::{App, PathPromptOptions};
 
-pub(crate) type LocalProjectPickerFuture =
+pub(crate) type FinderFallbackFuture =
     Pin<Box<dyn Future<Output = Result<Option<PathBuf>, String>>>>;
 
-pub(crate) trait LocalProjectPicker {
-    fn pick(&self, cx: &App) -> LocalProjectPickerFuture;
+pub(crate) trait FinderFallback {
+    fn choose(&self, cx: &App) -> FinderFallbackFuture;
 }
 
-pub(crate) struct NativeLocalProjectPicker;
+pub(crate) struct NativeFinderFallback;
 
-impl LocalProjectPicker for NativeLocalProjectPicker {
-    fn pick(&self, cx: &App) -> LocalProjectPickerFuture {
+impl FinderFallback for NativeFinderFallback {
+    fn choose(&self, cx: &App) -> FinderFallbackFuture {
         let selection = cx.prompt_for_paths(PathPromptOptions {
             files: false,
             directories: true,
@@ -33,12 +33,12 @@ impl LocalProjectPicker for NativeLocalProjectPicker {
 }
 
 #[cfg(test)]
-pub(crate) struct ScriptedLocalProjectPicker {
+pub(crate) struct ScriptedFinderFallback {
     selections: std::cell::RefCell<std::collections::VecDeque<Result<Option<PathBuf>, String>>>,
 }
 
 #[cfg(test)]
-impl ScriptedLocalProjectPicker {
+impl ScriptedFinderFallback {
     pub(crate) fn new(
         selections: impl IntoIterator<Item = Result<Option<PathBuf>, String>>,
     ) -> Self {
@@ -49,8 +49,8 @@ impl ScriptedLocalProjectPicker {
 }
 
 #[cfg(test)]
-impl LocalProjectPicker for ScriptedLocalProjectPicker {
-    fn pick(&self, _: &App) -> LocalProjectPickerFuture {
+impl FinderFallback for ScriptedFinderFallback {
+    fn choose(&self, _: &App) -> FinderFallbackFuture {
         let result = self.selections.borrow_mut().pop_front().unwrap_or(Ok(None));
         Box::pin(async move { result })
     }

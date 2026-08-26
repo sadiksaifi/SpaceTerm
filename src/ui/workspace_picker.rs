@@ -19,10 +19,10 @@ use super::{
     ActivateWindow6, ActivateWindow7, ActivateWindow8, ActivateWindow9, ActivateWorkspace1,
     ActivateWorkspace2, ActivateWorkspace3, ActivateWorkspace4, ActivateWorkspace5,
     ActivateWorkspace6, ActivateWorkspace7, ActivateWorkspace8, ActivateWorkspace9, ClosePane,
-    CloseTerminalFind, CloseWindow, CloseWorkspace, CopySelection, CreateWindow, CreateWorkspace,
-    FindNext, FindPrevious, FocusPaneDown, FocusPaneLeft, FocusPaneRight, FocusPaneUp,
-    OpenTerminalFind, SearchWorkspaces, SplitDown, SplitRight, TogglePaneZoom, ToggleSidebar,
-    ToggleSidebarFocus,
+    CloseTerminalFind, CloseWindow, CloseWorkspace, CopySelection, CreateScratchWorkspace,
+    CreateWindow, FindNext, FindPrevious, FocusPaneDown, FocusPaneLeft, FocusPaneRight,
+    FocusPaneUp, OpenTerminalFind, SearchWorkspaces, SplitDown, SplitRight, TogglePaneZoom,
+    ToggleSidebar, ToggleSidebarFocus,
 };
 use crate::domain::ValidatedWorkspaceDirectory;
 use crate::platform::macos_system_settings::SystemSettingsOpener;
@@ -909,7 +909,7 @@ impl Render for WorkspacePicker {
         div()
             .when(self.open, |picker| {
                 picker
-                    .capture_action(block_parent_action::<CreateWorkspace>)
+                    .capture_action(block_parent_action::<CreateScratchWorkspace>)
                     .capture_action(block_parent_action::<SearchWorkspaces>)
                     .capture_action(block_parent_action::<CloseWorkspace>)
                     .capture_action(block_parent_action::<ActivateWorkspace1>)
