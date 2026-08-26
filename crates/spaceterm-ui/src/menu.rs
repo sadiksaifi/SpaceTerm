@@ -721,6 +721,40 @@ impl<A> MenuEntry<A> {
         }
         self
     }
+
+    /// Returns this entry's presentation when it is one ordinary action.
+    ///
+    /// A caller that would otherwise wrap a lone entry in a disclosure uses this to offer the
+    /// action directly instead. Separators, sections, and submenus report nothing.
+    pub(crate) fn plain_action(&self) -> Option<PlainMenuAction<'_, A>> {
+        match &self.kind {
+            MenuEntryKind::Item(item)
+                if !item.destructive
+                    && item.shortcut.is_none()
+                    && item.icon.is_none()
+                    && item.mark == EntryMark::None =>
+            {
+                Some(PlainMenuAction {
+                    label: &item.label,
+                    action: &item.action,
+                    disabled: item.disabled,
+                    debug_selector: item.debug_selector.as_deref(),
+                })
+            }
+            MenuEntryKind::Item(_)
+            | MenuEntryKind::Separator
+            | MenuEntryKind::Section { .. }
+            | MenuEntryKind::Submenu { .. } => None,
+        }
+    }
+}
+
+/// One ordinary menu action a caller may present outside a menu.
+pub(crate) struct PlainMenuAction<'entry, A> {
+    pub(crate) label: &'entry SharedString,
+    pub(crate) action: &'entry A,
+    pub(crate) disabled: bool,
+    pub(crate) debug_selector: Option<&'entry str>,
 }
 
 /// A button-triggered action menu.
@@ -1543,7 +1577,7 @@ pub(crate) struct MenuReplacementFocus(pub(crate) Option<WeakFocusHandle>);
 /// A transient owner such as the Command Palette stays open while one of its own menus holds
 /// focus. The coordinator reserves the window before the menu takes focus, so this answer is
 /// already correct when the displaced owner observes its blur.
-pub(crate) fn window_menu_is_open(window: &Window, cx: &App) -> bool {
+pub fn window_menu_is_open(window: &Window, cx: &App) -> bool {
     if !cx.has_global::<MenuCoordinator>() {
         return false;
     }
@@ -1553,6 +1587,21 @@ pub(crate) fn window_menu_is_open(window: &Window, cx: &App) -> bool {
         .get(&window_id)
         .and_then(|ownership| ownership.owner.upgrade())
         .is_some_and(|owner| owner.read(cx).open)
+}
+
+/// Dismisses the menu owned by this Operating-System Window and restores its displaced focus.
+///
+/// Returns `true` only when an open menu was dismissed. Application-owned transients use this
+/// before capturing focus so the menu cannot remain above or restore focus through the new owner.
+pub fn dismiss_active_menu(window: &mut Window, cx: &mut App) -> bool {
+    let Some(MenuReplacementFocus(restore_focus)) = dismiss_active_menu_for_replacement(window, cx)
+    else {
+        return false;
+    };
+    if let Some(focus) = restore_focus.and_then(|focus| focus.upgrade()) {
+        focus.focus(window);
+    }
+    true
 }
 
 pub(crate) fn dismiss_active_menu_for_replacement(

@@ -10,12 +10,15 @@ use gpui::{
 
 use crate::{
     TextInput, TextInputEvent, TextInputTabBehavior, TextInputVariant,
-    button::{ButtonSize, ButtonVariant, IconButton},
+    button::{Button, ButtonSize, ButtonVariant, IconButton},
     menu::{Menu, MenuActivation, MenuEntry, MenuSize},
     overlay_scrollbar::{OverlayScrollbar, OverlayScrollbarEvent, ScrollMetrics},
 };
 
 const KEY_CONTEXT: &str = "SpaceTermCommandPalette";
+
+/// Every footer control shares one size so their labels sit on one baseline and one inset.
+const FOOTER_CONTROL_SIZE: ButtonSize = ButtonSize::Small;
 
 actions!(
     spaceterm_command_palette,
@@ -25,6 +28,7 @@ actions!(
         MovePageUp,
         MovePageDown,
         Activate,
+        Confirm,
         Dismiss,
         FocusNext,
         FocusPrevious
@@ -40,6 +44,7 @@ pub(crate) fn init(cx: &mut App) {
         KeyBinding::new("pageup", MovePageUp, Some(KEY_CONTEXT)),
         KeyBinding::new("pagedown", MovePageDown, Some(KEY_CONTEXT)),
         KeyBinding::new("ctrl-m", Activate, Some(KEY_CONTEXT)),
+        KeyBinding::new("cmd-enter", Confirm, Some(KEY_CONTEXT)),
         KeyBinding::new("escape", Dismiss, Some(KEY_CONTEXT)),
         KeyBinding::new("cmd-.", Dismiss, Some(KEY_CONTEXT)),
         KeyBinding::new("ctrl-g", Dismiss, Some(KEY_CONTEXT)),
@@ -98,6 +103,8 @@ pub enum CommandPaletteCloseReason {
     Programmatic,
     /// The owner replaced this palette with another transient UI owner.
     Replaced,
+    /// The owner completed its operation and takes focus itself.
+    Completed,
 }
 
 impl CommandPaletteCloseReason {
@@ -105,6 +112,13 @@ impl CommandPaletteCloseReason {
         matches!(
             self,
             Self::Activated | Self::Escape | Self::Outside | Self::Programmatic
+        )
+    }
+
+    const fn is_implicit_dismissal(self) -> bool {
+        matches!(
+            self,
+            Self::Escape | Self::Outside | Self::FocusLost | Self::Deactivated
         )
     }
 }
@@ -166,6 +180,8 @@ pub enum CommandPaletteEvent<I> {
     HeaderAction(SharedString),
     /// A footer actions-menu entry was activated.
     MenuAction(SharedString),
+    /// The footer confirm control was activated by pointer or by its keyboard equivalent.
+    Confirmed,
 }
 
 /// A standardized trailing row accessory.
@@ -244,6 +260,84 @@ impl CommandPaletteHint {
             label: label.into(),
             key: key.into(),
         }
+    }
+}
+
+/// Who decides which items a query presents.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum CommandPaletteMatching {
+    /// The palette filters and ranks items with its own static semantic matcher.
+    #[default]
+    Semantic,
+    /// The caller supplies exactly the items to present, already filtered and ordered.
+    ///
+    /// The palette presents every item in caller order and highlights nothing, because the query
+    /// is not a substring of the labels it produces. Callers whose query is an address rather than
+    /// a search term, such as a filesystem path, select this.
+    Caller,
+}
+
+/// What activating an item does to the palette.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum CommandPaletteActivationPolicy {
+    /// Activation closes the palette, because the item completed the caller's operation.
+    #[default]
+    Close,
+    /// Activation keeps the palette open, because the item narrows the caller's next results.
+    ///
+    /// Drill-down callers, such as a filesystem navigator whose rows descend a level, select this
+    /// and answer the activation by publishing a new query and new items.
+    Continue,
+}
+
+/// The single primary footer control and its keyboard equivalent.
+///
+/// It is primary by placement and by owning the confirm key, not by weight: the palette renders it
+/// as low-emphasis text so the result list stays the loudest thing on the surface.
+///
+/// The caller owns the label, the enabled state, and the identity of the operation; the palette
+/// owns the control's size, paint, placement, and shortcut presentation. Activating it, by pointer
+/// or by the palette's confirm key, emits [`CommandPaletteEvent::Confirmed`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CommandPaletteConfirm {
+    label: SharedString,
+    shortcut: SharedString,
+    disabled: bool,
+    debug_selector: Option<String>,
+}
+
+impl CommandPaletteConfirm {
+    /// Creates an enabled confirm control labelled for the operation it performs.
+    pub fn new(label: impl Into<SharedString>) -> Self {
+        Self {
+            label: label.into(),
+            shortcut: "\u{2318}\u{21a9}".into(),
+            disabled: false,
+            debug_selector: None,
+        }
+    }
+
+    /// Controls whether the control can activate. A disabled confirm ignores its keyboard
+    /// equivalent as well as pointer activation.
+    pub fn disabled(mut self, disabled: bool) -> Self {
+        self.disabled = disabled;
+        self
+    }
+
+    /// Adds a stable selector used by GPUI interaction tests.
+    pub fn debug_selector(mut self, selector: impl Into<String>) -> Self {
+        self.debug_selector = Some(selector.into());
+        self
+    }
+
+    /// Returns the caller-owned label.
+    pub fn label(&self) -> &str {
+        &self.label
+    }
+
+    /// Returns whether the control is disabled.
+    pub const fn is_disabled(&self) -> bool {
+        self.disabled
     }
 }
 
@@ -362,12 +456,16 @@ struct CommandPaletteMatch {
 fn match_command_palette_items<I>(
     items: &[CommandPaletteItem<I>],
     query: &str,
+    matching: CommandPaletteMatching,
 ) -> Vec<CommandPaletteMatch> {
-    let tokens: Vec<Vec<char>> = query
-        .split_whitespace()
-        .map(lowercase_chars)
-        .filter(|token| !token.is_empty())
-        .collect();
+    let tokens: Vec<Vec<char>> = match matching {
+        CommandPaletteMatching::Caller => Vec::new(),
+        CommandPaletteMatching::Semantic => query
+            .split_whitespace()
+            .map(lowercase_chars)
+            .filter(|token| !token.is_empty())
+            .collect(),
+    };
     if tokens.is_empty() {
         return items
             .iter()
@@ -650,10 +748,12 @@ pub struct CommandPaletteMetrics {
     panel_padding: Pixels,
     input_height: Pixels,
     row_height: Pixels,
+    single_line_row_height: Pixels,
     row_line_gap: Pixels,
     section_height: Pixels,
     separator_height: Pixels,
     footer_height: Pixels,
+    footer_padding: Option<Pixels>,
     horizontal_padding: Pixels,
     leading_width: Pixels,
     gap: Pixels,
@@ -678,10 +778,12 @@ impl CommandPaletteMetrics {
             panel_padding: px(4.0),
             input_height: px(42.0),
             row_height,
+            single_line_row_height: row_height,
             row_line_gap: px(2.0),
             section_height: px(22.0),
             separator_height: px(9.0),
             footer_height: px(30.0),
+            footer_padding: None,
             horizontal_padding: px(12.0),
             leading_width: px(18.0),
             gap: px(10.0),
@@ -694,6 +796,27 @@ impl CommandPaletteMetrics {
             accessory_line_padding: px(2.0),
             accessory_radius: px(4.0),
         }
+    }
+
+    /// Sets the footer's horizontal padding, overriding the panel's content inset.
+    ///
+    /// Footer controls are text with their own padding, so their boxes sitting on the content
+    /// edges puts their labels inside those edges. A caller that wants the labels to line up with
+    /// the editor and the rows sets a smaller footer padding. Defaults to the content inset, which
+    /// aligns the control boxes instead.
+    pub fn footer_padding(mut self, padding: Pixels) -> Self {
+        self.footer_padding = Some(padding);
+        self
+    }
+
+    /// Sets the height of a row that carries no description.
+    ///
+    /// A row height sized for a label above a description leaves a single-line row mostly empty,
+    /// so callers whose items are all one line give that row its own height. Defaults to the
+    /// ordinary row height, which keeps mixed result sets uniform.
+    pub fn single_line_row_height(mut self, height: Pixels) -> Self {
+        self.single_line_row_height = height;
+        self
     }
 
     /// Sets the maximum panel height and top offset.
@@ -781,6 +904,11 @@ impl CommandPaletteMetrics {
         self.panel_padding + self.horizontal_padding
     }
 
+    fn footer_inset(&self) -> Pixels {
+        self.footer_padding
+            .unwrap_or_else(|| self.content_leading_inset())
+    }
+
     /// Returns the concentric radius for an inset row inside the outer panel.
     fn row_corner_radius(&self) -> Pixels {
         (self.corner_radius - self.panel_padding).max(px(0.0))
@@ -818,11 +946,15 @@ pub struct CommandPalette<I: Clone + Eq + 'static> {
     hints: Vec<CommandPaletteHint>,
     actions_menu: Vec<MenuEntry<SharedString>>,
     actions_menu_label: SharedString,
+    confirm: Option<CommandPaletteConfirm>,
+    matching: CommandPaletteMatching,
+    activation: CommandPaletteActivationPolicy,
     selected: Option<I>,
     preferred: Option<I>,
     query: String,
     generation: CommandPaletteGeneration,
     loading: bool,
+    dismissible: bool,
     open: bool,
     input: Entity<TextInput>,
     focus_scope: gpui::FocusHandle,
@@ -851,7 +983,7 @@ mod presented_results {
     pub(super) enum PaletteRow {
         Section(SharedString),
         Separator,
-        Item(usize),
+        Item { position: usize, single_line: bool },
     }
 
     impl PaletteRow {
@@ -859,7 +991,17 @@ mod presented_results {
             match self {
                 Self::Section(_) => metrics.section_height,
                 Self::Separator => metrics.separator_height,
-                Self::Item(_) => metrics.row_height,
+                Self::Item {
+                    single_line: true, ..
+                } => metrics.single_line_row_height,
+                Self::Item { .. } => metrics.row_height,
+            }
+        }
+
+        pub(super) const fn item_position(&self) -> Option<usize> {
+            match self {
+                Self::Item { position, .. } => Some(*position),
+                Self::Section(_) | Self::Separator => None,
             }
         }
     }
@@ -891,7 +1033,10 @@ mod presented_results {
                     current = item.section.clone();
                 }
                 started = true;
-                rows.push(PaletteRow::Item(position));
+                rows.push(PaletteRow::Item {
+                    position,
+                    single_line: item.description.is_none(),
+                });
             }
             Self { rows }
         }
@@ -918,7 +1063,7 @@ mod presented_results {
         pub(super) fn list_index_for_match(&self, position: usize) -> Option<usize> {
             self.rows
                 .iter()
-                .position(|row| *row == PaletteRow::Item(position))
+                .position(|row| row.item_position() == Some(position))
         }
 
         #[cfg(test)]
@@ -945,10 +1090,7 @@ mod presented_results {
             content_y: Pixels,
             metrics: CommandPaletteMetrics,
         ) -> Option<usize> {
-            match self.row_at_y(content_y, metrics)?.1 {
-                PaletteRow::Item(position) => Some(*position),
-                PaletteRow::Section(_) | PaletteRow::Separator => None,
-            }
+            self.row_at_y(content_y, metrics)?.1.item_position()
         }
 
         pub(super) fn page_target(
@@ -1004,7 +1146,7 @@ mod presented_results {
         fn item_top(&self, position: usize, metrics: CommandPaletteMetrics) -> Option<Pixels> {
             let mut top = px(0.0);
             for row in &self.rows {
-                if *row == PaletteRow::Item(position) {
+                if row.item_position() == Some(position) {
                     return Some(top);
                 }
                 top += row.height(metrics);
@@ -1108,7 +1250,8 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
         })
         .detach();
         let items: Rc<[CommandPaletteItem<I>]> = unique_items(items).into();
-        let matches: Rc<[CommandPaletteMatch]> = match_command_palette_items(&items, "").into();
+        let matches: Rc<[CommandPaletteMatch]> =
+            match_command_palette_items(&items, "", CommandPaletteMatching::Semantic).into();
         let selected = first_enabled_id(&items, &matches);
         let presented_results = Rc::new(PresentedResults::new(&items, &matches));
         let leading_reserved = items.iter().any(|item| item.leading_icon.is_some());
@@ -1124,11 +1267,15 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
             hints: Vec::new(),
             actions_menu: Vec::new(),
             actions_menu_label: "Actions\u{2026}".into(),
+            confirm: None,
+            matching: CommandPaletteMatching::Semantic,
+            activation: CommandPaletteActivationPolicy::Close,
             selected,
             preferred: None,
             query: String::new(),
             generation: CommandPaletteGeneration::default(),
             loading: false,
+            dismissible: true,
             open: false,
             input,
             focus_scope,
@@ -1189,6 +1336,42 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
         cx: &mut gpui::Context<Self>,
     ) {
         self.header_actions = actions;
+        cx.notify();
+    }
+
+    /// Selects who filters and orders items for the current query.
+    ///
+    /// Switching modes recomputes the presented results immediately and repairs selection by
+    /// stable identity.
+    pub fn set_matching(&mut self, matching: CommandPaletteMatching, cx: &mut gpui::Context<Self>) {
+        if self.matching == matching {
+            return;
+        }
+        self.matching = matching;
+        self.recompute_matches();
+        cx.notify();
+    }
+
+    /// Selects whether activating an item closes the palette or keeps it open.
+    pub fn set_activation(
+        &mut self,
+        activation: CommandPaletteActivationPolicy,
+        cx: &mut gpui::Context<Self>,
+    ) {
+        self.activation = activation;
+        cx.notify();
+    }
+
+    /// Replaces the single primary footer control. `None` removes it.
+    ///
+    /// An installed confirm claims the palette's confirm key; without one that key is left for the
+    /// surrounding application.
+    pub fn set_confirm(
+        &mut self,
+        confirm: Option<CommandPaletteConfirm>,
+        cx: &mut gpui::Context<Self>,
+    ) {
+        self.confirm = confirm;
         cx.notify();
     }
 
@@ -1293,6 +1476,40 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
         self.close(CommandPaletteCloseReason::Programmatic, window, cx)
     }
 
+    /// Closes an open palette whose owner has completed its operation and moved focus itself.
+    ///
+    /// Unlike [`Self::dismiss`] this discards the captured prior focus owner, so the palette does
+    /// not pull focus back from whatever the completed operation focused.
+    pub fn dismiss_without_restoring_focus(
+        &mut self,
+        window: &mut Window,
+        cx: &mut gpui::Context<Self>,
+    ) -> bool {
+        self.restore_focus = None;
+        self.restore_on_activation = None;
+        self.close(CommandPaletteCloseReason::Completed, window, cx)
+    }
+
+    /// Returns focus to the query editor of an open palette.
+    pub fn focus_editor(&self, window: &mut Window, cx: &mut gpui::Context<Self>) {
+        if self.open {
+            self.input.read(cx).focus_handle().focus(window);
+        }
+    }
+
+    /// Returns whether the query editor currently holds keyboard focus.
+    pub fn editor_is_focused(&self, window: &Window, cx: &gpui::App) -> bool {
+        self.input.read(cx).focus_handle().is_focused(window)
+    }
+
+    /// Returns whether [`Self::set_query`] would preserve `query` byte-for-byte.
+    ///
+    /// Callers whose query is an address rather than a search term use this to reject values the
+    /// single-line editor would normalize.
+    pub fn can_set_query_exactly(&self, query: &str, cx: &gpui::App) -> bool {
+        self.input.read(cx).can_set_value_exactly(query)
+    }
+
     /// Closes an open palette before another transient takes focus.
     pub fn dismiss_for_replacement(
         &mut self,
@@ -1341,6 +1558,22 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
             self.loading = loading;
             cx.notify();
         }
+    }
+
+    /// Controls whether user, focus, or window transitions may dismiss the open palette.
+    ///
+    /// Explicit owner dismissal, replacement, completion, and item activation remain available.
+    pub fn set_dismissible(&mut self, dismissible: bool, cx: &mut gpui::Context<Self>) {
+        if self.dismissible != dismissible {
+            self.dismissible = dismissible;
+            cx.notify();
+        }
+    }
+
+    /// Controls user editing without preventing owner-driven query updates.
+    pub fn set_query_editable(&mut self, editable: bool, cx: &mut gpui::Context<Self>) {
+        self.input
+            .update(cx, |input, cx| input.set_editable(editable, cx));
     }
 
     /// Requests a refresh for the current query and returns its new generation.
@@ -1411,7 +1644,7 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
     }
 
     fn recompute_matches(&mut self) {
-        self.matches = match_command_palette_items(&self.items, &self.query).into();
+        self.matches = match_command_palette_items(&self.items, &self.query, self.matching).into();
         self.presented_results = Rc::new(PresentedResults::new(&self.items, &self.matches));
         self.list.reset(self.presented_results.len());
         self.repair_selection();
@@ -1655,7 +1888,9 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
         let input_focus = self.input.read(cx).focus_handle();
         input_focus.focus(window);
         let mut last_internal = input_focus;
-        let maximum_steps = self.header_actions.len() + usize::from(!self.actions_menu.is_empty());
+        let maximum_steps = self.header_actions.len()
+            + usize::from(!self.actions_menu.is_empty())
+            + usize::from(self.confirm.is_some());
         for _ in 0..maximum_steps {
             window.focus_next();
             if !self.focus_scope.contains_focused(window, cx) {
@@ -1689,6 +1924,13 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
         if !enabled {
             return;
         }
+        if self.activation == CommandPaletteActivationPolicy::Continue {
+            cx.emit(CommandPaletteEvent::Activated(CommandPaletteActivation {
+                item_id,
+                source,
+            }));
+            return;
+        }
         if !self.begin_close(CommandPaletteCloseReason::Activated, window, cx) {
             return;
         }
@@ -1718,7 +1960,7 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
         window: &mut Window,
         cx: &mut gpui::Context<Self>,
     ) -> bool {
-        if !self.open {
+        if !self.open || (!self.dismissible && reason.is_implicit_dismissal()) {
             return false;
         }
         self.open = false;
@@ -1874,6 +2116,12 @@ impl<I: Clone + Eq + 'static> Render for CommandPalette<I> {
                 palette.close(CommandPaletteCloseReason::Escape, window, cx);
                 cx.stop_propagation();
             }))
+            .when(self.confirm.is_some(), |overlay| {
+                overlay.on_action(cx.listener(|palette, _: &Confirm, _, cx| {
+                    palette.confirm_activated(cx);
+                    cx.stop_propagation();
+                }))
+            })
             .on_action(cx.listener(|palette, _: &FocusNext, window, cx| {
                 palette.focus_next_control(window, cx);
             }))
@@ -1895,7 +2143,14 @@ impl<I: Clone + Eq + 'static> Render for CommandPalette<I> {
 
 impl<I: Clone + Eq + 'static> CommandPalette<I> {
     fn has_footer(&self) -> bool {
-        !self.hints.is_empty() || !self.actions_menu.is_empty()
+        !self.hints.is_empty() || !self.actions_menu.is_empty() || self.confirm.is_some()
+    }
+
+    fn confirm_activated(&mut self, cx: &mut gpui::Context<Self>) {
+        if self.confirm.as_ref().is_none_or(|confirm| confirm.disabled) {
+            return;
+        }
+        cx.emit(CommandPaletteEvent::<I>::Confirmed);
     }
 
     fn render_outside_tracker(
@@ -2075,7 +2330,7 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
                         PaletteRow::Separator => {
                             render_row_separator(row_height, theme).into_any_element()
                         }
-                        PaletteRow::Item(position) => matches
+                        PaletteRow::Item { position, .. } => matches
                             .get(*position)
                             .and_then(|matched| {
                                 items.get(matched.item_index).map(|item| {
@@ -2103,6 +2358,55 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
             .into_any_element()
     }
 
+    /// Renders the footer's caller actions.
+    ///
+    /// A lone ordinary action is offered directly, because a disclosure that reveals exactly one
+    /// choice is more chrome than the choice it hides. Anything else stays a menu.
+    fn render_actions(&self, cx: &mut gpui::Context<Self>) -> Option<AnyElement> {
+        if self.actions_menu.is_empty() {
+            return None;
+        }
+        let palette = cx.entity().downgrade();
+        if let [entry] = self.actions_menu.as_slice()
+            && let Some(action) = entry.plain_action()
+        {
+            let emitted = action.action.clone();
+            return Some(
+                Button::new("command-palette-actions-single", action.label.clone())
+                    .variant(ButtonVariant::Ghost)
+                    .size(FOOTER_CONTROL_SIZE)
+                    .disabled(action.disabled)
+                    .tab_stop(true)
+                    .when_some(action.debug_selector, |button, selector| {
+                        button.debug_selector(selector)
+                    })
+                    .on_activate(move |_, _, cx| {
+                        let action = emitted.clone();
+                        let _ = palette.update(cx, |_, cx| {
+                            cx.emit(CommandPaletteEvent::<I>::MenuAction(action));
+                        });
+                    })
+                    .into_any_element(),
+            );
+        }
+        Some(
+            Menu::new(
+                "command-palette-actions-menu",
+                self.actions_menu_label.clone(),
+                self.actions_menu.clone(),
+            )
+            .size(MenuSize::Regular)
+            .debug_selector("command-palette-actions-menu")
+            .on_activate(move |activation: &MenuActivation<SharedString>, _, cx| {
+                let action = activation.action().clone();
+                let _ = palette.update(cx, |_, cx| {
+                    cx.emit(CommandPaletteEvent::<I>::MenuAction(action));
+                });
+            })
+            .into_any_element(),
+        )
+    }
+
     fn render_footer(
         &self,
         theme: CommandPaletteTheme,
@@ -2110,43 +2414,65 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
     ) -> AnyElement {
         let paint = theme.paint;
         let metrics = theme.metrics;
-        let palette = cx.entity().downgrade();
+        // Caller actions anchor the leading edge and the confirm anchors the trailing one, so an
+        // escape hatch never reads as the peer of the primary action.
         div()
             .debug_selector(|| "command-palette-footer".to_owned())
             .w_full()
             .h(metrics.footer_height)
             .flex_shrink_0()
-            .px(metrics.content_leading_inset())
+            .px(metrics.footer_inset())
             .flex()
             .flex_row()
             .items_center()
-            .justify_end()
+            .justify_between()
             .gap(metrics.gap)
-            .children(
-                self.hints
-                    .iter()
-                    .map(|hint| render_hint(hint, metrics, paint)),
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(metrics.gap)
+                    .children(self.render_actions(cx)),
             )
-            .when(!self.actions_menu.is_empty(), |footer| {
-                let label = self.actions_menu_label.clone();
-                footer.child(
-                    Menu::new(
-                        "command-palette-actions-menu",
-                        label,
-                        self.actions_menu.clone(),
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(metrics.gap)
+                    .children(
+                        self.hints
+                            .iter()
+                            .map(|hint| render_hint(hint, metrics, paint)),
                     )
-                    .size(MenuSize::Regular)
-                    .debug_selector("command-palette-actions-menu")
-                    .on_activate(
-                        move |activation: &MenuActivation<SharedString>, _, cx| {
-                            let action = activation.action().clone();
-                            let _ = palette.update(cx, |_, cx| {
-                                cx.emit(CommandPaletteEvent::<I>::MenuAction(action));
-                            });
-                        },
-                    ),
-                )
-            })
+                    .when_some(self.confirm.clone(), |trailing, confirm| {
+                        let confirm_palette = cx.entity().downgrade();
+                        let shortcut = confirm.shortcut.clone();
+                        let shortcut_size = metrics.secondary_size;
+                        trailing.child(
+                            Button::new("command-palette-confirm", confirm.label.clone())
+                                .variant(ButtonVariant::Ghost)
+                                .size(ButtonSize::Small)
+                                .disabled(confirm.disabled)
+                                .tab_stop(true)
+                                .when_some(confirm.debug_selector.clone(), |button, selector| {
+                                    button.debug_selector(selector)
+                                })
+                                .trailing(move |foreground| {
+                                    div()
+                                        .text_size(shortcut_size)
+                                        .text_color(foreground)
+                                        .child(shortcut)
+                                        .into_any_element()
+                                })
+                                .on_activate(move |_, _, cx| {
+                                    let _ = confirm_palette
+                                        .update(cx, |palette, cx| palette.confirm_activated(cx));
+                                }),
+                        )
+                    }),
+            )
             .into_any_element()
     }
 }
@@ -2559,7 +2885,10 @@ mod tests {
             .hover_background(rgba(0x1c1c24ff))
             .section_foreground(rgba(0x878787ff))
             .footer(rgba(0x878787ff), rgba(0x606079ff)),
-            CommandPaletteMetrics::new(px(420.0), px(40.0)).panel_geometry(px(260.0), px(24.0)),
+            CommandPaletteMetrics::new(px(420.0), px(40.0))
+                .single_line_row_height(px(28.0))
+                .footer_padding(px(8.0))
+                .panel_geometry(px(260.0), px(24.0)),
         )
     }
 
@@ -2586,7 +2915,7 @@ mod tests {
             CommandPaletteItem::new(4, "All Two").section("All"),
             CommandPaletteItem::new(5, "All Three").section("All"),
         ];
-        let matches = match_command_palette_items(&items, "");
+        let matches = match_command_palette_items(&items, "", CommandPaletteMatching::Semantic);
         (
             PresentedResults::new(&items, &matches),
             CommandPaletteMetrics::new(px(420.0), px(40.0)),
@@ -2602,13 +2931,28 @@ mod tests {
             (
                 &[
                     PaletteRow::Section("Recent".into()),
-                    PaletteRow::Item(0),
-                    PaletteRow::Item(1),
+                    PaletteRow::Item {
+                        position: 0,
+                        single_line: true
+                    },
+                    PaletteRow::Item {
+                        position: 1,
+                        single_line: true
+                    },
                     PaletteRow::Separator,
                     PaletteRow::Section("All".into()),
-                    PaletteRow::Item(2),
-                    PaletteRow::Item(3),
-                    PaletteRow::Item(4),
+                    PaletteRow::Item {
+                        position: 2,
+                        single_line: true
+                    },
+                    PaletteRow::Item {
+                        position: 3,
+                        single_line: true
+                    },
+                    PaletteRow::Item {
+                        position: 4,
+                        single_line: true
+                    },
                 ][..],
                 Some(5),
             )
@@ -2654,7 +2998,7 @@ mod tests {
 
     #[test]
     fn empty_query_should_preserve_provider_order() {
-        let matches = match_command_palette_items(&items(), "");
+        let matches = match_command_palette_items(&items(), "", CommandPaletteMatching::Semantic);
 
         assert_eq!(
             matches
@@ -2681,11 +3025,13 @@ mod tests {
         let items = items();
 
         assert_eq!(
-            match_command_palette_items(&items, "directory")[0].item_index,
+            match_command_palette_items(&items, "directory", CommandPaletteMatching::Semantic)[0]
+                .item_index,
             0
         );
         assert_eq!(
-            match_command_palette_items(&items, "remove")[0].item_index,
+            match_command_palette_items(&items, "remove", CommandPaletteMatching::Semantic)[0]
+                .item_index,
             2
         );
     }
@@ -2698,7 +3044,8 @@ mod tests {
         ];
 
         assert_eq!(
-            match_command_palette_items(&items, "window")[0].item_index,
+            match_command_palette_items(&items, "window", CommandPaletteMatching::Semantic)[0]
+                .item_index,
             1
         );
     }
@@ -2706,7 +3053,7 @@ mod tests {
     #[test]
     fn unicode_highlights_should_remain_valid_label_boundaries() {
         let items = vec![CommandPaletteItem::new(1, "Éclair 🔍")];
-        let matches = match_command_palette_items(&items, "é🔍");
+        let matches = match_command_palette_items(&items, "é🔍", CommandPaletteMatching::Semantic);
         let ranges = &matches[0].label_highlights;
 
         assert_eq!(ranges, &[0..2, 8..12]);
@@ -2720,7 +3067,11 @@ mod tests {
     fn multiple_query_tokens_may_match_different_semantic_fields() {
         let items = vec![CommandPaletteItem::new(1, "Open Workspace").keywords(["project"])];
 
-        assert_eq!(match_command_palette_items(&items, "open project").len(), 1);
+        assert_eq!(
+            match_command_palette_items(&items, "open project", CommandPaletteMatching::Semantic)
+                .len(),
+            1
+        );
     }
 
     struct CloneCountingId {
@@ -3076,6 +3427,381 @@ mod tests {
         );
     }
 
+    #[test]
+    fn caller_matching_should_present_every_item_in_caller_order() {
+        let items = items();
+        // A path-shaped query fuzzy-matches nothing here, so semantic matching would empty the list.
+        let semantic =
+            match_command_palette_items(&items, "~/Doc", CommandPaletteMatching::Semantic);
+        assert!(
+            semantic.is_empty(),
+            "the semantic matcher unexpectedly matched a path query"
+        );
+
+        let caller = match_command_palette_items(&items, "~/Doc", CommandPaletteMatching::Caller);
+        assert_eq!(
+            caller
+                .iter()
+                .map(|matched| matched.item_index)
+                .collect::<Vec<_>>(),
+            vec![0, 1, 2],
+            "caller matching did not present every item in caller order"
+        );
+        assert!(
+            caller
+                .iter()
+                .all(|matched| matched.label_highlights.is_empty()
+                    && matched.description_highlights.is_empty()),
+            "caller matching produced highlights for a query that is not a search term"
+        );
+    }
+
+    #[gpui::test]
+    fn caller_matching_should_survive_a_query_that_matches_nothing(cx: &mut TestAppContext) {
+        let (root, palette, _, _, cx) = palette_window(cx);
+        open_palette(&root, &palette, cx);
+
+        palette.update(cx, |palette, cx| {
+            palette.set_matching(CommandPaletteMatching::Caller, cx);
+            palette.set_query("~/Doc", cx);
+        });
+        cx.run_until_parked();
+
+        assert!(
+            cx.debug_bounds("row-open").is_some(),
+            "caller matching filtered an item the caller supplied"
+        );
+    }
+
+    #[gpui::test]
+    fn a_lone_footer_action_should_be_offered_without_a_disclosure(cx: &mut TestAppContext) {
+        let (root, palette, events, _, cx) = palette_window(cx);
+        open_palette(&root, &palette, cx);
+
+        palette.update(cx, |palette, cx| {
+            palette.set_actions_menu(
+                vec![
+                    MenuEntry::action("Choose with Finder\u{2026}", "finder".into())
+                        .debug_selector("footer-finder"),
+                ],
+                cx,
+            );
+        });
+        cx.run_until_parked();
+
+        assert!(
+            cx.debug_bounds("command-palette-actions-menu").is_none(),
+            "one action still rendered a disclosure"
+        );
+        let button = cx
+            .debug_bounds("footer-finder")
+            .expect("the lone action was not offered directly");
+
+        cx.simulate_click(button.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        assert!(
+            events
+                .borrow()
+                .contains(&CommandPaletteEvent::MenuAction("finder".into())),
+            "activating the lone action did not report its caller identity"
+        );
+    }
+
+    #[gpui::test]
+    fn lone_decorated_footer_entries_should_stay_behind_a_disclosure(cx: &mut TestAppContext) {
+        let (root, palette, _, _, cx) = palette_window(cx);
+        open_palette(&root, &palette, cx);
+        let decorated = vec![
+            (
+                "checkbox",
+                MenuEntry::checkbox("Show hidden", false, "checkbox".into()),
+            ),
+            (
+                "destructive",
+                MenuEntry::action("Delete", "destructive".into()).destructive(true),
+            ),
+            (
+                "shortcut",
+                MenuEntry::action("Retry", "shortcut".into()).shortcut("⌘R"),
+            ),
+            (
+                "icon",
+                MenuEntry::action("Finder", "icon".into()).icon(|_| div().into_any_element()),
+            ),
+        ];
+
+        for (decoration, entry) in decorated {
+            palette.update(cx, |palette, cx| {
+                palette.set_actions_menu(vec![entry], cx);
+            });
+            cx.run_until_parked();
+
+            assert!(
+                cx.debug_bounds("command-palette-actions-menu").is_some(),
+                "a lone {decoration} entry lost its menu presentation"
+            );
+        }
+    }
+
+    #[gpui::test]
+    fn a_row_without_a_description_should_take_the_single_line_height(cx: &mut TestAppContext) {
+        let (root, palette, _, _, cx) = palette_window(cx);
+        open_palette(&root, &palette, cx);
+
+        palette.update(cx, |palette, cx| {
+            palette.set_items(
+                vec![
+                    CommandPaletteItem::new(1, "Projects/").debug_selector("row-single"),
+                    CommandPaletteItem::new(2, "Open Workspace")
+                        .description("Choose a directory")
+                        .debug_selector("row-described"),
+                ],
+                cx,
+            );
+        });
+        cx.run_until_parked();
+
+        let metrics = test_theme().metrics;
+        let single = cx
+            .debug_bounds("row-single")
+            .expect("the single-line row was not rendered");
+        let described = cx
+            .debug_bounds("row-described")
+            .expect("the described row was not rendered");
+
+        assert_eq!(single.size.height, metrics.single_line_row_height);
+        assert_eq!(described.size.height, metrics.row_height);
+    }
+
+    #[gpui::test]
+    fn footer_control_labels_should_share_the_content_edges(cx: &mut TestAppContext) {
+        let (root, palette, _, _, cx) = palette_window(cx);
+        open_palette(&root, &palette, cx);
+
+        palette.update(cx, |palette, cx| {
+            palette.set_actions_menu(
+                vec![
+                    MenuEntry::action("Choose with Finder\u{2026}", "finder".into())
+                        .debug_selector("footer-finder"),
+                ],
+                cx,
+            );
+            palette.set_confirm(
+                Some(CommandPaletteConfirm::new("Add").debug_selector("footer-confirm")),
+                cx,
+            );
+        });
+        cx.run_until_parked();
+
+        let metrics = test_theme().metrics;
+        // The padding install_control_themes gives a Small text button around its label.
+        let label_inset = px(8.0);
+        let row = cx
+            .debug_bounds("row-open")
+            .expect("the first row was not rendered");
+        let action = cx
+            .debug_bounds("footer-finder")
+            .expect("the footer action was not rendered");
+        let confirm = cx
+            .debug_bounds("footer-confirm")
+            .expect("the confirm was not rendered");
+
+        // The controls hang outward by their own label padding, so their text, not their boxes,
+        // lines up with the row content above.
+        assert_eq!(
+            action.left() + label_inset,
+            row.left() + metrics.horizontal_padding,
+            "the footer action's label did not share the content leading edge: {action:?} {row:?}"
+        );
+        assert_eq!(
+            confirm.right() - label_inset,
+            row.right() - metrics.horizontal_padding,
+            "the confirm's label did not share the content trailing edge: {confirm:?} {row:?}"
+        );
+    }
+
+    #[gpui::test]
+    fn the_footer_should_anchor_actions_and_the_confirm_to_opposite_edges(cx: &mut TestAppContext) {
+        let (root, palette, _, _, cx) = palette_window(cx);
+        open_palette(&root, &palette, cx);
+
+        palette.update(cx, |palette, cx| {
+            palette.set_actions_menu(
+                vec![
+                    MenuEntry::action("Choose with Finder\u{2026}", "finder".into())
+                        .debug_selector("footer-finder"),
+                ],
+                cx,
+            );
+            palette.set_confirm(
+                Some(CommandPaletteConfirm::new("Add").debug_selector("footer-confirm")),
+                cx,
+            );
+        });
+        cx.run_until_parked();
+
+        let footer = cx
+            .debug_bounds("command-palette-footer")
+            .expect("the footer was not rendered");
+        let action = cx
+            .debug_bounds("footer-finder")
+            .expect("the footer action was not rendered");
+        let confirm = cx
+            .debug_bounds("footer-confirm")
+            .expect("the confirm was not rendered");
+
+        assert!(
+            action.right() < confirm.left(),
+            "the action and the confirm were not separated: {action:?} {confirm:?}"
+        );
+        let leading_gap = action.left() - footer.left();
+        let trailing_gap = footer.right() - confirm.right();
+        assert!(
+            leading_gap < footer.size.width / 4.0 && trailing_gap < footer.size.width / 4.0,
+            "the footer clustered its controls instead of anchoring both edges: \
+             leading {leading_gap:?} trailing {trailing_gap:?} in {footer:?}"
+        );
+    }
+
+    #[gpui::test]
+    fn several_footer_actions_should_stay_behind_a_disclosure(cx: &mut TestAppContext) {
+        let (root, palette, _, _, cx) = palette_window(cx);
+        open_palette(&root, &palette, cx);
+
+        palette.update(cx, |palette, cx| {
+            palette.set_actions_menu(
+                vec![
+                    MenuEntry::action("Choose with Finder\u{2026}", "finder".into())
+                        .debug_selector("footer-finder"),
+                    MenuEntry::action("Retry", "retry".into()),
+                ],
+                cx,
+            );
+        });
+        cx.run_until_parked();
+
+        assert!(
+            cx.debug_bounds("command-palette-actions-menu").is_some(),
+            "several actions did not render a disclosure"
+        );
+        assert!(
+            cx.debug_bounds("footer-finder").is_none(),
+            "a menu entry rendered outside its closed menu"
+        );
+    }
+
+    #[gpui::test]
+    fn continuing_activation_should_report_the_item_without_closing(cx: &mut TestAppContext) {
+        let (root, palette, events, _, cx) = palette_window(cx);
+        open_palette(&root, &palette, cx);
+
+        palette.update(cx, |palette, cx| {
+            palette.set_activation(CommandPaletteActivationPolicy::Continue, cx);
+        });
+        cx.run_until_parked();
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+
+        assert!(
+            events.borrow().iter().any(|event| matches!(
+                event,
+                CommandPaletteEvent::Activated(activation) if *activation.item_id() == 1
+            )),
+            "a continuing activation did not report its item"
+        );
+        assert!(
+            palette.read_with(cx, |palette, _| palette.is_open()),
+            "a continuing activation closed the palette"
+        );
+        assert!(
+            !events.borrow().iter().any(|event| matches!(
+                event,
+                CommandPaletteEvent::Lifecycle(CommandPaletteLifecycleEvent::Closed(_))
+            )),
+            "a continuing activation published a close lifecycle event"
+        );
+    }
+
+    #[gpui::test]
+    fn confirm_should_render_once_and_report_its_keyboard_equivalent(cx: &mut TestAppContext) {
+        let (root, palette, events, _, cx) = palette_window(cx);
+        open_palette(&root, &palette, cx);
+
+        assert!(
+            cx.debug_bounds("command-palette-footer").is_none(),
+            "a palette without a confirm rendered a footer"
+        );
+
+        palette.update(cx, |palette, cx| {
+            palette.set_confirm(
+                Some(CommandPaletteConfirm::new("Add").debug_selector("palette-confirm")),
+                cx,
+            );
+        });
+        cx.run_until_parked();
+
+        let footer = cx
+            .debug_bounds("command-palette-footer")
+            .expect("an installed confirm did not render a footer");
+        let confirm = cx
+            .debug_bounds("palette-confirm")
+            .expect("the confirm control was not rendered");
+        assert!(
+            footer.contains(&confirm.center()),
+            "the confirm control rendered outside the footer: {footer:?} {confirm:?}"
+        );
+
+        cx.simulate_keystrokes("cmd-enter");
+        cx.run_until_parked();
+
+        assert_eq!(
+            events
+                .borrow()
+                .iter()
+                .filter(|event| **event == CommandPaletteEvent::Confirmed)
+                .count(),
+            1,
+            "the confirm key did not emit exactly one confirmation"
+        );
+    }
+
+    #[gpui::test]
+    fn a_disabled_confirm_should_ignore_its_keyboard_equivalent(cx: &mut TestAppContext) {
+        let (root, palette, events, _, cx) = palette_window(cx);
+        open_palette(&root, &palette, cx);
+
+        palette.update(cx, |palette, cx| {
+            palette.set_confirm(Some(CommandPaletteConfirm::new("Add").disabled(true)), cx);
+        });
+        cx.run_until_parked();
+        cx.simulate_keystrokes("cmd-enter");
+        cx.run_until_parked();
+
+        assert!(
+            !events.borrow().contains(&CommandPaletteEvent::Confirmed),
+            "a disabled confirm reported a confirmation"
+        );
+    }
+
+    #[gpui::test]
+    fn the_confirm_key_should_stay_unclaimed_without_a_confirm(cx: &mut TestAppContext) {
+        let (root, palette, events, _, cx) = palette_window(cx);
+        open_palette(&root, &palette, cx);
+
+        cx.simulate_keystrokes("cmd-enter");
+        cx.run_until_parked();
+
+        assert!(
+            !events.borrow().contains(&CommandPaletteEvent::Confirmed),
+            "a palette without a confirm claimed the confirm key"
+        );
+        assert!(
+            palette.read_with(cx, |palette, _| palette.is_open()),
+            "the confirm key closed a palette that had no confirm"
+        );
+    }
+
     #[gpui::test]
     fn footer_should_render_only_with_hints_or_an_actions_menu(cx: &mut TestAppContext) {
         let (root, palette, _, _, cx) = palette_window(cx);
@@ -3141,10 +3867,10 @@ mod tests {
 
         palette.update(cx, |palette, cx| {
             palette.set_actions_menu(
-                vec![MenuEntry::action(
-                    "Copy path",
-                    SharedString::from("copy-path"),
-                )],
+                vec![
+                    MenuEntry::action("Copy path", SharedString::from("copy-path")),
+                    MenuEntry::action("Reveal", SharedString::from("reveal")),
+                ],
                 cx,
             );
         });
@@ -3189,6 +3915,7 @@ mod tests {
                             SharedString::from("focus-external"),
                         )
                         .debug_selector("command-palette-focus-external"),
+                        MenuEntry::action("Second action", SharedString::from("second")),
                     ],
                     cx,
                 );
@@ -3236,11 +3963,20 @@ mod tests {
             rows,
             vec![
                 PaletteRow::Section("Recent".into()),
-                PaletteRow::Item(0),
-                PaletteRow::Item(1),
+                PaletteRow::Item {
+                    position: 0,
+                    single_line: true
+                },
+                PaletteRow::Item {
+                    position: 1,
+                    single_line: true
+                },
                 PaletteRow::Separator,
                 PaletteRow::Section("All".into()),
-                PaletteRow::Item(2),
+                PaletteRow::Item {
+                    position: 2,
+                    single_line: true
+                },
             ]
         );
     }
@@ -3253,7 +3989,8 @@ mod tests {
             CommandPaletteItem::new(3, "Alpha").section("All"),
             CommandPaletteItem::new(4, "Alpha Command").section("All"),
         ];
-        let matches = match_command_palette_items(&items, "alpha");
+        let matches =
+            match_command_palette_items(&items, "alpha", CommandPaletteMatching::Semantic);
 
         assert_eq!(
             matches
@@ -3267,7 +4004,8 @@ mod tests {
     #[test]
     fn description_matches_should_report_their_own_highlight_ranges() {
         let items = vec![CommandPaletteItem::new(1, "Open").description("Choose a directory")];
-        let matches = match_command_palette_items(&items, "directory");
+        let matches =
+            match_command_palette_items(&items, "directory", CommandPaletteMatching::Semantic);
 
         assert!(matches[0].label_highlights.is_empty());
         assert_eq!(matches[0].description_highlights, vec![9..18]);
@@ -3491,6 +4229,28 @@ mod tests {
     }
 
     #[gpui::test]
+    fn shift_tab_from_query_should_reach_a_confirm_only_footer(cx: &mut TestAppContext) {
+        let (root, palette, _, _, cx) = palette_window(cx);
+        palette.update(cx, |palette, cx| {
+            palette.set_confirm(Some(CommandPaletteConfirm::new("Add")), cx);
+        });
+        open_palette(&root, &palette, cx);
+
+        cx.simulate_keystrokes("shift-tab");
+        cx.run_until_parked();
+
+        assert!(!cx.update(|window, cx| palette.read(cx).editor_is_focused(window, cx)));
+
+        cx.simulate_keystrokes("tab x");
+        cx.run_until_parked();
+
+        assert_eq!(
+            palette.read_with(cx, |palette, _| palette.query().to_owned()),
+            "x"
+        );
+    }
+
+    #[gpui::test]
     fn preferred_item_should_seed_each_open_transition(cx: &mut TestAppContext) {
         let (root, palette, _, _, cx) = palette_window(cx);
         palette.update(cx, |palette, cx| {
@@ -3656,6 +4416,61 @@ mod tests {
                 source: CommandPaletteActivationSource::Pointer,
             }
         )));
+    }
+
+    #[gpui::test]
+    fn implicit_dismissal_lock_should_retain_palette_until_explicit_completion(
+        cx: &mut TestAppContext,
+    ) {
+        let (root, palette, events, _, cx) = palette_window(cx);
+        open_palette(&root, &palette, cx);
+        palette.update(cx, |palette, cx| palette.set_dismissible(false, cx));
+
+        cx.simulate_keystrokes("escape");
+        let panel = cx.debug_bounds("command-palette-panel").unwrap_or_default();
+        let outside = point(panel.left() - px(8.0), panel.bottom() + px(8.0));
+        cx.simulate_click(outside, Modifiers::default());
+        let intruder = root.read_with(cx, |root, _| root.intruder_focus.clone());
+        cx.update(|window, _| intruder.focus(window));
+        cx.deactivate_window();
+        cx.run_until_parked();
+
+        assert!(palette.read_with(cx, |palette, _| palette.is_open()));
+        assert!(!events.borrow().iter().any(|event| matches!(
+            event,
+            CommandPaletteEvent::Lifecycle(CommandPaletteLifecycleEvent::Closed(_))
+        )));
+
+        cx.update(|window, cx| {
+            palette.update(cx, |palette, cx| {
+                palette.dismiss_without_restoring_focus(window, cx);
+            });
+        });
+
+        assert!(!palette.read_with(cx, |palette, _| palette.is_open()));
+    }
+
+    #[gpui::test]
+    fn read_only_query_should_reject_user_edits_but_accept_owner_updates(cx: &mut TestAppContext) {
+        let (root, palette, _, _, cx) = palette_window(cx);
+        open_palette(&root, &palette, cx);
+        palette.update(cx, |palette, cx| {
+            palette.set_query("locked", cx);
+            palette.set_query_editable(false, cx);
+        });
+
+        cx.simulate_keystrokes("cmd-a x");
+        cx.run_until_parked();
+        assert_eq!(
+            palette.read_with(cx, |palette, _| palette.query().to_owned()),
+            "locked"
+        );
+
+        palette.update(cx, |palette, cx| palette.set_query("owner", cx));
+        assert_eq!(
+            palette.read_with(cx, |palette, _| palette.query().to_owned()),
+            "owner"
+        );
     }
 
     #[gpui::test]

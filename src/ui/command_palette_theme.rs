@@ -23,6 +23,8 @@ pub(super) fn theme() -> CommandPaletteTheme {
             gpui_color(ACTIVE_THEME.text_disabled),
         ),
         CommandPaletteMetrics::new(px(600.0), px(48.0))
+            .single_line_row_height(px(32.0))
+            .footer_padding(px(8.0))
             .panel_geometry(px(480.0), px(52.0))
             .viewport_margin(px(16.0))
             .panel_spacing(px(4.0), px(42.0))

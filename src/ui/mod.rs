@@ -17,6 +17,7 @@ mod text_input_theme;
 mod tooltip_theme;
 mod window_manager;
 mod workspace_manager;
+mod workspace_picker;
 mod workspace_search;
 
 use gpui::{App, KeyBinding, actions};

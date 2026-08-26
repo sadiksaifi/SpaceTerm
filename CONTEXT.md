@@ -32,6 +32,12 @@ tmux, but SpaceTerm is not a tmux client and has no tmux-style server/client mod
 - Use `gpui-symbols` for icons and native macOS menus and system dialogs where appropriate.
 - Keep reusable SpaceTerm controls in the small internal `spaceterm-ui` crate. Application UI
   Modules compose those controls with product behavior and Vague Pro presentation.
+- Use the application-owned Workspace Picker as the primary Open Local Project selection
+  mechanism. It is a live, keyboard-first, one-level filesystem navigator that preserves typed
+  path spelling and performs no indexing, recents, persistence, filesystem watching, or fuzzy
+  matching. Finder is available only as an explicit fallback from the picker.
+- Present the Workspace Picker as a mode of the Command Palette rather than as its own panel, so
+  the application has exactly one transient surface geometry, chrome, and dismissal behavior.
 
 ## Architecture principles
 
@@ -138,13 +144,25 @@ Vague Pro presentation catalog.
 
 The palette presents one continuous surface: a borderless editor above a hairline, a
 variable-height virtualized result list, and an optional hint and actions footer. Search-line
-controls, footer hints, section headings, and the footer actions menu are typed caller values, not
-caller-painted elements, so the palette remains the only owner of their size and paint. Rows are
-grouped only where adjacent items report different sections. The palette renders its own anchored
+controls, footer hints, section headings, the footer actions, and the single primary footer confirm
+are typed caller values, not caller-painted elements, so the palette remains the only owner of their
+size and paint. A lone ordinary footer action is offered directly rather than behind a disclosure
+that would reveal exactly one choice; anything else stays a menu. A confirm carries its own label, enabled state, and keyboard equivalent,
+claims the palette's confirm key while installed, and is the only primary action the surface
+offers. Rows are grouped only where adjacent items report different sections.
+
+Two bounded typed policies let a caller whose query is an address rather than a search term reuse
+the same surface. Caller-owned matching presents exactly the supplied items in caller order and
+highlights nothing, because the query is not a substring of the labels it produces. Continuing
+activation reports the activated item without closing, so a drill-down caller answers it by
+publishing a new query and new items. Both default to the searching behavior. The palette renders its own anchored
 full-window layer without deferring it, because GPUI collects deferred draws once per frame and a
 deferred palette could not host the deferred menu overlay its footer owns; its owner therefore
 renders it last. While a menu owns the Operating-System Window, palette blur and outside presses
-are not dismissals. Activating a Command Palette or Menu first establishes internal closed and
+are not dismissals. A caller with a native or pending operation may temporarily make the query
+read-only and reject Escape, outside, focus-loss, and Operating-System Window deactivation
+closures; explicit owner completion and replacement remain authoritative. Activating a Command
+Palette or Menu first establishes internal closed and
 focus state, then delivers the typed activation while caller-owned transient blocking remains
 continuous, and finally publishes the activated close lifecycle event; non-activation close
 ordering is unchanged.
@@ -719,14 +737,31 @@ Logical and typed key text never enters diagnostics. SpaceTerm performs no autom
 telemetry or crash upload. A local diagnostic file is created only after the user explicitly
 chooses Export Terminal Diagnostics and confirms a path through the native save panel.
 
-### Workspace-Bound Terminal Creation
+### Workspace Picker and Workspace-Bound Terminal Creation
 
 Every runtime-only Workspace has an immutable Workspace Kind. New Workspace creates an Ad Hoc
-Workspace at `HOME`; Open Local Project creates a Local Project Workspace from one native,
-directory-only selection. The Workspace owns the exact selected or reported Workspace Directory and
-its canonical macOS device/file identity. Equivalent Local Project selections activate the existing
-Workspace, while an Ad Hoc Workspace at that identity remains distinct. No Workspace state is
-persisted or watched.
+Workspace at `HOME`; Open Local Project creates a Local Project Workspace from one directory
+confirmed through the in-app Workspace Picker. The picker is the canonical selection path and
+Finder is an explicit fallback retained behind its footer. Both paths complete the same background
+validation before Workspace activation.
+
+The picker composes the Command Palette with caller-owned matching and continuing activation. The
+typed path is the palette query and the only way to change directory: activating a row descends by
+rewriting that query, and moving up a level is editing it. Finder, folder-creation confirmation,
+validation, creation, and Workspace activation make that query read-only and retain the picker
+until their cancellation, failure, or explicit completion restores an authoritative state. The
+picker publishes one primary confirm
+whose label alone distinguishes adding an existing folder from creating a missing one, offers the
+Finder Fallback directly in its footer and gathers it with permission recovery into a menu only
+when an unreadable folder adds those entries, and states an
+unreadable or missing path as the list's single empty line. It renders no scrim, no parent row, no
+section heading, and no second confirm.
+
+The Workspace owns the exact selected or typed Workspace Directory spelling, including a selected
+symlink path, and its canonical macOS device/file identity. Equivalent Local Project selections
+activate the existing Workspace, while an Ad Hoc Workspace at that identity remains distinct. The
+picker starts at `HOME` on every open and retains no recents, index, persistence, or filesystem
+watcher. No Workspace state is persisted or watched.
 
 An Ad Hoc Workspace's initial Pane is its Directory Authority. Valid live Reported Working Directory
 changes from that Pane update the Workspace Directory even when its Workspace or Window is inactive.
