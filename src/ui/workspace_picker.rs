@@ -680,7 +680,7 @@ impl WorkspacePicker {
             "Create this folder?",
             Some(&detail),
             &[
-                PromptButton::ok("Create & Add"),
+                PromptButton::ok("Create & Open"),
                 PromptButton::cancel("Cancel"),
             ],
             cx,
@@ -834,16 +834,16 @@ impl WorkspacePicker {
 
     fn confirmation_label(&self) -> &'static str {
         if self.status == WorkspacePickerStatus::Missing {
-            "Create & Add"
+            "Create & Open"
         } else {
-            "Add"
+            "Open"
         }
     }
 
     /// The one line shown when the current path lists nothing.
     ///
     /// A missing folder needs no separate warning: the confirm control already reads
-    /// `Create & Add`.
+    /// `Create & Open`.
     fn empty_text(&self) -> &'static str {
         match self.status {
             WorkspacePickerStatus::Loading => "Reading\u{2026}",
@@ -1498,7 +1498,7 @@ mod tests {
         );
         assert_eq!(
             picker.read_with(cx, |picker, _| picker.confirmation_label()),
-            "Add"
+            "Open"
         );
     }
 
@@ -1518,7 +1518,7 @@ mod tests {
             )),
             (
                 WorkspacePickerStatus::Missing,
-                "Create & Add",
+                "Create & Open",
                 true,
                 "No such folder",
             )
@@ -1743,7 +1743,7 @@ mod tests {
         cx.deactivate_window();
         cx.run_until_parked();
         cx.update(|window, _| window.activate_window());
-        cx.simulate_prompt_answer("Create & Add");
+        cx.simulate_prompt_answer("Create & Open");
         cx.run_until_parked();
 
         assert_eq!(
@@ -1822,7 +1822,7 @@ mod tests {
         cx.update(|window, cx| {
             picker.update(cx, |picker, cx| picker.confirm_typed_path(window, cx));
         });
-        cx.simulate_prompt_answer("Create & Add");
+        cx.simulate_prompt_answer("Create & Open");
         assert!(cx.executor().tick(), "prompt completion did not run");
         cx.update(|window, cx| {
             window.dispatch_keystroke(Keystroke::parse("escape").unwrap(), cx);
@@ -1929,7 +1929,7 @@ mod tests {
             picker.update(cx, |picker, cx| picker.confirm_typed_path(window, cx));
         });
         assert!(cx.has_pending_prompt());
-        cx.simulate_prompt_answer("Create & Add");
+        cx.simulate_prompt_answer("Create & Open");
         cx.run_until_parked();
 
         let input = path_bar(&picker, cx);
