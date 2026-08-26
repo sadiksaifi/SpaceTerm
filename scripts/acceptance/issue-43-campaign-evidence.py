@@ -4319,6 +4319,12 @@ def validate_public_identity_evidence(
 
 
 def validate_public_url(url: str) -> urllib.parse.SplitResult:
+    """Shape-check a public evidence URL without touching the network.
+
+    Structural replay validates recorded URLs it never requests, so resolution belongs to
+    `resolve_public_url` at the request boundary instead. Keeping it here made an offline check
+    fail wherever DNS was unavailable.
+    """
     parsed = urllib.parse.urlsplit(url)
     if (
         parsed.scheme != "https" or not parsed.netloc or parsed.username or parsed.password
@@ -4336,6 +4342,17 @@ def validate_public_url(url: str) -> urllib.parse.SplitResult:
         fail("public evidence URL must use an approved public GitHub host")
     if hostname.lower() == "localhost" or hostname.endswith(".localhost"):
         fail("public evidence URL must not target localhost")
+    return parsed
+
+
+def resolve_public_url(url: str) -> urllib.parse.SplitResult:
+    """Shape-check a URL and prove it resolves only to global addresses before requesting it.
+
+    Every request and every redirect passes through here, so an approved hostname that resolves
+    into private, loopback, or link-local space is rejected before any connection is made.
+    """
+    parsed = validate_public_url(url)
+    hostname = parsed.hostname or ""
     try:
         addresses = {
             item[4][0] for item in socket.getaddrinfo(hostname, parsed.port or 443, type=socket.SOCK_STREAM)
@@ -4352,8 +4369,8 @@ class ValidatingRedirectHandler(urllib.request.HTTPRedirectHandler):
         self, request: urllib.request.Request, file_pointer: Any, code: int, message: str,
         headers: Any, new_url: str,
     ) -> urllib.request.Request | None:
-        old = validate_public_url(request.full_url)
-        new = validate_public_url(new_url)
+        old = resolve_public_url(request.full_url)
+        new = resolve_public_url(new_url)
         if request.has_header("Authorization") and (old.scheme, old.netloc) != (new.scheme, new.netloc):
             fail("authenticated public JSON requests cannot redirect across origins")
         return super().redirect_request(request, file_pointer, code, message, headers, new_url)
@@ -4364,13 +4381,13 @@ def open_public_request(request: urllib.request.Request, *, timeout: int) -> Any
 
 
 def remote_sha256(url: str, expected_bytes: int | None = None) -> tuple[str, int]:
-    validate_public_url(url)
+    resolve_public_url(url)
     request = urllib.request.Request(url, headers={"User-Agent": "SpaceTerm-issue-43-verifier/1"})
     digest = hashlib.sha256()
     total = 0
     try:
         with open_public_request(request, timeout=60) as response:
-            validate_public_url(response.geturl())
+            resolve_public_url(response.geturl())
             if getattr(response, "status", 200) != 200:
                 fail("public evidence URL did not return HTTP 200")
             while True:
@@ -4394,7 +4411,7 @@ PUBLIC_JSON_CACHE: dict[str, dict[str, Any]] = {}
 def fetch_public_json(url: str, maximum_bytes: int = 1024 * 1024) -> dict[str, Any]:
     if url in PUBLIC_JSON_CACHE:
         return PUBLIC_JSON_CACHE[url]
-    validate_public_url(url)
+    resolve_public_url(url)
     headers = {"User-Agent": "SpaceTerm-issue-43-verifier/1", "Accept": "application/json"}
     token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
     if token:
@@ -4402,7 +4419,7 @@ def fetch_public_json(url: str, maximum_bytes: int = 1024 * 1024) -> dict[str, A
     request = urllib.request.Request(url, headers=headers)
     try:
         with open_public_request(request, timeout=60) as response:
-            validate_public_url(response.geturl())
+            resolve_public_url(response.geturl())
             if getattr(response, "status", 200) != 200:
                 fail("public JSON evidence URL did not return HTTP 200")
             payload = response.read(maximum_bytes + 1)
