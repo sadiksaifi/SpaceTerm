@@ -10,8 +10,9 @@ use gpui::{
 };
 use gpui_symbols::Icon;
 use spaceterm_ui::{
-    CommandPalette, CommandPaletteActivationPolicy, CommandPaletteConfirm, CommandPaletteEvent,
-    CommandPaletteItem, CommandPaletteLifecycleEvent, CommandPaletteMatching, MenuEntry,
+    CommandPalette, CommandPaletteActivationPolicy, CommandPaletteCloseReason,
+    CommandPaletteConfirm, CommandPaletteEvent, CommandPaletteItem, CommandPaletteLifecycleEvent,
+    CommandPaletteMatching, MenuEntry,
 };
 
 use super::{
@@ -185,6 +186,9 @@ pub(super) fn filter_workspace_picker_rows(
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) enum WorkspacePickerEvent {
     StateChanged,
+    /// Escape closed the picker. Only Escape steps back to whatever presented it; an outside
+    /// press or a focus loss dismisses the whole flow.
+    Escaped,
     FinderRequested,
     Confirmed(ValidatedWorkspaceDirectory),
 }
@@ -446,7 +450,7 @@ impl WorkspacePicker {
                 self.open = true;
                 self.publish(cx);
             }
-            CommandPaletteEvent::Lifecycle(CommandPaletteLifecycleEvent::Closed(_)) => {
+            CommandPaletteEvent::Lifecycle(CommandPaletteLifecycleEvent::Closed(reason)) => {
                 self.open = false;
                 self.busy = None;
                 self.snapshot = None;
@@ -454,6 +458,9 @@ impl WorkspacePicker {
                 self.rows.clear();
                 self.lifecycle_generation = self.lifecycle_generation.wrapping_add(1);
                 self.operation_generation = self.operation_generation.wrapping_add(1);
+                if matches!(reason, CommandPaletteCloseReason::Escape) {
+                    cx.emit(WorkspacePickerEvent::Escaped);
+                }
                 cx.emit(WorkspacePickerEvent::StateChanged);
                 cx.notify();
             }

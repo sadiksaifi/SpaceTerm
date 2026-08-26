@@ -739,9 +739,17 @@ chooses Export Terminal Diagnostics and confirms a path through the native save 
 
 ### Workspace Picker and Workspace-Bound Terminal Creation
 
-Every runtime-only Workspace has an immutable Workspace Kind. Create Scratch Workspace creates a
+Every runtime-only Workspace has an immutable Workspace Kind. The New Workspace Panel is the one
+surface that presents every Workspace Source, naming each row for its source rather than repeating
+the panel's own noun, and stating each Kind's Workspace Directory behaviour beside it. It performs
+no lifecycle action: choosing a row runs the ordinary action. Create Scratch Workspace creates a
 Scratch Workspace at `HOME`; Open Local Project creates a Local Project Workspace from one directory
-confirmed through the in-app Workspace Picker. The picker is the canonical selection path and
+confirmed through the in-app Workspace Picker. Remote Project is listed and unavailable, so the
+panel states the whole model before an SSH selection path exists.
+
+Choosing Local Project replaces the panel with the Workspace Picker. Escape there returns to the
+panel that presented it; any other dismissal ends the flow, and confirming a directory completes
+it. Reaching the picker without the panel leaves nothing to step back to. The picker is the canonical selection path and
 Finder is an explicit fallback retained behind its footer. Both paths complete the same background
 validation before Workspace activation.
 
