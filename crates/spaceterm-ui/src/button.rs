@@ -470,6 +470,51 @@ impl ModalPressOwner {
     }
 }
 
+#[derive(Clone)]
+pub(crate) struct ModalControlScope {
+    press_owner: ModalPressOwner,
+}
+
+thread_local! {
+    static CURRENT_MODAL_CONTROL_SCOPE: RefCell<Option<ModalControlScope>> = const {
+        RefCell::new(None)
+    };
+}
+
+struct ModalControlScopeGuard {
+    previous: Option<ModalControlScope>,
+}
+
+impl Drop for ModalControlScopeGuard {
+    fn drop(&mut self) {
+        CURRENT_MODAL_CONTROL_SCOPE.with(|current| {
+            current.replace(self.previous.take());
+        });
+    }
+}
+
+impl ModalControlScope {
+    pub(crate) fn new(press_owner: ModalPressOwner) -> Self {
+        Self { press_owner }
+    }
+
+    pub(crate) fn enter<R>(&self, render: impl FnOnce() -> R) -> R {
+        let previous =
+            CURRENT_MODAL_CONTROL_SCOPE.with(|current| current.replace(Some(self.clone())));
+        let _guard = ModalControlScopeGuard { previous };
+        render()
+    }
+
+    fn current_press_owner() -> Option<ModalPressOwner> {
+        CURRENT_MODAL_CONTROL_SCOPE.with(|current| {
+            current
+                .borrow()
+                .as_ref()
+                .map(|scope| scope.press_owner.clone())
+        })
+    }
+}
+
 /// A reusable text action button with native desktop press semantics.
 #[derive(IntoElement)]
 pub struct Button {
@@ -796,7 +841,11 @@ impl ButtonCore {
         let state = window.use_keyed_state(self.id.clone(), cx, move |window, cx| {
             ButtonState::new(modal_focus_handle, window, cx)
         });
-        if let Some(owner) = &self.modal_press_owner {
+        let modal_press_owner = self
+            .modal_press_owner
+            .clone()
+            .or_else(ModalControlScope::current_press_owner);
+        if let Some(owner) = &modal_press_owner {
             owner.register(&state, ButtonState::cancel_modal_owned_press, |state| {
                 !state.interaction.has_owned_press()
             });

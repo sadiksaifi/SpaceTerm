@@ -1,9 +1,10 @@
 use gpui::{
-    AnyElement, App, Context, ElementId, FocusHandle, HitboxBehavior, ImageSource,
-    InteractiveElement as _, IntoElement, KeyBinding, KeyDownEvent, KeyUpEvent, MouseButton,
-    MouseDownEvent, MouseExitEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _, RenderOnce,
-    Rgba, ScrollWheelEvent, SharedString, StatefulInteractiveElement as _, Styled as _, WeakEntity,
-    Window, actions, canvas, div, img, prelude::FluentBuilder as _, px, relative, size,
+    AnyElement, App, Bounds, Context, Element, ElementId, FocusHandle, GlobalElementId,
+    HitboxBehavior, ImageSource, InspectorElementId, InteractiveElement as _, IntoElement,
+    KeyBinding, KeyDownEvent, KeyUpEvent, LayoutId, MouseButton, MouseDownEvent, MouseExitEvent,
+    MouseMoveEvent, MouseUpEvent, ParentElement as _, Pixels, RenderOnce, Rgba, ScrollWheelEvent,
+    SharedString, StatefulInteractiveElement as _, Styled as _, WeakEntity, Window, actions,
+    canvas, div, img, prelude::FluentBuilder as _, px, relative, size,
 };
 
 use super::{
@@ -20,7 +21,7 @@ use super::{
 };
 use crate::{
     Button, ButtonRole, ButtonSize, ButtonVariant,
-    button::{ModalPressOwner, measure_button_intrinsic_width},
+    button::{ModalControlScope, ModalPressOwner, measure_button_intrinsic_width},
 };
 
 const MODAL_KEY_CONTEXT: &str = "SpaceTermModal";
@@ -633,11 +634,15 @@ fn render_body(
                 })
                 .into_any_element()
         }
-        PreparedModalSemantics::Dialog { .. } => snapshot
-            .body
-            .clone()
-            .map(IntoElement::into_any_element)
-            .unwrap_or_else(|| div().into_any_element()),
+        PreparedModalSemantics::Dialog { .. } => ModalBodyControlScope {
+            content: snapshot
+                .body
+                .clone()
+                .map(IntoElement::into_any_element)
+                .unwrap_or_else(|| div().into_any_element()),
+            controls: ModalControlScope::new(press_owner.clone()),
+        }
+        .into_any_element(),
         PreparedModalSemantics::Progress { .. } => {
             let progress = snapshot.progress.as_ref();
             let status = progress
@@ -698,6 +703,71 @@ fn render_body(
                 .child(content),
         )
         .into_any_element()
+}
+
+struct ModalBodyControlScope {
+    content: AnyElement,
+    controls: ModalControlScope,
+}
+
+impl IntoElement for ModalBodyControlScope {
+    type Element = Self;
+
+    fn into_element(self) -> Self::Element {
+        self
+    }
+}
+
+impl Element for ModalBodyControlScope {
+    type RequestLayoutState = ();
+    type PrepaintState = ();
+
+    fn id(&self) -> Option<ElementId> {
+        None
+    }
+
+    fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (LayoutId, Self::RequestLayoutState) {
+        (
+            self.controls
+                .enter(|| self.content.request_layout(window, cx)),
+            (),
+        )
+    }
+
+    fn prepaint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        _: Bounds<Pixels>,
+        _: &mut Self::RequestLayoutState,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        self.controls.enter(|| self.content.prepaint(window, cx));
+    }
+
+    fn paint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        _: Bounds<Pixels>,
+        _: &mut Self::RequestLayoutState,
+        _: &mut Self::PrepaintState,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        self.controls.enter(|| self.content.paint(window, cx));
+    }
 }
 
 #[expect(
@@ -5578,6 +5648,246 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    enum DialogBodyParentOperation {
+        Complete(super::super::DialogCompletion),
+        Replace(gpui::WeakEntity<DialogBodyButtonFixture>),
+    }
+
+    struct DialogBodyButton {
+        activations: Rc<Cell<usize>>,
+        successor: Rc<RefCell<Option<super::super::DialogCompletion>>>,
+        operation: Rc<RefCell<Option<DialogBodyParentOperation>>>,
+        controls_are_idle: Rc<Cell<Option<bool>>>,
+    }
+
+    impl Render for DialogBodyButton {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let activations = self.activations.clone();
+            let successor = self.successor.clone();
+            let operation = self.operation.clone();
+            let controls_are_idle = self.controls_are_idle.clone();
+            let parent_release = canvas(
+                |_, _, _| (),
+                move |_, _, window, _| {
+                    window.on_mouse_event(move |event: &MouseUpEvent, phase, window, cx| {
+                        if !phase.capture() || event.button != MouseButton::Left {
+                            return;
+                        }
+                        if let Some(operation) = operation.borrow_mut().take() {
+                            match operation {
+                                DialogBodyParentOperation::Complete(completion) => completion
+                                    .complete(window, None, cx)
+                                    .expect("active Dialog should complete before body release"),
+                                DialogBodyParentOperation::Replace(root) => {
+                                    root.update(cx, |root, cx| root.replace_active(window, cx))
+                                        .expect("Dialog fixture should survive active replacement");
+                                }
+                            }
+                            controls_are_idle.set(Some(
+                                super::super::core::modal_button_controls_are_idle_for_test(
+                                    window, cx,
+                                ),
+                            ));
+                        }
+                    });
+                },
+            )
+            .absolute()
+            .inset_0();
+            div().relative().child(parent_release).child(
+                Button::new("dialog-body-button", "Body action")
+                    .debug_selector("dialog-body-button")
+                    .on_activate(move |_, window, cx| {
+                        activations.set(activations.get() + 1);
+                        let successor = successor.borrow().clone();
+                        if let Some(successor) = successor {
+                            successor
+                                .complete(window, None, cx)
+                                .expect("body callback should be able to complete the successor");
+                        }
+                    }),
+            )
+        }
+    }
+
+    struct DialogBodyButtonFixture {
+        body: Entity<DialogBodyButton>,
+        active: Option<super::super::DialogCompletion>,
+        successor: Rc<RefCell<Option<super::super::DialogCompletion>>>,
+        successor_outcome: Rc<RefCell<Option<DialogOutcome<&'static str>>>>,
+    }
+
+    impl DialogBodyButtonFixture {
+        fn present(&mut self, window: &Window, cx: &mut Context<Self>) {
+            self.active = Some(
+                Dialog::new(
+                    ModalId::new("dialog-body-button-predecessor"),
+                    "Dialog body button predecessor",
+                    "Body Button",
+                    vec![ModalAction::new(
+                        "cancel",
+                        "Cancel",
+                        ModalActionRole::Cancel,
+                        "dialog-body-button-predecessor-cancel",
+                    )],
+                    DialogInitialFocus::Action("cancel"),
+                )
+                .body(self.body.clone())
+                .present(
+                    window,
+                    cx,
+                    |_, _, _| DialogCloseDecision::Deny {
+                        first_invalid: None,
+                    },
+                    |_, _| {},
+                )
+                .expect("Dialog with public body Button should present"),
+            );
+        }
+
+        fn replace_active(
+            &mut self,
+            window: &Window,
+            cx: &mut Context<Self>,
+        ) -> super::super::DialogCompletion {
+            let outcome = self.successor_outcome.clone();
+            let successor = Dialog::new(
+                ModalId::new("dialog-body-button-successor"),
+                "Dialog body button successor",
+                "Successor",
+                vec![ModalAction::new(
+                    "cancel",
+                    "Cancel",
+                    ModalActionRole::Cancel,
+                    "dialog-body-button-successor-cancel",
+                )],
+                DialogInitialFocus::Action("cancel"),
+            )
+            .body(self.body.clone())
+            .replace_active(
+                window,
+                cx,
+                |_, _, _| DialogCloseDecision::Deny {
+                    first_invalid: None,
+                },
+                move |result, _| *outcome.borrow_mut() = Some(result),
+                |_, _| {},
+            )
+            .expect("successor Dialog should replace the active predecessor");
+            *self.successor.borrow_mut() = Some(successor.clone());
+            successor
+        }
+    }
+
+    impl Render for DialogBodyButtonFixture {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            ModalLayer::new(div().size_full())
+        }
+    }
+
+    type DialogBodyButtonWindow<'a> = (
+        Entity<DialogBodyButtonFixture>,
+        Rc<Cell<usize>>,
+        Rc<RefCell<Option<DialogBodyParentOperation>>>,
+        Rc<Cell<Option<bool>>>,
+        Rc<RefCell<Option<DialogOutcome<&'static str>>>>,
+        &'a mut VisualTestContext,
+    );
+
+    fn dialog_body_button_window(cx: &mut TestAppContext) -> DialogBodyButtonWindow<'_> {
+        install_test_catalogs(cx);
+        let activations = Rc::new(Cell::new(0));
+        let successor = Rc::new(RefCell::new(None));
+        let operation = Rc::new(RefCell::new(None));
+        let controls_are_idle = Rc::new(Cell::new(None));
+        let successor_outcome = Rc::new(RefCell::new(None));
+        let root_activations = activations.clone();
+        let root_successor = successor.clone();
+        let root_operation = operation.clone();
+        let root_controls_are_idle = controls_are_idle.clone();
+        let root_successor_outcome = successor_outcome.clone();
+        let (root, cx) = cx.add_window_view(move |_, cx| DialogBodyButtonFixture {
+            body: cx.new(|_| DialogBodyButton {
+                activations: root_activations,
+                successor: root_successor.clone(),
+                operation: root_operation,
+                controls_are_idle: root_controls_are_idle,
+            }),
+            active: None,
+            successor: root_successor,
+            successor_outcome: root_successor_outcome,
+        });
+        cx.update(|window, cx| {
+            window.activate_window();
+            root.update(cx, |root, cx| root.present(window, cx));
+        });
+        cx.run_until_parked();
+        (
+            root,
+            activations,
+            operation,
+            controls_are_idle,
+            successor_outcome,
+            cx,
+        )
+    }
+
+    #[gpui::test]
+    fn dialog_programmatic_completion_disarms_public_body_button_before_release(
+        cx: &mut TestAppContext,
+    ) {
+        let (root, activations, operation, controls_are_idle, _, cx) =
+            dialog_body_button_window(cx);
+        let button = cx
+            .debug_bounds("dialog-body-button")
+            .expect("public Dialog body Button should render");
+        cx.simulate_mouse_down(button.center(), MouseButton::Left, Modifiers::default());
+        let completion = root
+            .read_with(cx, |root, _| root.active.clone())
+            .expect("active Dialog completion should be retained");
+
+        *operation.borrow_mut() = Some(DialogBodyParentOperation::Complete(completion));
+        cx.simulate_mouse_up(button.center(), MouseButton::Left, Modifiers::default());
+        cx.run_until_parked();
+
+        assert!(
+            controls_are_idle.get() == Some(true)
+                && activations.get() == 0
+                && !cx.update(|window, cx| super::super::window_modal_is_open(window, cx)),
+            "a release from the completed Dialog frame invoked its public body Button"
+        );
+    }
+
+    #[gpui::test]
+    fn dialog_active_replacement_disarms_public_body_button_before_release(
+        cx: &mut TestAppContext,
+    ) {
+        let (root, activations, operation, controls_are_idle, successor_outcome, cx) =
+            dialog_body_button_window(cx);
+        let button = cx
+            .debug_bounds("dialog-body-button")
+            .expect("predecessor public Dialog body Button should render");
+        cx.simulate_mouse_down(button.center(), MouseButton::Left, Modifiers::default());
+
+        *operation.borrow_mut() = Some(DialogBodyParentOperation::Replace(root.downgrade()));
+        cx.simulate_mouse_up(button.center(), MouseButton::Left, Modifiers::default());
+        cx.run_until_parked();
+        let successor = root
+            .read_with(cx, |root, _| root.successor.borrow().clone())
+            .expect("successor should replace the predecessor before body release");
+        let current = cx.update(|window, cx| {
+            super::super::core::current_modal_parent(window, cx).map(|parent| parent.presentation)
+        });
+
+        assert!(
+            controls_are_idle.get() == Some(true)
+                && activations.get() == 0
+                && successor_outcome.borrow().is_none()
+                && current == Some(successor.presentation_id()),
+            "a predecessor body Button release invoked its callback or completed the successor"
+        );
     }
 
     #[gpui::test]
