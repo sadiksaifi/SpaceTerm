@@ -349,10 +349,6 @@ fn render_overlay(
             window.prevent_default();
             cx.stop_propagation();
         })
-        .on_key_down(|_: &KeyDownEvent, window, cx| {
-            window.prevent_default();
-            cx.stop_propagation();
-        })
         .child(div().size_0().track_focus(&surface_focus))
         .child(div().size_0().track_focus(&leading))
         .child(header)
@@ -7052,6 +7048,47 @@ mod tests {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
             ModalLayer::new(div().size_full())
         }
+    }
+
+    #[gpui::test]
+    fn focused_dialog_text_input_receives_printable_key_input(cx: &mut TestAppContext) {
+        install_test_catalogs(cx);
+        let requests = Rc::new(RefCell::new(Vec::new()));
+        let outcome = Rc::new(RefCell::new(None));
+        let lifecycle = Rc::new(RefCell::new(Vec::new()));
+        let (root, cx) = cx.add_window_view(move |window, cx| {
+            let input = cx.new(|cx| TextInput::new("printable-input", "Name", "", window, cx));
+            let body = cx.new(|_| CompositionDialogBody {
+                input: input.clone(),
+            });
+            CompositionDialogFixture {
+                input,
+                body,
+                requests,
+                outcome,
+                lifecycle,
+                presentation: None,
+            }
+        });
+        cx.update(|window, cx| {
+            window.activate_window();
+            root.update(cx, |root, cx| root.present(window, cx));
+        });
+        cx.run_until_parked();
+        let input = root.read_with(cx, |root, _| root.input.clone());
+
+        cx.simulate_input("a");
+        cx.run_until_parked();
+
+        assert_eq!(
+            cx.update(|window, cx| {
+                (
+                    input.read(cx).focus_handle().is_focused(window),
+                    input.read(cx).value().to_owned(),
+                )
+            }),
+            (true, "a".to_owned()),
+        );
     }
 
     #[gpui::test]
