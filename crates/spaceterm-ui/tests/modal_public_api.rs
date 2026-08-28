@@ -1,17 +1,110 @@
 use std::time::Duration;
 
-use gpui::{div, px, rgba};
+use gpui::{Context, Render, TestAppContext, Window, div, px, rgba};
 use spaceterm_ui::{
-    Alert, AlertAccessory, AlertIntent, DeterminateProgress, Dialog, DialogCompletion,
-    DialogInitialFocus, DialogSize, ModalAction, ModalActionEmphasis, ModalActionIntent,
-    ModalActionRole, ModalActivationSource, ModalCloseReason, ModalDesktopPolicy,
-    ModalDismissalError, ModalId, ModalLayer, ModalLifecycleEvent, ModalMetrics, ModalPaint,
-    ModalPresentationError, ModalPresentationHandle, ModalPresentationId,
-    ModalStaleGenerationError, ModalTerminalOutcomeError, ModalTextField, ModalTheme,
-    ModalUpdateError, ModalValidationError, ProgressCancellation, ProgressCancellationCompletion,
-    ProgressDialog, ProgressDialogHandle, ProgressDialogOutcome, ProgressDialogUpdate,
-    ProgressState, TextDirection,
+    Alert, AlertAccessory, AlertIntent, AlertOutcome, DeterminateProgress, Dialog,
+    DialogCloseDecision, DialogCompletion, DialogInitialFocus, DialogOutcome, DialogSize,
+    ModalAction, ModalActionEmphasis, ModalActionIntent, ModalActionRole, ModalActivationSource,
+    ModalCloseReason, ModalDesktopPolicy, ModalDismissalError, ModalId, ModalLayer,
+    ModalLifecycleEvent, ModalMetrics, ModalPaint, ModalPresentationError, ModalPresentationHandle,
+    ModalPresentationId, ModalStaleGenerationError, ModalTerminalOutcomeError, ModalTextField,
+    ModalTheme, ModalUpdateError, ModalValidationError, ProgressCancellation,
+    ProgressCancellationCompletion, ProgressDialog, ProgressDialogHandle, ProgressDialogOutcome,
+    ProgressDialogUpdate, ProgressState, TextDirection, install_modal_policy,
 };
+
+#[derive(Default)]
+struct ReentrantCallbackCaller {
+    opened_updates: usize,
+    dismissal_updates: usize,
+    completion_updates: usize,
+    alert: Option<ModalPresentationHandle>,
+    dialog: Option<DialogCompletion>,
+}
+
+impl ReentrantCallbackCaller {
+    fn present_alert(&mut self, window: &Window, cx: &mut Context<Self>) {
+        let opened_caller = cx.weak_entity();
+        let dismissal_caller = cx.weak_entity();
+        self.alert = Some(
+            Alert::new(
+                ModalId::new("reentrant-callback-alert"),
+                "Reentrant callback Alert",
+                "Reentrant Callback",
+                "Callbacks may update their presenting entity.",
+                vec![ModalAction::new(
+                    (),
+                    "OK",
+                    ModalActionRole::Affirmative,
+                    "reentrant-callback-alert-ok",
+                )],
+            )
+            .present_with_lifecycle(
+                window,
+                cx,
+                move |outcome, cx| {
+                    if matches!(outcome, AlertOutcome::Dismissed { .. }) {
+                        let _ =
+                            dismissal_caller.update(cx, |caller, _| caller.dismissal_updates += 1);
+                    }
+                },
+                move |event, cx| {
+                    if matches!(event, ModalLifecycleEvent::Opened(_)) {
+                        let _ = opened_caller.update(cx, |caller, _| caller.opened_updates += 1);
+                    }
+                },
+            )
+            .expect("Alert should present"),
+        );
+    }
+
+    fn dismiss_alert(&mut self, window: &Window, cx: &mut Context<Self>) {
+        self.alert
+            .as_ref()
+            .expect("Alert handle should be retained")
+            .dismiss(window, cx)
+            .expect("Alert should dismiss");
+    }
+
+    fn present_dialog(&mut self, window: &Window, cx: &mut Context<Self>) {
+        let completion_caller = cx.weak_entity();
+        self.dialog = Some(
+            Dialog::new(
+                ModalId::new("reentrant-callback-dialog"),
+                "Reentrant callback Dialog",
+                "Reentrant Callback",
+                vec![save_action(), cancel_action()],
+                DialogInitialFocus::Action(Decision::Save),
+            )
+            .present(
+                window,
+                cx,
+                |_, _, _| DialogCloseDecision::Pending,
+                move |outcome, cx| {
+                    if outcome == DialogOutcome::ProgrammaticallyCompleted {
+                        let _ = completion_caller
+                            .update(cx, |caller, _| caller.completion_updates += 1);
+                    }
+                },
+            )
+            .expect("Dialog should present"),
+        );
+    }
+
+    fn complete_dialog(&mut self, window: &Window, cx: &mut Context<Self>) {
+        self.dialog
+            .as_ref()
+            .expect("Dialog completion should be retained")
+            .complete(window, None, cx)
+            .expect("Dialog should complete");
+    }
+}
+
+impl Render for ReentrantCallbackCaller {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl gpui::IntoElement {
+        div()
+    }
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum Decision {
@@ -31,6 +124,73 @@ fn cancel_action() -> ModalAction<Decision> {
         ModalActionRole::Cancel,
         "cancel",
     )
+}
+
+#[gpui::test]
+fn opened_callback_updates_presenting_entity_after_present_returns(cx: &mut TestAppContext) {
+    cx.update(|cx| install_modal_policy(cx, ModalDesktopPolicy::mac_os()));
+    let (caller, cx) = cx.add_window_view(|_, _| ReentrantCallbackCaller::default());
+
+    cx.update(|window, cx| {
+        caller.update(cx, |caller, cx| {
+            caller.present_alert(window, cx);
+            assert_eq!(caller.opened_updates, 0);
+        });
+    });
+    cx.update(|_, _| {});
+    cx.run_until_parked();
+
+    assert_eq!(caller.read_with(cx, |caller, _| caller.opened_updates), 1);
+}
+
+#[gpui::test]
+fn dismissal_result_updates_entity_after_dismiss_returns(cx: &mut TestAppContext) {
+    cx.update(|cx| install_modal_policy(cx, ModalDesktopPolicy::mac_os()));
+    let (caller, cx) = cx.add_window_view(|_, _| ReentrantCallbackCaller::default());
+    cx.update(|window, cx| {
+        caller.update(cx, |caller, cx| caller.present_alert(window, cx));
+    });
+    cx.update(|_, _| {});
+    cx.run_until_parked();
+
+    cx.update(|window, cx| {
+        caller.update(cx, |caller, cx| {
+            caller.dismiss_alert(window, cx);
+            assert_eq!(caller.dismissal_updates, 0);
+        });
+    });
+    cx.update(|_, _| {});
+    cx.run_until_parked();
+
+    assert_eq!(
+        caller.read_with(cx, |caller, _| caller.dismissal_updates),
+        1
+    );
+}
+
+#[gpui::test]
+fn completion_result_updates_entity_after_complete_returns(cx: &mut TestAppContext) {
+    cx.update(|cx| install_modal_policy(cx, ModalDesktopPolicy::mac_os()));
+    let (caller, cx) = cx.add_window_view(|_, _| ReentrantCallbackCaller::default());
+    cx.update(|window, cx| {
+        caller.update(cx, |caller, cx| caller.present_dialog(window, cx));
+    });
+    cx.update(|_, _| {});
+    cx.run_until_parked();
+
+    cx.update(|window, cx| {
+        caller.update(cx, |caller, cx| {
+            caller.complete_dialog(window, cx);
+            assert_eq!(caller.completion_updates, 0);
+        });
+    });
+    cx.update(|_, _| {});
+    cx.run_until_parked();
+
+    assert_eq!(
+        caller.read_with(cx, |caller, _| caller.completion_updates),
+        1
+    );
 }
 
 #[test]

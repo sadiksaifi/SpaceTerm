@@ -221,8 +221,9 @@ impl<A> Alert<A> {
 
     /// Presents this Alert through the shared per-window owner and bounded FIFO queue.
     ///
-    /// The callback runs after the private owner reducer releases its GPUI entity update, so it may
-    /// reentrantly present another modal. It receives exactly one typed terminal outcome.
+    /// The callback is deferred until the GPUI update invoking presentation or settlement has
+    /// unwound, so it may update the presenting entity or reentrantly present another modal. It
+    /// receives exactly one typed terminal outcome.
     ///
     /// # Errors
     ///
@@ -240,7 +241,7 @@ impl<A> Alert<A> {
         self.present_with_lifecycle(window, cx, on_result, |_, _| {})
     }
 
-    /// Presents this Alert and observes its public lifecycle after each owner update is released.
+    /// Presents this Alert and observes its public lifecycle after the invoking GPUI update unwinds.
     ///
     /// Lifecycle order is `Opened`, optional `ActionRequested`/`Pending` for applicable facades,
     /// `Closing`, then `Closed`. Alert normally emits `Opened`, `Closing`, and `Closed`; a queued

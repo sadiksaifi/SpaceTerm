@@ -38,8 +38,9 @@
 //! any still-live counterpart, and the first allowed terminal decision wins. All terminal callbacks
 //! and public close lifecycle transitions are delivered at most once, including caller
 //! owner removal, Operating-System Window removal, replacement, queued dismissal, and reentrant
-//! callbacks. Reducer effects, callbacks, other entity updates, and queue advancement occur only
-//! after the owner update has been released.
+//! callbacks. Reducer state transitions and control disarming remain synchronous, while an
+//! owner-owned effect pump defers callbacks until the GPUI update that invoked the public operation
+//! has unwound. Reentrant effects and queue advancement retain their deterministic order.
 //!
 //! Progress updates are caller-driven and generation-checked. Determinate progress reaching `1.0`
 //! does not close a [`ProgressDialog`]; the owner must complete, fail, or dismiss it. Immutable

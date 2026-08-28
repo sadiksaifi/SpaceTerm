@@ -514,6 +514,28 @@ enum SettlementState {
     Settling,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum EffectPumpState {
+    #[default]
+    Idle,
+    Scheduled,
+    Running,
+}
+
+struct DeferredEffectBatch {
+    effects: VecDeque<ResultEffect>,
+    completes_settlement: bool,
+}
+
+impl DeferredEffectBatch {
+    fn new(effects: Vec<ResultEffect>, completes_settlement: bool) -> Self {
+        Self {
+            effects: effects.into(),
+            completes_settlement,
+        }
+    }
+}
+
 #[derive(Default)]
 struct FocusChain {
     generation: Option<ModalPresentationId>,
@@ -787,6 +809,9 @@ pub(super) struct ModalWindowOwner {
     active: Option<ActivePresentation>,
     queue: VecDeque<QueuedPresentation>,
     settlement: SettlementState,
+    effect_pump: EffectPumpState,
+    deferred_effects: VecDeque<DeferredEffectBatch>,
+    reentrant_effects: VecDeque<DeferredEffectBatch>,
     focus_chain: FocusChain,
     window_available: bool,
     palette_suspension: Option<crate::command_palette::CommandPaletteSuspension>,
@@ -816,7 +841,7 @@ impl ModalWindowOwner {
                 crate::menu::dismiss_menu_owned_by_modal_parent(parent, cx);
             }
             let effects = state.drain_all(ModalCloseReason::OwnerRemoved);
-            run_effects(effects, cx);
+            defer_released_owner_effects(effects, cx);
         })
         .detach();
         Self {
@@ -825,6 +850,9 @@ impl ModalWindowOwner {
             active: None,
             queue: VecDeque::new(),
             settlement: SettlementState::Idle,
+            effect_pump: EffectPumpState::Idle,
+            deferred_effects: VecDeque::new(),
+            reentrant_effects: VecDeque::new(),
             focus_chain: FocusChain::default(),
             window_available: true,
             palette_suspension: None,
@@ -841,6 +869,9 @@ impl ModalWindowOwner {
             active: None,
             queue: VecDeque::new(),
             settlement: SettlementState::Idle,
+            effect_pump: EffectPumpState::Idle,
+            deferred_effects: VecDeque::new(),
+            reentrant_effects: VecDeque::new(),
             focus_chain: FocusChain::default(),
             window_available: true,
             palette_suspension: None,
@@ -1851,7 +1882,7 @@ pub(super) fn retire_window_owner(owner: &Entity<ModalWindowOwner>, cx: &mut App
     if let Some(suspension) = suspension {
         crate::command_palette::discard_window_command_palette_suspension(suspension, cx);
     }
-    run_effects(effects, cx);
+    defer_owner_effects(owner, effects, cx);
 }
 
 pub(super) fn present<T: 'static>(
@@ -1897,7 +1928,7 @@ pub(super) fn present<T: 'static>(
     })?;
     cx.on_release(move |_, cx| caller_released(&owner_weak, window_id, caller_id, cx))
         .detach();
-    run_effects(effects, cx);
+    defer_owner_effects(&owner, effects, cx);
     let window_handle = window.window_handle();
     let owner_until_refresh = owner.clone();
     cx.defer(move |cx| {
@@ -2066,11 +2097,91 @@ fn settle_owner(owner: &Entity<ModalWindowOwner>, effects: Vec<ResultEffect>, cx
         cx.notify();
         owns_settlement
     });
-    run_effects(effects, cx);
-    if !owns_settlement {
+    enqueue_owner_effects(owner, effects, owns_settlement, cx);
+}
+
+fn defer_owner_effects(owner: &Entity<ModalWindowOwner>, effects: Vec<ResultEffect>, cx: &mut App) {
+    if effects.is_empty() {
         return;
     }
+    enqueue_owner_effects(owner, effects, false, cx);
+}
 
+fn enqueue_owner_effects(
+    owner: &Entity<ModalWindowOwner>,
+    effects: Vec<ResultEffect>,
+    completes_settlement: bool,
+    cx: &mut App,
+) {
+    if effects.is_empty() && !completes_settlement {
+        return;
+    }
+    let batch = DeferredEffectBatch::new(effects, completes_settlement);
+    let should_schedule = owner.update(cx, |state, _| match state.effect_pump {
+        EffectPumpState::Idle => {
+            state.deferred_effects.push_back(batch);
+            state.effect_pump = EffectPumpState::Scheduled;
+            true
+        }
+        EffectPumpState::Scheduled => {
+            state.deferred_effects.push_back(batch);
+            false
+        }
+        EffectPumpState::Running => {
+            state.reentrant_effects.push_back(batch);
+            false
+        }
+    });
+    if should_schedule {
+        let owner = owner.clone();
+        cx.defer(move |cx| pump_owner_effects(&owner, cx));
+    }
+}
+
+fn pump_owner_effects(owner: &Entity<ModalWindowOwner>, cx: &mut App) {
+    owner.update(cx, |state, _| {
+        state.effect_pump = EffectPumpState::Running;
+    });
+    loop {
+        let batch = owner.update(cx, |state, _| state.deferred_effects.pop_front());
+        let Some(batch) = batch else {
+            break;
+        };
+        pump_effect_batch(owner, batch, cx);
+    }
+    owner.update(cx, |state, _| {
+        state.effect_pump = EffectPumpState::Idle;
+    });
+}
+
+fn pump_effect_batch(
+    owner: &Entity<ModalWindowOwner>,
+    mut batch: DeferredEffectBatch,
+    cx: &mut App,
+) {
+    while let Some(effect) = batch.effects.pop_front() {
+        effect(cx);
+        pump_reentrant_effects(owner, cx);
+    }
+    if batch.completes_settlement {
+        finish_owner_settlement(owner, cx);
+        pump_reentrant_effects(owner, cx);
+    }
+}
+
+fn pump_reentrant_effects(owner: &Entity<ModalWindowOwner>, cx: &mut App) {
+    loop {
+        let batches = owner.update(cx, |state, _| std::mem::take(&mut state.reentrant_effects));
+        if batches.is_empty() {
+            return;
+        }
+        for batch in batches {
+            pump_effect_batch(owner, batch, cx);
+        }
+    }
+}
+
+fn finish_owner_settlement(owner: &Entity<ModalWindowOwner>, cx: &mut App) {
     let weak = owner.downgrade();
     loop {
         let should_promote = owner.read_with(cx, |state, _| {
@@ -2084,7 +2195,7 @@ fn settle_owner(owner: &Entity<ModalWindowOwner>, effects: Vec<ResultEffect>, cx
             cx.notify();
             effects
         });
-        run_effects(promotion, cx);
+        pump_effect_batch(owner, DeferredEffectBatch::new(promotion, false), cx);
     }
 
     let (window_id, suspension) = owner.update(cx, |state, _| {
@@ -2100,6 +2211,13 @@ fn settle_owner(owner: &Entity<ModalWindowOwner>, effects: Vec<ResultEffect>, cx
         );
         crate::command_palette::resume_window_command_palette(suspension, cx);
     }
+}
+
+fn defer_released_owner_effects(effects: Vec<ResultEffect>, cx: &mut App) {
+    if effects.is_empty() {
+        return;
+    }
+    cx.defer(move |cx| run_effects(effects, cx));
 }
 
 fn run_effects(effects: Vec<ResultEffect>, cx: &mut App) {

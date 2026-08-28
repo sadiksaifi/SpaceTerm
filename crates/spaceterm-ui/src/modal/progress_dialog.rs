@@ -219,7 +219,7 @@ impl ProgressDialogUpdate {
 ///
 /// Progress reaches a terminal state only through explicit completion, failure, dismissal, allowed
 /// cancellation, owner removal, replacement, or deadline expiry. Every terminal outcome is
-/// content-free and delivered exactly once after the private owner reducer releases its update.
+/// content-free and delivered exactly once after the invoking GPUI update unwinds.
 ///
 /// # Example
 ///
@@ -289,7 +289,7 @@ impl<A> ProgressDialog<A> {
 
     /// Presents this ProgressDialog and returns retained update and completion authority.
     ///
-    /// The cancellation callback runs outside the private owner update and receives opaque
+    /// The cancellation callback runs after the invoking GPUI update unwinds and receives opaque
     /// completion authority for the exact presentation, attempt, and activation source. Its
     /// terminal result callback runs exactly once.
     ///
@@ -315,7 +315,8 @@ impl<A> ProgressDialog<A> {
         self.present_with_lifecycle(window, cx, on_cancel, on_result, |_, _| {})
     }
 
-    /// Presents this ProgressDialog and observes lifecycle transitions after reducer updates.
+    /// Presents this ProgressDialog and observes lifecycle transitions after the invoking GPUI
+    /// update unwinds.
     ///
     /// Observable cancellation order is `ActionRequested`, optional `Pending`, `Closing`, result,
     /// then `Closed`. Programmatic terminal outcomes omit action-request transitions. A queued

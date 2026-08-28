@@ -214,7 +214,8 @@ impl<A> Dialog<A> {
 
     /// Presents this Dialog through the shared per-window owner and bounded FIFO queue.
     ///
-    /// `on_action` runs after `ActionRequested` and outside the owner update. Returning
+    /// `on_action` runs after `ActionRequested` and after the invoking GPUI update unwinds.
+    /// Returning
     /// [`DialogCloseDecision::Allow`] produces the terminal result, `Deny` restores open state,
     /// and `Pending` retains the supplied [`DialogPendingCompletion`] as asynchronous authority.
     /// A nested Cancel denial restores that authority; a nested Cancel allow closes exactly once.
@@ -241,7 +242,8 @@ impl<A> Dialog<A> {
         self.present_with_lifecycle(window, cx, on_action, on_result, |_, _| {})
     }
 
-    /// Presents this Dialog and observes lifecycle transitions after reducer updates are released.
+    /// Presents this Dialog and observes lifecycle transitions after the invoking GPUI update
+    /// unwinds.
     ///
     /// Observable order is `Opened`, `ActionRequested`, optional `Pending`, `Closing`, result,
     /// then `Closed`. Denial returns to open state without a close event. A queued Dialog dismissed
