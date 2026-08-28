@@ -7175,6 +7175,190 @@ mod tests {
         );
     }
 
+    struct DialogCustomRevealBody {
+        first: FocusHandle,
+        second: FocusHandle,
+    }
+
+    impl Render for DialogCustomRevealBody {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .flex()
+                .flex_col()
+                .child(crate::DialogFocusTarget::new(
+                    div()
+                        .debug_selector(|| "dialog-custom-reveal-first".to_owned())
+                        .h(px(28.0))
+                        .flex_shrink_0()
+                        .track_focus(&self.first)
+                        .child("First custom control"),
+                    self.first.clone(),
+                ))
+                .child(div().h(px(360.0)).flex_shrink_0())
+                .child(crate::DialogFocusTarget::new(
+                    div()
+                        .debug_selector(|| "dialog-custom-reveal-second".to_owned())
+                        .h(px(28.0))
+                        .flex_shrink_0()
+                        .track_focus(&self.second)
+                        .child("Second custom control"),
+                    self.second.clone(),
+                ))
+        }
+    }
+
+    struct DialogCustomRevealFixture {
+        body: Entity<DialogCustomRevealBody>,
+        initial: FocusHandle,
+        invalid: FocusHandle,
+        deny_with_invalid: bool,
+        presentation: Option<super::super::DialogCompletion>,
+    }
+
+    impl DialogCustomRevealFixture {
+        fn present(&mut self, window: &Window, cx: &mut Context<Self>) {
+            let invalid = self.invalid.clone();
+            let deny_with_invalid = self.deny_with_invalid;
+            self.presentation = Some(
+                Dialog::new(
+                    ModalId::new("dialog-custom-focus-reveal"),
+                    "Custom Dialog focus reveal",
+                    "Custom Focus Reveal",
+                    vec![
+                        ModalAction::new(
+                            "save",
+                            "Save",
+                            ModalActionRole::Affirmative,
+                            "custom-focus-reveal-save",
+                        )
+                        .default_action(true),
+                        ModalAction::new(
+                            "cancel",
+                            "Cancel",
+                            ModalActionRole::Cancel,
+                            "custom-focus-reveal-cancel",
+                        ),
+                    ],
+                    DialogInitialFocus::Body(self.initial.clone()),
+                )
+                .body(self.body.clone())
+                .present(
+                    window,
+                    cx,
+                    move |_, _, _| DialogCloseDecision::Deny {
+                        first_invalid: deny_with_invalid.then(|| invalid.clone()),
+                    },
+                    |_, _| {},
+                )
+                .expect("custom focus-reveal Dialog should present"),
+            );
+        }
+    }
+
+    impl Render for DialogCustomRevealFixture {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            ModalLayer::new(div().size_full())
+        }
+    }
+
+    fn open_dialog_custom_reveal_window(
+        cx: &mut TestAppContext,
+        initial_is_second: bool,
+        deny_with_invalid: bool,
+    ) -> WindowHandle<DialogCustomRevealFixture> {
+        install_test_catalogs(cx);
+        cx.update(|cx| {
+            cx.open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(Bounds::new(
+                        point(px(0.0), px(0.0)),
+                        size(px(320.0), px(240.0)),
+                    ))),
+                    ..WindowOptions::default()
+                },
+                move |_, cx| {
+                    let first = cx.focus_handle().tab_stop(true);
+                    let second = cx.focus_handle().tab_stop(true);
+                    let initial = if initial_is_second {
+                        second.clone()
+                    } else {
+                        first.clone()
+                    };
+                    cx.new(|cx| DialogCustomRevealFixture {
+                        body: cx.new(|_| DialogCustomRevealBody {
+                            first: first.clone(),
+                            second: second.clone(),
+                        }),
+                        initial,
+                        invalid: second,
+                        deny_with_invalid,
+                        presentation: None,
+                    })
+                },
+            )
+            .unwrap_or_else(|error| panic!("custom focus-reveal Dialog window failed: {error}"))
+        })
+    }
+
+    #[gpui::test]
+    fn dialog_initial_body_focus_reveals_an_adapted_custom_control_below_the_visible_body(
+        cx: &mut TestAppContext,
+    ) {
+        let window = open_dialog_custom_reveal_window(cx, true, false);
+        let root = window
+            .root(cx)
+            .expect("custom focus-reveal root should exist");
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.update(|window, cx| {
+            window.activate_window();
+            root.update(cx, |root, cx| root.present(window, cx));
+        });
+        cx.run_until_parked();
+
+        let viewport = cx
+            .debug_bounds("modal-body-viewport")
+            .expect("Dialog body viewport should render");
+        let target = cx
+            .debug_bounds("dialog-custom-reveal-second")
+            .expect("initial custom control should render");
+        let focused = root.read_with(&cx, |root, _| root.initial.clone());
+
+        assert!(
+            cx.update(|window, _| focused.is_focused(window)) && bounds_contains(viewport, target),
+            "focused initial custom target {target:?} was outside body viewport {viewport:?}"
+        );
+    }
+
+    #[gpui::test]
+    fn dialog_denied_validation_reveals_an_adapted_clipped_custom_control(cx: &mut TestAppContext) {
+        let window = open_dialog_custom_reveal_window(cx, false, true);
+        let root = window
+            .root(cx)
+            .expect("custom focus-reveal root should exist");
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.update(|window, cx| {
+            window.activate_window();
+            root.update(cx, |root, cx| root.present(window, cx));
+        });
+        cx.run_until_parked();
+
+        cx.simulate_keystrokes("shift-tab enter");
+        cx.run_until_parked();
+
+        let viewport = cx
+            .debug_bounds("modal-body-viewport")
+            .expect("Dialog body viewport should render");
+        let target = cx
+            .debug_bounds("dialog-custom-reveal-second")
+            .expect("invalid custom control should render");
+        let invalid = root.read_with(&cx, |root, _| root.invalid.clone());
+
+        assert!(
+            cx.update(|window, _| invalid.is_focused(window)) && bounds_contains(viewport, target),
+            "focused invalid custom target {target:?} was outside body viewport {viewport:?}"
+        );
+    }
+
     struct DialogFooterRevealFixture {
         presentation: Option<super::super::DialogCompletion>,
     }

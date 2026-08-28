@@ -12,8 +12,10 @@
 //!
 //! The shared renderer owns the viewport scrim, compact surface, adaptive action area, scrollable
 //! body, focus scope, and key context. Focus enters according to [`ModalDesktopPolicy`], focused
-//! controls are revealed inside the independently scrolling body and footer, the complete
-//! current-frame GPUI tab-stop order remains contained in both directions, disabled or removed
+//! controls are revealed inside the independently scrolling body and footer, and
+//! [`DialogFocusTarget`] lets arbitrary caller-owned body controls join that reveal mechanism
+//! without exposing scroll internals. The complete current-frame GPUI tab-stop order remains
+//! contained in both directions, disabled or removed
 //! targets are repaired on the next frame, and
 //! restoration is attempted only for a live predecessor or explicit successor that has not been
 //! superseded by newer focus ownership. Focused children handle Return and Escape first. This lets
@@ -122,7 +124,8 @@ pub use core::{
     ProgressCancellationCompletion, ProgressDialogHandle,
 };
 pub use dialog::{
-    Dialog, DialogActionRequest, DialogCloseDecision, DialogInitialFocus, DialogOutcome, DialogSize,
+    Dialog, DialogActionRequest, DialogCloseDecision, DialogFocusTarget, DialogInitialFocus,
+    DialogOutcome, DialogSize,
 };
 use policy::{ActionAxis, ModalInitialFocus};
 pub use policy::{ModalDesktopPolicy, TextDirection, install_modal_policy};

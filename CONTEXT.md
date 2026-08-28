@@ -140,7 +140,9 @@ Opened; time spent waiting in the queue does not consume the interval.
 The renderer captures the exact predecessor focus chain before first presentation, enters according
 to installed policy, contains the complete current-frame GPUI tab-stop order in both directions
 with frame-reconciled sentinels, reveals focused controls inside the independently scrolling body
-and footer, repairs disabled or removed targets, and restores only a live rendered predecessor or explicit successor
+and footer, and repairs disabled or removed targets. Button and Text Input participate in reveal
+automatically; arbitrary caller-owned Dialog body controls join through one layout-transparent
+semantic focus-target adapter without exposing scroll handles or anchors. Restoration uses only a live rendered predecessor or explicit successor
 that has not been superseded by newer transient or focus ownership. Operating-System Window
 deactivation retains the modal, cancels pressed state, and defers restoration. Reusable actions and
 Alert suppression register their keyed pointer and Space gestures with one modal-owned press

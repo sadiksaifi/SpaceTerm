@@ -1,6 +1,10 @@
 use std::rc::Rc;
 
-use gpui::{AnyView, App, Context, Entity, FocusHandle, Render, SharedString, Window};
+use gpui::{
+    AnyElement, AnyView, App, Bounds, Context, Element, ElementId, Entity, FocusHandle,
+    GlobalElementId, InspectorElementId, IntoElement, LayoutId, Pixels, Render, SharedString,
+    Window,
+};
 
 use super::{
     DialogCompletion, DialogPendingCompletion, ModalAction, ModalActivationSource,
@@ -11,6 +15,7 @@ use super::{
         PreparedModalSemantics,
     },
 };
+use crate::button::{ModalControlScope, ModalFocusAnchor};
 
 /// Maximum Unicode scalar count for optional Dialog description.
 const MAX_DIALOG_DESCRIPTION_CHARACTERS: usize = 2048;
@@ -34,9 +39,97 @@ pub enum DialogSize {
 /// repaired without allowing focus to escape the Dialog.
 pub enum DialogInitialFocus<A> {
     /// Focus this caller-owned body control when it is live and rendered.
+    ///
+    /// [`crate::Button`] and [`crate::TextInput`] participate in automatic scroll reveal. Wrap a
+    /// custom body control in [`DialogFocusTarget`] with this same handle.
     Body(FocusHandle),
     /// Focus the enabled action with this caller-owned identity.
     Action(A),
+}
+
+/// A layout-transparent focus-reveal adapter for an arbitrary Dialog body control.
+///
+/// [`crate::Button`] and [`crate::TextInput`] register themselves automatically and do not need
+/// this adapter. A custom control built with GPUI's plain `track_focus` must wrap its outer element
+/// in `DialogFocusTarget` and provide the same [`FocusHandle`] used by
+/// [`DialogInitialFocus::Body`] or the `first_invalid` field of [`DialogCloseDecision::Deny`]. The
+/// wrapped content retains its layout, focus tracking, keyboard handling, pointer behavior, and
+/// paint.
+pub struct DialogFocusTarget {
+    content: AnyElement,
+    focus: FocusHandle,
+    anchor: Option<ModalFocusAnchor>,
+}
+
+impl DialogFocusTarget {
+    /// Wraps one custom body control and associates its rendered bounds with `focus`.
+    pub fn new(content: impl IntoElement, focus: FocusHandle) -> Self {
+        Self {
+            content: content.into_any_element(),
+            focus,
+            anchor: None,
+        }
+    }
+}
+
+impl IntoElement for DialogFocusTarget {
+    type Element = Self;
+
+    fn into_element(self) -> Self::Element {
+        self
+    }
+}
+
+impl Element for DialogFocusTarget {
+    type RequestLayoutState = ();
+    type PrepaintState = ();
+
+    fn id(&self) -> Option<ElementId> {
+        None
+    }
+
+    fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (LayoutId, Self::RequestLayoutState) {
+        self.anchor = ModalControlScope::register_current_focus_anchor(&self.focus);
+        (self.content.request_layout(window, cx), ())
+    }
+
+    fn prepaint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        _: &mut Self::RequestLayoutState,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        if let Some(anchor) = &self.anchor {
+            anchor.track_bounds(bounds);
+        }
+        self.content.prepaint(window, cx);
+    }
+
+    fn paint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        _: Bounds<Pixels>,
+        _: &mut Self::RequestLayoutState,
+        _: &mut Self::PrepaintState,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        self.content.paint(window, cx);
+    }
 }
 
 /// Typed request emitted before a Dialog action may close the presentation.
@@ -89,6 +182,10 @@ pub enum DialogCloseDecision {
     /// Keep all caller-owned values and remain open, optionally focusing the first invalid field.
     Deny {
         /// A body focus owner to receive focus after inline validation is published.
+        ///
+        /// Custom controls using plain GPUI `track_focus` require [`DialogFocusTarget`] for
+        /// automatic scroll reveal; [`crate::Button`] and [`crate::TextInput`] participate
+        /// automatically.
         first_invalid: Option<FocusHandle>,
     },
     /// Enter a duplicate-safe pending state until the matching presentation is completed.
@@ -115,9 +212,11 @@ pub enum DialogOutcome<A> {
 ///
 /// The shared renderer owns the fixed header and footer, vertically scrollable body viewport,
 /// adaptive action area, focus scope, and complete underlay modality. [`Self::body`] attaches one
-/// caller-owned reusable GPUI entity without exposing those mechanisms. Tab and Shift-Tab remain
-/// contained and are repaired when a target disables or disappears. Focused children receive
-/// Return and Escape before the Dialog, including input-method composition cancellation.
+/// caller-owned reusable GPUI entity without exposing those mechanisms. [`crate::Button`] and
+/// [`crate::TextInput`] automatically participate in focus reveal; arbitrary body controls use
+/// [`DialogFocusTarget`]. Tab and Shift-Tab remain contained and are repaired when a target
+/// disables or disappears. Focused children receive Return and Escape before the Dialog, including
+/// input-method composition cancellation.
 ///
 /// Actions retain caller-owned typed identity and logical order while installed desktop policy
 /// owns physical ordering. Denied close attempts preserve caller-owned field values and may focus

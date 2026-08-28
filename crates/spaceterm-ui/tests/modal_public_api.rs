@@ -1,16 +1,20 @@
 use std::time::Duration;
 
-use gpui::{Context, Render, TestAppContext, Window, div, px, rgba};
+use gpui::{
+    Context, FocusHandle, InteractiveElement as _, ParentElement as _, Render, TestAppContext,
+    Window, div, px, rgba,
+};
 use spaceterm_ui::{
     Alert, AlertAccessory, AlertIntent, AlertOutcome, DeterminateProgress, Dialog,
-    DialogCloseDecision, DialogCompletion, DialogInitialFocus, DialogOutcome, DialogSize,
-    ModalAction, ModalActionEmphasis, ModalActionIntent, ModalActionRole, ModalActivationSource,
-    ModalCloseReason, ModalDesktopPolicy, ModalDismissalError, ModalId, ModalLayer,
-    ModalLifecycleEvent, ModalMetrics, ModalPaint, ModalPresentationError, ModalPresentationHandle,
-    ModalPresentationId, ModalStaleGenerationError, ModalTerminalOutcomeError, ModalTextField,
-    ModalTheme, ModalUpdateError, ModalValidationError, ProgressCancellation,
-    ProgressCancellationCompletion, ProgressDialog, ProgressDialogHandle, ProgressDialogOutcome,
-    ProgressDialogUpdate, ProgressState, TextDirection, install_modal_policy,
+    DialogCloseDecision, DialogCompletion, DialogFocusTarget, DialogInitialFocus, DialogOutcome,
+    DialogSize, ModalAction, ModalActionEmphasis, ModalActionIntent, ModalActionRole,
+    ModalActivationSource, ModalCloseReason, ModalDesktopPolicy, ModalDismissalError, ModalId,
+    ModalLayer, ModalLifecycleEvent, ModalMetrics, ModalPaint, ModalPresentationError,
+    ModalPresentationHandle, ModalPresentationId, ModalStaleGenerationError,
+    ModalTerminalOutcomeError, ModalTextField, ModalTheme, ModalUpdateError, ModalValidationError,
+    ProgressCancellation, ProgressCancellationCompletion, ProgressDialog, ProgressDialogHandle,
+    ProgressDialogOutcome, ProgressDialogUpdate, ProgressState, TextDirection,
+    install_modal_policy,
 };
 
 #[derive(Default)]
@@ -104,6 +108,37 @@ impl Render for ReentrantCallbackCaller {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl gpui::IntoElement {
         div()
     }
+}
+
+struct PublicCustomDialogBody {
+    focus: FocusHandle,
+}
+
+impl Render for PublicCustomDialogBody {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl gpui::IntoElement {
+        DialogFocusTarget::new(
+            div()
+                .track_focus(&self.focus)
+                .child("Caller-owned custom control"),
+            self.focus.clone(),
+        )
+    }
+}
+
+#[gpui::test]
+fn public_dialog_focus_target_wraps_custom_controls_without_scroll_types(cx: &mut TestAppContext) {
+    let (body, cx) = cx.add_window_view(|_, cx| PublicCustomDialogBody {
+        focus: cx.focus_handle().tab_stop(true),
+    });
+    let focus = body.read_with(cx, |body, _| body.focus.clone());
+
+    cx.update(|window, _| {
+        window.activate_window();
+        focus.focus(window);
+    });
+    cx.run_until_parked();
+
+    assert!(cx.update(|window, _| focus.is_focused(window)));
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

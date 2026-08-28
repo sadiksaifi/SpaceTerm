@@ -499,6 +499,10 @@ impl ModalFocusAnchor {
         self.anchor.clone()
     }
 
+    pub(crate) fn track_bounds(&self, bounds: Bounds<Pixels>) {
+        self.bounds.set(Some(bounds));
+    }
+
     pub(crate) fn bounds_tracker(&self, inset: Pixels) -> AnyElement {
         let bounds = self.bounds.clone();
         canvas(
