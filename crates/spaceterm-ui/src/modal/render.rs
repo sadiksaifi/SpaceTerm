@@ -4231,6 +4231,182 @@ mod tests {
     }
 
     #[gpui::test]
+    fn active_programmatic_only_deadline_expires_once_at_exact_interval(cx: &mut TestAppContext) {
+        install_test_catalogs(cx);
+        let outcomes = Rc::new(RefCell::new(Vec::new()));
+        let lifecycle = Rc::new(RefCell::new(Vec::new()));
+        let root_outcomes = outcomes.clone();
+        let root_lifecycle = lifecycle.clone();
+        let (root, cx) = cx.add_window_view(|_, cx| AlertFixture {
+            invoker: cx.focus_handle().tab_stop(true),
+            underlay_activations: Rc::new(Cell::new(0)),
+            outcome: Rc::new(RefCell::new(None)),
+            presentation: None,
+        });
+        let handle = cx.update(|window, cx| {
+            window.activate_window();
+            root.update(cx, |_, cx| {
+                ProgressDialog::<()>::new(
+                    ModalId::new("active-programmatic-deadline"),
+                    "Active bounded operation",
+                    "Active Operation",
+                    "Working",
+                    ProgressState::Indeterminate,
+                    ProgressCancellation::programmatic_only(Duration::from_secs(5)),
+                )
+                .present_with_lifecycle(
+                    window,
+                    cx,
+                    |_, _, _| ProgressCancelDecision::Deny,
+                    move |outcome, _| root_outcomes.borrow_mut().push(outcome),
+                    move |event, _| root_lifecycle.borrow_mut().push(*event),
+                )
+                .expect("programmatic-only ProgressDialog should present")
+            })
+        });
+        cx.run_until_parked();
+
+        assert_eq!(
+            lifecycle.borrow().as_slice(),
+            [ModalLifecycleEvent::Opened(handle.presentation_id())]
+        );
+        assert!(outcomes.borrow().is_empty());
+
+        cx.executor()
+            .advance_clock(Duration::from_secs(5) - Duration::from_millis(1));
+        cx.run_until_parked();
+
+        assert!(outcomes.borrow().is_empty());
+        assert_eq!(
+            lifecycle.borrow().as_slice(),
+            [ModalLifecycleEvent::Opened(handle.presentation_id())]
+        );
+        assert!(cx.update(|window, cx| super::super::window_modal_is_open(window, cx)));
+
+        cx.executor().advance_clock(Duration::from_millis(1));
+        cx.run_until_parked();
+        let stale_update = cx.update(|window, cx| {
+            handle.update(ProgressDialogUpdate::new().status("Too late"), window, cx)
+        });
+        let duplicate_terminal = cx.update(|window, cx| handle.complete(window, cx));
+        cx.executor().advance_clock(Duration::from_secs(5));
+        cx.run_until_parked();
+
+        assert_eq!(
+            (
+                outcomes.borrow().clone(),
+                lifecycle.borrow().clone(),
+                stale_update,
+                duplicate_terminal,
+                cx.update(|window, cx| super::super::window_modal_is_open(window, cx)),
+            ),
+            (
+                vec![ProgressDialogOutcome::DeadlineExpired],
+                vec![
+                    ModalLifecycleEvent::Opened(handle.presentation_id()),
+                    ModalLifecycleEvent::Closing(handle.presentation_id()),
+                    ModalLifecycleEvent::Closed(
+                        handle.presentation_id(),
+                        ModalCloseReason::DeadlineExpired,
+                    ),
+                ],
+                Err(ModalUpdateError::Closed),
+                Err(ModalTerminalOutcomeError::AlreadyDelivered),
+                false,
+            )
+        );
+    }
+
+    #[gpui::test]
+    fn queued_progress_programmatic_only_deadline_starts_at_promotion(cx: &mut TestAppContext) {
+        let (root, _, _, cx) = alert_window(cx);
+        let blocker = root
+            .read_with(cx, |root, _| root.presentation.clone())
+            .expect("active Alert should be retained");
+        let outcomes = Rc::new(RefCell::new(Vec::new()));
+        let lifecycle = Rc::new(RefCell::new(Vec::new()));
+        let root_outcomes = outcomes.clone();
+        let root_lifecycle = lifecycle.clone();
+        let handle = cx.update(|window, cx| {
+            root.update(cx, |_, cx| {
+                ProgressDialog::<()>::new(
+                    ModalId::new("queued-programmatic-deadline"),
+                    "Queued bounded operation",
+                    "Queued Operation",
+                    "Waiting",
+                    ProgressState::Indeterminate,
+                    ProgressCancellation::programmatic_only(Duration::from_secs(5)),
+                )
+                .present_with_lifecycle(
+                    window,
+                    cx,
+                    |_, _, _| ProgressCancelDecision::Deny,
+                    move |outcome, _| root_outcomes.borrow_mut().push(outcome),
+                    move |event, _| root_lifecycle.borrow_mut().push(*event),
+                )
+                .expect("programmatic-only ProgressDialog should queue")
+            })
+        });
+
+        cx.executor().advance_clock(Duration::from_secs(6));
+        cx.run_until_parked();
+
+        assert!(outcomes.borrow().is_empty());
+        assert!(lifecycle.borrow().is_empty());
+        assert!(cx.update(|window, cx| super::super::window_modal_is_open(window, cx)));
+
+        cx.update(|window, cx| {
+            blocker.dismiss(window, cx).expect("blocker should close");
+        });
+        cx.run_until_parked();
+
+        assert!(outcomes.borrow().is_empty());
+        assert_eq!(
+            lifecycle.borrow().as_slice(),
+            [ModalLifecycleEvent::Opened(handle.presentation_id())]
+        );
+
+        cx.executor()
+            .advance_clock(Duration::from_secs(5) - Duration::from_millis(1));
+        cx.run_until_parked();
+
+        assert!(outcomes.borrow().is_empty());
+        assert_eq!(
+            lifecycle.borrow().as_slice(),
+            [ModalLifecycleEvent::Opened(handle.presentation_id())]
+        );
+        assert!(cx.update(|window, cx| super::super::window_modal_is_open(window, cx)));
+
+        cx.executor().advance_clock(Duration::from_millis(1));
+        cx.run_until_parked();
+        let duplicate_terminal = cx.update(|window, cx| handle.fail(window, cx));
+        cx.executor().advance_clock(Duration::from_secs(5));
+        cx.run_until_parked();
+
+        assert_eq!(
+            (
+                outcomes.borrow().clone(),
+                lifecycle.borrow().clone(),
+                duplicate_terminal,
+                cx.update(|window, cx| super::super::window_modal_is_open(window, cx)),
+            ),
+            (
+                vec![ProgressDialogOutcome::DeadlineExpired],
+                vec![
+                    ModalLifecycleEvent::Opened(handle.presentation_id()),
+                    ModalLifecycleEvent::Closing(handle.presentation_id()),
+                    ModalLifecycleEvent::Closed(
+                        handle.presentation_id(),
+                        ModalCloseReason::DeadlineExpired,
+                    ),
+                ],
+                Err(ModalTerminalOutcomeError::AlreadyDelivered),
+                false,
+            )
+        );
+    }
+
+    #[gpui::test]
     fn queued_initially_disabled_progress_enables_and_routes_escape_after_promotion(
         cx: &mut TestAppContext,
     ) {

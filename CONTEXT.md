@@ -133,7 +133,9 @@ cancellation availability; active and queued programmatic-only presentations rej
 updates with a typed operational error. Progress updates are caller-driven, stale-update checked,
 and never imply completion at determinate maximum. Pending progress
 cancellation retains its original typed activation source through completion. Programmatic-only progress requires a nonzero installed-policy
-deadline no longer than thirty minutes and closes with a typed deadline outcome.
+deadline no longer than thirty minutes and closes with a typed deadline outcome. For a queued
+programmatic-only presentation, the interval starts when FIFO promotion makes it visible and emits
+Opened; time spent waiting in the queue does not consume the interval.
 
 The renderer captures the exact predecessor focus chain before first presentation, enters according
 to installed policy, contains the complete current-frame GPUI tab-stop order in both directions
