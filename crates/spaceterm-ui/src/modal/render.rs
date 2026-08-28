@@ -1619,10 +1619,10 @@ mod tests {
     };
 
     use gpui::{
-        Action, AppContext as _, Bounds, Context, Entity, EntityInputHandler as _, KeyDownEvent,
-        KeyUpEvent, Keystroke, Modifiers, MouseButton, MouseMoveEvent, Render, ScrollDelta,
-        TestAppContext, TouchPhase, VisualTestContext, WindowBounds, WindowHandle, WindowOptions,
-        point, rgba,
+        Action, AppContext as _, Bounds, Context, ElementInputHandler, Entity,
+        EntityInputHandler as _, InputHandler as _, KeyDownEvent, KeyUpEvent, Keystroke, Modifiers,
+        MouseButton, MouseMoveEvent, Render, ScrollDelta, TestAppContext, TouchPhase,
+        VisualTestContext, WindowBounds, WindowHandle, WindowOptions, point, rgba,
     };
 
     use super::*;
@@ -7983,6 +7983,58 @@ mod tests {
                 )
             }),
             (true, "a".to_owned()),
+        );
+    }
+
+    #[gpui::test]
+    fn dialog_registered_input_handler_accepts_marked_text_composition(cx: &mut TestAppContext) {
+        install_test_catalogs(cx);
+        let requests = Rc::new(RefCell::new(Vec::new()));
+        let outcome = Rc::new(RefCell::new(None));
+        let lifecycle = Rc::new(RefCell::new(Vec::new()));
+        let (root, cx) = cx.add_window_view(move |window, cx| {
+            let input = cx.new(|cx| {
+                TextInput::new("handler-input", "Name", "", window, cx)
+                    .debug_selector("dialog-handler-input")
+            });
+            let body = cx.new(|_| CompositionDialogBody {
+                input: input.clone(),
+            });
+            CompositionDialogFixture {
+                input,
+                body,
+                requests,
+                outcome,
+                lifecycle,
+                presentation: None,
+            }
+        });
+        cx.update(|window, cx| {
+            window.activate_window();
+            root.update(cx, |root, cx| root.present(window, cx));
+        });
+        cx.run_until_parked();
+        let input = root.read_with(cx, |root, _| root.input.clone());
+        let bounds = cx
+            .debug_bounds("dialog-handler-input")
+            .expect("Dialog TextInput should register its platform input handler");
+
+        cx.update(|window, cx| {
+            ElementInputHandler::new(bounds, input.clone())
+                .replace_and_mark_text_in_range(None, "日本", None, window, cx);
+        });
+        cx.run_until_parked();
+
+        assert_eq!(
+            input.read_with(cx, |input, _| {
+                (
+                    input.value().to_owned(),
+                    input
+                        .composition()
+                        .map(|composition| composition.marked_range()),
+                )
+            }),
+            ("日本".to_owned(), Some(0.."日本".len())),
         );
     }
 
