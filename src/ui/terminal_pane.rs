@@ -88,6 +88,7 @@ use spaceterm_ui::{
     Button, ButtonRole, ButtonSize, ButtonVariant, ContextMenu, EditCopy, EditPaste, IconButton,
     MenuLifecycleEvent, MenuSize, OverlayScrollbar, OverlayScrollbarEvent, ScrollMetrics,
     TextInput, TextInputEvent, TextInputTabBehavior, TextInputVariant, Tooltip,
+    window_modal_is_open,
 };
 
 const DEFAULT_FONT_SIZE: f32 = 18.0;
@@ -706,13 +707,18 @@ impl TerminalPane {
     }
 
     pub(crate) fn terminal_input_focused(&self, window: &Window, cx: &App) -> bool {
-        self.terminal_input_focused_with_activity(window, NativeActivity::current(window, cx))
+        self.terminal_input_focused_with_activity(
+            window,
+            NativeActivity::current(window, cx),
+            window_modal_is_open(window, cx),
+        )
     }
 
     fn terminal_input_focused_with_activity(
         &self,
         window: &Window,
         activity: NativeActivity,
+        modal_open: bool,
     ) -> bool {
         TerminalFocusCoordinator::is_focused(TerminalFocusFacts {
             active_workspace: self.product_focus.active_workspace,
@@ -721,9 +727,11 @@ impl TerminalPane {
             responder: self.focus_handle.is_focused(window),
             operating_system_window_key: activity.operating_system_window_key,
             application_active: activity.application_active,
-            blocker: self
-                .native_modal_open
+            blocker: modal_open
                 .then_some(TerminalFocusBlocker::Modal)
+                .or(self
+                    .native_modal_open
+                    .then_some(TerminalFocusBlocker::Modal))
                 .or_else(|| {
                     self.context_menu
                         .is_some()
@@ -734,15 +742,20 @@ impl TerminalPane {
     }
 
     fn sync_terminal_input_focus(&mut self, window: &Window, cx: &App) -> (bool, bool) {
-        self.sync_terminal_input_focus_with_activity(window, NativeActivity::current(window, cx))
+        self.sync_terminal_input_focus_with_activity_and_modal(
+            window,
+            NativeActivity::current(window, cx),
+            window_modal_is_open(window, cx),
+        )
     }
 
-    fn sync_terminal_input_focus_with_activity(
+    fn sync_terminal_input_focus_with_activity_and_modal(
         &mut self,
         window: &Window,
         activity: NativeActivity,
+        modal_open: bool,
     ) -> (bool, bool) {
-        let focused = self.terminal_input_focused_with_activity(window, activity);
+        let focused = self.terminal_input_focused_with_activity(window, activity, modal_open);
         let focus_gained = !self.terminal_input_focus && focused;
         self.apply_terminal_input_focus(focused);
         (focused, focus_gained)
@@ -3184,8 +3197,12 @@ impl Render for TerminalPane {
         );
         update_secure_input_application_activation(native_activity.application_active);
         let pane = cx.entity().downgrade();
-        let (terminal_input_focused, focus_gained) =
-            self.sync_terminal_input_focus_with_activity(window, native_activity);
+        let (terminal_input_focused, focus_gained) = self
+            .sync_terminal_input_focus_with_activity_and_modal(
+                window,
+                native_activity,
+                window_modal_is_open(window, cx),
+            );
         self.flush_pending_file_insertion(cx);
         let surface_active = terminal_surface_active(self.product_focus, native_activity);
         let native_visibility = self

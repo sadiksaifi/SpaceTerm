@@ -1,6 +1,8 @@
 mod button_theme;
 mod command_palette_theme;
+mod control_theme_catalog;
 mod menu_theme;
+mod modal_theme;
 mod new_workspace_panel;
 mod pane_action_menu;
 mod pane_host;
@@ -103,16 +105,16 @@ pub(crate) const WORKSPACE_SIDEBAR_DEFAULT_WIDTH: f32 = 240.0;
 pub(crate) const WORKSPACE_SIDEBAR_MINIMUM_WIDTH: f32 = 180.0;
 
 pub(crate) fn init(cx: &mut App) {
-    spaceterm_ui::init(
+    init_with_text_direction(cx, crate::platform::macos_locale::current_text_direction());
+}
+
+fn init_with_text_direction(cx: &mut App, text_direction: spaceterm_ui::TextDirection) {
+    spaceterm_ui::init(cx, control_theme_catalog::catalog());
+    spaceterm_ui::install_modal_policy(
         cx,
-        button_theme::theme(),
-        scrollbar_theme::theme(),
-        resize_handle_theme::theme(),
-        menu_theme::theme(),
-        command_palette_theme::theme(),
-        text_input_theme::theme(),
-        tooltip_theme::theme(),
+        spaceterm_ui::ModalDesktopPolicy::mac_os().with_text_direction(text_direction),
     );
+    spaceterm_ui::install_modal_keybindings(cx, spaceterm_ui::ModalKeybindingProfile::MacOs);
     spaceterm_ui::install_text_input_keybindings(
         cx,
         spaceterm_ui::TextInputKeybindingProfile::MacOs,
@@ -232,7 +234,7 @@ mod tests {
 
     #[gpui::test]
     fn ui_init_should_install_control_themes(cx: &mut TestAppContext) {
-        cx.update(init);
+        cx.update(|cx| init_with_text_direction(cx, spaceterm_ui::TextDirection::LeftToRight));
 
         assert!(cx.update(|cx| {
             cx.has_global::<spaceterm_ui::ButtonTheme>()
@@ -241,7 +243,24 @@ mod tests {
                 && cx.has_global::<spaceterm_ui::MenuTheme>()
                 && cx.has_global::<spaceterm_ui::CommandPaletteTheme>()
                 && cx.has_global::<spaceterm_ui::TextInputTheme>()
+                && cx.has_global::<spaceterm_ui::TooltipTheme>()
+                && cx.has_global::<spaceterm_ui::ModalTheme>()
+                && *cx.global::<spaceterm_ui::ModalTheme>() == modal_theme::theme()
+                && cx.has_global::<spaceterm_ui::ModalDesktopPolicy>()
+                && *cx.global::<spaceterm_ui::ModalDesktopPolicy>()
+                    == spaceterm_ui::ModalDesktopPolicy::mac_os()
         }));
+    }
+
+    #[gpui::test]
+    fn ui_init_should_install_macos_modal_command_period_binding(cx: &mut TestAppContext) {
+        cx.update(init);
+        let command_period =
+            Keystroke::parse("cmd-.").expect("macOS modal key equivalent should parse");
+
+        let has_binding = cx.update(|cx| !cx.all_bindings_for_input(&[command_period]).is_empty());
+
+        assert!(has_binding);
     }
 
     #[gpui::test]

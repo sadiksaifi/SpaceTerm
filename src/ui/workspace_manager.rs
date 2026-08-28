@@ -46,11 +46,11 @@ use gpui::{
 use gpui_symbols::{Icon, RenderingMode, SymbolWeight};
 use spaceterm_ui::{
     Button, ButtonShape, ButtonSize, ButtonVariant, ContextMenu, IconButton, MenuEntry,
-    MenuLifecycleEvent, MenuSize, MiddleTruncatedText, OverlayScrollbar, OverlayScrollbarEvent,
-    ResizeAxis, ResizeFinishReason, ResizeHandle, ResizeHandleEvent, ResizeInputSource,
-    ScrollMetrics, TextInput, TextInputEvent, TextInputVariant, Tooltip, TooltipLayer,
-    TooltipTargetVisibility, WindowDragRegion, WindowDragRegionEvent, WindowDragRegionResponse,
-    WindowDragRegionStatus,
+    MenuLifecycleEvent, MenuSize, MiddleTruncatedText, ModalLayer, OverlayScrollbar,
+    OverlayScrollbarEvent, ResizeAxis, ResizeFinishReason, ResizeHandle, ResizeHandleEvent,
+    ResizeInputSource, ScrollMetrics, TextInput, TextInputEvent, TextInputVariant, Tooltip,
+    TooltipLayer, TooltipTargetVisibility, WindowDragRegion, WindowDragRegionEvent,
+    WindowDragRegionResponse, WindowDragRegionStatus, window_modal_is_open,
 };
 
 const SIDEBAR_TOGGLE_INSET: f32 = 4.0;
@@ -599,6 +599,16 @@ impl WorkspaceManager {
     }
 
     fn terminal_focus_blocker(&self, window: &Window, cx: &App) -> Option<TerminalFocusBlocker> {
+        window_modal_is_open(window, cx)
+            .then_some(TerminalFocusBlocker::Modal)
+            .or_else(|| self.non_modal_terminal_focus_blocker(window, cx))
+    }
+
+    fn non_modal_terminal_focus_blocker(
+        &self,
+        window: &Window,
+        cx: &App,
+    ) -> Option<TerminalFocusBlocker> {
         self.workspace_picker
             .read(cx)
             .blocks_terminal_input()
@@ -708,7 +718,7 @@ impl WorkspaceManager {
     }
 
     fn sync_terminal_focus_blocker(&self, window: &Window, cx: &mut Context<Self>) {
-        let blocker = self.terminal_focus_blocker(window, cx);
+        let blocker = self.non_modal_terminal_focus_blocker(window, cx);
         self.workspaces
             .active_workspace()
             .payload()
@@ -2563,7 +2573,7 @@ impl Render for WorkspaceManager {
             .child(self.workspace_search.clone())
             .child(self.new_workspace_panel.clone())
             .child(self.workspace_picker.clone());
-        TooltipLayer::new(content)
+        ModalLayer::new(TooltipLayer::new(content))
     }
 }
 
@@ -2645,6 +2655,10 @@ mod tests {
     use gpui::{
         Modifiers, MouseDownEvent, MouseUpEvent, ScrollDelta, ScrollWheelEvent, TestAppContext,
         TouchPhase, VisualTestContext, point,
+    };
+    use spaceterm_ui::{
+        Alert, Dialog, DialogCloseDecision, DialogInitialFocus, ModalAction, ModalActionRole,
+        ModalId, ModalPresentationHandle, TextDirection,
     };
 
     use super::*;
@@ -2743,6 +2757,36 @@ mod tests {
         std::env::temp_dir().join(format!("spaceterm-workspace-manager-{name}-{nonce}"))
     }
 
+    fn test_alert(id: &'static str) -> Alert<&'static str> {
+        Alert::new(
+            ModalId::new(id),
+            "Application integration alert",
+            "Application Integration",
+            "Confirm the modal integration behavior.",
+            vec![
+                ModalAction::new(
+                    "acknowledge",
+                    "OK",
+                    ModalActionRole::Affirmative,
+                    "acknowledge",
+                )
+                .default_action(true),
+            ],
+        )
+    }
+
+    fn present_test_alert(
+        manager: &Entity<WorkspaceManager>,
+        id: &'static str,
+        cx: &mut VisualTestContext,
+    ) -> ModalPresentationHandle {
+        cx.update(|window, cx| {
+            manager
+                .update(cx, |_, cx| test_alert(id).present(window, cx, |_, _| {}))
+                .expect("test alert should present")
+        })
+    }
+
     fn open_workspace_picker(cx: &mut VisualTestContext) {
         cx.simulate_keystrokes("shift-cmd-o");
         cx.run_until_parked();
@@ -2757,6 +2801,545 @@ mod tests {
         open_workspace_picker(cx);
         click("workspace-picker-finder", cx);
         cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn application_rtl_locale_installation_should_mirror_production_modal_footer(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(|cx| crate::ui::init_with_text_direction(cx, TextDirection::RightToLeft));
+        let records = TestTerminalSessionRecords::default();
+        let session_factory: Rc<dyn TerminalSessionFactory> =
+            Rc::new(TestTerminalSessionFactory::new(records).with_fallback_title("zsh"));
+        let (manager, cx) = cx.add_window_view(|window, cx| {
+            WorkspaceManager::new(session_factory, PathBuf::from("/Users/test"), window, cx)
+        });
+        let dialog = Dialog::new(
+            ModalId::new("rtl-application-modal"),
+            "RTL application modal",
+            "RTL Application Modal",
+            vec![
+                ModalAction::new(
+                    "save",
+                    "Save",
+                    ModalActionRole::Affirmative,
+                    "rtl-application-save",
+                )
+                .default_action(true),
+                ModalAction::new(
+                    "help",
+                    "Help",
+                    ModalActionRole::Help,
+                    "rtl-application-help",
+                ),
+                ModalAction::new(
+                    "cancel",
+                    "Cancel",
+                    ModalActionRole::Cancel,
+                    "rtl-application-cancel",
+                ),
+            ],
+            DialogInitialFocus::Action("save"),
+        )
+        .description("Verify installed locale behavior.");
+        let _completion = cx.update(|window, cx| {
+            manager.update(cx, |manager, cx| {
+                manager.focus(window, cx);
+                dialog
+                    .present(
+                        window,
+                        cx,
+                        |_, _, _| DialogCloseDecision::Deny {
+                            first_invalid: None,
+                        },
+                        |_, _| {},
+                    )
+                    .expect("application integration Dialog should present")
+            })
+        });
+        cx.run_until_parked();
+
+        let save = cx
+            .debug_bounds("modal-action-rtl-application-save")
+            .expect("Save should render");
+        let cancel = cx
+            .debug_bounds("modal-action-rtl-application-cancel")
+            .expect("Cancel should render");
+        let help = cx
+            .debug_bounds("modal-action-rtl-application-help")
+            .expect("Help should render");
+        let policy_is_rtl = cx.update(|_, cx| {
+            *cx.global::<spaceterm_ui::ModalDesktopPolicy>()
+                == spaceterm_ui::ModalDesktopPolicy::mac_os()
+                    .with_text_direction(TextDirection::RightToLeft)
+        });
+
+        assert!(
+            policy_is_rtl && save.left() < cancel.left() && cancel.right() < help.left(),
+            "RTL production bounds were save={save:?}, cancel={cancel:?}, help={help:?}"
+        );
+    }
+
+    #[gpui::test]
+    fn workspace_root_should_render_modal_outside_tooltip_content(cx: &mut TestAppContext) {
+        let (manager, _, cx) = workspace_manager(cx);
+        cx.update(|window, _| window.activate_window());
+        cx.run_until_parked();
+        let pane_host = manager.read_with(cx, |manager, cx| {
+            manager
+                .workspaces
+                .active_workspace()
+                .payload()
+                .read(cx)
+                .active_pane_host()
+        });
+        let focused_pane = pane_host.read_with(cx, |pane_host, _| pane_host.focused_pane_id());
+        let focused_before = cx.update(|window, cx| {
+            pane_host
+                .read(cx)
+                .focused_terminal_has_input_focus(window, cx)
+        });
+
+        let presentation = present_test_alert(&manager, "root-layer-alert", cx);
+        cx.run_until_parked();
+        let modal_state = cx.update(|window, cx| {
+            let pane_host = pane_host.read(cx);
+            (
+                pane_host.focused_pane_id(),
+                pane_host.focused_terminal_has_input_focus(window, cx),
+            )
+        });
+
+        assert!(cx.debug_bounds("spaceterm-modal-root").is_some());
+        assert_eq!(presentation.presentation_id().value(), 1);
+        assert!(cx.debug_bounds("modal-surface-1").is_some());
+        assert_eq!((focused_before, modal_state), (true, (focused_pane, false)));
+
+        cx.update(|window, cx| {
+            presentation
+                .dismiss(window, cx)
+                .expect("root integration modal should dismiss")
+        });
+        cx.run_until_parked();
+        let restored = cx.update(|window, cx| {
+            let pane_host = pane_host.read(cx);
+            (
+                pane_host.focused_pane_id(),
+                pane_host.focused_terminal_has_input_focus(window, cx),
+            )
+        });
+
+        assert_eq!(restored, (focused_pane, true));
+    }
+
+    #[gpui::test]
+    fn workspace_search_reentry_should_not_steal_focus_from_an_active_modal(
+        cx: &mut TestAppContext,
+    ) {
+        let (manager, _, cx) = workspace_manager(cx);
+        cx.update(|window, _| window.activate_window());
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            manager.update(cx, |manager, cx| manager.open_workspace_search(window, cx));
+        });
+        cx.run_until_parked();
+        let presentation = present_test_alert(&manager, "workspace-search-modal-priority", cx);
+        cx.run_until_parked();
+
+        cx.update(|window, cx| {
+            manager.update(cx, |manager, cx| {
+                manager.open_workspace_search(window, cx);
+                manager.open_workspace_search(window, cx);
+            });
+        });
+        cx.run_until_parked();
+        let focus_contained = cx.update(|window, cx| {
+            let manager = manager.read(cx);
+            window_modal_is_open(window, cx)
+                && !manager
+                    .workspace_search
+                    .read(cx)
+                    .palette()
+                    .read(cx)
+                    .editor_is_focused(window, cx)
+        });
+
+        assert!(focus_contained);
+        assert!(cx.debug_bounds("command-palette-panel").is_none());
+
+        cx.update(|window, cx| {
+            presentation
+                .dismiss(window, cx)
+                .expect("workspace-search modal should dismiss")
+        });
+        cx.run_until_parked();
+
+        let resumed = cx.update(|window, cx| {
+            let palette = manager.read(cx).workspace_search.read(cx).palette();
+            (
+                palette.read(cx).is_open(),
+                palette.read(cx).editor_is_focused(window, cx),
+                window_modal_is_open(window, cx),
+                window.is_window_active(),
+            )
+        });
+        assert_eq!(resumed, (true, true, false, true));
+        assert!(cx.debug_bounds("command-palette-panel").is_some());
+    }
+
+    #[gpui::test]
+    fn workspace_picker_reentry_should_not_steal_focus_from_an_active_modal(
+        cx: &mut TestAppContext,
+    ) {
+        let (manager, _, cx) = workspace_manager(cx);
+        cx.update(|window, _| window.activate_window());
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            manager.update(cx, |manager, cx| {
+                manager.present_workspace_picker(window, cx)
+            });
+        });
+        cx.run_until_parked();
+        let presentation = present_test_alert(&manager, "workspace-picker-modal-priority", cx);
+        cx.run_until_parked();
+
+        cx.update(|window, cx| {
+            manager.update(cx, |manager, cx| {
+                manager.open_local_project(window, cx);
+                manager.open_local_project(window, cx);
+            });
+        });
+        cx.run_until_parked();
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        let focus_contained = cx.update(|window, cx| {
+            let manager = manager.read(cx);
+            window_modal_is_open(window, cx)
+                && !manager
+                    .workspace_picker
+                    .read(cx)
+                    .path_input_is_focused(window, cx)
+        });
+
+        assert!(focus_contained);
+        assert!(cx.debug_bounds("modal-surface-1").is_some());
+
+        cx.update(|window, cx| {
+            presentation
+                .dismiss(window, cx)
+                .expect("workspace-picker modal should dismiss")
+        });
+        cx.run_until_parked();
+
+        assert!(cx.debug_bounds("command-palette-panel").is_some());
+        assert!(cx.update(|window, cx| {
+            manager
+                .read(cx)
+                .workspace_picker
+                .read(cx)
+                .path_input_is_focused(window, cx)
+        }));
+    }
+
+    #[gpui::test]
+    fn queued_modals_should_preserve_focused_pane_and_restore_terminal_input_focus(
+        cx: &mut TestAppContext,
+    ) {
+        let (manager, records, cx) = workspace_manager(cx);
+        cx.update(|window, _| window.activate_window());
+        cx.run_until_parked();
+        let pane_host = manager.read_with(cx, |manager, cx| {
+            manager
+                .workspaces
+                .active_workspace()
+                .payload()
+                .read(cx)
+                .active_pane_host()
+        });
+        let focused_pane = pane_host.read_with(cx, |pane_host, _| pane_host.focused_pane_id());
+        let before = cx.update(|window, cx| {
+            (
+                pane_host.read(cx).focused_pane_id(),
+                pane_host
+                    .read(cx)
+                    .focused_terminal_has_input_focus(window, cx),
+            )
+        });
+        let command_count = records.commands().len();
+
+        let first = present_test_alert(&manager, "queued-modal-first", cx);
+        cx.run_until_parked();
+        let active = cx.update(|window, cx| {
+            (
+                pane_host.read(cx).focused_pane_id(),
+                pane_host
+                    .read(cx)
+                    .focused_terminal_has_input_focus(window, cx),
+            )
+        });
+        let second = present_test_alert(&manager, "queued-modal-second", cx);
+        cx.run_until_parked();
+        let queued = cx.update(|window, cx| {
+            (
+                pane_host.read(cx).focused_pane_id(),
+                pane_host
+                    .read(cx)
+                    .focused_terminal_has_input_focus(window, cx),
+            )
+        });
+
+        cx.update(|window, cx| {
+            first
+                .dismiss(window, cx)
+                .expect("first queued modal should dismiss")
+        });
+        cx.run_until_parked();
+        let promoted = cx.update(|window, cx| {
+            (
+                pane_host.read(cx).focused_pane_id(),
+                pane_host
+                    .read(cx)
+                    .focused_terminal_has_input_focus(window, cx),
+            )
+        });
+
+        cx.update(|window, cx| {
+            second
+                .dismiss(window, cx)
+                .expect("promoted modal should dismiss")
+        });
+        cx.run_until_parked();
+        let restored = cx.update(|window, cx| {
+            (
+                pane_host.read(cx).focused_pane_id(),
+                pane_host
+                    .read(cx)
+                    .focused_terminal_has_input_focus(window, cx),
+            )
+        });
+        let focus_reports = records
+            .commands()
+            .into_iter()
+            .skip(command_count)
+            .filter_map(|call| match call.command {
+                RecordedSessionCommand::Focus(focused) => Some(focused),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            (before, active, queued, promoted, restored, focus_reports),
+            (
+                (focused_pane, true),
+                (focused_pane, false),
+                (focused_pane, false),
+                (focused_pane, false),
+                (focused_pane, true),
+                vec![false, true],
+            )
+        );
+    }
+
+    #[gpui::test]
+    fn simultaneous_modals_should_block_and_restore_terminal_input_focus_per_operating_system_window(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(crate::ui::init);
+        let first_records = TestTerminalSessionRecords::default();
+        let second_records = TestTerminalSessionRecords::default();
+        let first_factory: Rc<dyn TerminalSessionFactory> = Rc::new(
+            TestTerminalSessionFactory::new(first_records.clone()).with_fallback_title("zsh"),
+        );
+        let second_factory: Rc<dyn TerminalSessionFactory> = Rc::new(
+            TestTerminalSessionFactory::new(second_records.clone()).with_fallback_title("zsh"),
+        );
+        let first = cx.add_window(|window, cx| {
+            WorkspaceManager::new(first_factory, PathBuf::from("/Users/first"), window, cx)
+        });
+        let second = cx.add_window(|window, cx| {
+            WorkspaceManager::new(second_factory, PathBuf::from("/Users/second"), window, cx)
+        });
+
+        let first_pane_host = first
+            .update(cx, |manager, window, cx| {
+                window.activate_window();
+                manager.focus(window, cx);
+                manager
+                    .workspaces
+                    .active_workspace()
+                    .payload()
+                    .read(cx)
+                    .active_pane_host()
+            })
+            .expect("first Operating-System Window should remain available");
+        cx.run_until_parked();
+        let first_focused_pane =
+            first_pane_host.read_with(cx, |pane_host, _| pane_host.focused_pane_id());
+        let first_before = first
+            .update(cx, |_, window, cx| {
+                first_pane_host
+                    .read(cx)
+                    .focused_terminal_has_input_focus(window, cx)
+            })
+            .expect("first Operating-System Window should remain available");
+        let first_command_count = first_records.commands().len();
+        let first_presentation = first
+            .update(cx, |_, window, cx| {
+                test_alert("first-window-modal").present(window, cx, |_, _| {})
+            })
+            .expect("first Operating-System Window should remain available")
+            .expect("first Operating-System Window should present its modal");
+        cx.run_until_parked();
+
+        let second_pane_host = second
+            .update(cx, |manager, window, cx| {
+                window.activate_window();
+                manager.focus(window, cx);
+                manager
+                    .workspaces
+                    .active_workspace()
+                    .payload()
+                    .read(cx)
+                    .active_pane_host()
+            })
+            .expect("second Operating-System Window should remain available");
+        cx.run_until_parked();
+        let second_focused_pane =
+            second_pane_host.read_with(cx, |pane_host, _| pane_host.focused_pane_id());
+        let second_before = second
+            .update(cx, |_, window, cx| {
+                second_pane_host
+                    .read(cx)
+                    .focused_terminal_has_input_focus(window, cx)
+            })
+            .expect("second Operating-System Window should remain available");
+        let second_command_count = second_records.commands().len();
+        let second_presentation = second
+            .update(cx, |_, window, cx| {
+                test_alert("second-window-modal").present(window, cx, |_, _| {})
+            })
+            .expect("second Operating-System Window should remain available")
+            .expect("second Operating-System Window should present its modal");
+        cx.run_until_parked();
+
+        let first_blocked = first
+            .update(cx, |_, window, cx| {
+                let pane_host = first_pane_host.read(cx);
+                (
+                    pane_host.focused_pane_id(),
+                    pane_host.focused_terminal_has_input_focus(window, cx),
+                )
+            })
+            .expect("first Operating-System Window should remain available");
+        let second_blocked = second
+            .update(cx, |_, window, cx| {
+                let pane_host = second_pane_host.read(cx);
+                (
+                    pane_host.focused_pane_id(),
+                    pane_host.focused_terminal_has_input_focus(window, cx),
+                )
+            })
+            .expect("second Operating-System Window should remain available");
+
+        first
+            .update(cx, |_, window, cx| {
+                window.activate_window();
+                first_presentation.dismiss(window, cx)
+            })
+            .expect("first Operating-System Window should remain available")
+            .expect("first Operating-System Window modal should dismiss");
+        cx.run_until_parked();
+        let first_restored = first
+            .update(cx, |_, window, cx| {
+                let pane_host = first_pane_host.read(cx);
+                (
+                    pane_host.focused_pane_id(),
+                    pane_host.focused_terminal_has_input_focus(window, cx),
+                )
+            })
+            .expect("first Operating-System Window should remain available");
+        let second_still_blocked = second
+            .update(cx, |_, window, cx| {
+                let pane_host = second_pane_host.read(cx);
+                (
+                    pane_host.focused_pane_id(),
+                    pane_host.focused_terminal_has_input_focus(window, cx),
+                )
+            })
+            .expect("second Operating-System Window should remain available");
+        let first_focus_reports = first_records
+            .commands()
+            .into_iter()
+            .skip(first_command_count)
+            .filter_map(|call| match call.command {
+                RecordedSessionCommand::Focus(focused) => Some(focused),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let second_focus_reports_while_blocked = second_records
+            .commands()
+            .into_iter()
+            .skip(second_command_count)
+            .filter_map(|call| match call.command {
+                RecordedSessionCommand::Focus(focused) => Some(focused),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            (
+                first_before,
+                second_before,
+                first_blocked,
+                second_blocked,
+                first_restored,
+                second_still_blocked,
+                first_focus_reports,
+                second_focus_reports_while_blocked,
+            ),
+            (
+                true,
+                true,
+                (first_focused_pane, false),
+                (second_focused_pane, false),
+                (first_focused_pane, true),
+                (second_focused_pane, false),
+                vec![false, true],
+                vec![false],
+            )
+        );
+
+        second
+            .update(cx, |_, window, cx| {
+                window.activate_window();
+                second_presentation.dismiss(window, cx)
+            })
+            .expect("second Operating-System Window should remain available")
+            .expect("second Operating-System Window modal should dismiss");
+        cx.run_until_parked();
+        let second_restored = second
+            .update(cx, |_, window, cx| {
+                let pane_host = second_pane_host.read(cx);
+                (
+                    pane_host.focused_pane_id(),
+                    pane_host.focused_terminal_has_input_focus(window, cx),
+                )
+            })
+            .expect("second Operating-System Window should remain available");
+        let second_focus_reports = second_records
+            .commands()
+            .into_iter()
+            .skip(second_command_count)
+            .filter_map(|call| match call.command {
+                RecordedSessionCommand::Focus(focused) => Some(focused),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            (second_restored, second_focus_reports),
+            ((second_focused_pane, true), vec![false, true])
+        );
     }
 
     #[gpui::test]

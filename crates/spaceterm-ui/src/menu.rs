@@ -1486,6 +1486,7 @@ struct MenuReservation(u64);
 struct MenuOwnership {
     owner: WeakEntity<MenuState>,
     reservation: MenuReservation,
+    modal_parent: Option<crate::modal::ModalParentToken>,
 }
 
 #[derive(Default)]
@@ -1499,8 +1500,13 @@ fn reserve_window(
     owner: &Entity<MenuState>,
     window: &mut Window,
     cx: &mut App,
-) -> (MenuReservation, Option<WeakEntity<MenuState>>) {
+) -> Option<(MenuReservation, Option<WeakEntity<MenuState>>)> {
     let window_id = window.window_handle().window_id();
+    let current_modal = crate::modal::current_modal_parent(window, cx);
+    let modal_parent = crate::modal::focused_modal_parent(window, cx);
+    if current_modal.is_some() && modal_parent != current_modal {
+        return None;
+    }
     let weak = owner.downgrade();
     let reservation = cx.update_global::<MenuCoordinator, _>(|coordinator, _| {
         coordinator.next_reservation = coordinator.next_reservation.wrapping_add(1);
@@ -1512,6 +1518,7 @@ fn reserve_window(
                 MenuOwnership {
                     owner: weak.clone(),
                     reservation,
+                    modal_parent,
                 },
             )
             .map(|ownership| ownership.owner)
@@ -1524,7 +1531,7 @@ fn reserve_window(
         true,
         cx,
     );
-    reservation
+    Some(reservation)
 }
 
 fn release_window(reservation: MenuReservation, window_id: WindowId, cx: &mut App) {
@@ -1548,6 +1555,7 @@ fn release_window(reservation: MenuReservation, window_id: WindowId, cx: &mut Ap
             false,
             cx,
         );
+        crate::command_palette::retry_window_command_palette_modal_resume(window_id, cx);
     }
 }
 
@@ -1587,6 +1595,52 @@ pub fn window_menu_is_open(window: &Window, cx: &App) -> bool {
         .get(&window_id)
         .and_then(|ownership| ownership.owner.upgrade())
         .is_some_and(|owner| owner.read(cx).open)
+}
+
+pub(crate) fn window_menu_is_owned_by_current_modal(window: &Window, cx: &App) -> bool {
+    let Some(modal_parent) = crate::modal::current_modal_parent(window, cx) else {
+        return false;
+    };
+    cx.has_global::<MenuCoordinator>()
+        && cx
+            .global::<MenuCoordinator>()
+            .owners
+            .get(&window.window_handle().window_id())
+            .is_some_and(|ownership| {
+                ownership.modal_parent == Some(modal_parent)
+                    && ownership
+                        .owner
+                        .upgrade()
+                        .is_some_and(|owner| owner.read(cx).open)
+            })
+}
+
+pub(crate) fn dismiss_menu_owned_by_modal_parent(
+    modal_parent: crate::modal::ModalParentToken,
+    cx: &mut App,
+) -> Option<WeakFocusHandle> {
+    if !cx.has_global::<MenuCoordinator>() {
+        return None;
+    }
+    let (owner, reservation) = cx
+        .global::<MenuCoordinator>()
+        .owners
+        .get(&modal_parent.window_id)
+        .filter(|ownership| ownership.modal_parent == Some(modal_parent))
+        .map(|ownership| (ownership.owner.clone(), ownership.reservation))?;
+    let retired_focus = owner
+        .read_with(cx, |state, _| state.focus_handle.downgrade())
+        .ok()?;
+    let replacement = owner
+        .update(cx, |state, cx| state.replace_without_lifecycle(cx))
+        .ok()
+        .flatten();
+    release_window(reservation, modal_parent.window_id, cx);
+    let replacement = replacement?;
+    if let Some(handler) = replacement.lifecycle {
+        handler(&MenuLifecycleEvent::Closed(MenuCloseReason::Replaced), cx);
+    }
+    Some(retired_focus)
 }
 
 /// Dismisses the menu owned by this Operating-System Window and restores its displaced focus.
@@ -2277,7 +2331,9 @@ fn open_menu(
     if !can_open {
         return;
     }
-    let (reservation, previous) = reserve_window(&entity, window, cx);
+    let Some((reservation, previous)) = reserve_window(&entity, window, cx) else {
+        return;
+    };
     let replacement = previous.and_then(|previous| {
         previous
             .update(cx, |state, cx| state.replace_without_lifecycle(cx))

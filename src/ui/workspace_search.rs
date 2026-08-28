@@ -250,7 +250,7 @@ impl WorkspaceSearch {
     }
 
     #[cfg(test)]
-    fn palette(&self) -> Entity<CommandPalette<WorkspaceId>> {
+    pub(super) fn palette(&self) -> Entity<CommandPalette<WorkspaceId>> {
         self.palette.clone()
     }
 

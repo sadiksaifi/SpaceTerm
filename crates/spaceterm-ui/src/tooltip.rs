@@ -695,6 +695,7 @@ struct TooltipOwnership {
 pub(crate) enum TooltipSuppression {
     Menu,
     CommandPalette,
+    Modal,
 }
 
 #[derive(Default)]
@@ -1756,6 +1757,26 @@ mod tests {
         cx.run_until_parked();
 
         assert!(cx.debug_bounds("test-tooltip").is_some());
+    }
+
+    #[gpui::test]
+    fn modal_suppression_epoch_should_invalidate_a_delayed_tooltip_after_release(
+        cx: &mut TestAppContext,
+    ) {
+        let (_, cx) = tooltip_window(cx);
+        let center = target_center(cx, "test-tooltip-button");
+        let window_id = cx.update(|window, _| window.window_handle().window_id());
+        cx.simulate_mouse_move(center, None, Modifiers::default());
+        cx.executor().advance_clock(TOOLTIP_SHOW_DELAY / 2);
+
+        cx.update(|_, cx| {
+            set_window_tooltip_suppression(window_id, TooltipSuppression::Modal, true, cx);
+            set_window_tooltip_suppression(window_id, TooltipSuppression::Modal, false, cx);
+        });
+        cx.executor().advance_clock(TOOLTIP_SHOW_DELAY);
+        cx.run_until_parked();
+
+        assert!(cx.debug_bounds("test-tooltip").is_none());
     }
 
     #[gpui::test]
