@@ -19,7 +19,10 @@ use gpui::{
 };
 use unicode_segmentation::UnicodeSegmentation as _;
 
-use crate::menu::{ContextMenu, MenuActivation, MenuEntry, MenuLifecycleEvent};
+use crate::{
+    button::ModalControlScope,
+    menu::{ContextMenu, MenuActivation, MenuEntry, MenuLifecycleEvent},
+};
 
 const KEY_CONTEXT: &str = "SpaceTermTextInput";
 const CARET_BLINK_INTERVAL: Duration = Duration::from_millis(530);
@@ -2114,6 +2117,7 @@ impl Render for TextInput {
                 .disabled(!self.enabled || self.buffer.text.is_empty()),
         ];
         let selector = self.debug_selector.clone();
+        let focus_anchor = ModalControlScope::register_current_focus_anchor(&self.focus_handle);
         let editor = div()
             .id(self.id.clone())
             .debug_selector(move || selector.to_string())
@@ -2168,7 +2172,7 @@ impl Render for TextInput {
         let menu_open = entity.downgrade();
         let menu_lifecycle = entity.downgrade();
         let menu_activate = entity.downgrade();
-        ContextMenu::new(
+        let control = ContextMenu::new(
             ("text-input-context-menu", entity.entity_id()),
             name,
             editor,
@@ -2213,7 +2217,19 @@ impl Render for TextInput {
                     TextInputMenuAction::SelectAll => input.on_select_all(&SelectAll, window, cx),
                 });
             },
-        )
+        );
+        if let Some(anchor) = focus_anchor {
+            div()
+                .id(("modal-text-input-focus-anchor", entity.entity_id()))
+                .relative()
+                .size_full()
+                .anchor_scroll(Some(anchor.scroll_anchor()))
+                .child(control)
+                .child(anchor.bounds_tracker(px(0.0)))
+                .into_any_element()
+        } else {
+            control.into_any_element()
+        }
     }
 }
 

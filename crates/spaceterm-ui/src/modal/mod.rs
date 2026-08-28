@@ -11,9 +11,10 @@
 //! Terminal Input Focus blocking from the active modal.
 //!
 //! The shared renderer owns the viewport scrim, compact surface, adaptive action area, scrollable
-//! body, focus scope, and key context. Focus enters according to [`ModalDesktopPolicy`], the
-//! complete current-frame GPUI tab-stop order remains contained in both directions, disabled or
-//! removed targets are repaired on the next frame, and
+//! body, focus scope, and key context. Focus enters according to [`ModalDesktopPolicy`], focused
+//! controls are revealed inside the independently scrolling body and footer, the complete
+//! current-frame GPUI tab-stop order remains contained in both directions, disabled or removed
+//! targets are repaired on the next frame, and
 //! restoration is attempted only for a live predecessor or explicit successor that has not been
 //! superseded by newer focus ownership. Focused children handle Return and Escape first. This lets
 //! an editor decline Return before an explicit default action runs and lets the first Escape cancel

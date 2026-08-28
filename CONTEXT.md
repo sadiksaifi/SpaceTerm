@@ -137,7 +137,8 @@ deadline no longer than thirty minutes and closes with a typed deadline outcome.
 
 The renderer captures the exact predecessor focus chain before first presentation, enters according
 to installed policy, contains the complete current-frame GPUI tab-stop order in both directions
-with frame-reconciled sentinels, repairs disabled or removed targets, and restores only a live rendered predecessor or explicit successor
+with frame-reconciled sentinels, reveals focused controls inside the independently scrolling body
+and footer, repairs disabled or removed targets, and restores only a live rendered predecessor or explicit successor
 that has not been superseded by newer transient or focus ownership. Operating-System Window
 deactivation retains the modal, cancels pressed state, and defers restoration. Reusable actions and
 Alert suppression register their keyed pointer and Space gestures with one modal-owned press

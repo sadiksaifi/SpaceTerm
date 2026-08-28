@@ -2,9 +2,9 @@ use gpui::{
     AnyElement, App, Bounds, Context, Element, ElementId, FocusHandle, GlobalElementId,
     HitboxBehavior, ImageSource, InspectorElementId, InteractiveElement as _, IntoElement,
     KeyBinding, KeyDownEvent, KeyUpEvent, LayoutId, MouseButton, MouseDownEvent, MouseExitEvent,
-    MouseMoveEvent, MouseUpEvent, ParentElement as _, Pixels, RenderOnce, Rgba, ScrollWheelEvent,
-    SharedString, StatefulInteractiveElement as _, Styled as _, WeakEntity, Window, actions,
-    canvas, div, img, prelude::FluentBuilder as _, px, relative, size,
+    MouseMoveEvent, MouseUpEvent, ParentElement as _, Pixels, RenderOnce, Rgba, ScrollHandle,
+    ScrollWheelEvent, SharedString, StatefulInteractiveElement as _, Styled as _, WeakEntity,
+    Window, actions, canvas, div, img, prelude::FluentBuilder as _, px, relative, size,
 };
 
 use super::{
@@ -21,7 +21,10 @@ use super::{
 };
 use crate::{
     Button, ButtonRole, ButtonSize, ButtonVariant,
-    button::{ModalControlScope, ModalPressOwner, measure_button_intrinsic_width},
+    button::{
+        ModalControlScope, ModalFocusAnchorRegistry, ModalPressOwner,
+        measure_button_intrinsic_width,
+    },
 };
 
 const MODAL_KEY_CONTEXT: &str = "SpaceTermModal";
@@ -220,7 +223,18 @@ fn render_overlay(
             cx,
         );
     });
-    let (scope, surface_focus, leading, trailing, suppression_focus, action_focus) = {
+    let (
+        scope,
+        surface_focus,
+        leading,
+        trailing,
+        suppression_focus,
+        action_focus,
+        body_scroll,
+        footer_scroll,
+        body_focus_anchors,
+        footer_focus_anchors,
+    ) = {
         let state = focus_state.read(cx);
         (
             state.scope.clone(),
@@ -229,6 +243,10 @@ fn render_overlay(
             state.trailing.clone(),
             state.suppression.clone(),
             state.action_focus.clone(),
+            state.body_scroll.clone(),
+            state.footer_scroll.clone(),
+            state.body_focus_anchors.clone(),
+            state.footer_focus_anchors.clone(),
         )
     };
     state.register_modal_scope(snapshot.presentation, &scope);
@@ -249,6 +267,8 @@ fn render_overlay(
         suppression_focus,
         suppression_is_focused,
         press_owner.clone(),
+        body_scroll,
+        body_focus_anchors,
         metrics,
         paint,
         window,
@@ -263,6 +283,8 @@ fn render_overlay(
         policy.text_direction(),
         action_focus,
         press_owner,
+        footer_scroll,
+        footer_focus_anchors,
         geometry.size.height * metrics.footer_maximum_fraction(),
         metrics,
         paint,
@@ -514,6 +536,8 @@ fn render_body(
     suppression_focus: FocusHandle,
     suppression_is_focused: bool,
     press_owner: ModalPressOwner,
+    body_scroll: ScrollHandle,
+    body_focus_anchors: ModalFocusAnchorRegistry,
     metrics: ModalMetrics,
     paint: ModalPaint,
     window: &mut Window,
@@ -626,6 +650,7 @@ fn render_body(
                         suppression_focus,
                         suppression_is_focused,
                         press_owner,
+                        body_focus_anchors.clone(),
                         metrics,
                         paint,
                         window,
@@ -634,13 +659,14 @@ fn render_body(
                 })
                 .into_any_element()
         }
-        PreparedModalSemantics::Dialog { .. } => ModalBodyControlScope {
+        PreparedModalSemantics::Dialog { .. } => ModalControlScopeElement {
             content: snapshot
                 .body
                 .clone()
                 .map(IntoElement::into_any_element)
                 .unwrap_or_else(|| div().into_any_element()),
-            controls: ModalControlScope::new(press_owner.clone()),
+            controls: ModalControlScope::new(press_owner.clone())
+                .with_focus_anchors(body_focus_anchors.clone()),
         }
         .into_any_element(),
         PreparedModalSemantics::Progress { .. } => {
@@ -695,6 +721,7 @@ fn render_body(
         .min_w_0()
         .overflow_x_hidden()
         .overflow_y_scroll()
+        .track_scroll(&body_scroll)
         .child(
             div()
                 .w_full()
@@ -705,12 +732,12 @@ fn render_body(
         .into_any_element()
 }
 
-struct ModalBodyControlScope {
+struct ModalControlScopeElement {
     content: AnyElement,
     controls: ModalControlScope,
 }
 
-impl IntoElement for ModalBodyControlScope {
+impl IntoElement for ModalControlScopeElement {
     type Element = Self;
 
     fn into_element(self) -> Self::Element {
@@ -718,7 +745,7 @@ impl IntoElement for ModalBodyControlScope {
     }
 }
 
-impl Element for ModalBodyControlScope {
+impl Element for ModalControlScopeElement {
     type RequestLayoutState = ();
     type PrepaintState = ();
 
@@ -783,6 +810,7 @@ fn render_alert_suppression(
     focus: FocusHandle,
     focused: bool,
     press_owner: ModalPressOwner,
+    focus_anchors: ModalFocusAnchorRegistry,
     metrics: ModalMetrics,
     paint: ModalPaint,
     window: &mut Window,
@@ -863,11 +891,14 @@ fn render_alert_suppression(
     let key_up_state = state;
     let keyboard_owner = owner;
     let keyboard_focus = focus.clone();
+    let focus_anchor = focus_anchors.register(&focus);
+    let scroll_anchor = focus_anchor.scroll_anchor();
     div()
         .id(("modal-suppression", presentation.value()))
         .debug_selector(|| "modal-alert-suppression".to_owned())
         .relative()
         .track_focus(&focus)
+        .anchor_scroll(Some(scroll_anchor))
         .flex()
         .items_center()
         .gap(metrics.action_gap)
@@ -921,6 +952,7 @@ fn render_alert_suppression(
             )
         })
         .child(pointer_tracker)
+        .child(focus_anchor.bounds_tracker(metrics.border_width))
         .into_any_element()
 }
 
@@ -1160,6 +1192,8 @@ fn render_footer(
     direction: TextDirection,
     action_focus: Vec<FocusHandle>,
     button_press_owner: ModalPressOwner,
+    footer_scroll: ScrollHandle,
+    footer_focus_anchors: ModalFocusAnchorRegistry,
     maximum_height: gpui::Pixels,
     metrics: ModalMetrics,
     paint: ModalPaint,
@@ -1235,7 +1269,7 @@ fn render_footer(
         ));
     }
 
-    div()
+    let footer = div()
         .id(("modal-footer", snapshot.presentation.value()))
         .debug_selector(move || format!("modal-footer-{}", presentation.value()))
         .flex_shrink_0()
@@ -1243,6 +1277,7 @@ fn render_footer(
         .max_h(maximum_height)
         .overflow_x_hidden()
         .overflow_y_scroll()
+        .track_scroll(&footer_scroll)
         .px(metrics.surface_padding)
         .py(metrics.section_gap)
         .border_t(metrics.border_width)
@@ -1264,7 +1299,13 @@ fn render_footer(
         })
         .when(has_help, |footer| footer.child(help_actions))
         .child(decisions)
-        .into_any_element()
+        .into_any_element();
+    ModalControlScopeElement {
+        content: footer,
+        controls: ModalControlScope::new(button_press_owner)
+            .with_focus_anchors(footer_focus_anchors),
+    }
+    .into_any_element()
 }
 
 #[expect(
@@ -1364,11 +1405,16 @@ struct ModalFocusRing {
     trailing: FocusHandle,
     suppression: FocusHandle,
     action_focus: Vec<FocusHandle>,
+    body_scroll: ScrollHandle,
+    footer_scroll: ScrollHandle,
+    body_focus_anchors: ModalFocusAnchorRegistry,
+    footer_focus_anchors: ModalFocusAnchorRegistry,
     presentation: Option<ModalPresentationId>,
     initial: PreparedFocusIntent,
     focus_request_generation: u64,
     initialized: bool,
     owned_focus_before_render: bool,
+    pending_reveal: Option<gpui::WeakFocusHandle>,
 }
 
 impl ModalFocusRing {
@@ -1378,12 +1424,16 @@ impl ModalFocusRing {
         let leading = cx.focus_handle().tab_stop(true);
         let trailing = cx.focus_handle().tab_stop(true);
         let suppression = cx.focus_handle();
-        cx.on_focus(&leading, window, |state, window, _| {
-            state.focus_last(window)
+        let body_scroll = ScrollHandle::new();
+        let footer_scroll = ScrollHandle::new();
+        let body_focus_anchors = ModalFocusAnchorRegistry::new(body_scroll.clone());
+        let footer_focus_anchors = ModalFocusAnchorRegistry::new(footer_scroll.clone());
+        cx.on_focus(&leading, window, |state, window, cx| {
+            state.focus_last(window, cx)
         })
         .detach();
-        cx.on_focus(&trailing, window, |state, window, _| {
-            state.focus_first(window)
+        cx.on_focus(&trailing, window, |state, window, cx| {
+            state.focus_first(window, cx)
         })
         .detach();
         cx.on_focus_out(&scope, window, |state, _, window, cx| {
@@ -1397,11 +1447,16 @@ impl ModalFocusRing {
             trailing,
             suppression,
             action_focus: Vec::new(),
+            body_scroll,
+            footer_scroll,
+            body_focus_anchors,
+            footer_focus_anchors,
             presentation: None,
             initial: PreparedFocusIntent::Surface,
             focus_request_generation: 0,
             initialized: false,
             owned_focus_before_render: false,
+            pending_reveal: None,
         }
     }
 
@@ -1414,6 +1469,8 @@ impl ModalFocusRing {
         window: &Window,
         cx: &mut Context<Self>,
     ) {
+        self.body_focus_anchors.reset();
+        self.footer_focus_anchors.reset();
         while self.action_focus.len() < actions.len() {
             self.action_focus.push(cx.focus_handle());
         }
@@ -1429,39 +1486,60 @@ impl ModalFocusRing {
         self.owned_focus_before_render = self.scope.contains_focused(window, cx);
     }
 
-    fn focus_first(&self, window: &mut Window) {
+    fn apply_focus_reveal(&self, focus: &FocusHandle, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.body_focus_anchors.reveal(focus, window, cx) {
+            self.footer_focus_anchors.reveal(focus, window, cx);
+        }
+    }
+
+    fn reveal_focus(&mut self, focus: &FocusHandle, window: &mut Window, cx: &mut Context<Self>) {
+        self.apply_focus_reveal(focus, window, cx);
+        self.pending_reveal = Some(focus.downgrade());
+    }
+
+    fn reveal_current_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(focused) = window.focused(cx) {
+            self.reveal_focus(&focused, window, cx);
+        }
+    }
+
+    fn focus_first(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.leading.focus(window);
         window.focus_next();
         if self.trailing.is_focused(window) {
             self.surface.focus(window);
         }
+        self.reveal_current_focus(window, cx);
     }
 
-    fn focus_next(&self, window: &mut Window, cx: &App) {
+    fn focus_next(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.surface.is_focused(window) || !self.scope.contains_focused(window, cx) {
-            self.focus_first(window);
+            self.focus_first(window, cx);
         } else {
             window.focus_next();
+            self.reveal_current_focus(window, cx);
         }
     }
 
-    fn focus_previous(&self, window: &mut Window, cx: &App) {
+    fn focus_previous(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.surface.is_focused(window) || !self.scope.contains_focused(window, cx) {
-            self.focus_last(window);
+            self.focus_last(window, cx);
         } else {
             window.focus_prev();
+            self.reveal_current_focus(window, cx);
         }
     }
 
-    fn focus_last(&self, window: &mut Window) {
+    fn focus_last(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.trailing.focus(window);
         window.focus_prev();
         if self.leading.is_focused(window) {
             self.surface.focus(window);
         }
+        self.reveal_current_focus(window, cx);
     }
 
-    fn repair_focus_loss(&self, window: &mut Window, cx: &App) {
+    fn repair_focus_loss(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !window.is_window_active()
             || crate::menu::window_menu_is_owned_by_current_modal(window, cx)
         {
@@ -1475,31 +1553,38 @@ impl ModalFocusRing {
             presentation,
         };
         if super::current_modal_parent(window, cx) == Some(expected) {
-            self.focus_first(window);
+            self.focus_first(window, cx);
         }
     }
 
-    fn reconcile(&mut self, window: &mut Window, cx: &App) {
+    fn reconcile(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if crate::menu::window_menu_is_owned_by_current_modal(window, cx) {
             return;
         }
+        if let Some(focus) = self.pending_reveal.take().and_then(|focus| focus.upgrade())
+            && focus.is_focused(window)
+        {
+            self.apply_focus_reveal(&focus, window, cx);
+        }
         if !self.initialized {
             let requested = match &self.initial {
-                PreparedFocusIntent::Action(index) => self.action_focus.get(*index),
-                PreparedFocusIntent::Body(body) => Some(body),
-                PreparedFocusIntent::Surface => Some(&self.surface),
+                PreparedFocusIntent::Action(index) => self.action_focus.get(*index).cloned(),
+                PreparedFocusIntent::Body(body) => Some(body.clone()),
+                PreparedFocusIntent::Surface => Some(self.surface.clone()),
             };
             if let Some(requested) = requested
-                && self.scope.contains(requested, window)
+                && self.scope.contains(&requested, window)
             {
                 requested.focus(window);
                 if !matches!(self.initial, PreparedFocusIntent::Surface)
                     && window.focused(cx).is_some_and(|focused| !focused.tab_stop)
                 {
-                    self.focus_first(window);
+                    self.focus_first(window, cx);
+                } else {
+                    self.reveal_focus(&requested, window, cx);
                 }
             } else {
-                self.focus_first(window);
+                self.focus_first(window, cx);
             }
             self.initialized = true;
         } else {
@@ -1509,7 +1594,7 @@ impl ModalFocusRing {
                     .focused(cx)
                     .is_some_and(|focused| !focused.tab_stop && !self.surface.is_focused(window));
             if focused_tab_stop_is_invalid || (self.owned_focus_before_render && !focused_inside) {
-                self.focus_first(window);
+                self.focus_first(window, cx);
             }
         }
     }
@@ -2954,7 +3039,7 @@ mod tests {
             "modal-action-constrained-dialog-cancel",
         ];
         let mut actions_reached = [false; 3];
-        for _ in 0..12 {
+        for step in 0..24 {
             for (reached, selector) in actions_reached.iter_mut().zip(action_selectors) {
                 let action = cx
                     .debug_bounds(selector)
@@ -2965,9 +3050,10 @@ mod tests {
                 );
                 *reached |= bounds_contains(footer, action);
             }
+            let direction = if step < 12 { 64.0 } else { -64.0 };
             cx.simulate_event(ScrollWheelEvent {
                 position: footer.center(),
-                delta: ScrollDelta::Pixels(point(px(0.0), px(-64.0))),
+                delta: ScrollDelta::Pixels(point(px(0.0), px(direction))),
                 modifiers: Modifiers::default(),
                 touch_phase: TouchPhase::Moved,
             });
@@ -6740,6 +6826,329 @@ mod tests {
 
         assert!(cx.update(|window, _| newer_owner.is_focused(window)));
         assert!(!cx.update(|window, _| successor.is_focused(window)));
+    }
+
+    struct DialogRevealBody {
+        first: Entity<TextInput>,
+        second: Entity<TextInput>,
+    }
+
+    impl Render for DialogRevealBody {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .flex()
+                .flex_col()
+                .child(div().h(px(28.0)).flex_shrink_0().child(self.first.clone()))
+                .child(div().h(px(360.0)).flex_shrink_0())
+                .child(div().h(px(28.0)).flex_shrink_0().child(self.second.clone()))
+        }
+    }
+
+    struct DialogRevealFixture {
+        body: Entity<DialogRevealBody>,
+        initial: FocusHandle,
+        invalid: FocusHandle,
+        deny_with_invalid: bool,
+        presentation: Option<super::super::DialogCompletion>,
+    }
+
+    impl DialogRevealFixture {
+        fn present(&mut self, window: &Window, cx: &mut Context<Self>) {
+            let invalid = self.invalid.clone();
+            let deny_with_invalid = self.deny_with_invalid;
+            self.presentation = Some(
+                Dialog::new(
+                    ModalId::new("dialog-focus-reveal"),
+                    "Dialog focus reveal",
+                    "Focus Reveal",
+                    vec![
+                        ModalAction::new(
+                            "save",
+                            "Save",
+                            ModalActionRole::Affirmative,
+                            "focus-reveal-save",
+                        )
+                        .default_action(true),
+                        ModalAction::new(
+                            "cancel",
+                            "Cancel",
+                            ModalActionRole::Cancel,
+                            "focus-reveal-cancel",
+                        ),
+                    ],
+                    DialogInitialFocus::Body(self.initial.clone()),
+                )
+                .body(self.body.clone())
+                .present(
+                    window,
+                    cx,
+                    move |_, _, _| DialogCloseDecision::Deny {
+                        first_invalid: deny_with_invalid.then(|| invalid.clone()),
+                    },
+                    |_, _| {},
+                )
+                .expect("focus-reveal Dialog should present"),
+            );
+        }
+    }
+
+    impl Render for DialogRevealFixture {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            ModalLayer::new(div().size_full())
+        }
+    }
+
+    fn open_dialog_reveal_window(
+        cx: &mut TestAppContext,
+        initial_is_second: bool,
+        deny_with_invalid: bool,
+    ) -> WindowHandle<DialogRevealFixture> {
+        install_test_catalogs(cx);
+        cx.update(|cx| {
+            cx.open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(Bounds::new(
+                        point(px(0.0), px(0.0)),
+                        size(px(320.0), px(240.0)),
+                    ))),
+                    ..WindowOptions::default()
+                },
+                move |window, cx| {
+                    let first = cx.new(|cx| {
+                        TextInput::new("reveal-first", "Reveal first", "", window, cx)
+                            .debug_selector("dialog-reveal-first")
+                            .return_behavior(TextInputReturnBehavior::Propagate)
+                    });
+                    let second = cx.new(|cx| {
+                        TextInput::new("reveal-second", "Reveal second", "", window, cx)
+                            .debug_selector("dialog-reveal-second")
+                            .return_behavior(TextInputReturnBehavior::Propagate)
+                    });
+                    let first_focus = first.read(cx).focus_handle();
+                    let second_focus = second.read(cx).focus_handle();
+                    let initial = if initial_is_second {
+                        second_focus.clone()
+                    } else {
+                        first_focus
+                    };
+                    cx.new(|cx| DialogRevealFixture {
+                        body: cx.new(|_| DialogRevealBody { first, second }),
+                        initial,
+                        invalid: second_focus,
+                        deny_with_invalid,
+                        presentation: None,
+                    })
+                },
+            )
+            .unwrap_or_else(|error| panic!("focus-reveal Dialog window failed: {error}"))
+        })
+    }
+
+    #[gpui::test]
+    fn dialog_initial_body_focus_reveals_a_text_input_below_the_visible_body(
+        cx: &mut TestAppContext,
+    ) {
+        let window = open_dialog_reveal_window(cx, true, false);
+        let root = window.root(cx).expect("focus-reveal root should exist");
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.update(|window, cx| {
+            window.activate_window();
+            root.update(cx, |root, cx| root.present(window, cx));
+        });
+        cx.run_until_parked();
+
+        let viewport = cx
+            .debug_bounds("modal-body-viewport")
+            .expect("Dialog body viewport should render");
+        let target = cx
+            .debug_bounds("dialog-reveal-second")
+            .expect("initial TextInput should render");
+        let focused = root.read_with(&cx, |root, _| root.initial.clone());
+
+        assert!(
+            cx.update(|window, _| focused.is_focused(window)) && bounds_contains(viewport, target),
+            "focused initial target {target:?} was outside body viewport {viewport:?}"
+        );
+    }
+
+    #[gpui::test]
+    fn dialog_denied_validation_reveals_a_clipped_invalid_text_input(cx: &mut TestAppContext) {
+        let window = open_dialog_reveal_window(cx, false, true);
+        let root = window.root(cx).expect("focus-reveal root should exist");
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.update(|window, cx| {
+            window.activate_window();
+            root.update(cx, |root, cx| root.present(window, cx));
+        });
+        cx.run_until_parked();
+
+        cx.simulate_keystrokes("shift-tab enter");
+        cx.run_until_parked();
+
+        let viewport = cx
+            .debug_bounds("modal-body-viewport")
+            .expect("Dialog body viewport should render");
+        let target = cx
+            .debug_bounds("dialog-reveal-second")
+            .expect("invalid TextInput should render");
+        let invalid = root.read_with(&cx, |root, _| root.invalid.clone());
+
+        assert!(
+            cx.update(|window, _| invalid.is_focused(window)) && bounds_contains(viewport, target),
+            "focused invalid target {target:?} was outside body viewport {viewport:?}"
+        );
+    }
+
+    struct DialogFooterRevealFixture {
+        presentation: Option<super::super::DialogCompletion>,
+    }
+
+    impl DialogFooterRevealFixture {
+        fn present(&mut self, window: &Window, cx: &mut Context<Self>) {
+            self.presentation = Some(
+                Dialog::new(
+                    ModalId::new("dialog-footer-focus-reveal"),
+                    "Dialog footer focus reveal",
+                    "Footer Focus Reveal",
+                    vec![
+                        ModalAction::new(
+                            "save",
+                            "Save all localized changes and continue safely",
+                            ModalActionRole::Affirmative,
+                            "footer-reveal-save",
+                        )
+                        .default_action(true),
+                        ModalAction::new(
+                            "review",
+                            "Review every entered setting before continuing",
+                            ModalActionRole::Auxiliary,
+                            "footer-reveal-review",
+                        ),
+                        ModalAction::new(
+                            "replace",
+                            "Replace the existing configuration after review",
+                            ModalActionRole::Auxiliary,
+                            "footer-reveal-replace",
+                        ),
+                        ModalAction::new(
+                            "cancel",
+                            "Cancel while retaining all entered information",
+                            ModalActionRole::Cancel,
+                            "footer-reveal-cancel",
+                        ),
+                    ],
+                    DialogInitialFocus::Action("save"),
+                )
+                .present(
+                    window,
+                    cx,
+                    |_, _, _| DialogCloseDecision::Deny {
+                        first_invalid: None,
+                    },
+                    |_, _| {},
+                )
+                .expect("footer focus-reveal Dialog should present"),
+            );
+        }
+    }
+
+    impl Render for DialogFooterRevealFixture {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            ModalLayer::new(div().size_full())
+        }
+    }
+
+    #[gpui::test]
+    fn vertical_dialog_footer_traversal_reveals_each_focused_action_in_both_directions(
+        cx: &mut TestAppContext,
+    ) {
+        install_test_catalogs(cx);
+        let window = cx.update(|cx| {
+            cx.open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(Bounds::new(
+                        point(px(0.0), px(0.0)),
+                        size(px(300.0), px(180.0)),
+                    ))),
+                    ..WindowOptions::default()
+                },
+                |_, cx| cx.new(|_| DialogFooterRevealFixture { presentation: None }),
+            )
+            .unwrap_or_else(|error| panic!("footer focus-reveal window failed: {error}"))
+        });
+        let root = window
+            .root(cx)
+            .expect("footer focus-reveal root should exist");
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.update(|window, cx| {
+            window.activate_window();
+            root.update(cx, |root, cx| root.present(window, cx));
+        });
+        cx.run_until_parked();
+
+        let steps = [
+            (
+                None,
+                "modal-action-footer-reveal-save",
+                "modal-action-footer-reveal-save-keyboard-focus",
+            ),
+            (
+                Some("tab"),
+                "modal-action-footer-reveal-review",
+                "modal-action-footer-reveal-review-keyboard-focus",
+            ),
+            (
+                Some("tab"),
+                "modal-action-footer-reveal-replace",
+                "modal-action-footer-reveal-replace-keyboard-focus",
+            ),
+            (
+                Some("tab"),
+                "modal-action-footer-reveal-cancel",
+                "modal-action-footer-reveal-cancel-keyboard-focus",
+            ),
+            (
+                Some("tab"),
+                "modal-action-footer-reveal-save",
+                "modal-action-footer-reveal-save-keyboard-focus",
+            ),
+            (
+                Some("shift-tab"),
+                "modal-action-footer-reveal-cancel",
+                "modal-action-footer-reveal-cancel-keyboard-focus",
+            ),
+            (
+                Some("shift-tab"),
+                "modal-action-footer-reveal-replace",
+                "modal-action-footer-reveal-replace-keyboard-focus",
+            ),
+            (
+                Some("shift-tab"),
+                "modal-action-footer-reveal-review",
+                "modal-action-footer-reveal-review-keyboard-focus",
+            ),
+            (
+                Some("shift-tab"),
+                "modal-action-footer-reveal-save",
+                "modal-action-footer-reveal-save-keyboard-focus",
+            ),
+        ];
+        for (key, action_selector, focus_selector) in steps {
+            if let Some(key) = key {
+                cx.simulate_keystrokes(key);
+                cx.run_until_parked();
+            }
+            let footer = cx
+                .debug_bounds("modal-footer-1")
+                .expect("Dialog footer should render");
+            let action = cx
+                .debug_bounds(action_selector)
+                .expect("focused footer action should render");
+            assert!(
+                cx.debug_bounds(focus_selector).is_some() && bounds_contains(footer, action),
+                "focused action {action_selector} at {action:?} was outside footer viewport {footer:?}"
+            );
+        }
     }
 
     struct DialogFocusBody {

@@ -1,10 +1,15 @@
-use std::{cell::RefCell, collections::HashMap, rc::Rc};
+use std::{
+    cell::{Cell, RefCell},
+    collections::HashMap,
+    rc::Rc,
+};
 
 use gpui::{
-    AnyElement, App, ElementId, Entity, EntityId, FocusHandle, Font, Global, HitboxBehavior,
-    InteractiveElement as _, IntoElement, KeyDownEvent, KeyUpEvent, MouseButton, MouseDownEvent,
-    MouseExitEvent, MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, RenderOnce, Rgba,
-    SharedString, Styled as _, TextRun, Window, canvas, div, prelude::FluentBuilder as _, px,
+    AnyElement, App, Bounds, ElementId, Entity, EntityId, FocusHandle, Font, Global,
+    HitboxBehavior, InteractiveElement as _, IntoElement, KeyDownEvent, KeyUpEvent, MouseButton,
+    MouseDownEvent, MouseExitEvent, MouseMoveEvent, MouseUpEvent, ParentElement, Pixels,
+    RenderOnce, Rgba, ScrollAnchor, ScrollHandle, SharedString, StatefulInteractiveElement as _,
+    Styled as _, TextRun, WeakFocusHandle, Window, canvas, div, prelude::FluentBuilder as _, px,
 };
 
 use crate::tooltip::{Tooltip, TooltipTargetVisibility};
@@ -471,8 +476,118 @@ impl ModalPressOwner {
 }
 
 #[derive(Clone)]
+pub(crate) struct ModalFocusAnchorRegistry {
+    scroll_handle: ScrollHandle,
+    frame: Rc<Cell<u64>>,
+    registrations: Rc<RefCell<Vec<ModalFocusAnchorRegistration>>>,
+}
+
+struct ModalFocusAnchorRegistration {
+    focus: WeakFocusHandle,
+    control: ModalFocusAnchor,
+    frame: u64,
+}
+
+#[derive(Clone)]
+pub(crate) struct ModalFocusAnchor {
+    anchor: ScrollAnchor,
+    bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
+}
+
+impl ModalFocusAnchor {
+    pub(crate) fn scroll_anchor(&self) -> ScrollAnchor {
+        self.anchor.clone()
+    }
+
+    pub(crate) fn bounds_tracker(&self, inset: Pixels) -> AnyElement {
+        let bounds = self.bounds.clone();
+        canvas(
+            move |control_bounds, _, _| bounds.set(Some(control_bounds.dilate(inset))),
+            |_, _, _, _| {},
+        )
+        .absolute()
+        .inset_0()
+        .into_any_element()
+    }
+}
+
+impl ModalFocusAnchorRegistry {
+    pub(crate) fn new(scroll_handle: ScrollHandle) -> Self {
+        Self {
+            scroll_handle,
+            frame: Rc::new(Cell::new(0)),
+            registrations: Rc::new(RefCell::new(Vec::new())),
+        }
+    }
+
+    pub(crate) fn reset(&self) {
+        let previous = self.frame.get();
+        self.frame.set(previous.wrapping_add(1));
+        self.registrations.borrow_mut().retain(|registration| {
+            registration.frame == previous && registration.focus.upgrade().is_some()
+        });
+    }
+
+    pub(crate) fn register(&self, focus: &FocusHandle) -> ModalFocusAnchor {
+        let frame = self.frame.get();
+        let mut registrations = self.registrations.borrow_mut();
+        registrations.retain(|registration| registration.focus.upgrade().is_some());
+        if let Some(registration) = registrations
+            .iter_mut()
+            .find(|registration| registration.focus.eq(focus))
+        {
+            registration.frame = frame;
+            return registration.control.clone();
+        }
+        let control = ModalFocusAnchor {
+            anchor: ScrollAnchor::for_handle(self.scroll_handle.clone()),
+            bounds: Rc::new(Cell::new(None)),
+        };
+        registrations.push(ModalFocusAnchorRegistration {
+            focus: focus.downgrade(),
+            control: control.clone(),
+            frame,
+        });
+        control
+    }
+
+    pub(crate) fn reveal(&self, focus: &FocusHandle, window: &mut Window, cx: &mut App) -> bool {
+        let frame = self.frame.get();
+        let control = {
+            let mut registrations = self.registrations.borrow_mut();
+            registrations.retain(|registration| registration.focus.upgrade().is_some());
+            registrations
+                .iter()
+                .find(|registration| registration.frame == frame && registration.focus.eq(focus))
+                .map(|registration| registration.control.clone())
+        };
+        let Some(control) = control else {
+            return false;
+        };
+        if let Some(bounds) = control.bounds.get() {
+            let viewport = self.scroll_handle.bounds();
+            let previous_offset = self.scroll_handle.offset();
+            let mut offset = previous_offset;
+            if bounds.top() < viewport.top() {
+                offset.y += viewport.top() - bounds.top();
+            } else if bounds.bottom() > viewport.bottom() {
+                offset.y += viewport.bottom() - bounds.bottom();
+            }
+            if offset != previous_offset {
+                self.scroll_handle.set_offset(offset);
+                window.refresh();
+            }
+        } else {
+            control.anchor.scroll_to(window, cx);
+        }
+        true
+    }
+}
+
+#[derive(Clone)]
 pub(crate) struct ModalControlScope {
     press_owner: ModalPressOwner,
+    focus_anchors: Option<ModalFocusAnchorRegistry>,
 }
 
 thread_local! {
@@ -495,7 +610,15 @@ impl Drop for ModalControlScopeGuard {
 
 impl ModalControlScope {
     pub(crate) fn new(press_owner: ModalPressOwner) -> Self {
-        Self { press_owner }
+        Self {
+            press_owner,
+            focus_anchors: None,
+        }
+    }
+
+    pub(crate) fn with_focus_anchors(mut self, focus_anchors: ModalFocusAnchorRegistry) -> Self {
+        self.focus_anchors = Some(focus_anchors);
+        self
     }
 
     pub(crate) fn enter<R>(&self, render: impl FnOnce() -> R) -> R {
@@ -511,6 +634,16 @@ impl ModalControlScope {
                 .borrow()
                 .as_ref()
                 .map(|scope| scope.press_owner.clone())
+        })
+    }
+
+    pub(crate) fn register_current_focus_anchor(focus: &FocusHandle) -> Option<ModalFocusAnchor> {
+        CURRENT_MODAL_CONTROL_SCOPE.with(|current| {
+            current
+                .borrow()
+                .as_ref()
+                .and_then(|scope| scope.focus_anchors.as_ref())
+                .map(|anchors| anchors.register(focus))
         })
     }
 }
@@ -862,6 +995,8 @@ impl ButtonCore {
                 state.interaction.is_hovered(),
             )
         };
+        let focus_anchor = ModalControlScope::register_current_focus_anchor(&focus_handle);
+        let scroll_anchor = focus_anchor.as_ref().map(ModalFocusAnchor::scroll_anchor);
         let focused = focus_handle.is_focused(window);
         let paint = resolve_paint(style, enabled, pressed, hovered);
         let border = if focused {
@@ -988,6 +1123,7 @@ impl ButtonCore {
             .cursor_default()
             .block_mouse_except_scroll()
             .track_focus(&focus_handle)
+            .anchor_scroll(scroll_anchor)
             .on_key_down(move |event: &KeyDownEvent, window, cx| {
                 if !is_unmodified_space_down(event) {
                     return;
@@ -1029,7 +1165,10 @@ impl ButtonCore {
                         .border_color(style.focus_border),
                 )
             })
-            .child(pointer_tracker);
+            .child(pointer_tracker)
+            .when_some(focus_anchor, |button, anchor| {
+                button.child(anchor.bounds_tracker(style.border_width))
+            });
 
         if let Some(tooltip) = tooltip {
             tooltip
