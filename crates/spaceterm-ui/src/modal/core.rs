@@ -1750,13 +1750,21 @@ fn opened_effects(
     owner: WeakEntity<ModalWindowOwner>,
     window_id: WindowId,
 ) -> Vec<ResultEffect> {
-    let mut effects = active
-        .lifecycle_effect(ModalLifecycleEvent::Opened(active.id))
-        .into_iter()
-        .collect::<Vec<_>>();
+    let presentation = active.id;
+    let mut effects: Vec<ResultEffect> = Vec::new();
+    if let Some(handler) = active.request.lifecycle.clone() {
+        let owner = owner.clone();
+        effects.push(Box::new(move |cx: &mut App| {
+            if startup_effect_is_live(&owner, window_id, presentation, cx) {
+                handler(&ModalLifecycleEvent::Opened(presentation), cx);
+            }
+        }));
+    }
     if let Some(deadline) = active.request.programmatic_deadline {
-        let presentation = active.id;
         effects.push(Box::new(move |cx| {
+            if !startup_effect_is_live(&owner, window_id, presentation, cx) {
+                return;
+            }
             let task = cx.spawn(async move |cx| {
                 cx.background_executor().timer(deadline).await;
                 let _ = cx
@@ -1766,6 +1774,25 @@ fn opened_effects(
         }));
     }
     effects
+}
+
+fn startup_effect_is_live(
+    owner: &WeakEntity<ModalWindowOwner>,
+    window_id: WindowId,
+    presentation: ModalPresentationId,
+    cx: &App,
+) -> bool {
+    let Some(owner) = owner.upgrade() else {
+        return false;
+    };
+    owner.read_with(cx, |state, _| {
+        state.window_id == window_id
+            && state.window_available
+            && state
+                .active
+                .as_ref()
+                .is_some_and(|active| active.id == presentation)
+    })
 }
 
 fn completion_effect(
@@ -4300,6 +4327,106 @@ mod tests {
         assert_eq!(
             trace.borrow().as_slice(),
             ["successor:result", "successor:closed", "following:opened"]
+        );
+    }
+
+    #[gpui::test]
+    fn nested_replacement_skips_superseded_successor_startup_effects(cx: &mut TestAppContext) {
+        let owner = cx.new(|cx| ModalWindowOwner::new(WindowId::from(1), cx));
+        let weak = owner.downgrade();
+        let trace = Rc::new(RefCell::new(Vec::new()));
+        let replacement_id = Rc::new(Cell::new(None));
+        let callback_replacement_id = replacement_id.clone();
+        let callback_owner = owner.downgrade();
+        let callback_trace = trace.clone();
+        let mut predecessor = traced_request("a", AnyWeakEntity::new_invalid(), trace.clone());
+        predecessor.result_sink = Some(Box::new(move |outcome, cx| {
+            assert!(matches!(
+                outcome,
+                InternalOutcome::Dismissed(ModalCloseReason::Replaced)
+            ));
+            callback_trace.borrow_mut().push("a:result".into());
+            let owner = callback_owner
+                .upgrade()
+                .expect("modal owner should survive the terminal callback");
+            let weak = owner.downgrade();
+            let replacement =
+                traced_request("c", AnyWeakEntity::new_invalid(), callback_trace.clone());
+            let (presentation, effects) = owner
+                .update(cx, |state, _| state.replace_active(replacement, weak))
+                .expect("terminal callback should replace b with c");
+            callback_replacement_id.set(Some(presentation));
+            settle_owner(&owner, effects, cx);
+        }));
+        let (predecessor_id, startup) = owner
+            .update(cx, |state, _| state.submit(predecessor, weak.clone()))
+            .expect("a should open");
+        cx.update(|cx| defer_owner_effects(&owner, startup, cx));
+        cx.run_until_parked();
+
+        let mut superseded = programmatic_progress_request(AnyWeakEntity::new_invalid());
+        let superseded_completion = superseded.completion.clone();
+        let result_trace = trace.clone();
+        superseded.result_sink = Some(Box::new(move |outcome, _| {
+            assert!(matches!(
+                outcome,
+                InternalOutcome::Progress(ProgressDialogOutcome::Replaced)
+            ));
+            result_trace.borrow_mut().push("b:result".into());
+        }));
+        let lifecycle_trace = trace.clone();
+        superseded.lifecycle = Some(Rc::new(move |event, _| {
+            let transition = match event {
+                ModalLifecycleEvent::Opened(_) => "opened",
+                ModalLifecycleEvent::Closing(_) => "closing",
+                ModalLifecycleEvent::Closed(_, ModalCloseReason::Replaced) => "closed",
+                ModalLifecycleEvent::ActionRequested(_)
+                | ModalLifecycleEvent::Pending(_)
+                | ModalLifecycleEvent::Closed(_, _) => return,
+            };
+            lifecycle_trace.borrow_mut().push(format!("b:{transition}"));
+        }));
+        let (superseded_id, effects) = owner
+            .update(cx, |state, _| {
+                state.replace_active(superseded, weak.clone())
+            })
+            .expect("a should be replaceable with b");
+        cx.update(|cx| settle_owner(&owner, effects, cx));
+        cx.run_until_parked();
+
+        cx.executor().advance_clock(Duration::from_secs(30));
+        cx.run_until_parked();
+
+        let replacement_id = replacement_id
+            .get()
+            .expect("a terminal callback should install c");
+        let active = owner.read_with(cx, |state, _| state.active.as_ref().map(|active| active.id));
+        assert_eq!(
+            (
+                trace.borrow().clone(),
+                predecessor_id.value(),
+                superseded_id.value(),
+                replacement_id.value(),
+                superseded_completion.status(),
+                active,
+            ),
+            (
+                vec![
+                    "a:opened".to_owned(),
+                    "a:closing".to_owned(),
+                    "a:result".to_owned(),
+                    "b:closing".to_owned(),
+                    "b:result".to_owned(),
+                    "b:closed".to_owned(),
+                    "c:opened".to_owned(),
+                    "a:closed".to_owned(),
+                ],
+                1,
+                2,
+                3,
+                CompletionStatus::Replaced,
+                Some(replacement_id),
+            )
         );
     }
 
