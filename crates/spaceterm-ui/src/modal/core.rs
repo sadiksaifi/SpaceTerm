@@ -7,8 +7,8 @@ use std::{
 
 use gpui::{
     AnyView, AnyWeakEntity, App, AppContext, BorrowAppContext, Context, Entity, EntityId,
-    FocusHandle, Global, IntoElement, Render, SharedString, WeakEntity, WeakFocusHandle, Window,
-    WindowId,
+    FocusHandle, Global, IntoElement, Render, SharedString, Subscription, WeakEntity,
+    WeakFocusHandle, Window, WindowId,
 };
 
 use crate::button::ModalPressOwner;
@@ -172,6 +172,7 @@ pub(super) struct PreparedModalRequest {
     dialog_size: DialogSize,
     suppression_flag: Option<Rc<Cell<bool>>>,
     completion: CompletionFlag,
+    _caller_release: Option<Subscription>,
 }
 
 impl PreparedModalRequest {
@@ -200,6 +201,7 @@ impl PreparedModalRequest {
             dialog_size: DialogSize::Regular,
             suppression_flag: None,
             completion: CompletionFlag::new(),
+            _caller_release: None,
         }
     }
 
@@ -817,6 +819,8 @@ pub(super) struct ModalWindowOwner {
     palette_suspension: Option<crate::command_palette::CommandPaletteSuspension>,
     transients_active: bool,
     press_owner: ModalPressOwner,
+    #[cfg(test)]
+    caller_release_callbacks: usize,
 }
 
 impl ModalWindowOwner {
@@ -858,6 +862,8 @@ impl ModalWindowOwner {
             palette_suspension: None,
             transients_active: false,
             press_owner: ModalPressOwner::default(),
+            #[cfg(test)]
+            caller_release_callbacks: 0,
         }
     }
 
@@ -877,6 +883,7 @@ impl ModalWindowOwner {
             palette_suspension: None,
             transients_active: false,
             press_owner: ModalPressOwner::default(),
+            caller_release_callbacks: 0,
         }
     }
 
@@ -1913,7 +1920,7 @@ pub(super) fn retire_window_owner(owner: &Entity<ModalWindowOwner>, cx: &mut App
 }
 
 pub(super) fn present<T: 'static>(
-    request: PreparedModalRequest,
+    mut request: PreparedModalRequest,
     window: &Window,
     cx: &mut Context<T>,
 ) -> Result<ModalPresentationHandle, ModalPresentationError> {
@@ -1926,6 +1933,10 @@ pub(super) fn present<T: 'static>(
     let owner_weak = owner.downgrade();
     let window_id = window.window_handle().window_id();
     let completion = request.completion.clone();
+    let release_owner = owner_weak.clone();
+    request._caller_release = Some(cx.on_release(move |_, cx| {
+        caller_released(&release_owner, window_id, caller_id, cx);
+    }));
     let first_visible_request = owner.read_with(cx, |state, _| {
         state.active.is_none() && state.settlement == SettlementState::Idle
     });
@@ -1953,8 +1964,6 @@ pub(super) fn present<T: 'static>(
         cx.notify();
         result
     })?;
-    cx.on_release(move |_, cx| caller_released(&owner_weak, window_id, caller_id, cx))
-        .detach();
     defer_owner_effects(&owner, effects, cx);
     let window_handle = window.window_handle();
     let owner_until_refresh = owner.clone();
@@ -1971,7 +1980,7 @@ pub(super) fn present<T: 'static>(
 }
 
 pub(super) fn replace_active<T: 'static>(
-    request: PreparedModalRequest,
+    mut request: PreparedModalRequest,
     window: &Window,
     cx: &mut Context<T>,
 ) -> Result<ModalPresentationHandle, ModalPresentationError> {
@@ -1997,13 +2006,15 @@ pub(super) fn replace_active<T: 'static>(
     disarm_modal_controls(&owner, cx);
     dismiss_owned_menu_before_any_active_close(&owner, cx);
     let owner_weak = owner.downgrade();
+    let release_owner = owner_weak.clone();
+    request._caller_release = Some(cx.on_release(move |_, cx| {
+        caller_released(&release_owner, window_id, caller_id, cx);
+    }));
     let (presentation, effects) = owner.update(cx, |state, cx| {
         let result = state.replace_active(request, owner_weak.clone());
         cx.notify();
         result
     })?;
-    cx.on_release(move |_, cx| caller_released(&owner_weak, window_id, caller_id, cx))
-        .detach();
     settle_owner(&owner, effects, cx);
     let window_handle = window.window_handle();
     let owner_until_refresh = owner.clone();
@@ -2031,6 +2042,10 @@ fn caller_released(
     if owner.read(cx).window_id != window_id {
         return;
     }
+    #[cfg(test)]
+    owner.update(cx, |state, _| {
+        state.caller_release_callbacks += 1;
+    });
     let closes_active = owner.read_with(cx, |state, _| {
         state
             .active
@@ -3000,7 +3015,7 @@ pub(super) fn active_progress_presentation_facts_for_test(
 mod tests {
     use std::{cell::RefCell, rc::Rc};
 
-    use gpui::{AnyWeakEntity, TestAppContext};
+    use gpui::{AnyWeakEntity, TestAppContext, div};
 
     use super::*;
     use crate::modal::DeterminateProgress;
@@ -3135,6 +3150,113 @@ mod tests {
             Box::new(|_, _| {}),
         )
         .with_dialog_action(Rc::new(|_, _, _, _, _| DialogCloseDecision::Pending))
+    }
+
+    struct ReleaseListenerRoot;
+
+    impl Render for ReleaseListenerRoot {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div()
+        }
+    }
+
+    struct ReleaseListenerCaller;
+
+    #[gpui::test]
+    fn repeated_settled_presentations_do_not_retain_caller_release_callbacks(
+        cx: &mut TestAppContext,
+    ) {
+        cx.set_global(ModalDesktopPolicy::mac_os());
+        let (_, cx) = cx.add_window_view(|_, _| ReleaseListenerRoot);
+        let caller = cx.update(|_, cx| cx.new(|_| ReleaseListenerCaller));
+        let outcomes = Rc::new(RefCell::new(Vec::new()));
+        let mut retained_owner = None;
+
+        for _ in 0..3 {
+            let presented = cx.update(|window, cx| {
+                caller.update(cx, |_, cx| {
+                    present(
+                        test_request("presented", cx.weak_entity().into(), outcomes.clone()),
+                        window,
+                        cx,
+                    )
+                    .expect("request should present")
+                })
+            });
+            retained_owner.get_or_insert_with(|| presented.owner.clone());
+            cx.run_until_parked();
+
+            let replacement = cx.update(|window, cx| {
+                caller.update(cx, |_, cx| {
+                    replace_active(
+                        test_request("replacement", cx.weak_entity().into(), outcomes.clone()),
+                        window,
+                        cx,
+                    )
+                    .expect("active request should be replaceable")
+                })
+            });
+            cx.run_until_parked();
+            cx.update(|window, cx| {
+                caller.update(cx, |_, cx| {
+                    replacement
+                        .dismiss(window, cx)
+                        .expect("replacement should dismiss")
+                })
+            });
+            cx.run_until_parked();
+        }
+
+        let active = cx.update(|window, cx| {
+            caller.update(cx, |_, cx| {
+                present(
+                    test_request("live-active", cx.weak_entity().into(), outcomes.clone()),
+                    window,
+                    cx,
+                )
+                .expect("live request should present")
+            })
+        });
+        let queued = cx.update(|window, cx| {
+            caller.update(cx, |_, cx| {
+                present(
+                    test_request("live-queued", cx.weak_entity().into(), outcomes.clone()),
+                    window,
+                    cx,
+                )
+                .expect("second live request should queue")
+            })
+        });
+        cx.run_until_parked();
+
+        drop(caller);
+        cx.update(|_, _| {});
+        cx.run_until_parked();
+
+        let owner = retained_owner.expect("modal owner should be retained for inspection");
+        assert_eq!(
+            (
+                owner.read_with(cx, |state, _| state.caller_release_callbacks),
+                outcomes.borrow().clone(),
+                active.completion.status(),
+                queued.completion.status(),
+            ),
+            (
+                2,
+                vec![
+                    ModalCloseReason::Replaced,
+                    ModalCloseReason::Programmatic,
+                    ModalCloseReason::Replaced,
+                    ModalCloseReason::Programmatic,
+                    ModalCloseReason::Replaced,
+                    ModalCloseReason::Programmatic,
+                    ModalCloseReason::OwnerRemoved,
+                    ModalCloseReason::OwnerRemoved,
+                ],
+                CompletionStatus::OwnerRemoved,
+                CompletionStatus::OwnerRemoved,
+            )
+        );
     }
 
     #[test]
