@@ -3,6 +3,7 @@ use std::fmt;
 use std::io;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use thiserror::Error;
 
@@ -198,6 +199,13 @@ impl SshCommandContext {
         self.spec(arguments)
     }
 
+    pub(crate) fn prepare_pane_channel(
+        &self,
+        command: ValidatedRemoteShellCommand,
+    ) -> PreparedSshPaneChannelCommand {
+        PreparedSshPaneChannelCommand::new(self.pane_channel(command))
+    }
+
     fn control_operation(&self, operation: &str) -> SshCommandSpec {
         let mut arguments = self.child_arguments();
         arguments.extend([OsString::from("-O"), OsString::from(operation)]);
@@ -258,6 +266,7 @@ fn push_option(arguments: &mut Vec<OsString>, option: OsString) {
     arguments.push(option);
 }
 
+#[derive(Debug)]
 pub(crate) struct SshCommandSpec {
     executable: PathBuf,
     arguments: Vec<OsString>,
@@ -271,6 +280,49 @@ impl SshCommandSpec {
     pub(crate) fn arguments(&self) -> &[OsString] {
         &self.arguments
     }
+
+    pub(crate) fn into_parts(self) -> (PathBuf, Vec<OsString>) {
+        (self.executable, self.arguments)
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct PreparedSshPaneChannelCommand {
+    command: Arc<Mutex<Option<SshCommandSpec>>>,
+}
+
+impl PreparedSshPaneChannelCommand {
+    fn new(command: SshCommandSpec) -> Self {
+        Self {
+            command: Arc::new(Mutex::new(Some(command))),
+        }
+    }
+
+    pub(crate) fn take(&self) -> Result<SshCommandSpec, PreparedSshPaneChannelError> {
+        let mut command = self
+            .command
+            .lock()
+            .map_err(|_| PreparedSshPaneChannelError::Unavailable)?;
+        command
+            .take()
+            .ok_or(PreparedSshPaneChannelError::AlreadyConsumed)
+    }
+}
+
+impl PartialEq for PreparedSshPaneChannelCommand {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.command, &other.command)
+    }
+}
+
+impl Eq for PreparedSshPaneChannelCommand {}
+
+#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
+pub(crate) enum PreparedSshPaneChannelError {
+    #[error("the prepared SSH Pane channel command has already been consumed")]
+    AlreadyConsumed,
+    #[error("the prepared SSH Pane channel command is unavailable")]
+    Unavailable,
 }
 
 #[derive(Clone, Debug, Eq, Error, PartialEq)]
@@ -618,6 +670,26 @@ mod tests {
         assert_eq!(
             ValidatedRemoteShellCommand::new("exec shell\nsecond command".to_owned()).err(),
             Some(RemoteShellCommandError::Control)
+        );
+    }
+
+    #[test]
+    fn prepared_pane_command_should_preserve_exact_argv_and_be_single_use() {
+        let prepared = context().prepare_pane_channel(
+            ValidatedRemoteShellCommand::new("exec /bin/zsh -l".to_owned()).unwrap(),
+        );
+        let duplicate_owner = prepared.clone();
+
+        let spec = prepared.take().unwrap();
+
+        assert_eq!(spec.executable(), OsStr::new("/usr/bin/ssh"));
+        assert_eq!(
+            arguments(&spec).last().map(String::as_str),
+            Some("exec /bin/zsh -l")
+        );
+        assert_eq!(
+            duplicate_owner.take().err(),
+            Some(PreparedSshPaneChannelError::AlreadyConsumed)
         );
     }
 

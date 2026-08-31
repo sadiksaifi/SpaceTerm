@@ -34,6 +34,14 @@ impl RecordedSessionStart {
     pub(crate) const fn local_launch_plan(&self) -> Option<&super::LocalTerminalLaunchPlan> {
         match &self.launch_plan {
             TerminalLaunchPlan::Local(plan) => Some(plan),
+            TerminalLaunchPlan::Remote(_) => None,
+        }
+    }
+
+    pub(crate) const fn remote_launch_plan(&self) -> Option<&super::RemoteTerminalLaunchPlan> {
+        match &self.launch_plan {
+            TerminalLaunchPlan::Local(_) => None,
+            TerminalLaunchPlan::Remote(plan) => Some(plan),
         }
     }
 
@@ -335,5 +343,58 @@ impl TerminalSessionHandle for TestTerminalSessionHandle {
 
     fn inject_acceptance_failure(&self, failure: AcceptanceSessionFailure) {
         self.record(RecordedSessionCommand::InjectAcceptanceFailure(failure));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::{RemoteWorkspaceDirectory, SshDestination};
+    use crate::ssh::command::{SshCommandContext, ValidatedRemoteShellCommand};
+    use crate::terminal::geometry::{BackingScale, CellGridSize, LogicalCellSize};
+    use crate::terminal::{RemoteTerminalLaunchPlan, TerminalLaunchPlan};
+
+    #[test]
+    fn test_factory_should_record_typed_remote_launch_context() {
+        let records = TestTerminalSessionRecords::default();
+        let factory = TestTerminalSessionFactory::new(records.clone());
+        let destination = SshDestination::new("user@remote".to_owned()).unwrap();
+        let directory = RemoteWorkspaceDirectory::new("~/project".to_owned()).unwrap();
+        let prepared = SshCommandContext::new(
+            PathBuf::from("/private/config/spaceterm/ssh_config"),
+            destination.clone(),
+            PathBuf::from("/private/runtime/spaceterm/control.sock"),
+        )
+        .unwrap()
+        .prepare_pane_channel(
+            ValidatedRemoteShellCommand::new("exec /bin/zsh -l".to_owned()).unwrap(),
+        );
+        let geometry = TerminalGeometry::from_grid(
+            CellGridSize::new(80, 24),
+            LogicalCellSize::new(8.0, 20.0),
+            BackingScale::ONE,
+        );
+
+        let _started = factory
+            .start(
+                geometry,
+                TerminalLaunchPlan::Remote(RemoteTerminalLaunchPlan::new(
+                    test_workspace_directory(PathBuf::from("/Users/local")),
+                    destination.clone(),
+                    directory.clone(),
+                    "project on remote".to_owned(),
+                    prepared,
+                )),
+            )
+            .unwrap();
+
+        let starts = records.starts();
+        let plan = starts[0]
+            .remote_launch_plan()
+            .expect("the test factory must preserve the remote plan");
+        assert_eq!(plan.destination(), &destination);
+        assert_eq!(plan.remote_directory(), &directory);
+        assert_eq!(plan.local_home().path(), PathBuf::from("/Users/local"));
+        assert!(starts[0].local_working_directory().is_none());
     }
 }

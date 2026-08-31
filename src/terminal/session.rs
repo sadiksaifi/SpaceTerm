@@ -15,8 +15,8 @@ use portable_pty::PtySize;
 use thiserror::Error;
 
 use crate::platform::macos_pty::{
-    PtyError, PtyTerminator, ShellExit, ShutdownDisposition, SpawnedPty, spawn_user_shell,
-    user_shell,
+    PtyError, PtyTerminator, ShellExit, ShutdownDisposition, SpawnedPty, spawn_remote_pane_channel,
+    spawn_user_shell, user_shell,
 };
 use crate::platform::shell_integration::resource_root;
 #[cfg(all(target_os = "macos", not(test)))]
@@ -33,6 +33,7 @@ use crate::terminal::identity;
 #[cfg(test)]
 use crate::terminal::key::OptionAsAltPolicy;
 use crate::terminal::key::{InputModifiers, KeyInput, PhysicalKey};
+use crate::terminal::metadata::{RemoteTerminalMetadataContext, TerminalMetadataContext};
 #[cfg(test)]
 use crate::terminal::osc52::Osc52ClipboardError;
 use crate::terminal::osc52::{
@@ -256,6 +257,8 @@ pub(crate) enum SessionError {
     Pty(#[from] PtyError),
     #[error("failed to start the terminal worker thread: {0}")]
     SpawnWorker(#[source] std::io::Error),
+    #[error(transparent)]
+    PreparedSshPaneChannel(#[from] crate::ssh::command::PreparedSshPaneChannelError),
     #[cfg(test)]
     #[error("terminal worker stopped before initialization completed")]
     StartupChannelClosed,
@@ -352,6 +355,51 @@ pub(crate) struct LocalTerminalLaunchPlan {
     working_directory: crate::domain::ValidatedWorkspaceDirectory,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct RemoteTerminalLaunchPlan {
+    local_home: crate::domain::ValidatedWorkspaceDirectory,
+    metadata_context: RemoteTerminalMetadataContext,
+    fallback_title: String,
+    pane_channel: crate::ssh::command::PreparedSshPaneChannelCommand,
+}
+
+impl RemoteTerminalLaunchPlan {
+    pub(crate) const fn new(
+        local_home: crate::domain::ValidatedWorkspaceDirectory,
+        destination: crate::domain::SshDestination,
+        remote_directory: crate::domain::RemoteWorkspaceDirectory,
+        fallback_title: String,
+        pane_channel: crate::ssh::command::PreparedSshPaneChannelCommand,
+    ) -> Self {
+        Self {
+            local_home,
+            metadata_context: RemoteTerminalMetadataContext::new(destination, remote_directory),
+            fallback_title,
+            pane_channel,
+        }
+    }
+
+    pub(crate) const fn local_home(&self) -> &crate::domain::ValidatedWorkspaceDirectory {
+        &self.local_home
+    }
+
+    pub(crate) const fn destination(&self) -> &crate::domain::SshDestination {
+        self.metadata_context.destination()
+    }
+
+    pub(crate) const fn remote_directory(&self) -> &crate::domain::RemoteWorkspaceDirectory {
+        self.metadata_context.initial_directory()
+    }
+
+    pub(crate) fn fallback_title(&self) -> &str {
+        &self.fallback_title
+    }
+
+    pub(crate) const fn metadata_context(&self) -> &RemoteTerminalMetadataContext {
+        &self.metadata_context
+    }
+}
+
 impl LocalTerminalLaunchPlan {
     pub(crate) const fn new(working_directory: crate::domain::ValidatedWorkspaceDirectory) -> Self {
         Self { working_directory }
@@ -365,6 +413,7 @@ impl LocalTerminalLaunchPlan {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum TerminalLaunchPlan {
     Local(LocalTerminalLaunchPlan),
+    Remote(RemoteTerminalLaunchPlan),
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -376,11 +425,24 @@ impl TerminalSessionFactory for NativeTerminalSessionFactory {
         geometry: TerminalGeometry,
         launch_plan: TerminalLaunchPlan,
     ) -> Result<StartedTerminalSession, SessionError> {
-        let TerminalLaunchPlan::Local(local) = launch_plan;
         let observation =
             crate::platform::acceptance_observation::take_runtime_session_observation();
-        let (session, events, accessibility) =
-            TerminalSession::start(geometry, local.working_directory().path(), observation)?;
+        let (session, events, accessibility) = match launch_plan {
+            TerminalLaunchPlan::Local(local) => {
+                TerminalSession::start(geometry, local.working_directory().path(), observation)?
+            }
+            TerminalLaunchPlan::Remote(remote) => {
+                let command = remote.pane_channel.take()?;
+                TerminalSession::start_remote(
+                    geometry,
+                    remote.local_home.path(),
+                    remote.metadata_context,
+                    remote.fallback_title,
+                    command,
+                    observation,
+                )?
+            }
+        };
         Ok(StartedTerminalSession {
             handle: Box::new(session),
             events,
@@ -618,15 +680,63 @@ impl TerminalSession {
         )
     }
 
+    fn start_remote(
+        geometry: TerminalGeometry,
+        local_home: &Path,
+        metadata_context: RemoteTerminalMetadataContext,
+        fallback_title: String,
+        command: crate::ssh::command::SshCommandSpec,
+        runtime_observation: Option<RuntimeObservation>,
+    ) -> Result<StartedSession, SessionError> {
+        Self::start_deferred_with_context(
+            geometry,
+            local_home,
+            TerminalMetadataContext::Remote(metadata_context),
+            fallback_title,
+            identity::TERM_FALLBACK,
+            runtime_observation,
+            move |size, local_home| {
+                let (pty, terminator) = spawn_remote_pane_channel(size, local_home, command)?;
+                Ok(StartedSessionPty {
+                    pty: Box::new(pty),
+                    terminator: Box::new(terminator),
+                })
+            },
+        )
+    }
+
     fn start_deferred_with(
         geometry: TerminalGeometry,
         working_directory: &Path,
         runtime_observation: Option<RuntimeObservation>,
         spawn_pty: impl FnOnce(PtySize, &Path) -> Result<StartedSessionPty, PtyError> + Send + 'static,
     ) -> Result<StartedSession, SessionError> {
+        let initial_directory = working_directory.to_string_lossy();
+        let metadata_context = TerminalMetadataContext::local(
+            &initial_directory,
+            crate::terminal::metadata::local_hostname().as_deref(),
+        );
+        Self::start_deferred_with_context(
+            geometry,
+            working_directory,
+            metadata_context,
+            shell_fallback_title(),
+            identity::launch_identity(&resource_root()).term,
+            runtime_observation,
+            spawn_pty,
+        )
+    }
+
+    fn start_deferred_with_context(
+        geometry: TerminalGeometry,
+        working_directory: &Path,
+        metadata_context: TerminalMetadataContext,
+        fallback_title: String,
+        terminal_name: &'static str,
+        runtime_observation: Option<RuntimeObservation>,
+        spawn_pty: impl FnOnce(PtySize, &Path) -> Result<StartedSessionPty, PtyError> + Send + 'static,
+    ) -> Result<StartedSession, SessionError> {
         let working_directory = PathBuf::from(working_directory);
-        let fallback_title = shell_fallback_title();
-        let terminal_name = identity::launch_identity(&resource_root()).term;
         let (command_tx, command_rx) = mpsc::channel();
         let reader_transport = ReaderTransport::new(command_tx.clone());
         let resizes = ResizeMailbox::default();
@@ -665,7 +775,7 @@ impl TerminalSession {
                     pty,
                     TerminalWorkerContext {
                         initial_geometry: geometry,
-                        initial_directory: working_directory,
+                        metadata_context,
                         fallback_title,
                         terminal_name,
                     },
@@ -706,6 +816,10 @@ impl TerminalSession {
         spawn_pty: impl FnOnce(PtySize, &Path) -> Result<StartedSessionPty, PtyError>,
     ) -> Result<StartedSession, SessionError> {
         let worker_directory = working_directory.to_owned();
+        let metadata_context = TerminalMetadataContext::local(
+            &worker_directory.to_string_lossy(),
+            crate::terminal::metadata::local_hostname().as_deref(),
+        );
         let terminal_name = identity::launch_identity(&resource_root()).term;
         let StartedSessionPty { pty, terminator } =
             spawn_pty(pty_size(geometry), working_directory)?;
@@ -728,7 +842,7 @@ impl TerminalSession {
                     pty,
                     TerminalWorkerContext {
                         initial_geometry: geometry,
-                        initial_directory: worker_directory,
+                        metadata_context,
                         fallback_title: "Terminal".to_owned(),
                         terminal_name,
                     },
@@ -1130,7 +1244,7 @@ struct TerminalWorker {
 
 struct TerminalWorkerContext {
     initial_geometry: TerminalGeometry,
-    initial_directory: PathBuf,
+    metadata_context: TerminalMetadataContext,
     fallback_title: String,
     terminal_name: &'static str,
 }
@@ -1494,7 +1608,7 @@ impl TerminalWorker {
     ) {
         let TerminalWorkerContext {
             initial_geometry,
-            initial_directory,
+            metadata_context,
             fallback_title,
             terminal_name,
         } = context;
@@ -1531,12 +1645,10 @@ impl TerminalWorker {
             }
         };
 
-        let local_hostname = crate::terminal::metadata::local_hostname();
-        let emulator = match TerminalEmulator::new_with_metadata(
+        let emulator = match TerminalEmulator::new_with_metadata_context(
             initial_geometry,
-            &initial_directory.to_string_lossy(),
+            metadata_context,
             &fallback_title,
-            local_hostname.as_deref(),
             terminal_name,
             Instant::now(),
         ) {
@@ -2557,6 +2669,52 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::*;
+    use crate::domain::{RemoteWorkspaceDirectory, SshDestination, WorkspaceDirectoryIdentity};
+    use crate::ssh::command::{SshCommandContext, ValidatedRemoteShellCommand};
+
+    #[test]
+    fn remote_launch_plan_should_preserve_typed_context_and_reject_reused_channels() {
+        let local_home = crate::domain::ValidatedWorkspaceDirectory::new(
+            PathBuf::from("/Users/local"),
+            WorkspaceDirectoryIdentity::new(7, 11),
+        );
+        let destination = SshDestination::new("user@remote".to_owned()).unwrap();
+        let remote_directory = RemoteWorkspaceDirectory::new("~/project".to_owned()).unwrap();
+        let prepared = SshCommandContext::new(
+            PathBuf::from("/private/config/spaceterm/ssh_config"),
+            destination.clone(),
+            PathBuf::from("/private/runtime/spaceterm/control.sock"),
+        )
+        .unwrap()
+        .prepare_pane_channel(
+            ValidatedRemoteShellCommand::new("exec /bin/zsh -l".to_owned()).unwrap(),
+        );
+        let plan = RemoteTerminalLaunchPlan::new(
+            local_home.clone(),
+            destination.clone(),
+            remote_directory.clone(),
+            "project on remote".to_owned(),
+            prepared.clone(),
+        );
+
+        assert_eq!(plan.local_home(), &local_home);
+        assert_eq!(plan.destination(), &destination);
+        assert_eq!(plan.remote_directory(), &remote_directory);
+        assert_eq!(plan.fallback_title(), "project on remote");
+        assert_eq!(plan.metadata_context().destination(), &destination);
+        let _consumed = prepared.take().unwrap();
+
+        let error = NativeTerminalSessionFactory
+            .start(test_geometry(), TerminalLaunchPlan::Remote(plan))
+            .err();
+
+        assert!(matches!(
+            error,
+            Some(SessionError::PreparedSshPaneChannel(
+                crate::ssh::command::PreparedSshPaneChannelError::AlreadyConsumed
+            ))
+        ));
+    }
 
     #[test]
     fn accessibility_continuation_runs_after_eight_normal_commands() {
@@ -3478,6 +3636,53 @@ mod tests {
             .unwrap();
 
         let event = receive_event(&events, "the native PTY startup failure", |event| {
+            matches!(
+                event,
+                SessionEvent::Failed(SessionFailure::Startup {
+                    stage: SessionStartupStage::Pty,
+                    ..
+                })
+            )
+        });
+
+        let SessionEvent::Failed(SessionFailure::Startup { message, .. }) = event else {
+            unreachable!("the event predicate accepts only typed PTY startup failures")
+        };
+        assert!(message.contains("Workspace working directory"));
+        drop(session);
+    }
+
+    #[test]
+    fn remote_factory_should_report_missing_local_home_without_starting_ssh() {
+        let destination = SshDestination::new("user@remote".to_owned()).unwrap();
+        let prepared = SshCommandContext::new(
+            PathBuf::from("/private/config/spaceterm/ssh_config"),
+            destination.clone(),
+            PathBuf::from("/private/runtime/spaceterm/control.sock"),
+        )
+        .unwrap()
+        .prepare_pane_channel(
+            ValidatedRemoteShellCommand::new("exec /bin/zsh -l".to_owned()).unwrap(),
+        );
+        let plan = RemoteTerminalLaunchPlan::new(
+            crate::domain::ValidatedWorkspaceDirectory::new(
+                PathBuf::from("/private/tmp/spaceterm-missing-local-home"),
+                WorkspaceDirectoryIdentity::new(0, 0),
+            ),
+            destination,
+            RemoteWorkspaceDirectory::new("~/project".to_owned()).unwrap(),
+            "project on remote".to_owned(),
+            prepared,
+        );
+        let StartedTerminalSession {
+            handle: session,
+            events,
+            accessibility: _,
+        } = NativeTerminalSessionFactory
+            .start(test_geometry(), TerminalLaunchPlan::Remote(plan))
+            .unwrap();
+
+        let event = receive_event(&events, "the remote local HOME failure", |event| {
             matches!(
                 event,
                 SessionEvent::Failed(SessionFailure::Startup {

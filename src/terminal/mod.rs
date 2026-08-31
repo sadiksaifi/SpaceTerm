@@ -81,8 +81,8 @@ pub(crate) use session::AccessibilitySelectionSender;
 pub(crate) use session::SessionFailure;
 pub(crate) use session::{
     AcceptanceSessionFailure, LocalTerminalLaunchPlan, NativeTerminalSessionFactory, PointerButton,
-    PointerInput, PointerPhase, SelectionCopyError, SessionEvent, SessionExit,
-    ShiftSelectionPolicy, SurfacePosition, TerminalLaunchPlan, TerminalSessionFactory,
+    PointerInput, PointerPhase, RemoteTerminalLaunchPlan, SelectionCopyError, SessionEvent,
+    SessionExit, ShiftSelectionPolicy, SurfacePosition, TerminalLaunchPlan, TerminalSessionFactory,
     TerminalSessionHandle, WheelInput, WheelPhase,
 };
 #[cfg(test)]

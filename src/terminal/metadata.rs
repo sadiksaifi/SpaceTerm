@@ -1,6 +1,8 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crate::domain::{RemoteWorkspaceDirectory, SshDestination};
+
 const MAX_TITLE_CHARS: usize = 256;
 const MAX_COMMAND_CHARS: usize = 4096;
 
@@ -72,8 +74,80 @@ pub(crate) enum ProgressMetadata {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct RemoteTerminalMetadataContext {
+    destination: SshDestination,
+    initial_directory: RemoteWorkspaceDirectory,
+}
+
+impl RemoteTerminalMetadataContext {
+    pub(crate) const fn new(
+        destination: SshDestination,
+        initial_directory: RemoteWorkspaceDirectory,
+    ) -> Self {
+        Self {
+            destination,
+            initial_directory,
+        }
+    }
+
+    pub(crate) const fn destination(&self) -> &SshDestination {
+        &self.destination
+    }
+
+    pub(crate) const fn initial_directory(&self) -> &RemoteWorkspaceDirectory {
+        &self.initial_directory
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum TerminalMetadataContext {
+    Local {
+        initial_directory: Arc<str>,
+        local_hostname: Option<Arc<str>>,
+    },
+    Remote(RemoteTerminalMetadataContext),
+}
+
+impl TerminalMetadataContext {
+    pub(crate) fn local(initial_directory: &str, local_hostname: Option<&str>) -> Self {
+        Self::Local {
+            initial_directory: Arc::from(initial_directory),
+            local_hostname: local_hostname.map(Arc::from),
+        }
+    }
+
+    pub(crate) const fn is_local(&self) -> bool {
+        matches!(self, Self::Local { .. })
+    }
+
+    pub(crate) const fn remote(&self) -> Option<&RemoteTerminalMetadataContext> {
+        match self {
+            Self::Local { .. } => None,
+            Self::Remote(context) => Some(context),
+        }
+    }
+
+    pub(crate) fn initial_directory(&self) -> &str {
+        match self {
+            Self::Local {
+                initial_directory, ..
+            } => initial_directory,
+            Self::Remote(context) => context.initial_directory().as_str(),
+        }
+    }
+
+    pub(crate) fn local_hostname(&self) -> Option<&str> {
+        match self {
+            Self::Local { local_hostname, .. } => local_hostname.as_deref(),
+            Self::Remote(_) => None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct TerminalMetadataSnapshot {
     pub(crate) revision: u64,
+    pub(crate) context: TerminalMetadataContext,
     pub(crate) freshness: MetadataFreshness,
     pub(crate) title: TitleMetadata,
     pub(crate) directory: DirectoryMetadata,
@@ -84,7 +158,6 @@ pub(crate) struct TerminalMetadataSnapshot {
 
 pub(crate) struct MetadataTracker {
     snapshot: Arc<TerminalMetadataSnapshot>,
-    local_hostname: Option<Arc<str>>,
     epoch: Instant,
     command_started: Option<Instant>,
 }
@@ -96,9 +169,23 @@ impl MetadataTracker {
         local_hostname: Option<&str>,
         epoch: Instant,
     ) -> Self {
+        Self::new_with_context(
+            TerminalMetadataContext::local(initial_directory, local_hostname),
+            fallback_title,
+            epoch,
+        )
+    }
+
+    pub(crate) fn new_with_context(
+        context: TerminalMetadataContext,
+        fallback_title: &str,
+        epoch: Instant,
+    ) -> Self {
+        let initial_directory = context.initial_directory().to_owned();
         Self {
             snapshot: Arc::new(TerminalMetadataSnapshot {
                 revision: 0,
+                context,
                 freshness: MetadataFreshness::Live,
                 title: TitleMetadata {
                     value: Arc::from(sanitize_title(fallback_title)),
@@ -112,7 +199,6 @@ impl MetadataTracker {
                 command: None,
                 progress: ProgressMetadata::None,
             }),
-            local_hostname: local_hostname.map(Arc::from),
             epoch,
             command_started: None,
         }
@@ -142,7 +228,8 @@ impl MetadataTracker {
     }
 
     pub(crate) fn set_reported_directory(&mut self, value: &str) -> bool {
-        let Some(directory) = parse_osc7_directory(value, self.local_hostname.as_deref()) else {
+        let Some(directory) = parse_osc7_directory(value, self.snapshot.context.local_hostname())
+        else {
             return false;
         };
         self.update(|snapshot| {
@@ -348,6 +435,24 @@ const fn hex_digit(byte: u8) -> Option<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::{RemoteWorkspaceDirectory, SshDestination};
+
+    #[test]
+    fn remote_metadata_context_should_preserve_typed_destination_and_directory() {
+        let remote = RemoteTerminalMetadataContext::new(
+            SshDestination::new("user@remote".to_owned()).unwrap(),
+            RemoteWorkspaceDirectory::new("~/project".to_owned()).unwrap(),
+        );
+        let context = TerminalMetadataContext::Remote(remote.clone());
+
+        let tracker = MetadataTracker::new_with_context(context, "Remote Project", Instant::now());
+        let snapshot = tracker.snapshot();
+
+        assert_eq!(snapshot.context.remote(), Some(&remote));
+        assert_eq!(snapshot.directory.path.as_ref(), "~/project");
+        assert_eq!(snapshot.title.value.as_ref(), "Remote Project");
+        assert!(!snapshot.context.is_local());
+    }
 
     #[test]
     fn title_metadata_strips_controls_and_is_bounded() {

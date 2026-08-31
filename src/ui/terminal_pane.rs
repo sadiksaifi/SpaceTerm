@@ -953,7 +953,8 @@ impl TerminalPane {
     pub(crate) fn reported_working_directory(&self) -> Option<PathBuf> {
         use crate::terminal::metadata::MetadataFreshness;
 
-        (self.screen.metadata.freshness == MetadataFreshness::Live)
+        (self.screen.metadata.context.is_local()
+            && self.screen.metadata.freshness == MetadataFreshness::Live)
             .then(|| PathBuf::from(self.screen.metadata.directory.path.as_ref()))
             .filter(|path| path.is_absolute())
     }
@@ -1757,7 +1758,9 @@ impl TerminalPane {
                     self.title = title.into();
                     cx.emit(TerminalPaneEvent::TitleChanged(self.title.clone()));
                 }
-                if screen.metadata.freshness == crate::terminal::metadata::MetadataFreshness::Live
+                if screen.metadata.context.is_local()
+                    && screen.metadata.freshness
+                        == crate::terminal::metadata::MetadataFreshness::Live
                     && (self.screen.metadata.directory.path != screen.metadata.directory.path
                         || self.screen.metadata.freshness != screen.metadata.freshness)
                 {
@@ -4534,6 +4537,22 @@ mod tests {
         screen
     }
 
+    fn remote_directory_screen(generation: u64, path: &str) -> Arc<ScreenSnapshot> {
+        let mut screen = directory_screen(
+            generation,
+            path,
+            crate::terminal::metadata::MetadataFreshness::Live,
+        );
+        Arc::make_mut(&mut Arc::make_mut(&mut screen).metadata).context =
+            crate::terminal::metadata::TerminalMetadataContext::Remote(
+                crate::terminal::metadata::RemoteTerminalMetadataContext::new(
+                    crate::domain::SshDestination::new("user@remote".to_owned()).unwrap(),
+                    crate::domain::RemoteWorkspaceDirectory::new(path.to_owned()).unwrap(),
+                ),
+            );
+        screen
+    }
+
     #[gpui::test]
     fn only_live_absolute_directory_metadata_should_emit_workspace_reports(
         cx: &mut TestAppContext,
@@ -4573,6 +4592,10 @@ mod tests {
                     "remote-or-relative",
                     crate::terminal::metadata::MetadataFreshness::Live,
                 )),
+                cx,
+            );
+            pane.handle_event(
+                SessionEvent::Screen(remote_directory_screen(4, "/srv/remote-project")),
                 cx,
             );
         });
