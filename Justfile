@@ -26,6 +26,10 @@ fetch:
 run:
     cargo run --locked
 
+# Run SpaceTerm with temporary component showcases enabled.
+run-showcase:
+    cargo run --locked --features showcase
+
 # Compile all targets and features without running tests.
 check:
     cargo check --workspace --all-targets --all-features --locked

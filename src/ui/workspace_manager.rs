@@ -4,6 +4,8 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use super::new_workspace_panel::{NewWorkspacePanel, NewWorkspacePanelEvent, NewWorkspaceSource};
+#[cfg(feature = "showcase")]
+use super::showcase::ComponentShowcase;
 use super::terminal_focus::TerminalFocusBlocker;
 use super::workspace_picker::{WorkspacePicker, WorkspacePickerEvent};
 use super::workspace_search::{WorkspaceSearch, WorkspaceSearchEvent, WorkspaceSearchItem};
@@ -129,6 +131,8 @@ pub(crate) struct WorkspaceManager {
     operating_system_window_drag_platform: Rc<dyn OperatingSystemWindowDragPlatform>,
     window_drag_status: WindowDragRegionStatus,
     pending_final_window_closes: BTreeSet<WorkspaceId>,
+    #[cfg(feature = "showcase")]
+    component_showcase: Option<Entity<ComponentShowcase>>,
 }
 
 impl WorkspaceManager {
@@ -276,6 +280,10 @@ impl WorkspaceManager {
         )
         .detach();
 
+        #[cfg(feature = "showcase")]
+        let component_showcase =
+            (crate::SHOWCASE_ENABLED && !cfg!(test)).then(|| cx.new(|_| ComponentShowcase::new()));
+
         Self {
             workspaces,
             session_factory,
@@ -298,6 +306,8 @@ impl WorkspaceManager {
             operating_system_window_drag_platform,
             window_drag_status: WindowDragRegionStatus::new(),
             pending_final_window_closes: BTreeSet::new(),
+            #[cfg(feature = "showcase")]
+            component_showcase,
         }
     }
 
@@ -2569,7 +2579,12 @@ impl Render for WorkspaceManager {
                         manager,
                     ),
                 )
-            })
+            });
+        #[cfg(feature = "showcase")]
+        let content = content.when_some(self.component_showcase.clone(), |content, showcase| {
+            content.child(showcase)
+        });
+        let content = content
             .child(self.workspace_search.clone())
             .child(self.new_workspace_panel.clone())
             .child(self.workspace_picker.clone());

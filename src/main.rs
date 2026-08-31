@@ -7,6 +7,9 @@ mod ui;
 
 use gpui::{App, Application};
 
+#[cfg(feature = "showcase")]
+const SHOWCASE_ENABLED: bool = true;
+
 fn main() {
     if let Err(error) = platform::acceptance_observation::configure_from_environment() {
         eprintln!("failed to configure acceptance observation: {error}");
