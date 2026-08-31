@@ -6,12 +6,16 @@
 | --- | --- | --- |
 | **SpaceTerm** | The macOS terminal application that owns all Workspaces. | tmux client, terminal client |
 | **Workspace** | A named top-level scope of one immutable Workspace Kind that owns one Workspace Directory and one or more Windows. | Session, attached session, project |
-| **Workspace Kind** | The immutable runtime-only classification of a Workspace as Scratch or Local Project. | mode, source, converted Workspace |
+| **Workspace Kind** | The immutable runtime-only classification of a Workspace as Scratch, Local Project, or Remote Project. | mode, source, converted Workspace |
 | **Scratch Workspace** | A Workspace created at `HOME` whose Workspace Directory follows its Directory Authority. | Ad Hoc Workspace, default project, temporary session |
 | **Local Project Workspace** | A Workspace opened from a native directory selection whose Project Root never changes. | repository, Git project |
-| **Workspace Directory** | The authoritative exact local directory used to start every future Terminal Session owned by a Workspace. | Focused Pane directory, fallback directory |
+| **Remote Project Workspace** | A Workspace pinned to one SSH Destination and one immutable remote Physical Directory Identity. | SSH session, remote terminal, remote host |
+| **Workspace Directory** | The authoritative exact directory value used to start future Terminal Sessions, represented by a validated local directory or a Remote Workspace Directory according to Workspace Kind. | Focused Pane directory, fallback directory, untyped path |
 | **Directory Authority** | The one Pane whose valid live Reported Working Directory may change a Scratch Workspace's Workspace Directory. | focused Pane, active Pane |
 | **Project Root** | The exact originally selected directory and canonical filesystem identity owned immutably by a Local Project Workspace. | Git root, repository root |
+| **SSH Destination** | The exact validated OpenSSH destination token selected for a Remote Project Workspace and retained as part of its identity. | physical host identity, resolved hostname, server |
+| **Remote Workspace Directory** | The exact absolute or home-relative remote directory spelling retained for Remote Terminal Session startup. | local path, `PathBuf`, Project Root |
+| **Physical Directory Identity** | The validated absolute physical remote directory returned by remote resolution for deduplication and automatic naming. | Remote Workspace Directory, local filesystem identity, display path |
 | **Window** | An ordered terminal work area that belongs to exactly one Workspace and contains a Pane Layout. | Tab, session, macOS window |
 | **Pane** | A terminal region that is one leaf of exactly one Window's Pane Layout. | Window, tab, split |
 | **Pane Layout** | The recursive arrangement of Panes and Splits within a Window. | Grid, pane tree |
@@ -27,7 +31,6 @@
 | **Focused Pane** | The one Pane selected by a Window for Pane operations and focus restoration. | Active Pane, selected Pane, Terminal Input Focus |
 | **Terminal Input Focus** | Transient truth that a Pane may accept terminal key input because its Workspace and Window are Active, it is the Focused Pane and current responder, its Operating-System Window and SpaceTerm are active, and no temporary UI owner blocks it. | Focused Pane, selected terminal |
 | **Workspace Chip** | The Active Workspace's icon, name, and pinned state shown in the top-left chrome only while the sidebar is hidden; it is a label, never a control. | breadcrumb, workspace switcher |
-| **Workspace Chip** | The Active Workspace's icon, name, and pinned state shown in the top-left chrome only while the sidebar is hidden; it is a label, never a control. | breadcrumb, workspace switcher |
 | **New Workspace Panel** | The transient chooser that presents every Workspace Source as one row and performs no lifecycle action itself; it blocks Terminal Input Focus while open. | New Workspace command, workspace wizard |
 | **Workspace Source** | The one row of the New Workspace Panel that produces a Workspace: Scratch, Local Project, or Remote Project. | Workspace Kind, project type |
 | **Workspace Picker** | The transient in-app, keyboard-first, one-level filesystem navigator that is the primary Open Local Project selection mechanism and blocks Terminal Input Focus while open. | project index, recent projects, file browser |
@@ -38,7 +41,11 @@
 
 | Term | Definition | Aliases to avoid |
 | --- | --- | --- |
-| **Terminal Session** | The live terminal runtime owned by a Pane, joining terminal emulation, a PTY, and a Shell Process. | Session, Workspace session |
+| **Terminal Session** | The live terminal runtime owned by a Pane, joining terminal emulation and a PTY to either a local Shell Process or a remote Terminal Session Channel. | Session, Workspace session |
+| **Control Connection** | The Remote Project runtime that exclusively owns one OpenSSH master process and private runtime socket for one SSH Destination. | Terminal Session, SSH client, shared Pane process |
+| **Terminal Session Channel** | A single-use prepared OpenSSH channel command consumed by one Remote Pane's Terminal Session through its Control Connection. | Control Connection, shell command string, reusable channel |
+| **Remote Connection Phase** | One of Connecting, Connected, Reconnecting, Disconnected, Failed, or Closing for a Remote Project Workspace's Control Connection. | network status string, Terminal Session exit state |
+| **Connection Generation** | The monotonic identity of one Remote Project Workspace connection attempt and its accepted lifecycle observations. | Presentation Generation, retry count, frame number |
 | **Runtime Observation** | An acceptance-only, authenticated, content-free stream of bounded numeric and closed-enum facts from one production Pane and Terminal Session; collection failure means NOT-RUN rather than PASS or FAIL. | telemetry, terminal transcript, runtime log |
 | **Acceptance Failure Action** | A nonce-bound, sequenced, one-shot request from the authenticated mounted-app verifier that selects one fixed production failure Seam and returns only closed-enum state facts; it does not exist during an ordinary launch. | test flag, debug command, arbitrary fault payload |
 | **Terminal Emulator** | The state machine that interprets terminal output and maintains the visible grid and Scrollback. | Terminal Session, Pane |
@@ -68,7 +75,7 @@
 | **Paste Payload** | An immutable, size-bounded text insertion candidate owned by the Terminal Session worker from normalization through encoding or cancellation. | clipboard contents, typed key input |
 | **File Insertion** | Ordered native file URLs converted to absolute POSIX-shell-quoted paths before becoming a Paste Payload. | raw URL paste, direct PTY write |
 | **Native Terminal Service** | A macOS Services, contextual-action, Quick Look, pasteboard, or drag/drop adapter that requests existing Selection, Terminal Hyperlink, File Insertion, and Paste Payload policies without mutating the Terminal Emulator. | independent input path, direct PTY service |
-| **Terminal Local File Capabilities** | Session-scoped authority for local filesystem interactions. Local Terminal metadata enables validated local links, File Insertion, Finder, Quick Look, and file-aware native actions; Remote Terminal metadata disables them without affecting web links or text and clipboard behavior. | filesystem access flag, remote path adapter |
+| **Terminal Local File Capabilities** | Session-scoped authority derived from Terminal metadata that enables local filesystem interactions only for Local Terminal Sessions. | filesystem access flag, remote path adapter |
 | **Terminal Accessibility Model** | A Pane-owned native editable text-area projection whose cell-atomic UTF-16 ranges map visible and retained terminal text, selected terminal font metadata, Selection, Cursor, and bounds back to logical terminal cells. | flattened cell string, screen-reader transcript |
 | **Render Lifecycle** | Pane-owned visibility, animation, scale, and newest-generation presentation state that schedules frames only when its native surface can present them. | render loop, global animation timer |
 | **Terminal Failure** | A typed PTY, Terminal Emulator, presentation, platform, or renderer-resource fault with an explicit recoverability class and no terminal contents or secrets. | stderr message, shell exit |
@@ -83,6 +90,7 @@
 | **Create Scratch Workspace** | Add and activate a new Scratch Workspace with its initial Window and Pane. | Create Workspace, start session, attach session |
 | **Show New Workspace Panel** | Present the New Workspace Panel so one Workspace Source can be chosen. | New Workspace, Create Workspace |
 | **Open Local Project** | Confirm one readable local directory through the Workspace Picker, or its explicit Finder Fallback, and create or activate its Local Project Workspace. | Open repository, convert Workspace |
+| **Open Remote Project** | Validate one Remote Workspace Directory through an SSH Destination and create or activate its Remote Project Workspace. | open remote terminal, connect to host |
 | **Close Workspace** | Remove a Workspace and its owned terminal runtimes, replacing it when it is the last Workspace. | Detach session, delete session |
 | **Create Window** | Add and activate a new Window in the Active Workspace. | New tab, link Window |
 | **Close Window** | Remove a Window and its owned terminal runtimes, escalating through its Workspace when it is the final Window. | Close tab, detach Window |
@@ -99,9 +107,11 @@
 - A **Workspace Kind** is fixed for the lifetime of its runtime-only **Workspace** and is never persisted.
 - A **Scratch Workspace** starts at `HOME`; its **Directory Authority** is initially the first Pane of its first Window.
 - A **Local Project Workspace** preserves its exact selected or typed **Project Root** spelling and deduplicates equivalent selections by macOS device/file identity.
+- A **Remote Project Workspace** preserves its first accepted **Remote Workspace Directory** spelling and deduplicates only by the composite of exact **SSH Destination** and **Physical Directory Identity**.
+- Selecting the same Remote Project composite activates the existing **Workspace** without constructing a replacement payload; a different SSH alias is a different **SSH Destination** and remains distinct.
+- An unrenamed **Remote Project Workspace** at its remote home **Physical Directory Identity** is named by its **SSH Destination** alone; every other one is named `<physical basename> · <SSH Destination>`.
 - The **Workspace Picker** is the primary **Open Local Project** path. It starts at `HOME` on every open, performs live one-level directory reads, and owns no recents, index, persistence, fuzzy matching, or filesystem watching.
-- A **Workspace Source** names the origin a Workspace is created from; a **Workspace Kind** is what the created Workspace immutably is. Remote Project is a listed Source with no selection path yet.
-- A **Workspace Chip** never duplicates the sidebar: it appears only while the sidebar is hidden, because an Active row already names the **Active Workspace**.
+- A **Workspace Source** names the origin a Workspace is created from; a **Workspace Kind** is what the created Workspace immutably is.
 - A **Workspace Chip** never duplicates the sidebar: it appears only while the sidebar is hidden, because an Active row already names the **Active Workspace**.
 - The **New Workspace Panel** performs no lifecycle action. Choosing Local Project replaces it with the **Workspace Picker**, and Escape there returns to the panel while any other dismissal ends the flow.
 - The **Finder Fallback** remains behind the open **Workspace Picker**; cancellation restores the picker unchanged, while selection joins the same background validation and Local Project identity-deduplication flow.
@@ -109,6 +119,11 @@
 - A valid promoted Pane report is adopted immediately. A missing or invalid report retains the previous Workspace Directory.
 - Create Window and Split Pane revalidate the **Workspace Directory** before mutation. Unavailability blocks new children without stopping existing Terminal Sessions and clears after successful validation.
 - Automatic Workspace names use the Workspace Directory basename, `Default` for `HOME`, and `/` for filesystem root. Only unrenamed Scratch Workspaces sharing one identity are numbered in sidebar order; empty rename input clears a custom name and duplicate custom names are valid.
+- A Local **Workspace Directory** is local filesystem authority and is revalidated before child creation; a **Remote Workspace Directory** is never converted to a local path, queried through local directory APIs, or subjected to local filesystem validation.
+- One live **Remote Project Workspace** owns one **Control Connection** for its current **Connection Generation**, and that Control Connection exclusively owns its master process, private runtime socket, shutdown, reap, and exact cleanup.
+- Each Remote Pane owns one **Terminal Session** that consumes one **Terminal Session Channel**; the channel shares its Workspace's **Control Connection** but never shares Pane or Terminal Session ownership.
+- A reconnect begins only after Disconnected or Failed and advances the **Connection Generation**; observations from older generations are stale, illegal same-generation transitions are rejected, and Closing is terminal.
+- Delayed readiness, failure, or disconnection from a predecessor **Connection Generation** cannot mutate or resurrect its successor.
 - A **Workspace** owns one or more **Windows** and has exactly one **Active Window**.
 - A **Window** belongs to exactly one **Workspace** and cannot be linked, shared, or attached elsewhere.
 - A **Window** owns one or more **Panes**, exactly one **Focused Pane**, and one arbitrarily nested **Pane Layout**.
@@ -153,13 +168,17 @@
 
 ## Example dialogue
 
-> **Dev:** "The user clicked Split Right in the Active Window. Should that create another Window?"
+> **Dev:** "The user selected `~/project` and `/home/dev/project` through the same SSH Destination, and both resolve to one Physical Directory Identity. Do we create two Workspaces?"
 
-> **Domain expert:** "No. **Split Pane** adds a **Pane** to the same **Window**, updates its **Pane Layout**, and makes the new Pane the **Focused Pane**."
+> **Domain expert:** "No. **Open Remote Project** activates the existing **Remote Project Workspace** because its **SSH Destination** and **Physical Directory Identity** match, while preserving the first accepted **Remote Workspace Directory** spelling."
 
-> **Dev:** "What happens if they close that Pane after it becomes the only Pane?"
+> **Dev:** "What if the same machine is selected through another SSH alias?"
 
-> **Domain expert:** "**Close Pane** escalates to **Close Window**. A final Window closes its Workspace when another remains, and closes the **Operating-System Window** only when it is globally final."
+> **Domain expert:** "That alias is a distinct **SSH Destination**, so it creates a distinct Workspace and **Control Connection**; each Remote Pane then consumes its own **Terminal Session Channel**."
+
+> **Dev:** "Can output from that Remote Pane be treated as a local file path?"
+
+> **Domain expert:** "No. Remote metadata disables **Terminal Local File Capabilities**, while web links, Selection, copy, ordinary text input, Terminal Find, and OSC 52 keep their existing policies."
 
 ## Flagged ambiguities
 
@@ -170,4 +189,7 @@
 - "Active," "focused," and "selected" were used as near-synonyms; reserve **Active** for Workspace and Window state and **Focused** for Pane state.
 - **Focused Pane** does not imply **Terminal Input Focus** while another responder, menu, modal, Operating-System Window, or application owns input.
 - "Terminal" can mean the application, emulator, runtime, or visible region; prefer **SpaceTerm**, **Terminal Emulator**, **Terminal Session**, or **Pane** according to the intended concept.
+- "Remote path" can mean the startup spelling or the resolved identity; use **Remote Workspace Directory** for the exact startup value and **Physical Directory Identity** for deduplication and naming, and use neither as a local path.
+- "Host" can incorrectly collapse an SSH alias into a physical machine identity; use **SSH Destination** for the exact OpenSSH token because different aliases remain distinct.
+- "Connection" can mean the shared SSH runtime or one Pane's channel; use **Control Connection** for the owned master and socket and **Terminal Session Channel** for the single-use Pane command.
 - "Horizontal split" and "vertical split" can describe either divider orientation or Pane placement; use the user-facing actions **Split Right** and **Split Down**, and use an explicitly named split axis only in implementation discussions.
