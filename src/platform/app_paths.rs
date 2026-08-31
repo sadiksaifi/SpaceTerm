@@ -1,8 +1,10 @@
-use std::ffi::{OsStr, OsString};
-use std::fs::{self, File, OpenOptions};
+use std::cell::RefCell;
+use std::ffi::{CString, OsStr, OsString};
+use std::fs::{self, File};
 use std::io;
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::MetadataExt;
+use std::os::unix::io::{AsRawFd, FromRawFd};
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -118,25 +120,28 @@ impl AppPaths {
 
     pub(crate) fn create_runtime_owner(&self, kind: &str) -> Result<RuntimeOwner, AppPathsError> {
         validate_child_name(kind)?;
-        let runtime_root = self.ensure_root(AppPathRoot::Runtime)?;
+        let runtime = ensure_private_directory(&self.runtime)?;
         for _ in 0..RUNTIME_OWNER_CREATION_ATTEMPTS {
             let sequence = NEXT_RUNTIME_OWNER.fetch_add(1, Ordering::Relaxed);
             let name = format!("{kind}-{}-{sequence:016x}", std::process::id());
-            let path = runtime_root.join(name);
-            let mut builder = fs::DirBuilder::new();
-            builder.mode(PRIVATE_DIRECTORY_MODE);
-            match builder.create(&path) {
+            let path = self.runtime.join(&name);
+            match create_directory_at(&runtime.file, OsStr::new(&name)) {
                 Ok(()) => {
-                    fs::set_permissions(&path, fs::Permissions::from_mode(PRIVATE_DIRECTORY_MODE))
-                        .map_err(|source| AppPathsError::SetPermissions {
-                            path: path.clone(),
-                            source,
-                        })?;
-                    let identity = private_directory_identity(&path)?;
+                    let directory =
+                        match open_private_child_directory(&runtime.file, OsStr::new(&name), &path)
+                        {
+                            Ok(directory) => directory,
+                            Err(error) => {
+                                let _ = remove_directory_at(&runtime.file, OsStr::new(&name));
+                                return Err(error);
+                            }
+                        };
                     return Ok(RuntimeOwner {
-                        runtime_root: runtime_root.to_path_buf(),
+                        runtime,
                         path,
-                        identity,
+                        name: OsString::from(name),
+                        directory,
+                        artifacts: RefCell::new(Vec::new()),
                         closed: false,
                     });
                 }
@@ -161,9 +166,11 @@ impl AppPaths {
 }
 
 pub(crate) struct RuntimeOwner {
-    runtime_root: PathBuf,
+    runtime: PrivateDirectory,
     path: PathBuf,
-    identity: DirectoryIdentity,
+    name: OsString,
+    directory: PrivateDirectory,
+    artifacts: RefCell<Vec<OsString>>,
     closed: bool,
 }
 
@@ -174,6 +181,7 @@ impl RuntimeOwner {
 
     pub(crate) fn socket_path(&self, name: &str) -> Result<PathBuf, AppPathsError> {
         validate_child_name(name)?;
+        self.verify_identity()?;
         let path = self.path.join(name);
         let actual = path.as_os_str().as_bytes().len();
         if actual > MACOS_UNIX_SOCKET_PATH_BYTES {
@@ -189,22 +197,15 @@ impl RuntimeOwner {
         validate_child_name(name)?;
         self.verify_identity()?;
         let path = self.path.join(name);
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create_new(true)
-            .mode(PRIVATE_ARTIFACT_MODE)
-            .open(&path)
-            .map_err(|source| AppPathsError::CreateArtifact {
+        let artifact_name = OsStr::new(name);
+        let file = create_file_at(&self.directory.file, artifact_name, &path)?;
+        let mut rollback = ArtifactRollback::new(&self.directory.file, artifact_name);
+        set_file_mode(&file, PRIVATE_ARTIFACT_MODE).map_err(|source| {
+            AppPathsError::SetPermissions {
                 path: path.clone(),
                 source,
-            })?;
-        fs::set_permissions(&path, fs::Permissions::from_mode(PRIVATE_ARTIFACT_MODE)).map_err(
-            |source| AppPathsError::SetPermissions {
-                path: path.clone(),
-                source,
-            },
-        )?;
+            }
+        })?;
         let metadata = file
             .metadata()
             .map_err(|source| AppPathsError::InspectPath {
@@ -215,55 +216,55 @@ impl RuntimeOwner {
             || metadata.uid() != effective_user_id()
             || metadata.mode() & 0o777 != PRIVATE_ARTIFACT_MODE
         {
-            drop(file);
-            let _ = fs::remove_file(&path);
             return Err(AppPathsError::UnsafePath { path });
         }
+        self.verify_identity()?;
+        self.artifacts
+            .borrow_mut()
+            .push(artifact_name.to_os_string());
+        rollback.disarm();
         Ok(RuntimeArtifact { path, file })
     }
 
     pub(crate) fn close(mut self) -> Result<(), AppPathsError> {
         let result = self.cleanup();
-        self.closed = true;
+        if result.is_ok() {
+            self.closed = true;
+        }
         result
     }
 
     fn cleanup(&self) -> Result<(), AppPathsError> {
         self.verify_identity()?;
-        match fs::remove_dir_all(&self.path) {
-            Ok(()) => Ok(()),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
-            Err(source) => Err(AppPathsError::Cleanup {
+        for name in self.artifacts.borrow().iter() {
+            match remove_file_at(&self.directory.file, name) {
+                Ok(()) => {}
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(source) => {
+                    return Err(AppPathsError::Cleanup {
+                        path: self.path.join(name),
+                        source,
+                    });
+                }
+            }
+        }
+        self.verify_identity()?;
+        remove_directory_at(&self.runtime.file, &self.name).map_err(|source| {
+            AppPathsError::Cleanup {
                 path: self.path.clone(),
                 source,
-            }),
-        }
+            }
+        })
     }
 
     fn verify_identity(&self) -> Result<(), AppPathsError> {
-        if self.path.parent() != Some(self.runtime_root.as_path()) {
+        if self.path.parent() != Some(self.runtime.path.as_path()) {
             return Err(AppPathsError::UnsafePath {
                 path: self.path.clone(),
             });
         }
-        match fs::symlink_metadata(&self.path) {
-            Ok(metadata)
-                if metadata.file_type().is_dir()
-                    && !metadata.file_type().is_symlink()
-                    && metadata.uid() == effective_user_id()
-                    && DirectoryIdentity::from_metadata(&metadata) == self.identity =>
-            {
-                Ok(())
-            }
-            Ok(_) => Err(AppPathsError::UnsafePath {
-                path: self.path.clone(),
-            }),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
-            Err(source) => Err(AppPathsError::InspectPath {
-                path: self.path.clone(),
-                source,
-            }),
-        }
+        self.runtime.verify_entry()?;
+        self.directory.verify_entry()
     }
 }
 
@@ -343,6 +344,108 @@ struct DirectoryIdentity {
     inode: u64,
 }
 
+struct PrivateDirectory {
+    parent: File,
+    file: File,
+    name: OsString,
+    path: PathBuf,
+    identity: DirectoryIdentity,
+}
+
+impl PrivateDirectory {
+    fn verify_entry(&self) -> Result<(), AppPathsError> {
+        let entry = open_directory_at(&self.parent, &self.name).map_err(|source| {
+            if matches!(
+                source.raw_os_error(),
+                Some(code)
+                    if code == libc::ELOOP
+                        || code == libc::ENOTDIR
+                        || code == libc::ENOENT
+            ) {
+                AppPathsError::UnsafePath {
+                    path: self.path.clone(),
+                }
+            } else {
+                AppPathsError::InspectPath {
+                    path: self.path.clone(),
+                    source,
+                }
+            }
+        })?;
+        let entry_identity = validate_private_open_directory(&entry, &self.path)?;
+        let open_identity = validate_private_open_directory(&self.file, &self.path)?;
+        if entry_identity == self.identity && open_identity == self.identity {
+            Ok(())
+        } else {
+            Err(AppPathsError::UnsafePath {
+                path: self.path.clone(),
+            })
+        }
+    }
+}
+
+struct DirectoryCreationRollback {
+    entries: Vec<(File, OsString)>,
+    armed: bool,
+}
+
+impl DirectoryCreationRollback {
+    fn new() -> Self {
+        Self {
+            entries: Vec::new(),
+            armed: true,
+        }
+    }
+
+    fn record(&mut self, parent: &File, name: &OsStr) -> io::Result<()> {
+        self.entries
+            .push((parent.try_clone()?, name.to_os_string()));
+        Ok(())
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for DirectoryCreationRollback {
+    fn drop(&mut self) {
+        if self.armed {
+            for (parent, name) in self.entries.iter().rev() {
+                let _ = remove_directory_at(parent, name);
+            }
+        }
+    }
+}
+
+struct ArtifactRollback<'a> {
+    parent: &'a File,
+    name: OsString,
+    armed: bool,
+}
+
+impl<'a> ArtifactRollback<'a> {
+    fn new(parent: &'a File, name: &OsStr) -> Self {
+        Self {
+            parent,
+            name: name.to_os_string(),
+            armed: true,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for ArtifactRollback<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = remove_file_at(self.parent, &self.name);
+        }
+    }
+}
+
 impl DirectoryIdentity {
     fn from_metadata(metadata: &fs::Metadata) -> Self {
         Self {
@@ -377,42 +480,159 @@ fn resolve_root(
     Ok(base.join("spaceterm"))
 }
 
-fn ensure_private_directory(path: &Path) -> Result<DirectoryIdentity, AppPathsError> {
-    match fs::symlink_metadata(path) {
-        Ok(metadata) => validate_private_directory(path, &metadata)?,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            fs::create_dir_all(path).map_err(|source| AppPathsError::CreateDirectory {
-                path: path.to_path_buf(),
-                source,
-            })?;
-        }
-        Err(source) => {
-            return Err(AppPathsError::InspectPath {
-                path: path.to_path_buf(),
-                source,
-            });
-        }
+fn ensure_private_directory(path: &Path) -> Result<PrivateDirectory, AppPathsError> {
+    if !path.is_absolute() {
+        return Err(AppPathsError::UnsafePath {
+            path: path.to_path_buf(),
+        });
     }
-    let metadata = fs::symlink_metadata(path).map_err(|source| AppPathsError::InspectPath {
-        path: path.to_path_buf(),
+    let mut parent = File::open("/").map_err(|source| AppPathsError::InspectPath {
+        path: PathBuf::from("/"),
         source,
     })?;
-    validate_private_directory(path, &metadata)?;
-    fs::set_permissions(path, fs::Permissions::from_mode(PRIVATE_DIRECTORY_MODE)).map_err(
-        |source| AppPathsError::SetPermissions {
-            path: path.to_path_buf(),
-            source,
-        },
-    )?;
-    private_directory_identity(path)
+    let mut traversed = PathBuf::from("/");
+    let mut components = path.components().peekable();
+    let mut rollback = DirectoryCreationRollback::new();
+    while let Some(component) = components.next() {
+        let Component::Normal(name) = component else {
+            if matches!(component, Component::RootDir) {
+                continue;
+            }
+            return Err(AppPathsError::UnsafePath {
+                path: path.to_path_buf(),
+            });
+        };
+        traversed.push(name);
+        let is_final = components.peek().is_none();
+        let (directory, created) = match open_directory_at(&parent, name) {
+            Ok(directory) => (directory, false),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                create_directory_at(&parent, name).map_err(|source| {
+                    AppPathsError::CreateDirectory {
+                        path: traversed.clone(),
+                        source,
+                    }
+                })?;
+                if let Err(source) = rollback.record(&parent, name) {
+                    let _ = remove_directory_at(&parent, name);
+                    return Err(AppPathsError::InspectPath {
+                        path: traversed.clone(),
+                        source,
+                    });
+                }
+                let directory = open_directory_at(&parent, name).map_err(|source| {
+                    AppPathsError::InspectPath {
+                        path: traversed.clone(),
+                        source,
+                    }
+                })?;
+                set_file_mode(&directory, PRIVATE_DIRECTORY_MODE).map_err(|source| {
+                    AppPathsError::SetPermissions {
+                        path: traversed.clone(),
+                        source,
+                    }
+                })?;
+                validate_private_open_directory(&directory, &traversed)?;
+                (directory, true)
+            }
+            Err(source) if matches!(source.raw_os_error(), Some(code) if code == libc::ELOOP || code == libc::ENOTDIR) =>
+            {
+                return Err(AppPathsError::UnsafePath {
+                    path: traversed.clone(),
+                });
+            }
+            Err(source) => {
+                return Err(AppPathsError::InspectPath {
+                    path: traversed.clone(),
+                    source,
+                });
+            }
+        };
+        if is_final {
+            if !created {
+                let metadata =
+                    directory
+                        .metadata()
+                        .map_err(|source| AppPathsError::InspectPath {
+                            path: traversed.clone(),
+                            source,
+                        })?;
+                if !metadata.is_dir() || metadata.uid() != effective_user_id() {
+                    return Err(AppPathsError::UnsafePath {
+                        path: traversed.clone(),
+                    });
+                }
+                set_file_mode(&directory, PRIVATE_DIRECTORY_MODE).map_err(|source| {
+                    AppPathsError::SetPermissions {
+                        path: traversed.clone(),
+                        source,
+                    }
+                })?;
+            }
+            let identity = validate_private_open_directory(&directory, &traversed)?;
+            rollback.disarm();
+            return Ok(PrivateDirectory {
+                parent,
+                file: directory,
+                name: name.to_os_string(),
+                path: traversed,
+                identity,
+            });
+        }
+        parent = directory;
+    }
+    Err(AppPathsError::UnsafePath {
+        path: path.to_path_buf(),
+    })
 }
 
-fn validate_private_directory(path: &Path, metadata: &fs::Metadata) -> Result<(), AppPathsError> {
-    if metadata.file_type().is_dir()
-        && !metadata.file_type().is_symlink()
+fn open_private_child_directory(
+    parent: &File,
+    name: &OsStr,
+    path: &Path,
+) -> Result<PrivateDirectory, AppPathsError> {
+    let directory =
+        open_directory_at(parent, name).map_err(|source| AppPathsError::InspectPath {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    set_file_mode(&directory, PRIVATE_DIRECTORY_MODE).map_err(|source| {
+        AppPathsError::SetPermissions {
+            path: path.to_path_buf(),
+            source,
+        }
+    })?;
+    let identity = validate_private_open_directory(&directory, path)?;
+    let parent = parent
+        .try_clone()
+        .map_err(|source| AppPathsError::InspectPath {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    Ok(PrivateDirectory {
+        parent,
+        file: directory,
+        name: name.to_os_string(),
+        path: path.to_path_buf(),
+        identity,
+    })
+}
+
+fn validate_private_open_directory(
+    directory: &File,
+    path: &Path,
+) -> Result<DirectoryIdentity, AppPathsError> {
+    let metadata = directory
+        .metadata()
+        .map_err(|source| AppPathsError::InspectPath {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    if metadata.is_dir()
         && metadata.uid() == effective_user_id()
+        && metadata.mode() & 0o777 == PRIVATE_DIRECTORY_MODE
     {
-        Ok(())
+        Ok(DirectoryIdentity::from_metadata(&metadata))
     } else {
         Err(AppPathsError::UnsafePath {
             path: path.to_path_buf(),
@@ -420,18 +640,98 @@ fn validate_private_directory(path: &Path, metadata: &fs::Metadata) -> Result<()
     }
 }
 
-fn private_directory_identity(path: &Path) -> Result<DirectoryIdentity, AppPathsError> {
-    let metadata = fs::symlink_metadata(path).map_err(|source| AppPathsError::InspectPath {
+fn component_cstring(name: &OsStr) -> io::Result<CString> {
+    CString::new(name.as_bytes())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path component contains NUL"))
+}
+
+fn open_directory_at(parent: &File, name: &OsStr) -> io::Result<File> {
+    let name = component_cstring(name)?;
+    // SAFETY: `name` is NUL-terminated and the returned descriptor is checked before ownership.
+    let descriptor = unsafe {
+        libc::openat(
+            parent.as_raw_fd(),
+            name.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if descriptor < 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        // SAFETY: `openat` returned a new owned descriptor.
+        Ok(unsafe { File::from_raw_fd(descriptor) })
+    }
+}
+
+fn create_directory_at(parent: &File, name: &OsStr) -> io::Result<()> {
+    let name = component_cstring(name)?;
+    // SAFETY: `name` is NUL-terminated and `mkdirat` does not retain the pointer.
+    let result = unsafe {
+        libc::mkdirat(
+            parent.as_raw_fd(),
+            name.as_ptr(),
+            PRIVATE_DIRECTORY_MODE as libc::mode_t,
+        )
+    };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+fn create_file_at(parent: &File, name: &OsStr, path: &Path) -> Result<File, AppPathsError> {
+    let name = component_cstring(name).map_err(|source| AppPathsError::CreateArtifact {
         path: path.to_path_buf(),
         source,
     })?;
-    validate_private_directory(path, &metadata)?;
-    if metadata.mode() & 0o777 != PRIVATE_DIRECTORY_MODE {
-        return Err(AppPathsError::UnsafePath {
+    // SAFETY: `name` is NUL-terminated and the returned descriptor is checked before ownership.
+    let descriptor = unsafe {
+        libc::openat(
+            parent.as_raw_fd(),
+            name.as_ptr(),
+            libc::O_RDWR | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            PRIVATE_ARTIFACT_MODE as libc::c_uint,
+        )
+    };
+    if descriptor < 0 {
+        Err(AppPathsError::CreateArtifact {
             path: path.to_path_buf(),
-        });
+            source: io::Error::last_os_error(),
+        })
+    } else {
+        // SAFETY: `openat` returned a new owned descriptor.
+        Ok(unsafe { File::from_raw_fd(descriptor) })
     }
-    Ok(DirectoryIdentity::from_metadata(&metadata))
+}
+
+fn set_file_mode(file: &File, mode: u32) -> io::Result<()> {
+    // SAFETY: `file` owns a valid descriptor and `fchmod` has no pointer arguments.
+    let result = unsafe { libc::fchmod(file.as_raw_fd(), mode as libc::mode_t) };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+fn remove_file_at(parent: &File, name: &OsStr) -> io::Result<()> {
+    unlink_at(parent, name, 0)
+}
+
+fn remove_directory_at(parent: &File, name: &OsStr) -> io::Result<()> {
+    unlink_at(parent, name, libc::AT_REMOVEDIR)
+}
+
+fn unlink_at(parent: &File, name: &OsStr, flags: i32) -> io::Result<()> {
+    let name = component_cstring(name)?;
+    // SAFETY: `name` is NUL-terminated and `unlinkat` does not retain the pointer.
+    let result = unsafe { libc::unlinkat(parent.as_raw_fd(), name.as_ptr(), flags) };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
 }
 
 fn validate_child_name(name: &str) -> Result<(), AppPathsError> {
@@ -456,7 +756,7 @@ fn effective_user_id() -> u32 {
 mod tests {
     use std::fs;
     use std::os::unix::ffi::OsStrExt;
-    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
     use std::sync::atomic::{AtomicU64, Ordering};
 
     use super::*;
@@ -470,8 +770,8 @@ mod tests {
     impl TestDirectory {
         fn new(name: &str) -> Self {
             let sequence = NEXT_TEST_DIRECTORY.fetch_add(1, Ordering::Relaxed);
-            let path =
-                Path::new("/tmp").join(format!("stap-{}-{sequence}-{name}", std::process::id()));
+            let path = Path::new("/private/tmp")
+                .join(format!("stap-{}-{sequence}-{name}", std::process::id()));
             let _ = fs::remove_dir_all(&path);
             fs::create_dir_all(&path).unwrap();
             Self { path }
@@ -597,6 +897,41 @@ mod tests {
     }
 
     #[test]
+    fn ensure_root_should_create_each_missing_owned_component_restrictively() {
+        let root = TestDirectory::new("restrictive-components");
+        let paths = AppPaths::resolve(&environment(&root.path)).unwrap();
+
+        paths.ensure_root(AppPathRoot::Config).unwrap();
+
+        for path in [
+            root.path.join("home"),
+            root.path.join("home/.config"),
+            root.path.join("home/.config/spaceterm"),
+        ] {
+            assert_eq!(
+                fs::symlink_metadata(&path).unwrap().mode() & 0o777,
+                0o700,
+                "{} was not private from creation",
+                path.display()
+            );
+        }
+    }
+
+    #[test]
+    fn ensure_root_should_reject_a_symlinked_intermediate_component() {
+        let root = TestDirectory::new("symlink-component");
+        let outside = root.path.join("outside");
+        fs::create_dir_all(&outside).unwrap();
+        symlink(&outside, root.path.join("home")).unwrap();
+        let paths = AppPaths::resolve(&environment(&root.path)).unwrap();
+
+        let error = paths.ensure_root(AppPathRoot::Config).unwrap_err();
+
+        assert!(matches!(error, AppPathsError::UnsafePath { .. }));
+        assert!(!outside.join(".config/spaceterm").exists());
+    }
+
+    #[test]
     fn runtime_owner_should_be_unique_private_and_remove_only_itself_on_close() {
         let root = TestDirectory::new("runtime-owner");
         let paths = AppPaths::resolve(&environment(&root.path)).unwrap();
@@ -626,6 +961,41 @@ mod tests {
 
         assert!(!owner_path.exists());
         assert!(paths.runtime().exists());
+    }
+
+    #[test]
+    fn runtime_owner_should_reject_a_replaced_path_before_returning_a_socket_path() {
+        let root = TestDirectory::new("replaced-owner");
+        let paths = AppPaths::resolve(&environment(&root.path)).unwrap();
+        let owner = paths.create_runtime_owner("ssh").unwrap();
+        let original = owner.path().to_path_buf();
+        let moved = paths.runtime().join("moved-owner");
+        let outside = root.path.join("outside");
+        fs::create_dir_all(&outside).unwrap();
+        fs::rename(&original, &moved).unwrap();
+        symlink(&outside, &original).unwrap();
+
+        let error = owner.socket_path("control.sock").unwrap_err();
+
+        assert!(matches!(error, AppPathsError::UnsafePath { .. }));
+        drop(owner);
+        assert!(outside.exists());
+        fs::remove_file(original).unwrap();
+        fs::remove_dir(moved).unwrap();
+    }
+
+    #[test]
+    fn runtime_owner_close_should_not_recursively_delete_untracked_contents() {
+        let root = TestDirectory::new("untracked-owner-content");
+        let paths = AppPaths::resolve(&environment(&root.path)).unwrap();
+        let owner = paths.create_runtime_owner("ssh").unwrap();
+        let owner_path = owner.path().to_path_buf();
+        fs::write(owner_path.join("not-owned-by-api"), b"keep").unwrap();
+
+        let error = owner.close().unwrap_err();
+
+        assert!(matches!(error, AppPathsError::Cleanup { .. }));
+        assert!(owner_path.join("not-owned-by-api").exists());
     }
 
     #[test]
