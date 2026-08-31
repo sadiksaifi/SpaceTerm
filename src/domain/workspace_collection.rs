@@ -335,6 +335,10 @@ pub(crate) enum WorkspaceError {
     WorkspaceNotFound(WorkspaceId),
     #[error("Workspace {0} has no local Workspace Directory")]
     LocalDirectoryUnavailable(WorkspaceId),
+    #[error("Workspace {0} is not a Remote Project Workspace")]
+    RemoteConnectionUnavailable(WorkspaceId),
+    #[error("Workspace {0} connection generation is exhausted")]
+    RemoteConnectionGenerationExhausted(WorkspaceId),
     #[error("Workspace ID space is exhausted")]
     IdSpaceExhausted,
 }
@@ -565,6 +569,44 @@ impl<T> WorkspaceCollection<T> {
             )
             .then_some(workspace.id)
         })
+    }
+
+    /// Starts exactly one reconnect attempt from a disconnected or failed Remote Project.
+    ///
+    /// The collection owns generation allocation so callers cannot reuse or skip generations.
+    pub(crate) fn begin_remote_reconnect(
+        &mut self,
+        workspace_id: WorkspaceId,
+    ) -> Result<RemoteConnectionReduction, WorkspaceError> {
+        let state = self.remote_connection_state_mut(workspace_id)?;
+        if !matches!(
+            state.phase(),
+            RemoteConnectionPhase::Disconnected | RemoteConnectionPhase::Failed
+        ) {
+            return Ok(RemoteConnectionReduction::Illegal);
+        }
+        let generation = state.generation().checked_add(1).ok_or(
+            WorkspaceError::RemoteConnectionGenerationExhausted(workspace_id),
+        )?;
+        Ok(state.reduce(RemoteConnectionState::reconnecting(generation)))
+    }
+
+    /// Applies one observed lifecycle transition to the owning Remote Project Workspace.
+    pub(crate) fn reduce_remote_connection_state(
+        &mut self,
+        workspace_id: WorkspaceId,
+        next: RemoteConnectionState,
+    ) -> Result<RemoteConnectionReduction, WorkspaceError> {
+        Ok(self.remote_connection_state_mut(workspace_id)?.reduce(next))
+    }
+
+    /// Begins terminal shutdown without advancing the current Connection Generation.
+    pub(crate) fn begin_remote_close(
+        &mut self,
+        workspace_id: WorkspaceId,
+    ) -> Result<RemoteConnectionReduction, WorkspaceError> {
+        let state = self.remote_connection_state_mut(workspace_id)?;
+        Ok(state.reduce(RemoteConnectionState::closing(state.generation())))
     }
 
     #[cfg(test)]
@@ -971,6 +1013,22 @@ impl<T> WorkspaceCollection<T> {
         self.workspaces
             .iter_mut()
             .find(|workspace| workspace.id == workspace_id)
+    }
+
+    fn remote_connection_state_mut(
+        &mut self,
+        workspace_id: WorkspaceId,
+    ) -> Result<&mut RemoteConnectionState, WorkspaceError> {
+        let Some(workspace) = self.workspace_mut(workspace_id) else {
+            return Err(WorkspaceError::WorkspaceNotFound(workspace_id));
+        };
+        let WorkspaceKind::RemoteProject {
+            connection_state, ..
+        } = &mut workspace.kind
+        else {
+            return Err(WorkspaceError::RemoteConnectionUnavailable(workspace_id));
+        };
+        Ok(connection_state)
     }
 
     fn next_workspace_id(&self) -> Result<(WorkspaceId, u64), WorkspaceError> {
@@ -1606,6 +1664,306 @@ mod tests {
             RemoteConnectionReduction::Illegal
         );
         assert_eq!(state, RemoteConnectionState::disconnected(4));
+    }
+
+    #[test]
+    fn remote_connection_operations_reject_missing_and_local_workspaces_without_mutation() {
+        let mut workspaces = WorkspaceCollection::new_scratch(
+            validated("/Users/test", 10),
+            DirectoryAuthority::initial(),
+            |_, _| (),
+        );
+        let local_id = workspaces
+            .create_local_project_workspace(validated("/Users/test/project", 20), |_, _| ())
+            .unwrap();
+        let before = workspaces
+            .iter()
+            .map(|workspace| (workspace.id(), workspace.kind().clone()))
+            .collect::<Vec<_>>();
+
+        for workspace_id in [WorkspaceId::new(1), local_id] {
+            assert_eq!(
+                workspaces.begin_remote_reconnect(workspace_id),
+                Err(WorkspaceError::RemoteConnectionUnavailable(workspace_id))
+            );
+            assert_eq!(
+                workspaces.reduce_remote_connection_state(
+                    workspace_id,
+                    RemoteConnectionState::disconnected(1),
+                ),
+                Err(WorkspaceError::RemoteConnectionUnavailable(workspace_id))
+            );
+            assert_eq!(
+                workspaces.begin_remote_close(workspace_id),
+                Err(WorkspaceError::RemoteConnectionUnavailable(workspace_id))
+            );
+        }
+        let missing = WorkspaceId::new(999);
+        assert_eq!(
+            workspaces.begin_remote_reconnect(missing),
+            Err(WorkspaceError::WorkspaceNotFound(missing))
+        );
+        assert_eq!(
+            workspaces
+                .reduce_remote_connection_state(missing, RemoteConnectionState::disconnected(1),),
+            Err(WorkspaceError::WorkspaceNotFound(missing))
+        );
+        assert_eq!(
+            workspaces.begin_remote_close(missing),
+            Err(WorkspaceError::WorkspaceNotFound(missing))
+        );
+        assert_eq!(
+            workspaces
+                .iter()
+                .map(|workspace| (workspace.id(), workspace.kind().clone()))
+                .collect::<Vec<_>>(),
+            before
+        );
+    }
+
+    #[test]
+    fn reconnect_generation_exhaustion_does_not_mutate_remote_state() {
+        let mut workspaces = WorkspaceCollection::new_scratch(
+            validated("/Users/test", 10),
+            DirectoryAuthority::initial(),
+            |_, _| (),
+        );
+        let workspace_id = workspaces
+            .create_remote_project_workspace(
+                remote_key("orb", "/srv/project"),
+                remote_directory("/srv/project"),
+                remote_identity("/home/test"),
+                RemoteConnectionState::disconnected(u64::MAX),
+                |_| (),
+            )
+            .unwrap()
+            .workspace_id();
+
+        assert_eq!(
+            workspaces.begin_remote_reconnect(workspace_id),
+            Err(WorkspaceError::RemoteConnectionGenerationExhausted(
+                workspace_id
+            ))
+        );
+        assert_eq!(
+            workspaces
+                .workspace(workspace_id)
+                .and_then(WorkspaceEntry::remote_connection_state),
+            Some(RemoteConnectionState::disconnected(u64::MAX))
+        );
+    }
+
+    #[test]
+    fn begin_remote_reconnect_advances_once_and_rejects_a_second_begin() {
+        let mut workspaces = WorkspaceCollection::new_scratch(
+            validated("/Users/test", 10),
+            DirectoryAuthority::initial(),
+            |_, _| (),
+        );
+        let workspace_id = workspaces
+            .create_remote_project_workspace(
+                remote_key("orb", "/srv/project"),
+                remote_directory("/srv/project"),
+                remote_identity("/home/test"),
+                RemoteConnectionState::disconnected(7),
+                |_| (),
+            )
+            .unwrap()
+            .workspace_id();
+
+        assert_eq!(
+            workspaces.begin_remote_reconnect(workspace_id),
+            Ok(RemoteConnectionReduction::Applied)
+        );
+        assert_eq!(
+            workspaces.begin_remote_reconnect(workspace_id),
+            Ok(RemoteConnectionReduction::Illegal)
+        );
+        assert_eq!(
+            workspaces
+                .workspace(workspace_id)
+                .and_then(WorkspaceEntry::remote_connection_state),
+            Some(RemoteConnectionState::reconnecting(8))
+        );
+    }
+
+    #[test]
+    fn begin_remote_reconnect_rejects_connected_state_without_advancing() {
+        let mut workspaces = WorkspaceCollection::new_scratch(
+            validated("/Users/test", 10),
+            DirectoryAuthority::initial(),
+            |_, _| (),
+        );
+        let workspace_id = workspaces
+            .create_remote_project_workspace(
+                remote_key("orb", "/srv/project"),
+                remote_directory("/srv/project"),
+                remote_identity("/home/test"),
+                RemoteConnectionState::connected(7),
+                |_| (),
+            )
+            .unwrap()
+            .workspace_id();
+
+        assert_eq!(
+            workspaces.begin_remote_reconnect(workspace_id),
+            Ok(RemoteConnectionReduction::Illegal)
+        );
+        assert_eq!(
+            workspaces
+                .workspace(workspace_id)
+                .and_then(WorkspaceEntry::remote_connection_state),
+            Some(RemoteConnectionState::connected(7))
+        );
+    }
+
+    #[test]
+    fn begin_remote_close_accepts_each_live_phase_without_advancing_generation() {
+        for (index, state) in [
+            RemoteConnectionState::connecting(3),
+            RemoteConnectionState::connected(4),
+            RemoteConnectionState::reconnecting(5),
+            RemoteConnectionState::disconnected(6),
+            RemoteConnectionState::failed(7),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut workspaces = WorkspaceCollection::new_scratch(
+                validated("/Users/test", 10),
+                DirectoryAuthority::initial(),
+                |_, _| (),
+            );
+            let workspace_id = workspaces
+                .create_remote_project_workspace(
+                    remote_key(&format!("orb-{index}"), "/srv/project"),
+                    remote_directory("/srv/project"),
+                    remote_identity("/home/test"),
+                    state,
+                    |_| (),
+                )
+                .unwrap()
+                .workspace_id();
+
+            assert_eq!(
+                workspaces.begin_remote_close(workspace_id),
+                Ok(RemoteConnectionReduction::Applied)
+            );
+            assert_eq!(
+                workspaces
+                    .workspace(workspace_id)
+                    .and_then(WorkspaceEntry::remote_connection_state),
+                Some(RemoteConnectionState::closing(state.generation()))
+            );
+        }
+    }
+
+    #[test]
+    fn collection_reducer_preserves_stale_and_illegal_results_without_mutation() {
+        let mut workspaces = WorkspaceCollection::new_scratch(
+            validated("/Users/test", 10),
+            DirectoryAuthority::initial(),
+            |_, _| (),
+        );
+        let workspace_id = workspaces
+            .create_remote_project_workspace(
+                remote_key("orb", "/srv/project"),
+                remote_directory("/srv/project"),
+                remote_identity("/home/test"),
+                RemoteConnectionState::disconnected(7),
+                |_| (),
+            )
+            .unwrap()
+            .workspace_id();
+        assert_eq!(
+            workspaces.begin_remote_reconnect(workspace_id),
+            Ok(RemoteConnectionReduction::Applied)
+        );
+
+        assert_eq!(
+            workspaces
+                .reduce_remote_connection_state(workspace_id, RemoteConnectionState::failed(7),),
+            Ok(RemoteConnectionReduction::Stale)
+        );
+        assert_eq!(
+            workspaces.reduce_remote_connection_state(
+                workspace_id,
+                RemoteConnectionState::reconnecting(9),
+            ),
+            Ok(RemoteConnectionReduction::Illegal)
+        );
+        assert_eq!(
+            workspaces
+                .workspace(workspace_id)
+                .and_then(WorkspaceEntry::remote_connection_state),
+            Some(RemoteConnectionState::reconnecting(8))
+        );
+    }
+
+    #[test]
+    fn collection_remote_lifecycle_reduces_legal_transitions_and_closing_is_terminal() {
+        let mut workspaces = WorkspaceCollection::new_scratch(
+            validated("/Users/test", 10),
+            DirectoryAuthority::initial(),
+            |_, _| (),
+        );
+        let workspace_id = workspaces
+            .create_remote_project_workspace(
+                remote_key("orb", "/srv/project"),
+                remote_directory("/srv/project"),
+                remote_identity("/home/test"),
+                RemoteConnectionState::connected(4),
+                |_| (),
+            )
+            .unwrap()
+            .workspace_id();
+
+        assert_eq!(
+            workspaces.reduce_remote_connection_state(
+                workspace_id,
+                RemoteConnectionState::disconnected(4),
+            ),
+            Ok(RemoteConnectionReduction::Applied)
+        );
+        assert_eq!(
+            workspaces.begin_remote_reconnect(workspace_id),
+            Ok(RemoteConnectionReduction::Applied)
+        );
+        assert_eq!(
+            workspaces
+                .reduce_remote_connection_state(workspace_id, RemoteConnectionState::failed(5),),
+            Ok(RemoteConnectionReduction::Applied)
+        );
+        assert_eq!(
+            workspaces.begin_remote_reconnect(workspace_id),
+            Ok(RemoteConnectionReduction::Applied)
+        );
+        assert_eq!(
+            workspaces
+                .reduce_remote_connection_state(workspace_id, RemoteConnectionState::connected(6),),
+            Ok(RemoteConnectionReduction::Applied)
+        );
+        assert_eq!(
+            workspaces.begin_remote_close(workspace_id),
+            Ok(RemoteConnectionReduction::Applied)
+        );
+        assert_eq!(
+            workspaces.begin_remote_close(workspace_id),
+            Ok(RemoteConnectionReduction::Illegal)
+        );
+        assert_eq!(
+            workspaces.reduce_remote_connection_state(
+                workspace_id,
+                RemoteConnectionState::disconnected(6),
+            ),
+            Ok(RemoteConnectionReduction::Illegal)
+        );
+        assert_eq!(
+            workspaces
+                .workspace(workspace_id)
+                .and_then(WorkspaceEntry::remote_connection_state),
+            Some(RemoteConnectionState::closing(6))
+        );
     }
 
     #[test]
