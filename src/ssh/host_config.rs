@@ -59,6 +59,8 @@ impl DirectSshTarget {
 pub(crate) struct DiscoveredSshHost {
     alias: SshHostAlias,
     provenance: Option<HostConfigProvenance>,
+    provenances: Vec<HostConfigProvenance>,
+    ambiguous: bool,
     direct_target: Option<DirectSshTarget>,
 }
 
@@ -71,11 +73,22 @@ impl DiscoveredSshHost {
         self.provenance.as_ref()
     }
 
+    pub(crate) fn provenances(&self) -> &[HostConfigProvenance] {
+        &self.provenances
+    }
+
+    pub(crate) const fn is_ambiguous(&self) -> bool {
+        self.ambiguous
+    }
+
     pub(crate) const fn direct_target(&self) -> Option<&DirectSshTarget> {
         self.direct_target.as_ref()
     }
 
     pub(crate) fn subtitle(&self) -> String {
+        if self.ambiguous {
+            return "Multiple SSH config declarations".to_owned();
+        }
         self.direct_target.as_ref().map_or_else(
             || {
                 self.provenance.as_ref().map_or_else(
@@ -102,7 +115,9 @@ pub(crate) struct HostDiscoveryLimits {
     pub(crate) total_bytes: usize,
     pub(crate) file_bytes: usize,
     pub(crate) glob_matches: usize,
+    pub(crate) directory_entries: usize,
     pub(crate) results: usize,
+    pub(crate) declarations: usize,
     pub(crate) token_bytes: usize,
 }
 
@@ -114,7 +129,9 @@ impl Default for HostDiscoveryLimits {
             total_bytes: 1024 * 1024,
             file_bytes: 256 * 1024,
             glob_matches: 256,
+            directory_entries: 4096,
             results: 512,
+            declarations: 2048,
             token_bytes: 1024,
         }
     }
@@ -130,6 +147,7 @@ pub(crate) enum HostConfigIssueKind {
     FileByteLimit,
     GlobLimit,
     ResultLimit,
+    DeclarationLimit,
     TokenLimit,
     IncludeCycle,
     MalformedLine,
@@ -200,15 +218,15 @@ impl HostConfigFilesystem for NativeHostConfigFilesystem {
         path: &Path,
         maximum_entries: usize,
     ) -> io::Result<Vec<PathBuf>> {
-        let capacity = maximum_entries.saturating_add(1);
-        let mut entries = BTreeSet::new();
+        let mut entries = Vec::with_capacity(maximum_entries.saturating_add(1));
         for entry in std::fs::read_dir(path)? {
-            entries.insert(entry?.path());
-            if entries.len() > capacity {
-                entries.pop_last();
+            entries.push(entry?.path());
+            if entries.len() > maximum_entries {
+                return Ok(entries);
             }
         }
-        Ok(entries.into_iter().collect())
+        entries.sort();
+        Ok(entries)
     }
 }
 
@@ -219,41 +237,77 @@ pub(crate) fn discover_ssh_hosts(
 ) -> HostDiscovery {
     let mut discovery = HostDiscovery::default();
     let mut known_aliases = BTreeSet::new();
+    let mut discovered_hosts = DiscoveredHosts::default();
     for (source, root) in [
         (HostConfigSource::Managed, roots.managed.as_path()),
         (HostConfigSource::User, roots.user.as_path()),
     ] {
-        let mut scanner = SourceScanner::new(filesystem, roots, limits, source, &known_aliases);
-        scanner.scan_file(root, 0);
-        known_aliases.extend(
-            scanner
-                .hosts
-                .iter()
-                .map(|host| host.alias.as_str().to_owned()),
+        let mut scanner = SourceScanner::new(
+            filesystem,
+            roots,
+            limits,
+            source,
+            &known_aliases,
+            &mut discovered_hosts,
         );
-        discovery.hosts.append(&mut scanner.hosts);
+        scanner.scan_file(root, 0);
         discovery.issues.append(&mut scanner.issues);
+        drop(scanner);
+        known_aliases.extend(discovered_hosts.aliases().map(str::to_owned));
     }
-    discovery.hosts = consolidate_hosts(discovery.hosts);
+    discovery.hosts = discovered_hosts.into_hosts();
     discovery
 }
 
-fn consolidate_hosts(hosts: Vec<DiscoveredSshHost>) -> Vec<DiscoveredSshHost> {
-    let mut indexes: BTreeMap<String, usize> = BTreeMap::new();
-    let mut consolidated: Vec<DiscoveredSshHost> = Vec::new();
-    for host in hosts {
-        if let Some(index) = indexes.get(host.alias.as_str()).copied() {
-            let existing = &mut consolidated[index];
-            if existing.provenance != host.provenance {
-                existing.provenance = None;
+#[derive(Default)]
+struct DiscoveredHosts {
+    indexes: BTreeMap<String, usize>,
+    hosts: Vec<DiscoveredSshHost>,
+}
+
+impl DiscoveredHosts {
+    fn aliases(&self) -> impl Iterator<Item = &str> {
+        self.indexes.keys().map(String::as_str)
+    }
+
+    fn record(
+        &mut self,
+        alias: SshHostAlias,
+        provenance: HostConfigProvenance,
+        direct_target: Option<DirectSshTarget>,
+        stanza_ambiguous: bool,
+    ) {
+        if let Some(index) = self.indexes.get(alias.as_str()).copied() {
+            let existing = &mut self.hosts[index];
+            if !existing.provenances.contains(&provenance) {
+                existing.provenances.push(provenance);
             }
+            existing.ambiguous = true;
             existing.direct_target = None;
         } else {
-            indexes.insert(host.alias.as_str().to_owned(), consolidated.len());
-            consolidated.push(host);
+            self.indexes
+                .insert(alias.as_str().to_owned(), self.hosts.len());
+            self.hosts.push(DiscoveredSshHost {
+                alias,
+                provenance: Some(provenance.clone()),
+                provenances: vec![provenance],
+                ambiguous: stanza_ambiguous,
+                direct_target,
+            });
         }
     }
-    consolidated
+
+    fn mark_ambiguous(&mut self, alias: &SshHostAlias) {
+        if let Some(index) = self.indexes.get(alias.as_str()).copied() {
+            let existing = &mut self.hosts[index];
+            existing.ambiguous = true;
+            existing.direct_target = None;
+        }
+    }
+
+    fn into_hosts(self) -> Vec<DiscoveredSshHost> {
+        self.hosts
+    }
 }
 
 struct SourceScanner<'a, F> {
@@ -261,14 +315,17 @@ struct SourceScanner<'a, F> {
     roots: &'a HostConfigRoots,
     limits: HostDiscoveryLimits,
     source: HostConfigSource,
-    hosts: Vec<DiscoveredSshHost>,
     issues: Vec<HostConfigIssue>,
+    discovered_hosts: &'a mut DiscoveredHosts,
     visited: BTreeSet<PathBuf>,
     active: BTreeSet<PathBuf>,
     files: usize,
     total_bytes: usize,
     glob_matches: usize,
+    directory_entries: usize,
     result_limit_reported: bool,
+    declaration_limit_reported: bool,
+    declarations: usize,
     known_aliases: BTreeSet<String>,
     new_results: usize,
 }
@@ -280,20 +337,24 @@ impl<'a, F: HostConfigFilesystem> SourceScanner<'a, F> {
         limits: HostDiscoveryLimits,
         source: HostConfigSource,
         known_aliases: &BTreeSet<String>,
+        discovered_hosts: &'a mut DiscoveredHosts,
     ) -> Self {
         Self {
             filesystem,
             roots,
             limits,
             source,
-            hosts: Vec::new(),
             issues: Vec::new(),
+            discovered_hosts,
             visited: BTreeSet::new(),
             active: BTreeSet::new(),
             files: 0,
             total_bytes: 0,
             glob_matches: 0,
+            directory_entries: 0,
             result_limit_reported: false,
+            declaration_limit_reported: false,
+            declarations: 0,
             known_aliases: known_aliases.clone(),
             new_results: 0,
         }
@@ -372,16 +433,28 @@ impl<'a, F: HostConfigFilesystem> SourceScanner<'a, F> {
                 Ok(Some(directive)) => directive,
                 Ok(None) => continue,
                 Err(TokenizeError::TooLong) => {
+                    self.finish_malformed_section(line, &mut section, &mut stanza);
                     self.issue(path, Some(line_number), HostConfigIssueKind::TokenLimit);
                     continue;
                 }
                 Err(TokenizeError::Malformed) => {
+                    self.finish_malformed_section(line, &mut section, &mut stanza);
                     self.issue(path, Some(line_number), HostConfigIssueKind::MalformedLine);
                     continue;
                 }
             };
             match keyword.as_str() {
                 "include" if section == ConfigSection::Global => {
+                    if tokens.is_empty()
+                        || tokens.iter().any(|token| {
+                            token.is_empty()
+                                || token.chars().any(char::is_control)
+                                || resolve_include_path(&self.roots.home, token).is_none()
+                        })
+                    {
+                        self.issue(path, Some(line_number), HostConfigIssueKind::MalformedLine);
+                        continue;
+                    }
                     for include in &tokens {
                         for included_path in self.expand_include(path, include, line_number) {
                             self.scan_file(&included_path, depth.saturating_add(1));
@@ -391,7 +464,13 @@ impl<'a, F: HostConfigFilesystem> SourceScanner<'a, F> {
                 "host" => {
                     self.finish_stanza(stanza.take());
                     section = ConfigSection::Host;
-                    stanza = Some(ParsedStanza::new(path, line_number, &tokens));
+                    match ParsedStanza::new(path, line_number, &tokens) {
+                        Ok(parsed) => stanza = Some(parsed),
+                        Err(()) => {
+                            stanza = None;
+                            self.issue(path, Some(line_number), HostConfigIssueKind::MalformedLine);
+                        }
+                    }
                 }
                 "match" => {
                     self.finish_stanza(stanza.take());
@@ -408,11 +487,30 @@ impl<'a, F: HostConfigFilesystem> SourceScanner<'a, F> {
         self.finish_stanza(stanza);
     }
 
+    fn finish_malformed_section(
+        &mut self,
+        line: &str,
+        section: &mut ConfigSection,
+        stanza: &mut Option<ParsedStanza>,
+    ) {
+        let Some(keyword) = config_keyword(line) else {
+            return;
+        };
+        if keyword.eq_ignore_ascii_case("host") {
+            self.finish_stanza(stanza.take());
+            *section = ConfigSection::Host;
+        } else if keyword.eq_ignore_ascii_case("match") {
+            self.finish_stanza(stanza.take());
+            *section = ConfigSection::Match;
+        }
+    }
+
     fn finish_stanza(&mut self, stanza: Option<ParsedStanza>) {
         let Some(stanza) = stanza else {
             return;
         };
         let direct_target = stanza.direct_target();
+        let stanza_ambiguous = stanza.ambiguous;
         for alias in stanza.aliases {
             let is_new = !self.known_aliases.contains(alias.as_str());
             if is_new && self.new_results >= self.limits.results {
@@ -426,33 +524,39 @@ impl<'a, F: HostConfigFilesystem> SourceScanner<'a, F> {
                 }
                 continue;
             }
+            if self.declarations >= self.limits.declarations {
+                self.discovered_hosts.mark_ambiguous(&alias);
+                if !self.declaration_limit_reported {
+                    self.issue(
+                        &stanza.path,
+                        Some(stanza.line),
+                        HostConfigIssueKind::DeclarationLimit,
+                    );
+                    self.declaration_limit_reported = true;
+                }
+                continue;
+            }
+            self.declarations += 1;
+            let provenance = HostConfigProvenance {
+                source: self.source,
+                path: stanza.path.clone(),
+                line: stanza.line,
+            };
+            self.discovered_hosts.record(
+                alias.clone(),
+                provenance,
+                direct_target.clone(),
+                stanza_ambiguous,
+            );
             if is_new {
                 self.known_aliases.insert(alias.as_str().to_owned());
                 self.new_results += 1;
             }
-            self.hosts.push(DiscoveredSshHost {
-                alias,
-                provenance: Some(HostConfigProvenance {
-                    source: self.source,
-                    path: stanza.path.clone(),
-                    line: stanza.line,
-                }),
-                direct_target: direct_target.clone(),
-            });
         }
     }
 
     fn expand_include(&mut self, including: &Path, token: &str, line: usize) -> Vec<PathBuf> {
-        let path = if token == "~" {
-            self.roots.home.clone()
-        } else if let Some(relative) = token.strip_prefix("~/") {
-            self.roots.home.join(relative)
-        } else if Path::new(token).is_absolute() {
-            PathBuf::from(token)
-        } else {
-            self.roots.home.join(".ssh").join(token)
-        };
-        let Some(path) = normalize_absolute_path(&path) else {
+        let Some(path) = resolve_include_path(&self.roots.home, token) else {
             self.issue(including, Some(line), HostConfigIssueKind::MalformedLine);
             return Vec::new();
         };
@@ -465,34 +569,48 @@ impl<'a, F: HostConfigFilesystem> SourceScanner<'a, F> {
             if contains_glob(&component) {
                 let mut next = Vec::new();
                 for directory in &expanded {
-                    let entries = match self
+                    if self.directory_entries >= self.limits.directory_entries {
+                        self.issue(directory, Some(line), HostConfigIssueKind::GlobLimit);
+                        return Vec::new();
+                    }
+                    let remaining_entries = self
+                        .limits
+                        .directory_entries
+                        .saturating_sub(self.directory_entries);
+                    let mut entries = match self
                         .filesystem
-                        .read_directory_limited(directory, self.limits.glob_matches)
+                        .read_directory_limited(directory, remaining_entries)
                     {
                         Ok(entries) => entries,
                         Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
                         Err(_) => {
                             self.issue(directory, Some(line), HostConfigIssueKind::Read);
-                            continue;
+                            return Vec::new();
                         }
                     };
-                    if entries.len() > self.limits.glob_matches {
+                    if entries.len() > remaining_entries {
+                        self.directory_entries = self.limits.directory_entries;
                         self.issue(directory, Some(line), HostConfigIssueKind::GlobLimit);
+                        return Vec::new();
                     }
-                    for entry in entries.into_iter().take(self.limits.glob_matches) {
+                    self.directory_entries += entries.len();
+                    entries.sort();
+                    for entry in entries {
                         let Some(name) = entry.file_name().and_then(|name| name.to_str()) else {
                             continue;
                         };
                         if glob_matches(&component, name) {
-                            if self.glob_matches >= self.limits.glob_matches {
+                            if self.glob_matches.saturating_add(next.len())
+                                >= self.limits.glob_matches
+                            {
                                 self.issue(directory, Some(line), HostConfigIssueKind::GlobLimit);
-                                break;
+                                return Vec::new();
                             }
-                            self.glob_matches += 1;
                             next.push(entry);
                         }
                     }
                 }
+                self.glob_matches += next.len();
                 expanded = next;
             } else {
                 let component = unescape_glob_literal(&component);
@@ -526,16 +644,21 @@ struct ParsedStanza {
 }
 
 impl ParsedStanza {
-    fn new(path: &Path, line: usize, tokens: &[String]) -> Self {
-        let mut aliases = Vec::new();
-        let mut ambiguous = tokens.is_empty();
-        for token in tokens {
-            match SshHostAlias::new(token.clone()) {
-                Ok(alias) => aliases.push(alias),
-                Err(_) => ambiguous = true,
-            }
+    fn new(path: &Path, line: usize, tokens: &[String]) -> Result<Self, ()> {
+        if tokens.is_empty() {
+            return Err(());
         }
-        Self {
+        let mut aliases = Vec::new();
+        let mut ambiguous = false;
+        for token in tokens {
+            if token.starts_with('!') || token.contains(['*', '?']) {
+                ambiguous = true;
+                continue;
+            }
+            let alias = SshHostAlias::new(token.clone()).map_err(|_| ())?;
+            aliases.push(alias);
+        }
+        Ok(Self {
             path: path.to_path_buf(),
             line,
             aliases,
@@ -543,7 +666,7 @@ impl ParsedStanza {
             hostname: None,
             user: None,
             port: None,
-        }
+        })
     }
 
     fn option(&mut self, keyword: &str, values: &[String]) {
@@ -601,11 +724,9 @@ fn parse_config_directive(
     if line.is_empty() || line.starts_with('#') {
         return Ok(None);
     }
-    let keyword_end = line
-        .find(|character: char| character.is_whitespace() || character == '=')
-        .unwrap_or(line.len());
+    let keyword_end = keyword_end(line);
     let keyword = &line[..keyword_end];
-    if keyword.is_empty() || keyword.len() > maximum_bytes || keyword.contains(['\'', '"', '\\']) {
+    if keyword.is_empty() || keyword.len() > maximum_bytes {
         return Err(TokenizeError::Malformed);
     }
     let mut arguments = line[keyword_end..].trim_start();
@@ -614,6 +735,19 @@ fn parse_config_directive(
     }
     let tokens = tokenize_config_arguments(arguments, maximum_bytes)?;
     Ok(Some((keyword.to_ascii_lowercase(), tokens)))
+}
+
+fn config_keyword(line: &str) -> Option<&str> {
+    let line = line.trim_start();
+    if line.is_empty() || line.starts_with('#') {
+        return None;
+    }
+    Some(&line[..keyword_end(line)])
+}
+
+fn keyword_end(line: &str) -> usize {
+    line.find(|character: char| character.is_whitespace() || character == '=')
+        .unwrap_or(line.len())
 }
 
 fn tokenize_config_arguments(
@@ -627,15 +761,18 @@ fn tokenize_config_arguments(
     let mut characters = line.chars().peekable();
     while let Some(character) = characters.next() {
         if character == '\\' {
-            let Some(next) = characters.next() else {
-                return Err(TokenizeError::Malformed);
-            };
             token_started = true;
-            if next.is_whitespace() || matches!(next, '\\' | '\'' | '"' | '#') {
-                current.push(next);
+            if let Some(next) = characters.peek().copied() {
+                let recognized =
+                    matches!(next, '\\' | '\'' | '"') || (quote.is_none() && next.is_whitespace());
+                if recognized {
+                    characters.next();
+                    current.push(next);
+                } else {
+                    current.push('\\');
+                }
             } else {
                 current.push('\\');
-                current.push(next);
             }
         } else if let Some(delimiter) = quote {
             if character == delimiter {
@@ -684,6 +821,19 @@ fn valid_user(value: &str) -> bool {
         && value.chars().all(|character| {
             character.is_alphanumeric() || matches!(character, '.' | '_' | '-' | '@')
         })
+}
+
+fn resolve_include_path(home: &Path, token: &str) -> Option<PathBuf> {
+    let path = if token == "~" {
+        home.to_path_buf()
+    } else if let Some(relative) = token.strip_prefix("~/") {
+        home.join(relative)
+    } else if Path::new(token).is_absolute() {
+        PathBuf::from(token)
+    } else {
+        home.join(".ssh").join(token)
+    };
+    normalize_absolute_path(&path)
 }
 
 fn normalize_absolute_path(path: &Path) -> Option<PathBuf> {
@@ -980,23 +1130,76 @@ mod tests {
     fn directive_parser_should_follow_openssh_keyword_comment_quote_and_escape_rules() {
         assert_eq!(
             parse_config_directive(
-                "Host = foo#literal \"\" escaped\\ value literal\\* # comment",
+                "Host = foo#literal foo\\#bar \"\" escaped\\ value literal\\* unknown\\q trailing\\\\ # comment",
                 128,
             ),
             Ok(Some((
                 "host".to_owned(),
                 vec![
                     "foo#literal".to_owned(),
+                    "foo\\#bar".to_owned(),
                     String::new(),
                     "escaped value".to_owned(),
                     "literal\\*".to_owned(),
+                    "unknown\\q".to_owned(),
+                    "trailing\\".to_owned(),
                 ],
             )))
         );
         assert_eq!(
             parse_config_directive("\"Host\" invalid", 128),
-            Err(TokenizeError::Malformed)
+            Ok(Some(("\"host\"".to_owned(), vec!["invalid".to_owned()])))
         );
+    }
+
+    #[test]
+    fn malformed_host_and_include_arguments_should_reject_the_whole_directive() {
+        let filesystem = MemoryFilesystem::default()
+            .file(
+                "/managed/ssh_config",
+                "Include included.conf \"\"\nHost accepted -option\nHost after\n",
+            )
+            .file("/home/test/.ssh/included.conf", "Host included\n");
+
+        let discovery = discover_ssh_hosts(&filesystem, &roots(), HostDiscoveryLimits::default());
+
+        assert_eq!(aliases(&discovery), ["after"]);
+        assert_eq!(
+            discovery
+                .issues
+                .iter()
+                .filter(|issue| issue.kind() == HostConfigIssueKind::MalformedLine)
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn malformed_host_tokenization_should_end_the_previous_stanza() {
+        let filesystem = MemoryFilesystem::default().file(
+            "/managed/ssh_config",
+            "Host prior\n  HostName prior.example\nHost \"unterminated\n  HostName leaked.example\nHost after\n",
+        );
+
+        let discovery = discover_ssh_hosts(&filesystem, &roots(), HostDiscoveryLimits::default());
+
+        assert_eq!(aliases(&discovery), ["prior", "after"]);
+        assert_eq!(discovery.hosts[0].subtitle(), "prior.example");
+        assert_eq!(discovery.hosts[1].direct_target(), None);
+    }
+
+    #[test]
+    fn excluded_host_patterns_should_not_be_reported_as_malformed() {
+        let filesystem = MemoryFilesystem::default().file(
+            "/managed/ssh_config",
+            "Host concrete *.example !excluded\n  HostName concrete.example\n",
+        );
+
+        let discovery = discover_ssh_hosts(&filesystem, &roots(), HostDiscoveryLimits::default());
+
+        assert_eq!(aliases(&discovery), ["concrete"]);
+        assert_eq!(discovery.hosts[0].direct_target(), None);
+        assert!(discovery.issues.is_empty());
     }
 
     #[test]
@@ -1032,8 +1235,54 @@ mod tests {
         let discovery = discover_ssh_hosts(&filesystem, &roots(), limits);
 
         assert_eq!(aliases(&discovery), ["duplicate", "user-only"]);
-        assert_eq!(discovery.hosts[0].provenance(), None);
+        assert_eq!(
+            discovery.hosts[0]
+                .provenance()
+                .map(HostConfigProvenance::source),
+            Some(HostConfigSource::Managed)
+        );
+        assert_eq!(discovery.hosts[0].provenances().len(), 2);
+        assert!(discovery.hosts[0].is_ambiguous());
         assert_eq!(discovery.hosts[0].direct_target(), None);
+    }
+
+    #[test]
+    fn duplicate_declarations_should_have_an_independent_bounded_provenance_budget() {
+        let filesystem = MemoryFilesystem::default().file(
+            "/managed/ssh_config",
+            "Host duplicate\nHost duplicate\nHost duplicate\nHost other\n",
+        );
+        let limits = HostDiscoveryLimits {
+            declarations: 2,
+            ..HostDiscoveryLimits::default()
+        };
+
+        let discovery = discover_ssh_hosts(&filesystem, &roots(), limits);
+
+        assert_eq!(aliases(&discovery), ["duplicate"]);
+        assert_eq!(discovery.hosts[0].provenances().len(), 2);
+        assert!(discovery.hosts[0].is_ambiguous());
+        assert!(
+            discovery
+                .issues
+                .iter()
+                .any(|issue| issue.kind() == HostConfigIssueKind::DeclarationLimit)
+        );
+    }
+
+    #[test]
+    fn declaration_budget_exhaustion_in_one_root_should_not_starve_the_other_root() {
+        let filesystem = MemoryFilesystem::default()
+            .file("/managed/ssh_config", "Host managed\nHost overflow\n")
+            .file("/home/test/.ssh/config", "Host user\n");
+        let limits = HostDiscoveryLimits {
+            declarations: 1,
+            ..HostDiscoveryLimits::default()
+        };
+
+        let discovery = discover_ssh_hosts(&filesystem, &roots(), limits);
+
+        assert_eq!(aliases(&discovery), ["managed", "user"]);
     }
 
     #[test]
@@ -1048,7 +1297,7 @@ mod tests {
     }
 
     #[test]
-    fn glob_expansion_should_choose_lexically_first_entries_before_bounding() {
+    fn glob_expansion_should_reject_an_incomplete_match_set() {
         let filesystem = MemoryFilesystem::default()
             .file("/managed/ssh_config", "Include conf/*.conf\n")
             .file("/home/test/.ssh/conf/z.conf", "Host z\n")
@@ -1061,7 +1310,50 @@ mod tests {
 
         let discovery = discover_ssh_hosts(&filesystem, &roots(), limits);
 
-        assert_eq!(aliases(&discovery), ["a", "b"]);
+        assert!(aliases(&discovery).is_empty());
+        assert!(
+            discovery
+                .issues
+                .iter()
+                .any(|issue| issue.kind() == HostConfigIssueKind::GlobLimit)
+        );
+    }
+
+    #[test]
+    fn glob_expansion_should_examine_nonmatches_without_spending_match_budget() {
+        let filesystem = MemoryFilesystem::default()
+            .file("/managed/ssh_config", "Include conf/*.conf\n")
+            .file("/home/test/.ssh/conf/a.txt", "Host ignored-a\n")
+            .file("/home/test/.ssh/conf/b.txt", "Host ignored-b\n")
+            .file("/home/test/.ssh/conf/z.conf", "Host z\n");
+        let limits = HostDiscoveryLimits {
+            glob_matches: 1,
+            directory_entries: 3,
+            ..HostDiscoveryLimits::default()
+        };
+
+        let discovery = discover_ssh_hosts(&filesystem, &roots(), limits);
+
+        assert_eq!(aliases(&discovery), ["z"]);
+        assert!(discovery.issues.is_empty());
+    }
+
+    #[test]
+    fn glob_expansion_should_reject_a_directory_that_cannot_be_examined_completely() {
+        let filesystem = MemoryFilesystem::default()
+            .file("/managed/ssh_config", "Include conf/*.conf\n")
+            .file("/home/test/.ssh/conf/a.conf", "Host a\n")
+            .file("/home/test/.ssh/conf/b.conf", "Host b\n")
+            .file("/home/test/.ssh/conf/c.conf", "Host c\n");
+        let limits = HostDiscoveryLimits {
+            glob_matches: 8,
+            directory_entries: 2,
+            ..HostDiscoveryLimits::default()
+        };
+
+        let discovery = discover_ssh_hosts(&filesystem, &roots(), limits);
+
+        assert!(aliases(&discovery).is_empty());
         assert!(
             discovery
                 .issues
