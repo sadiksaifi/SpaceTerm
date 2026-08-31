@@ -11,12 +11,14 @@ use std::path::Path;
 use thiserror::Error;
 
 use super::destination::SshHostAlias;
+use super::host_config::{DiscoveredSshHost, HostConfigSource};
 use crate::platform::app_paths::{AppPathRoot, AppPaths, AppPathsError};
 
 const HEADER: &str = "# This file is managed by SpaceTerm.\n\n";
 const PRECEDENCE_TAIL: &str = concat!(
     "Host *\n",
     "  Include ~/.ssh/config\n",
+    "Host *\n",
     "  Include /etc/ssh/ssh_config\n",
 );
 const TOKEN_BYTES: usize = 255;
@@ -127,16 +129,36 @@ pub(crate) enum ManagedHostsError {
     Missing { alias: String },
     #[error("the managed SSH config is not in SpaceTerm's canonical format")]
     NonCanonical,
+    #[error(
+        "the managed SSH config was committed but its directory could not be synced; reload before retrying: {source}"
+    )]
+    CommittedButUnsynced {
+        #[source]
+        source: io::Error,
+    },
     #[error(transparent)]
     Paths(#[from] AppPathsError),
     #[error("managed SSH config I/O failed: {0}")]
     Io(#[from] io::Error),
 }
 
+#[derive(Debug, Error)]
+pub(crate) enum AtomicReplaceError {
+    #[error("managed SSH config was not committed: {0}")]
+    NotCommitted(#[source] io::Error),
+    #[error("managed SSH config was committed but its directory was not synced: {0}")]
+    CommittedButUnsynced(#[source] io::Error),
+}
+
 pub(crate) trait ManagedHostsFilesystem {
     fn read(&self, directory: &Path, name: &OsStr) -> io::Result<Option<Vec<u8>>>;
 
-    fn atomic_replace(&self, directory: &Path, name: &OsStr, bytes: &[u8]) -> io::Result<()>;
+    fn atomic_replace(
+        &self,
+        directory: &Path,
+        name: &OsStr,
+        bytes: &[u8],
+    ) -> Result<(), AtomicReplaceError>;
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -168,27 +190,39 @@ impl ManagedHostsFilesystem for NativeManagedHostsFilesystem {
         Ok(Some(bytes))
     }
 
-    fn atomic_replace(&self, directory: &Path, name: &OsStr, bytes: &[u8]) -> io::Result<()> {
+    fn atomic_replace(
+        &self,
+        directory: &Path,
+        name: &OsStr,
+        bytes: &[u8],
+    ) -> Result<(), AtomicReplaceError> {
         if bytes.len() > MANAGED_CONFIG_BYTES {
-            return Err(io::Error::new(
+            return Err(AtomicReplaceError::NotCommitted(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "managed SSH config exceeds its size limit",
-            ));
+            )));
         }
-        let directory = open_private_directory(directory)?;
-        validate_target_at(&directory, name)?;
-        let (temporary_name, mut temporary) = create_temporary_file(&directory, name)?;
+        let directory = before_commit(open_private_directory(directory))?;
+        before_commit(validate_target_at(&directory, name))?;
+        let (temporary_name, mut temporary) =
+            before_commit(create_temporary_file(&directory, name))?;
         let mut rollback = TemporaryRollback::new(&directory, &temporary_name);
-        temporary.set_permissions(fs::Permissions::from_mode(PRIVATE_FILE_MODE))?;
-        validate_private_file(&temporary.metadata()?)?;
-        temporary.write_all(bytes)?;
-        temporary.sync_all()?;
-        validate_target_at(&directory, name)?;
-        rename_at(&directory, &temporary_name, name)?;
+        before_commit(temporary.set_permissions(fs::Permissions::from_mode(PRIVATE_FILE_MODE)))?;
+        let temporary_metadata = before_commit(temporary.metadata())?;
+        before_commit(validate_private_file(&temporary_metadata))?;
+        before_commit(temporary.write_all(bytes))?;
+        before_commit(temporary.sync_all())?;
+        before_commit(validate_target_at(&directory, name))?;
+        before_commit(rename_at(&directory, &temporary_name, name))?;
         rollback.disarm();
-        directory.sync_all()?;
-        Ok(())
+        directory
+            .sync_all()
+            .map_err(AtomicReplaceError::CommittedButUnsynced)
     }
+}
+
+fn before_commit<T>(result: io::Result<T>) -> Result<T, AtomicReplaceError> {
+    result.map_err(AtomicReplaceError::NotCommitted)
 }
 
 pub(crate) struct ManagedHostsStore<'a, F> {
@@ -213,13 +247,12 @@ impl<'a, F: ManagedHostsFilesystem> ManagedHostsStore<'a, F> {
     pub(crate) fn upsert(
         &self,
         host: ManagedSshHost,
-        configured_aliases: &[SshHostAlias],
+        configured_hosts: &[DiscoveredSshHost],
         editing_alias: Option<&SshHostAlias>,
     ) -> Result<(), ManagedHostsError> {
-        if configured_aliases
+        if configured_hosts
             .iter()
-            .any(|configured| configured == host.alias())
-            && editing_alias != Some(host.alias())
+            .any(|configured| configured_host_collides(configured, host.alias(), editing_alias))
         {
             return Err(ManagedHostsError::AliasCollision {
                 alias: host.alias().as_str().to_owned(),
@@ -278,10 +311,39 @@ impl<'a, F: ManagedHostsFilesystem> ManagedHostsStore<'a, F> {
                 "managed SSH config exceeds its size limit",
             )));
         }
-        self.filesystem
-            .atomic_replace(directory, name, bytes.as_bytes())?;
-        Ok(())
+        match self
+            .filesystem
+            .atomic_replace(directory, name, bytes.as_bytes())
+        {
+            Ok(()) => Ok(()),
+            Err(AtomicReplaceError::NotCommitted(source)) => Err(ManagedHostsError::Io(source)),
+            Err(AtomicReplaceError::CommittedButUnsynced(source)) => {
+                Err(ManagedHostsError::CommittedButUnsynced { source })
+            }
+        }
     }
+}
+
+fn configured_host_collides(
+    configured: &DiscoveredSshHost,
+    candidate: &SshHostAlias,
+    editing_alias: Option<&SshHostAlias>,
+) -> bool {
+    if configured.alias() != candidate {
+        return false;
+    }
+    if editing_alias != Some(candidate) || configured.is_ambiguous() {
+        return true;
+    }
+    let mut excluded_edited_declaration = false;
+    for provenance in configured.provenances() {
+        if !excluded_edited_declaration && provenance.source() == HostConfigSource::Managed {
+            excluded_edited_declaration = true;
+        } else {
+            return true;
+        }
+    }
+    !excluded_edited_declaration
 }
 
 fn invalid_managed_path() -> io::Error {
@@ -488,7 +550,7 @@ impl Drop for TemporaryRollback<'_> {
 
 fn validate_alias(value: &str) -> Result<(), ManagedSshHostValidationError> {
     validate_token(ManagedSshHostField::Alias, value, |character| {
-        character.is_alphanumeric() || matches!(character, '.' | '_' | '-' | '@' | ':' | '[' | ']')
+        character.is_alphanumeric() || matches!(character, '.' | '_' | '-' | ':' | '[' | ']')
     })
 }
 
@@ -738,6 +800,10 @@ mod tests {
 
     use super::*;
     use crate::platform::app_paths::{AppPathEnvironment, AppPaths};
+    use crate::ssh::host_config::{
+        HostConfigRoots, HostDiscovery, HostDiscoveryLimits, NativeHostConfigFilesystem,
+        discover_ssh_hosts,
+    };
 
     static NEXT_TEST_DIRECTORY: AtomicU64 = AtomicU64::new(0);
 
@@ -777,14 +843,16 @@ mod tests {
     #[derive(Default)]
     struct MemoryFilesystem {
         bytes: RefCell<Option<Vec<u8>>>,
-        fail_replace: Cell<bool>,
+        fail_before_commit: Cell<bool>,
+        fail_after_commit: Cell<bool>,
     }
 
     impl MemoryFilesystem {
         fn with_bytes(bytes: Vec<u8>) -> Self {
             Self {
                 bytes: RefCell::new(Some(bytes)),
-                fail_replace: Cell::new(false),
+                fail_before_commit: Cell::new(false),
+                fail_after_commit: Cell::new(false),
             }
         }
     }
@@ -803,17 +871,40 @@ mod tests {
             _directory: &Path,
             _name: &std::ffi::OsStr,
             bytes: &[u8],
-        ) -> std::io::Result<()> {
-            if self.fail_replace.get() {
-                return Err(std::io::Error::other("injected replacement failure"));
+        ) -> Result<(), AtomicReplaceError> {
+            if self.fail_before_commit.get() {
+                return Err(AtomicReplaceError::NotCommitted(std::io::Error::other(
+                    "injected replacement failure",
+                )));
             }
             *self.bytes.borrow_mut() = Some(bytes.to_vec());
+            if self.fail_after_commit.get() {
+                return Err(AtomicReplaceError::CommittedButUnsynced(
+                    std::io::Error::other("injected directory sync failure"),
+                ));
+            }
             Ok(())
         }
     }
 
     fn host(alias: &str, hostname: &str) -> ManagedSshHost {
         ManagedSshHost::new(alias.to_owned(), hostname.to_owned(), None, None, None).unwrap()
+    }
+
+    fn discovered_hosts(directory: &TestDirectory, managed: &str, user: &str) -> HostDiscovery {
+        let managed_path = directory.0.join("discovered-managed-config");
+        let user_path = directory.0.join("discovered-user-config");
+        fs::write(&managed_path, managed).unwrap();
+        fs::write(&user_path, user).unwrap();
+        discover_ssh_hosts(
+            &NativeHostConfigFilesystem,
+            &HostConfigRoots {
+                managed: managed_path,
+                user: user_path,
+                home: directory.0.clone(),
+            },
+            HostDiscoveryLimits::default(),
+        )
     }
 
     #[test]
@@ -852,6 +943,26 @@ mod tests {
             .unwrap_err();
             assert_eq!(error.kind, kind, "unexpected validation for {alias:?}");
         }
+    }
+
+    #[test]
+    fn validation_should_reject_at_in_a_managed_alias() {
+        let error = ManagedSshHost::new(
+            "user@work".to_owned(),
+            "server.example".to_owned(),
+            None,
+            None,
+            None,
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            error,
+            ManagedSshHostValidationError {
+                field: ManagedSshHostField::Alias,
+                kind: ManagedSshHostValueError::Unsafe,
+            }
+        );
     }
 
     #[test]
@@ -909,6 +1020,7 @@ mod tests {
                 "  IdentityFile \"~/Keys/Zeta Key\"\n\n",
                 "Host *\n",
                 "  Include ~/.ssh/config\n",
+                "Host *\n",
                 "  Include /etc/ssh/ssh_config\n",
             )
         );
@@ -942,6 +1054,7 @@ mod tests {
                 "  ProxyCommand unsafe\n\n",
                 "Host *\n",
                 "  Include ~/.ssh/config\n",
+                "Host *\n",
                 "  Include /etc/ssh/ssh_config\n",
             )
             .as_bytes(),
@@ -983,10 +1096,10 @@ mod tests {
         let paths = directory.paths();
         let filesystem = MemoryFilesystem::default();
         let store = ManagedHostsStore::new(&paths, &filesystem);
-        let configured = [SshHostAlias::new("work".to_owned()).unwrap()];
+        let configured = discovered_hosts(&directory, "", "Host work\n  HostName user.example\n");
 
         let error = store
-            .upsert(host("work", "work.example"), &configured, None)
+            .upsert(host("work", "work.example"), &configured.hosts, None)
             .unwrap_err();
 
         assert!(matches!(
@@ -1005,16 +1118,39 @@ mod tests {
         );
         let store = ManagedHostsStore::new(&paths, &filesystem);
         let alias = SshHostAlias::new("work".to_owned()).unwrap();
+        let configured = discovered_hosts(&directory, "Host work\n  HostName old.example\n", "");
 
         store
-            .upsert(
-                host("work", "new.example"),
-                std::slice::from_ref(&alias),
-                Some(&alias),
-            )
+            .upsert(host("work", "new.example"), &configured.hosts, Some(&alias))
             .unwrap();
 
         assert_eq!(store.load().unwrap()[0].host_name(), "new.example");
+    }
+
+    #[test]
+    fn store_should_not_exclude_a_user_collision_while_editing_a_managed_alias() {
+        let directory = TestDirectory::new();
+        let paths = directory.paths();
+        let original = host("work", "old.example");
+        let filesystem = MemoryFilesystem::with_bytes(
+            serialize_managed_hosts(std::slice::from_ref(&original)).into_bytes(),
+        );
+        let store = ManagedHostsStore::new(&paths, &filesystem);
+        let alias = SshHostAlias::new("work".to_owned()).unwrap();
+        let configured = discovered_hosts(
+            &directory,
+            "Host work\n  HostName old.example\n",
+            "Host work\n  HostName user.example\n",
+        );
+
+        let error = store
+            .upsert(host("work", "new.example"), &configured.hosts, Some(&alias))
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            ManagedHostsError::AliasCollision { alias } if alias == "work"
+        ));
     }
 
     #[test]
@@ -1023,7 +1159,7 @@ mod tests {
         let paths = directory.paths();
         let original = serialize_managed_hosts(&[host("work", "old.example")]).into_bytes();
         let filesystem = MemoryFilesystem::with_bytes(original.clone());
-        filesystem.fail_replace.set(true);
+        filesystem.fail_before_commit.set(true);
         let store = ManagedHostsStore::new(&paths, &filesystem);
         let alias = SshHostAlias::new("work".to_owned()).unwrap();
 
@@ -1031,6 +1167,26 @@ mod tests {
 
         assert!(
             error.is_err() && filesystem.bytes.borrow().as_deref() == Some(original.as_slice())
+        );
+    }
+
+    #[test]
+    fn store_should_report_committed_but_unsynced_after_a_directory_sync_failure() {
+        let directory = TestDirectory::new();
+        let paths = directory.paths();
+        let original = serialize_managed_hosts(&[host("work", "old.example")]).into_bytes();
+        let filesystem = MemoryFilesystem::with_bytes(original);
+        filesystem.fail_after_commit.set(true);
+        let store = ManagedHostsStore::new(&paths, &filesystem);
+        let alias = SshHostAlias::new("work".to_owned()).unwrap();
+
+        let error = store
+            .upsert(host("work", "new.example"), &[], Some(&alias))
+            .unwrap_err();
+
+        assert!(
+            matches!(error, ManagedHostsError::CommittedButUnsynced { .. })
+                && store.load().unwrap()[0].host_name() == "new.example"
         );
     }
 
