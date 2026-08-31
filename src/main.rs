@@ -1,6 +1,7 @@
 mod app;
 mod domain;
 mod platform;
+mod ssh;
 mod terminal;
 mod theme;
 mod ui;
