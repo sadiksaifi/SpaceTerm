@@ -1,14 +1,11 @@
-#![expect(
-    dead_code,
-    reason = "the native AskPass presenter lands before its SSH broker integration"
-)]
-
 use std::cell::RefCell;
 use std::marker::PhantomData;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::rc::Rc;
 use std::slice;
 
 use block::ConcreteBlock;
+use cocoa::appkit::NSApp;
 use cocoa::base::{BOOL, YES, id, nil};
 use cocoa::foundation::{NSAutoreleasePool, NSInteger, NSPoint, NSRect, NSSize, NSString};
 use gpui::Window;
@@ -40,8 +37,8 @@ pub(crate) enum AskPassRequestError {
     Empty,
     #[error("the AskPass prompt exceeds the application limit")]
     TooLong,
-    #[error("the AskPass prompt contains a NUL character")]
-    ContainsNul,
+    #[error("the AskPass prompt contains a control character")]
+    ContainsControlCharacter,
 }
 
 pub(crate) struct AskPassRequest {
@@ -60,8 +57,8 @@ impl AskPassRequest {
         if prompt.len() > MAX_ASKPASS_PROMPT_BYTES {
             return Err(AskPassRequestError::TooLong);
         }
-        if prompt.contains('\0') {
-            return Err(AskPassRequestError::ContainsNul);
+        if prompt.chars().any(char::is_control) {
+            return Err(AskPassRequestError::ContainsControlCharacter);
         }
         Ok(Self { prompt, kind })
     }
@@ -240,10 +237,15 @@ impl AskPassPresentationLifecycle {
         }
     }
 
-    fn cancellation_target(&self) -> Option<(id, id)> {
-        let active = self.state.borrow().active?;
-        (active.parent_window != nil && active.sheet_window != nil)
-            .then_some((active.parent_window, active.sheet_window))
+    fn take_cancellation_target(&self) -> Option<(id, id)> {
+        let mut state = self.state.borrow_mut();
+        let active = state.active.as_mut()?;
+        if active.parent_window == nil || active.sheet_window == nil {
+            return None;
+        }
+        let target = (active.parent_window, active.sheet_window);
+        active.sheet_window = nil;
+        Some(target)
     }
 
     #[cfg(test)]
@@ -298,7 +300,7 @@ impl MacosAskPassPresenter {
         if !main_thread() {
             return;
         }
-        let Some((parent_window, sheet_window)) = self.lifecycle.cancellation_target() else {
+        let Some((parent_window, sheet_window)) = self.lifecycle.take_cancellation_target() else {
             return;
         };
         // SAFETY: The lifecycle holds these pointers only while `NativeAskPassSheet` retains the
@@ -339,14 +341,17 @@ impl AskPassPresenter for MacosAskPassPresenter {
                 let presentation = Rc::new(RefCell::new(Some(sheet)));
                 let callback_presentation = presentation.clone();
                 let block = ConcreteBlock::new(move |response: NSInteger| {
-                    let Some(mut sheet) = callback_presentation.borrow_mut().take() else {
-                        return;
-                    };
                     let pool = NSAutoreleasePool::new(nil);
-                    sheet.finish(response);
+                    contain_appkit_completion(|| {
+                        let Some(mut sheet) = callback_presentation.borrow_mut().take() else {
+                            return;
+                        };
+                        sheet.finish(response);
+                    });
                     pool.drain();
                 });
                 let block = block.copy();
+                activate_for_sheet(self.parent_window.0);
                 let _: () = msg_send![
                     alert,
                     beginSheetModalForWindow: self.parent_window.0
@@ -364,6 +369,22 @@ impl AskPassPresenter for MacosAskPassPresenter {
 
     fn cancel_active(&mut self) {
         self.cancel_native_sheet();
+    }
+}
+
+fn contain_appkit_completion(completion: impl FnOnce()) {
+    let _ = catch_unwind(AssertUnwindSafe(completion));
+}
+
+fn activate_for_sheet(parent_window: id) {
+    // SAFETY: Presentation is main-thread confined. `parent_window` is retained by the presenter,
+    // and activation/key ordering do not transfer ownership.
+    unsafe {
+        let application = NSApp();
+        if application != nil {
+            let _: () = msg_send![application, activateIgnoringOtherApps: YES];
+        }
+        let _: () = msg_send![parent_window, makeKeyAndOrderFront: nil];
     }
 }
 
@@ -736,9 +757,11 @@ mod tests {
     }
 
     #[test]
-    fn request_rejects_empty_nul_and_oversized_prompts() {
+    fn request_rejects_empty_control_and_oversized_prompts() {
         let empty = AskPassRequest::new(String::new(), AskPassPromptKind::Secret).err();
         let nul = AskPassRequest::new("bad\0prompt".to_owned(), AskPassPromptKind::Secret).err();
+        let newline =
+            AskPassRequest::new("bad\nprompt".to_owned(), AskPassPromptKind::Secret).err();
         let oversized = AskPassRequest::new(
             "a".repeat(MAX_ASKPASS_PROMPT_BYTES + 1),
             AskPassPromptKind::Confirmation,
@@ -746,8 +769,43 @@ mod tests {
         .err();
 
         assert_eq!(empty, Some(AskPassRequestError::Empty));
-        assert_eq!(nul, Some(AskPassRequestError::ContainsNul));
+        assert_eq!(nul, Some(AskPassRequestError::ContainsControlCharacter));
+        assert_eq!(newline, Some(AskPassRequestError::ContainsControlCharacter));
         assert_eq!(oversized, Some(AskPassRequestError::TooLong));
+    }
+
+    #[test]
+    fn cancellation_target_is_claimed_exactly_once() {
+        let lifecycle = AskPassPresentationLifecycle::default();
+        let activity = lifecycle.begin().unwrap();
+        let parent = 1_usize as id;
+        let sheet = 2_usize as id;
+        lifecycle.bind_windows(activity.generation, parent, sheet);
+
+        assert_eq!(lifecycle.take_cancellation_target(), Some((parent, sheet)));
+        assert_eq!(lifecycle.take_cancellation_target(), None);
+        drop(activity);
+        assert!(!lifecycle.is_active());
+    }
+
+    #[test]
+    fn appkit_completion_boundary_contains_panics_and_runs_cleanup() {
+        struct Cleanup(Rc<RefCell<bool>>);
+
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                *self.0.borrow_mut() = true;
+            }
+        }
+
+        let cleaned = Rc::new(RefCell::new(false));
+        let cleanup = Cleanup(cleaned.clone());
+        contain_appkit_completion(move || {
+            let _cleanup = cleanup;
+            panic!("simulated completion panic");
+        });
+
+        assert!(*cleaned.borrow());
     }
 
     #[test]
