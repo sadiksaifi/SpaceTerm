@@ -1258,6 +1258,7 @@ impl ModalWindowOwner {
                     }
                     return Ok(effects);
                 };
+                let handler_owner = owner.clone();
                 let completion = DialogPendingCompletion::new(
                     owner,
                     self.window_id,
@@ -1266,6 +1267,14 @@ impl ModalWindowOwner {
                     active.request.completion.clone(),
                 );
                 effects.push(Box::new(move |cx| {
+                    let request_is_live = handler_owner.upgrade().is_some_and(|owner| {
+                        owner.read_with(cx, |state, _| {
+                            state.dialog_action_request_is_live(presentation, attempt)
+                        })
+                    });
+                    if !request_is_live {
+                        return;
+                    }
                     let decision =
                         handler(action_index, source, presentation, completion.clone(), cx);
                     let _ = apply_dialog_decision(&completion, decision, None, cx);
@@ -1284,6 +1293,7 @@ impl ModalWindowOwner {
                     active.state = RuntimeState::Open;
                     return Ok(effects);
                 };
+                let handler_owner = owner.clone();
                 let completion = ProgressCancellationCompletion::new(
                     owner,
                     self.window_id,
@@ -1292,12 +1302,58 @@ impl ModalWindowOwner {
                     active.request.completion.clone(),
                 );
                 effects.push(Box::new(move |cx| {
+                    let request_is_live = handler_owner.upgrade().is_some_and(|owner| {
+                        owner.read_with(cx, |state, _| {
+                            state.progress_action_request_is_live(presentation, attempt)
+                        })
+                    });
+                    if !request_is_live {
+                        return;
+                    }
                     let decision = handler(source, completion.clone(), cx);
                     let _ = apply_progress_cancel_decision(&completion, decision, cx);
                 }));
                 Ok(effects)
             }
         }
+    }
+
+    fn dialog_action_request_is_live(
+        &self,
+        presentation: ModalPresentationId,
+        attempt: u64,
+    ) -> bool {
+        self.active
+            .as_ref()
+            .filter(|active| active.id == presentation)
+            .is_some_and(|active| {
+                matches!(
+                    &active.state,
+                    RuntimeState::DialogPending(pending)
+                        if pending.attempt(attempt).is_some_and(|requested| {
+                            requested.phase == DialogAttemptPhase::ActionRequested
+                        })
+                )
+            })
+    }
+
+    fn progress_action_request_is_live(
+        &self,
+        presentation: ModalPresentationId,
+        attempt: u64,
+    ) -> bool {
+        self.active
+            .as_ref()
+            .filter(|active| active.id == presentation)
+            .is_some_and(|active| {
+                matches!(
+                    active.state,
+                    RuntimeState::ProgressActionRequested {
+                        attempt: current,
+                        ..
+                    } if current == attempt
+                )
+            })
     }
 
     fn apply_dialog_decision(
@@ -4550,6 +4606,98 @@ mod tests {
                 Some(replacement_id),
             )
         );
+    }
+
+    #[gpui::test]
+    fn reentrant_dialog_lifecycle_close_skips_stale_action_handler(cx: &mut TestAppContext) {
+        let owner = cx.new(|cx| ModalWindowOwner::new(WindowId::from(1), cx));
+        let weak = owner.downgrade();
+        let handle = Rc::new(RefCell::new(None));
+        let lifecycle_handle = handle.clone();
+        let handler_calls = Rc::new(Cell::new(0));
+        let handler_calls_sink = handler_calls.clone();
+        let request = dialog_request(AnyWeakEntity::new_invalid())
+            .with_dialog_action(Rc::new(move |_, _, _, _, _| {
+                handler_calls_sink.set(handler_calls_sink.get() + 1);
+                DialogCloseDecision::Pending
+            }))
+            .with_lifecycle(Some(Rc::new(move |event, cx| {
+                if matches!(event, ModalLifecycleEvent::ActionRequested(_)) {
+                    let handle = lifecycle_handle
+                        .borrow()
+                        .clone()
+                        .expect("Dialog handle should be retained");
+                    dismiss_retained_handle_for_test(&handle, cx);
+                }
+            })));
+        let completion = request.completion.clone();
+        let (presentation, startup) = owner
+            .update(cx, |state, _| state.submit(request, weak.clone()))
+            .expect("Dialog should open");
+        *handle.borrow_mut() = Some(ModalPresentationHandle {
+            owner: owner.clone(),
+            window_id: WindowId::from(1),
+            presentation,
+            completion,
+        });
+        cx.update(|cx| defer_owner_effects(&owner, startup, cx));
+        cx.run_until_parked();
+
+        let effects = owner
+            .update(cx, |state, _| {
+                state.request_action(presentation, 0, ModalActivationSource::Return, weak.clone())
+            })
+            .expect("Dialog action should enter lifecycle delivery");
+        cx.update(|cx| settle_owner(&owner, effects, cx));
+        cx.run_until_parked();
+
+        assert_eq!(handler_calls.get(), 0);
+    }
+
+    #[gpui::test]
+    fn reentrant_progress_lifecycle_close_skips_stale_cancel_handler(cx: &mut TestAppContext) {
+        let owner = cx.new(|cx| ModalWindowOwner::new(WindowId::from(1), cx));
+        let weak = owner.downgrade();
+        let handle = Rc::new(RefCell::new(None));
+        let lifecycle_handle = handle.clone();
+        let handler_calls = Rc::new(Cell::new(0));
+        let handler_calls_sink = handler_calls.clone();
+        let request = progress_request(AnyWeakEntity::new_invalid())
+            .with_progress_cancel(Rc::new(move |_, _, _| {
+                handler_calls_sink.set(handler_calls_sink.get() + 1);
+                ProgressCancelDecision::Pending
+            }))
+            .with_lifecycle(Some(Rc::new(move |event, cx| {
+                if matches!(event, ModalLifecycleEvent::ActionRequested(_)) {
+                    let handle = lifecycle_handle
+                        .borrow()
+                        .clone()
+                        .expect("ProgressDialog handle should be retained");
+                    dismiss_retained_handle_for_test(&handle, cx);
+                }
+            })));
+        let completion = request.completion.clone();
+        let (presentation, startup) = owner
+            .update(cx, |state, _| state.submit(request, weak.clone()))
+            .expect("ProgressDialog should open");
+        *handle.borrow_mut() = Some(ModalPresentationHandle {
+            owner: owner.clone(),
+            window_id: WindowId::from(1),
+            presentation,
+            completion,
+        });
+        cx.update(|cx| defer_owner_effects(&owner, startup, cx));
+        cx.run_until_parked();
+
+        let effects = owner
+            .update(cx, |state, _| {
+                state.request_action(presentation, 0, ModalActivationSource::Escape, weak.clone())
+            })
+            .expect("ProgressDialog cancellation should enter lifecycle delivery");
+        cx.update(|cx| settle_owner(&owner, effects, cx));
+        cx.run_until_parked();
+
+        assert_eq!(handler_calls.get(), 0);
     }
 
     #[gpui::test]
