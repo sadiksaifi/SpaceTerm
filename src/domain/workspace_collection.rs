@@ -94,7 +94,14 @@ pub(crate) struct RemoteDirectoryIdentity(String);
 
 impl RemoteDirectoryIdentity {
     pub(crate) fn new(value: String) -> Result<Self, RemoteWorkspaceValueError> {
-        if !value.starts_with('/') || value.chars().any(char::is_control) {
+        let normalized = value == "/"
+            || value.strip_prefix('/').is_some_and(|relative| {
+                !relative.is_empty()
+                    && relative.split('/').all(|component| {
+                        !component.is_empty() && component != "." && component != ".."
+                    })
+            });
+        if !normalized || value.chars().any(char::is_control) {
             return Err(RemoteWorkspaceValueError::InvalidDirectoryIdentity);
         }
         Ok(Self(value))
@@ -153,6 +160,7 @@ pub(crate) struct RemoteConnectionState {
 pub(crate) enum RemoteConnectionReduction {
     Applied,
     Stale,
+    Illegal,
 }
 
 impl RemoteConnectionState {
@@ -196,6 +204,40 @@ impl RemoteConnectionState {
     pub(crate) fn reduce(&mut self, next: Self) -> RemoteConnectionReduction {
         if next.generation < self.generation {
             return RemoteConnectionReduction::Stale;
+        }
+        let legal = if next.generation == self.generation {
+            matches!(
+                (self.phase, next.phase),
+                (
+                    RemoteConnectionPhase::Connecting,
+                    RemoteConnectionPhase::Connected
+                        | RemoteConnectionPhase::Failed
+                        | RemoteConnectionPhase::Closing
+                ) | (
+                    RemoteConnectionPhase::Connected,
+                    RemoteConnectionPhase::Disconnected | RemoteConnectionPhase::Closing
+                ) | (
+                    RemoteConnectionPhase::Reconnecting,
+                    RemoteConnectionPhase::Connected
+                        | RemoteConnectionPhase::Disconnected
+                        | RemoteConnectionPhase::Failed
+                        | RemoteConnectionPhase::Closing
+                ) | (
+                    RemoteConnectionPhase::Disconnected | RemoteConnectionPhase::Failed,
+                    RemoteConnectionPhase::Closing
+                )
+            )
+        } else {
+            matches!(
+                (self.phase, next.phase),
+                (
+                    RemoteConnectionPhase::Disconnected | RemoteConnectionPhase::Failed,
+                    RemoteConnectionPhase::Reconnecting
+                )
+            )
+        };
+        if !legal {
+            return RemoteConnectionReduction::Illegal;
         }
         *self = next;
         RemoteConnectionReduction::Applied
@@ -275,6 +317,12 @@ impl ValidatedWorkspaceDirectory {
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum WorkspaceDirectoryLocation {
+    Local(ValidatedWorkspaceDirectory),
+    Remote,
+}
+
 impl fmt::Display for WorkspaceId {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.0.fmt(formatter)
@@ -285,6 +333,8 @@ impl fmt::Display for WorkspaceId {
 pub(crate) enum WorkspaceError {
     #[error("Workspace {0} does not belong to this collection")]
     WorkspaceNotFound(WorkspaceId),
+    #[error("Workspace {0} has no local Workspace Directory")]
+    LocalDirectoryUnavailable(WorkspaceId),
     #[error("Workspace ID space is exhausted")]
     IdSpaceExhausted,
 }
@@ -336,8 +386,7 @@ pub(crate) struct WorkspaceEntry<T> {
     name: String,
     custom_name: Option<String>,
     kind: WorkspaceKind,
-    working_directory: PathBuf,
-    directory_identity: WorkspaceDirectoryIdentity,
+    directory_location: WorkspaceDirectoryLocation,
     availability: WorkspaceDirectoryAvailability,
     payload: T,
 }
@@ -351,8 +400,11 @@ impl<T> WorkspaceEntry<T> {
         &self.name
     }
 
-    pub(crate) fn working_directory(&self) -> &Path {
-        &self.working_directory
+    pub(crate) fn working_directory(&self) -> Option<&Path> {
+        match &self.directory_location {
+            WorkspaceDirectoryLocation::Local(directory) => Some(directory.path()),
+            WorkspaceDirectoryLocation::Remote => None,
+        }
     }
 
     pub(crate) const fn kind(&self) -> &WorkspaceKind {
@@ -384,8 +436,11 @@ impl<T> WorkspaceEntry<T> {
         }
     }
 
-    pub(crate) const fn directory_identity(&self) -> WorkspaceDirectoryIdentity {
-        self.directory_identity
+    pub(crate) const fn directory_identity(&self) -> Option<WorkspaceDirectoryIdentity> {
+        match &self.directory_location {
+            WorkspaceDirectoryLocation::Local(directory) => Some(directory.identity()),
+            WorkspaceDirectoryLocation::Remote => None,
+        }
     }
 
     pub(crate) const fn availability(&self) -> &WorkspaceDirectoryAvailability {
@@ -437,6 +492,7 @@ impl<T> WorkspaceCollection<T> {
     ) -> Self {
         let initial_workspace_id = WorkspaceId::from_raw(1);
         let payload = create_initial_payload(initial_workspace_id, directory.path());
+        let home_identity = directory.identity();
         let mut collection = Self {
             workspaces: vec![WorkspaceEntry {
                 id: initial_workspace_id,
@@ -445,14 +501,13 @@ impl<T> WorkspaceCollection<T> {
                 kind: WorkspaceKind::Scratch {
                     directory_authority,
                 },
-                working_directory: directory.path,
-                directory_identity: directory.identity,
+                directory_location: WorkspaceDirectoryLocation::Local(directory),
                 availability: WorkspaceDirectoryAvailability::Available,
                 payload,
             }],
             active_workspace_id: initial_workspace_id,
             next_workspace_id: 2,
-            home_identity: directory.identity,
+            home_identity,
             directory_names: true,
         };
         collection.recalculate_automatic_names();
@@ -520,7 +575,11 @@ impl<T> WorkspaceCollection<T> {
     ) -> Result<WorkspaceId, WorkspaceError> {
         let (workspace_id, next_workspace_id) = self.next_workspace_id()?;
         let name = self.next_default_workspace_name(None);
-        let payload = create_payload(workspace_id, &working_directory);
+        let directory = ValidatedWorkspaceDirectory::new(
+            working_directory,
+            WorkspaceDirectoryIdentity::new(0, workspace_id.get()),
+        );
+        let payload = create_payload(workspace_id, directory.path());
         self.workspaces.push(WorkspaceEntry {
             id: workspace_id,
             name: name.clone(),
@@ -528,8 +587,7 @@ impl<T> WorkspaceCollection<T> {
             kind: WorkspaceKind::Scratch {
                 directory_authority: DirectoryAuthority::initial(),
             },
-            working_directory,
-            directory_identity: WorkspaceDirectoryIdentity::new(0, workspace_id.get()),
+            directory_location: WorkspaceDirectoryLocation::Local(directory),
             availability: WorkspaceDirectoryAvailability::Available,
             payload,
         });
@@ -582,7 +640,6 @@ impl<T> WorkspaceCollection<T> {
         }
 
         let (workspace_id, next_workspace_id) = self.next_workspace_id()?;
-        let working_directory = PathBuf::from(remote_directory.as_str());
         let payload = create_payload(workspace_id);
         self.workspaces.push(WorkspaceEntry {
             id: workspace_id,
@@ -594,8 +651,7 @@ impl<T> WorkspaceCollection<T> {
                 remote_home_identity,
                 connection_state,
             },
-            working_directory,
-            directory_identity: WorkspaceDirectoryIdentity::new(0, workspace_id.get()),
+            directory_location: WorkspaceDirectoryLocation::Remote,
             availability: WorkspaceDirectoryAvailability::Available,
             payload,
         });
@@ -654,11 +710,13 @@ impl<T> WorkspaceCollection<T> {
         if *directory_authority != authority {
             return Ok(false);
         }
-        let changed = workspace.working_directory != directory.path
-            || workspace.directory_identity != directory.identity
-            || !workspace.availability.is_available();
-        workspace.working_directory = directory.path;
-        workspace.directory_identity = directory.identity;
+        let WorkspaceDirectoryLocation::Local(current_directory) =
+            &mut workspace.directory_location
+        else {
+            unreachable!("a Scratch Workspace must own a local Workspace Directory")
+        };
+        let changed = current_directory != &directory || !workspace.availability.is_available();
+        *current_directory = directory;
         workspace.availability = WorkspaceDirectoryAvailability::Available;
         self.recalculate_automatic_names();
         Ok(changed)
@@ -707,8 +765,12 @@ impl<T> WorkspaceCollection<T> {
         }
         *directory_authority = promoted_authority;
         if let Some(directory) = directory {
-            workspace.working_directory = directory.path;
-            workspace.directory_identity = directory.identity;
+            let WorkspaceDirectoryLocation::Local(current_directory) =
+                &mut workspace.directory_location
+            else {
+                unreachable!("a Scratch Workspace must own a local Workspace Directory")
+            };
+            *current_directory = directory;
             workspace.availability = WorkspaceDirectoryAvailability::Available;
         }
         self.recalculate_automatic_names();
@@ -736,8 +798,12 @@ impl<T> WorkspaceCollection<T> {
         }
         *directory_authority = promoted_authority;
         if let Some(directory) = directory {
-            workspace.working_directory = directory.path;
-            workspace.directory_identity = directory.identity;
+            let WorkspaceDirectoryLocation::Local(current_directory) =
+                &mut workspace.directory_location
+            else {
+                unreachable!("a Scratch Workspace must own a local Workspace Directory")
+            };
+            *current_directory = directory;
             workspace.availability = WorkspaceDirectoryAvailability::Available;
         }
         self.recalculate_automatic_names();
@@ -764,7 +830,10 @@ impl<T> WorkspaceCollection<T> {
         let Some(workspace) = self.workspace_mut(workspace_id) else {
             return Err(WorkspaceError::WorkspaceNotFound(workspace_id));
         };
-        workspace.directory_identity = identity;
+        let WorkspaceDirectoryLocation::Local(directory) = &mut workspace.directory_location else {
+            return Err(WorkspaceError::LocalDirectoryUnavailable(workspace_id));
+        };
+        directory.identity = identity;
         workspace.availability = WorkspaceDirectoryAvailability::Available;
         self.recalculate_automatic_names();
         Ok(())
@@ -839,8 +908,7 @@ impl<T> WorkspaceCollection<T> {
                     kind: WorkspaceKind::Scratch {
                         directory_authority,
                     },
-                    working_directory: replacement.path,
-                    directory_identity: replacement.identity,
+                    directory_location: WorkspaceDirectoryLocation::Local(replacement),
                     availability: WorkspaceDirectoryAvailability::Available,
                     payload: replacement_payload,
                 },
@@ -926,8 +994,7 @@ impl<T> WorkspaceCollection<T> {
             name: String::new(),
             custom_name: None,
             kind,
-            working_directory: directory.path,
-            directory_identity: directory.identity,
+            directory_location: WorkspaceDirectoryLocation::Local(directory),
             availability: WorkspaceDirectoryAvailability::Available,
             payload,
         });
@@ -952,16 +1019,20 @@ impl<T> WorkspaceCollection<T> {
                 let base = match &workspace.kind {
                     WorkspaceKind::RemoteProject {
                         key,
-                        remote_directory,
                         remote_home_identity,
                         ..
-                    } => {
-                        automatic_remote_workspace_name(key, remote_directory, remote_home_identity)
-                    }
+                    } => automatic_remote_workspace_name(key, remote_home_identity),
                     WorkspaceKind::Scratch { .. } | WorkspaceKind::LocalProject { .. } => {
+                        let WorkspaceDirectoryLocation::Local(directory) =
+                            &workspace.directory_location
+                        else {
+                            unreachable!(
+                                "Scratch and Local Project Workspaces must own local directories"
+                            )
+                        };
                         automatic_workspace_basename(
-                            &workspace.working_directory,
-                            workspace.directory_identity,
+                            directory.path(),
+                            directory.identity(),
                             self.home_identity,
                         )
                     }
@@ -974,7 +1045,7 @@ impl<T> WorkspaceCollection<T> {
                     .filter(|candidate| {
                         candidate.custom_name.is_none()
                             && matches!(candidate.kind, WorkspaceKind::Scratch { .. })
-                            && candidate.directory_identity == workspace.directory_identity
+                            && candidate.directory_identity() == workspace.directory_identity()
                     })
                     .count()
                     + 1;
@@ -1025,7 +1096,6 @@ fn automatic_workspace_basename(
 
 fn automatic_remote_workspace_name(
     key: &RemoteWorkspaceKey,
-    directory: &RemoteWorkspaceDirectory,
     home_identity: &RemoteDirectoryIdentity,
 ) -> String {
     let destination = key.destination().as_str();
@@ -1033,15 +1103,15 @@ fn automatic_remote_workspace_name(
         return destination.to_owned();
     }
 
-    let trimmed = directory.as_str().trim_end_matches('/');
-    let basename = if trimmed.is_empty() {
+    let physical_directory = key.physical_directory().as_str();
+    let basename = if physical_directory == "/" {
         "/"
     } else {
-        trimmed
+        physical_directory
             .rsplit('/')
             .next()
             .filter(|name| !name.is_empty())
-            .unwrap_or(trimmed)
+            .unwrap_or(physical_directory)
     };
     format!("{basename} · {destination}")
 }
@@ -1190,7 +1260,7 @@ mod tests {
         );
         assert_eq!(
             workspaces.workspace(created).unwrap().working_directory(),
-            Path::new("/selected/project")
+            Some(Path::new("/selected/project"))
         );
     }
 
@@ -1211,6 +1281,30 @@ mod tests {
         assert!(SshDestination::new("bad destination".to_owned()).is_err());
         assert!(RemoteWorkspaceDirectory::new("relative/path".to_owned()).is_err());
         assert!(RemoteDirectoryIdentity::new("~/not-physical".to_owned()).is_err());
+    }
+
+    #[test]
+    fn remote_physical_identity_requires_normalized_absolute_form() {
+        for invalid in [
+            "",
+            "relative/path",
+            "//srv/project",
+            "/srv//project",
+            "/srv/./project",
+            "/srv/team/../project",
+            "/srv/project/",
+        ] {
+            assert!(
+                RemoteDirectoryIdentity::new(invalid.to_owned()).is_err(),
+                "{invalid:?} is not normalized `pwd -P` output"
+            );
+        }
+
+        assert_eq!(remote_identity("/").as_str(), "/");
+        assert_eq!(
+            remote_identity("/srv/Space Term").as_str(),
+            "/srv/Space Term"
+        );
     }
 
     #[test]
@@ -1256,6 +1350,85 @@ mod tests {
                 .remote_workspace_directory()
                 .map(RemoteWorkspaceDirectory::as_str),
             Some("~/project")
+        );
+    }
+
+    #[test]
+    fn remote_project_directory_is_unavailable_through_local_directory_apis() {
+        let mut workspaces = WorkspaceCollection::new_scratch(
+            validated("/Users/test", 10),
+            DirectoryAuthority::initial(),
+            |_, _| (),
+        );
+        let workspace_id = workspaces
+            .create_remote_project_workspace(
+                remote_key("orb", "/home/test/project"),
+                remote_directory("~/project"),
+                remote_identity("/home/test"),
+                RemoteConnectionState::connected(1),
+                |_| (),
+            )
+            .unwrap()
+            .workspace_id();
+        let workspace = workspaces.workspace(workspace_id).unwrap();
+
+        assert_eq!(workspace.working_directory(), None);
+        assert_eq!(workspace.directory_identity(), None);
+        assert_eq!(
+            workspace
+                .remote_workspace_directory()
+                .map(RemoteWorkspaceDirectory::as_str),
+            Some("~/project")
+        );
+        assert_eq!(
+            workspaces
+                .set_directory_available(workspace_id, WorkspaceDirectoryIdentity::new(1, 99),),
+            Err(WorkspaceError::LocalDirectoryUnavailable(workspace_id))
+        );
+    }
+
+    #[test]
+    fn scratch_and_local_project_keep_validated_local_directory_apis() {
+        let mut workspaces = WorkspaceCollection::new_scratch(
+            validated("/Users/test", 10),
+            DirectoryAuthority::initial(),
+            |_, _| (),
+        );
+        let project_id = workspaces
+            .create_local_project_workspace(validated("/Users/test/project", 20), |_, _| ())
+            .unwrap();
+
+        assert_eq!(
+            (
+                workspaces
+                    .workspace(WorkspaceId::new(1))
+                    .unwrap()
+                    .working_directory(),
+                workspaces
+                    .workspace(WorkspaceId::new(1))
+                    .unwrap()
+                    .directory_identity(),
+            ),
+            (
+                Some(Path::new("/Users/test")),
+                Some(WorkspaceDirectoryIdentity::new(1, 10)),
+            )
+        );
+        assert_eq!(
+            (
+                workspaces
+                    .workspace(project_id)
+                    .unwrap()
+                    .working_directory(),
+                workspaces
+                    .workspace(project_id)
+                    .unwrap()
+                    .directory_identity(),
+            ),
+            (
+                Some(Path::new("/Users/test/project")),
+                Some(WorkspaceDirectoryIdentity::new(1, 20)),
+            )
         );
     }
 
@@ -1335,6 +1508,34 @@ mod tests {
     }
 
     #[test]
+    fn remote_automatic_name_uses_physical_basename_without_changing_startup_spelling() {
+        let mut workspaces = WorkspaceCollection::new_scratch(
+            validated("/Users/test", 10),
+            DirectoryAuthority::initial(),
+            |_, _| (),
+        );
+        let workspace_id = workspaces
+            .create_remote_project_workspace(
+                remote_key("orb", "/srv/team/project"),
+                remote_directory("/srv/team/project/."),
+                remote_identity("/home/test"),
+                RemoteConnectionState::connected(1),
+                |_| (),
+            )
+            .unwrap()
+            .workspace_id();
+        let workspace = workspaces.workspace(workspace_id).unwrap();
+
+        assert_eq!(workspace.name(), "project · orb");
+        assert_eq!(
+            workspace
+                .remote_workspace_directory()
+                .map(RemoteWorkspaceDirectory::as_str),
+            Some("/srv/team/project/.")
+        );
+    }
+
+    #[test]
     fn remote_connection_state_rejects_stale_generations() {
         let mut state = RemoteConnectionState::reconnecting(7);
 
@@ -1348,6 +1549,63 @@ mod tests {
         );
         assert_eq!(state, RemoteConnectionState::connected(7));
         assert_eq!(state.generation(), 7);
+    }
+
+    #[test]
+    fn closing_remote_connection_state_is_terminal() {
+        let mut state = RemoteConnectionState::closing(9);
+
+        assert_eq!(
+            state.reduce(RemoteConnectionState::connected(9)),
+            RemoteConnectionReduction::Illegal
+        );
+        assert_eq!(
+            state.reduce(RemoteConnectionState::reconnecting(10)),
+            RemoteConnectionReduction::Illegal
+        );
+        assert_eq!(state, RemoteConnectionState::closing(9));
+    }
+
+    #[test]
+    fn reconnect_requires_a_new_generation_and_rejects_predecessor_completions() {
+        let mut state = RemoteConnectionState::disconnected(7);
+
+        assert_eq!(
+            state.reduce(RemoteConnectionState::reconnecting(7)),
+            RemoteConnectionReduction::Illegal
+        );
+        assert_eq!(
+            state.reduce(RemoteConnectionState::reconnecting(8)),
+            RemoteConnectionReduction::Applied
+        );
+        assert_eq!(
+            state.reduce(RemoteConnectionState::connected(7)),
+            RemoteConnectionReduction::Stale
+        );
+        assert_eq!(
+            state.reduce(RemoteConnectionState::connected(8)),
+            RemoteConnectionReduction::Applied
+        );
+        assert_eq!(
+            state.reduce(RemoteConnectionState::disconnected(7)),
+            RemoteConnectionReduction::Stale
+        );
+        assert_eq!(state, RemoteConnectionState::connected(8));
+    }
+
+    #[test]
+    fn delayed_ready_cannot_resurrect_a_disconnected_generation() {
+        let mut state = RemoteConnectionState::connected(4);
+
+        assert_eq!(
+            state.reduce(RemoteConnectionState::disconnected(4)),
+            RemoteConnectionReduction::Applied
+        );
+        assert_eq!(
+            state.reduce(RemoteConnectionState::connected(4)),
+            RemoteConnectionReduction::Illegal
+        );
+        assert_eq!(state, RemoteConnectionState::disconnected(4));
     }
 
     #[test]
@@ -1388,7 +1646,7 @@ mod tests {
                 .unwrap()
         );
         let workspace = workspaces.workspace(WorkspaceId::new(1)).unwrap();
-        assert_eq!(workspace.working_directory(), Path::new("/promoted"));
+        assert_eq!(workspace.working_directory(), Some(Path::new("/promoted")));
         assert_eq!(
             workspace.availability(),
             &WorkspaceDirectoryAvailability::Available
@@ -1507,7 +1765,7 @@ mod tests {
             )
             .unwrap();
 
-        let stored_working_directory = workspaces.active_workspace().working_directory();
+        let stored_working_directory = workspaces.active_workspace().working_directory().unwrap();
         assert_eq!(
             (
                 workspaces.active_workspace().name(),
@@ -1756,7 +2014,8 @@ mod tests {
             )
             .unwrap();
 
-        let replacement_working_directory = workspaces.active_workspace().working_directory();
+        let replacement_working_directory =
+            workspaces.active_workspace().working_directory().unwrap();
 
         assert_eq!(
             (

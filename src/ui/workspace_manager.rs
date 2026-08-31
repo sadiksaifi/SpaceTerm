@@ -20,7 +20,7 @@ use super::{
     WindowManager, WindowManagerEvent,
 };
 use crate::domain::{
-    CloseWorkspaceOutcome, DirectoryAuthority, FinalWindowCloseOutcome,
+    CloseWorkspaceOutcome, DirectoryAuthority, FinalWindowCloseOutcome, RemoteWorkspaceDirectory,
     ValidatedWorkspaceDirectory, WorkspaceCollection, WorkspaceDirectoryAvailability,
     WorkspaceDirectoryIdentity, WorkspaceError, WorkspaceId, WorkspaceKind,
 };
@@ -432,8 +432,13 @@ impl WorkspaceManager {
             return;
         };
         let manager = workspace.payload().clone();
-        let path = workspace.working_directory().to_path_buf();
-        let identity = workspace.directory_identity();
+        let (Some(path), Some(identity)) = (
+            workspace.working_directory(),
+            workspace.directory_identity(),
+        ) else {
+            unreachable!("a Scratch Workspace must own a local Workspace Directory")
+        };
+        let path = path.to_path_buf();
         manager.update(cx, |manager, cx| {
             manager.set_workspace_directory(&path, identity, cx);
         });
@@ -479,8 +484,13 @@ impl WorkspaceManager {
             return;
         };
         let manager = workspace.payload().clone();
-        let path = workspace.working_directory().to_path_buf();
-        let identity = workspace.directory_identity();
+        let (Some(path), Some(identity)) = (
+            workspace.working_directory(),
+            workspace.directory_identity(),
+        ) else {
+            unreachable!("a Scratch Workspace must own a local Workspace Directory")
+        };
+        let path = path.to_path_buf();
         manager.update(cx, |manager, cx| {
             manager.set_workspace_directory(&path, identity, cx)
         });
@@ -526,8 +536,13 @@ impl WorkspaceManager {
             return;
         };
         let manager = workspace.payload().clone();
-        let path = workspace.working_directory().to_path_buf();
-        let identity = workspace.directory_identity();
+        let (Some(path), Some(identity)) = (
+            workspace.working_directory(),
+            workspace.directory_identity(),
+        ) else {
+            unreachable!("a Scratch Workspace must own a local Workspace Directory")
+        };
+        let path = path.to_path_buf();
         manager.update(cx, |manager, cx| {
             manager.set_workspace_directory(&path, identity, cx)
         });
@@ -651,7 +666,12 @@ impl WorkspaceManager {
                 WorkspaceSearchItem::new(
                     workspace.id(),
                     workspace.name().to_owned(),
-                    compact_home_path(workspace.working_directory(), &self.default_workspace_root),
+                    workspace_directory_labels(
+                        workspace.working_directory(),
+                        workspace.remote_workspace_directory(),
+                        &self.default_workspace_root,
+                    )
+                    .0,
                     matches!(workspace.kind(), WorkspaceKind::LocalProject { .. }),
                     matches!(
                         workspace.availability(),
@@ -1193,8 +1213,13 @@ impl WorkspaceManager {
         let Some(workspace) = self.workspaces.workspace(workspace_id) else {
             return;
         };
-        let path = workspace.working_directory().to_path_buf();
-        let expected_identity = workspace.directory_identity();
+        let (Some(path), Some(expected_identity)) = (
+            workspace.working_directory(),
+            workspace.directory_identity(),
+        ) else {
+            unreachable!("a Local Project Workspace must own a local Workspace Directory")
+        };
+        let path = path.to_path_buf();
         match validate_workspace_directory(&path) {
             Ok(directory) if directory.identity() == expected_identity => {
                 let _ = self
@@ -1821,7 +1846,11 @@ impl WorkspaceManager {
         let local_project = matches!(workspace.kind(), WorkspaceKind::LocalProject { .. });
         let available = workspace.availability().is_available();
         let name = workspace.name().to_owned();
-        let path = compact_home_path(workspace.working_directory(), &self.default_workspace_root);
+        let (path, _) = workspace_directory_labels(
+            workspace.working_directory(),
+            workspace.remote_workspace_directory(),
+            &self.default_workspace_root,
+        );
         let foreground = gpui_color(if available {
             ACTIVE_THEME.text
         } else {
@@ -2254,16 +2283,16 @@ impl WorkspaceManager {
         let active_workspace_id = self.workspaces.active_workspace_id();
         for workspace in self.workspaces.iter() {
             let (window_count, pane_count) = workspace.payload().read(cx).aggregate_counts(cx);
-            let path =
-                compact_home_path(workspace.working_directory(), &self.default_workspace_root);
+            let (path, directory_tooltip) = workspace_directory_labels(
+                workspace.working_directory(),
+                workspace.remote_workspace_directory(),
+                &self.default_workspace_root,
+            );
             let (available, tooltip) = match workspace.availability() {
-                WorkspaceDirectoryAvailability::Available => {
-                    (true, workspace.working_directory().display().to_string())
+                WorkspaceDirectoryAvailability::Available => (true, directory_tooltip),
+                WorkspaceDirectoryAvailability::Unavailable { reason } => {
+                    (false, format!("{directory_tooltip}: {reason}"))
                 }
-                WorkspaceDirectoryAvailability::Unavailable { reason } => (
-                    false,
-                    format!("{}: {reason}", workspace.working_directory().display()),
-                ),
             };
             rows = rows.child(self.render_workspace_row(
                 WorkspaceRowViewModel {
@@ -2625,6 +2654,26 @@ fn compact_home_path(path: &std::path::Path, home: &std::path::Path) -> String {
         .ok()
         .map(|relative| format!("~/{}", relative.display()))
         .unwrap_or_else(|| path.display().to_string())
+}
+
+fn workspace_directory_labels(
+    local_directory: Option<&std::path::Path>,
+    remote_directory: Option<&RemoteWorkspaceDirectory>,
+    local_home: &std::path::Path,
+) -> (String, String) {
+    match (local_directory, remote_directory) {
+        (Some(directory), None) => (
+            compact_home_path(directory, local_home),
+            directory.display().to_string(),
+        ),
+        (None, Some(directory)) => {
+            let directory = directory.as_str().to_owned();
+            (directory.clone(), directory)
+        }
+        (Some(_), Some(_)) | (None, None) => {
+            unreachable!("a Workspace must own exactly one local or remote directory")
+        }
+    }
 }
 
 fn initial_workspace_directory(path: PathBuf) -> (ValidatedWorkspaceDirectory, Option<String>) {
@@ -3577,7 +3626,7 @@ mod tests {
             let workspace = manager.workspaces.active_workspace();
             (
                 manager.workspaces.len(),
-                workspace.working_directory().to_path_buf(),
+                workspace.working_directory().unwrap().to_path_buf(),
                 workspace.kind().clone(),
             )
         });
@@ -4774,6 +4823,7 @@ mod tests {
                     .workspaces
                     .active_workspace()
                     .working_directory()
+                    .unwrap()
                     .to_path_buf(),
                 records.dropped_session_ids(),
                 records
