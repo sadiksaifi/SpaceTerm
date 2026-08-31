@@ -5146,6 +5146,7 @@ name = "spaceterm-ui"
 version = "0.0.0"
 dependencies = [
  "gpui",
+ "resvg",
  "unicode-segmentation",
 ]
 

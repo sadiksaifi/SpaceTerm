@@ -55,7 +55,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn every_declared_control_asset_is_embedded_svg() {
+    fn every_declared_control_asset_loads_and_renders_as_svg() {
         let assets = ControlAssets;
 
         for path in ASSET_PATHS {
@@ -63,10 +63,22 @@ mod tests {
                 .load(path)
                 .expect("embedded control asset should load")
                 .expect("declared control asset should exist");
-            let source = std::str::from_utf8(&bytes).expect("control asset should be UTF-8 SVG");
+            let tree = resvg::usvg::Tree::from_data(&bytes, &resvg::usvg::Options::default())
+                .unwrap_or_else(|error| panic!("{path} should parse as SVG: {error}"));
+            let mut pixmap = resvg::tiny_skia::Pixmap::new(16, 16)
+                .expect("control icon raster target should be valid");
+            resvg::render(
+                &tree,
+                resvg::tiny_skia::Transform::from_scale(
+                    16.0 / tree.size().width(),
+                    16.0 / tree.size().height(),
+                ),
+                &mut pixmap.as_mut(),
+            );
+
             assert!(
-                source.starts_with("<svg"),
-                "{path} should contain SVG markup"
+                pixmap.pixels().iter().any(|pixel| pixel.alpha() > 0),
+                "{path} should rasterize visible pixels"
             );
         }
     }
