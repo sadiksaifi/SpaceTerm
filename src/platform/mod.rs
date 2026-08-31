@@ -1,4 +1,5 @@
 pub(crate) mod acceptance_observation;
+pub(crate) mod app_paths;
 
 pub(crate) mod finder_fallback;
 pub(crate) mod workspace_directory;
