@@ -11,6 +11,7 @@ unicode-segmentation = "=1.13.3"
 
 [dev-dependencies]
 gpui = { version = "=0.2.2", features = ["test-support"] }
+resvg = { version = "=0.45.1", default-features = false }
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("cargo-clippy"))'] }

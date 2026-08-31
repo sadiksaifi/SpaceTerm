@@ -150,6 +150,7 @@ pub(crate) struct Theme {
     pub(crate) syntax: SyntaxTheme,
     pub(crate) players: [PlayerTheme; 8],
     pub(crate) background: Color,
+    pub(crate) modal_scrim: Color,
     pub(crate) link_text_hover: Color,
     pub(crate) error: Color,
     pub(crate) error_border: Color,
@@ -733,6 +734,7 @@ pub(crate) static VAGUE_PRO: Theme = Theme {
         },
     ],
     background: Color::rgb(0x14_14_15),
+    modal_scrim: Color::rgba(0x14_14_15_99),
     link_text_hover: Color::rgb(0x7e_98_e8),
     error: Color::rgb(0xd8_64_7e),
     error_border: Color::rgb(0xd8_64_7e),
@@ -901,6 +903,7 @@ mod tests {
     fn vague_pro_interface_tokens_match_upstream() {
         assert_eq!(
             (
+                VAGUE_PRO.modal_scrim.rgba_hex(),
                 VAGUE_PRO.text_muted.rgba_hex(),
                 VAGUE_PRO.element_hover.rgba_hex(),
                 VAGUE_PRO.ghost_element_background.rgba_hex(),
@@ -912,6 +915,7 @@ mod tests {
                 VAGUE_PRO.tab_active_background.rgba_hex(),
             ),
             (
+                0x14_14_15_99,
                 0x87_87_87_ff,
                 0x25_25_30_ff,
                 0x00_00_00_00,

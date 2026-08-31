@@ -3,10 +3,12 @@
 //! The crate owns interaction and editing behavior while the application supplies all product
 //! colors and surrounding chrome from its canonical theme.
 
+mod assets;
 mod button;
 mod command_palette;
 mod menu;
 mod middle_truncated_text;
+mod modal;
 mod overlay_scrollbar;
 mod resize_handle;
 mod text_input;
@@ -15,6 +17,7 @@ mod window_drag_region;
 
 use gpui::App;
 
+pub use assets::ControlAssets;
 pub use button::{
     Button, ButtonActivation, ButtonActivationSource, ButtonMetrics, ButtonPaint, ButtonRole,
     ButtonShape, ButtonSize, ButtonSizes, ButtonTheme, ButtonVariant, ButtonVariantStyle,
@@ -35,6 +38,21 @@ pub use menu::{
     PickerChange, PickerOption, dismiss_active_menu, window_menu_is_open,
 };
 pub use middle_truncated_text::MiddleTruncatedText;
+pub use modal::{
+    Alert, AlertAccessory, AlertIntent, AlertOutcome, AlertSuppression, DeterminateProgress,
+    Dialog, DialogActionRequest, DialogCloseDecision, DialogCompletion, DialogFocusTarget,
+    DialogInitialFocus, DialogOutcome, DialogPendingCompletion, DialogSize,
+    MAX_ALERT_DETAIL_CHARACTERS, MAX_ALERT_MESSAGE_CHARACTERS, MAX_PROGRESS_DETAIL_CHARACTERS,
+    MAX_PROGRESS_STATUS_CHARACTERS, ModalAction, ModalActionEmphasis, ModalActionIntent,
+    ModalActionRole, ModalActivationSource, ModalCloseReason, ModalDesktopPolicy,
+    ModalDismissalError, ModalId, ModalKeybindingProfile, ModalLayer, ModalLifecycleEvent,
+    ModalMetrics, ModalPaint, ModalPresentationError, ModalPresentationHandle, ModalPresentationId,
+    ModalStaleGenerationError, ModalTerminalOutcomeError, ModalTextField, ModalTheme,
+    ModalUpdateError, ModalValidationError, ProgressCancelDecision, ProgressCancellation,
+    ProgressCancellationCompletion, ProgressDialog, ProgressDialogHandle, ProgressDialogOutcome,
+    ProgressDialogUpdate, ProgressState, ProgressValueError, TextDirection,
+    install_modal_keybindings, install_modal_policy, install_modal_theme, window_modal_is_open,
+};
 pub use overlay_scrollbar::{
     OverlayScrollbar, OverlayScrollbarEvent, ScrollMetrics, ScrollOffset, ScrollbarTheme,
 };
@@ -45,9 +63,10 @@ pub use resize_handle::{
 pub use text_input::{
     Copy as EditCopy, Cut as EditCut, Paste as EditPaste, Redo as EditRedo,
     SelectAll as EditSelectAll, TextInput, TextInputChangeSource, TextInputComposition,
-    TextInputEvent, TextInputKeybindingProfile, TextInputMetrics, TextInputPaint,
-    TextInputSelection, TextInputTabBehavior, TextInputTheme, TextInputValueChanged,
-    TextInputVariant, TextInputVariants, Undo as EditUndo, install_text_input_keybindings,
+    TextInputEscapeBehavior, TextInputEvent, TextInputKeybindingProfile, TextInputMetrics,
+    TextInputPaint, TextInputReturnBehavior, TextInputSelection, TextInputTabBehavior,
+    TextInputTheme, TextInputValueChanged, TextInputVariant, TextInputVariants, Undo as EditUndo,
+    install_text_input_keybindings,
 };
 pub use tooltip::{
     Tooltip, TooltipLayer, TooltipMetrics, TooltipPaint, TooltipTarget, TooltipTargetVisibility,
@@ -58,33 +77,67 @@ pub use window_drag_region::{
     WindowDragRegionResponse, WindowDragRegionStatus,
 };
 
-/// Installs shared control themes and platform-neutral control behavior.
+/// Bounded application-owned presentation catalog for every reusable control family.
 ///
-/// Applications select a text-input keybinding profile separately with
+/// The catalog keeps initialization stable as the library gains cohesive control families and
+/// does not expose an arbitrary style map or call-site paint escape hatch.
+pub struct ControlThemeCatalog {
+    button: ButtonTheme,
+    scrollbar: ScrollbarTheme,
+    resize_handle: ResizeHandleTheme,
+    menu: MenuTheme,
+    command_palette: CommandPaletteTheme,
+    text_input: TextInputTheme,
+    tooltip: TooltipTheme,
+    modal: ModalTheme,
+}
+
+impl ControlThemeCatalog {
+    /// Creates the complete catalog required by [`init`].
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the bounded catalog has one required entry for each reusable control family"
+    )]
+    pub fn new(
+        button: ButtonTheme,
+        scrollbar: ScrollbarTheme,
+        resize_handle: ResizeHandleTheme,
+        menu: MenuTheme,
+        command_palette: CommandPaletteTheme,
+        text_input: TextInputTheme,
+        tooltip: TooltipTheme,
+        modal: ModalTheme,
+    ) -> Self {
+        Self {
+            button,
+            scrollbar,
+            resize_handle,
+            menu,
+            command_palette,
+            text_input,
+            tooltip,
+            modal,
+        }
+    }
+}
+
+/// Installs the complete shared control catalog and platform-neutral control behavior.
+///
+/// Applications install desktop policy, modal key equivalents, and text-input keybindings
+/// explicitly with [`install_modal_policy`], [`install_modal_keybindings`], and
 /// [`install_text_input_keybindings`].
-#[expect(
-    clippy::too_many_arguments,
-    reason = "installation accepts one explicit application-owned theme per reusable control family"
-)]
-pub fn init(
-    cx: &mut App,
-    button_theme: ButtonTheme,
-    scrollbar_theme: ScrollbarTheme,
-    resize_handle_theme: ResizeHandleTheme,
-    menu_theme: MenuTheme,
-    command_palette_theme: CommandPaletteTheme,
-    text_input_theme: TextInputTheme,
-    tooltip_theme: TooltipTheme,
-) {
-    cx.set_global(button_theme);
-    cx.set_global(scrollbar_theme);
-    cx.set_global(resize_handle_theme);
-    cx.set_global(menu_theme);
-    cx.set_global(command_palette_theme);
-    cx.set_global(text_input_theme);
-    cx.set_global(tooltip_theme);
+pub fn init(cx: &mut App, catalog: ControlThemeCatalog) {
+    cx.set_global(catalog.button);
+    cx.set_global(catalog.scrollbar);
+    cx.set_global(catalog.resize_handle);
+    cx.set_global(catalog.menu);
+    cx.set_global(catalog.command_palette);
+    cx.set_global(catalog.text_input);
+    cx.set_global(catalog.tooltip);
+    cx.set_global(catalog.modal);
     text_input::init(cx);
     menu::init(cx);
     command_palette::init(cx);
     tooltip::init(cx);
+    modal::init(cx);
 }

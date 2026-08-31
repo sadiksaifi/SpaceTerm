@@ -454,6 +454,11 @@ impl WindowManager {
     }
 
     #[cfg(test)]
+    pub(crate) fn active_pane_host(&self) -> Entity<PaneHost> {
+        self.windows.active_window().clone()
+    }
+
+    #[cfg(test)]
     pub(crate) fn focused_terminal_is_focused(&self, window: &Window, cx: &App) -> bool {
         self.windows
             .active_window()

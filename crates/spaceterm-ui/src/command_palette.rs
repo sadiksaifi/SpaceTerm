@@ -1,11 +1,12 @@
-use std::{ops::Range, rc::Rc};
+use std::{cell::Cell, ops::Range, rc::Rc};
 
 use gpui::{
-    AnyElement, App, AppContext as _, Corner, CursorStyle, Entity, EventEmitter, Global,
-    HitboxBehavior, InteractiveElement as _, IntoElement, KeyBinding, ListAlignment, ListOffset,
-    ListState, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _,
-    Pixels, Render, Rgba, ScrollWheelEvent, SharedString, Styled as _, Subscription, WeakEntity,
-    WeakFocusHandle, Window, actions, anchored, canvas, div, list, prelude::FluentBuilder as _, px,
+    AnyElement, App, AppContext as _, BorrowAppContext as _, Corner, CursorStyle, Entity,
+    EventEmitter, Global, HitboxBehavior, InteractiveElement as _, IntoElement, KeyBinding,
+    ListAlignment, ListOffset, ListState, MouseButton, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, ParentElement as _, Pixels, Render, Rgba, ScrollWheelEvent, SharedString,
+    Styled as _, Subscription, WeakEntity, WeakFocusHandle, Window, WindowId, actions, anchored,
+    canvas, div, list, prelude::FluentBuilder as _, px,
 };
 
 use crate::{
@@ -51,6 +52,311 @@ pub(crate) fn init(cx: &mut App) {
         KeyBinding::new("tab", FocusNext, Some(KEY_CONTEXT)),
         KeyBinding::new("shift-tab", FocusPrevious, Some(KEY_CONTEXT)),
     ]);
+    if !cx.has_global::<CommandPaletteCoordinator>() {
+        cx.set_global(CommandPaletteCoordinator::default());
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct CommandPaletteRegistration(u64);
+
+type SuspendPalette = Rc<dyn Fn(u64, &mut App) -> Option<WeakFocusHandle>>;
+type ResumePalette = Rc<dyn Fn(u64, CommandPaletteRegistration, &mut App)>;
+type ReplacePalette = Rc<dyn Fn(&mut App)>;
+
+struct ErasedPaletteRegistration {
+    token: CommandPaletteRegistration,
+    suspend: SuspendPalette,
+    resume: ResumePalette,
+    replace: ReplacePalette,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ModalPaletteSuspension {
+    generation: u64,
+    registration: Option<CommandPaletteRegistration>,
+}
+
+#[derive(Default)]
+struct CommandPaletteCoordinator {
+    registrations: std::collections::HashMap<WindowId, ErasedPaletteRegistration>,
+    modal_suspensions: std::collections::HashMap<WindowId, ModalPaletteSuspension>,
+    next_registration: u64,
+    next_suspension: u64,
+}
+
+impl Global for CommandPaletteCoordinator {}
+
+fn command_palette_modal_generation(window_id: WindowId, cx: &App) -> Option<u64> {
+    cx.has_global::<CommandPaletteCoordinator>()
+        .then(|| {
+            cx.global::<CommandPaletteCoordinator>()
+                .modal_suspensions
+                .get(&window_id)
+                .map(|suspension| suspension.generation)
+        })
+        .flatten()
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct CommandPaletteSuspension {
+    window_id: WindowId,
+    generation: u64,
+}
+
+pub(crate) struct SuspendedCommandPalette {
+    pub(crate) token: CommandPaletteSuspension,
+    pub(crate) predecessor: Option<WeakFocusHandle>,
+}
+
+pub(crate) fn suspend_window_command_palette(
+    window_id: WindowId,
+    cx: &mut App,
+) -> SuspendedCommandPalette {
+    if !cx.has_global::<CommandPaletteCoordinator>() {
+        init(cx);
+    }
+    let (generation, suspend) =
+        cx.update_global::<CommandPaletteCoordinator, _>(|coordinator, _| {
+            coordinator.next_suspension = coordinator.next_suspension.wrapping_add(1);
+            let generation = coordinator.next_suspension;
+            let registration = coordinator.registrations.get(&window_id);
+            let suspension = ModalPaletteSuspension {
+                generation,
+                registration: registration.map(|registration| registration.token),
+            };
+            let suspend = registration.map(|registration| registration.suspend.clone());
+            coordinator.modal_suspensions.insert(window_id, suspension);
+            (generation, suspend)
+        });
+    let predecessor = suspend.and_then(|suspend| suspend(generation, cx));
+    SuspendedCommandPalette {
+        token: CommandPaletteSuspension {
+            window_id,
+            generation,
+        },
+        predecessor,
+    }
+}
+
+pub(crate) fn resume_window_command_palette(
+    suspension: CommandPaletteSuspension,
+    cx: &mut App,
+) -> bool {
+    let Some((generation, registration, resume)) =
+        modal_resume_operation(suspension.window_id, Some(suspension.generation), cx)
+    else {
+        return false;
+    };
+    resume(generation, registration, cx);
+    true
+}
+
+pub(crate) fn retry_window_command_palette_modal_resume(window_id: WindowId, cx: &mut App) {
+    let Some((generation, registration, resume)) = modal_resume_operation(window_id, None, cx)
+    else {
+        return;
+    };
+    resume(generation, registration, cx);
+}
+
+fn modal_resume_operation(
+    window_id: WindowId,
+    expected_generation: Option<u64>,
+    cx: &mut App,
+) -> Option<(u64, CommandPaletteRegistration, ResumePalette)> {
+    if !cx.has_global::<CommandPaletteCoordinator>() {
+        return None;
+    }
+    cx.update_global::<CommandPaletteCoordinator, _>(|coordinator, _| {
+        let suspension = *coordinator.modal_suspensions.get(&window_id)?;
+        if expected_generation.is_some_and(|expected| expected != suspension.generation) {
+            return None;
+        }
+        let Some(registration) = suspension.registration else {
+            coordinator.modal_suspensions.remove(&window_id);
+            return None;
+        };
+        let resume = coordinator
+            .registrations
+            .get(&window_id)
+            .filter(|candidate| candidate.token == registration)
+            .map(|candidate| candidate.resume.clone());
+        if resume.is_none() && coordinator.modal_suspensions.get(&window_id) == Some(&suspension) {
+            coordinator.modal_suspensions.remove(&window_id);
+        }
+        resume.map(|resume| (suspension.generation, registration, resume))
+    })
+}
+
+fn complete_window_command_palette_modal_resume(
+    window_id: WindowId,
+    generation: u64,
+    registration: CommandPaletteRegistration,
+    cx: &mut App,
+) {
+    if !cx.has_global::<CommandPaletteCoordinator>() {
+        return;
+    }
+    cx.update_global::<CommandPaletteCoordinator, _>(|coordinator, _| {
+        if coordinator
+            .modal_suspensions
+            .get(&window_id)
+            .is_some_and(|suspension| {
+                suspension.generation == generation && suspension.registration == Some(registration)
+            })
+        {
+            coordinator.modal_suspensions.remove(&window_id);
+        }
+    });
+}
+
+pub(crate) fn discard_window_command_palette_suspension(
+    suspension: CommandPaletteSuspension,
+    cx: &mut App,
+) {
+    if !cx.has_global::<CommandPaletteCoordinator>() {
+        return;
+    }
+    cx.update_global::<CommandPaletteCoordinator, _>(|coordinator, _| {
+        if coordinator
+            .modal_suspensions
+            .get(&suspension.window_id)
+            .is_some_and(|current| current.generation == suspension.generation)
+        {
+            coordinator.modal_suspensions.remove(&suspension.window_id);
+        }
+    });
+}
+
+fn register_open_palette<I: Clone + Eq + 'static>(
+    owner: WeakEntity<CommandPalette<I>>,
+    window: &Window,
+    cx: &mut App,
+) -> (CommandPaletteRegistration, Option<u64>) {
+    let window_id = window.window_handle().window_id();
+    let window_handle = window.window_handle();
+    let suspend_window = window_handle;
+    let suspend_owner = owner.clone();
+    let suspend: SuspendPalette = Rc::new(move |generation, cx| {
+        let predecessor = suspend_owner
+            .update(cx, |palette, cx| palette.suspend_for_modal(generation, cx))
+            .ok()
+            .flatten();
+        let _ = cx.update_window(suspend_window, |_, window, _| window.refresh());
+        predecessor
+    });
+    let replace_owner = owner.clone();
+    let replace_window = window_handle;
+    let replace: ReplacePalette = Rc::new(move |cx| {
+        let replace_owner = replace_owner.clone();
+        cx.defer(move |cx| {
+            let _ = cx.update_window(replace_window, |_, window, cx| {
+                let _ = replace_owner.update(cx, |palette, cx| {
+                    if !palette.cancel_pending_open(window, cx)
+                        && palette.begin_close(CommandPaletteCloseReason::Replaced, window, cx)
+                    {
+                        palette.finish_close(CommandPaletteCloseReason::Replaced, cx);
+                    }
+                });
+            });
+        });
+    });
+    let resume_window_id = window_id;
+    let resume_retry_generation = Rc::new(Cell::new(None));
+    let resume: ResumePalette = Rc::new(move |generation, registration, cx| {
+        let may_resume = owner
+            .read_with(cx, |palette, _| {
+                (palette.open || palette.pending_open.is_some())
+                    && palette.suspended_by_modal == Some(generation)
+            })
+            .unwrap_or(false);
+        if !may_resume {
+            return;
+        }
+        let owner = owner.clone();
+        let retry_generation = resume_retry_generation.clone();
+        cx.defer(move |cx| {
+            let _ = cx.update_window(window_handle, |_, window, cx| {
+                let resumed = owner
+                    .update(cx, |palette, cx| {
+                        palette.resume_from_modal(generation, window, cx)
+                    })
+                    .unwrap_or(false);
+                if resumed {
+                    retry_generation.set(None);
+                    complete_window_command_palette_modal_resume(
+                        resume_window_id,
+                        generation,
+                        registration,
+                        cx,
+                    );
+                } else if retry_generation.get() != Some(generation) {
+                    retry_generation.set(Some(generation));
+                    window.on_next_frame(move |_, cx| {
+                        retry_window_command_palette_modal_resume(resume_window_id, cx);
+                    });
+                }
+            });
+        });
+    });
+    let (token, modal_suspension, replaced) =
+        cx.update_global::<CommandPaletteCoordinator, _>(|coordinator, _| {
+            coordinator.next_registration = coordinator.next_registration.wrapping_add(1);
+            let token = CommandPaletteRegistration(coordinator.next_registration);
+            let replaced = coordinator
+                .registrations
+                .insert(
+                    window_id,
+                    ErasedPaletteRegistration {
+                        token,
+                        suspend,
+                        resume,
+                        replace,
+                    },
+                )
+                .map(|registration| registration.replace);
+            let modal_suspension =
+                coordinator
+                    .modal_suspensions
+                    .get_mut(&window_id)
+                    .map(|suspension| {
+                        suspension.registration = Some(token);
+                        suspension.generation
+                    });
+            (token, modal_suspension, replaced)
+        });
+    if let Some(replaced) = replaced {
+        replaced(cx);
+    }
+    (token, modal_suspension)
+}
+
+fn unregister_palette(
+    window_id: WindowId,
+    token: CommandPaletteRegistration,
+    suspended_generation: Option<u64>,
+    cx: &mut App,
+) {
+    if !cx.has_global::<CommandPaletteCoordinator>() {
+        return;
+    }
+    cx.update_global::<CommandPaletteCoordinator, _>(|coordinator, _| {
+        if !coordinator
+            .registrations
+            .get(&window_id)
+            .is_some_and(|registration| registration.token == token)
+        {
+            return;
+        }
+        coordinator.registrations.remove(&window_id);
+        if let Some(suspension) = coordinator.modal_suspensions.get_mut(&window_id)
+            && suspension.registration == Some(token)
+            && suspended_generation == Some(suspension.generation)
+        {
+            suspension.registration = None;
+        }
+    });
 }
 
 /// The input path that activated a command-palette item.
@@ -135,6 +441,10 @@ pub enum CommandPaletteLifecycleEvent {
 /// The original focus owner transferred through a command-palette replacement chain.
 pub struct CommandPaletteReplacementFocus {
     restore_focus: Option<WeakFocusHandle>,
+}
+
+struct PendingCommandPaletteOpen {
+    replacement: Option<CommandPaletteReplacementFocus>,
 }
 
 /// Monotonic identity for the current command-palette query.
@@ -956,6 +1266,9 @@ pub struct CommandPalette<I: Clone + Eq + 'static> {
     loading: bool,
     dismissible: bool,
     open: bool,
+    pending_open: Option<PendingCommandPaletteOpen>,
+    suspended_by_modal: Option<u64>,
+    coordinator_registration: Option<CommandPaletteRegistration>,
     input: Entity<TextInput>,
     focus_scope: gpui::FocusHandle,
     scrollbar: Entity<OverlayScrollbar<f32>>,
@@ -1207,7 +1520,10 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
         );
         let focus_scope = cx.focus_handle();
         let focus_subscription = cx.on_focus_out(&focus_scope, window, |palette, _, window, cx| {
-            if palette.open && !crate::menu::window_menu_is_open(window, cx) {
+            if palette.open
+                && palette.suspended_by_modal.is_none()
+                && !crate::menu::window_menu_is_open(window, cx)
+            {
                 palette.close(CommandPaletteCloseReason::FocusLost, window, cx);
             }
         });
@@ -1226,7 +1542,25 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
             },
         );
         cx.observe_window_activation(window, |palette, window, cx| {
-            if palette.open && !window.is_window_active() {
+            if (palette.open || palette.pending_open.is_some())
+                && let Some(generation) = palette.suspended_by_modal
+                && window.is_window_active()
+                && !crate::modal::window_modal_is_open(window, cx)
+            {
+                if palette.resume_from_modal(generation, window, cx)
+                    && let Some(registration) = palette.coordinator_registration
+                {
+                    complete_window_command_palette_modal_resume(
+                        window.window_handle().window_id(),
+                        generation,
+                        registration,
+                        cx,
+                    );
+                }
+            } else if palette.open
+                && palette.suspended_by_modal.is_none()
+                && !window.is_window_active()
+            {
                 palette.close(CommandPaletteCloseReason::Deactivated, window, cx);
             } else if !palette.open
                 && window.is_window_active()
@@ -1240,7 +1574,10 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
         })
         .detach();
         let window_id = window.window_handle().window_id();
-        cx.on_release(move |_, cx| {
+        cx.on_release(move |palette, cx| {
+            if let Some(registration) = palette.coordinator_registration.take() {
+                unregister_palette(window_id, registration, palette.suspended_by_modal, cx);
+            }
             crate::tooltip::set_window_tooltip_suppression(
                 window_id,
                 crate::tooltip::TooltipSuppression::CommandPalette,
@@ -1277,6 +1614,9 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
             loading: false,
             dismissible: true,
             open: false,
+            pending_open: None,
+            suspended_by_modal: None,
+            coordinator_registration: None,
             input,
             focus_scope,
             scrollbar,
@@ -1430,9 +1770,38 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
         cx: &mut gpui::Context<Self>,
     ) -> bool {
         if self.open {
-            self.input.read(cx).focus_handle().focus(window);
+            if self.suspended_by_modal.is_none() && !crate::modal::window_modal_is_open(window, cx)
+            {
+                self.input.read(cx).focus_handle().focus(window);
+            }
             return false;
         }
+        if self.pending_open.is_some() {
+            return false;
+        }
+        if command_palette_modal_generation(window.window_handle().window_id(), cx).is_some()
+            || crate::modal::window_modal_is_open(window, cx)
+        {
+            let (registration, modal_suspension) =
+                register_open_palette(cx.entity().downgrade(), window, cx);
+            if let Some(generation) = modal_suspension {
+                self.coordinator_registration = Some(registration);
+                self.suspended_by_modal = Some(generation);
+                self.pending_open = Some(PendingCommandPaletteOpen { replacement });
+            } else {
+                unregister_palette(window.window_handle().window_id(), registration, None, cx);
+            }
+            return false;
+        }
+        self.finish_open(replacement, window, cx)
+    }
+
+    fn finish_open(
+        &mut self,
+        replacement: Option<CommandPaletteReplacementFocus>,
+        window: &mut Window,
+        cx: &mut gpui::Context<Self>,
+    ) -> bool {
         self.restore_on_activation = None;
         let menu_replacement = crate::menu::dismiss_active_menu_for_replacement(window, cx);
         self.restore_focus = match replacement {
@@ -1443,6 +1812,12 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
             },
         };
         self.open = true;
+        if self.coordinator_registration.is_none() {
+            let (registration, modal_suspension) =
+                register_open_palette(cx.entity().downgrade(), window, cx);
+            self.coordinator_registration = Some(registration);
+            self.suspended_by_modal = modal_suspension;
+        }
         crate::tooltip::set_window_tooltip_suppression(
             window.window_handle().window_id(),
             crate::tooltip::TooltipSuppression::CommandPalette,
@@ -1462,7 +1837,9 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
         self.repair_selection();
         self.reveal_selected();
         self.selection_reveal_pending = true;
-        self.input.read(cx).focus_handle().focus(window);
+        if self.suspended_by_modal.is_none() && !crate::modal::window_modal_is_open(window, cx) {
+            self.input.read(cx).focus_handle().focus(window);
+        }
         cx.emit(CommandPaletteEvent::Lifecycle(
             CommandPaletteLifecycleEvent::Opened,
         ));
@@ -1473,7 +1850,8 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
 
     /// Dismisses an open palette programmatically and restores its exact prior focus owner.
     pub fn dismiss(&mut self, window: &mut Window, cx: &mut gpui::Context<Self>) -> bool {
-        self.close(CommandPaletteCloseReason::Programmatic, window, cx)
+        self.cancel_pending_open(window, cx)
+            || self.close(CommandPaletteCloseReason::Programmatic, window, cx)
     }
 
     /// Closes an open palette whose owner has completed its operation and moved focus itself.
@@ -1487,12 +1865,16 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
     ) -> bool {
         self.restore_focus = None;
         self.restore_on_activation = None;
-        self.close(CommandPaletteCloseReason::Completed, window, cx)
+        self.cancel_pending_open(window, cx)
+            || self.close(CommandPaletteCloseReason::Completed, window, cx)
     }
 
     /// Returns focus to the query editor of an open palette.
     pub fn focus_editor(&self, window: &mut Window, cx: &mut gpui::Context<Self>) {
-        if self.open {
+        if self.open
+            && self.suspended_by_modal.is_none()
+            && !crate::modal::window_modal_is_open(window, cx)
+        {
             self.input.read(cx).focus_handle().focus(window);
         }
     }
@@ -1941,6 +2323,72 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
         self.finish_close(CommandPaletteCloseReason::Activated, cx);
     }
 
+    fn suspend_for_modal(
+        &mut self,
+        generation: u64,
+        cx: &mut gpui::Context<Self>,
+    ) -> Option<WeakFocusHandle> {
+        if !self.open {
+            return None;
+        }
+        self.suspended_by_modal = Some(generation);
+        self.pointer_press = None;
+        cx.notify();
+        self.restore_focus.clone()
+    }
+
+    fn resume_from_modal(
+        &mut self,
+        generation: u64,
+        window: &mut Window,
+        cx: &mut gpui::Context<Self>,
+    ) -> bool {
+        let editor_retained_focus = self.input.read(cx).focus_handle().is_focused(window);
+        let predecessor_restored = self
+            .restore_focus
+            .as_ref()
+            .and_then(WeakFocusHandle::upgrade)
+            .is_some_and(|focus| focus.contains_focused(window, cx));
+        if self.suspended_by_modal != Some(generation)
+            || crate::modal::window_modal_is_open(window, cx)
+            || (!editor_retained_focus
+                && !predecessor_restored
+                && !crate::modal::focus_allows_transient_resume(window, cx))
+        {
+            return false;
+        }
+        self.suspended_by_modal = None;
+        if let Some(pending) = self.pending_open.take() {
+            return self.finish_open(pending.replacement, window, cx);
+        }
+        if !self.open {
+            return false;
+        }
+        self.pointer_press = None;
+        self.pointer_suppressed = true;
+        self.hover_suppressed = true;
+        self.pointer_anchor = window.mouse_position();
+        self.input.read(cx).focus_handle().focus(window);
+        cx.notify();
+        true
+    }
+
+    fn cancel_pending_open(&mut self, window: &Window, cx: &mut gpui::Context<Self>) -> bool {
+        if self.pending_open.take().is_none() {
+            return false;
+        }
+        let suspended_generation = self.suspended_by_modal.take();
+        if let Some(registration) = self.coordinator_registration.take() {
+            unregister_palette(
+                window.window_handle().window_id(),
+                registration,
+                suspended_generation,
+                cx,
+            );
+        }
+        true
+    }
+
     fn close(
         &mut self,
         reason: CommandPaletteCloseReason,
@@ -1964,6 +2412,15 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
             return false;
         }
         self.open = false;
+        let suspended_generation = self.suspended_by_modal.take();
+        if let Some(registration) = self.coordinator_registration.take() {
+            unregister_palette(
+                window.window_handle().window_id(),
+                registration,
+                suspended_generation,
+                cx,
+            );
+        }
         crate::tooltip::set_window_tooltip_suppression(
             window.window_handle().window_id(),
             crate::tooltip::TooltipSuppression::CommandPalette,
@@ -2026,7 +2483,10 @@ fn first_enabled_id<I: Clone>(
 
 impl<I: Clone + Eq + 'static> Render for CommandPalette<I> {
     fn render(&mut self, window: &mut Window, cx: &mut gpui::Context<Self>) -> impl IntoElement {
-        if !self.open {
+        if !self.open
+            || self.suspended_by_modal.is_some()
+            || crate::modal::window_modal_is_open(window, cx)
+        {
             return div().into_any_element();
         }
         let theme = *cx.global::<CommandPaletteTheme>();
@@ -2860,6 +3320,7 @@ mod tests {
     use std::{
         cell::{Cell, RefCell},
         rc::Rc,
+        time::Duration,
     };
 
     use gpui::{
@@ -4632,6 +5093,902 @@ mod tests {
         });
 
         assert!(!applied);
+    }
+
+    #[derive(Debug, Eq, PartialEq)]
+    struct PaletteStateSnapshot {
+        item_ids: Vec<u8>,
+        item_labels: Vec<String>,
+        match_indexes: Vec<usize>,
+        presented_results: PresentedResults,
+        matching: CommandPaletteMatching,
+        activation: CommandPaletteActivationPolicy,
+        selected: Option<u8>,
+        preferred: Option<u8>,
+        query: String,
+        input_value: String,
+        generation: CommandPaletteGeneration,
+        loading: bool,
+        dismissible: bool,
+        open: bool,
+        restore_focus: bool,
+        restore_on_activation: bool,
+        pointer_suppressed: bool,
+        hover_suppressed: bool,
+        registration: Option<CommandPaletteRegistration>,
+    }
+
+    fn palette_state_snapshot(
+        palette: &Entity<CommandPalette<u8>>,
+        cx: &VisualTestContext,
+    ) -> PaletteStateSnapshot {
+        palette.read_with(cx, |palette, cx| PaletteStateSnapshot {
+            item_ids: palette.items.iter().map(|item| item.id).collect(),
+            item_labels: palette
+                .items
+                .iter()
+                .map(|item| item.label.to_string())
+                .collect(),
+            match_indexes: palette
+                .matches
+                .iter()
+                .map(|matched| matched.item_index)
+                .collect(),
+            presented_results: (*palette.presented_results).clone(),
+            matching: palette.matching,
+            activation: palette.activation,
+            selected: palette.selected,
+            preferred: palette.preferred,
+            query: palette.query.clone(),
+            input_value: palette.input.read(cx).value().to_owned(),
+            generation: palette.generation,
+            loading: palette.loading,
+            dismissible: palette.dismissible,
+            open: palette.open,
+            restore_focus: palette.restore_focus.is_some(),
+            restore_on_activation: palette.restore_on_activation.is_some(),
+            pointer_suppressed: palette.pointer_suppressed,
+            hover_suppressed: palette.hover_suppressed,
+            registration: palette.coordinator_registration,
+        })
+    }
+
+    struct ModalPaletteMenuBody;
+
+    impl Render for ModalPaletteMenuBody {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            crate::Menu::new(
+                "palette-modal-menu",
+                "Modal options",
+                vec![crate::MenuEntry::action("Option", ())],
+            )
+            .debug_selector("palette-modal-menu-trigger")
+            .on_activate(|_, _, _| {})
+        }
+    }
+
+    struct ModalPaletteRoot {
+        palette: Entity<CommandPalette<u8>>,
+        dialog_body: Entity<ModalPaletteMenuBody>,
+        prior_focus: FocusHandle,
+        modal: Option<crate::ModalPresentationHandle>,
+        dialog: Option<crate::DialogCompletion>,
+        progress: Option<crate::ProgressDialogHandle>,
+        palette_open_events: usize,
+    }
+
+    impl ModalPaletteRoot {
+        fn present_alert(&mut self, window: &Window, cx: &mut Context<Self>) {
+            self.modal = Some(
+                crate::Alert::new(
+                    crate::ModalId::new("palette-suspension-alert"),
+                    "Palette suspension",
+                    "Continue?",
+                    "The command palette should resume unchanged.",
+                    vec![
+                        crate::ModalAction::new(
+                            "ok",
+                            "OK",
+                            crate::ModalActionRole::Affirmative,
+                            "palette-alert-ok",
+                        )
+                        .default_action(true),
+                        crate::ModalAction::new(
+                            "cancel",
+                            "Cancel",
+                            crate::ModalActionRole::Cancel,
+                            "palette-alert-cancel",
+                        ),
+                    ],
+                )
+                .present(window, cx, |_, _| {})
+                .expect("alert should present"),
+            );
+        }
+
+        fn present_dialog_with_menu(&mut self, window: &Window, cx: &mut Context<Self>) {
+            self.dialog = Some(
+                crate::Dialog::new(
+                    crate::ModalId::new("palette-dialog-menu"),
+                    "Palette dialog menu",
+                    "Dialog",
+                    vec![
+                        crate::ModalAction::new(
+                            "save",
+                            "Save",
+                            crate::ModalActionRole::Affirmative,
+                            "palette-dialog-save",
+                        ),
+                        crate::ModalAction::new(
+                            "cancel",
+                            "Cancel",
+                            crate::ModalActionRole::Cancel,
+                            "palette-dialog-cancel",
+                        ),
+                    ],
+                    crate::DialogInitialFocus::Action("save"),
+                )
+                .body(self.dialog_body.clone())
+                .present(
+                    window,
+                    cx,
+                    |_, _, _| crate::DialogCloseDecision::Pending,
+                    |_, _| {},
+                )
+                .expect("Dialog should present"),
+            );
+        }
+
+        fn present_programmatic_progress(&mut self, window: &Window, cx: &mut Context<Self>) {
+            self.progress = Some(
+                crate::ProgressDialog::<()>::new(
+                    crate::ModalId::new("palette-suspension-progress"),
+                    "Palette suspension progress",
+                    "Working",
+                    "Waiting",
+                    crate::ProgressState::Indeterminate,
+                    crate::ProgressCancellation::programmatic_only(Duration::from_secs(30)),
+                )
+                .present(
+                    window,
+                    cx,
+                    |_, _, _| crate::ProgressCancelDecision::Deny,
+                    |_, _| {},
+                )
+                .expect("programmatic ProgressDialog should present"),
+            );
+        }
+    }
+
+    impl Render for ModalPaletteRoot {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            crate::ModalLayer::new(crate::TooltipLayer::new(
+                div()
+                    .size_full()
+                    .track_focus(&self.prior_focus)
+                    .child(self.palette.clone()),
+            ))
+        }
+    }
+
+    fn modal_palette_window(
+        cx: &mut TestAppContext,
+    ) -> (
+        Entity<ModalPaletteRoot>,
+        Entity<CommandPalette<u8>>,
+        &'_ mut VisualTestContext,
+    ) {
+        cx.set_global(test_theme());
+        install_control_themes(cx);
+        cx.update(crate::text_input::init);
+        cx.update(crate::menu::init);
+        cx.update(super::init);
+        cx.update(crate::tooltip::init);
+        cx.update(crate::modal::init);
+        cx.update(|cx| {
+            crate::install_modal_policy(cx, crate::ModalDesktopPolicy::mac_os());
+            let color = rgba(0x202024ff);
+            crate::install_modal_theme(
+                cx,
+                crate::ModalTheme::new(
+                    crate::ModalPaint::new(
+                        rgba(0x00000099),
+                        color,
+                        rgba(0x606068ff),
+                        rgba(0xffffffff),
+                        rgba(0xb0b0b8ff),
+                        rgba(0x505058ff),
+                        rgba(0x404048ff),
+                        rgba(0x55aaffff),
+                        rgba(0x5599ffff),
+                        rgba(0x5599ff22),
+                        rgba(0xffbb55ff),
+                        rgba(0xffbb5522),
+                        rgba(0xff6677ff),
+                        rgba(0xff667722),
+                    ),
+                    crate::ModalMetrics::new(px(360.0), px(480.0), px(640.0)),
+                ),
+            );
+        });
+        let (root, cx) = cx.add_window_view(|window, cx| ModalPaletteRoot {
+            palette: cx.new(|cx| CommandPalette::new("Search commands", items(), window, cx)),
+            dialog_body: cx.new(|_| ModalPaletteMenuBody),
+            prior_focus: cx.focus_handle().tab_stop(true),
+            modal: None,
+            dialog: None,
+            progress: None,
+            palette_open_events: 0,
+        });
+        let palette = root.read_with(cx, |root, _| root.palette.clone());
+        root.update(cx, |_, cx| {
+            cx.subscribe(&palette, |root, _, event, _| {
+                if matches!(
+                    event,
+                    CommandPaletteEvent::Lifecycle(CommandPaletteLifecycleEvent::Opened)
+                ) {
+                    root.palette_open_events += 1;
+                }
+            })
+            .detach();
+        });
+        cx.update(|window, _| window.activate_window());
+        cx.run_until_parked();
+        (root, palette, cx)
+    }
+
+    #[gpui::test]
+    fn palette_open_requested_after_modal_presentation_should_wait_without_mutating_state(
+        cx: &mut TestAppContext,
+    ) {
+        let (root, palette, cx) = modal_palette_window(cx);
+        palette.update(cx, |palette, cx| palette.set_query("window", cx));
+        let before = palette.read_with(cx, |palette, cx| {
+            (
+                palette.query.clone(),
+                palette.input.read(cx).value().to_owned(),
+                palette.selected,
+                palette.generation,
+            )
+        });
+        cx.update(|window, cx| {
+            root.update(cx, |root, cx| root.present_alert(window, cx));
+        });
+        cx.run_until_parked();
+        let replacement_focus = root.read_with(cx, |root, _| CommandPaletteReplacementFocus {
+            restore_focus: Some(root.prior_focus.downgrade()),
+        });
+
+        let open_results = cx.update(|window, cx| {
+            palette.update(cx, |palette, cx| {
+                let first = palette.open(window, cx);
+                let replacing = palette.open_replacing(replacement_focus, window, cx);
+                palette.focus_editor(window, cx);
+                palette.focus_editor(window, cx);
+                (first, replacing)
+            })
+        });
+        cx.run_until_parked();
+        let blocked = palette.read_with(cx, |palette, cx| {
+            (
+                palette.open,
+                palette.pending_open.is_some(),
+                palette.suspended_by_modal.is_some(),
+                palette.query.clone(),
+                palette.input.read(cx).value().to_owned(),
+                palette.selected,
+                palette.generation,
+            )
+        });
+        let modal_retained_focus = cx.update(|window, cx| {
+            crate::modal::focused_modal_parent(window, cx).is_some()
+                && !palette.read(cx).editor_is_focused(window, cx)
+        });
+
+        assert_eq!(open_results, (false, false));
+        assert_eq!(
+            blocked,
+            (false, true, true, before.0, before.1, before.2, before.3)
+        );
+        assert!(modal_retained_focus);
+        assert!(cx.debug_bounds("command-palette-panel").is_none());
+        assert_eq!(root.read_with(cx, |root, _| root.palette_open_events), 0);
+
+        let modal = root
+            .read_with(cx, |root, _| root.modal.clone())
+            .expect("modal handle should be retained");
+        cx.update(|window, cx| modal.dismiss(window, cx).expect("modal should close"));
+        cx.run_until_parked();
+
+        assert!(palette.read_with(cx, |palette, _| {
+            palette.open
+                && palette.pending_open.is_none()
+                && palette.suspended_by_modal.is_none()
+                && palette.query.is_empty()
+        }));
+        assert!(cx.update(|window, cx| palette.read(cx).editor_is_focused(window, cx)));
+        assert!(cx.debug_bounds("command-palette-panel").is_some());
+        assert_eq!(root.read_with(cx, |root, _| root.palette_open_events), 1);
+    }
+
+    #[gpui::test]
+    fn suspended_palette_focus_entries_should_not_steal_focus_from_active_modal(
+        cx: &mut TestAppContext,
+    ) {
+        let (root, palette, cx) = modal_palette_window(cx);
+        cx.update(|window, cx| {
+            palette.update(cx, |palette, cx| {
+                assert!(palette.open(window, cx));
+                palette.set_query("window", cx);
+            });
+            root.update(cx, |root, cx| root.present_alert(window, cx));
+        });
+        cx.run_until_parked();
+        let replacement_focus = root.read_with(cx, |root, _| CommandPaletteReplacementFocus {
+            restore_focus: Some(root.prior_focus.downgrade()),
+        });
+
+        cx.update(|window, cx| {
+            palette.update(cx, |palette, cx| {
+                assert!(!palette.open(window, cx));
+                assert!(!palette.open_replacing(replacement_focus, window, cx));
+                palette.focus_editor(window, cx);
+                palette.focus_editor(window, cx);
+            });
+        });
+        cx.run_until_parked();
+
+        assert!(cx.update(|window, cx| {
+            crate::modal::focused_modal_parent(window, cx).is_some()
+                && !palette.read(cx).editor_is_focused(window, cx)
+        }));
+        assert!(palette.read_with(cx, |palette, _| {
+            palette.open && palette.suspended_by_modal.is_some() && palette.query == "window"
+        }));
+        assert!(cx.debug_bounds("command-palette-panel").is_none());
+    }
+
+    #[gpui::test]
+    fn suspended_palette_focus_entries_should_not_steal_focus_from_active_dialog(
+        cx: &mut TestAppContext,
+    ) {
+        let (root, palette, cx) = modal_palette_window(cx);
+        cx.update(|window, cx| {
+            palette.update(cx, |palette, cx| {
+                assert!(palette.open(window, cx));
+            });
+            root.update(cx, |root, cx| root.present_dialog_with_menu(window, cx));
+        });
+        cx.run_until_parked();
+        let replacement_focus = root.read_with(cx, |root, _| CommandPaletteReplacementFocus {
+            restore_focus: Some(root.prior_focus.downgrade()),
+        });
+
+        cx.update(|window, cx| {
+            palette.update(cx, |palette, cx| {
+                assert!(!palette.open(window, cx));
+                assert!(!palette.open_replacing(replacement_focus, window, cx));
+                palette.focus_editor(window, cx);
+            });
+        });
+        cx.run_until_parked();
+
+        assert!(cx.update(|window, cx| {
+            crate::modal::focused_modal_parent(window, cx).is_some()
+                && !palette.read(cx).editor_is_focused(window, cx)
+        }));
+        assert!(cx.debug_bounds("modal-surface-1").is_some());
+        assert!(cx.debug_bounds("command-palette-panel").is_none());
+    }
+
+    #[gpui::test]
+    fn modal_focus_scope_should_repair_direct_unauthorized_focus_theft(cx: &mut TestAppContext) {
+        let (root, _, cx) = modal_palette_window(cx);
+        let unauthorized = root.read_with(cx, |root, _| root.prior_focus.clone());
+        cx.update(|window, cx| {
+            root.update(cx, |root, cx| root.present_alert(window, cx));
+        });
+        cx.run_until_parked();
+
+        cx.update(|window, _| unauthorized.focus(window));
+        cx.run_until_parked();
+
+        assert!(cx.update(|window, cx| {
+            crate::modal::focused_modal_parent(window, cx).is_some()
+                && !unauthorized.is_focused(window)
+        }));
+    }
+
+    #[gpui::test]
+    fn modal_close_without_registered_palette_should_not_suspend_later_palette(
+        cx: &mut TestAppContext,
+    ) {
+        let (root, palette, cx) = modal_palette_window(cx);
+        cx.update(|window, cx| {
+            root.update(cx, |root, cx| root.present_alert(window, cx));
+        });
+        cx.run_until_parked();
+        let modal = root
+            .read_with(cx, |root, _| root.modal.clone())
+            .expect("modal handle should be retained");
+
+        cx.update(|window, cx| modal.dismiss(window, cx).expect("modal should close"));
+        cx.run_until_parked();
+        let window_id = cx.update(|window, _| window.window_handle().window_id());
+        cx.update(|window, cx| {
+            palette.update(cx, |palette, cx| palette.open(window, cx));
+        });
+        cx.run_until_parked();
+
+        assert!(
+            cx.debug_bounds("command-palette-panel").is_some(),
+            "the palette did not render after an unrelated modal closed"
+        );
+        assert!(!cx.update(|_, cx| {
+            cx.global::<CommandPaletteCoordinator>()
+                .modal_suspensions
+                .contains_key(&window_id)
+        }));
+        assert!(cx.update(|window, cx| palette.read(cx).editor_is_focused(window, cx)));
+    }
+
+    #[gpui::test]
+    fn closing_suspended_palette_should_not_suspend_replacement_after_modal_close(
+        cx: &mut TestAppContext,
+    ) {
+        let (root, palette, cx) = modal_palette_window(cx);
+        cx.update(|window, cx| {
+            palette.update(cx, |palette, cx| palette.open(window, cx));
+            root.update(cx, |root, cx| root.present_alert(window, cx));
+        });
+        cx.run_until_parked();
+        let modal = root
+            .read_with(cx, |root, _| root.modal.clone())
+            .expect("modal handle should be retained");
+
+        cx.update(|window, cx| {
+            palette.update(cx, |palette, cx| {
+                assert!(
+                    palette.dismiss(window, cx),
+                    "suspended palette should close"
+                );
+            });
+            modal.dismiss(window, cx).expect("modal should close");
+        });
+        cx.run_until_parked();
+        let replacement = cx.update(|window, cx| {
+            let replacement = cx.new(|cx| {
+                CommandPalette::new(
+                    "Replacement",
+                    vec![CommandPaletteItem::new(9, "New")],
+                    window,
+                    cx,
+                )
+            });
+            root.update(cx, |root, cx| {
+                root.palette = replacement.clone();
+                cx.notify();
+            });
+            replacement.update(cx, |palette, cx| palette.open(window, cx));
+            replacement
+        });
+        cx.run_until_parked();
+        let window_id = cx.update(|window, _| window.window_handle().window_id());
+
+        assert!(
+            cx.debug_bounds("command-palette-panel").is_some(),
+            "the replacement palette did not render"
+        );
+        assert!(!cx.update(|_, cx| {
+            cx.global::<CommandPaletteCoordinator>()
+                .modal_suspensions
+                .contains_key(&window_id)
+        }));
+        assert!(cx.update(|window, cx| { replacement.read(cx).editor_is_focused(window, cx) }));
+    }
+
+    #[gpui::test]
+    fn modal_suspension_should_preserve_complete_palette_state_without_closing(
+        cx: &mut TestAppContext,
+    ) {
+        let (root, palette, events, _, cx) = palette_window(cx);
+        open_palette(&root, &palette, cx);
+        palette.update(cx, |palette, cx| {
+            palette.set_query("window", cx);
+            palette.set_loading(true, cx);
+            palette.set_dismissible(false, cx);
+            palette.set_preferred_item(Some(3), cx);
+        });
+        cx.run_until_parked();
+        events.borrow_mut().clear();
+        let before = palette_state_snapshot(&palette, cx);
+        let window_id = cx.update(|window, _| window.window_handle().window_id());
+
+        let suspension = cx.update(|_, cx| suspend_window_command_palette(window_id, cx));
+        cx.run_until_parked();
+        assert!(palette.read_with(cx, |palette, _| {
+            palette.suspended_by_modal.is_some() && palette.open
+        }));
+        assert!(events.borrow().is_empty());
+
+        let resumed = cx.update(|_, cx| resume_window_command_palette(suspension.token, cx));
+        cx.run_until_parked();
+
+        assert!(resumed);
+        assert_eq!(palette_state_snapshot(&palette, cx), before);
+        assert!(events.borrow().is_empty());
+    }
+
+    #[gpui::test]
+    fn modal_palette_suspension_should_be_isolated_by_operating_system_window(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(init);
+        let first_suspended = Rc::new(Cell::new(false));
+        let second_suspended = Rc::new(Cell::new(false));
+        let first_flag = first_suspended.clone();
+        let second_flag = second_suspended.clone();
+        let first_window = WindowId::from(101);
+        let second_window = WindowId::from(202);
+        cx.update(|cx| {
+            cx.update_global::<CommandPaletteCoordinator, _>(|coordinator, _| {
+                coordinator.registrations.insert(
+                    first_window,
+                    ErasedPaletteRegistration {
+                        token: CommandPaletteRegistration(1),
+                        suspend: Rc::new(move |_, _| {
+                            first_flag.set(true);
+                            None
+                        }),
+                        resume: Rc::new(|_, _, _| {}),
+                        replace: Rc::new(|_| {}),
+                    },
+                );
+                coordinator.registrations.insert(
+                    second_window,
+                    ErasedPaletteRegistration {
+                        token: CommandPaletteRegistration(2),
+                        suspend: Rc::new(move |_, _| {
+                            second_flag.set(true);
+                            None
+                        }),
+                        resume: Rc::new(|_, _, _| {}),
+                        replace: Rc::new(|_| {}),
+                    },
+                );
+            });
+            let _ = suspend_window_command_palette(first_window, cx);
+        });
+
+        assert!(first_suspended.get());
+        assert!(!second_suspended.get());
+        assert_eq!(
+            cx.update(|cx| {
+                let coordinator = cx.global::<CommandPaletteCoordinator>();
+                (
+                    coordinator.modal_suspensions.contains_key(&first_window),
+                    coordinator.modal_suspensions.contains_key(&second_window),
+                )
+            }),
+            (true, false)
+        );
+    }
+
+    #[gpui::test]
+    fn blocked_modal_resume_retains_generation_until_matching_palette_actually_focuses(
+        cx: &mut TestAppContext,
+    ) {
+        let (root, palette, cx) = modal_palette_window(cx);
+        let newer_focus = root.read_with(cx, |root, _| root.prior_focus.clone());
+        cx.update(|window, cx| {
+            palette.update(cx, |palette, cx| palette.open(window, cx));
+            root.update(cx, |root, cx| root.present_alert(window, cx));
+        });
+        cx.run_until_parked();
+        let window_id = cx.update(|window, _| window.window_handle().window_id());
+        let modal = root
+            .read_with(cx, |root, _| root.modal.clone())
+            .expect("modal handle should be retained");
+        let generation = palette
+            .read_with(cx, |palette, _| palette.suspended_by_modal)
+            .expect("palette should be suspended");
+
+        cx.update(|window, cx| {
+            modal.dismiss(window, cx).expect("modal should close");
+            newer_focus.focus(window);
+        });
+        cx.run_until_parked();
+
+        assert!(palette.read_with(cx, |palette, _| {
+            palette.open && palette.suspended_by_modal == Some(generation)
+        }));
+        assert!(cx.update(|window, _| newer_focus.is_focused(window)));
+        assert!(cx.update(|_, cx| {
+            cx.global::<CommandPaletteCoordinator>()
+                .modal_suspensions
+                .get(&window_id)
+                .is_some_and(|current| current.generation == generation)
+        }));
+
+        let editor = palette.read_with(cx, |palette, cx| {
+            palette.input.read(cx).focus_handle().clone()
+        });
+        cx.update(|window, _| editor.focus(window));
+        cx.update(|_, cx| retry_window_command_palette_modal_resume(window_id, cx));
+        cx.run_until_parked();
+
+        assert!(palette.read_with(cx, |palette, _| {
+            palette.open && palette.suspended_by_modal.is_none()
+        }));
+        assert!(!cx.update(|_, cx| {
+            cx.global::<CommandPaletteCoordinator>()
+                .modal_suspensions
+                .contains_key(&window_id)
+        }));
+    }
+
+    #[gpui::test]
+    fn replacing_a_palette_during_modal_suspension_should_resume_only_the_replacement(
+        cx: &mut TestAppContext,
+    ) {
+        let (root, palette, _, _, cx) = palette_window(cx);
+        open_palette(&root, &palette, cx);
+        let window_id = cx.update(|window, _| window.window_handle().window_id());
+        let suspension = cx.update(|_, cx| suspend_window_command_palette(window_id, cx));
+        let replacement = cx.update(|window, cx| {
+            let replacement = cx.new(|cx| {
+                CommandPalette::new(
+                    "Replacement",
+                    vec![CommandPaletteItem::new(9, "New")],
+                    window,
+                    cx,
+                )
+            });
+            replacement.update(cx, |palette, cx| {
+                palette.open(window, cx);
+            });
+            replacement
+        });
+
+        let resumed = cx.update(|_, cx| resume_window_command_palette(suspension.token, cx));
+        cx.run_until_parked();
+
+        assert!(resumed);
+        assert!(palette.read_with(cx, |palette, _| {
+            !palette.open && palette.suspended_by_modal.is_none()
+        }));
+        assert!(replacement.read_with(cx, |palette, _| {
+            palette.open && palette.suspended_by_modal.is_none()
+        }));
+    }
+
+    #[gpui::test]
+    fn modal_open_and_close_should_suspend_then_resume_the_registered_palette(
+        cx: &mut TestAppContext,
+    ) {
+        let (root, palette, cx) = modal_palette_window(cx);
+        let prior = root.read_with(cx, |root, _| root.prior_focus.clone());
+        cx.update(|window, _| prior.focus(window));
+        cx.update(|window, cx| {
+            palette.update(cx, |palette, cx| {
+                palette.open(window, cx);
+                palette.set_query("window", cx);
+                palette.set_loading(true, cx);
+                palette.set_dismissible(false, cx);
+            });
+        });
+        cx.run_until_parked();
+        let before = palette_state_snapshot(&palette, cx);
+
+        cx.update(|window, cx| {
+            root.update(cx, |root, cx| root.present_alert(window, cx));
+        });
+        cx.run_until_parked();
+        assert!(palette.read_with(cx, |palette, _| {
+            palette.open && palette.suspended_by_modal.is_some()
+        }));
+
+        let modal = root
+            .read_with(cx, |root, _| root.modal.clone())
+            .expect("modal handle should be retained");
+        cx.update(|window, cx| modal.dismiss(window, cx).expect("modal should close"));
+        cx.run_until_parked();
+
+        assert_eq!(palette_state_snapshot(&palette, cx), before);
+        assert!(cx.update(|window, cx| palette.read(cx).editor_is_focused(window, cx)));
+    }
+
+    #[gpui::test]
+    fn programmatic_progress_close_should_resume_the_registered_palette(cx: &mut TestAppContext) {
+        let (root, palette, cx) = modal_palette_window(cx);
+        cx.update(|window, cx| {
+            palette.update(cx, |palette, cx| palette.open(window, cx));
+            root.update(cx, |root, cx| {
+                root.present_programmatic_progress(window, cx)
+            });
+        });
+        cx.run_until_parked();
+        assert!(palette.read_with(cx, |palette, _| {
+            palette.open && palette.suspended_by_modal.is_some()
+        }));
+
+        let progress = root
+            .read_with(cx, |root, _| root.progress.clone())
+            .expect("progress handle should be retained");
+        cx.update(|window, cx| {
+            progress
+                .complete(window, cx)
+                .expect("progress should complete");
+        });
+        cx.run_until_parked();
+
+        assert!(palette.read_with(cx, |palette, _| {
+            palette.open && palette.suspended_by_modal.is_none()
+        }));
+        assert!(cx.update(|window, cx| palette.read(cx).editor_is_focused(window, cx)));
+    }
+
+    #[gpui::test]
+    fn parent_completion_closes_owned_menu_before_suspended_palette_resumes(
+        cx: &mut TestAppContext,
+    ) {
+        let (root, palette, cx) = modal_palette_window(cx);
+        cx.update(|window, cx| {
+            palette.update(cx, |palette, cx| palette.open(window, cx));
+            root.update(cx, |root, cx| root.present_dialog_with_menu(window, cx));
+        });
+        cx.run_until_parked();
+        let trigger = cx
+            .debug_bounds("palette-modal-menu-trigger")
+            .expect("modal-owned Menu trigger should render");
+        cx.simulate_click(trigger.center(), Modifiers::default());
+        cx.run_until_parked();
+        assert!(cx.update(|window, cx| {
+            crate::menu::window_menu_is_owned_by_current_modal(window, cx)
+        }));
+        let completion = root
+            .read_with(cx, |root, _| root.dialog.clone())
+            .expect("Dialog completion should be retained");
+
+        cx.update(|window, cx| {
+            completion
+                .complete(window, None, cx)
+                .expect("Dialog should complete");
+        });
+        cx.run_until_parked();
+
+        assert!(!cx.update(|window, cx| crate::window_menu_is_open(window, cx)));
+        assert!(palette.read_with(cx, |palette, _| {
+            palette.open && palette.suspended_by_modal.is_none()
+        }));
+        assert!(cx.update(|window, cx| palette.read(cx).editor_is_focused(window, cx)));
+    }
+
+    #[gpui::test]
+    fn programmatic_progress_closed_while_deactivated_should_resume_palette_on_reactivation(
+        cx: &mut TestAppContext,
+    ) {
+        let (root, palette, cx) = modal_palette_window(cx);
+        cx.update(|window, cx| {
+            palette.update(cx, |palette, cx| palette.open(window, cx));
+            root.update(cx, |root, cx| {
+                root.present_programmatic_progress(window, cx)
+            });
+        });
+        cx.run_until_parked();
+        let progress = root
+            .read_with(cx, |root, _| root.progress.clone())
+            .expect("progress handle should be retained");
+
+        cx.deactivate_window();
+        cx.update(|window, cx| {
+            progress
+                .complete(window, cx)
+                .expect("progress should complete while inactive");
+        });
+        cx.run_until_parked();
+        assert!(palette.read_with(cx, |palette, _| {
+            palette.open && palette.suspended_by_modal.is_some()
+        }));
+
+        cx.update(|window, _| window.activate_window());
+        cx.run_until_parked();
+
+        assert!(palette.read_with(cx, |palette, _| {
+            palette.open && palette.suspended_by_modal.is_none()
+        }));
+        assert!(cx.update(|window, cx| palette.read(cx).editor_is_focused(window, cx)));
+    }
+
+    #[gpui::test]
+    fn first_deferred_palette_request_resumes_after_window_reactivation(cx: &mut TestAppContext) {
+        let (root, palette, cx) = modal_palette_window(cx);
+        cx.update(|window, cx| root.update(cx, |root, cx| root.present_alert(window, cx)));
+        cx.run_until_parked();
+        let modal = root
+            .read_with(cx, |root, _| root.modal.clone())
+            .expect("modal handle should be retained");
+
+        cx.update(|window, cx| {
+            palette.update(cx, |palette, cx| {
+                assert!(!palette.open(window, cx));
+            });
+        });
+        cx.run_until_parked();
+        assert!(palette.read_with(cx, |palette, _| {
+            !palette.open && palette.pending_open.is_some() && palette.suspended_by_modal.is_some()
+        }));
+
+        cx.deactivate_window();
+        cx.update(|window, cx| modal.dismiss(window, cx).expect("modal should close"));
+        cx.run_until_parked();
+        assert!(palette.read_with(cx, |palette, _| {
+            !palette.open && palette.pending_open.is_some() && palette.suspended_by_modal.is_some()
+        }));
+
+        cx.update(|window, _| window.activate_window());
+        cx.run_until_parked();
+
+        assert!(palette.read_with(cx, |palette, _| {
+            palette.open && palette.pending_open.is_none() && palette.suspended_by_modal.is_none()
+        }));
+        assert!(cx.update(|window, cx| palette.read(cx).editor_is_focused(window, cx)));
+    }
+
+    #[gpui::test]
+    fn suspended_palette_should_remain_open_across_window_deactivation_and_reactivation(
+        cx: &mut TestAppContext,
+    ) {
+        let (root, palette, cx) = modal_palette_window(cx);
+        cx.update(|window, cx| {
+            palette.update(cx, |palette, cx| {
+                palette.open(window, cx);
+            });
+            root.update(cx, |root, cx| root.present_alert(window, cx));
+        });
+        cx.run_until_parked();
+
+        cx.deactivate_window();
+        cx.run_until_parked();
+        cx.update(|window, _| window.activate_window());
+        cx.run_until_parked();
+
+        assert!(palette.read_with(cx, |palette, _| {
+            palette.open && palette.suspended_by_modal.is_some()
+        }));
+        assert!(cx.update(|window, cx| crate::window_modal_is_open(window, cx)));
+    }
+
+    #[gpui::test]
+    fn closing_a_modal_while_deactivated_should_resume_its_palette_after_reactivation(
+        cx: &mut TestAppContext,
+    ) {
+        let (root, palette, cx) = modal_palette_window(cx);
+        cx.update(|window, cx| {
+            palette.update(cx, |palette, cx| {
+                palette.open(window, cx);
+            });
+            root.update(cx, |root, cx| root.present_alert(window, cx));
+        });
+        cx.run_until_parked();
+        let modal = root
+            .read_with(cx, |root, _| root.modal.clone())
+            .expect("modal handle should be retained");
+
+        cx.deactivate_window();
+        cx.update(|window, cx| modal.dismiss(window, cx).expect("modal should close"));
+        cx.run_until_parked();
+        assert!(palette.read_with(cx, |palette, _| {
+            palette.open && palette.suspended_by_modal.is_some()
+        }));
+
+        cx.update(|window, _| window.activate_window());
+        cx.run_until_parked();
+
+        assert!(palette.read_with(cx, |palette, _| {
+            palette.open && palette.suspended_by_modal.is_none()
+        }));
+        assert!(cx.update(|window, cx| palette.read(cx).editor_is_focused(window, cx)));
     }
 
     #[gpui::test]

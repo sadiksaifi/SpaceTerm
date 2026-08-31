@@ -17,6 +17,9 @@ pub(crate) mod macos_accessibility;
 pub(crate) mod macos_keyboard;
 
 #[cfg(target_os = "macos")]
+pub(crate) mod macos_locale;
+
+#[cfg(target_os = "macos")]
 pub(crate) mod macos_notification;
 
 #[cfg(target_os = "macos")]

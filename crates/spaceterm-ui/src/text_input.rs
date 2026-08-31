@@ -19,7 +19,10 @@ use gpui::{
 };
 use unicode_segmentation::UnicodeSegmentation as _;
 
-use crate::menu::{ContextMenu, MenuActivation, MenuEntry, MenuLifecycleEvent};
+use crate::{
+    button::ModalControlScope,
+    menu::{ContextMenu, MenuActivation, MenuEntry, MenuLifecycleEvent},
+};
 
 const KEY_CONTEXT: &str = "SpaceTermTextInput";
 const CARET_BLINK_INTERVAL: Duration = Duration::from_millis(530);
@@ -260,6 +263,32 @@ impl TextInputTheme {
 }
 
 impl Global for TextInputTheme {}
+
+/// How Return behaves while a [`TextInput`] owns focus.
+///
+/// Active input-method composition always commits and consumes the first Return without emitting
+/// [`TextInputEvent::Submitted`]. These variants apply only when no composition is active.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum TextInputReturnBehavior {
+    /// Emit [`TextInputEvent::Submitted`] and consume Return.
+    #[default]
+    Consume,
+    /// Emit [`TextInputEvent::Submitted`] and let a containing composite handle Return afterward.
+    Propagate,
+}
+
+/// How Escape behaves while a [`TextInput`] owns focus.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum TextInputEscapeBehavior {
+    /// Emit [`TextInputEvent::Cancelled`] and consume Escape.
+    #[default]
+    Consume,
+    /// Emit [`TextInputEvent::Cancelled`] and let a containing composite handle Escape afterward.
+    ///
+    /// The Escape that cancels active input-method composition is always consumed. Propagation is
+    /// possible only for a later Escape after composition has ended.
+    Propagate,
+}
 
 /// How Tab and Shift-Tab behave while a [`TextInput`] owns focus.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -794,6 +823,8 @@ pub struct TextInput {
     editable: bool,
     tab_stop: bool,
     tab_behavior: TextInputTabBehavior,
+    return_behavior: TextInputReturnBehavior,
+    escape_behavior: TextInputEscapeBehavior,
     input_length_limit: usize,
     emit_programmatic_changes: bool,
     focus_handle: FocusHandle,
@@ -857,6 +888,8 @@ impl TextInput {
             editable: true,
             tab_stop: true,
             tab_behavior: TextInputTabBehavior::default(),
+            return_behavior: TextInputReturnBehavior::default(),
+            escape_behavior: TextInputEscapeBehavior::default(),
             input_length_limit: DEFAULT_VALUE_LIMIT,
             emit_programmatic_changes: false,
             focus_handle,
@@ -927,6 +960,16 @@ impl TextInput {
     /// Selects whether the input or its containing composite handles Tab traversal.
     pub fn tab_behavior(mut self, behavior: TextInputTabBehavior) -> Self {
         self.tab_behavior = behavior;
+        self
+    }
+    /// Selects whether a non-composition Return is consumed or may bubble after submission.
+    pub fn return_behavior(mut self, behavior: TextInputReturnBehavior) -> Self {
+        self.return_behavior = behavior;
+        self
+    }
+    /// Selects whether a non-composition Escape is consumed or may bubble after cancellation.
+    pub fn escape_behavior(mut self, behavior: TextInputEscapeBehavior) -> Self {
+        self.escape_behavior = behavior;
         self
     }
     /// Sets the optional product limit. `Some` is clamped to 1 MiB; `None` removes the safe default
@@ -1532,19 +1575,31 @@ impl TextInput {
     }
     fn submit(&mut self, _: &Submit, _: &mut Window, cx: &mut Context<Self>) {
         if self.enabled {
-            self.commit_composition(cx);
+            if self.commit_composition(cx) {
+                self.restart_caret(cx);
+                cx.stop_propagation();
+                return;
+            }
             self.buffer.history.break_group();
             cx.emit(TextInputEvent::Submitted);
-            cx.stop_propagation();
+            match self.return_behavior {
+                TextInputReturnBehavior::Consume => cx.stop_propagation(),
+                TextInputReturnBehavior::Propagate => cx.propagate(),
+            }
         }
     }
     fn cancel(&mut self, _: &Cancel, _: &mut Window, cx: &mut Context<Self>) {
         if self.enabled {
-            if !self.cancel_composition(cx) {
-                self.buffer.history.break_group();
-                cx.emit(TextInputEvent::Cancelled);
+            if self.cancel_composition(cx) {
+                cx.stop_propagation();
+                return;
             }
-            cx.stop_propagation();
+            self.buffer.history.break_group();
+            cx.emit(TextInputEvent::Cancelled);
+            match self.escape_behavior {
+                TextInputEscapeBehavior::Consume => cx.stop_propagation(),
+                TextInputEscapeBehavior::Propagate => cx.propagate(),
+            }
         }
     }
     fn focus_next(&mut self, _: &FocusNext, window: &mut Window, cx: &mut Context<Self>) {
@@ -2062,6 +2117,7 @@ impl Render for TextInput {
                 .disabled(!self.enabled || self.buffer.text.is_empty()),
         ];
         let selector = self.debug_selector.clone();
+        let focus_anchor = ModalControlScope::register_current_focus_anchor(&self.focus_handle);
         let editor = div()
             .id(self.id.clone())
             .debug_selector(move || selector.to_string())
@@ -2116,7 +2172,7 @@ impl Render for TextInput {
         let menu_open = entity.downgrade();
         let menu_lifecycle = entity.downgrade();
         let menu_activate = entity.downgrade();
-        ContextMenu::new(
+        let control = ContextMenu::new(
             ("text-input-context-menu", entity.entity_id()),
             name,
             editor,
@@ -2161,7 +2217,19 @@ impl Render for TextInput {
                     TextInputMenuAction::SelectAll => input.on_select_all(&SelectAll, window, cx),
                 });
             },
-        )
+        );
+        if let Some(anchor) = focus_anchor {
+            div()
+                .id(("modal-text-input-focus-anchor", entity.entity_id()))
+                .relative()
+                .size_full()
+                .anchor_scroll(Some(anchor.scroll_anchor()))
+                .child(control)
+                .child(anchor.bounds_tracker(px(0.0)))
+                .into_any_element()
+        } else {
+            control.into_any_element()
+        }
     }
 }
 
@@ -2547,7 +2615,10 @@ fn byte_range_to_utf16(text: &str, range: Range<usize>) -> Range<usize> {
 
 #[cfg(test)]
 mod tests {
-    use std::{cell::RefCell, rc::Rc};
+    use std::{
+        cell::{Cell, RefCell},
+        rc::Rc,
+    };
 
     use super::*;
     use gpui::{Modifiers, TestAppContext, VisualTestContext, rgba};
@@ -2556,12 +2627,18 @@ mod tests {
         input: Entity<TextInput>,
         other_focus: FocusHandle,
         unrelated_menu: bool,
+        outer_submit: Rc<Cell<usize>>,
+        outer_cancel: Rc<Cell<usize>>,
     }
 
     impl Render for EventRoot {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let submit = self.outer_submit.clone();
+            let cancel = self.outer_cancel.clone();
             div()
                 .size_full()
+                .on_action(move |_: &Submit, _, _| submit.set(submit.get() + 1))
+                .on_action(move |_: &Cancel, _, _| cancel.set(cancel.get() + 1))
                 .flex()
                 .flex_col()
                 .child(div().h(px(32.0)).child(self.input.clone()))
@@ -2656,6 +2733,8 @@ mod tests {
                 input,
                 other_focus: cx.focus_handle(),
                 unrelated_menu,
+                outer_submit: Rc::new(Cell::new(0)),
+                outer_cancel: Rc::new(Cell::new(0)),
             }
         });
         let (input, other_focus) =
@@ -3218,7 +3297,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn composition_redo_and_submit_interrupt_composition(cx: &mut TestAppContext) {
+    fn composition_redo_and_return_commit_each_interrupt_composition(cx: &mut TestAppContext) {
         let (input, _, events, cx) = input_with_events(cx, "abc", false);
         mark_text(&input, cx, "日");
         cx.update(|window, cx| input.update(cx, |input, cx| input.redo(&Redo, window, cx)));
@@ -3233,8 +3312,8 @@ mod tests {
                 source: TextInputChangeSource::InputMethodComposition,
             }),
             TextInputEvent::CompositionCommitted,
-            TextInputEvent::Submitted,
         ]));
+        assert!(!events.borrow().contains(&TextInputEvent::Submitted));
     }
 
     #[gpui::test]
@@ -3680,6 +3759,93 @@ mod tests {
             )),
             ("new value".into(), 9..9, true, 0, 0)
         );
+    }
+
+    #[gpui::test]
+    fn default_return_and_escape_behaviors_consume_before_parent(cx: &mut TestAppContext) {
+        install_theme(cx);
+        let (root, cx) = cx.add_window_view(|window, cx| {
+            let input = cx.new(|cx| TextInput::new("test-input", "Test input", "", window, cx));
+            EventRoot {
+                input,
+                other_focus: cx.focus_handle(),
+                unrelated_menu: false,
+                outer_submit: Rc::new(Cell::new(0)),
+                outer_cancel: Rc::new(Cell::new(0)),
+            }
+        });
+        let (input, submit, cancel) = root.read_with(cx, |root, _| {
+            (
+                root.input.clone(),
+                root.outer_submit.clone(),
+                root.outer_cancel.clone(),
+            )
+        });
+        cx.update(|window, cx| input.read(cx).focus_handle().focus(window));
+
+        cx.simulate_keystrokes("enter escape");
+
+        assert_eq!((submit.get(), cancel.get()), (0, 0));
+    }
+
+    #[gpui::test]
+    fn propagated_return_and_escape_reach_parent_after_typed_events(cx: &mut TestAppContext) {
+        install_theme(cx);
+        let (root, cx) = cx.add_window_view(|window, cx| {
+            let input = cx.new(|cx| {
+                TextInput::new("test-input", "Test input", "", window, cx)
+                    .return_behavior(TextInputReturnBehavior::Propagate)
+                    .escape_behavior(TextInputEscapeBehavior::Propagate)
+            });
+            EventRoot {
+                input,
+                other_focus: cx.focus_handle(),
+                unrelated_menu: false,
+                outer_submit: Rc::new(Cell::new(0)),
+                outer_cancel: Rc::new(Cell::new(0)),
+            }
+        });
+        let (input, submit, cancel) = root.read_with(cx, |root, _| {
+            (
+                root.input.clone(),
+                root.outer_submit.clone(),
+                root.outer_cancel.clone(),
+            )
+        });
+        cx.update(|window, cx| input.read(cx).focus_handle().focus(window));
+
+        cx.simulate_keystrokes("enter escape");
+
+        assert_eq!((submit.get(), cancel.get()), (1, 1));
+    }
+
+    #[gpui::test]
+    fn propagated_escape_consumes_composition_before_later_parent_cancel(cx: &mut TestAppContext) {
+        install_theme(cx);
+        let (root, cx) = cx.add_window_view(|window, cx| {
+            let input = cx.new(|cx| {
+                TextInput::new("test-input", "Test input", "", window, cx)
+                    .escape_behavior(TextInputEscapeBehavior::Propagate)
+            });
+            EventRoot {
+                input,
+                other_focus: cx.focus_handle(),
+                unrelated_menu: false,
+                outer_submit: Rc::new(Cell::new(0)),
+                outer_cancel: Rc::new(Cell::new(0)),
+            }
+        });
+        let (input, cancel) = root.read_with(cx, |root, _| {
+            (root.input.clone(), root.outer_cancel.clone())
+        });
+        cx.update(|window, cx| input.read(cx).focus_handle().focus(window));
+        mark_text(&input, cx, "日");
+
+        cx.simulate_keystrokes("escape");
+        assert_eq!(cancel.get(), 0);
+        cx.simulate_keystrokes("escape");
+
+        assert_eq!(cancel.get(), 1);
     }
 
     #[gpui::test]

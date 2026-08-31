@@ -29,7 +29,9 @@ tmux, but SpaceTerm is not a tmux client and has no tmux-style server/client mod
 ## UI direction
 
 - Build the interface directly with GPUI as a compact, Zed-like desktop experience.
-- Use `gpui-symbols` for icons and native macOS menus and system dialogs where appropriate.
+- Every icon is an SF Symbol or SVG, never a font or text glyph. Use `gpui-symbols` for icons in
+  the macOS application and embedded SVG assets in the platform-neutral `spaceterm-ui` crate.
+  Continue to use native macOS menus and system dialogs where appropriate.
 - Keep reusable SpaceTerm controls in the small internal `spaceterm-ui` crate. Application UI
   Modules compose those controls with product behavior and Vague Pro presentation.
 - Use the application-owned Workspace Picker as the primary Open Local Project selection
@@ -94,6 +96,123 @@ paint and metric catalog, then owns surrounding chrome, product policy, and reac
 events. Application-specific composition remains in `src/ui`; controls move into the library only
 when their behavior has reusable depth.
 
+#### Window-Modal Controls
+
+The internal library's Modal Module is one deep, platform-neutral mechanism behind three narrow
+semantic facades: Alert, Dialog, and ProgressDialog. One private coordinator indexes one weak modal
+owner per Operating-System Window, while that window's `ModalLayer` root retains the owner strongly
+for the root lifetime. Each owner presents exactly one active modal, admits at most eight additional
+requests through a bounded FIFO queue, and allocates monotonic presentation
+generations so stale dismissal, pending-completion, cancellation, and progress-update handles cannot
+affect a successor. Each semantic facade exposes one intentional active-replacement operation that
+settles the predecessor with Replaced, preserves the existing FIFO behind the replacement, and
+installs the successor generation in the same owner transition so underlay blocking never lapses.
+Alert, Dialog, and ProgressDialog validate caller-owned typed configuration and compile it into the
+same private monomorphic request; action role, consequence, visual emphasis,
+default key designation, enabled state, and physical placement remain independent. Alert and Dialog
+reject every destructive Cancel action, and one enabled ordinary Cancel predicate governs safe
+validation, focus entry, keyboard cancellation, and rendering. The facades do not own separate
+backdrops, focus traps, queues, key routing, or close state.
+
+The private runtime reduces Open, ActionRequested, Pending, Closing, and Closed transitions into
+effects. It releases the owner entity update before invoking caller callbacks, emitting public
+lifecycle events, updating another entity, or advancing the queue, so reentrant callbacks cannot
+re-enter a locked GPUI entity. Result and terminal lifecycle delivery is exactly once across action,
+cancellation, programmatic completion, deadline, replacement, caller removal, Operating-System
+Window removal, active presentation, and queued presentation paths. Dialog denial preserves
+caller-owned field state; pending Dialog and ProgressDialog attempts carry opaque generation-bound
+completion authority. Dialog also returns independent generation-bound programmatic completion
+that may nominate a guarded successor focus target and produces a typed programmatic result for an
+active or queued presentation without synthesizing an action or borrowing pending-action authority.
+A pending Dialog primary attempt may own at most one nested safe Cancel
+attempt without replacing either authority: denial preserves any still-live counterpart, duplicate
+Cancel activation is disabled, and the first allowed terminal decision closes exactly once. Each
+cloned progress handle retains its observed update generation, so an
+older clone cannot overwrite a newer accepted update. Progress updates target the exact active or
+queued generation, and queued progress runtime and update generation transfer unchanged on FIFO
+promotion. A ProgressDialog retains immutable typed cancellation capability separately from mutable
+cancellation availability; active and queued programmatic-only presentations reject availability
+updates with a typed operational error. Progress updates are caller-driven, stale-update checked,
+and never imply completion at determinate maximum. Pending progress
+cancellation retains its original typed activation source through completion. Programmatic-only progress requires a nonzero installed-policy
+deadline no longer than thirty minutes and closes with a typed deadline outcome. For a queued
+programmatic-only presentation, the interval starts when FIFO promotion makes it visible and emits
+Opened; time spent waiting in the queue does not consume the interval.
+
+The renderer captures the exact predecessor focus chain before first presentation, enters according
+to installed policy, contains the complete current-frame GPUI tab-stop order in both directions
+with frame-reconciled sentinels, reveals focused controls inside the independently scrolling body
+and footer, and repairs disabled or removed targets. Button and Text Input participate in reveal
+automatically; arbitrary caller-owned Dialog body controls join through one layout-transparent
+semantic focus-target adapter without exposing scroll handles or anchors. Restoration uses only a live rendered predecessor or explicit successor
+that has not been superseded by newer transient or focus ownership. Operating-System Window
+deactivation retains the modal, cancels pressed state, and defers restoration. Reusable actions and
+Alert suppression register their keyed pointer and Space gestures with one modal-owned press
+registry, so disablement, replacement, caller removal, and Operating-System Window removal reject
+stale or mismatched releases before activation. Focused children receive Return and Escape first:
+Return reaches only an explicit enabled default after a child
+declines it; Escape and Command-Period reach only the enabled safe Cancel path; and the first Escape
+cancels active input-method composition before a later Escape can cancel the modal. Outside press,
+release, move, and wheel input is consumed without dismissal or click-through, and the modal key
+context makes the underlay inert to ordinary keyboard routing.
+
+Modal priority is private and Operating-System Window-scoped. The first visible modal dismisses an
+unrelated Menu while inheriting its restoration chain, suspends rather than resets an open Command
+Palette, and suppresses Tooltips. Those effects remain continuous across queued promotion. The
+modal-active palette generation exists even when no palette is registered: a palette first requested
+during that generation registers as suspended and defers focus capture, query reset, selection
+repair, lifecycle publication, and presentation until the exact modal sequence closes. Repeated
+open, replacement-open, and editor-focus requests cannot focus or render a palette while either the
+palette suspension or the independent per-window modal fact remains active. A Menu opened from
+focus contained by the current modal generation is modal-owned and may paint above the modal;
+Escape closes it first and restores focus inside the Dialog. Every other active-window focus loss
+is repaired into the current modal scope; only that exact modal-owned Menu and Operating-System
+Window deactivation are exempt. Every terminal parent close synchronously retires that owned Menu
+without restoring into disappearing Dialog content, and the focus chain recognizes only that exact
+retired child while refusing a newer owner. Command Palette suspension identity remains retained
+until deferred resume actually focuses the matching palette; a blocked attempt retries after focus
+restoration, on owned Menu closure, or on Operating-System Window reactivation without stealing
+focus. The root composes `ModalLayer::new(TooltipLayer::new(content))`, rendering the modal as the
+final normal overlay rather than a deferred draw so a deferred owned Menu can remain above it.
+
+The application installs one aggregate Vague Pro modal paint and scaled-metric catalog through its
+control-theme catalog and separately installs the immutable macOS logical desktop policy and macOS
+modal keybinding profile. Normal UI initialization resolves AppKit's current application-locale
+layout direction into that bounded policy, and every Operating-System Window modal root consumes the
+installed direction automatically; individual modal call sites do not select direction. That paint
+consumes a complete canonical backdrop token and maps every Alert intent to an internally owned
+semantic marker and treatment. Modal actions never use the reusable Outline variant. The macOS
+policy presents an explicit default through filled primary emphasis without changing caller-owned
+action role, consequence, or semantic emphasis. Modal controls retain exactly one bounded outset
+keyboard-focus ring that appears only on the currently focused control; the control's resting border
+is never repainted as a second focus stroke, and the ring radius expands with its offset to preserve
+concentric corners. This transient focus indication is distinct from a persistent outlined Button
+style. The global Outline variant remains available to non-modal controls.
+Indeterminate progress uses a static repeated-segment treatment rather than a determinate fill or
+motion-only cue. Generic
+Modal initialization installs only portable traversal, Return, and Escape behavior; the explicit
+macOS profile adds Command-Period. The library performs no platform detection and accepts no
+call-site paint or layout escape hatch. The macOS policy owns installed locale direction,
+validation, logical leading/trailing placement, right-to-left mirroring, action axis, focus entry,
+default-action presentation, and the private programmatic-only deadline maximum. One shared action
+arrangement implementation consumes the same role and default facts from typed caller actions in
+pure policy tests and erased render actions in production; physical mirroring never changes logical
+traversal, Help grouping, or caller-owned typed identity. The sole application integration outside
+rendering is the read-only per-window `window_modal_is_open` fact used by
+Terminal Input Focus; the application does not inspect the private queue, focus chain, transient
+state, or reducer.
+
+Pinned GPUI 0.2.2 exposes no general native accessibility-node API for custom GPUI elements. The
+Modal Module therefore cannot publish native Alert, Dialog, or progress roles; accessible
+title-description relationships; default, Cancel, enabled, or destructive action state; modal
+state; progress values or indeterminate state; live status announcements; accessibility focus; or
+exclusion of an arbitrary underlay from native accessibility traversal. Private logical semantic
+snapshots retain and test those facts, and stable debug selectors test observable behavior, but
+neither is native accessibility evidence. SpaceTerm makes no VoiceOver, Narrator, or Orca
+conformance claim for these controls. Accessibility-sensitive product workflows remain on native
+system prompts, including the existing `Window::prompt` call sites, until native accessibility-tree
+support exists and is verified. No production native prompt was migrated with this Module.
+
 The internal library's Resize Handle is a keyed, platform-neutral GPUI divider with a mandatory
 logical name and an explicitly named movement axis. It owns the enlarged pointer hitbox, resize
 cursor, hover, press and keyboard-focus presentation, pointer capture, cumulative displacement,
@@ -131,8 +250,9 @@ stable identity and a mandatory logical name. It exclusively owns bounded text, 
 grapheme Selection, input-method composition, undo and redo, clipboard editing, pointer capture
 and horizontal autoscroll, focus, caret scheduling, and cached shaping. Typed content-free events
 carry monotonic revisions and semantic edit sources; callers read the current value only when
-needed. The application installs its Vague Pro variants and explicitly selects a platform
-keybinding profile, while labels, borders, validation, search icons, and composite lifecycle policy
+needed. Return commits and consumes active input-method composition without submitting, so only a
+later Return may reach a containing default action. The application installs its Vague Pro variants
+and explicitly selects a platform keybinding profile, while labels, borders, validation, search icons, and composite lifecycle policy
 remain outside the editor.
 
 The internal library's Command Palette is an entity-backed, Operating-System Window-owned

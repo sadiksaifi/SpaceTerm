@@ -1,10 +1,15 @@
-use std::rc::Rc;
+use std::{
+    cell::{Cell, RefCell},
+    collections::HashMap,
+    rc::Rc,
+};
 
 use gpui::{
-    AnyElement, App, ElementId, FocusHandle, Global, HitboxBehavior, InteractiveElement as _,
-    IntoElement, KeyDownEvent, KeyUpEvent, MouseButton, MouseDownEvent, MouseExitEvent,
-    MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, RenderOnce, Rgba, SharedString,
-    Styled as _, Window, canvas, div, prelude::FluentBuilder as _, px,
+    AnyElement, App, Bounds, ElementId, Entity, EntityId, FocusHandle, Font, Global,
+    HitboxBehavior, InteractiveElement as _, IntoElement, KeyDownEvent, KeyUpEvent, MouseButton,
+    MouseDownEvent, MouseExitEvent, MouseMoveEvent, MouseUpEvent, ParentElement, Pixels,
+    RenderOnce, Rgba, ScrollAnchor, ScrollHandle, SharedString, StatefulInteractiveElement as _,
+    Styled as _, TextRun, WeakFocusHandle, Window, canvas, div, prelude::FluentBuilder as _, px,
 };
 
 use crate::tooltip::{Tooltip, TooltipTargetVisibility};
@@ -349,6 +354,38 @@ impl ButtonTheme {
 
 impl Global for ButtonTheme {}
 
+pub(crate) fn measure_button_intrinsic_width(
+    label: &SharedString,
+    size: ButtonSize,
+    window: &Window,
+    cx: &App,
+) -> Pixels {
+    let style =
+        cx.global::<ButtonTheme>()
+            .resolve(ButtonVariant::Secondary, size, ButtonShape::Rounded);
+    let text_style = window.text_style();
+    let run = TextRun {
+        len: label.len(),
+        font: Font {
+            family: text_style.font_family,
+            features: text_style.font_features,
+            fallbacks: text_style.font_fallbacks,
+            weight: text_style.font_weight,
+            style: text_style.font_style,
+        },
+        color: text_style.color,
+        background_color: None,
+        underline: None,
+        strikethrough: None,
+    };
+    window
+        .text_system()
+        .shape_line(label.clone(), style.font_size, &[run], None)
+        .width
+        + style.horizontal_padding * 2.0
+        + style.border_width * 2.0
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct ButtonStyle {
     normal: ButtonPaint,
@@ -366,6 +403,254 @@ struct ButtonStyle {
 
 type ActivationHandler = Rc<dyn Fn(&ButtonActivation, &mut Window, &mut App)>;
 type ContentBuilder = Box<dyn FnOnce(Rgba) -> AnyElement>;
+type ModalPressCancellation = Rc<dyn Fn(&mut App)>;
+type ModalPressIdleCheck = Rc<dyn Fn(&App) -> bool>;
+type ModalPressLivenessCheck = Rc<dyn Fn() -> bool>;
+
+struct ModalPressRegistration {
+    cancel: ModalPressCancellation,
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "modal press idleness is observable only by interaction tests"
+        )
+    )]
+    is_idle: ModalPressIdleCheck,
+    is_alive: ModalPressLivenessCheck,
+}
+
+#[derive(Clone, Default)]
+pub(crate) struct ModalPressOwner {
+    controls: Rc<RefCell<HashMap<EntityId, ModalPressRegistration>>>,
+}
+
+impl ModalPressOwner {
+    pub(crate) fn register<T: 'static>(
+        &self,
+        state: &Entity<T>,
+        cancel: impl Fn(&mut T, &mut gpui::Context<T>) + 'static,
+        is_idle: impl Fn(&T) -> bool + 'static,
+    ) {
+        let cancel_state = state.downgrade();
+        let idle_state = state.downgrade();
+        let live_state = state.downgrade();
+        let registration = ModalPressRegistration {
+            cancel: Rc::new(move |cx| {
+                let _ = cancel_state.update(cx, |state, cx| cancel(state, cx));
+            }),
+            is_idle: Rc::new(move |cx| {
+                idle_state
+                    .read_with(cx, |state, _| is_idle(state))
+                    .unwrap_or(true)
+            }),
+            is_alive: Rc::new(move || live_state.upgrade().is_some()),
+        };
+        let mut controls = self.controls.borrow_mut();
+        controls.retain(|_, control| (control.is_alive)());
+        controls.insert(state.entity_id(), registration);
+    }
+
+    pub(crate) fn disarm(&self, cx: &mut App) {
+        let controls = self
+            .controls
+            .borrow()
+            .values()
+            .map(|control| control.cancel.clone())
+            .collect::<Vec<_>>();
+        for cancel in controls {
+            cancel(cx);
+        }
+        self.controls
+            .borrow_mut()
+            .retain(|_, control| (control.is_alive)());
+    }
+
+    #[cfg(test)]
+    pub(crate) fn controls_are_idle(&self, cx: &App) -> bool {
+        self.controls
+            .borrow()
+            .values()
+            .all(|control| (control.is_idle)(cx))
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct ModalFocusAnchorRegistry {
+    scroll_handle: ScrollHandle,
+    frame: Rc<Cell<u64>>,
+    registrations: Rc<RefCell<Vec<ModalFocusAnchorRegistration>>>,
+}
+
+struct ModalFocusAnchorRegistration {
+    focus: WeakFocusHandle,
+    control: ModalFocusAnchor,
+    frame: u64,
+}
+
+#[derive(Clone)]
+pub(crate) struct ModalFocusAnchor {
+    anchor: ScrollAnchor,
+    bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
+}
+
+impl ModalFocusAnchor {
+    pub(crate) fn scroll_anchor(&self) -> ScrollAnchor {
+        self.anchor.clone()
+    }
+
+    pub(crate) fn track_bounds(&self, bounds: Bounds<Pixels>) {
+        self.bounds.set(Some(bounds));
+    }
+
+    pub(crate) fn bounds_tracker(&self, inset: Pixels) -> AnyElement {
+        let bounds = self.bounds.clone();
+        canvas(
+            move |control_bounds, _, _| bounds.set(Some(control_bounds.dilate(inset))),
+            |_, _, _, _| {},
+        )
+        .absolute()
+        .inset_0()
+        .into_any_element()
+    }
+}
+
+impl ModalFocusAnchorRegistry {
+    pub(crate) fn new(scroll_handle: ScrollHandle) -> Self {
+        Self {
+            scroll_handle,
+            frame: Rc::new(Cell::new(0)),
+            registrations: Rc::new(RefCell::new(Vec::new())),
+        }
+    }
+
+    pub(crate) fn reset(&self) {
+        let previous = self.frame.get();
+        self.frame.set(previous.wrapping_add(1));
+        self.registrations.borrow_mut().retain(|registration| {
+            registration.frame == previous && registration.focus.upgrade().is_some()
+        });
+    }
+
+    pub(crate) fn register(&self, focus: &FocusHandle) -> ModalFocusAnchor {
+        let frame = self.frame.get();
+        let mut registrations = self.registrations.borrow_mut();
+        registrations.retain(|registration| registration.focus.upgrade().is_some());
+        if let Some(registration) = registrations
+            .iter_mut()
+            .find(|registration| registration.focus.eq(focus))
+        {
+            registration.frame = frame;
+            return registration.control.clone();
+        }
+        let control = ModalFocusAnchor {
+            anchor: ScrollAnchor::for_handle(self.scroll_handle.clone()),
+            bounds: Rc::new(Cell::new(None)),
+        };
+        registrations.push(ModalFocusAnchorRegistration {
+            focus: focus.downgrade(),
+            control: control.clone(),
+            frame,
+        });
+        control
+    }
+
+    pub(crate) fn reveal(&self, focus: &FocusHandle, window: &mut Window, cx: &mut App) -> bool {
+        let frame = self.frame.get();
+        let control = {
+            let mut registrations = self.registrations.borrow_mut();
+            registrations.retain(|registration| registration.focus.upgrade().is_some());
+            registrations
+                .iter()
+                .find(|registration| registration.frame == frame && registration.focus.eq(focus))
+                .map(|registration| registration.control.clone())
+        };
+        let Some(control) = control else {
+            return false;
+        };
+        if let Some(bounds) = control.bounds.get() {
+            let viewport = self.scroll_handle.bounds();
+            let previous_offset = self.scroll_handle.offset();
+            let mut offset = previous_offset;
+            if bounds.top() < viewport.top() {
+                offset.y += viewport.top() - bounds.top();
+            } else if bounds.bottom() > viewport.bottom() {
+                offset.y += viewport.bottom() - bounds.bottom();
+            }
+            if offset != previous_offset {
+                self.scroll_handle.set_offset(offset);
+                window.refresh();
+            }
+        } else {
+            control.anchor.scroll_to(window, cx);
+        }
+        true
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct ModalControlScope {
+    press_owner: ModalPressOwner,
+    focus_anchors: Option<ModalFocusAnchorRegistry>,
+}
+
+thread_local! {
+    static CURRENT_MODAL_CONTROL_SCOPE: RefCell<Option<ModalControlScope>> = const {
+        RefCell::new(None)
+    };
+}
+
+struct ModalControlScopeGuard {
+    previous: Option<ModalControlScope>,
+}
+
+impl Drop for ModalControlScopeGuard {
+    fn drop(&mut self) {
+        CURRENT_MODAL_CONTROL_SCOPE.with(|current| {
+            current.replace(self.previous.take());
+        });
+    }
+}
+
+impl ModalControlScope {
+    pub(crate) fn new(press_owner: ModalPressOwner) -> Self {
+        Self {
+            press_owner,
+            focus_anchors: None,
+        }
+    }
+
+    pub(crate) fn with_focus_anchors(mut self, focus_anchors: ModalFocusAnchorRegistry) -> Self {
+        self.focus_anchors = Some(focus_anchors);
+        self
+    }
+
+    pub(crate) fn enter<R>(&self, render: impl FnOnce() -> R) -> R {
+        let previous =
+            CURRENT_MODAL_CONTROL_SCOPE.with(|current| current.replace(Some(self.clone())));
+        let _guard = ModalControlScopeGuard { previous };
+        render()
+    }
+
+    fn current_press_owner() -> Option<ModalPressOwner> {
+        CURRENT_MODAL_CONTROL_SCOPE.with(|current| {
+            current
+                .borrow()
+                .as_ref()
+                .map(|scope| scope.press_owner.clone())
+        })
+    }
+
+    pub(crate) fn register_current_focus_anchor(focus: &FocusHandle) -> Option<ModalFocusAnchor> {
+        CURRENT_MODAL_CONTROL_SCOPE.with(|current| {
+            current
+                .borrow()
+                .as_ref()
+                .and_then(|scope| scope.focus_anchors.as_ref())
+                .map(|anchors| anchors.register(focus))
+        })
+    }
+}
 
 /// A reusable text action button with native desktop press semantics.
 #[derive(IntoElement)]
@@ -375,6 +660,7 @@ pub struct Button {
     leading: Option<ContentBuilder>,
     trailing: Option<ContentBuilder>,
     full_width: bool,
+    multiline: bool,
 }
 
 impl Button {
@@ -387,7 +673,29 @@ impl Button {
             leading: None,
             trailing: None,
             full_width: false,
+            multiline: false,
         }
+    }
+
+    pub(crate) fn modal_focus_handle(mut self, focus_handle: FocusHandle) -> Self {
+        self.core.modal_focus_handle = Some(focus_handle);
+        self.core.tab_stop = true;
+        self
+    }
+
+    pub(crate) fn modal_borderless(mut self) -> Self {
+        self.core.modal_borderless = true;
+        self
+    }
+
+    pub(crate) fn modal_press_owner(mut self, owner: ModalPressOwner) -> Self {
+        self.core.modal_press_owner = Some(owner);
+        self
+    }
+
+    pub(crate) fn multiline(mut self, multiline: bool) -> Self {
+        self.multiline = multiline;
+        self
     }
 
     /// Adds leading noninteractive content rendered with the resolved foreground color.
@@ -473,10 +781,12 @@ impl RenderOnce for Button {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let style = self.core.resolve_style(cx);
         let full_width = self.full_width;
+        let multiline = self.multiline;
         let has_trailing = self.trailing.is_some();
         let content = move |foreground| {
             div()
                 .flex()
+                .min_w_0()
                 .items_center()
                 .justify_center()
                 .gap(style.gap)
@@ -484,7 +794,13 @@ impl RenderOnce for Button {
                 .when_some(self.leading, |content, build| {
                     content.child(build(foreground))
                 })
-                .child(div().line_height(gpui::relative(1.0)).child(self.label))
+                .child(
+                    div()
+                        .min_w_0()
+                        .line_height(gpui::relative(if multiline { 1.2 } else { 1.0 }))
+                        .when(multiline, |label| label.whitespace_normal().text_center())
+                        .child(self.label),
+                )
                 .when(full_width && has_trailing, |content| {
                     content.child(div().flex_grow())
                 })
@@ -494,8 +810,17 @@ impl RenderOnce for Button {
                 .into_any_element()
         };
 
-        self.core
-            .render(style, false, full_width, content, window, cx)
+        self.core.render(
+            style,
+            ButtonLayout {
+                icon_only: false,
+                full_width,
+                multiline,
+            },
+            content,
+            window,
+            cx,
+        )
     }
 }
 
@@ -584,8 +909,25 @@ impl IconButton {
 impl RenderOnce for IconButton {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let style = self.core.resolve_style(cx);
-        self.core.render(style, true, false, self.icon, window, cx)
+        self.core.render(
+            style,
+            ButtonLayout {
+                icon_only: true,
+                full_width: false,
+                multiline: false,
+            },
+            self.icon,
+            window,
+            cx,
+        )
     }
+}
+
+#[derive(Clone, Copy)]
+struct ButtonLayout {
+    icon_only: bool,
+    full_width: bool,
+    multiline: bool,
 }
 
 struct ButtonCore {
@@ -600,6 +942,9 @@ struct ButtonCore {
     debug_selector: Option<String>,
     tooltip: Option<Tooltip>,
     on_activate: Option<ActivationHandler>,
+    modal_focus_handle: Option<FocusHandle>,
+    modal_borderless: bool,
+    modal_press_owner: Option<ModalPressOwner>,
 }
 
 impl ButtonCore {
@@ -616,6 +961,9 @@ impl ButtonCore {
             debug_selector: None,
             tooltip: None,
             on_activate: None,
+            modal_focus_handle: None,
+            modal_borderless: false,
+            modal_press_owner: None,
         }
     }
 
@@ -627,14 +975,25 @@ impl ButtonCore {
     fn render(
         self,
         style: ButtonStyle,
-        icon_only: bool,
-        full_width: bool,
+        layout: ButtonLayout,
         build_content: impl FnOnce(Rgba) -> AnyElement + 'static,
         window: &mut Window,
         cx: &mut App,
     ) -> impl IntoElement {
         let enabled = !self.disabled && self.on_activate.is_some();
-        let state = window.use_keyed_state(self.id.clone(), cx, ButtonState::new);
+        let modal_focus_handle = self.modal_focus_handle.clone();
+        let state = window.use_keyed_state(self.id.clone(), cx, move |window, cx| {
+            ButtonState::new(modal_focus_handle, window, cx)
+        });
+        let modal_press_owner = self
+            .modal_press_owner
+            .clone()
+            .or_else(ModalControlScope::current_press_owner);
+        if let Some(owner) = &modal_press_owner {
+            owner.register(&state, ButtonState::cancel_modal_owned_press, |state| {
+                !state.interaction.has_owned_press()
+            });
+        }
         state.update(cx, |state, cx| {
             state.synchronize(enabled, self.tab_stop, cx);
         });
@@ -647,10 +1006,15 @@ impl ButtonCore {
                 state.interaction.is_hovered(),
             )
         };
+        let focus_anchor = ModalControlScope::register_current_focus_anchor(&focus_handle);
+        let scroll_anchor = focus_anchor.as_ref().map(ModalFocusAnchor::scroll_anchor);
         let focused = focus_handle.is_focused(window);
         let paint = resolve_paint(style, enabled, pressed, hovered);
-        let border = if focused {
-            style.focus_border
+        let focus_ring = focused.then_some(style.focus_border);
+        let focus_ring_offset = style.border_width * 2.0;
+        let focus_ring_position = focus_ring_offset + style.border_width;
+        let border_color = if self.modal_borderless {
+            paint.background
         } else {
             paint.border
         };
@@ -738,6 +1102,10 @@ impl ButtonCore {
         let on_keyboard_activate = self.on_activate.clone();
         let keyboard_focus = focus_handle.clone();
         let debug_selector = self.debug_selector;
+        let focus_selector = debug_selector
+            .as_ref()
+            .map(|selector| format!("{selector}-keyboard-focus"))
+            .unwrap_or_else(|| format!("{}-keyboard-focus", self.accessibility_name));
         let tooltip = self.tooltip;
         let content = build_content(paint.foreground);
 
@@ -751,19 +1119,25 @@ impl ButtonCore {
             .flex_shrink_0()
             .items_center()
             .justify_center()
-            .h(style.height)
-            .when(icon_only, |button| button.w(style.height))
-            .when(!icon_only, |button| button.px(style.horizontal_padding))
-            .when(full_width, |button| button.w_full())
+            .when(!layout.multiline, |button| button.h(style.height))
+            .when(layout.multiline, |button| {
+                button.min_h(style.height).py(style.gap)
+            })
+            .when(layout.icon_only, |button| button.w(style.height))
+            .when(!layout.icon_only, |button| {
+                button.px(style.horizontal_padding)
+            })
+            .when(layout.full_width, |button| button.w_full())
             .rounded(style.corner_radius)
             .border(style.border_width)
-            .border_color(border)
+            .border_color(border_color)
             .bg(paint.background)
             .text_color(paint.foreground)
             .text_size(style.font_size)
             .cursor_default()
             .block_mouse_except_scroll()
             .track_focus(&focus_handle)
+            .anchor_scroll(scroll_anchor)
             .on_key_down(move |event: &KeyDownEvent, window, cx| {
                 if !is_unmodified_space_down(event) {
                     return;
@@ -794,7 +1168,24 @@ impl ButtonCore {
                 cx.stop_propagation();
             })
             .child(content)
-            .child(pointer_tracker);
+            .when_some(focus_ring, move |button, ring_color| {
+                button.child(
+                    div()
+                        .debug_selector(move || focus_selector.clone())
+                        .absolute()
+                        .top(-focus_ring_position)
+                        .right(-focus_ring_position)
+                        .bottom(-focus_ring_position)
+                        .left(-focus_ring_position)
+                        .rounded(style.corner_radius + focus_ring_offset)
+                        .border(style.border_width)
+                        .border_color(ring_color),
+                )
+            })
+            .child(pointer_tracker)
+            .when_some(focus_anchor, |button, anchor| {
+                button.child(anchor.bounds_tracker(style.border_width))
+            });
 
         if let Some(tooltip) = tooltip {
             tooltip
@@ -830,12 +1221,17 @@ struct ButtonState {
 }
 
 impl ButtonState {
-    fn new(window: &mut Window, cx: &mut gpui::Context<Self>) -> Self {
-        let focus_handle = cx.focus_handle();
+    fn new(
+        injected_focus_handle: Option<FocusHandle>,
+        window: &mut Window,
+        cx: &mut gpui::Context<Self>,
+    ) -> Self {
+        let focus_handle = injected_focus_handle.unwrap_or_else(|| cx.focus_handle());
+        cx.on_focus(&focus_handle, window, |_, _, cx| cx.notify())
+            .detach();
         cx.on_blur(&focus_handle, window, |state, _, cx| {
-            if state.interaction.cancel_keyboard() {
-                cx.notify();
-            }
+            state.interaction.cancel_keyboard();
+            cx.notify();
         })
         .detach();
         cx.observe_window_activation(window, |state, window, cx| {
@@ -892,6 +1288,12 @@ impl ButtonState {
         }
     }
 
+    fn cancel_modal_owned_press(&mut self, cx: &mut gpui::Context<Self>) {
+        if self.interaction.cancel_all() {
+            cx.notify();
+        }
+    }
+
     fn space_down(&mut self, cx: &mut gpui::Context<Self>) {
         if self.enabled && self.interaction.space_down() {
             cx.notify();
@@ -923,6 +1325,10 @@ struct ButtonInteraction {
 }
 
 impl ButtonInteraction {
+    fn has_owned_press(self) -> bool {
+        self.is_pointer_armed() || self.space_held
+    }
+
     fn is_pointer_armed(self) -> bool {
         matches!(self.pointer, PointerPress::Armed { .. })
     }
@@ -1029,12 +1435,16 @@ mod tests {
     }
 
     fn test_theme() -> ButtonTheme {
+        test_theme_with_focus(rgba(0x00aaffff))
+    }
+
+    fn test_theme_with_focus(focus_border: Rgba) -> ButtonTheme {
         let variant = test_variant_style();
         let metrics = ButtonMetrics::new(px(24.0));
         ButtonTheme::new(
             ButtonVariants::new(variant, variant, variant, variant, variant, variant),
             ButtonSizes::new(metrics, metrics, metrics, metrics),
-            rgba(0x00aaffff),
+            focus_border,
         )
     }
 
@@ -1311,6 +1721,41 @@ mod tests {
 
         assert_eq!(activations.get(), 1);
         assert_eq!(source.get(), Some(ButtonActivationSource::Keyboard));
+    }
+
+    #[gpui::test]
+    fn keyboard_focus_adds_one_outset_ring_when_focus_and_normal_colors_match(
+        cx: &mut TestAppContext,
+    ) {
+        let (root, _, _, cx) = button_window(cx, false, true);
+        cx.update(|_, cx| cx.set_global(test_theme_with_focus(rgba(0x202020ff))));
+        root.update(cx, |_, cx| cx.notify());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("test-button-keyboard-focus").is_none());
+
+        cx.update(|window, _| {
+            window.focus_next();
+            window.focus_next();
+        });
+        cx.run_until_parked();
+        let button = cx
+            .debug_bounds("test-button")
+            .expect("button should render");
+        let focus = cx
+            .debug_bounds("test-button-keyboard-focus")
+            .expect("focused button should strengthen its single focus outline");
+        let other_focus = root.read_with(cx, |root, _| root.other_focus.clone());
+        cx.update(|window, _| other_focus.focus(window));
+        cx.run_until_parked();
+
+        assert!(
+            focus.left() == button.left() - px(2.0)
+                && focus.top() == button.top() - px(2.0)
+                && focus.right() == button.right() + px(2.0)
+                && focus.bottom() == button.bottom() + px(2.0)
+                && cx.debug_bounds("test-button-keyboard-focus").is_none(),
+            "button={button:?}, focus={focus:?}"
+        );
     }
 
     #[gpui::test]
