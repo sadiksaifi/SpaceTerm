@@ -73,7 +73,7 @@ pub(crate) fn resolve_destination_query(
             maximum: maximum_token_bytes,
         });
     }
-    if !is_positive_literal(query) {
+    if !is_positive_literal(query) || query.split('@').any(str::is_empty) {
         return Err(DestinationQueryError::Invalid);
     }
     let destination =
@@ -108,10 +108,11 @@ pub(crate) fn resolve_destination_query(
 fn is_positive_literal(value: &str) -> bool {
     !value.is_empty()
         && !value.starts_with('-')
-        && value.split('@').all(|component| !component.is_empty())
-        && value.chars().all(|character| {
-            character.is_alphanumeric() || matches!(character, '.' | '_' | '-' | '@')
-        })
+        && !value.starts_with('!')
+        && !value.contains(['*', '?'])
+        && !value
+            .chars()
+            .any(|character| character.is_whitespace() || character.is_control())
 }
 
 #[cfg(test)]
@@ -124,7 +125,15 @@ mod tests {
 
     #[test]
     fn alias_should_accept_positive_literal_tokens() {
-        for value in ["work", "work.example", "build_host", "fedora@orb"] {
+        for value in [
+            "work",
+            "work.example",
+            "build_host",
+            "fedora@orb",
+            "host[0]",
+            "host:22",
+            "host/path",
+        ] {
             assert_eq!(alias(value).as_str(), value);
         }
     }
@@ -139,12 +148,6 @@ mod tests {
             "*.example",
             "host?",
             "!host",
-            "host[0]",
-            "@host",
-            "host@",
-            "host@@orb",
-            "host:22",
-            "host/path",
         ] {
             assert_eq!(
                 SshHostAlias::new(value.to_owned()),
@@ -233,8 +236,6 @@ mod tests {
             "host*",
             "user@",
             "@host",
-            "host:22",
-            "host/path",
         ] {
             assert_eq!(
                 resolve_destination_query(query, &[alias("host")], 128),

@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
 use std::io::{self, Read};
 use std::path::{Component, Path, PathBuf};
@@ -58,7 +58,7 @@ impl DirectSshTarget {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct DiscoveredSshHost {
     alias: SshHostAlias,
-    provenance: HostConfigProvenance,
+    provenance: Option<HostConfigProvenance>,
     direct_target: Option<DirectSshTarget>,
 }
 
@@ -67,8 +67,8 @@ impl DiscoveredSshHost {
         &self.alias
     }
 
-    pub(crate) const fn provenance(&self) -> &HostConfigProvenance {
-        &self.provenance
+    pub(crate) const fn provenance(&self) -> Option<&HostConfigProvenance> {
+        self.provenance.as_ref()
     }
 
     pub(crate) const fn direct_target(&self) -> Option<&DirectSshTarget> {
@@ -77,7 +77,12 @@ impl DiscoveredSshHost {
 
     pub(crate) fn subtitle(&self) -> String {
         self.direct_target.as_ref().map_or_else(
-            || self.provenance.path.display().to_string(),
+            || {
+                self.provenance.as_ref().map_or_else(
+                    || "Multiple SSH config sources".to_owned(),
+                    |provenance| provenance.path.display().to_string(),
+                )
+            },
             DirectSshTarget::subtitle,
         )
     }
@@ -195,10 +200,15 @@ impl HostConfigFilesystem for NativeHostConfigFilesystem {
         path: &Path,
         maximum_entries: usize,
     ) -> io::Result<Vec<PathBuf>> {
-        std::fs::read_dir(path)?
-            .take(maximum_entries.saturating_add(1))
-            .map(|entry| entry.map(|entry| entry.path()))
-            .collect()
+        let capacity = maximum_entries.saturating_add(1);
+        let mut entries = BTreeSet::new();
+        for entry in std::fs::read_dir(path)? {
+            entries.insert(entry?.path());
+            if entries.len() > capacity {
+                entries.pop_last();
+            }
+        }
+        Ok(entries.into_iter().collect())
     }
 }
 
@@ -208,16 +218,42 @@ pub(crate) fn discover_ssh_hosts(
     limits: HostDiscoveryLimits,
 ) -> HostDiscovery {
     let mut discovery = HostDiscovery::default();
+    let mut known_aliases = BTreeSet::new();
     for (source, root) in [
         (HostConfigSource::Managed, roots.managed.as_path()),
         (HostConfigSource::User, roots.user.as_path()),
     ] {
-        let mut scanner = SourceScanner::new(filesystem, roots, limits, source);
+        let mut scanner = SourceScanner::new(filesystem, roots, limits, source, &known_aliases);
         scanner.scan_file(root, 0);
+        known_aliases.extend(
+            scanner
+                .hosts
+                .iter()
+                .map(|host| host.alias.as_str().to_owned()),
+        );
         discovery.hosts.append(&mut scanner.hosts);
         discovery.issues.append(&mut scanner.issues);
     }
+    discovery.hosts = consolidate_hosts(discovery.hosts);
     discovery
+}
+
+fn consolidate_hosts(hosts: Vec<DiscoveredSshHost>) -> Vec<DiscoveredSshHost> {
+    let mut indexes: BTreeMap<String, usize> = BTreeMap::new();
+    let mut consolidated: Vec<DiscoveredSshHost> = Vec::new();
+    for host in hosts {
+        if let Some(index) = indexes.get(host.alias.as_str()).copied() {
+            let existing = &mut consolidated[index];
+            if existing.provenance != host.provenance {
+                existing.provenance = None;
+            }
+            existing.direct_target = None;
+        } else {
+            indexes.insert(host.alias.as_str().to_owned(), consolidated.len());
+            consolidated.push(host);
+        }
+    }
+    consolidated
 }
 
 struct SourceScanner<'a, F> {
@@ -233,6 +269,8 @@ struct SourceScanner<'a, F> {
     total_bytes: usize,
     glob_matches: usize,
     result_limit_reported: bool,
+    known_aliases: BTreeSet<String>,
+    new_results: usize,
 }
 
 impl<'a, F: HostConfigFilesystem> SourceScanner<'a, F> {
@@ -241,6 +279,7 @@ impl<'a, F: HostConfigFilesystem> SourceScanner<'a, F> {
         roots: &'a HostConfigRoots,
         limits: HostDiscoveryLimits,
         source: HostConfigSource,
+        known_aliases: &BTreeSet<String>,
     ) -> Self {
         Self {
             filesystem,
@@ -255,6 +294,8 @@ impl<'a, F: HostConfigFilesystem> SourceScanner<'a, F> {
             total_bytes: 0,
             glob_matches: 0,
             result_limit_reported: false,
+            known_aliases: known_aliases.clone(),
+            new_results: 0,
         }
     }
 
@@ -324,12 +365,12 @@ impl<'a, F: HostConfigFilesystem> SourceScanner<'a, F> {
 
     fn parse_file(&mut self, path: &Path, text: &str, depth: usize) {
         let mut stanza = None;
-        let mut global = true;
-        let mut match_seen = false;
+        let mut section = ConfigSection::Global;
         for (index, line) in text.lines().enumerate() {
             let line_number = index + 1;
-            let mut tokens = match tokenize_config_line(line, self.limits.token_bytes) {
-                Ok(tokens) => tokens,
+            let (keyword, tokens) = match parse_config_directive(line, self.limits.token_bytes) {
+                Ok(Some(directive)) => directive,
+                Ok(None) => continue,
                 Err(TokenizeError::TooLong) => {
                     self.issue(path, Some(line_number), HostConfigIssueKind::TokenLimit);
                     continue;
@@ -339,14 +380,9 @@ impl<'a, F: HostConfigFilesystem> SourceScanner<'a, F> {
                     continue;
                 }
             };
-            if tokens.is_empty() {
-                continue;
-            }
-            split_keyword_assignment(&mut tokens);
-            let keyword = tokens[0].to_ascii_lowercase();
             match keyword.as_str() {
-                "include" if global && !match_seen => {
-                    for include in &tokens[1..] {
+                "include" if section == ConfigSection::Global => {
+                    for include in &tokens {
                         for included_path in self.expand_include(path, include, line_number) {
                             self.scan_file(&included_path, depth.saturating_add(1));
                         }
@@ -354,19 +390,16 @@ impl<'a, F: HostConfigFilesystem> SourceScanner<'a, F> {
                 }
                 "host" => {
                     self.finish_stanza(stanza.take());
-                    global = false;
-                    if !match_seen {
-                        stanza = Some(ParsedStanza::new(path, line_number, &tokens[1..]));
-                    }
+                    section = ConfigSection::Host;
+                    stanza = Some(ParsedStanza::new(path, line_number, &tokens));
                 }
                 "match" => {
                     self.finish_stanza(stanza.take());
-                    global = false;
-                    match_seen = true;
+                    section = ConfigSection::Match;
                 }
                 "hostname" | "user" | "port" => {
                     if let Some(stanza) = &mut stanza {
-                        stanza.option(&keyword, &tokens[1..]);
+                        stanza.option(&keyword, &tokens);
                     }
                 }
                 _ => {}
@@ -381,7 +414,8 @@ impl<'a, F: HostConfigFilesystem> SourceScanner<'a, F> {
         };
         let direct_target = stanza.direct_target();
         for alias in stanza.aliases {
-            if self.hosts.len() >= self.limits.results {
+            let is_new = !self.known_aliases.contains(alias.as_str());
+            if is_new && self.new_results >= self.limits.results {
                 if !self.result_limit_reported {
                     self.issue(
                         &stanza.path,
@@ -390,15 +424,19 @@ impl<'a, F: HostConfigFilesystem> SourceScanner<'a, F> {
                     );
                     self.result_limit_reported = true;
                 }
-                return;
+                continue;
+            }
+            if is_new {
+                self.known_aliases.insert(alias.as_str().to_owned());
+                self.new_results += 1;
             }
             self.hosts.push(DiscoveredSshHost {
                 alias,
-                provenance: HostConfigProvenance {
+                provenance: Some(HostConfigProvenance {
                     source: self.source,
                     path: stanza.path.clone(),
                     line: stanza.line,
-                },
+                }),
                 direct_target: direct_target.clone(),
             });
         }
@@ -412,10 +450,7 @@ impl<'a, F: HostConfigFilesystem> SourceScanner<'a, F> {
         } else if Path::new(token).is_absolute() {
             PathBuf::from(token)
         } else {
-            including
-                .parent()
-                .unwrap_or_else(|| Path::new("/"))
-                .join(token)
+            self.roots.home.join(".ssh").join(token)
         };
         let Some(path) = normalize_absolute_path(&path) else {
             self.issue(including, Some(line), HostConfigIssueKind::MalformedLine);
@@ -460,8 +495,9 @@ impl<'a, F: HostConfigFilesystem> SourceScanner<'a, F> {
                 }
                 expanded = next;
             } else {
+                let component = unescape_glob_literal(&component);
                 for directory in &mut expanded {
-                    directory.push(component.as_ref());
+                    directory.push(&component);
                 }
             }
         }
@@ -550,17 +586,57 @@ enum TokenizeError {
     Malformed,
 }
 
-fn tokenize_config_line(line: &str, maximum_bytes: usize) -> Result<Vec<String>, TokenizeError> {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ConfigSection {
+    Global,
+    Host,
+    Match,
+}
+
+fn parse_config_directive(
+    line: &str,
+    maximum_bytes: usize,
+) -> Result<Option<(String, Vec<String>)>, TokenizeError> {
+    let line = line.trim_start();
+    if line.is_empty() || line.starts_with('#') {
+        return Ok(None);
+    }
+    let keyword_end = line
+        .find(|character: char| character.is_whitespace() || character == '=')
+        .unwrap_or(line.len());
+    let keyword = &line[..keyword_end];
+    if keyword.is_empty() || keyword.len() > maximum_bytes || keyword.contains(['\'', '"', '\\']) {
+        return Err(TokenizeError::Malformed);
+    }
+    let mut arguments = line[keyword_end..].trim_start();
+    if let Some(after_equals) = arguments.strip_prefix('=') {
+        arguments = after_equals.trim_start();
+    }
+    let tokens = tokenize_config_arguments(arguments, maximum_bytes)?;
+    Ok(Some((keyword.to_ascii_lowercase(), tokens)))
+}
+
+fn tokenize_config_arguments(
+    line: &str,
+    maximum_bytes: usize,
+) -> Result<Vec<String>, TokenizeError> {
     let mut tokens = Vec::new();
     let mut current = String::new();
     let mut quote = None;
-    let mut escaped = false;
-    for character in line.chars() {
-        if escaped {
-            current.push(character);
-            escaped = false;
-        } else if character == '\\' {
-            escaped = true;
+    let mut token_started = false;
+    let mut characters = line.chars().peekable();
+    while let Some(character) = characters.next() {
+        if character == '\\' {
+            let Some(next) = characters.next() else {
+                return Err(TokenizeError::Malformed);
+            };
+            token_started = true;
+            if next.is_whitespace() || matches!(next, '\\' | '\'' | '"' | '#') {
+                current.push(next);
+            } else {
+                current.push('\\');
+                current.push(next);
+            }
         } else if let Some(delimiter) = quote {
             if character == delimiter {
                 quote = None;
@@ -569,38 +645,29 @@ fn tokenize_config_line(line: &str, maximum_bytes: usize) -> Result<Vec<String>,
             }
         } else if matches!(character, '\'' | '"') {
             quote = Some(character);
-        } else if character == '#' {
+            token_started = true;
+        } else if character == '#' && !token_started {
             break;
         } else if character.is_whitespace() {
-            if !current.is_empty() {
+            if token_started {
                 tokens.push(std::mem::take(&mut current));
+                token_started = false;
             }
         } else {
             current.push(character);
+            token_started = true;
         }
         if current.len() > maximum_bytes {
             return Err(TokenizeError::TooLong);
         }
     }
-    if escaped || quote.is_some() {
+    if quote.is_some() {
         return Err(TokenizeError::Malformed);
     }
-    if !current.is_empty() {
+    if token_started {
         tokens.push(current);
     }
     Ok(tokens)
-}
-
-fn split_keyword_assignment(tokens: &mut Vec<String>) {
-    let Some((keyword, value)) = tokens[0].split_once('=') else {
-        return;
-    };
-    let keyword = keyword.to_owned();
-    let value = value.to_owned();
-    tokens[0] = keyword;
-    if !value.is_empty() {
-        tokens.insert(1, value);
-    }
 }
 
 fn valid_hostname(value: &str) -> bool {
@@ -640,38 +707,144 @@ fn normalize_absolute_path(path: &Path) -> Option<PathBuf> {
 }
 
 fn contains_glob(value: &str) -> bool {
-    value.contains('*') || value.contains('?')
+    let mut escaped = false;
+    for character in value.chars() {
+        if escaped {
+            escaped = false;
+        } else if character == '\\' {
+            escaped = true;
+        } else if matches!(character, '*' | '?' | '[') {
+            return true;
+        }
+    }
+    false
 }
 
 fn glob_matches(pattern: &str, value: &str) -> bool {
-    let pattern = pattern.as_bytes();
-    let value = value.as_bytes();
-    let mut pattern_index = 0;
-    let mut value_index = 0;
-    let mut star = None;
-    let mut star_value = 0;
-    while value_index < value.len() {
-        if pattern_index < pattern.len()
-            && (pattern[pattern_index] == b'?' || pattern[pattern_index] == value[value_index])
+    if value.starts_with('.') && explicit_first_character(pattern) != Some('.') {
+        return false;
+    }
+    let pattern = pattern.chars().collect::<Vec<_>>();
+    let value = value.chars().collect::<Vec<_>>();
+    let mut memo = BTreeMap::new();
+    glob_matches_from(&pattern, &value, 0, 0, &mut memo)
+}
+
+fn glob_matches_from(
+    pattern: &[char],
+    value: &[char],
+    pattern_index: usize,
+    value_index: usize,
+    memo: &mut BTreeMap<(usize, usize), bool>,
+) -> bool {
+    if let Some(result) = memo.get(&(pattern_index, value_index)) {
+        return *result;
+    }
+    let result = if pattern_index == pattern.len() {
+        value_index == value.len()
+    } else {
+        match pattern[pattern_index] {
+            '*' => (value_index..=value.len())
+                .any(|next| glob_matches_from(pattern, value, pattern_index + 1, next, memo)),
+            '?' => {
+                value_index < value.len()
+                    && glob_matches_from(pattern, value, pattern_index + 1, value_index + 1, memo)
+            }
+            '\\' if pattern_index + 1 < pattern.len() => {
+                value.get(value_index) == pattern.get(pattern_index + 1)
+                    && glob_matches_from(pattern, value, pattern_index + 2, value_index + 1, memo)
+            }
+            '[' => match bracket_class(pattern, pattern_index, value.get(value_index).copied()) {
+                Some((matched, next_pattern)) => {
+                    matched
+                        && glob_matches_from(pattern, value, next_pattern, value_index + 1, memo)
+                }
+                None => {
+                    value.get(value_index) == Some(&'[')
+                        && glob_matches_from(
+                            pattern,
+                            value,
+                            pattern_index + 1,
+                            value_index + 1,
+                            memo,
+                        )
+                }
+            },
+            literal => {
+                value.get(value_index) == Some(&literal)
+                    && glob_matches_from(pattern, value, pattern_index + 1, value_index + 1, memo)
+            }
+        }
+    };
+    memo.insert((pattern_index, value_index), result);
+    result
+}
+
+fn bracket_class(pattern: &[char], start: usize, value: Option<char>) -> Option<(bool, usize)> {
+    let value = value?;
+    let mut index = start + 1;
+    let negated = matches!(pattern.get(index), Some('!' | '^'));
+    if negated {
+        index += 1;
+    }
+    let mut matched = false;
+    let mut populated = false;
+    while index < pattern.len() && pattern[index] != ']' {
+        let (first, after_first) = class_character(pattern, index)?;
+        populated = true;
+        if pattern.get(after_first) == Some(&'-')
+            && pattern
+                .get(after_first + 1)
+                .is_some_and(|character| *character != ']')
         {
-            pattern_index += 1;
-            value_index += 1;
-        } else if pattern_index < pattern.len() && pattern[pattern_index] == b'*' {
-            star = Some(pattern_index);
-            pattern_index += 1;
-            star_value = value_index;
-        } else if let Some(star_index) = star {
-            pattern_index = star_index + 1;
-            star_value += 1;
-            value_index = star_value;
+            let (last, after_last) = class_character(pattern, after_first + 1)?;
+            matched |= first <= value && value <= last;
+            index = after_last;
         } else {
-            return false;
+            matched |= first == value;
+            index = after_first;
         }
     }
-    while pattern_index < pattern.len() && pattern[pattern_index] == b'*' {
-        pattern_index += 1;
+    if !populated || pattern.get(index) != Some(&']') {
+        return None;
     }
-    pattern_index == pattern.len()
+    Some((if negated { !matched } else { matched }, index + 1))
+}
+
+fn class_character(pattern: &[char], index: usize) -> Option<(char, usize)> {
+    match pattern.get(index).copied()? {
+        '\\' => Some((*pattern.get(index + 1)?, index + 2)),
+        character => Some((character, index + 1)),
+    }
+}
+
+fn explicit_first_character(pattern: &str) -> Option<char> {
+    let characters = pattern.chars().collect::<Vec<_>>();
+    match *characters.first()? {
+        '\\' => characters.get(1).copied(),
+        '[' => {
+            bracket_class(&characters, 0, Some('.')).and_then(|(matched, _)| matched.then_some('.'))
+        }
+        character if matches!(character, '*' | '?') => None,
+        character => Some(character),
+    }
+}
+
+fn unescape_glob_literal(value: &str) -> String {
+    let mut result = String::new();
+    let mut characters = value.chars();
+    while let Some(character) = characters.next() {
+        if character == '\\' {
+            if let Some(escaped) = characters.next() {
+                result.push(escaped);
+            } else {
+                result.push('\\');
+            }
+        } else {
+            result.push(character);
+        }
+    }
+    result
 }
 
 fn is_system_ssh_path(path: &Path) -> bool {
@@ -738,10 +911,10 @@ mod tests {
                 .files
                 .keys()
                 .filter(|candidate| candidate.parent() == Some(path))
-                .take(maximum_entries.saturating_add(1))
                 .cloned()
                 .collect::<Vec<_>>();
             entries.sort();
+            entries.truncate(maximum_entries.saturating_add(1));
             Ok(entries)
         }
     }
@@ -775,11 +948,11 @@ mod tests {
         assert_eq!(discovery.hosts[0].subtitle(), "deploy@build.example:2222");
         assert_eq!(
             discovery.hosts[0].provenance(),
-            &HostConfigProvenance {
+            Some(&HostConfigProvenance {
                 source: HostConfigSource::Managed,
                 path: PathBuf::from("/managed/ssh_config"),
                 line: 1,
-            }
+            })
         );
     }
 
@@ -791,13 +964,110 @@ mod tests {
                 "Include /etc/ssh/ssh_config system-alias\nHost good *.example !blocked bad/path\nHostName good.example\nMatch host *\n  Host match-derived\n",
             )
             .file("/etc/ssh/ssh_config", "Host system\n")
-            .file("/managed/system-alias", "Host canonical-system\n")
-            .canonical("/managed/system-alias", "/etc/ssh/ssh_config");
+            .file(
+                "/home/test/.ssh/system-alias",
+                "Host canonical-system\n",
+            )
+            .canonical("/home/test/.ssh/system-alias", "/etc/ssh/ssh_config");
 
         let discovery = discover_ssh_hosts(&filesystem, &roots(), HostDiscoveryLimits::default());
 
-        assert_eq!(aliases(&discovery), ["good"]);
+        assert_eq!(aliases(&discovery), ["good", "bad/path", "match-derived"]);
         assert_eq!(discovery.hosts[0].direct_target(), None);
+    }
+
+    #[test]
+    fn directive_parser_should_follow_openssh_keyword_comment_quote_and_escape_rules() {
+        assert_eq!(
+            parse_config_directive(
+                "Host = foo#literal \"\" escaped\\ value literal\\* # comment",
+                128,
+            ),
+            Ok(Some((
+                "host".to_owned(),
+                vec![
+                    "foo#literal".to_owned(),
+                    String::new(),
+                    "escaped value".to_owned(),
+                    "literal\\*".to_owned(),
+                ],
+            )))
+        );
+        assert_eq!(
+            parse_config_directive("\"Host\" invalid", 128),
+            Err(TokenizeError::Malformed)
+        );
+    }
+
+    #[test]
+    fn discovery_should_allow_a_host_section_after_match_without_enabling_its_include() {
+        let filesystem = MemoryFilesystem::default()
+            .file(
+                "/managed/ssh_config",
+                "Match host old\n  Include ignored.conf\nHost later\n",
+            )
+            .file("/home/test/.ssh/ignored.conf", "Host ignored\n");
+
+        let discovery = discover_ssh_hosts(&filesystem, &roots(), HostDiscoveryLimits::default());
+
+        assert_eq!(aliases(&discovery), ["later"]);
+    }
+
+    #[test]
+    fn discovery_should_consolidate_duplicates_without_spending_new_result_budget() {
+        let filesystem = MemoryFilesystem::default()
+            .file(
+                "/managed/ssh_config",
+                "Host duplicate\n  HostName managed.example\n",
+            )
+            .file(
+                "/home/test/.ssh/config",
+                "Host duplicate\n  HostName user.example\nHost user-only\n",
+            );
+        let limits = HostDiscoveryLimits {
+            results: 1,
+            ..HostDiscoveryLimits::default()
+        };
+
+        let discovery = discover_ssh_hosts(&filesystem, &roots(), limits);
+
+        assert_eq!(aliases(&discovery), ["duplicate", "user-only"]);
+        assert_eq!(discovery.hosts[0].provenance(), None);
+        assert_eq!(discovery.hosts[0].direct_target(), None);
+    }
+
+    #[test]
+    fn lexical_glob_should_support_classes_escaping_and_dotfile_rules() {
+        assert!(glob_matches("[ab][0-9].conf", "a7.conf"));
+        assert!(glob_matches("[!a].conf", "b.conf"));
+        assert!(glob_matches(r"[\]].conf", "].conf"));
+        assert!(glob_matches(r"literal\*.conf", "literal*.conf"));
+        assert!(!glob_matches("*.conf", ".hidden.conf"));
+        assert!(glob_matches(".*.conf", ".hidden.conf"));
+        assert!(glob_matches("[.]hidden.conf", ".hidden.conf"));
+    }
+
+    #[test]
+    fn glob_expansion_should_choose_lexically_first_entries_before_bounding() {
+        let filesystem = MemoryFilesystem::default()
+            .file("/managed/ssh_config", "Include conf/*.conf\n")
+            .file("/home/test/.ssh/conf/z.conf", "Host z\n")
+            .file("/home/test/.ssh/conf/a.conf", "Host a\n")
+            .file("/home/test/.ssh/conf/b.conf", "Host b\n");
+        let limits = HostDiscoveryLimits {
+            glob_matches: 2,
+            ..HostDiscoveryLimits::default()
+        };
+
+        let discovery = discover_ssh_hosts(&filesystem, &roots(), limits);
+
+        assert_eq!(aliases(&discovery), ["a", "b"]);
+        assert!(
+            discovery
+                .issues
+                .iter()
+                .any(|issue| issue.kind() == HostConfigIssueKind::GlobLimit)
+        );
     }
 
     #[test]
@@ -809,8 +1079,8 @@ mod tests {
             )
             .file("/home/test/one.conf", "Host one\n")
             .file("/shared/two.conf", "Host two\n")
-            .file("/managed/parts/a.conf", "Host a\n")
-            .file("/managed/parts/b.conf", "Host b\n")
+            .file("/home/test/.ssh/parts/a.conf", "Host a\n")
+            .file("/home/test/.ssh/parts/b.conf", "Host b\n")
             .file("/shared/ignored.conf", "Host ignored\n");
 
         let discovery = discover_ssh_hosts(&filesystem, &roots(), HostDiscoveryLimits::default());
@@ -825,8 +1095,11 @@ mod tests {
                 "/managed/ssh_config",
                 "Include alias.conf\nHost after-cycle\n",
             )
-            .file("/managed/alias.conf", "Include ssh_config\nHost included\n")
-            .canonical("/managed/alias.conf", "/canonical/shared")
+            .file(
+                "/home/test/.ssh/alias.conf",
+                "Include alias.conf\nHost included\n",
+            )
+            .canonical("/home/test/.ssh/alias.conf", "/canonical/shared")
             .canonical("/managed/ssh_config", "/canonical/root")
             .canonical("/managed/ssh_config", "/canonical/root")
             .canonical("/managed/ssh_config", "/canonical/root");
@@ -851,11 +1124,11 @@ mod tests {
         assert_eq!(aliases(&discovery), ["user-host"]);
         assert_eq!(
             discovery.hosts[0].provenance(),
-            &HostConfigProvenance {
+            Some(&HostConfigProvenance {
                 source: HostConfigSource::User,
                 path: PathBuf::from("/home/test/.ssh/config"),
                 line: 1,
-            }
+            })
         );
         assert_eq!(discovery.issues[0].source(), HostConfigSource::Managed);
         assert_eq!(discovery.issues[0].kind(), HostConfigIssueKind::InvalidUtf8);
@@ -885,9 +1158,12 @@ mod tests {
                 "/managed/ssh_config",
                 "Include first.conf second.conf\nHost root\n",
             )
-            .file("/managed/first.conf", "Include deep.conf\nHost first\n")
-            .file("/managed/deep.conf", "Host deep\n")
-            .file("/managed/second.conf", "Host second\n");
+            .file(
+                "/home/test/.ssh/first.conf",
+                "Include deep.conf\nHost first\n",
+            )
+            .file("/home/test/.ssh/deep.conf", "Host deep\n")
+            .file("/home/test/.ssh/second.conf", "Host second\n");
         let limits = HostDiscoveryLimits {
             include_depth: 1,
             files: 2,
@@ -933,8 +1209,8 @@ mod tests {
                 "/managed/ssh_config",
                 "Include parts/*.conf\nHost first second third\n",
             )
-            .file("/managed/parts/a.conf", "Host a\n")
-            .file("/managed/parts/b.conf", "Host b\n");
+            .file("/home/test/.ssh/parts/a.conf", "Host a\n")
+            .file("/home/test/.ssh/parts/b.conf", "Host b\n");
         for (limits, kind) in [
             (
                 HostDiscoveryLimits {
