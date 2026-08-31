@@ -6,6 +6,7 @@ mod modal_theme;
 mod new_workspace_panel;
 mod pane_action_menu;
 mod pane_host;
+mod remote_workspace_flow;
 pub(crate) mod remote_workspace_picker;
 mod render_lifecycle;
 mod resize_handle_theme;

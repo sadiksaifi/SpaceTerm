@@ -327,6 +327,19 @@ pub(super) struct RemoteWorkspaceSelection {
 }
 
 impl RemoteWorkspaceSelection {
+    #[cfg(test)]
+    pub(super) fn new(
+        directory: RemoteWorkspaceDirectory,
+        physical_directory: RemoteDirectoryIdentity,
+        account: RemoteWorkspaceAccount,
+    ) -> Self {
+        Self {
+            directory,
+            physical_directory,
+            account,
+        }
+    }
+
     pub(super) const fn directory(&self) -> &RemoteWorkspaceDirectory {
         &self.directory
     }
