@@ -355,12 +355,20 @@ pub(crate) struct LocalTerminalLaunchPlan {
     working_directory: crate::domain::ValidatedWorkspaceDirectory,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub(crate) struct RemoteTerminalLaunchPlan {
     local_home: crate::domain::ValidatedWorkspaceDirectory,
     metadata_context: RemoteTerminalMetadataContext,
     fallback_title: String,
     pane_channel: crate::ssh::command::PreparedSshPaneChannelCommand,
+}
+
+impl fmt::Debug for RemoteTerminalLaunchPlan {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RemoteTerminalLaunchPlan")
+            .finish_non_exhaustive()
+    }
 }
 
 impl RemoteTerminalLaunchPlan {
@@ -2670,7 +2678,17 @@ mod tests {
 
     use super::*;
     use crate::domain::{RemoteWorkspaceDirectory, SshDestination, WorkspaceDirectoryIdentity};
-    use crate::ssh::command::{SshCommandContext, ValidatedRemoteShellCommand};
+    use crate::ssh::command::{
+        RemotePaneShellCommandBuilder, SshCommandContext, ValidatedRemoteLoginShell,
+        ValidatedRemoteShellCommand,
+    };
+
+    fn remote_pane_command(directory: &RemoteWorkspaceDirectory) -> ValidatedRemoteShellCommand {
+        let shell = ValidatedRemoteLoginShell::new("/bin/zsh".to_owned()).unwrap();
+        RemotePaneShellCommandBuilder::new(directory, &shell)
+            .build()
+            .unwrap()
+    }
 
     #[test]
     fn remote_launch_plan_should_preserve_typed_context_and_reject_reused_channels() {
@@ -2686,9 +2704,7 @@ mod tests {
             PathBuf::from("/private/runtime/spaceterm/control.sock"),
         )
         .unwrap()
-        .prepare_pane_channel(
-            ValidatedRemoteShellCommand::new("exec /bin/zsh -l".to_owned()).unwrap(),
-        );
+        .prepare_pane_channel(remote_pane_command(&remote_directory));
         let plan = RemoteTerminalLaunchPlan::new(
             local_home.clone(),
             destination.clone(),
@@ -2702,6 +2718,11 @@ mod tests {
         assert_eq!(plan.remote_directory(), &remote_directory);
         assert_eq!(plan.fallback_title(), "project on remote");
         assert_eq!(plan.metadata_context().destination(), &destination);
+        let debug = format!("{:?}", TerminalLaunchPlan::Remote(plan.clone()));
+        assert_eq!(debug, "Remote(RemoteTerminalLaunchPlan { .. })");
+        assert!(!debug.contains("user@remote"));
+        assert!(!debug.contains("~/project"));
+        assert!(!debug.contains("/Users/local"));
         let _consumed = prepared.take().unwrap();
 
         let error = NativeTerminalSessionFactory
@@ -3655,22 +3676,21 @@ mod tests {
     #[test]
     fn remote_factory_should_report_missing_local_home_without_starting_ssh() {
         let destination = SshDestination::new("user@remote".to_owned()).unwrap();
+        let remote_directory = RemoteWorkspaceDirectory::new("~/project".to_owned()).unwrap();
         let prepared = SshCommandContext::new(
             PathBuf::from("/private/config/spaceterm/ssh_config"),
             destination.clone(),
             PathBuf::from("/private/runtime/spaceterm/control.sock"),
         )
         .unwrap()
-        .prepare_pane_channel(
-            ValidatedRemoteShellCommand::new("exec /bin/zsh -l".to_owned()).unwrap(),
-        );
+        .prepare_pane_channel(remote_pane_command(&remote_directory));
         let plan = RemoteTerminalLaunchPlan::new(
             crate::domain::ValidatedWorkspaceDirectory::new(
                 PathBuf::from("/private/tmp/spaceterm-missing-local-home"),
                 WorkspaceDirectoryIdentity::new(0, 0),
             ),
             destination,
-            RemoteWorkspaceDirectory::new("~/project".to_owned()).unwrap(),
+            remote_directory,
             "project on remote".to_owned(),
             prepared,
         );
