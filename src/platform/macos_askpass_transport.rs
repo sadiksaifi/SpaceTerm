@@ -11,11 +11,11 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, mpsc};
+use std::sync::{Arc, Mutex, mpsc};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-use gpui::{App, Task, Window};
+use gpui::{App, Window};
 use thiserror::Error;
 use zeroize::Zeroizing;
 
@@ -105,7 +105,7 @@ impl CapabilityToken {
     }
 }
 
-pub(crate) struct AskPassEnvironment {
+struct AskPassEnvironment {
     helper_path: PathBuf,
     socket_path: PathBuf,
     capability: Arc<CapabilityToken>,
@@ -116,7 +116,7 @@ impl AskPassEnvironment {
     ///
     /// The iterator borrows every value so the capability is never cloned into a long-lived
     /// command model. Callers should apply these six entries immediately before spawning ssh.
-    pub(crate) fn entries(&self) -> impl Iterator<Item = (&'static str, &OsStr)> {
+    fn entries(&self) -> impl Iterator<Item = (&'static str, &OsStr)> {
         [
             ("SSH_ASKPASS", self.helper_path.as_os_str()),
             ("SSH_ASKPASS_REQUIRE", OsStr::new("force")),
@@ -130,14 +130,27 @@ impl AskPassEnvironment {
 }
 
 pub(crate) struct AskPassBroker {
+    lifetime: Arc<AskPassBrokerLifetime>,
+}
+
+struct AskPassBrokerLifetime {
     environment: Arc<AskPassEnvironment>,
     presenter: Arc<dyn BrokerPresenter>,
     stop: Arc<AtomicBool>,
-    worker: Option<JoinHandle<()>>,
-    presentation_task: Option<Task<()>>,
-    cancellation_task: Option<Task<()>>,
+    worker: Mutex<Option<JoinHandle<()>>>,
     _socket: RegisteredRuntimeSocket,
-    _runtime_owner: RuntimeOwner,
+    _runtime_owner: Mutex<Option<RuntimeOwner>>,
+}
+
+#[derive(Clone)]
+pub(crate) struct AskPassBrokerLease {
+    lifetime: Arc<AskPassBrokerLifetime>,
+}
+
+impl AskPassBrokerLease {
+    pub(crate) fn entries(&self) -> impl Iterator<Item = (&'static str, &OsStr)> {
+        self.lifetime.environment.entries()
+    }
 }
 
 impl AskPassBroker {
@@ -155,7 +168,7 @@ impl AskPassBroker {
             cancellations: cancellation_sender,
         });
         let request_presenter = native_presenter.clone();
-        let presentation_task = cx.spawn(async move |_cx| {
+        cx.spawn(async move |_cx| {
             while let Ok(job) = request_receiver.recv().await {
                 let (completion_sender, completion_receiver) = async_channel::bounded(1);
                 let presentation = request_presenter.borrow_mut().present(
@@ -175,17 +188,16 @@ impl AskPassBroker {
                     .map_err(|_| BrokerPresentationFailure::Unavailable);
                 let _ = job.response.send(response);
             }
-        });
+        })
+        .detach();
         let cancellation_presenter = native_presenter;
-        let cancellation_task = cx.spawn(async move |_cx| {
+        cx.spawn(async move |_cx| {
             while cancellation_receiver.recv().await.is_ok() {
                 cancellation_presenter.borrow_mut().cancel_active();
             }
-        });
-        let mut broker = Self::start_with_presenter(paths, std::env::current_exe()?, presenter)?;
-        broker.presentation_task = Some(presentation_task);
-        broker.cancellation_task = Some(cancellation_task);
-        Ok(broker)
+        })
+        .detach();
+        Self::start_with_presenter(paths, std::env::current_exe()?, presenter)
     }
 
     fn start_with_presenter(
@@ -224,42 +236,45 @@ impl AskPassBroker {
             .map_err(AskPassBrokerError::StartWorker)?;
 
         Ok(Self {
-            environment: Arc::new(AskPassEnvironment {
-                helper_path,
-                socket_path,
-                capability,
+            lifetime: Arc::new(AskPassBrokerLifetime {
+                environment: Arc::new(AskPassEnvironment {
+                    helper_path,
+                    socket_path,
+                    capability,
+                }),
+                presenter,
+                stop,
+                worker: Mutex::new(Some(worker)),
+                _socket: socket,
+                _runtime_owner: Mutex::new(Some(runtime_owner)),
             }),
-            presenter,
-            stop,
-            worker: Some(worker),
-            presentation_task: None,
-            cancellation_task: None,
-            _socket: socket,
-            _runtime_owner: runtime_owner,
         })
     }
 
-    pub(crate) fn environment(&self) -> &AskPassEnvironment {
-        &self.environment
+    pub(crate) fn lease(&self) -> AskPassBrokerLease {
+        AskPassBrokerLease {
+            lifetime: Arc::clone(&self.lifetime),
+        }
     }
 
-    pub(crate) fn environment_handle(&self) -> Arc<AskPassEnvironment> {
-        Arc::clone(&self.environment)
+    #[cfg(test)]
+    fn environment(&self) -> &AskPassEnvironment {
+        &self.lifetime.environment
     }
 }
 
-impl Drop for AskPassBroker {
+impl Drop for AskPassBrokerLifetime {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Release);
         self.presenter.cancel_active();
-        if self.worker.as_ref().is_some_and(JoinHandle::is_finished) {
-            if let Some(worker) = self.worker.take() {
-                let _ = worker.join();
-            }
+        if let Ok(worker) = self.worker.get_mut()
+            && let Some(worker) = worker.take()
+        {
+            let _ = worker.join();
         }
-        // A worker waiting for a native sheet is intentionally detached. Cancelling the sheet
-        // completes its one-shot callback, after which the worker observes `stop` and exits. The
-        // RuntimeOwner unlinks the socket now, so no new helper can connect during that handoff.
+        if let Ok(runtime_owner) = self._runtime_owner.get_mut() {
+            runtime_owner.take();
+        }
     }
 }
 
@@ -297,7 +312,11 @@ enum BrokerPresentationFailure {
 }
 
 trait BrokerPresenter: Send + Sync {
-    fn present(&self, request: AskPassRequest) -> Result<BrokerAnswer, BrokerPresentationFailure>;
+    fn present(
+        &self,
+        request: AskPassRequest,
+        stop: &AtomicBool,
+    ) -> Result<BrokerAnswer, BrokerPresentationFailure>;
 
     fn cancel_active(&self);
 }
@@ -313,14 +332,27 @@ struct ChannelBrokerPresenter {
 }
 
 impl BrokerPresenter for ChannelBrokerPresenter {
-    fn present(&self, request: AskPassRequest) -> Result<BrokerAnswer, BrokerPresentationFailure> {
+    fn present(
+        &self,
+        request: AskPassRequest,
+        stop: &AtomicBool,
+    ) -> Result<BrokerAnswer, BrokerPresentationFailure> {
         let (response, receiver) = mpsc::sync_channel(1);
         self.requests
             .send_blocking(PresentationJob { request, response })
             .map_err(|_| BrokerPresentationFailure::Unavailable)?;
-        receiver
-            .recv()
-            .map_err(|_| BrokerPresentationFailure::Unavailable)?
+        loop {
+            match receiver.recv_timeout(ACCEPT_POLL_INTERVAL) {
+                Ok(answer) => return answer,
+                Err(mpsc::RecvTimeoutError::Timeout) if stop.load(Ordering::Acquire) => {
+                    return Err(BrokerPresentationFailure::Unavailable);
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    return Err(BrokerPresentationFailure::Unavailable);
+                }
+            }
+        }
     }
 
     fn cancel_active(&self) {
@@ -360,6 +392,7 @@ fn run_broker(
                     capability.as_ref(),
                     &MacosPeerValidator,
                     presenter.as_ref(),
+                    stop.as_ref(),
                 );
             }
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
@@ -406,18 +439,22 @@ fn handle_connection(
     capability: &CapabilityToken,
     peer_validator: &dyn PeerValidator,
     presenter: &dyn BrokerPresenter,
+    stop: &AtomicBool,
 ) -> Result<(), ConnectionError> {
     peer_validator.validate(stream)?;
-    handle_verified_connection(stream, capability, presenter)
+    handle_verified_connection(stream, capability, presenter, stop)
 }
 
 fn handle_verified_connection<S: Read + Write>(
     stream: &mut S,
     capability: &CapabilityToken,
     presenter: &dyn BrokerPresenter,
+    stop: &AtomicBool,
 ) -> Result<(), ConnectionError> {
     let request = read_request(stream, capability)?;
-    let answer = presenter.present(request).unwrap_or(BrokerAnswer::Failed);
+    let answer = presenter
+        .present(request, stop)
+        .unwrap_or(BrokerAnswer::Failed);
     write_reply(stream, answer)?;
     Ok(())
 }
@@ -753,10 +790,48 @@ fn read_reply<S: Read>(stream: &mut S) -> Result<HelperAnswer, ConnectionError> 
 #[cfg(test)]
 mod tests {
     use std::collections::VecDeque;
+    use std::fs;
     use std::io::Cursor;
-    use std::sync::Mutex;
+    use std::sync::atomic::AtomicU64;
+    use std::sync::{Mutex, mpsc};
 
     use super::*;
+    use crate::platform::app_paths::{AppPathEnvironment, AppPaths};
+
+    static NEXT_TEST_DIRECTORY: AtomicU64 = AtomicU64::new(0);
+
+    struct TestDirectory(PathBuf);
+
+    impl TestDirectory {
+        fn new() -> Self {
+            let sequence = NEXT_TEST_DIRECTORY.fetch_add(1, Ordering::Relaxed);
+            let path = PathBuf::from(format!(
+                "/private/tmp/sta-{}-{sequence}",
+                std::process::id()
+            ));
+            fs::create_dir(&path).unwrap();
+            Self(path)
+        }
+
+        fn paths(&self) -> AppPaths {
+            AppPaths::resolve(&AppPathEnvironment {
+                home: None,
+                xdg_config_home: Some(self.0.join("config").into_os_string()),
+                xdg_data_home: Some(self.0.join("data").into_os_string()),
+                xdg_state_home: Some(self.0.join("state").into_os_string()),
+                xdg_cache_home: Some(self.0.join("cache").into_os_string()),
+                xdg_runtime_dir: Some(self.0.join("runtime").into_os_string()),
+                macos_temporary_directory: self.0.join("temporary"),
+            })
+            .unwrap()
+        }
+    }
+
+    impl Drop for TestDirectory {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
 
     struct MemoryStream {
         input: Cursor<Vec<u8>>,
@@ -809,6 +884,7 @@ mod tests {
         fn present(
             &self,
             request: AskPassRequest,
+            _stop: &AtomicBool,
         ) -> Result<BrokerAnswer, BrokerPresentationFailure> {
             self.prompts
                 .lock()
@@ -819,6 +895,38 @@ mod tests {
                 .unwrap()
                 .pop_front()
                 .ok_or(BrokerPresentationFailure::Unavailable)
+        }
+
+        fn cancel_active(&self) {
+            self.cancelled.store(true, Ordering::Release);
+        }
+    }
+
+    struct BlockingPresenter {
+        started: AtomicBool,
+        cancelled: AtomicBool,
+    }
+
+    impl BlockingPresenter {
+        fn new() -> Self {
+            Self {
+                started: AtomicBool::new(false),
+                cancelled: AtomicBool::new(false),
+            }
+        }
+    }
+
+    impl BrokerPresenter for BlockingPresenter {
+        fn present(
+            &self,
+            _request: AskPassRequest,
+            stop: &AtomicBool,
+        ) -> Result<BrokerAnswer, BrokerPresentationFailure> {
+            self.started.store(true, Ordering::Release);
+            while !stop.load(Ordering::Acquire) {
+                thread::sleep(ACCEPT_POLL_INTERVAL);
+            }
+            Err(BrokerPresentationFailure::Unavailable)
         }
 
         fn cancel_active(&self) {
@@ -889,7 +997,8 @@ mod tests {
             AskPassPromptKind::Secret,
         ));
 
-        handle_verified_connection(&mut stream, &token, &presenter).unwrap();
+        handle_verified_connection(&mut stream, &token, &presenter, &AtomicBool::new(false))
+            .unwrap();
 
         let mut reply = Cursor::new(stream.output);
         match read_reply(&mut reply).unwrap() {
@@ -961,7 +1070,7 @@ mod tests {
         ));
 
         assert_eq!(
-            handle_verified_connection(&mut stream, &token, &presenter),
+            handle_verified_connection(&mut stream, &token, &presenter, &AtomicBool::new(false),),
             Err(ConnectionError::InvalidCapability)
         );
         assert!(presenter.prompts.lock().unwrap().is_empty());
@@ -975,7 +1084,13 @@ mod tests {
         let (mut broker_stream, _helper_stream) = UnixStream::pair().unwrap();
 
         assert_eq!(
-            handle_connection(&mut broker_stream, &token, &RejectPeer, &presenter),
+            handle_connection(
+                &mut broker_stream,
+                &token,
+                &RejectPeer,
+                &presenter,
+                &AtomicBool::new(false),
+            ),
             Err(ConnectionError::PeerRejected)
         );
         assert!(presenter.prompts.lock().unwrap().is_empty());
@@ -987,7 +1102,7 @@ mod tests {
         let presenter = FakePresenter::new([]);
         let mut malformed = MemoryStream::new(vec![0, 0, 0, 1, 0xff]);
         assert_eq!(
-            handle_verified_connection(&mut malformed, &token, &presenter),
+            handle_verified_connection(&mut malformed, &token, &presenter, &AtomicBool::new(false),),
             Err(ConnectionError::MalformedFrame)
         );
 
@@ -997,7 +1112,7 @@ mod tests {
             .to_vec();
         let mut oversized = MemoryStream::new(oversized_length);
         assert_eq!(
-            handle_verified_connection(&mut oversized, &token, &presenter),
+            handle_verified_connection(&mut oversized, &token, &presenter, &AtomicBool::new(false),),
             Err(ConnectionError::OversizedFrame)
         );
         assert!(presenter.prompts.lock().unwrap().is_empty());
@@ -1040,8 +1155,10 @@ mod tests {
             AskPassPromptKind::Secret,
         ));
 
-        handle_verified_connection(&mut first, &token, &presenter).unwrap();
-        handle_verified_connection(&mut second, &token, &presenter).unwrap();
+        handle_verified_connection(&mut first, &token, &presenter, &AtomicBool::new(false))
+            .unwrap();
+        handle_verified_connection(&mut second, &token, &presenter, &AtomicBool::new(false))
+            .unwrap();
 
         assert_eq!(
             presenter.prompts.lock().unwrap().as_slice(),
@@ -1076,6 +1193,57 @@ mod tests {
     }
 
     #[test]
+    fn broker_lease_should_retain_and_then_cancel_pending_authentication() {
+        let directory = TestDirectory::new();
+        let presenter = Arc::new(BlockingPresenter::new());
+        let broker = AskPassBroker::start_with_presenter(
+            &directory.paths(),
+            PathBuf::from("/Applications/SpaceTerm.app/Contents/MacOS/spaceterm"),
+            presenter.clone(),
+        )
+        .unwrap();
+        let socket_path = broker.environment().socket_path.clone();
+        let capability = broker.environment().capability.text.as_bytes().to_vec();
+        let lease = broker.lease();
+        let (finished_sender, finished_receiver) = mpsc::sync_channel(1);
+        let helper = thread::spawn({
+            let socket_path = socket_path.clone();
+            move || {
+                let mut stream = UnixStream::connect(socket_path).unwrap();
+                let request =
+                    AskPassRequest::new("Password:".to_owned(), AskPassPromptKind::Secret).unwrap();
+                write_request(&mut stream, &capability, &request).unwrap();
+                let answer = read_reply(&mut stream);
+                let _ = finished_sender.send(answer);
+            }
+        });
+        for _ in 0..100 {
+            if presenter.started.load(Ordering::Acquire) {
+                break;
+            }
+            thread::sleep(ACCEPT_POLL_INTERVAL);
+        }
+
+        drop(broker);
+        assert!(
+            socket_path.exists()
+                && !presenter.cancelled.load(Ordering::Acquire)
+                && presenter.started.load(Ordering::Acquire)
+        );
+
+        drop(lease);
+        assert!(
+            presenter.cancelled.load(Ordering::Acquire)
+                && !socket_path.exists()
+                && matches!(
+                    finished_receiver.recv_timeout(Duration::from_secs(1)),
+                    Ok(Ok(HelperAnswer::Failed))
+                )
+        );
+        helper.join().unwrap();
+    }
+
+    #[test]
     fn environment_contains_only_the_six_askpass_overlay_entries() {
         let capability = Arc::new(token());
         let environment = AskPassEnvironment {
@@ -1088,6 +1256,17 @@ mod tests {
             .map(|(key, value)| (key, value.to_os_string()))
             .collect();
         assert_eq!(entries.len(), 6);
+        assert_eq!(
+            entries.iter().map(|(name, _)| *name).collect::<Vec<_>>(),
+            vec![
+                "SSH_ASKPASS",
+                "SSH_ASKPASS_REQUIRE",
+                "DISPLAY",
+                HELPER_MODE_ENV,
+                SOCKET_ENV,
+                CAPABILITY_ENV,
+            ]
+        );
         assert_eq!(entries[1], ("SSH_ASKPASS_REQUIRE", OsString::from("force")));
         assert_eq!(entries[2], ("DISPLAY", OsString::from(DISPLAY_MARKER)));
         assert_eq!(entries[3], (HELPER_MODE_ENV, OsString::from(HELPER_MODE)));

@@ -1,11 +1,11 @@
-use std::ffi::{OsStr, OsString};
+use std::ffi::OsString;
 use std::future::Future;
 use std::io;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
-use std::sync::Arc;
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use gpui::BackgroundExecutor;
@@ -13,7 +13,7 @@ use thiserror::Error;
 
 use super::cancellation::SshCancellationToken;
 use super::command::SshCommandSpec;
-use crate::platform::macos_askpass_transport::AskPassEnvironment;
+use crate::platform::macos_askpass_transport::AskPassBrokerLease;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct ProcessExit {
@@ -106,16 +106,6 @@ pub(crate) enum ProcessRunError {
     Io(#[from] io::Error),
 }
 
-pub(crate) trait SshAuthenticationOverlay: Send + Sync + 'static {
-    fn entries(&self) -> Vec<(&'static str, &OsStr)>;
-}
-
-impl SshAuthenticationOverlay for AskPassEnvironment {
-    fn entries(&self) -> Vec<(&'static str, &OsStr)> {
-        AskPassEnvironment::entries(self).collect()
-    }
-}
-
 #[derive(Debug, Error)]
 pub(crate) enum SshProcessEnvironmentError {
     #[error("the captured local HOME must be an absolute control-free path")]
@@ -127,14 +117,33 @@ pub(crate) enum SshProcessEnvironmentError {
 #[derive(Clone)]
 pub(crate) struct SshProcessEnvironment {
     home: PathBuf,
-    authentication: Arc<dyn SshAuthenticationOverlay>,
+    authentication: SshAuthentication,
     agent_socket: Option<OsString>,
+}
+
+#[derive(Clone)]
+enum SshAuthentication {
+    AskPass(AskPassBrokerLease),
+    #[cfg(test)]
+    None,
 }
 
 impl SshProcessEnvironment {
     pub(crate) fn new(
         home: PathBuf,
-        authentication: Arc<dyn SshAuthenticationOverlay>,
+        authentication: AskPassBrokerLease,
+        agent_socket: Option<OsString>,
+    ) -> Result<Self, SshProcessEnvironmentError> {
+        Self::validated(
+            home,
+            SshAuthentication::AskPass(authentication),
+            agent_socket,
+        )
+    }
+
+    fn validated(
+        home: PathBuf,
+        authentication: SshAuthentication,
         agent_socket: Option<OsString>,
     ) -> Result<Self, SshProcessEnvironmentError> {
         if !safe_absolute_path(&home) {
@@ -152,6 +161,14 @@ impl SshProcessEnvironment {
         })
     }
 
+    #[cfg(test)]
+    fn new_without_authentication(
+        home: PathBuf,
+        agent_socket: Option<OsString>,
+    ) -> Result<Self, SshProcessEnvironmentError> {
+        Self::validated(home, SshAuthentication::None, agent_socket)
+    }
+
     fn apply(&self, command: &mut Command) {
         command
             .env_clear()
@@ -161,8 +178,14 @@ impl SshProcessEnvironment {
         if let Some(agent_socket) = &self.agent_socket {
             command.env("SSH_AUTH_SOCK", agent_socket);
         }
-        for (name, value) in self.authentication.entries() {
-            command.env(name, value);
+        match &self.authentication {
+            SshAuthentication::AskPass(authentication) => {
+                for (name, value) in authentication.entries() {
+                    command.env(name, value);
+                }
+            }
+            #[cfg(test)]
+            SshAuthentication::None => {}
         }
     }
 }
@@ -319,35 +342,44 @@ impl Drop for NativeSshChild {
         let Some(mut child) = self.child.take() else {
             return;
         };
+        let _ = signal_process_group(self.process_group, libc::SIGKILL);
         if child.try_wait().ok().flatten().is_some() {
             return;
         }
-        let _ = signal_process_group(self.process_group, libc::SIGKILL);
-        let _ = std::thread::Builder::new()
+        reap_child(child);
+    }
+}
+
+fn reap_child(child: Child) {
+    reap_child_with(child, |receiver| {
+        std::thread::Builder::new()
             .name("spaceterm-ssh-reaper".to_owned())
             .spawn(move || {
-                let _ = child.wait();
-            });
+                if let Ok(mut child) = receiver.recv() {
+                    let _ = child.wait();
+                }
+            })
+            .map(|_| ())
+    });
+}
+
+fn reap_child_with(mut child: Child, spawn: impl FnOnce(mpsc::Receiver<Child>) -> io::Result<()>) {
+    let (sender, receiver) = mpsc::sync_channel(1);
+    if spawn(receiver).is_err() {
+        let _ = child.wait();
+        return;
+    }
+    if let Err(mpsc::SendError(mut returned_child)) = sender.send(child) {
+        let _ = returned_child.wait();
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::ffi::OsStr;
+    use super::*;
     use std::fs;
     use std::path::PathBuf;
     use std::process::{Command, Stdio};
-    use std::sync::Arc;
-
-    use super::*;
-
-    struct TestAuthenticationOverlay;
-
-    impl SshAuthenticationOverlay for TestAuthenticationOverlay {
-        fn entries(&self) -> Vec<(&'static str, &OsStr)> {
-            vec![("SPACETERM_TEST_AUTH", OsStr::new("available"))]
-        }
-    }
 
     #[test]
     fn launch_environment_should_clear_unknown_variables_and_use_captured_home_as_cwd() {
@@ -356,13 +388,19 @@ mod tests {
             std::process::id()
         ));
         fs::create_dir_all(&home).unwrap();
-        let environment =
-            SshProcessEnvironment::new(home.clone(), Arc::new(TestAuthenticationOverlay), None)
-                .unwrap();
+        let agent_socket = OsString::from("/private/tmp/spaceterm-test-agent.sock");
+        let environment = SshProcessEnvironment::new_without_authentication(
+            home.clone(),
+            Some(agent_socket.clone()),
+        )
+        .unwrap();
         let mut command = Command::new("/bin/sh");
         command
             .args(["-c", "pwd; /usr/bin/env"])
             .env("SPACETERM_UNKNOWN", "secret")
+            .env("HOME", "/attacker/home")
+            .env("PATH", "/attacker/bin")
+            .env("SSH_AUTH_SOCK", "/attacker/agent.sock")
             .stdout(Stdio::piped());
 
         environment.apply(&mut command);
@@ -371,21 +409,20 @@ mod tests {
 
         assert!(
             stdout.starts_with(&format!("{}\n", home.display()))
-                && stdout.contains("HOME=")
-                && stdout.contains("SPACETERM_TEST_AUTH=available")
+                && stdout.contains(&format!("HOME={}", home.display()))
+                && stdout.contains("PATH=/usr/bin:/bin")
+                && stdout.contains(&format!("SSH_AUTH_SOCK={}", agent_socket.to_string_lossy()))
                 && !stdout.contains("SPACETERM_UNKNOWN")
+                && !stdout.contains("/attacker/")
         );
         fs::remove_dir(home).unwrap();
     }
 
     #[test]
     fn launch_environment_should_reject_a_relative_home() {
-        let error = SshProcessEnvironment::new(
-            PathBuf::from("relative-home"),
-            Arc::new(TestAuthenticationOverlay),
-            None,
-        )
-        .err();
+        let error =
+            SshProcessEnvironment::new_without_authentication(PathBuf::from("relative-home"), None)
+                .err();
 
         assert!(matches!(
             error,
@@ -429,5 +466,64 @@ mod tests {
         let _ = fs::remove_file(pid_file);
 
         assert!(terminated);
+    }
+
+    #[test]
+    fn native_child_drop_should_terminate_descendants_after_the_leader_exits() {
+        let pid_file = PathBuf::from(format!(
+            "/private/tmp/spaceterm-process-orphan-descendant-{}.pid",
+            std::process::id()
+        ));
+        let script = format!("sleep 30 & echo $! > '{}'; exit 0", pid_file.display());
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", &script]);
+
+        let mut child = spawn_owned_command(command).unwrap();
+        for _ in 0..100 {
+            if pid_file.exists() && child.child.as_mut().unwrap().try_wait().unwrap().is_some() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let descendant: i32 = fs::read_to_string(&pid_file)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+
+        drop(child);
+
+        let terminated = wait_for_missing_process(descendant);
+        let _ = fs::remove_file(pid_file);
+        assert!(terminated);
+    }
+
+    #[test]
+    fn reaper_spawn_failure_should_reap_on_the_calling_thread() {
+        let child = Command::new("/bin/sh")
+            .args(["-c", "exit 0"])
+            .spawn()
+            .unwrap();
+        let process = i32::try_from(child.id()).unwrap();
+
+        reap_child_with(child, |_| Err(io::Error::other("injected spawn failure")));
+
+        // SAFETY: signal zero performs a process-existence check and dereferences no pointers.
+        assert!(
+            unsafe { libc::kill(process, 0) } == -1
+                && io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+        );
+    }
+
+    fn wait_for_missing_process(process: libc::pid_t) -> bool {
+        (0..100).any(|_| {
+            // SAFETY: signal zero performs a process-existence check and dereferences no pointers.
+            let missing = unsafe { libc::kill(process, 0) } == -1
+                && io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH);
+            if !missing {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            missing
+        })
     }
 }
