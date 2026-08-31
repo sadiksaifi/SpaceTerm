@@ -1,6 +1,6 @@
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -10,14 +10,37 @@ use super::{
     Osc52AuthorizationDecision, Osc52AuthorizationId, PasteConfirmationId, PasteDecision,
     PasteRequestOutcome, PasteResolution, PointerInput, PresentationGeneration, SelectionCopy,
     SelectionCopyError, SessionError, SessionEvent, StartedTerminalSession,
-    TerminalAccessibilityModel, TerminalSessionFactory, TerminalSessionHandle, WheelInput,
+    TerminalAccessibilityModel, TerminalLaunchPlan, TerminalSessionFactory, TerminalSessionHandle,
+    WheelInput,
 };
+use crate::domain::{ValidatedWorkspaceDirectory, WorkspaceDirectoryIdentity};
+
+pub(crate) fn test_workspace_directory(path: PathBuf) -> ValidatedWorkspaceDirectory {
+    ValidatedWorkspaceDirectory::new(path, WorkspaceDirectoryIdentity::new(0, 0))
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct RecordedSessionStart {
     pub(crate) session_id: usize,
     pub(crate) geometry: TerminalGeometry,
-    pub(crate) working_directory: PathBuf,
+    launch_plan: TerminalLaunchPlan,
+}
+
+impl RecordedSessionStart {
+    pub(crate) const fn launch_plan(&self) -> &TerminalLaunchPlan {
+        &self.launch_plan
+    }
+
+    pub(crate) const fn local_launch_plan(&self) -> Option<&super::LocalTerminalLaunchPlan> {
+        match &self.launch_plan {
+            TerminalLaunchPlan::Local(plan) => Some(plan),
+        }
+    }
+
+    pub(crate) fn local_working_directory(&self) -> Option<&ValidatedWorkspaceDirectory> {
+        self.local_launch_plan()
+            .map(super::LocalTerminalLaunchPlan::working_directory)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -165,14 +188,14 @@ impl TerminalSessionFactory for TestTerminalSessionFactory {
     fn start(
         &self,
         geometry: TerminalGeometry,
-        working_directory: &Path,
+        launch_plan: TerminalLaunchPlan,
     ) -> Result<StartedTerminalSession, SessionError> {
         let session_id = self.next_session_id.get();
         self.next_session_id.set(session_id + 1);
         self.records.starts.borrow_mut().push(RecordedSessionStart {
             session_id,
             geometry,
-            working_directory: working_directory.to_path_buf(),
+            launch_plan,
         });
 
         if let Some(message) = &self.start_failure {

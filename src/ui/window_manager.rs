@@ -1280,9 +1280,11 @@ mod tests {
         let records = TestTerminalSessionRecords::default();
         let session_factory: Rc<dyn TerminalSessionFactory> =
             Rc::new(TestTerminalSessionFactory::new(records.clone()));
-        let session_factory = WorkspaceTerminalSessionFactory::new(
+        let session_factory = WorkspaceTerminalSessionFactory::new_local(
             session_factory,
-            PathBuf::from("/tmp/spaceterm-window-manager-test"),
+            crate::terminal::testing::test_workspace_directory(PathBuf::from(
+                "/tmp/spaceterm-window-manager-test",
+            )),
         );
         let (manager, cx) =
             cx.add_window_view(|window, cx| WindowManager::new(session_factory, window, cx));
@@ -1305,9 +1307,11 @@ mod tests {
         let records = TestTerminalSessionRecords::default();
         let session_factory: Rc<dyn TerminalSessionFactory> =
             Rc::new(TestTerminalSessionFactory::new(records));
-        let session_factory = WorkspaceTerminalSessionFactory::new(
+        let session_factory = WorkspaceTerminalSessionFactory::new_local(
             session_factory,
-            PathBuf::from("/tmp/spaceterm-window-manager-drag-test"),
+            crate::terminal::testing::test_workspace_directory(PathBuf::from(
+                "/tmp/spaceterm-window-manager-drag-test",
+            )),
         );
         let platform = Rc::new(RecordingOperatingSystemWindowDragPlatform::default());
         let injected_platform = Rc::clone(&platform);

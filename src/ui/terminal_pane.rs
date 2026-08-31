@@ -4234,8 +4234,12 @@ mod tests {
     use super::*;
     use crate::terminal::testing::{
         RecordedSessionCommand, TestTerminalSessionFactory, TestTerminalSessionRecords,
+        test_workspace_directory,
     };
-    use crate::terminal::{ScrollbarSnapshot, SessionFailure, TerminalSessionFactory};
+    use crate::terminal::{
+        LocalTerminalLaunchPlan, ScrollbarSnapshot, SessionFailure, TerminalLaunchPlan,
+        TerminalSessionFactory,
+    };
 
     #[test]
     fn active_application_with_non_key_window_suppresses_inactive_only_notification() {
@@ -4494,9 +4498,11 @@ mod tests {
             TestTerminalSessionFactory::new(TestTerminalSessionRecords::default())
                 .with_start_failure("terminal session unavailable in UI test"),
         );
-        let session_factory = WorkspaceTerminalSessionFactory::new(
+        let session_factory = WorkspaceTerminalSessionFactory::new_local(
             session_factory,
-            PathBuf::from("/tmp/spaceterm-terminal-pane-test"),
+            crate::terminal::testing::test_workspace_directory(PathBuf::from(
+                "/tmp/spaceterm-terminal-pane-test",
+            )),
         );
         let (pane, cx) =
             cx.add_window_view(|window, cx| TerminalPane::new(session_factory, window, cx));
@@ -4701,9 +4707,11 @@ mod tests {
         let records = TestTerminalSessionRecords::default();
         let session_factory: Rc<dyn TerminalSessionFactory> =
             Rc::new(TestTerminalSessionFactory::new(records.clone()));
-        let session_factory = WorkspaceTerminalSessionFactory::new(
+        let session_factory = WorkspaceTerminalSessionFactory::new_local(
             session_factory,
-            PathBuf::from("/tmp/spaceterm-terminal-pane-keyboard-test"),
+            crate::terminal::testing::test_workspace_directory(PathBuf::from(
+                "/tmp/spaceterm-terminal-pane-keyboard-test",
+            )),
         );
         let (pane, cx) =
             cx.add_window_view(|window, cx| TerminalPane::new(session_factory, window, cx));
@@ -5112,9 +5120,11 @@ mod tests {
         let records = TestTerminalSessionRecords::default();
         let session_factory: Rc<dyn TerminalSessionFactory> =
             Rc::new(TestTerminalSessionFactory::new(records.clone()));
-        let session_factory = WorkspaceTerminalSessionFactory::new(
+        let session_factory = WorkspaceTerminalSessionFactory::new_local(
             session_factory,
-            PathBuf::from("/tmp/spaceterm-terminal-pane-keyboard-propagation-test"),
+            crate::terminal::testing::test_workspace_directory(PathBuf::from(
+                "/tmp/spaceterm-terminal-pane-keyboard-propagation-test",
+            )),
         );
         let propagated_key_downs = Rc::new(Cell::new(0));
         let propagated_for_probe = Rc::clone(&propagated_key_downs);
@@ -5148,9 +5158,11 @@ mod tests {
             TestTerminalSessionFactory::new(records.clone())
                 .with_selection_copy_response(Ok(Some(copy))),
         );
-        let session_factory = WorkspaceTerminalSessionFactory::new(
+        let session_factory = WorkspaceTerminalSessionFactory::new_local(
             session_factory,
-            PathBuf::from("/tmp/spaceterm-terminal-pane-copy-test"),
+            crate::terminal::testing::test_workspace_directory(PathBuf::from(
+                "/tmp/spaceterm-terminal-pane-copy-test",
+            )),
         );
         let (pane, cx) =
             cx.add_window_view(|window, cx| TerminalPane::new(session_factory, window, cx));
@@ -5178,9 +5190,11 @@ mod tests {
                 .with_paste_response(response)
                 .with_paste_resolution(resolution),
         );
-        let session_factory = WorkspaceTerminalSessionFactory::new(
+        let session_factory = WorkspaceTerminalSessionFactory::new_local(
             session_factory,
-            PathBuf::from("/tmp/spaceterm-terminal-pane-paste-test"),
+            crate::terminal::testing::test_workspace_directory(PathBuf::from(
+                "/tmp/spaceterm-terminal-pane-paste-test",
+            )),
         );
         let (pane, cx) =
             cx.add_window_view(|window, cx| TerminalPane::new(session_factory, window, cx));
@@ -7784,7 +7798,9 @@ mod tests {
                     LogicalCellSize::new(8.0, 16.0),
                     BackingScale::ONE,
                 ),
-                std::path::Path::new("/tmp/spaceterm-terminal-pane-test"),
+                TerminalLaunchPlan::Local(LocalTerminalLaunchPlan::new(test_workspace_directory(
+                    PathBuf::from("/tmp/spaceterm-terminal-pane-test"),
+                ))),
             )
             .expect("the test terminal session should start");
         let screen =
@@ -7849,9 +7865,11 @@ mod tests {
         let records = TestTerminalSessionRecords::default();
         let session_factory: Rc<dyn TerminalSessionFactory> =
             Rc::new(TestTerminalSessionFactory::new(records.clone()));
-        let session_factory = WorkspaceTerminalSessionFactory::new(
+        let session_factory = WorkspaceTerminalSessionFactory::new_local(
             session_factory,
-            PathBuf::from("/tmp/spaceterm-terminal-pane-scale-test"),
+            crate::terminal::testing::test_workspace_directory(PathBuf::from(
+                "/tmp/spaceterm-terminal-pane-scale-test",
+            )),
         );
         let (pane, cx) =
             cx.add_window_view(|window, cx| TerminalPane::new(session_factory, window, cx));
@@ -7895,9 +7913,11 @@ mod tests {
         let records = TestTerminalSessionRecords::default();
         let session_factory: Rc<dyn TerminalSessionFactory> =
             Rc::new(TestTerminalSessionFactory::new(records.clone()));
-        let session_factory = WorkspaceTerminalSessionFactory::new(
+        let session_factory = WorkspaceTerminalSessionFactory::new_local(
             session_factory,
-            PathBuf::from("/tmp/spaceterm-terminal-pane-test"),
+            crate::terminal::testing::test_workspace_directory(PathBuf::from(
+                "/tmp/spaceterm-terminal-pane-test",
+            )),
         );
         let (pane, cx) =
             cx.add_window_view(|window, cx| TerminalPane::new(session_factory, window, cx));
@@ -8764,9 +8784,11 @@ mod tests {
         let records = TestTerminalSessionRecords::default();
         let session_factory: Rc<dyn TerminalSessionFactory> =
             Rc::new(TestTerminalSessionFactory::new(records.clone()));
-        let session_factory = WorkspaceTerminalSessionFactory::new(
+        let session_factory = WorkspaceTerminalSessionFactory::new_local(
             session_factory,
-            PathBuf::from("/tmp/spaceterm-terminal-pane-test"),
+            crate::terminal::testing::test_workspace_directory(PathBuf::from(
+                "/tmp/spaceterm-terminal-pane-test",
+            )),
         );
         let (pane, cx) =
             cx.add_window_view(|window, cx| TerminalPane::new(session_factory, window, cx));

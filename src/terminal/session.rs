@@ -339,12 +339,32 @@ pub(crate) trait TerminalSessionFactory {
     fn start(
         &self,
         geometry: TerminalGeometry,
-        working_directory: &Path,
+        launch_plan: TerminalLaunchPlan,
     ) -> Result<StartedTerminalSession, SessionError>;
 
     fn fallback_title(&self) -> String {
         "Terminal".to_owned()
     }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct LocalTerminalLaunchPlan {
+    working_directory: crate::domain::ValidatedWorkspaceDirectory,
+}
+
+impl LocalTerminalLaunchPlan {
+    pub(crate) const fn new(working_directory: crate::domain::ValidatedWorkspaceDirectory) -> Self {
+        Self { working_directory }
+    }
+
+    pub(crate) const fn working_directory(&self) -> &crate::domain::ValidatedWorkspaceDirectory {
+        &self.working_directory
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum TerminalLaunchPlan {
+    Local(LocalTerminalLaunchPlan),
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -354,12 +374,13 @@ impl TerminalSessionFactory for NativeTerminalSessionFactory {
     fn start(
         &self,
         geometry: TerminalGeometry,
-        working_directory: &Path,
+        launch_plan: TerminalLaunchPlan,
     ) -> Result<StartedTerminalSession, SessionError> {
+        let TerminalLaunchPlan::Local(local) = launch_plan;
         let observation =
             crate::platform::acceptance_observation::take_runtime_session_observation();
         let (session, events, accessibility) =
-            TerminalSession::start(geometry, working_directory, observation)?;
+            TerminalSession::start(geometry, local.working_directory().path(), observation)?;
         Ok(StartedTerminalSession {
             handle: Box::new(session),
             events,
@@ -3447,7 +3468,12 @@ mod tests {
         } = NativeTerminalSessionFactory
             .start(
                 test_geometry(),
-                Path::new("/private/tmp/spaceterm-missing-session-workspace"),
+                TerminalLaunchPlan::Local(LocalTerminalLaunchPlan::new(
+                    crate::domain::ValidatedWorkspaceDirectory::new(
+                        PathBuf::from("/private/tmp/spaceterm-missing-session-workspace"),
+                        crate::domain::WorkspaceDirectoryIdentity::new(0, 0),
+                    ),
+                )),
             )
             .unwrap();
 

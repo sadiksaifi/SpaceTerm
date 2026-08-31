@@ -1226,12 +1226,12 @@ mod tests {
     };
 
     fn test_session_factory() -> WorkspaceTerminalSessionFactory {
-        WorkspaceTerminalSessionFactory::new(
+        WorkspaceTerminalSessionFactory::new_local(
             Rc::new(
                 TestTerminalSessionFactory::new(TestTerminalSessionRecords::default())
                     .with_selection_copy_response(Ok(None)),
             ),
-            test_workspace_root(),
+            crate::terminal::testing::test_workspace_directory(test_workspace_root()),
         )
     }
 
@@ -1379,8 +1379,10 @@ mod tests {
         let records = TestTerminalSessionRecords::default();
         let session_factory: Rc<dyn TerminalSessionFactory> =
             Rc::new(TestTerminalSessionFactory::new(records.clone()));
-        let session_factory =
-            WorkspaceTerminalSessionFactory::new(session_factory, test_workspace_root());
+        let session_factory = WorkspaceTerminalSessionFactory::new_local(
+            session_factory,
+            crate::terminal::testing::test_workspace_directory(test_workspace_root()),
+        );
         let (host, cx) = cx.add_window_view(|window, cx| {
             PaneHost::new(WindowId::new(1), session_factory, window, cx)
         });
@@ -1445,8 +1447,10 @@ mod tests {
         let records = TestTerminalSessionRecords::default();
         let session_factory: Rc<dyn TerminalSessionFactory> =
             Rc::new(TestTerminalSessionFactory::new(records.clone()));
-        let session_factory =
-            WorkspaceTerminalSessionFactory::new(session_factory, workspace_root.clone());
+        let session_factory = WorkspaceTerminalSessionFactory::new_local(
+            session_factory,
+            crate::terminal::testing::test_workspace_directory(workspace_root.clone()),
+        );
         let (host, cx) = cx.add_window_view(|window, cx| {
             PaneHost::new(WindowId::new(1), session_factory, window, cx)
         });
@@ -1462,7 +1466,13 @@ mod tests {
             records
                 .starts()
                 .into_iter()
-                .map(|start| start.working_directory)
+                .map(|start| {
+                    start
+                        .local_working_directory()
+                        .expect("Pane starts must remain local")
+                        .path()
+                        .to_path_buf()
+                })
                 .collect::<Vec<_>>(),
             vec![workspace_root.clone(), workspace_root]
         );
@@ -1525,8 +1535,10 @@ mod tests {
         let records = TestTerminalSessionRecords::default();
         let session_factory: Rc<dyn TerminalSessionFactory> =
             Rc::new(TestTerminalSessionFactory::new(records.clone()));
-        let session_factory =
-            WorkspaceTerminalSessionFactory::new(session_factory, test_workspace_root());
+        let session_factory = WorkspaceTerminalSessionFactory::new_local(
+            session_factory,
+            crate::terminal::testing::test_workspace_directory(test_workspace_root()),
+        );
         let (host, cx) = cx.add_window_view(|window, cx| {
             PaneHost::new(WindowId::new(1), session_factory, window, cx)
         });
@@ -1572,8 +1584,10 @@ mod tests {
         let records = TestTerminalSessionRecords::default();
         let session_factory: Rc<dyn TerminalSessionFactory> =
             Rc::new(TestTerminalSessionFactory::new(records.clone()));
-        let session_factory =
-            WorkspaceTerminalSessionFactory::new(session_factory, test_workspace_root());
+        let session_factory = WorkspaceTerminalSessionFactory::new_local(
+            session_factory,
+            crate::terminal::testing::test_workspace_directory(test_workspace_root()),
+        );
         let (host, cx) = cx.add_window_view(|window, cx| {
             PaneHost::new(WindowId::new(1), session_factory, window, cx)
         });
@@ -1617,8 +1631,10 @@ mod tests {
         let records = TestTerminalSessionRecords::default();
         let session_factory: Rc<dyn TerminalSessionFactory> =
             Rc::new(TestTerminalSessionFactory::new(records.clone()));
-        let session_factory =
-            WorkspaceTerminalSessionFactory::new(session_factory, test_workspace_root());
+        let session_factory = WorkspaceTerminalSessionFactory::new_local(
+            session_factory,
+            crate::terminal::testing::test_workspace_directory(test_workspace_root()),
+        );
         let (host, cx) = cx.add_window_view(|window, cx| {
             PaneHost::new(WindowId::new(1), session_factory, window, cx)
         });
@@ -1673,8 +1689,10 @@ mod tests {
         let records = TestTerminalSessionRecords::default();
         let session_factory: Rc<dyn TerminalSessionFactory> =
             Rc::new(TestTerminalSessionFactory::new(records.clone()).with_fallback_title("zsh"));
-        let session_factory =
-            WorkspaceTerminalSessionFactory::new(session_factory, test_workspace_root());
+        let session_factory = WorkspaceTerminalSessionFactory::new_local(
+            session_factory,
+            crate::terminal::testing::test_workspace_directory(test_workspace_root()),
+        );
         let (host, cx) = cx.add_window_view(|window, cx| {
             PaneHost::new(WindowId::new(1), session_factory, window, cx)
         });
@@ -1788,8 +1806,10 @@ mod tests {
         let records = TestTerminalSessionRecords::default();
         let session_factory: Rc<dyn TerminalSessionFactory> =
             Rc::new(TestTerminalSessionFactory::new(records.clone()).with_fallback_title("zsh"));
-        let session_factory =
-            WorkspaceTerminalSessionFactory::new(session_factory, test_workspace_root());
+        let session_factory = WorkspaceTerminalSessionFactory::new_local(
+            session_factory,
+            crate::terminal::testing::test_workspace_directory(test_workspace_root()),
+        );
         let (host, cx) = cx.add_window_view(|window, cx| {
             PaneHost::new(WindowId::new(1), session_factory, window, cx)
         });
@@ -1828,8 +1848,10 @@ mod tests {
         let records = TestTerminalSessionRecords::default();
         let session_factory: Rc<dyn TerminalSessionFactory> =
             Rc::new(TestTerminalSessionFactory::new(records.clone()));
-        let session_factory =
-            WorkspaceTerminalSessionFactory::new(session_factory, test_workspace_root());
+        let session_factory = WorkspaceTerminalSessionFactory::new_local(
+            session_factory,
+            crate::terminal::testing::test_workspace_directory(test_workspace_root()),
+        );
         let (host, cx) = cx.add_window_view(|window, cx| {
             PaneHost::new(WindowId::new(1), session_factory, window, cx)
         });
@@ -1865,8 +1887,10 @@ mod tests {
         let records = TestTerminalSessionRecords::default();
         let session_factory: Rc<dyn TerminalSessionFactory> =
             Rc::new(TestTerminalSessionFactory::new(records.clone()));
-        let session_factory =
-            WorkspaceTerminalSessionFactory::new(session_factory, test_workspace_root());
+        let session_factory = WorkspaceTerminalSessionFactory::new_local(
+            session_factory,
+            crate::terminal::testing::test_workspace_directory(test_workspace_root()),
+        );
         let (host, cx) = cx.add_window_view(|window, cx| {
             PaneHost::new(WindowId::new(1), session_factory, window, cx)
         });
@@ -1956,8 +1980,10 @@ mod tests {
         let records = TestTerminalSessionRecords::default();
         let session_factory: Rc<dyn TerminalSessionFactory> =
             Rc::new(TestTerminalSessionFactory::new(records.clone()));
-        let session_factory =
-            WorkspaceTerminalSessionFactory::new(session_factory, test_workspace_root());
+        let session_factory = WorkspaceTerminalSessionFactory::new_local(
+            session_factory,
+            crate::terminal::testing::test_workspace_directory(test_workspace_root()),
+        );
         let (host, cx) = cx.add_window_view(|window, cx| {
             PaneHost::new(WindowId::new(1), session_factory, window, cx)
         });
@@ -1992,8 +2018,10 @@ mod tests {
         let records = TestTerminalSessionRecords::default();
         let session_factory: Rc<dyn TerminalSessionFactory> =
             Rc::new(TestTerminalSessionFactory::new(records.clone()));
-        let session_factory =
-            WorkspaceTerminalSessionFactory::new(session_factory, test_workspace_root());
+        let session_factory = WorkspaceTerminalSessionFactory::new_local(
+            session_factory,
+            crate::terminal::testing::test_workspace_directory(test_workspace_root()),
+        );
         let (host, cx) = cx.add_window_view(|window, cx| {
             PaneHost::new(WindowId::new(1), session_factory, window, cx)
         });
@@ -2046,8 +2074,10 @@ mod tests {
         let records = TestTerminalSessionRecords::default();
         let session_factory: Rc<dyn TerminalSessionFactory> =
             Rc::new(TestTerminalSessionFactory::new(records.clone()));
-        let session_factory =
-            WorkspaceTerminalSessionFactory::new(session_factory, test_workspace_root());
+        let session_factory = WorkspaceTerminalSessionFactory::new_local(
+            session_factory,
+            crate::terminal::testing::test_workspace_directory(test_workspace_root()),
+        );
         let (host, cx) = cx.add_window_view(|window, cx| {
             PaneHost::new(WindowId::new(1), session_factory, window, cx)
         });
@@ -2085,8 +2115,10 @@ mod tests {
         let records = TestTerminalSessionRecords::default();
         let session_factory: Rc<dyn TerminalSessionFactory> =
             Rc::new(TestTerminalSessionFactory::new(records.clone()));
-        let session_factory =
-            WorkspaceTerminalSessionFactory::new(session_factory, test_workspace_root());
+        let session_factory = WorkspaceTerminalSessionFactory::new_local(
+            session_factory,
+            crate::terminal::testing::test_workspace_directory(test_workspace_root()),
+        );
         let (host, cx) = cx.add_window_view(|window, cx| {
             PaneHost::new(WindowId::new(1), session_factory, window, cx)
         });
@@ -2151,8 +2183,10 @@ mod tests {
         let records = TestTerminalSessionRecords::default();
         let session_factory: Rc<dyn TerminalSessionFactory> =
             Rc::new(TestTerminalSessionFactory::new(records));
-        let session_factory =
-            WorkspaceTerminalSessionFactory::new(session_factory, test_workspace_root());
+        let session_factory = WorkspaceTerminalSessionFactory::new_local(
+            session_factory,
+            crate::terminal::testing::test_workspace_directory(test_workspace_root()),
+        );
         let (host, cx) = cx.add_window_view(|window, cx| {
             PaneHost::new(WindowId::new(1), session_factory, window, cx)
         });
@@ -2203,8 +2237,10 @@ mod tests {
         let records = TestTerminalSessionRecords::default();
         let session_factory: Rc<dyn TerminalSessionFactory> =
             Rc::new(TestTerminalSessionFactory::new(records.clone()));
-        let session_factory =
-            WorkspaceTerminalSessionFactory::new(session_factory, test_workspace_root());
+        let session_factory = WorkspaceTerminalSessionFactory::new_local(
+            session_factory,
+            crate::terminal::testing::test_workspace_directory(test_workspace_root()),
+        );
         let (host, cx) = cx.add_window_view(|window, cx| {
             PaneHost::new(WindowId::new(1), session_factory, window, cx)
         });
@@ -2252,8 +2288,10 @@ mod tests {
         let records = TestTerminalSessionRecords::default();
         let session_factory: Rc<dyn TerminalSessionFactory> =
             Rc::new(TestTerminalSessionFactory::new(records.clone()));
-        let session_factory =
-            WorkspaceTerminalSessionFactory::new(session_factory, test_workspace_root());
+        let session_factory = WorkspaceTerminalSessionFactory::new_local(
+            session_factory,
+            crate::terminal::testing::test_workspace_directory(test_workspace_root()),
+        );
         let (host, cx) = cx.add_window_view(|window, cx| {
             PaneHost::new(WindowId::new(1), session_factory, window, cx)
         });

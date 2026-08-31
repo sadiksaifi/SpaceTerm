@@ -203,11 +203,13 @@ impl WorkspaceManager {
             |workspace_id, workspace_root| {
                 Self::create_window_manager(
                     workspace_id,
-                    WorkspaceTerminalSessionFactory::new(
+                    WorkspaceTerminalSessionFactory::new_local(
                         Rc::clone(&session_factory),
-                        workspace_root.to_path_buf(),
-                    )
-                    .with_directory_identity(initial_workspace_identity),
+                        ValidatedWorkspaceDirectory::new(
+                            workspace_root.to_path_buf(),
+                            initial_workspace_identity,
+                        ),
+                    ),
                     true,
                     px(WORKSPACE_SIDEBAR_DEFAULT_WIDTH),
                     Rc::clone(&initial_window_drag_platform),
@@ -941,11 +943,13 @@ impl WorkspaceManager {
             |workspace_id, workspace_root| {
                 Self::create_window_manager(
                     workspace_id,
-                    WorkspaceTerminalSessionFactory::new(
+                    WorkspaceTerminalSessionFactory::new_local(
                         session_factory,
-                        workspace_root.to_path_buf(),
-                    )
-                    .with_directory_identity(directory_identity),
+                        ValidatedWorkspaceDirectory::new(
+                            workspace_root.to_path_buf(),
+                            directory_identity,
+                        ),
+                    ),
                     sidebar_visible,
                     sidebar_width,
                     window_drag_platform,
@@ -1173,11 +1177,13 @@ impl WorkspaceManager {
             |workspace_id, project_root| {
                 Self::create_window_manager(
                     workspace_id,
-                    WorkspaceTerminalSessionFactory::new(
+                    WorkspaceTerminalSessionFactory::new_local(
                         session_factory,
-                        project_root.to_path_buf(),
-                    )
-                    .with_directory_identity(project_root_identity),
+                        ValidatedWorkspaceDirectory::new(
+                            project_root.to_path_buf(),
+                            project_root_identity,
+                        ),
+                    ),
                     sidebar_visible,
                     sidebar_width,
                     window_drag_platform,
@@ -1334,11 +1340,13 @@ impl WorkspaceManager {
             |replacement_workspace_id, workspace_root| {
                 Self::create_window_manager(
                     replacement_workspace_id,
-                    WorkspaceTerminalSessionFactory::new(
+                    WorkspaceTerminalSessionFactory::new_local(
                         session_factory,
-                        workspace_root.to_path_buf(),
-                    )
-                    .with_directory_identity(replacement_identity),
+                        ValidatedWorkspaceDirectory::new(
+                            workspace_root.to_path_buf(),
+                            replacement_identity,
+                        ),
+                    ),
                     sidebar_visible,
                     sidebar_width,
                     window_drag_platform,
@@ -3632,11 +3640,11 @@ mod tests {
         });
         assert_eq!((state.0, state.1), (2, project.clone()));
         assert!(matches!(state.2, WorkspaceKind::LocalProject { .. }));
-        assert!(
-            records.starts()[1..]
-                .iter()
-                .all(|start| start.working_directory == project)
-        );
+        assert!(records.starts()[1..].iter().all(|start| {
+            start
+                .local_working_directory()
+                .is_some_and(|directory| directory.path() == project)
+        }));
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -4829,7 +4837,13 @@ mod tests {
                 records
                     .starts()
                     .into_iter()
-                    .map(|start| start.working_directory)
+                    .map(|start| {
+                        start
+                            .local_working_directory()
+                            .expect("Scratch Workspace starts must remain local")
+                            .path()
+                            .to_path_buf()
+                    })
                     .collect::<Vec<_>>(),
             )
         });

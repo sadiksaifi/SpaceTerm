@@ -274,9 +274,11 @@ mod tests {
                 }),
             )),
         );
-        let session_factory = WorkspaceTerminalSessionFactory::new(
+        let session_factory = WorkspaceTerminalSessionFactory::new_local(
             session_factory,
-            PathBuf::from("/tmp/spaceterm-native-copy-command-test"),
+            crate::terminal::testing::test_workspace_directory(PathBuf::from(
+                "/tmp/spaceterm-native-copy-command-test",
+            )),
         );
         let (pane, cx) =
             cx.add_window_view(|window, cx| TerminalPane::new(session_factory, window, cx));
