@@ -170,7 +170,7 @@ pub(crate) struct RuntimeOwner {
     path: PathBuf,
     name: OsString,
     directory: PrivateDirectory,
-    artifacts: RefCell<Vec<OsString>>,
+    artifacts: RefCell<Vec<TrackedRuntimeArtifact>>,
     closed: bool,
 }
 
@@ -219,9 +219,10 @@ impl RuntimeOwner {
             return Err(AppPathsError::UnsafePath { path });
         }
         self.verify_identity()?;
-        self.artifacts
-            .borrow_mut()
-            .push(artifact_name.to_os_string());
+        self.artifacts.borrow_mut().push(TrackedRuntimeArtifact {
+            name: artifact_name.to_os_string(),
+            socket_identity: None,
+        });
         rollback.disarm();
         Ok(RuntimeArtifact { path, file })
     }
@@ -254,8 +255,41 @@ impl RuntimeOwner {
             let _ = remove_file_at(&self.directory.file, socket_name);
             return Err(error);
         }
-        self.artifacts.borrow_mut().push(socket_name.to_os_string());
-        Ok(RegisteredRuntimeSocket { path })
+        let registration = RegisteredRuntimeSocket::new(
+            path.clone(),
+            socket_name.to_os_string(),
+            after,
+            &self.runtime,
+            &self.directory,
+        )?;
+        self.artifacts.borrow_mut().push(TrackedRuntimeArtifact {
+            name: socket_name.to_os_string(),
+            socket_identity: Some(after),
+        });
+        Ok(registration)
+    }
+
+    pub(crate) fn remove_registered_socket(
+        &self,
+        socket: RegisteredRuntimeSocket,
+    ) -> Result<(), AppPathsError> {
+        self.verify_identity()?;
+        socket.verify()?;
+        if socket.path.parent() != Some(self.path.as_path()) {
+            return Err(AppPathsError::UnsafePath {
+                path: socket.path.clone(),
+            });
+        }
+        remove_file_at(&self.directory.file, &socket.name).map_err(|source| {
+            AppPathsError::Cleanup {
+                path: socket.path.clone(),
+                source,
+            }
+        })?;
+        self.artifacts.borrow_mut().retain(|artifact| {
+            artifact.name != socket.name || artifact.socket_identity != Some(socket.socket_identity)
+        });
+        Ok(())
     }
 
     pub(crate) fn close(mut self) -> Result<(), AppPathsError> {
@@ -268,13 +302,31 @@ impl RuntimeOwner {
 
     fn cleanup(&self) -> Result<(), AppPathsError> {
         self.verify_identity()?;
-        for name in self.artifacts.borrow().iter() {
-            match remove_file_at(&self.directory.file, name) {
+        for artifact in self.artifacts.borrow().iter() {
+            if let Some(expected_identity) = artifact.socket_identity {
+                let path = self.path.join(&artifact.name);
+                match inspect_socket_entry_at(
+                    &self.directory.file,
+                    &artifact.name,
+                    &path,
+                    Some(PRIVATE_ARTIFACT_MODE),
+                ) {
+                    Ok(identity) if identity == expected_identity => {}
+                    Ok(_) => return Err(AppPathsError::UnsafePath { path }),
+                    Err(AppPathsError::InspectPath { source, .. })
+                        if source.kind() == io::ErrorKind::NotFound =>
+                    {
+                        continue;
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+            match remove_file_at(&self.directory.file, &artifact.name) {
                 Ok(()) => {}
                 Err(error) if error.kind() == io::ErrorKind::NotFound => {}
                 Err(source) => {
                     return Err(AppPathsError::Cleanup {
-                        path: self.path.join(name),
+                        path: self.path.join(&artifact.name),
                         source,
                     });
                 }
@@ -314,15 +366,131 @@ pub(crate) struct RuntimeArtifact {
     file: File,
 }
 
-#[derive(Debug)]
 pub(crate) struct RegisteredRuntimeSocket {
     path: PathBuf,
+    name: OsString,
+    socket_identity: DirectoryIdentity,
+    runtime: RegisteredDirectory,
+    owner: RegisteredDirectory,
 }
 
 impl RegisteredRuntimeSocket {
+    fn new(
+        path: PathBuf,
+        name: OsString,
+        socket_identity: DirectoryIdentity,
+        runtime: &PrivateDirectory,
+        owner: &PrivateDirectory,
+    ) -> Result<Self, AppPathsError> {
+        Ok(Self {
+            path,
+            name,
+            socket_identity,
+            runtime: RegisteredDirectory::new(runtime)?,
+            owner: RegisteredDirectory::new(owner)?,
+        })
+    }
+
     pub(crate) fn path(&self) -> &Path {
         &self.path
     }
+
+    pub(crate) fn verify(&self) -> Result<(), AppPathsError> {
+        self.runtime.verify()?;
+        self.owner.verify()?;
+        if self.path.parent() != Some(self.owner.path.as_path()) {
+            return Err(AppPathsError::UnsafePath {
+                path: self.path.clone(),
+            });
+        }
+        let identity = inspect_socket_entry_at(
+            &self.owner.file,
+            &self.name,
+            &self.path,
+            Some(PRIVATE_ARTIFACT_MODE),
+        )?;
+        if identity == self.socket_identity {
+            Ok(())
+        } else {
+            Err(AppPathsError::UnsafePath {
+                path: self.path.clone(),
+            })
+        }
+    }
+}
+
+impl std::fmt::Debug for RegisteredRuntimeSocket {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RegisteredRuntimeSocket")
+            .field("path", &self.path)
+            .finish_non_exhaustive()
+    }
+}
+
+struct RegisteredDirectory {
+    parent: File,
+    file: File,
+    name: OsString,
+    path: PathBuf,
+    identity: DirectoryIdentity,
+}
+
+impl RegisteredDirectory {
+    fn new(directory: &PrivateDirectory) -> Result<Self, AppPathsError> {
+        Ok(Self {
+            parent: directory
+                .parent
+                .try_clone()
+                .map_err(|source| AppPathsError::InspectPath {
+                    path: directory.path.clone(),
+                    source,
+                })?,
+            file: directory
+                .file
+                .try_clone()
+                .map_err(|source| AppPathsError::InspectPath {
+                    path: directory.path.clone(),
+                    source,
+                })?,
+            name: directory.name.clone(),
+            path: directory.path.clone(),
+            identity: directory.identity,
+        })
+    }
+
+    fn verify(&self) -> Result<(), AppPathsError> {
+        let entry = open_directory_at(&self.parent, &self.name).map_err(|source| {
+            if matches!(
+                source.raw_os_error(),
+                Some(code) if code == libc::ELOOP || code == libc::ENOTDIR || code == libc::ENOENT
+            ) {
+                AppPathsError::UnsafePath {
+                    path: self.path.clone(),
+                }
+            } else {
+                AppPathsError::InspectPath {
+                    path: self.path.clone(),
+                    source,
+                }
+            }
+        })?;
+        let entry_identity = validate_private_open_directory(&entry, &self.path)?;
+        let open_identity = validate_private_open_directory(&self.file, &self.path)?;
+        if entry_identity == self.identity && open_identity == self.identity {
+            Ok(())
+        } else {
+            Err(AppPathsError::UnsafePath {
+                path: self.path.clone(),
+            })
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct TrackedRuntimeArtifact {
+    name: OsString,
+    socket_identity: Option<DirectoryIdentity>,
 }
 
 impl RuntimeArtifact {
@@ -1211,6 +1379,30 @@ mod tests {
         assert!(matches!(error, AppPathsError::UnsafePath { .. }));
         fs::remove_file(socket_path).unwrap();
         owner.close().unwrap();
+    }
+
+    #[test]
+    fn registered_socket_should_reject_replacement_and_owner_cleanup_should_not_unlink_it() {
+        let root = TestDirectory::new("replaced-socket");
+        let paths = AppPaths::resolve(&environment(&root.path)).unwrap();
+        let owner = paths.create_runtime_owner("ssh").unwrap();
+        let socket_path = owner.socket_path("control.sock").unwrap();
+        let listener = UnixListener::bind(&socket_path).unwrap();
+        let socket = owner.register_socket("control.sock").unwrap();
+        drop(listener);
+        fs::remove_file(&socket_path).unwrap();
+        let replacement = UnixListener::bind(&socket_path).unwrap();
+
+        let verification = socket.verify();
+        let cleanup = owner.close();
+
+        assert!(
+            matches!(verification, Err(AppPathsError::UnsafePath { .. }))
+                && matches!(cleanup, Err(AppPathsError::UnsafePath { .. }))
+                && socket_path.exists()
+        );
+        drop(replacement);
+        fs::remove_file(socket_path).unwrap();
     }
 
     #[test]

@@ -1,8 +1,9 @@
-use std::fs;
 use std::io;
 use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use thiserror::Error;
@@ -12,6 +13,7 @@ use super::command::{
     PreparedSshPaneChannelCommand, SshCommandContext, SshCommandContextError,
     ValidatedRemoteShellCommand,
 };
+use super::live_connection::{LiveConnectionAuthority, LiveConnectionState};
 use super::process::{ProcessExit, ProcessRunError, ProcessSignal, SshProcessBackend};
 use super::remote_utility::PreparedSshRemoteUtilityCommand;
 use crate::domain::SshDestination;
@@ -72,6 +74,7 @@ pub(crate) enum ControlConnectionState {
     Ready,
     ShuttingDown,
     Closed,
+    Failed,
 }
 
 #[derive(Debug, Error)]
@@ -124,6 +127,11 @@ pub(crate) enum ControlConnectionError {
     Command(#[from] SshCommandContextError),
     #[error("SSH control connection ownership was lost")]
     Ownership,
+    #[error("SSH control master supervisor could not be started: {source}")]
+    StartSupervisor {
+        #[source]
+        source: io::Error,
+    },
     #[error("SSH control connection is not ready")]
     NotReady,
 }
@@ -131,11 +139,12 @@ pub(crate) enum ControlConnectionError {
 pub(crate) struct OpenSshControlConnection<B: SshProcessBackend> {
     backend: Arc<B>,
     commands: SshCommandContext,
-    child: Option<B::Child>,
+    child: Arc<Mutex<Option<B::Child>>>,
     runtime_owner: Option<RuntimeOwner>,
-    registered_socket: Option<RegisteredRuntimeSocket>,
+    authority: Option<Arc<LiveConnectionAuthority>>,
+    supervisor_stop: Arc<AtomicBool>,
+    supervisor: Option<JoinHandle<()>>,
     control_path: PathBuf,
-    state: ControlConnectionState,
 }
 
 impl<B: SshProcessBackend> OpenSshControlConnection<B> {
@@ -151,7 +160,7 @@ impl<B: SshProcessBackend> OpenSshControlConnection<B> {
         }
         let runtime_owner = paths.create_runtime_owner(CONTROL_OWNER_KIND)?;
         let control_path = runtime_owner.socket_path(CONTROL_SOCKET_NAME)?;
-        let reservation = reserve_socket(&runtime_owner)?;
+        reserve_socket(&runtime_owner)?;
         let commands = SshCommandContext::new(
             paths.managed_ssh_config(),
             destination,
@@ -168,7 +177,7 @@ impl<B: SshProcessBackend> OpenSshControlConnection<B> {
             backend: Arc::clone(&backend),
             child: Some(child),
             runtime_owner: Some(runtime_owner),
-            registered_socket: Some(reservation),
+            registered_socket: None,
         };
         let deadline = deadline_after(backend.now(), timing.timeout);
 
@@ -228,8 +237,13 @@ impl<B: SshProcessBackend> OpenSshControlConnection<B> {
         }
     }
 
-    pub(crate) const fn state(&self) -> ControlConnectionState {
-        self.state
+    pub(crate) fn state(&self) -> ControlConnectionState {
+        match self.authority.as_ref().map(|authority| authority.state()) {
+            Some(LiveConnectionState::Ready) => ControlConnectionState::Ready,
+            Some(LiveConnectionState::ShuttingDown) => ControlConnectionState::ShuttingDown,
+            Some(LiveConnectionState::Failed) => ControlConnectionState::Failed,
+            Some(LiveConnectionState::Closed) | None => ControlConnectionState::Closed,
+        }
     }
 
     pub(crate) fn control_path(&self) -> &Path {
@@ -239,11 +253,20 @@ impl<B: SshProcessBackend> OpenSshControlConnection<B> {
     pub(crate) fn remote_utility_command(
         &self,
     ) -> Result<PreparedSshRemoteUtilityCommand, ControlConnectionError> {
-        if self.state != ControlConnectionState::Ready {
+        if self.state() != ControlConnectionState::Ready {
             return Err(ControlConnectionError::NotReady);
         }
-        Ok(PreparedSshRemoteUtilityCommand::new(
+        let capability = self
+            .authority
+            .as_ref()
+            .ok_or(ControlConnectionError::Ownership)?
+            .capability();
+        capability
+            .authorize()
+            .map_err(|_| ControlConnectionError::NotReady)?;
+        Ok(PreparedSshRemoteUtilityCommand::new_live(
             self.commands.remote_utility(),
+            capability,
         ))
     }
 
@@ -251,19 +274,31 @@ impl<B: SshProcessBackend> OpenSshControlConnection<B> {
         &self,
         command: ValidatedRemoteShellCommand,
     ) -> Result<PreparedSshPaneChannelCommand, ControlConnectionError> {
-        if self.state != ControlConnectionState::Ready {
+        if self.state() != ControlConnectionState::Ready {
             return Err(ControlConnectionError::NotReady);
         }
-        Ok(self.commands.prepare_pane_channel(command))
+        let capability = self
+            .authority
+            .as_ref()
+            .ok_or(ControlConnectionError::Ownership)?
+            .capability();
+        capability
+            .authorize()
+            .map_err(|_| ControlConnectionError::NotReady)?;
+        Ok(PreparedSshPaneChannelCommand::new(
+            self.commands.pane_channel(command),
+            Some(capability),
+        ))
     }
 
     pub(crate) async fn shutdown(&mut self) -> Result<(), ControlConnectionError> {
-        if self.state == ControlConnectionState::Closed {
+        if self.state() == ControlConnectionState::Closed {
             return Ok(());
         }
 
-        if self.state == ControlConnectionState::Ready {
-            self.state = ControlConnectionState::ShuttingDown;
+        if self.state() == ControlConnectionState::Ready {
+            self.transition(LiveConnectionState::ShuttingDown)?;
+            self.stop_supervisor();
             let deadline = deadline_after(self.backend.now(), SHUTDOWN_OPERATION_TIMEOUT);
             match self
                 .backend
@@ -276,11 +311,11 @@ impl<B: SshProcessBackend> OpenSshControlConnection<B> {
             {
                 Ok(exit) if exit.is_success() => {}
                 Ok(exit) => {
-                    self.state = ControlConnectionState::Ready;
+                    self.restore_ready_supervision()?;
                     return Err(ControlConnectionError::ShutdownRejected(exit));
                 }
                 Err(source) => {
-                    self.state = ControlConnectionState::Ready;
+                    self.restore_ready_supervision()?;
                     return Err(ControlConnectionError::ShutdownCommand { source });
                 }
             }
@@ -307,11 +342,11 @@ impl<B: SshProcessBackend> OpenSshControlConnection<B> {
                 }
             }
         }
-        self.registered_socket.take();
+        self.transition(LiveConnectionState::Closed)?;
+        self.authority.take();
         if let Some(owner) = self.runtime_owner.take() {
             owner.close().map_err(ControlConnectionError::Cleanup)?;
         }
-        self.state = ControlConnectionState::Closed;
         Ok(())
     }
 
@@ -320,7 +355,11 @@ impl<B: SshProcessBackend> OpenSshControlConnection<B> {
         deadline: Instant,
     ) -> Result<bool, ControlConnectionError> {
         loop {
-            let Some(child) = self.child.as_mut() else {
+            let mut child_slot = self
+                .child
+                .lock()
+                .map_err(|_| ControlConnectionError::Ownership)?;
+            let Some(child) = child_slot.as_mut() else {
                 return Ok(true);
             };
             if self
@@ -329,9 +368,10 @@ impl<B: SshProcessBackend> OpenSshControlConnection<B> {
                 .map_err(|source| ControlConnectionError::Reap { source })?
                 .is_some()
             {
-                self.child.take();
+                child_slot.take();
                 return Ok(true);
             }
+            drop(child_slot);
             let now = self.backend.now();
             if now >= deadline {
                 return Ok(false);
@@ -343,24 +383,67 @@ impl<B: SshProcessBackend> OpenSshControlConnection<B> {
     }
 
     fn signal_master(&mut self, signal: ProcessSignal) -> Result<(), ControlConnectionError> {
-        let child = self
+        let mut child_slot = self
             .child
+            .lock()
+            .map_err(|_| ControlConnectionError::Ownership)?;
+        let child = child_slot
             .as_mut()
             .ok_or(ControlConnectionError::Ownership)?;
         self.backend
             .signal_process_group(child, signal)
             .map_err(|source| ControlConnectionError::Reap { source })
     }
+
+    fn transition(&self, state: LiveConnectionState) -> Result<(), ControlConnectionError> {
+        self.authority
+            .as_ref()
+            .ok_or(ControlConnectionError::Ownership)?
+            .transition(state);
+        Ok(())
+    }
+
+    fn restore_ready_supervision(&mut self) -> Result<(), ControlConnectionError> {
+        self.transition(LiveConnectionState::Ready)?;
+        self.start_supervisor()
+    }
+
+    fn start_supervisor(&mut self) -> Result<(), ControlConnectionError> {
+        let authority = self
+            .authority
+            .as_ref()
+            .ok_or(ControlConnectionError::Ownership)?;
+        let stop = Arc::new(AtomicBool::new(false));
+        let supervisor = spawn_supervisor(
+            Arc::clone(&self.backend),
+            Arc::clone(&self.child),
+            Arc::clone(authority),
+            Arc::clone(&stop),
+        )?;
+        self.supervisor_stop = stop;
+        self.supervisor = Some(supervisor);
+        Ok(())
+    }
+
+    fn stop_supervisor(&mut self) {
+        self.supervisor_stop.store(true, Ordering::Release);
+        if let Some(supervisor) = self.supervisor.take() {
+            let _ = supervisor.join();
+        }
+    }
 }
 
 impl<B: SshProcessBackend> Drop for OpenSshControlConnection<B> {
     fn drop(&mut self) {
-        if let Some(child) = self.child.take() {
+        self.stop_supervisor();
+        let child = self.child.lock().ok().and_then(|mut child| child.take());
+        if let Some(child) = child {
             self.backend.force_cleanup(child);
         }
-        self.registered_socket.take();
+        if let Some(authority) = self.authority.take() {
+            authority.transition(LiveConnectionState::Closed);
+        }
         self.runtime_owner.take();
-        self.state = ControlConnectionState::Closed;
     }
 }
 
@@ -386,20 +469,46 @@ impl<B: SshProcessBackend> ConnectingControl<B> {
             .registered_socket
             .take()
             .ok_or(ControlConnectionError::Ownership)?;
+        let authority = LiveConnectionAuthority::new(registered_socket);
+        let child = Arc::new(Mutex::new(Some(child)));
+        let supervisor_stop = Arc::new(AtomicBool::new(false));
+        let supervisor = match spawn_supervisor(
+            Arc::clone(&self.backend),
+            Arc::clone(&child),
+            Arc::clone(&authority),
+            Arc::clone(&supervisor_stop),
+        ) {
+            Ok(supervisor) => supervisor,
+            Err(error) => {
+                if let Ok(mut child) = child.lock()
+                    && let Some(child) = child.take()
+                {
+                    self.backend.force_cleanup(child);
+                }
+                return Err(error);
+            }
+        };
         Ok(OpenSshControlConnection {
             backend: Arc::clone(&self.backend),
             commands,
-            child: Some(child),
+            child,
             runtime_owner: Some(runtime_owner),
-            registered_socket: Some(registered_socket),
+            authority: Some(authority),
+            supervisor_stop,
+            supervisor: Some(supervisor),
             control_path,
-            state: ControlConnectionState::Ready,
         })
     }
 }
 
 impl<B: SshProcessBackend> Drop for ConnectingControl<B> {
     fn drop(&mut self) {
+        if self.registered_socket.is_none()
+            && let Some(owner) = self.runtime_owner.as_ref()
+            && let Ok(socket) = owner.register_socket(CONTROL_SOCKET_NAME)
+        {
+            self.registered_socket = Some(socket);
+        }
         if let Some(child) = self.child.take() {
             self.backend.force_cleanup(child);
         }
@@ -412,15 +521,52 @@ fn deadline_after(now: Instant, duration: Duration) -> Instant {
     now.checked_add(duration).unwrap_or(now)
 }
 
-fn reserve_socket(owner: &RuntimeOwner) -> Result<RegisteredRuntimeSocket, ControlConnectionError> {
+fn spawn_supervisor<B: SshProcessBackend>(
+    backend: Arc<B>,
+    child: Arc<Mutex<Option<B::Child>>>,
+    authority: Arc<LiveConnectionAuthority>,
+    stop: Arc<AtomicBool>,
+) -> Result<JoinHandle<()>, ControlConnectionError> {
+    std::thread::Builder::new()
+        .name("spaceterm-ssh-supervisor".to_owned())
+        .spawn(move || {
+            while !stop.load(Ordering::Acquire) {
+                std::thread::sleep(PROCESS_POLL_INTERVAL);
+                if stop.load(Ordering::Acquire) {
+                    return;
+                }
+                let result = child.lock().map_or_else(
+                    |_| Err(io::Error::other("SSH master ownership lock was poisoned")),
+                    |mut child| match child.as_mut() {
+                        Some(process) => backend.try_wait(process).map(|exit| {
+                            if exit.is_some() {
+                                child.take();
+                            }
+                            exit
+                        }),
+                        None => Ok(Some(ProcessExit::unsuccessful(None))),
+                    },
+                );
+                match result {
+                    Ok(None) => {}
+                    Ok(Some(_)) | Err(_) => {
+                        authority.transition(LiveConnectionState::Failed);
+                        return;
+                    }
+                }
+            }
+        })
+        .map_err(|source| ControlConnectionError::StartSupervisor { source })
+}
+
+fn reserve_socket(owner: &RuntimeOwner) -> Result<(), ControlConnectionError> {
     let path = owner.socket_path(CONTROL_SOCKET_NAME)?;
     let listener = UnixListener::bind(&path)
         .map_err(|source| ControlConnectionError::SocketReservation { source })?;
     let registered = owner.register_socket(CONTROL_SOCKET_NAME)?;
     drop(listener);
-    fs::remove_file(&path)
-        .map_err(|source| ControlConnectionError::SocketReservation { source })?;
-    Ok(registered)
+    owner.remove_registered_socket(registered)?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -733,7 +879,7 @@ mod tests {
         let paths = directory.paths();
         let backend = Arc::new(FakeBackend::with_readiness([ProcessExit::successful()]));
         let cancellation = SshCancellationToken::default();
-        let mut connection = cx
+        let connection = cx
             .executor()
             .block(OpenSshControlConnection::connect(
                 &paths,
@@ -752,7 +898,11 @@ mod tests {
             .unwrap();
         assert!(pane.take().is_ok());
 
-        connection.state = ControlConnectionState::ShuttingDown;
+        connection
+            .authority
+            .as_ref()
+            .unwrap()
+            .transition(LiveConnectionState::ShuttingDown);
         assert!(matches!(
             connection.remote_utility_command(),
             Err(ControlConnectionError::NotReady)
@@ -986,6 +1136,96 @@ mod tests {
             backend.state.lock().unwrap().signals,
             vec![ProcessSignal::Terminate, ProcessSignal::Kill]
         );
+    }
+
+    #[gpui::test]
+    fn master_death_should_invalidate_stale_pane_and_utility_commands(cx: &mut TestAppContext) {
+        let directory = TestDirectory::new();
+        let paths = directory.paths();
+        let backend = Arc::new(FakeBackend::with_readiness([ProcessExit::successful()]));
+        let connection = cx
+            .executor()
+            .block(OpenSshControlConnection::connect(
+                &paths,
+                destination(),
+                Arc::clone(&backend),
+                &SshCancellationToken::default(),
+                timing(),
+            ))
+            .unwrap();
+        let pane = connection
+            .prepare_pane_channel(
+                ValidatedRemoteShellCommand::new("exec /bin/zsh -l".to_owned()).unwrap(),
+            )
+            .unwrap();
+        let utility = connection.remote_utility_command().unwrap();
+        backend
+            .state
+            .lock()
+            .unwrap()
+            .early_exits
+            .push_back(Some(ProcessExit::unsuccessful(Some(9))));
+
+        for _ in 0..100 {
+            if connection.state() == ControlConnectionState::Failed {
+                break;
+            }
+            std::thread::sleep(PROCESS_POLL_INTERVAL);
+        }
+
+        assert_eq!(connection.state(), ControlConnectionState::Failed);
+        assert!(matches!(
+            pane.take(),
+            Err(crate::ssh::command::PreparedSshPaneChannelError::Unavailable)
+        ));
+        assert!(
+            utility
+                .connection_cancellation()
+                .is_some_and(|cancellation| cancellation.is_cancelled())
+        );
+    }
+
+    #[gpui::test]
+    fn socket_replacement_should_block_command_use_and_never_be_unlinked(cx: &mut TestAppContext) {
+        let directory = TestDirectory::new();
+        let paths = directory.paths();
+        let backend = Arc::new(FakeBackend::with_readiness([ProcessExit::successful()]));
+        let connection = cx
+            .executor()
+            .block(OpenSshControlConnection::connect(
+                &paths,
+                destination(),
+                Arc::clone(&backend),
+                &SshCancellationToken::default(),
+                timing(),
+            ))
+            .unwrap();
+        let pane = connection
+            .prepare_pane_channel(
+                ValidatedRemoteShellCommand::new("exec /bin/zsh -l".to_owned()).unwrap(),
+            )
+            .unwrap();
+        let socket_path = connection.control_path().to_path_buf();
+        connection
+            .child
+            .lock()
+            .unwrap()
+            .as_mut()
+            .unwrap()
+            .listener
+            .take();
+        fs::remove_file(&socket_path).unwrap();
+        let replacement = UnixListener::bind(&socket_path).unwrap();
+
+        assert!(matches!(
+            pane.take(),
+            Err(crate::ssh::command::PreparedSshPaneChannelError::Unavailable)
+        ));
+        drop(connection);
+        assert!(socket_path.exists());
+
+        drop(replacement);
+        fs::remove_file(socket_path).unwrap();
     }
 
     #[test]

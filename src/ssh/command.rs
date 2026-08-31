@@ -7,6 +7,7 @@ use std::sync::{Arc, Mutex};
 
 use thiserror::Error;
 
+use super::live_connection::LiveConnectionCapability;
 use crate::domain::SshDestination;
 
 const SSH_EXECUTABLE: &str = "/usr/bin/ssh";
@@ -203,7 +204,7 @@ impl SshCommandContext {
         &self,
         command: ValidatedRemoteShellCommand,
     ) -> PreparedSshPaneChannelCommand {
-        PreparedSshPaneChannelCommand::new(self.pane_channel(command))
+        PreparedSshPaneChannelCommand::new(self.pane_channel(command), None)
     }
 
     fn control_operation(&self, operation: &str) -> SshCommandSpec {
@@ -290,19 +291,31 @@ impl SshCommandSpec {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub(crate) struct PreparedSshPaneChannelCommand {
     command: Arc<Mutex<Option<SshCommandSpec>>>,
+    capability: Option<LiveConnectionCapability>,
 }
 
 impl PreparedSshPaneChannelCommand {
-    fn new(command: SshCommandSpec) -> Self {
+    pub(super) fn new(
+        command: SshCommandSpec,
+        capability: Option<LiveConnectionCapability>,
+    ) -> Self {
         Self {
             command: Arc::new(Mutex::new(Some(command))),
+            capability,
         }
     }
 
     pub(crate) fn take(&self) -> Result<SshCommandSpec, PreparedSshPaneChannelError> {
+        if self
+            .capability
+            .as_ref()
+            .is_some_and(|capability| capability.authorize().is_err())
+        {
+            return Err(PreparedSshPaneChannelError::Unavailable);
+        }
         let mut command = self
             .command
             .lock()
@@ -310,6 +323,14 @@ impl PreparedSshPaneChannelCommand {
         command
             .take()
             .ok_or(PreparedSshPaneChannelError::AlreadyConsumed)
+    }
+}
+
+impl fmt::Debug for PreparedSshPaneChannelCommand {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PreparedSshPaneChannelCommand")
+            .finish_non_exhaustive()
     }
 }
 

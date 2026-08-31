@@ -10,6 +10,7 @@ use thiserror::Error;
 
 use super::cancellation::SshCancellationToken;
 use super::command::SshCommandSpec;
+use super::live_connection::LiveConnectionCapability;
 use super::process::ProcessExit;
 use crate::domain::RemoteWorkspaceDirectory;
 
@@ -55,13 +56,29 @@ pub(crate) trait SshRemoteUtilityRunner: Send + Sync + 'static {
 /// A reusable utility channel command created only by the centralized SSH command policy.
 pub(crate) struct PreparedSshRemoteUtilityCommand {
     command: Arc<SshCommandSpec>,
+    capability: Option<LiveConnectionCapability>,
 }
 
 impl PreparedSshRemoteUtilityCommand {
     pub(super) fn new(command: SshCommandSpec) -> Self {
         Self {
             command: Arc::new(command),
+            capability: None,
         }
+    }
+
+    pub(super) fn new_live(command: SshCommandSpec, capability: LiveConnectionCapability) -> Self {
+        Self {
+            command: Arc::new(command),
+            capability: Some(capability),
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn connection_cancellation(&self) -> Option<SshCancellationToken> {
+        self.capability
+            .as_ref()
+            .map(LiveConnectionCapability::cancellation)
     }
 }
 
@@ -374,13 +391,22 @@ impl<R: SshRemoteUtilityRunner> SshRemoteUtilityClient<R> {
         if script.len() > MAXIMUM_REMOTE_UTILITY_REQUEST_BYTES {
             return Err(RemoteUtilityError::RequestTooLarge);
         }
+        let operation_cancellation = match &self.command.capability {
+            Some(capability) => {
+                capability
+                    .authorize()
+                    .map_err(|_| RemoteUtilityError::Transport)?;
+                SshCancellationToken::linked(&self.cancellation, &capability.cancellation())
+            }
+            None => self.cancellation.clone(),
+        };
         let output = self
             .runner
             .run(
                 Arc::clone(&self.command.command),
                 script,
                 MAXIMUM_REMOTE_UTILITY_OUTPUT_BYTES,
-                self.cancellation.clone(),
+                operation_cancellation,
             )
             .await
             .map_err(|error| match error {
