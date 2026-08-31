@@ -14,6 +14,12 @@ const MACOS_UNIX_SOCKET_PATH_BYTES: usize = 103;
 const PRIVATE_DIRECTORY_MODE: u32 = 0o700;
 const PRIVATE_ARTIFACT_MODE: u32 = 0o600;
 const RUNTIME_OWNER_CREATION_ATTEMPTS: usize = 128;
+const HOME_ENVIRONMENT_VARIABLE: &str = "HOME";
+const XDG_CONFIG_HOME_ENVIRONMENT_VARIABLE: &str = "XDG_CONFIG_HOME";
+const XDG_DATA_HOME_ENVIRONMENT_VARIABLE: &str = "XDG_DATA_HOME";
+const XDG_STATE_HOME_ENVIRONMENT_VARIABLE: &str = "XDG_STATE_HOME";
+const XDG_CACHE_HOME_ENVIRONMENT_VARIABLE: &str = "XDG_CACHE_HOME";
+const XDG_RUNTIME_DIR_ENVIRONMENT_VARIABLE: &str = "XDG_RUNTIME_DIR";
 
 static NEXT_RUNTIME_OWNER: AtomicU64 = AtomicU64::new(0);
 
@@ -26,6 +32,47 @@ pub(crate) struct AppPathEnvironment {
     pub(crate) xdg_cache_home: Option<OsString>,
     pub(crate) xdg_runtime_dir: Option<OsString>,
     pub(crate) macos_temporary_directory: PathBuf,
+}
+
+trait AppPathEnvironmentReader {
+    fn environment_variable(&mut self, key: &OsStr) -> Option<OsString>;
+
+    fn macos_temporary_directory(&mut self) -> PathBuf;
+}
+
+struct ProcessAppPathEnvironmentReader;
+
+impl AppPathEnvironmentReader for ProcessAppPathEnvironmentReader {
+    fn environment_variable(&mut self, key: &OsStr) -> Option<OsString> {
+        std::env::var_os(key)
+    }
+
+    fn macos_temporary_directory(&mut self) -> PathBuf {
+        std::env::temp_dir()
+    }
+}
+
+impl AppPathEnvironment {
+    pub(crate) fn capture() -> Self {
+        Self::capture_with(&mut ProcessAppPathEnvironmentReader)
+    }
+
+    fn capture_with(reader: &mut impl AppPathEnvironmentReader) -> Self {
+        Self {
+            home: reader.environment_variable(OsStr::new(HOME_ENVIRONMENT_VARIABLE)),
+            xdg_config_home: reader
+                .environment_variable(OsStr::new(XDG_CONFIG_HOME_ENVIRONMENT_VARIABLE)),
+            xdg_data_home: reader
+                .environment_variable(OsStr::new(XDG_DATA_HOME_ENVIRONMENT_VARIABLE)),
+            xdg_state_home: reader
+                .environment_variable(OsStr::new(XDG_STATE_HOME_ENVIRONMENT_VARIABLE)),
+            xdg_cache_home: reader
+                .environment_variable(OsStr::new(XDG_CACHE_HOME_ENVIRONMENT_VARIABLE)),
+            xdg_runtime_dir: reader
+                .environment_variable(OsStr::new(XDG_RUNTIME_DIR_ENVIRONMENT_VARIABLE)),
+            macos_temporary_directory: reader.macos_temporary_directory(),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1061,8 +1108,9 @@ fn effective_user_id() -> u32 {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::fs;
-    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::ffi::{OsStrExt, OsStringExt};
     use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt, symlink};
     use std::os::unix::net::UnixListener;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -1102,6 +1150,202 @@ mod tests {
             xdg_runtime_dir: None,
             macos_temporary_directory: root.join("temporary"),
         }
+    }
+
+    #[derive(Default)]
+    struct TestAppPathEnvironmentReader {
+        environment: BTreeMap<OsString, OsString>,
+        environment_reads: BTreeMap<OsString, usize>,
+        macos_temporary_directory: PathBuf,
+        macos_temporary_directory_reads: usize,
+    }
+
+    impl TestAppPathEnvironmentReader {
+        fn with_environment(mut self, key: &str, value: impl Into<OsString>) -> Self {
+            self.environment.insert(key.into(), value.into());
+            self
+        }
+
+        fn with_macos_temporary_directory(mut self, path: impl Into<PathBuf>) -> Self {
+            self.macos_temporary_directory = path.into();
+            self
+        }
+
+        fn environment_read_count(&self, key: &str) -> usize {
+            self.environment_reads
+                .get(OsStr::new(key))
+                .copied()
+                .unwrap_or_default()
+        }
+    }
+
+    impl AppPathEnvironmentReader for TestAppPathEnvironmentReader {
+        fn environment_variable(&mut self, key: &OsStr) -> Option<OsString> {
+            *self
+                .environment_reads
+                .entry(key.to_os_string())
+                .or_default() += 1;
+            self.environment.get(key).cloned()
+        }
+
+        fn macos_temporary_directory(&mut self) -> PathBuf {
+            self.macos_temporary_directory_reads += 1;
+            self.macos_temporary_directory.clone()
+        }
+    }
+
+    #[test]
+    fn capture_should_read_each_input_exactly_once() {
+        let mut reader = TestAppPathEnvironmentReader::default()
+            .with_environment("HOME", "/Users/capture")
+            .with_environment("XDG_CONFIG_HOME", "/capture/config")
+            .with_environment("XDG_DATA_HOME", "/capture/data")
+            .with_environment("XDG_STATE_HOME", "/capture/state")
+            .with_environment("XDG_CACHE_HOME", "/capture/cache")
+            .with_environment("XDG_RUNTIME_DIR", "/capture/runtime")
+            .with_macos_temporary_directory("/capture/temporary");
+
+        let captured = AppPathEnvironment::capture_with(&mut reader);
+
+        assert_eq!(captured.home.as_deref(), Some(OsStr::new("/Users/capture")));
+        assert_eq!(
+            captured.xdg_config_home.as_deref(),
+            Some(OsStr::new("/capture/config"))
+        );
+        assert_eq!(
+            captured.xdg_data_home.as_deref(),
+            Some(OsStr::new("/capture/data"))
+        );
+        assert_eq!(
+            captured.xdg_state_home.as_deref(),
+            Some(OsStr::new("/capture/state"))
+        );
+        assert_eq!(
+            captured.xdg_cache_home.as_deref(),
+            Some(OsStr::new("/capture/cache"))
+        );
+        assert_eq!(
+            captured.xdg_runtime_dir.as_deref(),
+            Some(OsStr::new("/capture/runtime"))
+        );
+        assert_eq!(
+            captured.macos_temporary_directory,
+            Path::new("/capture/temporary")
+        );
+        for key in [
+            "HOME",
+            "XDG_CONFIG_HOME",
+            "XDG_DATA_HOME",
+            "XDG_STATE_HOME",
+            "XDG_CACHE_HOME",
+            "XDG_RUNTIME_DIR",
+        ] {
+            assert_eq!(
+                reader.environment_read_count(key),
+                1,
+                "read count for {key}"
+            );
+        }
+        assert_eq!(reader.macos_temporary_directory_reads, 1);
+    }
+
+    #[test]
+    fn capture_should_remain_immutable_after_the_source_changes() {
+        let mut reader = TestAppPathEnvironmentReader::default()
+            .with_environment("HOME", "/Users/original")
+            .with_environment("XDG_CONFIG_HOME", "/original/config")
+            .with_macos_temporary_directory("/original/temporary");
+        let captured = AppPathEnvironment::capture_with(&mut reader);
+
+        reader
+            .environment
+            .insert("HOME".into(), "/Users/replacement".into());
+        reader
+            .environment
+            .insert("XDG_CONFIG_HOME".into(), "/replacement/config".into());
+        reader.macos_temporary_directory = PathBuf::from("/replacement/temporary");
+
+        assert_eq!(
+            captured.home.as_deref(),
+            Some(OsStr::new("/Users/original"))
+        );
+        assert_eq!(
+            captured.xdg_config_home.as_deref(),
+            Some(OsStr::new("/original/config"))
+        );
+        assert_eq!(
+            captured.macos_temporary_directory,
+            Path::new("/original/temporary")
+        );
+    }
+
+    #[test]
+    fn captured_absent_and_invalid_values_should_use_existing_fallback_policy() {
+        let mut reader = TestAppPathEnvironmentReader::default()
+            .with_environment("HOME", "/Users/fallback")
+            .with_environment("XDG_DATA_HOME", "")
+            .with_environment("XDG_STATE_HOME", "relative-state")
+            .with_environment("XDG_RUNTIME_DIR", "relative-runtime")
+            .with_macos_temporary_directory("/private/tmp/captured");
+
+        let captured = AppPathEnvironment::capture_with(&mut reader);
+        let paths = AppPaths::resolve(&captured).unwrap();
+
+        assert_eq!(
+            paths.config(),
+            Path::new("/Users/fallback/.config/spaceterm")
+        );
+        assert_eq!(
+            paths.data(),
+            Path::new("/Users/fallback/.local/share/spaceterm")
+        );
+        assert_eq!(
+            paths.state(),
+            Path::new("/Users/fallback/.local/state/spaceterm")
+        );
+        assert_eq!(paths.cache(), Path::new("/Users/fallback/.cache/spaceterm"));
+        assert_eq!(
+            paths.runtime(),
+            Path::new("/private/tmp/captured/spaceterm")
+        );
+    }
+
+    #[test]
+    fn captured_relative_temporary_directory_should_remain_invalid() {
+        let mut reader = TestAppPathEnvironmentReader::default()
+            .with_environment("HOME", "/Users/fallback")
+            .with_macos_temporary_directory("relative-temporary");
+
+        let captured = AppPathEnvironment::capture_with(&mut reader);
+        let error = AppPaths::resolve(&captured).unwrap_err();
+
+        assert!(matches!(error, AppPathsError::InvalidTemporaryDirectory));
+    }
+
+    #[test]
+    fn capture_should_preserve_non_utf8_paths() {
+        let non_utf8_home = OsString::from_vec(b"/Users/home-\xff".to_vec());
+        let non_utf8_config = OsString::from_vec(b"/private/config-\xfe".to_vec());
+        let non_utf8_temporary = OsString::from_vec(b"/private/tmp/temp-\xfd".to_vec());
+        let mut reader = TestAppPathEnvironmentReader::default()
+            .with_environment("HOME", non_utf8_home.clone())
+            .with_environment("XDG_CONFIG_HOME", non_utf8_config.clone())
+            .with_macos_temporary_directory(PathBuf::from(non_utf8_temporary.clone()));
+
+        let captured = AppPathEnvironment::capture_with(&mut reader);
+
+        assert_eq!(
+            captured.home.as_deref().unwrap().as_bytes(),
+            non_utf8_home.as_bytes()
+        );
+        assert_eq!(
+            captured.xdg_config_home.as_deref().unwrap().as_bytes(),
+            non_utf8_config.as_bytes()
+        );
+        assert_eq!(
+            captured.macos_temporary_directory.as_os_str().as_bytes(),
+            non_utf8_temporary.as_bytes()
+        );
     }
 
     #[test]
