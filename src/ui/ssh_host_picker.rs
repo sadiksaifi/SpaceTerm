@@ -14,7 +14,8 @@ use gpui::{Context, Entity, EventEmitter, Render, SharedString, Window};
 use spaceterm_ui::{
     CommandPalette, CommandPaletteAccessory, CommandPaletteActivationPolicy,
     CommandPaletteCloseReason, CommandPaletteEvent, CommandPaletteItem,
-    CommandPaletteLifecycleEvent, CommandPaletteMatching, MenuEntry,
+    CommandPaletteLifecycleEvent, CommandPaletteMatching, CommandPaletteReplacementFocus,
+    MenuEntry,
 };
 
 use crate::domain::SshDestination;
@@ -239,6 +240,28 @@ impl SshHostPicker {
     pub(super) fn dismiss(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
         self.palette
             .update(cx, |palette, cx| palette.dismiss(window, cx))
+    }
+
+    pub(super) fn dismiss_for_replacement(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<CommandPaletteReplacementFocus> {
+        self.capture_selection(cx);
+        self.palette.update(cx, |palette, cx| {
+            palette.dismiss_for_replacement(window, cx)
+        })
+    }
+
+    pub(super) fn open_replacing(
+        &mut self,
+        replacement: CommandPaletteReplacementFocus,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        self.palette.update(cx, |palette, cx| {
+            palette.open_replacing(replacement, window, cx)
+        })
     }
 
     pub(super) fn refresh(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -875,5 +898,46 @@ mod tests {
                 .to_owned()),
             "f"
         );
+    }
+
+    #[gpui::test]
+    fn replacement_transfer_preserves_focus_chain_query_and_selection(cx: &mut TestAppContext) {
+        let provider = Arc::new(ScriptedHostDiscoveryProvider::new([
+            host_discovery("Host staging\nHost work\n", ""),
+            host_discovery("Host staging\nHost work\n", ""),
+        ]));
+        let (harness, picker, events, cx) = host_picker(provider, |_| false, cx);
+        set_query(&picker, "st", cx);
+        let selected = selected_item(&picker, cx);
+        events.borrow_mut().clear();
+
+        cx.update(|window, cx| {
+            let replacement = picker
+                .update(cx, |picker, cx| picker.dismiss_for_replacement(window, cx))
+                .expect("open host picker should transfer its original focus owner");
+            assert!(!harness.read(cx).prior_focus.is_focused(window));
+            assert!(picker.update(cx, |picker, cx| {
+                picker.open_replacing(replacement, window, cx)
+            }));
+        });
+        cx.run_until_parked();
+
+        assert!(events.borrow().contains(&SshHostPickerEvent::Lifecycle(
+            SshHostPickerLifecycleEvent::Closed(CommandPaletteCloseReason::Replaced)
+        )));
+        assert_eq!(
+            picker.read_with(cx, |picker, cx| (
+                picker.palette().read(cx).query().to_owned(),
+                picker.palette().read(cx).selected_item_id().cloned(),
+            )),
+            ("st".to_owned(), selected)
+        );
+        assert!(cx.update(|window, cx| {
+            picker
+                .read(cx)
+                .palette()
+                .read(cx)
+                .editor_is_focused(window, cx)
+        }));
     }
 }
