@@ -1638,7 +1638,9 @@ pub(crate) fn dismiss_menu_owned_by_modal_parent(
     release_window(reservation, modal_parent.window_id, cx);
     let replacement = replacement?;
     if let Some(handler) = replacement.lifecycle {
-        handler(&MenuLifecycleEvent::Closed(MenuCloseReason::Replaced), cx);
+        cx.defer(move |cx| {
+            handler(&MenuLifecycleEvent::Closed(MenuCloseReason::Replaced), cx);
+        });
     }
     Some(retired_focus)
 }

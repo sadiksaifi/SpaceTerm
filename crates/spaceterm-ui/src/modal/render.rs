@@ -4,7 +4,7 @@ use gpui::{
     KeyBinding, KeyDownEvent, KeyUpEvent, LayoutId, MouseButton, MouseDownEvent, MouseExitEvent,
     MouseMoveEvent, MouseUpEvent, ParentElement as _, Pixels, RenderOnce, Rgba, ScrollHandle,
     ScrollWheelEvent, SharedString, StatefulInteractiveElement as _, Styled as _, WeakEntity,
-    Window, actions, canvas, div, img, prelude::FluentBuilder as _, px, relative, size,
+    Window, actions, canvas, div, img, prelude::FluentBuilder as _, px, relative, size, svg,
 };
 
 use super::{
@@ -21,6 +21,10 @@ use super::{
 };
 use crate::{
     Button, ButtonRole, ButtonSize, ButtonVariant,
+    assets::{
+        ALERT_CRITICAL_ICON, ALERT_INFORMATION_ICON, ALERT_WARNING_ICON, CHECKBOX_CHECKED_ICON,
+        CHECKBOX_UNCHECKED_ICON, IMAGE_PLACEHOLDER_ICON,
+    },
     button::{
         ModalControlScope, ModalFocusAnchorRegistry, ModalPressOwner,
         measure_button_intrinsic_width,
@@ -195,7 +199,12 @@ fn render_overlay(
         .iter()
         .map(|action| measure_button_intrinsic_width(&action.label, ButtonSize::Small, window, cx))
         .collect::<Vec<_>>();
-    let axis = select_action_axis(available_actions, &measured_widths, metrics);
+    let axis = select_action_axis(
+        geometry.size.width,
+        available_actions,
+        &measured_widths,
+        metrics,
+    );
     let arrangement = policy.action_arrangement(&snapshot.actions, axis);
 
     let state_id: SharedString = format!(
@@ -440,7 +449,7 @@ fn surface_contains(geometry: ModalSurfaceGeometry, point: gpui::Point<gpui::Pix
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct AlertIntentPresentation {
-    marker: &'static str,
+    icon_path: &'static str,
     selector: &'static str,
     accent: Rgba,
     background: Rgba,
@@ -452,19 +461,19 @@ fn alert_intent_presentation(
 ) -> AlertIntentPresentation {
     match intent {
         super::AlertIntent::Informational => AlertIntentPresentation {
-            marker: "i",
+            icon_path: ALERT_INFORMATION_ICON,
             selector: "informational",
             accent: paint.informational,
             background: paint.informational_background,
         },
         super::AlertIntent::Warning => AlertIntentPresentation {
-            marker: "!",
+            icon_path: ALERT_WARNING_ICON,
             selector: "warning",
             accent: paint.warning,
             background: paint.warning_background,
         },
         super::AlertIntent::Critical => AlertIntentPresentation {
-            marker: "×",
+            icon_path: ALERT_CRITICAL_ICON,
             selector: "critical",
             accent: paint.critical,
             background: paint.critical_background,
@@ -563,14 +572,10 @@ fn render_body(
                             .size(extent)
                             .into_any_element()
                     }
-                    AlertAccessory::Icon { image: None, .. } => div()
+                    AlertAccessory::Icon { image: None, .. } => svg()
+                        .path(IMAGE_PLACEHOLDER_ICON)
                         .size(extent)
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .text_size(metrics.title_size)
                         .text_color(paint.secondary_text)
-                        .child("◇")
                         .into_any_element(),
                 }
             });
@@ -578,34 +583,36 @@ fn render_body(
             let intent_selector = format!("modal-alert-intent-{}", intent_presentation.selector);
             let marker_selector =
                 format!("modal-alert-intent-mark-{}", intent_presentation.selector);
+            let marker_extent = metrics.accessory_extent() / 2.0;
             let message_panel = div()
                 .debug_selector(move || intent_selector.clone())
                 .flex()
+                .items_start()
                 .min_w_0()
-                .overflow_hidden()
-                .rounded(metrics.corner_radius)
-                .border(metrics.border_width)
-                .border_color(intent_presentation.accent)
-                .bg(intent_presentation.background)
+                .gap(metrics.action_gap)
                 .child(
                     div()
                         .debug_selector(move || marker_selector.clone())
-                        .w(metrics.accessory_extent() / 2.0)
+                        .size(marker_extent)
                         .flex_shrink_0()
                         .flex()
                         .items_center()
                         .justify_center()
-                        .py(metrics.action_gap)
-                        .text_size(metrics.title_size)
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .text_color(intent_presentation.accent)
-                        .child(intent_presentation.marker),
+                        .rounded(marker_extent / 2.0)
+                        .border(metrics.border_width)
+                        .border_color(intent_presentation.accent)
+                        .bg(intent_presentation.background)
+                        .child(
+                            svg()
+                                .path(intent_presentation.icon_path)
+                                .size(marker_extent * 0.55)
+                                .text_color(intent_presentation.accent),
+                        ),
                 )
                 .child(
                     div()
                         .flex_1()
                         .min_w_0()
-                        .p(metrics.action_gap)
                         .child(
                             div()
                                 .debug_selector(|| "modal-alert-message".to_owned())
@@ -616,7 +623,7 @@ fn render_body(
                         .when_some(detail.clone(), |content, detail| {
                             content.child(
                                 div()
-                                    .mt(metrics.action_gap)
+                                    .mt(metrics.action_gap / 2.0)
                                     .text_size(metrics.detail_size)
                                     .text_color(paint.secondary_text)
                                     .whitespace_normal()
@@ -893,10 +900,22 @@ fn render_alert_suppression(
     let keyboard_focus = focus.clone();
     let focus_anchor = focus_anchors.register(&focus);
     let scroll_anchor = focus_anchor.scroll_anchor();
-    div()
+    let checkbox_icon = if selected {
+        CHECKBOX_CHECKED_ICON
+    } else {
+        CHECKBOX_UNCHECKED_ICON
+    };
+    let checkbox_color = if selected {
+        paint.progress_fill
+    } else {
+        paint.secondary_text
+    };
+    let control = div()
         .id(("modal-suppression", presentation.value()))
         .debug_selector(|| "modal-alert-suppression".to_owned())
         .relative()
+        .max_w(relative(1.0))
+        .min_w_0()
         .track_focus(&focus)
         .anchor_scroll(Some(scroll_anchor))
         .flex()
@@ -906,11 +925,9 @@ fn render_alert_suppression(
         .py(metrics.action_gap / 2.0)
         .rounded(metrics.corner_radius)
         .border(metrics.border_width)
-        .border_color(if focused {
-            paint.progress_fill
-        } else {
-            paint.border
-        })
+        .border_color(paint.surface)
+        .bg(paint.surface)
+        .text_size(metrics.body_size)
         .cursor_default()
         .block_mouse_except_scroll()
         .on_key_down(move |event: &KeyDownEvent, window, cx| {
@@ -938,22 +955,32 @@ fn render_alert_suppression(
             window.prevent_default();
             cx.stop_propagation();
         })
-        .child(if selected { "☑" } else { "☐" })
+        .child(
+            svg()
+                .path(checkbox_icon)
+                .size(metrics.body_size)
+                .flex_shrink_0()
+                .text_color(checkbox_color),
+        )
         .child(label)
         .when(focused, |control| {
             control.child(
                 div()
                     .debug_selector(|| "modal-alert-suppression-keyboard-focus".to_owned())
                     .absolute()
-                    .inset(metrics.border_width * 2.0)
-                    .rounded((metrics.corner_radius - metrics.border_width * 2.0).max(px(0.0)))
+                    .top(-metrics.border_width * 3.0)
+                    .right(-metrics.border_width * 3.0)
+                    .bottom(-metrics.border_width * 3.0)
+                    .left(-metrics.border_width * 3.0)
+                    .rounded(metrics.corner_radius + metrics.border_width * 2.0)
                     .border(metrics.border_width)
                     .border_color(paint.progress_fill),
             )
         })
         .child(pointer_tracker)
-        .child(focus_anchor.bounds_tracker(metrics.border_width))
-        .into_any_element()
+        .child(focus_anchor.bounds_tracker(metrics.border_width));
+
+    div().flex().min_w_0().child(control).into_any_element()
 }
 
 struct ModalSuppressionState {
@@ -1238,15 +1265,18 @@ fn render_footer(
             button_press_owner.clone(),
             axis == ActionAxis::Vertical,
             policy.default_action_presentation(action),
-            metrics,
-            paint,
         ));
     }
     let has_help = !help.is_empty();
     let mut help_actions = div()
         .flex()
         .when(axis == ActionAxis::Horizontal, |actions| {
-            actions.flex_row().items_center()
+            actions
+                .flex_row()
+                .when(direction == TextDirection::RightToLeft, |actions| {
+                    actions.flex_row_reverse()
+                })
+                .items_center()
         })
         .when(axis == ActionAxis::Vertical, |actions| actions.flex_col())
         .gap(metrics.action_gap)
@@ -1264,8 +1294,6 @@ fn render_footer(
             button_press_owner.clone(),
             axis == ActionAxis::Vertical,
             policy.default_action_presentation(action),
-            metrics,
-            paint,
         ));
     }
 
@@ -1321,13 +1349,13 @@ fn render_action(
     button_press_owner: ModalPressOwner,
     full_width: bool,
     default_presentation: DefaultActionPresentation,
-    metrics: ModalMetrics,
-    paint: ModalPaint,
 ) -> AnyElement {
     let source_owner = owner;
     let variant = if action.intent == ModalActionIntent::Destructive {
         ButtonVariant::Destructive
-    } else if action.emphasis == ModalActionEmphasis::Prominent {
+    } else if default_presentation == DefaultActionPresentation::Emphasized
+        || action.emphasis == ModalActionEmphasis::Prominent
+    {
         ButtonVariant::Primary
     } else if action.role == ModalActionRole::Help {
         ButtonVariant::Link
@@ -1351,6 +1379,7 @@ fn render_action(
         .full_width(full_width)
         .multiline(full_width)
         .disabled(!action.enabled)
+        .modal_borderless()
         .modal_press_owner(button_press_owner)
         .debug_selector(selector)
         .on_activate(move |activation, _, cx| {
@@ -1366,21 +1395,13 @@ fn render_action(
     let button = button.into_any_element();
     match default_presentation {
         DefaultActionPresentation::None => button,
-        DefaultActionPresentation::Ring => {
-            let selector = format!("modal-action-default-ring-{}", action.debug_identity);
+        DefaultActionPresentation::Emphasized => {
+            let selector = format!("modal-action-default-emphasis-{}", action.debug_identity);
             div()
                 .debug_selector(move || selector.clone())
                 .relative()
-                .when(full_width, |ring| ring.w_full())
+                .when(full_width, |emphasis| emphasis.w_full())
                 .child(button)
-                .child(
-                    div()
-                        .absolute()
-                        .inset_0()
-                        .rounded(metrics.corner_radius)
-                        .border(metrics.border_width)
-                        .border_color(paint.default_ring),
-                )
                 .into_any_element()
         }
     }
@@ -1630,10 +1651,10 @@ mod tests {
         Alert, AlertOutcome, AlertSuppression, ButtonMetrics, ButtonPaint, ButtonSizes,
         ButtonTheme, ButtonVariantStyle, ButtonVariants, DeterminateProgress, Dialog,
         DialogCloseDecision, DialogInitialFocus, DialogOutcome, DialogPendingCompletion,
-        MAX_PROGRESS_STATUS_CHARACTERS, Menu, MenuEntry, MenuMetrics, MenuPaint, MenuSize,
-        MenuSizes, MenuTheme, ModalAction, ModalActionIntent, ModalCloseReason,
-        ModalDismissalError, ModalId, ModalLifecycleEvent, ModalTerminalOutcomeError,
-        ModalUpdateError, ProgressCancelDecision, ProgressCancellation,
+        MAX_PROGRESS_STATUS_CHARACTERS, Menu, MenuCloseReason, MenuEntry, MenuLifecycleEvent,
+        MenuMetrics, MenuPaint, MenuSize, MenuSizes, MenuTheme, ModalAction, ModalActionIntent,
+        ModalCloseReason, ModalDismissalError, ModalId, ModalLifecycleEvent,
+        ModalTerminalOutcomeError, ModalUpdateError, ProgressCancelDecision, ProgressCancellation,
         ProgressCancellationCompletion, ProgressDialog, ProgressDialogOutcome,
         ProgressDialogUpdate, ProgressState, TextInput, TextInputEscapeBehavior,
         TextInputKeybindingProfile, TextInputMetrics, TextInputPaint, TextInputReturnBehavior,
@@ -1766,7 +1787,6 @@ mod tests {
                 rgba(0x505058ff),
                 rgba(0x404048ff),
                 rgba(0x55aaffff),
-                rgba(0x66aaffff),
                 rgba(0x5599ffff),
                 rgba(0x5599ff22),
                 rgba(0xffbb55ff),
@@ -1788,7 +1808,6 @@ mod tests {
                 rgba(0xb0b0b8ff),
                 rgba(0x505058ff),
                 rgba(0x404048ff),
-                rgba(0x606068ff),
                 rgba(0x606068ff),
                 rgba(0x5599ffff),
                 rgba(0x5599ff22),
@@ -2031,6 +2050,58 @@ mod tests {
     }
 
     impl Render for ActionGeometryFixture {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            ModalLayer::new(div().size_full())
+        }
+    }
+
+    struct CompactWarningFixture {
+        presentation: Option<super::super::ModalPresentationHandle>,
+    }
+
+    impl CompactWarningFixture {
+        fn present(&mut self, window: &Window, cx: &mut Context<Self>) {
+            self.presentation = Some(
+                Alert::new(
+                    ModalId::new("compact-warning"),
+                    "Warning Alert preview",
+                    "Replace Existing Settings?",
+                    "The existing workspace settings will be replaced.",
+                    vec![
+                        ModalAction::new(
+                            "replace",
+                            "Replace",
+                            ModalActionRole::Affirmative,
+                            "compact-warning-replace",
+                        )
+                        .default_action(true),
+                        ModalAction::new(
+                            "cancel",
+                            "Cancel",
+                            ModalActionRole::Cancel,
+                            "compact-warning-cancel",
+                        ),
+                    ],
+                )
+                .intent(super::super::AlertIntent::Warning)
+                .detail("You can safely cancel this preview. No settings are changed.")
+                .suppression(AlertSuppression::new(
+                    "Do not show this warning again",
+                    false,
+                ))
+                .help_action(ModalAction::new(
+                    "help",
+                    "Help",
+                    ModalActionRole::Help,
+                    "compact-warning-help",
+                ))
+                .present(window, cx, |_, _| {})
+                .expect("compact warning Alert should present"),
+            );
+        }
+    }
+
+    impl Render for CompactWarningFixture {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
             ModalLayer::new(div().size_full())
         }
@@ -2323,7 +2394,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn standard_default_action_receives_macos_ring_without_changing_standard_emphasis(
+    fn standard_default_action_receives_macos_emphasis_without_mutating_semantics(
         cx: &mut TestAppContext,
     ) {
         let window = open_action_geometry_window(
@@ -2358,21 +2429,21 @@ mod tests {
         let default = cx
             .debug_bounds("modal-action-standard-default")
             .expect("standard default should render");
-        let ring = cx
-            .debug_bounds("modal-action-default-ring-standard-default")
-            .expect("macOS default ring should render");
+        let emphasis = cx
+            .debug_bounds("modal-action-default-emphasis-standard-default")
+            .expect("macOS default emphasis should render");
 
         assert!(
-            bounds_contains(ring, default)
+            bounds_contains(emphasis, default)
                 && cx
-                    .debug_bounds("modal-action-default-ring-standard-secondary")
+                    .debug_bounds("modal-action-default-emphasis-standard-secondary")
                     .is_none(),
-            "standard default ring {ring:?} did not distinguish default {default:?}"
+            "standard default emphasis {emphasis:?} did not distinguish default {default:?}"
         );
     }
 
     #[gpui::test]
-    fn focus_geometry_remains_visible_when_focus_normal_and_default_colors_match(
+    fn modal_keyboard_focus_ring_remains_distinct_from_filled_default_emphasis(
         cx: &mut TestAppContext,
     ) {
         install_test_catalogs(cx);
@@ -2426,9 +2497,9 @@ mod tests {
         let action_focus = cx
             .debug_bounds("modal-action-equal-focus-save-keyboard-focus")
             .expect("focused action should add inner geometry");
-        let default_ring = cx
-            .debug_bounds("modal-action-default-ring-equal-focus-save")
-            .expect("default designation should remain independently rendered");
+        let default_emphasis = cx
+            .debug_bounds("modal-action-default-emphasis-equal-focus-save")
+            .expect("default designation should remain independently represented");
         let suppression = cx
             .debug_bounds("modal-alert-suppression")
             .expect("suppression should render");
@@ -2442,15 +2513,15 @@ mod tests {
             .debug_bounds("modal-alert-suppression-keyboard-focus")
             .expect("focused suppression should add inner geometry");
 
-        let retained_default_ring = cx.debug_bounds("modal-action-default-ring-equal-focus-save");
+        let retained_default_emphasis =
+            cx.debug_bounds("modal-action-default-emphasis-equal-focus-save");
         assert!(
             suppression_was_unfocused
-                && bounds_contains(action, action_focus)
-                && action != action_focus
-                && bounds_contains(suppression, suppression_focus)
+                && bounds_contains(action_focus, action)
+                && bounds_contains(suppression_focus, suppression)
                 && suppression != suppression_focus
-                && retained_default_ring == Some(default_ring),
-            "suppression_was_unfocused={suppression_was_unfocused}, action={action:?}, action_focus={action_focus:?}, suppression={suppression:?}, suppression_focus={suppression_focus:?}, default_ring={default_ring:?}, retained_default_ring={retained_default_ring:?}"
+                && retained_default_emphasis == Some(default_emphasis),
+            "suppression_was_unfocused={suppression_was_unfocused}, action={action:?}, action_focus={action_focus:?}, suppression={suppression:?}, suppression_focus={suppression_focus:?}, default_emphasis={default_emphasis:?}, retained_default_emphasis={retained_default_emphasis:?}"
         );
     }
 
@@ -2491,6 +2562,66 @@ mod tests {
     }
 
     #[gpui::test]
+    fn compact_warning_keeps_content_and_safe_actions_visible_together(cx: &mut TestAppContext) {
+        install_test_catalogs(cx);
+        cx.set_global(test_modal_theme(ModalMetrics::new(
+            px(360.0),
+            px(480.0),
+            px(640.0),
+        )));
+        let window = cx.update(|cx| {
+            cx.open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(Bounds::new(
+                        point(px(0.0), px(0.0)),
+                        size(px(800.0), px(700.0)),
+                    ))),
+                    ..WindowOptions::default()
+                },
+                |_, cx| cx.new(|_| CompactWarningFixture { presentation: None }),
+            )
+            .unwrap_or_else(|error| panic!("compact warning window failed: {error}"))
+        });
+        let root = window.root(cx).expect("compact warning root should exist");
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.update(|window, cx| root.update(cx, |root, cx| root.present(window, cx)));
+        cx.run_until_parked();
+
+        let body = cx
+            .debug_bounds("modal-body-viewport")
+            .expect("warning body should render");
+        let footer = cx
+            .debug_bounds("modal-footer-1")
+            .expect("warning footer should render");
+        let message = cx
+            .debug_bounds("modal-alert-message")
+            .expect("warning message should render");
+        let suppression = cx
+            .debug_bounds("modal-alert-suppression")
+            .expect("warning suppression should render");
+        let help = cx
+            .debug_bounds("modal-action-compact-warning-help")
+            .expect("warning Help should render");
+        let cancel = cx
+            .debug_bounds("modal-action-compact-warning-cancel")
+            .expect("warning Cancel should render");
+        let replace = cx
+            .debug_bounds("modal-action-compact-warning-replace")
+            .expect("warning Replace should render");
+
+        assert!(
+            bounds_contains(body, message)
+                && bounds_contains(body, suppression)
+                && bounds_contains(footer, help)
+                && bounds_contains(footer, cancel)
+                && bounds_contains(footer, replace)
+                && help.left() < cancel.left()
+                && cancel.left() < replace.left(),
+            "body={body:?}, message={message:?}, suppression={suppression:?}, footer={footer:?}, help={help:?}, cancel={cancel:?}, replace={replace:?}"
+        );
+    }
+
+    #[gpui::test]
     fn critical_alert_renders_bounded_semantic_treatment_without_accessory(
         cx: &mut TestAppContext,
     ) {
@@ -2518,8 +2649,8 @@ mod tests {
         let critical = alert_intent_presentation(super::super::AlertIntent::Critical, paint);
 
         assert!(
-            informational.marker != warning.marker
-                && warning.marker != critical.marker
+            informational.icon_path != warning.icon_path
+                && warning.icon_path != critical.icon_path
                 && informational.accent != warning.accent
                 && warning.accent != critical.accent
                 && informational.background != warning.background
@@ -2673,6 +2804,76 @@ mod tests {
         assert!(
             save.left() < cancel.left() && cancel.right() < help.left(),
             "RTL bounds were save={save:?}, cancel={cancel:?}, help={help:?}"
+        );
+    }
+
+    #[gpui::test]
+    fn right_to_left_horizontal_dialog_mirrors_multiple_help_actions(cx: &mut TestAppContext) {
+        install_test_catalogs(cx);
+        cx.set_global(ModalDesktopPolicy::mac_os().with_text_direction(TextDirection::RightToLeft));
+        let window = cx.update(|cx| {
+            cx.open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(Bounds::new(
+                        point(px(0.0), px(0.0)),
+                        size(px(800.0), px(700.0)),
+                    ))),
+                    ..WindowOptions::default()
+                },
+                |_, cx| {
+                    let body = cx.new(|_| DialogGeometryBody { tall: false });
+                    cx.new(|_| DialogGeometryFixture {
+                        body,
+                        title: "RTL Help Actions".into(),
+                        description: "Every horizontal action group mirrors in RTL.".into(),
+                        actions: vec![
+                            ModalAction::new(
+                                "save",
+                                "Save",
+                                ModalActionRole::Affirmative,
+                                "rtl-help-save",
+                            )
+                            .default_action(true),
+                            ModalAction::new(
+                                "cancel",
+                                "Cancel",
+                                ModalActionRole::Cancel,
+                                "rtl-help-cancel",
+                            ),
+                            ModalAction::new(
+                                "help-primary",
+                                "Help",
+                                ModalActionRole::Help,
+                                "rtl-help-primary",
+                            ),
+                            ModalAction::new(
+                                "help-secondary",
+                                "More Help",
+                                ModalActionRole::Help,
+                                "rtl-help-secondary",
+                            ),
+                        ],
+                        size: DialogSize::Regular,
+                        presentation: None,
+                    })
+                },
+            )
+            .expect("RTL Dialog window should open")
+        });
+        let root = window.root(cx).expect("RTL Dialog root should exist");
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.update(|window, cx| root.update(cx, |root, cx| root.present(window, cx)));
+        cx.run_until_parked();
+        let primary = cx
+            .debug_bounds("modal-action-rtl-help-primary")
+            .expect("primary Help action should render");
+        let secondary = cx
+            .debug_bounds("modal-action-rtl-help-secondary")
+            .expect("secondary Help action should render");
+
+        assert!(
+            secondary.right() < primary.left(),
+            "RTL Help actions did not mirror: primary={primary:?}, secondary={secondary:?}"
         );
     }
 
@@ -6912,6 +7113,14 @@ mod tests {
         );
     }
 
+    struct OtherOperatingSystemWindowRoot;
+
+    impl Render for OtherOperatingSystemWindowRoot {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div()
+        }
+    }
+
     #[gpui::test]
     fn dialog_programmatic_completion_rejects_another_operating_system_window(
         cx: &mut TestAppContext,
@@ -6923,8 +7132,10 @@ mod tests {
             .read_with(cx, |root, _| root.completion.clone())
             .expect("completion should be retained");
         let other_window = cx.update(|_, cx| {
-            cx.open_window(WindowOptions::default(), |_, cx| cx.new(|_| DialogMenuBody))
-                .expect("second Operating-System Window should open")
+            cx.open_window(WindowOptions::default(), |_, cx| {
+                cx.new(|_| OtherOperatingSystemWindowRoot)
+            })
+            .expect("second Operating-System Window should open")
         });
 
         let result = cx.update(|_, cx| {
@@ -7999,13 +8210,13 @@ mod tests {
             actual,
             vec![
                 AlertFocusTarget::Save,
-                AlertFocusTarget::Cancel,
                 AlertFocusTarget::Suppression,
                 AlertFocusTarget::Help,
+                AlertFocusTarget::Cancel,
                 AlertFocusTarget::Save,
+                AlertFocusTarget::Cancel,
                 AlertFocusTarget::Help,
                 AlertFocusTarget::Suppression,
-                AlertFocusTarget::Cancel,
                 AlertFocusTarget::Save,
             ]
         );
@@ -8047,13 +8258,13 @@ mod tests {
             actual,
             vec![
                 AlertFocusTarget::Save,
-                AlertFocusTarget::Cancel,
                 AlertFocusTarget::Suppression,
                 AlertFocusTarget::Help,
+                AlertFocusTarget::Cancel,
                 AlertFocusTarget::Save,
+                AlertFocusTarget::Cancel,
                 AlertFocusTarget::Help,
                 AlertFocusTarget::Suppression,
-                AlertFocusTarget::Cancel,
                 AlertFocusTarget::Save,
             ]
         );
@@ -8370,10 +8581,13 @@ mod tests {
         );
     }
 
-    struct DialogMenuBody;
+    struct OwnedDialogMenuBody {
+        lifecycle_owner: Rc<RefCell<Option<WeakEntity<DialogMenuFixture>>>>,
+    }
 
-    impl Render for DialogMenuBody {
+    impl Render for OwnedDialogMenuBody {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let lifecycle_owner = self.lifecycle_owner.clone();
             Menu::new(
                 "dialog-owned-menu",
                 "Dialog options",
@@ -8382,14 +8596,22 @@ mod tests {
             .size(MenuSize::Small)
             .debug_selector("dialog-owned-menu-trigger")
             .on_activate(|_, _, _| {})
+            .on_lifecycle(move |event, cx| {
+                if matches!(event, MenuLifecycleEvent::Closed(MenuCloseReason::Replaced))
+                    && let Some(owner) = lifecycle_owner.borrow().clone()
+                {
+                    let _ = owner.update(cx, |fixture, _| fixture.menu_closed += 1);
+                }
+            })
         }
     }
 
     struct DialogMenuFixture {
-        body: Entity<DialogMenuBody>,
+        body: Entity<OwnedDialogMenuBody>,
         presentation: Option<super::super::DialogCompletion>,
         allow_actions: bool,
         outcome: Rc<RefCell<Option<DialogOutcome<&'static str>>>>,
+        menu_closed: usize,
     }
 
     impl DialogMenuFixture {
@@ -8459,12 +8681,18 @@ mod tests {
         cx: &mut TestAppContext,
     ) -> (Entity<DialogMenuFixture>, &mut VisualTestContext) {
         install_test_catalogs(cx);
-        let (root, cx) = cx.add_window_view(|_, cx| DialogMenuFixture {
-            body: cx.new(|_| DialogMenuBody),
+        let lifecycle_owner = Rc::new(RefCell::new(None));
+        let body_lifecycle_owner = lifecycle_owner.clone();
+        let (root, cx) = cx.add_window_view(move |_, cx| DialogMenuFixture {
+            body: cx.new(|_| OwnedDialogMenuBody {
+                lifecycle_owner: body_lifecycle_owner,
+            }),
             presentation: None,
             allow_actions: false,
             outcome: Rc::new(RefCell::new(None)),
+            menu_closed: 0,
         });
+        *lifecycle_owner.borrow_mut() = Some(root.downgrade());
         cx.update(|window, _| window.activate_window());
         cx.run_until_parked();
         (root, cx)
@@ -8544,6 +8772,36 @@ mod tests {
             root.read_with(cx, |root, _| root.outcome.borrow().clone()),
             Some(DialogOutcome::ProgrammaticallyCompleted)
         );
+    }
+
+    #[gpui::test]
+    fn programmatic_dialog_completion_defers_owned_menu_lifecycle_beyond_caller_update(
+        cx: &mut TestAppContext,
+    ) {
+        let (root, cx) = dialog_menu_window(cx);
+        cx.update(|window, cx| root.update(cx, |root, cx| root.present(window, cx)));
+        cx.run_until_parked();
+        let trigger = cx
+            .debug_bounds("dialog-owned-menu-trigger")
+            .expect("dialog menu trigger should render");
+        cx.simulate_click(trigger.center(), Modifiers::default());
+        cx.run_until_parked();
+
+        cx.update(|window, cx| {
+            root.update(cx, |root, cx| {
+                root.presentation
+                    .clone()
+                    .expect("Dialog completion should be retained")
+                    .complete(window, None, cx)
+                    .expect("Dialog should complete programmatically");
+                assert_eq!(root.menu_closed, 0);
+            });
+        });
+        cx.run_until_parked();
+
+        assert_eq!(root.read_with(cx, |root, _| root.menu_closed), 1);
+        assert!(!cx.update(|window, cx| crate::menu::window_menu_is_open(window, cx)));
+        assert!(!cx.update(|window, cx| super::super::window_modal_is_open(window, cx)));
     }
 
     #[gpui::test]
@@ -8733,7 +8991,7 @@ mod tests {
                 action.emphasis,
             ),
             (
-                DefaultActionPresentation::Ring,
+                DefaultActionPresentation::Emphasized,
                 DefaultActionPresentation::None,
                 ModalActionRole::Affirmative,
                 ModalActionIntent::Ordinary,

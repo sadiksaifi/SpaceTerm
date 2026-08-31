@@ -29,7 +29,9 @@ tmux, but SpaceTerm is not a tmux client and has no tmux-style server/client mod
 ## UI direction
 
 - Build the interface directly with GPUI as a compact, Zed-like desktop experience.
-- Use `gpui-symbols` for icons and native macOS menus and system dialogs where appropriate.
+- Every icon is an SF Symbol or SVG, never a font or text glyph. Use `gpui-symbols` for icons in
+  the macOS application and embedded SVG assets in the platform-neutral `spaceterm-ui` crate.
+  Continue to use native macOS menus and system dialogs where appropriate.
 - Keep reusable SpaceTerm controls in the small internal `spaceterm-ui` crate. Application UI
   Modules compose those controls with product behavior and Vague Pro presentation.
 - Use the application-owned Workspace Picker as the primary Open Local Project selection
@@ -177,11 +179,15 @@ The application installs one aggregate Vague Pro modal paint and scaled-metric c
 control-theme catalog and separately installs the immutable macOS logical desktop policy and macOS
 modal keybinding profile. Normal UI initialization resolves AppKit's current application-locale
 layout direction into that bounded policy, and every Operating-System Window modal root consumes the
-installed direction automatically; individual modal call sites do not select direction. That paint consumes a complete canonical backdrop token, maps every Alert
-intent to an internally owned semantic marker and treatment, and supplies the macOS default-action
-ring without changing caller-owned action emphasis, role, or consequence. Reusable actions and the
-Alert suppression stop add bounded inset keyboard-focus geometry using application-owned paint;
-that current-focus geometry remains distinct from the independently rendered default-action ring.
+installed direction automatically; individual modal call sites do not select direction. That paint
+consumes a complete canonical backdrop token and maps every Alert intent to an internally owned
+semantic marker and treatment. Modal actions never use the reusable Outline variant. The macOS
+policy presents an explicit default through filled primary emphasis without changing caller-owned
+action role, consequence, or semantic emphasis. Modal controls retain exactly one bounded outset
+keyboard-focus ring that appears only on the currently focused control; the control's resting border
+is never repainted as a second focus stroke, and the ring radius expands with its offset to preserve
+concentric corners. This transient focus indication is distinct from a persistent outlined Button
+style. The global Outline variant remains available to non-modal controls.
 Indeterminate progress uses a static repeated-segment treatment rather than a determinate fill or
 motion-only cue. Generic
 Modal initialization installs only portable traversal, Return, and Escape behavior; the explicit

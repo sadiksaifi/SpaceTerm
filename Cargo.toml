@@ -7,10 +7,6 @@ edition = "2024"
 members = ["crates/spaceterm-ui"]
 resolver = "2"
 
-[features]
-default = []
-showcase = []
-
 [dependencies]
 anyhow = "1.0.100"
 async-channel = "2.5.0"

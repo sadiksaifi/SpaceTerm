@@ -3,6 +3,7 @@
 //! The crate owns interaction and editing behavior while the application supplies all product
 //! colors and surrounding chrome from its canonical theme.
 
+mod assets;
 mod button;
 mod command_palette;
 mod menu;
@@ -16,6 +17,7 @@ mod window_drag_region;
 
 use gpui::App;
 
+pub use assets::ControlAssets;
 pub use button::{
     Button, ButtonActivation, ButtonActivationSource, ButtonMetrics, ButtonPaint, ButtonRole,
     ButtonShape, ButtonSize, ButtonSizes, ButtonTheme, ButtonVariant, ButtonVariantStyle,

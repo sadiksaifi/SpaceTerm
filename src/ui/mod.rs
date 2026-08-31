@@ -9,8 +9,6 @@ mod pane_host;
 mod render_lifecycle;
 mod resize_handle_theme;
 mod scrollbar_theme;
-#[cfg(feature = "showcase")]
-mod showcase;
 mod terminal_context_menu;
 mod terminal_element;
 mod terminal_focus;

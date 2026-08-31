@@ -685,7 +685,6 @@ pub struct ModalPaint {
     divider: Rgba,
     progress_track: Rgba,
     progress_fill: Rgba,
-    default_ring: Rgba,
     informational: Rgba,
     informational_background: Rgba,
     warning: Rgba,
@@ -709,7 +708,6 @@ impl ModalPaint {
         divider: Rgba,
         progress_track: Rgba,
         progress_fill: Rgba,
-        default_ring: Rgba,
         informational: Rgba,
         informational_background: Rgba,
         warning: Rgba,
@@ -726,7 +724,6 @@ impl ModalPaint {
             divider,
             progress_track,
             progress_fill,
-            default_ring,
             informational,
             informational_background,
             warning,
@@ -1175,7 +1172,7 @@ mod tests {
         let color = gpui::rgba(0x112233ff);
         let paint = ModalPaint::new(
             color, color, color, color, color, color, color, color, color, color, color, color,
-            color, color, color,
+            color, color,
         );
         let theme = ModalTheme::new(paint, ModalMetrics::new(px(360.0), px(480.0), px(640.0)));
 

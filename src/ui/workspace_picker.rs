@@ -322,10 +322,7 @@ impl WorkspacePicker {
         self.palette.update(cx, |palette, cx| {
             palette.set_query_editable(true, cx);
             palette.set_dismissible(true, cx);
-            if palette.open(window, cx) {
-                // Every open starts at HOME; the picker retains no recents or last location.
-                palette.set_query(HOME_DISPLAY, cx);
-            }
+            palette.open(window, cx);
         });
         true
     }
@@ -448,6 +445,8 @@ impl WorkspacePicker {
         match event {
             CommandPaletteEvent::Lifecycle(CommandPaletteLifecycleEvent::Opened) => {
                 self.open = true;
+                self.palette
+                    .update(cx, |palette, cx| palette.set_query(HOME_DISPLAY, cx));
                 self.publish(cx);
             }
             CommandPaletteEvent::Lifecycle(CommandPaletteLifecycleEvent::Closed(reason)) => {
@@ -1111,11 +1110,36 @@ mod tests {
 
     struct WorkspacePickerHarness {
         picker: Entity<WorkspacePicker>,
+        modal: Option<spaceterm_ui::ModalPresentationHandle>,
+    }
+
+    impl WorkspacePickerHarness {
+        fn present_modal(&mut self, window: &Window, cx: &mut Context<Self>) {
+            self.modal = Some(
+                spaceterm_ui::Alert::new(
+                    spaceterm_ui::ModalId::new("workspace-picker-test-modal"),
+                    "Blocking alert",
+                    "Blocking Alert",
+                    "The Workspace Picker request should wait behind this modal.",
+                    vec![
+                        spaceterm_ui::ModalAction::new(
+                            "ok",
+                            "OK",
+                            spaceterm_ui::ModalActionRole::Affirmative,
+                            "workspace-picker-test-ok",
+                        )
+                        .default_action(true),
+                    ],
+                )
+                .present(window, cx, |_, _| {})
+                .expect("test modal should present"),
+            );
+        }
     }
 
     impl Render for WorkspacePickerHarness {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-            div().size_full().child(self.picker.clone())
+            spaceterm_ui::ModalLayer::new(div().size_full().child(self.picker.clone()))
         }
     }
 
@@ -1134,7 +1158,10 @@ mod tests {
             let picker = cx.new(|cx| {
                 WorkspacePicker::new(home(), injected_filesystem, system_settings, window, cx)
             });
-            WorkspacePickerHarness { picker }
+            WorkspacePickerHarness {
+                picker,
+                modal: None,
+            }
         });
         let picker = harness.read_with(cx, |harness, _| harness.picker.clone());
         cx.update(|window, cx| {
@@ -1145,6 +1172,46 @@ mod tests {
         });
         cx.run_until_parked();
         (picker, cx)
+    }
+
+    #[gpui::test]
+    fn first_picker_request_deferred_by_modal_still_starts_at_home(cx: &mut TestAppContext) {
+        let filesystem = Arc::new(ScriptedWorkspacePickerFilesystem::new([home()], []));
+        cx.update(crate::ui::init);
+        let injected_filesystem: Arc<dyn WorkspacePickerFilesystem + Send + Sync> = filesystem;
+        let system_settings: Rc<dyn SystemSettingsOpener> = Rc::new(TestSystemSettingsOpener);
+        let (harness, cx) = cx.add_window_view(move |window, cx| {
+            let picker = cx.new(|cx| {
+                WorkspacePicker::new(home(), injected_filesystem, system_settings, window, cx)
+            });
+            WorkspacePickerHarness {
+                picker,
+                modal: None,
+            }
+        });
+        let picker = harness.read_with(cx, |harness, _| harness.picker.clone());
+        cx.update(|window, cx| {
+            window.activate_window();
+            harness.update(cx, |harness, cx| harness.present_modal(window, cx));
+        });
+        cx.run_until_parked();
+
+        cx.update(|window, cx| {
+            picker.update(cx, |picker, cx| {
+                assert!(picker.open(window, cx));
+            });
+        });
+        cx.run_until_parked();
+        let modal = harness
+            .read_with(cx, |harness, _| harness.modal.clone())
+            .expect("modal handle should be retained");
+        cx.update(|window, cx| modal.dismiss(window, cx).expect("modal should dismiss"));
+        cx.run_until_parked();
+
+        assert_eq!(path_bar(&picker, cx), HOME_DISPLAY);
+        assert!(picker.read_with(cx, |picker, cx| {
+            picker.is_open() && picker.palette.read(cx).is_open()
+        }));
     }
 
     fn set_input(picker: &Entity<WorkspacePicker>, value: &str, cx: &mut VisualTestContext) {

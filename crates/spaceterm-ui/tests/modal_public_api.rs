@@ -436,7 +436,7 @@ fn public_modal_support_contract_is_exported_without_private_machinery() {
     let theme = ModalTheme::new(
         ModalPaint::new(
             color, color, color, color, color, color, color, color, color, color, color, color,
-            color, color, color,
+            color, color,
         ),
         ModalMetrics::new(px(360.0), px(480.0), px(640.0)),
     );

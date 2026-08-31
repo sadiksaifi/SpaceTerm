@@ -1542,7 +1542,7 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
             },
         );
         cx.observe_window_activation(window, |palette, window, cx| {
-            if palette.open
+            if (palette.open || palette.pending_open.is_some())
                 && let Some(generation) = palette.suspended_by_modal
                 && window.is_window_active()
                 && !crate::modal::window_modal_is_open(window, cx)
@@ -5300,7 +5300,6 @@ mod tests {
                         rgba(0x505058ff),
                         rgba(0x404048ff),
                         rgba(0x55aaffff),
-                        rgba(0x66aaffff),
                         rgba(0x5599ffff),
                         rgba(0x5599ff22),
                         rgba(0xffbb55ff),
@@ -5897,6 +5896,41 @@ mod tests {
 
         assert!(palette.read_with(cx, |palette, _| {
             palette.open && palette.suspended_by_modal.is_none()
+        }));
+        assert!(cx.update(|window, cx| palette.read(cx).editor_is_focused(window, cx)));
+    }
+
+    #[gpui::test]
+    fn first_deferred_palette_request_resumes_after_window_reactivation(cx: &mut TestAppContext) {
+        let (root, palette, cx) = modal_palette_window(cx);
+        cx.update(|window, cx| root.update(cx, |root, cx| root.present_alert(window, cx)));
+        cx.run_until_parked();
+        let modal = root
+            .read_with(cx, |root, _| root.modal.clone())
+            .expect("modal handle should be retained");
+
+        cx.update(|window, cx| {
+            palette.update(cx, |palette, cx| {
+                assert!(!palette.open(window, cx));
+            });
+        });
+        cx.run_until_parked();
+        assert!(palette.read_with(cx, |palette, _| {
+            !palette.open && palette.pending_open.is_some() && palette.suspended_by_modal.is_some()
+        }));
+
+        cx.deactivate_window();
+        cx.update(|window, cx| modal.dismiss(window, cx).expect("modal should close"));
+        cx.run_until_parked();
+        assert!(palette.read_with(cx, |palette, _| {
+            !palette.open && palette.pending_open.is_some() && palette.suspended_by_modal.is_some()
+        }));
+
+        cx.update(|window, _| window.activate_window());
+        cx.run_until_parked();
+
+        assert!(palette.read_with(cx, |palette, _| {
+            palette.open && palette.pending_open.is_none() && palette.suspended_by_modal.is_none()
         }));
         assert!(cx.update(|window, cx| palette.read(cx).editor_is_focused(window, cx)));
     }

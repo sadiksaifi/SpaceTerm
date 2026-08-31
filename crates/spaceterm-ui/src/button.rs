@@ -683,6 +683,11 @@ impl Button {
         self
     }
 
+    pub(crate) fn modal_borderless(mut self) -> Self {
+        self.core.modal_borderless = true;
+        self
+    }
+
     pub(crate) fn modal_press_owner(mut self, owner: ModalPressOwner) -> Self {
         self.core.modal_press_owner = Some(owner);
         self
@@ -938,6 +943,7 @@ struct ButtonCore {
     tooltip: Option<Tooltip>,
     on_activate: Option<ActivationHandler>,
     modal_focus_handle: Option<FocusHandle>,
+    modal_borderless: bool,
     modal_press_owner: Option<ModalPressOwner>,
 }
 
@@ -956,6 +962,7 @@ impl ButtonCore {
             tooltip: None,
             on_activate: None,
             modal_focus_handle: None,
+            modal_borderless: false,
             modal_press_owner: None,
         }
     }
@@ -1003,8 +1010,11 @@ impl ButtonCore {
         let scroll_anchor = focus_anchor.as_ref().map(ModalFocusAnchor::scroll_anchor);
         let focused = focus_handle.is_focused(window);
         let paint = resolve_paint(style, enabled, pressed, hovered);
-        let border = if focused {
-            style.focus_border
+        let focus_ring = focused.then_some(style.focus_border);
+        let focus_ring_offset = style.border_width * 2.0;
+        let focus_ring_position = focus_ring_offset + style.border_width;
+        let border_color = if self.modal_borderless {
+            paint.background
         } else {
             paint.border
         };
@@ -1120,7 +1130,7 @@ impl ButtonCore {
             .when(layout.full_width, |button| button.w_full())
             .rounded(style.corner_radius)
             .border(style.border_width)
-            .border_color(border)
+            .border_color(border_color)
             .bg(paint.background)
             .text_color(paint.foreground)
             .text_size(style.font_size)
@@ -1158,15 +1168,18 @@ impl ButtonCore {
                 cx.stop_propagation();
             })
             .child(content)
-            .when(focused, |button| {
+            .when_some(focus_ring, move |button, ring_color| {
                 button.child(
                     div()
                         .debug_selector(move || focus_selector.clone())
                         .absolute()
-                        .inset(style.border_width * 2.0)
-                        .rounded((style.corner_radius - style.border_width * 2.0).max(px(0.0)))
+                        .top(-focus_ring_position)
+                        .right(-focus_ring_position)
+                        .bottom(-focus_ring_position)
+                        .left(-focus_ring_position)
+                        .rounded(style.corner_radius + focus_ring_offset)
                         .border(style.border_width)
-                        .border_color(style.focus_border),
+                        .border_color(ring_color),
                 )
             })
             .child(pointer_tracker)
@@ -1711,7 +1724,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn keyboard_focus_adds_bounded_geometry_when_focus_and_normal_colors_match(
+    fn keyboard_focus_adds_one_outset_ring_when_focus_and_normal_colors_match(
         cx: &mut TestAppContext,
     ) {
         let (root, _, _, cx) = button_window(cx, false, true);
@@ -1730,17 +1743,18 @@ mod tests {
             .expect("button should render");
         let focus = cx
             .debug_bounds("test-button-keyboard-focus")
-            .expect("focused button should add an inner focus outline");
+            .expect("focused button should strengthen its single focus outline");
         let other_focus = root.read_with(cx, |root, _| root.other_focus.clone());
         cx.update(|window, _| other_focus.focus(window));
         cx.run_until_parked();
 
         assert!(
-            focus.left() > button.left()
-                && focus.top() > button.top()
-                && focus.right() < button.right()
-                && focus.bottom() < button.bottom()
-                && cx.debug_bounds("test-button-keyboard-focus").is_none()
+            focus.left() == button.left() - px(2.0)
+                && focus.top() == button.top() - px(2.0)
+                && focus.right() == button.right() + px(2.0)
+                && focus.bottom() == button.bottom() + px(2.0)
+                && cx.debug_bounds("test-button-keyboard-focus").is_none(),
+            "button={button:?}, focus={focus:?}"
         );
     }
 

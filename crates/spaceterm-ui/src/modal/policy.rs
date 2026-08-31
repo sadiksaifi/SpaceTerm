@@ -75,7 +75,7 @@ enum DesktopShape {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum DefaultActionPresentation {
     None,
-    Ring,
+    Emphasized,
 }
 
 pub(super) trait ArrangementActionFacts {
@@ -327,7 +327,7 @@ impl ModalDesktopPolicy {
         action: &super::core::ModalRenderAction,
     ) -> DefaultActionPresentation {
         if action.is_default && self.shape == DesktopShape::MacOs {
-            DefaultActionPresentation::Ring
+            DefaultActionPresentation::Emphasized
         } else {
             DefaultActionPresentation::None
         }
@@ -588,11 +588,12 @@ pub(super) const fn physical_edge(edge: LogicalEdge, direction: TextDirection) -
 }
 
 pub(super) fn select_action_axis(
+    surface_width: Pixels,
     available_width: Pixels,
     button_widths: &[Pixels],
     metrics: ModalMetrics,
 ) -> ActionAxis {
-    if available_width < metrics.horizontal_action_threshold() {
+    if surface_width < metrics.horizontal_action_threshold() {
         return ActionAxis::Vertical;
     }
     let buttons_width = button_widths
@@ -1241,7 +1242,22 @@ mod tests {
         let metrics = ModalMetrics::new(px(360.0), px(480.0), px(640.0));
 
         assert_eq!(
-            select_action_axis(px(400.0), &[px(90.0), px(100.0)], metrics),
+            select_action_axis(px(400.0), px(368.0), &[px(90.0), px(100.0)], metrics,),
+            ActionAxis::Horizontal
+        );
+    }
+
+    #[test]
+    fn compact_surface_stays_horizontal_when_labels_fit_its_padded_content() {
+        let metrics = ModalMetrics::new(px(360.0), px(480.0), px(640.0));
+
+        assert_eq!(
+            select_action_axis(
+                px(360.0),
+                px(328.0),
+                &[px(72.0), px(72.0), px(72.0)],
+                metrics,
+            ),
             ActionAxis::Horizontal
         );
     }
@@ -1251,7 +1267,7 @@ mod tests {
         let metrics = ModalMetrics::new(px(360.0), px(480.0), px(640.0));
 
         assert_eq!(
-            select_action_axis(px(400.0), &[px(220.0), px(220.0)], metrics),
+            select_action_axis(px(400.0), px(368.0), &[px(220.0), px(220.0)], metrics,),
             ActionAxis::Vertical
         );
     }
@@ -1261,7 +1277,7 @@ mod tests {
         let metrics = ModalMetrics::new(px(360.0), px(480.0), px(640.0));
 
         assert_eq!(
-            select_action_axis(px(320.0), &[px(80.0)], metrics),
+            select_action_axis(px(320.0), px(288.0), &[px(80.0)], metrics),
             ActionAxis::Vertical
         );
     }
