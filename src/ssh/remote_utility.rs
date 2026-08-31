@@ -1,17 +1,18 @@
 use std::future::Future;
 use std::io::{self, Read, Write};
+use std::os::unix::process::CommandExt;
 use std::process::{Command, Stdio};
 use std::str;
 use std::sync::Arc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use thiserror::Error;
 
 use super::cancellation::SshCancellationToken;
 use super::command::SshCommandSpec;
 use super::live_connection::LiveConnectionCapability;
-use super::process::ProcessExit;
+use super::process::{ProcessExit, SshProcessEnvironment};
 use crate::domain::RemoteWorkspaceDirectory;
 
 pub(crate) const MAXIMUM_REMOTE_UTILITY_OUTPUT_BYTES: usize = 384 * 1024;
@@ -19,6 +20,7 @@ const MAXIMUM_REMOTE_UTILITY_REQUEST_BYTES: usize = 32 * 1024;
 const MAXIMUM_REMOTE_FIELD_BYTES: usize = 16 * 1024;
 const MAXIMUM_REMOTE_DIRECTORY_NAMES: usize = 1024;
 const PROCESS_POLL_INTERVAL: Duration = Duration::from_millis(10);
+const NATIVE_UTILITY_TIMEOUT: Duration = Duration::from_secs(60);
 const PROTOCOL_HEADER: &str = "SPACETERM-REMOTE/1";
 
 #[derive(Debug)]
@@ -39,6 +41,8 @@ pub(crate) enum RemoteUtilityRunError {
     Cancelled,
     #[error("remote utility output exceeded its safety limit")]
     OutputTooLarge,
+    #[error("remote utility process exceeded its deadline")]
+    TimedOut,
     #[error("remote utility process failed")]
     Io(#[source] io::Error),
 }
@@ -82,8 +86,28 @@ impl PreparedSshRemoteUtilityCommand {
     }
 }
 
-#[derive(Clone, Copy, Default)]
-pub(crate) struct NativeSshRemoteUtilityRunner;
+#[derive(Clone)]
+pub(crate) struct NativeSshRemoteUtilityRunner {
+    environment: SshProcessEnvironment,
+    timeout: Duration,
+}
+
+impl NativeSshRemoteUtilityRunner {
+    pub(crate) const fn new(environment: SshProcessEnvironment) -> Self {
+        Self {
+            environment,
+            timeout: NATIVE_UTILITY_TIMEOUT,
+        }
+    }
+
+    #[cfg(test)]
+    const fn with_timeout(environment: SshProcessEnvironment, timeout: Duration) -> Self {
+        Self {
+            environment,
+            timeout,
+        }
+    }
+}
 
 impl SshRemoteUtilityRunner for NativeSshRemoteUtilityRunner {
     fn run(
@@ -94,7 +118,61 @@ impl SshRemoteUtilityRunner for NativeSshRemoteUtilityRunner {
         cancellation: SshCancellationToken,
     ) -> impl Future<Output = Result<RemoteUtilityProcessOutput, RemoteUtilityRunError>> + Send
     {
-        async move { run_native_command(command, script, maximum_output_bytes, &cancellation) }
+        let environment = self.environment.clone();
+        let timeout = self.timeout;
+        async move {
+            let mut cancel_on_drop = CancelOnDrop::new(cancellation.clone());
+            let (sender, receiver) = async_channel::bounded(1);
+            thread::Builder::new()
+                .name("spaceterm-ssh-utility".to_owned())
+                .spawn(move || {
+                    let result = run_native_command(
+                        command,
+                        script,
+                        maximum_output_bytes,
+                        &cancellation,
+                        &environment,
+                        Instant::now()
+                            .checked_add(timeout)
+                            .unwrap_or_else(Instant::now),
+                    );
+                    let _ = sender.send_blocking(result);
+                })
+                .map_err(RemoteUtilityRunError::Io)?;
+            let result = receiver.recv().await.map_err(|_| {
+                RemoteUtilityRunError::Io(io::Error::other(
+                    "SSH utility worker ended without returning process ownership",
+                ))
+            })?;
+            cancel_on_drop.disarm();
+            result
+        }
+    }
+}
+
+struct CancelOnDrop {
+    cancellation: SshCancellationToken,
+    armed: bool,
+}
+
+impl CancelOnDrop {
+    fn new(cancellation: SshCancellationToken) -> Self {
+        Self {
+            cancellation,
+            armed: true,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for CancelOnDrop {
+    fn drop(&mut self) {
+        if self.armed {
+            self.cancellation.cancel();
+        }
     }
 }
 
@@ -103,25 +181,39 @@ fn run_native_command(
     script: Vec<u8>,
     maximum_output_bytes: usize,
     cancellation: &SshCancellationToken,
+    environment: &SshProcessEnvironment,
+    deadline: Instant,
 ) -> Result<RemoteUtilityProcessOutput, RemoteUtilityRunError> {
     if cancellation.is_cancelled() {
         return Err(RemoteUtilityRunError::Cancelled);
     }
-    let mut child = Command::new(spec.executable())
+    let mut command = Command::new(spec.executable());
+    command
         .args(spec.arguments())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
-        .spawn()
-        .map_err(RemoteUtilityRunError::Io)?;
+        .process_group(0);
+    environment.apply(&mut command);
+    let mut child = command.spawn().map_err(RemoteUtilityRunError::Io)?;
+    let process_group = match child.id().try_into() {
+        Ok(process_group) => process_group,
+        Err(_) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(RemoteUtilityRunError::Io(io::Error::other(
+                "SSH utility process identifier did not fit the platform process type",
+            )));
+        }
+    };
     let Some(mut stdin) = child.stdin.take() else {
-        terminate_and_reap(&mut child);
+        terminate_and_reap(&mut child, process_group);
         return Err(RemoteUtilityRunError::Io(io::Error::other(
             "SSH stdin pipe was unavailable",
         )));
     };
     let Some(mut stdout) = child.stdout.take() else {
-        terminate_and_reap(&mut child);
+        terminate_and_reap(&mut child, process_group);
         return Err(RemoteUtilityRunError::Io(io::Error::other(
             "SSH stdout pipe was unavailable",
         )));
@@ -137,16 +229,24 @@ fn run_native_command(
 
     let exit = loop {
         if cancellation.is_cancelled() {
-            terminate_and_reap(&mut child);
+            terminate_and_reap(&mut child, process_group);
             let _ = writer.join();
             if let Some(reader) = reader.take() {
                 let _ = reader.join();
             }
             return Err(RemoteUtilityRunError::Cancelled);
         }
+        if Instant::now() >= deadline {
+            terminate_and_reap(&mut child, process_group);
+            let _ = writer.join();
+            if let Some(reader) = reader.take() {
+                let _ = reader.join();
+            }
+            return Err(RemoteUtilityRunError::TimedOut);
+        }
         if reader.as_ref().is_some_and(|reader| reader.is_finished()) {
             let Some(finished_reader) = reader.take() else {
-                terminate_and_reap(&mut child);
+                terminate_and_reap(&mut child, process_group);
                 let _ = writer.join();
                 return Err(RemoteUtilityRunError::Io(io::Error::other(
                     "SSH stdout reader ownership was lost",
@@ -154,12 +254,12 @@ fn run_native_command(
             };
             match finished_reader.join() {
                 Ok(Err(ReadBoundedError::OutputTooLarge)) => {
-                    terminate_and_reap(&mut child);
+                    terminate_and_reap(&mut child, process_group);
                     let _ = writer.join();
                     return Err(RemoteUtilityRunError::OutputTooLarge);
                 }
                 Ok(Err(ReadBoundedError::Io(error))) => {
-                    terminate_and_reap(&mut child);
+                    terminate_and_reap(&mut child, process_group);
                     let _ = writer.join();
                     return Err(RemoteUtilityRunError::Io(error));
                 }
@@ -167,7 +267,7 @@ fn run_native_command(
                     captured_stdout = Some(stdout);
                 }
                 Err(_) => {
-                    terminate_and_reap(&mut child);
+                    terminate_and_reap(&mut child, process_group);
                     let _ = writer.join();
                     return Err(RemoteUtilityRunError::Io(io::Error::other(
                         "SSH stdout reader failed",
@@ -177,15 +277,20 @@ fn run_native_command(
         }
         match child.try_wait() {
             Err(error) => {
-                terminate_and_reap(&mut child);
+                terminate_and_reap(&mut child, process_group);
                 let _ = writer.join();
                 if let Some(reader) = reader.take() {
                     let _ = reader.join();
                 }
                 return Err(RemoteUtilityRunError::Io(error));
             }
-            Ok(Some(status)) => break ProcessExit::from(status),
-            Ok(None) => thread::sleep(PROCESS_POLL_INTERVAL),
+            Ok(Some(status)) => {
+                terminate_process_group(process_group);
+                break ProcessExit::from(status);
+            }
+            Ok(None) => thread::sleep(
+                PROCESS_POLL_INTERVAL.min(deadline.saturating_duration_since(Instant::now())),
+            ),
         }
     };
     if let Ok(Err(error)) = writer.join() {
@@ -216,9 +321,14 @@ fn run_native_command(
     Ok(RemoteUtilityProcessOutput::new(exit, stdout))
 }
 
-fn terminate_and_reap(child: &mut std::process::Child) {
-    let _ = child.kill();
+fn terminate_and_reap(child: &mut std::process::Child, process_group: libc::pid_t) {
+    terminate_process_group(process_group);
     let _ = child.wait();
+}
+
+fn terminate_process_group(process_group: libc::pid_t) {
+    // SAFETY: the positive process group is the PID of a child launched with a private group.
+    let _ = unsafe { libc::kill(-process_group, libc::SIGKILL) };
 }
 
 enum ReadBoundedError {
@@ -412,7 +522,9 @@ impl<R: SshRemoteUtilityRunner> SshRemoteUtilityClient<R> {
             .map_err(|error| match error {
                 RemoteUtilityRunError::Cancelled => RemoteUtilityError::Cancelled,
                 RemoteUtilityRunError::OutputTooLarge => RemoteUtilityError::OutputTooLarge,
-                RemoteUtilityRunError::Io(_) => RemoteUtilityError::Transport,
+                RemoteUtilityRunError::TimedOut | RemoteUtilityRunError::Io(_) => {
+                    RemoteUtilityError::Transport
+                }
             })?;
         if !output.exit.is_success() {
             return Err(RemoteUtilityError::CommandFailed(output.exit.code()));
@@ -764,12 +876,15 @@ impl<'a> ResponseParser<'a> {
 #[cfg(test)]
 mod tests {
     use std::collections::VecDeque;
+    use std::fs;
     use std::future::Future;
     use std::io;
     use std::io::Write;
     use std::path::PathBuf;
+    use std::pin::Pin;
     use std::process::{Command, Stdio};
     use std::sync::{Arc, Mutex};
+    use std::task::{Context, Poll, Wake, Waker};
 
     use gpui::TestAppContext;
 
@@ -777,7 +892,7 @@ mod tests {
     use crate::domain::{RemoteWorkspaceDirectory, SshDestination};
     use crate::ssh::command::{SshCommandContext, SshCommandSpec};
     use crate::ssh::control_connection::SshCancellationToken;
-    use crate::ssh::process::ProcessExit;
+    use crate::ssh::process::{ProcessExit, SshProcessEnvironment};
 
     #[derive(Default)]
     struct FakeRunnerState {
@@ -825,6 +940,114 @@ mod tests {
                 })
             };
             async move { result }
+        }
+    }
+
+    #[test]
+    fn dropping_native_utility_future_should_cancel_and_reap_the_private_group() {
+        let pid_file = PathBuf::from(format!(
+            "/private/tmp/spaceterm-utility-drop-{}.pid",
+            std::process::id()
+        ));
+        let script = format!("echo $$ > '{}'; sleep 30", pid_file.display());
+        let command = Arc::new(SshCommandSpec::for_test(
+            PathBuf::from("/bin/sh"),
+            vec!["-c".into(), script.into()],
+        ));
+        let environment =
+            SshProcessEnvironment::new_without_authentication(PathBuf::from("/private/tmp"), None)
+                .unwrap();
+        let runner = NativeSshRemoteUtilityRunner::new(environment);
+        let mut future = Box::pin(runner.run(
+            command,
+            Vec::new(),
+            MAXIMUM_REMOTE_UTILITY_OUTPUT_BYTES,
+            SshCancellationToken::default(),
+        ));
+        let waker = Waker::from(Arc::new(NoopWake));
+        let mut context = Context::from_waker(&waker);
+
+        assert!(matches!(
+            Pin::as_mut(&mut future).poll(&mut context),
+            Poll::Pending
+        ));
+        for _ in 0..100 {
+            if pid_file.exists() {
+                break;
+            }
+            thread::sleep(PROCESS_POLL_INTERVAL);
+        }
+        let process: libc::pid_t = fs::read_to_string(&pid_file)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+
+        drop(future);
+
+        let terminated = (0..100).any(|_| {
+            // SAFETY: signal zero checks process existence and dereferences no pointers.
+            let missing = unsafe { libc::kill(process, 0) } == -1
+                && io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH);
+            if !missing {
+                thread::sleep(PROCESS_POLL_INTERVAL);
+            }
+            missing
+        });
+        let _ = fs::remove_file(pid_file);
+        assert!(terminated);
+    }
+
+    #[test]
+    fn completed_native_utility_should_not_cancel_the_reusable_client_token() {
+        let command = Arc::new(SshCommandSpec::for_test(
+            PathBuf::from("/bin/sh"),
+            vec!["-s".into()],
+        ));
+        let environment =
+            SshProcessEnvironment::new_without_authentication(PathBuf::from("/private/tmp"), None)
+                .unwrap();
+        let runner = NativeSshRemoteUtilityRunner::new(environment);
+        let cancellation = SshCancellationToken::default();
+
+        let output = block_on_external(runner.run(
+            command,
+            b"printf ok\n".to_vec(),
+            MAXIMUM_REMOTE_UTILITY_OUTPUT_BYTES,
+            cancellation.clone(),
+        ))
+        .unwrap();
+
+        assert!(output.exit.is_success() && output.stdout == b"ok" && !cancellation.is_cancelled());
+    }
+
+    struct NoopWake;
+
+    impl Wake for NoopWake {
+        fn wake(self: Arc<Self>) {}
+    }
+
+    struct ThreadWake(std::thread::Thread);
+
+    impl Wake for ThreadWake {
+        fn wake(self: Arc<Self>) {
+            self.0.unpark();
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.0.unpark();
+        }
+    }
+
+    fn block_on_external<T>(future: impl Future<Output = T>) -> T {
+        let mut future = Box::pin(future);
+        let waker = Waker::from(Arc::new(ThreadWake(thread::current())));
+        let mut context = Context::from_waker(&waker);
+        loop {
+            match Pin::as_mut(&mut future).poll(&mut context) {
+                Poll::Ready(output) => return output,
+                Poll::Pending => thread::park(),
+            }
         }
     }
 
@@ -984,6 +1207,29 @@ mod tests {
                 .unwrap(),
             "/srv/real project"
         );
+    }
+
+    #[test]
+    fn native_utility_should_force_cleanup_at_its_wall_clock_deadline() {
+        let command = Arc::new(SshCommandSpec::for_test(
+            PathBuf::from("/bin/sh"),
+            vec!["-c".into(), "sleep 30".into()],
+        ));
+        let environment =
+            SshProcessEnvironment::new_without_authentication(PathBuf::from("/private/tmp"), None)
+                .unwrap();
+        let runner =
+            NativeSshRemoteUtilityRunner::with_timeout(environment, Duration::from_millis(20));
+
+        let error = block_on_external(runner.run(
+            command,
+            Vec::new(),
+            MAXIMUM_REMOTE_UTILITY_OUTPUT_BYTES,
+            SshCancellationToken::default(),
+        ))
+        .unwrap_err();
+
+        assert!(matches!(error, RemoteUtilityRunError::TimedOut));
     }
 
     #[gpui::test]

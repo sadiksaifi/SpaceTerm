@@ -447,6 +447,8 @@ pub(crate) enum PtyError {
     CloneReader(#[source] AnyError),
     #[error("failed to acquire the pseudo-terminal writer: {0}")]
     TakeWriter(#[source] AnyError),
+    #[error("the prepared SSH Pane channel is no longer available")]
+    SshChannelUnavailable,
 }
 
 pub(crate) fn spawn_user_shell(
@@ -465,7 +467,7 @@ pub(crate) fn spawn_remote_pane_channel(
     command: SshCommandSpec,
 ) -> Result<(SpawnedPty, PtyTerminator), PtyError> {
     validate_working_directory(local_home)?;
-    let command = build_remote_pane_command(command, local_home);
+    let command = build_remote_pane_command(command, local_home)?;
     spawn_command_in_pty(size, command, "/usr/bin/ssh")
 }
 
@@ -594,20 +596,29 @@ fn build_shell_command_with_resources(
     command
 }
 
-fn build_remote_pane_command(command: SshCommandSpec, local_home: &Path) -> CommandBuilder {
-    let (executable, arguments) = command.into_parts();
+fn build_remote_pane_command(
+    command: SshCommandSpec,
+    local_home: &Path,
+) -> Result<CommandBuilder, PtyError> {
+    let (executable, arguments, environment) = command
+        .into_pane_launch_parts()
+        .map_err(|_| PtyError::SshChannelUnavailable)?;
     let mut command = CommandBuilder::new(executable);
     command.args(arguments);
-    for name in FOREIGN_RUNTIME_ENVIRONMENT {
-        command.env_remove(name);
+    if let Some(environment) = environment {
+        environment.apply_to_pty(&mut command);
+    } else {
+        for name in FOREIGN_RUNTIME_ENVIRONMENT {
+            command.env_remove(name);
+        }
+        for name in SHELL_INTEGRATION_ENVIRONMENT {
+            command.env_remove(name);
+        }
+        command.env_remove("TERMINFO");
+        command.cwd(local_home);
     }
-    for name in SHELL_INTEGRATION_ENVIRONMENT {
-        command.env_remove(name);
-    }
-    command.env_remove("TERMINFO");
     command.env("TERM", identity::TERM_FALLBACK);
-    command.cwd(local_home);
-    command
+    Ok(command)
 }
 
 fn apply_terminal_identity(command: &mut CommandBuilder, resources: &Path) {
@@ -1086,7 +1097,7 @@ mod tests {
         );
         let local_home = Path::new("/Users/local");
 
-        let command = build_remote_pane_command(prepared.take().unwrap(), local_home);
+        let command = build_remote_pane_command(prepared.take().unwrap(), local_home).unwrap();
 
         assert_eq!(command.get_argv().first().unwrap(), "/usr/bin/ssh");
         assert_eq!(command.get_argv().last().unwrap(), "exec /bin/zsh -l");

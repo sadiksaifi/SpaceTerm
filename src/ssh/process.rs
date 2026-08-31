@@ -57,6 +57,8 @@ impl From<ExitStatus> for ProcessExit {
 pub(crate) trait SshProcessBackend: Send + Sync + 'static {
     type Child: Send + 'static;
 
+    fn environment(&self) -> &SshProcessEnvironment;
+
     fn now(&self) -> Instant;
 
     fn spawn(&self, spec: SshCommandSpec) -> impl Future<Output = io::Result<Self::Child>> + Send;
@@ -162,19 +164,38 @@ impl SshProcessEnvironment {
     }
 
     #[cfg(test)]
-    fn new_without_authentication(
+    pub(super) fn new_without_authentication(
         home: PathBuf,
         agent_socket: Option<OsString>,
     ) -> Result<Self, SshProcessEnvironmentError> {
         Self::validated(home, SshAuthentication::None, agent_socket)
     }
 
-    fn apply(&self, command: &mut Command) {
+    pub(super) fn apply(&self, command: &mut Command) {
         command
             .env_clear()
             .current_dir(&self.home)
             .env("HOME", &self.home)
             .env("PATH", "/usr/bin:/bin");
+        if let Some(agent_socket) = &self.agent_socket {
+            command.env("SSH_AUTH_SOCK", agent_socket);
+        }
+        match &self.authentication {
+            SshAuthentication::AskPass(authentication) => {
+                for (name, value) in authentication.entries() {
+                    command.env(name, value);
+                }
+            }
+            #[cfg(test)]
+            SshAuthentication::None => {}
+        }
+    }
+
+    pub(crate) fn apply_to_pty(&self, command: &mut portable_pty::CommandBuilder) {
+        command.env_clear();
+        command.cwd(&self.home);
+        command.env("HOME", &self.home);
+        command.env("PATH", "/usr/bin:/bin");
         if let Some(agent_socket) = &self.agent_socket {
             command.env("SSH_AUTH_SOCK", agent_socket);
         }
@@ -215,6 +236,10 @@ pub(crate) struct NativeSshChild {
 
 impl SshProcessBackend for NativeSshProcessBackend {
     type Child = NativeSshChild;
+
+    fn environment(&self) -> &SshProcessEnvironment {
+        &self.environment
+    }
 
     fn now(&self) -> Instant {
         Instant::now()
@@ -298,10 +323,17 @@ fn safe_absolute_path(path: &Path) -> bool {
 
 fn spawn_owned_command(mut command: Command) -> io::Result<NativeSshChild> {
     command.process_group(0);
-    let child = command.spawn()?;
-    let process_group = child.id().try_into().map_err(|_| {
-        io::Error::other("SSH child process identifier did not fit the platform process type")
-    })?;
+    let mut child = command.spawn()?;
+    let process_group = match child.id().try_into() {
+        Ok(process_group) => process_group,
+        Err(_) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(io::Error::other(
+                "SSH child process identifier did not fit the platform process type",
+            ));
+        }
+    };
     Ok(NativeSshChild {
         child: Some(child),
         process_group,
@@ -428,6 +460,37 @@ mod tests {
             error,
             Some(SshProcessEnvironmentError::UnsafeHome)
         ));
+    }
+
+    #[test]
+    fn pane_environment_should_clear_ambient_values_and_use_captured_home() {
+        let home = PathBuf::from("/private/tmp");
+        let environment = SshProcessEnvironment::new_without_authentication(
+            home.clone(),
+            Some(OsString::from("/private/tmp/agent.sock")),
+        )
+        .unwrap();
+        let mut command = portable_pty::CommandBuilder::new("/usr/bin/ssh");
+        command.env("SPACETERM_UNKNOWN", "secret");
+        command.env("HOME", "/attacker/home");
+        command.env("PATH", "/attacker/bin");
+
+        environment.apply_to_pty(&mut command);
+
+        assert_eq!(command.get_cwd(), Some(&home.into_os_string()));
+        assert_eq!(
+            command.get_env("HOME"),
+            Some(std::ffi::OsStr::new("/private/tmp"))
+        );
+        assert_eq!(
+            command.get_env("PATH"),
+            Some(std::ffi::OsStr::new("/usr/bin:/bin"))
+        );
+        assert_eq!(
+            command.get_env("SSH_AUTH_SOCK"),
+            Some(std::ffi::OsStr::new("/private/tmp/agent.sock"))
+        );
+        assert_eq!(command.get_env("SPACETERM_UNKNOWN"), None);
     }
 
     #[test]

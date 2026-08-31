@@ -8,6 +8,7 @@ use std::sync::{Arc, Mutex};
 use thiserror::Error;
 
 use super::live_connection::LiveConnectionCapability;
+use super::process::SshProcessEnvironment;
 use crate::domain::SshDestination;
 
 const SSH_EXECUTABLE: &str = "/usr/bin/ssh";
@@ -200,11 +201,12 @@ impl SshCommandContext {
         self.spec(arguments)
     }
 
+    #[cfg(test)]
     pub(crate) fn prepare_pane_channel(
         &self,
         command: ValidatedRemoteShellCommand,
     ) -> PreparedSshPaneChannelCommand {
-        PreparedSshPaneChannelCommand::new(self.pane_channel(command), None)
+        PreparedSshPaneChannelCommand::new(self.pane_channel(command), None, None)
     }
 
     fn control_operation(&self, operation: &str) -> SshCommandSpec {
@@ -247,6 +249,7 @@ impl SshCommandContext {
         SshCommandSpec {
             executable: self.executable.clone(),
             arguments,
+            pane_execution: None,
         }
     }
 
@@ -271,13 +274,27 @@ fn push_option(arguments: &mut Vec<OsString>, option: OsString) {
     arguments.push(option);
 }
 
-#[derive(Debug)]
 pub(crate) struct SshCommandSpec {
     executable: PathBuf,
     arguments: Vec<OsString>,
+    pane_execution: Option<SshPaneExecution>,
+}
+
+struct SshPaneExecution {
+    capability: LiveConnectionCapability,
+    environment: SshProcessEnvironment,
 }
 
 impl SshCommandSpec {
+    #[cfg(test)]
+    pub(super) fn for_test(executable: PathBuf, arguments: Vec<OsString>) -> Self {
+        Self {
+            executable,
+            arguments,
+            pane_execution: None,
+        }
+    }
+
     pub(crate) fn executable(&self) -> &OsStr {
         self.executable.as_os_str()
     }
@@ -286,8 +303,30 @@ impl SshCommandSpec {
         &self.arguments
     }
 
-    pub(crate) fn into_parts(self) -> (PathBuf, Vec<OsString>) {
-        (self.executable, self.arguments)
+    pub(crate) fn into_pane_launch_parts(
+        self,
+    ) -> Result<(PathBuf, Vec<OsString>, Option<SshProcessEnvironment>), PreparedSshPaneChannelError>
+    {
+        let environment = match self.pane_execution {
+            Some(execution) => {
+                execution
+                    .capability
+                    .authorize()
+                    .map_err(|_| PreparedSshPaneChannelError::Unavailable)?;
+                Some(execution.environment)
+            }
+            None => {
+                #[cfg(test)]
+                {
+                    None
+                }
+                #[cfg(not(test))]
+                {
+                    return Err(PreparedSshPaneChannelError::Unavailable);
+                }
+            }
+        };
+        Ok((self.executable, self.arguments, environment))
     }
 }
 
@@ -295,16 +334,19 @@ impl SshCommandSpec {
 pub(crate) struct PreparedSshPaneChannelCommand {
     command: Arc<Mutex<Option<SshCommandSpec>>>,
     capability: Option<LiveConnectionCapability>,
+    environment: Option<SshProcessEnvironment>,
 }
 
 impl PreparedSshPaneChannelCommand {
     pub(super) fn new(
         command: SshCommandSpec,
         capability: Option<LiveConnectionCapability>,
+        environment: Option<SshProcessEnvironment>,
     ) -> Self {
         Self {
             command: Arc::new(Mutex::new(Some(command))),
             capability,
+            environment,
         }
     }
 
@@ -320,9 +362,18 @@ impl PreparedSshPaneChannelCommand {
             .command
             .lock()
             .map_err(|_| PreparedSshPaneChannelError::Unavailable)?;
-        command
+        let mut command = command
             .take()
-            .ok_or(PreparedSshPaneChannelError::AlreadyConsumed)
+            .ok_or(PreparedSshPaneChannelError::AlreadyConsumed)?;
+        command.pane_execution = match (&self.capability, &self.environment) {
+            (Some(capability), Some(environment)) => Some(SshPaneExecution {
+                capability: capability.clone(),
+                environment: environment.clone(),
+            }),
+            (None, None) => None,
+            _ => return Err(PreparedSshPaneChannelError::Unavailable),
+        };
+        Ok(command)
     }
 }
 

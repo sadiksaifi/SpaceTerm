@@ -288,6 +288,7 @@ impl<B: SshProcessBackend> OpenSshControlConnection<B> {
         Ok(PreparedSshPaneChannelCommand::new(
             self.commands.pane_channel(command),
             Some(capability),
+            Some(self.backend.environment().clone()),
         ))
     }
 
@@ -673,6 +674,7 @@ mod tests {
     struct FakeBackend {
         epoch: Instant,
         state: Mutex<FakeState>,
+        environment: super::super::process::SshProcessEnvironment,
     }
 
     impl Default for FakeBackend {
@@ -680,6 +682,12 @@ mod tests {
             Self {
                 epoch: Instant::now(),
                 state: Mutex::new(FakeState::default()),
+                environment:
+                    super::super::process::SshProcessEnvironment::new_without_authentication(
+                        PathBuf::from("/private/tmp"),
+                        None,
+                    )
+                    .unwrap(),
             }
         }
     }
@@ -692,6 +700,12 @@ mod tests {
                     readiness: readiness.into_iter().collect(),
                     ..FakeState::default()
                 }),
+                environment:
+                    super::super::process::SshProcessEnvironment::new_without_authentication(
+                        PathBuf::from("/private/tmp"),
+                        None,
+                    )
+                    .unwrap(),
             }
         }
 
@@ -710,6 +724,10 @@ mod tests {
 
     impl SshProcessBackend for FakeBackend {
         type Child = FakeChild;
+
+        fn environment(&self) -> &super::super::process::SshProcessEnvironment {
+            &self.environment
+        }
 
         fn now(&self) -> Instant {
             self.epoch + self.state.lock().unwrap().elapsed
@@ -1205,6 +1223,7 @@ mod tests {
                 ValidatedRemoteShellCommand::new("exec /bin/zsh -l".to_owned()).unwrap(),
             )
             .unwrap();
+        let command = pane.take().unwrap();
         let socket_path = connection.control_path().to_path_buf();
         connection
             .child
@@ -1218,7 +1237,7 @@ mod tests {
         let replacement = UnixListener::bind(&socket_path).unwrap();
 
         assert!(matches!(
-            pane.take(),
+            command.into_pane_launch_parts(),
             Err(crate::ssh::command::PreparedSshPaneChannelError::Unavailable)
         ));
         drop(connection);
