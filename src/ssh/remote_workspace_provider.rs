@@ -1,4 +1,8 @@
+use std::future::{Future, poll_fn};
+use std::pin::pin;
 use std::sync::Arc;
+use std::task::Poll;
+use std::time::Duration;
 
 use gpui::{BackgroundExecutor, Task};
 
@@ -12,6 +16,8 @@ use crate::ui::remote_workspace_picker::{
     RemoteWorkspaceAccount, RemoteWorkspaceDirectoryListing, RemoteWorkspaceDirectoryRow,
     RemoteWorkspaceExactPathState, RemoteWorkspaceProvider, RemoteWorkspaceProviderError,
 };
+
+const REMOTE_WORKSPACE_OPERATION_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub(crate) struct SshRemoteWorkspaceProvider<R: SshRemoteUtilityRunner> {
     client: Arc<SshRemoteUtilityClient<R>>,
@@ -30,15 +36,39 @@ impl<R: SshRemoteUtilityRunner> SshRemoteWorkspaceProvider<R> {
             executor,
         }
     }
+
+    fn spawn_operation<T, F, Fut>(
+        &self,
+        operation: F,
+    ) -> Task<Result<T, RemoteWorkspaceProviderError>>
+    where
+        T: Send + 'static,
+        F: FnOnce(Arc<SshRemoteUtilityClient<R>>, SshCancellationToken) -> Fut + Send + 'static,
+        Fut: Future<Output = Result<T, RemoteWorkspaceProviderError>> + Send + 'static,
+    {
+        let client = Arc::clone(&self.client);
+        let timer_executor = self.executor.clone();
+        self.executor.spawn(async move {
+            let cancellation = SshCancellationToken::default();
+            let mut cancel_on_drop = CancelOperationOnDrop::new(cancellation.clone());
+            let operation = operation(client, cancellation.clone());
+            let timeout = timer_executor.timer(REMOTE_WORKSPACE_OPERATION_TIMEOUT);
+            let result = race_operation_with_timeout(operation, timeout, &cancellation).await;
+            cancel_on_drop.disarm();
+            result
+        })
+    }
 }
 
 impl<R: SshRemoteUtilityRunner> RemoteWorkspaceProvider for SshRemoteWorkspaceProvider<R> {
     fn discover_account(
         &self,
     ) -> Task<Result<RemoteWorkspaceAccount, RemoteWorkspaceProviderError>> {
-        let client = Arc::clone(&self.client);
-        self.executor.spawn(async move {
-            let metadata = client.discover_account().await.map_err(map_error)?;
+        self.spawn_operation(|client, cancellation| async move {
+            let metadata = client
+                .discover_account_with_cancellation(cancellation)
+                .await
+                .map_err(map_error)?;
             let home_identity = RemoteDirectoryIdentity::new(metadata.physical_home().to_owned())
                 .map_err(|_| RemoteWorkspaceProviderError::InvalidResponse)?;
             RemoteWorkspaceAccount::new(
@@ -54,10 +84,9 @@ impl<R: SshRemoteUtilityRunner> RemoteWorkspaceProvider for SshRemoteWorkspacePr
         &self,
         directory: RemoteWorkspaceDirectory,
     ) -> Task<Result<RemoteWorkspaceDirectoryListing, RemoteWorkspaceProviderError>> {
-        let client = Arc::clone(&self.client);
-        self.executor.spawn(async move {
+        self.spawn_operation(move |client, cancellation| async move {
             let listing = client
-                .list_directories(directory)
+                .list_directories_with_cancellation(directory, cancellation)
                 .await
                 .map_err(map_error)?;
             let rows = listing
@@ -77,10 +106,9 @@ impl<R: SshRemoteUtilityRunner> RemoteWorkspaceProvider for SshRemoteWorkspacePr
         &self,
         directory: RemoteWorkspaceDirectory,
     ) -> Task<Result<RemoteWorkspaceExactPathState, RemoteWorkspaceProviderError>> {
-        let client = Arc::clone(&self.client);
-        self.executor.spawn(async move {
+        self.spawn_operation(move |client, cancellation| async move {
             client
-                .probe_exact_path(directory)
+                .probe_exact_path_with_cancellation(directory, cancellation)
                 .await
                 .map(|state| match state {
                     RemoteDirectoryProbe::ReadableDirectory => {
@@ -96,10 +124,9 @@ impl<R: SshRemoteUtilityRunner> RemoteWorkspaceProvider for SshRemoteWorkspacePr
         &self,
         directory: RemoteWorkspaceDirectory,
     ) -> Task<Result<(), RemoteWorkspaceProviderError>> {
-        let client = Arc::clone(&self.client);
-        self.executor.spawn(async move {
+        self.spawn_operation(move |client, cancellation| async move {
             client
-                .create_directory_recursively(directory)
+                .create_directory_recursively_with_cancellation(directory, cancellation)
                 .await
                 .map_err(map_error)
         })
@@ -109,15 +136,60 @@ impl<R: SshRemoteUtilityRunner> RemoteWorkspaceProvider for SshRemoteWorkspacePr
         &self,
         directory: RemoteWorkspaceDirectory,
     ) -> Task<Result<RemoteDirectoryIdentity, RemoteWorkspaceProviderError>> {
-        let client = Arc::clone(&self.client);
-        self.executor.spawn(async move {
+        self.spawn_operation(move |client, cancellation| async move {
             let physical = client
-                .resolve_physical_directory(directory)
+                .resolve_physical_directory_with_cancellation(directory, cancellation)
                 .await
                 .map_err(map_error)?;
             RemoteDirectoryIdentity::new(physical)
                 .map_err(|_| RemoteWorkspaceProviderError::InvalidResponse)
         })
+    }
+}
+
+async fn race_operation_with_timeout<T>(
+    operation: impl Future<Output = Result<T, RemoteWorkspaceProviderError>>,
+    timeout: Task<()>,
+    cancellation: &SshCancellationToken,
+) -> Result<T, RemoteWorkspaceProviderError> {
+    let mut operation = pin!(operation);
+    let mut timeout = pin!(timeout);
+    poll_fn(|cx| {
+        if let Poll::Ready(result) = operation.as_mut().poll(cx) {
+            return Poll::Ready(result);
+        }
+        if timeout.as_mut().poll(cx).is_ready() {
+            cancellation.cancel();
+            return Poll::Ready(Err(RemoteWorkspaceProviderError::Other));
+        }
+        Poll::Pending
+    })
+    .await
+}
+
+struct CancelOperationOnDrop {
+    cancellation: SshCancellationToken,
+    armed: bool,
+}
+
+impl CancelOperationOnDrop {
+    fn new(cancellation: SshCancellationToken) -> Self {
+        Self {
+            cancellation,
+            armed: true,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for CancelOperationOnDrop {
+    fn drop(&mut self) {
+        if self.armed {
+            self.cancellation.cancel();
+        }
     }
 }
 
@@ -160,6 +232,25 @@ mod tests {
 
     struct FakeRunner {
         outputs: Mutex<VecDeque<Result<RemoteUtilityProcessOutput, RemoteUtilityRunError>>>,
+    }
+
+    #[derive(Default)]
+    struct PendingRunner {
+        cancellations: Mutex<Vec<SshCancellationToken>>,
+    }
+
+    impl SshRemoteUtilityRunner for PendingRunner {
+        fn run(
+            &self,
+            _command: Arc<SshCommandSpec>,
+            _script: Vec<u8>,
+            _maximum_output_bytes: usize,
+            cancellation: SshCancellationToken,
+        ) -> impl Future<Output = Result<RemoteUtilityProcessOutput, RemoteUtilityRunError>> + Send
+        {
+            self.cancellations.lock().unwrap().push(cancellation);
+            std::future::pending()
+        }
     }
 
     impl FakeRunner {
@@ -222,6 +313,31 @@ mod tests {
             Arc::new(FakeRunner::new(outputs)),
             SshCancellationToken::default(),
             cx.executor(),
+        )
+    }
+
+    fn pending_provider(
+        cx: &TestAppContext,
+    ) -> (
+        SshRemoteWorkspaceProvider<PendingRunner>,
+        Arc<PendingRunner>,
+    ) {
+        let command = SshCommandContext::new(
+            PathBuf::from("/private/config/spaceterm/ssh_config"),
+            SshDestination::new("remote".to_owned()).unwrap(),
+            PathBuf::from("/private/runtime/spaceterm/master.sock"),
+        )
+        .unwrap()
+        .remote_utility();
+        let runner = Arc::new(PendingRunner::default());
+        (
+            SshRemoteWorkspaceProvider::new(
+                PreparedSshRemoteUtilityCommand::new(command),
+                Arc::clone(&runner),
+                SshCancellationToken::default(),
+                cx.executor(),
+            ),
+            runner,
         )
     }
 
@@ -293,5 +409,32 @@ mod tests {
                 .unwrap_err(),
             RemoteWorkspaceProviderError::InvalidResponse
         );
+    }
+
+    #[gpui::test]
+    fn provider_operation_drop_and_deadline_should_cancel_the_exact_request(
+        cx: &mut TestAppContext,
+    ) {
+        let (provider, runner) = pending_provider(cx);
+        let dropped = provider.probe_exact_path(directory("/srv/first"));
+        cx.run_until_parked();
+        let first = runner.cancellations.lock().unwrap()[0].clone();
+
+        drop(dropped);
+        cx.run_until_parked();
+        assert!(first.is_cancelled());
+
+        let timed_out = provider.probe_exact_path(directory("/srv/second"));
+        cx.run_until_parked();
+        let second = runner.cancellations.lock().unwrap()[1].clone();
+        cx.executor()
+            .advance_clock(REMOTE_WORKSPACE_OPERATION_TIMEOUT);
+        cx.run_until_parked();
+
+        assert_eq!(
+            cx.executor().block(timed_out).unwrap_err(),
+            RemoteWorkspaceProviderError::Other
+        );
+        assert!(second.is_cancelled());
     }
 }

@@ -19,6 +19,8 @@ pub(crate) const MAXIMUM_REMOTE_UTILITY_OUTPUT_BYTES: usize = 384 * 1024;
 const MAXIMUM_REMOTE_UTILITY_REQUEST_BYTES: usize = 32 * 1024;
 const MAXIMUM_REMOTE_FIELD_BYTES: usize = 16 * 1024;
 const MAXIMUM_REMOTE_DIRECTORY_NAMES: usize = 1024;
+const MAXIMUM_REMOTE_DIRECTORY_ENTRIES_EXAMINED: usize = 1024;
+const MAXIMUM_REMOTE_PATH_BYTES: usize = 4096;
 const PROCESS_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const NATIVE_UTILITY_TIMEOUT: Duration = Duration::from_secs(60);
 const PROTOCOL_HEADER: &str = "SPACETERM-REMOTE/1";
@@ -450,7 +452,15 @@ impl<R: SshRemoteUtilityRunner> SshRemoteUtilityClient<R> {
     pub(crate) async fn discover_account(
         &self,
     ) -> Result<RemoteAccountMetadata, RemoteUtilityError> {
-        let output = self.execute(build_account_script()).await?;
+        self.discover_account_with_cancellation(SshCancellationToken::default())
+            .await
+    }
+
+    pub(crate) async fn discover_account_with_cancellation(
+        &self,
+        cancellation: SshCancellationToken,
+    ) -> Result<RemoteAccountMetadata, RemoteUtilityError> {
+        let output = self.execute(build_account_script(), cancellation).await?;
         parse_account(&output)
     }
 
@@ -458,8 +468,17 @@ impl<R: SshRemoteUtilityRunner> SshRemoteUtilityClient<R> {
         &self,
         directory: RemoteWorkspaceDirectory,
     ) -> Result<RemoteUtilityDirectoryListing, RemoteUtilityError> {
+        self.list_directories_with_cancellation(directory, SshCancellationToken::default())
+            .await
+    }
+
+    pub(crate) async fn list_directories_with_cancellation(
+        &self,
+        directory: RemoteWorkspaceDirectory,
+        cancellation: SshCancellationToken,
+    ) -> Result<RemoteUtilityDirectoryListing, RemoteUtilityError> {
         let output = self
-            .execute(build_path_script("list", directory.as_str()))
+            .execute(build_path_script("list", directory.as_str())?, cancellation)
             .await?;
         parse_listing(&output)
     }
@@ -468,8 +487,20 @@ impl<R: SshRemoteUtilityRunner> SshRemoteUtilityClient<R> {
         &self,
         directory: RemoteWorkspaceDirectory,
     ) -> Result<RemoteDirectoryProbe, RemoteUtilityError> {
+        self.probe_exact_path_with_cancellation(directory, SshCancellationToken::default())
+            .await
+    }
+
+    pub(crate) async fn probe_exact_path_with_cancellation(
+        &self,
+        directory: RemoteWorkspaceDirectory,
+        cancellation: SshCancellationToken,
+    ) -> Result<RemoteDirectoryProbe, RemoteUtilityError> {
         let output = self
-            .execute(build_path_script("probe", directory.as_str()))
+            .execute(
+                build_path_script("probe", directory.as_str())?,
+                cancellation,
+            )
             .await?;
         parse_probe(&output)
     }
@@ -478,8 +509,23 @@ impl<R: SshRemoteUtilityRunner> SshRemoteUtilityClient<R> {
         &self,
         directory: RemoteWorkspaceDirectory,
     ) -> Result<(), RemoteUtilityError> {
+        self.create_directory_recursively_with_cancellation(
+            directory,
+            SshCancellationToken::default(),
+        )
+        .await
+    }
+
+    pub(crate) async fn create_directory_recursively_with_cancellation(
+        &self,
+        directory: RemoteWorkspaceDirectory,
+        cancellation: SshCancellationToken,
+    ) -> Result<(), RemoteUtilityError> {
         let output = self
-            .execute(build_path_script("mkdir", directory.as_str()))
+            .execute(
+                build_path_script("mkdir", directory.as_str())?,
+                cancellation,
+            )
             .await?;
         parse_empty_success(&output, "mkdir")
     }
@@ -488,27 +534,48 @@ impl<R: SshRemoteUtilityRunner> SshRemoteUtilityClient<R> {
         &self,
         directory: RemoteWorkspaceDirectory,
     ) -> Result<String, RemoteUtilityError> {
+        self.resolve_physical_directory_with_cancellation(
+            directory,
+            SshCancellationToken::default(),
+        )
+        .await
+    }
+
+    pub(crate) async fn resolve_physical_directory_with_cancellation(
+        &self,
+        directory: RemoteWorkspaceDirectory,
+        cancellation: SshCancellationToken,
+    ) -> Result<String, RemoteUtilityError> {
         let output = self
-            .execute(build_path_script("physical", directory.as_str()))
+            .execute(
+                build_path_script("physical", directory.as_str())?,
+                cancellation,
+            )
             .await?;
         parse_physical(&output)
     }
 
-    async fn execute(&self, script: Vec<u8>) -> Result<Vec<u8>, RemoteUtilityError> {
-        if self.cancellation.is_cancelled() {
+    async fn execute(
+        &self,
+        script: Vec<u8>,
+        request_cancellation: SshCancellationToken,
+    ) -> Result<Vec<u8>, RemoteUtilityError> {
+        if self.cancellation.is_cancelled() || request_cancellation.is_cancelled() {
             return Err(RemoteUtilityError::Cancelled);
         }
         if script.len() > MAXIMUM_REMOTE_UTILITY_REQUEST_BYTES {
             return Err(RemoteUtilityError::RequestTooLarge);
         }
+        let request_cancellation =
+            SshCancellationToken::linked(&self.cancellation, &request_cancellation);
         let operation_cancellation = match &self.command.capability {
             Some(capability) => {
                 capability
                     .authorize()
                     .map_err(|_| RemoteUtilityError::Transport)?;
-                SshCancellationToken::linked(&self.cancellation, &capability.cancellation())
+                SshCancellationToken::linked(&request_cancellation, &capability.cancellation())
             }
-            None => self.cancellation.clone(),
+            None => request_cancellation,
         };
         let output = self
             .runner
@@ -540,19 +607,34 @@ fn build_account_script() -> Vec<u8> {
     format!("{COMMON_SCRIPT}\n{ACCOUNT_SCRIPT}").into_bytes()
 }
 
-fn build_path_script(operation: &str, path: &str) -> Vec<u8> {
+fn build_path_script(operation: &str, path: &str) -> Result<Vec<u8>, RemoteUtilityError> {
+    if path.len() > MAXIMUM_REMOTE_PATH_BYTES {
+        return Err(RemoteUtilityError::RequestTooLarge);
+    }
     let operation_script = match operation {
-        "list" => LIST_SCRIPT,
-        "probe" => PROBE_SCRIPT,
-        "mkdir" => MKDIR_SCRIPT,
-        "physical" => PHYSICAL_SCRIPT,
+        "list" => LIST_SCRIPT_TEMPLATE
+            .replace(
+                "__MAXIMUM_ENTRIES_EXAMINED__",
+                &MAXIMUM_REMOTE_DIRECTORY_ENTRIES_EXAMINED.to_string(),
+            )
+            .replace(
+                "__MAXIMUM_DIRECTORY_NAMES__",
+                &MAXIMUM_REMOTE_DIRECTORY_NAMES.to_string(),
+            ),
+        "probe" => PROBE_SCRIPT.to_owned(),
+        "mkdir" => MKDIR_SCRIPT.to_owned(),
+        "physical" => PHYSICAL_SCRIPT.to_owned(),
         _ => unreachable!("remote utility operation is fixed by the caller"),
     };
-    format!(
+    let script = format!(
         "{COMMON_SCRIPT}\ninput_path={}\n{PATH_EXPANSION_SCRIPT}\n{operation_script}",
         quote_for_posix_shell(path)
     )
-    .into_bytes()
+    .into_bytes();
+    if script.len() > MAXIMUM_REMOTE_UTILITY_REQUEST_BYTES {
+        return Err(RemoteUtilityError::RequestTooLarge);
+    }
+    Ok(script)
 }
 
 fn quote_for_posix_shell(value: &str) -> String {
@@ -584,6 +666,25 @@ const PATH_EXPANSION_SCRIPT: &str = r#"case "$input_path" in
     *) emit_empty protocol invalid-path; exit 0 ;;
 esac
 [ -n "$remote_path" ] || { emit_empty protocol invalid-path; exit 0; }
+classify_remote_path() {
+    path_status=missing
+    candidate=$remote_path
+    while :; do
+        if [ -e "$candidate" ]; then
+            if [ "$candidate" != "$remote_path" ]; then
+                [ -d "$candidate" ] || { path_status=not-directory; return; }
+                [ -x "$candidate" ] || { path_status=permission-denied; return; }
+            else
+                path_status=exists
+            fi
+            return
+        fi
+        [ "$candidate" != / ] || return
+        candidate=${candidate%/*}
+        [ -n "$candidate" ] || candidate=/
+    done
+}
+classify_remote_path
 "#;
 
 const ACCOUNT_SCRIPT: &str = r#"user=$(id -un 2>/dev/null) || { emit_empty account failed; exit 0; }
@@ -603,8 +704,8 @@ emit_field "$physical_home"
 printf '.\n'
 "#;
 
-const PROBE_SCRIPT: &str = r#"if [ ! -e "$remote_path" ]; then
-    emit_empty probe missing
+const PROBE_SCRIPT: &str = r#"if [ "$path_status" != exists ]; then
+    emit_empty probe "$path_status"
 elif [ ! -d "$remote_path" ]; then
     emit_empty probe not-directory
 elif [ ! -r "$remote_path" ] || [ ! -x "$remote_path" ]; then
@@ -614,8 +715,8 @@ else
 fi
 "#;
 
-const LIST_SCRIPT: &str = r#"if [ ! -e "$remote_path" ]; then
-    emit_empty list missing
+const LIST_SCRIPT_TEMPLATE: &str = r#"if [ "$path_status" != exists ]; then
+    emit_empty list "$path_status"
     exit 0
 fi
 if [ ! -d "$remote_path" ]; then
@@ -626,20 +727,60 @@ if [ ! -r "$remote_path" ] || [ ! -x "$remote_path" ]; then
     emit_empty list permission-denied
     exit 0
 fi
-emit_header list ok
-set +f
-directory_count=0
-listing_truncated=0
-for child in "$remote_path"/* "$remote_path"/.[!.]* "$remote_path"/..?*; do
-    [ -d "$child" ] || continue
-    directory_count=$((directory_count + 1))
-    if [ "$directory_count" -gt 1024 ]; then
-        listing_truncated=1
-        break
+state_directory=$(umask 077; mktemp -d "${TMPDIR:-/tmp}/spaceterm-list.XXXXXXXXXX") || {
+    emit_empty list failed
+    exit 0
+}
+state_file=$state_directory/state
+result_file=$state_directory/result
+cleanup_listing_state() {
+    rm -f "$state_file" "$result_file"
+    rmdir "$state_directory"
+}
+trap cleanup_listing_state EXIT HUP INT TERM
+printf '0 0 0\n' > "$state_file" || { emit_empty list failed; exit 0; }
+: > "$result_file" || { emit_empty list failed; exit 0; }
+find "$remote_path"/. ! -name . -prune -exec /bin/sh -c '
+    state_file=$1
+    result_file=$2
+    child=$3
+    IFS=" " read -r examined emitted truncated < "$state_file" || exit 70
+    examined=$((examined + 1))
+    if [ "$examined" -gt __MAXIMUM_ENTRIES_EXAMINED__ ]; then
+        truncated=1
+        printf "%s %s %s\n" "$examined" "$emitted" "$truncated" > "$state_file" || exit 70
+        kill -TERM "$PPID"
+        exit 0
     fi
-    child_name=${child##*/}
-    emit_field "$child_name"
-done
+    if [ -d "$child" ]; then
+        emitted=$((emitted + 1))
+        if [ "$emitted" -gt __MAXIMUM_DIRECTORY_NAMES__ ]; then
+            truncated=1
+            printf "%s %s %s\n" "$examined" "$emitted" "$truncated" > "$state_file" || exit 70
+            kill -TERM "$PPID"
+            exit 0
+        fi
+        child_name=${child##*/}
+        field_length=$(LC_ALL=C printf "%s" "$child_name" | LC_ALL=C wc -c | tr -d "[:space:]") || exit 70
+        {
+            printf "%s:" "$field_length"
+            printf "%s" "$child_name"
+            printf ","
+        } >> "$result_file" || exit 70
+    fi
+    printf "%s %s %s\n" "$examined" "$emitted" "$truncated" > "$state_file" || exit 70
+' spaceterm-enumerate "$state_file" "$result_file" {} \; 2>/dev/null
+find_status=$?
+IFS=' ' read -r examined emitted listing_truncated < "$state_file" || {
+    emit_empty list failed
+    exit 0
+}
+if [ "$find_status" -ne 0 ] && [ "$listing_truncated" -ne 1 ]; then
+    emit_empty list failed
+    exit 0
+fi
+emit_header list ok
+cat "$result_file" || exit 70
 printf '.\n%s\n' "$listing_truncated"
 "#;
 
@@ -652,8 +793,8 @@ else
 fi
 "#;
 
-const PHYSICAL_SCRIPT: &str = r#"if [ ! -e "$remote_path" ]; then
-    emit_empty physical missing
+const PHYSICAL_SCRIPT: &str = r#"if [ "$path_status" != exists ]; then
+    emit_empty physical "$path_status"
     exit 0
 fi
 if [ ! -d "$remote_path" ]; then
@@ -880,6 +1021,7 @@ mod tests {
     use std::future::Future;
     use std::io;
     use std::io::Write;
+    use std::os::unix::fs::PermissionsExt;
     use std::path::PathBuf;
     use std::pin::Pin;
     use std::process::{Command, Stdio};
@@ -1099,10 +1241,10 @@ mod tests {
     fn generated_remote_scripts_should_be_valid_posix_shell_syntax() {
         for script in [
             build_account_script(),
-            build_path_script("list", "/tmp/space ' with quote"),
-            build_path_script("probe", "~/project"),
-            build_path_script("mkdir", "/tmp/-leading"),
-            build_path_script("physical", "/tmp/project"),
+            build_path_script("list", "/tmp/space ' with quote").unwrap(),
+            build_path_script("probe", "~/project").unwrap(),
+            build_path_script("mkdir", "/tmp/-leading").unwrap(),
+            build_path_script("physical", "/tmp/project").unwrap(),
         ] {
             let mut child = Command::new("/bin/sh")
                 .arg("-n")
@@ -1184,6 +1326,138 @@ mod tests {
     }
 
     #[gpui::test]
+    fn path_request_limit_should_be_checked_before_quote_expansion(cx: &mut TestAppContext) {
+        let (client, runner) = client([success(response("probe", "missing", &[], ""))]);
+        let accepted = format!("/{}", "'".repeat(MAXIMUM_REMOTE_PATH_BYTES - 1));
+
+        assert_eq!(
+            cx.executor()
+                .block(client.probe_exact_path(remote_directory(&accepted)))
+                .unwrap(),
+            RemoteDirectoryProbe::Missing
+        );
+        let accepted_script_length = runner.state.lock().unwrap().scripts[0].len();
+        assert!(accepted_script_length <= MAXIMUM_REMOTE_UTILITY_REQUEST_BYTES);
+
+        let rejected = format!("/{}", "'".repeat(MAXIMUM_REMOTE_PATH_BYTES));
+        assert_eq!(
+            cx.executor()
+                .block(client.probe_exact_path(remote_directory(&rejected)))
+                .unwrap_err(),
+            RemoteUtilityError::RequestTooLarge
+        );
+        assert_eq!(runner.state.lock().unwrap().scripts.len(), 1);
+    }
+
+    #[test]
+    fn listing_script_should_bound_examined_entries_without_shell_globs() {
+        let script =
+            String::from_utf8(build_path_script("list", "/srv/-'projects").unwrap()).unwrap();
+
+        assert!(!script.contains("\"$remote_path\"/*"));
+        assert!(script.contains(&MAXIMUM_REMOTE_DIRECTORY_ENTRIES_EXAMINED.to_string()));
+        assert!(script.contains(&MAXIMUM_REMOTE_DIRECTORY_NAMES.to_string()));
+        assert!(script.contains("find \"$remote_path\"/."));
+    }
+
+    #[test]
+    fn injected_million_entry_enumerator_should_stop_at_the_examination_bound() {
+        let test_root = PathBuf::from(format!(
+            "/private/tmp/spaceterm-list-bound-{}",
+            std::process::id()
+        ));
+        let fake_bin = test_root.join("bin");
+        let fake_find = fake_bin.join("find");
+        let count_file = test_root.join("count");
+        let child_file = test_root.join("ordinary-file");
+        fs::create_dir_all(&fake_bin).unwrap();
+        fs::write(&child_file, b"not a directory").unwrap();
+        fs::write(
+            &fake_find,
+            br#"#!/bin/sh
+shift 6
+index=0
+while [ "$index" -lt 1000000 ]; do
+    index=$((index + 1))
+    printf '%s\n' "$index" > "$SPACETERM_FAKE_FIND_COUNT"
+    /bin/sh -c "$3" "$4" "$5" "$6" "$SPACETERM_FAKE_CHILD"
+done
+"#,
+        )
+        .unwrap();
+        fs::set_permissions(&fake_find, fs::Permissions::from_mode(0o700)).unwrap();
+        let script = build_path_script("list", test_root.to_str().unwrap()).unwrap();
+        let mut child = Command::new("/bin/sh")
+            .env_clear()
+            .env("HOME", "/private/tmp")
+            .env("PATH", format!("{}:/usr/bin:/bin", fake_bin.display()))
+            .env("TMPDIR", &test_root)
+            .env("SPACETERM_FAKE_FIND_COUNT", &count_file)
+            .env("SPACETERM_FAKE_CHILD", &child_file)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(&script).unwrap();
+        let output = child.wait_with_output().unwrap();
+
+        assert!(
+            output.status.success(),
+            "bounded list script failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let listing = parse_listing(&output.stdout).unwrap();
+        assert!(listing.names().is_empty());
+        assert!(listing.is_truncated());
+        assert_eq!(
+            fs::read_to_string(&count_file).unwrap().trim(),
+            (MAXIMUM_REMOTE_DIRECTORY_ENTRIES_EXAMINED + 1).to_string()
+        );
+        fs::remove_dir_all(test_root).unwrap();
+    }
+
+    #[test]
+    fn generated_listing_should_preserve_argv_safe_directory_names() {
+        let test_root = PathBuf::from(format!(
+            "/private/tmp/spaceterm-list-names-{}",
+            std::process::id()
+        ));
+        let expected = ["Space Term", "-'quoted", ".hidden", "line\nbreak"];
+        fs::create_dir_all(&test_root).unwrap();
+        for name in expected {
+            fs::create_dir(test_root.join(name)).unwrap();
+        }
+        fs::write(test_root.join("ordinary-file"), b"ignored").unwrap();
+        let script = build_path_script("list", test_root.to_str().unwrap()).unwrap();
+        let mut child = Command::new("/bin/sh")
+            .env_clear()
+            .env("HOME", "/private/tmp")
+            .env("PATH", "/usr/bin:/bin")
+            .env("TMPDIR", "/private/tmp")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(&script).unwrap();
+        let output = child.wait_with_output().unwrap();
+        fs::remove_dir_all(&test_root).unwrap();
+
+        assert!(
+            output.status.success(),
+            "listing script failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let listing = parse_listing(&output.stdout).unwrap();
+        for name in expected {
+            assert!(listing.names().iter().any(|candidate| candidate == name));
+        }
+        assert_eq!(listing.names().len(), expected.len());
+        assert!(!listing.is_truncated());
+    }
+
+    #[gpui::test]
     fn probe_create_and_physical_identity_should_decode_typed_results(cx: &mut TestAppContext) {
         let (client, _) = client([
             success(response("probe", "ok", &[], "")),
@@ -1206,6 +1480,81 @@ mod tests {
                 .block(client.resolve_physical_directory(directory))
                 .unwrap(),
             "/srv/real project"
+        );
+    }
+
+    #[gpui::test]
+    fn probe_should_distinguish_missing_type_and_access_errors(cx: &mut TestAppContext) {
+        let (client, _) = client([
+            success(response("probe", "missing", &[], "")),
+            success(response("probe", "not-directory", &[], "")),
+            success(response("probe", "permission-denied", &[], "")),
+        ]);
+
+        assert_eq!(
+            cx.executor()
+                .block(client.probe_exact_path(remote_directory("/srv/missing")))
+                .unwrap(),
+            RemoteDirectoryProbe::Missing
+        );
+        assert_eq!(
+            cx.executor()
+                .block(client.probe_exact_path(remote_directory("/srv/file/child")))
+                .unwrap_err(),
+            RemoteUtilityError::NotDirectory
+        );
+        assert_eq!(
+            cx.executor()
+                .block(client.probe_exact_path(remote_directory("/srv/private/child")))
+                .unwrap_err(),
+            RemoteUtilityError::PermissionDenied
+        );
+    }
+
+    #[test]
+    fn generated_probe_should_report_an_inaccessible_ancestor_without_claiming_missing() {
+        let test_root = PathBuf::from(format!(
+            "/private/tmp/spaceterm-probe-status-{}",
+            std::process::id()
+        ));
+        let private = test_root.join("private");
+        let ordinary_file = test_root.join("ordinary-file");
+        fs::create_dir_all(&private).unwrap();
+        fs::write(&ordinary_file, b"not a directory").unwrap();
+        fs::set_permissions(&private, fs::Permissions::from_mode(0o000)).unwrap();
+
+        let run_probe = |path: &std::path::Path| {
+            let script = build_path_script("probe", path.to_str().unwrap()).unwrap();
+            let mut child = Command::new("/bin/sh")
+                .env_clear()
+                .env("HOME", "/private/tmp")
+                .env("PATH", "/usr/bin:/bin")
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap();
+            child.stdin.take().unwrap().write_all(&script).unwrap();
+            child.wait_with_output().unwrap()
+        };
+
+        let inaccessible = run_probe(&private.join("child"));
+        let not_directory = run_probe(&ordinary_file.join("child"));
+        let missing = run_probe(&test_root.join("missing/child"));
+        fs::set_permissions(&private, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::remove_dir_all(&test_root).unwrap();
+
+        assert_eq!(
+            parse_probe(&inaccessible.stdout).unwrap_err(),
+            RemoteUtilityError::PermissionDenied
+        );
+        assert_eq!(
+            parse_probe(&not_directory.stdout).unwrap_err(),
+            RemoteUtilityError::NotDirectory
+        );
+        assert_eq!(
+            parse_probe(&missing.stdout).unwrap(),
+            RemoteDirectoryProbe::Missing
         );
     }
 

@@ -433,6 +433,9 @@ pub(super) struct RemoteWorkspacePicker {
     status: RemoteWorkspacePickerStatus,
     busy: Option<RemoteWorkspacePickerBusy>,
     creation_alert: Option<ModalPresentationHandle>,
+    account_task: Option<Task<()>>,
+    refresh_task: Option<Task<()>>,
+    validation_task: Option<Task<()>>,
 }
 
 impl EventEmitter<RemoteWorkspacePickerEvent> for RemoteWorkspacePicker {}
@@ -473,6 +476,9 @@ impl RemoteWorkspacePicker {
             status: RemoteWorkspacePickerStatus::DiscoveringAccount,
             busy: None,
             creation_alert: None,
+            account_task: None,
+            refresh_task: None,
+            validation_task: None,
         }
     }
 
@@ -511,6 +517,9 @@ impl RemoteWorkspacePicker {
         self.status = RemoteWorkspacePickerStatus::DiscoveringAccount;
         self.busy = None;
         self.creation_alert = None;
+        self.account_task.take();
+        self.refresh_task.take();
+        self.validation_task.take();
         self.palette.update(cx, |palette, cx| {
             palette.set_query_editable(true, cx);
             palette.set_dismissible(true, cx);
@@ -635,6 +644,9 @@ impl RemoteWorkspacePicker {
         self.listing_truncated = false;
         self.busy = None;
         self.creation_alert = None;
+        self.account_task.take();
+        self.refresh_task.take();
+        self.validation_task.take();
         self.lifecycle_generation = self.lifecycle_generation.wrapping_add(1);
         self.operation_generation = self.operation_generation.wrapping_add(1);
         match reason {
@@ -651,7 +663,8 @@ impl RemoteWorkspacePicker {
         let operation_generation = self.operation_generation;
         let lifecycle_generation = self.lifecycle_generation;
         let task = self.provider.discover_account();
-        cx.spawn_in(window, async move |picker, cx| {
+        self.account_task.take();
+        self.account_task = Some(cx.spawn_in(window, async move |picker, cx| {
             let result = task.await;
             let _ = picker.update_in(cx, |picker, window, cx| {
                 if !picker.open
@@ -673,8 +686,7 @@ impl RemoteWorkspacePicker {
                     }
                 }
             });
-        })
-        .detach();
+        }));
     }
 
     fn refresh_for_input(&mut self, value: String, window: &mut Window, cx: &mut Context<Self>) {
@@ -684,6 +696,7 @@ impl RemoteWorkspacePicker {
         let parsed = match parse_remote_workspace_path(&value) {
             Ok(parsed) => parsed,
             Err(error) => {
+                self.refresh_task.take();
                 self.parsed = None;
                 self.status = RemoteWorkspacePickerStatus::Invalid(error);
                 self.listing_error = None;
@@ -717,7 +730,8 @@ impl RemoteWorkspacePicker {
         let probe = self
             .provider
             .probe_exact_path(parsed.exact_directory().clone());
-        cx.spawn_in(window, async move |picker, cx| {
+        self.refresh_task.take();
+        self.refresh_task = Some(cx.spawn_in(window, async move |picker, cx| {
             let listing = match listing {
                 Some(task) => Some(task.await),
                 None => None,
@@ -732,8 +746,7 @@ impl RemoteWorkspacePicker {
             let _ = picker.update_in(cx, |picker, _, cx| {
                 picker.finish_refresh(completion, cx);
             });
-        })
-        .detach();
+        }));
         self.publish(cx);
     }
 
@@ -968,7 +981,8 @@ impl RemoteWorkspacePicker {
         });
         let provider = Arc::clone(&self.provider);
         let request = directory.clone();
-        cx.spawn_in(window, async move |picker, cx| {
+        self.validation_task.take();
+        self.validation_task = Some(cx.spawn_in(window, async move |picker, cx| {
             let result = match kind {
                 RemoteWorkspaceValidationKind::Creation => {
                     match provider.create_directory_recursively(request.clone()).await {
@@ -989,8 +1003,7 @@ impl RemoteWorkspacePicker {
             let _ = picker.update_in(cx, |picker, window, cx| {
                 picker.finish_validation(completion, window, cx);
             });
-        })
-        .detach();
+        }));
         self.publish(cx);
     }
 
@@ -1174,10 +1187,14 @@ fn gpui_color(color: Color) -> gpui::Rgba {
 mod tests {
     use std::cell::RefCell;
     use std::collections::VecDeque;
+    use std::future::pending;
     use std::rc::Rc;
+    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
     use std::sync::{Arc, Mutex};
 
-    use gpui::{Keystroke, Modifiers, Task, TestAppContext, VisualTestContext, div};
+    use gpui::{
+        BackgroundExecutor, Keystroke, Modifiers, Task, TestAppContext, VisualTestContext, div,
+    };
 
     use super::*;
 
@@ -1257,6 +1274,65 @@ mod tests {
                 .validations
                 .pop_front()
                 .unwrap_or_else(|| Task::ready(Err(RemoteWorkspaceProviderError::Other)))
+        }
+    }
+
+    struct PendingOperationDrop(Arc<AtomicUsize>);
+
+    impl Drop for PendingOperationDrop {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, AtomicOrdering::SeqCst);
+        }
+    }
+
+    struct CancellationTrackingRemoteWorkspaceProvider {
+        executor: BackgroundExecutor,
+        dropped_operations: Arc<AtomicUsize>,
+    }
+
+    impl CancellationTrackingRemoteWorkspaceProvider {
+        fn pending<T: Send + 'static>(&self) -> Task<Result<T, RemoteWorkspaceProviderError>> {
+            let dropped_operations = Arc::clone(&self.dropped_operations);
+            self.executor.spawn(async move {
+                let _drop = PendingOperationDrop(dropped_operations);
+                pending().await
+            })
+        }
+    }
+
+    impl RemoteWorkspaceProvider for CancellationTrackingRemoteWorkspaceProvider {
+        fn discover_account(
+            &self,
+        ) -> Task<Result<RemoteWorkspaceAccount, RemoteWorkspaceProviderError>> {
+            Task::ready(Ok(remote_account()))
+        }
+
+        fn list_directories(
+            &self,
+            _: RemoteWorkspaceDirectory,
+        ) -> Task<Result<RemoteWorkspaceDirectoryListing, RemoteWorkspaceProviderError>> {
+            self.pending()
+        }
+
+        fn probe_exact_path(
+            &self,
+            _: RemoteWorkspaceDirectory,
+        ) -> Task<Result<RemoteWorkspaceExactPathState, RemoteWorkspaceProviderError>> {
+            self.pending()
+        }
+
+        fn create_directory_recursively(
+            &self,
+            _: RemoteWorkspaceDirectory,
+        ) -> Task<Result<(), RemoteWorkspaceProviderError>> {
+            self.pending()
+        }
+
+        fn validate_physical_identity(
+            &self,
+            _: RemoteWorkspaceDirectory,
+        ) -> Task<Result<RemoteDirectoryIdentity, RemoteWorkspaceProviderError>> {
+            self.pending()
         }
     }
 
@@ -1540,6 +1616,40 @@ mod tests {
             picker.read_with(cx, |picker, cx| picker.palette.read(cx).query().to_owned()),
             current_query
         );
+    }
+
+    #[gpui::test]
+    fn superseded_remote_refresh_should_cancel_listing_and_probe_tasks(cx: &mut TestAppContext) {
+        let dropped_operations = Arc::new(AtomicUsize::new(0));
+        let provider = Arc::new(CancellationTrackingRemoteWorkspaceProvider {
+            executor: cx.executor(),
+            dropped_operations: Arc::clone(&dropped_operations),
+        });
+        cx.update(crate::ui::init);
+        let injected: Arc<dyn RemoteWorkspaceProvider + Send + Sync> = provider;
+        let (harness, cx) = cx.add_window_view(move |window, cx| {
+            let picker = cx.new(|cx| RemoteWorkspacePicker::new(injected, window, cx));
+            RemoteWorkspacePickerHarness { picker }
+        });
+        let picker = harness.read_with(cx, |harness, _| harness.picker.clone());
+        cx.update(|window, cx| {
+            window.activate_window();
+            picker.update(cx, |picker, cx| assert!(picker.open(window, cx)));
+        });
+        cx.run_until_parked();
+
+        cx.update(|window, cx| {
+            picker.update(cx, |picker, cx| {
+                picker.refresh_for_input("~/second/".to_owned(), window, cx);
+            });
+        });
+        cx.run_until_parked();
+
+        assert_eq!(dropped_operations.load(AtomicOrdering::SeqCst), 2);
+        picker.update(cx, |picker, cx| {
+            picker.finish_close(CommandPaletteCloseReason::Programmatic, cx);
+        });
+        cx.run_until_parked();
     }
 
     #[gpui::test]
