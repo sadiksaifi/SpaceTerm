@@ -8,8 +8,12 @@ use std::time::Duration;
 
 use thiserror::Error;
 
-use super::command::{SshCommandContext, SshCommandContextError};
+use super::command::{
+    PreparedSshPaneChannelCommand, SshCommandContext, SshCommandContextError,
+    ValidatedRemoteShellCommand,
+};
 use super::process::{ProcessExit, SshProcessBackend};
+use super::remote_utility::PreparedSshRemoteUtilityCommand;
 use crate::domain::SshDestination;
 use crate::platform::app_paths::{AppPaths, AppPathsError, RegisteredRuntimeSocket, RuntimeOwner};
 
@@ -128,6 +132,8 @@ pub(crate) enum ControlConnectionError {
     Command(#[from] SshCommandContextError),
     #[error("SSH control connection ownership was lost")]
     Ownership,
+    #[error("SSH control connection is not ready")]
+    NotReady,
 }
 
 pub(crate) struct OpenSshControlConnection<B: SshProcessBackend> {
@@ -222,6 +228,27 @@ impl<B: SshProcessBackend> OpenSshControlConnection<B> {
 
     pub(crate) fn control_path(&self) -> &Path {
         &self.control_path
+    }
+
+    pub(crate) fn remote_utility_command(
+        &self,
+    ) -> Result<PreparedSshRemoteUtilityCommand, ControlConnectionError> {
+        if self.state != ControlConnectionState::Ready {
+            return Err(ControlConnectionError::NotReady);
+        }
+        Ok(PreparedSshRemoteUtilityCommand::new(
+            self.commands.remote_utility(),
+        ))
+    }
+
+    pub(crate) fn prepare_pane_channel(
+        &self,
+        command: ValidatedRemoteShellCommand,
+    ) -> Result<PreparedSshPaneChannelCommand, ControlConnectionError> {
+        if self.state != ControlConnectionState::Ready {
+            return Err(ControlConnectionError::NotReady);
+        }
+        Ok(self.commands.prepare_pane_channel(command))
     }
 
     pub(crate) async fn shutdown(&mut self) -> Result<(), ControlConnectionError> {
@@ -553,6 +580,46 @@ mod tests {
             (connection.state(), mode),
             (ControlConnectionState::Ready, 0o600)
         );
+    }
+
+    #[gpui::test]
+    fn ready_connection_should_prepare_utility_and_single_use_pane_commands(
+        cx: &mut TestAppContext,
+    ) {
+        let directory = TestDirectory::new();
+        let paths = directory.paths();
+        let backend = Arc::new(FakeBackend::with_readiness([ProcessExit::successful()]));
+        let cancellation = SshCancellationToken::default();
+        let mut connection = cx
+            .executor()
+            .block(OpenSshControlConnection::connect(
+                &paths,
+                destination(),
+                backend,
+                &cancellation,
+                timing(),
+            ))
+            .unwrap();
+
+        assert!(connection.remote_utility_command().is_ok());
+        let pane = connection
+            .prepare_pane_channel(
+                ValidatedRemoteShellCommand::new("exec /bin/zsh -l".to_owned()).unwrap(),
+            )
+            .unwrap();
+        assert!(pane.take().is_ok());
+
+        connection.state = ControlConnectionState::ShuttingDown;
+        assert!(matches!(
+            connection.remote_utility_command(),
+            Err(ControlConnectionError::NotReady)
+        ));
+        assert!(matches!(
+            connection.prepare_pane_channel(
+                ValidatedRemoteShellCommand::new("exec /bin/zsh -l".to_owned()).unwrap()
+            ),
+            Err(ControlConnectionError::NotReady)
+        ));
     }
 
     #[gpui::test]

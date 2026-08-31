@@ -4,3 +4,5 @@ pub(crate) mod destination;
 pub(crate) mod host_config;
 pub(crate) mod managed_hosts;
 pub(crate) mod process;
+pub(crate) mod remote_utility;
+pub(crate) mod remote_workspace_provider;

@@ -27,21 +27,21 @@ const CREATE_ALERT_ID: &str = "remote-workspace-create-folder";
 pub(super) const MAXIMUM_REMOTE_WORKSPACE_DIRECTORY_ROWS: usize = 1024;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum RemoteWorkspaceAccountError {
+pub(crate) enum RemoteWorkspaceAccountError {
     InvalidUser,
     InvalidLoginShell,
 }
 
 /// Account facts discovered from the connected destination before remote path navigation begins.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(super) struct RemoteWorkspaceAccount {
+pub(crate) struct RemoteWorkspaceAccount {
     user: String,
     home_identity: RemoteDirectoryIdentity,
     login_shell: String,
 }
 
 impl RemoteWorkspaceAccount {
-    pub(super) fn new(
+    pub(crate) fn new(
         user: String,
         home_identity: RemoteDirectoryIdentity,
         login_shell: String,
@@ -63,21 +63,21 @@ impl RemoteWorkspaceAccount {
         })
     }
 
-    pub(super) fn user(&self) -> &str {
+    pub(crate) fn user(&self) -> &str {
         &self.user
     }
 
-    pub(super) const fn home_identity(&self) -> &RemoteDirectoryIdentity {
+    pub(crate) const fn home_identity(&self) -> &RemoteDirectoryIdentity {
         &self.home_identity
     }
 
-    pub(super) fn login_shell(&self) -> &str {
+    pub(crate) fn login_shell(&self) -> &str {
         &self.login_shell
     }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum RemoteWorkspaceProviderError {
+pub(crate) enum RemoteWorkspaceProviderError {
     ConnectionLost,
     Missing,
     NotDirectory,
@@ -87,7 +87,7 @@ pub(super) enum RemoteWorkspaceProviderError {
 }
 
 /// The connected-SSH boundary used by the picker. Every path crossing it is a remote string type.
-pub(super) trait RemoteWorkspaceProvider: Send + Sync {
+pub(crate) trait RemoteWorkspaceProvider: Send + Sync {
     fn discover_account(
         &self,
     ) -> Task<Result<RemoteWorkspaceAccount, RemoteWorkspaceProviderError>>;
@@ -206,40 +206,47 @@ pub(super) fn parse_remote_workspace_path(
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum RemoteWorkspaceDirectoryRowError {
+pub(crate) enum RemoteWorkspaceDirectoryRowError {
     InvalidName,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(super) struct RemoteWorkspaceDirectoryRow {
+pub(crate) struct RemoteWorkspaceDirectoryRow {
     name: String,
 }
 
 /// A defensively bounded one-level directory result from a remote provider.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(super) struct RemoteWorkspaceDirectoryListing {
+pub(crate) struct RemoteWorkspaceDirectoryListing {
     rows: Vec<RemoteWorkspaceDirectoryRow>,
     truncated: bool,
 }
 
 impl RemoteWorkspaceDirectoryListing {
-    pub(super) fn new(mut rows: Vec<RemoteWorkspaceDirectoryRow>) -> Self {
-        let truncated = rows.len() > MAXIMUM_REMOTE_WORKSPACE_DIRECTORY_ROWS;
+    pub(crate) fn new(rows: Vec<RemoteWorkspaceDirectoryRow>) -> Self {
+        Self::from_remote(rows, false)
+    }
+
+    pub(crate) fn from_remote(
+        mut rows: Vec<RemoteWorkspaceDirectoryRow>,
+        remotely_truncated: bool,
+    ) -> Self {
+        let truncated = remotely_truncated || rows.len() > MAXIMUM_REMOTE_WORKSPACE_DIRECTORY_ROWS;
         rows.truncate(MAXIMUM_REMOTE_WORKSPACE_DIRECTORY_ROWS);
         Self { rows, truncated }
     }
 
-    pub(super) fn rows(&self) -> &[RemoteWorkspaceDirectoryRow] {
+    pub(crate) fn rows(&self) -> &[RemoteWorkspaceDirectoryRow] {
         &self.rows
     }
 
-    pub(super) const fn is_truncated(&self) -> bool {
+    pub(crate) const fn is_truncated(&self) -> bool {
         self.truncated
     }
 }
 
 impl RemoteWorkspaceDirectoryRow {
-    pub(super) fn new(name: String) -> Result<Self, RemoteWorkspaceDirectoryRowError> {
+    pub(crate) fn new(name: String) -> Result<Self, RemoteWorkspaceDirectoryRowError> {
         if name.is_empty()
             || name == "."
             || name == ".."
@@ -251,7 +258,7 @@ impl RemoteWorkspaceDirectoryRow {
         Ok(Self { name })
     }
 
-    pub(super) fn name(&self) -> &str {
+    pub(crate) fn name(&self) -> &str {
         &self.name
     }
 }
@@ -287,7 +294,7 @@ pub(super) fn descend_remote_workspace_query(
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum RemoteWorkspaceExactPathState {
+pub(crate) enum RemoteWorkspaceExactPathState {
     ReadableDirectory,
     Missing,
 }
