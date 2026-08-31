@@ -9,6 +9,9 @@ mod ui;
 use gpui::{App, Application};
 
 fn main() {
+    if let Some(exit_code) = platform::macos_askpass_transport::dispatch_helper_from_environment() {
+        std::process::exit(exit_code);
+    }
     if let Err(error) = platform::acceptance_observation::configure_from_environment() {
         eprintln!("failed to configure acceptance observation: {error}");
         std::process::exit(2);
