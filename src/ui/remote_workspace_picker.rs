@@ -2,13 +2,114 @@
     not(test),
     expect(
         dead_code,
-        reason = "the path model lands before the Remote Workspace Picker GPUI surface"
+        reason = "the Remote Workspace Picker is wired into Workspace Manager in the next slice"
     )
 )]
 
-use std::cmp::Ordering;
+use std::{cmp::Ordering, sync::Arc};
 
-use crate::domain::{RemoteWorkspaceDirectory, RemoteWorkspaceValueError};
+use gpui::prelude::*;
+use gpui::{App, Context, Entity, EventEmitter, Render, Task, Window, div, px};
+use gpui_symbols::Icon;
+use spaceterm_ui::{
+    Alert, AlertOutcome, CommandPalette, CommandPaletteActivationPolicy, CommandPaletteCloseReason,
+    CommandPaletteConfirm, CommandPaletteEvent, CommandPaletteItem, CommandPaletteLifecycleEvent,
+    CommandPaletteMatching, ModalAction, ModalActionRole, ModalId, ModalPresentationHandle,
+};
+
+use crate::domain::{RemoteDirectoryIdentity, RemoteWorkspaceDirectory, RemoteWorkspaceValueError};
+use crate::theme::{ACTIVE_THEME, Color};
+
+const HOME_DISPLAY: &str = "~/";
+const ROW_ICON_SIZE: f32 = 14.0;
+const CREATE_ALERT_ID: &str = "remote-workspace-create-folder";
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum RemoteWorkspaceAccountError {
+    InvalidUser,
+    InvalidLoginShell,
+}
+
+/// Account facts discovered from the connected destination before remote path navigation begins.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct RemoteWorkspaceAccount {
+    user: String,
+    home_identity: RemoteDirectoryIdentity,
+    login_shell: String,
+}
+
+impl RemoteWorkspaceAccount {
+    pub(super) fn new(
+        user: String,
+        home_identity: RemoteDirectoryIdentity,
+        login_shell: String,
+    ) -> Result<Self, RemoteWorkspaceAccountError> {
+        if user.is_empty()
+            || user
+                .chars()
+                .any(|character| character.is_whitespace() || character.is_control())
+        {
+            return Err(RemoteWorkspaceAccountError::InvalidUser);
+        }
+        if login_shell.is_empty() || login_shell.chars().any(char::is_control) {
+            return Err(RemoteWorkspaceAccountError::InvalidLoginShell);
+        }
+        Ok(Self {
+            user,
+            home_identity,
+            login_shell,
+        })
+    }
+
+    pub(super) fn user(&self) -> &str {
+        &self.user
+    }
+
+    pub(super) const fn home_identity(&self) -> &RemoteDirectoryIdentity {
+        &self.home_identity
+    }
+
+    pub(super) fn login_shell(&self) -> &str {
+        &self.login_shell
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum RemoteWorkspaceProviderError {
+    ConnectionLost,
+    Missing,
+    NotDirectory,
+    PermissionDenied,
+    InvalidResponse,
+    Other,
+}
+
+/// The connected-SSH boundary used by the picker. Every path crossing it is a remote string type.
+pub(super) trait RemoteWorkspaceProvider: Send + Sync {
+    fn discover_account(
+        &self,
+    ) -> Task<Result<RemoteWorkspaceAccount, RemoteWorkspaceProviderError>>;
+
+    fn list_directories(
+        &self,
+        directory: RemoteWorkspaceDirectory,
+    ) -> Task<Result<Vec<RemoteWorkspaceDirectoryRow>, RemoteWorkspaceProviderError>>;
+
+    fn probe_exact_path(
+        &self,
+        directory: RemoteWorkspaceDirectory,
+    ) -> Task<Result<RemoteWorkspaceExactPathState, RemoteWorkspaceProviderError>>;
+
+    fn create_directory_recursively(
+        &self,
+        directory: RemoteWorkspaceDirectory,
+    ) -> Task<Result<(), RemoteWorkspaceProviderError>>;
+
+    fn validate_physical_identity(
+        &self,
+        directory: RemoteWorkspaceDirectory,
+    ) -> Task<Result<RemoteDirectoryIdentity, RemoteWorkspaceProviderError>>;
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum RemoteWorkspacePathFormatError {
@@ -186,9 +287,1167 @@ pub(super) fn remote_workspace_confirmation(
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct RemoteWorkspaceSelection {
+    directory: RemoteWorkspaceDirectory,
+    physical_directory: RemoteDirectoryIdentity,
+    account: RemoteWorkspaceAccount,
+}
+
+impl RemoteWorkspaceSelection {
+    pub(super) const fn directory(&self) -> &RemoteWorkspaceDirectory {
+        &self.directory
+    }
+
+    pub(super) const fn physical_directory(&self) -> &RemoteDirectoryIdentity {
+        &self.physical_directory
+    }
+
+    pub(super) const fn account(&self) -> &RemoteWorkspaceAccount {
+        &self.account
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) enum RemoteWorkspacePickerEvent {
+    StateChanged,
+    BackToHost,
+    Dismissed,
+    Confirmed(RemoteWorkspaceSelection),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RemoteWorkspacePickerStatus {
+    DiscoveringAccount,
+    Loading,
+    Readable,
+    Missing,
+    NotDirectory,
+    PermissionDenied,
+    ConnectionLost,
+    Other,
+    Invalid(RemoteWorkspacePathFormatError),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RemoteWorkspacePickerBusy {
+    CreationAlert,
+    Creating,
+    Validating,
+    AwaitingActivation,
+}
+
+#[derive(Clone)]
+struct LoadedRemoteDirectorySnapshot {
+    directory: RemoteWorkspaceDirectory,
+    entries: Vec<RemoteWorkspaceDirectoryRow>,
+}
+
+struct RefreshCompletion {
+    lifecycle_generation: u64,
+    operation_generation: u64,
+    parsed: ParsedRemoteWorkspacePath,
+    listing: Option<Result<Vec<RemoteWorkspaceDirectoryRow>, RemoteWorkspaceProviderError>>,
+    probe: Result<RemoteWorkspaceExactPathState, RemoteWorkspaceProviderError>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RemoteWorkspaceValidationKind {
+    Existing,
+    Creation,
+}
+
+struct ValidationCompletion {
+    lifecycle_generation: u64,
+    operation_generation: u64,
+    directory: RemoteWorkspaceDirectory,
+    result: Result<RemoteDirectoryIdentity, RemoteWorkspaceProviderError>,
+}
+
+/// One connected-destination directory chooser built on the reusable Command Palette.
+pub(super) struct RemoteWorkspacePicker {
+    provider: Arc<dyn RemoteWorkspaceProvider + Send + Sync>,
+    palette: Entity<CommandPalette<RemoteWorkspaceDirectoryRow>>,
+    opening: bool,
+    open: bool,
+    lifecycle_generation: u64,
+    operation_generation: u64,
+    account: Option<RemoteWorkspaceAccount>,
+    parsed: Option<ParsedRemoteWorkspacePath>,
+    snapshot: Option<LoadedRemoteDirectorySnapshot>,
+    rows: Vec<RemoteWorkspaceDirectoryRow>,
+    status: RemoteWorkspacePickerStatus,
+    busy: Option<RemoteWorkspacePickerBusy>,
+    creation_alert: Option<ModalPresentationHandle>,
+}
+
+impl EventEmitter<RemoteWorkspacePickerEvent> for RemoteWorkspacePicker {}
+
+impl RemoteWorkspacePicker {
+    pub(super) fn new(
+        provider: Arc<dyn RemoteWorkspaceProvider + Send + Sync>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let palette = cx.new(|cx| {
+            let mut palette = CommandPalette::new("Remote workspace path", Vec::new(), window, cx);
+            palette.set_matching(CommandPaletteMatching::Caller, cx);
+            palette.set_activation(CommandPaletteActivationPolicy::Continue, cx);
+            palette
+        });
+        cx.subscribe_in(
+            &palette,
+            window,
+            |picker, _, event: &CommandPaletteEvent<RemoteWorkspaceDirectoryRow>, window, cx| {
+                picker.reduce_palette_event(event, window, cx);
+            },
+        )
+        .detach();
+        Self {
+            provider,
+            palette,
+            opening: false,
+            open: false,
+            lifecycle_generation: 0,
+            operation_generation: 0,
+            account: None,
+            parsed: None,
+            snapshot: None,
+            rows: Vec::new(),
+            status: RemoteWorkspacePickerStatus::DiscoveringAccount,
+            busy: None,
+            creation_alert: None,
+        }
+    }
+
+    pub(super) fn open(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if self.open || self.opening {
+            self.refocus_path(window, cx);
+            return false;
+        }
+        self.opening = true;
+        self.lifecycle_generation = self.lifecycle_generation.wrapping_add(1);
+        self.operation_generation = self.operation_generation.wrapping_add(1);
+        self.account = None;
+        self.parsed = None;
+        self.snapshot = None;
+        self.rows.clear();
+        self.status = RemoteWorkspacePickerStatus::DiscoveringAccount;
+        self.busy = None;
+        self.creation_alert = None;
+        self.palette.update(cx, |palette, cx| {
+            palette.set_query_editable(true, cx);
+            palette.set_dismissible(true, cx);
+            palette.open(window, cx);
+        });
+        true
+    }
+
+    pub(super) const fn is_open(&self) -> bool {
+        self.open
+    }
+
+    pub(super) const fn blocks_terminal_input(&self) -> bool {
+        self.open || self.opening
+    }
+
+    pub(super) fn path_input_is_focused(&self, window: &Window, cx: &App) -> bool {
+        self.palette.read(cx).editor_is_focused(window, cx)
+    }
+
+    pub(super) fn refocus_path(&self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.open {
+            self.palette
+                .update(cx, |palette, cx| palette.focus_editor(window, cx));
+        }
+    }
+
+    pub(super) fn dismiss(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if !self.blocks_terminal_input() || self.busy.is_some() {
+            return false;
+        }
+        self.palette
+            .update(cx, |palette, cx| palette.dismiss(window, cx))
+    }
+
+    pub(super) fn complete_activation(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !self.open || self.busy != Some(RemoteWorkspacePickerBusy::AwaitingActivation) {
+            return false;
+        }
+        self.busy = None;
+        self.palette.update(cx, |palette, cx| {
+            palette.dismiss_without_restoring_focus(window, cx)
+        })
+    }
+
+    pub(super) fn activation_failed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.open && self.busy == Some(RemoteWorkspacePickerBusy::AwaitingActivation) {
+            self.busy = None;
+            self.status = RemoteWorkspacePickerStatus::Other;
+            self.publish(cx);
+            self.refocus_path(window, cx);
+        }
+    }
+
+    fn reduce_palette_event(
+        &mut self,
+        event: &CommandPaletteEvent<RemoteWorkspaceDirectoryRow>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match event {
+            CommandPaletteEvent::Lifecycle(CommandPaletteLifecycleEvent::Opened) => {
+                self.opening = false;
+                self.open = true;
+                self.palette
+                    .update(cx, |palette, cx| palette.set_query(HOME_DISPLAY, cx));
+                self.start_account_discovery(window, cx);
+                self.publish(cx);
+            }
+            CommandPaletteEvent::Lifecycle(CommandPaletteLifecycleEvent::Closed(reason)) => {
+                self.opening = false;
+                self.open = false;
+                self.account = None;
+                self.parsed = None;
+                self.snapshot = None;
+                self.rows.clear();
+                self.busy = None;
+                self.creation_alert = None;
+                self.lifecycle_generation = self.lifecycle_generation.wrapping_add(1);
+                self.operation_generation = self.operation_generation.wrapping_add(1);
+                match reason {
+                    CommandPaletteCloseReason::Escape => {
+                        cx.emit(RemoteWorkspacePickerEvent::BackToHost)
+                    }
+                    CommandPaletteCloseReason::Completed => {}
+                    _ => cx.emit(RemoteWorkspacePickerEvent::Dismissed),
+                }
+                cx.emit(RemoteWorkspacePickerEvent::StateChanged);
+                cx.notify();
+            }
+            CommandPaletteEvent::QueryChanged(query) => {
+                self.refresh_for_input(query.text().to_owned(), window, cx);
+            }
+            CommandPaletteEvent::Activated(activation) => {
+                self.descend_to(activation.item_id().clone(), window, cx);
+            }
+            CommandPaletteEvent::Confirmed => self.confirm_current(window, cx),
+            CommandPaletteEvent::HeaderAction(_) | CommandPaletteEvent::MenuAction(_) => {}
+        }
+    }
+
+    fn start_account_discovery(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.operation_generation = self.operation_generation.wrapping_add(1);
+        let operation_generation = self.operation_generation;
+        let lifecycle_generation = self.lifecycle_generation;
+        let task = self.provider.discover_account();
+        cx.spawn_in(window, async move |picker, cx| {
+            let result = task.await;
+            let _ = picker.update_in(cx, |picker, window, cx| {
+                if !picker.open
+                    || picker.lifecycle_generation != lifecycle_generation
+                    || picker.operation_generation != operation_generation
+                {
+                    return;
+                }
+                match result {
+                    Ok(account) => {
+                        picker.account = Some(account);
+                        let query = picker.palette.read(cx).query().to_owned();
+                        picker.refresh_for_input(query, window, cx);
+                    }
+                    Err(error) => {
+                        picker.status = status_for_provider_error(error);
+                        picker.clear_rows(cx);
+                        picker.publish(cx);
+                    }
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn refresh_for_input(&mut self, value: String, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.open || self.busy.is_some() || self.account.is_none() {
+            return;
+        }
+        let parsed = match parse_remote_workspace_path(&value) {
+            Ok(parsed) => parsed,
+            Err(error) => {
+                self.parsed = None;
+                self.status = RemoteWorkspacePickerStatus::Invalid(error);
+                self.operation_generation = self.operation_generation.wrapping_add(1);
+                self.clear_rows(cx);
+                self.publish(cx);
+                return;
+            }
+        };
+        let listing_needed = !self
+            .snapshot
+            .as_ref()
+            .is_some_and(|snapshot| snapshot.directory == *parsed.enumeration_directory());
+        self.parsed = Some(parsed.clone());
+        if !listing_needed {
+            self.rebuild_rows(cx);
+        }
+        self.status = RemoteWorkspacePickerStatus::Loading;
+        self.operation_generation = self.operation_generation.wrapping_add(1);
+        let operation_generation = self.operation_generation;
+        let lifecycle_generation = self.lifecycle_generation;
+        let listing = listing_needed.then(|| {
+            self.provider
+                .list_directories(parsed.enumeration_directory().clone())
+        });
+        let probe = self
+            .provider
+            .probe_exact_path(parsed.exact_directory().clone());
+        cx.spawn_in(window, async move |picker, cx| {
+            let listing = match listing {
+                Some(task) => Some(task.await),
+                None => None,
+            };
+            let completion = RefreshCompletion {
+                lifecycle_generation,
+                operation_generation,
+                parsed,
+                listing,
+                probe: probe.await,
+            };
+            let _ = picker.update_in(cx, |picker, _, cx| {
+                picker.finish_refresh(completion, cx);
+            });
+        })
+        .detach();
+        self.publish(cx);
+    }
+
+    fn finish_refresh(&mut self, completion: RefreshCompletion, cx: &mut Context<Self>) {
+        let Some(current) = self.parsed.as_ref() else {
+            return;
+        };
+        if !self.open
+            || self.lifecycle_generation != completion.lifecycle_generation
+            || self.operation_generation != completion.operation_generation
+            || current.exact_directory() != completion.parsed.exact_directory()
+            || current.enumeration_directory() != completion.parsed.enumeration_directory()
+        {
+            return;
+        }
+        let listing_error = match completion.listing {
+            Some(Ok(entries)) => {
+                self.snapshot = Some(LoadedRemoteDirectorySnapshot {
+                    directory: completion.parsed.enumeration_directory().clone(),
+                    entries,
+                });
+                self.rebuild_rows(cx);
+                None
+            }
+            Some(Err(error)) => Some(error),
+            None => None,
+        };
+        self.status = match listing_error {
+            Some(error) => status_for_provider_error(error),
+            None => match completion.probe {
+                Ok(RemoteWorkspaceExactPathState::ReadableDirectory) => {
+                    RemoteWorkspacePickerStatus::Readable
+                }
+                Ok(RemoteWorkspaceExactPathState::Missing) => RemoteWorkspacePickerStatus::Missing,
+                Err(error) => status_for_provider_error(error),
+            },
+        };
+        if listing_error.is_some() {
+            self.clear_rows(cx);
+        }
+        self.publish(cx);
+    }
+
+    fn rebuild_rows(&mut self, cx: &mut Context<Self>) {
+        let (Some(parsed), Some(snapshot)) = (self.parsed.as_ref(), self.snapshot.as_ref()) else {
+            return;
+        };
+        if snapshot.directory != *parsed.enumeration_directory() {
+            return;
+        }
+        self.rows = filter_remote_workspace_rows(parsed, &snapshot.entries);
+        let items = self
+            .rows
+            .iter()
+            .cloned()
+            .map(remote_directory_palette_item)
+            .collect();
+        self.palette
+            .update(cx, |palette, cx| palette.set_items(items, cx));
+    }
+
+    fn clear_rows(&mut self, cx: &mut Context<Self>) {
+        self.rows.clear();
+        self.palette
+            .update(cx, |palette, cx| palette.set_items(Vec::new(), cx));
+    }
+
+    fn descend_to(
+        &mut self,
+        row: RemoteWorkspaceDirectoryRow,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.busy.is_some() {
+            return;
+        }
+        let Some(parsed) = self.parsed.as_ref() else {
+            return;
+        };
+        let Ok(directory) = descend_remote_workspace_query(parsed, &row) else {
+            self.status = RemoteWorkspacePickerStatus::Other;
+            self.publish(cx);
+            return;
+        };
+        let query = directory.as_str().to_owned();
+        if !self.palette.read(cx).can_set_query_exactly(&query, cx) {
+            self.status = RemoteWorkspacePickerStatus::Other;
+            self.publish(cx);
+            return;
+        }
+        self.palette
+            .update(cx, |palette, cx| palette.set_query(query, cx));
+        self.refocus_path(window, cx);
+    }
+
+    fn confirm_current(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.busy.is_some() {
+            return;
+        }
+        let Some(parsed) = self.parsed.clone() else {
+            return;
+        };
+        match self.status {
+            RemoteWorkspacePickerStatus::Readable => {
+                self.start_validation(
+                    parsed.exact_directory().clone(),
+                    RemoteWorkspaceValidationKind::Existing,
+                    window,
+                    cx,
+                );
+            }
+            RemoteWorkspacePickerStatus::Missing => self.present_creation_alert(parsed, window, cx),
+            _ => {}
+        }
+    }
+
+    fn present_creation_alert(
+        &mut self,
+        parsed: ParsedRemoteWorkspacePath,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.busy = Some(RemoteWorkspacePickerBusy::CreationAlert);
+        self.publish(cx);
+        let directory = parsed.exact_directory().clone();
+        let expected = directory.clone();
+        let picker = cx.weak_entity();
+        let window_handle = window.window_handle();
+        let alert = Alert::new(
+            ModalId::new(CREATE_ALERT_ID),
+            "Create remote folder",
+            "Create Remote Folder?",
+            format!(
+                "Create {}? Missing parent folders will also be created.",
+                parsed.display()
+            ),
+            vec![
+                ModalAction::new(
+                    true,
+                    "Create Folder",
+                    ModalActionRole::Affirmative,
+                    "remote-workspace-create",
+                )
+                .default_action(true),
+                ModalAction::new(
+                    false,
+                    "Cancel",
+                    ModalActionRole::Cancel,
+                    "remote-workspace-create-cancel",
+                ),
+            ],
+        )
+        .present(window, cx, move |outcome, cx| {
+            let _ = window_handle.update(cx, |_, window, cx| {
+                let _ = picker.update(cx, |picker, cx| {
+                    picker.creation_alert = None;
+                    if !picker.open
+                        || picker.busy != Some(RemoteWorkspacePickerBusy::CreationAlert)
+                        || picker
+                            .parsed
+                            .as_ref()
+                            .map(|parsed| parsed.exact_directory())
+                            != Some(&expected)
+                    {
+                        return;
+                    }
+                    if matches!(
+                        outcome,
+                        AlertOutcome::Activated {
+                            action_id: true,
+                            ..
+                        }
+                    ) {
+                        picker.start_validation(
+                            directory,
+                            RemoteWorkspaceValidationKind::Creation,
+                            window,
+                            cx,
+                        );
+                    } else {
+                        picker.busy = None;
+                        picker.publish(cx);
+                        picker.refocus_path(window, cx);
+                    }
+                });
+            });
+        });
+        match alert {
+            Ok(handle) => self.creation_alert = Some(handle),
+            Err(_) => {
+                self.busy = None;
+                self.status = RemoteWorkspacePickerStatus::Other;
+                self.publish(cx);
+                self.refocus_path(window, cx);
+            }
+        }
+    }
+
+    fn start_validation(
+        &mut self,
+        directory: RemoteWorkspaceDirectory,
+        kind: RemoteWorkspaceValidationKind,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.operation_generation = self.operation_generation.wrapping_add(1);
+        let operation_generation = self.operation_generation;
+        let lifecycle_generation = self.lifecycle_generation;
+        self.busy = Some(match kind {
+            RemoteWorkspaceValidationKind::Existing => RemoteWorkspacePickerBusy::Validating,
+            RemoteWorkspaceValidationKind::Creation => RemoteWorkspacePickerBusy::Creating,
+        });
+        let provider = Arc::clone(&self.provider);
+        let request = directory.clone();
+        cx.spawn_in(window, async move |picker, cx| {
+            let result = match kind {
+                RemoteWorkspaceValidationKind::Creation => {
+                    match provider.create_directory_recursively(request.clone()).await {
+                        Ok(()) => provider.validate_physical_identity(request).await,
+                        Err(error) => Err(error),
+                    }
+                }
+                RemoteWorkspaceValidationKind::Existing => {
+                    provider.validate_physical_identity(request).await
+                }
+            };
+            let completion = ValidationCompletion {
+                lifecycle_generation,
+                operation_generation,
+                directory,
+                result,
+            };
+            let _ = picker.update_in(cx, |picker, window, cx| {
+                picker.finish_validation(completion, window, cx);
+            });
+        })
+        .detach();
+        self.publish(cx);
+    }
+
+    fn finish_validation(
+        &mut self,
+        completion: ValidationCompletion,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.open
+            || self.lifecycle_generation != completion.lifecycle_generation
+            || self.operation_generation != completion.operation_generation
+            || self.parsed.as_ref().map(|parsed| parsed.exact_directory())
+                != Some(&completion.directory)
+        {
+            return;
+        }
+        match completion.result {
+            Ok(physical_directory) => {
+                let Some(account) = self.account.clone() else {
+                    return;
+                };
+                self.busy = Some(RemoteWorkspacePickerBusy::AwaitingActivation);
+                self.sync_palette(cx);
+                cx.emit(RemoteWorkspacePickerEvent::Confirmed(
+                    RemoteWorkspaceSelection {
+                        directory: completion.directory,
+                        physical_directory,
+                        account,
+                    },
+                ));
+                cx.notify();
+            }
+            Err(error) => {
+                self.busy = None;
+                self.status = status_for_provider_error(error);
+                self.publish(cx);
+                self.refocus_path(window, cx);
+            }
+        }
+    }
+
+    fn can_confirm(&self) -> bool {
+        self.busy.is_none()
+            && matches!(
+                self.status,
+                RemoteWorkspacePickerStatus::Readable | RemoteWorkspacePickerStatus::Missing
+            )
+    }
+
+    fn confirmation_label(&self) -> &'static str {
+        if self.status == RemoteWorkspacePickerStatus::Missing {
+            "Create Folder"
+        } else {
+            "Open Remote Project"
+        }
+    }
+
+    fn empty_text(&self) -> &'static str {
+        match self.status {
+            RemoteWorkspacePickerStatus::DiscoveringAccount => "Discovering remote home\u{2026}",
+            RemoteWorkspacePickerStatus::Loading => "Reading remote folder\u{2026}",
+            RemoteWorkspacePickerStatus::Readable => "No folders here",
+            RemoteWorkspacePickerStatus::Missing => "No such remote folder",
+            RemoteWorkspacePickerStatus::NotDirectory => "Not a remote folder",
+            RemoteWorkspacePickerStatus::PermissionDenied => {
+                "Permission denied for this remote folder"
+            }
+            RemoteWorkspacePickerStatus::ConnectionLost => "SSH connection was lost",
+            RemoteWorkspacePickerStatus::Other => {
+                "SpaceTerm couldn\u{2019}t read this remote folder"
+            }
+            RemoteWorkspacePickerStatus::Invalid(error) => error.message(),
+        }
+    }
+
+    fn sync_palette(&self, cx: &mut Context<Self>) {
+        let loading = self.busy.is_some();
+        let confirm = CommandPaletteConfirm::new(self.confirmation_label())
+            .disabled(!self.can_confirm())
+            .debug_selector("remote-workspace-picker-confirm");
+        self.palette.update(cx, |palette, cx| {
+            palette.set_confirm(Some(confirm), cx);
+            palette.set_no_results_text(self.empty_text(), cx);
+            palette.set_loading(loading, cx);
+            palette.set_query_editable(!loading, cx);
+            palette.set_dismissible(!loading, cx);
+        });
+    }
+
+    fn publish(&mut self, cx: &mut Context<Self>) {
+        self.sync_palette(cx);
+        cx.emit(RemoteWorkspacePickerEvent::StateChanged);
+        cx.notify();
+    }
+
+    #[cfg(test)]
+    fn row_names(&self) -> Vec<String> {
+        self.rows.iter().map(|row| row.name().to_owned()).collect()
+    }
+}
+
+impl RemoteWorkspacePathFormatError {
+    const fn message(self) -> &'static str {
+        match self {
+            Self::Relative => "Enter an absolute path beginning with / or ~/.",
+            Self::BareTilde => "Use ~/ to open your remote home folder.",
+            Self::UnsupportedTilde => "Only ~/ is supported for home-relative remote paths.",
+            Self::InvalidControlCharacter => "Remote paths cannot contain control characters.",
+        }
+    }
+}
+
+impl Render for RemoteWorkspacePicker {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div().child(self.palette.clone())
+    }
+}
+
+fn remote_directory_palette_item(
+    row: RemoteWorkspaceDirectoryRow,
+) -> CommandPaletteItem<RemoteWorkspaceDirectoryRow> {
+    let icon_color = gpui_color(ACTIVE_THEME.icon_muted);
+    let selector = format!("remote-workspace-picker-row-{}", row.name());
+    let label = format!("{}/", row.name());
+    CommandPaletteItem::new(row, label)
+        .leading_icon(move |_| {
+            Icon::new("folder")
+                .size(px(ROW_ICON_SIZE))
+                .color(icon_color)
+                .into_any_element()
+        })
+        .debug_selector(selector)
+}
+
+fn status_for_provider_error(error: RemoteWorkspaceProviderError) -> RemoteWorkspacePickerStatus {
+    match error {
+        RemoteWorkspaceProviderError::ConnectionLost => RemoteWorkspacePickerStatus::ConnectionLost,
+        RemoteWorkspaceProviderError::Missing => RemoteWorkspacePickerStatus::Missing,
+        RemoteWorkspaceProviderError::NotDirectory => RemoteWorkspacePickerStatus::NotDirectory,
+        RemoteWorkspaceProviderError::PermissionDenied => {
+            RemoteWorkspacePickerStatus::PermissionDenied
+        }
+        RemoteWorkspaceProviderError::InvalidResponse | RemoteWorkspaceProviderError::Other => {
+            RemoteWorkspacePickerStatus::Other
+        }
+    }
+}
+
+fn gpui_color(color: Color) -> gpui::Rgba {
+    gpui::rgba(color.rgba_hex())
+}
+
 #[cfg(test)]
 mod tests {
+    use std::cell::RefCell;
+    use std::collections::VecDeque;
+    use std::rc::Rc;
+    use std::sync::{Arc, Mutex};
+
+    use gpui::{Keystroke, Modifiers, Task, TestAppContext, VisualTestContext, div};
+
     use super::*;
+
+    #[derive(Default)]
+    struct ScriptedRemoteWorkspaceProviderState {
+        accounts: VecDeque<Task<Result<RemoteWorkspaceAccount, RemoteWorkspaceProviderError>>>,
+        listings:
+            VecDeque<Task<Result<Vec<RemoteWorkspaceDirectoryRow>, RemoteWorkspaceProviderError>>>,
+        probes: VecDeque<Task<Result<RemoteWorkspaceExactPathState, RemoteWorkspaceProviderError>>>,
+        creations: VecDeque<Task<Result<(), RemoteWorkspaceProviderError>>>,
+        validations: VecDeque<Task<Result<RemoteDirectoryIdentity, RemoteWorkspaceProviderError>>>,
+        listed_directories: Vec<RemoteWorkspaceDirectory>,
+        created_directories: Vec<RemoteWorkspaceDirectory>,
+        validated_directories: Vec<RemoteWorkspaceDirectory>,
+    }
+
+    #[derive(Clone, Default)]
+    struct ScriptedRemoteWorkspaceProvider {
+        state: Arc<Mutex<ScriptedRemoteWorkspaceProviderState>>,
+    }
+
+    impl RemoteWorkspaceProvider for ScriptedRemoteWorkspaceProvider {
+        fn discover_account(
+            &self,
+        ) -> Task<Result<RemoteWorkspaceAccount, RemoteWorkspaceProviderError>> {
+            self.state
+                .lock()
+                .unwrap()
+                .accounts
+                .pop_front()
+                .unwrap_or_else(|| Task::ready(Err(RemoteWorkspaceProviderError::Other)))
+        }
+
+        fn list_directories(
+            &self,
+            directory: RemoteWorkspaceDirectory,
+        ) -> Task<Result<Vec<RemoteWorkspaceDirectoryRow>, RemoteWorkspaceProviderError>> {
+            let mut state = self.state.lock().unwrap();
+            state.listed_directories.push(directory);
+            state
+                .listings
+                .pop_front()
+                .unwrap_or_else(|| Task::ready(Err(RemoteWorkspaceProviderError::Other)))
+        }
+
+        fn probe_exact_path(
+            &self,
+            _directory: RemoteWorkspaceDirectory,
+        ) -> Task<Result<RemoteWorkspaceExactPathState, RemoteWorkspaceProviderError>> {
+            self.state
+                .lock()
+                .unwrap()
+                .probes
+                .pop_front()
+                .unwrap_or_else(|| Task::ready(Err(RemoteWorkspaceProviderError::Other)))
+        }
+
+        fn create_directory_recursively(
+            &self,
+            directory: RemoteWorkspaceDirectory,
+        ) -> Task<Result<(), RemoteWorkspaceProviderError>> {
+            let mut state = self.state.lock().unwrap();
+            state.created_directories.push(directory);
+            state
+                .creations
+                .pop_front()
+                .unwrap_or_else(|| Task::ready(Err(RemoteWorkspaceProviderError::Other)))
+        }
+
+        fn validate_physical_identity(
+            &self,
+            directory: RemoteWorkspaceDirectory,
+        ) -> Task<Result<RemoteDirectoryIdentity, RemoteWorkspaceProviderError>> {
+            let mut state = self.state.lock().unwrap();
+            state.validated_directories.push(directory);
+            state
+                .validations
+                .pop_front()
+                .unwrap_or_else(|| Task::ready(Err(RemoteWorkspaceProviderError::Other)))
+        }
+    }
+
+    struct RemoteWorkspacePickerHarness {
+        picker: gpui::Entity<RemoteWorkspacePicker>,
+    }
+
+    impl gpui::Render for RemoteWorkspacePickerHarness {
+        fn render(
+            &mut self,
+            _: &mut gpui::Window,
+            _: &mut gpui::Context<Self>,
+        ) -> impl gpui::IntoElement {
+            spaceterm_ui::ModalLayer::new(div().size_full().child(self.picker.clone()))
+        }
+    }
+
+    fn remote_account() -> RemoteWorkspaceAccount {
+        RemoteWorkspaceAccount::new(
+            "tester".to_owned(),
+            RemoteDirectoryIdentity::new("/home/tester".to_owned()).unwrap(),
+            "/bin/zsh".to_owned(),
+        )
+        .unwrap()
+    }
+
+    fn scripted_provider(
+        listings: impl IntoIterator<
+            Item = Result<Vec<RemoteWorkspaceDirectoryRow>, RemoteWorkspaceProviderError>,
+        >,
+        probes: impl IntoIterator<
+            Item = Result<RemoteWorkspaceExactPathState, RemoteWorkspaceProviderError>,
+        >,
+        creations: impl IntoIterator<Item = Result<(), RemoteWorkspaceProviderError>>,
+        validations: impl IntoIterator<
+            Item = Result<RemoteDirectoryIdentity, RemoteWorkspaceProviderError>,
+        >,
+    ) -> Arc<ScriptedRemoteWorkspaceProvider> {
+        Arc::new(ScriptedRemoteWorkspaceProvider {
+            state: Arc::new(Mutex::new(ScriptedRemoteWorkspaceProviderState {
+                accounts: [Task::ready(Ok(remote_account()))].into(),
+                listings: listings.into_iter().map(Task::ready).collect(),
+                probes: probes.into_iter().map(Task::ready).collect(),
+                creations: creations.into_iter().map(Task::ready).collect(),
+                validations: validations.into_iter().map(Task::ready).collect(),
+                ..ScriptedRemoteWorkspaceProviderState::default()
+            })),
+        })
+    }
+
+    fn remote_workspace_picker(
+        provider: Arc<ScriptedRemoteWorkspaceProvider>,
+        cx: &mut TestAppContext,
+    ) -> (
+        gpui::Entity<RemoteWorkspacePicker>,
+        Rc<RefCell<Vec<RemoteWorkspacePickerEvent>>>,
+        &mut VisualTestContext,
+    ) {
+        cx.update(crate::ui::init);
+        let injected: Arc<dyn RemoteWorkspaceProvider + Send + Sync> = provider;
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let recorded_events = Rc::clone(&events);
+        let (harness, cx) = cx.add_window_view(move |window, cx| {
+            let picker = cx.new(|cx| RemoteWorkspacePicker::new(injected, window, cx));
+            cx.subscribe(
+                &picker,
+                move |_, _, event: &RemoteWorkspacePickerEvent, _| {
+                    recorded_events.borrow_mut().push(event.clone());
+                },
+            )
+            .detach();
+            RemoteWorkspacePickerHarness { picker }
+        });
+        let picker = harness.read_with(cx, |harness, _| harness.picker.clone());
+        cx.update(|window, cx| {
+            window.activate_window();
+            picker.update(cx, |picker, cx| assert!(picker.open(window, cx)));
+        });
+        cx.run_until_parked();
+        (picker, events, cx)
+    }
+
+    #[gpui::test]
+    fn remote_picker_lists_home_and_descends_without_closing(cx: &mut TestAppContext) {
+        let provider = scripted_provider(
+            [
+                Ok(remote_rows(["Projects", ".ssh", "alpha"])),
+                Ok(remote_rows(["SpaceTerm"])),
+            ],
+            [
+                Ok(RemoteWorkspaceExactPathState::ReadableDirectory),
+                Ok(RemoteWorkspaceExactPathState::ReadableDirectory),
+            ],
+            [],
+            [],
+        );
+        let (picker, _, cx) = remote_workspace_picker(Arc::clone(&provider), cx);
+
+        assert_eq!(
+            picker.read_with(cx, |picker, _| picker.row_names()),
+            vec!["alpha", "Projects"]
+        );
+        cx.update(|window, cx| {
+            window.dispatch_keystroke(Keystroke::parse("enter").unwrap(), cx);
+        });
+        cx.run_until_parked();
+
+        assert_eq!(
+            picker.read_with(cx, |picker, cx| picker.palette.read(cx).query().to_owned()),
+            "~/alpha/"
+        );
+        assert!(picker.read_with(cx, |picker, _| picker.is_open()));
+    }
+
+    #[gpui::test]
+    fn missing_remote_path_changes_the_sole_confirmation_to_create(cx: &mut TestAppContext) {
+        let provider = scripted_provider(
+            [Ok(Vec::new())],
+            [Ok(RemoteWorkspaceExactPathState::Missing)],
+            [],
+            [],
+        );
+        let (picker, _, cx) = remote_workspace_picker(provider, cx);
+
+        assert_eq!(
+            picker.read_with(cx, |picker, _| (
+                picker.confirmation_label(),
+                picker.can_confirm()
+            )),
+            ("Create Folder", true)
+        );
+        assert!(cx.debug_bounds("remote-workspace-picker-confirm").is_some());
+    }
+
+    #[gpui::test]
+    fn create_confirmation_uses_alert_then_emits_validated_remote_selection(
+        cx: &mut TestAppContext,
+    ) {
+        let identity =
+            RemoteDirectoryIdentity::new("/home/tester/Projects/new".to_owned()).unwrap();
+        let provider = scripted_provider(
+            [Ok(Vec::new()), Ok(Vec::new())],
+            [
+                Ok(RemoteWorkspaceExactPathState::ReadableDirectory),
+                Ok(RemoteWorkspaceExactPathState::Missing),
+            ],
+            [Ok(())],
+            [Ok(identity.clone())],
+        );
+        let (picker, events, cx) = remote_workspace_picker(Arc::clone(&provider), cx);
+        set_remote_input(&picker, "~/Projects/new", cx);
+
+        cx.update(|window, cx| {
+            picker.update(cx, |picker, cx| picker.confirm_current(window, cx));
+        });
+        cx.run_until_parked();
+        let create = cx
+            .debug_bounds("modal-action-remote-workspace-create")
+            .expect("creation Alert should expose its typed affirmative action");
+        cx.simulate_click(create.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        let expected = remote_directory("~/Projects/new");
+        let records = provider.state.lock().unwrap();
+        assert_eq!(records.created_directories, vec![expected.clone()]);
+        assert_eq!(records.validated_directories, vec![expected.clone()]);
+        drop(records);
+        let selection = events.borrow().iter().find_map(|event| match event {
+            RemoteWorkspacePickerEvent::Confirmed(selection) => Some(selection.clone()),
+            _ => None,
+        });
+        let selection = selection.expect("validated selection should be emitted");
+        assert_eq!(selection.directory(), &expected);
+        assert_eq!(selection.physical_directory(), &identity);
+        assert_eq!(selection.account().user(), "tester");
+        assert_eq!(selection.account().home_identity().as_str(), "/home/tester");
+        assert_eq!(selection.account().login_shell(), "/bin/zsh");
+    }
+
+    #[gpui::test]
+    fn stale_remote_refresh_cannot_replace_the_current_readable_state(cx: &mut TestAppContext) {
+        let provider = scripted_provider(
+            [Ok(Vec::new())],
+            [Ok(RemoteWorkspaceExactPathState::ReadableDirectory)],
+            [],
+            [],
+        );
+        let (picker, _, cx) = remote_workspace_picker(provider, cx);
+        let (lifecycle_generation, operation_generation, parsed) =
+            picker.read_with(cx, |picker, _| {
+                (
+                    picker.lifecycle_generation,
+                    picker.operation_generation,
+                    picker.parsed.clone().unwrap(),
+                )
+            });
+
+        picker.update(cx, |picker, cx| {
+            picker.finish_refresh(
+                RefreshCompletion {
+                    lifecycle_generation,
+                    operation_generation: operation_generation.wrapping_sub(1),
+                    parsed,
+                    listing: Some(Err(RemoteWorkspaceProviderError::PermissionDenied)),
+                    probe: Err(RemoteWorkspaceProviderError::ConnectionLost),
+                },
+                cx,
+            );
+        });
+
+        assert_eq!(
+            picker.read_with(cx, |picker, _| picker.status),
+            RemoteWorkspacePickerStatus::Readable
+        );
+    }
+
+    #[gpui::test]
+    fn remote_listing_errors_are_specific_and_never_keep_unread_rows(cx: &mut TestAppContext) {
+        let provider = scripted_provider(
+            [Err(RemoteWorkspaceProviderError::PermissionDenied)],
+            [Ok(RemoteWorkspaceExactPathState::ReadableDirectory)],
+            [],
+            [],
+        );
+        let (picker, _, cx) = remote_workspace_picker(provider, cx);
+
+        assert_eq!(
+            picker.read_with(cx, |picker, _| {
+                (picker.status, picker.empty_text(), picker.row_names())
+            }),
+            (
+                RemoteWorkspacePickerStatus::PermissionDenied,
+                "Permission denied for this remote folder",
+                Vec::<String>::new(),
+            )
+        );
+    }
+
+    #[gpui::test]
+    fn escape_steps_back_but_programmatic_dismissal_ends_the_flow(cx: &mut TestAppContext) {
+        let provider = scripted_provider(
+            [Ok(Vec::new())],
+            [Ok(RemoteWorkspaceExactPathState::ReadableDirectory)],
+            [],
+            [],
+        );
+        let (picker, events, cx) = remote_workspace_picker(provider, cx);
+        assert!(picker.read_with(cx, |picker, _| picker.blocks_terminal_input()));
+        assert!(cx.update(|window, cx| picker.read(cx).path_input_is_focused(window, cx)));
+
+        cx.update(|window, cx| {
+            window.dispatch_keystroke(Keystroke::parse("escape").unwrap(), cx);
+        });
+        cx.run_until_parked();
+
+        assert!(!picker.read_with(cx, |picker, _| picker.blocks_terminal_input()));
+        assert!(
+            events
+                .borrow()
+                .contains(&RemoteWorkspacePickerEvent::BackToHost)
+        );
+        assert!(
+            !events
+                .borrow()
+                .contains(&RemoteWorkspacePickerEvent::Dismissed)
+        );
+    }
+
+    #[gpui::test]
+    fn non_back_dismissal_emits_dismissed(cx: &mut TestAppContext) {
+        let provider = scripted_provider(
+            [Ok(Vec::new())],
+            [Ok(RemoteWorkspaceExactPathState::ReadableDirectory)],
+            [],
+            [],
+        );
+        let (picker, events, cx) = remote_workspace_picker(provider, cx);
+
+        assert!(
+            cx.update(|window, cx| { picker.update(cx, |picker, cx| picker.dismiss(window, cx)) })
+        );
+        cx.run_until_parked();
+
+        assert!(
+            events
+                .borrow()
+                .contains(&RemoteWorkspacePickerEvent::Dismissed)
+        );
+        assert!(
+            !events
+                .borrow()
+                .contains(&RemoteWorkspacePickerEvent::BackToHost)
+        );
+    }
+
+    #[gpui::test]
+    fn validation_makes_the_path_read_only_until_the_parent_advances(cx: &mut TestAppContext) {
+        let identity = RemoteDirectoryIdentity::new("/home/tester".to_owned()).unwrap();
+        let provider = scripted_provider(
+            [Ok(Vec::new())],
+            [Ok(RemoteWorkspaceExactPathState::ReadableDirectory)],
+            [],
+            [Ok(identity)],
+        );
+        let (picker, events, cx) = remote_workspace_picker(provider, cx);
+
+        cx.update(|window, cx| {
+            picker.update(cx, |picker, cx| picker.confirm_current(window, cx));
+            for key in ["cmd-a", "x", "escape"] {
+                window.dispatch_keystroke(Keystroke::parse(key).unwrap(), cx);
+            }
+        });
+        let query = picker.read_with(cx, |picker, cx| picker.palette.read(cx).query().to_owned());
+        let dismissed =
+            cx.update(|window, cx| picker.update(cx, |picker, cx| picker.dismiss(window, cx)));
+        cx.run_until_parked();
+
+        assert_eq!(query, HOME_DISPLAY);
+        assert!(!dismissed);
+        assert!(
+            events
+                .borrow()
+                .iter()
+                .any(|event| { matches!(event, RemoteWorkspacePickerEvent::Confirmed(_)) })
+        );
+        assert_eq!(
+            picker.read_with(cx, |picker, _| picker.busy),
+            Some(RemoteWorkspacePickerBusy::AwaitingActivation)
+        );
+    }
+
+    fn set_remote_input(
+        picker: &gpui::Entity<RemoteWorkspacePicker>,
+        value: &str,
+        cx: &mut VisualTestContext,
+    ) {
+        cx.update(|_, cx| {
+            picker.update(cx, |picker, cx| {
+                picker
+                    .palette
+                    .update(cx, |palette, cx| palette.set_query(value, cx));
+            });
+        });
+        cx.run_until_parked();
+    }
+
+    fn remote_directory(value: &str) -> RemoteWorkspaceDirectory {
+        RemoteWorkspaceDirectory::new(value.to_owned()).unwrap()
+    }
 
     #[test]
     fn remote_path_parser_should_accept_root_without_rewriting_it() {
