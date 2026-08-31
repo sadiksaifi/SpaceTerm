@@ -226,6 +226,38 @@ impl RuntimeOwner {
         Ok(RuntimeArtifact { path, file })
     }
 
+    pub(crate) fn register_socket(
+        &self,
+        name: &str,
+    ) -> Result<RegisteredRuntimeSocket, AppPathsError> {
+        validate_child_name(name)?;
+        self.verify_identity()?;
+        let path = self.path.join(name);
+        let socket_name = OsStr::new(name);
+        let before = inspect_socket_entry_at(&self.directory.file, socket_name, &path, None)?;
+        set_entry_mode_at(&self.directory.file, socket_name, PRIVATE_ARTIFACT_MODE).map_err(
+            |source| AppPathsError::SetPermissions {
+                path: path.clone(),
+                source,
+            },
+        )?;
+        let after = inspect_socket_entry_at(
+            &self.directory.file,
+            socket_name,
+            &path,
+            Some(PRIVATE_ARTIFACT_MODE),
+        )?;
+        if before != after {
+            return Err(AppPathsError::UnsafePath { path });
+        }
+        if let Err(error) = self.verify_identity() {
+            let _ = remove_file_at(&self.directory.file, socket_name);
+            return Err(error);
+        }
+        self.artifacts.borrow_mut().push(socket_name.to_os_string());
+        Ok(RegisteredRuntimeSocket { path })
+    }
+
     pub(crate) fn close(mut self) -> Result<(), AppPathsError> {
         let result = self.cleanup();
         if result.is_ok() {
@@ -280,6 +312,17 @@ impl Drop for RuntimeOwner {
 pub(crate) struct RuntimeArtifact {
     path: PathBuf,
     file: File,
+}
+
+#[derive(Debug)]
+pub(crate) struct RegisteredRuntimeSocket {
+    path: PathBuf,
+}
+
+impl RegisteredRuntimeSocket {
+    pub(crate) fn path(&self) -> &Path {
+        &self.path
+    }
 }
 
 impl RuntimeArtifact {
@@ -507,33 +550,70 @@ fn ensure_private_directory(path: &Path) -> Result<PrivateDirectory, AppPathsErr
         let (directory, created) = match open_directory_at(&parent, name) {
             Ok(directory) => (directory, false),
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                create_directory_at(&parent, name).map_err(|source| {
-                    AppPathsError::CreateDirectory {
-                        path: traversed.clone(),
-                        source,
+                let created = match create_directory_at(&parent, name) {
+                    Ok(()) => {
+                        if let Err(source) = rollback.record(&parent, name) {
+                            let _ = remove_directory_at(&parent, name);
+                            return Err(AppPathsError::InspectPath {
+                                path: traversed.clone(),
+                                source,
+                            });
+                        }
+                        true
                     }
-                })?;
-                if let Err(source) = rollback.record(&parent, name) {
-                    let _ = remove_directory_at(&parent, name);
-                    return Err(AppPathsError::InspectPath {
-                        path: traversed.clone(),
-                        source,
-                    });
-                }
+                    Err(error) if error.kind() == io::ErrorKind::AlreadyExists => false,
+                    Err(source) => {
+                        return Err(AppPathsError::CreateDirectory {
+                            path: traversed.clone(),
+                            source,
+                        });
+                    }
+                };
                 let directory = open_directory_at(&parent, name).map_err(|source| {
-                    AppPathsError::InspectPath {
-                        path: traversed.clone(),
-                        source,
+                    if matches!(source.raw_os_error(), Some(code) if code == libc::ELOOP || code == libc::ENOTDIR)
+                    {
+                        AppPathsError::UnsafePath {
+                            path: traversed.clone(),
+                        }
+                    } else {
+                        AppPathsError::InspectPath {
+                            path: traversed.clone(),
+                            source,
+                        }
                     }
                 })?;
-                set_file_mode(&directory, PRIVATE_DIRECTORY_MODE).map_err(|source| {
-                    AppPathsError::SetPermissions {
-                        path: traversed.clone(),
-                        source,
+                if created {
+                    set_file_mode(&directory, PRIVATE_DIRECTORY_MODE).map_err(|source| {
+                        AppPathsError::SetPermissions {
+                            path: traversed.clone(),
+                            source,
+                        }
+                    })?;
+                }
+                validate_private_open_directory(&directory, &traversed).map_err(|error| {
+                    if created {
+                        error
+                    } else {
+                        AppPathsError::UnsafePath {
+                            path: traversed.clone(),
+                        }
                     }
                 })?;
-                validate_private_open_directory(&directory, &traversed)?;
-                (directory, true)
+                if !created && is_final {
+                    let metadata =
+                        directory
+                            .metadata()
+                            .map_err(|source| AppPathsError::InspectPath {
+                                path: traversed.clone(),
+                                source,
+                            })?;
+                    if metadata.uid() != effective_user_id() {
+                        return Err(AppPathsError::UnsafePath {
+                            path: traversed.clone(),
+                        });
+                    }
+                }
+                (directory, created)
             }
             Err(source) if matches!(source.raw_os_error(), Some(code) if code == libc::ELOOP || code == libc::ENOTDIR) =>
             {
@@ -715,6 +795,65 @@ fn set_file_mode(file: &File, mode: u32) -> io::Result<()> {
     }
 }
 
+fn inspect_socket_entry_at(
+    parent: &File,
+    name: &OsStr,
+    path: &Path,
+    expected_mode: Option<u32>,
+) -> Result<DirectoryIdentity, AppPathsError> {
+    let name = component_cstring(name).map_err(|source| AppPathsError::InspectPath {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    // SAFETY: `status` is initialized for `fstatat`, and `name` is NUL-terminated.
+    let mut status = unsafe { std::mem::zeroed::<libc::stat>() };
+    // SAFETY: both pointers are valid for the duration of this call.
+    let result = unsafe {
+        libc::fstatat(
+            parent.as_raw_fd(),
+            name.as_ptr(),
+            &mut status,
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    };
+    if result != 0 {
+        return Err(AppPathsError::InspectPath {
+            path: path.to_path_buf(),
+            source: io::Error::last_os_error(),
+        });
+    }
+    let mode = u32::from(status.st_mode);
+    let socket = mode & u32::from(libc::S_IFMT) == u32::from(libc::S_IFSOCK);
+    let expected_mode = expected_mode.is_none_or(|expected| mode & 0o777 == expected);
+    if !socket || status.st_uid != effective_user_id() || !expected_mode {
+        return Err(AppPathsError::UnsafePath {
+            path: path.to_path_buf(),
+        });
+    }
+    Ok(DirectoryIdentity {
+        device: status.st_dev as u64,
+        inode: status.st_ino,
+    })
+}
+
+fn set_entry_mode_at(parent: &File, name: &OsStr, mode: u32) -> io::Result<()> {
+    let name = component_cstring(name)?;
+    // SAFETY: `name` is NUL-terminated and `fchmodat` does not retain the pointer.
+    let result = unsafe {
+        libc::fchmodat(
+            parent.as_raw_fd(),
+            name.as_ptr(),
+            mode as libc::mode_t,
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
 fn remove_file_at(parent: &File, name: &OsStr) -> io::Result<()> {
     unlink_at(parent, name, 0)
 }
@@ -756,7 +895,8 @@ fn effective_user_id() -> u32 {
 mod tests {
     use std::fs;
     use std::os::unix::ffi::OsStrExt;
-    use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
+    use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt, symlink};
+    use std::os::unix::net::UnixListener;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     use super::*;
@@ -1037,6 +1177,40 @@ mod tests {
                 maximum: MACOS_UNIX_SOCKET_PATH_BYTES,
             }) if actual == MACOS_UNIX_SOCKET_PATH_BYTES + 1
         ));
+    }
+
+    #[test]
+    fn registered_socket_should_be_owner_only_and_removed_with_its_runtime_owner() {
+        let root = TestDirectory::new("registered-socket");
+        let paths = AppPaths::resolve(&environment(&root.path)).unwrap();
+        let owner = paths.create_runtime_owner("ssh").unwrap();
+        let socket_path = owner.socket_path("control.sock").unwrap();
+        let listener = UnixListener::bind(&socket_path).unwrap();
+
+        let socket = owner.register_socket("control.sock").unwrap();
+
+        let metadata = fs::symlink_metadata(socket.path()).unwrap();
+        assert!(metadata.file_type().is_socket());
+        assert_eq!(metadata.uid(), unsafe { libc::geteuid() });
+        assert_eq!(metadata.mode() & 0o777, 0o600);
+        drop(listener);
+        owner.close().unwrap();
+        assert!(!socket_path.exists());
+    }
+
+    #[test]
+    fn socket_registration_should_reject_a_non_socket_artifact() {
+        let root = TestDirectory::new("invalid-socket");
+        let paths = AppPaths::resolve(&environment(&root.path)).unwrap();
+        let owner = paths.create_runtime_owner("ssh").unwrap();
+        let socket_path = owner.socket_path("control.sock").unwrap();
+        fs::write(&socket_path, b"not a socket").unwrap();
+
+        let error = owner.register_socket("control.sock").unwrap_err();
+
+        assert!(matches!(error, AppPathsError::UnsafePath { .. }));
+        fs::remove_file(socket_path).unwrap();
+        owner.close().unwrap();
     }
 
     #[test]
