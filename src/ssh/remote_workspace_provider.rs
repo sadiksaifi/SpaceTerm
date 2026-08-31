@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use gpui::{BackgroundExecutor, Task};
 
-use super::control_connection::SshCancellationToken;
+use super::cancellation::SshCancellationToken;
 use super::remote_utility::{
     PreparedSshRemoteUtilityCommand, RemoteDirectoryProbe, RemoteUtilityError,
     SshRemoteUtilityClient, SshRemoteUtilityRunner,

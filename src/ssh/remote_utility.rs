@@ -8,8 +8,8 @@ use std::time::Duration;
 
 use thiserror::Error;
 
+use super::cancellation::SshCancellationToken;
 use super::command::SshCommandSpec;
-use super::control_connection::SshCancellationToken;
 use super::process::ProcessExit;
 use crate::domain::RemoteWorkspaceDirectory;
 

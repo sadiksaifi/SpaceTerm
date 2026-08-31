@@ -6,11 +6,12 @@ use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use gpui::BackgroundExecutor;
 use thiserror::Error;
 
+use super::cancellation::SshCancellationToken;
 use super::command::SshCommandSpec;
 use crate::platform::macos_askpass_transport::AskPassEnvironment;
 
@@ -56,15 +57,53 @@ impl From<ExitStatus> for ProcessExit {
 pub(crate) trait SshProcessBackend: Send + Sync + 'static {
     type Child: Send + 'static;
 
+    fn now(&self) -> Instant;
+
     fn spawn(&self, spec: SshCommandSpec) -> impl Future<Output = io::Result<Self::Child>> + Send;
 
-    fn run(&self, spec: SshCommandSpec) -> impl Future<Output = io::Result<ProcessExit>> + Send;
+    fn run(
+        &self,
+        spec: SshCommandSpec,
+        cancellation: SshCancellationToken,
+        deadline: Instant,
+    ) -> impl Future<Output = Result<ProcessExit, ProcessRunError>> + Send;
 
     fn try_wait(&self, child: &mut Self::Child) -> io::Result<Option<ProcessExit>>;
 
-    fn terminate_and_reap(&self, child: &mut Self::Child) -> io::Result<()>;
+    fn signal_process_group(
+        &self,
+        child: &mut Self::Child,
+        signal: ProcessSignal,
+    ) -> io::Result<()>;
+
+    fn force_cleanup(&self, child: Self::Child);
 
     fn delay(&self, duration: Duration) -> impl Future<Output = ()> + Send;
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ProcessSignal {
+    Terminate,
+    Kill,
+}
+
+impl ProcessSignal {
+    const fn raw(self) -> libc::c_int {
+        match self {
+            Self::Terminate => libc::SIGTERM,
+            Self::Kill => libc::SIGKILL,
+        }
+    }
+}
+
+#[derive(Debug, Error)]
+pub(crate) enum ProcessRunError {
+    #[error("SSH process operation was cancelled")]
+    Cancelled,
+    #[error("SSH process operation exceeded its deadline")]
+    TimedOut,
+    #[error("SSH process operation failed: {0}")]
+    Io(#[from] io::Error),
 }
 
 pub(crate) trait SshAuthenticationOverlay: Send + Sync + 'static {
@@ -154,12 +193,21 @@ pub(crate) struct NativeSshChild {
 impl SshProcessBackend for NativeSshProcessBackend {
     type Child = NativeSshChild;
 
+    fn now(&self) -> Instant {
+        Instant::now()
+    }
+
     fn spawn(&self, spec: SshCommandSpec) -> impl Future<Output = io::Result<Self::Child>> + Send {
         let command = command(spec, &self.environment);
         async move { spawn_owned_command_off_thread(command).await }
     }
 
-    fn run(&self, spec: SshCommandSpec) -> impl Future<Output = io::Result<ProcessExit>> + Send {
+    fn run(
+        &self,
+        spec: SshCommandSpec,
+        cancellation: SshCancellationToken,
+        deadline: Instant,
+    ) -> impl Future<Output = Result<ProcessExit, ProcessRunError>> + Send {
         let backend = self.clone();
         async move {
             let mut child = backend.spawn(spec).await?;
@@ -167,7 +215,18 @@ impl SshProcessBackend for NativeSshProcessBackend {
                 if let Some(exit) = backend.try_wait(&mut child)? {
                     return Ok(exit);
                 }
-                backend.delay(Duration::from_millis(10)).await;
+                if cancellation.is_cancelled() {
+                    backend.force_cleanup(child);
+                    return Err(ProcessRunError::Cancelled);
+                }
+                let now = backend.now();
+                if now >= deadline {
+                    backend.force_cleanup(child);
+                    return Err(ProcessRunError::TimedOut);
+                }
+                backend
+                    .delay(Duration::from_millis(10).min(deadline.duration_since(now)))
+                    .await;
             }
         }
     }
@@ -181,18 +240,16 @@ impl SshProcessBackend for NativeSshProcessBackend {
             .map(|status| status.map(ProcessExit::from))
     }
 
-    fn terminate_and_reap(&self, child: &mut Self::Child) -> io::Result<()> {
-        let Some(process) = child.child.as_mut() else {
-            return Ok(());
-        };
-        if process.try_wait()?.is_some() {
-            child.child.take();
-            return Ok(());
-        }
-        signal_process_group(child.process_group, libc::SIGKILL)?;
-        process.wait()?;
-        child.child.take();
-        Ok(())
+    fn signal_process_group(
+        &self,
+        child: &mut Self::Child,
+        signal: ProcessSignal,
+    ) -> io::Result<()> {
+        signal_process_group(child.process_group, signal.raw())
+    }
+
+    fn force_cleanup(&self, child: Self::Child) {
+        drop(child);
     }
 
     fn delay(&self, duration: Duration) -> impl Future<Output = ()> + Send {

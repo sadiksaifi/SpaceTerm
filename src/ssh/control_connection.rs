@@ -3,16 +3,16 @@ use std::io;
 use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use thiserror::Error;
 
+pub(crate) use super::cancellation::SshCancellationToken;
 use super::command::{
     PreparedSshPaneChannelCommand, SshCommandContext, SshCommandContextError,
     ValidatedRemoteShellCommand,
 };
-use super::process::{ProcessExit, SshProcessBackend};
+use super::process::{ProcessExit, ProcessRunError, ProcessSignal, SshProcessBackend};
 use super::remote_utility::PreparedSshRemoteUtilityCommand;
 use crate::domain::SshDestination;
 use crate::platform::app_paths::{AppPaths, AppPathsError, RegisteredRuntimeSocket, RuntimeOwner};
@@ -20,21 +20,11 @@ use crate::platform::app_paths::{AppPaths, AppPathsError, RegisteredRuntimeSocke
 const CONTROL_OWNER_KIND: &str = "ssh-control";
 const CONTROL_SOCKET_NAME: &str = "master.sock";
 const MAXIMUM_READINESS_TIMEOUT: Duration = Duration::from_secs(60);
-
-#[derive(Clone, Default)]
-pub(crate) struct SshCancellationToken {
-    cancelled: Arc<AtomicBool>,
-}
-
-impl SshCancellationToken {
-    pub(crate) fn cancel(&self) {
-        self.cancelled.store(true, Ordering::Release);
-    }
-
-    pub(crate) fn is_cancelled(&self) -> bool {
-        self.cancelled.load(Ordering::Acquire)
-    }
-}
+const SHUTDOWN_OPERATION_TIMEOUT: Duration = Duration::from_secs(5);
+const SHUTDOWN_MASTER_GRACE: Duration = Duration::from_secs(2);
+const SHUTDOWN_TERMINATE_GRACE: Duration = Duration::from_secs(1);
+const SHUTDOWN_KILL_DEADLINE: Duration = Duration::from_secs(1);
+const PROCESS_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
 pub(crate) enum ControlConnectionTimingError {
@@ -105,12 +95,12 @@ pub(crate) enum ControlConnectionError {
     #[error("SSH readiness command could not be run: {source}")]
     Readiness {
         #[source]
-        source: io::Error,
+        source: ProcessRunError,
     },
     #[error("SSH shutdown command could not be run: {source}")]
     ShutdownCommand {
         #[source]
-        source: io::Error,
+        source: ProcessRunError,
     },
     #[error("SSH control master rejected graceful shutdown: {0:?}")]
     ShutdownRejected(ProcessExit),
@@ -119,6 +109,8 @@ pub(crate) enum ControlConnectionError {
         #[source]
         source: io::Error,
     },
+    #[error("SSH control master did not terminate before its cleanup deadline")]
+    MasterTerminationTimedOut,
     #[error("SSH private runtime cleanup failed: {0}")]
     Cleanup(AppPathsError),
     #[error("SSH private socket reservation failed: {source}")]
@@ -178,7 +170,7 @@ impl<B: SshProcessBackend> OpenSshControlConnection<B> {
             runtime_owner: Some(runtime_owner),
             registered_socket: Some(reservation),
         };
-        let mut elapsed = Duration::ZERO;
+        let deadline = deadline_after(backend.now(), timing.timeout);
 
         loop {
             if cancellation.is_cancelled() {
@@ -195,15 +187,24 @@ impl<B: SshProcessBackend> OpenSshControlConnection<B> {
                 launch.child.take();
                 return Err(ControlConnectionError::MasterExited(exit));
             }
-            if elapsed >= timing.timeout {
+            if backend.now() >= deadline {
                 return Err(ControlConnectionError::ReadinessTimedOut {
                     timeout: timing.timeout,
                 });
             }
-            let readiness = backend
-                .run(commands.readiness_check())
+            let readiness = match backend
+                .run(commands.readiness_check(), cancellation.clone(), deadline)
                 .await
-                .map_err(|source| ControlConnectionError::Readiness { source })?;
+            {
+                Ok(readiness) => readiness,
+                Err(ProcessRunError::Cancelled) => return Err(ControlConnectionError::Cancelled),
+                Err(ProcessRunError::TimedOut) => {
+                    return Err(ControlConnectionError::ReadinessTimedOut {
+                        timeout: timing.timeout,
+                    });
+                }
+                Err(source) => return Err(ControlConnectionError::Readiness { source }),
+            };
             if cancellation.is_cancelled() {
                 return Err(ControlConnectionError::Cancelled);
             }
@@ -216,9 +217,14 @@ impl<B: SshProcessBackend> OpenSshControlConnection<B> {
                 launch.registered_socket = Some(registered);
                 return launch.finish(commands, control_path);
             }
-            let delay = timing.poll_interval.min(timing.timeout - elapsed);
+            let now = backend.now();
+            if now >= deadline {
+                return Err(ControlConnectionError::ReadinessTimedOut {
+                    timeout: timing.timeout,
+                });
+            }
+            let delay = timing.poll_interval.min(deadline.duration_since(now));
             backend.delay(delay).await;
-            elapsed += delay;
         }
     }
 
@@ -256,42 +262,101 @@ impl<B: SshProcessBackend> OpenSshControlConnection<B> {
             return Ok(());
         }
 
-        let mut first_error = None;
         if self.state == ControlConnectionState::Ready {
             self.state = ControlConnectionState::ShuttingDown;
-            match self.backend.run(self.commands.graceful_exit()).await {
+            let deadline = deadline_after(self.backend.now(), SHUTDOWN_OPERATION_TIMEOUT);
+            match self
+                .backend
+                .run(
+                    self.commands.graceful_exit(),
+                    SshCancellationToken::default(),
+                    deadline,
+                )
+                .await
+            {
                 Ok(exit) if exit.is_success() => {}
-                Ok(exit) => first_error = Some(ControlConnectionError::ShutdownRejected(exit)),
+                Ok(exit) => {
+                    self.state = ControlConnectionState::Ready;
+                    return Err(ControlConnectionError::ShutdownRejected(exit));
+                }
                 Err(source) => {
-                    first_error = Some(ControlConnectionError::ShutdownCommand { source });
+                    self.state = ControlConnectionState::Ready;
+                    return Err(ControlConnectionError::ShutdownCommand { source });
                 }
             }
         }
-        if let Some(mut child) = self.child.take()
-            && let Err(source) = self.backend.terminate_and_reap(&mut child)
-            && first_error.is_none()
+
+        if !self
+            .wait_for_master_exit(deadline_after(self.backend.now(), SHUTDOWN_MASTER_GRACE))
+            .await?
         {
-            first_error = Some(ControlConnectionError::Reap { source });
+            self.signal_master(ProcessSignal::Terminate)?;
+            if !self
+                .wait_for_master_exit(deadline_after(self.backend.now(), SHUTDOWN_TERMINATE_GRACE))
+                .await?
+            {
+                self.signal_master(ProcessSignal::Kill)?;
+                if !self
+                    .wait_for_master_exit(deadline_after(
+                        self.backend.now(),
+                        SHUTDOWN_KILL_DEADLINE,
+                    ))
+                    .await?
+                {
+                    return Err(ControlConnectionError::MasterTerminationTimedOut);
+                }
+            }
         }
         self.registered_socket.take();
-        if let Some(owner) = self.runtime_owner.take()
-            && let Err(error) = owner.close()
-            && first_error.is_none()
-        {
-            first_error = Some(ControlConnectionError::Cleanup(error));
+        if let Some(owner) = self.runtime_owner.take() {
+            owner.close().map_err(ControlConnectionError::Cleanup)?;
         }
         self.state = ControlConnectionState::Closed;
-        match first_error {
-            Some(error) => Err(error),
-            None => Ok(()),
+        Ok(())
+    }
+
+    async fn wait_for_master_exit(
+        &mut self,
+        deadline: Instant,
+    ) -> Result<bool, ControlConnectionError> {
+        loop {
+            let Some(child) = self.child.as_mut() else {
+                return Ok(true);
+            };
+            if self
+                .backend
+                .try_wait(child)
+                .map_err(|source| ControlConnectionError::Reap { source })?
+                .is_some()
+            {
+                self.child.take();
+                return Ok(true);
+            }
+            let now = self.backend.now();
+            if now >= deadline {
+                return Ok(false);
+            }
+            self.backend
+                .delay(PROCESS_POLL_INTERVAL.min(deadline.duration_since(now)))
+                .await;
         }
+    }
+
+    fn signal_master(&mut self, signal: ProcessSignal) -> Result<(), ControlConnectionError> {
+        let child = self
+            .child
+            .as_mut()
+            .ok_or(ControlConnectionError::Ownership)?;
+        self.backend
+            .signal_process_group(child, signal)
+            .map_err(|source| ControlConnectionError::Reap { source })
     }
 }
 
 impl<B: SshProcessBackend> Drop for OpenSshControlConnection<B> {
     fn drop(&mut self) {
-        if let Some(mut child) = self.child.take() {
-            let _ = self.backend.terminate_and_reap(&mut child);
+        if let Some(child) = self.child.take() {
+            self.backend.force_cleanup(child);
         }
         self.registered_socket.take();
         self.runtime_owner.take();
@@ -335,12 +400,16 @@ impl<B: SshProcessBackend> ConnectingControl<B> {
 
 impl<B: SshProcessBackend> Drop for ConnectingControl<B> {
     fn drop(&mut self) {
-        if let Some(mut child) = self.child.take() {
-            let _ = self.backend.terminate_and_reap(&mut child);
+        if let Some(child) = self.child.take() {
+            self.backend.force_cleanup(child);
         }
         self.registered_socket.take();
         self.runtime_owner.take();
     }
+}
+
+fn deadline_after(now: Instant, duration: Duration) -> Instant {
+    now.checked_add(duration).unwrap_or(now)
 }
 
 fn reserve_socket(owner: &RuntimeOwner) -> Result<RegisteredRuntimeSocket, ControlConnectionError> {
@@ -368,7 +437,7 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::{Arc, Mutex};
     use std::task::{Context, Poll, Wake, Waker};
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     use gpui::TestAppContext;
 
@@ -376,7 +445,7 @@ mod tests {
     use crate::domain::SshDestination;
     use crate::platform::app_paths::{AppPathEnvironment, AppPaths};
     use crate::ssh::command::SshCommandSpec;
-    use crate::ssh::process::{ProcessExit, SshProcessBackend};
+    use crate::ssh::process::{ProcessExit, ProcessRunError, ProcessSignal, SshProcessBackend};
 
     static NEXT_TEST_DIRECTORY: AtomicU64 = AtomicU64::new(0);
 
@@ -386,7 +455,7 @@ mod tests {
         fn new() -> Self {
             let sequence = NEXT_TEST_DIRECTORY.fetch_add(1, Ordering::Relaxed);
             let path = PathBuf::from(format!(
-                "/private/tmp/spaceterm-control-{}-{sequence}",
+                "/private/tmp/stc-{}-{sequence}",
                 std::process::id()
             ));
             fs::DirBuilder::new().mode(0o700).create(&path).unwrap();
@@ -417,7 +486,6 @@ mod tests {
         listener: Option<UnixListener>,
     }
 
-    #[derive(Default)]
     struct FakeState {
         readiness: VecDeque<ProcessExit>,
         early_exits: VecDeque<Option<ProcessExit>>,
@@ -427,16 +495,53 @@ mod tests {
         reaps: usize,
         cancel_on_delay: Option<SshCancellationToken>,
         pending_delay: bool,
+        elapsed: Duration,
+        hang_readiness: bool,
+        hang_shutdown: bool,
+        exit_after_shutdown: bool,
+        exit_on_signal: ProcessSignal,
+        signals: Vec<ProcessSignal>,
     }
 
-    #[derive(Default)]
+    impl Default for FakeState {
+        fn default() -> Self {
+            Self {
+                readiness: VecDeque::new(),
+                early_exits: VecDeque::new(),
+                records: Vec::new(),
+                delays: Vec::new(),
+                socket_path: None,
+                reaps: 0,
+                cancel_on_delay: None,
+                pending_delay: false,
+                elapsed: Duration::ZERO,
+                hang_readiness: false,
+                hang_shutdown: false,
+                exit_after_shutdown: true,
+                exit_on_signal: ProcessSignal::Terminate,
+                signals: Vec::new(),
+            }
+        }
+    }
+
     struct FakeBackend {
+        epoch: Instant,
         state: Mutex<FakeState>,
+    }
+
+    impl Default for FakeBackend {
+        fn default() -> Self {
+            Self {
+                epoch: Instant::now(),
+                state: Mutex::new(FakeState::default()),
+            }
+        }
     }
 
     impl FakeBackend {
         fn with_readiness(readiness: impl IntoIterator<Item = ProcessExit>) -> Self {
             Self {
+                epoch: Instant::now(),
                 state: Mutex::new(FakeState {
                     readiness: readiness.into_iter().collect(),
                     ..FakeState::default()
@@ -460,6 +565,10 @@ mod tests {
     impl SshProcessBackend for FakeBackend {
         type Child = FakeChild;
 
+        fn now(&self) -> Instant {
+            self.epoch + self.state.lock().unwrap().elapsed
+        }
+
         fn spawn(
             &self,
             spec: SshCommandSpec,
@@ -480,18 +589,39 @@ mod tests {
         fn run(
             &self,
             spec: SshCommandSpec,
-        ) -> impl Future<Output = io::Result<ProcessExit>> + Send {
+            cancellation: SshCancellationToken,
+            deadline: Instant,
+        ) -> impl Future<Output = Result<ProcessExit, ProcessRunError>> + Send {
             async move {
                 let arguments = spec.arguments().to_vec();
                 let is_readiness = contains_pair(&arguments, "-O", "check");
+                let is_shutdown = contains_pair(&arguments, "-O", "exit");
+                let should_hang = {
+                    let mut state = self.state.lock().unwrap();
+                    state.records.push(arguments);
+                    (is_readiness && state.hang_readiness) || (is_shutdown && state.hang_shutdown)
+                };
+                while should_hang {
+                    if cancellation.is_cancelled() {
+                        return Err(ProcessRunError::Cancelled);
+                    }
+                    let now = self.now();
+                    if now >= deadline {
+                        return Err(ProcessRunError::TimedOut);
+                    }
+                    self.delay(PROCESS_POLL_INTERVAL.min(deadline.duration_since(now)))
+                        .await;
+                }
                 let mut state = self.state.lock().unwrap();
-                state.records.push(arguments);
                 if is_readiness {
                     Ok(state
                         .readiness
                         .pop_front()
                         .unwrap_or(ProcessExit::unsuccessful(Some(255))))
                 } else {
+                    if is_shutdown && state.exit_after_shutdown {
+                        state.early_exits.push_back(Some(ProcessExit::successful()));
+                    }
                     Ok(ProcessExit::successful())
                 }
             }
@@ -507,10 +637,22 @@ mod tests {
             Ok(exit)
         }
 
-        fn terminate_and_reap(&self, child: &mut Self::Child) -> io::Result<()> {
+        fn signal_process_group(
+            &self,
+            _child: &mut Self::Child,
+            signal: ProcessSignal,
+        ) -> io::Result<()> {
+            let mut state = self.state.lock().unwrap();
+            state.signals.push(signal);
+            if signal == state.exit_on_signal {
+                state.early_exits.push_back(Some(ProcessExit::successful()));
+            }
+            Ok(())
+        }
+
+        fn force_cleanup(&self, mut child: Self::Child) {
             child.listener.take();
             self.state.lock().unwrap().reaps += 1;
-            Ok(())
         }
 
         fn delay(&self, duration: Duration) -> impl Future<Output = ()> + Send {
@@ -518,6 +660,7 @@ mod tests {
                 let (cancel, should_remain_pending) = {
                     let mut state = self.state.lock().unwrap();
                     state.delays.push(duration);
+                    state.elapsed += duration;
                     (state.cancel_on_delay.clone(), state.pending_delay)
                 };
                 if let Some(cancel) = cancel {
@@ -643,7 +786,9 @@ mod tests {
 
         assert!(
             matches!(error, ControlConnectionError::ReadinessTimedOut { .. })
-                && backend.reap_count() == 1
+                && backend.reap_count() == 1,
+            "error={error:?}, reaps={}",
+            backend.reap_count()
         );
     }
 
@@ -753,6 +898,93 @@ mod tests {
                 && backend.reap_count() == 1
                 && !socket_path.exists()
                 && connection.state() == ControlConnectionState::Closed
+        );
+    }
+
+    #[gpui::test]
+    fn hanging_readiness_check_should_obey_the_wall_clock_deadline_and_reap(
+        cx: &mut TestAppContext,
+    ) {
+        let directory = TestDirectory::new();
+        let paths = directory.paths();
+        let backend = Arc::new(FakeBackend::default());
+        backend.state.lock().unwrap().hang_readiness = true;
+
+        let error = cx
+            .executor()
+            .block(OpenSshControlConnection::connect(
+                &paths,
+                destination(),
+                Arc::clone(&backend),
+                &SshCancellationToken::default(),
+                timing(),
+            ))
+            .err()
+            .unwrap();
+
+        assert!(
+            matches!(error, ControlConnectionError::ReadinessTimedOut { .. })
+                && backend.reap_count() == 1
+        );
+    }
+
+    #[gpui::test]
+    fn hanging_exit_command_should_retain_ready_master_ownership(cx: &mut TestAppContext) {
+        let directory = TestDirectory::new();
+        let paths = directory.paths();
+        let backend = Arc::new(FakeBackend::with_readiness([ProcessExit::successful()]));
+        let mut connection = cx
+            .executor()
+            .block(OpenSshControlConnection::connect(
+                &paths,
+                destination(),
+                Arc::clone(&backend),
+                &SshCancellationToken::default(),
+                timing(),
+            ))
+            .unwrap();
+        backend.state.lock().unwrap().hang_shutdown = true;
+
+        let error = cx.executor().block(connection.shutdown()).unwrap_err();
+
+        assert!(
+            matches!(
+                error,
+                ControlConnectionError::ShutdownCommand {
+                    source: ProcessRunError::TimedOut
+                }
+            ) && connection.state() == ControlConnectionState::Ready
+                && connection.control_path().exists()
+                && backend.reap_count() == 0
+        );
+    }
+
+    #[gpui::test]
+    fn shutdown_should_grace_then_terminate_then_force_the_owned_group(cx: &mut TestAppContext) {
+        let directory = TestDirectory::new();
+        let paths = directory.paths();
+        let backend = Arc::new(FakeBackend::with_readiness([ProcessExit::successful()]));
+        let mut connection = cx
+            .executor()
+            .block(OpenSshControlConnection::connect(
+                &paths,
+                destination(),
+                Arc::clone(&backend),
+                &SshCancellationToken::default(),
+                timing(),
+            ))
+            .unwrap();
+        {
+            let mut state = backend.state.lock().unwrap();
+            state.exit_after_shutdown = false;
+            state.exit_on_signal = ProcessSignal::Kill;
+        }
+
+        cx.executor().block(connection.shutdown()).unwrap();
+
+        assert_eq!(
+            backend.state.lock().unwrap().signals,
+            vec![ProcessSignal::Terminate, ProcessSignal::Kill]
         );
     }
 
