@@ -10,11 +10,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use gpui::prelude::*;
-use gpui::{Context, Entity, EventEmitter, Render, Task, Window, div};
+use gpui::{App, Context, Entity, EventEmitter, FocusHandle, Render, Task, Window, div};
 use spaceterm_ui::{
-    Alert, AlertIntent, AlertOutcome, ModalAction, ModalActionIntent, ModalActionRole, ModalId,
-    ModalPresentationHandle, ProgressCancelDecision, ProgressCancellation, ProgressDialog,
-    ProgressDialogHandle, ProgressDialogOutcome, ProgressDialogUpdate, ProgressState,
+    Alert, AlertIntent, AlertOutcome, CommandPaletteReplacementFocus, ModalAction,
+    ModalActionIntent, ModalActionRole, ModalId, ModalPresentationHandle, ProgressCancelDecision,
+    ProgressCancellation, ProgressDialog, ProgressDialogHandle, ProgressDialogOutcome,
+    ProgressDialogUpdate, ProgressState,
 };
 
 use super::remote_workspace_picker::{
@@ -310,6 +311,7 @@ enum AcknowledgeAction {
 pub(super) struct RemoteWorkspaceFlow {
     backend: Arc<dyn RemoteWorkspaceFlowBackend>,
     host_picker: Entity<SshHostPicker>,
+    focus_scope: FocusHandle,
     active_form: Option<Entity<SshHostForm>>,
     remote_picker: Option<Entity<RemoteWorkspacePicker>>,
     stage: RemoteWorkspaceFlowStage,
@@ -352,6 +354,7 @@ impl RemoteWorkspaceFlow {
         Self {
             backend,
             host_picker,
+            focus_scope: cx.focus_handle(),
             active_form: None,
             remote_picker: None,
             stage: RemoteWorkspaceFlowStage::Idle,
@@ -374,6 +377,24 @@ impl RemoteWorkspaceFlow {
     }
 
     pub(super) fn open(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        self.open_with_replacement(None, window, cx)
+    }
+
+    pub(super) fn open_replacing(
+        &mut self,
+        replacement: CommandPaletteReplacementFocus,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        self.open_with_replacement(Some(replacement), window, cx)
+    }
+
+    fn open_with_replacement(
+        &mut self,
+        replacement: Option<CommandPaletteReplacementFocus>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
         if !matches!(
             self.stage,
             RemoteWorkspaceFlowStage::Idle | RemoteWorkspaceFlowStage::Cancelled
@@ -382,15 +403,30 @@ impl RemoteWorkspaceFlow {
         }
         self.cancelled_emitted = false;
         self.stage = RemoteWorkspaceFlowStage::HostSelection;
-        let opened = self
-            .host_picker
-            .update(cx, |picker, cx| picker.open(window, cx));
-        if !opened {
+        let blocked_by_modal = spaceterm_ui::window_modal_is_open(window, cx);
+        let opened = self.host_picker.update(cx, |picker, cx| match replacement {
+            Some(replacement) => picker.open_replacing(replacement, window, cx),
+            None => picker.open(window, cx),
+        });
+        if !opened && !blocked_by_modal {
             self.stage = RemoteWorkspaceFlowStage::Idle;
             return false;
         }
         self.publish(cx);
         true
+    }
+
+    pub(super) fn blocks_terminal_input(&self) -> bool {
+        !matches!(
+            self.stage,
+            RemoteWorkspaceFlowStage::Idle
+                | RemoteWorkspaceFlowStage::Completed
+                | RemoteWorkspaceFlowStage::Cancelled
+        )
+    }
+
+    pub(super) fn owns_first_responder(&self, window: &Window, cx: &App) -> bool {
+        self.focus_scope.contains_focused(window, cx)
     }
 
     fn reduce_host_event(
@@ -1205,6 +1241,7 @@ impl Render for RemoteWorkspaceFlow {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         div()
             .size_full()
+            .track_focus(&self.focus_scope)
             .child(self.host_picker.clone())
             .children(self.remote_picker.iter().cloned())
     }
@@ -1217,10 +1254,13 @@ mod tests {
     use std::rc::Rc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use gpui::{TestAppContext, VisualTestContext};
+    use gpui::{FocusHandle, TestAppContext, VisualTestContext};
     use spaceterm_ui::ModalLayer;
 
     use super::*;
+    use crate::ui::new_workspace_panel::{
+        NewWorkspacePanel, NewWorkspacePanelEvent, NewWorkspaceSource,
+    };
     use crate::ui::remote_workspace_picker::{
         RemoteWorkspaceDirectoryListing, RemoteWorkspaceExactPathState,
         RemoteWorkspaceProviderError,
@@ -1438,6 +1478,42 @@ mod tests {
         }
     }
 
+    struct ReplacementHarness {
+        panel: Entity<NewWorkspacePanel>,
+        flow: Entity<RemoteWorkspaceFlow>,
+        prior_focus: FocusHandle,
+        source_callbacks: usize,
+        successful_transfers: usize,
+    }
+
+    impl ReplacementHarness {
+        fn transfer_remote(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+            let Some(replacement) = self
+                .panel
+                .update(cx, |panel, cx| panel.dismiss_for_replacement(window, cx))
+            else {
+                return false;
+            };
+            let transferred = self
+                .flow
+                .update(cx, |flow, cx| flow.open_replacing(replacement, window, cx));
+            self.successful_transfers += usize::from(transferred);
+            transferred
+        }
+    }
+
+    impl Render for ReplacementHarness {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            ModalLayer::new(
+                div()
+                    .size_full()
+                    .track_focus(&self.prior_focus)
+                    .child(self.panel.clone())
+                    .child(self.flow.clone()),
+            )
+        }
+    }
+
     fn flow_window(
         backend: Arc<FakeBackend>,
         cx: &mut TestAppContext,
@@ -1472,6 +1548,58 @@ mod tests {
         });
         cx.run_until_parked();
         (harness, flow, events, cx)
+    }
+
+    fn replacement_window(
+        backend: Arc<FakeBackend>,
+        cx: &mut TestAppContext,
+    ) -> (
+        Entity<ReplacementHarness>,
+        Entity<NewWorkspacePanel>,
+        Entity<RemoteWorkspaceFlow>,
+        &mut VisualTestContext,
+    ) {
+        cx.update(crate::ui::init);
+        let injected: Arc<dyn RemoteWorkspaceFlowBackend> = backend;
+        let (harness, cx) = cx.add_window_view(move |window, cx| {
+            let panel = cx.new(|cx| NewWorkspacePanel::new(window, cx));
+            let flow = cx.new(|cx| RemoteWorkspaceFlow::new(injected, window, cx));
+            cx.subscribe_in(
+                &panel,
+                window,
+                |harness: &mut ReplacementHarness,
+                 _,
+                 event: &NewWorkspacePanelEvent,
+                 window,
+                 cx| {
+                    if matches!(
+                        event,
+                        NewWorkspacePanelEvent::SourceSelected(NewWorkspaceSource::RemoteProject)
+                    ) {
+                        harness.source_callbacks += 1;
+                        harness.transfer_remote(window, cx);
+                    }
+                },
+            )
+            .detach();
+            ReplacementHarness {
+                panel,
+                flow,
+                prior_focus: cx.focus_handle(),
+                source_callbacks: 0,
+                successful_transfers: 0,
+            }
+        });
+        let (panel, flow): (Entity<NewWorkspacePanel>, Entity<RemoteWorkspaceFlow>) = harness
+            .read_with(cx, |harness, _| {
+                (harness.panel.clone(), harness.flow.clone())
+            });
+        cx.update(|window, cx| {
+            harness.read(cx).prior_focus.focus(window);
+            panel.update(cx, |panel, cx| panel.open(window, cx));
+        });
+        cx.run_until_parked();
+        (harness, panel, flow, cx)
     }
 
     fn remote_account() -> RemoteWorkspaceAccount {
@@ -1536,6 +1664,120 @@ mod tests {
         let bounds = cx.debug_bounds(selector).unwrap();
         cx.simulate_click(bounds.center(), gpui::Modifiers::none());
         cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn remote_source_replacement_should_transfer_focus_escape_and_reopen_exactly_once(
+        cx: &mut TestAppContext,
+    ) {
+        let backend = FakeBackend::new([]);
+        let (harness, panel, flow, cx) = replacement_window(backend, cx);
+        assert!(cx.update(|window, cx| panel.read(cx).input_is_focused(window, cx)));
+
+        cx.simulate_keystrokes("down down enter");
+        cx.run_until_parked();
+
+        assert_eq!(
+            flow.read_with(cx, |flow, _| flow.stage()),
+            RemoteWorkspaceFlowStage::HostSelection
+        );
+        assert!(!panel.read_with(cx, |panel, _| panel.blocks_terminal_input()));
+        assert!(flow.read_with(cx, |flow, _| flow.blocks_terminal_input()));
+        assert!(cx.update(|window, cx| flow.read(cx).owns_first_responder(window, cx)));
+        assert!(!cx.update(|window, cx| harness.read(cx).prior_focus.is_focused(window)));
+        assert_eq!(
+            harness.read_with(cx, |harness, _| (
+                harness.source_callbacks,
+                harness.successful_transfers,
+            )),
+            (1, 1)
+        );
+
+        cx.update(|window, cx| {
+            harness.update(cx, |harness, cx| {
+                assert!(!harness.transfer_remote(window, cx));
+            });
+        });
+        assert_eq!(
+            harness.read_with(cx, |harness, _| harness.successful_transfers),
+            1
+        );
+        assert_eq!(
+            flow.read_with(cx, |flow, _| flow.stage()),
+            RemoteWorkspaceFlowStage::HostSelection
+        );
+
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        assert_eq!(
+            flow.read_with(cx, |flow, _| flow.stage()),
+            RemoteWorkspaceFlowStage::Cancelled
+        );
+        assert!(!flow.read_with(cx, |flow, _| flow.blocks_terminal_input()));
+        assert!(cx.update(|window, cx| harness.read(cx).prior_focus.is_focused(window)));
+
+        cx.update(|window, cx| panel.update(cx, |panel, cx| panel.open(window, cx)));
+        cx.run_until_parked();
+        cx.simulate_keystrokes("down down enter");
+        cx.run_until_parked();
+        assert_eq!(
+            harness.read_with(cx, |harness, _| (
+                harness.source_callbacks,
+                harness.successful_transfers,
+            )),
+            (2, 2)
+        );
+        assert!(cx.update(|window, cx| flow.read(cx).owns_first_responder(window, cx)));
+    }
+
+    #[gpui::test]
+    fn modal_blocker_should_retain_replacement_until_host_picker_can_take_focus(
+        cx: &mut TestAppContext,
+    ) {
+        let backend = FakeBackend::new([]);
+        let (harness, panel, flow, cx) = replacement_window(backend, cx);
+
+        cx.update(|window, cx| {
+            harness.update(cx, |harness, cx| {
+                let replacement = harness
+                    .panel
+                    .update(cx, |panel, cx| panel.dismiss_for_replacement(window, cx))
+                    .unwrap();
+                Alert::new(
+                    ModalId::new("remote-workspace-focus-blocker"),
+                    "Focus blocker",
+                    "Focus Blocker",
+                    "Wait before opening the Host Picker.",
+                    vec![ModalAction::new(
+                        AcknowledgeAction::Acknowledge,
+                        "OK",
+                        ModalActionRole::Cancel,
+                        "remote-workspace-focus-blocker-ok",
+                    )],
+                )
+                .present(window, cx, |_, _| {})
+                .unwrap();
+                assert!(harness.flow.update(cx, |flow, cx| {
+                    flow.open_replacing(replacement, window, cx)
+                }));
+            });
+        });
+        cx.run_until_parked();
+
+        assert!(cx.update(|window, cx| spaceterm_ui::window_modal_is_open(window, cx)));
+        assert_eq!(
+            flow.read_with(cx, |flow, _| flow.stage()),
+            RemoteWorkspaceFlowStage::HostSelection
+        );
+        assert!(flow.read_with(cx, |flow, _| flow.blocks_terminal_input()));
+        assert!(!panel.read_with(cx, |panel, _| panel.blocks_terminal_input()));
+        assert!(!cx.update(|window, cx| harness.read(cx).prior_focus.is_focused(window)));
+
+        click("modal-action-remote-workspace-focus-blocker-ok", cx);
+
+        assert!(!cx.update(|window, cx| spaceterm_ui::window_modal_is_open(window, cx)));
+        assert!(cx.update(|window, cx| flow.read(cx).owns_first_responder(window, cx)));
+        assert!(!cx.update(|window, cx| harness.read(cx).prior_focus.is_focused(window)));
     }
 
     #[gpui::test]

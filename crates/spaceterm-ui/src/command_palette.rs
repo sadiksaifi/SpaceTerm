@@ -2343,6 +2343,10 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
         window: &mut Window,
         cx: &mut gpui::Context<Self>,
     ) -> bool {
+        let pending_replacement = self
+            .pending_open
+            .as_ref()
+            .is_some_and(|pending| pending.replacement.is_some());
         let editor_retained_focus = self.input.read(cx).focus_handle().is_focused(window);
         let predecessor_restored = self
             .restore_focus
@@ -2353,6 +2357,7 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
             || crate::modal::window_modal_is_open(window, cx)
             || (!editor_retained_focus
                 && !predecessor_restored
+                && !pending_replacement
                 && !crate::modal::focus_allows_transient_resume(window, cx))
         {
             return false;
