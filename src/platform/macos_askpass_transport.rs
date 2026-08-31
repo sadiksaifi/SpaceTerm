@@ -130,7 +130,7 @@ impl AskPassEnvironment {
 }
 
 pub(crate) struct AskPassBroker {
-    environment: AskPassEnvironment,
+    environment: Arc<AskPassEnvironment>,
     presenter: Arc<dyn BrokerPresenter>,
     stop: Arc<AtomicBool>,
     worker: Option<JoinHandle<()>>,
@@ -224,11 +224,11 @@ impl AskPassBroker {
             .map_err(AskPassBrokerError::StartWorker)?;
 
         Ok(Self {
-            environment: AskPassEnvironment {
+            environment: Arc::new(AskPassEnvironment {
                 helper_path,
                 socket_path,
                 capability,
-            },
+            }),
             presenter,
             stop,
             worker: Some(worker),
@@ -241,6 +241,10 @@ impl AskPassBroker {
 
     pub(crate) fn environment(&self) -> &AskPassEnvironment {
         &self.environment
+    }
+
+    pub(crate) fn environment_handle(&self) -> Arc<AskPassEnvironment> {
+        Arc::clone(&self.environment)
     }
 }
 

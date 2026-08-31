@@ -225,6 +225,10 @@ impl SshCommandContext {
         let mut arguments = self.base_arguments();
         push_option(&mut arguments, OsString::from("ControlMaster=no"));
         push_option(&mut arguments, OsString::from("ControlPersist=no"));
+        push_option(
+            &mut arguments,
+            OsString::from("ProxyCommand=/usr/bin/false"),
+        );
         arguments
     }
 
@@ -569,6 +573,8 @@ mod tests {
                 "ControlMaster=no",
                 "-o",
                 "ControlPersist=no",
+                "-o",
+                "ProxyCommand=/usr/bin/false",
                 "-O",
                 "check",
                 "--",
@@ -592,6 +598,8 @@ mod tests {
                 "ControlMaster=no",
                 "-o",
                 "ControlPersist=no",
+                "-o",
+                "ProxyCommand=/usr/bin/false",
                 "-O",
                 "exit",
                 "--",
@@ -615,6 +623,8 @@ mod tests {
                 "ControlMaster=no",
                 "-o",
                 "ControlPersist=no",
+                "-o",
+                "ProxyCommand=/usr/bin/false",
                 "-o",
                 "ClearAllForwardings=yes",
                 "-T",
@@ -649,6 +659,8 @@ mod tests {
                 "ControlMaster=no",
                 "-o",
                 "ControlPersist=no",
+                "-o",
+                "ProxyCommand=/usr/bin/false",
                 "-o",
                 "ClearAllForwardings=yes",
                 "-tt",
@@ -710,6 +722,19 @@ mod tests {
                 .iter()
                 .all(|spec| spec.executable() == OsStr::new("/usr/bin/ssh"))
         );
+    }
+
+    #[test]
+    fn channel_specs_should_make_direct_connection_fallback_impossible() {
+        let context = context();
+        let command = ValidatedRemoteShellCommand::new("exec shell".to_owned()).unwrap();
+        let specs = [context.remote_utility(), context.pane_channel(command)];
+
+        assert!(specs.iter().all(|spec| {
+            spec.arguments()
+                .windows(2)
+                .any(|pair| pair[0] == "-o" && pair[1] == "ProxyCommand=/usr/bin/false")
+        }));
     }
 
     #[test]
