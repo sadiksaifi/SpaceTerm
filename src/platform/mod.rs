@@ -15,6 +15,9 @@ pub(crate) mod macos_application;
 pub(crate) mod macos_accessibility;
 
 #[cfg(target_os = "macos")]
+pub(crate) mod macos_askpass;
+
+#[cfg(target_os = "macos")]
 pub(crate) mod macos_keyboard;
 
 #[cfg(target_os = "macos")]
