@@ -38,6 +38,170 @@ impl WorkspaceDirectoryIdentity {
     }
 }
 
+#[derive(Clone, Debug, Error, Eq, PartialEq)]
+pub(crate) enum RemoteWorkspaceValueError {
+    #[error("SSH destination must be one non-option, control-free token")]
+    InvalidDestination,
+    #[error("Remote Workspace Directory must be an absolute or ~/ path without control characters")]
+    InvalidWorkspaceDirectory,
+    #[error("Physical remote directory identity must be an absolute control-free path")]
+    InvalidDirectoryIdentity,
+}
+
+/// The exact OpenSSH destination token selected by the user.
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub(crate) struct SshDestination(String);
+
+impl SshDestination {
+    pub(crate) fn new(value: String) -> Result<Self, RemoteWorkspaceValueError> {
+        if value.is_empty()
+            || value.starts_with('-')
+            || value
+                .chars()
+                .any(|character| character.is_whitespace() || character.is_control())
+        {
+            return Err(RemoteWorkspaceValueError::InvalidDestination);
+        }
+        Ok(Self(value))
+    }
+
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// The exact user-visible spelling of a directory selected on a remote destination.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct RemoteWorkspaceDirectory(String);
+
+impl RemoteWorkspaceDirectory {
+    pub(crate) fn new(value: String) -> Result<Self, RemoteWorkspaceValueError> {
+        let supported_form = value.starts_with('/') || value == "~" || value.starts_with("~/");
+        if !supported_form || value.chars().any(char::is_control) {
+            return Err(RemoteWorkspaceValueError::InvalidWorkspaceDirectory);
+        }
+        Ok(Self(value))
+    }
+
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// The physical absolute directory returned by the remote `pwd -P` validation protocol.
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub(crate) struct RemoteDirectoryIdentity(String);
+
+impl RemoteDirectoryIdentity {
+    pub(crate) fn new(value: String) -> Result<Self, RemoteWorkspaceValueError> {
+        if !value.starts_with('/') || value.chars().any(char::is_control) {
+            return Err(RemoteWorkspaceValueError::InvalidDirectoryIdentity);
+        }
+        Ok(Self(value))
+    }
+
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// The deduplication identity of a Remote Project Workspace.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub(crate) struct RemoteWorkspaceKey {
+    destination: SshDestination,
+    physical_directory: RemoteDirectoryIdentity,
+}
+
+impl RemoteWorkspaceKey {
+    pub(crate) const fn new(
+        destination: SshDestination,
+        physical_directory: RemoteDirectoryIdentity,
+    ) -> Self {
+        Self {
+            destination,
+            physical_directory,
+        }
+    }
+
+    pub(crate) const fn destination(&self) -> &SshDestination {
+        &self.destination
+    }
+
+    pub(crate) const fn physical_directory(&self) -> &RemoteDirectoryIdentity {
+        &self.physical_directory
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum RemoteConnectionPhase {
+    Connecting,
+    Connected,
+    Reconnecting,
+    Disconnected,
+    Failed,
+    Closing,
+}
+
+/// One bounded connection phase coupled to the operation generation that produced it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct RemoteConnectionState {
+    generation: u64,
+    phase: RemoteConnectionPhase,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum RemoteConnectionReduction {
+    Applied,
+    Stale,
+}
+
+impl RemoteConnectionState {
+    pub(crate) const fn connecting(generation: u64) -> Self {
+        Self::new(generation, RemoteConnectionPhase::Connecting)
+    }
+
+    pub(crate) const fn connected(generation: u64) -> Self {
+        Self::new(generation, RemoteConnectionPhase::Connected)
+    }
+
+    pub(crate) const fn reconnecting(generation: u64) -> Self {
+        Self::new(generation, RemoteConnectionPhase::Reconnecting)
+    }
+
+    pub(crate) const fn disconnected(generation: u64) -> Self {
+        Self::new(generation, RemoteConnectionPhase::Disconnected)
+    }
+
+    pub(crate) const fn failed(generation: u64) -> Self {
+        Self::new(generation, RemoteConnectionPhase::Failed)
+    }
+
+    pub(crate) const fn closing(generation: u64) -> Self {
+        Self::new(generation, RemoteConnectionPhase::Closing)
+    }
+
+    const fn new(generation: u64, phase: RemoteConnectionPhase) -> Self {
+        Self { generation, phase }
+    }
+
+    pub(crate) const fn generation(self) -> u64 {
+        self.generation
+    }
+
+    pub(crate) const fn phase(self) -> RemoteConnectionPhase {
+        self.phase
+    }
+
+    /// Reduces a completion or lifecycle observation while rejecting predecessor generations.
+    pub(crate) fn reduce(&mut self, next: Self) -> RemoteConnectionReduction {
+        if next.generation < self.generation {
+            return RemoteConnectionReduction::Stale;
+        }
+        *self = next;
+        RemoteConnectionReduction::Applied
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct DirectoryAuthority {
     window_id: super::WindowId,
@@ -70,6 +234,12 @@ pub(crate) enum WorkspaceKind {
     },
     LocalProject {
         project_root_identity: WorkspaceDirectoryIdentity,
+    },
+    RemoteProject {
+        key: RemoteWorkspaceKey,
+        remote_directory: RemoteWorkspaceDirectory,
+        remote_home_identity: RemoteDirectoryIdentity,
+        connection_state: RemoteConnectionState,
     },
 }
 
@@ -133,6 +303,22 @@ pub(crate) enum CloseWorkspaceOutcome<T> {
     },
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum CreateRemoteProjectOutcome {
+    Created { workspace_id: WorkspaceId },
+    ActivatedExisting { workspace_id: WorkspaceId },
+}
+
+impl CreateRemoteProjectOutcome {
+    pub(crate) const fn workspace_id(self) -> WorkspaceId {
+        match self {
+            Self::Created { workspace_id } | Self::ActivatedExisting { workspace_id } => {
+                workspace_id
+            }
+        }
+    }
+}
+
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) enum FinalWindowCloseOutcome<T> {
     WorkspaceClosed {
@@ -171,6 +357,31 @@ impl<T> WorkspaceEntry<T> {
 
     pub(crate) const fn kind(&self) -> &WorkspaceKind {
         &self.kind
+    }
+
+    pub(crate) const fn remote_workspace_directory(&self) -> Option<&RemoteWorkspaceDirectory> {
+        match &self.kind {
+            WorkspaceKind::RemoteProject {
+                remote_directory, ..
+            } => Some(remote_directory),
+            WorkspaceKind::Scratch { .. } | WorkspaceKind::LocalProject { .. } => None,
+        }
+    }
+
+    pub(crate) const fn remote_workspace_key(&self) -> Option<&RemoteWorkspaceKey> {
+        match &self.kind {
+            WorkspaceKind::RemoteProject { key, .. } => Some(key),
+            WorkspaceKind::Scratch { .. } | WorkspaceKind::LocalProject { .. } => None,
+        }
+    }
+
+    pub(crate) const fn remote_connection_state(&self) -> Option<RemoteConnectionState> {
+        match &self.kind {
+            WorkspaceKind::RemoteProject {
+                connection_state, ..
+            } => Some(*connection_state),
+            WorkspaceKind::Scratch { .. } | WorkspaceKind::LocalProject { .. } => None,
+        }
     }
 
     pub(crate) const fn directory_identity(&self) -> WorkspaceDirectoryIdentity {
@@ -288,6 +499,19 @@ impl<T> WorkspaceCollection<T> {
         })
     }
 
+    pub(crate) fn remote_project_workspace(&self, key: &RemoteWorkspaceKey) -> Option<WorkspaceId> {
+        self.workspaces.iter().find_map(|workspace| {
+            matches!(
+                &workspace.kind,
+                WorkspaceKind::RemoteProject {
+                    key: candidate_key,
+                    ..
+                } if candidate_key == key
+            )
+            .then_some(workspace.id)
+        })
+    }
+
     #[cfg(test)]
     pub(crate) fn create_scratch_workspace_unchecked(
         &mut self,
@@ -342,6 +566,43 @@ impl<T> WorkspaceCollection<T> {
             project_root_identity: directory.identity,
         };
         self.create_workspace_entry(kind, directory, create_payload)
+    }
+
+    pub(crate) fn create_remote_project_workspace(
+        &mut self,
+        key: RemoteWorkspaceKey,
+        remote_directory: RemoteWorkspaceDirectory,
+        remote_home_identity: RemoteDirectoryIdentity,
+        connection_state: RemoteConnectionState,
+        create_payload: impl FnOnce(WorkspaceId) -> T,
+    ) -> Result<CreateRemoteProjectOutcome, WorkspaceError> {
+        if let Some(workspace_id) = self.remote_project_workspace(&key) {
+            self.active_workspace_id = workspace_id;
+            return Ok(CreateRemoteProjectOutcome::ActivatedExisting { workspace_id });
+        }
+
+        let (workspace_id, next_workspace_id) = self.next_workspace_id()?;
+        let working_directory = PathBuf::from(remote_directory.as_str());
+        let payload = create_payload(workspace_id);
+        self.workspaces.push(WorkspaceEntry {
+            id: workspace_id,
+            name: String::new(),
+            custom_name: None,
+            kind: WorkspaceKind::RemoteProject {
+                key,
+                remote_directory,
+                remote_home_identity,
+                connection_state,
+            },
+            working_directory,
+            directory_identity: WorkspaceDirectoryIdentity::new(0, workspace_id.get()),
+            availability: WorkspaceDirectoryAvailability::Available,
+            payload,
+        });
+        self.active_workspace_id = workspace_id;
+        self.next_workspace_id = next_workspace_id;
+        self.recalculate_automatic_names();
+        Ok(CreateRemoteProjectOutcome::Created { workspace_id })
     }
 
     pub(crate) fn activate_workspace(
@@ -688,11 +949,23 @@ impl<T> WorkspaceCollection<T> {
                 if let Some(custom_name) = &workspace.custom_name {
                     return custom_name.clone();
                 }
-                let base = automatic_workspace_basename(
-                    &workspace.working_directory,
-                    workspace.directory_identity,
-                    self.home_identity,
-                );
+                let base = match &workspace.kind {
+                    WorkspaceKind::RemoteProject {
+                        key,
+                        remote_directory,
+                        remote_home_identity,
+                        ..
+                    } => {
+                        automatic_remote_workspace_name(key, remote_directory, remote_home_identity)
+                    }
+                    WorkspaceKind::Scratch { .. } | WorkspaceKind::LocalProject { .. } => {
+                        automatic_workspace_basename(
+                            &workspace.working_directory,
+                            workspace.directory_identity,
+                            self.home_identity,
+                        )
+                    }
+                };
                 if !matches!(workspace.kind, WorkspaceKind::Scratch { .. }) {
                     return base;
                 }
@@ -750,6 +1023,29 @@ fn automatic_workspace_basename(
         .unwrap_or_else(|| "/".to_owned())
 }
 
+fn automatic_remote_workspace_name(
+    key: &RemoteWorkspaceKey,
+    directory: &RemoteWorkspaceDirectory,
+    home_identity: &RemoteDirectoryIdentity,
+) -> String {
+    let destination = key.destination().as_str();
+    if key.physical_directory() == home_identity {
+        return destination.to_owned();
+    }
+
+    let trimmed = directory.as_str().trim_end_matches('/');
+    let basename = if trimmed.is_empty() {
+        "/"
+    } else {
+        trimmed
+            .rsplit('/')
+            .next()
+            .filter(|name| !name.is_empty())
+            .unwrap_or(trimmed)
+    };
+    format!("{basename} · {destination}")
+}
+
 #[cfg(test)]
 mod tests {
     use std::cell::Cell;
@@ -778,6 +1074,25 @@ mod tests {
         ValidatedWorkspaceDirectory::new(
             PathBuf::from(path),
             WorkspaceDirectoryIdentity::new(1, file),
+        )
+    }
+
+    fn ssh_destination(value: &str) -> SshDestination {
+        SshDestination::new(value.to_owned()).unwrap()
+    }
+
+    fn remote_directory(value: &str) -> RemoteWorkspaceDirectory {
+        RemoteWorkspaceDirectory::new(value.to_owned()).unwrap()
+    }
+
+    fn remote_identity(value: &str) -> RemoteDirectoryIdentity {
+        RemoteDirectoryIdentity::new(value.to_owned()).unwrap()
+    }
+
+    fn remote_key(destination: &str, physical_directory: &str) -> RemoteWorkspaceKey {
+        RemoteWorkspaceKey::new(
+            ssh_destination(destination),
+            remote_identity(physical_directory),
         )
     }
 
@@ -877,6 +1192,162 @@ mod tests {
             workspaces.workspace(created).unwrap().working_directory(),
             Path::new("/selected/project")
         );
+    }
+
+    #[test]
+    fn remote_values_validate_without_changing_user_visible_spelling() {
+        let destination = ssh_destination("root@fedora@orb");
+        let directory = remote_directory("~/Projects/Space Term/");
+        let identity = remote_identity("/home/root/Projects/Space Term");
+
+        assert_eq!(
+            (destination.as_str(), directory.as_str(), identity.as_str(),),
+            (
+                "root@fedora@orb",
+                "~/Projects/Space Term/",
+                "/home/root/Projects/Space Term",
+            )
+        );
+        assert!(SshDestination::new("bad destination".to_owned()).is_err());
+        assert!(RemoteWorkspaceDirectory::new("relative/path".to_owned()).is_err());
+        assert!(RemoteDirectoryIdentity::new("~/not-physical".to_owned()).is_err());
+    }
+
+    #[test]
+    fn remote_project_key_deduplicates_without_invoking_the_duplicate_payload_factory() {
+        let mut workspaces = WorkspaceCollection::new_scratch(
+            validated("/Users/test", 10),
+            DirectoryAuthority::initial(),
+            |_, _| "scratch",
+        );
+        let key = remote_key("orb", "/home/test/project");
+        let created = workspaces
+            .create_remote_project_workspace(
+                key.clone(),
+                remote_directory("~/project"),
+                remote_identity("/home/test"),
+                RemoteConnectionState::connected(4),
+                |_| "remote",
+            )
+            .unwrap();
+        let duplicate = workspaces
+            .create_remote_project_workspace(
+                key,
+                remote_directory("/home/test/./project"),
+                remote_identity("/home/test"),
+                RemoteConnectionState::connected(9),
+                |_| panic!("a duplicate Remote Project must retain its original payload"),
+            )
+            .unwrap();
+
+        let CreateRemoteProjectOutcome::Created { workspace_id } = created else {
+            panic!("the first Remote Project should be created")
+        };
+        assert_eq!(
+            duplicate,
+            CreateRemoteProjectOutcome::ActivatedExisting { workspace_id }
+        );
+        assert_eq!(workspaces.len(), 2);
+        assert_eq!(workspaces.active_workspace_id(), workspace_id);
+        assert_eq!(
+            workspaces
+                .workspace(workspace_id)
+                .unwrap()
+                .remote_workspace_directory()
+                .map(RemoteWorkspaceDirectory::as_str),
+            Some("~/project")
+        );
+    }
+
+    #[test]
+    fn remote_project_key_keeps_different_destination_aliases_distinct() {
+        let mut workspaces = WorkspaceCollection::new_scratch(
+            validated("/Users/test", 10),
+            DirectoryAuthority::initial(),
+            |_, _| (),
+        );
+        let first = workspaces
+            .create_remote_project_workspace(
+                remote_key("orb", "/srv/project"),
+                remote_directory("/srv/project"),
+                remote_identity("/home/test"),
+                RemoteConnectionState::connected(1),
+                |_| (),
+            )
+            .unwrap();
+        let second = workspaces
+            .create_remote_project_workspace(
+                remote_key("orb-alias", "/srv/project"),
+                remote_directory("/srv/project"),
+                remote_identity("/home/test"),
+                RemoteConnectionState::connected(1),
+                |_| (),
+            )
+            .unwrap();
+
+        assert!(matches!(first, CreateRemoteProjectOutcome::Created { .. }));
+        assert!(matches!(second, CreateRemoteProjectOutcome::Created { .. }));
+        assert_eq!(workspaces.len(), 3);
+    }
+
+    #[test]
+    fn remote_automatic_names_distinguish_home_directory_and_preserve_custom_names() {
+        let mut workspaces = WorkspaceCollection::new_scratch(
+            validated("/Users/test", 10),
+            DirectoryAuthority::initial(),
+            |_, _| (),
+        );
+        let home = workspaces
+            .create_remote_project_workspace(
+                remote_key("orb", "/home/test"),
+                remote_directory("~/"),
+                remote_identity("/home/test"),
+                RemoteConnectionState::connected(1),
+                |_| (),
+            )
+            .unwrap()
+            .workspace_id();
+        let project = workspaces
+            .create_remote_project_workspace(
+                remote_key("dev@example", "/srv/team/project"),
+                remote_directory("/srv/team/project/"),
+                remote_identity("/home/dev"),
+                RemoteConnectionState::connected(1),
+                |_| (),
+            )
+            .unwrap()
+            .workspace_id();
+
+        assert_eq!(workspaces.workspace(home).unwrap().name(), "orb");
+        assert_eq!(
+            workspaces.workspace(project).unwrap().name(),
+            "project · dev@example"
+        );
+        workspaces
+            .rename_workspace(project, "  Production  ".to_owned())
+            .unwrap();
+        assert_eq!(workspaces.workspace(project).unwrap().name(), "Production");
+        workspaces.rename_workspace(project, String::new()).unwrap();
+        assert_eq!(
+            workspaces.workspace(project).unwrap().name(),
+            "project · dev@example"
+        );
+    }
+
+    #[test]
+    fn remote_connection_state_rejects_stale_generations() {
+        let mut state = RemoteConnectionState::reconnecting(7);
+
+        assert_eq!(
+            state.reduce(RemoteConnectionState::connected(7)),
+            RemoteConnectionReduction::Applied
+        );
+        assert_eq!(
+            state.reduce(RemoteConnectionState::failed(6)),
+            RemoteConnectionReduction::Stale
+        );
+        assert_eq!(state, RemoteConnectionState::connected(7));
+        assert_eq!(state.generation(), 7);
     }
 
     #[test]

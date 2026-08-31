@@ -8,7 +8,10 @@ pub(crate) use terminal_window::{
 };
 pub(crate) use window_collection::{CloseWindowOutcome, WindowCollection, WindowError};
 pub(crate) use workspace_collection::{
-    CloseWorkspaceOutcome, DirectoryAuthority, FinalWindowCloseOutcome,
-    ValidatedWorkspaceDirectory, WorkspaceCollection, WorkspaceDirectoryAvailability,
-    WorkspaceDirectoryIdentity, WorkspaceError, WorkspaceId, WorkspaceKind,
+    CloseWorkspaceOutcome, CreateRemoteProjectOutcome, DirectoryAuthority, FinalWindowCloseOutcome,
+    RemoteConnectionPhase, RemoteConnectionReduction, RemoteConnectionState,
+    RemoteDirectoryIdentity, RemoteWorkspaceDirectory, RemoteWorkspaceKey,
+    RemoteWorkspaceValueError, SshDestination, ValidatedWorkspaceDirectory, WorkspaceCollection,
+    WorkspaceDirectoryAvailability, WorkspaceDirectoryIdentity, WorkspaceError, WorkspaceId,
+    WorkspaceKind,
 };

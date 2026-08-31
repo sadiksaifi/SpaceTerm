@@ -4419,6 +4419,7 @@ mod tests {
                 match workspace.kind() {
                     WorkspaceKind::Scratch { .. } => scratch = Some(workspace.id().get()),
                     WorkspaceKind::LocalProject { .. } => project = Some(workspace.id().get()),
+                    WorkspaceKind::RemoteProject { .. } => {}
                 }
             }
             (
