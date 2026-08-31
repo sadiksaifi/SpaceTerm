@@ -735,8 +735,10 @@ mod tests {
     use portable_pty::{ChildKiller, ExitStatus};
 
     use super::*;
-    use crate::domain::SshDestination;
-    use crate::ssh::command::{SshCommandContext, ValidatedRemoteShellCommand};
+    use crate::domain::{RemoteWorkspaceDirectory, SshDestination};
+    use crate::ssh::command::{
+        RemotePaneShellCommandBuilder, SshCommandContext, ValidatedRemoteLoginShell,
+    };
 
     #[test]
     fn hidden_input_requires_canonical_mode_without_echo() {
@@ -1092,15 +1094,22 @@ mod tests {
             PathBuf::from("/private/runtime/spaceterm/control.sock"),
         )
         .unwrap();
+        let directory = RemoteWorkspaceDirectory::new("~/project".to_owned()).unwrap();
+        let login_shell = ValidatedRemoteLoginShell::new("/bin/zsh".to_owned()).unwrap();
         let prepared = command_context.prepare_pane_channel(
-            ValidatedRemoteShellCommand::new("exec /bin/zsh -l".to_owned()).unwrap(),
+            RemotePaneShellCommandBuilder::new(&directory, &login_shell)
+                .build()
+                .unwrap(),
         );
         let local_home = Path::new("/Users/local");
 
         let command = build_remote_pane_command(prepared.take().unwrap(), local_home).unwrap();
 
         assert_eq!(command.get_argv().first().unwrap(), "/usr/bin/ssh");
-        assert_eq!(command.get_argv().last().unwrap(), "exec /bin/zsh -l");
+        assert_eq!(
+            command.get_argv().last().unwrap(),
+            "cd \"${HOME}\"'/project' && exec '/bin/zsh' -l"
+        );
         assert_eq!(command.get_cwd(), Some(&local_home.as_os_str().to_owned()));
         assert_eq!(
             command.get_env("TERM"),
