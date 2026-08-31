@@ -21,7 +21,8 @@ use crate::platform::macos_window_drag::{
     OperatingSystemWindowDragError, OperatingSystemWindowDragPlatform,
 };
 use crate::terminal::{
-    NativeServiceOrigin, NativeServiceStatus, SelectionCopy, WorkspaceTerminalSessionFactory,
+    NativeServiceOrigin, NativeServiceStatus, SelectionCopy, WorkspaceChildLaunchValidation,
+    WorkspaceTerminalSessionFactory,
 };
 use crate::theme::{ACTIVE_THEME, Color};
 use gpui::prelude::*;
@@ -489,18 +490,24 @@ impl WindowManager {
         self.window_menu = None;
         self.window_selector_pressed = None;
         self.sync_terminal_focus_blocker(cx);
-        match self.session_factory.validate_working_directory() {
-            Ok(directory) => cx.emit(WindowManagerEvent::DirectoryAvailable {
-                identity: directory.identity(),
-            }),
+        match self.session_factory.validate_child_launch() {
+            Ok(WorkspaceChildLaunchValidation::Local(directory)) => {
+                cx.emit(WindowManagerEvent::DirectoryAvailable {
+                    identity: directory.identity(),
+                });
+            }
+            Ok(WorkspaceChildLaunchValidation::Remote) => {}
             Err(error) => {
                 let reason = error.to_string();
                 cx.emit(WindowManagerEvent::DirectoryUnavailable {
                     reason: reason.clone(),
                 });
+                let directory = self.session_factory.local_working_directory().map_or_else(
+                    || "the local Workspace Directory".to_owned(),
+                    |path| path.display().to_string(),
+                );
                 let detail = format!(
-                    "Cannot create a Window at {} because {reason}. Restore the directory or use another Workspace.",
-                    self.session_factory.working_directory().display()
+                    "Cannot create a Window at {directory} because {reason}. Restore the directory or use another Workspace."
                 );
                 drop(window.prompt(
                     PromptLevel::Warning,
@@ -1264,6 +1271,7 @@ mod tests {
     use super::*;
     use crate::domain::PaneId;
     use crate::platform::macos_window_drag::RecordingOperatingSystemWindowDragPlatform;
+    use crate::ssh::command::{SshCommandContext, ValidatedRemoteShellCommand};
     use crate::terminal::testing::{
         RecordedSessionCommand, TestTerminalSessionFactory, TestTerminalSessionRecords,
     };
@@ -1285,6 +1293,51 @@ mod tests {
             crate::terminal::testing::test_workspace_directory(PathBuf::from(
                 "/tmp/spaceterm-window-manager-test",
             )),
+        );
+        let (manager, cx) =
+            cx.add_window_view(|window, cx| WindowManager::new(session_factory, window, cx));
+        cx.update(|window, cx| {
+            window.activate_window();
+            manager.update(cx, |manager, cx| manager.focus(window, cx));
+        });
+        cx.run_until_parked();
+        (manager, records, cx)
+    }
+
+    fn remote_window_manager(
+        cx: &mut TestAppContext,
+    ) -> (
+        Entity<WindowManager>,
+        TestTerminalSessionRecords,
+        &mut VisualTestContext,
+    ) {
+        cx.update(crate::ui::init);
+        let records = TestTerminalSessionRecords::default();
+        let destination = crate::domain::SshDestination::new("tester@remote".to_owned()).unwrap();
+        let command_context = Rc::new(
+            SshCommandContext::new(
+                PathBuf::from("/private/config/spaceterm/ssh_config"),
+                destination.clone(),
+                PathBuf::from("/private/runtime/spaceterm/master.sock"),
+            )
+            .unwrap(),
+        );
+        let session_factory = WorkspaceTerminalSessionFactory::new_remote(
+            Rc::new(TestTerminalSessionFactory::new(records.clone())),
+            crate::domain::ValidatedWorkspaceDirectory::new(
+                PathBuf::from("/missing/local/home-is-not-a-workspace"),
+                WorkspaceDirectoryIdentity::new(79, 83),
+            ),
+            crate::terminal::metadata::RemoteTerminalMetadataContext::new(
+                destination,
+                crate::domain::RemoteWorkspaceDirectory::new("~/project".to_owned()).unwrap(),
+            ),
+            "project on remote".to_owned(),
+            Rc::new(move || {
+                command_context.prepare_pane_channel(
+                    ValidatedRemoteShellCommand::new("exec /bin/zsh -l".to_owned()).unwrap(),
+                )
+            }),
         );
         let (manager, cx) =
             cx.add_window_view(|window, cx| WindowManager::new(session_factory, window, cx));
@@ -1492,6 +1545,27 @@ mod tests {
             )
         });
         assert_eq!(state, (2, WindowId::new(2), Vec::new()));
+    }
+
+    #[gpui::test]
+    fn remote_window_creation_skips_local_validation_and_preserves_launch_context(
+        cx: &mut TestAppContext,
+    ) {
+        let (manager, records, cx) = remote_window_manager(cx);
+
+        cx.update(|window, cx| {
+            manager.update(cx, |manager, cx| manager.create_window(window, cx));
+        });
+        cx.run_until_parked();
+
+        assert_eq!(manager.read_with(cx, |manager, _| manager.windows.len()), 2);
+        assert_eq!(records.starts().len(), 2);
+        assert!(records.starts().iter().all(|start| {
+            start.remote_launch_plan().is_some_and(|plan| {
+                plan.destination().as_str() == "tester@remote"
+                    && plan.remote_directory().as_str() == "~/project"
+            })
+        }));
     }
 
     #[gpui::test]

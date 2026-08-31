@@ -3,6 +3,8 @@ use std::fs::Metadata;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
+use super::metadata::TerminalLocalFileCapabilities;
+
 pub(crate) const MAX_LINK_BYTES: usize = 4096;
 const LOCAL_EMISSION_METADATA_PREFIX: &[u8; 8] = b"STLF\0\0\0\x01";
 const LOCAL_EMISSION_METADATA_HEADER_BYTES: usize = LOCAL_EMISSION_METADATA_PREFIX.len() + 8 * 3;
@@ -53,6 +55,10 @@ impl From<&Metadata> for LocalFileIdentity {
 }
 
 impl HyperlinkTarget {
+    pub(crate) const fn is_local_file(&self) -> bool {
+        matches!(self.kind, HyperlinkKind::LocalPath)
+    }
+
     pub(crate) fn url(value: &str) -> Option<Self> {
         valid_text(value)
             .then(|| {
@@ -69,8 +75,10 @@ impl HyperlinkTarget {
         value: &str,
         trusted_directory: &Path,
         local_hostname: Option<&str>,
+        local_file_capabilities: TerminalLocalFileCapabilities,
     ) -> Option<Self> {
         Self::url(value).or_else(|| {
+            local_file_capabilities.are_enabled().then_some(())?;
             let path = parse_local_file_uri(value, local_hostname)?;
             Self::local(&path, trusted_directory)
         })
@@ -118,13 +126,17 @@ impl HyperlinkTarget {
         }
     }
 
-    pub(crate) fn activation_url(&self) -> Option<String> {
+    pub(crate) fn activation_url(
+        &self,
+        local_file_capabilities: TerminalLocalFileCapabilities,
+    ) -> Option<String> {
         match self.kind {
             HyperlinkKind::Url => Some(self.value.clone()),
             HyperlinkKind::LocalPath => {
+                local_file_capabilities.are_enabled().then_some(())?;
                 // This is intentionally action-triggered filesystem I/O. Hover/render/context
                 // eligibility uses the immutable target and never performs synchronous I/O.
-                let path = self.revalidated_local_path()?;
+                let path = self.revalidated_local_path(local_file_capabilities)?;
                 Some(file_url(path.to_str()?))
             }
         }
@@ -139,7 +151,11 @@ impl HyperlinkTarget {
 
     /// Serializes the validated target into resolver-only metadata retained
     /// separately from terminal text and hyperlink URI formatting.
-    pub(crate) fn local_emission_metadata(&self) -> Option<Vec<u8>> {
+    pub(crate) fn local_emission_metadata(
+        &self,
+        local_file_capabilities: TerminalLocalFileCapabilities,
+    ) -> Option<Vec<u8>> {
+        local_file_capabilities.are_enabled().then_some(())?;
         let identity = self.local_file_identity?;
         (self.kind == HyperlinkKind::LocalPath).then_some(())?;
         let total = LOCAL_EMISSION_METADATA_HEADER_BYTES.checked_add(self.value.len())?;
@@ -155,7 +171,11 @@ impl HyperlinkTarget {
         Some(metadata)
     }
 
-    pub(crate) fn from_local_emission_metadata(metadata: &[u8]) -> Option<Self> {
+    pub(crate) fn from_local_emission_metadata(
+        metadata: &[u8],
+        local_file_capabilities: TerminalLocalFileCapabilities,
+    ) -> Option<Self> {
+        local_file_capabilities.are_enabled().then_some(())?;
         if metadata.len() > MAX_LINK_BYTES
             || metadata.len() <= LOCAL_EMISSION_METADATA_HEADER_BYTES
             || !metadata.starts_with(LOCAL_EMISSION_METADATA_PREFIX)
@@ -180,7 +200,11 @@ impl HyperlinkTarget {
         })
     }
 
-    pub(crate) fn revalidated_local_path(&self) -> Option<PathBuf> {
+    pub(crate) fn revalidated_local_path(
+        &self,
+        local_file_capabilities: TerminalLocalFileCapabilities,
+    ) -> Option<PathBuf> {
+        local_file_capabilities.are_enabled().then_some(())?;
         if self.kind != HyperlinkKind::LocalPath {
             return None;
         }
@@ -361,6 +385,8 @@ mod tests {
 
     use super::*;
 
+    const LOCAL_FILES: TerminalLocalFileCapabilities = TerminalLocalFileCapabilities::Enabled;
+
     fn temporary_directory(name: &str) -> std::path::PathBuf {
         let directory =
             std::env::temp_dir().join(format!("spaceterm-hyperlink-{}-{name}", std::process::id()));
@@ -398,7 +424,9 @@ mod tests {
         let file = directory.join("preview file.txt");
         fs::write(&file, b"preview").unwrap();
 
-        let target = HyperlinkTarget::osc8("file:preview%20file.txt", &directory, None).unwrap();
+        let target =
+            HyperlinkTarget::osc8("file:preview%20file.txt", &directory, None, LOCAL_FILES)
+                .unwrap();
         let canonical = file.canonicalize().unwrap();
         let canonical = canonical.to_str().unwrap();
 
@@ -408,7 +436,10 @@ mod tests {
             target.identity,
             stable_identity(HyperlinkKind::LocalPath, canonical.as_bytes())
         );
-        assert_eq!(target.activation_url(), Some(file_url(canonical)));
+        assert_eq!(
+            target.activation_url(LOCAL_FILES),
+            Some(file_url(canonical))
+        );
         fs::remove_dir_all(directory).unwrap();
     }
 
@@ -424,7 +455,9 @@ mod tests {
             format!("file://localhost{encoded_path}"),
             format!("file://mac.local{encoded_path}"),
         ] {
-            assert!(HyperlinkTarget::osc8(&uri, &directory, Some("mac.local")).is_some());
+            assert!(
+                HyperlinkTarget::osc8(&uri, &directory, Some("mac.local"), LOCAL_FILES).is_some()
+            );
         }
         fs::remove_dir_all(directory).unwrap();
     }
@@ -446,11 +479,9 @@ mod tests {
             "file:.".to_owned(),
         ];
 
-        assert!(
-            rejected
-                .iter()
-                .all(|uri| { HyperlinkTarget::osc8(uri, &directory, Some("mac.local")).is_none() })
-        );
+        assert!(rejected.iter().all(|uri| {
+            HyperlinkTarget::osc8(uri, &directory, Some("mac.local"), LOCAL_FILES).is_none()
+        }));
         fs::remove_dir_all(directory).unwrap();
     }
 
@@ -471,20 +502,45 @@ mod tests {
         let directory = temporary_directory("emission-metadata");
         let file = directory.join("preview.txt");
         fs::write(&file, b"first").unwrap();
-        let target = HyperlinkTarget::osc8("file:preview.txt", &directory, None).unwrap();
-        let metadata = target.local_emission_metadata().unwrap();
+        let target =
+            HyperlinkTarget::osc8("file:preview.txt", &directory, None, LOCAL_FILES).unwrap();
+        let metadata = target.local_emission_metadata(LOCAL_FILES).unwrap();
 
         fs::remove_file(&file).unwrap();
-        let restored = HyperlinkTarget::from_local_emission_metadata(&metadata).unwrap();
+        let restored =
+            HyperlinkTarget::from_local_emission_metadata(&metadata, LOCAL_FILES).unwrap();
 
         assert_eq!(restored, target);
-        assert_eq!(restored.activation_url(), None);
+        assert_eq!(restored.activation_url(LOCAL_FILES), None);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn disabled_local_file_capabilities_suppress_emission_and_restoration() {
+        let directory = temporary_directory("disabled-emission");
+        let file = directory.join("preview.txt");
+        fs::write(&file, b"preview").unwrap();
+        let target =
+            HyperlinkTarget::osc8("file:preview.txt", &directory, None, LOCAL_FILES).unwrap();
+        let metadata = target.local_emission_metadata(LOCAL_FILES).unwrap();
+
+        assert_eq!(
+            target.local_emission_metadata(TerminalLocalFileCapabilities::Disabled),
+            None
+        );
+        assert_eq!(
+            HyperlinkTarget::from_local_emission_metadata(
+                &metadata,
+                TerminalLocalFileCapabilities::Disabled,
+            ),
+            None
+        );
         fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
     fn malformed_local_emission_metadata_is_rejected() {
-        assert!(HyperlinkTarget::from_local_emission_metadata(b"forged").is_none());
+        assert!(HyperlinkTarget::from_local_emission_metadata(b"forged", LOCAL_FILES).is_none());
     }
 
     #[test]
@@ -492,7 +548,9 @@ mod tests {
         let directory = temporary_directory("debug-redaction");
         let file = directory.join("private-preview.txt");
         fs::write(&file, b"first").unwrap();
-        let target = HyperlinkTarget::osc8("file:private-preview.txt", &directory, None).unwrap();
+        let target =
+            HyperlinkTarget::osc8("file:private-preview.txt", &directory, None, LOCAL_FILES)
+                .unwrap();
 
         let diagnostics = format!("{target:?}");
 

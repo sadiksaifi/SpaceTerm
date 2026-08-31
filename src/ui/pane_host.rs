@@ -14,7 +14,8 @@ use crate::domain::{
     SplitId, TerminalWindow, WindowId, WorkspaceDirectoryIdentity, WorkspaceId, ZoomState,
 };
 use crate::terminal::{
-    NativeServiceOrigin, NativeServiceStatus, SelectionCopy, WorkspaceTerminalSessionFactory,
+    NativeServiceOrigin, NativeServiceStatus, SelectionCopy, WorkspaceChildLaunchValidation,
+    WorkspaceTerminalSessionFactory,
 };
 use crate::theme::{ACTIVE_THEME, Color};
 use gpui::prelude::*;
@@ -412,18 +413,24 @@ impl PaneHost {
             eprintln!("cannot split Pane {target_pane_id} with invalid measured bounds");
             return;
         };
-        match self.session_factory.validate_working_directory() {
-            Ok(directory) => cx.emit(PaneHostEvent::DirectoryAvailable {
-                identity: directory.identity(),
-            }),
+        match self.session_factory.validate_child_launch() {
+            Ok(WorkspaceChildLaunchValidation::Local(directory)) => {
+                cx.emit(PaneHostEvent::DirectoryAvailable {
+                    identity: directory.identity(),
+                });
+            }
+            Ok(WorkspaceChildLaunchValidation::Remote) => {}
             Err(error) => {
                 let reason = error.to_string();
                 cx.emit(PaneHostEvent::DirectoryUnavailable {
                     reason: reason.clone(),
                 });
+                let directory = self.session_factory.local_working_directory().map_or_else(
+                    || "the local Workspace Directory".to_owned(),
+                    |path| path.display().to_string(),
+                );
                 let detail = format!(
-                    "Cannot create a Pane at {} because {reason}. Restore the directory or use another Workspace.",
-                    self.session_factory.working_directory().display()
+                    "Cannot create a Pane at {directory} because {reason}. Restore the directory or use another Workspace."
                 );
                 drop(window.prompt(
                     PromptLevel::Warning,
@@ -1218,6 +1225,7 @@ mod tests {
     };
 
     use super::*;
+    use crate::ssh::command::{SshCommandContext, ValidatedRemoteShellCommand};
     use crate::terminal::testing::{
         RecordedSessionCommand, TestTerminalSessionFactory, TestTerminalSessionRecords,
     };
@@ -1235,6 +1243,37 @@ mod tests {
         )
     }
 
+    fn remote_test_session_factory(
+        records: TestTerminalSessionRecords,
+    ) -> WorkspaceTerminalSessionFactory {
+        let destination = crate::domain::SshDestination::new("tester@remote".to_owned()).unwrap();
+        let command_context = Rc::new(
+            SshCommandContext::new(
+                PathBuf::from("/private/config/spaceterm/ssh_config"),
+                destination.clone(),
+                PathBuf::from("/private/runtime/spaceterm/master.sock"),
+            )
+            .unwrap(),
+        );
+        WorkspaceTerminalSessionFactory::new_remote(
+            Rc::new(TestTerminalSessionFactory::new(records)),
+            crate::domain::ValidatedWorkspaceDirectory::new(
+                PathBuf::from("/missing/local/home-is-not-a-workspace"),
+                WorkspaceDirectoryIdentity::new(71, 73),
+            ),
+            crate::terminal::metadata::RemoteTerminalMetadataContext::new(
+                destination,
+                crate::domain::RemoteWorkspaceDirectory::new("~/project".to_owned()).unwrap(),
+            ),
+            "project on remote".to_owned(),
+            Rc::new(move || {
+                command_context.prepare_pane_channel(
+                    ValidatedRemoteShellCommand::new("exec /bin/zsh -l".to_owned()).unwrap(),
+                )
+            }),
+        )
+    }
+
     fn split_test_pane(
         host: &Entity<PaneHost>,
         pane_id: PaneId,
@@ -1247,6 +1286,30 @@ mod tests {
             });
         });
         cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn remote_split_skips_local_workspace_validation_and_preserves_launch_context(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(crate::ui::init);
+        let records = TestTerminalSessionRecords::default();
+        let session_factory = remote_test_session_factory(records.clone());
+        let (host, cx) = cx.add_window_view(|window, cx| {
+            PaneHost::new(WindowId::new(1), session_factory, window, cx)
+        });
+        cx.run_until_parked();
+
+        split_test_pane(&host, PaneId::new(1), SplitAxis::Horizontal, cx);
+
+        assert_eq!(host.read_with(cx, |host, _| host.pane_count()), 2);
+        assert_eq!(records.starts().len(), 2);
+        assert!(records.starts().iter().all(|start| {
+            start.remote_launch_plan().is_some_and(|plan| {
+                plan.destination().as_str() == "tester@remote"
+                    && plan.remote_directory().as_str() == "~/project"
+            })
+        }));
     }
 
     fn four_pane_host(cx: &mut TestAppContext) -> (Entity<PaneHost>, &mut VisualTestContext) {

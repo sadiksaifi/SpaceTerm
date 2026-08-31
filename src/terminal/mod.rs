@@ -49,6 +49,7 @@ pub(crate) use hyperlink::HyperlinkTarget;
 pub(crate) use key::{
     InputModifiers, KeyAction, KeyInput, KeyInputError, OptionAsAltPolicy, PhysicalKey,
 };
+pub(crate) use metadata::TerminalLocalFileCapabilities;
 pub(crate) use native_services::{
     NativeContextActions, NativeInsertion, NativeServiceCapabilities, NativeServiceOrigin,
     NativeServiceStatus, QuickLookTarget,
@@ -87,4 +88,6 @@ pub(crate) use session::{
 };
 #[cfg(test)]
 pub(crate) use session::{SessionError, StartedTerminalSession};
-pub(crate) use workspace_terminal_session_factory::WorkspaceTerminalSessionFactory;
+pub(crate) use workspace_terminal_session_factory::{
+    WorkspaceChildLaunchValidation, WorkspaceTerminalSessionFactory,
+};

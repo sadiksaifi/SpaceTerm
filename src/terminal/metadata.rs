@@ -108,6 +108,18 @@ pub(crate) enum TerminalMetadataContext {
     Remote(RemoteTerminalMetadataContext),
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum TerminalLocalFileCapabilities {
+    Enabled,
+    Disabled,
+}
+
+impl TerminalLocalFileCapabilities {
+    pub(crate) const fn are_enabled(self) -> bool {
+        matches!(self, Self::Enabled)
+    }
+}
+
 impl TerminalMetadataContext {
     pub(crate) fn local(initial_directory: &str, local_hostname: Option<&str>) -> Self {
         Self::Local {
@@ -118,6 +130,13 @@ impl TerminalMetadataContext {
 
     pub(crate) const fn is_local(&self) -> bool {
         matches!(self, Self::Local { .. })
+    }
+
+    pub(crate) const fn local_file_capabilities(&self) -> TerminalLocalFileCapabilities {
+        match self {
+            Self::Local { .. } => TerminalLocalFileCapabilities::Enabled,
+            Self::Remote(_) => TerminalLocalFileCapabilities::Disabled,
+        }
     }
 
     pub(crate) const fn remote(&self) -> Option<&RemoteTerminalMetadataContext> {
@@ -452,6 +471,28 @@ mod tests {
         assert_eq!(snapshot.directory.path.as_ref(), "~/project");
         assert_eq!(snapshot.title.value.as_ref(), "Remote Project");
         assert!(!snapshot.context.is_local());
+        assert_eq!(
+            snapshot.context.local_file_capabilities(),
+            TerminalLocalFileCapabilities::Disabled
+        );
+    }
+
+    #[test]
+    fn local_file_capabilities_should_be_derived_only_from_terminal_context() {
+        let local = TerminalMetadataContext::local("/Users/test", Some("mac.local"));
+        let remote = TerminalMetadataContext::Remote(RemoteTerminalMetadataContext::new(
+            SshDestination::new("user@remote".to_owned()).unwrap(),
+            RemoteWorkspaceDirectory::new("~/project".to_owned()).unwrap(),
+        ));
+
+        assert_eq!(
+            local.local_file_capabilities(),
+            TerminalLocalFileCapabilities::Enabled
+        );
+        assert_eq!(
+            remote.local_file_capabilities(),
+            TerminalLocalFileCapabilities::Disabled
+        );
     }
 
     #[test]

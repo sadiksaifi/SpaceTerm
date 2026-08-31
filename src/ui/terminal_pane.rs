@@ -69,8 +69,9 @@ use crate::terminal::{
     PasteConfirmation, PasteDecision, PasteRequestOutcome, PasteResolution, PhysicalKey,
     PointerButton, PointerInput, PointerPhase, QuickLookTarget, ScreenSnapshot, SelectionCopy,
     SelectionCopyError, SessionEvent, ShiftSelectionPolicy, SurfacePosition,
-    TerminalAccessibilityModel, TerminalFailure, TerminalSessionHandle, UnhandledKeyDiagnostic,
-    WheelInput, WheelPhase, WorkspaceTerminalSessionFactory,
+    TerminalAccessibilityModel, TerminalFailure, TerminalLocalFileCapabilities,
+    TerminalSessionHandle, UnhandledKeyDiagnostic, WheelInput, WheelPhase,
+    WorkspaceTerminalSessionFactory,
 };
 use crate::theme::{ACTIVE_THEME, Color};
 #[cfg(test)]
@@ -251,6 +252,7 @@ impl SelectionPasteboard {
 
 pub(crate) struct TerminalPane {
     session_factory: WorkspaceTerminalSessionFactory,
+    local_file_capabilities: TerminalLocalFileCapabilities,
     session: Option<Box<dyn TerminalSessionHandle>>,
     session_start_attempted: bool,
     acceptance_observation_claimed: bool,
@@ -369,6 +371,7 @@ impl TerminalPane {
         let backing_scale = BackingScale::new(window.scale_factor()).unwrap_or(BackingScale::ONE);
         let fallback_title: SharedString =
             normalized_pane_title("", &session_factory.fallback_title()).into();
+        let local_file_capabilities = session_factory.local_file_capabilities();
         let scrollbar = cx.new(|_| OverlayScrollbar::<u64>::new("terminal-scrollbar"));
         let render_cache = cx.new(|_| TerminalGridCache::new());
         let fallback_render_cache = cx.new(|_| TerminalGridCache::new());
@@ -433,6 +436,7 @@ impl TerminalPane {
 
         Self {
             session_factory,
+            local_file_capabilities,
             session: None,
             session_start_attempted: false,
             acceptance_observation_claimed: false,
@@ -2177,6 +2181,7 @@ impl TerminalPane {
                 .surface_position(event.position, false)
                 .and_then(|position| self.link_at(position));
             if let Some(url) = activated_link(
+                self.local_file_capabilities,
                 generation,
                 &pressed,
                 self.screen.generation,
@@ -2349,15 +2354,23 @@ impl TerminalPane {
     }
 
     fn paste_clipboard(&mut self, _: &PasteClipboard, window: &mut Window, cx: &mut Context<Self>) {
-        let paths = read_file_urls().unwrap_or_default();
         let terminal_input_focused = self.synchronize_terminal_input_focus(window, cx);
+        let paths = self
+            .local_file_capabilities
+            .are_enabled()
+            .then(|| read_file_urls().unwrap_or_default())
+            .unwrap_or_default();
         let insertion = if paths.is_empty() {
             let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) else {
                 return;
             };
             NativeInsertion::service_text(text, terminal_input_focused)
         } else {
-            NativeInsertion::dropped_files(&paths, terminal_input_focused)
+            NativeInsertion::dropped_files(
+                &paths,
+                terminal_input_focused,
+                self.local_file_capabilities,
+            )
         };
         let Ok(insertion) = insertion else {
             return;
@@ -2403,14 +2416,18 @@ impl TerminalPane {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let insertion = match NativeInsertion::prepare_dropped_files(paths) {
-            Ok(insertion) => insertion,
-            Err(message) => {
-                self.status = Some(format!("File drop rejected: {message}"));
-                cx.notify();
-                return;
-            }
-        };
+        if !self.local_file_capabilities.are_enabled() {
+            return;
+        }
+        let insertion =
+            match NativeInsertion::prepare_dropped_files(paths, self.local_file_capabilities) {
+                Ok(insertion) => insertion,
+                Err(message) => {
+                    self.status = Some(format!("File drop rejected: {message}"));
+                    cx.notify();
+                    return;
+                }
+            };
         self.pending_file_insertion = Some(insertion);
         window.activate_window();
         self.focus(window);
@@ -2440,6 +2457,7 @@ impl TerminalPane {
 
     fn native_context_actions(&self) -> NativeContextActions {
         NativeContextActions::from_presence(
+            self.local_file_capabilities,
             self.screen.selection_present,
             self.current_hovered_link(),
         )
@@ -2455,6 +2473,7 @@ impl TerminalPane {
         );
         let selection_is_current = menu.generation == self.screen.generation;
         let mut actions = NativeContextActions::from_presence(
+            self.local_file_capabilities,
             selection_is_current && menu.selection_present && self.screen.selection_present,
             link,
         );
@@ -2490,7 +2509,8 @@ impl TerminalPane {
 
         let link = self.link_at(position);
         let quick_look_eligible =
-            NativeContextActions::from_presence(false, link.as_ref()).quick_look;
+            NativeContextActions::from_presence(self.local_file_capabilities, false, link.as_ref())
+                .quick_look;
         self.context_menu = Some(TerminalContextMenuState {
             generation: self.screen.generation,
             position,
@@ -2536,6 +2556,7 @@ impl TerminalPane {
         .cloned();
         let selection_is_current = menu.generation == self.screen.generation;
         let mut actions = NativeContextActions::from_presence(
+            self.local_file_capabilities,
             selection_is_current && menu.selection_present && self.screen.selection_present,
             link.as_ref(),
         );
@@ -2547,7 +2568,9 @@ impl TerminalPane {
                 self.copy_selection(&CopySelection, window, cx);
             }
             TerminalContextMenuCommand::OpenLink if actions.open_link => {
-                if let Some(url) = link.and_then(|link| link.activation_url()) {
+                if let Some(url) =
+                    link.and_then(|link| link.activation_url(self.local_file_capabilities))
+                {
                     cx.open_url(&url);
                 }
             }
@@ -2566,7 +2589,7 @@ impl TerminalPane {
         link: &crate::terminal::HyperlinkTarget,
         cx: &mut Context<Self>,
     ) {
-        let Some(target) = QuickLookTarget::from_link(link) else {
+        let Some(target) = QuickLookTarget::from_link(link, self.local_file_capabilities) else {
             return;
         };
         if self.quick_look.preview(&target).is_err() {
@@ -2863,6 +2886,7 @@ impl TerminalPane {
             .get(usize::from(cell.col))?
             .hyperlink
             .clone()
+            .filter(|link| !link.is_local_file() || self.local_file_capabilities.are_enabled())
     }
 
     fn render_find_bar(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -3974,6 +3998,7 @@ fn terminal_surface_position(
 }
 
 fn activated_link(
+    local_file_capabilities: TerminalLocalFileCapabilities,
     pressed_generation: crate::terminal::PresentationGeneration,
     pressed: &crate::terminal::HyperlinkTarget,
     current_generation: crate::terminal::PresentationGeneration,
@@ -3981,7 +4006,7 @@ fn activated_link(
 ) -> Option<String> {
     (pressed_generation == current_generation
         && current.is_some_and(|link| link.identity == pressed.identity))
-    .then(|| pressed.activation_url())
+    .then(|| pressed.activation_url(local_file_capabilities))
     .flatten()
 }
 
@@ -4235,6 +4260,7 @@ mod tests {
     };
 
     use super::*;
+    use crate::ssh::command::{SshCommandContext, ValidatedRemoteShellCommand};
     use crate::terminal::testing::{
         RecordedSessionCommand, TestTerminalSessionFactory, TestTerminalSessionRecords,
         test_workspace_directory,
@@ -4744,6 +4770,184 @@ mod tests {
         });
         cx.run_until_parked();
         (pane, cx, records)
+    }
+
+    fn remote_workspace_session_factory(
+        records: TestTerminalSessionRecords,
+    ) -> WorkspaceTerminalSessionFactory {
+        let destination = crate::domain::SshDestination::new("tester@remote".to_owned()).unwrap();
+        let command_context = Rc::new(
+            SshCommandContext::new(
+                PathBuf::from("/private/config/spaceterm/ssh_config"),
+                destination.clone(),
+                PathBuf::from("/private/runtime/spaceterm/master.sock"),
+            )
+            .unwrap(),
+        );
+        let prepare_pane_channel = Rc::new(move || {
+            command_context.prepare_pane_channel(
+                ValidatedRemoteShellCommand::new("exec /bin/zsh -l".to_owned()).unwrap(),
+            )
+        });
+        WorkspaceTerminalSessionFactory::new_remote(
+            Rc::new(TestTerminalSessionFactory::new(records)),
+            test_workspace_directory(PathBuf::from("/local/home")),
+            crate::terminal::metadata::RemoteTerminalMetadataContext::new(
+                destination,
+                crate::domain::RemoteWorkspaceDirectory::new("~/project".to_owned()).unwrap(),
+            ),
+            "project on remote".to_owned(),
+            prepare_pane_channel,
+        )
+    }
+
+    fn connected_remote_terminal_pane(
+        cx: &mut TestAppContext,
+    ) -> (
+        Entity<TerminalPane>,
+        &mut VisualTestContext,
+        TestTerminalSessionRecords,
+    ) {
+        cx.update(crate::ui::init);
+        let records = TestTerminalSessionRecords::default();
+        let session_factory = remote_workspace_session_factory(records.clone());
+        let (pane, cx) =
+            cx.add_window_view(|window, cx| TerminalPane::new(session_factory, window, cx));
+        cx.update(|window, cx| {
+            window.activate_window();
+            pane.update(cx, |pane, _| pane.focus(window));
+        });
+        cx.run_until_parked();
+        (pane, cx, records)
+    }
+
+    #[gpui::test]
+    fn remote_pane_disables_local_file_actions_but_preserves_text_services_and_web_links(
+        cx: &mut TestAppContext,
+    ) {
+        let directory = std::env::temp_dir().join(format!(
+            "spaceterm-remote-pane-capabilities-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let file = directory.join("preview.txt");
+        std::fs::write(&file, b"preview").unwrap();
+        let local_link = crate::terminal::HyperlinkTarget::osc8(
+            "file:preview.txt",
+            &directory,
+            None,
+            TerminalLocalFileCapabilities::Enabled,
+        )
+        .unwrap();
+        let web_link = crate::terminal::HyperlinkTarget::url("https://example.test").unwrap();
+        let previews = Rc::new(Cell::new(0));
+        let (pane, cx, records) = connected_remote_terminal_pane(cx);
+
+        cx.update(|window, cx| {
+            pane.update(cx, |pane, cx| {
+                pane.screen = context_action_screen(Some(local_link.clone()), true);
+                pane.last_geometry = Some(TerminalGeometry::from_grid(
+                    CellGridSize::new(1, 1),
+                    LogicalCellSize::new(f32::from(pane.cell_width), pane.line_height),
+                    BackingScale::ONE,
+                ));
+                pane.quick_look = Box::new(RecordingQuickLookPresenter {
+                    previews: Rc::clone(&previews),
+                    dismissals: Rc::new(Cell::new(0)),
+                });
+                let menu = TerminalContextMenuState {
+                    generation: pane.screen.generation,
+                    position: SurfacePosition::default(),
+                    link: Some(local_link.clone()),
+                    selection_present: true,
+                    quick_look_eligible: true,
+                };
+                assert_eq!(
+                    pane.context_menu_actions(&menu),
+                    NativeContextActions {
+                        copy: true,
+                        open_link: false,
+                        quick_look: false,
+                    }
+                );
+                pane.perform_context_menu_command(
+                    menu,
+                    TerminalContextMenuCommand::QuickLook,
+                    window,
+                    cx,
+                );
+                pane.insert_dropped_file_paths_for_test(&[file.clone()], window, cx);
+            });
+        });
+        cx.run_until_parked();
+        cx.write_to_clipboard(ClipboardItem::new_string("clipboard text".to_owned()));
+        cx.update(|window, cx| {
+            pane.update(cx, |pane, cx| {
+                pane.paste_clipboard(&PasteClipboard, window, cx);
+            });
+        });
+        cx.run_until_parked();
+        let origin = current_native_service_origin(&pane, cx);
+        let inserted = cx.update(|window, cx| {
+            pane.update(cx, |pane, cx| {
+                pane.insert_native_service_text(origin, "ordinary text".to_owned(), window, cx)
+            })
+        });
+        cx.run_until_parked();
+        let osc52_request = Osc52AuthorizationRequest {
+            id: crate::terminal::Osc52AuthorizationId::new(97),
+            access: Osc52Access::Write,
+            target: Osc52Target::Standard,
+            byte_len: 12,
+        };
+        records
+            .last_event_sender()
+            .unwrap()
+            .send_blocking(SessionEvent::Osc52Authorization(osc52_request))
+            .unwrap();
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            pane.update(cx, |pane, cx| {
+                pane.resolve_osc52_authorization(Osc52AuthorizationDecision::Allow, window, cx);
+                pane.open_find(&OpenTerminalFind, window, cx);
+            });
+        });
+
+        assert!(inserted);
+        assert_eq!(previews.get(), 0);
+        assert!(pane.read_with(cx, |pane, _| pane.find_input.is_some()));
+        let generation = pane.read_with(cx, |pane, _| pane.screen.generation);
+        assert_eq!(
+            activated_link(
+                TerminalLocalFileCapabilities::Disabled,
+                generation,
+                &web_link,
+                generation,
+                Some(&web_link),
+            ),
+            Some("https://example.test".to_owned())
+        );
+        assert!(records.commands().iter().any(|call| {
+            call.command == RecordedSessionCommand::RequestPaste("ordinary text".to_owned())
+        }));
+        assert!(records.commands().iter().any(|call| {
+            call.command == RecordedSessionCommand::RequestPaste("clipboard text".to_owned())
+        }));
+        assert!(records.commands().iter().any(|call| {
+            call.command
+                == RecordedSessionCommand::ResolveOsc52Authorization(
+                    osc52_request.id,
+                    Osc52AuthorizationDecision::Allow,
+                )
+        }));
+        assert!(records.commands().iter().all(|call| {
+            !matches!(
+                &call.command,
+                RecordedSessionCommand::RequestPaste(text)
+                    if text.contains(file.to_string_lossy().as_ref())
+            )
+        }));
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[gpui::test]
@@ -7360,11 +7564,35 @@ mod tests {
         let second = crate::terminal::PresentationGeneration::test(2);
 
         assert_eq!(
-            activated_link(first, &link, first, Some(&link)),
+            activated_link(
+                TerminalLocalFileCapabilities::Enabled,
+                first,
+                &link,
+                first,
+                Some(&link),
+            ),
             Some("https://example.test".to_owned())
         );
-        assert_eq!(activated_link(first, &link, second, Some(&link)), None);
-        assert_eq!(activated_link(first, &link, first, None), None);
+        assert_eq!(
+            activated_link(
+                TerminalLocalFileCapabilities::Enabled,
+                first,
+                &link,
+                second,
+                Some(&link),
+            ),
+            None
+        );
+        assert_eq!(
+            activated_link(
+                TerminalLocalFileCapabilities::Enabled,
+                first,
+                &link,
+                first,
+                None,
+            ),
+            None
+        );
     }
 
     #[test]
@@ -7378,6 +7606,7 @@ mod tests {
         assert_eq!(hovered_link_for_generation(Some(&hovered), second), None);
         assert_eq!(
             NativeContextActions::from_presence(
+                TerminalLocalFileCapabilities::Enabled,
                 false,
                 hovered_link_for_generation(Some(&hovered), second),
             ),
@@ -7583,8 +7812,13 @@ mod tests {
         std::fs::create_dir_all(&directory).unwrap();
         let file = directory.join("preview.txt");
         std::fs::write(&file, b"preview").unwrap();
-        let link =
-            crate::terminal::HyperlinkTarget::osc8("file:preview.txt", &directory, None).unwrap();
+        let link = crate::terminal::HyperlinkTarget::osc8(
+            "file:preview.txt",
+            &directory,
+            None,
+            TerminalLocalFileCapabilities::Enabled,
+        )
+        .unwrap();
         let previews = Rc::new(Cell::new(0));
         let dismissals = Rc::new(Cell::new(0));
         let (pane, cx, _records) = connected_terminal_pane(cx);
@@ -7635,8 +7869,13 @@ mod tests {
         std::fs::create_dir_all(&directory).unwrap();
         let file = directory.join("preview.txt");
         std::fs::write(&file, b"preview").unwrap();
-        let link =
-            crate::terminal::HyperlinkTarget::osc8("file:preview.txt", &directory, None).unwrap();
+        let link = crate::terminal::HyperlinkTarget::osc8(
+            "file:preview.txt",
+            &directory,
+            None,
+            TerminalLocalFileCapabilities::Enabled,
+        )
+        .unwrap();
         let previews = Rc::new(Cell::new(0));
         let dismissals = Rc::new(Cell::new(0));
         let (pane, cx, _records) = connected_terminal_pane(cx);

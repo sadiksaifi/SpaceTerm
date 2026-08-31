@@ -581,6 +581,7 @@ pub(crate) struct TerminalEmulator {
     pending_attention: Rc<RefCell<Vec<AttentionEvent>>>,
     title: Arc<str>,
     metadata: MetadataTracker,
+    local_file_capabilities: crate::terminal::metadata::TerminalLocalFileCapabilities,
     xtgettcap: XtGetTcapObserver,
     primary_row_cache: Vec<RowSnapshot>,
     alternate_row_cache: Vec<RowSnapshot>,
@@ -733,6 +734,7 @@ impl TerminalEmulator {
         let cell = geometry.backing_cell_size();
         let pty_responses = Rc::new(RefCell::new(Vec::new()));
         let pending_metadata = Rc::new(RefCell::new(Vec::new()));
+        let local_file_capabilities = metadata_context.local_file_capabilities();
         let trusted_directory = Rc::new(RefCell::new(
             metadata_context
                 .is_local()
@@ -805,12 +807,15 @@ impl TerminalEmulator {
                 let Ok(uri) = std::str::from_utf8(uri) else {
                     return HyperlinkResolution::Suppress;
                 };
-                let Some(target) =
-                    HyperlinkTarget::osc8(uri, &directory, local_hostname.as_deref())
-                else {
+                let Some(target) = HyperlinkTarget::osc8(
+                    uri,
+                    &directory,
+                    local_hostname.as_deref(),
+                    local_file_capabilities,
+                ) else {
                     return HyperlinkResolution::Suppress;
                 };
-                let Some(userdata) = target.local_emission_metadata() else {
+                let Some(userdata) = target.local_emission_metadata(local_file_capabilities) else {
                     return HyperlinkResolution::Suppress;
                 };
                 HyperlinkResolution::Replace {
@@ -896,6 +901,7 @@ impl TerminalEmulator {
             pending_attention,
             title,
             metadata,
+            local_file_capabilities,
             xtgettcap: XtGetTcapObserver::new(terminal_name),
             primary_row_cache: Vec::new(),
             alternate_row_cache: Vec::new(),
@@ -2035,7 +2041,10 @@ impl TerminalEmulator {
                                     if let Some(target) = local_hyperlink_targets.get(userdata) {
                                         return target.clone();
                                     }
-                                    let target = crate::terminal::HyperlinkTarget::from_local_emission_metadata(userdata);
+                                    let target = crate::terminal::HyperlinkTarget::from_local_emission_metadata(
+                                        userdata,
+                                        self.local_file_capabilities,
+                                    );
                                     local_hyperlink_targets
                                         .insert(userdata.to_vec(), target.clone());
                                     target
@@ -4915,7 +4924,11 @@ mod tests {
             first_link.value,
             file.canonicalize().unwrap().to_str().unwrap()
         );
-        assert_eq!(first_link.activation_url(), None);
+        assert_eq!(
+            first_link
+                .activation_url(crate::terminal::metadata::TerminalLocalFileCapabilities::Enabled),
+            None
+        );
         fs::remove_dir_all(directory).unwrap();
         fs::remove_dir_all(second_directory).unwrap();
     }
@@ -4937,10 +4950,22 @@ mod tests {
         )
         .unwrap();
 
-        emulator.feed(b"\x1b]8;;file:preview.txt\x07remote\x1b]8;;\x07");
+        emulator.feed(
+            b"\x1b]8;;file:preview.txt\x07remote\x1b]8;;\x07 \
+              \x1b]8;;https://example.test\x07web\x1b]8;;\x07",
+        );
 
         let snapshot = emulator.snapshot().unwrap().unwrap();
-        assert!(snapshot.rows[0].iter().all(|cell| cell.hyperlink.is_none()));
+        assert!(
+            snapshot.rows[0][..6]
+                .iter()
+                .all(|cell| cell.hyperlink.is_none())
+        );
+        assert!(snapshot.rows[0][7..10].iter().all(|cell| {
+            cell.hyperlink
+                .as_ref()
+                .is_some_and(|link| link.kind == crate::terminal::hyperlink::HyperlinkKind::Url)
+        }));
         assert!(!snapshot.metadata.context.is_local());
         assert_eq!(snapshot.metadata.directory.path.as_ref(), "~/project");
     }
