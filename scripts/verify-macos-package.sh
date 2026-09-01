@@ -7,6 +7,8 @@ export LC_ALL=C
 readonly APP_NAME="SpaceTerm"
 readonly BUNDLE_IDENTIFIER="io.github.sadiksaifi.spaceterm"
 readonly MINIMUM_MACOS_VERSION="11.0"
+readonly ASKPASS_HELPER_MODE="broker-v1"
+readonly ASKPASS_HELPER_TIMEOUT_SECONDS=5
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 readonly SCRIPT_DIR
@@ -21,6 +23,8 @@ DMG_MOUNTED=0
 MOUNT_POINT=""
 EXPECTED_MARKETING_VERSION=""
 EXPECTED_BUILD_NUMBER=""
+HELPER_PID=""
+HELPER_WATCHDOG_PID=""
 
 usage() {
     cat <<EOF
@@ -46,6 +50,14 @@ require_command() {
 
 cleanup() {
     local exit_status=$?
+    if [[ -n "$HELPER_WATCHDOG_PID" ]]; then
+        kill -KILL "$HELPER_WATCHDOG_PID" >/dev/null 2>&1 || true
+        wait "$HELPER_WATCHDOG_PID" 2>/dev/null || true
+    fi
+    if [[ -n "$HELPER_PID" ]]; then
+        kill -KILL "$HELPER_PID" >/dev/null 2>&1 || true
+        wait "$HELPER_PID" 2>/dev/null || true
+    fi
     if (( DMG_MOUNTED )) && [[ -n "$MOUNT_POINT" ]]; then
         hdiutil detach "$MOUNT_POINT" -force >/dev/null 2>&1 || true
     fi
@@ -60,6 +72,56 @@ plist_value() {
     local key="$2"
     /usr/libexec/PlistBuddy -c "Print :$key" "$plist" 2>/dev/null \
         || die "missing Info.plist key: $key"
+}
+
+verify_askpass_helper_mode() {
+    local executable="$1"
+    local label="$2"
+    local stdout_path="$TEMP_ROOT/$label.askpass.stdout"
+    local stderr_path="$TEMP_ROOT/$label.askpass.stderr"
+    local timeout_path="$TEMP_ROOT/$label.askpass.timeout"
+    local helper_exit helper_pid
+
+    : > "$stdout_path"
+    : > "$stderr_path"
+    /usr/bin/env -i \
+        SPACETERM_SSH_ASKPASS_MODE="$ASKPASS_HELPER_MODE" \
+        "$executable" "SpaceTerm package verifier prompt" \
+        >"$stdout_path" 2>"$stderr_path" &
+    HELPER_PID=$!
+    helper_pid="$HELPER_PID"
+
+    (
+        sleep "$ASKPASS_HELPER_TIMEOUT_SECONDS"
+        if kill -0 "$helper_pid" >/dev/null 2>&1; then
+            : > "$timeout_path"
+            kill -TERM "$helper_pid" >/dev/null 2>&1 || true
+            sleep 1
+            kill -KILL "$helper_pid" >/dev/null 2>&1 || true
+        fi
+    ) &
+    HELPER_WATCHDOG_PID=$!
+
+    if wait "$helper_pid"; then
+        helper_exit=0
+    else
+        helper_exit=$?
+    fi
+    HELPER_PID=""
+    kill -TERM "$HELPER_WATCHDOG_PID" >/dev/null 2>&1 || true
+    wait "$HELPER_WATCHDOG_PID" 2>/dev/null || true
+    HELPER_WATCHDOG_PID=""
+
+    [[ ! -e "$timeout_path" ]] \
+        || die "$label AskPass helper mode exceeded its ${ASKPASS_HELPER_TIMEOUT_SECONDS}s deadline"
+    ! kill -0 "$helper_pid" >/dev/null 2>&1 \
+        || die "$label AskPass helper process remained alive after its bounded invocation"
+    [[ "$helper_exit" == "2" ]] \
+        || die "$label AskPass helper mode must reject missing transport inputs with exit 2, got: $helper_exit"
+    [[ ! -s "$stdout_path" ]] \
+        || die "$label AskPass helper mode wrote unexpected standard output"
+    [[ ! -s "$stderr_path" ]] \
+        || die "$label AskPass helper mode wrote unexpected standard error"
 }
 
 verify_app_bundle() {
@@ -167,6 +229,7 @@ verify_app_bundle() {
         || die "$label app signature metadata could not be read: $app"
     grep -Fq "Signature=adhoc" <<<"$signature_details" \
         || die "$label app is not ad-hoc signed: $app"
+    verify_askpass_helper_mode "$executable" "$label"
 }
 
 while (( $# > 0 )); do
