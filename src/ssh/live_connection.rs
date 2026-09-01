@@ -27,6 +27,7 @@ impl LiveConnectionState {
 }
 
 pub(crate) struct LiveConnectionAuthority {
+    instance: LiveConnectionInstance,
     state: AtomicU8,
     generation: AtomicU64,
     cancellation: Mutex<SshCancellationToken>,
@@ -37,6 +38,7 @@ pub(crate) struct LiveConnectionAuthority {
 impl LiveConnectionAuthority {
     pub(crate) fn new(socket: RegisteredRuntimeSocket) -> Arc<Self> {
         Arc::new(Self {
+            instance: LiveConnectionInstance::new(),
             state: AtomicU8::new(LiveConnectionState::Ready as u8),
             generation: AtomicU64::new(1),
             cancellation: Mutex::new(SshCancellationToken::default()),
@@ -82,6 +84,52 @@ impl LiveConnectionAuthority {
 
     pub(crate) fn observe_lifecycle(&self) -> ControlConnectionLifecycleObserver {
         self.lifecycle.observe()
+    }
+}
+
+#[derive(Clone)]
+struct LiveConnectionInstance(Arc<()>);
+
+impl LiveConnectionInstance {
+    fn new() -> Self {
+        Self(Arc::new(()))
+    }
+}
+
+impl PartialEq for LiveConnectionInstance {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for LiveConnectionInstance {}
+
+/// Opaque identity for one exact live authority state.
+///
+/// The instance component prevents equal numeric generations from different control connections
+/// from authorizing one another.
+#[derive(Clone, Eq, PartialEq)]
+pub(crate) struct LiveConnectionBinding {
+    instance: LiveConnectionInstance,
+    generation: u64,
+}
+
+impl LiveConnectionBinding {
+    fn new(instance: LiveConnectionInstance, generation: u64) -> Self {
+        Self {
+            instance,
+            generation,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(generation: u64) -> Self {
+        Self::new(LiveConnectionInstance::new(), generation)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_generation(&self, generation: u64) -> Self {
+        Self::new(self.instance.clone(), generation)
     }
 }
 
@@ -170,6 +218,12 @@ impl ControlConnectionLifecycleObserver {
         authority.publish(ControlConnectionTerminalState::Closed);
         authority.observe()
     }
+
+    #[cfg(test)]
+    pub(crate) fn controlled() -> (async_channel::Sender<ControlConnectionTerminalState>, Self) {
+        let (sender, receiver) = async_channel::bounded(1);
+        (sender, Self { receiver })
+    }
 }
 
 #[derive(Clone)]
@@ -181,6 +235,18 @@ pub(crate) struct LiveConnectionCapability {
 
 impl LiveConnectionCapability {
     pub(crate) fn authorize(&self) -> Result<(), LiveConnectionError> {
+        self.authorized_authority().map(drop)
+    }
+
+    pub(crate) fn binding(&self) -> Result<LiveConnectionBinding, LiveConnectionError> {
+        let authority = self.authorized_authority()?;
+        Ok(LiveConnectionBinding::new(
+            authority.instance.clone(),
+            self.generation,
+        ))
+    }
+
+    fn authorized_authority(&self) -> Result<Arc<LiveConnectionAuthority>, LiveConnectionError> {
         let authority = self
             .authority
             .upgrade()
@@ -194,15 +260,12 @@ impl LiveConnectionCapability {
         authority
             .socket
             .verify()
-            .map_err(|_| LiveConnectionError::SocketReplaced)
+            .map_err(|_| LiveConnectionError::SocketReplaced)?;
+        Ok(authority)
     }
 
     pub(crate) fn cancellation(&self) -> SshCancellationToken {
         self.cancellation.clone()
-    }
-
-    pub(crate) const fn generation(&self) -> u64 {
-        self.generation
     }
 }
 
@@ -278,5 +341,15 @@ mod tests {
             block_on(observer.terminal()),
             ControlConnectionTerminalState::Closed
         );
+    }
+
+    #[test]
+    fn live_connection_binding_should_distinguish_instances_at_the_same_generation() {
+        let first = LiveConnectionBinding::for_test(1);
+        let second = LiveConnectionBinding::for_test(1);
+
+        assert!(first != second);
+        assert!(first == first.with_generation(1));
+        assert!(first != first.with_generation(2));
     }
 }

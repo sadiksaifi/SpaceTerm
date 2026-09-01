@@ -50,7 +50,7 @@ pub(super) enum RemoteWorkspaceConnectionProgress {
 }
 
 impl RemoteWorkspaceConnectionProgress {
-    const fn status(self) -> &'static str {
+    pub(super) const fn status(self) -> &'static str {
         match self {
             Self::CheckingCompatibility => "Checking remote compatibility",
             Self::Connecting => "Connecting securely",
@@ -67,6 +67,16 @@ pub(super) struct RemoteWorkspaceConnectContext {
 }
 
 impl RemoteWorkspaceConnectContext {
+    pub(super) fn new(
+        progress: async_channel::Sender<RemoteWorkspaceConnectionProgress>,
+        cancelled: Arc<AtomicBool>,
+    ) -> Self {
+        Self {
+            progress,
+            cancelled,
+        }
+    }
+
     pub(super) fn report(&self, progress: RemoteWorkspaceConnectionProgress) {
         let _ = self.progress.try_send(progress);
     }
@@ -90,20 +100,12 @@ pub(super) enum RemoteWorkspaceFlowBackendError {
 ///
 /// This trait deliberately exposes no command or transport access to UI code.
 pub(super) trait RemoteWorkspaceSessionOwner: Send + 'static {
-    fn bind_terminal_channels(
-        &self,
-        directory: &RemoteWorkspaceDirectory,
-        login_shell: &str,
-    ) -> Result<Arc<dyn RemoteTerminalChannelProvider>, RemoteWorkspaceFlowBackendError>;
-
     fn bind_terminal_channels_for_identity(
         &self,
         directory: &RemoteWorkspaceDirectory,
-        _expected_identity: &RemoteDirectoryIdentity,
+        expected_identity: &RemoteDirectoryIdentity,
         login_shell: &str,
-    ) -> Result<Arc<dyn RemoteTerminalChannelProvider>, RemoteWorkspaceFlowBackendError> {
-        self.bind_terminal_channels(directory, login_shell)
-    }
+    ) -> Result<Arc<dyn RemoteTerminalChannelProvider>, RemoteWorkspaceFlowBackendError>;
 
     fn take_lifecycle_observer(&mut self) -> Option<ControlConnectionObserver>;
 
@@ -129,22 +131,11 @@ impl RemoteWorkspaceConnectedSession {
         }
     }
 
-    fn provider(&self) -> Arc<dyn RemoteWorkspaceProvider + Send + Sync> {
+    pub(super) fn provider(&self) -> Arc<dyn RemoteWorkspaceProvider + Send + Sync> {
         Arc::clone(&self.provider)
     }
 
-    fn bind_terminal_channels(
-        &self,
-        directory: &RemoteWorkspaceDirectory,
-        login_shell: &str,
-    ) -> Result<Arc<dyn RemoteTerminalChannelProvider>, RemoteWorkspaceFlowBackendError> {
-        self.owner
-            .as_ref()
-            .ok_or(RemoteWorkspaceFlowBackendError::ConnectionFailed)?
-            .bind_terminal_channels(directory, login_shell)
-    }
-
-    fn bind_terminal_channels_for_identity(
+    pub(super) fn bind_terminal_channels_for_identity(
         &self,
         directory: &RemoteWorkspaceDirectory,
         expected_identity: &RemoteDirectoryIdentity,
@@ -156,7 +147,7 @@ impl RemoteWorkspaceConnectedSession {
             .bind_terminal_channels_for_identity(directory, expected_identity, login_shell)
     }
 
-    fn take_lifecycle_observer(&mut self) -> Option<ControlConnectionObserver> {
+    pub(super) fn take_lifecycle_observer(&mut self) -> Option<ControlConnectionObserver> {
         self.owner.as_mut()?.take_lifecycle_observer()
     }
 }
@@ -1460,9 +1451,10 @@ mod tests {
     }
 
     impl RemoteWorkspaceSessionOwner for CountingOwner {
-        fn bind_terminal_channels(
+        fn bind_terminal_channels_for_identity(
             &self,
             _: &RemoteWorkspaceDirectory,
+            _: &RemoteDirectoryIdentity,
             _: &str,
         ) -> Result<Arc<dyn RemoteTerminalChannelProvider>, RemoteWorkspaceFlowBackendError>
         {

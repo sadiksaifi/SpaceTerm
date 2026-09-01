@@ -14,7 +14,8 @@ use super::command::{
     ValidatedRemoteShellCommand,
 };
 use super::live_connection::{
-    ControlConnectionLifecycleObserver, LiveConnectionAuthority, LiveConnectionState,
+    ControlConnectionLifecycleObserver, LiveConnectionAuthority, LiveConnectionBinding,
+    LiveConnectionState,
 };
 use super::process::{
     ProcessExit, ProcessRunError, ProcessSignal, SshProcessBackend, TransientSshErrorOutput,
@@ -324,7 +325,7 @@ impl<B: SshProcessBackend> OpenSshControlConnection<B> {
         ))
     }
 
-    pub(crate) fn live_generation(&self) -> Result<u64, ControlConnectionError> {
+    pub(crate) fn live_binding(&self) -> Result<LiveConnectionBinding, ControlConnectionError> {
         if self.state() != ControlConnectionState::Ready {
             return Err(ControlConnectionError::NotReady);
         }
@@ -334,9 +335,8 @@ impl<B: SshProcessBackend> OpenSshControlConnection<B> {
             .ok_or(ControlConnectionError::Ownership)?
             .capability();
         capability
-            .authorize()
-            .map_err(|_| ControlConnectionError::NotReady)?;
-        Ok(capability.generation())
+            .binding()
+            .map_err(|_| ControlConnectionError::NotReady)
     }
 
     pub(crate) async fn shutdown(&mut self) -> Result<(), ControlConnectionError> {
@@ -946,6 +946,35 @@ mod tests {
             (connection.state(), mode),
             (ControlConnectionState::Ready, 0o600)
         );
+    }
+
+    #[gpui::test]
+    fn separate_ready_connections_should_have_distinct_initial_bindings(cx: &mut TestAppContext) {
+        let directory = TestDirectory::new();
+        let paths = directory.paths();
+        let cancellation = SshCancellationToken::default();
+        let first = cx
+            .executor()
+            .block(OpenSshControlConnection::connect(
+                &paths,
+                destination(),
+                Arc::new(FakeBackend::with_readiness([ProcessExit::successful()])),
+                &cancellation,
+                timing(),
+            ))
+            .unwrap();
+        let second = cx
+            .executor()
+            .block(OpenSshControlConnection::connect(
+                &paths,
+                destination(),
+                Arc::new(FakeBackend::with_readiness([ProcessExit::successful()])),
+                &cancellation,
+                timing(),
+            ))
+            .unwrap();
+
+        assert!(first.live_binding().unwrap() != second.live_binding().unwrap());
     }
 
     #[gpui::test]

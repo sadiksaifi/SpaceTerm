@@ -29,7 +29,7 @@ use crate::ssh::host_config::{
     HostConfigRoots, HostDiscovery, HostDiscoveryLimits, NativeHostConfigFilesystem,
     discover_ssh_hosts,
 };
-use crate::ssh::live_connection::ControlConnectionObserver;
+use crate::ssh::live_connection::{ControlConnectionObserver, LiveConnectionBinding};
 use crate::ssh::managed_hosts::{
     ManagedHostsError, ManagedHostsStore, ManagedSshHost, NativeManagedHostsFilesystem,
 };
@@ -406,15 +406,6 @@ struct NativeRemoteWorkspaceSessionOwner {
 }
 
 impl RemoteWorkspaceSessionOwner for NativeRemoteWorkspaceSessionOwner {
-    fn bind_terminal_channels(
-        &self,
-        directory: &RemoteWorkspaceDirectory,
-        login_shell: &str,
-    ) -> Result<Arc<dyn RemoteTerminalChannelProvider>, RemoteWorkspaceFlowBackendError> {
-        let _ = (directory, login_shell);
-        Err(RemoteWorkspaceFlowBackendError::ConnectionFailed)
-    }
-
     fn bind_terminal_channels_for_identity(
         &self,
         directory: &RemoteWorkspaceDirectory,
@@ -482,7 +473,7 @@ struct NativeRemoteTerminalChannelProvider {
 #[derive(Default)]
 struct ChannelGrantState {
     validation_epoch: u64,
-    granted_generation: Option<u64>,
+    granted_binding: Option<LiveConnectionBinding>,
 }
 
 impl RemoteTerminalChannelProvider for NativeRemoteTerminalChannelProvider {
@@ -502,7 +493,7 @@ impl RemoteTerminalChannelProvider for NativeRemoteTerminalChannelProvider {
                 .grant
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            grant.granted_generation = None;
+            grant.granted_binding = None;
             let Some(validation_epoch) = grant.validation_epoch.checked_add(1) else {
                 return Task::ready(Err(RemoteChannelRevalidationError::ConnectionUnavailable));
             };
@@ -512,12 +503,12 @@ impl RemoteTerminalChannelProvider for NativeRemoteTerminalChannelProvider {
         let Some(control) = self.control.upgrade() else {
             return Task::ready(Err(RemoteChannelRevalidationError::ConnectionUnavailable));
         };
-        let generation = control
+        let binding = control
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .as_ref()
-            .and_then(|connection| connection.live_generation());
-        let Some(generation) = generation else {
+            .and_then(|connection| connection.live_binding());
+        let Some(binding) = binding else {
             return Task::ready(Err(RemoteChannelRevalidationError::ConnectionUnavailable));
         };
         let validation = self
@@ -536,17 +527,17 @@ impl RemoteTerminalChannelProvider for NativeRemoteTerminalChannelProvider {
             if observed_identity != expected_identity {
                 return Err(RemoteChannelRevalidationError::IdentityChanged);
             }
-            let current_generation = control
+            let current_binding = control
                 .upgrade()
                 .and_then(|control| {
                     control
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
                         .as_ref()
-                        .and_then(|connection| connection.live_generation())
+                        .and_then(|connection| connection.live_binding())
                 })
                 .ok_or(RemoteChannelRevalidationError::ConnectionUnavailable)?;
-            if current_generation != generation {
+            if current_binding != binding {
                 return Err(RemoteChannelRevalidationError::ConnectionUnavailable);
             }
             let mut grant = grant
@@ -555,7 +546,7 @@ impl RemoteTerminalChannelProvider for NativeRemoteTerminalChannelProvider {
             if grant.validation_epoch != validation_epoch {
                 return Err(RemoteChannelRevalidationError::ConnectionUnavailable);
             }
-            grant.granted_generation = Some(generation);
+            grant.granted_binding = Some(binding);
             Ok(())
         })
     }
@@ -563,11 +554,11 @@ impl RemoteTerminalChannelProvider for NativeRemoteTerminalChannelProvider {
     fn prepare(
         &self,
     ) -> Result<crate::ssh::command::PreparedSshPaneChannelCommand, RemoteChannelUnavailable> {
-        let granted_generation = self
+        let granted_binding = self
             .grant
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .granted_generation
+            .granted_binding
             .take()
             .ok_or(RemoteChannelUnavailable)?;
         let control = self.control.upgrade().ok_or(RemoteChannelUnavailable)?;
@@ -580,7 +571,7 @@ impl RemoteTerminalChannelProvider for NativeRemoteTerminalChannelProvider {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let connection = control.as_ref().ok_or(RemoteChannelUnavailable)?;
-        if connection.live_generation() != Some(granted_generation) {
+        if connection.live_binding() != Some(granted_binding) {
             return Err(RemoteChannelUnavailable);
         }
         connection.prepare_pane_channel(command)
@@ -595,7 +586,7 @@ trait NativeSessionControl: Send {
         command: crate::ssh::command::ValidatedRemoteShellCommand,
     ) -> Result<crate::ssh::command::PreparedSshPaneChannelCommand, RemoteChannelUnavailable>;
 
-    fn live_generation(&self) -> Option<u64>;
+    fn live_binding(&self) -> Option<LiveConnectionBinding>;
 
     fn shutdown(&mut self, executor: &BackgroundExecutor);
 }
@@ -613,8 +604,8 @@ impl NativeSessionControl for OpenSshControlConnection<NativeSshProcessBackend> 
             .map_err(|_| RemoteChannelUnavailable)
     }
 
-    fn live_generation(&self) -> Option<u64> {
-        OpenSshControlConnection::live_generation(self).ok()
+    fn live_binding(&self) -> Option<LiveConnectionBinding> {
+        OpenSshControlConnection::live_binding(self).ok()
     }
 
     fn shutdown(&mut self, executor: &BackgroundExecutor) {
@@ -625,7 +616,7 @@ impl NativeSessionControl for OpenSshControlConnection<NativeSshProcessBackend> 
 #[cfg(test)]
 mod tests {
     use std::collections::VecDeque;
-    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use gpui::TestAppContext;
 
@@ -834,7 +825,7 @@ mod tests {
     struct FakeSessionControl {
         shutdowns: Arc<AtomicUsize>,
         preparations: Arc<AtomicUsize>,
-        generation: Arc<AtomicU64>,
+        binding: Arc<Mutex<LiveConnectionBinding>>,
         alias: SshHostAlias,
         aliases: ActiveSshAliasRegistry,
     }
@@ -859,8 +850,13 @@ mod tests {
             .prepare_pane_channel(command))
         }
 
-        fn live_generation(&self) -> Option<u64> {
-            Some(self.generation.load(Ordering::Acquire))
+        fn live_binding(&self) -> Option<LiveConnectionBinding> {
+            Some(
+                self.binding
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clone(),
+            )
         }
 
         fn shutdown(&mut self, _: &BackgroundExecutor) {
@@ -878,12 +874,12 @@ mod tests {
         let alias_lease = aliases.acquire(alias.clone()).unwrap();
         let shutdowns = Arc::new(AtomicUsize::new(0));
         let preparations = Arc::new(AtomicUsize::new(0));
-        let generation = Arc::new(AtomicU64::new(1));
+        let binding = Arc::new(Mutex::new(LiveConnectionBinding::for_test(1)));
         let control: Arc<Mutex<Option<Box<dyn NativeSessionControl>>>> =
             Arc::new(Mutex::new(Some(Box::new(FakeSessionControl {
                 shutdowns: Arc::clone(&shutdowns),
                 preparations,
-                generation,
+                binding,
                 alias: alias.clone(),
                 aliases: aliases.clone(),
             }))));
@@ -891,7 +887,9 @@ mod tests {
         let mut owner = NativeRemoteWorkspaceSessionOwner {
             control: Arc::clone(&control),
             lifecycle: None,
-            utility: Arc::new(FakeIdentityProvider::returning([])),
+            utility: Arc::new(FakeIdentityProvider::returning([Ok(
+                RemoteDirectoryIdentity::new("/home/test/src".to_owned()).unwrap(),
+            )])),
             authentication: None,
             alias: Some(alias_lease),
             cancellation: cancellation.clone(),
@@ -906,6 +904,7 @@ mod tests {
             )
             .unwrap();
         assert!(provider.is_ready());
+        assert_eq!(cx.executor().block(provider.revalidate()), Ok(()));
 
         owner.close();
         owner.close();
@@ -921,13 +920,13 @@ mod tests {
     fn native_channel_should_require_one_fresh_identity_grant_per_preparation(
         cx: &mut TestAppContext,
     ) {
-        let generation = Arc::new(AtomicU64::new(7));
+        let binding = Arc::new(Mutex::new(LiveConnectionBinding::for_test(7)));
         let preparations = Arc::new(AtomicUsize::new(0));
         let control: Arc<Mutex<Option<Box<dyn NativeSessionControl>>>> =
             Arc::new(Mutex::new(Some(Box::new(FakeSessionControl {
                 shutdowns: Arc::new(AtomicUsize::new(0)),
                 preparations: Arc::clone(&preparations),
-                generation: Arc::clone(&generation),
+                binding: Arc::clone(&binding),
                 alias: SshHostAlias::new("work".to_owned()).unwrap(),
                 aliases: ActiveSshAliasRegistry::default(),
             }))));
@@ -952,9 +951,57 @@ mod tests {
         assert_eq!(preparations.load(Ordering::SeqCst), 1);
 
         assert_eq!(cx.executor().block(provider.revalidate()), Ok(()));
-        generation.store(8, Ordering::Release);
+        let next_generation = binding
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .with_generation(8);
+        *binding
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = next_generation;
         assert!(provider.prepare().is_err());
         assert_eq!(preparations.load(Ordering::SeqCst), 1);
+    }
+
+    #[gpui::test]
+    fn native_channel_should_reject_a_same_generation_replacement_control(cx: &mut TestAppContext) {
+        let old_preparations = Arc::new(AtomicUsize::new(0));
+        let old_binding = LiveConnectionBinding::for_test(1);
+        let control: Arc<Mutex<Option<Box<dyn NativeSessionControl>>>> =
+            Arc::new(Mutex::new(Some(Box::new(FakeSessionControl {
+                shutdowns: Arc::new(AtomicUsize::new(0)),
+                preparations: Arc::clone(&old_preparations),
+                binding: Arc::new(Mutex::new(old_binding)),
+                alias: SshHostAlias::new("work".to_owned()).unwrap(),
+                aliases: ActiveSshAliasRegistry::default(),
+            }))));
+        let expected = RemoteDirectoryIdentity::new("/srv/project".to_owned()).unwrap();
+        let provider = NativeRemoteTerminalChannelProvider {
+            control: Arc::downgrade(&control),
+            directory: RemoteWorkspaceDirectory::new("~/project".to_owned()).unwrap(),
+            expected_identity: expected.clone(),
+            utility: Arc::new(FakeIdentityProvider::returning([Ok(expected)])),
+            login_shell: "/bin/zsh".to_owned(),
+            executor: cx.executor(),
+            grant: Arc::new(Mutex::new(ChannelGrantState::default())),
+        };
+
+        assert_eq!(cx.executor().block(provider.revalidate()), Ok(()));
+
+        let replacement_preparations = Arc::new(AtomicUsize::new(0));
+        *control
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            Some(Box::new(FakeSessionControl {
+                shutdowns: Arc::new(AtomicUsize::new(0)),
+                preparations: Arc::clone(&replacement_preparations),
+                binding: Arc::new(Mutex::new(LiveConnectionBinding::for_test(1))),
+                alias: SshHostAlias::new("work".to_owned()).unwrap(),
+                aliases: ActiveSshAliasRegistry::default(),
+            }));
+
+        assert!(provider.prepare().is_err());
+        assert_eq!(old_preparations.load(Ordering::SeqCst), 0);
+        assert_eq!(replacement_preparations.load(Ordering::SeqCst), 0);
     }
 
     #[gpui::test]
@@ -966,7 +1013,7 @@ mod tests {
             Arc::new(Mutex::new(Some(Box::new(FakeSessionControl {
                 shutdowns: Arc::new(AtomicUsize::new(0)),
                 preparations: Arc::clone(&preparations),
-                generation: Arc::new(AtomicU64::new(1)),
+                binding: Arc::new(Mutex::new(LiveConnectionBinding::for_test(1))),
                 alias: SshHostAlias::new("work".to_owned()).unwrap(),
                 aliases: ActiveSshAliasRegistry::default(),
             }))));
