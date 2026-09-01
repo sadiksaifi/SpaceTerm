@@ -41,6 +41,8 @@ use crate::ssh::process::TransientSshErrorOutput;
 use crate::terminal::RemoteTerminalChannelProvider;
 
 const CONNECTION_PROGRESS_ID: &str = "remote-workspace-connection-progress";
+const CONNECTION_PROGRESS_DETAIL: &str =
+    "Authentication prompts may appear in a secure macOS sheet.";
 const CONNECTION_ERROR_ID: &str = "remote-workspace-connection-error";
 const OPENSSH_ERROR_DETAIL_HEADING: &str = "OpenSSH reported:";
 const DELETE_CONFIRMATION_ID: &str = "remote-workspace-delete-host";
@@ -61,6 +63,21 @@ impl RemoteWorkspaceConnectionProgress {
             Self::Connecting => "Connecting securely",
             Self::Authenticating => "Waiting for authentication",
         }
+    }
+}
+
+fn connection_progress_dialog_update(
+    progress: RemoteWorkspaceConnectionProgress,
+) -> ProgressDialogUpdate {
+    let update = ProgressDialogUpdate::new().status(progress.status());
+    if progress == RemoteWorkspaceConnectionProgress::Authenticating {
+        update
+            .detail(None::<&'static str>)
+            .cancellation_enabled(false)
+    } else {
+        update
+            .detail(Some(CONNECTION_PROGRESS_DETAIL))
+            .cancellation_enabled(true)
     }
 }
 
@@ -1031,7 +1048,7 @@ impl RemoteWorkspaceFlow {
                 "remote-workspace-connect-cancel",
             )),
         )
-        .detail("Authentication prompts may appear in a secure macOS sheet.")
+        .detail(CONNECTION_PROGRESS_DETAIL)
         .present(
             window,
             cx,
@@ -1105,11 +1122,7 @@ impl RemoteWorkspaceFlow {
         self.stage = RemoteWorkspaceFlowStage::Connecting(progress);
         self.observed_progress.push(progress);
         if let Some(handle) = &self.progress {
-            let _ = handle.update(
-                ProgressDialogUpdate::new().status(progress.status()),
-                window,
-                cx,
-            );
+            let _ = handle.update(connection_progress_dialog_update(progress), window, cx);
         }
         self.publish(cx);
         true
@@ -2234,6 +2247,55 @@ mod tests {
         );
         assert!(presentation.is_some());
         assert!(cx.debug_bounds("modal-progress-status").is_some());
+        assert_eq!(
+            connection_progress_dialog_update(RemoteWorkspaceConnectionProgress::Authenticating),
+            ProgressDialogUpdate::new()
+                .status(RemoteWorkspaceConnectionProgress::Authenticating.status())
+                .detail(None::<&'static str>)
+                .cancellation_enabled(false)
+        );
+
+        click("modal-action-remote-workspace-connect-cancel", cx);
+
+        assert_eq!(
+            flow.read_with(cx, |flow, _| flow.stage()),
+            RemoteWorkspaceFlowStage::Connecting(RemoteWorkspaceConnectionProgress::Authenticating)
+        );
+        assert_eq!(
+            flow.read_with(cx, |flow, _| flow
+                .progress
+                .as_ref()
+                .map(ProgressDialogHandle::presentation_id)),
+            presentation
+        );
+
+        cx.update(|window, cx| {
+            flow.update(cx, |flow, cx| {
+                let generation = flow.action_generation;
+                assert!(flow.apply_connection_progress(
+                    generation,
+                    RemoteWorkspaceConnectionProgress::Connecting,
+                    window,
+                    cx,
+                ));
+            });
+        });
+        cx.run_until_parked();
+
+        assert_eq!(
+            connection_progress_dialog_update(RemoteWorkspaceConnectionProgress::Connecting),
+            ProgressDialogUpdate::new()
+                .status(RemoteWorkspaceConnectionProgress::Connecting.status())
+                .detail(Some(CONNECTION_PROGRESS_DETAIL))
+                .cancellation_enabled(true)
+        );
+        assert_eq!(
+            flow.read_with(cx, |flow, _| flow
+                .progress
+                .as_ref()
+                .map(ProgressDialogHandle::presentation_id)),
+            presentation
+        );
 
         sender.try_send(Ok(session(&closes))).unwrap();
         cx.run_until_parked();
@@ -2245,6 +2307,75 @@ mod tests {
         assert!(flow.read_with(cx, |flow, _| flow.progress.is_none()));
         assert_eq!(backend.discoveries.load(Ordering::SeqCst), 1);
         assert_eq!(closes.load(Ordering::SeqCst), 0);
+    }
+
+    #[gpui::test]
+    fn authentication_finish_should_restore_progress_cancellation_before_connection_finishes(
+        cx: &mut TestAppContext,
+    ) {
+        let (sender, receiver) = async_channel::bounded(1);
+        let task = cx.update(|cx| {
+            cx.background_executor()
+                .spawn(async move { receiver.recv().await.unwrap() })
+        });
+        let backend = FakeBackend::new([task]);
+        let (_, flow, events, cx) = flow_window(Arc::clone(&backend), cx);
+
+        select_destination(&flow, "work", cx);
+        cx.update(|window, cx| {
+            flow.update(cx, |flow, cx| {
+                let generation = flow.action_generation;
+                assert!(flow.apply_connection_progress(
+                    generation,
+                    RemoteWorkspaceConnectionProgress::Authenticating,
+                    window,
+                    cx,
+                ));
+            });
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            connection_progress_dialog_update(RemoteWorkspaceConnectionProgress::Authenticating),
+            ProgressDialogUpdate::new()
+                .status(RemoteWorkspaceConnectionProgress::Authenticating.status())
+                .detail(None::<&'static str>)
+                .cancellation_enabled(false)
+        );
+
+        cx.update(|window, cx| {
+            flow.update(cx, |flow, cx| {
+                let generation = flow.action_generation;
+                assert!(flow.apply_connection_progress(
+                    generation,
+                    RemoteWorkspaceConnectionProgress::Connecting,
+                    window,
+                    cx,
+                ));
+            });
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            connection_progress_dialog_update(RemoteWorkspaceConnectionProgress::Connecting),
+            ProgressDialogUpdate::new()
+                .status(RemoteWorkspaceConnectionProgress::Connecting.status())
+                .detail(Some(CONNECTION_PROGRESS_DETAIL))
+                .cancellation_enabled(true)
+        );
+
+        click("modal-action-remote-workspace-connect-cancel", cx);
+        cx.run_until_parked();
+
+        assert_eq!(
+            flow.read_with(cx, |flow, _| flow.stage()),
+            RemoteWorkspaceFlowStage::Cancelled
+        );
+        assert!(flow.read_with(cx, |flow, _| flow.progress.is_none()));
+        assert_eq!(events.borrow().cancelled, 1);
+
+        sender
+            .try_send(Err(RemoteWorkspaceFlowBackendError::ConnectionFailed))
+            .unwrap();
+        cx.run_until_parked();
     }
 
     #[gpui::test]

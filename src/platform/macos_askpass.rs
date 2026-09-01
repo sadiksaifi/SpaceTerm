@@ -1,15 +1,19 @@
+use std::borrow::Cow;
 use std::cell::RefCell;
+use std::ffi::c_void;
 use std::marker::PhantomData;
 use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::path::Path;
 use std::rc::Rc;
 use std::slice;
 
 use block::ConcreteBlock;
 use cocoa::appkit::NSApp;
-use cocoa::base::{BOOL, YES, id, nil};
+use cocoa::base::{BOOL, NO, YES, id, nil};
 use cocoa::foundation::{NSAutoreleasePool, NSInteger, NSPoint, NSRect, NSSize, NSString};
 use gpui::Window;
-use objc::runtime::Object;
+use objc::declare::ClassDecl;
+use objc::runtime::{Class, Object, Sel};
 use objc::{class, msg_send, sel, sel_impl};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use zeroize::Zeroizing;
@@ -24,6 +28,8 @@ const NS_ALERT_FIRST_BUTTON_RETURN: NSInteger = 1_000;
 const NS_ALERT_SECOND_BUTTON_RETURN: NSInteger = 1_001;
 const NS_MODAL_RESPONSE_ABORT: NSInteger = -1_001;
 const NS_UTF8_STRING_ENCODING: usize = 4;
+const SECRET_FIELD_OBSERVER_CLASS: &str = "SpaceTermAskPassSecretFieldObserver";
+const SECRET_FIELD_OBSERVER_BUTTON_IVAR: &str = "spaceTermAskPassAffirmativeButton";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 /// UI semantics for one bounded AskPass prompt.
@@ -39,8 +45,8 @@ pub(crate) enum AskPassRequestError {
     Empty,
     #[error("the AskPass prompt exceeds the application limit")]
     TooLong,
-    #[error("the AskPass prompt contains a control character")]
-    ContainsControlCharacter,
+    #[error("the AskPass prompt contains an unsafe control or format character")]
+    ContainsUnsafeCharacter,
 }
 
 /// Validated, bounded AskPass prompt and its presentation kind.
@@ -63,11 +69,8 @@ impl AskPassRequest {
             return Err(AskPassRequestError::TooLong);
         }
         let prompt = prompt.replace("\r\n", "\n");
-        if prompt
-            .chars()
-            .any(|character| character != '\n' && character.is_control())
-        {
-            return Err(AskPassRequestError::ContainsControlCharacter);
+        if prompt.chars().any(is_unsafe_prompt_character) {
+            return Err(AskPassRequestError::ContainsUnsafeCharacter);
         }
         Ok(Self { prompt, kind })
     }
@@ -79,6 +82,413 @@ impl AskPassRequest {
     pub(crate) const fn kind(&self) -> AskPassPromptKind {
         self.kind
     }
+
+    fn classification(&self) -> AskPassPromptClassification<'_> {
+        classify_prompt(&self.prompt, self.kind)
+    }
+
+    fn presentation(&self) -> AskPassPresentation<'_> {
+        match self.classification() {
+            AskPassPromptClassification::FirstContact(first_contact) => {
+                AskPassPresentation::first_contact(first_contact)
+            }
+            AskPassPromptClassification::Confirmation => AskPassPresentation::confirmation(self),
+            AskPassPromptClassification::Password(password) => {
+                AskPassPresentation::password(self, password)
+            }
+            AskPassPromptClassification::KeyPassphrase(key_passphrase) => {
+                AskPassPresentation::key_passphrase(self, key_passphrase)
+            }
+            AskPassPromptClassification::Secret => AskPassPresentation::secret(self),
+        }
+    }
+}
+
+fn is_unsafe_prompt_character(character: char) -> bool {
+    (character != '\n' && character.is_control())
+        || matches!(
+            character,
+            '\u{00ad}'
+                | '\u{034f}'
+                | '\u{0600}'..='\u{0605}'
+                | '\u{061c}'
+                | '\u{06dd}'
+                | '\u{070f}'
+                | '\u{0890}'..='\u{0891}'
+                | '\u{08e2}'
+                | '\u{115f}'..='\u{1160}'
+                | '\u{17b4}'..='\u{17b5}'
+                | '\u{180b}'..='\u{180f}'
+                | '\u{200b}'..='\u{200f}'
+                | '\u{2028}'..='\u{202e}'
+                | '\u{2060}'..='\u{206f}'
+                | '\u{3164}'
+                | '\u{fe00}'..='\u{fe0f}'
+                | '\u{feff}'
+                | '\u{ffa0}'
+                | '\u{e0000}'..='\u{e007f}'
+                | '\u{e0100}'..='\u{e01ef}'
+        )
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum AskPassPresentationKind {
+    FirstContact,
+    Confirmation,
+    Password,
+    KeyPassphrase,
+    Secret,
+}
+
+struct AskPassPresentation<'a> {
+    kind: AskPassPresentationKind,
+    title: &'static str,
+    informative_text: Cow<'a, str>,
+    affirmative: &'static str,
+    negative: &'static str,
+    field_label: Option<&'static str>,
+}
+
+impl<'a> AskPassPresentation<'a> {
+    fn first_contact(prompt: FirstContactPrompt<'a>) -> Self {
+        let host = match prompt.address {
+            Some(address) => format!(
+                "Host: {}\nAddress: {address}\n\n{} fingerprint:\n{}",
+                prompt.host, prompt.key_type, prompt.fingerprint
+            ),
+            None => format!(
+                "Host: {}\n\n{} fingerprint:\n{}",
+                prompt.host, prompt.key_type, prompt.fingerprint
+            ),
+        };
+        let mut informative_text = concat!(
+            "SSH does not recognize this host key for this address. Verify the fingerprint with ",
+            "the host owner.\n\n"
+        )
+        .to_owned();
+        informative_text.push_str(&host);
+        if !prompt.additional_details.is_empty() {
+            informative_text.push_str("\n\n");
+            informative_text.push_str(&prompt.additional_details.join("\n"));
+        }
+        informative_text.push_str(
+            "\n\nIf you continue, SSH will attempt to remember this key for future connections.",
+        );
+        Self {
+            kind: AskPassPresentationKind::FirstContact,
+            title: "Verify SSH Host",
+            informative_text: Cow::Owned(informative_text),
+            affirmative: "Trust & Connect",
+            negative: "Cancel",
+            field_label: None,
+        }
+    }
+
+    fn confirmation(request: &'a AskPassRequest) -> Self {
+        Self {
+            kind: AskPassPresentationKind::Confirmation,
+            title: "SpaceTerm SSH Authentication",
+            informative_text: Cow::Borrowed(request.prompt()),
+            affirmative: "Yes",
+            negative: "No",
+            field_label: None,
+        }
+    }
+
+    fn password(request: &'a AskPassRequest, prompt: PasswordPrompt<'a>) -> Self {
+        let mut informative_text = format!("SSH requested:\n{}\n\n", request.prompt());
+        if let (Some(account), Some(host)) = (prompt.account, prompt.host) {
+            informative_text.push_str(&format!("Host: {host}\nAccount: {account}\n"));
+        }
+        informative_text.push_str(concat!(
+            "Method: Password\n\n",
+            "SpaceTerm sends this response to SSH and does not store it."
+        ));
+        Self {
+            kind: AskPassPresentationKind::Password,
+            title: "Sign In to Remote Host",
+            informative_text: Cow::Owned(informative_text),
+            affirmative: "Sign In",
+            negative: "Cancel",
+            field_label: Some("Password"),
+        }
+    }
+
+    fn key_passphrase(request: &'a AskPassRequest, prompt: KeyPassphrasePrompt<'a>) -> Self {
+        let mut informative_text = format!(
+            "SSH requested:\n{}\n\nKey: {}",
+            request.prompt(),
+            prompt.filename
+        );
+        if let Some(location) = prompt.location {
+            informative_text.push_str(&format!("\nLocation: {location}"));
+        }
+        informative_text
+            .push_str("\n\nSpaceTerm sends this response to SSH and does not store it.");
+        Self {
+            kind: AskPassPresentationKind::KeyPassphrase,
+            title: "SSH Key Passphrase",
+            informative_text: Cow::Owned(informative_text),
+            affirmative: "Submit & Connect",
+            negative: "Cancel",
+            field_label: Some("Key passphrase"),
+        }
+    }
+
+    fn secret(request: &'a AskPassRequest) -> Self {
+        Self {
+            kind: AskPassPresentationKind::Secret,
+            title: "SpaceTerm SSH Authentication",
+            informative_text: Cow::Borrowed(request.prompt()),
+            affirmative: "Continue",
+            negative: "Cancel",
+            field_label: Some("Secure SSH authentication response"),
+        }
+    }
+}
+
+impl AskPassPresentationKind {
+    const fn uses_secret_field(self) -> bool {
+        matches!(self, Self::Password | Self::KeyPassphrase | Self::Secret)
+    }
+
+    const fn requires_nonempty_secret(self) -> bool {
+        matches!(self, Self::Password | Self::KeyPassphrase)
+    }
+
+    #[cfg(test)]
+    const fn secret_submission_enabled(self, length: usize) -> bool {
+        !self.requires_nonempty_secret() || length > 0
+    }
+
+    fn button_result(self, response: NSInteger) -> Option<AskPassResult> {
+        match (self, response) {
+            (Self::FirstContact, NS_ALERT_FIRST_BUTTON_RETURN) => Some(AskPassResult::Cancelled),
+            (Self::FirstContact, NS_ALERT_SECOND_BUTTON_RETURN) => {
+                Some(AskPassResult::Confirmation(true))
+            }
+            (Self::Confirmation, NS_ALERT_FIRST_BUTTON_RETURN) => {
+                Some(AskPassResult::Confirmation(false))
+            }
+            (Self::Confirmation, NS_ALERT_SECOND_BUTTON_RETURN) => {
+                Some(AskPassResult::Confirmation(true))
+            }
+            (
+                Self::Password | Self::KeyPassphrase | Self::Secret,
+                NS_ALERT_SECOND_BUTTON_RETURN,
+            ) => Some(AskPassResult::Cancelled),
+            (_, NS_MODAL_RESPONSE_ABORT) => Some(AskPassResult::Cancelled),
+            _ => None,
+        }
+    }
+}
+
+enum AskPassPromptClassification<'a> {
+    FirstContact(FirstContactPrompt<'a>),
+    Confirmation,
+    Password(PasswordPrompt<'a>),
+    KeyPassphrase(KeyPassphrasePrompt<'a>),
+    Secret,
+}
+
+struct FirstContactPrompt<'a> {
+    host: &'a str,
+    address: Option<&'a str>,
+    key_type: &'a str,
+    fingerprint: &'a str,
+    additional_details: Vec<&'a str>,
+}
+
+struct PasswordPrompt<'a> {
+    account: Option<&'a str>,
+    host: Option<&'a str>,
+}
+
+struct KeyPassphrasePrompt<'a> {
+    filename: &'a str,
+    location: Option<&'a str>,
+}
+
+/// Recognizes Apple OpenSSH's locally generated first-contact grammar even though `sshconnect.c`
+/// requests it through `RP_ECHO` and therefore supplies no confirmation hint to AskPass. The
+/// anchored first line, one valid fingerprint, and terminal confirmation question are all required.
+/// A keyboard-interactive server that exactly mimics this grammar can receive only the fixed `yes`
+/// response; this path never reads a secret and only OpenSSH's local host-key path can update its
+/// known-hosts files.
+fn classify_prompt(prompt: &str, hint: AskPassPromptKind) -> AskPassPromptClassification<'_> {
+    if let Some(first_contact) = parse_first_contact_prompt(prompt) {
+        return AskPassPromptClassification::FirstContact(first_contact);
+    }
+    if looks_like_first_contact_confirmation(prompt) {
+        return AskPassPromptClassification::Confirmation;
+    }
+    if hint == AskPassPromptKind::Secret {
+        if let Some(key_passphrase) = parse_key_passphrase_prompt(prompt) {
+            return AskPassPromptClassification::KeyPassphrase(key_passphrase);
+        }
+        if let Some(password) = parse_password_prompt(prompt) {
+            return AskPassPromptClassification::Password(password);
+        }
+    }
+    match hint {
+        AskPassPromptKind::Confirmation => AskPassPromptClassification::Confirmation,
+        AskPassPromptKind::Secret => AskPassPromptClassification::Secret,
+    }
+}
+
+fn looks_like_first_contact_confirmation(prompt: &str) -> bool {
+    prompt
+        .lines()
+        .next()
+        .is_some_and(|line| line.starts_with("The authenticity of host '"))
+        && prompt.lines().any(is_continue_connecting_question)
+}
+
+fn parse_first_contact_prompt(prompt: &str) -> Option<FirstContactPrompt<'_>> {
+    let mut lines = prompt.lines();
+    let first_line = lines.next()?;
+    let host_and_address = first_line
+        .strip_prefix("The authenticity of host '")?
+        .strip_suffix("' can't be established.")?;
+    let (host, address) = parse_host_and_address(host_and_address)?;
+
+    let mut key_type = None;
+    let mut fingerprint = None;
+    let mut additional_details = Vec::new();
+    let mut found_question = false;
+    while let Some(line) = lines.next() {
+        let line = line.trim_end();
+        if is_continue_connecting_question(line) {
+            if lines.any(|trailing| !trailing.trim().is_empty()) {
+                return None;
+            }
+            found_question = true;
+            break;
+        }
+        if let Some((parsed_key_type, parsed_fingerprint)) = parse_fingerprint_line(line) {
+            if key_type.is_some() {
+                return None;
+            }
+            key_type = Some(parsed_key_type);
+            fingerprint = Some(parsed_fingerprint);
+        } else if is_host_security_warning(line) {
+            return None;
+        } else if !line.is_empty() {
+            additional_details.push(line);
+        }
+    }
+    if !found_question {
+        return None;
+    }
+    Some(FirstContactPrompt {
+        host,
+        address,
+        key_type: key_type?,
+        fingerprint: fingerprint?,
+        additional_details,
+    })
+}
+
+fn parse_host_and_address(value: &str) -> Option<(&str, Option<&str>)> {
+    if let Some((host, address)) = value.rsplit_once(" (") {
+        let address = address.strip_suffix(')')?;
+        if !safe_first_contact_label(host) || !safe_first_contact_label(address) {
+            return None;
+        }
+        return Some((host, Some(address)));
+    }
+    safe_first_contact_label(value).then_some((value, None))
+}
+
+fn safe_first_contact_label(value: &str) -> bool {
+    !value.is_empty() && !value.chars().any(is_unsafe_prompt_character)
+}
+
+fn is_host_security_warning(line: &str) -> bool {
+    [
+        "WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!",
+        "WARNING: REVOKED HOST KEY DETECTED!",
+        "WARNING: POSSIBLE DNS SPOOFING DETECTED!",
+    ]
+    .iter()
+    .any(|warning| line.contains(warning))
+}
+
+fn parse_fingerprint_line(line: &str) -> Option<(&str, &str)> {
+    let (key_type, fingerprint) = line.split_once(" key fingerprint is")?;
+    if key_type.is_empty()
+        || !key_type
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'@'))
+    {
+        return None;
+    }
+    let fingerprint = fingerprint
+        .strip_prefix(": ")
+        .or_else(|| fingerprint.strip_prefix(' '))?
+        .trim_end_matches('.');
+    let digest = fingerprint
+        .strip_prefix("SHA256:")
+        .or_else(|| fingerprint.strip_prefix("MD5:"));
+    if digest.is_none_or(str::is_empty)
+        || !fingerprint
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b':' | b'+' | b'/' | b'='))
+    {
+        return None;
+    }
+    Some((key_type, fingerprint))
+}
+
+fn is_continue_connecting_question(line: &str) -> bool {
+    matches!(
+        line.trim_end(),
+        "Are you sure you want to continue connecting (yes/no/[fingerprint])?"
+            | "Are you sure you want to continue connecting (yes/no)?"
+    )
+}
+
+fn parse_password_prompt(prompt: &str) -> Option<PasswordPrompt<'_>> {
+    if prompt.contains('\n') {
+        return None;
+    }
+    let prompt = prompt.strip_suffix(' ').unwrap_or(prompt);
+    if matches!(prompt, "Password:" | "password:") {
+        return Some(PasswordPrompt {
+            account: None,
+            host: None,
+        });
+    }
+    let identity = prompt.strip_suffix("'s password:")?;
+    let (account, host) = identity.rsplit_once('@')?;
+    if !safe_first_contact_label(account) || !safe_first_contact_label(host) {
+        return None;
+    }
+    Some(PasswordPrompt {
+        account: Some(account),
+        host: Some(host),
+    })
+}
+
+fn parse_key_passphrase_prompt(prompt: &str) -> Option<KeyPassphrasePrompt<'_>> {
+    if prompt.contains('\n') {
+        return None;
+    }
+    let key_path = prompt
+        .strip_suffix(' ')
+        .unwrap_or(prompt)
+        .strip_prefix("Enter passphrase for key '")?
+        .strip_suffix("':")?;
+    if key_path.is_empty() {
+        return None;
+    }
+    let path = Path::new(key_path);
+    let filename = path.file_name()?.to_str()?;
+    let location = path
+        .parent()
+        .and_then(Path::to_str)
+        .filter(|location| !location.is_empty());
+    Some(KeyPassphrasePrompt { filename, location })
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -387,7 +797,7 @@ impl AskPassPresenter for MacosAskPassPresenter {
                     completionHandler: block
                 ];
                 if let Some(sheet) = presentation.borrow().as_ref() {
-                    sheet.focus_secret_field();
+                    sheet.focus_initial_control();
                 }
                 Ok(())
             })();
@@ -460,10 +870,12 @@ impl Drop for RetainedAppKitWindow {
 }
 
 struct NativeAskPassSheet {
-    kind: AskPassPromptKind,
+    presentation_kind: AskPassPresentationKind,
     alert: id,
     alert_window: id,
     secret_field: Option<id>,
+    secret_field_observer: Option<id>,
+    initial_focus: Option<id>,
     secure_input: Option<SecureInputSecretLease>,
     activity: AskPassPresentationActivity,
     completion: PendingAskPassCompletion,
@@ -476,6 +888,7 @@ impl NativeAskPassSheet {
         activity: AskPassPresentationActivity,
         completion: AskPassCompletion,
     ) -> Result<Self, AskPassPresentationError> {
+        let presentation = request.presentation();
         // SAFETY: Caller establishes AppKit main-thread confinement and owns the returned retains.
         let alert: id = unsafe {
             let allocated: id = msg_send![class!(NSAlert), alloc];
@@ -488,39 +901,57 @@ impl NativeAskPassSheet {
         // SAFETY: NSAlert copies the strings and retains the accessory view configured below.
         unsafe {
             let title = NSString::alloc(nil)
-                .init_str("SpaceTerm SSH Authentication")
+                .init_str(presentation.title)
                 .autorelease();
             let prompt = NSString::alloc(nil)
-                .init_str(request.prompt())
+                .init_str(presentation.informative_text.as_ref())
                 .autorelease();
             let _: () = msg_send![alert, setAlertStyle: 1_usize];
             let _: () = msg_send![alert, setMessageText: title];
             let _: () = msg_send![alert, setInformativeText: prompt];
         }
 
-        let secret_field = match request.kind() {
-            AskPassPromptKind::Secret => {
-                // SAFETY: NSSecureTextField's designated frame initializer returns an owned view.
-                let field = unsafe { new_secure_text_field(alert)? };
-                Some(field)
-            }
-            AskPassPromptKind::Confirmation => None,
+        let secret_field = if presentation.kind.uses_secret_field() {
+            let Some(field_label) = presentation.field_label else {
+                // SAFETY: The unpublished alert is still owned by this failure path.
+                unsafe {
+                    let _: () = msg_send![alert, release];
+                }
+                return Err(AskPassPresentationError::AllocationFailed);
+            };
+            // SAFETY: NSSecureTextField's designated frame initializer returns an owned view.
+            Some(unsafe { new_secure_text_field(alert, field_label)? })
+        } else {
+            None
         };
 
-        // SAFETY: Button order defines the documented NSAlert return codes. AppKit assigns Return
-        // to the first button; Escape is explicitly bound to the second safe/cancel response.
-        unsafe {
-            let (affirmative, negative) = match request.kind() {
-                AskPassPromptKind::Secret => ("Continue", "Cancel"),
-                AskPassPromptKind::Confirmation => ("Yes", "No"),
+        // SAFETY: Non-secret decisions place the safe response first so Return cannot trust or
+        // approve. Secret prompts retain submit-first ordering and require explicit nonempty values
+        // where their strict presentation model requires one.
+        let (safe_button, affirmative_button): (id, id) = unsafe {
+            let (first, second, safe_is_first) = if presentation.kind.uses_secret_field() {
+                (presentation.affirmative, presentation.negative, false)
+            } else {
+                (presentation.negative, presentation.affirmative, true)
             };
-            let affirmative = NSString::alloc(nil).init_str(affirmative).autorelease();
-            let negative = NSString::alloc(nil).init_str(negative).autorelease();
-            let _: id = msg_send![alert, addButtonWithTitle: affirmative];
-            let negative_button: id = msg_send![alert, addButtonWithTitle: negative];
+            let first = NSString::alloc(nil).init_str(first).autorelease();
+            let second = NSString::alloc(nil).init_str(second).autorelease();
+            let first_button: id = msg_send![alert, addButtonWithTitle: first];
+            let second_button: id = msg_send![alert, addButtonWithTitle: second];
+            let safe_button = if safe_is_first {
+                first_button
+            } else {
+                second_button
+            };
             let escape = NSString::alloc(nil).init_str("\u{1b}").autorelease();
-            let _: () = msg_send![negative_button, setKeyEquivalent: escape];
-        }
+            let _: () = msg_send![safe_button, setKeyEquivalent: escape];
+            let affirmative_button = if safe_is_first {
+                second_button
+            } else {
+                first_button
+            };
+            (safe_button, affirmative_button)
+        };
 
         // SAFETY: The retained alert owns its NSWindow for the alert lifetime.
         let alert_window: id = unsafe { msg_send![alert, window] };
@@ -536,12 +967,47 @@ impl NativeAskPassSheet {
             }
             return Err(AskPassPresentationError::AllocationFailed);
         }
+        if !presentation.kind.uses_secret_field() {
+            // SAFETY: The safe first button is owned by this alert. Assigning its cell as the
+            // default makes Return safe even after Escape is installed as its key equivalent.
+            unsafe {
+                let safe_cell: id = msg_send![safe_button, cell];
+                let _: () = msg_send![alert_window, setDefaultButtonCell: safe_cell];
+            }
+        }
+        let secret_field_observer = if presentation.kind.requires_nonempty_secret() {
+            let Some(field) = secret_field else {
+                // SAFETY: The retained alert owns both buttons and no object has been published.
+                unsafe {
+                    let _: () = msg_send![alert, release];
+                }
+                return Err(AskPassPresentationError::AllocationFailed);
+            };
+            let Some(observer) =
+                (unsafe { new_nonempty_secret_observer(field, affirmative_button) })
+            else {
+                // SAFETY: Neither owned object has been published. Removing the accessory balances
+                // NSAlert's retain before the explicit allocation retains are released.
+                unsafe {
+                    let _: () = msg_send![alert, setAccessoryView: nil];
+                    let _: () = msg_send![field, release];
+                    let _: () = msg_send![alert, release];
+                }
+                return Err(AskPassPresentationError::AllocationFailed);
+            };
+            Some(observer)
+        } else {
+            None
+        };
+        let initial_focus = secret_field.or(Some(safe_button));
 
         Ok(Self {
-            kind: request.kind(),
+            presentation_kind: presentation.kind,
             alert,
             alert_window,
             secret_field,
+            secret_field_observer,
+            initial_focus,
             secure_input: None,
             activity,
             completion: PendingAskPassCompletion::new(completion),
@@ -559,8 +1025,8 @@ impl NativeAskPassSheet {
         }
     }
 
-    fn focus_secret_field(&self) {
-        let Some(field) = self.secret_field else {
+    fn focus_initial_control(&self) {
+        let Some(control) = self.initial_focus else {
             return;
         };
         let window = self.alert_window();
@@ -569,8 +1035,8 @@ impl NativeAskPassSheet {
         }
         // SAFETY: Both objects remain retained by this active sheet on AppKit's main thread.
         unsafe {
-            let _: () = msg_send![window, setInitialFirstResponder: field];
-            let _: BOOL = msg_send![window, makeFirstResponder: field];
+            let _: () = msg_send![window, setInitialFirstResponder: control];
+            let _: BOOL = msg_send![window, makeFirstResponder: control];
         }
     }
 
@@ -584,18 +1050,14 @@ impl NativeAskPassSheet {
     }
 
     fn result(&self, response: NSInteger) -> AskPassResult {
-        match (self.kind, response) {
-            (AskPassPromptKind::Secret, NS_ALERT_FIRST_BUTTON_RETURN) => self
+        if self.presentation_kind.uses_secret_field() && response == NS_ALERT_FIRST_BUTTON_RETURN {
+            return self
                 .read_secret()
-                .map_or_else(AskPassResult::Failed, AskPassResult::Secret),
-            (AskPassPromptKind::Confirmation, NS_ALERT_FIRST_BUTTON_RETURN) => {
-                AskPassResult::Confirmation(true)
-            }
-            (AskPassPromptKind::Confirmation, NS_ALERT_SECOND_BUTTON_RETURN) => {
-                AskPassResult::Confirmation(false)
-            }
-            _ => AskPassResult::Cancelled,
+                .map_or_else(AskPassResult::Failed, AskPassResult::Secret);
         }
+        self.presentation_kind
+            .button_result(response)
+            .unwrap_or(AskPassResult::Cancelled)
     }
 
     fn read_secret(&self) -> Result<AskPassSecret, AskPassResponseError> {
@@ -646,6 +1108,12 @@ impl NativeAskPassSheet {
         // SAFETY: This owner holds one retain for each object. Removing the accessory first drops
         // NSAlert's retain, then these explicit releases balance allocation ownership.
         unsafe {
+            if let Some(observer) = self.secret_field_observer.take() {
+                if let Some(field) = self.secret_field {
+                    let _: () = msg_send![field, setDelegate: nil];
+                }
+                let _: () = msg_send![observer, release];
+            }
             if let Some(field) = self.secret_field.take() {
                 let _: () = msg_send![self.alert, setAccessoryView: nil];
                 let _: () = msg_send![field, release];
@@ -664,7 +1132,10 @@ impl Drop for NativeAskPassSheet {
     }
 }
 
-unsafe fn new_secure_text_field(alert: id) -> Result<id, AskPassPresentationError> {
+unsafe fn new_secure_text_field(
+    alert: id,
+    accessibility_label: &str,
+) -> Result<id, AskPassPresentationError> {
     let frame = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(360.0, 24.0));
     // SAFETY: NSSecureTextField supports NSView's frame initializer and returns an owned object.
     let field: id = unsafe {
@@ -683,7 +1154,7 @@ unsafe fn new_secure_text_field(alert: id) -> Result<id, AskPassPresentationErro
     // protected-content flag prevents assistive APIs from exposing the entered secret value.
     unsafe {
         let accessibility_label = NSString::alloc(nil)
-            .init_str("Secure SSH authentication response")
+            .init_str(accessibility_label)
             .autorelease();
         let _: () = msg_send![field, setAccessibilityLabel: accessibility_label];
         let _: () = msg_send![field, setAccessibilityProtectedContent: YES];
@@ -696,6 +1167,69 @@ unsafe fn new_secure_text_field(alert: id) -> Result<id, AskPassPresentationErro
         }
     }
     Ok(field)
+}
+
+fn secret_field_observer_class() -> Option<&'static Class> {
+    if let Some(class) = Class::get(SECRET_FIELD_OBSERVER_CLASS) {
+        return Some(class);
+    }
+    let mut declaration = ClassDecl::new(SECRET_FIELD_OBSERVER_CLASS, class!(NSObject))?;
+    declaration.add_ivar::<*mut c_void>(SECRET_FIELD_OBSERVER_BUTTON_IVAR);
+    // SAFETY: The selector uses NSControlTextEditingDelegate's documented notification ABI.
+    unsafe {
+        declaration.add_method(
+            sel!(controlTextDidChange:),
+            secret_field_did_change as extern "C" fn(&Object, Sel, id),
+        );
+    }
+    Some(declaration.register())
+}
+
+unsafe fn new_nonempty_secret_observer(field: id, affirmative_button: id) -> Option<id> {
+    let observer_class = secret_field_observer_class()?;
+    // SAFETY: The registered class is an NSObject subclass and `init` returns an owned object.
+    let observer: id = unsafe {
+        let allocated: id = msg_send![observer_class, alloc];
+        msg_send![allocated, init]
+    };
+    if observer == nil {
+        return None;
+    }
+    // SAFETY: The observer is main-thread confined and retained by NativeAskPassSheet. The alert
+    // retains its button, and the delegate is cleared before either explicit owner is released.
+    unsafe {
+        (*observer).set_ivar(
+            SECRET_FIELD_OBSERVER_BUTTON_IVAR,
+            affirmative_button.cast::<c_void>(),
+        );
+        let _: () = msg_send![affirmative_button, setEnabled: NO];
+        let _: () = msg_send![field, setDelegate: observer];
+    }
+    Some(observer)
+}
+
+extern "C" fn secret_field_did_change(this: &Object, _: Sel, notification: id) {
+    // SAFETY: The delegate callback runs synchronously on AppKit's main thread while the sheet
+    // retains the field and button. It reads only the response length, never its bytes.
+    unsafe {
+        let button: *mut c_void = *this.get_ivar::<*mut c_void>(SECRET_FIELD_OBSERVER_BUTTON_IVAR);
+        if button.is_null() || notification == nil {
+            return;
+        }
+        let field: id = msg_send![notification, object];
+        if field == nil {
+            return;
+        }
+        let value: id = msg_send![field, stringValue];
+        let length: usize = if value == nil {
+            0
+        } else {
+            msg_send![value, length]
+        };
+        let enabled = if length > 0 { YES } else { NO };
+        let button = button.cast::<Object>();
+        let _: () = msg_send![button, setEnabled: enabled];
+    }
 }
 
 fn main_thread() -> bool {
@@ -802,6 +1336,334 @@ mod tests {
     }
 
     #[test]
+    fn classification_recognizes_macos_first_contact_without_confirmation_hint() {
+        let prompt = concat!(
+            "The authenticity of host 'homelab (100.64.0.10)' can't be established.\n",
+            "ED25519 key fingerprint is SHA256:AbCdEf0123456789.\n",
+            "This key is not known by any other names.\n",
+            "Are you sure you want to continue connecting (yes/no/[fingerprint])? "
+        );
+        let request = AskPassRequest::new(prompt.to_owned(), AskPassPromptKind::Secret).unwrap();
+
+        let AskPassPromptClassification::FirstContact(classification) = request.classification()
+        else {
+            panic!("expected a first-contact classification");
+        };
+
+        assert_eq!(classification.host, "homelab");
+        assert_eq!(classification.address, Some("100.64.0.10"));
+        assert_eq!(classification.key_type, "ED25519");
+        assert_eq!(classification.fingerprint, "SHA256:AbCdEf0123456789");
+        let presentation = request.presentation();
+        assert!(matches!(
+            presentation.kind,
+            AskPassPresentationKind::FirstContact
+        ));
+        assert_eq!(presentation.title, "Verify SSH Host");
+        assert_eq!(
+            presentation.informative_text,
+            concat!(
+                "SSH does not recognize this host key for this address. Verify the fingerprint ",
+                "with the host owner.\n\n",
+                "Host: homelab\nAddress: 100.64.0.10\n\n",
+                "ED25519 fingerprint:\nSHA256:AbCdEf0123456789\n\n",
+                "This key is not known by any other names.\n\n",
+                "If you continue, SSH will attempt to remember this key for future connections."
+            )
+        );
+        assert_eq!(presentation.affirmative, "Trust & Connect");
+        assert_eq!(presentation.negative, "Cancel");
+    }
+
+    #[test]
+    fn first_contact_presentation_preserves_every_openssh_context_line() {
+        let prompt = concat!(
+            "The authenticity of host 'example.test (203.0.113.10)' can't be established.\n",
+            "RSA key fingerprint is SHA256:FingerprintValue.\n",
+            "No matching host key fingerprint found in DNS.\n",
+            "This host key is known by the following other names/addresses:\n",
+            "    ~/.ssh/known_hosts:12: old.example.test\n",
+            "Are you sure you want to continue connecting (yes/no/[fingerprint])? "
+        );
+        let request = AskPassRequest::new(prompt.to_owned(), AskPassPromptKind::Secret).unwrap();
+        let presentation = request.presentation();
+
+        assert_eq!(
+            presentation.informative_text,
+            concat!(
+                "SSH does not recognize this host key for this address. Verify the fingerprint ",
+                "with the host owner.\n\n",
+                "Host: example.test\nAddress: 203.0.113.10\n\n",
+                "RSA fingerprint:\nSHA256:FingerprintValue\n\n",
+                "No matching host key fingerprint found in DNS.\n",
+                "This host key is known by the following other names/addresses:\n",
+                "    ~/.ssh/known_hosts:12: old.example.test\n\n",
+                "If you continue, SSH will attempt to remember this key for future connections."
+            )
+        );
+    }
+
+    #[test]
+    fn classification_preserves_ipv6_port_and_accepts_openssh_dns_detail() {
+        let prompt = concat!(
+            "The authenticity of host '[example.test]:2222 ([2001:db8::10]:2222)' can't be established.\n",
+            "ECDSA key fingerprint is: SHA256:FingerprintValue.\n",
+            "Matching host key fingerprint found in DNS.\n",
+            "Are you sure you want to continue connecting (yes/no/[fingerprint])? "
+        );
+        let request =
+            AskPassRequest::new(prompt.to_owned(), AskPassPromptKind::Confirmation).unwrap();
+
+        let AskPassPromptClassification::FirstContact(classification) = request.classification()
+        else {
+            panic!("expected a first-contact classification");
+        };
+
+        assert_eq!(classification.host, "[example.test]:2222");
+        assert_eq!(classification.address, Some("[2001:db8::10]:2222"));
+        assert_eq!(classification.key_type, "ECDSA");
+        assert_eq!(classification.fingerprint, "SHA256:FingerprintValue");
+    }
+
+    #[test]
+    fn classification_requires_the_complete_terminal_openssh_grammar() {
+        for prompt in [
+            concat!(
+                "The authenticity of host 'example.test (203.0.113.10)' can't be established.\n",
+                "A host key fingerprint could not be parsed.\n",
+                "Are you sure you want to continue connecting (yes/no/[fingerprint])? "
+            ),
+            concat!(
+                "The authenticity of host 'example.test (203.0.113.10)' can't be established.\n",
+                "ED25519 key fingerprint is SHA256:.\n",
+                "Are you sure you want to continue connecting (yes/no/[fingerprint])? "
+            ),
+            concat!(
+                "The authenticity of host 'example.test (203.0.113.10)' can't be established.\n",
+                "ED25519 key fingerprint is SHA256:FingerprintValue.\n",
+                "Are you sure you want to continue connecting (yes/no/[fingerprint])?\n",
+                "unexpected trailing challenge"
+            ),
+        ] {
+            let request =
+                AskPassRequest::new(prompt.to_owned(), AskPassPromptKind::Secret).unwrap();
+            let presentation = request.presentation();
+
+            assert!(matches!(
+                presentation.kind,
+                AskPassPresentationKind::Confirmation
+            ));
+            assert_eq!(presentation.informative_text, request.prompt());
+        }
+    }
+
+    #[test]
+    fn password_prompts_use_the_distinct_nonempty_secure_presentation() {
+        for (prompt, expected_context) in [
+            (
+                "sdk@homelab's password: ",
+                concat!(
+                    "SSH requested:\nsdk@homelab's password: \n\n",
+                    "Host: homelab\nAccount: sdk\nMethod: Password\n\n",
+                    "SpaceTerm sends this response to SSH and does not store it."
+                ),
+            ),
+            (
+                "Password:",
+                concat!(
+                    "SSH requested:\nPassword:\n\nMethod: Password\n\n",
+                    "SpaceTerm sends this response to SSH and does not store it."
+                ),
+            ),
+        ] {
+            let request =
+                AskPassRequest::new(prompt.to_owned(), AskPassPromptKind::Secret).unwrap();
+            let presentation = request.presentation();
+
+            assert!(matches!(
+                presentation.kind,
+                AskPassPresentationKind::Password
+            ));
+            assert_eq!(presentation.title, "Sign In to Remote Host");
+            assert_eq!(presentation.informative_text, expected_context);
+            assert_eq!(presentation.affirmative, "Sign In");
+            assert_eq!(presentation.negative, "Cancel");
+            assert_eq!(presentation.field_label, Some("Password"));
+            assert!(!presentation.kind.secret_submission_enabled(0));
+            assert!(presentation.kind.secret_submission_enabled(1));
+        }
+    }
+
+    #[test]
+    fn key_passphrase_prompts_use_the_distinct_nonempty_secure_presentation() {
+        let prompt = "Enter passphrase for key '/Users/sdk/.ssh/id_ed25519': ";
+        let request = AskPassRequest::new(prompt.to_owned(), AskPassPromptKind::Secret).unwrap();
+        let presentation = request.presentation();
+
+        assert!(matches!(
+            presentation.kind,
+            AskPassPresentationKind::KeyPassphrase
+        ));
+        assert_eq!(presentation.title, "SSH Key Passphrase");
+        assert_eq!(
+            presentation.informative_text,
+            concat!(
+                "SSH requested:\nEnter passphrase for key '/Users/sdk/.ssh/id_ed25519': \n\n",
+                "Key: id_ed25519\nLocation: /Users/sdk/.ssh\n\n",
+                "SpaceTerm sends this response to SSH and does not store it."
+            )
+        );
+        assert_eq!(presentation.affirmative, "Submit & Connect");
+        assert_eq!(presentation.negative, "Cancel");
+        assert_eq!(presentation.field_label, Some("Key passphrase"));
+        assert!(!presentation.kind.secret_submission_enabled(0));
+        assert!(presentation.kind.secret_submission_enabled(1));
+    }
+
+    #[test]
+    fn generic_secret_challenges_keep_protocol_compatible_empty_submission() {
+        for prompt in ["One-time verification code: ", "PIN: "] {
+            let request =
+                AskPassRequest::new(prompt.to_owned(), AskPassPromptKind::Secret).unwrap();
+            let presentation = request.presentation();
+
+            assert!(matches!(presentation.kind, AskPassPresentationKind::Secret));
+            assert_eq!(presentation.title, "SpaceTerm SSH Authentication");
+            assert_eq!(presentation.informative_text, prompt);
+            assert_eq!(presentation.affirmative, "Continue");
+            assert_eq!(presentation.negative, "Cancel");
+            assert_eq!(
+                presentation.field_label,
+                Some("Secure SSH authentication response")
+            );
+            assert!(presentation.kind.secret_submission_enabled(0));
+        }
+        assert!(AskPassSecret::new(Vec::new()).is_ok());
+    }
+
+    #[test]
+    fn strict_secret_parsers_reject_multiline_and_wrong_hint_variants() {
+        for prompt in [
+            "sdk@homelab's password:\nOne-time code:",
+            "One-time code:\nsdk@homelab's password:",
+            "Enter passphrase for key '/tmp/id':\nOne-time code:",
+            "One-time code:\nEnter passphrase for key '/tmp/id':",
+        ] {
+            let request =
+                AskPassRequest::new(prompt.to_owned(), AskPassPromptKind::Secret).unwrap();
+            assert!(matches!(
+                request.presentation().kind,
+                AskPassPresentationKind::Secret
+            ));
+        }
+        let request = AskPassRequest::new(
+            "sdk@homelab's password: ".to_owned(),
+            AskPassPromptKind::Confirmation,
+        )
+        .unwrap();
+        assert!(matches!(
+            request.presentation().kind,
+            AskPassPresentationKind::Confirmation
+        ));
+    }
+
+    #[test]
+    fn host_security_warnings_never_offer_first_contact_trust() {
+        for warning in [
+            "WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!",
+            "WARNING: REVOKED HOST KEY DETECTED!",
+            "WARNING: POSSIBLE DNS SPOOFING DETECTED!",
+        ] {
+            let prompt = format!(
+                concat!(
+                    "The authenticity of host 'example.test (203.0.113.10)' can't be ",
+                    "established.\n",
+                    "ED25519 key fingerprint is SHA256:FingerprintValue.\n",
+                    "{}\n",
+                    "Are you sure you want to continue connecting (yes/no/[fingerprint])? "
+                ),
+                warning
+            );
+            let request = AskPassRequest::new(prompt, AskPassPromptKind::Secret).unwrap();
+            let presentation = request.presentation();
+
+            assert!(!matches!(
+                presentation.kind,
+                AskPassPresentationKind::FirstContact
+            ));
+            assert_ne!(presentation.affirmative, "Trust & Connect");
+        }
+    }
+
+    #[test]
+    fn safe_first_button_response_mapping_covers_both_buttons_and_abort() {
+        let first_contact = AskPassPresentationKind::FirstContact;
+        assert_eq!(
+            observe(
+                first_contact
+                    .button_result(NS_ALERT_FIRST_BUTTON_RETURN)
+                    .unwrap()
+            ),
+            ObservedResult::Cancelled
+        );
+        assert_eq!(
+            observe(
+                first_contact
+                    .button_result(NS_ALERT_SECOND_BUTTON_RETURN)
+                    .unwrap()
+            ),
+            ObservedResult::Confirmation(true)
+        );
+        assert_eq!(
+            observe(
+                first_contact
+                    .button_result(NS_MODAL_RESPONSE_ABORT)
+                    .unwrap()
+            ),
+            ObservedResult::Cancelled
+        );
+
+        let confirmation = AskPassPresentationKind::Confirmation;
+        assert_eq!(
+            observe(
+                confirmation
+                    .button_result(NS_ALERT_FIRST_BUTTON_RETURN)
+                    .unwrap()
+            ),
+            ObservedResult::Confirmation(false)
+        );
+        assert_eq!(
+            observe(
+                confirmation
+                    .button_result(NS_ALERT_SECOND_BUTTON_RETURN)
+                    .unwrap()
+            ),
+            ObservedResult::Confirmation(true)
+        );
+        assert_eq!(
+            observe(confirmation.button_result(NS_MODAL_RESPONSE_ABORT).unwrap()),
+            ObservedResult::Cancelled
+        );
+    }
+
+    #[test]
+    fn generic_confirmation_preserves_yes_no_transport_semantics() {
+        let request = AskPassRequest::new(
+            "Allow a generic SSH operation?".to_owned(),
+            AskPassPromptKind::Confirmation,
+        )
+        .unwrap();
+        let presentation = request.presentation();
+
+        assert!(matches!(
+            presentation.kind,
+            AskPassPresentationKind::Confirmation
+        ));
+        assert_eq!(presentation.affirmative, "Yes");
+        assert_eq!(presentation.negative, "No");
+    }
+
+    #[test]
     fn request_rejects_empty_and_oversized_prompts() {
         let empty = AskPassRequest::new(String::new(), AskPassPromptKind::Secret).err();
         let oversized = AskPassRequest::new(
@@ -827,7 +1689,22 @@ mod tests {
             let error =
                 AskPassRequest::new(prompt.to_owned(), AskPassPromptKind::Confirmation).err();
 
-            assert_eq!(error, Some(AskPassRequestError::ContainsControlCharacter));
+            assert_eq!(error, Some(AskPassRequestError::ContainsUnsafeCharacter));
+        }
+    }
+
+    #[test]
+    fn request_rejects_bidi_and_invisible_format_spoofing() {
+        for character in [
+            '\u{00ad}', '\u{061c}', '\u{200b}', '\u{202e}', '\u{2066}', '\u{feff}',
+        ] {
+            let error = AskPassRequest::new(
+                format!("trusted{character}host"),
+                AskPassPromptKind::Confirmation,
+            )
+            .err();
+
+            assert_eq!(error, Some(AskPassRequestError::ContainsUnsafeCharacter));
         }
     }
 

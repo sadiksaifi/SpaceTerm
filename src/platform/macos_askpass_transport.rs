@@ -141,7 +141,7 @@ pub(crate) struct AskPassBroker {
 }
 
 #[derive(Clone, Default)]
-/// Content-free observation of authentication prompt start and user cancellation.
+/// Content-free observation of authentication prompt activity and user cancellation.
 ///
 /// It is scoped to one connection attempt and carries no prompt or response bytes.
 pub(crate) struct AskPassAttemptObservation {
@@ -151,6 +151,7 @@ pub(crate) struct AskPassAttemptObservation {
 #[derive(Default)]
 struct AskPassAttemptObservationState {
     prompt_started: AtomicBool,
+    prompt_active: AtomicBool,
     cancelled: Arc<AtomicBool>,
 }
 
@@ -158,6 +159,11 @@ impl AskPassAttemptObservation {
     /// Reports whether any prompt in this attempt reached the presenter.
     pub(crate) fn prompt_started(&self) -> bool {
         self.state.prompt_started.load(Ordering::Acquire)
+    }
+
+    /// Reports whether a native prompt is currently active for this attempt.
+    pub(crate) fn prompt_active(&self) -> bool {
+        self.state.prompt_active.load(Ordering::Acquire)
     }
 
     /// Reports whether any prompt in this attempt was cancelled.
@@ -454,6 +460,23 @@ struct ObservedBrokerPresenter {
     observation: AskPassAttemptObservation,
 }
 
+struct PromptActivity<'a> {
+    active: &'a AtomicBool,
+}
+
+impl<'a> PromptActivity<'a> {
+    fn begin(active: &'a AtomicBool) -> Self {
+        active.store(true, Ordering::Release);
+        Self { active }
+    }
+}
+
+impl Drop for PromptActivity<'_> {
+    fn drop(&mut self) {
+        self.active.store(false, Ordering::Release);
+    }
+}
+
 impl BrokerPresenter for ObservedBrokerPresenter {
     fn present(
         &self,
@@ -464,7 +487,9 @@ impl BrokerPresenter for ObservedBrokerPresenter {
             .state
             .prompt_started
             .store(true, Ordering::Release);
+        let activity = PromptActivity::begin(&self.observation.state.prompt_active);
         let answer = self.inner.present(request, stop);
+        drop(activity);
         if matches!(answer, Ok(BrokerAnswer::Cancelled)) {
             self.observation
                 .state
@@ -1443,6 +1468,7 @@ mod tests {
         let stop = AtomicBool::new(false);
 
         assert!(!observation.prompt_started());
+        assert!(!observation.prompt_active());
         assert!(!observation.cancelled());
         let request =
             AskPassRequest::new("Password:".to_owned(), AskPassPromptKind::Secret).unwrap();
@@ -1451,11 +1477,69 @@ mod tests {
             Ok(BrokerAnswer::Cancelled)
         ));
         assert!(observation.prompt_started());
+        assert!(!observation.prompt_active());
         assert!(observation.cancelled());
         assert!(observation.cancellation_flag().load(Ordering::Acquire));
 
         presenter.cancel_active();
         assert!(observation.cancelled());
+    }
+
+    #[test]
+    fn attempt_observation_should_clear_activity_when_each_prompt_finishes() {
+        struct GatedPresenter {
+            entered: Mutex<Option<mpsc::SyncSender<()>>>,
+            release: Mutex<mpsc::Receiver<()>>,
+        }
+
+        impl BrokerPresenter for GatedPresenter {
+            fn present(
+                &self,
+                _request: AskPassRequest,
+                _stop: &AtomicBool,
+            ) -> Result<BrokerAnswer, BrokerPresentationFailure> {
+                self.entered
+                    .lock()
+                    .unwrap()
+                    .take()
+                    .unwrap()
+                    .send(())
+                    .unwrap();
+                self.release.lock().unwrap().recv().unwrap();
+                Ok(BrokerAnswer::Secret(Zeroizing::new(Vec::new())))
+            }
+
+            fn cancel_active(&self) {}
+        }
+
+        let (entered_sender, entered_receiver) = mpsc::sync_channel(1);
+        let (release_sender, release_receiver) = mpsc::sync_channel(1);
+        let observation = AskPassAttemptObservation::default();
+        let presenter = ObservedBrokerPresenter {
+            inner: Arc::new(GatedPresenter {
+                entered: Mutex::new(Some(entered_sender)),
+                release: Mutex::new(release_receiver),
+            }),
+            observation: observation.clone(),
+        };
+        let stop = Arc::new(AtomicBool::new(false));
+        let worker = thread::spawn({
+            let stop = Arc::clone(&stop);
+            move || {
+                let request =
+                    AskPassRequest::new("PIN:".to_owned(), AskPassPromptKind::Secret).unwrap();
+                presenter.present(request, &stop)
+            }
+        });
+
+        entered_receiver
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap();
+        assert!(observation.prompt_active());
+        release_sender.send(()).unwrap();
+        assert!(matches!(worker.join(), Ok(Ok(BrokerAnswer::Secret(_)))));
+        assert!(!observation.prompt_active());
+        assert!(!observation.cancelled());
     }
 
     #[test]

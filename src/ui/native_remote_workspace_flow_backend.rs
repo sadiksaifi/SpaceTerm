@@ -410,11 +410,18 @@ fn watch_authentication(
     executor: BackgroundExecutor,
 ) -> Task<()> {
     executor.clone().spawn(async move {
-        while !observation.prompt_started() && !cancellation.is_cancelled() {
+        let mut prompt_was_active = false;
+        while !cancellation.is_cancelled() {
+            let prompt_is_active = observation.prompt_active();
+            if prompt_is_active != prompt_was_active {
+                context.report(if prompt_is_active {
+                    RemoteWorkspaceConnectionProgress::Authenticating
+                } else {
+                    RemoteWorkspaceConnectionProgress::Connecting
+                });
+                prompt_was_active = prompt_is_active;
+            }
             executor.timer(CONNECT_CANCELLATION_POLL).await;
-        }
-        if observation.prompt_started() && !cancellation.is_cancelled() {
-            context.report(RemoteWorkspaceConnectionProgress::Authenticating);
         }
     })
 }
