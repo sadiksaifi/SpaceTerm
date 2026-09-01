@@ -172,6 +172,20 @@ struct PreparedRemoteWorkspaceReconnect {
     restart: PreparedWindowManagerRemoteRestart,
 }
 
+struct WindowManagerCreation {
+    workspace_id: WorkspaceId,
+    sidebar_visible: bool,
+    sidebar_width: Pixels,
+    operating_system_window_drag_platform: Rc<dyn OperatingSystemWindowDragPlatform>,
+}
+
+struct PendingRemoteProjectActivation {
+    flow: Entity<RemoteWorkspaceFlow>,
+    handle: RemoteWorkspaceFlowCompletionHandle,
+    completion: RemoteWorkspaceFlowCompletion,
+    terminal_factory: WorkspaceTerminalSessionFactory,
+}
+
 #[derive(Debug, Eq, PartialEq)]
 enum RemoteWorkspaceReconnectFailure {
     Cancelled,
@@ -463,11 +477,13 @@ impl WorkspaceManager {
         cx: &mut Context<Self>,
     ) -> Entity<WindowManager> {
         match Self::try_create_window_manager(
-            workspace_id,
             session_factory,
-            sidebar_visible,
-            sidebar_width,
-            operating_system_window_drag_platform,
+            WindowManagerCreation {
+                workspace_id,
+                sidebar_visible,
+                sidebar_width,
+                operating_system_window_drag_platform,
+            },
             window,
             cx,
         ) {
@@ -477,37 +493,34 @@ impl WorkspaceManager {
     }
 
     fn try_create_window_manager(
-        workspace_id: WorkspaceId,
         session_factory: WorkspaceTerminalSessionFactory,
-        sidebar_visible: bool,
-        sidebar_width: Pixels,
-        operating_system_window_drag_platform: Rc<dyn OperatingSystemWindowDragPlatform>,
+        creation: WindowManagerCreation,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Result<Entity<WindowManager>, crate::terminal::RemoteChannelUnavailable> {
         let prepared_launch = session_factory.prepare_child_launch()?;
         Ok(Self::create_window_manager_with_prepared_launch(
-            workspace_id,
             session_factory,
             prepared_launch,
-            sidebar_visible,
-            sidebar_width,
-            operating_system_window_drag_platform,
+            creation,
             window,
             cx,
         ))
     }
 
     fn create_window_manager_with_prepared_launch(
-        workspace_id: WorkspaceId,
         session_factory: WorkspaceTerminalSessionFactory,
         prepared_launch: PreparedWorkspaceTerminalLaunch,
-        sidebar_visible: bool,
-        sidebar_width: Pixels,
-        operating_system_window_drag_platform: Rc<dyn OperatingSystemWindowDragPlatform>,
+        creation: WindowManagerCreation,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Entity<WindowManager> {
+        let WindowManagerCreation {
+            workspace_id,
+            sidebar_visible,
+            sidebar_width,
+            operating_system_window_drag_platform,
+        } = creation;
         let manager = cx.new(|cx| {
             let mut manager = WindowManager::new_with_prepared_initial_launch(
                 session_factory,
@@ -1412,7 +1425,7 @@ impl WorkspaceManager {
             match self.try_activate_existing_remote_project(key, completion, window, cx) {
                 Ok(()) => self.acknowledge_remote_project_activation(flow, handle, window, cx),
                 Err(completion) => {
-                    self.return_remote_project_activation(flow, handle, completion, window, cx)
+                    self.return_remote_project_activation(flow, handle, *completion, window, cx)
                 }
             }
             return;
@@ -1434,21 +1447,17 @@ impl WorkspaceManager {
         let Some(revalidation) = terminal_factory.revalidate_remote_child_launch() else {
             unreachable!("a Remote Workspace Terminal factory must require revalidation")
         };
-        let flow = flow.clone();
-        let handle = handle.clone();
+        let activation = PendingRemoteProjectActivation {
+            flow: flow.clone(),
+            handle: handle.clone(),
+            completion,
+            terminal_factory,
+        };
         self.remote_workspace_activation_task =
             Some(cx.spawn_in(window, async move |manager, cx| {
                 let revalidation = revalidation.await;
                 let _ = manager.update_in(cx, |manager, window, cx| {
-                    manager.finish_remote_project_activation(
-                        &flow,
-                        &handle,
-                        completion,
-                        terminal_factory,
-                        revalidation,
-                        window,
-                        cx,
-                    );
+                    manager.finish_remote_project_activation(activation, revalidation, window, cx);
                 });
             }));
         self.sync_terminal_focus_blocker(window, cx);
@@ -1457,23 +1466,26 @@ impl WorkspaceManager {
 
     fn finish_remote_project_activation(
         &mut self,
-        flow: &Entity<RemoteWorkspaceFlow>,
-        handle: &RemoteWorkspaceFlowCompletionHandle,
-        completion: RemoteWorkspaceFlowCompletion,
-        terminal_factory: WorkspaceTerminalSessionFactory,
+        activation: PendingRemoteProjectActivation,
         revalidation: Result<(), crate::terminal::RemoteChannelRevalidationError>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let is_current = self.remote_workspace_flow.as_ref() == Some(flow)
-            && flow.read(cx).owns_activation(handle);
+        let PendingRemoteProjectActivation {
+            flow,
+            handle,
+            completion,
+            terminal_factory,
+        } = activation;
+        let is_current = self.remote_workspace_flow.as_ref() == Some(&flow)
+            && flow.read(cx).owns_activation(&handle);
         if !is_current {
             drop(completion);
             return;
         }
         if let Err(error) = revalidation {
             eprintln!("cannot create Remote Workspace because {error}");
-            self.return_remote_project_activation(flow, handle, completion, window, cx);
+            self.return_remote_project_activation(&flow, &handle, completion, window, cx);
             return;
         }
         let key = RemoteWorkspaceKey::new(
@@ -1482,9 +1494,9 @@ impl WorkspaceManager {
         );
         if self.workspaces.remote_project_workspace(&key).is_some() {
             match self.try_activate_existing_remote_project(key, completion, window, cx) {
-                Ok(()) => self.acknowledge_remote_project_activation(flow, handle, window, cx),
+                Ok(()) => self.acknowledge_remote_project_activation(&flow, &handle, window, cx),
                 Err(completion) => {
-                    self.return_remote_project_activation(flow, handle, completion, window, cx)
+                    self.return_remote_project_activation(&flow, &handle, *completion, window, cx)
                 }
             }
             return;
@@ -1493,7 +1505,7 @@ impl WorkspaceManager {
             Ok(prepared_launch) => prepared_launch,
             Err(error) => {
                 eprintln!("cannot create Remote Workspace because {error}");
-                self.return_remote_project_activation(flow, handle, completion, window, cx);
+                self.return_remote_project_activation(&flow, &handle, completion, window, cx);
                 return;
             }
         };
@@ -1504,9 +1516,9 @@ impl WorkspaceManager {
             window,
             cx,
         ) {
-            Ok(()) => self.acknowledge_remote_project_activation(flow, handle, window, cx),
+            Ok(()) => self.acknowledge_remote_project_activation(&flow, &handle, window, cx),
             Err(completion) => {
-                self.return_remote_project_activation(flow, handle, completion, window, cx)
+                self.return_remote_project_activation(&flow, &handle, *completion, window, cx)
             }
         }
     }
@@ -1517,7 +1529,7 @@ impl WorkspaceManager {
         completion: RemoteWorkspaceFlowCompletion,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> Result<(), RemoteWorkspaceFlowCompletion> {
+    ) -> Result<(), Box<RemoteWorkspaceFlowCompletion>> {
         let previous_workspace_id = self.workspaces.active_workspace_id();
         let previous_manager = self.workspaces.active_workspace().payload().clone();
         let outcome = self.workspaces.create_remote_project_workspace(
@@ -1528,7 +1540,7 @@ impl WorkspaceManager {
             |_| unreachable!("deduplication must not create a replacement payload"),
         );
         let Ok(CreateRemoteProjectOutcome::ActivatedExisting { workspace_id }) = outcome else {
-            return Err(completion);
+            return Err(Box::new(completion));
         };
         self.activate_remote_window_manager(
             previous_workspace_id,
@@ -1549,10 +1561,10 @@ impl WorkspaceManager {
         prepared_launch: PreparedWorkspaceTerminalLaunch,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> Result<(), RemoteWorkspaceFlowCompletion> {
+    ) -> Result<(), Box<RemoteWorkspaceFlowCompletion>> {
         let alias_pin = match completion.acquire_workspace_alias_pin() {
             Ok(alias_pin) => alias_pin,
-            Err(_) => return Err(completion),
+            Err(_) => return Err(Box::new(completion)),
         };
         let key = RemoteWorkspaceKey::new(
             completion.destination().clone(),
@@ -1570,12 +1582,14 @@ impl WorkspaceManager {
             RemoteConnectionState::connected(1),
             |workspace_id| {
                 Self::create_window_manager_with_prepared_launch(
-                    workspace_id,
                     terminal_factory,
                     prepared_launch,
-                    sidebar_visible,
-                    sidebar_width,
-                    window_drag_platform,
+                    WindowManagerCreation {
+                        workspace_id,
+                        sidebar_visible,
+                        sidebar_width,
+                        operating_system_window_drag_platform: window_drag_platform,
+                    },
                     window,
                     cx,
                 )
@@ -1595,7 +1609,7 @@ impl WorkspaceManager {
                 self.debug_assert_remote_runtime_invariants();
                 return Ok(());
             }
-            Err(_) => return Err(completion),
+            Err(_) => return Err(Box::new(completion)),
         };
         let (session, _, _, _, _, _, lifecycle) = completion.into_parts();
         let replaced = self.remote_workspace_runtimes.insert(
@@ -3870,7 +3884,6 @@ fn workspace_menu_entries(
 
 fn remote_connection_status(phase: RemoteConnectionPhase) -> Option<&'static str> {
     match phase {
-        RemoteConnectionPhase::Connecting => Some("Connecting"),
         RemoteConnectionPhase::Connected => Some("Connected"),
         RemoteConnectionPhase::Reconnecting => Some("Reconnecting"),
         RemoteConnectionPhase::Disconnected => Some("Disconnected"),
@@ -3944,9 +3957,7 @@ fn remote_workspace_reconnect_error_content(
 
 fn remote_connection_color(phase: RemoteConnectionPhase) -> Color {
     match phase {
-        RemoteConnectionPhase::Connecting | RemoteConnectionPhase::Reconnecting => {
-            ACTIVE_THEME.info
-        }
+        RemoteConnectionPhase::Reconnecting => ACTIVE_THEME.info,
         RemoteConnectionPhase::Connected => ACTIVE_THEME.success,
         RemoteConnectionPhase::Disconnected | RemoteConnectionPhase::Closing => {
             ACTIVE_THEME.text_muted
@@ -4423,7 +4434,7 @@ mod tests {
             &self,
             _: &RemoteWorkspaceDirectory,
             _: &crate::domain::RemoteDirectoryIdentity,
-            _: &str,
+            _: &crate::ssh::command::ValidatedRemoteLoginShell,
         ) -> Result<
             Arc<dyn crate::terminal::RemoteTerminalChannelProvider>,
             RemoteWorkspaceFlowBackendError,

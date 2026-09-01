@@ -467,12 +467,9 @@ impl RemoteWorkspaceSessionOwner for NativeRemoteWorkspaceSessionOwner {
         &self,
         directory: &RemoteWorkspaceDirectory,
         expected_identity: &RemoteDirectoryIdentity,
-        login_shell: &str,
+        login_shell: &ValidatedRemoteLoginShell,
     ) -> Result<Arc<dyn RemoteTerminalChannelProvider>, RemoteWorkspaceFlowBackendError> {
-        let login_shell_path = login_shell.to_owned();
-        let login_shell = ValidatedRemoteLoginShell::new(login_shell_path.clone())
-            .map_err(|_| RemoteWorkspaceFlowBackendError::IncompatibleServer)?;
-        RemotePaneShellCommandBuilder::new(directory, &login_shell)
+        RemotePaneShellCommandBuilder::new(directory, login_shell)
             .build()
             .map_err(|_| RemoteWorkspaceFlowBackendError::IncompatibleServer)?;
         Ok(Arc::new(NativeRemoteTerminalChannelProvider {
@@ -480,7 +477,7 @@ impl RemoteWorkspaceSessionOwner for NativeRemoteWorkspaceSessionOwner {
             directory: directory.clone(),
             expected_identity: expected_identity.clone(),
             utility: Arc::clone(&self.utility),
-            login_shell: login_shell_path,
+            login_shell: login_shell.as_str().to_owned(),
             executor: self.executor.clone(),
             grant: Arc::new(Mutex::new(ChannelGrantState::default())),
         }))
@@ -992,11 +989,12 @@ mod tests {
             executor: cx.executor(),
             closed: false,
         };
+        let login_shell = ValidatedRemoteLoginShell::new("/bin/zsh".to_owned()).unwrap();
         let provider = owner
             .bind_terminal_channels_for_identity(
                 &RemoteWorkspaceDirectory::new("~/src".to_owned()).unwrap(),
                 &RemoteDirectoryIdentity::new("/home/test/src".to_owned()).unwrap(),
-                "/bin/zsh",
+                &login_shell,
             )
             .unwrap();
         assert!(provider.is_ready());

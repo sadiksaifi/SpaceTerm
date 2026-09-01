@@ -32,6 +32,7 @@ use super::ssh_host_picker::{
     HostDiscoveryProvider, SshHostPicker, SshHostPickerEvent, SshHostPickerLifecycleEvent,
 };
 use crate::domain::{RemoteDirectoryIdentity, RemoteWorkspaceDirectory, SshDestination};
+use crate::ssh::command::ValidatedRemoteLoginShell;
 use crate::ssh::destination::SshHostAlias;
 use crate::ssh::host_config::HostDiscovery;
 use crate::ssh::live_connection::ControlConnectionObserver;
@@ -205,7 +206,7 @@ pub(super) trait RemoteWorkspaceSessionOwner: Send + 'static {
         &self,
         directory: &RemoteWorkspaceDirectory,
         expected_identity: &RemoteDirectoryIdentity,
-        login_shell: &str,
+        login_shell: &ValidatedRemoteLoginShell,
     ) -> Result<Arc<dyn RemoteTerminalChannelProvider>, RemoteWorkspaceFlowBackendError>;
 
     /// Transfers the content-free observer paired with this exact session at most once.
@@ -244,7 +245,7 @@ impl RemoteWorkspaceConnectedSession {
         &self,
         directory: &RemoteWorkspaceDirectory,
         expected_identity: &RemoteDirectoryIdentity,
-        login_shell: &str,
+        login_shell: &ValidatedRemoteLoginShell,
     ) -> Result<Arc<dyn RemoteTerminalChannelProvider>, RemoteWorkspaceFlowBackendError> {
         self.owner
             .as_ref()
@@ -406,7 +407,7 @@ impl RemoteWorkspaceFlowCompletion {
     }
 
     pub(super) fn login_shell(&self) -> &str {
-        self.account.login_shell()
+        self.account.login_shell().as_str()
     }
 
     pub(super) fn terminal_channels(&self) -> Arc<dyn RemoteTerminalChannelProvider> {
@@ -989,7 +990,7 @@ impl RemoteWorkspaceFlow {
         let flow = cx.weak_entity();
         let result_flow = flow.clone();
         let window_handle = window.window_handle();
-        let result_window = window_handle.clone();
+        let result_window = window_handle;
         let dialog = ProgressDialog::new(
             ModalId::new(CONNECTION_PROGRESS_ID),
             "Remote connection progress",
@@ -1009,10 +1010,10 @@ impl RemoteWorkspaceFlow {
             cx,
             move |_, _, cx| {
                 let _ = flow.update(cx, |flow, _| {
-                    if flow.action_generation == generation {
-                        if let Some(cancelled) = &flow.connection_cancelled {
-                            cancelled.store(true, Ordering::Release);
-                        }
+                    if flow.action_generation == generation
+                        && let Some(cancelled) = &flow.connection_cancelled
+                    {
+                        cancelled.store(true, Ordering::Release);
                     }
                 });
                 ProgressCancelDecision::Allow
@@ -1418,9 +1419,9 @@ impl RemoteWorkspaceFlow {
         completion: RemoteWorkspaceFlowCompletion,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> Result<(), RemoteWorkspaceFlowCompletion> {
+    ) -> Result<(), Box<RemoteWorkspaceFlowCompletion>> {
         if !self.owns_activation(handle) {
-            return Err(completion);
+            return Err(Box::new(completion));
         }
         let RemoteWorkspaceFlowCompletion {
             session,
@@ -1592,7 +1593,7 @@ mod tests {
             &self,
             _: &RemoteWorkspaceDirectory,
             _: &RemoteDirectoryIdentity,
-            _: &str,
+            _: &ValidatedRemoteLoginShell,
         ) -> Result<Arc<dyn RemoteTerminalChannelProvider>, RemoteWorkspaceFlowBackendError>
         {
             Ok(Arc::new(|| Err(crate::terminal::RemoteChannelUnavailable)))
@@ -1638,7 +1639,7 @@ mod tests {
             &self,
             _: &RemoteWorkspaceDirectory,
             _: &RemoteDirectoryIdentity,
-            _: &str,
+            _: &ValidatedRemoteLoginShell,
         ) -> Result<Arc<dyn RemoteTerminalChannelProvider>, RemoteWorkspaceFlowBackendError>
         {
             Ok(Arc::new(|| Err(crate::terminal::RemoteChannelUnavailable)))
@@ -2784,7 +2785,7 @@ mod tests {
         assert_eq!(destination.as_str(), "deploy@work");
         assert_eq!(directory.as_str(), "~/src");
         assert_eq!(physical.as_str(), "/home/tester/src");
-        assert_eq!(account.login_shell(), "/bin/zsh");
+        assert_eq!(account.login_shell().as_str(), "/bin/zsh");
         assert!(terminal_channels.is_ready());
         let _ = lifecycle;
         cx.update(|window, cx| {
