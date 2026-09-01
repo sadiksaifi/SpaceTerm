@@ -27,6 +27,13 @@ impl SshCancellationToken {
         self.cancelled.store(true, Ordering::Release);
     }
 
+    pub(crate) fn observing(flag: Arc<AtomicBool>) -> Self {
+        Self {
+            cancelled: Arc::new(AtomicBool::new(false)),
+            observed: Arc::from([flag]),
+        }
+    }
+
     pub(crate) fn is_cancelled(&self) -> bool {
         self.cancelled.load(Ordering::Acquire)
             || self
@@ -45,5 +52,20 @@ impl SshCancellationToken {
             cancelled: Arc::new(AtomicBool::new(false)),
             observed: observed.into(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn observed_flag_should_cancel_without_polling_or_mutating_the_source() {
+        let source = Arc::new(AtomicBool::new(false));
+        let token = SshCancellationToken::observing(Arc::clone(&source));
+
+        source.store(true, Ordering::Release);
+
+        assert!(token.is_cancelled() && source.load(Ordering::Acquire));
     }
 }

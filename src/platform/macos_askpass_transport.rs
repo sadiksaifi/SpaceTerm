@@ -141,7 +141,7 @@ pub(crate) struct AskPassAttemptObservation {
 #[derive(Default)]
 struct AskPassAttemptObservationState {
     prompt_started: AtomicBool,
-    cancelled: AtomicBool,
+    cancelled: Arc<AtomicBool>,
 }
 
 impl AskPassAttemptObservation {
@@ -151,6 +151,10 @@ impl AskPassAttemptObservation {
 
     pub(crate) fn cancelled(&self) -> bool {
         self.state.cancelled.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn cancellation_flag(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.state.cancelled)
     }
 }
 
@@ -1414,6 +1418,7 @@ mod tests {
         ));
         assert!(observation.prompt_started());
         assert!(observation.cancelled());
+        assert!(observation.cancellation_flag().load(Ordering::Acquire));
 
         presenter.cancel_active();
         assert!(observation.cancelled());
