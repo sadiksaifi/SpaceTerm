@@ -89,5 +89,6 @@ pub(crate) use session::{
 #[cfg(test)]
 pub(crate) use session::{SessionError, StartedTerminalSession};
 pub(crate) use workspace_terminal_session_factory::{
+    PreparedWorkspaceTerminalLaunch, RemoteChannelUnavailable, RemoteTerminalChannelProvider,
     WorkspaceChildLaunchValidation, WorkspaceTerminalSessionFactory,
 };

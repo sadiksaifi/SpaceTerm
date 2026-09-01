@@ -67,9 +67,9 @@ use crate::terminal::{
     NativeServiceOrigin, NativeServiceStatus, OptionAsAltPolicy, Osc52Access,
     Osc52AuthorizationDecision, Osc52AuthorizationRequest, Osc52Target, PaneTerminalState,
     PasteConfirmation, PasteDecision, PasteRequestOutcome, PasteResolution, PhysicalKey,
-    PointerButton, PointerInput, PointerPhase, QuickLookTarget, ScreenSnapshot, SelectionCopy,
-    SelectionCopyError, SessionEvent, ShiftSelectionPolicy, SurfacePosition,
-    TerminalAccessibilityModel, TerminalFailure, TerminalLocalFileCapabilities,
+    PointerButton, PointerInput, PointerPhase, PreparedWorkspaceTerminalLaunch, QuickLookTarget,
+    ScreenSnapshot, SelectionCopy, SelectionCopyError, SessionEvent, ShiftSelectionPolicy,
+    SurfacePosition, TerminalAccessibilityModel, TerminalFailure, TerminalLocalFileCapabilities,
     TerminalSessionHandle, UnhandledKeyDiagnostic, WheelInput, WheelPhase,
     WorkspaceTerminalSessionFactory,
 };
@@ -252,6 +252,7 @@ impl SelectionPasteboard {
 
 pub(crate) struct TerminalPane {
     session_factory: WorkspaceTerminalSessionFactory,
+    prepared_launch: Option<PreparedWorkspaceTerminalLaunch>,
     local_file_capabilities: TerminalLocalFileCapabilities,
     session: Option<Box<dyn TerminalSessionHandle>>,
     session_start_attempted: bool,
@@ -346,13 +347,31 @@ pub(crate) struct TerminalPane {
 }
 
 impl TerminalPane {
+    #[cfg(test)]
     pub(crate) fn new(
         session_factory: WorkspaceTerminalSessionFactory,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        let prepared_launch = session_factory.prepare_child_launch().ok();
         Self::new_with_quick_look(
             session_factory,
+            prepared_launch,
+            Box::new(MacosQuickLook::default()),
+            window,
+            cx,
+        )
+    }
+
+    pub(crate) fn new_with_prepared_launch(
+        session_factory: WorkspaceTerminalSessionFactory,
+        prepared_launch: PreparedWorkspaceTerminalLaunch,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        Self::new_with_quick_look(
+            session_factory,
+            Some(prepared_launch),
             Box::new(MacosQuickLook::default()),
             window,
             cx,
@@ -361,6 +380,7 @@ impl TerminalPane {
 
     fn new_with_quick_look(
         session_factory: WorkspaceTerminalSessionFactory,
+        prepared_launch: Option<PreparedWorkspaceTerminalLaunch>,
         quick_look: Box<dyn QuickLookPlatform>,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -436,6 +456,7 @@ impl TerminalPane {
 
         Self {
             session_factory,
+            prepared_launch,
             local_file_capabilities,
             session: None,
             session_start_attempted: false,
@@ -1380,7 +1401,23 @@ impl TerminalPane {
             self.start_failure_action_monitor(cx);
         }
 
-        match self.session_factory.start(geometry) {
+        let prepared_launch = match self.prepared_launch.take() {
+            Some(prepared_launch) => prepared_launch,
+            None => match self.session_factory.prepare_child_launch() {
+                Ok(prepared_launch) => prepared_launch,
+                Err(error) => {
+                    let _ = error;
+                    self.present_failure(
+                        TerminalFailure::platform("prepare-session-channel"),
+                        false,
+                        Some(RecoveryAction::StartSession),
+                    );
+                    cx.notify();
+                    return;
+                }
+            },
+        };
+        match self.session_factory.start(geometry, prepared_launch) {
             Ok(started) => {
                 if self
                     .recovery_retry_requested
@@ -4254,6 +4291,7 @@ mod tests {
     use std::cell::{Cell, RefCell};
     use std::path::PathBuf;
     use std::rc::Rc;
+    use std::sync::Arc;
 
     use gpui::{
         EmptyView, Entity, KeyUpEvent, Keystroke, Modifiers, TestAppContext, VisualTestContext,
@@ -4776,7 +4814,7 @@ mod tests {
         records: TestTerminalSessionRecords,
     ) -> WorkspaceTerminalSessionFactory {
         let destination = crate::domain::SshDestination::new("tester@remote".to_owned()).unwrap();
-        let command_context = Rc::new(
+        let command_context = Arc::new(
             SshCommandContext::new(
                 PathBuf::from("/private/config/spaceterm/ssh_config"),
                 destination.clone(),
@@ -4784,10 +4822,10 @@ mod tests {
             )
             .unwrap(),
         );
-        let prepare_pane_channel = Rc::new(move || {
-            command_context.prepare_pane_channel(
+        let prepare_pane_channel = Arc::new(move || {
+            Ok(command_context.prepare_pane_channel(
                 ValidatedRemoteShellCommand::new("exec /bin/zsh -l".to_owned()).unwrap(),
-            )
+            ))
         });
         WorkspaceTerminalSessionFactory::new_remote(
             Rc::new(TestTerminalSessionFactory::new(records)),

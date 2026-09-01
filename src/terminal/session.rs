@@ -406,6 +406,14 @@ impl RemoteTerminalLaunchPlan {
     pub(crate) const fn metadata_context(&self) -> &RemoteTerminalMetadataContext {
         &self.metadata_context
     }
+
+    #[cfg(test)]
+    pub(crate) fn take_pane_channel(
+        &self,
+    ) -> Result<crate::ssh::command::SshCommandSpec, crate::ssh::command::PreparedSshPaneChannelError>
+    {
+        self.pane_channel.take()
+    }
 }
 
 impl LocalTerminalLaunchPlan {

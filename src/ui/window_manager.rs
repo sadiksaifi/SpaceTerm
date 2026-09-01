@@ -21,7 +21,8 @@ use crate::platform::macos_window_drag::{
     OperatingSystemWindowDragError, OperatingSystemWindowDragPlatform,
 };
 use crate::terminal::{
-    NativeServiceOrigin, NativeServiceStatus, SelectionCopy, WorkspaceChildLaunchValidation,
+    NativeServiceOrigin, NativeServiceStatus, PreparedWorkspaceTerminalLaunch,
+    RemoteChannelUnavailable, SelectionCopy, WorkspaceChildLaunchValidation,
     WorkspaceTerminalSessionFactory,
 };
 use crate::theme::{ACTIVE_THEME, Color};
@@ -116,12 +117,15 @@ impl WindowManager {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        Self::new_with_operating_system_window_drag_platform(
+        match Self::new_with_operating_system_window_drag_platform(
             session_factory,
             Rc::new(MacosOperatingSystemWindowDragPlatform::default()),
             window,
             cx,
-        )
+        ) {
+            Ok(manager) => manager,
+            Err(error) => panic!("test WindowManager channel preparation failed: {error}"),
+        }
     }
 
     pub(crate) fn new_with_operating_system_window_drag_platform(
@@ -129,9 +133,32 @@ impl WindowManager {
         operating_system_window_drag_platform: Rc<dyn OperatingSystemWindowDragPlatform>,
         window: &mut Window,
         cx: &mut Context<Self>,
+    ) -> Result<Self, RemoteChannelUnavailable> {
+        let prepared_launch = session_factory.prepare_child_launch()?;
+        Ok(Self::new_with_prepared_initial_launch(
+            session_factory,
+            prepared_launch,
+            operating_system_window_drag_platform,
+            window,
+            cx,
+        ))
+    }
+
+    pub(crate) fn new_with_prepared_initial_launch(
+        session_factory: WorkspaceTerminalSessionFactory,
+        prepared_launch: PreparedWorkspaceTerminalLaunch,
+        operating_system_window_drag_platform: Rc<dyn OperatingSystemWindowDragPlatform>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
     ) -> Self {
         let windows = WindowCollection::new(|window_id| {
-            Self::create_pane_host(window_id, session_factory.clone(), window, cx)
+            Self::create_pane_host(
+                window_id,
+                session_factory.clone(),
+                prepared_launch,
+                window,
+                cx,
+            )
         });
         Self {
             windows,
@@ -152,10 +179,19 @@ impl WindowManager {
     fn create_pane_host(
         window_id: WindowId,
         session_factory: WorkspaceTerminalSessionFactory,
+        prepared_launch: PreparedWorkspaceTerminalLaunch,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Entity<PaneHost> {
-        let pane_host = cx.new(|cx| PaneHost::new(window_id, session_factory, window, cx));
+        let pane_host = cx.new(|cx| {
+            PaneHost::new_with_prepared_launch(
+                window_id,
+                session_factory,
+                prepared_launch,
+                window,
+                cx,
+            )
+        });
         debug_assert_eq!(pane_host.read(cx).window_id(), window_id);
         cx.subscribe_in(
             &pane_host,
@@ -519,10 +555,17 @@ impl WindowManager {
                 return;
             }
         }
+        let prepared_launch = match self.session_factory.prepare_child_launch() {
+            Ok(prepared_launch) => prepared_launch,
+            Err(error) => {
+                eprintln!("cannot create Window because {error}");
+                return;
+            }
+        };
         let previous_window = self.windows.active_window().clone();
         let session_factory = self.session_factory.clone();
         let result = self.windows.create_window(|window_id| {
-            Self::create_pane_host(window_id, session_factory, window, cx)
+            Self::create_pane_host(window_id, session_factory, prepared_launch, window, cx)
         });
         let window_id = match result {
             Ok(window_id) => window_id,
@@ -1275,7 +1318,10 @@ mod tests {
     use crate::terminal::testing::{
         RecordedSessionCommand, TestTerminalSessionFactory, TestTerminalSessionRecords,
     };
-    use crate::terminal::{ScreenSnapshot, SessionEvent, SessionExit, TerminalSessionFactory};
+    use crate::terminal::{
+        RemoteChannelUnavailable, RemoteTerminalChannelProvider, ScreenSnapshot, SessionEvent,
+        SessionExit, TerminalSessionFactory,
+    };
 
     fn window_manager(
         cx: &mut TestAppContext,
@@ -1314,7 +1360,7 @@ mod tests {
         cx.update(crate::ui::init);
         let records = TestTerminalSessionRecords::default();
         let destination = crate::domain::SshDestination::new("tester@remote".to_owned()).unwrap();
-        let command_context = Rc::new(
+        let command_context = Arc::new(
             SshCommandContext::new(
                 PathBuf::from("/private/config/spaceterm/ssh_config"),
                 destination.clone(),
@@ -1322,21 +1368,13 @@ mod tests {
             )
             .unwrap(),
         );
-        let session_factory = WorkspaceTerminalSessionFactory::new_remote(
-            Rc::new(TestTerminalSessionFactory::new(records.clone())),
-            crate::domain::ValidatedWorkspaceDirectory::new(
-                PathBuf::from("/missing/local/home-is-not-a-workspace"),
-                WorkspaceDirectoryIdentity::new(79, 83),
-            ),
-            crate::terminal::metadata::RemoteTerminalMetadataContext::new(
-                destination,
-                crate::domain::RemoteWorkspaceDirectory::new("~/project".to_owned()).unwrap(),
-            ),
-            "project on remote".to_owned(),
-            Rc::new(move || {
-                command_context.prepare_pane_channel(
+        let session_factory = remote_session_factory_with_provider(
+            records.clone(),
+            destination,
+            Arc::new(move || {
+                Ok(command_context.prepare_pane_channel(
                     ValidatedRemoteShellCommand::new("exec /bin/zsh -l".to_owned()).unwrap(),
-                )
+                ))
             }),
         );
         let (manager, cx) =
@@ -1347,6 +1385,26 @@ mod tests {
         });
         cx.run_until_parked();
         (manager, records, cx)
+    }
+
+    fn remote_session_factory_with_provider(
+        records: TestTerminalSessionRecords,
+        destination: crate::domain::SshDestination,
+        provider: Arc<dyn RemoteTerminalChannelProvider>,
+    ) -> WorkspaceTerminalSessionFactory {
+        WorkspaceTerminalSessionFactory::new_remote(
+            Rc::new(TestTerminalSessionFactory::new(records)),
+            crate::domain::ValidatedWorkspaceDirectory::new(
+                PathBuf::from("/missing/local/home-is-not-a-workspace"),
+                WorkspaceDirectoryIdentity::new(79, 83),
+            ),
+            crate::terminal::metadata::RemoteTerminalMetadataContext::new(
+                destination,
+                crate::domain::RemoteWorkspaceDirectory::new("~/project".to_owned()).unwrap(),
+            ),
+            "project on remote".to_owned(),
+            provider,
+        )
     }
 
     fn window_manager_with_operating_system_window_drag_platform(
@@ -1375,6 +1433,7 @@ mod tests {
                 window,
                 cx,
             )
+            .unwrap()
         });
         cx.update(|window, cx| {
             window.activate_window();
@@ -1566,6 +1625,55 @@ mod tests {
                     && plan.remote_directory().as_str() == "~/project"
             })
         }));
+    }
+
+    #[gpui::test]
+    fn remote_window_creation_should_leave_hierarchy_unchanged_when_channel_reservation_fails(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(crate::ui::init);
+        let records = TestTerminalSessionRecords::default();
+        let destination = crate::domain::SshDestination::new("tester@remote".to_owned()).unwrap();
+        let command_context = Arc::new(
+            SshCommandContext::new(
+                PathBuf::from("/private/config/spaceterm/ssh_config"),
+                destination.clone(),
+                PathBuf::from("/private/runtime/spaceterm/master.sock"),
+            )
+            .unwrap(),
+        );
+        let preparations = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let provider = {
+            let preparations = Arc::clone(&preparations);
+            Arc::new(move || {
+                if preparations.fetch_add(1, std::sync::atomic::Ordering::AcqRel) == 0 {
+                    Ok(command_context.prepare_pane_channel(
+                        ValidatedRemoteShellCommand::new("exec /bin/zsh -l".to_owned()).unwrap(),
+                    ))
+                } else {
+                    Err(RemoteChannelUnavailable)
+                }
+            })
+        };
+        let session_factory =
+            remote_session_factory_with_provider(records.clone(), destination, provider);
+        let (manager, cx) =
+            cx.add_window_view(|window, cx| WindowManager::new(session_factory, window, cx));
+        cx.run_until_parked();
+
+        cx.update(|window, cx| {
+            manager.update(cx, |manager, cx| manager.create_window(window, cx));
+        });
+        cx.run_until_parked();
+
+        assert_eq!(
+            manager.read_with(cx, |manager, _| {
+                (manager.windows.len(), manager.windows.active_window_id())
+            }),
+            (1, WindowId::new(1))
+        );
+        assert_eq!(records.starts().len(), 1);
+        assert_eq!(preparations.load(std::sync::atomic::Ordering::Acquire), 2);
     }
 
     #[gpui::test]

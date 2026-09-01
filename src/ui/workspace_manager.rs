@@ -201,7 +201,7 @@ impl WorkspaceManager {
             default_directory,
             DirectoryAuthority::initial(),
             |workspace_id, workspace_root| {
-                Self::create_window_manager(
+                Self::create_local_window_manager(
                     workspace_id,
                     WorkspaceTerminalSessionFactory::new_local(
                         Rc::clone(&session_factory),
@@ -303,7 +303,7 @@ impl WorkspaceManager {
         }
     }
 
-    fn create_window_manager(
+    fn create_local_window_manager(
         workspace_id: WorkspaceId,
         session_factory: WorkspaceTerminalSessionFactory,
         sidebar_visible: bool,
@@ -312,9 +312,34 @@ impl WorkspaceManager {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Entity<WindowManager> {
+        match Self::try_create_window_manager(
+            workspace_id,
+            session_factory,
+            sidebar_visible,
+            sidebar_width,
+            operating_system_window_drag_platform,
+            window,
+            cx,
+        ) {
+            Ok(manager) => manager,
+            Err(error) => unreachable!("Local initial launch preparation is infallible: {error}"),
+        }
+    }
+
+    fn try_create_window_manager(
+        workspace_id: WorkspaceId,
+        session_factory: WorkspaceTerminalSessionFactory,
+        sidebar_visible: bool,
+        sidebar_width: Pixels,
+        operating_system_window_drag_platform: Rc<dyn OperatingSystemWindowDragPlatform>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<Entity<WindowManager>, crate::terminal::RemoteChannelUnavailable> {
+        let prepared_launch = session_factory.prepare_child_launch()?;
         let manager = cx.new(|cx| {
-            let mut manager = WindowManager::new_with_operating_system_window_drag_platform(
+            let mut manager = WindowManager::new_with_prepared_initial_launch(
                 session_factory,
+                prepared_launch,
                 operating_system_window_drag_platform,
                 window,
                 cx,
@@ -395,7 +420,7 @@ impl WorkspaceManager {
             },
         )
         .detach();
-        manager
+        Ok(manager)
     }
 
     fn handle_directory_report(
@@ -941,7 +966,7 @@ impl WorkspaceManager {
             directory,
             DirectoryAuthority::initial(),
             |workspace_id, workspace_root| {
-                Self::create_window_manager(
+                Self::create_local_window_manager(
                     workspace_id,
                     WorkspaceTerminalSessionFactory::new_local(
                         session_factory,
@@ -1175,7 +1200,7 @@ impl WorkspaceManager {
         let result = self.workspaces.create_local_project_workspace(
             directory,
             |workspace_id, project_root| {
-                Self::create_window_manager(
+                Self::create_local_window_manager(
                     workspace_id,
                     WorkspaceTerminalSessionFactory::new_local(
                         session_factory,
@@ -1338,7 +1363,7 @@ impl WorkspaceManager {
             replacement,
             DirectoryAuthority::initial(),
             |replacement_workspace_id, workspace_root| {
-                Self::create_window_manager(
+                Self::create_local_window_manager(
                     replacement_workspace_id,
                     WorkspaceTerminalSessionFactory::new_local(
                         session_factory,

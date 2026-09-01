@@ -1,5 +1,8 @@
 use std::path::PathBuf;
 use std::rc::Rc;
+use std::sync::Arc;
+
+use thiserror::Error;
 
 use super::geometry::TerminalGeometry;
 use super::metadata::{RemoteTerminalMetadataContext, TerminalLocalFileCapabilities};
@@ -22,7 +25,49 @@ struct RemoteWorkspaceTerminalLaunchContext {
     local_home: ValidatedWorkspaceDirectory,
     metadata_context: RemoteTerminalMetadataContext,
     fallback_title: String,
-    prepare_pane_channel: Rc<dyn Fn() -> PreparedSshPaneChannelCommand>,
+    channel_provider: Arc<dyn RemoteTerminalChannelProvider>,
+}
+
+#[derive(Clone, Copy, Debug, Error, Eq, PartialEq)]
+#[error("the remote Terminal Session channel is unavailable")]
+pub(crate) struct RemoteChannelUnavailable;
+
+pub(crate) trait RemoteTerminalChannelProvider: Send + Sync {
+    fn is_ready(&self) -> bool;
+
+    fn prepare(&self) -> Result<PreparedSshPaneChannelCommand, RemoteChannelUnavailable>;
+}
+
+#[cfg(test)]
+impl<F> RemoteTerminalChannelProvider for F
+where
+    F: Fn() -> Result<PreparedSshPaneChannelCommand, RemoteChannelUnavailable> + Send + Sync,
+{
+    fn is_ready(&self) -> bool {
+        true
+    }
+
+    fn prepare(&self) -> Result<PreparedSshPaneChannelCommand, RemoteChannelUnavailable> {
+        self()
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct PreparedWorkspaceTerminalLaunch {
+    launch_plan: TerminalLaunchPlan,
+}
+
+#[cfg(test)]
+impl PreparedWorkspaceTerminalLaunch {
+    fn take_remote_channel(
+        &self,
+    ) -> Result<crate::ssh::command::SshCommandSpec, crate::ssh::command::PreparedSshPaneChannelError>
+    {
+        let TerminalLaunchPlan::Remote(plan) = &self.launch_plan else {
+            panic!("the test launch must be remote")
+        };
+        plan.take_pane_channel()
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -55,7 +100,7 @@ impl WorkspaceTerminalSessionFactory {
         local_home: ValidatedWorkspaceDirectory,
         metadata_context: RemoteTerminalMetadataContext,
         fallback_title: String,
-        prepare_pane_channel: Rc<dyn Fn() -> PreparedSshPaneChannelCommand>,
+        channel_provider: Arc<dyn RemoteTerminalChannelProvider>,
     ) -> Self {
         Self {
             session_factory,
@@ -64,29 +109,41 @@ impl WorkspaceTerminalSessionFactory {
                     local_home,
                     metadata_context,
                     fallback_title,
-                    prepare_pane_channel,
+                    channel_provider,
                 },
             ),
         }
     }
 
-    pub(crate) fn start(
+    pub(crate) fn prepare_child_launch(
         &self,
-        geometry: TerminalGeometry,
-    ) -> Result<StartedTerminalSession, SessionError> {
+    ) -> Result<PreparedWorkspaceTerminalLaunch, RemoteChannelUnavailable> {
         let launch_plan = match &self.launch_context {
             WorkspaceTerminalLaunchContext::Local(plan) => TerminalLaunchPlan::Local(plan.clone()),
             WorkspaceTerminalLaunchContext::Remote(context) => {
+                if !context.channel_provider.is_ready() {
+                    return Err(RemoteChannelUnavailable);
+                }
+                let pane_channel = context.channel_provider.prepare()?;
                 TerminalLaunchPlan::Remote(RemoteTerminalLaunchPlan::new(
                     context.local_home.clone(),
                     context.metadata_context.destination().clone(),
                     context.metadata_context.initial_directory().clone(),
                     context.fallback_title.clone(),
-                    (context.prepare_pane_channel)(),
+                    pane_channel,
                 ))
             }
         };
-        self.session_factory.start(geometry, launch_plan)
+        Ok(PreparedWorkspaceTerminalLaunch { launch_plan })
+    }
+
+    pub(crate) fn start(
+        &self,
+        geometry: TerminalGeometry,
+        prepared_launch: PreparedWorkspaceTerminalLaunch,
+    ) -> Result<StartedTerminalSession, SessionError> {
+        self.session_factory
+            .start(geometry, prepared_launch.launch_plan)
     }
 
     pub(crate) fn fallback_title(&self) -> String {
@@ -146,7 +203,9 @@ impl WorkspaceTerminalSessionFactory {
 
 #[cfg(test)]
 mod tests {
-    use std::cell::Cell;
+    use std::collections::VecDeque;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
 
     use super::*;
     use crate::domain::{RemoteWorkspaceDirectory, SshDestination};
@@ -155,6 +214,72 @@ mod tests {
         BackingScale, CellGridSize, LogicalCellSize, TerminalGeometry,
     };
     use crate::terminal::testing::{TestTerminalSessionFactory, TestTerminalSessionRecords};
+
+    struct TestRemoteChannelProvider {
+        ready: AtomicBool,
+        preparations: AtomicUsize,
+        results: Mutex<VecDeque<Result<PreparedSshPaneChannelCommand, RemoteChannelUnavailable>>>,
+    }
+
+    impl TestRemoteChannelProvider {
+        fn new(
+            ready: bool,
+            results: impl IntoIterator<
+                Item = Result<PreparedSshPaneChannelCommand, RemoteChannelUnavailable>,
+            >,
+        ) -> Self {
+            Self {
+                ready: AtomicBool::new(ready),
+                preparations: AtomicUsize::new(0),
+                results: Mutex::new(results.into_iter().collect()),
+            }
+        }
+    }
+
+    impl RemoteTerminalChannelProvider for TestRemoteChannelProvider {
+        fn is_ready(&self) -> bool {
+            self.ready.load(Ordering::Acquire)
+        }
+
+        fn prepare(&self) -> Result<PreparedSshPaneChannelCommand, RemoteChannelUnavailable> {
+            self.preparations.fetch_add(1, Ordering::AcqRel);
+            self.results
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or(Err(RemoteChannelUnavailable))
+        }
+    }
+
+    fn prepared_channel(
+        destination: &SshDestination,
+        command: &str,
+    ) -> PreparedSshPaneChannelCommand {
+        SshCommandContext::new(
+            PathBuf::from("/private/config/spaceterm/ssh_config"),
+            destination.clone(),
+            PathBuf::from("/private/runtime/spaceterm/master.sock"),
+        )
+        .unwrap()
+        .prepare_pane_channel(ValidatedRemoteShellCommand::new(command.to_owned()).unwrap())
+    }
+
+    fn remote_factory(
+        records: TestTerminalSessionRecords,
+        provider: Arc<dyn RemoteTerminalChannelProvider>,
+    ) -> WorkspaceTerminalSessionFactory {
+        let destination = SshDestination::new("tester@remote".to_owned()).unwrap();
+        let remote_directory = RemoteWorkspaceDirectory::new("~/project".to_owned()).unwrap();
+        WorkspaceTerminalSessionFactory::new_remote(
+            Rc::new(TestTerminalSessionFactory::new(records)),
+            crate::terminal::testing::test_workspace_directory(PathBuf::from(
+                "/local/home/used-only-as-process-cwd",
+            )),
+            RemoteTerminalMetadataContext::new(destination, remote_directory),
+            "project on remote".to_owned(),
+            provider,
+        )
+    }
 
     #[test]
     fn local_factory_should_forward_the_validated_launch_plan() {
@@ -173,7 +298,8 @@ mod tests {
             BackingScale::ONE,
         );
 
-        let _started = factory.start(geometry).unwrap();
+        let launch = factory.prepare_child_launch().unwrap();
+        let _started = factory.start(geometry, launch).unwrap();
 
         let starts = records.starts();
         assert!(matches!(
@@ -191,50 +317,28 @@ mod tests {
     #[test]
     fn remote_factory_should_preserve_context_and_prepare_one_channel_per_child() {
         let records = TestTerminalSessionRecords::default();
-        let session_factory: Rc<dyn TerminalSessionFactory> =
-            Rc::new(TestTerminalSessionFactory::new(records.clone()));
         let destination = SshDestination::new("tester@remote".to_owned()).unwrap();
         let remote_directory = RemoteWorkspaceDirectory::new("~/project".to_owned()).unwrap();
-        let metadata_context =
-            RemoteTerminalMetadataContext::new(destination.clone(), remote_directory.clone());
-        let command_context = Rc::new(
-            SshCommandContext::new(
-                PathBuf::from("/private/config/spaceterm/ssh_config"),
-                destination.clone(),
-                PathBuf::from("/private/runtime/spaceterm/master.sock"),
-            )
-            .unwrap(),
-        );
-        let preparations = Rc::new(Cell::new(0));
-        let prepare_pane_channel = {
-            let command_context = Rc::clone(&command_context);
-            let preparations = Rc::clone(&preparations);
-            Rc::new(move || {
-                preparations.set(preparations.get() + 1);
-                command_context.prepare_pane_channel(
-                    ValidatedRemoteShellCommand::new("exec /bin/zsh -l".to_owned()).unwrap(),
-                )
-            })
-        };
-        let factory = WorkspaceTerminalSessionFactory::new_remote(
-            session_factory,
-            crate::terminal::testing::test_workspace_directory(PathBuf::from(
-                "/local/home/used-only-as-process-cwd",
-            )),
-            metadata_context,
-            "project on remote".to_owned(),
-            prepare_pane_channel,
-        );
+        let provider = Arc::new(TestRemoteChannelProvider::new(
+            true,
+            [
+                Ok(prepared_channel(&destination, "exec /bin/zsh -l")),
+                Ok(prepared_channel(&destination, "exec /bin/zsh -l")),
+            ],
+        ));
+        let factory = remote_factory(records.clone(), provider.clone());
         let geometry = TerminalGeometry::from_grid(
             CellGridSize::new(80, 24),
             LogicalCellSize::new(8.0, 20.0),
             BackingScale::ONE,
         );
 
-        let _first = factory.start(geometry).unwrap();
-        let _second = factory.start(geometry).unwrap();
+        let first = factory.prepare_child_launch().unwrap();
+        let second = factory.prepare_child_launch().unwrap();
+        let _first = factory.start(geometry, first).unwrap();
+        let _second = factory.start(geometry, second).unwrap();
 
-        assert_eq!(preparations.get(), 2);
+        assert_eq!(provider.preparations.load(Ordering::Acquire), 2);
         assert_eq!(factory.local_working_directory(), None);
         assert_eq!(
             factory.validate_child_launch().unwrap(),
@@ -250,5 +354,63 @@ mod tests {
                 plan.destination() == &destination && plan.remote_directory() == &remote_directory
             })
         }));
+    }
+
+    #[test]
+    fn remote_factory_should_reject_launch_when_provider_is_not_ready() {
+        let records = TestTerminalSessionRecords::default();
+        let provider = Arc::new(TestRemoteChannelProvider::new(false, []));
+        let factory = remote_factory(records.clone(), provider.clone());
+
+        let error = factory.prepare_child_launch().unwrap_err();
+
+        assert_eq!(error, RemoteChannelUnavailable);
+        assert_eq!(provider.preparations.load(Ordering::Acquire), 0);
+        assert!(records.starts().is_empty());
+    }
+
+    #[test]
+    fn remote_factory_should_propagate_master_death_race_during_reservation() {
+        let records = TestTerminalSessionRecords::default();
+        let provider = Arc::new(TestRemoteChannelProvider::new(
+            true,
+            [Err(RemoteChannelUnavailable)],
+        ));
+        let factory = remote_factory(records.clone(), provider.clone());
+
+        let error = factory.prepare_child_launch().unwrap_err();
+
+        assert_eq!(error, RemoteChannelUnavailable);
+        assert_eq!(provider.preparations.load(Ordering::Acquire), 1);
+        assert!(records.starts().is_empty());
+    }
+
+    #[test]
+    fn prepared_remote_launches_should_be_distinct_and_single_use() {
+        let records = TestTerminalSessionRecords::default();
+        let destination = SshDestination::new("tester@remote".to_owned()).unwrap();
+        let provider = Arc::new(TestRemoteChannelProvider::new(
+            true,
+            [
+                Ok(prepared_channel(&destination, "exec first")),
+                Ok(prepared_channel(&destination, "exec second")),
+            ],
+        ));
+        let factory = remote_factory(records, provider);
+        let first = factory.prepare_child_launch().unwrap();
+        let second = factory.prepare_child_launch().unwrap();
+
+        let first_command = first.take_remote_channel().unwrap();
+        let second_command = second.take_remote_channel().unwrap();
+        let error = match first.take_remote_channel() {
+            Ok(_) => panic!("a prepared remote launch must be single-use"),
+            Err(error) => error,
+        };
+
+        assert_ne!(first_command.arguments(), second_command.arguments());
+        assert!(matches!(
+            error,
+            crate::ssh::command::PreparedSshPaneChannelError::AlreadyConsumed
+        ));
     }
 }

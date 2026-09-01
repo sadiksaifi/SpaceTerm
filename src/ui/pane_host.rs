@@ -14,8 +14,8 @@ use crate::domain::{
     SplitId, TerminalWindow, WindowId, WorkspaceDirectoryIdentity, WorkspaceId, ZoomState,
 };
 use crate::terminal::{
-    NativeServiceOrigin, NativeServiceStatus, SelectionCopy, WorkspaceChildLaunchValidation,
-    WorkspaceTerminalSessionFactory,
+    NativeServiceOrigin, NativeServiceStatus, PreparedWorkspaceTerminalLaunch, SelectionCopy,
+    WorkspaceChildLaunchValidation, WorkspaceTerminalSessionFactory,
 };
 use crate::theme::{ACTIVE_THEME, Color};
 use gpui::prelude::*;
@@ -88,9 +88,24 @@ pub(crate) struct PaneHost {
 }
 
 impl PaneHost {
+    #[cfg(test)]
     pub(crate) fn new(
         window_id: WindowId,
         session_factory: WorkspaceTerminalSessionFactory,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let prepared_launch = match session_factory.prepare_child_launch() {
+            Ok(prepared_launch) => prepared_launch,
+            Err(error) => panic!("test PaneHost channel preparation failed: {error}"),
+        };
+        Self::new_with_prepared_launch(window_id, session_factory, prepared_launch, window, cx)
+    }
+
+    pub(crate) fn new_with_prepared_launch(
+        window_id: WindowId,
+        session_factory: WorkspaceTerminalSessionFactory,
+        prepared_launch: PreparedWorkspaceTerminalLaunch,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -101,7 +116,13 @@ impl PaneHost {
             }
         };
         let terminal_window = TerminalWindow::new(window_id, minimum_pane_size, |pane_id| {
-            Self::create_terminal(pane_id, session_factory.clone(), window, cx)
+            Self::create_terminal(
+                pane_id,
+                session_factory.clone(),
+                prepared_launch,
+                window,
+                cx,
+            )
         });
         let initial_pane_id = terminal_window.focused_pane_id();
         let Some(initial_terminal) = terminal_window.terminal(initial_pane_id) else {
@@ -129,10 +150,13 @@ impl PaneHost {
     fn create_terminal(
         pane_id: PaneId,
         session_factory: WorkspaceTerminalSessionFactory,
+        prepared_launch: PreparedWorkspaceTerminalLaunch,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Entity<TerminalPane> {
-        let terminal = cx.new(|cx| TerminalPane::new(session_factory, window, cx));
+        let terminal = cx.new(|cx| {
+            TerminalPane::new_with_prepared_launch(session_factory, prepared_launch, window, cx)
+        });
         cx.subscribe_in(
             &terminal,
             window,
@@ -442,13 +466,22 @@ impl PaneHost {
                 return;
             }
         }
+        let prepared_launch = match self.session_factory.prepare_child_launch() {
+            Ok(prepared_launch) => prepared_launch,
+            Err(error) => {
+                eprintln!("cannot split Pane because {error}");
+                return;
+            }
+        };
         let session_factory = self.session_factory.clone();
         let result = self.terminal_window.split_pane(
             target_pane_id,
             axis,
             target_size,
             DIVIDER_SIZE,
-            |new_pane_id| Self::create_terminal(new_pane_id, session_factory, window, cx),
+            |new_pane_id| {
+                Self::create_terminal(new_pane_id, session_factory, prepared_launch, window, cx)
+            },
         );
 
         match result {
@@ -1230,7 +1263,8 @@ mod tests {
         RecordedSessionCommand, TestTerminalSessionFactory, TestTerminalSessionRecords,
     };
     use crate::terminal::{
-        ScreenSnapshot, ScrollbarSnapshot, SessionEvent, SessionExit, TerminalSessionFactory,
+        RemoteChannelUnavailable, RemoteTerminalChannelProvider, ScreenSnapshot, ScrollbarSnapshot,
+        SessionEvent, SessionExit, TerminalSessionFactory,
     };
 
     fn test_session_factory() -> WorkspaceTerminalSessionFactory {
@@ -1247,7 +1281,7 @@ mod tests {
         records: TestTerminalSessionRecords,
     ) -> WorkspaceTerminalSessionFactory {
         let destination = crate::domain::SshDestination::new("tester@remote".to_owned()).unwrap();
-        let command_context = Rc::new(
+        let command_context = Arc::new(
             SshCommandContext::new(
                 PathBuf::from("/private/config/spaceterm/ssh_config"),
                 destination.clone(),
@@ -1255,6 +1289,22 @@ mod tests {
             )
             .unwrap(),
         );
+        remote_test_session_factory_with_provider(
+            records,
+            destination,
+            Arc::new(move || {
+                Ok(command_context.prepare_pane_channel(
+                    ValidatedRemoteShellCommand::new("exec /bin/zsh -l".to_owned()).unwrap(),
+                ))
+            }),
+        )
+    }
+
+    fn remote_test_session_factory_with_provider(
+        records: TestTerminalSessionRecords,
+        destination: crate::domain::SshDestination,
+        provider: Arc<dyn RemoteTerminalChannelProvider>,
+    ) -> WorkspaceTerminalSessionFactory {
         WorkspaceTerminalSessionFactory::new_remote(
             Rc::new(TestTerminalSessionFactory::new(records)),
             crate::domain::ValidatedWorkspaceDirectory::new(
@@ -1266,11 +1316,7 @@ mod tests {
                 crate::domain::RemoteWorkspaceDirectory::new("~/project".to_owned()).unwrap(),
             ),
             "project on remote".to_owned(),
-            Rc::new(move || {
-                command_context.prepare_pane_channel(
-                    ValidatedRemoteShellCommand::new("exec /bin/zsh -l".to_owned()).unwrap(),
-                )
-            }),
+            provider,
         )
     }
 
@@ -1310,6 +1356,51 @@ mod tests {
                     && plan.remote_directory().as_str() == "~/project"
             })
         }));
+    }
+
+    #[gpui::test]
+    fn remote_split_should_leave_hierarchy_unchanged_when_channel_reservation_races_master_death(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(crate::ui::init);
+        let records = TestTerminalSessionRecords::default();
+        let destination = crate::domain::SshDestination::new("tester@remote".to_owned()).unwrap();
+        let command_context = Arc::new(
+            SshCommandContext::new(
+                PathBuf::from("/private/config/spaceterm/ssh_config"),
+                destination.clone(),
+                PathBuf::from("/private/runtime/spaceterm/master.sock"),
+            )
+            .unwrap(),
+        );
+        let preparations = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let provider = {
+            let preparations = Arc::clone(&preparations);
+            Arc::new(move || {
+                if preparations.fetch_add(1, std::sync::atomic::Ordering::AcqRel) == 0 {
+                    Ok(command_context.prepare_pane_channel(
+                        ValidatedRemoteShellCommand::new("exec /bin/zsh -l".to_owned()).unwrap(),
+                    ))
+                } else {
+                    Err(RemoteChannelUnavailable)
+                }
+            })
+        };
+        let session_factory =
+            remote_test_session_factory_with_provider(records.clone(), destination, provider);
+        let (host, cx) = cx.add_window_view(|window, cx| {
+            PaneHost::new(WindowId::new(1), session_factory, window, cx)
+        });
+        cx.run_until_parked();
+
+        split_test_pane(&host, PaneId::new(1), SplitAxis::Horizontal, cx);
+
+        assert_eq!(
+            host.read_with(cx, |host, _| (host.pane_count(), host.focused_pane_id())),
+            (1, PaneId::new(1))
+        );
+        assert_eq!(records.starts().len(), 1);
+        assert_eq!(preparations.load(std::sync::atomic::Ordering::Acquire), 2);
     }
 
     fn four_pane_host(cx: &mut TestAppContext) -> (Entity<PaneHost>, &mut VisualTestContext) {
