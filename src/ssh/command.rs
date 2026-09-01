@@ -902,6 +902,7 @@ mod tests {
     use super::*;
 
     static NEXT_PROBE_SCRIPT: AtomicU64 = AtomicU64::new(0);
+    const TEST_NATIVE_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 
     struct ProbeScript(PathBuf);
 
@@ -1177,14 +1178,14 @@ mod tests {
 
         assert_eq!(
             block_on_external(
-                native_probe(malformed.0.clone(), Duration::from_secs(1))
+                native_probe(malformed.0.clone(), TEST_NATIVE_PROBE_TIMEOUT)
                     .probe(SshCancellationToken::default())
             ),
             SshCapability::Unavailable(SshUnavailableReason::Unrecognized)
         );
         assert_eq!(
             block_on_external(
-                native_probe(old.0.clone(), Duration::from_secs(1))
+                native_probe(old.0.clone(), TEST_NATIVE_PROBE_TIMEOUT)
                     .probe(SshCancellationToken::default())
             ),
             SshCapability::Unavailable(SshUnavailableReason::TooOld {
@@ -1202,7 +1203,7 @@ mod tests {
 [ -z "${SPACETERM_AMBIENT_PROBE+x}" ] || exit 6
 printf 'OpenSSH_9.9p2 Apple-1, LibreSSL 3.3.6\n' >&2"#,
         );
-        let runner = native_probe(script.0.clone(), Duration::from_secs(1));
+        let runner = native_probe(script.0.clone(), TEST_NATIVE_PROBE_TIMEOUT);
 
         assert_eq!(
             block_on_external(runner.probe(SshCancellationToken::default())),

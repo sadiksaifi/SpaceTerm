@@ -1520,13 +1520,16 @@ done
         let fake_bin = test_root.join("bin");
         let fake_find = fake_bin.join("find");
         let pid_file = test_root.join("enumerator-pid");
+        let ready_file = test_root.join("enumerator-ready");
         let stopped_file = test_root.join("enumerator-stopped");
+        let _ = fs::remove_dir_all(&test_root);
         fs::create_dir_all(&fake_bin).unwrap();
         fs::write(
             &fake_find,
             br#"#!/bin/sh
 printf '%s\n' "$$" > "$SPACETERM_ENUMERATOR_PID"
 trap 'printf stopped > "$SPACETERM_ENUMERATOR_STOPPED"; exit 0' TERM
+printf ready > "$SPACETERM_ENUMERATOR_READY"
 while :; do /bin/sleep 1; done
 "#,
         )
@@ -1539,6 +1542,7 @@ while :; do /bin/sleep 1; done
             .env("PATH", format!("{}:/usr/bin:/bin", fake_bin.display()))
             .env("TMPDIR", &test_root)
             .env("SPACETERM_ENUMERATOR_PID", &pid_file)
+            .env("SPACETERM_ENUMERATOR_READY", &ready_file)
             .env("SPACETERM_ENUMERATOR_STOPPED", &stopped_file)
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
@@ -1546,12 +1550,11 @@ while :; do /bin/sleep 1; done
             .spawn()
             .unwrap();
         child.stdin.take().unwrap().write_all(&script).unwrap();
-        for _ in 0..100 {
-            if pid_file.exists() {
-                break;
-            }
+        let readiness_deadline = Instant::now() + Duration::from_secs(10);
+        while !ready_file.exists() && Instant::now() < readiness_deadline {
             thread::sleep(PROCESS_POLL_INTERVAL);
         }
+        assert!(ready_file.exists(), "fake enumerator did not become ready");
         let enumerator: libc::pid_t = fs::read_to_string(&pid_file)
             .unwrap()
             .trim()
