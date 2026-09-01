@@ -7,6 +7,7 @@ mod native_remote_workspace_flow_backend;
 mod new_workspace_panel;
 mod pane_action_menu;
 mod pane_host;
+mod remote_child_launch;
 mod remote_workspace_flow;
 pub(crate) mod remote_workspace_picker;
 mod render_lifecycle;
@@ -35,6 +36,7 @@ pub(crate) use native_remote_workspace_flow_backend::NativeRemoteWorkspaceFlowBa
 pub(crate) use pane_host::{
     PaneHost, PaneHostEvent, PreparedPaneHostRemoteRestart, RemotePaneHostLifecycleError,
 };
+pub(crate) use remote_child_launch::RemoteChildLaunchUnavailable;
 #[cfg(test)]
 pub(crate) use render_lifecycle::{RenderLifecycle, ScaleChange, SurfaceVisibility};
 #[cfg(test)]

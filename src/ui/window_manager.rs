@@ -10,8 +10,9 @@ use super::terminal_focus::TerminalFocusBlocker;
 use super::{
     ActivateWindow1, ActivateWindow2, ActivateWindow3, ActivateWindow4, ActivateWindow5,
     ActivateWindow6, ActivateWindow7, ActivateWindow8, ActivateWindow9, CloseWindow, CreateWindow,
-    PaneHost, PaneHostEvent, PreparedPaneHostRemoteRestart, RemotePaneHostLifecycleError,
-    TERMINAL_KEY_CONTEXT, TOP_CHROME_HEIGHT, WORKSPACE_SIDEBAR_DEFAULT_WIDTH,
+    PaneHost, PaneHostEvent, PreparedPaneHostRemoteRestart, RemoteChildLaunchUnavailable,
+    RemotePaneHostLifecycleError, TERMINAL_KEY_CONTEXT, TOP_CHROME_HEIGHT,
+    WORKSPACE_SIDEBAR_DEFAULT_WIDTH,
 };
 
 #[derive(Debug, Error)]
@@ -263,6 +264,13 @@ impl WindowManager {
                         reason: reason.clone(),
                     });
                 }
+            },
+        )
+        .detach();
+        cx.subscribe(
+            &pane_host,
+            |_, _, event: &RemoteChildLaunchUnavailable, cx| {
+                cx.emit(*event);
             },
         )
         .detach();
@@ -697,7 +705,7 @@ impl WindowManager {
 
     pub(crate) fn create_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.remote_disconnected_generation.is_some() {
-            eprintln!("cannot create Window while the remote Workspace is disconnected");
+            cx.emit(RemoteChildLaunchUnavailable::ConnectionUnavailable);
             return;
         }
         self.window_menu = None;
@@ -739,19 +747,22 @@ impl WindowManager {
             cx.spawn_in(window, async move |manager, cx| {
                 let revalidation = revalidation.await;
                 let _ = manager.update_in(cx, |manager, window, cx| {
-                    if manager.remote_disconnected_generation.is_some()
-                        || manager.child_launch_generation != child_launch_generation
-                    {
+                    if manager.remote_disconnected_generation.is_some() {
+                        cx.emit(RemoteChildLaunchUnavailable::Cancelled);
+                        return;
+                    }
+                    if manager.child_launch_generation != child_launch_generation {
+                        cx.emit(RemoteChildLaunchUnavailable::Stale);
                         return;
                     }
                     if let Err(error) = revalidation {
-                        eprintln!("cannot create Window because {error}");
+                        cx.emit(RemoteChildLaunchUnavailable::from(error));
                         return;
                     }
                     let prepared_launch = match session_factory.prepare_child_launch() {
                         Ok(prepared_launch) => prepared_launch,
-                        Err(error) => {
-                            eprintln!("cannot create Window because {error}");
+                        Err(_) => {
+                            cx.emit(RemoteChildLaunchUnavailable::ConnectionUnavailable);
                             return;
                         }
                     };
@@ -763,8 +774,8 @@ impl WindowManager {
         }
         let prepared_launch = match self.session_factory.prepare_child_launch() {
             Ok(prepared_launch) => prepared_launch,
-            Err(error) => {
-                eprintln!("cannot create Window because {error}");
+            Err(_) => {
+                cx.emit(RemoteChildLaunchUnavailable::ConnectionUnavailable);
                 return;
             }
         };
@@ -1509,6 +1520,7 @@ impl Render for WindowManager {
 }
 
 impl EventEmitter<WindowManagerEvent> for WindowManager {}
+impl EventEmitter<RemoteChildLaunchUnavailable> for WindowManager {}
 
 fn gpui_color(color: Color) -> gpui::Rgba {
     rgba(color.rgba_hex())
@@ -1539,6 +1551,17 @@ mod tests {
         SessionExit, TerminalSessionFactory,
     };
     use crate::ui::TogglePaneZoom;
+
+    struct RemoteLaunchEventHarness {
+        manager: Entity<WindowManager>,
+        events: Rc<RefCell<Vec<RemoteChildLaunchUnavailable>>>,
+    }
+
+    impl Render for RemoteLaunchEventHarness {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            self.manager.clone()
+        }
+    }
 
     struct SequencedRemoteChannelProvider {
         ready: AtomicBool,
@@ -1653,6 +1676,44 @@ mod tests {
         });
         cx.run_until_parked();
         (manager, records, cx)
+    }
+
+    fn remote_window_manager_with_provider_and_events(
+        cx: &mut TestAppContext,
+        provider: Arc<SequencedRemoteChannelProvider>,
+    ) -> (
+        Entity<WindowManager>,
+        TestTerminalSessionRecords,
+        Rc<RefCell<Vec<RemoteChildLaunchUnavailable>>>,
+        &mut VisualTestContext,
+    ) {
+        cx.update(crate::ui::init);
+        let records = TestTerminalSessionRecords::default();
+        let destination = crate::domain::SshDestination::new("tester@remote".to_owned()).unwrap();
+        let session_factory =
+            remote_session_factory_with_provider(records.clone(), destination, provider);
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let recorded_events = Rc::clone(&events);
+        let (harness, cx) = cx.add_window_view(move |window, cx| {
+            let manager = cx.new(|cx| WindowManager::new(session_factory, window, cx));
+            cx.subscribe(
+                &manager,
+                move |_, _, event: &RemoteChildLaunchUnavailable, _| {
+                    recorded_events.borrow_mut().push(*event);
+                },
+            )
+            .detach();
+            RemoteLaunchEventHarness { manager, events }
+        });
+        let (manager, events) = harness.read_with(cx, |harness, _| {
+            (harness.manager.clone(), Rc::clone(&harness.events))
+        });
+        cx.update(|window, cx| {
+            window.activate_window();
+            manager.update(cx, |manager, cx| manager.focus(window, cx));
+        });
+        cx.run_until_parked();
+        (manager, records, events, cx)
     }
 
     fn hierarchy_identity(
@@ -2970,6 +3031,105 @@ mod tests {
         assert_eq!(records.starts().len(), 2);
         assert_eq!(provider.preparation_count(), 2);
         assert_eq!(provider.revalidation_count(), 2);
+    }
+
+    #[gpui::test]
+    fn remote_create_window_should_emit_each_typed_revalidation_failure_without_mutation(
+        cx: &mut TestAppContext,
+    ) {
+        let destination = crate::domain::SshDestination::new("tester@remote".to_owned()).unwrap();
+        let provider = Arc::new(SequencedRemoteChannelProvider::new(destination));
+        let (manager, records, events, cx) =
+            remote_window_manager_with_provider_and_events(cx, Arc::clone(&provider));
+        let before = manager.read_with(cx, hierarchy_identity);
+
+        for error in [
+            RemoteChannelRevalidationError::ConnectionUnavailable,
+            RemoteChannelRevalidationError::DirectoryUnavailable,
+            RemoteChannelRevalidationError::IdentityChanged,
+        ] {
+            provider.fail_revalidation_with(Some(error));
+            cx.update(|window, cx| {
+                manager.update(cx, |manager, cx| manager.create_window(window, cx));
+            });
+            cx.run_until_parked();
+        }
+
+        assert_eq!(
+            events.borrow().as_slice(),
+            [
+                RemoteChildLaunchUnavailable::ConnectionUnavailable,
+                RemoteChildLaunchUnavailable::DirectoryUnavailable,
+                RemoteChildLaunchUnavailable::IdentityChanged,
+            ]
+        );
+        assert_eq!(manager.read_with(cx, hierarchy_identity), before);
+        assert_eq!(records.starts().len(), 1);
+        assert_eq!(provider.preparation_count(), 1);
+    }
+
+    #[gpui::test]
+    fn remote_create_window_should_report_consumed_grant_supersession_and_cancellation_once(
+        cx: &mut TestAppContext,
+    ) {
+        let destination = crate::domain::SshDestination::new("tester@remote".to_owned()).unwrap();
+        let provider = Arc::new(SequencedRemoteChannelProvider::new(destination));
+        let (manager, records, events, cx) =
+            remote_window_manager_with_provider_and_events(cx, Arc::clone(&provider));
+        let before = manager.read_with(cx, hierarchy_identity);
+
+        provider.invalidate_next_grant();
+        cx.update(|window, cx| {
+            manager.update(cx, |manager, cx| manager.create_window(window, cx));
+        });
+        cx.run_until_parked();
+
+        cx.update(|window, cx| {
+            manager.update(cx, |manager, cx| {
+                manager.create_window(window, cx);
+                manager.child_launch_generation = manager.child_launch_generation.wrapping_add(1);
+            });
+        });
+        cx.run_until_parked();
+
+        cx.update(|window, cx| {
+            manager.update(cx, |manager, cx| {
+                manager.create_window(window, cx);
+                manager.disconnect_remote(1, cx).unwrap();
+            });
+        });
+        cx.run_until_parked();
+
+        assert_eq!(
+            events.borrow().as_slice(),
+            [
+                RemoteChildLaunchUnavailable::ConnectionUnavailable,
+                RemoteChildLaunchUnavailable::Stale,
+                RemoteChildLaunchUnavailable::Cancelled,
+            ]
+        );
+        assert_eq!(manager.read_with(cx, hierarchy_identity), before);
+        assert_eq!(records.starts().len(), 1);
+    }
+
+    #[gpui::test]
+    fn remote_split_failure_should_be_forwarded_once_by_window_manager(cx: &mut TestAppContext) {
+        let destination = crate::domain::SshDestination::new("tester@remote".to_owned()).unwrap();
+        let provider = Arc::new(SequencedRemoteChannelProvider::new(destination));
+        let (manager, records, events, cx) =
+            remote_window_manager_with_provider_and_events(cx, Arc::clone(&provider));
+        let before = manager.read_with(cx, hierarchy_identity);
+        provider.fail_revalidation_with(Some(RemoteChannelRevalidationError::IdentityChanged));
+
+        cx.simulate_keystrokes("cmd-d");
+        cx.run_until_parked();
+
+        assert_eq!(
+            events.borrow().as_slice(),
+            [RemoteChildLaunchUnavailable::IdentityChanged]
+        );
+        assert_eq!(manager.read_with(cx, hierarchy_identity), before);
+        assert_eq!(records.starts().len(), 1);
     }
 
     #[gpui::test]
