@@ -16,6 +16,7 @@ use crate::theme::{ACTIVE_THEME, Color};
 const CONFIRMATION_MODAL_ID: &str = "ssh-askpass-confirmation";
 const SECRET_MODAL_ID: &str = "ssh-askpass-secret";
 const MAX_SECRET_BYTES: usize = 16 * 1024;
+const SECRET_INPUT_HEIGHT: f32 = 28.0;
 const REQUIRED_SECRET_MESSAGE: &str = "Enter a response to continue.";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -438,7 +439,13 @@ impl Render for AskPassSecretBody {
                             .text_color(gpui_color(ACTIVE_THEME.text_muted))
                             .child(self.field_label),
                     )
-                    .child(self.input.clone())
+                    .child(
+                        div()
+                            .debug_selector(|| "ssh-askpass-secret-input-frame".to_owned())
+                            .h(px(SECRET_INPUT_HEIGHT))
+                            .flex_shrink_0()
+                            .child(self.input.clone()),
+                    )
                     .when(self.required_error, |field| {
                         field.child(
                             div()
@@ -617,6 +624,23 @@ mod tests {
             [ObservedResult::Secret(b"correct horse".to_vec())]
         );
         assert!(presenter.read_with(cx, |presenter, _| presenter.active.is_none()));
+    }
+
+    #[gpui::test]
+    fn secret_input_keeps_compact_single_line_height(cx: &mut TestAppContext) {
+        let (_, presenter, results, cx) = askpass_window(cx);
+        present(
+            1,
+            request("root@example.test's password:", AskPassPromptKind::Secret),
+            &presenter,
+            &results,
+            cx,
+        );
+
+        let bounds = cx
+            .debug_bounds("ssh-askpass-secret-input-frame")
+            .expect("secret input frame should render");
+        assert_eq!(bounds.size.height, px(SECRET_INPUT_HEIGHT));
     }
 
     #[gpui::test]
