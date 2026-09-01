@@ -5,7 +5,6 @@
 
 use std::ffi::{OsStr, OsString};
 use std::io::{self, Read, Write};
-use std::marker::PhantomData;
 use std::os::fd::AsRawFd;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -173,7 +172,6 @@ impl AskPassConnectionAttempt {
 pub(crate) struct NativeAskPassBrokerFactory {
     helper_path: PathBuf,
     presenter: Arc<dyn BrokerPresenter>,
-    _main_thread: PhantomData<Rc<()>>,
 }
 
 impl NativeAskPassBrokerFactory {
@@ -182,7 +180,6 @@ impl NativeAskPassBrokerFactory {
         Ok(Self {
             helper_path: std::env::current_exe()?,
             presenter,
-            _main_thread: PhantomData,
         })
     }
 
@@ -422,7 +419,14 @@ impl BrokerPresenter for ObservedBrokerPresenter {
             .state
             .prompt_started
             .store(true, Ordering::Release);
-        self.inner.present(request, stop)
+        let answer = self.inner.present(request, stop);
+        if matches!(answer, Ok(BrokerAnswer::Cancelled)) {
+            self.observation
+                .state
+                .cancelled
+                .store(true, Ordering::Release);
+        }
+        answer
     }
 
     fn cancel_active(&self) {
@@ -1375,7 +1379,7 @@ mod tests {
             Ok(BrokerAnswer::Cancelled)
         ));
         assert!(observation.prompt_started());
-        assert!(!observation.cancelled());
+        assert!(observation.cancelled());
 
         presenter.cancel_active();
         assert!(observation.cancelled());

@@ -32,7 +32,9 @@ use super::ssh_host_picker::{
 use crate::domain::{RemoteDirectoryIdentity, RemoteWorkspaceDirectory, SshDestination};
 use crate::ssh::destination::SshHostAlias;
 use crate::ssh::host_config::HostDiscovery;
+use crate::ssh::live_connection::ControlConnectionObserver;
 use crate::ssh::managed_hosts::ManagedSshHost;
+use crate::terminal::RemoteTerminalChannelProvider;
 
 const CONNECTION_PROGRESS_ID: &str = "remote-workspace-connection-progress";
 const CONNECTION_ERROR_ID: &str = "remote-workspace-connection-error";
@@ -87,6 +89,14 @@ pub(super) enum RemoteWorkspaceFlowBackendError {
 ///
 /// This trait deliberately exposes no command or transport access to UI code.
 pub(super) trait RemoteWorkspaceSessionOwner: Send + 'static {
+    fn bind_terminal_channels(
+        &self,
+        directory: &RemoteWorkspaceDirectory,
+        login_shell: &str,
+    ) -> Result<Arc<dyn RemoteTerminalChannelProvider>, RemoteWorkspaceFlowBackendError>;
+
+    fn take_lifecycle_observer(&mut self) -> Option<ControlConnectionObserver>;
+
     fn close(&mut self);
 }
 
@@ -111,6 +121,21 @@ impl RemoteWorkspaceConnectedSession {
 
     fn provider(&self) -> Arc<dyn RemoteWorkspaceProvider + Send + Sync> {
         Arc::clone(&self.provider)
+    }
+
+    fn bind_terminal_channels(
+        &self,
+        directory: &RemoteWorkspaceDirectory,
+        login_shell: &str,
+    ) -> Result<Arc<dyn RemoteTerminalChannelProvider>, RemoteWorkspaceFlowBackendError> {
+        self.owner
+            .as_ref()
+            .ok_or(RemoteWorkspaceFlowBackendError::ConnectionFailed)?
+            .bind_terminal_channels(directory, login_shell)
+    }
+
+    fn take_lifecycle_observer(&mut self) -> Option<ControlConnectionObserver> {
+        self.owner.as_mut()?.take_lifecycle_observer()
     }
 }
 
@@ -185,6 +210,8 @@ pub(super) struct RemoteWorkspaceFlowCompletion {
     directory: RemoteWorkspaceDirectory,
     physical_directory: RemoteDirectoryIdentity,
     account: RemoteWorkspaceAccount,
+    terminal_channels: Arc<dyn RemoteTerminalChannelProvider>,
+    lifecycle: ControlConnectionObserver,
 }
 
 impl RemoteWorkspaceFlowCompletion {
@@ -216,6 +243,14 @@ impl RemoteWorkspaceFlowCompletion {
         self.account.login_shell()
     }
 
+    pub(super) fn terminal_channels(&self) -> Arc<dyn RemoteTerminalChannelProvider> {
+        Arc::clone(&self.terminal_channels)
+    }
+
+    pub(super) const fn lifecycle(&self) -> &ControlConnectionObserver {
+        &self.lifecycle
+    }
+
     pub(super) fn into_parts(
         self,
     ) -> (
@@ -224,6 +259,8 @@ impl RemoteWorkspaceFlowCompletion {
         RemoteWorkspaceDirectory,
         RemoteDirectoryIdentity,
         RemoteWorkspaceAccount,
+        Arc<dyn RemoteTerminalChannelProvider>,
+        ControlConnectionObserver,
     ) {
         (
             self.session,
@@ -231,6 +268,8 @@ impl RemoteWorkspaceFlowCompletion {
             self.directory,
             self.physical_directory,
             self.account,
+            self.terminal_channels,
+            self.lifecycle,
         )
     }
 }
@@ -321,6 +360,7 @@ pub(super) struct RemoteWorkspaceFlow {
     connection_cancelled: Option<Arc<AtomicBool>>,
     progress: Option<ProgressDialogHandle>,
     connected: Option<RemoteWorkspaceConnectedSession>,
+    retained_lifecycle: Option<ControlConnectionObserver>,
     pending_completion: Option<RemoteWorkspaceFlowCompletionHandle>,
     observed_progress: Vec<RemoteWorkspaceConnectionProgress>,
     delete_alert: Option<ModalPresentationHandle>,
@@ -364,6 +404,7 @@ impl RemoteWorkspaceFlow {
             connection_cancelled: None,
             progress: None,
             connected: None,
+            retained_lifecycle: None,
             pending_completion: None,
             observed_progress: Vec::new(),
             delete_alert: None,
@@ -1086,12 +1127,41 @@ impl RemoteWorkspaceFlow {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let (Some(session), Some(destination)) =
+        let (Some(mut session), Some(destination)) =
             (self.connected.take(), self.pending_destination.take())
         else {
             if let Some(picker) = &self.remote_picker {
                 picker.update(cx, |picker, cx| picker.activation_failed(window, cx));
             }
+            return;
+        };
+        let terminal_channels = match session
+            .bind_terminal_channels(selection.directory(), selection.account().login_shell())
+        {
+            Ok(provider) => provider,
+            Err(error) => {
+                self.connected = Some(session);
+                self.pending_destination = Some(destination);
+                self.connection_error = Some(error);
+                if let Some(picker) = &self.remote_picker {
+                    picker.update(cx, |picker, cx| picker.activation_failed(window, cx));
+                }
+                self.publish(cx);
+                return;
+            }
+        };
+        let lifecycle = self
+            .retained_lifecycle
+            .take()
+            .or_else(|| session.take_lifecycle_observer());
+        let Some(lifecycle) = lifecycle else {
+            self.connected = Some(session);
+            self.pending_destination = Some(destination);
+            self.connection_error = Some(RemoteWorkspaceFlowBackendError::ConnectionFailed);
+            if let Some(picker) = &self.remote_picker {
+                picker.update(cx, |picker, cx| picker.activation_failed(window, cx));
+            }
+            self.publish(cx);
             return;
         };
         let completion = RemoteWorkspaceFlowCompletion {
@@ -1100,6 +1170,8 @@ impl RemoteWorkspaceFlow {
             directory: selection.directory().clone(),
             physical_directory: selection.physical_directory().clone(),
             account: selection.account().clone(),
+            terminal_channels,
+            lifecycle,
         };
         let handle = RemoteWorkspaceFlowCompletionHandle::new(completion);
         self.pending_completion = Some(handle.clone());
@@ -1161,8 +1233,11 @@ impl RemoteWorkspaceFlow {
             directory: _,
             physical_directory: _,
             account: _,
+            terminal_channels: _,
+            lifecycle,
         } = completion;
         self.connected = Some(session);
+        self.retained_lifecycle = Some(lifecycle);
         self.pending_destination = Some(destination);
         self.pending_completion = None;
         if let Some(picker) = &self.remote_picker {
@@ -1209,6 +1284,7 @@ impl RemoteWorkspaceFlow {
         self.remote_picker = None;
         self.pending_completion = None;
         self.connected = None;
+        self.retained_lifecycle = None;
         self.pending_destination = None;
         self.connection_error = None;
         self.stage = RemoteWorkspaceFlowStage::Cancelled;
@@ -1310,6 +1386,19 @@ mod tests {
     }
 
     impl RemoteWorkspaceSessionOwner for CountingOwner {
+        fn bind_terminal_channels(
+            &self,
+            _: &RemoteWorkspaceDirectory,
+            _: &str,
+        ) -> Result<Arc<dyn RemoteTerminalChannelProvider>, RemoteWorkspaceFlowBackendError>
+        {
+            Ok(Arc::new(|| Err(crate::terminal::RemoteChannelUnavailable)))
+        }
+
+        fn take_lifecycle_observer(&mut self) -> Option<ControlConnectionObserver> {
+            Some(ControlConnectionObserver::closed())
+        }
+
         fn close(&mut self) {
             self.closes.fetch_add(1, Ordering::SeqCst);
         }
@@ -2253,11 +2342,14 @@ mod tests {
         let _ = completion.session();
         assert!(handle.take().is_none());
         assert_eq!(closes.load(Ordering::SeqCst), 0);
-        let (session, destination, directory, physical, account) = completion.into_parts();
+        let (session, destination, directory, physical, account, terminal_channels, lifecycle) =
+            completion.into_parts();
         assert_eq!(destination.as_str(), "deploy@work");
         assert_eq!(directory.as_str(), "~/src");
         assert_eq!(physical.as_str(), "/home/tester/src");
         assert_eq!(account.login_shell(), "/bin/zsh");
+        assert!(terminal_channels.is_ready());
+        let _ = lifecycle;
         cx.update(|window, cx| {
             flow.update(cx, |flow, cx| {
                 assert!(flow.activation_succeeded(&handle, window, cx));

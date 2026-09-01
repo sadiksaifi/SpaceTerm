@@ -154,12 +154,21 @@ pub(crate) struct ControlConnectionLifecycleObserver {
     receiver: async_channel::Receiver<ControlConnectionTerminalState>,
 }
 
+pub(crate) type ControlConnectionObserver = ControlConnectionLifecycleObserver;
+
 impl ControlConnectionLifecycleObserver {
     pub(crate) async fn terminal(&self) -> ControlConnectionTerminalState {
         self.receiver
             .recv()
             .await
             .unwrap_or(ControlConnectionTerminalState::Closed)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn closed() -> Self {
+        let authority = ControlConnectionLifecycleAuthority::default();
+        authority.publish(ControlConnectionTerminalState::Closed);
+        authority.observe()
     }
 }
 
