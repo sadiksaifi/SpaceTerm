@@ -325,6 +325,7 @@ impl SshProcessEnvironment {
         }
     }
 
+    #[cfg(test)]
     pub(super) fn probe_environment(&self) -> SshProbeEnvironment {
         SshProbeEnvironment {
             home: self.home.clone(),

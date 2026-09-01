@@ -9,6 +9,9 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
+#[cfg(test)]
+use std::sync::mpsc;
+
 use thiserror::Error;
 
 use super::cancellation::SshCancellationToken;
@@ -81,10 +84,12 @@ impl SshProbeOutput {
     }
 }
 
+#[cfg(test)]
 pub(crate) trait SshProbeRunner {
     fn run(&self, executable: &Path, arguments: &[OsString]) -> io::Result<SshProbeOutput>;
 }
 
+#[cfg(test)]
 pub(crate) fn probe_ssh_capability(runner: &impl SshProbeRunner) -> SshCapability {
     let output = match runner.run(Path::new(SSH_EXECUTABLE), &[OsString::from("-V")]) {
         Ok(output) => output,
@@ -102,18 +107,11 @@ pub(crate) struct NativeSshProbeRunner {
     timeout: Duration,
     #[cfg(test)]
     executable: PathBuf,
+    #[cfg(test)]
+    spawned: Option<mpsc::SyncSender<libc::pid_t>>,
 }
 
 impl NativeSshProbeRunner {
-    pub(crate) fn new(environment: SshProcessEnvironment) -> Self {
-        Self {
-            environment: environment.probe_environment(),
-            timeout: NATIVE_PROBE_TIMEOUT,
-            #[cfg(test)]
-            executable: PathBuf::new(),
-        }
-    }
-
     pub(crate) fn from_startup(
         home: PathBuf,
         startup: &StartupSshEnvironment,
@@ -123,6 +121,8 @@ impl NativeSshProbeRunner {
             timeout: NATIVE_PROBE_TIMEOUT,
             #[cfg(test)]
             executable: PathBuf::new(),
+            #[cfg(test)]
+            spawned: None,
         })
     }
 
@@ -136,7 +136,14 @@ impl NativeSshProbeRunner {
             environment: environment.probe_environment(),
             timeout,
             executable,
+            spawned: None,
         }
+    }
+
+    #[cfg(test)]
+    fn observing_spawn(mut self, spawned: mpsc::SyncSender<libc::pid_t>) -> Self {
+        self.spawned = Some(spawned);
+        self
     }
 
     pub(crate) fn probe_blocking(&self) -> SshCapability {
@@ -148,6 +155,8 @@ impl NativeSshProbeRunner {
             Instant::now()
                 .checked_add(self.timeout)
                 .unwrap_or_else(Instant::now),
+            #[cfg(test)]
+            self.spawned.clone(),
         ))
     }
 
@@ -166,6 +175,7 @@ impl NativeSshProbeRunner {
         }
     }
 
+    #[cfg(test)]
     pub(crate) async fn probe(&self, cancellation: SshCancellationToken) -> SshCapability {
         if cancellation.is_cancelled() {
             return SshCapability::Unavailable(SshUnavailableReason::ProbeFailed);
@@ -173,6 +183,7 @@ impl NativeSshProbeRunner {
         let environment = self.environment.clone();
         let timeout = self.timeout;
         let executable = self.executable();
+        let spawned = self.spawned.clone();
         let mut cancel_on_drop = ProbeCancelOnDrop::new(cancellation.clone());
         let (sender, receiver) = async_channel::bounded(1);
         let worker = thread::Builder::new()
@@ -185,6 +196,7 @@ impl NativeSshProbeRunner {
                     Instant::now()
                         .checked_add(timeout)
                         .unwrap_or_else(Instant::now),
+                    spawned,
                 );
                 let _ = sender.send_blocking(result);
             });
@@ -243,11 +255,13 @@ enum NativeProbeError {
     Io,
 }
 
+#[cfg(test)]
 struct ProbeCancelOnDrop {
     cancellation: SshCancellationToken,
     armed: bool,
 }
 
+#[cfg(test)]
 impl ProbeCancelOnDrop {
     fn new(cancellation: SshCancellationToken) -> Self {
         Self {
@@ -261,6 +275,7 @@ impl ProbeCancelOnDrop {
     }
 }
 
+#[cfg(test)]
 impl Drop for ProbeCancelOnDrop {
     fn drop(&mut self) {
         if self.armed {
@@ -274,6 +289,7 @@ fn run_native_probe(
     environment: SshProbeEnvironment,
     cancellation: &SshCancellationToken,
     deadline: Instant,
+    #[cfg(test)] spawned: Option<mpsc::SyncSender<libc::pid_t>>,
 ) -> Result<SshProbeOutput, NativeProbeError> {
     let mut command = Command::new(executable);
     command
@@ -298,6 +314,10 @@ fn run_native_probe(
             return Err(NativeProbeError::Io);
         }
     };
+    #[cfg(test)]
+    if let Some(spawned) = spawned {
+        let _ = spawned.send(process_group);
+    }
     let stdout = child.stdout.take().ok_or_else(|| {
         terminate_probe(&mut child, process_group);
         NativeProbeError::Io
@@ -1319,35 +1339,25 @@ printf 'OpenSSH_9.9p2 Apple-1, LibreSSL 3.3.6\n' >&2"#,
 
     #[test]
     fn native_probe_cancellation_should_terminate_the_private_process_group() {
-        let pid_file = PathBuf::from(format!(
-            "/private/tmp/spaceterm-probe-cancel-{}.pid",
-            std::process::id()
-        ));
-        let script = ProbeScript::new(&format!("echo $$ > '{}'; sleep 30", pid_file.display()));
-        let runner = native_probe(script.0.clone(), Duration::from_secs(5));
+        let script = ProbeScript::new("sleep 30");
+        let (spawned_sender, spawned_receiver) = mpsc::sync_channel(1);
+        let runner =
+            native_probe(script.0.clone(), Duration::from_secs(5)).observing_spawn(spawned_sender);
         let cancellation = SshCancellationToken::default();
         let canceller = cancellation.clone();
         let cancel_thread = thread::spawn(move || {
-            for _ in 0..100 {
-                if pid_file.exists() {
-                    break;
-                }
-                thread::sleep(Duration::from_millis(10));
-            }
+            let process = spawned_receiver
+                .recv_timeout(TEST_NATIVE_PROBE_TIMEOUT)
+                .unwrap();
             canceller.cancel();
-            pid_file
+            process
         });
 
         assert_eq!(
             block_on_external(runner.probe(cancellation)),
             SshCapability::Unavailable(SshUnavailableReason::ProbeFailed)
         );
-        let pid_file = cancel_thread.join().unwrap();
-        let process: libc::pid_t = fs::read_to_string(&pid_file)
-            .unwrap()
-            .trim()
-            .parse()
-            .unwrap();
+        let process = cancel_thread.join().unwrap();
         let missing = (0..100).any(|_| {
             // SAFETY: signal zero checks process existence and dereferences no pointers.
             let missing = unsafe { libc::kill(process, 0) } == -1
@@ -1357,7 +1367,6 @@ printf 'OpenSSH_9.9p2 Apple-1, LibreSSL 3.3.6\n' >&2"#,
             }
             missing
         });
-        let _ = fs::remove_file(pid_file);
         assert!(missing);
     }
 
