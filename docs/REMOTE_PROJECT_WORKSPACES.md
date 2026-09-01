@@ -3,14 +3,10 @@
 Remote over SSH is the third SpaceTerm Workspace source. A Remote Project Workspace is pinned to
 one directory on one SSH destination and remains available only for the current SpaceTerm run.
 
-This guide describes the user-facing feature being delivered by
-[issue #153](https://github.com/sadiksaifi/SpaceTerm/issues/153). The branch already contains its
-remote domain, XDG paths, host discovery and management, host and directory pickers, OpenSSH
-command and control ownership, native authentication sheets, remote terminal launch, and local-file
-capability boundaries. End-to-end Workspace orchestration, transport-loss presentation, and the
-Reconnect action are still being integrated. The workflow and reconnect sections below describe
-the completed branch contract, not behavior available in an older release or a partial branch
-build.
+SpaceTerm validates the system OpenSSH client at startup, guides destination and directory
+selection, opens remote Terminal Sessions, and owns the connection for the lifetime of the
+Workspace. If that connection is lost, the Workspace remains visible with its final presentation
+and an explicit Reconnect action.
 
 ## Requirements
 
@@ -27,12 +23,17 @@ Check the installed client with:
 ```
 
 The remote account needs a POSIX-like Linux, macOS, or BSD environment with `/bin/sh`. Supported
-login shells are Bash, Zsh, Fish, Nushell, Elvish, and POSIX `sh`. Windows OpenSSH hosts are outside
-the first release.
+login shells are Bash, Zsh, Fish, Nushell, Elvish, and POSIX `sh`. Windows OpenSSH hosts are not
+supported.
 
 SpaceTerm uses the system OpenSSH client. It does not implement SSH, replace `known_hosts`, store
 credentials, or install a SpaceTerm agent, shell integration, terminfo entry, daemon, or other
 component on the remote machine.
+
+SpaceTerm checks `/usr/bin/ssh` once from its captured startup environment. When the executable is
+missing, older than OpenSSH 8.2, or cannot be identified safely, **Remote over SSH** is disabled in
+the New Workspace Panel with the reason shown on the row. No connection or authentication prompt
+is started while this gate is closed.
 
 ## SSH host discovery
 
@@ -45,7 +46,13 @@ When the SSH Host Picker opens, SpaceTerm scans:
 The picker discovers positive literal aliases from global `Host` declarations. It intentionally
 does not list wildcard or negated patterns, `Match`-derived names, `/etc/ssh/ssh_config` entries,
 DNS results, `known_hosts`, or every destination OpenSSH could resolve. System SSH configuration
-still participates when OpenSSH connects even though its entries are not discovery results.
+participates when OpenSSH connects even though its entries are not discovery results.
+
+Discovery runs again each time the Host Picker opens. Each configured row identifies whether it is
+SpaceTerm-managed or read-only and shows its direct target or configuration provenance. Safe hosts
+remain selectable when another file has a problem; a nonselectable diagnostic row explains
+unreadable files, malformed entries, include cycles, or safety-limit truncation without exposing
+configuration contents.
 
 Standard user SSH entries are read-only in SpaceTerm. SpaceTerm-managed entries support Add, Edit,
 and Delete and contain:
@@ -66,9 +73,10 @@ connects or writes configuration.
 
 ## Open a Remote Project
 
-After final Workspace orchestration is present, the issue #153 flow will be:
+The complete flow is:
 
-1. Press Command-O and select **Remote over SSH**.
+1. Press Command-O and select **Remote over SSH**. If the row is disabled, follow its OpenSSH
+   availability guidance before continuing.
 2. Select a configured destination, enter a `user@alias` override, or choose **Add SSH Host**.
 3. Complete any password, key-passphrase, keyboard-interactive, MFA, or host-confirmation prompt in
    the native macOS sheet opened by SpaceTerm.
@@ -79,6 +87,11 @@ After final Workspace orchestration is present, the issue #153 flow will be:
 The Remote Workspace Picker reads one directory level at a time. It has no index, recents, fuzzy
 matching, persistence, or filesystem watcher. If a listing is truncated, type the exact path to
 continue.
+
+Opening performs a final remote existence, directory-type, permission, and physical-identity
+validation before SpaceTerm creates anything. A connection or validation failure keeps the
+retained flow available for retry. Cancelling the flow closes its connection and writes no
+Workspace state.
 
 SpaceTerm preserves the selected SSH destination and the exact remote directory spelling for
 display and shell startup. It separately resolves the physical directory for identity. Opening an
@@ -111,21 +124,30 @@ connection. Its Windows and Panes reuse that connection, but different Workspace
 even when they use the same destination. Each Pane still owns its own Terminal Session and SSH
 channel.
 
-New Windows and Panes must start in the Workspace's pinned remote directory. Final integration must
-revalidate that directory before creating a child; an unavailable or physically changed directory
-will block the new child without stopping already running Terminal Sessions. A Remote Project never
-follows a Pane's reported working directory.
+New Windows and Panes start in the Workspace's pinned remote directory. SpaceTerm revalidates the
+connection and physical directory identity before creating each child. An unavailable or changed
+directory blocks that child, shows an actionable alert, and leaves existing Terminal Sessions and
+their focus unchanged. A Remote Project never follows a Pane's reported working directory.
 
 A normal remote shell `exit` closes that Pane through the ordinary hierarchy rules. A shared SSH
-transport loss is different. Under the completed issue #153 integration, it will preserve the
-Workspace, Window and Pane layout, focused identities, and final terminal presentations, disable
-terminal input, and mark the Workspace disconnected.
+transport loss is different. SpaceTerm preserves the Workspace, Window and Pane layout, focused
+identities, zoom state, and final terminal presentations, disables input and new child creation,
+and marks the Workspace **Disconnected**. The sidebar row shows the connection state; when the
+sidebar is hidden, the Workspace chip shows the same state and its tooltip remains descriptive.
 
-The completed Reconnect behavior is explicit, not automatic. It will create a new isolated control
-connection, ask for authentication again only when OpenSSH requires it, revalidate the pinned
-directory, and start a fresh shell in each preserved Pane. It will not restore remote processes,
-emulator state, or Scrollback. Cancelling or failing reconnect will leave the disconnected
-Workspace and retained final presentations in place.
+Reconnect is explicit, not automatic. The Workspace menu contains one **Reconnect** action, enabled
+only while the Workspace is Disconnected or a connection attempt has Failed. Only one reconnect can
+run at a time. Its retained progress dialog remains below any native authentication or host-key
+sheet, and Cancel safely returns to the disconnected Workspace.
+
+A successful reconnect creates a fresh isolated connection, asks for authentication again only
+when OpenSSH requires it, rediscovers the account, validates the exact pinned physical directory,
+and starts a fresh shell in every preserved Pane. It preserves Workspace, Window and Pane identity,
+layout, focus, and zoom state. It does not restore remote processes, emulator state, or Scrollback.
+Connection failure leaves the Workspace available for another Reconnect. If the directory is
+unavailable or resolves to a different physical directory, SpaceTerm keeps the Workspace
+Disconnected, preserves its final presentations, and explains that the Remote Project must be
+reopened or its directory access repaired.
 
 Closing the flow, Workspace, Operating-System Window, or application closes and reaps the owned
 local SSH processes and removes their private runtime artifacts. Remote Projects and their
@@ -170,7 +192,7 @@ persisted under the state directory.
 
 - Credentials and authentication responses remain memory-only, are released promptly, and never
   enter history, logs, diagnostics, accessibility values, or application events.
-- The completed flow retains only a bounded, control-free tail of OpenSSH error output for a
+- The flow retains only a bounded, control-free tail of OpenSSH error output for a
   transient error alert; it does not persist or export that output.
 - Exact destinations and remote directories are runtime Workspace data and are not restored after
   application restart.
@@ -195,7 +217,10 @@ persisted under the state directory.
 | **No such remote folder** | Enter the correct path or use **Create Folder** after confirming that its parent is writable. |
 | **Not a remote folder** | Select or enter a directory rather than a regular file or another remote object. |
 | **Permission denied for this remote folder** | Ask the remote administrator for directory traversal and read access, or select a directory the account can use. |
-| **SSH connection was lost** | In a build with the completed reconnect integration, use the Workspace-level **Reconnect** action and expect fresh shells; remote processes and Scrollback are not restored. |
+| **SSH connection was lost** | Open the Workspace menu and choose **Reconnect**. Expect fresh shells in the preserved Pane layout; remote processes and Scrollback are not restored. |
+| **Remote Directory Unavailable** during reconnect | Restore traversal and read access to the pinned directory, then choose **Reconnect** again. If the directory was intentionally moved or removed, close and reopen the Remote Project at its new path. |
+| **Remote Directory Changed** during reconnect | The selected spelling now resolves to a different physical directory. Close and reopen the Remote Project so SpaceTerm can validate and accept the new identity. |
+| **Reconnect** is disabled | Wait for the active connection or reconnect attempt to finish. Reconnect is enabled only after a Disconnected or Failed status. |
 | Only the first 1024 folders are shown | Type the complete absolute or `~/` path directly. |
 | The remote shell cannot start | Confirm that the remote account has `/bin/sh` and one supported login shell, and that the pinned directory still exists and resolves to the original physical directory. |
 | A local file action is unavailable in a Remote Pane | This is intentional. Use remote-native tools or an explicitly separate transfer workflow; SpaceTerm does not treat remote paths as local files. |

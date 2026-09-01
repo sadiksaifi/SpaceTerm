@@ -28,7 +28,7 @@ just run
 ## Documentation
 
 - [Remote Project Workspaces](docs/REMOTE_PROJECT_WORKSPACES.md) covers Remote over SSH setup,
-  authentication, lifecycle, security, and troubleshooting for builds that include issue #153.
+  authentication, lifecycle, reconnect, security, and troubleshooting.
 
 ## Package for macOS
 
