@@ -932,6 +932,14 @@ Window deactivation cancels Remote Workspace Directory selection, the persistent
 releases the picker immediately and restores the Focused Pane on reactivation only when no newer
 presentation blocks Terminal Input Focus.
 
+AskPass presentation minimizes native macOS surface area. First-contact host verification and
+other non-secret SSH confirmations use the application-owned Alert while authentication
+temporarily suspends the connection ProgressDialog; the ProgressDialog resumes when connection work
+continues. Passwords, private-key passphrases, PINs, one-time codes, and other secret responses use
+the protected native secure-text sheet because the GPUI control stack does not provide equivalent
+protected accessibility and secure-input semantics. AppKit rejects non-secret AskPass requests,
+and secret bytes never enter GPUI state.
+
 Remote connection state couples Connecting, Connected, Reconnecting, Disconnected, Failed, and
 Closing to a monotonic Connection Generation. Reconnect starts only from Disconnected or Failed at
 a greater generation. A completion from an older generation is stale, an invalid transition is

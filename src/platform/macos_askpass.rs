@@ -83,6 +83,32 @@ impl AskPassRequest {
         self.kind
     }
 
+    /// Reports whether this prompt must use the protected native secret-entry surface.
+    pub(crate) fn requires_secure_input(&self) -> bool {
+        self.presentation().kind.uses_secret_field()
+    }
+
+    /// Builds application-owned content for a non-secret SSH decision.
+    pub(crate) fn confirmation_presentation(&self) -> Option<AskPassConfirmationPresentation> {
+        let presentation = self.presentation();
+        if presentation.kind.uses_secret_field() {
+            return None;
+        }
+        let first_contact = presentation.kind == AskPassPresentationKind::FirstContact;
+        Some(AskPassConfirmationPresentation {
+            first_contact,
+            title: presentation.title,
+            message: if first_contact {
+                "Verify the host key fingerprint before connecting."
+            } else {
+                "SSH requires confirmation before it can continue."
+            },
+            detail: presentation.informative_text.into_owned(),
+            affirmative: presentation.affirmative,
+            negative: presentation.negative,
+        })
+    }
+
     fn classification(&self) -> AskPassPromptClassification<'_> {
         classify_prompt(&self.prompt, self.kind)
     }
@@ -101,6 +127,42 @@ impl AskPassRequest {
             }
             AskPassPromptClassification::Secret => AskPassPresentation::secret(self),
         }
+    }
+}
+
+/// Owned, non-secret content rendered by SpaceTerm's shared GPUI Alert surface.
+pub(crate) struct AskPassConfirmationPresentation {
+    first_contact: bool,
+    title: &'static str,
+    message: &'static str,
+    detail: String,
+    affirmative: &'static str,
+    negative: &'static str,
+}
+
+impl AskPassConfirmationPresentation {
+    pub(crate) const fn is_first_contact(&self) -> bool {
+        self.first_contact
+    }
+
+    pub(crate) const fn title(&self) -> &'static str {
+        self.title
+    }
+
+    pub(crate) const fn message(&self) -> &'static str {
+        self.message
+    }
+
+    pub(crate) fn detail(&self) -> &str {
+        &self.detail
+    }
+
+    pub(crate) const fn affirmative(&self) -> &'static str {
+        self.affirmative
+    }
+
+    pub(crate) const fn negative(&self) -> &'static str {
+        self.negative
     }
 }
 
@@ -535,6 +597,10 @@ pub(crate) enum AskPassPresentationError {
     Busy,
     #[error("AskPass presentation requires the AppKit main thread")]
     OffMainThread,
+    #[error("non-secret AskPass decisions must use the SpaceTerm confirmation surface")]
+    NativeSecureInputOnly,
+    #[error("SpaceTerm could not present the AskPass confirmation")]
+    ApplicationConfirmationUnavailable,
     #[error("the GPUI window did not expose an AppKit view")]
     NativeViewUnavailable,
     #[error("the GPUI window did not expose an AppKit window")]
@@ -762,6 +828,9 @@ impl AskPassPresenter for MacosAskPassPresenter {
     ) -> Result<(), AskPassPresentationError> {
         if !main_thread() {
             return Err(AskPassPresentationError::OffMainThread);
+        }
+        if !request.requires_secure_input() {
+            return Err(AskPassPresentationError::NativeSecureInputOnly);
         }
         let activity = self.lifecycle.begin()?;
 
@@ -1373,6 +1442,49 @@ mod tests {
         );
         assert_eq!(presentation.affirmative, "Trust & Connect");
         assert_eq!(presentation.negative, "Cancel");
+    }
+
+    #[test]
+    fn only_secret_prompts_require_the_native_secure_input_surface() {
+        let first_contact = AskPassRequest::new(
+            concat!(
+                "The authenticity of host 'homelab (100.64.0.10)' can't be established.\n",
+                "ED25519 key fingerprint is SHA256:AbCdEf0123456789.\n",
+                "Are you sure you want to continue connecting (yes/no/[fingerprint])? "
+            )
+            .to_owned(),
+            AskPassPromptKind::Secret,
+        )
+        .unwrap();
+        let confirmation = AskPassRequest::new(
+            "Continue with SSH authentication?".to_owned(),
+            AskPassPromptKind::Confirmation,
+        )
+        .unwrap();
+        let password =
+            AskPassRequest::new("Password:".to_owned(), AskPassPromptKind::Secret).unwrap();
+        let passphrase = AskPassRequest::new(
+            "Enter passphrase for key '/Users/sdk/.ssh/id_ed25519': ".to_owned(),
+            AskPassPromptKind::Secret,
+        )
+        .unwrap();
+
+        assert!(!first_contact.requires_secure_input());
+        assert!(
+            first_contact
+                .confirmation_presentation()
+                .is_some_and(|presentation| presentation.is_first_contact())
+        );
+        assert!(!confirmation.requires_secure_input());
+        assert!(
+            confirmation
+                .confirmation_presentation()
+                .is_some_and(|presentation| !presentation.is_first_contact())
+        );
+        assert!(password.requires_secure_input());
+        assert!(password.confirmation_presentation().is_none());
+        assert!(passphrase.requires_secure_input());
+        assert!(passphrase.confirmation_presentation().is_none());
     }
 
     #[test]
