@@ -153,10 +153,11 @@ pub(crate) enum AtomicReplaceError {
 
 /// Filesystem boundary for the app-owned managed SSH configuration.
 ///
-/// Reads must be bounded and reject unsafe owner, type, mode, or symlink state. Replacement must
-/// use a same-directory unpredictable create-new temporary file, mode `0600`, complete write and
-/// file sync, no-follow target validation, atomic rename, and directory sync. Any pre-rename
-/// failure leaves the original bytes unchanged and removes only the owned temporary artifact.
+/// Reads must be bounded and reject unsafe owner, type, mode, or symlink state. Replacement and
+/// first creation must use a same-directory unpredictable create-new temporary file, mode `0600`,
+/// complete write and file sync, no-follow target validation, an atomic commit, and directory sync.
+/// First creation must not replace a target that appears after its absence check. Any pre-commit
+/// failure leaves the target unchanged and removes only the owned temporary artifact.
 pub(crate) trait ManagedHostsFilesystem {
     /// Reads a private bounded file, returning `None` only when it does not exist.
     fn read(&self, directory: &Path, name: &OsStr) -> io::Result<Option<Vec<u8>>>;
@@ -168,6 +169,20 @@ pub(crate) trait ManagedHostsFilesystem {
         name: &OsStr,
         bytes: &[u8],
     ) -> Result<(), AtomicReplaceError>;
+
+    /// Atomically publishes `bytes` only when `name` remains absent at the commit point.
+    fn atomic_create(
+        &self,
+        directory: &Path,
+        name: &OsStr,
+        bytes: &[u8],
+    ) -> Result<AtomicCreateOutcome, AtomicReplaceError>;
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum AtomicCreateOutcome {
+    Created,
+    AlreadyExists,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -229,6 +244,43 @@ impl ManagedHostsFilesystem for NativeManagedHostsFilesystem {
             .sync_all()
             .map_err(AtomicReplaceError::CommittedButUnsynced)
     }
+
+    fn atomic_create(
+        &self,
+        directory: &Path,
+        name: &OsStr,
+        bytes: &[u8],
+    ) -> Result<AtomicCreateOutcome, AtomicReplaceError> {
+        if bytes.len() > MANAGED_CONFIG_BYTES {
+            return Err(AtomicReplaceError::NotCommitted(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "managed SSH config exceeds its size limit",
+            )));
+        }
+        let directory = before_commit(open_private_directory(directory))?;
+        before_commit(validate_target_at(&directory, name))?;
+        let (temporary_name, mut temporary) =
+            before_commit(create_temporary_file(&directory, name))?;
+        let mut rollback = TemporaryRollback::new(&directory, &temporary_name);
+        before_commit(temporary.set_permissions(fs::Permissions::from_mode(PRIVATE_FILE_MODE)))?;
+        let temporary_metadata = before_commit(temporary.metadata())?;
+        before_commit(validate_private_file(&temporary_metadata))?;
+        before_commit(temporary.write_all(bytes))?;
+        before_commit(temporary.sync_all())?;
+        match link_at(&directory, &temporary_name, name) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                return Ok(AtomicCreateOutcome::AlreadyExists);
+            }
+            Err(error) => return Err(AtomicReplaceError::NotCommitted(error)),
+        }
+        unlink_at(&directory, &temporary_name).map_err(AtomicReplaceError::CommittedButUnsynced)?;
+        rollback.disarm();
+        directory
+            .sync_all()
+            .map_err(AtomicReplaceError::CommittedButUnsynced)?;
+        Ok(AtomicCreateOutcome::Created)
+    }
 }
 
 fn before_commit<T>(result: io::Result<T>) -> Result<T, AtomicReplaceError> {
@@ -259,6 +311,51 @@ impl<'a, F: ManagedHostsFilesystem> ManagedHostsStore<'a, F> {
             return Ok(Vec::new());
         };
         parse_managed_hosts(&bytes).map_err(|_| ManagedHostsError::NonCanonical)
+    }
+
+    /// Ensures OpenSSH's explicit `-F` target exists in the canonical app-owned format.
+    ///
+    /// Read-only aliases discovered from user or system configuration still execute through this
+    /// file so managed aliases retain deterministic precedence. The first connection therefore
+    /// publishes an empty canonical file without replacing a concurrently created configuration.
+    pub(crate) fn ensure_exists(&self) -> Result<(), ManagedHostsError> {
+        let target = self.paths.managed_ssh_config();
+        let name = target.file_name().ok_or_else(invalid_managed_path)?;
+        match self.filesystem.read(self.paths.config(), name)? {
+            Some(bytes) => parse_managed_hosts(&bytes)
+                .map(|_| ())
+                .map_err(|_| ManagedHostsError::NonCanonical),
+            None => {
+                let directory = self.paths.ensure_root(AppPathRoot::Config)?;
+                let bytes = serialize_managed_hosts(&[]);
+                match self
+                    .filesystem
+                    .atomic_create(directory, name, bytes.as_bytes())
+                {
+                    Ok(AtomicCreateOutcome::Created) => Ok(()),
+                    Ok(AtomicCreateOutcome::AlreadyExists) => self
+                        .filesystem
+                        .read(directory, name)?
+                        .ok_or_else(|| {
+                            ManagedHostsError::Io(io::Error::new(
+                                io::ErrorKind::NotFound,
+                                "managed SSH config disappeared during creation",
+                            ))
+                        })
+                        .and_then(|bytes| {
+                            parse_managed_hosts(&bytes)
+                                .map(|_| ())
+                                .map_err(|_| ManagedHostsError::NonCanonical)
+                        }),
+                    Err(AtomicReplaceError::NotCommitted(source)) => {
+                        Err(ManagedHostsError::Io(source))
+                    }
+                    Err(AtomicReplaceError::CommittedButUnsynced(source)) => {
+                        Err(ManagedHostsError::CommittedButUnsynced { source })
+                    }
+                }
+            }
+        }
     }
 
     /// Inserts or edits one host after collision checks against fresh discovered provenance.
@@ -516,6 +613,35 @@ fn rename_at(directory: &File, source: &CString, target: &OsStr) -> io::Result<(
             target.as_ptr(),
         )
     };
+    if result == -1 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+fn link_at(directory: &File, source: &CString, target: &OsStr) -> io::Result<()> {
+    let target = component_cstring(target)?;
+    // SAFETY: both names and the directory descriptor remain valid for the call.
+    let result = unsafe {
+        libc::linkat(
+            directory.as_raw_fd(),
+            source.as_ptr(),
+            directory.as_raw_fd(),
+            target.as_ptr(),
+            0,
+        )
+    };
+    if result == -1 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+fn unlink_at(directory: &File, name: &CString) -> io::Result<()> {
+    // SAFETY: the directory descriptor and name remain valid for the call.
+    let result = unsafe { libc::unlinkat(directory.as_raw_fd(), name.as_ptr(), 0) };
     if result == -1 {
         Err(io::Error::last_os_error())
     } else {
@@ -818,6 +944,7 @@ mod tests {
     use std::num::NonZeroU16;
     use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
     use std::path::{Path, PathBuf};
+    use std::process::Command;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     use super::*;
@@ -867,6 +994,8 @@ mod tests {
         bytes: RefCell<Option<Vec<u8>>>,
         fail_before_commit: Cell<bool>,
         fail_after_commit: Cell<bool>,
+        replacements: Cell<usize>,
+        create_race_bytes: RefCell<Option<Vec<u8>>>,
     }
 
     impl MemoryFilesystem {
@@ -875,6 +1004,8 @@ mod tests {
                 bytes: RefCell::new(Some(bytes)),
                 fail_before_commit: Cell::new(false),
                 fail_after_commit: Cell::new(false),
+                replacements: Cell::new(0),
+                create_race_bytes: RefCell::new(None),
             }
         }
     }
@@ -894,6 +1025,7 @@ mod tests {
             _name: &std::ffi::OsStr,
             bytes: &[u8],
         ) -> Result<(), AtomicReplaceError> {
+            self.replacements.set(self.replacements.get() + 1);
             if self.fail_before_commit.get() {
                 return Err(AtomicReplaceError::NotCommitted(std::io::Error::other(
                     "injected replacement failure",
@@ -906,6 +1038,32 @@ mod tests {
                 ));
             }
             Ok(())
+        }
+
+        fn atomic_create(
+            &self,
+            _directory: &Path,
+            _name: &std::ffi::OsStr,
+            bytes: &[u8],
+        ) -> Result<AtomicCreateOutcome, AtomicReplaceError> {
+            if let Some(racing_bytes) = self.create_race_bytes.borrow_mut().take() {
+                *self.bytes.borrow_mut() = Some(racing_bytes);
+            }
+            if self.bytes.borrow().is_some() {
+                return Ok(AtomicCreateOutcome::AlreadyExists);
+            }
+            if self.fail_before_commit.get() {
+                return Err(AtomicReplaceError::NotCommitted(std::io::Error::other(
+                    "injected creation failure",
+                )));
+            }
+            *self.bytes.borrow_mut() = Some(bytes.to_vec());
+            if self.fail_after_commit.get() {
+                return Err(AtomicReplaceError::CommittedButUnsynced(
+                    std::io::Error::other("injected directory sync failure"),
+                ));
+            }
+            Ok(AtomicCreateOutcome::Created)
         }
     }
 
@@ -1113,6 +1271,87 @@ mod tests {
     }
 
     #[test]
+    fn ensure_exists_should_bootstrap_the_empty_canonical_config() {
+        let directory = TestDirectory::new();
+        let paths = directory.paths();
+        let filesystem = MemoryFilesystem::default();
+        let store = ManagedHostsStore::new(&paths, &filesystem);
+
+        store.ensure_exists().unwrap();
+
+        assert_eq!(
+            filesystem.bytes.borrow().as_deref(),
+            Some(format!("{HEADER}{PRECEDENCE_TAIL}").as_bytes())
+        );
+    }
+
+    #[test]
+    fn ensure_exists_should_validate_without_rewriting_an_existing_config() {
+        let directory = TestDirectory::new();
+        let paths = directory.paths();
+        let original = serialize_managed_hosts(&[host("work", "work.example")]).into_bytes();
+        let filesystem = MemoryFilesystem::with_bytes(original.clone());
+        filesystem.fail_before_commit.set(true);
+        let store = ManagedHostsStore::new(&paths, &filesystem);
+
+        store.ensure_exists().unwrap();
+
+        assert!(
+            filesystem.replacements.get() == 0
+                && filesystem.bytes.borrow().as_deref() == Some(original.as_slice())
+        );
+    }
+
+    #[test]
+    fn ensure_exists_should_report_atomic_creation_failure_without_leaving_bytes() {
+        let directory = TestDirectory::new();
+        let paths = directory.paths();
+        let filesystem = MemoryFilesystem::default();
+        filesystem.fail_before_commit.set(true);
+        let store = ManagedHostsStore::new(&paths, &filesystem);
+
+        let result = store.ensure_exists();
+
+        assert!(
+            matches!(result, Err(ManagedHostsError::Io(_))) && filesystem.bytes.borrow().is_none()
+        );
+    }
+
+    #[test]
+    fn ensure_exists_should_not_replace_a_config_created_after_the_absence_check() {
+        let directory = TestDirectory::new();
+        let paths = directory.paths();
+        let racing = serialize_managed_hosts(&[host("racing", "racing.example")]).into_bytes();
+        let filesystem = MemoryFilesystem::default();
+        *filesystem.create_race_bytes.borrow_mut() = Some(racing.clone());
+        let store = ManagedHostsStore::new(&paths, &filesystem);
+
+        store.ensure_exists().unwrap();
+
+        assert_eq!(
+            filesystem.bytes.borrow().as_deref(),
+            Some(racing.as_slice())
+        );
+    }
+
+    #[test]
+    fn ensure_exists_should_reject_existing_noncanonical_content_without_rewriting_it() {
+        let directory = TestDirectory::new();
+        let paths = directory.paths();
+        let original = b"Host manual\n  HostName manual.example\n".to_vec();
+        let filesystem = MemoryFilesystem::with_bytes(original.clone());
+        let store = ManagedHostsStore::new(&paths, &filesystem);
+
+        let result = store.ensure_exists();
+
+        assert!(
+            matches!(result, Err(ManagedHostsError::NonCanonical))
+                && filesystem.replacements.get() == 0
+                && filesystem.bytes.borrow().as_deref() == Some(original.as_slice())
+        );
+    }
+
+    #[test]
     fn store_should_reject_a_configured_alias_collision() {
         let directory = TestDirectory::new();
         let paths = directory.paths();
@@ -1280,6 +1519,54 @@ mod tests {
             .mode()
             & 0o777;
         assert_eq!((config_mode, file_mode), (0o700, 0o600));
+    }
+
+    #[test]
+    fn native_store_should_prepare_first_connection_for_a_read_only_discovered_host() {
+        let directory = TestDirectory::new();
+        let paths = directory.paths();
+        let user_config = directory.0.join("user-ssh-config");
+        fs::write(
+            &user_config,
+            "Host read-only\n  HostName read-only.example\n",
+        )
+        .unwrap();
+        let roots = HostConfigRoots {
+            managed: paths.managed_ssh_config(),
+            user: user_config,
+            home: directory.0.clone(),
+        };
+        let initial = discover_ssh_hosts(
+            &NativeHostConfigFilesystem,
+            &roots,
+            HostDiscoveryLimits::default(),
+        );
+        let discovered = initial
+            .hosts
+            .iter()
+            .find(|host| host.alias().as_str() == "read-only")
+            .unwrap();
+        assert_eq!(
+            discovered.provenance().map(|source| source.source()),
+            Some(HostConfigSource::User)
+        );
+        assert!(!paths.managed_ssh_config().exists());
+        let before_bootstrap = Command::new("/usr/bin/ssh")
+            .args(["-F"])
+            .arg(paths.managed_ssh_config())
+            .args(["-G", "read-only"])
+            .output()
+            .unwrap();
+
+        ManagedHostsStore::new(&paths, &NativeManagedHostsFilesystem)
+            .ensure_exists()
+            .unwrap();
+
+        assert!(
+            !before_bootstrap.status.success()
+                && fs::read_to_string(paths.managed_ssh_config()).unwrap()
+                    == format!("{HEADER}{PRECEDENCE_TAIL}")
+        );
     }
 
     #[test]

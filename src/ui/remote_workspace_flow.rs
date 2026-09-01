@@ -105,6 +105,8 @@ pub(super) enum RemoteWorkspaceFlowBackendError {
     IncompatibleServer,
     #[error("the required OpenSSH version is unavailable")]
     OpenSshUnavailable,
+    #[error("the app-owned SSH configuration is unavailable")]
+    SshConfigurationUnavailable,
     #[error("SSH authentication was cancelled")]
     AuthenticationCancelled,
     #[error("the SSH connection failed")]
@@ -138,6 +140,7 @@ impl fmt::Debug for RemoteWorkspaceFlowBackendError {
             Self::HostInUse => "HostInUse",
             Self::IncompatibleServer => "IncompatibleServer",
             Self::OpenSshUnavailable => "OpenSshUnavailable",
+            Self::SshConfigurationUnavailable => "SshConfigurationUnavailable",
             Self::AuthenticationCancelled => "AuthenticationCancelled",
             Self::ConnectionFailed => "ConnectionFailed",
             Self::ConnectionFailedWithDetail(_) => "ConnectionFailedWithDetail(<redacted>)",
@@ -159,6 +162,9 @@ fn connection_error_content(
         }
         Some(RemoteWorkspaceFlowBackendError::IncompatibleServer) => {
             "This host does not provide the remote capabilities SpaceTerm requires."
+        }
+        Some(RemoteWorkspaceFlowBackendError::SshConfigurationUnavailable) => {
+            "SpaceTerm couldn\u{2019}t prepare its private SSH configuration. Check permissions for the SpaceTerm configuration folder and retry."
         }
         _ => "SpaceTerm couldn\u{2019}t establish the remote connection.",
     };
@@ -2555,6 +2561,22 @@ mod tests {
             connection_error_content(Some(&RemoteWorkspaceFlowBackendError::ConnectionFailed));
 
         assert_eq!(content.detail, None);
+    }
+
+    #[test]
+    fn ssh_configuration_failure_content_should_be_actionable_and_content_free() {
+        let error = RemoteWorkspaceFlowBackendError::SshConfigurationUnavailable;
+
+        let content = connection_error_content(Some(&error));
+
+        assert_eq!(
+            (content.message, content.detail, format!("{error:?}")),
+            (
+                "SpaceTerm couldn\u{2019}t prepare its private SSH configuration. Check permissions for the SpaceTerm configuration folder and retry.",
+                None,
+                "SshConfigurationUnavailable".to_owned(),
+            )
+        );
     }
 
     #[gpui::test]

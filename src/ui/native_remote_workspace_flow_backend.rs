@@ -312,6 +312,13 @@ impl RemoteWorkspaceFlowBackend for NativeRemoteWorkspaceFlowBackend {
                 cancellation.cancel();
                 return Err(RemoteWorkspaceFlowBackendError::ConnectionFailed);
             }
+            ManagedHostsStore::new(&paths, &NativeManagedHostsFilesystem)
+                .ensure_exists()
+                .map_err(|_| RemoteWorkspaceFlowBackendError::SshConfigurationUnavailable)?;
+            if context.is_cancelled() {
+                cancellation.cancel();
+                return Err(RemoteWorkspaceFlowBackendError::ConnectionFailed);
+            }
             context.report(RemoteWorkspaceConnectionProgress::Connecting);
             let backend = Arc::new(NativeSshProcessBackend::new(
                 executor.clone(),
