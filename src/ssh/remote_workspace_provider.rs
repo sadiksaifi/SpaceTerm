@@ -400,15 +400,21 @@ mod tests {
     }
 
     #[gpui::test]
-    fn provider_should_reject_remote_names_the_picker_cannot_represent(cx: &mut TestAppContext) {
-        let provider = provider(cx, [response("list", "ok", &["line\nbreak"], "0\n")]);
-
-        assert_eq!(
-            cx.executor()
-                .block(provider.list_directories(directory("/srv")))
-                .unwrap_err(),
-            RemoteWorkspaceProviderError::InvalidResponse
+    fn provider_should_keep_safe_siblings_when_remote_names_cannot_be_represented(
+        cx: &mut TestAppContext,
+    ) {
+        let provider = provider(
+            cx,
+            [response("list", "ok", &["safe", "line\nbreak"], "0\n")],
         );
+
+        let listing = cx
+            .executor()
+            .block(provider.list_directories(directory("/srv")))
+            .unwrap();
+
+        assert_eq!(listing.rows()[0].name(), "safe");
+        assert!(listing.is_truncated());
     }
 
     #[gpui::test]

@@ -715,6 +715,8 @@ else
 fi
 "#;
 
+// POSIX has no dependency-free streaming directory API. The supervised `find` child is bounded by
+// examined rows here and by the transport's wall-clock and output limits on every request.
 const LIST_SCRIPT_TEMPLATE: &str = r#"if [ "$path_status" != exists ]; then
     emit_empty list "$path_status"
     exit 0
@@ -733,11 +735,23 @@ state_directory=$(umask 077; mktemp -d "${TMPDIR:-/tmp}/spaceterm-list.XXXXXXXXX
 }
 state_file=$state_directory/state
 result_file=$state_directory/result
+enumerator_pid=
 cleanup_listing_state() {
+    if [ -n "$enumerator_pid" ]; then
+        kill -TERM "$enumerator_pid" 2>/dev/null
+        wait "$enumerator_pid" 2>/dev/null
+        enumerator_pid=
+    fi
     rm -f "$state_file" "$result_file"
     rmdir "$state_directory"
 }
-trap cleanup_listing_state EXIT HUP INT TERM
+cancel_listing() {
+    cleanup_listing_state
+    trap - EXIT HUP INT TERM
+    exit 129
+}
+trap cleanup_listing_state EXIT
+trap cancel_listing HUP INT TERM
 printf '0 0 0\n' > "$state_file" || { emit_empty list failed; exit 0; }
 : > "$result_file" || { emit_empty list failed; exit 0; }
 find "$remote_path"/. ! -name . -prune -exec /bin/sh -c '
@@ -769,13 +783,19 @@ find "$remote_path"/. ! -name . -prune -exec /bin/sh -c '
         } >> "$result_file" || exit 70
     fi
     printf "%s %s %s\n" "$examined" "$emitted" "$truncated" > "$state_file" || exit 70
-' spaceterm-enumerate "$state_file" "$result_file" {} \; 2>/dev/null
-find_status=$?
+' spaceterm-enumerate "$state_file" "$result_file" {} \; 2>/dev/null &
+enumerator_pid=$!
+if wait "$enumerator_pid"; then
+    enumerator_status=0
+else
+    enumerator_status=$?
+fi
+enumerator_pid=
 IFS=' ' read -r examined emitted listing_truncated < "$state_file" || {
     emit_empty list failed
     exit 0
 }
-if [ "$find_status" -ne 0 ] && [ "$listing_truncated" -ne 1 ]; then
+if [ "$enumerator_status" -ne 0 ] && [ "$listing_truncated" -ne 1 ]; then
     emit_empty list failed
     exit 0
 fi
@@ -784,12 +804,18 @@ cat "$result_file" || exit 70
 printf '.\n%s\n' "$listing_truncated"
 "#;
 
-const MKDIR_SCRIPT: &str = r#"if [ -e "$remote_path" ] && [ ! -d "$remote_path" ]; then
+const MKDIR_SCRIPT: &str = r#"if [ "$path_status" = not-directory ]; then
+    emit_empty mkdir not-directory
+elif [ "$path_status" = permission-denied ]; then
+    emit_empty mkdir permission-denied
+elif [ -e "$remote_path" ] && [ ! -d "$remote_path" ]; then
     emit_empty mkdir not-directory
 elif mkdir -p "$remote_path" 2>/dev/null && [ -d "$remote_path" ]; then
     emit_empty mkdir ok
-else
+elif [ -e "$remote_path" ] && [ -d "$remote_path" ] && { [ ! -r "$remote_path" ] || [ ! -x "$remote_path" ]; }; then
     emit_empty mkdir permission-denied
+else
+    emit_empty mkdir failed
 fi
 "#;
 
@@ -801,7 +827,14 @@ if [ ! -d "$remote_path" ]; then
     emit_empty physical not-directory
     exit 0
 fi
-physical_path_output=$(cd "$remote_path" 2>/dev/null && { pwd -P && printf .; }) || { emit_empty physical permission-denied; exit 0; }
+physical_path_output=$(cd "$remote_path" 2>/dev/null && { pwd -P && printf .; }) || {
+    if [ -e "$remote_path" ] && [ -d "$remote_path" ] && { [ ! -r "$remote_path" ] || [ ! -x "$remote_path" ]; }; then
+        emit_empty physical permission-denied
+    else
+        emit_empty physical failed
+    fi
+    exit 0
+}
 physical_path_with_separator=${physical_path_output%?}
 physical_path=${physical_path_with_separator%?}
 emit_header physical ok
@@ -847,24 +880,42 @@ fn parse_account(output: &[u8]) -> Result<RemoteAccountMetadata, RemoteUtilityEr
 fn parse_listing(output: &[u8]) -> Result<RemoteUtilityDirectoryListing, RemoteUtilityError> {
     let mut response = ResponseParser::new(output, "list")?;
     response.require_ok()?;
-    let names = response.read_fields(MAXIMUM_REMOTE_DIRECTORY_NAMES)?;
-    let truncated = match response.read_line()? {
-        "0" => false,
-        "1" => true,
+    let raw_names = response.read_raw_fields(MAXIMUM_REMOTE_DIRECTORY_NAMES)?;
+    let mut truncated = match response.read_line()? {
+        b"0" => false,
+        b"1" => true,
         _ => return Err(RemoteUtilityError::InvalidResponse),
     };
     response.require_end()?;
+    let names = raw_names
+        .into_iter()
+        .filter_map(|raw_name| match str::from_utf8(raw_name) {
+            Ok(name)
+                if !name.is_empty()
+                    && name != "."
+                    && name != ".."
+                    && !name.contains('/')
+                    && !name.chars().any(char::is_control) =>
+            {
+                Some(name.to_owned())
+            }
+            _ => {
+                truncated = true;
+                None
+            }
+        })
+        .collect();
     Ok(RemoteUtilityDirectoryListing { names, truncated })
 }
 
 fn parse_probe(output: &[u8]) -> Result<RemoteDirectoryProbe, RemoteUtilityError> {
     let mut response = ResponseParser::new(output, "probe")?;
     match response.status {
-        "ok" => {
+        b"ok" => {
             response.finish_fields(0)?;
             Ok(RemoteDirectoryProbe::ReadableDirectory)
         }
-        "missing" => {
+        b"missing" => {
             response.finish_fields(0)?;
             Ok(RemoteDirectoryProbe::Missing)
         }
@@ -893,9 +944,9 @@ fn parse_physical(output: &[u8]) -> Result<String, RemoteUtilityError> {
 }
 
 struct ResponseParser<'a> {
-    input: &'a str,
+    input: &'a [u8],
     cursor: usize,
-    status: &'a str,
+    status: &'a [u8],
 }
 
 impl<'a> ResponseParser<'a> {
@@ -903,13 +954,14 @@ impl<'a> ResponseParser<'a> {
         if output.len() > MAXIMUM_REMOTE_UTILITY_OUTPUT_BYTES {
             return Err(RemoteUtilityError::OutputTooLarge);
         }
-        let input = str::from_utf8(output).map_err(|_| RemoteUtilityError::InvalidResponse)?;
         let mut response = Self {
-            input,
+            input: output,
             cursor: 0,
-            status: "",
+            status: b"",
         };
-        if response.read_line()? != PROTOCOL_HEADER || response.read_line()? != expected_kind {
+        if response.read_line()? != PROTOCOL_HEADER.as_bytes()
+            || response.read_line()? != expected_kind.as_bytes()
+        {
             return Err(RemoteUtilityError::InvalidResponse);
         }
         response.status = response.read_line()?;
@@ -917,7 +969,7 @@ impl<'a> ResponseParser<'a> {
     }
 
     fn require_ok(&mut self) -> Result<(), RemoteUtilityError> {
-        if self.status == "ok" {
+        if self.status == b"ok" {
             Ok(())
         } else {
             self.finish_fields(0)?;
@@ -927,10 +979,10 @@ impl<'a> ResponseParser<'a> {
 
     fn status_error(&self) -> RemoteUtilityError {
         match self.status {
-            "missing" => RemoteUtilityError::Missing,
-            "not-directory" => RemoteUtilityError::NotDirectory,
-            "permission-denied" => RemoteUtilityError::PermissionDenied,
-            "failed" => RemoteUtilityError::RemoteFailed,
+            b"missing" => RemoteUtilityError::Missing,
+            b"not-directory" => RemoteUtilityError::NotDirectory,
+            b"permission-denied" => RemoteUtilityError::PermissionDenied,
+            b"failed" => RemoteUtilityError::RemoteFailed,
             _ => RemoteUtilityError::InvalidResponse,
         }
     }
@@ -945,9 +997,23 @@ impl<'a> ResponseParser<'a> {
     }
 
     fn read_fields(&mut self, maximum_count: usize) -> Result<Vec<String>, RemoteUtilityError> {
+        self.read_raw_fields(maximum_count)?
+            .into_iter()
+            .map(|field| {
+                str::from_utf8(field)
+                    .map(str::to_owned)
+                    .map_err(|_| RemoteUtilityError::InvalidResponse)
+            })
+            .collect()
+    }
+
+    fn read_raw_fields(
+        &mut self,
+        maximum_count: usize,
+    ) -> Result<Vec<&'a [u8]>, RemoteUtilityError> {
         let mut fields = Vec::new();
         loop {
-            if self.remaining().starts_with(".\n") {
+            if self.remaining().starts_with(b".\n") {
                 self.cursor += 2;
                 return Ok(fields);
             }
@@ -958,19 +1024,21 @@ impl<'a> ResponseParser<'a> {
         }
     }
 
-    fn read_netstring(&mut self) -> Result<String, RemoteUtilityError> {
+    fn read_netstring(&mut self) -> Result<&'a [u8], RemoteUtilityError> {
         let remaining = self.remaining();
         let colon = remaining
-            .find(':')
+            .iter()
+            .position(|byte| *byte == b':')
             .ok_or(RemoteUtilityError::InvalidResponse)?;
         let length_spelling = &remaining[..colon];
         if length_spelling.is_empty()
-            || !length_spelling.bytes().all(|byte| byte.is_ascii_digit())
-            || (length_spelling.len() > 1 && length_spelling.starts_with('0'))
+            || !length_spelling.iter().all(u8::is_ascii_digit)
+            || (length_spelling.len() > 1 && length_spelling.starts_with(b"0"))
         {
             return Err(RemoteUtilityError::InvalidResponse);
         }
-        let length = length_spelling
+        let length = str::from_utf8(length_spelling)
+            .map_err(|_| RemoteUtilityError::InvalidResponse)?
             .parse::<usize>()
             .map_err(|_| RemoteUtilityError::InvalidResponse)?;
         if length > MAXIMUM_REMOTE_FIELD_BYTES {
@@ -980,21 +1048,19 @@ impl<'a> ResponseParser<'a> {
         let field_end = field_start
             .checked_add(length)
             .ok_or(RemoteUtilityError::InvalidResponse)?;
-        if self.input.as_bytes().get(field_end) != Some(&b',')
-            || !self.input.is_char_boundary(field_start)
-            || !self.input.is_char_boundary(field_end)
-        {
+        if self.input.get(field_end) != Some(&b',') {
             return Err(RemoteUtilityError::InvalidResponse);
         }
-        let field = self.input[field_start..field_end].to_owned();
+        let field = &self.input[field_start..field_end];
         self.cursor = field_end + 1;
         Ok(field)
     }
 
-    fn read_line(&mut self) -> Result<&'a str, RemoteUtilityError> {
+    fn read_line(&mut self) -> Result<&'a [u8], RemoteUtilityError> {
         let remaining = self.remaining();
         let newline = remaining
-            .find('\n')
+            .iter()
+            .position(|byte| *byte == b'\n')
             .ok_or(RemoteUtilityError::InvalidResponse)?;
         let line = &remaining[..newline];
         self.cursor += newline + 1;
@@ -1009,7 +1075,7 @@ impl<'a> ResponseParser<'a> {
         }
     }
 
-    fn remaining(&self) -> &'a str {
+    fn remaining(&self) -> &'a [u8] {
         &self.input[self.cursor..]
     }
 }
@@ -1289,23 +1355,23 @@ mod tests {
     }
 
     #[gpui::test]
-    fn listing_should_preserve_spaces_and_leading_dashes(cx: &mut TestAppContext) {
-        let (client, _) = client([success(response(
+    fn listing_should_skip_hostile_names_without_losing_safe_siblings(cx: &mut TestAppContext) {
+        let mut listing_response = response(
             "list",
             "ok",
-            &["Space Term", "-archive", ".config", "line\nbreak"],
+            &["Space Term", "line\nbreak", "after hostile"],
             "1\n",
-        ))]);
+        );
+        let fields_start = b"SPACETERM-REMOTE/1\nlist\nok\n".len();
+        listing_response.splice(fields_start..fields_start, [b'1', b':', 0xff, b',']);
+        let (client, _) = client([success(listing_response)]);
 
         let listing = cx
             .executor()
             .block(client.list_directories(remote_directory("/srv/projects")))
             .unwrap();
 
-        assert_eq!(
-            listing.names(),
-            ["Space Term", "-archive", ".config", "line\nbreak"]
-        );
+        assert_eq!(listing.names(), ["Space Term", "after hostile"]);
         assert!(listing.is_truncated());
     }
 
@@ -1358,6 +1424,9 @@ mod tests {
         assert!(script.contains(&MAXIMUM_REMOTE_DIRECTORY_ENTRIES_EXAMINED.to_string()));
         assert!(script.contains(&MAXIMUM_REMOTE_DIRECTORY_NAMES.to_string()));
         assert!(script.contains("find \"$remote_path\"/."));
+        assert!(script.contains("2>/dev/null &"));
+        assert!(script.contains("kill -TERM \"$enumerator_pid\""));
+        assert!(script.contains("wait \"$enumerator_pid\""));
     }
 
     #[test]
@@ -1418,16 +1487,78 @@ done
     }
 
     #[test]
+    fn listing_enumerator_should_be_terminated_and_waited_when_remote_shell_is_cancelled() {
+        let test_root = PathBuf::from(format!(
+            "/private/tmp/spaceterm-list-cancel-{}",
+            std::process::id()
+        ));
+        let fake_bin = test_root.join("bin");
+        let fake_find = fake_bin.join("find");
+        let pid_file = test_root.join("enumerator-pid");
+        let stopped_file = test_root.join("enumerator-stopped");
+        fs::create_dir_all(&fake_bin).unwrap();
+        fs::write(
+            &fake_find,
+            br#"#!/bin/sh
+printf '%s\n' "$$" > "$SPACETERM_ENUMERATOR_PID"
+trap 'printf stopped > "$SPACETERM_ENUMERATOR_STOPPED"; exit 0' TERM
+while :; do /bin/sleep 1; done
+"#,
+        )
+        .unwrap();
+        fs::set_permissions(&fake_find, fs::Permissions::from_mode(0o700)).unwrap();
+        let script = build_path_script("list", test_root.to_str().unwrap()).unwrap();
+        let mut child = Command::new("/bin/sh")
+            .env_clear()
+            .env("HOME", "/private/tmp")
+            .env("PATH", format!("{}:/usr/bin:/bin", fake_bin.display()))
+            .env("TMPDIR", &test_root)
+            .env("SPACETERM_ENUMERATOR_PID", &pid_file)
+            .env("SPACETERM_ENUMERATOR_STOPPED", &stopped_file)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(&script).unwrap();
+        for _ in 0..100 {
+            if pid_file.exists() {
+                break;
+            }
+            thread::sleep(PROCESS_POLL_INTERVAL);
+        }
+        let enumerator: libc::pid_t = fs::read_to_string(&pid_file)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+
+        // SAFETY: this signals only the child shell created by this test.
+        assert_eq!(
+            unsafe { libc::kill(child.id() as libc::pid_t, libc::SIGTERM) },
+            0
+        );
+        let status = child.wait().unwrap();
+
+        assert!(!status.success());
+        assert!(stopped_file.exists());
+        // SAFETY: signal zero checks process existence and dereferences no pointers.
+        assert_eq!(unsafe { libc::kill(enumerator, 0) }, -1);
+        fs::remove_dir_all(test_root).unwrap();
+    }
+
+    #[test]
     fn generated_listing_should_preserve_argv_safe_directory_names() {
         let test_root = PathBuf::from(format!(
             "/private/tmp/spaceterm-list-names-{}",
             std::process::id()
         ));
-        let expected = ["Space Term", "-'quoted", ".hidden", "line\nbreak"];
+        let expected = ["Space Term", "-'quoted", ".hidden"];
         fs::create_dir_all(&test_root).unwrap();
         for name in expected {
             fs::create_dir(test_root.join(name)).unwrap();
         }
+        fs::create_dir(test_root.join("line\nbreak")).unwrap();
         fs::write(test_root.join("ordinary-file"), b"ignored").unwrap();
         let script = build_path_script("list", test_root.to_str().unwrap()).unwrap();
         let mut child = Command::new("/bin/sh")
@@ -1454,7 +1585,48 @@ done
             assert!(listing.names().iter().any(|candidate| candidate == name));
         }
         assert_eq!(listing.names().len(), expected.len());
-        assert!(!listing.is_truncated());
+        assert!(listing.is_truncated());
+    }
+
+    #[test]
+    fn ambiguous_mkdir_failure_should_not_claim_permission_denied() {
+        let test_root = PathBuf::from(format!(
+            "/private/tmp/spaceterm-mkdir-failed-{}",
+            std::process::id()
+        ));
+        let fake_bin = test_root.join("bin");
+        fs::create_dir_all(&fake_bin).unwrap();
+        let fake_mkdir = fake_bin.join("mkdir");
+        fs::write(&fake_mkdir, b"#!/bin/sh\nexit 1\n").unwrap();
+        fs::set_permissions(&fake_mkdir, fs::Permissions::from_mode(0o700)).unwrap();
+        let target = test_root.join("missing/child");
+        let script = build_path_script("mkdir", target.to_str().unwrap()).unwrap();
+        let mut child = Command::new("/bin/sh")
+            .env_clear()
+            .env("HOME", "/private/tmp")
+            .env("PATH", format!("{}:/usr/bin:/bin", fake_bin.display()))
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(&script).unwrap();
+        let output = child.wait_with_output().unwrap();
+        fs::remove_dir_all(test_root).unwrap();
+
+        assert_eq!(
+            parse_empty_success(&output.stdout, "mkdir").unwrap_err(),
+            RemoteUtilityError::RemoteFailed
+        );
+    }
+
+    #[test]
+    fn ambiguous_physical_path_failure_should_not_claim_permission_denied() {
+        assert!(PHYSICAL_SCRIPT.contains("emit_empty physical failed"));
+        assert_eq!(
+            parse_physical(&response("physical", "failed", &[], "")).unwrap_err(),
+            RemoteUtilityError::RemoteFailed
+        );
     }
 
     #[gpui::test]
