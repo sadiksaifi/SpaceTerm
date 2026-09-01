@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 use std::rc::Rc;
+use std::sync::Arc;
 
 use gpui::{
     App, AppContext, Bounds, KeyBinding, Menu, MenuItem, SystemMenuType, TitlebarOptions,
@@ -7,12 +8,72 @@ use gpui::{
 };
 use spaceterm_ui::{EditCopy, EditCut, EditPaste, EditRedo, EditSelectAll, EditUndo};
 
+use crate::platform::app_paths::{AppPathEnvironment, AppPaths, AppPathsError};
+use crate::ssh::alias_usage::ActiveSshAliasRegistry;
+use crate::ssh::command::{NativeSshProbeRunner, SshCapability, SshUnavailableReason};
+use crate::ssh::startup_environment::StartupSshEnvironment;
 use crate::terminal::{NativeTerminalSessionFactory, TerminalSessionFactory};
 use crate::ui::{
     ClosePane, CloseWindow, CloseWorkspace, CreateScratchWorkspace, CreateWindow,
-    ExportTerminalDiagnostics, FindNext, FindPrevious, OpenLocalProject, OpenTerminalFind,
-    SearchWorkspaces, ShowNewWorkspacePanel, WorkspaceManager,
+    ExportTerminalDiagnostics, FindNext, FindPrevious, NativeRemoteWorkspaceFlowBackendFactory,
+    OpenLocalProject, OpenTerminalFind, SearchWorkspaces, ShowNewWorkspacePanel, WorkspaceManager,
 };
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum StartupDependenciesError {
+    #[error("the user home directory is unavailable")]
+    MissingHome,
+    #[error("the user home directory is not absolute")]
+    RelativeHome,
+    #[error(transparent)]
+    Paths(#[from] AppPathsError),
+}
+
+pub(crate) struct StartupDependencies {
+    paths: Arc<AppPaths>,
+    home_directory: PathBuf,
+    ssh_environment: StartupSshEnvironment,
+    ssh_capability: SshCapability,
+    active_aliases: ActiveSshAliasRegistry,
+}
+
+impl StartupDependencies {
+    pub(crate) fn capture() -> Result<Self, StartupDependenciesError> {
+        let path_environment = AppPathEnvironment::capture();
+        let home_directory = path_environment
+            .home
+            .as_deref()
+            .map(PathBuf::from)
+            .ok_or(StartupDependenciesError::MissingHome)?;
+        if !home_directory.is_absolute() {
+            return Err(StartupDependenciesError::RelativeHome);
+        }
+        let ssh_environment = StartupSshEnvironment::capture();
+        let ssh_capability =
+            NativeSshProbeRunner::from_startup(home_directory.clone(), &ssh_environment)
+                .map(|runner| runner.probe_blocking())
+                .unwrap_or(SshCapability::Unavailable(
+                    SshUnavailableReason::ProbeFailed,
+                ));
+        Ok(Self {
+            paths: Arc::new(AppPaths::resolve(&path_environment)?),
+            home_directory,
+            ssh_environment,
+            ssh_capability,
+            active_aliases: ActiveSshAliasRegistry::default(),
+        })
+    }
+
+    fn remote_backend_factory(&self) -> Arc<NativeRemoteWorkspaceFlowBackendFactory> {
+        Arc::new(NativeRemoteWorkspaceFlowBackendFactory::new(
+            Arc::clone(&self.paths),
+            self.home_directory.clone(),
+            self.ssh_environment.clone(),
+            self.ssh_capability.clone(),
+            self.active_aliases.clone(),
+        ))
+    }
+}
 
 actions!(
     spaceterm,
@@ -138,12 +199,9 @@ fn toggle_active_window_full_screen(_: &ToggleFullScreen, cx: &mut App) {
     });
 }
 
-pub(crate) fn open(cx: &mut App) {
-    let Some(home_directory) = std::env::var_os("HOME").map(PathBuf::from) else {
-        eprintln!("failed to open SpaceTerm because the user home directory is unavailable");
-        cx.quit();
-        return;
-    };
+pub(crate) fn open(cx: &mut App, startup: StartupDependencies) {
+    let home_directory = startup.home_directory.clone();
+    let remote_backend_factory = startup.remote_backend_factory();
     let bounds = Bounds::centered(None, size(px(900.0), px(580.0)), cx);
     let session_factory: Rc<dyn TerminalSessionFactory> = Rc::new(NativeTerminalSessionFactory);
     let result = cx.open_window(
@@ -162,6 +220,7 @@ pub(crate) fn open(cx: &mut App) {
                 WorkspaceManager::new(
                     Rc::clone(&session_factory),
                     home_directory.clone(),
+                    Arc::clone(&remote_backend_factory),
                     window,
                     cx,
                 )
@@ -274,9 +333,11 @@ mod tests {
                 }),
             )),
         );
-        let session_factory = WorkspaceTerminalSessionFactory::new(
+        let session_factory = WorkspaceTerminalSessionFactory::new_local(
             session_factory,
-            PathBuf::from("/tmp/spaceterm-native-copy-command-test"),
+            crate::terminal::testing::test_workspace_directory(PathBuf::from(
+                "/tmp/spaceterm-native-copy-command-test",
+            )),
         );
         let (pane, cx) =
             cx.add_window_view(|window, cx| TerminalPane::new(session_factory, window, cx));

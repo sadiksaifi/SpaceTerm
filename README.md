@@ -25,6 +25,11 @@ Run `just` to list the common development, validation, and packaging commands.
 just run
 ```
 
+## Documentation
+
+- [Remote Project Workspaces](docs/REMOTE_PROJECT_WORKSPACES.md) covers Remote over SSH setup,
+  authentication, lifecycle, reconnect, security, and troubleshooting.
+
 ## Package for macOS
 
 Create a release application bundle and installer disk image:

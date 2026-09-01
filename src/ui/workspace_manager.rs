@@ -1,10 +1,21 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
+use super::native_remote_workspace_flow_backend::NativeRemoteWorkspaceFlowBackendFactory;
 use super::new_workspace_panel::{NewWorkspacePanel, NewWorkspacePanelEvent, NewWorkspaceSource};
+use super::remote_workspace_flow::{
+    RemoteWorkspaceAliasPin, RemoteWorkspaceConnectContext, RemoteWorkspaceConnectedSession,
+    RemoteWorkspaceConnectionProgress, RemoteWorkspaceFlow, RemoteWorkspaceFlowBackend,
+    RemoteWorkspaceFlowBackendError, RemoteWorkspaceFlowBackendFactory,
+    RemoteWorkspaceFlowCompletion, RemoteWorkspaceFlowCompletionHandle, RemoteWorkspaceFlowEvent,
+};
 use super::terminal_focus::TerminalFocusBlocker;
+use super::window_manager::{
+    PreparedWindowManagerRemoteRestart, RemoteWindowManagerLifecycleError,
+};
 use super::workspace_picker::{WorkspacePicker, WorkspacePickerEvent};
 use super::workspace_search::{WorkspaceSearch, WorkspaceSearchEvent, WorkspaceSearchItem};
 use super::{
@@ -14,15 +25,18 @@ use super::{
     ActivateWorkspace6, ActivateWorkspace7, ActivateWorkspace8, ActivateWorkspace9, ClosePane,
     CloseTerminalFind, CloseWindow, CloseWorkspace, CopySelection, CreateScratchWorkspace,
     CreateWindow, FindNext, FindPrevious, FocusPaneDown, FocusPaneLeft, FocusPaneRight,
-    FocusPaneUp, OpenLocalProject, OpenTerminalFind, SearchWorkspaces, ShowNewWorkspacePanel,
-    SplitDown, SplitRight, TERMINAL_KEY_CONTEXT, TOP_CHROME_HEIGHT, TogglePaneZoom, ToggleSidebar,
-    ToggleSidebarFocus, WORKSPACE_SIDEBAR_DEFAULT_WIDTH, WORKSPACE_SIDEBAR_MINIMUM_WIDTH,
-    WindowManager, WindowManagerEvent,
+    FocusPaneUp, OpenLocalProject, OpenTerminalFind, RemoteChildLaunchUnavailable,
+    SearchWorkspaces, ShowNewWorkspacePanel, SplitDown, SplitRight, TERMINAL_KEY_CONTEXT,
+    TOP_CHROME_HEIGHT, TogglePaneZoom, ToggleSidebar, ToggleSidebarFocus,
+    WORKSPACE_SIDEBAR_DEFAULT_WIDTH, WORKSPACE_SIDEBAR_MINIMUM_WIDTH, WindowManager,
+    WindowManagerEvent,
 };
 use crate::domain::{
-    CloseWorkspaceOutcome, DirectoryAuthority, FinalWindowCloseOutcome,
-    ValidatedWorkspaceDirectory, WorkspaceCollection, WorkspaceDirectoryAvailability,
-    WorkspaceDirectoryIdentity, WorkspaceError, WorkspaceId, WorkspaceKind,
+    CloseWorkspaceOutcome, CreateRemoteProjectOutcome, DirectoryAuthority, FinalWindowCloseOutcome,
+    RemoteConnectionPhase, RemoteConnectionReduction, RemoteConnectionState,
+    RemoteWorkspaceDirectory, RemoteWorkspaceKey, ValidatedWorkspaceDirectory, WorkspaceCollection,
+    WorkspaceDirectoryAvailability, WorkspaceDirectoryIdentity, WorkspaceError, WorkspaceId,
+    WorkspaceKind,
 };
 use crate::platform::finder_fallback::{FinderFallback, NativeFinderFallback};
 use crate::platform::macos_system_settings::MacosSystemSettingsOpener;
@@ -32,25 +46,30 @@ use crate::platform::macos_window_drag::{
 };
 use crate::platform::workspace_directory::validate_workspace_directory;
 use crate::platform::workspace_picker_filesystem::NativeWorkspacePickerFilesystem;
+use crate::ssh::live_connection::{ControlConnectionObserver, ControlConnectionTerminalState};
+use crate::ssh::process::TransientSshErrorOutput;
+use crate::terminal::metadata::RemoteTerminalMetadataContext;
 use crate::terminal::{
-    NativeServiceOrigin, NativeServiceStatus, SelectionCopy, TerminalSessionFactory,
-    WorkspaceTerminalSessionFactory,
+    NativeServiceOrigin, NativeServiceStatus, PreparedWorkspaceTerminalLaunch, SelectionCopy,
+    TerminalSessionFactory, WorkspaceTerminalSessionFactory,
 };
 use crate::theme::{ACTIVE_THEME, Color};
 use gpui::prelude::*;
 use gpui::{
     Action, AnyElement, App, Context, DispatchPhase, Entity, EntityId, FocusHandle, MouseButton,
     MouseMoveEvent, MouseUpEvent, Pixels, Render, ScrollHandle, ScrollWheelEvent, SharedString,
-    WeakEntity, Window, canvas, div, point, px, rgba,
+    Task, WeakEntity, Window, canvas, div, point, px, rgba,
 };
 use gpui_symbols::{Icon, RenderingMode, SymbolWeight};
 use spaceterm_ui::{
-    Button, ButtonShape, ButtonSize, ButtonVariant, ContextMenu, IconButton, MenuEntry,
-    MenuLifecycleEvent, MenuSize, MiddleTruncatedText, ModalLayer, OverlayScrollbar,
-    OverlayScrollbarEvent, ResizeAxis, ResizeFinishReason, ResizeHandle, ResizeHandleEvent,
-    ResizeInputSource, ScrollMetrics, TextInput, TextInputEvent, TextInputVariant, Tooltip,
-    TooltipLayer, TooltipTargetVisibility, WindowDragRegion, WindowDragRegionEvent,
-    WindowDragRegionResponse, WindowDragRegionStatus, window_modal_is_open,
+    Alert, AlertIntent, Button, ButtonShape, ButtonSize, ButtonVariant, ContextMenu, IconButton,
+    MenuEntry, MenuLifecycleEvent, MenuSize, MiddleTruncatedText, ModalAction, ModalActionRole,
+    ModalId, ModalLayer, OverlayScrollbar, OverlayScrollbarEvent, ProgressCancelDecision,
+    ProgressCancellation, ProgressDialog, ProgressDialogHandle, ProgressDialogOutcome,
+    ProgressDialogUpdate, ProgressState, ResizeAxis, ResizeFinishReason, ResizeHandle,
+    ResizeHandleEvent, ResizeInputSource, ScrollMetrics, TextInput, TextInputEvent,
+    TextInputVariant, Tooltip, TooltipLayer, TooltipTargetVisibility, WindowDragRegion,
+    WindowDragRegionEvent, WindowDragRegionResponse, WindowDragRegionStatus, window_modal_is_open,
 };
 
 const SIDEBAR_TOGGLE_INSET: f32 = 4.0;
@@ -80,6 +99,7 @@ const TERMINAL_CONTENT_MINIMUM_WIDTH: f32 = 240.0;
 enum WorkspaceMenuCommand {
     NewWindow,
     Rename,
+    Reconnect,
     Close,
 }
 
@@ -101,10 +121,99 @@ struct WorkspaceRowViewModel {
     path: SharedString,
     tooltip: SharedString,
     local_project: bool,
+    remote_connection_phase: Option<RemoteConnectionPhase>,
     available: bool,
     window_count: usize,
     pane_count: usize,
     active: bool,
+}
+
+struct RemoteWorkspaceRuntime {
+    generation: u64,
+    session: Option<RemoteWorkspaceConnectedSession>,
+    lifecycle: Option<ControlConnectionObserver>,
+    alias_pin: Option<RemoteWorkspaceAliasPin>,
+}
+
+impl RemoteWorkspaceRuntime {
+    fn new(
+        generation: u64,
+        session: RemoteWorkspaceConnectedSession,
+        lifecycle: ControlConnectionObserver,
+        alias_pin: Option<RemoteWorkspaceAliasPin>,
+    ) -> Self {
+        Self {
+            generation,
+            session: Some(session),
+            lifecycle: Some(lifecycle),
+            alias_pin,
+        }
+    }
+
+    fn close(&mut self) {
+        self.lifecycle.take();
+        self.session.take();
+        self.alias_pin.take();
+    }
+}
+
+struct RemoteWorkspaceReconnectAttempt {
+    workspace_id: WorkspaceId,
+    generation: u64,
+    cancelled: Arc<AtomicBool>,
+    progress: Option<ProgressDialogHandle>,
+    progress_generation: u64,
+    _work: Task<()>,
+    _progress_updates: Task<()>,
+}
+
+#[derive(Clone, Copy)]
+struct RemoteWorkspaceReconnectProgressIdentity {
+    workspace_id: WorkspaceId,
+    reconnect_generation: u64,
+    presentation_generation: u64,
+}
+
+struct PreparedRemoteWorkspaceReconnect {
+    session: RemoteWorkspaceConnectedSession,
+    lifecycle: ControlConnectionObserver,
+    restart: PreparedWindowManagerRemoteRestart,
+}
+
+struct WindowManagerCreation {
+    workspace_id: WorkspaceId,
+    sidebar_visible: bool,
+    sidebar_width: Pixels,
+    operating_system_window_drag_platform: Rc<dyn OperatingSystemWindowDragPlatform>,
+}
+
+struct PendingRemoteProjectActivation {
+    flow: Entity<RemoteWorkspaceFlow>,
+    handle: RemoteWorkspaceFlowCompletionHandle,
+    completion: RemoteWorkspaceFlowCompletion,
+    terminal_factory: WorkspaceTerminalSessionFactory,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+enum RemoteWorkspaceReconnectFailure {
+    Cancelled,
+    ConnectionFailed {
+        detail: Option<TransientSshErrorOutput>,
+    },
+    DirectoryUnavailable,
+    IdentityChanged,
+}
+
+impl Drop for RemoteWorkspaceReconnectAttempt {
+    fn drop(&mut self) {
+        self.cancelled.store(true, Ordering::Release);
+    }
+}
+
+impl Drop for RemoteWorkspaceRuntime {
+    fn drop(&mut self) {
+        self.close();
+    }
 }
 
 pub(crate) struct WorkspaceManager {
@@ -121,6 +230,14 @@ pub(crate) struct WorkspaceManager {
     sidebar_focus: FocusHandle,
     workspace_search: Entity<WorkspaceSearch>,
     new_workspace_panel: Entity<NewWorkspacePanel>,
+    remote_workspace_backend: Option<Arc<dyn RemoteWorkspaceFlowBackend>>,
+    remote_workspace_flow: Option<Entity<RemoteWorkspaceFlow>>,
+    remote_workspace_runtimes: BTreeMap<WorkspaceId, RemoteWorkspaceRuntime>,
+    remote_workspace_activation_task: Option<Task<()>>,
+    remote_workspace_focus_restore_pending: bool,
+    remote_workspace_reconnect: Option<RemoteWorkspaceReconnectAttempt>,
+    #[cfg(test)]
+    close_focused_pane_before_reconnect_commit: bool,
     picker_entered_from_panel: bool,
     workspace_menu: Option<WorkspaceMenuState>,
     rename: Option<WorkspaceRenameState>,
@@ -135,6 +252,28 @@ impl WorkspaceManager {
     pub(crate) fn new(
         session_factory: Rc<dyn TerminalSessionFactory>,
         default_workspace_root: PathBuf,
+        remote_workspace_backend_factory: Arc<NativeRemoteWorkspaceFlowBackendFactory>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let remote_workspace_backend_factory: Arc<dyn RemoteWorkspaceFlowBackendFactory> =
+            remote_workspace_backend_factory;
+        Self::new_with_adapters(
+            session_factory,
+            default_workspace_root,
+            Rc::new(NativeFinderFallback),
+            Rc::new(MacosOperatingSystemWindowDragPlatform::default()),
+            remote_workspace_backend_factory,
+            window,
+            cx,
+        )
+    }
+
+    #[cfg(test)]
+    fn new_with_remote_workspace_backend_factory(
+        session_factory: Rc<dyn TerminalSessionFactory>,
+        default_workspace_root: PathBuf,
+        remote_workspace_backend_factory: Arc<dyn RemoteWorkspaceFlowBackendFactory>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -143,6 +282,7 @@ impl WorkspaceManager {
             default_workspace_root,
             Rc::new(NativeFinderFallback),
             Rc::new(MacosOperatingSystemWindowDragPlatform::default()),
+            remote_workspace_backend_factory,
             window,
             cx,
         )
@@ -153,6 +293,7 @@ impl WorkspaceManager {
         session_factory: Rc<dyn TerminalSessionFactory>,
         default_workspace_root: PathBuf,
         finder_fallback: Rc<dyn FinderFallback>,
+        remote_workspace_backend_factory: Arc<dyn RemoteWorkspaceFlowBackendFactory>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -161,16 +302,18 @@ impl WorkspaceManager {
             default_workspace_root,
             finder_fallback,
             Rc::new(MacosOperatingSystemWindowDragPlatform::default()),
+            remote_workspace_backend_factory,
             window,
             cx,
         )
     }
 
     #[cfg(test)]
-    pub(crate) fn new_with_operating_system_window_drag_platform(
+    fn new_with_operating_system_window_drag_platform(
         session_factory: Rc<dyn TerminalSessionFactory>,
         default_workspace_root: PathBuf,
         operating_system_window_drag_platform: Rc<dyn OperatingSystemWindowDragPlatform>,
+        remote_workspace_backend_factory: Arc<dyn RemoteWorkspaceFlowBackendFactory>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -179,6 +322,7 @@ impl WorkspaceManager {
             default_workspace_root,
             Rc::new(NativeFinderFallback),
             operating_system_window_drag_platform,
+            remote_workspace_backend_factory,
             window,
             cx,
         )
@@ -189,6 +333,7 @@ impl WorkspaceManager {
         default_workspace_root: PathBuf,
         finder_fallback: Rc<dyn FinderFallback>,
         operating_system_window_drag_platform: Rc<dyn OperatingSystemWindowDragPlatform>,
+        remote_workspace_backend_factory: Arc<dyn RemoteWorkspaceFlowBackendFactory>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -201,13 +346,15 @@ impl WorkspaceManager {
             default_directory,
             DirectoryAuthority::initial(),
             |workspace_id, workspace_root| {
-                Self::create_window_manager(
+                Self::create_local_window_manager(
                     workspace_id,
-                    WorkspaceTerminalSessionFactory::new(
+                    WorkspaceTerminalSessionFactory::new_local(
                         Rc::clone(&session_factory),
-                        workspace_root.to_path_buf(),
-                    )
-                    .with_directory_identity(initial_workspace_identity),
+                        ValidatedWorkspaceDirectory::new(
+                            workspace_root.to_path_buf(),
+                            initial_workspace_identity,
+                        ),
+                    ),
                     true,
                     px(WORKSPACE_SIDEBAR_DEFAULT_WIDTH),
                     Rc::clone(&initial_window_drag_platform),
@@ -266,7 +413,28 @@ impl WorkspaceManager {
             },
         )
         .detach();
-        let new_workspace_panel = cx.new(|cx| NewWorkspacePanel::new(window, cx));
+        let mut remote_unavailable_reason = remote_workspace_backend_factory.unavailable_reason();
+        let remote_workspace_backend = if remote_unavailable_reason.is_some() {
+            None
+        } else {
+            match remote_workspace_backend_factory.create(window, cx) {
+                Ok(backend) => Some(backend),
+                Err(error) => {
+                    eprintln!("failed to initialize Remote Workspace backend: {error:?}");
+                    remote_unavailable_reason = Some(
+                        "Remote Workspace setup failed; restart SpaceTerm to retry".to_owned(),
+                    );
+                    None
+                }
+            }
+        };
+        let new_workspace_panel = cx.new(|cx| {
+            NewWorkspacePanel::new_with_remote_unavailable_reason(
+                remote_unavailable_reason,
+                window,
+                cx,
+            )
+        });
         cx.subscribe_in(
             &new_workspace_panel,
             window,
@@ -274,6 +442,10 @@ impl WorkspaceManager {
                 manager.handle_new_workspace_panel_event(event, window, cx);
             },
         )
+        .detach();
+        cx.observe_window_activation(window, |manager, window, cx| {
+            manager.restore_remote_workspace_focus_after_activation(window, cx);
+        })
         .detach();
 
         Self {
@@ -290,6 +462,14 @@ impl WorkspaceManager {
             sidebar_focus: cx.focus_handle(),
             workspace_search,
             new_workspace_panel,
+            remote_workspace_backend,
+            remote_workspace_flow: None,
+            remote_workspace_runtimes: BTreeMap::new(),
+            remote_workspace_activation_task: None,
+            remote_workspace_focus_restore_pending: false,
+            remote_workspace_reconnect: None,
+            #[cfg(test)]
+            close_focused_pane_before_reconnect_commit: false,
             picker_entered_from_panel: false,
             workspace_menu: None,
             rename: None,
@@ -301,7 +481,7 @@ impl WorkspaceManager {
         }
     }
 
-    fn create_window_manager(
+    fn create_local_window_manager(
         workspace_id: WorkspaceId,
         session_factory: WorkspaceTerminalSessionFactory,
         sidebar_visible: bool,
@@ -310,9 +490,55 @@ impl WorkspaceManager {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Entity<WindowManager> {
+        match Self::try_create_window_manager(
+            session_factory,
+            WindowManagerCreation {
+                workspace_id,
+                sidebar_visible,
+                sidebar_width,
+                operating_system_window_drag_platform,
+            },
+            window,
+            cx,
+        ) {
+            Ok(manager) => manager,
+            Err(error) => unreachable!("Local initial launch preparation is infallible: {error}"),
+        }
+    }
+
+    fn try_create_window_manager(
+        session_factory: WorkspaceTerminalSessionFactory,
+        creation: WindowManagerCreation,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<Entity<WindowManager>, crate::terminal::RemoteChannelUnavailable> {
+        let prepared_launch = session_factory.prepare_child_launch()?;
+        Ok(Self::create_window_manager_with_prepared_launch(
+            session_factory,
+            prepared_launch,
+            creation,
+            window,
+            cx,
+        ))
+    }
+
+    fn create_window_manager_with_prepared_launch(
+        session_factory: WorkspaceTerminalSessionFactory,
+        prepared_launch: PreparedWorkspaceTerminalLaunch,
+        creation: WindowManagerCreation,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Entity<WindowManager> {
+        let WindowManagerCreation {
+            workspace_id,
+            sidebar_visible,
+            sidebar_width,
+            operating_system_window_drag_platform,
+        } = creation;
         let manager = cx.new(|cx| {
-            let mut manager = WindowManager::new_with_operating_system_window_drag_platform(
+            let mut manager = WindowManager::new_with_prepared_initial_launch(
                 session_factory,
+                prepared_launch,
                 operating_system_window_drag_platform,
                 window,
                 cx,
@@ -393,7 +619,51 @@ impl WorkspaceManager {
             },
         )
         .detach();
+        cx.subscribe_in(
+            &manager,
+            window,
+            move |workspace_manager, _, event: &RemoteChildLaunchUnavailable, window, cx| {
+                workspace_manager.handle_remote_child_launch_unavailable(
+                    workspace_id,
+                    *event,
+                    window,
+                    cx,
+                );
+            },
+        )
+        .detach();
         manager
+    }
+
+    fn handle_remote_child_launch_unavailable(
+        &mut self,
+        workspace_id: WorkspaceId,
+        event: RemoteChildLaunchUnavailable,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self
+            .workspaces
+            .workspace(workspace_id)
+            .is_none_or(|workspace| workspace.remote_workspace_key().is_none())
+        {
+            return;
+        }
+        let failure = match event {
+            RemoteChildLaunchUnavailable::ConnectionUnavailable => {
+                RemoteWorkspaceReconnectFailure::ConnectionFailed { detail: None }
+            }
+            RemoteChildLaunchUnavailable::DirectoryUnavailable => {
+                RemoteWorkspaceReconnectFailure::DirectoryUnavailable
+            }
+            RemoteChildLaunchUnavailable::IdentityChanged => {
+                RemoteWorkspaceReconnectFailure::IdentityChanged
+            }
+            RemoteChildLaunchUnavailable::Cancelled | RemoteChildLaunchUnavailable::Stale => {
+                return;
+            }
+        };
+        self.present_remote_workspace_reconnect_error(failure, window, cx);
     }
 
     fn handle_directory_report(
@@ -432,8 +702,13 @@ impl WorkspaceManager {
             return;
         };
         let manager = workspace.payload().clone();
-        let path = workspace.working_directory().to_path_buf();
-        let identity = workspace.directory_identity();
+        let (Some(path), Some(identity)) = (
+            workspace.working_directory(),
+            workspace.directory_identity(),
+        ) else {
+            unreachable!("a Scratch Workspace must own a local Workspace Directory")
+        };
+        let path = path.to_path_buf();
         manager.update(cx, |manager, cx| {
             manager.set_workspace_directory(&path, identity, cx);
         });
@@ -479,8 +754,13 @@ impl WorkspaceManager {
             return;
         };
         let manager = workspace.payload().clone();
-        let path = workspace.working_directory().to_path_buf();
-        let identity = workspace.directory_identity();
+        let (Some(path), Some(identity)) = (
+            workspace.working_directory(),
+            workspace.directory_identity(),
+        ) else {
+            unreachable!("a Scratch Workspace must own a local Workspace Directory")
+        };
+        let path = path.to_path_buf();
         manager.update(cx, |manager, cx| {
             manager.set_workspace_directory(&path, identity, cx)
         });
@@ -526,8 +806,13 @@ impl WorkspaceManager {
             return;
         };
         let manager = workspace.payload().clone();
-        let path = workspace.working_directory().to_path_buf();
-        let identity = workspace.directory_identity();
+        let (Some(path), Some(identity)) = (
+            workspace.working_directory(),
+            workspace.directory_identity(),
+        ) else {
+            unreachable!("a Scratch Workspace must own a local Workspace Directory")
+        };
+        let path = path.to_path_buf();
         manager.update(cx, |manager, cx| {
             manager.set_workspace_directory(&path, identity, cx)
         });
@@ -614,6 +899,11 @@ impl WorkspaceManager {
             .blocks_terminal_input()
             .then_some(TerminalFocusBlocker::Modal)
             .or(self
+                .remote_workspace_flow
+                .as_ref()
+                .is_some_and(|flow| flow.read(cx).blocks_terminal_input())
+                .then_some(TerminalFocusBlocker::CommandPalette))
+            .or(self
                 .new_workspace_panel
                 .read(cx)
                 .blocks_terminal_input()
@@ -651,7 +941,12 @@ impl WorkspaceManager {
                 WorkspaceSearchItem::new(
                     workspace.id(),
                     workspace.name().to_owned(),
-                    compact_home_path(workspace.working_directory(), &self.default_workspace_root),
+                    workspace_directory_labels(
+                        workspace.working_directory(),
+                        workspace.remote_workspace_directory(),
+                        &self.default_workspace_root,
+                    )
+                    .0,
                     matches!(workspace.kind(), WorkspaceKind::LocalProject { .. }),
                     matches!(
                         workspace.availability(),
@@ -725,6 +1020,23 @@ impl WorkspaceManager {
             .update(cx, |manager, cx| {
                 manager.set_parent_focus_blocker(blocker, cx);
             });
+    }
+
+    fn restore_remote_workspace_focus_after_activation(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !window.is_window_active()
+            || !std::mem::take(&mut self.remote_workspace_focus_restore_pending)
+        {
+            return;
+        }
+        if self.terminal_focus_blocker(window, cx).is_some() {
+            return;
+        }
+        self.focus(window, cx);
+        cx.notify();
     }
 
     fn handle_operating_system_window_drag_event(
@@ -919,13 +1231,15 @@ impl WorkspaceManager {
             directory,
             DirectoryAuthority::initial(),
             |workspace_id, workspace_root| {
-                Self::create_window_manager(
+                Self::create_local_window_manager(
                     workspace_id,
-                    WorkspaceTerminalSessionFactory::new(
+                    WorkspaceTerminalSessionFactory::new_local(
                         session_factory,
-                        workspace_root.to_path_buf(),
-                    )
-                    .with_directory_identity(directory_identity),
+                        ValidatedWorkspaceDirectory::new(
+                            workspace_root.to_path_buf(),
+                            directory_identity,
+                        ),
+                    ),
                     sidebar_visible,
                     sidebar_width,
                     window_drag_platform,
@@ -1058,10 +1372,929 @@ impl WorkspaceManager {
                     self.present_workspace_picker(window, cx);
                 }
                 NewWorkspaceSource::Scratch => self.create_scratch_workspace(window, cx),
-                // The palette never activates a disabled row; Remote Project has no selection
-                // path until SSH Workspaces exist.
-                NewWorkspaceSource::RemoteProject => {}
+                NewWorkspaceSource::RemoteProject => self.present_remote_workspace_flow(window, cx),
             },
+        }
+    }
+
+    fn present_remote_workspace_flow(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(backend) = self.remote_workspace_backend.as_ref().map(Arc::clone) else {
+            self.sync_terminal_focus_blocker(window, cx);
+            return;
+        };
+        let flow = self.remote_workspace_flow.get_or_insert_with(|| {
+            let flow = cx.new(|cx| RemoteWorkspaceFlow::new(backend, window, cx));
+            cx.subscribe_in(
+                &flow,
+                window,
+                |manager, flow, event: &RemoteWorkspaceFlowEvent, window, cx| {
+                    manager.handle_remote_workspace_flow_event(flow, event, window, cx);
+                },
+            )
+            .detach();
+            flow
+        });
+        let Some(replacement) = self
+            .new_workspace_panel
+            .update(cx, |panel, cx| panel.dismiss_for_replacement(window, cx))
+        else {
+            self.sync_terminal_focus_blocker(window, cx);
+            return;
+        };
+        if !flow.update(cx, |flow, cx| flow.open_replacing(replacement, window, cx)) {
+            self.remote_workspace_flow = None;
+        }
+        self.sync_terminal_focus_blocker(window, cx);
+        cx.notify();
+    }
+
+    fn handle_remote_workspace_flow_event(
+        &mut self,
+        source: &Entity<RemoteWorkspaceFlow>,
+        event: &RemoteWorkspaceFlowEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self
+            .remote_workspace_flow
+            .as_ref()
+            .is_none_or(|current| current != source)
+        {
+            return;
+        }
+        match event {
+            RemoteWorkspaceFlowEvent::StateChanged => {
+                self.sync_terminal_focus_blocker(window, cx);
+                cx.notify();
+            }
+            RemoteWorkspaceFlowEvent::Cancelled => {
+                self.remote_workspace_activation_task.take();
+                self.remote_workspace_focus_restore_pending = !window.is_window_active();
+                self.remote_workspace_flow = None;
+                self.sync_terminal_focus_blocker(window, cx);
+                cx.notify();
+            }
+            RemoteWorkspaceFlowEvent::Completed(handle) => {
+                self.activate_remote_project(source, handle, window, cx);
+            }
+        }
+    }
+
+    fn activate_remote_project(
+        &mut self,
+        flow: &Entity<RemoteWorkspaceFlow>,
+        handle: &RemoteWorkspaceFlowCompletionHandle,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(completion) = handle.take() else {
+            return;
+        };
+        let key = RemoteWorkspaceKey::new(
+            completion.destination().clone(),
+            completion.physical_directory().clone(),
+        );
+        if self.workspaces.remote_project_workspace(&key).is_some() {
+            match self.try_activate_existing_remote_project(key, completion, window, cx) {
+                Ok(()) => self.acknowledge_remote_project_activation(flow, handle, window, cx),
+                Err(completion) => {
+                    self.return_remote_project_activation(flow, handle, *completion, window, cx)
+                }
+            }
+            return;
+        }
+
+        let terminal_factory = WorkspaceTerminalSessionFactory::new_remote(
+            Rc::clone(&self.session_factory),
+            ValidatedWorkspaceDirectory::new(
+                self.default_workspace_root.clone(),
+                self.default_workspace_identity,
+            ),
+            RemoteTerminalMetadataContext::new(
+                completion.destination().clone(),
+                completion.directory().clone(),
+            ),
+            remote_workspace_fallback_title(&key, completion.remote_home_identity()),
+            completion.terminal_channels(),
+        );
+        let Some(revalidation) = terminal_factory.revalidate_remote_child_launch() else {
+            unreachable!("a Remote Workspace Terminal factory must require revalidation")
+        };
+        let activation = PendingRemoteProjectActivation {
+            flow: flow.clone(),
+            handle: handle.clone(),
+            completion,
+            terminal_factory,
+        };
+        self.remote_workspace_activation_task =
+            Some(cx.spawn_in(window, async move |manager, cx| {
+                let revalidation = revalidation.await;
+                let _ = manager.update_in(cx, |manager, window, cx| {
+                    manager.finish_remote_project_activation(activation, revalidation, window, cx);
+                });
+            }));
+        self.sync_terminal_focus_blocker(window, cx);
+        cx.notify();
+    }
+
+    fn finish_remote_project_activation(
+        &mut self,
+        activation: PendingRemoteProjectActivation,
+        revalidation: Result<(), crate::terminal::RemoteChannelRevalidationError>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let PendingRemoteProjectActivation {
+            flow,
+            handle,
+            completion,
+            terminal_factory,
+        } = activation;
+        let is_current = self.remote_workspace_flow.as_ref() == Some(&flow)
+            && flow.read(cx).owns_activation(&handle);
+        if !is_current {
+            drop(completion);
+            return;
+        }
+        if let Err(error) = revalidation {
+            eprintln!("cannot create Remote Workspace because {error}");
+            self.return_remote_project_activation(&flow, &handle, completion, window, cx);
+            return;
+        }
+        let key = RemoteWorkspaceKey::new(
+            completion.destination().clone(),
+            completion.physical_directory().clone(),
+        );
+        if self.workspaces.remote_project_workspace(&key).is_some() {
+            match self.try_activate_existing_remote_project(key, completion, window, cx) {
+                Ok(()) => self.acknowledge_remote_project_activation(&flow, &handle, window, cx),
+                Err(completion) => {
+                    self.return_remote_project_activation(&flow, &handle, *completion, window, cx)
+                }
+            }
+            return;
+        }
+        let prepared_launch = match terminal_factory.prepare_child_launch() {
+            Ok(prepared_launch) => prepared_launch,
+            Err(error) => {
+                eprintln!("cannot create Remote Workspace because {error}");
+                self.return_remote_project_activation(&flow, &handle, completion, window, cx);
+                return;
+            }
+        };
+        match self.try_create_remote_project(
+            completion,
+            terminal_factory,
+            prepared_launch,
+            window,
+            cx,
+        ) {
+            Ok(()) => self.acknowledge_remote_project_activation(&flow, &handle, window, cx),
+            Err(completion) => {
+                self.return_remote_project_activation(&flow, &handle, *completion, window, cx)
+            }
+        }
+    }
+
+    fn try_activate_existing_remote_project(
+        &mut self,
+        key: RemoteWorkspaceKey,
+        completion: RemoteWorkspaceFlowCompletion,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<(), Box<RemoteWorkspaceFlowCompletion>> {
+        let previous_workspace_id = self.workspaces.active_workspace_id();
+        let previous_manager = self.workspaces.active_workspace().payload().clone();
+        let outcome = self.workspaces.create_remote_project_workspace(
+            key,
+            completion.directory().clone(),
+            completion.remote_home_identity().clone(),
+            RemoteConnectionState::connected(1),
+            |_| unreachable!("deduplication must not create a replacement payload"),
+        );
+        let Ok(CreateRemoteProjectOutcome::ActivatedExisting { workspace_id }) = outcome else {
+            return Err(Box::new(completion));
+        };
+        self.activate_remote_window_manager(
+            previous_workspace_id,
+            previous_manager,
+            workspace_id,
+            window,
+            cx,
+        );
+        drop(completion);
+        self.debug_assert_remote_runtime_invariants();
+        Ok(())
+    }
+
+    fn try_create_remote_project(
+        &mut self,
+        completion: RemoteWorkspaceFlowCompletion,
+        terminal_factory: WorkspaceTerminalSessionFactory,
+        prepared_launch: PreparedWorkspaceTerminalLaunch,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<(), Box<RemoteWorkspaceFlowCompletion>> {
+        let alias_pin = match completion.acquire_workspace_alias_pin() {
+            Ok(alias_pin) => alias_pin,
+            Err(_) => return Err(Box::new(completion)),
+        };
+        let key = RemoteWorkspaceKey::new(
+            completion.destination().clone(),
+            completion.physical_directory().clone(),
+        );
+        let previous_workspace_id = self.workspaces.active_workspace_id();
+        let previous_manager = self.workspaces.active_workspace().payload().clone();
+        let sidebar_visible = self.sidebar_visible;
+        let sidebar_width = self.sidebar_width;
+        let window_drag_platform = Rc::clone(&self.operating_system_window_drag_platform);
+        let result = self.workspaces.create_remote_project_workspace(
+            key,
+            completion.directory().clone(),
+            completion.remote_home_identity().clone(),
+            RemoteConnectionState::connected(1),
+            |workspace_id| {
+                Self::create_window_manager_with_prepared_launch(
+                    terminal_factory,
+                    prepared_launch,
+                    WindowManagerCreation {
+                        workspace_id,
+                        sidebar_visible,
+                        sidebar_width,
+                        operating_system_window_drag_platform: window_drag_platform,
+                    },
+                    window,
+                    cx,
+                )
+            },
+        );
+        let workspace_id = match result {
+            Ok(CreateRemoteProjectOutcome::Created { workspace_id }) => workspace_id,
+            Ok(CreateRemoteProjectOutcome::ActivatedExisting { workspace_id }) => {
+                drop(completion);
+                self.activate_remote_window_manager(
+                    previous_workspace_id,
+                    previous_manager,
+                    workspace_id,
+                    window,
+                    cx,
+                );
+                self.debug_assert_remote_runtime_invariants();
+                return Ok(());
+            }
+            Err(_) => return Err(Box::new(completion)),
+        };
+        let (session, _, _, _, _, _, lifecycle) = completion.into_parts();
+        let replaced = self.remote_workspace_runtimes.insert(
+            workspace_id,
+            RemoteWorkspaceRuntime::new(1, session, lifecycle, alias_pin),
+        );
+        debug_assert!(
+            replaced.is_none(),
+            "a new Remote Workspace owns one runtime"
+        );
+        self.activate_remote_window_manager(
+            previous_workspace_id,
+            previous_manager,
+            workspace_id,
+            window,
+            cx,
+        );
+        self.observe_remote_workspace_runtime(workspace_id, 1, cx);
+        self.debug_assert_remote_runtime_invariants();
+        Ok(())
+    }
+
+    fn return_remote_project_activation(
+        &mut self,
+        flow: &Entity<RemoteWorkspaceFlow>,
+        handle: &RemoteWorkspaceFlowCompletionHandle,
+        completion: RemoteWorkspaceFlowCompletion,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let _ = flow.update(cx, |flow, cx| {
+            flow.activation_failed(handle, completion, window, cx)
+        });
+        self.sync_terminal_focus_blocker(window, cx);
+        cx.notify();
+    }
+
+    fn acknowledge_remote_project_activation(
+        &mut self,
+        flow: &Entity<RemoteWorkspaceFlow>,
+        handle: &RemoteWorkspaceFlowCompletionHandle,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let acknowledged =
+            flow.update(cx, |flow, cx| flow.activation_succeeded(handle, window, cx));
+        debug_assert!(
+            acknowledged,
+            "the active Remote Workspace completion must acknowledge"
+        );
+        if !acknowledged {
+            return;
+        }
+        self.remote_workspace_flow = None;
+        self.sync_terminal_focus_blocker(window, cx);
+        self.scroll_active_workspace_into_view();
+        self.refresh_workspace_search(cx);
+        cx.notify();
+    }
+
+    fn activate_remote_window_manager(
+        &self,
+        previous_workspace_id: WorkspaceId,
+        previous_manager: Entity<WindowManager>,
+        workspace_id: WorkspaceId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(next_manager) = self
+            .workspaces
+            .workspace(workspace_id)
+            .map(|workspace| workspace.payload().clone())
+        else {
+            unreachable!("an activated Remote Workspace must remain in its collection")
+        };
+        if previous_workspace_id != workspace_id {
+            previous_manager.update(cx, |manager, cx| manager.deactivate(cx));
+        }
+        next_manager.update(cx, |manager, cx| {
+            manager.set_parent_focus_blocker(Some(TerminalFocusBlocker::CommandPalette), cx);
+            manager.activate(window, cx);
+        });
+    }
+
+    fn debug_assert_remote_runtime_invariants(&self) {
+        debug_assert!(
+            self.remote_workspace_runtimes
+                .iter()
+                .all(|(workspace_id, _)| {
+                    self.workspaces
+                        .workspace(*workspace_id)
+                        .is_some_and(|workspace| {
+                            matches!(workspace.kind(), WorkspaceKind::RemoteProject { .. })
+                        })
+                })
+        );
+        debug_assert!(self.workspaces.iter().all(|workspace| {
+            !matches!(workspace.kind(), WorkspaceKind::RemoteProject { .. })
+                || self.remote_workspace_runtimes.contains_key(&workspace.id())
+        }));
+    }
+
+    fn observe_remote_workspace_runtime(
+        &mut self,
+        workspace_id: WorkspaceId,
+        generation: u64,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(observer) = self
+            .remote_workspace_runtimes
+            .get_mut(&workspace_id)
+            .filter(|runtime| runtime.generation == generation)
+            .and_then(|runtime| runtime.lifecycle.take())
+        else {
+            return;
+        };
+        cx.spawn(async move |manager, cx| {
+            let terminal = observer.terminal().await;
+            let _ = manager.update(cx, |manager, cx| {
+                manager.handle_remote_workspace_terminal(workspace_id, generation, terminal, cx);
+            });
+        })
+        .detach();
+    }
+
+    fn handle_remote_workspace_terminal(
+        &mut self,
+        workspace_id: WorkspaceId,
+        generation: u64,
+        _terminal: ControlConnectionTerminalState,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(state) = self
+            .workspaces
+            .workspace(workspace_id)
+            .and_then(|workspace| workspace.remote_connection_state())
+        else {
+            return;
+        };
+        if state != RemoteConnectionState::connected(generation)
+            || self
+                .remote_workspace_runtimes
+                .get(&workspace_id)
+                .is_none_or(|runtime| runtime.generation != generation)
+        {
+            return;
+        }
+        let Some(window_manager) = self
+            .workspaces
+            .workspace(workspace_id)
+            .map(|workspace| workspace.payload().clone())
+        else {
+            return;
+        };
+        if let Err(error) =
+            window_manager.update(cx, |manager, cx| manager.disconnect_remote(generation, cx))
+        {
+            eprintln!("cannot disconnect Remote Workspace terminals: {error}");
+            return;
+        }
+        let next = RemoteConnectionState::disconnected(generation);
+        if self
+            .workspaces
+            .reduce_remote_connection_state(workspace_id, next)
+            != Ok(RemoteConnectionReduction::Applied)
+        {
+            return;
+        }
+        if let Some(runtime) = self.remote_workspace_runtimes.get_mut(&workspace_id) {
+            runtime.session.take();
+        }
+        self.refresh_workspace_search(cx);
+        cx.notify();
+    }
+
+    fn start_remote_workspace_reconnect(
+        &mut self,
+        workspace_id: WorkspaceId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.remote_workspace_reconnect.is_some() {
+            return;
+        }
+        let Some(backend) = self.remote_workspace_backend.clone() else {
+            return;
+        };
+        if self.workspaces.begin_remote_reconnect(workspace_id)
+            != Ok(RemoteConnectionReduction::Applied)
+        {
+            return;
+        }
+        let Some(workspace) = self.workspaces.workspace(workspace_id) else {
+            return;
+        };
+        let Some(key) = workspace.remote_workspace_key().cloned() else {
+            return;
+        };
+        let Some(directory) = workspace.remote_workspace_directory().cloned() else {
+            return;
+        };
+        let Some(state) = workspace.remote_connection_state() else {
+            return;
+        };
+        let generation = state.generation();
+        let destination = key.destination().clone();
+        let expected_identity = key.physical_directory().clone();
+        let window_manager = workspace.payload().clone();
+        let local_root = ValidatedWorkspaceDirectory::new(
+            self.default_workspace_root.clone(),
+            self.default_workspace_identity,
+        );
+        let session_factory = Rc::clone(&self.session_factory);
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let Some(progress) = self.present_remote_workspace_reconnect_progress(
+            RemoteWorkspaceReconnectProgressIdentity {
+                workspace_id,
+                reconnect_generation: generation,
+                presentation_generation: 1,
+            },
+            RemoteWorkspaceConnectionProgress::CheckingCompatibility,
+            Arc::clone(&cancelled),
+            window,
+            cx,
+        ) else {
+            let _ = self.workspaces.reduce_remote_connection_state(
+                workspace_id,
+                RemoteConnectionState::failed(generation),
+            );
+            cx.notify();
+            return;
+        };
+        let (progress_sender, progress_receiver) = async_channel::bounded(8);
+        let context = RemoteWorkspaceConnectContext::new(progress_sender, Arc::clone(&cancelled));
+        let connection = backend.connect(destination.clone(), context);
+        let progress_updates = cx.spawn_in(window, async move |manager, cx| {
+            while let Ok(update) = progress_receiver.recv().await {
+                let Ok(current) = manager.update_in(cx, |manager, window, cx| {
+                    manager.apply_remote_workspace_reconnect_progress(
+                        workspace_id,
+                        generation,
+                        update,
+                        window,
+                        cx,
+                    )
+                }) else {
+                    break;
+                };
+                if !current {
+                    break;
+                }
+            }
+        });
+
+        let work_cancelled = Arc::clone(&cancelled);
+        let work = cx.spawn_in(window, async move |manager, cx| {
+            let result = async {
+                let mut session = connection.await.map_err(|error| {
+                    if work_cancelled.load(Ordering::Acquire)
+                        || matches!(
+                            error,
+                            RemoteWorkspaceFlowBackendError::AuthenticationCancelled
+                        )
+                    {
+                        RemoteWorkspaceReconnectFailure::Cancelled
+                    } else {
+                        RemoteWorkspaceReconnectFailure::ConnectionFailed {
+                            detail: error.into_connection_detail(),
+                        }
+                    }
+                })?;
+                if work_cancelled.load(Ordering::Acquire) {
+                    return Err(RemoteWorkspaceReconnectFailure::Cancelled);
+                }
+                let provider = session.provider();
+                let account = provider.discover_account().await.map_err(|_| {
+                    RemoteWorkspaceReconnectFailure::ConnectionFailed { detail: None }
+                })?;
+                if work_cancelled.load(Ordering::Acquire) {
+                    return Err(RemoteWorkspaceReconnectFailure::Cancelled);
+                }
+                let actual_identity = provider
+                    .validate_physical_identity(directory.clone())
+                    .await
+                    .map_err(|_| RemoteWorkspaceReconnectFailure::DirectoryUnavailable)?;
+                if actual_identity != expected_identity {
+                    return Err(RemoteWorkspaceReconnectFailure::IdentityChanged);
+                }
+                let channels = session
+                    .bind_terminal_channels_for_identity(
+                        &directory,
+                        &expected_identity,
+                        account.login_shell(),
+                    )
+                    .map_err(|_| RemoteWorkspaceReconnectFailure::ConnectionFailed {
+                        detail: None,
+                    })?;
+                let lifecycle = session
+                    .take_lifecycle_observer()
+                    .ok_or(RemoteWorkspaceReconnectFailure::ConnectionFailed { detail: None })?;
+                let factory = WorkspaceTerminalSessionFactory::new_remote(
+                    session_factory,
+                    local_root,
+                    RemoteTerminalMetadataContext::new(destination, directory),
+                    remote_workspace_fallback_title(&key, account.home_identity()),
+                    channels,
+                );
+                let restart = window_manager
+                    .update(cx, |manager, cx| {
+                        manager.prepare_remote_restart(factory, generation, cx)
+                    })
+                    .map_err(|_| RemoteWorkspaceReconnectFailure::Cancelled)?
+                    .await
+                    .map_err(classify_remote_workspace_restart_failure)?;
+                if work_cancelled.load(Ordering::Acquire) {
+                    return Err(RemoteWorkspaceReconnectFailure::Cancelled);
+                }
+                Ok(PreparedRemoteWorkspaceReconnect {
+                    session,
+                    lifecycle,
+                    restart,
+                })
+            }
+            .await;
+            let _ = manager.update_in(cx, |manager, window, cx| {
+                manager.finish_remote_workspace_reconnect(
+                    workspace_id,
+                    generation,
+                    result,
+                    window,
+                    cx,
+                );
+            });
+        });
+        self.remote_workspace_reconnect = Some(RemoteWorkspaceReconnectAttempt {
+            workspace_id,
+            generation,
+            cancelled,
+            progress: Some(progress),
+            progress_generation: 1,
+            _work: work,
+            _progress_updates: progress_updates,
+        });
+        self.refresh_workspace_search(cx);
+        cx.notify();
+    }
+
+    fn present_remote_workspace_reconnect_progress(
+        &self,
+        identity: RemoteWorkspaceReconnectProgressIdentity,
+        progress: RemoteWorkspaceConnectionProgress,
+        cancelled: Arc<AtomicBool>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<ProgressDialogHandle> {
+        let result_manager = cx.weak_entity();
+        let result_window = window.window_handle();
+        let cancel_flag = cancelled;
+        ProgressDialog::new(
+            ModalId::new("remote-workspace-reconnect-progress"),
+            "Remote reconnection progress",
+            "Reconnect Remote Workspace",
+            progress.status(),
+            ProgressState::Indeterminate,
+            ProgressCancellation::Cancellable(ModalAction::new(
+                (),
+                "Cancel",
+                ModalActionRole::Cancel,
+                "remote-workspace-reconnect-cancel",
+            )),
+        )
+        .detail("Authentication prompts open in a SpaceTerm dialog.")
+        .present(
+            window,
+            cx,
+            move |_, _, _| {
+                cancel_flag.store(true, Ordering::Release);
+                ProgressCancelDecision::Allow
+            },
+            move |outcome, cx| {
+                let _ = result_window.update(cx, |_, window, cx| {
+                    let _ = result_manager.update(cx, |manager, cx| {
+                        manager.finish_remote_workspace_reconnect_progress(
+                            identity, outcome, window, cx,
+                        );
+                    });
+                });
+            },
+        )
+        .ok()
+    }
+
+    fn apply_remote_workspace_reconnect_progress(
+        &mut self,
+        workspace_id: WorkspaceId,
+        generation: u64,
+        update: RemoteWorkspaceConnectionProgress,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let is_current = self
+            .remote_workspace_reconnect
+            .as_ref()
+            .is_some_and(|attempt| {
+                attempt.workspace_id == workspace_id && attempt.generation == generation
+            });
+        if !is_current {
+            return false;
+        }
+        if update == RemoteWorkspaceConnectionProgress::Authenticating {
+            let progress = self
+                .remote_workspace_reconnect
+                .as_mut()
+                .and_then(|attempt| {
+                    let progress = attempt.progress.take();
+                    if progress.is_some() {
+                        attempt.progress_generation = attempt.progress_generation.wrapping_add(1);
+                    }
+                    progress
+                });
+            if let Some(progress) = progress {
+                let _ = progress.dismiss(window, cx);
+            }
+            return true;
+        }
+        if let Some(progress) = self
+            .remote_workspace_reconnect
+            .as_ref()
+            .and_then(|attempt| attempt.progress.as_ref())
+        {
+            let _ = progress.update(
+                ProgressDialogUpdate::new().status(update.status()),
+                window,
+                cx,
+            );
+            return true;
+        }
+        let attempt = self
+            .remote_workspace_reconnect
+            .as_ref()
+            .expect("the current reconnect attempt must remain owned");
+        let cancelled = Arc::clone(&attempt.cancelled);
+        let progress_generation = attempt.progress_generation;
+        let Some(progress) = self.present_remote_workspace_reconnect_progress(
+            RemoteWorkspaceReconnectProgressIdentity {
+                workspace_id,
+                reconnect_generation: generation,
+                presentation_generation: progress_generation,
+            },
+            update,
+            Arc::clone(&cancelled),
+            window,
+            cx,
+        ) else {
+            cancelled.store(true, Ordering::Release);
+            return false;
+        };
+        if let Some(attempt) = self.remote_workspace_reconnect.as_mut().filter(|attempt| {
+            attempt.workspace_id == workspace_id && attempt.generation == generation
+        }) {
+            attempt.progress = Some(progress);
+            return true;
+        }
+        let _ = progress.dismiss(window, cx);
+        false
+    }
+
+    fn finish_remote_workspace_reconnect(
+        &mut self,
+        workspace_id: WorkspaceId,
+        generation: u64,
+        result: Result<PreparedRemoteWorkspaceReconnect, RemoteWorkspaceReconnectFailure>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let is_current = self
+            .remote_workspace_reconnect
+            .as_ref()
+            .is_some_and(|attempt| {
+                attempt.workspace_id == workspace_id && attempt.generation == generation
+            })
+            && self
+                .workspaces
+                .workspace(workspace_id)
+                .and_then(|workspace| workspace.remote_connection_state())
+                == Some(RemoteConnectionState::reconnecting(generation));
+        if !is_current {
+            return;
+        }
+        let attempt = self
+            .remote_workspace_reconnect
+            .take()
+            .expect("a current reconnect attempt must remain owned");
+        match result {
+            Ok(prepared) => {
+                let Some(window_manager) = self
+                    .workspaces
+                    .workspace(workspace_id)
+                    .map(|workspace| workspace.payload().clone())
+                else {
+                    return;
+                };
+                #[cfg(test)]
+                if self.close_focused_pane_before_reconnect_commit {
+                    self.close_focused_pane_before_reconnect_commit = false;
+                    window_manager
+                        .read(cx)
+                        .active_pane_host()
+                        .update(cx, |host, cx| host.close_focused_for_test(window, cx));
+                }
+                if let Err(error) = window_manager.update(cx, |manager, cx| {
+                    manager.commit_remote_restart(prepared.restart, window, cx)
+                }) {
+                    let failure = classify_remote_workspace_restart_failure(error);
+                    let next = remote_workspace_reconnect_failure_state(&failure, generation);
+                    let _ = self
+                        .workspaces
+                        .reduce_remote_connection_state(workspace_id, next);
+                    if let Some(progress) = &attempt.progress {
+                        let _ = progress.fail(window, cx);
+                    }
+                    self.present_remote_workspace_reconnect_error(failure, window, cx);
+                    self.refresh_workspace_search(cx);
+                    cx.notify();
+                    return;
+                }
+                let alias_pin = self
+                    .remote_workspace_runtimes
+                    .get_mut(&workspace_id)
+                    .and_then(|runtime| runtime.alias_pin.take());
+                self.remote_workspace_runtimes.insert(
+                    workspace_id,
+                    RemoteWorkspaceRuntime::new(
+                        generation,
+                        prepared.session,
+                        prepared.lifecycle,
+                        alias_pin,
+                    ),
+                );
+                let reduction = self.workspaces.reduce_remote_connection_state(
+                    workspace_id,
+                    RemoteConnectionState::connected(generation),
+                );
+                debug_assert_eq!(reduction, Ok(RemoteConnectionReduction::Applied));
+                self.observe_remote_workspace_runtime(workspace_id, generation, cx);
+                if let Some(progress) = &attempt.progress {
+                    let _ = progress.complete(window, cx);
+                }
+            }
+            Err(failure) => {
+                let next = remote_workspace_reconnect_failure_state(&failure, generation);
+                let _ = self
+                    .workspaces
+                    .reduce_remote_connection_state(workspace_id, next);
+                if matches!(failure, RemoteWorkspaceReconnectFailure::Cancelled) {
+                    if let Some(progress) = &attempt.progress {
+                        let _ = progress.dismiss(window, cx);
+                    }
+                } else {
+                    if let Some(progress) = &attempt.progress {
+                        let _ = progress.fail(window, cx);
+                    }
+                    self.present_remote_workspace_reconnect_error(failure, window, cx);
+                }
+            }
+        }
+        self.refresh_workspace_search(cx);
+        cx.notify();
+    }
+
+    fn present_remote_workspace_reconnect_error(
+        &mut self,
+        failure: RemoteWorkspaceReconnectFailure,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((title, message)) = remote_workspace_reconnect_error_content(&failure) else {
+            return;
+        };
+        let manager = cx.weak_entity();
+        let window_handle = window.window_handle();
+        let result = Alert::new(
+            ModalId::new("remote-workspace-reconnect-error"),
+            "Remote Workspace reconnection failed",
+            title,
+            message,
+            vec![ModalAction::new(
+                (),
+                "OK",
+                ModalActionRole::Cancel,
+                "remote-workspace-reconnect-error-ok",
+            )],
+        )
+        .intent(AlertIntent::Warning)
+        .present(window, cx, move |_, cx| {
+            let _ = window_handle.update(cx, |_, window, cx| {
+                let _ = manager.update(cx, |manager, cx| {
+                    manager.sync_terminal_focus_blocker(window, cx);
+                    manager.focus(window, cx);
+                    cx.notify();
+                });
+            });
+        });
+        if result.is_ok() {
+            self.sync_terminal_focus_blocker(window, cx);
+            cx.notify();
+        }
+    }
+
+    fn finish_remote_workspace_reconnect_progress(
+        &mut self,
+        identity: RemoteWorkspaceReconnectProgressIdentity,
+        outcome: ProgressDialogOutcome,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(attempt) = self.remote_workspace_reconnect.as_ref() else {
+            return;
+        };
+        if attempt.workspace_id != identity.workspace_id
+            || attempt.generation != identity.reconnect_generation
+            || attempt.progress_generation != identity.presentation_generation
+        {
+            return;
+        }
+        if !matches!(
+            outcome,
+            ProgressDialogOutcome::Cancelled { .. }
+                | ProgressDialogOutcome::DeadlineExpired
+                | ProgressDialogOutcome::OwnerRemoved
+                | ProgressDialogOutcome::ProgrammaticDismissal
+                | ProgressDialogOutcome::Replaced
+        ) {
+            return;
+        }
+        attempt.cancelled.store(true, Ordering::Release);
+        self.remote_workspace_reconnect = None;
+        let _ = self.workspaces.reduce_remote_connection_state(
+            identity.workspace_id,
+            RemoteConnectionState::disconnected(identity.reconnect_generation),
+        );
+        self.refresh_workspace_search(cx);
+        cx.notify();
+    }
+
+    fn close_remote_runtimes(&mut self) {
+        if let Some(attempt) = self.remote_workspace_reconnect.take() {
+            attempt.cancelled.store(true, Ordering::Release);
+        }
+        self.remote_workspace_activation_task.take();
+        for runtime in self.remote_workspace_runtimes.values_mut() {
+            runtime.close();
         }
     }
 
@@ -1151,13 +2384,15 @@ impl WorkspaceManager {
         let result = self.workspaces.create_local_project_workspace(
             directory,
             |workspace_id, project_root| {
-                Self::create_window_manager(
+                Self::create_local_window_manager(
                     workspace_id,
-                    WorkspaceTerminalSessionFactory::new(
+                    WorkspaceTerminalSessionFactory::new_local(
                         session_factory,
-                        project_root.to_path_buf(),
-                    )
-                    .with_directory_identity(project_root_identity),
+                        ValidatedWorkspaceDirectory::new(
+                            project_root.to_path_buf(),
+                            project_root_identity,
+                        ),
+                    ),
                     sidebar_visible,
                     sidebar_width,
                     window_drag_platform,
@@ -1193,8 +2428,13 @@ impl WorkspaceManager {
         let Some(workspace) = self.workspaces.workspace(workspace_id) else {
             return;
         };
-        let path = workspace.working_directory().to_path_buf();
-        let expected_identity = workspace.directory_identity();
+        let (Some(path), Some(expected_identity)) = (
+            workspace.working_directory(),
+            workspace.directory_identity(),
+        ) else {
+            unreachable!("a Local Project Workspace must own a local Workspace Directory")
+        };
+        let path = path.to_path_buf();
         match validate_workspace_directory(&path) {
             Ok(directory) if directory.identity() == expected_identity => {
                 let _ = self
@@ -1295,6 +2535,7 @@ impl WorkspaceManager {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.begin_remote_workspace_close(workspace_id, window, cx);
         let was_active = self.workspaces.active_workspace_id() == workspace_id;
         let session_factory = Rc::clone(&self.session_factory);
         let window_drag_platform = Rc::clone(&self.operating_system_window_drag_platform);
@@ -1307,13 +2548,15 @@ impl WorkspaceManager {
             replacement,
             DirectoryAuthority::initial(),
             |replacement_workspace_id, workspace_root| {
-                Self::create_window_manager(
+                Self::create_local_window_manager(
                     replacement_workspace_id,
-                    WorkspaceTerminalSessionFactory::new(
+                    WorkspaceTerminalSessionFactory::new_local(
                         session_factory,
-                        workspace_root.to_path_buf(),
-                    )
-                    .with_directory_identity(replacement_identity),
+                        ValidatedWorkspaceDirectory::new(
+                            workspace_root.to_path_buf(),
+                            replacement_identity,
+                        ),
+                    ),
                     sidebar_visible,
                     sidebar_width,
                     window_drag_platform,
@@ -1345,6 +2588,8 @@ impl WorkspaceManager {
             | CloseWorkspaceOutcome::FinalWorkspaceReplaced { payload, .. } => payload,
         };
         closed_manager.update(cx, |manager, cx| manager.close_all(cx));
+        self.remote_workspace_runtimes.remove(&workspace_id);
+        self.debug_assert_remote_runtime_invariants();
 
         if was_active {
             let active_manager = self.workspaces.active_workspace().payload().clone();
@@ -1373,6 +2618,7 @@ impl WorkspaceManager {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.begin_remote_workspace_close(workspace_id, window, cx);
         let was_active = self.workspaces.active_workspace_id() == workspace_id;
         let outcome = match self
             .workspaces
@@ -1394,6 +2640,8 @@ impl WorkspaceManager {
             } => {
                 debug_assert_eq!(closed_workspace_id, workspace_id);
                 payload.update(cx, |manager, cx| manager.close_all(cx));
+                self.remote_workspace_runtimes.remove(&workspace_id);
+                self.debug_assert_remote_runtime_invariants();
 
                 if was_active {
                     let active_manager = self.workspaces.active_workspace().payload().clone();
@@ -1423,8 +2671,40 @@ impl WorkspaceManager {
                 debug_assert_eq!(final_workspace_id, workspace_id);
                 let manager = self.workspaces.active_workspace().payload().clone();
                 manager.update(cx, |manager, cx| manager.close_all(cx));
+                self.remote_workspace_runtimes.remove(&workspace_id);
                 self.pending_final_window_closes.remove(&workspace_id);
                 window.remove_window();
+            }
+        }
+    }
+
+    fn begin_remote_workspace_close(
+        &mut self,
+        workspace_id: WorkspaceId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self
+            .workspaces
+            .workspace(workspace_id)
+            .and_then(|workspace| workspace.remote_connection_state())
+            .is_none()
+        {
+            return;
+        }
+        let _ = self.workspaces.begin_remote_close(workspace_id);
+        let reconnect_matches = self
+            .remote_workspace_reconnect
+            .as_ref()
+            .is_some_and(|attempt| attempt.workspace_id == workspace_id);
+        if reconnect_matches {
+            let attempt = self
+                .remote_workspace_reconnect
+                .take()
+                .expect("matching reconnect attempt must remain owned");
+            attempt.cancelled.store(true, Ordering::Release);
+            if let Some(progress) = &attempt.progress {
+                let _ = progress.dismiss(window, cx);
             }
         }
     }
@@ -1623,6 +2903,9 @@ impl WorkspaceManager {
                     manager.sync_terminal_focus_blocker(window, cx);
                 });
             }
+            WorkspaceMenuCommand::Reconnect => {
+                self.start_remote_workspace_reconnect(workspace_id, window, cx)
+            }
             WorkspaceMenuCommand::Close => self.close_workspace(workspace_id, window, cx),
         }
     }
@@ -1819,9 +3102,23 @@ impl WorkspaceManager {
     fn render_workspace_chip(&self) -> AnyElement {
         let workspace = self.workspaces.active_workspace();
         let local_project = matches!(workspace.kind(), WorkspaceKind::LocalProject { .. });
+        let workspace_icon = match workspace.kind() {
+            WorkspaceKind::LocalProject { .. } => "folder",
+            WorkspaceKind::RemoteProject { .. } => "globe",
+            WorkspaceKind::Scratch { .. } => "terminal",
+        };
         let available = workspace.availability().is_available();
+        let remote_connection_phase = workspace
+            .remote_connection_state()
+            .map(RemoteConnectionState::phase);
+        let remote_status = remote_connection_phase.and_then(remote_connection_status);
+        let remote_color = remote_connection_phase.map(remote_connection_color);
         let name = workspace.name().to_owned();
-        let path = compact_home_path(workspace.working_directory(), &self.default_workspace_root);
+        let (path, _) = workspace_directory_labels(
+            workspace.working_directory(),
+            workspace.remote_workspace_directory(),
+            &self.default_workspace_root,
+        );
         let foreground = gpui_color(if available {
             ACTIVE_THEME.text
         } else {
@@ -1834,7 +3131,9 @@ impl WorkspaceManager {
         } else {
             ACTIVE_THEME.icon_muted
         });
-        let tooltip_detail = path.clone();
+        let tooltip_detail = remote_status
+            .map(|status| format!("{path}: {status}"))
+            .unwrap_or_else(|| path.clone());
 
         let chip = div()
             .id("workspace-chip")
@@ -1845,9 +3144,9 @@ impl WorkspaceManager {
             .gap(px(5.0))
             .min_w_0()
             .child(
-                Icon::new(if local_project { "folder" } else { "terminal" })
+                Icon::new(workspace_icon)
                     .size(px(WORKSPACE_CHIP_ICON_SIZE))
-                    .color(icon_color),
+                    .color(remote_color.map(gpui_color).unwrap_or(icon_color)),
             )
             .child(
                 div()
@@ -1862,6 +3161,17 @@ impl WorkspaceManager {
                     Icon::new("pin.fill")
                         .size(px(SIDEBAR_ROW_PIN_ICON_SIZE))
                         .color(gpui_color(ACTIVE_THEME.icon_muted)),
+                )
+            })
+            .when_some(remote_status, |chip, status| {
+                chip.child(
+                    div()
+                        .id("workspace-chip-remote-status")
+                        .debug_selector(|| "workspace-chip-remote-status".to_owned())
+                        .flex_shrink_0()
+                        .text_size(px(SIDEBAR_DETAIL_TEXT_SIZE))
+                        .text_color(gpui_color(remote_color.unwrap_or(ACTIVE_THEME.text_muted)))
+                        .child(status),
                 )
             });
 
@@ -1970,13 +3280,19 @@ impl WorkspaceManager {
             path,
             tooltip,
             local_project,
+            remote_connection_phase,
             available,
             window_count,
             pane_count,
             active,
         } = row;
         let click_manager = manager.clone();
-        let accessibility_name = format!("Workspace actions for {name}");
+        let remote_status = remote_connection_phase.and_then(remote_connection_status);
+        let remote_color = remote_connection_phase.map(remote_connection_color);
+        let accessibility_name = remote_status.map_or_else(
+            || format!("Workspace actions for {name}"),
+            |status| format!("Workspace actions for {name}, connection {status}"),
+        );
         let rename = self
             .rename
             .as_ref()
@@ -2023,8 +3339,12 @@ impl WorkspaceManager {
         let maximum_path_characters = ((f32::from(self.sidebar_width) - 64.0) / 6.0)
             .floor()
             .max(8.0) as usize;
-        let tooltip_text = tooltip;
-        let tooltip_label = if available {
+        let tooltip_text = remote_status
+            .map(|status| format!("{tooltip}: {status}"))
+            .unwrap_or_else(|| tooltip.to_string());
+        let tooltip_label = if remote_status.is_some() {
+            "Remote Workspace connection"
+        } else if available {
             "Workspace Directory"
         } else {
             "Workspace unavailable"
@@ -2072,9 +3392,18 @@ impl WorkspaceManager {
                         div()
                             .relative()
                             .child(
-                                Icon::new(if local_project { "folder" } else { "terminal" })
-                                    .size(px(SIDEBAR_ROW_ICON_SIZE))
-                                    .color(gpui_color(if available {
+                                Icon::new(if local_project {
+                                    "folder"
+                                } else if remote_connection_phase.is_some() {
+                                    "globe"
+                                } else {
+                                    "terminal"
+                                })
+                                .size(px(SIDEBAR_ROW_ICON_SIZE))
+                                .color(gpui_color(
+                                    if let Some(color) = remote_color {
+                                        color
+                                    } else if available {
                                         if active {
                                             ACTIVE_THEME.icon_accent
                                         } else {
@@ -2082,7 +3411,8 @@ impl WorkspaceManager {
                                         }
                                     } else {
                                         ACTIVE_THEME.warning
-                                    })),
+                                    },
+                                )),
                             )
                             .when(!available, |icon| {
                                 icon.child(
@@ -2117,7 +3447,25 @@ impl WorkspaceManager {
                                     .text_size(px(SIDEBAR_DETAIL_TEXT_SIZE))
                                     .text_color(gpui_color(ACTIVE_THEME.text_muted))
                                     .child(format!("{window_count}W · {pane_count}P")),
-                            ),
+                            )
+                            .when_some(remote_status, |line, status| {
+                                line.child(
+                                    div()
+                                        .id(("workspace-row-remote-status", workspace_id.get()))
+                                        .debug_selector(move || {
+                                            format!(
+                                                "workspace-row-remote-status-{}",
+                                                workspace_id.get()
+                                            )
+                                        })
+                                        .flex_shrink_0()
+                                        .text_size(px(SIDEBAR_DETAIL_TEXT_SIZE))
+                                        .text_color(gpui_color(
+                                            remote_color.unwrap_or(ACTIVE_THEME.text_muted),
+                                        ))
+                                        .child(status),
+                                )
+                            }),
                     )
                     .child(
                         // The path carries the Workspace Kind: a Local Project is pinned to it,
@@ -2207,7 +3555,7 @@ impl WorkspaceManager {
                     ("workspace-menu-controls", workspace_id.get()),
                     accessibility_name,
                     row,
-                    workspace_menu_entries(),
+                    workspace_menu_entries(remote_connection_phase),
                 )
                 .size(MenuSize::Small)
                 .debug_selector(format!("workspace-menu-controls-{}", workspace_id.get()))
@@ -2254,31 +3602,39 @@ impl WorkspaceManager {
         let active_workspace_id = self.workspaces.active_workspace_id();
         for workspace in self.workspaces.iter() {
             let (window_count, pane_count) = workspace.payload().read(cx).aggregate_counts(cx);
-            let path =
-                compact_home_path(workspace.working_directory(), &self.default_workspace_root);
+            let (path, directory_tooltip) = workspace_directory_labels(
+                workspace.working_directory(),
+                workspace.remote_workspace_directory(),
+                &self.default_workspace_root,
+            );
             let (available, tooltip) = match workspace.availability() {
-                WorkspaceDirectoryAvailability::Available => {
-                    (true, workspace.working_directory().display().to_string())
+                WorkspaceDirectoryAvailability::Available => (true, directory_tooltip),
+                WorkspaceDirectoryAvailability::Unavailable { reason } => {
+                    (false, format!("{directory_tooltip}: {reason}"))
                 }
-                WorkspaceDirectoryAvailability::Unavailable { reason } => (
-                    false,
-                    format!("{}: {reason}", workspace.working_directory().display()),
-                ),
             };
-            rows = rows.child(self.render_workspace_row(
-                WorkspaceRowViewModel {
-                    workspace_id: workspace.id(),
-                    name: workspace.name().to_owned().into(),
-                    path: path.into(),
-                    tooltip: tooltip.into(),
-                    local_project: matches!(workspace.kind(), WorkspaceKind::LocalProject { .. }),
-                    available,
-                    window_count,
-                    pane_count,
-                    active: workspace.id() == active_workspace_id,
-                },
-                manager.clone(),
-            ));
+            rows = rows.child(
+                self.render_workspace_row(
+                    WorkspaceRowViewModel {
+                        workspace_id: workspace.id(),
+                        name: workspace.name().to_owned().into(),
+                        path: path.into(),
+                        tooltip: tooltip.into(),
+                        local_project: matches!(
+                            workspace.kind(),
+                            WorkspaceKind::LocalProject { .. }
+                        ),
+                        remote_connection_phase: workspace
+                            .remote_connection_state()
+                            .map(RemoteConnectionState::phase),
+                        available,
+                        window_count,
+                        pane_count,
+                        active: workspace.id() == active_workspace_id,
+                    },
+                    manager.clone(),
+                ),
+            );
         }
 
         let scrollbar = self.scrollbar.clone();
@@ -2443,6 +3799,12 @@ impl WorkspaceManager {
     }
 }
 
+impl Drop for WorkspaceManager {
+    fn drop(&mut self) {
+        self.close_remote_runtimes();
+    }
+}
+
 impl Render for WorkspaceManager {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         debug_assert!(self.workspaces.len() > 0);
@@ -2555,6 +3917,7 @@ impl Render for WorkspaceManager {
             .on_action(cx.listener(Self::forward_active_terminal_action::<FindPrevious>))
             .on_action(cx.listener(Self::forward_active_terminal_action::<CloseTerminalFind>))
             .child(active_window_manager)
+            .children(self.remote_workspace_flow.iter().cloned())
             .child(self.render_top_left_chrome(manager.clone()))
             .child(self.render_sidebar_resize_handle(
                 "workspace-top-chrome-resize-handle",
@@ -2578,8 +3941,10 @@ impl Render for WorkspaceManager {
     }
 }
 
-fn workspace_menu_entries() -> Vec<MenuEntry<WorkspaceMenuCommand>> {
-    vec![
+fn workspace_menu_entries(
+    remote_connection_phase: Option<RemoteConnectionPhase>,
+) -> Vec<MenuEntry<WorkspaceMenuCommand>> {
+    let mut entries = vec![
         MenuEntry::action("New Window", WorkspaceMenuCommand::NewWindow)
             .shortcut("⌘T")
             .icon(|foreground| {
@@ -2599,6 +3964,25 @@ fn workspace_menu_entries() -> Vec<MenuEntry<WorkspaceMenuCommand>> {
                     .into_any_element()
             })
             .debug_selector("workspace-menu-row-rename"),
+    ];
+    if let Some(phase) = remote_connection_phase {
+        entries.push(
+            MenuEntry::action("Reconnect", WorkspaceMenuCommand::Reconnect)
+                .disabled(!matches!(
+                    phase,
+                    RemoteConnectionPhase::Disconnected | RemoteConnectionPhase::Failed
+                ))
+                .icon(|foreground| {
+                    Icon::new("arrow.clockwise")
+                        .weight(SymbolWeight::Regular)
+                        .size(px(14.0))
+                        .color(foreground)
+                        .into_any_element()
+                })
+                .debug_selector("workspace-menu-row-reconnect"),
+        );
+    }
+    entries.extend([
         MenuEntry::separator(),
         MenuEntry::action("Close Workspace", WorkspaceMenuCommand::Close)
             .destructive(true)
@@ -2610,7 +3994,92 @@ fn workspace_menu_entries() -> Vec<MenuEntry<WorkspaceMenuCommand>> {
                     .into_any_element()
             })
             .debug_selector("workspace-menu-row-close"),
-    ]
+    ]);
+    entries
+}
+
+fn remote_connection_status(phase: RemoteConnectionPhase) -> Option<&'static str> {
+    match phase {
+        RemoteConnectionPhase::Connected => Some("Connected"),
+        RemoteConnectionPhase::Reconnecting => Some("Reconnecting"),
+        RemoteConnectionPhase::Disconnected => Some("Disconnected"),
+        RemoteConnectionPhase::Failed => Some("Connection failed"),
+        RemoteConnectionPhase::Closing => Some("Closing"),
+    }
+}
+
+fn classify_remote_workspace_restart_failure(
+    error: RemoteWindowManagerLifecycleError,
+) -> RemoteWorkspaceReconnectFailure {
+    match error {
+        RemoteWindowManagerLifecycleError::Revalidation(
+            crate::terminal::RemoteChannelRevalidationError::DirectoryUnavailable,
+        ) => RemoteWorkspaceReconnectFailure::DirectoryUnavailable,
+        RemoteWindowManagerLifecycleError::Revalidation(
+            crate::terminal::RemoteChannelRevalidationError::IdentityChanged,
+        ) => RemoteWorkspaceReconnectFailure::IdentityChanged,
+        _ => RemoteWorkspaceReconnectFailure::ConnectionFailed { detail: None },
+    }
+}
+
+fn remote_workspace_reconnect_failure_state(
+    failure: &RemoteWorkspaceReconnectFailure,
+    generation: u64,
+) -> RemoteConnectionState {
+    match failure {
+        RemoteWorkspaceReconnectFailure::ConnectionFailed { .. } => {
+            RemoteConnectionState::failed(generation)
+        }
+        RemoteWorkspaceReconnectFailure::Cancelled
+        | RemoteWorkspaceReconnectFailure::DirectoryUnavailable
+        | RemoteWorkspaceReconnectFailure::IdentityChanged => {
+            RemoteConnectionState::disconnected(generation)
+        }
+    }
+}
+
+fn remote_workspace_reconnect_error_content(
+    failure: &RemoteWorkspaceReconnectFailure,
+) -> Option<(&'static str, String)> {
+    match failure {
+        RemoteWorkspaceReconnectFailure::Cancelled => None,
+        RemoteWorkspaceReconnectFailure::ConnectionFailed { detail } => Some((
+            "Couldn’t Reconnect",
+            detail.as_ref().map_or_else(
+                || {
+                    "SpaceTerm couldn’t restore the remote connection. Check the SSH host and try again."
+                        .to_owned()
+                },
+                |detail| {
+                    format!(
+                        "SpaceTerm couldn’t restore the remote connection. OpenSSH reported:\n\n{}",
+                        detail.as_str()
+                    )
+                },
+            ),
+        )),
+        RemoteWorkspaceReconnectFailure::DirectoryUnavailable => Some((
+            "Remote Directory Unavailable",
+            "SpaceTerm can’t access the selected remote directory. Check its permissions or reopen the Remote Project."
+                .to_owned(),
+        )),
+        RemoteWorkspaceReconnectFailure::IdentityChanged => Some((
+            "Remote Directory Changed",
+            "The selected remote path now resolves to a different directory. Reopen the Remote Project to review it."
+                .to_owned(),
+        )),
+    }
+}
+
+fn remote_connection_color(phase: RemoteConnectionPhase) -> Color {
+    match phase {
+        RemoteConnectionPhase::Reconnecting => ACTIVE_THEME.info,
+        RemoteConnectionPhase::Connected => ACTIVE_THEME.success,
+        RemoteConnectionPhase::Disconnected | RemoteConnectionPhase::Closing => {
+            ACTIVE_THEME.text_muted
+        }
+        RemoteConnectionPhase::Failed => ACTIVE_THEME.error,
+    }
 }
 
 fn gpui_color(color: Color) -> gpui::Rgba {
@@ -2625,6 +4094,46 @@ fn compact_home_path(path: &std::path::Path, home: &std::path::Path) -> String {
         .ok()
         .map(|relative| format!("~/{}", relative.display()))
         .unwrap_or_else(|| path.display().to_string())
+}
+
+fn workspace_directory_labels(
+    local_directory: Option<&std::path::Path>,
+    remote_directory: Option<&RemoteWorkspaceDirectory>,
+    local_home: &std::path::Path,
+) -> (String, String) {
+    match (local_directory, remote_directory) {
+        (Some(directory), None) => (
+            compact_home_path(directory, local_home),
+            directory.display().to_string(),
+        ),
+        (None, Some(directory)) => {
+            let directory = directory.as_str().to_owned();
+            (directory.clone(), directory)
+        }
+        (Some(_), Some(_)) | (None, None) => {
+            unreachable!("a Workspace must own exactly one local or remote directory")
+        }
+    }
+}
+
+fn remote_workspace_fallback_title(
+    key: &RemoteWorkspaceKey,
+    home_identity: &crate::domain::RemoteDirectoryIdentity,
+) -> String {
+    if key.physical_directory() == home_identity {
+        return key.destination().as_str().to_owned();
+    }
+    let physical = key.physical_directory().as_str();
+    let basename = if physical == "/" {
+        "/"
+    } else {
+        physical
+            .rsplit('/')
+            .next()
+            .filter(|component| !component.is_empty())
+            .unwrap_or(physical)
+    };
+    format!("{basename} · {}", key.destination().as_str())
 }
 
 fn initial_workspace_directory(path: PathBuf) -> (ValidatedWorkspaceDirectory, Option<String>) {
@@ -2649,8 +4158,12 @@ fn initial_workspace_directory(path: PathBuf) -> (ValidatedWorkspaceDirectory, O
 
 #[cfg(test)]
 mod tests {
+    use std::cell::RefCell;
+    use std::collections::VecDeque;
     use std::fs;
     use std::os::unix::fs::symlink;
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use gpui::{
@@ -2663,12 +4176,569 @@ mod tests {
     };
 
     use super::*;
+
+    type RemoteCompletionFixture = (
+        RemoteWorkspaceFlowCompletion,
+        Arc<AtomicUsize>,
+        Arc<AtomicUsize>,
+        Arc<AtomicUsize>,
+        Arc<AtomicBool>,
+        async_channel::Sender<crate::ssh::live_connection::ControlConnectionTerminalState>,
+    );
     use crate::platform::finder_fallback::ScriptedFinderFallback;
     use crate::platform::macos_window_drag::RecordingOperatingSystemWindowDragPlatform;
+    use crate::platform::ssh_askpass::{AskPassPromptKind, AskPassRequest, AskPassResult};
+    use crate::ssh::command::{SshCommandContext, ValidatedRemoteShellCommand};
+    use crate::ssh::destination::SshHostAlias;
+    use crate::ssh::host_config::HostDiscovery;
+    use crate::ssh::managed_hosts::ManagedSshHost;
     use crate::terminal::testing::{
         RecordedSessionCommand, TestTerminalSessionFactory, TestTerminalSessionRecords,
     };
     use crate::terminal::{SessionEvent, SessionExit};
+    use crate::ui::remote_workspace_flow::{
+        RemoteWorkspaceAliasPin, RemoteWorkspaceAliasPinError, RemoteWorkspaceConnectContext,
+        RemoteWorkspaceFlowBackendError, RemoteWorkspaceFlowStage, RemoteWorkspaceSessionOwner,
+    };
+    use crate::ui::remote_workspace_picker::{
+        RemoteWorkspaceAccount, RemoteWorkspaceDirectoryListing, RemoteWorkspaceExactPathState,
+        RemoteWorkspaceProvider, RemoteWorkspaceProviderError,
+    };
+    use crate::ui::ssh_askpass_dialog::GpuiAskPassPresenter;
+    use crate::ui::ssh_host_form::ManagedHostFormBackendError;
+
+    #[derive(Default)]
+    struct TestRemoteWorkspaceFlowBackend {
+        connections: Mutex<
+            VecDeque<
+                gpui::Task<
+                    Result<RemoteWorkspaceConnectedSession, RemoteWorkspaceFlowBackendError>,
+                >,
+            >,
+        >,
+        connect_calls: AtomicUsize,
+    }
+
+    impl TestRemoteWorkspaceFlowBackend {
+        fn with_connections(
+            connections: impl IntoIterator<
+                Item = gpui::Task<
+                    Result<RemoteWorkspaceConnectedSession, RemoteWorkspaceFlowBackendError>,
+                >,
+            >,
+        ) -> Arc<Self> {
+            Arc::new(Self {
+                connections: Mutex::new(connections.into_iter().collect()),
+                connect_calls: AtomicUsize::new(0),
+            })
+        }
+    }
+
+    impl RemoteWorkspaceFlowBackend for TestRemoteWorkspaceFlowBackend {
+        fn discover_hosts(&self) -> HostDiscovery {
+            HostDiscovery::default()
+        }
+
+        fn host_in_active_use(&self, _: &SshHostAlias) -> bool {
+            false
+        }
+
+        fn managed_host(&self, _: &SshHostAlias) -> Option<ManagedSshHost> {
+            None
+        }
+
+        fn save_managed_host(
+            &self,
+            _: ManagedSshHost,
+            _: Option<SshHostAlias>,
+        ) -> gpui::Task<Result<(), ManagedHostFormBackendError>> {
+            gpui::Task::ready(Ok(()))
+        }
+
+        fn delete_managed_host(
+            &self,
+            _: SshHostAlias,
+        ) -> gpui::Task<Result<(), RemoteWorkspaceFlowBackendError>> {
+            gpui::Task::ready(Ok(()))
+        }
+
+        fn connect(
+            &self,
+            _: crate::domain::SshDestination,
+            _: RemoteWorkspaceConnectContext,
+        ) -> gpui::Task<Result<RemoteWorkspaceConnectedSession, RemoteWorkspaceFlowBackendError>>
+        {
+            self.connect_calls.fetch_add(1, Ordering::AcqRel);
+            self.connections
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or_else(|| {
+                    gpui::Task::ready(Err(RemoteWorkspaceFlowBackendError::ConnectionFailed))
+                })
+        }
+    }
+
+    struct TestRemoteWorkspaceFlowBackendFactory {
+        backend: Arc<TestRemoteWorkspaceFlowBackend>,
+    }
+
+    impl RemoteWorkspaceFlowBackendFactory for TestRemoteWorkspaceFlowBackendFactory {
+        fn create(
+            &self,
+            _: &Window,
+            _: &mut App,
+        ) -> Result<Arc<dyn RemoteWorkspaceFlowBackend>, RemoteWorkspaceFlowBackendError> {
+            Ok(self.backend.clone())
+        }
+    }
+
+    struct UnavailableTestRemoteWorkspaceFlowBackendFactory {
+        create_calls: Arc<AtomicUsize>,
+    }
+
+    impl RemoteWorkspaceFlowBackendFactory for UnavailableTestRemoteWorkspaceFlowBackendFactory {
+        fn unavailable_reason(&self) -> Option<String> {
+            Some("OpenSSH 8.2 or later is required".to_owned())
+        }
+
+        fn create(
+            &self,
+            _: &Window,
+            _: &mut App,
+        ) -> Result<Arc<dyn RemoteWorkspaceFlowBackend>, RemoteWorkspaceFlowBackendError> {
+            self.create_calls.fetch_add(1, Ordering::AcqRel);
+            Err(RemoteWorkspaceFlowBackendError::ConnectionFailed)
+        }
+    }
+
+    struct FailingTestRemoteWorkspaceFlowBackendFactory {
+        create_calls: Arc<AtomicUsize>,
+    }
+
+    impl RemoteWorkspaceFlowBackendFactory for FailingTestRemoteWorkspaceFlowBackendFactory {
+        fn create(
+            &self,
+            _: &Window,
+            _: &mut App,
+        ) -> Result<Arc<dyn RemoteWorkspaceFlowBackend>, RemoteWorkspaceFlowBackendError> {
+            self.create_calls.fetch_add(1, Ordering::AcqRel);
+            Err(RemoteWorkspaceFlowBackendError::ConnectionFailed)
+        }
+    }
+
+    fn test_remote_backend_factory() -> Arc<dyn RemoteWorkspaceFlowBackendFactory> {
+        Arc::new(TestRemoteWorkspaceFlowBackendFactory {
+            backend: Arc::new(TestRemoteWorkspaceFlowBackend::default()),
+        })
+    }
+
+    struct TestRemoteProvider {
+        account_available: bool,
+        identity: Result<crate::domain::RemoteDirectoryIdentity, RemoteWorkspaceProviderError>,
+    }
+
+    impl TestRemoteProvider {
+        fn failing() -> Self {
+            Self {
+                account_available: false,
+                identity: Err(RemoteWorkspaceProviderError::Other),
+            }
+        }
+
+        fn connected(identity: crate::domain::RemoteDirectoryIdentity) -> Self {
+            Self {
+                account_available: true,
+                identity: Ok(identity),
+            }
+        }
+
+        fn directory_unavailable() -> Self {
+            Self {
+                account_available: true,
+                identity: Err(RemoteWorkspaceProviderError::PermissionDenied),
+            }
+        }
+    }
+
+    impl RemoteWorkspaceProvider for TestRemoteProvider {
+        fn discover_account(
+            &self,
+        ) -> gpui::Task<Result<RemoteWorkspaceAccount, RemoteWorkspaceProviderError>> {
+            if !self.account_available {
+                return gpui::Task::ready(Err(RemoteWorkspaceProviderError::Other));
+            }
+            gpui::Task::ready(
+                RemoteWorkspaceAccount::new(
+                    "tester".to_owned(),
+                    crate::domain::RemoteDirectoryIdentity::new("/home/tester".to_owned()).unwrap(),
+                    "/bin/zsh".to_owned(),
+                )
+                .map_err(|_| RemoteWorkspaceProviderError::InvalidResponse),
+            )
+        }
+
+        fn list_directories(
+            &self,
+            _: RemoteWorkspaceDirectory,
+        ) -> gpui::Task<Result<RemoteWorkspaceDirectoryListing, RemoteWorkspaceProviderError>>
+        {
+            gpui::Task::ready(Err(RemoteWorkspaceProviderError::Other))
+        }
+
+        fn probe_exact_path(
+            &self,
+            _: RemoteWorkspaceDirectory,
+        ) -> gpui::Task<Result<RemoteWorkspaceExactPathState, RemoteWorkspaceProviderError>>
+        {
+            gpui::Task::ready(Err(RemoteWorkspaceProviderError::Other))
+        }
+
+        fn create_directory_recursively(
+            &self,
+            _: RemoteWorkspaceDirectory,
+        ) -> gpui::Task<Result<(), RemoteWorkspaceProviderError>> {
+            gpui::Task::ready(Err(RemoteWorkspaceProviderError::Other))
+        }
+
+        fn validate_physical_identity(
+            &self,
+            _: RemoteWorkspaceDirectory,
+        ) -> gpui::Task<Result<crate::domain::RemoteDirectoryIdentity, RemoteWorkspaceProviderError>>
+        {
+            gpui::Task::ready(self.identity.clone())
+        }
+    }
+
+    struct BlockingRemoteProvider {
+        account:
+            Mutex<Option<gpui::Task<Result<RemoteWorkspaceAccount, RemoteWorkspaceProviderError>>>>,
+        identity: Mutex<
+            Option<
+                gpui::Task<
+                    Result<crate::domain::RemoteDirectoryIdentity, RemoteWorkspaceProviderError>,
+                >,
+            >,
+        >,
+        account_calls: Arc<AtomicUsize>,
+        identity_calls: Arc<AtomicUsize>,
+    }
+
+    impl RemoteWorkspaceProvider for BlockingRemoteProvider {
+        fn discover_account(
+            &self,
+        ) -> gpui::Task<Result<RemoteWorkspaceAccount, RemoteWorkspaceProviderError>> {
+            self.account_calls.fetch_add(1, Ordering::AcqRel);
+            self.account
+                .lock()
+                .unwrap()
+                .take()
+                .unwrap_or_else(|| gpui::Task::ready(Err(RemoteWorkspaceProviderError::Other)))
+        }
+
+        fn list_directories(
+            &self,
+            _: RemoteWorkspaceDirectory,
+        ) -> gpui::Task<Result<RemoteWorkspaceDirectoryListing, RemoteWorkspaceProviderError>>
+        {
+            gpui::Task::ready(Err(RemoteWorkspaceProviderError::Other))
+        }
+
+        fn probe_exact_path(
+            &self,
+            _: RemoteWorkspaceDirectory,
+        ) -> gpui::Task<Result<RemoteWorkspaceExactPathState, RemoteWorkspaceProviderError>>
+        {
+            gpui::Task::ready(Err(RemoteWorkspaceProviderError::Other))
+        }
+
+        fn create_directory_recursively(
+            &self,
+            _: RemoteWorkspaceDirectory,
+        ) -> gpui::Task<Result<(), RemoteWorkspaceProviderError>> {
+            gpui::Task::ready(Err(RemoteWorkspaceProviderError::Other))
+        }
+
+        fn validate_physical_identity(
+            &self,
+            _: RemoteWorkspaceDirectory,
+        ) -> gpui::Task<Result<crate::domain::RemoteDirectoryIdentity, RemoteWorkspaceProviderError>>
+        {
+            self.identity_calls.fetch_add(1, Ordering::AcqRel);
+            self.identity
+                .lock()
+                .unwrap()
+                .take()
+                .unwrap_or_else(|| gpui::Task::ready(Err(RemoteWorkspaceProviderError::Other)))
+        }
+    }
+
+    fn test_remote_account() -> RemoteWorkspaceAccount {
+        RemoteWorkspaceAccount::new(
+            "tester".to_owned(),
+            crate::domain::RemoteDirectoryIdentity::new("/home/tester".to_owned()).unwrap(),
+            "/bin/zsh".to_owned(),
+        )
+        .unwrap()
+    }
+
+    struct TestRemoteChannelProvider {
+        preparations: Arc<AtomicUsize>,
+        revalidations: Arc<AtomicUsize>,
+        revalidation_tasks: Mutex<
+            VecDeque<gpui::Task<Result<(), crate::terminal::RemoteChannelRevalidationError>>>,
+        >,
+        available: Arc<AtomicBool>,
+        destination: crate::domain::SshDestination,
+    }
+
+    impl crate::terminal::RemoteTerminalChannelProvider for TestRemoteChannelProvider {
+        fn is_ready(&self) -> bool {
+            self.available.load(Ordering::Acquire)
+        }
+
+        fn revalidate(
+            &self,
+        ) -> gpui::Task<Result<(), crate::terminal::RemoteChannelRevalidationError>> {
+            self.revalidations.fetch_add(1, Ordering::AcqRel);
+            self.revalidation_tasks
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or_else(|| gpui::Task::ready(Ok(())))
+        }
+
+        fn prepare(
+            &self,
+        ) -> Result<
+            crate::ssh::command::PreparedSshPaneChannelCommand,
+            crate::terminal::RemoteChannelUnavailable,
+        > {
+            self.preparations.fetch_add(1, Ordering::AcqRel);
+            if !self.available.load(Ordering::Acquire) {
+                return Err(crate::terminal::RemoteChannelUnavailable);
+            }
+            Ok(SshCommandContext::new(
+                PathBuf::from("/private/config/spaceterm/ssh_config"),
+                self.destination.clone(),
+                PathBuf::from("/private/runtime/spaceterm/master.sock"),
+            )
+            .unwrap()
+            .prepare_pane_channel(
+                ValidatedRemoteShellCommand::new("exec /bin/zsh -l".to_owned()).unwrap(),
+            ))
+        }
+    }
+
+    struct TestRemoteSessionOwner {
+        closes: Arc<AtomicUsize>,
+        channels: Arc<dyn crate::terminal::RemoteTerminalChannelProvider>,
+        lifecycle: Option<crate::ssh::live_connection::ControlConnectionObserver>,
+        _lifecycle_senders:
+            Vec<async_channel::Sender<crate::ssh::live_connection::ControlConnectionTerminalState>>,
+        alias: Option<crate::ssh::alias_usage::ActiveSshAliasLease>,
+        alias_pin_error: bool,
+    }
+
+    impl RemoteWorkspaceSessionOwner for TestRemoteSessionOwner {
+        fn acquire_workspace_alias_pin(
+            &self,
+        ) -> Result<Option<RemoteWorkspaceAliasPin>, RemoteWorkspaceAliasPinError> {
+            if self.alias_pin_error {
+                return Err(RemoteWorkspaceAliasPinError);
+            }
+            self.alias
+                .as_ref()
+                .map(|alias| {
+                    alias
+                        .try_duplicate()
+                        .map(RemoteWorkspaceAliasPin::new)
+                        .map_err(|_| RemoteWorkspaceAliasPinError)
+                })
+                .transpose()
+        }
+
+        fn bind_terminal_channels_for_identity(
+            &self,
+            _: &RemoteWorkspaceDirectory,
+            _: &crate::domain::RemoteDirectoryIdentity,
+            _: &crate::ssh::command::ValidatedRemoteLoginShell,
+        ) -> Result<
+            Arc<dyn crate::terminal::RemoteTerminalChannelProvider>,
+            RemoteWorkspaceFlowBackendError,
+        > {
+            Ok(Arc::clone(&self.channels))
+        }
+
+        fn take_lifecycle_observer(
+            &mut self,
+        ) -> Option<crate::ssh::live_connection::ControlConnectionObserver> {
+            self.lifecycle.take()
+        }
+
+        fn close(&mut self) {
+            self.closes.fetch_add(1, Ordering::AcqRel);
+            self.alias.take();
+        }
+    }
+
+    fn remote_completion(
+        destination: &str,
+        directory: &str,
+        physical: &str,
+        available: bool,
+    ) -> (
+        RemoteWorkspaceFlowCompletion,
+        Arc<AtomicUsize>,
+        Arc<AtomicUsize>,
+        Arc<AtomicBool>,
+    ) {
+        let (completion, closes, preparations, _, availability, _) =
+            remote_completion_with_revalidation(
+                destination,
+                directory,
+                physical,
+                available,
+                gpui::Task::ready(Ok(())),
+            );
+        (completion, closes, preparations, availability)
+    }
+
+    fn remote_completion_with_revalidation(
+        destination: &str,
+        directory: &str,
+        physical: &str,
+        available: bool,
+        revalidation: gpui::Task<Result<(), crate::terminal::RemoteChannelRevalidationError>>,
+    ) -> RemoteCompletionFixture {
+        let destination = crate::domain::SshDestination::new(destination.to_owned()).unwrap();
+        let directory = RemoteWorkspaceDirectory::new(directory.to_owned()).unwrap();
+        let physical = crate::domain::RemoteDirectoryIdentity::new(physical.to_owned()).unwrap();
+        let home = crate::domain::RemoteDirectoryIdentity::new("/home/tester".to_owned()).unwrap();
+        let preparations = Arc::new(AtomicUsize::new(0));
+        let revalidations = Arc::new(AtomicUsize::new(0));
+        let availability = Arc::new(AtomicBool::new(available));
+        let channels: Arc<dyn crate::terminal::RemoteTerminalChannelProvider> =
+            Arc::new(TestRemoteChannelProvider {
+                preparations: Arc::clone(&preparations),
+                revalidations: Arc::clone(&revalidations),
+                revalidation_tasks: Mutex::new(VecDeque::from([revalidation])),
+                available: Arc::clone(&availability),
+                destination: destination.clone(),
+            });
+        let closes = Arc::new(AtomicUsize::new(0));
+        let (runtime_lifecycle_sender, runtime_lifecycle) =
+            crate::ssh::live_connection::ControlConnectionObserver::controlled();
+        let (session_lifecycle_sender, session_lifecycle) =
+            crate::ssh::live_connection::ControlConnectionObserver::controlled();
+        let session = RemoteWorkspaceConnectedSession::new(
+            Box::new(TestRemoteSessionOwner {
+                closes: Arc::clone(&closes),
+                channels: Arc::clone(&channels),
+                lifecycle: Some(session_lifecycle),
+                _lifecycle_senders: vec![
+                    runtime_lifecycle_sender.clone(),
+                    session_lifecycle_sender,
+                ],
+                alias: None,
+                alias_pin_error: false,
+            }),
+            Arc::new(TestRemoteProvider::failing()),
+        );
+        let account =
+            RemoteWorkspaceAccount::new("tester".to_owned(), home, "/bin/zsh".to_owned()).unwrap();
+        (
+            RemoteWorkspaceFlowCompletion::for_test(
+                session,
+                destination,
+                directory,
+                physical,
+                account,
+                channels,
+                runtime_lifecycle,
+            ),
+            closes,
+            preparations,
+            revalidations,
+            availability,
+            runtime_lifecycle_sender,
+        )
+    }
+
+    fn remote_completion_with_active_alias() -> (
+        RemoteWorkspaceFlowCompletion,
+        crate::ssh::alias_usage::ActiveSshAliasRegistry,
+        SshHostAlias,
+        Arc<AtomicUsize>,
+        async_channel::Sender<crate::ssh::live_connection::ControlConnectionTerminalState>,
+    ) {
+        remote_completion_with_active_alias_pin_failure(false)
+    }
+
+    fn remote_completion_with_active_alias_pin_failure(
+        alias_pin_error: bool,
+    ) -> (
+        RemoteWorkspaceFlowCompletion,
+        crate::ssh::alias_usage::ActiveSshAliasRegistry,
+        SshHostAlias,
+        Arc<AtomicUsize>,
+        async_channel::Sender<crate::ssh::live_connection::ControlConnectionTerminalState>,
+    ) {
+        let registry = crate::ssh::alias_usage::ActiveSshAliasRegistry::default();
+        let alias = SshHostAlias::new("work".to_owned()).unwrap();
+        let lease = registry.acquire(alias.clone()).unwrap();
+        let destination = crate::domain::SshDestination::new("work".to_owned()).unwrap();
+        let directory = RemoteWorkspaceDirectory::new("~/src".to_owned()).unwrap();
+        let physical =
+            crate::domain::RemoteDirectoryIdentity::new("/home/tester/src".to_owned()).unwrap();
+        let home = crate::domain::RemoteDirectoryIdentity::new("/home/tester".to_owned()).unwrap();
+        let preparations = Arc::new(AtomicUsize::new(0));
+        let revalidations = Arc::new(AtomicUsize::new(0));
+        let channels: Arc<dyn crate::terminal::RemoteTerminalChannelProvider> =
+            Arc::new(TestRemoteChannelProvider {
+                preparations,
+                revalidations,
+                revalidation_tasks: Mutex::new(VecDeque::from([gpui::Task::ready(Ok(()))])),
+                available: Arc::new(AtomicBool::new(true)),
+                destination: destination.clone(),
+            });
+        let closes = Arc::new(AtomicUsize::new(0));
+        let (runtime_lifecycle_sender, runtime_lifecycle) =
+            crate::ssh::live_connection::ControlConnectionObserver::controlled();
+        let (session_lifecycle_sender, session_lifecycle) =
+            crate::ssh::live_connection::ControlConnectionObserver::controlled();
+        let session = RemoteWorkspaceConnectedSession::new(
+            Box::new(TestRemoteSessionOwner {
+                closes: Arc::clone(&closes),
+                channels: Arc::clone(&channels),
+                lifecycle: Some(session_lifecycle),
+                _lifecycle_senders: vec![
+                    runtime_lifecycle_sender.clone(),
+                    session_lifecycle_sender,
+                ],
+                alias: Some(lease),
+                alias_pin_error,
+            }),
+            Arc::new(TestRemoteProvider::failing()),
+        );
+        let account =
+            RemoteWorkspaceAccount::new("tester".to_owned(), home, "/bin/zsh".to_owned()).unwrap();
+        (
+            RemoteWorkspaceFlowCompletion::for_test(
+                session,
+                destination,
+                directory,
+                physical,
+                account,
+                channels,
+                runtime_lifecycle,
+            ),
+            registry,
+            alias,
+            closes,
+            runtime_lifecycle_sender,
+        )
+    }
 
     fn workspace_manager(
         cx: &mut TestAppContext,
@@ -2682,13 +4752,125 @@ mod tests {
         let session_factory: Rc<dyn TerminalSessionFactory> =
             Rc::new(TestTerminalSessionFactory::new(records.clone()).with_fallback_title("zsh"));
         let (manager, cx) = cx.add_window_view(|window, cx| {
-            WorkspaceManager::new(session_factory, PathBuf::from("/Users/test"), window, cx)
+            WorkspaceManager::new_with_remote_workspace_backend_factory(
+                session_factory,
+                PathBuf::from("/Users/test"),
+                test_remote_backend_factory(),
+                window,
+                cx,
+            )
         });
         cx.update(|window, cx| {
             manager.update(cx, |manager, cx| manager.focus(window, cx));
         });
         cx.run_until_parked();
         (manager, records, cx)
+    }
+
+    fn workspace_manager_with_remote_backend(
+        backend: Arc<TestRemoteWorkspaceFlowBackend>,
+        cx: &mut TestAppContext,
+    ) -> (
+        Entity<WorkspaceManager>,
+        TestTerminalSessionRecords,
+        &mut VisualTestContext,
+    ) {
+        cx.update(crate::ui::init);
+        let records = TestTerminalSessionRecords::default();
+        let session_factory: Rc<dyn TerminalSessionFactory> =
+            Rc::new(TestTerminalSessionFactory::new(records.clone()).with_fallback_title("zsh"));
+        let factory: Arc<dyn RemoteWorkspaceFlowBackendFactory> =
+            Arc::new(TestRemoteWorkspaceFlowBackendFactory { backend });
+        let (manager, cx) = cx.add_window_view(move |window, cx| {
+            WorkspaceManager::new_with_remote_workspace_backend_factory(
+                session_factory,
+                PathBuf::from("/Users/test"),
+                factory,
+                window,
+                cx,
+            )
+        });
+        cx.update(|window, cx| {
+            manager.update(cx, |manager, cx| manager.focus(window, cx));
+        });
+        cx.run_until_parked();
+        (manager, records, cx)
+    }
+
+    fn reconnect_session(
+        destination: &str,
+        physical: &str,
+    ) -> (
+        RemoteWorkspaceConnectedSession,
+        Arc<AtomicUsize>,
+        Arc<AtomicUsize>,
+        Arc<AtomicUsize>,
+        async_channel::Sender<crate::ssh::live_connection::ControlConnectionTerminalState>,
+    ) {
+        let physical = crate::domain::RemoteDirectoryIdentity::new(physical.to_owned()).unwrap();
+        reconnect_session_with_provider(
+            destination,
+            Arc::new(TestRemoteProvider::connected(physical)),
+        )
+    }
+
+    fn reconnect_session_with_provider(
+        destination: &str,
+        provider: Arc<dyn RemoteWorkspaceProvider>,
+    ) -> (
+        RemoteWorkspaceConnectedSession,
+        Arc<AtomicUsize>,
+        Arc<AtomicUsize>,
+        Arc<AtomicUsize>,
+        async_channel::Sender<crate::ssh::live_connection::ControlConnectionTerminalState>,
+    ) {
+        reconnect_session_with_provider_and_revalidation(destination, provider, VecDeque::new())
+    }
+
+    fn reconnect_session_with_provider_and_revalidation(
+        destination: &str,
+        provider: Arc<dyn RemoteWorkspaceProvider>,
+        revalidation_tasks: VecDeque<
+            gpui::Task<Result<(), crate::terminal::RemoteChannelRevalidationError>>,
+        >,
+    ) -> (
+        RemoteWorkspaceConnectedSession,
+        Arc<AtomicUsize>,
+        Arc<AtomicUsize>,
+        Arc<AtomicUsize>,
+        async_channel::Sender<crate::ssh::live_connection::ControlConnectionTerminalState>,
+    ) {
+        let destination = crate::domain::SshDestination::new(destination.to_owned()).unwrap();
+        let preparations = Arc::new(AtomicUsize::new(0));
+        let revalidations = Arc::new(AtomicUsize::new(0));
+        let channels: Arc<dyn crate::terminal::RemoteTerminalChannelProvider> =
+            Arc::new(TestRemoteChannelProvider {
+                preparations: Arc::clone(&preparations),
+                revalidations: Arc::clone(&revalidations),
+                revalidation_tasks: Mutex::new(revalidation_tasks),
+                available: Arc::new(AtomicBool::new(true)),
+                destination,
+            });
+        let closes = Arc::new(AtomicUsize::new(0));
+        let (lifecycle_sender, lifecycle) =
+            crate::ssh::live_connection::ControlConnectionObserver::controlled();
+        (
+            RemoteWorkspaceConnectedSession::new(
+                Box::new(TestRemoteSessionOwner {
+                    closes: Arc::clone(&closes),
+                    channels,
+                    lifecycle: Some(lifecycle),
+                    _lifecycle_senders: vec![lifecycle_sender.clone()],
+                    alias: None,
+                    alias_pin_error: false,
+                }),
+                provider,
+            ),
+            closes,
+            preparations,
+            revalidations,
+            lifecycle_sender,
+        )
     }
 
     fn workspace_manager_with_operating_system_window_drag_platform(
@@ -2709,6 +4891,7 @@ mod tests {
                 session_factory,
                 PathBuf::from("/Users/test"),
                 injected_platform,
+                test_remote_backend_factory(),
                 window,
                 cx,
             )
@@ -2739,6 +4922,7 @@ mod tests {
                 session_factory,
                 PathBuf::from("/Users/test"),
                 finder_fallback,
+                test_remote_backend_factory(),
                 window,
                 cx,
             )
@@ -2798,6 +4982,87 @@ mod tests {
         cx.run_until_parked();
     }
 
+    fn open_remote_workspace_flow(
+        manager: &Entity<WorkspaceManager>,
+        cx: &mut VisualTestContext,
+    ) -> Entity<RemoteWorkspaceFlow> {
+        open_new_workspace_panel(cx);
+        click("new-workspace-source-remote-project", cx);
+        manager.read_with(cx, |manager, _| {
+            manager
+                .remote_workspace_flow
+                .as_ref()
+                .expect("Remote Project must create its flow")
+                .clone()
+        })
+    }
+
+    fn emit_remote_workspace_completion(
+        flow: &Entity<RemoteWorkspaceFlow>,
+        completion: RemoteWorkspaceFlowCompletion,
+        cx: &mut VisualTestContext,
+    ) {
+        cx.update(|_, cx| {
+            flow.update(cx, |flow, cx| flow.emit_completion_for_test(completion, cx));
+        });
+        cx.run_until_parked();
+    }
+
+    fn create_disconnected_remote_workspace(
+        manager: &Entity<WorkspaceManager>,
+        cx: &mut VisualTestContext,
+    ) -> WorkspaceId {
+        let flow = open_remote_workspace_flow(manager, cx);
+        let (completion, _, _, _, _, lifecycle) = remote_completion_with_revalidation(
+            "work",
+            "~/src",
+            "/home/tester/src",
+            true,
+            gpui::Task::ready(Ok(())),
+        );
+        emit_remote_workspace_completion(&flow, completion, cx);
+        let workspace_id =
+            manager.read_with(cx, |manager, _| manager.workspaces.active_workspace_id());
+        lifecycle
+            .try_send(ControlConnectionTerminalState::Closed)
+            .unwrap();
+        cx.run_until_parked();
+        workspace_id
+    }
+
+    fn install_remote_completion_directly(
+        manager: &Entity<WorkspaceManager>,
+        completion: RemoteWorkspaceFlowCompletion,
+        cx: &mut VisualTestContext,
+    ) {
+        cx.update(|window, cx| {
+            manager.update(cx, |manager, cx| {
+                let key = RemoteWorkspaceKey::new(
+                    completion.destination().clone(),
+                    completion.physical_directory().clone(),
+                );
+                let terminal_factory = WorkspaceTerminalSessionFactory::new_remote(
+                    Rc::clone(&manager.session_factory),
+                    ValidatedWorkspaceDirectory::new(
+                        manager.default_workspace_root.clone(),
+                        manager.default_workspace_identity,
+                    ),
+                    RemoteTerminalMetadataContext::new(
+                        completion.destination().clone(),
+                        completion.directory().clone(),
+                    ),
+                    remote_workspace_fallback_title(&key, completion.remote_home_identity()),
+                    completion.terminal_channels(),
+                );
+                let prepared = terminal_factory.prepare_child_launch().unwrap();
+                manager
+                    .try_create_remote_project(completion, terminal_factory, prepared, window, cx)
+                    .unwrap_or_else(|_| panic!("direct Remote Workspace installation failed"));
+            });
+        });
+        cx.run_until_parked();
+    }
+
     fn choose_with_finder_fallback(cx: &mut VisualTestContext) {
         open_workspace_picker(cx);
         click("workspace-picker-finder", cx);
@@ -2813,7 +5078,13 @@ mod tests {
         let session_factory: Rc<dyn TerminalSessionFactory> =
             Rc::new(TestTerminalSessionFactory::new(records).with_fallback_title("zsh"));
         let (manager, cx) = cx.add_window_view(|window, cx| {
-            WorkspaceManager::new(session_factory, PathBuf::from("/Users/test"), window, cx)
+            WorkspaceManager::new_with_remote_workspace_backend_factory(
+                session_factory,
+                PathBuf::from("/Users/test"),
+                test_remote_backend_factory(),
+                window,
+                cx,
+            )
         });
         let dialog = Dialog::new(
             ModalId::new("rtl-application-modal"),
@@ -3155,10 +5426,22 @@ mod tests {
             TestTerminalSessionFactory::new(second_records.clone()).with_fallback_title("zsh"),
         );
         let first = cx.add_window(|window, cx| {
-            WorkspaceManager::new(first_factory, PathBuf::from("/Users/first"), window, cx)
+            WorkspaceManager::new_with_remote_workspace_backend_factory(
+                first_factory,
+                PathBuf::from("/Users/first"),
+                test_remote_backend_factory(),
+                window,
+                cx,
+            )
         });
         let second = cx.add_window(|window, cx| {
-            WorkspaceManager::new(second_factory, PathBuf::from("/Users/second"), window, cx)
+            WorkspaceManager::new_with_remote_workspace_backend_factory(
+                second_factory,
+                PathBuf::from("/Users/second"),
+                test_remote_backend_factory(),
+                window,
+                cx,
+            )
         });
 
         let first_pane_host = first
@@ -3430,6 +5713,1748 @@ mod tests {
     }
 
     #[gpui::test]
+    fn choosing_remote_project_should_strictly_replace_the_panel_and_restore_focus_on_escape(
+        cx: &mut TestAppContext,
+    ) {
+        let (manager, _, cx) = workspace_manager(cx);
+
+        open_new_workspace_panel(cx);
+        click("new-workspace-source-remote-project", cx);
+        let flow = manager.read_with(cx, |manager, _| {
+            manager
+                .remote_workspace_flow
+                .as_ref()
+                .expect("Remote Project must create its flow")
+                .clone()
+        });
+
+        let opened = cx.update(|window, cx| {
+            let manager = manager.read(cx);
+            (
+                manager.new_workspace_panel.read(cx).is_open(),
+                flow.read(cx).stage(),
+                flow.read(cx).owns_first_responder(window, cx),
+                manager.terminal_focus_blocker(window, cx),
+            )
+        });
+        assert_eq!(
+            opened,
+            (
+                false,
+                RemoteWorkspaceFlowStage::HostSelection,
+                true,
+                Some(TerminalFocusBlocker::CommandPalette),
+            )
+        );
+
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        let escaped = cx.update(|window, cx| {
+            let manager = manager.read(cx);
+            (
+                manager.remote_workspace_flow.is_none(),
+                manager.terminal_focus_blocker(window, cx),
+                manager
+                    .workspaces
+                    .active_workspace()
+                    .payload()
+                    .read(cx)
+                    .focused_terminal_is_focused(window, cx),
+            )
+        });
+        assert_eq!(escaped, (true, None, true));
+
+        open_new_workspace_panel(cx);
+        click("new-workspace-source-remote-project", cx);
+        let reopened = manager.read_with(cx, |manager, _| {
+            manager
+                .remote_workspace_flow
+                .as_ref()
+                .expect("Remote Project should create a fresh flow")
+                .clone()
+        });
+        assert_ne!(reopened, flow);
+        assert_eq!(
+            reopened.read_with(cx, |flow, _| flow.stage()),
+            RemoteWorkspaceFlowStage::HostSelection
+        );
+    }
+
+    #[gpui::test]
+    fn deactivated_remote_picker_should_restore_actions_after_releasing_its_flow(
+        cx: &mut TestAppContext,
+    ) {
+        let (session, closes, _, _, _) = reconnect_session("work", "/home/tester");
+        let backend =
+            TestRemoteWorkspaceFlowBackend::with_connections([gpui::Task::ready(Ok(session))]);
+        let (manager, _, cx) = workspace_manager_with_remote_backend(backend, cx);
+        cx.update(|window, _| window.activate_window());
+        cx.run_until_parked();
+        let flow = open_remote_workspace_flow(&manager, cx);
+        cx.update(|window, cx| {
+            flow.update(cx, |flow, cx| {
+                flow.select_destination_for_test(
+                    crate::domain::SshDestination::new("work".to_owned()).unwrap(),
+                    window,
+                    cx,
+                );
+            });
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            flow.read_with(cx, |flow, _| flow.stage()),
+            RemoteWorkspaceFlowStage::DirectorySelection
+        );
+
+        cx.deactivate_window();
+        cx.run_until_parked();
+
+        assert_eq!(closes.load(Ordering::Acquire), 1);
+        assert_eq!(
+            flow.read_with(cx, |flow, _| flow.stage()),
+            RemoteWorkspaceFlowStage::Cancelled
+        );
+        assert!(manager.read_with(cx, |manager, _| manager.remote_workspace_flow.is_none()));
+        assert_eq!(
+            cx.update(|window, cx| manager.read(cx).terminal_focus_blocker(window, cx)),
+            None
+        );
+        assert!(manager.read_with(cx, |manager, _| {
+            manager.remote_workspace_focus_restore_pending
+        }));
+
+        let cancelled_flow_id = flow.entity_id();
+        drop(flow);
+        cx.update(|window, _| window.activate_window());
+        cx.run_until_parked();
+
+        assert!(manager.read_with(cx, |manager, _| {
+            !manager.remote_workspace_focus_restore_pending
+        }));
+        assert!(cx.update(|window, cx| {
+            manager
+                .read(cx)
+                .workspaces
+                .active_workspace()
+                .payload()
+                .read(cx)
+                .focused_terminal_is_focused(window, cx)
+        }));
+        assert!(cx.update(|window, cx| { window.is_action_available(&ShowNewWorkspacePanel, cx) }));
+
+        open_new_workspace_panel(cx);
+        assert!(cx.update(|window, cx| {
+            let manager = manager.read(cx);
+            manager.new_workspace_panel.read(cx).is_open()
+                && manager
+                    .new_workspace_panel
+                    .read(cx)
+                    .input_is_focused(window, cx)
+        }));
+        cx.update(|window, cx| {
+            manager.update(cx, |manager, cx| {
+                manager.remote_workspace_focus_restore_pending = true;
+                manager.restore_remote_workspace_focus_after_activation(window, cx);
+            });
+        });
+        assert!(cx.update(|window, cx| {
+            let manager = manager.read(cx);
+            !manager.remote_workspace_focus_restore_pending
+                && manager
+                    .new_workspace_panel
+                    .read(cx)
+                    .input_is_focused(window, cx)
+                && !manager
+                    .workspaces
+                    .active_workspace()
+                    .payload()
+                    .read(cx)
+                    .focused_terminal_is_focused(window, cx)
+        }));
+        click("new-workspace-source-remote-project", cx);
+        let reopened = manager.read_with(cx, |manager, _| {
+            manager
+                .remote_workspace_flow
+                .as_ref()
+                .expect("Remote Project should create a fresh flow")
+                .clone()
+        });
+        assert_ne!(reopened.entity_id(), cancelled_flow_id);
+    }
+
+    #[gpui::test]
+    fn unavailable_remote_source_should_stay_disabled_without_constructing_askpass_backend(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(crate::ui::init);
+        let records = TestTerminalSessionRecords::default();
+        let session_factory: Rc<dyn TerminalSessionFactory> =
+            Rc::new(TestTerminalSessionFactory::new(records).with_fallback_title("zsh"));
+        let create_calls = Arc::new(AtomicUsize::new(0));
+        let factory: Arc<dyn RemoteWorkspaceFlowBackendFactory> =
+            Arc::new(UnavailableTestRemoteWorkspaceFlowBackendFactory {
+                create_calls: Arc::clone(&create_calls),
+            });
+        let (manager, cx) = cx.add_window_view(move |window, cx| {
+            WorkspaceManager::new_with_remote_workspace_backend_factory(
+                session_factory,
+                PathBuf::from("/Users/test"),
+                factory,
+                window,
+                cx,
+            )
+        });
+        cx.update(|window, cx| manager.update(cx, |manager, cx| manager.focus(window, cx)));
+        cx.run_until_parked();
+
+        open_new_workspace_panel(cx);
+        click("new-workspace-source-remote-project", cx);
+        cx.run_until_parked();
+
+        assert_eq!(create_calls.load(Ordering::Acquire), 0);
+        assert!(manager.read_with(cx, |manager, cx| {
+            manager.new_workspace_panel.read(cx).is_open()
+        }));
+        assert!(manager.read_with(cx, |manager, _| manager.remote_workspace_flow.is_none()));
+        assert_eq!(
+            cx.update(|window, cx| manager.read(cx).terminal_focus_blocker(window, cx)),
+            Some(TerminalFocusBlocker::CommandPalette)
+        );
+    }
+
+    #[gpui::test]
+    fn backend_construction_failure_should_disable_remote_instead_of_leaving_an_inert_source(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(crate::ui::init);
+        let records = TestTerminalSessionRecords::default();
+        let session_factory: Rc<dyn TerminalSessionFactory> =
+            Rc::new(TestTerminalSessionFactory::new(records).with_fallback_title("zsh"));
+        let create_calls = Arc::new(AtomicUsize::new(0));
+        let factory: Arc<dyn RemoteWorkspaceFlowBackendFactory> =
+            Arc::new(FailingTestRemoteWorkspaceFlowBackendFactory {
+                create_calls: Arc::clone(&create_calls),
+            });
+        let (manager, cx) = cx.add_window_view(move |window, cx| {
+            WorkspaceManager::new_with_remote_workspace_backend_factory(
+                session_factory,
+                PathBuf::from("/Users/test"),
+                factory,
+                window,
+                cx,
+            )
+        });
+        cx.update(|window, cx| manager.update(cx, |manager, cx| manager.focus(window, cx)));
+        cx.run_until_parked();
+
+        open_new_workspace_panel(cx);
+        click("new-workspace-source-remote-project", cx);
+        cx.run_until_parked();
+
+        assert_eq!(create_calls.load(Ordering::Acquire), 1);
+        assert!(manager.read_with(cx, |manager, cx| {
+            manager.new_workspace_panel.read(cx).is_open()
+        }));
+        assert!(manager.read_with(cx, |manager, _| manager.remote_workspace_flow.is_none()));
+        assert_eq!(
+            cx.update(|window, cx| manager.read(cx).terminal_focus_blocker(window, cx)),
+            Some(TerminalFocusBlocker::CommandPalette)
+        );
+    }
+
+    #[gpui::test]
+    fn remote_completion_should_create_exact_metadata_launch_and_owned_runtime(
+        cx: &mut TestAppContext,
+    ) {
+        let (manager, records, cx) = workspace_manager(cx);
+        let flow = open_remote_workspace_flow(&manager, cx);
+        let (completion, closes, preparations, revalidations, _, _) =
+            remote_completion_with_revalidation(
+                "deploy@work",
+                "~/src",
+                "/home/tester/src",
+                true,
+                gpui::Task::ready(Ok(())),
+            );
+
+        emit_remote_workspace_completion(&flow, completion, cx);
+
+        let (workspace_id, destination, directory, physical, runtime_count, has_alias_pin) =
+            manager.read_with(cx, |manager, _| {
+                let workspace = manager.workspaces.active_workspace();
+                (
+                    workspace.id(),
+                    workspace
+                        .remote_workspace_key()
+                        .expect("active Workspace must be remote")
+                        .destination()
+                        .as_str()
+                        .to_owned(),
+                    workspace
+                        .remote_workspace_directory()
+                        .expect("Remote Workspace preserves typed spelling")
+                        .as_str()
+                        .to_owned(),
+                    workspace
+                        .remote_workspace_key()
+                        .unwrap()
+                        .physical_directory()
+                        .as_str()
+                        .to_owned(),
+                    manager.remote_workspace_runtimes.len(),
+                    manager
+                        .remote_workspace_runtimes
+                        .get(&workspace.id())
+                        .is_some_and(|runtime| runtime.alias_pin.is_some()),
+                )
+            });
+        let starts = records.starts();
+        let remote = starts
+            .last()
+            .and_then(|start| start.remote_launch_plan())
+            .expect("initial Remote Pane must use a remote launch plan");
+        assert_eq!(
+            (destination.as_str(), directory.as_str(), physical.as_str()),
+            ("deploy@work", "~/src", "/home/tester/src")
+        );
+        assert_eq!(runtime_count, 1);
+        assert!(
+            !has_alias_pin,
+            "a raw SSH destination must not own an alias pin"
+        );
+        assert_eq!(revalidations.load(Ordering::Acquire), 1);
+        assert_eq!(preparations.load(Ordering::Acquire), 1);
+        assert_eq!(closes.load(Ordering::Acquire), 0);
+        assert_eq!(remote.destination().as_str(), "deploy@work");
+        assert_eq!(remote.remote_directory().as_str(), "~/src");
+        assert_eq!(remote.local_home().path(), PathBuf::from("/Users/test"));
+
+        cx.update(|window, cx| {
+            manager.update(cx, |manager, cx| {
+                manager.close_workspace(workspace_id, window, cx)
+            });
+        });
+        cx.run_until_parked();
+        assert_eq!(closes.load(Ordering::Acquire), 1);
+        assert_eq!(
+            manager.read_with(cx, |manager, _| manager.remote_workspace_runtimes.len()),
+            0
+        );
+    }
+
+    #[gpui::test]
+    fn completed_flow_event_should_transfer_runtime_acknowledge_and_focus_remote_workspace(
+        cx: &mut TestAppContext,
+    ) {
+        let (manager, records, cx) = workspace_manager(cx);
+        let flow = open_remote_workspace_flow(&manager, cx);
+        let (completion, closes, preparations, _) =
+            remote_completion("work", "~/src", "/home/tester/src", true);
+
+        emit_remote_workspace_completion(&flow, completion, cx);
+
+        let state = cx.update(|window, cx| {
+            let manager = manager.read(cx);
+            (
+                manager.workspaces.len(),
+                manager.remote_workspace_flow.is_none(),
+                manager.remote_workspace_runtimes.len(),
+                manager.terminal_focus_blocker(window, cx),
+                manager
+                    .workspaces
+                    .active_workspace()
+                    .payload()
+                    .read(cx)
+                    .focused_terminal_is_focused(window, cx),
+            )
+        });
+        assert_eq!(state, (2, true, 1, None, true));
+        assert_eq!(records.starts().len(), 2);
+        assert_eq!(preparations.load(Ordering::Acquire), 1);
+        assert_eq!(closes.load(Ordering::Acquire), 0);
+        assert_eq!(
+            flow.read_with(cx, |flow, _| flow.stage()),
+            RemoteWorkspaceFlowStage::Completed
+        );
+    }
+
+    #[gpui::test]
+    fn closed_remote_control_connection_should_preserve_workspace_and_block_its_pane(
+        cx: &mut TestAppContext,
+    ) {
+        let (manager, records, cx) = workspace_manager(cx);
+        let flow = open_remote_workspace_flow(&manager, cx);
+        let (completion, closes, _, _, _, lifecycle) = remote_completion_with_revalidation(
+            "work",
+            "~/src",
+            "/home/tester/src",
+            true,
+            gpui::Task::ready(Ok(())),
+        );
+        emit_remote_workspace_completion(&flow, completion, cx);
+        let (workspace_id, window_manager, pane_host) = manager.read_with(cx, |manager, cx| {
+            let workspace = manager.workspaces.active_workspace();
+            let window_manager = workspace.payload().clone();
+            let pane_host = window_manager.read(cx).active_pane_host();
+            (workspace.id(), window_manager, pane_host)
+        });
+        let starts_before_disconnect = records.starts().len();
+
+        lifecycle
+            .try_send(ControlConnectionTerminalState::Closed)
+            .unwrap();
+        cx.run_until_parked();
+        redraw(cx);
+
+        assert_eq!(
+            manager.read_with(cx, |manager, _| manager
+                .workspaces
+                .workspace(workspace_id)
+                .unwrap()
+                .remote_connection_state()),
+            Some(RemoteConnectionState::disconnected(1))
+        );
+        assert_eq!(closes.load(Ordering::Acquire), 1);
+        assert_eq!(records.starts().len(), starts_before_disconnect);
+        assert_eq!(
+            manager.read_with(cx, |manager, _| manager
+                .workspaces
+                .workspace(workspace_id)
+                .unwrap()
+                .payload()
+                .entity_id()),
+            window_manager.entity_id()
+        );
+        assert_eq!(
+            window_manager.read_with(cx, |manager, _| manager.active_pane_host().entity_id()),
+            pane_host.entity_id()
+        );
+        assert_eq!(
+            pane_host.read_with(cx, |host, cx| (
+                host.remote_disconnected_generation(),
+                host.focused_terminal_remote_state(cx),
+                host.pane_count(),
+            )),
+            (Some(1), (true, true), 1)
+        );
+        let status_selector: &'static str = Box::leak(
+            format!("workspace-row-remote-status-{}", workspace_id.get()).into_boxed_str(),
+        );
+        assert!(cx.debug_bounds(status_selector).is_some());
+
+        cx.simulate_keystrokes("cmd-b");
+        redraw(cx);
+        assert!(
+            cx.debug_bounds("workspace-chip-remote-status").is_some(),
+            "hidden-sidebar identity chip must retain remote connection status"
+        );
+        cx.simulate_keystrokes("cmd-b");
+        redraw(cx);
+
+        cx.simulate_keystrokes("cmd-t");
+        cx.run_until_parked();
+        assert_eq!(records.starts().len(), starts_before_disconnect);
+        assert_eq!(pane_host.read_with(cx, |host, _| host.pane_count()), 1);
+    }
+
+    #[gpui::test]
+    fn workspace_menu_should_enable_its_single_reconnect_action_only_after_disconnect(
+        cx: &mut TestAppContext,
+    ) {
+        let backend = Arc::new(TestRemoteWorkspaceFlowBackend::default());
+        let (manager, _, cx) = workspace_manager_with_remote_backend(backend.clone(), cx);
+        let flow = open_remote_workspace_flow(&manager, cx);
+        let (completion, _, _, _, _, lifecycle) = remote_completion_with_revalidation(
+            "work",
+            "~/src",
+            "/home/tester/src",
+            true,
+            gpui::Task::ready(Ok(())),
+        );
+        emit_remote_workspace_completion(&flow, completion, cx);
+        let workspace_id =
+            manager.read_with(cx, |manager, _| manager.workspaces.active_workspace_id());
+        let row_selector: &'static str =
+            Box::leak(format!("workspace-row-{}-active", workspace_id.get()).into_boxed_str());
+        redraw(cx);
+
+        right_click(row_selector, cx);
+        assert!(
+            cx.debug_bounds("workspace-menu-row-reconnect").is_some(),
+            "Remote Workspace menu must contain exactly one stable Reconnect row"
+        );
+        click("workspace-menu-row-reconnect", cx);
+        assert_eq!(backend.connect_calls.load(Ordering::Acquire), 0);
+        assert_eq!(
+            manager.read_with(cx, |manager, _| manager
+                .workspaces
+                .workspace(workspace_id)
+                .unwrap()
+                .remote_connection_state()),
+            Some(RemoteConnectionState::connected(1))
+        );
+        cx.simulate_keystrokes("escape");
+
+        lifecycle
+            .try_send(ControlConnectionTerminalState::Closed)
+            .unwrap();
+        cx.run_until_parked();
+        redraw(cx);
+        right_click(row_selector, cx);
+        click("workspace-menu-row-reconnect", cx);
+
+        assert_eq!(backend.connect_calls.load(Ordering::Acquire), 1);
+        assert_eq!(
+            manager.read_with(cx, |manager, _| manager
+                .workspaces
+                .workspace(workspace_id)
+                .unwrap()
+                .remote_connection_state()),
+            Some(RemoteConnectionState::failed(2))
+        );
+    }
+
+    #[gpui::test]
+    fn reconnect_authentication_should_promote_queued_askpass_and_restore_progress_after_close(
+        cx: &mut TestAppContext,
+    ) {
+        let (_connection_sender, connection_receiver) = async_channel::bounded(1);
+        let pending = cx.update(|cx| {
+            cx.background_executor()
+                .spawn(async move { connection_receiver.recv().await.unwrap() })
+        });
+        let backend = TestRemoteWorkspaceFlowBackend::with_connections([pending]);
+        let (manager, _, cx) = workspace_manager_with_remote_backend(backend, cx);
+        let workspace_id = create_disconnected_remote_workspace(&manager, cx);
+        let outcomes = Rc::new(RefCell::new(Vec::new()));
+        let askpass = cx.update(|window, cx| {
+            manager.update(cx, |manager, cx| {
+                manager.start_remote_workspace_reconnect(workspace_id, window, cx)
+            });
+            let askpass = cx.new(|_| GpuiAskPassPresenter::default());
+            let captured = Rc::clone(&outcomes);
+            askpass
+                .update(cx, |presenter, cx| {
+                    presenter.present(
+                        55,
+                        AskPassRequest::new(
+                            "root@example.test's password:".to_owned(),
+                            AskPassPromptKind::Secret,
+                        )
+                        .unwrap(),
+                        Box::new(move |result| {
+                            captured
+                                .borrow_mut()
+                                .push(matches!(result, AskPassResult::Cancelled));
+                        }),
+                        window,
+                        cx,
+                    )
+                })
+                .unwrap();
+            askpass
+        });
+        cx.run_until_parked();
+        let original = manager.read_with(cx, |manager, _| {
+            manager
+                .remote_workspace_reconnect
+                .as_ref()
+                .and_then(|attempt| attempt.progress.as_ref())
+                .map(ProgressDialogHandle::presentation_id)
+                .unwrap()
+        });
+        assert!(cx.debug_bounds("ssh-askpass-secret-input").is_none());
+
+        cx.update(|window, cx| {
+            manager.update(cx, |manager, cx| {
+                assert!(manager.apply_remote_workspace_reconnect_progress(
+                    workspace_id,
+                    2,
+                    RemoteWorkspaceConnectionProgress::Authenticating,
+                    window,
+                    cx,
+                ));
+            });
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("ssh-askpass-secret-input").is_some());
+        assert!(manager.read_with(cx, |manager, _| {
+            manager
+                .remote_workspace_reconnect
+                .as_ref()
+                .is_some_and(|attempt| attempt.progress.is_none())
+        }));
+
+        cx.update(|window, cx| {
+            askpass.update(cx, |presenter, cx| presenter.cancel_owner(55, window, cx));
+        });
+        cx.run_until_parked();
+        assert_eq!(outcomes.borrow().as_slice(), [true]);
+        cx.update(|window, cx| {
+            manager.update(cx, |manager, cx| {
+                assert!(manager.apply_remote_workspace_reconnect_progress(
+                    workspace_id,
+                    2,
+                    RemoteWorkspaceConnectionProgress::Connecting,
+                    window,
+                    cx,
+                ));
+            });
+        });
+        cx.run_until_parked();
+        let restored = manager.read_with(cx, |manager, _| {
+            manager
+                .remote_workspace_reconnect
+                .as_ref()
+                .and_then(|attempt| attempt.progress.as_ref())
+                .map(ProgressDialogHandle::presentation_id)
+                .unwrap()
+        });
+        assert_ne!(restored, original);
+
+        click("modal-action-remote-workspace-reconnect-cancel", cx);
+        assert!(manager.read_with(cx, |manager, _| {
+            manager.remote_workspace_reconnect.is_none()
+        }));
+    }
+
+    #[gpui::test]
+    fn reconnect_should_atomically_restart_the_same_workspace_window_and_pane(
+        cx: &mut TestAppContext,
+    ) {
+        let (new_session, new_closes, new_preparations, new_revalidations, _new_lifecycle) =
+            reconnect_session("work", "/home/tester/src");
+        let backend =
+            TestRemoteWorkspaceFlowBackend::with_connections([gpui::Task::ready(Ok(new_session))]);
+        let (manager, records, cx) = workspace_manager_with_remote_backend(backend.clone(), cx);
+        let flow = open_remote_workspace_flow(&manager, cx);
+        let (completion, old_closes, _, _, _, old_lifecycle) = remote_completion_with_revalidation(
+            "work",
+            "~/src",
+            "/home/tester/src",
+            true,
+            gpui::Task::ready(Ok(())),
+        );
+        emit_remote_workspace_completion(&flow, completion, cx);
+        let (workspace_id, window_manager, pane_host, starts_before_reconnect) =
+            manager.read_with(cx, |manager, cx| {
+                let workspace = manager.workspaces.active_workspace();
+                let window_manager = workspace.payload().clone();
+                let pane_host = window_manager.read(cx).active_pane_host();
+                (
+                    workspace.id(),
+                    window_manager,
+                    pane_host,
+                    records.starts().len(),
+                )
+            });
+
+        old_lifecycle
+            .try_send(ControlConnectionTerminalState::Closed)
+            .unwrap();
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            manager.update(cx, |manager, cx| {
+                manager.start_remote_workspace_reconnect(workspace_id, window, cx)
+            });
+        });
+        cx.run_until_parked();
+
+        assert_eq!(backend.connect_calls.load(Ordering::Acquire), 1);
+        assert_eq!(old_closes.load(Ordering::Acquire), 1);
+        assert_eq!(new_closes.load(Ordering::Acquire), 0);
+        assert_eq!(new_revalidations.load(Ordering::Acquire), 1);
+        assert_eq!(new_preparations.load(Ordering::Acquire), 1);
+        assert_eq!(records.starts().len(), starts_before_reconnect + 1);
+        assert_eq!(
+            manager.read_with(cx, |manager, _| manager
+                .workspaces
+                .workspace(workspace_id)
+                .unwrap()
+                .remote_connection_state()),
+            Some(RemoteConnectionState::connected(2))
+        );
+        assert_eq!(
+            manager.read_with(cx, |manager, _| manager
+                .workspaces
+                .workspace(workspace_id)
+                .unwrap()
+                .payload()
+                .entity_id()),
+            window_manager.entity_id()
+        );
+        assert_eq!(
+            window_manager.read_with(cx, |manager, _| manager.active_pane_host().entity_id()),
+            pane_host.entity_id()
+        );
+        assert_eq!(
+            pane_host.read_with(cx, |host, cx| (
+                host.remote_disconnected_generation(),
+                host.focused_terminal_remote_state(cx),
+                host.pane_count(),
+            )),
+            (None, (false, true), 1)
+        );
+
+        manager.update(cx, |manager, cx| {
+            manager.handle_remote_workspace_terminal(
+                workspace_id,
+                1,
+                ControlConnectionTerminalState::Failed,
+                cx,
+            )
+        });
+        assert_eq!(
+            manager.read_with(cx, |manager, _| manager
+                .workspaces
+                .workspace(workspace_id)
+                .unwrap()
+                .remote_connection_state()),
+            Some(RemoteConnectionState::connected(2))
+        );
+
+        assert_eq!(new_closes.load(Ordering::Acquire), 0);
+    }
+
+    #[gpui::test]
+    fn reconnect_should_consume_a_terminal_state_published_before_observer_installation(
+        cx: &mut TestAppContext,
+    ) {
+        let (new_session, new_closes, _, _, new_lifecycle) =
+            reconnect_session("work", "/home/tester/src");
+        new_lifecycle
+            .try_send(ControlConnectionTerminalState::Failed)
+            .unwrap();
+        let backend =
+            TestRemoteWorkspaceFlowBackend::with_connections([gpui::Task::ready(Ok(new_session))]);
+        let (manager, _, cx) = workspace_manager_with_remote_backend(backend, cx);
+        let flow = open_remote_workspace_flow(&manager, cx);
+        let (completion, _, _, _, _, old_lifecycle) = remote_completion_with_revalidation(
+            "work",
+            "~/src",
+            "/home/tester/src",
+            true,
+            gpui::Task::ready(Ok(())),
+        );
+        emit_remote_workspace_completion(&flow, completion, cx);
+        let workspace_id =
+            manager.read_with(cx, |manager, _| manager.workspaces.active_workspace_id());
+        old_lifecycle
+            .try_send(ControlConnectionTerminalState::Closed)
+            .unwrap();
+        cx.run_until_parked();
+
+        cx.update(|window, cx| {
+            manager.update(cx, |manager, cx| {
+                manager.start_remote_workspace_reconnect(workspace_id, window, cx)
+            });
+        });
+        cx.run_until_parked();
+
+        assert_eq!(
+            manager.read_with(cx, |manager, _| manager
+                .workspaces
+                .workspace(workspace_id)
+                .unwrap()
+                .remote_connection_state()),
+            Some(RemoteConnectionState::disconnected(2))
+        );
+        assert_eq!(new_closes.load(Ordering::Acquire), 1);
+    }
+
+    #[gpui::test]
+    fn reconnect_identity_change_should_keep_final_presentation_and_show_typed_alert(
+        cx: &mut TestAppContext,
+    ) {
+        let (new_session, new_closes, new_preparations, new_revalidations, _) =
+            reconnect_session("work", "/home/tester/replaced");
+        let backend =
+            TestRemoteWorkspaceFlowBackend::with_connections([gpui::Task::ready(Ok(new_session))]);
+        let (manager, records, cx) = workspace_manager_with_remote_backend(backend, cx);
+        let flow = open_remote_workspace_flow(&manager, cx);
+        let (completion, _, _, _, _, old_lifecycle) = remote_completion_with_revalidation(
+            "work",
+            "~/src",
+            "/home/tester/src",
+            true,
+            gpui::Task::ready(Ok(())),
+        );
+        emit_remote_workspace_completion(&flow, completion, cx);
+        let (workspace_id, pane_host, starts) = manager.read_with(cx, |manager, cx| {
+            let workspace = manager.workspaces.active_workspace();
+            (
+                workspace.id(),
+                workspace.payload().read(cx).active_pane_host(),
+                records.starts().len(),
+            )
+        });
+        old_lifecycle
+            .try_send(ControlConnectionTerminalState::Closed)
+            .unwrap();
+        cx.run_until_parked();
+
+        cx.update(|window, cx| {
+            manager.update(cx, |manager, cx| {
+                manager.start_remote_workspace_reconnect(workspace_id, window, cx)
+            });
+        });
+        cx.run_until_parked();
+        redraw(cx);
+
+        assert_eq!(
+            manager.read_with(cx, |manager, _| manager
+                .workspaces
+                .workspace(workspace_id)
+                .unwrap()
+                .remote_connection_state()),
+            Some(RemoteConnectionState::disconnected(2))
+        );
+        assert_eq!(new_closes.load(Ordering::Acquire), 1);
+        assert_eq!(new_preparations.load(Ordering::Acquire), 0);
+        assert_eq!(new_revalidations.load(Ordering::Acquire), 0);
+        assert_eq!(records.starts().len(), starts);
+        assert_eq!(
+            pane_host.read_with(cx, |host, cx| host.focused_terminal_remote_state(cx)),
+            (true, true)
+        );
+        assert!(
+            cx.debug_bounds("modal-action-remote-workspace-reconnect-error-ok")
+                .is_some()
+        );
+        assert_eq!(
+            remote_workspace_reconnect_error_content(
+                &RemoteWorkspaceReconnectFailure::IdentityChanged
+            ),
+            Some((
+                "Remote Directory Changed",
+                "The selected remote path now resolves to a different directory. Reopen the Remote Project to review it.".to_owned()
+            ))
+        );
+    }
+
+    #[gpui::test]
+    fn reconnect_directory_unavailable_should_remain_disconnected_with_actionable_alert(
+        cx: &mut TestAppContext,
+    ) {
+        let (new_session, new_closes, _, _, _) = reconnect_session_with_provider(
+            "work",
+            Arc::new(TestRemoteProvider::directory_unavailable()),
+        );
+        let backend =
+            TestRemoteWorkspaceFlowBackend::with_connections([gpui::Task::ready(Ok(new_session))]);
+        let (manager, _, cx) = workspace_manager_with_remote_backend(backend, cx);
+        let flow = open_remote_workspace_flow(&manager, cx);
+        let (completion, _, _, _, _, old_lifecycle) = remote_completion_with_revalidation(
+            "work",
+            "~/src",
+            "/home/tester/src",
+            true,
+            gpui::Task::ready(Ok(())),
+        );
+        emit_remote_workspace_completion(&flow, completion, cx);
+        let workspace_id =
+            manager.read_with(cx, |manager, _| manager.workspaces.active_workspace_id());
+        old_lifecycle
+            .try_send(ControlConnectionTerminalState::Closed)
+            .unwrap();
+        cx.run_until_parked();
+
+        cx.update(|window, cx| {
+            manager.update(cx, |manager, cx| {
+                manager.start_remote_workspace_reconnect(workspace_id, window, cx)
+            });
+        });
+        cx.run_until_parked();
+        redraw(cx);
+
+        assert_eq!(
+            manager.read_with(cx, |manager, _| manager
+                .workspaces
+                .workspace(workspace_id)
+                .unwrap()
+                .remote_connection_state()),
+            Some(RemoteConnectionState::disconnected(2))
+        );
+        assert_eq!(new_closes.load(Ordering::Acquire), 1);
+        assert!(
+            cx.debug_bounds("modal-action-remote-workspace-reconnect-error-ok")
+                .is_some()
+        );
+        assert_eq!(
+            remote_workspace_reconnect_error_content(
+                &RemoteWorkspaceReconnectFailure::DirectoryUnavailable
+            ),
+            Some((
+                "Remote Directory Unavailable",
+                "SpaceTerm can’t access the selected remote directory. Check its permissions or reopen the Remote Project.".to_owned()
+            ))
+        );
+    }
+
+    #[test]
+    fn reconnect_connection_detail_should_reach_the_transient_alert_content() {
+        let detail =
+            TransientSshErrorOutput::from_untrusted_bytes(b"ssh: Permission denied (publickey).")
+                .unwrap();
+        let failure = RemoteWorkspaceReconnectFailure::ConnectionFailed {
+            detail: Some(detail),
+        };
+        assert_eq!(
+            format!("{failure:?}"),
+            "ConnectionFailed { detail: Some(TransientSshErrorOutput(<redacted>)) }"
+        );
+        assert_eq!(
+            remote_workspace_reconnect_error_content(&failure),
+            Some((
+                "Couldn’t Reconnect",
+                "SpaceTerm couldn’t restore the remote connection. OpenSSH reported:\n\nssh: Permission denied (publickey)."
+                    .to_owned(),
+            ))
+        );
+    }
+
+    #[gpui::test]
+    fn hierarchy_change_between_restart_prepare_and_commit_should_fail_with_typed_alert(
+        cx: &mut TestAppContext,
+    ) {
+        let (new_session, new_closes, _, _, _) = reconnect_session("work", "/home/tester/src");
+        let backend =
+            TestRemoteWorkspaceFlowBackend::with_connections([gpui::Task::ready(Ok(new_session))]);
+        let (manager, records, cx) = workspace_manager_with_remote_backend(backend, cx);
+        let flow = open_remote_workspace_flow(&manager, cx);
+        let (completion, _, _, _, _, lifecycle) = remote_completion_with_revalidation(
+            "work",
+            "~/src",
+            "/home/tester/src",
+            true,
+            gpui::Task::ready(Ok(())),
+        );
+        emit_remote_workspace_completion(&flow, completion, cx);
+        redraw(cx);
+        cx.simulate_keystrokes("cmd-d");
+        cx.run_until_parked();
+        let (workspace_id, window_manager, starts) = manager.read_with(cx, |manager, _| {
+            let workspace = manager.workspaces.active_workspace();
+            (
+                workspace.id(),
+                workspace.payload().clone(),
+                records.starts().len(),
+            )
+        });
+        assert_eq!(
+            window_manager.read_with(cx, |manager, cx| manager.aggregate_counts(cx)),
+            (1, 2)
+        );
+
+        lifecycle
+            .try_send(ControlConnectionTerminalState::Closed)
+            .unwrap();
+        cx.run_until_parked();
+        manager.update(cx, |manager, _| {
+            manager.close_focused_pane_before_reconnect_commit = true;
+        });
+        cx.update(|window, cx| {
+            manager.update(cx, |manager, cx| {
+                manager.start_remote_workspace_reconnect(workspace_id, window, cx)
+            });
+        });
+        cx.run_until_parked();
+        redraw(cx);
+
+        assert_eq!(
+            manager.read_with(cx, |manager, _| manager
+                .workspaces
+                .workspace(workspace_id)
+                .unwrap()
+                .remote_connection_state()),
+            Some(RemoteConnectionState::failed(2))
+        );
+        assert_eq!(new_closes.load(Ordering::Acquire), 1);
+        assert_eq!(records.starts().len(), starts);
+        assert_eq!(
+            window_manager.read_with(cx, |manager, cx| manager.aggregate_counts(cx)),
+            (1, 1)
+        );
+        assert!(
+            cx.debug_bounds("modal-action-remote-workspace-reconnect-error-ok")
+                .is_some()
+        );
+    }
+
+    #[gpui::test]
+    fn reconnect_cancel_should_be_single_flight_and_close_late_success_without_resurrection(
+        cx: &mut TestAppContext,
+    ) {
+        let (late_session, late_closes, _, _, _) = reconnect_session("work", "/home/tester/src");
+        let (sender, receiver) = async_channel::bounded(1);
+        let pending = cx.update(|cx| {
+            cx.background_executor()
+                .spawn(async move { receiver.recv().await.unwrap() })
+        });
+        let backend = TestRemoteWorkspaceFlowBackend::with_connections([pending]);
+        let (manager, _, cx) = workspace_manager_with_remote_backend(backend.clone(), cx);
+        let flow = open_remote_workspace_flow(&manager, cx);
+        let (completion, _, _, _, _, lifecycle) = remote_completion_with_revalidation(
+            "work",
+            "~/src",
+            "/home/tester/src",
+            true,
+            gpui::Task::ready(Ok(())),
+        );
+        emit_remote_workspace_completion(&flow, completion, cx);
+        let workspace_id =
+            manager.read_with(cx, |manager, _| manager.workspaces.active_workspace_id());
+        lifecycle
+            .try_send(ControlConnectionTerminalState::Closed)
+            .unwrap();
+        cx.run_until_parked();
+
+        cx.update(|window, cx| {
+            manager.update(cx, |manager, cx| {
+                manager.start_remote_workspace_reconnect(workspace_id, window, cx);
+                manager.start_remote_workspace_reconnect(workspace_id, window, cx);
+            });
+        });
+        cx.run_until_parked();
+        redraw(cx);
+        assert_eq!(backend.connect_calls.load(Ordering::Acquire), 1);
+        assert_eq!(
+            manager.read_with(cx, |manager, _| manager
+                .workspaces
+                .workspace(workspace_id)
+                .unwrap()
+                .remote_connection_state()),
+            Some(RemoteConnectionState::reconnecting(2))
+        );
+
+        click("modal-action-remote-workspace-reconnect-cancel", cx);
+        assert_eq!(
+            manager.read_with(cx, |manager, _| manager
+                .workspaces
+                .workspace(workspace_id)
+                .unwrap()
+                .remote_connection_state()),
+            Some(RemoteConnectionState::disconnected(2))
+        );
+        assert!(manager.read_with(cx, |manager, _| {
+            manager.remote_workspace_reconnect.is_none()
+        }));
+
+        assert!(sender.try_send(Ok(late_session)).is_err());
+        cx.run_until_parked();
+        assert_eq!(late_closes.load(Ordering::Acquire), 1);
+        assert_eq!(
+            manager.read_with(cx, |manager, _| manager
+                .workspaces
+                .workspace(workspace_id)
+                .unwrap()
+                .remote_connection_state()),
+            Some(RemoteConnectionState::disconnected(2))
+        );
+    }
+
+    #[gpui::test]
+    fn cancelling_while_account_discovery_is_blocked_should_close_connected_session_immediately(
+        cx: &mut TestAppContext,
+    ) {
+        let (account_sender, account_receiver) = async_channel::bounded(1);
+        let account_task = cx.update(|cx| {
+            cx.background_executor()
+                .spawn(async move { account_receiver.recv().await.unwrap() })
+        });
+        let account_calls = Arc::new(AtomicUsize::new(0));
+        let provider: Arc<dyn RemoteWorkspaceProvider> = Arc::new(BlockingRemoteProvider {
+            account: Mutex::new(Some(account_task)),
+            identity: Mutex::new(Some(gpui::Task::ready(Ok(
+                crate::domain::RemoteDirectoryIdentity::new("/home/tester/src".to_owned()).unwrap(),
+            )))),
+            account_calls: Arc::clone(&account_calls),
+            identity_calls: Arc::new(AtomicUsize::new(0)),
+        });
+        let (session, closes, _, _, _) = reconnect_session_with_provider("work", provider);
+        let backend =
+            TestRemoteWorkspaceFlowBackend::with_connections([gpui::Task::ready(Ok(session))]);
+        let (manager, _, cx) = workspace_manager_with_remote_backend(backend, cx);
+        let workspace_id = create_disconnected_remote_workspace(&manager, cx);
+
+        cx.update(|window, cx| {
+            manager.update(cx, |manager, cx| {
+                manager.start_remote_workspace_reconnect(workspace_id, window, cx)
+            });
+        });
+        cx.run_until_parked();
+        redraw(cx);
+        assert_eq!(account_calls.load(Ordering::Acquire), 1);
+        assert_eq!(closes.load(Ordering::Acquire), 0);
+
+        click("modal-action-remote-workspace-reconnect-cancel", cx);
+
+        assert_eq!(closes.load(Ordering::Acquire), 1);
+        assert!(account_sender.is_closed());
+        assert_eq!(
+            manager.read_with(cx, |manager, _| manager
+                .workspaces
+                .workspace(workspace_id)
+                .unwrap()
+                .remote_connection_state()),
+            Some(RemoteConnectionState::disconnected(2))
+        );
+    }
+
+    #[gpui::test]
+    fn closing_workspace_while_identity_validation_is_blocked_should_close_session_immediately(
+        cx: &mut TestAppContext,
+    ) {
+        let (identity_sender, identity_receiver) = async_channel::bounded(1);
+        let identity_task = cx.update(|cx| {
+            cx.background_executor()
+                .spawn(async move { identity_receiver.recv().await.unwrap() })
+        });
+        let identity_calls = Arc::new(AtomicUsize::new(0));
+        let provider: Arc<dyn RemoteWorkspaceProvider> = Arc::new(BlockingRemoteProvider {
+            account: Mutex::new(Some(gpui::Task::ready(Ok(test_remote_account())))),
+            identity: Mutex::new(Some(identity_task)),
+            account_calls: Arc::new(AtomicUsize::new(0)),
+            identity_calls: Arc::clone(&identity_calls),
+        });
+        let (session, closes, _, _, _) = reconnect_session_with_provider("work", provider);
+        let backend =
+            TestRemoteWorkspaceFlowBackend::with_connections([gpui::Task::ready(Ok(session))]);
+        let (manager, _, cx) = workspace_manager_with_remote_backend(backend, cx);
+        let workspace_id = create_disconnected_remote_workspace(&manager, cx);
+        cx.update(|window, cx| {
+            manager.update(cx, |manager, cx| {
+                manager.start_remote_workspace_reconnect(workspace_id, window, cx)
+            });
+        });
+        cx.run_until_parked();
+        assert_eq!(identity_calls.load(Ordering::Acquire), 1);
+        assert_eq!(closes.load(Ordering::Acquire), 0);
+
+        cx.update(|window, cx| {
+            manager.update(cx, |manager, cx| {
+                manager.close_workspace(workspace_id, window, cx)
+            });
+        });
+        cx.run_until_parked();
+
+        assert_eq!(closes.load(Ordering::Acquire), 1);
+        assert!(identity_sender.is_closed());
+        assert!(manager.read_with(cx, |manager, _| {
+            manager.workspaces.workspace(workspace_id).is_none()
+        }));
+    }
+
+    #[gpui::test]
+    fn application_cleanup_while_restart_preparation_is_blocked_should_abort_and_close_session(
+        cx: &mut TestAppContext,
+    ) {
+        let (revalidation_sender, revalidation_receiver) = async_channel::bounded(1);
+        let revalidation_task = cx.update(|cx| {
+            cx.background_executor()
+                .spawn(async move { revalidation_receiver.recv().await.unwrap() })
+        });
+        let provider: Arc<dyn RemoteWorkspaceProvider> = Arc::new(TestRemoteProvider::connected(
+            crate::domain::RemoteDirectoryIdentity::new("/home/tester/src".to_owned()).unwrap(),
+        ));
+        let (session, closes, _, revalidations, _) =
+            reconnect_session_with_provider_and_revalidation(
+                "work",
+                provider,
+                VecDeque::from([revalidation_task]),
+            );
+        let backend =
+            TestRemoteWorkspaceFlowBackend::with_connections([gpui::Task::ready(Ok(session))]);
+        let (manager, _, cx) = workspace_manager_with_remote_backend(backend, cx);
+        let workspace_id = create_disconnected_remote_workspace(&manager, cx);
+        cx.update(|window, cx| {
+            manager.update(cx, |manager, cx| {
+                manager.start_remote_workspace_reconnect(workspace_id, window, cx)
+            });
+        });
+        cx.run_until_parked();
+        assert_eq!(revalidations.load(Ordering::Acquire), 1);
+        assert_eq!(closes.load(Ordering::Acquire), 0);
+
+        manager.update(cx, |manager, _| manager.close_remote_runtimes());
+        cx.run_until_parked();
+
+        assert_eq!(closes.load(Ordering::Acquire), 1);
+        assert!(revalidation_sender.is_closed());
+        assert!(manager.read_with(cx, |manager, _| {
+            manager.remote_workspace_reconnect.is_none()
+        }));
+        assert_ne!(
+            manager.read_with(cx, |manager, _| manager
+                .workspaces
+                .workspace(workspace_id)
+                .unwrap()
+                .remote_connection_state()),
+            Some(RemoteConnectionState::connected(2))
+        );
+    }
+
+    #[gpui::test]
+    fn authentication_cancelled_reconnect_should_return_to_disconnected_without_error_alert(
+        cx: &mut TestAppContext,
+    ) {
+        let backend = TestRemoteWorkspaceFlowBackend::with_connections([gpui::Task::ready(Err(
+            RemoteWorkspaceFlowBackendError::AuthenticationCancelled,
+        ))]);
+        let (manager, _, cx) = workspace_manager_with_remote_backend(backend, cx);
+        let flow = open_remote_workspace_flow(&manager, cx);
+        let (completion, _, _, _, _, lifecycle) = remote_completion_with_revalidation(
+            "work",
+            "~/src",
+            "/home/tester/src",
+            true,
+            gpui::Task::ready(Ok(())),
+        );
+        emit_remote_workspace_completion(&flow, completion, cx);
+        let workspace_id =
+            manager.read_with(cx, |manager, _| manager.workspaces.active_workspace_id());
+        lifecycle
+            .try_send(ControlConnectionTerminalState::Closed)
+            .unwrap();
+        cx.run_until_parked();
+
+        cx.update(|window, cx| {
+            manager.update(cx, |manager, cx| {
+                manager.start_remote_workspace_reconnect(workspace_id, window, cx)
+            });
+        });
+        cx.run_until_parked();
+        redraw(cx);
+
+        assert_eq!(
+            manager.read_with(cx, |manager, _| manager
+                .workspaces
+                .workspace(workspace_id)
+                .unwrap()
+                .remote_connection_state()),
+            Some(RemoteConnectionState::disconnected(2))
+        );
+        assert!(
+            cx.debug_bounds("modal-action-remote-workspace-reconnect-error-ok")
+                .is_none()
+        );
+    }
+
+    #[gpui::test]
+    fn bounded_connection_detail_should_survive_reconnect_into_the_failure_alert(
+        cx: &mut TestAppContext,
+    ) {
+        let detail = crate::ssh::process::TransientSshErrorOutput::from_untrusted_bytes(
+            b"ssh: Permission denied (publickey).",
+        )
+        .unwrap();
+        let backend = TestRemoteWorkspaceFlowBackend::with_connections([gpui::Task::ready(Err(
+            RemoteWorkspaceFlowBackendError::ConnectionFailedWithDetail(detail),
+        ))]);
+        let (manager, _, cx) = workspace_manager_with_remote_backend(backend, cx);
+        let workspace_id = create_disconnected_remote_workspace(&manager, cx);
+
+        cx.update(|window, cx| {
+            manager.update(cx, |manager, cx| {
+                manager.start_remote_workspace_reconnect(workspace_id, window, cx)
+            });
+        });
+        cx.run_until_parked();
+        redraw(cx);
+
+        assert_eq!(
+            manager.read_with(cx, |manager, _| manager
+                .workspaces
+                .workspace(workspace_id)
+                .unwrap()
+                .remote_connection_state()),
+            Some(RemoteConnectionState::failed(2))
+        );
+        assert!(
+            cx.debug_bounds("modal-action-remote-workspace-reconnect-error-ok")
+                .is_some()
+        );
+    }
+
+    #[gpui::test]
+    fn closing_workspace_during_reconnect_should_close_late_session_and_prevent_resurrection(
+        cx: &mut TestAppContext,
+    ) {
+        let (late_session, late_closes, _, _, _) = reconnect_session("work", "/home/tester/src");
+        let (sender, receiver) = async_channel::bounded(1);
+        let pending = cx.update(|cx| {
+            cx.background_executor()
+                .spawn(async move { receiver.recv().await.unwrap() })
+        });
+        let backend = TestRemoteWorkspaceFlowBackend::with_connections([pending]);
+        let (manager, _, cx) = workspace_manager_with_remote_backend(backend, cx);
+        let flow = open_remote_workspace_flow(&manager, cx);
+        let (completion, _, _, _, _, lifecycle) = remote_completion_with_revalidation(
+            "work",
+            "~/src",
+            "/home/tester/src",
+            true,
+            gpui::Task::ready(Ok(())),
+        );
+        emit_remote_workspace_completion(&flow, completion, cx);
+        let workspace_id =
+            manager.read_with(cx, |manager, _| manager.workspaces.active_workspace_id());
+        lifecycle
+            .try_send(ControlConnectionTerminalState::Closed)
+            .unwrap();
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            manager.update(cx, |manager, cx| {
+                manager.start_remote_workspace_reconnect(workspace_id, window, cx);
+                manager.close_workspace(workspace_id, window, cx);
+            });
+        });
+        cx.run_until_parked();
+        assert!(manager.read_with(cx, |manager, _| {
+            manager.workspaces.workspace(workspace_id).is_none()
+        }));
+
+        assert!(sender.try_send(Ok(late_session)).is_err());
+        cx.run_until_parked();
+        assert_eq!(late_closes.load(Ordering::Acquire), 1);
+        assert!(manager.read_with(cx, |manager, _| {
+            manager.workspaces.workspace(workspace_id).is_none()
+        }));
+    }
+
+    #[gpui::test]
+    fn remote_child_identity_failure_should_show_alert_without_changing_connection_or_focus(
+        cx: &mut TestAppContext,
+    ) {
+        let (manager, _, cx) = workspace_manager(cx);
+        let flow = open_remote_workspace_flow(&manager, cx);
+        let (completion, _, _, _) = remote_completion("work", "~/src", "/home/tester/src", true);
+        emit_remote_workspace_completion(&flow, completion, cx);
+        let (workspace_id, window_manager) = manager.read_with(cx, |manager, _| {
+            let workspace = manager.workspaces.active_workspace();
+            (workspace.id(), workspace.payload().clone())
+        });
+
+        window_manager.update(cx, |_, cx| {
+            cx.emit(RemoteChildLaunchUnavailable::IdentityChanged)
+        });
+        cx.run_until_parked();
+        redraw(cx);
+
+        assert_eq!(
+            manager.read_with(cx, |manager, _| manager
+                .workspaces
+                .workspace(workspace_id)
+                .unwrap()
+                .remote_connection_state()),
+            Some(RemoteConnectionState::connected(1))
+        );
+        assert!(!cx.update(|window, cx| {
+            window_manager
+                .read(cx)
+                .focused_terminal_has_input_focus(window, cx)
+        }));
+        assert!(
+            cx.debug_bounds("modal-action-remote-workspace-reconnect-error-ok")
+                .is_some()
+        );
+        click("modal-action-remote-workspace-reconnect-error-ok", cx);
+        assert!(cx.update(|window, cx| {
+            window_manager
+                .read(cx)
+                .focused_terminal_is_focused(window, cx)
+        }));
+    }
+
+    #[gpui::test]
+    fn failed_flow_activation_should_return_intact_connection_to_picker_retry_state(
+        cx: &mut TestAppContext,
+    ) {
+        let (manager, records, cx) = workspace_manager(cx);
+        let flow = open_remote_workspace_flow(&manager, cx);
+        let (completion, closes, preparations, _) =
+            remote_completion("work", "~/src", "/home/tester/src", false);
+
+        emit_remote_workspace_completion(&flow, completion, cx);
+
+        let state = cx.update(|window, cx| {
+            let manager = manager.read(cx);
+            (
+                manager.workspaces.len(),
+                manager.remote_workspace_runtimes.len(),
+                manager.remote_workspace_flow.is_some(),
+                flow.read(cx).stage(),
+                manager.terminal_focus_blocker(window, cx),
+            )
+        });
+        assert_eq!(
+            state,
+            (
+                1,
+                0,
+                true,
+                RemoteWorkspaceFlowStage::DirectorySelection,
+                Some(TerminalFocusBlocker::CommandPalette),
+            )
+        );
+        assert_eq!(records.starts().len(), 1);
+        assert_eq!(preparations.load(Ordering::Acquire), 0);
+        assert_eq!(closes.load(Ordering::Acquire), 0);
+    }
+
+    #[gpui::test]
+    fn remote_revalidation_failures_should_return_intact_completion_without_mutation(
+        cx: &mut TestAppContext,
+    ) {
+        let (manager, records, cx) = workspace_manager(cx);
+
+        for error in [
+            crate::terminal::RemoteChannelRevalidationError::ConnectionUnavailable,
+            crate::terminal::RemoteChannelRevalidationError::DirectoryUnavailable,
+            crate::terminal::RemoteChannelRevalidationError::IdentityChanged,
+        ] {
+            let flow = open_remote_workspace_flow(&manager, cx);
+            let (completion, closes, preparations, revalidations, _, _) =
+                remote_completion_with_revalidation(
+                    "work",
+                    "~/src",
+                    "/home/tester/src",
+                    true,
+                    gpui::Task::ready(Err(error)),
+                );
+
+            emit_remote_workspace_completion(&flow, completion, cx);
+
+            assert_eq!(
+                manager.read_with(cx, |manager, _| (
+                    manager.workspaces.len(),
+                    manager.remote_workspace_runtimes.len(),
+                )),
+                (1, 0)
+            );
+            assert_eq!(records.starts().len(), 1);
+            assert_eq!(revalidations.load(Ordering::Acquire), 1);
+            assert_eq!(preparations.load(Ordering::Acquire), 0);
+            assert_eq!(closes.load(Ordering::Acquire), 0);
+            assert_eq!(
+                flow.read_with(cx, |flow, _| flow.stage()),
+                RemoteWorkspaceFlowStage::DirectorySelection
+            );
+
+            cx.update(|window, cx| {
+                flow.update(cx, |flow, cx| flow.cancel_for_test(window, cx));
+            });
+            cx.run_until_parked();
+            assert_eq!(closes.load(Ordering::Acquire), 1);
+        }
+    }
+
+    #[gpui::test]
+    fn cancelled_initial_revalidation_should_close_immediately_without_late_resurrection(
+        cx: &mut TestAppContext,
+    ) {
+        let (manager, records, cx) = workspace_manager(cx);
+        let (sender, receiver) = async_channel::bounded(1);
+        let delayed_revalidation = cx.update(|_, cx| {
+            cx.background_executor()
+                .spawn(async move { receiver.recv().await.unwrap() })
+        });
+        let (stale, stale_closes, stale_preparations, stale_revalidations, _, _) =
+            remote_completion_with_revalidation(
+                "work",
+                "~/stale",
+                "/home/tester/stale",
+                true,
+                delayed_revalidation,
+            );
+        let first_flow = open_remote_workspace_flow(&manager, cx);
+        emit_remote_workspace_completion(&first_flow, stale, cx);
+        assert_eq!(stale_revalidations.load(Ordering::Acquire), 1);
+
+        cx.update(|window, cx| {
+            first_flow.update(cx, |flow, cx| flow.cancel_for_test(window, cx));
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            manager.read_with(cx, |manager, _| manager.workspaces.len()),
+            1
+        );
+        assert_eq!(stale_preparations.load(Ordering::Acquire), 0);
+        assert_eq!(stale_closes.load(Ordering::Acquire), 1);
+        assert!(sender.try_send(Ok(())).is_err());
+
+        let (current, current_closes, current_preparations, _) =
+            remote_completion("work", "~/current", "/home/tester/current", true);
+        let current_flow = open_remote_workspace_flow(&manager, cx);
+        assert_ne!(current_flow, first_flow);
+        emit_remote_workspace_completion(&current_flow, current, cx);
+        assert_eq!(
+            manager.read_with(cx, |manager, _| manager.workspaces.len()),
+            2
+        );
+        assert_eq!(current_preparations.load(Ordering::Acquire), 1);
+        assert_eq!(current_closes.load(Ordering::Acquire), 0);
+
+        assert_eq!(
+            manager.read_with(cx, |manager, _| manager.workspaces.len()),
+            2
+        );
+        assert_eq!(records.starts().len(), 2);
+        assert_eq!(stale_preparations.load(Ordering::Acquire), 0);
+        assert_eq!(current_closes.load(Ordering::Acquire), 0);
+    }
+
+    #[gpui::test]
+    fn equivalent_remote_completion_should_activate_existing_and_close_redundant_session(
+        cx: &mut TestAppContext,
+    ) {
+        let (manager, records, cx) = workspace_manager(cx);
+        let (first, first_closes, first_preparations, _) =
+            remote_completion("work", "~/src", "/home/tester/src", true);
+        let (duplicate, duplicate_closes, duplicate_preparations, _) =
+            remote_completion("work", "/home/tester/src", "/home/tester/src", true);
+
+        let first_flow = open_remote_workspace_flow(&manager, cx);
+        emit_remote_workspace_completion(&first_flow, first, cx);
+        let duplicate_flow = open_remote_workspace_flow(&manager, cx);
+        emit_remote_workspace_completion(&duplicate_flow, duplicate, cx);
+
+        let state = manager.read_with(cx, |manager, _| {
+            (
+                manager.workspaces.len(),
+                manager
+                    .workspaces
+                    .active_workspace()
+                    .remote_workspace_directory()
+                    .unwrap()
+                    .as_str()
+                    .to_owned(),
+                manager.remote_workspace_runtimes.len(),
+            )
+        });
+        assert_eq!(state, (2, "~/src".to_owned(), 1));
+        assert_eq!(records.starts().len(), 2);
+        assert_eq!(first_preparations.load(Ordering::Acquire), 1);
+        assert_eq!(duplicate_preparations.load(Ordering::Acquire), 0);
+        assert_eq!(first_closes.load(Ordering::Acquire), 0);
+        assert_eq!(duplicate_closes.load(Ordering::Acquire), 1);
+    }
+
+    #[gpui::test]
+    fn equivalent_workspace_created_during_revalidation_should_win_without_a_duplicate_launch(
+        cx: &mut TestAppContext,
+    ) {
+        let (manager, records, cx) = workspace_manager(cx);
+        let (sender, receiver) = async_channel::bounded(1);
+        let pending_revalidation = cx.update(|_, cx| {
+            cx.background_executor()
+                .spawn(async move { receiver.recv().await.unwrap() })
+        });
+        let (pending, pending_closes, pending_preparations, pending_revalidations, _, _) =
+            remote_completion_with_revalidation(
+                "work",
+                "~/src",
+                "/home/tester/src",
+                true,
+                pending_revalidation,
+            );
+        let (winner, winner_closes, winner_preparations, _) =
+            remote_completion("work", "/home/tester/src", "/home/tester/src", true);
+        let flow = open_remote_workspace_flow(&manager, cx);
+        emit_remote_workspace_completion(&flow, pending, cx);
+        assert_eq!(pending_revalidations.load(Ordering::Acquire), 1);
+
+        install_remote_completion_directly(&manager, winner, cx);
+        assert_eq!(winner_preparations.load(Ordering::Acquire), 1);
+        sender.try_send(Ok(())).unwrap();
+        cx.run_until_parked();
+
+        assert_eq!(
+            manager.read_with(cx, |manager, _| (
+                manager.workspaces.len(),
+                manager.remote_workspace_runtimes.len(),
+                manager
+                    .workspaces
+                    .active_workspace()
+                    .remote_workspace_directory()
+                    .map(|directory| directory.as_str().to_owned()),
+            )),
+            (2, 1, Some("/home/tester/src".to_owned()))
+        );
+        assert_eq!(records.starts().len(), 2);
+        assert_eq!(pending_preparations.load(Ordering::Acquire), 0);
+        assert_eq!(pending_closes.load(Ordering::Acquire), 1);
+        assert_eq!(winner_closes.load(Ordering::Acquire), 0);
+        assert!(manager.read_with(cx, |manager, _| manager.remote_workspace_flow.is_none()));
+        assert_eq!(
+            flow.read_with(cx, |flow, _| flow.stage()),
+            RemoteWorkspaceFlowStage::Completed
+        );
+    }
+
+    #[gpui::test]
+    fn remote_workspace_close_should_release_active_alias_after_runtime_cleanup(
+        cx: &mut TestAppContext,
+    ) {
+        let (manager, _, cx) = workspace_manager(cx);
+        let (completion, aliases, alias, closes, _) = remote_completion_with_active_alias();
+        assert!(aliases.is_active(&alias));
+
+        let flow = open_remote_workspace_flow(&manager, cx);
+        emit_remote_workspace_completion(&flow, completion, cx);
+        let workspace_id =
+            manager.read_with(cx, |manager, _| manager.workspaces.active_workspace_id());
+        assert!(aliases.is_active(&alias));
+        assert_eq!(closes.load(Ordering::Acquire), 0);
+        assert!(manager.read_with(cx, |manager, _| {
+            manager
+                .remote_workspace_runtimes
+                .get(&workspace_id)
+                .is_some_and(|runtime| runtime.alias_pin.is_some())
+        }));
+
+        cx.update(|window, cx| {
+            manager.update(cx, |manager, cx| {
+                manager.close_workspace(workspace_id, window, cx)
+            });
+        });
+        cx.run_until_parked();
+
+        assert_eq!(closes.load(Ordering::Acquire), 1);
+        assert!(!aliases.is_active(&alias));
+    }
+
+    #[gpui::test]
+    fn managed_alias_should_remain_immutable_after_master_loss_and_during_reconnect(
+        cx: &mut TestAppContext,
+    ) {
+        let (connection_sender, connection_receiver) = async_channel::bounded(1);
+        let connection = cx.update(|cx| {
+            cx.background_executor()
+                .spawn(async move { connection_receiver.recv().await.unwrap() })
+        });
+        let backend = TestRemoteWorkspaceFlowBackend::with_connections([connection]);
+        let (manager, _, cx) = workspace_manager_with_remote_backend(backend, cx);
+        let (completion, aliases, alias, closes, lifecycle) = remote_completion_with_active_alias();
+        let flow = open_remote_workspace_flow(&manager, cx);
+        emit_remote_workspace_completion(&flow, completion, cx);
+        let workspace_id =
+            manager.read_with(cx, |manager, _| manager.workspaces.active_workspace_id());
+
+        assert!(aliases.begin_mutation([alias.clone()]).is_err());
+        lifecycle
+            .try_send(ControlConnectionTerminalState::Closed)
+            .unwrap();
+        cx.run_until_parked();
+
+        assert_eq!(closes.load(Ordering::Acquire), 1);
+        assert!(aliases.is_active(&alias));
+        assert!(aliases.begin_mutation([alias.clone()]).is_err());
+
+        cx.update(|window, cx| {
+            manager.update(cx, |manager, cx| {
+                manager.start_remote_workspace_reconnect(workspace_id, window, cx)
+            });
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            manager.read_with(cx, |manager, _| manager
+                .workspaces
+                .workspace(workspace_id)
+                .unwrap()
+                .remote_connection_state()),
+            Some(RemoteConnectionState::reconnecting(2))
+        );
+        assert!(aliases.begin_mutation([alias.clone()]).is_err());
+
+        cx.update(|window, cx| {
+            manager.update(cx, |manager, cx| {
+                manager.close_workspace(workspace_id, window, cx)
+            });
+        });
+        cx.run_until_parked();
+
+        assert!(connection_sender.is_closed());
+        assert!(!aliases.is_active(&alias));
+        assert!(aliases.begin_mutation([alias]).is_ok());
+    }
+
+    #[gpui::test]
+    fn failed_workspace_alias_pin_should_return_activation_without_leaking_authority(
+        cx: &mut TestAppContext,
+    ) {
+        let (manager, _, cx) = workspace_manager(cx);
+        let (completion, aliases, alias, closes, _) =
+            remote_completion_with_active_alias_pin_failure(true);
+        let flow = open_remote_workspace_flow(&manager, cx);
+
+        emit_remote_workspace_completion(&flow, completion, cx);
+
+        assert_eq!(
+            manager.read_with(cx, |manager, _| (
+                manager.workspaces.len(),
+                manager.remote_workspace_runtimes.len(),
+                manager.remote_workspace_flow.is_some(),
+            )),
+            (1, 0, true)
+        );
+        assert_eq!(closes.load(Ordering::Acquire), 0);
+        assert!(aliases.is_active(&alias));
+        assert_eq!(
+            flow.read_with(cx, |flow, _| flow.stage()),
+            RemoteWorkspaceFlowStage::DirectorySelection
+        );
+
+        cx.update(|window, cx| {
+            flow.update(cx, |flow, cx| flow.cancel_for_test(window, cx));
+        });
+        cx.run_until_parked();
+
+        assert_eq!(closes.load(Ordering::Acquire), 1);
+        assert!(!aliases.is_active(&alias));
+        assert!(aliases.begin_mutation([alias]).is_ok());
+    }
+
+    #[gpui::test]
+    fn application_teardown_hook_should_close_remote_runtime_exactly_once(cx: &mut TestAppContext) {
+        let (manager, _, cx) = workspace_manager(cx);
+        let (completion, closes, _, _) =
+            remote_completion("work", "~/src", "/home/tester/src", true);
+        let flow = open_remote_workspace_flow(&manager, cx);
+        emit_remote_workspace_completion(&flow, completion, cx);
+
+        manager.update(cx, |manager, _| manager.close_remote_runtimes());
+        manager.update(cx, |manager, _| manager.close_remote_runtimes());
+
+        assert_eq!(closes.load(Ordering::Acquire), 1);
+    }
+
+    #[gpui::test]
+    fn unavailable_initial_remote_channel_should_return_intact_completion_for_retry(
+        cx: &mut TestAppContext,
+    ) {
+        let (manager, records, cx) = workspace_manager(cx);
+        let flow = open_remote_workspace_flow(&manager, cx);
+        let (completion, closes, preparations, availability) =
+            remote_completion("work", "~/src", "/home/tester/src", false);
+
+        emit_remote_workspace_completion(&flow, completion, cx);
+        assert_eq!(
+            manager.read_with(cx, |manager, _| manager.workspaces.len()),
+            1
+        );
+        assert_eq!(records.starts().len(), 1);
+        assert_eq!(preparations.load(Ordering::Acquire), 0);
+        assert_eq!(closes.load(Ordering::Acquire), 0);
+
+        availability.store(true, Ordering::Release);
+        assert_eq!(
+            flow.read_with(cx, |flow, _| flow.stage()),
+            RemoteWorkspaceFlowStage::DirectorySelection
+        );
+    }
+
+    #[gpui::test]
     fn choosing_scratch_should_create_a_workspace_and_close_the_panel(cx: &mut TestAppContext) {
         let (manager, _, cx) = workspace_manager(cx);
 
@@ -3577,17 +7602,17 @@ mod tests {
             let workspace = manager.workspaces.active_workspace();
             (
                 manager.workspaces.len(),
-                workspace.working_directory().to_path_buf(),
+                workspace.working_directory().unwrap().to_path_buf(),
                 workspace.kind().clone(),
             )
         });
         assert_eq!((state.0, state.1), (2, project.clone()));
         assert!(matches!(state.2, WorkspaceKind::LocalProject { .. }));
-        assert!(
-            records.starts()[1..]
-                .iter()
-                .all(|start| start.working_directory == project)
-        );
+        assert!(records.starts()[1..].iter().all(|start| {
+            start
+                .local_working_directory()
+                .is_some_and(|directory| directory.path() == project)
+        }));
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -4419,6 +8444,7 @@ mod tests {
                 match workspace.kind() {
                     WorkspaceKind::Scratch { .. } => scratch = Some(workspace.id().get()),
                     WorkspaceKind::LocalProject { .. } => project = Some(workspace.id().get()),
+                    WorkspaceKind::RemoteProject { .. } => {}
                 }
             }
             (
@@ -4773,12 +8799,19 @@ mod tests {
                     .workspaces
                     .active_workspace()
                     .working_directory()
+                    .unwrap()
                     .to_path_buf(),
                 records.dropped_session_ids(),
                 records
                     .starts()
                     .into_iter()
-                    .map(|start| start.working_directory)
+                    .map(|start| {
+                        start
+                            .local_working_directory()
+                            .expect("Scratch Workspace starts must remain local")
+                            .path()
+                            .to_path_buf()
+                    })
                     .collect::<Vec<_>>(),
             )
         });

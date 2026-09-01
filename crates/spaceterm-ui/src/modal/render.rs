@@ -184,8 +184,9 @@ fn render_overlay(
     let paint = theme.paint;
     let viewport = window.viewport_size();
     let desired_width = metrics.width_for(match snapshot.kind {
-        ModalKind::Alert | ModalKind::Progress => DialogSize::Compact,
+        ModalKind::Alert => DialogSize::Regular,
         ModalKind::Dialog => snapshot.dialog_size,
+        ModalKind::Progress => DialogSize::Compact,
     });
     let height_cap = metrics.maximum_height().min(match snapshot.kind {
         ModalKind::Alert => metrics.alert_height_cap(),
@@ -583,6 +584,7 @@ fn render_body(
             let intent_selector = format!("modal-alert-intent-{}", intent_presentation.selector);
             let marker_selector =
                 format!("modal-alert-intent-mark-{}", intent_presentation.selector);
+            let detail_selector = format!("modal-alert-detail-{}", snapshot.presentation.value());
             let marker_extent = metrics.accessory_extent() / 2.0;
             let message_panel = div()
                 .debug_selector(move || intent_selector.clone())
@@ -621,8 +623,10 @@ fn render_body(
                                 .child(message.clone()),
                         )
                         .when_some(detail.clone(), |content, detail| {
+                            let detail_selector = detail_selector.clone();
                             content.child(
                                 div()
+                                    .debug_selector(move || detail_selector.clone())
                                     .mt(metrics.action_gap / 2.0)
                                     .text_size(metrics.detail_size)
                                     .text_color(paint.secondary_text)

@@ -4,6 +4,7 @@ use crate::domain::{PaneId, WindowId, WorkspaceId};
 
 use super::file_insertion::prepare_file_insertion;
 use super::hyperlink::{HyperlinkKind, HyperlinkTarget};
+use super::metadata::TerminalLocalFileCapabilities;
 #[cfg(test)]
 use super::selection::SelectionCopy;
 
@@ -102,20 +103,30 @@ impl NativeServiceStatus {
 }
 
 impl NativeContextActions {
-    pub(crate) fn from_presence(selection_present: bool, link: Option<&HyperlinkTarget>) -> Self {
+    pub(crate) fn from_presence(
+        local_file_capabilities: TerminalLocalFileCapabilities,
+        selection_present: bool,
+        link: Option<&HyperlinkTarget>,
+    ) -> Self {
+        let link = link.filter(|link| {
+            link.kind == HyperlinkKind::Url || local_file_capabilities.are_enabled()
+        });
         Self {
             copy: selection_present,
             open_link: link.is_some(),
-            quick_look: link.is_some_and(|link| link.kind == HyperlinkKind::LocalPath),
+            quick_look: local_file_capabilities.are_enabled()
+                && link.is_some_and(|link| link.kind == HyperlinkKind::LocalPath),
         }
     }
 
     #[cfg(test)]
     pub(crate) fn from_state(
+        local_file_capabilities: TerminalLocalFileCapabilities,
         selection: Option<&SelectionCopy>,
         link: Option<&HyperlinkTarget>,
     ) -> Self {
         Self::from_presence(
+            local_file_capabilities,
             selection.is_some_and(|selection| !selection.plain_text.is_empty()),
             link,
         )
@@ -147,14 +158,22 @@ impl NativeInsertion {
     pub(crate) fn dropped_files(
         paths: &[PathBuf],
         terminal_input_focused: bool,
+        local_file_capabilities: TerminalLocalFileCapabilities,
     ) -> Result<Self, NativeInsertionError> {
         if !terminal_input_focused {
             return Err(NativeInsertionError::TerminalUnfocused);
         }
-        Self::prepare_dropped_files(paths).map_err(NativeInsertionError::InvalidFiles)
+        Self::prepare_dropped_files(paths, local_file_capabilities)
+            .map_err(NativeInsertionError::InvalidFiles)
     }
 
-    pub(crate) fn prepare_dropped_files(paths: &[PathBuf]) -> Result<Self, &'static str> {
+    pub(crate) fn prepare_dropped_files(
+        paths: &[PathBuf],
+        local_file_capabilities: TerminalLocalFileCapabilities,
+    ) -> Result<Self, &'static str> {
+        if !local_file_capabilities.are_enabled() {
+            return Err("local file insertion is disabled for this Terminal Session");
+        }
         prepare_file_insertion(paths).map(|insertion| Self {
             text: insertion.text,
         })
@@ -179,6 +198,7 @@ impl NativeInsertion {
 )]
 pub(crate) struct QuickLookTarget {
     link: HyperlinkTarget,
+    local_file_capabilities: TerminalLocalFileCapabilities,
 }
 
 impl QuickLookTarget {
@@ -189,9 +209,15 @@ impl QuickLookTarget {
             reason = "the next stacked context-action layer resolves the current hyperlink"
         )
     )]
-    pub(crate) fn from_link(link: &HyperlinkTarget) -> Option<Self> {
-        link.revalidated_local_path()?;
-        Some(Self { link: link.clone() })
+    pub(crate) fn from_link(
+        link: &HyperlinkTarget,
+        local_file_capabilities: TerminalLocalFileCapabilities,
+    ) -> Option<Self> {
+        link.revalidated_local_path(local_file_capabilities)?;
+        Some(Self {
+            link: link.clone(),
+            local_file_capabilities,
+        })
     }
 
     #[cfg_attr(
@@ -202,7 +228,8 @@ impl QuickLookTarget {
         )
     )]
     pub(crate) fn revalidated_path(&self) -> Option<PathBuf> {
-        self.link.revalidated_local_path()
+        self.link
+            .revalidated_local_path(self.local_file_capabilities)
     }
 }
 
@@ -215,6 +242,9 @@ mod tests {
     use super::*;
     use crate::terminal::{HyperlinkTarget, SelectionCopy};
 
+    const LOCAL_FILES: TerminalLocalFileCapabilities = TerminalLocalFileCapabilities::Enabled;
+    const REMOTE_FILES: TerminalLocalFileCapabilities = TerminalLocalFileCapabilities::Disabled;
+
     #[test]
     fn context_actions_follow_selection_and_validated_link_state() {
         let selection = SelectionCopy {
@@ -224,7 +254,7 @@ mod tests {
         let url = HyperlinkTarget::url("https://example.test").unwrap();
 
         assert_eq!(
-            NativeContextActions::from_state(Some(&selection), Some(&url)),
+            NativeContextActions::from_state(LOCAL_FILES, Some(&selection), Some(&url)),
             NativeContextActions {
                 copy: true,
                 open_link: true,
@@ -232,7 +262,7 @@ mod tests {
             }
         );
         assert_eq!(
-            NativeContextActions::from_state(None, None),
+            NativeContextActions::from_state(LOCAL_FILES, None, None),
             NativeContextActions::default()
         );
     }
@@ -246,7 +276,7 @@ mod tests {
             "printf 'ok'\n"
         );
         assert_eq!(
-            NativeInsertion::dropped_files(&[PathBuf::from("/tmp/a b")], true)
+            NativeInsertion::dropped_files(&[PathBuf::from("/tmp/a b")], true, LOCAL_FILES)
                 .unwrap()
                 .text(),
             "'/tmp/a b'"
@@ -255,7 +285,10 @@ mod tests {
             NativeInsertion::service_text("ignored", false),
             Err(NativeInsertionError::TerminalUnfocused)
         );
-        assert!(NativeInsertion::dropped_files(&[PathBuf::from("relative")], true).is_err());
+        assert!(
+            NativeInsertion::dropped_files(&[PathBuf::from("relative")], true, LOCAL_FILES)
+                .is_err()
+        );
     }
 
     #[test]
@@ -272,7 +305,7 @@ mod tests {
     #[test]
     fn context_enablement_can_be_derived_without_copying_selection_text() {
         assert_eq!(
-            NativeContextActions::from_presence(true, None),
+            NativeContextActions::from_presence(LOCAL_FILES, true, None),
             NativeContextActions {
                 copy: true,
                 open_link: false,
@@ -293,14 +326,16 @@ mod tests {
             &format!("file://{}", file.to_str().unwrap()),
             &directory,
             None,
+            LOCAL_FILES,
         )
         .unwrap();
         let url = HyperlinkTarget::url("https://example.test").unwrap();
         assert_eq!(
-            QuickLookTarget::from_link(&local).and_then(|target| target.revalidated_path()),
+            QuickLookTarget::from_link(&local, LOCAL_FILES)
+                .and_then(|target| target.revalidated_path()),
             Some(file.canonicalize().unwrap())
         );
-        assert!(QuickLookTarget::from_link(&url).is_none());
+        assert!(QuickLookTarget::from_link(&url, LOCAL_FILES).is_none());
 
         fs::remove_dir_all(directory).unwrap();
     }
@@ -312,14 +347,15 @@ mod tests {
         fs::create_dir_all(&directory).unwrap();
         let file = directory.join("preview.txt");
         fs::write(&file, b"preview").unwrap();
-        let local = HyperlinkTarget::osc8("file:preview.txt", &directory, None).unwrap();
+        let local =
+            HyperlinkTarget::osc8("file:preview.txt", &directory, None, LOCAL_FILES).unwrap();
 
         fs::remove_file(file).unwrap();
 
-        assert_eq!(local.activation_url(), None);
-        assert_eq!(QuickLookTarget::from_link(&local), None);
-        assert!(NativeContextActions::from_presence(false, Some(&local)).open_link);
-        assert!(NativeContextActions::from_presence(false, Some(&local)).quick_look);
+        assert_eq!(local.activation_url(LOCAL_FILES), None);
+        assert_eq!(QuickLookTarget::from_link(&local, LOCAL_FILES), None);
+        assert!(NativeContextActions::from_presence(LOCAL_FILES, false, Some(&local)).open_link);
+        assert!(NativeContextActions::from_presence(LOCAL_FILES, false, Some(&local)).quick_look);
         fs::remove_dir_all(directory).unwrap();
     }
 
@@ -331,15 +367,16 @@ mod tests {
         let file = directory.join("preview.txt");
         let replacement = directory.join("replacement.txt");
         fs::write(&file, b"first").unwrap();
-        let local = HyperlinkTarget::osc8("file:preview.txt", &directory, None).unwrap();
+        let local =
+            HyperlinkTarget::osc8("file:preview.txt", &directory, None, LOCAL_FILES).unwrap();
 
         fs::write(&replacement, b"replacement").unwrap();
         fs::rename(&replacement, &file).unwrap();
 
-        assert_eq!(local.activation_url(), None);
-        assert_eq!(QuickLookTarget::from_link(&local), None);
-        assert!(NativeContextActions::from_presence(false, Some(&local)).open_link);
-        assert!(NativeContextActions::from_presence(false, Some(&local)).quick_look);
+        assert_eq!(local.activation_url(LOCAL_FILES), None);
+        assert_eq!(QuickLookTarget::from_link(&local, LOCAL_FILES), None);
+        assert!(NativeContextActions::from_presence(LOCAL_FILES, false, Some(&local)).open_link);
+        assert!(NativeContextActions::from_presence(LOCAL_FILES, false, Some(&local)).quick_look);
         fs::remove_dir_all(directory).unwrap();
     }
 
@@ -352,15 +389,45 @@ mod tests {
         let other = directory.join("other.txt");
         fs::write(&file, b"first").unwrap();
         fs::write(&other, b"other").unwrap();
-        let local = HyperlinkTarget::osc8("file:preview.txt", &directory, None).unwrap();
+        let local =
+            HyperlinkTarget::osc8("file:preview.txt", &directory, None, LOCAL_FILES).unwrap();
 
         fs::remove_file(&file).unwrap();
         symlink(&other, &file).unwrap();
 
-        assert_eq!(local.activation_url(), None);
-        assert_eq!(QuickLookTarget::from_link(&local), None);
-        assert!(NativeContextActions::from_presence(false, Some(&local)).open_link);
-        assert!(NativeContextActions::from_presence(false, Some(&local)).quick_look);
+        assert_eq!(local.activation_url(LOCAL_FILES), None);
+        assert_eq!(QuickLookTarget::from_link(&local, LOCAL_FILES), None);
+        assert!(NativeContextActions::from_presence(LOCAL_FILES, false, Some(&local)).open_link);
+        assert!(NativeContextActions::from_presence(LOCAL_FILES, false, Some(&local)).quick_look);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn remote_capabilities_disable_every_file_action_but_preserve_text_and_web_actions() {
+        let directory = std::env::temp_dir().join(format!(
+            "spaceterm-remote-capability-boundary-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&directory).unwrap();
+        let file = directory.join("preview.txt");
+        fs::write(&file, b"preview").unwrap();
+        let local =
+            HyperlinkTarget::osc8("file:preview.txt", &directory, None, LOCAL_FILES).unwrap();
+        let web = HyperlinkTarget::url("https://example.test").unwrap();
+
+        assert_eq!(local.activation_url(REMOTE_FILES), None);
+        assert_eq!(QuickLookTarget::from_link(&local, REMOTE_FILES), None);
+        assert_eq!(
+            NativeContextActions::from_presence(REMOTE_FILES, true, Some(&local)),
+            NativeContextActions {
+                copy: true,
+                open_link: false,
+                quick_look: false,
+            }
+        );
+        assert!(NativeContextActions::from_presence(REMOTE_FILES, false, Some(&web)).open_link);
+        assert!(NativeInsertion::service_text("ordinary text", true).is_ok());
+        assert!(NativeInsertion::dropped_files(&[file], true, REMOTE_FILES).is_err());
         fs::remove_dir_all(directory).unwrap();
     }
 }

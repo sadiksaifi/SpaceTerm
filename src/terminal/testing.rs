@@ -1,6 +1,6 @@
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -10,14 +10,45 @@ use super::{
     Osc52AuthorizationDecision, Osc52AuthorizationId, PasteConfirmationId, PasteDecision,
     PasteRequestOutcome, PasteResolution, PointerInput, PresentationGeneration, SelectionCopy,
     SelectionCopyError, SessionError, SessionEvent, StartedTerminalSession,
-    TerminalAccessibilityModel, TerminalSessionFactory, TerminalSessionHandle, WheelInput,
+    TerminalAccessibilityModel, TerminalLaunchPlan, TerminalSessionFactory, TerminalSessionHandle,
+    WheelInput,
 };
+use crate::domain::{ValidatedWorkspaceDirectory, WorkspaceDirectoryIdentity};
+
+pub(crate) fn test_workspace_directory(path: PathBuf) -> ValidatedWorkspaceDirectory {
+    ValidatedWorkspaceDirectory::new(path, WorkspaceDirectoryIdentity::new(0, 0))
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct RecordedSessionStart {
     pub(crate) session_id: usize,
     pub(crate) geometry: TerminalGeometry,
-    pub(crate) working_directory: PathBuf,
+    launch_plan: TerminalLaunchPlan,
+}
+
+impl RecordedSessionStart {
+    pub(crate) const fn launch_plan(&self) -> &TerminalLaunchPlan {
+        &self.launch_plan
+    }
+
+    pub(crate) const fn local_launch_plan(&self) -> Option<&super::LocalTerminalLaunchPlan> {
+        match &self.launch_plan {
+            TerminalLaunchPlan::Local(plan) => Some(plan),
+            TerminalLaunchPlan::Remote(_) => None,
+        }
+    }
+
+    pub(crate) const fn remote_launch_plan(&self) -> Option<&super::RemoteTerminalLaunchPlan> {
+        match &self.launch_plan {
+            TerminalLaunchPlan::Local(_) => None,
+            TerminalLaunchPlan::Remote(plan) => Some(plan),
+        }
+    }
+
+    pub(crate) fn local_working_directory(&self) -> Option<&ValidatedWorkspaceDirectory> {
+        self.local_launch_plan()
+            .map(super::LocalTerminalLaunchPlan::working_directory)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -108,6 +139,7 @@ pub(crate) struct TestTerminalSessionFactory {
     next_session_id: Cell<usize>,
     fallback_title: String,
     start_failure: Option<String>,
+    start_failure_session_id: Option<usize>,
     selection_response: Result<Option<SelectionCopy>, SelectionCopyError>,
     paste_response: Result<PasteRequestOutcome, String>,
     paste_resolution: Result<PasteResolution, String>,
@@ -120,6 +152,7 @@ impl TestTerminalSessionFactory {
             next_session_id: Cell::new(1),
             fallback_title: "Terminal".to_owned(),
             start_failure: None,
+            start_failure_session_id: None,
             selection_response: Ok(None),
             paste_response: Ok(PasteRequestOutcome::Written),
             paste_resolution: Ok(PasteResolution::Written),
@@ -133,6 +166,17 @@ impl TestTerminalSessionFactory {
 
     pub(crate) fn with_start_failure(mut self, message: impl Into<String>) -> Self {
         self.start_failure = Some(message.into());
+        self.start_failure_session_id = None;
+        self
+    }
+
+    pub(crate) fn with_start_failure_at(
+        mut self,
+        session_id: usize,
+        message: impl Into<String>,
+    ) -> Self {
+        self.start_failure = Some(message.into());
+        self.start_failure_session_id = Some(session_id);
         self
     }
 
@@ -165,17 +209,21 @@ impl TerminalSessionFactory for TestTerminalSessionFactory {
     fn start(
         &self,
         geometry: TerminalGeometry,
-        working_directory: &Path,
+        launch_plan: TerminalLaunchPlan,
     ) -> Result<StartedTerminalSession, SessionError> {
         let session_id = self.next_session_id.get();
         self.next_session_id.set(session_id + 1);
         self.records.starts.borrow_mut().push(RecordedSessionStart {
             session_id,
             geometry,
-            working_directory: working_directory.to_path_buf(),
+            launch_plan,
         });
 
-        if let Some(message) = &self.start_failure {
+        if let Some(message) = &self.start_failure
+            && self
+                .start_failure_session_id
+                .is_none_or(|failure_session_id| failure_session_id == session_id)
+        {
             return Err(SessionError::EmulatorStartup(message.clone()));
         }
 
@@ -312,5 +360,58 @@ impl TerminalSessionHandle for TestTerminalSessionHandle {
 
     fn inject_acceptance_failure(&self, failure: AcceptanceSessionFailure) {
         self.record(RecordedSessionCommand::InjectAcceptanceFailure(failure));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::{RemoteWorkspaceDirectory, SshDestination};
+    use crate::ssh::command::{SshCommandContext, ValidatedRemoteShellCommand};
+    use crate::terminal::geometry::{BackingScale, CellGridSize, LogicalCellSize};
+    use crate::terminal::{RemoteTerminalLaunchPlan, TerminalLaunchPlan};
+
+    #[test]
+    fn test_factory_should_record_typed_remote_launch_context() {
+        let records = TestTerminalSessionRecords::default();
+        let factory = TestTerminalSessionFactory::new(records.clone());
+        let destination = SshDestination::new("user@remote".to_owned()).unwrap();
+        let directory = RemoteWorkspaceDirectory::new("~/project".to_owned()).unwrap();
+        let prepared = SshCommandContext::new(
+            PathBuf::from("/private/config/spaceterm/ssh_config"),
+            destination.clone(),
+            PathBuf::from("/private/runtime/spaceterm/control.sock"),
+        )
+        .unwrap()
+        .prepare_pane_channel(
+            ValidatedRemoteShellCommand::new("exec /bin/zsh -l".to_owned()).unwrap(),
+        );
+        let geometry = TerminalGeometry::from_grid(
+            CellGridSize::new(80, 24),
+            LogicalCellSize::new(8.0, 20.0),
+            BackingScale::ONE,
+        );
+
+        let _started = factory
+            .start(
+                geometry,
+                TerminalLaunchPlan::Remote(Box::new(RemoteTerminalLaunchPlan::new(
+                    test_workspace_directory(PathBuf::from("/Users/local")),
+                    destination.clone(),
+                    directory.clone(),
+                    "project on remote".to_owned(),
+                    prepared,
+                ))),
+            )
+            .unwrap();
+
+        let starts = records.starts();
+        let plan = starts[0]
+            .remote_launch_plan()
+            .expect("the test factory must preserve the remote plan");
+        assert_eq!(plan.destination(), &destination);
+        assert_eq!(plan.remote_directory(), &directory);
+        assert_eq!(plan.local_home().path(), PathBuf::from("/Users/local"));
+        assert!(starts[0].local_working_directory().is_none());
     }
 }

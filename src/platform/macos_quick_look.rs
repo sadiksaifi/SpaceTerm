@@ -241,7 +241,9 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use super::*;
-    use crate::terminal::HyperlinkTarget;
+    use crate::terminal::{HyperlinkTarget, TerminalLocalFileCapabilities};
+
+    const LOCAL_FILES: TerminalLocalFileCapabilities = TerminalLocalFileCapabilities::Enabled;
 
     #[derive(Default)]
     struct RecordingPanel {
@@ -269,8 +271,9 @@ mod tests {
         fs::create_dir_all(&directory).unwrap();
         let file = directory.join("preview.txt");
         fs::write(&file, b"preview").unwrap();
-        let link = HyperlinkTarget::osc8("file:preview.txt", &directory, None).unwrap();
-        let target = QuickLookTarget::from_link(&link).unwrap();
+        let link =
+            HyperlinkTarget::osc8("file:preview.txt", &directory, None, LOCAL_FILES).unwrap();
+        let target = QuickLookTarget::from_link(&link, LOCAL_FILES).unwrap();
         let mut presenter = QuickLookPresenter::new(RecordingPanel::default());
 
         let result = presenter.preview(&target);
@@ -290,8 +293,9 @@ mod tests {
         let file = directory.join("preview.txt");
         let replacement = directory.join("replacement.txt");
         fs::write(&file, b"preview").unwrap();
-        let link = HyperlinkTarget::osc8("file:preview.txt", &directory, None).unwrap();
-        let target = QuickLookTarget::from_link(&link).unwrap();
+        let link =
+            HyperlinkTarget::osc8("file:preview.txt", &directory, None, LOCAL_FILES).unwrap();
+        let target = QuickLookTarget::from_link(&link, LOCAL_FILES).unwrap();
         fs::write(&replacement, b"replacement").unwrap();
         fs::rename(replacement, &file).unwrap();
         let mut presenter = QuickLookPresenter::new(RecordingPanel::default());
@@ -310,7 +314,7 @@ mod tests {
     fn quick_look_target_rejects_web_links_before_the_platform_boundary() {
         let link = HyperlinkTarget::url("https://example.test/file.txt").unwrap();
 
-        let target = QuickLookTarget::from_link(&link);
+        let target = QuickLookTarget::from_link(&link, LOCAL_FILES);
 
         assert_eq!(target, None);
     }
@@ -324,10 +328,11 @@ mod tests {
         fs::create_dir_all(&directory).unwrap();
         let file = directory.join("preview.txt");
         fs::write(&file, b"preview").unwrap();
-        let link = HyperlinkTarget::osc8("file:preview.txt", &directory, None).unwrap();
+        let link =
+            HyperlinkTarget::osc8("file:preview.txt", &directory, None, LOCAL_FILES).unwrap();
         fs::remove_file(file).unwrap();
 
-        let target = QuickLookTarget::from_link(&link);
+        let target = QuickLookTarget::from_link(&link, LOCAL_FILES);
 
         assert_eq!(target, None);
         fs::remove_dir_all(directory).unwrap();
@@ -341,8 +346,8 @@ mod tests {
         ));
         fs::create_dir_all(&directory).unwrap();
 
-        let target = HyperlinkTarget::osc8("file:.", &directory, None)
-            .and_then(|link| QuickLookTarget::from_link(&link));
+        let target = HyperlinkTarget::osc8("file:.", &directory, None, LOCAL_FILES)
+            .and_then(|link| QuickLookTarget::from_link(&link, LOCAL_FILES));
 
         assert_eq!(target, None);
         fs::remove_dir_all(directory).unwrap();

@@ -1,7 +1,7 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::mem;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -46,7 +46,9 @@ use crate::terminal::hyperlink::{HyperlinkTarget, has_file_scheme};
 use crate::terminal::identity::{self, XtGetTcapObserver};
 use crate::terminal::key::{InputModifiers, KeyAction, KeyInput, OptionAsAltPolicy, PhysicalKey};
 use crate::terminal::keyboard_protocol::KeyboardProtocolEncoder;
-use crate::terminal::metadata::{MetadataTracker, TerminalMetadataSnapshot};
+use crate::terminal::metadata::{
+    MetadataTracker, TerminalMetadataContext, TerminalMetadataSnapshot,
+};
 use crate::terminal::selection::{SelectionCopy, SelectionCopyOptions, TrailingSpacePolicy};
 #[cfg(test)]
 use crate::terminal::session::WheelPhase;
@@ -579,6 +581,7 @@ pub(crate) struct TerminalEmulator {
     pending_attention: Rc<RefCell<Vec<AttentionEvent>>>,
     title: Arc<str>,
     metadata: MetadataTracker,
+    local_file_capabilities: crate::terminal::metadata::TerminalLocalFileCapabilities,
     xtgettcap: XtGetTcapObserver,
     primary_row_cache: Vec<RowSnapshot>,
     alternate_row_cache: Vec<RowSnapshot>,
@@ -601,7 +604,7 @@ pub(crate) struct TerminalEmulator {
     pointer_mapping_invalidated: bool,
     gesture_clock: GestureClock,
     presentation_generation: PresentationGeneration,
-    synchronized_output_started: Option<Instant>,
+    synchronized_output_last_activity: Option<Instant>,
     find: TerminalFindState,
 }
 
@@ -703,6 +706,7 @@ impl TerminalEmulator {
         )
     }
 
+    #[cfg(test)]
     pub(crate) fn new_with_metadata(
         geometry: TerminalGeometry,
         initial_directory: &str,
@@ -711,14 +715,32 @@ impl TerminalEmulator {
         terminal_name: &'static str,
         epoch: Instant,
     ) -> Result<Self, Error> {
+        Self::new_with_metadata_context(
+            geometry,
+            TerminalMetadataContext::local(initial_directory, local_hostname),
+            fallback_title,
+            terminal_name,
+            epoch,
+        )
+    }
+
+    pub(crate) fn new_with_metadata_context(
+        geometry: TerminalGeometry,
+        metadata_context: TerminalMetadataContext,
+        fallback_title: &str,
+        terminal_name: &'static str,
+        epoch: Instant,
+    ) -> Result<Self, Error> {
         let grid = geometry.grid();
         let cell = geometry.backing_cell_size();
         let pty_responses = Rc::new(RefCell::new(Vec::new()));
         let pending_metadata = Rc::new(RefCell::new(Vec::new()));
+        let local_file_capabilities = metadata_context.local_file_capabilities();
         let trusted_directory = Rc::new(RefCell::new(
-            Path::new(initial_directory)
-                .is_absolute()
-                .then(|| PathBuf::from(initial_directory)),
+            metadata_context
+                .is_local()
+                .then(|| PathBuf::from(metadata_context.initial_directory()))
+                .filter(|directory| directory.is_absolute()),
         ));
         let pending_attention = Rc::new(RefCell::new(Vec::new()));
         set_png_decoder(Some(Box::new(RustPngDecoder::new())))?;
@@ -754,15 +776,19 @@ impl TerminalEmulator {
         terminal.on_pwd_changed({
             let pending_metadata = Rc::clone(&pending_metadata);
             let trusted_directory = Rc::clone(&trusted_directory);
-            let local_hostname = local_hostname.map(ToOwned::to_owned);
+            let local_hostname = metadata_context.local_hostname().map(ToOwned::to_owned);
+            let local_context = metadata_context.is_local();
             move |terminal| {
                 if let Ok(directory) = terminal.pwd() {
-                    *trusted_directory.borrow_mut() =
-                        crate::terminal::metadata::parse_osc7_directory(
-                            directory,
-                            local_hostname.as_deref(),
-                        )
-                        .map(|metadata| PathBuf::from(metadata.path.as_ref()));
+                    let reported = crate::terminal::metadata::parse_osc7_directory(
+                        directory,
+                        local_hostname.as_deref(),
+                    );
+                    *trusted_directory.borrow_mut() = if local_context {
+                        reported.map(|metadata| PathBuf::from(metadata.path.as_ref()))
+                    } else {
+                        None
+                    };
                     pending_metadata
                         .borrow_mut()
                         .push(MetadataEvent::Directory(Arc::from(directory)));
@@ -771,7 +797,7 @@ impl TerminalEmulator {
         })?;
         terminal.on_hyperlink_resolve({
             let trusted_directory = Rc::clone(&trusted_directory);
-            let local_hostname = local_hostname.map(ToOwned::to_owned);
+            let local_hostname = metadata_context.local_hostname().map(ToOwned::to_owned);
             move |_, uri| {
                 if !has_file_scheme(uri) {
                     return HyperlinkResolution::Passthrough;
@@ -782,12 +808,15 @@ impl TerminalEmulator {
                 let Ok(uri) = std::str::from_utf8(uri) else {
                     return HyperlinkResolution::Suppress;
                 };
-                let Some(target) =
-                    HyperlinkTarget::osc8(uri, &directory, local_hostname.as_deref())
-                else {
+                let Some(target) = HyperlinkTarget::osc8(
+                    uri,
+                    &directory,
+                    local_hostname.as_deref(),
+                    local_file_capabilities,
+                ) else {
                     return HyperlinkResolution::Suppress;
                 };
-                let Some(userdata) = target.local_emission_metadata() else {
+                let Some(userdata) = target.local_emission_metadata(local_file_capabilities) else {
                     return HyperlinkResolution::Suppress;
                 };
                 HyperlinkResolution::Replace {
@@ -844,8 +873,7 @@ impl TerminalEmulator {
             move |_| pending_attention.borrow_mut().push(AttentionEvent::Bell)
         })?;
 
-        let metadata =
-            MetadataTracker::new(initial_directory, fallback_title, local_hostname, epoch);
+        let metadata = MetadataTracker::new_with_context(metadata_context, fallback_title, epoch);
         let title = Arc::clone(&metadata.snapshot().title.value);
 
         let mut mouse_encoder = MouseEncoder::new()?;
@@ -874,6 +902,7 @@ impl TerminalEmulator {
             pending_attention,
             title,
             metadata,
+            local_file_capabilities,
             xtgettcap: XtGetTcapObserver::new(terminal_name),
             primary_row_cache: Vec::new(),
             alternate_row_cache: Vec::new(),
@@ -896,7 +925,7 @@ impl TerminalEmulator {
             pointer_mapping_invalidated: false,
             gesture_clock: GestureClock::System(Instant::now()),
             presentation_generation: PresentationGeneration::default(),
-            synchronized_output_started: None,
+            synchronized_output_last_activity: None,
             find: TerminalFindState::default(),
         })
     }
@@ -967,9 +996,14 @@ impl TerminalEmulator {
             self.find.invalidate();
         }
         let synchronized_after = self.terminal.mode(Mode::SYNC_OUTPUT).unwrap_or(false);
-        self.synchronized_output_started = match (synchronized_before, synchronized_after) {
+        self.synchronized_output_last_activity = match (synchronized_before, synchronized_after) {
             (false, true) => Some(now),
-            (true, true) => self.synchronized_output_started.or(Some(now)),
+            // The one-second safeguard is an inactivity deadline. A large remote redraw may
+            // legitimately keep one synchronized transaction open for longer than a second while
+            // output is still arriving; releasing it on total wall-clock duration exposes the
+            // producer's intermediate grid.
+            (true, true) if !bytes.is_empty() => Some(now),
+            (true, true) => self.synchronized_output_last_activity.or(Some(now)),
             (_, false) => None,
         };
         if let Some(last) = bytes.last().copied() {
@@ -994,8 +1028,8 @@ impl TerminalEmulator {
     }
 
     pub(crate) fn synchronized_output_deadline(&self) -> Option<Instant> {
-        self.synchronized_output_started
-            .map(|started| started + MAX_SYNCHRONIZED_OUTPUT_DURATION)
+        self.synchronized_output_last_activity
+            .map(|last_activity| last_activity + MAX_SYNCHRONIZED_OUTPUT_DURATION)
     }
 
     pub(crate) fn presentation_generation(&self) -> PresentationGeneration {
@@ -1013,7 +1047,7 @@ impl TerminalEmulator {
     }
 
     pub(crate) fn end_synchronized_output(&mut self) -> Result<bool, Error> {
-        self.synchronized_output_started = None;
+        self.synchronized_output_last_activity = None;
         if !self.terminal.mode(Mode::SYNC_OUTPUT)? {
             return Ok(false);
         }
@@ -2013,7 +2047,10 @@ impl TerminalEmulator {
                                     if let Some(target) = local_hyperlink_targets.get(userdata) {
                                         return target.clone();
                                     }
-                                    let target = crate::terminal::HyperlinkTarget::from_local_emission_metadata(userdata);
+                                    let target = crate::terminal::HyperlinkTarget::from_local_emission_metadata(
+                                        userdata,
+                                        self.local_file_capabilities,
+                                    );
                                     local_hyperlink_targets
                                         .insert(userdata.to_vec(), target.clone());
                                     target
@@ -3945,6 +3982,34 @@ mod tests {
     }
 
     #[test]
+    fn synchronized_output_deadline_should_follow_the_last_output_activity() {
+        let mut emulator = emulator(32, 2);
+        let _ = emulator.snapshot().unwrap();
+        let started = Instant::now();
+        emulator.feed_at(b"\x1b[?2026hlong", started);
+        assert!(emulator.snapshot().unwrap().is_none());
+
+        let progressed = started + Duration::from_millis(900);
+        emulator.feed_at(b" remote redraw", progressed);
+        assert!(emulator.snapshot().unwrap().is_none());
+        assert!(
+            !emulator
+                .expire_synchronized_output(started + Duration::from_secs(1))
+                .unwrap(),
+            "active synchronized output must not expose an intermediate grid"
+        );
+
+        assert!(
+            emulator
+                .expire_synchronized_output(progressed + Duration::from_secs(1))
+                .unwrap(),
+            "one second without output must still release a stalled producer"
+        );
+        let released = emulator.snapshot().unwrap().unwrap();
+        assert!(row_text(&released, 0).starts_with("long remote redraw"));
+    }
+
+    #[test]
     fn unchanged_rows_reuse_their_cell_storage() {
         let mut emulator = emulator(10, 3);
         let first = emulator.snapshot().unwrap().unwrap();
@@ -4893,9 +4958,50 @@ mod tests {
             first_link.value,
             file.canonicalize().unwrap().to_str().unwrap()
         );
-        assert_eq!(first_link.activation_url(), None);
+        assert_eq!(
+            first_link
+                .activation_url(crate::terminal::metadata::TerminalLocalFileCapabilities::Enabled),
+            None
+        );
         fs::remove_dir_all(directory).unwrap();
         fs::remove_dir_all(second_directory).unwrap();
+    }
+
+    #[test]
+    fn remote_metadata_context_should_never_resolve_file_links_as_local_paths() {
+        let metadata_context = TerminalMetadataContext::Remote(
+            crate::terminal::metadata::RemoteTerminalMetadataContext::new(
+                crate::domain::SshDestination::new("user@remote".to_owned()).unwrap(),
+                crate::domain::RemoteWorkspaceDirectory::new("~/project".to_owned()).unwrap(),
+            ),
+        );
+        let mut emulator = TerminalEmulator::new_with_metadata_context(
+            geometry(16, 2, 10.0, 20.0),
+            metadata_context,
+            "project on remote",
+            identity::TERM_FALLBACK,
+            Instant::now(),
+        )
+        .unwrap();
+
+        emulator.feed(
+            b"\x1b]8;;file:preview.txt\x07remote\x1b]8;;\x07 \
+              \x1b]8;;https://example.test\x07web\x1b]8;;\x07",
+        );
+
+        let snapshot = emulator.snapshot().unwrap().unwrap();
+        assert!(
+            snapshot.rows[0][..6]
+                .iter()
+                .all(|cell| cell.hyperlink.is_none())
+        );
+        assert!(snapshot.rows[0][7..10].iter().all(|cell| {
+            cell.hyperlink
+                .as_ref()
+                .is_some_and(|link| link.kind == crate::terminal::hyperlink::HyperlinkKind::Url)
+        }));
+        assert!(!snapshot.metadata.context.is_local());
+        assert_eq!(snapshot.metadata.directory.path.as_ref(), "~/project");
     }
 
     #[test]

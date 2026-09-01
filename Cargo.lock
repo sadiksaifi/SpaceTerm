@@ -5139,6 +5139,7 @@ dependencies = [
  "spaceterm-ui",
  "thiserror 2.0.19",
  "unicode-bidi",
+ "zeroize",
 ]
 
 [[package]]
@@ -5148,6 +5149,7 @@ dependencies = [
  "gpui",
  "resvg",
  "unicode-segmentation",
+ "zeroize",
 ]
 
 [[package]]

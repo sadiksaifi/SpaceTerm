@@ -89,12 +89,12 @@ impl<D: SecureInputDriver> SecureInputCoordinator<D> {
     }
 
     fn reconcile(&mut self, reason: &'static str) {
-        let eligible = self
+        let eligible_panes = self
             .panes
             .values()
             .filter(|pane| pane.hidden_input && pane.terminal_input_focus)
             .count();
-        let desired = self.application_active && eligible == 1;
+        let desired = self.application_active && eligible_panes == 1;
         if desired == self.enabled {
             return;
         }
@@ -103,7 +103,7 @@ impl<D: SecureInputDriver> SecureInputCoordinator<D> {
             Ok(()) => {
                 self.enabled = desired;
                 eprintln!(
-                    "secure event input {}: {reason}; eligible Panes={eligible}",
+                    "secure event input {}: {reason}; eligible panes={eligible_panes}",
                     if desired { "enabled" } else { "disabled" }
                 );
             }

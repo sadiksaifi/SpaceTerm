@@ -1,9 +1,12 @@
+#[cfg(test)]
+use gpui::App;
 use gpui::prelude::*;
 use gpui::{Context, Entity, EventEmitter, Render, Window, px, rgba};
 use gpui_symbols::Icon;
 use spaceterm_ui::{
-    CommandPalette, CommandPaletteAccessory, CommandPaletteEvent, CommandPaletteHint,
-    CommandPaletteItem, CommandPaletteLifecycleEvent,
+    CommandPalette, CommandPaletteAccessory, CommandPaletteActivationPolicy, CommandPaletteEvent,
+    CommandPaletteHint, CommandPaletteItem, CommandPaletteLifecycleEvent,
+    CommandPaletteReplacementFocus,
 };
 
 use crate::theme::ACTIVE_THEME;
@@ -43,21 +46,16 @@ impl NewWorkspaceSource {
         match self {
             Self::LocalProject => "folder",
             Self::Scratch => "terminal",
-            Self::RemoteProject => "network",
+            Self::RemoteProject => "globe",
         }
     }
 
-    const fn accessory(self) -> &'static str {
+    const fn accessory(self) -> Option<&'static str> {
         match self {
-            Self::LocalProject => "\u{21e7}\u{2318}O",
-            Self::Scratch => "\u{2318}N",
-            Self::RemoteProject => "Soon",
+            Self::LocalProject => Some("\u{21e7}\u{2318}O"),
+            Self::Scratch => Some("\u{2318}N"),
+            Self::RemoteProject => None,
         }
-    }
-
-    /// Whether the source can create a Workspace today.
-    const fn is_available(self) -> bool {
-        !matches!(self, Self::RemoteProject)
     }
 
     const fn debug_selector(self) -> &'static str {
@@ -75,33 +73,37 @@ impl NewWorkspaceSource {
         [Self::LocalProject, Self::Scratch, Self::RemoteProject]
     }
 
-    fn into_palette_item(self) -> CommandPaletteItem<Self> {
-        let available = self.is_available();
-        let icon_color = rgba(if available {
-            ACTIVE_THEME.icon.rgba_hex()
-        } else {
-            ACTIVE_THEME.text_muted.rgba_hex()
-        });
+    fn into_palette_item(
+        self,
+        remote_unavailable_reason: Option<String>,
+    ) -> CommandPaletteItem<Self> {
+        let icon_color = rgba(ACTIVE_THEME.icon.rgba_hex());
         let icon_name = self.icon();
-        let accessory = if available {
-            CommandPaletteAccessory::Shortcut(self.accessory().into())
-        } else {
-            CommandPaletteAccessory::Status(self.accessory().into())
-        };
-        // An unavailable source stays listed because the three descriptions together are what
-        // teach the Workspace Kinds. The palette omits disabled rows from selection and keyboard
-        // navigation, so it states the model without becoming a dead stop.
-        CommandPaletteItem::new(self, self.label())
-            .description(self.description())
-            .disabled(!available)
+        let unavailable = (self == Self::RemoteProject)
+            .then_some(remote_unavailable_reason)
+            .flatten();
+        let item = CommandPaletteItem::new(self, self.label())
+            .description(
+                unavailable
+                    .clone()
+                    .unwrap_or_else(|| self.description().to_owned()),
+            )
+            .disabled(unavailable.is_some())
             .leading_icon(move |_| {
                 Icon::new(icon_name)
                     .size(px(SOURCE_ICON_SIZE))
                     .color(icon_color)
                     .into_any_element()
             })
-            .trailing(accessory)
-            .debug_selector(self.debug_selector())
+            .debug_selector(self.debug_selector());
+
+        match (self.accessory(), unavailable.as_ref()) {
+            (_, Some(_)) => item.trailing(CommandPaletteAccessory::Status("Unavailable".into())),
+            (Some(shortcut), None) => {
+                item.trailing(CommandPaletteAccessory::Shortcut(shortcut.into()))
+            }
+            (None, None) => item,
+        }
     }
 }
 
@@ -122,10 +124,19 @@ pub(super) struct NewWorkspacePanel {
 }
 
 impl NewWorkspacePanel {
+    #[cfg(test)]
     pub(super) fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        Self::new_with_remote_unavailable_reason(None, window, cx)
+    }
+
+    pub(super) fn new_with_remote_unavailable_reason(
+        remote_unavailable_reason: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let items = NewWorkspaceSource::ordered()
             .into_iter()
-            .map(NewWorkspaceSource::into_palette_item)
+            .map(|source| source.into_palette_item(remote_unavailable_reason.clone()))
             .collect();
         let palette = cx.new(|cx| {
             let mut palette = CommandPalette::new("New Workspace", items, window, cx);
@@ -137,13 +148,14 @@ impl NewWorkspacePanel {
                 ],
                 cx,
             );
+            palette.set_activation(CommandPaletteActivationPolicy::Continue, cx);
             palette
         });
         cx.subscribe_in(
             &palette,
             window,
-            |panel, _, event: &CommandPaletteEvent<NewWorkspaceSource>, _, cx| {
-                panel.reduce_palette_event(event, cx);
+            |panel, _, event: &CommandPaletteEvent<NewWorkspaceSource>, window, cx| {
+                panel.reduce_palette_event(event, window, cx);
             },
         )
         .detach();
@@ -193,6 +205,44 @@ impl NewWorkspacePanel {
             .update(cx, |palette, cx| palette.dismiss(window, cx));
     }
 
+    pub(super) fn dismiss_for_replacement(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<CommandPaletteReplacementFocus> {
+        self.cancel_pending_open(cx);
+        let replacement = self.palette.update(cx, |palette, cx| {
+            palette.dismiss_for_replacement(window, cx)
+        });
+        if replacement.is_some() {
+            self.settle(false, cx);
+        }
+        replacement
+    }
+
+    #[cfg(test)]
+    pub(super) fn open_replacing(
+        &mut self,
+        replacement: CommandPaletteReplacementFocus,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.open || self.pending_open {
+            return false;
+        }
+        self.pending_open = true;
+        cx.emit(NewWorkspacePanelEvent::StateChanged);
+        cx.notify();
+        let opened = self.palette.update(cx, |palette, cx| {
+            palette.open_replacing(replacement, window, cx)
+        });
+        if opened || spaceterm_ui::window_modal_is_open(window, cx) {
+            return true;
+        }
+        self.settle(false, cx);
+        false
+    }
+
     pub(super) fn is_open(&self) -> bool {
         self.open
     }
@@ -201,6 +251,11 @@ impl NewWorkspacePanel {
     /// open request and the palette actually opening.
     pub(super) fn blocks_terminal_input(&self) -> bool {
         self.open || self.pending_open
+    }
+
+    #[cfg(test)]
+    pub(super) fn input_is_focused(&self, window: &Window, cx: &App) -> bool {
+        self.palette.read(cx).editor_is_focused(window, cx)
     }
 
     fn cancel_pending_open(&mut self, cx: &mut Context<Self>) {
@@ -224,6 +279,7 @@ impl NewWorkspacePanel {
     fn reduce_palette_event(
         &mut self,
         event: &CommandPaletteEvent<NewWorkspaceSource>,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         match event {
@@ -234,9 +290,12 @@ impl NewWorkspacePanel {
                 self.settle(false, cx);
             }
             CommandPaletteEvent::Activated(activation) => {
-                cx.emit(NewWorkspacePanelEvent::SourceSelected(
-                    *activation.item_id(),
-                ));
+                let source = *activation.item_id();
+                if source != NewWorkspaceSource::RemoteProject {
+                    self.palette
+                        .update(cx, |palette, cx| palette.dismiss(window, cx));
+                }
+                cx.emit(NewWorkspacePanelEvent::SourceSelected(source));
                 cx.notify();
             }
             CommandPaletteEvent::QueryChanged(_)
@@ -269,13 +328,24 @@ mod tests {
     struct NewWorkspacePanelHarness {
         panel: Entity<NewWorkspacePanel>,
         prior_focus: FocusHandle,
+        selected_source: Option<NewWorkspaceSource>,
     }
 
     impl NewWorkspacePanelHarness {
         fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+            let panel = cx.new(|cx| NewWorkspacePanel::new(window, cx));
+            cx.subscribe(&panel, |harness, _, event: &NewWorkspacePanelEvent, cx| {
+                if let NewWorkspacePanelEvent::SourceSelected(source) = event {
+                    harness.selected_source = Some(*source);
+                    cx.notify();
+                }
+            })
+            .detach();
+
             Self {
-                panel: cx.new(|cx| NewWorkspacePanel::new(window, cx)),
+                panel,
                 prior_focus: cx.focus_handle(),
+                selected_source: None,
             }
         }
     }
@@ -291,13 +361,17 @@ mod tests {
 
     fn new_workspace_panel(
         cx: &mut TestAppContext,
-    ) -> (Entity<NewWorkspacePanel>, &mut VisualTestContext) {
+    ) -> (
+        Entity<NewWorkspacePanelHarness>,
+        Entity<NewWorkspacePanel>,
+        &mut VisualTestContext,
+    ) {
         cx.update(crate::ui::init);
         let (harness, cx) = cx.add_window_view(NewWorkspacePanelHarness::new);
         let panel = harness.read_with(cx, |harness, _| harness.panel.clone());
         cx.update(|window, cx| harness.read(cx).prior_focus.focus(window));
         cx.run_until_parked();
-        (panel, cx)
+        (harness, panel, cx)
     }
 
     fn open(panel: &Entity<NewWorkspacePanel>, cx: &mut VisualTestContext) {
@@ -308,8 +382,12 @@ mod tests {
     #[test]
     fn local_project_should_lead_so_the_default_selection_opens_the_picker() {
         assert_eq!(
-            NewWorkspaceSource::ordered().first().copied(),
-            Some(NewWorkspaceSource::LocalProject)
+            NewWorkspaceSource::ordered(),
+            [
+                NewWorkspaceSource::LocalProject,
+                NewWorkspaceSource::Scratch,
+                NewWorkspaceSource::RemoteProject,
+            ]
         );
     }
 
@@ -335,18 +413,26 @@ mod tests {
     }
 
     #[test]
-    fn remote_project_should_be_the_only_unavailable_source() {
-        let unavailable: Vec<_> = NewWorkspaceSource::ordered()
-            .into_iter()
-            .filter(|source| !source.is_available())
-            .collect();
+    fn remote_project_should_be_enabled_without_a_coming_soon_accessory() {
+        let remote = NewWorkspaceSource::RemoteProject;
 
-        assert_eq!(unavailable, vec![NewWorkspaceSource::RemoteProject]);
+        assert!(!remote.into_palette_item(None).is_disabled());
+        assert_eq!(remote.accessory(), None);
+        assert_eq!(remote.icon(), "globe");
+    }
+
+    #[test]
+    fn unavailable_remote_project_should_be_disabled_with_the_actionable_probe_reason() {
+        let reason = "OpenSSH 9.0 or later is required";
+        let remote = NewWorkspaceSource::RemoteProject.into_palette_item(Some(reason.to_owned()));
+
+        assert!(remote.is_disabled());
+        assert_eq!(remote.description_text(), Some(reason));
     }
 
     #[gpui::test]
     fn opening_should_present_every_source_and_block_terminal_input(cx: &mut TestAppContext) {
-        let (panel, cx) = new_workspace_panel(cx);
+        let (_, panel, cx) = new_workspace_panel(cx);
 
         open(&panel, cx);
 
@@ -361,7 +447,7 @@ mod tests {
 
     #[gpui::test]
     fn opening_should_select_local_project_before_any_query(cx: &mut TestAppContext) {
-        let (panel, cx) = new_workspace_panel(cx);
+        let (_, panel, cx) = new_workspace_panel(cx);
 
         open(&panel, cx);
 
@@ -376,19 +462,19 @@ mod tests {
     }
 
     #[gpui::test]
-    fn an_unavailable_source_should_stay_listed_but_never_be_selected(cx: &mut TestAppContext) {
-        let (panel, cx) = new_workspace_panel(cx);
+    fn remote_project_should_be_keyboard_selectable_and_emit_its_source(cx: &mut TestAppContext) {
+        let (harness, panel, cx) = new_workspace_panel(cx);
 
         open(&panel, cx);
-        cx.simulate_keystrokes("down down down down");
+        cx.simulate_keystrokes("down down");
         cx.run_until_parked();
 
         assert!(
             cx.debug_bounds(NewWorkspaceSource::RemoteProject.debug_selector())
                 .is_some(),
-            "the Remote Project row must stay visible to teach the Kinds"
+            "Remote over SSH was not rendered"
         );
-        assert_ne!(
+        assert_eq!(
             panel.read_with(cx, |panel, cx| panel
                 .palette()
                 .read(cx)
@@ -396,11 +482,90 @@ mod tests {
                 .copied()),
             Some(NewWorkspaceSource::RemoteProject)
         );
+
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+
+        assert_eq!(
+            harness.read_with(cx, |harness, _| harness.selected_source),
+            Some(NewWorkspaceSource::RemoteProject)
+        );
+        assert!(panel.read_with(cx, |panel, _| panel.is_open()));
+    }
+
+    #[gpui::test]
+    fn local_and_scratch_should_keep_their_completed_activation_behavior(cx: &mut TestAppContext) {
+        let (harness, panel, cx) = new_workspace_panel(cx);
+
+        open(&panel, cx);
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        assert_eq!(
+            harness.read_with(cx, |harness, _| harness.selected_source),
+            Some(NewWorkspaceSource::LocalProject)
+        );
+        assert!(!panel.read_with(cx, |panel, _| panel.is_open()));
+        assert!(cx.update(|window, cx| harness.read(cx).prior_focus.is_focused(window)));
+
+        open(&panel, cx);
+        cx.simulate_keystrokes("down enter");
+        cx.run_until_parked();
+        assert_eq!(
+            harness.read_with(cx, |harness, _| harness.selected_source),
+            Some(NewWorkspaceSource::Scratch)
+        );
+        assert!(!panel.read_with(cx, |panel, _| panel.is_open()));
+        assert!(cx.update(|window, cx| harness.read(cx).prior_focus.is_focused(window)));
+    }
+
+    #[gpui::test]
+    fn open_escape_reopen_should_restore_then_retake_the_first_responder(cx: &mut TestAppContext) {
+        let (harness, panel, cx) = new_workspace_panel(cx);
+
+        open(&panel, cx);
+        assert!(cx.update(|window, cx| panel.read(cx).input_is_focused(window, cx)));
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        assert!(!panel.read_with(cx, |panel, _| panel.blocks_terminal_input()));
+        assert!(cx.update(|window, cx| harness.read(cx).prior_focus.is_focused(window)));
+
+        open(&panel, cx);
+        assert!(panel.read_with(cx, |panel, _| panel.blocks_terminal_input()));
+        assert!(cx.update(|window, cx| panel.read(cx).input_is_focused(window, cx)));
+        assert!(!cx.update(|window, cx| harness.read(cx).prior_focus.is_focused(window)));
+    }
+
+    #[gpui::test]
+    fn replacement_wrappers_should_be_exact_once_and_preserve_original_focus(
+        cx: &mut TestAppContext,
+    ) {
+        let (harness, panel, cx) = new_workspace_panel(cx);
+        open(&panel, cx);
+
+        cx.update(|window, cx| {
+            let replacement = panel
+                .update(cx, |panel, cx| panel.dismiss_for_replacement(window, cx))
+                .expect("an open source panel should transfer its focus chain");
+            assert!(
+                panel
+                    .update(cx, |panel, cx| panel.dismiss_for_replacement(window, cx))
+                    .is_none()
+            );
+            assert!(panel.update(cx, |panel, cx| {
+                panel.open_replacing(replacement, window, cx)
+            }));
+        });
+        cx.run_until_parked();
+
+        assert!(cx.update(|window, cx| panel.read(cx).input_is_focused(window, cx)));
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        assert!(cx.update(|window, cx| harness.read(cx).prior_focus.is_focused(window)));
     }
 
     #[gpui::test]
     fn dismissing_should_release_terminal_input(cx: &mut TestAppContext) {
-        let (panel, cx) = new_workspace_panel(cx);
+        let (_, panel, cx) = new_workspace_panel(cx);
 
         open(&panel, cx);
         cx.update(|window, cx| panel.update(cx, |panel, cx| panel.dismiss(window, cx)));

@@ -22,7 +22,9 @@ use super::identity::{
     launch_identity,
 };
 use super::key::{InputModifiers, KeyAction, KeyInput, OptionAsAltPolicy, PhysicalKey};
-use super::metadata::{DirectoryProvenance, parse_osc7_directory, sanitize_title};
+use super::metadata::{
+    DirectoryProvenance, TerminalLocalFileCapabilities, parse_osc7_directory, sanitize_title,
+};
 use super::native_services::{
     NativeContextActions, NativeInsertion, NativeInsertionError, QuickLookTarget,
 };
@@ -1311,12 +1313,13 @@ fn check_precision_wheel() -> Result<(), String> {
 }
 
 fn check_hyperlinks() -> Result<(), String> {
+    let local_files = TerminalLocalFileCapabilities::Enabled;
     let target = HyperlinkTarget::url("https://example.test/path")
         .ok_or_else(|| "valid HTTPS link was rejected".to_owned())?;
     require_eq("link-kind", target.kind, HyperlinkKind::Url)?;
     require_eq(
         "activation-url",
-        target.activation_url(),
+        target.activation_url(local_files),
         Some("https://example.test/path".to_owned()),
     )?;
     let cells = ["go ".to_owned(), "https://example.test/path".to_owned()];
@@ -1341,7 +1344,7 @@ fn check_hyperlinks() -> Result<(), String> {
     let file = directory.join("preview file.txt");
     std::fs::write(&file, b"preview").map_err(|error| error.to_string())?;
     let result = (|| {
-        let local = HyperlinkTarget::osc8("file:preview%20file.txt", &directory, None)
+        let local = HyperlinkTarget::osc8("file:preview%20file.txt", &directory, None, local_files)
             .ok_or_else(|| "valid local OSC 8 target was rejected".to_owned())?;
         require_eq("local-link-kind", local.kind, HyperlinkKind::LocalPath)?;
         require_eq(
@@ -1354,8 +1357,9 @@ fn check_hyperlinks() -> Result<(), String> {
         )?;
         let retained = HyperlinkTarget::from_local_emission_metadata(
             &local
-                .local_emission_metadata()
+                .local_emission_metadata(local_files)
                 .ok_or_else(|| "valid local target metadata exceeded its bound".to_owned())?,
+            local_files,
         )
         .ok_or_else(|| "resolver-only local target metadata did not decode".to_owned())?;
         require_eq("local-link-emission-identity", retained, local.clone())?;
@@ -1364,9 +1368,11 @@ fn check_hyperlinks() -> Result<(), String> {
                 &format!("file://remote.test{}", file.to_string_lossy()),
                 &directory,
                 Some("mac.local"),
+                local_files,
             )
             .is_none()
-                && HyperlinkTarget::osc8("file:missing.txt", &directory, None).is_none(),
+                && HyperlinkTarget::osc8("file:missing.txt", &directory, None, local_files)
+                    .is_none(),
             "local-link-rejections",
             "remote or missing local OSC 8 target was accepted",
         )?;
@@ -1375,13 +1381,18 @@ fn check_hyperlinks() -> Result<(), String> {
         std::fs::create_dir_all(&next_directory).map_err(|error| error.to_string())?;
         let next_file = next_directory.join("preview file.txt");
         std::fs::write(&next_file, b"next").map_err(|error| error.to_string())?;
-        let next = HyperlinkTarget::osc8("file:preview%20file.txt", &next_directory, None)
-            .ok_or_else(|| "second valid local OSC 8 target was rejected".to_owned())?;
+        let next = HyperlinkTarget::osc8(
+            "file:preview%20file.txt",
+            &next_directory,
+            None,
+            local_files,
+        )
+        .ok_or_else(|| "second valid local OSC 8 target was rejected".to_owned())?;
         let local_url = local
-            .activation_url()
+            .activation_url(local_files)
             .ok_or_else(|| "fresh local OSC 8 target became inert".to_owned())?;
         let next_url = next
-            .activation_url()
+            .activation_url(local_files)
             .ok_or_else(|| "fresh second local OSC 8 target became inert".to_owned())?;
         require_eq(
             "local-link-canonical-emission-directory",
@@ -1567,17 +1578,18 @@ fn check_attention() -> Result<(), String> {
 }
 
 fn check_native_services() -> Result<(), String> {
+    let local_files = TerminalLocalFileCapabilities::Enabled;
     let url = HyperlinkTarget::url("https://example.test").unwrap();
     require_eq(
         "context-actions",
-        NativeContextActions::from_presence(true, Some(&url)),
+        NativeContextActions::from_presence(local_files, true, Some(&url)),
         NativeContextActions {
             copy: true,
             open_link: true,
             quick_look: false,
         },
     )?;
-    let insertion = NativeInsertion::dropped_files(&[PathBuf::from("/tmp/a b")], true)
+    let insertion = NativeInsertion::dropped_files(&[PathBuf::from("/tmp/a b")], true, local_files)
         .map_err(|error| format!("native insertion failed: {error:?}"))?;
     require_eq("native-file-insertion", insertion.text(), "'/tmp/a b'")?;
     require_eq(
@@ -1599,17 +1611,18 @@ fn check_native_services() -> Result<(), String> {
             &format!("file://{}", file.to_string_lossy()),
             &directory,
             None,
+            local_files,
         )
         .ok_or_else(|| "valid Quick Look link was rejected".to_owned())?;
         require_eq(
             "quick-look-local-regular-file",
-            NativeContextActions::from_presence(false, Some(&local)).quick_look,
+            NativeContextActions::from_presence(local_files, false, Some(&local)).quick_look,
             true,
         )?;
         std::fs::remove_file(&file).map_err(|error| error.to_string())?;
         require(
-            QuickLookTarget::from_link(&local).is_none()
-                && NativeContextActions::from_presence(false, Some(&local)).quick_look,
+            QuickLookTarget::from_link(&local, local_files).is_none()
+                && NativeContextActions::from_presence(local_files, false, Some(&local)).quick_look,
             "quick-look-stale-path",
             "missing local file remained executable or immutable eligibility was lost",
         )

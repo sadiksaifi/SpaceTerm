@@ -209,9 +209,10 @@ state; progress values or indeterminate state; live status announcements; access
 exclusion of an arbitrary underlay from native accessibility traversal. Private logical semantic
 snapshots retain and test those facts, and stable debug selectors test observable behavior, but
 neither is native accessibility evidence. SpaceTerm makes no VoiceOver, Narrator, or Orca
-conformance claim for these controls. Accessibility-sensitive product workflows remain on native
-system prompts, including the existing `Window::prompt` call sites, until native accessibility-tree
-support exists and is verified. No production native prompt was migrated with this Module.
+conformance claim for these controls. Accessibility-sensitive workflows should remain on native
+system prompts until native accessibility-tree support exists and is verified. AskPass secret
+entry is the explicit current exception: it uses the application-owned Dialog for visual and
+interaction consistency and does not claim protected native accessibility semantics.
 
 The internal library's Resize Handle is a keyed, platform-neutral GPUI divider with a mandatory
 logical name and an explicitly named movement axis. It owns the enlarged pointer hitbox, resize
@@ -864,8 +865,8 @@ surface that presents every Workspace Source, naming each row for its source rat
 the panel's own noun, and stating each Kind's Workspace Directory behaviour beside it. It performs
 no lifecycle action: choosing a row runs the ordinary action. Create Scratch Workspace creates a
 Scratch Workspace at `HOME`; Open Local Project creates a Local Project Workspace from one directory
-confirmed through the in-app Workspace Picker. Remote Project is listed and unavailable, so the
-panel states the whole model before an SSH selection path exists.
+confirmed through the in-app Workspace Picker. Remote Project is a distinct Source whose SSH
+Destination and Remote Workspace Directory selection remain outside the panel's ownership.
 
 A trailing ellipsis on a command label belongs to the macOS menu bar alone. SpaceTerm's own
 surfaces never carry one: inside a chooser every row already leads onward, so marking some and not
@@ -908,10 +909,58 @@ Directory. Create Window and Split Pane revalidate existence, readability, direc
 filesystem identity before hierarchy mutation. Failure leaves running Terminal Sessions intact,
 marks the Workspace unavailable, and blocks only new children until validation succeeds.
 
+A Remote Project Workspace owns its exact SSH Destination and exact selected Remote Workspace
+Directory spelling as remote values, never as a local `PathBuf` or local filesystem identity. The
+remote validation protocol resolves a separate absolute Physical Directory Identity. The composite
+of SSH Destination and Physical Directory Identity is the Remote Project Workspace deduplication
+identity: selecting the same composite activates the existing Workspace without constructing a
+replacement payload, while a different SSH destination alias remains distinct. The first accepted
+Remote Workspace Directory spelling remains the Terminal Session startup spelling even when its
+Physical Directory Identity supplies deduplication and automatic naming.
+
+One Remote Project Workspace owns one Control Connection for its current Connection Generation.
+The Control Connection exclusively owns the OpenSSH master process, its private runtime socket, and
+their bounded shutdown, reap, and exact cleanup. Every Pane still owns one Terminal Session, and
+each Remote Terminal Session consumes its own single-use prepared channel command through that
+Control Connection. A Remote launch uses the local `HOME` only as the local SSH process working
+directory; it does not grant local path authority to the Remote Workspace Directory.
+
+Closing or cancelling a Remote Project transfers Control Connection shutdown, reap, AskPass
+teardown, and private runtime cleanup into retained background ownership. GPUI releases
+hierarchy and focus ownership synchronously without waiting for the bounded OpenSSH shutdown; the
+session alias lease remains held until that background cleanup finishes. When Operating-System
+Window deactivation cancels Remote Workspace Directory selection, the persistent Workspace owner
+releases the picker immediately and restores the Focused Pane on reactivation only when no newer
+presentation blocks Terminal Input Focus.
+
+AskPass presentation uses only application-owned window-modal controls. First-contact host
+verification and other non-secret SSH confirmations use Alert, while passwords, private-key
+passphrases, PINs, one-time codes, and other secret responses use Dialog with obscured Text Input.
+Authentication temporarily suspends the connection ProgressDialog, which resumes when connection
+work continues. Obscured entry renders bullets, disables clipboard extraction and editing history,
+and transfers the accepted value into a zeroizing response owner. It does not provide native
+protected accessibility or macOS Secure Event Input semantics. The terminal PTY's independent
+Secure Event Input lifecycle remains unchanged.
+
+Remote connection state couples Connecting, Connected, Reconnecting, Disconnected, Failed, and
+Closing to a monotonic Connection Generation. Reconnect starts only from Disconnected or Failed at
+a greater generation. A completion from an older generation is stale, an invalid transition is
+rejected, and Closing is terminal, so delayed readiness or disconnection cannot resurrect a
+retired connection or overwrite its successor.
+
+Terminal metadata distinguishes Local and Remote launch contexts. Only Local metadata enables
+Terminal Local File Capabilities. Remote metadata prevents local path classification, user-data
+emission, validation, opening, preview, File Insertion, path drag/drop, clipboard file-URL intake,
+and file-aware native Services. Web links, Selection, copy, ordinary text paste and drop, Terminal
+Input, Terminal Find, and OSC 52 retain their existing policies. Create Window and Split Pane use
+the Workspace's typed launch context: Local children revalidate the local Workspace Directory,
+while Remote children preserve the Remote Workspace Directory and never run local path validation.
+
 Without a custom name, Workspace names follow the directory basename, use `Default` for the `HOME`
 identity and `/` for the filesystem root, and number only unrenamed Scratch Workspaces with the same
 identity in sidebar order. An empty trimmed rename clears the custom name; duplicate custom names are
-valid.
+valid. An unrenamed Remote Project Workspace at its remote home Physical Directory Identity uses its
+SSH Destination alone; every other Remote Project uses `<physical basename> · <SSH Destination>`.
 
 ### Cross-Hierarchy Close Escalation
 

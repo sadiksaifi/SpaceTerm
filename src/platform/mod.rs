@@ -1,4 +1,5 @@
 pub(crate) mod acceptance_observation;
+pub(crate) mod app_paths;
 
 pub(crate) mod finder_fallback;
 pub(crate) mod workspace_directory;
@@ -12,6 +13,12 @@ pub(crate) mod macos_application;
 
 #[cfg(target_os = "macos")]
 pub(crate) mod macos_accessibility;
+
+#[cfg(target_os = "macos")]
+pub(crate) mod ssh_askpass;
+
+#[cfg(target_os = "macos")]
+pub(crate) mod macos_askpass_transport;
 
 #[cfg(target_os = "macos")]
 pub(crate) mod macos_keyboard;

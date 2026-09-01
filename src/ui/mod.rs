@@ -3,12 +3,19 @@ mod command_palette_theme;
 mod control_theme_catalog;
 mod menu_theme;
 mod modal_theme;
+mod native_remote_workspace_flow_backend;
 mod new_workspace_panel;
 mod pane_action_menu;
 mod pane_host;
+mod remote_child_launch;
+mod remote_workspace_flow;
+pub(crate) mod remote_workspace_picker;
 mod render_lifecycle;
 mod resize_handle_theme;
 mod scrollbar_theme;
+pub(crate) mod ssh_askpass_dialog;
+mod ssh_host_form;
+mod ssh_host_picker;
 mod terminal_context_menu;
 mod terminal_element;
 mod terminal_focus;
@@ -26,7 +33,11 @@ mod workspace_search;
 use gpui::{App, KeyBinding, actions};
 use spaceterm_ui::{EditCopy, EditPaste};
 
-pub(crate) use pane_host::{PaneHost, PaneHostEvent};
+pub(crate) use native_remote_workspace_flow_backend::NativeRemoteWorkspaceFlowBackendFactory;
+pub(crate) use pane_host::{
+    PaneHost, PaneHostEvent, PreparedPaneHostRemoteRestart, RemotePaneHostLifecycleError,
+};
+pub(crate) use remote_child_launch::RemoteChildLaunchUnavailable;
 #[cfg(test)]
 pub(crate) use render_lifecycle::{RenderLifecycle, ScaleChange, SurfaceVisibility};
 #[cfg(test)]
@@ -35,7 +46,9 @@ pub(crate) use terminal_focus::{
 };
 #[cfg(test)]
 pub(crate) use terminal_ime::conformance_ime_observation;
-pub(crate) use terminal_pane::{TerminalPane, TerminalPaneEvent};
+pub(crate) use terminal_pane::{
+    PreparedRemotePaneRestart, RemotePaneLifecycleError, TerminalPane, TerminalPaneEvent,
+};
 pub(crate) use window_manager::{WindowManager, WindowManagerEvent};
 pub(crate) use workspace_manager::WorkspaceManager;
 

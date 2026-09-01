@@ -1,20 +1,50 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use thiserror::Error;
+
 use super::pane_action_menu::{
     CloseTarget, PaneActionMenuCommand, pane_action_menu_entries, sf_symbol,
 };
 use super::terminal_focus::{TerminalFocusBlocker, TerminalProductFocus};
 use super::{
-    ClosePane, FocusPaneDown, FocusPaneLeft, FocusPaneRight, FocusPaneUp, SplitDown, SplitRight,
-    TERMINAL_KEY_CONTEXT, TerminalPane, TerminalPaneEvent, TogglePaneZoom,
+    ClosePane, FocusPaneDown, FocusPaneLeft, FocusPaneRight, FocusPaneUp,
+    PreparedRemotePaneRestart, RemoteChildLaunchUnavailable, RemotePaneLifecycleError, SplitDown,
+    SplitRight, TERMINAL_KEY_CONTEXT, TerminalPane, TerminalPaneEvent, TogglePaneZoom,
 };
+
+#[derive(Debug, Error)]
+/// A typed rejection while coordinating Remote lifecycle across one Window's Pane hierarchy.
+pub(crate) enum RemotePaneHostLifecycleError {
+    #[error("Pane {pane_id} cannot change remote session lifecycle: {source}")]
+    Pane {
+        pane_id: PaneId,
+        #[source]
+        source: RemotePaneLifecycleError,
+    },
+    #[error("the prepared restart belongs to Window {prepared}, not Window {current}")]
+    WindowChanged {
+        prepared: WindowId,
+        current: WindowId,
+    },
+    #[error("Pane {0} changed after remote restart preparation")]
+    PaneChanged(PaneId),
+}
+
+/// Move-only restart reservations for every Pane in one unchanged Window hierarchy.
+///
+/// The token is valid only while Window, Pane, and session-epoch identities remain unchanged.
+pub(crate) struct PreparedPaneHostRemoteRestart {
+    window_id: WindowId,
+    panes: Vec<(PaneId, Entity<TerminalPane>, PreparedRemotePaneRestart)>,
+}
 use crate::domain::{
     ClosePaneOutcome, FocusDirection, PaneId, PaneNodeRef, PaneSize, PaneTreeRef, SplitAxis,
     SplitId, TerminalWindow, WindowId, WorkspaceDirectoryIdentity, WorkspaceId, ZoomState,
 };
 use crate::terminal::{
-    NativeServiceOrigin, NativeServiceStatus, SelectionCopy, WorkspaceTerminalSessionFactory,
+    NativeServiceOrigin, NativeServiceStatus, PreparedWorkspaceTerminalLaunch, SelectionCopy,
+    WorkspaceChildLaunchValidation, WorkspaceTerminalSessionFactory,
 };
 use crate::theme::{ACTIVE_THEME, Color};
 use gpui::prelude::*;
@@ -84,12 +114,29 @@ pub(crate) struct PaneHost {
     native_service_hierarchy_generation: u64,
     native_service_focus_signature: Option<(bool, PaneId, Option<TerminalFocusBlocker>)>,
     close_window_requested: bool,
+    remote_disconnected_generation: Option<u64>,
+    child_launch_generation: u64,
 }
 
 impl PaneHost {
+    #[cfg(test)]
     pub(crate) fn new(
         window_id: WindowId,
         session_factory: WorkspaceTerminalSessionFactory,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let prepared_launch = match session_factory.prepare_child_launch() {
+            Ok(prepared_launch) => prepared_launch,
+            Err(error) => panic!("test PaneHost channel preparation failed: {error}"),
+        };
+        Self::new_with_prepared_launch(window_id, session_factory, prepared_launch, window, cx)
+    }
+
+    pub(crate) fn new_with_prepared_launch(
+        window_id: WindowId,
+        session_factory: WorkspaceTerminalSessionFactory,
+        prepared_launch: PreparedWorkspaceTerminalLaunch,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -100,7 +147,13 @@ impl PaneHost {
             }
         };
         let terminal_window = TerminalWindow::new(window_id, minimum_pane_size, |pane_id| {
-            Self::create_terminal(pane_id, session_factory.clone(), window, cx)
+            Self::create_terminal(
+                pane_id,
+                session_factory.clone(),
+                prepared_launch,
+                window,
+                cx,
+            )
         });
         let initial_pane_id = terminal_window.focused_pane_id();
         let Some(initial_terminal) = terminal_window.terminal(initial_pane_id) else {
@@ -122,16 +175,21 @@ impl PaneHost {
             native_service_hierarchy_generation: 0,
             native_service_focus_signature: None,
             close_window_requested: false,
+            remote_disconnected_generation: None,
+            child_launch_generation: 0,
         }
     }
 
     fn create_terminal(
         pane_id: PaneId,
         session_factory: WorkspaceTerminalSessionFactory,
+        prepared_launch: PreparedWorkspaceTerminalLaunch,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Entity<TerminalPane> {
-        let terminal = cx.new(|cx| TerminalPane::new(session_factory, window, cx));
+        let terminal = cx.new(|cx| {
+            TerminalPane::new_with_prepared_launch(session_factory, prepared_launch, window, cx)
+        });
         cx.subscribe_in(
             &terminal,
             window,
@@ -333,9 +391,216 @@ impl PaneHost {
         }
     }
 
+    /// Atomically marks every Pane in this Window disconnected for one generation.
+    ///
+    /// All Panes are prevalidated before any mutation. The Pane tree, focus, zoom, and retained
+    /// presentations remain intact, while new child launches and terminal input are blocked.
+    pub(crate) fn disconnect_remote(
+        &mut self,
+        generation: u64,
+        cx: &mut Context<Self>,
+    ) -> Result<(), RemotePaneHostLifecycleError> {
+        self.can_disconnect_remote(generation, cx)?;
+        for (_, terminal) in self.terminal_window.terminals_with_ids() {
+            terminal.update(cx, |terminal, cx| {
+                terminal
+                    .disconnect_remote(generation, cx)
+                    .expect("prevalidated remote disconnect must remain legal")
+            });
+        }
+        self.remote_disconnected_generation = Some(generation);
+        self.child_launch_generation = self.child_launch_generation.wrapping_add(1);
+        self.sync_terminal_focus(cx);
+        Ok(())
+    }
+
+    /// Prevalidates a hierarchy-wide disconnect without mutating any Pane.
+    pub(crate) fn can_disconnect_remote(
+        &self,
+        generation: u64,
+        cx: &App,
+    ) -> Result<(), RemotePaneHostLifecycleError> {
+        for (pane_id, terminal) in self.terminal_window.terminals_with_ids() {
+            terminal
+                .read(cx)
+                .can_disconnect_remote(generation)
+                .map_err(|source| RemotePaneHostLifecycleError::Pane { pane_id, source })?;
+        }
+        Ok(())
+    }
+
+    /// Binds one already-reserved launch to every existing Pane without mutating the hierarchy.
+    ///
+    /// The launch count and Pane identities must match exactly. Any failure drops the aggregate
+    /// token and leaves all Panes disconnected and unchanged.
+    pub(crate) fn prepare_remote_restart(
+        &self,
+        session_factory: WorkspaceTerminalSessionFactory,
+        generation: u64,
+        prepared_launches: Vec<PreparedWorkspaceTerminalLaunch>,
+        cx: &App,
+    ) -> Result<PreparedPaneHostRemoteRestart, RemotePaneHostLifecycleError> {
+        if self.terminal_window.pane_count() != prepared_launches.len() {
+            return Err(RemotePaneHostLifecycleError::PaneChanged(
+                self.terminal_window.focused_pane_id(),
+            ));
+        }
+        let mut panes = Vec::with_capacity(self.terminal_window.pane_count());
+        for ((pane_id, terminal), prepared_launch) in self
+            .terminal_window
+            .terminals_with_ids()
+            .zip(prepared_launches)
+        {
+            let prepared = terminal
+                .read(cx)
+                .prepare_remote_restart(session_factory.clone(), generation, prepared_launch)
+                .map_err(|source| RemotePaneHostLifecycleError::Pane { pane_id, source })?;
+            panes.push((pane_id, terminal.clone(), prepared));
+        }
+        Ok(PreparedPaneHostRemoteRestart {
+            window_id: self.terminal_window.id(),
+            panes,
+        })
+    }
+
+    /// Revalidates every prepared Pane restart against the current Window hierarchy.
+    pub(crate) fn can_commit_remote_restart(
+        &self,
+        prepared: &PreparedPaneHostRemoteRestart,
+        cx: &App,
+    ) -> Result<(), RemotePaneHostLifecycleError> {
+        if self.terminal_window.id() != prepared.window_id {
+            return Err(RemotePaneHostLifecycleError::WindowChanged {
+                prepared: prepared.window_id,
+                current: self.terminal_window.id(),
+            });
+        }
+        if self.terminal_window.pane_count() != prepared.panes.len() {
+            return Err(RemotePaneHostLifecycleError::PaneChanged(
+                self.terminal_window.focused_pane_id(),
+            ));
+        }
+        for (pane_id, terminal, pane_restart) in &prepared.panes {
+            let Some(current) = self.terminal_window.terminal(*pane_id) else {
+                return Err(RemotePaneHostLifecycleError::PaneChanged(*pane_id));
+            };
+            if current.entity_id() != terminal.entity_id() {
+                return Err(RemotePaneHostLifecycleError::PaneChanged(*pane_id));
+            }
+            terminal
+                .read(cx)
+                .can_commit_remote_restart(pane_restart)
+                .map_err(|source| RemotePaneHostLifecycleError::Pane {
+                    pane_id: *pane_id,
+                    source,
+                })?;
+        }
+        Ok(())
+    }
+
+    /// Commits every prevalidated Pane restart in place after aggregate preparation succeeds.
+    ///
+    /// Window, Pane-tree, focus, and zoom identities are preserved. Once commit begins, later
+    /// Terminal Session startup failure belongs to its individual Pane rather than rolling back
+    /// already committed siblings.
+    pub(crate) fn commit_remote_restart(
+        &mut self,
+        prepared: PreparedPaneHostRemoteRestart,
+        session_factory: WorkspaceTerminalSessionFactory,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Result<(), RemotePaneHostLifecycleError> {
+        self.can_commit_remote_restart(&prepared, cx)?;
+        for (pane_id, terminal, pane_restart) in prepared.panes {
+            terminal.update(cx, |terminal, cx| {
+                terminal
+                    .commit_remote_restart(pane_restart, window, cx)
+                    .unwrap_or_else(|error| {
+                        panic!("prevalidated Pane {pane_id} restart commit failed: {error}")
+                    })
+            });
+        }
+        self.session_factory = session_factory;
+        self.remote_disconnected_generation = None;
+        self.child_launch_generation = self.child_launch_generation.wrapping_add(1);
+        self.sync_terminal_focus(cx);
+        cx.emit(PaneHostEvent::PresentationChanged {
+            window_id: self.terminal_window.id(),
+        });
+        cx.notify();
+        Ok(())
+    }
+
     #[cfg(test)]
     pub(crate) const fn focused_pane_id(&self) -> PaneId {
         self.terminal_window.focused_pane_id()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pane_entity_ids(&self) -> Vec<(PaneId, gpui::EntityId)> {
+        self.terminal_window
+            .terminals_with_ids()
+            .map(|(pane_id, terminal)| (pane_id, terminal.entity_id()))
+            .collect()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn layout_signature(&self) -> String {
+        fn encode(tree: PaneTreeRef<'_>, signature: &mut String) {
+            match tree.node() {
+                PaneNodeRef::Leaf { pane_id } => {
+                    signature.push_str(&format!("pane:{}", pane_id.get()));
+                }
+                PaneNodeRef::Split {
+                    split_id,
+                    axis,
+                    ratio,
+                    first,
+                    second,
+                } => {
+                    signature.push_str(&format!("split:{}:{axis:?}:{ratio}(", split_id.get()));
+                    encode(first, signature);
+                    signature.push(',');
+                    encode(second, signature);
+                    signature.push(')');
+                }
+            }
+        }
+
+        let mut signature = String::new();
+        encode(self.terminal_window.root(), &mut signature);
+        signature
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn remote_disconnected_generation(&self) -> Option<u64> {
+        self.remote_disconnected_generation
+    }
+
+    #[cfg(test)]
+    pub(crate) fn focused_terminal_remote_state(&self, cx: &App) -> (bool, bool) {
+        self.terminal_window
+            .terminal(self.terminal_window.focused_pane_id())
+            .map(|terminal| {
+                let terminal = terminal.read(cx);
+                terminal.remote_session_state()
+            })
+            .unwrap_or((false, false))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn terminal_restart_states(
+        &self,
+        cx: &App,
+    ) -> Vec<(PaneId, bool, Option<&'static str>)> {
+        self.terminal_window
+            .terminals_with_ids()
+            .map(|(pane_id, terminal)| {
+                let terminal = terminal.read(cx);
+                let (session_attached, failure_operation) = terminal.restart_state();
+                (pane_id, session_attached, failure_operation)
+            })
+            .collect()
     }
 
     #[cfg(test)]
@@ -404,6 +669,10 @@ impl PaneHost {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.remote_disconnected_generation.is_some() {
+            cx.emit(RemoteChildLaunchUnavailable::ConnectionUnavailable);
+            return;
+        }
         let Some(target_bounds) = self.pane_bounds.get(&target_pane_id).copied() else {
             eprintln!("cannot split Pane {target_pane_id} before its bounds are measured");
             return;
@@ -412,18 +681,24 @@ impl PaneHost {
             eprintln!("cannot split Pane {target_pane_id} with invalid measured bounds");
             return;
         };
-        match self.session_factory.validate_working_directory() {
-            Ok(directory) => cx.emit(PaneHostEvent::DirectoryAvailable {
-                identity: directory.identity(),
-            }),
+        match self.session_factory.validate_child_launch() {
+            Ok(WorkspaceChildLaunchValidation::Local(directory)) => {
+                cx.emit(PaneHostEvent::DirectoryAvailable {
+                    identity: directory.identity(),
+                });
+            }
+            Ok(WorkspaceChildLaunchValidation::Remote) => {}
             Err(error) => {
                 let reason = error.to_string();
                 cx.emit(PaneHostEvent::DirectoryUnavailable {
                     reason: reason.clone(),
                 });
+                let directory = self.session_factory.local_working_directory().map_or_else(
+                    || "the local Workspace Directory".to_owned(),
+                    |path| path.display().to_string(),
+                );
                 let detail = format!(
-                    "Cannot create a Pane at {} because {reason}. Restore the directory or use another Workspace.",
-                    self.session_factory.working_directory().display()
+                    "Cannot create a Pane at {directory} because {reason}. Restore the directory or use another Workspace."
                 );
                 drop(window.prompt(
                     PromptLevel::Warning,
@@ -435,13 +710,90 @@ impl PaneHost {
                 return;
             }
         }
+        if let Some(revalidation) = self.session_factory.revalidate_remote_child_launch() {
+            self.child_launch_generation = self.child_launch_generation.wrapping_add(1);
+            let child_launch_generation = self.child_launch_generation;
+            let session_factory = self.session_factory.clone();
+            cx.spawn_in(window, async move |host, cx| {
+                let revalidation = revalidation.await;
+                let _ = host.update_in(cx, |host, window, cx| {
+                    if host.remote_disconnected_generation.is_some() {
+                        cx.emit(RemoteChildLaunchUnavailable::Cancelled);
+                        return;
+                    }
+                    if host.child_launch_generation != child_launch_generation {
+                        cx.emit(RemoteChildLaunchUnavailable::Stale);
+                        return;
+                    }
+                    if let Err(error) = revalidation {
+                        cx.emit(RemoteChildLaunchUnavailable::from(error));
+                        return;
+                    }
+                    let prepared_launch = match session_factory.prepare_child_launch() {
+                        Ok(prepared_launch) => prepared_launch,
+                        Err(_) => {
+                            cx.emit(RemoteChildLaunchUnavailable::ConnectionUnavailable);
+                            return;
+                        }
+                    };
+                    let Some(current_bounds) = host.pane_bounds.get(&target_pane_id).copied()
+                    else {
+                        return;
+                    };
+                    let Ok(current_size) = pane_size(current_bounds) else {
+                        return;
+                    };
+                    if current_size != target_size {
+                        return;
+                    }
+                    host.split_pane_with_prepared_launch(
+                        target_pane_id,
+                        axis,
+                        target_size,
+                        prepared_launch,
+                        window,
+                        cx,
+                    );
+                });
+            })
+            .detach();
+            return;
+        }
+        let prepared_launch = match self.session_factory.prepare_child_launch() {
+            Ok(prepared_launch) => prepared_launch,
+            Err(_) => {
+                cx.emit(RemoteChildLaunchUnavailable::ConnectionUnavailable);
+                return;
+            }
+        };
+        self.split_pane_with_prepared_launch(
+            target_pane_id,
+            axis,
+            target_size,
+            prepared_launch,
+            window,
+            cx,
+        );
+    }
+
+    fn split_pane_with_prepared_launch(
+        &mut self,
+        target_pane_id: PaneId,
+        axis: SplitAxis,
+        target_size: PaneSize,
+        prepared_launch: PreparedWorkspaceTerminalLaunch,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let session_factory = self.session_factory.clone();
         let result = self.terminal_window.split_pane(
             target_pane_id,
             axis,
             target_size,
             DIVIDER_SIZE,
-            |new_pane_id| Self::create_terminal(new_pane_id, session_factory, window, cx),
+            |new_pane_id| {
+                Self::create_terminal(new_pane_id, session_factory, prepared_launch, window, cx)
+            },
         );
 
         match result {
@@ -468,6 +820,11 @@ impl PaneHost {
 
     fn close_focused(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.close_pane(self.terminal_window.focused_pane_id(), window, cx);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn close_focused_for_test(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_focused(window, cx);
     }
 
     fn close_pane(&mut self, pane_id: PaneId, window: &mut Window, cx: &mut Context<Self>) {
@@ -942,6 +1299,7 @@ impl PaneHost {
 }
 
 impl EventEmitter<PaneHostEvent> for PaneHost {}
+impl EventEmitter<RemoteChildLaunchUnavailable> for PaneHost {}
 
 fn collect_pane_order(tree: PaneTreeRef<'_>, panes: &mut Vec<PaneId>) {
     match tree.node() {
@@ -1207,10 +1565,12 @@ fn gpui_color(color: Color) -> gpui::Rgba {
 
 #[cfg(test)]
 mod tests {
-    use std::cell::Cell;
+    use std::cell::{Cell, RefCell};
     use std::path::PathBuf;
     use std::rc::Rc;
     use std::sync::Arc;
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     use gpui::{
         Modifiers, MouseButton, ScrollDelta, ScrollWheelEvent, TestAppContext, TouchPhase,
@@ -1218,20 +1578,135 @@ mod tests {
     };
 
     use super::*;
+    use crate::ssh::command::{SshCommandContext, ValidatedRemoteShellCommand};
     use crate::terminal::testing::{
         RecordedSessionCommand, TestTerminalSessionFactory, TestTerminalSessionRecords,
     };
     use crate::terminal::{
+        RemoteChannelRevalidationError, RemoteChannelUnavailable, RemoteTerminalChannelProvider,
         ScreenSnapshot, ScrollbarSnapshot, SessionEvent, SessionExit, TerminalSessionFactory,
     };
+    use crate::ui::RemoteChildLaunchUnavailable;
+
+    struct RemoteLaunchEventHarness {
+        host: Entity<PaneHost>,
+        events: Rc<RefCell<Vec<RemoteChildLaunchUnavailable>>>,
+    }
+
+    impl Render for RemoteLaunchEventHarness {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            self.host.clone()
+        }
+    }
+
+    struct RevalidatingRemoteChannelProvider {
+        grant: AtomicBool,
+        revalidations: AtomicUsize,
+        preparations: AtomicUsize,
+        revalidation_error: Mutex<Option<RemoteChannelRevalidationError>>,
+        command_context: SshCommandContext,
+    }
+
+    impl RevalidatingRemoteChannelProvider {
+        fn new(destination: crate::domain::SshDestination) -> Self {
+            Self {
+                grant: AtomicBool::new(true),
+                revalidations: AtomicUsize::new(0),
+                preparations: AtomicUsize::new(0),
+                revalidation_error: Mutex::new(None),
+                command_context: SshCommandContext::new(
+                    PathBuf::from("/private/config/spaceterm/ssh_config"),
+                    destination,
+                    PathBuf::from("/private/runtime/spaceterm/master.sock"),
+                )
+                .unwrap(),
+            }
+        }
+
+        fn fail_revalidation_with(&self, error: Option<RemoteChannelRevalidationError>) {
+            *self.revalidation_error.lock().unwrap() = error;
+        }
+    }
+
+    impl RemoteTerminalChannelProvider for RevalidatingRemoteChannelProvider {
+        fn is_ready(&self) -> bool {
+            true
+        }
+
+        fn revalidate(&self) -> gpui::Task<Result<(), RemoteChannelRevalidationError>> {
+            self.revalidations.fetch_add(1, Ordering::AcqRel);
+            self.grant.store(false, Ordering::Release);
+            let error = *self.revalidation_error.lock().unwrap();
+            if error.is_none() {
+                self.grant.store(true, Ordering::Release);
+            }
+            gpui::Task::ready(error.map_or(Ok(()), Err))
+        }
+
+        fn prepare(
+            &self,
+        ) -> Result<crate::ssh::command::PreparedSshPaneChannelCommand, RemoteChannelUnavailable>
+        {
+            if !self.grant.swap(false, Ordering::AcqRel) {
+                return Err(RemoteChannelUnavailable);
+            }
+            self.preparations.fetch_add(1, Ordering::AcqRel);
+            Ok(self.command_context.prepare_pane_channel(
+                ValidatedRemoteShellCommand::new("exec /bin/zsh -l".to_owned()).unwrap(),
+            ))
+        }
+    }
 
     fn test_session_factory() -> WorkspaceTerminalSessionFactory {
-        WorkspaceTerminalSessionFactory::new(
+        WorkspaceTerminalSessionFactory::new_local(
             Rc::new(
                 TestTerminalSessionFactory::new(TestTerminalSessionRecords::default())
                     .with_selection_copy_response(Ok(None)),
             ),
-            test_workspace_root(),
+            crate::terminal::testing::test_workspace_directory(test_workspace_root()),
+        )
+    }
+
+    fn remote_test_session_factory(
+        records: TestTerminalSessionRecords,
+    ) -> WorkspaceTerminalSessionFactory {
+        let destination = crate::domain::SshDestination::new("tester@remote".to_owned()).unwrap();
+        let command_context = Arc::new(
+            SshCommandContext::new(
+                PathBuf::from("/private/config/spaceterm/ssh_config"),
+                destination.clone(),
+                PathBuf::from("/private/runtime/spaceterm/master.sock"),
+            )
+            .unwrap(),
+        );
+        remote_test_session_factory_with_provider(
+            records,
+            destination,
+            Arc::new(move || {
+                Ok(command_context.prepare_pane_channel(
+                    ValidatedRemoteShellCommand::new("exec /bin/zsh -l".to_owned()).unwrap(),
+                ))
+            }),
+        )
+    }
+
+    fn remote_test_session_factory_with_provider(
+        records: TestTerminalSessionRecords,
+        destination: crate::domain::SshDestination,
+        provider: Arc<dyn RemoteTerminalChannelProvider>,
+    ) -> WorkspaceTerminalSessionFactory {
+        WorkspaceTerminalSessionFactory::new_remote(
+            Rc::new(TestTerminalSessionFactory::new(records)),
+            crate::domain::ValidatedWorkspaceDirectory::new(
+                PathBuf::from("/missing/local/home-is-not-a-workspace"),
+                WorkspaceDirectoryIdentity::new(71, 73),
+            ),
+            crate::terminal::metadata::RemoteTerminalMetadataContext::new(
+                destination,
+                crate::domain::RemoteWorkspaceDirectory::new("~/project".to_owned()).unwrap(),
+            ),
+            "project on remote".to_owned(),
+            provider,
         )
     }
 
@@ -1247,6 +1722,250 @@ mod tests {
             });
         });
         cx.run_until_parked();
+    }
+
+    fn remote_pane_host_with_events(
+        session_factory: WorkspaceTerminalSessionFactory,
+        cx: &mut TestAppContext,
+    ) -> (
+        Entity<PaneHost>,
+        Rc<RefCell<Vec<RemoteChildLaunchUnavailable>>>,
+        &mut VisualTestContext,
+    ) {
+        cx.update(crate::ui::init);
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let recorded_events = Rc::clone(&events);
+        let (harness, cx) = cx.add_window_view(move |window, cx| {
+            let host = cx.new(|cx| PaneHost::new(WindowId::new(1), session_factory, window, cx));
+            cx.subscribe(
+                &host,
+                move |_, _, event: &RemoteChildLaunchUnavailable, _| {
+                    recorded_events.borrow_mut().push(*event);
+                },
+            )
+            .detach();
+            RemoteLaunchEventHarness { host, events }
+        });
+        let (host, events) = harness.read_with(cx, |harness, _| {
+            (harness.host.clone(), Rc::clone(&harness.events))
+        });
+        cx.run_until_parked();
+        (host, events, cx)
+    }
+
+    #[gpui::test]
+    fn remote_split_should_emit_each_typed_revalidation_failure_without_mutation(
+        cx: &mut TestAppContext,
+    ) {
+        let records = TestTerminalSessionRecords::default();
+        let destination = crate::domain::SshDestination::new("tester@remote".to_owned()).unwrap();
+        let provider = Arc::new(RevalidatingRemoteChannelProvider::new(destination.clone()));
+        let session_factory = remote_test_session_factory_with_provider(
+            records.clone(),
+            destination,
+            Arc::clone(&provider) as Arc<dyn RemoteTerminalChannelProvider>,
+        );
+        let (host, events, cx) = remote_pane_host_with_events(session_factory, cx);
+        let before = host.read_with(cx, |host, _| {
+            (
+                host.pane_count(),
+                host.focused_pane_id(),
+                host.layout_signature(),
+            )
+        });
+
+        for error in [
+            RemoteChannelRevalidationError::ConnectionUnavailable,
+            RemoteChannelRevalidationError::DirectoryUnavailable,
+            RemoteChannelRevalidationError::IdentityChanged,
+        ] {
+            provider.fail_revalidation_with(Some(error));
+            split_test_pane(&host, before.1, SplitAxis::Horizontal, cx);
+        }
+
+        assert_eq!(
+            events.borrow().as_slice(),
+            [
+                RemoteChildLaunchUnavailable::ConnectionUnavailable,
+                RemoteChildLaunchUnavailable::DirectoryUnavailable,
+                RemoteChildLaunchUnavailable::IdentityChanged,
+            ]
+        );
+        assert_eq!(
+            host.read_with(cx, |host, _| {
+                (
+                    host.pane_count(),
+                    host.focused_pane_id(),
+                    host.layout_signature(),
+                )
+            }),
+            before
+        );
+        assert_eq!(records.starts().len(), 1);
+    }
+
+    #[gpui::test]
+    fn superseded_and_cancelled_remote_splits_should_emit_once_without_mutation(
+        cx: &mut TestAppContext,
+    ) {
+        let records = TestTerminalSessionRecords::default();
+        let destination = crate::domain::SshDestination::new("tester@remote".to_owned()).unwrap();
+        let provider = Arc::new(RevalidatingRemoteChannelProvider::new(destination.clone()));
+        let session_factory = remote_test_session_factory_with_provider(
+            records.clone(),
+            destination,
+            Arc::clone(&provider) as Arc<dyn RemoteTerminalChannelProvider>,
+        );
+        let (host, events, cx) = remote_pane_host_with_events(session_factory, cx);
+        let before = host.read_with(cx, |host, _| {
+            (
+                host.pane_count(),
+                host.focused_pane_id(),
+                host.layout_signature(),
+            )
+        });
+
+        cx.update(|window, cx| {
+            host.update(cx, |host, cx| {
+                host.split_pane(before.1, SplitAxis::Horizontal, window, cx);
+                host.child_launch_generation = host.child_launch_generation.wrapping_add(1);
+            });
+        });
+        cx.run_until_parked();
+
+        cx.update(|window, cx| {
+            host.update(cx, |host, cx| {
+                host.split_pane(before.1, SplitAxis::Horizontal, window, cx);
+                host.disconnect_remote(1, cx).unwrap();
+            });
+        });
+        cx.run_until_parked();
+
+        assert_eq!(
+            events.borrow().as_slice(),
+            [
+                RemoteChildLaunchUnavailable::Stale,
+                RemoteChildLaunchUnavailable::Cancelled,
+            ]
+        );
+        assert_eq!(
+            host.read_with(cx, |host, _| {
+                (
+                    host.pane_count(),
+                    host.focused_pane_id(),
+                    host.layout_signature(),
+                )
+            }),
+            before
+        );
+        assert_eq!(records.starts().len(), 1);
+    }
+
+    #[gpui::test]
+    fn remote_split_skips_local_workspace_validation_and_preserves_launch_context(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(crate::ui::init);
+        let records = TestTerminalSessionRecords::default();
+        let session_factory = remote_test_session_factory(records.clone());
+        let (host, cx) = cx.add_window_view(|window, cx| {
+            PaneHost::new(WindowId::new(1), session_factory, window, cx)
+        });
+        cx.run_until_parked();
+
+        split_test_pane(&host, PaneId::new(1), SplitAxis::Horizontal, cx);
+
+        assert_eq!(host.read_with(cx, |host, _| host.pane_count()), 2);
+        assert_eq!(records.starts().len(), 2);
+        assert!(records.starts().iter().all(|start| {
+            start.remote_launch_plan().is_some_and(|plan| {
+                plan.destination().as_str() == "tester@remote"
+                    && plan.remote_directory().as_str() == "~/project"
+            })
+        }));
+    }
+
+    #[gpui::test]
+    fn remote_split_should_revalidate_before_mutating_the_pane_tree(cx: &mut TestAppContext) {
+        cx.update(crate::ui::init);
+        let records = TestTerminalSessionRecords::default();
+        let destination = crate::domain::SshDestination::new("tester@remote".to_owned()).unwrap();
+        let provider = Arc::new(RevalidatingRemoteChannelProvider::new(destination.clone()));
+        let session_factory = remote_test_session_factory_with_provider(
+            records.clone(),
+            destination,
+            Arc::clone(&provider) as Arc<dyn RemoteTerminalChannelProvider>,
+        );
+        let (host, cx) = cx.add_window_view(|window, cx| {
+            PaneHost::new(WindowId::new(1), session_factory, window, cx)
+        });
+        cx.run_until_parked();
+        let focused = host.read_with(cx, |host, _| host.focused_pane_id());
+
+        provider.fail_revalidation_with(Some(RemoteChannelRevalidationError::IdentityChanged));
+        split_test_pane(&host, focused, SplitAxis::Horizontal, cx);
+
+        assert_eq!(host.read_with(cx, |host, _| host.pane_count()), 1);
+        assert_eq!(
+            host.read_with(cx, |host, _| host.focused_pane_id()),
+            focused
+        );
+        assert_eq!(records.starts().len(), 1);
+        assert_eq!(provider.preparations.load(Ordering::Acquire), 1);
+        assert_eq!(provider.revalidations.load(Ordering::Acquire), 1);
+
+        provider.fail_revalidation_with(None);
+        split_test_pane(&host, focused, SplitAxis::Horizontal, cx);
+
+        assert_eq!(host.read_with(cx, |host, _| host.pane_count()), 2);
+        assert_eq!(records.starts().len(), 2);
+        assert_eq!(provider.preparations.load(Ordering::Acquire), 2);
+        assert_eq!(provider.revalidations.load(Ordering::Acquire), 2);
+    }
+
+    #[gpui::test]
+    fn remote_split_should_leave_hierarchy_unchanged_when_channel_reservation_races_master_death(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(crate::ui::init);
+        let records = TestTerminalSessionRecords::default();
+        let destination = crate::domain::SshDestination::new("tester@remote".to_owned()).unwrap();
+        let command_context = Arc::new(
+            SshCommandContext::new(
+                PathBuf::from("/private/config/spaceterm/ssh_config"),
+                destination.clone(),
+                PathBuf::from("/private/runtime/spaceterm/master.sock"),
+            )
+            .unwrap(),
+        );
+        let preparations = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let provider = {
+            let preparations = Arc::clone(&preparations);
+            Arc::new(move || {
+                if preparations.fetch_add(1, std::sync::atomic::Ordering::AcqRel) == 0 {
+                    Ok(command_context.prepare_pane_channel(
+                        ValidatedRemoteShellCommand::new("exec /bin/zsh -l".to_owned()).unwrap(),
+                    ))
+                } else {
+                    Err(RemoteChannelUnavailable)
+                }
+            })
+        };
+        let session_factory =
+            remote_test_session_factory_with_provider(records.clone(), destination, provider);
+        let (host, cx) = cx.add_window_view(|window, cx| {
+            PaneHost::new(WindowId::new(1), session_factory, window, cx)
+        });
+        cx.run_until_parked();
+
+        split_test_pane(&host, PaneId::new(1), SplitAxis::Horizontal, cx);
+
+        assert_eq!(
+            host.read_with(cx, |host, _| (host.pane_count(), host.focused_pane_id())),
+            (1, PaneId::new(1))
+        );
+        assert_eq!(records.starts().len(), 1);
+        assert_eq!(preparations.load(std::sync::atomic::Ordering::Acquire), 2);
     }
 
     fn four_pane_host(cx: &mut TestAppContext) -> (Entity<PaneHost>, &mut VisualTestContext) {
@@ -1379,8 +2098,10 @@ mod tests {
         let records = TestTerminalSessionRecords::default();
         let session_factory: Rc<dyn TerminalSessionFactory> =
             Rc::new(TestTerminalSessionFactory::new(records.clone()));
-        let session_factory =
-            WorkspaceTerminalSessionFactory::new(session_factory, test_workspace_root());
+        let session_factory = WorkspaceTerminalSessionFactory::new_local(
+            session_factory,
+            crate::terminal::testing::test_workspace_directory(test_workspace_root()),
+        );
         let (host, cx) = cx.add_window_view(|window, cx| {
             PaneHost::new(WindowId::new(1), session_factory, window, cx)
         });
@@ -1445,8 +2166,10 @@ mod tests {
         let records = TestTerminalSessionRecords::default();
         let session_factory: Rc<dyn TerminalSessionFactory> =
             Rc::new(TestTerminalSessionFactory::new(records.clone()));
-        let session_factory =
-            WorkspaceTerminalSessionFactory::new(session_factory, workspace_root.clone());
+        let session_factory = WorkspaceTerminalSessionFactory::new_local(
+            session_factory,
+            crate::terminal::testing::test_workspace_directory(workspace_root.clone()),
+        );
         let (host, cx) = cx.add_window_view(|window, cx| {
             PaneHost::new(WindowId::new(1), session_factory, window, cx)
         });
@@ -1462,7 +2185,13 @@ mod tests {
             records
                 .starts()
                 .into_iter()
-                .map(|start| start.working_directory)
+                .map(|start| {
+                    start
+                        .local_working_directory()
+                        .expect("Pane starts must remain local")
+                        .path()
+                        .to_path_buf()
+                })
                 .collect::<Vec<_>>(),
             vec![workspace_root.clone(), workspace_root]
         );
@@ -1525,8 +2254,10 @@ mod tests {
         let records = TestTerminalSessionRecords::default();
         let session_factory: Rc<dyn TerminalSessionFactory> =
             Rc::new(TestTerminalSessionFactory::new(records.clone()));
-        let session_factory =
-            WorkspaceTerminalSessionFactory::new(session_factory, test_workspace_root());
+        let session_factory = WorkspaceTerminalSessionFactory::new_local(
+            session_factory,
+            crate::terminal::testing::test_workspace_directory(test_workspace_root()),
+        );
         let (host, cx) = cx.add_window_view(|window, cx| {
             PaneHost::new(WindowId::new(1), session_factory, window, cx)
         });
@@ -1572,8 +2303,10 @@ mod tests {
         let records = TestTerminalSessionRecords::default();
         let session_factory: Rc<dyn TerminalSessionFactory> =
             Rc::new(TestTerminalSessionFactory::new(records.clone()));
-        let session_factory =
-            WorkspaceTerminalSessionFactory::new(session_factory, test_workspace_root());
+        let session_factory = WorkspaceTerminalSessionFactory::new_local(
+            session_factory,
+            crate::terminal::testing::test_workspace_directory(test_workspace_root()),
+        );
         let (host, cx) = cx.add_window_view(|window, cx| {
             PaneHost::new(WindowId::new(1), session_factory, window, cx)
         });
@@ -1617,8 +2350,10 @@ mod tests {
         let records = TestTerminalSessionRecords::default();
         let session_factory: Rc<dyn TerminalSessionFactory> =
             Rc::new(TestTerminalSessionFactory::new(records.clone()));
-        let session_factory =
-            WorkspaceTerminalSessionFactory::new(session_factory, test_workspace_root());
+        let session_factory = WorkspaceTerminalSessionFactory::new_local(
+            session_factory,
+            crate::terminal::testing::test_workspace_directory(test_workspace_root()),
+        );
         let (host, cx) = cx.add_window_view(|window, cx| {
             PaneHost::new(WindowId::new(1), session_factory, window, cx)
         });
@@ -1673,8 +2408,10 @@ mod tests {
         let records = TestTerminalSessionRecords::default();
         let session_factory: Rc<dyn TerminalSessionFactory> =
             Rc::new(TestTerminalSessionFactory::new(records.clone()).with_fallback_title("zsh"));
-        let session_factory =
-            WorkspaceTerminalSessionFactory::new(session_factory, test_workspace_root());
+        let session_factory = WorkspaceTerminalSessionFactory::new_local(
+            session_factory,
+            crate::terminal::testing::test_workspace_directory(test_workspace_root()),
+        );
         let (host, cx) = cx.add_window_view(|window, cx| {
             PaneHost::new(WindowId::new(1), session_factory, window, cx)
         });
@@ -1788,8 +2525,10 @@ mod tests {
         let records = TestTerminalSessionRecords::default();
         let session_factory: Rc<dyn TerminalSessionFactory> =
             Rc::new(TestTerminalSessionFactory::new(records.clone()).with_fallback_title("zsh"));
-        let session_factory =
-            WorkspaceTerminalSessionFactory::new(session_factory, test_workspace_root());
+        let session_factory = WorkspaceTerminalSessionFactory::new_local(
+            session_factory,
+            crate::terminal::testing::test_workspace_directory(test_workspace_root()),
+        );
         let (host, cx) = cx.add_window_view(|window, cx| {
             PaneHost::new(WindowId::new(1), session_factory, window, cx)
         });
@@ -1828,8 +2567,10 @@ mod tests {
         let records = TestTerminalSessionRecords::default();
         let session_factory: Rc<dyn TerminalSessionFactory> =
             Rc::new(TestTerminalSessionFactory::new(records.clone()));
-        let session_factory =
-            WorkspaceTerminalSessionFactory::new(session_factory, test_workspace_root());
+        let session_factory = WorkspaceTerminalSessionFactory::new_local(
+            session_factory,
+            crate::terminal::testing::test_workspace_directory(test_workspace_root()),
+        );
         let (host, cx) = cx.add_window_view(|window, cx| {
             PaneHost::new(WindowId::new(1), session_factory, window, cx)
         });
@@ -1865,8 +2606,10 @@ mod tests {
         let records = TestTerminalSessionRecords::default();
         let session_factory: Rc<dyn TerminalSessionFactory> =
             Rc::new(TestTerminalSessionFactory::new(records.clone()));
-        let session_factory =
-            WorkspaceTerminalSessionFactory::new(session_factory, test_workspace_root());
+        let session_factory = WorkspaceTerminalSessionFactory::new_local(
+            session_factory,
+            crate::terminal::testing::test_workspace_directory(test_workspace_root()),
+        );
         let (host, cx) = cx.add_window_view(|window, cx| {
             PaneHost::new(WindowId::new(1), session_factory, window, cx)
         });
@@ -1956,8 +2699,10 @@ mod tests {
         let records = TestTerminalSessionRecords::default();
         let session_factory: Rc<dyn TerminalSessionFactory> =
             Rc::new(TestTerminalSessionFactory::new(records.clone()));
-        let session_factory =
-            WorkspaceTerminalSessionFactory::new(session_factory, test_workspace_root());
+        let session_factory = WorkspaceTerminalSessionFactory::new_local(
+            session_factory,
+            crate::terminal::testing::test_workspace_directory(test_workspace_root()),
+        );
         let (host, cx) = cx.add_window_view(|window, cx| {
             PaneHost::new(WindowId::new(1), session_factory, window, cx)
         });
@@ -1992,8 +2737,10 @@ mod tests {
         let records = TestTerminalSessionRecords::default();
         let session_factory: Rc<dyn TerminalSessionFactory> =
             Rc::new(TestTerminalSessionFactory::new(records.clone()));
-        let session_factory =
-            WorkspaceTerminalSessionFactory::new(session_factory, test_workspace_root());
+        let session_factory = WorkspaceTerminalSessionFactory::new_local(
+            session_factory,
+            crate::terminal::testing::test_workspace_directory(test_workspace_root()),
+        );
         let (host, cx) = cx.add_window_view(|window, cx| {
             PaneHost::new(WindowId::new(1), session_factory, window, cx)
         });
@@ -2046,8 +2793,10 @@ mod tests {
         let records = TestTerminalSessionRecords::default();
         let session_factory: Rc<dyn TerminalSessionFactory> =
             Rc::new(TestTerminalSessionFactory::new(records.clone()));
-        let session_factory =
-            WorkspaceTerminalSessionFactory::new(session_factory, test_workspace_root());
+        let session_factory = WorkspaceTerminalSessionFactory::new_local(
+            session_factory,
+            crate::terminal::testing::test_workspace_directory(test_workspace_root()),
+        );
         let (host, cx) = cx.add_window_view(|window, cx| {
             PaneHost::new(WindowId::new(1), session_factory, window, cx)
         });
@@ -2085,8 +2834,10 @@ mod tests {
         let records = TestTerminalSessionRecords::default();
         let session_factory: Rc<dyn TerminalSessionFactory> =
             Rc::new(TestTerminalSessionFactory::new(records.clone()));
-        let session_factory =
-            WorkspaceTerminalSessionFactory::new(session_factory, test_workspace_root());
+        let session_factory = WorkspaceTerminalSessionFactory::new_local(
+            session_factory,
+            crate::terminal::testing::test_workspace_directory(test_workspace_root()),
+        );
         let (host, cx) = cx.add_window_view(|window, cx| {
             PaneHost::new(WindowId::new(1), session_factory, window, cx)
         });
@@ -2151,8 +2902,10 @@ mod tests {
         let records = TestTerminalSessionRecords::default();
         let session_factory: Rc<dyn TerminalSessionFactory> =
             Rc::new(TestTerminalSessionFactory::new(records));
-        let session_factory =
-            WorkspaceTerminalSessionFactory::new(session_factory, test_workspace_root());
+        let session_factory = WorkspaceTerminalSessionFactory::new_local(
+            session_factory,
+            crate::terminal::testing::test_workspace_directory(test_workspace_root()),
+        );
         let (host, cx) = cx.add_window_view(|window, cx| {
             PaneHost::new(WindowId::new(1), session_factory, window, cx)
         });
@@ -2203,8 +2956,10 @@ mod tests {
         let records = TestTerminalSessionRecords::default();
         let session_factory: Rc<dyn TerminalSessionFactory> =
             Rc::new(TestTerminalSessionFactory::new(records.clone()));
-        let session_factory =
-            WorkspaceTerminalSessionFactory::new(session_factory, test_workspace_root());
+        let session_factory = WorkspaceTerminalSessionFactory::new_local(
+            session_factory,
+            crate::terminal::testing::test_workspace_directory(test_workspace_root()),
+        );
         let (host, cx) = cx.add_window_view(|window, cx| {
             PaneHost::new(WindowId::new(1), session_factory, window, cx)
         });
@@ -2252,8 +3007,10 @@ mod tests {
         let records = TestTerminalSessionRecords::default();
         let session_factory: Rc<dyn TerminalSessionFactory> =
             Rc::new(TestTerminalSessionFactory::new(records.clone()));
-        let session_factory =
-            WorkspaceTerminalSessionFactory::new(session_factory, test_workspace_root());
+        let session_factory = WorkspaceTerminalSessionFactory::new_local(
+            session_factory,
+            crate::terminal::testing::test_workspace_directory(test_workspace_root()),
+        );
         let (host, cx) = cx.add_window_view(|window, cx| {
             PaneHost::new(WindowId::new(1), session_factory, window, cx)
         });

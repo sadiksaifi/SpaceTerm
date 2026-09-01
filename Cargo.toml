@@ -31,6 +31,7 @@ block = "=0.1.6"
 cocoa = "=0.26.0"
 objc = "=0.2.7"
 raw-window-handle = "=0.6.2"
+zeroize = "=1.9.0"
 
 [dev-dependencies]
 gpui = { version = "=0.2.2", features = ["test-support"] }

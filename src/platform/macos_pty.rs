@@ -15,6 +15,7 @@ use thiserror::Error;
 use crate::platform::shell_integration::{
     ShellEnvironment, configured_mode, plan_shell_integration, resource_root,
 };
+use crate::ssh::command::SshCommandSpec;
 use crate::terminal::identity;
 
 const CHILD_EXIT_POLL_INTERVAL: Duration = Duration::from_millis(10);
@@ -52,6 +53,13 @@ const FOREIGN_RUNTIME_ENVIRONMENT: &[&str] = &[
     "ZELLIJ",
     "ZELLIJ_PANE_ID",
     "ZELLIJ_SESSION_NAME",
+];
+const SHELL_INTEGRATION_ENVIRONMENT: &[&str] = &[
+    "SPACETERM_BASH_ENV",
+    "SPACETERM_BASH_INJECT",
+    "SPACETERM_SHELL_INTEGRATION_VERSION",
+    "SPACETERM_SHELL_INTEGRATION_XDG_DIR",
+    "SPACETERM_ZSH_ZDOTDIR",
 ];
 
 #[cfg(test)]
@@ -439,6 +447,8 @@ pub(crate) enum PtyError {
     CloneReader(#[source] AnyError),
     #[error("failed to acquire the pseudo-terminal writer: {0}")]
     TakeWriter(#[source] AnyError),
+    #[error("the prepared SSH Pane channel is no longer available")]
+    SshChannelUnavailable,
 }
 
 pub(crate) fn spawn_user_shell(
@@ -449,6 +459,16 @@ pub(crate) fn spawn_user_shell(
     let shell = user_shell();
     let command = build_shell_command(&shell, working_directory);
     spawn_command_in_pty(size, command, &shell)
+}
+
+pub(crate) fn spawn_remote_pane_channel(
+    size: PtySize,
+    local_home: &Path,
+    command: SshCommandSpec,
+) -> Result<(SpawnedPty, PtyTerminator), PtyError> {
+    validate_working_directory(local_home)?;
+    let command = build_remote_pane_command(command, local_home)?;
+    spawn_command_in_pty(size, command, "/usr/bin/ssh")
 }
 
 fn spawn_command_in_pty(
@@ -576,6 +596,31 @@ fn build_shell_command_with_resources(
     command
 }
 
+fn build_remote_pane_command(
+    command: SshCommandSpec,
+    local_home: &Path,
+) -> Result<CommandBuilder, PtyError> {
+    let (executable, arguments, environment) = command
+        .into_pane_launch_parts()
+        .map_err(|_| PtyError::SshChannelUnavailable)?;
+    let mut command = CommandBuilder::new(executable);
+    command.args(arguments);
+    if let Some(environment) = environment {
+        environment.apply_to_pty(&mut command);
+    } else {
+        for name in FOREIGN_RUNTIME_ENVIRONMENT {
+            command.env_remove(name);
+        }
+        for name in SHELL_INTEGRATION_ENVIRONMENT {
+            command.env_remove(name);
+        }
+        command.env_remove("TERMINFO");
+        command.cwd(local_home);
+    }
+    command.env("TERM", identity::TERM_FALLBACK);
+    Ok(command)
+}
+
 fn apply_terminal_identity(command: &mut CommandBuilder, resources: &Path) {
     for name in FOREIGN_RUNTIME_ENVIRONMENT {
         command.env_remove(name);
@@ -690,6 +735,10 @@ mod tests {
     use portable_pty::{ChildKiller, ExitStatus};
 
     use super::*;
+    use crate::domain::{RemoteWorkspaceDirectory, SshDestination};
+    use crate::ssh::command::{
+        RemotePaneShellCommandBuilder, SshCommandContext, ValidatedRemoteLoginShell,
+    };
 
     #[test]
     fn hidden_input_requires_canonical_mode_without_echo() {
@@ -1035,6 +1084,39 @@ mod tests {
             Some(std::ffi::OsStr::new(env!("CARGO_PKG_VERSION")))
         );
         assert!(command.get_controlling_tty());
+    }
+
+    #[test]
+    fn remote_command_should_preserve_prepared_argv_and_use_only_local_home_as_cwd() {
+        let command_context = SshCommandContext::new(
+            PathBuf::from("/private/config/spaceterm/ssh_config"),
+            SshDestination::new("user@remote".to_owned()).unwrap(),
+            PathBuf::from("/private/runtime/spaceterm/control.sock"),
+        )
+        .unwrap();
+        let directory = RemoteWorkspaceDirectory::new("~/project".to_owned()).unwrap();
+        let login_shell = ValidatedRemoteLoginShell::new("/bin/zsh".to_owned()).unwrap();
+        let prepared = command_context.prepare_pane_channel(
+            RemotePaneShellCommandBuilder::new(&directory, &login_shell)
+                .build()
+                .unwrap(),
+        );
+        let local_home = Path::new("/Users/local");
+
+        let command = build_remote_pane_command(prepared.take().unwrap(), local_home).unwrap();
+
+        assert_eq!(command.get_argv().first().unwrap(), "/usr/bin/ssh");
+        assert_eq!(
+            command.get_argv().last().unwrap(),
+            "cd \"${HOME}\"'/project' && SPACETERM='1' COLORTERM='truecolor' exec '/bin/zsh' -l"
+        );
+        assert_eq!(command.get_cwd(), Some(&local_home.as_os_str().to_owned()));
+        assert_eq!(
+            command.get_env("TERM"),
+            Some(std::ffi::OsStr::new("xterm-256color"))
+        );
+        assert_eq!(command.get_env("TERMINFO"), None);
+        assert_eq!(command.get_env("SPACETERM_SHELL_INTEGRATION_VERSION"), None);
     }
 
     #[test]

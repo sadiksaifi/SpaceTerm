@@ -63,10 +63,10 @@ pub use resize_handle::{
 pub use text_input::{
     Copy as EditCopy, Cut as EditCut, Paste as EditPaste, Redo as EditRedo,
     SelectAll as EditSelectAll, TextInput, TextInputChangeSource, TextInputComposition,
-    TextInputEscapeBehavior, TextInputEvent, TextInputKeybindingProfile, TextInputMetrics,
-    TextInputPaint, TextInputReturnBehavior, TextInputSelection, TextInputTabBehavior,
-    TextInputTheme, TextInputValueChanged, TextInputVariant, TextInputVariants, Undo as EditUndo,
-    install_text_input_keybindings,
+    TextInputContentMode, TextInputEscapeBehavior, TextInputEvent, TextInputKeybindingProfile,
+    TextInputMetrics, TextInputPaint, TextInputReturnBehavior, TextInputSelection,
+    TextInputTabBehavior, TextInputTheme, TextInputValueChanged, TextInputVariant,
+    TextInputVariants, Undo as EditUndo, install_text_input_keybindings,
 };
 pub use tooltip::{
     Tooltip, TooltipLayer, TooltipMetrics, TooltipPaint, TooltipTarget, TooltipTargetVisibility,
