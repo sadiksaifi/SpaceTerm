@@ -2316,8 +2316,6 @@ impl Render for TextInput {
             .debug_selector(move || selector.to_string())
             .size_full()
             .min_w_0()
-            .flex()
-            .items_center()
             .key_context(KEY_CONTEXT)
             .track_focus(&self.focus_handle)
             .cursor(if self.enabled {
@@ -2418,6 +2416,8 @@ impl Render for TextInput {
                 .id(("modal-text-input-focus-anchor", entity.entity_id()))
                 .relative()
                 .size_full()
+                .flex()
+                .items_center()
                 .anchor_scroll(Some(anchor.scroll_anchor()))
                 .child(control)
                 .child(anchor.bounds_tracker(px(0.0)))
