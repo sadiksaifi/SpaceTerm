@@ -3,9 +3,9 @@
 //! The crate owns interaction and editing behavior while the application supplies all product
 //! colors and surrounding chrome from its canonical theme.
 
-mod assets;
 mod button;
 mod command_palette;
+mod icon;
 mod menu;
 mod middle_truncated_text;
 mod modal;
@@ -17,7 +17,6 @@ mod window_drag_region;
 
 use gpui::App;
 
-pub use assets::ControlAssets;
 pub use button::{
     Button, ButtonActivation, ButtonActivationSource, ButtonMetrics, ButtonPaint, ButtonRole,
     ButtonShape, ButtonSize, ButtonSizes, ButtonTheme, ButtonVariant, ButtonVariantStyle,
@@ -31,6 +30,7 @@ pub use command_palette::{
     CommandPaletteMetrics, CommandPalettePaint, CommandPaletteQuery,
     CommandPaletteReplacementFocus, CommandPaletteTheme,
 };
+pub use icon::{Icon, IconName};
 pub use menu::{
     ContextMenu, ContextMenuOpenRequest, Menu, MenuActivation, MenuActivationSource, MenuAlignment,
     MenuCloseReason, MenuEntry, MenuLifecycleEvent, MenuMetrics, MenuPaint, MenuPlacement,
@@ -126,7 +126,8 @@ impl ControlThemeCatalog {
 /// Applications install desktop policy, modal key equivalents, and text-input keybindings
 /// explicitly with [`install_modal_policy`], [`install_modal_keybindings`], and
 /// [`install_text_input_keybindings`].
-pub fn init(cx: &mut App, catalog: ControlThemeCatalog) {
+pub fn init(cx: &mut App, catalog: ControlThemeCatalog) -> gpui::Result<()> {
+    icon::register_font(cx)?;
     cx.set_global(catalog.button);
     cx.set_global(catalog.scrollbar);
     cx.set_global(catalog.resize_handle);
@@ -140,4 +141,5 @@ pub fn init(cx: &mut App, catalog: ControlThemeCatalog) {
     command_palette::init(cx);
     tooltip::init(cx);
     modal::init(cx);
+    Ok(())
 }

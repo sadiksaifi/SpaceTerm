@@ -10,17 +10,15 @@ use std::{cmp::Ordering, sync::Arc};
 
 use gpui::prelude::*;
 use gpui::{App, Context, Entity, EventEmitter, Render, Task, Window, div, px};
-use gpui_symbols::Icon;
 use spaceterm_ui::{
     Alert, AlertOutcome, CommandPalette, CommandPaletteActivationPolicy, CommandPaletteCloseReason,
     CommandPaletteConfirm, CommandPaletteEvent, CommandPaletteItem, CommandPaletteLifecycleEvent,
-    CommandPaletteMatching, CommandPaletteReplacementFocus, ModalAction, ModalActionRole, ModalId,
-    ModalPresentationHandle,
+    CommandPaletteMatching, CommandPaletteReplacementFocus, Icon, IconName, ModalAction,
+    ModalActionRole, ModalId, ModalPresentationHandle,
 };
 
 use crate::domain::{RemoteDirectoryIdentity, RemoteWorkspaceDirectory, RemoteWorkspaceValueError};
 use crate::ssh::command::ValidatedRemoteLoginShell;
-use crate::theme::{ACTIVE_THEME, Color};
 
 const HOME_DISPLAY: &str = "~/";
 const ROW_ICON_SIZE: f32 = 14.0;
@@ -1161,15 +1159,11 @@ fn remote_directory_palette_item(
     item: RemoteWorkspacePickerItemId,
     show_truncation_notice: bool,
 ) -> CommandPaletteItem<RemoteWorkspacePickerItemId> {
-    let icon_color = gpui_color(ACTIVE_THEME.icon_muted);
     let selector = format!("remote-workspace-picker-row-{}", item.row.name());
     let label = format!("{}/", item.row.name());
     let palette_item = CommandPaletteItem::new(item, label)
-        .leading_icon(move |_| {
-            Icon::new("folder")
-                .size(px(ROW_ICON_SIZE))
-                .color(icon_color)
-                .into_any_element()
+        .leading_icon(move |foreground| {
+            Icon::new(IconName::Folder, px(ROW_ICON_SIZE), foreground).into_any_element()
         })
         .debug_selector(selector);
     if show_truncation_notice {
@@ -1209,10 +1203,6 @@ fn status_for_provider_error(error: RemoteWorkspaceProviderError) -> RemoteWorks
             RemoteWorkspacePickerStatus::Other
         }
     }
-}
-
-fn gpui_color(color: Color) -> gpui::Rgba {
-    gpui::rgba(color.rgba_hex())
 }
 
 #[cfg(test)]
@@ -1427,7 +1417,8 @@ mod tests {
         Rc<RefCell<Vec<RemoteWorkspacePickerEvent>>>,
         &mut VisualTestContext,
     ) {
-        cx.update(crate::ui::init);
+        cx.update(crate::ui::init)
+            .expect("UI initialization should succeed");
         let injected: Arc<dyn RemoteWorkspaceProvider + Send + Sync> = provider;
         let events = Rc::new(RefCell::new(Vec::new()));
         let recorded_events = Rc::clone(&events);
@@ -1669,7 +1660,8 @@ mod tests {
             executor: cx.executor(),
             dropped_operations: Arc::clone(&dropped_operations),
         });
-        cx.update(crate::ui::init);
+        cx.update(crate::ui::init)
+            .expect("UI initialization should succeed");
         let injected: Arc<dyn RemoteWorkspaceProvider + Send + Sync> = provider;
         let (harness, cx) = cx.add_window_view(move |window, cx| {
             let picker = cx.new(|cx| RemoteWorkspacePicker::new(injected, window, cx));

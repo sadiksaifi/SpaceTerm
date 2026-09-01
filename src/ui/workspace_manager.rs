@@ -60,14 +60,13 @@ use gpui::{
     MouseMoveEvent, MouseUpEvent, Pixels, Render, ScrollHandle, ScrollWheelEvent, SharedString,
     Task, WeakEntity, Window, canvas, div, point, px, rgba,
 };
-use gpui_symbols::{Icon, RenderingMode, SymbolWeight};
 use spaceterm_ui::{
-    Alert, AlertIntent, Button, ButtonShape, ButtonSize, ButtonVariant, ContextMenu, IconButton,
-    MenuEntry, MenuLifecycleEvent, MenuSize, MiddleTruncatedText, ModalAction, ModalActionRole,
-    ModalId, ModalLayer, OverlayScrollbar, OverlayScrollbarEvent, ProgressCancelDecision,
-    ProgressCancellation, ProgressDialog, ProgressDialogHandle, ProgressDialogOutcome,
-    ProgressDialogUpdate, ProgressState, ResizeAxis, ResizeFinishReason, ResizeHandle,
-    ResizeHandleEvent, ResizeInputSource, ScrollMetrics, TextInput, TextInputEvent,
+    Alert, AlertIntent, Button, ButtonShape, ButtonSize, ButtonVariant, ContextMenu, Icon,
+    IconButton, IconName, MenuEntry, MenuLifecycleEvent, MenuSize, MiddleTruncatedText,
+    ModalAction, ModalActionRole, ModalId, ModalLayer, OverlayScrollbar, OverlayScrollbarEvent,
+    ProgressCancelDecision, ProgressCancellation, ProgressDialog, ProgressDialogHandle,
+    ProgressDialogOutcome, ProgressDialogUpdate, ProgressState, ResizeAxis, ResizeFinishReason,
+    ResizeHandle, ResizeHandleEvent, ResizeInputSource, ScrollMetrics, TextInput, TextInputEvent,
     TextInputVariant, Tooltip, TooltipLayer, TooltipTargetVisibility, WindowDragRegion,
     WindowDragRegionEvent, WindowDragRegionResponse, WindowDragRegionStatus, window_modal_is_open,
 };
@@ -84,7 +83,7 @@ const SIDEBAR_HEADER_TRAILING_PADDING: f32 = SIDEBAR_TOGGLE_INSET;
 const SIDEBAR_HEADER_ACTION_GAP: f32 = 0.0;
 const SIDEBAR_ROW_HORIZONTAL_PADDING: f32 = 12.0;
 const SIDEBAR_ROW_ICON_SIZE: f32 = 14.0;
-const SIDEBAR_ROW_PIN_ICON_SIZE: f32 = 9.0;
+const SIDEBAR_ROW_PIN_ICON_SIZE: f32 = 10.0;
 /// Clearance for the native traffic lights that share the top-left chrome strip.
 const TRAFFIC_LIGHT_CLEARANCE: f32 = 82.0;
 const WORKSPACE_CHIP_ICON_SIZE: f32 = 11.0;
@@ -947,11 +946,7 @@ impl WorkspaceManager {
                         &self.default_workspace_root,
                     )
                     .0,
-                    matches!(workspace.kind(), WorkspaceKind::LocalProject { .. }),
-                    matches!(
-                        workspace.availability(),
-                        WorkspaceDirectoryAvailability::Available
-                    ),
+                    workspace.kind(),
                     window_count,
                     pane_count,
                 )
@@ -3103,9 +3098,9 @@ impl WorkspaceManager {
         let workspace = self.workspaces.active_workspace();
         let local_project = matches!(workspace.kind(), WorkspaceKind::LocalProject { .. });
         let workspace_icon = match workspace.kind() {
-            WorkspaceKind::LocalProject { .. } => "folder",
-            WorkspaceKind::RemoteProject { .. } => "globe",
-            WorkspaceKind::Scratch { .. } => "terminal",
+            WorkspaceKind::LocalProject { .. } => IconName::Folder,
+            WorkspaceKind::RemoteProject { .. } => IconName::Globe,
+            WorkspaceKind::Scratch { .. } => IconName::Terminal,
         };
         let available = workspace.availability().is_available();
         let remote_connection_phase = workspace
@@ -3143,11 +3138,11 @@ impl WorkspaceManager {
             .items_center()
             .gap(px(5.0))
             .min_w_0()
-            .child(
-                Icon::new(workspace_icon)
-                    .size(px(WORKSPACE_CHIP_ICON_SIZE))
-                    .color(remote_color.map(gpui_color).unwrap_or(icon_color)),
-            )
+            .child(Icon::new(
+                workspace_icon,
+                px(WORKSPACE_CHIP_ICON_SIZE),
+                remote_color.map(gpui_color).unwrap_or(icon_color),
+            ))
             .child(
                 div()
                     .min_w_0()
@@ -3157,11 +3152,11 @@ impl WorkspaceManager {
                     .child(name.clone()),
             )
             .when(local_project, |chip| {
-                chip.child(
-                    Icon::new("pin.fill")
-                        .size(px(SIDEBAR_ROW_PIN_ICON_SIZE))
-                        .color(gpui_color(ACTIVE_THEME.icon_muted)),
-                )
+                chip.child(Icon::new(
+                    IconName::Pin,
+                    px(SIDEBAR_ROW_PIN_ICON_SIZE),
+                    gpui_color(ACTIVE_THEME.icon_muted),
+                ))
             })
             .when_some(remote_status, |chip, status| {
                 chip.child(
@@ -3220,10 +3215,7 @@ impl WorkspaceManager {
                     .right(px(SIDEBAR_TOGGLE_INSET))
                     .child(
                         IconButton::new("toggle-sidebar-button", "Toggle Sidebar", |foreground| {
-                            Icon::new("sidebar.left")
-                                .size(px(14.0))
-                                .color(foreground)
-                                .into_any_element()
+                            Icon::new(IconName::PanelLeft, px(14.0), foreground).into_any_element()
                         })
                         .variant(ButtonVariant::Ghost)
                         .size(ButtonSize::Regular)
@@ -3391,37 +3383,35 @@ impl WorkspaceManager {
                     .child(
                         div()
                             .relative()
-                            .child(
-                                Icon::new(if local_project {
-                                    "folder"
+                            .child(Icon::new(
+                                if local_project {
+                                    IconName::Folder
                                 } else if remote_connection_phase.is_some() {
-                                    "globe"
+                                    IconName::Globe
                                 } else {
-                                    "terminal"
-                                })
-                                .size(px(SIDEBAR_ROW_ICON_SIZE))
-                                .color(gpui_color(
-                                    if let Some(color) = remote_color {
-                                        color
-                                    } else if available {
-                                        if active {
-                                            ACTIVE_THEME.icon_accent
-                                        } else {
-                                            ACTIVE_THEME.icon
-                                        }
+                                    IconName::Terminal
+                                },
+                                px(SIDEBAR_ROW_ICON_SIZE),
+                                gpui_color(if let Some(color) = remote_color {
+                                    color
+                                } else if available {
+                                    if active {
+                                        ACTIVE_THEME.icon_accent
                                     } else {
-                                        ACTIVE_THEME.warning
-                                    },
-                                )),
-                            )
+                                        ACTIVE_THEME.icon
+                                    }
+                                } else {
+                                    ACTIVE_THEME.warning
+                                }),
+                            ))
                             .when(!available, |icon| {
-                                icon.child(
-                                    div().absolute().right(px(-5.0)).bottom(px(-4.0)).child(
-                                        Icon::new("exclamationmark.triangle.fill")
-                                            .size(px(8.0))
-                                            .color(gpui_color(ACTIVE_THEME.warning)),
+                                icon.child(div().absolute().right(px(-5.0)).bottom(px(-4.0)).child(
+                                    Icon::new(
+                                        IconName::TriangleAlert,
+                                        px(10.0),
+                                        gpui_color(ACTIVE_THEME.warning),
                                     ),
-                                )
+                                ))
                             }),
                     ),
             )
@@ -3502,15 +3492,15 @@ impl WorkspaceManager {
                                             format!("workspace-row-pin-{}", workspace_id.get())
                                         })
                                         .flex_shrink_0()
-                                        .child(
-                                            Icon::new("pin.fill")
-                                                .size(px(SIDEBAR_ROW_PIN_ICON_SIZE))
-                                                .color(gpui_color(if available {
-                                                    ACTIVE_THEME.icon_muted
-                                                } else {
-                                                    ACTIVE_THEME.warning
-                                                })),
-                                        ),
+                                        .child(Icon::new(
+                                            IconName::Pin,
+                                            px(SIDEBAR_ROW_PIN_ICON_SIZE),
+                                            gpui_color(if available {
+                                                ACTIVE_THEME.icon_muted
+                                            } else {
+                                                ACTIVE_THEME.warning
+                                            }),
+                                        )),
                                 )
                             }),
                     ),
@@ -3670,12 +3660,7 @@ impl WorkspaceManager {
                     "search-workspaces-button",
                     "Search Workspaces",
                     |foreground| {
-                        Icon::new("magnifyingglass")
-                            .size(px(13.0))
-                            .weight(SymbolWeight::Medium)
-                            .rendering_mode(RenderingMode::Monochrome)
-                            .color(foreground)
-                            .into_any_element()
+                        Icon::new(IconName::Search, px(12.0), foreground).into_any_element()
                     },
                 )
                 .variant(ButtonVariant::Ghost)
@@ -3722,11 +3707,8 @@ impl WorkspaceManager {
                             .shape(ButtonShape::Square)
                             .full_width(true)
                             .debug_selector("new-workspace-button")
-                            .leading(|_| {
-                                Icon::new("plus")
-                                    .size(px(13.0))
-                                    .color(gpui_color(ACTIVE_THEME.icon))
-                                    .into_any_element()
+                            .leading(|foreground| {
+                                Icon::new(IconName::Plus, px(14.0), foreground).into_any_element()
                             })
                             .trailing(|_| {
                                 div()
@@ -3948,21 +3930,11 @@ fn workspace_menu_entries(
         MenuEntry::action("New Window", WorkspaceMenuCommand::NewWindow)
             .shortcut("⌘T")
             .icon(|foreground| {
-                Icon::new("plus.rectangle.on.rectangle")
-                    .weight(SymbolWeight::Regular)
-                    .size(px(14.0))
-                    .color(foreground)
-                    .into_any_element()
+                Icon::new(IconName::SquarePlus, px(14.0), foreground).into_any_element()
             })
             .debug_selector("workspace-menu-row-new-window"),
         MenuEntry::action("Rename Workspace", WorkspaceMenuCommand::Rename)
-            .icon(|foreground| {
-                Icon::new("pencil")
-                    .weight(SymbolWeight::Regular)
-                    .size(px(14.0))
-                    .color(foreground)
-                    .into_any_element()
-            })
+            .icon(|foreground| Icon::new(IconName::Pencil, px(14.0), foreground).into_any_element())
             .debug_selector("workspace-menu-row-rename"),
     ];
     if let Some(phase) = remote_connection_phase {
@@ -3973,11 +3945,7 @@ fn workspace_menu_entries(
                     RemoteConnectionPhase::Disconnected | RemoteConnectionPhase::Failed
                 ))
                 .icon(|foreground| {
-                    Icon::new("arrow.clockwise")
-                        .weight(SymbolWeight::Regular)
-                        .size(px(14.0))
-                        .color(foreground)
-                        .into_any_element()
+                    Icon::new(IconName::RotateCw, px(14.0), foreground).into_any_element()
                 })
                 .debug_selector("workspace-menu-row-reconnect"),
         );
@@ -3986,13 +3954,7 @@ fn workspace_menu_entries(
         MenuEntry::separator(),
         MenuEntry::action("Close Workspace", WorkspaceMenuCommand::Close)
             .destructive(true)
-            .icon(|foreground| {
-                Icon::new("xmark")
-                    .weight(SymbolWeight::Regular)
-                    .size(px(14.0))
-                    .color(foreground)
-                    .into_any_element()
-            })
+            .icon(|foreground| Icon::new(IconName::X, px(14.0), foreground).into_any_element())
             .debug_selector("workspace-menu-row-close"),
     ]);
     entries
@@ -4747,7 +4709,8 @@ mod tests {
         TestTerminalSessionRecords,
         &mut VisualTestContext,
     ) {
-        cx.update(crate::ui::init);
+        cx.update(crate::ui::init)
+            .expect("UI initialization should succeed");
         let records = TestTerminalSessionRecords::default();
         let session_factory: Rc<dyn TerminalSessionFactory> =
             Rc::new(TestTerminalSessionFactory::new(records.clone()).with_fallback_title("zsh"));
@@ -4775,7 +4738,8 @@ mod tests {
         TestTerminalSessionRecords,
         &mut VisualTestContext,
     ) {
-        cx.update(crate::ui::init);
+        cx.update(crate::ui::init)
+            .expect("UI initialization should succeed");
         let records = TestTerminalSessionRecords::default();
         let session_factory: Rc<dyn TerminalSessionFactory> =
             Rc::new(TestTerminalSessionFactory::new(records.clone()).with_fallback_title("zsh"));
@@ -4880,7 +4844,8 @@ mod tests {
         Rc<RecordingOperatingSystemWindowDragPlatform>,
         &mut VisualTestContext,
     ) {
-        cx.update(crate::ui::init);
+        cx.update(crate::ui::init)
+            .expect("UI initialization should succeed");
         let records = TestTerminalSessionRecords::default();
         let session_factory: Rc<dyn TerminalSessionFactory> =
             Rc::new(TestTerminalSessionFactory::new(records).with_fallback_title("zsh"));
@@ -4911,7 +4876,8 @@ mod tests {
         TestTerminalSessionRecords,
         &mut VisualTestContext,
     ) {
-        cx.update(crate::ui::init);
+        cx.update(crate::ui::init)
+            .expect("UI initialization should succeed");
         let records = TestTerminalSessionRecords::default();
         let session_factory: Rc<dyn TerminalSessionFactory> =
             Rc::new(TestTerminalSessionFactory::new(records.clone()).with_fallback_title("zsh"));
@@ -5073,7 +5039,8 @@ mod tests {
     fn application_rtl_locale_installation_should_mirror_production_modal_footer(
         cx: &mut TestAppContext,
     ) {
-        cx.update(|cx| crate::ui::init_with_text_direction(cx, TextDirection::RightToLeft));
+        cx.update(|cx| crate::ui::init_with_text_direction(cx, TextDirection::RightToLeft))
+            .expect("UI initialization should succeed");
         let records = TestTerminalSessionRecords::default();
         let session_factory: Rc<dyn TerminalSessionFactory> =
             Rc::new(TestTerminalSessionFactory::new(records).with_fallback_title("zsh"));
@@ -5416,7 +5383,8 @@ mod tests {
     fn simultaneous_modals_should_block_and_restore_terminal_input_focus_per_operating_system_window(
         cx: &mut TestAppContext,
     ) {
-        cx.update(crate::ui::init);
+        cx.update(crate::ui::init)
+            .expect("UI initialization should succeed");
         let first_records = TestTerminalSessionRecords::default();
         let second_records = TestTerminalSessionRecords::default();
         let first_factory: Rc<dyn TerminalSessionFactory> = Rc::new(
@@ -5886,7 +5854,8 @@ mod tests {
     fn unavailable_remote_source_should_stay_disabled_without_constructing_askpass_backend(
         cx: &mut TestAppContext,
     ) {
-        cx.update(crate::ui::init);
+        cx.update(crate::ui::init)
+            .expect("UI initialization should succeed");
         let records = TestTerminalSessionRecords::default();
         let session_factory: Rc<dyn TerminalSessionFactory> =
             Rc::new(TestTerminalSessionFactory::new(records).with_fallback_title("zsh"));
@@ -5926,7 +5895,8 @@ mod tests {
     fn backend_construction_failure_should_disable_remote_instead_of_leaving_an_inert_source(
         cx: &mut TestAppContext,
     ) {
-        cx.update(crate::ui::init);
+        cx.update(crate::ui::init)
+            .expect("UI initialization should succeed");
         let records = TestTerminalSessionRecords::default();
         let session_factory: Rc<dyn TerminalSessionFactory> =
             Rc::new(TestTerminalSessionFactory::new(records).with_fallback_title("zsh"));

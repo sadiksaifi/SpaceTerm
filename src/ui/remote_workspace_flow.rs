@@ -1951,7 +1951,8 @@ mod tests {
         Rc<RefCell<CapturedEvents>>,
         &mut VisualTestContext,
     ) {
-        cx.update(crate::ui::init);
+        cx.update(crate::ui::init)
+            .expect("UI initialization should succeed");
         let injected: Arc<dyn RemoteWorkspaceFlowBackend> = backend;
         let (harness, cx) = cx.add_window_view(move |window, cx| {
             let flow = cx.new(|cx| RemoteWorkspaceFlow::new(injected, window, cx));
@@ -1993,7 +1994,8 @@ mod tests {
         Entity<RemoteWorkspaceFlow>,
         &mut VisualTestContext,
     ) {
-        cx.update(crate::ui::init);
+        cx.update(crate::ui::init)
+            .expect("UI initialization should succeed");
         let injected: Arc<dyn RemoteWorkspaceFlowBackend> = backend;
         let (harness, cx) = cx.add_window_view(move |window, cx| {
             let panel = cx.new(|cx| NewWorkspacePanel::new(window, cx));

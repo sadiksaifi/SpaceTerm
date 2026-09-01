@@ -4,7 +4,7 @@ use gpui::{
     KeyBinding, KeyDownEvent, KeyUpEvent, LayoutId, MouseButton, MouseDownEvent, MouseExitEvent,
     MouseMoveEvent, MouseUpEvent, ParentElement as _, Pixels, RenderOnce, Rgba, ScrollHandle,
     ScrollWheelEvent, SharedString, StatefulInteractiveElement as _, Styled as _, WeakEntity,
-    Window, actions, canvas, div, img, prelude::FluentBuilder as _, px, relative, size, svg,
+    Window, actions, canvas, div, img, prelude::FluentBuilder as _, px, relative, size,
 };
 
 use super::{
@@ -20,11 +20,7 @@ use super::{
     policy::{ActionArrangement, DefaultActionPresentation, is_safe_cancel, select_action_axis},
 };
 use crate::{
-    Button, ButtonRole, ButtonSize, ButtonVariant,
-    assets::{
-        ALERT_CRITICAL_ICON, ALERT_INFORMATION_ICON, ALERT_WARNING_ICON, CHECKBOX_CHECKED_ICON,
-        CHECKBOX_UNCHECKED_ICON, IMAGE_PLACEHOLDER_ICON,
-    },
+    Button, ButtonRole, ButtonSize, ButtonVariant, Icon, IconName,
     button::{
         ModalControlScope, ModalFocusAnchorRegistry, ModalPressOwner,
         measure_button_intrinsic_width,
@@ -448,9 +444,9 @@ fn surface_contains(geometry: ModalSurfaceGeometry, point: gpui::Point<gpui::Pix
         && point.y <= geometry.origin_y + geometry.size.height
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug)]
 struct AlertIntentPresentation {
-    icon_path: &'static str,
+    icon: IconName,
     selector: &'static str,
     accent: Rgba,
     background: Rgba,
@@ -462,19 +458,19 @@ fn alert_intent_presentation(
 ) -> AlertIntentPresentation {
     match intent {
         super::AlertIntent::Informational => AlertIntentPresentation {
-            icon_path: ALERT_INFORMATION_ICON,
+            icon: IconName::Info,
             selector: "informational",
             accent: paint.informational,
             background: paint.informational_background,
         },
         super::AlertIntent::Warning => AlertIntentPresentation {
-            icon_path: ALERT_WARNING_ICON,
+            icon: IconName::TriangleAlert,
             selector: "warning",
             accent: paint.warning,
             background: paint.warning_background,
         },
         super::AlertIntent::Critical => AlertIntentPresentation {
-            icon_path: ALERT_CRITICAL_ICON,
+            icon: IconName::OctagonAlert,
             selector: "critical",
             accent: paint.critical,
             background: paint.critical_background,
@@ -573,11 +569,10 @@ fn render_body(
                             .size(extent)
                             .into_any_element()
                     }
-                    AlertAccessory::Icon { image: None, .. } => svg()
-                        .path(IMAGE_PLACEHOLDER_ICON)
-                        .size(extent)
-                        .text_color(paint.secondary_text)
-                        .into_any_element(),
+                    AlertAccessory::Icon { image: None, .. } => {
+                        Icon::new(IconName::ImageOff, extent, paint.secondary_text)
+                            .into_any_element()
+                    }
                 }
             });
             let intent_presentation = alert_intent_presentation(*intent, paint);
@@ -604,12 +599,11 @@ fn render_body(
                         .border(metrics.border_width)
                         .border_color(intent_presentation.accent)
                         .bg(intent_presentation.background)
-                        .child(
-                            svg()
-                                .path(intent_presentation.icon_path)
-                                .size(marker_extent * 0.55)
-                                .text_color(intent_presentation.accent),
-                        ),
+                        .child(Icon::new(
+                            intent_presentation.icon,
+                            marker_extent * 0.55,
+                            intent_presentation.accent,
+                        )),
                 )
                 .child(
                     div()
@@ -905,9 +899,9 @@ fn render_alert_suppression(
     let focus_anchor = focus_anchors.register(&focus);
     let scroll_anchor = focus_anchor.scroll_anchor();
     let checkbox_icon = if selected {
-        CHECKBOX_CHECKED_ICON
+        IconName::SquareCheckBig
     } else {
-        CHECKBOX_UNCHECKED_ICON
+        IconName::Square
     };
     let checkbox_color = if selected {
         paint.progress_fill
@@ -959,13 +953,7 @@ fn render_alert_suppression(
             window.prevent_default();
             cx.stop_propagation();
         })
-        .child(
-            svg()
-                .path(checkbox_icon)
-                .size(metrics.body_size)
-                .flex_shrink_0()
-                .text_color(checkbox_color),
-        )
+        .child(Icon::new(checkbox_icon, metrics.body_size, checkbox_color))
         .child(label)
         .when(focused, |control| {
             control.child(
@@ -2652,10 +2640,11 @@ mod tests {
         let warning = alert_intent_presentation(super::super::AlertIntent::Warning, paint);
         let critical = alert_intent_presentation(super::super::AlertIntent::Critical, paint);
 
+        assert_eq!(informational.icon.unicode(), IconName::Info.unicode());
+        assert_eq!(warning.icon.unicode(), IconName::TriangleAlert.unicode());
+        assert_eq!(critical.icon.unicode(), IconName::OctagonAlert.unicode());
         assert!(
-            informational.icon_path != warning.icon_path
-                && warning.icon_path != critical.icon_path
-                && informational.accent != warning.accent
+            informational.accent != warning.accent
                 && warning.accent != critical.accent
                 && informational.background != warning.background
                 && warning.background != critical.background

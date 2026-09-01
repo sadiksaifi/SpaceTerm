@@ -10,7 +10,7 @@ use gpui::{
 };
 
 use crate::{
-    TextInput, TextInputEvent, TextInputTabBehavior, TextInputVariant,
+    Icon, IconName, TextInput, TextInputEvent, TextInputTabBehavior, TextInputVariant,
     button::{Button, ButtonSize, ButtonVariant, IconButton},
     menu::{Menu, MenuActivation, MenuEntry, MenuSize},
     overlay_scrollbar::{OverlayScrollbar, OverlayScrollbarEvent, ScrollMetrics},
@@ -3063,6 +3063,16 @@ fn status_row(
         .child(text.into())
 }
 
+fn row_foreground(paint: CommandPalettePaint, disabled: bool, selected: bool) -> Rgba {
+    if disabled {
+        paint.disabled
+    } else if selected {
+        paint.selected_foreground
+    } else {
+        paint.foreground
+    }
+}
+
 #[expect(
     clippy::too_many_arguments,
     reason = "one row's complete presentation inputs are clearer than an intermediate struct"
@@ -3081,13 +3091,7 @@ fn render_row<I: Clone + Eq + 'static>(
 ) -> AnyElement {
     let paint = theme.paint;
     let metrics = theme.metrics;
-    let foreground = if item.disabled {
-        paint.disabled
-    } else if selected {
-        paint.selected_foreground
-    } else {
-        paint.foreground
-    };
+    let foreground = row_foreground(paint, item.disabled, selected);
     let secondary = if item.disabled {
         paint.disabled
     } else {
@@ -3311,12 +3315,9 @@ fn render_accessory(
             .text_color(color)
             .child(text)
             .into_any_element(),
-        CommandPaletteAccessory::Checkmark => div()
-            .flex_shrink_0()
-            .text_size(metrics.secondary_size)
-            .text_color(color)
-            .child("\u{2713}")
-            .into_any_element(),
+        CommandPaletteAccessory::Checkmark => {
+            Icon::new(IconName::Check, px(12.0), color).into_any_element()
+        }
     }
 }
 
@@ -3356,6 +3357,18 @@ mod tests {
                 .footer_padding(px(8.0))
                 .panel_geometry(px(260.0), px(24.0)),
         )
+    }
+
+    #[test]
+    fn row_icons_should_share_selected_and_disabled_text_foregrounds() {
+        let paint = test_theme().paint;
+
+        assert_eq!(row_foreground(paint, false, false), paint.foreground);
+        assert_eq!(
+            row_foreground(paint, false, true),
+            paint.selected_foreground
+        );
+        assert_eq!(row_foreground(paint, true, true), paint.disabled);
     }
 
     fn items() -> Vec<CommandPaletteItem<u8>> {

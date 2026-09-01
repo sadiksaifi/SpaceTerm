@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 use super::pane_action_menu::{
-    CloseTarget, PaneActionMenuCommand, pane_action_menu_entries, sf_symbol,
+    CloseTarget, PaneActionMenuCommand, menu_icon, pane_action_menu_entries,
 };
 use super::terminal_focus::{TerminalFocusBlocker, TerminalProductFocus};
 use super::{
@@ -52,11 +52,10 @@ use gpui::{
     AnyElement, App, Bounds, Context, DefiniteLength, Entity, EventEmitter, MouseDownEvent, Pixels,
     PromptButton, PromptLevel, Render, Window, deferred, div, px, rgba,
 };
-use gpui_symbols::{Icon, SymbolWeight};
 use spaceterm_ui::{
-    ButtonSize, ButtonVariant, IconButton, Menu, MenuAlignment, MenuLifecycleEvent, MenuPlacement,
-    MenuPlacementConfig, MenuSize, ResizeAxis, ResizeHandle, ResizeHandleEvent, ResizeInputSource,
-    Tooltip,
+    ButtonSize, ButtonVariant, Icon, IconButton, IconName, Menu, MenuAlignment, MenuLifecycleEvent,
+    MenuPlacement, MenuPlacementConfig, MenuSize, ResizeAxis, ResizeHandle, ResizeHandleEvent,
+    ResizeInputSource, Tooltip,
 };
 
 const DIVIDER_SIZE: f32 = super::resize_handle_theme::VISIBLE_THICKNESS;
@@ -1377,11 +1376,7 @@ fn render_pane_header(
                     ("pane-zoom-restore", pane_id.get()),
                     "Restore Panes",
                     |foreground| {
-                        Icon::new("arrow.down.right.and.arrow.up.left")
-                            .weight(SymbolWeight::Medium)
-                            .size(px(13.0))
-                            .color(foreground)
-                            .into_any_element()
+                        Icon::new(IconName::Minimize2, px(12.0), foreground).into_any_element()
                     },
                 )
                 .variant(ButtonVariant::Ghost)
@@ -1514,7 +1509,7 @@ fn render_pane_controls(
                 "Pane Actions",
                 pane_action_menu_entries("pane-menu", zoomed, true, CloseTarget::Pane),
             )
-            .icon_trigger(sf_symbol("ellipsis"))
+            .icon_trigger(menu_icon(IconName::Ellipsis))
             .size(MenuSize::Wide)
             .placement(
                 MenuPlacementConfig::new(MenuPlacement::Bottom, MenuAlignment::End).offset(px(0.0)),
@@ -1732,7 +1727,8 @@ mod tests {
         Rc<RefCell<Vec<RemoteChildLaunchUnavailable>>>,
         &mut VisualTestContext,
     ) {
-        cx.update(crate::ui::init);
+        cx.update(crate::ui::init)
+            .expect("UI initialization should succeed");
         let events = Rc::new(RefCell::new(Vec::new()));
         let recorded_events = Rc::clone(&events);
         let (harness, cx) = cx.add_window_view(move |window, cx| {
@@ -1865,7 +1861,8 @@ mod tests {
     fn remote_split_skips_local_workspace_validation_and_preserves_launch_context(
         cx: &mut TestAppContext,
     ) {
-        cx.update(crate::ui::init);
+        cx.update(crate::ui::init)
+            .expect("UI initialization should succeed");
         let records = TestTerminalSessionRecords::default();
         let session_factory = remote_test_session_factory(records.clone());
         let (host, cx) = cx.add_window_view(|window, cx| {
@@ -1887,7 +1884,8 @@ mod tests {
 
     #[gpui::test]
     fn remote_split_should_revalidate_before_mutating_the_pane_tree(cx: &mut TestAppContext) {
-        cx.update(crate::ui::init);
+        cx.update(crate::ui::init)
+            .expect("UI initialization should succeed");
         let records = TestTerminalSessionRecords::default();
         let destination = crate::domain::SshDestination::new("tester@remote".to_owned()).unwrap();
         let provider = Arc::new(RevalidatingRemoteChannelProvider::new(destination.clone()));
@@ -1927,7 +1925,8 @@ mod tests {
     fn remote_split_should_leave_hierarchy_unchanged_when_channel_reservation_races_master_death(
         cx: &mut TestAppContext,
     ) {
-        cx.update(crate::ui::init);
+        cx.update(crate::ui::init)
+            .expect("UI initialization should succeed");
         let records = TestTerminalSessionRecords::default();
         let destination = crate::domain::SshDestination::new("tester@remote".to_owned()).unwrap();
         let command_context = Arc::new(
@@ -1969,7 +1968,8 @@ mod tests {
     }
 
     fn four_pane_host(cx: &mut TestAppContext) -> (Entity<PaneHost>, &mut VisualTestContext) {
-        cx.update(crate::ui::init);
+        cx.update(crate::ui::init)
+            .expect("UI initialization should succeed");
         let session_factory = test_session_factory();
         let (host, cx) = cx.add_window_view(|window, cx| {
             PaneHost::new(WindowId::new(1), session_factory, window, cx)
@@ -1991,7 +1991,8 @@ mod tests {
 
     #[gpui::test]
     fn attention_remains_scoped_to_its_owning_pane_and_window_title(cx: &mut TestAppContext) {
-        cx.update(crate::ui::init);
+        cx.update(crate::ui::init)
+            .expect("UI initialization should succeed");
         let (host, cx) = cx.add_window_view(|window, cx| {
             PaneHost::new(WindowId::new(1), test_session_factory(), window, cx)
         });
@@ -2027,7 +2028,8 @@ mod tests {
 
     #[gpui::test]
     fn single_pane_should_not_render_a_pane_header(cx: &mut TestAppContext) {
-        cx.update(crate::ui::init);
+        cx.update(crate::ui::init)
+            .expect("UI initialization should succeed");
         let session_factory = test_session_factory();
         let (_host, cx) = cx.add_window_view(|window, cx| {
             PaneHost::new(WindowId::new(1), session_factory, window, cx)
@@ -2040,7 +2042,8 @@ mod tests {
     fn pane_menu_restores_its_trigger_before_terminal_input_can_be_refocused(
         cx: &mut TestAppContext,
     ) {
-        cx.update(crate::ui::init);
+        cx.update(crate::ui::init)
+            .expect("UI initialization should succeed");
         let session_factory = test_session_factory();
         let (host, cx) = cx.add_window_view(|window, cx| {
             PaneHost::new(WindowId::new(1), session_factory, window, cx)
@@ -2094,7 +2097,8 @@ mod tests {
     fn pane_menu_activation_should_not_restore_terminal_before_command_completion(
         cx: &mut TestAppContext,
     ) {
-        cx.update(crate::ui::init);
+        cx.update(crate::ui::init)
+            .expect("UI initialization should succeed");
         let records = TestTerminalSessionRecords::default();
         let session_factory: Rc<dyn TerminalSessionFactory> =
             Rc::new(TestTerminalSessionFactory::new(records.clone()));
@@ -2161,7 +2165,8 @@ mod tests {
 
     #[gpui::test]
     fn initial_and_split_panes_should_start_in_the_workspace_root(cx: &mut TestAppContext) {
-        cx.update(crate::ui::init);
+        cx.update(crate::ui::init)
+            .expect("UI initialization should succeed");
         let workspace_root = PathBuf::from("/tmp/spaceterm-explicit-workspace-root");
         let records = TestTerminalSessionRecords::default();
         let session_factory: Rc<dyn TerminalSessionFactory> =
@@ -2199,7 +2204,8 @@ mod tests {
 
     #[gpui::test]
     fn split_panes_should_render_compact_focused_and_unfocused_headers(cx: &mut TestAppContext) {
-        cx.update(crate::ui::init);
+        cx.update(crate::ui::init)
+            .expect("UI initialization should succeed");
         let session_factory = test_session_factory();
         let (host, cx) = cx.add_window_view(|window, cx| {
             PaneHost::new(WindowId::new(1), session_factory, window, cx)
@@ -2227,7 +2233,8 @@ mod tests {
 
     #[gpui::test]
     fn focusing_another_pane_should_move_the_focused_header_state(cx: &mut TestAppContext) {
-        cx.update(crate::ui::init);
+        cx.update(crate::ui::init)
+            .expect("UI initialization should succeed");
         let session_factory = test_session_factory();
         let (host, cx) = cx.add_window_view(|window, cx| {
             PaneHost::new(WindowId::new(1), session_factory, window, cx)
@@ -2250,7 +2257,8 @@ mod tests {
 
     #[gpui::test]
     fn native_service_return_is_rejected_after_pane_changes_away_and_back(cx: &mut TestAppContext) {
-        cx.update(crate::ui::init);
+        cx.update(crate::ui::init)
+            .expect("UI initialization should succeed");
         let records = TestTerminalSessionRecords::default();
         let session_factory: Rc<dyn TerminalSessionFactory> =
             Rc::new(TestTerminalSessionFactory::new(records.clone()));
@@ -2299,7 +2307,8 @@ mod tests {
 
     #[gpui::test]
     fn closing_a_nonfocused_pane_invalidates_the_service_hierarchy(cx: &mut TestAppContext) {
-        cx.update(crate::ui::init);
+        cx.update(crate::ui::init)
+            .expect("UI initialization should succeed");
         let records = TestTerminalSessionRecords::default();
         let session_factory: Rc<dyn TerminalSessionFactory> =
             Rc::new(TestTerminalSessionFactory::new(records.clone()));
@@ -2346,7 +2355,8 @@ mod tests {
 
     #[gpui::test]
     fn file_drop_should_focus_the_target_pane_before_requesting_its_paste(cx: &mut TestAppContext) {
-        cx.update(crate::ui::init);
+        cx.update(crate::ui::init)
+            .expect("UI initialization should succeed");
         let records = TestTerminalSessionRecords::default();
         let session_factory: Rc<dyn TerminalSessionFactory> =
             Rc::new(TestTerminalSessionFactory::new(records.clone()));
@@ -2404,7 +2414,8 @@ mod tests {
 
     #[gpui::test]
     fn terminal_scrollbar_interaction_should_focus_its_owning_pane(cx: &mut TestAppContext) {
-        cx.update(crate::ui::init);
+        cx.update(crate::ui::init)
+            .expect("UI initialization should succeed");
         let records = TestTerminalSessionRecords::default();
         let session_factory: Rc<dyn TerminalSessionFactory> =
             Rc::new(TestTerminalSessionFactory::new(records.clone()).with_fallback_title("zsh"));
@@ -2521,7 +2532,8 @@ mod tests {
 
     #[gpui::test]
     fn terminal_title_event_should_update_the_pane_header_snapshot(cx: &mut TestAppContext) {
-        cx.update(crate::ui::init);
+        cx.update(crate::ui::init)
+            .expect("UI initialization should succeed");
         let records = TestTerminalSessionRecords::default();
         let session_factory: Rc<dyn TerminalSessionFactory> =
             Rc::new(TestTerminalSessionFactory::new(records.clone()).with_fallback_title("zsh"));
@@ -2563,7 +2575,8 @@ mod tests {
     fn exited_terminal_session_should_close_its_pane_and_focus_the_neighbor(
         cx: &mut TestAppContext,
     ) {
-        cx.update(crate::ui::init);
+        cx.update(crate::ui::init)
+            .expect("UI initialization should succeed");
         let records = TestTerminalSessionRecords::default();
         let session_factory: Rc<dyn TerminalSessionFactory> =
             Rc::new(TestTerminalSessionFactory::new(records.clone()));
@@ -2601,7 +2614,8 @@ mod tests {
 
     #[gpui::test]
     fn exited_last_terminal_session_should_request_window_close(cx: &mut TestAppContext) {
-        cx.update(crate::ui::init);
+        cx.update(crate::ui::init)
+            .expect("UI initialization should succeed");
         let close_requests = Rc::new(Cell::new(0));
         let records = TestTerminalSessionRecords::default();
         let session_factory: Rc<dyn TerminalSessionFactory> =
@@ -2640,7 +2654,8 @@ mod tests {
 
     #[gpui::test]
     fn single_pane_toggle_zoom_should_not_emit_presentation_changed(cx: &mut TestAppContext) {
-        cx.update(crate::ui::init);
+        cx.update(crate::ui::init)
+            .expect("UI initialization should succeed");
         let presentation_changes = Rc::new(Cell::new(0));
         let session_factory = test_session_factory();
         let (host, cx) = cx.add_window_view(|window, cx| {
@@ -2666,7 +2681,8 @@ mod tests {
 
     #[gpui::test]
     fn successful_toggle_zoom_should_emit_one_presentation_changed(cx: &mut TestAppContext) {
-        cx.update(crate::ui::init);
+        cx.update(crate::ui::init)
+            .expect("UI initialization should succeed");
         let presentation_changes = Rc::new(Cell::new(0));
         let session_factory = test_session_factory();
         let (host, cx) = cx.add_window_view(|window, cx| {
@@ -2695,7 +2711,8 @@ mod tests {
     fn zoom_restore_button_should_restore_panes_without_sending_terminal_pointer_input(
         cx: &mut TestAppContext,
     ) {
-        cx.update(crate::ui::init);
+        cx.update(crate::ui::init)
+            .expect("UI initialization should succeed");
         let records = TestTerminalSessionRecords::default();
         let session_factory: Rc<dyn TerminalSessionFactory> =
             Rc::new(TestTerminalSessionFactory::new(records.clone()));
@@ -2733,7 +2750,8 @@ mod tests {
     fn menu_click_should_execute_command_without_sending_terminal_pointer_input(
         cx: &mut TestAppContext,
     ) {
-        cx.update(crate::ui::init);
+        cx.update(crate::ui::init)
+            .expect("UI initialization should succeed");
         let records = TestTerminalSessionRecords::default();
         let session_factory: Rc<dyn TerminalSessionFactory> =
             Rc::new(TestTerminalSessionFactory::new(records.clone()));
@@ -2789,7 +2807,8 @@ mod tests {
     fn ellipsis_click_should_toggle_menu_without_sending_terminal_pointer_input(
         cx: &mut TestAppContext,
     ) {
-        cx.update(crate::ui::init);
+        cx.update(crate::ui::init)
+            .expect("UI initialization should succeed");
         let records = TestTerminalSessionRecords::default();
         let session_factory: Rc<dyn TerminalSessionFactory> =
             Rc::new(TestTerminalSessionFactory::new(records.clone()));
@@ -2830,7 +2849,8 @@ mod tests {
 
     #[gpui::test]
     fn opening_nonfocused_pane_menu_should_focus_and_zoom_the_target_pane(cx: &mut TestAppContext) {
-        cx.update(crate::ui::init);
+        cx.update(crate::ui::init)
+            .expect("UI initialization should succeed");
         let records = TestTerminalSessionRecords::default();
         let session_factory: Rc<dyn TerminalSessionFactory> =
             Rc::new(TestTerminalSessionFactory::new(records.clone()));
@@ -2898,7 +2918,8 @@ mod tests {
 
     #[gpui::test]
     fn pane_menu_should_render_wide_compact_menu(cx: &mut TestAppContext) {
-        cx.update(crate::ui::init);
+        cx.update(crate::ui::init)
+            .expect("UI initialization should succeed");
         let records = TestTerminalSessionRecords::default();
         let session_factory: Rc<dyn TerminalSessionFactory> =
             Rc::new(TestTerminalSessionFactory::new(records));
@@ -2952,7 +2973,8 @@ mod tests {
     fn shared_resize_handle_should_resize_split_without_leaking_terminal_input(
         cx: &mut TestAppContext,
     ) {
-        cx.update(crate::ui::init);
+        cx.update(crate::ui::init)
+            .expect("UI initialization should succeed");
         let records = TestTerminalSessionRecords::default();
         let session_factory: Rc<dyn TerminalSessionFactory> =
             Rc::new(TestTerminalSessionFactory::new(records.clone()));
@@ -3003,7 +3025,8 @@ mod tests {
 
     #[gpui::test]
     fn integrated_split_resize_handle_should_own_both_outer_hitbox_edges(cx: &mut TestAppContext) {
-        cx.update(crate::ui::init);
+        cx.update(crate::ui::init)
+            .expect("UI initialization should succeed");
         let records = TestTerminalSessionRecords::default();
         let session_factory: Rc<dyn TerminalSessionFactory> =
             Rc::new(TestTerminalSessionFactory::new(records.clone()));

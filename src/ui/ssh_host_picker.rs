@@ -760,7 +760,8 @@ mod tests {
         host_in_active_use: impl Fn(&SshHostAlias) -> bool + Send + Sync + 'static,
         cx: &'a mut TestAppContext,
     ) -> HostPickerWindow<'a> {
-        cx.update(crate::ui::init);
+        cx.update(crate::ui::init)
+            .expect("UI initialization should succeed");
         let injected_provider: Arc<dyn HostDiscoveryProvider> = provider;
         let active_use = Arc::new(host_in_active_use);
         let (harness, cx) = cx.add_window_view(move |window, cx| {

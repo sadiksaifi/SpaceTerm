@@ -322,7 +322,8 @@ mod tests {
 
     #[gpui::test]
     fn native_copy_command_dispatches_semantic_copy_to_the_terminal(cx: &mut TestAppContext) {
-        cx.update(crate::ui::init);
+        cx.update(crate::ui::init)
+            .expect("UI initialization should succeed");
         cx.update(init);
         let records = TestTerminalSessionRecords::default();
         let session_factory: Rc<dyn TerminalSessionFactory> = Rc::new(

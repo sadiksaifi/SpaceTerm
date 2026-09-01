@@ -992,7 +992,8 @@ mod tests {
         backend: Arc<ScriptedBackend>,
         cx: &'a mut TestAppContext,
     ) -> FormWindow<'a> {
-        cx.update(crate::ui::init);
+        cx.update(crate::ui::init)
+            .expect("UI initialization should succeed");
         let injected: Arc<dyn ManagedHostFormBackend> = backend;
         let (harness, cx) = cx.add_window_view(move |window, cx| {
             let form = cx.new(|cx| SshHostForm::new(mode, injected, window, cx));
