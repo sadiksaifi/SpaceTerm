@@ -787,6 +787,15 @@ impl SupportedRemoteLoginShell {
             Self::PosixSh | Self::Bash | Self::Zsh | Self::Fish => "&&",
         }
     }
+
+    const fn launch_prefix(self) -> &'static str {
+        match self {
+            Self::PosixSh | Self::Bash | Self::Zsh => "SPACETERM='1' COLORTERM='truecolor' exec",
+            Self::Fish => "set -lx SPACETERM '1' && set -lx COLORTERM 'truecolor' && exec",
+            Self::Nushell => "$env.SPACETERM = \"1\"; $env.COLORTERM = \"truecolor\"; exec",
+            Self::Elvish => "set E:SPACETERM = '1'; set E:COLORTERM = 'truecolor'; exec",
+        }
+    }
 }
 
 /// Capability result produced by remote account discovery for a configured POSIX `sh`.
@@ -909,7 +918,8 @@ impl<'a> RemotePaneShellCommandBuilder<'a> {
         let login_shell = kind.quote_login_shell(&self.login_shell.path);
         let arguments = kind.login_arguments();
         let separator = kind.success_separator();
-        let mut command = format!("cd {directory} {separator} exec {login_shell}");
+        let launch_prefix = kind.launch_prefix();
+        let mut command = format!("cd {directory} {separator} {launch_prefix} {login_shell}");
         for argument in arguments {
             command.push(' ');
             command.push_str(argument);
@@ -1509,7 +1519,7 @@ printf 'OpenSSH_9.9p2 Apple-1, LibreSSL 3.3.6\n' >&2"#,
                 "SessionType=default",
                 "--",
                 "root@fedora@orb",
-                "cd '/srv/project' && exec '/bin/zsh' -l",
+                "cd '/srv/project' && SPACETERM='1' COLORTERM='truecolor' exec '/bin/zsh' -l",
             ]
         );
     }
@@ -1524,7 +1534,7 @@ printf 'OpenSSH_9.9p2 Apple-1, LibreSSL 3.3.6\n' >&2"#,
 
         assert_eq!(
             command.argument,
-            "cd '/srv/-project dir/it'\"'\"'s $(touch nope); ü' && exec '/opt/shell dir/it'\"'\"'s/zsh' -l"
+            "cd '/srv/-project dir/it'\"'\"'s $(touch nope); ü' && SPACETERM='1' COLORTERM='truecolor' exec '/opt/shell dir/it'\"'\"'s/zsh' -l"
         );
     }
 
@@ -1534,7 +1544,7 @@ printf 'OpenSSH_9.9p2 Apple-1, LibreSSL 3.3.6\n' >&2"#,
 
         assert_eq!(
             command.argument,
-            "cd \"${HOME}\"'/project dir/it'\"'\"'s' && exec '/bin/bash' -l"
+            "cd \"${HOME}\"'/project dir/it'\"'\"'s' && SPACETERM='1' COLORTERM='truecolor' exec '/bin/bash' -l"
         );
     }
 
@@ -1548,37 +1558,40 @@ printf 'OpenSSH_9.9p2 Apple-1, LibreSSL 3.3.6\n' >&2"#,
 
         assert_eq!(
             command.argument,
-            "cd ($nu.home-dir | path join \"project \\\"quoted\\\" it's $(touch nope); ü\") ; exec \"/opt/shell \\\"quoted\\\"/nu\" -l"
+            "cd ($nu.home-dir | path join \"project \\\"quoted\\\" it's $(touch nope); ü\") ; $env.SPACETERM = \"1\"; $env.COLORTERM = \"truecolor\"; exec \"/opt/shell \\\"quoted\\\"/nu\" -l"
         );
     }
 
     #[test]
     fn pane_command_should_use_explicit_arguments_for_every_supported_shell() {
         let cases = [
-            ("/bin/sh", "cd '/srv/project' && exec '/bin/sh' -l"),
+            (
+                "/bin/sh",
+                "cd '/srv/project' && SPACETERM='1' COLORTERM='truecolor' exec '/bin/sh' -l",
+            ),
             (
                 "/usr/local/bin/bash",
-                "cd '/srv/project' && exec '/usr/local/bin/bash' -l",
+                "cd '/srv/project' && SPACETERM='1' COLORTERM='truecolor' exec '/usr/local/bin/bash' -l",
             ),
             (
                 "/opt/bin/zsh",
-                "cd '/srv/project' && exec '/opt/bin/zsh' -l",
+                "cd '/srv/project' && SPACETERM='1' COLORTERM='truecolor' exec '/opt/bin/zsh' -l",
             ),
             (
                 "/opt/bin/fish",
-                "cd '/srv/project' && exec '/opt/bin/fish' -l",
+                "cd '/srv/project' && set -lx SPACETERM '1' && set -lx COLORTERM 'truecolor' && exec '/opt/bin/fish' -l",
             ),
             (
                 "/opt/bin/nu",
-                "cd \"/srv/project\" ; exec \"/opt/bin/nu\" -l",
+                "cd \"/srv/project\" ; $env.SPACETERM = \"1\"; $env.COLORTERM = \"truecolor\"; exec \"/opt/bin/nu\" -l",
             ),
             (
                 "/opt/bin/nushell",
-                "cd \"/srv/project\" ; exec \"/opt/bin/nushell\" -l",
+                "cd \"/srv/project\" ; $env.SPACETERM = \"1\"; $env.COLORTERM = \"truecolor\"; exec \"/opt/bin/nushell\" -l",
             ),
             (
                 "/opt/bin/elvish",
-                "cd '/srv/project' ; exec '/opt/bin/elvish'",
+                "cd '/srv/project' ; set E:SPACETERM = '1'; set E:COLORTERM = 'truecolor'; exec '/opt/bin/elvish'",
             ),
         ];
 
@@ -1586,6 +1599,48 @@ printf 'OpenSSH_9.9p2 Apple-1, LibreSSL 3.3.6\n' >&2"#,
             let command = pane_command("/srv/project", shell).unwrap();
             assert_eq!(command.argument, expected);
         }
+    }
+
+    #[test]
+    fn pane_command_should_launch_the_remote_shell_with_only_remote_compatibility_markers() {
+        let sequence = NEXT_PROBE_SCRIPT.fetch_add(1, Ordering::Relaxed);
+        let test_root = PathBuf::from(format!(
+            "/private/tmp/spaceterm-remote-shell-environment-{}-{sequence}",
+            std::process::id()
+        ));
+        let workspace = test_root.join("workspace");
+        let fake_shell = test_root.join("zsh");
+        let environment = test_root.join("environment");
+        fs::create_dir_all(&workspace).unwrap();
+        fs::write(
+            &fake_shell,
+            br#"#!/bin/sh
+printf '%s\n%s\n%s\n%s\n' \
+    "${SPACETERM-unset}" \
+    "${COLORTERM-unset}" \
+    "${TERMINFO-unset}" \
+    "${SPACETERM_SHELL_INTEGRATION_VERSION-unset}" \
+    > "$SPACETERM_REMOTE_ENVIRONMENT"
+"#,
+        )
+        .unwrap();
+        fs::set_permissions(&fake_shell, fs::Permissions::from_mode(0o700)).unwrap();
+        let command =
+            pane_command(workspace.to_str().unwrap(), fake_shell.to_str().unwrap()).unwrap();
+
+        let status = Command::new("/bin/sh")
+            .args(["-c", &command.argument])
+            .env_clear()
+            .env("SPACETERM_REMOTE_ENVIRONMENT", &environment)
+            .status()
+            .unwrap();
+
+        assert!(status.success());
+        assert_eq!(
+            fs::read_to_string(environment).unwrap(),
+            "1\ntruecolor\nunset\nunset\n"
+        );
+        fs::remove_dir_all(test_root).unwrap();
     }
 
     #[test]
@@ -1754,7 +1809,7 @@ pwd -P > "$SPACETERM_WORKING_DIRECTORY"
         assert_eq!(spec.executable(), OsStr::new("/usr/bin/ssh"));
         assert_eq!(
             arguments(&spec).last().map(String::as_str),
-            Some("cd '/srv/project' && exec '/bin/zsh' -l")
+            Some("cd '/srv/project' && SPACETERM='1' COLORTERM='truecolor' exec '/bin/zsh' -l")
         );
         assert_eq!(
             duplicate_owner.take().err(),

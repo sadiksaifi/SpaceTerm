@@ -1108,7 +1108,7 @@ mod tests {
         assert_eq!(command.get_argv().first().unwrap(), "/usr/bin/ssh");
         assert_eq!(
             command.get_argv().last().unwrap(),
-            "cd \"${HOME}\"'/project' && exec '/bin/zsh' -l"
+            "cd \"${HOME}\"'/project' && SPACETERM='1' COLORTERM='truecolor' exec '/bin/zsh' -l"
         );
         assert_eq!(command.get_cwd(), Some(&local_home.as_os_str().to_owned()));
         assert_eq!(

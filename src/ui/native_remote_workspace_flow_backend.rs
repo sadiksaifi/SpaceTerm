@@ -1090,7 +1090,7 @@ mod tests {
 
         assert_eq!(
             command.arguments().last().unwrap(),
-            "cd '/srv/project' && exec '/bin/sh' -l"
+            "cd '/srv/project' && SPACETERM='1' COLORTERM='truecolor' exec '/bin/sh' -l"
         );
     }
 
