@@ -469,6 +469,18 @@ impl RemoteWorkspaceFlow {
         self.stage
     }
 
+    pub(super) fn owns_activation(
+        &self,
+        handle: &RemoteWorkspaceFlowCompletionHandle,
+    ) -> bool {
+        self.stage == RemoteWorkspaceFlowStage::AwaitingActivation
+            && self
+                .pending_completion
+                .as_ref()
+                .is_some_and(|pending| pending.is_same_transfer(handle))
+            && handle.is_empty()
+    }
+
     #[cfg(test)]
     pub(super) fn emit_completion_for_test(
         &mut self,
@@ -1257,13 +1269,7 @@ impl RemoteWorkspaceFlow {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        let is_current = self.stage == RemoteWorkspaceFlowStage::AwaitingActivation
-            && self
-                .pending_completion
-                .as_ref()
-                .is_some_and(|pending| pending.is_same_transfer(handle))
-            && handle.is_empty();
-        if !is_current {
+        if !self.owns_activation(handle) {
             return false;
         }
         drop(handle.take());
@@ -1288,13 +1294,7 @@ impl RemoteWorkspaceFlow {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Result<(), RemoteWorkspaceFlowCompletion> {
-        let is_current = self.stage == RemoteWorkspaceFlowStage::AwaitingActivation
-            && self
-                .pending_completion
-                .as_ref()
-                .is_some_and(|pending| pending.is_same_transfer(handle))
-            && handle.is_empty();
-        if !is_current {
+        if !self.owns_activation(handle) {
             return Err(completion);
         }
         let RemoteWorkspaceFlowCompletion {

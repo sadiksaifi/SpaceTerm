@@ -152,6 +152,21 @@ impl WorkspaceTerminalSessionFactory {
         Ok(PreparedWorkspaceTerminalLaunch { launch_plan })
     }
 
+    /// Revalidates the pinned physical identity and grants one subsequent Remote child launch.
+    ///
+    /// Local child launches have no remote authority to revalidate, so callers can keep their
+    /// synchronous path by branching on `None`.
+    pub(crate) fn revalidate_remote_child_launch(
+        &self,
+    ) -> Option<Task<Result<(), RemoteChannelRevalidationError>>> {
+        match &self.launch_context {
+            WorkspaceTerminalLaunchContext::Local(_) => None,
+            WorkspaceTerminalLaunchContext::Remote(context) => {
+                Some(context.channel_provider.revalidate())
+            }
+        }
+    }
+
     pub(crate) fn start(
         &self,
         geometry: TerminalGeometry,
