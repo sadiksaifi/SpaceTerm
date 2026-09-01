@@ -4164,7 +4164,7 @@ mod tests {
     }
 
     #[test]
-    fn synchronized_output_deadline_should_publish_the_pending_screen() {
+    fn synchronized_output_deadline_should_publish_only_after_output_stalls() {
         let (_command_tx, commands) = mpsc::channel();
         let (_reader_events, reader_event_rx) = mpsc::sync_channel(PTY_OUTPUT_QUEUE_CAPACITY);
         let records = ScriptedPtyRecords::default();
@@ -4210,17 +4210,28 @@ mod tests {
         let _ = receiver.try_recv().unwrap();
 
         let started = Instant::now();
-        worker.emulator.feed_at(b"\x1b[?2026hstalled", started);
+        worker.emulator.feed_at(b"\x1b[?2026hlong", started);
         assert!(worker.publish_screen());
         assert!(receiver.try_recv().is_err());
 
+        let progressed = started + Duration::from_millis(900);
+        worker.emulator.feed_at(b" remote redraw", progressed);
         assert!(
             worker.release_synchronized_output_if_due(started + MAX_SYNCHRONIZED_OUTPUT_DURATION)
+        );
+        assert!(
+            receiver.try_recv().is_err(),
+            "an active remote redraw must remain atomic after one second of total duration"
+        );
+
+        assert!(
+            worker
+                .release_synchronized_output_if_due(progressed + MAX_SYNCHRONIZED_OUTPUT_DURATION)
         );
         let SessionEvent::Screen(screen) = receiver.try_recv().unwrap() else {
             panic!("the synchronized-output deadline must publish a screen")
         };
-        assert!(screen_text(&screen).contains("stalled"));
+        assert!(screen_text(&screen).contains("long remote redraw"));
         worker.finish();
     }
 

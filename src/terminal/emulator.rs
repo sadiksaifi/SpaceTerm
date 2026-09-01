@@ -604,7 +604,7 @@ pub(crate) struct TerminalEmulator {
     pointer_mapping_invalidated: bool,
     gesture_clock: GestureClock,
     presentation_generation: PresentationGeneration,
-    synchronized_output_started: Option<Instant>,
+    synchronized_output_last_activity: Option<Instant>,
     find: TerminalFindState,
 }
 
@@ -925,7 +925,7 @@ impl TerminalEmulator {
             pointer_mapping_invalidated: false,
             gesture_clock: GestureClock::System(Instant::now()),
             presentation_generation: PresentationGeneration::default(),
-            synchronized_output_started: None,
+            synchronized_output_last_activity: None,
             find: TerminalFindState::default(),
         })
     }
@@ -996,9 +996,14 @@ impl TerminalEmulator {
             self.find.invalidate();
         }
         let synchronized_after = self.terminal.mode(Mode::SYNC_OUTPUT).unwrap_or(false);
-        self.synchronized_output_started = match (synchronized_before, synchronized_after) {
+        self.synchronized_output_last_activity = match (synchronized_before, synchronized_after) {
             (false, true) => Some(now),
-            (true, true) => self.synchronized_output_started.or(Some(now)),
+            // The one-second safeguard is an inactivity deadline. A large remote redraw may
+            // legitimately keep one synchronized transaction open for longer than a second while
+            // output is still arriving; releasing it on total wall-clock duration exposes the
+            // producer's intermediate grid.
+            (true, true) if !bytes.is_empty() => Some(now),
+            (true, true) => self.synchronized_output_last_activity.or(Some(now)),
             (_, false) => None,
         };
         if let Some(last) = bytes.last().copied() {
@@ -1023,8 +1028,8 @@ impl TerminalEmulator {
     }
 
     pub(crate) fn synchronized_output_deadline(&self) -> Option<Instant> {
-        self.synchronized_output_started
-            .map(|started| started + MAX_SYNCHRONIZED_OUTPUT_DURATION)
+        self.synchronized_output_last_activity
+            .map(|last_activity| last_activity + MAX_SYNCHRONIZED_OUTPUT_DURATION)
     }
 
     pub(crate) fn presentation_generation(&self) -> PresentationGeneration {
@@ -1042,7 +1047,7 @@ impl TerminalEmulator {
     }
 
     pub(crate) fn end_synchronized_output(&mut self) -> Result<bool, Error> {
-        self.synchronized_output_started = None;
+        self.synchronized_output_last_activity = None;
         if !self.terminal.mode(Mode::SYNC_OUTPUT)? {
             return Ok(false);
         }
@@ -3974,6 +3979,34 @@ mod tests {
         );
         let released = emulator.snapshot().unwrap().unwrap();
         assert!(row_text(&released, 0).starts_with("stalled"));
+    }
+
+    #[test]
+    fn synchronized_output_deadline_should_follow_the_last_output_activity() {
+        let mut emulator = emulator(32, 2);
+        let _ = emulator.snapshot().unwrap();
+        let started = Instant::now();
+        emulator.feed_at(b"\x1b[?2026hlong", started);
+        assert!(emulator.snapshot().unwrap().is_none());
+
+        let progressed = started + Duration::from_millis(900);
+        emulator.feed_at(b" remote redraw", progressed);
+        assert!(emulator.snapshot().unwrap().is_none());
+        assert!(
+            !emulator
+                .expire_synchronized_output(started + Duration::from_secs(1))
+                .unwrap(),
+            "active synchronized output must not expose an intermediate grid"
+        );
+
+        assert!(
+            emulator
+                .expire_synchronized_output(progressed + Duration::from_secs(1))
+                .unwrap(),
+            "one second without output must still release a stalled producer"
+        );
+        let released = emulator.snapshot().unwrap().unwrap();
+        assert!(row_text(&released, 0).starts_with("long remote redraw"));
     }
 
     #[test]
