@@ -927,7 +927,10 @@ directory; it does not grant local path authority to the Remote Workspace Direct
 Closing or cancelling a Remote Project transfers Control Connection shutdown, reap, AskPass
 teardown, and private runtime cleanup into retained background ownership. GPUI and AppKit release
 hierarchy and focus ownership synchronously without waiting for the bounded OpenSSH shutdown; the
-session alias lease remains held until that background cleanup finishes.
+session alias lease remains held until that background cleanup finishes. When Operating-System
+Window deactivation cancels Remote Workspace Directory selection, the persistent Workspace owner
+releases the picker immediately and restores the Focused Pane on reactivation only when no newer
+presentation blocks Terminal Input Focus.
 
 Remote connection state couples Connecting, Connected, Reconnecting, Disconnected, Failed, and
 Closing to a monotonic Connection Generation. Reconnect starts only from Disconnected or Failed at

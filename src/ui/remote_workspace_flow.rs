@@ -630,14 +630,14 @@ impl RemoteWorkspaceFlow {
     }
 
     #[cfg(test)]
-    pub(super) fn dismiss_remote_picker_for_test(
+    pub(super) fn select_destination_for_test(
         &mut self,
+        destination: SshDestination,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.reduce_remote_picker_event(
-            self.action_generation,
-            &RemoteWorkspacePickerEvent::Dismissed,
+        self.reduce_host_event(
+            &SshHostPickerEvent::SelectDestination(destination),
             window,
             cx,
         );

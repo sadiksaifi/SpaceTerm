@@ -226,6 +226,7 @@ pub(crate) struct WorkspaceManager {
     remote_workspace_flow: Option<Entity<RemoteWorkspaceFlow>>,
     remote_workspace_runtimes: BTreeMap<WorkspaceId, RemoteWorkspaceRuntime>,
     remote_workspace_activation_task: Option<Task<()>>,
+    remote_workspace_focus_restore_pending: bool,
     remote_workspace_reconnect: Option<RemoteWorkspaceReconnectAttempt>,
     #[cfg(test)]
     close_focused_pane_before_reconnect_commit: bool,
@@ -434,6 +435,10 @@ impl WorkspaceManager {
             },
         )
         .detach();
+        cx.observe_window_activation(window, |manager, window, cx| {
+            manager.restore_remote_workspace_focus_after_activation(window, cx);
+        })
+        .detach();
 
         Self {
             workspaces,
@@ -453,6 +458,7 @@ impl WorkspaceManager {
             remote_workspace_flow: None,
             remote_workspace_runtimes: BTreeMap::new(),
             remote_workspace_activation_task: None,
+            remote_workspace_focus_restore_pending: false,
             remote_workspace_reconnect: None,
             #[cfg(test)]
             close_focused_pane_before_reconnect_commit: false,
@@ -1008,6 +1014,23 @@ impl WorkspaceManager {
             });
     }
 
+    fn restore_remote_workspace_focus_after_activation(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !window.is_window_active()
+            || !std::mem::take(&mut self.remote_workspace_focus_restore_pending)
+        {
+            return;
+        }
+        if self.terminal_focus_blocker(window, cx).is_some() {
+            return;
+        }
+        self.focus(window, cx);
+        cx.notify();
+    }
+
     fn handle_operating_system_window_drag_event(
         &mut self,
         event: WindowDragRegionEvent,
@@ -1398,6 +1421,7 @@ impl WorkspaceManager {
             }
             RemoteWorkspaceFlowEvent::Cancelled => {
                 self.remote_workspace_activation_task.take();
+                self.remote_workspace_focus_restore_pending = !window.is_window_active();
                 self.remote_workspace_flow = None;
                 self.sync_terminal_focus_blocker(window, cx);
                 cx.notify();
@@ -5663,24 +5687,32 @@ mod tests {
     }
 
     #[gpui::test]
-    fn dismissed_remote_picker_should_release_flow_and_reenable_new_workspace(
+    fn deactivated_remote_picker_should_restore_actions_after_releasing_its_flow(
         cx: &mut TestAppContext,
     ) {
-        let (manager, _, cx) = workspace_manager(cx);
+        let (session, closes, _, _, _) = reconnect_session("work", "/home/tester");
+        let backend =
+            TestRemoteWorkspaceFlowBackend::with_connections([gpui::Task::ready(Ok(session))]);
+        let (manager, _, cx) = workspace_manager_with_remote_backend(backend, cx);
+        cx.update(|window, _| window.activate_window());
+        cx.run_until_parked();
         let flow = open_remote_workspace_flow(&manager, cx);
-        let (completion, closes, _, _) =
-            remote_completion("work", "~/src", "/home/tester/src", false);
-        emit_remote_workspace_completion(&flow, completion, cx);
+        cx.update(|window, cx| {
+            flow.update(cx, |flow, cx| {
+                flow.select_destination_for_test(
+                    crate::domain::SshDestination::new("work".to_owned()).unwrap(),
+                    window,
+                    cx,
+                );
+            });
+        });
+        cx.run_until_parked();
         assert_eq!(
             flow.read_with(cx, |flow, _| flow.stage()),
             RemoteWorkspaceFlowStage::DirectorySelection
         );
 
-        cx.update(|window, cx| {
-            flow.update(cx, |flow, cx| {
-                flow.dismiss_remote_picker_for_test(window, cx)
-            });
-        });
+        cx.deactivate_window();
         cx.run_until_parked();
 
         assert_eq!(closes.load(Ordering::Acquire), 1);
@@ -5693,10 +5725,57 @@ mod tests {
             cx.update(|window, cx| manager.read(cx).terminal_focus_blocker(window, cx)),
             None
         );
+        assert!(manager.read_with(cx, |manager, _| {
+            manager.remote_workspace_focus_restore_pending
+        }));
+
+        let cancelled_flow_id = flow.entity_id();
+        drop(flow);
+        cx.update(|window, _| window.activate_window());
+        cx.run_until_parked();
+
+        assert!(manager.read_with(cx, |manager, _| {
+            !manager.remote_workspace_focus_restore_pending
+        }));
+        assert!(cx.update(|window, cx| {
+            manager
+                .read(cx)
+                .workspaces
+                .active_workspace()
+                .payload()
+                .read(cx)
+                .focused_terminal_is_focused(window, cx)
+        }));
+        assert!(cx.update(|window, cx| { window.is_action_available(&ShowNewWorkspacePanel, cx) }));
 
         open_new_workspace_panel(cx);
-        assert!(manager.read_with(cx, |manager, cx| {
+        assert!(cx.update(|window, cx| {
+            let manager = manager.read(cx);
             manager.new_workspace_panel.read(cx).is_open()
+                && manager
+                    .new_workspace_panel
+                    .read(cx)
+                    .input_is_focused(window, cx)
+        }));
+        cx.update(|window, cx| {
+            manager.update(cx, |manager, cx| {
+                manager.remote_workspace_focus_restore_pending = true;
+                manager.restore_remote_workspace_focus_after_activation(window, cx);
+            });
+        });
+        assert!(cx.update(|window, cx| {
+            let manager = manager.read(cx);
+            !manager.remote_workspace_focus_restore_pending
+                && manager
+                    .new_workspace_panel
+                    .read(cx)
+                    .input_is_focused(window, cx)
+                && !manager
+                    .workspaces
+                    .active_workspace()
+                    .payload()
+                    .read(cx)
+                    .focused_terminal_is_focused(window, cx)
         }));
         click("new-workspace-source-remote-project", cx);
         let reopened = manager.read_with(cx, |manager, _| {
@@ -5706,7 +5785,7 @@ mod tests {
                 .expect("Remote Project should create a fresh flow")
                 .clone()
         });
-        assert_ne!(reopened, flow);
+        assert_ne!(reopened.entity_id(), cancelled_flow_id);
     }
 
     #[gpui::test]
