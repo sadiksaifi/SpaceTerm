@@ -12,6 +12,7 @@ impl SshHostAlias {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn new_bounded(
         value: String,
         maximum_bytes: usize,
@@ -43,6 +44,7 @@ pub(crate) enum DestinationQueryResolution {
 }
 
 impl DestinationQueryResolution {
+    #[cfg(test)]
     pub(crate) const fn destination(&self) -> &SshDestination {
         match self {
             Self::Configured { destination, .. } | Self::AddHost { destination } => destination,
@@ -53,7 +55,11 @@ impl DestinationQueryResolution {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum SshHostAliasError {
     Invalid,
-    TooLong { actual: usize, maximum: usize },
+    #[cfg(test)]
+    TooLong {
+        actual: usize,
+        maximum: usize,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

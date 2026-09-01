@@ -44,11 +44,11 @@ impl WorkspaceDirectoryIdentity {
 /// Rejected strings must not reach OpenSSH arguments, remote utility commands, or local path APIs.
 pub(crate) enum RemoteWorkspaceValueError {
     #[error("SSH destination must be one non-option, control-free token")]
-    InvalidDestination,
+    Destination,
     #[error("Remote Workspace Directory must be an absolute or ~/ path without control characters")]
-    InvalidWorkspaceDirectory,
+    WorkspaceDirectory,
     #[error("Physical remote directory identity must be an absolute control-free path")]
-    InvalidDirectoryIdentity,
+    DirectoryIdentity,
 }
 
 /// The exact OpenSSH destination token selected by the user.
@@ -66,7 +66,7 @@ impl SshDestination {
                 .chars()
                 .any(|character| character.is_whitespace() || character.is_control())
         {
-            return Err(RemoteWorkspaceValueError::InvalidDestination);
+            return Err(RemoteWorkspaceValueError::Destination);
         }
         Ok(Self(value))
     }
@@ -87,7 +87,7 @@ impl RemoteWorkspaceDirectory {
     pub(crate) fn new(value: String) -> Result<Self, RemoteWorkspaceValueError> {
         let supported_form = value.starts_with('/') || value == "~" || value.starts_with("~/");
         if !supported_form || value.chars().any(char::is_control) {
-            return Err(RemoteWorkspaceValueError::InvalidWorkspaceDirectory);
+            return Err(RemoteWorkspaceValueError::WorkspaceDirectory);
         }
         Ok(Self(value))
     }
@@ -114,7 +114,7 @@ impl RemoteDirectoryIdentity {
                     })
             });
         if !normalized || value.chars().any(char::is_control) {
-            return Err(RemoteWorkspaceValueError::InvalidDirectoryIdentity);
+            return Err(RemoteWorkspaceValueError::DirectoryIdentity);
         }
         Ok(Self(value))
     }
@@ -159,7 +159,6 @@ impl RemoteWorkspaceKey {
 ///
 /// A phase is meaningful only together with its owning connection generation.
 pub(crate) enum RemoteConnectionPhase {
-    Connecting,
     Connected,
     Reconnecting,
     Disconnected,
@@ -189,10 +188,6 @@ pub(crate) enum RemoteConnectionReduction {
 }
 
 impl RemoteConnectionState {
-    pub(crate) const fn connecting(generation: u64) -> Self {
-        Self::new(generation, RemoteConnectionPhase::Connecting)
-    }
-
     pub(crate) const fn connected(generation: u64) -> Self {
         Self::new(generation, RemoteConnectionPhase::Connected)
     }
@@ -238,11 +233,6 @@ impl RemoteConnectionState {
             matches!(
                 (self.phase, next.phase),
                 (
-                    RemoteConnectionPhase::Connecting,
-                    RemoteConnectionPhase::Connected
-                        | RemoteConnectionPhase::Failed
-                        | RemoteConnectionPhase::Closing
-                ) | (
                     RemoteConnectionPhase::Connected,
                     RemoteConnectionPhase::Disconnected | RemoteConnectionPhase::Closing
                 ) | (
@@ -405,6 +395,7 @@ pub(crate) enum CreateRemoteProjectOutcome {
 }
 
 impl CreateRemoteProjectOutcome {
+    #[cfg(test)]
     pub(crate) const fn workspace_id(self) -> WorkspaceId {
         match self {
             Self::Created { workspace_id } | Self::ActivatedExisting { workspace_id } => {
@@ -1877,7 +1868,6 @@ mod tests {
     #[test]
     fn begin_remote_close_accepts_each_live_phase_without_advancing_generation() {
         for (index, state) in [
-            RemoteConnectionState::connecting(3),
             RemoteConnectionState::connected(4),
             RemoteConnectionState::reconnecting(5),
             RemoteConnectionState::disconnected(6),

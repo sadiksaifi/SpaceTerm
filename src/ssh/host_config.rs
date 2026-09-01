@@ -22,14 +22,6 @@ impl HostConfigProvenance {
     pub(crate) const fn source(&self) -> HostConfigSource {
         self.source
     }
-
-    pub(crate) fn path(&self) -> &Path {
-        &self.path
-    }
-
-    pub(crate) const fn line(&self) -> usize {
-        self.line
-    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -81,6 +73,7 @@ impl DiscoveredSshHost {
         self.ambiguous
     }
 
+    #[cfg(test)]
     pub(crate) const fn direct_target(&self) -> Option<&DirectSshTarget> {
         self.direct_target.as_ref()
     }
@@ -162,14 +155,17 @@ pub(crate) struct HostConfigIssue {
 }
 
 impl HostConfigIssue {
+    #[cfg(test)]
     pub(crate) const fn source(&self) -> HostConfigSource {
         self.source
     }
 
+    #[cfg(test)]
     pub(crate) fn path(&self) -> &Path {
         &self.path
     }
 
+    #[cfg(test)]
     pub(crate) const fn line(&self) -> Option<usize> {
         self.line
     }
@@ -975,7 +971,7 @@ fn explicit_first_character(pattern: &str) -> Option<char> {
         '[' => {
             bracket_class(&characters, 0, Some('.')).and_then(|(matched, _)| matched.then_some('.'))
         }
-        character if matches!(character, '*' | '?') => None,
+        '*' | '?' => None,
         character => Some(character),
     }
 }

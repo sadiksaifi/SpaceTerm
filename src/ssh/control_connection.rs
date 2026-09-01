@@ -1,6 +1,8 @@
 use std::io;
 use std::os::unix::net::UnixListener;
-use std::path::{Path, PathBuf};
+#[cfg(test)]
+use std::path::Path;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -26,6 +28,7 @@ use crate::platform::app_paths::{AppPaths, AppPathsError, RegisteredRuntimeSocke
 
 const CONTROL_OWNER_KIND: &str = "ssh-control";
 const CONTROL_SOCKET_NAME: &str = "master.sock";
+#[cfg(test)]
 const MAXIMUM_READINESS_TIMEOUT: Duration = Duration::from_secs(60);
 const SHUTDOWN_OPERATION_TIMEOUT: Duration = Duration::from_secs(5);
 const SHUTDOWN_MASTER_GRACE: Duration = Duration::from_secs(2);
@@ -35,6 +38,7 @@ const PROCESS_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
 /// Invalid bounded readiness timing supplied to a control connection.
+#[cfg(test)]
 pub(crate) enum ControlConnectionTimingError {
     #[error("SSH readiness timeout must be between one nanosecond and 60 seconds")]
     InvalidTimeout,
@@ -54,6 +58,7 @@ pub(crate) struct ControlConnectionTiming {
 }
 
 impl ControlConnectionTiming {
+    #[cfg(test)]
     pub(crate) fn new(
         timeout: Duration,
         poll_interval: Duration,
@@ -171,6 +176,7 @@ pub(crate) struct OpenSshControlConnection<B: SshProcessBackend> {
     authority: Option<Arc<LiveConnectionAuthority>>,
     supervisor_stop: Arc<AtomicBool>,
     supervisor: Option<JoinHandle<()>>,
+    #[cfg(test)]
     control_path: PathBuf,
 }
 
@@ -302,6 +308,7 @@ impl<B: SshProcessBackend> OpenSshControlConnection<B> {
     }
 
     /// Borrows the bounded private socket path owned by this connection.
+    #[cfg(test)]
     pub(crate) fn control_path(&self) -> &Path {
         &self.control_path
     }
@@ -572,6 +579,8 @@ impl<B: SshProcessBackend> ConnectingControl<B> {
                 return Err(error);
             }
         };
+        #[cfg(not(test))]
+        drop(control_path);
         Ok(OpenSshControlConnection {
             backend: Arc::clone(&self.backend),
             commands,
@@ -580,6 +589,7 @@ impl<B: SshProcessBackend> ConnectingControl<B> {
             authority: Some(authority),
             supervisor_stop,
             supervisor: Some(supervisor),
+            #[cfg(test)]
             control_path,
         })
     }
@@ -622,11 +632,10 @@ fn spawn_supervisor<B: SshProcessBackend>(
                 let result = child.lock().map_or_else(
                     |_| Err(io::Error::other("SSH master ownership lock was poisoned")),
                     |mut child| match child.as_mut() {
-                        Some(process) => backend.try_wait(process).map(|exit| {
+                        Some(process) => backend.try_wait(process).inspect(|exit| {
                             if exit.is_some() {
                                 child.take();
                             }
-                            exit
                         }),
                         None => Ok(Some(ProcessExit::unsuccessful(None))),
                     },
@@ -658,7 +667,7 @@ mod tests {
     use std::collections::VecDeque;
     use std::ffi::OsString;
     use std::fs;
-    use std::future::{Future, pending};
+    use std::future::pending;
     use std::io;
     use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
     use std::os::unix::net::UnixListener;
@@ -818,39 +827,34 @@ mod tests {
             self.epoch + self.state.lock().unwrap().elapsed
         }
 
-        fn spawn(
-            &self,
-            spec: SshCommandSpec,
-        ) -> impl Future<Output = io::Result<Self::Child>> + Send {
-            async move {
-                let arguments = spec.arguments().to_vec();
-                let socket_path = argument_after(&arguments, "-S").unwrap();
-                let listener = UnixListener::bind(&socket_path)?;
-                let mut state = self.state.lock().unwrap();
-                state.records.push(arguments);
-                state.socket_path = Some(socket_path);
-                Ok(FakeChild {
-                    listener: Some(listener),
-                })
-            }
+        async fn spawn(&self, spec: SshCommandSpec) -> io::Result<Self::Child> {
+            let arguments = spec.arguments().to_vec();
+            let socket_path = argument_after(&arguments, "-S").unwrap();
+            let listener = UnixListener::bind(&socket_path)?;
+            let mut state = self.state.lock().unwrap();
+            state.records.push(arguments);
+            state.socket_path = Some(socket_path);
+            Ok(FakeChild {
+                listener: Some(listener),
+            })
         }
 
-        fn run(
+        async fn run(
             &self,
             spec: SshCommandSpec,
             cancellation: SshCancellationToken,
             deadline: Instant,
-        ) -> impl Future<Output = Result<ProcessExit, ProcessRunError>> + Send {
-            async move {
-                let arguments = spec.arguments().to_vec();
-                let is_readiness = contains_pair(&arguments, "-O", "check");
-                let is_shutdown = contains_pair(&arguments, "-O", "exit");
-                let should_hang = {
-                    let mut state = self.state.lock().unwrap();
-                    state.records.push(arguments);
-                    (is_readiness && state.hang_readiness) || (is_shutdown && state.hang_shutdown)
-                };
-                while should_hang {
+        ) -> Result<ProcessExit, ProcessRunError> {
+            let arguments = spec.arguments().to_vec();
+            let is_readiness = contains_pair(&arguments, "-O", "check");
+            let is_shutdown = contains_pair(&arguments, "-O", "exit");
+            let should_hang = {
+                let mut state = self.state.lock().unwrap();
+                state.records.push(arguments);
+                (is_readiness && state.hang_readiness) || (is_shutdown && state.hang_shutdown)
+            };
+            if should_hang {
+                loop {
                     if cancellation.is_cancelled() {
                         return Err(ProcessRunError::Cancelled);
                     }
@@ -861,18 +865,18 @@ mod tests {
                     self.delay(PROCESS_POLL_INTERVAL.min(deadline.duration_since(now)))
                         .await;
                 }
-                let mut state = self.state.lock().unwrap();
-                if is_readiness {
-                    Ok(state
-                        .readiness
-                        .pop_front()
-                        .unwrap_or(ProcessExit::unsuccessful(Some(255))))
-                } else {
-                    if is_shutdown && state.exit_after_shutdown {
-                        state.early_exits.push_back(Some(ProcessExit::successful()));
-                    }
-                    Ok(ProcessExit::successful())
+            }
+            let mut state = self.state.lock().unwrap();
+            if is_readiness {
+                Ok(state
+                    .readiness
+                    .pop_front()
+                    .unwrap_or(ProcessExit::unsuccessful(Some(255))))
+            } else {
+                if is_shutdown && state.exit_after_shutdown {
+                    state.early_exits.push_back(Some(ProcessExit::successful()));
                 }
+                Ok(ProcessExit::successful())
             }
         }
 
@@ -908,20 +912,18 @@ mod tests {
             self.state.lock().unwrap().master_error_output.take()
         }
 
-        fn delay(&self, duration: Duration) -> impl Future<Output = ()> + Send {
-            async move {
-                let (cancel, should_remain_pending) = {
-                    let mut state = self.state.lock().unwrap();
-                    state.delays.push(duration);
-                    state.elapsed += duration;
-                    (state.cancel_on_delay.clone(), state.pending_delay)
-                };
-                if let Some(cancel) = cancel {
-                    cancel.cancel();
-                }
-                if should_remain_pending {
-                    pending::<()>().await;
-                }
+        async fn delay(&self, duration: Duration) {
+            let (cancel, should_remain_pending) = {
+                let mut state = self.state.lock().unwrap();
+                state.delays.push(duration);
+                state.elapsed += duration;
+                (state.cancel_on_delay.clone(), state.pending_delay)
+            };
+            if let Some(cancel) = cancel {
+                cancel.cancel();
+            }
+            if should_remain_pending {
+                pending::<()>().await;
             }
         }
     }

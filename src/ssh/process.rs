@@ -91,6 +91,7 @@ pub(crate) struct ProcessExit {
 }
 
 impl ProcessExit {
+    #[cfg(test)]
     pub(crate) const fn successful() -> Self {
         Self {
             success: true,

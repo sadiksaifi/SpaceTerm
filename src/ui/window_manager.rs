@@ -160,6 +160,7 @@ impl WindowManager {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn new_with_operating_system_window_drag_platform(
         session_factory: WorkspaceTerminalSessionFactory,
         operating_system_window_drag_platform: Rc<dyn OperatingSystemWindowDragPlatform>,
@@ -1575,6 +1576,16 @@ mod tests {
         events: Rc<RefCell<Vec<RemoteChildLaunchUnavailable>>>,
     }
 
+    type PaneHierarchyIdentity = (
+        WindowId,
+        gpui::EntityId,
+        Vec<(PaneId, gpui::EntityId)>,
+        String,
+        PaneId,
+        ZoomState,
+    );
+    type WindowHierarchyIdentity = (WindowId, Vec<PaneHierarchyIdentity>);
+
     impl Render for RemoteLaunchEventHarness {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
             self.manager.clone()
@@ -1734,20 +1745,7 @@ mod tests {
         (manager, records, events, cx)
     }
 
-    fn hierarchy_identity(
-        manager: &WindowManager,
-        cx: &App,
-    ) -> (
-        WindowId,
-        Vec<(
-            WindowId,
-            gpui::EntityId,
-            Vec<(PaneId, gpui::EntityId)>,
-            String,
-            PaneId,
-            ZoomState,
-        )>,
-    ) {
+    fn hierarchy_identity(manager: &WindowManager, cx: &App) -> WindowHierarchyIdentity {
         (
             manager.windows.active_window_id(),
             manager
@@ -1786,11 +1784,10 @@ mod tests {
             .detach();
         });
         cx.run_until_parked();
-        let prepared = result
+        result
             .borrow_mut()
             .take()
-            .expect("remote restart preparation task must finish");
-        prepared
+            .expect("remote restart preparation task must finish")
     }
 
     fn window_manager(

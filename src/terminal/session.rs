@@ -402,22 +402,27 @@ impl RemoteTerminalLaunchPlan {
         }
     }
 
+    #[cfg(test)]
     pub(crate) const fn local_home(&self) -> &crate::domain::ValidatedWorkspaceDirectory {
         &self.local_home
     }
 
+    #[cfg(test)]
     pub(crate) const fn destination(&self) -> &crate::domain::SshDestination {
         self.metadata_context.destination()
     }
 
+    #[cfg(test)]
     pub(crate) const fn remote_directory(&self) -> &crate::domain::RemoteWorkspaceDirectory {
         self.metadata_context.initial_directory()
     }
 
+    #[cfg(test)]
     pub(crate) fn fallback_title(&self) -> &str {
         &self.fallback_title
     }
 
+    #[cfg(test)]
     pub(crate) const fn metadata_context(&self) -> &RemoteTerminalMetadataContext {
         &self.metadata_context
     }
@@ -448,7 +453,7 @@ impl LocalTerminalLaunchPlan {
 /// ownership diverge; callers must not reconstruct one variant from the other's directory data.
 pub(crate) enum TerminalLaunchPlan {
     Local(LocalTerminalLaunchPlan),
-    Remote(RemoteTerminalLaunchPlan),
+    Remote(Box<RemoteTerminalLaunchPlan>),
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -467,6 +472,7 @@ impl TerminalSessionFactory for NativeTerminalSessionFactory {
                 TerminalSession::start(geometry, local.working_directory().path(), observation)?
             }
             TerminalLaunchPlan::Remote(remote) => {
+                let remote = *remote;
                 let command = remote.pane_channel.take()?;
                 TerminalSession::start_remote(
                     geometry,
@@ -2745,7 +2751,7 @@ mod tests {
         assert_eq!(plan.remote_directory(), &remote_directory);
         assert_eq!(plan.fallback_title(), "project on remote");
         assert_eq!(plan.metadata_context().destination(), &destination);
-        let debug = format!("{:?}", TerminalLaunchPlan::Remote(plan.clone()));
+        let debug = format!("{:?}", TerminalLaunchPlan::Remote(Box::new(plan.clone())));
         assert_eq!(debug, "Remote(RemoteTerminalLaunchPlan { .. })");
         assert!(!debug.contains("user@remote"));
         assert!(!debug.contains("~/project"));
@@ -2753,7 +2759,7 @@ mod tests {
         let _consumed = prepared.take().unwrap();
 
         let error = NativeTerminalSessionFactory
-            .start(test_geometry(), TerminalLaunchPlan::Remote(plan))
+            .start(test_geometry(), TerminalLaunchPlan::Remote(Box::new(plan)))
             .err();
 
         assert!(matches!(
@@ -3726,7 +3732,7 @@ mod tests {
             events,
             accessibility: _,
         } = NativeTerminalSessionFactory
-            .start(test_geometry(), TerminalLaunchPlan::Remote(plan))
+            .start(test_geometry(), TerminalLaunchPlan::Remote(Box::new(plan)))
             .unwrap();
 
         let event = receive_event(&events, "the remote local HOME failure", |event| {

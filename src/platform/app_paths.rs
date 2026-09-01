@@ -81,7 +81,6 @@ pub(crate) enum AppPathRoot {
     Data,
     State,
     Cache,
-    Runtime,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -139,18 +138,22 @@ impl AppPaths {
         &self.config
     }
 
+    #[cfg(test)]
     pub(crate) fn data(&self) -> &Path {
         &self.data
     }
 
+    #[cfg(test)]
     pub(crate) fn state(&self) -> &Path {
         &self.state
     }
 
+    #[cfg(test)]
     pub(crate) fn cache(&self) -> &Path {
         &self.cache
     }
 
+    #[cfg(test)]
     pub(crate) fn runtime(&self) -> &Path {
         &self.runtime
     }
@@ -207,7 +210,6 @@ impl AppPaths {
             AppPathRoot::Data => &self.data,
             AppPathRoot::State => &self.state,
             AppPathRoot::Cache => &self.cache,
-            AppPathRoot::Runtime => &self.runtime,
         }
     }
 }
@@ -222,6 +224,7 @@ pub(crate) struct RuntimeOwner {
 }
 
 impl RuntimeOwner {
+    #[cfg(test)]
     pub(crate) fn path(&self) -> &Path {
         &self.path
     }
@@ -240,6 +243,7 @@ impl RuntimeOwner {
         Ok(path)
     }
 
+    #[cfg(test)]
     pub(crate) fn create_artifact(&self, name: &str) -> Result<RuntimeArtifact, AppPathsError> {
         validate_child_name(name)?;
         self.verify_identity()?;
@@ -408,6 +412,7 @@ impl Drop for RuntimeOwner {
     }
 }
 
+#[cfg(test)]
 pub(crate) struct RuntimeArtifact {
     path: PathBuf,
     file: File,
@@ -438,6 +443,7 @@ impl RegisteredRuntimeSocket {
         })
     }
 
+    #[cfg(test)]
     pub(crate) fn path(&self) -> &Path {
         &self.path
     }
@@ -540,6 +546,7 @@ struct TrackedRuntimeArtifact {
     socket_identity: Option<DirectoryIdentity>,
 }
 
+#[cfg(test)]
 impl RuntimeArtifact {
     pub(crate) fn path(&self) -> &Path {
         &self.path
@@ -582,6 +589,7 @@ pub(crate) enum AppPathsError {
     InvalidArtifactName,
     #[error("the Unix socket path uses {actual} bytes but macOS permits at most {maximum}")]
     SocketPathTooLong { actual: usize, maximum: usize },
+    #[cfg(test)]
     #[error("failed to create runtime artifact {}: {source}", path.display())]
     CreateArtifact {
         path: PathBuf,
@@ -676,12 +684,14 @@ impl Drop for DirectoryCreationRollback {
     }
 }
 
+#[cfg(test)]
 struct ArtifactRollback<'a> {
     parent: &'a File,
     name: OsString,
     armed: bool,
 }
 
+#[cfg(test)]
 impl<'a> ArtifactRollback<'a> {
     fn new(parent: &'a File, name: &OsStr) -> Self {
         Self {
@@ -696,6 +706,7 @@ impl<'a> ArtifactRollback<'a> {
     }
 }
 
+#[cfg(test)]
 impl Drop for ArtifactRollback<'_> {
     fn drop(&mut self) {
         if self.armed {
@@ -975,6 +986,7 @@ fn create_directory_at(parent: &File, name: &OsStr) -> io::Result<()> {
     }
 }
 
+#[cfg(test)]
 fn create_file_at(parent: &File, name: &OsStr, path: &Path) -> Result<File, AppPathsError> {
     let name = component_cstring(name).map_err(|source| AppPathsError::CreateArtifact {
         path: path.to_path_buf(),

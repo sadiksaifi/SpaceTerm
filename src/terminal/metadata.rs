@@ -150,6 +150,7 @@ impl TerminalMetadataContext {
         }
     }
 
+    #[cfg(test)]
     pub(crate) const fn remote(&self) -> Option<&RemoteTerminalMetadataContext> {
         match self {
             Self::Local { .. } => None,

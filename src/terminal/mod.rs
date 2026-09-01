@@ -81,13 +81,15 @@ pub(crate) use session::AccessibilitySelectionSender;
 )]
 pub(crate) use session::SessionFailure;
 pub(crate) use session::{
-    AcceptanceSessionFailure, LocalTerminalLaunchPlan, NativeTerminalSessionFactory, PointerButton,
-    PointerInput, PointerPhase, RemoteTerminalLaunchPlan, SelectionCopyError, SessionEvent,
-    SessionExit, ShiftSelectionPolicy, SurfacePosition, TerminalLaunchPlan, TerminalSessionFactory,
-    TerminalSessionHandle, WheelInput, WheelPhase,
+    AcceptanceSessionFailure, NativeTerminalSessionFactory, PointerButton, PointerInput,
+    PointerPhase, SelectionCopyError, SessionEvent, SessionExit, ShiftSelectionPolicy,
+    SurfacePosition, TerminalSessionFactory, TerminalSessionHandle, WheelInput, WheelPhase,
 };
 #[cfg(test)]
-pub(crate) use session::{SessionError, StartedTerminalSession};
+pub(crate) use session::{
+    LocalTerminalLaunchPlan, RemoteTerminalLaunchPlan, SessionError, StartedTerminalSession,
+    TerminalLaunchPlan,
+};
 pub(crate) use workspace_terminal_session_factory::{
     PreparedWorkspaceTerminalLaunch, RemoteChannelRevalidationError, RemoteChannelUnavailable,
     RemoteTerminalChannelProvider, WorkspaceChildLaunchValidation, WorkspaceTerminalSessionFactory,

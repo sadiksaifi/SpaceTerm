@@ -267,12 +267,7 @@ impl SshHostForm {
             move |request, completion, cx| {
                 owner
                     .update(cx, |form, cx| {
-                        form.handle_action(
-                            *request.action_id(),
-                            completion,
-                            window_handle.clone(),
-                            cx,
-                        )
+                        form.handle_action(*request.action_id(), completion, window_handle, cx)
                     })
                     .unwrap_or(DialogCloseDecision::Deny {
                         first_invalid: None,
@@ -677,51 +672,53 @@ fn initial_values(mode: &SshHostFormMode) -> SshHostFormValues {
 }
 
 fn validate_form_values(values: &SshHostFormValues) -> SshHostFormValidation {
-    let mut errors = SshHostFormErrors::default();
-    errors.alias = validation_error(
-        ManagedSshHost::new(
-            values.alias.clone(),
-            "valid.example".to_owned(),
-            None,
-            None,
-            None,
-        ),
-        SshHostFormField::Alias,
-    );
-    errors.host_name = validation_error(
-        ManagedSshHost::new(
-            "valid-alias".to_owned(),
-            values.host_name.clone(),
-            None,
-            None,
-            None,
-        ),
-        SshHostFormField::HostName,
-    );
-    errors.user = validation_error(
-        ManagedSshHost::new(
-            "valid-alias".to_owned(),
-            "valid.example".to_owned(),
-            optional_value(&values.user),
-            None,
-            None,
-        ),
-        SshHostFormField::User,
-    );
-    errors.identity_file = validation_error(
-        ManagedSshHost::new(
-            "valid-alias".to_owned(),
-            "valid.example".to_owned(),
-            None,
-            None,
-            optional_value(&values.identity_file),
-        ),
-        SshHostFormField::IdentityFile,
-    );
     let port = parse_port(&values.port);
-    if port.is_err() {
-        errors.port = Some("Enter a decimal port from 1 to 65535.");
-    }
+    let errors = SshHostFormErrors {
+        alias: validation_error(
+            ManagedSshHost::new(
+                values.alias.clone(),
+                "valid.example".to_owned(),
+                None,
+                None,
+                None,
+            ),
+            SshHostFormField::Alias,
+        ),
+        host_name: validation_error(
+            ManagedSshHost::new(
+                "valid-alias".to_owned(),
+                values.host_name.clone(),
+                None,
+                None,
+                None,
+            ),
+            SshHostFormField::HostName,
+        ),
+        user: validation_error(
+            ManagedSshHost::new(
+                "valid-alias".to_owned(),
+                "valid.example".to_owned(),
+                optional_value(&values.user),
+                None,
+                None,
+            ),
+            SshHostFormField::User,
+        ),
+        port: port
+            .as_ref()
+            .err()
+            .map(|_| "Enter a decimal port from 1 to 65535."),
+        identity_file: validation_error(
+            ManagedSshHost::new(
+                "valid-alias".to_owned(),
+                "valid.example".to_owned(),
+                None,
+                None,
+                optional_value(&values.identity_file),
+            ),
+            SshHostFormField::IdentityFile,
+        ),
+    };
     let host = match (errors.first_invalid(), port) {
         (None, Ok(port)) => ManagedSshHost::new(
             values.alias.clone(),
@@ -810,6 +807,14 @@ mod tests {
 
     use super::*;
 
+    type RecordedFormEvents = Rc<RefCell<Vec<SshHostFormEvent>>>;
+    type FormWindow<'a> = (
+        Entity<FormHarness>,
+        Entity<SshHostForm>,
+        RecordedFormEvents,
+        &'a mut VisualTestContext,
+    );
+
     #[derive(Clone, Debug, Eq, PartialEq)]
     struct SaveRecord {
         host: ManagedSshHost,
@@ -869,16 +874,11 @@ mod tests {
         }
     }
 
-    fn form_window(
+    fn form_window<'a>(
         mode: SshHostFormMode,
         backend: Arc<ScriptedBackend>,
-        cx: &mut TestAppContext,
-    ) -> (
-        Entity<FormHarness>,
-        Entity<SshHostForm>,
-        Rc<RefCell<Vec<SshHostFormEvent>>>,
-        &mut VisualTestContext,
-    ) {
+        cx: &'a mut TestAppContext,
+    ) -> FormWindow<'a> {
         cx.update(crate::ui::init);
         let injected: Arc<dyn ManagedHostFormBackend> = backend;
         let (harness, cx) = cx.add_window_view(move |window, cx| {

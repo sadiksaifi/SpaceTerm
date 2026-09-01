@@ -21,8 +21,8 @@ use zeroize::Zeroizing;
 
 use super::app_paths::{AppPaths, AppPathsError, RegisteredRuntimeSocket, RuntimeOwner};
 use super::macos_askpass::{
-    AskPassPresentationError, AskPassPresenter, AskPassPromptKind, AskPassRequest, AskPassResult,
-    MacosAskPassPresenter,
+    AskPassPresentationError, AskPassPresenter, AskPassPromptKind, AskPassRequest,
+    AskPassResponseError, AskPassResult, MacosAskPassPresenter,
 };
 
 const PROTOCOL_VERSION: u8 = 1;
@@ -527,7 +527,9 @@ fn map_native_result(result: AskPassResult) -> BrokerAnswer {
         }
         AskPassResult::Confirmation(confirmed) => BrokerAnswer::Confirmation(confirmed),
         AskPassResult::Cancelled => BrokerAnswer::Cancelled,
-        AskPassResult::Failed(_) => BrokerAnswer::Failed,
+        AskPassResult::Failed(
+            AskPassResponseError::SecretTooLong | AskPassResponseError::EncodingUnavailable,
+        ) => BrokerAnswer::Failed,
     }
 }
 

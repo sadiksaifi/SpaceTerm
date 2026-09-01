@@ -175,13 +175,13 @@ impl WorkspaceTerminalSessionFactory {
                     return Err(RemoteChannelUnavailable);
                 }
                 let pane_channel = context.channel_provider.prepare()?;
-                TerminalLaunchPlan::Remote(RemoteTerminalLaunchPlan::new(
+                TerminalLaunchPlan::Remote(Box::new(RemoteTerminalLaunchPlan::new(
                     context.local_home.clone(),
                     context.metadata_context.destination().clone(),
                     context.metadata_context.initial_directory().clone(),
                     context.fallback_title.clone(),
                     pane_channel,
-                ))
+                )))
             }
         };
         Ok(PreparedWorkspaceTerminalLaunch { launch_plan })

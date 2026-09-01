@@ -706,6 +706,7 @@ impl TerminalEmulator {
         )
     }
 
+    #[cfg(test)]
     pub(crate) fn new_with_metadata(
         geometry: TerminalGeometry,
         initial_directory: &str,

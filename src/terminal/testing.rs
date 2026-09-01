@@ -395,13 +395,13 @@ mod tests {
         let _started = factory
             .start(
                 geometry,
-                TerminalLaunchPlan::Remote(RemoteTerminalLaunchPlan::new(
+                TerminalLaunchPlan::Remote(Box::new(RemoteTerminalLaunchPlan::new(
                     test_workspace_directory(PathBuf::from("/Users/local")),
                     destination.clone(),
                     directory.clone(),
                     "project on remote".to_owned(),
                     prepared,
-                )),
+                ))),
             )
             .unwrap();
 

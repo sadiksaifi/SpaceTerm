@@ -181,6 +181,7 @@ impl PendingAskPassCompletion {
         }
     }
 
+    #[cfg(test)]
     fn once(&self) -> AskPassCompletionOnce {
         self.once.clone()
     }

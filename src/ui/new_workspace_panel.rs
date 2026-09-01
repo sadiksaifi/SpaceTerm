@@ -1,5 +1,7 @@
+#[cfg(test)]
+use gpui::App;
 use gpui::prelude::*;
-use gpui::{App, Context, Entity, EventEmitter, Render, Window, px, rgba};
+use gpui::{Context, Entity, EventEmitter, Render, Window, px, rgba};
 use gpui_symbols::Icon;
 use spaceterm_ui::{
     CommandPalette, CommandPaletteAccessory, CommandPaletteActivationPolicy, CommandPaletteEvent,
@@ -122,6 +124,7 @@ pub(super) struct NewWorkspacePanel {
 }
 
 impl NewWorkspacePanel {
+    #[cfg(test)]
     pub(super) fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         Self::new_with_remote_unavailable_reason(None, window, cx)
     }
@@ -217,6 +220,7 @@ impl NewWorkspacePanel {
         replacement
     }
 
+    #[cfg(test)]
     pub(super) fn open_replacing(
         &mut self,
         replacement: CommandPaletteReplacementFocus,
@@ -249,6 +253,7 @@ impl NewWorkspacePanel {
         self.open || self.pending_open
     }
 
+    #[cfg(test)]
     pub(super) fn input_is_focused(&self, window: &Window, cx: &App) -> bool {
         self.palette.read(cx).editor_is_focused(window, cx)
     }

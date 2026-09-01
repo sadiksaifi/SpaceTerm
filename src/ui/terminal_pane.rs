@@ -2705,11 +2705,11 @@ impl TerminalPane {
 
     fn paste_clipboard(&mut self, _: &PasteClipboard, window: &mut Window, cx: &mut Context<Self>) {
         let terminal_input_focused = self.synchronize_terminal_input_focus(window, cx);
-        let paths = self
-            .local_file_capabilities
-            .are_enabled()
-            .then(|| read_file_urls().unwrap_or_default())
-            .unwrap_or_default();
+        let paths = if self.local_file_capabilities.are_enabled() {
+            read_file_urls().unwrap_or_default()
+        } else {
+            Vec::new()
+        };
         let insertion = if paths.is_empty() {
             let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) else {
                 return;
@@ -5602,7 +5602,7 @@ mod tests {
                     window,
                     cx,
                 );
-                pane.insert_dropped_file_paths_for_test(&[file.clone()], window, cx);
+                pane.insert_dropped_file_paths_for_test(std::slice::from_ref(&file), window, cx);
             });
         });
         cx.run_until_parked();

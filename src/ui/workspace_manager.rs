@@ -4059,6 +4059,15 @@ mod tests {
     };
 
     use super::*;
+
+    type RemoteCompletionFixture = (
+        RemoteWorkspaceFlowCompletion,
+        Arc<AtomicUsize>,
+        Arc<AtomicUsize>,
+        Arc<AtomicUsize>,
+        Arc<AtomicBool>,
+        async_channel::Sender<crate::ssh::live_connection::ControlConnectionTerminalState>,
+    );
     use crate::platform::finder_fallback::ScriptedFinderFallback;
     use crate::platform::macos_window_drag::RecordingOperatingSystemWindowDragPlatform;
     use crate::ssh::command::{SshCommandContext, ValidatedRemoteShellCommand};
@@ -4482,14 +4491,7 @@ mod tests {
         physical: &str,
         available: bool,
         revalidation: gpui::Task<Result<(), crate::terminal::RemoteChannelRevalidationError>>,
-    ) -> (
-        RemoteWorkspaceFlowCompletion,
-        Arc<AtomicUsize>,
-        Arc<AtomicUsize>,
-        Arc<AtomicUsize>,
-        Arc<AtomicBool>,
-        async_channel::Sender<crate::ssh::live_connection::ControlConnectionTerminalState>,
-    ) {
+    ) -> RemoteCompletionFixture {
         let destination = crate::domain::SshDestination::new(destination.to_owned()).unwrap();
         let directory = RemoteWorkspaceDirectory::new(directory.to_owned()).unwrap();
         let physical = crate::domain::RemoteDirectoryIdentity::new(physical.to_owned()).unwrap();

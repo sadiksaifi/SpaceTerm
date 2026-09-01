@@ -193,7 +193,7 @@ fn host_rows_for_query(discovery: &HostDiscovery, query: &str) -> Vec<HostPicker
                     .to_lowercase()
                     .starts_with(&folded_query)
         })
-        .filter_map(|host| configured_host_row(host))
+        .filter_map(configured_host_row)
         .collect::<Vec<_>>();
 
     let aliases = hosts
@@ -602,6 +602,14 @@ mod tests {
     use gpui::{FocusHandle, TestAppContext, VisualTestContext, div};
 
     use super::*;
+
+    type RecordedHostPickerEvents = Rc<RefCell<Vec<SshHostPickerEvent>>>;
+    type HostPickerWindow<'a> = (
+        Entity<SshHostPickerHarness>,
+        Entity<SshHostPicker>,
+        RecordedHostPickerEvents,
+        &'a mut VisualTestContext,
+    );
     use crate::ssh::host_config::{
         HostConfigFilesystem, HostConfigRoots, HostDiscoveryLimits, discover_ssh_hosts,
     };
@@ -747,16 +755,11 @@ mod tests {
         }
     }
 
-    fn host_picker(
+    fn host_picker<'a>(
         provider: Arc<ScriptedHostDiscoveryProvider>,
         host_in_active_use: impl Fn(&SshHostAlias) -> bool + Send + Sync + 'static,
-        cx: &mut TestAppContext,
-    ) -> (
-        Entity<SshHostPickerHarness>,
-        Entity<SshHostPicker>,
-        Rc<RefCell<Vec<SshHostPickerEvent>>>,
-        &mut VisualTestContext,
-    ) {
+        cx: &'a mut TestAppContext,
+    ) -> HostPickerWindow<'a> {
         cx.update(crate::ui::init);
         let injected_provider: Arc<dyn HostDiscoveryProvider> = provider;
         let active_use = Arc::new(host_in_active_use);
