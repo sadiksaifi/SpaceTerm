@@ -469,10 +469,7 @@ impl RemoteWorkspaceFlow {
         self.stage
     }
 
-    pub(super) fn owns_activation(
-        &self,
-        handle: &RemoteWorkspaceFlowCompletionHandle,
-    ) -> bool {
+    pub(super) fn owns_activation(&self, handle: &RemoteWorkspaceFlowCompletionHandle) -> bool {
         self.stage == RemoteWorkspaceFlowStage::AwaitingActivation
             && self
                 .pending_completion
@@ -492,6 +489,11 @@ impl RemoteWorkspaceFlow {
         self.stage = RemoteWorkspaceFlowStage::AwaitingActivation;
         cx.emit(RemoteWorkspaceFlowEvent::Completed(handle));
         self.publish(cx);
+    }
+
+    #[cfg(test)]
+    pub(super) fn cancel_for_test(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.cancel_flow(window, cx);
     }
 
     pub(super) fn open(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
@@ -857,6 +859,7 @@ impl RemoteWorkspaceFlow {
         self.pending_destination = Some(destination.clone());
         self.connection_error = None;
         self.connected = None;
+        self.retained_lifecycle = None;
         self.observed_progress.clear();
         let cancelled = Arc::new(AtomicBool::new(false));
         self.connection_cancelled = Some(Arc::clone(&cancelled));
@@ -1453,6 +1456,7 @@ mod tests {
 
     struct CountingOwner {
         closes: Arc<AtomicUsize>,
+        observer_takes: Option<Arc<AtomicUsize>>,
     }
 
     impl RemoteWorkspaceSessionOwner for CountingOwner {
@@ -1466,6 +1470,9 @@ mod tests {
         }
 
         fn take_lifecycle_observer(&mut self) -> Option<ControlConnectionObserver> {
+            if let Some(observer_takes) = &self.observer_takes {
+                observer_takes.fetch_add(1, Ordering::SeqCst);
+            }
             Some(ControlConnectionObserver::closed())
         }
 
@@ -1797,6 +1804,20 @@ mod tests {
         RemoteWorkspaceConnectedSession::new(
             Box::new(CountingOwner {
                 closes: Arc::clone(closes),
+                observer_takes: None,
+            }),
+            Arc::new(ReadyRemoteProvider),
+        )
+    }
+
+    fn session_with_observer_takes(
+        closes: &Arc<AtomicUsize>,
+        observer_takes: &Arc<AtomicUsize>,
+    ) -> RemoteWorkspaceConnectedSession {
+        RemoteWorkspaceConnectedSession::new(
+            Box::new(CountingOwner {
+                closes: Arc::clone(closes),
+                observer_takes: Some(Arc::clone(observer_takes)),
             }),
             Arc::new(ReadyRemoteProvider),
         )
@@ -2564,6 +2585,55 @@ mod tests {
         );
         assert_eq!(closes.load(Ordering::SeqCst), 1);
         assert_eq!(backend.state.lock().unwrap().connect_records.len(), 2);
+    }
+
+    #[gpui::test]
+    fn failed_activation_then_different_host_should_use_the_new_session_observer(
+        cx: &mut TestAppContext,
+    ) {
+        let closes = Arc::new(AtomicUsize::new(0));
+        let first_observer_takes = Arc::new(AtomicUsize::new(0));
+        let second_observer_takes = Arc::new(AtomicUsize::new(0));
+        let backend = FakeBackend::new([
+            Task::ready(Ok(session_with_observer_takes(
+                &closes,
+                &first_observer_takes,
+            ))),
+            Task::ready(Ok(session_with_observer_takes(
+                &closes,
+                &second_observer_takes,
+            ))),
+        ]);
+        let (_, flow, events, cx) = flow_window(backend, cx);
+        let selection = RemoteWorkspaceSelection::new(
+            RemoteWorkspaceDirectory::new("~/src".to_owned()).unwrap(),
+            remote_identity("/home/tester/src"),
+            remote_account(),
+        );
+
+        select_destination(&flow, "work", cx);
+        cx.update(|window, cx| {
+            flow.update(cx, |flow, cx| flow.complete(selection.clone(), window, cx));
+        });
+        let first = events.borrow().completions[0].clone();
+        let returned = first.take().unwrap();
+        cx.update(|window, cx| {
+            flow.update(cx, |flow, cx| {
+                assert!(flow.activation_failed(&first, returned, window, cx).is_ok());
+            });
+        });
+        assert_eq!(first_observer_takes.load(Ordering::SeqCst), 1);
+
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        select_destination(&flow, "other", cx);
+        cx.update(|window, cx| {
+            flow.update(cx, |flow, cx| flow.complete(selection, window, cx));
+        });
+
+        assert_eq!(closes.load(Ordering::SeqCst), 1);
+        assert_eq!(events.borrow().completions.len(), 2);
+        assert_eq!(second_observer_takes.load(Ordering::SeqCst), 1);
     }
 
     #[gpui::test]
