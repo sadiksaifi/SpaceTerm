@@ -871,6 +871,7 @@ impl AskPassPresenter for MacosAskPassPresenter {
                     completionHandler: block
                 ];
                 if let Some(sheet) = presentation.borrow().as_ref() {
+                    sheet.align_action_group_trailing();
                     sheet.focus_initial_control();
                 }
                 Ok(())
@@ -1027,12 +1028,6 @@ impl NativeAskPassSheet {
             (safe_button, affirmative_button)
         };
 
-        // SAFETY: Laying out the fully configured alert materializes its standard action group
-        // before the trailing constraint below is installed.
-        unsafe {
-            let _: () = msg_send![alert, layout];
-        }
-
         // SAFETY: The retained alert owns its NSWindow for the alert lifetime.
         let alert_window: id = unsafe { msg_send![alert, window] };
         if alert_window == nil {
@@ -1055,11 +1050,6 @@ impl NativeAskPassSheet {
                 let _: () = msg_send![alert_window, setDefaultButtonCell: safe_cell];
             }
         }
-        // SAFETY: `layout` above established the standard NSAlert view hierarchy. The helper only
-        // replaces the action group's center-X constraint when both buttons share the content view.
-        let _action_group_aligned = unsafe {
-            align_alert_action_group_trailing(alert_window, safe_button, affirmative_button)
-        };
         let secret_field_observer = if presentation.kind.requires_nonempty_secret() {
             let Some(field) = secret_field else {
                 // SAFETY: The retained alert owns both buttons and no object has been published.
@@ -1107,6 +1097,26 @@ impl NativeAskPassSheet {
     fn acquire_secure_input(&mut self) {
         if self.secret_field.is_some() {
             self.secure_input = Some(acquire_secret_input(SecureInputSecretOwnerId::new()));
+        }
+    }
+
+    fn align_action_group_trailing(&self) {
+        // SAFETY: `beginSheetModalForWindow:completionHandler:` has completed NSAlert's sheet
+        // layout. Querying the retained alert now avoids relying on button identity across AppKit's
+        // internal relayout; any changed hierarchy falls back to the native action placement.
+        unsafe {
+            let buttons: id = msg_send![self.alert, buttons];
+            if buttons == nil {
+                return;
+            }
+            let count: usize = msg_send![buttons, count];
+            if count != 2 {
+                return;
+            }
+            let first_button: id = msg_send![buttons, objectAtIndex: 0_usize];
+            let second_button: id = msg_send![buttons, objectAtIndex: 1_usize];
+            let _action_group_aligned =
+                align_alert_action_group_trailing(self.alert_window, first_button, second_button);
         }
     }
 
@@ -1287,19 +1297,19 @@ fn has_exact_center_constraint_properties(
 
 unsafe fn align_alert_action_group_trailing(
     alert_window: id,
-    safe_button: id,
-    affirmative_button: id,
+    first_button: id,
+    second_button: id,
 ) -> bool {
-    if alert_window == nil || safe_button == nil || affirmative_button == nil {
+    if alert_window == nil || first_button == nil || second_button == nil {
         return false;
     }
     // SAFETY: NSAlert owns both buttons and its content view for the alert lifetime. This uses only
     // public NSView and NSLayoutAnchor selectors after the alert has completed its initial layout.
     unsafe {
-        let action_group: id = msg_send![safe_button, superview];
-        let affirmative_group: id = msg_send![affirmative_button, superview];
+        let action_group: id = msg_send![first_button, superview];
+        let second_button_group: id = msg_send![second_button, superview];
         let content_view: id = msg_send![alert_window, contentView];
-        if action_group == nil || action_group != affirmative_group || content_view == nil {
+        if action_group == nil || action_group != second_button_group || content_view == nil {
             return false;
         }
         let action_group_parent: id = msg_send![action_group, superview];
