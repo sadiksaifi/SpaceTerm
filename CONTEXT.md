@@ -645,8 +645,10 @@ soft-wrap unwrapping from hard newlines and make trailing-space trimming determi
 spacer tails never become duplicated text. Pasteboard ownership stays outside the Terminal
 Emulator: the macOS Adapter publishes only public UTF-8 plain-text and HTML representations, and
 copy failures report the operation or representation type without logging copied content.
-Command-C completes that latency-sensitive query and publishes its representations before the
-action returns, so any immediate Paste observes the new Selection rather than the previous
+Completing a non-empty local pointer Selection automatically runs that ordered query and publishes
+its representations after the release; application mouse reporting never triggers an automatic
+copy. Command-C completes the same latency-sensitive query and publishes its representations before
+the action returns, so any immediate Paste observes the new Selection rather than the previous
 pasteboard value.
 
 ### Terminal Find

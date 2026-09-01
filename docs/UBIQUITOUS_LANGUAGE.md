@@ -135,6 +135,7 @@
 - Opening **Terminal Find** transfers responder ownership away from terminal input without changing **Focused Pane** identity; clicking the terminal may restore **Terminal Input Focus** while Find remains open.
 - **Terminal Find** searches across soft wraps but not hard line boundaries, maps UTF-8 bytes to grapheme-head cells, excludes wide spacer tails, and never derives search results in GPUI rendering.
 - **Selection** is painted above every **Terminal Find** result, including its current result.
+- Completing a non-empty local pointer **Selection** automatically publishes its formatted plain-text and HTML representations to the macOS pasteboard; application mouse reporting never triggers that copy.
 - **Marked Text** exists only while its Pane has **Terminal Input Focus**; cancellation or focus loss discards it without Terminal Session input.
 - A **Paste Payload** that requires **Paste Confirmation** remains worker-owned; UI and diagnostics receive only bounded risk metadata, never its content.
 - A multiline **Paste Payload** requires **Paste Confirmation** only when bracketed-paste mode is inactive; an embedded closing fence always requires confirmation, while encoder-replaced control bytes alone do not.

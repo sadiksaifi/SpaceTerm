@@ -57,6 +57,7 @@ pub(crate) enum RecordedSessionCommand {
     Focus(bool),
     Resize(TerminalGeometry),
     Pointer(PointerInput),
+    PointerAndCopySelection(PointerInput),
     Wheel(WheelInput),
     ScrollTo(u64, PresentationGeneration),
     SetFindQuery(FindQueryGeneration, String),
@@ -129,7 +130,13 @@ impl TestTerminalSessionRecords {
         self.commands
             .borrow()
             .iter()
-            .filter(|input| matches!(input.command, RecordedSessionCommand::Pointer(_)))
+            .filter(|input| {
+                matches!(
+                    input.command,
+                    RecordedSessionCommand::Pointer(_)
+                        | RecordedSessionCommand::PointerAndCopySelection(_)
+                )
+            })
             .count()
     }
 }
@@ -300,6 +307,14 @@ impl TerminalSessionHandle for TestTerminalSessionHandle {
 
     fn pointer(&self, input: PointerInput) {
         self.record(RecordedSessionCommand::Pointer(input));
+    }
+
+    fn pointer_and_copy_selection(
+        &self,
+        input: PointerInput,
+    ) -> Result<Option<SelectionCopy>, SelectionCopyError> {
+        self.record(RecordedSessionCommand::PointerAndCopySelection(input));
+        self.selection_response.clone()
     }
 
     fn wheel(&self, input: WheelInput) {

@@ -343,6 +343,7 @@ pub(crate) struct TerminalPane {
     last_geometry: Option<TerminalGeometry>,
     grid_bounds: Option<Bounds<Pixels>>,
     pressed_button: Option<PointerButton>,
+    selection_copy_pending: bool,
     pointer_modifiers: InputModifiers,
     shift_selection: ShiftSelectionPolicy,
     wheel_accumulator: WheelAccumulator,
@@ -554,6 +555,7 @@ impl TerminalPane {
             last_geometry: None,
             grid_bounds: None,
             pressed_button: None,
+            selection_copy_pending: false,
             pointer_modifiers: InputModifiers::default(),
             shift_selection: ShiftSelectionPolicy::default(),
             wheel_accumulator: WheelAccumulator::default(),
@@ -1168,6 +1170,7 @@ impl TerminalPane {
         self.apply_terminal_input_focus(false);
         self.context_menu = None;
         self.pressed_button = None;
+        self.selection_copy_pending = false;
         self.pressed_link = None;
         cx.notify();
     }
@@ -2457,6 +2460,12 @@ impl TerminalPane {
         }
 
         self.pressed_button = Some(button);
+        self.selection_copy_pending = button == PointerButton::Left
+            && pointer_uses_text_cursor(
+                self.screen.mouse_tracking,
+                self.pointer_modifiers.shift,
+                self.shift_selection,
+            );
         if let Some(session) = &self.session {
             session.pointer(PointerInput {
                 generation: self.screen.generation,
@@ -2542,19 +2551,29 @@ impl TerminalPane {
             return;
         }
         self.pressed_button = None;
+        let copy_selection = std::mem::take(&mut self.selection_copy_pending);
         let Some(position) = self.surface_position(event.position, true) else {
             return;
         };
 
-        if let Some(session) = &self.session {
-            session.pointer(PointerInput {
-                generation: self.screen.generation,
-                phase: PointerPhase::Release,
-                button: Some(button),
-                position,
-                modifiers: self.pointer_modifiers,
-                shift_selection: self.shift_selection,
-            });
+        let input = PointerInput {
+            generation: self.screen.generation,
+            phase: PointerPhase::Release,
+            button: Some(button),
+            position,
+            modifiers: self.pointer_modifiers,
+            shift_selection: self.shift_selection,
+        };
+        let copy = self.session.as_ref().and_then(|session| {
+            if copy_selection {
+                Some(session.pointer_and_copy_selection(input))
+            } else {
+                session.pointer(input);
+                None
+            }
+        });
+        if let Some(copy) = copy {
+            self.publish_selection_copy(copy, None, cx);
         }
         cx.stop_propagation();
     }
@@ -2636,7 +2655,19 @@ impl TerminalPane {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(copy) = self.ordered_selection_copy(cx) {
+        let Some(session) = self.session.as_ref() else {
+            return;
+        };
+        self.publish_selection_copy(session.copy_selection(), recovery, cx);
+    }
+
+    fn publish_selection_copy(
+        &mut self,
+        result: Result<Option<SelectionCopy>, SelectionCopyError>,
+        recovery: Option<RecoveryToken>,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(copy) = self.selection_copy_from_result(result, cx) {
             if let Err(error) = self.selection_pasteboard.write(copy, cx) {
                 let _ = error;
                 self.present_failure(
@@ -2661,7 +2692,15 @@ impl TerminalPane {
 
     fn ordered_selection_copy(&mut self, cx: &mut Context<Self>) -> Option<SelectionCopy> {
         let session = self.session.as_ref()?;
-        match session.copy_selection() {
+        self.selection_copy_from_result(session.copy_selection(), cx)
+    }
+
+    fn selection_copy_from_result(
+        &mut self,
+        result: Result<Option<SelectionCopy>, SelectionCopyError>,
+        cx: &mut Context<Self>,
+    ) -> Option<SelectionCopy> {
+        match result {
             Ok(Some(copy)) if !copy.plain_text.is_empty() => Some(copy),
             Err(SelectionCopyError::Formatting) => {
                 self.present_failure(
@@ -5405,6 +5444,7 @@ mod tests {
             call.command,
             RecordedSessionCommand::Key(_)
                 | RecordedSessionCommand::Pointer(_)
+                | RecordedSessionCommand::PointerAndCopySelection(_)
                 | RecordedSessionCommand::Wheel(_)
         )));
     }
@@ -7046,6 +7086,169 @@ mod tests {
     }
 
     #[gpui::test]
+    fn completed_local_selection_copies_to_the_pasteboard_after_release(cx: &mut TestAppContext) {
+        let (pane, cx, records) = terminal_pane_with_selection_copy(
+            cx,
+            SelectionCopy {
+                plain_text: "selected text".to_owned(),
+                html: Some("<pre>selected text</pre>".to_owned()),
+            },
+        );
+        let position = pane.read_with(cx, |pane, _| {
+            pane.grid_bounds
+                .expect("terminal grid must be measured")
+                .center()
+        });
+        let command_count = records.commands().len();
+
+        cx.simulate_mouse_down(position, MouseButton::Left, Modifiers::none());
+        cx.simulate_mouse_up(position, MouseButton::Left, Modifiers::none());
+
+        let commands = records
+            .commands()
+            .into_iter()
+            .skip(command_count)
+            .filter(|call| {
+                matches!(
+                    call.command,
+                    RecordedSessionCommand::Pointer(_)
+                        | RecordedSessionCommand::PointerAndCopySelection(_)
+                )
+            })
+            .map(|call| call.command)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            cx.read_from_clipboard().and_then(|item| item.text()),
+            Some("selected text".to_owned())
+        );
+        assert!(matches!(
+            commands.as_slice(),
+            [
+                RecordedSessionCommand::Pointer(PointerInput {
+                    phase: PointerPhase::Press,
+                    ..
+                }),
+                RecordedSessionCommand::PointerAndCopySelection(PointerInput {
+                    phase: PointerPhase::Release,
+                    ..
+                }),
+            ]
+        ));
+    }
+
+    #[gpui::test]
+    fn application_mouse_release_does_not_copy_the_existing_selection(cx: &mut TestAppContext) {
+        let (pane, cx, records) = terminal_pane_with_selection_copy(
+            cx,
+            SelectionCopy {
+                plain_text: "existing selection".to_owned(),
+                html: None,
+            },
+        );
+        pane.update(cx, |pane, cx| {
+            Arc::make_mut(&mut pane.screen).mouse_tracking = true;
+            cx.notify();
+        });
+        cx.run_until_parked();
+        let position = pane.read_with(cx, |pane, _| {
+            pane.grid_bounds
+                .expect("terminal grid must be measured")
+                .center()
+        });
+        let command_count = records.commands().len();
+        cx.write_to_clipboard(ClipboardItem::new_string("keep me".to_owned()));
+
+        cx.simulate_mouse_down(position, MouseButton::Left, Modifiers::none());
+        cx.simulate_mouse_up(position, MouseButton::Left, Modifiers::none());
+
+        assert_eq!(
+            cx.read_from_clipboard().and_then(|item| item.text()),
+            Some("keep me".to_owned())
+        );
+        assert!(
+            records
+                .commands()
+                .into_iter()
+                .skip(command_count)
+                .all(|call| !matches!(
+                    call.command,
+                    RecordedSessionCommand::PointerAndCopySelection(_)
+                ))
+        );
+    }
+
+    #[gpui::test]
+    fn shift_override_selection_copies_while_application_mouse_tracking_is_active(
+        cx: &mut TestAppContext,
+    ) {
+        let (pane, cx, records) = terminal_pane_with_selection_copy(
+            cx,
+            SelectionCopy {
+                plain_text: "shift selection".to_owned(),
+                html: None,
+            },
+        );
+        pane.update(cx, |pane, cx| {
+            Arc::make_mut(&mut pane.screen).mouse_tracking = true;
+            cx.notify();
+        });
+        cx.run_until_parked();
+        let position = pane.read_with(cx, |pane, _| {
+            pane.grid_bounds
+                .expect("terminal grid must be measured")
+                .center()
+        });
+        let modifiers = Modifiers {
+            shift: true,
+            ..Modifiers::default()
+        };
+        let command_count = records.commands().len();
+
+        cx.simulate_mouse_down(position, MouseButton::Left, modifiers);
+        cx.simulate_mouse_up(position, MouseButton::Left, modifiers);
+
+        assert_eq!(
+            cx.read_from_clipboard().and_then(|item| item.text()),
+            Some("shift selection".to_owned())
+        );
+        assert!(
+            records
+                .commands()
+                .into_iter()
+                .skip(command_count)
+                .any(|call| matches!(
+                    call.command,
+                    RecordedSessionCommand::PointerAndCopySelection(_)
+                ))
+        );
+    }
+
+    #[gpui::test]
+    fn empty_completed_selection_preserves_the_pasteboard(cx: &mut TestAppContext) {
+        let (pane, cx, _records) = terminal_pane_with_selection_copy(
+            cx,
+            SelectionCopy {
+                plain_text: String::new(),
+                html: None,
+            },
+        );
+        let position = pane.read_with(cx, |pane, _| {
+            pane.grid_bounds
+                .expect("terminal grid must be measured")
+                .center()
+        });
+        cx.write_to_clipboard(ClipboardItem::new_string("keep me".to_owned()));
+
+        cx.simulate_mouse_down(position, MouseButton::Left, Modifiers::none());
+        cx.simulate_mouse_up(position, MouseButton::Left, Modifiers::none());
+
+        assert_eq!(
+            cx.read_from_clipboard().and_then(|item| item.text()),
+            Some("keep me".to_owned())
+        );
+    }
+
+    #[gpui::test]
     fn copy_updates_the_pasteboard_before_the_action_returns(cx: &mut TestAppContext) {
         let (pane, cx, _records) = terminal_pane_with_selection_copy(
             cx,
@@ -8464,7 +8667,9 @@ mod tests {
         );
         assert!(records.commands().iter().all(|call| !matches!(
             call.command,
-            RecordedSessionCommand::Pointer(_) | RecordedSessionCommand::Wheel(_)
+            RecordedSessionCommand::Pointer(_)
+                | RecordedSessionCommand::PointerAndCopySelection(_)
+                | RecordedSessionCommand::Wheel(_)
         )));
 
         let copy = cx
