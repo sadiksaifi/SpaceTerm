@@ -35,6 +35,8 @@ const ASKPASS_ACTION_TRAILING_INSET: f64 = 16.0;
 const ASKPASS_ACTION_ALIGNMENT_TOLERANCE: f64 = 0.5;
 const SECRET_FIELD_OBSERVER_CLASS: &str = "SpaceTermAskPassSecretFieldObserver";
 const SECRET_FIELD_OBSERVER_BUTTON_IVAR: &str = "spaceTermAskPassAffirmativeButton";
+const SHEET_RESPONSE_OWNER_CLASS: &str = "SpaceTermAskPassSheetResponseOwner";
+const SHEET_RESPONSE_OWNER_STATE_IVAR: &str = "spaceTermAskPassSheetResponseState";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 /// UI semantics for one bounded AskPass prompt.
@@ -696,8 +698,7 @@ struct AskPassPresentationState {
 #[derive(Clone, Copy)]
 struct ActiveAskPassPresentation {
     generation: u64,
-    parent_window: id,
-    sheet_window: id,
+    response_owner: id,
 }
 
 impl AskPassPresentationLifecycle {
@@ -710,8 +711,7 @@ impl AskPassPresentationLifecycle {
         let generation = state.next_generation;
         state.active = Some(ActiveAskPassPresentation {
             generation,
-            parent_window: nil,
-            sheet_window: nil,
+            response_owner: nil,
         });
         Ok(AskPassPresentationActivity {
             lifecycle: self.clone(),
@@ -720,14 +720,13 @@ impl AskPassPresentationLifecycle {
         })
     }
 
-    fn bind_windows(&self, generation: u64, parent_window: id, sheet_window: id) {
+    fn bind_response_owner(&self, generation: u64, response_owner: id) {
         let mut state = self.state.borrow_mut();
         let Some(active) = state.active.as_mut() else {
             return;
         };
         if active.generation == generation {
-            active.parent_window = parent_window;
-            active.sheet_window = sheet_window;
+            active.response_owner = response_owner;
         }
     }
 
@@ -741,15 +740,15 @@ impl AskPassPresentationLifecycle {
         }
     }
 
-    fn take_cancellation_target(&self) -> Option<(id, id)> {
+    fn take_cancellation_owner(&self) -> Option<id> {
         let mut state = self.state.borrow_mut();
         let active = state.active.as_mut()?;
-        if active.parent_window == nil || active.sheet_window == nil {
+        if active.response_owner == nil {
             return None;
         }
-        let target = (active.parent_window, active.sheet_window);
-        active.sheet_window = nil;
-        Some(target)
+        let response_owner = active.response_owner;
+        active.response_owner = nil;
+        Some(response_owner)
     }
 
     #[cfg(test)]
@@ -765,9 +764,9 @@ struct AskPassPresentationActivity {
 }
 
 impl AskPassPresentationActivity {
-    fn bind_windows(&self, parent_window: id, sheet_window: id) {
+    fn bind_response_owner(&self, response_owner: id) {
         self.lifecycle
-            .bind_windows(self.generation, parent_window, sheet_window);
+            .bind_response_owner(self.generation, response_owner);
     }
 
     fn finish(&mut self) {
@@ -810,17 +809,15 @@ impl MacosAskPassPresenter {
         if !main_thread() {
             return;
         }
-        let Some((parent_window, sheet_window)) = self.lifecycle.take_cancellation_target() else {
+        let Some(response_owner) = self.lifecycle.take_cancellation_owner() else {
             return;
         };
-        // SAFETY: The lifecycle holds these pointers only while `NativeAskPassSheet` retains the
-        // alert and the presenter retains its parent. Both are confined to AppKit's main thread.
+        // SAFETY: The lifecycle holds this pointer only while `NativeAskPassSheet` retains the
+        // response owner. Its abort selector shares the button actions' exactly-once end guard.
         unsafe {
-            let _: () = msg_send![
-                parent_window,
-                endSheet: sheet_window
-                returnCode: NS_MODAL_RESPONSE_ABORT
-            ];
+            let response_owner: id = msg_send![response_owner, retain];
+            let _: () = msg_send![response_owner, spaceTermAskPassAbort];
+            let _: () = msg_send![response_owner, release];
         }
     }
 }
@@ -844,12 +841,10 @@ impl AskPassPresenter for MacosAskPassPresenter {
         unsafe {
             let pool = NSAutoreleasePool::new(nil);
             let result = (|| {
-                let mut sheet = NativeAskPassSheet::new(request, activity, completion)?;
-                let alert = sheet.alert;
+                let mut sheet =
+                    NativeAskPassSheet::new(request, activity, completion, self.parent_window.0)?;
                 let sheet_window = sheet.alert_window();
-                sheet
-                    .activity
-                    .bind_windows(self.parent_window.0, sheet_window);
+                sheet.activity.bind_response_owner(sheet.response_owner());
                 sheet.acquire_secure_input();
                 let presentation = Rc::new(RefCell::new(Some(sheet)));
                 let callback_presentation = presentation.clone();
@@ -866,12 +861,11 @@ impl AskPassPresenter for MacosAskPassPresenter {
                 let block = block.copy();
                 activate_for_sheet(self.parent_window.0);
                 let _: () = msg_send![
-                    alert,
-                    beginSheetModalForWindow: self.parent_window.0
+                    self.parent_window.0,
+                    beginSheet: sheet_window
                     completionHandler: block
                 ];
                 if let Some(sheet) = presentation.borrow().as_ref() {
-                    sheet.align_action_group_trailing();
                     sheet.focus_initial_control();
                 }
                 Ok(())
@@ -950,6 +944,9 @@ struct NativeAskPassSheet {
     alert_window: id,
     secret_field: Option<id>,
     secret_field_observer: Option<id>,
+    first_button: id,
+    second_button: id,
+    response_owner: Option<id>,
     initial_focus: Option<id>,
     secure_input: Option<SecureInputSecretLease>,
     activity: AskPassPresentationActivity,
@@ -962,6 +959,7 @@ impl NativeAskPassSheet {
         request: AskPassRequest,
         activity: AskPassPresentationActivity,
         completion: AskPassCompletion,
+        parent_window: id,
     ) -> Result<Self, AskPassPresentationError> {
         let presentation = request.presentation();
         // SAFETY: Caller establishes AppKit main-thread confinement and owns the returned retains.
@@ -1003,7 +1001,7 @@ impl NativeAskPassSheet {
         // SAFETY: Non-secret decisions place the safe response first so Return cannot trust or
         // approve. Secret prompts retain submit-first ordering and require explicit nonempty values
         // where their strict presentation model requires one.
-        let (safe_button, affirmative_button): (id, id) = unsafe {
+        let (first_button, second_button, safe_button, affirmative_button): (id, id, id, id) = unsafe {
             let (first, second, safe_is_first) = if presentation.kind.uses_secret_field() {
                 (presentation.affirmative, presentation.negative, false)
             } else {
@@ -1025,7 +1023,7 @@ impl NativeAskPassSheet {
             } else {
                 first_button
             };
-            (safe_button, affirmative_button)
+            (first_button, second_button, safe_button, affirmative_button)
         };
 
         // SAFETY: The retained alert owns its NSWindow for the alert lifetime.
@@ -1050,10 +1048,31 @@ impl NativeAskPassSheet {
                 let _: () = msg_send![alert_window, setDefaultButtonCell: safe_cell];
             }
         }
+        // SAFETY: `layout` finalizes NSAlert's public view hierarchy before SpaceTerm replaces the
+        // button targets and presents the retained window directly through NSWindow.
+        unsafe {
+            let _: () = msg_send![alert, layout];
+            let _action_group_aligned =
+                align_alert_action_group_trailing(alert_window, first_button, second_button);
+        }
+        let Some(response_owner) = (unsafe {
+            new_sheet_response_owner(parent_window, alert_window, first_button, second_button)
+        }) else {
+            unsafe {
+                if let Some(field) = secret_field {
+                    let _: () = msg_send![alert, setAccessoryView: nil];
+                    let _: () = msg_send![field, release];
+                }
+                let _: () = msg_send![alert, release];
+            }
+            return Err(AskPassPresentationError::AllocationFailed);
+        };
         let secret_field_observer = if presentation.kind.requires_nonempty_secret() {
             let Some(field) = secret_field else {
-                // SAFETY: The retained alert owns both buttons and no object has been published.
                 unsafe {
+                    let _: () = msg_send![first_button, setTarget: nil];
+                    let _: () = msg_send![second_button, setTarget: nil];
+                    let _: () = msg_send![response_owner, release];
                     let _: () = msg_send![alert, release];
                 }
                 return Err(AskPassPresentationError::AllocationFailed);
@@ -1064,6 +1083,9 @@ impl NativeAskPassSheet {
                 // SAFETY: Neither owned object has been published. Removing the accessory balances
                 // NSAlert's retain before the explicit allocation retains are released.
                 unsafe {
+                    let _: () = msg_send![first_button, setTarget: nil];
+                    let _: () = msg_send![second_button, setTarget: nil];
+                    let _: () = msg_send![response_owner, release];
                     let _: () = msg_send![alert, setAccessoryView: nil];
                     let _: () = msg_send![field, release];
                     let _: () = msg_send![alert, release];
@@ -1075,6 +1097,13 @@ impl NativeAskPassSheet {
             None
         };
         let initial_focus = secret_field.or(Some(safe_button));
+        if let Some(control) = initial_focus {
+            // SAFETY: The alert window retains its control hierarchy. Establishing the initial
+            // responder before presentation lets AppKit route Return and Escape from first paint.
+            unsafe {
+                let _: () = msg_send![alert_window, setInitialFirstResponder: control];
+            }
+        }
 
         Ok(Self {
             presentation_kind: presentation.kind,
@@ -1082,6 +1111,9 @@ impl NativeAskPassSheet {
             alert_window,
             secret_field,
             secret_field_observer,
+            first_button,
+            second_button,
+            response_owner: Some(response_owner),
             initial_focus,
             secure_input: None,
             activity,
@@ -1094,29 +1126,13 @@ impl NativeAskPassSheet {
         self.alert_window
     }
 
+    fn response_owner(&self) -> id {
+        self.response_owner.unwrap_or(nil)
+    }
+
     fn acquire_secure_input(&mut self) {
         if self.secret_field.is_some() {
             self.secure_input = Some(acquire_secret_input(SecureInputSecretOwnerId::new()));
-        }
-    }
-
-    fn align_action_group_trailing(&self) {
-        // SAFETY: `beginSheetModalForWindow:completionHandler:` has completed NSAlert's sheet
-        // layout. Querying the retained alert now avoids relying on button identity across AppKit's
-        // internal relayout; any changed hierarchy falls back to the native action placement.
-        unsafe {
-            let buttons: id = msg_send![self.alert, buttons];
-            if buttons == nil {
-                return;
-            }
-            let count: usize = msg_send![buttons, count];
-            if count != 2 {
-                return;
-            }
-            let first_button: id = msg_send![buttons, objectAtIndex: 0_usize];
-            let second_button: id = msg_send![buttons, objectAtIndex: 1_usize];
-            let _action_group_aligned =
-                align_alert_action_group_trailing(self.alert_window, first_button, second_button);
         }
     }
 
@@ -1130,6 +1146,15 @@ impl NativeAskPassSheet {
         }
         // SAFETY: Both objects remain retained by this active sheet on AppKit's main thread.
         unsafe {
+            let sheet_parent: id = msg_send![window, sheetParent];
+            let attached_sheet: id = if sheet_parent == nil {
+                nil
+            } else {
+                msg_send![sheet_parent, attachedSheet]
+            };
+            if !is_current_attached_sheet(sheet_parent, attached_sheet, window) {
+                return;
+            }
             let _: () = msg_send![window, setInitialFirstResponder: control];
             let _: BOOL = msg_send![window, makeFirstResponder: control];
         }
@@ -1203,6 +1228,11 @@ impl NativeAskPassSheet {
         // SAFETY: This owner holds one retain for each object. Removing the accessory first drops
         // NSAlert's retain, then these explicit releases balance allocation ownership.
         unsafe {
+            if let Some(response_owner) = self.response_owner.take() {
+                let _: () = msg_send![self.first_button, setTarget: nil];
+                let _: () = msg_send![self.second_button, setTarget: nil];
+                let _: () = msg_send![response_owner, release];
+            }
             if let Some(observer) = self.secret_field_observer.take() {
                 if let Some(field) = self.secret_field {
                     let _: () = msg_send![field, setDelegate: nil];
@@ -1218,12 +1248,167 @@ impl NativeAskPassSheet {
     }
 }
 
+fn is_current_attached_sheet(sheet_parent: id, attached_sheet: id, sheet_window: id) -> bool {
+    sheet_parent != nil && attached_sheet == sheet_window
+}
+
 impl Drop for NativeAskPassSheet {
     fn drop(&mut self) {
         self.clear_secret_field();
         self.secure_input.take();
         self.activity.finish();
         self.release_native_objects();
+    }
+}
+
+#[derive(Clone, Copy)]
+struct SheetResponseRequest {
+    parent_window: id,
+    sheet_window: id,
+    response: NSInteger,
+}
+
+struct SheetResponseState {
+    parent_window: id,
+    sheet_window: id,
+    ended: bool,
+}
+
+impl SheetResponseState {
+    fn claim(&mut self, response: NSInteger) -> Option<SheetResponseRequest> {
+        if self.ended || self.parent_window == nil || self.sheet_window == nil {
+            return None;
+        }
+        self.ended = true;
+        Some(SheetResponseRequest {
+            parent_window: self.parent_window,
+            sheet_window: self.sheet_window,
+            response,
+        })
+    }
+}
+
+fn sheet_response_owner_class() -> Option<&'static Class> {
+    if let Some(class) = Class::get(SHEET_RESPONSE_OWNER_CLASS) {
+        return Some(class);
+    }
+    let mut declaration = ClassDecl::new(SHEET_RESPONSE_OWNER_CLASS, class!(NSObject))?;
+    declaration.add_ivar::<*mut c_void>(SHEET_RESPONSE_OWNER_STATE_IVAR);
+    // SAFETY: These selectors are SpaceTerm-owned NSButton actions and NSObject teardown. Their
+    // function signatures match the documented Objective-C target/action and dealloc ABIs.
+    unsafe {
+        declaration.add_method(
+            sel!(spaceTermAskPassPrimary:),
+            sheet_response_primary as extern "C" fn(&Object, Sel, id),
+        );
+        declaration.add_method(
+            sel!(spaceTermAskPassSafe:),
+            sheet_response_safe as extern "C" fn(&Object, Sel, id),
+        );
+        declaration.add_method(
+            sel!(spaceTermAskPassAbort),
+            sheet_response_abort as extern "C" fn(&Object, Sel),
+        );
+        declaration.add_method(
+            sel!(dealloc),
+            dealloc_sheet_response_owner as extern "C" fn(&Object, Sel),
+        );
+    }
+    Some(declaration.register())
+}
+
+unsafe fn new_sheet_response_owner(
+    parent_window: id,
+    sheet_window: id,
+    first_button: id,
+    second_button: id,
+) -> Option<id> {
+    if parent_window == nil || sheet_window == nil || first_button == nil || second_button == nil {
+        return None;
+    }
+    let class = sheet_response_owner_class()?;
+    // SAFETY: The registered NSObject subclass owns one boxed response state until dealloc.
+    let owner: id = unsafe {
+        let allocated: id = msg_send![class, alloc];
+        msg_send![allocated, init]
+    };
+    if owner == nil {
+        return None;
+    }
+    let state = Box::into_raw(Box::new(SheetResponseState {
+        parent_window,
+        sheet_window,
+        ended: false,
+    }))
+    .cast::<c_void>();
+    // SAFETY: NSButton target/action is public AppKit API. The sheet retains `owner` explicitly,
+    // because controls do not retain their targets, and clears both targets before releasing it.
+    unsafe {
+        (*owner).set_ivar(SHEET_RESPONSE_OWNER_STATE_IVAR, state);
+        let primary_action = sel!(spaceTermAskPassPrimary:);
+        let safe_action = sel!(spaceTermAskPassSafe:);
+        let _: () = msg_send![first_button, setTarget: owner];
+        let _: () = msg_send![first_button, setAction: primary_action];
+        let _: () = msg_send![second_button, setTarget: owner];
+        let _: () = msg_send![second_button, setAction: safe_action];
+    }
+    Some(owner)
+}
+
+extern "C" fn sheet_response_primary(this: &Object, _: Sel, _: id) {
+    contain_appkit_completion(|| unsafe {
+        end_sheet_once(this, NS_ALERT_FIRST_BUTTON_RETURN);
+    });
+}
+
+extern "C" fn sheet_response_safe(this: &Object, _: Sel, _: id) {
+    contain_appkit_completion(|| unsafe {
+        end_sheet_once(this, NS_ALERT_SECOND_BUTTON_RETURN);
+    });
+}
+
+extern "C" fn sheet_response_abort(this: &Object, _: Sel) {
+    contain_appkit_completion(|| unsafe {
+        end_sheet_once(this, NS_MODAL_RESPONSE_ABORT);
+    });
+}
+
+unsafe fn end_sheet_once(this: &Object, response: NSInteger) {
+    // SAFETY: The owner stores exactly one live state pointer until dealloc. All actions and
+    // external cancellation are main-thread confined, so claiming serializes every response.
+    let state: *mut c_void = unsafe { *this.get_ivar(SHEET_RESPONSE_OWNER_STATE_IVAR) };
+    if state.is_null() {
+        return;
+    }
+    // SAFETY: The ivar was created from `Box<SheetResponseState>` and remains owned by this object.
+    let Some(request) = (unsafe { state.cast::<SheetResponseState>().as_mut() })
+        .and_then(|state| state.claim(response))
+    else {
+        return;
+    };
+    let owner = std::ptr::from_ref(this).cast_mut();
+    // SAFETY: `endSheet:returnCode:` may synchronously run completion and release the sheet's
+    // ownership. This temporary retain keeps the action receiver alive until the selector returns.
+    unsafe {
+        let retained_owner: id = msg_send![owner, retain];
+        let _: () = msg_send![
+            request.parent_window,
+            endSheet: request.sheet_window
+            returnCode: request.response
+        ];
+        let _: () = msg_send![retained_owner, release];
+    }
+}
+
+extern "C" fn dealloc_sheet_response_owner(this: &Object, _: Sel) {
+    // SAFETY: Construction stores exactly one boxed state before publishing the owner. NSObject
+    // calls dealloc once after the sheet clears button targets and releases its explicit retain.
+    unsafe {
+        let state: *mut c_void = *this.get_ivar(SHEET_RESPONSE_OWNER_STATE_IVAR);
+        if !state.is_null() {
+            drop(Box::from_raw(state.cast::<SheetResponseState>()));
+        }
+        let _: () = msg_send![super(this, class!(NSObject)), dealloc];
     }
 }
 
@@ -2033,17 +2218,67 @@ mod tests {
     }
 
     #[test]
-    fn cancellation_target_is_claimed_exactly_once() {
+    fn cancellation_owner_is_claimed_exactly_once() {
         let lifecycle = AskPassPresentationLifecycle::default();
         let activity = lifecycle.begin().unwrap();
-        let parent = 1_usize as id;
-        let sheet = 2_usize as id;
-        lifecycle.bind_windows(activity.generation, parent, sheet);
+        let response_owner = 1_usize as id;
+        lifecycle.bind_response_owner(activity.generation, response_owner);
 
-        assert_eq!(lifecycle.take_cancellation_target(), Some((parent, sheet)));
-        assert_eq!(lifecycle.take_cancellation_target(), None);
+        assert_eq!(lifecycle.take_cancellation_owner(), Some(response_owner));
+        assert_eq!(lifecycle.take_cancellation_owner(), None);
         drop(activity);
         assert!(!lifecycle.is_active());
+    }
+
+    #[test]
+    fn stale_generation_cannot_replace_a_later_cancellation_owner() {
+        let lifecycle = AskPassPresentationLifecycle::default();
+        let first = lifecycle.begin().unwrap();
+        let stale_generation = first.generation;
+        drop(first);
+        let second = lifecycle.begin().unwrap();
+        let current_owner = 2_usize as id;
+        lifecycle.bind_response_owner(second.generation, current_owner);
+
+        lifecycle.bind_response_owner(stale_generation, 1_usize as id);
+
+        assert_eq!(lifecycle.take_cancellation_owner(), Some(current_owner));
+    }
+
+    #[test]
+    fn sheet_response_state_claims_only_the_first_response() {
+        let mut state = SheetResponseState {
+            parent_window: 1_usize as id,
+            sheet_window: 2_usize as id,
+            ended: false,
+        };
+
+        let first = state.claim(NS_ALERT_FIRST_BUTTON_RETURN);
+        let second = state.claim(NS_ALERT_SECOND_BUTTON_RETURN);
+
+        assert!(first.is_some());
+        assert!(second.is_none());
+    }
+
+    #[test]
+    fn focus_policy_accepts_only_the_parent_attached_sheet() {
+        let parent = 1_usize as id;
+        let sheet = 2_usize as id;
+
+        assert!(is_current_attached_sheet(parent, sheet, sheet));
+    }
+
+    #[test]
+    fn focus_policy_rejects_an_invisible_queued_sheet() {
+        let parent = 1_usize as id;
+        let queued_sheet = 2_usize as id;
+        let visible_sheet = 3_usize as id;
+
+        assert!(!is_current_attached_sheet(
+            parent,
+            visible_sheet,
+            queued_sheet
+        ));
     }
 
     #[test]
