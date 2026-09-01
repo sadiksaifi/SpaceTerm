@@ -660,6 +660,7 @@ struct MouseModeState {
 pub(crate) struct EmulatorAction {
     pub(crate) bytes: Vec<u8>,
     pub(crate) screen_changed: bool,
+    pub(crate) selection_completed: bool,
 }
 
 impl EmulatorAction {
@@ -667,6 +668,7 @@ impl EmulatorAction {
         Self {
             bytes,
             screen_changed: false,
+            selection_completed: false,
         }
     }
 
@@ -674,6 +676,7 @@ impl EmulatorAction {
         Self {
             bytes: Vec::new(),
             screen_changed: true,
+            selection_completed: false,
         }
     }
 
@@ -685,10 +688,19 @@ impl EmulatorAction {
         }
     }
 
+    fn selection_completed() -> Self {
+        Self {
+            bytes: Vec::new(),
+            screen_changed: false,
+            selection_completed: true,
+        }
+    }
+
     fn none() -> Self {
         Self {
             bytes: Vec::new(),
             screen_changed: false,
+            selection_completed: false,
         }
     }
 }
@@ -1089,6 +1101,7 @@ impl TerminalEmulator {
         Ok(EmulatorAction {
             bytes,
             screen_changed: true,
+            selection_completed: false,
         })
     }
 
@@ -1224,6 +1237,7 @@ impl TerminalEmulator {
             return Ok(EmulatorAction {
                 bytes,
                 screen_changed: true,
+                selection_completed: false,
             });
         }
 
@@ -1260,6 +1274,7 @@ impl TerminalEmulator {
             return Ok(EmulatorAction {
                 bytes,
                 screen_changed: true,
+                selection_completed: false,
             });
         }
 
@@ -1294,6 +1309,7 @@ impl TerminalEmulator {
         Ok(EmulatorAction {
             bytes,
             screen_changed: true,
+            selection_completed: false,
         })
     }
 
@@ -1418,6 +1434,7 @@ impl TerminalEmulator {
                 Ok(EmulatorAction {
                     bytes,
                     screen_changed: true,
+                    selection_completed: false,
                 })
             }
             PointerRoute::Selection => {
@@ -1503,7 +1520,7 @@ impl TerminalEmulator {
             }
             PointerRoute::Selection => {
                 self.selection_release(input.position)?;
-                Ok(EmulatorAction::none())
+                Ok(EmulatorAction::selection_completed())
             }
         }
     }
@@ -5175,6 +5192,7 @@ mod tests {
         );
         let released = emulator.pointer(input).unwrap();
         assert!(!released.bytes.is_empty());
+        assert!(!released.selection_completed);
 
         let input = current_pointer(
             &emulator,
@@ -5195,6 +5213,18 @@ mod tests {
         assert!(selected_press.bytes.is_empty());
         assert!(selected_drag.bytes.is_empty());
         assert!(selected_drag.screen_changed);
+        let input = current_pointer(
+            &emulator,
+            pointer(
+                PointerPhase::Release,
+                Some(PointerButton::Left),
+                48.0,
+                10.0,
+                true,
+            ),
+        );
+        let selected_release = emulator.pointer(input).unwrap();
+        assert!(selected_release.selection_completed);
 
         let snapshot = emulator.snapshot().unwrap().unwrap();
         assert!(snapshot.rows[0][..5].iter().all(|cell| cell.selected));

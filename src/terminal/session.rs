@@ -311,6 +311,10 @@ pub(crate) trait TerminalSessionHandle {
     fn focus(&self, focused: bool);
     fn resize(&self, geometry: TerminalGeometry);
     fn pointer(&self, input: PointerInput);
+    fn pointer_and_copy_selection(
+        &self,
+        input: PointerInput,
+    ) -> Result<Option<SelectionCopy>, SelectionCopyError>;
     fn wheel(&self, input: WheelInput);
     fn scroll_to(&self, offset_rows: u64, generation: PresentationGeneration);
     fn set_find_query(&self, generation: FindQueryGeneration, query: String);
@@ -964,6 +968,22 @@ impl TerminalSession {
         }
     }
 
+    pub(crate) fn pointer_and_copy_selection(
+        &self,
+        input: PointerInput,
+    ) -> Result<Option<SelectionCopy>, SelectionCopyError> {
+        let Some(commands) = &self.commands else {
+            return Err(SelectionCopyError::WorkerStopped);
+        };
+        let (reply, receiver) = mpsc::sync_channel(1);
+        commands
+            .send(Command::PointerAndCopySelection(input, reply))
+            .map_err(|_| SelectionCopyError::WorkerStopped)?;
+        receiver
+            .recv()
+            .map_err(|_| SelectionCopyError::WorkerStopped)?
+    }
+
     pub(crate) fn wheel(&self, input: WheelInput) {
         if let Some(commands) = &self.commands
             && commands.send(Command::Wheel(input)).is_err()
@@ -1123,6 +1143,13 @@ impl TerminalSessionHandle for TerminalSession {
         Self::pointer(self, input);
     }
 
+    fn pointer_and_copy_selection(
+        &self,
+        input: PointerInput,
+    ) -> Result<Option<SelectionCopy>, SelectionCopyError> {
+        Self::pointer_and_copy_selection(self, input)
+    }
+
     fn wheel(&self, input: WheelInput) {
         Self::wheel(self, input);
     }
@@ -1227,6 +1254,10 @@ enum Command {
     Focus(bool),
     Resize,
     Pointer(PointerInput),
+    PointerAndCopySelection(
+        PointerInput,
+        mpsc::SyncSender<Result<Option<SelectionCopy>, SelectionCopyError>>,
+    ),
     Wheel(WheelInput),
     ScrollTo(u64, PresentationGeneration),
     FindQueryChanged,
@@ -1890,6 +1921,24 @@ impl TerminalWorker {
                     self.apply_emulator_action(action) && self.refresh_selection_autoscroll()
                 }
                 Err(message) => {
+                    self.send_runtime_failure(message);
+                    false
+                }
+            },
+            Command::PointerAndCopySelection(input, reply) => match self.emulator.pointer(input) {
+                Ok(action) => {
+                    let copy = if action.selection_completed {
+                        self.emulator
+                            .selection_copy(SelectionCopyOptions::default())
+                            .map_err(|_| SelectionCopyError::Formatting)
+                    } else {
+                        Ok(None)
+                    };
+                    let _ = reply.send(copy);
+                    self.apply_emulator_action(action) && self.refresh_selection_autoscroll()
+                }
+                Err(message) => {
+                    let _ = reply.send(Ok(None));
                     self.send_runtime_failure(message);
                     false
                 }
@@ -4276,7 +4325,7 @@ mod tests {
     }
 
     #[test]
-    fn copy_selection_should_observe_every_preceding_pointer_event() {
+    fn pointer_release_copy_should_observe_the_completed_selection_atomically() {
         let (result, reader_steps, _records) =
             start_scripted_session(ScriptedPtyOptions::default());
         let (mut session, events, _accessibility) = result.unwrap();
@@ -4307,13 +4356,50 @@ mod tests {
             PointerPhase::Motion,
             SurfacePosition { x: 63.0, y: 1.0 },
         ));
-        session.pointer(pointer(
-            PointerPhase::Release,
-            SurfacePosition { x: 63.0, y: 1.0 },
-        ));
-        let copy = session.copy_selection().unwrap().unwrap();
+        let copy = session
+            .pointer_and_copy_selection(pointer(
+                PointerPhase::Release,
+                SurfacePosition { x: 63.0, y: 1.0 },
+            ))
+            .unwrap()
+            .unwrap();
 
         assert_eq!(copy.plain_text, "selected");
+        session.shutdown();
+    }
+
+    #[test]
+    fn application_mouse_release_should_not_return_a_selection_copy() {
+        let (result, reader_steps, _records) =
+            start_scripted_session(ScriptedPtyOptions::default());
+        let (mut session, events, _accessibility) = result.unwrap();
+        reader_steps
+            .send(ReaderStep::Bytes(
+                b"selected\x1b[?1000h\x1b[?1006h".to_vec(),
+            ))
+            .unwrap();
+        let SessionEvent::Screen(screen) = receive_event(
+            &events,
+            "the mouse-tracking terminal screen",
+            |event| matches!(event, SessionEvent::Screen(screen) if screen.mouse_tracking),
+        ) else {
+            unreachable!()
+        };
+        let pointer = |phase| PointerInput {
+            generation: screen.generation,
+            phase,
+            button: Some(PointerButton::Left),
+            position: SurfacePosition { x: 1.0, y: 1.0 },
+            modifiers: InputModifiers::default(),
+            shift_selection: ShiftSelectionPolicy::default(),
+        };
+
+        session.pointer(pointer(PointerPhase::Press));
+        let copy = session
+            .pointer_and_copy_selection(pointer(PointerPhase::Release))
+            .unwrap();
+
+        assert_eq!(copy, None);
         session.shutdown();
     }
 
