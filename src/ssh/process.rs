@@ -1,3 +1,4 @@
+#[cfg(test)]
 use std::ffi::OsString;
 use std::fmt;
 use std::future::Future;
@@ -15,6 +16,7 @@ use thiserror::Error;
 
 use super::cancellation::SshCancellationToken;
 use super::command::SshCommandSpec;
+use super::startup_environment::StartupSshEnvironment;
 use crate::platform::macos_askpass_transport::AskPassBrokerLease;
 
 pub(crate) const MAXIMUM_TRANSIENT_SSH_ERROR_BYTES: usize = 8 * 1024;
@@ -207,13 +209,13 @@ pub(crate) enum SshProcessEnvironmentError {
 #[derive(Clone)]
 /// Captured environment for authenticated SSH commands.
 ///
-/// Applying this value clears ambient variables, installs only fixed `HOME` and `PATH`, an
-/// optional validated agent socket, and the fixed AskPass transport overlay. The retained AskPass
-/// lease keeps its private broker alive for the process lifetime.
+/// Applying this value clears ambient variables, installs only fixed `HOME`, the explicitly
+/// allowlisted capture-once startup environment, and the fixed AskPass transport overlay. The
+/// retained AskPass lease keeps its private broker alive for the process lifetime.
 pub(crate) struct SshProcessEnvironment {
     home: PathBuf,
     authentication: SshAuthentication,
-    agent_socket: Option<OsString>,
+    startup: StartupSshEnvironment,
 }
 
 #[derive(Clone)]
@@ -222,7 +224,7 @@ pub(crate) struct SshProcessEnvironment {
 /// This environment clears ambient variables and deliberately excludes AskPass transport state.
 pub(crate) struct SshProbeEnvironment {
     home: PathBuf,
-    agent_socket: Option<OsString>,
+    startup: StartupSshEnvironment,
 }
 
 #[derive(Clone)]
@@ -236,24 +238,24 @@ impl SshProcessEnvironment {
     pub(crate) fn new(
         home: PathBuf,
         authentication: AskPassBrokerLease,
-        agent_socket: Option<OsString>,
+        startup: &StartupSshEnvironment,
     ) -> Result<Self, SshProcessEnvironmentError> {
         Self::validated(
             home,
             SshAuthentication::AskPass(authentication),
-            agent_socket,
+            startup.clone(),
         )
     }
 
     fn validated(
         home: PathBuf,
         authentication: SshAuthentication,
-        agent_socket: Option<OsString>,
+        startup: StartupSshEnvironment,
     ) -> Result<Self, SshProcessEnvironmentError> {
         if !safe_absolute_path(&home) {
             return Err(SshProcessEnvironmentError::UnsafeHome);
         }
-        if agent_socket.as_ref().is_some_and(|socket| {
+        if startup.agent_socket().is_some_and(|socket| {
             socket.as_bytes().is_empty() || !safe_absolute_path(Path::new(socket))
         }) {
             return Err(SshProcessEnvironmentError::UnsafeAgentSocket);
@@ -261,7 +263,7 @@ impl SshProcessEnvironment {
         Ok(Self {
             home,
             authentication,
-            agent_socket,
+            startup,
         })
     }
 
@@ -270,17 +272,28 @@ impl SshProcessEnvironment {
         home: PathBuf,
         agent_socket: Option<OsString>,
     ) -> Result<Self, SshProcessEnvironmentError> {
-        Self::validated(home, SshAuthentication::None, agent_socket)
+        Self::validated(
+            home,
+            SshAuthentication::None,
+            StartupSshEnvironment::for_test(agent_socket),
+        )
+    }
+
+    #[cfg(test)]
+    pub(super) fn new_without_authentication_from_startup(
+        home: PathBuf,
+        startup: &StartupSshEnvironment,
+    ) -> Result<Self, SshProcessEnvironmentError> {
+        Self::validated(home, SshAuthentication::None, startup.clone())
     }
 
     pub(super) fn apply(&self, command: &mut Command) {
         command
             .env_clear()
             .current_dir(&self.home)
-            .env("HOME", &self.home)
-            .env("PATH", "/usr/bin:/bin");
-        if let Some(agent_socket) = &self.agent_socket {
-            command.env("SSH_AUTH_SOCK", agent_socket);
+            .env("HOME", &self.home);
+        for (name, value) in self.startup.entries() {
+            command.env(name, value);
         }
         match &self.authentication {
             SshAuthentication::AskPass(authentication) => {
@@ -297,9 +310,8 @@ impl SshProcessEnvironment {
         command.env_clear();
         command.cwd(&self.home);
         command.env("HOME", &self.home);
-        command.env("PATH", "/usr/bin:/bin");
-        if let Some(agent_socket) = &self.agent_socket {
-            command.env("SSH_AUTH_SOCK", agent_socket);
+        for (name, value) in self.startup.entries() {
+            command.env(name, value);
         }
         match &self.authentication {
             SshAuthentication::AskPass(authentication) => {
@@ -315,7 +327,7 @@ impl SshProcessEnvironment {
     pub(super) fn probe_environment(&self) -> SshProbeEnvironment {
         SshProbeEnvironment {
             home: self.home.clone(),
-            agent_socket: self.agent_socket.clone(),
+            startup: self.startup.clone(),
         }
     }
 }
@@ -323,27 +335,29 @@ impl SshProcessEnvironment {
 impl SshProbeEnvironment {
     pub(crate) fn new(
         home: PathBuf,
-        agent_socket: Option<OsString>,
+        startup: &StartupSshEnvironment,
     ) -> Result<Self, SshProcessEnvironmentError> {
         if !safe_absolute_path(&home) {
             return Err(SshProcessEnvironmentError::UnsafeHome);
         }
-        if agent_socket.as_ref().is_some_and(|socket| {
+        if startup.agent_socket().is_some_and(|socket| {
             socket.as_bytes().is_empty() || !safe_absolute_path(Path::new(socket))
         }) {
             return Err(SshProcessEnvironmentError::UnsafeAgentSocket);
         }
-        Ok(Self { home, agent_socket })
+        Ok(Self {
+            home,
+            startup: startup.clone(),
+        })
     }
 
     pub(super) fn apply(&self, command: &mut Command) {
         command
             .env_clear()
             .current_dir(&self.home)
-            .env("HOME", &self.home)
-            .env("PATH", "/usr/bin:/bin");
-        if let Some(agent_socket) = &self.agent_socket {
-            command.env("SSH_AUTH_SOCK", agent_socket);
+            .env("HOME", &self.home);
+        for (name, value) in self.startup.entries() {
+            command.env(name, value);
         }
     }
 }
@@ -598,6 +612,7 @@ fn reap_child_with(mut child: Child, spawn: impl FnOnce(mpsc::Receiver<Child>) -
 mod tests {
     use super::*;
     use std::fs;
+    use std::os::unix::fs::PermissionsExt;
     use std::path::PathBuf;
     use std::process::{Command, Stdio};
 
@@ -665,6 +680,57 @@ mod tests {
                 && !stdout.contains("/attacker/")
         );
         fs::remove_dir(home).unwrap();
+    }
+
+    #[test]
+    fn launch_environment_should_preserve_captured_path_for_openssh_proxy_commands_only() {
+        let test_root = PathBuf::from(format!(
+            "/private/tmp/spaceterm-proxy-environment-{}",
+            std::process::id()
+        ));
+        let bin = test_root.join("bin");
+        let helper = bin.join("spaceterm-test-proxy");
+        let marker = test_root.join("proxy-invoked");
+        let config = test_root.join("ssh-config");
+        let _ = fs::remove_dir_all(&test_root);
+        fs::create_dir_all(&bin).unwrap();
+        fs::write(
+            &helper,
+            format!(
+                "#!/bin/sh\n[ -z \"${{SPACETERM_UNRELATED_SECRET+x}}\" ] || exit 9\nprintf invoked > '{}'\nexit 1\n",
+                marker.display()
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&helper, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::write(
+            &config,
+            "Host captured-path\n  HostName example.invalid\n  BatchMode yes\n  ProxyCommand spaceterm-test-proxy\n",
+        )
+        .unwrap();
+        let startup = StartupSshEnvironment::for_test_with_path(
+            OsString::from(format!("{}:/usr/bin:/bin", bin.display())),
+            None,
+        );
+        let environment = SshProcessEnvironment::new_without_authentication_from_startup(
+            test_root.clone(),
+            &startup,
+        )
+        .unwrap();
+        let mut command = Command::new("/usr/bin/ssh");
+        command
+            .args(["-F", config.to_str().unwrap(), "captured-path"])
+            .env("SPACETERM_UNRELATED_SECRET", "must-not-be-inherited")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+
+        environment.apply(&mut command);
+        let status = command.status().unwrap();
+        let marker_contents = fs::read_to_string(&marker).unwrap_or_default();
+        fs::remove_dir_all(test_root).unwrap();
+
+        assert!(!status.success() && marker_contents == "invoked");
     }
 
     #[test]

@@ -281,7 +281,7 @@ impl RemoteWorkspaceFlowBackend for NativeRemoteWorkspaceFlowBackend {
         let environment = match SshProcessEnvironment::new(
             self.local_home.clone(),
             authentication.clone(),
-            self.startup_environment.cloned_agent_socket(),
+            &self.startup_environment,
         ) {
             Ok(environment) => environment,
             Err(_) => return Task::ready(Err(RemoteWorkspaceFlowBackendError::ConnectionFailed)),

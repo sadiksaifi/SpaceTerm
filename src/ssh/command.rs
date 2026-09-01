@@ -119,7 +119,7 @@ impl NativeSshProbeRunner {
         startup: &StartupSshEnvironment,
     ) -> Result<Self, SshProcessEnvironmentError> {
         Ok(Self {
-            environment: SshProbeEnvironment::new(home, startup.cloned_agent_socket())?,
+            environment: SshProbeEnvironment::new(home, startup)?,
             timeout: NATIVE_PROBE_TIMEOUT,
             #[cfg(test)]
             executable: PathBuf::new(),
