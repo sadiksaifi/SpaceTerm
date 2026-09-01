@@ -1233,6 +1233,7 @@ impl WindowManager {
                         )
                         .variant(ButtonVariant::Ghost)
                         .size(ButtonSize::Compact)
+                        .preserve_ancestor_hover()
                         .debug_selector(format!("window-close-button-{}", window_id.get()))
                         .tooltip(
                             Tooltip::new(("window-close-tooltip", window_id.get()), "Close Window")

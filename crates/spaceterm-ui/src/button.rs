@@ -884,6 +884,15 @@ impl IconButton {
         self
     }
 
+    /// Keeps ancestor hover presentation active while the pointer is over this button.
+    ///
+    /// The button still owns and consumes its pointer activation. Use this when the button is a
+    /// child action whose containing interactive surface reveals it on hover.
+    pub fn preserve_ancestor_hover(mut self) -> Self {
+        self.core.preserve_ancestor_hover = true;
+        self
+    }
+
     /// Adds a stable selector used by GPUI interaction tests.
     pub fn debug_selector(mut self, selector: impl Into<String>) -> Self {
         self.core.debug_selector = Some(selector.into());
@@ -945,6 +954,7 @@ struct ButtonCore {
     modal_focus_handle: Option<FocusHandle>,
     modal_borderless: bool,
     modal_press_owner: Option<ModalPressOwner>,
+    preserve_ancestor_hover: bool,
 }
 
 impl ButtonCore {
@@ -964,6 +974,7 @@ impl ButtonCore {
             modal_focus_handle: None,
             modal_borderless: false,
             modal_press_owner: None,
+            preserve_ancestor_hover: false,
         }
     }
 
@@ -1108,6 +1119,7 @@ impl ButtonCore {
             .unwrap_or_else(|| format!("{}-keyboard-focus", self.accessibility_name));
         let tooltip = self.tooltip;
         let content = build_content(paint.foreground);
+        let preserve_ancestor_hover = self.preserve_ancestor_hover;
 
         let button = div()
             .id(self.id)
@@ -1135,7 +1147,9 @@ impl ButtonCore {
             .text_color(paint.foreground)
             .text_size(style.font_size)
             .cursor_default()
-            .block_mouse_except_scroll()
+            .when(!preserve_ancestor_hover, |button| {
+                button.block_mouse_except_scroll()
+            })
             .track_focus(&focus_handle)
             .anchor_scroll(scroll_anchor)
             .on_key_down(move |event: &KeyDownEvent, window, cx| {
@@ -1581,6 +1595,28 @@ mod tests {
         other_focus: FocusHandle,
     }
 
+    struct NestedIconButtonRoot {
+        ancestor_hovered: Rc<Cell<bool>>,
+    }
+
+    impl Render for NestedIconButtonRoot {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let ancestor_hovered = Rc::clone(&self.ancestor_hovered);
+            div()
+                .id("hover-parent")
+                .block_mouse_except_scroll()
+                .on_hover(move |hovered, _, _| ancestor_hovered.set(*hovered))
+                .child(
+                    IconButton::new("nested-icon-button", "Nested action", |_| {
+                        div().into_any_element()
+                    })
+                    .preserve_ancestor_hover()
+                    .debug_selector("nested-icon-button")
+                    .on_activate(|_, _, _| {}),
+                )
+        }
+    }
+
     impl Render for TestRoot {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
             let activations = self.activations.clone();
@@ -1636,6 +1672,25 @@ mod tests {
         cx.debug_bounds("test-button")
             .unwrap_or_else(|| panic!("button bounds were not painted"))
             .center()
+    }
+
+    #[gpui::test]
+    fn nested_icon_button_should_preserve_ancestor_hover(cx: &mut TestAppContext) {
+        cx.set_global(test_theme());
+        let ancestor_hovered = Rc::new(Cell::new(false));
+        let observed_hover = Rc::clone(&ancestor_hovered);
+        let (_, cx) = cx.add_window_view(move |_, _| NestedIconButtonRoot {
+            ancestor_hovered: observed_hover,
+        });
+        cx.run_until_parked();
+        let button = cx
+            .debug_bounds("nested-icon-button")
+            .expect("the nested icon button was not rendered");
+
+        cx.simulate_mouse_move(button.center(), None, Modifiers::none());
+        cx.run_until_parked();
+
+        assert!(ancestor_hovered.get());
     }
 
     #[gpui::test]
