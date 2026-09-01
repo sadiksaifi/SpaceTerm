@@ -11,7 +11,7 @@ use super::remote_workspace_flow::{
 };
 use super::remote_workspace_picker::RemoteWorkspaceProvider;
 use super::ssh_host_form::ManagedHostFormBackendError;
-use crate::domain::{RemoteWorkspaceDirectory, SshDestination};
+use crate::domain::{RemoteDirectoryIdentity, RemoteWorkspaceDirectory, SshDestination};
 use crate::platform::app_paths::AppPaths;
 use crate::platform::macos_askpass_transport::{
     AskPassAttemptObservation, AskPassBrokerLease, NativeAskPassBrokerFactory,
@@ -37,7 +37,9 @@ use crate::ssh::process::{NativeSshProcessBackend, SshProcessEnvironment};
 use crate::ssh::remote_utility::NativeSshRemoteUtilityRunner;
 use crate::ssh::remote_workspace_provider::SshRemoteWorkspaceProvider;
 use crate::ssh::startup_environment::StartupSshEnvironment;
-use crate::terminal::{RemoteChannelUnavailable, RemoteTerminalChannelProvider};
+use crate::terminal::{
+    RemoteChannelRevalidationError, RemoteChannelUnavailable, RemoteTerminalChannelProvider,
+};
 
 const CONNECT_CANCELLATION_POLL: Duration = Duration::from_millis(15);
 
@@ -339,6 +341,7 @@ impl RemoteWorkspaceFlowBackend for NativeRemoteWorkspaceFlowBackend {
             let owner = NativeRemoteWorkspaceSessionOwner {
                 control,
                 lifecycle: Some(lifecycle),
+                utility: Arc::clone(&provider),
                 authentication: Some(authentication),
                 alias: Some(alias_lease),
                 cancellation,
@@ -394,6 +397,7 @@ fn map_save_error(error: ManagedHostsError) -> ManagedHostFormBackendError {
 struct NativeRemoteWorkspaceSessionOwner {
     control: Arc<Mutex<Option<Box<dyn NativeSessionControl>>>>,
     lifecycle: Option<ControlConnectionObserver>,
+    utility: Arc<dyn RemoteWorkspaceProvider + Send + Sync>,
     authentication: Option<AskPassBrokerLease>,
     alias: Option<ActiveSshAliasLease>,
     cancellation: SshCancellationToken,
@@ -407,6 +411,16 @@ impl RemoteWorkspaceSessionOwner for NativeRemoteWorkspaceSessionOwner {
         directory: &RemoteWorkspaceDirectory,
         login_shell: &str,
     ) -> Result<Arc<dyn RemoteTerminalChannelProvider>, RemoteWorkspaceFlowBackendError> {
+        let _ = (directory, login_shell);
+        Err(RemoteWorkspaceFlowBackendError::ConnectionFailed)
+    }
+
+    fn bind_terminal_channels_for_identity(
+        &self,
+        directory: &RemoteWorkspaceDirectory,
+        expected_identity: &RemoteDirectoryIdentity,
+        login_shell: &str,
+    ) -> Result<Arc<dyn RemoteTerminalChannelProvider>, RemoteWorkspaceFlowBackendError> {
         let login_shell_path = login_shell.to_owned();
         let login_shell = ValidatedRemoteLoginShell::new(login_shell_path.clone())
             .map_err(|_| RemoteWorkspaceFlowBackendError::IncompatibleServer)?;
@@ -416,7 +430,11 @@ impl RemoteWorkspaceSessionOwner for NativeRemoteWorkspaceSessionOwner {
         Ok(Arc::new(NativeRemoteTerminalChannelProvider {
             control: Arc::downgrade(&self.control),
             directory: directory.clone(),
+            expected_identity: expected_identity.clone(),
+            utility: Arc::clone(&self.utility),
             login_shell: login_shell_path,
+            executor: self.executor.clone(),
+            grant: Arc::new(Mutex::new(ChannelGrantState::default())),
         }))
     }
 
@@ -454,7 +472,17 @@ impl Drop for NativeRemoteWorkspaceSessionOwner {
 struct NativeRemoteTerminalChannelProvider {
     control: Weak<Mutex<Option<Box<dyn NativeSessionControl>>>>,
     directory: RemoteWorkspaceDirectory,
+    expected_identity: RemoteDirectoryIdentity,
+    utility: Arc<dyn RemoteWorkspaceProvider + Send + Sync>,
     login_shell: String,
+    executor: BackgroundExecutor,
+    grant: Arc<Mutex<ChannelGrantState>>,
+}
+
+#[derive(Default)]
+struct ChannelGrantState {
+    validation_epoch: u64,
+    granted_generation: Option<u64>,
 }
 
 impl RemoteTerminalChannelProvider for NativeRemoteTerminalChannelProvider {
@@ -468,22 +496,94 @@ impl RemoteTerminalChannelProvider for NativeRemoteTerminalChannelProvider {
         })
     }
 
+    fn revalidate(&self) -> Task<Result<(), RemoteChannelRevalidationError>> {
+        let validation_epoch = {
+            let mut grant = self
+                .grant
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            grant.granted_generation = None;
+            let Some(validation_epoch) = grant.validation_epoch.checked_add(1) else {
+                return Task::ready(Err(RemoteChannelRevalidationError::ConnectionUnavailable));
+            };
+            grant.validation_epoch = validation_epoch;
+            validation_epoch
+        };
+        let Some(control) = self.control.upgrade() else {
+            return Task::ready(Err(RemoteChannelRevalidationError::ConnectionUnavailable));
+        };
+        let generation = control
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .and_then(|connection| connection.live_generation());
+        let Some(generation) = generation else {
+            return Task::ready(Err(RemoteChannelRevalidationError::ConnectionUnavailable));
+        };
+        let validation = self
+            .utility
+            .validate_physical_identity(self.directory.clone());
+        let expected_identity = self.expected_identity.clone();
+        let control = Arc::downgrade(&control);
+        let grant = Arc::clone(&self.grant);
+        self.executor.spawn(async move {
+            let observed_identity = validation.await.map_err(|error| match error {
+                super::remote_workspace_picker::RemoteWorkspaceProviderError::ConnectionLost => {
+                    RemoteChannelRevalidationError::ConnectionUnavailable
+                }
+                _ => RemoteChannelRevalidationError::DirectoryUnavailable,
+            })?;
+            if observed_identity != expected_identity {
+                return Err(RemoteChannelRevalidationError::IdentityChanged);
+            }
+            let current_generation = control
+                .upgrade()
+                .and_then(|control| {
+                    control
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .as_ref()
+                        .and_then(|connection| connection.live_generation())
+                })
+                .ok_or(RemoteChannelRevalidationError::ConnectionUnavailable)?;
+            if current_generation != generation {
+                return Err(RemoteChannelRevalidationError::ConnectionUnavailable);
+            }
+            let mut grant = grant
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if grant.validation_epoch != validation_epoch {
+                return Err(RemoteChannelRevalidationError::ConnectionUnavailable);
+            }
+            grant.granted_generation = Some(generation);
+            Ok(())
+        })
+    }
+
     fn prepare(
         &self,
     ) -> Result<crate::ssh::command::PreparedSshPaneChannelCommand, RemoteChannelUnavailable> {
+        let granted_generation = self
+            .grant
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .granted_generation
+            .take()
+            .ok_or(RemoteChannelUnavailable)?;
         let control = self.control.upgrade().ok_or(RemoteChannelUnavailable)?;
         let login_shell = ValidatedRemoteLoginShell::new(self.login_shell.clone())
             .map_err(|_| RemoteChannelUnavailable)?;
         let command = RemotePaneShellCommandBuilder::new(&self.directory, &login_shell)
             .build()
             .map_err(|_| RemoteChannelUnavailable)?;
-        control
+        let control = control
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .as_ref()
-            .ok_or(RemoteChannelUnavailable)?
-            .prepare_pane_channel(command)
-            .map_err(|_| RemoteChannelUnavailable)
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let connection = control.as_ref().ok_or(RemoteChannelUnavailable)?;
+        if connection.live_generation() != Some(granted_generation) {
+            return Err(RemoteChannelUnavailable);
+        }
+        connection.prepare_pane_channel(command)
     }
 }
 
@@ -494,6 +594,8 @@ trait NativeSessionControl: Send {
         &self,
         command: crate::ssh::command::ValidatedRemoteShellCommand,
     ) -> Result<crate::ssh::command::PreparedSshPaneChannelCommand, RemoteChannelUnavailable>;
+
+    fn live_generation(&self) -> Option<u64>;
 
     fn shutdown(&mut self, executor: &BackgroundExecutor);
 }
@@ -511,6 +613,10 @@ impl NativeSessionControl for OpenSshControlConnection<NativeSshProcessBackend> 
             .map_err(|_| RemoteChannelUnavailable)
     }
 
+    fn live_generation(&self) -> Option<u64> {
+        OpenSshControlConnection::live_generation(self).ok()
+    }
+
     fn shutdown(&mut self, executor: &BackgroundExecutor) {
         let _ = executor.block(OpenSshControlConnection::shutdown(self));
     }
@@ -518,13 +624,107 @@ impl NativeSessionControl for OpenSshControlConnection<NativeSshProcessBackend> 
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::collections::VecDeque;
+    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
     use gpui::TestAppContext;
 
     use super::*;
     use crate::platform::app_paths::AppPathEnvironment;
     use crate::ssh::command::{OpenSshVersion, SshUnavailableReason};
+
+    struct FakeIdentityProvider {
+        validations: Mutex<
+            VecDeque<
+                Result<
+                    RemoteDirectoryIdentity,
+                    super::super::remote_workspace_picker::RemoteWorkspaceProviderError,
+                >,
+            >,
+        >,
+    }
+
+    impl FakeIdentityProvider {
+        fn returning(
+            results: impl IntoIterator<
+                Item = Result<
+                    RemoteDirectoryIdentity,
+                    super::super::remote_workspace_picker::RemoteWorkspaceProviderError,
+                >,
+            >,
+        ) -> Self {
+            Self {
+                validations: Mutex::new(results.into_iter().collect()),
+            }
+        }
+    }
+
+    impl RemoteWorkspaceProvider for FakeIdentityProvider {
+        fn discover_account(
+            &self,
+        ) -> Task<
+            Result<
+                super::super::remote_workspace_picker::RemoteWorkspaceAccount,
+                super::super::remote_workspace_picker::RemoteWorkspaceProviderError,
+            >,
+        > {
+            Task::ready(Err(
+                super::super::remote_workspace_picker::RemoteWorkspaceProviderError::Other,
+            ))
+        }
+
+        fn list_directories(
+            &self,
+            _: RemoteWorkspaceDirectory,
+        ) -> Task<
+            Result<
+                super::super::remote_workspace_picker::RemoteWorkspaceDirectoryListing,
+                super::super::remote_workspace_picker::RemoteWorkspaceProviderError,
+            >,
+        > {
+            Task::ready(Err(
+                super::super::remote_workspace_picker::RemoteWorkspaceProviderError::Other,
+            ))
+        }
+
+        fn probe_exact_path(
+            &self,
+            _: RemoteWorkspaceDirectory,
+        ) -> Task<
+            Result<
+                super::super::remote_workspace_picker::RemoteWorkspaceExactPathState,
+                super::super::remote_workspace_picker::RemoteWorkspaceProviderError,
+            >,
+        > {
+            Task::ready(Err(
+                super::super::remote_workspace_picker::RemoteWorkspaceProviderError::Other,
+            ))
+        }
+
+        fn create_directory_recursively(
+            &self,
+            _: RemoteWorkspaceDirectory,
+        ) -> Task<Result<(), super::super::remote_workspace_picker::RemoteWorkspaceProviderError>>
+        {
+            Task::ready(Err(
+                super::super::remote_workspace_picker::RemoteWorkspaceProviderError::Other,
+            ))
+        }
+
+        fn validate_physical_identity(
+            &self,
+            _: RemoteWorkspaceDirectory,
+        ) -> Task<
+            Result<
+                RemoteDirectoryIdentity,
+                super::super::remote_workspace_picker::RemoteWorkspaceProviderError,
+            >,
+        > {
+            Task::ready(self.validations.lock().unwrap().pop_front().unwrap_or(Err(
+                super::super::remote_workspace_picker::RemoteWorkspaceProviderError::Other,
+            )))
+        }
+    }
 
     fn factory_with_capability(
         startup_capability: SshCapability,
@@ -633,6 +833,8 @@ mod tests {
 
     struct FakeSessionControl {
         shutdowns: Arc<AtomicUsize>,
+        preparations: Arc<AtomicUsize>,
+        generation: Arc<AtomicU64>,
         alias: SshHostAlias,
         aliases: ActiveSshAliasRegistry,
     }
@@ -644,10 +846,21 @@ mod tests {
 
         fn prepare_pane_channel(
             &self,
-            _: crate::ssh::command::ValidatedRemoteShellCommand,
+            command: crate::ssh::command::ValidatedRemoteShellCommand,
         ) -> Result<crate::ssh::command::PreparedSshPaneChannelCommand, RemoteChannelUnavailable>
         {
-            Err(RemoteChannelUnavailable)
+            self.preparations.fetch_add(1, Ordering::SeqCst);
+            Ok(crate::ssh::command::SshCommandContext::new(
+                PathBuf::from("/private/config/spaceterm/ssh_config"),
+                SshDestination::new("work".to_owned()).unwrap(),
+                PathBuf::from("/private/runtime/spaceterm/master.sock"),
+            )
+            .unwrap()
+            .prepare_pane_channel(command))
+        }
+
+        fn live_generation(&self) -> Option<u64> {
+            Some(self.generation.load(Ordering::Acquire))
         }
 
         fn shutdown(&mut self, _: &BackgroundExecutor) {
@@ -664,9 +877,13 @@ mod tests {
         let alias = SshHostAlias::new("work".to_owned()).unwrap();
         let alias_lease = aliases.acquire(alias.clone()).unwrap();
         let shutdowns = Arc::new(AtomicUsize::new(0));
+        let preparations = Arc::new(AtomicUsize::new(0));
+        let generation = Arc::new(AtomicU64::new(1));
         let control: Arc<Mutex<Option<Box<dyn NativeSessionControl>>>> =
             Arc::new(Mutex::new(Some(Box::new(FakeSessionControl {
                 shutdowns: Arc::clone(&shutdowns),
+                preparations,
+                generation,
                 alias: alias.clone(),
                 aliases: aliases.clone(),
             }))));
@@ -674,6 +891,7 @@ mod tests {
         let mut owner = NativeRemoteWorkspaceSessionOwner {
             control: Arc::clone(&control),
             lifecycle: None,
+            utility: Arc::new(FakeIdentityProvider::returning([])),
             authentication: None,
             alias: Some(alias_lease),
             cancellation: cancellation.clone(),
@@ -681,8 +899,9 @@ mod tests {
             closed: false,
         };
         let provider = owner
-            .bind_terminal_channels(
+            .bind_terminal_channels_for_identity(
                 &RemoteWorkspaceDirectory::new("~/src".to_owned()).unwrap(),
+                &RemoteDirectoryIdentity::new("/home/test/src".to_owned()).unwrap(),
                 "/bin/zsh",
             )
             .unwrap();
@@ -696,6 +915,79 @@ mod tests {
         assert!(!aliases.is_active(&alias));
         assert!(!provider.is_ready());
         assert!(provider.prepare().is_err());
+    }
+
+    #[gpui::test]
+    fn native_channel_should_require_one_fresh_identity_grant_per_preparation(
+        cx: &mut TestAppContext,
+    ) {
+        let generation = Arc::new(AtomicU64::new(7));
+        let preparations = Arc::new(AtomicUsize::new(0));
+        let control: Arc<Mutex<Option<Box<dyn NativeSessionControl>>>> =
+            Arc::new(Mutex::new(Some(Box::new(FakeSessionControl {
+                shutdowns: Arc::new(AtomicUsize::new(0)),
+                preparations: Arc::clone(&preparations),
+                generation: Arc::clone(&generation),
+                alias: SshHostAlias::new("work".to_owned()).unwrap(),
+                aliases: ActiveSshAliasRegistry::default(),
+            }))));
+        let expected = RemoteDirectoryIdentity::new("/srv/project".to_owned()).unwrap();
+        let provider = NativeRemoteTerminalChannelProvider {
+            control: Arc::downgrade(&control),
+            directory: RemoteWorkspaceDirectory::new("~/project".to_owned()).unwrap(),
+            expected_identity: expected.clone(),
+            utility: Arc::new(FakeIdentityProvider::returning([
+                Ok(expected.clone()),
+                Ok(expected),
+            ])),
+            login_shell: "/bin/zsh".to_owned(),
+            executor: cx.executor(),
+            grant: Arc::new(Mutex::new(ChannelGrantState::default())),
+        };
+
+        assert!(provider.prepare().is_err());
+        assert_eq!(cx.executor().block(provider.revalidate()), Ok(()));
+        assert!(provider.prepare().is_ok());
+        assert!(provider.prepare().is_err());
+        assert_eq!(preparations.load(Ordering::SeqCst), 1);
+
+        assert_eq!(cx.executor().block(provider.revalidate()), Ok(()));
+        generation.store(8, Ordering::Release);
+        assert!(provider.prepare().is_err());
+        assert_eq!(preparations.load(Ordering::SeqCst), 1);
+    }
+
+    #[gpui::test]
+    fn native_channel_should_reject_identity_replacement_without_granting_prepare(
+        cx: &mut TestAppContext,
+    ) {
+        let preparations = Arc::new(AtomicUsize::new(0));
+        let control: Arc<Mutex<Option<Box<dyn NativeSessionControl>>>> =
+            Arc::new(Mutex::new(Some(Box::new(FakeSessionControl {
+                shutdowns: Arc::new(AtomicUsize::new(0)),
+                preparations: Arc::clone(&preparations),
+                generation: Arc::new(AtomicU64::new(1)),
+                alias: SshHostAlias::new("work".to_owned()).unwrap(),
+                aliases: ActiveSshAliasRegistry::default(),
+            }))));
+        let provider = NativeRemoteTerminalChannelProvider {
+            control: Arc::downgrade(&control),
+            directory: RemoteWorkspaceDirectory::new("~/project".to_owned()).unwrap(),
+            expected_identity: RemoteDirectoryIdentity::new("/srv/project".to_owned()).unwrap(),
+            utility: Arc::new(FakeIdentityProvider::returning([Ok(
+                RemoteDirectoryIdentity::new("/attacker/project".to_owned()).unwrap(),
+            )])),
+            login_shell: "/bin/zsh".to_owned(),
+            executor: cx.executor(),
+            grant: Arc::new(Mutex::new(ChannelGrantState::default())),
+        };
+
+        assert_eq!(
+            cx.executor().block(provider.revalidate()),
+            Err(RemoteChannelRevalidationError::IdentityChanged)
+        );
+        assert!(provider.prepare().is_err());
+        assert_eq!(preparations.load(Ordering::SeqCst), 0);
     }
 
     #[test]

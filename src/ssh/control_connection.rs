@@ -324,6 +324,21 @@ impl<B: SshProcessBackend> OpenSshControlConnection<B> {
         ))
     }
 
+    pub(crate) fn live_generation(&self) -> Result<u64, ControlConnectionError> {
+        if self.state() != ControlConnectionState::Ready {
+            return Err(ControlConnectionError::NotReady);
+        }
+        let capability = self
+            .authority
+            .as_ref()
+            .ok_or(ControlConnectionError::Ownership)?
+            .capability();
+        capability
+            .authorize()
+            .map_err(|_| ControlConnectionError::NotReady)?;
+        Ok(capability.generation())
+    }
+
     pub(crate) async fn shutdown(&mut self) -> Result<(), ControlConnectionError> {
         if self.state() == ControlConnectionState::Closed {
             return Ok(());

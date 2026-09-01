@@ -200,6 +200,10 @@ impl LiveConnectionCapability {
     pub(crate) fn cancellation(&self) -> SshCancellationToken {
         self.cancellation.clone()
     }
+
+    pub(crate) const fn generation(&self) -> u64 {
+        self.generation
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]

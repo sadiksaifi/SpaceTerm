@@ -96,6 +96,15 @@ pub(super) trait RemoteWorkspaceSessionOwner: Send + 'static {
         login_shell: &str,
     ) -> Result<Arc<dyn RemoteTerminalChannelProvider>, RemoteWorkspaceFlowBackendError>;
 
+    fn bind_terminal_channels_for_identity(
+        &self,
+        directory: &RemoteWorkspaceDirectory,
+        _expected_identity: &RemoteDirectoryIdentity,
+        login_shell: &str,
+    ) -> Result<Arc<dyn RemoteTerminalChannelProvider>, RemoteWorkspaceFlowBackendError> {
+        self.bind_terminal_channels(directory, login_shell)
+    }
+
     fn take_lifecycle_observer(&mut self) -> Option<ControlConnectionObserver>;
 
     fn close(&mut self);
@@ -133,6 +142,18 @@ impl RemoteWorkspaceConnectedSession {
             .as_ref()
             .ok_or(RemoteWorkspaceFlowBackendError::ConnectionFailed)?
             .bind_terminal_channels(directory, login_shell)
+    }
+
+    fn bind_terminal_channels_for_identity(
+        &self,
+        directory: &RemoteWorkspaceDirectory,
+        expected_identity: &RemoteDirectoryIdentity,
+        login_shell: &str,
+    ) -> Result<Arc<dyn RemoteTerminalChannelProvider>, RemoteWorkspaceFlowBackendError> {
+        self.owner
+            .as_ref()
+            .ok_or(RemoteWorkspaceFlowBackendError::ConnectionFailed)?
+            .bind_terminal_channels_for_identity(directory, expected_identity, login_shell)
     }
 
     fn take_lifecycle_observer(&mut self) -> Option<ControlConnectionObserver> {
@@ -1182,9 +1203,11 @@ impl RemoteWorkspaceFlow {
             }
             return;
         };
-        let terminal_channels = match session
-            .bind_terminal_channels(selection.directory(), selection.account().login_shell())
-        {
+        let terminal_channels = match session.bind_terminal_channels_for_identity(
+            selection.directory(),
+            selection.physical_directory(),
+            selection.account().login_shell(),
+        ) {
             Ok(provider) => provider,
             Err(error) => {
                 self.connected = Some(session);

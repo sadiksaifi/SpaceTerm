@@ -2,6 +2,7 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
 
+use gpui::Task;
 use thiserror::Error;
 
 use super::geometry::TerminalGeometry;
@@ -32,8 +33,22 @@ struct RemoteWorkspaceTerminalLaunchContext {
 #[error("the remote Terminal Session channel is unavailable")]
 pub(crate) struct RemoteChannelUnavailable;
 
+#[derive(Clone, Copy, Debug, Error, Eq, PartialEq)]
+pub(crate) enum RemoteChannelRevalidationError {
+    #[error("the remote Terminal Session connection is unavailable")]
+    ConnectionUnavailable,
+    #[error("the remote workspace directory could not be revalidated")]
+    DirectoryUnavailable,
+    #[error("the remote workspace directory identity changed")]
+    IdentityChanged,
+}
+
 pub(crate) trait RemoteTerminalChannelProvider: Send + Sync {
     fn is_ready(&self) -> bool;
+
+    fn revalidate(&self) -> Task<Result<(), RemoteChannelRevalidationError>> {
+        Task::ready(Ok(()))
+    }
 
     fn prepare(&self) -> Result<PreparedSshPaneChannelCommand, RemoteChannelUnavailable>;
 }
