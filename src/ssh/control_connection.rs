@@ -13,7 +13,9 @@ use super::command::{
     PreparedSshPaneChannelCommand, SshCommandContext, SshCommandContextError,
     ValidatedRemoteShellCommand,
 };
-use super::live_connection::{LiveConnectionAuthority, LiveConnectionState};
+use super::live_connection::{
+    ControlConnectionLifecycleObserver, LiveConnectionAuthority, LiveConnectionState,
+};
 use super::process::{ProcessExit, ProcessRunError, ProcessSignal, SshProcessBackend};
 use super::remote_utility::PreparedSshRemoteUtilityCommand;
 use crate::domain::SshDestination;
@@ -148,6 +150,15 @@ pub(crate) struct OpenSshControlConnection<B: SshProcessBackend> {
 }
 
 impl<B: SshProcessBackend> OpenSshControlConnection<B> {
+    pub(crate) fn lifecycle_observer(
+        &self,
+    ) -> Result<ControlConnectionLifecycleObserver, ControlConnectionError> {
+        self.authority
+            .as_ref()
+            .map(|authority| authority.observe_lifecycle())
+            .ok_or(ControlConnectionError::Ownership)
+    }
+
     pub(crate) async fn connect(
         paths: &AppPaths,
         destination: SshDestination,
@@ -1177,6 +1188,7 @@ mod tests {
             )
             .unwrap();
         let utility = connection.remote_utility_command().unwrap();
+        let lifecycle = connection.lifecycle_observer().unwrap();
         backend
             .state
             .lock()
@@ -1192,6 +1204,10 @@ mod tests {
         }
 
         assert_eq!(connection.state(), ControlConnectionState::Failed);
+        assert_eq!(
+            cx.executor().block(lifecycle.terminal()),
+            crate::ssh::live_connection::ControlConnectionTerminalState::Failed
+        );
         assert!(matches!(
             pane.take(),
             Err(crate::ssh::command::PreparedSshPaneChannelError::Unavailable)
@@ -1200,6 +1216,31 @@ mod tests {
             utility
                 .connection_cancellation()
                 .is_some_and(|cancellation| cancellation.is_cancelled())
+        );
+    }
+
+    #[gpui::test]
+    fn dropping_a_ready_connection_should_publish_closed_once(cx: &mut TestAppContext) {
+        let directory = TestDirectory::new();
+        let paths = directory.paths();
+        let backend = Arc::new(FakeBackend::with_readiness([ProcessExit::successful()]));
+        let connection = cx
+            .executor()
+            .block(OpenSshControlConnection::connect(
+                &paths,
+                destination(),
+                backend,
+                &SshCancellationToken::default(),
+                timing(),
+            ))
+            .unwrap();
+        let lifecycle = connection.lifecycle_observer().unwrap();
+
+        drop(connection);
+
+        assert_eq!(
+            cx.executor().block(lifecycle.terminal()),
+            crate::ssh::live_connection::ControlConnectionTerminalState::Closed
         );
     }
 
