@@ -14,6 +14,7 @@ use super::{
 };
 
 #[derive(Debug, Error)]
+/// A typed rejection while coordinating Remote lifecycle across one Window's Pane hierarchy.
 pub(crate) enum RemotePaneHostLifecycleError {
     #[error("Pane {pane_id} cannot change remote session lifecycle: {source}")]
     Pane {
@@ -30,6 +31,9 @@ pub(crate) enum RemotePaneHostLifecycleError {
     PaneChanged(PaneId),
 }
 
+/// Move-only restart reservations for every Pane in one unchanged Window hierarchy.
+///
+/// The token is valid only while Window, Pane, and session-epoch identities remain unchanged.
 pub(crate) struct PreparedPaneHostRemoteRestart {
     window_id: WindowId,
     panes: Vec<(PaneId, Entity<TerminalPane>, PreparedRemotePaneRestart)>,
@@ -387,6 +391,10 @@ impl PaneHost {
         }
     }
 
+    /// Atomically marks every Pane in this Window disconnected for one generation.
+    ///
+    /// All Panes are prevalidated before any mutation. The Pane tree, focus, zoom, and retained
+    /// presentations remain intact, while new child launches and terminal input are blocked.
     pub(crate) fn disconnect_remote(
         &mut self,
         generation: u64,
@@ -406,6 +414,7 @@ impl PaneHost {
         Ok(())
     }
 
+    /// Prevalidates a hierarchy-wide disconnect without mutating any Pane.
     pub(crate) fn can_disconnect_remote(
         &self,
         generation: u64,
@@ -420,6 +429,10 @@ impl PaneHost {
         Ok(())
     }
 
+    /// Binds one already-reserved launch to every existing Pane without mutating the hierarchy.
+    ///
+    /// The launch count and Pane identities must match exactly. Any failure drops the aggregate
+    /// token and leaves all Panes disconnected and unchanged.
     pub(crate) fn prepare_remote_restart(
         &self,
         session_factory: WorkspaceTerminalSessionFactory,
@@ -450,6 +463,7 @@ impl PaneHost {
         })
     }
 
+    /// Revalidates every prepared Pane restart against the current Window hierarchy.
     pub(crate) fn can_commit_remote_restart(
         &self,
         prepared: &PreparedPaneHostRemoteRestart,
@@ -484,6 +498,11 @@ impl PaneHost {
         Ok(())
     }
 
+    /// Commits every prevalidated Pane restart in place after aggregate preparation succeeds.
+    ///
+    /// Window, Pane-tree, focus, and zoom identities are preserved. Once commit begins, later
+    /// Terminal Session startup failure belongs to its individual Pane rather than rolling back
+    /// already committed siblings.
     pub(crate) fn commit_remote_restart(
         &mut self,
         prepared: PreparedPaneHostRemoteRestart,

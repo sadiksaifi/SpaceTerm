@@ -31,9 +31,15 @@ struct RemoteWorkspaceTerminalLaunchContext {
 
 #[derive(Clone, Copy, Debug, Error, Eq, PartialEq)]
 #[error("the remote Terminal Session channel is unavailable")]
+/// A content-free failure to reserve one Remote Terminal Session channel.
+///
+/// No hierarchy mutation may occur after this error and before a fresh revalidation succeeds.
 pub(crate) struct RemoteChannelUnavailable;
 
 #[derive(Clone, Copy, Debug, Error, Eq, PartialEq)]
+/// A content-free reason that a Remote child launch could not be authorized.
+///
+/// These errors intentionally carry no destination, path, socket, command, or authentication data.
 pub(crate) enum RemoteChannelRevalidationError {
     #[error("the remote Terminal Session connection is unavailable")]
     ConnectionUnavailable,
@@ -43,11 +49,20 @@ pub(crate) enum RemoteChannelRevalidationError {
     IdentityChanged,
 }
 
+/// Workspace-owned authority for reserving single-use Remote Terminal Session channels.
+///
+/// Each successful `revalidate` grants at most one immediately following `prepare`. The provider
+/// binds that grant to the current Control Connection generation and pinned physical directory
+/// identity. Callers must revalidate before hierarchy mutation and treat cancellation or a stale
+/// grant as no mutation. Implementations must not reinterpret the remote directory as a local path.
 pub(crate) trait RemoteTerminalChannelProvider: Send + Sync {
+    /// Reports whether the owning Control Connection can currently accept child channels.
     fn is_ready(&self) -> bool;
 
+    /// Revalidates the pinned remote physical identity and authorizes one subsequent preparation.
     fn revalidate(&self) -> Task<Result<(), RemoteChannelRevalidationError>>;
 
+    /// Consumes the current revalidation grant into one prepared OpenSSH channel command.
     fn prepare(&self) -> Result<PreparedSshPaneChannelCommand, RemoteChannelUnavailable>;
 }
 
@@ -70,6 +85,10 @@ where
 }
 
 #[derive(Debug)]
+/// A move-only child-launch reservation prepared before hierarchy mutation.
+///
+/// A Remote token owns one single-use channel command. Passing it to `start` transfers that
+/// command to exactly one Pane; dropping it abandons the reservation without starting a session.
 pub(crate) struct PreparedWorkspaceTerminalLaunch {
     launch_plan: TerminalLaunchPlan,
 }
@@ -88,18 +107,24 @@ impl PreparedWorkspaceTerminalLaunch {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+/// The authority required before adding a child to a Workspace hierarchy.
+///
+/// Local validation returns local filesystem authority. Remote validation never returns a path;
+/// its physical identity grant remains encapsulated by `RemoteTerminalChannelProvider`.
 pub(crate) enum WorkspaceChildLaunchValidation {
     Local(ValidatedWorkspaceDirectory),
     Remote,
 }
 
 #[derive(Clone)]
+/// Binds Terminal Session creation to one Workspace's immutable Local or Remote launch context.
 pub(crate) struct WorkspaceTerminalSessionFactory {
     session_factory: Rc<dyn TerminalSessionFactory>,
     launch_context: WorkspaceTerminalLaunchContext,
 }
 
 impl WorkspaceTerminalSessionFactory {
+    /// Creates a factory whose children start from one validated local Workspace Directory.
     pub(crate) fn new_local(
         session_factory: Rc<dyn TerminalSessionFactory>,
         working_directory: ValidatedWorkspaceDirectory,
@@ -112,6 +137,10 @@ impl WorkspaceTerminalSessionFactory {
         }
     }
 
+    /// Creates a factory whose children consume channels from one Remote Workspace owner.
+    ///
+    /// `local_home` is only the local OpenSSH process working directory. The metadata directory is
+    /// remote startup data and must never be converted to a local `PathBuf`.
     pub(crate) fn new_remote(
         session_factory: Rc<dyn TerminalSessionFactory>,
         local_home: ValidatedWorkspaceDirectory,
@@ -132,6 +161,10 @@ impl WorkspaceTerminalSessionFactory {
         }
     }
 
+    /// Reserves one launch before the caller mutates its Window or Pane hierarchy.
+    ///
+    /// Local plans are clonable directory authority. Remote plans consume the provider's one-shot
+    /// grant and fail if readiness changed after revalidation.
     pub(crate) fn prepare_child_launch(
         &self,
     ) -> Result<PreparedWorkspaceTerminalLaunch, RemoteChannelUnavailable> {
@@ -157,7 +190,8 @@ impl WorkspaceTerminalSessionFactory {
     /// Revalidates the pinned physical identity and grants one subsequent Remote child launch.
     ///
     /// Local child launches have no remote authority to revalidate, so callers can keep their
-    /// synchronous path by branching on `None`.
+    /// synchronous path by branching on `None`. Dropping the task or receiving an error authorizes
+    /// no hierarchy mutation; the grant must be consumed immediately after successful completion.
     pub(crate) fn revalidate_remote_child_launch(
         &self,
     ) -> Option<Task<Result<(), RemoteChannelRevalidationError>>> {
@@ -169,6 +203,7 @@ impl WorkspaceTerminalSessionFactory {
         }
     }
 
+    /// Transfers a prepared launch token into one newly started Terminal Session.
     pub(crate) fn start(
         &self,
         geometry: TerminalGeometry,
@@ -208,6 +243,9 @@ impl WorkspaceTerminalSessionFactory {
         }
     }
 
+    /// Returns local filesystem authority only for a Local launch context.
+    ///
+    /// Remote Workspace directories are intentionally unavailable through this API.
     pub(crate) fn local_working_directory(&self) -> Option<&std::path::Path> {
         match &self.launch_context {
             WorkspaceTerminalLaunchContext::Local(plan) => Some(plan.working_directory().path()),
@@ -215,6 +253,10 @@ impl WorkspaceTerminalSessionFactory {
         }
     }
 
+    /// Revalidates Local directory identity without applying local validation to Remote values.
+    ///
+    /// A Remote result carries no path authority; callers must separately use the provider's
+    /// asynchronous physical-identity grant before reserving a channel.
     pub(crate) fn validate_child_launch(
         &self,
     ) -> Result<WorkspaceChildLaunchValidation, WorkspaceDirectoryError> {

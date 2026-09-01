@@ -16,6 +16,7 @@ use super::{
 };
 
 #[derive(Debug, Error)]
+/// A typed rejection while coordinating Remote lifecycle across the Workspace's Window hierarchy.
 pub(crate) enum RemoteWindowManagerLifecycleError {
     #[error(transparent)]
     Revalidation(#[from] RemoteChannelRevalidationError),
@@ -33,6 +34,9 @@ pub(crate) enum RemoteWindowManagerLifecycleError {
     WindowChanged(WindowId),
 }
 
+/// Move-only restart reservations for every Pane across one unchanged Window hierarchy.
+///
+/// No Window or Pane is mutated until the complete token has been prepared and revalidated.
 pub(crate) struct PreparedWindowManagerRemoteRestart {
     session_factory: WorkspaceTerminalSessionFactory,
     windows: Vec<(WindowId, Entity<PaneHost>, PreparedPaneHostRemoteRestart)>,
@@ -362,6 +366,11 @@ impl WindowManager {
         }
     }
 
+    /// Atomically disconnects every Window and Pane for the authoritative connection generation.
+    ///
+    /// The complete hierarchy is prevalidated before mutation. Window IDs, Pane layouts, active and
+    /// focused identities, zoom, and final presentations remain intact while input and new Remote
+    /// child launches are blocked.
     pub(crate) fn disconnect_remote(
         &mut self,
         generation: u64,
@@ -390,6 +399,11 @@ impl WindowManager {
         Ok(())
     }
 
+    /// Revalidates and reserves one fresh Remote channel for every preserved Pane.
+    ///
+    /// Reservation is asynchronous and completes before hierarchy mutation. Each channel requires
+    /// its own current physical-identity grant. Cancellation, stale generation, directory change,
+    /// or any reservation failure drops all prepared tokens and leaves the hierarchy disconnected.
     pub(crate) fn prepare_remote_restart(
         &mut self,
         session_factory: WorkspaceTerminalSessionFactory,
@@ -461,6 +475,10 @@ impl WindowManager {
         })
     }
 
+    /// Commits a fully prepared Remote restart across the existing Window hierarchy.
+    ///
+    /// The method revalidates all Window and Pane identities before the first commit, then replaces
+    /// Terminal Sessions in place. Post-commit session startup failures remain local to each Pane.
     pub(crate) fn commit_remote_restart(
         &mut self,
         prepared: PreparedWindowManagerRemoteRestart,

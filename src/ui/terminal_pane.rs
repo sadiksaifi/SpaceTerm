@@ -240,6 +240,9 @@ struct SelectionPasteboard {
 }
 
 #[derive(Clone, Copy, Debug, Error, Eq, PartialEq)]
+/// A typed rejection of a Remote Pane disconnect or restart lifecycle operation.
+///
+/// Errors leave the Pane's session epoch, presentation, and input state unchanged.
 pub(crate) enum RemotePaneLifecycleError {
     #[error("the Pane does not own a remote Terminal Session")]
     LocalPane,
@@ -253,6 +256,9 @@ pub(crate) enum RemotePaneLifecycleError {
     ChannelUnavailable(#[from] RemoteChannelUnavailable),
 }
 
+/// A move-only restart token bound to one Pane session epoch and successor generation.
+///
+/// Preparation reserves a fresh channel but does not replace the current Terminal Session.
 pub(crate) struct PreparedRemotePaneRestart {
     session_factory: WorkspaceTerminalSessionFactory,
     prepared_launch: PreparedWorkspaceTerminalLaunch,
@@ -1126,6 +1132,7 @@ impl TerminalPane {
         Ok(())
     }
 
+    /// Validates that `generation` may disconnect this Remote Pane without mutating it.
     pub(crate) fn can_disconnect_remote(
         &self,
         generation: u64,
@@ -1133,6 +1140,11 @@ impl TerminalPane {
         self.validate_remote_generation(generation)
     }
 
+    /// Suspends a Remote Pane for an authoritative Control Connection loss.
+    ///
+    /// The final screen, title, selection, and Find presentation remain owned by the Pane. Terminal
+    /// input is blocked, prior-session event tasks are retired, and repeated notification for the
+    /// same generation is idempotent. Stale generations and Local Panes are rejected unchanged.
     pub(crate) fn disconnect_remote(
         &mut self,
         generation: u64,
@@ -1168,6 +1180,10 @@ impl TerminalPane {
         true
     }
 
+    /// Binds one prepared channel to this disconnected Pane without mutating its session.
+    ///
+    /// The generation must advance and the token captures the current session epoch so delayed
+    /// preparation cannot replace a successor. Dropping the token abandons the reserved launch.
     pub(crate) fn prepare_remote_restart(
         &self,
         session_factory: WorkspaceTerminalSessionFactory,
@@ -1198,6 +1214,7 @@ impl TerminalPane {
         })
     }
 
+    /// Revalidates a prepared restart against the Pane's current epoch and generation.
     pub(crate) fn can_commit_remote_restart(
         &self,
         prepared: &PreparedRemotePaneRestart,
@@ -1220,6 +1237,11 @@ impl TerminalPane {
         Ok(())
     }
 
+    /// Commits a prevalidated successor Terminal Session in the existing Pane entity.
+    ///
+    /// The Pane and layout identities remain unchanged. Prior-session event and accessibility
+    /// tasks are retired, generation caches reset, and the retained presentation remains visible
+    /// until the successor publishes its first snapshot. Later startup failure is Pane-local.
     pub(crate) fn commit_remote_restart(
         &mut self,
         prepared: PreparedRemotePaneRestart,

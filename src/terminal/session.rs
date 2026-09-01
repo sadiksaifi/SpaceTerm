@@ -338,7 +338,12 @@ pub(crate) trait TerminalSessionHandle {
     }
 }
 
+/// Starts one Terminal Session by consuming typed Local or Remote launch authority.
 pub(crate) trait TerminalSessionFactory {
+    /// Starts a session without reparsing or weakening the supplied launch plan.
+    ///
+    /// Remote implementations consume the prepared OpenSSH command exactly once and use only the
+    /// plan's validated local home as local process working-directory authority.
     fn start(
         &self,
         geometry: TerminalGeometry,
@@ -351,11 +356,21 @@ pub(crate) trait TerminalSessionFactory {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+/// A local Terminal Session launch bound to one validated local Workspace Directory.
+///
+/// Its directory is local filesystem authority and is the only launch directory passed to local
+/// process `chdir` and identity validation.
 pub(crate) struct LocalTerminalLaunchPlan {
     working_directory: crate::domain::ValidatedWorkspaceDirectory,
 }
 
 #[derive(Clone, Eq, PartialEq)]
+/// A Remote Terminal Session launch bound to one prepared OpenSSH Pane channel.
+///
+/// `local_home` is used only as the local SSH process working directory. Destination and Remote
+/// Workspace Directory remain typed remote metadata and must never enter `PathBuf`, local `chdir`,
+/// or local filesystem validation. The prepared channel is single-use and sensitive Debug output
+/// is deliberately redacted.
 pub(crate) struct RemoteTerminalLaunchPlan {
     local_home: crate::domain::ValidatedWorkspaceDirectory,
     metadata_context: RemoteTerminalMetadataContext,
@@ -427,6 +442,10 @@ impl LocalTerminalLaunchPlan {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+/// The exhaustive Local or Remote launch authority consumed by a Terminal Session factory.
+///
+/// Matching this enum is the boundary at which local path capabilities and remote channel
+/// ownership diverge; callers must not reconstruct one variant from the other's directory data.
 pub(crate) enum TerminalLaunchPlan {
     Local(LocalTerminalLaunchPlan),
     Remote(RemoteTerminalLaunchPlan),

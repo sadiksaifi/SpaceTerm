@@ -39,6 +39,9 @@ impl WorkspaceDirectoryIdentity {
 }
 
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
+/// Validation failures for values that cross the local-to-remote domain boundary.
+///
+/// Rejected strings must not reach OpenSSH arguments, remote utility commands, or local path APIs.
 pub(crate) enum RemoteWorkspaceValueError {
     #[error("SSH destination must be one non-option, control-free token")]
     InvalidDestination,
@@ -49,6 +52,9 @@ pub(crate) enum RemoteWorkspaceValueError {
 }
 
 /// The exact OpenSSH destination token selected by the user.
+///
+/// Equality is spelling-sensitive so different configured aliases remain distinct even when they
+/// currently resolve to the same host. The token is passed as one validated OpenSSH argument.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub(crate) struct SshDestination(String);
 
@@ -71,6 +77,9 @@ impl SshDestination {
 }
 
 /// The exact user-visible spelling of a directory selected on a remote destination.
+///
+/// This remote value is preserved for display and shell startup. It is not local filesystem
+/// authority and must never be converted to `PathBuf` or passed to a local path API.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct RemoteWorkspaceDirectory(String);
 
@@ -89,6 +98,9 @@ impl RemoteWorkspaceDirectory {
 }
 
 /// The physical absolute directory returned by the remote `pwd -P` validation protocol.
+///
+/// Its normalized path-like spelling is an opaque remote identity used for deduplication and
+/// revalidation. It must never become a local `PathBuf` or local filesystem identity.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub(crate) struct RemoteDirectoryIdentity(String);
 
@@ -113,6 +125,9 @@ impl RemoteDirectoryIdentity {
 }
 
 /// The deduplication identity of a Remote Project Workspace.
+///
+/// Both the exact destination token and validated physical directory participate in equality.
+/// The selected directory spelling is deliberately excluded and remains separate startup data.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub(crate) struct RemoteWorkspaceKey {
     destination: SshDestination,
@@ -140,6 +155,9 @@ impl RemoteWorkspaceKey {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// A bounded phase in one Remote Project Workspace's Control Connection lifecycle.
+///
+/// A phase is meaningful only together with its owning connection generation.
 pub(crate) enum RemoteConnectionPhase {
     Connecting,
     Connected,
@@ -150,6 +168,9 @@ pub(crate) enum RemoteConnectionPhase {
 }
 
 /// One bounded connection phase coupled to the operation generation that produced it.
+///
+/// Generations are monotonic within one Remote Project Workspace. Closing is terminal, and an
+/// observation from a predecessor generation cannot mutate a successor.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct RemoteConnectionState {
     generation: u64,
@@ -157,6 +178,10 @@ pub(crate) struct RemoteConnectionState {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// The result of reducing one proposed Remote connection transition.
+///
+/// Rejected transitions leave the existing state unchanged. `Stale` identifies a predecessor
+/// generation; `Illegal` identifies a transition outside the explicit lifecycle table.
 pub(crate) enum RemoteConnectionReduction {
     Applied,
     Stale,
@@ -200,7 +225,11 @@ impl RemoteConnectionState {
         self.phase
     }
 
-    /// Reduces a completion or lifecycle observation while rejecting predecessor generations.
+    /// Reduces a completion or lifecycle observation through the explicit transition table.
+    ///
+    /// A reconnect may advance the generation only from Disconnected or Failed. Same-generation
+    /// observations may complete or terminate the current attempt, while Closing accepts no
+    /// successor. Rejection never mutates `self`.
     pub(crate) fn reduce(&mut self, next: Self) -> RemoteConnectionReduction {
         if next.generation < self.generation {
             return RemoteConnectionReduction::Stale;
@@ -270,13 +299,19 @@ impl DirectoryAuthority {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+/// The immutable behavioral kind and kind-specific ownership state of a Workspace.
 pub(crate) enum WorkspaceKind {
+    /// A local Workspace whose directory follows its current Directory Authority.
     Scratch {
         directory_authority: DirectoryAuthority,
     },
+    /// A local Workspace pinned to one validated filesystem identity.
     LocalProject {
         project_root_identity: WorkspaceDirectoryIdentity,
     },
+    /// A runtime-only remote Workspace pinned to one deduplication key and startup spelling.
+    ///
+    /// Its remote directory and physical identity remain remote values, never local path authority.
     RemoteProject {
         key: RemoteWorkspaceKey,
         remote_directory: RemoteWorkspaceDirectory,
@@ -298,6 +333,9 @@ impl WorkspaceDirectoryAvailability {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+/// A validated local Workspace Directory and its local filesystem identity.
+///
+/// This is the only Workspace directory value that may enter local `Path` and `PathBuf` APIs.
 pub(crate) struct ValidatedWorkspaceDirectory {
     path: PathBuf,
     identity: WorkspaceDirectoryIdentity,
@@ -358,6 +396,9 @@ pub(crate) enum CloseWorkspaceOutcome<T> {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// Whether Remote Project creation allocated a new Workspace or activated its deduplicated owner.
+///
+/// `ActivatedExisting` guarantees that the supplied payload factory was not invoked.
 pub(crate) enum CreateRemoteProjectOutcome {
     Created { workspace_id: WorkspaceId },
     ActivatedExisting { workspace_id: WorkspaceId },
@@ -558,6 +599,10 @@ impl<T> WorkspaceCollection<T> {
         })
     }
 
+    /// Returns the Workspace that owns the exact Remote deduplication key, if one exists.
+    ///
+    /// Lookup compares the exact SSH destination token plus physical remote directory identity;
+    /// it does not compare the selected directory spelling or resolve aliases.
     pub(crate) fn remote_project_workspace(&self, key: &RemoteWorkspaceKey) -> Option<WorkspaceId> {
         self.workspaces.iter().find_map(|workspace| {
             matches!(
@@ -573,7 +618,8 @@ impl<T> WorkspaceCollection<T> {
 
     /// Starts exactly one reconnect attempt from a disconnected or failed Remote Project.
     ///
-    /// The collection owns generation allocation so callers cannot reuse or skip generations.
+    /// The collection owns checked generation allocation so callers cannot manufacture, reuse, or
+    /// skip generations. Errors and illegal reductions leave the Workspace unchanged.
     pub(crate) fn begin_remote_reconnect(
         &mut self,
         workspace_id: WorkspaceId,
@@ -592,6 +638,9 @@ impl<T> WorkspaceCollection<T> {
     }
 
     /// Applies one observed lifecycle transition to the owning Remote Project Workspace.
+    ///
+    /// The state's reducer rejects stale generations and illegal phase changes without mutation.
+    /// Missing and non-Remote Workspace IDs return typed errors.
     pub(crate) fn reduce_remote_connection_state(
         &mut self,
         workspace_id: WorkspaceId,
@@ -601,6 +650,9 @@ impl<T> WorkspaceCollection<T> {
     }
 
     /// Begins terminal shutdown without advancing the current Connection Generation.
+    ///
+    /// Closing is terminal: delayed readiness, failure, disconnect, and reconnect observations
+    /// cannot resurrect this Workspace. Rejection leaves the prior state unchanged.
     pub(crate) fn begin_remote_close(
         &mut self,
         workspace_id: WorkspaceId,
@@ -668,6 +720,11 @@ impl<T> WorkspaceCollection<T> {
         self.create_workspace_entry(kind, directory, create_payload)
     }
 
+    /// Creates or activates the Remote Project identified by `key`.
+    ///
+    /// Deduplication occurs before ID allocation and before invoking `create_payload`; an existing
+    /// exact destination plus physical-directory identity is activated with its original selected
+    /// directory spelling and runtime owner intact. No remote value enters a local path API.
     pub(crate) fn create_remote_project_workspace(
         &mut self,
         key: RemoteWorkspaceKey,

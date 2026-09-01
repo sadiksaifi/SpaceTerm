@@ -74,6 +74,10 @@ pub(crate) enum ProgressMetadata {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+/// Immutable remote identity and startup-directory context for one Terminal Session.
+///
+/// The directory retains its exact remote spelling for presentation and startup. It is not local
+/// filesystem authority and must never be converted to `PathBuf` or locally validated.
 pub(crate) struct RemoteTerminalMetadataContext {
     destination: SshDestination,
     initial_directory: RemoteWorkspaceDirectory,
@@ -100,6 +104,10 @@ impl RemoteTerminalMetadataContext {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+/// The typed location context from which terminal metadata derives its path authority.
+///
+/// Local context may classify and validate local paths. Remote context preserves remote strings
+/// only and disables every feature that would interpret them through the local filesystem.
 pub(crate) enum TerminalMetadataContext {
     Local {
         initial_directory: Arc<str>,
@@ -109,6 +117,9 @@ pub(crate) enum TerminalMetadataContext {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// Whether Terminal metadata may authorize features backed by the local filesystem.
+///
+/// This capability is derived from Local versus Remote metadata and is not user-configurable.
 pub(crate) enum TerminalLocalFileCapabilities {
     Enabled,
     Disabled,
