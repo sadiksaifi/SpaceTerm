@@ -736,6 +736,7 @@ fn form_field(
         )
         .child(
             div()
+                .id(error_selector)
                 .h(px(34.0))
                 .w_full()
                 .min_w_0()
