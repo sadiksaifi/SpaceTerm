@@ -102,6 +102,13 @@ pub(crate) struct ActiveSshAliasLease {
     alias: Option<SshHostAlias>,
 }
 
+impl ActiveSshAliasLease {
+    pub(crate) fn try_duplicate(&self) -> Result<Self, SshAliasBusy> {
+        let alias = self.alias.as_ref().ok_or(SshAliasBusy)?;
+        self.registry.acquire(alias.clone())
+    }
+}
+
 impl Drop for ActiveSshAliasLease {
     fn drop(&mut self) {
         if let Some(alias) = self.alias.take() {
@@ -143,5 +150,33 @@ mod tests {
         assert!(registry.begin_mutation([alias.clone()]).is_err());
         drop(connection);
         assert!(registry.begin_mutation([alias]).is_ok());
+    }
+
+    #[test]
+    fn duplicated_lease_should_keep_the_alias_active_after_the_connection_releases() {
+        let registry = ActiveSshAliasRegistry::default();
+        let alias = alias();
+        let connection = registry.acquire(alias.clone()).unwrap();
+        let workspace = connection.try_duplicate().unwrap();
+
+        drop(connection);
+        assert!(registry.is_active(&alias));
+        drop(workspace);
+        assert!(!registry.is_active(&alias));
+    }
+
+    #[test]
+    fn duplicate_workspace_pins_should_release_only_after_the_final_owner() {
+        let registry = ActiveSshAliasRegistry::default();
+        let alias = alias();
+        let connection = registry.acquire(alias.clone()).unwrap();
+        let first = connection.try_duplicate().unwrap();
+        let second = connection.try_duplicate().unwrap();
+
+        drop(connection);
+        drop(first);
+        assert!(registry.is_active(&alias));
+        drop(second);
+        assert!(!registry.is_active(&alias));
     }
 }

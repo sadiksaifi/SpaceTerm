@@ -5,9 +5,10 @@ use std::time::Duration;
 use gpui::{App, BackgroundExecutor, Task, Window};
 
 use super::remote_workspace_flow::{
-    RemoteWorkspaceConnectContext, RemoteWorkspaceConnectedSession,
-    RemoteWorkspaceConnectionProgress, RemoteWorkspaceFlowBackend, RemoteWorkspaceFlowBackendError,
-    RemoteWorkspaceFlowBackendFactory, RemoteWorkspaceSessionOwner,
+    RemoteWorkspaceAliasPin, RemoteWorkspaceAliasPinError, RemoteWorkspaceConnectContext,
+    RemoteWorkspaceConnectedSession, RemoteWorkspaceConnectionProgress, RemoteWorkspaceFlowBackend,
+    RemoteWorkspaceFlowBackendError, RemoteWorkspaceFlowBackendFactory,
+    RemoteWorkspaceSessionOwner,
 };
 use super::remote_workspace_picker::RemoteWorkspaceProvider;
 use super::ssh_host_form::ManagedHostFormBackendError;
@@ -110,9 +111,14 @@ fn acquire_destination_alias(
     registry: &ActiveSshAliasRegistry,
     destination: &SshDestination,
     mut discover_aliases: impl FnMut() -> Vec<SshHostAlias>,
-) -> Result<ActiveSshAliasLease, RemoteWorkspaceFlowBackendError> {
-    let initial = resolve_configured_alias(destination, &discover_aliases())
-        .ok_or(RemoteWorkspaceFlowBackendError::ConnectionFailed)?;
+) -> Result<Option<ActiveSshAliasLease>, RemoteWorkspaceFlowBackendError> {
+    let Some(initial) = resolve_configured_alias(destination, &discover_aliases()) else {
+        return if resolve_configured_alias(destination, &discover_aliases()).is_none() {
+            Ok(None)
+        } else {
+            Err(RemoteWorkspaceFlowBackendError::ConnectionFailed)
+        };
+    };
     let lease = registry
         .acquire(initial.clone())
         .map_err(|_| RemoteWorkspaceFlowBackendError::HostInUse)?;
@@ -121,7 +127,7 @@ fn acquire_destination_alias(
     if confirmed != initial {
         return Err(RemoteWorkspaceFlowBackendError::ConnectionFailed);
     }
-    Ok(lease)
+    Ok(Some(lease))
 }
 
 pub(crate) struct NativeRemoteWorkspaceFlowBackendFactory {
@@ -347,7 +353,7 @@ impl RemoteWorkspaceFlowBackend for NativeRemoteWorkspaceFlowBackend {
                 lifecycle: Some(lifecycle),
                 utility: Arc::clone(&provider),
                 authentication: Some(authentication),
-                alias: Some(alias_lease),
+                alias: alias_lease,
                 cancellation,
                 executor,
                 closed: false,
@@ -427,6 +433,20 @@ struct NativeRemoteWorkspaceSessionOwner {
 }
 
 impl RemoteWorkspaceSessionOwner for NativeRemoteWorkspaceSessionOwner {
+    fn acquire_workspace_alias_pin(
+        &self,
+    ) -> Result<Option<RemoteWorkspaceAliasPin>, RemoteWorkspaceAliasPinError> {
+        self.alias
+            .as_ref()
+            .map(|alias| {
+                alias
+                    .try_duplicate()
+                    .map(RemoteWorkspaceAliasPin::new)
+                    .map_err(|_| RemoteWorkspaceAliasPinError)
+            })
+            .transpose()
+    }
+
     fn bind_terminal_channels_for_identity(
         &self,
         directory: &RemoteWorkspaceDirectory,
@@ -843,6 +863,38 @@ mod tests {
         );
     }
 
+    #[test]
+    fn raw_destination_should_remain_unpinned_after_two_fresh_unconfigured_discoveries() {
+        let aliases = ActiveSshAliasRegistry::default();
+        let destination = SshDestination::new("root@server.example:2222".to_owned()).unwrap();
+        let mut calls = 0;
+
+        let result = acquire_destination_alias(&aliases, &destination, || {
+            calls += 1;
+            Vec::new()
+        });
+
+        assert!(matches!(result, Ok(None)) && calls == 2);
+    }
+
+    #[test]
+    fn newly_configured_raw_destination_should_not_continue_without_an_alias_lease() {
+        let aliases = ActiveSshAliasRegistry::default();
+        let destination = SshDestination::new("root@work".to_owned()).unwrap();
+        let discoveries = Mutex::new(vec![Vec::new(), discovered("work")].into_iter());
+
+        let result = acquire_destination_alias(&aliases, &destination, || {
+            discoveries.lock().unwrap().next().unwrap()
+        });
+
+        assert!(
+            matches!(
+                result,
+                Err(RemoteWorkspaceFlowBackendError::ConnectionFailed)
+            ) && !aliases.is_active(&SshHostAlias::new("work".to_owned()).unwrap())
+        );
+    }
+
     struct FakeSessionControl {
         shutdowns: Arc<AtomicUsize>,
         preparations: Arc<AtomicUsize>,
@@ -887,7 +939,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn native_owner_should_cancel_and_close_exactly_once_before_releasing_alias(
+    fn native_owner_should_close_exactly_once_without_releasing_the_workspace_alias_pin(
         cx: &mut TestAppContext,
     ) {
         let aliases = ActiveSshAliasRegistry::default();
@@ -926,15 +978,18 @@ mod tests {
             .unwrap();
         assert!(provider.is_ready());
         assert_eq!(cx.executor().block(provider.revalidate()), Ok(()));
+        let workspace_alias = owner.acquire_workspace_alias_pin().unwrap().unwrap();
 
         owner.close();
         owner.close();
 
         assert!(cancellation.is_cancelled());
         assert_eq!(shutdowns.load(Ordering::SeqCst), 1);
-        assert!(!aliases.is_active(&alias));
+        assert!(aliases.is_active(&alias));
         assert!(!provider.is_ready());
         assert!(provider.prepare().is_err());
+        drop(workspace_alias);
+        assert!(!aliases.is_active(&alias));
     }
 
     #[gpui::test]

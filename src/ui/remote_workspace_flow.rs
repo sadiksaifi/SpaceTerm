@@ -156,10 +156,34 @@ fn connection_error_content(
     ConnectionErrorContent { message, detail }
 }
 
+/// Opaque Workspace-lifetime authority that keeps one configured SSH alias immutable.
+///
+/// This value is intentionally non-Clone and non-Debug. Dropping it releases exactly its own
+/// registry count without affecting the connected session's independent alias lease.
+pub(super) struct RemoteWorkspaceAliasPin {
+    _owner: Box<dyn Send>,
+}
+
+impl RemoteWorkspaceAliasPin {
+    pub(super) fn new(owner: impl Send + 'static) -> Self {
+        Self {
+            _owner: Box::new(owner),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Error, Eq, PartialEq)]
+#[error("the configured SSH alias could not be pinned for Workspace ownership")]
+pub(super) struct RemoteWorkspaceAliasPinError;
+
 /// The opaque lifetime owner for one connected SSH control path.
 ///
 /// This trait deliberately exposes no command or transport access to UI code.
 pub(super) trait RemoteWorkspaceSessionOwner: Send + 'static {
+    fn acquire_workspace_alias_pin(
+        &self,
+    ) -> Result<Option<RemoteWorkspaceAliasPin>, RemoteWorkspaceAliasPinError>;
+
     fn bind_terminal_channels_for_identity(
         &self,
         directory: &RemoteWorkspaceDirectory,
@@ -209,6 +233,15 @@ impl RemoteWorkspaceConnectedSession {
 
     pub(super) fn take_lifecycle_observer(&mut self) -> Option<ControlConnectionObserver> {
         self.owner.as_mut()?.take_lifecycle_observer()
+    }
+
+    fn acquire_workspace_alias_pin(
+        &self,
+    ) -> Result<Option<RemoteWorkspaceAliasPin>, RemoteWorkspaceAliasPinError> {
+        self.owner
+            .as_ref()
+            .ok_or(RemoteWorkspaceAliasPinError)?
+            .acquire_workspace_alias_pin()
     }
 }
 
@@ -352,6 +385,15 @@ impl RemoteWorkspaceFlowCompletion {
 
     pub(super) fn terminal_channels(&self) -> Arc<dyn RemoteTerminalChannelProvider> {
         Arc::clone(&self.terminal_channels)
+    }
+
+    /// Acquires the independent alias pin only when Workspace installation is ready to commit.
+    ///
+    /// Failure borrows no ownership from this completion, so activation can return it intact.
+    pub(super) fn acquire_workspace_alias_pin(
+        &self,
+    ) -> Result<Option<RemoteWorkspaceAliasPin>, RemoteWorkspaceAliasPinError> {
+        self.session.acquire_workspace_alias_pin()
     }
 
     pub(super) fn into_parts(
@@ -1514,6 +1556,12 @@ mod tests {
     }
 
     impl RemoteWorkspaceSessionOwner for CountingOwner {
+        fn acquire_workspace_alias_pin(
+            &self,
+        ) -> Result<Option<RemoteWorkspaceAliasPin>, RemoteWorkspaceAliasPinError> {
+            Ok(None)
+        }
+
         fn bind_terminal_channels_for_identity(
             &self,
             _: &RemoteWorkspaceDirectory,
@@ -1532,6 +1580,50 @@ mod tests {
         }
 
         fn close(&mut self) {
+            self.closes.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    struct AliasPinningOwner {
+        alias: Option<crate::ssh::alias_usage::ActiveSshAliasLease>,
+        acquisition_fails: bool,
+        closes: Arc<AtomicUsize>,
+    }
+
+    impl RemoteWorkspaceSessionOwner for AliasPinningOwner {
+        fn acquire_workspace_alias_pin(
+            &self,
+        ) -> Result<Option<RemoteWorkspaceAliasPin>, RemoteWorkspaceAliasPinError> {
+            if self.acquisition_fails {
+                return Err(RemoteWorkspaceAliasPinError);
+            }
+            self.alias
+                .as_ref()
+                .map(|alias| {
+                    alias
+                        .try_duplicate()
+                        .map(RemoteWorkspaceAliasPin::new)
+                        .map_err(|_| RemoteWorkspaceAliasPinError)
+                })
+                .transpose()
+        }
+
+        fn bind_terminal_channels_for_identity(
+            &self,
+            _: &RemoteWorkspaceDirectory,
+            _: &RemoteDirectoryIdentity,
+            _: &str,
+        ) -> Result<Arc<dyn RemoteTerminalChannelProvider>, RemoteWorkspaceFlowBackendError>
+        {
+            Ok(Arc::new(|| Err(crate::terminal::RemoteChannelUnavailable)))
+        }
+
+        fn take_lifecycle_observer(&mut self) -> Option<ControlConnectionObserver> {
+            Some(ControlConnectionObserver::closed())
+        }
+
+        fn close(&mut self) {
+            self.alias.take();
             self.closes.fetch_add(1, Ordering::SeqCst);
         }
     }
@@ -1875,6 +1967,29 @@ mod tests {
                 observer_takes: Some(Arc::clone(observer_takes)),
             }),
             Arc::new(ReadyRemoteProvider),
+        )
+    }
+
+    fn pinning_completion(
+        alias: Option<crate::ssh::alias_usage::ActiveSshAliasLease>,
+        acquisition_fails: bool,
+        closes: &Arc<AtomicUsize>,
+    ) -> RemoteWorkspaceFlowCompletion {
+        RemoteWorkspaceFlowCompletion::for_test(
+            RemoteWorkspaceConnectedSession::new(
+                Box::new(AliasPinningOwner {
+                    alias,
+                    acquisition_fails,
+                    closes: Arc::clone(closes),
+                }),
+                Arc::new(ReadyRemoteProvider),
+            ),
+            destination("work"),
+            RemoteWorkspaceDirectory::new("~/src".to_owned()).unwrap(),
+            remote_identity("/home/tester/src"),
+            remote_account(),
+            Arc::new(|| Err(crate::terminal::RemoteChannelUnavailable)),
+            ControlConnectionObserver::closed(),
         )
     }
 
@@ -2288,6 +2403,90 @@ mod tests {
             flow.read_with(cx, |flow, _| flow.stage()),
             RemoteWorkspaceFlowStage::HostSelection
         );
+    }
+
+    #[test]
+    fn configured_completion_should_keep_a_workspace_alias_pin_after_session_drop() {
+        let registry = crate::ssh::alias_usage::ActiveSshAliasRegistry::default();
+        let alias = alias("work");
+        let connection = registry.acquire(alias.clone()).unwrap();
+        let closes = Arc::new(AtomicUsize::new(0));
+        let completion = pinning_completion(Some(connection), false, &closes);
+
+        let workspace = completion.acquire_workspace_alias_pin().unwrap().unwrap();
+        drop(completion);
+
+        assert!(registry.is_active(&alias));
+        assert_eq!(closes.load(Ordering::SeqCst), 1);
+        drop(workspace);
+        assert!(!registry.is_active(&alias));
+    }
+
+    #[test]
+    fn unconfigured_completion_should_not_create_a_workspace_alias_pin() {
+        let closes = Arc::new(AtomicUsize::new(0));
+        let completion = pinning_completion(None, false, &closes);
+
+        assert!(completion.acquire_workspace_alias_pin().unwrap().is_none());
+        drop(completion);
+        assert_eq!(closes.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn duplicate_workspace_alias_pins_should_hold_independent_registry_counts() {
+        let registry = crate::ssh::alias_usage::ActiveSshAliasRegistry::default();
+        let alias = alias("work");
+        let connection = registry.acquire(alias.clone()).unwrap();
+        let closes = Arc::new(AtomicUsize::new(0));
+        let completion = pinning_completion(Some(connection), false, &closes);
+        let first = completion.acquire_workspace_alias_pin().unwrap().unwrap();
+        let second = completion.acquire_workspace_alias_pin().unwrap().unwrap();
+
+        drop(completion);
+        drop(first);
+        assert!(registry.is_active(&alias));
+        drop(second);
+        assert!(!registry.is_active(&alias));
+    }
+
+    #[test]
+    fn reconnect_generation_swap_should_keep_the_workspace_alias_continuously_pinned() {
+        let registry = crate::ssh::alias_usage::ActiveSshAliasRegistry::default();
+        let alias = alias("work");
+        let closes = Arc::new(AtomicUsize::new(0));
+        let first_connection = registry.acquire(alias.clone()).unwrap();
+        let first = pinning_completion(Some(first_connection), false, &closes);
+        let workspace = first.acquire_workspace_alias_pin().unwrap().unwrap();
+        drop(first);
+
+        let replacement_connection = registry.acquire(alias.clone()).unwrap();
+        let replacement = pinning_completion(Some(replacement_connection), false, &closes);
+        assert!(registry.is_active(&alias));
+        drop(replacement);
+        assert!(registry.is_active(&alias));
+        drop(workspace);
+        assert!(!registry.is_active(&alias));
+        assert_eq!(closes.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn failed_workspace_alias_pin_acquisition_should_leave_completion_ownership_intact() {
+        let registry = crate::ssh::alias_usage::ActiveSshAliasRegistry::default();
+        let alias = alias("work");
+        let connection = registry.acquire(alias.clone()).unwrap();
+        let closes = Arc::new(AtomicUsize::new(0));
+        let completion = pinning_completion(Some(connection), true, &closes);
+
+        let Err(error) = completion.acquire_workspace_alias_pin() else {
+            panic!("the injected pin acquisition failure must remain typed");
+        };
+
+        assert!(registry.is_active(&alias));
+        assert_eq!(closes.load(Ordering::SeqCst), 0);
+        assert!(!format!("{error:?}").contains(alias.as_str()));
+        drop(completion);
+        assert!(!registry.is_active(&alias));
+        assert_eq!(closes.load(Ordering::SeqCst), 1);
     }
 
     #[test]
