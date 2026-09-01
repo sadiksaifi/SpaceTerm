@@ -174,6 +174,12 @@ pub(crate) struct SshProcessEnvironment {
 }
 
 #[derive(Clone)]
+pub(crate) struct SshProbeEnvironment {
+    home: PathBuf,
+    agent_socket: Option<OsString>,
+}
+
+#[derive(Clone)]
 enum SshAuthentication {
     AskPass(AskPassBrokerLease),
     #[cfg(test)]
@@ -257,6 +263,41 @@ impl SshProcessEnvironment {
             }
             #[cfg(test)]
             SshAuthentication::None => {}
+        }
+    }
+
+    pub(super) fn probe_environment(&self) -> SshProbeEnvironment {
+        SshProbeEnvironment {
+            home: self.home.clone(),
+            agent_socket: self.agent_socket.clone(),
+        }
+    }
+}
+
+impl SshProbeEnvironment {
+    pub(crate) fn new(
+        home: PathBuf,
+        agent_socket: Option<OsString>,
+    ) -> Result<Self, SshProcessEnvironmentError> {
+        if !safe_absolute_path(&home) {
+            return Err(SshProcessEnvironmentError::UnsafeHome);
+        }
+        if agent_socket.as_ref().is_some_and(|socket| {
+            socket.as_bytes().is_empty() || !safe_absolute_path(Path::new(socket))
+        }) {
+            return Err(SshProcessEnvironmentError::UnsafeAgentSocket);
+        }
+        Ok(Self { home, agent_socket })
+    }
+
+    pub(super) fn apply(&self, command: &mut Command) {
+        command
+            .env_clear()
+            .current_dir(&self.home)
+            .env("HOME", &self.home)
+            .env("PATH", "/usr/bin:/bin");
+        if let Some(agent_socket) = &self.agent_socket {
+            command.env("SSH_AUTH_SOCK", agent_socket);
         }
     }
 }

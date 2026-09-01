@@ -38,6 +38,11 @@ impl StartupSshEnvironment {
     pub(crate) fn cloned_agent_socket(&self) -> Option<OsString> {
         self.agent_socket.clone()
     }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(agent_socket: Option<OsString>) -> Self {
+        Self { agent_socket }
+    }
 }
 
 #[cfg(test)]

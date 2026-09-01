@@ -13,7 +13,8 @@ use thiserror::Error;
 
 use super::cancellation::SshCancellationToken;
 use super::live_connection::LiveConnectionCapability;
-use super::process::SshProcessEnvironment;
+use super::process::{SshProbeEnvironment, SshProcessEnvironment, SshProcessEnvironmentError};
+use super::startup_environment::StartupSshEnvironment;
 use crate::domain::{RemoteWorkspaceDirectory, SshDestination};
 
 const SSH_EXECUTABLE: &str = "/usr/bin/ssh";
@@ -97,20 +98,32 @@ pub(crate) fn probe_ssh_capability(runner: &impl SshProbeRunner) -> SshCapabilit
 
 #[derive(Clone)]
 pub(crate) struct NativeSshProbeRunner {
-    environment: SshProcessEnvironment,
+    environment: SshProbeEnvironment,
     timeout: Duration,
     #[cfg(test)]
     executable: PathBuf,
 }
 
 impl NativeSshProbeRunner {
-    pub(crate) const fn new(environment: SshProcessEnvironment) -> Self {
+    pub(crate) fn new(environment: SshProcessEnvironment) -> Self {
         Self {
-            environment,
+            environment: environment.probe_environment(),
             timeout: NATIVE_PROBE_TIMEOUT,
             #[cfg(test)]
             executable: PathBuf::new(),
         }
+    }
+
+    pub(crate) fn from_startup(
+        home: PathBuf,
+        startup: &StartupSshEnvironment,
+    ) -> Result<Self, SshProcessEnvironmentError> {
+        Ok(Self {
+            environment: SshProbeEnvironment::new(home, startup.cloned_agent_socket())?,
+            timeout: NATIVE_PROBE_TIMEOUT,
+            #[cfg(test)]
+            executable: PathBuf::new(),
+        })
     }
 
     #[cfg(test)]
@@ -120,9 +133,36 @@ impl NativeSshProbeRunner {
         timeout: Duration,
     ) -> Self {
         Self {
-            environment,
+            environment: environment.probe_environment(),
             timeout,
             executable,
+        }
+    }
+
+    pub(crate) fn probe_blocking(&self) -> SshCapability {
+        let cancellation = SshCancellationToken::default();
+        classify_native_probe_result(run_native_probe(
+            self.executable(),
+            self.environment.clone(),
+            &cancellation,
+            Instant::now()
+                .checked_add(self.timeout)
+                .unwrap_or_else(Instant::now),
+        ))
+    }
+
+    fn executable(&self) -> PathBuf {
+        #[cfg(not(test))]
+        {
+            PathBuf::from(SSH_EXECUTABLE)
+        }
+        #[cfg(test)]
+        {
+            if self.executable.as_os_str().is_empty() {
+                PathBuf::from(SSH_EXECUTABLE)
+            } else {
+                self.executable.clone()
+            }
         }
     }
 
@@ -132,14 +172,7 @@ impl NativeSshProbeRunner {
         }
         let environment = self.environment.clone();
         let timeout = self.timeout;
-        #[cfg(not(test))]
-        let executable = PathBuf::from(SSH_EXECUTABLE);
-        #[cfg(test)]
-        let executable = if self.executable.as_os_str().is_empty() {
-            PathBuf::from(SSH_EXECUTABLE)
-        } else {
-            self.executable.clone()
-        };
+        let executable = self.executable();
         let mut cancel_on_drop = ProbeCancelOnDrop::new(cancellation.clone());
         let (sender, receiver) = async_channel::bounded(1);
         let worker = thread::Builder::new()
@@ -161,15 +194,21 @@ impl NativeSshProbeRunner {
         }
         let result = receiver.recv().await;
         cancel_on_drop.disarm();
-        match result {
-            Ok(Ok(output)) => classify_probe_output(output),
-            Ok(Err(NativeProbeError::NotFound)) => {
-                SshCapability::Unavailable(SshUnavailableReason::NotFound)
-            }
-            Ok(Err(
-                NativeProbeError::Cancelled | NativeProbeError::TimedOut | NativeProbeError::Io,
-            ))
-            | Err(_) => SshCapability::Unavailable(SshUnavailableReason::ProbeFailed),
+        result.map_or_else(
+            |_| SshCapability::Unavailable(SshUnavailableReason::ProbeFailed),
+            classify_native_probe_result,
+        )
+    }
+}
+
+fn classify_native_probe_result(result: Result<SshProbeOutput, NativeProbeError>) -> SshCapability {
+    match result {
+        Ok(output) => classify_probe_output(output),
+        Err(NativeProbeError::NotFound) => {
+            SshCapability::Unavailable(SshUnavailableReason::NotFound)
+        }
+        Err(NativeProbeError::Cancelled | NativeProbeError::TimedOut | NativeProbeError::Io) => {
+            SshCapability::Unavailable(SshUnavailableReason::ProbeFailed)
         }
     }
 }
@@ -232,7 +271,7 @@ impl Drop for ProbeCancelOnDrop {
 
 fn run_native_probe(
     executable: PathBuf,
-    environment: SshProcessEnvironment,
+    environment: SshProbeEnvironment,
     cancellation: &SshCancellationToken,
     deadline: Instant,
 ) -> Result<SshProbeOutput, NativeProbeError> {
@@ -918,6 +957,17 @@ mod tests {
         )
     }
 
+    fn startup_probe(
+        executable: PathBuf,
+        home: PathBuf,
+        agent_socket: Option<OsString>,
+    ) -> Result<NativeSshProbeRunner, SshProcessEnvironmentError> {
+        let startup = StartupSshEnvironment::for_test(agent_socket);
+        let mut runner = NativeSshProbeRunner::from_startup(home, &startup)?;
+        runner.executable = executable;
+        Ok(runner)
+    }
+
     enum FakeProbeResult {
         Output(SshProbeOutput),
         Error(io::ErrorKind),
@@ -1158,6 +1208,49 @@ printf 'OpenSSH_9.9p2 Apple-1, LibreSSL 3.3.6\n' >&2"#,
             block_on_external(runner.probe(SshCancellationToken::default())),
             SshCapability::Available(OpenSshVersion::new(9, 9))
         );
+    }
+
+    #[test]
+    fn startup_probe_should_use_no_askpass_environment_and_keep_the_captured_agent() {
+        let script = ProbeScript::new(
+            r#"[ "$HOME" = /private/tmp ] || exit 4
+[ "$PATH" = /usr/bin:/bin ] || exit 5
+[ "$SSH_AUTH_SOCK" = /private/tmp/ssh-agent.sock ] || exit 6
+[ -z "${SSH_ASKPASS+x}" ] || exit 7
+[ -z "${SSH_ASKPASS_REQUIRE+x}" ] || exit 8
+printf 'OpenSSH_9.9p2 Apple-1, LibreSSL 3.3.6\n' >&2"#,
+        );
+        let runner = startup_probe(
+            script.0.clone(),
+            PathBuf::from("/private/tmp"),
+            Some(OsString::from("/private/tmp/ssh-agent.sock")),
+        )
+        .unwrap();
+
+        assert_eq!(
+            runner.probe_blocking(),
+            SshCapability::Available(OpenSshVersion::new(9, 9))
+        );
+    }
+
+    #[test]
+    fn startup_probe_should_reject_unsafe_captured_paths_before_launch() {
+        assert!(matches!(
+            startup_probe(
+                PathBuf::from("/usr/bin/ssh"),
+                PathBuf::from("relative-home"),
+                None,
+            ),
+            Err(SshProcessEnvironmentError::UnsafeHome)
+        ));
+        assert!(matches!(
+            startup_probe(
+                PathBuf::from("/usr/bin/ssh"),
+                PathBuf::from("/private/tmp"),
+                Some(OsString::from("relative-agent")),
+            ),
+            Err(SshProcessEnvironmentError::UnsafeAgentSocket)
+        ));
     }
 
     #[test]
