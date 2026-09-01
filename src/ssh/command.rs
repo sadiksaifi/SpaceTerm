@@ -451,7 +451,7 @@ impl SshCommandContext {
         push_option(&mut arguments, OsString::from("ControlMaster=yes"));
         push_option(&mut arguments, self.control_path_option());
         push_option(&mut arguments, OsString::from("ControlPersist=no"));
-        arguments.extend([OsString::from("-N"), OsString::from("-M")]);
+        arguments.push(OsString::from("-N"));
         self.finish(arguments)
     }
 
@@ -1381,7 +1381,7 @@ printf 'OpenSSH_9.9p2 Apple-1, LibreSSL 3.3.6\n' >&2"#,
     }
 
     #[test]
-    fn master_spec_should_pin_config_socket_and_master_policy() {
+    fn master_spec_should_pin_config_socket_and_enable_master_exactly_once() {
         let spec = context().master();
 
         assert_eq!(
@@ -1398,10 +1398,28 @@ printf 'OpenSSH_9.9p2 Apple-1, LibreSSL 3.3.6\n' >&2"#,
                 "-o",
                 "ControlPersist=no",
                 "-N",
-                "-M",
                 "--",
                 "root@fedora@orb",
             ]
+        );
+    }
+
+    #[test]
+    fn master_spec_should_not_request_confirmation_for_mux_clients() {
+        let arguments = arguments(&context().master());
+        let explicit_master_enables = arguments
+            .iter()
+            .filter(|argument| argument.as_str() == "ControlMaster=yes")
+            .count();
+        let short_master_enables = arguments
+            .iter()
+            .filter(|argument| argument.as_str() == "-M")
+            .count();
+
+        assert_eq!(explicit_master_enables, 1);
+        assert_eq!(
+            short_master_enables, 0,
+            "a second master enable makes OpenSSH request confirmation for mux clients"
         );
     }
 
