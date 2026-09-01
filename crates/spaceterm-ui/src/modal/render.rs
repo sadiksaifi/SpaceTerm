@@ -184,8 +184,9 @@ fn render_overlay(
     let paint = theme.paint;
     let viewport = window.viewport_size();
     let desired_width = metrics.width_for(match snapshot.kind {
-        ModalKind::Alert | ModalKind::Progress => DialogSize::Compact,
+        ModalKind::Alert => DialogSize::Regular,
         ModalKind::Dialog => snapshot.dialog_size,
+        ModalKind::Progress => DialogSize::Compact,
     });
     let height_cap = metrics.maximum_height().min(match snapshot.kind {
         ModalKind::Alert => metrics.alert_height_cap(),
