@@ -120,6 +120,14 @@ impl RemoteWorkspaceFlowBackendError {
             _ => None,
         }
     }
+
+    /// Transfers the bounded diagnostic without converting it into an inspectable string.
+    pub(super) fn into_connection_detail(self) -> Option<TransientSshErrorOutput> {
+        match self {
+            Self::ConnectionFailedWithDetail(detail) => Some(detail),
+            _ => None,
+        }
+    }
 }
 
 impl fmt::Debug for RemoteWorkspaceFlowBackendError {

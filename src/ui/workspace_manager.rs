@@ -47,6 +47,7 @@ use crate::platform::macos_window_drag::{
 use crate::platform::workspace_directory::validate_workspace_directory;
 use crate::platform::workspace_picker_filesystem::NativeWorkspacePickerFilesystem;
 use crate::ssh::live_connection::{ControlConnectionObserver, ControlConnectionTerminalState};
+use crate::ssh::process::TransientSshErrorOutput;
 use crate::terminal::metadata::RemoteTerminalMetadataContext;
 use crate::terminal::{
     NativeServiceOrigin, NativeServiceStatus, PreparedWorkspaceTerminalLaunch, SelectionCopy,
@@ -174,7 +175,9 @@ struct PreparedRemoteWorkspaceReconnect {
 #[derive(Debug, Eq, PartialEq)]
 enum RemoteWorkspaceReconnectFailure {
     Cancelled,
-    ConnectionFailed { detail: Option<String> },
+    ConnectionFailed {
+        detail: Option<TransientSshErrorOutput>,
+    },
     DirectoryUnavailable,
     IdentityChanged,
 }
@@ -210,6 +213,8 @@ pub(crate) struct WorkspaceManager {
     remote_workspace_runtimes: BTreeMap<WorkspaceId, RemoteWorkspaceRuntime>,
     remote_workspace_activation_task: Option<Task<()>>,
     remote_workspace_reconnect: Option<RemoteWorkspaceReconnectAttempt>,
+    #[cfg(test)]
+    close_focused_pane_before_reconnect_commit: bool,
     picker_entered_from_panel: bool,
     workspace_menu: Option<WorkspaceMenuState>,
     rename: Option<WorkspaceRenameState>,
@@ -435,6 +440,8 @@ impl WorkspaceManager {
             remote_workspace_runtimes: BTreeMap::new(),
             remote_workspace_activation_task: None,
             remote_workspace_reconnect: None,
+            #[cfg(test)]
+            close_focused_pane_before_reconnect_commit: false,
             picker_entered_from_panel: false,
             workspace_menu: None,
             rename: None,
@@ -1885,7 +1892,7 @@ impl WorkspaceManager {
                         RemoteWorkspaceReconnectFailure::Cancelled
                     } else {
                         RemoteWorkspaceReconnectFailure::ConnectionFailed {
-                            detail: error.connection_detail().map(str::to_owned),
+                            detail: error.into_connection_detail(),
                         }
                     }
                 })?;
@@ -2020,15 +2027,24 @@ impl WorkspaceManager {
                 else {
                     return;
                 };
+                #[cfg(test)]
+                if self.close_focused_pane_before_reconnect_commit {
+                    self.close_focused_pane_before_reconnect_commit = false;
+                    window_manager
+                        .read(cx)
+                        .active_pane_host()
+                        .update(cx, |host, cx| host.close_focused_for_test(window, cx));
+                }
                 if let Err(error) = window_manager.update(cx, |manager, cx| {
                     manager.commit_remote_restart(prepared.restart, window, cx)
                 }) {
-                    eprintln!("cannot commit Remote Workspace reconnect: {error}");
-                    let _ = self.workspaces.reduce_remote_connection_state(
-                        workspace_id,
-                        RemoteConnectionState::failed(generation),
-                    );
+                    let failure = classify_remote_workspace_restart_failure(error);
+                    let next = remote_workspace_reconnect_failure_state(&failure, generation);
+                    let _ = self
+                        .workspaces
+                        .reduce_remote_connection_state(workspace_id, next);
                     let _ = attempt.progress.fail(window, cx);
+                    self.present_remote_workspace_reconnect_error(failure, window, cx);
                     self.refresh_workspace_search(cx);
                     cx.notify();
                     return;
@@ -2055,18 +2071,7 @@ impl WorkspaceManager {
                 let _ = attempt.progress.complete(window, cx);
             }
             Err(failure) => {
-                let next = match &failure {
-                    RemoteWorkspaceReconnectFailure::Cancelled => {
-                        RemoteConnectionState::disconnected(generation)
-                    }
-                    RemoteWorkspaceReconnectFailure::ConnectionFailed { .. } => {
-                        RemoteConnectionState::failed(generation)
-                    }
-                    RemoteWorkspaceReconnectFailure::DirectoryUnavailable
-                    | RemoteWorkspaceReconnectFailure::IdentityChanged => {
-                        RemoteConnectionState::disconnected(generation)
-                    }
-                };
+                let next = remote_workspace_reconnect_failure_state(&failure, generation);
                 let _ = self
                     .workspaces
                     .reduce_remote_connection_state(workspace_id, next);
@@ -3888,6 +3893,22 @@ fn classify_remote_workspace_restart_failure(
     }
 }
 
+fn remote_workspace_reconnect_failure_state(
+    failure: &RemoteWorkspaceReconnectFailure,
+    generation: u64,
+) -> RemoteConnectionState {
+    match failure {
+        RemoteWorkspaceReconnectFailure::ConnectionFailed { .. } => {
+            RemoteConnectionState::failed(generation)
+        }
+        RemoteWorkspaceReconnectFailure::Cancelled
+        | RemoteWorkspaceReconnectFailure::DirectoryUnavailable
+        | RemoteWorkspaceReconnectFailure::IdentityChanged => {
+            RemoteConnectionState::disconnected(generation)
+        }
+    }
+}
+
 fn remote_workspace_reconnect_error_content(
     failure: &RemoteWorkspaceReconnectFailure,
 ) -> Option<(&'static str, String)> {
@@ -3902,7 +3923,8 @@ fn remote_workspace_reconnect_error_content(
                 },
                 |detail| {
                     format!(
-                        "SpaceTerm couldn’t restore the remote connection. OpenSSH reported:\n\n{detail}"
+                        "SpaceTerm couldn’t restore the remote connection. OpenSSH reported:\n\n{}",
+                        detail.as_str()
                     )
                 },
             ),
@@ -6234,17 +6256,91 @@ mod tests {
 
     #[test]
     fn reconnect_connection_detail_should_reach_the_transient_alert_content() {
+        let detail =
+            TransientSshErrorOutput::from_untrusted_bytes(b"ssh: Permission denied (publickey).")
+                .unwrap();
+        let failure = RemoteWorkspaceReconnectFailure::ConnectionFailed {
+            detail: Some(detail),
+        };
         assert_eq!(
-            remote_workspace_reconnect_error_content(
-                &RemoteWorkspaceReconnectFailure::ConnectionFailed {
-                    detail: Some("ssh: Permission denied (publickey).".to_owned()),
-                }
-            ),
+            format!("{failure:?}"),
+            "ConnectionFailed { detail: Some(TransientSshErrorOutput(<redacted>)) }"
+        );
+        assert_eq!(
+            remote_workspace_reconnect_error_content(&failure),
             Some((
                 "Couldn’t Reconnect",
                 "SpaceTerm couldn’t restore the remote connection. OpenSSH reported:\n\nssh: Permission denied (publickey)."
                     .to_owned(),
             ))
+        );
+    }
+
+    #[gpui::test]
+    fn hierarchy_change_between_restart_prepare_and_commit_should_fail_with_typed_alert(
+        cx: &mut TestAppContext,
+    ) {
+        let (new_session, new_closes, _, _, _) = reconnect_session("work", "/home/tester/src");
+        let backend =
+            TestRemoteWorkspaceFlowBackend::with_connections([gpui::Task::ready(Ok(new_session))]);
+        let (manager, records, cx) = workspace_manager_with_remote_backend(backend, cx);
+        let flow = open_remote_workspace_flow(&manager, cx);
+        let (completion, _, _, _, _, lifecycle) = remote_completion_with_revalidation(
+            "work",
+            "~/src",
+            "/home/tester/src",
+            true,
+            gpui::Task::ready(Ok(())),
+        );
+        emit_remote_workspace_completion(&flow, completion, cx);
+        redraw(cx);
+        cx.simulate_keystrokes("cmd-d");
+        cx.run_until_parked();
+        let (workspace_id, window_manager, starts) = manager.read_with(cx, |manager, _| {
+            let workspace = manager.workspaces.active_workspace();
+            (
+                workspace.id(),
+                workspace.payload().clone(),
+                records.starts().len(),
+            )
+        });
+        assert_eq!(
+            window_manager.read_with(cx, |manager, cx| manager.aggregate_counts(cx)),
+            (1, 2)
+        );
+
+        lifecycle
+            .try_send(ControlConnectionTerminalState::Closed)
+            .unwrap();
+        cx.run_until_parked();
+        manager.update(cx, |manager, _| {
+            manager.close_focused_pane_before_reconnect_commit = true;
+        });
+        cx.update(|window, cx| {
+            manager.update(cx, |manager, cx| {
+                manager.start_remote_workspace_reconnect(workspace_id, window, cx)
+            });
+        });
+        cx.run_until_parked();
+        redraw(cx);
+
+        assert_eq!(
+            manager.read_with(cx, |manager, _| manager
+                .workspaces
+                .workspace(workspace_id)
+                .unwrap()
+                .remote_connection_state()),
+            Some(RemoteConnectionState::failed(2))
+        );
+        assert_eq!(new_closes.load(Ordering::Acquire), 1);
+        assert_eq!(records.starts().len(), starts);
+        assert_eq!(
+            window_manager.read_with(cx, |manager, cx| manager.aggregate_counts(cx)),
+            (1, 1)
+        );
+        assert!(
+            cx.debug_bounds("modal-action-remote-workspace-reconnect-error-ok")
+                .is_some()
         );
     }
 

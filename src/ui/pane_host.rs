@@ -822,6 +822,11 @@ impl PaneHost {
         self.close_pane(self.terminal_window.focused_pane_id(), window, cx);
     }
 
+    #[cfg(test)]
+    pub(crate) fn close_focused_for_test(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_focused(window, cx);
+    }
+
     fn close_pane(&mut self, pane_id: PaneId, window: &mut Window, cx: &mut Context<Self>) {
         if self.close_window_requested {
             return;
