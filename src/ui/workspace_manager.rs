@@ -161,6 +161,8 @@ struct RemoteWorkspaceReconnectAttempt {
     generation: u64,
     cancelled: Arc<AtomicBool>,
     progress: ProgressDialogHandle,
+    _work: Task<()>,
+    _progress_updates: Task<()>,
 }
 
 struct PreparedRemoteWorkspaceReconnect {
@@ -169,12 +171,18 @@ struct PreparedRemoteWorkspaceReconnect {
     restart: PreparedWindowManagerRemoteRestart,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Debug, Eq, PartialEq)]
 enum RemoteWorkspaceReconnectFailure {
     Cancelled,
-    ConnectionFailed,
+    ConnectionFailed { detail: Option<String> },
     DirectoryUnavailable,
     IdentityChanged,
+}
+
+impl Drop for RemoteWorkspaceReconnectAttempt {
+    fn drop(&mut self) {
+        self.cancelled.store(true, Ordering::Release);
+    }
 }
 
 impl Drop for RemoteWorkspaceRuntime {
@@ -609,7 +617,7 @@ impl WorkspaceManager {
         }
         let failure = match event {
             RemoteChildLaunchUnavailable::ConnectionUnavailable => {
-                RemoteWorkspaceReconnectFailure::ConnectionFailed
+                RemoteWorkspaceReconnectFailure::ConnectionFailed { detail: None }
             }
             RemoteChildLaunchUnavailable::DirectoryUnavailable => {
                 RemoteWorkspaceReconnectFailure::DirectoryUnavailable
@@ -1842,17 +1850,10 @@ impl WorkspaceManager {
             cx.notify();
             return;
         };
-        self.remote_workspace_reconnect = Some(RemoteWorkspaceReconnectAttempt {
-            workspace_id,
-            generation,
-            cancelled: Arc::clone(&cancelled),
-            progress,
-        });
-
         let (progress_sender, progress_receiver) = async_channel::bounded(8);
         let context = RemoteWorkspaceConnectContext::new(progress_sender, Arc::clone(&cancelled));
         let connection = backend.connect(destination.clone(), context);
-        cx.spawn_in(window, async move |manager, cx| {
+        let progress_updates = cx.spawn_in(window, async move |manager, cx| {
             while let Ok(update) = progress_receiver.recv().await {
                 let Ok(current) = manager.update_in(cx, |manager, window, cx| {
                     manager.apply_remote_workspace_reconnect_progress(
@@ -1869,29 +1870,33 @@ impl WorkspaceManager {
                     break;
                 }
             }
-        })
-        .detach();
+        });
 
-        cx.spawn_in(window, async move |manager, cx| {
+        let work_cancelled = Arc::clone(&cancelled);
+        let work = cx.spawn_in(window, async move |manager, cx| {
             let result = async {
                 let mut session = connection.await.map_err(|error| {
-                    if cancelled.load(Ordering::Acquire)
-                        || error == RemoteWorkspaceFlowBackendError::AuthenticationCancelled
+                    if work_cancelled.load(Ordering::Acquire)
+                        || matches!(
+                            error,
+                            RemoteWorkspaceFlowBackendError::AuthenticationCancelled
+                        )
                     {
                         RemoteWorkspaceReconnectFailure::Cancelled
                     } else {
-                        RemoteWorkspaceReconnectFailure::ConnectionFailed
+                        RemoteWorkspaceReconnectFailure::ConnectionFailed {
+                            detail: error.connection_detail().map(str::to_owned),
+                        }
                     }
                 })?;
-                if cancelled.load(Ordering::Acquire) {
+                if work_cancelled.load(Ordering::Acquire) {
                     return Err(RemoteWorkspaceReconnectFailure::Cancelled);
                 }
                 let provider = session.provider();
-                let account = provider
-                    .discover_account()
-                    .await
-                    .map_err(|_| RemoteWorkspaceReconnectFailure::ConnectionFailed)?;
-                if cancelled.load(Ordering::Acquire) {
+                let account = provider.discover_account().await.map_err(|_| {
+                    RemoteWorkspaceReconnectFailure::ConnectionFailed { detail: None }
+                })?;
+                if work_cancelled.load(Ordering::Acquire) {
                     return Err(RemoteWorkspaceReconnectFailure::Cancelled);
                 }
                 let actual_identity = provider
@@ -1907,10 +1912,12 @@ impl WorkspaceManager {
                         &expected_identity,
                         account.login_shell(),
                     )
-                    .map_err(|_| RemoteWorkspaceReconnectFailure::ConnectionFailed)?;
+                    .map_err(|_| RemoteWorkspaceReconnectFailure::ConnectionFailed {
+                        detail: None,
+                    })?;
                 let lifecycle = session
                     .take_lifecycle_observer()
-                    .ok_or(RemoteWorkspaceReconnectFailure::ConnectionFailed)?;
+                    .ok_or(RemoteWorkspaceReconnectFailure::ConnectionFailed { detail: None })?;
                 let factory = WorkspaceTerminalSessionFactory::new_remote(
                     session_factory,
                     local_root,
@@ -1925,7 +1932,7 @@ impl WorkspaceManager {
                     .map_err(|_| RemoteWorkspaceReconnectFailure::Cancelled)?
                     .await
                     .map_err(classify_remote_workspace_restart_failure)?;
-                if cancelled.load(Ordering::Acquire) {
+                if work_cancelled.load(Ordering::Acquire) {
                     return Err(RemoteWorkspaceReconnectFailure::Cancelled);
                 }
                 Ok(PreparedRemoteWorkspaceReconnect {
@@ -1944,8 +1951,15 @@ impl WorkspaceManager {
                     cx,
                 );
             });
-        })
-        .detach();
+        });
+        self.remote_workspace_reconnect = Some(RemoteWorkspaceReconnectAttempt {
+            workspace_id,
+            generation,
+            cancelled,
+            progress,
+            _work: work,
+            _progress_updates: progress_updates,
+        });
         self.refresh_workspace_search(cx);
         cx.notify();
     }
@@ -2041,11 +2055,11 @@ impl WorkspaceManager {
                 let _ = attempt.progress.complete(window, cx);
             }
             Err(failure) => {
-                let next = match failure {
+                let next = match &failure {
                     RemoteWorkspaceReconnectFailure::Cancelled => {
                         RemoteConnectionState::disconnected(generation)
                     }
-                    RemoteWorkspaceReconnectFailure::ConnectionFailed => {
+                    RemoteWorkspaceReconnectFailure::ConnectionFailed { .. } => {
                         RemoteConnectionState::failed(generation)
                     }
                     RemoteWorkspaceReconnectFailure::DirectoryUnavailable
@@ -2056,7 +2070,7 @@ impl WorkspaceManager {
                 let _ = self
                     .workspaces
                     .reduce_remote_connection_state(workspace_id, next);
-                if failure == RemoteWorkspaceReconnectFailure::Cancelled {
+                if matches!(failure, RemoteWorkspaceReconnectFailure::Cancelled) {
                     let _ = attempt.progress.dismiss(window, cx);
                 } else {
                     let _ = attempt.progress.fail(window, cx);
@@ -2074,7 +2088,7 @@ impl WorkspaceManager {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some((title, message)) = remote_workspace_reconnect_error_content(failure) else {
+        let Some((title, message)) = remote_workspace_reconnect_error_content(&failure) else {
             return;
         };
         let manager = cx.weak_entity();
@@ -3870,26 +3884,38 @@ fn classify_remote_workspace_restart_failure(
         RemoteWindowManagerLifecycleError::Revalidation(
             crate::terminal::RemoteChannelRevalidationError::IdentityChanged,
         ) => RemoteWorkspaceReconnectFailure::IdentityChanged,
-        _ => RemoteWorkspaceReconnectFailure::ConnectionFailed,
+        _ => RemoteWorkspaceReconnectFailure::ConnectionFailed { detail: None },
     }
 }
 
 fn remote_workspace_reconnect_error_content(
-    failure: RemoteWorkspaceReconnectFailure,
-) -> Option<(&'static str, &'static str)> {
+    failure: &RemoteWorkspaceReconnectFailure,
+) -> Option<(&'static str, String)> {
     match failure {
         RemoteWorkspaceReconnectFailure::Cancelled => None,
-        RemoteWorkspaceReconnectFailure::ConnectionFailed => Some((
+        RemoteWorkspaceReconnectFailure::ConnectionFailed { detail } => Some((
             "Couldn’t Reconnect",
-            "SpaceTerm couldn’t restore the remote connection. Check the SSH host and try again.",
+            detail.as_ref().map_or_else(
+                || {
+                    "SpaceTerm couldn’t restore the remote connection. Check the SSH host and try again."
+                        .to_owned()
+                },
+                |detail| {
+                    format!(
+                        "SpaceTerm couldn’t restore the remote connection. OpenSSH reported:\n\n{detail}"
+                    )
+                },
+            ),
         )),
         RemoteWorkspaceReconnectFailure::DirectoryUnavailable => Some((
             "Remote Directory Unavailable",
-            "SpaceTerm can’t access the selected remote directory. Check its permissions or reopen the Remote Project.",
+            "SpaceTerm can’t access the selected remote directory. Check its permissions or reopen the Remote Project."
+                .to_owned(),
         )),
         RemoteWorkspaceReconnectFailure::IdentityChanged => Some((
             "Remote Directory Changed",
-            "The selected remote path now resolves to a different directory. Reopen the Remote Project to review it.",
+            "The selected remote path now resolves to a different directory. Reopen the Remote Project to review it."
+                .to_owned(),
         )),
     }
 }
@@ -4221,6 +4247,78 @@ mod tests {
         {
             gpui::Task::ready(self.identity.clone())
         }
+    }
+
+    struct BlockingRemoteProvider {
+        account:
+            Mutex<Option<gpui::Task<Result<RemoteWorkspaceAccount, RemoteWorkspaceProviderError>>>>,
+        identity: Mutex<
+            Option<
+                gpui::Task<
+                    Result<crate::domain::RemoteDirectoryIdentity, RemoteWorkspaceProviderError>,
+                >,
+            >,
+        >,
+        account_calls: Arc<AtomicUsize>,
+        identity_calls: Arc<AtomicUsize>,
+    }
+
+    impl RemoteWorkspaceProvider for BlockingRemoteProvider {
+        fn discover_account(
+            &self,
+        ) -> gpui::Task<Result<RemoteWorkspaceAccount, RemoteWorkspaceProviderError>> {
+            self.account_calls.fetch_add(1, Ordering::AcqRel);
+            self.account
+                .lock()
+                .unwrap()
+                .take()
+                .unwrap_or_else(|| gpui::Task::ready(Err(RemoteWorkspaceProviderError::Other)))
+        }
+
+        fn list_directories(
+            &self,
+            _: RemoteWorkspaceDirectory,
+        ) -> gpui::Task<Result<RemoteWorkspaceDirectoryListing, RemoteWorkspaceProviderError>>
+        {
+            gpui::Task::ready(Err(RemoteWorkspaceProviderError::Other))
+        }
+
+        fn probe_exact_path(
+            &self,
+            _: RemoteWorkspaceDirectory,
+        ) -> gpui::Task<Result<RemoteWorkspaceExactPathState, RemoteWorkspaceProviderError>>
+        {
+            gpui::Task::ready(Err(RemoteWorkspaceProviderError::Other))
+        }
+
+        fn create_directory_recursively(
+            &self,
+            _: RemoteWorkspaceDirectory,
+        ) -> gpui::Task<Result<(), RemoteWorkspaceProviderError>> {
+            gpui::Task::ready(Err(RemoteWorkspaceProviderError::Other))
+        }
+
+        fn validate_physical_identity(
+            &self,
+            _: RemoteWorkspaceDirectory,
+        ) -> gpui::Task<Result<crate::domain::RemoteDirectoryIdentity, RemoteWorkspaceProviderError>>
+        {
+            self.identity_calls.fetch_add(1, Ordering::AcqRel);
+            self.identity
+                .lock()
+                .unwrap()
+                .take()
+                .unwrap_or_else(|| gpui::Task::ready(Err(RemoteWorkspaceProviderError::Other)))
+        }
+    }
+
+    fn test_remote_account() -> RemoteWorkspaceAccount {
+        RemoteWorkspaceAccount::new(
+            "tester".to_owned(),
+            crate::domain::RemoteDirectoryIdentity::new("/home/tester".to_owned()).unwrap(),
+            "/bin/zsh".to_owned(),
+        )
+        .unwrap()
     }
 
     struct TestRemoteChannelProvider {
@@ -4572,6 +4670,22 @@ mod tests {
         Arc<AtomicUsize>,
         async_channel::Sender<crate::ssh::live_connection::ControlConnectionTerminalState>,
     ) {
+        reconnect_session_with_provider_and_revalidation(destination, provider, VecDeque::new())
+    }
+
+    fn reconnect_session_with_provider_and_revalidation(
+        destination: &str,
+        provider: Arc<dyn RemoteWorkspaceProvider>,
+        revalidation_tasks: VecDeque<
+            gpui::Task<Result<(), crate::terminal::RemoteChannelRevalidationError>>,
+        >,
+    ) -> (
+        RemoteWorkspaceConnectedSession,
+        Arc<AtomicUsize>,
+        Arc<AtomicUsize>,
+        Arc<AtomicUsize>,
+        async_channel::Sender<crate::ssh::live_connection::ControlConnectionTerminalState>,
+    ) {
         let destination = crate::domain::SshDestination::new(destination.to_owned()).unwrap();
         let preparations = Arc::new(AtomicUsize::new(0));
         let revalidations = Arc::new(AtomicUsize::new(0));
@@ -4579,7 +4693,7 @@ mod tests {
             Arc::new(TestRemoteChannelProvider {
                 preparations: Arc::clone(&preparations),
                 revalidations: Arc::clone(&revalidations),
-                revalidation_tasks: Mutex::new(VecDeque::new()),
+                revalidation_tasks: Mutex::new(revalidation_tasks),
                 available: Arc::new(AtomicBool::new(true)),
                 destination,
             });
@@ -4738,6 +4852,28 @@ mod tests {
             flow.update(cx, |flow, cx| flow.emit_completion_for_test(completion, cx));
         });
         cx.run_until_parked();
+    }
+
+    fn create_disconnected_remote_workspace(
+        manager: &Entity<WorkspaceManager>,
+        cx: &mut VisualTestContext,
+    ) -> WorkspaceId {
+        let flow = open_remote_workspace_flow(manager, cx);
+        let (completion, _, _, _, _, lifecycle) = remote_completion_with_revalidation(
+            "work",
+            "~/src",
+            "/home/tester/src",
+            true,
+            gpui::Task::ready(Ok(())),
+        );
+        emit_remote_workspace_completion(&flow, completion, cx);
+        let workspace_id =
+            manager.read_with(cx, |manager, _| manager.workspaces.active_workspace_id());
+        lifecycle
+            .try_send(ControlConnectionTerminalState::Closed)
+            .unwrap();
+        cx.run_until_parked();
+        workspace_id
     }
 
     fn install_remote_completion_directly(
@@ -6028,11 +6164,11 @@ mod tests {
         );
         assert_eq!(
             remote_workspace_reconnect_error_content(
-                RemoteWorkspaceReconnectFailure::IdentityChanged
+                &RemoteWorkspaceReconnectFailure::IdentityChanged
             ),
             Some((
                 "Remote Directory Changed",
-                "The selected remote path now resolves to a different directory. Reopen the Remote Project to review it."
+                "The selected remote path now resolves to a different directory. Reopen the Remote Project to review it.".to_owned()
             ))
         );
     }
@@ -6087,11 +6223,27 @@ mod tests {
         );
         assert_eq!(
             remote_workspace_reconnect_error_content(
-                RemoteWorkspaceReconnectFailure::DirectoryUnavailable
+                &RemoteWorkspaceReconnectFailure::DirectoryUnavailable
             ),
             Some((
                 "Remote Directory Unavailable",
-                "SpaceTerm can’t access the selected remote directory. Check its permissions or reopen the Remote Project."
+                "SpaceTerm can’t access the selected remote directory. Check its permissions or reopen the Remote Project.".to_owned()
+            ))
+        );
+    }
+
+    #[test]
+    fn reconnect_connection_detail_should_reach_the_transient_alert_content() {
+        assert_eq!(
+            remote_workspace_reconnect_error_content(
+                &RemoteWorkspaceReconnectFailure::ConnectionFailed {
+                    detail: Some("ssh: Permission denied (publickey).".to_owned()),
+                }
+            ),
+            Some((
+                "Couldn’t Reconnect",
+                "SpaceTerm couldn’t restore the remote connection. OpenSSH reported:\n\nssh: Permission denied (publickey)."
+                    .to_owned(),
             ))
         );
     }
@@ -6155,7 +6307,7 @@ mod tests {
             manager.remote_workspace_reconnect.is_none()
         }));
 
-        sender.try_send(Ok(late_session)).unwrap();
+        assert!(sender.try_send(Ok(late_session)).is_err());
         cx.run_until_parked();
         assert_eq!(late_closes.load(Ordering::Acquire), 1);
         assert_eq!(
@@ -6165,6 +6317,147 @@ mod tests {
                 .unwrap()
                 .remote_connection_state()),
             Some(RemoteConnectionState::disconnected(2))
+        );
+    }
+
+    #[gpui::test]
+    fn cancelling_while_account_discovery_is_blocked_should_close_connected_session_immediately(
+        cx: &mut TestAppContext,
+    ) {
+        let (account_sender, account_receiver) = async_channel::bounded(1);
+        let account_task = cx.update(|cx| {
+            cx.background_executor()
+                .spawn(async move { account_receiver.recv().await.unwrap() })
+        });
+        let account_calls = Arc::new(AtomicUsize::new(0));
+        let provider: Arc<dyn RemoteWorkspaceProvider> = Arc::new(BlockingRemoteProvider {
+            account: Mutex::new(Some(account_task)),
+            identity: Mutex::new(Some(gpui::Task::ready(Ok(
+                crate::domain::RemoteDirectoryIdentity::new("/home/tester/src".to_owned()).unwrap(),
+            )))),
+            account_calls: Arc::clone(&account_calls),
+            identity_calls: Arc::new(AtomicUsize::new(0)),
+        });
+        let (session, closes, _, _, _) = reconnect_session_with_provider("work", provider);
+        let backend =
+            TestRemoteWorkspaceFlowBackend::with_connections([gpui::Task::ready(Ok(session))]);
+        let (manager, _, cx) = workspace_manager_with_remote_backend(backend, cx);
+        let workspace_id = create_disconnected_remote_workspace(&manager, cx);
+
+        cx.update(|window, cx| {
+            manager.update(cx, |manager, cx| {
+                manager.start_remote_workspace_reconnect(workspace_id, window, cx)
+            });
+        });
+        cx.run_until_parked();
+        redraw(cx);
+        assert_eq!(account_calls.load(Ordering::Acquire), 1);
+        assert_eq!(closes.load(Ordering::Acquire), 0);
+
+        click("modal-action-remote-workspace-reconnect-cancel", cx);
+
+        assert_eq!(closes.load(Ordering::Acquire), 1);
+        assert!(account_sender.is_closed());
+        assert_eq!(
+            manager.read_with(cx, |manager, _| manager
+                .workspaces
+                .workspace(workspace_id)
+                .unwrap()
+                .remote_connection_state()),
+            Some(RemoteConnectionState::disconnected(2))
+        );
+    }
+
+    #[gpui::test]
+    fn closing_workspace_while_identity_validation_is_blocked_should_close_session_immediately(
+        cx: &mut TestAppContext,
+    ) {
+        let (identity_sender, identity_receiver) = async_channel::bounded(1);
+        let identity_task = cx.update(|cx| {
+            cx.background_executor()
+                .spawn(async move { identity_receiver.recv().await.unwrap() })
+        });
+        let identity_calls = Arc::new(AtomicUsize::new(0));
+        let provider: Arc<dyn RemoteWorkspaceProvider> = Arc::new(BlockingRemoteProvider {
+            account: Mutex::new(Some(gpui::Task::ready(Ok(test_remote_account())))),
+            identity: Mutex::new(Some(identity_task)),
+            account_calls: Arc::new(AtomicUsize::new(0)),
+            identity_calls: Arc::clone(&identity_calls),
+        });
+        let (session, closes, _, _, _) = reconnect_session_with_provider("work", provider);
+        let backend =
+            TestRemoteWorkspaceFlowBackend::with_connections([gpui::Task::ready(Ok(session))]);
+        let (manager, _, cx) = workspace_manager_with_remote_backend(backend, cx);
+        let workspace_id = create_disconnected_remote_workspace(&manager, cx);
+        cx.update(|window, cx| {
+            manager.update(cx, |manager, cx| {
+                manager.start_remote_workspace_reconnect(workspace_id, window, cx)
+            });
+        });
+        cx.run_until_parked();
+        assert_eq!(identity_calls.load(Ordering::Acquire), 1);
+        assert_eq!(closes.load(Ordering::Acquire), 0);
+
+        cx.update(|window, cx| {
+            manager.update(cx, |manager, cx| {
+                manager.close_workspace(workspace_id, window, cx)
+            });
+        });
+        cx.run_until_parked();
+
+        assert_eq!(closes.load(Ordering::Acquire), 1);
+        assert!(identity_sender.is_closed());
+        assert!(manager.read_with(cx, |manager, _| {
+            manager.workspaces.workspace(workspace_id).is_none()
+        }));
+    }
+
+    #[gpui::test]
+    fn application_cleanup_while_restart_preparation_is_blocked_should_abort_and_close_session(
+        cx: &mut TestAppContext,
+    ) {
+        let (revalidation_sender, revalidation_receiver) = async_channel::bounded(1);
+        let revalidation_task = cx.update(|cx| {
+            cx.background_executor()
+                .spawn(async move { revalidation_receiver.recv().await.unwrap() })
+        });
+        let provider: Arc<dyn RemoteWorkspaceProvider> = Arc::new(TestRemoteProvider::connected(
+            crate::domain::RemoteDirectoryIdentity::new("/home/tester/src".to_owned()).unwrap(),
+        ));
+        let (session, closes, _, revalidations, _) =
+            reconnect_session_with_provider_and_revalidation(
+                "work",
+                provider,
+                VecDeque::from([revalidation_task]),
+            );
+        let backend =
+            TestRemoteWorkspaceFlowBackend::with_connections([gpui::Task::ready(Ok(session))]);
+        let (manager, _, cx) = workspace_manager_with_remote_backend(backend, cx);
+        let workspace_id = create_disconnected_remote_workspace(&manager, cx);
+        cx.update(|window, cx| {
+            manager.update(cx, |manager, cx| {
+                manager.start_remote_workspace_reconnect(workspace_id, window, cx)
+            });
+        });
+        cx.run_until_parked();
+        assert_eq!(revalidations.load(Ordering::Acquire), 1);
+        assert_eq!(closes.load(Ordering::Acquire), 0);
+
+        manager.update(cx, |manager, _| manager.close_remote_runtimes());
+        cx.run_until_parked();
+
+        assert_eq!(closes.load(Ordering::Acquire), 1);
+        assert!(revalidation_sender.is_closed());
+        assert!(manager.read_with(cx, |manager, _| {
+            manager.remote_workspace_reconnect.is_none()
+        }));
+        assert_ne!(
+            manager.read_with(cx, |manager, _| manager
+                .workspaces
+                .workspace(workspace_id)
+                .unwrap()
+                .remote_connection_state()),
+            Some(RemoteConnectionState::connected(2))
         );
     }
 
@@ -6215,6 +6508,42 @@ mod tests {
     }
 
     #[gpui::test]
+    fn bounded_connection_detail_should_survive_reconnect_into_the_failure_alert(
+        cx: &mut TestAppContext,
+    ) {
+        let detail = crate::ssh::process::TransientSshErrorOutput::from_untrusted_bytes(
+            b"ssh: Permission denied (publickey).",
+        )
+        .unwrap();
+        let backend = TestRemoteWorkspaceFlowBackend::with_connections([gpui::Task::ready(Err(
+            RemoteWorkspaceFlowBackendError::ConnectionFailedWithDetail(detail),
+        ))]);
+        let (manager, _, cx) = workspace_manager_with_remote_backend(backend, cx);
+        let workspace_id = create_disconnected_remote_workspace(&manager, cx);
+
+        cx.update(|window, cx| {
+            manager.update(cx, |manager, cx| {
+                manager.start_remote_workspace_reconnect(workspace_id, window, cx)
+            });
+        });
+        cx.run_until_parked();
+        redraw(cx);
+
+        assert_eq!(
+            manager.read_with(cx, |manager, _| manager
+                .workspaces
+                .workspace(workspace_id)
+                .unwrap()
+                .remote_connection_state()),
+            Some(RemoteConnectionState::failed(2))
+        );
+        assert!(
+            cx.debug_bounds("modal-action-remote-workspace-reconnect-error-ok")
+                .is_some()
+        );
+    }
+
+    #[gpui::test]
     fn closing_workspace_during_reconnect_should_close_late_session_and_prevent_resurrection(
         cx: &mut TestAppContext,
     ) {
@@ -6252,7 +6581,7 @@ mod tests {
             manager.workspaces.workspace(workspace_id).is_none()
         }));
 
-        sender.try_send(Ok(late_session)).unwrap();
+        assert!(sender.try_send(Ok(late_session)).is_err());
         cx.run_until_parked();
         assert_eq!(late_closes.load(Ordering::Acquire), 1);
         assert!(manager.read_with(cx, |manager, _| {
