@@ -91,6 +91,10 @@ impl RemoteWorkspaceConnectContext {
 }
 
 #[derive(Eq, Error, PartialEq)]
+/// Actionable flow failure with authentication material and raw remote output excluded.
+///
+/// Connection detail, when present, is already control-free and bounded to the transient alert
+/// lifetime. Its `Debug` representation remains redacted.
 pub(super) enum RemoteWorkspaceFlowBackendError {
     #[error("the managed SSH host could not be deleted")]
     DeleteFailed,
@@ -109,6 +113,7 @@ pub(super) enum RemoteWorkspaceFlowBackendError {
 }
 
 impl RemoteWorkspaceFlowBackendError {
+    /// Borrows the sanitized connection tail intended only for the active failure alert.
     pub(super) fn connection_detail(&self) -> Option<&str> {
         match self {
             Self::ConnectionFailedWithDetail(detail) => Some(detail.as_str()),
@@ -178,12 +183,16 @@ pub(super) struct RemoteWorkspaceAliasPinError;
 
 /// The opaque lifetime owner for one connected SSH control path.
 ///
-/// This trait deliberately exposes no command or transport access to UI code.
+/// This trait deliberately exposes no command or transport access to UI code. Implementations are
+/// non-clone owners and must make `close` idempotent, bounded, and responsible for exact process,
+/// socket, authentication, cancellation, and per-session alias cleanup.
 pub(super) trait RemoteWorkspaceSessionOwner: Send + 'static {
+    /// Acquires an independent Workspace-lifetime alias count without consuming session ownership.
     fn acquire_workspace_alias_pin(
         &self,
     ) -> Result<Option<RemoteWorkspaceAliasPin>, RemoteWorkspaceAliasPinError>;
 
+    /// Binds a fallible channel provider to the visible directory and its physical identity.
     fn bind_terminal_channels_for_identity(
         &self,
         directory: &RemoteWorkspaceDirectory,
@@ -191,8 +200,10 @@ pub(super) trait RemoteWorkspaceSessionOwner: Send + 'static {
         login_shell: &str,
     ) -> Result<Arc<dyn RemoteTerminalChannelProvider>, RemoteWorkspaceFlowBackendError>;
 
+    /// Transfers the content-free observer paired with this exact session at most once.
     fn take_lifecycle_observer(&mut self) -> Option<ControlConnectionObserver>;
 
+    /// Cancels and cleans up all session-owned resources exactly once.
     fn close(&mut self);
 }
 
@@ -205,6 +216,7 @@ pub(super) struct RemoteWorkspaceConnectedSession {
 }
 
 impl RemoteWorkspaceConnectedSession {
+    /// Creates a connected session from its singular owner and narrow utility provider.
     pub(super) fn new(
         owner: Box<dyn RemoteWorkspaceSessionOwner>,
         provider: Arc<dyn RemoteWorkspaceProvider + Send + Sync>,
@@ -219,6 +231,7 @@ impl RemoteWorkspaceConnectedSession {
         Arc::clone(&self.provider)
     }
 
+    /// Creates a provider that requires physical revalidation before every child reservation.
     pub(super) fn bind_terminal_channels_for_identity(
         &self,
         directory: &RemoteWorkspaceDirectory,
@@ -231,6 +244,7 @@ impl RemoteWorkspaceConnectedSession {
             .bind_terminal_channels_for_identity(directory, expected_identity, login_shell)
     }
 
+    /// Transfers the session-paired lifecycle observer at most once.
     pub(super) fn take_lifecycle_observer(&mut self) -> Option<ControlConnectionObserver> {
         self.owner.as_mut()?.take_lifecycle_observer()
     }
@@ -255,6 +269,7 @@ impl Drop for RemoteWorkspaceConnectedSession {
 
 /// All side effects required by the standalone remote-workspace creation flow.
 pub(super) trait RemoteWorkspaceFlowBackend: Send + Sync {
+    /// Performs fresh bounded host discovery and preserves partial-scan diagnostics.
     fn discover_hosts(&self) -> HostDiscovery;
 
     fn host_in_active_use(&self, alias: &SshHostAlias) -> bool;
@@ -272,6 +287,7 @@ pub(super) trait RemoteWorkspaceFlowBackend: Send + Sync {
         alias: SshHostAlias,
     ) -> Task<Result<(), RemoteWorkspaceFlowBackendError>>;
 
+    /// Connects with attempt-scoped progress and cancellation, returning singular ownership.
     fn connect(
         &self,
         destination: SshDestination,
@@ -281,10 +297,12 @@ pub(super) trait RemoteWorkspaceFlowBackend: Send + Sync {
 
 /// Builds the window-bound backend once while its Workspace Manager is initialized.
 pub(super) trait RemoteWorkspaceFlowBackendFactory: Send + Sync {
+    /// Returns a content-free startup gate reason before AskPass or connection work begins.
     fn unavailable_reason(&self) -> Option<String> {
         None
     }
 
+    /// Creates a backend while the window is available without retaining it in background work.
     fn create(
         &self,
         window: &Window,

@@ -34,6 +34,7 @@ const SHUTDOWN_KILL_DEADLINE: Duration = Duration::from_secs(1);
 const PROCESS_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
+/// Invalid bounded readiness timing supplied to a control connection.
 pub(crate) enum ControlConnectionTimingError {
     #[error("SSH readiness timeout must be between one nanosecond and 60 seconds")]
     InvalidTimeout,
@@ -42,6 +43,10 @@ pub(crate) enum ControlConnectionTimingError {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// Readiness polling policy for one control-master launch.
+///
+/// Production may leave the overall timeout unset so OpenSSH's configured connection timeout
+/// remains authoritative; every individual readiness command is still bounded.
 pub(crate) struct ControlConnectionTiming {
     timeout: Option<Duration>,
     poll_interval: Duration,
@@ -78,6 +83,7 @@ impl Default for ControlConnectionTiming {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// Observable ownership state of one control master.
 pub(crate) enum ControlConnectionState {
     Ready,
     ShuttingDown,
@@ -86,6 +92,10 @@ pub(crate) enum ControlConnectionState {
 }
 
 #[derive(Debug, Error)]
+/// Typed control-master failure with raw process output excluded.
+///
+/// The sole diagnostic payload is an optional bounded, control-free, non-Debug tail suitable for
+/// the active failure alert. Authentication prompts and secrets are never carried by this error.
 pub(crate) enum ControlConnectionError {
     #[error("SSH control connection was cancelled")]
     Cancelled,
@@ -147,6 +157,12 @@ pub(crate) enum ControlConnectionError {
     NotReady,
 }
 
+/// Singular owner of one workspace-scoped OpenSSH control master.
+///
+/// The connection owns the child process group, private runtime directory, registered socket,
+/// live authority, and supervisor. It is intentionally non-clone. Child commands are authorized
+/// only while the exact socket identity and live connection instance and generation remain ready.
+/// Drop performs exact owned-process cleanup and removes only registered runtime artifacts.
 pub(crate) struct OpenSshControlConnection<B: SshProcessBackend> {
     backend: Arc<B>,
     commands: SshCommandContext,
@@ -159,6 +175,7 @@ pub(crate) struct OpenSshControlConnection<B: SshProcessBackend> {
 }
 
 impl<B: SshProcessBackend> OpenSshControlConnection<B> {
+    /// Creates a content-free observer for the first terminal `Failed` or `Closed` transition.
     pub(crate) fn lifecycle_observer(
         &self,
     ) -> Result<ControlConnectionLifecycleObserver, ControlConnectionError> {
@@ -168,6 +185,10 @@ impl<B: SshProcessBackend> OpenSshControlConnection<B> {
             .ok_or(ControlConnectionError::Ownership)
     }
 
+    /// Launches and supervises a fresh master using a bounded private control socket.
+    ///
+    /// Cancellation retains no child, socket, or runtime owner. Readiness never falls back to a
+    /// direct SSH connection when the registered control socket is unavailable.
     pub(crate) async fn connect(
         paths: &AppPaths,
         destination: SshDestination,
@@ -270,6 +291,7 @@ impl<B: SshProcessBackend> OpenSshControlConnection<B> {
         }
     }
 
+    /// Returns the current state without transferring live authority.
     pub(crate) fn state(&self) -> ControlConnectionState {
         match self.authority.as_ref().map(|authority| authority.state()) {
             Some(LiveConnectionState::Ready) => ControlConnectionState::Ready,
@@ -279,10 +301,12 @@ impl<B: SshProcessBackend> OpenSshControlConnection<B> {
         }
     }
 
+    /// Borrows the bounded private socket path owned by this connection.
     pub(crate) fn control_path(&self) -> &Path {
         &self.control_path
     }
 
+    /// Prepares a no-TTY utility command bound to the current live authority.
     pub(crate) fn remote_utility_command(
         &self,
     ) -> Result<PreparedSshRemoteUtilityCommand, ControlConnectionError> {
@@ -303,6 +327,7 @@ impl<B: SshProcessBackend> OpenSshControlConnection<B> {
         ))
     }
 
+    /// Prepares a pane command bound to the current live authority and sanitized environment.
     pub(crate) fn prepare_pane_channel(
         &self,
         command: ValidatedRemoteShellCommand,
@@ -325,6 +350,7 @@ impl<B: SshProcessBackend> OpenSshControlConnection<B> {
         ))
     }
 
+    /// Returns the opaque connection-instance and generation binding currently authorized.
     pub(crate) fn live_binding(&self) -> Result<LiveConnectionBinding, ControlConnectionError> {
         if self.state() != ControlConnectionState::Ready {
             return Err(ControlConnectionError::NotReady);
@@ -339,6 +365,10 @@ impl<B: SshProcessBackend> OpenSshControlConnection<B> {
             .map_err(|_| ControlConnectionError::NotReady)
     }
 
+    /// Shuts down exactly once, with bounded graceful, terminate, and kill phases.
+    ///
+    /// Ownership is released only after the process group is reaped and private runtime cleanup
+    /// succeeds. A graceful-command failure restores ready supervision so the caller can retry.
     pub(crate) async fn shutdown(&mut self) -> Result<(), ControlConnectionError> {
         if self.state() == ControlConnectionState::Closed {
             return Ok(());

@@ -129,11 +129,19 @@ impl AskPassEnvironment {
     }
 }
 
+/// Singular owner of one private AskPass IPC broker and runtime namespace.
+///
+/// The broker validates a bounded versioned frame and capability before presenting. It never logs
+/// prompt or response content. Dropping its final lease cancels any presentation, joins the worker,
+/// and removes only the registered socket and owner-private runtime artifacts.
 pub(crate) struct AskPassBroker {
     lifetime: Arc<AskPassBrokerLifetime>,
 }
 
 #[derive(Clone, Default)]
+/// Content-free observation of authentication prompt start and user cancellation.
+///
+/// It is scoped to one connection attempt and carries no prompt or response bytes.
 pub(crate) struct AskPassAttemptObservation {
     state: Arc<AskPassAttemptObservationState>,
 }
@@ -145,10 +153,12 @@ struct AskPassAttemptObservationState {
 }
 
 impl AskPassAttemptObservation {
+    /// Reports whether any prompt in this attempt reached the presenter.
     pub(crate) fn prompt_started(&self) -> bool {
         self.state.prompt_started.load(Ordering::Acquire)
     }
 
+    /// Reports whether any prompt in this attempt was cancelled.
     pub(crate) fn cancelled(&self) -> bool {
         self.state.cancelled.load(Ordering::Acquire)
     }
@@ -158,27 +168,35 @@ impl AskPassAttemptObservation {
     }
 }
 
+/// Fresh broker lifetime and content-free observation for one connection attempt.
 pub(crate) struct AskPassConnectionAttempt {
     broker: AskPassBroker,
     observation: AskPassAttemptObservation,
 }
 
 impl AskPassConnectionAttempt {
+    /// Retains the broker and returns its fixed six-variable environment overlay.
     pub(crate) fn lease(&self) -> AskPassBrokerLease {
         self.broker.lease()
     }
 
+    /// Returns an attempt-scoped observer without exposing broker transport state.
     pub(crate) fn observation(&self) -> AskPassAttemptObservation {
         self.observation.clone()
     }
 }
 
+/// Main-thread-bound factory for fresh per-connection AskPass brokers.
+///
+/// Construction captures the current executable and a safe GPUI-to-AppKit presentation bridge, so
+/// background connection work never retains a live `Window`.
 pub(crate) struct NativeAskPassBrokerFactory {
     helper_path: PathBuf,
     presenter: Arc<dyn BrokerPresenter>,
 }
 
 impl NativeAskPassBrokerFactory {
+    /// Captures the helper executable and presenter on the application main thread.
     pub(crate) fn new(window: &Window, cx: &mut App) -> Result<Self, AskPassBrokerError> {
         let presenter = native_channel_presenter(window, cx)?;
         Ok(Self {
@@ -187,6 +205,7 @@ impl NativeAskPassBrokerFactory {
         })
     }
 
+    /// Creates an isolated private runtime, broker, capability, and observer for one attempt.
     pub(crate) fn start_attempt(
         &self,
         paths: &AppPaths,
@@ -215,15 +234,21 @@ struct AskPassBrokerLifetime {
 }
 
 #[derive(Clone)]
+/// Cloneable lifetime lease for one connection attempt's private AskPass broker.
+///
+/// Clones extend only the broker lifetime. Environment access exposes exactly six fixed names and
+/// borrowed values, preventing overrides of process policy such as `HOME`, `PATH`, or agent state.
 pub(crate) struct AskPassBrokerLease {
     lifetime: Arc<AskPassBrokerLifetime>,
 }
 
 impl AskPassBrokerLease {
+    /// Borrows the fixed AskPass environment overlay for immediate process construction.
     pub(crate) fn entries(&self) -> impl Iterator<Item = (&'static str, &OsStr)> {
         self.lifetime.environment.entries()
     }
 
+    /// Cancels presentation and tears down the broker, socket, worker, and runtime owner once.
     pub(crate) fn cancel(&self) {
         self.lifetime.close();
     }
@@ -379,6 +404,7 @@ impl Drop for AskPassBrokerLifetime {
 }
 
 #[derive(Debug, Error)]
+/// Broker startup failure with prompt, capability, and response content excluded.
 pub(crate) enum AskPassBrokerError {
     #[error(transparent)]
     Paths(#[from] AppPathsError),
@@ -733,6 +759,10 @@ impl<'a> FrameCursor<'a> {
     }
 }
 
+/// Dispatches helper mode before application startup, or returns `None` for the GUI role.
+///
+/// Invalid or incomplete helper transport input fails closed without presenting UI. The helper
+/// writes only a successful response to stdout and never emits transport details to stderr.
 pub(crate) fn dispatch_helper_from_environment() -> Option<i32> {
     dispatch_helper_role(std::env::var_os(HELPER_MODE_ENV), |mode| {
         let invocation = HelperInvocation {

@@ -45,6 +45,12 @@ use crate::terminal::{
 
 const CONNECT_CANCELLATION_POLL: Duration = Duration::from_millis(15);
 
+/// Production SSH adapter for the window-independent remote Workspace flow.
+///
+/// The backend shares captured startup paths, environment, capability, and alias registry. Every
+/// connection creates a fresh AskPass attempt, sanitized process backend, private control master,
+/// and request-cancellable utility provider. Typed UI errors never retain raw prompts, secrets, or
+/// remote output beyond the bounded sanitized connection-detail value.
 pub(super) struct NativeRemoteWorkspaceFlowBackend {
     paths: Arc<AppPaths>,
     local_home: PathBuf,
@@ -56,6 +62,7 @@ pub(super) struct NativeRemoteWorkspaceFlowBackend {
 }
 
 impl NativeRemoteWorkspaceFlowBackend {
+    /// Creates an adapter from capture-once startup inputs and a main-thread AskPass factory.
     pub(super) fn new(
         paths: Arc<AppPaths>,
         local_home: PathBuf,
@@ -130,6 +137,10 @@ fn acquire_destination_alias(
     Ok(Some(lease))
 }
 
+/// Main-thread factory that gates Remote availability using the pinned startup SSH capability.
+///
+/// Creating a backend captures only an attempt factory from the live window. Background connect
+/// futures do not retain the `Window` or access ambient process state.
 pub(crate) struct NativeRemoteWorkspaceFlowBackendFactory {
     paths: Arc<AppPaths>,
     local_home: PathBuf,
@@ -421,6 +432,11 @@ fn map_control_connection_error(
     }
 }
 
+/// Non-clone owner of one connected session's control, authentication, alias, and cancellation.
+///
+/// The owner pairs its lifecycle observer with the same control generation. Close cancels work,
+/// performs bounded control shutdown once, tears down AskPass, and releases the session alias lease
+/// only after cleanup. Workspace-lifetime alias pins are acquired as independent registry counts.
 struct NativeRemoteWorkspaceSessionOwner {
     control: Arc<Mutex<Option<Box<dyn NativeSessionControl>>>>,
     lifecycle: Option<ControlConnectionObserver>,
@@ -501,6 +517,10 @@ impl Drop for NativeRemoteWorkspaceSessionOwner {
     }
 }
 
+/// Fallible terminal-channel source bound to one directory identity and live control authority.
+///
+/// Revalidation must observe the expected physical identity through the session utility provider
+/// and grants exactly one prepare for the same opaque connection instance and generation.
 struct NativeRemoteTerminalChannelProvider {
     control: Weak<Mutex<Option<Box<dyn NativeSessionControl>>>>,
     directory: RemoteWorkspaceDirectory,
@@ -619,6 +639,9 @@ impl RemoteTerminalChannelProvider for NativeRemoteTerminalChannelProvider {
     }
 }
 
+/// Narrow object-safe control boundary retained only by the native session owner.
+///
+/// UI-facing providers receive a weak reference and can neither clone nor shut down the control.
 trait NativeSessionControl: Send {
     fn is_ready(&self) -> bool;
 

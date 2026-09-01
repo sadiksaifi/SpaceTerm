@@ -82,6 +82,7 @@ impl fmt::Debug for TransientSshErrorOutput {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// Content-free result from a supervised SSH process.
 pub(crate) struct ProcessExit {
     success: bool,
     code: Option<i32>,
@@ -120,15 +121,27 @@ impl From<ExitStatus> for ProcessExit {
     }
 }
 
+/// Owns every process operation used by an SSH control connection.
+///
+/// Implementations must launch children in a private process group, avoid blocking async executor
+/// threads, and terminate and reap the leader and all descendants on cancellation or ownership
+/// loss. Commands run with [`SshProcessEnvironment`], never the ambient process environment.
 pub(crate) trait SshProcessBackend: Send + Sync + 'static {
+    /// Non-clone ownership of one child process and its private process group.
     type Child: Send + 'static;
 
+    /// Returns the captured, sanitized environment applied to all spawned SSH processes.
     fn environment(&self) -> &SshProcessEnvironment;
 
     fn now(&self) -> Instant;
 
+    /// Starts one owned command without blocking the caller's async executor thread.
     fn spawn(&self, spec: SshCommandSpec) -> impl Future<Output = io::Result<Self::Child>> + Send;
 
+    /// Runs a short-lived command until completion, cancellation, or the supplied wall deadline.
+    ///
+    /// Cancellation and timeout must terminate and reap the command's entire private process
+    /// group before returning.
     fn run(
         &self,
         spec: SshCommandSpec,
@@ -136,16 +149,20 @@ pub(crate) trait SshProcessBackend: Send + Sync + 'static {
         deadline: Instant,
     ) -> impl Future<Output = Result<ProcessExit, ProcessRunError>> + Send;
 
+    /// Polls and reaps the child leader when it has exited.
     fn try_wait(&self, child: &mut Self::Child) -> io::Result<Option<ProcessExit>>;
 
+    /// Signals the private process group owned by `child`.
     fn signal_process_group(
         &self,
         child: &mut Self::Child,
         signal: ProcessSignal,
     ) -> io::Result<()>;
 
+    /// Consumes ownership and synchronously terminates and reaps the process group.
     fn force_cleanup(&self, child: Self::Child);
 
+    /// Takes a bounded, sanitized diagnostic tail without exposing raw process output.
     fn take_error_output(&self, _child: &mut Self::Child) -> Option<TransientSshErrorOutput> {
         None
     }
@@ -179,6 +196,7 @@ pub(crate) enum ProcessRunError {
 }
 
 #[derive(Debug, Error)]
+/// Failure to construct a safe, explicitly captured SSH process environment.
 pub(crate) enum SshProcessEnvironmentError {
     #[error("the captured local HOME must be an absolute control-free path")]
     UnsafeHome,
@@ -187,6 +205,11 @@ pub(crate) enum SshProcessEnvironmentError {
 }
 
 #[derive(Clone)]
+/// Captured environment for authenticated SSH commands.
+///
+/// Applying this value clears ambient variables, installs only fixed `HOME` and `PATH`, an
+/// optional validated agent socket, and the fixed AskPass transport overlay. The retained AskPass
+/// lease keeps its private broker alive for the process lifetime.
 pub(crate) struct SshProcessEnvironment {
     home: PathBuf,
     authentication: SshAuthentication,
@@ -194,6 +217,9 @@ pub(crate) struct SshProcessEnvironment {
 }
 
 #[derive(Clone)]
+/// Captured environment for the helper-free OpenSSH capability probe.
+///
+/// This environment clears ambient variables and deliberately excludes AskPass transport state.
 pub(crate) struct SshProbeEnvironment {
     home: PathBuf,
     agent_socket: Option<OsString>,
@@ -323,6 +349,7 @@ impl SshProbeEnvironment {
 }
 
 #[derive(Clone)]
+/// Native backend that supervises SSH commands outside GPUI executor threads.
 pub(crate) struct NativeSshProcessBackend {
     executor: BackgroundExecutor,
     environment: SshProcessEnvironment,
@@ -340,6 +367,9 @@ impl NativeSshProcessBackend {
     }
 }
 
+/// Non-clone owner of a child, its private process group, and bounded stderr reader.
+///
+/// Dropping this value terminates and reaps the group even when the leader has already exited.
 pub(crate) struct NativeSshChild {
     child: Option<Child>,
     process_group: libc::pid_t,

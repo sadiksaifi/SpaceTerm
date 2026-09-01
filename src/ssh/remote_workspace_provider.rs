@@ -19,12 +19,18 @@ use crate::ui::remote_workspace_picker::{
 
 const REMOTE_WORKSPACE_OPERATION_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Picker-facing provider backed by one live SSH remote utility client.
+///
+/// Every operation receives its own cancellation scope and fixed wall deadline. Dropping or
+/// superseding the returned task cancels the underlying utility process rather than merely
+/// ignoring its result. Only typed, validated protocol values cross into picker state.
 pub(crate) struct SshRemoteWorkspaceProvider<R: SshRemoteUtilityRunner> {
     client: Arc<SshRemoteUtilityClient<R>>,
     executor: BackgroundExecutor,
 }
 
 impl<R: SshRemoteUtilityRunner> SshRemoteWorkspaceProvider<R> {
+    /// Binds provider operations to one prepared live command and session cancellation scope.
     pub(crate) fn new(
         command: PreparedSshRemoteUtilityCommand,
         runner: Arc<R>,

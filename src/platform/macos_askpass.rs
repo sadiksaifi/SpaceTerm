@@ -26,12 +26,14 @@ const NS_MODAL_RESPONSE_ABORT: NSInteger = -1_001;
 const NS_UTF8_STRING_ENCODING: usize = 4;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// UI semantics for one bounded AskPass prompt.
 pub(crate) enum AskPassPromptKind {
     Secret,
     Confirmation,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+/// Validation failure for untrusted prompt text received from the helper transport.
 pub(crate) enum AskPassRequestError {
     #[error("the AskPass prompt is empty")]
     Empty,
@@ -41,6 +43,9 @@ pub(crate) enum AskPassRequestError {
     ContainsControlCharacter,
 }
 
+/// Validated, control-free AskPass prompt and its presentation kind.
+///
+/// Prompt text is bounded before it reaches GPUI or AppKit and must never be logged or persisted.
 pub(crate) struct AskPassRequest {
     prompt: String,
     kind: AskPassPromptKind,
@@ -73,11 +78,15 @@ impl AskPassRequest {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// Failure to capture a bounded response from the native control.
 pub(crate) enum AskPassResponseError {
     SecretTooLong,
     EncodingUnavailable,
 }
 
+/// Non-clone, non-Debug owner of zeroized AskPass response bytes.
+///
+/// The bytes are borrowed only long enough to frame the broker response and are cleared on drop.
 pub(crate) struct AskPassSecret {
     bytes: Zeroizing<Vec<u8>>,
 }
@@ -97,6 +106,7 @@ impl AskPassSecret {
     }
 }
 
+/// Exactly-once result of one native AskPass presentation.
 pub(crate) enum AskPassResult {
     Secret(AskPassSecret),
     Confirmation(bool),
@@ -105,6 +115,7 @@ pub(crate) enum AskPassResult {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+/// Safe presentation failure with prompt and response content excluded.
 pub(crate) enum AskPassPresentationError {
     #[error("an AskPass sheet is already active")]
     Busy,
@@ -118,15 +129,22 @@ pub(crate) enum AskPassPresentationError {
     AllocationFailed,
 }
 
+/// One-shot completion that consumes the response owner.
 pub(crate) type AskPassCompletion = Box<dyn FnOnce(AskPassResult)>;
 
+/// Main-thread presenter for at most one active AskPass sheet.
+///
+/// Implementations must invoke completion exactly once. Cancellation or presenter teardown must
+/// close the active sheet, release secure input, and complete with `Cancelled`.
 pub(crate) trait AskPassPresenter {
+    /// Presents a validated request without transferring secret ownership into retained UI state.
     fn present(
         &mut self,
         request: AskPassRequest,
         completion: AskPassCompletion,
     ) -> Result<(), AskPassPresentationError>;
 
+    /// Cancels the active request, if any, without affecting a later presentation generation.
     fn cancel_active(&mut self);
 }
 
@@ -281,6 +299,11 @@ impl Drop for AskPassPresentationActivity {
     }
 }
 
+/// AppKit sheet presenter confined to the main thread.
+///
+/// The presenter retains its parent window, explicitly owns native sheet objects through the
+/// completion callback, and holds secure input only while a secret field is active. It is neither
+/// `Send` nor `Sync`, and all unsafe Objective-C messages remain inside that ownership boundary.
 pub(crate) struct MacosAskPassPresenter {
     parent_window: RetainedAppKitWindow,
     lifecycle: AskPassPresentationLifecycle,
@@ -288,6 +311,7 @@ pub(crate) struct MacosAskPassPresenter {
 }
 
 impl MacosAskPassPresenter {
+    /// Captures and retains the AppKit parent for subsequent attempt-local sheets.
     pub(crate) fn new(window: &Window) -> Result<Self, AskPassPresentationError> {
         Ok(Self {
             parent_window: RetainedAppKitWindow::new(window)?,

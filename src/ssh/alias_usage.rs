@@ -4,6 +4,11 @@ use std::sync::{Arc, Mutex};
 use super::destination::SshHostAlias;
 
 #[derive(Clone, Default)]
+/// Process-local authority for active configured-alias use and managed-host mutation exclusion.
+///
+/// Counts make independent connection and Workspace pins explicit. All acquisition and mutation
+/// checks are atomic under one registry lock, so an alias cannot become mutable between checking
+/// and reserving it.
 pub(crate) struct ActiveSshAliasRegistry {
     state: Arc<Mutex<ActiveSshAliasState>>,
 }
@@ -15,9 +20,11 @@ struct ActiveSshAliasState {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// Content-free indication that an alias is active or reserved for mutation.
 pub(crate) struct SshAliasBusy;
 
 impl ActiveSshAliasRegistry {
+    /// Acquires one counted use lease unless a mutation already owns the alias.
     pub(crate) fn acquire(&self, alias: SshHostAlias) -> Result<ActiveSshAliasLease, SshAliasBusy> {
         let mut state = self
             .state
@@ -43,6 +50,7 @@ impl ActiveSshAliasRegistry {
             .is_some_and(|count| *count != 0)
     }
 
+    /// Atomically reserves every supplied alias only when none is active or already mutating.
     pub(crate) fn begin_mutation(
         &self,
         aliases: impl IntoIterator<Item = SshHostAlias>,
@@ -79,6 +87,7 @@ impl ActiveSshAliasRegistry {
     }
 }
 
+/// Non-clone mutation reservation released exactly on drop.
 pub(crate) struct ActiveSshAliasMutation {
     registry: ActiveSshAliasRegistry,
     aliases: BTreeSet<SshHostAlias>,
@@ -97,12 +106,17 @@ impl Drop for ActiveSshAliasMutation {
     }
 }
 
+/// Non-clone counted use of one configured SSH alias.
+///
+/// Drop releases exactly one registry count. Explicit duplication acquires a distinct count used
+/// for an independently owned Workspace pin.
 pub(crate) struct ActiveSshAliasLease {
     registry: ActiveSshAliasRegistry,
     alias: Option<SshHostAlias>,
 }
 
 impl ActiveSshAliasLease {
+    /// Acquires a separate counted lease for the same alias.
     pub(crate) fn try_duplicate(&self) -> Result<Self, SshAliasBusy> {
         let alias = self.alias.as_ref().ok_or(SshAliasBusy)?;
         self.registry.acquire(alias.clone())

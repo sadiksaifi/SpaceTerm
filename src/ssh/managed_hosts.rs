@@ -143,6 +143,7 @@ pub(crate) enum ManagedHostsError {
 }
 
 #[derive(Debug, Error)]
+/// Atomic-replacement outcome separated by whether new bytes became visible.
 pub(crate) enum AtomicReplaceError {
     #[error("managed SSH config was not committed: {0}")]
     NotCommitted(#[source] io::Error),
@@ -150,9 +151,17 @@ pub(crate) enum AtomicReplaceError {
     CommittedButUnsynced(#[source] io::Error),
 }
 
+/// Filesystem boundary for the app-owned managed SSH configuration.
+///
+/// Reads must be bounded and reject unsafe owner, type, mode, or symlink state. Replacement must
+/// use a same-directory unpredictable create-new temporary file, mode `0600`, complete write and
+/// file sync, no-follow target validation, atomic rename, and directory sync. Any pre-rename
+/// failure leaves the original bytes unchanged and removes only the owned temporary artifact.
 pub(crate) trait ManagedHostsFilesystem {
+    /// Reads a private bounded file, returning `None` only when it does not exist.
     fn read(&self, directory: &Path, name: &OsStr) -> io::Result<Option<Vec<u8>>>;
 
+    /// Atomically replaces `name`, distinguishing pre-commit failure from post-commit sync loss.
     fn atomic_replace(
         &self,
         directory: &Path,
@@ -162,6 +171,7 @@ pub(crate) trait ManagedHostsFilesystem {
 }
 
 #[derive(Clone, Copy, Debug, Default)]
+/// Native descriptor-relative implementation of [`ManagedHostsFilesystem`].
 pub(crate) struct NativeManagedHostsFilesystem;
 
 impl ManagedHostsFilesystem for NativeManagedHostsFilesystem {
@@ -225,16 +235,23 @@ fn before_commit<T>(result: io::Result<T>) -> Result<T, AtomicReplaceError> {
     result.map_err(AtomicReplaceError::NotCommitted)
 }
 
+/// Canonical store for SpaceTerm-owned concrete SSH host stanzas.
+///
+/// The store rejects unknown or noncanonical content rather than rewriting it, serializes hosts
+/// deterministically, preserves OpenSSH include precedence, and never mutates user or system SSH
+/// files. Mutations perform fresh collision checks before a single atomic replacement.
 pub(crate) struct ManagedHostsStore<'a, F> {
     paths: &'a AppPaths,
     filesystem: &'a F,
 }
 
 impl<'a, F: ManagedHostsFilesystem> ManagedHostsStore<'a, F> {
+    /// Binds the store to injected application paths and a filesystem implementation.
     pub(crate) const fn new(paths: &'a AppPaths, filesystem: &'a F) -> Self {
         Self { paths, filesystem }
     }
 
+    /// Loads only the bounded canonical app-owned format.
     pub(crate) fn load(&self) -> Result<Vec<ManagedSshHost>, ManagedHostsError> {
         let target = self.paths.managed_ssh_config();
         let name = target.file_name().ok_or_else(invalid_managed_path)?;
@@ -244,6 +261,10 @@ impl<'a, F: ManagedHostsFilesystem> ManagedHostsStore<'a, F> {
         parse_managed_hosts(&bytes).map_err(|_| ManagedHostsError::NonCanonical)
     }
 
+    /// Inserts or edits one host after collision checks against fresh discovered provenance.
+    ///
+    /// The exact edited managed declaration is the sole collision exemption. Pre-commit failure
+    /// preserves the original bytes; a directory-sync failure is reported as committed state.
     pub(crate) fn upsert(
         &self,
         host: ManagedSshHost,
@@ -288,6 +309,7 @@ impl<'a, F: ManagedHostsFilesystem> ManagedHostsStore<'a, F> {
         self.write(&hosts)
     }
 
+    /// Deletes one existing managed alias using the same atomic mutation contract.
     pub(crate) fn delete(&self, alias: &SshHostAlias) -> Result<(), ManagedHostsError> {
         let mut hosts = self.load()?;
         let position = hosts

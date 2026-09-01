@@ -26,6 +26,7 @@ const NATIVE_UTILITY_TIMEOUT: Duration = Duration::from_secs(60);
 const PROTOCOL_HEADER: &str = "SPACETERM-REMOTE/1";
 
 #[derive(Debug)]
+/// Content-free exit status plus bounded untrusted stdout from one utility process.
 pub(crate) struct RemoteUtilityProcessOutput {
     exit: ProcessExit,
     stdout: Vec<u8>,
@@ -38,6 +39,7 @@ impl RemoteUtilityProcessOutput {
 }
 
 #[derive(Debug, Error)]
+/// Transport-level utility failure that never retains remote output.
 pub(crate) enum RemoteUtilityRunError {
     #[error("remote utility command was cancelled")]
     Cancelled,
@@ -49,7 +51,12 @@ pub(crate) enum RemoteUtilityRunError {
     Io(#[source] io::Error),
 }
 
+/// Process boundary for fixed `/bin/sh -s` remote utility requests.
+///
+/// Implementations must enforce the supplied output bound, link cancellation to process-group
+/// termination and reaping, and never log, persist, or interpret untrusted remote bytes.
 pub(crate) trait SshRemoteUtilityRunner: Send + Sync + 'static {
+    /// Runs one owned script with no TTY and a request-scoped cancellation token.
     fn run(
         &self,
         command: Arc<SshCommandSpec>,
@@ -60,6 +67,9 @@ pub(crate) trait SshRemoteUtilityRunner: Send + Sync + 'static {
 }
 
 /// A reusable utility channel command created only by the centralized SSH command policy.
+///
+/// A live command carries revocable authority for one exact control instance and generation, so
+/// it cannot fall back to a direct connection or outlive its control socket.
 pub(crate) struct PreparedSshRemoteUtilityCommand {
     command: Arc<SshCommandSpec>,
     capability: Option<LiveConnectionCapability>,
@@ -89,6 +99,10 @@ impl PreparedSshRemoteUtilityCommand {
 }
 
 #[derive(Clone)]
+/// Native bounded runner that owns a private utility process group per request.
+///
+/// Work executes off async executor threads. Timeout, cancellation, or future drop kills and
+/// reaps the process group before ownership is released.
 pub(crate) struct NativeSshRemoteUtilityRunner {
     environment: SshProcessEnvironment,
     timeout: Duration,
@@ -354,6 +368,7 @@ fn read_bounded(reader: &mut impl Read, maximum_bytes: usize) -> Result<Vec<u8>,
 }
 
 #[derive(Clone, Debug, Eq, Error, PartialEq)]
+/// Typed utility failure with raw protocol and shell output excluded.
 pub(crate) enum RemoteUtilityError {
     #[error("remote utility request was cancelled")]
     Cancelled,
@@ -378,6 +393,7 @@ pub(crate) enum RemoteUtilityError {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+/// Strictly decoded account metadata returned by protocol version 1.
 pub(crate) struct RemoteAccountMetadata {
     user: String,
     uid: u64,
@@ -409,6 +425,7 @@ impl RemoteAccountMetadata {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+/// Bounded safe directory names plus an explicit partial-listing marker.
 pub(crate) struct RemoteUtilityDirectoryListing {
     names: Vec<String>,
     truncated: bool,
@@ -425,11 +442,18 @@ impl RemoteUtilityDirectoryListing {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// Exact-path probe outcome after distinct type and access checks.
 pub(crate) enum RemoteDirectoryProbe {
     ReadableDirectory,
     Missing,
 }
 
+/// Typed client for SpaceTerm's bounded, versioned remote utility protocol.
+///
+/// Remote paths remain validated remote-domain strings and never reach local filesystem APIs.
+/// Each operation validates live control authority, request size, output size, UTF-8, frame
+/// version, field lengths, row counts, and operation kind. Raw output is never retained in errors.
+/// Session and request cancellation are linked before the runner receives process ownership.
 pub(crate) struct SshRemoteUtilityClient<R: SshRemoteUtilityRunner> {
     command: PreparedSshRemoteUtilityCommand,
     runner: Arc<R>,
@@ -437,6 +461,7 @@ pub(crate) struct SshRemoteUtilityClient<R: SshRemoteUtilityRunner> {
 }
 
 impl<R: SshRemoteUtilityRunner> SshRemoteUtilityClient<R> {
+    /// Creates a client bound to one prepared command and session cancellation scope.
     pub(crate) fn new(
         command: PreparedSshRemoteUtilityCommand,
         runner: Arc<R>,
