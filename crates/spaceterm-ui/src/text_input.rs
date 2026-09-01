@@ -2316,6 +2316,8 @@ impl Render for TextInput {
             .debug_selector(move || selector.to_string())
             .size_full()
             .min_w_0()
+            .flex()
+            .items_center()
             .key_context(KEY_CONTEXT)
             .track_focus(&self.focus_handle)
             .cursor(if self.enabled {
