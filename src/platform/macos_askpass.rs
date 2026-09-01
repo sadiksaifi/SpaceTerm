@@ -43,9 +43,9 @@ pub(crate) enum AskPassRequestError {
     ContainsControlCharacter,
 }
 
-/// Validated, control-free AskPass prompt and its presentation kind.
+/// Validated, bounded AskPass prompt and its presentation kind.
 ///
-/// Prompt text is bounded before it reaches GPUI or AppKit and must never be logged or persisted.
+/// Prompt text is CRLF-normalized, permits LF line breaks, and must never be logged or persisted.
 pub(crate) struct AskPassRequest {
     prompt: String,
     kind: AskPassPromptKind,
@@ -62,7 +62,11 @@ impl AskPassRequest {
         if prompt.len() > MAX_ASKPASS_PROMPT_BYTES {
             return Err(AskPassRequestError::TooLong);
         }
-        if prompt.chars().any(char::is_control) {
+        let prompt = prompt.replace("\r\n", "\n");
+        if prompt
+            .chars()
+            .any(|character| character != '\n' && character.is_control())
+        {
             return Err(AskPassRequestError::ContainsControlCharacter);
         }
         Ok(Self { prompt, kind })
@@ -773,7 +777,7 @@ mod tests {
 
     #[test]
     fn request_accepts_the_maximum_bounded_prompt() {
-        let prompt = "a".repeat(MAX_ASKPASS_PROMPT_BYTES);
+        let prompt = "a\n".repeat(MAX_ASKPASS_PROMPT_BYTES / 2);
 
         let request = AskPassRequest::new(prompt, AskPassPromptKind::Secret).unwrap();
 
@@ -782,11 +786,24 @@ mod tests {
     }
 
     #[test]
-    fn request_rejects_empty_control_and_oversized_prompts() {
+    fn request_normalizes_multiline_unknown_host_confirmation() {
+        let prompt = concat!(
+            "The authenticity of host 'example.test (203.0.113.10)' can't be established.\r\n",
+            "ED25519 key fingerprint is SHA256:example.\r\n",
+            "This key is not known by any other names.\r\n",
+            "Are you sure you want to continue connecting (yes/no/[fingerprint])? "
+        );
+
+        let request =
+            AskPassRequest::new(prompt.to_owned(), AskPassPromptKind::Confirmation).unwrap();
+
+        assert_eq!(request.prompt(), prompt.replace("\r\n", "\n"));
+        assert_eq!(request.kind(), AskPassPromptKind::Confirmation);
+    }
+
+    #[test]
+    fn request_rejects_empty_and_oversized_prompts() {
         let empty = AskPassRequest::new(String::new(), AskPassPromptKind::Secret).err();
-        let nul = AskPassRequest::new("bad\0prompt".to_owned(), AskPassPromptKind::Secret).err();
-        let newline =
-            AskPassRequest::new("bad\nprompt".to_owned(), AskPassPromptKind::Secret).err();
         let oversized = AskPassRequest::new(
             "a".repeat(MAX_ASKPASS_PROMPT_BYTES + 1),
             AskPassPromptKind::Confirmation,
@@ -794,9 +811,24 @@ mod tests {
         .err();
 
         assert_eq!(empty, Some(AskPassRequestError::Empty));
-        assert_eq!(nul, Some(AskPassRequestError::ContainsControlCharacter));
-        assert_eq!(newline, Some(AskPassRequestError::ContainsControlCharacter));
         assert_eq!(oversized, Some(AskPassRequestError::TooLong));
+    }
+
+    #[test]
+    fn request_rejects_every_non_newline_control_after_crlf_normalization() {
+        for prompt in [
+            "bad\0prompt",
+            "bad\tprompt",
+            "bad\u{1b}prompt",
+            "bad\rprompt",
+            "bad\r\r\nprompt",
+            "bad\u{7f}prompt",
+        ] {
+            let error =
+                AskPassRequest::new(prompt.to_owned(), AskPassPromptKind::Confirmation).err();
+
+            assert_eq!(error, Some(AskPassRequestError::ContainsControlCharacter));
+        }
     }
 
     #[test]
