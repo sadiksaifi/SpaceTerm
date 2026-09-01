@@ -367,23 +367,29 @@ impl<B: SshProcessBackend> OpenSshControlConnection<B> {
         deadline: Instant,
     ) -> Result<bool, ControlConnectionError> {
         loop {
-            let mut child_slot = self
-                .child
-                .lock()
-                .map_err(|_| ControlConnectionError::Ownership)?;
-            let Some(child) = child_slot.as_mut() else {
-                return Ok(true);
+            let exited = {
+                let mut child_slot = self
+                    .child
+                    .lock()
+                    .map_err(|_| ControlConnectionError::Ownership)?;
+                let Some(child) = child_slot.as_mut() else {
+                    return Ok(true);
+                };
+                if self
+                    .backend
+                    .try_wait(child)
+                    .map_err(|source| ControlConnectionError::Reap { source })?
+                    .is_some()
+                {
+                    child_slot.take();
+                    true
+                } else {
+                    false
+                }
             };
-            if self
-                .backend
-                .try_wait(child)
-                .map_err(|source| ControlConnectionError::Reap { source })?
-                .is_some()
-            {
-                child_slot.take();
+            if exited {
                 return Ok(true);
             }
-            drop(child_slot);
             let now = self.backend.now();
             if now >= deadline {
                 return Ok(false);

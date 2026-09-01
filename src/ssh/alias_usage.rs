@@ -1,45 +1,98 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 
 use super::destination::SshHostAlias;
 
 #[derive(Clone, Default)]
 pub(crate) struct ActiveSshAliasRegistry {
-    counts: Arc<Mutex<BTreeMap<SshHostAlias, usize>>>,
+    state: Arc<Mutex<ActiveSshAliasState>>,
 }
 
+#[derive(Default)]
+struct ActiveSshAliasState {
+    counts: BTreeMap<SshHostAlias, usize>,
+    mutations: BTreeSet<SshHostAlias>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct SshAliasBusy;
+
 impl ActiveSshAliasRegistry {
-    pub(crate) fn acquire(&self, alias: SshHostAlias) -> ActiveSshAliasLease {
-        let mut counts = self
-            .counts
+    pub(crate) fn acquire(&self, alias: SshHostAlias) -> Result<ActiveSshAliasLease, SshAliasBusy> {
+        let mut state = self
+            .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let count = counts.entry(alias.clone()).or_default();
+        if state.mutations.contains(&alias) {
+            return Err(SshAliasBusy);
+        }
+        let count = state.counts.entry(alias.clone()).or_default();
         *count = count.saturating_add(1);
-        ActiveSshAliasLease {
+        Ok(ActiveSshAliasLease {
             registry: self.clone(),
             alias: Some(alias),
-        }
+        })
     }
 
     pub(crate) fn is_active(&self, alias: &SshHostAlias) -> bool {
-        self.counts
+        self.state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .counts
             .get(alias)
             .is_some_and(|count| *count != 0)
     }
 
-    fn release(&self, alias: &SshHostAlias) {
-        let mut counts = self
-            .counts
+    pub(crate) fn begin_mutation(
+        &self,
+        aliases: impl IntoIterator<Item = SshHostAlias>,
+    ) -> Result<ActiveSshAliasMutation, SshAliasBusy> {
+        let aliases: BTreeSet<_> = aliases.into_iter().collect();
+        let mut state = self
+            .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(count) = counts.get_mut(alias) {
+        if aliases.iter().any(|alias| {
+            state.counts.get(alias).is_some_and(|count| *count != 0)
+                || state.mutations.contains(alias)
+        }) {
+            return Err(SshAliasBusy);
+        }
+        state.mutations.extend(aliases.iter().cloned());
+        Ok(ActiveSshAliasMutation {
+            registry: self.clone(),
+            aliases,
+        })
+    }
+
+    fn release(&self, alias: &SshHostAlias) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(count) = state.counts.get_mut(alias) {
             *count = count.saturating_sub(1);
             if *count == 0 {
-                counts.remove(alias);
+                state.counts.remove(alias);
             }
+        }
+    }
+}
+
+pub(crate) struct ActiveSshAliasMutation {
+    registry: ActiveSshAliasRegistry,
+    aliases: BTreeSet<SshHostAlias>,
+}
+
+impl Drop for ActiveSshAliasMutation {
+    fn drop(&mut self) {
+        let mut state = self
+            .registry
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for alias in &self.aliases {
+            state.mutations.remove(alias);
         }
     }
 }
@@ -69,12 +122,26 @@ mod tests {
     fn duplicate_alias_leases_should_remain_active_until_every_owner_releases() {
         let registry = ActiveSshAliasRegistry::default();
         let alias = alias();
-        let first = registry.acquire(alias.clone());
-        let second = registry.acquire(alias.clone());
+        let first = registry.acquire(alias.clone()).unwrap();
+        let second = registry.acquire(alias.clone()).unwrap();
 
         drop(first);
         assert!(registry.is_active(&alias));
         drop(second);
         assert!(!registry.is_active(&alias));
+    }
+
+    #[test]
+    fn mutation_and_connection_leases_should_exclude_each_other_atomically() {
+        let registry = ActiveSshAliasRegistry::default();
+        let alias = alias();
+        let mutation = registry.begin_mutation([alias.clone()]).unwrap();
+        assert!(registry.acquire(alias.clone()).is_err());
+        drop(mutation);
+
+        let connection = registry.acquire(alias.clone()).unwrap();
+        assert!(registry.begin_mutation([alias.clone()]).is_err());
+        drop(connection);
+        assert!(registry.begin_mutation([alias]).is_ok());
     }
 }

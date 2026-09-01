@@ -3,6 +3,7 @@ mod command_palette_theme;
 mod control_theme_catalog;
 mod menu_theme;
 mod modal_theme;
+mod native_remote_workspace_flow_backend;
 mod new_workspace_panel;
 mod pane_action_menu;
 mod pane_host;
@@ -30,7 +31,9 @@ mod workspace_search;
 use gpui::{App, KeyBinding, actions};
 use spaceterm_ui::{EditCopy, EditPaste};
 
-pub(crate) use pane_host::{PaneHost, PaneHostEvent};
+pub(crate) use pane_host::{
+    PaneHost, PaneHostEvent, PreparedPaneHostRemoteRestart, RemotePaneHostLifecycleError,
+};
 #[cfg(test)]
 pub(crate) use render_lifecycle::{RenderLifecycle, ScaleChange, SurfaceVisibility};
 #[cfg(test)]
@@ -39,7 +42,9 @@ pub(crate) use terminal_focus::{
 };
 #[cfg(test)]
 pub(crate) use terminal_ime::conformance_ime_observation;
-pub(crate) use terminal_pane::{TerminalPane, TerminalPaneEvent};
+pub(crate) use terminal_pane::{
+    PreparedRemotePaneRestart, RemotePaneLifecycleError, TerminalPane, TerminalPaneEvent,
+};
 pub(crate) use window_manager::{WindowManager, WindowManagerEvent};
 pub(crate) use workspace_manager::WorkspaceManager;
 
