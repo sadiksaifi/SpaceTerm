@@ -86,11 +86,10 @@ use gpui::{
     SharedString, Task, TextRun, UTF16Selection, Window, div, font, point, px, relative, rgba,
     size,
 };
-use gpui_symbols::{Icon, SymbolWeight};
 use spaceterm_ui::{
-    Button, ButtonRole, ButtonSize, ButtonVariant, ContextMenu, EditCopy, EditPaste, IconButton,
-    MenuLifecycleEvent, MenuSize, OverlayScrollbar, OverlayScrollbarEvent, ScrollMetrics,
-    TextInput, TextInputEvent, TextInputTabBehavior, TextInputVariant, Tooltip,
+    Button, ButtonRole, ButtonSize, ButtonVariant, ContextMenu, EditCopy, EditPaste, Icon,
+    IconButton, IconName, MenuLifecycleEvent, MenuSize, OverlayScrollbar, OverlayScrollbarEvent,
+    ScrollMetrics, TextInput, TextInputEvent, TextInputTabBehavior, TextInputVariant, Tooltip,
     window_modal_is_open,
 };
 
@@ -3363,7 +3362,7 @@ impl TerminalPane {
                 .child(find_icon_button(
                     "terminal-find-previous",
                     "Find Previous",
-                    "chevron.up",
+                    IconName::ChevronUp,
                     has_results,
                     move |window, cx| {
                         let _ = previous_pane.update(cx, |pane, cx| {
@@ -3374,7 +3373,7 @@ impl TerminalPane {
                 .child(find_icon_button(
                     "terminal-find-next",
                     "Find Next",
-                    "chevron.down",
+                    IconName::ChevronDown,
                     has_results,
                     move |window, cx| {
                         let _ = next_pane.update(cx, |pane, cx| {
@@ -3385,7 +3384,7 @@ impl TerminalPane {
                 .child(find_icon_button(
                     "terminal-find-close",
                     "Close Find",
-                    "xmark",
+                    IconName::X,
                     true,
                     move |window, cx| {
                         let _ = close_pane.update(cx, |pane, cx| {
@@ -3401,16 +3400,12 @@ impl TerminalPane {
 fn find_icon_button(
     id: &'static str,
     accessibility_name: &'static str,
-    symbol: &'static str,
+    icon: IconName,
     enabled: bool,
     on_activate: impl Fn(&mut Window, &mut App) + 'static,
 ) -> AnyElement {
     IconButton::new(id, accessibility_name, move |foreground| {
-        Icon::new(symbol)
-            .weight(SymbolWeight::Medium)
-            .size(px(11.0))
-            .color(foreground)
-            .into_any_element()
+        Icon::new(icon, px(12.0), foreground).into_any_element()
     })
     .variant(ButtonVariant::Ghost)
     .size(ButtonSize::Small)
@@ -4913,7 +4908,8 @@ mod tests {
     }
 
     fn terminal_pane(cx: &mut TestAppContext) -> (Entity<TerminalPane>, &mut VisualTestContext) {
-        cx.update(crate::ui::init);
+        cx.update(crate::ui::init)
+            .expect("UI initialization should succeed");
         let session_factory: Rc<dyn TerminalSessionFactory> = Rc::new(
             TestTerminalSessionFactory::new(TestTerminalSessionRecords::default())
                 .with_start_failure("terminal session unavailable in UI test"),
@@ -5143,7 +5139,8 @@ mod tests {
         &mut VisualTestContext,
         TestTerminalSessionRecords,
     ) {
-        cx.update(crate::ui::init);
+        cx.update(crate::ui::init)
+            .expect("UI initialization should succeed");
         let records = TestTerminalSessionRecords::default();
         let session_factory: Rc<dyn TerminalSessionFactory> =
             Rc::new(TestTerminalSessionFactory::new(records.clone()));
@@ -5240,7 +5237,8 @@ mod tests {
         &mut VisualTestContext,
         TestTerminalSessionRecords,
     ) {
-        cx.update(crate::ui::init);
+        cx.update(crate::ui::init)
+            .expect("UI initialization should succeed");
         let records = TestTerminalSessionRecords::default();
         let session_factory = remote_workspace_session_factory(records.clone());
         let (pane, cx) =
@@ -5261,7 +5259,8 @@ mod tests {
         &mut VisualTestContext,
         TestTerminalSessionRecords,
     ) {
-        cx.update(crate::ui::init);
+        cx.update(crate::ui::init)
+            .expect("UI initialization should succeed");
         let records = TestTerminalSessionRecords::default();
         let session_factory =
             remote_workspace_session_factory_with_readiness(records.clone(), ready);
@@ -6109,7 +6108,8 @@ mod tests {
         TestTerminalSessionRecords,
         Rc<Cell<usize>>,
     ) {
-        cx.update(crate::ui::init);
+        cx.update(crate::ui::init)
+            .expect("UI initialization should succeed");
         let records = TestTerminalSessionRecords::default();
         let session_factory: Rc<dyn TerminalSessionFactory> =
             Rc::new(TestTerminalSessionFactory::new(records.clone()));
@@ -6145,7 +6145,8 @@ mod tests {
         &mut VisualTestContext,
         TestTerminalSessionRecords,
     ) {
-        cx.update(crate::ui::init);
+        cx.update(crate::ui::init)
+            .expect("UI initialization should succeed");
         let records = TestTerminalSessionRecords::default();
         let session_factory: Rc<dyn TerminalSessionFactory> = Rc::new(
             TestTerminalSessionFactory::new(records.clone())
@@ -6176,7 +6177,8 @@ mod tests {
         &mut VisualTestContext,
         TestTerminalSessionRecords,
     ) {
-        cx.update(crate::ui::init);
+        cx.update(crate::ui::init)
+            .expect("UI initialization should succeed");
         let records = TestTerminalSessionRecords::default();
         let session_factory: Rc<dyn TerminalSessionFactory> = Rc::new(
             TestTerminalSessionFactory::new(records.clone())
@@ -9054,7 +9056,8 @@ mod tests {
     fn backing_scale_change_should_preserve_the_grid_and_resize_backing_pixels(
         cx: &mut TestAppContext,
     ) {
-        cx.update(crate::ui::init);
+        cx.update(crate::ui::init)
+            .expect("UI initialization should succeed");
         let records = TestTerminalSessionRecords::default();
         let session_factory: Rc<dyn TerminalSessionFactory> =
             Rc::new(TestTerminalSessionFactory::new(records.clone()));
@@ -9102,7 +9105,8 @@ mod tests {
 
     #[gpui::test]
     fn terminal_pane_close_should_drop_its_session_once_when_repeated(cx: &mut TestAppContext) {
-        cx.update(crate::ui::init);
+        cx.update(crate::ui::init)
+            .expect("UI initialization should succeed");
         let records = TestTerminalSessionRecords::default();
         let session_factory: Rc<dyn TerminalSessionFactory> =
             Rc::new(TestTerminalSessionFactory::new(records.clone()));
@@ -9973,7 +9977,8 @@ mod tests {
     fn terminal_failure_should_keep_the_pane_visible_with_a_failure_status(
         cx: &mut TestAppContext,
     ) {
-        cx.update(crate::ui::init);
+        cx.update(crate::ui::init)
+            .expect("UI initialization should succeed");
         let records = TestTerminalSessionRecords::default();
         let session_factory: Rc<dyn TerminalSessionFactory> =
             Rc::new(TestTerminalSessionFactory::new(records.clone()));

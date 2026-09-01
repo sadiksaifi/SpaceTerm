@@ -552,7 +552,8 @@ mod tests {
     );
 
     fn askpass_window(cx: &mut TestAppContext) -> AskPassWindow<'_> {
-        cx.update(crate::ui::init);
+        cx.update(crate::ui::init)
+            .expect("UI initialization should succeed");
         let results = Rc::new(RefCell::new(Vec::new()));
         let (harness, cx) = cx.add_window_view(|_, cx| {
             let presenter = cx.new(|_| GpuiAskPassPresenter::default());

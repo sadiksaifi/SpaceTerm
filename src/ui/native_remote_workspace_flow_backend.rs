@@ -1057,7 +1057,8 @@ mod tests {
     fn pending_native_shutdown_should_not_block_cancel_or_focus_restoration(
         cx: &mut TestAppContext,
     ) {
-        cx.update(crate::ui::init);
+        cx.update(crate::ui::init)
+            .expect("UI initialization should succeed");
         let (release, pending) = async_channel::bounded(1);
         let started = Arc::new(AtomicUsize::new(0));
         let terminated = Arc::new(AtomicUsize::new(0));

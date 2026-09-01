@@ -15,6 +15,7 @@ resources = [
     { src = "target/package-macos/Assets.car", target = "Assets.car" },
     { src = "target/package-macos/terminfo", target = "terminfo" },
     { src = "assets/shell-integration", target = "shell-integration" },
+    { src = "assets/THIRD-PARTY-NOTICES.txt", target = "THIRD-PARTY-NOTICES.txt" },
 ]
 
 [package.metadata.packager.macos]
@@ -35,7 +36,6 @@ resolver = "2"
 anyhow = "1.0.100"
 async-channel = "2.5.0"
 gpui = "=0.2.2"
-gpui-symbols = "=0.6.1"
 image = { version = "=0.25.10", default-features = false }
 libghostty-vt = { version = "=0.2.1", default-features = false, features = ["kitty-graphics", "png"] }
 libc = "=0.2.189"
@@ -46,7 +46,6 @@ thiserror = "2.0.17"
 unicode-bidi = "=0.3.18"
 
 [patch.crates-io]
-gpui-symbols = { path = "third_party/gpui-symbols" }
 libghostty-vt = { path = "third_party/libghostty-vt" }
 libghostty-vt-sys = { path = "third_party/libghostty-vt-sys" }
 

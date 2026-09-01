@@ -14,6 +14,8 @@ use gpui::{
     prelude::FluentBuilder as _, px, size,
 };
 
+use crate::{Icon, IconName};
+
 const KEY_CONTEXT: &str = "SpaceTermMenu";
 const TYPEAHEAD_RESET: Duration = Duration::from_millis(700);
 const SUBMENU_OPEN_DELAY: Duration = Duration::from_millis(100);
@@ -802,7 +804,8 @@ impl<A: Clone + 'static> Menu<A> {
 impl<A: Clone + 'static> RenderOnce for Menu<A> {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let style = cx.global::<MenuTheme>().resolve(self.core.size);
-        let foreground = style.paint.foreground;
+        let enabled = self.core.is_enabled();
+        let (foreground, disclosure_foreground) = trigger_foregrounds(style.paint, enabled);
         let content = div()
             .flex()
             .items_center()
@@ -813,7 +816,11 @@ impl<A: Clone + 'static> RenderOnce for Menu<A> {
             .when(!self.icon_trigger, |content| {
                 content
                     .child(self.label)
-                    .child(div().ml_auto().text_color(style.paint.muted).child("▾"))
+                    .child(div().ml_auto().child(Icon::new(
+                        IconName::ChevronDown,
+                        px(12.0),
+                        disclosure_foreground,
+                    )))
             })
             .into_any_element();
         self.core.render(content, window, cx)
@@ -1040,7 +1047,8 @@ impl<T: Clone + PartialEq + 'static> RenderOnce for Picker<T> {
             ) as Rc<dyn Fn(&MenuActivation<T>, &mut Window, &mut App)>
         });
         let style = cx.global::<MenuTheme>().resolve(self.core.size);
-        let foreground = style.paint.foreground;
+        let enabled = self.core.is_enabled();
+        let (foreground, disclosure_foreground) = trigger_foregrounds(style.paint, enabled);
         let content = div()
             .flex()
             .items_center()
@@ -1049,7 +1057,11 @@ impl<T: Clone + PartialEq + 'static> RenderOnce for Picker<T> {
                 content.child(icon(foreground))
             })
             .child(div().flex_grow().child(self.selected_label))
-            .child(div().text_color(style.paint.muted).child("▾"))
+            .child(Icon::new(
+                IconName::ChevronDown,
+                px(12.0),
+                disclosure_foreground,
+            ))
             .into_any_element();
         self.core.render(content, window, cx)
     }
@@ -1157,15 +1169,19 @@ impl<A> MenuControl<A> {
             on_context_open: None,
         }
     }
+
+    fn is_enabled(&self) -> bool {
+        !self.disabled && self.on_activate.is_some() && has_selectable(&self.entries)
+    }
 }
 
 impl<A: Clone + 'static> MenuControl<A> {
     fn render(self, content: AnyElement, window: &mut Window, cx: &mut App) -> AnyElement {
         let style = cx.global::<MenuTheme>().resolve(self.size);
+        let enabled = self.is_enabled();
         let handler = self.on_activate;
         let lifecycle = self.on_lifecycle;
         let context_open = self.on_context_open;
-        let enabled = !self.disabled && handler.is_some() && has_selectable(&self.entries);
         let entries = convert_entries(self.entries, &move |action: A, mark| {
             let handler = handler.clone();
             Rc::new(move |source, window: &mut Window, cx: &mut App| {
@@ -2763,8 +2779,8 @@ fn render_row(
         .flex()
         .items_center()
         .justify_center();
-    if let Some(indicator) = mark_indicator(mark) {
-        leading = leading.child(indicator);
+    if let Some(indicator) = mark_icon(mark) {
+        leading = leading.child(Icon::new(indicator, px(12.0), foreground));
     } else if let Some(icon) = icon {
         leading = leading.child(icon(foreground));
     }
@@ -2780,7 +2796,11 @@ fn render_row(
             )
         })
         .when(submenu, |row| {
-            row.child(div().text_color(secondary_foreground).child("›"))
+            row.child(Icon::new(
+                IconName::ChevronRight,
+                px(12.0),
+                secondary_foreground,
+            ))
         });
     if !disabled {
         let down_state = pointer_state.clone();
@@ -2848,15 +2868,23 @@ fn render_row(
     row.into_any_element()
 }
 
-fn mark_indicator(mark: EntryMark) -> Option<&'static str> {
+fn mark_icon(mark: EntryMark) -> Option<IconName> {
     match mark {
         EntryMark::None => None,
-        EntryMark::Checkbox(true) => Some("✓"),
+        EntryMark::Checkbox(true) => Some(IconName::Check),
         EntryMark::Checkbox(false) => None,
-        EntryMark::Radio { selected: true, .. } => Some("●"),
+        EntryMark::Radio { selected: true, .. } => Some(IconName::CircleDot),
         EntryMark::Radio {
             selected: false, ..
         } => None,
+    }
+}
+
+fn trigger_foregrounds(paint: MenuPaint, enabled: bool) -> (Rgba, Rgba) {
+    if enabled {
+        (paint.foreground, paint.muted)
+    } else {
+        (paint.disabled, paint.disabled)
     }
 }
 
@@ -3275,29 +3303,47 @@ mod tests {
 
     #[test]
     fn rows_should_use_one_leading_slot_and_leave_unselected_icons_visible() {
-        assert_eq!(mark_indicator(EntryMark::None), None);
-        assert_eq!(mark_indicator(EntryMark::Checkbox(false)), None);
-        assert_eq!(mark_indicator(EntryMark::Checkbox(true)), Some("✓"));
+        assert!(mark_icon(EntryMark::None).is_none());
+        assert!(mark_icon(EntryMark::Checkbox(false)).is_none());
         assert_eq!(
-            mark_indicator(EntryMark::Radio {
+            mark_icon(EntryMark::Checkbox(true)).map(IconName::unicode),
+            Some(IconName::Check.unicode())
+        );
+        assert!(
+            mark_icon(EntryMark::Radio {
                 selected: false,
                 index: 0,
-            }),
-            None
+            })
+            .is_none()
         );
         assert_eq!(
-            mark_indicator(EntryMark::Radio {
+            mark_icon(EntryMark::Radio {
                 selected: true,
                 index: 0,
-            }),
-            Some("●")
+            })
+            .map(IconName::unicode),
+            Some(IconName::CircleDot.unicode())
         );
     }
 
     #[test]
-    fn highlighted_destructive_rows_should_preserve_danger_color() {
+    fn controls_and_rows_should_share_resolved_icon_and_text_foregrounds() {
         let paint = test_theme().paint;
 
+        assert_eq!(
+            trigger_foregrounds(paint, true),
+            (paint.foreground, paint.muted)
+        );
+        assert_eq!(
+            trigger_foregrounds(paint, false),
+            (paint.disabled, paint.disabled)
+        );
+        assert_eq!(row_foreground(paint, false, false, false), paint.foreground);
+        assert_eq!(
+            row_foreground(paint, false, false, true),
+            paint.selected_foreground
+        );
+        assert_eq!(row_foreground(paint, true, false, true), paint.disabled);
         assert_eq!(row_foreground(paint, false, true, true), paint.destructive);
         assert_eq!(
             row_secondary_foreground(paint, false, true, true),

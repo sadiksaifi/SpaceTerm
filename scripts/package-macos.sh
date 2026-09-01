@@ -22,6 +22,7 @@ readonly OUTPUT_DMG="$DIST_DIR/$APP_NAME.dmg"
 readonly INFO_PLIST_SOURCE="$REPO_ROOT/packaging/macos/Info.plist"
 readonly ICON_SOURCE="$REPO_ROOT/assets/macos/$APP_NAME.icon"
 readonly TERMINFO_SOURCE="$REPO_ROOT/assets/terminfo/xterm-spaceterm.terminfo"
+readonly THIRD_PARTY_NOTICES_SOURCE="$REPO_ROOT/assets/THIRD-PARTY-NOTICES.txt"
 readonly BUILD_TARGET_DIR="$REPO_ROOT/target"
 readonly PACKAGE_STAGE_DIR="$BUILD_TARGET_DIR/package-macos"
 readonly STAGED_INFO_PLIST="$PACKAGE_STAGE_DIR/Info.plist"
@@ -201,6 +202,8 @@ require_xcode
 [[ -f "$INFO_PLIST_SOURCE" ]] || die "missing Info.plist template: $INFO_PLIST_SOURCE"
 [[ -f "$ICON_SOURCE/icon.json" ]] || die "missing Icon Composer source: $ICON_SOURCE"
 [[ -f "$TERMINFO_SOURCE" ]] || die "missing terminfo source: $TERMINFO_SOURCE"
+[[ -f "$THIRD_PARTY_NOTICES_SOURCE" ]] \
+    || die "missing third-party notices: $THIRD_PARTY_NOTICES_SOURCE"
 if (( UNIVERSAL )); then
     require_command rustup
     require_universal_targets

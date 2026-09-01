@@ -10,12 +10,12 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use gpui::prelude::*;
-use gpui::{Context, Entity, EventEmitter, Render, SharedString, Window};
+use gpui::{Context, Entity, EventEmitter, Render, SharedString, Window, px};
 use spaceterm_ui::{
     CommandPalette, CommandPaletteAccessory, CommandPaletteActivationPolicy,
     CommandPaletteCloseReason, CommandPaletteEvent, CommandPaletteItem,
-    CommandPaletteLifecycleEvent, CommandPaletteMatching, CommandPaletteReplacementFocus,
-    MenuEntry,
+    CommandPaletteLifecycleEvent, CommandPaletteMatching, CommandPaletteReplacementFocus, Icon,
+    IconName, MenuEntry,
 };
 
 use crate::domain::SshDestination;
@@ -33,6 +33,7 @@ const DELETE_HOST_ACTION: &str = "ssh-host-picker-delete";
 const DISCOVERY_WARNING_SELECTOR: &str = "ssh-host-picker-discovery-warning";
 const MAXIMUM_DISCOVERY_WARNING_BYTES: usize = 256;
 const HOST_DISCOVERY_ISSUE_CLASS_COUNT: usize = 4;
+const HOST_ICON_SIZE: f32 = 14.0;
 
 pub(super) trait HostDiscoveryProvider: Send + Sync {
     fn discover(&self) -> HostDiscovery;
@@ -125,6 +126,10 @@ impl HostDiscoveryDiagnostic {
             .description(self.description)
             .section("SSH Config Warning")
             .disabled(true)
+            .leading_icon(|foreground| {
+                Icon::new(IconName::TriangleAlert, px(HOST_ICON_SIZE), foreground)
+                    .into_any_element()
+            })
             .trailing(CommandPaletteAccessory::Status("Action needed".into()))
             .debug_selector(DISCOVERY_WARNING_SELECTOR)
     }
@@ -163,6 +168,9 @@ impl HostPickerRow {
         };
         CommandPaletteItem::new(self.id, self.label)
             .description(self.subtitle)
+            .leading_icon(|foreground| {
+                Icon::new(IconName::Server, px(HOST_ICON_SIZE), foreground).into_any_element()
+            })
             .trailing(CommandPaletteAccessory::Status(status.into()))
             .debug_selector(format!("ssh-host-picker-row-{}", self.destination.as_str()))
     }
@@ -760,7 +768,8 @@ mod tests {
         host_in_active_use: impl Fn(&SshHostAlias) -> bool + Send + Sync + 'static,
         cx: &'a mut TestAppContext,
     ) -> HostPickerWindow<'a> {
-        cx.update(crate::ui::init);
+        cx.update(crate::ui::init)
+            .expect("UI initialization should succeed");
         let injected_provider: Arc<dyn HostDiscoveryProvider> = provider;
         let active_use = Arc::new(host_in_active_use);
         let (harness, cx) = cx.add_window_view(move |window, cx| {

@@ -117,12 +117,15 @@ pub(crate) const TOP_CHROME_HEIGHT: f32 = 36.0;
 pub(crate) const WORKSPACE_SIDEBAR_DEFAULT_WIDTH: f32 = 240.0;
 pub(crate) const WORKSPACE_SIDEBAR_MINIMUM_WIDTH: f32 = 180.0;
 
-pub(crate) fn init(cx: &mut App) {
-    init_with_text_direction(cx, crate::platform::macos_locale::current_text_direction());
+pub(crate) fn init(cx: &mut App) -> gpui::Result<()> {
+    init_with_text_direction(cx, crate::platform::macos_locale::current_text_direction())
 }
 
-fn init_with_text_direction(cx: &mut App, text_direction: spaceterm_ui::TextDirection) {
-    spaceterm_ui::init(cx, control_theme_catalog::catalog());
+fn init_with_text_direction(
+    cx: &mut App,
+    text_direction: spaceterm_ui::TextDirection,
+) -> gpui::Result<()> {
+    spaceterm_ui::init(cx, control_theme_catalog::catalog())?;
     spaceterm_ui::install_modal_policy(
         cx,
         spaceterm_ui::ModalDesktopPolicy::mac_os().with_text_direction(text_direction),
@@ -237,6 +240,7 @@ fn init_with_text_direction(cx: &mut App, text_direction: spaceterm_ui::TextDire
             Some(TERMINAL_KEY_CONTEXT),
         ),
     ]);
+    Ok(())
 }
 
 #[cfg(test)]
@@ -247,7 +251,10 @@ mod tests {
 
     #[gpui::test]
     fn ui_init_should_install_control_themes(cx: &mut TestAppContext) {
-        cx.update(|cx| init_with_text_direction(cx, spaceterm_ui::TextDirection::LeftToRight));
+        cx.update(|cx| {
+            init_with_text_direction(cx, spaceterm_ui::TextDirection::LeftToRight)
+                .expect("UI initialization should succeed")
+        });
 
         assert!(cx.update(|cx| {
             cx.has_global::<spaceterm_ui::ButtonTheme>()
@@ -267,7 +274,7 @@ mod tests {
 
     #[gpui::test]
     fn ui_init_should_install_macos_modal_command_period_binding(cx: &mut TestAppContext) {
-        cx.update(init);
+        cx.update(|cx| init(cx).expect("UI initialization should succeed"));
         let command_period =
             Keystroke::parse("cmd-.").expect("macOS modal key equivalent should parse");
 
@@ -278,7 +285,7 @@ mod tests {
 
     #[gpui::test]
     fn terminal_zoom_shortcuts_should_bind_font_size_actions(cx: &mut TestAppContext) {
-        cx.update(init);
+        cx.update(|cx| init(cx).expect("UI initialization should succeed"));
         let expected = [
             ("cmd-=", IncreaseTerminalFontSize.name()),
             ("cmd-+", IncreaseTerminalFontSize.name()),
@@ -309,7 +316,7 @@ mod tests {
 
     #[gpui::test]
     fn terminal_find_shortcuts_should_bind_standard_macos_actions(cx: &mut TestAppContext) {
-        cx.update(init);
+        cx.update(|cx| init(cx).expect("UI initialization should succeed"));
         let expected = [
             ("cmd-f", OpenTerminalFind.name()),
             ("cmd-g", FindNext.name()),
@@ -339,7 +346,7 @@ mod tests {
 
     #[gpui::test]
     fn workspace_and_hierarchy_shortcuts_should_be_global(cx: &mut TestAppContext) {
-        cx.update(init);
+        cx.update(|cx| init(cx).expect("UI initialization should succeed"));
         let expected = [
             ("cmd-n", CreateScratchWorkspace.name()),
             ("cmd-p", SearchWorkspaces.name()),

@@ -1,15 +1,12 @@
 #[cfg(test)]
 use gpui::App;
 use gpui::prelude::*;
-use gpui::{Context, Entity, EventEmitter, Render, Window, px, rgba};
-use gpui_symbols::Icon;
+use gpui::{Context, Entity, EventEmitter, Render, Window, px};
 use spaceterm_ui::{
     CommandPalette, CommandPaletteAccessory, CommandPaletteActivationPolicy, CommandPaletteEvent,
     CommandPaletteHint, CommandPaletteItem, CommandPaletteLifecycleEvent,
-    CommandPaletteReplacementFocus,
+    CommandPaletteReplacementFocus, Icon, IconName,
 };
-
-use crate::theme::ACTIVE_THEME;
 
 const SOURCE_ICON_SIZE: f32 = 14.0;
 
@@ -42,11 +39,11 @@ impl NewWorkspaceSource {
         }
     }
 
-    const fn icon(self) -> &'static str {
+    const fn icon(self) -> IconName {
         match self {
-            Self::LocalProject => "folder",
-            Self::Scratch => "terminal",
-            Self::RemoteProject => "globe",
+            Self::LocalProject => IconName::Folder,
+            Self::Scratch => IconName::Terminal,
+            Self::RemoteProject => IconName::Globe,
         }
     }
 
@@ -77,7 +74,6 @@ impl NewWorkspaceSource {
         self,
         remote_unavailable_reason: Option<String>,
     ) -> CommandPaletteItem<Self> {
-        let icon_color = rgba(ACTIVE_THEME.icon.rgba_hex());
         let icon_name = self.icon();
         let unavailable = (self == Self::RemoteProject)
             .then_some(remote_unavailable_reason)
@@ -89,11 +85,8 @@ impl NewWorkspaceSource {
                     .unwrap_or_else(|| self.description().to_owned()),
             )
             .disabled(unavailable.is_some())
-            .leading_icon(move |_| {
-                Icon::new(icon_name)
-                    .size(px(SOURCE_ICON_SIZE))
-                    .color(icon_color)
-                    .into_any_element()
+            .leading_icon(move |foreground| {
+                Icon::new(icon_name, px(SOURCE_ICON_SIZE), foreground).into_any_element()
             })
             .debug_selector(self.debug_selector());
 
@@ -366,7 +359,8 @@ mod tests {
         Entity<NewWorkspacePanel>,
         &mut VisualTestContext,
     ) {
-        cx.update(crate::ui::init);
+        cx.update(crate::ui::init)
+            .expect("UI initialization should succeed");
         let (harness, cx) = cx.add_window_view(NewWorkspacePanelHarness::new);
         let panel = harness.read_with(cx, |harness, _| harness.panel.clone());
         cx.update(|window, cx| harness.read(cx).prior_focus.focus(window));
@@ -418,7 +412,7 @@ mod tests {
 
         assert!(!remote.into_palette_item(None).is_disabled());
         assert_eq!(remote.accessory(), None);
-        assert_eq!(remote.icon(), "globe");
+        assert!(matches!(remote.icon(), IconName::Globe));
     }
 
     #[test]

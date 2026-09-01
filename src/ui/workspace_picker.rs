@@ -8,11 +8,10 @@ use gpui::{
     Action, App, Context, Entity, EventEmitter, PromptButton, PromptLevel, Render, SharedString,
     Window, div, px,
 };
-use gpui_symbols::Icon;
 use spaceterm_ui::{
     CommandPalette, CommandPaletteActivationPolicy, CommandPaletteCloseReason,
     CommandPaletteConfirm, CommandPaletteEvent, CommandPaletteItem, CommandPaletteLifecycleEvent,
-    CommandPaletteMatching, MenuEntry,
+    CommandPaletteMatching, Icon, IconName, MenuEntry,
 };
 
 use super::{
@@ -31,7 +30,6 @@ use crate::platform::workspace_picker_filesystem::{
     WorkspacePickerDirectoryEntry, WorkspacePickerExactPathProbe, WorkspacePickerFilesystem,
     WorkspacePickerFilesystemError,
 };
-use crate::theme::{ACTIVE_THEME, Color};
 
 const HOME_DISPLAY: &str = "~/";
 const ROW_ICON_SIZE: f32 = 14.0;
@@ -959,14 +957,10 @@ impl Render for WorkspacePicker {
 }
 
 fn directory_palette_item(entry: WorkspacePickerDirectoryEntry) -> CommandPaletteItem<PathBuf> {
-    let icon_color = gpui_color(ACTIVE_THEME.icon_muted);
     let selector = format!("workspace-picker-row-{}", entry.name());
     CommandPaletteItem::new(entry.path().to_path_buf(), format!("{}/", entry.name()))
-        .leading_icon(move |_| {
-            Icon::new("folder")
-                .size(px(ROW_ICON_SIZE))
-                .color(icon_color)
-                .into_any_element()
+        .leading_icon(move |foreground| {
+            Icon::new(IconName::Folder, px(ROW_ICON_SIZE), foreground).into_any_element()
         })
         .debug_selector(selector)
 }
@@ -978,10 +972,6 @@ fn status_for_error(error: WorkspacePickerFilesystemError) -> WorkspacePickerSta
         WorkspacePickerFilesystemError::PermissionDenied => WorkspacePickerStatus::PermissionDenied,
         WorkspacePickerFilesystemError::Other => WorkspacePickerStatus::Other,
     }
-}
-
-fn gpui_color(color: Color) -> gpui::Rgba {
-    gpui::rgba(color.rgba_hex())
 }
 
 #[cfg(test)]
@@ -1151,7 +1141,8 @@ mod tests {
         filesystem: Arc<ScriptedWorkspacePickerFilesystem>,
         cx: &mut TestAppContext,
     ) -> (Entity<WorkspacePicker>, &mut VisualTestContext) {
-        cx.update(crate::ui::init);
+        cx.update(crate::ui::init)
+            .expect("UI initialization should succeed");
         let injected_filesystem: Arc<dyn WorkspacePickerFilesystem + Send + Sync> = filesystem;
         let system_settings: Rc<dyn SystemSettingsOpener> = Rc::new(TestSystemSettingsOpener);
         let (harness, cx) = cx.add_window_view(move |window, cx| {
@@ -1177,7 +1168,8 @@ mod tests {
     #[gpui::test]
     fn first_picker_request_deferred_by_modal_still_starts_at_home(cx: &mut TestAppContext) {
         let filesystem = Arc::new(ScriptedWorkspacePickerFilesystem::new([home()], []));
-        cx.update(crate::ui::init);
+        cx.update(crate::ui::init)
+            .expect("UI initialization should succeed");
         let injected_filesystem: Arc<dyn WorkspacePickerFilesystem + Send + Sync> = filesystem;
         let system_settings: Rc<dyn SystemSettingsOpener> = Rc::new(TestSystemSettingsOpener);
         let (harness, cx) = cx.add_window_view(move |window, cx| {

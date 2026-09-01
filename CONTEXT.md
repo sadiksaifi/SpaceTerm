@@ -16,7 +16,9 @@ tmux, but SpaceTerm is not a tmux client and has no tmux-style server/client mod
   `spaceterm-ui` library crate.
 - Use `libghostty-vt` for terminal emulation.
 - Use a macOS PTY to launch and communicate with shells.
-- Use `gpui-symbols` for native macOS SF Symbols.
+- Use typed `IconName` values from the exact `lucide-icons` 1.34.0 set for app-owned in-app
+  icons. The platform-neutral `spaceterm-ui` crate owns the dependency, registers its bundled font,
+  and renders icons through a size-and-tint adapter.
 - Ship the SpaceTerm application on macOS and keep native platform integration macOS-specific.
   Reusable `spaceterm-ui` controls render entirely through GPUI and remain platform-neutral for
   possible future Linux and Windows support; do not create speculative platform adapters.
@@ -33,9 +35,9 @@ tmux, but SpaceTerm is not a tmux client and has no tmux-style server/client mod
 ## UI direction
 
 - Build the interface directly with GPUI as a compact, Zed-like desktop experience.
-- Every icon is an SF Symbol or SVG, never a font or text glyph. Use `gpui-symbols` for icons in
-  the macOS application and embedded SVG assets in the platform-neutral `spaceterm-ui` crate.
-  Continue to use native macOS menus and system dialogs where appropriate.
+- Every app-owned in-app icon is a typed Lucide `IconName` rendered through `spaceterm-ui`'s
+  bundled icon font. Arbitrary Unicode, raw private-use characters, and text glyphs are never icon
+  inputs. Continue to use native macOS menus and system dialogs where appropriate.
 - Keep reusable SpaceTerm controls in the small internal `spaceterm-ui` crate. Application UI
   Modules compose those controls with product behavior and Vague Pro presentation.
 - Use the application-owned Workspace Picker as the primary Open Local Project selection

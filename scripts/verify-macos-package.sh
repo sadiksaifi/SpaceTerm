@@ -14,6 +14,7 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 readonly SCRIPT_DIR
 REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd -P)"
 readonly REPO_ROOT
+readonly THIRD_PARTY_NOTICES_SOURCE="$REPO_ROOT/assets/THIRD-PARTY-NOTICES.txt"
 
 APP_PATH="$REPO_ROOT/dist/$APP_NAME.app"
 DMG_PATH="$REPO_ROOT/dist/$APP_NAME.dmg"
@@ -137,6 +138,7 @@ verify_app_bundle() {
     local executable_architectures executable_description signature_details
     local shell_integration="$app/Contents/Resources/shell-integration"
     local terminfo="$app/Contents/Resources/terminfo"
+    local third_party_notices="$app/Contents/Resources/THIRD-PARTY-NOTICES.txt"
     local terminfo_description
 
     [[ -d "$app" ]] || die "$label app bundle is missing: $app"
@@ -217,6 +219,15 @@ verify_app_bundle() {
     [[ -f "$extracted_iconset/icon_128x128@2x.png" ]] \
         || die "$label app icon does not contain a 256x256 legacy representation"
 
+    [[ -f "$third_party_notices" ]] \
+        || die "$label third-party notices resource is missing: $third_party_notices"
+    cmp -s "$THIRD_PARTY_NOTICES_SOURCE" "$third_party_notices" \
+        || die "$label third-party notices differ from the tracked resource"
+    for notice in "lucide-icons-rs" "Lucide Icons" "ISC License" "Feather" "MIT License"; do
+        grep -Fq "$notice" "$third_party_notices" \
+            || die "$label third-party notices are missing required notice: $notice"
+    done
+
     [[ "$(tr -d '[:space:]' < "$shell_integration/VERSION")" == "1" ]] \
         || die "$label shell integration version is missing or unsupported"
     for resource in \
@@ -286,6 +297,7 @@ esac
 readonly NATIVE_ARCHITECTURE
 require_command codesign
 require_command assetutil
+require_command cmp
 require_command file
 require_command hdiutil
 require_command iconutil

@@ -4,7 +4,7 @@ use std::rc::Rc;
 use thiserror::Error;
 
 use super::pane_action_menu::{
-    CloseTarget, PaneActionMenuCommand, pane_action_menu_entries, sf_symbol,
+    CloseTarget, PaneActionMenuCommand, menu_icon, pane_action_menu_entries,
 };
 use super::terminal_focus::TerminalFocusBlocker;
 use super::{
@@ -61,11 +61,10 @@ use gpui::{
     AnyElement, App, Context, Entity, EventEmitter, MouseButton, Pixels, PromptButton, PromptLevel,
     Render, ScrollHandle, SharedString, Task, Window, div, px, rgba,
 };
-use gpui_symbols::{Icon, SymbolWeight};
 use spaceterm_ui::{
-    ButtonSize, ButtonVariant, ContextMenu, IconButton, Menu, MenuAlignment, MenuLifecycleEvent,
-    MenuPlacement, MenuPlacementConfig, MenuSize, Tooltip, WindowDragRegion, WindowDragRegionEvent,
-    WindowDragRegionResponse, WindowDragRegionStatus,
+    ButtonSize, ButtonVariant, ContextMenu, Icon, IconButton, IconName, Menu, MenuAlignment,
+    MenuLifecycleEvent, MenuPlacement, MenuPlacementConfig, MenuSize, Tooltip, WindowDragRegion,
+    WindowDragRegionEvent, WindowDragRegionResponse, WindowDragRegionStatus,
 };
 
 const WINDOW_BAR_HEIGHT: f32 = TOP_CHROME_HEIGHT;
@@ -1224,10 +1223,7 @@ impl WindowManager {
                             ("window-close-button", window_id.get()),
                             "Close Window",
                             |foreground| {
-                                Icon::new("xmark")
-                                    .weight(SymbolWeight::Medium)
-                                    .size(px(WINDOW_CLOSE_ICON_SIZE))
-                                    .color(foreground)
+                                Icon::new(IconName::X, px(WINDOW_CLOSE_ICON_SIZE), foreground)
                                     .into_any_element()
                             },
                         )
@@ -1385,10 +1381,7 @@ impl WindowManager {
             .child(items)
             .child(
                 IconButton::new("create-window-button", "Create Window", |foreground| {
-                    Icon::new("plus")
-                        .size(px(14.0))
-                        .color(foreground)
-                        .into_any_element()
+                    Icon::new(IconName::Plus, px(14.0), foreground).into_any_element()
                 })
                 .variant(ButtonVariant::Ghost)
                 .size(ButtonSize::Regular)
@@ -1420,7 +1413,7 @@ impl WindowManager {
                                 CloseTarget::Window,
                             ),
                         )
-                        .icon_trigger(sf_symbol("ellipsis"))
+                        .icon_trigger(menu_icon(IconName::Ellipsis))
                         .size(MenuSize::Wide)
                         .placement(
                             MenuPlacementConfig::new(MenuPlacement::Bottom, MenuAlignment::End)
@@ -1693,7 +1686,8 @@ mod tests {
         TestTerminalSessionRecords,
         &mut VisualTestContext,
     ) {
-        cx.update(crate::ui::init);
+        cx.update(crate::ui::init)
+            .expect("UI initialization should succeed");
         let records = TestTerminalSessionRecords::default();
         let destination = crate::domain::SshDestination::new("tester@remote".to_owned()).unwrap();
         let session_factory =
@@ -1717,7 +1711,8 @@ mod tests {
         Rc<RefCell<Vec<RemoteChildLaunchUnavailable>>>,
         &mut VisualTestContext,
     ) {
-        cx.update(crate::ui::init);
+        cx.update(crate::ui::init)
+            .expect("UI initialization should succeed");
         let records = TestTerminalSessionRecords::default();
         let destination = crate::domain::SshDestination::new("tester@remote".to_owned()).unwrap();
         let session_factory =
@@ -1798,7 +1793,8 @@ mod tests {
         TestTerminalSessionRecords,
         &mut VisualTestContext,
     ) {
-        cx.update(crate::ui::init);
+        cx.update(crate::ui::init)
+            .expect("UI initialization should succeed");
         let records = TestTerminalSessionRecords::default();
         let session_factory: Rc<dyn TerminalSessionFactory> =
             Rc::new(TestTerminalSessionFactory::new(records.clone()));
@@ -1825,7 +1821,8 @@ mod tests {
         TestTerminalSessionRecords,
         &mut VisualTestContext,
     ) {
-        cx.update(crate::ui::init);
+        cx.update(crate::ui::init)
+            .expect("UI initialization should succeed");
         let records = TestTerminalSessionRecords::default();
         let destination = crate::domain::SshDestination::new("tester@remote".to_owned()).unwrap();
         let command_context = Arc::new(
@@ -1894,7 +1891,8 @@ mod tests {
         Rc<RecordingOperatingSystemWindowDragPlatform>,
         &mut VisualTestContext,
     ) {
-        cx.update(crate::ui::init);
+        cx.update(crate::ui::init)
+            .expect("UI initialization should succeed");
         let records = TestTerminalSessionRecords::default();
         let session_factory: Rc<dyn TerminalSessionFactory> =
             Rc::new(TestTerminalSessionFactory::new(records));
@@ -2111,7 +2109,8 @@ mod tests {
     fn remote_window_creation_should_leave_hierarchy_unchanged_when_channel_reservation_fails(
         cx: &mut TestAppContext,
     ) {
-        cx.update(crate::ui::init);
+        cx.update(crate::ui::init)
+            .expect("UI initialization should succeed");
         let records = TestTerminalSessionRecords::default();
         let destination = crate::domain::SshDestination::new("tester@remote".to_owned()).unwrap();
         let command_context = Arc::new(

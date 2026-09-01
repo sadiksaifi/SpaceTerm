@@ -1,13 +1,11 @@
 use gpui::prelude::*;
-use gpui::{Context, Entity, EventEmitter, Render, Window, px, rgba};
-use gpui_symbols::Icon;
+use gpui::{Context, Entity, EventEmitter, Render, Window, px};
 use spaceterm_ui::{
     CommandPalette, CommandPaletteAccessory, CommandPaletteEvent, CommandPaletteHint,
-    CommandPaletteItem, CommandPaletteLifecycleEvent,
+    CommandPaletteItem, CommandPaletteLifecycleEvent, Icon, IconName,
 };
 
-use crate::domain::WorkspaceId;
-use crate::theme::ACTIVE_THEME;
+use crate::domain::{WorkspaceId, WorkspaceKind};
 
 const WORKSPACE_ICON_SIZE: f32 = 14.0;
 
@@ -17,12 +15,38 @@ pub(super) enum WorkspaceSearchEvent {
     WorkspaceSelected(WorkspaceId),
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WorkspaceSearchKind {
+    Scratch,
+    LocalProject,
+    RemoteProject,
+}
+
+impl WorkspaceSearchKind {
+    const fn icon(self) -> IconName {
+        match self {
+            Self::Scratch => IconName::Terminal,
+            Self::LocalProject => IconName::Folder,
+            Self::RemoteProject => IconName::Globe,
+        }
+    }
+}
+
+impl From<&WorkspaceKind> for WorkspaceSearchKind {
+    fn from(kind: &WorkspaceKind) -> Self {
+        match kind {
+            WorkspaceKind::Scratch { .. } => Self::Scratch,
+            WorkspaceKind::LocalProject { .. } => Self::LocalProject,
+            WorkspaceKind::RemoteProject { .. } => Self::RemoteProject,
+        }
+    }
+}
+
 pub(super) struct WorkspaceSearchItem {
     workspace_id: WorkspaceId,
     name: String,
     path: String,
-    local_project: bool,
-    available: bool,
+    kind: WorkspaceSearchKind,
     window_count: usize,
     pane_count: usize,
 }
@@ -32,8 +56,7 @@ impl WorkspaceSearchItem {
         workspace_id: WorkspaceId,
         name: String,
         path: String,
-        local_project: bool,
-        available: bool,
+        kind: &WorkspaceKind,
         window_count: usize,
         pane_count: usize,
     ) -> Self {
@@ -41,31 +64,18 @@ impl WorkspaceSearchItem {
             workspace_id,
             name,
             path,
-            local_project,
-            available,
+            kind: kind.into(),
             window_count,
             pane_count,
         }
     }
 
     fn into_palette_item(self) -> CommandPaletteItem<WorkspaceId> {
-        let icon_color = rgba(if self.available {
-            ACTIVE_THEME.icon.rgba_hex()
-        } else {
-            ACTIVE_THEME.warning.rgba_hex()
-        });
-        let icon_name = if self.local_project {
-            "folder"
-        } else {
-            "terminal"
-        };
+        let icon_name = self.kind.icon();
         CommandPaletteItem::new(self.workspace_id, self.name)
             .description(self.path)
-            .leading_icon(move |_| {
-                Icon::new(icon_name)
-                    .size(px(WORKSPACE_ICON_SIZE))
-                    .color(icon_color)
-                    .into_any_element()
+            .leading_icon(move |foreground| {
+                Icon::new(icon_name, px(WORKSPACE_ICON_SIZE), foreground).into_any_element()
             })
             .trailing(CommandPaletteAccessory::Text(
                 format!("{}W · {}P", self.window_count, self.pane_count).into(),
@@ -301,13 +311,15 @@ mod tests {
                     {
                         harness.reopen_on_selection = false;
                         search.update(cx, |search, cx| {
+                            let kind = WorkspaceKind::Scratch {
+                                directory_authority: crate::domain::DirectoryAuthority::initial(),
+                            };
                             search.open(
                                 vec![WorkspaceSearchItem::new(
                                     WorkspaceId::new(9),
                                     "Reopened".to_owned(),
                                     "/reopened".to_owned(),
-                                    false,
-                                    true,
+                                    &kind,
                                     1,
                                     1,
                                 )],
@@ -344,7 +356,8 @@ mod tests {
         Entity<WorkspaceSearch>,
         &mut VisualTestContext,
     ) {
-        cx.update(crate::ui::init);
+        cx.update(crate::ui::init)
+            .expect("UI initialization should succeed");
         let (harness, cx) = cx.add_window_view(WorkspaceSearchHarness::new);
         let search = harness.read_with(cx, |harness, _| harness.search.clone());
         cx.update(|window, cx| harness.read(cx).prior_focus.focus(window));
@@ -353,15 +366,33 @@ mod tests {
     }
 
     fn item(workspace_id: u64, name: &str, path: &str) -> WorkspaceSearchItem {
+        let kind = WorkspaceKind::Scratch {
+            directory_authority: crate::domain::DirectoryAuthority::initial(),
+        };
         WorkspaceSearchItem::new(
             WorkspaceId::new(workspace_id),
             name.to_owned(),
             path.to_owned(),
-            false,
-            true,
+            &kind,
             workspace_id as usize,
             workspace_id as usize + 1,
         )
+    }
+
+    #[test]
+    fn workspace_kinds_should_use_distinct_semantic_icons() {
+        assert!(matches!(
+            WorkspaceSearchKind::Scratch.icon(),
+            IconName::Terminal
+        ));
+        assert!(matches!(
+            WorkspaceSearchKind::LocalProject.icon(),
+            IconName::Folder
+        ));
+        assert!(matches!(
+            WorkspaceSearchKind::RemoteProject.icon(),
+            IconName::Globe
+        ));
     }
 
     fn open(

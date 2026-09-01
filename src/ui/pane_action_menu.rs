@@ -1,7 +1,6 @@
 use gpui::prelude::*;
 use gpui::{AnyElement, Rgba, px};
-use gpui_symbols::{Icon, SymbolWeight};
-use spaceterm_ui::MenuEntry;
+use spaceterm_ui::{Icon, IconName, MenuEntry};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
@@ -29,33 +28,52 @@ pub(crate) fn pane_action_menu_entries(
 
     vec![
         MenuEntry::action("Split Right", PaneActionMenuCommand::SplitRight)
-            .icon(sf_symbol("rectangle.split.2x1"))
+            .icon(menu_icon(pane_action_icon(
+                PaneActionMenuCommand::SplitRight,
+                zoomed,
+            )))
             .shortcut("⌘D")
             .debug_selector(format!("{debug_prefix}-row-split-right")),
         MenuEntry::action("Split Down", PaneActionMenuCommand::SplitDown)
-            .icon(sf_symbol("rectangle.split.1x2"))
+            .icon(menu_icon(pane_action_icon(
+                PaneActionMenuCommand::SplitDown,
+                zoomed,
+            )))
             .shortcut("⇧⌘D")
             .debug_selector(format!("{debug_prefix}-row-split-down")),
         MenuEntry::action(zoom_label, PaneActionMenuCommand::ToggleZoom)
-            .icon(sf_symbol(zoom_icon))
+            .icon(menu_icon(zoom_icon))
             .shortcut("⇧⌘↩")
             .disabled(!zoom_enabled)
             .debug_selector(format!("{debug_prefix}-row-toggle-zoom")),
         MenuEntry::separator(),
         MenuEntry::action(close_label, PaneActionMenuCommand::Close)
-            .icon(sf_symbol("xmark"))
+            .icon(menu_icon(pane_action_icon(
+                PaneActionMenuCommand::Close,
+                zoomed,
+            )))
             .shortcut(close_shortcut)
             .destructive(true)
             .debug_selector(format!("{debug_prefix}-row-{close_selector}")),
     ]
 }
 
-fn zoom_presentation(zoomed: bool) -> (&'static str, &'static str) {
-    if zoomed {
-        ("arrow.down.right.and.arrow.up.left", "Restore Panes")
-    } else {
-        ("arrow.up.left.and.arrow.down.right", "Zoom Pane")
+fn pane_action_icon(command: PaneActionMenuCommand, zoomed: bool) -> IconName {
+    match command {
+        PaneActionMenuCommand::SplitRight => IconName::Columns2,
+        PaneActionMenuCommand::SplitDown => IconName::Rows2,
+        PaneActionMenuCommand::ToggleZoom if zoomed => IconName::Minimize2,
+        PaneActionMenuCommand::ToggleZoom => IconName::Maximize2,
+        PaneActionMenuCommand::Close => IconName::X,
     }
+}
+
+fn zoom_presentation(zoomed: bool) -> (IconName, &'static str) {
+    let label = if zoomed { "Restore Panes" } else { "Zoom Pane" };
+    (
+        pane_action_icon(PaneActionMenuCommand::ToggleZoom, zoomed),
+        label,
+    )
 }
 
 fn close_presentation(close_target: CloseTarget) -> (&'static str, &'static str, &'static str) {
@@ -65,14 +83,8 @@ fn close_presentation(close_target: CloseTarget) -> (&'static str, &'static str,
     }
 }
 
-pub(crate) fn sf_symbol(name: &'static str) -> impl Fn(Rgba) -> AnyElement {
-    move |foreground| {
-        Icon::new(name)
-            .weight(SymbolWeight::Regular)
-            .size(px(14.0))
-            .color(foreground)
-            .into_any_element()
-    }
+pub(crate) fn menu_icon(name: IconName) -> impl Fn(Rgba) -> AnyElement {
+    move |foreground| Icon::new(name, px(14.0), foreground).into_any_element()
 }
 
 #[cfg(test)]
@@ -119,7 +131,8 @@ mod tests {
         zoom_enabled: bool,
         close_target: CloseTarget,
     ) -> &mut gpui::VisualTestContext {
-        cx.update(crate::ui::init);
+        cx.update(crate::ui::init)
+            .expect("UI initialization should succeed");
         let (_, cx) = cx.add_window_view(move |_, _| MenuTestOwner {
             zoomed,
             zoom_enabled,
@@ -131,11 +144,26 @@ mod tests {
     }
 
     #[test]
-    fn zoom_entry_should_use_restore_label_and_icon_when_zoomed() {
-        assert_eq!(
-            zoom_presentation(true),
-            ("arrow.down.right.and.arrow.up.left", "Restore Panes")
-        );
+    fn split_entries_should_use_directional_layout_icons() {
+        assert!(matches!(
+            pane_action_icon(PaneActionMenuCommand::SplitRight, false),
+            IconName::Columns2
+        ));
+        assert!(matches!(
+            pane_action_icon(PaneActionMenuCommand::SplitDown, false),
+            IconName::Rows2
+        ));
+    }
+
+    #[test]
+    fn zoom_entry_should_use_zoom_and_restore_icons_for_its_state() {
+        let (zoom_icon, zoom_label) = zoom_presentation(false);
+        let (restore_icon, restore_label) = zoom_presentation(true);
+
+        assert!(matches!(zoom_icon, IconName::Maximize2));
+        assert_eq!(zoom_label, "Zoom Pane");
+        assert!(matches!(restore_icon, IconName::Minimize2));
+        assert_eq!(restore_label, "Restore Panes");
     }
 
     #[test]
