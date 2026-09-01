@@ -5,6 +5,7 @@
 
 use std::ffi::{OsStr, OsString};
 use std::io::{self, Read, Write};
+use std::marker::PhantomData;
 use std::os::fd::AsRawFd;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -133,6 +134,76 @@ pub(crate) struct AskPassBroker {
     lifetime: Arc<AskPassBrokerLifetime>,
 }
 
+#[derive(Clone, Default)]
+pub(crate) struct AskPassAttemptObservation {
+    state: Arc<AskPassAttemptObservationState>,
+}
+
+#[derive(Default)]
+struct AskPassAttemptObservationState {
+    prompt_started: AtomicBool,
+    cancelled: AtomicBool,
+}
+
+impl AskPassAttemptObservation {
+    pub(crate) fn prompt_started(&self) -> bool {
+        self.state.prompt_started.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn cancelled(&self) -> bool {
+        self.state.cancelled.load(Ordering::Acquire)
+    }
+}
+
+pub(crate) struct AskPassConnectionAttempt {
+    broker: AskPassBroker,
+    observation: AskPassAttemptObservation,
+}
+
+impl AskPassConnectionAttempt {
+    pub(crate) fn lease(&self) -> AskPassBrokerLease {
+        self.broker.lease()
+    }
+
+    pub(crate) fn observation(&self) -> AskPassAttemptObservation {
+        self.observation.clone()
+    }
+}
+
+pub(crate) struct NativeAskPassBrokerFactory {
+    helper_path: PathBuf,
+    presenter: Arc<dyn BrokerPresenter>,
+    _main_thread: PhantomData<Rc<()>>,
+}
+
+impl NativeAskPassBrokerFactory {
+    pub(crate) fn new(window: &Window, cx: &mut App) -> Result<Self, AskPassBrokerError> {
+        let presenter = native_channel_presenter(window, cx)?;
+        Ok(Self {
+            helper_path: std::env::current_exe()?,
+            presenter,
+            _main_thread: PhantomData,
+        })
+    }
+
+    pub(crate) fn start_attempt(
+        &self,
+        paths: &AppPaths,
+    ) -> Result<AskPassConnectionAttempt, AskPassBrokerError> {
+        let observation = AskPassAttemptObservation::default();
+        let presenter = Arc::new(ObservedBrokerPresenter {
+            inner: Arc::clone(&self.presenter),
+            observation: observation.clone(),
+        });
+        let broker =
+            AskPassBroker::start_with_presenter(paths, self.helper_path.clone(), presenter)?;
+        Ok(AskPassConnectionAttempt {
+            broker,
+            observation,
+        })
+    }
+}
+
 struct AskPassBrokerLifetime {
     environment: Arc<AskPassEnvironment>,
     presenter: Arc<dyn BrokerPresenter>,
@@ -159,48 +230,19 @@ impl AskPassBroker {
         window: &Window,
         cx: &mut App,
     ) -> Result<Self, AskPassBrokerError> {
-        let native_presenter =
-            Rc::new(std::cell::RefCell::new(MacosAskPassPresenter::new(window)?));
-        let (request_sender, request_receiver) = async_channel::bounded(1);
-        let (cancellation_sender, cancellation_receiver) = async_channel::bounded(1);
-        let presenter = Arc::new(ChannelBrokerPresenter {
-            requests: request_sender,
-            cancellations: cancellation_sender,
-        });
-        let request_presenter = native_presenter.clone();
-        cx.spawn(async move |_cx| {
-            while let Ok(job) = request_receiver.recv().await {
-                let (completion_sender, completion_receiver) = async_channel::bounded(1);
-                let presentation = request_presenter.borrow_mut().present(
-                    job.request,
-                    Box::new(move |result| {
-                        let _ = completion_sender.try_send(result);
-                    }),
-                );
-                if presentation.is_err() {
-                    let _ = job.response.send(Err(BrokerPresentationFailure::Rejected));
-                    continue;
-                }
-                let response = completion_receiver
-                    .recv()
-                    .await
-                    .map(map_native_result)
-                    .map_err(|_| BrokerPresentationFailure::Unavailable);
-                let _ = job.response.send(response);
-            }
-        })
-        .detach();
-        let cancellation_presenter = native_presenter;
-        cx.spawn(async move |_cx| {
-            while cancellation_receiver.recv().await.is_ok() {
-                cancellation_presenter.borrow_mut().cancel_active();
-            }
-        })
-        .detach();
-        Self::start_with_presenter(paths, std::env::current_exe()?, presenter)
+        let factory = NativeAskPassBrokerFactory::new(window, cx)?;
+        Ok(factory.start_attempt(paths)?.broker)
     }
 
     fn start_with_presenter(
+        paths: &AppPaths,
+        helper_path: PathBuf,
+        presenter: Arc<dyn BrokerPresenter>,
+    ) -> Result<Self, AskPassBrokerError> {
+        Self::start_with_presenter_and_observer(paths, helper_path, presenter)
+    }
+
+    fn start_with_presenter_and_observer(
         paths: &AppPaths,
         helper_path: PathBuf,
         presenter: Arc<dyn BrokerPresenter>,
@@ -263,6 +305,50 @@ impl AskPassBroker {
     }
 }
 
+fn native_channel_presenter(
+    window: &Window,
+    cx: &mut App,
+) -> Result<Arc<dyn BrokerPresenter>, AskPassBrokerError> {
+    let native_presenter = Rc::new(std::cell::RefCell::new(MacosAskPassPresenter::new(window)?));
+    let (request_sender, request_receiver) = async_channel::bounded(1);
+    let (cancellation_sender, cancellation_receiver) = async_channel::bounded(1);
+    let presenter = Arc::new(ChannelBrokerPresenter {
+        requests: request_sender,
+        cancellations: cancellation_sender,
+    });
+    let request_presenter = native_presenter.clone();
+    cx.spawn(async move |_cx| {
+        while let Ok(job) = request_receiver.recv().await {
+            let (completion_sender, completion_receiver) = async_channel::bounded(1);
+            let presentation = request_presenter.borrow_mut().present(
+                job.request,
+                Box::new(move |result| {
+                    let _ = completion_sender.try_send(result);
+                }),
+            );
+            if presentation.is_err() {
+                let _ = job.response.send(Err(BrokerPresentationFailure::Rejected));
+                continue;
+            }
+            let response = completion_receiver
+                .recv()
+                .await
+                .map(map_native_result)
+                .map_err(|_| BrokerPresentationFailure::Unavailable);
+            let _ = job.response.send(response);
+        }
+    })
+    .detach();
+    let cancellation_presenter = native_presenter;
+    cx.spawn(async move |_cx| {
+        while cancellation_receiver.recv().await.is_ok() {
+            cancellation_presenter.borrow_mut().cancel_active();
+        }
+    })
+    .detach();
+    Ok(presenter)
+}
+
 impl Drop for AskPassBrokerLifetime {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Release);
@@ -319,6 +405,33 @@ trait BrokerPresenter: Send + Sync {
     ) -> Result<BrokerAnswer, BrokerPresentationFailure>;
 
     fn cancel_active(&self);
+}
+
+struct ObservedBrokerPresenter {
+    inner: Arc<dyn BrokerPresenter>,
+    observation: AskPassAttemptObservation,
+}
+
+impl BrokerPresenter for ObservedBrokerPresenter {
+    fn present(
+        &self,
+        request: AskPassRequest,
+        stop: &AtomicBool,
+    ) -> Result<BrokerAnswer, BrokerPresentationFailure> {
+        self.observation
+            .state
+            .prompt_started
+            .store(true, Ordering::Release);
+        self.inner.present(request, stop)
+    }
+
+    fn cancel_active(&self) {
+        self.observation
+            .state
+            .cancelled
+            .store(true, Ordering::Release);
+        self.inner.cancel_active();
+    }
 }
 
 struct PresentationJob {
@@ -1241,6 +1354,31 @@ mod tests {
                 )
         );
         helper.join().unwrap();
+    }
+
+    #[test]
+    fn attempt_observation_should_report_prompt_start_and_cancellation_without_content() {
+        let inner = Arc::new(FakePresenter::new([BrokerAnswer::Cancelled]));
+        let observation = AskPassAttemptObservation::default();
+        let presenter = ObservedBrokerPresenter {
+            inner,
+            observation: observation.clone(),
+        };
+        let stop = AtomicBool::new(false);
+
+        assert!(!observation.prompt_started());
+        assert!(!observation.cancelled());
+        let request =
+            AskPassRequest::new("Password:".to_owned(), AskPassPromptKind::Secret).unwrap();
+        assert!(matches!(
+            presenter.present(request, &stop),
+            Ok(BrokerAnswer::Cancelled)
+        ));
+        assert!(observation.prompt_started());
+        assert!(!observation.cancelled());
+
+        presenter.cancel_active();
+        assert!(observation.cancelled());
     }
 
     #[test]
