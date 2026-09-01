@@ -14,7 +14,9 @@ use super::{
 /// Maximum Unicode scalar count for an Alert message.
 pub const MAX_ALERT_MESSAGE_CHARACTERS: usize = 2048;
 /// Maximum Unicode scalar count for optional Alert detail.
-pub const MAX_ALERT_DETAIL_CHARACTERS: usize = 4096;
+///
+/// This accommodates one bounded 8 KiB diagnostic plus a short caller-owned fixed heading.
+pub const MAX_ALERT_DETAIL_CHARACTERS: usize = 8 * 1024 + 64;
 /// Maximum Unicode scalar count for an Alert accessory's logical name.
 const MAX_ALERT_ACCESSORY_NAME_CHARACTERS: usize = 256;
 /// Maximum Unicode scalar count for a suppression choice label.

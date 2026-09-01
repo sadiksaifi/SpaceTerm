@@ -22,7 +22,8 @@ use crate::ssh::command::{
     RemotePaneShellCommandBuilder, SshCapability, ValidatedRemoteLoginShell,
 };
 use crate::ssh::control_connection::{
-    ControlConnectionState, ControlConnectionTiming, OpenSshControlConnection,
+    ControlConnectionError, ControlConnectionState, ControlConnectionTiming,
+    OpenSshControlConnection,
 };
 use crate::ssh::destination::{SshHostAlias, resolve_destination_query};
 use crate::ssh::host_config::{
@@ -317,10 +318,13 @@ impl RemoteWorkspaceFlowBackend for NativeRemoteWorkspaceFlowBackend {
                         Err(RemoteWorkspaceFlowBackendError::ConnectionFailed)
                     };
                 }
-                Err(_) if observation.cancelled() && !context.is_cancelled() => {
-                    return Err(RemoteWorkspaceFlowBackendError::AuthenticationCancelled);
+                Err(error) => {
+                    return Err(map_control_connection_error(
+                        error,
+                        observation.cancelled(),
+                        context.is_cancelled(),
+                    ));
                 }
-                Err(_) => return Err(RemoteWorkspaceFlowBackendError::ConnectionFailed),
             };
             let utility_command = connection
                 .remote_utility_command()
@@ -391,6 +395,23 @@ fn map_save_error(error: ManagedHostsError) -> ManagedHostFormBackendError {
     match error {
         ManagedHostsError::AliasCollision { .. } => ManagedHostFormBackendError::AliasCollision,
         _ => ManagedHostFormBackendError::SaveFailed,
+    }
+}
+
+fn map_control_connection_error(
+    error: ControlConnectionError,
+    authentication_cancelled: bool,
+    flow_cancelled: bool,
+) -> RemoteWorkspaceFlowBackendError {
+    if authentication_cancelled && !flow_cancelled {
+        return RemoteWorkspaceFlowBackendError::AuthenticationCancelled;
+    }
+    match error {
+        ControlConnectionError::MasterExited {
+            error_output: Some(detail),
+            ..
+        } => RemoteWorkspaceFlowBackendError::ConnectionFailedWithDetail(detail),
+        _ => RemoteWorkspaceFlowBackendError::ConnectionFailed,
     }
 }
 
@@ -1049,5 +1070,51 @@ mod tests {
             map_save_error(ManagedHostsError::NonCanonical),
             ManagedHostFormBackendError::SaveFailed
         );
+    }
+
+    #[test]
+    fn early_master_exit_should_preserve_only_the_sanitized_transient_detail() {
+        let detail = crate::ssh::process::TransientSshErrorOutput::from_untrusted_bytes(
+            b"bad\x1b[31m config\n",
+        )
+        .unwrap();
+
+        let error = map_control_connection_error(
+            ControlConnectionError::MasterExited {
+                exit: crate::ssh::process::ProcessExit::unsuccessful(Some(255)),
+                error_output: Some(detail),
+            },
+            false,
+            false,
+        );
+
+        assert_eq!(error.connection_detail(), Some("bad [31m config"));
+        assert!(!format!("{error:?}").contains("config"));
+        assert!(!error.to_string().contains("config"));
+    }
+
+    #[test]
+    fn authentication_cancel_should_discard_master_detail_before_flow_mapping() {
+        let detail = crate::ssh::process::TransientSshErrorOutput::from_untrusted_bytes(
+            b"Password for private key: correct horse battery staple",
+        )
+        .unwrap();
+
+        let error = map_control_connection_error(
+            ControlConnectionError::MasterExited {
+                exit: crate::ssh::process::ProcessExit::unsuccessful(Some(255)),
+                error_output: Some(detail),
+            },
+            true,
+            false,
+        );
+
+        assert_eq!(
+            error,
+            RemoteWorkspaceFlowBackendError::AuthenticationCancelled
+        );
+        assert_eq!(error.connection_detail(), None);
+        assert!(!format!("{error:?}").contains("Password"));
+        assert!(!error.to_string().contains("correct horse"));
     }
 }

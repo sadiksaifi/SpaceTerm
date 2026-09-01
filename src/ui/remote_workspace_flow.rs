@@ -6,6 +6,7 @@
     )
 )]
 
+use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -17,6 +18,7 @@ use spaceterm_ui::{
     ProgressCancellation, ProgressDialog, ProgressDialogHandle, ProgressDialogOutcome,
     ProgressDialogUpdate, ProgressState,
 };
+use thiserror::Error;
 
 use super::remote_workspace_picker::{
     RemoteWorkspaceAccount, RemoteWorkspacePicker, RemoteWorkspacePickerEvent,
@@ -34,10 +36,12 @@ use crate::ssh::destination::SshHostAlias;
 use crate::ssh::host_config::HostDiscovery;
 use crate::ssh::live_connection::ControlConnectionObserver;
 use crate::ssh::managed_hosts::ManagedSshHost;
+use crate::ssh::process::TransientSshErrorOutput;
 use crate::terminal::RemoteTerminalChannelProvider;
 
 const CONNECTION_PROGRESS_ID: &str = "remote-workspace-connection-progress";
 const CONNECTION_ERROR_ID: &str = "remote-workspace-connection-error";
+const OPENSSH_ERROR_DETAIL_HEADING: &str = "OpenSSH reported:";
 const DELETE_CONFIRMATION_ID: &str = "remote-workspace-delete-host";
 const DELETE_ERROR_ID: &str = "remote-workspace-delete-error";
 
@@ -86,14 +90,70 @@ impl RemoteWorkspaceConnectContext {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Eq, Error, PartialEq)]
 pub(super) enum RemoteWorkspaceFlowBackendError {
+    #[error("the managed SSH host could not be deleted")]
     DeleteFailed,
+    #[error("the SSH host is already in use")]
     HostInUse,
+    #[error("the remote server is incompatible")]
     IncompatibleServer,
+    #[error("the required OpenSSH version is unavailable")]
     OpenSshUnavailable,
+    #[error("SSH authentication was cancelled")]
     AuthenticationCancelled,
+    #[error("the SSH connection failed")]
     ConnectionFailed,
+    #[error("the SSH connection failed")]
+    ConnectionFailedWithDetail(TransientSshErrorOutput),
+}
+
+impl RemoteWorkspaceFlowBackendError {
+    pub(super) fn connection_detail(&self) -> Option<&str> {
+        match self {
+            Self::ConnectionFailedWithDetail(detail) => Some(detail.as_str()),
+            _ => None,
+        }
+    }
+}
+
+impl fmt::Debug for RemoteWorkspaceFlowBackendError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::DeleteFailed => "DeleteFailed",
+            Self::HostInUse => "HostInUse",
+            Self::IncompatibleServer => "IncompatibleServer",
+            Self::OpenSshUnavailable => "OpenSshUnavailable",
+            Self::AuthenticationCancelled => "AuthenticationCancelled",
+            Self::ConnectionFailed => "ConnectionFailed",
+            Self::ConnectionFailedWithDetail(_) => "ConnectionFailedWithDetail(<redacted>)",
+        })
+    }
+}
+
+struct ConnectionErrorContent {
+    message: &'static str,
+    detail: Option<String>,
+}
+
+fn connection_error_content(
+    error: Option<&RemoteWorkspaceFlowBackendError>,
+) -> ConnectionErrorContent {
+    let message = match error {
+        Some(RemoteWorkspaceFlowBackendError::OpenSshUnavailable) => {
+            "SpaceTerm requires OpenSSH 8.2 or newer at /usr/bin/ssh."
+        }
+        Some(RemoteWorkspaceFlowBackendError::IncompatibleServer) => {
+            "This host does not provide the remote capabilities SpaceTerm requires."
+        }
+        _ => "SpaceTerm couldn\u{2019}t establish the remote connection.",
+    };
+    let detail = error.and_then(|error| {
+        error
+            .connection_detail()
+            .map(|detail| format!("{OPENSSH_ERROR_DETAIL_HEADING}\n{detail}"))
+    });
+    ConnectionErrorContent { message, detail }
 }
 
 /// The opaque lifetime owner for one connected SSH control path.
@@ -1009,8 +1069,10 @@ impl RemoteWorkspaceFlow {
                 self.open_remote_picker(window, cx);
             }
             ProgressDialogOutcome::Failed
-                if self.connection_error
-                    == Some(RemoteWorkspaceFlowBackendError::AuthenticationCancelled) =>
+                if matches!(
+                    self.connection_error.as_ref(),
+                    Some(RemoteWorkspaceFlowBackendError::AuthenticationCancelled)
+                ) =>
             {
                 self.connection_error = None;
                 self.connection_cancelled = None;
@@ -1041,22 +1103,15 @@ impl RemoteWorkspaceFlow {
             return;
         }
         self.stage = RemoteWorkspaceFlowStage::ConnectionError;
-        let message = match self.connection_error {
-            Some(RemoteWorkspaceFlowBackendError::OpenSshUnavailable) => {
-                "SpaceTerm requires OpenSSH 8.2 or newer at /usr/bin/ssh."
-            }
-            Some(RemoteWorkspaceFlowBackendError::IncompatibleServer) => {
-                "This host does not provide the remote capabilities SpaceTerm requires."
-            }
-            _ => "SpaceTerm couldn\u{2019}t establish the remote connection.",
-        };
+        let connection_error = self.connection_error.take();
+        let content = connection_error_content(connection_error.as_ref());
         let flow = cx.weak_entity();
         let window_handle = window.window_handle();
         let alert = Alert::new(
             ModalId::new(CONNECTION_ERROR_ID),
             "Remote connection failed",
             "Couldn\u{2019}t Connect",
-            message,
+            content.message,
             vec![
                 ModalAction::new(
                     ConnectionErrorAction::Retry,
@@ -1078,15 +1133,21 @@ impl RemoteWorkspaceFlow {
                     "remote-workspace-error-cancel",
                 ),
             ],
-        )
-        .intent(AlertIntent::Warning)
-        .present(window, cx, move |outcome, cx| {
-            let _ = window_handle.update(cx, |_, window, cx| {
-                let _ = flow.update(cx, |flow, cx| {
-                    flow.finish_connection_error(generation, outcome, window, cx);
+        );
+        let alert = if let Some(detail) = content.detail {
+            alert.detail(detail)
+        } else {
+            alert
+        };
+        let alert = alert
+            .intent(AlertIntent::Warning)
+            .present(window, cx, move |outcome, cx| {
+                let _ = window_handle.update(cx, |_, window, cx| {
+                    let _ = flow.update(cx, |flow, cx| {
+                        flow.finish_connection_error(generation, outcome, window, cx);
+                    });
                 });
             });
-        });
         match alert {
             Ok(handle) => self.error_alert = Some(handle),
             Err(_) => self.cancel_flow(window, cx),
@@ -1117,7 +1178,9 @@ impl RemoteWorkspaceFlow {
                     self.cancel_flow(window, cx);
                     return;
                 };
-                self.start_connection(destination, window, cx);
+                cx.defer_in(window, move |flow, window, cx| {
+                    flow.start_connection(destination, window, cx);
+                });
             }
             ConnectionErrorAction::Back => {
                 self.connection_error = None;
@@ -2224,6 +2287,72 @@ mod tests {
         assert_eq!(
             flow.read_with(cx, |flow, _| flow.stage()),
             RemoteWorkspaceFlowStage::HostSelection
+        );
+    }
+
+    #[test]
+    fn detailed_connection_content_should_use_a_fixed_heading_and_sanitized_output() {
+        let detail = TransientSshErrorOutput::from_untrusted_bytes(
+            b"ssh: connect failed\x1b[31m\ntry another route",
+        )
+        .unwrap();
+        let error = RemoteWorkspaceFlowBackendError::ConnectionFailedWithDetail(detail);
+
+        let content = connection_error_content(Some(&error));
+
+        assert_eq!(
+            content.detail.as_deref(),
+            Some("OpenSSH reported:\nssh: connect failed [31m try another route")
+        );
+        assert_eq!(
+            content.message,
+            "SpaceTerm couldn\u{2019}t establish the remote connection."
+        );
+    }
+
+    #[test]
+    fn generic_connection_content_should_not_retain_a_detail_region() {
+        let content =
+            connection_error_content(Some(&RemoteWorkspaceFlowBackendError::ConnectionFailed));
+
+        assert_eq!(content.detail, None);
+    }
+
+    #[gpui::test]
+    fn retry_should_clear_prior_openssh_detail_and_keep_default_modal_focus(
+        cx: &mut TestAppContext,
+    ) {
+        let detail =
+            TransientSshErrorOutput::from_untrusted_bytes(b"first failure detail").unwrap();
+        let backend = FakeBackend::new([
+            Task::ready(Err(
+                RemoteWorkspaceFlowBackendError::ConnectionFailedWithDetail(detail),
+            )),
+            Task::ready(Err(RemoteWorkspaceFlowBackendError::ConnectionFailed)),
+        ]);
+        let (_, flow, _, cx) = flow_window(Arc::clone(&backend), cx);
+
+        select_destination(&flow, "work", cx);
+        assert!(cx.debug_bounds("modal-alert-detail-2").is_some());
+        assert!(flow.read_with(cx, |flow, _| flow.connection_error.is_none()));
+
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+
+        assert_eq!(backend.state.lock().unwrap().connect_records.len(), 2);
+        assert_eq!(
+            flow.read_with(cx, |flow, _| flow.stage()),
+            RemoteWorkspaceFlowStage::ConnectionError
+        );
+        assert!(
+            cx.debug_bounds("modal-action-remote-workspace-retry")
+                .is_some()
+        );
+        assert!(
+            cx.debug_bounds("modal-alert-detail-4").is_none(),
+            "the second connection Alert retained the predecessor detail"
         );
     }
 

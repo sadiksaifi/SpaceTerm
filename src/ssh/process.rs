@@ -18,16 +18,18 @@ use super::command::SshCommandSpec;
 use crate::platform::macos_askpass_transport::AskPassBrokerLease;
 
 pub(crate) const MAXIMUM_TRANSIENT_SSH_ERROR_BYTES: usize = 8 * 1024;
+const TRANSIENT_SSH_ERROR_TRUNCATION_MARKER: &str = "[earlier OpenSSH output truncated] ";
 
 /// Bounded control-free OpenSSH diagnostics retained only for the active connection failure UI.
+#[derive(Eq, PartialEq)]
 pub(crate) struct TransientSshErrorOutput(String);
 
 impl TransientSshErrorOutput {
     pub(crate) fn from_untrusted_bytes(bytes: &[u8]) -> Option<Self> {
-        let start = bytes
+        let untrusted_start = bytes
             .len()
             .saturating_sub(MAXIMUM_TRANSIENT_SSH_ERROR_BYTES);
-        let sanitized: String = String::from_utf8_lossy(&bytes[start..])
+        let sanitized: String = String::from_utf8_lossy(&bytes[untrusted_start..])
             .chars()
             .map(|character| {
                 if character.is_control() {
@@ -41,17 +43,35 @@ impl TransientSshErrorOutput {
         if sanitized.is_empty() {
             return None;
         }
-        let mut retained_start = sanitized
-            .len()
-            .saturating_sub(MAXIMUM_TRANSIENT_SSH_ERROR_BYTES);
+        let truncated = untrusted_start != 0 || sanitized.len() > MAXIMUM_TRANSIENT_SSH_ERROR_BYTES;
+        let retained_bytes = if truncated {
+            MAXIMUM_TRANSIENT_SSH_ERROR_BYTES
+                .saturating_sub(TRANSIENT_SSH_ERROR_TRUNCATION_MARKER.len())
+        } else {
+            MAXIMUM_TRANSIENT_SSH_ERROR_BYTES
+        };
+        let mut retained_start = sanitized.len().saturating_sub(retained_bytes);
         while !sanitized.is_char_boundary(retained_start) {
             retained_start = retained_start.saturating_add(1);
         }
-        Some(Self(sanitized[retained_start..].to_owned()))
+        let retained = &sanitized[retained_start..];
+        if truncated {
+            Some(Self(format!(
+                "{TRANSIENT_SSH_ERROR_TRUNCATION_MARKER}{retained}"
+            )))
+        } else {
+            Some(Self(retained.to_owned()))
+        }
     }
 
     pub(crate) fn as_str(&self) -> &str {
         &self.0
+    }
+}
+
+impl fmt::Display for TransientSshErrorOutput {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("OpenSSH failure detail (<redacted>)")
     }
 }
 
@@ -561,9 +581,23 @@ mod tests {
         assert!(
             output.as_str().len() <= MAXIMUM_TRANSIENT_SSH_ERROR_BYTES
                 && output.as_str().ends_with("final [31m message")
+                && output
+                    .as_str()
+                    .starts_with(TRANSIENT_SSH_ERROR_TRUNCATION_MARKER)
                 && !output.as_str().chars().any(char::is_control)
                 && !format!("{output:?}").contains("final")
+                && !output.to_string().contains("final")
         );
+    }
+
+    #[test]
+    fn transient_error_output_should_lossily_sanitize_invalid_utf8_without_exposing_formatting() {
+        let output =
+            TransientSshErrorOutput::from_untrusted_bytes(b"bad\xff\xfe\nmessage").unwrap();
+
+        assert_eq!(output.as_str(), "bad\u{fffd}\u{fffd} message");
+        assert_eq!(format!("{output:?}"), "TransientSshErrorOutput(<redacted>)");
+        assert_eq!(output.to_string(), "OpenSSH failure detail (<redacted>)");
     }
 
     #[test]
