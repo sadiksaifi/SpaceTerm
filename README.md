@@ -6,9 +6,11 @@ A native macOS terminal built with Rust, GPUI, `libghostty-vt`, and a macOS PTY.
 
 - macOS
 - Rust
+- Xcode 26 or newer
 - Zig 0.15.2
 - Just
 - ShellCheck
+- `cargo-packager` 0.11.8
 
 Install the Homebrew Zig build required by `libghostty-vt`:
 
@@ -16,6 +18,14 @@ Install the Homebrew Zig build required by `libghostty-vt`:
 brew install just shellcheck zig@0.15
 brew link --force zig@0.15
 ```
+
+Install the pinned Rust packaging tool:
+
+```sh
+just install-packager
+```
+
+Run `just doctor` to verify the Rust, Xcode, packaging, and native build tools.
 
 Run `just` to list the common development, validation, and packaging commands.
 
@@ -38,6 +48,9 @@ Create a release application bundle and installer disk image:
 just package
 ```
 
+Packaging uses pinned `cargo-packager` for application-bundle and DMG construction. Xcode compiles
+the tracked `assets/macos/SpaceTerm.icon` into the layered icon catalog and legacy macOS fallback.
+
 Pass a build number when producing another build of the same Cargo version, for example `just package 2`.
 
 The native-architecture artifacts are written to:
@@ -58,7 +71,10 @@ Verify existing artifacts without rebuilding them:
 just verify-package
 ```
 
-Packaging uses an ad-hoc signature, so it does not require an Apple Developer Program membership. It works for local development and testing, but it cannot provide Developer ID trust or Apple notarization. A downloaded copy may require the explicit **Open Anyway** action in **System Settings → Privacy & Security** before its first launch.
+Packaging uses an ad-hoc signature, so it does not require an Apple Developer Program membership.
+It works for local development and testing, but it cannot provide Developer ID trust or Apple
+notarization. A downloaded copy may require the explicit **Open Anyway** action in **System
+Settings → Privacy & Security** before its first launch.
 
 ## Validate
 

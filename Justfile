@@ -1,5 +1,7 @@
 app_bundle := "dist/SpaceTerm.app"
 disk_image := "dist/SpaceTerm.dmg"
+packager_version := "0.11.8"
+minimum_xcode_major := "26"
 
 # List the available project commands.
 default:
@@ -10,13 +12,21 @@ doctor:
     @cargo --version
     @cargo clippy --version
     @rustfmt --version
+    @version="$(cargo packager --version 2>/dev/null || true)"; test "$version" = "cargo-packager {{ packager_version }}" || { echo "cargo-packager {{ packager_version }} is required; run: just install-packager" >&2; exit 1; }
     @zig version
     @just --version
     @shellcheck --version | head -n 1
+    @version="$(xcodebuild -version | awk 'NR == 1 { print $2 }')"; major="${version%%.*}"; test "$major" -ge "{{ minimum_xcode_major }}" || { echo "Xcode {{ minimum_xcode_major }} or newer is required, got: $version" >&2; exit 1; }
     @xcrun --find codesign
+    @xcrun --find actool
+    @xcrun --find assetutil
     @xcrun --find hdiutil
     @xcrun --find iconutil
     @xcrun --find tic
+
+# Install the pinned macOS application and DMG packager.
+install-packager:
+    cargo install cargo-packager --version "{{ packager_version }}" --locked
 
 # Download locked Rust dependencies.
 fetch:

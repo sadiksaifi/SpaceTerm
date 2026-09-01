@@ -18,6 +18,7 @@ readonly REPO_ROOT
 APP_PATH="$REPO_ROOT/dist/$APP_NAME.app"
 DMG_PATH="$REPO_ROOT/dist/$APP_NAME.dmg"
 REQUIRE_UNIVERSAL=0
+NATIVE_ARCHITECTURE=""
 TEMP_ROOT=""
 DMG_MOUNTED=0
 MOUNT_POINT=""
@@ -128,10 +129,12 @@ verify_app_bundle() {
     local app="$1"
     local label="$2"
     local plist="$app/Contents/Info.plist"
-    local executable_name icon_name executable icon_path package_type bundle_identifier
+    local executable_name icon_file icon_name executable icon_path asset_catalog package_type
+    local bundle_identifier
     local bundle_name display_name marketing_version build_number minimum_macos_version
     local extracted_iconset="$TEMP_ROOT/$label.iconset"
-    local executable_description signature_details
+    local asset_info="$TEMP_ROOT/$label.assets.json"
+    local executable_architectures executable_description signature_details
     local shell_integration="$app/Contents/Resources/shell-integration"
     local terminfo="$app/Contents/Resources/terminfo"
     local terminfo_description
@@ -141,7 +144,8 @@ verify_app_bundle() {
     plutil -lint "$plist" >/dev/null || die "$label Info.plist is invalid: $plist"
 
     executable_name="$(plist_value "$plist" CFBundleExecutable)"
-    icon_name="$(plist_value "$plist" CFBundleIconFile)"
+    icon_file="$(plist_value "$plist" CFBundleIconFile)"
+    icon_name="$(plist_value "$plist" CFBundleIconName)"
     package_type="$(plist_value "$plist" CFBundlePackageType)"
     bundle_identifier="$(plist_value "$plist" CFBundleIdentifier)"
     bundle_name="$(plist_value "$plist" CFBundleName)"
@@ -151,8 +155,10 @@ verify_app_bundle() {
     minimum_macos_version="$(plist_value "$plist" LSMinimumSystemVersion)"
     [[ "$executable_name" == "$APP_NAME" ]] \
         || die "$label CFBundleExecutable must be $APP_NAME, got: $executable_name"
-    [[ "$icon_name" == "$APP_NAME.icns" ]] \
-        || die "$label CFBundleIconFile must be $APP_NAME.icns, got: $icon_name"
+    [[ "$icon_file" == "$APP_NAME" ]] \
+        || die "$label CFBundleIconFile must be $APP_NAME, got: $icon_file"
+    [[ "$icon_name" == "$APP_NAME" ]] \
+        || die "$label CFBundleIconName must be $APP_NAME, got: $icon_name"
     [[ "$package_type" == "APPL" ]] \
         || die "$label CFBundlePackageType must be APPL, got: $package_type"
     [[ "$bundle_identifier" == "$BUNDLE_IDENTIFIER" ]] \
@@ -178,25 +184,38 @@ verify_app_bundle() {
     fi
 
     executable="$app/Contents/MacOS/$executable_name"
-    icon_path="$app/Contents/Resources/$icon_name"
+    icon_path="$app/Contents/Resources/$APP_NAME.icns"
+    asset_catalog="$app/Contents/Resources/Assets.car"
     [[ -x "$executable" ]] || die "$label executable is missing or not executable: $executable"
     executable_description="$(file "$executable")"
     grep -Fq "Mach-O" <<<"$executable_description" \
         || die "$label executable is not a Mach-O binary: $executable"
+    executable_architectures="$(lipo -archs "$executable")" \
+        || die "$label executable architecture could not be read: $executable"
     if (( REQUIRE_UNIVERSAL )); then
         lipo -verify_arch arm64 x86_64 "$executable" \
             || die "$label executable is not universal arm64 + x86_64"
     else
-        [[ -n "$(lipo -archs "$executable")" ]] \
-            || die "$label executable has no readable architecture slice"
+        [[ "$executable_architectures" == "$NATIVE_ARCHITECTURE" ]] \
+            || die "$label executable must contain only $NATIVE_ARCHITECTURE, got: $executable_architectures"
     fi
 
     [[ -f "$icon_path" ]] || die "$label app icon is missing: $icon_path"
+    [[ -f "$asset_catalog" ]] \
+        || die "$label layered icon asset catalog is missing: $asset_catalog"
+    assetutil --info "$asset_catalog" >"$asset_info" \
+        || die "$label layered icon asset catalog is invalid: $asset_catalog"
+    grep -Eq '"Name"[[:space:]]*:[[:space:]]*"SpaceTerm"' "$asset_info" \
+        || die "$label layered icon asset catalog does not contain SpaceTerm"
+    grep -Eq '"AssetType"[[:space:]]*:[[:space:]]*"Icon Image"' "$asset_info" \
+        || die "$label layered icon asset catalog contains no icon image"
+    grep -Eq '"PixelWidth"[[:space:]]*:[[:space:]]*1024' "$asset_info" \
+        || die "$label layered icon asset catalog contains no 1024-pixel representation"
     iconutil --convert iconset --output "$extracted_iconset" "$icon_path" >/dev/null
     [[ -f "$extracted_iconset/icon_16x16.png" ]] \
         || die "$label app icon does not contain a 16x16 representation"
-    [[ -f "$extracted_iconset/icon_512x512@2x.png" ]] \
-        || die "$label app icon does not contain a 1024x1024 representation"
+    [[ -f "$extracted_iconset/icon_128x128@2x.png" ]] \
+        || die "$label app icon does not contain a 256x256 legacy representation"
 
     [[ "$(tr -d '[:space:]' < "$shell_integration/VERSION")" == "1" ]] \
         || die "$label shell integration version is missing or unsupported"
@@ -260,7 +279,13 @@ while (( $# > 0 )); do
 done
 
 [[ "$(uname -s)" == "Darwin" ]] || die "macOS package verification must run on macOS"
+case "$(uname -m)" in
+    arm64|x86_64) NATIVE_ARCHITECTURE="$(uname -m)" ;;
+    *) die "unsupported native macOS architecture: $(uname -m)" ;;
+esac
+readonly NATIVE_ARCHITECTURE
 require_command codesign
+require_command assetutil
 require_command file
 require_command hdiutil
 require_command iconutil

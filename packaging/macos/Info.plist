@@ -9,7 +9,9 @@
 	<key>CFBundleExecutable</key>
 	<string>SpaceTerm</string>
 	<key>CFBundleIconFile</key>
-	<string>SpaceTerm.icns</string>
+	<string>SpaceTerm</string>
+	<key>CFBundleIconName</key>
+	<string>SpaceTerm</string>
 	<key>CFBundleIdentifier</key>
 	<string>io.github.sadiksaifi.spaceterm</string>
 	<key>CFBundleInfoDictionaryVersion</key>
@@ -26,6 +28,8 @@
 	<string>public.app-category.developer-tools</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>11.0</string>
+	<key>LSRequiresCarbon</key>
+	<false/>
 	<key>NSHighResolutionCapable</key>
 	<true/>
 	<key>NSPrincipalClass</key>
