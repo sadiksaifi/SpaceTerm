@@ -4,7 +4,7 @@ use spaceterm_ui::{
     Alert, AlertIntent, AlertOutcome, Dialog, DialogCloseDecision, DialogCompletion,
     DialogInitialFocus, DialogOutcome, DialogSize, ModalAction, ModalActionRole, ModalId,
     ModalLifecycleEvent, ModalPresentationHandle, TextInput, TextInputContentMode,
-    TextInputEscapeBehavior, TextInputReturnBehavior,
+    TextInputEscapeBehavior, TextInputReturnBehavior, TextInputVariant,
 };
 
 use crate::platform::ssh_askpass::{
@@ -211,7 +211,7 @@ impl GpuiAskPassPresenter {
             ],
             DialogInitialFocus::Body(initial_focus),
         )
-        .size(DialogSize::Regular)
+        .size(DialogSize::Compact)
         .body(body.clone())
         .present_with_lifecycle(
             window,
@@ -359,6 +359,7 @@ impl AskPassSecretBody {
                 window,
                 cx,
             )
+            .variant(TextInputVariant::Bare)
             .content_mode(TextInputContentMode::Obscured)
             .input_length_limit(Some(MAX_SECRET_BYTES))
             .return_behavior(TextInputReturnBehavior::Propagate)
@@ -416,7 +417,8 @@ impl AskPassSecretBody {
 }
 
 impl Render for AskPassSecretBody {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let input_focus = self.input.read(cx).focus_handle();
         div()
             .flex()
             .flex_col()
@@ -441,9 +443,26 @@ impl Render for AskPassSecretBody {
                     )
                     .child(
                         div()
+                            .id("ssh-askpass-secret-input-frame")
                             .debug_selector(|| "ssh-askpass-secret-input-frame".to_owned())
                             .h(px(SECRET_INPUT_HEIGHT))
+                            .w_full()
+                            .min_w_0()
                             .flex_shrink_0()
+                            .flex()
+                            .items_center()
+                            .overflow_hidden()
+                            .px(px(8.0))
+                            .rounded(px(4.0))
+                            .border(px(1.0))
+                            .border_color(gpui_color(ACTIVE_THEME.border))
+                            .bg(gpui_color(ACTIVE_THEME.element_background))
+                            .text_size(px(13.0))
+                            .text_color(gpui_color(ACTIVE_THEME.text))
+                            .on_click(move |_, window, cx| {
+                                input_focus.focus(window);
+                                cx.stop_propagation();
+                            })
                             .child(self.input.clone()),
                     )
                     .when(self.required_error, |field| {
@@ -627,7 +646,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn secret_input_keeps_compact_single_line_height(cx: &mut TestAppContext) {
+    fn secret_input_uses_compact_single_line_frame(cx: &mut TestAppContext) {
         let (_, presenter, results, cx) = askpass_window(cx);
         present(
             1,
@@ -640,7 +659,7 @@ mod tests {
         let bounds = cx
             .debug_bounds("ssh-askpass-secret-input-frame")
             .expect("secret input frame should render");
-        assert_eq!(bounds.size.height, px(SECRET_INPUT_HEIGHT));
+        assert_eq!(bounds.size, gpui::size(px(326.0), px(SECRET_INPUT_HEIGHT)));
     }
 
     #[gpui::test]
