@@ -629,6 +629,20 @@ impl RemoteWorkspaceFlow {
         self.cancel_flow(window, cx);
     }
 
+    #[cfg(test)]
+    pub(super) fn dismiss_remote_picker_for_test(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.reduce_remote_picker_event(
+            self.action_generation,
+            &RemoteWorkspacePickerEvent::Dismissed,
+            window,
+            cx,
+        );
+    }
+
     pub(super) fn open(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
         self.open_with_replacement(None, window, cx)
     }

@@ -1398,6 +1398,7 @@ impl WorkspaceManager {
             }
             RemoteWorkspaceFlowEvent::Cancelled => {
                 self.remote_workspace_activation_task.take();
+                self.remote_workspace_flow = None;
                 self.sync_terminal_focus_blocker(window, cx);
                 cx.notify();
             }
@@ -5601,13 +5602,16 @@ mod tests {
 
         open_new_workspace_panel(cx);
         click("new-workspace-source-remote-project", cx);
+        let flow = manager.read_with(cx, |manager, _| {
+            manager
+                .remote_workspace_flow
+                .as_ref()
+                .expect("Remote Project must create its flow")
+                .clone()
+        });
 
         let opened = cx.update(|window, cx| {
             let manager = manager.read(cx);
-            let flow = manager
-                .remote_workspace_flow
-                .as_ref()
-                .expect("Remote Project must create its flow");
             (
                 manager.new_workspace_panel.read(cx).is_open(),
                 flow.read(cx).stage(),
@@ -5630,12 +5634,7 @@ mod tests {
         let escaped = cx.update(|window, cx| {
             let manager = manager.read(cx);
             (
-                manager
-                    .remote_workspace_flow
-                    .as_ref()
-                    .expect("cancelled flow remains reusable")
-                    .read(cx)
-                    .stage(),
+                manager.remote_workspace_flow.is_none(),
                 manager.terminal_focus_blocker(window, cx),
                 manager
                     .workspaces
@@ -5645,21 +5644,69 @@ mod tests {
                     .focused_terminal_is_focused(window, cx),
             )
         });
-        assert_eq!(escaped, (RemoteWorkspaceFlowStage::Cancelled, None, true));
+        assert_eq!(escaped, (true, None, true));
 
         open_new_workspace_panel(cx);
         click("new-workspace-source-remote-project", cx);
+        let reopened = manager.read_with(cx, |manager, _| {
+            manager
+                .remote_workspace_flow
+                .as_ref()
+                .expect("Remote Project should create a fresh flow")
+                .clone()
+        });
+        assert_ne!(reopened, flow);
         assert_eq!(
-            manager.read_with(cx, |manager, cx| {
-                manager
-                    .remote_workspace_flow
-                    .as_ref()
-                    .expect("cancelled flow should reopen")
-                    .read(cx)
-                    .stage()
-            }),
+            reopened.read_with(cx, |flow, _| flow.stage()),
             RemoteWorkspaceFlowStage::HostSelection
         );
+    }
+
+    #[gpui::test]
+    fn dismissed_remote_picker_should_release_flow_and_reenable_new_workspace(
+        cx: &mut TestAppContext,
+    ) {
+        let (manager, _, cx) = workspace_manager(cx);
+        let flow = open_remote_workspace_flow(&manager, cx);
+        let (completion, closes, _, _) =
+            remote_completion("work", "~/src", "/home/tester/src", false);
+        emit_remote_workspace_completion(&flow, completion, cx);
+        assert_eq!(
+            flow.read_with(cx, |flow, _| flow.stage()),
+            RemoteWorkspaceFlowStage::DirectorySelection
+        );
+
+        cx.update(|window, cx| {
+            flow.update(cx, |flow, cx| {
+                flow.dismiss_remote_picker_for_test(window, cx)
+            });
+        });
+        cx.run_until_parked();
+
+        assert_eq!(closes.load(Ordering::Acquire), 1);
+        assert_eq!(
+            flow.read_with(cx, |flow, _| flow.stage()),
+            RemoteWorkspaceFlowStage::Cancelled
+        );
+        assert!(manager.read_with(cx, |manager, _| manager.remote_workspace_flow.is_none()));
+        assert_eq!(
+            cx.update(|window, cx| manager.read(cx).terminal_focus_blocker(window, cx)),
+            None
+        );
+
+        open_new_workspace_panel(cx);
+        assert!(manager.read_with(cx, |manager, cx| {
+            manager.new_workspace_panel.read(cx).is_open()
+        }));
+        click("new-workspace-source-remote-project", cx);
+        let reopened = manager.read_with(cx, |manager, _| {
+            manager
+                .remote_workspace_flow
+                .as_ref()
+                .expect("Remote Project should create a fresh flow")
+                .clone()
+        });
+        assert_ne!(reopened, flow);
     }
 
     #[gpui::test]
@@ -6862,7 +6909,7 @@ mod tests {
         let (current, current_closes, current_preparations, _) =
             remote_completion("work", "~/current", "/home/tester/current", true);
         let current_flow = open_remote_workspace_flow(&manager, cx);
-        assert_eq!(current_flow, first_flow);
+        assert_ne!(current_flow, first_flow);
         emit_remote_workspace_completion(&current_flow, current, cx);
         assert_eq!(
             manager.read_with(cx, |manager, _| manager.workspaces.len()),
