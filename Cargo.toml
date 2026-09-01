@@ -3,6 +3,30 @@ name = "spaceterm"
 version = "0.0.0"
 edition = "2024"
 
+[package.metadata.packager]
+product-name = "SpaceTerm"
+identifier = "io.github.sadiksaifi.spaceterm"
+formats = ["app", "dmg"]
+out-dir = "dist"
+category = "DeveloperTool"
+binaries = [{ path = "SpaceTerm", main = true }]
+icons = ["target/package-macos/SpaceTerm.icns"]
+resources = [
+    { src = "target/package-macos/Assets.car", target = "Assets.car" },
+    { src = "target/package-macos/terminfo", target = "terminfo" },
+    { src = "assets/shell-integration", target = "shell-integration" },
+]
+
+[package.metadata.packager.macos]
+minimum-system-version = "11.0"
+signing-identity = "-"
+info-plist-path = "target/package-macos/Info.plist"
+
+[package.metadata.packager.dmg]
+window-size = { width = 600, height = 400 }
+app-position = { x = 180, y = 170 }
+application-folder-position = { x = 480, y = 170 }
+
 [workspace]
 members = ["crates/spaceterm-ui"]
 resolver = "2"

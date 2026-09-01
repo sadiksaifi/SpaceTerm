@@ -20,6 +20,10 @@ tmux, but SpaceTerm is not a tmux client and has no tmux-style server/client mod
 - Ship the SpaceTerm application on macOS and keep native platform integration macOS-specific.
   Reusable `spaceterm-ui` controls render entirely through GPUI and remain platform-neutral for
   possible future Linux and Windows support; do not create speculative platform adapters.
+- Package the application and installer disk image with pinned `cargo-packager` 0.11.8. The
+  tracked `SpaceTerm.icon` is the only application-icon source and requires Xcode 26 or newer to
+  compile into a layered `Assets.car` plus the legacy `SpaceTerm.icns` fallback. Local packages
+  use a free ad-hoc signature and are neither Developer ID signed nor notarized.
 - Treat Vague Pro as the only application and terminal theme and as the source of all brand colors.
   Reuse the tokens in `src/theme.rs`; never hardcode or redefine colors in UI, terminal, platform,
   or domain code.
