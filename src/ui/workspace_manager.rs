@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use super::native_remote_workspace_flow_backend::NativeRemoteWorkspaceFlowBackendFactory;
 use super::new_workspace_panel::{NewWorkspacePanel, NewWorkspacePanelEvent, NewWorkspaceSource};
 use super::remote_workspace_flow::{
-    RemoteWorkspaceConnectContext, RemoteWorkspaceConnectedSession,
+    RemoteWorkspaceAliasPin, RemoteWorkspaceConnectContext, RemoteWorkspaceConnectedSession,
     RemoteWorkspaceConnectionProgress, RemoteWorkspaceFlow, RemoteWorkspaceFlowBackend,
     RemoteWorkspaceFlowBackendError, RemoteWorkspaceFlowBackendFactory,
     RemoteWorkspaceFlowCompletion, RemoteWorkspaceFlowCompletionHandle, RemoteWorkspaceFlowEvent,
@@ -131,6 +131,7 @@ struct RemoteWorkspaceRuntime {
     generation: u64,
     session: Option<RemoteWorkspaceConnectedSession>,
     lifecycle: Option<ControlConnectionObserver>,
+    alias_pin: Option<RemoteWorkspaceAliasPin>,
 }
 
 impl RemoteWorkspaceRuntime {
@@ -138,17 +139,20 @@ impl RemoteWorkspaceRuntime {
         generation: u64,
         session: RemoteWorkspaceConnectedSession,
         lifecycle: ControlConnectionObserver,
+        alias_pin: Option<RemoteWorkspaceAliasPin>,
     ) -> Self {
         Self {
             generation,
             session: Some(session),
             lifecycle: Some(lifecycle),
+            alias_pin,
         }
     }
 
     fn close(&mut self) {
         self.lifecycle.take();
         self.session.take();
+        self.alias_pin.take();
     }
 }
 
@@ -1531,6 +1535,10 @@ impl WorkspaceManager {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Result<(), RemoteWorkspaceFlowCompletion> {
+        let alias_pin = match completion.acquire_workspace_alias_pin() {
+            Ok(alias_pin) => alias_pin,
+            Err(_) => return Err(completion),
+        };
         let key = RemoteWorkspaceKey::new(
             completion.destination().clone(),
             completion.physical_directory().clone(),
@@ -1577,7 +1585,7 @@ impl WorkspaceManager {
         let (session, _, _, _, _, _, lifecycle) = completion.into_parts();
         let replaced = self.remote_workspace_runtimes.insert(
             workspace_id,
-            RemoteWorkspaceRuntime::new(1, session, lifecycle),
+            RemoteWorkspaceRuntime::new(1, session, lifecycle, alias_pin),
         );
         debug_assert!(
             replaced.is_none(),
@@ -2011,9 +2019,18 @@ impl WorkspaceManager {
                     cx.notify();
                     return;
                 }
+                let alias_pin = self
+                    .remote_workspace_runtimes
+                    .get_mut(&workspace_id)
+                    .and_then(|runtime| runtime.alias_pin.take());
                 self.remote_workspace_runtimes.insert(
                     workspace_id,
-                    RemoteWorkspaceRuntime::new(generation, prepared.session, prepared.lifecycle),
+                    RemoteWorkspaceRuntime::new(
+                        generation,
+                        prepared.session,
+                        prepared.lifecycle,
+                        alias_pin,
+                    ),
                 );
                 let reduction = self.workspaces.reduce_remote_connection_state(
                     workspace_id,
@@ -3994,8 +4011,8 @@ mod tests {
     };
     use crate::terminal::{SessionEvent, SessionExit};
     use crate::ui::remote_workspace_flow::{
-        RemoteWorkspaceConnectContext, RemoteWorkspaceFlowBackendError, RemoteWorkspaceFlowStage,
-        RemoteWorkspaceSessionOwner,
+        RemoteWorkspaceAliasPin, RemoteWorkspaceAliasPinError, RemoteWorkspaceConnectContext,
+        RemoteWorkspaceFlowBackendError, RemoteWorkspaceFlowStage, RemoteWorkspaceSessionOwner,
     };
     use crate::ui::remote_workspace_picker::{
         RemoteWorkspaceAccount, RemoteWorkspaceDirectoryListing, RemoteWorkspaceExactPathState,
@@ -4261,9 +4278,27 @@ mod tests {
         _lifecycle_senders:
             Vec<async_channel::Sender<crate::ssh::live_connection::ControlConnectionTerminalState>>,
         alias: Option<crate::ssh::alias_usage::ActiveSshAliasLease>,
+        alias_pin_error: bool,
     }
 
     impl RemoteWorkspaceSessionOwner for TestRemoteSessionOwner {
+        fn acquire_workspace_alias_pin(
+            &self,
+        ) -> Result<Option<RemoteWorkspaceAliasPin>, RemoteWorkspaceAliasPinError> {
+            if self.alias_pin_error {
+                return Err(RemoteWorkspaceAliasPinError);
+            }
+            self.alias
+                .as_ref()
+                .map(|alias| {
+                    alias
+                        .try_duplicate()
+                        .map(RemoteWorkspaceAliasPin::new)
+                        .map_err(|_| RemoteWorkspaceAliasPinError)
+                })
+                .transpose()
+        }
+
         fn bind_terminal_channels_for_identity(
             &self,
             _: &RemoteWorkspaceDirectory,
@@ -4354,6 +4389,7 @@ mod tests {
                     session_lifecycle_sender,
                 ],
                 alias: None,
+                alias_pin_error: false,
             }),
             Arc::new(TestRemoteProvider::failing()),
         );
@@ -4382,6 +4418,19 @@ mod tests {
         crate::ssh::alias_usage::ActiveSshAliasRegistry,
         SshHostAlias,
         Arc<AtomicUsize>,
+        async_channel::Sender<crate::ssh::live_connection::ControlConnectionTerminalState>,
+    ) {
+        remote_completion_with_active_alias_pin_failure(false)
+    }
+
+    fn remote_completion_with_active_alias_pin_failure(
+        alias_pin_error: bool,
+    ) -> (
+        RemoteWorkspaceFlowCompletion,
+        crate::ssh::alias_usage::ActiveSshAliasRegistry,
+        SshHostAlias,
+        Arc<AtomicUsize>,
+        async_channel::Sender<crate::ssh::live_connection::ControlConnectionTerminalState>,
     ) {
         let registry = crate::ssh::alias_usage::ActiveSshAliasRegistry::default();
         let alias = SshHostAlias::new("work".to_owned()).unwrap();
@@ -4411,8 +4460,12 @@ mod tests {
                 closes: Arc::clone(&closes),
                 channels: Arc::clone(&channels),
                 lifecycle: Some(session_lifecycle),
-                _lifecycle_senders: vec![runtime_lifecycle_sender, session_lifecycle_sender],
+                _lifecycle_senders: vec![
+                    runtime_lifecycle_sender.clone(),
+                    session_lifecycle_sender,
+                ],
                 alias: Some(lease),
+                alias_pin_error,
             }),
             Arc::new(TestRemoteProvider::failing()),
         );
@@ -4431,6 +4484,7 @@ mod tests {
             registry,
             alias,
             closes,
+            runtime_lifecycle_sender,
         )
     }
 
@@ -4540,6 +4594,7 @@ mod tests {
                     lifecycle: Some(lifecycle),
                     _lifecycle_senders: vec![lifecycle_sender.clone()],
                     alias: None,
+                    alias_pin_error: false,
                 }),
                 provider,
             ),
@@ -5533,7 +5588,7 @@ mod tests {
 
         emit_remote_workspace_completion(&flow, completion, cx);
 
-        let (workspace_id, destination, directory, physical, runtime_count) =
+        let (workspace_id, destination, directory, physical, runtime_count, has_alias_pin) =
             manager.read_with(cx, |manager, _| {
                 let workspace = manager.workspaces.active_workspace();
                 (
@@ -5556,6 +5611,10 @@ mod tests {
                         .as_str()
                         .to_owned(),
                     manager.remote_workspace_runtimes.len(),
+                    manager
+                        .remote_workspace_runtimes
+                        .get(&workspace.id())
+                        .is_some_and(|runtime| runtime.alias_pin.is_some()),
                 )
             });
         let starts = records.starts();
@@ -5568,6 +5627,10 @@ mod tests {
             ("deploy@work", "~/src", "/home/tester/src")
         );
         assert_eq!(runtime_count, 1);
+        assert!(
+            !has_alias_pin,
+            "a raw SSH destination must not own an alias pin"
+        );
         assert_eq!(revalidations.load(Ordering::Acquire), 1);
         assert_eq!(preparations.load(Ordering::Acquire), 1);
         assert_eq!(closes.load(Ordering::Acquire), 0);
@@ -6472,7 +6535,7 @@ mod tests {
         cx: &mut TestAppContext,
     ) {
         let (manager, _, cx) = workspace_manager(cx);
-        let (completion, aliases, alias, closes) = remote_completion_with_active_alias();
+        let (completion, aliases, alias, closes, _) = remote_completion_with_active_alias();
         assert!(aliases.is_active(&alias));
 
         let flow = open_remote_workspace_flow(&manager, cx);
@@ -6481,6 +6544,12 @@ mod tests {
             manager.read_with(cx, |manager, _| manager.workspaces.active_workspace_id());
         assert!(aliases.is_active(&alias));
         assert_eq!(closes.load(Ordering::Acquire), 0);
+        assert!(manager.read_with(cx, |manager, _| {
+            manager
+                .remote_workspace_runtimes
+                .get(&workspace_id)
+                .is_some_and(|runtime| runtime.alias_pin.is_some())
+        }));
 
         cx.update(|window, cx| {
             manager.update(cx, |manager, cx| {
@@ -6491,6 +6560,97 @@ mod tests {
 
         assert_eq!(closes.load(Ordering::Acquire), 1);
         assert!(!aliases.is_active(&alias));
+    }
+
+    #[gpui::test]
+    fn managed_alias_should_remain_immutable_after_master_loss_and_during_reconnect(
+        cx: &mut TestAppContext,
+    ) {
+        let (connection_sender, connection_receiver) = async_channel::bounded(1);
+        let connection = cx.update(|cx| {
+            cx.background_executor()
+                .spawn(async move { connection_receiver.recv().await.unwrap() })
+        });
+        let backend = TestRemoteWorkspaceFlowBackend::with_connections([connection]);
+        let (manager, _, cx) = workspace_manager_with_remote_backend(backend, cx);
+        let (completion, aliases, alias, closes, lifecycle) = remote_completion_with_active_alias();
+        let flow = open_remote_workspace_flow(&manager, cx);
+        emit_remote_workspace_completion(&flow, completion, cx);
+        let workspace_id =
+            manager.read_with(cx, |manager, _| manager.workspaces.active_workspace_id());
+
+        assert!(aliases.begin_mutation([alias.clone()]).is_err());
+        lifecycle
+            .try_send(ControlConnectionTerminalState::Closed)
+            .unwrap();
+        cx.run_until_parked();
+
+        assert_eq!(closes.load(Ordering::Acquire), 1);
+        assert!(aliases.is_active(&alias));
+        assert!(aliases.begin_mutation([alias.clone()]).is_err());
+
+        cx.update(|window, cx| {
+            manager.update(cx, |manager, cx| {
+                manager.start_remote_workspace_reconnect(workspace_id, window, cx)
+            });
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            manager.read_with(cx, |manager, _| manager
+                .workspaces
+                .workspace(workspace_id)
+                .unwrap()
+                .remote_connection_state()),
+            Some(RemoteConnectionState::reconnecting(2))
+        );
+        assert!(aliases.begin_mutation([alias.clone()]).is_err());
+
+        cx.update(|window, cx| {
+            manager.update(cx, |manager, cx| {
+                manager.close_workspace(workspace_id, window, cx)
+            });
+        });
+        cx.run_until_parked();
+
+        assert!(connection_sender.is_closed());
+        assert!(!aliases.is_active(&alias));
+        assert!(aliases.begin_mutation([alias]).is_ok());
+    }
+
+    #[gpui::test]
+    fn failed_workspace_alias_pin_should_return_activation_without_leaking_authority(
+        cx: &mut TestAppContext,
+    ) {
+        let (manager, _, cx) = workspace_manager(cx);
+        let (completion, aliases, alias, closes, _) =
+            remote_completion_with_active_alias_pin_failure(true);
+        let flow = open_remote_workspace_flow(&manager, cx);
+
+        emit_remote_workspace_completion(&flow, completion, cx);
+
+        assert_eq!(
+            manager.read_with(cx, |manager, _| (
+                manager.workspaces.len(),
+                manager.remote_workspace_runtimes.len(),
+                manager.remote_workspace_flow.is_some(),
+            )),
+            (1, 0, true)
+        );
+        assert_eq!(closes.load(Ordering::Acquire), 0);
+        assert!(aliases.is_active(&alias));
+        assert_eq!(
+            flow.read_with(cx, |flow, _| flow.stage()),
+            RemoteWorkspaceFlowStage::DirectorySelection
+        );
+
+        cx.update(|window, cx| {
+            flow.update(cx, |flow, cx| flow.cancel_for_test(window, cx));
+        });
+        cx.run_until_parked();
+
+        assert_eq!(closes.load(Ordering::Acquire), 1);
+        assert!(!aliases.is_active(&alias));
+        assert!(aliases.begin_mutation([alias]).is_ok());
     }
 
     #[gpui::test]
