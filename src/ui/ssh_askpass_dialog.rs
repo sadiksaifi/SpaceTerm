@@ -659,7 +659,7 @@ mod tests {
         let bounds = cx
             .debug_bounds("ssh-askpass-secret-input-frame")
             .expect("secret input frame should render");
-        assert_eq!(bounds.size, gpui::size(px(366.0), px(SECRET_INPUT_HEIGHT)));
+        assert_eq!(bounds.size, gpui::size(px(406.0), px(SECRET_INPUT_HEIGHT)));
     }
 
     #[gpui::test]
