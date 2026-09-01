@@ -19,7 +19,10 @@ use gpui::{App, Window};
 use thiserror::Error;
 use zeroize::Zeroizing;
 
-use super::app_paths::{AppPaths, AppPathsError, RegisteredRuntimeSocket, RuntimeOwner};
+use super::app_paths::{
+    ASKPASS_RUNTIME_OWNER_KIND, ASKPASS_RUNTIME_SOCKET_NAME, AppPaths, AppPathsError,
+    RegisteredRuntimeSocket, RuntimeOwner,
+};
 use super::macos_askpass::{
     AskPassPresentationError, AskPassPresenter, AskPassPromptKind, AskPassRequest,
     AskPassResponseError, AskPassResult, MacosAskPassPresenter,
@@ -32,7 +35,6 @@ const MAX_PROMPT_BYTES: usize = 4 * 1024;
 const MAX_SECRET_BYTES: usize = 16 * 1024;
 const MAX_REQUEST_FRAME_BYTES: usize = CAPABILITY_TEXT_BYTES + MAX_PROMPT_BYTES + 8;
 const MAX_REPLY_FRAME_BYTES: usize = MAX_SECRET_BYTES + 1;
-const SOCKET_NAME: &str = "broker.sock";
 const HELPER_MODE_ENV: &str = "SPACETERM_SSH_ASKPASS_MODE";
 const SOCKET_ENV: &str = "SPACETERM_SSH_ASKPASS_SOCKET";
 const CAPABILITY_ENV: &str = "SPACETERM_SSH_ASKPASS_CAPABILITY";
@@ -280,10 +282,10 @@ impl AskPassBroker {
         if !helper_path.is_absolute() {
             return Err(AskPassBrokerError::HelperPathNotAbsolute);
         }
-        let runtime_owner = paths.create_runtime_owner("askpass")?;
-        let socket_path = runtime_owner.socket_path(SOCKET_NAME)?;
+        let runtime_owner = paths.create_runtime_owner(ASKPASS_RUNTIME_OWNER_KIND)?;
+        let socket_path = runtime_owner.socket_path(ASKPASS_RUNTIME_SOCKET_NAME)?;
         let listener = UnixListener::bind(&socket_path).map_err(AskPassBrokerError::Bind)?;
-        let socket = match runtime_owner.register_socket(SOCKET_NAME) {
+        let socket = match runtime_owner.register_socket(ASKPASS_RUNTIME_SOCKET_NAME) {
             Ok(socket) => socket,
             Err(error) => {
                 drop(listener);

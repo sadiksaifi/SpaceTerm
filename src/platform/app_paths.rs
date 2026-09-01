@@ -14,6 +14,10 @@ const MACOS_UNIX_SOCKET_PATH_BYTES: usize = 103;
 const PRIVATE_DIRECTORY_MODE: u32 = 0o700;
 const PRIVATE_ARTIFACT_MODE: u32 = 0o600;
 const RUNTIME_OWNER_CREATION_ATTEMPTS: usize = 128;
+pub(crate) const ASKPASS_RUNTIME_OWNER_KIND: &str = "a";
+pub(crate) const ASKPASS_RUNTIME_SOCKET_NAME: &str = "a";
+pub(crate) const CONTROL_RUNTIME_OWNER_KIND: &str = "c";
+pub(crate) const CONTROL_RUNTIME_SOCKET_NAME: &str = "c";
 const HOME_ENVIRONMENT_VARIABLE: &str = "HOME";
 const XDG_CONFIG_HOME_ENVIRONMENT_VARIABLE: &str = "XDG_CONFIG_HOME";
 const XDG_DATA_HOME_ENVIRONMENT_VARIABLE: &str = "XDG_DATA_HOME";
@@ -179,7 +183,7 @@ impl AppPaths {
         let runtime = ensure_private_directory(&self.runtime)?;
         for _ in 0..RUNTIME_OWNER_CREATION_ATTEMPTS {
             let sequence = NEXT_RUNTIME_OWNER.fetch_add(1, Ordering::Relaxed);
-            let name = format!("{kind}-{}-{sequence:016x}", std::process::id());
+            let name = runtime_owner_name(kind, std::process::id(), sequence);
             let path = self.runtime.join(&name);
             match create_directory_at(&runtime.file, OsStr::new(&name)) {
                 Ok(()) => {
@@ -210,6 +214,41 @@ impl AppPaths {
         Err(AppPathsError::RuntimeOwnerExhausted)
     }
 
+    #[cfg(test)]
+    fn create_runtime_owner_with_identity(
+        &self,
+        kind: &str,
+        process_id: u32,
+        sequence: u64,
+    ) -> Result<RuntimeOwner, AppPathsError> {
+        validate_child_name(kind)?;
+        let runtime = ensure_private_directory(&self.runtime)?;
+        let name = runtime_owner_name(kind, process_id, sequence);
+        let path = self.runtime.join(&name);
+        create_directory_at(&runtime.file, OsStr::new(&name)).map_err(|source| {
+            AppPathsError::CreateDirectory {
+                path: path.clone(),
+                source,
+            }
+        })?;
+        let directory = match open_private_child_directory(&runtime.file, OsStr::new(&name), &path)
+        {
+            Ok(directory) => directory,
+            Err(error) => {
+                let _ = remove_directory_at(&runtime.file, OsStr::new(&name));
+                return Err(error);
+            }
+        };
+        Ok(RuntimeOwner {
+            runtime,
+            path,
+            name: OsString::from(name),
+            directory,
+            artifacts: RefCell::new(Vec::new()),
+            closed: false,
+        })
+    }
+
     fn root(&self, root: AppPathRoot) -> &Path {
         match root {
             AppPathRoot::Config => &self.config,
@@ -218,6 +257,33 @@ impl AppPaths {
             AppPathRoot::Cache => &self.cache,
         }
     }
+}
+
+fn runtime_owner_name(kind: &str, process_id: u32, sequence: u64) -> String {
+    format!(
+        "{kind}-{}-{}",
+        encode_base36(u64::from(process_id)),
+        encode_base36(sequence)
+    )
+}
+
+fn encode_base36(mut value: u64) -> String {
+    const DIGITS: &[u8; 36] = b"0123456789abcdefghijklmnopqrstuvwxyz";
+    let mut reversed = [0_u8; 13];
+    let mut length = 0;
+    loop {
+        reversed[length] = DIGITS[(value % 36) as usize];
+        length += 1;
+        value /= 36;
+        if value == 0 {
+            break;
+        }
+    }
+    let mut encoded = String::with_capacity(length);
+    for byte in reversed[..length].iter().rev() {
+        encoded.push(char::from(*byte));
+    }
+    encoded
 }
 
 pub(crate) struct RuntimeOwner {
@@ -1422,14 +1488,79 @@ mod tests {
         })
         .unwrap();
 
-        let owner = paths.create_runtime_owner("askpass").unwrap();
+        for (owner_kind, socket_name) in [
+            (ASKPASS_RUNTIME_OWNER_KIND, ASKPASS_RUNTIME_SOCKET_NAME),
+            (CONTROL_RUNTIME_OWNER_KIND, CONTROL_RUNTIME_SOCKET_NAME),
+        ] {
+            let owner = paths.create_runtime_owner(owner_kind).unwrap();
+            let socket_path = owner.socket_path(socket_name).unwrap();
+            let listener = UnixListener::bind(&socket_path).unwrap();
+            let socket = owner.register_socket(socket_name).unwrap();
+
+            assert!(
+                socket_path.as_os_str().as_bytes().len()
+                    <= MACOS_UNIX_SOCKET_PATH_BYTES.saturating_sub(8)
+                    && fs::metadata(&socket_path).unwrap().mode() & 0o777 == PRIVATE_ARTIFACT_MODE
+                    && fs::metadata(owner.path()).unwrap().mode() & 0o777 == PRIVATE_DIRECTORY_MODE
+            );
+
+            drop(listener);
+            owner.remove_registered_socket(socket).unwrap();
+            let owner_path = owner.path().to_path_buf();
+            owner.close().unwrap();
+            assert!(!socket_path.exists() && !owner_path.exists());
+        }
 
         assert!(
             captured_temporary == canonical_temporary
                 && paths.runtime() == canonical_temporary.join("spaceterm")
                 && fs::metadata(&canonical_temporary).unwrap().mode() & 0o777 == 0o755
                 && fs::metadata(paths.runtime()).unwrap().mode() & 0o777 == 0o700
-                && fs::metadata(owner.path()).unwrap().mode() & 0o777 == 0o700
+        );
+    }
+
+    #[test]
+    fn native_macos_fallback_should_bind_both_worst_case_compact_socket_paths() {
+        let canonical_temporary = canonicalize_macos_temporary_directory(std::env::temp_dir());
+        let paths = AppPaths::resolve(&AppPathEnvironment {
+            home: Some(PathBuf::from("/Users/test").into_os_string()),
+            macos_temporary_directory: canonical_temporary,
+            ..AppPathEnvironment::default()
+        })
+        .unwrap();
+        let sequence = u64::MAX.saturating_sub(NEXT_TEST_DIRECTORY.fetch_add(1, Ordering::Relaxed));
+
+        for (owner_kind, socket_name) in [
+            (ASKPASS_RUNTIME_OWNER_KIND, ASKPASS_RUNTIME_SOCKET_NAME),
+            (CONTROL_RUNTIME_OWNER_KIND, CONTROL_RUNTIME_SOCKET_NAME),
+        ] {
+            let owner = paths
+                .create_runtime_owner_with_identity(owner_kind, u32::MAX, sequence)
+                .unwrap();
+            let socket_path = owner.socket_path(socket_name).unwrap();
+            let listener = UnixListener::bind(&socket_path).unwrap();
+            let socket = owner.register_socket(socket_name).unwrap();
+
+            assert!(
+                socket_path.as_os_str().as_bytes().len()
+                    <= MACOS_UNIX_SOCKET_PATH_BYTES.saturating_sub(8)
+                    && fs::metadata(&socket_path).unwrap().mode() & 0o777 == PRIVATE_ARTIFACT_MODE
+            );
+
+            drop(listener);
+            owner.remove_registered_socket(socket).unwrap();
+            let owner_path = owner.path().to_path_buf();
+            owner.close().unwrap();
+            assert!(!socket_path.exists() && !owner_path.exists());
+        }
+    }
+
+    #[test]
+    fn runtime_owner_names_should_encode_the_full_identity_compactly() {
+        assert_eq!(runtime_owner_name("a", 0, 0), "a-0-0");
+        assert_eq!(
+            runtime_owner_name("c", u32::MAX, u64::MAX),
+            "c-1z141z3-3w5e11264sgsf"
         );
     }
 

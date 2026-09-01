@@ -24,10 +24,10 @@ use super::process::{
 };
 use super::remote_utility::PreparedSshRemoteUtilityCommand;
 use crate::domain::SshDestination;
-use crate::platform::app_paths::{AppPaths, AppPathsError, RegisteredRuntimeSocket, RuntimeOwner};
-
-const CONTROL_OWNER_KIND: &str = "ssh-control";
-const CONTROL_SOCKET_NAME: &str = "master.sock";
+use crate::platform::app_paths::{
+    AppPaths, AppPathsError, CONTROL_RUNTIME_OWNER_KIND, CONTROL_RUNTIME_SOCKET_NAME,
+    RegisteredRuntimeSocket, RuntimeOwner,
+};
 #[cfg(test)]
 const MAXIMUM_READINESS_TIMEOUT: Duration = Duration::from_secs(60);
 const SHUTDOWN_OPERATION_TIMEOUT: Duration = Duration::from_secs(5);
@@ -205,8 +205,8 @@ impl<B: SshProcessBackend> OpenSshControlConnection<B> {
         if cancellation.is_cancelled() {
             return Err(ControlConnectionError::Cancelled);
         }
-        let runtime_owner = paths.create_runtime_owner(CONTROL_OWNER_KIND)?;
-        let control_path = runtime_owner.socket_path(CONTROL_SOCKET_NAME)?;
+        let runtime_owner = paths.create_runtime_owner(CONTROL_RUNTIME_OWNER_KIND)?;
+        let control_path = runtime_owner.socket_path(CONTROL_RUNTIME_SOCKET_NAME)?;
         reserve_socket(&runtime_owner)?;
         let commands = SshCommandContext::new(
             paths.managed_ssh_config(),
@@ -280,7 +280,7 @@ impl<B: SshProcessBackend> OpenSshControlConnection<B> {
                     .runtime_owner
                     .as_ref()
                     .ok_or(ControlConnectionError::Ownership)?;
-                let registered = owner.register_socket(CONTROL_SOCKET_NAME)?;
+                let registered = owner.register_socket(CONTROL_RUNTIME_SOCKET_NAME)?;
                 launch.registered_socket = Some(registered);
                 return launch.finish(commands, control_path);
             }
@@ -599,7 +599,7 @@ impl<B: SshProcessBackend> Drop for ConnectingControl<B> {
     fn drop(&mut self) {
         if self.registered_socket.is_none()
             && let Some(owner) = self.runtime_owner.as_ref()
-            && let Ok(socket) = owner.register_socket(CONTROL_SOCKET_NAME)
+            && let Ok(socket) = owner.register_socket(CONTROL_RUNTIME_SOCKET_NAME)
         {
             self.registered_socket = Some(socket);
         }
@@ -653,10 +653,10 @@ fn spawn_supervisor<B: SshProcessBackend>(
 }
 
 fn reserve_socket(owner: &RuntimeOwner) -> Result<(), ControlConnectionError> {
-    let path = owner.socket_path(CONTROL_SOCKET_NAME)?;
+    let path = owner.socket_path(CONTROL_RUNTIME_SOCKET_NAME)?;
     let listener = UnixListener::bind(&path)
         .map_err(|source| ControlConnectionError::SocketReservation { source })?;
-    let registered = owner.register_socket(CONTROL_SOCKET_NAME)?;
+    let registered = owner.register_socket(CONTROL_RUNTIME_SOCKET_NAME)?;
     drop(listener);
     owner.remove_registered_socket(registered)?;
     Ok(())
