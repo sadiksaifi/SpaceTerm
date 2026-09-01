@@ -111,6 +111,7 @@ pub(crate) struct PaneHost {
     native_service_focus_signature: Option<(bool, PaneId, Option<TerminalFocusBlocker>)>,
     close_window_requested: bool,
     remote_disconnected_generation: Option<u64>,
+    child_launch_generation: u64,
 }
 
 impl PaneHost {
@@ -171,6 +172,7 @@ impl PaneHost {
             native_service_focus_signature: None,
             close_window_requested: false,
             remote_disconnected_generation: None,
+            child_launch_generation: 0,
         }
     }
 
@@ -399,6 +401,7 @@ impl PaneHost {
             });
         }
         self.remote_disconnected_generation = Some(generation);
+        self.child_launch_generation = self.child_launch_generation.wrapping_add(1);
         self.sync_terminal_focus(cx);
         Ok(())
     }
@@ -421,13 +424,23 @@ impl PaneHost {
         &self,
         session_factory: WorkspaceTerminalSessionFactory,
         generation: u64,
+        prepared_launches: Vec<PreparedWorkspaceTerminalLaunch>,
         cx: &App,
     ) -> Result<PreparedPaneHostRemoteRestart, RemotePaneHostLifecycleError> {
+        if self.terminal_window.pane_count() != prepared_launches.len() {
+            return Err(RemotePaneHostLifecycleError::PaneChanged(
+                self.terminal_window.focused_pane_id(),
+            ));
+        }
         let mut panes = Vec::with_capacity(self.terminal_window.pane_count());
-        for (pane_id, terminal) in self.terminal_window.terminals_with_ids() {
+        for ((pane_id, terminal), prepared_launch) in self
+            .terminal_window
+            .terminals_with_ids()
+            .zip(prepared_launches)
+        {
             let prepared = terminal
                 .read(cx)
-                .prepare_remote_restart(session_factory.clone(), generation)
+                .prepare_remote_restart(session_factory.clone(), generation, prepared_launch)
                 .map_err(|source| RemotePaneHostLifecycleError::Pane { pane_id, source })?;
             panes.push((pane_id, terminal.clone(), prepared));
         }
@@ -490,6 +503,7 @@ impl PaneHost {
         }
         self.session_factory = session_factory;
         self.remote_disconnected_generation = None;
+        self.child_launch_generation = self.child_launch_generation.wrapping_add(1);
         self.sync_terminal_focus(cx);
         cx.emit(PaneHostEvent::PresentationChanged {
             window_id: self.terminal_window.id(),
@@ -677,6 +691,52 @@ impl PaneHost {
                 return;
             }
         }
+        if let Some(revalidation) = self.session_factory.revalidate_remote_child_launch() {
+            self.child_launch_generation = self.child_launch_generation.wrapping_add(1);
+            let child_launch_generation = self.child_launch_generation;
+            let session_factory = self.session_factory.clone();
+            cx.spawn_in(window, async move |host, cx| {
+                let revalidation = revalidation.await;
+                let _ = host.update_in(cx, |host, window, cx| {
+                    if host.remote_disconnected_generation.is_some()
+                        || host.child_launch_generation != child_launch_generation
+                    {
+                        return;
+                    }
+                    if let Err(error) = revalidation {
+                        eprintln!("cannot split Pane because {error}");
+                        return;
+                    }
+                    let prepared_launch = match session_factory.prepare_child_launch() {
+                        Ok(prepared_launch) => prepared_launch,
+                        Err(error) => {
+                            eprintln!("cannot split Pane because {error}");
+                            return;
+                        }
+                    };
+                    let Some(current_bounds) = host.pane_bounds.get(&target_pane_id).copied()
+                    else {
+                        return;
+                    };
+                    let Ok(current_size) = pane_size(current_bounds) else {
+                        return;
+                    };
+                    if current_size != target_size {
+                        return;
+                    }
+                    host.split_pane_with_prepared_launch(
+                        target_pane_id,
+                        axis,
+                        target_size,
+                        prepared_launch,
+                        window,
+                        cx,
+                    );
+                });
+            })
+            .detach();
+            return;
+        }
         let prepared_launch = match self.session_factory.prepare_child_launch() {
             Ok(prepared_launch) => prepared_launch,
             Err(error) => {
@@ -684,6 +744,25 @@ impl PaneHost {
                 return;
             }
         };
+        self.split_pane_with_prepared_launch(
+            target_pane_id,
+            axis,
+            target_size,
+            prepared_launch,
+            window,
+            cx,
+        );
+    }
+
+    fn split_pane_with_prepared_launch(
+        &mut self,
+        target_pane_id: PaneId,
+        axis: SplitAxis,
+        target_size: PaneSize,
+        prepared_launch: PreparedWorkspaceTerminalLaunch,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let session_factory = self.session_factory.clone();
         let result = self.terminal_window.split_pane(
             target_pane_id,
@@ -1462,6 +1541,8 @@ mod tests {
     use std::path::PathBuf;
     use std::rc::Rc;
     use std::sync::Arc;
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     use gpui::{
         Modifiers, MouseButton, ScrollDelta, ScrollWheelEvent, TestAppContext, TouchPhase,
@@ -1474,9 +1555,67 @@ mod tests {
         RecordedSessionCommand, TestTerminalSessionFactory, TestTerminalSessionRecords,
     };
     use crate::terminal::{
-        RemoteChannelUnavailable, RemoteTerminalChannelProvider, ScreenSnapshot, ScrollbarSnapshot,
-        SessionEvent, SessionExit, TerminalSessionFactory,
+        RemoteChannelRevalidationError, RemoteChannelUnavailable, RemoteTerminalChannelProvider,
+        ScreenSnapshot, ScrollbarSnapshot, SessionEvent, SessionExit, TerminalSessionFactory,
     };
+
+    struct RevalidatingRemoteChannelProvider {
+        grant: AtomicBool,
+        revalidations: AtomicUsize,
+        preparations: AtomicUsize,
+        revalidation_error: Mutex<Option<RemoteChannelRevalidationError>>,
+        command_context: SshCommandContext,
+    }
+
+    impl RevalidatingRemoteChannelProvider {
+        fn new(destination: crate::domain::SshDestination) -> Self {
+            Self {
+                grant: AtomicBool::new(true),
+                revalidations: AtomicUsize::new(0),
+                preparations: AtomicUsize::new(0),
+                revalidation_error: Mutex::new(None),
+                command_context: SshCommandContext::new(
+                    PathBuf::from("/private/config/spaceterm/ssh_config"),
+                    destination,
+                    PathBuf::from("/private/runtime/spaceterm/master.sock"),
+                )
+                .unwrap(),
+            }
+        }
+
+        fn fail_revalidation_with(&self, error: Option<RemoteChannelRevalidationError>) {
+            *self.revalidation_error.lock().unwrap() = error;
+        }
+    }
+
+    impl RemoteTerminalChannelProvider for RevalidatingRemoteChannelProvider {
+        fn is_ready(&self) -> bool {
+            true
+        }
+
+        fn revalidate(&self) -> gpui::Task<Result<(), RemoteChannelRevalidationError>> {
+            self.revalidations.fetch_add(1, Ordering::AcqRel);
+            self.grant.store(false, Ordering::Release);
+            let error = *self.revalidation_error.lock().unwrap();
+            if error.is_none() {
+                self.grant.store(true, Ordering::Release);
+            }
+            gpui::Task::ready(error.map_or(Ok(()), Err))
+        }
+
+        fn prepare(
+            &self,
+        ) -> Result<crate::ssh::command::PreparedSshPaneChannelCommand, RemoteChannelUnavailable>
+        {
+            if !self.grant.swap(false, Ordering::AcqRel) {
+                return Err(RemoteChannelUnavailable);
+            }
+            self.preparations.fetch_add(1, Ordering::AcqRel);
+            Ok(self.command_context.prepare_pane_channel(
+                ValidatedRemoteShellCommand::new("exec /bin/zsh -l".to_owned()).unwrap(),
+            ))
+        }
+    }
 
     fn test_session_factory() -> WorkspaceTerminalSessionFactory {
         WorkspaceTerminalSessionFactory::new_local(
@@ -1567,6 +1706,44 @@ mod tests {
                     && plan.remote_directory().as_str() == "~/project"
             })
         }));
+    }
+
+    #[gpui::test]
+    fn remote_split_should_revalidate_before_mutating_the_pane_tree(cx: &mut TestAppContext) {
+        cx.update(crate::ui::init);
+        let records = TestTerminalSessionRecords::default();
+        let destination = crate::domain::SshDestination::new("tester@remote".to_owned()).unwrap();
+        let provider = Arc::new(RevalidatingRemoteChannelProvider::new(destination.clone()));
+        let session_factory = remote_test_session_factory_with_provider(
+            records.clone(),
+            destination,
+            Arc::clone(&provider) as Arc<dyn RemoteTerminalChannelProvider>,
+        );
+        let (host, cx) = cx.add_window_view(|window, cx| {
+            PaneHost::new(WindowId::new(1), session_factory, window, cx)
+        });
+        cx.run_until_parked();
+        let focused = host.read_with(cx, |host, _| host.focused_pane_id());
+
+        provider.fail_revalidation_with(Some(RemoteChannelRevalidationError::IdentityChanged));
+        split_test_pane(&host, focused, SplitAxis::Horizontal, cx);
+
+        assert_eq!(host.read_with(cx, |host, _| host.pane_count()), 1);
+        assert_eq!(
+            host.read_with(cx, |host, _| host.focused_pane_id()),
+            focused
+        );
+        assert_eq!(records.starts().len(), 1);
+        assert_eq!(provider.preparations.load(Ordering::Acquire), 1);
+        assert_eq!(provider.revalidations.load(Ordering::Acquire), 1);
+
+        provider.fail_revalidation_with(None);
+        split_test_pane(&host, focused, SplitAxis::Horizontal, cx);
+
+        assert_eq!(host.read_with(cx, |host, _| host.pane_count()), 2);
+        assert_eq!(records.starts().len(), 2);
+        assert_eq!(provider.preparations.load(Ordering::Acquire), 2);
+        assert_eq!(provider.revalidations.load(Ordering::Acquire), 2);
     }
 
     #[gpui::test]

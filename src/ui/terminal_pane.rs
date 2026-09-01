@@ -1172,6 +1172,7 @@ impl TerminalPane {
         &self,
         session_factory: WorkspaceTerminalSessionFactory,
         generation: u64,
+        prepared_launch: PreparedWorkspaceTerminalLaunch,
     ) -> Result<PreparedRemotePaneRestart, RemotePaneLifecycleError> {
         self.validate_remote_generation(generation)?;
         if !self.remote_input_blocked {
@@ -1189,7 +1190,6 @@ impl TerminalPane {
         if !session_factory.is_remote() {
             return Err(RemotePaneLifecycleError::LocalPane);
         }
-        let prepared_launch = session_factory.prepare_child_launch()?;
         Ok(PreparedRemotePaneRestart {
             session_factory,
             prepared_launch,
@@ -1635,19 +1635,30 @@ impl TerminalPane {
 
         let prepared_launch = match self.prepared_launch.take() {
             Some(prepared_launch) => prepared_launch,
-            None => match self.session_factory.prepare_child_launch() {
-                Ok(prepared_launch) => prepared_launch,
-                Err(error) => {
-                    let _ = error;
-                    self.present_failure(
-                        TerminalFailure::platform("prepare-session-channel"),
-                        false,
-                        Some(RecoveryAction::StartSession),
-                    );
-                    cx.notify();
-                    return;
+            None if !self.session_factory.is_remote() => {
+                match self.session_factory.prepare_child_launch() {
+                    Ok(prepared_launch) => prepared_launch,
+                    Err(error) => {
+                        let _ = error;
+                        self.present_failure(
+                            TerminalFailure::platform("prepare-session-channel"),
+                            false,
+                            Some(RecoveryAction::StartSession),
+                        );
+                        cx.notify();
+                        return;
+                    }
                 }
-            },
+            }
+            None => {
+                self.present_failure(
+                    TerminalFailure::platform("prepare-session-channel"),
+                    false,
+                    Some(RecoveryAction::StartSession),
+                );
+                cx.notify();
+                return;
+            }
         };
         match self.session_factory.start(geometry, prepared_launch) {
             Ok(started) => {
@@ -5107,6 +5118,18 @@ mod tests {
             self.ready.load(Ordering::SeqCst)
         }
 
+        fn revalidate(
+            &self,
+        ) -> gpui::Task<Result<(), crate::terminal::RemoteChannelRevalidationError>> {
+            if self.is_ready() {
+                gpui::Task::ready(Ok(()))
+            } else {
+                gpui::Task::ready(Err(
+                    crate::terminal::RemoteChannelRevalidationError::ConnectionUnavailable,
+                ))
+            }
+        }
+
         fn prepare(
             &self,
         ) -> Result<crate::ssh::command::PreparedSshPaneChannelCommand, RemoteChannelUnavailable>
@@ -5223,8 +5246,19 @@ mod tests {
         });
         let factory = pane.read_with(cx, |pane, _| pane.session_factory.clone());
         pane.update(cx, |pane, cx| pane.disconnect_remote(7, cx).unwrap());
+        assert_eq!(
+            cx.executor().block(
+                factory
+                    .revalidate_remote_child_launch()
+                    .expect("remote restart must require revalidation"),
+            ),
+            Ok(())
+        );
+        let prepared_launch = factory.prepare_child_launch().unwrap();
         let prepared = pane
-            .read_with(cx, |pane, _| pane.prepare_remote_restart(factory, 8))
+            .read_with(cx, |pane, _| {
+                pane.prepare_remote_restart(factory, 8, prepared_launch)
+            })
             .unwrap();
         cx.update(|window, cx| {
             pane.update(cx, |pane, cx| {
@@ -5459,8 +5493,19 @@ mod tests {
             !pane.hidden_input && !pane.terminal_input_focus
         }));
 
+        assert_eq!(
+            cx.executor().block(
+                factory
+                    .revalidate_remote_child_launch()
+                    .expect("remote restart must require revalidation"),
+            ),
+            Ok(())
+        );
+        let prepared_launch = factory.prepare_child_launch().unwrap();
         let prepared = pane
-            .read_with(cx, |pane, _| pane.prepare_remote_restart(factory, 8))
+            .read_with(cx, |pane, _| {
+                pane.prepare_remote_restart(factory, 8, prepared_launch)
+            })
             .unwrap();
         cx.update(|window, cx| {
             pane.update(cx, |pane, cx| {

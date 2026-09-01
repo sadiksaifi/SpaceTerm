@@ -16,6 +16,12 @@ use super::{
 
 #[derive(Debug, Error)]
 pub(crate) enum RemoteWindowManagerLifecycleError {
+    #[error(transparent)]
+    Revalidation(#[from] RemoteChannelRevalidationError),
+    #[error(transparent)]
+    ChannelUnavailable(#[from] RemoteChannelUnavailable),
+    #[error("remote restart preparation was superseded")]
+    PreparationSuperseded,
     #[error("Window {window_id} cannot change remote session lifecycle: {source}")]
     Window {
         window_id: WindowId,
@@ -41,14 +47,14 @@ use crate::platform::macos_window_drag::{
 };
 use crate::terminal::{
     NativeServiceOrigin, NativeServiceStatus, PreparedWorkspaceTerminalLaunch,
-    RemoteChannelUnavailable, SelectionCopy, WorkspaceChildLaunchValidation,
-    WorkspaceTerminalSessionFactory,
+    RemoteChannelRevalidationError, RemoteChannelUnavailable, SelectionCopy,
+    WorkspaceChildLaunchValidation, WorkspaceTerminalSessionFactory,
 };
 use crate::theme::{ACTIVE_THEME, Color};
 use gpui::prelude::*;
 use gpui::{
     AnyElement, App, Context, Entity, EventEmitter, MouseButton, Pixels, PromptButton, PromptLevel,
-    Render, ScrollHandle, SharedString, Window, div, px, rgba,
+    Render, ScrollHandle, SharedString, Task, Window, div, px, rgba,
 };
 use gpui_symbols::{Icon, SymbolWeight};
 use spaceterm_ui::{
@@ -124,6 +130,7 @@ pub(crate) struct WindowManager {
     window_bar_scroll_handle: ScrollHandle,
     close_workspace_requested: bool,
     remote_disconnected_generation: Option<u64>,
+    child_launch_generation: u64,
 }
 
 impl WindowManager {
@@ -194,6 +201,7 @@ impl WindowManager {
             window_bar_scroll_handle: ScrollHandle::new(),
             close_workspace_requested: false,
             remote_disconnected_generation: None,
+            child_launch_generation: 0,
         }
     }
 
@@ -368,27 +376,76 @@ impl WindowManager {
             });
         }
         self.remote_disconnected_generation = Some(generation);
+        self.child_launch_generation = self.child_launch_generation.wrapping_add(1);
         self.sync_terminal_focus_blocker(cx);
         cx.notify();
         Ok(())
     }
 
     pub(crate) fn prepare_remote_restart(
+        &mut self,
+        session_factory: WorkspaceTerminalSessionFactory,
+        generation: u64,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<PreparedWindowManagerRemoteRestart, RemoteWindowManagerLifecycleError>> {
+        self.child_launch_generation = self.child_launch_generation.wrapping_add(1);
+        let child_launch_generation = self.child_launch_generation;
+        let pane_count = self
+            .windows
+            .iter()
+            .map(|(_, pane_host)| pane_host.read(cx).pane_count())
+            .sum();
+        cx.spawn(async move |manager, cx| {
+            let mut prepared_launches = Vec::with_capacity(pane_count);
+            for _ in 0..pane_count {
+                let Some(revalidation) = session_factory.revalidate_remote_child_launch() else {
+                    return Err(RemoteWindowManagerLifecycleError::PreparationSuperseded);
+                };
+                revalidation.await?;
+                prepared_launches.push(session_factory.prepare_child_launch()?);
+            }
+            manager
+                .update(cx, |manager, cx| {
+                    if manager.child_launch_generation != child_launch_generation {
+                        return Err(RemoteWindowManagerLifecycleError::PreparationSuperseded);
+                    }
+                    manager.prepare_remote_restart_with_launches(
+                        session_factory,
+                        generation,
+                        prepared_launches,
+                        cx,
+                    )
+                })
+                .map_err(|_| RemoteWindowManagerLifecycleError::PreparationSuperseded)?
+        })
+    }
+
+    fn prepare_remote_restart_with_launches(
         &self,
         session_factory: WorkspaceTerminalSessionFactory,
         generation: u64,
+        prepared_launches: Vec<PreparedWorkspaceTerminalLaunch>,
         cx: &App,
     ) -> Result<PreparedWindowManagerRemoteRestart, RemoteWindowManagerLifecycleError> {
+        let mut prepared_launches = prepared_launches.into_iter();
         let mut windows = Vec::with_capacity(self.windows.len());
         for (window_id, pane_host) in self.windows.iter() {
+            let pane_count = pane_host.read(cx).pane_count();
+            let launches: Vec<_> = prepared_launches.by_ref().take(pane_count).collect();
+            if launches.len() != pane_count {
+                return Err(RemoteWindowManagerLifecycleError::WindowChanged(window_id));
+            }
             let prepared = pane_host
                 .read(cx)
-                .prepare_remote_restart(session_factory.clone(), generation, cx)
+                .prepare_remote_restart(session_factory.clone(), generation, launches, cx)
                 .map_err(|source| RemoteWindowManagerLifecycleError::Window {
                     window_id,
                     source,
                 })?;
             windows.push((window_id, pane_host.clone(), prepared));
+        }
+        if prepared_launches.next().is_some() {
+            return Err(RemoteWindowManagerLifecycleError::PreparationSuperseded);
         }
         Ok(PreparedWindowManagerRemoteRestart {
             session_factory,
@@ -434,6 +491,7 @@ impl WindowManager {
         }
         self.session_factory = session_factory;
         self.remote_disconnected_generation = None;
+        self.child_launch_generation = self.child_launch_generation.wrapping_add(1);
         self.sync_terminal_focus_blocker(cx);
         cx.emit(WindowManagerEvent::PresentationChanged);
         cx.notify();
@@ -674,6 +732,35 @@ impl WindowManager {
                 return;
             }
         }
+        if let Some(revalidation) = self.session_factory.revalidate_remote_child_launch() {
+            self.child_launch_generation = self.child_launch_generation.wrapping_add(1);
+            let child_launch_generation = self.child_launch_generation;
+            let session_factory = self.session_factory.clone();
+            cx.spawn_in(window, async move |manager, cx| {
+                let revalidation = revalidation.await;
+                let _ = manager.update_in(cx, |manager, window, cx| {
+                    if manager.remote_disconnected_generation.is_some()
+                        || manager.child_launch_generation != child_launch_generation
+                    {
+                        return;
+                    }
+                    if let Err(error) = revalidation {
+                        eprintln!("cannot create Window because {error}");
+                        return;
+                    }
+                    let prepared_launch = match session_factory.prepare_child_launch() {
+                        Ok(prepared_launch) => prepared_launch,
+                        Err(error) => {
+                            eprintln!("cannot create Window because {error}");
+                            return;
+                        }
+                    };
+                    manager.create_window_with_prepared_launch(prepared_launch, window, cx);
+                });
+            })
+            .detach();
+            return;
+        }
         let prepared_launch = match self.session_factory.prepare_child_launch() {
             Ok(prepared_launch) => prepared_launch,
             Err(error) => {
@@ -681,6 +768,15 @@ impl WindowManager {
                 return;
             }
         };
+        self.create_window_with_prepared_launch(prepared_launch, window, cx);
+    }
+
+    fn create_window_with_prepared_launch(
+        &mut self,
+        prepared_launch: PreparedWorkspaceTerminalLaunch,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let previous_window = self.windows.active_window().clone();
         let session_factory = self.session_factory.clone();
         let result = self.windows.create_window(|window_id| {
@@ -1420,7 +1516,7 @@ fn gpui_color(color: Color) -> gpui::Rgba {
 
 #[cfg(test)]
 mod tests {
-    use std::cell::Cell;
+    use std::cell::{Cell, RefCell};
     use std::path::PathBuf;
     use std::rc::Rc;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -1446,8 +1542,12 @@ mod tests {
 
     struct SequencedRemoteChannelProvider {
         ready: AtomicBool,
+        grant: AtomicBool,
         preparations: AtomicUsize,
+        revalidations: AtomicUsize,
         fail_at: Mutex<Option<usize>>,
+        revalidation_error: Mutex<Option<RemoteChannelRevalidationError>>,
+        invalidate_grant_after_revalidation: AtomicBool,
         command_context: SshCommandContext,
     }
 
@@ -1455,8 +1555,12 @@ mod tests {
         fn new(destination: crate::domain::SshDestination) -> Self {
             Self {
                 ready: AtomicBool::new(true),
+                grant: AtomicBool::new(true),
                 preparations: AtomicUsize::new(0),
+                revalidations: AtomicUsize::new(0),
                 fail_at: Mutex::new(None),
+                revalidation_error: Mutex::new(None),
+                invalidate_grant_after_revalidation: AtomicBool::new(false),
                 command_context: SshCommandContext::new(
                     PathBuf::from("/private/config/spaceterm/ssh_config"),
                     destination,
@@ -1477,6 +1581,19 @@ mod tests {
         fn preparation_count(&self) -> usize {
             self.preparations.load(Ordering::Acquire)
         }
+
+        fn revalidation_count(&self) -> usize {
+            self.revalidations.load(Ordering::Acquire)
+        }
+
+        fn fail_revalidation_with(&self, error: Option<RemoteChannelRevalidationError>) {
+            *self.revalidation_error.lock().unwrap() = error;
+        }
+
+        fn invalidate_next_grant(&self) {
+            self.invalidate_grant_after_revalidation
+                .store(true, Ordering::Release);
+        }
     }
 
     impl RemoteTerminalChannelProvider for SequencedRemoteChannelProvider {
@@ -1484,10 +1601,27 @@ mod tests {
             self.ready.load(Ordering::Acquire)
         }
 
+        fn revalidate(&self) -> Task<Result<(), crate::terminal::RemoteChannelRevalidationError>> {
+            self.revalidations.fetch_add(1, Ordering::AcqRel);
+            self.grant.store(false, Ordering::Release);
+            let result = self.revalidation_error.lock().unwrap().map_or(Ok(()), Err);
+            if result.is_ok()
+                && !self
+                    .invalidate_grant_after_revalidation
+                    .swap(false, Ordering::AcqRel)
+            {
+                self.grant.store(true, Ordering::Release);
+            }
+            Task::ready(result)
+        }
+
         fn prepare(
             &self,
         ) -> Result<crate::ssh::command::PreparedSshPaneChannelCommand, RemoteChannelUnavailable>
         {
+            if !self.grant.swap(false, Ordering::AcqRel) {
+                return Err(RemoteChannelUnavailable);
+            }
             let preparation = self.preparations.fetch_add(1, Ordering::AcqRel) + 1;
             if *self.fail_at.lock().unwrap() == Some(preparation) {
                 return Err(RemoteChannelUnavailable);
@@ -1553,6 +1687,31 @@ mod tests {
                 })
                 .collect(),
         )
+    }
+
+    fn prepare_remote_restart_for_test(
+        manager: &Entity<WindowManager>,
+        session_factory: WorkspaceTerminalSessionFactory,
+        generation: u64,
+        cx: &mut VisualTestContext,
+    ) -> Result<PreparedWindowManagerRemoteRestart, RemoteWindowManagerLifecycleError> {
+        let task = manager.update(cx, |manager, cx| {
+            manager.prepare_remote_restart(session_factory, generation, cx)
+        });
+        let result = Rc::new(RefCell::new(None));
+        let task_result = Rc::clone(&result);
+        cx.update(|_, cx| {
+            cx.spawn(async move |_| {
+                *task_result.borrow_mut() = Some(task.await);
+            })
+            .detach();
+        });
+        cx.run_until_parked();
+        let prepared = result
+            .borrow_mut()
+            .take()
+            .expect("remote restart preparation task must finish");
+        prepared
     }
 
     fn window_manager(
@@ -2782,6 +2941,59 @@ mod tests {
     }
 
     #[gpui::test]
+    fn remote_create_window_should_revalidate_before_mutating_the_hierarchy(
+        cx: &mut TestAppContext,
+    ) {
+        let destination = crate::domain::SshDestination::new("tester@remote".to_owned()).unwrap();
+        let provider = Arc::new(SequencedRemoteChannelProvider::new(destination));
+        let (manager, records, cx) = remote_window_manager_with_provider(cx, Arc::clone(&provider));
+        let before = manager.read_with(cx, hierarchy_identity);
+
+        provider.fail_revalidation_with(Some(RemoteChannelRevalidationError::IdentityChanged));
+        cx.update(|window, cx| {
+            manager.update(cx, |manager, cx| manager.create_window(window, cx));
+        });
+        cx.run_until_parked();
+
+        assert_eq!(manager.read_with(cx, hierarchy_identity), before);
+        assert_eq!(records.starts().len(), 1);
+        assert_eq!(provider.preparation_count(), 1);
+        assert_eq!(provider.revalidation_count(), 1);
+
+        provider.fail_revalidation_with(None);
+        cx.update(|window, cx| {
+            manager.update(cx, |manager, cx| manager.create_window(window, cx));
+        });
+        cx.run_until_parked();
+
+        assert_eq!(manager.read_with(cx, |manager, _| manager.windows.len()), 2);
+        assert_eq!(records.starts().len(), 2);
+        assert_eq!(provider.preparation_count(), 2);
+        assert_eq!(provider.revalidation_count(), 2);
+    }
+
+    #[gpui::test]
+    fn remote_create_window_should_not_mutate_when_generation_changes_after_revalidation(
+        cx: &mut TestAppContext,
+    ) {
+        let destination = crate::domain::SshDestination::new("tester@remote".to_owned()).unwrap();
+        let provider = Arc::new(SequencedRemoteChannelProvider::new(destination));
+        let (manager, records, cx) = remote_window_manager_with_provider(cx, Arc::clone(&provider));
+        let before = manager.read_with(cx, hierarchy_identity);
+        provider.invalidate_next_grant();
+
+        cx.update(|window, cx| {
+            manager.update(cx, |manager, cx| manager.create_window(window, cx));
+        });
+        cx.run_until_parked();
+
+        assert_eq!(manager.read_with(cx, hierarchy_identity), before);
+        assert_eq!(records.starts().len(), 1);
+        assert_eq!(provider.preparation_count(), 1);
+        assert_eq!(provider.revalidation_count(), 1);
+    }
+
+    #[gpui::test]
     fn remote_restart_reserves_all_channels_before_preserving_and_restarting_hierarchy(
         cx: &mut TestAppContext,
     ) {
@@ -2808,14 +3020,31 @@ mod tests {
         );
         let before = manager.read_with(cx, hierarchy_identity);
 
+        provider.fail_revalidation_with(Some(RemoteChannelRevalidationError::IdentityChanged));
+        let factory = manager.read_with(cx, |manager, _| manager.session_factory.clone());
+        let identity_changed = prepare_remote_restart_for_test(&manager, factory, 5, cx);
+        assert!(matches!(
+            identity_changed,
+            Err(RemoteWindowManagerLifecycleError::Revalidation(
+                RemoteChannelRevalidationError::IdentityChanged
+            ))
+        ));
+        assert_eq!(records.starts().len(), 3);
+        assert_eq!(manager.read_with(cx, hierarchy_identity), before);
+        assert!(manager.read_with(cx, |manager, cx| {
+            manager
+                .windows
+                .iter()
+                .all(|(_, host)| host.read(cx).remote_disconnected_generation() == Some(4))
+        }));
+
+        provider.fail_revalidation_with(None);
         provider.fail_at(Some(provider.preparation_count() + 2));
         let factory = manager.read_with(cx, |manager, _| manager.session_factory.clone());
-        let failed = manager.read_with(cx, |manager, cx| {
-            manager.prepare_remote_restart(factory, 5, cx)
-        });
+        let failed = prepare_remote_restart_for_test(&manager, factory, 5, cx);
         assert!(matches!(
             failed,
-            Err(RemoteWindowManagerLifecycleError::Window { .. })
+            Err(RemoteWindowManagerLifecycleError::ChannelUnavailable(_))
         ));
         assert_eq!(records.starts().len(), 3);
         let after_failed_prepare = manager.read_with(cx, hierarchy_identity);
@@ -2829,11 +3058,7 @@ mod tests {
 
         provider.fail_at(None);
         let factory = manager.read_with(cx, |manager, _| manager.session_factory.clone());
-        let prepared = manager
-            .read_with(cx, |manager, cx| {
-                manager.prepare_remote_restart(factory, 5, cx)
-            })
-            .unwrap();
+        let prepared = prepare_remote_restart_for_test(&manager, factory, 5, cx).unwrap();
         cx.update(|window, cx| {
             manager
                 .update(cx, |manager, cx| {
@@ -2846,6 +3071,35 @@ mod tests {
         let after_commit = manager.read_with(cx, hierarchy_identity);
         assert_eq!(after_commit, before);
         assert_eq!(records.starts().len(), 6);
+    }
+
+    #[gpui::test]
+    fn cancelled_remote_restart_preparation_should_not_reserve_or_mutate(cx: &mut TestAppContext) {
+        let destination = crate::domain::SshDestination::new("tester@remote".to_owned()).unwrap();
+        let provider = Arc::new(SequencedRemoteChannelProvider::new(destination));
+        let (manager, records, cx) = remote_window_manager_with_provider(cx, Arc::clone(&provider));
+        manager
+            .update(cx, |manager, cx| manager.disconnect_remote(4, cx))
+            .unwrap();
+        let before = manager.read_with(cx, hierarchy_identity);
+        let preparation_count = provider.preparation_count();
+        let revalidation_count = provider.revalidation_count();
+        let factory = manager.read_with(cx, |manager, _| manager.session_factory.clone());
+
+        let task = manager.update(cx, |manager, cx| {
+            manager.prepare_remote_restart(factory, 5, cx)
+        });
+        drop(task);
+        cx.run_until_parked();
+
+        assert_eq!(manager.read_with(cx, hierarchy_identity), before);
+        assert_eq!(records.starts().len(), 1);
+        assert_eq!(provider.preparation_count(), preparation_count);
+        assert_eq!(provider.revalidation_count(), revalidation_count);
+        assert_eq!(
+            manager.read_with(cx, |manager, _| manager.remote_disconnected_generation),
+            Some(4)
+        );
     }
 
     #[gpui::test]
@@ -2899,11 +3153,7 @@ mod tests {
             destination,
             provider,
         );
-        let prepared = manager
-            .read_with(cx, |manager, cx| {
-                manager.prepare_remote_restart(restart_factory, 11, cx)
-            })
-            .unwrap();
+        let prepared = prepare_remote_restart_for_test(&manager, restart_factory, 11, cx).unwrap();
         cx.update(|window, cx| {
             manager
                 .update(cx, |manager, cx| {

@@ -46,9 +46,7 @@ pub(crate) enum RemoteChannelRevalidationError {
 pub(crate) trait RemoteTerminalChannelProvider: Send + Sync {
     fn is_ready(&self) -> bool;
 
-    fn revalidate(&self) -> Task<Result<(), RemoteChannelRevalidationError>> {
-        Task::ready(Ok(()))
-    }
+    fn revalidate(&self) -> Task<Result<(), RemoteChannelRevalidationError>>;
 
     fn prepare(&self) -> Result<PreparedSshPaneChannelCommand, RemoteChannelUnavailable>;
 }
@@ -60,6 +58,10 @@ where
 {
     fn is_ready(&self) -> bool {
         true
+    }
+
+    fn revalidate(&self) -> Task<Result<(), RemoteChannelRevalidationError>> {
+        Task::ready(Ok(()))
     }
 
     fn prepare(&self) -> Result<PreparedSshPaneChannelCommand, RemoteChannelUnavailable> {
@@ -285,6 +287,14 @@ mod tests {
     impl RemoteTerminalChannelProvider for TestRemoteChannelProvider {
         fn is_ready(&self) -> bool {
             self.ready.load(Ordering::Acquire)
+        }
+
+        fn revalidate(&self) -> Task<Result<(), RemoteChannelRevalidationError>> {
+            if self.is_ready() {
+                Task::ready(Ok(()))
+            } else {
+                Task::ready(Err(RemoteChannelRevalidationError::ConnectionUnavailable))
+            }
         }
 
         fn prepare(&self) -> Result<PreparedSshPaneChannelCommand, RemoteChannelUnavailable> {
