@@ -690,7 +690,9 @@ impl SupportedRemoteLoginShell {
 
     const fn login_arguments(self) -> &'static [&'static str] {
         match self {
-            Self::PosixSh => &["-l"],
+            // POSIX does not define `sh -l`. The channel already owns a PTY, so a conforming
+            // `sh` starts interactively without a non-portable login option.
+            Self::PosixSh => &[],
             Self::Bash => &["-l"],
             Self::Zsh => &["-l"],
             Self::Fish => &["-l"],
@@ -1387,7 +1389,7 @@ printf 'OpenSSH_9.9p2 Apple-1, LibreSSL 3.3.6\n' >&2"#,
     #[test]
     fn pane_command_should_use_explicit_arguments_for_every_supported_shell() {
         let cases = [
-            ("/bin/sh", "cd '/srv/project' && exec '/bin/sh' -l"),
+            ("/bin/sh", "cd '/srv/project' && exec '/bin/sh'"),
             (
                 "/usr/local/bin/bash",
                 "cd '/srv/project' && exec '/usr/local/bin/bash' -l",
@@ -1418,6 +1420,52 @@ printf 'OpenSSH_9.9p2 Apple-1, LibreSSL 3.3.6\n' >&2"#,
             let command = pane_command("/srv/project", shell).unwrap();
             assert_eq!(command.argument, expected);
         }
+    }
+
+    #[test]
+    fn posix_sh_pane_command_should_not_require_a_nonstandard_login_option() {
+        let sequence = NEXT_PROBE_SCRIPT.fetch_add(1, Ordering::Relaxed);
+        let test_root = PathBuf::from(format!(
+            "/private/tmp/spaceterm-posix-sh-{}-{sequence}",
+            std::process::id()
+        ));
+        let workspace = test_root.join("workspace with spaces");
+        let fake_bin = test_root.join("bin");
+        let fake_shell = fake_bin.join("sh");
+        let argument_count = test_root.join("argument-count");
+        let working_directory = test_root.join("working-directory");
+        fs::create_dir_all(&workspace).unwrap();
+        fs::create_dir_all(&fake_bin).unwrap();
+        fs::write(
+            &fake_shell,
+            br#"#!/bin/sh
+if [ "$#" -ne 0 ]; then
+    exit 64
+fi
+printf '%s\n' "$#" > "$SPACETERM_ARGUMENT_COUNT"
+pwd -P > "$SPACETERM_WORKING_DIRECTORY"
+"#,
+        )
+        .unwrap();
+        fs::set_permissions(&fake_shell, fs::Permissions::from_mode(0o700)).unwrap();
+        let command =
+            pane_command(workspace.to_str().unwrap(), fake_shell.to_str().unwrap()).unwrap();
+
+        let status = Command::new("/bin/sh")
+            .args(["-c", &command.argument])
+            .env_clear()
+            .env("SPACETERM_ARGUMENT_COUNT", &argument_count)
+            .env("SPACETERM_WORKING_DIRECTORY", &working_directory)
+            .status()
+            .unwrap();
+
+        assert!(status.success());
+        assert_eq!(fs::read_to_string(argument_count).unwrap(), "0\n");
+        assert_eq!(
+            fs::read_to_string(working_directory).unwrap(),
+            format!("{}\n", workspace.display())
+        );
+        fs::remove_dir_all(test_root).unwrap();
     }
 
     #[test]
