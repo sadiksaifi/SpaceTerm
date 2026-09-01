@@ -1,11 +1,13 @@
 use std::ffi::OsString;
+use std::fmt;
 use std::future::Future;
-use std::io;
+use std::io::{self, Read};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::mpsc;
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use gpui::BackgroundExecutor;
@@ -14,6 +16,50 @@ use thiserror::Error;
 use super::cancellation::SshCancellationToken;
 use super::command::SshCommandSpec;
 use crate::platform::macos_askpass_transport::AskPassBrokerLease;
+
+pub(crate) const MAXIMUM_TRANSIENT_SSH_ERROR_BYTES: usize = 8 * 1024;
+
+/// Bounded control-free OpenSSH diagnostics retained only for the active connection failure UI.
+pub(crate) struct TransientSshErrorOutput(String);
+
+impl TransientSshErrorOutput {
+    pub(crate) fn from_untrusted_bytes(bytes: &[u8]) -> Option<Self> {
+        let start = bytes
+            .len()
+            .saturating_sub(MAXIMUM_TRANSIENT_SSH_ERROR_BYTES);
+        let sanitized: String = String::from_utf8_lossy(&bytes[start..])
+            .chars()
+            .map(|character| {
+                if character.is_control() {
+                    ' '
+                } else {
+                    character
+                }
+            })
+            .collect();
+        let sanitized = sanitized.trim();
+        if sanitized.is_empty() {
+            return None;
+        }
+        let mut retained_start = sanitized
+            .len()
+            .saturating_sub(MAXIMUM_TRANSIENT_SSH_ERROR_BYTES);
+        while !sanitized.is_char_boundary(retained_start) {
+            retained_start = retained_start.saturating_add(1);
+        }
+        Some(Self(sanitized[retained_start..].to_owned()))
+    }
+
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Debug for TransientSshErrorOutput {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("TransientSshErrorOutput(<redacted>)")
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct ProcessExit {
@@ -79,6 +125,10 @@ pub(crate) trait SshProcessBackend: Send + Sync + 'static {
     ) -> io::Result<()>;
 
     fn force_cleanup(&self, child: Self::Child);
+
+    fn take_error_output(&self, _child: &mut Self::Child) -> Option<TransientSshErrorOutput> {
+        None
+    }
 
     fn delay(&self, duration: Duration) -> impl Future<Output = ()> + Send;
 }
@@ -232,6 +282,7 @@ impl NativeSshProcessBackend {
 pub(crate) struct NativeSshChild {
     child: Option<Child>,
     process_group: libc::pid_t,
+    stderr_reader: Option<JoinHandle<io::Result<Vec<u8>>>>,
 }
 
 impl SshProcessBackend for NativeSshProcessBackend {
@@ -300,6 +351,12 @@ impl SshProcessBackend for NativeSshProcessBackend {
         drop(child);
     }
 
+    fn take_error_output(&self, child: &mut Self::Child) -> Option<TransientSshErrorOutput> {
+        let _ = signal_process_group(child.process_group, libc::SIGKILL);
+        let bytes = child.stderr_reader.take()?.join().ok()?.ok()?;
+        TransientSshErrorOutput::from_untrusted_bytes(&bytes)
+    }
+
     fn delay(&self, duration: Duration) -> impl Future<Output = ()> + Send {
         let executor = self.executor.clone();
         async move { executor.timer(duration).await }
@@ -312,7 +369,7 @@ fn command(spec: SshCommandSpec, environment: &SshProcessEnvironment) -> Command
         .args(spec.arguments())
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null());
+        .stderr(Stdio::piped());
     environment.apply(&mut command);
     command
 }
@@ -334,10 +391,50 @@ fn spawn_owned_command(mut command: Command) -> io::Result<NativeSshChild> {
             ));
         }
     };
+    let stderr_reader = if let Some(stderr) = child.stderr.take() {
+        match std::thread::Builder::new()
+            .name("spaceterm-ssh-stderr".to_owned())
+            .spawn(move || read_final_error_tail(stderr))
+        {
+            Ok(reader) => Some(reader),
+            Err(error) => {
+                let _ = signal_process_group(process_group, libc::SIGKILL);
+                let _ = child.wait();
+                return Err(error);
+            }
+        }
+    } else {
+        None
+    };
     Ok(NativeSshChild {
         child: Some(child),
         process_group,
+        stderr_reader,
     })
+}
+
+fn read_final_error_tail(mut stderr: impl Read) -> io::Result<Vec<u8>> {
+    let mut tail = Vec::with_capacity(MAXIMUM_TRANSIENT_SSH_ERROR_BYTES);
+    let mut chunk = [0_u8; 1024];
+    loop {
+        let read = stderr.read(&mut chunk)?;
+        if read == 0 {
+            return Ok(tail);
+        }
+        if read >= MAXIMUM_TRANSIENT_SSH_ERROR_BYTES {
+            tail.clear();
+            tail.extend_from_slice(&chunk[read - MAXIMUM_TRANSIENT_SSH_ERROR_BYTES..read]);
+            continue;
+        }
+        let excess = tail
+            .len()
+            .saturating_add(read)
+            .saturating_sub(MAXIMUM_TRANSIENT_SSH_ERROR_BYTES);
+        if excess != 0 {
+            tail.drain(..excess);
+        }
+        tail.extend_from_slice(&chunk[..read]);
+    }
 }
 
 async fn spawn_owned_command_off_thread(command: Command) -> io::Result<NativeSshChild> {
@@ -412,6 +509,21 @@ mod tests {
     use std::fs;
     use std::path::PathBuf;
     use std::process::{Command, Stdio};
+
+    #[test]
+    fn transient_error_output_should_keep_only_the_sanitized_final_eight_kibibytes() {
+        let mut input = vec![b'x'; MAXIMUM_TRANSIENT_SSH_ERROR_BYTES + 32];
+        input.extend_from_slice(b"\nfinal\x1b[31m message\0");
+
+        let output = TransientSshErrorOutput::from_untrusted_bytes(&input).unwrap();
+
+        assert!(
+            output.as_str().len() <= MAXIMUM_TRANSIENT_SSH_ERROR_BYTES
+                && output.as_str().ends_with("final [31m message")
+                && !output.as_str().chars().any(char::is_control)
+                && !format!("{output:?}").contains("final")
+        );
+    }
 
     #[test]
     fn launch_environment_should_clear_unknown_variables_and_use_captured_home_as_cwd() {

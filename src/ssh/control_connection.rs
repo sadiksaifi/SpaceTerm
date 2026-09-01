@@ -16,7 +16,9 @@ use super::command::{
 use super::live_connection::{
     ControlConnectionLifecycleObserver, LiveConnectionAuthority, LiveConnectionState,
 };
-use super::process::{ProcessExit, ProcessRunError, ProcessSignal, SshProcessBackend};
+use super::process::{
+    ProcessExit, ProcessRunError, ProcessSignal, SshProcessBackend, TransientSshErrorOutput,
+};
 use super::remote_utility::PreparedSshRemoteUtilityCommand;
 use crate::domain::SshDestination;
 use crate::platform::app_paths::{AppPaths, AppPathsError, RegisteredRuntimeSocket, RuntimeOwner};
@@ -40,8 +42,9 @@ pub(crate) enum ControlConnectionTimingError {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct ControlConnectionTiming {
-    timeout: Duration,
+    timeout: Option<Duration>,
     poll_interval: Duration,
+    readiness_check_timeout: Duration,
 }
 
 impl ControlConnectionTiming {
@@ -56,8 +59,9 @@ impl ControlConnectionTiming {
             return Err(ControlConnectionTimingError::InvalidPollInterval);
         }
         Ok(Self {
-            timeout,
+            timeout: Some(timeout),
             poll_interval,
+            readiness_check_timeout: timeout,
         })
     }
 }
@@ -65,8 +69,9 @@ impl ControlConnectionTiming {
 impl Default for ControlConnectionTiming {
     fn default() -> Self {
         Self {
-            timeout: Duration::from_secs(15),
+            timeout: None,
             poll_interval: Duration::from_millis(100),
+            readiness_check_timeout: Duration::from_secs(1),
         }
     }
 }
@@ -85,8 +90,11 @@ pub(crate) enum ControlConnectionError {
     Cancelled,
     #[error("SSH control master did not become ready within {timeout:?}")]
     ReadinessTimedOut { timeout: Duration },
-    #[error("SSH control master exited before becoming ready: {0:?}")]
-    MasterExited(ProcessExit),
+    #[error("SSH control master exited before becoming ready: {exit:?}")]
+    MasterExited {
+        exit: ProcessExit,
+        error_output: Option<TransientSshErrorOutput>,
+    },
     #[error("SSH control master could not be launched: {source}")]
     Launch {
         #[source]
@@ -190,7 +198,9 @@ impl<B: SshProcessBackend> OpenSshControlConnection<B> {
             runtime_owner: Some(runtime_owner),
             registered_socket: None,
         };
-        let deadline = deadline_after(backend.now(), timing.timeout);
+        let deadline = timing
+            .timeout
+            .map(|timeout| deadline_after(backend.now(), timeout));
 
         loop {
             if cancellation.is_cancelled() {
@@ -204,25 +214,34 @@ impl<B: SshProcessBackend> OpenSshControlConnection<B> {
                 .try_wait(child)
                 .map_err(|source| ControlConnectionError::MasterStatus { source })?
             {
+                let error_output = backend.take_error_output(child);
                 launch.child.take();
-                return Err(ControlConnectionError::MasterExited(exit));
+                return Err(ControlConnectionError::MasterExited { exit, error_output });
             }
-            if backend.now() >= deadline {
+            if deadline.is_some_and(|deadline| backend.now() >= deadline) {
                 return Err(ControlConnectionError::ReadinessTimedOut {
-                    timeout: timing.timeout,
+                    timeout: timing.timeout.unwrap_or_default(),
                 });
             }
+            let now = backend.now();
+            let readiness_deadline =
+                deadline.unwrap_or_else(|| deadline_after(now, timing.readiness_check_timeout));
             let readiness = match backend
-                .run(commands.readiness_check(), cancellation.clone(), deadline)
+                .run(
+                    commands.readiness_check(),
+                    cancellation.clone(),
+                    readiness_deadline,
+                )
                 .await
             {
                 Ok(readiness) => readiness,
                 Err(ProcessRunError::Cancelled) => return Err(ControlConnectionError::Cancelled),
-                Err(ProcessRunError::TimedOut) => {
+                Err(ProcessRunError::TimedOut) if timing.timeout.is_some() => {
                     return Err(ControlConnectionError::ReadinessTimedOut {
-                        timeout: timing.timeout,
+                        timeout: timing.timeout.unwrap_or_default(),
                     });
                 }
+                Err(ProcessRunError::TimedOut) => ProcessExit::unsuccessful(None),
                 Err(source) => return Err(ControlConnectionError::Readiness { source }),
             };
             if cancellation.is_cancelled() {
@@ -238,12 +257,14 @@ impl<B: SshProcessBackend> OpenSshControlConnection<B> {
                 return launch.finish(commands, control_path);
             }
             let now = backend.now();
-            if now >= deadline {
+            if deadline.is_some_and(|deadline| now >= deadline) {
                 return Err(ControlConnectionError::ReadinessTimedOut {
-                    timeout: timing.timeout,
+                    timeout: timing.timeout.unwrap_or_default(),
                 });
             }
-            let delay = timing.poll_interval.min(deadline.duration_since(now));
+            let delay = deadline.map_or(timing.poll_interval, |deadline| {
+                timing.poll_interval.min(deadline.duration_since(now))
+            });
             backend.delay(delay).await;
         }
     }
@@ -665,6 +686,7 @@ mod tests {
         exit_after_shutdown: bool,
         exit_on_signal: ProcessSignal,
         signals: Vec<ProcessSignal>,
+        master_error_output: Option<TransientSshErrorOutput>,
     }
 
     impl Default for FakeState {
@@ -684,6 +706,7 @@ mod tests {
                 exit_after_shutdown: true,
                 exit_on_signal: ProcessSignal::Terminate,
                 signals: Vec::new(),
+                master_error_output: None,
             }
         }
     }
@@ -836,6 +859,10 @@ mod tests {
             self.state.lock().unwrap().reaps += 1;
         }
 
+        fn take_error_output(&self, _child: &mut Self::Child) -> Option<TransientSshErrorOutput> {
+            self.state.lock().unwrap().master_error_output.take()
+        }
+
         fn delay(&self, duration: Duration) -> impl Future<Output = ()> + Send {
             async move {
                 let (cancel, should_remain_pending) = {
@@ -982,12 +1009,14 @@ mod tests {
         let directory = TestDirectory::new();
         let paths = directory.paths();
         let backend = Arc::new(FakeBackend::default());
-        backend
-            .state
-            .lock()
-            .unwrap()
-            .early_exits
-            .push_back(Some(ProcessExit::unsuccessful(Some(7))));
+        {
+            let mut state = backend.state.lock().unwrap();
+            state
+                .early_exits
+                .push_back(Some(ProcessExit::unsuccessful(Some(7))));
+            state.master_error_output =
+                TransientSshErrorOutput::from_untrusted_bytes(b"bad\x1b config");
+        }
         let cancellation = SshCancellationToken::default();
 
         let error = cx
@@ -1003,8 +1032,11 @@ mod tests {
             .unwrap();
 
         assert!(matches!(
-            error,
-            ControlConnectionError::MasterExited(exit) if exit == ProcessExit::unsuccessful(Some(7))
+            &error,
+            ControlConnectionError::MasterExited { exit, error_output: Some(output) }
+                if *exit == ProcessExit::unsuccessful(Some(7))
+                    && output.as_str() == "bad  config"
+                    && !format!("{error:?}").contains("bad")
         ));
     }
 
@@ -1334,5 +1366,10 @@ mod tests {
                 .is_err()
                 && ControlConnectionTiming::new(Duration::from_secs(1), Duration::ZERO).is_err()
         );
+    }
+
+    #[test]
+    fn production_timing_should_not_impose_a_connection_deadline() {
+        assert!(ControlConnectionTiming::default().timeout.is_none());
     }
 }
