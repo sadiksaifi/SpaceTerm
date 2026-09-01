@@ -8,3 +8,4 @@ pub(crate) mod managed_hosts;
 pub(crate) mod process;
 pub(crate) mod remote_utility;
 pub(crate) mod remote_workspace_provider;
+pub(crate) mod startup_environment;
