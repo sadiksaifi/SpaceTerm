@@ -14,7 +14,7 @@ use gpui::{AnyWindowHandle, App, Context, Entity, EventEmitter, Render, Task, Wi
 use spaceterm_ui::{
     Dialog, DialogCloseDecision, DialogCompletion, DialogInitialFocus, DialogOutcome,
     DialogPendingCompletion, DialogSize, ModalAction, ModalActionRole, ModalId, TextInput,
-    TextInputEscapeBehavior, TextInputEvent, TextInputReturnBehavior,
+    TextInputEscapeBehavior, TextInputEvent, TextInputReturnBehavior, TextInputVariant,
 };
 
 use crate::ssh::destination::SshHostAlias;
@@ -93,6 +93,37 @@ struct SshHostFormErrors {
     identity_file: Option<&'static str>,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct SshHostFormTouched {
+    alias: bool,
+    host_name: bool,
+    user: bool,
+    port: bool,
+    identity_file: bool,
+}
+
+impl SshHostFormTouched {
+    fn mark(&mut self, field: SshHostFormField) {
+        match field {
+            SshHostFormField::Alias => self.alias = true,
+            SshHostFormField::HostName => self.host_name = true,
+            SshHostFormField::User => self.user = true,
+            SshHostFormField::Port => self.port = true,
+            SshHostFormField::IdentityFile => self.identity_file = true,
+        }
+    }
+
+    fn contains(self, field: SshHostFormField) -> bool {
+        match field {
+            SshHostFormField::Alias => self.alias,
+            SshHostFormField::HostName => self.host_name,
+            SshHostFormField::User => self.user,
+            SshHostFormField::Port => self.port,
+            SshHostFormField::IdentityFile => self.identity_file,
+        }
+    }
+}
+
 impl SshHostFormErrors {
     fn first_invalid(&self) -> Option<SshHostFormField> {
         [
@@ -131,6 +162,8 @@ pub(super) struct SshHostForm {
     port: Entity<TextInput>,
     identity_file: Entity<TextInput>,
     errors: SshHostFormErrors,
+    touched: SshHostFormTouched,
+    submit_attempted: bool,
     backend_error: Option<&'static str>,
     open: bool,
     pending: bool,
@@ -191,12 +224,24 @@ impl SshHostForm {
             window,
             cx,
         );
-        for input in [&alias, &host_name, &user, &port, &identity_file] {
-            cx.subscribe(input, |form, _, event: &TextInputEvent, cx| {
-                if matches!(event, TextInputEvent::ValueChanged(_)) {
-                    form.revalidate(cx);
-                }
-            })
+        for (field, input) in [
+            (SshHostFormField::Alias, &alias),
+            (SshHostFormField::HostName, &host_name),
+            (SshHostFormField::User, &user),
+            (SshHostFormField::Port, &port),
+            (SshHostFormField::IdentityFile, &identity_file),
+        ] {
+            cx.subscribe(
+                input,
+                move |form, _, event: &TextInputEvent, cx| match event {
+                    TextInputEvent::ValueChanged(_) => form.revalidate(cx),
+                    TextInputEvent::FocusLost => {
+                        form.touched.mark(field);
+                        form.revalidate(cx);
+                    }
+                    _ => {}
+                },
+            )
             .detach();
         }
         let mut form = Self {
@@ -208,6 +253,8 @@ impl SshHostForm {
             port,
             identity_file,
             errors: SshHostFormErrors::default(),
+            touched: SshHostFormTouched::default(),
+            submit_attempted: false,
             backend_error: None,
             open: false,
             pending: false,
@@ -231,6 +278,8 @@ impl SshHostForm {
         self.pending_host = None;
         self.pending_cancel = None;
         self.backend_error = None;
+        self.touched = SshHostFormTouched::default();
+        self.submit_attempted = false;
         self.revalidate(cx);
         self.set_editable(true, cx);
         let owner = cx.weak_entity();
@@ -258,8 +307,8 @@ impl SshHostForm {
             ],
             DialogInitialFocus::Body(initial_focus),
         )
-        .description("SpaceTerm writes only this managed SSH host entry.")
-        .size(DialogSize::Regular)
+        .description("Save an SSH destination for Remote Projects.")
+        .size(DialogSize::Wide)
         .body(cx.entity());
         let completion = dialog.present(
             window,
@@ -336,6 +385,12 @@ impl SshHostForm {
         cx.notify();
     }
 
+    fn visible_error(&self, field: SshHostFormField) -> Option<&'static str> {
+        (self.submit_attempted || self.touched.contains(field))
+            .then(|| self.errors.for_field(field))
+            .flatten()
+    }
+
     fn handle_action(
         &mut self,
         action: SshHostFormAction,
@@ -361,6 +416,7 @@ impl SshHostForm {
                 let validation = validate_form_values(&self.values(cx));
                 self.errors = validation.errors;
                 let Some(host) = validation.host else {
+                    self.submit_attempted = true;
                     self.backend_error = None;
                     let first_invalid = self
                         .errors
@@ -434,6 +490,7 @@ impl SshHostForm {
             Err(error) => {
                 self.pending = false;
                 self.pending_host = None;
+                self.submit_attempted = true;
                 self.errors = validate_form_values(&self.values(cx)).errors;
                 let first_invalid = match error {
                     ManagedHostFormBackendError::AliasCollision => {
@@ -553,44 +610,61 @@ impl SaveSettlement {
 }
 
 impl Render for SshHostForm {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .flex()
             .flex_col()
-            .gap(px(12.0))
+            .gap(px(16.0))
             .child(form_field(
                 "Alias",
                 true,
                 self.alias.clone(),
-                self.errors.alias,
+                self.alias.read(cx).focus_handle(),
+                self.alias.read(cx).is_focused(),
+                self.visible_error(SshHostFormField::Alias),
                 "managed-ssh-host-alias-error",
             ))
             .child(form_field(
                 "Host name",
                 true,
                 self.host_name.clone(),
-                self.errors.host_name,
+                self.host_name.read(cx).focus_handle(),
+                self.host_name.read(cx).is_focused(),
+                self.visible_error(SshHostFormField::HostName),
                 "managed-ssh-host-name-error",
             ))
-            .child(form_field(
-                "User",
-                false,
-                self.user.clone(),
-                self.errors.user,
-                "managed-ssh-host-user-error",
-            ))
-            .child(form_field(
-                "Port",
-                false,
-                self.port.clone(),
-                self.errors.port,
-                "managed-ssh-host-port-error",
-            ))
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_start()
+                    .gap(px(12.0))
+                    .child(div().min_w_0().flex_1().child(form_field(
+                        "User",
+                        false,
+                        self.user.clone(),
+                        self.user.read(cx).focus_handle(),
+                        self.user.read(cx).is_focused(),
+                        self.visible_error(SshHostFormField::User),
+                        "managed-ssh-host-user-error",
+                    )))
+                    .child(div().w(px(144.0)).flex_shrink_0().child(form_field(
+                        "Port",
+                        false,
+                        self.port.clone(),
+                        self.port.read(cx).focus_handle(),
+                        self.port.read(cx).is_focused(),
+                        self.visible_error(SshHostFormField::Port),
+                        "managed-ssh-host-port-error",
+                    ))),
+            )
             .child(form_field(
                 "Identity file",
                 false,
                 self.identity_file.clone(),
-                self.errors.identity_file,
+                self.identity_file.read(cx).focus_handle(),
+                self.identity_file.read(cx).is_focused(),
+                self.visible_error(SshHostFormField::IdentityFile),
                 "managed-ssh-host-identity-file-error",
             ))
             .when_some(self.backend_error, |form, error| {
@@ -616,6 +690,7 @@ fn text_input(
     cx.new(|cx| {
         TextInput::new(id, accessibility_name, value, window, cx)
             .placeholder(placeholder)
+            .variant(TextInputVariant::Bare)
             .return_behavior(TextInputReturnBehavior::Propagate)
             .escape_behavior(TextInputEscapeBehavior::Propagate)
             .debug_selector(id)
@@ -626,24 +701,61 @@ fn form_field(
     label: &'static str,
     required: bool,
     input: Entity<TextInput>,
+    input_focus: gpui::FocusHandle,
+    focused: bool,
     error: Option<&'static str>,
     error_selector: &'static str,
 ) -> impl IntoElement {
+    let border_color = if error.is_some() {
+        ACTIVE_THEME.error_border
+    } else if focused {
+        ACTIVE_THEME.border_selected
+    } else {
+        ACTIVE_THEME.border
+    };
     div()
         .flex()
         .flex_col()
-        .gap(px(5.0))
+        .gap(px(6.0))
         .child(
             div()
+                .flex()
+                .flex_row()
+                .items_center()
                 .text_size(px(12.0))
                 .text_color(gpui_color(ACTIVE_THEME.text_muted))
-                .child(if required {
-                    format!("{label} (required)")
-                } else {
-                    label.to_owned()
+                .child(label)
+                .when(required, |label| {
+                    label.child(
+                        div()
+                            .ml(px(3.0))
+                            .text_color(gpui_color(ACTIVE_THEME.error))
+                            .child("*"),
+                    )
                 }),
         )
-        .child(input)
+        .child(
+            div()
+                .h(px(34.0))
+                .w_full()
+                .min_w_0()
+                .flex_shrink_0()
+                .flex()
+                .items_center()
+                .overflow_hidden()
+                .px(px(10.0))
+                .rounded(px(5.0))
+                .border(px(1.0))
+                .border_color(gpui_color(border_color))
+                .bg(gpui_color(ACTIVE_THEME.element_background))
+                .text_size(px(13.0))
+                .text_color(gpui_color(ACTIVE_THEME.text))
+                .on_click(move |_, window, cx| {
+                    input_focus.focus(window);
+                    cx.stop_propagation();
+                })
+                .child(input),
+        )
         .when_some(error, |field, error| {
             field.child(
                 div()
