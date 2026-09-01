@@ -1,4 +1,6 @@
+use std::future::Future;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
@@ -435,8 +437,9 @@ fn map_control_connection_error(
 /// Non-clone owner of one connected session's control, authentication, alias, and cancellation.
 ///
 /// The owner pairs its lifecycle observer with the same control generation. Close cancels work,
-/// performs bounded control shutdown once, tears down AskPass, and releases the session alias lease
-/// only after cleanup. Workspace-lifetime alias pins are acquired as independent registry counts.
+/// transfers bounded control shutdown and AskPass teardown to retained background ownership, and
+/// releases the session alias lease only after cleanup. Workspace-lifetime alias pins are acquired
+/// as independent registry counts.
 struct NativeRemoteWorkspaceSessionOwner {
     control: Arc<Mutex<Option<Box<dyn NativeSessionControl>>>>,
     lifecycle: Option<ControlConnectionObserver>,
@@ -491,20 +494,28 @@ impl RemoteWorkspaceSessionOwner for NativeRemoteWorkspaceSessionOwner {
         if self.closed {
             return;
         }
+        self.closed = true;
         self.cancellation.cancel();
         let connection = self
             .control
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .take();
-        if let Some(mut connection) = connection {
-            connection.shutdown(&self.executor);
+        let authentication = self.authentication.take();
+        let alias = self.alias.take();
+        if connection.is_some() || authentication.is_some() || alias.is_some() {
+            self.executor
+                .spawn(async move {
+                    if let Some(authentication) = authentication {
+                        authentication.cancel();
+                    }
+                    if let Some(connection) = connection {
+                        connection.shutdown().await;
+                    }
+                    drop(alias);
+                })
+                .detach();
         }
-        if let Some(authentication) = self.authentication.take() {
-            authentication.cancel();
-        }
-        self.alias.take();
-        self.closed = true;
     }
 }
 
@@ -647,8 +658,10 @@ trait NativeSessionControl: Send {
 
     fn live_binding(&self) -> Option<LiveConnectionBinding>;
 
-    fn shutdown(&mut self, executor: &BackgroundExecutor);
+    fn shutdown(self: Box<Self>) -> NativeSessionShutdown;
 }
+
+type NativeSessionShutdown = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
 
 impl NativeSessionControl for OpenSshControlConnection<NativeSshProcessBackend> {
     fn is_ready(&self) -> bool {
@@ -667,17 +680,24 @@ impl NativeSessionControl for OpenSshControlConnection<NativeSshProcessBackend> 
         OpenSshControlConnection::live_binding(self).ok()
     }
 
-    fn shutdown(&mut self, executor: &BackgroundExecutor) {
-        let _ = executor.block(OpenSshControlConnection::shutdown(self));
+    fn shutdown(mut self: Box<Self>) -> NativeSessionShutdown {
+        Box::pin(async move {
+            let _ = OpenSshControlConnection::shutdown(&mut *self).await;
+        })
     }
 }
 
 #[cfg(test)]
 mod tests {
     use std::collections::VecDeque;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::mpsc;
+    use std::thread;
 
-    use gpui::TestAppContext;
+    use gpui::{
+        Context, FocusHandle, InteractiveElement, IntoElement, ParentElement, Render, Styled,
+        TestAppContext, div,
+    };
 
     use super::*;
     use crate::platform::app_paths::AppPathEnvironment;
@@ -950,10 +970,157 @@ mod tests {
             )
         }
 
-        fn shutdown(&mut self, _: &BackgroundExecutor) {
-            assert!(self.aliases.is_active(&self.alias));
-            self.shutdowns.fetch_add(1, Ordering::SeqCst);
+        fn shutdown(self: Box<Self>) -> NativeSessionShutdown {
+            Box::pin(async move {
+                assert!(self.aliases.is_active(&self.alias));
+                self.shutdowns.fetch_add(1, Ordering::SeqCst);
+            })
         }
+    }
+
+    struct PendingShutdownControl {
+        release: async_channel::Receiver<()>,
+        started: Arc<AtomicUsize>,
+        terminated: Arc<AtomicUsize>,
+        reaped: Arc<AtomicUsize>,
+        artifacts_removed: Arc<AtomicUsize>,
+    }
+
+    impl NativeSessionControl for PendingShutdownControl {
+        fn is_ready(&self) -> bool {
+            true
+        }
+
+        fn prepare_pane_channel(
+            &self,
+            _: crate::ssh::command::ValidatedRemoteShellCommand,
+        ) -> Result<crate::ssh::command::PreparedSshPaneChannelCommand, RemoteChannelUnavailable>
+        {
+            Err(RemoteChannelUnavailable)
+        }
+
+        fn live_binding(&self) -> Option<LiveConnectionBinding> {
+            Some(LiveConnectionBinding::for_test(1))
+        }
+
+        fn shutdown(self: Box<Self>) -> NativeSessionShutdown {
+            Box::pin(async move {
+                self.started.fetch_add(1, Ordering::SeqCst);
+                let _ = self.release.recv().await;
+                self.terminated.fetch_add(1, Ordering::SeqCst);
+                self.reaped.fetch_add(1, Ordering::SeqCst);
+                self.artifacts_removed.fetch_add(1, Ordering::SeqCst);
+            })
+        }
+    }
+
+    struct NativeCloseHarness {
+        session: Option<RemoteWorkspaceConnectedSession>,
+        prior_focus: FocusHandle,
+        transient_focus: FocusHandle,
+    }
+
+    impl NativeCloseHarness {
+        fn cancel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+            self.session.take();
+            self.prior_focus.focus(window);
+            cx.notify();
+        }
+    }
+
+    impl Render for NativeCloseHarness {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .size_full()
+                .track_focus(&self.prior_focus)
+                .child(div().track_focus(&self.transient_focus))
+        }
+    }
+
+    #[gpui::test]
+    fn pending_native_shutdown_should_not_block_cancel_or_focus_restoration(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(crate::ui::init);
+        let (release, pending) = async_channel::bounded(1);
+        let started = Arc::new(AtomicUsize::new(0));
+        let terminated = Arc::new(AtomicUsize::new(0));
+        let reaped = Arc::new(AtomicUsize::new(0));
+        let artifacts_removed = Arc::new(AtomicUsize::new(0));
+        let aliases = ActiveSshAliasRegistry::default();
+        let alias = SshHostAlias::new("work".to_owned()).unwrap();
+        let alias_lease = aliases.acquire(alias.clone()).unwrap();
+        let control: Arc<Mutex<Option<Box<dyn NativeSessionControl>>>> =
+            Arc::new(Mutex::new(Some(Box::new(PendingShutdownControl {
+                release: pending,
+                started: Arc::clone(&started),
+                terminated: Arc::clone(&terminated),
+                reaped: Arc::clone(&reaped),
+                artifacts_removed: Arc::clone(&artifacts_removed),
+            }))));
+        let owner = NativeRemoteWorkspaceSessionOwner {
+            control,
+            lifecycle: None,
+            utility: Arc::new(FakeIdentityProvider::returning([])),
+            authentication: None,
+            alias: Some(alias_lease),
+            cancellation: SshCancellationToken::default(),
+            executor: cx.executor(),
+            closed: false,
+        };
+        let session = RemoteWorkspaceConnectedSession::new(
+            Box::new(owner),
+            Arc::new(FakeIdentityProvider::returning([])),
+        );
+        let (harness, cx) = cx.add_window_view(move |window, cx| {
+            let prior_focus = cx.focus_handle();
+            let transient_focus = cx.focus_handle();
+            transient_focus.focus(window);
+            NativeCloseHarness {
+                session: Some(session),
+                prior_focus,
+                transient_focus,
+            }
+        });
+        cx.update(|window, _| window.activate_window());
+        cx.run_until_parked();
+        assert!(cx.update(|window, cx| harness.read(cx).transient_focus.is_focused(window)));
+
+        let (returned, wait_for_return) = mpsc::sync_channel(1);
+        let blocked = Arc::new(AtomicBool::new(false));
+        let watchdog_blocked = Arc::clone(&blocked);
+        let watchdog_release = release.clone();
+        let watchdog = thread::spawn(move || {
+            if wait_for_return
+                .recv_timeout(Duration::from_secs(1))
+                .is_err()
+            {
+                watchdog_blocked.store(true, Ordering::Release);
+                let _ = watchdog_release.send_blocking(());
+            }
+        });
+
+        cx.update(|window, cx| {
+            harness.update(cx, |harness, cx| harness.cancel(window, cx));
+        });
+        returned.send(()).unwrap();
+        watchdog.join().unwrap();
+
+        assert!(!blocked.load(Ordering::Acquire));
+        assert!(cx.update(|window, cx| harness.read(cx).prior_focus.is_focused(window)));
+        cx.run_until_parked();
+        assert_eq!(started.load(Ordering::SeqCst), 1);
+        assert_eq!(terminated.load(Ordering::SeqCst), 0);
+        assert_eq!(reaped.load(Ordering::SeqCst), 0);
+        assert_eq!(artifacts_removed.load(Ordering::SeqCst), 0);
+        assert!(aliases.is_active(&alias));
+
+        release.send_blocking(()).unwrap();
+        cx.run_until_parked();
+        assert_eq!(terminated.load(Ordering::SeqCst), 1);
+        assert_eq!(reaped.load(Ordering::SeqCst), 1);
+        assert_eq!(artifacts_removed.load(Ordering::SeqCst), 1);
+        assert!(!aliases.is_active(&alias));
     }
 
     #[gpui::test]
@@ -1001,6 +1168,7 @@ mod tests {
 
         owner.close();
         owner.close();
+        cx.run_until_parked();
 
         assert!(cancellation.is_cancelled());
         assert_eq!(shutdowns.load(Ordering::SeqCst), 1);

@@ -924,6 +924,11 @@ each Remote Terminal Session consumes its own single-use prepared channel comman
 Control Connection. A Remote launch uses the local `HOME` only as the local SSH process working
 directory; it does not grant local path authority to the Remote Workspace Directory.
 
+Closing or cancelling a Remote Project transfers Control Connection shutdown, reap, AskPass
+teardown, and private runtime cleanup into retained background ownership. GPUI and AppKit release
+hierarchy and focus ownership synchronously without waiting for the bounded OpenSSH shutdown; the
+session alias lease remains held until that background cleanup finishes.
+
 Remote connection state couples Connecting, Connected, Reconnecting, Disconnected, Failed, and
 Closing to a monotonic Connection Generation. Reconnect starts only from Disconnected or Failed at
 a greater generation. A completion from an older generation is stale, an invalid transition is

@@ -193,8 +193,9 @@ pub(super) struct RemoteWorkspaceAliasPinError;
 /// The opaque lifetime owner for one connected SSH control path.
 ///
 /// This trait deliberately exposes no command or transport access to UI code. Implementations are
-/// non-clone owners and must make `close` idempotent, bounded, and responsible for exact process,
-/// socket, authentication, cancellation, and per-session alias cleanup.
+/// non-clone owners and must make `close` idempotent and non-blocking for the calling GPUI thread.
+/// Retained background ownership remains responsible for bounded exact process, socket,
+/// authentication, cancellation, and per-session alias cleanup after `close` returns.
 pub(super) trait RemoteWorkspaceSessionOwner: Send + 'static {
     /// Acquires an independent Workspace-lifetime alias count without consuming session ownership.
     fn acquire_workspace_alias_pin(
@@ -1810,11 +1811,17 @@ mod tests {
     struct FlowHarness {
         flow: Entity<RemoteWorkspaceFlow>,
         events: Rc<RefCell<CapturedEvents>>,
+        prior_focus: FocusHandle,
     }
 
     impl Render for FlowHarness {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-            ModalLayer::new(div().size_full().child(self.flow.clone()))
+            ModalLayer::new(
+                div()
+                    .size_full()
+                    .track_focus(&self.prior_focus)
+                    .child(self.flow.clone()),
+            )
         }
     }
 
@@ -1877,7 +1884,13 @@ mod tests {
                 RemoteWorkspaceFlowEvent::StateChanged => {}
             })
             .detach();
-            FlowHarness { flow, events }
+            let prior_focus = cx.focus_handle();
+            prior_focus.focus(window);
+            FlowHarness {
+                flow,
+                events,
+                prior_focus,
+            }
         });
         let (flow, events) = harness.read_with(cx, |harness, _| {
             (harness.flow.clone(), Rc::clone(&harness.events))
@@ -2987,7 +3000,7 @@ mod tests {
     fn full_remote_picker_dismissal_should_close_retained_connection(cx: &mut TestAppContext) {
         let closes = Arc::new(AtomicUsize::new(0));
         let backend = FakeBackend::new([Task::ready(Ok(session(&closes)))]);
-        let (_, flow, events, cx) = flow_window(backend, cx);
+        let (harness, flow, events, cx) = flow_window(backend, cx);
         select_destination(&flow, "work", cx);
 
         cx.update(|window, cx| {
@@ -3008,6 +3021,7 @@ mod tests {
         );
         assert_eq!(closes.load(Ordering::SeqCst), 1);
         assert_eq!(events.borrow().cancelled, 1);
+        assert!(cx.update(|window, cx| harness.read(cx).prior_focus.is_focused(window)));
     }
 
     #[test]
