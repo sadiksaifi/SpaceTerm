@@ -22,12 +22,17 @@ use crate::domain::SshDestination;
 use crate::ssh::destination::{
     DestinationQueryResolution, SshHostAlias, resolve_destination_query,
 };
-use crate::ssh::host_config::{DiscoveredSshHost, HostConfigSource, HostDiscovery};
+use crate::ssh::host_config::{
+    DiscoveredSshHost, HostConfigIssueKind, HostConfigSource, HostDiscovery,
+};
 
 const MAXIMUM_DESTINATION_BYTES: usize = 1024;
 const ADD_HOST_ACTION: &str = "ssh-host-picker-add";
 const EDIT_HOST_ACTION: &str = "ssh-host-picker-edit";
 const DELETE_HOST_ACTION: &str = "ssh-host-picker-delete";
+const DISCOVERY_WARNING_SELECTOR: &str = "ssh-host-picker-discovery-warning";
+const MAXIMUM_DISCOVERY_WARNING_BYTES: usize = 256;
+const HOST_DISCOVERY_ISSUE_CLASS_COUNT: usize = 4;
 
 pub(super) trait HostDiscoveryProvider: Send + Sync {
     fn discover(&self) -> HostDiscovery;
@@ -35,11 +40,102 @@ pub(super) trait HostDiscoveryProvider: Send + Sync {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum SshHostPickerItemId {
+    DiscoveryWarning,
     Configured(SshHostAlias),
     UserOverride {
         destination: SshDestination,
         alias: SshHostAlias,
     },
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+enum HostDiscoveryIssueClass {
+    Unreadable,
+    Malformed,
+    IncludeCycle,
+    SafetyLimit,
+}
+
+impl HostDiscoveryIssueClass {
+    const fn action(self) -> &'static str {
+        match self {
+            Self::Unreadable => "check SSH config file permissions",
+            Self::Malformed => "fix malformed SSH config directives",
+            Self::IncludeCycle => "remove recursive Include directives",
+            Self::SafetyLimit => "narrow Include patterns or reduce config size",
+        }
+    }
+}
+
+fn issue_class(kind: HostConfigIssueKind) -> HostDiscoveryIssueClass {
+    match kind {
+        HostConfigIssueKind::Read => HostDiscoveryIssueClass::Unreadable,
+        HostConfigIssueKind::InvalidUtf8 | HostConfigIssueKind::MalformedLine => {
+            HostDiscoveryIssueClass::Malformed
+        }
+        HostConfigIssueKind::IncludeCycle => HostDiscoveryIssueClass::IncludeCycle,
+        HostConfigIssueKind::IncludeDepthLimit
+        | HostConfigIssueKind::FileLimit
+        | HostConfigIssueKind::TotalByteLimit
+        | HostConfigIssueKind::FileByteLimit
+        | HostConfigIssueKind::GlobLimit
+        | HostConfigIssueKind::ResultLimit
+        | HostConfigIssueKind::DeclarationLimit
+        | HostConfigIssueKind::TokenLimit => HostDiscoveryIssueClass::SafetyLimit,
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct HostDiscoveryDiagnostic {
+    title: &'static str,
+    description: String,
+}
+
+impl HostDiscoveryDiagnostic {
+    fn for_discovery(discovery: &HostDiscovery) -> Option<Self> {
+        let mut classes = BTreeSet::new();
+        for issue in &discovery.issues {
+            classes.insert(issue_class(issue.kind()));
+            if classes.len() == HOST_DISCOVERY_ISSUE_CLASS_COUNT {
+                break;
+            }
+        }
+        if classes.is_empty() {
+            return None;
+        }
+        let actions = classes
+            .into_iter()
+            .map(HostDiscoveryIssueClass::action)
+            .collect::<Vec<_>>()
+            .join("; ");
+        let description = format!("To load all hosts, {actions}, then refresh.");
+        debug_assert!(description.len() <= MAXIMUM_DISCOVERY_WARNING_BYTES);
+        Some(Self {
+            title: if discovery.hosts.is_empty() {
+                "No safe SSH hosts were found"
+            } else {
+                "SSH host list is incomplete"
+            },
+            description,
+        })
+    }
+
+    fn into_palette_item(self) -> CommandPaletteItem<SshHostPickerItemId> {
+        CommandPaletteItem::new(SshHostPickerItemId::DiscoveryWarning, self.title)
+            .description(self.description)
+            .section("SSH Config Warning")
+            .disabled(true)
+            .trailing(CommandPaletteAccessory::Status("Action needed".into()))
+            .debug_selector(DISCOVERY_WARNING_SELECTOR)
+    }
+}
+
+fn no_results_text(discovery: &HostDiscovery, query: &str) -> &'static str {
+    if query.is_empty() && discovery.hosts.is_empty() && discovery.issues.is_empty() {
+        "No SSH hosts configured"
+    } else {
+        "No matching SSH hosts"
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -334,24 +430,40 @@ impl SshHostPicker {
         cx.spawn_in(window, async move |picker, cx| {
             let discovery = background.await;
             let _ = picker.update_in(cx, |picker, _, cx| {
-                if picker.open && picker.refresh_generation == generation {
-                    picker.discovery = discovery;
-                    picker.rebuild_rows(cx);
-                }
+                picker.apply_discovery(generation, discovery, cx);
             });
         })
         .detach();
     }
 
+    fn apply_discovery(
+        &mut self,
+        generation: u64,
+        discovery: HostDiscovery,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !self.open || self.refresh_generation != generation {
+            return false;
+        }
+        self.discovery = discovery;
+        self.rebuild_rows(cx);
+        true
+    }
+
     fn rebuild_rows(&mut self, cx: &mut Context<Self>) {
         self.rows = host_rows_for_query(&self.discovery, &self.retained_query);
-        let items = self
-            .rows
-            .iter()
-            .cloned()
-            .map(HostPickerRow::into_palette_item)
-            .collect();
+        let mut items = Vec::with_capacity(self.rows.len().saturating_add(1));
+        if let Some(diagnostic) = HostDiscoveryDiagnostic::for_discovery(&self.discovery) {
+            items.push(diagnostic.into_palette_item());
+        }
+        items.extend(
+            self.rows
+                .iter()
+                .cloned()
+                .map(HostPickerRow::into_palette_item),
+        );
         self.palette.update(cx, |palette, cx| {
+            palette.set_no_results_text(no_results_text(&self.discovery, &self.retained_query), cx);
             palette.set_preferred_item(self.retained_selection.clone(), cx);
             palette.set_items(items, cx);
         });
@@ -496,6 +608,7 @@ mod tests {
 
     struct MemoryHostConfigFilesystem {
         files: BTreeMap<PathBuf, Vec<u8>>,
+        unreadable: BTreeSet<PathBuf>,
     }
 
     impl HostConfigFilesystem for MemoryHostConfigFilesystem {
@@ -504,6 +617,9 @@ mod tests {
         }
 
         fn read_file_limited(&self, path: &Path, maximum_bytes: usize) -> io::Result<Vec<u8>> {
+            if self.unreadable.contains(path) {
+                return Err(io::Error::from(io::ErrorKind::PermissionDenied));
+            }
             let contents = self
                 .files
                 .get(path)
@@ -520,7 +636,11 @@ mod tests {
         }
     }
 
-    fn host_discovery(managed: &str, user: &str) -> HostDiscovery {
+    fn host_discovery_with_limits(
+        managed: &[u8],
+        user: &[u8],
+        limits: HostDiscoveryLimits,
+    ) -> HostDiscovery {
         let roots = HostConfigRoots {
             managed: PathBuf::from("/managed/ssh_config"),
             user: PathBuf::from("/home/test/.ssh/config"),
@@ -528,9 +648,34 @@ mod tests {
         };
         let filesystem = MemoryHostConfigFilesystem {
             files: BTreeMap::from([
-                (roots.managed.clone(), managed.as_bytes().to_vec()),
-                (roots.user.clone(), user.as_bytes().to_vec()),
+                (roots.managed.clone(), managed.to_vec()),
+                (roots.user.clone(), user.to_vec()),
             ]),
+            unreadable: BTreeSet::new(),
+        };
+        discover_ssh_hosts(&filesystem, &roots, limits)
+    }
+
+    fn host_discovery(managed: &str, user: &str) -> HostDiscovery {
+        host_discovery_with_limits(
+            managed.as_bytes(),
+            user.as_bytes(),
+            HostDiscoveryLimits::default(),
+        )
+    }
+
+    fn unreadable_host_discovery() -> HostDiscovery {
+        let roots = HostConfigRoots {
+            managed: PathBuf::from("/managed/ssh_config"),
+            user: PathBuf::from("/home/test/.ssh/config"),
+            home: PathBuf::from("/home/test"),
+        };
+        let filesystem = MemoryHostConfigFilesystem {
+            files: BTreeMap::from([
+                (roots.managed.clone(), Vec::new()),
+                (roots.user.clone(), b"Host safe-user-host\n".to_vec()),
+            ]),
+            unreadable: BTreeSet::from([roots.managed.clone()]),
         };
         discover_ssh_hosts(&filesystem, &roots, HostDiscoveryLimits::default())
     }
@@ -702,6 +847,219 @@ mod tests {
                 ("work", "deploy@build.example:2222", true),
             ]
         );
+    }
+
+    #[test]
+    fn read_issues_should_produce_an_unreadable_diagnostic() {
+        assert_eq!(
+            issue_class(HostConfigIssueKind::Read),
+            HostDiscoveryIssueClass::Unreadable
+        );
+    }
+
+    #[gpui::test]
+    fn unreadable_config_should_warn_without_discarding_safe_hosts(cx: &mut TestAppContext) {
+        let provider = Arc::new(ScriptedHostDiscoveryProvider::new([
+            unreadable_host_discovery(),
+        ]));
+        let (_, picker, _, cx) = host_picker(provider, |_| false, cx);
+
+        let diagnostic = picker.read_with(cx, |picker, _| {
+            HostDiscoveryDiagnostic::for_discovery(&picker.discovery).unwrap()
+        });
+        assert!(diagnostic.description.contains("file permissions"));
+        assert_eq!(
+            picker.read_with(cx, |picker, _| picker.rows[0].label().to_owned()),
+            "safe-user-host"
+        );
+        assert!(cx.debug_bounds(DISCOVERY_WARNING_SELECTOR).is_some());
+    }
+
+    #[test]
+    fn invalid_text_and_directives_should_produce_a_malformed_diagnostic() {
+        assert_eq!(
+            [
+                issue_class(HostConfigIssueKind::InvalidUtf8),
+                issue_class(HostConfigIssueKind::MalformedLine),
+            ],
+            [
+                HostDiscoveryIssueClass::Malformed,
+                HostDiscoveryIssueClass::Malformed,
+            ]
+        );
+    }
+
+    #[test]
+    fn include_cycles_should_produce_a_cycle_diagnostic() {
+        assert_eq!(
+            issue_class(HostConfigIssueKind::IncludeCycle),
+            HostDiscoveryIssueClass::IncludeCycle
+        );
+    }
+
+    #[test]
+    fn every_scanner_bound_should_produce_a_safety_limit_diagnostic() {
+        let classes = [
+            HostConfigIssueKind::IncludeDepthLimit,
+            HostConfigIssueKind::FileLimit,
+            HostConfigIssueKind::TotalByteLimit,
+            HostConfigIssueKind::FileByteLimit,
+            HostConfigIssueKind::GlobLimit,
+            HostConfigIssueKind::ResultLimit,
+            HostConfigIssueKind::DeclarationLimit,
+            HostConfigIssueKind::TokenLimit,
+        ]
+        .map(issue_class);
+
+        assert_eq!([HostDiscoveryIssueClass::SafetyLimit; 8], classes);
+    }
+
+    #[gpui::test]
+    fn partial_discovery_should_keep_safe_hosts_and_show_a_non_selectable_warning(
+        cx: &mut TestAppContext,
+    ) {
+        let provider = Arc::new(ScriptedHostDiscoveryProvider::new([host_discovery(
+            "Host \"unterminated\nHost work\n",
+            "Host personal\n",
+        )]));
+        let (_, picker, _, cx) = host_picker(provider, |_| false, cx);
+
+        assert!(cx.debug_bounds(DISCOVERY_WARNING_SELECTOR).is_some());
+        assert_eq!(
+            picker.read_with(cx, |picker, _| picker
+                .rows
+                .iter()
+                .map(|row| row.label().to_owned())
+                .collect::<Vec<_>>()),
+            ["personal".to_owned(), "work".to_owned()]
+        );
+        assert!(matches!(
+            selected_item(&picker, cx),
+            Some(SshHostPickerItemId::Configured(_))
+        ));
+        let diagnostic = picker.read_with(cx, |picker, _| {
+            HostDiscoveryDiagnostic::for_discovery(&picker.discovery).unwrap()
+        });
+        assert!(!diagnostic.description.contains("/managed"));
+        assert!(!diagnostic.description.contains("unterminated"));
+    }
+
+    #[test]
+    fn truncated_discovery_warning_should_be_fixed_and_bounded() {
+        let discovery = host_discovery_with_limits(
+            b"Host first second third\n",
+            b"",
+            HostDiscoveryLimits {
+                results: 1,
+                ..HostDiscoveryLimits::default()
+            },
+        );
+
+        let diagnostic = HostDiscoveryDiagnostic::for_discovery(&discovery).unwrap();
+
+        assert!(diagnostic.description.contains("narrow Include patterns"));
+        assert!(diagnostic.description.len() <= MAXIMUM_DISCOVERY_WARNING_BYTES);
+    }
+
+    #[gpui::test]
+    fn genuine_empty_discovery_should_show_the_configured_empty_state_without_a_warning(
+        cx: &mut TestAppContext,
+    ) {
+        let provider = Arc::new(ScriptedHostDiscoveryProvider::new([
+            HostDiscovery::default(),
+        ]));
+        let (_, picker, _, cx) = host_picker(provider, |_| false, cx);
+
+        assert_eq!(
+            picker.read_with(cx, |picker, _| no_results_text(&picker.discovery, "")),
+            "No SSH hosts configured"
+        );
+        assert!(cx.debug_bounds(DISCOVERY_WARNING_SELECTOR).is_none());
+        assert!(selected_item(&picker, cx).is_none());
+    }
+
+    #[gpui::test]
+    fn partial_empty_discovery_should_explain_that_no_safe_hosts_were_found(
+        cx: &mut TestAppContext,
+    ) {
+        let discovery = host_discovery("Host \"unterminated\n", "");
+        let provider = Arc::new(ScriptedHostDiscoveryProvider::new([discovery]));
+        let (_, picker, _, cx) = host_picker(provider, |_| false, cx);
+
+        let diagnostic = picker.read_with(cx, |picker, _| {
+            HostDiscoveryDiagnostic::for_discovery(&picker.discovery).unwrap()
+        });
+        assert_eq!(diagnostic.title, "No safe SSH hosts were found");
+        assert!(cx.debug_bounds(DISCOVERY_WARNING_SELECTOR).is_some());
+        assert!(selected_item(&picker, cx).is_none());
+    }
+
+    #[gpui::test]
+    fn refresh_should_update_then_clear_discovery_diagnostics(cx: &mut TestAppContext) {
+        let provider = Arc::new(ScriptedHostDiscoveryProvider::new([
+            host_discovery("Host \"unterminated\nHost work\n", ""),
+            host_discovery("Include /managed/ssh_config\nHost work\n", ""),
+            host_discovery("Host work\n", ""),
+        ]));
+        let (_, picker, _, cx) = host_picker(Arc::clone(&provider), |_| false, cx);
+        assert!(
+            picker
+                .read_with(cx, |picker, _| HostDiscoveryDiagnostic::for_discovery(
+                    &picker.discovery
+                ))
+                .unwrap()
+                .description
+                .contains("malformed")
+        );
+
+        cx.update(|window, cx| {
+            picker.update(cx, |picker, cx| picker.refresh(window, cx));
+        });
+        cx.run_until_parked();
+        assert!(
+            picker
+                .read_with(cx, |picker, _| HostDiscoveryDiagnostic::for_discovery(
+                    &picker.discovery
+                ))
+                .unwrap()
+                .description
+                .contains("recursive Include")
+        );
+
+        cx.update(|window, cx| {
+            picker.update(cx, |picker, cx| picker.refresh(window, cx));
+        });
+        cx.run_until_parked();
+
+        assert_eq!(provider.calls(), 3);
+        assert!(picker.read_with(cx, |picker, _| {
+            HostDiscoveryDiagnostic::for_discovery(&picker.discovery).is_none()
+        }));
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds(DISCOVERY_WARNING_SELECTOR).is_none());
+    }
+
+    #[gpui::test]
+    fn stale_refresh_result_should_not_restore_an_old_diagnostic(cx: &mut TestAppContext) {
+        let provider = Arc::new(ScriptedHostDiscoveryProvider::new([host_discovery(
+            "Host work\n",
+            "",
+        )]));
+        let (_, picker, _, cx) = host_picker(provider, |_| false, cx);
+        let stale_generation =
+            picker.read_with(cx, |picker, _| picker.refresh_generation.wrapping_sub(1));
+        let stale_discovery = host_discovery("Host \"unterminated\n", "");
+
+        let applied = picker.update(cx, |picker, cx| {
+            picker.apply_discovery(stale_generation, stale_discovery, cx)
+        });
+
+        assert!(!applied);
+        assert!(picker.read_with(cx, |picker, _| {
+            HostDiscoveryDiagnostic::for_discovery(&picker.discovery).is_none()
+        }));
+        assert!(cx.debug_bounds(DISCOVERY_WARNING_SELECTOR).is_none());
     }
 
     #[gpui::test]
