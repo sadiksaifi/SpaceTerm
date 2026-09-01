@@ -28,6 +28,11 @@ const NS_ALERT_FIRST_BUTTON_RETURN: NSInteger = 1_000;
 const NS_ALERT_SECOND_BUTTON_RETURN: NSInteger = 1_001;
 const NS_MODAL_RESPONSE_ABORT: NSInteger = -1_001;
 const NS_UTF8_STRING_ENCODING: usize = 4;
+const NS_LAYOUT_ATTRIBUTE_CENTER_X: NSInteger = 9;
+const NS_LAYOUT_RELATION_EQUAL: NSInteger = 0;
+const NS_USER_INTERFACE_LAYOUT_DIRECTION_RIGHT_TO_LEFT: NSInteger = 1;
+const ASKPASS_ACTION_TRAILING_INSET: f64 = 16.0;
+const ASKPASS_ACTION_ALIGNMENT_TOLERANCE: f64 = 0.5;
 const SECRET_FIELD_OBSERVER_CLASS: &str = "SpaceTermAskPassSecretFieldObserver";
 const SECRET_FIELD_OBSERVER_BUTTON_IVAR: &str = "spaceTermAskPassAffirmativeButton";
 
@@ -1022,6 +1027,12 @@ impl NativeAskPassSheet {
             (safe_button, affirmative_button)
         };
 
+        // SAFETY: Laying out the fully configured alert materializes its standard action group
+        // before the trailing constraint below is installed.
+        unsafe {
+            let _: () = msg_send![alert, layout];
+        }
+
         // SAFETY: The retained alert owns its NSWindow for the alert lifetime.
         let alert_window: id = unsafe { msg_send![alert, window] };
         if alert_window == nil {
@@ -1044,6 +1055,11 @@ impl NativeAskPassSheet {
                 let _: () = msg_send![alert_window, setDefaultButtonCell: safe_cell];
             }
         }
+        // SAFETY: `layout` above established the standard NSAlert view hierarchy. The helper only
+        // replaces the action group's center-X constraint when both buttons share the content view.
+        let _action_group_aligned = unsafe {
+            align_alert_action_group_trailing(alert_window, safe_button, affirmative_button)
+        };
         let secret_field_observer = if presentation.kind.requires_nonempty_secret() {
             let Some(field) = secret_field else {
                 // SAFETY: The retained alert owns both buttons and no object has been published.
@@ -1236,6 +1252,135 @@ unsafe fn new_secure_text_field(
         }
     }
     Ok(field)
+}
+
+fn action_group_is_trailing(
+    group_frame: NSRect,
+    content_bounds: NSRect,
+    right_to_left: bool,
+) -> bool {
+    let (actual, expected) = if right_to_left {
+        (
+            group_frame.origin.x,
+            content_bounds.origin.x + ASKPASS_ACTION_TRAILING_INSET,
+        )
+    } else {
+        (
+            group_frame.origin.x + group_frame.size.width,
+            content_bounds.origin.x + content_bounds.size.width - ASKPASS_ACTION_TRAILING_INSET,
+        )
+    };
+    (actual - expected).abs() <= ASKPASS_ACTION_ALIGNMENT_TOLERANCE
+}
+
+fn has_exact_center_constraint_properties(
+    is_active: bool,
+    relation: NSInteger,
+    multiplier: f64,
+    constant: f64,
+) -> bool {
+    is_active
+        && relation == NS_LAYOUT_RELATION_EQUAL
+        && (multiplier - 1.0).abs() <= f64::EPSILON
+        && constant.abs() <= f64::EPSILON
+}
+
+unsafe fn align_alert_action_group_trailing(
+    alert_window: id,
+    safe_button: id,
+    affirmative_button: id,
+) -> bool {
+    if alert_window == nil || safe_button == nil || affirmative_button == nil {
+        return false;
+    }
+    // SAFETY: NSAlert owns both buttons and its content view for the alert lifetime. This uses only
+    // public NSView and NSLayoutAnchor selectors after the alert has completed its initial layout.
+    unsafe {
+        let action_group: id = msg_send![safe_button, superview];
+        let affirmative_group: id = msg_send![affirmative_button, superview];
+        let content_view: id = msg_send![alert_window, contentView];
+        if action_group == nil || action_group != affirmative_group || content_view == nil {
+            return false;
+        }
+        let action_group_parent: id = msg_send![action_group, superview];
+        if action_group_parent != content_view {
+            return false;
+        }
+        let layout_direction: NSInteger = msg_send![content_view, userInterfaceLayoutDirection];
+        let right_to_left = layout_direction == NS_USER_INTERFACE_LAYOUT_DIRECTION_RIGHT_TO_LEFT;
+
+        let group_frame: NSRect = msg_send![action_group, frame];
+        let content_bounds: NSRect = msg_send![content_view, bounds];
+        if action_group_is_trailing(group_frame, content_bounds, right_to_left) {
+            return true;
+        }
+
+        let constraints: id = msg_send![content_view, constraints];
+        if constraints == nil {
+            return false;
+        }
+        let count: usize = msg_send![constraints, count];
+        let mut center_constraint = None;
+        for index in 0..count {
+            let constraint: id = msg_send![constraints, objectAtIndex: index];
+            let is_active: BOOL = msg_send![constraint, isActive];
+            let first_item: id = msg_send![constraint, firstItem];
+            let second_item: id = msg_send![constraint, secondItem];
+            let first_attribute: NSInteger = msg_send![constraint, firstAttribute];
+            let second_attribute: NSInteger = msg_send![constraint, secondAttribute];
+            let relation: NSInteger = msg_send![constraint, relation];
+            let multiplier: f64 = msg_send![constraint, multiplier];
+            let constant: f64 = msg_send![constraint, constant];
+            let centers_group = first_item == action_group
+                && second_item == content_view
+                && first_attribute == NS_LAYOUT_ATTRIBUTE_CENTER_X
+                && second_attribute == NS_LAYOUT_ATTRIBUTE_CENTER_X;
+            let centers_group_reversed = first_item == content_view
+                && second_item == action_group
+                && first_attribute == NS_LAYOUT_ATTRIBUTE_CENTER_X
+                && second_attribute == NS_LAYOUT_ATTRIBUTE_CENTER_X;
+            let exact_active_center = (centers_group || centers_group_reversed)
+                && has_exact_center_constraint_properties(
+                    is_active == YES,
+                    relation,
+                    multiplier,
+                    constant,
+                );
+            if exact_active_center {
+                if center_constraint.is_some() {
+                    return false;
+                }
+                center_constraint = Some(constraint);
+            }
+        }
+        let Some(center_constraint) = center_constraint else {
+            return false;
+        };
+
+        let action_trailing: id = msg_send![action_group, trailingAnchor];
+        let content_trailing: id = msg_send![content_view, trailingAnchor];
+        let trailing_constraint: id = msg_send![
+            action_trailing,
+            constraintEqualToAnchor: content_trailing
+            constant: -ASKPASS_ACTION_TRAILING_INSET
+        ];
+        if trailing_constraint == nil {
+            return false;
+        }
+        let _: () = msg_send![center_constraint, setActive: NO];
+        let _: () = msg_send![trailing_constraint, setActive: YES];
+        let _: () = msg_send![content_view, layoutSubtreeIfNeeded];
+
+        let group_frame: NSRect = msg_send![action_group, frame];
+        let content_bounds: NSRect = msg_send![content_view, bounds];
+        if action_group_is_trailing(group_frame, content_bounds, right_to_left) {
+            return true;
+        }
+        let _: () = msg_send![trailing_constraint, setActive: NO];
+        let _: () = msg_send![center_constraint, setActive: YES];
+        let _: () = msg_send![content_view, layoutSubtreeIfNeeded];
+        false
+    }
 }
 
 fn secret_field_observer_class() -> Option<&'static Class> {
@@ -1485,6 +1630,63 @@ mod tests {
         assert!(password.confirmation_presentation().is_none());
         assert!(passphrase.requires_secure_input());
         assert!(passphrase.confirmation_presentation().is_none());
+    }
+
+    #[test]
+    fn action_group_trailing_policy_mirrors_with_layout_direction() {
+        let content_bounds = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(392.0, 120.0));
+        let left_to_right_group = NSRect::new(NSPoint::new(148.0, 16.0), NSSize::new(228.0, 28.0));
+        let right_to_left_group = NSRect::new(NSPoint::new(16.0, 16.0), NSSize::new(228.0, 28.0));
+
+        assert!(action_group_is_trailing(
+            left_to_right_group,
+            content_bounds,
+            false
+        ));
+        assert!(!action_group_is_trailing(
+            left_to_right_group,
+            content_bounds,
+            true
+        ));
+        assert!(action_group_is_trailing(
+            right_to_left_group,
+            content_bounds,
+            true
+        ));
+        assert!(!action_group_is_trailing(
+            right_to_left_group,
+            content_bounds,
+            false
+        ));
+    }
+
+    #[test]
+    fn action_group_replacement_accepts_only_an_exact_active_center_equality() {
+        assert!(has_exact_center_constraint_properties(
+            true,
+            NS_LAYOUT_RELATION_EQUAL,
+            1.0,
+            0.0
+        ));
+        assert!(!has_exact_center_constraint_properties(
+            false,
+            NS_LAYOUT_RELATION_EQUAL,
+            1.0,
+            0.0
+        ));
+        assert!(!has_exact_center_constraint_properties(true, 1, 1.0, 0.0));
+        assert!(!has_exact_center_constraint_properties(
+            true,
+            NS_LAYOUT_RELATION_EQUAL,
+            2.0,
+            0.0
+        ));
+        assert!(!has_exact_center_constraint_properties(
+            true,
+            NS_LAYOUT_RELATION_EQUAL,
+            1.0,
+            1.0
+        ));
     }
 
     #[test]
