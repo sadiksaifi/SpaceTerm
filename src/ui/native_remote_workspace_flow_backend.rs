@@ -276,7 +276,9 @@ impl RemoteWorkspaceFlowBackend for NativeRemoteWorkspaceFlowBackend {
         };
         let attempt = match self.askpass.start_attempt(&self.paths) {
             Ok(attempt) => attempt,
-            Err(_) => return Task::ready(Err(RemoteWorkspaceFlowBackendError::ConnectionFailed)),
+            Err(_) => {
+                return Task::ready(Err(RemoteWorkspaceFlowBackendError::SshRuntimeUnavailable));
+            }
         };
         let authentication = attempt.lease();
         let observation = attempt.observation();

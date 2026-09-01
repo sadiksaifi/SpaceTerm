@@ -48,8 +48,14 @@ impl AppPathEnvironmentReader for ProcessAppPathEnvironmentReader {
     }
 
     fn macos_temporary_directory(&mut self) -> PathBuf {
-        std::env::temp_dir()
+        canonicalize_macos_temporary_directory(std::env::temp_dir())
     }
+}
+
+/// Resolves macOS system aliases such as `/var` only for the trusted temporary-directory fallback.
+/// Explicit XDG roots remain untouched and are still traversed without following symlinks.
+fn canonicalize_macos_temporary_directory(path: PathBuf) -> PathBuf {
+    fs::canonicalize(&path).unwrap_or(path)
 }
 
 impl AppPathEnvironment {
@@ -1398,6 +1404,58 @@ mod tests {
         assert_eq!(paths.state(), root.path.join("home/.local/state/spaceterm"));
         assert_eq!(paths.cache(), root.path.join("home/.cache/spaceterm"));
         assert_eq!(paths.runtime(), root.path.join("temporary/spaceterm"));
+    }
+
+    #[test]
+    fn macos_fallback_runtime_should_resolve_the_system_style_var_symlink_once() {
+        let root = TestDirectory::new("macos-var-runtime");
+        let canonical_temporary = root.path.join("private/var/folders/user/T");
+        fs::create_dir_all(&canonical_temporary).unwrap();
+        fs::set_permissions(&canonical_temporary, fs::Permissions::from_mode(0o755)).unwrap();
+        symlink(root.path.join("private/var"), root.path.join("var")).unwrap();
+        let captured_temporary =
+            canonicalize_macos_temporary_directory(root.path.join("var/folders/user/T"));
+        let paths = AppPaths::resolve(&AppPathEnvironment {
+            home: Some(root.path.join("home").into_os_string()),
+            macos_temporary_directory: captured_temporary.clone(),
+            ..AppPathEnvironment::default()
+        })
+        .unwrap();
+
+        let owner = paths.create_runtime_owner("askpass").unwrap();
+
+        assert!(
+            captured_temporary == canonical_temporary
+                && paths.runtime() == canonical_temporary.join("spaceterm")
+                && fs::metadata(&canonical_temporary).unwrap().mode() & 0o777 == 0o755
+                && fs::metadata(paths.runtime()).unwrap().mode() & 0o777 == 0o700
+                && fs::metadata(owner.path()).unwrap().mode() & 0o777 == 0o700
+        );
+    }
+
+    #[test]
+    fn explicit_xdg_runtime_should_still_reject_a_symlinked_base() {
+        let root = TestDirectory::new("xdg-runtime-symlink");
+        let outside = root.path.join("outside-runtime");
+        fs::create_dir_all(&outside).unwrap();
+        let linked_runtime = root.path.join("xdg-runtime");
+        symlink(&outside, &linked_runtime).unwrap();
+        let paths = AppPaths::resolve(&AppPathEnvironment {
+            home: Some(root.path.join("home").into_os_string()),
+            xdg_runtime_dir: Some(linked_runtime.into_os_string()),
+            macos_temporary_directory: root.path.join("temporary"),
+            ..AppPathEnvironment::default()
+        })
+        .unwrap();
+
+        let Err(error) = paths.create_runtime_owner("askpass") else {
+            panic!("the symlinked XDG runtime base must remain unavailable");
+        };
+
+        assert!(
+            matches!(error, AppPathsError::UnsafePath { .. })
+                && !outside.join("spaceterm").exists()
+        );
     }
 
     #[test]
