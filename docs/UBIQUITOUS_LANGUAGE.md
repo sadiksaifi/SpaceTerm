@@ -43,6 +43,7 @@
 | --- | --- | --- |
 | **Terminal Session** | The live terminal runtime owned by a Pane, joining terminal emulation and a PTY to either a local Shell Process or a remote Terminal Session Channel. | Session, Workspace session |
 | **Control Connection** | The Remote Project runtime that exclusively owns one OpenSSH master process and private runtime socket for one SSH Destination. | Terminal Session, SSH client, shared Pane process |
+| **Authentication Prompt** | A single OpenSSH AskPass confirmation or obscured response request presented through SpaceTerm's application-owned Alert or Dialog while connection progress is suspended. | native prompt, macOS sheet, terminal password input |
 | **Terminal Session Channel** | A single-use prepared OpenSSH channel command consumed by one Remote Pane's Terminal Session through its Control Connection. | Control Connection, shell command string, reusable channel |
 | **Remote Connection Phase** | One of Connecting, Connected, Reconnecting, Disconnected, Failed, or Closing for a Remote Project Workspace's Control Connection. | network status string, Terminal Session exit state |
 | **Connection Generation** | The monotonic identity of one Remote Project Workspace connection attempt and its accepted lifecycle observations. | Presentation Generation, retry count, frame number |
@@ -121,6 +122,7 @@
 - Automatic Workspace names use the Workspace Directory basename, `Default` for `HOME`, and `/` for filesystem root. Only unrenamed Scratch Workspaces sharing one identity are numbered in sidebar order; empty rename input clears a custom name and duplicate custom names are valid.
 - A Local **Workspace Directory** is local filesystem authority and is revalidated before child creation; a **Remote Workspace Directory** is never converted to a local path, queried through local directory APIs, or subjected to local filesystem validation.
 - One live **Remote Project Workspace** owns one **Control Connection** for its current **Connection Generation**, and that Control Connection exclusively owns its master process, private runtime socket, shutdown, reap, and exact cleanup.
+- A Control Connection presents at most one **Authentication Prompt** at a time; cancellation and stale presentation callbacks cannot settle a newer prompt, and connection progress resumes only after the prompt closes.
 - Each Remote Pane owns one **Terminal Session** that consumes one **Terminal Session Channel**; the channel shares its Workspace's **Control Connection** but never shares Pane or Terminal Session ownership.
 - A reconnect begins only after Disconnected or Failed and advances the **Connection Generation**; observations from older generations are stale, illegal same-generation transitions are rejected, and Closing is terminal.
 - Delayed readiness, failure, or disconnection from a predecessor **Connection Generation** cannot mutate or resurrect its successor.

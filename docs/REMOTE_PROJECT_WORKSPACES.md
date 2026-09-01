@@ -78,8 +78,8 @@ The complete flow is:
 1. Press Command-O and select **Remote over SSH**. If the row is disabled, follow its OpenSSH
    availability guidance before continuing.
 2. Select a configured destination, enter a `user@alias` override, or choose **Add SSH Host**.
-3. Complete any password, key-passphrase, keyboard-interactive, MFA, or host-confirmation prompt in
-   the native macOS sheet opened by SpaceTerm.
+3. Complete any password, key-passphrase, keyboard-interactive, MFA, or host-confirmation
+   Authentication Prompt in SpaceTerm's application-owned Dialog or Alert.
 4. Browse the remote account from `~/`, enter an absolute path beginning with `/`, or enter a
    home-relative path beginning with `~/`.
 5. Select **Open Remote Project**. For a missing exact path, confirm **Create Folder** first.
@@ -105,8 +105,9 @@ the automatic name.
 ## Authentication and host verification
 
 Authentication and host verification remain OpenSSH policy. SpaceTerm displays OpenSSH's bounded,
-control-free prompt in a native window-modal sheet and returns one answer to the waiting OpenSSH
-process. Secret fields use native secure text input.
+control-free prompt in an application-owned Alert or Dialog and returns one answer to the waiting
+OpenSSH process. Secret responses use obscured Text Input without claiming native protected
+accessibility or macOS Secure Event Input semantics.
 
 Cancel rejects the current prompt and returns to the retained SSH selection flow. SpaceTerm does
 not save passwords, passphrases, MFA responses, or host-confirmation answers. OpenSSH continues to
@@ -211,7 +212,7 @@ persisted under the state directory.
 | A known host is missing from the picker | Confirm it is a positive literal alias in global `Host` context in `~/.ssh/config` or an unconditional included file. Wildcards, negations, `Match`, system config, and dynamic resolution are intentionally excluded. |
 | A managed host cannot be edited or deleted | Close every live Remote Project Workspace using that alias, then reopen the Host Picker. Standard user-config entries are always read-only. |
 | A managed SSH config error appears | Use SpaceTerm's Add, Edit, and Delete actions instead of hand-editing the managed file. Check that the XDG configuration path is absolute and owner-writable without broadening its permissions. |
-| Authentication fails or is cancelled | Retry and answer the native OpenSSH prompts. For a user-config alias, test the same destination with `/usr/bin/ssh destination` to diagnose agent, key, proxy, or server policy outside SpaceTerm. |
+| Authentication fails or is cancelled | Retry and answer SpaceTerm's Authentication Prompts. For a user-config alias, test the same destination with `/usr/bin/ssh destination` to diagnose agent, key, proxy, or server policy outside SpaceTerm. |
 | OpenSSH reports a new or changed host key | Verify the fingerprint with a trusted administrator and repair `known_hosts` through the normal OpenSSH workflow. Never bypass host-key verification. |
 | **Enter an absolute path beginning with / or ~/.** | Enter `/path/to/project` or `~/path/to/project`; use `~/` rather than a bare `~`. |
 | **No such remote folder** | Enter the correct path or use **Create Folder** after confirming that its parent is writable. |

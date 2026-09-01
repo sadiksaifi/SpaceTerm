@@ -209,9 +209,10 @@ state; progress values or indeterminate state; live status announcements; access
 exclusion of an arbitrary underlay from native accessibility traversal. Private logical semantic
 snapshots retain and test those facts, and stable debug selectors test observable behavior, but
 neither is native accessibility evidence. SpaceTerm makes no VoiceOver, Narrator, or Orca
-conformance claim for these controls. Accessibility-sensitive product workflows remain on native
-system prompts, including the existing `Window::prompt` call sites, until native accessibility-tree
-support exists and is verified. No production native prompt was migrated with this Module.
+conformance claim for these controls. Accessibility-sensitive workflows should remain on native
+system prompts until native accessibility-tree support exists and is verified. AskPass secret
+entry is the explicit current exception: it uses the application-owned Dialog for visual and
+interaction consistency and does not claim protected native accessibility semantics.
 
 The internal library's Resize Handle is a keyed, platform-neutral GPUI divider with a mandatory
 logical name and an explicitly named movement axis. It owns the enlarged pointer hitbox, resize
@@ -925,20 +926,21 @@ Control Connection. A Remote launch uses the local `HOME` only as the local SSH 
 directory; it does not grant local path authority to the Remote Workspace Directory.
 
 Closing or cancelling a Remote Project transfers Control Connection shutdown, reap, AskPass
-teardown, and private runtime cleanup into retained background ownership. GPUI and AppKit release
+teardown, and private runtime cleanup into retained background ownership. GPUI releases
 hierarchy and focus ownership synchronously without waiting for the bounded OpenSSH shutdown; the
 session alias lease remains held until that background cleanup finishes. When Operating-System
 Window deactivation cancels Remote Workspace Directory selection, the persistent Workspace owner
 releases the picker immediately and restores the Focused Pane on reactivation only when no newer
 presentation blocks Terminal Input Focus.
 
-AskPass presentation minimizes native macOS surface area. First-contact host verification and
-other non-secret SSH confirmations use the application-owned Alert while authentication
-temporarily suspends the connection ProgressDialog; the ProgressDialog resumes when connection work
-continues. Passwords, private-key passphrases, PINs, one-time codes, and other secret responses use
-the protected native secure-text sheet because the GPUI control stack does not provide equivalent
-protected accessibility and secure-input semantics. AppKit rejects non-secret AskPass requests,
-and secret bytes never enter GPUI state.
+AskPass presentation uses only application-owned window-modal controls. First-contact host
+verification and other non-secret SSH confirmations use Alert, while passwords, private-key
+passphrases, PINs, one-time codes, and other secret responses use Dialog with obscured Text Input.
+Authentication temporarily suspends the connection ProgressDialog, which resumes when connection
+work continues. Obscured entry renders bullets, disables clipboard extraction and editing history,
+and transfers the accepted value into a zeroizing response owner. It does not provide native
+protected accessibility or macOS Secure Event Input semantics. The terminal PTY's independent
+Secure Event Input lifecycle remains unchanged.
 
 Remote connection state couples Connecting, Connected, Reconnecting, Disconnected, Failed, and
 Closing to a monotonic Connection Generation. Reconnect starts only from Disconnected or Failed at

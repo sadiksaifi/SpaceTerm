@@ -5149,6 +5149,7 @@ dependencies = [
  "gpui",
  "resvg",
  "unicode-segmentation",
+ "zeroize",
 ]
 
 [[package]]

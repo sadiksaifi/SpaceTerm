@@ -161,9 +161,17 @@ struct RemoteWorkspaceReconnectAttempt {
     workspace_id: WorkspaceId,
     generation: u64,
     cancelled: Arc<AtomicBool>,
-    progress: ProgressDialogHandle,
+    progress: Option<ProgressDialogHandle>,
+    progress_generation: u64,
     _work: Task<()>,
     _progress_updates: Task<()>,
+}
+
+#[derive(Clone, Copy)]
+struct RemoteWorkspaceReconnectProgressIdentity {
+    workspace_id: WorkspaceId,
+    reconnect_generation: u64,
+    presentation_generation: u64,
 }
 
 struct PreparedRemoteWorkspaceReconnect {
@@ -1849,46 +1857,17 @@ impl WorkspaceManager {
         );
         let session_factory = Rc::clone(&self.session_factory);
         let cancelled = Arc::new(AtomicBool::new(false));
-        let cancel_manager = cx.weak_entity();
-        let result_manager = cancel_manager.clone();
-        let result_window = window.window_handle();
-        let cancel_flag = Arc::clone(&cancelled);
-        let dialog = ProgressDialog::new(
-            ModalId::new("remote-workspace-reconnect-progress"),
-            "Remote reconnection progress",
-            "Reconnect Remote Workspace",
-            RemoteWorkspaceConnectionProgress::CheckingCompatibility.status(),
-            ProgressState::Indeterminate,
-            ProgressCancellation::Cancellable(ModalAction::new(
-                (),
-                "Cancel",
-                ModalActionRole::Cancel,
-                "remote-workspace-reconnect-cancel",
-            )),
-        )
-        .detail("Authentication prompts may appear in a secure macOS sheet.")
-        .present(
+        let Some(progress) = self.present_remote_workspace_reconnect_progress(
+            RemoteWorkspaceReconnectProgressIdentity {
+                workspace_id,
+                reconnect_generation: generation,
+                presentation_generation: 1,
+            },
+            RemoteWorkspaceConnectionProgress::CheckingCompatibility,
+            Arc::clone(&cancelled),
             window,
             cx,
-            move |_, _, _| {
-                cancel_flag.store(true, Ordering::Release);
-                ProgressCancelDecision::Allow
-            },
-            move |outcome, cx| {
-                let _ = result_window.update(cx, |_, window, cx| {
-                    let _ = result_manager.update(cx, |manager, cx| {
-                        manager.finish_remote_workspace_reconnect_progress(
-                            workspace_id,
-                            generation,
-                            outcome,
-                            window,
-                            cx,
-                        );
-                    });
-                });
-            },
-        );
-        let Ok(progress) = dialog else {
+        ) else {
             let _ = self.workspaces.reduce_remote_connection_state(
                 workspace_id,
                 RemoteConnectionState::failed(generation),
@@ -2002,12 +1981,58 @@ impl WorkspaceManager {
             workspace_id,
             generation,
             cancelled,
-            progress,
+            progress: Some(progress),
+            progress_generation: 1,
             _work: work,
             _progress_updates: progress_updates,
         });
         self.refresh_workspace_search(cx);
         cx.notify();
+    }
+
+    fn present_remote_workspace_reconnect_progress(
+        &self,
+        identity: RemoteWorkspaceReconnectProgressIdentity,
+        progress: RemoteWorkspaceConnectionProgress,
+        cancelled: Arc<AtomicBool>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<ProgressDialogHandle> {
+        let result_manager = cx.weak_entity();
+        let result_window = window.window_handle();
+        let cancel_flag = cancelled;
+        ProgressDialog::new(
+            ModalId::new("remote-workspace-reconnect-progress"),
+            "Remote reconnection progress",
+            "Reconnect Remote Workspace",
+            progress.status(),
+            ProgressState::Indeterminate,
+            ProgressCancellation::Cancellable(ModalAction::new(
+                (),
+                "Cancel",
+                ModalActionRole::Cancel,
+                "remote-workspace-reconnect-cancel",
+            )),
+        )
+        .detail("Authentication prompts open in a SpaceTerm dialog.")
+        .present(
+            window,
+            cx,
+            move |_, _, _| {
+                cancel_flag.store(true, Ordering::Release);
+                ProgressCancelDecision::Allow
+            },
+            move |outcome, cx| {
+                let _ = result_window.update(cx, |_, window, cx| {
+                    let _ = result_manager.update(cx, |manager, cx| {
+                        manager.finish_remote_workspace_reconnect_progress(
+                            identity, outcome, window, cx,
+                        );
+                    });
+                });
+            },
+        )
+        .ok()
     }
 
     fn apply_remote_workspace_reconnect_progress(
@@ -2018,17 +2043,71 @@ impl WorkspaceManager {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        let Some(attempt) = self.remote_workspace_reconnect.as_ref().filter(|attempt| {
-            attempt.workspace_id == workspace_id && attempt.generation == generation
-        }) else {
+        let is_current = self
+            .remote_workspace_reconnect
+            .as_ref()
+            .is_some_and(|attempt| {
+                attempt.workspace_id == workspace_id && attempt.generation == generation
+            });
+        if !is_current {
             return false;
-        };
-        let _ = attempt.progress.update(
-            ProgressDialogUpdate::new().status(update.status()),
+        }
+        if update == RemoteWorkspaceConnectionProgress::Authenticating {
+            let progress = self
+                .remote_workspace_reconnect
+                .as_mut()
+                .and_then(|attempt| {
+                    let progress = attempt.progress.take();
+                    if progress.is_some() {
+                        attempt.progress_generation = attempt.progress_generation.wrapping_add(1);
+                    }
+                    progress
+                });
+            if let Some(progress) = progress {
+                let _ = progress.dismiss(window, cx);
+            }
+            return true;
+        }
+        if let Some(progress) = self
+            .remote_workspace_reconnect
+            .as_ref()
+            .and_then(|attempt| attempt.progress.as_ref())
+        {
+            let _ = progress.update(
+                ProgressDialogUpdate::new().status(update.status()),
+                window,
+                cx,
+            );
+            return true;
+        }
+        let attempt = self
+            .remote_workspace_reconnect
+            .as_ref()
+            .expect("the current reconnect attempt must remain owned");
+        let cancelled = Arc::clone(&attempt.cancelled);
+        let progress_generation = attempt.progress_generation;
+        let Some(progress) = self.present_remote_workspace_reconnect_progress(
+            RemoteWorkspaceReconnectProgressIdentity {
+                workspace_id,
+                reconnect_generation: generation,
+                presentation_generation: progress_generation,
+            },
+            update,
+            Arc::clone(&cancelled),
             window,
             cx,
-        );
-        true
+        ) else {
+            cancelled.store(true, Ordering::Release);
+            return false;
+        };
+        if let Some(attempt) = self.remote_workspace_reconnect.as_mut().filter(|attempt| {
+            attempt.workspace_id == workspace_id && attempt.generation == generation
+        }) {
+            attempt.progress = Some(progress);
+            return true;
+        }
+        let _ = progress.dismiss(window, cx);
+        false
     }
 
     fn finish_remote_workspace_reconnect(
@@ -2082,7 +2161,9 @@ impl WorkspaceManager {
                     let _ = self
                         .workspaces
                         .reduce_remote_connection_state(workspace_id, next);
-                    let _ = attempt.progress.fail(window, cx);
+                    if let Some(progress) = &attempt.progress {
+                        let _ = progress.fail(window, cx);
+                    }
                     self.present_remote_workspace_reconnect_error(failure, window, cx);
                     self.refresh_workspace_search(cx);
                     cx.notify();
@@ -2107,7 +2188,9 @@ impl WorkspaceManager {
                 );
                 debug_assert_eq!(reduction, Ok(RemoteConnectionReduction::Applied));
                 self.observe_remote_workspace_runtime(workspace_id, generation, cx);
-                let _ = attempt.progress.complete(window, cx);
+                if let Some(progress) = &attempt.progress {
+                    let _ = progress.complete(window, cx);
+                }
             }
             Err(failure) => {
                 let next = remote_workspace_reconnect_failure_state(&failure, generation);
@@ -2115,9 +2198,13 @@ impl WorkspaceManager {
                     .workspaces
                     .reduce_remote_connection_state(workspace_id, next);
                 if matches!(failure, RemoteWorkspaceReconnectFailure::Cancelled) {
-                    let _ = attempt.progress.dismiss(window, cx);
+                    if let Some(progress) = &attempt.progress {
+                        let _ = progress.dismiss(window, cx);
+                    }
                 } else {
-                    let _ = attempt.progress.fail(window, cx);
+                    if let Some(progress) = &attempt.progress {
+                        let _ = progress.fail(window, cx);
+                    }
                     self.present_remote_workspace_reconnect_error(failure, window, cx);
                 }
             }
@@ -2167,12 +2254,20 @@ impl WorkspaceManager {
 
     fn finish_remote_workspace_reconnect_progress(
         &mut self,
-        workspace_id: WorkspaceId,
-        generation: u64,
+        identity: RemoteWorkspaceReconnectProgressIdentity,
         outcome: ProgressDialogOutcome,
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let Some(attempt) = self.remote_workspace_reconnect.as_ref() else {
+            return;
+        };
+        if attempt.workspace_id != identity.workspace_id
+            || attempt.generation != identity.reconnect_generation
+            || attempt.progress_generation != identity.presentation_generation
+        {
+            return;
+        }
         if !matches!(
             outcome,
             ProgressDialogOutcome::Cancelled { .. }
@@ -2183,17 +2278,11 @@ impl WorkspaceManager {
         ) {
             return;
         }
-        let Some(attempt) = self.remote_workspace_reconnect.as_ref() else {
-            return;
-        };
-        if attempt.workspace_id != workspace_id || attempt.generation != generation {
-            return;
-        }
         attempt.cancelled.store(true, Ordering::Release);
         self.remote_workspace_reconnect = None;
         let _ = self.workspaces.reduce_remote_connection_state(
-            workspace_id,
-            RemoteConnectionState::disconnected(generation),
+            identity.workspace_id,
+            RemoteConnectionState::disconnected(identity.reconnect_generation),
         );
         self.refresh_workspace_search(cx);
         cx.notify();
@@ -2614,7 +2703,9 @@ impl WorkspaceManager {
                 .take()
                 .expect("matching reconnect attempt must remain owned");
             attempt.cancelled.store(true, Ordering::Release);
-            let _ = attempt.progress.dismiss(window, cx);
+            if let Some(progress) = &attempt.progress {
+                let _ = progress.dismiss(window, cx);
+            }
         }
     }
 
@@ -4067,6 +4158,7 @@ fn initial_workspace_directory(path: PathBuf) -> (ValidatedWorkspaceDirectory, O
 
 #[cfg(test)]
 mod tests {
+    use std::cell::RefCell;
     use std::collections::VecDeque;
     use std::fs;
     use std::os::unix::fs::symlink;
@@ -4095,6 +4187,7 @@ mod tests {
     );
     use crate::platform::finder_fallback::ScriptedFinderFallback;
     use crate::platform::macos_window_drag::RecordingOperatingSystemWindowDragPlatform;
+    use crate::platform::ssh_askpass::{AskPassPromptKind, AskPassRequest, AskPassResult};
     use crate::ssh::command::{SshCommandContext, ValidatedRemoteShellCommand};
     use crate::ssh::destination::SshHostAlias;
     use crate::ssh::host_config::HostDiscovery;
@@ -4111,6 +4204,7 @@ mod tests {
         RemoteWorkspaceAccount, RemoteWorkspaceDirectoryListing, RemoteWorkspaceExactPathState,
         RemoteWorkspaceProvider, RemoteWorkspaceProviderError,
     };
+    use crate::ui::ssh_askpass_dialog::GpuiAskPassPresenter;
     use crate::ui::ssh_host_form::ManagedHostFormBackendError;
 
     #[derive(Default)]
@@ -6118,6 +6212,110 @@ mod tests {
                 .remote_connection_state()),
             Some(RemoteConnectionState::failed(2))
         );
+    }
+
+    #[gpui::test]
+    fn reconnect_authentication_should_promote_queued_askpass_and_restore_progress_after_close(
+        cx: &mut TestAppContext,
+    ) {
+        let (_connection_sender, connection_receiver) = async_channel::bounded(1);
+        let pending = cx.update(|cx| {
+            cx.background_executor()
+                .spawn(async move { connection_receiver.recv().await.unwrap() })
+        });
+        let backend = TestRemoteWorkspaceFlowBackend::with_connections([pending]);
+        let (manager, _, cx) = workspace_manager_with_remote_backend(backend, cx);
+        let workspace_id = create_disconnected_remote_workspace(&manager, cx);
+        let outcomes = Rc::new(RefCell::new(Vec::new()));
+        let askpass = cx.update(|window, cx| {
+            manager.update(cx, |manager, cx| {
+                manager.start_remote_workspace_reconnect(workspace_id, window, cx)
+            });
+            let askpass = cx.new(|_| GpuiAskPassPresenter::default());
+            let captured = Rc::clone(&outcomes);
+            askpass
+                .update(cx, |presenter, cx| {
+                    presenter.present(
+                        55,
+                        AskPassRequest::new(
+                            "root@example.test's password:".to_owned(),
+                            AskPassPromptKind::Secret,
+                        )
+                        .unwrap(),
+                        Box::new(move |result| {
+                            captured
+                                .borrow_mut()
+                                .push(matches!(result, AskPassResult::Cancelled));
+                        }),
+                        window,
+                        cx,
+                    )
+                })
+                .unwrap();
+            askpass
+        });
+        cx.run_until_parked();
+        let original = manager.read_with(cx, |manager, _| {
+            manager
+                .remote_workspace_reconnect
+                .as_ref()
+                .and_then(|attempt| attempt.progress.as_ref())
+                .map(ProgressDialogHandle::presentation_id)
+                .unwrap()
+        });
+        assert!(cx.debug_bounds("ssh-askpass-secret-input").is_none());
+
+        cx.update(|window, cx| {
+            manager.update(cx, |manager, cx| {
+                assert!(manager.apply_remote_workspace_reconnect_progress(
+                    workspace_id,
+                    2,
+                    RemoteWorkspaceConnectionProgress::Authenticating,
+                    window,
+                    cx,
+                ));
+            });
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("ssh-askpass-secret-input").is_some());
+        assert!(manager.read_with(cx, |manager, _| {
+            manager
+                .remote_workspace_reconnect
+                .as_ref()
+                .is_some_and(|attempt| attempt.progress.is_none())
+        }));
+
+        cx.update(|window, cx| {
+            askpass.update(cx, |presenter, cx| presenter.cancel_owner(55, window, cx));
+        });
+        cx.run_until_parked();
+        assert_eq!(outcomes.borrow().as_slice(), [true]);
+        cx.update(|window, cx| {
+            manager.update(cx, |manager, cx| {
+                assert!(manager.apply_remote_workspace_reconnect_progress(
+                    workspace_id,
+                    2,
+                    RemoteWorkspaceConnectionProgress::Connecting,
+                    window,
+                    cx,
+                ));
+            });
+        });
+        cx.run_until_parked();
+        let restored = manager.read_with(cx, |manager, _| {
+            manager
+                .remote_workspace_reconnect
+                .as_ref()
+                .and_then(|attempt| attempt.progress.as_ref())
+                .map(ProgressDialogHandle::presentation_id)
+                .unwrap()
+        });
+        assert_ne!(restored, original);
+
+        click("modal-action-remote-workspace-reconnect-cancel", cx);
+        assert!(manager.read_with(cx, |manager, _| {
+            manager.remote_workspace_reconnect.is_none()
+        }));
     }
 
     #[gpui::test]

@@ -11,16 +11,12 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-use gpui::{App, AppContext, Context, Window};
-use spaceterm_ui::{
-    Alert, AlertIntent, AlertOutcome, ModalAction, ModalActionRole, ModalId, ModalLifecycleEvent,
-    ModalPresentationHandle,
-};
+use gpui::{App, AppContext, Window};
 use thiserror::Error;
 use zeroize::Zeroizing;
 
@@ -28,10 +24,11 @@ use super::app_paths::{
     ASKPASS_RUNTIME_OWNER_KIND, ASKPASS_RUNTIME_SOCKET_NAME, AppPaths, AppPathsError,
     RegisteredRuntimeSocket, RuntimeOwner,
 };
-use super::macos_askpass::{
-    AskPassConfirmationPresentation, AskPassPresentationError, AskPassPresenter, AskPassPromptKind,
-    AskPassRequest, AskPassResponseError, AskPassResult, MacosAskPassPresenter,
+use super::ssh_askpass::{
+    AskPassPresentationError, AskPassPromptKind, AskPassRequest, AskPassResponseError,
+    AskPassResult,
 };
+use crate::ui::ssh_askpass_dialog::GpuiAskPassPresenter;
 
 const PROTOCOL_VERSION: u8 = 1;
 const CAPABILITY_BYTES: usize = 32;
@@ -51,7 +48,6 @@ const HELPER_CANCELLED: i32 = 1;
 const HELPER_FAILED: i32 = 2;
 const ACCEPT_POLL_INTERVAL: Duration = Duration::from_millis(15);
 const CONNECTION_IO_TIMEOUT: Duration = Duration::from_secs(5);
-const CONFIRMATION_MODAL_ID: &str = "ssh-askpass-confirmation";
 
 const REQUEST_SECRET: u8 = 1;
 const REQUEST_CONFIRMATION: u8 = 2;
@@ -202,20 +198,20 @@ impl AskPassConnectionAttempt {
 
 /// Main-thread-bound factory for fresh per-connection AskPass brokers.
 ///
-/// Construction captures the current executable and safe GPUI and AppKit presentation bridges, so
+/// Construction captures the current executable and a safe GPUI presentation bridge, so
 /// background connection work never retains a live `Window`.
-pub(crate) struct NativeAskPassBrokerFactory {
+pub(crate) struct GpuiAskPassBrokerFactory {
     helper_path: PathBuf,
-    presenter: Arc<dyn BrokerPresenter>,
+    bridge: GpuiAskPassBridge,
 }
 
-impl NativeAskPassBrokerFactory {
+impl GpuiAskPassBrokerFactory {
     /// Captures the helper executable and presenter on the application main thread.
     pub(crate) fn new(window: &Window, cx: &mut App) -> Result<Self, AskPassBrokerError> {
-        let presenter = native_channel_presenter(window, cx)?;
+        let bridge = gpui_askpass_bridge(window, cx);
         Ok(Self {
             helper_path: std::env::current_exe()?,
-            presenter,
+            bridge,
         })
     }
 
@@ -226,7 +222,7 @@ impl NativeAskPassBrokerFactory {
     ) -> Result<AskPassConnectionAttempt, AskPassBrokerError> {
         let observation = AskPassAttemptObservation::default();
         let presenter = Arc::new(ObservedBrokerPresenter {
-            inner: Arc::clone(&self.presenter),
+            inner: self.bridge.presenter(),
             observation: observation.clone(),
         });
         let broker =
@@ -269,12 +265,12 @@ impl AskPassBrokerLease {
 }
 
 impl AskPassBroker {
-    pub(crate) fn start_native(
+    pub(crate) fn start_gpui(
         paths: &AppPaths,
         window: &Window,
         cx: &mut App,
     ) -> Result<Self, AskPassBrokerError> {
-        let factory = NativeAskPassBrokerFactory::new(window, cx)?;
+        let factory = GpuiAskPassBrokerFactory::new(window, cx)?;
         Ok(factory.start_attempt(paths)?.broker)
     }
 
@@ -349,172 +345,56 @@ impl AskPassBroker {
     }
 }
 
-fn native_channel_presenter(
-    window: &Window,
-    cx: &mut App,
-) -> Result<Arc<dyn BrokerPresenter>, AskPassBrokerError> {
-    let native_presenter = Rc::new(std::cell::RefCell::new(MacosAskPassPresenter::new(window)?));
-    let confirmation_presenter = cx.new(|_| GpuiAskPassConfirmationPresenter::default());
+fn gpui_askpass_bridge(window: &Window, cx: &mut App) -> GpuiAskPassBridge {
+    let presenter = cx.new(|_| GpuiAskPassPresenter::default());
     let window_handle = window.window_handle();
-    let (request_sender, request_receiver) = async_channel::bounded(1);
-    let (cancellation_sender, cancellation_receiver) = async_channel::bounded(1);
-    let presenter = Arc::new(ChannelBrokerPresenter {
-        requests: request_sender,
-        cancellations: cancellation_sender,
-    });
-    let request_presenter = native_presenter.clone();
-    let request_confirmation_presenter = confirmation_presenter.clone();
-    let request_window = window_handle;
+    let (command_sender, command_receiver) = async_channel::bounded(2);
     cx.spawn(async move |cx| {
-        while let Ok(job) = request_receiver.recv().await {
-            let (completion_sender, completion_receiver) = async_channel::bounded(1);
-            let presentation = if job.request.requires_secure_input() {
-                request_presenter.borrow_mut().present(
-                    job.request,
-                    Box::new(move |result| {
-                        let _ = completion_sender.try_send(result);
-                    }),
-                )
-            } else {
-                let Some(presentation) = job.request.confirmation_presentation() else {
-                    let _ = job.response.send(Err(BrokerPresentationFailure::Rejected));
-                    continue;
-                };
-                request_window
-                    .update(cx, |_, window, cx| {
-                        request_confirmation_presenter.update(cx, |presenter, cx| {
-                            presenter.present(presentation, completion_sender, window, cx)
+        while let Ok(command) = command_receiver.recv().await {
+            match command {
+                AskPassUiCommand::Present { owner, job } => {
+                    if job.cancelled.load(Ordering::Acquire) {
+                        let _ = job.response.send(Ok(BrokerAnswer::Cancelled));
+                        continue;
+                    }
+                    let response = Rc::new(RefCell::new(Some(job.response)));
+                    let completion_response = Rc::clone(&response);
+                    let result = window_handle.update(cx, |_, window, cx| {
+                        presenter.update(cx, |presenter, cx| {
+                            presenter.present(
+                                owner,
+                                job.request,
+                                Box::new(move |result| {
+                                    if let Some(response) = completion_response.borrow_mut().take()
+                                    {
+                                        let _ = response.send(Ok(map_presentation_result(result)));
+                                    }
+                                }),
+                                window,
+                                cx,
+                            )
                         })
-                    })
-                    .map_err(|_| AskPassPresentationError::NativeWindowUnavailable)
-                    .and_then(|result| result)
-            };
-            if presentation.is_err() {
-                let _ = job.response.send(Err(BrokerPresentationFailure::Rejected));
-                continue;
+                    });
+                    if !matches!(result, Ok(Ok(())))
+                        && let Some(response) = response.borrow_mut().take()
+                    {
+                        let _ = response.send(Err(BrokerPresentationFailure::Rejected));
+                    }
+                }
+                AskPassUiCommand::Cancel { owner } => {
+                    let _ = window_handle.update(cx, |_, window, cx| {
+                        presenter.update(cx, |presenter, cx| {
+                            presenter.cancel_owner(owner, window, cx);
+                        });
+                    });
+                }
             }
-            let response = completion_receiver
-                .recv()
-                .await
-                .map(map_native_result)
-                .map_err(|_| BrokerPresentationFailure::Unavailable);
-            let _ = job.response.send(response);
         }
     })
     .detach();
-    let cancellation_presenter = native_presenter;
-    let cancellation_confirmation_presenter = confirmation_presenter;
-    let cancellation_window = window_handle;
-    cx.spawn(async move |cx| {
-        while cancellation_receiver.recv().await.is_ok() {
-            cancellation_presenter.borrow_mut().cancel_active();
-            let _ = cancellation_window.update(cx, |_, window, cx| {
-                cancellation_confirmation_presenter.update(cx, |presenter, cx| {
-                    presenter.cancel_active(window, cx);
-                });
-            });
-        }
-    })
-    .detach();
-    Ok(presenter)
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum GpuiAskPassAction {
-    Confirm,
-    Reject,
-}
-
-#[derive(Default)]
-struct GpuiAskPassConfirmationPresenter {
-    active: Option<ModalPresentationHandle>,
-}
-
-impl GpuiAskPassConfirmationPresenter {
-    fn present(
-        &mut self,
-        presentation: AskPassConfirmationPresentation,
-        completion: async_channel::Sender<AskPassResult>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Result<(), AskPassPresentationError> {
-        let first_contact = presentation.is_first_contact();
-        let detail = presentation.detail().to_owned();
-        let result = Rc::new(RefCell::new(None));
-        let completion = Rc::new(RefCell::new(Some(completion)));
-        let result_callback = Rc::clone(&result);
-        let lifecycle_result = Rc::clone(&result);
-        let lifecycle_completion = Rc::clone(&completion);
-        let presenter = cx.weak_entity();
-        let alert = Alert::new(
-            ModalId::new(CONFIRMATION_MODAL_ID),
-            presentation.title(),
-            presentation.title(),
-            presentation.message(),
-            vec![
-                ModalAction::new(
-                    GpuiAskPassAction::Confirm,
-                    presentation.affirmative(),
-                    ModalActionRole::Affirmative,
-                    "ssh-askpass-confirm",
-                ),
-                ModalAction::new(
-                    GpuiAskPassAction::Reject,
-                    presentation.negative(),
-                    ModalActionRole::Cancel,
-                    "ssh-askpass-reject",
-                ),
-            ],
-        )
-        .intent(AlertIntent::Warning)
-        .detail(detail);
-        let on_result = move |outcome, _cx: &mut App| {
-            *result_callback.borrow_mut() =
-                Some(map_gpui_confirmation_outcome(first_contact, outcome));
-        };
-        let on_lifecycle = move |event: &ModalLifecycleEvent, cx: &mut App| {
-            if !matches!(event, ModalLifecycleEvent::Closed(_, _)) {
-                return;
-            }
-            let _ = presenter.update(cx, |presenter, _| {
-                presenter.active = None;
-            });
-            let result = lifecycle_result
-                .borrow_mut()
-                .take()
-                .unwrap_or(AskPassResult::Cancelled);
-            if let Some(completion) = lifecycle_completion.borrow_mut().take() {
-                let _ = completion.try_send(result);
-            }
-        };
-        let alert = alert
-            .present_with_lifecycle(window, cx, on_result, on_lifecycle)
-            .map_err(|_| AskPassPresentationError::ApplicationConfirmationUnavailable)?;
-        self.active = Some(alert);
-        Ok(())
-    }
-
-    fn cancel_active(&mut self, window: &Window, cx: &mut App) {
-        if let Some(active) = self.active.take() {
-            let _ = active.dismiss(window, cx);
-        }
-    }
-}
-
-fn map_gpui_confirmation_outcome(
-    first_contact: bool,
-    outcome: AlertOutcome<GpuiAskPassAction>,
-) -> AskPassResult {
-    match outcome {
-        AlertOutcome::Activated {
-            action_id: GpuiAskPassAction::Confirm,
-            ..
-        } => AskPassResult::Confirmation(true),
-        AlertOutcome::Activated {
-            action_id: GpuiAskPassAction::Reject,
-            ..
-        } if !first_contact => AskPassResult::Confirmation(false),
-        AlertOutcome::Activated { .. } | AlertOutcome::Dismissed { .. } => AskPassResult::Cancelled,
+    GpuiAskPassBridge {
+        commands: command_sender,
+        next_owner: Arc::new(AtomicU64::new(0)),
     }
 }
 
@@ -642,11 +522,44 @@ impl BrokerPresenter for ObservedBrokerPresenter {
 struct PresentationJob {
     request: AskPassRequest,
     response: mpsc::SyncSender<Result<BrokerAnswer, BrokerPresentationFailure>>,
+    cancelled: Arc<AtomicBool>,
+}
+
+enum AskPassUiCommand {
+    Present { owner: u64, job: PresentationJob },
+    Cancel { owner: u64 },
+}
+
+struct GpuiAskPassBridge {
+    commands: async_channel::Sender<AskPassUiCommand>,
+    next_owner: Arc<AtomicU64>,
+}
+
+impl GpuiAskPassBridge {
+    fn presenter(&self) -> Arc<dyn BrokerPresenter> {
+        let owner = self
+            .next_owner
+            .fetch_add(1, Ordering::Relaxed)
+            .wrapping_add(1);
+        Arc::new(ChannelBrokerPresenter {
+            commands: self.commands.clone(),
+            owner,
+            state: Mutex::new(ChannelCommandState::default()),
+            cancelled: Arc::new(AtomicBool::new(false)),
+        })
+    }
+}
+
+#[derive(Default)]
+struct ChannelCommandState {
+    closed: bool,
 }
 
 struct ChannelBrokerPresenter {
-    requests: async_channel::Sender<PresentationJob>,
-    cancellations: async_channel::Sender<()>,
+    commands: async_channel::Sender<AskPassUiCommand>,
+    owner: u64,
+    state: Mutex<ChannelCommandState>,
+    cancelled: Arc<AtomicBool>,
 }
 
 impl BrokerPresenter for ChannelBrokerPresenter {
@@ -656,9 +569,24 @@ impl BrokerPresenter for ChannelBrokerPresenter {
         stop: &AtomicBool,
     ) -> Result<BrokerAnswer, BrokerPresentationFailure> {
         let (response, receiver) = mpsc::sync_channel(1);
-        self.requests
-            .send_blocking(PresentationJob { request, response })
+        let state = self
+            .state
+            .lock()
             .map_err(|_| BrokerPresentationFailure::Unavailable)?;
+        if state.closed {
+            return Err(BrokerPresentationFailure::Unavailable);
+        }
+        self.commands
+            .send_blocking(AskPassUiCommand::Present {
+                owner: self.owner,
+                job: PresentationJob {
+                    request,
+                    response,
+                    cancelled: Arc::clone(&self.cancelled),
+                },
+            })
+            .map_err(|_| BrokerPresentationFailure::Unavailable)?;
+        drop(state);
         loop {
             match receiver.recv_timeout(ACCEPT_POLL_INTERVAL) {
                 Ok(answer) => return answer,
@@ -674,20 +602,40 @@ impl BrokerPresenter for ChannelBrokerPresenter {
     }
 
     fn cancel_active(&self) {
-        let _ = self.cancellations.try_send(());
+        let Ok(mut state) = self.state.lock() else {
+            return;
+        };
+        if state.closed {
+            return;
+        }
+        state.closed = true;
+        self.cancelled.store(true, Ordering::Release);
+        enqueue_cancel_without_blocking(self.commands.clone(), self.owner);
     }
 }
 
-fn map_native_result(result: AskPassResult) -> BrokerAnswer {
+fn enqueue_cancel_without_blocking(commands: async_channel::Sender<AskPassUiCommand>, owner: u64) {
+    let command = AskPassUiCommand::Cancel { owner };
+    match commands.try_send(command) {
+        Ok(()) | Err(async_channel::TrySendError::Closed(_)) => {}
+        Err(async_channel::TrySendError::Full(command)) => {
+            let _ = thread::Builder::new()
+                .name("spaceterm-askpass-cancel".to_owned())
+                .spawn(move || {
+                    let _ = commands.send_blocking(command);
+                });
+        }
+    }
+}
+
+fn map_presentation_result(result: AskPassResult) -> BrokerAnswer {
     match result {
         AskPassResult::Secret(secret) => {
             BrokerAnswer::Secret(Zeroizing::new(secret.as_bytes().to_vec()))
         }
         AskPassResult::Confirmation(confirmed) => BrokerAnswer::Confirmation(confirmed),
         AskPassResult::Cancelled => BrokerAnswer::Cancelled,
-        AskPassResult::Failed(
-            AskPassResponseError::SecretTooLong | AskPassResponseError::EncodingUnavailable,
-        ) => BrokerAnswer::Failed,
+        AskPassResult::Failed(AskPassResponseError::SecretTooLong) => BrokerAnswer::Failed,
     }
 }
 
@@ -1353,38 +1301,6 @@ mod tests {
     }
 
     #[test]
-    fn gpui_confirmation_preserves_first_contact_and_generic_rejection_semantics() {
-        let activated = |action_id| AlertOutcome::Activated {
-            action_id,
-            source: spaceterm_ui::ModalActivationSource::Programmatic,
-            suppression_selected: None,
-        };
-
-        assert!(matches!(
-            map_gpui_confirmation_outcome(true, activated(GpuiAskPassAction::Confirm),),
-            AskPassResult::Confirmation(true)
-        ));
-        assert!(matches!(
-            map_gpui_confirmation_outcome(false, activated(GpuiAskPassAction::Reject),),
-            AskPassResult::Confirmation(false)
-        ));
-        assert!(matches!(
-            map_gpui_confirmation_outcome(true, activated(GpuiAskPassAction::Reject),),
-            AskPassResult::Cancelled
-        ));
-        assert!(matches!(
-            map_gpui_confirmation_outcome(
-                false,
-                AlertOutcome::Dismissed {
-                    reason: spaceterm_ui::ModalCloseReason::Programmatic,
-                    suppression_selected: None,
-                },
-            ),
-            AskPassResult::Cancelled
-        ));
-    }
-
-    #[test]
     fn helper_writes_only_the_secret_answer_and_required_terminator() {
         let connector = FakeConnector {
             stream: Mutex::new(Some(MemoryStream::new(reply_bytes(BrokerAnswer::Secret(
@@ -1523,6 +1439,104 @@ mod tests {
                 ("Password:".to_owned(), AskPassPromptKind::Secret),
             ]
         );
+    }
+
+    #[test]
+    fn channel_presenter_orders_cancel_after_present_without_waiting_for_modal_completion() {
+        let (commands, receiver) = async_channel::bounded(2);
+        let presenter = Arc::new(ChannelBrokerPresenter {
+            commands,
+            owner: 41,
+            state: Mutex::new(ChannelCommandState::default()),
+            cancelled: Arc::new(AtomicBool::new(false)),
+        });
+        let worker = thread::spawn({
+            let presenter = Arc::clone(&presenter);
+            move || {
+                presenter.present(
+                    AskPassRequest::new("Password:".to_owned(), AskPassPromptKind::Secret).unwrap(),
+                    &AtomicBool::new(false),
+                )
+            }
+        });
+
+        let response = match receiver.recv_blocking().unwrap() {
+            AskPassUiCommand::Present { owner, job } => {
+                assert_eq!(owner, 41);
+                assert_eq!(job.request.kind(), AskPassPromptKind::Secret);
+                job.response
+            }
+            AskPassUiCommand::Cancel { .. } => panic!("Present must be ordered before Cancel"),
+        };
+        presenter.cancel_active();
+        assert!(matches!(
+            receiver.recv_blocking(),
+            Ok(AskPassUiCommand::Cancel { owner: 41 })
+        ));
+        response.send(Ok(BrokerAnswer::Cancelled)).unwrap();
+        assert!(matches!(worker.join(), Ok(Ok(BrokerAnswer::Cancelled))));
+    }
+
+    #[test]
+    fn channel_presenter_rejects_presentation_after_attempt_cancellation() {
+        let (commands, receiver) = async_channel::bounded(2);
+        let presenter = ChannelBrokerPresenter {
+            commands,
+            owner: 73,
+            state: Mutex::new(ChannelCommandState::default()),
+            cancelled: Arc::new(AtomicBool::new(false)),
+        };
+
+        presenter.cancel_active();
+        assert!(matches!(
+            receiver.recv_blocking(),
+            Ok(AskPassUiCommand::Cancel { owner: 73 })
+        ));
+        assert!(matches!(
+            presenter.present(
+                AskPassRequest::new("Password:".to_owned(), AskPassPromptKind::Secret).unwrap(),
+                &AtomicBool::new(false),
+            ),
+            Err(BrokerPresentationFailure::Unavailable)
+        ));
+        assert!(receiver.try_recv().is_err());
+    }
+
+    #[test]
+    fn channel_presenter_delivers_cancel_after_the_shared_command_queue_was_full() {
+        let (commands, receiver) = async_channel::bounded(2);
+        assert!(
+            commands
+                .try_send(AskPassUiCommand::Cancel { owner: 1 })
+                .is_ok()
+        );
+        assert!(
+            commands
+                .try_send(AskPassUiCommand::Cancel { owner: 2 })
+                .is_ok()
+        );
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let presenter = ChannelBrokerPresenter {
+            commands,
+            owner: 91,
+            state: Mutex::new(ChannelCommandState::default()),
+            cancelled: Arc::clone(&cancelled),
+        };
+
+        presenter.cancel_active();
+        assert!(cancelled.load(Ordering::Acquire));
+        assert!(matches!(
+            receiver.recv_blocking(),
+            Ok(AskPassUiCommand::Cancel { owner: 1 })
+        ));
+        assert!(matches!(
+            receiver.recv_blocking(),
+            Ok(AskPassUiCommand::Cancel { owner: 2 })
+        ));
+        assert!(matches!(
+            receiver.recv_blocking(),
+            Ok(AskPassUiCommand::Cancel { owner: 91 })
+        ));
     }
 
     #[test]

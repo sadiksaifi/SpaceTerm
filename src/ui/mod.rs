@@ -13,6 +13,7 @@ pub(crate) mod remote_workspace_picker;
 mod render_lifecycle;
 mod resize_handle_theme;
 mod scrollbar_theme;
+pub(crate) mod ssh_askpass_dialog;
 mod ssh_host_form;
 mod ssh_host_picker;
 mod terminal_context_menu;

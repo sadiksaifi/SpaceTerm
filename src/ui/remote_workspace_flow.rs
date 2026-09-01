@@ -41,8 +41,7 @@ use crate::ssh::process::TransientSshErrorOutput;
 use crate::terminal::RemoteTerminalChannelProvider;
 
 const CONNECTION_PROGRESS_ID: &str = "remote-workspace-connection-progress";
-const CONNECTION_PROGRESS_DETAIL: &str =
-    "Passwords, passphrases, and other secrets open in a protected macOS sheet.";
+const CONNECTION_PROGRESS_DETAIL: &str = "Authentication prompts open in a SpaceTerm dialog.";
 const CONNECTION_ERROR_ID: &str = "remote-workspace-connection-error";
 const OPENSSH_ERROR_DETAIL_HEADING: &str = "OpenSSH reported:";
 const DELETE_CONFIRMATION_ID: &str = "remote-workspace-delete-host";

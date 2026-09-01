@@ -17,7 +17,7 @@ use super::ssh_host_form::ManagedHostFormBackendError;
 use crate::domain::{RemoteDirectoryIdentity, RemoteWorkspaceDirectory, SshDestination};
 use crate::platform::app_paths::AppPaths;
 use crate::platform::macos_askpass_transport::{
-    AskPassAttemptObservation, AskPassBrokerLease, NativeAskPassBrokerFactory,
+    AskPassAttemptObservation, AskPassBrokerLease, GpuiAskPassBrokerFactory,
 };
 use crate::ssh::alias_usage::{ActiveSshAliasLease, ActiveSshAliasRegistry};
 use crate::ssh::cancellation::SshCancellationToken;
@@ -59,7 +59,7 @@ pub(super) struct NativeRemoteWorkspaceFlowBackend {
     startup_environment: StartupSshEnvironment,
     startup_capability: SshCapability,
     aliases: ActiveSshAliasRegistry,
-    askpass: Arc<NativeAskPassBrokerFactory>,
+    askpass: Arc<GpuiAskPassBrokerFactory>,
     executor: BackgroundExecutor,
 }
 
@@ -71,7 +71,7 @@ impl NativeRemoteWorkspaceFlowBackend {
         startup_environment: StartupSshEnvironment,
         startup_capability: SshCapability,
         aliases: ActiveSshAliasRegistry,
-        askpass: Arc<NativeAskPassBrokerFactory>,
+        askpass: Arc<GpuiAskPassBrokerFactory>,
         executor: BackgroundExecutor,
     ) -> Self {
         Self {
@@ -182,7 +182,7 @@ impl RemoteWorkspaceFlowBackendFactory for NativeRemoteWorkspaceFlowBackendFacto
         window: &Window,
         cx: &mut App,
     ) -> Result<Arc<dyn RemoteWorkspaceFlowBackend>, RemoteWorkspaceFlowBackendError> {
-        let askpass = NativeAskPassBrokerFactory::new(window, cx)
+        let askpass = GpuiAskPassBrokerFactory::new(window, cx)
             .map(Arc::new)
             .map_err(|_| RemoteWorkspaceFlowBackendError::ConnectionFailed)?;
         Ok(Arc::new(NativeRemoteWorkspaceFlowBackend::new(

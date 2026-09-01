@@ -5,6 +5,8 @@
 //! limit is applied. Undo and redo retain at most 128 snapshots and 1 MiB of text in total. The
 //! application kill ring retains at most 64 KiB. All limits are byte limits and every truncation
 //! performed during construction or kill-ring capture ends at a complete grapheme boundary.
+//! Obscured inputs use a 16 KiB limit, render one bullet per grapheme, and retain no clipboard,
+//! kill-ring, undo, or redo content.
 
 use std::{ops::Range, time::Duration};
 
@@ -18,6 +20,7 @@ use gpui::{
     UnderlineStyle, Window, actions, div, fill, point, px, relative, size,
 };
 use unicode_segmentation::UnicodeSegmentation as _;
+use zeroize::{Zeroize as _, Zeroizing};
 
 use crate::{
     button::ModalControlScope,
@@ -28,13 +31,16 @@ const KEY_CONTEXT: &str = "SpaceTermTextInput";
 const CARET_BLINK_INTERVAL: Duration = Duration::from_millis(530);
 const HARD_VALUE_LIMIT: usize = 1024 * 1024;
 const DEFAULT_VALUE_LIMIT: usize = 64 * 1024;
+const OBSCURED_VALUE_LIMIT: usize = 16 * 1024;
 const CLIPBOARD_INSERTION_LIMIT: usize = 1024 * 1024;
 const KILL_RING_LIMIT: usize = 64 * 1024;
 const HISTORY_ENTRY_LIMIT: usize = 128;
 const HISTORY_BYTE_LIMIT: usize = 1024 * 1024;
+const OBSCURED_BULLET: char = '\u{2022}';
+const OBSCURED_BULLET_BYTES: usize = OBSCURED_BULLET.len_utf8();
 
 #[derive(Default)]
-struct TextKillRing(String);
+struct TextKillRing(Zeroizing<String>);
 
 impl Global for TextKillRing {}
 
@@ -164,6 +170,16 @@ pub enum TextInputVariant {
     Standard,
     /// Presentation for a parent-owned continuous surface.
     Bare,
+}
+
+/// How an input's value is presented and retained while editing.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum TextInputContentMode {
+    /// Present the value as ordinary text and enable the complete editing history.
+    #[default]
+    Plain,
+    /// Present one bullet per grapheme and retain no clipboard or editing history.
+    Obscured,
 }
 
 /// Text-input colors supplied by the application theme.
@@ -454,7 +470,7 @@ impl Selection {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct Snapshot {
-    text: String,
+    text: Zeroizing<String>,
     selection: Selection,
 }
 impl Snapshot {
@@ -546,18 +562,26 @@ impl History {
 
 #[derive(Debug)]
 struct TextBuffer {
-    text: String,
+    text: Zeroizing<String>,
     selection: Selection,
     history: History,
+    history_enabled: bool,
 }
 
 impl TextBuffer {
     fn new(text: String) -> Self {
         let end = text.len();
         Self {
-            text,
+            text: Zeroizing::new(text),
             selection: Selection::caret(end),
             history: History::default(),
+            history_enabled: true,
+        }
+    }
+    fn set_history_enabled(&mut self, enabled: bool) {
+        self.history_enabled = enabled;
+        if !enabled {
+            self.history.clear();
         }
     }
     fn snapshot(&self) -> Snapshot {
@@ -603,20 +627,34 @@ impl TextBuffer {
         kind: EditKind,
         limit: usize,
     ) -> bool {
+        let replacement = Zeroizing::new(replacement);
         let range = normalize_byte_range(&self.text, range);
         let final_len = self.text.len() - range.len() + replacement.len();
         if final_len > limit || final_len > HARD_VALUE_LIMIT {
             return false;
         }
-        if self.text[range.clone()] == replacement {
+        if self.text[range.clone()] == *replacement {
             self.selection = Selection::caret(range.start + replacement.len());
             return false;
         }
-        let snapshot = self.history.should_snapshot(kind).then(|| self.snapshot());
+        let snapshot =
+            (self.history_enabled && self.history.should_snapshot(kind)).then(|| self.snapshot());
         let cursor = range.start + replacement.len();
-        self.text.replace_range(range, &replacement);
+        if self.history_enabled {
+            self.text.replace_range(range, &replacement);
+        } else {
+            let mut updated = String::with_capacity(final_len);
+            updated.push_str(&self.text[..range.start]);
+            updated.push_str(&replacement);
+            updated.push_str(&self.text[range.end..]);
+            self.text = Zeroizing::new(updated);
+        }
         self.selection = Selection::caret(cursor);
-        self.history.record_snapshot(snapshot, kind);
+        if self.history_enabled {
+            self.history.record_snapshot(snapshot, kind);
+        } else {
+            self.history.clear();
+        }
         true
     }
 
@@ -642,7 +680,15 @@ impl TextBuffer {
             return false;
         }
         let cursor = range.start + replacement.len();
-        self.text.replace_range(range, replacement);
+        if self.history_enabled {
+            self.text.replace_range(range, replacement);
+        } else {
+            let mut updated = String::with_capacity(final_len);
+            updated.push_str(&self.text[..range.start]);
+            updated.push_str(replacement);
+            updated.push_str(&self.text[range.end..]);
+            self.text = Zeroizing::new(updated);
+        }
         self.selection = Selection::caret(cursor);
         self.history.break_group();
         true
@@ -749,6 +795,9 @@ impl TextBuffer {
     }
 
     fn undo(&mut self) -> bool {
+        if !self.history_enabled {
+            return false;
+        }
         let Some(snapshot) = self.history.pop_undo() else {
             return false;
         };
@@ -758,6 +807,9 @@ impl TextBuffer {
         true
     }
     fn redo(&mut self) -> bool {
+        if !self.history_enabled {
+            return false;
+        }
         let Some(snapshot) = self.history.pop_redo() else {
             return false;
         };
@@ -784,6 +836,7 @@ struct PointerGesture {
 #[derive(Clone, Debug, PartialEq)]
 struct ShapeKey {
     revision: u64,
+    content_mode: TextInputContentMode,
     marked_range: Option<Range<usize>>,
     placeholder: SharedString,
     empty: bool,
@@ -818,6 +871,7 @@ pub struct TextInput {
     accessibility_name: SharedString,
     debug_selector: SharedString,
     placeholder: SharedString,
+    content_mode: TextInputContentMode,
     variant: TextInputVariant,
     enabled: bool,
     editable: bool,
@@ -831,7 +885,7 @@ pub struct TextInput {
     focused: bool,
     window_active: bool,
     buffer: TextBuffer,
-    initial_value_source: Option<String>,
+    initial_value_source: Option<Zeroizing<String>>,
     revision: u64,
     composition: Option<CompositionState>,
     geometry: Option<GeometryCache>,
@@ -852,6 +906,8 @@ pub struct TextInput {
     value_shape_clone_count: usize,
     #[cfg(test)]
     clipboard_read_count: usize,
+    #[cfg(test)]
+    last_shaped_display: Option<SharedString>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -873,16 +929,19 @@ impl TextInput {
             cx.on_blur(&focus_handle, window, Self::on_blur),
             cx.observe_window_activation(window, Self::on_window_activation),
         ];
-        let normalized = normalize_single_line(&initial_value.into());
-        let normalized = truncate_grapheme(&normalized, HARD_VALUE_LIMIT).to_owned();
+        let initial_value = Zeroizing::new(initial_value.into());
+        let normalized = Zeroizing::new(normalize_single_line(&initial_value));
+        let normalized =
+            Zeroizing::new(truncate_grapheme(&normalized, HARD_VALUE_LIMIT).to_owned());
         let default_value = truncate_grapheme(&normalized, DEFAULT_VALUE_LIMIT).to_owned();
-        let initial_value_source = (default_value != normalized).then_some(normalized);
+        let initial_value_source = (default_value != *normalized).then_some(normalized);
         let accessibility_name = accessibility_name.into();
         Self {
             id: id.into(),
             debug_selector: accessibility_name.clone(),
             accessibility_name,
             placeholder: SharedString::default(),
+            content_mode: TextInputContentMode::default(),
             variant: TextInputVariant::default(),
             enabled: true,
             editable: true,
@@ -917,6 +976,8 @@ impl TextInput {
             value_shape_clone_count: 0,
             #[cfg(test)]
             clipboard_read_count: 0,
+            #[cfg(test)]
+            last_shaped_display: None,
             _subscriptions: subscriptions,
         }
     }
@@ -924,6 +985,26 @@ impl TextInput {
     /// Sets the placeholder shown when the value is empty.
     pub fn placeholder(mut self, placeholder: impl Into<SharedString>) -> Self {
         self.placeholder = placeholder.into();
+        self.geometry = None;
+        self
+    }
+    /// Selects ordinary or obscured content handling.
+    ///
+    /// Obscured values are capped at 16 KiB, rendered as one bullet per grapheme, and never enter
+    /// the clipboard, kill ring, undo stack, redo stack, or native surrounding-text queries.
+    pub fn content_mode(mut self, mode: TextInputContentMode) -> Self {
+        self.content_mode = mode;
+        self.buffer
+            .set_history_enabled(mode == TextInputContentMode::Plain);
+        if mode == TextInputContentMode::Obscured {
+            self.input_length_limit = self.input_length_limit.min(OBSCURED_VALUE_LIMIT);
+            let value = truncate_grapheme(&self.buffer.text, self.input_length_limit).to_owned();
+            if value != *self.buffer.text {
+                self.buffer = TextBuffer::new(value);
+                self.buffer.set_history_enabled(false);
+            }
+            self.initial_value_source = None;
+        }
         self.geometry = None;
         self
     }
@@ -976,14 +1057,23 @@ impl TextInput {
     /// while retaining the hard 1 MiB limit. An initial value above the resulting limit is
     /// grapheme-safely truncated before the entity can emit events.
     pub fn input_length_limit(mut self, limit: Option<usize>) -> Self {
-        self.input_length_limit = limit.unwrap_or(HARD_VALUE_LIMIT).min(HARD_VALUE_LIMIT);
+        self.input_length_limit =
+            limit
+                .unwrap_or(HARD_VALUE_LIMIT)
+                .min(HARD_VALUE_LIMIT)
+                .min(match self.content_mode {
+                    TextInputContentMode::Plain => HARD_VALUE_LIMIT,
+                    TextInputContentMode::Obscured => OBSCURED_VALUE_LIMIT,
+                });
         let source = self
             .initial_value_source
-            .as_deref()
-            .unwrap_or(&self.buffer.text);
+            .as_ref()
+            .map_or(self.buffer.text.as_str(), |value| value.as_str());
         let value = truncate_grapheme(source, self.input_length_limit).to_owned();
-        if value != self.buffer.text {
+        if value != *self.buffer.text {
             self.buffer = TextBuffer::new(value);
+            self.buffer
+                .set_history_enabled(self.content_mode == TextInputContentMode::Plain);
         }
         self
     }
@@ -1001,6 +1091,41 @@ impl TextInput {
     /// Returns the current normalized value.
     pub fn value(&self) -> &str {
         &self.buffer.text
+    }
+    /// Removes and returns the current value while clearing every retained editing state.
+    ///
+    /// The caller becomes the sole owner of the returned value. The input no longer retains the
+    /// value through its buffer, composition, undo, redo, initial-value source, or shaped cache.
+    pub fn take_value(&mut self, cx: &mut Context<Self>) -> String {
+        let value = self.take_value_without_event();
+        if !value.is_empty() {
+            self.advance_revision(
+                TextInputChangeSource::Programmatic,
+                self.emit_programmatic_changes,
+                cx,
+            );
+        } else {
+            self.restart_caret(cx);
+        }
+        value
+    }
+    /// Clears the current value and every retained editing state.
+    ///
+    /// Returns whether the current value was nonempty.
+    pub fn clear(&mut self, cx: &mut Context<Self>) -> bool {
+        let mut value = self.take_value_without_event();
+        let changed = !value.is_empty();
+        value.zeroize();
+        if changed {
+            self.advance_revision(
+                TextInputChangeSource::Programmatic,
+                self.emit_programmatic_changes,
+                cx,
+            );
+        } else {
+            self.restart_caret(cx);
+        }
+        changed
     }
     /// Returns whether [`Self::set_value`] would preserve `value` byte-for-byte.
     pub fn can_set_value_exactly(&self, value: &str) -> bool {
@@ -1071,7 +1196,8 @@ impl TextInput {
     /// event with `Programmatic` is emitted only when configured and only after that revision
     /// advances. The return value reports whether text changed.
     pub fn set_value(&mut self, value: impl Into<String>, cx: &mut Context<Self>) -> bool {
-        let normalized = normalize_single_line(&value.into());
+        let value = Zeroizing::new(value.into());
+        let normalized = Zeroizing::new(normalize_single_line(&value));
         if normalized.len() > self.input_length_limit || normalized.len() > HARD_VALUE_LIMIT {
             return false;
         }
@@ -1079,7 +1205,7 @@ impl TextInput {
             cx.emit(TextInputEvent::CompositionCancelled);
         }
         self.buffer.history.clear();
-        let changed = self.buffer.text != normalized;
+        let changed = self.buffer.text.as_str() != normalized.as_str();
         self.buffer.text = normalized;
         self.buffer.selection = Selection::caret(self.buffer.text.len());
         self.cancel_pointer_gesture();
@@ -1096,6 +1222,17 @@ impl TextInput {
         changed
     }
 
+    fn take_value_without_event(&mut self) -> String {
+        self.composition = None;
+        self.buffer.history.clear();
+        self.buffer.selection = Selection::caret(0);
+        self.initial_value_source = None;
+        self.geometry = None;
+        self.scroll = px(0.0);
+        self.cancel_pointer_gesture();
+        std::mem::take(&mut *self.buffer.text)
+    }
+
     /// Selects the complete value after committing active composition.
     pub fn select_all(&mut self, cx: &mut Context<Self>) {
         self.commit_composition(cx);
@@ -1105,6 +1242,44 @@ impl TextInput {
 
     fn can_edit(&self) -> bool {
         self.enabled && self.editable
+    }
+
+    fn display_offset_for_source(&self, source_offset: usize) -> usize {
+        match self.content_mode {
+            TextInputContentMode::Plain => source_offset.min(self.buffer.text.len()),
+            TextInputContentMode::Obscured => {
+                let source_offset =
+                    clamp_grapheme_boundary(&self.buffer.text, source_offset, false);
+                self.buffer.text[..source_offset].graphemes(true).count() * OBSCURED_BULLET_BYTES
+            }
+        }
+    }
+
+    fn source_offset_for_display(&self, display_offset: usize) -> usize {
+        match self.content_mode {
+            TextInputContentMode::Plain => {
+                clamp_grapheme_boundary(&self.buffer.text, display_offset, false)
+            }
+            TextInputContentMode::Obscured => {
+                let grapheme_index = display_offset / OBSCURED_BULLET_BYTES;
+                self.buffer
+                    .text
+                    .grapheme_indices(true)
+                    .nth(grapheme_index)
+                    .map_or(self.buffer.text.len(), |(offset, _)| offset)
+            }
+        }
+    }
+
+    fn display_text(&self) -> SharedString {
+        match self.content_mode {
+            TextInputContentMode::Plain => self.buffer.text.as_str().to_owned().into(),
+            TextInputContentMode::Obscured => {
+                std::iter::repeat_n(OBSCURED_BULLET, self.buffer.text.graphemes(true).count())
+                    .collect::<String>()
+                    .into()
+            }
+        }
     }
 
     fn can_accept_paste(&self, text: &str) -> bool {
@@ -1233,7 +1408,7 @@ impl TextInput {
         let Some(state) = self.composition.take() else {
             return false;
         };
-        if state.original.text != self.buffer.text {
+        if self.buffer.history_enabled && state.original.text != self.buffer.text {
             self.buffer
                 .history
                 .record_snapshot(Some(state.original), EditKind::Atomic);
@@ -1359,6 +1534,10 @@ impl TextInput {
     }
 
     fn kill(&mut self, range: Range<usize>, cx: &mut Context<Self>) {
+        if self.content_mode == TextInputContentMode::Obscured {
+            cx.stop_propagation();
+            return;
+        }
         if !self.can_edit() {
             return;
         }
@@ -1370,7 +1549,7 @@ impl TextInput {
         }
         let killed =
             truncate_grapheme(&self.buffer.text[range.clone()], KILL_RING_LIMIT).to_owned();
-        cx.global_mut::<TextKillRing>().0 = killed;
+        cx.global_mut::<TextKillRing>().0 = Zeroizing::new(killed);
         let changed = self.buffer.replace(
             range,
             String::new(),
@@ -1405,6 +1584,10 @@ impl TextInput {
         self.kill(range, cx);
     }
     fn yank(&mut self, _: &Yank, _: &mut Window, cx: &mut Context<Self>) {
+        if self.content_mode == TextInputContentMode::Obscured {
+            cx.stop_propagation();
+            return;
+        }
         if !self.can_edit() {
             return;
         }
@@ -1517,7 +1700,8 @@ impl TextInput {
     }
 
     fn copy(&mut self, _: &Copy, _: &mut Window, cx: &mut Context<Self>) {
-        if self.enabled
+        if self.content_mode == TextInputContentMode::Plain
+            && self.enabled
             && let Some(text) = self.buffer.selected_text()
         {
             cx.write_to_clipboard(ClipboardItem::new_string(text.to_owned()));
@@ -1525,7 +1709,7 @@ impl TextInput {
         cx.stop_propagation();
     }
     fn cut(&mut self, _: &Cut, _: &mut Window, cx: &mut Context<Self>) {
-        if self.can_edit() {
+        if self.content_mode == TextInputContentMode::Plain && self.can_edit() {
             self.commit_composition(cx);
             if let Some(text) = self.buffer.selected_text().map(ToOwned::to_owned) {
                 cx.write_to_clipboard(ClipboardItem::new_string(text));
@@ -1554,7 +1738,7 @@ impl TextInput {
         cx.stop_propagation();
     }
     fn undo(&mut self, _: &Undo, _: &mut Window, cx: &mut Context<Self>) {
-        if self.can_edit() {
+        if self.content_mode == TextInputContentMode::Plain && self.can_edit() {
             self.commit_composition(cx);
             if self.buffer.undo() {
                 self.advance_revision(TextInputChangeSource::Undo, true, cx);
@@ -1564,7 +1748,7 @@ impl TextInput {
         }
     }
     fn redo(&mut self, _: &Redo, _: &mut Window, cx: &mut Context<Self>) {
-        if self.can_edit() {
+        if self.content_mode == TextInputContentMode::Plain && self.can_edit() {
             self.commit_composition(cx);
             if self.buffer.redo() {
                 self.advance_revision(TextInputChangeSource::Redo, true, cx);
@@ -1779,7 +1963,7 @@ impl TextInput {
         let caret_x = if self.buffer.text.is_empty() {
             px(0.0)
         } else {
-            line.x_for_index(self.buffer.selection.cursor())
+            line.x_for_index(self.display_offset_for_source(self.buffer.selection.cursor()))
         };
         let mut scroll = self
             .scroll
@@ -1807,12 +1991,10 @@ impl TextInput {
         if position.y > bounds.bottom() {
             return self.buffer.text.len();
         }
-        clamp_grapheme_boundary(
-            &self.buffer.text,
+        self.source_offset_for_display(
             geometry
                 .line
                 .closest_index_for_x(position.x - bounds.left() + self.scroll),
-            false,
         )
     }
 
@@ -1845,6 +2027,7 @@ impl TextInput {
             .flatten();
         let key = ShapeKey {
             revision: self.revision,
+            content_mode: self.content_mode,
             marked_range: marked_range.clone(),
             placeholder: self.placeholder.clone(),
             empty,
@@ -1864,12 +2047,17 @@ impl TextInput {
         let display: SharedString = if empty {
             self.placeholder.clone()
         } else {
-            #[cfg(test)]
-            {
-                self.value_shape_clone_count += 1;
+            if self.content_mode == TextInputContentMode::Plain {
+                #[cfg(test)]
+                {
+                    self.value_shape_clone_count += 1;
+                }
             }
-            self.buffer.text.clone().into()
+            self.display_text()
         };
+        let marked_range = marked_range.map(|range| {
+            self.display_offset_for_source(range.start)..self.display_offset_for_source(range.end)
+        });
         let base = TextRun {
             len: display.len(),
             font,
@@ -1882,6 +2070,7 @@ impl TextInput {
         #[cfg(test)]
         {
             self.shape_count += 1;
+            self.last_shaped_display = Some(display.clone());
         }
         let line = window
             .text_system()
@@ -1908,6 +2097,10 @@ impl EntityInputHandler for TextInput {
         _: &mut Window,
         _: &mut Context<Self>,
     ) -> Option<String> {
+        if self.content_mode == TextInputContentMode::Obscured {
+            *adjusted = None;
+            return None;
+        }
         let range = utf16_query_range_to_bytes(&self.buffer.text, range_utf16);
         adjusted.replace(byte_range_to_utf16(&self.buffer.text, range.clone()));
         Some(self.buffer.text[range].to_owned())
@@ -2066,13 +2259,15 @@ impl EntityInputHandler for TextInput {
         let line = self.rebuild_geometry(bounds, window, cx);
         let scroll = self.reconcile_scroll(&line, bounds, cx.global::<TextInputTheme>().metrics);
         let range = utf16_query_range_to_bytes(&self.buffer.text, range_utf16);
+        let display_range =
+            self.display_offset_for_source(range.start)..self.display_offset_for_source(range.end);
         Some(Bounds::from_corners(
             point(
-                bounds.left() + line.x_for_index(range.start) - scroll,
+                bounds.left() + line.x_for_index(display_range.start) - scroll,
                 bounds.top(),
             ),
             point(
-                bounds.left() + line.x_for_index(range.end) - scroll,
+                bounds.left() + line.x_for_index(display_range.end) - scroll,
                 bounds.bottom(),
             ),
         ))
@@ -2086,11 +2281,8 @@ impl EntityInputHandler for TextInput {
         let bounds = self.last_bounds?;
         let line = self.rebuild_geometry(bounds, window, cx);
         let scroll = self.reconcile_scroll(&line, bounds, cx.global::<TextInputTheme>().metrics);
-        let index = clamp_grapheme_boundary(
-            &self.buffer.text,
-            line.closest_index_for_x(point.x - bounds.left() + scroll),
-            false,
-        );
+        let index = self
+            .source_offset_for_display(line.closest_index_for_x(point.x - bounds.left() + scroll));
         Some(byte_offset_to_utf16(&self.buffer.text, index))
     }
 }
@@ -2102,16 +2294,17 @@ impl Render for TextInput {
         let has_selection = !self.buffer.selection.is_empty();
         let can_edit = self.can_edit();
         let can_paste = self.paste_available;
+        let exposes_content = self.content_mode == TextInputContentMode::Plain;
         let entries = vec![
             MenuEntry::action("Undo", TextInputMenuAction::Undo)
-                .disabled(!can_edit || self.buffer.history.undo.is_empty()),
+                .disabled(!exposes_content || !can_edit || self.buffer.history.undo.is_empty()),
             MenuEntry::action("Redo", TextInputMenuAction::Redo)
-                .disabled(!can_edit || self.buffer.history.redo.is_empty()),
+                .disabled(!exposes_content || !can_edit || self.buffer.history.redo.is_empty()),
             MenuEntry::separator(),
             MenuEntry::action("Cut", TextInputMenuAction::Cut)
-                .disabled(!can_edit || !has_selection),
+                .disabled(!exposes_content || !can_edit || !has_selection),
             MenuEntry::action("Copy", TextInputMenuAction::Copy)
-                .disabled(!self.enabled || !has_selection),
+                .disabled(!exposes_content || !self.enabled || !has_selection),
             MenuEntry::action("Paste", TextInputMenuAction::Paste).disabled(!can_paste),
             MenuEntry::action("Select All", TextInputMenuAction::SelectAll)
                 .disabled(!self.enabled || self.buffer.text.is_empty()),
@@ -2287,7 +2480,7 @@ impl Element for TextElement {
             let caret_x = if empty {
                 px(0.0)
             } else {
-                line.x_for_index(input.buffer.selection.cursor())
+                line.x_for_index(input.display_offset_for_source(input.buffer.selection.cursor()))
             };
             let scroll = input.reconcile_scroll(&line, bounds, theme.metrics);
             let active = input.enabled && input.focused && input.window_active;
@@ -2298,12 +2491,17 @@ impl Element for TextElement {
                         Bounds::from_corners(
                             point(
                                 bounds.left()
-                                    + line.x_for_index(input.buffer.selection.range.start)
+                                    + line.x_for_index(input.display_offset_for_source(
+                                        input.buffer.selection.range.start,
+                                    ))
                                     - scroll,
                                 bounds.top(),
                             ),
                             point(
-                                bounds.left() + line.x_for_index(input.buffer.selection.range.end)
+                                bounds.left()
+                                    + line.x_for_index(input.display_offset_for_source(
+                                        input.buffer.selection.range.end,
+                                    ))
                                     - scroll,
                                 bounds.bottom(),
                             ),
@@ -2707,6 +2905,24 @@ mod tests {
         (input, cx)
     }
 
+    fn obscured_input<'a>(
+        cx: &'a mut TestAppContext,
+        value: &'static str,
+    ) -> (Entity<TextInput>, &'a mut VisualTestContext) {
+        install_theme(cx);
+        let (input, cx) = cx.add_window_view(move |window, cx| {
+            TextInput::new("test-input", "Secret", value, window, cx)
+                .content_mode(TextInputContentMode::Obscured)
+                .debug_selector("test-input")
+        });
+        cx.update(|window, cx| {
+            window.activate_window();
+            input.read(cx).focus_handle().focus(window);
+        });
+        cx.run_until_parked();
+        (input, cx)
+    }
+
     fn input_with_events<'a>(
         cx: &'a mut TestAppContext,
         value: &'static str,
@@ -2818,13 +3034,13 @@ mod tests {
         let mut buffer = TextBuffer::new("e\u{301}👩‍💻".into());
         assert!(buffer.delete_backward(HARD_VALUE_LIMIT));
         assert!(buffer.delete_backward(HARD_VALUE_LIMIT));
-        assert_eq!(buffer.text, "");
+        assert_eq!(buffer.text.as_str(), "");
     }
     #[test]
     fn transposition_swaps_complete_graphemes() {
         let mut buffer = TextBuffer::new("e\u{301}👩‍💻".into());
         assert!(buffer.transpose(HARD_VALUE_LIMIT));
-        assert_eq!(buffer.text, "👩‍💻e\u{301}");
+        assert_eq!(buffer.text.as_str(), "👩‍💻e\u{301}");
     }
     #[test]
     fn oversized_edit_is_atomic() {
@@ -2982,7 +3198,188 @@ mod tests {
             EditKind::Atomic,
             HARD_VALUE_LIMIT,
         ));
-        assert_eq!(buffer.text, "AX👩‍💻B");
+        assert_eq!(buffer.text.as_str(), "AX👩‍💻B");
+    }
+
+    #[gpui::test]
+    fn obscured_ascii_projection_maps_source_and_display_offsets(cx: &mut TestAppContext) {
+        let (input, cx) = obscured_input(cx, "abc");
+
+        assert_eq!(
+            input.read_with(cx, |input, _| (
+                input.display_text().to_string(),
+                [0, 1, 2, 3].map(|offset| input.display_offset_for_source(offset)),
+                [0, 3, 6, 9].map(|offset| input.source_offset_for_display(offset)),
+            )),
+            ("•••".into(), [0, 3, 6, 9], [0, 1, 2, 3],)
+        );
+    }
+
+    #[gpui::test]
+    fn obscured_emoji_projection_preserves_grapheme_boundaries(cx: &mut TestAppContext) {
+        let (input, cx) = obscured_input(cx, "Ae\u{301}👩‍💻B");
+
+        assert_eq!(
+            input.read_with(cx, |input, _| (
+                input.display_text().to_string(),
+                [0, 1, 4, 15, 16].map(|offset| input.display_offset_for_source(offset)),
+                [0, 3, 6, 9, 12].map(|offset| input.source_offset_for_display(offset)),
+            )),
+            ("••••".into(), [0, 3, 6, 9, 12], [0, 1, 4, 15, 16],)
+        );
+    }
+
+    #[gpui::test]
+    fn obscured_shaping_never_receives_plaintext(cx: &mut TestAppContext) {
+        let (input, cx) = obscured_input(cx, "correct horse battery staple");
+
+        let (display, plaintext_clone_count) = input.read_with(cx, |input, _| {
+            (
+                input.last_shaped_display.as_ref().map(ToString::to_string),
+                input.value_shape_clone_count,
+            )
+        });
+        assert_eq!((display, plaintext_clone_count), (Some("•".repeat(28)), 0));
+    }
+
+    #[gpui::test]
+    fn obscured_native_whole_range_query_returns_no_plaintext(cx: &mut TestAppContext) {
+        const SECRET: &str = "päss👩‍💻phrase";
+        let (input, cx) = obscured_input(cx, SECRET);
+        let mut adjusted = Some(1..2);
+
+        let queried = cx.update(|window, cx| {
+            input.update(cx, |input, cx| {
+                input.text_for_range(0..SECRET.encode_utf16().count(), &mut adjusted, window, cx)
+            })
+        });
+
+        assert_eq!((queried, adjusted), (None, None));
+    }
+
+    #[gpui::test]
+    fn obscured_native_composition_still_updates_and_commits(cx: &mut TestAppContext) {
+        let (input, cx) = obscured_input(cx, "");
+
+        cx.update(|window, cx| {
+            input.update(cx, |input, cx| {
+                input.replace_and_mark_text_in_range(None, "日本", Some(1..1), window, cx);
+                input.replace_text_in_range(None, "日本語", window, cx);
+            });
+        });
+
+        assert_eq!(
+            input.read_with(cx, |input, _| (
+                input.value().to_owned(),
+                input.composition().is_none(),
+                input.buffer.history.undo.len(),
+            )),
+            ("日本語".into(), true, 0)
+        );
+    }
+
+    #[gpui::test]
+    fn obscured_clipboard_kill_and_history_actions_are_inert(cx: &mut TestAppContext) {
+        let (input, cx) = obscured_input(cx, "secret");
+        cx.write_to_clipboard(ClipboardItem::new_string("clipboard sentinel".into()));
+
+        cx.update(|window, cx| {
+            input.update(cx, |input, cx| {
+                input.select_all(cx);
+                input.copy(&Copy, window, cx);
+                input.cut(&Cut, window, cx);
+                input.kill_to_end(&KillToEnd, window, cx);
+                input.yank(&Yank, window, cx);
+                input.undo(&Undo, window, cx);
+                input.redo(&Redo, window, cx);
+            });
+        });
+
+        let clipboard =
+            cx.update(|_, cx| cx.read_from_clipboard().and_then(bounded_clipboard_text));
+        assert_eq!(
+            input.read_with(cx, |input, _| (
+                input.value().to_owned(),
+                input.buffer.history.undo.len(),
+                input.buffer.history.redo.len(),
+                clipboard,
+            )),
+            ("secret".into(), 0, 0, Some("clipboard sentinel".into()))
+        );
+    }
+
+    #[gpui::test]
+    fn obscured_input_supports_paste_selection_and_editing_without_history(
+        cx: &mut TestAppContext,
+    ) {
+        let (input, cx) = obscured_input(cx, "old");
+        cx.write_to_clipboard(ClipboardItem::new_string("new👩‍💻".into()));
+        input.update(cx, |input, cx| input.select_all(cx));
+        cx.update(|window, cx| {
+            input.update(cx, |input, cx| input.paste(&Paste, window, cx));
+        });
+        cx.simulate_keystrokes("backspace");
+
+        assert_eq!(
+            input.read_with(cx, |input, _| (
+                input.value().to_owned(),
+                input.buffer.history.undo.len(),
+            )),
+            ("new".into(), 0)
+        );
+    }
+
+    #[gpui::test]
+    fn obscured_input_enforces_sixteen_kibibyte_limit(cx: &mut TestAppContext) {
+        install_theme(cx);
+        let (input, cx) = cx.add_window_view(|window, cx| {
+            TextInput::new(
+                "test-input",
+                "Secret",
+                "x".repeat(OBSCURED_VALUE_LIMIT + 1),
+                window,
+                cx,
+            )
+            .content_mode(TextInputContentMode::Obscured)
+            .input_length_limit(None)
+        });
+
+        assert_eq!(
+            input.read_with(cx, |input, _| (
+                input.value().len(),
+                input.input_length_limit,
+            )),
+            (OBSCURED_VALUE_LIMIT, OBSCURED_VALUE_LIMIT)
+        );
+    }
+
+    #[gpui::test]
+    fn take_and_clear_remove_retained_obscured_state(cx: &mut TestAppContext) {
+        let (input, cx) = obscured_input(cx, "first secret");
+
+        let (taken, empty_after_take) = input.update(cx, |input, cx| {
+            let taken = input.take_value(cx);
+            let empty = input.value().is_empty()
+                && input.composition.is_none()
+                && input.buffer.history.undo.is_empty()
+                && input.buffer.history.redo.is_empty()
+                && input.initial_value_source.is_none()
+                && input.geometry.is_none();
+            (taken, empty)
+        });
+        input.update(cx, |input, cx| {
+            assert!(input.set_value("second secret", cx));
+            assert!(input.clear(cx));
+        });
+
+        assert_eq!(
+            (
+                taken,
+                empty_after_take,
+                input.read_with(cx, |input, _| input.value().is_empty())
+            ),
+            ("first secret".into(), true, true)
+        );
     }
 
     #[test]
@@ -2990,7 +3387,7 @@ mod tests {
         let mut buffer = TextBuffer::new("e\u{301}👩‍💻".into());
         buffer.move_to(0);
         assert!(buffer.delete_forward(HARD_VALUE_LIMIT));
-        assert_eq!(buffer.text, "👩‍💻");
+        assert_eq!(buffer.text.as_str(), "👩‍💻");
     }
 
     #[test]
