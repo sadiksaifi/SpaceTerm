@@ -1,14 +1,39 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use thiserror::Error;
+
 use super::pane_action_menu::{
     CloseTarget, PaneActionMenuCommand, pane_action_menu_entries, sf_symbol,
 };
 use super::terminal_focus::{TerminalFocusBlocker, TerminalProductFocus};
 use super::{
-    ClosePane, FocusPaneDown, FocusPaneLeft, FocusPaneRight, FocusPaneUp, SplitDown, SplitRight,
+    ClosePane, FocusPaneDown, FocusPaneLeft, FocusPaneRight, FocusPaneUp,
+    PreparedRemotePaneRestart, RemotePaneLifecycleError, SplitDown, SplitRight,
     TERMINAL_KEY_CONTEXT, TerminalPane, TerminalPaneEvent, TogglePaneZoom,
 };
+
+#[derive(Debug, Error)]
+pub(crate) enum RemotePaneHostLifecycleError {
+    #[error("Pane {pane_id} cannot change remote session lifecycle: {source}")]
+    Pane {
+        pane_id: PaneId,
+        #[source]
+        source: RemotePaneLifecycleError,
+    },
+    #[error("the prepared restart belongs to Window {prepared}, not Window {current}")]
+    WindowChanged {
+        prepared: WindowId,
+        current: WindowId,
+    },
+    #[error("Pane {0} changed after remote restart preparation")]
+    PaneChanged(PaneId),
+}
+
+pub(crate) struct PreparedPaneHostRemoteRestart {
+    window_id: WindowId,
+    panes: Vec<(PaneId, Entity<TerminalPane>, PreparedRemotePaneRestart)>,
+}
 use crate::domain::{
     ClosePaneOutcome, FocusDirection, PaneId, PaneNodeRef, PaneSize, PaneTreeRef, SplitAxis,
     SplitId, TerminalWindow, WindowId, WorkspaceDirectoryIdentity, WorkspaceId, ZoomState,
@@ -85,6 +110,7 @@ pub(crate) struct PaneHost {
     native_service_hierarchy_generation: u64,
     native_service_focus_signature: Option<(bool, PaneId, Option<TerminalFocusBlocker>)>,
     close_window_requested: bool,
+    remote_disconnected_generation: Option<u64>,
 }
 
 impl PaneHost {
@@ -144,6 +170,7 @@ impl PaneHost {
             native_service_hierarchy_generation: 0,
             native_service_focus_signature: None,
             close_window_requested: false,
+            remote_disconnected_generation: None,
         }
     }
 
@@ -358,9 +385,189 @@ impl PaneHost {
         }
     }
 
+    pub(crate) fn disconnect_remote(
+        &mut self,
+        generation: u64,
+        cx: &mut Context<Self>,
+    ) -> Result<(), RemotePaneHostLifecycleError> {
+        self.can_disconnect_remote(generation, cx)?;
+        for (_, terminal) in self.terminal_window.terminals_with_ids() {
+            terminal.update(cx, |terminal, cx| {
+                terminal
+                    .disconnect_remote(generation, cx)
+                    .expect("prevalidated remote disconnect must remain legal")
+            });
+        }
+        self.remote_disconnected_generation = Some(generation);
+        self.sync_terminal_focus(cx);
+        Ok(())
+    }
+
+    pub(crate) fn can_disconnect_remote(
+        &self,
+        generation: u64,
+        cx: &App,
+    ) -> Result<(), RemotePaneHostLifecycleError> {
+        for (pane_id, terminal) in self.terminal_window.terminals_with_ids() {
+            terminal
+                .read(cx)
+                .can_disconnect_remote(generation)
+                .map_err(|source| RemotePaneHostLifecycleError::Pane { pane_id, source })?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn prepare_remote_restart(
+        &self,
+        session_factory: WorkspaceTerminalSessionFactory,
+        generation: u64,
+        cx: &App,
+    ) -> Result<PreparedPaneHostRemoteRestart, RemotePaneHostLifecycleError> {
+        let mut panes = Vec::with_capacity(self.terminal_window.pane_count());
+        for (pane_id, terminal) in self.terminal_window.terminals_with_ids() {
+            let prepared = terminal
+                .read(cx)
+                .prepare_remote_restart(session_factory.clone(), generation)
+                .map_err(|source| RemotePaneHostLifecycleError::Pane { pane_id, source })?;
+            panes.push((pane_id, terminal.clone(), prepared));
+        }
+        Ok(PreparedPaneHostRemoteRestart {
+            window_id: self.terminal_window.id(),
+            panes,
+        })
+    }
+
+    pub(crate) fn can_commit_remote_restart(
+        &self,
+        prepared: &PreparedPaneHostRemoteRestart,
+        cx: &App,
+    ) -> Result<(), RemotePaneHostLifecycleError> {
+        if self.terminal_window.id() != prepared.window_id {
+            return Err(RemotePaneHostLifecycleError::WindowChanged {
+                prepared: prepared.window_id,
+                current: self.terminal_window.id(),
+            });
+        }
+        if self.terminal_window.pane_count() != prepared.panes.len() {
+            return Err(RemotePaneHostLifecycleError::PaneChanged(
+                self.terminal_window.focused_pane_id(),
+            ));
+        }
+        for (pane_id, terminal, pane_restart) in &prepared.panes {
+            let Some(current) = self.terminal_window.terminal(*pane_id) else {
+                return Err(RemotePaneHostLifecycleError::PaneChanged(*pane_id));
+            };
+            if current.entity_id() != terminal.entity_id() {
+                return Err(RemotePaneHostLifecycleError::PaneChanged(*pane_id));
+            }
+            terminal
+                .read(cx)
+                .can_commit_remote_restart(pane_restart)
+                .map_err(|source| RemotePaneHostLifecycleError::Pane {
+                    pane_id: *pane_id,
+                    source,
+                })?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn commit_remote_restart(
+        &mut self,
+        prepared: PreparedPaneHostRemoteRestart,
+        session_factory: WorkspaceTerminalSessionFactory,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Result<(), RemotePaneHostLifecycleError> {
+        self.can_commit_remote_restart(&prepared, cx)?;
+        for (pane_id, terminal, pane_restart) in prepared.panes {
+            terminal.update(cx, |terminal, cx| {
+                terminal
+                    .commit_remote_restart(pane_restart, window, cx)
+                    .unwrap_or_else(|error| {
+                        panic!("prevalidated Pane {pane_id} restart commit failed: {error}")
+                    })
+            });
+        }
+        self.session_factory = session_factory;
+        self.remote_disconnected_generation = None;
+        self.sync_terminal_focus(cx);
+        cx.emit(PaneHostEvent::PresentationChanged {
+            window_id: self.terminal_window.id(),
+        });
+        cx.notify();
+        Ok(())
+    }
+
     #[cfg(test)]
     pub(crate) const fn focused_pane_id(&self) -> PaneId {
         self.terminal_window.focused_pane_id()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pane_entity_ids(&self) -> Vec<(PaneId, gpui::EntityId)> {
+        self.terminal_window
+            .terminals_with_ids()
+            .map(|(pane_id, terminal)| (pane_id, terminal.entity_id()))
+            .collect()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn layout_signature(&self) -> String {
+        fn encode(tree: PaneTreeRef<'_>, signature: &mut String) {
+            match tree.node() {
+                PaneNodeRef::Leaf { pane_id } => {
+                    signature.push_str(&format!("pane:{}", pane_id.get()));
+                }
+                PaneNodeRef::Split {
+                    split_id,
+                    axis,
+                    ratio,
+                    first,
+                    second,
+                } => {
+                    signature.push_str(&format!("split:{}:{axis:?}:{ratio}(", split_id.get()));
+                    encode(first, signature);
+                    signature.push(',');
+                    encode(second, signature);
+                    signature.push(')');
+                }
+            }
+        }
+
+        let mut signature = String::new();
+        encode(self.terminal_window.root(), &mut signature);
+        signature
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn remote_disconnected_generation(&self) -> Option<u64> {
+        self.remote_disconnected_generation
+    }
+
+    #[cfg(test)]
+    pub(crate) fn focused_terminal_remote_state(&self, cx: &App) -> (bool, bool) {
+        self.terminal_window
+            .terminal(self.terminal_window.focused_pane_id())
+            .map(|terminal| {
+                let terminal = terminal.read(cx);
+                terminal.remote_session_state()
+            })
+            .unwrap_or((false, false))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn terminal_restart_states(
+        &self,
+        cx: &App,
+    ) -> Vec<(PaneId, bool, Option<&'static str>)> {
+        self.terminal_window
+            .terminals_with_ids()
+            .map(|(pane_id, terminal)| {
+                let terminal = terminal.read(cx);
+                let (session_attached, failure_operation) = terminal.restart_state();
+                (pane_id, session_attached, failure_operation)
+            })
+            .collect()
     }
 
     #[cfg(test)]
@@ -429,6 +636,10 @@ impl PaneHost {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.remote_disconnected_generation.is_some() {
+            eprintln!("cannot split Pane while the remote Workspace is disconnected");
+            return;
+        }
         let Some(target_bounds) = self.pane_bounds.get(&target_pane_id).copied() else {
             eprintln!("cannot split Pane {target_pane_id} before its bounds are measured");
             return;

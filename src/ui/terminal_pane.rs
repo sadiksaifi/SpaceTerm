@@ -4,6 +4,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use thiserror::Error;
+
 use super::render_lifecycle::{RenderLifecycle, ScaleChange, SurfaceVisibility};
 use super::terminal_context_menu::{TerminalContextMenuCommand, terminal_context_menu_entries};
 use super::terminal_element::PaintPreflightFault;
@@ -68,10 +70,10 @@ use crate::terminal::{
     Osc52AuthorizationDecision, Osc52AuthorizationRequest, Osc52Target, PaneTerminalState,
     PasteConfirmation, PasteDecision, PasteRequestOutcome, PasteResolution, PhysicalKey,
     PointerButton, PointerInput, PointerPhase, PreparedWorkspaceTerminalLaunch, QuickLookTarget,
-    ScreenSnapshot, SelectionCopy, SelectionCopyError, SessionEvent, ShiftSelectionPolicy,
-    SurfacePosition, TerminalAccessibilityModel, TerminalFailure, TerminalLocalFileCapabilities,
-    TerminalSessionHandle, UnhandledKeyDiagnostic, WheelInput, WheelPhase,
-    WorkspaceTerminalSessionFactory,
+    RemoteChannelUnavailable, ScreenSnapshot, SelectionCopy, SelectionCopyError, SessionEvent,
+    ShiftSelectionPolicy, SurfacePosition, TerminalAccessibilityModel, TerminalFailure,
+    TerminalLocalFileCapabilities, TerminalSessionHandle, UnhandledKeyDiagnostic, WheelInput,
+    WheelPhase, WorkspaceTerminalSessionFactory,
 };
 use crate::theme::{ACTIVE_THEME, Color};
 #[cfg(test)]
@@ -237,6 +239,27 @@ struct SelectionPasteboard {
     fail_next_write: bool,
 }
 
+#[derive(Clone, Copy, Debug, Error, Eq, PartialEq)]
+pub(crate) enum RemotePaneLifecycleError {
+    #[error("the Pane does not own a remote Terminal Session")]
+    LocalPane,
+    #[error("remote connection generation {received} is stale; current generation is {current}")]
+    StaleGeneration { current: u64, received: u64 },
+    #[error("the remote Pane is not disconnected")]
+    NotDisconnected,
+    #[error("the prepared remote restart no longer matches the Pane session epoch")]
+    SessionChanged,
+    #[error(transparent)]
+    ChannelUnavailable(#[from] RemoteChannelUnavailable),
+}
+
+pub(crate) struct PreparedRemotePaneRestart {
+    session_factory: WorkspaceTerminalSessionFactory,
+    prepared_launch: PreparedWorkspaceTerminalLaunch,
+    generation: u64,
+    expected_epoch: u64,
+}
+
 impl SelectionPasteboard {
     fn write(&mut self, copy: SelectionCopy, cx: &mut App) -> Result<(), String> {
         if std::mem::take(&mut self.fail_next_write) {
@@ -256,6 +279,11 @@ pub(crate) struct TerminalPane {
     local_file_capabilities: TerminalLocalFileCapabilities,
     session: Option<Box<dyn TerminalSessionHandle>>,
     session_start_attempted: bool,
+    session_epoch: u64,
+    accepted_screen_generation: Option<crate::terminal::PresentationGeneration>,
+    remote_connection_generation: Option<u64>,
+    remote_input_blocked: bool,
+    remote_restart_start_pending: bool,
     acceptance_observation_claimed: bool,
     runtime_observation: Option<crate::terminal::RuntimeObservation>,
     failure_actions: Option<FailureActionController>,
@@ -460,6 +488,11 @@ impl TerminalPane {
             local_file_capabilities,
             session: None,
             session_start_attempted: false,
+            session_epoch: 0,
+            accepted_screen_generation: None,
+            remote_connection_generation: None,
+            remote_input_blocked: false,
+            remote_restart_start_pending: false,
             acceptance_observation_claimed: false,
             runtime_observation: None,
             failure_actions: None,
@@ -745,6 +778,9 @@ impl TerminalPane {
         activity: NativeActivity,
         modal_open: bool,
     ) -> bool {
+        if self.remote_input_blocked {
+            return false;
+        }
         TerminalFocusCoordinator::is_focused(TerminalFocusFacts {
             active_workspace: self.product_focus.active_workspace,
             active_window: self.product_focus.active_window,
@@ -994,6 +1030,21 @@ impl TerminalPane {
         self.font_size
     }
 
+    #[cfg(test)]
+    pub(crate) const fn remote_session_state(&self) -> (bool, bool) {
+        (self.remote_input_blocked, self.session.is_some())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn restart_state(&self) -> (bool, Option<&'static str>) {
+        (
+            self.session.is_some(),
+            self.pane_state
+                .failure()
+                .map(crate::terminal::TerminalFailure::operation),
+        )
+    }
+
     pub(crate) fn close(&mut self) {
         self.end_find_state();
         if let Some(observation) = &self.runtime_observation {
@@ -1049,6 +1100,154 @@ impl TerminalPane {
         if let Some(id) = self.native_attention_pane.take() {
             remove_attention_pane(id);
         }
+    }
+
+    fn validate_remote_generation(&self, generation: u64) -> Result<(), RemotePaneLifecycleError> {
+        if !self.session_factory.is_remote() {
+            return Err(RemotePaneLifecycleError::LocalPane);
+        }
+        if let Some(current) = self.remote_connection_generation
+            && generation < current
+        {
+            return Err(RemotePaneLifecycleError::StaleGeneration {
+                current,
+                received: generation,
+            });
+        }
+        Ok(())
+    }
+
+    pub(crate) fn can_disconnect_remote(
+        &self,
+        generation: u64,
+    ) -> Result<(), RemotePaneLifecycleError> {
+        self.validate_remote_generation(generation)
+    }
+
+    pub(crate) fn disconnect_remote(
+        &mut self,
+        generation: u64,
+        cx: &mut Context<Self>,
+    ) -> Result<(), RemotePaneLifecycleError> {
+        self.validate_remote_generation(generation)?;
+        if self.remote_connection_generation == Some(generation) && self.remote_input_blocked {
+            return Ok(());
+        }
+        self.remote_connection_generation = Some(generation);
+        self.suspend_remote_session(cx);
+        Ok(())
+    }
+
+    fn suspend_remote_session(&mut self, cx: &mut Context<Self>) {
+        self.remote_input_blocked = true;
+        self.session_epoch = self.session_epoch.wrapping_add(1);
+        self._event_task.take();
+        self._accessibility_task.take();
+        self.apply_terminal_input_focus(false);
+        self.context_menu = None;
+        self.pressed_button = None;
+        self.pressed_link = None;
+        cx.notify();
+    }
+
+    pub(crate) fn prepare_remote_restart(
+        &self,
+        session_factory: WorkspaceTerminalSessionFactory,
+        generation: u64,
+    ) -> Result<PreparedRemotePaneRestart, RemotePaneLifecycleError> {
+        self.validate_remote_generation(generation)?;
+        if !self.remote_input_blocked {
+            return Err(RemotePaneLifecycleError::NotDisconnected);
+        }
+        let Some(disconnected_generation) = self.remote_connection_generation else {
+            return Err(RemotePaneLifecycleError::NotDisconnected);
+        };
+        if generation <= disconnected_generation {
+            return Err(RemotePaneLifecycleError::StaleGeneration {
+                current: disconnected_generation,
+                received: generation,
+            });
+        }
+        if !session_factory.is_remote() {
+            return Err(RemotePaneLifecycleError::LocalPane);
+        }
+        let prepared_launch = session_factory.prepare_child_launch()?;
+        Ok(PreparedRemotePaneRestart {
+            session_factory,
+            prepared_launch,
+            generation,
+            expected_epoch: self.session_epoch,
+        })
+    }
+
+    pub(crate) fn can_commit_remote_restart(
+        &self,
+        prepared: &PreparedRemotePaneRestart,
+    ) -> Result<(), RemotePaneLifecycleError> {
+        if self.session_epoch != prepared.expected_epoch {
+            return Err(RemotePaneLifecycleError::SessionChanged);
+        }
+        if !self.remote_input_blocked {
+            return Err(RemotePaneLifecycleError::NotDisconnected);
+        }
+        let Some(disconnected_generation) = self.remote_connection_generation else {
+            return Err(RemotePaneLifecycleError::NotDisconnected);
+        };
+        if prepared.generation <= disconnected_generation {
+            return Err(RemotePaneLifecycleError::StaleGeneration {
+                current: disconnected_generation,
+                received: prepared.generation,
+            });
+        }
+        Ok(())
+    }
+
+    pub(crate) fn commit_remote_restart(
+        &mut self,
+        prepared: PreparedRemotePaneRestart,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Result<(), RemotePaneLifecycleError> {
+        self.can_commit_remote_restart(&prepared)?;
+        let restart_geometry = self.last_geometry;
+        self.session_epoch = self.session_epoch.wrapping_add(1);
+        self._event_task.take();
+        self._accessibility_task.take();
+        if let Some(observation) = self.runtime_observation.take() {
+            observation.pane_released();
+        }
+        self._runtime_visibility_task.take();
+        self.runtime_visibility_source.take();
+        self.acceptance_observation_claimed = false;
+        self.session.take();
+        self.native_service_session_identity = self.native_service_session_identity.wrapping_add(1);
+        self.session_factory = prepared.session_factory;
+        self.prepared_launch = Some(prepared.prepared_launch);
+        self.local_file_capabilities = self.session_factory.local_file_capabilities();
+        self.fallback_title =
+            normalized_pane_title("", &self.session_factory.fallback_title()).into();
+        self.session_start_attempted = false;
+        self.remote_connection_generation = Some(prepared.generation);
+        self.remote_input_blocked = false;
+        self.remote_restart_start_pending = true;
+        self.accepted_screen_generation = None;
+        self.render_lifecycle.reset_session_presentations();
+        self.pending_accessibility_notifications
+            .insert(AccessibilityNotification::Value);
+        self.pending_accessibility_notifications
+            .insert(AccessibilityNotification::Selection);
+        self.last_geometry = restart_geometry;
+        self.pane_state = PaneTerminalState::Running;
+        self.pending_recovery = None;
+        self.recovery_retry_requested = None;
+        self.status = None;
+        self.state_revision = self.state_revision.wrapping_add(1);
+        if let Some(geometry) = restart_geometry {
+            self.start_session(geometry, cx);
+        }
+        let _ = self.sync_terminal_input_focus(window, cx);
+        cx.notify();
+        Ok(())
     }
 
     fn reset_blink_phase(&mut self) {
@@ -1384,6 +1583,10 @@ impl TerminalPane {
             return;
         }
 
+        self.start_session(geometry, cx);
+    }
+
+    fn start_session(&mut self, geometry: TerminalGeometry, cx: &mut Context<Self>) {
         if self.session_start_attempted {
             return;
         }
@@ -1419,6 +1622,7 @@ impl TerminalPane {
         };
         match self.session_factory.start(geometry, prepared_launch) {
             Ok(started) => {
+                self.remote_restart_start_pending = false;
                 if self
                     .recovery_retry_requested
                     .filter(|recovery| recovery.action == RecoveryAction::StartSession)
@@ -1439,6 +1643,7 @@ impl TerminalPane {
                 let receiver = started.events;
                 let observation = self.runtime_observation.clone();
                 let accessibility_receiver = started.accessibility;
+                let session_epoch = self.session_epoch;
                 self._event_task = Some(cx.spawn(async move |this, cx| {
                     while let Ok(event) = receiver.recv().await {
                         let mut events = vec![event];
@@ -1455,7 +1660,7 @@ impl TerminalPane {
                         if this
                             .update(cx, |this, cx| {
                                 for event in events {
-                                    this.handle_event(event, cx);
+                                    this.handle_session_event(session_epoch, event, cx);
                                 }
                                 cx.notify();
                             })
@@ -1477,7 +1682,7 @@ impl TerminalPane {
                         }
                         if this
                             .update(cx, |this, cx| {
-                                this.handle_accessibility(accessibility);
+                                this.handle_session_accessibility(session_epoch, accessibility);
                                 cx.notify();
                             })
                             .is_err()
@@ -1489,9 +1694,15 @@ impl TerminalPane {
             }
             Err(error) => {
                 let _ = error;
+                let operation = if self.remote_restart_start_pending {
+                    "restart-remote-session"
+                } else {
+                    "start-session-worker"
+                };
+                self.remote_restart_start_pending = false;
                 self.present_failure(
-                    TerminalFailure::platform("start-session-worker"),
-                    false,
+                    TerminalFailure::platform(operation),
+                    self.session_factory.is_remote(),
                     Some(RecoveryAction::StartSession),
                 );
                 cx.notify();
@@ -1791,7 +2002,10 @@ impl TerminalPane {
                 if let Some(observation) = &self.runtime_observation {
                     observation.ui_screen_received();
                 }
-                if screen.generation < self.screen.generation {
+                if self
+                    .accepted_screen_generation
+                    .is_some_and(|generation| screen.generation < generation)
+                {
                     return;
                 }
                 let title = normalized_pane_title(&screen.title, &self.fallback_title);
@@ -1811,6 +2025,7 @@ impl TerminalPane {
                     }
                 }
                 let _ = self.render_lifecycle.observe_snapshot(screen.generation);
+                self.accepted_screen_generation = Some(screen.generation);
                 if let Some(observation) = &self.runtime_observation {
                     observation.ui_screen_applied(
                         screen.generation.as_u64(),
@@ -1860,6 +2075,10 @@ impl TerminalPane {
                 }
             }
             SessionEvent::Exited(status) => {
+                if self.session_factory.remote_channel_is_ready() == Some(false) {
+                    self.suspend_remote_session(cx);
+                    return;
+                }
                 self.context_menu = None;
                 self.quick_look.dismiss();
                 if matches!(self.pane_state, PaneTerminalState::Exited(_))
@@ -1897,6 +2116,27 @@ impl TerminalPane {
                     self.emit_injected_failure_if_matching();
                 }
             }
+        }
+    }
+
+    fn handle_session_event(
+        &mut self,
+        session_epoch: u64,
+        event: SessionEvent,
+        cx: &mut Context<Self>,
+    ) {
+        if self.session_epoch == session_epoch {
+            self.handle_event(event, cx);
+        }
+    }
+
+    fn handle_session_accessibility(
+        &mut self,
+        session_epoch: u64,
+        accessibility: Arc<TerminalAccessibilityModel>,
+    ) {
+        if self.session_epoch == session_epoch {
+            self.handle_accessibility(accessibility);
         }
     }
 
@@ -4304,8 +4544,8 @@ mod tests {
         test_workspace_directory,
     };
     use crate::terminal::{
-        LocalTerminalLaunchPlan, ScrollbarSnapshot, SessionFailure, TerminalLaunchPlan,
-        TerminalSessionFactory,
+        LocalTerminalLaunchPlan, ScrollbarSnapshot, SessionExit, SessionFailure,
+        TerminalLaunchPlan, TerminalSessionFactory,
     };
 
     #[test]
@@ -4857,6 +5097,162 @@ mod tests {
         });
         cx.run_until_parked();
         (pane, cx, records)
+    }
+
+    #[gpui::test]
+    fn remote_restart_ignores_prior_epoch_events_and_accepts_fresh_generation_one(
+        cx: &mut TestAppContext,
+    ) {
+        let (pane, cx, records) = connected_remote_terminal_pane(cx);
+        let exits = Rc::new(Cell::new(0));
+        let observed_exits = Rc::clone(&exits);
+        pane.update(cx, |_, cx| {
+            cx.subscribe(&pane, move |_, _, event: &TerminalPaneEvent, _| {
+                if matches!(event, TerminalPaneEvent::Exited) {
+                    observed_exits.set(observed_exits.get() + 1);
+                }
+            })
+            .detach();
+        });
+
+        let (old_epoch, old_accessibility) = pane.update(cx, |pane, cx| {
+            let old_epoch = pane.session_epoch;
+            pane.handle_session_event(
+                old_epoch,
+                SessionEvent::Screen(text_screen(90, &["old"])),
+                cx,
+            );
+            let old_accessibility = Arc::new(TerminalAccessibilityModel::from_screen(
+                &text_screen(90, &["old"]),
+            ));
+            pane.handle_session_accessibility(old_epoch, Arc::clone(&old_accessibility));
+            (old_epoch, old_accessibility)
+        });
+        let factory = pane.read_with(cx, |pane, _| pane.session_factory.clone());
+        pane.update(cx, |pane, cx| pane.disconnect_remote(7, cx).unwrap());
+        let prepared = pane
+            .read_with(cx, |pane, _| pane.prepare_remote_restart(factory, 8))
+            .unwrap();
+        cx.update(|window, cx| {
+            pane.update(cx, |pane, cx| {
+                pane.commit_remote_restart(prepared, window, cx).unwrap()
+            });
+        });
+        cx.run_until_parked();
+        assert_eq!(records.starts().len(), 2);
+        assert_eq!(
+            pane.read_with(cx, |pane, _| (
+                pane.screen.generation,
+                pane.title.clone(),
+                Arc::ptr_eq(&pane.accessibility, &old_accessibility),
+            )),
+            (
+                crate::terminal::PresentationGeneration::test(90),
+                SharedString::from("text preflight"),
+                true,
+            )
+        );
+
+        pane.update(cx, |pane, cx| {
+            pane.handle_session_event(
+                old_epoch,
+                SessionEvent::Screen(text_screen(99, &["stale"])),
+                cx,
+            );
+            pane.handle_session_event(old_epoch, SessionEvent::Exited(SessionExit::Success), cx);
+            pane.handle_session_accessibility(
+                old_epoch,
+                Arc::new(TerminalAccessibilityModel::from_screen(&text_screen(
+                    99,
+                    &["stale"],
+                ))),
+            );
+            let current_epoch = pane.session_epoch;
+            pane.handle_session_event(
+                current_epoch,
+                SessionEvent::Screen(text_screen(1, &["fresh"])),
+                cx,
+            );
+        });
+
+        let state = pane.read_with(cx, |pane, _| {
+            (
+                pane.screen.generation,
+                pane.title.clone(),
+                Arc::ptr_eq(&pane.accessibility, &old_accessibility),
+            )
+        });
+        assert_eq!(state.0, crate::terminal::PresentationGeneration::test(1));
+        assert_eq!(state.1.as_ref(), "text preflight");
+        assert!(state.2);
+        assert_eq!(exits.get(), 0);
+
+        let successor_epoch = pane.read_with(cx, |pane, _| pane.session_epoch);
+        let delayed_disconnect = pane.update(cx, |pane, cx| pane.disconnect_remote(7, cx));
+        assert_eq!(
+            delayed_disconnect,
+            Err(RemotePaneLifecycleError::StaleGeneration {
+                current: 8,
+                received: 7,
+            })
+        );
+        assert_eq!(
+            pane.read_with(cx, |pane, _| (
+                pane.session_epoch,
+                pane.remote_input_blocked
+            )),
+            (successor_epoch, false)
+        );
+    }
+
+    #[gpui::test]
+    fn disconnected_remote_pane_blocks_input_but_preserves_copy_selection_and_find(
+        cx: &mut TestAppContext,
+    ) {
+        let (pane, cx, records) = connected_remote_terminal_pane(cx);
+        cx.update(|window, cx| {
+            pane.update(cx, |pane, cx| {
+                pane.handle_event(SessionEvent::Screen(context_action_screen(None, true)), cx);
+                pane.open_find(&OpenTerminalFind, window, cx);
+                pane.disconnect_remote(3, cx).unwrap();
+                pane.copy_selection(&CopySelection, window, cx);
+            });
+        });
+        cx.simulate_keystrokes("blocked");
+        cx.run_until_parked();
+
+        let state = cx.update(|window, cx| {
+            pane.read_with(cx, |pane, _| {
+                (
+                    pane.screen.selection_present,
+                    pane.find_input.is_some(),
+                    pane.terminal_input_focused(window, cx),
+                    pane.session.is_some(),
+                )
+            })
+        });
+        assert_eq!(state, (true, true, false, true));
+        assert!(
+            records.commands().iter().any(|call| {
+                matches!(call.command, RecordedSessionCommand::RequestSelectionCopy)
+            })
+        );
+        assert!(
+            !records
+                .commands()
+                .iter()
+                .any(|call| { matches!(call.command, RecordedSessionCommand::Key(_)) })
+        );
+    }
+
+    #[gpui::test]
+    fn local_pane_rejects_remote_disconnect_without_mutation(cx: &mut TestAppContext) {
+        let (pane, cx, records) = connected_terminal_pane(cx);
+        let epoch = pane.read_with(cx, |pane, _| pane.session_epoch);
+        let result = pane.update(cx, |pane, cx| pane.disconnect_remote(1, cx));
+        assert_eq!(result, Err(RemotePaneLifecycleError::LocalPane));
+        assert_eq!(pane.read_with(cx, |pane, _| pane.session_epoch), epoch);
+        assert_eq!(records.starts().len(), 1);
     }
 
     #[gpui::test]

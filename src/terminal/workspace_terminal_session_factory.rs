@@ -160,6 +160,22 @@ impl WorkspaceTerminalSessionFactory {
         }
     }
 
+    pub(crate) const fn is_remote(&self) -> bool {
+        matches!(
+            &self.launch_context,
+            WorkspaceTerminalLaunchContext::Remote(_)
+        )
+    }
+
+    pub(crate) fn remote_channel_is_ready(&self) -> Option<bool> {
+        match &self.launch_context {
+            WorkspaceTerminalLaunchContext::Local(_) => None,
+            WorkspaceTerminalLaunchContext::Remote(context) => {
+                Some(context.channel_provider.is_ready())
+            }
+        }
+    }
+
     pub(crate) fn local_working_directory(&self) -> Option<&std::path::Path> {
         match &self.launch_context {
             WorkspaceTerminalLaunchContext::Local(plan) => Some(plan.working_directory().path()),

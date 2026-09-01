@@ -139,6 +139,7 @@ pub(crate) struct TestTerminalSessionFactory {
     next_session_id: Cell<usize>,
     fallback_title: String,
     start_failure: Option<String>,
+    start_failure_session_id: Option<usize>,
     selection_response: Result<Option<SelectionCopy>, SelectionCopyError>,
     paste_response: Result<PasteRequestOutcome, String>,
     paste_resolution: Result<PasteResolution, String>,
@@ -151,6 +152,7 @@ impl TestTerminalSessionFactory {
             next_session_id: Cell::new(1),
             fallback_title: "Terminal".to_owned(),
             start_failure: None,
+            start_failure_session_id: None,
             selection_response: Ok(None),
             paste_response: Ok(PasteRequestOutcome::Written),
             paste_resolution: Ok(PasteResolution::Written),
@@ -164,6 +166,17 @@ impl TestTerminalSessionFactory {
 
     pub(crate) fn with_start_failure(mut self, message: impl Into<String>) -> Self {
         self.start_failure = Some(message.into());
+        self.start_failure_session_id = None;
+        self
+    }
+
+    pub(crate) fn with_start_failure_at(
+        mut self,
+        session_id: usize,
+        message: impl Into<String>,
+    ) -> Self {
+        self.start_failure = Some(message.into());
+        self.start_failure_session_id = Some(session_id);
         self
     }
 
@@ -206,7 +219,11 @@ impl TerminalSessionFactory for TestTerminalSessionFactory {
             launch_plan,
         });
 
-        if let Some(message) = &self.start_failure {
+        if let Some(message) = &self.start_failure
+            && self
+                .start_failure_session_id
+                .is_none_or(|failure_session_id| failure_session_id == session_id)
+        {
             return Err(SessionError::EmulatorStartup(message.clone()));
         }
 

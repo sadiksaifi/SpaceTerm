@@ -142,6 +142,14 @@ impl RenderLifecycle {
         self.latest = None;
     }
 
+    pub(crate) fn reset_session_presentations(&mut self) {
+        if self.released {
+            return;
+        }
+        self.latest = None;
+        self.presented = None;
+    }
+
     fn has_pending_frame(&self) -> bool {
         self.latest.is_some() && self.latest != self.presented
     }
@@ -196,6 +204,21 @@ mod tests {
         );
         lifecycle.mark_presented(PresentationGeneration::test(2));
         assert!(!lifecycle.update_visibility(visible()).request_redraw);
+    }
+
+    #[test]
+    fn session_reset_accepts_a_successor_generation_before_the_old_presented_value() {
+        let mut lifecycle = RenderLifecycle::new(visible());
+        lifecycle.observe_snapshot(PresentationGeneration::test(90));
+        lifecycle.mark_presented(PresentationGeneration::test(90));
+
+        lifecycle.reset_session_presentations();
+        lifecycle.observe_snapshot(PresentationGeneration::test(1));
+
+        assert_eq!(
+            lifecycle.take_frame(),
+            Some(PresentationGeneration::test(1))
+        );
     }
 
     #[test]
