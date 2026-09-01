@@ -1,12 +1,17 @@
 use std::ffi::{OsStr, OsString};
 use std::fmt;
-use std::io;
+use std::io::{self, Read};
 use std::os::unix::ffi::OsStrExt;
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use thiserror::Error;
 
+use super::cancellation::SshCancellationToken;
 use super::live_connection::LiveConnectionCapability;
 use super::process::SshProcessEnvironment;
 use crate::domain::{RemoteWorkspaceDirectory, SshDestination};
@@ -14,6 +19,8 @@ use crate::domain::{RemoteWorkspaceDirectory, SshDestination};
 const SSH_EXECUTABLE: &str = "/usr/bin/ssh";
 const MINIMUM_OPENSSH_VERSION: OpenSshVersion = OpenSshVersion::new(8, 2);
 const MAX_PROBE_STREAM_BYTES: usize = 4 * 1024;
+const NATIVE_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+const NATIVE_PROBE_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const MAXIMUM_REMOTE_SHELL_VALUE_BYTES: usize = 4 * 1024;
 const MAXIMUM_REMOTE_PANE_COMMAND_BYTES: usize = 32 * 1024;
 
@@ -85,6 +92,89 @@ pub(crate) fn probe_ssh_capability(runner: &impl SshProbeRunner) -> SshCapabilit
         }
         Err(_) => return SshCapability::Unavailable(SshUnavailableReason::ProbeFailed),
     };
+    classify_probe_output(output)
+}
+
+#[derive(Clone)]
+pub(crate) struct NativeSshProbeRunner {
+    environment: SshProcessEnvironment,
+    timeout: Duration,
+    #[cfg(test)]
+    executable: PathBuf,
+}
+
+impl NativeSshProbeRunner {
+    pub(crate) const fn new(environment: SshProcessEnvironment) -> Self {
+        Self {
+            environment,
+            timeout: NATIVE_PROBE_TIMEOUT,
+            #[cfg(test)]
+            executable: PathBuf::new(),
+        }
+    }
+
+    #[cfg(test)]
+    fn for_test(
+        environment: SshProcessEnvironment,
+        executable: PathBuf,
+        timeout: Duration,
+    ) -> Self {
+        Self {
+            environment,
+            timeout,
+            executable,
+        }
+    }
+
+    pub(crate) async fn probe(&self, cancellation: SshCancellationToken) -> SshCapability {
+        if cancellation.is_cancelled() {
+            return SshCapability::Unavailable(SshUnavailableReason::ProbeFailed);
+        }
+        let environment = self.environment.clone();
+        let timeout = self.timeout;
+        #[cfg(not(test))]
+        let executable = PathBuf::from(SSH_EXECUTABLE);
+        #[cfg(test)]
+        let executable = if self.executable.as_os_str().is_empty() {
+            PathBuf::from(SSH_EXECUTABLE)
+        } else {
+            self.executable.clone()
+        };
+        let mut cancel_on_drop = ProbeCancelOnDrop::new(cancellation.clone());
+        let (sender, receiver) = async_channel::bounded(1);
+        let worker = thread::Builder::new()
+            .name("spaceterm-ssh-version".to_owned())
+            .spawn(move || {
+                let result = run_native_probe(
+                    executable,
+                    environment,
+                    &cancellation,
+                    Instant::now()
+                        .checked_add(timeout)
+                        .unwrap_or_else(Instant::now),
+                );
+                let _ = sender.send_blocking(result);
+            });
+        if worker.is_err() {
+            cancel_on_drop.disarm();
+            return SshCapability::Unavailable(SshUnavailableReason::ProbeFailed);
+        }
+        let result = receiver.recv().await;
+        cancel_on_drop.disarm();
+        match result {
+            Ok(Ok(output)) => classify_probe_output(output),
+            Ok(Err(NativeProbeError::NotFound)) => {
+                SshCapability::Unavailable(SshUnavailableReason::NotFound)
+            }
+            Ok(Err(
+                NativeProbeError::Cancelled | NativeProbeError::TimedOut | NativeProbeError::Io,
+            ))
+            | Err(_) => SshCapability::Unavailable(SshUnavailableReason::ProbeFailed),
+        }
+    }
+}
+
+fn classify_probe_output(output: SshProbeOutput) -> SshCapability {
     if !output.success {
         return SshCapability::Unavailable(SshUnavailableReason::ProbeFailed);
     }
@@ -92,7 +182,6 @@ pub(crate) fn probe_ssh_capability(runner: &impl SshProbeRunner) -> SshCapabilit
     {
         return SshCapability::Unavailable(SshUnavailableReason::Unrecognized);
     }
-
     let version =
         parse_version_stream(&output.stderr).or_else(|| parse_version_stream(&output.stdout));
     let Some(version) = version else {
@@ -105,6 +194,142 @@ pub(crate) fn probe_ssh_capability(runner: &impl SshProbeRunner) -> SshCapabilit
         });
     }
     SshCapability::Available(version)
+}
+
+#[derive(Debug)]
+enum NativeProbeError {
+    NotFound,
+    Cancelled,
+    TimedOut,
+    Io,
+}
+
+struct ProbeCancelOnDrop {
+    cancellation: SshCancellationToken,
+    armed: bool,
+}
+
+impl ProbeCancelOnDrop {
+    fn new(cancellation: SshCancellationToken) -> Self {
+        Self {
+            cancellation,
+            armed: true,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for ProbeCancelOnDrop {
+    fn drop(&mut self) {
+        if self.armed {
+            self.cancellation.cancel();
+        }
+    }
+}
+
+fn run_native_probe(
+    executable: PathBuf,
+    environment: SshProcessEnvironment,
+    cancellation: &SshCancellationToken,
+    deadline: Instant,
+) -> Result<SshProbeOutput, NativeProbeError> {
+    let mut command = Command::new(executable);
+    command
+        .arg("-V")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .process_group(0);
+    environment.apply(&mut command);
+    let mut child = command.spawn().map_err(|error| {
+        if error.kind() == io::ErrorKind::NotFound {
+            NativeProbeError::NotFound
+        } else {
+            NativeProbeError::Io
+        }
+    })?;
+    let process_group = match libc::pid_t::try_from(child.id()) {
+        Ok(process_group) => process_group,
+        Err(_) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(NativeProbeError::Io);
+        }
+    };
+    let stdout = child.stdout.take().ok_or_else(|| {
+        terminate_probe(&mut child, process_group);
+        NativeProbeError::Io
+    })?;
+    let stderr = child.stderr.take().ok_or_else(|| {
+        terminate_probe(&mut child, process_group);
+        NativeProbeError::Io
+    })?;
+    let stdout_reader = thread::spawn(move || read_probe_stream(stdout));
+    let stderr_reader = thread::spawn(move || read_probe_stream(stderr));
+
+    let status = loop {
+        if cancellation.is_cancelled() {
+            terminate_probe(&mut child, process_group);
+            let _ = stdout_reader.join();
+            let _ = stderr_reader.join();
+            return Err(NativeProbeError::Cancelled);
+        }
+        if Instant::now() >= deadline {
+            terminate_probe(&mut child, process_group);
+            let _ = stdout_reader.join();
+            let _ = stderr_reader.join();
+            return Err(NativeProbeError::TimedOut);
+        }
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                signal_probe_group(process_group);
+                break status;
+            }
+            Ok(None) => thread::sleep(
+                NATIVE_PROBE_POLL_INTERVAL.min(deadline.saturating_duration_since(Instant::now())),
+            ),
+            Err(_) => {
+                terminate_probe(&mut child, process_group);
+                let _ = stdout_reader.join();
+                let _ = stderr_reader.join();
+                return Err(NativeProbeError::Io);
+            }
+        }
+    };
+    let stdout = join_probe_reader(stdout_reader)?;
+    let stderr = join_probe_reader(stderr_reader)?;
+    Ok(SshProbeOutput::new(status.success(), stdout, stderr))
+}
+
+fn read_probe_stream(mut stream: impl Read) -> io::Result<Vec<u8>> {
+    let mut output = Vec::with_capacity(256);
+    stream
+        .by_ref()
+        .take(u64::try_from(MAX_PROBE_STREAM_BYTES + 1).unwrap_or(u64::MAX))
+        .read_to_end(&mut output)?;
+    Ok(output)
+}
+
+fn join_probe_reader(
+    reader: thread::JoinHandle<io::Result<Vec<u8>>>,
+) -> Result<Vec<u8>, NativeProbeError> {
+    reader
+        .join()
+        .map_err(|_| NativeProbeError::Io)?
+        .map_err(|_| NativeProbeError::Io)
+}
+
+fn terminate_probe(child: &mut Child, process_group: libc::pid_t) {
+    signal_probe_group(process_group);
+    let _ = child.wait();
+}
+
+fn signal_probe_group(process_group: libc::pid_t) {
+    // SAFETY: this is the positive process group of the child launched above with a private group.
+    let _ = unsafe { libc::kill(-process_group, libc::SIGKILL) };
 }
 
 fn parse_version_stream(stream: &[u8]) -> Option<OpenSshVersion> {
@@ -622,12 +847,74 @@ fn quote_for_nushell(value: &str) -> String {
 mod tests {
     use std::cell::RefCell;
     use std::ffi::{OsStr, OsString};
+    use std::fs;
+    use std::future::Future;
     use std::io;
+    use std::os::unix::fs::PermissionsExt;
     use std::path::{Path, PathBuf};
+    use std::pin::Pin;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::task::{Context, Poll, Wake, Waker};
 
     use crate::domain::{RemoteWorkspaceDirectory, SshDestination};
 
     use super::*;
+
+    static NEXT_PROBE_SCRIPT: AtomicU64 = AtomicU64::new(0);
+
+    struct ProbeScript(PathBuf);
+
+    impl ProbeScript {
+        fn new(body: &str) -> Self {
+            let sequence = NEXT_PROBE_SCRIPT.fetch_add(1, Ordering::Relaxed);
+            let path = PathBuf::from(format!(
+                "/private/tmp/spaceterm-probe-{}-{sequence}",
+                std::process::id()
+            ));
+            fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
+            Self(path)
+        }
+    }
+
+    impl Drop for ProbeScript {
+        fn drop(&mut self) {
+            let _ = fs::remove_file(&self.0);
+        }
+    }
+
+    struct ThreadWake(std::thread::Thread);
+
+    impl Wake for ThreadWake {
+        fn wake(self: Arc<Self>) {
+            self.0.unpark();
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.0.unpark();
+        }
+    }
+
+    fn block_on_external<T>(future: impl Future<Output = T>) -> T {
+        let mut future = Box::pin(future);
+        let waker = Waker::from(Arc::new(ThreadWake(thread::current())));
+        let mut context = Context::from_waker(&waker);
+        loop {
+            match Pin::as_mut(&mut future).poll(&mut context) {
+                Poll::Ready(output) => return output,
+                Poll::Pending => thread::park(),
+            }
+        }
+    }
+
+    fn native_probe(executable: PathBuf, timeout: Duration) -> NativeSshProbeRunner {
+        NativeSshProbeRunner::for_test(
+            SshProcessEnvironment::new_without_authentication(PathBuf::from("/private/tmp"), None)
+                .unwrap(),
+            executable,
+            timeout,
+        )
+    }
 
     enum FakeProbeResult {
         Output(SshProbeOutput),
@@ -805,6 +1092,114 @@ mod tests {
             capability,
             SshCapability::Unavailable(SshUnavailableReason::ProbeFailed)
         );
+    }
+
+    #[test]
+    fn native_probe_should_report_not_found_without_exposing_an_io_message() {
+        let runner = native_probe(
+            PathBuf::from("/private/tmp/spaceterm-missing-ssh"),
+            Duration::from_secs(1),
+        );
+
+        assert_eq!(
+            block_on_external(runner.probe(SshCancellationToken::default())),
+            SshCapability::Unavailable(SshUnavailableReason::NotFound)
+        );
+    }
+
+    #[test]
+    fn native_probe_should_force_cleanup_at_its_deadline() {
+        let script = ProbeScript::new("sleep 30");
+        let runner = native_probe(script.0.clone(), Duration::from_millis(20));
+
+        assert_eq!(
+            block_on_external(runner.probe(SshCancellationToken::default())),
+            SshCapability::Unavailable(SshUnavailableReason::ProbeFailed)
+        );
+    }
+
+    #[test]
+    fn native_probe_should_reject_malformed_and_too_old_versions() {
+        let malformed = ProbeScript::new("printf 'not-openssh\\n' >&2");
+        let old = ProbeScript::new("printf 'OpenSSH_8.1p1\\n' >&2");
+
+        assert_eq!(
+            block_on_external(
+                native_probe(malformed.0.clone(), Duration::from_secs(1))
+                    .probe(SshCancellationToken::default())
+            ),
+            SshCapability::Unavailable(SshUnavailableReason::Unrecognized)
+        );
+        assert_eq!(
+            block_on_external(
+                native_probe(old.0.clone(), Duration::from_secs(1))
+                    .probe(SshCancellationToken::default())
+            ),
+            SshCapability::Unavailable(SshUnavailableReason::TooOld {
+                found: OpenSshVersion::new(8, 1),
+                minimum: OpenSshVersion::new(8, 2),
+            })
+        );
+    }
+
+    #[test]
+    fn native_probe_should_use_only_the_sanitized_captured_environment() {
+        let script = ProbeScript::new(
+            r#"[ "$HOME" = /private/tmp ] || exit 4
+[ "$PATH" = /usr/bin:/bin ] || exit 5
+[ -z "${SPACETERM_AMBIENT_PROBE+x}" ] || exit 6
+printf 'OpenSSH_9.9p2 Apple-1, LibreSSL 3.3.6\n' >&2"#,
+        );
+        let runner = native_probe(script.0.clone(), Duration::from_secs(1));
+
+        assert_eq!(
+            block_on_external(runner.probe(SshCancellationToken::default())),
+            SshCapability::Available(OpenSshVersion::new(9, 9))
+        );
+    }
+
+    #[test]
+    fn native_probe_cancellation_should_terminate_the_private_process_group() {
+        let pid_file = PathBuf::from(format!(
+            "/private/tmp/spaceterm-probe-cancel-{}.pid",
+            std::process::id()
+        ));
+        let script = ProbeScript::new(&format!("echo $$ > '{}'; sleep 30", pid_file.display()));
+        let runner = native_probe(script.0.clone(), Duration::from_secs(5));
+        let cancellation = SshCancellationToken::default();
+        let canceller = cancellation.clone();
+        let cancel_thread = thread::spawn(move || {
+            for _ in 0..100 {
+                if pid_file.exists() {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(10));
+            }
+            canceller.cancel();
+            pid_file
+        });
+
+        assert_eq!(
+            block_on_external(runner.probe(cancellation)),
+            SshCapability::Unavailable(SshUnavailableReason::ProbeFailed)
+        );
+        let pid_file = cancel_thread.join().unwrap();
+        let process: libc::pid_t = fs::read_to_string(&pid_file)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        let missing = (0..100).any(|_| {
+            // SAFETY: signal zero checks process existence and dereferences no pointers.
+            let missing = unsafe { libc::kill(process, 0) } == -1
+                && io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH);
+            if !missing {
+                thread::sleep(Duration::from_millis(10));
+            }
+            missing
+        });
+        let _ = fs::remove_file(pid_file);
+        assert!(missing);
     }
 
     #[test]
