@@ -206,7 +206,7 @@ struct AskPassBrokerLifetime {
     presenter: Arc<dyn BrokerPresenter>,
     stop: Arc<AtomicBool>,
     worker: Mutex<Option<JoinHandle<()>>>,
-    _socket: RegisteredRuntimeSocket,
+    socket: Mutex<Option<RegisteredRuntimeSocket>>,
     _runtime_owner: Mutex<Option<RuntimeOwner>>,
 }
 
@@ -218,6 +218,10 @@ pub(crate) struct AskPassBrokerLease {
 impl AskPassBrokerLease {
     pub(crate) fn entries(&self) -> impl Iterator<Item = (&'static str, &OsStr)> {
         self.lifetime.environment.entries()
+    }
+
+    pub(crate) fn cancel(&self) {
+        self.lifetime.close();
     }
 }
 
@@ -284,7 +288,7 @@ impl AskPassBroker {
                 presenter,
                 stop,
                 worker: Mutex::new(Some(worker)),
-                _socket: socket,
+                socket: Mutex::new(Some(socket)),
                 _runtime_owner: Mutex::new(Some(runtime_owner)),
             }),
         })
@@ -346,18 +350,27 @@ fn native_channel_presenter(
     Ok(presenter)
 }
 
-impl Drop for AskPassBrokerLifetime {
-    fn drop(&mut self) {
+impl AskPassBrokerLifetime {
+    fn close(&self) {
         self.stop.store(true, Ordering::Release);
         self.presenter.cancel_active();
-        if let Ok(worker) = self.worker.get_mut()
+        if let Ok(mut worker) = self.worker.lock()
             && let Some(worker) = worker.take()
         {
             let _ = worker.join();
         }
-        if let Ok(runtime_owner) = self._runtime_owner.get_mut() {
+        if let Ok(mut socket) = self.socket.lock() {
+            socket.take();
+        }
+        if let Ok(mut runtime_owner) = self._runtime_owner.lock() {
             runtime_owner.take();
         }
+    }
+}
+
+impl Drop for AskPassBrokerLifetime {
+    fn drop(&mut self) {
+        self.close();
     }
 }
 
@@ -1358,6 +1371,27 @@ mod tests {
                 )
         );
         helper.join().unwrap();
+    }
+
+    #[test]
+    fn explicit_lease_cancellation_should_teardown_the_broker_with_clones_retained() {
+        let directory = TestDirectory::new();
+        let presenter = Arc::new(FakePresenter::new([]));
+        let broker = AskPassBroker::start_with_presenter(
+            &directory.paths(),
+            PathBuf::from("/Applications/SpaceTerm.app/Contents/MacOS/spaceterm"),
+            presenter,
+        )
+        .unwrap();
+        let socket_path = broker.environment().socket_path.clone();
+        let lease = broker.lease();
+        let retained = lease.clone();
+        drop(broker);
+
+        lease.cancel();
+
+        assert!(!socket_path.exists());
+        assert_eq!(retained.entries().count(), 6);
     }
 
     #[test]

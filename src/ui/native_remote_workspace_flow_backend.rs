@@ -207,7 +207,7 @@ impl RemoteWorkspaceFlowBackend for NativeRemoteWorkspaceFlowBackend {
             if !matches!(capability, SshCapability::Available(_)) {
                 cancellation.cancel();
                 drop((cancellation_watch, authentication_watch));
-                return Err(RemoteWorkspaceFlowBackendError::IncompatibleServer);
+                return Err(RemoteWorkspaceFlowBackendError::OpenSshUnavailable);
             }
             if context.is_cancelled() {
                 cancellation.cancel();
@@ -364,7 +364,9 @@ impl RemoteWorkspaceSessionOwner for NativeRemoteWorkspaceSessionOwner {
         if let Some(mut connection) = connection {
             connection.shutdown(&self.executor);
         }
-        self.authentication.take();
+        if let Some(authentication) = self.authentication.take() {
+            authentication.cancel();
+        }
         self.alias.take();
         self.closed = true;
     }

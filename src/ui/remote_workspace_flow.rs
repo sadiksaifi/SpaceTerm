@@ -81,6 +81,7 @@ pub(super) enum RemoteWorkspaceFlowBackendError {
     DeleteFailed,
     HostInUse,
     IncompatibleServer,
+    OpenSshUnavailable,
     AuthenticationCancelled,
     ConnectionFailed,
 }
@@ -971,6 +972,9 @@ impl RemoteWorkspaceFlow {
         }
         self.stage = RemoteWorkspaceFlowStage::ConnectionError;
         let message = match self.connection_error {
+            Some(RemoteWorkspaceFlowBackendError::OpenSshUnavailable) => {
+                "SpaceTerm requires OpenSSH 8.2 or newer at /usr/bin/ssh."
+            }
             Some(RemoteWorkspaceFlowBackendError::IncompatibleServer) => {
                 "This host does not provide the remote capabilities SpaceTerm requires."
             }
