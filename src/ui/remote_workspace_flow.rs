@@ -174,6 +174,19 @@ pub(super) trait RemoteWorkspaceFlowBackend: Send + Sync {
     ) -> Task<Result<RemoteWorkspaceConnectedSession, RemoteWorkspaceFlowBackendError>>;
 }
 
+/// Builds the window-bound backend once while its Workspace Manager is initialized.
+pub(super) trait RemoteWorkspaceFlowBackendFactory: Send + Sync {
+    fn unavailable_reason(&self) -> Option<String> {
+        None
+    }
+
+    fn create(
+        &self,
+        window: &Window,
+        cx: &mut App,
+    ) -> Result<Arc<dyn RemoteWorkspaceFlowBackend>, RemoteWorkspaceFlowBackendError>;
+}
+
 struct FlowHostDiscoveryProvider {
     backend: Arc<dyn RemoteWorkspaceFlowBackend>,
 }
@@ -216,6 +229,27 @@ pub(super) struct RemoteWorkspaceFlowCompletion {
 }
 
 impl RemoteWorkspaceFlowCompletion {
+    #[cfg(test)]
+    pub(super) fn for_test(
+        session: RemoteWorkspaceConnectedSession,
+        destination: SshDestination,
+        directory: RemoteWorkspaceDirectory,
+        physical_directory: RemoteDirectoryIdentity,
+        account: RemoteWorkspaceAccount,
+        terminal_channels: Arc<dyn RemoteTerminalChannelProvider>,
+        lifecycle: ControlConnectionObserver,
+    ) -> Self {
+        Self {
+            session,
+            destination,
+            directory,
+            physical_directory,
+            account,
+            terminal_channels,
+            lifecycle,
+        }
+    }
+
     pub(super) const fn session(&self) -> &RemoteWorkspaceConnectedSession {
         &self.session
     }
@@ -246,10 +280,6 @@ impl RemoteWorkspaceFlowCompletion {
 
     pub(super) fn terminal_channels(&self) -> Arc<dyn RemoteTerminalChannelProvider> {
         Arc::clone(&self.terminal_channels)
-    }
-
-    pub(super) const fn lifecycle(&self) -> &ControlConnectionObserver {
-        &self.lifecycle
     }
 
     pub(super) fn into_parts(
@@ -416,6 +446,19 @@ impl RemoteWorkspaceFlow {
 
     pub(super) const fn stage(&self) -> RemoteWorkspaceFlowStage {
         self.stage
+    }
+
+    #[cfg(test)]
+    pub(super) fn emit_completion_for_test(
+        &mut self,
+        completion: RemoteWorkspaceFlowCompletion,
+        cx: &mut Context<Self>,
+    ) {
+        let handle = RemoteWorkspaceFlowCompletionHandle::new(completion);
+        self.pending_completion = Some(handle.clone());
+        self.stage = RemoteWorkspaceFlowStage::AwaitingActivation;
+        cx.emit(RemoteWorkspaceFlowEvent::Completed(handle));
+        self.publish(cx);
     }
 
     pub(super) fn open(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {

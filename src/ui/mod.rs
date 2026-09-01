@@ -31,6 +31,7 @@ mod workspace_search;
 use gpui::{App, KeyBinding, actions};
 use spaceterm_ui::{EditCopy, EditPaste};
 
+pub(crate) use native_remote_workspace_flow_backend::NativeRemoteWorkspaceFlowBackendFactory;
 pub(crate) use pane_host::{
     PaneHost, PaneHostEvent, PreparedPaneHostRemoteRestart, RemotePaneHostLifecycleError,
 };

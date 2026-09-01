@@ -71,11 +71,22 @@ impl NewWorkspaceSource {
         [Self::LocalProject, Self::Scratch, Self::RemoteProject]
     }
 
-    fn into_palette_item(self) -> CommandPaletteItem<Self> {
+    fn into_palette_item(
+        self,
+        remote_unavailable_reason: Option<String>,
+    ) -> CommandPaletteItem<Self> {
         let icon_color = rgba(ACTIVE_THEME.icon.rgba_hex());
         let icon_name = self.icon();
+        let unavailable = (self == Self::RemoteProject)
+            .then_some(remote_unavailable_reason)
+            .flatten();
         let item = CommandPaletteItem::new(self, self.label())
-            .description(self.description())
+            .description(
+                unavailable
+                    .clone()
+                    .unwrap_or_else(|| self.description().to_owned()),
+            )
+            .disabled(unavailable.is_some())
             .leading_icon(move |_| {
                 Icon::new(icon_name)
                     .size(px(SOURCE_ICON_SIZE))
@@ -84,9 +95,12 @@ impl NewWorkspaceSource {
             })
             .debug_selector(self.debug_selector());
 
-        match self.accessory() {
-            Some(shortcut) => item.trailing(CommandPaletteAccessory::Shortcut(shortcut.into())),
-            None => item,
+        match (self.accessory(), unavailable.as_ref()) {
+            (_, Some(_)) => item.trailing(CommandPaletteAccessory::Status("Unavailable".into())),
+            (Some(shortcut), None) => {
+                item.trailing(CommandPaletteAccessory::Shortcut(shortcut.into()))
+            }
+            (None, None) => item,
         }
     }
 }
@@ -109,9 +123,17 @@ pub(super) struct NewWorkspacePanel {
 
 impl NewWorkspacePanel {
     pub(super) fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        Self::new_with_remote_unavailable_reason(None, window, cx)
+    }
+
+    pub(super) fn new_with_remote_unavailable_reason(
+        remote_unavailable_reason: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let items = NewWorkspaceSource::ordered()
             .into_iter()
-            .map(NewWorkspaceSource::into_palette_item)
+            .map(|source| source.into_palette_item(remote_unavailable_reason.clone()))
             .collect();
         let palette = cx.new(|cx| {
             let mut palette = CommandPalette::new("New Workspace", items, window, cx);
@@ -389,9 +411,18 @@ mod tests {
     fn remote_project_should_be_enabled_without_a_coming_soon_accessory() {
         let remote = NewWorkspaceSource::RemoteProject;
 
-        assert!(!remote.into_palette_item().is_disabled());
+        assert!(!remote.into_palette_item(None).is_disabled());
         assert_eq!(remote.accessory(), None);
         assert_eq!(remote.icon(), "globe");
+    }
+
+    #[test]
+    fn unavailable_remote_project_should_be_disabled_with_the_actionable_probe_reason() {
+        let reason = "OpenSSH 9.0 or later is required";
+        let remote = NewWorkspaceSource::RemoteProject.into_palette_item(Some(reason.to_owned()));
+
+        assert!(remote.is_disabled());
+        assert_eq!(remote.description_text(), Some(reason));
     }
 
     #[gpui::test]
