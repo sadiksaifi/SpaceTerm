@@ -19,11 +19,14 @@ use spaceterm_ui::{
 };
 
 use crate::domain::{RemoteDirectoryIdentity, RemoteWorkspaceDirectory, RemoteWorkspaceValueError};
+use crate::ssh::command::ValidatedRemoteLoginShell;
 use crate::theme::{ACTIVE_THEME, Color};
 
 const HOME_DISPLAY: &str = "~/";
 const ROW_ICON_SIZE: f32 = 14.0;
 const CREATE_ALERT_ID: &str = "remote-workspace-create-folder";
+const UNSUPPORTED_LOGIN_SHELL_MESSAGE: &str =
+    "The remote login shell does not support login mode. Choose another account or shell.";
 pub(super) const MAXIMUM_REMOTE_WORKSPACE_DIRECTORY_ROWS: usize = 1024;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -37,7 +40,7 @@ pub(crate) enum RemoteWorkspaceAccountError {
 pub(crate) struct RemoteWorkspaceAccount {
     user: String,
     home_identity: RemoteDirectoryIdentity,
-    login_shell: String,
+    login_shell: ValidatedRemoteLoginShell,
 }
 
 impl RemoteWorkspaceAccount {
@@ -53,8 +56,26 @@ impl RemoteWorkspaceAccount {
         {
             return Err(RemoteWorkspaceAccountError::InvalidUser);
         }
-        if login_shell.is_empty() || login_shell.chars().any(char::is_control) {
-            return Err(RemoteWorkspaceAccountError::InvalidLoginShell);
+        let login_shell = ValidatedRemoteLoginShell::new(login_shell)
+            .map_err(|_| RemoteWorkspaceAccountError::InvalidLoginShell)?;
+        Ok(Self {
+            user,
+            home_identity,
+            login_shell,
+        })
+    }
+
+    pub(crate) fn from_validated_login_shell(
+        user: String,
+        home_identity: RemoteDirectoryIdentity,
+        login_shell: ValidatedRemoteLoginShell,
+    ) -> Result<Self, RemoteWorkspaceAccountError> {
+        if user.is_empty()
+            || user
+                .chars()
+                .any(|character| character.is_whitespace() || character.is_control())
+        {
+            return Err(RemoteWorkspaceAccountError::InvalidUser);
         }
         Ok(Self {
             user,
@@ -71,7 +92,7 @@ impl RemoteWorkspaceAccount {
         &self.home_identity
     }
 
-    pub(crate) fn login_shell(&self) -> &str {
+    pub(crate) const fn login_shell(&self) -> &ValidatedRemoteLoginShell {
         &self.login_shell
     }
 }
@@ -82,6 +103,7 @@ pub(crate) enum RemoteWorkspaceProviderError {
     Missing,
     NotDirectory,
     PermissionDenied,
+    UnsupportedLoginShell,
     InvalidResponse,
     Other,
 }
@@ -370,6 +392,7 @@ enum RemoteWorkspacePickerStatus {
     NotDirectory,
     PermissionDenied,
     ConnectionLost,
+    UnsupportedLoginShell,
     Other,
     Invalid(RemoteWorkspacePathFormatError),
 }
@@ -565,6 +588,10 @@ impl RemoteWorkspacePicker {
         dismissed
     }
 
+    #[expect(
+        dead_code,
+        reason = "the retained parent flow owns this symmetrical focus-transfer seam"
+    )]
     pub(super) fn dismiss_for_replacement(
         &mut self,
         window: &mut Window,
@@ -1079,6 +1106,7 @@ impl RemoteWorkspacePicker {
                 "Permission denied for this remote folder"
             }
             RemoteWorkspacePickerStatus::ConnectionLost => "SSH connection was lost",
+            RemoteWorkspacePickerStatus::UnsupportedLoginShell => UNSUPPORTED_LOGIN_SHELL_MESSAGE,
             RemoteWorkspacePickerStatus::Other => {
                 "SpaceTerm couldn\u{2019}t read this remote folder"
             }
@@ -1159,6 +1187,7 @@ fn listing_error_text(error: RemoteWorkspaceProviderError) -> &'static str {
         RemoteWorkspaceProviderError::PermissionDenied => {
             "Permission denied while listing this remote folder"
         }
+        RemoteWorkspaceProviderError::UnsupportedLoginShell => UNSUPPORTED_LOGIN_SHELL_MESSAGE,
         RemoteWorkspaceProviderError::InvalidResponse | RemoteWorkspaceProviderError::Other => {
             "SpaceTerm couldn\u{2019}t list this remote folder"
         }
@@ -1172,6 +1201,9 @@ fn status_for_provider_error(error: RemoteWorkspaceProviderError) -> RemoteWorks
         RemoteWorkspaceProviderError::NotDirectory => RemoteWorkspacePickerStatus::NotDirectory,
         RemoteWorkspaceProviderError::PermissionDenied => {
             RemoteWorkspacePickerStatus::PermissionDenied
+        }
+        RemoteWorkspaceProviderError::UnsupportedLoginShell => {
+            RemoteWorkspacePickerStatus::UnsupportedLoginShell
         }
         RemoteWorkspaceProviderError::InvalidResponse | RemoteWorkspaceProviderError::Other => {
             RemoteWorkspacePickerStatus::Other
@@ -1513,7 +1545,19 @@ mod tests {
         assert_eq!(selection.physical_directory(), &identity);
         assert_eq!(selection.account().user(), "tester");
         assert_eq!(selection.account().home_identity().as_str(), "/home/tester");
-        assert_eq!(selection.account().login_shell(), "/bin/zsh");
+        assert_eq!(selection.account().login_shell().as_str(), "/bin/zsh");
+    }
+
+    #[test]
+    fn unsupported_login_shell_should_have_an_actionable_account_status() {
+        assert_eq!(
+            status_for_provider_error(RemoteWorkspaceProviderError::UnsupportedLoginShell),
+            RemoteWorkspacePickerStatus::UnsupportedLoginShell
+        );
+        assert_eq!(
+            UNSUPPORTED_LOGIN_SHELL_MESSAGE,
+            "The remote login shell does not support login mode. Choose another account or shell."
+        );
     }
 
     #[gpui::test]

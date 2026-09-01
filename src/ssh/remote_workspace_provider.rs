@@ -7,6 +7,7 @@ use std::time::Duration;
 use gpui::{BackgroundExecutor, Task};
 
 use super::cancellation::SshCancellationToken;
+use super::command::ValidatedRemoteLoginShell;
 use super::remote_utility::{
     PreparedSshRemoteUtilityCommand, RemoteDirectoryProbe, RemoteUtilityError,
     SshRemoteUtilityClient, SshRemoteUtilityRunner,
@@ -77,10 +78,15 @@ impl<R: SshRemoteUtilityRunner> RemoteWorkspaceProvider for SshRemoteWorkspacePr
                 .map_err(map_error)?;
             let home_identity = RemoteDirectoryIdentity::new(metadata.physical_home().to_owned())
                 .map_err(|_| RemoteWorkspaceProviderError::InvalidResponse)?;
-            RemoteWorkspaceAccount::new(
+            let login_shell = ValidatedRemoteLoginShell::from_discovery(
+                metadata.login_shell().to_owned(),
+                metadata.posix_sh_login_capability(),
+            )
+            .map_err(|_| RemoteWorkspaceProviderError::UnsupportedLoginShell)?;
+            RemoteWorkspaceAccount::from_validated_login_shell(
                 metadata.user().to_owned(),
                 home_identity,
-                metadata.login_shell().to_owned(),
+                login_shell,
             )
             .map_err(|_| RemoteWorkspaceProviderError::InvalidResponse)
         })
@@ -210,6 +216,9 @@ fn map_error(error: RemoteUtilityError) -> RemoteWorkspaceProviderError {
         RemoteUtilityError::Missing => RemoteWorkspaceProviderError::Missing,
         RemoteUtilityError::NotDirectory => RemoteWorkspaceProviderError::NotDirectory,
         RemoteUtilityError::PermissionDenied => RemoteWorkspaceProviderError::PermissionDenied,
+        RemoteUtilityError::UnsupportedLoginShell => {
+            RemoteWorkspaceProviderError::UnsupportedLoginShell
+        }
         RemoteUtilityError::RequestTooLarge
         | RemoteUtilityError::OutputTooLarge
         | RemoteUtilityError::InvalidResponse => RemoteWorkspaceProviderError::InvalidResponse,
@@ -359,7 +368,14 @@ mod tests {
                 response(
                     "account",
                     "ok",
-                    &["tester", "501", "/home/tester", "/bin/zsh", "/home/tester"],
+                    &[
+                        "tester",
+                        "501",
+                        "/home/tester",
+                        "/bin/zsh",
+                        "/home/tester",
+                        "not-applicable",
+                    ],
                     "",
                 ),
                 response("list", "ok", &["Space Term", "-archive"], "1\n"),
@@ -372,7 +388,7 @@ mod tests {
         let account = cx.executor().block(provider.discover_account()).unwrap();
         assert_eq!(account.user(), "tester");
         assert_eq!(account.home_identity().as_str(), "/home/tester");
-        assert_eq!(account.login_shell(), "/bin/zsh");
+        assert_eq!(account.login_shell().as_str(), "/bin/zsh");
 
         let listing = cx
             .executor()
@@ -402,6 +418,57 @@ mod tests {
                 .unwrap()
                 .as_str(),
             "/srv/physical"
+        );
+    }
+
+    #[gpui::test]
+    fn provider_should_bind_verified_posix_sh_capability_to_the_account(cx: &mut TestAppContext) {
+        let provider = provider(
+            cx,
+            [response(
+                "account",
+                "ok",
+                &[
+                    "tester",
+                    "501",
+                    "/home/tester",
+                    "/bin/sh",
+                    "/home/tester",
+                    "login-option-supported",
+                ],
+                "",
+            )],
+        );
+
+        let account = cx.executor().block(provider.discover_account()).unwrap();
+
+        assert_eq!(account.login_shell().as_str(), "/bin/sh");
+    }
+
+    #[gpui::test]
+    fn provider_should_reject_posix_sh_without_verified_login_capability(cx: &mut TestAppContext) {
+        let provider = provider(
+            cx,
+            [response(
+                "account",
+                "ok",
+                &[
+                    "tester",
+                    "501",
+                    "/home/tester",
+                    "/bin/sh",
+                    "/home/tester",
+                    "not-applicable",
+                ],
+                "",
+            )],
+        );
+
+        assert_eq!(
+            cx.executor()
+                .block(provider.discover_account())
+                .unwrap_err(),
+            RemoteWorkspaceProviderError::UnsupportedLoginShell
         );
     }
 

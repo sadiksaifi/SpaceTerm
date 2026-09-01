@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use thiserror::Error;
 
 use super::cancellation::SshCancellationToken;
-use super::command::SshCommandSpec;
+use super::command::{PosixShLoginCapability, SshCommandSpec};
 use super::live_connection::LiveConnectionCapability;
 use super::process::{ProcessExit, SshProcessEnvironment};
 use crate::domain::RemoteWorkspaceDirectory;
@@ -76,6 +76,7 @@ pub(crate) struct PreparedSshRemoteUtilityCommand {
 }
 
 impl PreparedSshRemoteUtilityCommand {
+    #[cfg(test)]
     pub(super) fn new(command: SshCommandSpec) -> Self {
         Self {
             command: Arc::new(command),
@@ -309,10 +310,10 @@ fn run_native_command(
             ),
         }
     };
-    if let Ok(Err(error)) = writer.join() {
-        if exit.is_success() {
-            return Err(RemoteUtilityRunError::Io(error));
-        }
+    if let Ok(Err(error)) = writer.join()
+        && exit.is_success()
+    {
+        return Err(RemoteUtilityRunError::Io(error));
     }
     let stdout = match captured_stdout {
         Some(stdout) => stdout,
@@ -382,6 +383,8 @@ pub(crate) enum RemoteUtilityError {
     Transport,
     #[error("remote utility returned an invalid response")]
     InvalidResponse,
+    #[error("the configured remote login shell cannot start in login mode")]
+    UnsupportedLoginShell,
     #[error("remote path does not exist")]
     Missing,
     #[error("remote path is not a directory")]
@@ -400,6 +403,7 @@ pub(crate) struct RemoteAccountMetadata {
     home: String,
     login_shell: String,
     physical_home: String,
+    posix_sh_login_capability: PosixShLoginCapability,
 }
 
 impl RemoteAccountMetadata {
@@ -407,10 +411,12 @@ impl RemoteAccountMetadata {
         &self.user
     }
 
+    #[cfg(test)]
     pub(crate) const fn uid(&self) -> u64 {
         self.uid
     }
 
+    #[cfg(test)]
     pub(crate) fn home(&self) -> &str {
         &self.home
     }
@@ -421,6 +427,10 @@ impl RemoteAccountMetadata {
 
     pub(crate) fn physical_home(&self) -> &str {
         &self.physical_home
+    }
+
+    pub(crate) const fn posix_sh_login_capability(&self) -> PosixShLoginCapability {
+        self.posix_sh_login_capability
     }
 }
 
@@ -474,6 +484,7 @@ impl<R: SshRemoteUtilityRunner> SshRemoteUtilityClient<R> {
         }
     }
 
+    #[cfg(test)]
     pub(crate) async fn discover_account(
         &self,
     ) -> Result<RemoteAccountMetadata, RemoteUtilityError> {
@@ -489,6 +500,7 @@ impl<R: SshRemoteUtilityRunner> SshRemoteUtilityClient<R> {
         parse_account(&output)
     }
 
+    #[cfg(test)]
     pub(crate) async fn list_directories(
         &self,
         directory: RemoteWorkspaceDirectory,
@@ -508,6 +520,7 @@ impl<R: SshRemoteUtilityRunner> SshRemoteUtilityClient<R> {
         parse_listing(&output)
     }
 
+    #[cfg(test)]
     pub(crate) async fn probe_exact_path(
         &self,
         directory: RemoteWorkspaceDirectory,
@@ -530,6 +543,7 @@ impl<R: SshRemoteUtilityRunner> SshRemoteUtilityClient<R> {
         parse_probe(&output)
     }
 
+    #[cfg(test)]
     pub(crate) async fn create_directory_recursively(
         &self,
         directory: RemoteWorkspaceDirectory,
@@ -555,6 +569,7 @@ impl<R: SshRemoteUtilityRunner> SshRemoteUtilityClient<R> {
         parse_empty_success(&output, "mkdir")
     }
 
+    #[cfg(test)]
     pub(crate) async fn resolve_physical_directory(
         &self,
         directory: RemoteWorkspaceDirectory,
@@ -717,6 +732,20 @@ uid=$(id -u 2>/dev/null) || { emit_empty account failed; exit 0; }
 home=${HOME-}
 login_shell=${SHELL-}
 [ -n "$user" ] && [ -n "$uid" ] && [ -n "$home" ] && [ -n "$login_shell" ] || { emit_empty account failed; exit 0; }
+case "$login_shell" in
+    /*) ;;
+    *) emit_empty account unsupported-login-shell; exit 0 ;;
+esac
+login_shell_name=${login_shell##*/}
+posix_sh_login_capability=not-applicable
+if [ "$login_shell_name" = sh ]; then
+    if "$login_shell" -l -c ':' </dev/null >/dev/null 2>&1; then
+        posix_sh_login_capability=login-option-supported
+    else
+        emit_empty account unsupported-login-shell
+        exit 0
+    fi
+fi
 physical_home_output=$(cd "$home" 2>/dev/null && { pwd -P && printf .; }) || { emit_empty account failed; exit 0; }
 physical_home_with_separator=${physical_home_output%?}
 physical_home=${physical_home_with_separator%?}
@@ -726,6 +755,7 @@ emit_field "$uid"
 emit_field "$home"
 emit_field "$login_shell"
 emit_field "$physical_home"
+emit_field "$posix_sh_login_capability"
 printf '.\n'
 "#;
 
@@ -870,7 +900,7 @@ printf '.\n'
 fn parse_account(output: &[u8]) -> Result<RemoteAccountMetadata, RemoteUtilityError> {
     let mut response = ResponseParser::new(output, "account")?;
     response.require_ok()?;
-    let fields = response.finish_fields(5)?;
+    let fields = response.finish_fields(6)?;
     if fields[1].is_empty()
         || !fields[1].bytes().all(|byte| byte.is_ascii_digit())
         || (fields[1].len() > 1 && fields[1].starts_with('0'))
@@ -887,18 +917,24 @@ fn parse_account(output: &[u8]) -> Result<RemoteAccountMetadata, RemoteUtilityEr
         || !fields[2].starts_with('/')
         || !fields[3].starts_with('/')
         || !fields[4].starts_with('/')
-        || fields[2..]
+        || fields[2..5]
             .iter()
             .any(|field| field.chars().any(char::is_control))
     {
         return Err(RemoteUtilityError::InvalidResponse);
     }
+    let posix_sh_login_capability = match fields[5].as_str() {
+        "not-applicable" => PosixShLoginCapability::NotApplicable,
+        "login-option-supported" => PosixShLoginCapability::LoginOptionSupported,
+        _ => return Err(RemoteUtilityError::InvalidResponse),
+    };
     Ok(RemoteAccountMetadata {
         user: fields[0].clone(),
         uid,
         home: fields[2].clone(),
         login_shell: fields[3].clone(),
         physical_home: fields[4].clone(),
+        posix_sh_login_capability,
     })
 }
 
@@ -1007,6 +1043,7 @@ impl<'a> ResponseParser<'a> {
             b"missing" => RemoteUtilityError::Missing,
             b"not-directory" => RemoteUtilityError::NotDirectory,
             b"permission-denied" => RemoteUtilityError::PermissionDenied,
+            b"unsupported-login-shell" => RemoteUtilityError::UnsupportedLoginShell,
             b"failed" => RemoteUtilityError::RemoteFailed,
             _ => RemoteUtilityError::InvalidResponse,
         }
@@ -1166,8 +1203,7 @@ mod tests {
                 let mut state = self.state.lock().unwrap();
                 state.scripts.push(script);
                 state.responses.pop_front().unwrap_or_else(|| {
-                    Err(RemoteUtilityRunError::Io(io::Error::new(
-                        io::ErrorKind::Other,
+                    Err(RemoteUtilityRunError::Io(io::Error::other(
                         "missing fake response",
                     )))
                 })
@@ -1366,6 +1402,7 @@ mod tests {
                 "/Users/tester",
                 "/bin/zsh",
                 "/Users/tester",
+                "not-applicable",
             ],
             "",
         ))]);
@@ -1377,6 +1414,175 @@ mod tests {
         assert_eq!(metadata.home(), "/Users/tester");
         assert_eq!(metadata.login_shell(), "/bin/zsh");
         assert_eq!(metadata.physical_home(), "/Users/tester");
+        assert_eq!(
+            metadata.posix_sh_login_capability(),
+            PosixShLoginCapability::NotApplicable
+        );
+    }
+
+    #[gpui::test]
+    fn account_metadata_should_preserve_verified_posix_sh_login_capability(
+        cx: &mut TestAppContext,
+    ) {
+        let (client, _) = client([success(response(
+            "account",
+            "ok",
+            &[
+                "tester",
+                "501",
+                "/Users/tester",
+                "/bin/sh",
+                "/Users/tester",
+                "login-option-supported",
+            ],
+            "",
+        ))]);
+
+        let metadata = cx.executor().block(client.discover_account()).unwrap();
+
+        assert_eq!(
+            metadata.posix_sh_login_capability(),
+            PosixShLoginCapability::LoginOptionSupported
+        );
+    }
+
+    #[gpui::test]
+    fn account_metadata_should_map_unsupported_posix_sh_login_mode(cx: &mut TestAppContext) {
+        let (client, _) = client([success(response(
+            "account",
+            "unsupported-login-shell",
+            &[],
+            "",
+        ))]);
+
+        assert_eq!(
+            cx.executor().block(client.discover_account()).unwrap_err(),
+            RemoteUtilityError::UnsupportedLoginShell
+        );
+    }
+
+    #[test]
+    fn account_script_should_reject_a_conforming_sh_without_a_login_option() {
+        let test_root = PathBuf::from(format!(
+            "/private/tmp/spaceterm-account-sh-reject-{}",
+            std::process::id()
+        ));
+        let home = test_root.join("home");
+        let fake_bin = test_root.join("bin");
+        let fake_shell = fake_bin.join("sh");
+        fs::create_dir_all(&home).unwrap();
+        fs::create_dir_all(&fake_bin).unwrap();
+        fs::write(&fake_shell, b"#!/bin/sh\nexit 64\n").unwrap();
+        fs::set_permissions(&fake_shell, fs::Permissions::from_mode(0o700)).unwrap();
+        let mut child = Command::new("/bin/sh")
+            .env_clear()
+            .env("HOME", &home)
+            .env("PATH", "/usr/bin:/bin")
+            .env("SHELL", &fake_shell)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(&build_account_script())
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+
+        assert!(output.status.success());
+        assert_eq!(
+            parse_account(&output.stdout).unwrap_err(),
+            RemoteUtilityError::UnsupportedLoginShell
+        );
+        fs::remove_dir_all(test_root).unwrap();
+    }
+
+    #[test]
+    fn account_script_should_reject_relative_sh_without_executing_it() {
+        let test_root = PathBuf::from(format!(
+            "/private/tmp/spaceterm-account-relative-sh-{}",
+            std::process::id()
+        ));
+        let home = test_root.join("home");
+        let fake_bin = test_root.join("bin");
+        let fake_shell = fake_bin.join("sh");
+        let execution_marker = test_root.join("executed");
+        fs::create_dir_all(&home).unwrap();
+        fs::create_dir_all(&fake_bin).unwrap();
+        fs::write(
+            &fake_shell,
+            format!("#!/bin/sh\ntouch '{}'\n", execution_marker.display()),
+        )
+        .unwrap();
+        fs::set_permissions(&fake_shell, fs::Permissions::from_mode(0o700)).unwrap();
+        let mut child = Command::new("/bin/sh")
+            .env_clear()
+            .env("HOME", &home)
+            .env("PATH", format!("{}:/usr/bin:/bin", fake_bin.display()))
+            .env("SHELL", "sh")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(&build_account_script())
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+
+        assert_eq!(
+            parse_account(&output.stdout).unwrap_err(),
+            RemoteUtilityError::UnsupportedLoginShell
+        );
+        assert!(!execution_marker.exists());
+        fs::remove_dir_all(test_root).unwrap();
+    }
+
+    #[test]
+    fn account_script_should_record_a_supported_posix_sh_login_option() {
+        let test_root = PathBuf::from(format!(
+            "/private/tmp/spaceterm-account-sh-accept-{}",
+            std::process::id()
+        ));
+        let home = test_root.join("home");
+        let fake_bin = test_root.join("bin");
+        let fake_shell = fake_bin.join("sh");
+        fs::create_dir_all(&home).unwrap();
+        fs::create_dir_all(&fake_bin).unwrap();
+        fs::write(
+            &fake_shell,
+            b"#!/bin/sh\n[ \"$#\" -eq 3 ] && [ \"$1\" = -l ] && [ \"$2\" = -c ]\n",
+        )
+        .unwrap();
+        fs::set_permissions(&fake_shell, fs::Permissions::from_mode(0o700)).unwrap();
+        let mut child = Command::new("/bin/sh")
+            .env_clear()
+            .env("HOME", &home)
+            .env("PATH", "/usr/bin:/bin")
+            .env("SHELL", &fake_shell)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(&build_account_script())
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        let metadata = parse_account(&output.stdout).unwrap();
+
+        assert!(output.status.success());
+        assert_eq!(
+            metadata.posix_sh_login_capability(),
+            PosixShLoginCapability::LoginOptionSupported
+        );
+        fs::remove_dir_all(test_root).unwrap();
     }
 
     #[gpui::test]

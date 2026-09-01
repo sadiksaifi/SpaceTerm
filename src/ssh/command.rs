@@ -681,6 +681,10 @@ pub(crate) enum RemoteShellCommandError {
     LoginShellTooLong,
     #[error("the remote login shell is not supported")]
     UnsupportedLoginShell,
+    #[error("the POSIX sh login shell requires a verified login option")]
+    PosixShLoginCapabilityRequired,
+    #[error("the remote login-shell capability does not match the configured shell")]
+    InvalidLoginShellCapability,
     #[error("the Remote Workspace Directory is too long to launch")]
     WorkspaceDirectoryTooLong,
     #[error("the remote Pane launch command is too long")]
@@ -704,7 +708,7 @@ impl ValidatedRemoteShellCommand {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum SupportedRemoteLoginShell {
     PosixSh,
     Bash,
@@ -729,9 +733,7 @@ impl SupportedRemoteLoginShell {
 
     const fn login_arguments(self) -> &'static [&'static str] {
         match self {
-            // POSIX does not define `sh -l`. The channel already owns a PTY, so a conforming
-            // `sh` starts interactively without a non-portable login option.
-            Self::PosixSh => &[],
+            Self::PosixSh => &["-l"],
             Self::Bash => &["-l"],
             Self::Zsh => &["-l"],
             Self::Fish => &["-l"],
@@ -767,14 +769,59 @@ impl SupportedRemoteLoginShell {
     }
 }
 
+/// Capability result produced by remote account discovery for a configured POSIX `sh`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum PosixShLoginCapability {
+    /// The configured login shell is not POSIX `sh`.
+    NotApplicable,
+    /// The configured `sh` accepted its implementation's login option under supervision.
+    LoginOptionSupported,
+}
+
 /// Validated remote account metadata for one supported absolute login-shell path.
+#[derive(Clone, Eq, PartialEq)]
 pub(crate) struct ValidatedRemoteLoginShell {
     path: String,
     kind: SupportedRemoteLoginShell,
 }
 
 impl ValidatedRemoteLoginShell {
+    /// Validates a supported shell that does not require a separately discovered capability.
+    ///
+    /// POSIX does not standardize `sh -l`, so callers must use [`Self::from_discovery`] for `sh`.
     pub(crate) fn new(path: String) -> Result<Self, RemoteShellCommandError> {
+        let shell = Self::parse(path)?;
+        if shell.kind == SupportedRemoteLoginShell::PosixSh {
+            return Err(RemoteShellCommandError::PosixShLoginCapabilityRequired);
+        }
+        Ok(shell)
+    }
+
+    /// Binds the remote capability observation to the exact configured login-shell path.
+    pub(crate) fn from_discovery(
+        path: String,
+        posix_sh_capability: PosixShLoginCapability,
+    ) -> Result<Self, RemoteShellCommandError> {
+        let shell = Self::parse(path)?;
+        match (shell.kind, posix_sh_capability) {
+            (SupportedRemoteLoginShell::PosixSh, PosixShLoginCapability::LoginOptionSupported) => {
+                Ok(shell)
+            }
+            (SupportedRemoteLoginShell::PosixSh, PosixShLoginCapability::NotApplicable) => {
+                Err(RemoteShellCommandError::PosixShLoginCapabilityRequired)
+            }
+            (_, PosixShLoginCapability::NotApplicable) => Ok(shell),
+            (_, PosixShLoginCapability::LoginOptionSupported) => {
+                Err(RemoteShellCommandError::InvalidLoginShellCapability)
+            }
+        }
+    }
+
+    pub(crate) fn as_str(&self) -> &str {
+        &self.path
+    }
+
+    fn parse(path: String) -> Result<Self, RemoteShellCommandError> {
         if path.is_empty() {
             return Err(RemoteShellCommandError::MissingLoginShell);
         }
@@ -800,6 +847,15 @@ impl ValidatedRemoteLoginShell {
             .ok_or(RemoteShellCommandError::InvalidLoginShellPath)?;
         let kind = SupportedRemoteLoginShell::from_basename(basename)?;
         Ok(Self { path, kind })
+    }
+}
+
+impl fmt::Debug for ValidatedRemoteLoginShell {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ValidatedRemoteLoginShell")
+            .field("kind", &self.kind)
+            .finish_non_exhaustive()
     }
 }
 
@@ -1032,7 +1088,14 @@ mod tests {
         login_shell: &str,
     ) -> Result<ValidatedRemoteShellCommand, RemoteShellCommandError> {
         let directory = RemoteWorkspaceDirectory::new(directory.to_owned()).unwrap();
-        let login_shell = ValidatedRemoteLoginShell::new(login_shell.to_owned())?;
+        let login_shell = if login_shell.rsplit('/').next() == Some("sh") {
+            ValidatedRemoteLoginShell::from_discovery(
+                login_shell.to_owned(),
+                PosixShLoginCapability::LoginOptionSupported,
+            )?
+        } else {
+            ValidatedRemoteLoginShell::new(login_shell.to_owned())?
+        };
         RemotePaneShellCommandBuilder::new(&directory, &login_shell).build()
     }
 
@@ -1483,7 +1546,7 @@ printf 'OpenSSH_9.9p2 Apple-1, LibreSSL 3.3.6\n' >&2"#,
     #[test]
     fn pane_command_should_use_explicit_arguments_for_every_supported_shell() {
         let cases = [
-            ("/bin/sh", "cd '/srv/project' && exec '/bin/sh'"),
+            ("/bin/sh", "cd '/srv/project' && exec '/bin/sh' -l"),
             (
                 "/usr/local/bin/bash",
                 "cd '/srv/project' && exec '/usr/local/bin/bash' -l",
@@ -1517,7 +1580,7 @@ printf 'OpenSSH_9.9p2 Apple-1, LibreSSL 3.3.6\n' >&2"#,
     }
 
     #[test]
-    fn posix_sh_pane_command_should_not_require_a_nonstandard_login_option() {
+    fn posix_sh_pane_command_should_use_the_verified_login_option() {
         let sequence = NEXT_PROBE_SCRIPT.fetch_add(1, Ordering::Relaxed);
         let test_root = PathBuf::from(format!(
             "/private/tmp/spaceterm-posix-sh-{}-{sequence}",
@@ -1526,17 +1589,17 @@ printf 'OpenSSH_9.9p2 Apple-1, LibreSSL 3.3.6\n' >&2"#,
         let workspace = test_root.join("workspace with spaces");
         let fake_bin = test_root.join("bin");
         let fake_shell = fake_bin.join("sh");
-        let argument_count = test_root.join("argument-count");
+        let first_argument = test_root.join("first-argument");
         let working_directory = test_root.join("working-directory");
         fs::create_dir_all(&workspace).unwrap();
         fs::create_dir_all(&fake_bin).unwrap();
         fs::write(
             &fake_shell,
             br#"#!/bin/sh
-if [ "$#" -ne 0 ]; then
+if [ "$#" -ne 1 ] || [ "$1" != -l ]; then
     exit 64
 fi
-printf '%s\n' "$#" > "$SPACETERM_ARGUMENT_COUNT"
+printf '%s\n' "$1" > "$SPACETERM_FIRST_ARGUMENT"
 pwd -P > "$SPACETERM_WORKING_DIRECTORY"
 "#,
         )
@@ -1548,18 +1611,51 @@ pwd -P > "$SPACETERM_WORKING_DIRECTORY"
         let status = Command::new("/bin/sh")
             .args(["-c", &command.argument])
             .env_clear()
-            .env("SPACETERM_ARGUMENT_COUNT", &argument_count)
+            .env("SPACETERM_FIRST_ARGUMENT", &first_argument)
             .env("SPACETERM_WORKING_DIRECTORY", &working_directory)
             .status()
             .unwrap();
 
         assert!(status.success());
-        assert_eq!(fs::read_to_string(argument_count).unwrap(), "0\n");
+        assert_eq!(fs::read_to_string(first_argument).unwrap(), "-l\n");
         assert_eq!(
             fs::read_to_string(working_directory).unwrap(),
             format!("{}\n", workspace.display())
         );
         fs::remove_dir_all(test_root).unwrap();
+    }
+
+    #[test]
+    fn posix_sh_should_require_a_matching_discovered_login_capability() {
+        assert_eq!(
+            ValidatedRemoteLoginShell::new("/bin/sh".to_owned()).unwrap_err(),
+            RemoteShellCommandError::PosixShLoginCapabilityRequired
+        );
+        assert_eq!(
+            ValidatedRemoteLoginShell::from_discovery(
+                "/bin/sh".to_owned(),
+                PosixShLoginCapability::NotApplicable,
+            )
+            .unwrap_err(),
+            RemoteShellCommandError::PosixShLoginCapabilityRequired
+        );
+        assert_eq!(
+            ValidatedRemoteLoginShell::from_discovery(
+                "/bin/zsh".to_owned(),
+                PosixShLoginCapability::LoginOptionSupported,
+            )
+            .unwrap_err(),
+            RemoteShellCommandError::InvalidLoginShellCapability
+        );
+        assert_eq!(
+            ValidatedRemoteLoginShell::from_discovery(
+                "/bin/sh".to_owned(),
+                PosixShLoginCapability::LoginOptionSupported,
+            )
+            .unwrap()
+            .as_str(),
+            "/bin/sh"
+        );
     }
 
     #[test]

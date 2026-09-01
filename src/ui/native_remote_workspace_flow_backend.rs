@@ -477,7 +477,7 @@ impl RemoteWorkspaceSessionOwner for NativeRemoteWorkspaceSessionOwner {
             directory: directory.clone(),
             expected_identity: expected_identity.clone(),
             utility: Arc::clone(&self.utility),
-            login_shell: login_shell.as_str().to_owned(),
+            login_shell: login_shell.clone(),
             executor: self.executor.clone(),
             grant: Arc::new(Mutex::new(ChannelGrantState::default())),
         }))
@@ -523,7 +523,7 @@ struct NativeRemoteTerminalChannelProvider {
     directory: RemoteWorkspaceDirectory,
     expected_identity: RemoteDirectoryIdentity,
     utility: Arc<dyn RemoteWorkspaceProvider + Send + Sync>,
-    login_shell: String,
+    login_shell: ValidatedRemoteLoginShell,
     executor: BackgroundExecutor,
     grant: Arc<Mutex<ChannelGrantState>>,
 }
@@ -620,9 +620,7 @@ impl RemoteTerminalChannelProvider for NativeRemoteTerminalChannelProvider {
             .take()
             .ok_or(RemoteChannelUnavailable)?;
         let control = self.control.upgrade().ok_or(RemoteChannelUnavailable)?;
-        let login_shell = ValidatedRemoteLoginShell::new(self.login_shell.clone())
-            .map_err(|_| RemoteChannelUnavailable)?;
-        let command = RemotePaneShellCommandBuilder::new(&self.directory, &login_shell)
+        let command = RemotePaneShellCommandBuilder::new(&self.directory, &self.login_shell)
             .build()
             .map_err(|_| RemoteChannelUnavailable)?;
         let control = control
@@ -1036,7 +1034,7 @@ mod tests {
                 Ok(expected.clone()),
                 Ok(expected),
             ])),
-            login_shell: "/bin/zsh".to_owned(),
+            login_shell: ValidatedRemoteLoginShell::new("/bin/zsh".to_owned()).unwrap(),
             executor: cx.executor(),
             grant: Arc::new(Mutex::new(ChannelGrantState::default())),
         };
@@ -1060,6 +1058,43 @@ mod tests {
     }
 
     #[gpui::test]
+    fn native_channel_should_preserve_verified_posix_sh_through_preparation(
+        cx: &mut TestAppContext,
+    ) {
+        let control: Arc<Mutex<Option<Box<dyn NativeSessionControl>>>> =
+            Arc::new(Mutex::new(Some(Box::new(FakeSessionControl {
+                shutdowns: Arc::new(AtomicUsize::new(0)),
+                preparations: Arc::new(AtomicUsize::new(0)),
+                binding: Arc::new(Mutex::new(LiveConnectionBinding::for_test(7))),
+                alias: SshHostAlias::new("work".to_owned()).unwrap(),
+                aliases: ActiveSshAliasRegistry::default(),
+            }))));
+        let expected = RemoteDirectoryIdentity::new("/srv/project".to_owned()).unwrap();
+        let provider = NativeRemoteTerminalChannelProvider {
+            control: Arc::downgrade(&control),
+            directory: RemoteWorkspaceDirectory::new("/srv/project".to_owned()).unwrap(),
+            expected_identity: expected.clone(),
+            utility: Arc::new(FakeIdentityProvider::returning([Ok(expected)])),
+            login_shell: ValidatedRemoteLoginShell::from_discovery(
+                "/bin/sh".to_owned(),
+                crate::ssh::command::PosixShLoginCapability::LoginOptionSupported,
+            )
+            .unwrap(),
+            executor: cx.executor(),
+            grant: Arc::new(Mutex::new(ChannelGrantState::default())),
+        };
+
+        assert_eq!(cx.executor().block(provider.revalidate()), Ok(()));
+        let prepared = provider.prepare().unwrap();
+        let command = prepared.take().unwrap();
+
+        assert_eq!(
+            command.arguments().last().unwrap(),
+            "cd '/srv/project' && exec '/bin/sh' -l"
+        );
+    }
+
+    #[gpui::test]
     fn native_channel_should_reject_a_same_generation_replacement_control(cx: &mut TestAppContext) {
         let old_preparations = Arc::new(AtomicUsize::new(0));
         let old_binding = LiveConnectionBinding::for_test(1);
@@ -1077,7 +1112,7 @@ mod tests {
             directory: RemoteWorkspaceDirectory::new("~/project".to_owned()).unwrap(),
             expected_identity: expected.clone(),
             utility: Arc::new(FakeIdentityProvider::returning([Ok(expected)])),
-            login_shell: "/bin/zsh".to_owned(),
+            login_shell: ValidatedRemoteLoginShell::new("/bin/zsh".to_owned()).unwrap(),
             executor: cx.executor(),
             grant: Arc::new(Mutex::new(ChannelGrantState::default())),
         };
@@ -1121,7 +1156,7 @@ mod tests {
             utility: Arc::new(FakeIdentityProvider::returning([Ok(
                 RemoteDirectoryIdentity::new("/attacker/project".to_owned()).unwrap(),
             )])),
-            login_shell: "/bin/zsh".to_owned(),
+            login_shell: ValidatedRemoteLoginShell::new("/bin/zsh".to_owned()).unwrap(),
             executor: cx.executor(),
             grant: Arc::new(Mutex::new(ChannelGrantState::default())),
         };
