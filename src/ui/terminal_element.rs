@@ -1089,9 +1089,16 @@ impl Element for TerminalGridElement {
                 .text_system()
                 .baseline_offset(font_id, self.font_size, self.line_height);
         let ascent = window.text_system().ascent(font_id, self.font_size);
+        let descent = window.text_system().descent(font_id, self.font_size);
         let x_height = window.text_system().x_height(font_id, self.font_size);
-        let decoration_metrics =
-            decoration_metrics(baseline, ascent, x_height, window.scale_factor());
+        let decoration_metrics = decoration_metrics(
+            baseline,
+            ascent,
+            descent,
+            x_height,
+            self.line_height,
+            window.scale_factor(),
+        );
         let rows = Arc::clone(&self.rows);
         let cursor = self.cursor.as_ref();
         let cursor_preparation_style = self.cursor_preparation_style;
@@ -1538,7 +1545,9 @@ struct DecorationMetrics {
 fn decoration_metrics(
     baseline: Pixels,
     ascent: Pixels,
+    descent: Pixels,
     x_height: Pixels,
+    line_height: Pixels,
     scale_factor: f32,
 ) -> DecorationMetrics {
     let scale_factor = if scale_factor.is_finite() && scale_factor > 0.0 {
@@ -1548,7 +1557,9 @@ fn decoration_metrics(
     };
     let device_pixel = px(1.0 / scale_factor);
     let snap = |value: Pixels| px((f32::from(value) * scale_factor).round() / scale_factor);
-    let underline_y = snap(baseline + device_pixel);
+    let row_bottom = px((f32::from(line_height) * scale_factor).floor() / scale_factor);
+    let lowest_safe_underline_y = (row_bottom - device_pixel * 3.0).max(px(0.0));
+    let underline_y = snap(baseline + descent * 0.618).min(lowest_safe_underline_y);
     DecorationMetrics {
         device_pixel,
         thickness: device_pixel,
@@ -2459,7 +2470,14 @@ mod tests {
             cell_width: px(8.0),
             line_height: px(20.0),
             scale_factor_bits: 2.0f32.to_bits(),
-            decoration_metrics: decoration_metrics(px(15.0), px(11.0), px(8.0), 2.0),
+            decoration_metrics: decoration_metrics(
+                px(15.0),
+                px(11.0),
+                px(4.0),
+                px(8.0),
+                px(20.0),
+                2.0,
+            ),
             cursor,
         }
     }
@@ -2915,7 +2933,7 @@ mod tests {
                 .chain(&input.over_text_decorations)
                 .all(|span| span.color == colors().background && span.blinking)
         );
-        let metrics = decoration_metrics(px(15.0), px(11.0), px(8.0), 2.0);
+        let metrics = decoration_metrics(px(15.0), px(11.0), px(4.0), px(8.0), px(20.0), 2.0);
         let prepared = prepare_decoration_geometry(
             &input.under_text_decorations,
             px(0.0),
@@ -2935,20 +2953,33 @@ mod tests {
 
     #[test]
     fn decoration_metrics_follow_font_metrics_and_snap_to_retina_pixels() {
-        let metrics = decoration_metrics(px(15.2), px(11.1), px(8.2), 2.0);
+        let metrics = decoration_metrics(px(15.2), px(11.1), px(4.0), px(8.2), px(20.0), 2.0);
 
         assert_eq!(metrics.device_pixel, px(0.5));
         assert_eq!(metrics.thickness, px(0.5));
-        assert_eq!(metrics.underline_y, px(15.5));
-        assert_eq!(metrics.double_underline_y, px(16.5));
+        assert_eq!(metrics.underline_y, px(17.5));
+        assert_eq!(metrics.double_underline_y, px(18.5));
         assert_eq!(metrics.strikethrough_y, px(11.0));
         assert_eq!(metrics.overline_y, px(4.0));
         assert!(metrics.wave_amplitude >= metrics.device_pixel);
     }
 
     #[test]
+    fn decoration_metrics_keep_the_tallest_underline_inside_its_cell_row() {
+        let metrics = decoration_metrics(px(19.0), px(15.0), px(6.0), px(8.0), px(20.0), 1.0);
+
+        assert_eq!(
+            (
+                metrics.underline_y,
+                metrics.double_underline_y + metrics.thickness,
+            ),
+            (px(17.0), px(20.0))
+        );
+    }
+
+    #[test]
     fn underline_variants_produce_distinct_cell_clipped_geometry() {
-        let metrics = decoration_metrics(px(15.0), px(11.0), px(8.0), 2.0);
+        let metrics = decoration_metrics(px(15.0), px(11.0), px(4.0), px(8.0), px(20.0), 2.0);
         let span = |kind| DecorationSpan {
             start: 0,
             len: 2,

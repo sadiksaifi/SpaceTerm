@@ -518,13 +518,14 @@ coalesces decoration spans only across adjacent cells with identical kind, resol
 blink state; wide spacer tails extend their head cell's decoration without producing text.
 Invisible cells prepare no foreground decorations, while Selection remains an independent overlay.
 
-Decoration positions derive from the selected terminal font's baseline, ascent, and x-height, and
-their minimum thickness and positions snap to one backing device pixel. Prepared rows cache flat
-scene primitives for every decoration, including GPUI wavy-underlines for curly strokes, and reuse
-that geometry until row content or layout invalidates it. GPUI clips submission to terminal grid
-bounds. The fixed paint order is background and Selection, underline and overline, glyph or
-generated symbol, then strikethrough; marked-text overlays remain above the immutable grid
-presentation.
+Decoration positions derive from the selected terminal font's baseline, ascent, descent, and
+x-height, and their minimum thickness and positions snap to one backing device pixel. Underline
+geometry reserves enough space inside its cell row for double and curly strokes, so no decoration
+enters an adjacent row. Prepared rows cache flat scene primitives for every decoration, including
+GPUI wavy-underlines for curly strokes, and reuse that geometry until row content or layout
+invalidates it. GPUI clips submission to terminal grid bounds. The fixed paint order is background
+and Selection, underline and overline, glyph or generated symbol, then strikethrough; marked-text
+overlays remain above the immutable grid presentation.
 
 ### Terminal Drawing Symbols
 
