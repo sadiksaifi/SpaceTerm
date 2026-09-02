@@ -10,7 +10,9 @@ use gpui::{
 
 const DEFAULT_KEYBOARD_STEP: f32 = 1.0;
 const DEFAULT_MODIFIED_KEYBOARD_STEP: f32 = 10.0;
+const SPACIOUS_TARGET_MULTIPLIER: f32 = 2.0;
 const MINIMUM_METRIC: f32 = 0.5;
+const MAXIMUM_TARGET_EXTENT: f32 = 4096.0;
 const MAXIMUM_METRIC: f32 = 32.0;
 
 /// The logical movement axis owned by a [`ResizeHandle`].
@@ -48,6 +50,18 @@ impl ResizeAxis {
             _ => None,
         }
     }
+}
+
+/// The bounded pointer-target shape used by a [`ResizeHandle`].
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub enum ResizeHandleTarget {
+    /// Uses the application-installed regular pointer-target thickness.
+    #[default]
+    Regular,
+    /// Doubles the regular target thickness across the complete divider.
+    Spacious,
+    /// Doubles the target only for a leading cross-axis segment of the supplied extent.
+    SpaciousLeading(Pixels),
 }
 
 /// Stable identity for one resize interaction.
@@ -201,9 +215,21 @@ impl ResizeHandleMetrics {
         self.visible_thickness
     }
 
-    /// Returns the larger pointer target thickness.
+    /// Returns the regular pointer target thickness.
     pub fn hitbox_thickness(self) -> Pixels {
         self.hitbox_thickness
+    }
+
+    /// Returns the pointer-target thickness for the selected shape.
+    pub fn pointer_target_thickness(self, target: ResizeHandleTarget) -> Pixels {
+        match target {
+            ResizeHandleTarget::Regular => self.hitbox_thickness,
+            ResizeHandleTarget::Spacious | ResizeHandleTarget::SpaciousLeading(_) => {
+                bounded_metric(px(
+                    f32::from(self.hitbox_thickness) * SPACIOUS_TARGET_MULTIPLIER
+                ))
+            }
+        }
     }
 
     fn normalized(mut self) -> Self {
@@ -247,9 +273,14 @@ impl ResizeHandleTheme {
         self.metrics.visible_thickness
     }
 
-    /// Returns the pointer target thickness.
+    /// Returns the regular pointer target thickness.
     pub fn hitbox_thickness(self) -> Pixels {
         self.metrics.hitbox_thickness
+    }
+
+    /// Returns the pointer-target thickness for the selected shape.
+    pub fn pointer_target_thickness(self, target: ResizeHandleTarget) -> Pixels {
+        self.metrics.pointer_target_thickness(target)
     }
 }
 
@@ -278,6 +309,7 @@ pub struct ResizeHandle {
     disabled: bool,
     tab_stop: bool,
     reset_on_double_click: bool,
+    target: ResizeHandleTarget,
     keyboard_step: f32,
     modified_keyboard_step: f32,
     debug_selector: Option<String>,
@@ -301,6 +333,7 @@ impl ResizeHandle {
             disabled: false,
             tab_stop: false,
             reset_on_double_click: false,
+            target: ResizeHandleTarget::Regular,
             keyboard_step: DEFAULT_KEYBOARD_STEP,
             modified_keyboard_step: DEFAULT_MODIFIED_KEYBOARD_STEP,
             debug_selector: None,
@@ -333,6 +366,22 @@ impl ResizeHandle {
     /// Enables the optional primary-pointer double-click reset request.
     pub fn reset_on_double_click(mut self, enabled: bool) -> Self {
         self.reset_on_double_click = enabled;
+        self
+    }
+
+    /// Selects a bounded pointer-target shape without changing the visible divider thickness.
+    pub fn target(mut self, target: ResizeHandleTarget) -> Self {
+        self.target = match target {
+            ResizeHandleTarget::SpaciousLeading(extent) => {
+                let extent = f32::from(extent);
+                ResizeHandleTarget::SpaciousLeading(px(if extent.is_finite() {
+                    extent.clamp(MINIMUM_METRIC, MAXIMUM_TARGET_EXTENT)
+                } else {
+                    MINIMUM_METRIC
+                }))
+            }
+            target => target,
+        };
         self
     }
 
@@ -406,121 +455,195 @@ impl RenderOnce for ResizeHandle {
         let hitbox_selector = format!("{root_selector}-hitbox");
         let divider_selector = format!("{root_selector}-divider");
 
-        let hover_state = state.clone();
-        let down_state = state.clone();
-        let move_state = state.clone();
-        let up_state = state.clone();
-        let pointer_handler = self.on_event.clone();
-        let reset_handler = self.on_event.clone();
-        let pointer_focus = focus_handle.clone();
-        let reset_on_double_click = self.reset_on_double_click;
-        let pointer_tracker = canvas(
-            |bounds, window, _| window.insert_hitbox(bounds, HitboxBehavior::Normal),
-            move |_, hitbox, window, _| {
-                let down_hitbox = hitbox.clone();
-                let down_handler = pointer_handler.clone();
-                let move_handler = pointer_handler.clone();
-                let up_handler = pointer_handler.clone();
-                window.on_mouse_event(move |event: &MouseDownEvent, phase, window, cx| {
-                    if !phase.capture()
-                        || event.button != MouseButton::Left
-                        || !down_hitbox.is_hovered(window)
-                    {
-                        return;
-                    }
-                    if event.click_count == 2 && reset_on_double_click {
-                        if !down_state.read(cx).enabled {
+        let regular_thickness = theme.metrics.hitbox_thickness;
+        let target_thickness = theme.metrics.pointer_target_thickness(self.target);
+        let target_inset = px((f32::from(target_thickness) - f32::from(regular_thickness)) / 2.0);
+        let leading_extent = match self.target {
+            ResizeHandleTarget::SpaciousLeading(extent) => Some(extent),
+            ResizeHandleTarget::Regular | ResizeHandleTarget::Spacious => None,
+        };
+        let axis = self.axis;
+        let pointer_target = |id: &'static str,
+                              debug_selector: String,
+                              hover_source: u8,
+                              offset: Pixels,
+                              thickness: Pixels,
+                              extent: Option<Pixels>| {
+            let hover_state = state.clone();
+            let down_state = state.clone();
+            let move_state = state.clone();
+            let up_state = state.clone();
+            let pointer_handler = self.on_event.clone();
+            let reset_handler = self.on_event.clone();
+            let pointer_focus = focus_handle.clone();
+            let reset_on_double_click = self.reset_on_double_click;
+            let pointer_tracker = canvas(
+                |bounds, window, _| window.insert_hitbox(bounds, HitboxBehavior::Normal),
+                move |_, hitbox, window, _| {
+                    let down_hitbox = hitbox.clone();
+                    let down_handler = pointer_handler.clone();
+                    let move_handler = pointer_handler.clone();
+                    let up_handler = pointer_handler.clone();
+                    window.on_mouse_event(move |event: &MouseDownEvent, phase, window, cx| {
+                        if !phase.capture()
+                            || event.button != MouseButton::Left
+                            || !down_hitbox.is_hovered(window)
+                        {
                             return;
                         }
-                        window.prevent_default();
-                        pointer_focus.focus(window);
-                        emit_events(
-                            reset_handler.clone(),
-                            vec![ResizeHandleEvent::ResetRequested {
-                                source: ResizeInputSource::Pointer,
-                            }],
-                            window,
-                            cx,
-                        );
-                        cx.stop_propagation();
-                        return;
-                    }
-                    if event.click_count != 1 {
-                        return;
-                    }
-                    let events =
-                        down_state.update(cx, |state, cx| state.pointer_down(event.position, cx));
-                    if !events.is_empty() {
-                        pointer_focus.focus(window);
-                        window.prevent_default();
-                        emit_events(down_handler.clone(), events, window, cx);
-                        cx.stop_propagation();
-                    }
-                });
-
-                window.on_mouse_event(move |event: &MouseMoveEvent, phase, window, cx| {
-                    if !phase.capture() || !move_state.read(cx).owns_pointer_stream() {
-                        return;
-                    }
-                    let events = move_state.update(cx, |state, cx| {
-                        state.pointer_move(event.position, event.pressed_button, cx)
+                        if event.click_count == 2 && reset_on_double_click {
+                            if !down_state.read(cx).enabled {
+                                return;
+                            }
+                            window.prevent_default();
+                            pointer_focus.focus(window);
+                            emit_events(
+                                reset_handler.clone(),
+                                vec![ResizeHandleEvent::ResetRequested {
+                                    source: ResizeInputSource::Pointer,
+                                }],
+                                window,
+                                cx,
+                            );
+                            cx.stop_propagation();
+                            return;
+                        }
+                        if event.click_count != 1 {
+                            return;
+                        }
+                        let events = down_state
+                            .update(cx, |state, cx| state.pointer_down(event.position, cx));
+                        if !events.is_empty() {
+                            pointer_focus.focus(window);
+                            window.prevent_default();
+                            emit_events(down_handler.clone(), events, window, cx);
+                            cx.stop_propagation();
+                        }
                     });
-                    window.prevent_default();
-                    emit_events(move_handler.clone(), events, window, cx);
-                    cx.stop_propagation();
-                });
 
-                window.on_mouse_event(move |event: &MouseUpEvent, phase, window, cx| {
-                    if !phase.capture()
-                        || event.button != MouseButton::Left
-                        || !up_state.read(cx).owns_pointer_stream()
-                    {
-                        return;
-                    }
-                    let events = up_state.update(cx, |state, cx| state.pointer_up(cx));
-                    window.prevent_default();
-                    emit_events(up_handler.clone(), events, window, cx);
-                    cx.stop_propagation();
-                });
-            },
-        )
-        .absolute()
-        .inset_0();
+                    window.on_mouse_event(move |event: &MouseMoveEvent, phase, window, cx| {
+                        if !phase.capture() || !move_state.read(cx).owns_pointer_stream() {
+                            return;
+                        }
+                        let events = move_state.update(cx, |state, cx| {
+                            state.pointer_move(event.position, event.pressed_button, cx)
+                        });
+                        window.prevent_default();
+                        emit_events(move_handler.clone(), events, window, cx);
+                        cx.stop_propagation();
+                    });
 
-        let hitbox_offset = px(-(f32::from(theme.metrics.hitbox_thickness)
-            - f32::from(theme.metrics.visible_thickness))
-            / 2.0);
-        let hitbox_debug = hitbox_selector.clone();
-        let divider_debug = divider_selector.clone();
-        let hitbox = div()
-            .id("resize-handle-hitbox")
-            .debug_selector(move || hitbox_debug)
-            .absolute()
-            .flex()
-            .items_center()
-            .justify_center()
-            .block_mouse_except_scroll()
-            .when(enabled, |hitbox| hitbox.cursor(self.axis.cursor()))
-            .when(!enabled, |hitbox| hitbox.cursor_default())
-            .on_hover(move |hovered, _, cx| {
-                hover_state.update(cx, |state, cx| state.set_hovered(*hovered, cx));
-            })
-            .inset_0()
-            .child(
-                div()
-                    .id("resize-handle-divider")
-                    .debug_selector(move || divider_debug)
-                    .flex_shrink_0()
-                    .bg(color)
-                    .when(self.axis == ResizeAxis::Horizontal, |divider| {
-                        divider.w(divider_thickness).h_full()
-                    })
-                    .when(self.axis == ResizeAxis::Vertical, |divider| {
-                        divider.h(divider_thickness).w_full()
-                    }),
+                    window.on_mouse_event(move |event: &MouseUpEvent, phase, window, cx| {
+                        if !phase.capture()
+                            || event.button != MouseButton::Left
+                            || !up_state.read(cx).owns_pointer_stream()
+                        {
+                            return;
+                        }
+                        let events = up_state.update(cx, |state, cx| state.pointer_up(cx));
+                        window.prevent_default();
+                        emit_events(up_handler.clone(), events, window, cx);
+                        cx.stop_propagation();
+                    });
+                },
             )
-            .child(pointer_tracker);
+            .absolute()
+            .inset_0();
 
+            div()
+                .id(id)
+                .debug_selector(move || debug_selector)
+                .absolute()
+                .block_mouse_except_scroll()
+                .when(enabled, |target| target.cursor(axis.cursor()))
+                .when(!enabled, |target| target.cursor_default())
+                .on_hover(move |hovered, _, cx| {
+                    hover_state.update(cx, |state, cx| {
+                        state.set_target_hovered(hover_source, *hovered, cx);
+                    });
+                })
+                .when(axis == ResizeAxis::Horizontal, |target| {
+                    target
+                        .left(offset)
+                        .w(thickness)
+                        .when_some(extent, |target, extent| target.top_0().h(extent))
+                        .when(extent.is_none(), |target| target.top_0().bottom_0())
+                })
+                .when(axis == ResizeAxis::Vertical, |target| {
+                    target
+                        .top(offset)
+                        .h(thickness)
+                        .when_some(extent, |target, extent| target.left_0().w(extent))
+                        .when(extent.is_none(), |target| target.left_0().right_0())
+                })
+                .child(pointer_tracker)
+                .into_any_element()
+        };
+
+        let regular_target_thickness = if self.target == ResizeHandleTarget::Spacious {
+            target_thickness
+        } else {
+            regular_thickness
+        };
+        let regular_target_offset =
+            px((f32::from(target_thickness) - f32::from(regular_target_thickness)) / 2.0);
+        let regular_target = pointer_target(
+            "resize-handle-hitbox",
+            hitbox_selector,
+            0b001,
+            regular_target_offset,
+            regular_target_thickness,
+            None,
+        );
+        let spacious_debug_selector = format!("{root_selector}-spacious-hitbox");
+        let leading_targets = leading_extent.map(|extent| {
+            let trailing_offset = target_inset + regular_thickness;
+            [
+                pointer_target(
+                    "resize-handle-leading-target",
+                    format!("{root_selector}-leading-target"),
+                    0b010,
+                    px(0.0),
+                    target_inset,
+                    Some(extent),
+                ),
+                pointer_target(
+                    "resize-handle-trailing-target",
+                    format!("{root_selector}-trailing-target"),
+                    0b100,
+                    trailing_offset,
+                    target_inset,
+                    Some(extent),
+                ),
+            ]
+        });
+        let spacious_debug = leading_extent.map(|extent| {
+            div()
+                .id("resize-handle-spacious-hitbox")
+                .debug_selector(move || spacious_debug_selector)
+                .absolute()
+                .when(axis == ResizeAxis::Horizontal, |target| {
+                    target.top_0().left_0().w(target_thickness).h(extent)
+                })
+                .when(axis == ResizeAxis::Vertical, |target| {
+                    target.top_0().left_0().h(target_thickness).w(extent)
+                })
+        });
+        let divider_debug = divider_selector;
+        let divider = div()
+            .id("resize-handle-divider")
+            .debug_selector(move || divider_debug)
+            .flex_shrink_0()
+            .bg(color)
+            .when(axis == ResizeAxis::Horizontal, |divider| {
+                divider.w(divider_thickness).h_full()
+            })
+            .when(axis == ResizeAxis::Vertical, |divider| {
+                divider.h(divider_thickness).w_full()
+            });
+
+        let hitbox_offset =
+            px(-(f32::from(target_thickness) - f32::from(theme.metrics.visible_thickness)) / 2.0);
         let key_state = state;
         let key_handler = self.on_event;
         let key_focus = focus_handle.clone();
@@ -528,16 +651,19 @@ impl RenderOnce for ResizeHandle {
             .id(self.id)
             .debug_selector(move || root_selector)
             .relative()
+            .flex()
+            .items_center()
+            .justify_center()
             .flex_shrink_0()
             .track_focus(&focus_handle)
-            .when(self.axis == ResizeAxis::Horizontal, |root| {
-                root.w(theme.metrics.hitbox_thickness)
+            .when(axis == ResizeAxis::Horizontal, |root| {
+                root.w(target_thickness)
                     .h_full()
                     .ml(hitbox_offset)
                     .mr(hitbox_offset)
             })
-            .when(self.axis == ResizeAxis::Vertical, |root| {
-                root.h(theme.metrics.hitbox_thickness)
+            .when(axis == ResizeAxis::Vertical, |root| {
+                root.h(target_thickness)
                     .w_full()
                     .mt(hitbox_offset)
                     .mb(hitbox_offset)
@@ -554,7 +680,10 @@ impl RenderOnce for ResizeHandle {
                 emit_events(key_handler.clone(), events, window, cx);
                 cx.stop_propagation();
             })
-            .child(hitbox)
+            .child(regular_target)
+            .children(leading_targets.into_iter().flatten())
+            .children(spacious_debug)
+            .child(divider)
     }
 }
 
@@ -618,6 +747,7 @@ struct ResizeHandleState {
     modified_keyboard_step: f32,
     enabled: bool,
     hovered: bool,
+    hovered_targets: u8,
     pointer: Option<PointerInteraction>,
     suppress_pointer_until_release: bool,
     next_interaction_id: u64,
@@ -655,6 +785,7 @@ impl ResizeHandleState {
             modified_keyboard_step: DEFAULT_MODIFIED_KEYBOARD_STEP,
             enabled: false,
             hovered: false,
+            hovered_targets: 0,
             pointer: None,
             suppress_pointer_until_release: false,
             next_interaction_id: 1,
@@ -692,14 +823,20 @@ impl ResizeHandleState {
         self.enabled = enabled;
         if !enabled {
             self.hovered = false;
+            self.hovered_targets = 0;
             return self.finish_pointer(ResizeFinishReason::Disabled, false, cx);
         }
         cx.notify();
         Vec::new()
     }
 
-    fn set_hovered(&mut self, hovered: bool, cx: &mut gpui::Context<Self>) {
-        let hovered = self.enabled && hovered;
+    fn set_target_hovered(&mut self, target: u8, hovered: bool, cx: &mut gpui::Context<Self>) {
+        if hovered {
+            self.hovered_targets |= target;
+        } else {
+            self.hovered_targets &= !target;
+        }
+        let hovered = self.enabled && self.hovered_targets != 0;
         if self.hovered != hovered {
             self.hovered = hovered;
             cx.notify();
@@ -926,6 +1063,21 @@ mod tests {
         assert_eq!(metrics.visible_thickness, px(MINIMUM_METRIC));
         assert_eq!(metrics.active_thickness, px(MAXIMUM_METRIC));
         assert_eq!(metrics.hitbox_thickness, px(MAXIMUM_METRIC));
+    }
+
+    #[test]
+    fn target_shapes_should_expand_only_the_pointer_target() {
+        let metrics = ResizeHandleMetrics::new(px(1.0), px(8.0));
+
+        assert_eq!(
+            (
+                metrics.pointer_target_thickness(ResizeHandleTarget::Regular),
+                metrics.pointer_target_thickness(ResizeHandleTarget::Spacious),
+                metrics.pointer_target_thickness(ResizeHandleTarget::SpaciousLeading(px(36.0))),
+                metrics.visible_thickness,
+            ),
+            (px(8.0), px(16.0), px(16.0), px(1.0))
+        );
     }
 
     #[test]

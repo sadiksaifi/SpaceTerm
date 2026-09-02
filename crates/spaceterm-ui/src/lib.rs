@@ -58,7 +58,8 @@ pub use overlay_scrollbar::{
 };
 pub use resize_handle::{
     ResizeAxis, ResizeFinishReason, ResizeHandle, ResizeHandleEvent, ResizeHandleMetrics,
-    ResizeHandlePaint, ResizeHandleTheme, ResizeInputSource, ResizeInteractionId,
+    ResizeHandlePaint, ResizeHandleTarget, ResizeHandleTheme, ResizeInputSource,
+    ResizeInteractionId,
 };
 pub use text_input::{
     Copy as EditCopy, Cut as EditCut, Paste as EditPaste, Redo as EditRedo,

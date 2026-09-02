@@ -2,14 +2,15 @@ use std::cell::Cell;
 use std::rc::Rc;
 
 use gpui::{
-    AnyElement, App, ElementId, HitboxBehavior, InteractiveElement as _, IntoElement, MouseButton,
-    MouseDownEvent, MouseExitEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _, Pixels,
-    Point, RenderOnce, SharedString, Styled as _, Window, canvas, div, px,
+    AnyElement, App, Edges, ElementId, HitboxBehavior, InteractiveElement as _, IntoElement,
+    MouseButton, MouseDownEvent, MouseExitEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _,
+    Pixels, Point, RenderOnce, SharedString, Styled as _, Window, canvas, div, px,
 };
 
 const DEFAULT_DRAG_THRESHOLD: f32 = 4.0;
 const MINIMUM_DRAG_THRESHOLD: f32 = 1.0;
 const MAXIMUM_DRAG_THRESHOLD: f32 = 32.0;
+const MAXIMUM_POINTER_INSET: f32 = 4096.0;
 
 /// Stable identity for one primary-pointer interaction owned by a [`WindowDragRegion`].
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -140,8 +141,9 @@ type WindowDragHandler =
 /// owned gesture. The application owns top-chrome layout and paint, terminal focus coordination,
 /// actual Operating-System Window movement, and double-activation policy.
 ///
-/// The pointer hitbox is painted below `content`, and primary down is claimed in the bubble phase
-/// only after frontmost capture handlers have had an opportunity to consume it. Interactive
+/// The pointer hitbox is painted below `content`, may be inset to reserve neighboring controls,
+/// and claims primary down in the bubble phase only after frontmost capture handlers have had an
+/// opportunity to consume it. Interactive
 /// children follow the normal GPUI contract of stopping handled events or installing a blocking
 /// hitbox; SpaceTerm Buttons, Menu triggers, selectors, and Resize Handles do so. Occluding and
 /// capture-owning overlays therefore retain their behavior, while uncovered space remains
@@ -164,6 +166,7 @@ pub struct WindowDragRegion {
     status: WindowDragRegionStatus,
     disabled: bool,
     drag_threshold: Pixels,
+    pointer_insets: Edges<Pixels>,
     debug_selector: Option<String>,
     on_event: Option<WindowDragHandler>,
 }
@@ -172,6 +175,7 @@ impl WindowDragRegion {
     /// Creates a region with stable identity, a mandatory logical name, and caller-owned content.
     ///
     /// The region fills its containing bounds and adds no paint or layout metrics of its own.
+    /// Pointer insets affect only its internal interaction target.
     pub fn new(
         id: impl Into<ElementId>,
         accessibility_name: impl Into<SharedString>,
@@ -184,6 +188,7 @@ impl WindowDragRegion {
             status: WindowDragRegionStatus::new(),
             disabled: false,
             drag_threshold: px(DEFAULT_DRAG_THRESHOLD),
+            pointer_insets: Edges::default(),
             debug_selector: None,
             on_event: None,
         }
@@ -209,6 +214,20 @@ impl WindowDragRegion {
     /// Non-finite values use the four-pixel default.
     pub fn drag_threshold(mut self, threshold: Pixels) -> Self {
         self.drag_threshold = bounded_drag_threshold(threshold);
+        self
+    }
+
+    /// Insets the draggable pointer target without changing content layout or paint.
+    ///
+    /// Applications can reserve a neighboring control's pointer corridor so the two controls do
+    /// not depend on event-ordering precedence for exclusive gesture ownership.
+    pub fn pointer_insets(mut self, insets: Edges<Pixels>) -> Self {
+        self.pointer_insets = Edges {
+            top: bounded_pointer_inset(insets.top),
+            right: bounded_pointer_inset(insets.right),
+            bottom: bounded_pointer_inset(insets.bottom),
+            left: bounded_pointer_inset(insets.left),
+        };
         self
     }
 
@@ -331,15 +350,35 @@ impl RenderOnce for WindowDragRegion {
         let root_selector = self
             .debug_selector
             .unwrap_or_else(|| self.accessibility_name.to_string());
+        let hitbox_selector = format!("{root_selector}-hitbox");
+        let pointer_insets = self.pointer_insets;
+        let pointer_target = div()
+            .id("window-drag-region-hitbox")
+            .debug_selector(move || hitbox_selector)
+            .absolute()
+            .top(pointer_insets.top)
+            .right(pointer_insets.right)
+            .bottom(pointer_insets.bottom)
+            .left(pointer_insets.left)
+            .child(pointer_tracker);
         div()
             .id(self.id)
             .debug_selector(move || root_selector)
             .relative()
             .size_full()
             .cursor_default()
-            .child(pointer_tracker)
+            .child(pointer_target)
             .child(self.content)
     }
+}
+
+fn bounded_pointer_inset(inset: Pixels) -> Pixels {
+    let value = f32::from(inset);
+    px(if value.is_finite() {
+        value.clamp(0.0, MAXIMUM_POINTER_INSET)
+    } else {
+        0.0
+    })
 }
 
 fn bounded_drag_threshold(threshold: Pixels) -> Pixels {
@@ -743,6 +782,17 @@ mod tests {
         assert_eq!(bounded_drag_threshold(px(f32::NAN)), px(4.0));
     }
 
+    #[test]
+    fn pointer_inset_should_be_nonnegative_bounded_and_finite() {
+        assert_eq!(bounded_pointer_inset(px(-1.0)), px(0.0));
+        assert_eq!(bounded_pointer_inset(px(12.0)), px(12.0));
+        assert_eq!(
+            bounded_pointer_inset(px(MAXIMUM_POINTER_INSET + 1.0)),
+            px(MAXIMUM_POINTER_INSET)
+        );
+        assert_eq!(bounded_pointer_inset(px(f32::NAN)), px(0.0));
+    }
+
     struct TestRoot {
         events: Rc<RefCell<Vec<WindowDragRegionEvent>>>,
         parent_events: Rc<RefCell<Vec<MouseButton>>>,
@@ -750,6 +800,7 @@ mod tests {
         child_presses: Rc<RefCell<usize>>,
         disabled: bool,
         show: bool,
+        pointer_insets: Edges<Pixels>,
         overlay: bool,
         capture_overlay: bool,
     }
@@ -781,6 +832,7 @@ mod tests {
                 content,
             )
             .disabled(self.disabled)
+            .pointer_insets(self.pointer_insets)
             .debug_selector("test-window-drag-region")
             .on_event(move |event, _, _| region_events.borrow_mut().push(*event));
 
@@ -904,6 +956,7 @@ mod tests {
             child_presses: root_child_presses,
             disabled: false,
             show: true,
+            pointer_insets: Edges::default(),
             overlay: false,
             capture_overlay: false,
         });
@@ -922,6 +975,45 @@ mod tests {
     fn region_bounds(cx: &mut VisualTestContext) -> gpui::Bounds<Pixels> {
         cx.debug_bounds("test-window-drag-region")
             .expect("window drag region was not rendered")
+    }
+
+    #[gpui::test]
+    fn pointer_insets_should_remove_reserved_edges_from_drag_ownership(cx: &mut TestAppContext) {
+        let DragWindow {
+            root, events, cx, ..
+        } = drag_window(cx);
+        root.update(cx, |root, cx| {
+            root.pointer_insets = Edges {
+                right: px(20.0),
+                left: px(12.0),
+                ..Edges::default()
+            };
+            cx.notify();
+        });
+        cx.run_until_parked();
+        let root_bounds = region_bounds(cx);
+        let target = cx
+            .debug_bounds("test-window-drag-region-hitbox")
+            .expect("the inset Window drag target was not rendered");
+
+        assert_eq!(
+            target,
+            gpui::Bounds::new(
+                point(root_bounds.left() + px(12.0), root_bounds.top()),
+                gpui::size(root_bounds.size.width - px(32.0), root_bounds.size.height),
+            )
+        );
+
+        let reserved = point(root_bounds.right() - px(4.0), root_bounds.center().y);
+        cx.simulate_mouse_down(reserved, MouseButton::Left, Modifiers::none());
+        cx.simulate_mouse_move(
+            point(reserved.x + px(8.0), reserved.y),
+            MouseButton::Left,
+            Modifiers::none(),
+        );
+        cx.simulate_mouse_up(reserved, MouseButton::Left, Modifiers::none());
+
+        assert!(events.borrow().is_empty());
     }
 
     #[gpui::test]
