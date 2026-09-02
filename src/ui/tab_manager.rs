@@ -66,15 +66,15 @@ use spaceterm_ui::{
     WindowDragRegionEvent, WindowDragRegionResponse, WindowDragRegionStatus,
 };
 
-const WINDOW_BAR_HEIGHT: f32 = TOP_CHROME_HEIGHT;
-const WINDOW_BAR_DIVIDER_SIZE: f32 = 1.0;
-const WINDOW_ITEM_WIDTH: f32 = 132.0;
-const WINDOW_ITEM_MINIMUM_WIDTH: f32 = 84.0;
-const WINDOW_ITEM_MAXIMUM_WIDTH: f32 = 160.0;
-const WINDOW_ITEM_RIGHT_PADDING: f32 = 6.0;
-const WINDOW_CLOSE_ICON_SIZE: f32 = 12.0;
-const WINDOW_CONTROL_SIZE: f32 = 28.0;
-const WINDOW_CONTROL_INSET: f32 = 4.0;
+const TAB_BAR_HEIGHT: f32 = TOP_CHROME_HEIGHT;
+const TAB_BAR_DIVIDER_SIZE: f32 = 1.0;
+const TAB_ITEM_WIDTH: f32 = 132.0;
+const TAB_ITEM_MINIMUM_WIDTH: f32 = 84.0;
+const TAB_ITEM_MAXIMUM_WIDTH: f32 = 160.0;
+const TAB_ITEM_RIGHT_PADDING: f32 = 6.0;
+const TAB_CLOSE_ICON_SIZE: f32 = 12.0;
+const TAB_CONTROL_SIZE: f32 = 28.0;
+const TAB_CONTROL_INSET: f32 = 4.0;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum TabMenuInvocation {
@@ -1076,11 +1076,11 @@ impl TabManager {
             .group(tab_group.clone())
             .h_full()
             .flex_none()
-            .w(px(WINDOW_ITEM_WIDTH))
-            .min_w(px(WINDOW_ITEM_MINIMUM_WIDTH))
-            .max_w(px(WINDOW_ITEM_MAXIMUM_WIDTH))
+            .w(px(TAB_ITEM_WIDTH))
+            .min_w(px(TAB_ITEM_MINIMUM_WIDTH))
+            .max_w(px(TAB_ITEM_MAXIMUM_WIDTH))
             .pl(px(12.0))
-            .pr(px(WINDOW_ITEM_RIGHT_PADDING))
+            .pr(px(TAB_ITEM_RIGHT_PADDING))
             .flex()
             .items_center()
             .cursor_pointer()
@@ -1137,7 +1137,7 @@ impl TabManager {
                             ("tab-close-button", tab_id.get()),
                             "Close Tab",
                             |foreground| {
-                                Icon::new(IconName::X, px(WINDOW_CLOSE_ICON_SIZE), foreground)
+                                Icon::new(IconName::X, px(TAB_CLOSE_ICON_SIZE), foreground)
                                     .into_any_element()
                             },
                         )
@@ -1164,7 +1164,7 @@ impl TabManager {
                     .top_0()
                     .right_0()
                     .h_full()
-                    .w(px(WINDOW_BAR_DIVIDER_SIZE))
+                    .w(px(TAB_BAR_DIVIDER_SIZE))
                     .bg(gpui_color(ACTIVE_THEME.border)),
             )
             .child(
@@ -1175,7 +1175,7 @@ impl TabManager {
                     .bottom_0()
                     .left_0()
                     .w_full()
-                    .h(px(WINDOW_BAR_DIVIDER_SIZE))
+                    .h(px(TAB_BAR_DIVIDER_SIZE))
                     .bg(gpui_color(ACTIVE_THEME.border)),
             )
             .when(active, |item| {
@@ -1187,7 +1187,7 @@ impl TabManager {
                         .bottom_0()
                         .left_0()
                         .w_full()
-                        .h(px(WINDOW_BAR_DIVIDER_SIZE))
+                        .h(px(TAB_BAR_DIVIDER_SIZE))
                         .bg(gpui_color(ACTIVE_THEME.panel_focused_border)),
                 )
             });
@@ -1196,8 +1196,8 @@ impl TabManager {
             ("tab-context-menu", tab_id.get()),
             "Tab Actions",
             div()
-                .w(px(WINDOW_ITEM_WIDTH))
-                .h(px(WINDOW_BAR_HEIGHT))
+                .w(px(TAB_ITEM_WIDTH))
+                .h(px(TAB_BAR_HEIGHT))
                 .flex_none()
                 .child(item),
             pane_action_menu_entries("tab-menu", zoomed, zoom_enabled, CloseTarget::Tab),
@@ -1272,7 +1272,7 @@ impl TabManager {
             .flex()
             .flex_row()
             .items_center()
-            .pr(px(WINDOW_CONTROL_SIZE + WINDOW_CONTROL_INSET * 2.0))
+            .pr(px(TAB_CONTROL_SIZE + TAB_CONTROL_INSET * 2.0))
             .bg(gpui_color(ACTIVE_THEME.tab_bar_background))
             .child(
                 div()
@@ -1282,7 +1282,7 @@ impl TabManager {
                     .bottom_0()
                     .left_0()
                     .w_full()
-                    .h(px(WINDOW_BAR_DIVIDER_SIZE))
+                    .h(px(TAB_BAR_DIVIDER_SIZE))
                     .bg(gpui_color(ACTIVE_THEME.border)),
             )
             .child(items)
@@ -1307,8 +1307,8 @@ impl TabManager {
             .child(
                 div()
                     .absolute()
-                    .top(px(WINDOW_CONTROL_INSET))
-                    .right(px(WINDOW_CONTROL_INSET))
+                    .top(px(TAB_CONTROL_INSET))
+                    .right(px(TAB_CONTROL_INSET))
                     .child(
                         Menu::new(
                             "tab-menu-button-control",
@@ -1371,7 +1371,7 @@ impl TabManager {
             .id("tab-bar")
             .debug_selector(|| "tab-bar".to_owned())
             .relative()
-            .h(px(WINDOW_BAR_HEIGHT))
+            .h(px(TAB_BAR_HEIGHT))
             .min_w_0()
             .flex_1()
             .flex_shrink_0()
@@ -1900,17 +1900,17 @@ mod tests {
                 active_bottom_divider.size,
             ),
             (
-                px(WINDOW_BAR_HEIGHT),
-                px(WINDOW_BAR_DIVIDER_SIZE),
-                px(WINDOW_BAR_DIVIDER_SIZE),
+                px(TAB_BAR_HEIGHT),
+                px(TAB_BAR_DIVIDER_SIZE),
+                px(TAB_BAR_DIVIDER_SIZE),
                 underline.origin.y + underline.size.height,
-                px(WINDOW_BAR_DIVIDER_SIZE),
+                px(TAB_BAR_DIVIDER_SIZE),
                 inactive_item.size.height,
                 inactive_item.origin.x + inactive_item.size.width,
                 divider.origin.y,
-                gpui::size(inactive_item.size.width, px(WINDOW_BAR_DIVIDER_SIZE)),
+                gpui::size(inactive_item.size.width, px(TAB_BAR_DIVIDER_SIZE)),
                 divider.origin.y,
-                gpui::size(active_item.size.width, px(WINDOW_BAR_DIVIDER_SIZE)),
+                gpui::size(active_item.size.width, px(TAB_BAR_DIVIDER_SIZE)),
             )
         );
     }
@@ -2238,10 +2238,7 @@ mod tests {
                 item.origin.x + item.size.width - (close_button.origin.x + close_button.size.width),
                 close_button.size,
             ),
-            (
-                px(WINDOW_ITEM_RIGHT_PADDING),
-                gpui::size(px(20.0), px(20.0)),
-            )
+            (px(TAB_ITEM_RIGHT_PADDING), gpui::size(px(20.0), px(20.0)),)
         );
     }
 
