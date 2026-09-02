@@ -19,9 +19,20 @@
     {
       "layers" : [
         {
-          "fill" : {
-            "solid" : "display-p3:0.69043,0.69043,0.69043,1.00000"
-          },
+          "blend-mode" : "normal",
+          "fill-specializations" : [
+            {
+              "value" : {
+                "solid" : "display-p3:0.99631,0.99631,0.99631,1.00000"
+              }
+            },
+            {
+              "appearance" : "dark",
+              "value" : {
+                "solid" : "display-p3:0.96311,0.96311,0.96311,1.00000"
+              }
+            }
+          ],
           "glass" : true,
           "hidden" : false,
           "image-name" : "SVG Image 4.svg",
