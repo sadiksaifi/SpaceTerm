@@ -154,6 +154,7 @@ pub(crate) struct TerminalGridElement {
     presentation_operation: Option<OperationToken>,
     graphics_attempt: Option<GraphicsAttemptToken>,
     graphics_cache: Entity<TerminalGraphicsCache>,
+    active_hyperlink: Option<u64>,
     fallback: Option<Box<TerminalGridElement>>,
     fallback_generation: Option<crate::terminal::PresentationGeneration>,
     paint_fault: Option<PaintPreflightFault>,
@@ -175,6 +176,7 @@ pub(crate) struct TerminalGridConfiguration {
     pub(crate) presentation_operation: Option<OperationToken>,
     pub(crate) graphics_attempt: Option<GraphicsAttemptToken>,
     pub(crate) graphics_cache: Entity<TerminalGraphicsCache>,
+    pub(crate) active_hyperlink: Option<u64>,
     pub(crate) fallback: Option<(
         Arc<ScreenSnapshot>,
         Entity<TerminalGridCache>,
@@ -221,6 +223,7 @@ impl TerminalGridElement {
                         presentation_operation: None,
                         graphics_attempt: None,
                         graphics_cache: configuration.graphics_cache.clone(),
+                        active_hyperlink: None,
                         fallback: None,
                         paint_fault: None,
                     },
@@ -286,6 +289,7 @@ impl TerminalGridElement {
             presentation_operation: configuration.presentation_operation,
             graphics_attempt: configuration.graphics_attempt,
             graphics_cache: configuration.graphics_cache,
+            active_hyperlink: configuration.active_hyperlink,
             fallback,
             fallback_generation,
             paint_fault: configuration.paint_fault,
@@ -328,6 +332,7 @@ struct PreparedRow {
 struct PreparedFrameRow {
     stable: Arc<PreparedRow>,
     find_backgrounds: Vec<PaintQuad>,
+    hyperlink_hover_decorations: PreparedDecorations,
     cursor_background: Option<PaintQuad>,
     cursor_overlay_visible: bool,
     preedit: Option<PreparedPreeditRow>,
@@ -385,6 +390,7 @@ impl PreparedFrameRow {
         Self {
             stable,
             find_backgrounds: Vec::new(),
+            hyperlink_hover_decorations: PreparedDecorations::default(),
             cursor_background: None,
             cursor_overlay_visible: false,
             preedit: None,
@@ -548,6 +554,11 @@ impl TerminalPaintBatch {
                 for row in &self.rows {
                     paint_prepared_decorations(
                         &row.stable.under_text_decorations,
+                        self.blink_phase_visible,
+                        window,
+                    );
+                    paint_prepared_decorations(
+                        &row.hyperlink_hover_decorations,
                         self.blink_phase_visible,
                         window,
                     );
@@ -1162,6 +1173,16 @@ impl Element for TerminalGridElement {
 
             let mut frame = PreparedFrameRow::new(stable);
             frame.find_backgrounds = find_backgrounds;
+            frame.hyperlink_hover_decorations = prepare_decoration_geometry(
+                &hyperlink_hover_underline_spans(
+                    &self.presentation.rows[row_index],
+                    self.active_hyperlink,
+                ),
+                row_top,
+                grid_left,
+                self.cell_width,
+                decoration_metrics,
+            );
             frame.cursor_background = cursor_background;
             frame.cursor_overlay_visible = cursor_overlay_visible;
             frame.preedit = preedit_rows
@@ -1523,7 +1544,7 @@ fn decoration_metrics(
     };
     let device_pixel = px(1.0 / scale_factor);
     let snap = |value: Pixels| px((f32::from(value) * scale_factor).round() / scale_factor);
-    let underline_y = snap(baseline + device_pixel * 2.0);
+    let underline_y = snap(baseline + device_pixel);
     DecorationMetrics {
         device_pixel,
         thickness: device_pixel,
@@ -1932,6 +1953,38 @@ fn push_decoration(spans: &mut Vec<DecorationSpan>, mut span: DecorationSpan) {
     }
     span.len = span.len.max(1);
     spans.push(span);
+}
+
+fn hyperlink_hover_underline_spans(
+    row: &RowSnapshot,
+    active_hyperlink: Option<u64>,
+) -> Vec<DecorationSpan> {
+    let Some(active_hyperlink) = active_hyperlink else {
+        return Vec::new();
+    };
+    let mut spans = Vec::new();
+    for (column, cell) in row.iter().enumerate() {
+        if cell.invisible
+            || cell.underline != TerminalUnderlineSnapshot::None
+            || !cell
+                .hyperlink
+                .as_ref()
+                .is_some_and(|link| link.identity == active_hyperlink)
+        {
+            continue;
+        }
+        push_decoration(
+            &mut spans,
+            DecorationSpan {
+                start: column,
+                len: 1,
+                kind: DecorationKind::Underline(TerminalUnderlineSnapshot::Single),
+                color: ACTIVE_THEME.link_text_hover,
+                blinking: false,
+            },
+        );
+    }
+    spans
 }
 
 #[cfg(test)]
@@ -2657,6 +2710,43 @@ mod tests {
     }
 
     #[test]
+    fn hyperlink_hover_underlines_only_undecorated_cells_in_mixed_spans() {
+        let link = crate::terminal::HyperlinkTarget::url("https://example.test").unwrap();
+        let mut plain_first = cell("a");
+        plain_first.hyperlink = Some(link.clone());
+        let mut decorated = cell("b");
+        decorated.hyperlink = Some(link.clone());
+        decorated.underline = crate::terminal::TerminalUnderlineSnapshot::Curly;
+        let mut plain_second = cell("c");
+        plain_second.hyperlink = Some(link.clone());
+        let mut other = cell("d");
+        other.hyperlink = crate::terminal::HyperlinkTarget::url("https://other.test");
+        let row = Arc::<[CellSnapshot]>::from([plain_first, decorated, plain_second, other]);
+
+        let spans = hyperlink_hover_underline_spans(&row, Some(link.identity));
+
+        assert_eq!(
+            spans,
+            [
+                DecorationSpan {
+                    start: 0,
+                    len: 1,
+                    kind: DecorationKind::Underline(TerminalUnderlineSnapshot::Single),
+                    color: ACTIVE_THEME.link_text_hover,
+                    blinking: false,
+                },
+                DecorationSpan {
+                    start: 2,
+                    len: 1,
+                    kind: DecorationKind::Underline(TerminalUnderlineSnapshot::Single),
+                    color: ACTIVE_THEME.link_text_hover,
+                    blinking: false,
+                },
+            ]
+        );
+    }
+
+    #[test]
     fn decorations_compose_with_inverse_selection_visibility_and_blink_phase() {
         let mut decorated = cell("x");
         decorated.inverse = true;
@@ -2701,8 +2791,8 @@ mod tests {
 
         assert_eq!(metrics.device_pixel, px(0.5));
         assert_eq!(metrics.thickness, px(0.5));
-        assert_eq!(metrics.underline_y, px(16.0));
-        assert_eq!(metrics.double_underline_y, px(17.0));
+        assert_eq!(metrics.underline_y, px(15.5));
+        assert_eq!(metrics.double_underline_y, px(16.5));
         assert_eq!(metrics.strikethrough_y, px(11.0));
         assert_eq!(metrics.overline_y, px(4.0));
         assert!(metrics.wave_amplitude >= metrics.device_pixel);
