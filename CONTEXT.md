@@ -518,13 +518,14 @@ coalesces decoration spans only across adjacent cells with identical kind, resol
 blink state; wide spacer tails extend their head cell's decoration without producing text.
 Invisible cells prepare no foreground decorations, while Selection remains an independent overlay.
 
-Decoration positions derive from the selected terminal font's baseline, ascent, and x-height, and
-their minimum thickness and positions snap to one backing device pixel. Prepared rows cache flat
-scene primitives for every decoration, including GPUI wavy-underlines for curly strokes, and reuse
-that geometry until row content or layout invalidates it. GPUI clips submission to terminal grid
-bounds. The fixed paint order is background and Selection, underline and overline, glyph or
-generated symbol, then strikethrough; marked-text overlays remain above the immutable grid
-presentation.
+Decoration positions derive from the selected terminal font's baseline, ascent, descent, and
+x-height, and their minimum thickness and positions snap to one backing device pixel. Underline
+geometry reserves enough space inside its cell row for double and curly strokes, so no decoration
+enters an adjacent row. Prepared rows cache flat scene primitives for every decoration, including
+GPUI wavy-underlines for curly strokes, and reuse that geometry until row content or layout
+invalidates it. GPUI clips submission to terminal grid bounds. The fixed paint order is background
+and Selection, underline and overline, glyph or generated symbol, then strikethrough; marked-text
+overlays remain above the immutable grid presentation.
 
 ### Terminal Drawing Symbols
 
@@ -613,10 +614,16 @@ horizontal movement never mutates ordinary Scrollback.
 Immutable Terminal Presentations attach validated link targets to complete cells. OSC 8 targets
 come from `libghostty-vt`; configured detection maps UTF-8 byte spans back to whole grapheme cells.
 URL and local-path validation are separate, bounded, and control-free, with local paths resolved
-only against trusted Session context and required to exist. Hover presentation covers every cell
-with the same stable identity, while opening requires a platform-modified press and release on the
-same identity and Presentation Generation; drags, stale mappings, malformed schemes, and missing
-paths are inert.
+only against trusted Session context and required to exist. A Terminal Hyperlink becomes active
+only while the pointer is over it and the macOS platform modifier is held, including modifier
+changes while the pointer remains stationary. Active presentation uses a pointing-hand cursor, a
+compact bottom-left destination preview, and one font-aligned underline only on linked cells that
+do not already carry a terminal-supplied underline; every terminal-supplied underline remains
+unchanged, including mixed-decoration link spans. Active presentation is scoped to the exact
+contiguous occurrence under the pointer, continuing across soft-wrapped rows without activating
+separate occurrences of the same target. Opening requires a platform-modified press and release on
+the same identity and Presentation Generation; drags, stale mappings, malformed schemes, and
+missing paths are inert.
 
 ### Native File Insertion
 

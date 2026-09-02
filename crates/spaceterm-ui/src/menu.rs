@@ -875,6 +875,14 @@ impl<T: IntoElement + 'static, A: Clone + 'static> ContextMenu<T, A> {
         self.core.fill_parent_width = true;
         self
     }
+
+    /// Leaves pointer cursor selection to the decorated content and its ancestors.
+    ///
+    /// Context-menu triggers request the default cursor unless this is enabled.
+    pub fn preserve_trigger_cursor(mut self) -> Self {
+        self.core.preserve_trigger_cursor = true;
+        self
+    }
 }
 
 impl<T: IntoElement + 'static, A: Clone + 'static> RenderOnce for ContextMenu<T, A> {
@@ -1140,6 +1148,7 @@ struct MenuControl<A> {
     disabled: bool,
     icon_trigger: bool,
     fill_parent_width: bool,
+    preserve_trigger_cursor: bool,
     debug_selector: Option<String>,
     on_activate: Option<TypedActivationHandler<A>>,
     on_lifecycle: Option<MenuLifecycleHandler>,
@@ -1163,6 +1172,7 @@ impl<A> MenuControl<A> {
             disabled: false,
             icon_trigger: false,
             fill_parent_width: false,
+            preserve_trigger_cursor: false,
             debug_selector: None,
             on_activate: None,
             on_lifecycle: None,
@@ -1300,6 +1310,7 @@ impl<A: Clone + 'static> MenuControl<A> {
 
         let key_state = state.downgrade();
         let fill_parent_width = self.fill_parent_width;
+        let preserve_trigger_cursor = self.preserve_trigger_cursor;
         let debug_selector = self.debug_selector;
         let accessibility_name = self.accessibility_name;
         let mut trigger = div()
@@ -1308,7 +1319,7 @@ impl<A: Clone + 'static> MenuControl<A> {
                 debug_selector.unwrap_or_else(|| accessibility_name.to_string())
             })
             .relative()
-            .cursor_default()
+            .when(!preserve_trigger_cursor, |trigger| trigger.cursor_default())
             .when(fill_parent_width, |trigger| trigger.w_full())
             .when(!open && self.kind != TriggerKind::Context, |trigger| {
                 trigger.track_focus(&focus_handle)
@@ -4364,6 +4375,31 @@ mod tests {
             )
             .on_activate(|_, _, _| {})
         }
+    }
+
+    #[test]
+    fn context_menu_can_preserve_the_surrounding_cursor_without_changing_the_default() {
+        let default_menu = ContextMenu::new(
+            "default-context-cursor",
+            "Default context cursor",
+            div(),
+            vec![MenuEntry::action("Inspect", ())],
+        );
+        let preserving_menu = ContextMenu::new(
+            "preserving-context-cursor",
+            "Preserving context cursor",
+            div(),
+            vec![MenuEntry::action("Inspect", ())],
+        )
+        .preserve_trigger_cursor();
+
+        assert_eq!(
+            (
+                default_menu.core.preserve_trigger_cursor,
+                preserving_menu.core.preserve_trigger_cursor,
+            ),
+            (false, true)
+        );
     }
 
     struct ContextDragRoot {

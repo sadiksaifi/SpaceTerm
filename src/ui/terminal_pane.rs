@@ -59,8 +59,8 @@ use crate::platform::macos_secure_input::{
 };
 use crate::terminal::attention::AttentionState;
 use crate::terminal::geometry::{
-    BackingPosition, BackingScale, CellGridSize, LogicalCellSize, LogicalPosition, LogicalSize,
-    TerminalGeometry,
+    BackingPosition, BackingScale, CellGridPosition, CellGridSize, LogicalCellSize,
+    LogicalPosition, LogicalSize, TerminalGeometry,
 };
 use crate::terminal::{
     AccessibilityGeometry, AccessibilityNotification, AccessibilityNotifications, AttentionFacts,
@@ -198,6 +198,13 @@ struct TerminalContextMenuState {
     link: Option<crate::terminal::HyperlinkTarget>,
     selection_present: bool,
     quick_look_eligible: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct HoveredTerminalLink {
+    generation: crate::terminal::PresentationGeneration,
+    cell: CellGridPosition,
+    target: crate::terminal::HyperlinkTarget,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -361,10 +368,7 @@ pub(crate) struct TerminalPane {
     pending_file_insertion: Option<NativeInsertion>,
     pending_paste: Option<PasteConfirmation>,
     pending_osc52: Option<Osc52AuthorizationRequest>,
-    hovered_link: Option<(
-        crate::terminal::PresentationGeneration,
-        crate::terminal::HyperlinkTarget,
-    )>,
+    hovered_link: Option<HoveredTerminalLink>,
     pressed_link: Option<(
         crate::terminal::PresentationGeneration,
         crate::terminal::HyperlinkTarget,
@@ -2494,8 +2498,12 @@ impl TerminalPane {
             return;
         };
         let hovered_link = self
-            .link_at(position)
-            .map(|link| (self.screen.generation, link));
+            .link_cell_at(position)
+            .map(|(cell, target)| HoveredTerminalLink {
+                generation: self.screen.generation,
+                cell,
+                target,
+            });
         if self.hovered_link != hovered_link {
             self.hovered_link = hovered_link;
             cx.notify();
@@ -2540,6 +2548,7 @@ impl TerminalPane {
                 &pressed,
                 self.screen.generation,
                 current.as_ref(),
+                event.modifiers.platform,
             ) {
                 cx.open_url(&url);
             }
@@ -2988,6 +2997,7 @@ impl TerminalPane {
 
     fn current_hovered_link(&self) -> Option<&crate::terminal::HyperlinkTarget> {
         hovered_link_for_generation(self.hovered_link.as_ref(), self.screen.generation)
+            .map(|hovered| &hovered.target)
     }
 
     pub(crate) fn native_service_status(
@@ -3265,16 +3275,25 @@ impl TerminalPane {
     }
 
     fn link_at(&self, position: SurfacePosition) -> Option<crate::terminal::HyperlinkTarget> {
+        self.link_cell_at(position).map(|(_, link)| link)
+    }
+
+    fn link_cell_at(
+        &self,
+        position: SurfacePosition,
+    ) -> Option<(CellGridPosition, crate::terminal::HyperlinkTarget)> {
         let cell = self
             .last_geometry?
             .cell_at_backing_position(BackingPosition::new(position.x, position.y));
-        self.screen
+        let link = self
+            .screen
             .rows
             .get(usize::from(cell.row))?
             .get(usize::from(cell.col))?
             .hyperlink
             .clone()
-            .filter(|link| !link.is_local_file() || self.local_file_capabilities.are_enabled())
+            .filter(|link| !link.is_local_file() || self.local_file_capabilities.are_enabled())?;
+        Some((cell, link))
     }
 
     fn render_find_bar(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -3753,41 +3772,17 @@ impl Render for TerminalPane {
             self.fallback_render_cache.clone()
         };
         let background = gpui_color(display_screen.background);
-        let hovered_link = displaying_current
-            .then(|| self.current_hovered_link().cloned())
+        let active_hovered_link = displaying_current
+            .then(|| {
+                active_hovered_link(
+                    self.hovered_link.as_ref(),
+                    self.screen.generation,
+                    self.pointer_modifiers.platform,
+                )
+                .cloned()
+            })
             .flatten();
         let native_context_actions = self.native_context_actions();
-        let link_cell_width = self.cell_width;
-        let link_line_height = self.line_height;
-        let link_rows = display_screen.rows.clone();
-        let link_highlights = hovered_link.as_ref().map_or_else(Vec::new, |hovered| {
-            link_rows
-                .iter()
-                .enumerate()
-                .flat_map(|(row, cells)| {
-                    cells
-                        .iter()
-                        .enumerate()
-                        .filter(move |(_, cell)| {
-                            cell.hyperlink
-                                .as_ref()
-                                .is_some_and(|link| link.identity == hovered.identity)
-                        })
-                        .map(move |(column, _)| {
-                            div()
-                                .absolute()
-                                .left(px(
-                                    HORIZONTAL_PADDING + column as f32 * f32::from(link_cell_width)
-                                ))
-                                .top(px(VERTICAL_PADDING + row as f32 * link_line_height))
-                                .w(link_cell_width)
-                                .h(px(link_line_height))
-                                .border_b_1()
-                                .border_color(gpui_color(ACTIVE_THEME.link_text_hover))
-                        })
-                })
-                .collect::<Vec<_>>()
-        });
         let paste_confirmation = self.pending_paste;
         let osc52_authorization = self.pending_osc52;
         let key_context = if paste_confirmation.is_some() {
@@ -3847,6 +3842,9 @@ impl Render for TerminalPane {
                 presentation_operation,
                 graphics_attempt,
                 graphics_cache: self.graphics_cache.clone(),
+                active_hyperlink: active_hovered_link
+                    .as_ref()
+                    .map(|hovered| (hovered.target.identity, hovered.cell)),
                 fallback: (presentation_operation.is_some()
                     && !Arc::ptr_eq(&display_screen, &self.last_valid_screen))
                 .then(|| {
@@ -3884,6 +3882,7 @@ impl Render for TerminalPane {
             context_menu_entries,
         )
         .size(MenuSize::Regular)
+        .preserve_trigger_cursor()
         .disabled(!context_menu_available)
         .debug_selector("terminal-context-menu")
         .on_open_request(move |request, window, cx| {
@@ -3930,7 +3929,7 @@ impl Render for TerminalPane {
             .py(px(VERTICAL_PADDING))
             .when(pointer_uses_text_cursor, |root| root.cursor_text())
             .when(!pointer_uses_text_cursor, |root| root.cursor_default())
-            .when(hovered_link.is_some(), |root| root.cursor_pointer())
+            .when(active_hovered_link.is_some(), |root| root.cursor_pointer())
             .key_context(key_context)
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(Self::copy_selection))
@@ -3963,7 +3962,6 @@ impl Render for TerminalPane {
             .on_mouse_up_out(MouseButton::Middle, cx.listener(Self::on_mouse_up_out))
             .on_mouse_up_out(MouseButton::Right, cx.listener(Self::on_mouse_up_out))
             .child(terminal_grid)
-            .children(link_highlights)
             .child(scrollbar)
             .when_some(find_bar, |root, find_bar| root.child(find_bar))
             .when(attention_visual, |root| {
@@ -3976,15 +3974,24 @@ impl Render for TerminalPane {
                         .border_color(gpui_color(ACTIVE_THEME.warning)),
                 )
             })
-            .when_some(hovered_link, |root, link| {
+            .when_some(active_hovered_link, |root, link| {
                 root.child(
                     div()
+                        .debug_selector(|| "terminal-link-preview".to_owned())
                         .absolute()
                         .left(px(8.0))
                         .bottom(px(8.0))
+                        .max_w(px(520.0))
                         .px(px(6.0))
-                        .bg(gpui_color(ACTIVE_THEME.background))
-                        .child(link.value),
+                        .py(px(3.0))
+                        .rounded(px(4.0))
+                        .border_1()
+                        .border_color(gpui_color(ACTIVE_THEME.border))
+                        .bg(gpui_color(ACTIVE_THEME.element_active))
+                        .text_color(gpui_color(ACTIVE_THEME.text_muted))
+                        .text_sm()
+                        .overflow_hidden()
+                        .child(div().truncate().child(link.target.value)),
                 )
             })
             .when_some(paste_confirmation, |root, confirmation| {
@@ -4387,8 +4394,10 @@ fn activated_link(
     pressed: &crate::terminal::HyperlinkTarget,
     current_generation: crate::terminal::PresentationGeneration,
     current: Option<&crate::terminal::HyperlinkTarget>,
+    platform_modifier: bool,
 ) -> Option<String> {
-    (pressed_generation == current_generation
+    (platform_modifier
+        && pressed_generation == current_generation
         && current.is_some_and(|link| link.identity == pressed.identity))
     .then(|| pressed.activation_url(local_file_capabilities))
     .flatten()
@@ -4407,15 +4416,20 @@ fn revalidated_context_link<'a>(
 }
 
 fn hovered_link_for_generation(
-    hovered: Option<&(
-        crate::terminal::PresentationGeneration,
-        crate::terminal::HyperlinkTarget,
-    )>,
+    hovered: Option<&HoveredTerminalLink>,
     current_generation: crate::terminal::PresentationGeneration,
-) -> Option<&crate::terminal::HyperlinkTarget> {
-    hovered
-        .filter(|(generation, _)| *generation == current_generation)
-        .map(|(_, link)| link)
+) -> Option<&HoveredTerminalLink> {
+    hovered.filter(|hovered| hovered.generation == current_generation)
+}
+
+fn active_hovered_link(
+    hovered: Option<&HoveredTerminalLink>,
+    current_generation: crate::terminal::PresentationGeneration,
+    platform_modifier: bool,
+) -> Option<&HoveredTerminalLink> {
+    platform_modifier
+        .then(|| hovered_link_for_generation(hovered, current_generation))
+        .flatten()
 }
 
 #[derive(Default)]
@@ -5689,6 +5703,7 @@ mod tests {
                 &web_link,
                 generation,
                 Some(&web_link),
+                true,
             ),
             Some("https://example.test".to_owned())
         );
@@ -8489,7 +8504,7 @@ mod tests {
     }
 
     #[test]
-    fn hyperlinks_open_only_on_same_generation_explicit_release() {
+    fn hyperlinks_open_only_on_platform_modified_same_generation_release() {
         let link = crate::terminal::HyperlinkTarget::url("https://example.test").unwrap();
         let first = crate::terminal::PresentationGeneration::test(1);
         let second = crate::terminal::PresentationGeneration::test(2);
@@ -8501,6 +8516,7 @@ mod tests {
                 &link,
                 first,
                 Some(&link),
+                true,
             ),
             Some("https://example.test".to_owned())
         );
@@ -8511,6 +8527,7 @@ mod tests {
                 &link,
                 second,
                 Some(&link),
+                true,
             ),
             None
         );
@@ -8521,9 +8538,75 @@ mod tests {
                 &link,
                 first,
                 None,
+                true,
             ),
             None
         );
+        assert_eq!(
+            activated_link(
+                TerminalLocalFileCapabilities::Enabled,
+                first,
+                &link,
+                first,
+                Some(&link),
+                false,
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn active_link_hover_requires_the_platform_modifier() {
+        let link = crate::terminal::HyperlinkTarget::url("https://example.test").unwrap();
+        let generation = crate::terminal::PresentationGeneration::test(1);
+        let hovered = HoveredTerminalLink {
+            generation,
+            cell: CellGridPosition::new(0, 0),
+            target: link,
+        };
+
+        assert_eq!(
+            (
+                active_hovered_link(Some(&hovered), generation, false),
+                active_hovered_link(Some(&hovered), generation, true),
+            ),
+            (None, Some(&hovered))
+        );
+    }
+
+    #[gpui::test]
+    fn stationary_link_hover_updates_when_the_platform_modifier_changes(cx: &mut TestAppContext) {
+        let (pane, cx, _records) = connected_terminal_pane(cx);
+        pane.update(cx, |pane, cx| {
+            pane.screen = context_action_screen(
+                crate::terminal::HyperlinkTarget::url("https://example.test"),
+                false,
+            );
+            cx.notify();
+        });
+        cx.run_until_parked();
+        let pointer = pane.read_with(cx, |pane, _| {
+            let bounds = pane.grid_bounds.expect("terminal grid was painted");
+            point(
+                bounds.left() + pane.cell_width / 2.0,
+                bounds.top() + px(pane.line_height / 2.0),
+            )
+        });
+
+        cx.simulate_mouse_move(pointer, None, Modifiers::none());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("terminal-link-preview").is_none());
+
+        cx.simulate_modifiers_change(Modifiers {
+            platform: true,
+            ..Modifiers::none()
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("terminal-link-preview").is_some());
+
+        cx.simulate_modifiers_change(Modifiers::none());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("terminal-link-preview").is_none());
     }
 
     #[test]
@@ -8531,7 +8614,11 @@ mod tests {
         let link = crate::terminal::HyperlinkTarget::url("https://example.test").unwrap();
         let first = crate::terminal::PresentationGeneration::test(1);
         let second = crate::terminal::PresentationGeneration::test(2);
-        let hovered = (first, link);
+        let hovered = HoveredTerminalLink {
+            generation: first,
+            cell: CellGridPosition::new(0, 0),
+            target: link,
+        };
 
         assert!(hovered_link_for_generation(Some(&hovered), first).is_some());
         assert_eq!(hovered_link_for_generation(Some(&hovered), second), None);
@@ -8539,7 +8626,7 @@ mod tests {
             NativeContextActions::from_presence(
                 TerminalLocalFileCapabilities::Enabled,
                 false,
-                hovered_link_for_generation(Some(&hovered), second),
+                hovered_link_for_generation(Some(&hovered), second).map(|hovered| &hovered.target),
             ),
             NativeContextActions::default()
         );
