@@ -121,17 +121,17 @@ accept an unverified replacement key.
 ## Connections, Panes, and reconnect
 
 Each pending Remote flow or open Remote Project Workspace owns one isolated OpenSSH control
-connection. Its Windows and Panes reuse that connection, but different Workspaces never share one,
+connection. Its Tabs and Panes reuse that connection, but different Workspaces never share one,
 even when they use the same destination. Each Pane still owns its own Terminal Session and SSH
 channel.
 
-New Windows and Panes start in the Workspace's pinned remote directory. SpaceTerm revalidates the
+New Tabs and Panes start in the Workspace's pinned remote directory. SpaceTerm revalidates the
 connection and physical directory identity before creating each child. An unavailable or changed
 directory blocks that child, shows an actionable alert, and leaves existing Terminal Sessions and
 their focus unchanged. A Remote Project never follows a Pane's reported working directory.
 
 A normal remote shell `exit` closes that Pane through the ordinary hierarchy rules. A shared SSH
-transport loss is different. SpaceTerm preserves the Workspace, Window and Pane layout, focused
+transport loss is different. SpaceTerm preserves the Workspace, Tab and Pane layout, focused
 identities, zoom state, and final terminal presentations, disables input and new child creation,
 and marks the Workspace **Disconnected**. The sidebar row shows the connection state; when the
 sidebar is hidden, the Workspace chip shows the same state and its tooltip remains descriptive.
@@ -143,7 +143,7 @@ sheet, and Cancel safely returns to the disconnected Workspace.
 
 A successful reconnect creates a fresh isolated connection, asks for authentication again only
 when OpenSSH requires it, rediscovers the account, validates the exact pinned physical directory,
-and starts a fresh shell in every preserved Pane. It preserves Workspace, Window and Pane identity,
+and starts a fresh shell in every preserved Pane. It preserves Workspace, Tab and Pane identity,
 layout, focus, and zoom state. It does not restore remote processes, emulator state, or Scrollback.
 Connection failure leaves the Workspace available for another Reconnect. If the directory is
 unavailable or resolves to a different physical directory, SpaceTerm keeps the Workspace

@@ -16,6 +16,7 @@ mod scrollbar_theme;
 pub(crate) mod ssh_askpass_dialog;
 mod ssh_host_form;
 mod ssh_host_picker;
+mod tab_manager;
 mod terminal_context_menu;
 mod terminal_element;
 mod terminal_focus;
@@ -25,7 +26,6 @@ mod terminal_pane;
 mod terminal_symbols;
 mod text_input_theme;
 mod tooltip_theme;
-mod window_manager;
 mod workspace_manager;
 mod workspace_picker;
 mod workspace_search;
@@ -40,6 +40,7 @@ pub(crate) use pane_host::{
 pub(crate) use remote_child_launch::RemoteChildLaunchUnavailable;
 #[cfg(test)]
 pub(crate) use render_lifecycle::{RenderLifecycle, ScaleChange, SurfaceVisibility};
+pub(crate) use tab_manager::{TabManager, TabManagerEvent};
 #[cfg(test)]
 pub(crate) use terminal_focus::{
     TerminalFocusBlocker, TerminalFocusCoordinator, TerminalFocusFacts,
@@ -49,7 +50,6 @@ pub(crate) use terminal_ime::conformance_ime_observation;
 pub(crate) use terminal_pane::{
     PreparedRemotePaneRestart, RemotePaneLifecycleError, TerminalPane, TerminalPaneEvent,
 };
-pub(crate) use window_manager::{WindowManager, WindowManagerEvent};
 pub(crate) use workspace_manager::WorkspaceManager;
 
 actions!(
@@ -72,16 +72,16 @@ actions!(
         FocusPaneUp,
         FocusPaneDown,
         TogglePaneZoom,
-        CreateWindow,
-        ActivateWindow1,
-        ActivateWindow2,
-        ActivateWindow3,
-        ActivateWindow4,
-        ActivateWindow5,
-        ActivateWindow6,
-        ActivateWindow7,
-        ActivateWindow8,
-        ActivateWindow9,
+        CreateTab,
+        ActivateTab1,
+        ActivateTab2,
+        ActivateTab3,
+        ActivateTab4,
+        ActivateTab5,
+        ActivateTab6,
+        ActivateTab7,
+        ActivateTab8,
+        ActivateTab9,
         ActivateWorkspace1,
         ActivateWorkspace2,
         ActivateWorkspace3,
@@ -92,7 +92,7 @@ actions!(
         ActivateWorkspace8,
         ActivateWorkspace9,
         ClosePane,
-        CloseWindow,
+        CloseTab,
         CloseWorkspace,
         CreateScratchWorkspace,
         SearchWorkspaces,
@@ -140,9 +140,9 @@ fn init_with_text_direction(
         KeyBinding::new("cmd-p", SearchWorkspaces, None),
         KeyBinding::new("cmd-o", ShowNewWorkspacePanel, None),
         KeyBinding::new("shift-cmd-o", OpenLocalProject, None),
-        KeyBinding::new("cmd-t", CreateWindow, None),
+        KeyBinding::new("cmd-t", CreateTab, None),
         KeyBinding::new("cmd-w", ClosePane, None),
-        KeyBinding::new("cmd-shift-w", CloseWindow, None),
+        KeyBinding::new("cmd-shift-w", CloseTab, None),
         KeyBinding::new("cmd-c", EditCopy, Some(TERMINAL_KEY_CONTEXT)),
         KeyBinding::new("cmd-v", EditPaste, Some(TERMINAL_KEY_CONTEXT)),
         KeyBinding::new("cmd-f", OpenTerminalFind, Some(TERMINAL_KEY_CONTEXT)),
@@ -215,15 +215,15 @@ fn init_with_text_direction(
             TogglePaneZoom,
             Some(TERMINAL_KEY_CONTEXT),
         ),
-        KeyBinding::new("cmd-1", ActivateWindow1, Some(TERMINAL_KEY_CONTEXT)),
-        KeyBinding::new("cmd-2", ActivateWindow2, Some(TERMINAL_KEY_CONTEXT)),
-        KeyBinding::new("cmd-3", ActivateWindow3, Some(TERMINAL_KEY_CONTEXT)),
-        KeyBinding::new("cmd-4", ActivateWindow4, Some(TERMINAL_KEY_CONTEXT)),
-        KeyBinding::new("cmd-5", ActivateWindow5, Some(TERMINAL_KEY_CONTEXT)),
-        KeyBinding::new("cmd-6", ActivateWindow6, Some(TERMINAL_KEY_CONTEXT)),
-        KeyBinding::new("cmd-7", ActivateWindow7, Some(TERMINAL_KEY_CONTEXT)),
-        KeyBinding::new("cmd-8", ActivateWindow8, Some(TERMINAL_KEY_CONTEXT)),
-        KeyBinding::new("cmd-9", ActivateWindow9, Some(TERMINAL_KEY_CONTEXT)),
+        KeyBinding::new("cmd-1", ActivateTab1, Some(TERMINAL_KEY_CONTEXT)),
+        KeyBinding::new("cmd-2", ActivateTab2, Some(TERMINAL_KEY_CONTEXT)),
+        KeyBinding::new("cmd-3", ActivateTab3, Some(TERMINAL_KEY_CONTEXT)),
+        KeyBinding::new("cmd-4", ActivateTab4, Some(TERMINAL_KEY_CONTEXT)),
+        KeyBinding::new("cmd-5", ActivateTab5, Some(TERMINAL_KEY_CONTEXT)),
+        KeyBinding::new("cmd-6", ActivateTab6, Some(TERMINAL_KEY_CONTEXT)),
+        KeyBinding::new("cmd-7", ActivateTab7, Some(TERMINAL_KEY_CONTEXT)),
+        KeyBinding::new("cmd-8", ActivateTab8, Some(TERMINAL_KEY_CONTEXT)),
+        KeyBinding::new("cmd-9", ActivateTab9, Some(TERMINAL_KEY_CONTEXT)),
         KeyBinding::new("ctrl-1", ActivateWorkspace1, Some(TERMINAL_KEY_CONTEXT)),
         KeyBinding::new("ctrl-2", ActivateWorkspace2, Some(TERMINAL_KEY_CONTEXT)),
         KeyBinding::new("ctrl-3", ActivateWorkspace3, Some(TERMINAL_KEY_CONTEXT)),
@@ -352,9 +352,9 @@ mod tests {
             ("cmd-p", SearchWorkspaces.name()),
             ("cmd-o", ShowNewWorkspacePanel.name()),
             ("shift-cmd-o", OpenLocalProject.name()),
-            ("cmd-t", CreateWindow.name()),
+            ("cmd-t", CreateTab.name()),
             ("cmd-w", ClosePane.name()),
-            ("cmd-shift-w", CloseWindow.name()),
+            ("cmd-shift-w", CloseTab.name()),
         ];
         let actual = cx.update(|cx| {
             expected

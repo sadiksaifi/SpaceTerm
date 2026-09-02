@@ -27,7 +27,7 @@ use super::{
     TERMINAL_FIND_KEY_CONTEXT, TERMINAL_KEY_CONTEXT, TERMINAL_OSC52_AUTHORIZATION_KEY_CONTEXT,
     TERMINAL_PASTE_CONFIRMATION_KEY_CONTEXT,
 };
-use crate::domain::{PaneId, WindowId, WorkspaceId};
+use crate::domain::{PaneId, TabId, WorkspaceId};
 use crate::platform::acceptance_observation::{
     FailureActionCase, FailureActionController, FailureActionEvent, FailureActionPhase,
     FailureActionRequest, FailureActionResult, FailurePaneState, FailurePendingRecovery,
@@ -134,7 +134,7 @@ impl NativeActivity {
 
 fn terminal_surface_active(product_focus: TerminalProductFocus, activity: NativeActivity) -> bool {
     product_focus.active_workspace
-        && product_focus.active_window
+        && product_focus.active_tab
         && activity.operating_system_window_key
 }
 
@@ -620,11 +620,11 @@ impl TerminalPane {
             self.end_find_state();
         }
         let native_service_blocked = !product_focus.active_workspace
-            || !product_focus.active_window
+            || !product_focus.active_tab
             || !product_focus.focused_pane
             || product_focus.blocker.is_some();
         let pane_inactive = !product_focus.active_workspace
-            || !product_focus.active_window
+            || !product_focus.active_tab
             || !product_focus.focused_pane;
         if pane_inactive {
             self.quick_look.dismiss();
@@ -646,7 +646,7 @@ impl TerminalPane {
             session.resolve_osc52_authorization(request.id, Osc52AuthorizationDecision::Deny);
         }
         self.product_focus = product_focus;
-        let pane_visible = product_focus.active_window && product_focus.pane_visible;
+        let pane_visible = product_focus.active_tab && product_focus.pane_visible;
         let _ = self
             .render_lifecycle
             .update_product_visibility(product_focus.active_workspace, pane_visible);
@@ -798,7 +798,7 @@ impl TerminalPane {
         }
         TerminalFocusCoordinator::is_focused(TerminalFocusFacts {
             active_workspace: self.product_focus.active_workspace,
-            active_window: self.product_focus.active_window,
+            active_tab: self.product_focus.active_tab,
             focused_pane: self.product_focus.focused_pane,
             responder: self.focus_handle.is_focused(window),
             operating_system_window_key: activity.operating_system_window_key,
@@ -2015,12 +2015,12 @@ impl TerminalPane {
     ) {
         let surface = SurfaceVisibility {
             application_active: self.application_active,
-            key_window: self.product_focus.active_window,
+            key_window: self.product_focus.active_tab,
             minimized: native.minimized,
             occluded: native.occluded,
             live_resize: native.live_resize,
             workspace_visible: self.product_focus.active_workspace,
-            pane_visible: self.product_focus.active_window && self.product_focus.pane_visible,
+            pane_visible: self.product_focus.active_tab && self.product_focus.pane_visible,
         };
         let effects = self.render_lifecycle.update_visibility(surface);
         if let Some(observation) = &self.runtime_observation {
@@ -2929,7 +2929,7 @@ impl TerminalPane {
     fn context_menu_available(&self) -> bool {
         matches!(self.pane_state, PaneTerminalState::Running)
             && self.product_focus.active_workspace
-            && self.product_focus.active_window
+            && self.product_focus.active_tab
             && self.product_focus.focused_pane
             && self.product_focus.blocker.is_none()
             && !self.native_modal_open
@@ -3003,7 +3003,7 @@ impl TerminalPane {
     pub(crate) fn native_service_status(
         &mut self,
         workspace_id: WorkspaceId,
-        window_id: WindowId,
+        tab_id: TabId,
         pane_id: PaneId,
         hierarchy_generation: u64,
         window: &Window,
@@ -3018,7 +3018,7 @@ impl TerminalPane {
         let origin = session_available.then(|| {
             NativeServiceOrigin::new(
                 workspace_id,
-                window_id,
+                tab_id,
                 pane_id,
                 self.native_service_session_identity,
                 self.native_service_focus_epoch.get(),
@@ -3647,7 +3647,7 @@ impl Render for TerminalPane {
             occluded: native_visibility.occluded,
             live_resize: native_visibility.live_resize,
             workspace_visible: self.product_focus.active_workspace,
-            pane_visible: self.product_focus.active_window && self.product_focus.pane_visible,
+            pane_visible: self.product_focus.active_tab && self.product_focus.pane_visible,
         };
         let lifecycle_effects = self.render_lifecycle.update_visibility(surface_visibility);
         if let Some(observation) = &self.runtime_observation {
@@ -5978,7 +5978,7 @@ mod tests {
         pane.update(cx, |pane, _| {
             pane.set_product_focus(TerminalProductFocus {
                 active_workspace: false,
-                active_window: false,
+                active_tab: false,
                 pane_visible: false,
                 focused_pane: false,
                 blocker: None,
@@ -6224,7 +6224,7 @@ mod tests {
             pane.update(cx, |pane, cx| {
                 pane.native_service_status(
                     WorkspaceId::new(1),
-                    WindowId::new(1),
+                    TabId::new(1),
                     PaneId::new(1),
                     pane.native_service_hierarchy_generation,
                     window,
@@ -6440,7 +6440,7 @@ mod tests {
         pane.update(cx, |pane, _| {
             pane.set_product_focus(TerminalProductFocus {
                 active_workspace: true,
-                active_window: true,
+                active_tab: true,
                 focused_pane: true,
                 ..TerminalProductFocus::default()
             });
@@ -6450,7 +6450,7 @@ mod tests {
         pane.update(cx, |pane, _| {
             pane.set_product_focus(TerminalProductFocus {
                 active_workspace: true,
-                active_window: true,
+                active_tab: true,
                 focused_pane: false,
                 ..TerminalProductFocus::default()
             });
@@ -6761,7 +6761,7 @@ mod tests {
             pane.update(cx, |pane, cx| {
                 pane.set_product_focus(TerminalProductFocus {
                     active_workspace: true,
-                    active_window: true,
+                    active_tab: true,
                     ..TerminalProductFocus::default()
                 });
                 pane.handle_event(SessionEvent::Screen(blinking_screen()), cx);
@@ -6781,7 +6781,7 @@ mod tests {
             pane.update(cx, |pane, cx| {
                 pane.set_product_focus(TerminalProductFocus {
                     active_workspace: true,
-                    active_window: false,
+                    active_tab: false,
                     ..TerminalProductFocus::default()
                 });
                 cx.notify();
@@ -6804,7 +6804,7 @@ mod tests {
             pane.update(cx, |pane, cx| {
                 pane.set_product_focus(TerminalProductFocus {
                     active_workspace: true,
-                    active_window: true,
+                    active_tab: true,
                     focused_pane: true,
                     ..TerminalProductFocus::default()
                 });
@@ -6829,7 +6829,7 @@ mod tests {
             pane.update(cx, |pane, cx| {
                 pane.set_product_focus(TerminalProductFocus {
                     active_workspace: true,
-                    active_window: true,
+                    active_tab: true,
                     focused_pane: true,
                     ..TerminalProductFocus::default()
                 });
@@ -6868,7 +6868,7 @@ mod tests {
             pane.update(cx, |pane, cx| {
                 pane.set_product_focus(TerminalProductFocus {
                     active_workspace: true,
-                    active_window: true,
+                    active_tab: true,
                     focused_pane: false,
                     ..TerminalProductFocus::default()
                 });
@@ -6883,7 +6883,7 @@ mod tests {
             pane.update(cx, |pane, cx| {
                 pane.set_product_focus(TerminalProductFocus {
                     active_workspace: true,
-                    active_window: true,
+                    active_tab: true,
                     focused_pane: true,
                     ..TerminalProductFocus::default()
                 });
@@ -6906,7 +6906,7 @@ mod tests {
         let (pane, cx) = terminal_pane(cx);
         let focused = TerminalProductFocus {
             active_workspace: true,
-            active_window: true,
+            active_tab: true,
             focused_pane: true,
             ..TerminalProductFocus::default()
         };

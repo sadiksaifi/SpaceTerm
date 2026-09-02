@@ -15,14 +15,13 @@ use spaceterm_ui::{
 };
 
 use super::{
-    ActivateWindow1, ActivateWindow2, ActivateWindow3, ActivateWindow4, ActivateWindow5,
-    ActivateWindow6, ActivateWindow7, ActivateWindow8, ActivateWindow9, ActivateWorkspace1,
-    ActivateWorkspace2, ActivateWorkspace3, ActivateWorkspace4, ActivateWorkspace5,
-    ActivateWorkspace6, ActivateWorkspace7, ActivateWorkspace8, ActivateWorkspace9, ClosePane,
-    CloseTerminalFind, CloseWindow, CloseWorkspace, CopySelection, CreateScratchWorkspace,
-    CreateWindow, FindNext, FindPrevious, FocusPaneDown, FocusPaneLeft, FocusPaneRight,
-    FocusPaneUp, OpenTerminalFind, SearchWorkspaces, SplitDown, SplitRight, TogglePaneZoom,
-    ToggleSidebar, ToggleSidebarFocus,
+    ActivateTab1, ActivateTab2, ActivateTab3, ActivateTab4, ActivateTab5, ActivateTab6,
+    ActivateTab7, ActivateTab8, ActivateTab9, ActivateWorkspace1, ActivateWorkspace2,
+    ActivateWorkspace3, ActivateWorkspace4, ActivateWorkspace5, ActivateWorkspace6,
+    ActivateWorkspace7, ActivateWorkspace8, ActivateWorkspace9, ClosePane, CloseTab,
+    CloseTerminalFind, CloseWorkspace, CopySelection, CreateScratchWorkspace, CreateTab, FindNext,
+    FindPrevious, FocusPaneDown, FocusPaneLeft, FocusPaneRight, FocusPaneUp, OpenTerminalFind,
+    SearchWorkspaces, SplitDown, SplitRight, TogglePaneZoom, ToggleSidebar, ToggleSidebarFocus,
 };
 use crate::domain::ValidatedWorkspaceDirectory;
 use crate::platform::macos_system_settings::SystemSettingsOpener;
@@ -900,7 +899,7 @@ impl WorkspacePicker {
     }
 }
 
-/// Keeps a hierarchy shortcut from mutating Workspaces, Windows, or Panes behind the open picker.
+/// Keeps a hierarchy shortcut from mutating Workspaces, Tabs, or Panes behind the open picker.
 ///
 /// The Command Palette owns focus, pointer, and dismissal isolation, but the application's
 /// hierarchy actions are registered above it and would otherwise still fire.
@@ -928,18 +927,18 @@ impl Render for WorkspacePicker {
                     .capture_action(block_parent_action::<ToggleSidebar>)
                     .capture_action(block_parent_action::<ToggleSidebarFocus>)
                     .capture_action(block_parent_action::<CopySelection>)
-                    .capture_action(block_parent_action::<CreateWindow>)
-                    .capture_action(block_parent_action::<ActivateWindow1>)
-                    .capture_action(block_parent_action::<ActivateWindow2>)
-                    .capture_action(block_parent_action::<ActivateWindow3>)
-                    .capture_action(block_parent_action::<ActivateWindow4>)
-                    .capture_action(block_parent_action::<ActivateWindow5>)
-                    .capture_action(block_parent_action::<ActivateWindow6>)
-                    .capture_action(block_parent_action::<ActivateWindow7>)
-                    .capture_action(block_parent_action::<ActivateWindow8>)
-                    .capture_action(block_parent_action::<ActivateWindow9>)
+                    .capture_action(block_parent_action::<CreateTab>)
+                    .capture_action(block_parent_action::<ActivateTab1>)
+                    .capture_action(block_parent_action::<ActivateTab2>)
+                    .capture_action(block_parent_action::<ActivateTab3>)
+                    .capture_action(block_parent_action::<ActivateTab4>)
+                    .capture_action(block_parent_action::<ActivateTab5>)
+                    .capture_action(block_parent_action::<ActivateTab6>)
+                    .capture_action(block_parent_action::<ActivateTab7>)
+                    .capture_action(block_parent_action::<ActivateTab8>)
+                    .capture_action(block_parent_action::<ActivateTab9>)
                     .capture_action(block_parent_action::<ClosePane>)
-                    .capture_action(block_parent_action::<CloseWindow>)
+                    .capture_action(block_parent_action::<CloseTab>)
                     .capture_action(block_parent_action::<SplitRight>)
                     .capture_action(block_parent_action::<SplitDown>)
                     .capture_action(block_parent_action::<FocusPaneLeft>)

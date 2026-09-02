@@ -391,9 +391,9 @@ focus-sidebar
 focus-workspace-rename
 focus-workspace-context-menu
 focus-pane-menu
-focus-window-menu
+focus-tab-menu
 focus-top-chrome
-focus-window-selector
+focus-tab-selector
 focus-terminal-find
 focus-native-panels
 focus-non-key-os-window

@@ -47,7 +47,7 @@ pub(super) struct WorkspaceSearchItem {
     name: String,
     path: String,
     kind: WorkspaceSearchKind,
-    window_count: usize,
+    tab_count: usize,
     pane_count: usize,
 }
 
@@ -57,7 +57,7 @@ impl WorkspaceSearchItem {
         name: String,
         path: String,
         kind: &WorkspaceKind,
-        window_count: usize,
+        tab_count: usize,
         pane_count: usize,
     ) -> Self {
         Self {
@@ -65,7 +65,7 @@ impl WorkspaceSearchItem {
             name,
             path,
             kind: kind.into(),
-            window_count,
+            tab_count,
             pane_count,
         }
     }
@@ -78,7 +78,7 @@ impl WorkspaceSearchItem {
                 Icon::new(icon_name, px(WORKSPACE_ICON_SIZE), foreground).into_any_element()
             })
             .trailing(CommandPaletteAccessory::Text(
-                format!("{}W · {}P", self.window_count, self.pane_count).into(),
+                format!("{} tabs · {} panes", self.tab_count, self.pane_count).into(),
             ))
             .debug_selector(format!(
                 "workspace-search-result-{}",

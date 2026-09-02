@@ -8,42 +8,41 @@ use super::pane_action_menu::{
 };
 use super::terminal_focus::TerminalFocusBlocker;
 use super::{
-    ActivateWindow1, ActivateWindow2, ActivateWindow3, ActivateWindow4, ActivateWindow5,
-    ActivateWindow6, ActivateWindow7, ActivateWindow8, ActivateWindow9, CloseWindow, CreateWindow,
-    PaneHost, PaneHostEvent, PreparedPaneHostRemoteRestart, RemoteChildLaunchUnavailable,
-    RemotePaneHostLifecycleError, TERMINAL_KEY_CONTEXT, TOP_CHROME_HEIGHT,
-    WORKSPACE_SIDEBAR_DEFAULT_WIDTH,
+    ActivateTab1, ActivateTab2, ActivateTab3, ActivateTab4, ActivateTab5, ActivateTab6,
+    ActivateTab7, ActivateTab8, ActivateTab9, CloseTab, CreateTab, PaneHost, PaneHostEvent,
+    PreparedPaneHostRemoteRestart, RemoteChildLaunchUnavailable, RemotePaneHostLifecycleError,
+    TERMINAL_KEY_CONTEXT, TOP_CHROME_HEIGHT, WORKSPACE_SIDEBAR_DEFAULT_WIDTH,
 };
 
 #[derive(Debug, Error)]
-/// A typed rejection while coordinating Remote lifecycle across the Workspace's Window hierarchy.
-pub(crate) enum RemoteWindowManagerLifecycleError {
+/// A typed rejection while coordinating Remote lifecycle across the Workspace's Tab hierarchy.
+pub(crate) enum RemoteTabManagerLifecycleError {
     #[error(transparent)]
     Revalidation(#[from] RemoteChannelRevalidationError),
     #[error(transparent)]
     ChannelUnavailable(#[from] RemoteChannelUnavailable),
     #[error("remote restart preparation was superseded")]
     PreparationSuperseded,
-    #[error("Window {window_id} cannot change remote session lifecycle: {source}")]
-    Window {
-        window_id: WindowId,
+    #[error("Tab {tab_id} cannot change remote session lifecycle: {source}")]
+    Tab {
+        tab_id: TabId,
         #[source]
         source: RemotePaneHostLifecycleError,
     },
-    #[error("Window {0} changed after remote restart preparation")]
-    WindowChanged(WindowId),
+    #[error("Tab {0} changed after remote restart preparation")]
+    TabChanged(TabId),
 }
 
-/// Move-only restart reservations for every Pane across one unchanged Window hierarchy.
+/// Move-only restart reservations for every Pane across one unchanged Tab hierarchy.
 ///
-/// No Window or Pane is mutated until the complete token has been prepared and revalidated.
-pub(crate) struct PreparedWindowManagerRemoteRestart {
+/// No Tab or Pane is mutated until the complete token has been prepared and revalidated.
+pub(crate) struct PreparedTabManagerRemoteRestart {
     session_factory: WorkspaceTerminalSessionFactory,
-    windows: Vec<(WindowId, Entity<PaneHost>, PreparedPaneHostRemoteRestart)>,
+    tabs: Vec<(TabId, Entity<PaneHost>, PreparedPaneHostRemoteRestart)>,
 }
 use crate::domain::{
-    CloseWindowOutcome, PaneId, SplitAxis, WindowCollection, WindowError, WindowId,
-    WorkspaceDirectoryIdentity, WorkspaceId, ZoomState,
+    CloseTabOutcome, PaneId, SplitAxis, TabCollection, TabError, TabId, WorkspaceDirectoryIdentity,
+    WorkspaceId, ZoomState,
 };
 #[cfg(test)]
 use crate::platform::macos_window_drag::MacosOperatingSystemWindowDragPlatform;
@@ -78,37 +77,37 @@ const WINDOW_CONTROL_SIZE: f32 = 28.0;
 const WINDOW_CONTROL_INSET: f32 = 4.0;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum WindowMenuInvocation {
+enum TabMenuInvocation {
     Explicit,
     Context,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct WindowMenuState {
-    window_id: WindowId,
-    invocation: WindowMenuInvocation,
+struct TabMenuState {
+    tab_id: TabId,
+    invocation: TabMenuInvocation,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum WindowManagerEvent {
-    FinalWindowCloseRequested {
-        final_window_id: WindowId,
+pub(crate) enum TabManagerEvent {
+    FinalTabCloseRequested {
+        final_tab_id: TabId,
     },
     PresentationChanged,
     ReportedWorkingDirectoryChanged {
-        window_id: WindowId,
+        tab_id: TabId,
         pane_id: PaneId,
         path: PathBuf,
     },
     PaneClosed {
-        window_id: WindowId,
+        tab_id: TabId,
         pane_id: PaneId,
         promoted_pane_id: PaneId,
         promoted_directory: Option<PathBuf>,
     },
-    WindowClosed {
-        window_id: WindowId,
-        promoted_window_id: WindowId,
+    TabClosed {
+        tab_id: TabId,
+        promoted_tab_id: TabId,
         promoted_pane_id: PaneId,
         promoted_directory: Option<PathBuf>,
     },
@@ -120,26 +119,26 @@ pub(crate) enum WindowManagerEvent {
     },
 }
 
-pub(crate) struct WindowManager {
-    windows: WindowCollection<Entity<PaneHost>>,
+pub(crate) struct TabManager {
+    tabs: TabCollection<Entity<PaneHost>>,
     session_factory: WorkspaceTerminalSessionFactory,
     active: bool,
     sidebar_visible: bool,
     sidebar_width: Pixels,
-    window_menu: Option<WindowMenuState>,
+    tab_menu: Option<TabMenuState>,
     parent_focus_blocker: Option<TerminalFocusBlocker>,
-    window_selector_pressed: Option<WindowId>,
+    tab_selector_pressed: Option<TabId>,
     operating_system_window_drag_platform: Rc<dyn OperatingSystemWindowDragPlatform>,
     window_drag_status: WindowDragRegionStatus,
-    window_bar_scroll_handle: ScrollHandle,
+    tab_bar_scroll_handle: ScrollHandle,
     close_workspace_requested: bool,
     remote_disconnected_generation: Option<u64>,
     child_launch_generation: u64,
 }
 
-impl WindowManager {
-    fn report_window_error(operation: &str, error: WindowError) {
-        eprintln!("failed to {operation} Window: {error}");
+impl TabManager {
+    fn report_tab_error(operation: &str, error: TabError) {
+        eprintln!("failed to {operation} Tab: {error}");
     }
 
     #[cfg(test)]
@@ -155,7 +154,7 @@ impl WindowManager {
             cx,
         ) {
             Ok(manager) => manager,
-            Err(error) => panic!("test WindowManager channel preparation failed: {error}"),
+            Err(error) => panic!("test TabManager channel preparation failed: {error}"),
         }
     }
 
@@ -183,27 +182,21 @@ impl WindowManager {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let windows = WindowCollection::new(|window_id| {
-            Self::create_pane_host(
-                window_id,
-                session_factory.clone(),
-                prepared_launch,
-                window,
-                cx,
-            )
+        let tabs = TabCollection::new(|tab_id| {
+            Self::create_pane_host(tab_id, session_factory.clone(), prepared_launch, window, cx)
         });
         Self {
-            windows,
+            tabs,
             session_factory,
             active: true,
             sidebar_visible: true,
             sidebar_width: px(WORKSPACE_SIDEBAR_DEFAULT_WIDTH),
-            window_menu: None,
+            tab_menu: None,
             parent_focus_blocker: None,
-            window_selector_pressed: None,
+            tab_selector_pressed: None,
             operating_system_window_drag_platform,
             window_drag_status: WindowDragRegionStatus::new(),
-            window_bar_scroll_handle: ScrollHandle::new(),
+            tab_bar_scroll_handle: ScrollHandle::new(),
             close_workspace_requested: false,
             remote_disconnected_generation: None,
             child_launch_generation: 0,
@@ -211,60 +204,54 @@ impl WindowManager {
     }
 
     fn create_pane_host(
-        window_id: WindowId,
+        tab_id: TabId,
         session_factory: WorkspaceTerminalSessionFactory,
         prepared_launch: PreparedWorkspaceTerminalLaunch,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Entity<PaneHost> {
         let pane_host = cx.new(|cx| {
-            PaneHost::new_with_prepared_launch(
-                window_id,
-                session_factory,
-                prepared_launch,
-                window,
-                cx,
-            )
+            PaneHost::new_with_prepared_launch(tab_id, session_factory, prepared_launch, window, cx)
         });
-        debug_assert_eq!(pane_host.read(cx).window_id(), window_id);
+        debug_assert_eq!(pane_host.read(cx).tab_id(), tab_id);
         cx.subscribe_in(
             &pane_host,
             window,
             |manager, _, event: &PaneHostEvent, window, cx| match event {
-                PaneHostEvent::CloseWindowRequested { window_id } => {
-                    manager.close_window(*window_id, window, cx);
+                PaneHostEvent::CloseTabRequested { tab_id } => {
+                    manager.close_tab(*tab_id, window, cx);
                 }
                 PaneHostEvent::PresentationChanged { .. } => {
-                    cx.emit(WindowManagerEvent::PresentationChanged);
+                    cx.emit(TabManagerEvent::PresentationChanged);
                     cx.notify();
                 }
                 PaneHostEvent::ReportedWorkingDirectoryChanged {
-                    window_id,
+                    tab_id,
                     pane_id,
                     path,
-                } => cx.emit(WindowManagerEvent::ReportedWorkingDirectoryChanged {
-                    window_id: *window_id,
+                } => cx.emit(TabManagerEvent::ReportedWorkingDirectoryChanged {
+                    tab_id: *tab_id,
                     pane_id: *pane_id,
                     path: path.clone(),
                 }),
                 PaneHostEvent::PaneClosed {
-                    window_id,
+                    tab_id,
                     pane_id,
                     promoted_pane_id,
                     promoted_directory,
-                } => cx.emit(WindowManagerEvent::PaneClosed {
-                    window_id: *window_id,
+                } => cx.emit(TabManagerEvent::PaneClosed {
+                    tab_id: *tab_id,
                     pane_id: *pane_id,
                     promoted_pane_id: *promoted_pane_id,
                     promoted_directory: promoted_directory.clone(),
                 }),
                 PaneHostEvent::DirectoryAvailable { identity } => {
-                    cx.emit(WindowManagerEvent::DirectoryAvailable {
+                    cx.emit(TabManagerEvent::DirectoryAvailable {
                         identity: *identity,
                     });
                 }
                 PaneHostEvent::DirectoryUnavailable { reason } => {
-                    cx.emit(WindowManagerEvent::DirectoryUnavailable {
+                    cx.emit(TabManagerEvent::DirectoryUnavailable {
                         reason: reason.clone(),
                     });
                 }
@@ -283,7 +270,7 @@ impl WindowManager {
 
     pub(crate) fn focus(&self, window: &mut Window, cx: &mut App) {
         if self.active {
-            self.windows.active_window().read(cx).focus(window, cx);
+            self.tabs.active_tab().read(cx).focus(window, cx);
         }
     }
 
@@ -297,7 +284,7 @@ impl WindowManager {
             return NativeServiceStatus::default();
         }
         let blocker = self.terminal_focus_blocker();
-        self.windows.active_window().update(cx, |pane_host, cx| {
+        self.tabs.active_tab().update(cx, |pane_host, cx| {
             pane_host.set_focus_branch(true, blocker, cx);
             pane_host.native_service_status(workspace_id, window, cx)
         })
@@ -309,14 +296,12 @@ impl WindowManager {
         window: &Window,
         cx: &mut App,
     ) -> Option<SelectionCopy> {
-        if !self.active || self.windows.active_window_id() != origin.window_id() {
+        if !self.active || self.tabs.active_tab_id() != origin.tab_id() {
             return None;
         }
-        self.windows
-            .window(origin.window_id())?
-            .update(cx, |pane_host, cx| {
-                pane_host.native_service_selection(origin, window, cx)
-            })
+        self.tabs.tab(origin.tab_id())?.update(cx, |pane_host, cx| {
+            pane_host.native_service_selection(origin, window, cx)
+        })
     }
 
     pub(crate) fn insert_native_service_text(
@@ -326,10 +311,10 @@ impl WindowManager {
         window: &Window,
         cx: &mut App,
     ) -> bool {
-        if !self.active || self.windows.active_window_id() != origin.window_id() {
+        if !self.active || self.tabs.active_tab_id() != origin.tab_id() {
             return false;
         }
-        let Some(pane_host) = self.windows.window(origin.window_id()) else {
+        let Some(pane_host) = self.tabs.tab(origin.tab_id()) else {
             return false;
         };
         pane_host.update(cx, |pane_host, cx| {
@@ -344,52 +329,49 @@ impl WindowManager {
 
     pub(crate) fn activate_without_focus(&mut self, cx: &mut Context<Self>) {
         self.active = true;
-        self.windows
-            .active_window()
+        self.tabs
+            .active_tab()
             .update(cx, |pane_host, cx| pane_host.activate_without_focus(cx));
         self.sync_terminal_focus_blocker(cx);
     }
 
     pub(crate) fn deactivate(&mut self, cx: &mut Context<Self>) {
         self.active = false;
-        self.windows
-            .active_window()
+        self.tabs
+            .active_tab()
             .update(cx, |pane_host, cx| pane_host.deactivate(cx));
-        self.window_menu = None;
-        self.window_selector_pressed = None;
+        self.tab_menu = None;
+        self.tab_selector_pressed = None;
         self.sync_terminal_focus_blocker(cx);
     }
 
     pub(crate) fn close_all(&self, cx: &mut App) {
-        for (_, pane_host) in self.windows.iter() {
+        for (_, pane_host) in self.tabs.iter() {
             pane_host.update(cx, |pane_host, cx| pane_host.close_all(cx));
         }
     }
 
-    /// Atomically disconnects every Window and Pane for the authoritative connection generation.
+    /// Atomically disconnects every Tab and Pane for the authoritative connection generation.
     ///
-    /// The complete hierarchy is prevalidated before mutation. Window IDs, Pane layouts, active and
+    /// The complete hierarchy is prevalidated before mutation. Tab IDs, Pane layouts, active and
     /// focused identities, zoom, and final presentations remain intact while input and new Remote
     /// child launches are blocked.
     pub(crate) fn disconnect_remote(
         &mut self,
         generation: u64,
         cx: &mut Context<Self>,
-    ) -> Result<(), RemoteWindowManagerLifecycleError> {
-        for (window_id, pane_host) in self.windows.iter() {
+    ) -> Result<(), RemoteTabManagerLifecycleError> {
+        for (tab_id, pane_host) in self.tabs.iter() {
             pane_host
                 .read(cx)
                 .can_disconnect_remote(generation, cx)
-                .map_err(|source| RemoteWindowManagerLifecycleError::Window {
-                    window_id,
-                    source,
-                })?;
+                .map_err(|source| RemoteTabManagerLifecycleError::Tab { tab_id, source })?;
         }
-        for (_, pane_host) in self.windows.iter() {
+        for (_, pane_host) in self.tabs.iter() {
             pane_host.update(cx, |pane_host, cx| {
                 pane_host
                     .disconnect_remote(generation, cx)
-                    .expect("prevalidated Window disconnect must remain legal")
+                    .expect("prevalidated Tab disconnect must remain legal")
             });
         }
         self.remote_disconnected_generation = Some(generation);
@@ -409,11 +391,11 @@ impl WindowManager {
         session_factory: WorkspaceTerminalSessionFactory,
         generation: u64,
         cx: &mut Context<Self>,
-    ) -> Task<Result<PreparedWindowManagerRemoteRestart, RemoteWindowManagerLifecycleError>> {
+    ) -> Task<Result<PreparedTabManagerRemoteRestart, RemoteTabManagerLifecycleError>> {
         self.child_launch_generation = self.child_launch_generation.wrapping_add(1);
         let child_launch_generation = self.child_launch_generation;
         let pane_count = self
-            .windows
+            .tabs
             .iter()
             .map(|(_, pane_host)| pane_host.read(cx).pane_count())
             .sum();
@@ -421,7 +403,7 @@ impl WindowManager {
             let mut prepared_launches = Vec::with_capacity(pane_count);
             for _ in 0..pane_count {
                 let Some(revalidation) = session_factory.revalidate_remote_child_launch() else {
-                    return Err(RemoteWindowManagerLifecycleError::PreparationSuperseded);
+                    return Err(RemoteTabManagerLifecycleError::PreparationSuperseded);
                 };
                 revalidation.await?;
                 prepared_launches.push(session_factory.prepare_child_launch()?);
@@ -429,7 +411,7 @@ impl WindowManager {
             manager
                 .update(cx, |manager, cx| {
                     if manager.child_launch_generation != child_launch_generation {
-                        return Err(RemoteWindowManagerLifecycleError::PreparationSuperseded);
+                        return Err(RemoteTabManagerLifecycleError::PreparationSuperseded);
                     }
                     manager.prepare_remote_restart_with_launches(
                         session_factory,
@@ -438,7 +420,7 @@ impl WindowManager {
                         cx,
                     )
                 })
-                .map_err(|_| RemoteWindowManagerLifecycleError::PreparationSuperseded)?
+                .map_err(|_| RemoteTabManagerLifecycleError::PreparationSuperseded)?
         })
     }
 
@@ -448,70 +430,67 @@ impl WindowManager {
         generation: u64,
         prepared_launches: Vec<PreparedWorkspaceTerminalLaunch>,
         cx: &App,
-    ) -> Result<PreparedWindowManagerRemoteRestart, RemoteWindowManagerLifecycleError> {
+    ) -> Result<PreparedTabManagerRemoteRestart, RemoteTabManagerLifecycleError> {
         let mut prepared_launches = prepared_launches.into_iter();
-        let mut windows = Vec::with_capacity(self.windows.len());
-        for (window_id, pane_host) in self.windows.iter() {
+        let mut tabs = Vec::with_capacity(self.tabs.len());
+        for (tab_id, pane_host) in self.tabs.iter() {
             let pane_count = pane_host.read(cx).pane_count();
             let launches: Vec<_> = prepared_launches.by_ref().take(pane_count).collect();
             if launches.len() != pane_count {
-                return Err(RemoteWindowManagerLifecycleError::WindowChanged(window_id));
+                return Err(RemoteTabManagerLifecycleError::TabChanged(tab_id));
             }
             let prepared = pane_host
                 .read(cx)
                 .prepare_remote_restart(session_factory.clone(), generation, launches, cx)
-                .map_err(|source| RemoteWindowManagerLifecycleError::Window {
-                    window_id,
-                    source,
-                })?;
-            windows.push((window_id, pane_host.clone(), prepared));
+                .map_err(|source| RemoteTabManagerLifecycleError::Tab { tab_id, source })?;
+            tabs.push((tab_id, pane_host.clone(), prepared));
         }
         if prepared_launches.next().is_some() {
-            return Err(RemoteWindowManagerLifecycleError::PreparationSuperseded);
+            return Err(RemoteTabManagerLifecycleError::PreparationSuperseded);
         }
-        Ok(PreparedWindowManagerRemoteRestart {
+        Ok(PreparedTabManagerRemoteRestart {
             session_factory,
-            windows,
+            tabs,
         })
     }
 
-    /// Commits a fully prepared Remote restart across the existing Window hierarchy.
+    /// Commits a fully prepared Remote restart across the existing Tab hierarchy.
     ///
-    /// The method revalidates all Window and Pane identities before the first commit, then replaces
+    /// The method revalidates all Tab and Pane identities before the first commit, then replaces
     /// Terminal Sessions in place. Post-commit session startup failures remain local to each Pane.
     pub(crate) fn commit_remote_restart(
         &mut self,
-        prepared: PreparedWindowManagerRemoteRestart,
+        prepared: PreparedTabManagerRemoteRestart,
         window: &Window,
         cx: &mut Context<Self>,
-    ) -> Result<(), RemoteWindowManagerLifecycleError> {
-        if self.windows.len() != prepared.windows.len() {
-            return Err(RemoteWindowManagerLifecycleError::WindowChanged(
-                self.windows.active_window_id(),
+    ) -> Result<(), RemoteTabManagerLifecycleError> {
+        if self.tabs.len() != prepared.tabs.len() {
+            return Err(RemoteTabManagerLifecycleError::TabChanged(
+                self.tabs.active_tab_id(),
             ));
         }
-        for (window_id, pane_host, host_restart) in &prepared.windows {
-            let Some(current) = self.windows.window(*window_id) else {
-                return Err(RemoteWindowManagerLifecycleError::WindowChanged(*window_id));
+        for (tab_id, pane_host, host_restart) in &prepared.tabs {
+            let Some(current) = self.tabs.tab(*tab_id) else {
+                return Err(RemoteTabManagerLifecycleError::TabChanged(*tab_id));
             };
             if current.entity_id() != pane_host.entity_id() {
-                return Err(RemoteWindowManagerLifecycleError::WindowChanged(*window_id));
+                return Err(RemoteTabManagerLifecycleError::TabChanged(*tab_id));
             }
             pane_host
                 .read(cx)
                 .can_commit_remote_restart(host_restart, cx)
-                .map_err(|source| RemoteWindowManagerLifecycleError::Window {
-                    window_id: *window_id,
+                .map_err(|source| RemoteTabManagerLifecycleError::Tab {
+                    tab_id: *tab_id,
                     source,
                 })?;
         }
         let session_factory = prepared.session_factory;
-        for (window_id, pane_host, host_restart) in prepared.windows {
+        for (tab_id, pane_host, host_restart) in prepared.tabs {
             pane_host.update(cx, |pane_host, cx| {
                 pane_host
                     .commit_remote_restart(host_restart, session_factory.clone(), window, cx)
                     .unwrap_or_else(|error| {
-                        panic!("prevalidated Window {window_id} restart commit failed: {error}")
+                        panic!("prevalidated Tab {tab_id} restart commit failed: {error}")
                     })
             });
         }
@@ -519,18 +498,18 @@ impl WindowManager {
         self.remote_disconnected_generation = None;
         self.child_launch_generation = self.child_launch_generation.wrapping_add(1);
         self.sync_terminal_focus_blocker(cx);
-        cx.emit(WindowManagerEvent::PresentationChanged);
+        cx.emit(TabManagerEvent::PresentationChanged);
         cx.notify();
         Ok(())
     }
 
     pub(crate) fn aggregate_counts(&self, cx: &App) -> (usize, usize) {
         let panes = self
-            .windows
+            .tabs
             .iter()
             .map(|(_, pane_host)| pane_host.read(cx).pane_count())
             .sum();
-        (self.windows.len(), panes)
+        (self.tabs.len(), panes)
     }
 
     pub(crate) fn set_workspace_directory(
@@ -541,7 +520,7 @@ impl WindowManager {
     ) {
         self.session_factory
             .set_working_directory(path.to_path_buf(), identity);
-        for (_, pane_host) in self.windows.iter() {
+        for (_, pane_host) in self.tabs.iter() {
             pane_host.update(cx, |pane_host, _| {
                 pane_host.set_workspace_directory(path, identity)
             });
@@ -581,19 +560,19 @@ impl WindowManager {
                 .is_active()
                 .then_some(TerminalFocusBlocker::TopChrome))
             .or(self
-                .window_selector_pressed
-                .map(|_| TerminalFocusBlocker::WindowSelector))
-            .or(self.window_menu.map(|menu| match menu.invocation {
-                WindowMenuInvocation::Explicit => TerminalFocusBlocker::WindowMenu,
-                WindowMenuInvocation::Context => TerminalFocusBlocker::ContextMenu,
+                .tab_selector_pressed
+                .map(|_| TerminalFocusBlocker::TabSelector))
+            .or(self.tab_menu.map(|menu| match menu.invocation {
+                TabMenuInvocation::Explicit => TerminalFocusBlocker::TabMenu,
+                TabMenuInvocation::Context => TerminalFocusBlocker::ContextMenu,
             }))
     }
 
     fn sync_terminal_focus_blocker(&self, cx: &mut Context<Self>) {
         let blocker = self.terminal_focus_blocker();
-        let active_window_id = self.windows.active_window_id();
-        for (window_id, pane_host) in self.windows.iter() {
-            let active = self.active && window_id == active_window_id;
+        let active_tab_id = self.tabs.active_tab_id();
+        for (tab_id, pane_host) in self.tabs.iter() {
+            let active = self.active && tab_id == active_tab_id;
             pane_host.update(cx, |pane_host, cx| {
                 pane_host.set_focus_branch(active, blocker, cx);
             });
@@ -650,95 +629,90 @@ impl WindowManager {
         eprintln!("failed to {operation} Operating-System Window drag: {error}");
     }
 
-    fn begin_window_selector(&mut self, window_id: WindowId, cx: &mut Context<Self>) {
-        self.window_selector_pressed = Some(window_id);
+    fn begin_tab_selector(&mut self, tab_id: TabId, cx: &mut Context<Self>) {
+        self.tab_selector_pressed = Some(tab_id);
         self.sync_terminal_focus_blocker(cx);
         cx.notify();
     }
 
-    fn cancel_window_selector(&mut self, window_id: WindowId, cx: &mut Context<Self>) {
-        if self.window_selector_pressed != Some(window_id) {
+    fn cancel_tab_selector(&mut self, tab_id: TabId, cx: &mut Context<Self>) {
+        if self.tab_selector_pressed != Some(tab_id) {
             return;
         }
-        self.window_selector_pressed = None;
+        self.tab_selector_pressed = None;
         self.sync_terminal_focus_blocker(cx);
         cx.notify();
     }
 
-    fn commit_window_selector(
-        &mut self,
-        window_id: WindowId,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self.window_selector_pressed != Some(window_id) {
+    fn commit_tab_selector(&mut self, tab_id: TabId, window: &mut Window, cx: &mut Context<Self>) {
+        if self.tab_selector_pressed != Some(tab_id) {
             return;
         }
-        let _ = self.activate_window(window_id, window, cx);
-        self.window_selector_pressed = None;
+        let _ = self.activate_tab(tab_id, window, cx);
+        self.tab_selector_pressed = None;
         self.sync_terminal_focus_blocker(cx);
         cx.notify();
     }
 
     #[cfg(test)]
     pub(crate) fn sidebar_detail(&self, cx: &App) -> SharedString {
-        let title = self.windows.active_window().read(cx).window_title();
-        if self.windows.len() == 1 {
+        let title = self.tabs.active_tab().read(cx).tab_title();
+        if self.tabs.len() == 1 {
             return title;
         }
-        format!("{title} · {} Windows", self.windows.len()).into()
+        format!("{title} · {} tabs", self.tabs.len()).into()
     }
 
     #[cfg(test)]
     pub(crate) fn active_pane_host(&self) -> Entity<PaneHost> {
-        self.windows.active_window().clone()
+        self.tabs.active_tab().clone()
     }
 
     #[cfg(test)]
     pub(crate) fn focused_terminal_is_focused(&self, window: &Window, cx: &App) -> bool {
-        self.windows
-            .active_window()
+        self.tabs
+            .active_tab()
             .read(cx)
             .focused_terminal_is_focused(window, cx)
     }
 
     #[cfg(test)]
     pub(crate) fn focused_terminal_has_input_focus(&self, window: &Window, cx: &App) -> bool {
-        self.windows
-            .active_window()
+        self.tabs
+            .active_tab()
             .read(cx)
             .focused_terminal_has_input_focus(window, cx)
     }
 
-    fn scroll_active_window_into_view(&self) {
-        let active_window_id = self.windows.active_window_id();
+    fn scroll_active_tab_into_view(&self) {
+        let active_tab_id = self.tabs.active_tab_id();
         if let Some(index) = self
-            .windows
+            .tabs
             .iter()
-            .position(|(window_id, _)| window_id == active_window_id)
+            .position(|(tab_id, _)| tab_id == active_tab_id)
         {
-            self.window_bar_scroll_handle.scroll_to_item(index);
+            self.tab_bar_scroll_handle.scroll_to_item(index);
         }
     }
 
-    pub(crate) fn create_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn create_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.remote_disconnected_generation.is_some() {
             cx.emit(RemoteChildLaunchUnavailable::ConnectionUnavailable);
             return;
         }
-        self.window_menu = None;
-        self.window_selector_pressed = None;
+        self.tab_menu = None;
+        self.tab_selector_pressed = None;
         self.sync_terminal_focus_blocker(cx);
         match self.session_factory.validate_child_launch() {
             Ok(WorkspaceChildLaunchValidation::Local(directory)) => {
-                cx.emit(WindowManagerEvent::DirectoryAvailable {
+                cx.emit(TabManagerEvent::DirectoryAvailable {
                     identity: directory.identity(),
                 });
             }
             Ok(WorkspaceChildLaunchValidation::Remote) => {}
             Err(error) => {
                 let reason = error.to_string();
-                cx.emit(WindowManagerEvent::DirectoryUnavailable {
+                cx.emit(TabManagerEvent::DirectoryUnavailable {
                     reason: reason.clone(),
                 });
                 let directory = self.session_factory.local_working_directory().map_or_else(
@@ -746,7 +720,7 @@ impl WindowManager {
                     |path| path.display().to_string(),
                 );
                 let detail = format!(
-                    "Cannot create a Window at {directory} because {reason}. Restore the directory or use another Workspace."
+                    "Cannot create a Tab at {directory} because {reason}. Restore the directory or use another Workspace."
                 );
                 drop(window.prompt(
                     PromptLevel::Warning,
@@ -784,7 +758,7 @@ impl WindowManager {
                             return;
                         }
                     };
-                    manager.create_window_with_prepared_launch(prepared_launch, window, cx);
+                    manager.create_tab_with_prepared_launch(prepared_launch, window, cx);
                 });
             })
             .detach();
@@ -797,171 +771,162 @@ impl WindowManager {
                 return;
             }
         };
-        self.create_window_with_prepared_launch(prepared_launch, window, cx);
+        self.create_tab_with_prepared_launch(prepared_launch, window, cx);
     }
 
-    fn create_window_with_prepared_launch(
+    fn create_tab_with_prepared_launch(
         &mut self,
         prepared_launch: PreparedWorkspaceTerminalLaunch,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let previous_window = self.windows.active_window().clone();
+        let previous_tab = self.tabs.active_tab().clone();
         let session_factory = self.session_factory.clone();
-        let result = self.windows.create_window(|window_id| {
-            Self::create_pane_host(window_id, session_factory, prepared_launch, window, cx)
+        let result = self.tabs.create_tab(|tab_id| {
+            Self::create_pane_host(tab_id, session_factory, prepared_launch, window, cx)
         });
-        let window_id = match result {
-            Ok(window_id) => window_id,
+        let tab_id = match result {
+            Ok(tab_id) => tab_id,
             Err(error) => {
-                Self::report_window_error("create", error);
+                Self::report_tab_error("create", error);
                 return;
             }
         };
-        let Some(pane_host) = self.windows.window(window_id).cloned() else {
-            unreachable!("a newly created Window must remain owned by its collection")
+        let Some(pane_host) = self.tabs.tab(tab_id).cloned() else {
+            unreachable!("a newly created Tab must remain owned by its collection")
         };
 
-        previous_window.update(cx, |pane_host, cx| pane_host.deactivate(cx));
+        previous_tab.update(cx, |pane_host, cx| pane_host.deactivate(cx));
         if self.active {
             pane_host.update(cx, |pane_host, cx| pane_host.activate(window, cx));
         } else {
             pane_host.update(cx, |pane_host, cx| pane_host.deactivate(cx));
         }
         self.sync_terminal_focus_blocker(cx);
-        self.scroll_active_window_into_view();
-        cx.emit(WindowManagerEvent::PresentationChanged);
+        self.scroll_active_tab_into_view();
+        cx.emit(TabManagerEvent::PresentationChanged);
         cx.notify();
     }
 
-    fn activate_window(
-        &mut self,
-        window_id: WindowId,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> bool {
-        self.window_menu = None;
-        self.activate_window_preserving_menu(window_id, window, cx)
+    fn activate_tab(&mut self, tab_id: TabId, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        self.tab_menu = None;
+        self.activate_tab_preserving_menu(tab_id, window, cx)
     }
 
-    fn activate_window_preserving_menu(
+    fn activate_tab_preserving_menu(
         &mut self,
-        window_id: WindowId,
+        tab_id: TabId,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        let Some(next_window) = self.windows.window(window_id).cloned() else {
-            eprintln!("cannot activate unknown Window {window_id}");
+        let Some(next_tab) = self.tabs.tab(tab_id).cloned() else {
+            eprintln!("cannot activate unknown Tab {tab_id}");
             return false;
         };
-        let previous_window_id = self.windows.active_window_id();
-        let previous_window = self.windows.active_window().clone();
-        if let Err(error) = self.windows.activate_window(window_id) {
-            Self::report_window_error("activate", error);
+        let previous_tab_id = self.tabs.active_tab_id();
+        let previous_tab = self.tabs.active_tab().clone();
+        if let Err(error) = self.tabs.activate_tab(tab_id) {
+            Self::report_tab_error("activate", error);
             return false;
         }
 
-        if previous_window_id != window_id {
-            previous_window.update(cx, |pane_host, cx| pane_host.deactivate(cx));
+        if previous_tab_id != tab_id {
+            previous_tab.update(cx, |pane_host, cx| pane_host.deactivate(cx));
         }
         let blocker = self.terminal_focus_blocker();
-        next_window.update(cx, |pane_host, cx| {
+        next_tab.update(cx, |pane_host, cx| {
             pane_host.set_focus_branch(self.active, blocker, cx);
         });
         if self.active {
-            next_window.update(cx, |pane_host, cx| pane_host.activate(window, cx));
+            next_tab.update(cx, |pane_host, cx| pane_host.activate(window, cx));
         } else {
-            next_window.update(cx, |pane_host, cx| pane_host.deactivate(cx));
+            next_tab.update(cx, |pane_host, cx| pane_host.deactivate(cx));
         }
         self.sync_terminal_focus_blocker(cx);
-        self.scroll_active_window_into_view();
-        cx.emit(WindowManagerEvent::PresentationChanged);
+        self.scroll_active_tab_into_view();
+        cx.emit(TabManagerEvent::PresentationChanged);
         cx.notify();
         true
     }
 
-    fn activate_window_at(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
-        let window_id = self
-            .windows
-            .iter()
-            .nth(index)
-            .map(|(window_id, _)| window_id);
-        if let Some(window_id) = window_id {
-            self.activate_window(window_id, window, cx);
+    fn activate_tab_at(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let tab_id = self.tabs.iter().nth(index).map(|(tab_id, _)| tab_id);
+        if let Some(tab_id) = tab_id {
+            self.activate_tab(tab_id, window, cx);
         }
     }
 
-    fn close_window(&mut self, window_id: WindowId, window: &mut Window, cx: &mut Context<Self>) {
+    fn close_tab(&mut self, tab_id: TabId, window: &mut Window, cx: &mut Context<Self>) {
         if self.close_workspace_requested {
             return;
         }
 
-        let was_active = self.windows.active_window_id() == window_id;
-        match self.windows.close_window(window_id) {
-            Ok(CloseWindowOutcome::WindowClosed {
-                closed_window_id,
+        let was_active = self.tabs.active_tab_id() == tab_id;
+        match self.tabs.close_tab(tab_id) {
+            Ok(CloseTabOutcome::TabClosed {
+                closed_tab_id,
                 payload,
-                active_window_id,
+                active_tab_id,
             }) => {
-                debug_assert_eq!(closed_window_id, window_id);
+                debug_assert_eq!(closed_tab_id, tab_id);
                 payload.update(cx, |pane_host, cx| pane_host.close_all(cx));
-                let Some((promoted_window_id, promoted_host)) = self.windows.iter().next() else {
-                    unreachable!("closing one of multiple Windows must leave a promotion candidate")
+                let Some((promoted_tab_id, promoted_host)) = self.tabs.iter().next() else {
+                    unreachable!("closing one of multiple Tabs must leave a promotion candidate")
                 };
                 let promoted_pane_id = promoted_host.read(cx).root_pane_id();
                 let promoted_directory = promoted_host
                     .read(cx)
                     .reported_working_directory(promoted_pane_id, cx);
                 if was_active {
-                    let active_window = self.windows.active_window().clone();
+                    let active_tab = self.tabs.active_tab().clone();
                     if self.active {
-                        active_window.update(cx, |pane_host, cx| pane_host.activate(window, cx));
+                        active_tab.update(cx, |pane_host, cx| pane_host.activate(window, cx));
                     } else {
-                        active_window.update(cx, |pane_host, cx| pane_host.deactivate(cx));
+                        active_tab.update(cx, |pane_host, cx| pane_host.deactivate(cx));
                     }
                 }
-                self.window_menu = None;
-                self.window_selector_pressed = None;
+                self.tab_menu = None;
+                self.tab_selector_pressed = None;
                 self.sync_terminal_focus_blocker(cx);
-                debug_assert_eq!(active_window_id, self.windows.active_window_id());
-                self.scroll_active_window_into_view();
-                cx.emit(WindowManagerEvent::PresentationChanged);
-                cx.emit(WindowManagerEvent::WindowClosed {
-                    window_id,
-                    promoted_window_id,
+                debug_assert_eq!(active_tab_id, self.tabs.active_tab_id());
+                self.scroll_active_tab_into_view();
+                cx.emit(TabManagerEvent::PresentationChanged);
+                cx.emit(TabManagerEvent::TabClosed {
+                    tab_id,
+                    promoted_tab_id,
                     promoted_pane_id,
                     promoted_directory,
                 });
                 cx.notify();
             }
-            Ok(CloseWindowOutcome::CloseWorkspace { final_window_id }) => {
+            Ok(CloseTabOutcome::CloseWorkspace { final_tab_id }) => {
                 self.close_workspace_requested = true;
-                self.window_menu = None;
-                self.window_selector_pressed = None;
-                cx.emit(WindowManagerEvent::FinalWindowCloseRequested { final_window_id });
+                self.tab_menu = None;
+                self.tab_selector_pressed = None;
+                cx.emit(TabManagerEvent::FinalTabCloseRequested { final_tab_id });
             }
             Err(error) => {
-                self.window_menu = None;
-                self.window_selector_pressed = None;
+                self.tab_menu = None;
+                self.tab_selector_pressed = None;
                 self.sync_terminal_focus_blocker(cx);
-                Self::report_window_error("close", error);
+                Self::report_tab_error("close", error);
             }
         }
     }
 
     fn prepare_context_menu(
         &mut self,
-        window_id: WindowId,
+        tab_id: TabId,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        self.window_menu = Some(WindowMenuState {
-            window_id,
-            invocation: WindowMenuInvocation::Context,
+        self.tab_menu = Some(TabMenuState {
+            tab_id,
+            invocation: TabMenuInvocation::Context,
         });
         self.sync_terminal_focus_blocker(cx);
-        if !self.activate_window_preserving_menu(window_id, window, cx) {
-            self.window_menu = None;
+        if !self.activate_tab_preserving_menu(tab_id, window, cx) {
+            self.tab_menu = None;
             self.sync_terminal_focus_blocker(cx);
             return false;
         }
@@ -971,22 +936,19 @@ impl WindowManager {
 
     fn handle_menu_lifecycle(
         &mut self,
-        window_id: WindowId,
-        invocation: WindowMenuInvocation,
+        tab_id: TabId,
+        invocation: TabMenuInvocation,
         event: MenuLifecycleEvent,
         cx: &mut Context<Self>,
     ) {
-        let owner = WindowMenuState {
-            window_id,
-            invocation,
-        };
+        let owner = TabMenuState { tab_id, invocation };
         match event {
-            MenuLifecycleEvent::Opened => self.window_menu = Some(owner),
+            MenuLifecycleEvent::Opened => self.tab_menu = Some(owner),
             MenuLifecycleEvent::Closed(_) => {
-                if self.window_menu != Some(owner) {
+                if self.tab_menu != Some(owner) {
                     return;
                 }
-                self.window_menu = None;
+                self.tab_menu = None;
             }
         }
         self.sync_terminal_focus_blocker(cx);
@@ -996,22 +958,19 @@ impl WindowManager {
     fn perform_menu_command(
         &mut self,
         command: PaneActionMenuCommand,
-        window_id: WindowId,
+        tab_id: TabId,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let invocation = self
-            .window_menu
-            .filter(|menu| menu.window_id == window_id)
-            .map_or(WindowMenuInvocation::Explicit, |menu| menu.invocation);
-        self.window_menu = Some(WindowMenuState {
-            window_id,
-            invocation,
-        });
+            .tab_menu
+            .filter(|menu| menu.tab_id == tab_id)
+            .map_or(TabMenuInvocation::Explicit, |menu| menu.invocation);
+        self.tab_menu = Some(TabMenuState { tab_id, invocation });
         self.sync_terminal_focus_blocker(cx);
 
-        let Some(pane_host) = self.windows.window(window_id).cloned() else {
-            self.window_menu = None;
+        let Some(pane_host) = self.tabs.tab(tab_id).cloned() else {
+            self.tab_menu = None;
             self.sync_terminal_focus_blocker(cx);
             return;
         };
@@ -1025,106 +984,61 @@ impl WindowManager {
             PaneActionMenuCommand::ToggleZoom => {
                 pane_host.update(cx, |pane_host, cx| pane_host.toggle_zoom(window, cx));
             }
-            PaneActionMenuCommand::Close => self.close_window(window_id, window, cx),
+            PaneActionMenuCommand::Close => self.close_tab(tab_id, window, cx),
         }
-        if self.window_menu.take().is_some() {
+        if self.tab_menu.take().is_some() {
             self.sync_terminal_focus_blocker(cx);
         }
         cx.notify();
     }
 
-    fn on_close_window(&mut self, _: &CloseWindow, window: &mut Window, cx: &mut Context<Self>) {
-        self.close_window(self.windows.active_window_id(), window, cx);
+    fn on_close_tab(&mut self, _: &CloseTab, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_tab(self.tabs.active_tab_id(), window, cx);
     }
 
-    fn on_create_window(&mut self, _: &CreateWindow, window: &mut Window, cx: &mut Context<Self>) {
-        self.create_window(window, cx);
+    fn on_create_tab(&mut self, _: &CreateTab, window: &mut Window, cx: &mut Context<Self>) {
+        self.create_tab(window, cx);
     }
 
-    fn on_activate_window_1(
-        &mut self,
-        _: &ActivateWindow1,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.activate_window_at(0, window, cx);
+    fn on_activate_tab_1(&mut self, _: &ActivateTab1, window: &mut Window, cx: &mut Context<Self>) {
+        self.activate_tab_at(0, window, cx);
     }
 
-    fn on_activate_window_2(
-        &mut self,
-        _: &ActivateWindow2,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.activate_window_at(1, window, cx);
+    fn on_activate_tab_2(&mut self, _: &ActivateTab2, window: &mut Window, cx: &mut Context<Self>) {
+        self.activate_tab_at(1, window, cx);
     }
 
-    fn on_activate_window_3(
-        &mut self,
-        _: &ActivateWindow3,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.activate_window_at(2, window, cx);
+    fn on_activate_tab_3(&mut self, _: &ActivateTab3, window: &mut Window, cx: &mut Context<Self>) {
+        self.activate_tab_at(2, window, cx);
     }
 
-    fn on_activate_window_4(
-        &mut self,
-        _: &ActivateWindow4,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.activate_window_at(3, window, cx);
+    fn on_activate_tab_4(&mut self, _: &ActivateTab4, window: &mut Window, cx: &mut Context<Self>) {
+        self.activate_tab_at(3, window, cx);
     }
 
-    fn on_activate_window_5(
-        &mut self,
-        _: &ActivateWindow5,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.activate_window_at(4, window, cx);
+    fn on_activate_tab_5(&mut self, _: &ActivateTab5, window: &mut Window, cx: &mut Context<Self>) {
+        self.activate_tab_at(4, window, cx);
     }
 
-    fn on_activate_window_6(
-        &mut self,
-        _: &ActivateWindow6,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.activate_window_at(5, window, cx);
+    fn on_activate_tab_6(&mut self, _: &ActivateTab6, window: &mut Window, cx: &mut Context<Self>) {
+        self.activate_tab_at(5, window, cx);
     }
 
-    fn on_activate_window_7(
-        &mut self,
-        _: &ActivateWindow7,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.activate_window_at(6, window, cx);
+    fn on_activate_tab_7(&mut self, _: &ActivateTab7, window: &mut Window, cx: &mut Context<Self>) {
+        self.activate_tab_at(6, window, cx);
     }
 
-    fn on_activate_window_8(
-        &mut self,
-        _: &ActivateWindow8,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.activate_window_at(7, window, cx);
+    fn on_activate_tab_8(&mut self, _: &ActivateTab8, window: &mut Window, cx: &mut Context<Self>) {
+        self.activate_tab_at(7, window, cx);
     }
 
-    fn on_activate_window_9(
-        &mut self,
-        _: &ActivateWindow9,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.activate_window_at(8, window, cx);
+    fn on_activate_tab_9(&mut self, _: &ActivateTab9, window: &mut Window, cx: &mut Context<Self>) {
+        self.activate_tab_at(8, window, cx);
     }
 
-    fn render_window_item(
+    fn render_tab_item(
         &self,
-        window_id: WindowId,
+        tab_id: TabId,
         title: SharedString,
         active: bool,
         manager: gpui::WeakEntity<Self>,
@@ -1137,10 +1051,10 @@ impl WindowManager {
         let context_activation_manager = manager.clone();
         let context_lifecycle_manager = manager.clone();
         let close_manager = manager;
-        let window_group = format!("window-item-{}", window_id.get());
+        let tab_group = format!("tab-item-{}", tab_id.get());
         let (zoomed, zoom_enabled) = self
-            .windows
-            .window(window_id)
+            .tabs
+            .tab(tab_id)
             .map(|pane_host| {
                 let pane_host = pane_host.read(cx);
                 (
@@ -1150,16 +1064,16 @@ impl WindowManager {
             })
             .unwrap_or((false, false));
         let item = div()
-            .id(("window-item", window_id.get()))
+            .id(("tab-item", tab_id.get()))
             .debug_selector(move || {
                 format!(
-                    "window-item-{}-{}",
-                    window_id.get(),
+                    "tab-item-{}-{}",
+                    tab_id.get(),
                     if active { "active" } else { "inactive" }
                 )
             })
             .relative()
-            .group(window_group.clone())
+            .group(tab_group.clone())
             .h_full()
             .flex_none()
             .w(px(WINDOW_ITEM_WIDTH))
@@ -1185,25 +1099,25 @@ impl WindowManager {
             .hover(|item| item.bg(gpui_color(ACTIVE_THEME.ghost_element_selected)))
             .on_mouse_down(MouseButton::Left, move |_, _, cx| {
                 let _ = press_manager.update(cx, |manager, cx| {
-                    manager.begin_window_selector(window_id, cx);
+                    manager.begin_tab_selector(tab_id, cx);
                 });
                 cx.stop_propagation();
             })
             .on_mouse_up_out(MouseButton::Left, move |_, _, cx| {
                 let _ = release_manager.update(cx, |manager, cx| {
-                    manager.cancel_window_selector(window_id, cx);
+                    manager.cancel_tab_selector(tab_id, cx);
                 });
             })
             .on_click(move |_, window, cx| {
                 let _ = click_manager.update(cx, |manager, cx| {
-                    manager.commit_window_selector(window_id, window, cx);
+                    manager.commit_tab_selector(tab_id, window, cx);
                 });
                 cx.stop_propagation();
             })
             .child(
                 div()
-                    .id(("window-title", window_id.get()))
-                    .debug_selector(move || format!("window-title-{}", window_id.get()))
+                    .id(("tab-title", tab_id.get()))
+                    .debug_selector(move || format!("tab-title-{}", tab_id.get()))
                     .flex_1()
                     .min_w_0()
                     .truncate()
@@ -1216,12 +1130,12 @@ impl WindowManager {
                     .when(!active, |button| {
                         button
                             .opacity(0.0)
-                            .group_hover(window_group, |button| button.opacity(1.0))
+                            .group_hover(tab_group, |button| button.opacity(1.0))
                     })
                     .child(
                         IconButton::new(
-                            ("window-close-button", window_id.get()),
-                            "Close Window",
+                            ("tab-close-button", tab_id.get()),
+                            "Close Tab",
                             |foreground| {
                                 Icon::new(IconName::X, px(WINDOW_CLOSE_ICON_SIZE), foreground)
                                     .into_any_element()
@@ -1230,25 +1144,22 @@ impl WindowManager {
                         .variant(ButtonVariant::Ghost)
                         .size(ButtonSize::Compact)
                         .preserve_ancestor_hover()
-                        .debug_selector(format!("window-close-button-{}", window_id.get()))
+                        .debug_selector(format!("tab-close-button-{}", tab_id.get()))
                         .tooltip(
-                            Tooltip::new(("window-close-tooltip", window_id.get()), "Close Window")
-                                .debug_selector(format!(
-                                    "window-close-tooltip-{}",
-                                    window_id.get()
-                                )),
+                            Tooltip::new(("tab-close-tooltip", tab_id.get()), "Close Tab")
+                                .debug_selector(format!("tab-close-tooltip-{}", tab_id.get())),
                         )
                         .on_activate(move |_, window, cx| {
                             let _ = close_manager.update(cx, |manager, cx| {
-                                manager.close_window(window_id, window, cx);
+                                manager.close_tab(tab_id, window, cx);
                             });
                         }),
                     ),
             )
             .child(
                 div()
-                    .id(("window-item-divider", window_id.get()))
-                    .debug_selector(move || format!("window-item-{}-divider", window_id.get()))
+                    .id(("tab-item-divider", tab_id.get()))
+                    .debug_selector(move || format!("tab-item-{}-divider", tab_id.get()))
                     .absolute()
                     .top_0()
                     .right_0()
@@ -1258,10 +1169,8 @@ impl WindowManager {
             )
             .child(
                 div()
-                    .id(("window-item-bottom-divider", window_id.get()))
-                    .debug_selector(move || {
-                        format!("window-item-{}-bottom-divider", window_id.get())
-                    })
+                    .id(("tab-item-bottom-divider", tab_id.get()))
+                    .debug_selector(move || format!("tab-item-{}-bottom-divider", tab_id.get()))
                     .absolute()
                     .bottom_0()
                     .left_0()
@@ -1272,10 +1181,8 @@ impl WindowManager {
             .when(active, |item| {
                 item.child(
                     div()
-                        .id(("window-item-underline", window_id.get()))
-                        .debug_selector(move || {
-                            format!("window-item-{}-underline", window_id.get())
-                        })
+                        .id(("tab-item-underline", tab_id.get()))
+                        .debug_selector(move || format!("tab-item-{}-underline", tab_id.get()))
                         .absolute()
                         .bottom_0()
                         .left_0()
@@ -1286,14 +1193,14 @@ impl WindowManager {
             });
 
         ContextMenu::new(
-            ("window-context-menu", window_id.get()),
-            "Window Actions",
+            ("tab-context-menu", tab_id.get()),
+            "Tab Actions",
             div()
                 .w(px(WINDOW_ITEM_WIDTH))
                 .h(px(WINDOW_BAR_HEIGHT))
                 .flex_none()
                 .child(item),
-            pane_action_menu_entries("window-menu", zoomed, zoom_enabled, CloseTarget::Window),
+            pane_action_menu_entries("tab-menu", zoomed, zoom_enabled, CloseTarget::Tab),
         )
         .size(MenuSize::Wide)
         .placement(
@@ -1302,42 +1209,42 @@ impl WindowManager {
         .on_open_request(move |_, window, cx| {
             context_open_manager
                 .update(cx, |manager, cx| {
-                    manager.prepare_context_menu(window_id, window, cx)
+                    manager.prepare_context_menu(tab_id, window, cx)
                 })
                 .unwrap_or(false)
         })
         .on_activate(move |activation, window, cx| {
             let command = *activation.action();
             let _ = context_activation_manager.update(cx, |manager, cx| {
-                manager.perform_menu_command(command, window_id, window, cx);
+                manager.perform_menu_command(command, tab_id, window, cx);
             });
         })
         .on_lifecycle(move |event, cx| {
             let event = *event;
             let _ = context_lifecycle_manager.update(cx, |manager, cx| {
-                manager.handle_menu_lifecycle(window_id, WindowMenuInvocation::Context, event, cx);
+                manager.handle_menu_lifecycle(tab_id, TabMenuInvocation::Context, event, cx);
             });
         })
         .into_any_element()
     }
 
-    fn render_window_bar(&self, manager: gpui::WeakEntity<Self>, cx: &App) -> AnyElement {
-        let active_window_id = self.windows.active_window_id();
+    fn render_tab_bar(&self, manager: gpui::WeakEntity<Self>, cx: &App) -> AnyElement {
+        let active_tab_id = self.tabs.active_tab_id();
         let mut items = div()
-            .id("window-items")
-            .debug_selector(|| "window-items".to_owned())
+            .id("tab-items")
+            .debug_selector(|| "tab-items".to_owned())
             .h_full()
             .min_w_0()
             .flex_1()
             .flex()
             .flex_row()
             .overflow_x_scroll()
-            .track_scroll(&self.window_bar_scroll_handle);
-        for (window_id, pane_host) in self.windows.iter() {
-            items = items.child(self.render_window_item(
-                window_id,
-                pane_host.read(cx).window_title(),
-                window_id == active_window_id,
+            .track_scroll(&self.tab_bar_scroll_handle);
+        for (tab_id, pane_host) in self.tabs.iter() {
+            items = items.child(self.render_tab_item(
+                tab_id,
+                pane_host.read(cx).tab_title(),
+                tab_id == active_tab_id,
                 manager.clone(),
                 cx,
             ));
@@ -1348,8 +1255,8 @@ impl WindowManager {
         let menu_activation_manager = manager.clone();
         let menu_lifecycle_manager = manager;
         let (zoomed, zoom_enabled) = self
-            .windows
-            .window(active_window_id)
+            .tabs
+            .tab(active_tab_id)
             .map(|pane_host| {
                 let pane_host = pane_host.read(cx);
                 (
@@ -1369,8 +1276,8 @@ impl WindowManager {
             .bg(gpui_color(ACTIVE_THEME.tab_bar_background))
             .child(
                 div()
-                    .id("window-bar-divider")
-                    .debug_selector(|| "window-bar-divider".to_owned())
+                    .id("tab-bar-divider")
+                    .debug_selector(|| "tab-bar-divider".to_owned())
                     .absolute()
                     .bottom_0()
                     .left_0()
@@ -1380,20 +1287,20 @@ impl WindowManager {
             )
             .child(items)
             .child(
-                IconButton::new("create-window-button", "Create Window", |foreground| {
+                IconButton::new("create-tab-button", "Create Tab", |foreground| {
                     Icon::new(IconName::Plus, px(14.0), foreground).into_any_element()
                 })
                 .variant(ButtonVariant::Ghost)
                 .size(ButtonSize::Regular)
-                .debug_selector("create-window-button")
+                .debug_selector("create-tab-button")
                 .tooltip(
-                    Tooltip::new("create-window-tooltip", "Create Window")
+                    Tooltip::new("create-tab-tooltip", "Create Tab")
                         .keyboard_equivalent("⌘T")
-                        .debug_selector("create-window-tooltip"),
+                        .debug_selector("create-tab-tooltip"),
                 )
                 .on_activate(move |_, window, cx| {
                     let _ = create_manager.update(cx, |manager, cx| {
-                        manager.create_window(window, cx);
+                        manager.create_tab(window, cx);
                     });
                 }),
             )
@@ -1404,13 +1311,13 @@ impl WindowManager {
                     .right(px(WINDOW_CONTROL_INSET))
                     .child(
                         Menu::new(
-                            "window-menu-button-control",
-                            "Window Actions",
+                            "tab-menu-button-control",
+                            "Tab Actions",
                             pane_action_menu_entries(
-                                "window-menu",
+                                "tab-menu",
                                 zoomed,
                                 zoom_enabled,
-                                CloseTarget::Window,
+                                CloseTarget::Tab,
                             ),
                         )
                         .icon_trigger(menu_icon(IconName::Ellipsis))
@@ -1419,19 +1326,19 @@ impl WindowManager {
                             MenuPlacementConfig::new(MenuPlacement::Bottom, MenuAlignment::End)
                                 .offset(px(0.0)),
                         )
-                        .debug_selector("window-menu-button")
+                        .debug_selector("tab-menu-button")
                         .on_activate(move |activation, window, cx| {
                             let command = *activation.action();
                             let _ = menu_activation_manager.update(cx, |manager, cx| {
-                                manager.perform_menu_command(command, active_window_id, window, cx);
+                                manager.perform_menu_command(command, active_tab_id, window, cx);
                             });
                         })
                         .on_lifecycle(move |event, cx| {
                             let event = *event;
                             let _ = menu_lifecycle_manager.update(cx, |manager, cx| {
                                 manager.handle_menu_lifecycle(
-                                    active_window_id,
-                                    WindowMenuInvocation::Explicit,
+                                    active_tab_id,
+                                    TabMenuInvocation::Explicit,
                                     event,
                                     cx,
                                 );
@@ -1441,8 +1348,8 @@ impl WindowManager {
             );
 
         let drag_region = WindowDragRegion::new(
-            "window-bar-drag-region",
-            "Move Operating-System Window from Window chrome",
+            "tab-bar-drag-region",
+            "Move Operating-System Window from Tab chrome",
             content,
         )
         .status(self.window_drag_status.clone())
@@ -1450,7 +1357,7 @@ impl WindowManager {
             left: super::resize_handle_theme::spacious_target_half_thickness(),
             ..Edges::default()
         })
-        .debug_selector("window-bar-drag-region")
+        .debug_selector("tab-bar-drag-region")
         .on_event(move |event, window, cx| {
             let event = *event;
             drag_manager
@@ -1461,8 +1368,8 @@ impl WindowManager {
         });
 
         div()
-            .id("window-bar")
-            .debug_selector(|| "window-bar".to_owned())
+            .id("tab-bar")
+            .debug_selector(|| "tab-bar".to_owned())
             .relative()
             .h(px(WINDOW_BAR_HEIGHT))
             .min_w_0()
@@ -1474,16 +1381,16 @@ impl WindowManager {
     }
 }
 
-impl Render for WindowManager {
+impl Render for TabManager {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        debug_assert!(self.windows.len() > 0);
+        debug_assert!(self.tabs.len() > 0);
         let manager = cx.entity().downgrade();
-        let active_window = self.windows.active_window().clone();
-        let window_bar = self.render_window_bar(manager.clone(), cx);
+        let active_tab = self.tabs.active_tab().clone();
+        let tab_bar = self.render_tab_bar(manager.clone(), cx);
 
         div()
-            .id("window-manager")
-            .debug_selector(|| "window-manager".to_owned())
+            .id("tab-manager")
+            .debug_selector(|| "tab-manager".to_owned())
             .key_context(TERMINAL_KEY_CONTEXT)
             .relative()
             .size_full()
@@ -1493,17 +1400,17 @@ impl Render for WindowManager {
             .flex_col()
             .overflow_hidden()
             .bg(gpui_color(ACTIVE_THEME.terminal_background))
-            .on_action(cx.listener(Self::on_create_window))
-            .on_action(cx.listener(Self::on_activate_window_1))
-            .on_action(cx.listener(Self::on_activate_window_2))
-            .on_action(cx.listener(Self::on_activate_window_3))
-            .on_action(cx.listener(Self::on_activate_window_4))
-            .on_action(cx.listener(Self::on_activate_window_5))
-            .on_action(cx.listener(Self::on_activate_window_6))
-            .on_action(cx.listener(Self::on_activate_window_7))
-            .on_action(cx.listener(Self::on_activate_window_8))
-            .on_action(cx.listener(Self::on_activate_window_9))
-            .on_action(cx.listener(Self::on_close_window))
+            .on_action(cx.listener(Self::on_create_tab))
+            .on_action(cx.listener(Self::on_activate_tab_1))
+            .on_action(cx.listener(Self::on_activate_tab_2))
+            .on_action(cx.listener(Self::on_activate_tab_3))
+            .on_action(cx.listener(Self::on_activate_tab_4))
+            .on_action(cx.listener(Self::on_activate_tab_5))
+            .on_action(cx.listener(Self::on_activate_tab_6))
+            .on_action(cx.listener(Self::on_activate_tab_7))
+            .on_action(cx.listener(Self::on_activate_tab_8))
+            .on_action(cx.listener(Self::on_activate_tab_9))
+            .on_action(cx.listener(Self::on_close_tab))
             .child(
                 div()
                     .h(px(TOP_CHROME_HEIGHT))
@@ -1513,31 +1420,31 @@ impl Render for WindowManager {
                     .flex_row()
                     .child(
                         div()
-                            .id("window-manager-top-spacer")
-                            .debug_selector(|| "window-manager-top-spacer".to_owned())
+                            .id("tab-manager-top-spacer")
+                            .debug_selector(|| "tab-manager-top-spacer".to_owned())
                             .w(self.sidebar_width)
                             .h_full()
                             .flex_shrink_0()
                             .bg(gpui_color(ACTIVE_THEME.tab_bar_background)),
                     )
-                    .child(window_bar),
+                    .child(tab_bar),
             )
             .child(
                 div()
-                    .id("window-manager-content")
-                    .debug_selector(|| "window-manager-content".to_owned())
+                    .id("tab-manager-content")
+                    .debug_selector(|| "tab-manager-content".to_owned())
                     .flex_1()
                     .min_w_0()
                     .min_h_0()
                     .overflow_hidden()
                     .when(self.sidebar_visible, |body| body.ml(self.sidebar_width))
-                    .child(active_window),
+                    .child(active_tab),
             )
     }
 }
 
-impl EventEmitter<WindowManagerEvent> for WindowManager {}
-impl EventEmitter<RemoteChildLaunchUnavailable> for WindowManager {}
+impl EventEmitter<TabManagerEvent> for TabManager {}
+impl EventEmitter<RemoteChildLaunchUnavailable> for TabManager {}
 
 fn gpui_color(color: Color) -> gpui::Rgba {
     rgba(color.rgba_hex())
@@ -1570,19 +1477,19 @@ mod tests {
     use crate::ui::TogglePaneZoom;
 
     struct RemoteLaunchEventHarness {
-        manager: Entity<WindowManager>,
+        manager: Entity<TabManager>,
         events: Rc<RefCell<Vec<RemoteChildLaunchUnavailable>>>,
     }
 
     type PaneHierarchyIdentity = (
-        WindowId,
+        TabId,
         gpui::EntityId,
         Vec<(PaneId, gpui::EntityId)>,
         String,
         PaneId,
         ZoomState,
     );
-    type WindowHierarchyIdentity = (WindowId, Vec<PaneHierarchyIdentity>);
+    type TabHierarchyIdentity = (TabId, Vec<PaneHierarchyIdentity>);
 
     impl Render for RemoteLaunchEventHarness {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
@@ -1682,11 +1589,11 @@ mod tests {
         }
     }
 
-    fn remote_window_manager_with_provider(
+    fn remote_tab_manager_with_provider(
         cx: &mut TestAppContext,
         provider: Arc<SequencedRemoteChannelProvider>,
     ) -> (
-        Entity<WindowManager>,
+        Entity<TabManager>,
         TestTerminalSessionRecords,
         &mut VisualTestContext,
     ) {
@@ -1697,7 +1604,7 @@ mod tests {
         let session_factory =
             remote_session_factory_with_provider(records.clone(), destination, provider);
         let (manager, cx) =
-            cx.add_window_view(|window, cx| WindowManager::new(session_factory, window, cx));
+            cx.add_window_view(|window, cx| TabManager::new(session_factory, window, cx));
         cx.update(|window, cx| {
             window.activate_window();
             manager.update(cx, |manager, cx| manager.focus(window, cx));
@@ -1706,11 +1613,11 @@ mod tests {
         (manager, records, cx)
     }
 
-    fn remote_window_manager_with_provider_and_events(
+    fn remote_tab_manager_with_provider_and_events(
         cx: &mut TestAppContext,
         provider: Arc<SequencedRemoteChannelProvider>,
     ) -> (
-        Entity<WindowManager>,
+        Entity<TabManager>,
         TestTerminalSessionRecords,
         Rc<RefCell<Vec<RemoteChildLaunchUnavailable>>>,
         &mut VisualTestContext,
@@ -1724,7 +1631,7 @@ mod tests {
         let events = Rc::new(RefCell::new(Vec::new()));
         let recorded_events = Rc::clone(&events);
         let (harness, cx) = cx.add_window_view(move |window, cx| {
-            let manager = cx.new(|cx| WindowManager::new(session_factory, window, cx));
+            let manager = cx.new(|cx| TabManager::new(session_factory, window, cx));
             cx.subscribe(
                 &manager,
                 move |_, _, event: &RemoteChildLaunchUnavailable, _| {
@@ -1745,16 +1652,16 @@ mod tests {
         (manager, records, events, cx)
     }
 
-    fn hierarchy_identity(manager: &WindowManager, cx: &App) -> WindowHierarchyIdentity {
+    fn hierarchy_identity(manager: &TabManager, cx: &App) -> TabHierarchyIdentity {
         (
-            manager.windows.active_window_id(),
+            manager.tabs.active_tab_id(),
             manager
-                .windows
+                .tabs
                 .iter()
-                .map(|(window_id, pane_host)| {
+                .map(|(tab_id, pane_host)| {
                     let host = pane_host.read(cx);
                     (
-                        window_id,
+                        tab_id,
                         pane_host.entity_id(),
                         host.pane_entity_ids(),
                         host.layout_signature(),
@@ -1767,11 +1674,11 @@ mod tests {
     }
 
     fn prepare_remote_restart_for_test(
-        manager: &Entity<WindowManager>,
+        manager: &Entity<TabManager>,
         session_factory: WorkspaceTerminalSessionFactory,
         generation: u64,
         cx: &mut VisualTestContext,
-    ) -> Result<PreparedWindowManagerRemoteRestart, RemoteWindowManagerLifecycleError> {
+    ) -> Result<PreparedTabManagerRemoteRestart, RemoteTabManagerLifecycleError> {
         let task = manager.update(cx, |manager, cx| {
             manager.prepare_remote_restart(session_factory, generation, cx)
         });
@@ -1790,10 +1697,10 @@ mod tests {
             .expect("remote restart preparation task must finish")
     }
 
-    fn window_manager(
+    fn tab_manager(
         cx: &mut TestAppContext,
     ) -> (
-        Entity<WindowManager>,
+        Entity<TabManager>,
         TestTerminalSessionRecords,
         &mut VisualTestContext,
     ) {
@@ -1805,11 +1712,11 @@ mod tests {
         let session_factory = WorkspaceTerminalSessionFactory::new_local(
             session_factory,
             crate::terminal::testing::test_workspace_directory(PathBuf::from(
-                "/tmp/spaceterm-window-manager-test",
+                "/tmp/spaceterm-tab-manager-test",
             )),
         );
         let (manager, cx) =
-            cx.add_window_view(|window, cx| WindowManager::new(session_factory, window, cx));
+            cx.add_window_view(|window, cx| TabManager::new(session_factory, window, cx));
         cx.update(|window, cx| {
             window.activate_window();
             manager.update(cx, |manager, cx| manager.focus(window, cx));
@@ -1818,10 +1725,10 @@ mod tests {
         (manager, records, cx)
     }
 
-    fn remote_window_manager(
+    fn remote_tab_manager(
         cx: &mut TestAppContext,
     ) -> (
-        Entity<WindowManager>,
+        Entity<TabManager>,
         TestTerminalSessionRecords,
         &mut VisualTestContext,
     ) {
@@ -1847,7 +1754,7 @@ mod tests {
             }),
         );
         let (manager, cx) =
-            cx.add_window_view(|window, cx| WindowManager::new(session_factory, window, cx));
+            cx.add_window_view(|window, cx| TabManager::new(session_factory, window, cx));
         cx.update(|window, cx| {
             window.activate_window();
             manager.update(cx, |manager, cx| manager.focus(window, cx));
@@ -1888,10 +1795,10 @@ mod tests {
         )
     }
 
-    fn window_manager_with_operating_system_window_drag_platform(
+    fn tab_manager_with_operating_system_window_drag_platform(
         cx: &mut TestAppContext,
     ) -> (
-        Entity<WindowManager>,
+        Entity<TabManager>,
         Rc<RecordingOperatingSystemWindowDragPlatform>,
         &mut VisualTestContext,
     ) {
@@ -1903,13 +1810,13 @@ mod tests {
         let session_factory = WorkspaceTerminalSessionFactory::new_local(
             session_factory,
             crate::terminal::testing::test_workspace_directory(PathBuf::from(
-                "/tmp/spaceterm-window-manager-drag-test",
+                "/tmp/spaceterm-tab-manager-drag-test",
             )),
         );
         let platform = Rc::new(RecordingOperatingSystemWindowDragPlatform::default());
         let injected_platform = Rc::clone(&platform);
         let (manager, cx) = cx.add_window_view(move |window, cx| {
-            WindowManager::new_with_operating_system_window_drag_platform(
+            TabManager::new_with_operating_system_window_drag_platform(
                 session_factory,
                 injected_platform,
                 window,
@@ -1947,36 +1854,36 @@ mod tests {
     }
 
     #[gpui::test]
-    fn window_bar_should_keep_dim_dividers_beneath_every_item_and_accent_the_active_window(
+    fn tab_bar_should_keep_dim_dividers_beneath_every_item_and_accent_the_active_tab(
         cx: &mut TestAppContext,
     ) {
-        let (_manager, _records, cx) = window_manager(cx);
-        click("create-window-button", cx);
+        let (_manager, _records, cx) = tab_manager(cx);
+        click("create-tab-button", cx);
 
         let bar = cx
-            .debug_bounds("window-bar")
-            .expect("the Window bar was not rendered");
+            .debug_bounds("tab-bar")
+            .expect("the Tab bar was not rendered");
         let divider = cx
-            .debug_bounds("window-bar-divider")
-            .expect("the Window bar divider was not rendered");
+            .debug_bounds("tab-bar-divider")
+            .expect("the Tab bar divider was not rendered");
         let underline = cx
-            .debug_bounds("window-item-2-underline")
-            .expect("the Active Window underline was not rendered");
+            .debug_bounds("tab-item-2-underline")
+            .expect("the Active Tab underline was not rendered");
         let inactive_item = cx
-            .debug_bounds("window-item-1-inactive")
-            .expect("the inactive Window item was not rendered");
+            .debug_bounds("tab-item-1-inactive")
+            .expect("the inactive Tab item was not rendered");
         let active_item = cx
-            .debug_bounds("window-item-2-active")
-            .expect("the Active Window item was not rendered");
+            .debug_bounds("tab-item-2-active")
+            .expect("the Active Tab item was not rendered");
         let item_divider = cx
-            .debug_bounds("window-item-1-divider")
-            .expect("the Window item divider was not rendered");
+            .debug_bounds("tab-item-1-divider")
+            .expect("the Tab item divider was not rendered");
         let inactive_bottom_divider = cx
-            .debug_bounds("window-item-1-bottom-divider")
-            .expect("the inactive Window bottom divider was not rendered");
+            .debug_bounds("tab-item-1-bottom-divider")
+            .expect("the inactive Tab bottom divider was not rendered");
         let active_bottom_divider = cx
-            .debug_bounds("window-item-2-bottom-divider")
-            .expect("the Active Window bottom divider was not rendered");
+            .debug_bounds("tab-item-2-bottom-divider")
+            .expect("the Active Tab bottom divider was not rendered");
 
         assert_eq!(
             (
@@ -2009,17 +1916,17 @@ mod tests {
     }
 
     #[gpui::test]
-    fn window_bar_should_start_after_the_persistent_sidebar_chrome(cx: &mut TestAppContext) {
-        let (_manager, _records, cx) = window_manager(cx);
+    fn tab_bar_should_start_after_the_persistent_sidebar_chrome(cx: &mut TestAppContext) {
+        let (_manager, _records, cx) = tab_manager(cx);
         let root = cx
-            .debug_bounds("window-manager")
-            .expect("the Window manager was not rendered");
+            .debug_bounds("tab-manager")
+            .expect("the Tab manager was not rendered");
         let spacer = cx
-            .debug_bounds("window-manager-top-spacer")
+            .debug_bounds("tab-manager-top-spacer")
             .expect("the persistent top-left spacer was not rendered");
         let bar = cx
-            .debug_bounds("window-bar")
-            .expect("the Window bar was not rendered");
+            .debug_bounds("tab-bar")
+            .expect("the Tab bar was not rendered");
 
         assert_eq!(
             (spacer.origin, spacer.size, bar.origin.x),
@@ -2032,17 +1939,17 @@ mod tests {
     }
 
     #[gpui::test]
-    fn hiding_sidebar_should_expand_content_without_moving_the_window_bar(cx: &mut TestAppContext) {
-        let (manager, _records, cx) = window_manager(cx);
+    fn hiding_sidebar_should_expand_content_without_moving_the_tab_bar(cx: &mut TestAppContext) {
+        let (manager, _records, cx) = tab_manager(cx);
         let root = cx
-            .debug_bounds("window-manager")
-            .expect("the Window manager was not rendered");
+            .debug_bounds("tab-manager")
+            .expect("the Tab manager was not rendered");
         let visible_content = cx
-            .debug_bounds("window-manager-content")
-            .expect("the Window content was not rendered");
+            .debug_bounds("tab-manager-content")
+            .expect("the Tab content was not rendered");
         let visible_bar = cx
-            .debug_bounds("window-bar")
-            .expect("the Window bar was not rendered");
+            .debug_bounds("tab-bar")
+            .expect("the Tab bar was not rendered");
 
         manager.update(cx, |manager, cx| {
             manager.set_sidebar_layout(false, px(WORKSPACE_SIDEBAR_DEFAULT_WIDTH), cx);
@@ -2050,11 +1957,11 @@ mod tests {
         cx.run_until_parked();
 
         let hidden_content = cx
-            .debug_bounds("window-manager-content")
-            .expect("the expanded Window content was not rendered");
+            .debug_bounds("tab-manager-content")
+            .expect("the expanded Tab content was not rendered");
         let hidden_bar = cx
-            .debug_bounds("window-bar")
-            .expect("the Window bar was not rendered");
+            .debug_bounds("tab-bar")
+            .expect("the Tab bar was not rendered");
         assert_eq!(
             (
                 visible_content.origin.x,
@@ -2072,34 +1979,34 @@ mod tests {
     }
 
     #[gpui::test]
-    fn command_t_should_create_and_activate_a_new_window(cx: &mut TestAppContext) {
-        let (manager, records, cx) = window_manager(cx);
+    fn command_t_should_create_and_activate_a_new_tab(cx: &mut TestAppContext) {
+        let (manager, records, cx) = tab_manager(cx);
 
         cx.simulate_keystrokes("cmd-t");
         cx.run_until_parked();
 
         let state = manager.read_with(cx, |manager, _| {
             (
-                manager.windows.len(),
-                manager.windows.active_window_id(),
+                manager.tabs.len(),
+                manager.tabs.active_tab_id(),
                 records.dropped_session_ids(),
             )
         });
-        assert_eq!(state, (2, WindowId::new(2), Vec::new()));
+        assert_eq!(state, (2, TabId::new(2), Vec::new()));
     }
 
     #[gpui::test]
-    fn remote_window_creation_skips_local_validation_and_preserves_launch_context(
+    fn remote_tab_creation_skips_local_validation_and_preserves_launch_context(
         cx: &mut TestAppContext,
     ) {
-        let (manager, records, cx) = remote_window_manager(cx);
+        let (manager, records, cx) = remote_tab_manager(cx);
 
         cx.update(|window, cx| {
-            manager.update(cx, |manager, cx| manager.create_window(window, cx));
+            manager.update(cx, |manager, cx| manager.create_tab(window, cx));
         });
         cx.run_until_parked();
 
-        assert_eq!(manager.read_with(cx, |manager, _| manager.windows.len()), 2);
+        assert_eq!(manager.read_with(cx, |manager, _| manager.tabs.len()), 2);
         assert_eq!(records.starts().len(), 2);
         assert!(records.starts().iter().all(|start| {
             start.remote_launch_plan().is_some_and(|plan| {
@@ -2110,7 +2017,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn remote_window_creation_should_leave_hierarchy_unchanged_when_channel_reservation_fails(
+    fn remote_tab_creation_should_leave_hierarchy_unchanged_when_channel_reservation_fails(
         cx: &mut TestAppContext,
     ) {
         cx.update(crate::ui::init)
@@ -2141,85 +2048,75 @@ mod tests {
         let session_factory =
             remote_session_factory_with_provider(records.clone(), destination, provider);
         let (manager, cx) =
-            cx.add_window_view(|window, cx| WindowManager::new(session_factory, window, cx));
+            cx.add_window_view(|window, cx| TabManager::new(session_factory, window, cx));
         cx.run_until_parked();
 
         cx.update(|window, cx| {
-            manager.update(cx, |manager, cx| manager.create_window(window, cx));
+            manager.update(cx, |manager, cx| manager.create_tab(window, cx));
         });
         cx.run_until_parked();
 
         assert_eq!(
             manager.read_with(cx, |manager, _| {
-                (manager.windows.len(), manager.windows.active_window_id())
+                (manager.tabs.len(), manager.tabs.active_tab_id())
             }),
-            (1, WindowId::new(1))
+            (1, TabId::new(1))
         );
         assert_eq!(records.starts().len(), 1);
         assert_eq!(preparations.load(std::sync::atomic::Ordering::Acquire), 2);
     }
 
     #[gpui::test]
-    fn command_number_shortcuts_should_activate_windows_by_position(cx: &mut TestAppContext) {
-        let (manager, _records, cx) = window_manager(cx);
+    fn command_number_shortcuts_should_activate_tabs_by_position(cx: &mut TestAppContext) {
+        let (manager, _records, cx) = tab_manager(cx);
         for _ in 1..9 {
             cx.simulate_keystrokes("cmd-t");
             cx.run_until_parked();
         }
 
-        let mut active_window_ids = Vec::new();
+        let mut active_tab_ids = Vec::new();
         for shortcut in [
             "cmd-1", "cmd-2", "cmd-3", "cmd-4", "cmd-5", "cmd-6", "cmd-7", "cmd-8", "cmd-9",
         ] {
             cx.simulate_keystrokes(shortcut);
             cx.run_until_parked();
-            active_window_ids
-                .push(manager.read_with(cx, |manager, _| manager.windows.active_window_id()));
+            active_tab_ids.push(manager.read_with(cx, |manager, _| manager.tabs.active_tab_id()));
         }
 
-        assert_eq!(
-            active_window_ids,
-            (1..=9).map(WindowId::new).collect::<Vec<_>>()
-        );
+        assert_eq!(active_tab_ids, (1..=9).map(TabId::new).collect::<Vec<_>>());
     }
 
     #[gpui::test]
-    fn unavailable_command_number_shortcut_should_preserve_the_active_window(
-        cx: &mut TestAppContext,
-    ) {
-        let (manager, _records, cx) = window_manager(cx);
+    fn unavailable_command_number_shortcut_should_preserve_the_active_tab(cx: &mut TestAppContext) {
+        let (manager, _records, cx) = tab_manager(cx);
 
         cx.simulate_keystrokes("cmd-9");
         cx.run_until_parked();
 
-        let active_window_id =
-            manager.read_with(cx, |manager, _| manager.windows.active_window_id());
-        assert_eq!(active_window_id, WindowId::new(1));
+        let active_tab_id = manager.read_with(cx, |manager, _| manager.tabs.active_tab_id());
+        assert_eq!(active_tab_id, TabId::new(1));
     }
 
     #[gpui::test]
-    fn create_button_should_create_and_activate_without_dropping_the_inactive_window(
+    fn create_button_should_create_and_activate_without_dropping_the_inactive_tab(
         cx: &mut TestAppContext,
     ) {
-        let (manager, records, cx) = window_manager(cx);
+        let (manager, records, cx) = tab_manager(cx);
         let first_entity_id =
-            manager.read_with(cx, |manager, _| manager.windows.active_window().entity_id());
+            manager.read_with(cx, |manager, _| manager.tabs.active_tab().entity_id());
 
-        click("create-window-button", cx);
+        click("create-tab-button", cx);
 
         let state = manager.read_with(cx, |manager, cx| {
             (
-                manager.windows.len(),
-                manager.windows.active_window_id(),
+                manager.tabs.len(),
+                manager.tabs.active_tab_id(),
+                manager.tabs.tab(TabId::new(1)).map(Entity::entity_id),
                 manager
-                    .windows
-                    .window(WindowId::new(1))
-                    .map(Entity::entity_id),
-                manager
-                    .windows
-                    .window(WindowId::new(1))
-                    .is_some_and(|window| !window.read(cx).is_active()),
-                manager.windows.active_window().read(cx).is_active(),
+                    .tabs
+                    .tab(TabId::new(1))
+                    .is_some_and(|tab| !tab.read(cx).is_active()),
+                manager.tabs.active_tab().read(cx).is_active(),
                 records.dropped_session_ids(),
             )
         });
@@ -2227,7 +2124,7 @@ mod tests {
             state,
             (
                 2,
-                WindowId::new(2),
+                TabId::new(2),
                 Some(first_entity_id),
                 true,
                 true,
@@ -2237,11 +2134,11 @@ mod tests {
     }
 
     #[gpui::test]
-    fn single_pane_window_title_should_follow_the_terminal_title(cx: &mut TestAppContext) {
-        let (manager, records, cx) = window_manager(cx);
+    fn single_pane_tab_title_should_follow_the_terminal_title(cx: &mut TestAppContext) {
+        let (manager, records, cx) = tab_manager(cx);
         let sender = records
             .event_sender(1)
-            .expect("the initial Window session must have started");
+            .expect("the initial Tab session must have started");
 
         sender
             .try_send(SessionEvent::Screen(ScreenSnapshot::from_test_parts(
@@ -2253,19 +2150,19 @@ mod tests {
         cx.run_until_parked();
 
         let title = manager.read_with(cx, |manager, cx| {
-            manager.windows.active_window().read(cx).window_title()
+            manager.tabs.active_tab().read(cx).tab_title()
         });
         assert_eq!(title.as_ref(), "Claude Code");
     }
 
     #[gpui::test]
-    fn split_window_title_should_show_the_count_and_restore_the_terminal_title_after_close(
+    fn split_tab_title_should_show_the_count_and_restore_the_terminal_title_after_close(
         cx: &mut TestAppContext,
     ) {
-        let (manager, records, cx) = window_manager(cx);
+        let (manager, records, cx) = tab_manager(cx);
         let sender = records
             .event_sender(1)
-            .expect("the initial Window session must have started");
+            .expect("the initial Tab session must have started");
         sender
             .try_send(SessionEvent::Screen(ScreenSnapshot::from_test_parts(
                 Arc::from([]),
@@ -2278,12 +2175,12 @@ mod tests {
         cx.simulate_keystrokes("cmd-d");
         cx.run_until_parked();
         let split_title = manager.read_with(cx, |manager, cx| {
-            manager.windows.active_window().read(cx).window_title()
+            manager.tabs.active_tab().read(cx).tab_title()
         });
         cx.simulate_keystrokes("cmd-w");
         cx.run_until_parked();
         let restored_title = manager.read_with(cx, |manager, cx| {
-            manager.windows.active_window().read(cx).window_title()
+            manager.tabs.active_tab().read(cx).tab_title()
         });
 
         assert_eq!(
@@ -2293,48 +2190,48 @@ mod tests {
     }
 
     #[gpui::test]
-    fn hover_close_button_should_close_its_window_without_activating_it(cx: &mut TestAppContext) {
-        let (manager, records, cx) = window_manager(cx);
-        click("create-window-button", cx);
+    fn hover_close_button_should_close_its_tab_without_activating_it(cx: &mut TestAppContext) {
+        let (manager, records, cx) = tab_manager(cx);
+        click("create-tab-button", cx);
 
-        click("window-close-button-1", cx);
-
-        let state = manager.read_with(cx, |manager, _| {
-            (
-                manager.windows.len(),
-                manager.windows.active_window_id(),
-                records.dropped_session_ids(),
-            )
-        });
-        assert_eq!(state, (1, WindowId::new(2), vec![1]));
-    }
-
-    #[gpui::test]
-    fn active_window_close_button_should_close_the_active_window(cx: &mut TestAppContext) {
-        let (manager, records, cx) = window_manager(cx);
-        click("create-window-button", cx);
-
-        click("window-close-button-2", cx);
+        click("tab-close-button-1", cx);
 
         let state = manager.read_with(cx, |manager, _| {
             (
-                manager.windows.len(),
-                manager.windows.active_window_id(),
+                manager.tabs.len(),
+                manager.tabs.active_tab_id(),
                 records.dropped_session_ids(),
             )
         });
-        assert_eq!(state, (1, WindowId::new(1), vec![2]));
+        assert_eq!(state, (1, TabId::new(2), vec![1]));
     }
 
     #[gpui::test]
-    fn window_close_button_should_use_a_compact_right_inset(cx: &mut TestAppContext) {
-        let (_manager, _records, cx) = window_manager(cx);
+    fn active_tab_close_button_should_close_the_active_tab(cx: &mut TestAppContext) {
+        let (manager, records, cx) = tab_manager(cx);
+        click("create-tab-button", cx);
+
+        click("tab-close-button-2", cx);
+
+        let state = manager.read_with(cx, |manager, _| {
+            (
+                manager.tabs.len(),
+                manager.tabs.active_tab_id(),
+                records.dropped_session_ids(),
+            )
+        });
+        assert_eq!(state, (1, TabId::new(1), vec![2]));
+    }
+
+    #[gpui::test]
+    fn tab_close_button_should_use_a_compact_right_inset(cx: &mut TestAppContext) {
+        let (_manager, _records, cx) = tab_manager(cx);
         let item = cx
-            .debug_bounds("window-item-1-active")
-            .expect("the Active Window item was not rendered");
+            .debug_bounds("tab-item-1-active")
+            .expect("the Active Tab item was not rendered");
         let close_button = cx
-            .debug_bounds("window-close-button-1")
-            .expect("the Active Window close button was not rendered");
+            .debug_bounds("tab-close-button-1")
+            .expect("the Active Tab close button was not rendered");
 
         assert_eq!(
             (
@@ -2349,45 +2246,45 @@ mod tests {
     }
 
     #[gpui::test]
-    fn creating_windows_should_scroll_the_active_window_into_view(cx: &mut TestAppContext) {
-        let (manager, _records, cx) = window_manager(cx);
+    fn creating_tabs_should_scroll_the_active_tab_into_view(cx: &mut TestAppContext) {
+        let (manager, _records, cx) = tab_manager(cx);
 
         for _ in 0..20 {
-            click("create-window-button", cx);
+            click("create-tab-button", cx);
         }
 
         let state = manager.read_with(cx, |manager, _| {
             (
-                manager.windows.len(),
-                manager.windows.active_window_id(),
-                manager.window_bar_scroll_handle.offset().x,
+                manager.tabs.len(),
+                manager.tabs.active_tab_id(),
+                manager.tab_bar_scroll_handle.offset().x,
             )
         });
-        assert_eq!((state.0, state.1), (21, WindowId::new(21)));
+        assert_eq!((state.0, state.1), (21, TabId::new(21)));
         assert!(
             state.2 < px(0.0),
-            "the Window bar did not scroll; offset was {:?}",
+            "the Tab bar did not scroll; offset was {:?}",
             state.2
         );
     }
 
     #[gpui::test]
-    fn window_items_should_scroll_horizontally_with_the_mouse_wheel(cx: &mut TestAppContext) {
-        let (manager, _records, cx) = window_manager(cx);
+    fn tab_items_should_scroll_horizontally_with_the_mouse_wheel(cx: &mut TestAppContext) {
+        let (manager, _records, cx) = tab_manager(cx);
         for _ in 0..12 {
-            click("create-window-button", cx);
+            click("create-tab-button", cx);
         }
 
         manager.read_with(cx, |manager, _| {
             manager
-                .window_bar_scroll_handle
+                .tab_bar_scroll_handle
                 .set_offset(point(px(0.0), px(0.0)));
         });
         manager.update(cx, |_, cx| cx.notify());
         cx.run_until_parked();
         let items = cx
-            .debug_bounds("window-items")
-            .expect("the Window item strip was not rendered");
+            .debug_bounds("tab-items")
+            .expect("the Tab item strip was not rendered");
         cx.simulate_event(ScrollWheelEvent {
             position: items.center(),
             delta: ScrollDelta::Pixels(point(px(0.0), px(-120.0))),
@@ -2396,60 +2293,57 @@ mod tests {
         });
         cx.run_until_parked();
 
-        let offset =
-            manager.read_with(cx, |manager, _| manager.window_bar_scroll_handle.offset().x);
+        let offset = manager.read_with(cx, |manager, _| manager.tab_bar_scroll_handle.offset().x);
         assert!(
             offset < px(0.0),
-            "the Window strip did not scroll; offset was {offset:?}"
+            "the Tab strip did not scroll; offset was {offset:?}"
         );
     }
 
     #[gpui::test]
-    fn activating_an_inactive_window_should_restore_its_focused_pane(cx: &mut TestAppContext) {
-        let (manager, _records, cx) = window_manager(cx);
+    fn activating_an_inactive_tab_should_restore_its_focused_pane(cx: &mut TestAppContext) {
+        let (manager, _records, cx) = tab_manager(cx);
         cx.simulate_keystrokes("cmd-d");
-        click("create-window-button", cx);
+        click("create-tab-button", cx);
 
-        click("window-item-1-inactive", cx);
+        click("tab-item-1-inactive", cx);
 
-        let first_window = manager.read_with(cx, |manager, _| {
+        let first_tab = manager.read_with(cx, |manager, _| {
             manager
-                .windows
-                .window(WindowId::new(1))
+                .tabs
+                .tab(TabId::new(1))
                 .cloned()
-                .expect("Window 1 must remain owned")
+                .expect("Tab 1 must remain owned")
         });
         let state = cx.update(|window, cx| {
-            let pane_host = first_window.read(cx);
+            let pane_host = first_tab.read(cx);
             (
-                manager.read(cx).windows.active_window_id(),
+                manager.read(cx).tabs.active_tab_id(),
                 pane_host.focused_pane_id(),
                 pane_host.focused_terminal_is_focused(window, cx),
             )
         });
-        assert_eq!(state, (WindowId::new(1), PaneId::new(2), true));
+        assert_eq!(state, (TabId::new(1), PaneId::new(2), true));
     }
 
     #[gpui::test]
-    fn right_click_should_activate_and_target_the_clicked_window(cx: &mut TestAppContext) {
-        let (manager, _records, cx) = window_manager(cx);
-        click("create-window-button", cx);
+    fn right_click_should_activate_and_target_the_clicked_tab(cx: &mut TestAppContext) {
+        let (manager, _records, cx) = tab_manager(cx);
+        click("create-tab-button", cx);
 
-        right_click("window-item-1-inactive", cx);
+        right_click("tab-item-1-inactive", cx);
 
         let state = manager.read_with(cx, |manager, _| {
             (
-                manager.windows.active_window_id(),
-                manager
-                    .window_menu
-                    .map(|menu| (menu.window_id, menu.invocation)),
+                manager.tabs.active_tab_id(),
+                manager.tab_menu.map(|menu| (menu.tab_id, menu.invocation)),
             )
         });
         assert_eq!(
             state,
             (
-                WindowId::new(1),
-                Some((WindowId::new(1), WindowMenuInvocation::Context))
+                TabId::new(1),
+                Some((TabId::new(1), TabMenuInvocation::Context))
             )
         );
         let services_blocked = cx.update(|window, cx| {
@@ -2464,19 +2358,19 @@ mod tests {
     }
 
     #[gpui::test]
-    fn inactive_window_context_menu_should_not_transiently_focus_its_terminal(
+    fn inactive_tab_context_menu_should_not_transiently_focus_its_terminal(
         cx: &mut TestAppContext,
     ) {
-        let (manager, records, cx) = window_manager(cx);
-        click("create-window-button", cx);
+        let (manager, records, cx) = tab_manager(cx);
+        click("create-tab-button", cx);
         let command_count = records.commands().len();
 
-        right_click("window-item-1-inactive", cx);
+        right_click("tab-item-1-inactive", cx);
 
         let state = cx.update(|window, cx| {
             let manager = manager.read(cx);
             (
-                manager.windows.active_window_id(),
+                manager.tabs.active_tab_id(),
                 manager.focused_terminal_is_focused(window, cx),
                 manager.focused_terminal_has_input_focus(window, cx),
             )
@@ -2492,51 +2386,49 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(
             (state, focus_edges),
-            ((WindowId::new(1), false, false), vec![(2, false)])
+            ((TabId::new(1), false, false), vec![(2, false)])
         );
     }
 
     #[gpui::test]
-    fn top_ellipsis_should_target_the_active_window(cx: &mut TestAppContext) {
-        let (manager, _records, cx) = window_manager(cx);
-        click("create-window-button", cx);
+    fn top_ellipsis_should_target_the_active_tab(cx: &mut TestAppContext) {
+        let (manager, _records, cx) = tab_manager(cx);
+        click("create-tab-button", cx);
 
-        click("window-menu-button", cx);
+        click("tab-menu-button", cx);
 
-        let menu = manager.read_with(cx, |manager, _| manager.window_menu);
+        let menu = manager.read_with(cx, |manager, _| manager.tab_menu);
         assert_eq!(
             menu,
-            Some(WindowMenuState {
-                window_id: WindowId::new(2),
-                invocation: WindowMenuInvocation::Explicit,
+            Some(TabMenuState {
+                tab_id: TabId::new(2),
+                invocation: TabMenuInvocation::Explicit,
             })
         );
     }
 
     #[gpui::test]
-    fn window_menu_keeps_services_blocked_until_terminal_focus_is_restored(
-        cx: &mut TestAppContext,
-    ) {
-        let (manager, _records, cx) = window_manager(cx);
+    fn tab_menu_keeps_services_blocked_until_terminal_focus_is_restored(cx: &mut TestAppContext) {
+        let (manager, _records, cx) = tab_manager(cx);
         let before = cx.update(|window, cx| {
             manager.update(cx, |manager, cx| {
                 manager.native_service_status(WorkspaceId::new(1), window, cx)
             })
         });
 
-        click("window-menu-button", cx);
+        click("tab-menu-button", cx);
         let blocked = cx.update(|window, cx| {
             manager.update(cx, |manager, cx| {
                 manager.native_service_status(WorkspaceId::new(1), window, cx)
             })
         });
-        click("window-menu-button", cx);
+        click("tab-menu-button", cx);
         let trigger_focused = cx.update(|window, cx| {
             manager.update(cx, |manager, cx| {
                 manager.native_service_status(WorkspaceId::new(1), window, cx)
             })
         });
-        let pane_host = manager.read_with(cx, |manager, _| manager.windows.active_window().clone());
+        let pane_host = manager.read_with(cx, |manager, _| manager.tabs.active_tab().clone());
         cx.update(|window, cx| {
             pane_host.update(cx, |pane_host, cx| pane_host.focus(window, cx));
         });
@@ -2555,24 +2447,22 @@ mod tests {
 
     #[gpui::test]
     fn top_ellipsis_should_toggle_its_open_menu_closed(cx: &mut TestAppContext) {
-        let (manager, _records, cx) = window_manager(cx);
-        click("window-menu-button", cx);
+        let (manager, _records, cx) = tab_manager(cx);
+        click("tab-menu-button", cx);
 
-        click("window-menu-button", cx);
+        click("tab-menu-button", cx);
 
-        let menu = manager.read_with(cx, |manager, _| manager.window_menu);
+        let menu = manager.read_with(cx, |manager, _| manager.tab_menu);
         assert_eq!(menu, None);
     }
 
     #[gpui::test]
-    fn window_menu_outside_press_should_preempt_the_background_drag_region(
-        cx: &mut TestAppContext,
-    ) {
-        let (manager, _records, cx) = window_manager(cx);
-        click("window-menu-button", cx);
+    fn tab_menu_outside_press_should_preempt_the_background_drag_region(cx: &mut TestAppContext) {
+        let (manager, _records, cx) = tab_manager(cx);
+        click("tab-menu-button", cx);
         let chrome = cx
-            .debug_bounds("window-bar")
-            .expect("Window chrome was not rendered")
+            .debug_bounds("tab-bar")
+            .expect("Tab chrome was not rendered")
             .center();
 
         cx.simulate_click(chrome, Modifiers::none());
@@ -2580,7 +2470,7 @@ mod tests {
 
         let state = manager.read_with(cx, |manager, _| {
             (
-                manager.window_menu,
+                manager.tab_menu,
                 manager.window_drag_status.is_active(),
                 manager.terminal_focus_blocker(),
             )
@@ -2589,28 +2479,28 @@ mod tests {
     }
 
     #[gpui::test]
-    fn window_menu_should_restore_its_trigger_without_changing_the_focused_pane(
+    fn tab_menu_should_restore_its_trigger_without_changing_the_focused_pane(
         cx: &mut TestAppContext,
     ) {
-        let (manager, records, cx) = window_manager(cx);
+        let (manager, records, cx) = tab_manager(cx);
         let command_count = records.commands().len();
         let focused_pane_id = manager.read_with(cx, |manager, cx| {
-            manager.windows.active_window().read(cx).focused_pane_id()
+            manager.tabs.active_tab().read(cx).focused_pane_id()
         });
 
-        click("window-menu-button", cx);
+        click("tab-menu-button", cx);
 
         let menu_open = cx.update(|window, cx| {
             let manager = manager.read(cx);
             (
-                manager.windows.active_window().read(cx).focused_pane_id(),
+                manager.tabs.active_tab().read(cx).focused_pane_id(),
                 manager.focused_terminal_is_focused(window, cx),
                 manager.focused_terminal_has_input_focus(window, cx),
             )
         });
         assert_eq!(menu_open, (focused_pane_id, false, false));
 
-        click("window-menu-button", cx);
+        click("tab-menu-button", cx);
         cx.simulate_keystrokes("a");
 
         let trigger_commands = records
@@ -2624,7 +2514,7 @@ mod tests {
             [(1, RecordedSessionCommand::Focus(false))]
         ));
 
-        let pane_host = manager.read_with(cx, |manager, _| manager.windows.active_window().clone());
+        let pane_host = manager.read_with(cx, |manager, _| manager.tabs.active_tab().clone());
         cx.update(|window, cx| {
             pane_host.update(cx, |pane_host, cx| pane_host.focus(window, cx));
         });
@@ -2643,13 +2533,12 @@ mod tests {
     }
 
     #[gpui::test]
-    fn window_chrome_should_forward_threshold_crossing_and_double_activation_to_platform_policy(
+    fn tab_chrome_should_forward_threshold_crossing_and_double_activation_to_platform_policy(
         cx: &mut TestAppContext,
     ) {
-        let (_manager, platform, cx) =
-            window_manager_with_operating_system_window_drag_platform(cx);
+        let (_manager, platform, cx) = tab_manager_with_operating_system_window_drag_platform(cx);
         let chrome = cx
-            .debug_bounds("window-bar-drag-region")
+            .debug_bounds("tab-bar-drag-region")
             .expect("Window drag region must be rendered")
             .center();
 
@@ -2691,14 +2580,14 @@ mod tests {
     fn top_chrome_mouse_down_should_block_until_release_without_changing_focused_pane(
         cx: &mut TestAppContext,
     ) {
-        let (manager, records, cx) = window_manager(cx);
+        let (manager, records, cx) = tab_manager(cx);
         let command_count = records.commands().len();
         let chrome = cx
-            .debug_bounds("window-bar")
+            .debug_bounds("tab-bar")
             .expect("top chrome must be rendered")
             .center();
         let focused_pane_id = manager.read_with(cx, |manager, cx| {
-            manager.windows.active_window().read(cx).focused_pane_id()
+            manager.tabs.active_tab().read(cx).focused_pane_id()
         });
 
         cx.simulate_mouse_down(chrome, MouseButton::Left, Modifiers::none());
@@ -2706,7 +2595,7 @@ mod tests {
         let blocked = cx.update(|window, cx| {
             let manager = manager.read(cx);
             (
-                manager.windows.active_window().read(cx).focused_pane_id(),
+                manager.tabs.active_tab().read(cx).focused_pane_id(),
                 manager.focused_terminal_is_focused(window, cx),
                 manager.focused_terminal_has_input_focus(window, cx),
             )
@@ -2737,8 +2626,8 @@ mod tests {
         }));
 
         let outside_chrome = cx
-            .debug_bounds("window-manager-content")
-            .expect("Window content must be rendered")
+            .debug_bounds("tab-manager-content")
+            .expect("Tab content must be rendered")
             .center();
         cx.simulate_mouse_up(outside_chrome, MouseButton::Left, Modifiers::none());
         cx.run_until_parked();
@@ -2761,18 +2650,18 @@ mod tests {
     }
 
     #[gpui::test]
-    fn window_selector_press_should_block_before_activation_and_restore_selected_terminal(
+    fn tab_selector_press_should_block_before_activation_and_restore_selected_terminal(
         cx: &mut TestAppContext,
     ) {
-        let (manager, records, cx) = window_manager(cx);
-        click("create-window-button", cx);
+        let (manager, records, cx) = tab_manager(cx);
+        click("create-tab-button", cx);
         let command_count = records.commands().len();
         let position = cx
-            .debug_bounds("window-item-1-inactive")
-            .expect("inactive Window selector must be rendered")
+            .debug_bounds("tab-item-1-inactive")
+            .expect("inactive Tab selector must be rendered")
             .center();
         let focused_pane_id = manager.read_with(cx, |manager, cx| {
-            manager.windows.active_window().read(cx).focused_pane_id()
+            manager.tabs.active_tab().read(cx).focused_pane_id()
         });
 
         cx.simulate_mouse_move(position, None, Modifiers::none());
@@ -2782,13 +2671,13 @@ mod tests {
         let pressed = cx.update(|window, cx| {
             let manager = manager.read(cx);
             (
-                manager.windows.active_window_id(),
-                manager.windows.active_window().read(cx).focused_pane_id(),
+                manager.tabs.active_tab_id(),
+                manager.tabs.active_tab().read(cx).focused_pane_id(),
                 manager.focused_terminal_is_focused(window, cx),
                 manager.focused_terminal_has_input_focus(window, cx),
             )
         });
-        assert_eq!(pressed, (WindowId::new(2), focused_pane_id, true, false));
+        assert_eq!(pressed, (TabId::new(2), focused_pane_id, true, false));
 
         cx.simulate_mouse_up(position, MouseButton::Left, Modifiers::none());
         cx.run_until_parked();
@@ -2796,7 +2685,7 @@ mod tests {
         let selected = cx.update(|window, cx| {
             let manager = manager.read(cx);
             (
-                manager.windows.active_window_id(),
+                manager.tabs.active_tab_id(),
                 manager.focused_terminal_is_focused(window, cx),
                 manager.focused_terminal_has_input_focus(window, cx),
             )
@@ -2812,32 +2701,32 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(
             (selected, focus_edges),
-            ((WindowId::new(1), true, true), vec![(2, false), (1, true)])
+            ((TabId::new(1), true, true), vec![(2, false), (1, true)])
         );
     }
 
     #[gpui::test]
-    fn window_menu_split_should_target_the_selected_window_without_terminal_pointer_input(
+    fn tab_menu_split_should_target_the_selected_tab_without_terminal_pointer_input(
         cx: &mut TestAppContext,
     ) {
-        let (manager, records, cx) = window_manager(cx);
-        click("create-window-button", cx);
-        right_click("window-item-1-inactive", cx);
+        let (manager, records, cx) = tab_manager(cx);
+        click("create-tab-button", cx);
+        right_click("tab-item-1-inactive", cx);
 
-        click("window-menu-row-split-right", cx);
+        click("tab-menu-row-split-right", cx);
 
         let pane_counts = manager.read_with(cx, |manager, cx| {
             (
                 manager
-                    .windows
-                    .window(WindowId::new(1))
-                    .expect("Window 1 must remain owned")
+                    .tabs
+                    .tab(TabId::new(1))
+                    .expect("Tab 1 must remain owned")
                     .read(cx)
                     .pane_count(),
                 manager
-                    .windows
-                    .window(WindowId::new(2))
-                    .expect("Window 2 must remain owned")
+                    .tabs
+                    .tab(TabId::new(2))
+                    .expect("Tab 2 must remain owned")
                     .read(cx)
                     .pane_count(),
                 records.pointer_count(),
@@ -2847,18 +2736,18 @@ mod tests {
     }
 
     #[gpui::test]
-    fn single_pane_window_menu_should_disable_zoom_without_dismissing_the_menu(
+    fn single_pane_tab_menu_should_disable_zoom_without_dismissing_the_menu(
         cx: &mut TestAppContext,
     ) {
-        let (manager, _records, cx) = window_manager(cx);
-        click("window-menu-button", cx);
+        let (manager, _records, cx) = tab_manager(cx);
+        click("tab-menu-button", cx);
 
-        click("window-menu-row-toggle-zoom", cx);
+        click("tab-menu-row-toggle-zoom", cx);
 
         let state = manager.read_with(cx, |manager, cx| {
             (
-                manager.window_menu.is_some(),
-                manager.windows.active_window().read(cx).zoom_state(),
+                manager.tab_menu.is_some(),
+                manager.tabs.active_tab().read(cx).zoom_state(),
             )
         });
         assert_eq!(state, (true, ZoomState::Restored));
@@ -2868,111 +2757,105 @@ mod tests {
     fn target_focus_change_should_dismiss_menu_and_refresh_zoom_when_reopened(
         cx: &mut TestAppContext,
     ) {
-        let (manager, _records, cx) = window_manager(cx);
-        click("window-menu-button", cx);
+        let (manager, _records, cx) = tab_manager(cx);
+        click("tab-menu-button", cx);
 
-        let pane_host = manager.read_with(cx, |manager, _| manager.windows.active_window().clone());
+        let pane_host = manager.read_with(cx, |manager, _| manager.tabs.active_tab().clone());
         cx.update(|window, cx| {
             pane_host.update(cx, |pane_host, cx| {
                 pane_host.split_focused(SplitAxis::Horizontal, window, cx);
             });
         });
         cx.run_until_parked();
-        assert!(manager.read_with(cx, |manager, _| manager.window_menu.is_none()));
+        assert!(manager.read_with(cx, |manager, _| manager.tab_menu.is_none()));
 
-        click("window-menu-button", cx);
-        click("window-menu-row-toggle-zoom", cx);
+        click("tab-menu-button", cx);
+        click("tab-menu-row-toggle-zoom", cx);
 
         let state = manager.read_with(cx, |manager, cx| {
             (
-                manager.window_menu.is_none(),
-                manager.windows.active_window().read(cx).zoom_state(),
-                manager.windows.active_window().read(cx).pane_count(),
+                manager.tab_menu.is_none(),
+                manager.tabs.active_tab().read(cx).zoom_state(),
+                manager.tabs.active_tab().read(cx).pane_count(),
             )
         });
         assert!(
             matches!(state, (true, ZoomState::Zoomed(_), 2)),
-            "the open Window menu did not use the target PaneHost's live zoom state: {state:?}"
+            "the open Tab menu did not use the target PaneHost's live zoom state: {state:?}"
         );
     }
 
     #[gpui::test]
-    fn close_window_menu_should_focus_the_neighbor_and_drop_the_closed_session_once(
+    fn close_tab_menu_should_focus_the_neighbor_and_drop_the_closed_session_once(
         cx: &mut TestAppContext,
     ) {
-        let (manager, records, cx) = window_manager(cx);
-        click("create-window-button", cx);
-        click("window-menu-button", cx);
+        let (manager, records, cx) = tab_manager(cx);
+        click("create-tab-button", cx);
+        click("tab-menu-button", cx);
 
-        click("window-menu-row-close-window", cx);
+        click("tab-menu-row-close-tab", cx);
 
         let state = manager.read_with(cx, |manager, _| {
             (
-                manager.windows.len(),
-                manager.windows.active_window_id(),
+                manager.tabs.len(),
+                manager.tabs.active_tab_id(),
                 records.dropped_session_ids(),
             )
         });
-        assert_eq!(state, (1, WindowId::new(1), vec![2]));
+        assert_eq!(state, (1, TabId::new(1), vec![2]));
     }
 
     #[gpui::test]
-    fn closing_an_inactive_window_should_preserve_the_active_window(cx: &mut TestAppContext) {
-        let (manager, records, cx) = window_manager(cx);
-        click("create-window-button", cx);
+    fn closing_an_inactive_tab_should_preserve_the_active_tab(cx: &mut TestAppContext) {
+        let (manager, records, cx) = tab_manager(cx);
+        click("create-tab-button", cx);
 
         cx.update(|window, cx| {
             manager.update(cx, |manager, cx| {
-                manager.close_window(WindowId::new(1), window, cx);
+                manager.close_tab(TabId::new(1), window, cx);
             });
         });
         cx.run_until_parked();
 
         let state = manager.read_with(cx, |manager, _| {
-            (
-                manager.windows.active_window_id(),
-                records.dropped_session_ids(),
-            )
+            (manager.tabs.active_tab_id(), records.dropped_session_ids())
         });
-        assert_eq!(state, (WindowId::new(2), vec![1]));
+        assert_eq!(state, (TabId::new(2), vec![1]));
     }
 
     #[gpui::test]
-    fn inactive_shell_exit_should_close_its_window_without_stealing_focus(cx: &mut TestAppContext) {
-        let (manager, records, cx) = window_manager(cx);
-        click("create-window-button", cx);
+    fn inactive_shell_exit_should_close_its_tab_without_stealing_focus(cx: &mut TestAppContext) {
+        let (manager, records, cx) = tab_manager(cx);
+        click("create-tab-button", cx);
         let first_sender = records
             .event_sender(1)
-            .expect("Window 1 session must have started");
+            .expect("Tab 1 session must have started");
 
         first_sender
             .try_send(SessionEvent::Exited(SessionExit::Success))
             .unwrap();
         cx.run_until_parked();
 
-        let active_window =
-            manager.read_with(cx, |manager, _| manager.windows.active_window().clone());
+        let active_tab = manager.read_with(cx, |manager, _| manager.tabs.active_tab().clone());
         let state = cx.update(|window, cx| {
             (
-                manager.read(cx).windows.active_window_id(),
-                active_window
-                    .read(cx)
-                    .focused_terminal_is_focused(window, cx),
+                manager.read(cx).tabs.active_tab_id(),
+                active_tab.read(cx).focused_terminal_is_focused(window, cx),
                 records.dropped_session_ids(),
             )
         });
-        assert_eq!(state, (WindowId::new(2), true, vec![1]));
+        assert_eq!(state, (TabId::new(2), true, vec![1]));
     }
 
     #[gpui::test]
-    fn inactive_workspace_active_window_exit_should_leave_its_fallback_deactivated_and_unfocused(
+    fn inactive_workspace_active_tab_exit_should_leave_its_fallback_deactivated_and_unfocused(
         cx: &mut TestAppContext,
     ) {
-        let (manager, records, cx) = window_manager(cx);
-        click("create-window-button", cx);
+        let (manager, records, cx) = tab_manager(cx);
+        click("create-tab-button", cx);
         let active_sender = records
             .event_sender(2)
-            .expect("Window 2 session must have started");
+            .expect("Tab 2 session must have started");
         cx.update(|window, cx| {
             manager.update(cx, |manager, cx| manager.deactivate(cx));
             window.blur();
@@ -2983,27 +2866,27 @@ mod tests {
             .unwrap();
         cx.run_until_parked();
 
-        let fallback = manager.read_with(cx, |manager, _| manager.windows.active_window().clone());
+        let fallback = manager.read_with(cx, |manager, _| manager.tabs.active_tab().clone());
         let state = cx.update(|window, cx| {
             (
                 manager.read(cx).active,
-                manager.read(cx).windows.len(),
-                manager.read(cx).windows.active_window_id(),
+                manager.read(cx).tabs.len(),
+                manager.read(cx).tabs.active_tab_id(),
                 fallback.read(cx).is_active(),
                 fallback.read(cx).focused_terminal_is_focused(window, cx),
                 records.dropped_session_ids(),
             )
         });
-        assert_eq!(state, (false, 1, WindowId::new(1), false, false, vec![2]));
+        assert_eq!(state, (false, 1, TabId::new(1), false, false, vec![2]));
     }
 
     #[gpui::test]
-    fn active_shell_exit_should_close_its_window_and_focus_the_neighbor(cx: &mut TestAppContext) {
-        let (manager, records, cx) = window_manager(cx);
-        click("create-window-button", cx);
+    fn active_shell_exit_should_close_its_tab_and_focus_the_neighbor(cx: &mut TestAppContext) {
+        let (manager, records, cx) = tab_manager(cx);
+        click("create-tab-button", cx);
         let active_sender = records
             .event_sender(2)
-            .expect("Window 2 session must have started");
+            .expect("Tab 2 session must have started");
 
         active_sender
             .try_send(SessionEvent::Exited(SessionExit::Success))
@@ -3012,26 +2895,24 @@ mod tests {
 
         let state = manager.read_with(cx, |manager, _| {
             (
-                manager.windows.len(),
-                manager.windows.active_window_id(),
+                manager.tabs.len(),
+                manager.tabs.active_tab_id(),
                 records.dropped_session_ids(),
             )
         });
-        assert_eq!(state, (1, WindowId::new(1), vec![2]));
+        assert_eq!(state, (1, TabId::new(1), vec![2]));
     }
 
     #[gpui::test]
-    fn remote_create_window_should_revalidate_before_mutating_the_hierarchy(
-        cx: &mut TestAppContext,
-    ) {
+    fn remote_create_tab_should_revalidate_before_mutating_the_hierarchy(cx: &mut TestAppContext) {
         let destination = crate::domain::SshDestination::new("tester@remote".to_owned()).unwrap();
         let provider = Arc::new(SequencedRemoteChannelProvider::new(destination));
-        let (manager, records, cx) = remote_window_manager_with_provider(cx, Arc::clone(&provider));
+        let (manager, records, cx) = remote_tab_manager_with_provider(cx, Arc::clone(&provider));
         let before = manager.read_with(cx, hierarchy_identity);
 
         provider.fail_revalidation_with(Some(RemoteChannelRevalidationError::IdentityChanged));
         cx.update(|window, cx| {
-            manager.update(cx, |manager, cx| manager.create_window(window, cx));
+            manager.update(cx, |manager, cx| manager.create_tab(window, cx));
         });
         cx.run_until_parked();
 
@@ -3042,24 +2923,24 @@ mod tests {
 
         provider.fail_revalidation_with(None);
         cx.update(|window, cx| {
-            manager.update(cx, |manager, cx| manager.create_window(window, cx));
+            manager.update(cx, |manager, cx| manager.create_tab(window, cx));
         });
         cx.run_until_parked();
 
-        assert_eq!(manager.read_with(cx, |manager, _| manager.windows.len()), 2);
+        assert_eq!(manager.read_with(cx, |manager, _| manager.tabs.len()), 2);
         assert_eq!(records.starts().len(), 2);
         assert_eq!(provider.preparation_count(), 2);
         assert_eq!(provider.revalidation_count(), 2);
     }
 
     #[gpui::test]
-    fn remote_create_window_should_emit_each_typed_revalidation_failure_without_mutation(
+    fn remote_create_tab_should_emit_each_typed_revalidation_failure_without_mutation(
         cx: &mut TestAppContext,
     ) {
         let destination = crate::domain::SshDestination::new("tester@remote".to_owned()).unwrap();
         let provider = Arc::new(SequencedRemoteChannelProvider::new(destination));
         let (manager, records, events, cx) =
-            remote_window_manager_with_provider_and_events(cx, Arc::clone(&provider));
+            remote_tab_manager_with_provider_and_events(cx, Arc::clone(&provider));
         let before = manager.read_with(cx, hierarchy_identity);
 
         for error in [
@@ -3069,7 +2950,7 @@ mod tests {
         ] {
             provider.fail_revalidation_with(Some(error));
             cx.update(|window, cx| {
-                manager.update(cx, |manager, cx| manager.create_window(window, cx));
+                manager.update(cx, |manager, cx| manager.create_tab(window, cx));
             });
             cx.run_until_parked();
         }
@@ -3088,24 +2969,24 @@ mod tests {
     }
 
     #[gpui::test]
-    fn remote_create_window_should_report_consumed_grant_supersession_and_cancellation_once(
+    fn remote_create_tab_should_report_consumed_grant_supersession_and_cancellation_once(
         cx: &mut TestAppContext,
     ) {
         let destination = crate::domain::SshDestination::new("tester@remote".to_owned()).unwrap();
         let provider = Arc::new(SequencedRemoteChannelProvider::new(destination));
         let (manager, records, events, cx) =
-            remote_window_manager_with_provider_and_events(cx, Arc::clone(&provider));
+            remote_tab_manager_with_provider_and_events(cx, Arc::clone(&provider));
         let before = manager.read_with(cx, hierarchy_identity);
 
         provider.invalidate_next_grant();
         cx.update(|window, cx| {
-            manager.update(cx, |manager, cx| manager.create_window(window, cx));
+            manager.update(cx, |manager, cx| manager.create_tab(window, cx));
         });
         cx.run_until_parked();
 
         cx.update(|window, cx| {
             manager.update(cx, |manager, cx| {
-                manager.create_window(window, cx);
+                manager.create_tab(window, cx);
                 manager.child_launch_generation = manager.child_launch_generation.wrapping_add(1);
             });
         });
@@ -3113,7 +2994,7 @@ mod tests {
 
         cx.update(|window, cx| {
             manager.update(cx, |manager, cx| {
-                manager.create_window(window, cx);
+                manager.create_tab(window, cx);
                 manager.disconnect_remote(1, cx).unwrap();
             });
         });
@@ -3132,11 +3013,11 @@ mod tests {
     }
 
     #[gpui::test]
-    fn remote_split_failure_should_be_forwarded_once_by_window_manager(cx: &mut TestAppContext) {
+    fn remote_split_failure_should_be_forwarded_once_by_tab_manager(cx: &mut TestAppContext) {
         let destination = crate::domain::SshDestination::new("tester@remote".to_owned()).unwrap();
         let provider = Arc::new(SequencedRemoteChannelProvider::new(destination));
         let (manager, records, events, cx) =
-            remote_window_manager_with_provider_and_events(cx, Arc::clone(&provider));
+            remote_tab_manager_with_provider_and_events(cx, Arc::clone(&provider));
         let before = manager.read_with(cx, hierarchy_identity);
         provider.fail_revalidation_with(Some(RemoteChannelRevalidationError::IdentityChanged));
 
@@ -3152,17 +3033,17 @@ mod tests {
     }
 
     #[gpui::test]
-    fn remote_create_window_should_not_mutate_when_generation_changes_after_revalidation(
+    fn remote_create_tab_should_not_mutate_when_generation_changes_after_revalidation(
         cx: &mut TestAppContext,
     ) {
         let destination = crate::domain::SshDestination::new("tester@remote".to_owned()).unwrap();
         let provider = Arc::new(SequencedRemoteChannelProvider::new(destination));
-        let (manager, records, cx) = remote_window_manager_with_provider(cx, Arc::clone(&provider));
+        let (manager, records, cx) = remote_tab_manager_with_provider(cx, Arc::clone(&provider));
         let before = manager.read_with(cx, hierarchy_identity);
         provider.invalidate_next_grant();
 
         cx.update(|window, cx| {
-            manager.update(cx, |manager, cx| manager.create_window(window, cx));
+            manager.update(cx, |manager, cx| manager.create_tab(window, cx));
         });
         cx.run_until_parked();
 
@@ -3178,10 +3059,10 @@ mod tests {
     ) {
         let destination = crate::domain::SshDestination::new("tester@remote".to_owned()).unwrap();
         let provider = Arc::new(SequencedRemoteChannelProvider::new(destination));
-        let (manager, records, cx) = remote_window_manager_with_provider(cx, Arc::clone(&provider));
+        let (manager, records, cx) = remote_tab_manager_with_provider(cx, Arc::clone(&provider));
         cx.simulate_keystrokes("cmd-d");
         cx.dispatch_action(TogglePaneZoom);
-        click("create-window-button", cx);
+        click("create-tab-button", cx);
         cx.run_until_parked();
         assert_eq!(records.starts().len(), 3);
 
@@ -3190,7 +3071,7 @@ mod tests {
             .unwrap();
         cx.simulate_keystrokes("cmd-d");
         cx.update(|window, cx| {
-            manager.update(cx, |manager, cx| manager.create_window(window, cx));
+            manager.update(cx, |manager, cx| manager.create_tab(window, cx));
         });
         cx.run_until_parked();
         assert_eq!(
@@ -3204,7 +3085,7 @@ mod tests {
         let identity_changed = prepare_remote_restart_for_test(&manager, factory, 5, cx);
         assert!(matches!(
             identity_changed,
-            Err(RemoteWindowManagerLifecycleError::Revalidation(
+            Err(RemoteTabManagerLifecycleError::Revalidation(
                 RemoteChannelRevalidationError::IdentityChanged
             ))
         ));
@@ -3212,7 +3093,7 @@ mod tests {
         assert_eq!(manager.read_with(cx, hierarchy_identity), before);
         assert!(manager.read_with(cx, |manager, cx| {
             manager
-                .windows
+                .tabs
                 .iter()
                 .all(|(_, host)| host.read(cx).remote_disconnected_generation() == Some(4))
         }));
@@ -3223,14 +3104,14 @@ mod tests {
         let failed = prepare_remote_restart_for_test(&manager, factory, 5, cx);
         assert!(matches!(
             failed,
-            Err(RemoteWindowManagerLifecycleError::ChannelUnavailable(_))
+            Err(RemoteTabManagerLifecycleError::ChannelUnavailable(_))
         ));
         assert_eq!(records.starts().len(), 3);
         let after_failed_prepare = manager.read_with(cx, hierarchy_identity);
         assert_eq!(after_failed_prepare, before);
         assert!(manager.read_with(cx, |manager, cx| {
             manager
-                .windows
+                .tabs
                 .iter()
                 .all(|(_, host)| host.read(cx).remote_disconnected_generation() == Some(4))
         }));
@@ -3256,7 +3137,7 @@ mod tests {
     fn cancelled_remote_restart_preparation_should_not_reserve_or_mutate(cx: &mut TestAppContext) {
         let destination = crate::domain::SshDestination::new("tester@remote".to_owned()).unwrap();
         let provider = Arc::new(SequencedRemoteChannelProvider::new(destination));
-        let (manager, records, cx) = remote_window_manager_with_provider(cx, Arc::clone(&provider));
+        let (manager, records, cx) = remote_tab_manager_with_provider(cx, Arc::clone(&provider));
         manager
             .update(cx, |manager, cx| manager.disconnect_remote(4, cx))
             .unwrap();
@@ -3285,7 +3166,7 @@ mod tests {
     fn known_remote_master_failure_keeps_pane_and_blocks_new_children(cx: &mut TestAppContext) {
         let destination = crate::domain::SshDestination::new("tester@remote".to_owned()).unwrap();
         let provider = Arc::new(SequencedRemoteChannelProvider::new(destination));
-        let (manager, records, cx) = remote_window_manager_with_provider(cx, Arc::clone(&provider));
+        let (manager, records, cx) = remote_tab_manager_with_provider(cx, Arc::clone(&provider));
         provider.set_ready(false);
         records
             .event_sender(1)
@@ -3296,15 +3177,15 @@ mod tests {
 
         cx.simulate_keystrokes("cmd-d");
         cx.update(|window, cx| {
-            manager.update(cx, |manager, cx| manager.create_window(window, cx));
+            manager.update(cx, |manager, cx| manager.create_tab(window, cx));
         });
         cx.run_until_parked();
 
         let state = manager.read_with(cx, |manager, cx| {
-            let host = manager.windows.active_window().read(cx);
+            let host = manager.tabs.active_tab().read(cx);
             let remote_state = host.focused_terminal_remote_state(cx);
             (
-                manager.windows.len(),
+                manager.tabs.len(),
                 host.pane_count(),
                 remote_state.0,
                 remote_state.1,
@@ -3318,7 +3199,7 @@ mod tests {
     fn post_commit_start_failure_is_scoped_to_the_failed_remote_pane(cx: &mut TestAppContext) {
         let destination = crate::domain::SshDestination::new("tester@remote".to_owned()).unwrap();
         let provider = Arc::new(SequencedRemoteChannelProvider::new(destination.clone()));
-        let (manager, records, cx) = remote_window_manager_with_provider(cx, Arc::clone(&provider));
+        let (manager, records, cx) = remote_tab_manager_with_provider(cx, Arc::clone(&provider));
         cx.simulate_keystrokes("cmd-d");
         cx.run_until_parked();
         manager
@@ -3344,8 +3225,8 @@ mod tests {
 
         let states = manager.read_with(cx, |manager, cx| {
             manager
-                .windows
-                .active_window()
+                .tabs
+                .active_tab()
                 .read(cx)
                 .terminal_restart_states(cx)
         });
@@ -3365,8 +3246,8 @@ mod tests {
 
     #[gpui::test]
     fn healthy_remote_shell_exit_keeps_existing_hierarchy_close_behavior(cx: &mut TestAppContext) {
-        let (manager, records, cx) = remote_window_manager(cx);
-        click("create-window-button", cx);
+        let (manager, records, cx) = remote_tab_manager(cx);
+        click("create-tab-button", cx);
         records
             .event_sender(2)
             .unwrap()
@@ -3375,23 +3256,23 @@ mod tests {
         cx.run_until_parked();
         assert_eq!(
             manager.read_with(cx, |manager, _| {
-                (manager.windows.len(), manager.windows.active_window_id())
+                (manager.tabs.len(), manager.tabs.active_tab_id())
             }),
-            (1, WindowId::new(1))
+            (1, TabId::new(1))
         );
     }
 
     #[gpui::test]
-    fn closing_a_multi_pane_window_should_close_every_owned_session_exactly_once(
+    fn closing_a_multi_pane_tab_should_close_every_owned_session_exactly_once(
         cx: &mut TestAppContext,
     ) {
-        let (manager, records, cx) = window_manager(cx);
+        let (manager, records, cx) = tab_manager(cx);
         cx.simulate_keystrokes("cmd-d");
-        click("create-window-button", cx);
+        click("create-tab-button", cx);
 
         cx.update(|window, cx| {
             manager.update(cx, |manager, cx| {
-                manager.close_window(WindowId::new(1), window, cx);
+                manager.close_tab(TabId::new(1), window, cx);
             });
         });
         cx.run_until_parked();
@@ -3402,10 +3283,8 @@ mod tests {
     }
 
     #[gpui::test]
-    fn command_w_should_close_only_the_focused_pane_when_the_window_is_split(
-        cx: &mut TestAppContext,
-    ) {
-        let (manager, records, cx) = window_manager(cx);
+    fn command_w_should_close_only_the_focused_pane_when_the_tab_is_split(cx: &mut TestAppContext) {
+        let (manager, records, cx) = tab_manager(cx);
         cx.simulate_keystrokes("cmd-d");
         cx.run_until_parked();
 
@@ -3414,8 +3293,8 @@ mod tests {
 
         let state = manager.read_with(cx, |manager, cx| {
             (
-                manager.windows.len(),
-                manager.windows.active_window().read(cx).pane_count(),
+                manager.tabs.len(),
+                manager.tabs.active_tab().read(cx).pane_count(),
                 records.dropped_session_ids(),
             )
         });
@@ -3423,29 +3302,29 @@ mod tests {
     }
 
     #[gpui::test]
-    fn command_w_should_close_the_active_window_when_its_last_pane_closes(cx: &mut TestAppContext) {
-        let (manager, records, cx) = window_manager(cx);
-        click("create-window-button", cx);
+    fn command_w_should_close_the_active_tab_when_its_last_pane_closes(cx: &mut TestAppContext) {
+        let (manager, records, cx) = tab_manager(cx);
+        click("create-tab-button", cx);
 
         cx.simulate_keystrokes("cmd-w");
         cx.run_until_parked();
 
         let state = manager.read_with(cx, |manager, _| {
             (
-                manager.windows.len(),
-                manager.windows.active_window_id(),
+                manager.tabs.len(),
+                manager.tabs.active_tab_id(),
                 records.dropped_session_ids(),
             )
         });
-        assert_eq!(state, (1, WindowId::new(1), vec![2]));
+        assert_eq!(state, (1, TabId::new(1), vec![2]));
     }
 
     #[gpui::test]
-    fn command_shift_w_should_close_every_pane_in_only_the_active_window(cx: &mut TestAppContext) {
-        let (manager, records, cx) = window_manager(cx);
+    fn command_shift_w_should_close_every_pane_in_only_the_active_tab(cx: &mut TestAppContext) {
+        let (manager, records, cx) = tab_manager(cx);
         cx.simulate_keystrokes("cmd-d");
-        click("create-window-button", cx);
-        click("window-item-1-inactive", cx);
+        click("create-tab-button", cx);
+        click("tab-item-1-inactive", cx);
 
         cx.simulate_keystrokes("cmd-shift-w");
         cx.run_until_parked();
@@ -3454,25 +3333,25 @@ mod tests {
         dropped.sort_unstable();
         let state = manager.read_with(cx, |manager, cx| {
             (
-                manager.windows.len(),
-                manager.windows.active_window_id(),
-                manager.windows.active_window().read(cx).pane_count(),
+                manager.tabs.len(),
+                manager.tabs.active_tab_id(),
+                manager.tabs.active_tab().read(cx).pane_count(),
             )
         });
-        assert_eq!(state, (1, WindowId::new(2), 1));
+        assert_eq!(state, (1, TabId::new(2), 1));
         assert_eq!(dropped, vec![1, 2]);
     }
 
     #[gpui::test]
-    fn command_shift_w_should_request_owning_workspace_close_for_the_final_window(
+    fn command_shift_w_should_request_owning_workspace_close_for_the_final_tab(
         cx: &mut TestAppContext,
     ) {
-        let (manager, records, cx) = window_manager(cx);
+        let (manager, records, cx) = tab_manager(cx);
         let close_requests = Rc::new(Cell::new(0));
         let close_requests_for_subscription = Rc::clone(&close_requests);
         manager.update(cx, |_, cx| {
-            cx.subscribe(&manager, move |_, _, event: &WindowManagerEvent, _| {
-                if matches!(event, WindowManagerEvent::FinalWindowCloseRequested { .. }) {
+            cx.subscribe(&manager, move |_, _, event: &TabManagerEvent, _| {
+                if matches!(event, TabManagerEvent::FinalTabCloseRequested { .. }) {
                     close_requests_for_subscription.update(|count| count + 1);
                 }
             })
@@ -3490,16 +3369,16 @@ mod tests {
     }
 
     #[gpui::test]
-    fn window_context_menu_should_stay_inside_the_operating_system_window(cx: &mut TestAppContext) {
-        let (_manager, _records, cx) = window_manager(cx);
-        right_click("window-item-1-active", cx);
+    fn tab_context_menu_should_stay_inside_the_operating_system_window(cx: &mut TestAppContext) {
+        let (_manager, _records, cx) = tab_manager(cx);
+        right_click("tab-item-1-active", cx);
 
         let row = cx
-            .debug_bounds("window-menu-row-split-right")
-            .expect("the Window menu was not rendered");
+            .debug_bounds("tab-menu-row-split-right")
+            .expect("the Tab menu was not rendered");
         let root = cx
-            .debug_bounds("window-manager")
-            .expect("the Window manager was not rendered");
+            .debug_bounds("tab-manager")
+            .expect("the Tab manager was not rendered");
 
         assert!(row.origin.x >= root.origin.x);
         assert!(row.origin.y >= root.origin.y);

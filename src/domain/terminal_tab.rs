@@ -32,7 +32,7 @@ macro_rules! typed_id {
     };
 }
 
-typed_id!(WindowId);
+typed_id!(TabId);
 typed_id!(PaneId);
 typed_id!(SplitId);
 
@@ -107,16 +107,16 @@ pub(crate) enum ClosePaneOutcome<T> {
         focused_pane_id: PaneId,
         closed_terminal: T,
     },
-    CloseWindow {
-        window_id: WindowId,
+    CloseTab {
+        tab_id: TabId,
     },
 }
 
 #[derive(Clone, Copy, Debug, Error, PartialEq)]
 pub(crate) enum PaneError {
-    #[error("Pane {0} does not belong to this Window")]
+    #[error("Pane {0} does not belong to this Tab")]
     PaneNotFound(PaneId),
-    #[error("Split {0} does not belong to this Window")]
+    #[error("Split {0} does not belong to this Tab")]
     SplitNotFound(SplitId),
     #[error("Pane ID space is exhausted")]
     PaneIdExhausted,
@@ -189,8 +189,8 @@ pub(crate) enum PaneNodeRef<'a> {
     },
 }
 
-pub(crate) struct TerminalWindow<T> {
-    id: WindowId,
+pub(crate) struct TerminalTab<T> {
+    id: TabId,
     root: PaneNode,
     terminals: BTreeMap<PaneId, T>,
     focused_pane_id: PaneId,
@@ -200,9 +200,9 @@ pub(crate) struct TerminalWindow<T> {
     next_split_id: u64,
 }
 
-impl<T> TerminalWindow<T> {
+impl<T> TerminalTab<T> {
     pub(crate) fn new(
-        id: WindowId,
+        id: TabId,
         minimum_pane_size: PaneSize,
         create_initial_terminal: impl FnOnce(PaneId) -> T,
     ) -> Self {
@@ -222,7 +222,7 @@ impl<T> TerminalWindow<T> {
         }
     }
 
-    pub(crate) const fn id(&self) -> WindowId {
+    pub(crate) const fn id(&self) -> TabId {
         self.id
     }
 
@@ -329,7 +329,7 @@ impl<T> TerminalWindow<T> {
             .without_pane(pane_id)
             .ok_or(PaneError::PaneNotFound(pane_id))?;
         let Some(new_root) = removal.replacement else {
-            return Ok(ClosePaneOutcome::CloseWindow { window_id: self.id });
+            return Ok(ClosePaneOutcome::CloseTab { tab_id: self.id });
         };
         let terminal = self
             .terminals
@@ -852,40 +852,37 @@ mod tests {
         PaneSize::new(width, height).unwrap()
     }
 
-    fn window<T>(terminal: T) -> TerminalWindow<T> {
-        TerminalWindow::new(WindowId::new(7), size(100.0, 50.0), |_| terminal)
+    fn tab<T>(terminal: T) -> TerminalTab<T> {
+        TerminalTab::new(TabId::new(7), size(100.0, 50.0), |_| terminal)
     }
 
-    fn four_pane_window() -> TerminalWindow<()> {
-        let mut window = window(());
-        window
-            .split_pane(
-                PaneId::new(1),
-                SplitAxis::Horizontal,
-                size(500.0, 400.0),
-                DIVIDER_SIZE,
-                |_| (),
-            )
-            .unwrap();
-        window
-            .split_pane(
-                PaneId::new(1),
-                SplitAxis::Vertical,
-                size(250.0, 400.0),
-                DIVIDER_SIZE,
-                |_| (),
-            )
-            .unwrap();
-        window
-            .split_pane(
-                PaneId::new(2),
-                SplitAxis::Vertical,
-                size(250.0, 400.0),
-                DIVIDER_SIZE,
-                |_| (),
-            )
-            .unwrap();
-        window
+    fn four_pane_tab() -> TerminalTab<()> {
+        let mut tab = tab(());
+        tab.split_pane(
+            PaneId::new(1),
+            SplitAxis::Horizontal,
+            size(500.0, 400.0),
+            DIVIDER_SIZE,
+            |_| (),
+        )
+        .unwrap();
+        tab.split_pane(
+            PaneId::new(1),
+            SplitAxis::Vertical,
+            size(250.0, 400.0),
+            DIVIDER_SIZE,
+            |_| (),
+        )
+        .unwrap();
+        tab.split_pane(
+            PaneId::new(2),
+            SplitAxis::Vertical,
+            size(250.0, 400.0),
+            DIVIDER_SIZE,
+            |_| (),
+        )
+        .unwrap();
+        tab
     }
 
     fn topology(tree: PaneTreeRef<'_>) -> String {
@@ -908,68 +905,61 @@ mod tests {
     #[test]
     fn new_should_create_one_focused_pane() {
         let created_id = Cell::new(None);
-        let window = TerminalWindow::new(WindowId::new(7), size(100.0, 50.0), |pane_id| {
+        let tab = TerminalTab::new(TabId::new(7), size(100.0, 50.0), |pane_id| {
             created_id.set(Some(pane_id));
         });
 
         assert_eq!(
-            (
-                window.pane_count(),
-                window.focused_pane_id(),
-                created_id.get()
-            ),
+            (tab.pane_count(), tab.focused_pane_id(), created_id.get()),
             (1, PaneId::new(1), Some(PaneId::new(1)))
         );
     }
 
     #[test]
     fn split_pane_should_build_nested_right_and_down_layout() {
-        let mut window = window(());
-        window
-            .split_pane(
-                PaneId::new(1),
-                SplitAxis::Horizontal,
-                size(500.0, 400.0),
-                DIVIDER_SIZE,
-                |_| (),
-            )
-            .unwrap();
-        window
-            .split_pane(
-                PaneId::new(2),
-                SplitAxis::Vertical,
-                size(250.0, 400.0),
-                DIVIDER_SIZE,
-                |_| (),
-            )
-            .unwrap();
+        let mut tab = tab(());
+        tab.split_pane(
+            PaneId::new(1),
+            SplitAxis::Horizontal,
+            size(500.0, 400.0),
+            DIVIDER_SIZE,
+            |_| (),
+        )
+        .unwrap();
+        tab.split_pane(
+            PaneId::new(2),
+            SplitAxis::Vertical,
+            size(250.0, 400.0),
+            DIVIDER_SIZE,
+            |_| (),
+        )
+        .unwrap();
 
         assert_eq!(
-            topology(window.root()),
+            topology(tab.root()),
             "1:Horizontal:0.50(1,2:Vertical:0.50(2,3))"
         );
     }
 
     #[test]
     fn split_pane_should_focus_the_created_pane() {
-        let mut window = window(());
-        window
-            .split_pane(
-                PaneId::new(1),
-                SplitAxis::Horizontal,
-                size(500.0, 400.0),
-                DIVIDER_SIZE,
-                |_| (),
-            )
-            .unwrap();
+        let mut tab = tab(());
+        tab.split_pane(
+            PaneId::new(1),
+            SplitAxis::Horizontal,
+            size(500.0, 400.0),
+            DIVIDER_SIZE,
+            |_| (),
+        )
+        .unwrap();
 
-        assert_eq!(window.focused_pane_id(), PaneId::new(2));
+        assert_eq!(tab.focused_pane_id(), PaneId::new(2));
     }
 
     #[test]
     fn closed_pane_and_split_ids_should_not_be_reused() {
-        let mut window = window(());
-        let second = window
+        let mut tab = tab(());
+        let second = tab
             .split_pane(
                 PaneId::new(1),
                 SplitAxis::Horizontal,
@@ -978,9 +968,9 @@ mod tests {
                 |_| (),
             )
             .unwrap();
-        window.close_pane(second).unwrap();
+        tab.close_pane(second).unwrap();
 
-        let third = window
+        let third = tab
             .split_pane(
                 PaneId::new(1),
                 SplitAxis::Vertical,
@@ -991,17 +981,17 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            (third, topology(window.root())),
+            (third, topology(tab.root())),
             (PaneId::new(3), "2:Vertical:0.50(1,3)".into())
         );
     }
 
     #[test]
     fn split_pane_should_validate_the_target_before_creating_terminal() {
-        let mut window = window(());
+        let mut tab = tab(());
         let creations = Cell::new(0);
 
-        let result = window.split_pane(
+        let result = tab.split_pane(
             PaneId::new(99),
             SplitAxis::Horizontal,
             size(500.0, 400.0),
@@ -1012,22 +1002,17 @@ mod tests {
         );
 
         assert_eq!(
-            (
-                result,
-                creations.get(),
-                window.next_pane_id,
-                window.next_split_id,
-            ),
+            (result, creations.get(), tab.next_pane_id, tab.next_split_id,),
             (Err(PaneError::PaneNotFound(PaneId::new(99))), 0, 2, 1)
         );
     }
 
     #[test]
     fn split_pane_should_validate_minimum_size_before_creating_terminal() {
-        let mut window = window(());
+        let mut tab = tab(());
         let creations = Cell::new(0);
 
-        let result = window.split_pane(
+        let result = tab.split_pane(
             PaneId::new(1),
             SplitAxis::Horizontal,
             size(200.0, 50.0),
@@ -1038,12 +1023,7 @@ mod tests {
         );
 
         assert_eq!(
-            (
-                result,
-                creations.get(),
-                window.next_pane_id,
-                window.next_split_id,
-            ),
+            (result, creations.get(), tab.next_pane_id, tab.next_split_id,),
             (
                 Err(PaneError::InsufficientSpace {
                     available: size(200.0, 50.0),
@@ -1058,11 +1038,11 @@ mod tests {
 
     #[test]
     fn split_pane_should_reject_exhausted_pane_ids_without_mutation() {
-        let mut window = window(());
-        window.next_pane_id = u64::MAX;
+        let mut tab = tab(());
+        tab.next_pane_id = u64::MAX;
         let creations = Cell::new(0);
 
-        let result = window.split_pane(
+        let result = tab.split_pane(
             PaneId::new(1),
             SplitAxis::Horizontal,
             size(500.0, 400.0),
@@ -1074,11 +1054,11 @@ mod tests {
             (
                 result,
                 creations.get(),
-                topology(window.root()),
-                window.pane_count(),
-                window.focused_pane_id(),
-                window.next_pane_id,
-                window.next_split_id,
+                topology(tab.root()),
+                tab.pane_count(),
+                tab.focused_pane_id(),
+                tab.next_pane_id,
+                tab.next_split_id,
             ),
             (
                 Err(PaneError::PaneIdExhausted),
@@ -1094,11 +1074,11 @@ mod tests {
 
     #[test]
     fn split_pane_should_reject_exhausted_split_ids_without_mutation() {
-        let mut window = window(());
-        window.next_split_id = u64::MAX;
+        let mut tab = tab(());
+        tab.next_split_id = u64::MAX;
         let creations = Cell::new(0);
 
-        let result = window.split_pane(
+        let result = tab.split_pane(
             PaneId::new(1),
             SplitAxis::Horizontal,
             size(500.0, 400.0),
@@ -1110,11 +1090,11 @@ mod tests {
             (
                 result,
                 creations.get(),
-                topology(window.root()),
-                window.pane_count(),
-                window.focused_pane_id(),
-                window.next_pane_id,
-                window.next_split_id,
+                topology(tab.root()),
+                tab.pane_count(),
+                tab.focused_pane_id(),
+                tab.next_pane_id,
+                tab.next_split_id,
             ),
             (
                 Err(PaneError::SplitIdExhausted),
@@ -1130,12 +1110,12 @@ mod tests {
 
     #[test]
     fn focus_pane_should_reject_an_unknown_id_without_changing_focus() {
-        let mut window = window(());
+        let mut tab = tab(());
 
-        let result = window.focus_pane(PaneId::new(99));
+        let result = tab.focus_pane(PaneId::new(99));
 
         assert_eq!(
-            (result, window.focused_pane_id()),
+            (result, tab.focused_pane_id()),
             (
                 Err(PaneError::PaneNotFound(PaneId::new(99))),
                 PaneId::new(1)
@@ -1145,8 +1125,8 @@ mod tests {
 
     #[test]
     fn focus_pane_in_direction_should_follow_nested_visual_neighbors() {
-        let mut window = four_pane_window();
-        window.focus_pane(PaneId::new(1)).unwrap();
+        let mut tab = four_pane_tab();
+        tab.focus_pane(PaneId::new(1)).unwrap();
 
         let focused_panes = [
             FocusDirection::Right,
@@ -1154,7 +1134,7 @@ mod tests {
             FocusDirection::Left,
             FocusDirection::Up,
         ]
-        .map(|direction| window.focus_pane_in_direction(direction));
+        .map(|direction| tab.focus_pane_in_direction(direction));
 
         assert_eq!(
             focused_panes,
@@ -1169,49 +1149,49 @@ mod tests {
 
     #[test]
     fn focus_pane_in_direction_should_not_wrap_at_a_layout_edge() {
-        let mut window = four_pane_window();
-        window.focus_pane(PaneId::new(1)).unwrap();
+        let mut tab = four_pane_tab();
+        tab.focus_pane(PaneId::new(1)).unwrap();
 
-        let focused_pane = window.focus_pane_in_direction(FocusDirection::Left);
+        let focused_pane = tab.focus_pane_in_direction(FocusDirection::Left);
 
         assert_eq!(
-            (focused_pane, window.focused_pane_id()),
+            (focused_pane, tab.focused_pane_id()),
             (None, PaneId::new(1))
         );
     }
 
     #[test]
     fn focus_pane_in_direction_should_move_zoom_to_the_neighbor() {
-        let mut window = four_pane_window();
-        window.focus_pane(PaneId::new(1)).unwrap();
-        let _ = window.toggle_zoom();
+        let mut tab = four_pane_tab();
+        tab.focus_pane(PaneId::new(1)).unwrap();
+        let _ = tab.toggle_zoom();
 
-        let focused_pane = window.focus_pane_in_direction(FocusDirection::Right);
+        let focused_pane = tab.focus_pane_in_direction(FocusDirection::Right);
 
         assert_eq!(
-            (focused_pane, window.zoom_state()),
+            (focused_pane, tab.zoom_state()),
             (Some(PaneId::new(2)), ZoomState::Zoomed(PaneId::new(2)))
         );
     }
 
     #[test]
-    fn close_pane_should_request_window_close_for_the_last_pane() {
+    fn close_pane_should_request_tab_close_for_the_last_pane() {
         let drops = Rc::new(RefCell::new(Vec::new()));
         let probe = DropProbe {
             id: 1,
             drops: drops.clone(),
         };
-        let mut window = window(probe);
+        let mut tab = tab(probe);
 
-        let outcome = window.close_pane(PaneId::new(1)).unwrap();
+        let outcome = tab.close_pane(PaneId::new(1)).unwrap();
 
-        let ClosePaneOutcome::CloseWindow { window_id } = outcome else {
-            panic!("closing the final Pane must request its Window close")
+        let ClosePaneOutcome::CloseTab { tab_id } = outcome else {
+            panic!("closing the final Pane must request its Tab close")
         };
-        assert_eq!(window_id, WindowId::new(7));
+        assert_eq!(tab_id, TabId::new(7));
         assert!(drops.borrow().is_empty());
 
-        drop(window);
+        drop(tab);
 
         assert_eq!(*drops.borrow(), vec![1]);
     }
@@ -1219,24 +1199,23 @@ mod tests {
     #[test]
     fn close_pane_should_transfer_its_terminal_and_drop_it_exactly_once() {
         let drops = Rc::new(RefCell::new(Vec::new()));
-        let mut window = window(DropProbe {
+        let mut tab = tab(DropProbe {
             id: 1,
             drops: drops.clone(),
         });
-        window
-            .split_pane(
-                PaneId::new(1),
-                SplitAxis::Horizontal,
-                size(500.0, 400.0),
-                DIVIDER_SIZE,
-                |_| DropProbe {
-                    id: 2,
-                    drops: drops.clone(),
-                },
-            )
-            .unwrap();
+        tab.split_pane(
+            PaneId::new(1),
+            SplitAxis::Horizontal,
+            size(500.0, 400.0),
+            DIVIDER_SIZE,
+            |_| DropProbe {
+                id: 2,
+                drops: drops.clone(),
+            },
+        )
+        .unwrap();
 
-        let outcome = window.close_pane(PaneId::new(2)).unwrap();
+        let outcome = tab.close_pane(PaneId::new(2)).unwrap();
 
         assert!(drops.borrow().is_empty());
 
@@ -1244,186 +1223,169 @@ mod tests {
 
         assert_eq!(*drops.borrow(), vec![2]);
 
-        drop(window);
+        drop(tab);
 
         assert_eq!(*drops.borrow(), vec![2, 1]);
     }
 
     #[test]
     fn close_pane_should_focus_the_nearest_leaf_in_its_sibling() {
-        let mut window = window(());
-        window
-            .split_pane(
-                PaneId::new(1),
-                SplitAxis::Horizontal,
-                size(500.0, 400.0),
-                DIVIDER_SIZE,
-                |_| (),
-            )
-            .unwrap();
-        window
-            .split_pane(
-                PaneId::new(1),
-                SplitAxis::Vertical,
-                size(250.0, 400.0),
-                DIVIDER_SIZE,
-                |_| (),
-            )
-            .unwrap();
-        window.focus_pane(PaneId::new(2)).unwrap();
+        let mut tab = tab(());
+        tab.split_pane(
+            PaneId::new(1),
+            SplitAxis::Horizontal,
+            size(500.0, 400.0),
+            DIVIDER_SIZE,
+            |_| (),
+        )
+        .unwrap();
+        tab.split_pane(
+            PaneId::new(1),
+            SplitAxis::Vertical,
+            size(250.0, 400.0),
+            DIVIDER_SIZE,
+            |_| (),
+        )
+        .unwrap();
+        tab.focus_pane(PaneId::new(2)).unwrap();
 
-        window.close_pane(PaneId::new(2)).unwrap();
+        tab.close_pane(PaneId::new(2)).unwrap();
 
-        assert_eq!(window.focused_pane_id(), PaneId::new(3));
+        assert_eq!(tab.focused_pane_id(), PaneId::new(3));
     }
 
     #[test]
     fn focus_pane_should_move_zoom_to_the_new_focus() {
-        let mut window = window(());
-        window
-            .split_pane(
-                PaneId::new(1),
-                SplitAxis::Horizontal,
-                size(500.0, 400.0),
-                DIVIDER_SIZE,
-                |_| (),
-            )
-            .unwrap();
-        let _ = window.toggle_zoom();
+        let mut tab = tab(());
+        tab.split_pane(
+            PaneId::new(1),
+            SplitAxis::Horizontal,
+            size(500.0, 400.0),
+            DIVIDER_SIZE,
+            |_| (),
+        )
+        .unwrap();
+        let _ = tab.toggle_zoom();
 
-        window.focus_pane(PaneId::new(1)).unwrap();
+        tab.focus_pane(PaneId::new(1)).unwrap();
 
-        assert_eq!(window.zoom_state(), ZoomState::Zoomed(PaneId::new(1)));
+        assert_eq!(tab.zoom_state(), ZoomState::Zoomed(PaneId::new(1)));
     }
 
     #[test]
     fn split_pane_should_restore_a_zoomed_layout() {
-        let mut window = window(());
-        window
-            .split_pane(
-                PaneId::new(1),
-                SplitAxis::Horizontal,
-                size(500.0, 400.0),
-                DIVIDER_SIZE,
-                |_| (),
-            )
-            .unwrap();
-        let _ = window.toggle_zoom();
-        window
-            .split_pane(
-                PaneId::new(2),
-                SplitAxis::Vertical,
-                size(250.0, 400.0),
-                DIVIDER_SIZE,
-                |_| (),
-            )
-            .unwrap();
+        let mut tab = tab(());
+        tab.split_pane(
+            PaneId::new(1),
+            SplitAxis::Horizontal,
+            size(500.0, 400.0),
+            DIVIDER_SIZE,
+            |_| (),
+        )
+        .unwrap();
+        let _ = tab.toggle_zoom();
+        tab.split_pane(
+            PaneId::new(2),
+            SplitAxis::Vertical,
+            size(250.0, 400.0),
+            DIVIDER_SIZE,
+            |_| (),
+        )
+        .unwrap();
 
-        assert_eq!(window.zoom_state(), ZoomState::Restored);
+        assert_eq!(tab.zoom_state(), ZoomState::Restored);
     }
 
     #[test]
     fn toggle_zoom_should_be_unavailable_for_a_single_pane() {
-        let mut window = window(());
+        let mut tab = tab(());
 
-        let result = window.toggle_zoom();
+        let result = tab.toggle_zoom();
 
-        assert_eq!((result, window.zoom_state()), (None, ZoomState::Restored));
+        assert_eq!((result, tab.zoom_state()), (None, ZoomState::Restored));
     }
 
     #[test]
     fn close_pane_should_restore_when_the_zoomed_pane_closes() {
-        let mut window = window(());
-        window
-            .split_pane(
-                PaneId::new(1),
-                SplitAxis::Horizontal,
-                size(500.0, 400.0),
-                DIVIDER_SIZE,
-                |_| (),
-            )
-            .unwrap();
-        let _ = window.toggle_zoom();
+        let mut tab = tab(());
+        tab.split_pane(
+            PaneId::new(1),
+            SplitAxis::Horizontal,
+            size(500.0, 400.0),
+            DIVIDER_SIZE,
+            |_| (),
+        )
+        .unwrap();
+        let _ = tab.toggle_zoom();
 
-        window.close_pane(PaneId::new(2)).unwrap();
+        tab.close_pane(PaneId::new(2)).unwrap();
 
-        assert_eq!(window.zoom_state(), ZoomState::Restored);
+        assert_eq!(tab.zoom_state(), ZoomState::Restored);
     }
 
     #[test]
     fn close_pane_should_restore_when_only_the_zoomed_pane_remains() {
-        let mut window = window(());
-        window
-            .split_pane(
-                PaneId::new(1),
-                SplitAxis::Horizontal,
-                size(500.0, 400.0),
-                DIVIDER_SIZE,
-                |_| (),
-            )
-            .unwrap();
-        window.focus_pane(PaneId::new(1)).unwrap();
-        assert_eq!(
-            window.toggle_zoom(),
-            Some(ZoomState::Zoomed(PaneId::new(1)))
-        );
+        let mut tab = tab(());
+        tab.split_pane(
+            PaneId::new(1),
+            SplitAxis::Horizontal,
+            size(500.0, 400.0),
+            DIVIDER_SIZE,
+            |_| (),
+        )
+        .unwrap();
+        tab.focus_pane(PaneId::new(1)).unwrap();
+        assert_eq!(tab.toggle_zoom(), Some(ZoomState::Zoomed(PaneId::new(1))));
 
-        window.close_pane(PaneId::new(2)).unwrap();
+        tab.close_pane(PaneId::new(2)).unwrap();
 
-        assert_eq!(window.zoom_state(), ZoomState::Restored);
+        assert_eq!(tab.zoom_state(), ZoomState::Restored);
     }
 
     #[test]
     fn minimum_size_should_accumulate_nested_split_constraints() {
-        let mut window = window(());
-        window
-            .split_pane(
-                PaneId::new(1),
-                SplitAxis::Horizontal,
-                size(500.0, 400.0),
-                DIVIDER_SIZE,
-                |_| (),
-            )
-            .unwrap();
-        window
-            .split_pane(
-                PaneId::new(2),
-                SplitAxis::Vertical,
-                size(250.0, 400.0),
-                DIVIDER_SIZE,
-                |_| (),
-            )
-            .unwrap();
+        let mut tab = tab(());
+        tab.split_pane(
+            PaneId::new(1),
+            SplitAxis::Horizontal,
+            size(500.0, 400.0),
+            DIVIDER_SIZE,
+            |_| (),
+        )
+        .unwrap();
+        tab.split_pane(
+            PaneId::new(2),
+            SplitAxis::Vertical,
+            size(250.0, 400.0),
+            DIVIDER_SIZE,
+            |_| (),
+        )
+        .unwrap();
 
-        assert_eq!(
-            window.minimum_size(DIVIDER_SIZE).unwrap(),
-            size(201.0, 101.0)
-        );
+        assert_eq!(tab.minimum_size(DIVIDER_SIZE).unwrap(), size(201.0, 101.0));
     }
 
     #[test]
     fn resize_split_should_clamp_against_recursive_child_minimums() {
-        let mut window = window(());
-        window
-            .split_pane(
-                PaneId::new(1),
-                SplitAxis::Horizontal,
-                size(500.0, 400.0),
-                DIVIDER_SIZE,
-                |_| (),
-            )
-            .unwrap();
-        window
-            .split_pane(
-                PaneId::new(1),
-                SplitAxis::Horizontal,
-                size(250.0, 400.0),
-                DIVIDER_SIZE,
-                |_| (),
-            )
-            .unwrap();
+        let mut tab = tab(());
+        tab.split_pane(
+            PaneId::new(1),
+            SplitAxis::Horizontal,
+            size(500.0, 400.0),
+            DIVIDER_SIZE,
+            |_| (),
+        )
+        .unwrap();
+        tab.split_pane(
+            PaneId::new(1),
+            SplitAxis::Horizontal,
+            size(250.0, 400.0),
+            DIVIDER_SIZE,
+            |_| (),
+        )
+        .unwrap();
 
-        let ratio = window
+        let ratio = tab
             .resize_split(SplitId::new(1), size(402.0, 100.0), DIVIDER_SIZE, 0.1)
             .unwrap();
 
@@ -1432,40 +1394,37 @@ mod tests {
 
     #[test]
     fn resize_split_should_reject_an_impossible_extent_without_changing_ratio() {
-        let mut window = window(());
-        window
-            .split_pane(
-                PaneId::new(1),
-                SplitAxis::Horizontal,
-                size(500.0, 400.0),
-                DIVIDER_SIZE,
-                |_| (),
-            )
-            .unwrap();
+        let mut tab = tab(());
+        tab.split_pane(
+            PaneId::new(1),
+            SplitAxis::Horizontal,
+            size(500.0, 400.0),
+            DIVIDER_SIZE,
+            |_| (),
+        )
+        .unwrap();
 
-        let result = window.resize_split(SplitId::new(1), size(200.0, 50.0), DIVIDER_SIZE, 0.8);
+        let result = tab.resize_split(SplitId::new(1), size(200.0, 50.0), DIVIDER_SIZE, 0.8);
 
         assert_eq!(
-            (result.is_err(), topology(window.root())),
+            (result.is_err(), topology(tab.root())),
             (true, "1:Horizontal:0.50(1,2)".into())
         );
     }
 
     #[test]
     fn resize_split_should_reject_a_non_finite_ratio() {
-        let mut window = window(());
-        window
-            .split_pane(
-                PaneId::new(1),
-                SplitAxis::Horizontal,
-                size(500.0, 400.0),
-                DIVIDER_SIZE,
-                |_| (),
-            )
-            .unwrap();
+        let mut tab = tab(());
+        tab.split_pane(
+            PaneId::new(1),
+            SplitAxis::Horizontal,
+            size(500.0, 400.0),
+            DIVIDER_SIZE,
+            |_| (),
+        )
+        .unwrap();
 
-        let result =
-            window.resize_split(SplitId::new(1), size(500.0, 400.0), DIVIDER_SIZE, f32::NAN);
+        let result = tab.resize_split(SplitId::new(1), size(500.0, 400.0), DIVIDER_SIZE, f32::NAN);
 
         assert!(matches!(result, Err(PaneError::InvalidSplitRatio(value)) if value.is_nan()));
     }

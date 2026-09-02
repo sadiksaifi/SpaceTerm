@@ -265,21 +265,21 @@ impl RemoteConnectionState {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct DirectoryAuthority {
-    window_id: super::WindowId,
+    tab_id: super::TabId,
     pane_id: super::PaneId,
 }
 
 impl DirectoryAuthority {
     pub(crate) const fn initial() -> Self {
-        Self::new(super::WindowId::from_raw(1), super::PaneId::from_raw(1))
+        Self::new(super::TabId::from_raw(1), super::PaneId::from_raw(1))
     }
 
-    pub(crate) const fn new(window_id: super::WindowId, pane_id: super::PaneId) -> Self {
-        Self { window_id, pane_id }
+    pub(crate) const fn new(tab_id: super::TabId, pane_id: super::PaneId) -> Self {
+        Self { tab_id, pane_id }
     }
 
-    pub(crate) const fn window_id(self) -> super::WindowId {
-        self.window_id
+    pub(crate) const fn tab_id(self) -> super::TabId {
+        self.tab_id
     }
 
     #[cfg(test)]
@@ -406,7 +406,7 @@ impl CreateRemoteProjectOutcome {
 }
 
 #[derive(Debug, Eq, PartialEq)]
-pub(crate) enum FinalWindowCloseOutcome<T> {
+pub(crate) enum FinalTabCloseOutcome<T> {
     WorkspaceClosed {
         closed_workspace_id: WorkspaceId,
         active_workspace_id: WorkspaceId,
@@ -867,10 +867,10 @@ impl<T> WorkspaceCollection<T> {
         Ok(true)
     }
 
-    pub(crate) fn promote_directory_authority_for_window(
+    pub(crate) fn promote_directory_authority_for_tab(
         &mut self,
         workspace_id: WorkspaceId,
-        removed_window_id: super::WindowId,
+        removed_tab_id: super::TabId,
         promoted_authority: DirectoryAuthority,
         directory: Option<ValidatedWorkspaceDirectory>,
     ) -> Result<bool, WorkspaceError> {
@@ -883,7 +883,7 @@ impl<T> WorkspaceCollection<T> {
         else {
             return Ok(false);
         };
-        if directory_authority.window_id() != removed_window_id {
+        if directory_authority.tab_id() != removed_tab_id {
             return Ok(false);
         }
         *directory_authority = promoted_authority;
@@ -1027,10 +1027,10 @@ impl<T> WorkspaceCollection<T> {
         })
     }
 
-    pub(crate) fn close_workspace_for_final_window(
+    pub(crate) fn close_workspace_for_final_tab(
         &mut self,
         workspace_id: WorkspaceId,
-    ) -> Result<FinalWindowCloseOutcome<T>, WorkspaceError> {
+    ) -> Result<FinalTabCloseOutcome<T>, WorkspaceError> {
         let Some(index) = self
             .workspaces
             .iter()
@@ -1040,7 +1040,7 @@ impl<T> WorkspaceCollection<T> {
         };
 
         if self.workspaces.len() == 1 {
-            return Ok(FinalWindowCloseOutcome::CloseOperatingSystemWindow { workspace_id });
+            return Ok(FinalTabCloseOutcome::CloseOperatingSystemWindow { workspace_id });
         }
 
         let closed_workspace = self.workspaces.remove(index);
@@ -1050,7 +1050,7 @@ impl<T> WorkspaceCollection<T> {
         }
         self.recalculate_automatic_names();
 
-        Ok(FinalWindowCloseOutcome::WorkspaceClosed {
+        Ok(FinalTabCloseOutcome::WorkspaceClosed {
             closed_workspace_id: closed_workspace.id,
             active_workspace_id: self.active_workspace_id,
             payload: closed_workspace.payload,
@@ -1275,7 +1275,7 @@ mod tests {
     #[test]
     fn workspace_kinds_own_distinct_directory_policies() {
         let authority =
-            DirectoryAuthority::new(super::super::WindowId::new(4), super::super::PaneId::new(7));
+            DirectoryAuthority::new(super::super::TabId::new(4), super::super::PaneId::new(7));
         let mut workspaces = WorkspaceCollection::new_scratch(
             validated("/Users/test", 10),
             authority,
@@ -1295,8 +1295,8 @@ mod tests {
                 if *project_root_identity == WorkspaceDirectoryIdentity::new(1, 20)
         ));
         assert_eq!(
-            (authority.window_id(), authority.pane_id()),
-            (super::super::WindowId::new(4), super::super::PaneId::new(7))
+            (authority.tab_id(), authority.pane_id()),
+            (super::super::TabId::new(4), super::super::PaneId::new(7))
         );
     }
 
@@ -2016,9 +2016,9 @@ mod tests {
     #[test]
     fn authority_reports_validate_ownership_and_promotion() {
         let first =
-            DirectoryAuthority::new(super::super::WindowId::new(1), super::super::PaneId::new(1));
+            DirectoryAuthority::new(super::super::TabId::new(1), super::super::PaneId::new(1));
         let promoted =
-            DirectoryAuthority::new(super::super::WindowId::new(1), super::super::PaneId::new(2));
+            DirectoryAuthority::new(super::super::TabId::new(1), super::super::PaneId::new(2));
         let mut workspaces =
             WorkspaceCollection::new_scratch(validated("/previous", 10), first, |_, _| ());
 
@@ -2457,7 +2457,7 @@ mod tests {
     }
 
     #[test]
-    fn final_window_close_should_remove_a_non_final_workspace_without_allocating_a_replacement() {
+    fn final_tab_close_should_remove_a_non_final_workspace_without_allocating_a_replacement() {
         let mut workspaces = new_workspaces("first payload");
         workspaces
             .create_scratch_workspace_unchecked(PathBuf::from("/second"), |_, _| "second payload")
@@ -2465,12 +2465,12 @@ mod tests {
         workspaces.next_workspace_id = u64::MAX;
 
         let outcome = workspaces
-            .close_workspace_for_final_window(WorkspaceId::new(1))
+            .close_workspace_for_final_tab(WorkspaceId::new(1))
             .unwrap();
 
         assert_eq!(
             outcome,
-            FinalWindowCloseOutcome::WorkspaceClosed {
+            FinalTabCloseOutcome::WorkspaceClosed {
                 closed_workspace_id: WorkspaceId::new(1),
                 active_workspace_id: WorkspaceId::new(2),
                 payload: "first payload",
@@ -2480,17 +2480,17 @@ mod tests {
     }
 
     #[test]
-    fn final_window_close_should_preserve_the_globally_final_workspace() {
+    fn final_tab_close_should_preserve_the_globally_final_workspace() {
         let mut workspaces = new_workspaces("first payload");
         workspaces.next_workspace_id = u64::MAX;
 
         let outcome = workspaces
-            .close_workspace_for_final_window(WorkspaceId::new(1))
+            .close_workspace_for_final_tab(WorkspaceId::new(1))
             .unwrap();
 
         assert_eq!(
             outcome,
-            FinalWindowCloseOutcome::CloseOperatingSystemWindow {
+            FinalTabCloseOutcome::CloseOperatingSystemWindow {
                 workspace_id: WorkspaceId::new(1),
             }
         );
@@ -2505,7 +2505,7 @@ mod tests {
     }
 
     #[test]
-    fn final_window_close_should_transfer_ownership_and_drop_each_payload_exactly_once() {
+    fn final_tab_close_should_transfer_ownership_and_drop_each_payload_exactly_once() {
         let drops = Rc::new(Cell::new(0));
         let mut workspaces = new_workspaces(DropProbe {
             drops: Rc::clone(&drops),
@@ -2517,7 +2517,7 @@ mod tests {
             .unwrap();
 
         let outcome = workspaces
-            .close_workspace_for_final_window(WorkspaceId::new(1))
+            .close_workspace_for_final_tab(WorkspaceId::new(1))
             .unwrap();
         assert_eq!(drops.get(), 0);
 

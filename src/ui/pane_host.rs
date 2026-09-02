@@ -14,7 +14,7 @@ use super::{
 };
 
 #[derive(Debug, Error)]
-/// A typed rejection while coordinating Remote lifecycle across one Window's Pane hierarchy.
+/// A typed rejection while coordinating Remote lifecycle across one Tab's Pane hierarchy.
 pub(crate) enum RemotePaneHostLifecycleError {
     #[error("Pane {pane_id} cannot change remote session lifecycle: {source}")]
     Pane {
@@ -22,25 +22,22 @@ pub(crate) enum RemotePaneHostLifecycleError {
         #[source]
         source: RemotePaneLifecycleError,
     },
-    #[error("the prepared restart belongs to Window {prepared}, not Window {current}")]
-    WindowChanged {
-        prepared: WindowId,
-        current: WindowId,
-    },
+    #[error("the prepared restart belongs to Tab {prepared}, not Tab {current}")]
+    TabChanged { prepared: TabId, current: TabId },
     #[error("Pane {0} changed after remote restart preparation")]
     PaneChanged(PaneId),
 }
 
-/// Move-only restart reservations for every Pane in one unchanged Window hierarchy.
+/// Move-only restart reservations for every Pane in one unchanged Tab hierarchy.
 ///
-/// The token is valid only while Window, Pane, and session-epoch identities remain unchanged.
+/// The token is valid only while Tab, Pane, and session-epoch identities remain unchanged.
 pub(crate) struct PreparedPaneHostRemoteRestart {
-    window_id: WindowId,
+    tab_id: TabId,
     panes: Vec<(PaneId, Entity<TerminalPane>, PreparedRemotePaneRestart)>,
 }
 use crate::domain::{
     ClosePaneOutcome, FocusDirection, PaneId, PaneNodeRef, PaneSize, PaneTreeRef, SplitAxis,
-    SplitId, TerminalWindow, WindowId, WorkspaceDirectoryIdentity, WorkspaceId, ZoomState,
+    SplitId, TabId, TerminalTab, WorkspaceDirectoryIdentity, WorkspaceId, ZoomState,
 };
 use crate::terminal::{
     NativeServiceOrigin, NativeServiceStatus, PreparedWorkspaceTerminalLaunch, SelectionCopy,
@@ -74,19 +71,19 @@ const _: () = assert!(
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum PaneHostEvent {
-    CloseWindowRequested {
-        window_id: WindowId,
+    CloseTabRequested {
+        tab_id: TabId,
     },
     PresentationChanged {
-        window_id: WindowId,
+        tab_id: TabId,
     },
     ReportedWorkingDirectoryChanged {
-        window_id: WindowId,
+        tab_id: TabId,
         pane_id: PaneId,
         path: PathBuf,
     },
     PaneClosed {
-        window_id: WindowId,
+        tab_id: TabId,
         pane_id: PaneId,
         promoted_pane_id: PaneId,
         promoted_directory: Option<PathBuf>,
@@ -100,7 +97,7 @@ pub(crate) enum PaneHostEvent {
 }
 
 pub(crate) struct PaneHost {
-    terminal_window: TerminalWindow<Entity<TerminalPane>>,
+    terminal_tab: TerminalTab<Entity<TerminalPane>>,
     session_factory: WorkspaceTerminalSessionFactory,
     pane_bounds: BTreeMap<PaneId, Bounds<Pixels>>,
     split_bounds: BTreeMap<SplitId, Bounds<Pixels>>,
@@ -112,7 +109,7 @@ pub(crate) struct PaneHost {
     focus_branch_blocker: Option<TerminalFocusBlocker>,
     native_service_hierarchy_generation: u64,
     native_service_focus_signature: Option<(bool, PaneId, Option<TerminalFocusBlocker>)>,
-    close_window_requested: bool,
+    close_tab_requested: bool,
     remote_disconnected_generation: Option<u64>,
     child_launch_generation: u64,
 }
@@ -120,7 +117,7 @@ pub(crate) struct PaneHost {
 impl PaneHost {
     #[cfg(test)]
     pub(crate) fn new(
-        window_id: WindowId,
+        tab_id: TabId,
         session_factory: WorkspaceTerminalSessionFactory,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -129,11 +126,11 @@ impl PaneHost {
             Ok(prepared_launch) => prepared_launch,
             Err(error) => panic!("test PaneHost channel preparation failed: {error}"),
         };
-        Self::new_with_prepared_launch(window_id, session_factory, prepared_launch, window, cx)
+        Self::new_with_prepared_launch(tab_id, session_factory, prepared_launch, window, cx)
     }
 
     pub(crate) fn new_with_prepared_launch(
-        window_id: WindowId,
+        tab_id: TabId,
         session_factory: WorkspaceTerminalSessionFactory,
         prepared_launch: PreparedWorkspaceTerminalLaunch,
         window: &mut Window,
@@ -145,7 +142,7 @@ impl PaneHost {
                 unreachable!("fixed minimum Pane dimensions must be valid: {error}")
             }
         };
-        let terminal_window = TerminalWindow::new(window_id, minimum_pane_size, |pane_id| {
+        let terminal_tab = TerminalTab::new(tab_id, minimum_pane_size, |pane_id| {
             Self::create_terminal(
                 pane_id,
                 session_factory.clone(),
@@ -154,14 +151,14 @@ impl PaneHost {
                 cx,
             )
         });
-        let initial_pane_id = terminal_window.focused_pane_id();
-        let Some(initial_terminal) = terminal_window.terminal(initial_pane_id) else {
-            unreachable!("a new Window must own its initial Pane terminal")
+        let initial_pane_id = terminal_tab.focused_pane_id();
+        let Some(initial_terminal) = terminal_tab.terminal(initial_pane_id) else {
+            unreachable!("a new Tab must own its initial Pane terminal")
         };
         let initial_title = initial_terminal.read(cx).title();
 
         Self {
-            terminal_window,
+            terminal_tab,
             session_factory,
             pane_bounds: BTreeMap::new(),
             split_bounds: BTreeMap::new(),
@@ -173,7 +170,7 @@ impl PaneHost {
             focus_branch_blocker: None,
             native_service_hierarchy_generation: 0,
             native_service_focus_signature: None,
-            close_window_requested: false,
+            close_tab_requested: false,
             remote_disconnected_generation: None,
             child_launch_generation: 0,
         }
@@ -197,13 +194,13 @@ impl PaneHost {
                 TerminalPaneEvent::TitleChanged(title) => {
                     host.pane_titles.insert(pane_id, title.clone());
                     cx.emit(PaneHostEvent::PresentationChanged {
-                        window_id: host.terminal_window.id(),
+                        tab_id: host.terminal_tab.id(),
                     });
                     cx.notify();
                 }
                 TerminalPaneEvent::ReportedWorkingDirectoryChanged(path) => {
                     cx.emit(PaneHostEvent::ReportedWorkingDirectoryChanged {
-                        window_id: host.terminal_window.id(),
+                        tab_id: host.terminal_tab.id(),
                         pane_id,
                         path: path.clone(),
                     });
@@ -211,7 +208,7 @@ impl PaneHost {
                 TerminalPaneEvent::AttentionChanged { unread_count } => {
                     host.pane_attention.insert(pane_id, *unread_count);
                     cx.emit(PaneHostEvent::PresentationChanged {
-                        window_id: host.terminal_window.id(),
+                        tab_id: host.terminal_tab.id(),
                     });
                     cx.notify();
                 }
@@ -224,8 +221,8 @@ impl PaneHost {
 
     pub(crate) fn focus(&self, window: &mut Window, cx: &App) {
         let Some(terminal) = self
-            .terminal_window
-            .terminal(self.terminal_window.focused_pane_id())
+            .terminal_tab
+            .terminal(self.terminal_tab.focused_pane_id())
         else {
             return;
         };
@@ -239,16 +236,16 @@ impl PaneHost {
         cx: &mut Context<Self>,
     ) -> NativeServiceStatus {
         self.sync_terminal_focus(cx);
-        let pane_id = self.terminal_window.focused_pane_id();
-        let window_id = self.terminal_window.id();
+        let pane_id = self.terminal_tab.focused_pane_id();
+        let tab_id = self.terminal_tab.id();
         let hierarchy_generation = self.native_service_hierarchy_generation;
-        let Some(terminal) = self.terminal_window.terminal(pane_id) else {
+        let Some(terminal) = self.terminal_tab.terminal(pane_id) else {
             return NativeServiceStatus::default();
         };
         terminal.update(cx, |terminal, cx| {
             terminal.native_service_status(
                 workspace_id,
-                window_id,
+                tab_id,
                 pane_id,
                 hierarchy_generation,
                 window,
@@ -263,13 +260,13 @@ impl PaneHost {
         window: &Window,
         cx: &mut App,
     ) -> Option<SelectionCopy> {
-        if self.terminal_window.id() != origin.window_id()
-            || self.terminal_window.focused_pane_id() != origin.pane_id()
+        if self.terminal_tab.id() != origin.tab_id()
+            || self.terminal_tab.focused_pane_id() != origin.pane_id()
             || self.native_service_hierarchy_generation != origin.hierarchy_generation()
         {
             return None;
         }
-        self.terminal_window
+        self.terminal_tab
             .terminal(origin.pane_id())?
             .update(cx, |terminal, cx| {
                 terminal.native_service_selection(origin, window, cx)
@@ -283,13 +280,13 @@ impl PaneHost {
         window: &Window,
         cx: &mut App,
     ) -> bool {
-        if self.terminal_window.id() != origin.window_id()
-            || self.terminal_window.focused_pane_id() != origin.pane_id()
+        if self.terminal_tab.id() != origin.tab_id()
+            || self.terminal_tab.focused_pane_id() != origin.pane_id()
             || self.native_service_hierarchy_generation != origin.hierarchy_generation()
         {
             return false;
         }
-        let Some(terminal) = self.terminal_window.terminal(origin.pane_id()) else {
+        let Some(terminal) = self.terminal_tab.terminal(origin.pane_id()) else {
             return false;
         };
         terminal.update(cx, |terminal, cx| {
@@ -297,20 +294,20 @@ impl PaneHost {
         })
     }
 
-    pub(crate) const fn window_id(&self) -> WindowId {
-        self.terminal_window.id()
+    pub(crate) const fn tab_id(&self) -> TabId {
+        self.terminal_tab.id()
     }
 
     pub(crate) fn pane_count(&self) -> usize {
-        self.terminal_window.pane_count()
+        self.terminal_tab.pane_count()
     }
 
     pub(crate) fn root_pane_id(&self) -> PaneId {
-        self.terminal_window.root_pane_id()
+        self.terminal_tab.root_pane_id()
     }
 
     pub(crate) fn reported_working_directory(&self, pane_id: PaneId, cx: &App) -> Option<PathBuf> {
-        self.terminal_window
+        self.terminal_tab
             .terminal(pane_id)
             .and_then(|terminal| terminal.read(cx).reported_working_directory())
     }
@@ -324,9 +321,9 @@ impl PaneHost {
             .set_working_directory(path.to_path_buf(), identity);
     }
 
-    pub(crate) fn window_title(&self) -> gpui::SharedString {
+    pub(crate) fn tab_title(&self) -> gpui::SharedString {
         let attention = self.pane_attention.values().copied().sum::<u32>();
-        let pane_count = self.terminal_window.pane_count();
+        let pane_count = self.terminal_tab.pane_count();
         if pane_count > 1 {
             return if attention > 0 {
                 format!("• {pane_count} Panes").into()
@@ -337,7 +334,7 @@ impl PaneHost {
 
         let title = self
             .pane_titles
-            .get(&self.terminal_window.focused_pane_id())
+            .get(&self.terminal_tab.focused_pane_id())
             .cloned()
             .unwrap_or_else(|| "Terminal".into());
         if attention > 0 {
@@ -348,7 +345,7 @@ impl PaneHost {
     }
 
     pub(crate) const fn zoom_state(&self) -> ZoomState {
-        self.terminal_window.zoom_state()
+        self.terminal_tab.zoom_state()
     }
 
     pub(crate) fn activate(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -385,12 +382,12 @@ impl PaneHost {
         self.active = false;
         self.menu_pane_id = None;
         self.sync_terminal_focus(cx);
-        for terminal in self.terminal_window.terminals() {
+        for terminal in self.terminal_tab.terminals() {
             terminal.update(cx, |terminal, _| terminal.close());
         }
     }
 
-    /// Atomically marks every Pane in this Window disconnected for one generation.
+    /// Atomically marks every Pane in this Tab disconnected for one generation.
     ///
     /// All Panes are prevalidated before any mutation. The Pane tree, focus, zoom, and retained
     /// presentations remain intact, while new child launches and terminal input are blocked.
@@ -400,7 +397,7 @@ impl PaneHost {
         cx: &mut Context<Self>,
     ) -> Result<(), RemotePaneHostLifecycleError> {
         self.can_disconnect_remote(generation, cx)?;
-        for (_, terminal) in self.terminal_window.terminals_with_ids() {
+        for (_, terminal) in self.terminal_tab.terminals_with_ids() {
             terminal.update(cx, |terminal, cx| {
                 terminal
                     .disconnect_remote(generation, cx)
@@ -419,7 +416,7 @@ impl PaneHost {
         generation: u64,
         cx: &App,
     ) -> Result<(), RemotePaneHostLifecycleError> {
-        for (pane_id, terminal) in self.terminal_window.terminals_with_ids() {
+        for (pane_id, terminal) in self.terminal_tab.terminals_with_ids() {
             terminal
                 .read(cx)
                 .can_disconnect_remote(generation)
@@ -439,14 +436,14 @@ impl PaneHost {
         prepared_launches: Vec<PreparedWorkspaceTerminalLaunch>,
         cx: &App,
     ) -> Result<PreparedPaneHostRemoteRestart, RemotePaneHostLifecycleError> {
-        if self.terminal_window.pane_count() != prepared_launches.len() {
+        if self.terminal_tab.pane_count() != prepared_launches.len() {
             return Err(RemotePaneHostLifecycleError::PaneChanged(
-                self.terminal_window.focused_pane_id(),
+                self.terminal_tab.focused_pane_id(),
             ));
         }
-        let mut panes = Vec::with_capacity(self.terminal_window.pane_count());
+        let mut panes = Vec::with_capacity(self.terminal_tab.pane_count());
         for ((pane_id, terminal), prepared_launch) in self
-            .terminal_window
+            .terminal_tab
             .terminals_with_ids()
             .zip(prepared_launches)
         {
@@ -457,30 +454,30 @@ impl PaneHost {
             panes.push((pane_id, terminal.clone(), prepared));
         }
         Ok(PreparedPaneHostRemoteRestart {
-            window_id: self.terminal_window.id(),
+            tab_id: self.terminal_tab.id(),
             panes,
         })
     }
 
-    /// Revalidates every prepared Pane restart against the current Window hierarchy.
+    /// Revalidates every prepared Pane restart against the current Tab hierarchy.
     pub(crate) fn can_commit_remote_restart(
         &self,
         prepared: &PreparedPaneHostRemoteRestart,
         cx: &App,
     ) -> Result<(), RemotePaneHostLifecycleError> {
-        if self.terminal_window.id() != prepared.window_id {
-            return Err(RemotePaneHostLifecycleError::WindowChanged {
-                prepared: prepared.window_id,
-                current: self.terminal_window.id(),
+        if self.terminal_tab.id() != prepared.tab_id {
+            return Err(RemotePaneHostLifecycleError::TabChanged {
+                prepared: prepared.tab_id,
+                current: self.terminal_tab.id(),
             });
         }
-        if self.terminal_window.pane_count() != prepared.panes.len() {
+        if self.terminal_tab.pane_count() != prepared.panes.len() {
             return Err(RemotePaneHostLifecycleError::PaneChanged(
-                self.terminal_window.focused_pane_id(),
+                self.terminal_tab.focused_pane_id(),
             ));
         }
         for (pane_id, terminal, pane_restart) in &prepared.panes {
-            let Some(current) = self.terminal_window.terminal(*pane_id) else {
+            let Some(current) = self.terminal_tab.terminal(*pane_id) else {
                 return Err(RemotePaneHostLifecycleError::PaneChanged(*pane_id));
             };
             if current.entity_id() != terminal.entity_id() {
@@ -499,7 +496,7 @@ impl PaneHost {
 
     /// Commits every prevalidated Pane restart in place after aggregate preparation succeeds.
     ///
-    /// Window, Pane-tree, focus, and zoom identities are preserved. Once commit begins, later
+    /// Tab, Pane-tree, focus, and zoom identities are preserved. Once commit begins, later
     /// Terminal Session startup failure belongs to its individual Pane rather than rolling back
     /// already committed siblings.
     pub(crate) fn commit_remote_restart(
@@ -524,7 +521,7 @@ impl PaneHost {
         self.child_launch_generation = self.child_launch_generation.wrapping_add(1);
         self.sync_terminal_focus(cx);
         cx.emit(PaneHostEvent::PresentationChanged {
-            window_id: self.terminal_window.id(),
+            tab_id: self.terminal_tab.id(),
         });
         cx.notify();
         Ok(())
@@ -532,12 +529,12 @@ impl PaneHost {
 
     #[cfg(test)]
     pub(crate) const fn focused_pane_id(&self) -> PaneId {
-        self.terminal_window.focused_pane_id()
+        self.terminal_tab.focused_pane_id()
     }
 
     #[cfg(test)]
     pub(crate) fn pane_entity_ids(&self) -> Vec<(PaneId, gpui::EntityId)> {
-        self.terminal_window
+        self.terminal_tab
             .terminals_with_ids()
             .map(|(pane_id, terminal)| (pane_id, terminal.entity_id()))
             .collect()
@@ -567,7 +564,7 @@ impl PaneHost {
         }
 
         let mut signature = String::new();
-        encode(self.terminal_window.root(), &mut signature);
+        encode(self.terminal_tab.root(), &mut signature);
         signature
     }
 
@@ -578,8 +575,8 @@ impl PaneHost {
 
     #[cfg(test)]
     pub(crate) fn focused_terminal_remote_state(&self, cx: &App) -> (bool, bool) {
-        self.terminal_window
-            .terminal(self.terminal_window.focused_pane_id())
+        self.terminal_tab
+            .terminal(self.terminal_tab.focused_pane_id())
             .map(|terminal| {
                 let terminal = terminal.read(cx);
                 terminal.remote_session_state()
@@ -592,7 +589,7 @@ impl PaneHost {
         &self,
         cx: &App,
     ) -> Vec<(PaneId, bool, Option<&'static str>)> {
-        self.terminal_window
+        self.terminal_tab
             .terminals_with_ids()
             .map(|(pane_id, terminal)| {
                 let terminal = terminal.read(cx);
@@ -604,15 +601,15 @@ impl PaneHost {
 
     #[cfg(test)]
     pub(crate) fn focused_terminal_is_focused(&self, window: &Window, cx: &App) -> bool {
-        self.terminal_window
-            .terminal(self.terminal_window.focused_pane_id())
+        self.terminal_tab
+            .terminal(self.terminal_tab.focused_pane_id())
             .is_some_and(|terminal| terminal.read(cx).is_focused(window))
     }
 
     #[cfg(test)]
     pub(crate) fn focused_terminal_has_input_focus(&self, window: &Window, cx: &App) -> bool {
-        self.terminal_window
-            .terminal(self.terminal_window.focused_pane_id())
+        self.terminal_tab
+            .terminal(self.terminal_tab.focused_pane_id())
             .is_some_and(|terminal| terminal.read(cx).terminal_input_focused(window, cx))
     }
 
@@ -622,10 +619,10 @@ impl PaneHost {
     }
 
     fn focus_pane(&mut self, pane_id: PaneId, cx: &mut Context<Self>) {
-        if self.terminal_window.focused_pane_id() == pane_id {
+        if self.terminal_tab.focused_pane_id() == pane_id {
             return;
         }
-        if let Err(error) = self.terminal_window.focus_pane(pane_id) {
+        if let Err(error) = self.terminal_tab.focus_pane(pane_id) {
             eprintln!("failed to focus Pane: {error}");
             return;
         }
@@ -640,13 +637,13 @@ impl PaneHost {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(pane_id) = self.terminal_window.focus_pane_in_direction(direction) else {
+        let Some(pane_id) = self.terminal_tab.focus_pane_in_direction(direction) else {
             return;
         };
         self.menu_pane_id = None;
         self.sync_terminal_focus(cx);
         cx.notify();
-        if let Some(terminal) = self.terminal_window.terminal(pane_id) {
+        if let Some(terminal) = self.terminal_tab.terminal(pane_id) {
             terminal.update(cx, |terminal, _| terminal.focus(window));
         }
     }
@@ -657,7 +654,7 @@ impl PaneHost {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let focused_pane_id = self.terminal_window.focused_pane_id();
+        let focused_pane_id = self.terminal_tab.focused_pane_id();
         self.split_pane(focused_pane_id, axis, window, cx);
     }
 
@@ -785,7 +782,7 @@ impl PaneHost {
         cx: &mut Context<Self>,
     ) {
         let session_factory = self.session_factory.clone();
-        let result = self.terminal_window.split_pane(
+        let result = self.terminal_tab.split_pane(
             target_pane_id,
             axis,
             target_size,
@@ -798,7 +795,7 @@ impl PaneHost {
         match result {
             Ok(pane_id) => {
                 self.advance_native_service_hierarchy_generation(cx);
-                if let Some(terminal) = self.terminal_window.terminal(pane_id) {
+                if let Some(terminal) = self.terminal_tab.terminal(pane_id) {
                     self.pane_titles.insert(pane_id, terminal.read(cx).title());
                 }
                 self.pane_attention.insert(pane_id, 0);
@@ -806,10 +803,10 @@ impl PaneHost {
                 self.split_bounds.clear();
                 self.sync_terminal_focus(cx);
                 cx.emit(PaneHostEvent::PresentationChanged {
-                    window_id: self.terminal_window.id(),
+                    tab_id: self.terminal_tab.id(),
                 });
                 cx.notify();
-                if let Some(terminal) = self.terminal_window.terminal(pane_id) {
+                if let Some(terminal) = self.terminal_tab.terminal(pane_id) {
                     terminal.update(cx, |terminal, _| terminal.focus(window));
                 }
             }
@@ -818,7 +815,7 @@ impl PaneHost {
     }
 
     fn close_focused(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.close_pane(self.terminal_window.focused_pane_id(), window, cx);
+        self.close_pane(self.terminal_tab.focused_pane_id(), window, cx);
     }
 
     #[cfg(test)]
@@ -827,18 +824,18 @@ impl PaneHost {
     }
 
     fn close_pane(&mut self, pane_id: PaneId, window: &mut Window, cx: &mut Context<Self>) {
-        if self.close_window_requested {
+        if self.close_tab_requested {
             return;
         }
 
-        match self.terminal_window.close_pane(pane_id) {
-            Ok(ClosePaneOutcome::CloseWindow { window_id }) => {
+        match self.terminal_tab.close_pane(pane_id) {
+            Ok(ClosePaneOutcome::CloseTab { tab_id }) => {
                 self.advance_native_service_hierarchy_generation(cx);
-                self.close_window_requested = true;
+                self.close_tab_requested = true;
                 self.active = false;
                 self.menu_pane_id = None;
                 self.sync_terminal_focus(cx);
-                cx.emit(PaneHostEvent::CloseWindowRequested { window_id });
+                cx.emit(PaneHostEvent::CloseTabRequested { tab_id });
             }
             Ok(ClosePaneOutcome::PaneClosed {
                 focused_pane_id,
@@ -854,25 +851,25 @@ impl PaneHost {
                 self.split_bounds.clear();
                 self.pane_titles.remove(&pane_id);
                 self.pane_attention.remove(&pane_id);
-                let promoted_pane_id = self.terminal_window.root_pane_id();
+                let promoted_pane_id = self.terminal_tab.root_pane_id();
                 let promoted_directory = self
-                    .terminal_window
+                    .terminal_tab
                     .terminal(promoted_pane_id)
                     .and_then(|terminal| terminal.read(cx).reported_working_directory());
                 self.menu_pane_id = None;
                 self.sync_terminal_focus(cx);
                 cx.emit(PaneHostEvent::PresentationChanged {
-                    window_id: self.terminal_window.id(),
+                    tab_id: self.terminal_tab.id(),
                 });
                 cx.emit(PaneHostEvent::PaneClosed {
-                    window_id: self.terminal_window.id(),
+                    tab_id: self.terminal_tab.id(),
                     pane_id,
                     promoted_pane_id,
                     promoted_directory,
                 });
                 cx.notify();
                 if self.active
-                    && let Some(terminal) = self.terminal_window.terminal(focused_pane_id)
+                    && let Some(terminal) = self.terminal_tab.terminal(focused_pane_id)
                 {
                     terminal.update(cx, |terminal, _| terminal.focus(window));
                 }
@@ -882,14 +879,14 @@ impl PaneHost {
     }
 
     pub(crate) fn toggle_zoom(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.terminal_window.toggle_zoom().is_none() {
+        if self.terminal_tab.toggle_zoom().is_none() {
             return;
         }
         self.advance_native_service_hierarchy_generation(cx);
         self.menu_pane_id = None;
         self.sync_terminal_focus(cx);
         cx.emit(PaneHostEvent::PresentationChanged {
-            window_id: self.terminal_window.id(),
+            tab_id: self.terminal_tab.id(),
         });
         cx.notify();
         self.focus(window, cx);
@@ -911,7 +908,7 @@ impl PaneHost {
         let Ok(available_size) = pane_size(bounds) else {
             return;
         };
-        match self.terminal_window.resize_split(
+        match self.terminal_tab.resize_split(
             split_id,
             available_size,
             DIVIDER_SIZE,
@@ -930,7 +927,7 @@ impl PaneHost {
             return;
         };
         match self
-            .terminal_window
+            .terminal_tab
             .resize_split(split_id, available_size, DIVIDER_SIZE, 0.5)
         {
             Ok(_) => cx.notify(),
@@ -983,7 +980,7 @@ impl PaneHost {
     ) {
         match event {
             MenuLifecycleEvent::Opened => {
-                if let Err(error) = self.terminal_window.focus_pane(pane_id) {
+                if let Err(error) = self.terminal_tab.focus_pane(pane_id) {
                     eprintln!("failed to focus Pane: {error}");
                     return;
                 }
@@ -1011,15 +1008,14 @@ impl PaneHost {
         cx: &mut Context<Self>,
     ) {
         let focused_terminal_id = self
-            .terminal_window
-            .terminal(self.terminal_window.focused_pane_id())
+            .terminal_tab
+            .terminal(self.terminal_tab.focused_pane_id())
             .map(Entity::entity_id);
-        let visible_terminal_id = match self.terminal_window.zoom_state() {
+        let visible_terminal_id = match self.terminal_tab.zoom_state() {
             ZoomState::Restored => None,
-            ZoomState::Zoomed(pane_id) => self
-                .terminal_window
-                .terminal(pane_id)
-                .map(Entity::entity_id),
+            ZoomState::Zoomed(pane_id) => {
+                self.terminal_tab.terminal(pane_id).map(Entity::entity_id)
+            }
         };
         let blocker = menu_blocked
             .then_some(TerminalFocusBlocker::PaneMenu)
@@ -1028,15 +1024,15 @@ impl PaneHost {
                 .is_some()
                 .then_some(TerminalFocusBlocker::PaneResize))
             .or(self.focus_branch_blocker);
-        let signature = (self.active, self.terminal_window.focused_pane_id(), blocker);
+        let signature = (self.active, self.terminal_tab.focused_pane_id(), blocker);
         if self.native_service_focus_signature != Some(signature) {
             self.advance_native_service_hierarchy_generation(cx);
             self.native_service_focus_signature = Some(signature);
         }
         let hierarchy_generation = self.native_service_hierarchy_generation;
-        let mut panes = Vec::with_capacity(self.terminal_window.pane_count());
-        collect_pane_order(self.terminal_window.root(), &mut panes);
-        let presented_panes = match self.terminal_window.zoom_state() {
+        let mut panes = Vec::with_capacity(self.terminal_tab.pane_count());
+        collect_pane_order(self.terminal_tab.root(), &mut panes);
+        let presented_panes = match self.terminal_tab.zoom_state() {
             ZoomState::Zoomed(pane_id) => vec![pane_id],
             ZoomState::Restored => panes.clone(),
         };
@@ -1046,12 +1042,12 @@ impl PaneHost {
             .map(|(order, pane_id)| (pane_id, order))
             .collect::<BTreeMap<_, _>>();
         for pane_id in panes {
-            let Some(terminal) = self.terminal_window.terminal(pane_id) else {
+            let Some(terminal) = self.terminal_tab.terminal(pane_id) else {
                 continue;
             };
             let product_focus = TerminalProductFocus {
                 active_workspace: self.active,
-                active_window: self.active,
+                active_tab: self.active,
                 pane_visible: self.active
                     && visible_terminal_id.is_none_or(|visible| visible == terminal.entity_id()),
                 focused_pane: Some(terminal.entity_id()) == focused_terminal_id,
@@ -1078,7 +1074,7 @@ impl PaneHost {
         self.native_service_hierarchy_generation =
             self.native_service_hierarchy_generation.wrapping_add(1);
         let hierarchy_generation = self.native_service_hierarchy_generation;
-        for terminal in self.terminal_window.terminals() {
+        for terminal in self.terminal_tab.terminals() {
             terminal.update(cx, |terminal, _| {
                 terminal.synchronize_native_service_hierarchy_generation(hierarchy_generation);
             });
@@ -1172,15 +1168,15 @@ impl PaneHost {
     }
 
     fn render_leaf(&self, pane_id: PaneId, host: gpui::WeakEntity<Self>) -> AnyElement {
-        let Some(terminal) = self.terminal_window.terminal(pane_id).cloned() else {
+        let Some(terminal) = self.terminal_tab.terminal(pane_id).cloned() else {
             return div()
                 .size_full()
                 .bg(gpui_color(ACTIVE_THEME.terminal_background))
                 .into_any_element();
         };
-        let focused = self.terminal_window.focused_pane_id() == pane_id;
-        let has_multiple_panes = self.terminal_window.pane_count() > 1;
-        let zoomed = matches!(self.terminal_window.zoom_state(), ZoomState::Zoomed(_));
+        let focused = self.terminal_tab.focused_pane_id() == pane_id;
+        let has_multiple_panes = self.terminal_tab.pane_count() > 1;
+        let zoomed = matches!(self.terminal_tab.zoom_state(), ZoomState::Zoomed(_));
         let title = self
             .pane_titles
             .get(&pane_id)
@@ -1314,24 +1310,24 @@ impl Render for PaneHost {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_terminal_focus(cx);
         let host = cx.entity().downgrade();
-        let zoom_state = self.terminal_window.zoom_state();
+        let zoom_state = self.terminal_tab.zoom_state();
         let minimum_size = match zoom_state {
-            ZoomState::Zoomed(_) => self.terminal_window.minimum_pane_size(),
-            ZoomState::Restored => match self.terminal_window.minimum_size(DIVIDER_SIZE) {
+            ZoomState::Zoomed(_) => self.terminal_tab.minimum_pane_size(),
+            ZoomState::Restored => match self.terminal_tab.minimum_size(DIVIDER_SIZE) {
                 Ok(size) => size,
                 Err(error) => {
                     eprintln!("failed to calculate minimum Pane layout size: {error}");
-                    self.terminal_window.minimum_pane_size()
+                    self.terminal_tab.minimum_pane_size()
                 }
             },
         };
         let content = match zoom_state {
-            ZoomState::Restored => self.render_tree(self.terminal_window.root(), host.clone()),
+            ZoomState::Restored => self.render_tree(self.terminal_tab.root(), host.clone()),
             ZoomState::Zoomed(pane_id) => self.render_leaf(pane_id, host),
         };
 
         div()
-            .id(("pane-host", self.terminal_window.id().get()))
+            .id(("pane-host", self.terminal_tab.id().get()))
             .key_context(TERMINAL_KEY_CONTEXT)
             .relative()
             .size_full()
@@ -1732,7 +1728,7 @@ mod tests {
         let events = Rc::new(RefCell::new(Vec::new()));
         let recorded_events = Rc::clone(&events);
         let (harness, cx) = cx.add_window_view(move |window, cx| {
-            let host = cx.new(|cx| PaneHost::new(WindowId::new(1), session_factory, window, cx));
+            let host = cx.new(|cx| PaneHost::new(TabId::new(1), session_factory, window, cx));
             cx.subscribe(
                 &host,
                 move |_, _, event: &RemoteChildLaunchUnavailable, _| {
@@ -1866,7 +1862,7 @@ mod tests {
         let records = TestTerminalSessionRecords::default();
         let session_factory = remote_test_session_factory(records.clone());
         let (host, cx) = cx.add_window_view(|window, cx| {
-            PaneHost::new(WindowId::new(1), session_factory, window, cx)
+            PaneHost::new(TabId::new(1), session_factory, window, cx)
         });
         cx.run_until_parked();
 
@@ -1895,7 +1891,7 @@ mod tests {
             Arc::clone(&provider) as Arc<dyn RemoteTerminalChannelProvider>,
         );
         let (host, cx) = cx.add_window_view(|window, cx| {
-            PaneHost::new(WindowId::new(1), session_factory, window, cx)
+            PaneHost::new(TabId::new(1), session_factory, window, cx)
         });
         cx.run_until_parked();
         let focused = host.read_with(cx, |host, _| host.focused_pane_id());
@@ -1953,7 +1949,7 @@ mod tests {
         let session_factory =
             remote_test_session_factory_with_provider(records.clone(), destination, provider);
         let (host, cx) = cx.add_window_view(|window, cx| {
-            PaneHost::new(WindowId::new(1), session_factory, window, cx)
+            PaneHost::new(TabId::new(1), session_factory, window, cx)
         });
         cx.run_until_parked();
 
@@ -1972,7 +1968,7 @@ mod tests {
             .expect("UI initialization should succeed");
         let session_factory = test_session_factory();
         let (host, cx) = cx.add_window_view(|window, cx| {
-            PaneHost::new(WindowId::new(1), session_factory, window, cx)
+            PaneHost::new(TabId::new(1), session_factory, window, cx)
         });
 
         split_test_pane(&host, PaneId::new(1), SplitAxis::Horizontal, cx);
@@ -1990,21 +1986,18 @@ mod tests {
     }
 
     #[gpui::test]
-    fn attention_remains_scoped_to_its_owning_pane_and_window_title(cx: &mut TestAppContext) {
+    fn attention_remains_scoped_to_its_owning_pane_and_tab_title(cx: &mut TestAppContext) {
         cx.update(crate::ui::init)
             .expect("UI initialization should succeed");
         let (host, cx) = cx.add_window_view(|window, cx| {
-            PaneHost::new(WindowId::new(1), test_session_factory(), window, cx)
+            PaneHost::new(TabId::new(1), test_session_factory(), window, cx)
         });
 
         host.update(cx, |host, _| {
             host.pane_attention.insert(PaneId::new(1), 2);
         });
 
-        assert_eq!(
-            host.read_with(cx, |host, _| host.window_title()),
-            "• Terminal"
-        );
+        assert_eq!(host.read_with(cx, |host, _| host.tab_title()), "• Terminal");
         assert_eq!(
             host.read_with(cx, |host, _| host.pane_attention.clone()),
             BTreeMap::from([(PaneId::new(1), 2)])
@@ -2022,7 +2015,7 @@ mod tests {
     ) -> [PaneId; N] {
         shortcuts.map(|shortcut| {
             cx.simulate_keystrokes(shortcut);
-            host.read_with(cx, |host, _| host.terminal_window.focused_pane_id())
+            host.read_with(cx, |host, _| host.terminal_tab.focused_pane_id())
         })
     }
 
@@ -2032,7 +2025,7 @@ mod tests {
             .expect("UI initialization should succeed");
         let session_factory = test_session_factory();
         let (_host, cx) = cx.add_window_view(|window, cx| {
-            PaneHost::new(WindowId::new(1), session_factory, window, cx)
+            PaneHost::new(TabId::new(1), session_factory, window, cx)
         });
 
         assert!(cx.debug_bounds("pane-header-1-focused").is_none());
@@ -2046,7 +2039,7 @@ mod tests {
             .expect("UI initialization should succeed");
         let session_factory = test_session_factory();
         let (host, cx) = cx.add_window_view(|window, cx| {
-            PaneHost::new(WindowId::new(1), session_factory, window, cx)
+            PaneHost::new(TabId::new(1), session_factory, window, cx)
         });
         cx.update(|window, app| {
             window.activate_window();
@@ -2107,7 +2100,7 @@ mod tests {
             crate::terminal::testing::test_workspace_directory(test_workspace_root()),
         );
         let (host, cx) = cx.add_window_view(|window, cx| {
-            PaneHost::new(WindowId::new(1), session_factory, window, cx)
+            PaneHost::new(TabId::new(1), session_factory, window, cx)
         });
         cx.update(|window, _| window.activate_window());
         cx.run_until_parked();
@@ -2176,7 +2169,7 @@ mod tests {
             crate::terminal::testing::test_workspace_directory(workspace_root.clone()),
         );
         let (host, cx) = cx.add_window_view(|window, cx| {
-            PaneHost::new(WindowId::new(1), session_factory, window, cx)
+            PaneHost::new(TabId::new(1), session_factory, window, cx)
         });
 
         cx.update(|window, cx| {
@@ -2208,7 +2201,7 @@ mod tests {
             .expect("UI initialization should succeed");
         let session_factory = test_session_factory();
         let (host, cx) = cx.add_window_view(|window, cx| {
-            PaneHost::new(WindowId::new(1), session_factory, window, cx)
+            PaneHost::new(TabId::new(1), session_factory, window, cx)
         });
 
         cx.update(|window, cx| {
@@ -2237,7 +2230,7 @@ mod tests {
             .expect("UI initialization should succeed");
         let session_factory = test_session_factory();
         let (host, cx) = cx.add_window_view(|window, cx| {
-            PaneHost::new(WindowId::new(1), session_factory, window, cx)
+            PaneHost::new(TabId::new(1), session_factory, window, cx)
         });
 
         cx.update(|window, cx| {
@@ -2267,7 +2260,7 @@ mod tests {
             crate::terminal::testing::test_workspace_directory(test_workspace_root()),
         );
         let (host, cx) = cx.add_window_view(|window, cx| {
-            PaneHost::new(WindowId::new(1), session_factory, window, cx)
+            PaneHost::new(TabId::new(1), session_factory, window, cx)
         });
         cx.update(|window, cx| {
             window.activate_window();
@@ -2317,7 +2310,7 @@ mod tests {
             crate::terminal::testing::test_workspace_directory(test_workspace_root()),
         );
         let (host, cx) = cx.add_window_view(|window, cx| {
-            PaneHost::new(WindowId::new(1), session_factory, window, cx)
+            PaneHost::new(TabId::new(1), session_factory, window, cx)
         });
         cx.update(|window, cx| {
             window.activate_window();
@@ -2365,7 +2358,7 @@ mod tests {
             crate::terminal::testing::test_workspace_directory(test_workspace_root()),
         );
         let (host, cx) = cx.add_window_view(|window, cx| {
-            PaneHost::new(WindowId::new(1), session_factory, window, cx)
+            PaneHost::new(TabId::new(1), session_factory, window, cx)
         });
         cx.update(|window, cx| {
             window.activate_window();
@@ -2376,7 +2369,7 @@ mod tests {
         });
         cx.run_until_parked();
         let first_pane = host.read_with(cx, |host, _| {
-            host.terminal_window
+            host.terminal_tab
                 .terminal(PaneId::new(1))
                 .cloned()
                 .expect("the original Pane should still exist")
@@ -2424,7 +2417,7 @@ mod tests {
             crate::terminal::testing::test_workspace_directory(test_workspace_root()),
         );
         let (host, cx) = cx.add_window_view(|window, cx| {
-            PaneHost::new(WindowId::new(1), session_factory, window, cx)
+            PaneHost::new(TabId::new(1), session_factory, window, cx)
         });
         cx.update(|window, cx| {
             host.update(cx, |host, cx| {
@@ -2542,7 +2535,7 @@ mod tests {
             crate::terminal::testing::test_workspace_directory(test_workspace_root()),
         );
         let (host, cx) = cx.add_window_view(|window, cx| {
-            PaneHost::new(WindowId::new(1), session_factory, window, cx)
+            PaneHost::new(TabId::new(1), session_factory, window, cx)
         });
 
         cx.update(|window, cx| {
@@ -2585,7 +2578,7 @@ mod tests {
             crate::terminal::testing::test_workspace_directory(test_workspace_root()),
         );
         let (host, cx) = cx.add_window_view(|window, cx| {
-            PaneHost::new(WindowId::new(1), session_factory, window, cx)
+            PaneHost::new(TabId::new(1), session_factory, window, cx)
         });
 
         cx.update(|window, cx| {
@@ -2604,8 +2597,8 @@ mod tests {
 
         let state = host.read_with(cx, |host, _| {
             (
-                host.terminal_window.pane_count(),
-                host.terminal_window.focused_pane_id(),
+                host.terminal_tab.pane_count(),
+                host.terminal_tab.focused_pane_id(),
                 records.dropped_session_ids(),
             )
         });
@@ -2613,7 +2606,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn exited_last_terminal_session_should_request_window_close(cx: &mut TestAppContext) {
+    fn exited_last_terminal_session_should_request_tab_close(cx: &mut TestAppContext) {
         cx.update(crate::ui::init)
             .expect("UI initialization should succeed");
         let close_requests = Rc::new(Cell::new(0));
@@ -2625,7 +2618,7 @@ mod tests {
             crate::terminal::testing::test_workspace_directory(test_workspace_root()),
         );
         let (host, cx) = cx.add_window_view(|window, cx| {
-            PaneHost::new(WindowId::new(1), session_factory, window, cx)
+            PaneHost::new(TabId::new(1), session_factory, window, cx)
         });
         let close_requests_for_subscription = Rc::clone(&close_requests);
         host.update(cx, |_, cx| {
@@ -2659,7 +2652,7 @@ mod tests {
         let presentation_changes = Rc::new(Cell::new(0));
         let session_factory = test_session_factory();
         let (host, cx) = cx.add_window_view(|window, cx| {
-            PaneHost::new(WindowId::new(1), session_factory, window, cx)
+            PaneHost::new(TabId::new(1), session_factory, window, cx)
         });
         let presentation_changes_for_subscription = Rc::clone(&presentation_changes);
         host.update(cx, |_, cx| {
@@ -2686,7 +2679,7 @@ mod tests {
         let presentation_changes = Rc::new(Cell::new(0));
         let session_factory = test_session_factory();
         let (host, cx) = cx.add_window_view(|window, cx| {
-            PaneHost::new(WindowId::new(1), session_factory, window, cx)
+            PaneHost::new(TabId::new(1), session_factory, window, cx)
         });
         split_test_pane(&host, PaneId::new(1), SplitAxis::Horizontal, cx);
         let presentation_changes_for_subscription = Rc::clone(&presentation_changes);
@@ -2721,7 +2714,7 @@ mod tests {
             crate::terminal::testing::test_workspace_directory(test_workspace_root()),
         );
         let (host, cx) = cx.add_window_view(|window, cx| {
-            PaneHost::new(WindowId::new(1), session_factory, window, cx)
+            PaneHost::new(TabId::new(1), session_factory, window, cx)
         });
 
         cx.update(|window, cx| {
@@ -2741,7 +2734,7 @@ mod tests {
         cx.run_until_parked();
 
         let state = host.read_with(cx, |host, _| {
-            (host.terminal_window.zoom_state(), records.pointer_count())
+            (host.terminal_tab.zoom_state(), records.pointer_count())
         });
         assert_eq!(state, (ZoomState::Restored, 0));
     }
@@ -2760,7 +2753,7 @@ mod tests {
             crate::terminal::testing::test_workspace_directory(test_workspace_root()),
         );
         let (host, cx) = cx.add_window_view(|window, cx| {
-            PaneHost::new(WindowId::new(1), session_factory, window, cx)
+            PaneHost::new(TabId::new(1), session_factory, window, cx)
         });
 
         cx.update(|window, cx| {
@@ -2795,7 +2788,7 @@ mod tests {
 
         let state = host.read_with(cx, |host, _| {
             (
-                host.terminal_window.pane_count(),
+                host.terminal_tab.pane_count(),
                 host.menu_pane_id,
                 records.pointer_count(),
             )
@@ -2817,7 +2810,7 @@ mod tests {
             crate::terminal::testing::test_workspace_directory(test_workspace_root()),
         );
         let (host, cx) = cx.add_window_view(|window, cx| {
-            PaneHost::new(WindowId::new(1), session_factory, window, cx)
+            PaneHost::new(TabId::new(1), session_factory, window, cx)
         });
 
         cx.update(|window, cx| {
@@ -2859,7 +2852,7 @@ mod tests {
             crate::terminal::testing::test_workspace_directory(test_workspace_root()),
         );
         let (host, cx) = cx.add_window_view(|window, cx| {
-            PaneHost::new(WindowId::new(1), session_factory, window, cx)
+            PaneHost::new(TabId::new(1), session_factory, window, cx)
         });
 
         cx.update(|window, cx| {
@@ -2894,7 +2887,7 @@ mod tests {
         cx.run_until_parked();
 
         let terminal = host.read_with(cx, |host, _| {
-            host.terminal_window.terminal(first_pane_id).cloned()
+            host.terminal_tab.terminal(first_pane_id).cloned()
         });
         let terminal_is_focused = cx.update(|window, cx| {
             terminal
@@ -2903,8 +2896,8 @@ mod tests {
         });
         let state = host.read_with(cx, |host, _| {
             (
-                host.terminal_window.focused_pane_id(),
-                host.terminal_window.zoom_state(),
+                host.terminal_tab.focused_pane_id(),
+                host.terminal_tab.zoom_state(),
                 terminal_is_focused,
                 records.pointer_count(),
             )
@@ -2928,7 +2921,7 @@ mod tests {
             crate::terminal::testing::test_workspace_directory(test_workspace_root()),
         );
         let (host, cx) = cx.add_window_view(|window, cx| {
-            PaneHost::new(WindowId::new(1), session_factory, window, cx)
+            PaneHost::new(TabId::new(1), session_factory, window, cx)
         });
 
         cx.update(|window, cx| {
@@ -2983,7 +2976,7 @@ mod tests {
             crate::terminal::testing::test_workspace_directory(test_workspace_root()),
         );
         let (host, cx) = cx.add_window_view(|window, cx| {
-            PaneHost::new(WindowId::new(1), session_factory, window, cx)
+            PaneHost::new(TabId::new(1), session_factory, window, cx)
         });
         cx.update(|window, cx| {
             window.activate_window();
@@ -3006,7 +2999,7 @@ mod tests {
 
         let state = cx.update(|window, cx| {
             let host = host.read(cx);
-            let ratio = match host.terminal_window.root().node() {
+            let ratio = match host.terminal_tab.root().node() {
                 PaneNodeRef::Split { ratio, .. } => ratio,
                 PaneNodeRef::Leaf { .. } => 0.0,
             };
@@ -3035,7 +3028,7 @@ mod tests {
             crate::terminal::testing::test_workspace_directory(test_workspace_root()),
         );
         let (host, cx) = cx.add_window_view(|window, cx| {
-            PaneHost::new(WindowId::new(1), session_factory, window, cx)
+            PaneHost::new(TabId::new(1), session_factory, window, cx)
         });
         cx.update(|window, cx| {
             host.update(cx, |host, cx| {
@@ -3088,7 +3081,7 @@ mod tests {
             crate::terminal::testing::test_workspace_directory(test_workspace_root()),
         );
         let (host, cx) = cx.add_window_view(|window, cx| {
-            PaneHost::new(WindowId::new(1), session_factory, window, cx)
+            PaneHost::new(TabId::new(1), session_factory, window, cx)
         });
         cx.update(|window, cx| {
             window.activate_window();

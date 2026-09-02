@@ -14,7 +14,7 @@ pub(crate) enum PaneActionMenuCommand {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum CloseTarget {
     Pane,
-    Window,
+    Tab,
 }
 
 pub(crate) fn pane_action_menu_entries(
@@ -79,7 +79,7 @@ fn zoom_presentation(zoomed: bool) -> (IconName, &'static str) {
 fn close_presentation(close_target: CloseTarget) -> (&'static str, &'static str, &'static str) {
     match close_target {
         CloseTarget::Pane => ("Close Pane", "⌘W", "close-pane"),
-        CloseTarget::Window => ("Close Window", "⇧⌘W", "close-window"),
+        CloseTarget::Tab => ("Close Tab", "⇧⌘W", "close-tab"),
     }
 }
 
@@ -173,8 +173,8 @@ mod tests {
             ("Close Pane", "⌘W", "close-pane")
         );
         assert_eq!(
-            close_presentation(CloseTarget::Window),
-            ("Close Window", "⇧⌘W", "close-window")
+            close_presentation(CloseTarget::Tab),
+            ("Close Tab", "⇧⌘W", "close-tab")
         );
     }
 
@@ -195,11 +195,11 @@ mod tests {
 
     #[gpui::test]
     fn close_entry_should_keep_target_specific_selector(cx: &mut TestAppContext) {
-        let cx = menu_window(cx, false, true, CloseTarget::Window);
+        let cx = menu_window(cx, false, true, CloseTarget::Tab);
         let trigger = cx.debug_bounds("Pane Actions").unwrap().center();
         cx.simulate_click(trigger, gpui::Modifiers::none());
         cx.run_until_parked();
 
-        assert!(cx.debug_bounds("test-menu-row-close-window").is_some());
+        assert!(cx.debug_bounds("test-menu-row-close-tab").is_some());
     }
 }

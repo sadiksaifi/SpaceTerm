@@ -161,7 +161,7 @@ impl WorkspaceTerminalSessionFactory {
         }
     }
 
-    /// Reserves one launch before the caller mutates its Window or Pane hierarchy.
+    /// Reserves one launch before the caller mutates its Tab or Pane hierarchy.
     ///
     /// Local plans are clonable directory authority. Remote plans consume the provider's one-shot
     /// grant and fail if readiness changed after revalidation.

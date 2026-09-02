@@ -16,7 +16,7 @@ here.
 - Run conventional acceptance through the packaged release application and its production GPUI,
   AppKit, PTY, Terminal Emulator, and Shell Process path.
 - Use the product and domain contracts in [`CONTEXT.md`](../CONTEXT.md) and
-  [`UBIQUITOUS_LANGUAGE.md`](UBIQUITOUS_LANGUAGE.md), including the distinction between a Window's
+  [`UBIQUITOUS_LANGUAGE.md`](UBIQUITOUS_LANGUAGE.md), including the distinction between a Tab's
   Focused Pane and Terminal Input Focus.
 - Published protocols and Apple platform behavior are authoritative. Ghostty is a behavioral and
   performance reference, not protocol authority and not an implementation dependency.
@@ -451,7 +451,7 @@ remains hidden.
 
 When DEC 1004 is enabled, also record exact PTY bytes: one focus-out per loss, one focus-in per
 gain, no duplicate reports, and held terminal-routed keys released before focus-out. Evidence must
-show that the Window-owned Focused Pane identity remains distinct from Terminal Input Focus.
+show that the Tab-owned Focused Pane identity remains distinct from Terminal Input Focus.
 
 | Case ID | Required route |
 | --- | --- |
@@ -460,14 +460,14 @@ show that the Window-owned Focused Pane identity remains distinct from Terminal 
 | `focus-workspace-rename` | Start and finish/cancel Workspace rename. |
 | `focus-workspace-context-menu` | Open and dismiss a Workspace context menu. |
 | `focus-pane-menu` | Open and dismiss a Pane menu. |
-| `focus-window-menu` | Open and dismiss a Window menu and Window context menu. |
+| `focus-tab-menu` | Open and dismiss a Tab menu and Tab context menu. |
 | `focus-top-chrome` | Interact with top chrome/window dragging. |
-| `focus-window-selector` | Interact with the Window selector, including switching Windows. |
+| `focus-tab-selector` | Interact with the Tab selector, including switching Tabs. |
 | `focus-terminal-find` | Open Terminal Find, restore terminal responder focus while Find remains open, and close Find. |
 | `focus-native-panels` | Present and dismiss every native modal/save panel used by the terminal. |
 | `focus-non-key-os-window` | Make the Operating-System Window non-key while SpaceTerm remains active where possible. |
 | `focus-app-activation` | Deactivate and reactivate SpaceTerm. |
-| `focus-hierarchy-switch` | Switch Active Workspace and Active Window while multiple Panes remain visible. |
+| `focus-hierarchy-switch` | Switch Active Workspace and Active Tab while multiple Panes remain visible. |
 
 ## Capability and native-service matrix
 
@@ -483,7 +483,7 @@ Exercise every row through the production packaged path, not only test reducers.
 | `capability-links` | Links: OSC 8 and detected URL activation, validated local path activation, stale-generation rejection, and inert malformed/missing targets. |
 | `capability-resize-scrollback` | Resize and Scrollback: cell/pixel resize, rapid live resize, reflow, viewport anchoring while output continues, Selection anchoring, Primary/Alternate Screen restoration, and backing-scale/display change. |
 | `capability-accessibility` | Accessibility: inspect the actual Pane with Accessibility Inspector and VoiceOver; verify editable text-area role/value, UTF-16 ranges, visible range, Selection, Cursor, wide/combining/emoji text, soft wraps, retained Scrollback, range bounds, hit testing, and Pane-scoped notifications. |
-| `capability-attention` | Attention: BEL audio/visual behavior, Pane/Window unread state, Dock attention rate limiting/cancellation, inactive-only native notification delivery, aggregation, and no focus stealing. |
+| `capability-attention` | Attention: BEL audio/visual behavior, Pane/Tab unread state, Dock attention rate limiting/cancellation, inactive-only native notification delivery, aggregation, and no focus stealing. |
 | `capability-macos-services` | macOS Services: selection export and text insertion through the Services menu, with insertion entering the Paste Payload sanitizer. |
 | `capability-context-actions` | Context actions: enablement follows current Selection and Terminal Hyperlink state and stale state is inert. |
 | `capability-quick-look` | Quick Look: available only for an existing validated local regular-file Terminal Hyperlink; web, missing, remote, and stale targets are unavailable. |
@@ -542,7 +542,7 @@ reference, not a requirement for identical implementation or identical absolute 
    input.
 3. Repeat with Unicode, wide graphemes, ANSI styles, links, and drawing symbols.
 4. Repeat while the Terminal Viewport is scrolled away from the bottom.
-5. Repeat while the Workspace/Window/Pane is hidden or occluded, then restore it.
+5. Repeat while the Workspace/Tab/Pane is hidden or occluded, then restore it.
 6. Record bytes processed, RSS every 10 seconds, input responsiveness, frame behavior, final
    Presentation, and Shell Process exit.
 

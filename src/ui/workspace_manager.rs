@@ -12,27 +12,24 @@ use super::remote_workspace_flow::{
     RemoteWorkspaceFlowBackendError, RemoteWorkspaceFlowBackendFactory,
     RemoteWorkspaceFlowCompletion, RemoteWorkspaceFlowCompletionHandle, RemoteWorkspaceFlowEvent,
 };
+use super::tab_manager::{PreparedTabManagerRemoteRestart, RemoteTabManagerLifecycleError};
 use super::terminal_focus::TerminalFocusBlocker;
-use super::window_manager::{
-    PreparedWindowManagerRemoteRestart, RemoteWindowManagerLifecycleError,
-};
 use super::workspace_picker::{WorkspacePicker, WorkspacePickerEvent};
 use super::workspace_search::{WorkspaceSearch, WorkspaceSearchEvent, WorkspaceSearchItem};
 use super::{
-    ActivateWindow1, ActivateWindow2, ActivateWindow3, ActivateWindow4, ActivateWindow5,
-    ActivateWindow6, ActivateWindow7, ActivateWindow8, ActivateWindow9, ActivateWorkspace1,
-    ActivateWorkspace2, ActivateWorkspace3, ActivateWorkspace4, ActivateWorkspace5,
-    ActivateWorkspace6, ActivateWorkspace7, ActivateWorkspace8, ActivateWorkspace9, ClosePane,
-    CloseTerminalFind, CloseWindow, CloseWorkspace, CopySelection, CreateScratchWorkspace,
-    CreateWindow, FindNext, FindPrevious, FocusPaneDown, FocusPaneLeft, FocusPaneRight,
-    FocusPaneUp, OpenLocalProject, OpenTerminalFind, RemoteChildLaunchUnavailable,
-    SearchWorkspaces, ShowNewWorkspacePanel, SplitDown, SplitRight, TERMINAL_KEY_CONTEXT,
-    TOP_CHROME_HEIGHT, TogglePaneZoom, ToggleSidebar, ToggleSidebarFocus,
-    WORKSPACE_SIDEBAR_DEFAULT_WIDTH, WORKSPACE_SIDEBAR_MINIMUM_WIDTH, WindowManager,
-    WindowManagerEvent,
+    ActivateTab1, ActivateTab2, ActivateTab3, ActivateTab4, ActivateTab5, ActivateTab6,
+    ActivateTab7, ActivateTab8, ActivateTab9, ActivateWorkspace1, ActivateWorkspace2,
+    ActivateWorkspace3, ActivateWorkspace4, ActivateWorkspace5, ActivateWorkspace6,
+    ActivateWorkspace7, ActivateWorkspace8, ActivateWorkspace9, ClosePane, CloseTab,
+    CloseTerminalFind, CloseWorkspace, CopySelection, CreateScratchWorkspace, CreateTab, FindNext,
+    FindPrevious, FocusPaneDown, FocusPaneLeft, FocusPaneRight, FocusPaneUp, OpenLocalProject,
+    OpenTerminalFind, RemoteChildLaunchUnavailable, SearchWorkspaces, ShowNewWorkspacePanel,
+    SplitDown, SplitRight, TERMINAL_KEY_CONTEXT, TOP_CHROME_HEIGHT, TabManager, TabManagerEvent,
+    TogglePaneZoom, ToggleSidebar, ToggleSidebarFocus, WORKSPACE_SIDEBAR_DEFAULT_WIDTH,
+    WORKSPACE_SIDEBAR_MINIMUM_WIDTH,
 };
 use crate::domain::{
-    CloseWorkspaceOutcome, CreateRemoteProjectOutcome, DirectoryAuthority, FinalWindowCloseOutcome,
+    CloseWorkspaceOutcome, CreateRemoteProjectOutcome, DirectoryAuthority, FinalTabCloseOutcome,
     RemoteConnectionPhase, RemoteConnectionReduction, RemoteConnectionState,
     RemoteWorkspaceDirectory, RemoteWorkspaceKey, ValidatedWorkspaceDirectory, WorkspaceCollection,
     WorkspaceDirectoryAvailability, WorkspaceDirectoryIdentity, WorkspaceError, WorkspaceId,
@@ -97,7 +94,7 @@ const SIDEBAR_MAXIMUM_WIDTH: f32 = 420.0;
 const TERMINAL_CONTENT_MINIMUM_WIDTH: f32 = 240.0;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum WorkspaceMenuCommand {
-    NewWindow,
+    NewTab,
     Rename,
     Reconnect,
     Close,
@@ -123,7 +120,7 @@ struct WorkspaceRowViewModel {
     local_project: bool,
     remote_connection_phase: Option<RemoteConnectionPhase>,
     available: bool,
-    window_count: usize,
+    tab_count: usize,
     pane_count: usize,
     active: bool,
 }
@@ -177,10 +174,10 @@ struct RemoteWorkspaceReconnectProgressIdentity {
 struct PreparedRemoteWorkspaceReconnect {
     session: RemoteWorkspaceConnectedSession,
     lifecycle: ControlConnectionObserver,
-    restart: PreparedWindowManagerRemoteRestart,
+    restart: PreparedTabManagerRemoteRestart,
 }
 
-struct WindowManagerCreation {
+struct TabManagerCreation {
     workspace_id: WorkspaceId,
     sidebar_visible: bool,
     sidebar_width: Pixels,
@@ -217,7 +214,7 @@ impl Drop for RemoteWorkspaceRuntime {
 }
 
 pub(crate) struct WorkspaceManager {
-    workspaces: WorkspaceCollection<Entity<WindowManager>>,
+    workspaces: WorkspaceCollection<Entity<TabManager>>,
     session_factory: Rc<dyn TerminalSessionFactory>,
     default_workspace_root: PathBuf,
     default_workspace_identity: WorkspaceDirectoryIdentity,
@@ -245,7 +242,7 @@ pub(crate) struct WorkspaceManager {
     suppress_sidebar_pointer_until_release: bool,
     operating_system_window_drag_platform: Rc<dyn OperatingSystemWindowDragPlatform>,
     window_drag_status: WindowDragRegionStatus,
-    pending_final_window_closes: BTreeSet<WorkspaceId>,
+    pending_final_tab_closes: BTreeSet<WorkspaceId>,
 }
 
 impl WorkspaceManager {
@@ -346,7 +343,7 @@ impl WorkspaceManager {
             default_directory,
             DirectoryAuthority::initial(),
             |workspace_id, workspace_root| {
-                Self::create_local_window_manager(
+                Self::create_local_tab_manager(
                     workspace_id,
                     WorkspaceTerminalSessionFactory::new_local(
                         Rc::clone(&session_factory),
@@ -477,11 +474,11 @@ impl WorkspaceManager {
             suppress_sidebar_pointer_until_release: false,
             operating_system_window_drag_platform,
             window_drag_status: WindowDragRegionStatus::new(),
-            pending_final_window_closes: BTreeSet::new(),
+            pending_final_tab_closes: BTreeSet::new(),
         }
     }
 
-    fn create_local_window_manager(
+    fn create_local_tab_manager(
         workspace_id: WorkspaceId,
         session_factory: WorkspaceTerminalSessionFactory,
         sidebar_visible: bool,
@@ -489,10 +486,10 @@ impl WorkspaceManager {
         operating_system_window_drag_platform: Rc<dyn OperatingSystemWindowDragPlatform>,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> Entity<WindowManager> {
-        match Self::try_create_window_manager(
+    ) -> Entity<TabManager> {
+        match Self::try_create_tab_manager(
             session_factory,
-            WindowManagerCreation {
+            TabManagerCreation {
                 workspace_id,
                 sidebar_visible,
                 sidebar_width,
@@ -506,14 +503,14 @@ impl WorkspaceManager {
         }
     }
 
-    fn try_create_window_manager(
+    fn try_create_tab_manager(
         session_factory: WorkspaceTerminalSessionFactory,
-        creation: WindowManagerCreation,
+        creation: TabManagerCreation,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> Result<Entity<WindowManager>, crate::terminal::RemoteChannelUnavailable> {
+    ) -> Result<Entity<TabManager>, crate::terminal::RemoteChannelUnavailable> {
         let prepared_launch = session_factory.prepare_child_launch()?;
-        Ok(Self::create_window_manager_with_prepared_launch(
+        Ok(Self::create_tab_manager_with_prepared_launch(
             session_factory,
             prepared_launch,
             creation,
@@ -522,21 +519,21 @@ impl WorkspaceManager {
         ))
     }
 
-    fn create_window_manager_with_prepared_launch(
+    fn create_tab_manager_with_prepared_launch(
         session_factory: WorkspaceTerminalSessionFactory,
         prepared_launch: PreparedWorkspaceTerminalLaunch,
-        creation: WindowManagerCreation,
+        creation: TabManagerCreation,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> Entity<WindowManager> {
-        let WindowManagerCreation {
+    ) -> Entity<TabManager> {
+        let TabManagerCreation {
             workspace_id,
             sidebar_visible,
             sidebar_width,
             operating_system_window_drag_platform,
         } = creation;
         let manager = cx.new(|cx| {
-            let mut manager = WindowManager::new_with_prepared_initial_launch(
+            let mut manager = TabManager::new_with_prepared_initial_launch(
                 session_factory,
                 prepared_launch,
                 operating_system_window_drag_platform,
@@ -549,14 +546,14 @@ impl WorkspaceManager {
         cx.subscribe_in(
             &manager,
             window,
-            move |workspace_manager, _, event: &WindowManagerEvent, window, cx| match event {
-                WindowManagerEvent::FinalWindowCloseRequested { .. } => {
+            move |workspace_manager, _, event: &TabManagerEvent, window, cx| match event {
+                TabManagerEvent::FinalTabCloseRequested { .. } => {
                     if workspace_manager
-                        .pending_final_window_closes
+                        .pending_final_tab_closes
                         .insert(workspace_id)
                     {
                         cx.defer_in(window, move |workspace_manager, window, cx| {
-                            workspace_manager.close_workspace_for_final_window(
+                            workspace_manager.close_workspace_for_final_tab(
                                 workspace_id,
                                 window,
                                 cx,
@@ -564,52 +561,52 @@ impl WorkspaceManager {
                         });
                     }
                 }
-                WindowManagerEvent::PresentationChanged => {
+                TabManagerEvent::PresentationChanged => {
                     workspace_manager.refresh_workspace_search(cx);
                     cx.notify();
                 }
-                WindowManagerEvent::ReportedWorkingDirectoryChanged {
-                    window_id,
+                TabManagerEvent::ReportedWorkingDirectoryChanged {
+                    tab_id,
                     pane_id,
                     path,
                 } => workspace_manager.handle_directory_report(
                     workspace_id,
-                    DirectoryAuthority::new(*window_id, *pane_id),
+                    DirectoryAuthority::new(*tab_id, *pane_id),
                     path,
                     cx,
                 ),
-                WindowManagerEvent::PaneClosed {
-                    window_id,
+                TabManagerEvent::PaneClosed {
+                    tab_id,
                     pane_id,
                     promoted_pane_id,
                     promoted_directory,
                 } => workspace_manager.handle_authority_promotion(
                     workspace_id,
-                    DirectoryAuthority::new(*window_id, *pane_id),
-                    DirectoryAuthority::new(*window_id, *promoted_pane_id),
+                    DirectoryAuthority::new(*tab_id, *pane_id),
+                    DirectoryAuthority::new(*tab_id, *promoted_pane_id),
                     promoted_directory.as_deref(),
                     cx,
                 ),
-                WindowManagerEvent::WindowClosed {
-                    window_id,
-                    promoted_window_id,
+                TabManagerEvent::TabClosed {
+                    tab_id,
+                    promoted_tab_id,
                     promoted_pane_id,
                     promoted_directory,
-                } => workspace_manager.handle_window_authority_promotion(
+                } => workspace_manager.handle_tab_authority_promotion(
                     workspace_id,
-                    *window_id,
-                    DirectoryAuthority::new(*promoted_window_id, *promoted_pane_id),
+                    *tab_id,
+                    DirectoryAuthority::new(*promoted_tab_id, *promoted_pane_id),
                     promoted_directory.as_deref(),
                     cx,
                 ),
-                WindowManagerEvent::DirectoryAvailable { identity } => {
+                TabManagerEvent::DirectoryAvailable { identity } => {
                     let _ = workspace_manager
                         .workspaces
                         .set_directory_available(workspace_id, *identity);
                     workspace_manager.refresh_workspace_search(cx);
                     cx.notify();
                 }
-                WindowManagerEvent::DirectoryUnavailable { reason } => {
+                TabManagerEvent::DirectoryUnavailable { reason } => {
                     let _ = workspace_manager
                         .workspaces
                         .set_directory_unavailable(workspace_id, reason.clone());
@@ -768,10 +765,10 @@ impl WorkspaceManager {
         cx.notify();
     }
 
-    fn handle_window_authority_promotion(
+    fn handle_tab_authority_promotion(
         &mut self,
         workspace_id: WorkspaceId,
-        removed_window_id: crate::domain::WindowId,
+        removed_tab_id: crate::domain::TabId,
         promoted_authority: DirectoryAuthority,
         reported_directory: Option<&std::path::Path>,
         cx: &mut Context<Self>,
@@ -785,9 +782,9 @@ impl WorkspaceManager {
         };
         let promoted = self
             .workspaces
-            .promote_directory_authority_for_window(
+            .promote_directory_authority_for_tab(
                 workspace_id,
-                removed_window_id,
+                removed_tab_id,
                 promoted_authority,
                 directory,
             )
@@ -937,7 +934,7 @@ impl WorkspaceManager {
         self.workspaces
             .iter()
             .map(|workspace| {
-                let (window_count, pane_count) = workspace.payload().read(cx).aggregate_counts(cx);
+                let (tab_count, pane_count) = workspace.payload().read(cx).aggregate_counts(cx);
                 WorkspaceSearchItem::new(
                     workspace.id(),
                     workspace.name().to_owned(),
@@ -948,7 +945,7 @@ impl WorkspaceManager {
                     )
                     .0,
                     workspace.kind(),
-                    window_count,
+                    tab_count,
                     pane_count,
                 )
             })
@@ -1227,7 +1224,7 @@ impl WorkspaceManager {
             directory,
             DirectoryAuthority::initial(),
             |workspace_id, workspace_root| {
-                Self::create_local_window_manager(
+                Self::create_local_tab_manager(
                     workspace_id,
                     WorkspaceTerminalSessionFactory::new_local(
                         session_factory,
@@ -1571,7 +1568,7 @@ impl WorkspaceManager {
         let Ok(CreateRemoteProjectOutcome::ActivatedExisting { workspace_id }) = outcome else {
             return Err(Box::new(completion));
         };
-        self.activate_remote_window_manager(
+        self.activate_remote_tab_manager(
             previous_workspace_id,
             previous_manager,
             workspace_id,
@@ -1610,10 +1607,10 @@ impl WorkspaceManager {
             completion.remote_home_identity().clone(),
             RemoteConnectionState::connected(1),
             |workspace_id| {
-                Self::create_window_manager_with_prepared_launch(
+                Self::create_tab_manager_with_prepared_launch(
                     terminal_factory,
                     prepared_launch,
-                    WindowManagerCreation {
+                    TabManagerCreation {
                         workspace_id,
                         sidebar_visible,
                         sidebar_width,
@@ -1628,7 +1625,7 @@ impl WorkspaceManager {
             Ok(CreateRemoteProjectOutcome::Created { workspace_id }) => workspace_id,
             Ok(CreateRemoteProjectOutcome::ActivatedExisting { workspace_id }) => {
                 drop(completion);
-                self.activate_remote_window_manager(
+                self.activate_remote_tab_manager(
                     previous_workspace_id,
                     previous_manager,
                     workspace_id,
@@ -1649,7 +1646,7 @@ impl WorkspaceManager {
             replaced.is_none(),
             "a new Remote Workspace owns one runtime"
         );
-        self.activate_remote_window_manager(
+        self.activate_remote_tab_manager(
             previous_workspace_id,
             previous_manager,
             workspace_id,
@@ -1699,10 +1696,10 @@ impl WorkspaceManager {
         cx.notify();
     }
 
-    fn activate_remote_window_manager(
+    fn activate_remote_tab_manager(
         &self,
         previous_workspace_id: WorkspaceId,
-        previous_manager: Entity<WindowManager>,
+        previous_manager: Entity<TabManager>,
         workspace_id: WorkspaceId,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -1786,7 +1783,7 @@ impl WorkspaceManager {
         {
             return;
         }
-        let Some(window_manager) = self
+        let Some(tab_manager) = self
             .workspaces
             .workspace(workspace_id)
             .map(|workspace| workspace.payload().clone())
@@ -1794,7 +1791,7 @@ impl WorkspaceManager {
             return;
         };
         if let Err(error) =
-            window_manager.update(cx, |manager, cx| manager.disconnect_remote(generation, cx))
+            tab_manager.update(cx, |manager, cx| manager.disconnect_remote(generation, cx))
         {
             eprintln!("cannot disconnect Remote Workspace terminals: {error}");
             return;
@@ -1846,7 +1843,7 @@ impl WorkspaceManager {
         let generation = state.generation();
         let destination = key.destination().clone();
         let expected_identity = key.physical_directory().clone();
-        let window_manager = workspace.payload().clone();
+        let tab_manager = workspace.payload().clone();
         let local_root = ValidatedWorkspaceDirectory::new(
             self.default_workspace_root.clone(),
             self.default_workspace_identity,
@@ -1946,7 +1943,7 @@ impl WorkspaceManager {
                     remote_workspace_fallback_title(&key, account.home_identity()),
                     channels,
                 );
-                let restart = window_manager
+                let restart = tab_manager
                     .update(cx, |manager, cx| {
                         manager.prepare_remote_restart(factory, generation, cx)
                     })
@@ -2134,7 +2131,7 @@ impl WorkspaceManager {
             .expect("a current reconnect attempt must remain owned");
         match result {
             Ok(prepared) => {
-                let Some(window_manager) = self
+                let Some(tab_manager) = self
                     .workspaces
                     .workspace(workspace_id)
                     .map(|workspace| workspace.payload().clone())
@@ -2144,12 +2141,12 @@ impl WorkspaceManager {
                 #[cfg(test)]
                 if self.close_focused_pane_before_reconnect_commit {
                     self.close_focused_pane_before_reconnect_commit = false;
-                    window_manager
+                    tab_manager
                         .read(cx)
                         .active_pane_host()
                         .update(cx, |host, cx| host.close_focused_for_test(window, cx));
                 }
-                if let Err(error) = window_manager.update(cx, |manager, cx| {
+                if let Err(error) = tab_manager.update(cx, |manager, cx| {
                     manager.commit_remote_restart(prepared.restart, window, cx)
                 }) {
                     let failure = classify_remote_workspace_restart_failure(error);
@@ -2380,7 +2377,7 @@ impl WorkspaceManager {
         let result = self.workspaces.create_local_project_workspace(
             directory,
             |workspace_id, project_root| {
-                Self::create_local_window_manager(
+                Self::create_local_tab_manager(
                     workspace_id,
                     WorkspaceTerminalSessionFactory::new_local(
                         session_factory,
@@ -2544,7 +2541,7 @@ impl WorkspaceManager {
             replacement,
             DirectoryAuthority::initial(),
             |replacement_workspace_id, workspace_root| {
-                Self::create_local_window_manager(
+                Self::create_local_tab_manager(
                     replacement_workspace_id,
                     WorkspaceTerminalSessionFactory::new_local(
                         session_factory,
@@ -2608,7 +2605,7 @@ impl WorkspaceManager {
         cx.notify();
     }
 
-    fn close_workspace_for_final_window(
+    fn close_workspace_for_final_tab(
         &mut self,
         workspace_id: WorkspaceId,
         window: &mut Window,
@@ -2616,20 +2613,17 @@ impl WorkspaceManager {
     ) {
         self.begin_remote_workspace_close(workspace_id, window, cx);
         let was_active = self.workspaces.active_workspace_id() == workspace_id;
-        let outcome = match self
-            .workspaces
-            .close_workspace_for_final_window(workspace_id)
-        {
+        let outcome = match self.workspaces.close_workspace_for_final_tab(workspace_id) {
             Ok(outcome) => outcome,
             Err(error) => {
-                self.pending_final_window_closes.remove(&workspace_id);
-                Self::report_workspace_error("close for final Window", error);
+                self.pending_final_tab_closes.remove(&workspace_id);
+                Self::report_workspace_error("close for final Tab", error);
                 return;
             }
         };
 
         match outcome {
-            FinalWindowCloseOutcome::WorkspaceClosed {
+            FinalTabCloseOutcome::WorkspaceClosed {
                 closed_workspace_id,
                 active_workspace_id,
                 payload,
@@ -2648,7 +2642,7 @@ impl WorkspaceManager {
                     }
                 }
                 debug_assert_eq!(active_workspace_id, self.workspaces.active_workspace_id());
-                self.pending_final_window_closes.remove(&workspace_id);
+                self.pending_final_tab_closes.remove(&workspace_id);
                 if self
                     .rename
                     .as_ref()
@@ -2661,14 +2655,14 @@ impl WorkspaceManager {
                 self.refresh_workspace_search(cx);
                 cx.notify();
             }
-            FinalWindowCloseOutcome::CloseOperatingSystemWindow {
+            FinalTabCloseOutcome::CloseOperatingSystemWindow {
                 workspace_id: final_workspace_id,
             } => {
                 debug_assert_eq!(final_workspace_id, workspace_id);
                 let manager = self.workspaces.active_workspace().payload().clone();
                 manager.update(cx, |manager, cx| manager.close_all(cx));
                 self.remote_workspace_runtimes.remove(&workspace_id);
-                self.pending_final_window_closes.remove(&workspace_id);
+                self.pending_final_tab_closes.remove(&workspace_id);
                 window.remove_window();
             }
         }
@@ -2799,11 +2793,11 @@ impl WorkspaceManager {
         cx: &mut Context<Self>,
     ) {
         match command {
-            WorkspaceMenuCommand::NewWindow => {
+            WorkspaceMenuCommand::NewTab => {
                 if let Some(workspace) = self.workspaces.workspace(workspace_id) {
                     workspace
                         .payload()
-                        .update(cx, |manager, cx| manager.create_window(window, cx));
+                        .update(cx, |manager, cx| manager.create_tab(window, cx));
                 }
                 self.sync_terminal_focus_blocker(window, cx);
                 cx.notify();
@@ -3279,7 +3273,7 @@ impl WorkspaceManager {
             local_project,
             remote_connection_phase,
             available,
-            window_count,
+            tab_count,
             pane_count,
             active,
         } = row;
@@ -3441,7 +3435,7 @@ impl WorkspaceManager {
                                     .flex_shrink_0()
                                     .text_size(px(SIDEBAR_DETAIL_TEXT_SIZE))
                                     .text_color(gpui_color(ACTIVE_THEME.text_muted))
-                                    .child(format!("{window_count}W · {pane_count}P")),
+                                    .child(format!("{tab_count} tabs · {pane_count} panes")),
                             )
                             .when_some(remote_status, |line, status| {
                                 line.child(
@@ -3596,7 +3590,7 @@ impl WorkspaceManager {
             .occlude();
         let active_workspace_id = self.workspaces.active_workspace_id();
         for workspace in self.workspaces.iter() {
-            let (window_count, pane_count) = workspace.payload().read(cx).aggregate_counts(cx);
+            let (tab_count, pane_count) = workspace.payload().read(cx).aggregate_counts(cx);
             let (path, directory_tooltip) = workspace_directory_labels(
                 workspace.working_directory(),
                 workspace.remote_workspace_directory(),
@@ -3623,7 +3617,7 @@ impl WorkspaceManager {
                             .remote_connection_state()
                             .map(RemoteConnectionState::phase),
                         available,
-                        window_count,
+                        tab_count,
                         pane_count,
                         active: workspace.id() == active_workspace_id,
                     },
@@ -3792,7 +3786,7 @@ impl Render for WorkspaceManager {
         let manager = cx.entity().downgrade();
         let suppressed_move_manager = manager.clone();
         let suppressed_up_manager = manager.clone();
-        let active_window_manager = self.workspaces.active_workspace().payload().clone();
+        let active_tab_manager = self.workspaces.active_workspace().payload().clone();
         if self.sidebar_visible {
             self.sync_scrollbar(cx);
         }
@@ -3873,18 +3867,18 @@ impl Render for WorkspaceManager {
             .on_action(cx.listener(Self::on_toggle_sidebar))
             .on_action(cx.listener(Self::on_toggle_sidebar_focus))
             .on_action(cx.listener(Self::forward_active_terminal_action::<CopySelection>))
-            .on_action(cx.listener(Self::forward_active_terminal_action::<CreateWindow>))
-            .on_action(cx.listener(Self::forward_active_terminal_action::<ActivateWindow1>))
-            .on_action(cx.listener(Self::forward_active_terminal_action::<ActivateWindow2>))
-            .on_action(cx.listener(Self::forward_active_terminal_action::<ActivateWindow3>))
-            .on_action(cx.listener(Self::forward_active_terminal_action::<ActivateWindow4>))
-            .on_action(cx.listener(Self::forward_active_terminal_action::<ActivateWindow5>))
-            .on_action(cx.listener(Self::forward_active_terminal_action::<ActivateWindow6>))
-            .on_action(cx.listener(Self::forward_active_terminal_action::<ActivateWindow7>))
-            .on_action(cx.listener(Self::forward_active_terminal_action::<ActivateWindow8>))
-            .on_action(cx.listener(Self::forward_active_terminal_action::<ActivateWindow9>))
+            .on_action(cx.listener(Self::forward_active_terminal_action::<CreateTab>))
+            .on_action(cx.listener(Self::forward_active_terminal_action::<ActivateTab1>))
+            .on_action(cx.listener(Self::forward_active_terminal_action::<ActivateTab2>))
+            .on_action(cx.listener(Self::forward_active_terminal_action::<ActivateTab3>))
+            .on_action(cx.listener(Self::forward_active_terminal_action::<ActivateTab4>))
+            .on_action(cx.listener(Self::forward_active_terminal_action::<ActivateTab5>))
+            .on_action(cx.listener(Self::forward_active_terminal_action::<ActivateTab6>))
+            .on_action(cx.listener(Self::forward_active_terminal_action::<ActivateTab7>))
+            .on_action(cx.listener(Self::forward_active_terminal_action::<ActivateTab8>))
+            .on_action(cx.listener(Self::forward_active_terminal_action::<ActivateTab9>))
             .on_action(cx.listener(Self::forward_active_terminal_action::<ClosePane>))
-            .on_action(cx.listener(Self::forward_active_terminal_action::<CloseWindow>))
+            .on_action(cx.listener(Self::forward_active_terminal_action::<CloseTab>))
             .on_action(cx.listener(Self::forward_active_terminal_action::<SplitRight>))
             .on_action(cx.listener(Self::forward_active_terminal_action::<SplitDown>))
             .on_action(cx.listener(Self::forward_active_terminal_action::<FocusPaneLeft>))
@@ -3896,7 +3890,7 @@ impl Render for WorkspaceManager {
             .on_action(cx.listener(Self::forward_active_terminal_action::<FindNext>))
             .on_action(cx.listener(Self::forward_active_terminal_action::<FindPrevious>))
             .on_action(cx.listener(Self::forward_active_terminal_action::<CloseTerminalFind>))
-            .child(active_window_manager)
+            .child(active_tab_manager)
             .children(self.remote_workspace_flow.iter().cloned())
             .child(self.render_top_left_chrome(manager.clone()))
             .when(self.sidebar_visible, |root| {
@@ -3915,12 +3909,12 @@ fn workspace_menu_entries(
     remote_connection_phase: Option<RemoteConnectionPhase>,
 ) -> Vec<MenuEntry<WorkspaceMenuCommand>> {
     let mut entries = vec![
-        MenuEntry::action("New Window", WorkspaceMenuCommand::NewWindow)
+        MenuEntry::action("New Tab", WorkspaceMenuCommand::NewTab)
             .shortcut("⌘T")
             .icon(|foreground| {
                 Icon::new(IconName::SquarePlus, px(14.0), foreground).into_any_element()
             })
-            .debug_selector("workspace-menu-row-new-window"),
+            .debug_selector("workspace-menu-row-new-tab"),
         MenuEntry::action("Rename Workspace", WorkspaceMenuCommand::Rename)
             .icon(|foreground| Icon::new(IconName::Pencil, px(14.0), foreground).into_any_element())
             .debug_selector("workspace-menu-row-rename"),
@@ -3959,13 +3953,13 @@ fn remote_connection_status(phase: RemoteConnectionPhase) -> Option<&'static str
 }
 
 fn classify_remote_workspace_restart_failure(
-    error: RemoteWindowManagerLifecycleError,
+    error: RemoteTabManagerLifecycleError,
 ) -> RemoteWorkspaceReconnectFailure {
     match error {
-        RemoteWindowManagerLifecycleError::Revalidation(
+        RemoteTabManagerLifecycleError::Revalidation(
             crate::terminal::RemoteChannelRevalidationError::DirectoryUnavailable,
         ) => RemoteWorkspaceReconnectFailure::DirectoryUnavailable,
-        RemoteWindowManagerLifecycleError::Revalidation(
+        RemoteTabManagerLifecycleError::Revalidation(
             crate::terminal::RemoteChannelRevalidationError::IdentityChanged,
         ) => RemoteWorkspaceReconnectFailure::IdentityChanged,
         _ => RemoteWorkspaceReconnectFailure::ConnectionFailed { detail: None },
@@ -6050,11 +6044,11 @@ mod tests {
             gpui::Task::ready(Ok(())),
         );
         emit_remote_workspace_completion(&flow, completion, cx);
-        let (workspace_id, window_manager, pane_host) = manager.read_with(cx, |manager, cx| {
+        let (workspace_id, tab_manager, pane_host) = manager.read_with(cx, |manager, cx| {
             let workspace = manager.workspaces.active_workspace();
-            let window_manager = workspace.payload().clone();
-            let pane_host = window_manager.read(cx).active_pane_host();
-            (workspace.id(), window_manager, pane_host)
+            let tab_manager = workspace.payload().clone();
+            let pane_host = tab_manager.read(cx).active_pane_host();
+            (workspace.id(), tab_manager, pane_host)
         });
         let starts_before_disconnect = records.starts().len();
 
@@ -6081,10 +6075,10 @@ mod tests {
                 .unwrap()
                 .payload()
                 .entity_id()),
-            window_manager.entity_id()
+            tab_manager.entity_id()
         );
         assert_eq!(
-            window_manager.read_with(cx, |manager, _| manager.active_pane_host().entity_id()),
+            tab_manager.read_with(cx, |manager, _| manager.active_pane_host().entity_id()),
             pane_host.entity_id()
         );
         assert_eq!(
@@ -6277,7 +6271,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn reconnect_should_atomically_restart_the_same_workspace_window_and_pane(
+    fn reconnect_should_atomically_restart_the_same_workspace_tab_and_pane(
         cx: &mut TestAppContext,
     ) {
         let (new_session, new_closes, new_preparations, new_revalidations, _new_lifecycle) =
@@ -6294,14 +6288,14 @@ mod tests {
             gpui::Task::ready(Ok(())),
         );
         emit_remote_workspace_completion(&flow, completion, cx);
-        let (workspace_id, window_manager, pane_host, starts_before_reconnect) =
+        let (workspace_id, tab_manager, pane_host, starts_before_reconnect) =
             manager.read_with(cx, |manager, cx| {
                 let workspace = manager.workspaces.active_workspace();
-                let window_manager = workspace.payload().clone();
-                let pane_host = window_manager.read(cx).active_pane_host();
+                let tab_manager = workspace.payload().clone();
+                let pane_host = tab_manager.read(cx).active_pane_host();
                 (
                     workspace.id(),
-                    window_manager,
+                    tab_manager,
                     pane_host,
                     records.starts().len(),
                 )
@@ -6339,10 +6333,10 @@ mod tests {
                 .unwrap()
                 .payload()
                 .entity_id()),
-            window_manager.entity_id()
+            tab_manager.entity_id()
         );
         assert_eq!(
-            window_manager.read_with(cx, |manager, _| manager.active_pane_host().entity_id()),
+            tab_manager.read_with(cx, |manager, _| manager.active_pane_host().entity_id()),
             pane_host.entity_id()
         );
         assert_eq!(
@@ -6591,7 +6585,7 @@ mod tests {
         redraw(cx);
         cx.simulate_keystrokes("cmd-d");
         cx.run_until_parked();
-        let (workspace_id, window_manager, starts) = manager.read_with(cx, |manager, _| {
+        let (workspace_id, tab_manager, starts) = manager.read_with(cx, |manager, _| {
             let workspace = manager.workspaces.active_workspace();
             (
                 workspace.id(),
@@ -6600,7 +6594,7 @@ mod tests {
             )
         });
         assert_eq!(
-            window_manager.read_with(cx, |manager, cx| manager.aggregate_counts(cx)),
+            tab_manager.read_with(cx, |manager, cx| manager.aggregate_counts(cx)),
             (1, 2)
         );
 
@@ -6630,7 +6624,7 @@ mod tests {
         assert_eq!(new_closes.load(Ordering::Acquire), 1);
         assert_eq!(records.starts().len(), starts);
         assert_eq!(
-            window_manager.read_with(cx, |manager, cx| manager.aggregate_counts(cx)),
+            tab_manager.read_with(cx, |manager, cx| manager.aggregate_counts(cx)),
             (1, 1)
         );
         assert!(
@@ -6988,12 +6982,12 @@ mod tests {
         let flow = open_remote_workspace_flow(&manager, cx);
         let (completion, _, _, _) = remote_completion("work", "~/src", "/home/tester/src", true);
         emit_remote_workspace_completion(&flow, completion, cx);
-        let (workspace_id, window_manager) = manager.read_with(cx, |manager, _| {
+        let (workspace_id, tab_manager) = manager.read_with(cx, |manager, _| {
             let workspace = manager.workspaces.active_workspace();
             (workspace.id(), workspace.payload().clone())
         });
 
-        window_manager.update(cx, |_, cx| {
+        tab_manager.update(cx, |_, cx| {
             cx.emit(RemoteChildLaunchUnavailable::IdentityChanged)
         });
         cx.run_until_parked();
@@ -7008,7 +7002,7 @@ mod tests {
             Some(RemoteConnectionState::connected(1))
         );
         assert!(!cx.update(|window, cx| {
-            window_manager
+            tab_manager
                 .read(cx)
                 .focused_terminal_has_input_focus(window, cx)
         }));
@@ -7017,11 +7011,11 @@ mod tests {
                 .is_some()
         );
         click("modal-action-remote-workspace-reconnect-error-ok", cx);
-        assert!(cx.update(|window, cx| {
-            window_manager
-                .read(cx)
-                .focused_terminal_is_focused(window, cx)
-        }));
+        assert!(
+            cx.update(|window, cx| {
+                tab_manager.read(cx).focused_terminal_is_focused(window, cx)
+            })
+        );
     }
 
     #[gpui::test]
@@ -7965,8 +7959,8 @@ mod tests {
             .expect("Workspace top chrome must be rendered")
             .center();
         let outside = cx
-            .debug_bounds("window-manager-content")
-            .expect("Window content must be rendered")
+            .debug_bounds("tab-manager-content")
+            .expect("Tab content must be rendered")
             .center();
 
         cx.simulate_mouse_down(chrome, MouseButton::Left, Modifiers::none());
@@ -8040,8 +8034,8 @@ mod tests {
             .debug_bounds("workspace-sidebar-resize-handle-divider")
             .expect("the unified sidebar divider was not rendered");
         let content = cx
-            .debug_bounds("window-manager-content")
-            .expect("the active Window content was not rendered");
+            .debug_bounds("tab-manager-content")
+            .expect("the active Tab content was not rendered");
 
         assert_eq!(
             (
@@ -8094,8 +8088,8 @@ mod tests {
             .debug_bounds("workspace-top-chrome-drag-region-hitbox")
             .expect("the Workspace chrome drag target was not rendered");
         let window_drag_target = cx
-            .debug_bounds("window-bar-drag-region-hitbox")
-            .expect("the Window chrome drag target was not rendered");
+            .debug_bounds("tab-bar-drag-region-hitbox")
+            .expect("the Tab chrome drag target was not rendered");
         assert_eq!(
             (workspace_drag_target.right(), window_drag_target.left()),
             (spacious_hitbox.left(), spacious_hitbox.right())
@@ -8191,18 +8185,18 @@ mod tests {
             .debug_bounds("workspace-sidebar")
             .expect("the resized Workspace sidebar was not rendered");
         let content = cx
-            .debug_bounds("window-manager-content")
-            .expect("the active Window content was not rendered");
-        let window_bar = cx
-            .debug_bounds("window-bar")
-            .expect("the Window bar was not rendered");
+            .debug_bounds("tab-manager-content")
+            .expect("the active Tab content was not rendered");
+        let tab_bar = cx
+            .debug_bounds("tab-bar")
+            .expect("the Tab bar was not rendered");
         assert_eq!(
             (
                 layout,
                 chrome.size.width,
                 sidebar.size.width,
                 content.origin.x,
-                window_bar.origin.x,
+                tab_bar.origin.x,
             ),
             (
                 (true, resized_width),
@@ -8351,17 +8345,17 @@ mod tests {
             .debug_bounds("workspace-top-chrome")
             .expect("the persistent top-left chrome was not rendered");
         let content = cx
-            .debug_bounds("window-manager-content")
-            .expect("the active Window content was not rendered");
-        let window_bar = cx
-            .debug_bounds("window-bar")
-            .expect("the Window bar was not rendered");
+            .debug_bounds("tab-manager-content")
+            .expect("the active Tab content was not rendered");
+        let tab_bar = cx
+            .debug_bounds("tab-bar")
+            .expect("the Tab bar was not rendered");
         assert_eq!(
             (
                 layout,
                 chrome.size.width,
                 content.origin.x,
-                window_bar.origin.x,
+                tab_bar.origin.x,
             ),
             (
                 (false, px(WORKSPACE_SIDEBAR_MINIMUM_WIDTH)),
@@ -8405,7 +8399,7 @@ mod tests {
             "the sidebar resize did not collapse the body"
         );
         let terminal = cx
-            .debug_bounds("window-manager-content")
+            .debug_bounds("tab-manager-content")
             .expect("the Terminal Session content was rendered")
             .center();
         cx.simulate_mouse_move(terminal, MouseButton::Left, Modifiers::none());
@@ -8783,8 +8777,8 @@ mod tests {
             .debug_bounds("workspace-top-chrome")
             .expect("the fixed top-left chrome must remain rendered");
         let content = cx
-            .debug_bounds("window-manager-content")
-            .expect("the active Window content was not rendered");
+            .debug_bounds("tab-manager-content")
+            .expect("the active Tab content was not rendered");
         assert_eq!(
             (
                 hidden_state,
@@ -9028,7 +9022,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn window_shortcuts_should_create_and_activate_windows_while_sidebar_is_focused(
+    fn tab_shortcuts_should_create_and_activate_tabs_while_sidebar_is_focused(
         cx: &mut TestAppContext,
     ) {
         let (manager, _records, cx) = workspace_manager(cx);
@@ -9058,10 +9052,10 @@ mod tests {
 
         assert_eq!(
             (created_state.0, created_state.1.as_ref()),
-            (false, "zsh · 2 Windows")
+            (false, "zsh · 2 tabs")
         );
-        assert!(cx.debug_bounds("window-item-1-active").is_some());
-        assert!(cx.debug_bounds("window-item-2-inactive").is_some());
+        assert!(cx.debug_bounds("tab-item-1-active").is_some());
+        assert!(cx.debug_bounds("tab-item-2-inactive").is_some());
     }
 
     #[gpui::test]
@@ -9088,20 +9082,20 @@ mod tests {
     }
 
     #[gpui::test]
-    fn duplicate_final_window_close_requests_should_schedule_one_operating_system_window_close(
+    fn duplicate_final_tab_close_requests_should_schedule_one_operating_system_window_close(
         cx: &mut TestAppContext,
     ) {
         let (manager, records, cx) = workspace_manager(cx);
-        let window_manager = manager.read_with(cx, |manager, _| {
+        let tab_manager = manager.read_with(cx, |manager, _| {
             manager.workspaces.active_workspace().payload().clone()
         });
 
-        window_manager.update(cx, |_, cx| {
-            cx.emit(WindowManagerEvent::FinalWindowCloseRequested {
-                final_window_id: crate::domain::WindowId::new(1),
+        tab_manager.update(cx, |_, cx| {
+            cx.emit(TabManagerEvent::FinalTabCloseRequested {
+                final_tab_id: crate::domain::TabId::new(1),
             });
-            cx.emit(WindowManagerEvent::FinalWindowCloseRequested {
-                final_window_id: crate::domain::WindowId::new(1),
+            cx.emit(TabManagerEvent::FinalTabCloseRequested {
+                final_tab_id: crate::domain::TabId::new(1),
             });
         });
         cx.run_until_parked();
@@ -9111,7 +9105,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn pane_shortcuts_should_operate_on_the_active_window_while_sidebar_is_focused(
+    fn pane_shortcuts_should_operate_on_the_active_tab_while_sidebar_is_focused(
         cx: &mut TestAppContext,
     ) {
         let (manager, records, cx) = workspace_manager(cx);
@@ -9141,13 +9135,11 @@ mod tests {
     }
 
     #[gpui::test]
-    fn workspace_context_menu_should_target_new_window_and_rename_commands(
-        cx: &mut TestAppContext,
-    ) {
+    fn workspace_context_menu_should_target_new_tab_and_rename_commands(cx: &mut TestAppContext) {
         let (manager, _records, cx) = workspace_manager(cx);
 
         right_click("workspace-row-1-active", cx);
-        click("workspace-menu-row-new-window", cx);
+        click("workspace-menu-row-new-tab", cx);
         let workspace_detail = manager.read_with(cx, |manager, cx| {
             manager
                 .workspaces
@@ -9167,7 +9159,7 @@ mod tests {
 
         assert_eq!(
             (workspace_detail.as_ref(), name),
-            ("zsh · 2 Windows", "Dev".to_owned())
+            ("zsh · 2 tabs", "Dev".to_owned())
         );
     }
 
@@ -9378,7 +9370,7 @@ mod tests {
                 true,
                 "Default".to_owned(),
                 "zsh",
-                "zsh · 2 Windows",
+                "zsh · 2 tabs",
                 Vec::new(),
             )
         );

@@ -572,12 +572,12 @@ mod tests {
     use cocoa::appkit::NSPasteboard;
 
     use super::*;
-    use crate::domain::{PaneId, WindowId, WorkspaceId};
+    use crate::domain::{PaneId, TabId, WorkspaceId};
 
     fn origin(generation: u64) -> NativeServiceOrigin {
         NativeServiceOrigin::new(
             WorkspaceId::new(1),
-            WindowId::new(2),
+            TabId::new(2),
             PaneId::new(3),
             4,
             5,
