@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use crate::domain::{PaneId, WindowId, WorkspaceId};
+use crate::domain::{PaneId, TabId, WorkspaceId};
 
 use super::file_insertion::prepare_file_insertion;
 use super::hyperlink::{HyperlinkKind, HyperlinkTarget};
@@ -33,7 +33,7 @@ impl NativeServiceCapabilities {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct NativeServiceOrigin {
     workspace_id: WorkspaceId,
-    window_id: WindowId,
+    tab_id: TabId,
     pane_id: PaneId,
     session_identity: u64,
     focus_epoch: u64,
@@ -43,7 +43,7 @@ pub(crate) struct NativeServiceOrigin {
 impl NativeServiceOrigin {
     pub(crate) const fn new(
         workspace_id: WorkspaceId,
-        window_id: WindowId,
+        tab_id: TabId,
         pane_id: PaneId,
         session_identity: u64,
         focus_epoch: u64,
@@ -51,7 +51,7 @@ impl NativeServiceOrigin {
     ) -> Self {
         Self {
             workspace_id,
-            window_id,
+            tab_id,
             pane_id,
             session_identity,
             focus_epoch,
@@ -63,8 +63,8 @@ impl NativeServiceOrigin {
         self.workspace_id
     }
 
-    pub(crate) const fn window_id(self) -> WindowId {
-        self.window_id
+    pub(crate) const fn tab_id(self) -> TabId {
+        self.tab_id
     }
 
     pub(crate) const fn pane_id(self) -> PaneId {

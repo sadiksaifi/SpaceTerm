@@ -1034,7 +1034,7 @@ fn check_presentation(issue: u8) -> Result<(), String> {
 fn check_terminal_focus() -> Result<(), String> {
     let focused = TerminalFocusFacts {
         active_workspace: true,
-        active_window: true,
+        active_tab: true,
         focused_pane: true,
         responder: true,
         operating_system_window_key: true,

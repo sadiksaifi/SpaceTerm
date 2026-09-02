@@ -14,7 +14,7 @@ use crate::ssh::command::{NativeSshProbeRunner, SshCapability, SshUnavailableRea
 use crate::ssh::startup_environment::StartupSshEnvironment;
 use crate::terminal::{NativeTerminalSessionFactory, TerminalSessionFactory};
 use crate::ui::{
-    ClosePane, CloseWindow, CloseWorkspace, CreateScratchWorkspace, CreateWindow,
+    ClosePane, CloseTab, CloseWorkspace, CreateScratchWorkspace, CreateTab,
     ExportTerminalDiagnostics, FindNext, FindPrevious, NativeRemoteWorkspaceFlowBackendFactory,
     OpenLocalProject, OpenTerminalFind, SearchWorkspaces, ShowNewWorkspacePanel, WorkspaceManager,
 };
@@ -166,10 +166,10 @@ fn file_menu() -> Menu {
             MenuItem::action("New Scratch Workspace", CreateScratchWorkspace),
             MenuItem::action("Open Local Project…", OpenLocalProject),
             MenuItem::action("Search Workspaces…", SearchWorkspaces),
-            MenuItem::action("New Window", CreateWindow),
+            MenuItem::action("New Tab", CreateTab),
             MenuItem::separator(),
             MenuItem::action("Close Pane", ClosePane),
-            MenuItem::action("Close Window", CloseWindow),
+            MenuItem::action("Close Tab", CloseTab),
             MenuItem::action("Close Workspace", CloseWorkspace),
             MenuItem::separator(),
             MenuItem::action("Export Terminal Diagnostics…", ExportTerminalDiagnostics),
@@ -309,10 +309,10 @@ mod tests {
                 "New Scratch Workspace",
                 "Open Local Project…",
                 "Search Workspaces…",
-                "New Window",
+                "New Tab",
                 "|",
                 "Close Pane",
-                "Close Window",
+                "Close Tab",
                 "Close Workspace",
                 "|",
                 "Export Terminal Diagnostics…",

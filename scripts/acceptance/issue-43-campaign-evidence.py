@@ -60,8 +60,8 @@ MATRIX_CASES: dict[str, tuple[str, ...]] = {
     ),
     "focus": (
         "focus-pane-switch", "focus-sidebar", "focus-workspace-rename",
-        "focus-workspace-context-menu", "focus-pane-menu", "focus-window-menu",
-        "focus-top-chrome", "focus-window-selector", "focus-terminal-find",
+        "focus-workspace-context-menu", "focus-pane-menu", "focus-tab-menu",
+        "focus-top-chrome", "focus-tab-selector", "focus-terminal-find",
         "focus-native-panels", "focus-non-key-os-window",
         "focus-app-activation", "focus-hierarchy-switch",
     ),
@@ -127,14 +127,14 @@ CASE_CLAUSES: dict[str, tuple[str, ...]] = {
     "focus-workspace-rename": ("route-rename-finish-cancel",),
     "focus-workspace-context-menu": ("route-workspace-menu",),
     "focus-pane-menu": ("route-pane-menu",),
-    "focus-window-menu": ("route-window-menu-context",),
+    "focus-tab-menu": ("route-tab-menu-context",),
     "focus-top-chrome": ("route-top-chrome-drag",),
-    "focus-window-selector": ("route-window-selector-switch",),
+    "focus-tab-selector": ("route-tab-selector-switch",),
     "focus-terminal-find": ("route-find-responder-open-close",),
     "focus-native-panels": ("route-all-native-panels",),
     "focus-non-key-os-window": ("route-non-key-while-active",),
     "focus-app-activation": ("route-deactivate-reactivate",),
-    "focus-hierarchy-switch": ("route-active-workspace-window",),
+    "focus-hierarchy-switch": ("route-active-workspace-tab",),
     "capability-keyboard": ("ordinary-text", "navigation-function", "control-option-command", "repeat-release", "non-us-layout", "dead-key", "native-ime-compose-commit"),
     "capability-mouse": ("local-selection", "application-tracking", "captured-drag-release", "shift-override", "precision-wheel", "momentum", "alternate-screen-scroll"),
     "capability-paste": ("ordinary", "bracketed-multiline", "unsafe-approve-cancel", "embedded-closing-fence", "file-url", "file-drag-drop"),
@@ -143,7 +143,7 @@ CASE_CLAUSES: dict[str, tuple[str, ...]] = {
     "capability-links": ("osc8-detected-activate", "validated-local-path", "stale-generation-reject", "malformed-missing-inert"),
     "capability-resize-scrollback": ("cell-pixel-resize", "rapid-live-resize", "reflow", "viewport-anchor-output", "selection-anchor", "primary-alternate-restore"),
     "capability-accessibility": ("inspector-real-pane", "voiceover-real-pane", "editable-role-value", "utf16-ranges", "visible-selection-cursor", "wide-combining-emoji", "soft-wraps-scrollback", "range-bounds-hit-test", "pane-notifications"),
-    "capability-attention": ("bel-audio-visual", "pane-window-unread", "dock-rate-cancel", "inactive-notification", "aggregation", "no-focus-steal"),
+    "capability-attention": ("bel-audio-visual", "pane-tab-unread", "dock-rate-cancel", "inactive-notification", "aggregation", "no-focus-steal"),
     "capability-macos-services": ("selection-export", "text-insertion", "paste-sanitizer"),
     "capability-context-actions": ("selection-link-enablement", "stale-inert"),
     "capability-quick-look": ("validated-regular-local", "web-missing-remote-stale-unavailable"),
@@ -1458,7 +1458,7 @@ def validate_record(document: Any, run_id: str) -> dict[str, Any]:
             ):
                 fail("focus PASS contradicts the required focus/cursor transition")
             expected_identity_change = case_id in {
-                "focus-pane-switch", "focus-window-selector", "focus-hierarchy-switch",
+                "focus-pane-switch", "focus-tab-selector", "focus-hierarchy-switch",
             }
             identity_changed = (
                 document["focused_pane_identity_before"]

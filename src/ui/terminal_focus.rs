@@ -7,16 +7,16 @@ pub(crate) enum TerminalFocusBlocker {
     ContextMenu,
     PaneMenu,
     PaneResize,
-    WindowMenu,
+    TabMenu,
     TopChrome,
-    WindowSelector,
+    TabSelector,
     Modal,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct TerminalFocusFacts {
     pub(crate) active_workspace: bool,
-    pub(crate) active_window: bool,
+    pub(crate) active_tab: bool,
     pub(crate) focused_pane: bool,
     pub(crate) responder: bool,
     pub(crate) operating_system_window_key: bool,
@@ -27,7 +27,7 @@ pub(crate) struct TerminalFocusFacts {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct TerminalProductFocus {
     pub(crate) active_workspace: bool,
-    pub(crate) active_window: bool,
+    pub(crate) active_tab: bool,
     pub(crate) pane_visible: bool,
     pub(crate) focused_pane: bool,
     pub(crate) blocker: Option<TerminalFocusBlocker>,
@@ -37,7 +37,7 @@ impl Default for TerminalProductFocus {
     fn default() -> Self {
         Self {
             active_workspace: true,
-            active_window: true,
+            active_tab: true,
             pane_visible: true,
             focused_pane: true,
             blocker: None,
@@ -50,7 +50,7 @@ impl TerminalFocusFacts {
     const fn focused() -> Self {
         Self {
             active_workspace: true,
-            active_window: true,
+            active_tab: true,
             focused_pane: true,
             responder: true,
             operating_system_window_key: true,
@@ -65,7 +65,7 @@ pub(crate) struct TerminalFocusCoordinator;
 impl TerminalFocusCoordinator {
     pub(crate) const fn is_focused(facts: TerminalFocusFacts) -> bool {
         facts.active_workspace
-            && facts.active_window
+            && facts.active_tab
             && facts.focused_pane
             && facts.responder
             && facts.operating_system_window_key
@@ -89,7 +89,7 @@ mod tests {
                 ..focused
             },
             TerminalFocusFacts {
-                active_window: false,
+                active_tab: false,
                 ..focused
             },
             TerminalFocusFacts {
@@ -129,9 +129,9 @@ mod tests {
             TerminalFocusBlocker::ContextMenu,
             TerminalFocusBlocker::PaneMenu,
             TerminalFocusBlocker::PaneResize,
-            TerminalFocusBlocker::WindowMenu,
+            TerminalFocusBlocker::TabMenu,
             TerminalFocusBlocker::TopChrome,
-            TerminalFocusBlocker::WindowSelector,
+            TerminalFocusBlocker::TabSelector,
             TerminalFocusBlocker::Modal,
         ];
 

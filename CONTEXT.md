@@ -8,6 +8,9 @@ and architectural principles. Domain terminology, relationships, and invariants 
 
 SpaceTerm is a modern native macOS terminal. Its layout hierarchy takes useful inspiration from
 tmux, but SpaceTerm is not a tmux client and has no tmux-style server/client model.
+The canonical product hierarchy is `SpaceTerm -> Workspace -> Tab -> Pane Layout -> Pane`.
+Each Workspace owns one or more Tabs with exactly one Active Tab, and each Tab owns one or more
+Panes with exactly one Focused Pane. Window means the native macOS presentation surface.
 
 ## Technology decisions
 
@@ -74,7 +77,7 @@ Modules. Keep GPUI rendering, PTY syscalls, and Ghostty integration outside the 
 ### Encapsulation
 
 Express domain changes through intentional operations such as `create_workspace`,
-`close_workspace`, `create_window`, `close_window`, `split_pane`, `close_pane`, `focus_pane`, and
+`close_workspace`, `create_tab`, `close_tab`, `split_pane`, `close_pane`, `focus_pane`, and
 `resize_split`. Do not permit arbitrary external mutation of collections or active and focused
 identities.
 
@@ -308,7 +311,7 @@ at its Interface.
 ### Identity Ownership
 
 Each hierarchy Module allocates the identities it owns. `WorkspaceCollection` allocates Workspace
-IDs, `WindowCollection` allocates Window IDs, and `TerminalWindow` allocates Pane and Split IDs.
+IDs, `TabCollection` allocates Tab IDs, and `TerminalTab` allocates Pane and Split IDs.
 Creation factories receive the generated identity so infrastructure can bind events without
 manufacturing domain state. Identities are monotonic and are not reused after deletion.
 
@@ -379,7 +382,7 @@ authority; malformed and remote reports cannot replace the last valid value. OSC
 zones and command completion retain bounded command text, exit status, and injected-monotonic-clock
 duration, while OSC 9;4 progress is clamped to its protocol range. Every metadata value carries
 session provenance and freshness, metadata-only changes reuse row identity, and completion marks
-the final metadata stale before the typed lifecycle event. Pane and Window chrome consume only the
+the final metadata stale before the typed lifecycle event. Pane and Tab chrome consume only the
 owning snapshot's resolved sanitized title and never parse terminal controls or query live emulator
 state.
 
@@ -443,7 +446,7 @@ owning Terminal Session lane; they never carry command text. Each Pane reduces o
 against explicit Terminal Input Focus, active-surface, key-window, and application facts using an
 injected monotonic clock. Repeated bells are suppressed within 100 milliseconds, Dock requests are
 limited to one per second, and inactive-only notifications aggregate for five seconds. Vague Pro visual
-bells and Pane/Window unread indicators never move focus. Focus gain or accepted key input clears
+bells and Pane/Tab unread indicators never move focus. Focus gain or accepted key input clears
 eligible state and cancels the outstanding native Dock request. AppKit audio, Dock, and notification
 effects sit behind one testable platform Seam and native notification policy.
 
@@ -546,8 +549,8 @@ accumulate drift.
 
 ### Terminal Input Focus
 
-Terminal Input Focus is a pure derived fact and is distinct from the Window-owned Focused Pane
-identity. The Terminal Focus Coordinator combines Active Workspace, Active Window, Focused Pane,
+Terminal Input Focus is a pure derived fact and is distinct from the Tab-owned Focused Pane
+identity. The Terminal Focus Coordinator combines Active Workspace, Active Tab, Focused Pane,
 terminal responder ownership, key Operating-System Window, active application, and temporary UI
 blockers. Only the complete true state admits terminal key input and presents the negotiated
 cursor. Any false fact preserves emulator visibility but presents a steady, outline-only hollow
@@ -917,14 +920,14 @@ picker starts at `HOME` on every open and retains no recents, index, persistence
 watcher. No Workspace state is persisted or watched.
 
 A Scratch Workspace's initial Pane is its Directory Authority. Valid live Reported Working Directory
-changes from that Pane update the Workspace Directory even when its Workspace or Window is inactive.
-Closing the authority Pane promotes the first remaining Pane in Pane Layout order; closing its Window
-promotes the root Pane of the first remaining Window. A promoted Pane's current valid report is
+changes from that Pane update the Workspace Directory even when its Workspace or Tab is inactive.
+Closing the authority Pane promotes the first remaining Pane in Pane Layout order; closing its Tab
+promotes the root Pane of the first remaining Tab. A promoted Pane's current valid report is
 adopted immediately. Local Project reports never change its immutable Project Root.
 
 `WorkspaceTerminalSessionFactory` binds each creation operation to the Workspace-owned exact path.
 Local Project children always start at Project Root; Scratch children start at the latest Workspace
-Directory. Create Window and Split Pane revalidate existence, readability, directory type, and
+Directory. Create Tab and Split Pane revalidate existence, readability, directory type, and
 filesystem identity before hierarchy mutation. Failure leaves running Terminal Sessions intact,
 marks the Workspace unavailable, and blocks only new children until validation succeeds.
 
@@ -971,7 +974,7 @@ Terminal metadata distinguishes Local and Remote launch contexts. Only Local met
 Terminal Local File Capabilities. Remote metadata prevents local path classification, user-data
 emission, validation, opening, preview, File Insertion, path drag/drop, clipboard file-URL intake,
 and file-aware native Services. Web links, Selection, copy, ordinary text paste and drop, Terminal
-Input, Terminal Find, and OSC 52 retain their existing policies. Create Window and Split Pane use
+Input, Terminal Find, and OSC 52 retain their existing policies. Create Tab and Split Pane use
 the Workspace's typed launch context: Local children revalidate the local Workspace Directory,
 while Remote children preserve the Remote Workspace Directory and never run local path validation.
 
@@ -984,7 +987,7 @@ SSH Destination alone; every other Remote Project uses `<physical basename> · <
 ### Cross-Hierarchy Close Escalation
 
 Closing a final child escalates to its owning hierarchy Module without first destroying the child.
-Closing the final Pane requests its Window close; closing the final Window removes its Workspace
+Closing the final Pane requests its Tab close; closing the final Tab removes its Workspace
 when another Workspace remains, or closes the Operating-System Window when globally final. Explicit
 Close Workspace remains distinct and replaces the final Workspace. The Module that resolves each
 close synchronously removes the entity and initiates one-shot shutdown of its Terminal Sessions.
