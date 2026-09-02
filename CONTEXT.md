@@ -618,9 +618,11 @@ only while the pointer is over it and the macOS platform modifier is held, inclu
 changes while the pointer remains stationary. Active presentation uses a pointing-hand cursor, a
 compact bottom-left destination preview, and one font-aligned underline only on linked cells that
 do not already carry a terminal-supplied underline; every terminal-supplied underline remains
-unchanged, including mixed-decoration link spans. Opening requires a platform-modified press and
-release on the same identity and Presentation Generation; drags, stale mappings, malformed schemes,
-and missing paths are inert.
+unchanged, including mixed-decoration link spans. Active presentation is scoped to the exact
+contiguous occurrence under the pointer, continuing across soft-wrapped rows without activating
+separate occurrences of the same target. Opening requires a platform-modified press and release on
+the same identity and Presentation Generation; drags, stale mappings, malformed schemes, and
+missing paths are inert.
 
 ### Native File Insertion
 

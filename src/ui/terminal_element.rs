@@ -8,6 +8,7 @@ use gpui::{
 };
 use unicode_bidi::{BidiClass, bidi_class};
 
+use crate::terminal::geometry::CellGridPosition;
 use crate::terminal::{
     CellSnapshot, CursorPositionSnapshot, CursorShapeSnapshot, CursorSnapshot, FindHighlightSpan,
     RowSnapshot, ScreenSnapshot, TerminalColor, TerminalColorsSnapshot, TerminalUnderlineSnapshot,
@@ -154,7 +155,7 @@ pub(crate) struct TerminalGridElement {
     presentation_operation: Option<OperationToken>,
     graphics_attempt: Option<GraphicsAttemptToken>,
     graphics_cache: Entity<TerminalGraphicsCache>,
-    active_hyperlink: Option<u64>,
+    active_hyperlink: Option<(u64, CellGridPosition)>,
     fallback: Option<Box<TerminalGridElement>>,
     fallback_generation: Option<crate::terminal::PresentationGeneration>,
     paint_fault: Option<PaintPreflightFault>,
@@ -176,7 +177,7 @@ pub(crate) struct TerminalGridConfiguration {
     pub(crate) presentation_operation: Option<OperationToken>,
     pub(crate) graphics_attempt: Option<GraphicsAttemptToken>,
     pub(crate) graphics_cache: Entity<TerminalGraphicsCache>,
-    pub(crate) active_hyperlink: Option<u64>,
+    pub(crate) active_hyperlink: Option<(u64, CellGridPosition)>,
     pub(crate) fallback: Option<(
         Arc<ScreenSnapshot>,
         Entity<TerminalGridCache>,
@@ -1130,6 +1131,8 @@ impl Element for TerminalGridElement {
             );
             (stable_rows, preedit_rows)
         });
+        let active_hyperlink_occurrence =
+            hyperlink_occurrence(&self.presentation, self.active_hyperlink);
 
         for (row_index, stable) in stable_rows.into_iter().enumerate() {
             let row_top = bounds.top() + self.line_height * row_index as f32;
@@ -1176,7 +1179,8 @@ impl Element for TerminalGridElement {
             frame.hyperlink_hover_decorations = prepare_decoration_geometry(
                 &hyperlink_hover_underline_spans(
                     &self.presentation.rows[row_index],
-                    self.active_hyperlink,
+                    row_index,
+                    active_hyperlink_occurrence,
                 ),
                 row_top,
                 grid_left,
@@ -1955,21 +1959,129 @@ fn push_decoration(spans: &mut Vec<DecorationSpan>, mut span: DecorationSpan) {
     spans.push(span);
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct HyperlinkOccurrence {
+    identity: u64,
+    start_row: usize,
+    start_column: usize,
+    end_row: usize,
+    end_column: usize,
+}
+
+fn cell_has_hyperlink(screen: &ScreenSnapshot, row: usize, column: usize, identity: u64) -> bool {
+    screen
+        .rows
+        .get(row)
+        .and_then(|row| row.get(column))
+        .and_then(|cell| cell.hyperlink.as_ref())
+        .is_some_and(|link| link.identity == identity)
+}
+
+fn hyperlink_occurrence(
+    screen: &ScreenSnapshot,
+    active_hyperlink: Option<(u64, CellGridPosition)>,
+) -> Option<HyperlinkOccurrence> {
+    let (identity, hovered_cell) = active_hyperlink?;
+    let hovered_row = usize::from(hovered_cell.row);
+    let hovered_column = usize::from(hovered_cell.col);
+    if !cell_has_hyperlink(screen, hovered_row, hovered_column, identity) {
+        return None;
+    }
+
+    let mut start_row = hovered_row;
+    let mut start_column = hovered_column;
+    loop {
+        if start_column > 0 && cell_has_hyperlink(screen, start_row, start_column - 1, identity) {
+            start_column -= 1;
+            continue;
+        }
+        if start_column == 0 && start_row > 0 {
+            let previous_row = start_row - 1;
+            if let Some(previous_column) = screen
+                .rows
+                .get(previous_row)
+                .and_then(|row| row.len().checked_sub(1))
+                && screen
+                    .row_soft_wrapped
+                    .get(previous_row)
+                    .copied()
+                    .unwrap_or(false)
+                && cell_has_hyperlink(screen, previous_row, previous_column, identity)
+            {
+                start_row = previous_row;
+                start_column = previous_column;
+                continue;
+            }
+        }
+        break;
+    }
+
+    let mut end_row = hovered_row;
+    let mut end_column = hovered_column;
+    loop {
+        let row_len = screen.rows.get(end_row)?.len();
+        if end_column + 1 < row_len && cell_has_hyperlink(screen, end_row, end_column + 1, identity)
+        {
+            end_column += 1;
+            continue;
+        }
+        if end_column + 1 == row_len
+            && screen
+                .row_soft_wrapped
+                .get(end_row)
+                .copied()
+                .unwrap_or(false)
+            && cell_has_hyperlink(screen, end_row + 1, 0, identity)
+        {
+            end_row += 1;
+            end_column = 0;
+            continue;
+        }
+        break;
+    }
+
+    Some(HyperlinkOccurrence {
+        identity,
+        start_row,
+        start_column,
+        end_row,
+        end_column,
+    })
+}
+
 fn hyperlink_hover_underline_spans(
     row: &RowSnapshot,
-    active_hyperlink: Option<u64>,
+    row_index: usize,
+    occurrence: Option<HyperlinkOccurrence>,
 ) -> Vec<DecorationSpan> {
-    let Some(active_hyperlink) = active_hyperlink else {
+    let Some(occurrence) = occurrence
+        .filter(|occurrence| (occurrence.start_row..=occurrence.end_row).contains(&row_index))
+    else {
         return Vec::new();
     };
+    let start_column = if row_index == occurrence.start_row {
+        occurrence.start_column
+    } else {
+        0
+    };
+    let end_column = if row_index == occurrence.end_row {
+        occurrence.end_column
+    } else {
+        row.len().saturating_sub(1)
+    };
     let mut spans = Vec::new();
-    for (column, cell) in row.iter().enumerate() {
+    for (column, cell) in row
+        .iter()
+        .enumerate()
+        .skip(start_column)
+        .take(end_column.saturating_sub(start_column) + 1)
+    {
         if cell.invisible
             || cell.underline != TerminalUnderlineSnapshot::None
             || !cell
                 .hyperlink
                 .as_ref()
-                .is_some_and(|link| link.identity == active_hyperlink)
+                .is_some_and(|link| link.identity == occurrence.identity)
         {
             continue;
         }
@@ -2722,8 +2834,15 @@ mod tests {
         let mut other = cell("d");
         other.hyperlink = crate::terminal::HyperlinkTarget::url("https://other.test");
         let row = Arc::<[CellSnapshot]>::from([plain_first, decorated, plain_second, other]);
+        let screen = ScreenSnapshot::from_test_parts(
+            Arc::from([Arc::clone(&row)]),
+            crate::terminal::ScrollbarSnapshot::default(),
+            "test",
+        );
+        let occurrence =
+            hyperlink_occurrence(&screen, Some((link.identity, CellGridPosition::new(0, 0))));
 
-        let spans = hyperlink_hover_underline_spans(&row, Some(link.identity));
+        let spans = hyperlink_hover_underline_spans(&row, 0, occurrence);
 
         assert_eq!(
             spans,
@@ -2743,6 +2862,35 @@ mod tests {
                     blinking: false,
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn hyperlink_hover_underlines_only_the_hovered_occurrence_when_targets_repeat() {
+        let link = crate::terminal::HyperlinkTarget::url("https://example.test").unwrap();
+        let mut first = cell("a");
+        first.hyperlink = Some(link.clone());
+        let separator = cell(" ");
+        let mut second = cell("b");
+        second.hyperlink = Some(link.clone());
+        let row = Arc::<[CellSnapshot]>::from([first, separator, second]);
+        let screen = ScreenSnapshot::from_test_parts(
+            Arc::from([Arc::clone(&row)]),
+            crate::terminal::ScrollbarSnapshot::default(),
+            "test",
+        );
+        let occurrence =
+            hyperlink_occurrence(&screen, Some((link.identity, CellGridPosition::new(2, 0))));
+
+        assert_eq!(
+            hyperlink_hover_underline_spans(&row, 0, occurrence),
+            [DecorationSpan {
+                start: 2,
+                len: 1,
+                kind: DecorationKind::Underline(TerminalUnderlineSnapshot::Single),
+                color: ACTIVE_THEME.link_text_hover,
+                blinking: false,
+            }]
         );
     }
 
