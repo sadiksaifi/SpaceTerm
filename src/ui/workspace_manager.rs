@@ -3739,12 +3739,8 @@ impl WorkspaceManager {
             .into_any_element()
     }
 
-    fn render_sidebar_resize_handle(
-        &self,
-        selector: &'static str,
-        top_chrome: bool,
-        manager: WeakEntity<Self>,
-    ) -> AnyElement {
+    fn render_sidebar_resize_handle(&self, manager: WeakEntity<Self>) -> AnyElement {
+        let selector = "workspace-sidebar-resize-handle";
         let current_width = f32::from(self.sidebar_width);
         let handle = ResizeHandle::new(
             selector,
@@ -3763,18 +3759,14 @@ impl WorkspaceManager {
         });
         let wrapper = div()
             .absolute()
+            .top_0()
             .left(self.sidebar_width - px(CHROME_DIVIDER_SIZE / 2.0))
             .w(px(CHROME_DIVIDER_SIZE));
-        if top_chrome {
-            wrapper
-                .top_0()
-                .h(px(TOP_CHROME_HEIGHT))
-                .child(handle)
-                .into_any_element()
+        if self.sidebar_visible {
+            wrapper.bottom_0().child(handle).into_any_element()
         } else {
             wrapper
-                .top(px(TOP_CHROME_HEIGHT))
-                .bottom_0()
+                .h(px(TOP_CHROME_HEIGHT))
                 .child(handle)
                 .into_any_element()
         }
@@ -3901,20 +3893,10 @@ impl Render for WorkspaceManager {
             .child(active_window_manager)
             .children(self.remote_workspace_flow.iter().cloned())
             .child(self.render_top_left_chrome(manager.clone()))
-            .child(self.render_sidebar_resize_handle(
-                "workspace-top-chrome-resize-handle",
-                true,
-                manager.clone(),
-            ))
             .when(self.sidebar_visible, |root| {
-                root.child(self.render_sidebar(manager.clone(), cx)).child(
-                    self.render_sidebar_resize_handle(
-                        "workspace-sidebar-resize-handle",
-                        false,
-                        manager,
-                    ),
-                )
-            });
+                root.child(self.render_sidebar(manager.clone(), cx))
+            })
+            .child(self.render_sidebar_resize_handle(manager));
         let content = content
             .child(self.workspace_search.clone())
             .child(self.new_workspace_panel.clone())
@@ -8033,9 +8015,12 @@ mod tests {
     }
 
     #[gpui::test]
-    fn sidebar_should_render_edge_to_edge_below_fixed_top_chrome(cx: &mut TestAppContext) {
+    fn sidebar_should_render_one_divider_across_top_chrome_and_body(cx: &mut TestAppContext) {
         let (_manager, _records, cx) = workspace_manager(cx);
 
+        let root = cx
+            .debug_bounds("workspace-manager")
+            .expect("the Workspace manager was not rendered");
         let chrome = cx
             .debug_bounds("workspace-top-chrome")
             .expect("the fixed top-left chrome was not rendered");
@@ -8045,12 +8030,9 @@ mod tests {
         let active_row = cx
             .debug_bounds("workspace-row-1-active")
             .expect("the Active Workspace row was not rendered");
-        let sidebar_divider = cx
+        let divider = cx
             .debug_bounds("workspace-sidebar-resize-handle-divider")
-            .expect("the shared sidebar divider was not rendered");
-        let top_chrome_divider = cx
-            .debug_bounds("workspace-top-chrome-resize-handle-divider")
-            .expect("the shared fixed top-chrome divider was not rendered");
+            .expect("the unified sidebar divider was not rendered");
         let content = cx
             .debug_bounds("window-manager-content")
             .expect("the active Window content was not rendered");
@@ -8063,11 +8045,9 @@ mod tests {
                 sidebar.size.width,
                 active_row.origin.x,
                 active_row.size.width,
-                sidebar_divider.center().x,
-                sidebar_divider.origin.y,
-                sidebar_divider.size,
-                top_chrome_divider.center().x,
-                top_chrome_divider.size.height,
+                divider.center().x,
+                divider.origin.y,
+                divider.size,
                 content.origin.x,
             ),
             (
@@ -8078,12 +8058,79 @@ mod tests {
                 px(0.0),
                 px(WORKSPACE_SIDEBAR_DEFAULT_WIDTH),
                 sidebar.origin.x + sidebar.size.width,
-                sidebar.origin.y,
-                gpui::size(px(CHROME_DIVIDER_SIZE), sidebar.size.height),
-                chrome.origin.x + chrome.size.width,
-                chrome.size.height,
+                root.origin.y,
+                gpui::size(px(CHROME_DIVIDER_SIZE), root.size.height),
                 px(WORKSPACE_SIDEBAR_DEFAULT_WIDTH),
             )
+        );
+    }
+
+    #[gpui::test]
+    fn sidebar_divider_hover_should_preserve_full_height_hairline_geometry(
+        cx: &mut TestAppContext,
+    ) {
+        let (_manager, _records, cx) = workspace_manager(cx);
+        let root = cx
+            .debug_bounds("workspace-manager")
+            .expect("the Workspace manager was not rendered");
+        let hitbox = cx
+            .debug_bounds("workspace-sidebar-resize-handle-hitbox")
+            .expect("the unified sidebar divider hitbox was not rendered");
+        let expected = gpui::size(px(CHROME_DIVIDER_SIZE), root.size.height);
+        let top = point(
+            hitbox.center().x,
+            root.origin.y + px(TOP_CHROME_HEIGHT / 2.0),
+        );
+        let body = point(hitbox.center().x, root.origin.y + root.size.height / 2.0);
+
+        cx.simulate_mouse_move(top, None, Modifiers::none());
+        cx.run_until_parked();
+        let top_geometry = cx
+            .debug_bounds("workspace-sidebar-resize-handle-divider")
+            .expect("the hovered sidebar divider was not rendered")
+            .size;
+        cx.simulate_mouse_move(body, None, Modifiers::none());
+        cx.run_until_parked();
+        let body_geometry = cx
+            .debug_bounds("workspace-sidebar-resize-handle-divider")
+            .expect("the hovered sidebar divider was not rendered")
+            .size;
+
+        assert_eq!((top_geometry, body_geometry), (expected, expected));
+    }
+
+    #[gpui::test]
+    fn dragging_sidebar_divider_in_top_chrome_should_resize_without_moving_window(
+        cx: &mut TestAppContext,
+    ) {
+        let (manager, platform, cx) =
+            workspace_manager_with_operating_system_window_drag_platform(cx);
+        let hitbox = cx
+            .debug_bounds("workspace-sidebar-resize-handle-hitbox")
+            .expect("the unified sidebar divider hitbox was not rendered");
+        let start = point(
+            hitbox.center().x,
+            hitbox.origin.y + px(TOP_CHROME_HEIGHT / 2.0),
+        );
+        let destination = point(start.x + px(40.0), start.y);
+
+        cx.simulate_mouse_move(start, None, Modifiers::none());
+        cx.simulate_mouse_down(start, MouseButton::Left, Modifiers::none());
+        cx.simulate_mouse_move(
+            point(start.x + px(12.0), start.y),
+            MouseButton::Left,
+            Modifiers::none(),
+        );
+        cx.simulate_mouse_move(destination, MouseButton::Left, Modifiers::none());
+        cx.simulate_mouse_up(destination, MouseButton::Left, Modifiers::none());
+        cx.run_until_parked();
+
+        assert_eq!(
+            (
+                manager.read_with(cx, |manager, _| manager.sidebar_width),
+                platform.counts(),
+            ),
+            (px(WORKSPACE_SIDEBAR_DEFAULT_WIDTH + 40.0), (0, 0, 0, 0),)
         );
     }
 
@@ -8215,8 +8262,8 @@ mod tests {
         });
         cx.run_until_parked();
         let position = cx
-            .debug_bounds("workspace-top-chrome-resize-handle-hitbox")
-            .expect("the persistent shared sidebar handle was rendered")
+            .debug_bounds("workspace-sidebar-resize-handle-hitbox")
+            .expect("the unified sidebar handle was rendered")
             .center();
 
         cx.simulate_event(gpui::MouseDownEvent {
@@ -8453,6 +8500,9 @@ mod tests {
         );
 
         cx.simulate_keystrokes("cmd-b");
+        redraw(cx);
+        // The unified keyed ResizeHandle persists across visibility changes, so the GPUI test
+        // inspector needs one more refresh to retire selectors from the preceding frame.
         redraw(cx);
 
         assert!(

@@ -3024,6 +3024,55 @@ mod tests {
     }
 
     #[gpui::test]
+    fn pane_split_resize_states_should_preserve_hairline_thickness(cx: &mut TestAppContext) {
+        cx.update(crate::ui::init)
+            .expect("UI initialization should succeed");
+        let records = TestTerminalSessionRecords::default();
+        let session_factory: Rc<dyn TerminalSessionFactory> =
+            Rc::new(TestTerminalSessionFactory::new(records));
+        let session_factory = WorkspaceTerminalSessionFactory::new_local(
+            session_factory,
+            crate::terminal::testing::test_workspace_directory(test_workspace_root()),
+        );
+        let (host, cx) = cx.add_window_view(|window, cx| {
+            PaneHost::new(WindowId::new(1), session_factory, window, cx)
+        });
+        cx.update(|window, cx| {
+            host.update(cx, |host, cx| {
+                host.split_focused(SplitAxis::Horizontal, window, cx);
+            });
+        });
+        cx.run_until_parked();
+        let hitbox = cx
+            .debug_bounds("split-divider-1-hitbox")
+            .expect("the split ResizeHandle was not rendered");
+        let center = hitbox.center();
+        let resting = cx
+            .debug_bounds("split-divider-1-divider")
+            .expect("the split divider was not rendered")
+            .size
+            .width;
+
+        cx.simulate_mouse_move(center, None, Modifiers::none());
+        cx.run_until_parked();
+        let hovered = cx
+            .debug_bounds("split-divider-1-divider")
+            .expect("the hovered split divider was not rendered")
+            .size
+            .width;
+        cx.simulate_mouse_down(center, MouseButton::Left, Modifiers::none());
+        cx.run_until_parked();
+        let active = cx
+            .debug_bounds("split-divider-1-divider")
+            .expect("the active split divider was not rendered")
+            .size
+            .width;
+        cx.simulate_mouse_up(center, MouseButton::Left, Modifiers::none());
+
+        assert_eq!((resting, hovered, active), (px(1.0), px(1.0), px(1.0)));
+    }
+
+    #[gpui::test]
     fn integrated_split_resize_handle_should_own_both_outer_hitbox_edges(cx: &mut TestAppContext) {
         cx.update(crate::ui::init)
             .expect("UI initialization should succeed");

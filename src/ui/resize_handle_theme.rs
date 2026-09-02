@@ -14,10 +14,7 @@ pub(super) fn theme() -> ResizeHandleTheme {
             gpui_color(ACTIVE_THEME.panel_focused_border),
             gpui_color(ACTIVE_THEME.border_disabled),
         ),
-        ResizeHandleMetrics::new(px(VISIBLE_THICKNESS), px(8.0))
-            .hover_thickness(px(2.0))
-            .active_thickness(px(3.0))
-            .focus_thickness(px(2.0)),
+        ResizeHandleMetrics::new(px(VISIBLE_THICKNESS), px(8.0)),
     )
 }
 
