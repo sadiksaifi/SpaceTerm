@@ -71,6 +71,10 @@ const _: () = assert!(
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum PaneHostEvent {
+    UserClosePaneRequested {
+        tab_id: TabId,
+        pane_id: PaneId,
+    },
     CloseTabRequested {
         tab_id: TabId,
     },
@@ -310,6 +314,22 @@ impl PaneHost {
         self.terminal_tab
             .terminal(pane_id)
             .and_then(|terminal| terminal.read(cx).reported_working_directory())
+    }
+
+    pub(crate) fn pane_requires_close_confirmation(
+        &self,
+        pane_id: PaneId,
+        cx: &App,
+    ) -> Option<bool> {
+        self.terminal_tab
+            .terminal(pane_id)
+            .map(|terminal| terminal.read(cx).requires_close_confirmation())
+    }
+
+    pub(crate) fn requires_close_confirmation(&self, cx: &App) -> bool {
+        self.terminal_tab
+            .terminals()
+            .any(|terminal| terminal.read(cx).requires_close_confirmation())
     }
 
     pub(crate) fn set_workspace_directory(
@@ -814,8 +834,28 @@ impl PaneHost {
         }
     }
 
+    #[cfg(test)]
     fn close_focused(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.close_pane(self.terminal_tab.focused_pane_id(), window, cx);
+    }
+
+    fn request_close_pane(&mut self, pane_id: PaneId, cx: &mut Context<Self>) {
+        if self.close_tab_requested || self.terminal_tab.terminal(pane_id).is_none() {
+            return;
+        }
+        cx.emit(PaneHostEvent::UserClosePaneRequested {
+            tab_id: self.terminal_tab.id(),
+            pane_id,
+        });
+    }
+
+    pub(crate) fn close_pane_authorized(
+        &mut self,
+        pane_id: PaneId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.close_pane(pane_id, window, cx);
     }
 
     #[cfg(test)]
@@ -1099,7 +1139,7 @@ impl PaneHost {
                 self.split_pane(pane_id, SplitAxis::Vertical, window, cx)
             }
             PaneActionMenuCommand::ToggleZoom => self.toggle_zoom(window, cx),
-            PaneActionMenuCommand::Close => self.close_pane(pane_id, window, cx),
+            PaneActionMenuCommand::Close => self.request_close_pane(pane_id, cx),
         }
         if self.menu_pane_id.take().is_some() {
             self.sync_terminal_focus(cx);
@@ -1150,8 +1190,8 @@ impl PaneHost {
         self.toggle_zoom(window, cx);
     }
 
-    fn on_close_pane(&mut self, _: &ClosePane, window: &mut Window, cx: &mut Context<Self>) {
-        self.close_focused(window, cx);
+    fn on_close_pane(&mut self, _: &ClosePane, _: &mut Window, cx: &mut Context<Self>) {
+        self.request_close_pane(self.terminal_tab.focused_pane_id(), cx);
     }
 
     fn render_tree(&self, tree: PaneTreeRef<'_>, host: gpui::WeakEntity<Self>) -> AnyElement {

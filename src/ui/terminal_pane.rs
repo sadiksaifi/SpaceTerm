@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 
 use thiserror::Error;
 
+use super::close_policy::{PaneLifecycle, pane_requires_close_confirmation};
 use super::render_lifecycle::{RenderLifecycle, ScaleChange, SurfaceVisibility};
 use super::terminal_context_menu::{TerminalContextMenuCommand, terminal_context_menu_entries};
 use super::terminal_element::PaintPreflightFault;
@@ -1038,6 +1039,34 @@ impl TerminalPane {
             && self.screen.metadata.freshness == MetadataFreshness::Live)
             .then(|| PathBuf::from(self.screen.metadata.directory.path.as_ref()))
             .filter(|path| path.is_absolute())
+    }
+
+    pub(crate) fn requires_close_confirmation(&self) -> bool {
+        let lifecycle = if self.session.is_none() {
+            PaneLifecycle::NoLiveTerminalSession
+        } else if matches!(self.pane_state, PaneTerminalState::Exited(_)) {
+            PaneLifecycle::Exited
+        } else if self
+            .pane_state
+            .failure()
+            .is_some_and(TerminalFailure::is_fatal)
+        {
+            PaneLifecycle::FatallyFailed
+        } else if self.remote_input_blocked {
+            PaneLifecycle::DisconnectedRemote
+        } else {
+            PaneLifecycle::Live
+        };
+        pane_requires_close_confirmation(
+            lifecycle,
+            self.screen.metadata.freshness,
+            self.screen.metadata.prompt_zone,
+            self.screen
+                .metadata
+                .command
+                .as_ref()
+                .map(|command| &command.state),
+        )
     }
 
     #[cfg(test)]
