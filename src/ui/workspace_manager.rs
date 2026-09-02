@@ -56,9 +56,9 @@ use crate::terminal::{
 use crate::theme::{ACTIVE_THEME, Color};
 use gpui::prelude::*;
 use gpui::{
-    Action, AnyElement, App, Context, DispatchPhase, Entity, EntityId, FocusHandle, MouseButton,
-    MouseMoveEvent, MouseUpEvent, Pixels, Render, ScrollHandle, ScrollWheelEvent, SharedString,
-    Task, WeakEntity, Window, canvas, div, point, px, rgba,
+    Action, AnyElement, App, Context, DispatchPhase, Edges, Entity, EntityId, FocusHandle,
+    MouseButton, MouseMoveEvent, MouseUpEvent, Pixels, Render, ScrollHandle, ScrollWheelEvent,
+    SharedString, Task, WeakEntity, Window, canvas, div, point, px, rgba,
 };
 use spaceterm_ui::{
     Alert, AlertIntent, Button, ButtonShape, ButtonSize, ButtonVariant, ContextMenu, Icon,
@@ -66,9 +66,10 @@ use spaceterm_ui::{
     ModalAction, ModalActionRole, ModalId, ModalLayer, OverlayScrollbar, OverlayScrollbarEvent,
     ProgressCancelDecision, ProgressCancellation, ProgressDialog, ProgressDialogHandle,
     ProgressDialogOutcome, ProgressDialogUpdate, ProgressState, ResizeAxis, ResizeFinishReason,
-    ResizeHandle, ResizeHandleEvent, ResizeInputSource, ScrollMetrics, TextInput, TextInputEvent,
-    TextInputVariant, Tooltip, TooltipLayer, TooltipTargetVisibility, WindowDragRegion,
-    WindowDragRegionEvent, WindowDragRegionResponse, WindowDragRegionStatus, window_modal_is_open,
+    ResizeHandle, ResizeHandleEvent, ResizeHandleTarget, ResizeInputSource, ScrollMetrics,
+    TextInput, TextInputEvent, TextInputVariant, Tooltip, TooltipLayer, TooltipTargetVisibility,
+    WindowDragRegion, WindowDragRegionEvent, WindowDragRegionResponse, WindowDragRegionStatus,
+    window_modal_is_open,
 };
 
 const SIDEBAR_TOGGLE_INSET: f32 = 4.0;
@@ -3237,6 +3238,10 @@ impl WorkspaceManager {
             content,
         )
         .status(self.window_drag_status.clone())
+        .pointer_insets(Edges {
+            right: super::resize_handle_theme::spacious_target_half_thickness(),
+            ..Edges::default()
+        })
         .debug_selector("workspace-top-chrome-drag-region")
         .on_event(move |event, window, cx| {
             let event = *event;
@@ -3750,6 +3755,7 @@ impl WorkspaceManager {
         )
         .tab_stop(true)
         .reset_on_double_click(true)
+        .target(ResizeHandleTarget::SpaciousLeading(px(TOP_CHROME_HEIGHT)))
         .debug_selector(selector)
         .on_event(move |event, window, cx| {
             let event = *event;
@@ -8075,12 +8081,27 @@ mod tests {
             .expect("the Workspace manager was not rendered");
         let hitbox = cx
             .debug_bounds("workspace-sidebar-resize-handle-hitbox")
-            .expect("the unified sidebar divider hitbox was not rendered");
-        let expected = gpui::size(px(CHROME_DIVIDER_SIZE), root.size.height);
-        let top = point(
-            hitbox.center().x,
-            root.origin.y + px(TOP_CHROME_HEIGHT / 2.0),
+            .expect("the regular sidebar divider hitbox was not rendered");
+        let spacious_hitbox = cx
+            .debug_bounds("workspace-sidebar-resize-handle-spacious-hitbox")
+            .expect("the spacious top-chrome hitbox was not rendered");
+        assert_eq!(hitbox.size.width, px(8.0));
+        assert_eq!(
+            spacious_hitbox.size,
+            gpui::size(px(16.0), px(TOP_CHROME_HEIGHT))
         );
+        let workspace_drag_target = cx
+            .debug_bounds("workspace-top-chrome-drag-region-hitbox")
+            .expect("the Workspace chrome drag target was not rendered");
+        let window_drag_target = cx
+            .debug_bounds("window-bar-drag-region-hitbox")
+            .expect("the Window chrome drag target was not rendered");
+        assert_eq!(
+            (workspace_drag_target.right(), window_drag_target.left()),
+            (spacious_hitbox.left(), spacious_hitbox.right())
+        );
+        let expected = gpui::size(px(CHROME_DIVIDER_SIZE), root.size.height);
+        let top = spacious_hitbox.center();
         let body = point(hitbox.center().x, root.origin.y + root.size.height / 2.0);
 
         cx.simulate_mouse_move(top, None, Modifiers::none());
@@ -8100,37 +8121,49 @@ mod tests {
     }
 
     #[gpui::test]
-    fn dragging_sidebar_divider_in_top_chrome_should_resize_without_moving_window(
+    fn dragging_sidebar_divider_at_top_chrome_edges_should_not_move_window(
         cx: &mut TestAppContext,
     ) {
         let (manager, platform, cx) =
             workspace_manager_with_operating_system_window_drag_platform(cx);
-        let hitbox = cx
-            .debug_bounds("workspace-sidebar-resize-handle-hitbox")
-            .expect("the unified sidebar divider hitbox was not rendered");
-        let start = point(
-            hitbox.center().x,
-            hitbox.origin.y + px(TOP_CHROME_HEIGHT / 2.0),
-        );
-        let destination = point(start.x + px(40.0), start.y);
 
-        cx.simulate_mouse_move(start, None, Modifiers::none());
-        cx.simulate_mouse_down(start, MouseButton::Left, Modifiers::none());
-        cx.simulate_mouse_move(
-            point(start.x + px(12.0), start.y),
-            MouseButton::Left,
-            Modifiers::none(),
-        );
-        cx.simulate_mouse_move(destination, MouseButton::Left, Modifiers::none());
-        cx.simulate_mouse_up(destination, MouseButton::Left, Modifiers::none());
-        cx.run_until_parked();
+        for leading_edge in [true, false] {
+            for top_edge in [true, false] {
+                let hitbox = cx
+                    .debug_bounds("workspace-sidebar-resize-handle-spacious-hitbox")
+                    .expect("the spacious top-chrome hitbox was not rendered");
+                let start_x = if leading_edge {
+                    hitbox.left() + px(0.5)
+                } else {
+                    hitbox.right() - px(0.5)
+                };
+                let start_y = if top_edge {
+                    hitbox.top() + px(0.5)
+                } else {
+                    hitbox.bottom() - px(0.5)
+                };
+                let start = point(start_x, start_y);
+                let destination = point(start.x + px(20.0), start.y);
+
+                cx.simulate_mouse_move(start, None, Modifiers::none());
+                cx.simulate_mouse_down(start, MouseButton::Left, Modifiers::none());
+                cx.simulate_mouse_move(
+                    point(start.x + px(12.0), start.y),
+                    MouseButton::Left,
+                    Modifiers::none(),
+                );
+                cx.simulate_mouse_move(destination, MouseButton::Left, Modifiers::none());
+                cx.simulate_mouse_up(destination, MouseButton::Left, Modifiers::none());
+                cx.run_until_parked();
+            }
+        }
 
         assert_eq!(
             (
                 manager.read_with(cx, |manager, _| manager.sidebar_width),
                 platform.counts(),
             ),
-            (px(WORKSPACE_SIDEBAR_DEFAULT_WIDTH + 40.0), (0, 0, 0, 0),)
+            (px(WORKSPACE_SIDEBAR_DEFAULT_WIDTH + 80.0), (0, 0, 0, 0),)
         );
     }
 

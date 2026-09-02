@@ -58,8 +58,8 @@ use crate::terminal::{
 use crate::theme::{ACTIVE_THEME, Color};
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, App, Context, Entity, EventEmitter, MouseButton, Pixels, PromptButton, PromptLevel,
-    Render, ScrollHandle, SharedString, Task, Window, div, px, rgba,
+    AnyElement, App, Context, Edges, Entity, EventEmitter, MouseButton, Pixels, PromptButton,
+    PromptLevel, Render, ScrollHandle, SharedString, Task, Window, div, px, rgba,
 };
 use spaceterm_ui::{
     ButtonSize, ButtonVariant, ContextMenu, Icon, IconButton, IconName, Menu, MenuAlignment,
@@ -1446,6 +1446,10 @@ impl WindowManager {
             content,
         )
         .status(self.window_drag_status.clone())
+        .pointer_insets(Edges {
+            left: super::resize_handle_theme::spacious_target_half_thickness(),
+            ..Edges::default()
+        })
         .debug_selector("window-bar-drag-region")
         .on_event(move |event, window, cx| {
             let event = *event;

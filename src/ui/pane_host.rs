@@ -3046,6 +3046,7 @@ mod tests {
         let hitbox = cx
             .debug_bounds("split-divider-1-hitbox")
             .expect("the split ResizeHandle was not rendered");
+        let target_width = hitbox.size.width;
         let center = hitbox.center();
         let resting = cx
             .debug_bounds("split-divider-1-divider")
@@ -3069,7 +3070,10 @@ mod tests {
             .width;
         cx.simulate_mouse_up(center, MouseButton::Left, Modifiers::none());
 
-        assert_eq!((resting, hovered, active), (px(1.0), px(1.0), px(1.0)));
+        assert_eq!(
+            (target_width, resting, hovered, active),
+            (px(8.0), px(1.0), px(1.0), px(1.0))
+        );
     }
 
     #[gpui::test]

@@ -1,5 +1,5 @@
-use gpui::{Rgba, px, rgba};
-use spaceterm_ui::{ResizeHandleMetrics, ResizeHandlePaint, ResizeHandleTheme};
+use gpui::{Pixels, Rgba, px, rgba};
+use spaceterm_ui::{ResizeHandleMetrics, ResizeHandlePaint, ResizeHandleTarget, ResizeHandleTheme};
 
 use crate::theme::{ACTIVE_THEME, Color};
 
@@ -16,6 +16,11 @@ pub(super) fn theme() -> ResizeHandleTheme {
         ),
         ResizeHandleMetrics::new(px(VISIBLE_THICKNESS), px(8.0)),
     )
+}
+
+pub(super) fn spacious_target_half_thickness() -> Pixels {
+    let thickness = theme().pointer_target_thickness(ResizeHandleTarget::Spacious);
+    px(f32::from(thickness) / 2.0)
 }
 
 fn gpui_color(color: Color) -> Rgba {

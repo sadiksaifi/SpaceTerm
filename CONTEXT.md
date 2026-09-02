@@ -223,8 +223,10 @@ interaction consistency and does not claim protected native accessibility semant
 The internal library's Resize Handle is a keyed, platform-neutral GPUI divider with a mandatory
 logical name and an explicitly named movement axis. It owns the enlarged pointer hitbox, resize
 cursor, hover, press and keyboard-focus presentation, pointer capture, cumulative displacement,
-keyboard steps, reset activation, and ordered typed interaction and cancellation lifecycle. It
-requests logical values while preserving the caller's authoritative value throughout an active
+keyboard steps, reset activation, and ordered typed interaction and cancellation lifecycle. Its
+bounded Regular, Spacious, and leading-segment Spacious pointer-target shapes never change the
+visible divider thickness. It requests logical values while preserving the caller's authoritative
+value throughout an active
 interaction. The application owns Pane Layout ratios, Pane minimum dimensions, Workspace sidebar
 bounds and collapse policy, terminal focus coordination, and every other product-specific resize
 policy.
@@ -233,8 +235,10 @@ The internal library's Window Drag Region is a keyed, platform-neutral interacti
 mandatory logical name and a bounded logical movement threshold. It owns primary-pointer gesture
 eligibility, software capture outside its bounds, explicit pressed and move-requested lifecycle,
 exactly-once move requests, double activation, cancellation, child-control exclusion, and event
-propagation. A retained read-only status handle lets application policy derive whether the control
-owns an interaction without duplicating its pointer lifecycle. The control adds no presentation.
+propagation. Bounded pointer insets let the application geometrically reserve neighboring control
+corridors instead of relying only on event-ordering precedence. A retained read-only status handle
+lets application policy derive whether the control owns an interaction without duplicating its
+pointer lifecycle. The control adds no presentation.
 The application owns top-chrome layout and paint, Terminal Input Focus coordination, actual
 Operating-System Window movement, and zoom, maximize, restore, or preference policy for double
 activation. One injected macOS platform adapter retains the original primary mouse-down, targets
