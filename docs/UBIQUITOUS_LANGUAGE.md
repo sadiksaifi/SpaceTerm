@@ -16,11 +16,11 @@
 | **SSH Destination** | The exact validated OpenSSH destination token selected for a Remote Project Workspace and retained as part of its identity. | physical host identity, resolved hostname, server |
 | **Remote Workspace Directory** | The exact absolute or home-relative remote directory spelling retained for Remote Terminal Session startup. | local path, `PathBuf`, Project Root |
 | **Physical Directory Identity** | The validated absolute physical remote directory returned by remote resolution for deduplication and automatic naming. | Remote Workspace Directory, local filesystem identity, display path |
-| **Tab** | An ordered terminal work area that belongs to exactly one Workspace and contains a Pane Layout. | Window, session |
-| **Pane** | A terminal region that is one leaf of exactly one Tab's Pane Layout. | Tab, Window, split |
+| **Tab** | An ordered terminal work area that belongs to exactly one Workspace and contains a Pane Layout. | session |
+| **Pane** | A terminal region that is one leaf of exactly one Tab's Pane Layout. | Tab, split |
 | **Pane Layout** | The recursive arrangement of Panes and Splits within a Tab. | Grid, pane tree |
 | **Split** | A layout division with exactly two child Pane Layouts and a constrained size ratio. | Pane, divider |
-| **Window** | A native macOS application surface that presents SpaceTerm. | product Tab, Pane container |
+| **Window** | A native macOS application surface that presents SpaceTerm. | |
 
 ## Selection and visibility
 
@@ -93,8 +93,8 @@
 | **Open Local Project** | Confirm one readable local directory through the Workspace Picker, or its explicit Finder Fallback, and create or activate its Local Project Workspace. | Open repository, convert Workspace |
 | **Open Remote Project** | Validate one Remote Workspace Directory through an SSH Destination and create or activate its Remote Project Workspace. | open remote terminal, connect to host |
 | **Close Workspace** | Remove a Workspace and its owned terminal runtimes, replacing it when it is the last Workspace. | Detach session, delete session |
-| **Create Tab** | Add and activate a new Tab in the Active Workspace. The conventional user-facing command is **New Tab**. | Create Window, link Tab |
-| **Close Tab** | Remove a Tab and its owned terminal runtimes, escalating through its Workspace when it is the final Tab. | Close Window, detach Tab |
+| **Create Tab** | Add and activate a new Tab in the Active Workspace. The conventional user-facing command is **New Tab**. | link Tab |
+| **Close Tab** | Remove a Tab and its owned terminal runtimes, escalating through its Workspace when it is the final Tab. | detach Tab |
 | **Split Pane** | Divide a target Pane and focus the newly created Pane. | Create Tab, split Tab |
 | **Close Pane** | Remove a Pane and its Terminal Session, escalating to Close Tab when it is the final Pane. | Close split, close terminal |
 | **Focus Pane** | Make an owned Pane the Focused Pane without changing its owning Tab. | Activate Pane, select terminal |
@@ -186,7 +186,6 @@
 
 ## Flagged ambiguities
 
-- Unqualified **Window** means the native macOS presentation surface. It must never name a Workspace child, Pane container, or hierarchy identity; use **Operating-System Window** or **macOS Window** when extra qualification helps.
 - **Tab** names the Workspace-owned product entity and must not be confused with the Tab key, keyboard traversal, a focus tab stop, or tab-separated data.
 - "Session" can incorrectly imply a tmux-style **Workspace** or describe a Pane's runtime; never use bare "session" for hierarchy concepts, and use **Terminal Session** only for the qualified runtime.
 - tmux-inspired layout does not imply a server/client model; do not describe SpaceTerm concepts as clients, attached sessions, or shared Tabs.
