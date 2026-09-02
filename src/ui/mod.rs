@@ -117,6 +117,12 @@ pub(crate) const TOP_CHROME_HEIGHT: f32 = 36.0;
 pub(crate) const WORKSPACE_SIDEBAR_DEFAULT_WIDTH: f32 = 240.0;
 pub(crate) const WORKSPACE_SIDEBAR_MINIMUM_WIDTH: f32 = 180.0;
 
+fn workspace_count_summary(tab_count: usize, pane_count: usize) -> String {
+    let tab_label = if tab_count == 1 { "tab" } else { "tabs" };
+    let pane_label = if pane_count == 1 { "pane" } else { "panes" };
+    format!("{tab_count} {tab_label} · {pane_count} {pane_label}")
+}
+
 pub(crate) fn init(cx: &mut App) -> gpui::Result<()> {
     init_with_text_direction(cx, crate::platform::macos_locale::current_text_direction())
 }
@@ -248,6 +254,24 @@ mod tests {
     use gpui::{Action, Keystroke, TestAppContext};
 
     use super::*;
+
+    #[test]
+    fn workspace_count_summary_should_pluralize_each_entity_independently() {
+        assert_eq!(
+            (
+                workspace_count_summary(1, 1),
+                workspace_count_summary(1, 2),
+                workspace_count_summary(2, 1),
+                workspace_count_summary(2, 3),
+            ),
+            (
+                "1 tab · 1 pane".to_owned(),
+                "1 tab · 2 panes".to_owned(),
+                "2 tabs · 1 pane".to_owned(),
+                "2 tabs · 3 panes".to_owned(),
+            )
+        );
+    }
 
     #[gpui::test]
     fn ui_init_should_install_control_themes(cx: &mut TestAppContext) {

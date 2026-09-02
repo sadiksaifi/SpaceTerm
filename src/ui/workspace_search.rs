@@ -78,7 +78,7 @@ impl WorkspaceSearchItem {
                 Icon::new(icon_name, px(WORKSPACE_ICON_SIZE), foreground).into_any_element()
             })
             .trailing(CommandPaletteAccessory::Text(
-                format!("{} tabs · {} panes", self.tab_count, self.pane_count).into(),
+                super::workspace_count_summary(self.tab_count, self.pane_count).into(),
             ))
             .debug_selector(format!(
                 "workspace-search-result-{}",

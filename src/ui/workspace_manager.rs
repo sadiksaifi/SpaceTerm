@@ -3435,7 +3435,7 @@ impl WorkspaceManager {
                                     .flex_shrink_0()
                                     .text_size(px(SIDEBAR_DETAIL_TEXT_SIZE))
                                     .text_color(gpui_color(ACTIVE_THEME.text_muted))
-                                    .child(format!("{tab_count} tabs · {pane_count} panes")),
+                                    .child(super::workspace_count_summary(tab_count, pane_count)),
                             )
                             .when_some(remote_status, |line, status| {
                                 line.child(
