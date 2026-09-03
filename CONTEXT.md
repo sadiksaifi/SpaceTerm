@@ -155,10 +155,11 @@ and footer, and repairs disabled or removed targets. Button and Text Input parti
 automatically; arbitrary caller-owned Dialog body controls join through one layout-transparent
 semantic focus-target adapter without exposing scroll handles or anchors. Restoration uses only a live rendered predecessor or explicit successor
 that has not been superseded by newer transient or focus ownership. Operating-System Window
-deactivation retains the modal, cancels pressed state, and defers restoration. Reusable actions and
-Alert suppression register their keyed pointer, Space, and Return gestures with one modal-owned
-press registry, so disablement, replacement, caller removal, and Operating-System Window removal
-reject stale or mismatched releases before activation. Focused children receive Return and Escape
+deactivation retains the modal, cancels pressed state, and defers restoration. Reusable actions
+register their keyed pointer, Space, and Return gestures with one modal-owned press registry, while
+Alert suppression registers only pointer and Space. Disablement, replacement, caller removal, and
+Operating-System Window removal reject stale or mismatched releases before activation. Focused
+children receive Return and Escape
 first. An enabled focused action consumes Return and activates on its matching release before any
 separately designated default action. After a focused body control declines Return, only an
 explicit enabled default may receive it. Escape and Command-Period reach only the enabled safe
