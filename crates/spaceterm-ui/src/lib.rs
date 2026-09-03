@@ -137,6 +137,7 @@ pub fn init(cx: &mut App, catalog: ControlThemeCatalog) -> gpui::Result<()> {
     cx.set_global(catalog.text_input);
     cx.set_global(catalog.tooltip);
     cx.set_global(catalog.modal);
+    button::init(cx);
     text_input::init(cx);
     menu::init(cx);
     command_palette::init(cx);

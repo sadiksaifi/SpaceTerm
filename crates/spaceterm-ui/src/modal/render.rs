@@ -1377,7 +1377,8 @@ fn render_action(
         .on_activate(move |activation, _, cx| {
             let source = match activation.source() {
                 crate::ButtonActivationSource::Pointer => ModalActivationSource::Pointer,
-                crate::ButtonActivationSource::Keyboard => ModalActivationSource::Space,
+                crate::ButtonActivationSource::Space => ModalActivationSource::Space,
+                crate::ButtonActivationSource::Return => ModalActivationSource::Return,
             };
             request_action_from_renderer(&source_owner, presentation, index, source, cx);
         });
@@ -1827,6 +1828,7 @@ mod tests {
             TextInputVariants::new(input_paint, input_paint),
             TextInputMetrics::new(px(1.0), px(2.0), Duration::from_millis(16), px(20.0)),
         ));
+        cx.update(crate::button::init);
         cx.update(crate::menu::init);
         cx.update(crate::text_input::init);
         cx.update(crate::tooltip::init);
@@ -3756,7 +3758,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn destructive_alert_focuses_safe_cancel_and_space_activates_it(cx: &mut TestAppContext) {
+    fn destructive_alert_focuses_safe_cancel_and_return_activates_it(cx: &mut TestAppContext) {
         install_test_catalogs(cx);
         let outcome = Rc::new(RefCell::new(None));
         let root_outcome = outcome.clone();
@@ -3802,13 +3804,17 @@ mod tests {
         });
         cx.run_until_parked();
 
-        press_space(cx);
+        assert!(
+            cx.debug_bounds("modal-action-destructive-alert-cancel-keyboard-focus")
+                .is_some()
+        );
+        press_return(cx);
 
         assert!(matches!(
             outcome.borrow().as_ref(),
             Some(AlertOutcome::Activated {
                 action_id: "cancel",
-                source: ModalActivationSource::Space,
+                source: ModalActivationSource::Return,
                 ..
             })
         ));
@@ -4095,6 +4101,7 @@ mod tests {
                 outcome.borrow().as_ref(),
                 Some(AlertOutcome::Activated {
                     action_id: "save",
+                    source: ModalActivationSource::Return,
                     suppression_selected: Some(true),
                     ..
                 })
@@ -5260,8 +5267,7 @@ mod tests {
     }
 
     fn request_primary_and_nested_cancel(cx: &mut VisualTestContext) {
-        cx.simulate_keystrokes("enter");
-        cx.run_until_parked();
+        press_return(cx);
         cx.simulate_keystrokes("escape");
         cx.run_until_parked();
     }
@@ -5271,8 +5277,7 @@ mod tests {
         cx: &mut TestAppContext,
     ) {
         let (requests, _, _, cx) = pending_dialog_window(cx);
-        cx.simulate_keystrokes("enter");
-        cx.run_until_parked();
+        press_return(cx);
         let cancel = cx
             .debug_bounds("modal-action-pending-cancel")
             .expect("Cancel should render");
@@ -5517,8 +5522,7 @@ mod tests {
             })
         });
         cx.run_until_parked();
-        cx.simulate_keystrokes("enter");
-        cx.run_until_parked();
+        press_return(cx);
 
         let queued_trace = trace.clone();
         let queued = cx.update(|window, cx| {
@@ -6057,13 +6061,34 @@ mod tests {
     fn modal_return_activates_the_explicit_default(cx: &mut TestAppContext) {
         let (_, _, outcome, cx) = alert_window(cx);
 
-        cx.simulate_keystrokes("enter");
-        cx.run_until_parked();
+        press_return(cx);
 
         assert!(matches!(
             outcome.borrow().as_ref(),
             Some(AlertOutcome::Activated {
                 action_id: "save",
+                source: ModalActivationSource::Return,
+                ..
+            })
+        ));
+    }
+
+    #[gpui::test]
+    fn focused_modal_action_takes_return_precedence_over_explicit_default(cx: &mut TestAppContext) {
+        let (_, _, outcome, cx) = alert_window(cx);
+        cx.simulate_keystrokes("shift-tab");
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("modal-action-cancel-keyboard-focus")
+                .is_some()
+        );
+
+        press_return(cx);
+
+        assert!(matches!(
+            outcome.borrow().as_ref(),
+            Some(AlertOutcome::Activated {
+                action_id: "cancel",
                 source: ModalActivationSource::Return,
                 ..
             })
@@ -6462,8 +6487,7 @@ mod tests {
             MouseButton::Left,
             Modifiers::default(),
         );
-        cx.simulate_keystrokes("enter");
-        cx.run_until_parked();
+        press_return(cx);
 
         assert!(matches!(
             outcome.borrow().as_ref(),
@@ -6533,8 +6557,7 @@ mod tests {
             MouseButton::Left,
             Modifiers::default(),
         );
-        cx.simulate_keystrokes("enter");
-        cx.run_until_parked();
+        press_return(cx);
 
         assert!(
             matches!(
@@ -7367,8 +7390,9 @@ mod tests {
         });
         cx.run_until_parked();
 
-        cx.simulate_keystrokes("shift-tab enter");
+        cx.simulate_keystrokes("shift-tab");
         cx.run_until_parked();
+        press_return(&mut cx);
 
         let viewport = cx
             .debug_bounds("modal-body-viewport")
@@ -7551,8 +7575,9 @@ mod tests {
         });
         cx.run_until_parked();
 
-        cx.simulate_keystrokes("shift-tab enter");
+        cx.simulate_keystrokes("shift-tab");
         cx.run_until_parked();
+        press_return(&mut cx);
 
         let viewport = cx
             .debug_bounds("modal-body-viewport")
@@ -7840,6 +7865,16 @@ mod tests {
 
     fn press_space(cx: &mut VisualTestContext) {
         let keystroke = Keystroke::parse("space").unwrap_or_default();
+        cx.simulate_event(KeyDownEvent {
+            keystroke: keystroke.clone(),
+            is_held: false,
+        });
+        cx.simulate_event(KeyUpEvent { keystroke });
+        cx.run_until_parked();
+    }
+
+    fn press_return(cx: &mut VisualTestContext) {
+        let keystroke = Keystroke::parse("enter").unwrap_or_default();
         cx.simulate_event(KeyDownEvent {
             keystroke: keystroke.clone(),
             is_held: false,

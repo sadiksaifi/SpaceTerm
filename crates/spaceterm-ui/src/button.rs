@@ -6,13 +6,26 @@ use std::{
 
 use gpui::{
     AnyElement, App, Bounds, ElementId, Entity, EntityId, FocusHandle, Font, Global,
-    HitboxBehavior, InteractiveElement as _, IntoElement, KeyDownEvent, KeyUpEvent, MouseButton,
-    MouseDownEvent, MouseExitEvent, MouseMoveEvent, MouseUpEvent, ParentElement, Pixels,
-    RenderOnce, Rgba, ScrollAnchor, ScrollHandle, SharedString, StatefulInteractiveElement as _,
-    Styled as _, TextRun, WeakFocusHandle, Window, canvas, div, prelude::FluentBuilder as _, px,
+    HitboxBehavior, InteractiveElement as _, IntoElement, KeyBinding, KeyDownEvent, KeyUpEvent,
+    MouseButton, MouseDownEvent, MouseExitEvent, MouseMoveEvent, MouseUpEvent, ParentElement,
+    Pixels, RenderOnce, Rgba, ScrollAnchor, ScrollHandle, SharedString,
+    StatefulInteractiveElement as _, Styled as _, TextRun, WeakFocusHandle, Window, actions,
+    canvas, div, prelude::FluentBuilder as _, px,
 };
 
 use crate::tooltip::{Tooltip, TooltipTargetVisibility};
+
+const KEY_CONTEXT: &str = "SpaceTermButton";
+
+actions!(spaceterm_button, [ActivateWithReturn]);
+
+pub(crate) fn init(cx: &mut App) {
+    cx.bind_keys([KeyBinding::new(
+        "enter",
+        ActivateWithReturn,
+        Some(KEY_CONTEXT),
+    )]);
+}
 
 /// The semantic intent of a button action.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -32,7 +45,9 @@ pub enum ButtonActivationSource {
     /// A primary pointer press released inside the button.
     Pointer,
     /// An unmodified Space key press while the button had keyboard focus.
-    Keyboard,
+    Space,
+    /// An unmodified Return or Enter key press while the button had keyboard focus.
+    Return,
 }
 
 /// Information supplied to a button activation callback.
@@ -1108,6 +1123,7 @@ impl ButtonCore {
         .absolute()
         .inset_0();
 
+        let return_down_state = state.clone();
         let key_down_state = state.clone();
         let key_up_state = state;
         let on_keyboard_activate = self.on_activate.clone();
@@ -1151,27 +1167,40 @@ impl ButtonCore {
                 button.block_mouse_except_scroll()
             })
             .track_focus(&focus_handle)
+            .key_context(KEY_CONTEXT)
             .anchor_scroll(scroll_anchor)
+            .on_action(move |_: &ActivateWithReturn, window, cx| {
+                window.prevent_default();
+                return_down_state.update(cx, |state, cx| {
+                    state.keyboard_down(KeyboardActivation::Return, cx)
+                });
+                cx.stop_propagation();
+            })
             .on_key_down(move |event: &KeyDownEvent, window, cx| {
                 if !is_unmodified_space_down(event) {
                     return;
                 }
                 window.prevent_default();
-                key_down_state.update(cx, |state, cx| state.space_down(cx));
+                key_down_state.update(cx, |state, cx| {
+                    state.keyboard_down(KeyboardActivation::Space, cx)
+                });
                 cx.stop_propagation();
             })
             .on_key_up(move |event: &KeyUpEvent, window, cx| {
-                if event.keystroke.key != "space" || !key_up_state.read(cx).interaction.space_held {
+                let Some(key) = KeyboardActivation::from_key(&event.keystroke.key) else {
+                    return;
+                };
+                if !key_up_state.read(cx).interaction.owns_keyboard(key) {
                     return;
                 }
                 let may_activate =
                     !event.keystroke.modifiers.modified() && keyboard_focus.is_focused(window);
                 let activate =
-                    key_up_state.update(cx, |state, cx| state.space_up(may_activate, cx));
+                    key_up_state.update(cx, |state, cx| state.keyboard_up(key, may_activate, cx));
                 if activate && let Some(handler) = &on_keyboard_activate {
                     handler(
                         &ButtonActivation {
-                            source: ButtonActivationSource::Keyboard,
+                            source: key.source(),
                             role,
                         },
                         window,
@@ -1308,14 +1337,19 @@ impl ButtonState {
         }
     }
 
-    fn space_down(&mut self, cx: &mut gpui::Context<Self>) {
-        if self.enabled && self.interaction.space_down() {
+    fn keyboard_down(&mut self, key: KeyboardActivation, cx: &mut gpui::Context<Self>) {
+        if self.enabled && self.interaction.keyboard_down(key) {
             cx.notify();
         }
     }
 
-    fn space_up(&mut self, focused: bool, cx: &mut gpui::Context<Self>) -> bool {
-        let released_owned_press = self.interaction.space_up();
+    fn keyboard_up(
+        &mut self,
+        key: KeyboardActivation,
+        focused: bool,
+        cx: &mut gpui::Context<Self>,
+    ) -> bool {
+        let released_owned_press = self.interaction.keyboard_up(key);
         let activate = self.enabled && focused && released_owned_press;
         cx.notify();
         activate
@@ -1331,16 +1365,39 @@ enum PointerPress {
     },
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum KeyboardActivation {
+    Space,
+    Return,
+}
+
+impl KeyboardActivation {
+    fn from_key(key: &str) -> Option<Self> {
+        match key {
+            "space" => Some(Self::Space),
+            "enter" => Some(Self::Return),
+            _ => None,
+        }
+    }
+
+    const fn source(self) -> ButtonActivationSource {
+        match self {
+            Self::Space => ButtonActivationSource::Space,
+            Self::Return => ButtonActivationSource::Return,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 struct ButtonInteraction {
     pointer: PointerPress,
-    space_held: bool,
+    keyboard: Option<KeyboardActivation>,
     hovered: bool,
 }
 
 impl ButtonInteraction {
     fn has_owned_press(self) -> bool {
-        self.is_pointer_armed() || self.space_held
+        self.is_pointer_armed() || self.keyboard.is_some()
     }
 
     fn is_pointer_armed(self) -> bool {
@@ -1348,7 +1405,7 @@ impl ButtonInteraction {
     }
 
     fn is_pressed(self) -> bool {
-        matches!(self.pointer, PointerPress::Armed { inside: true }) || self.space_held
+        matches!(self.pointer, PointerPress::Armed { inside: true }) || self.keyboard.is_some()
     }
 
     fn is_hovered(self) -> bool {
@@ -1397,24 +1454,30 @@ impl ButtonInteraction {
         changed
     }
 
-    fn space_down(&mut self) -> bool {
-        if self.space_held {
+    fn owns_keyboard(self, key: KeyboardActivation) -> bool {
+        self.keyboard == Some(key)
+    }
+
+    fn keyboard_down(&mut self, key: KeyboardActivation) -> bool {
+        if self.keyboard.is_some() {
             false
         } else {
-            self.space_held = true;
+            self.keyboard = Some(key);
             true
         }
     }
 
-    fn space_up(&mut self) -> bool {
-        let activate = self.space_held;
-        self.space_held = false;
+    fn keyboard_up(&mut self, key: KeyboardActivation) -> bool {
+        let activate = self.owns_keyboard(key);
+        if activate {
+            self.keyboard = None;
+        }
         activate
     }
 
     fn cancel_keyboard(&mut self) -> bool {
-        let changed = self.space_held;
-        self.space_held = false;
+        let changed = self.keyboard.is_some();
+        self.keyboard = None;
         changed
     }
 
@@ -1566,20 +1629,20 @@ mod tests {
     }
 
     #[test]
-    fn repeated_space_down_should_still_activate_once() {
+    fn repeated_keyboard_down_should_still_activate_once() {
         let mut state = ButtonInteraction::default();
 
-        assert!(state.space_down());
-        assert!(!state.space_down());
-        assert!(state.space_up());
-        assert!(!state.space_up());
+        assert!(state.keyboard_down(KeyboardActivation::Return));
+        assert!(!state.keyboard_down(KeyboardActivation::Return));
+        assert!(state.keyboard_up(KeyboardActivation::Return));
+        assert!(!state.keyboard_up(KeyboardActivation::Return));
     }
 
     #[test]
     fn cancelling_all_input_should_clear_pressed_state() {
         let mut state = ButtonInteraction::default();
         state.pointer_down();
-        state.space_down();
+        state.keyboard_down(KeyboardActivation::Space);
 
         state.cancel_all();
 
@@ -1650,6 +1713,7 @@ mod tests {
     );
 
     fn button_window(cx: &mut TestAppContext, disabled: bool, tab_stop: bool) -> ButtonWindow<'_> {
+        cx.update(super::init);
         cx.set_global(test_theme());
         let activations = Rc::new(Cell::new(0));
         let last_source = Rc::new(Cell::new(None));
@@ -1775,7 +1839,7 @@ mod tests {
         });
 
         assert_eq!(activations.get(), 1);
-        assert_eq!(source.get(), Some(ButtonActivationSource::Keyboard));
+        assert_eq!(source.get(), Some(ButtonActivationSource::Space));
     }
 
     #[gpui::test]
@@ -1814,14 +1878,59 @@ mod tests {
     }
 
     #[gpui::test]
-    fn enter_should_not_activate_focused_button(cx: &mut TestAppContext) {
-        let (_, activations, _, cx) = button_window(cx, false, true);
+    fn focused_return_should_activate_once_on_key_up(cx: &mut TestAppContext) {
+        let (_, activations, source, cx) = button_window(cx, false, true);
         cx.update(|window, _| {
             window.focus_next();
             window.focus_next();
         });
 
-        cx.simulate_keystrokes("enter");
+        let enter = Keystroke::parse("enter").unwrap_or_default();
+        cx.simulate_event(KeyDownEvent {
+            keystroke: enter.clone(),
+            is_held: false,
+        });
+        cx.simulate_event(KeyDownEvent {
+            keystroke: enter.clone(),
+            is_held: true,
+        });
+        assert_eq!(activations.get(), 0);
+        cx.simulate_event(KeyUpEvent { keystroke: enter });
+
+        assert_eq!(activations.get(), 1);
+        assert_eq!(source.get(), Some(ButtonActivationSource::Return));
+    }
+
+    #[gpui::test]
+    fn return_release_after_focus_change_should_not_activate(cx: &mut TestAppContext) {
+        let (root, activations, _, cx) = button_window(cx, false, true);
+        cx.update(|window, _| {
+            window.focus_next();
+            window.focus_next();
+        });
+        let enter = Keystroke::parse("enter").unwrap_or_default();
+        cx.simulate_event(KeyDownEvent {
+            keystroke: enter.clone(),
+            is_held: false,
+        });
+        let other_focus = root.read_with(cx, |root, _| root.other_focus.clone());
+        cx.update(|window, _| other_focus.focus(window));
+
+        cx.simulate_event(KeyUpEvent { keystroke: enter });
+
+        assert_eq!(activations.get(), 0);
+    }
+
+    #[gpui::test]
+    fn disabled_focused_button_should_not_arm_return(cx: &mut TestAppContext) {
+        let (_, activations, _, cx) = button_window(cx, true, true);
+        let enter = Keystroke::parse("enter").unwrap_or_default();
+
+        cx.simulate_event(KeyDownEvent {
+            keystroke: enter.clone(),
+            is_held: false,
+        });
+        cx.simulate_event(KeyUpEvent { keystroke: enter });
 
         assert_eq!(activations.get(), 0);
     }

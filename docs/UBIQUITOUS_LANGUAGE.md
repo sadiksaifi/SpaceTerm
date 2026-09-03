@@ -169,6 +169,7 @@
 - A user-requested close requires one aggregate **Close Confirmation** when any affected live Pane has a running command, incomplete Command Output, unknown startup state, stale Terminal Metadata, or another unknown live state.
 - No **Close Confirmation** is required for a Pane without a live Terminal Session, an exited or fatally failed Pane, a disconnected Remote Pane, or live Terminal Metadata proving a Prompt, Command Input, or finished command.
 - One pending **Close Confirmation** suppresses duplicate close requests; cancellation, dismissal, presentation failure, or stale target identity performs no hierarchy mutation, while confirmation authorizes the exact captured target once.
+- **Close Confirmation** initially focuses safe Cancel, never designates its destructive action as the Return-key default, and lets Return activate whichever enabled action is visibly focused.
 - Cross-hierarchy escalation after an authorized close never asks again, and automatic Terminal Session exit and internal failure cleanup bypass **Close Confirmation** because they are not user-requested closes.
 - Closing the final **Tab** closes its **Workspace** when another Workspace remains, or closes the **Window** when it is globally final.
 - Explicitly closing the final **Workspace** replaces it; escalation from its final **Tab** closes the **Window** instead.

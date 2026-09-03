@@ -1608,7 +1608,9 @@ mod tests {
     use std::rc::Rc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use gpui::{FocusHandle, TestAppContext, VisualTestContext};
+    use gpui::{
+        FocusHandle, KeyDownEvent, KeyUpEvent, Keystroke, TestAppContext, VisualTestContext,
+    };
     use spaceterm_ui::ModalLayer;
 
     use super::*;
@@ -2136,6 +2138,16 @@ mod tests {
     fn click(selector: &'static str, cx: &mut VisualTestContext) {
         let bounds = cx.debug_bounds(selector).unwrap();
         cx.simulate_click(bounds.center(), gpui::Modifiers::none());
+        cx.run_until_parked();
+    }
+
+    fn press_return(cx: &mut VisualTestContext) {
+        let keystroke = Keystroke::parse("enter").unwrap_or_default();
+        cx.simulate_event(KeyDownEvent {
+            keystroke: keystroke.clone(),
+            is_held: false,
+        });
+        cx.simulate_event(KeyUpEvent { keystroke });
         cx.run_until_parked();
     }
 
@@ -2865,8 +2877,7 @@ mod tests {
         assert!(cx.debug_bounds("modal-alert-detail-2").is_some());
         assert!(flow.read_with(cx, |flow, _| flow.connection_error.is_none()));
 
-        cx.simulate_keystrokes("enter");
-        cx.run_until_parked();
+        press_return(cx);
         cx.update(|window, _| window.refresh());
         cx.run_until_parked();
 

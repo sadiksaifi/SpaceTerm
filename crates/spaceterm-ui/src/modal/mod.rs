@@ -18,9 +18,10 @@
 //! contained in both directions, disabled or removed
 //! targets are repaired on the next frame, and
 //! restoration is attempted only for a live predecessor or explicit successor that has not been
-//! superseded by newer focus ownership. Focused children handle Return and Escape first. This lets
-//! an editor decline Return before an explicit default action runs and lets the first Escape cancel
-//! input-method composition before a later Escape reaches the modal Cancel path.
+//! superseded by newer focus ownership. Focused children handle Return and Escape first. A focused
+//! action consumes Return before any different explicit default, while an editor may decline Return
+//! so that explicit default runs. The first Escape cancels input-method composition before a later
+//! Escape reaches the modal Cancel path.
 //!
 //! Caller action order is logical input order, not result identity or physical placement.
 //! [`ModalActionRole`], [`ModalActionIntent`], [`ModalActionEmphasis`], enabled state, explicit
@@ -354,7 +355,8 @@ pub enum ModalActivationSource {
     Pointer,
     /// Space activated the focused reusable button.
     Space,
-    /// Return reached the modal after the focused child declined it.
+    /// Return activated the focused action or reached the explicit default after a focused child
+    /// declined it.
     Return,
     /// Escape reached the modal after the focused child declined it.
     Escape,
