@@ -17,14 +17,10 @@ use crate::tooltip::{Tooltip, TooltipTargetVisibility};
 
 const KEY_CONTEXT: &str = "SpaceTermButton";
 
-actions!(spaceterm_button, [ActivateWithReturn]);
+actions!(spaceterm_button, [CaptureReturn]);
 
 pub(crate) fn init(cx: &mut App) {
-    cx.bind_keys([KeyBinding::new(
-        "enter",
-        ActivateWithReturn,
-        Some(KEY_CONTEXT),
-    )]);
+    cx.bind_keys([KeyBinding::new("enter", CaptureReturn, Some(KEY_CONTEXT))]);
 }
 
 /// The semantic intent of a button action.
@@ -1123,7 +1119,6 @@ impl ButtonCore {
         .absolute()
         .inset_0();
 
-        let return_down_state = state.clone();
         let key_down_state = state.clone();
         let key_up_state = state;
         let on_keyboard_activate = self.on_activate.clone();
@@ -1169,21 +1164,18 @@ impl ButtonCore {
             .track_focus(&focus_handle)
             .key_context(KEY_CONTEXT)
             .anchor_scroll(scroll_anchor)
-            .on_action(move |_: &ActivateWithReturn, window, cx| {
+            .on_action(move |_: &CaptureReturn, window, cx| {
                 window.prevent_default();
-                return_down_state.update(cx, |state, cx| {
-                    state.keyboard_down(KeyboardActivation::Return, cx)
-                });
-                cx.stop_propagation();
+                cx.propagate();
             })
             .on_key_down(move |event: &KeyDownEvent, window, cx| {
-                if !is_unmodified_space_down(event) {
+                let Some(key) = KeyboardActivation::from_key_down(event) else {
                     return;
-                }
+                };
                 window.prevent_default();
-                key_down_state.update(cx, |state, cx| {
-                    state.keyboard_down(KeyboardActivation::Space, cx)
-                });
+                if !event.is_held {
+                    key_down_state.update(cx, |state, cx| state.keyboard_down(key, cx));
+                }
                 cx.stop_propagation();
             })
             .on_key_up(move |event: &KeyUpEvent, window, cx| {
@@ -1251,10 +1243,6 @@ fn resolve_paint(style: ButtonStyle, enabled: bool, pressed: bool, hovered: bool
     } else {
         style.normal
     }
-}
-
-fn is_unmodified_space_down(event: &KeyDownEvent) -> bool {
-    event.keystroke.key == "space" && !event.keystroke.modifiers.modified()
 }
 
 struct ButtonState {
@@ -1372,6 +1360,12 @@ enum KeyboardActivation {
 }
 
 impl KeyboardActivation {
+    fn from_key_down(event: &KeyDownEvent) -> Option<Self> {
+        (!event.keystroke.modifiers.modified())
+            .then(|| Self::from_key(&event.keystroke.key))
+            .flatten()
+    }
+
     fn from_key(key: &str) -> Option<Self> {
         match key {
             "space" => Some(Self::Space),
@@ -1658,6 +1652,11 @@ mod tests {
         other_focus: FocusHandle,
     }
 
+    struct ReturnTransferRoot {
+        first_activations: Rc<Cell<usize>>,
+        second_activations: Rc<Cell<usize>>,
+    }
+
     struct NestedIconButtonRoot {
         ancestor_hovered: Rc<Cell<bool>>,
     }
@@ -1702,6 +1701,30 @@ mod tests {
                 .when(self.overlay, |root| {
                     root.child(div().absolute().inset_0().occlude())
                 })
+        }
+    }
+
+    impl Render for ReturnTransferRoot {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let first_activations = Rc::clone(&self.first_activations);
+            let second_activations = Rc::clone(&self.second_activations);
+            div()
+                .child(
+                    Button::new("return-transfer-first", "First")
+                        .tab_stop(true)
+                        .debug_selector("return-transfer-first")
+                        .on_activate(move |_, _, _| {
+                            first_activations.set(first_activations.get() + 1);
+                        }),
+                )
+                .child(
+                    Button::new("return-transfer-second", "Second")
+                        .tab_stop(true)
+                        .debug_selector("return-transfer-second")
+                        .on_activate(move |_, _, _| {
+                            second_activations.set(second_activations.get() + 1);
+                        }),
+                )
         }
     }
 
@@ -1899,6 +1922,49 @@ mod tests {
 
         assert_eq!(activations.get(), 1);
         assert_eq!(source.get(), Some(ButtonActivationSource::Return));
+    }
+
+    #[gpui::test]
+    fn return_repeat_after_focus_transfer_should_not_activate_new_button(cx: &mut TestAppContext) {
+        cx.update(super::init);
+        cx.set_global(test_theme());
+        let first_activations = Rc::new(Cell::new(0));
+        let second_activations = Rc::new(Cell::new(0));
+        let root_first_activations = Rc::clone(&first_activations);
+        let root_second_activations = Rc::clone(&second_activations);
+        let (_, cx) = cx.add_window_view(move |_, _| ReturnTransferRoot {
+            first_activations: root_first_activations,
+            second_activations: root_second_activations,
+        });
+        cx.update(|window, _| {
+            window.activate_window();
+            window.focus_next();
+        });
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("return-transfer-first-keyboard-focus")
+                .is_some()
+        );
+        let enter = Keystroke::parse("enter").unwrap_or_default();
+        cx.simulate_event(KeyDownEvent {
+            keystroke: enter.clone(),
+            is_held: false,
+        });
+        cx.update(|window, _| window.focus_next());
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("return-transfer-second-keyboard-focus")
+                .is_some()
+        );
+
+        cx.simulate_event(KeyDownEvent {
+            keystroke: enter.clone(),
+            is_held: true,
+        });
+        cx.simulate_event(KeyUpEvent { keystroke: enter });
+
+        assert_eq!(first_activations.get(), 0);
+        assert_eq!(second_activations.get(), 0);
     }
 
     #[gpui::test]

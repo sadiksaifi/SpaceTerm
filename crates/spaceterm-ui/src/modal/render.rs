@@ -299,6 +299,7 @@ fn render_overlay(
     let default_action = enabled_action(snapshot.default_action, &snapshot.actions);
     let cancel_action = safe_cancel_action(snapshot.cancel_action, &snapshot.actions);
     let forward_focus = focus_state.clone();
+    let default_focus = focus_state.clone();
     let backward_focus = focus_state;
     let default_owner = owner.clone();
     let cancel_owner = owner.clone();
@@ -337,6 +338,11 @@ fn render_overlay(
             cx.stop_propagation();
         })
         .on_action(move |_: &ActivateDefault, window, cx| {
+            if default_focus.read(cx).has_focused_action(window) {
+                window.prevent_default();
+                cx.propagate();
+                return;
+            }
             if let Some(index) = default_action {
                 request_action_from_renderer(
                     &default_owner,
@@ -1509,6 +1515,12 @@ impl ModalFocusRing {
     fn reveal_focus(&mut self, focus: &FocusHandle, window: &mut Window, cx: &mut Context<Self>) {
         self.apply_focus_reveal(focus, window, cx);
         self.pending_reveal = Some(focus.downgrade());
+    }
+
+    fn has_focused_action(&self, window: &Window) -> bool {
+        self.action_focus
+            .iter()
+            .any(|focus| focus.is_focused(window))
     }
 
     fn reveal_current_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
