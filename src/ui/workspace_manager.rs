@@ -4,6 +4,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use super::close_policy::CloseScope;
 use super::native_remote_workspace_flow_backend::NativeRemoteWorkspaceFlowBackendFactory;
 use super::new_workspace_panel::{NewWorkspacePanel, NewWorkspacePanelEvent, NewWorkspaceSource};
 use super::remote_workspace_flow::{
@@ -30,10 +31,10 @@ use super::{
 };
 use crate::domain::{
     CloseWorkspaceOutcome, CreateRemoteProjectOutcome, DirectoryAuthority, FinalTabCloseOutcome,
-    RemoteConnectionPhase, RemoteConnectionReduction, RemoteConnectionState,
-    RemoteWorkspaceDirectory, RemoteWorkspaceKey, ValidatedWorkspaceDirectory, WorkspaceCollection,
-    WorkspaceDirectoryAvailability, WorkspaceDirectoryIdentity, WorkspaceError, WorkspaceId,
-    WorkspaceKind,
+    PaneId, RemoteConnectionPhase, RemoteConnectionReduction, RemoteConnectionState,
+    RemoteWorkspaceDirectory, RemoteWorkspaceKey, TabId, ValidatedWorkspaceDirectory,
+    WorkspaceCollection, WorkspaceDirectoryAvailability, WorkspaceDirectoryIdentity,
+    WorkspaceError, WorkspaceId, WorkspaceKind,
 };
 use crate::platform::finder_fallback::{FinderFallback, NativeFinderFallback};
 use crate::platform::macos_system_settings::MacosSystemSettingsOpener;
@@ -58,15 +59,15 @@ use gpui::{
     SharedString, Task, WeakEntity, Window, canvas, div, point, px, rgba,
 };
 use spaceterm_ui::{
-    Alert, AlertIntent, Button, ButtonShape, ButtonSize, ButtonVariant, ContextMenu, Icon,
-    IconButton, IconName, MenuEntry, MenuLifecycleEvent, MenuSize, MiddleTruncatedText,
-    ModalAction, ModalActionRole, ModalId, ModalLayer, OverlayScrollbar, OverlayScrollbarEvent,
-    ProgressCancelDecision, ProgressCancellation, ProgressDialog, ProgressDialogHandle,
-    ProgressDialogOutcome, ProgressDialogUpdate, ProgressState, ResizeAxis, ResizeFinishReason,
-    ResizeHandle, ResizeHandleEvent, ResizeHandleTarget, ResizeInputSource, ScrollMetrics,
-    TextInput, TextInputEvent, TextInputVariant, Tooltip, TooltipLayer, TooltipTargetVisibility,
-    WindowDragRegion, WindowDragRegionEvent, WindowDragRegionResponse, WindowDragRegionStatus,
-    window_modal_is_open,
+    Alert, AlertIntent, AlertOutcome, Button, ButtonShape, ButtonSize, ButtonVariant, ContextMenu,
+    Icon, IconButton, IconName, MenuEntry, MenuLifecycleEvent, MenuSize, MiddleTruncatedText,
+    ModalAction, ModalActionEmphasis, ModalActionIntent, ModalActionRole, ModalId, ModalLayer,
+    OverlayScrollbar, OverlayScrollbarEvent, ProgressCancelDecision, ProgressCancellation,
+    ProgressDialog, ProgressDialogHandle, ProgressDialogOutcome, ProgressDialogUpdate,
+    ProgressState, ResizeAxis, ResizeFinishReason, ResizeHandle, ResizeHandleEvent,
+    ResizeHandleTarget, ResizeInputSource, ScrollMetrics, TextInput, TextInputEvent,
+    TextInputVariant, Tooltip, TooltipLayer, TooltipTargetVisibility, WindowDragRegion,
+    WindowDragRegionEvent, WindowDragRegionResponse, WindowDragRegionStatus, window_modal_is_open,
 };
 
 const SIDEBAR_TOGGLE_INSET: f32 = 4.0;
@@ -98,6 +99,46 @@ enum WorkspaceMenuCommand {
     Rename,
     Reconnect,
     Close,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CloseTarget {
+    Pane {
+        workspace_id: WorkspaceId,
+        tab_id: TabId,
+        pane_id: PaneId,
+    },
+    Tab {
+        workspace_id: WorkspaceId,
+        tab_id: TabId,
+    },
+    Workspace(WorkspaceId),
+    Window,
+    Application,
+}
+
+impl CloseTarget {
+    const fn scope(self) -> CloseScope {
+        match self {
+            Self::Pane { .. } => CloseScope::Pane,
+            Self::Tab { .. } => CloseScope::Tab,
+            Self::Workspace(_) => CloseScope::Workspace,
+            Self::Window => CloseScope::Window,
+            Self::Application => CloseScope::Application,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PendingCloseConfirmation {
+    generation: u64,
+    target: CloseTarget,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CloseConfirmationAction {
+    Confirm,
+    Cancel,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -243,6 +284,8 @@ pub(crate) struct WorkspaceManager {
     operating_system_window_drag_platform: Rc<dyn OperatingSystemWindowDragPlatform>,
     window_drag_status: WindowDragRegionStatus,
     pending_final_tab_closes: BTreeSet<WorkspaceId>,
+    close_confirmation_generation: u64,
+    pending_close_confirmation: Option<PendingCloseConfirmation>,
 }
 
 impl WorkspaceManager {
@@ -475,6 +518,8 @@ impl WorkspaceManager {
             operating_system_window_drag_platform,
             window_drag_status: WindowDragRegionStatus::new(),
             pending_final_tab_closes: BTreeSet::new(),
+            close_confirmation_generation: 0,
+            pending_close_confirmation: None,
         }
     }
 
@@ -547,6 +592,27 @@ impl WorkspaceManager {
             &manager,
             window,
             move |workspace_manager, _, event: &TabManagerEvent, window, cx| match event {
+                TabManagerEvent::ClosePaneRequested { tab_id, pane_id } => {
+                    workspace_manager.request_close(
+                        CloseTarget::Pane {
+                            workspace_id,
+                            tab_id: *tab_id,
+                            pane_id: *pane_id,
+                        },
+                        window,
+                        cx,
+                    );
+                }
+                TabManagerEvent::CloseTabRequested { tab_id } => {
+                    workspace_manager.request_close(
+                        CloseTarget::Tab {
+                            workspace_id,
+                            tab_id: *tab_id,
+                        },
+                        window,
+                        cx,
+                    );
+                }
                 TabManagerEvent::FinalTabCloseRequested { .. } => {
                     if workspace_manager
                         .pending_final_tab_closes
@@ -2522,6 +2588,210 @@ impl WorkspaceManager {
         }
     }
 
+    fn close_target_requires_confirmation(&self, target: CloseTarget, cx: &App) -> Option<bool> {
+        match target {
+            CloseTarget::Pane {
+                workspace_id,
+                tab_id,
+                pane_id,
+            } => self
+                .workspaces
+                .workspace(workspace_id)
+                .and_then(|workspace| {
+                    workspace
+                        .payload()
+                        .read(cx)
+                        .pane_requires_close_confirmation(tab_id, pane_id, cx)
+                }),
+            CloseTarget::Tab {
+                workspace_id,
+                tab_id,
+            } => self
+                .workspaces
+                .workspace(workspace_id)
+                .and_then(|workspace| {
+                    workspace
+                        .payload()
+                        .read(cx)
+                        .tab_requires_close_confirmation(tab_id, cx)
+                }),
+            CloseTarget::Workspace(workspace_id) => self
+                .workspaces
+                .workspace(workspace_id)
+                .map(|workspace| workspace.payload().read(cx).requires_close_confirmation(cx)),
+            CloseTarget::Window | CloseTarget::Application => Some(
+                self.workspaces
+                    .iter()
+                    .any(|workspace| workspace.payload().read(cx).requires_close_confirmation(cx)),
+            ),
+        }
+    }
+
+    fn request_close(&mut self, target: CloseTarget, window: &mut Window, cx: &mut Context<Self>) {
+        if self.pending_close_confirmation.is_some() {
+            return;
+        }
+        let Some(requires_confirmation) = self.close_target_requires_confirmation(target, cx)
+        else {
+            return;
+        };
+        if !requires_confirmation {
+            self.commit_close_target(target, window, cx);
+            return;
+        }
+        self.present_close_confirmation(target, window, cx);
+    }
+
+    fn present_close_confirmation(
+        &mut self,
+        target: CloseTarget,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(generation) = self.close_confirmation_generation.checked_add(1) else {
+            return;
+        };
+        let Some(window_handle) = window.window_handle().downcast::<WorkspaceManager>() else {
+            return;
+        };
+        self.close_confirmation_generation = generation;
+        self.pending_close_confirmation = Some(PendingCloseConfirmation { generation, target });
+
+        let scope = target.scope();
+        let result = Alert::new(
+            ModalId::new("close-confirmation"),
+            scope.title(),
+            scope.title(),
+            "One or more affected Panes may still have running processes. Closing will terminate their Terminal Sessions.",
+            vec![
+                ModalAction::new(
+                    CloseConfirmationAction::Confirm,
+                    scope.destructive_label(),
+                    ModalActionRole::Affirmative,
+                    "close-confirmation-confirm",
+                )
+                .with_intent(ModalActionIntent::Destructive)
+                .with_emphasis(ModalActionEmphasis::Prominent),
+                ModalAction::new(
+                    CloseConfirmationAction::Cancel,
+                    "Cancel",
+                    ModalActionRole::Cancel,
+                    "close-confirmation-cancel",
+                ),
+            ],
+        )
+        .intent(AlertIntent::Critical)
+        .present(window, cx, move |outcome, cx| {
+            let confirmed = matches!(
+                outcome,
+                AlertOutcome::Activated {
+                    action_id: CloseConfirmationAction::Confirm,
+                    ..
+                }
+            );
+            let _ = window_handle.update(cx, |manager, window, cx| {
+                manager.settle_close_confirmation(generation, target, confirmed, window, cx);
+            });
+        });
+
+        if let Err(error) = result {
+            self.pending_close_confirmation = None;
+            eprintln!("failed to present close confirmation: {error}");
+        }
+    }
+
+    fn settle_close_confirmation(
+        &mut self,
+        generation: u64,
+        target: CloseTarget,
+        confirmed: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.pending_close_confirmation != Some(PendingCloseConfirmation { generation, target })
+        {
+            return;
+        }
+        self.pending_close_confirmation = None;
+        if confirmed
+            && self
+                .close_target_requires_confirmation(target, cx)
+                .is_some()
+        {
+            self.commit_close_target(target, window, cx);
+        }
+    }
+
+    fn commit_close_target(
+        &mut self,
+        target: CloseTarget,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match target {
+            CloseTarget::Pane {
+                workspace_id,
+                tab_id,
+                pane_id,
+            } => {
+                let Some(manager) = self
+                    .workspaces
+                    .workspace(workspace_id)
+                    .map(|workspace| workspace.payload().clone())
+                else {
+                    return;
+                };
+                manager.update(cx, |manager, cx| {
+                    manager.close_pane_authorized(tab_id, pane_id, window, cx)
+                });
+            }
+            CloseTarget::Tab {
+                workspace_id,
+                tab_id,
+            } => {
+                let Some(manager) = self
+                    .workspaces
+                    .workspace(workspace_id)
+                    .map(|workspace| workspace.payload().clone())
+                else {
+                    return;
+                };
+                manager.update(cx, |manager, cx| {
+                    manager.close_tab_authorized(tab_id, window, cx)
+                });
+            }
+            CloseTarget::Workspace(workspace_id) => {
+                if self.workspaces.workspace(workspace_id).is_some() {
+                    self.close_workspace(workspace_id, window, cx);
+                }
+            }
+            CloseTarget::Window => window.remove_window(),
+            CloseTarget::Application => cx.quit(),
+        }
+    }
+
+    pub(crate) fn should_close_window(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.pending_close_confirmation.is_some() {
+            return false;
+        }
+        if self
+            .close_target_requires_confirmation(CloseTarget::Window, cx)
+            .is_some_and(|requires| !requires)
+        {
+            return true;
+        }
+        self.present_close_confirmation(CloseTarget::Window, window, cx);
+        false
+    }
+
+    pub(crate) fn request_application_quit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.request_close(CloseTarget::Application, window, cx);
+    }
+
     fn close_workspace(
         &mut self,
         workspace_id: WorkspaceId,
@@ -2896,7 +3166,9 @@ impl WorkspaceManager {
             WorkspaceMenuCommand::Reconnect => {
                 self.start_remote_workspace_reconnect(workspace_id, window, cx)
             }
-            WorkspaceMenuCommand::Close => self.close_workspace(workspace_id, window, cx),
+            WorkspaceMenuCommand::Close => {
+                self.request_close(CloseTarget::Workspace(workspace_id), window, cx)
+            }
         }
     }
 
@@ -2972,7 +3244,7 @@ impl WorkspaceManager {
         cx: &mut Context<Self>,
     ) {
         let workspace_id = self.workspaces.active_workspace_id();
-        self.close_workspace(workspace_id, window, cx);
+        self.request_close(CloseTarget::Workspace(workspace_id), window, cx);
     }
 
     fn on_activate_workspace_1(
@@ -4108,7 +4380,7 @@ mod tests {
     use std::os::unix::fs::symlink;
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
     use gpui::{
         Modifiers, MouseDownEvent, MouseUpEvent, ScrollDelta, ScrollWheelEvent, TestAppContext,
@@ -4706,6 +4978,42 @@ mod tests {
             )
         });
         cx.update(|window, cx| {
+            manager.update(cx, |manager, cx| manager.focus(window, cx));
+            let close_manager = manager.downgrade();
+            window.on_window_should_close(cx, move |window, cx| {
+                close_manager
+                    .update(cx, |manager, cx| manager.should_close_window(window, cx))
+                    .unwrap_or(true)
+            });
+        });
+        cx.run_until_parked();
+        (manager, records, cx)
+    }
+
+    fn workspace_manager_with_application_actions(
+        cx: &mut TestAppContext,
+    ) -> (
+        Entity<WorkspaceManager>,
+        TestTerminalSessionRecords,
+        &mut VisualTestContext,
+    ) {
+        cx.update(crate::ui::init)
+            .expect("UI initialization should succeed");
+        cx.update(crate::app::init);
+        let records = TestTerminalSessionRecords::default();
+        let session_factory: Rc<dyn TerminalSessionFactory> =
+            Rc::new(TestTerminalSessionFactory::new(records.clone()).with_fallback_title("zsh"));
+        let (manager, cx) = cx.add_window_view(|window, cx| {
+            WorkspaceManager::new_with_remote_workspace_backend_factory(
+                session_factory,
+                PathBuf::from("/Users/test"),
+                test_remote_backend_factory(),
+                window,
+                cx,
+            )
+        });
+        cx.update(|window, cx| {
+            window.activate_window();
             manager.update(cx, |manager, cx| manager.focus(window, cx));
         });
         cx.run_until_parked();
@@ -7890,6 +8198,368 @@ mod tests {
         cx.run_until_parked();
     }
 
+    fn active_tab_manager(
+        manager: &Entity<WorkspaceManager>,
+        cx: &VisualTestContext,
+    ) -> (WorkspaceId, Entity<TabManager>) {
+        manager.read_with(cx, |manager, _| {
+            let workspace = manager.workspaces.active_workspace();
+            (workspace.id(), workspace.payload().clone())
+        })
+    }
+
+    #[gpui::test]
+    fn risky_pane_close_should_cancel_safely_suppress_duplicates_and_confirm_once(
+        cx: &mut TestAppContext,
+    ) {
+        let (manager, records, cx) = workspace_manager(cx);
+        redraw(cx);
+        cx.simulate_keystrokes("cmd-d");
+        redraw(cx);
+        let (_, tab_manager) = active_tab_manager(&manager, cx);
+        assert_eq!(
+            tab_manager.read_with(cx, |manager, cx| manager.aggregate_counts(cx)),
+            (1, 2)
+        );
+
+        cx.simulate_keystrokes("cmd-w");
+        cx.run_until_parked();
+        let first_pending = manager.read_with(cx, |manager, _| {
+            manager
+                .pending_close_confirmation
+                .expect("risky close should present one confirmation")
+        });
+        cx.simulate_keystrokes("cmd-w");
+        cx.run_until_parked();
+
+        assert_eq!(
+            manager.read_with(cx, |manager, _| manager
+                .pending_close_confirmation
+                .expect("duplicate request must keep the original confirmation")
+                .generation),
+            first_pending.generation
+        );
+        assert_eq!(
+            tab_manager.read_with(cx, |manager, cx| manager.aggregate_counts(cx)),
+            (1, 2)
+        );
+        assert!(records.dropped_session_ids().is_empty());
+
+        click("modal-action-close-confirmation-cancel", cx);
+        redraw(cx);
+        assert!(manager.read_with(cx, |manager, _| {
+            manager.pending_close_confirmation.is_none()
+        }));
+        assert_eq!(
+            tab_manager.read_with(cx, |manager, cx| manager.aggregate_counts(cx)),
+            (1, 2)
+        );
+
+        cx.update(|window, cx| {
+            manager.update(cx, |manager, cx| {
+                manager.request_close(first_pending.target, window, cx)
+            });
+        });
+        redraw(cx);
+        assert!(manager.read_with(cx, |manager, _| {
+            manager.pending_close_confirmation.is_some()
+        }));
+        click("modal-action-close-confirmation-confirm", cx);
+
+        assert_eq!(
+            (
+                manager.read_with(cx, |manager, _| manager.pending_close_confirmation),
+                tab_manager.read_with(cx, |manager, cx| manager.aggregate_counts(cx)),
+                records.dropped_session_ids(),
+            ),
+            (None, (1, 1), vec![2])
+        );
+    }
+
+    #[gpui::test]
+    fn prompt_metadata_should_close_a_pane_without_confirmation(cx: &mut TestAppContext) {
+        let (manager, records, cx) = workspace_manager(cx);
+        redraw(cx);
+        cx.simulate_keystrokes("cmd-d");
+        redraw(cx);
+        let (_, tab_manager) = active_tab_manager(&manager, cx);
+        let mut metadata = crate::terminal::metadata::MetadataTracker::new(
+            "/Users/test",
+            "zsh",
+            None,
+            Instant::now(),
+        );
+        assert!(metadata.apply_semantic_prompt("A", Instant::now()));
+        let mut screen = (*crate::terminal::ScreenSnapshot::empty()).clone();
+        screen.metadata = metadata.snapshot();
+        records
+            .event_sender(2)
+            .expect("the focused split Pane session was not started")
+            .try_send(SessionEvent::Screen(Arc::new(screen)))
+            .unwrap();
+        cx.run_until_parked();
+
+        cx.simulate_keystrokes("cmd-w");
+        cx.run_until_parked();
+
+        assert!(manager.read_with(cx, |manager, _| {
+            manager.pending_close_confirmation.is_none()
+        }));
+        assert_eq!(
+            tab_manager.read_with(cx, |manager, cx| manager.aggregate_counts(cx)),
+            (1, 1)
+        );
+        assert_eq!(records.dropped_session_ids(), vec![2]);
+    }
+
+    #[gpui::test]
+    fn automatic_terminal_exit_should_bypass_close_confirmation(cx: &mut TestAppContext) {
+        let (manager, records, cx) = workspace_manager(cx);
+        redraw(cx);
+        cx.simulate_keystrokes("cmd-d");
+        redraw(cx);
+        let (_, tab_manager) = active_tab_manager(&manager, cx);
+
+        records
+            .event_sender(2)
+            .expect("the focused split Pane session was not started")
+            .try_send(SessionEvent::Exited(SessionExit::Success))
+            .unwrap();
+        cx.run_until_parked();
+
+        assert!(manager.read_with(cx, |manager, _| {
+            manager.pending_close_confirmation.is_none()
+        }));
+        assert_eq!(
+            tab_manager.read_with(cx, |manager, cx| manager.aggregate_counts(cx)),
+            (1, 1)
+        );
+        assert_eq!(records.dropped_session_ids(), vec![2]);
+    }
+
+    #[gpui::test]
+    fn confirmed_stale_pane_identity_should_not_close_its_successor(cx: &mut TestAppContext) {
+        let (manager, records, cx) = workspace_manager(cx);
+        redraw(cx);
+        cx.simulate_keystrokes("cmd-d");
+        redraw(cx);
+        let (workspace_id, tab_manager) = active_tab_manager(&manager, cx);
+        let (tab_id, pane_id) =
+            tab_manager.read_with(cx, |manager, cx| manager.active_terminal_identity(cx));
+
+        cx.update(|window, cx| {
+            manager.update(cx, |manager, cx| {
+                manager.request_close(
+                    CloseTarget::Pane {
+                        workspace_id,
+                        tab_id,
+                        pane_id,
+                    },
+                    window,
+                    cx,
+                );
+            });
+            tab_manager.update(cx, |manager, cx| {
+                manager.close_pane_authorized(tab_id, pane_id, window, cx)
+            });
+        });
+        cx.run_until_parked();
+        click("modal-action-close-confirmation-confirm", cx);
+
+        assert_eq!(
+            tab_manager.read_with(cx, |manager, cx| manager.aggregate_counts(cx)),
+            (1, 1)
+        );
+        assert_eq!(records.dropped_session_ids(), vec![2]);
+    }
+
+    #[gpui::test]
+    fn native_window_and_application_close_should_share_the_pending_coordinator(
+        cx: &mut TestAppContext,
+    ) {
+        let (manager, _, cx) = workspace_manager(cx);
+        redraw(cx);
+
+        assert!(!cx.update(|window, cx| manager.update(cx, |manager, cx| {
+            manager.should_close_window(window, cx)
+        })));
+        assert_eq!(
+            manager.read_with(cx, |manager, _| manager
+                .pending_close_confirmation
+                .map(|pending| pending.target)),
+            Some(CloseTarget::Window)
+        );
+        cx.update(|window, cx| {
+            manager.update(cx, |manager, cx| {
+                manager.request_application_quit(window, cx)
+            });
+        });
+        assert_eq!(
+            manager.read_with(cx, |manager, _| manager
+                .pending_close_confirmation
+                .map(|pending| pending.target)),
+            Some(CloseTarget::Window)
+        );
+        click("modal-action-close-confirmation-cancel", cx);
+
+        cx.update(|window, cx| {
+            manager.update(cx, |manager, cx| {
+                manager.request_application_quit(window, cx)
+            });
+        });
+        assert_eq!(
+            manager.read_with(cx, |manager, _| manager
+                .pending_close_confirmation
+                .map(|pending| pending.target)),
+            Some(CloseTarget::Application)
+        );
+        click("modal-action-close-confirmation-cancel", cx);
+    }
+
+    #[gpui::test]
+    fn direct_multi_pane_tab_close_should_use_one_aggregate_confirmation(cx: &mut TestAppContext) {
+        let (manager, records, cx) = workspace_manager(cx);
+        redraw(cx);
+        cx.simulate_keystrokes("cmd-d");
+        redraw(cx);
+        cx.simulate_keystrokes("cmd-t");
+        redraw(cx);
+        cx.simulate_keystrokes("cmd-1");
+        redraw(cx);
+        let (workspace_id, tab_manager) = active_tab_manager(&manager, cx);
+
+        cx.simulate_keystrokes("cmd-shift-w");
+        cx.run_until_parked();
+
+        assert_eq!(
+            manager.read_with(cx, |manager, _| manager
+                .pending_close_confirmation
+                .map(|pending| pending.target)),
+            Some(CloseTarget::Tab {
+                workspace_id,
+                tab_id: TabId::new(1),
+            })
+        );
+        assert_eq!(
+            tab_manager.read_with(cx, |manager, cx| manager.aggregate_counts(cx)),
+            (2, 3)
+        );
+        assert!(records.dropped_session_ids().is_empty());
+
+        click("modal-action-close-confirmation-confirm", cx);
+
+        assert_eq!(
+            tab_manager.read_with(cx, |manager, cx| manager.aggregate_counts(cx)),
+            (1, 1)
+        );
+        assert_eq!(records.dropped_session_ids(), vec![1, 2]);
+    }
+
+    #[gpui::test]
+    fn direct_multi_tab_workspace_close_should_use_one_aggregate_confirmation(
+        cx: &mut TestAppContext,
+    ) {
+        let (manager, records, cx) = workspace_manager(cx);
+        redraw(cx);
+        cx.simulate_keystrokes("cmd-t");
+        redraw(cx);
+
+        cx.dispatch_action(CloseWorkspace);
+        cx.run_until_parked();
+
+        assert_eq!(
+            manager.read_with(cx, |manager, _| manager
+                .pending_close_confirmation
+                .map(|pending| pending.target)),
+            Some(CloseTarget::Workspace(WorkspaceId::new(1)))
+        );
+        assert_eq!(
+            manager.read_with(cx, |manager, _| manager.workspaces.len()),
+            1
+        );
+        assert!(records.dropped_session_ids().is_empty());
+
+        click("modal-action-close-confirmation-confirm", cx);
+
+        assert_eq!(
+            manager.read_with(cx, |manager, _| (
+                manager.workspaces.len(),
+                manager.workspaces.active_workspace_id(),
+            )),
+            (1, WorkspaceId::new(2))
+        );
+        assert_eq!(records.dropped_session_ids(), vec![1, 2]);
+        assert_eq!(records.session_count(), 3);
+    }
+
+    #[gpui::test]
+    fn native_window_close_should_cancel_then_remove_only_after_confirmation(
+        cx: &mut TestAppContext,
+    ) {
+        let (manager, records, cx) = workspace_manager(cx);
+        redraw(cx);
+
+        assert!(!cx.simulate_close());
+        assert_eq!(
+            manager.read_with(cx, |manager, _| manager
+                .pending_close_confirmation
+                .map(|pending| pending.target)),
+            Some(CloseTarget::Window)
+        );
+        click("modal-action-close-confirmation-cancel", cx);
+        assert_eq!(cx.windows().len(), 1);
+        assert!(records.dropped_session_ids().is_empty());
+
+        assert!(!cx.simulate_close());
+        click("modal-action-close-confirmation-confirm", cx);
+
+        assert!(cx.windows().is_empty());
+    }
+
+    #[gpui::test]
+    fn command_q_and_quit_action_should_cancel_safely_and_confirm_once(cx: &mut TestAppContext) {
+        let (manager, records, cx) = workspace_manager_with_application_actions(cx);
+        redraw(cx);
+
+        cx.simulate_keystrokes("cmd-q");
+        cx.run_until_parked();
+        assert_eq!(
+            manager.read_with(cx, |manager, _| manager
+                .pending_close_confirmation
+                .map(|pending| pending.target)),
+            Some(CloseTarget::Application)
+        );
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        assert!(manager.read_with(cx, |manager, _| {
+            manager.pending_close_confirmation.is_none()
+        }));
+        assert!(records.dropped_session_ids().is_empty());
+
+        cx.dispatch_action(crate::app::QuitApplication);
+        cx.run_until_parked();
+        assert_eq!(
+            manager.read_with(cx, |manager, _| manager
+                .pending_close_confirmation
+                .map(|pending| pending.target)),
+            Some(CloseTarget::Application)
+        );
+        cx.simulate_keystrokes("cmd-.");
+        cx.run_until_parked();
+        assert!(manager.read_with(cx, |manager, _| {
+            manager.pending_close_confirmation.is_none()
+        }));
+        assert!(records.dropped_session_ids().is_empty());
+
+        cx.dispatch_action(crate::app::QuitApplication);
+        cx.run_until_parked();
+        click("modal-action-close-confirmation-confirm", cx);
+
+        assert!(manager.read_with(cx, |manager, _| {
+            manager.pending_close_confirmation.is_none()
+        }));
+    }
+
     fn right_click(selector: &'static str, cx: &mut VisualTestContext) {
         let position = cx
             .debug_bounds(selector)
@@ -9068,6 +9738,7 @@ mod tests {
         cx.run_until_parked();
         cx.simulate_keystrokes("cmd-w");
         cx.run_until_parked();
+        click("modal-action-close-confirmation-confirm", cx);
 
         let state = manager.read_with(cx, |manager, _| {
             (
@@ -9384,6 +10055,7 @@ mod tests {
 
         right_click("workspace-row-1-active", cx);
         click("workspace-menu-row-close", cx);
+        click("modal-action-close-confirmation-confirm", cx);
 
         let state = manager.read_with(cx, |manager, _| {
             (

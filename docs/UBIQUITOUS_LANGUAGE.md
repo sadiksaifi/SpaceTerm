@@ -83,6 +83,7 @@
 | **Local Diagnostics** | A bounded content-free sequence of Terminal Failure identifiers and unhandled keyboard event kind, action, and native key code written only after explicit user export. | telemetry, crash upload, terminal log |
 | **Paste Confirmation** | A transient authorization for one unsafe Paste Payload, identified opaquely and valid only while its Pane retains Terminal Input Focus and the worker deadline has not expired. | generic modal, clipboard permission |
 | **OSC 52 Authorization** | A bounded, opaque, one-operation decision governing whether a terminal program may read or write a named clipboard target; access is denied unless explicit policy allows or asks for it. | paste confirmation, unrestricted clipboard access |
+| **Close Confirmation** | The one application-owned window-modal authorization for an exact user-requested destructive close whose affected hierarchy contains at least one Pane that may still be running work. | per-Pane prompt, shell transcript, automatic-exit prompt |
 
 ## Lifecycle actions
 
@@ -165,6 +166,10 @@
 - A **Pane** belongs to exactly one **Tab** and owns one **Terminal Session**.
 - A **Split** has exactly two child **Pane Layouts**; each child is either another **Split** or a **Pane**.
 - Closing any hierarchy entity closes every **Terminal Session**, **PTY**, and **Shell Process** it owns.
+- A user-requested close requires one aggregate **Close Confirmation** when any affected live Pane has a running command, incomplete Command Output, unknown startup state, stale Terminal Metadata, or another unknown live state.
+- No **Close Confirmation** is required for a Pane without a live Terminal Session, an exited or fatally failed Pane, a disconnected Remote Pane, or live Terminal Metadata proving a Prompt, Command Input, or finished command.
+- One pending **Close Confirmation** suppresses duplicate close requests; cancellation, dismissal, presentation failure, or stale target identity performs no hierarchy mutation, while confirmation authorizes the exact captured target once.
+- Cross-hierarchy escalation after an authorized close never asks again, and automatic Terminal Session exit and internal failure cleanup bypass **Close Confirmation** because they are not user-requested closes.
 - Closing the final **Tab** closes its **Workspace** when another Workspace remains, or closes the **Window** when it is globally final.
 - Explicitly closing the final **Workspace** replaces it; escalation from its final **Tab** closes the **Window** instead.
 - No operation may leave an orphaned **PTY** or **Shell Process**.

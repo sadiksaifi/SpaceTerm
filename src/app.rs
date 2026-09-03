@@ -100,7 +100,7 @@ pub(crate) fn init(cx: &mut App) {
         KeyBinding::new("ctrl-cmd-f", ToggleFullScreen, None),
         KeyBinding::new("fn-f", ToggleFullScreen, None),
     ]);
-    cx.on_action(|_: &QuitApplication, cx| cx.quit());
+    cx.on_action(request_application_quit);
     cx.on_action(|_: &HideApplication, cx| cx.hide());
     cx.on_action(|_: &HideOtherApplications, cx| cx.hide_other_apps());
     cx.on_action(|_: &ShowAllApplications, cx| cx.unhide_other_apps());
@@ -199,6 +199,27 @@ fn toggle_active_window_full_screen(_: &ToggleFullScreen, cx: &mut App) {
     });
 }
 
+fn request_application_quit(_: &QuitApplication, cx: &mut App) {
+    let Some(active_window) = cx.active_window() else {
+        cx.quit();
+        return;
+    };
+    let Some(active_window) = active_window.downcast::<WorkspaceManager>() else {
+        cx.quit();
+        return;
+    };
+    cx.defer(move |cx| {
+        if active_window
+            .update(cx, |manager, window, cx| {
+                manager.request_application_quit(window, cx)
+            })
+            .is_err()
+        {
+            cx.quit();
+        }
+    });
+}
+
 pub(crate) fn open(cx: &mut App, startup: StartupDependencies) {
     let home_directory = startup.home_directory.clone();
     let remote_backend_factory = startup.remote_backend_factory();
@@ -227,6 +248,12 @@ pub(crate) fn open(cx: &mut App, startup: StartupDependencies) {
             });
             workspace_manager.update(cx, |workspace_manager, cx| {
                 workspace_manager.focus(window, cx);
+            });
+            let close_manager = workspace_manager.downgrade();
+            window.on_window_should_close(cx, move |window, cx| {
+                close_manager
+                    .update(cx, |manager, cx| manager.should_close_window(window, cx))
+                    .unwrap_or(true)
             });
             if let Err(error) = crate::platform::macos_services::install(window, cx) {
                 eprintln!("failed to install the macOS Services responder: {error}");

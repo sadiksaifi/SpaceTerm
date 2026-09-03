@@ -90,6 +90,13 @@ struct TabMenuState {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum TabManagerEvent {
+    ClosePaneRequested {
+        tab_id: TabId,
+        pane_id: PaneId,
+    },
+    CloseTabRequested {
+        tab_id: TabId,
+    },
     FinalTabCloseRequested {
         final_tab_id: TabId,
     },
@@ -218,6 +225,12 @@ impl TabManager {
             &pane_host,
             window,
             |manager, _, event: &PaneHostEvent, window, cx| match event {
+                PaneHostEvent::UserClosePaneRequested { tab_id, pane_id } => {
+                    cx.emit(TabManagerEvent::ClosePaneRequested {
+                        tab_id: *tab_id,
+                        pane_id: *pane_id,
+                    });
+                }
                 PaneHostEvent::CloseTabRequested { tab_id } => {
                     manager.close_tab(*tab_id, window, cx);
                 }
@@ -349,6 +362,53 @@ impl TabManager {
         for (_, pane_host) in self.tabs.iter() {
             pane_host.update(cx, |pane_host, cx| pane_host.close_all(cx));
         }
+    }
+
+    pub(crate) fn pane_requires_close_confirmation(
+        &self,
+        tab_id: TabId,
+        pane_id: PaneId,
+        cx: &App,
+    ) -> Option<bool> {
+        self.tabs
+            .tab(tab_id)
+            .and_then(|host| host.read(cx).pane_requires_close_confirmation(pane_id, cx))
+    }
+
+    pub(crate) fn tab_requires_close_confirmation(&self, tab_id: TabId, cx: &App) -> Option<bool> {
+        self.tabs
+            .tab(tab_id)
+            .map(|host| host.read(cx).requires_close_confirmation(cx))
+    }
+
+    pub(crate) fn requires_close_confirmation(&self, cx: &App) -> bool {
+        self.tabs
+            .iter()
+            .any(|(_, host)| host.read(cx).requires_close_confirmation(cx))
+    }
+
+    pub(crate) fn close_pane_authorized(
+        &mut self,
+        tab_id: TabId,
+        pane_id: PaneId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(host) = self.tabs.tab(tab_id).cloned() else {
+            return;
+        };
+        host.update(cx, |host, cx| {
+            host.close_pane_authorized(pane_id, window, cx)
+        });
+    }
+
+    pub(crate) fn close_tab_authorized(
+        &mut self,
+        tab_id: TabId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.close_tab(tab_id, window, cx);
     }
 
     /// Atomically disconnects every Tab and Pane for the authoritative connection generation.
@@ -510,6 +570,13 @@ impl TabManager {
             .map(|(_, pane_host)| pane_host.read(cx).pane_count())
             .sum();
         (self.tabs.len(), panes)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn active_terminal_identity(&self, cx: &App) -> (TabId, PaneId) {
+        let tab_id = self.tabs.active_tab_id();
+        let pane_id = self.tabs.active_tab().read(cx).focused_pane_id();
+        (tab_id, pane_id)
     }
 
     pub(crate) fn set_workspace_directory(
@@ -914,6 +981,13 @@ impl TabManager {
         }
     }
 
+    fn request_close_tab(&mut self, tab_id: TabId, cx: &mut Context<Self>) {
+        if self.close_workspace_requested || self.tabs.tab(tab_id).is_none() {
+            return;
+        }
+        cx.emit(TabManagerEvent::CloseTabRequested { tab_id });
+    }
+
     fn prepare_context_menu(
         &mut self,
         tab_id: TabId,
@@ -984,7 +1058,7 @@ impl TabManager {
             PaneActionMenuCommand::ToggleZoom => {
                 pane_host.update(cx, |pane_host, cx| pane_host.toggle_zoom(window, cx));
             }
-            PaneActionMenuCommand::Close => self.close_tab(tab_id, window, cx),
+            PaneActionMenuCommand::Close => self.request_close_tab(tab_id, cx),
         }
         if self.tab_menu.take().is_some() {
             self.sync_terminal_focus_blocker(cx);
@@ -992,8 +1066,8 @@ impl TabManager {
         cx.notify();
     }
 
-    fn on_close_tab(&mut self, _: &CloseTab, window: &mut Window, cx: &mut Context<Self>) {
-        self.close_tab(self.tabs.active_tab_id(), window, cx);
+    fn on_close_tab(&mut self, _: &CloseTab, _: &mut Window, cx: &mut Context<Self>) {
+        self.request_close_tab(self.tabs.active_tab_id(), cx);
     }
 
     fn on_create_tab(&mut self, _: &CreateTab, window: &mut Window, cx: &mut Context<Self>) {
@@ -1149,9 +1223,9 @@ impl TabManager {
                             Tooltip::new(("tab-close-tooltip", tab_id.get()), "Close Tab")
                                 .debug_selector(format!("tab-close-tooltip-{}", tab_id.get())),
                         )
-                        .on_activate(move |_, window, cx| {
+                        .on_activate(move |_, _, cx| {
                             let _ = close_manager.update(cx, |manager, cx| {
-                                manager.close_tab(tab_id, window, cx);
+                                manager.request_close_tab(tab_id, cx);
                             });
                         }),
                     ),
@@ -1720,6 +1794,22 @@ mod tests {
         cx.update(|window, cx| {
             window.activate_window();
             manager.update(cx, |manager, cx| manager.focus(window, cx));
+            manager.update(cx, |_, cx| {
+                cx.subscribe_in(
+                    &manager,
+                    window,
+                    |manager, _, event: &TabManagerEvent, window, cx| match event {
+                        TabManagerEvent::ClosePaneRequested { tab_id, pane_id } => {
+                            manager.close_pane_authorized(*tab_id, *pane_id, window, cx);
+                        }
+                        TabManagerEvent::CloseTabRequested { tab_id } => {
+                            manager.close_tab_authorized(*tab_id, window, cx);
+                        }
+                        _ => {}
+                    },
+                )
+                .detach();
+            });
         });
         cx.run_until_parked();
         (manager, records, cx)

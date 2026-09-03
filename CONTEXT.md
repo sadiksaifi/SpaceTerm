@@ -993,3 +993,26 @@ Close Workspace remains distinct and replaces the final Workspace. The Module th
 close synchronously removes the entity and initiates one-shot shutdown of its Terminal Sessions.
 Shell termination and PTY ownership cleanup continue on terminal worker threads so GPUI callers do
 not wait for reader or Shell Process joins.
+
+### Close Confirmation
+
+Every user-requested close is classified before it may reach a hierarchy mutation. A Pane is safe
+to close immediately when it has no live Terminal Session, has exited or failed fatally, is a
+disconnected Remote Pane, or has live Terminal Metadata proving a Prompt, Command Input, or
+finished command. A live running command, Command Output without completion, startup with unknown
+semantic state, stale metadata, and every other unknown live state require confirmation. Unknown
+state intentionally favors protecting work, including unsupported or non-integrated shells that
+cannot prove they are idle.
+
+One Critical, application-owned window-modal Alert protects Close Pane, Close Tab, Close Workspace,
+the native Window close control, and Quit SpaceTerm. Higher-level requests aggregate every affected
+Pane into one confirmation. Its destructive Affirmative action is never the Return-key default;
+initial focus, Escape, and Command-Period remain on safe cancellation. The Alert never exposes
+command text, terminal contents, paths, or process details.
+
+The Operating-System Window owns one monotonic Close Confirmation coordinator. Duplicate user close
+requests are ignored while one confirmation is pending. Cancellation, dismissal, presentation
+failure, or a captured Pane, Tab, or Workspace disappearing before settlement performs no hierarchy
+mutation. Confirmation authorizes the exact captured target once and then enters the existing
+cross-hierarchy close path, so escalation does not prompt again. Automatic Terminal Session exit
+and internal failure cleanup are not user-requested closes and bypass Close Confirmation.

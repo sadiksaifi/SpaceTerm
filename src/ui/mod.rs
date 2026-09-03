@@ -1,4 +1,5 @@
 mod button_theme;
+mod close_policy;
 mod command_palette_theme;
 mod control_theme_catalog;
 mod menu_theme;

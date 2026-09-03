@@ -2089,10 +2089,10 @@ fn hyperlink_hover_underline_spans(
     {
         if cell.invisible
             || cell.underline != TerminalUnderlineSnapshot::None
-            || !cell
+            || cell
                 .hyperlink
                 .as_ref()
-                .is_some_and(|link| link.identity == occurrence.identity)
+                .is_none_or(|link| link.identity != occurrence.identity)
         {
             continue;
         }
