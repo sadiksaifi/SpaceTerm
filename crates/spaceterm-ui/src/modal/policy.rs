@@ -125,9 +125,10 @@ impl ModalDesktopPolicy {
     ///
     /// In horizontal left-to-right rows Cancel is leading and the explicit default is trailing;
     /// right-to-left layout mirrors physical placement while retaining logical traversal and typed
-    /// identity. Return activates only an explicit enabled default, and cancellation actions route
-    /// only to the enabled safe Cancel path. The separately installed macOS modal keybinding
-    /// profile adds Command-Period. Programmatic-only progress is capped at thirty minutes.
+    /// identity. Return activates an enabled focused action before falling back to an explicit
+    /// enabled default, and cancellation actions route only to the enabled safe Cancel path. The
+    /// separately installed macOS modal keybinding profile adds Command-Period. Programmatic-only
+    /// progress is capped at thirty minutes.
     pub const fn mac_os() -> Self {
         Self {
             shape: DesktopShape::MacOs,

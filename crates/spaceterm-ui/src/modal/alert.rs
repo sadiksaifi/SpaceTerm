@@ -137,8 +137,9 @@ pub enum AlertOutcome<A> {
 ///
 /// Alert accepts one to three decision actions plus an optional separate Help action. It never
 /// dismisses from an outside press. Initial focus prefers an explicit default or sole ordinary
-/// acknowledgement, but a destructive Alert enters on the enabled safe Cancel path. Return uses
-/// only an explicit enabled default; Escape and an installed platform cancellation equivalent use
+/// acknowledgement, but a destructive Alert enters on the enabled safe Cancel path. Return
+/// activates the enabled focused action first, then only an explicit enabled default after a
+/// focused body control declines it. Escape and an installed platform cancellation equivalent use
 /// only the enabled Cancel action.
 /// Caller action order is preserved as logical identity while [`ModalDesktopPolicy`] owns physical
 /// placement and the renderer traverses the complete current-frame GPUI tab-stop order.

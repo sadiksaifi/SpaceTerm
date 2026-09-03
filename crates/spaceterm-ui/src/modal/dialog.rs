@@ -215,8 +215,9 @@ pub enum DialogOutcome<A> {
 /// caller-owned reusable GPUI entity without exposing those mechanisms. [`crate::Button`] and
 /// [`crate::TextInput`] automatically participate in focus reveal; arbitrary body controls use
 /// [`DialogFocusTarget`]. Tab and Shift-Tab remain contained and are repaired when a target
-/// disables or disappears. Focused children receive Return and Escape before the Dialog, including
-/// input-method composition cancellation.
+/// disables or disappears. Focused action buttons consume Return before the Dialog default, while
+/// focused body controls may decline Return to that default. Focused children also receive Escape
+/// before the Dialog, including input-method composition cancellation.
 ///
 /// Actions retain caller-owned typed identity and logical order while installed desktop policy
 /// owns physical ordering. Denied close attempts preserve caller-owned field values and may focus

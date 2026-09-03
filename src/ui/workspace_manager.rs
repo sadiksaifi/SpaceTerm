@@ -4383,8 +4383,8 @@ mod tests {
     use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
     use gpui::{
-        Modifiers, MouseDownEvent, MouseUpEvent, ScrollDelta, ScrollWheelEvent, TestAppContext,
-        TouchPhase, VisualTestContext, point,
+        KeyDownEvent, KeyUpEvent, Keystroke, Modifiers, MouseDownEvent, MouseUpEvent, ScrollDelta,
+        ScrollWheelEvent, TestAppContext, TouchPhase, VisualTestContext, point,
     };
     use spaceterm_ui::{
         Alert, Dialog, DialogCloseDecision, DialogInitialFocus, ModalAction, ModalActionRole,
@@ -8192,6 +8192,16 @@ mod tests {
         cx.run_until_parked();
     }
 
+    fn press_return(cx: &mut VisualTestContext) {
+        let keystroke = Keystroke::parse("enter").unwrap_or_default();
+        cx.simulate_event(KeyDownEvent {
+            keystroke: keystroke.clone(),
+            is_held: false,
+        });
+        cx.simulate_event(KeyUpEvent { keystroke });
+        cx.run_until_parked();
+    }
+
     fn redraw(cx: &mut VisualTestContext) {
         cx.run_until_parked();
         cx.update(|window, _| window.refresh());
@@ -8209,9 +8219,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn risky_pane_close_should_cancel_safely_suppress_duplicates_and_confirm_once(
-        cx: &mut TestAppContext,
-    ) {
+    fn risky_pane_close_should_follow_keyboard_focus_and_confirm_once(cx: &mut TestAppContext) {
         let (manager, records, cx) = workspace_manager(cx);
         redraw(cx);
         cx.simulate_keystrokes("cmd-d");
@@ -8244,8 +8252,12 @@ mod tests {
             (1, 2)
         );
         assert!(records.dropped_session_ids().is_empty());
+        assert!(
+            cx.debug_bounds("modal-action-close-confirmation-cancel-keyboard-focus")
+                .is_some()
+        );
 
-        click("modal-action-close-confirmation-cancel", cx);
+        press_return(cx);
         redraw(cx);
         assert!(manager.read_with(cx, |manager, _| {
             manager.pending_close_confirmation.is_none()
@@ -8264,7 +8276,22 @@ mod tests {
         assert!(manager.read_with(cx, |manager, _| {
             manager.pending_close_confirmation.is_some()
         }));
-        click("modal-action-close-confirmation-confirm", cx);
+        assert!(
+            cx.debug_bounds("modal-action-close-confirmation-cancel-keyboard-focus")
+                .is_some()
+        );
+        cx.simulate_keystrokes("tab");
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("modal-action-close-confirmation-confirm-keyboard-focus")
+                .is_some()
+        );
+        assert_eq!(
+            tab_manager.read_with(cx, |manager, cx| manager.aggregate_counts(cx)),
+            (1, 2)
+        );
+        assert!(records.dropped_session_ids().is_empty());
+        press_return(cx);
 
         assert_eq!(
             (

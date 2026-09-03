@@ -155,12 +155,15 @@ and footer, and repairs disabled or removed targets. Button and Text Input parti
 automatically; arbitrary caller-owned Dialog body controls join through one layout-transparent
 semantic focus-target adapter without exposing scroll handles or anchors. Restoration uses only a live rendered predecessor or explicit successor
 that has not been superseded by newer transient or focus ownership. Operating-System Window
-deactivation retains the modal, cancels pressed state, and defers restoration. Reusable actions and
-Alert suppression register their keyed pointer and Space gestures with one modal-owned press
-registry, so disablement, replacement, caller removal, and Operating-System Window removal reject
-stale or mismatched releases before activation. Focused children receive Return and Escape first:
-Return reaches only an explicit enabled default after a child
-declines it; Escape and Command-Period reach only the enabled safe Cancel path; and the first Escape
+deactivation retains the modal, cancels pressed state, and defers restoration. Reusable actions
+register their keyed pointer, Space, and Return gestures with one modal-owned press registry, while
+Alert suppression registers only pointer and Space. Disablement, replacement, caller removal, and
+Operating-System Window removal reject stale or mismatched releases before activation. Focused
+children receive Return and Escape
+first. An enabled focused action consumes Return and activates on its matching release before any
+separately designated default action. After a focused body control declines Return, only an
+explicit enabled default may receive it. Escape and Command-Period reach only the enabled safe
+Cancel path; and the first Escape
 cancels active input-method composition before a later Escape can cancel the modal. Outside press,
 release, move, and wheel input is consumed without dismissal or click-through, and the modal key
 context makes the underlay inert to ordinary keyboard routing.
@@ -1006,9 +1009,10 @@ cannot prove they are idle.
 
 One Critical, application-owned window-modal Alert protects Close Pane, Close Tab, Close Workspace,
 the native Window close control, and Quit SpaceTerm. Higher-level requests aggregate every affected
-Pane into one confirmation. Its destructive Affirmative action is never the Return-key default;
-initial focus, Escape, and Command-Period remain on safe cancellation. The Alert never exposes
-command text, terminal contents, paths, or process details.
+Pane into one confirmation. Its destructive Affirmative action is never the explicit Return-key
+default. Initial focus, Escape, and Command-Period remain on safe cancellation, while Return
+activates whichever enabled action is visibly focused. The Alert never exposes command text,
+terminal contents, paths, or process details.
 
 The Operating-System Window owns one monotonic Close Confirmation coordinator. Duplicate user close
 requests are ignored while one confirmation is pending. Cancellation, dismissal, presentation

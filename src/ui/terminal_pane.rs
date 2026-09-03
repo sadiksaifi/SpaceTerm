@@ -6607,9 +6607,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn terminal_find_enter_and_escape_work_after_each_button_receives_tab_focus(
-        cx: &mut TestAppContext,
-    ) {
+    fn terminal_find_return_activates_each_focused_button(cx: &mut TestAppContext) {
         let (pane, cx, records) = connected_terminal_pane(cx);
 
         for tab_count in 1..=3 {
@@ -6630,7 +6628,15 @@ mod tests {
             for _ in 0..tab_count {
                 cx.simulate_keystrokes("tab");
             }
-            cx.simulate_keystrokes("enter escape");
+            let enter = Keystroke::parse("enter").unwrap_or_default();
+            cx.simulate_event(KeyDownEvent {
+                keystroke: enter.clone(),
+                is_held: false,
+            });
+            cx.simulate_event(KeyUpEvent { keystroke: enter });
+            if tab_count < 3 {
+                cx.simulate_keystrokes("escape");
+            }
             cx.run_until_parked();
 
             assert!(
@@ -6638,19 +6644,27 @@ mod tests {
                 "Escape did not close Find after tabbing to button {tab_count}"
             );
             let commands = records.commands();
-            assert!(
-                commands.iter().skip(command_count).any(|call| matches!(
-                    call.command,
-                    RecordedSessionCommand::NavigateFind(_, FindDirection::Next)
-                )),
-                "Enter did not navigate after tabbing to button {tab_count}"
-            );
+            if tab_count < 3 {
+                let expected_direction = if tab_count == 1 {
+                    FindDirection::Previous
+                } else {
+                    FindDirection::Next
+                };
+                assert!(
+                    commands.iter().skip(command_count).any(|call| matches!(
+                        call.command,
+                        RecordedSessionCommand::NavigateFind(_, direction)
+                            if direction == expected_direction
+                    )),
+                    "Return did not activate focused Find button {tab_count}"
+                );
+            }
             assert!(
                 commands
                     .iter()
                     .skip(command_count)
                     .any(|call| matches!(call.command, RecordedSessionCommand::EndFind(_))),
-                "Escape did not end Find after tabbing to button {tab_count}"
+                "focused Close or Escape did not end Find after button {tab_count}"
             );
         }
     }
