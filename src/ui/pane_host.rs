@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
 use thiserror::Error;
 
@@ -39,9 +40,12 @@ use crate::domain::{
     ClosePaneOutcome, FocusDirection, PaneId, PaneNodeRef, PaneSize, PaneTreeRef, SplitAxis,
     SplitId, TabId, TerminalTab, WorkspaceDirectoryIdentity, WorkspaceId, ZoomState,
 };
+#[cfg(test)]
+use crate::terminal::GpuiTerminalKeyInputAdapterFactory;
 use crate::terminal::{
     NativeServiceOrigin, NativeServiceStatus, PreparedWorkspaceTerminalLaunch, SelectionCopy,
-    WorkspaceChildLaunchValidation, WorkspaceTerminalSessionFactory,
+    TerminalKeyInputAdapterFactory, WorkspaceChildLaunchValidation,
+    WorkspaceTerminalSessionFactory,
 };
 use crate::theme::{ACTIVE_THEME, Color};
 use gpui::prelude::*;
@@ -103,6 +107,7 @@ pub(crate) enum PaneHostEvent {
 pub(crate) struct PaneHost {
     terminal_tab: TerminalTab<Entity<TerminalPane>>,
     session_factory: WorkspaceTerminalSessionFactory,
+    key_input_adapter_factory: Rc<dyn TerminalKeyInputAdapterFactory>,
     pane_bounds: BTreeMap<PaneId, Bounds<Pixels>>,
     split_bounds: BTreeMap<SplitId, Bounds<Pixels>>,
     pane_titles: BTreeMap<PaneId, gpui::SharedString>,
@@ -130,13 +135,21 @@ impl PaneHost {
             Ok(prepared_launch) => prepared_launch,
             Err(error) => panic!("test PaneHost channel preparation failed: {error}"),
         };
-        Self::new_with_prepared_launch(tab_id, session_factory, prepared_launch, window, cx)
+        Self::new_with_prepared_launch(
+            tab_id,
+            session_factory,
+            prepared_launch,
+            Rc::new(GpuiTerminalKeyInputAdapterFactory::default()),
+            window,
+            cx,
+        )
     }
 
     pub(crate) fn new_with_prepared_launch(
         tab_id: TabId,
         session_factory: WorkspaceTerminalSessionFactory,
         prepared_launch: PreparedWorkspaceTerminalLaunch,
+        key_input_adapter_factory: Rc<dyn TerminalKeyInputAdapterFactory>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -151,6 +164,7 @@ impl PaneHost {
                 pane_id,
                 session_factory.clone(),
                 prepared_launch,
+                Rc::clone(&key_input_adapter_factory),
                 window,
                 cx,
             )
@@ -164,6 +178,7 @@ impl PaneHost {
         Self {
             terminal_tab,
             session_factory,
+            key_input_adapter_factory,
             pane_bounds: BTreeMap::new(),
             split_bounds: BTreeMap::new(),
             pane_titles: BTreeMap::from([(initial_pane_id, initial_title)]),
@@ -184,11 +199,18 @@ impl PaneHost {
         pane_id: PaneId,
         session_factory: WorkspaceTerminalSessionFactory,
         prepared_launch: PreparedWorkspaceTerminalLaunch,
+        key_input_adapter_factory: Rc<dyn TerminalKeyInputAdapterFactory>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Entity<TerminalPane> {
         let terminal = cx.new(|cx| {
-            TerminalPane::new_with_prepared_launch(session_factory, prepared_launch, window, cx)
+            TerminalPane::new_with_prepared_launch(
+                session_factory,
+                prepared_launch,
+                key_input_adapter_factory.create(),
+                window,
+                cx,
+            )
         });
         cx.subscribe_in(
             &terminal,
@@ -802,13 +824,21 @@ impl PaneHost {
         cx: &mut Context<Self>,
     ) {
         let session_factory = self.session_factory.clone();
+        let key_input_adapter_factory = Rc::clone(&self.key_input_adapter_factory);
         let result = self.terminal_tab.split_pane(
             target_pane_id,
             axis,
             target_size,
             DIVIDER_SIZE,
             |new_pane_id| {
-                Self::create_terminal(new_pane_id, session_factory, prepared_launch, window, cx)
+                Self::create_terminal(
+                    new_pane_id,
+                    session_factory,
+                    prepared_launch,
+                    key_input_adapter_factory,
+                    window,
+                    cx,
+                )
             },
         );
 

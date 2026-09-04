@@ -6,17 +6,24 @@ use std::sync::Arc;
 
 use super::geometry::TerminalGeometry;
 use super::{
-    AcceptanceSessionFailure, FindDirection, FindQueryGeneration, KeyInput,
+    AcceptanceSessionFailure, FindDirection, FindQueryGeneration, KeyInput, OptionAsAltPolicy,
     Osc52AuthorizationDecision, Osc52AuthorizationId, PasteConfirmationId, PasteDecision,
     PasteRequestOutcome, PasteResolution, PointerInput, PresentationGeneration, SelectionCopy,
     SelectionCopyError, SessionError, SessionEvent, StartedTerminalSession,
-    TerminalAccessibilityModel, TerminalLaunchPlan, TerminalSessionFactory, TerminalSessionHandle,
-    WheelInput,
+    TerminalAccessibilityModel, TerminalKeyInputAdapter, TerminalKeyInputAdapterFactory,
+    TerminalLaunchPlan, TerminalSessionFactory, TerminalSessionHandle, WheelInput,
 };
 use crate::domain::{ValidatedWorkspaceDirectory, WorkspaceDirectoryIdentity};
 
 pub(crate) fn test_workspace_directory(path: PathBuf) -> ValidatedWorkspaceDirectory {
     ValidatedWorkspaceDirectory::new(path, WorkspaceDirectoryIdentity::new(0, 0))
+}
+
+pub(crate) fn test_terminal_key_input_adapter() -> Box<dyn TerminalKeyInputAdapter> {
+    crate::platform::macos_keyboard::MacosTerminalKeyInputAdapterFactory::new(
+        OptionAsAltPolicy::default(),
+    )
+    .create()
 }
 
 #[derive(Clone, Debug, PartialEq)]

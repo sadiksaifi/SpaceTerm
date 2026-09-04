@@ -3,10 +3,14 @@ use std::ffi::CStr;
 use cocoa::appkit::{NSApp, NSEvent, NSEventModifierFlags, NSEventType};
 use cocoa::base::{id, nil};
 use cocoa::foundation::NSString;
+use gpui::{KeyDownEvent, KeyUpEvent, ModifiersChangedEvent};
 use objc::{msg_send, sel, sel_impl};
 
 use crate::terminal::{
-    InputModifiers, KeyAction, KeyInput, KeyInputError, OptionAsAltPolicy, PhysicalKey,
+    GpuiTerminalKeyInputAdapter, GpuiTerminalKeyInputAdapterFactory, InputModifiers, KeyAction,
+    KeyInput, KeyInputError, KeyTranslation, OptionAsAltPolicy, PhysicalKey,
+    TerminalKeyInputAdapter, TerminalKeyInputAdapterFactory, TerminalKeyInputEventKind,
+    UnhandledKeyEvent,
 };
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -37,27 +41,6 @@ pub(crate) struct NativeKeyEvent {
     pub(crate) unmodified_characters: Option<String>,
     pub(crate) characters_without_option: Option<String>,
     pub(crate) modifiers: NativeModifiers,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum NativeKeyEventKind {
-    KeyDown,
-    KeyUp,
-    FlagsChanged,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct UnhandledKeyEvent {
-    pub(crate) kind: NativeKeyEventKind,
-    pub(crate) action: KeyAction,
-    pub(crate) native_key_code: Option<u16>,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum KeyTranslation {
-    Encoded(KeyInput),
-    TextInput(String),
-    Unhandled(UnhandledKeyEvent),
 }
 
 impl NativeKeyEvent {
@@ -191,6 +174,73 @@ pub(crate) struct MacosKeyboardBridge {
     pressed_modifier_key_codes: Vec<u16>,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct MacosTerminalKeyInputAdapterFactory {
+    option_as_alt: OptionAsAltPolicy,
+}
+
+impl MacosTerminalKeyInputAdapterFactory {
+    pub(crate) const fn new(option_as_alt: OptionAsAltPolicy) -> Self {
+        Self { option_as_alt }
+    }
+}
+
+impl TerminalKeyInputAdapterFactory for MacosTerminalKeyInputAdapterFactory {
+    fn create(&self) -> Box<dyn TerminalKeyInputAdapter> {
+        Box::new(MacosTerminalKeyInputAdapter::new(self.option_as_alt))
+    }
+}
+
+pub(crate) struct MacosTerminalKeyInputAdapter {
+    bridge: MacosKeyboardBridge,
+    gpui: GpuiTerminalKeyInputAdapter,
+}
+
+impl MacosTerminalKeyInputAdapter {
+    pub(crate) fn new(option_as_alt: OptionAsAltPolicy) -> Self {
+        let gpui_factory = GpuiTerminalKeyInputAdapterFactory::new(option_as_alt);
+        Self {
+            bridge: MacosKeyboardBridge::new(option_as_alt),
+            gpui: gpui_factory.adapter(),
+        }
+    }
+}
+
+impl TerminalKeyInputAdapter for MacosTerminalKeyInputAdapter {
+    fn key_down(&mut self, event: &KeyDownEvent) -> KeyTranslation {
+        let action = if event.is_held {
+            KeyAction::Repeat
+        } else {
+            KeyAction::Press
+        };
+        NativeKeyEvent::current_key(action)
+            .map(|event| self.bridge.translate(event))
+            .unwrap_or_else(|| self.gpui.key_down(event))
+    }
+
+    fn key_up(&mut self, event: &KeyUpEvent) -> KeyTranslation {
+        NativeKeyEvent::current_key(KeyAction::Release)
+            .map(|event| self.bridge.translate(event))
+            .unwrap_or_else(|| self.gpui.key_up(event))
+    }
+
+    fn modifiers_changed(&mut self, event: &ModifiersChangedEvent) -> Option<KeyTranslation> {
+        let portable_translation = self.gpui.modifiers_changed(event);
+        NativeKeyEvent::current_modifier()
+            .map(|event| self.bridge.modifier_transition(event))
+            .or(portable_translation)
+    }
+
+    fn input_method_commit(&mut self, text: String) -> KeyTranslation {
+        self.gpui.input_method_commit(text)
+    }
+
+    fn reset(&mut self) {
+        self.bridge.reset_pressed_modifiers();
+        self.gpui.reset();
+    }
+}
+
 impl MacosKeyboardBridge {
     pub(crate) fn new(option_as_alt: OptionAsAltPolicy) -> Self {
         Self {
@@ -202,8 +252,8 @@ impl MacosKeyboardBridge {
     pub(crate) fn translate(&self, event: NativeKeyEvent) -> KeyTranslation {
         let unhandled = UnhandledKeyEvent {
             kind: match event.action {
-                KeyAction::Press | KeyAction::Repeat => NativeKeyEventKind::KeyDown,
-                KeyAction::Release => NativeKeyEventKind::KeyUp,
+                KeyAction::Press | KeyAction::Repeat => TerminalKeyInputEventKind::KeyDown,
+                KeyAction::Release => TerminalKeyInputEventKind::KeyUp,
             },
             action: event.action,
             native_key_code: Some(event.native_key_code),
@@ -260,7 +310,7 @@ impl MacosKeyboardBridge {
 
     pub(crate) fn modifier_transition(&mut self, mut event: NativeKeyEvent) -> KeyTranslation {
         let unhandled = UnhandledKeyEvent {
-            kind: NativeKeyEventKind::FlagsChanged,
+            kind: TerminalKeyInputEventKind::ModifiersChanged,
             action: event.action,
             native_key_code: Some(event.native_key_code),
         };
@@ -476,6 +526,13 @@ fn physical_key(native_key_code: u16) -> PhysicalKey {
 mod tests {
     use super::*;
 
+    #[test]
+    fn macos_adapter_satisfies_the_shared_contract_without_a_native_event() {
+        crate::terminal::assert_common_adapter_contract(Box::new(
+            MacosTerminalKeyInputAdapter::new(OptionAsAltPolicy::default()),
+        ));
+    }
+
     fn encoded(translation: KeyTranslation) -> KeyInput {
         let KeyTranslation::Encoded(input) = translation else {
             panic!("expected encoded key input, found {translation:?}");
@@ -507,7 +564,7 @@ mod tests {
         assert_eq!(
             bridge.translate(event),
             KeyTranslation::Unhandled(UnhandledKeyEvent {
-                kind: NativeKeyEventKind::KeyDown,
+                kind: TerminalKeyInputEventKind::KeyDown,
                 action: KeyAction::Press,
                 native_key_code: Some(u16::MAX),
             })
@@ -537,7 +594,7 @@ mod tests {
         assert_eq!(
             bridge.translate(event),
             KeyTranslation::Unhandled(UnhandledKeyEvent {
-                kind: NativeKeyEventKind::KeyDown,
+                kind: TerminalKeyInputEventKind::KeyDown,
                 action: KeyAction::Press,
                 native_key_code: Some(u16::MAX),
             })
@@ -553,7 +610,7 @@ mod tests {
         assert_eq!(
             bridge.translate(event),
             KeyTranslation::Unhandled(UnhandledKeyEvent {
-                kind: NativeKeyEventKind::KeyUp,
+                kind: TerminalKeyInputEventKind::KeyUp,
                 action: KeyAction::Release,
                 native_key_code: Some(u16::MAX),
             })
@@ -670,7 +727,7 @@ mod tests {
         assert_eq!(
             bridge.modifier_transition(native(0, "")),
             KeyTranslation::Unhandled(UnhandledKeyEvent {
-                kind: NativeKeyEventKind::FlagsChanged,
+                kind: TerminalKeyInputEventKind::ModifiersChanged,
                 action: KeyAction::Press,
                 native_key_code: Some(0),
             })

@@ -49,10 +49,13 @@ use crate::platform::macos_window_drag::MacosOperatingSystemWindowDragPlatform;
 use crate::platform::macos_window_drag::{
     OperatingSystemWindowDragError, OperatingSystemWindowDragPlatform,
 };
+#[cfg(test)]
+use crate::terminal::GpuiTerminalKeyInputAdapterFactory;
 use crate::terminal::{
     NativeServiceOrigin, NativeServiceStatus, PreparedWorkspaceTerminalLaunch,
     RemoteChannelRevalidationError, RemoteChannelUnavailable, SelectionCopy,
-    WorkspaceChildLaunchValidation, WorkspaceTerminalSessionFactory,
+    TerminalKeyInputAdapterFactory, WorkspaceChildLaunchValidation,
+    WorkspaceTerminalSessionFactory,
 };
 use crate::theme::{ACTIVE_THEME, Color};
 use gpui::prelude::*;
@@ -129,6 +132,7 @@ pub(crate) enum TabManagerEvent {
 pub(crate) struct TabManager {
     tabs: TabCollection<Entity<PaneHost>>,
     session_factory: WorkspaceTerminalSessionFactory,
+    key_input_adapter_factory: Rc<dyn TerminalKeyInputAdapterFactory>,
     active: bool,
     sidebar_visible: bool,
     sidebar_width: Pixels,
@@ -177,6 +181,7 @@ impl TabManager {
             session_factory,
             prepared_launch,
             operating_system_window_drag_platform,
+            Rc::new(GpuiTerminalKeyInputAdapterFactory::default()),
             window,
             cx,
         ))
@@ -186,15 +191,25 @@ impl TabManager {
         session_factory: WorkspaceTerminalSessionFactory,
         prepared_launch: PreparedWorkspaceTerminalLaunch,
         operating_system_window_drag_platform: Rc<dyn OperatingSystemWindowDragPlatform>,
+        key_input_adapter_factory: Rc<dyn TerminalKeyInputAdapterFactory>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        let initial_key_input_adapter_factory = Rc::clone(&key_input_adapter_factory);
         let tabs = TabCollection::new(|tab_id| {
-            Self::create_pane_host(tab_id, session_factory.clone(), prepared_launch, window, cx)
+            Self::create_pane_host(
+                tab_id,
+                session_factory.clone(),
+                prepared_launch,
+                Rc::clone(&initial_key_input_adapter_factory),
+                window,
+                cx,
+            )
         });
         Self {
             tabs,
             session_factory,
+            key_input_adapter_factory,
             active: true,
             sidebar_visible: true,
             sidebar_width: px(WORKSPACE_SIDEBAR_DEFAULT_WIDTH),
@@ -214,11 +229,19 @@ impl TabManager {
         tab_id: TabId,
         session_factory: WorkspaceTerminalSessionFactory,
         prepared_launch: PreparedWorkspaceTerminalLaunch,
+        key_input_adapter_factory: Rc<dyn TerminalKeyInputAdapterFactory>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Entity<PaneHost> {
         let pane_host = cx.new(|cx| {
-            PaneHost::new_with_prepared_launch(tab_id, session_factory, prepared_launch, window, cx)
+            PaneHost::new_with_prepared_launch(
+                tab_id,
+                session_factory,
+                prepared_launch,
+                key_input_adapter_factory,
+                window,
+                cx,
+            )
         });
         debug_assert_eq!(pane_host.read(cx).tab_id(), tab_id);
         cx.subscribe_in(
@@ -849,8 +872,16 @@ impl TabManager {
     ) {
         let previous_tab = self.tabs.active_tab().clone();
         let session_factory = self.session_factory.clone();
+        let key_input_adapter_factory = Rc::clone(&self.key_input_adapter_factory);
         let result = self.tabs.create_tab(|tab_id| {
-            Self::create_pane_host(tab_id, session_factory, prepared_launch, window, cx)
+            Self::create_pane_host(
+                tab_id,
+                session_factory,
+                prepared_launch,
+                key_input_adapter_factory,
+                window,
+                cx,
+            )
         });
         let tab_id = match result {
             Ok(tab_id) => tab_id,

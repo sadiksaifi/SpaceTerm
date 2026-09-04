@@ -43,9 +43,6 @@ use crate::platform::macos_attention::{
 };
 #[cfg(not(test))]
 use crate::platform::macos_attention::{MacosAttentionPlatform, apply_attention_effects};
-use crate::platform::macos_keyboard::{
-    KeyTranslation, MacosKeyboardBridge, NativeKeyEvent, NativeKeyEventKind, UnhandledKeyEvent,
-};
 use crate::platform::macos_pasteboard::read_file_urls;
 use crate::platform::macos_quick_look::{MacosQuickLook, QuickLookPlatform};
 use crate::platform::macos_render_lifecycle::{
@@ -58,6 +55,8 @@ use crate::platform::macos_secure_input::{
     update_application_activation as update_secure_input_application_activation,
     update_pane as update_secure_input_pane,
 };
+#[cfg(test)]
+use crate::terminal::UnhandledKeyEvent;
 use crate::terminal::attention::AttentionState;
 use crate::terminal::geometry::{
     BackingPosition, BackingScale, CellGridPosition, CellGridSize, LogicalCellSize,
@@ -66,15 +65,16 @@ use crate::terminal::geometry::{
 use crate::terminal::{
     AccessibilityGeometry, AccessibilityNotification, AccessibilityNotifications, AttentionFacts,
     DiagnosticBundle, DiagnosticKeyEventKind, FindDirection, FindQueryGeneration, InputModifiers,
-    KeyAction, KeyInput, NativeContextActions, NativeInsertion, NativeServiceCapabilities,
-    NativeServiceOrigin, NativeServiceStatus, OptionAsAltPolicy, Osc52Access,
+    KeyAction, KeyInput, KeyTranslation, NativeContextActions, NativeInsertion,
+    NativeServiceCapabilities, NativeServiceOrigin, NativeServiceStatus, Osc52Access,
     Osc52AuthorizationDecision, Osc52AuthorizationRequest, Osc52Target, PaneTerminalState,
     PasteConfirmation, PasteDecision, PasteRequestOutcome, PasteResolution, PhysicalKey,
     PointerButton, PointerInput, PointerPhase, PreparedWorkspaceTerminalLaunch, QuickLookTarget,
     RemoteChannelUnavailable, ScreenSnapshot, SelectionCopy, SelectionCopyError, SessionEvent,
     ShiftSelectionPolicy, SurfacePosition, TerminalAccessibilityModel, TerminalFailure,
-    TerminalLocalFileCapabilities, TerminalSessionHandle, UnhandledKeyDiagnostic, WheelInput,
-    WheelPhase, WorkspaceTerminalSessionFactory,
+    TerminalKeyInputAdapter, TerminalKeyInputEventKind, TerminalLocalFileCapabilities,
+    TerminalSessionHandle, UnhandledKeyDiagnostic, WheelInput, WheelPhase,
+    WorkspaceTerminalSessionFactory,
 };
 use crate::theme::{ACTIVE_THEME, Color};
 #[cfg(test)]
@@ -360,7 +360,7 @@ pub(crate) struct TerminalPane {
     paint_fault: Option<PaintPreflightFault>,
     graphics_cache: Entity<TerminalGraphicsCache>,
     selection_pasteboard: SelectionPasteboard,
-    keyboard_bridge: MacosKeyboardBridge,
+    key_input_adapter: Box<dyn TerminalKeyInputAdapter>,
     ime: TerminalIme,
     preedit_layout: Option<PreeditLayout>,
     preedit_layout_key: Option<PreeditLayoutKey>,
@@ -398,6 +398,7 @@ impl TerminalPane {
         Self::new_with_quick_look(
             session_factory,
             prepared_launch,
+            crate::terminal::testing::test_terminal_key_input_adapter(),
             Box::new(MacosQuickLook::default()),
             window,
             cx,
@@ -407,12 +408,14 @@ impl TerminalPane {
     pub(crate) fn new_with_prepared_launch(
         session_factory: WorkspaceTerminalSessionFactory,
         prepared_launch: PreparedWorkspaceTerminalLaunch,
+        key_input_adapter: Box<dyn TerminalKeyInputAdapter>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         Self::new_with_quick_look(
             session_factory,
             Some(prepared_launch),
+            key_input_adapter,
             Box::new(MacosQuickLook::default()),
             window,
             cx,
@@ -422,6 +425,7 @@ impl TerminalPane {
     fn new_with_quick_look(
         session_factory: WorkspaceTerminalSessionFactory,
         prepared_launch: Option<PreparedWorkspaceTerminalLaunch>,
+        key_input_adapter: Box<dyn TerminalKeyInputAdapter>,
         quick_look: Box<dyn QuickLookPlatform>,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -569,7 +573,7 @@ impl TerminalPane {
             paint_fault: None,
             graphics_cache,
             selection_pasteboard: SelectionPasteboard::default(),
-            keyboard_bridge: MacosKeyboardBridge::new(OptionAsAltPolicy::default()),
+            key_input_adapter,
             ime: TerminalIme::default(),
             preedit_layout: None,
             preedit_layout_key: None,
@@ -847,7 +851,7 @@ impl TerminalPane {
             self.terminal_input_focus = focused;
             self.advance_native_service_focus_epoch();
             if !focused {
-                self.keyboard_bridge.reset_pressed_modifiers();
+                self.key_input_adapter.reset();
             }
             if focused {
                 self.pending_accessibility_notifications
@@ -2259,14 +2263,7 @@ impl TerminalPane {
         if !self.synchronize_terminal_input_focus(window, cx) {
             return;
         }
-        let action = if event.is_held {
-            KeyAction::Repeat
-        } else {
-            KeyAction::Press
-        };
-        let input = NativeKeyEvent::current_key(action)
-            .map(|event| self.keyboard_bridge.translate(event))
-            .unwrap_or_else(|| encode_key(event));
+        let input = self.key_input_adapter.key_down(event);
         if self.ime.marked_text().is_some() {
             if let KeyTranslation::Encoded(input) = &input
                 && input.physical_key != PhysicalKey::Unidentified
@@ -2288,9 +2285,7 @@ impl TerminalPane {
         if !self.synchronize_terminal_input_focus(window, cx) {
             return;
         }
-        let input = NativeKeyEvent::current_key(KeyAction::Release)
-            .map(|event| self.keyboard_bridge.translate(event))
-            .unwrap_or_else(|| encode_keystroke(&event.keystroke, KeyAction::Release));
+        let input = self.key_input_adapter.key_up(event);
         if let KeyTranslation::Encoded(input) = &input
             && let Some(index) = self
                 .ime_suppressed_keys
@@ -2326,11 +2321,9 @@ impl TerminalPane {
         if !self.synchronize_terminal_input_focus(window, cx) {
             return;
         }
-        let Some(event) = NativeKeyEvent::current_modifier() else {
-            return;
-        };
-        let translation = self.keyboard_bridge.modifier_transition(event);
-        self.send_key_translation(translation, cx);
+        if let Some(translation) = self.key_input_adapter.modifiers_changed(event) {
+            self.send_key_translation(translation, cx);
+        }
     }
 
     fn send_key_translation(
@@ -2343,9 +2336,11 @@ impl TerminalPane {
             KeyTranslation::TextInput(text) => KeyInput::text_input(text),
             KeyTranslation::Unhandled(event) => {
                 let kind = match event.kind {
-                    NativeKeyEventKind::KeyDown => DiagnosticKeyEventKind::KeyDown,
-                    NativeKeyEventKind::KeyUp => DiagnosticKeyEventKind::KeyUp,
-                    NativeKeyEventKind::FlagsChanged => DiagnosticKeyEventKind::FlagsChanged,
+                    TerminalKeyInputEventKind::KeyDown => DiagnosticKeyEventKind::KeyDown,
+                    TerminalKeyInputEventKind::KeyUp => DiagnosticKeyEventKind::KeyUp,
+                    TerminalKeyInputEventKind::ModifiersChanged => {
+                        DiagnosticKeyEventKind::FlagsChanged
+                    }
                 };
                 self.diagnostics
                     .record_unhandled_key(UnhandledKeyDiagnostic::new(
@@ -3549,10 +3544,8 @@ impl EntityInputHandler for TerminalPane {
         self.ime.commit(text);
         self.invalidate_preedit_layout();
         if let Some(text) = self.ime.take_commit() {
-            self.send_key_translation(
-                KeyTranslation::Encoded(KeyInput::input_method_commit(text)),
-                cx,
-            );
+            let translation = self.key_input_adapter.input_method_commit(text);
+            self.send_key_translation(translation, cx);
         }
         self.pending_accessibility_notifications
             .insert(AccessibilityNotification::Value);
@@ -4488,192 +4481,6 @@ impl WheelAccumulator {
         }
         steps
     }
-}
-
-fn encode_key(event: &KeyDownEvent) -> KeyTranslation {
-    encode_keystroke(
-        &event.keystroke,
-        if event.is_held {
-            KeyAction::Repeat
-        } else {
-            KeyAction::Press
-        },
-    )
-}
-
-fn encode_keystroke(keystroke: &gpui::Keystroke, action: KeyAction) -> KeyTranslation {
-    let physical_key = physical_key(&keystroke.key);
-    let text = keystroke
-        .key_char
-        .clone()
-        .filter(|text| !text.is_empty() && !text.chars().any(char::is_control));
-    let unshifted_codepoint = single_char(&keystroke.key).map(unshifted_character);
-
-    let input = KeyInput {
-        action,
-        physical_key,
-        native_key_code: None,
-        logical_key: keystroke.key.clone(),
-        text,
-        unshifted_codepoint,
-        modifiers: input_modifiers(keystroke.modifiers),
-        consumed_modifiers: InputModifiers::default(),
-        option_as_alt: OptionAsAltPolicy::default(),
-    };
-    let allows_text_input =
-        !input.modifiers.control && !input.modifiers.platform && !input.modifiers.alt;
-    match input.validate() {
-        Ok(()) => KeyTranslation::Encoded(input),
-        Err(_) => match input.text {
-            Some(text) if action != KeyAction::Release && allows_text_input => {
-                KeyTranslation::TextInput(text)
-            }
-            _ => KeyTranslation::Unhandled(UnhandledKeyEvent {
-                kind: match action {
-                    KeyAction::Press | KeyAction::Repeat => NativeKeyEventKind::KeyDown,
-                    KeyAction::Release => NativeKeyEventKind::KeyUp,
-                },
-                action,
-                native_key_code: None,
-            }),
-        },
-    }
-}
-
-fn physical_key(key: &str) -> PhysicalKey {
-    match key {
-        "enter" => PhysicalKey::Enter,
-        "backspace" => PhysicalKey::Backspace,
-        "tab" => PhysicalKey::Tab,
-        "escape" => PhysicalKey::Escape,
-        "up" => PhysicalKey::ArrowUp,
-        "down" => PhysicalKey::ArrowDown,
-        "right" => PhysicalKey::ArrowRight,
-        "left" => PhysicalKey::ArrowLeft,
-        "home" => PhysicalKey::Home,
-        "end" => PhysicalKey::End,
-        "pageup" => PhysicalKey::PageUp,
-        "pagedown" => PhysicalKey::PageDown,
-        "insert" => PhysicalKey::Insert,
-        "delete" => PhysicalKey::Delete,
-        "f1" => PhysicalKey::F1,
-        "f2" => PhysicalKey::F2,
-        "f3" => PhysicalKey::F3,
-        "f4" => PhysicalKey::F4,
-        "f5" => PhysicalKey::F5,
-        "f6" => PhysicalKey::F6,
-        "f7" => PhysicalKey::F7,
-        "f8" => PhysicalKey::F8,
-        "f9" => PhysicalKey::F9,
-        "f10" => PhysicalKey::F10,
-        "f11" => PhysicalKey::F11,
-        "f12" => PhysicalKey::F12,
-        "f13" => PhysicalKey::F13,
-        "f14" => PhysicalKey::F14,
-        "f15" => PhysicalKey::F15,
-        "f16" => PhysicalKey::F16,
-        "f17" => PhysicalKey::F17,
-        "f18" => PhysicalKey::F18,
-        "f19" => PhysicalKey::F19,
-        "f20" => PhysicalKey::F20,
-        "f21" => PhysicalKey::F21,
-        "f22" => PhysicalKey::F22,
-        "f23" => PhysicalKey::F23,
-        "f24" => PhysicalKey::F24,
-        "f25" => PhysicalKey::F25,
-        "space" | " " => PhysicalKey::Space,
-        value => single_char(value)
-            .map(physical_character_key)
-            .unwrap_or(PhysicalKey::Unidentified),
-    }
-}
-
-fn physical_character_key(character: char) -> PhysicalKey {
-    match unshifted_character(character) {
-        '`' => PhysicalKey::Backquote,
-        '\\' => PhysicalKey::Backslash,
-        '[' => PhysicalKey::BracketLeft,
-        ']' => PhysicalKey::BracketRight,
-        ',' => PhysicalKey::Comma,
-        '0' => PhysicalKey::Digit0,
-        '1' => PhysicalKey::Digit1,
-        '2' => PhysicalKey::Digit2,
-        '3' => PhysicalKey::Digit3,
-        '4' => PhysicalKey::Digit4,
-        '5' => PhysicalKey::Digit5,
-        '6' => PhysicalKey::Digit6,
-        '7' => PhysicalKey::Digit7,
-        '8' => PhysicalKey::Digit8,
-        '9' => PhysicalKey::Digit9,
-        '=' => PhysicalKey::Equal,
-        'a' => PhysicalKey::A,
-        'b' => PhysicalKey::B,
-        'c' => PhysicalKey::C,
-        'd' => PhysicalKey::D,
-        'e' => PhysicalKey::E,
-        'f' => PhysicalKey::F,
-        'g' => PhysicalKey::G,
-        'h' => PhysicalKey::H,
-        'i' => PhysicalKey::I,
-        'j' => PhysicalKey::J,
-        'k' => PhysicalKey::K,
-        'l' => PhysicalKey::L,
-        'm' => PhysicalKey::M,
-        'n' => PhysicalKey::N,
-        'o' => PhysicalKey::O,
-        'p' => PhysicalKey::P,
-        'q' => PhysicalKey::Q,
-        'r' => PhysicalKey::R,
-        's' => PhysicalKey::S,
-        't' => PhysicalKey::T,
-        'u' => PhysicalKey::U,
-        'v' => PhysicalKey::V,
-        'w' => PhysicalKey::W,
-        'x' => PhysicalKey::X,
-        'y' => PhysicalKey::Y,
-        'z' => PhysicalKey::Z,
-        '-' => PhysicalKey::Minus,
-        '.' => PhysicalKey::Period,
-        '\'' => PhysicalKey::Quote,
-        ';' => PhysicalKey::Semicolon,
-        '/' => PhysicalKey::Slash,
-        ' ' => PhysicalKey::Space,
-        _ => PhysicalKey::Unidentified,
-    }
-}
-
-fn unshifted_character(character: char) -> char {
-    match character {
-        '~' => '`',
-        '!' => '1',
-        '@' => '2',
-        '#' => '3',
-        '$' => '4',
-        '%' => '5',
-        '^' => '6',
-        '&' => '7',
-        '*' => '8',
-        '(' => '9',
-        ')' => '0',
-        '_' => '-',
-        '+' => '=',
-        '{' => '[',
-        '}' => ']',
-        '|' => '\\',
-        ':' => ';',
-        '"' => '\'',
-        '<' => ',',
-        '>' => '.',
-        '?' => '/',
-        character if character.is_ascii_uppercase() => character.to_ascii_lowercase(),
-        character => character,
-    }
-}
-
-fn single_char(value: &str) -> Option<char> {
-    let mut characters = value.chars();
-    let first = characters.next()?;
-    characters.next().is_none().then_some(first)
 }
 
 #[cfg(test)]
@@ -7788,7 +7595,7 @@ mod tests {
         let handled = pane.update(cx, |pane, cx| {
             pane.send_key_translation(
                 KeyTranslation::Unhandled(UnhandledKeyEvent {
-                    kind: NativeKeyEventKind::KeyDown,
+                    kind: TerminalKeyInputEventKind::KeyDown,
                     action: KeyAction::Press,
                     native_key_code: Some(u16::MAX),
                 }),
@@ -8108,25 +7915,6 @@ mod tests {
         }
     }
 
-    fn expected_key(
-        physical_key: PhysicalKey,
-        logical_key: &str,
-        text: Option<&str>,
-        modifiers: InputModifiers,
-    ) -> KeyInput {
-        KeyInput {
-            action: KeyAction::Press,
-            physical_key,
-            native_key_code: None,
-            logical_key: logical_key.to_owned(),
-            text: text.map(ToOwned::to_owned),
-            unshifted_codepoint: single_char(logical_key).map(unshifted_character),
-            modifiers,
-            consumed_modifiers: InputModifiers::default(),
-            option_as_alt: OptionAsAltPolicy::default(),
-        }
-    }
-
     #[test]
     fn reported_terminal_title_should_replace_the_shell_fallback() {
         assert_eq!(
@@ -8371,129 +8159,6 @@ mod tests {
         assert_eq!(
             normalized_pane_title("cargo\u{7} test", "zsh"),
             "cargo test"
-        );
-    }
-
-    #[test]
-    fn maps_printable_text_and_terminal_keys() {
-        assert_eq!(
-            encode_key(&event("a", Some("a"), Modifiers::default())),
-            KeyTranslation::Encoded(expected_key(
-                PhysicalKey::A,
-                "a",
-                Some("a"),
-                InputModifiers::default(),
-            ))
-        );
-        assert_eq!(
-            encode_key(&event("enter", None, Modifiers::default())),
-            KeyTranslation::Encoded(expected_key(
-                PhysicalKey::Enter,
-                "enter",
-                None,
-                InputModifiers::default(),
-            ))
-        );
-        assert_eq!(
-            encode_key(&event("up", None, Modifiers::default())),
-            KeyTranslation::Encoded(expected_key(
-                PhysicalKey::ArrowUp,
-                "up",
-                None,
-                InputModifiers::default(),
-            ))
-        );
-    }
-
-    #[test]
-    fn preserves_control_and_alt_for_worker_side_encoding() {
-        let modifiers = Modifiers {
-            control: true,
-            alt: true,
-            ..Modifiers::default()
-        };
-        assert_eq!(
-            encode_key(&event("c", Some("c"), modifiers)),
-            KeyTranslation::Encoded(expected_key(
-                PhysicalKey::C,
-                "c",
-                Some("c"),
-                InputModifiers {
-                    control: true,
-                    alt: true,
-                    ..InputModifiers::default()
-                },
-            ))
-        );
-    }
-
-    #[test]
-    fn control_d_should_be_sent_to_the_shell_as_eof_input() {
-        let modifiers = Modifiers {
-            control: true,
-            ..Modifiers::default()
-        };
-
-        assert_eq!(
-            encode_key(&event("d", Some("d"), modifiers)),
-            KeyTranslation::Encoded(expected_key(
-                PhysicalKey::D,
-                "d",
-                Some("d"),
-                InputModifiers {
-                    control: true,
-                    ..InputModifiers::default()
-                },
-            ))
-        );
-    }
-
-    #[test]
-    fn preserves_unbound_command_keys_for_terminal_protocol_encoding() {
-        let modifiers = Modifiers {
-            platform: true,
-            ..Modifiers::default()
-        };
-        assert_eq!(
-            encode_key(&event("q", None, modifiers)),
-            KeyTranslation::Encoded(expected_key(
-                PhysicalKey::Q,
-                "q",
-                None,
-                InputModifiers {
-                    platform: true,
-                    ..InputModifiers::default()
-                },
-            ))
-        );
-    }
-
-    #[test]
-    fn unsupported_keys_are_unhandled_without_native_identity() {
-        assert_eq!(
-            encode_key(&event("hyper", None, Modifiers::default())),
-            KeyTranslation::Unhandled(UnhandledKeyEvent {
-                kind: NativeKeyEventKind::KeyDown,
-                action: KeyAction::Press,
-                native_key_code: None,
-            })
-        );
-    }
-
-    #[test]
-    fn unsupported_command_keys_with_text_are_unhandled() {
-        let modifiers = Modifiers {
-            platform: true,
-            ..Modifiers::default()
-        };
-
-        assert_eq!(
-            encode_key(&event("hyper", Some("x"), modifiers)),
-            KeyTranslation::Unhandled(UnhandledKeyEvent {
-                kind: NativeKeyEventKind::KeyDown,
-                action: KeyAction::Press,
-                native_key_code: None,
-            })
         );
     }
 
