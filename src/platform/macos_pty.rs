@@ -1,5 +1,6 @@
-use std::env;
+use std::collections::BTreeMap;
 use std::io::{self, Read, Write};
+use std::os::fd::RawFd;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -12,6 +13,11 @@ use portable_pty::{
 };
 use thiserror::Error;
 
+use crate::platform::native_pty::{
+    NativePtyAdapter, NativePtyAdapterParts, NativePtyExit, NativePtyLaunch,
+    NativePtyOperationFailure, NativePtySize, NativePtyTermination, NativePtyWaitFailure,
+    user_shell,
+};
 use crate::platform::shell_integration::{
     ShellEnvironment, configured_mode, plan_shell_integration, resource_root,
 };
@@ -70,21 +76,43 @@ pub(crate) fn lock_real_pty_test() -> std::sync::MutexGuard<'static, ()> {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum ShutdownDisposition {
+enum ShutdownDisposition {
     NotRequested,
     Graceful,
     Forced,
 }
 
 #[derive(Debug)]
-pub(crate) struct ShellExit {
-    pub(crate) status: ExitStatus,
-    pub(crate) shutdown: ShutdownDisposition,
+struct ShellExit {
+    status: ExitStatus,
+    shutdown: ShutdownDisposition,
 }
 
 struct TerminationTarget {
     process_group: Option<i32>,
+    session: Option<ProcessSessionIdentity>,
+    known_processes: Vec<ProcessIdentity>,
     fallback: Box<dyn ChildKiller + Send + Sync>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ProcessIdentity {
+    process: i32,
+    started_seconds: u64,
+    started_microseconds: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ProcessSessionIdentity {
+    session: i32,
+    leader: ProcessIdentity,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ProcessObservation {
+    identity: ProcessIdentity,
+    process_group: i32,
+    session: i32,
 }
 
 impl TerminationTarget {
@@ -93,24 +121,62 @@ impl TerminationTarget {
     }
 
     fn hang_up(&mut self) -> io::Result<()> {
-        match self.process_group {
-            Some(process_group) => signal_process_group(process_group, libc::SIGHUP),
-            None => self.fallback.kill(),
-        }
+        self.signal_owned_process_groups(libc::SIGHUP)
     }
 
     fn force(&mut self) -> io::Result<()> {
-        match self.process_group {
-            Some(process_group) => signal_process_group(process_group, libc::SIGKILL),
-            None => self.fallback.kill(),
+        self.signal_owned_process_groups(libc::SIGKILL)
+    }
+
+    fn signal_owned_process_groups(&mut self, signal: i32) -> io::Result<()> {
+        let Some(owner_group) = self.process_group else {
+            return self.fallback.kill();
+        };
+        let Some(session) = self.session else {
+            return signal_process_group(owner_group, signal);
+        };
+        let mut process_groups = process_groups_in_session(&session)?;
+        self.remember_processes(&process_groups);
+        let owner_members = process_groups.remove(&owner_group).unwrap_or_default();
+        let mut first_error = None;
+        for (process_group, members) in process_groups {
+            if let Err(error) =
+                signal_owned_process_group(process_group, &members, &session, signal)
+            {
+                first_error.get_or_insert(error);
+            }
+        }
+        if let Err(error) =
+            signal_owned_process_group(owner_group, &owner_members, &session, signal)
+        {
+            first_error.get_or_insert(error);
+        }
+        match first_error {
+            Some(error) => Err(error),
+            None => Ok(()),
         }
     }
 
-    fn is_alive(&self) -> io::Result<bool> {
+    fn remember_processes(&mut self, process_groups: &BTreeMap<i32, Vec<ProcessIdentity>>) {
+        for identity in process_groups.values().flatten() {
+            if !self.known_processes.contains(identity) {
+                self.known_processes.push(*identity);
+            }
+        }
+    }
+
+    fn is_alive(&mut self) -> io::Result<bool> {
         let Some(process_group) = self.process_group else {
             return Ok(true);
         };
-        process_group_is_alive(process_group)
+        match self.session {
+            Some(session) => {
+                let process_groups = process_groups_in_session(&session)?;
+                self.remember_processes(&process_groups);
+                Ok(!process_groups.is_empty())
+            }
+            None => process_group_is_alive(process_group),
+        }
     }
 }
 
@@ -121,10 +187,30 @@ struct ChildTermination {
 }
 
 impl ChildTermination {
+    #[cfg(test)]
     fn new(process_group: Option<i32>, fallback: Box<dyn ChildKiller + Send + Sync>) -> Self {
         Self {
             target: Mutex::new(Some(TerminationTarget {
                 process_group,
+                session: None,
+                known_processes: Vec::new(),
+                fallback,
+            })),
+            requested: AtomicBool::new(false),
+            forced: AtomicBool::new(false),
+        }
+    }
+
+    fn new_with_session(
+        process_group: i32,
+        session: ProcessSessionIdentity,
+        fallback: Box<dyn ChildKiller + Send + Sync>,
+    ) -> Self {
+        Self {
+            target: Mutex::new(Some(TerminationTarget {
+                process_group: Some(process_group),
+                session: Some(session),
+                known_processes: vec![session.leader],
                 fallback,
             })),
             requested: AtomicBool::new(false),
@@ -133,10 +219,13 @@ impl ChildTermination {
     }
 
     fn signal(&self) -> io::Result<()> {
-        if self.requested.swap(true, Ordering::AcqRel) {
+        if self.requested.load(Ordering::Acquire) {
             return Ok(());
         }
         let mut target = self.lock_target();
+        if self.requested.swap(true, Ordering::AcqRel) {
+            return Ok(());
+        }
         match target.as_mut() {
             Some(target) => target.hang_up(),
             None => Ok(()),
@@ -157,30 +246,45 @@ impl ChildTermination {
         self.lock_target().take();
     }
 
-    fn complete_process_group(&self, graceful_deadline: Instant) -> ShutdownDisposition {
+    fn complete_process_group(
+        &self,
+        graceful_deadline: Instant,
+    ) -> io::Result<ShutdownDisposition> {
+        let mut target_slot = self.lock_target();
         if !self.requested.load(Ordering::Acquire) {
-            self.revoke();
-            return ShutdownDisposition::NotRequested;
+            // A queued close may reach the termination supervisor after the session leader is
+            // reaped. Keep stable session authority so that close can still find its descendants.
+            let retains_session_authority = target_slot
+                .as_ref()
+                .and_then(|target| target.session)
+                .is_some();
+            if !retains_session_authority {
+                target_slot.take();
+            }
+            return Ok(ShutdownDisposition::NotRequested);
         }
 
-        let mut target_slot = self.lock_target();
         let Some(target) = target_slot.as_mut() else {
-            return if self.forced.load(Ordering::Acquire) {
+            return Ok(if self.forced.load(Ordering::Acquire) {
                 ShutdownDisposition::Forced
             } else {
                 ShutdownDisposition::Graceful
-            };
+            });
         };
         if !target.owns_process_group() {
             target_slot.take();
-            return ShutdownDisposition::Graceful;
+            return Ok(ShutdownDisposition::Graceful);
         }
 
         while Instant::now() < graceful_deadline {
             match target.is_alive() {
                 Ok(false) => {
                     target_slot.take();
-                    return ShutdownDisposition::Graceful;
+                    return Ok(if self.forced.load(Ordering::Acquire) {
+                        ShutdownDisposition::Forced
+                    } else {
+                        ShutdownDisposition::Graceful
+                    });
                 }
                 Ok(true) => thread::sleep(CHILD_EXIT_POLL_INTERVAL),
                 Err(error) => {
@@ -190,12 +294,9 @@ impl ChildTermination {
             }
         }
 
-        if let Err(error) = target.force() {
-            eprintln!("failed to force shell process group shutdown: {error}");
-        }
+        target.force()?;
         self.forced.store(true, Ordering::Release);
-        target_slot.take();
-        ShutdownDisposition::Forced
+        Ok(ShutdownDisposition::Forced)
     }
 
     fn requested(&self) -> bool {
@@ -229,11 +330,139 @@ fn process_group_is_alive(process_group: i32) -> io::Result<bool> {
     }
 }
 
+fn process_groups_in_session(
+    session: &ProcessSessionIdentity,
+) -> io::Result<BTreeMap<i32, Vec<ProcessIdentity>>> {
+    let leader = observe_process(session.session);
+    if leader.is_some_and(|leader| {
+        leader.identity != session.leader || leader.session != session.session
+    }) {
+        return Ok(BTreeMap::new());
+    }
+
+    let mut process_groups = BTreeMap::<_, Vec<_>>::new();
+    for process in all_process_ids()?
+        .into_iter()
+        .filter(|process| *process > 0)
+    {
+        let Some(observation) = observe_process(process) else {
+            continue;
+        };
+        if observation.session != session.session {
+            continue;
+        }
+        process_groups
+            .entry(observation.process_group)
+            .or_default()
+            .push(observation.identity);
+    }
+    Ok(process_groups)
+}
+
+fn signal_owned_process_group(
+    process_group: i32,
+    members: &[ProcessIdentity],
+    session: &ProcessSessionIdentity,
+    signal: i32,
+) -> io::Result<()> {
+    let still_owned = members.iter().any(|member| {
+        observe_process(member.process).is_some_and(|observation| {
+            observation.identity == *member
+                && observation.process_group == process_group
+                && observation.session == session.session
+        })
+    });
+    if still_owned {
+        signal_process_group(process_group, signal)
+    } else {
+        Ok(())
+    }
+}
+
+fn observe_process(process: i32) -> Option<ProcessObservation> {
+    let before = process_bsd_info(process)?;
+    // SAFETY: getsid performs a read-only process identity query.
+    let session = unsafe { libc::getsid(process) };
+    if session < 1 {
+        return None;
+    }
+    let after = process_bsd_info(process)?;
+    let before_identity = process_identity(&before)?;
+    let after_identity = process_identity(&after)?;
+    if before_identity != after_identity
+        || before.pbi_pgid != after.pbi_pgid
+        || before.e_tdev != after.e_tdev
+    {
+        return None;
+    }
+    Some(ProcessObservation {
+        identity: after_identity,
+        process_group: i32::try_from(after.pbi_pgid).ok()?,
+        session,
+    })
+}
+
+fn process_bsd_info(process: i32) -> Option<libc::proc_bsdinfo> {
+    let mut info = std::mem::MaybeUninit::<libc::proc_bsdinfo>::zeroed();
+    let expected = i32::try_from(std::mem::size_of::<libc::proc_bsdinfo>()).ok()?;
+    let read = unsafe {
+        libc::proc_pidinfo(
+            process,
+            libc::PROC_PIDTBSDINFO,
+            0,
+            info.as_mut_ptr().cast::<libc::c_void>(),
+            expected,
+        )
+    };
+    if read != expected {
+        return None;
+    }
+    // SAFETY: proc_pidinfo initialized the complete proc_bsdinfo structure.
+    Some(unsafe { info.assume_init() })
+}
+
+fn process_identity(info: &libc::proc_bsdinfo) -> Option<ProcessIdentity> {
+    Some(ProcessIdentity {
+        process: i32::try_from(info.pbi_pid).ok()?,
+        started_seconds: info.pbi_start_tvsec,
+        started_microseconds: info.pbi_start_tvusec,
+    })
+}
+
+fn all_process_ids() -> io::Result<Vec<i32>> {
+    let process_count = unsafe { libc::proc_listallpids(std::ptr::null_mut(), 0) };
+    if process_count < 1 {
+        return Err(io::Error::other("failed to size the macOS process list"));
+    }
+    let mut capacity = process_count as usize + 64;
+    loop {
+        let mut process_ids = vec![0_i32; capacity];
+        let buffer_size = capacity
+            .checked_mul(std::mem::size_of::<i32>())
+            .and_then(|size| i32::try_from(size).ok())
+            .ok_or_else(|| io::Error::other("process-list buffer size overflowed"))?;
+        let listed = unsafe {
+            libc::proc_listallpids(process_ids.as_mut_ptr().cast::<libc::c_void>(), buffer_size)
+        };
+        if listed < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        if listed as usize >= capacity {
+            capacity = capacity
+                .checked_mul(2)
+                .ok_or_else(|| io::Error::other("process-list capacity overflowed"))?;
+            continue;
+        }
+        process_ids.truncate(listed as usize);
+        return Ok(process_ids);
+    }
+}
+
 fn child_already_reaped_error() -> io::Error {
     io::Error::new(io::ErrorKind::NotFound, "shell process was already reaped")
 }
 
-pub(crate) struct PtyTerminator {
+struct PtyTerminator {
     termination: Arc<ChildTermination>,
 }
 
@@ -242,12 +471,12 @@ impl PtyTerminator {
         Self { termination }
     }
 
-    pub(crate) fn terminate(&self) -> io::Result<()> {
+    fn terminate(&self) -> io::Result<()> {
         self.termination.signal()
     }
 }
 
-pub(crate) struct SpawnedPty {
+struct SpawnedPty {
     master: Box<dyn MasterPty + Send>,
     reader: Option<Box<dyn Read + Send>>,
     writer: Box<dyn Write + Send>,
@@ -256,17 +485,17 @@ pub(crate) struct SpawnedPty {
 }
 
 impl SpawnedPty {
-    pub(crate) fn take_reader(&mut self) -> io::Result<Box<dyn Read + Send>> {
+    fn take_reader(&mut self) -> io::Result<Box<dyn Read + Send>> {
         self.reader
             .take()
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "PTY reader was already taken"))
     }
 
-    pub(crate) fn resize(&self, size: PtySize) -> Result<(), AnyError> {
+    fn resize(&self, size: PtySize) -> Result<(), AnyError> {
         self.master.resize(size)
     }
 
-    pub(crate) fn hidden_input(&self) -> io::Result<bool> {
+    fn hidden_input(&self) -> io::Result<bool> {
         let descriptor = self
             .master
             .as_raw_fd()
@@ -274,13 +503,13 @@ impl SpawnedPty {
         read_termios(descriptor).map(|termios| termios_hidden_input(&termios))
     }
 
-    pub(crate) fn wait_for_child(&mut self, timeout: Duration) -> io::Result<ShellExit> {
+    fn wait_for_child(&mut self, timeout: Duration) -> io::Result<ShellExit> {
         let deadline = Instant::now() + timeout;
         loop {
             if let Some(status) = self.try_wait_for_child()? {
                 let shutdown = self
                     .termination
-                    .complete_process_group(Instant::now() + GRACEFUL_SHUTDOWN_TIMEOUT);
+                    .complete_process_group(Instant::now() + GRACEFUL_SHUTDOWN_TIMEOUT)?;
                 return Ok(ShellExit { status, shutdown });
             }
 
@@ -312,13 +541,24 @@ impl SpawnedPty {
     fn cleanup_child(&mut self) {
         let child = self.child.take();
         let Some(mut child) = child else {
+            if self.termination.requested()
+                && let Err(error) = self
+                    .termination
+                    .complete_process_group(Instant::now() + GRACEFUL_SHUTDOWN_TIMEOUT)
+            {
+                eprintln!("failed to retry shell process group shutdown: {error}");
+            }
             return;
         };
 
         match child.try_wait() {
             Ok(Some(_)) => {
-                self.termination
-                    .complete_process_group(Instant::now() + GRACEFUL_SHUTDOWN_TIMEOUT);
+                if let Err(error) = self
+                    .termination
+                    .complete_process_group(Instant::now() + GRACEFUL_SHUTDOWN_TIMEOUT)
+                {
+                    eprintln!("failed to complete shell process group shutdown: {error}");
+                }
                 return;
             }
             Ok(None) => {}
@@ -339,7 +579,7 @@ impl SpawnedPty {
 
         if let Err(error) = child.kill() {
             eprintln!("failed to terminate shell process during cleanup: {error}");
-            Self::report_child_after_failed_termination(child.as_mut());
+            Self::reap_after_failed_termination(child.as_mut());
             return;
         }
 
@@ -357,14 +597,29 @@ impl SpawnedPty {
 
         let graceful_deadline = Instant::now() + GRACEFUL_SHUTDOWN_TIMEOUT;
         if Self::poll_child_until(child, graceful_deadline) {
-            self.termination.complete_process_group(graceful_deadline);
+            if let Err(error) = self.termination.complete_process_group(graceful_deadline) {
+                eprintln!("failed to complete shell process group shutdown: {error}");
+            }
             return;
         }
 
-        self.termination.complete_process_group(graceful_deadline);
+        if let Err(error) = self.termination.complete_process_group(graceful_deadline) {
+            eprintln!("failed to force shell process group shutdown: {error}");
+            if let Err(kill_error) = child.kill() {
+                eprintln!(
+                    "failed to terminate shell process after process-group shutdown failed: {kill_error}"
+                );
+            }
+        }
         let forced_deadline = Instant::now() + FORCED_SHUTDOWN_TIMEOUT;
         if !Self::poll_child_until(child, forced_deadline) {
             eprintln!("shell process did not become reapable after forced process-group shutdown");
+            if let Err(error) = child.wait() {
+                eprintln!("failed to reap shell process after bounded shutdown: {error}");
+            }
+        }
+        if let Err(error) = self.termination.complete_process_group(Instant::now()) {
+            eprintln!("failed to retry shell process group shutdown: {error}");
         }
     }
 
@@ -386,16 +641,19 @@ impl SpawnedPty {
         }
     }
 
-    fn report_child_after_failed_termination(child: &mut dyn Child) {
+    fn reap_after_failed_termination(child: &mut dyn Child) {
         match child.try_wait() {
             Ok(Some(_)) => {}
             Ok(None) => {
-                eprintln!(
-                    "shell process is still running after termination failed; it could not be reaped"
-                );
+                if let Err(error) = child.wait() {
+                    eprintln!("failed to reap shell process after termination failed: {error}");
+                }
             }
             Err(error) => {
                 eprintln!("failed to recheck shell process after termination failed: {error}");
+                if let Err(wait_error) = child.wait() {
+                    eprintln!("failed to reap shell process after inspection failed: {wait_error}");
+                }
             }
         }
     }
@@ -411,6 +669,46 @@ impl Write for SpawnedPty {
     }
 }
 
+impl NativePtyAdapter for SpawnedPty {
+    fn take_reader(&mut self) -> io::Result<Box<dyn Read + Send>> {
+        Self::take_reader(self)
+    }
+
+    fn resize(&self, size: NativePtySize) -> Result<(), NativePtyOperationFailure> {
+        Self::resize(self, portable_size(size))
+            .map_err(|error| NativePtyOperationFailure::new(error.to_string()))
+    }
+
+    fn hidden_input(&self) -> Result<bool, NativePtyOperationFailure> {
+        Self::hidden_input(self).map_err(|error| NativePtyOperationFailure::new(error.to_string()))
+    }
+
+    fn wait_for_exit(&mut self, timeout: Duration) -> Result<NativePtyExit, NativePtyWaitFailure> {
+        let exit = self
+            .wait_for_child(timeout)
+            .map_err(|error| NativePtyWaitFailure::new(error.to_string()))?;
+        Ok(native_exit(exit))
+    }
+}
+
+fn native_exit(exit: ShellExit) -> NativePtyExit {
+    match exit.shutdown {
+        ShutdownDisposition::Graceful => NativePtyExit::GracefulShutdown,
+        ShutdownDisposition::Forced => NativePtyExit::ForcedShutdown,
+        ShutdownDisposition::NotRequested => match exit.status.signal() {
+            Some(signal) => NativePtyExit::Signal(signal.to_owned()),
+            None if exit.status.success() => NativePtyExit::Success,
+            None => NativePtyExit::ExitCode(exit.status.exit_code()),
+        },
+    }
+}
+
+impl NativePtyTermination for PtyTerminator {
+    fn request_termination(&self) -> io::Result<()> {
+        self.terminate()
+    }
+}
+
 impl Drop for SpawnedPty {
     fn drop(&mut self) {
         self.cleanup_child();
@@ -418,7 +716,7 @@ impl Drop for SpawnedPty {
 }
 
 #[derive(Debug, Error)]
-pub(crate) enum PtyError {
+pub(super) enum PtyError {
     #[error("Workspace working directory {} is unavailable: {source}", path.display())]
     WorkingDirectory {
         path: PathBuf,
@@ -443,6 +741,10 @@ pub(crate) enum PtyError {
     },
     #[error("the shell process did not expose its process-group identifier")]
     MissingProcessGroup,
+    #[error("failed to identify the shell process session: {0}")]
+    InspectSession(#[source] io::Error),
+    #[error("the shell process did not establish an isolated process session")]
+    UnisolatedSession,
     #[error("failed to clone the pseudo-terminal reader: {0}")]
     CloneReader(#[source] AnyError),
     #[error("failed to acquire the pseudo-terminal writer: {0}")]
@@ -451,7 +753,7 @@ pub(crate) enum PtyError {
     SshChannelUnavailable,
 }
 
-pub(crate) fn spawn_user_shell(
+fn spawn_user_shell(
     size: PtySize,
     working_directory: &Path,
 ) -> Result<(SpawnedPty, PtyTerminator), PtyError> {
@@ -461,7 +763,7 @@ pub(crate) fn spawn_user_shell(
     spawn_command_in_pty(size, command, &shell)
 }
 
-pub(crate) fn spawn_remote_pane_channel(
+fn spawn_remote_pane_channel(
     size: PtySize,
     local_home: &Path,
     command: SshCommandSpec,
@@ -469,6 +771,34 @@ pub(crate) fn spawn_remote_pane_channel(
     validate_working_directory(local_home)?;
     let command = build_remote_pane_command(command, local_home)?;
     spawn_command_in_pty(size, command, "/usr/bin/ssh")
+}
+
+pub(super) fn spawn_native_pty(
+    launch: NativePtyLaunch,
+    size: NativePtySize,
+) -> Result<NativePtyAdapterParts, PtyError> {
+    let (pty, termination) = match launch {
+        NativePtyLaunch::Local { working_directory } => {
+            spawn_user_shell(portable_size(size), &working_directory)?
+        }
+        NativePtyLaunch::Remote {
+            local_home,
+            command,
+        } => spawn_remote_pane_channel(portable_size(size), &local_home, command)?,
+    };
+    Ok(NativePtyAdapterParts {
+        adapter: Box::new(pty),
+        termination: Arc::new(termination),
+    })
+}
+
+const fn portable_size(size: NativePtySize) -> PtySize {
+    PtySize {
+        rows: size.rows,
+        cols: size.columns,
+        pixel_width: size.pixel_width,
+        pixel_height: size.pixel_height,
+    }
 }
 
 fn spawn_command_in_pty(
@@ -513,8 +843,23 @@ fn spawn_command_in_pty(
         terminate_after_startup_failure(child.as_mut());
         return Err(PtyError::MissingProcessGroup);
     };
-    let termination = Arc::new(ChildTermination::new(
-        Some(process_group),
+    let Some(observation) = observe_process(process_group) else {
+        terminate_after_startup_failure(child.as_mut());
+        return Err(PtyError::InspectSession(io::Error::other(
+            "the child process identity was unavailable",
+        )));
+    };
+    if observation.session != process_group || observation.process_group != process_group {
+        terminate_after_startup_failure(child.as_mut());
+        return Err(PtyError::UnisolatedSession);
+    }
+    let session = ProcessSessionIdentity {
+        session: observation.session,
+        leader: observation.identity,
+    };
+    let termination = Arc::new(ChildTermination::new_with_session(
+        process_group,
+        session,
         child.clone_killer(),
     ));
     let terminator = PtyTerminator::new(Arc::clone(&termination));
@@ -542,7 +887,7 @@ fn initialize_pty(master: &dyn MasterPty, size: PtySize) -> Result<(), PtyError>
     master.resize(size).map_err(PtyError::InitialResize)
 }
 
-fn read_termios(descriptor: std::os::fd::RawFd) -> io::Result<libc::termios> {
+fn read_termios(descriptor: RawFd) -> io::Result<libc::termios> {
     let mut termios = std::mem::MaybeUninit::<libc::termios>::uninit();
     // SAFETY: descriptor is a live PTY master and termios points to writable storage.
     if unsafe { libc::tcgetattr(descriptor, termios.as_mut_ptr()) } == -1 {
@@ -638,13 +983,6 @@ fn apply_terminal_identity(command: &mut CommandBuilder, resources: &Path) {
     command.env("SPACETERM", "1");
 }
 
-pub(crate) fn user_shell() -> String {
-    env::var("SHELL")
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| "/bin/zsh".to_owned())
-}
-
 #[cfg(test)]
 pub(crate) fn conformance_initialization_observation() -> String {
     let command = build_shell_command_with_resources(
@@ -705,7 +1043,9 @@ pub(crate) fn conformance_shutdown_observation() -> String {
     let termination = ChildTermination::new(None, Box::new(CountingKiller(Arc::clone(&kills))));
     let first = termination.signal().is_ok();
     let second = termination.signal().is_ok();
-    let disposition = termination.complete_process_group(Instant::now());
+    let disposition = termination
+        .complete_process_group(Instant::now())
+        .expect("the fake child killer should complete shutdown");
     format!(
         "first={first} duplicate={second} signals={} disposition={disposition:?} revoked={}",
         kills.load(Ordering::Relaxed),
@@ -726,6 +1066,7 @@ fn terminate_after_startup_failure(child: &mut dyn Child) {
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+    use std::env;
     use std::fmt;
     use std::io::{self, BufRead, BufReader};
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -739,6 +1080,69 @@ mod tests {
     use crate::ssh::command::{
         RemotePaneShellCommandBuilder, SshCommandContext, ValidatedRemoteLoginShell,
     };
+
+    #[test]
+    fn platform_neutral_size_preserves_rows_columns_and_pixels() {
+        assert_eq!(
+            portable_size(NativePtySize {
+                rows: 31,
+                columns: 97,
+                pixel_width: 1_164,
+                pixel_height: 620,
+            }),
+            PtySize {
+                rows: 31,
+                cols: 97,
+                pixel_width: 1_164,
+                pixel_height: 620,
+            }
+        );
+    }
+
+    #[test]
+    fn platform_neutral_exit_preserves_status_and_shutdown_classification() {
+        let cases = [
+            (
+                ShellExit {
+                    status: ExitStatus::with_exit_code(0),
+                    shutdown: ShutdownDisposition::NotRequested,
+                },
+                NativePtyExit::Success,
+            ),
+            (
+                ShellExit {
+                    status: ExitStatus::with_exit_code(23),
+                    shutdown: ShutdownDisposition::NotRequested,
+                },
+                NativePtyExit::ExitCode(23),
+            ),
+            (
+                ShellExit {
+                    status: ExitStatus::with_signal("TERM"),
+                    shutdown: ShutdownDisposition::NotRequested,
+                },
+                NativePtyExit::Signal("TERM".to_owned()),
+            ),
+            (
+                ShellExit {
+                    status: ExitStatus::with_exit_code(0),
+                    shutdown: ShutdownDisposition::Graceful,
+                },
+                NativePtyExit::GracefulShutdown,
+            ),
+            (
+                ShellExit {
+                    status: ExitStatus::with_exit_code(0),
+                    shutdown: ShutdownDisposition::Forced,
+                },
+                NativePtyExit::ForcedShutdown,
+            ),
+        ];
+
+        for (exit, expected) in cases {
+            assert_eq!(native_exit(exit), expected);
+        }
+    }
 
     #[test]
     fn hidden_input_requires_canonical_mode_without_echo() {
@@ -987,6 +1391,249 @@ mod tests {
     }
 
     #[test]
+    fn interactive_foreground_process_group_should_be_forced_down_with_its_shell() {
+        let _isolation = lock_real_pty_test();
+        let working_directory = env::current_dir().unwrap();
+        let mut command = CommandBuilder::new("/bin/zsh");
+        command.args(["-f", "-i"]);
+        command.cwd(&working_directory);
+        command.env("PS1", "SPACETERM_READY ");
+        let (mut pty, terminator) = spawn_command_in_pty(
+            PtySize {
+                rows: 24,
+                cols: 80,
+                pixel_width: 640,
+                pixel_height: 480,
+            },
+            command,
+            "interactive foreground process group",
+        )
+        .unwrap();
+        let mut reader = BufReader::new(pty.take_reader().unwrap());
+        read_output_marker(&mut reader, b"SPACETERM_READY");
+        pty.write_all(
+            b"sh -c 'trap \"\" HUP; sleep 30 & child=$!; echo SPACETERM_FOREGROUND leader=$$ child=$child; wait'\n",
+        )
+        .unwrap();
+        pty.flush().unwrap();
+
+        let (leader, child) = read_process_report(&mut reader, "SPACETERM_FOREGROUND");
+        let shell_process_group = pty
+            .termination
+            .lock_target()
+            .as_ref()
+            .and_then(|target| target.process_group)
+            .unwrap();
+        assert_ne!(leader, shell_process_group);
+        let drain = thread::spawn(move || {
+            let mut sink = io::sink();
+            io::copy(&mut reader, &mut sink)
+        });
+
+        terminator.terminate().unwrap();
+        pty.cleanup_child();
+        assert!(pty.termination.forced.load(Ordering::Acquire));
+        drop(pty);
+        drain.join().unwrap().unwrap();
+
+        assert_process_disappears(leader);
+        assert_process_disappears(child);
+    }
+
+    #[test]
+    fn interactive_background_process_group_should_be_forced_down_with_its_shell() {
+        let _isolation = lock_real_pty_test();
+        let working_directory = env::current_dir().unwrap();
+        let readiness = env::temp_dir().join(format!(
+            "spaceterm-background-pty-ready-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&readiness);
+        let mut command = CommandBuilder::new("/bin/zsh");
+        command.args(["-f", "-i"]);
+        command.cwd(&working_directory);
+        command.env("PS1", "SPACETERM_READY ");
+        command.env("SPACETERM_BACKGROUND_READY", &readiness);
+        let (mut pty, terminator) = spawn_command_in_pty(
+            PtySize {
+                rows: 24,
+                cols: 80,
+                pixel_width: 640,
+                pixel_height: 480,
+            },
+            command,
+            "interactive background process group",
+        )
+        .unwrap();
+        let mut reader = BufReader::new(pty.take_reader().unwrap());
+        read_output_marker(&mut reader, b"SPACETERM_READY");
+        pty.write_all(
+            b"sh -c 'trap \"\" HUP; : > \"$SPACETERM_BACKGROUND_READY\"; while :; do sleep 1; done' & background=$!; while [ ! -f \"$SPACETERM_BACKGROUND_READY\" ]; do sleep 0.01; done; echo SPACETERM_BACKGROUND leader=$background child=$background\n",
+        )
+        .unwrap();
+        pty.flush().unwrap();
+
+        let (leader, child) = read_process_report(&mut reader, "SPACETERM_BACKGROUND");
+        std::fs::remove_file(&readiness).unwrap();
+        let shell_process_group = pty
+            .termination
+            .lock_target()
+            .as_ref()
+            .and_then(|target| target.process_group)
+            .unwrap();
+        assert_ne!(leader, shell_process_group);
+        let session = pty
+            .termination
+            .lock_target()
+            .as_ref()
+            .and_then(|target| target.session)
+            .unwrap();
+        assert!(
+            process_groups_in_session(&session)
+                .unwrap()
+                .contains_key(&leader)
+        );
+        let drain = thread::spawn(move || {
+            let mut sink = io::sink();
+            io::copy(&mut reader, &mut sink)
+        });
+
+        terminator.terminate().unwrap();
+        pty.cleanup_child();
+        assert!(pty.termination.forced.load(Ordering::Acquire));
+        drop(pty);
+        drain.join().unwrap().unwrap();
+
+        assert_process_disappears(leader);
+        assert_process_disappears(child);
+    }
+
+    #[test]
+    fn hup_handler_process_handoff_should_be_forced_down_with_its_shell() {
+        let _isolation = lock_real_pty_test();
+        let working_directory = env::current_dir().unwrap();
+        let readiness = env::temp_dir().join(format!(
+            "spaceterm-handoff-pty-ready-{}",
+            std::process::id()
+        ));
+        let replacement_report = env::temp_dir().join(format!(
+            "spaceterm-handoff-pty-child-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&readiness);
+        let _ = std::fs::remove_file(&replacement_report);
+        let mut command = CommandBuilder::new("/bin/zsh");
+        command.args(["-f", "-i"]);
+        command.cwd(&working_directory);
+        command.env("PS1", "SPACETERM_READY ");
+        command.env("SPACETERM_HANDOFF_READY", &readiness);
+        command.env("SPACETERM_HANDOFF_CHILD", &replacement_report);
+        command.env(
+            "SPACETERM_HANDOFF_TRAP",
+            "trap '' HUP; sleep 30 & echo $! > \"$SPACETERM_HANDOFF_CHILD\"; exit 0",
+        );
+        let (mut pty, terminator) = spawn_command_in_pty(
+            PtySize {
+                rows: 24,
+                cols: 80,
+                pixel_width: 640,
+                pixel_height: 480,
+            },
+            command,
+            "HUP handler process handoff",
+        )
+        .unwrap();
+        let mut reader = BufReader::new(pty.take_reader().unwrap());
+        read_output_marker(&mut reader, b"SPACETERM_READY");
+        pty.write_all(
+            b"sh -c 'trap \"$SPACETERM_HANDOFF_TRAP\" HUP; : > \"$SPACETERM_HANDOFF_READY\"; while :; do sleep 1; done' & background=$!; while [ ! -f \"$SPACETERM_HANDOFF_READY\" ]; do sleep 0.01; done; echo SPACETERM_HANDOFF leader=$background child=$background\n",
+        )
+        .unwrap();
+        pty.flush().unwrap();
+
+        let (leader, _) = read_process_report(&mut reader, "SPACETERM_HANDOFF");
+        std::fs::remove_file(&readiness).unwrap();
+        let drain = thread::spawn(move || {
+            let mut sink = io::sink();
+            io::copy(&mut reader, &mut sink)
+        });
+
+        terminator.terminate().unwrap();
+        pty.cleanup_child();
+        assert!(pty.termination.forced.load(Ordering::Acquire));
+        drop(pty);
+        drain.join().unwrap().unwrap();
+
+        let replacement = std::fs::read_to_string(&replacement_report)
+            .unwrap()
+            .trim()
+            .parse::<i32>()
+            .unwrap();
+        std::fs::remove_file(&replacement_report).unwrap();
+        assert_ne!(replacement, leader);
+        assert_process_disappears(leader);
+        assert_process_disappears(replacement);
+    }
+
+    #[test]
+    fn close_after_session_leader_exit_should_terminate_surviving_group() {
+        let _isolation = lock_real_pty_test();
+        let working_directory = env::current_dir().unwrap();
+        let mut command = CommandBuilder::new("/bin/sh");
+        command.args([
+            "-c",
+            "trap '' HUP TERM; sleep 30 </dev/null >/dev/null 2>&1 & child=$!; echo SPACETERM_LATE_CLOSE leader=$$ child=$child",
+        ]);
+        command.cwd(&working_directory);
+        let (mut pty, terminator) = spawn_command_in_pty(
+            PtySize {
+                rows: 24,
+                cols: 80,
+                pixel_width: 640,
+                pixel_height: 480,
+            },
+            command,
+            "late close after session leader exit",
+        )
+        .unwrap();
+        let mut reader = BufReader::new(pty.take_reader().unwrap());
+        let (leader, child) = read_process_report(&mut reader, "SPACETERM_LATE_CLOSE");
+        drop(reader);
+        let session = pty
+            .termination
+            .lock_target()
+            .as_ref()
+            .and_then(|target| target.session)
+            .unwrap();
+
+        let exit = pty.wait_for_child(Duration::from_secs(1)).unwrap();
+        assert_eq!(exit.shutdown, ShutdownDisposition::NotRequested);
+        let child_identity = observe_process(child).unwrap().identity;
+
+        terminator.terminate().unwrap();
+        pty.cleanup_child();
+        drop(pty);
+
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let disappeared = loop {
+            if !observe_process(child).is_some_and(|process| process.identity == child_identity) {
+                break true;
+            }
+            if Instant::now() >= deadline {
+                let _ =
+                    signal_owned_process_group(leader, &[child_identity], &session, libc::SIGKILL);
+                break false;
+            }
+            thread::sleep(CHILD_EXIT_POLL_INTERVAL);
+        };
+
+        assert!(
+            disappeared,
+            "process {child} survived close after leader {leader} exited"
+        );
+    }
+
+    #[test]
     fn responsive_process_group_should_finish_during_the_grace_window() {
         let _isolation = lock_real_pty_test();
         let working_directory = env::current_dir().unwrap();
@@ -1043,6 +1690,41 @@ mod tests {
                 "process {process} remained after process-group shutdown"
             );
             thread::sleep(CHILD_EXIT_POLL_INTERVAL);
+        }
+    }
+
+    fn read_process_report(reader: &mut impl BufRead, marker: &str) -> (i32, i32) {
+        let mut report = String::new();
+        loop {
+            report.clear();
+            let read = reader.read_line(&mut report).unwrap();
+            assert_ne!(read, 0, "PTY closed before {marker} was reported");
+            let fields: HashMap<_, _> = report
+                .split_whitespace()
+                .skip_while(|field| *field != marker)
+                .skip(1)
+                .filter_map(|field| field.split_once('='))
+                .collect();
+            let parsed = fields
+                .get("leader")
+                .and_then(|leader| leader.parse::<i32>().ok())
+                .zip(
+                    fields
+                        .get("child")
+                        .and_then(|child| child.parse::<i32>().ok()),
+                );
+            if let Some(ids) = parsed {
+                return ids;
+            }
+        }
+    }
+
+    fn read_output_marker(reader: &mut impl Read, marker: &[u8]) {
+        let mut observed = Vec::new();
+        while !observed.ends_with(marker) {
+            let mut byte = [0_u8; 1];
+            reader.read_exact(&mut byte).unwrap();
+            observed.push(byte[0]);
         }
     }
 
