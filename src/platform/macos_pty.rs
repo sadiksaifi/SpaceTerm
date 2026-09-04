@@ -252,7 +252,15 @@ impl ChildTermination {
     ) -> io::Result<ShutdownDisposition> {
         let mut target_slot = self.lock_target();
         if !self.requested.load(Ordering::Acquire) {
-            target_slot.take();
+            // A queued close may reach the termination supervisor after the session leader is
+            // reaped. Keep stable session authority so that close can still find its descendants.
+            let retains_session_authority = target_slot
+                .as_ref()
+                .and_then(|target| target.session)
+                .is_some();
+            if !retains_session_authority {
+                target_slot.take();
+            }
             return Ok(ShutdownDisposition::NotRequested);
         }
 
@@ -1565,6 +1573,64 @@ mod tests {
         assert_ne!(replacement, leader);
         assert_process_disappears(leader);
         assert_process_disappears(replacement);
+    }
+
+    #[test]
+    fn close_after_session_leader_exit_should_terminate_surviving_group() {
+        let _isolation = lock_real_pty_test();
+        let working_directory = env::current_dir().unwrap();
+        let mut command = CommandBuilder::new("/bin/sh");
+        command.args([
+            "-c",
+            "trap '' HUP TERM; sleep 30 </dev/null >/dev/null 2>&1 & child=$!; echo SPACETERM_LATE_CLOSE leader=$$ child=$child",
+        ]);
+        command.cwd(&working_directory);
+        let (mut pty, terminator) = spawn_command_in_pty(
+            PtySize {
+                rows: 24,
+                cols: 80,
+                pixel_width: 640,
+                pixel_height: 480,
+            },
+            command,
+            "late close after session leader exit",
+        )
+        .unwrap();
+        let mut reader = BufReader::new(pty.take_reader().unwrap());
+        let (leader, child) = read_process_report(&mut reader, "SPACETERM_LATE_CLOSE");
+        drop(reader);
+        let session = pty
+            .termination
+            .lock_target()
+            .as_ref()
+            .and_then(|target| target.session)
+            .unwrap();
+
+        let exit = pty.wait_for_child(Duration::from_secs(1)).unwrap();
+        assert_eq!(exit.shutdown, ShutdownDisposition::NotRequested);
+        let child_identity = observe_process(child).unwrap().identity;
+
+        terminator.terminate().unwrap();
+        pty.cleanup_child();
+        drop(pty);
+
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let disappeared = loop {
+            if !observe_process(child).is_some_and(|process| process.identity == child_identity) {
+                break true;
+            }
+            if Instant::now() >= deadline {
+                let _ =
+                    signal_owned_process_group(leader, &[child_identity], &session, libc::SIGKILL);
+                break false;
+            }
+            thread::sleep(CHILD_EXIT_POLL_INTERVAL);
+        };
+
+        assert!(
+            disappeared,
+            "process {child} survived close after leader {leader} exited"
+        );
     }
 
     #[test]
