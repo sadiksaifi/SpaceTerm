@@ -20,7 +20,7 @@
 | **Pane** | A terminal region that is one leaf of exactly one Tab's Pane Layout. | Tab, split |
 | **Pane Layout** | The recursive arrangement of Panes and Splits within a Tab. | Grid, pane tree |
 | **Split** | A layout division with exactly two child Pane Layouts and a constrained size ratio. | Pane, divider |
-| **Window** | A native macOS application surface that presents SpaceTerm. | |
+| **Operating-System Window** | A native application surface that presents SpaceTerm. | Window |
 
 ## Selection and visibility
 
@@ -171,8 +171,8 @@
 - One pending **Close Confirmation** suppresses duplicate close requests; cancellation, dismissal, presentation failure, or stale target identity performs no hierarchy mutation, while confirmation authorizes the exact captured target once.
 - **Close Confirmation** initially focuses safe Cancel, never designates its destructive action as the Return-key default, and lets Return activate whichever enabled action is visibly focused.
 - Cross-hierarchy escalation after an authorized close never asks again, and automatic Terminal Session exit and internal failure cleanup bypass **Close Confirmation** because they are not user-requested closes.
-- Closing the final **Tab** closes its **Workspace** when another Workspace remains, or closes the **Window** when it is globally final.
-- Explicitly closing the final **Workspace** replaces it; escalation from its final **Tab** closes the **Window** instead.
+- Closing the final **Tab** closes its **Workspace** when another Workspace remains, or closes the **Operating-System Window** when it is globally final.
+- Explicitly closing the final **Workspace** replaces it; escalation from its final **Tab** closes the **Operating-System Window** instead.
 - No operation may leave an orphaned **PTY** or **Shell Process**.
 - Active and focused identities always reference entities still owned by their parent.
 
