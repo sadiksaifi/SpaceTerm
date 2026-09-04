@@ -1,4 +1,6 @@
+use std::collections::BTreeMap;
 use std::io::{self, Read, Write};
+use std::os::fd::RawFd;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -88,7 +90,29 @@ struct ShellExit {
 
 struct TerminationTarget {
     process_group: Option<i32>,
+    session: Option<ProcessSessionIdentity>,
+    known_processes: Vec<ProcessIdentity>,
     fallback: Box<dyn ChildKiller + Send + Sync>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ProcessIdentity {
+    process: i32,
+    started_seconds: u64,
+    started_microseconds: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ProcessSessionIdentity {
+    session: i32,
+    leader: ProcessIdentity,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ProcessObservation {
+    identity: ProcessIdentity,
+    process_group: i32,
+    session: i32,
 }
 
 impl TerminationTarget {
@@ -97,24 +121,62 @@ impl TerminationTarget {
     }
 
     fn hang_up(&mut self) -> io::Result<()> {
-        match self.process_group {
-            Some(process_group) => signal_process_group(process_group, libc::SIGHUP),
-            None => self.fallback.kill(),
-        }
+        self.signal_owned_process_groups(libc::SIGHUP)
     }
 
     fn force(&mut self) -> io::Result<()> {
-        match self.process_group {
-            Some(process_group) => signal_process_group(process_group, libc::SIGKILL),
-            None => self.fallback.kill(),
+        self.signal_owned_process_groups(libc::SIGKILL)
+    }
+
+    fn signal_owned_process_groups(&mut self, signal: i32) -> io::Result<()> {
+        let Some(owner_group) = self.process_group else {
+            return self.fallback.kill();
+        };
+        let Some(session) = self.session else {
+            return signal_process_group(owner_group, signal);
+        };
+        let mut process_groups = process_groups_in_session(&session)?;
+        self.remember_processes(&process_groups);
+        let owner_members = process_groups.remove(&owner_group).unwrap_or_default();
+        let mut first_error = None;
+        for (process_group, members) in process_groups {
+            if let Err(error) =
+                signal_owned_process_group(process_group, &members, &session, signal)
+            {
+                first_error.get_or_insert(error);
+            }
+        }
+        if let Err(error) =
+            signal_owned_process_group(owner_group, &owner_members, &session, signal)
+        {
+            first_error.get_or_insert(error);
+        }
+        match first_error {
+            Some(error) => Err(error),
+            None => Ok(()),
         }
     }
 
-    fn is_alive(&self) -> io::Result<bool> {
+    fn remember_processes(&mut self, process_groups: &BTreeMap<i32, Vec<ProcessIdentity>>) {
+        for identity in process_groups.values().flatten() {
+            if !self.known_processes.contains(identity) {
+                self.known_processes.push(*identity);
+            }
+        }
+    }
+
+    fn is_alive(&mut self) -> io::Result<bool> {
         let Some(process_group) = self.process_group else {
             return Ok(true);
         };
-        process_group_is_alive(process_group)
+        match self.session {
+            Some(session) => {
+                let process_groups = process_groups_in_session(&session)?;
+                self.remember_processes(&process_groups);
+                Ok(!process_groups.is_empty())
+            }
+            None => process_group_is_alive(process_group),
+        }
     }
 }
 
@@ -125,10 +187,30 @@ struct ChildTermination {
 }
 
 impl ChildTermination {
+    #[cfg(test)]
     fn new(process_group: Option<i32>, fallback: Box<dyn ChildKiller + Send + Sync>) -> Self {
         Self {
             target: Mutex::new(Some(TerminationTarget {
                 process_group,
+                session: None,
+                known_processes: Vec::new(),
+                fallback,
+            })),
+            requested: AtomicBool::new(false),
+            forced: AtomicBool::new(false),
+        }
+    }
+
+    fn new_with_session(
+        process_group: i32,
+        session: ProcessSessionIdentity,
+        fallback: Box<dyn ChildKiller + Send + Sync>,
+    ) -> Self {
+        Self {
+            target: Mutex::new(Some(TerminationTarget {
+                process_group: Some(process_group),
+                session: Some(session),
+                known_processes: vec![session.leader],
                 fallback,
             })),
             requested: AtomicBool::new(false),
@@ -190,7 +272,11 @@ impl ChildTermination {
             match target.is_alive() {
                 Ok(false) => {
                     target_slot.take();
-                    return Ok(ShutdownDisposition::Graceful);
+                    return Ok(if self.forced.load(Ordering::Acquire) {
+                        ShutdownDisposition::Forced
+                    } else {
+                        ShutdownDisposition::Graceful
+                    });
                 }
                 Ok(true) => thread::sleep(CHILD_EXIT_POLL_INTERVAL),
                 Err(error) => {
@@ -202,7 +288,6 @@ impl ChildTermination {
 
         target.force()?;
         self.forced.store(true, Ordering::Release);
-        target_slot.take();
         Ok(ShutdownDisposition::Forced)
     }
 
@@ -234,6 +319,134 @@ fn process_group_is_alive(process_group: i32) -> io::Result<bool> {
         Some(libc::ESRCH) => Ok(false),
         Some(libc::EPERM) => Ok(true),
         _ => Err(error),
+    }
+}
+
+fn process_groups_in_session(
+    session: &ProcessSessionIdentity,
+) -> io::Result<BTreeMap<i32, Vec<ProcessIdentity>>> {
+    let leader = observe_process(session.session);
+    if leader.is_some_and(|leader| {
+        leader.identity != session.leader || leader.session != session.session
+    }) {
+        return Ok(BTreeMap::new());
+    }
+
+    let mut process_groups = BTreeMap::<_, Vec<_>>::new();
+    for process in all_process_ids()?
+        .into_iter()
+        .filter(|process| *process > 0)
+    {
+        let Some(observation) = observe_process(process) else {
+            continue;
+        };
+        if observation.session != session.session {
+            continue;
+        }
+        process_groups
+            .entry(observation.process_group)
+            .or_default()
+            .push(observation.identity);
+    }
+    Ok(process_groups)
+}
+
+fn signal_owned_process_group(
+    process_group: i32,
+    members: &[ProcessIdentity],
+    session: &ProcessSessionIdentity,
+    signal: i32,
+) -> io::Result<()> {
+    let still_owned = members.iter().any(|member| {
+        observe_process(member.process).is_some_and(|observation| {
+            observation.identity == *member
+                && observation.process_group == process_group
+                && observation.session == session.session
+        })
+    });
+    if still_owned {
+        signal_process_group(process_group, signal)
+    } else {
+        Ok(())
+    }
+}
+
+fn observe_process(process: i32) -> Option<ProcessObservation> {
+    let before = process_bsd_info(process)?;
+    // SAFETY: getsid performs a read-only process identity query.
+    let session = unsafe { libc::getsid(process) };
+    if session < 1 {
+        return None;
+    }
+    let after = process_bsd_info(process)?;
+    let before_identity = process_identity(&before)?;
+    let after_identity = process_identity(&after)?;
+    if before_identity != after_identity
+        || before.pbi_pgid != after.pbi_pgid
+        || before.e_tdev != after.e_tdev
+    {
+        return None;
+    }
+    Some(ProcessObservation {
+        identity: after_identity,
+        process_group: i32::try_from(after.pbi_pgid).ok()?,
+        session,
+    })
+}
+
+fn process_bsd_info(process: i32) -> Option<libc::proc_bsdinfo> {
+    let mut info = std::mem::MaybeUninit::<libc::proc_bsdinfo>::zeroed();
+    let expected = i32::try_from(std::mem::size_of::<libc::proc_bsdinfo>()).ok()?;
+    let read = unsafe {
+        libc::proc_pidinfo(
+            process,
+            libc::PROC_PIDTBSDINFO,
+            0,
+            info.as_mut_ptr().cast::<libc::c_void>(),
+            expected,
+        )
+    };
+    if read != expected {
+        return None;
+    }
+    // SAFETY: proc_pidinfo initialized the complete proc_bsdinfo structure.
+    Some(unsafe { info.assume_init() })
+}
+
+fn process_identity(info: &libc::proc_bsdinfo) -> Option<ProcessIdentity> {
+    Some(ProcessIdentity {
+        process: i32::try_from(info.pbi_pid).ok()?,
+        started_seconds: info.pbi_start_tvsec,
+        started_microseconds: info.pbi_start_tvusec,
+    })
+}
+
+fn all_process_ids() -> io::Result<Vec<i32>> {
+    let process_count = unsafe { libc::proc_listallpids(std::ptr::null_mut(), 0) };
+    if process_count < 1 {
+        return Err(io::Error::other("failed to size the macOS process list"));
+    }
+    let mut capacity = process_count as usize + 64;
+    loop {
+        let mut process_ids = vec![0_i32; capacity];
+        let buffer_size = capacity
+            .checked_mul(std::mem::size_of::<i32>())
+            .and_then(|size| i32::try_from(size).ok())
+            .ok_or_else(|| io::Error::other("process-list buffer size overflowed"))?;
+        let listed = unsafe {
+            libc::proc_listallpids(process_ids.as_mut_ptr().cast::<libc::c_void>(), buffer_size)
+        };
+        if listed < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        if listed as usize >= capacity {
+            capacity = capacity
+                .checked_mul(2)
+                .ok_or_else(|| io::Error::other("process-list capacity overflowed"))?;
+            continue;
+        }
+        process_ids.truncate(listed as usize);
+        return Ok(process_ids);
     }
 }
 
@@ -520,6 +733,10 @@ pub(super) enum PtyError {
     },
     #[error("the shell process did not expose its process-group identifier")]
     MissingProcessGroup,
+    #[error("failed to identify the shell process session: {0}")]
+    InspectSession(#[source] io::Error),
+    #[error("the shell process did not establish an isolated process session")]
+    UnisolatedSession,
     #[error("failed to clone the pseudo-terminal reader: {0}")]
     CloneReader(#[source] AnyError),
     #[error("failed to acquire the pseudo-terminal writer: {0}")]
@@ -618,8 +835,23 @@ fn spawn_command_in_pty(
         terminate_after_startup_failure(child.as_mut());
         return Err(PtyError::MissingProcessGroup);
     };
-    let termination = Arc::new(ChildTermination::new(
-        Some(process_group),
+    let Some(observation) = observe_process(process_group) else {
+        terminate_after_startup_failure(child.as_mut());
+        return Err(PtyError::InspectSession(io::Error::other(
+            "the child process identity was unavailable",
+        )));
+    };
+    if observation.session != process_group || observation.process_group != process_group {
+        terminate_after_startup_failure(child.as_mut());
+        return Err(PtyError::UnisolatedSession);
+    }
+    let session = ProcessSessionIdentity {
+        session: observation.session,
+        leader: observation.identity,
+    };
+    let termination = Arc::new(ChildTermination::new_with_session(
+        process_group,
+        session,
         child.clone_killer(),
     ));
     let terminator = PtyTerminator::new(Arc::clone(&termination));
@@ -647,7 +879,7 @@ fn initialize_pty(master: &dyn MasterPty, size: PtySize) -> Result<(), PtyError>
     master.resize(size).map_err(PtyError::InitialResize)
 }
 
-fn read_termios(descriptor: std::os::fd::RawFd) -> io::Result<libc::termios> {
+fn read_termios(descriptor: RawFd) -> io::Result<libc::termios> {
     let mut termios = std::mem::MaybeUninit::<libc::termios>::uninit();
     // SAFETY: descriptor is a live PTY master and termios points to writable storage.
     if unsafe { libc::tcgetattr(descriptor, termios.as_mut_ptr()) } == -1 {
@@ -1151,6 +1383,191 @@ mod tests {
     }
 
     #[test]
+    fn interactive_foreground_process_group_should_be_forced_down_with_its_shell() {
+        let _isolation = lock_real_pty_test();
+        let working_directory = env::current_dir().unwrap();
+        let mut command = CommandBuilder::new("/bin/zsh");
+        command.args(["-f", "-i"]);
+        command.cwd(&working_directory);
+        command.env("PS1", "SPACETERM_READY ");
+        let (mut pty, terminator) = spawn_command_in_pty(
+            PtySize {
+                rows: 24,
+                cols: 80,
+                pixel_width: 640,
+                pixel_height: 480,
+            },
+            command,
+            "interactive foreground process group",
+        )
+        .unwrap();
+        let mut reader = BufReader::new(pty.take_reader().unwrap());
+        read_output_marker(&mut reader, b"SPACETERM_READY");
+        pty.write_all(
+            b"sh -c 'trap \"\" HUP; sleep 30 & child=$!; echo SPACETERM_FOREGROUND leader=$$ child=$child; wait'\n",
+        )
+        .unwrap();
+        pty.flush().unwrap();
+
+        let (leader, child) = read_process_report(&mut reader, "SPACETERM_FOREGROUND");
+        let shell_process_group = pty
+            .termination
+            .lock_target()
+            .as_ref()
+            .and_then(|target| target.process_group)
+            .unwrap();
+        assert_ne!(leader, shell_process_group);
+        let drain = thread::spawn(move || {
+            let mut sink = io::sink();
+            io::copy(&mut reader, &mut sink)
+        });
+
+        terminator.terminate().unwrap();
+        pty.cleanup_child();
+        assert!(pty.termination.forced.load(Ordering::Acquire));
+        drop(pty);
+        drain.join().unwrap().unwrap();
+
+        assert_process_disappears(leader);
+        assert_process_disappears(child);
+    }
+
+    #[test]
+    fn interactive_background_process_group_should_be_forced_down_with_its_shell() {
+        let _isolation = lock_real_pty_test();
+        let working_directory = env::current_dir().unwrap();
+        let readiness = env::temp_dir().join(format!(
+            "spaceterm-background-pty-ready-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&readiness);
+        let mut command = CommandBuilder::new("/bin/zsh");
+        command.args(["-f", "-i"]);
+        command.cwd(&working_directory);
+        command.env("PS1", "SPACETERM_READY ");
+        command.env("SPACETERM_BACKGROUND_READY", &readiness);
+        let (mut pty, terminator) = spawn_command_in_pty(
+            PtySize {
+                rows: 24,
+                cols: 80,
+                pixel_width: 640,
+                pixel_height: 480,
+            },
+            command,
+            "interactive background process group",
+        )
+        .unwrap();
+        let mut reader = BufReader::new(pty.take_reader().unwrap());
+        read_output_marker(&mut reader, b"SPACETERM_READY");
+        pty.write_all(
+            b"sh -c 'trap \"\" HUP; : > \"$SPACETERM_BACKGROUND_READY\"; while :; do sleep 1; done' & background=$!; while [ ! -f \"$SPACETERM_BACKGROUND_READY\" ]; do sleep 0.01; done; echo SPACETERM_BACKGROUND leader=$background child=$background\n",
+        )
+        .unwrap();
+        pty.flush().unwrap();
+
+        let (leader, child) = read_process_report(&mut reader, "SPACETERM_BACKGROUND");
+        std::fs::remove_file(&readiness).unwrap();
+        let shell_process_group = pty
+            .termination
+            .lock_target()
+            .as_ref()
+            .and_then(|target| target.process_group)
+            .unwrap();
+        assert_ne!(leader, shell_process_group);
+        let session = pty
+            .termination
+            .lock_target()
+            .as_ref()
+            .and_then(|target| target.session)
+            .unwrap();
+        assert!(
+            process_groups_in_session(&session)
+                .unwrap()
+                .contains_key(&leader)
+        );
+        let drain = thread::spawn(move || {
+            let mut sink = io::sink();
+            io::copy(&mut reader, &mut sink)
+        });
+
+        terminator.terminate().unwrap();
+        pty.cleanup_child();
+        assert!(pty.termination.forced.load(Ordering::Acquire));
+        drop(pty);
+        drain.join().unwrap().unwrap();
+
+        assert_process_disappears(leader);
+        assert_process_disappears(child);
+    }
+
+    #[test]
+    fn hup_handler_process_handoff_should_be_forced_down_with_its_shell() {
+        let _isolation = lock_real_pty_test();
+        let working_directory = env::current_dir().unwrap();
+        let readiness = env::temp_dir().join(format!(
+            "spaceterm-handoff-pty-ready-{}",
+            std::process::id()
+        ));
+        let replacement_report = env::temp_dir().join(format!(
+            "spaceterm-handoff-pty-child-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&readiness);
+        let _ = std::fs::remove_file(&replacement_report);
+        let mut command = CommandBuilder::new("/bin/zsh");
+        command.args(["-f", "-i"]);
+        command.cwd(&working_directory);
+        command.env("PS1", "SPACETERM_READY ");
+        command.env("SPACETERM_HANDOFF_READY", &readiness);
+        command.env("SPACETERM_HANDOFF_CHILD", &replacement_report);
+        command.env(
+            "SPACETERM_HANDOFF_TRAP",
+            "trap '' HUP; sleep 30 & echo $! > \"$SPACETERM_HANDOFF_CHILD\"; exit 0",
+        );
+        let (mut pty, terminator) = spawn_command_in_pty(
+            PtySize {
+                rows: 24,
+                cols: 80,
+                pixel_width: 640,
+                pixel_height: 480,
+            },
+            command,
+            "HUP handler process handoff",
+        )
+        .unwrap();
+        let mut reader = BufReader::new(pty.take_reader().unwrap());
+        read_output_marker(&mut reader, b"SPACETERM_READY");
+        pty.write_all(
+            b"sh -c 'trap \"$SPACETERM_HANDOFF_TRAP\" HUP; : > \"$SPACETERM_HANDOFF_READY\"; while :; do sleep 1; done' & background=$!; while [ ! -f \"$SPACETERM_HANDOFF_READY\" ]; do sleep 0.01; done; echo SPACETERM_HANDOFF leader=$background child=$background\n",
+        )
+        .unwrap();
+        pty.flush().unwrap();
+
+        let (leader, _) = read_process_report(&mut reader, "SPACETERM_HANDOFF");
+        std::fs::remove_file(&readiness).unwrap();
+        let drain = thread::spawn(move || {
+            let mut sink = io::sink();
+            io::copy(&mut reader, &mut sink)
+        });
+
+        terminator.terminate().unwrap();
+        pty.cleanup_child();
+        assert!(pty.termination.forced.load(Ordering::Acquire));
+        drop(pty);
+        drain.join().unwrap().unwrap();
+
+        let replacement = std::fs::read_to_string(&replacement_report)
+            .unwrap()
+            .trim()
+            .parse::<i32>()
+            .unwrap();
+        std::fs::remove_file(&replacement_report).unwrap();
+        assert_ne!(replacement, leader);
+        assert_process_disappears(leader);
+        assert_process_disappears(replacement);
+    }
+
+    #[test]
     fn responsive_process_group_should_finish_during_the_grace_window() {
         let _isolation = lock_real_pty_test();
         let working_directory = env::current_dir().unwrap();
@@ -1207,6 +1624,41 @@ mod tests {
                 "process {process} remained after process-group shutdown"
             );
             thread::sleep(CHILD_EXIT_POLL_INTERVAL);
+        }
+    }
+
+    fn read_process_report(reader: &mut impl BufRead, marker: &str) -> (i32, i32) {
+        let mut report = String::new();
+        loop {
+            report.clear();
+            let read = reader.read_line(&mut report).unwrap();
+            assert_ne!(read, 0, "PTY closed before {marker} was reported");
+            let fields: HashMap<_, _> = report
+                .split_whitespace()
+                .skip_while(|field| *field != marker)
+                .skip(1)
+                .filter_map(|field| field.split_once('='))
+                .collect();
+            let parsed = fields
+                .get("leader")
+                .and_then(|leader| leader.parse::<i32>().ok())
+                .zip(
+                    fields
+                        .get("child")
+                        .and_then(|child| child.parse::<i32>().ok()),
+                );
+            if let Some(ids) = parsed {
+                return ids;
+            }
+        }
+    }
+
+    fn read_output_marker(reader: &mut impl Read, marker: &[u8]) {
+        let mut observed = Vec::new();
+        while !observed.ends_with(marker) {
+            let mut byte = [0_u8; 1];
+            reader.read_exact(&mut byte).unwrap();
+            observed.push(byte[0]);
         }
     }
 
