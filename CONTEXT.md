@@ -19,8 +19,9 @@ Panes with exactly one Focused Pane.
 - Keep the executable in the root application crate and reusable GPUI controls in the internal
   `spaceterm-ui` library crate.
 - Use `libghostty-vt` for terminal emulation.
-- Use an Operating-System-specific PTY Adapter to launch and communicate with shells. The current
-  production implementation is macOS-only; Linux PTY support remains future work.
+- Use a platform-neutral Native PTY Owner to launch and communicate with shells through an
+  Operating-System-specific PTY Adapter. The macOS Adapter is the only production implementation;
+  a Linux Adapter is intentional future work.
 - Use typed `IconName` values from the exact `lucide-icons` 1.34.0 set for app-owned in-app
   icons. The platform-neutral `spaceterm-ui` crate owns the dependency, registers its bundled font,
   and renders icons through a size-and-tint adapter.
@@ -324,15 +325,28 @@ manufacturing domain state. Identities are monotonic and are not reused after de
 
 ### Native PTY Owner
 
-`SpawnedPty` exclusively owns the macOS PTY master, reader, writer, and Shell Process. PTY
-configuration, Shell Process launch, and Terminal Emulator initialization occur on the terminal
-worker; Terminal Session creation returns after starting that worker, and startup errors arrive as
-typed terminal events. The worker installs a deferred one-shot signaller so a close racing startup
-still requests prompt termination. Once launched, only the worker may wait, perform full
-termination escalation, or reap, so close callers never wait for process cleanup. Shutdown sends
-one SIGHUP to the complete owned process group, allows a bounded grace period, then sends SIGKILL to
-that group when any member remains. The worker reaps the Shell Process exactly once after reader
-output and publishes typed normal, signal, graceful-shutdown, or forced-shutdown exit state.
+The platform-neutral Native PTY Owner exclusively owns one PTY master, reader, writer, Shell
+Process, termination authority, hidden-input inspection, shutdown escalation, waiting, and
+exactly-once reaping from successful creation through destruction. Terminal Session code sees only
+typed Native PTY launch, geometry, output, operation, exit, and failure values. It retains Terminal
+Emulator initialization, the Bounded PTY Output Transport, command ordering, resize delivery, and
+event publication without naming an Operating-System Adapter or POSIX mechanism.
+
+Local Shell Process and remote Terminal Session Channel launches enter the same Native PTY Owner
+Seam and ownership lifecycle. Terminal Session creation returns after starting its worker, while
+the Native PTY Owner creates its Adapter and Shell Process there. A platform-neutral close handle
+records a request that races startup, applies it promptly when termination authority is installed,
+and rejects duplicate effects. Close callers detach worker cleanup and never wait for the reader,
+shutdown escalation, Shell Process wait, or reap.
+
+The macOS Adapter is the only production PTY Adapter. It preserves controlling-terminal creation,
+initial row, column, and pixel geometry, working directory, UTF-8 terminal configuration,
+hidden-input detection, and complete process-group shutdown. Shutdown sends one SIGHUP, allows a
+bounded grace period, then sends SIGKILL when any process-group member remains. The Native PTY
+Owner reports normal exit, signal exit, graceful shutdown, forced shutdown, startup failure,
+reader failure, and wait failure through platform-neutral typed outcomes. Its Interface exposes no
+file descriptor, termios flag, signal number, or process-group identity. A Linux Adapter is the
+intentional next implementation; no speculative Windows Adapter exists.
 
 ### Temporary Shell Integration
 
@@ -586,7 +600,8 @@ emitting focus-out, while application Actions remain outside that held-key set.
 
 ### Balanced Secure Event Input
 
-The terminal worker polls the worker-owned PTY master at a bounded 200-millisecond interval and
+The terminal worker requests hidden-input inspection from its Native PTY Owner at a bounded
+200-millisecond interval and
 classifies hidden input only when canonical mode is enabled and echo is disabled. An AppKit-thread,
 application-scoped coordinator enables Carbon Secure Event Input only when exactly one live Pane
 both reports hidden input and owns Terminal Input Focus. It performs only physical state
@@ -1015,8 +1030,8 @@ Closing the final Pane requests its Tab close; closing the final Tab removes its
 when another Workspace remains, or closes the Operating-System Window when globally final. Explicit
 Close Workspace remains distinct and replaces the final Workspace. The Module that resolves each
 close synchronously removes the entity and initiates one-shot shutdown of its Terminal Sessions.
-Shell termination and PTY ownership cleanup continue on terminal worker threads so GPUI callers do
-not wait for reader or Shell Process joins.
+Native PTY Owner termination and cleanup continue on terminal worker threads so GPUI callers do not
+wait for reader or Shell Process joins.
 
 ### Close Confirmation
 

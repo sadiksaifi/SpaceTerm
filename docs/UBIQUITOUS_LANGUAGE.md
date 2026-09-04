@@ -41,7 +41,7 @@
 
 | Term | Definition | Aliases to avoid |
 | --- | --- | --- |
-| **Terminal Session** | The live terminal runtime owned by a Pane, joining terminal emulation and a PTY to either a local Shell Process or a remote Terminal Session Channel. | Session, Workspace session |
+| **Terminal Session** | The live terminal runtime owned by a Pane, joining its Terminal Emulator to a platform-neutral Native PTY Owner for either a local Shell Process or a remote Terminal Session Channel. | Session, Workspace session |
 | **Terminal Key Input** | The platform-neutral Module that translates GPUI key, text, and aggregate-modifier events into validated typed input or an explicit unhandled outcome before the Terminal Session command lane. | native event forwarding, terminal escape sequence |
 | **Terminal Key Input Adapter** | One application-selected implementation of Terminal Key Input created per Pane through an injected factory. | Pane keyboard bridge, global keyboard singleton |
 | **Portable GPUI Adapter** | The Terminal Key Input Adapter used as the initial Linux path and as the macOS fallback when no matching AppKit event is available; it never invents physical identities GPUI does not expose. | Linux-native key mapper, guessed keycode fallback |
@@ -54,7 +54,8 @@
 | **Runtime Observation** | An acceptance-only, authenticated, content-free stream of bounded numeric and closed-enum facts from one production Pane and Terminal Session; collection failure means NOT-RUN rather than PASS or FAIL. | telemetry, terminal transcript, runtime log |
 | **Acceptance Failure Action** | A nonce-bound, sequenced, one-shot request from the authenticated mounted-app verifier that selects one fixed production failure Seam and returns only closed-enum state facts; it does not exist during an ordinary launch. | test flag, debug command, arbitrary fault payload |
 | **Terminal Emulator** | The state machine that interprets terminal output and maintains the visible grid and Scrollback. | Terminal Session, Pane |
-| **PTY** | The macOS pseudoterminal that connects a Terminal Emulator to its Shell Process. | Terminal, shell |
+| **Native PTY Owner** | The platform-neutral Module that exclusively owns one PTY and the complete Shell Process lifecycle behind an Operating-System-specific Adapter. | macOS PTY, file descriptor wrapper, Terminal Session |
+| **PTY** | The Operating-System pseudoterminal facility that connects a Terminal Emulator to its Shell Process through a Native PTY Owner. The macOS Adapter is the only production implementation and a Linux Adapter is intentional future work. | Terminal, shell, Native PTY Owner Interface |
 | **Shell Process** | The command interpreter process launched for a Pane through its PTY. | Terminal, session |
 | **Shell Integration** | Versioned temporary startup resources injected only into a supported Shell Process to report safe directory, prompt, command, and completion facts without changing user configuration. | shell plugin installation, dotfile rewrite |
 | **Terminal Capability Identity** | The canonical SpaceTerm program, version, `TERM`, terminfo, XTVERSION, device-attribute, and XTGETTCAP profile exposed by one Terminal Session. | emulator dependency identity, user-agent string |
@@ -129,6 +130,9 @@
 - One live **Remote Project Workspace** owns one **Control Connection** for its current **Connection Generation**, and that Control Connection exclusively owns its master process, private runtime socket, shutdown, reap, and exact cleanup.
 - A Control Connection presents at most one **Authentication Prompt** at a time; cancellation and stale presentation callbacks cannot settle a newer prompt, and connection progress resumes only after the prompt closes.
 - Each Remote Pane owns one **Terminal Session** that consumes one **Terminal Session Channel**; the channel shares its Workspace's **Control Connection** but never shares Pane or Terminal Session ownership.
+- Local Shell Process and remote **Terminal Session Channel** launches enter the same **Native PTY Owner** Seam. The owner exclusively retains the PTY master, reader, writer, Shell Process, termination authority, hidden-input inspection, shutdown escalation, wait, and exactly-once reap.
+- A close racing Native PTY startup remains pending until termination authority is installed, repeated close requests have one effect, and GPUI callers never wait for Native PTY Owner cleanup.
+- The **Native PTY Owner** Interface exposes only platform-neutral launch, geometry, input/output, lifecycle, and failure values. The macOS Adapter owns controlling-terminal and process-group mechanics; a Linux Adapter is intentional future work, and no Windows Adapter is defined.
 - A reconnect begins only after Disconnected or Failed and advances the **Connection Generation**; observations from older generations are stale, illegal same-generation transitions are rejected, and Closing is terminal.
 - Delayed readiness, failure, or disconnection from a predecessor **Connection Generation** cannot mutate or resurrect its successor.
 - A **Workspace** owns one or more **Tabs** and has exactly one **Active Tab**.
@@ -177,7 +181,7 @@
 - A **Reported Working Directory** accepts only a local absolute `file://` report and retains its last valid provenance when a malformed or remote report arrives.
 - A **Pane** belongs to exactly one **Tab** and owns one **Terminal Session**.
 - A **Split** has exactly two child **Pane Layouts**; each child is either another **Split** or a **Pane**.
-- Closing any hierarchy entity closes every **Terminal Session**, **PTY**, and **Shell Process** it owns.
+- Closing any hierarchy entity closes every **Terminal Session** and transfers each owned **Native PTY Owner** through nonblocking termination and complete **PTY** and **Shell Process** cleanup.
 - A user-requested close requires one aggregate **Close Confirmation** when any affected live Pane has a running command, incomplete Command Output, unknown startup state, stale Terminal Metadata, or another unknown live state.
 - No **Close Confirmation** is required for a Pane without a live Terminal Session, an exited or fatally failed Pane, a disconnected Remote Pane, or live Terminal Metadata proving a Prompt, Command Input, or finished command.
 - One pending **Close Confirmation** suppresses duplicate close requests; cancellation, dismissal, presentation failure, or stale target identity performs no hierarchy mutation, while confirmation authorizes the exact captured target once.

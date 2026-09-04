@@ -1,22 +1,21 @@
 use std::collections::VecDeque;
 use std::fmt;
-use std::io::{ErrorKind, Read, Write};
+use std::io::Write;
 use std::mem;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(test)]
+use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver as CommandReceiver, Sender as CommandSender};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use anyhow::Error as AnyError;
-#[cfg(test)]
-use portable_pty::ExitStatus;
-use portable_pty::PtySize;
 use thiserror::Error;
 
-use crate::platform::macos_pty::{
-    PtyError, PtyTerminator, ShellExit, ShutdownDisposition, SpawnedPty, spawn_remote_pane_channel,
-    spawn_user_shell, user_shell,
+use crate::platform::native_pty::{
+    NativePtyCloseHandle, NativePtyExit, NativePtyLaunch, NativePtyOperationFailure,
+    NativePtyOutput, NativePtyOutputSink, NativePtyOwner, NativePtySize, NativePtyStartupFailure,
+    NativePtyStartupStage, NativePtyWaitFailure, shell_fallback_title,
 };
 use crate::platform::shell_integration::resource_root;
 #[cfg(all(target_os = "macos", not(test)))]
@@ -49,9 +48,8 @@ use crate::terminal::selection::{SelectionCopy, SelectionCopyOptions};
 use crate::terminal::{FindDirection, FindQueryGeneration, RuntimeObservation};
 
 const FINAL_CHILD_WAIT_TIMEOUT: Duration = Duration::from_secs(2);
-const PTY_READ_BUFFER_SIZE: usize = 16 * 1024;
 const PTY_OUTPUT_QUEUE_CAPACITY: usize = 8;
-const TERMIOS_POLL_INTERVAL: Duration = Duration::from_millis(200);
+const HIDDEN_INPUT_POLL_INTERVAL: Duration = Duration::from_millis(200);
 const PASTE_CONFIRMATION_TIMEOUT: Duration = Duration::from_secs(30);
 const OSC52_AUTHORIZATION_TIMEOUT: Duration = Duration::from_secs(30);
 const ACCESSIBILITY_NORMAL_COMMAND_BURST: u8 = 8;
@@ -132,12 +130,12 @@ pub(crate) enum WheelPhase {
     MomentumCancelled,
 }
 
-fn pty_size(geometry: TerminalGeometry) -> PtySize {
+fn pty_size(geometry: TerminalGeometry) -> NativePtySize {
     let grid = geometry.grid();
     let backing = geometry.backing_grid_size();
-    PtySize {
+    NativePtySize {
         rows: grid.rows,
-        cols: grid.cols,
+        columns: grid.cols,
         pixel_width: backing.width.min(u32::from(u16::MAX)) as u16,
         pixel_height: backing.height.min(u32::from(u16::MAX)) as u16,
     }
@@ -252,9 +250,6 @@ impl fmt::Display for SessionStartupStage {
 
 #[derive(Debug, Error)]
 pub(crate) enum SessionError {
-    #[cfg(test)]
-    #[error(transparent)]
-    Pty(#[from] PtyError),
     #[error("failed to start the terminal worker thread: {0}")]
     SpawnWorker(#[source] std::io::Error),
     #[error(transparent)]
@@ -496,13 +491,7 @@ impl TerminalSessionFactory for NativeTerminalSessionFactory {
     }
 
     fn fallback_title(&self) -> String {
-        let shell = user_shell();
-        Path::new(&shell)
-            .file_name()
-            .and_then(|name| name.to_str())
-            .filter(|name| !name.is_empty())
-            .unwrap_or(&shell)
-            .to_owned()
+        shell_fallback_title()
     }
 }
 
@@ -565,7 +554,7 @@ impl FindQueryMailbox {
 pub(crate) struct TerminalSession {
     commands: Option<CommandSender<Command>>,
     worker: Option<JoinHandle<()>>,
-    terminator: Option<Box<dyn SessionPtyTerminator>>,
+    native_pty_close: Option<NativePtyCloseHandle>,
     resizes: ResizeMailbox,
     find_queries: FindQueryMailbox,
     runtime_observation: Option<RuntimeObservation>,
@@ -576,19 +565,6 @@ type StartedSession = (
     async_channel::Receiver<SessionEvent>,
     async_channel::Receiver<Arc<TerminalAccessibilityModel>>,
 );
-
-trait SessionPty: Write + Send {
-    fn take_reader(&mut self) -> std::io::Result<Box<dyn Read + Send>>;
-    fn resize(&self, size: PtySize) -> Result<(), AnyError>;
-    fn wait_for_child(&mut self, timeout: Duration) -> std::io::Result<ShellExit>;
-    fn hidden_input(&self) -> std::io::Result<bool> {
-        Ok(false)
-    }
-}
-
-trait SessionPtyTerminator: Send + Sync {
-    fn terminate(&self) -> std::io::Result<()>;
-}
 
 #[cfg(test)]
 #[derive(Default)]
@@ -623,105 +599,20 @@ fn native_osc52_clipboard() -> Box<dyn Osc52Clipboard> {
     }
 }
 
-struct StartedSessionPty {
-    pty: Box<dyn SessionPty>,
-    terminator: Box<dyn SessionPtyTerminator>,
-}
-
-#[derive(Clone, Default)]
-struct DeferredPtyTerminator {
-    state: Arc<Mutex<DeferredPtyTerminationState>>,
-}
-
-#[derive(Default)]
-struct DeferredPtyTerminationState {
-    requested: bool,
-    terminator: Option<Box<dyn SessionPtyTerminator>>,
-}
-
-impl DeferredPtyTerminator {
-    fn install(&self, terminator: Box<dyn SessionPtyTerminator>) -> std::io::Result<()> {
-        let mut state = self.lock_state();
-        if state.requested {
-            drop(state);
-            terminator.terminate()
-        } else {
-            state.terminator = Some(terminator);
-            Ok(())
-        }
-    }
-
-    fn lock_state(&self) -> std::sync::MutexGuard<'_, DeferredPtyTerminationState> {
-        match self.state.lock() {
-            Ok(state) => state,
-            Err(poisoned) => {
-                eprintln!("deferred PTY termination lock was poisoned; recovering");
-                poisoned.into_inner()
-            }
-        }
-    }
-}
-
-impl SessionPtyTerminator for DeferredPtyTerminator {
-    fn terminate(&self) -> std::io::Result<()> {
-        let terminator = {
-            let mut state = self.lock_state();
-            state.requested = true;
-            state.terminator.take()
-        };
-        match terminator {
-            Some(terminator) => terminator.terminate(),
-            None => Ok(()),
-        }
-    }
-}
-
-impl SessionPty for SpawnedPty {
-    fn take_reader(&mut self) -> std::io::Result<Box<dyn Read + Send>> {
-        SpawnedPty::take_reader(self)
-    }
-
-    fn resize(&self, size: PtySize) -> Result<(), AnyError> {
-        SpawnedPty::resize(self, size)
-    }
-
-    fn wait_for_child(&mut self, timeout: Duration) -> std::io::Result<ShellExit> {
-        SpawnedPty::wait_for_child(self, timeout)
-    }
-
-    fn hidden_input(&self) -> std::io::Result<bool> {
-        SpawnedPty::hidden_input(self)
-    }
-}
-
-impl SessionPtyTerminator for PtyTerminator {
-    fn terminate(&self) -> std::io::Result<()> {
-        PtyTerminator::terminate(self)
-    }
-}
-
-fn spawn_native_session_pty(
-    size: PtySize,
-    working_directory: &Path,
-) -> Result<StartedSessionPty, PtyError> {
-    let (pty, terminator) = spawn_user_shell(size, working_directory)?;
-    Ok(StartedSessionPty {
-        pty: Box::new(pty),
-        terminator: Box::new(terminator),
-    })
-}
-
 impl TerminalSession {
     pub(crate) fn start(
         geometry: TerminalGeometry,
         working_directory: &Path,
         runtime_observation: Option<RuntimeObservation>,
     ) -> Result<StartedSession, SessionError> {
+        let launch = NativePtyLaunch::local(working_directory.to_owned());
         Self::start_deferred_with(
             geometry,
             working_directory,
             runtime_observation,
-            spawn_native_session_pty,
+            move |size, output, close_handle| {
+                NativePtyOwner::start(launch, size, output, close_handle)
+            },
         )
     }
 
@@ -733,19 +624,15 @@ impl TerminalSession {
         command: crate::ssh::command::SshCommandSpec,
         runtime_observation: Option<RuntimeObservation>,
     ) -> Result<StartedSession, SessionError> {
+        let launch = NativePtyLaunch::remote(local_home.to_owned(), command);
         Self::start_deferred_with_context(
             geometry,
-            local_home,
             TerminalMetadataContext::Remote(metadata_context),
             fallback_title,
             identity::TERM_FALLBACK,
             runtime_observation,
-            move |size, local_home| {
-                let (pty, terminator) = spawn_remote_pane_channel(size, local_home, command)?;
-                Ok(StartedSessionPty {
-                    pty: Box::new(pty),
-                    terminator: Box::new(terminator),
-                })
+            move |size, output, close_handle| {
+                NativePtyOwner::start(launch, size, output, close_handle)
             },
         )
     }
@@ -754,7 +641,13 @@ impl TerminalSession {
         geometry: TerminalGeometry,
         working_directory: &Path,
         runtime_observation: Option<RuntimeObservation>,
-        spawn_pty: impl FnOnce(PtySize, &Path) -> Result<StartedSessionPty, PtyError> + Send + 'static,
+        start_native_pty: impl FnOnce(
+            NativePtySize,
+            Arc<dyn NativePtyOutputSink>,
+            &NativePtyCloseHandle,
+        ) -> Result<NativePtyOwner, NativePtyStartupFailure>
+        + Send
+        + 'static,
     ) -> Result<StartedSession, SessionError> {
         let initial_directory = working_directory.to_string_lossy();
         let metadata_context = TerminalMetadataContext::local(
@@ -763,25 +656,28 @@ impl TerminalSession {
         );
         Self::start_deferred_with_context(
             geometry,
-            working_directory,
             metadata_context,
             shell_fallback_title(),
             identity::launch_identity(&resource_root()).term,
             runtime_observation,
-            spawn_pty,
+            start_native_pty,
         )
     }
 
     fn start_deferred_with_context(
         geometry: TerminalGeometry,
-        working_directory: &Path,
         metadata_context: TerminalMetadataContext,
         fallback_title: String,
         terminal_name: &'static str,
         runtime_observation: Option<RuntimeObservation>,
-        spawn_pty: impl FnOnce(PtySize, &Path) -> Result<StartedSessionPty, PtyError> + Send + 'static,
+        start_native_pty: impl FnOnce(
+            NativePtySize,
+            Arc<dyn NativePtyOutputSink>,
+            &NativePtyCloseHandle,
+        ) -> Result<NativePtyOwner, NativePtyStartupFailure>
+        + Send
+        + 'static,
     ) -> Result<StartedSession, SessionError> {
-        let working_directory = PathBuf::from(working_directory);
         let (command_tx, command_rx) = mpsc::channel();
         let reader_transport = ReaderTransport::new(command_tx.clone());
         let resizes = ResizeMailbox::default();
@@ -790,34 +686,42 @@ impl TerminalSession {
         let worker_find_queries = find_queries.clone();
         let (event_tx, event_rx) = async_channel::bounded(2);
         let (accessibility_tx, accessibility_rx) = async_channel::bounded(1);
-        let deferred_terminator = DeferredPtyTerminator::default();
-        let worker_terminator = deferred_terminator.clone();
+        let native_pty_close = NativePtyCloseHandle::default();
+        let worker_native_pty_close = native_pty_close.clone();
+        let native_pty_output = reader_transport.output_sink();
         let worker_events = event_tx.clone();
         let worker_observation = runtime_observation.clone();
 
         let worker = thread::Builder::new()
             .name("spaceterm-terminal".to_owned())
             .spawn(move || {
-                let StartedSessionPty { pty, terminator } =
-                    match spawn_pty(pty_size(geometry), &working_directory) {
-                        Ok(started) => started,
-                        Err(error) => {
-                            send_session_event(
-                                &worker_events,
-                                SessionEvent::Failed(SessionFailure::Startup {
-                                    stage: SessionStartupStage::Pty,
-                                    message: error.to_string(),
-                                }),
-                                worker_observation.as_ref(),
-                            );
-                            return;
-                        }
-                    };
-                if let Err(error) = worker_terminator.install(terminator) {
-                    eprintln!("failed to terminate a PTY closed during startup: {error}");
-                }
+                let native_pty = match start_native_pty(
+                    pty_size(geometry),
+                    native_pty_output,
+                    &worker_native_pty_close,
+                ) {
+                    Ok(owner) => owner,
+                    Err(error) => {
+                        let stage = match error.stage() {
+                            NativePtyStartupStage::Adapter => SessionStartupStage::Pty,
+                            NativePtyStartupStage::Reader => SessionStartupStage::Reader,
+                            NativePtyStartupStage::ReaderThread => {
+                                SessionStartupStage::ReaderThread
+                            }
+                        };
+                        send_session_event(
+                            &worker_events,
+                            SessionEvent::Failed(SessionFailure::Startup {
+                                stage,
+                                message: error.to_string(),
+                            }),
+                            worker_observation.as_ref(),
+                        );
+                        return;
+                    }
+                };
                 TerminalWorker::run(
-                    pty,
+                    native_pty,
                     TerminalWorkerContext {
                         initial_geometry: geometry,
                         metadata_context,
@@ -844,7 +748,7 @@ impl TerminalSession {
             Self {
                 commands: Some(command_tx),
                 worker: Some(worker),
-                terminator: Some(Box::new(deferred_terminator)),
+                native_pty_close: Some(native_pty_close),
                 resizes,
                 find_queries,
                 runtime_observation,
@@ -858,7 +762,11 @@ impl TerminalSession {
     fn start_with(
         geometry: TerminalGeometry,
         working_directory: &Path,
-        spawn_pty: impl FnOnce(PtySize, &Path) -> Result<StartedSessionPty, PtyError>,
+        start_native_pty: impl FnOnce(
+            NativePtySize,
+            Arc<dyn NativePtyOutputSink>,
+            &NativePtyCloseHandle,
+        ) -> Result<NativePtyOwner, NativePtyStartupFailure>,
     ) -> Result<StartedSession, SessionError> {
         let worker_directory = working_directory.to_owned();
         let metadata_context = TerminalMetadataContext::local(
@@ -866,10 +774,15 @@ impl TerminalSession {
             crate::terminal::metadata::local_hostname().as_deref(),
         );
         let terminal_name = identity::launch_identity(&resource_root()).term;
-        let StartedSessionPty { pty, terminator } =
-            spawn_pty(pty_size(geometry), working_directory)?;
         let (command_tx, command_rx) = mpsc::channel();
         let reader_transport = ReaderTransport::new(command_tx.clone());
+        let native_pty_close = NativePtyCloseHandle::default();
+        let native_pty = start_native_pty(
+            pty_size(geometry),
+            reader_transport.output_sink(),
+            &native_pty_close,
+        )
+        .map_err(|error| SessionError::EmulatorStartup(error.to_string()))?;
         // Two slots retain the latest screen and a final lifecycle event without
         // allowing sustained PTY output to build an unbounded UI backlog.
         let (event_tx, event_rx) = async_channel::bounded(2);
@@ -884,7 +797,7 @@ impl TerminalSession {
             .name("spaceterm-terminal".to_owned())
             .spawn(move || {
                 TerminalWorker::run(
-                    pty,
+                    native_pty,
                     TerminalWorkerContext {
                         initial_geometry: geometry,
                         metadata_context,
@@ -912,7 +825,7 @@ impl TerminalSession {
                 Self {
                     commands: Some(command_tx),
                     worker: Some(worker),
-                    terminator: Some(terminator),
+                    native_pty_close: Some(native_pty_close),
                     resizes,
                     find_queries,
                     runtime_observation: None,
@@ -1098,8 +1011,8 @@ impl TerminalSession {
 
     fn request_shutdown(&mut self) {
         // Request termination before transferring sole responsibility to off-thread PTY cleanup.
-        if let Some(terminator) = self.terminator.take()
-            && let Err(error) = terminator.terminate()
+        if let Some(close_handle) = self.native_pty_close.take()
+            && let Err(error) = close_handle.request_close()
         {
             eprintln!("failed to terminate shell while shutting down terminal worker: {error}");
         }
@@ -1221,31 +1134,40 @@ impl Drop for TerminalSession {
     }
 }
 
-enum ReaderEvent {
-    Output(Vec<u8>),
-    Stopped(Option<String>),
-}
-
 struct ReaderTransport {
-    commands: CommandSender<Command>,
-    events: mpsc::SyncSender<ReaderEvent>,
-    event_rx: mpsc::Receiver<ReaderEvent>,
+    output: Arc<SessionNativePtyOutputSink>,
+    event_rx: mpsc::Receiver<NativePtyOutput>,
 }
 
 impl ReaderTransport {
     fn new(commands: CommandSender<Command>) -> Self {
         let (events, event_rx) = mpsc::sync_channel(PTY_OUTPUT_QUEUE_CAPACITY);
         Self {
-            commands,
-            events,
+            output: Arc::new(SessionNativePtyOutputSink { commands, events }),
             event_rx,
         }
+    }
+
+    fn output_sink(&self) -> Arc<dyn NativePtyOutputSink> {
+        self.output.clone()
+    }
+}
+
+struct SessionNativePtyOutputSink {
+    commands: CommandSender<Command>,
+    events: mpsc::SyncSender<NativePtyOutput>,
+}
+
+impl NativePtyOutputSink for SessionNativePtyOutputSink {
+    fn publish(&self, output: NativePtyOutput) -> bool {
+        // ReaderReady orders bounded PTY output against the reliable control command lane.
+        self.events.send(output).is_ok() && self.commands.send(Command::ReaderReady).is_ok()
     }
 }
 
 struct ReaderEventBatch {
     chunks: Vec<Vec<u8>>,
-    reader_stopped: Option<Option<String>>,
+    reader_stopped: Option<Option<crate::platform::native_pty::NativePtyReadFailure>>,
 }
 
 #[derive(Debug)]
@@ -1287,11 +1209,10 @@ enum Command {
 }
 
 struct TerminalWorker {
-    pty: Box<dyn SessionPty>,
+    native_pty: NativePtyOwner,
     emulator: TerminalEmulator,
     commands: CommandReceiver<Command>,
-    reader_events: mpsc::Receiver<ReaderEvent>,
-    reader_thread: JoinHandle<()>,
+    reader_events: mpsc::Receiver<NativePtyOutput>,
     events: async_channel::Sender<SessionEvent>,
     accessibility: async_channel::Sender<Arc<TerminalAccessibilityModel>>,
     resizes: ResizeMailbox,
@@ -1379,8 +1300,12 @@ impl HiddenInputSchedule {
         }
     }
 
-    fn update(&mut self, now: Instant, result: std::io::Result<bool>) -> Option<bool> {
-        self.deadline = now + TERMIOS_POLL_INTERVAL;
+    fn update(
+        &mut self,
+        now: Instant,
+        result: Result<bool, NativePtyOperationFailure>,
+    ) -> Option<bool> {
+        self.deadline = now + HIDDEN_INPUT_POLL_INTERVAL;
         let active = match result {
             Ok(active) => active,
             Err(error) => {
@@ -1670,7 +1595,7 @@ impl StartupReporter {
 
 impl TerminalWorker {
     fn run(
-        mut pty: Box<dyn SessionPty>,
+        native_pty: NativePtyOwner,
         context: TerminalWorkerContext,
         commands: CommandReceiver<Command>,
         reader_transport: ReaderTransport,
@@ -1694,28 +1619,9 @@ impl TerminalWorker {
             runtime_observation,
         } = publishers;
         let ReaderTransport {
-            commands: reader_commands,
-            events: reader_events,
+            output: _output,
             event_rx: reader_event_rx,
         } = reader_transport;
-        let reader = match pty.take_reader() {
-            Ok(reader) => reader,
-            Err(error) => {
-                startup.failed(SessionStartupStage::Reader, error.to_string());
-                return;
-            }
-        };
-
-        let reader_thread = match spawn_reader(reader, reader_events, reader_commands) {
-            Ok(thread) => thread,
-            Err(error) => {
-                startup.failed(
-                    SessionStartupStage::ReaderThread,
-                    format!("failed to start PTY reader thread: {error}"),
-                );
-                return;
-            }
-        };
 
         let emulator = match TerminalEmulator::new_with_metadata_context(
             initial_geometry,
@@ -1728,18 +1634,16 @@ impl TerminalWorker {
             Err(error) => {
                 startup.failed(SessionStartupStage::Emulator, error.to_string());
                 drop(reader_event_rx);
-                drop(pty);
-                join_reader(reader_thread);
+                drop(native_pty);
                 return;
             }
         };
 
         let mut worker = Self {
-            pty,
+            native_pty,
             emulator,
             commands,
             reader_events: reader_event_rx,
-            reader_thread,
             events,
             accessibility,
             resizes,
@@ -1891,11 +1795,9 @@ impl TerminalWorker {
                     return true;
                 };
                 let result = self
-                    .pty
+                    .native_pty
                     .resize(pty_size(geometry))
-                    .map_err(|error| {
-                        format!("failed to resize the macOS pseudo-terminal: {error:#}")
-                    })
+                    .map_err(|error| format!("failed to resize the native PTY: {error}"))
                     .and_then(|()| {
                         self.emulator
                             .resize(geometry)
@@ -2039,7 +1941,7 @@ impl TerminalWorker {
             Command::PollHiddenInput => {
                 if let Some(active) = self
                     .hidden_input
-                    .update(Instant::now(), self.pty.hidden_input())
+                    .update(Instant::now(), self.native_pty.hidden_input())
                 {
                     send_session_event(
                         &self.events,
@@ -2187,7 +2089,7 @@ impl TerminalWorker {
             }
             let event = classify_reader_stop(
                 read_error,
-                self.pty.wait_for_child(FINAL_CHILD_WAIT_TIMEOUT),
+                self.native_pty.wait_for_exit(FINAL_CHILD_WAIT_TIMEOUT),
             );
             self.emulator.mark_metadata_stale();
             if !self.publish_screen() {
@@ -2209,8 +2111,8 @@ impl TerminalWorker {
 
         for index in 0..limit {
             match self.reader_events.recv() {
-                Ok(ReaderEvent::Output(bytes)) => batch.chunks.push(bytes),
-                Ok(ReaderEvent::Stopped(read_error)) => {
+                Ok(NativePtyOutput::Bytes(bytes)) => batch.chunks.push(bytes),
+                Ok(NativePtyOutput::Stopped(read_error)) => {
                     batch.reader_stopped = Some(read_error);
                     break;
                 }
@@ -2450,7 +2352,11 @@ impl TerminalWorker {
     }
 
     fn write_pty(&mut self, bytes: &[u8]) -> bool {
-        if let Err(error) = self.pty.write_all(bytes).and_then(|()| self.pty.flush()) {
+        if let Err(error) = self
+            .native_pty
+            .write_all(bytes)
+            .and_then(|()| self.native_pty.flush())
+        {
             let _ = self.send_runtime_failure(format!("failed to write to the shell PTY: {error}"));
             return false;
         }
@@ -2555,11 +2461,10 @@ impl TerminalWorker {
 
     fn finish(self) {
         let Self {
-            pty,
+            native_pty,
             emulator: _emulator,
             commands: _commands,
             reader_events,
-            reader_thread,
             events: _events,
             resizes: _resizes,
             pending_command: _pending_command,
@@ -2571,100 +2476,39 @@ impl TerminalWorker {
             runtime_observation,
             ..
         } = self;
-        // SpawnedPty's Drop terminates and reaps a live shell for the native Adapter.
+        // The Native PTY Owner performs termination, waiting, and reaping off the GPUI thread.
         drop(reader_events);
-        drop(pty);
-        join_reader(reader_thread);
+        drop(native_pty);
         if let Some(observation) = &runtime_observation {
             observation.session_exited(exit_class_code(&SessionExit::GracefulShutdown));
         }
     }
 }
 
-fn shell_fallback_title() -> String {
-    let shell = user_shell();
-    Path::new(&shell)
-        .file_name()
-        .and_then(|name| name.to_str())
-        .filter(|name| !name.is_empty())
-        .unwrap_or(&shell)
-        .to_owned()
-}
-
-fn spawn_reader(
-    mut reader: Box<dyn Read + Send>,
-    events: mpsc::SyncSender<ReaderEvent>,
-    commands: CommandSender<Command>,
-) -> std::io::Result<JoinHandle<()>> {
-    thread::Builder::new()
-        .name("spaceterm-pty-reader".to_owned())
-        .spawn(move || {
-            let mut buffer = [0_u8; PTY_READ_BUFFER_SIZE];
-            loop {
-                match reader.read(&mut buffer) {
-                    Ok(0) => {
-                        let _ = send_reader_event(ReaderEvent::Stopped(None), &events, &commands);
-                        break;
-                    }
-                    Ok(read) => {
-                        if !send_reader_event(
-                            ReaderEvent::Output(buffer[..read].to_vec()),
-                            &events,
-                            &commands,
-                        ) {
-                            break;
-                        }
-                    }
-                    Err(error) if error.kind() == ErrorKind::Interrupted => continue,
-                    Err(error) => {
-                        let _ = send_reader_event(
-                            ReaderEvent::Stopped(Some(error.to_string())),
-                            &events,
-                            &commands,
-                        );
-                        break;
-                    }
-                }
-            }
-        })
-}
-
-fn send_reader_event(
-    event: ReaderEvent,
-    events: &mpsc::SyncSender<ReaderEvent>,
-    commands: &CommandSender<Command>,
-) -> bool {
-    // ReaderReady is the publication point that orders this private event against control
-    // Commands. Controls may overtake a producer still blocked on bounded output capacity.
-    events.send(event).is_ok() && commands.send(Command::ReaderReady).is_ok()
-}
-
 fn classify_reader_stop(
-    read_error: Option<String>,
-    wait_result: std::io::Result<ShellExit>,
+    read_error: Option<crate::platform::native_pty::NativePtyReadFailure>,
+    wait_result: Result<NativePtyExit, NativePtyWaitFailure>,
 ) -> SessionEvent {
     match (read_error, wait_result) {
-        (None, Ok(exit)) => SessionEvent::Exited(classify_shell_exit(exit)),
+        (None, Ok(exit)) => SessionEvent::Exited(classify_native_pty_exit(exit)),
         (Some(read_error), Ok(exit)) => SessionEvent::Failed(SessionFailure::PtyRead {
-            read_error,
-            exit_status: classify_shell_exit(exit).to_string(),
+            read_error: read_error.to_string(),
+            exit_status: classify_native_pty_exit(exit).to_string(),
         }),
         (read_error, Err(wait_error)) => SessionEvent::Failed(SessionFailure::ShellWait {
-            read_error,
+            read_error: read_error.map(|error| error.to_string()),
             wait_error: wait_error.to_string(),
         }),
     }
 }
 
-fn classify_shell_exit(exit: ShellExit) -> SessionExit {
-    match exit.shutdown {
-        ShutdownDisposition::Graceful => SessionExit::GracefulShutdown,
-        ShutdownDisposition::Forced => SessionExit::ForcedShutdown,
-        ShutdownDisposition::NotRequested => match exit.status.signal() {
-            Some(signal) => SessionExit::Signal(signal.to_owned()),
-            None if exit.status.success() => SessionExit::Success,
-            None => SessionExit::ExitCode(exit.status.exit_code()),
-        },
+fn classify_native_pty_exit(exit: NativePtyExit) -> SessionExit {
+    match exit {
+        NativePtyExit::Success => SessionExit::Success,
+        NativePtyExit::ExitCode(code) => SessionExit::ExitCode(code),
+        NativePtyExit::Signal(signal) => SessionExit::Signal(signal),
+        NativePtyExit::GracefulShutdown => SessionExit::GracefulShutdown,
+        NativePtyExit::ForcedShutdown => SessionExit::ForcedShutdown,
     }
 }
 
@@ -2745,21 +2589,18 @@ fn join_worker(worker: JoinHandle<()>) {
     }
 }
 
-fn join_reader(reader: JoinHandle<()>) {
-    if reader.join().is_err() {
-        eprintln!("PTY reader thread panicked");
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::VecDeque;
-    use std::io;
+    use std::io::{self, ErrorKind, Read};
     use std::sync::{Condvar, Mutex};
     use std::time::{Duration, Instant};
 
     use super::*;
     use crate::domain::{RemoteWorkspaceDirectory, SshDestination, WorkspaceDirectoryIdentity};
+    use crate::platform::native_pty::{
+        NativePtyAdapter, NativePtyAdapterParts, NativePtyTermination,
+    };
     use crate::ssh::command::{
         RemotePaneShellCommandBuilder, SshCommandContext, ValidatedRemoteLoginShell,
         ValidatedRemoteShellCommand,
@@ -2900,10 +2741,15 @@ mod tests {
         assert_eq!(schedule.update(start, Ok(true)), Some(true));
         assert_eq!(schedule.update(start, Ok(true)), None);
         assert_eq!(
-            schedule.update(start, Err(io::Error::other("descriptor closed"))),
+            schedule.update(
+                start,
+                Err(NativePtyOperationFailure::new(
+                    "descriptor closed".to_owned()
+                ))
+            ),
             Some(false)
         );
-        assert_eq!(schedule.deadline, start + TERMIOS_POLL_INTERVAL);
+        assert_eq!(schedule.deadline, start + HIDDEN_INPUT_POLL_INTERVAL);
     }
     use crate::terminal::geometry::{BackingScale, CellGridSize, LogicalCellSize};
     use crate::terminal::key::{KeyAction, PhysicalKey};
@@ -2988,7 +2834,7 @@ mod tests {
         write_attempts: usize,
         written: Vec<u8>,
         flushes: usize,
-        resizes: Vec<PtySize>,
+        resizes: Vec<NativePtySize>,
         waits: usize,
         terminations: usize,
         pty_drops: usize,
@@ -3128,7 +2974,7 @@ mod tests {
         }
     }
 
-    impl SessionPty for ScriptedPty {
+    impl NativePtyAdapter for ScriptedPty {
         fn take_reader(&mut self) -> io::Result<Box<dyn Read + Send>> {
             self.records.update(|state| state.take_reader_calls += 1);
             if let Some(message) = self.reader_error.take() {
@@ -3139,33 +2985,68 @@ mod tests {
             })
         }
 
-        fn resize(&self, size: PtySize) -> Result<(), AnyError> {
+        fn resize(&self, size: NativePtySize) -> Result<(), NativePtyOperationFailure> {
             self.records.update(|state| state.resizes.push(size));
             match &self.resize_error {
-                Some(message) => Err(AnyError::msg(message.clone())),
+                Some(message) => Err(NativePtyOperationFailure::new(message.clone())),
                 None => Ok(()),
             }
         }
 
-        fn wait_for_child(&mut self, timeout: Duration) -> io::Result<ShellExit> {
+        fn wait_for_exit(
+            &mut self,
+            timeout: Duration,
+        ) -> Result<NativePtyExit, NativePtyWaitFailure> {
             self.records.update(|state| state.waits += 1);
             if self.wait_times_out {
-                return Err(io::Error::new(
-                    ErrorKind::TimedOut,
-                    format!(
-                        "timed out after {} ms waiting for the scripted shell process to exit",
-                        timeout.as_millis()
-                    ),
-                ));
+                return Err(NativePtyWaitFailure::new(format!(
+                    "timed out after {} ms waiting for the scripted shell process to exit",
+                    timeout.as_millis()
+                )));
             }
             match &self.wait_error {
-                Some(message) => Err(io::Error::other(message.clone())),
-                None => Ok(ShellExit {
-                    status: ExitStatus::with_exit_code(self.exit_code),
-                    shutdown: ShutdownDisposition::NotRequested,
-                }),
+                Some(message) => Err(NativePtyWaitFailure::new(message.clone())),
+                None if self.exit_code == 0 => Ok(NativePtyExit::Success),
+                None => Ok(NativePtyExit::ExitCode(self.exit_code)),
             }
         }
+    }
+
+    struct DiscardNativePtyOutput;
+
+    impl NativePtyOutputSink for DiscardNativePtyOutput {
+        fn publish(&self, _output: NativePtyOutput) -> bool {
+            true
+        }
+    }
+
+    struct NoopNativePtyTermination;
+
+    impl NativePtyTermination for NoopNativePtyTermination {
+        fn request_termination(&self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn direct_native_pty(records: ScriptedPtyRecords) -> NativePtyOwner {
+        NativePtyOwner::from_adapter_parts(
+            NativePtyAdapterParts {
+                adapter: Box::new(ScriptedPty {
+                    reader: Some(Box::new(io::empty())),
+                    records,
+                    reader_error: None,
+                    resize_error: None,
+                    write_error: None,
+                    wait_error: None,
+                    wait_times_out: false,
+                    exit_code: 0,
+                }),
+                termination: Arc::new(NoopNativePtyTermination),
+            },
+            Arc::new(DiscardNativePtyOutput),
+            &NativePtyCloseHandle::default(),
+        )
+        .unwrap()
     }
 
     #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -3233,20 +3114,10 @@ mod tests {
         let (events, receiver) = async_channel::bounded(PTY_OUTPUT_QUEUE_CAPACITY);
         let (accessibility, _accessibility_receiver) = async_channel::bounded(1);
         let worker = TerminalWorker {
-            pty: Box::new(ScriptedPty {
-                reader: None,
-                records: records.clone(),
-                reader_error: None,
-                resize_error: None,
-                write_error: None,
-                wait_error: None,
-                wait_times_out: false,
-                exit_code: 0,
-            }),
+            native_pty: direct_native_pty(records.clone()),
             emulator: TerminalEmulator::new(test_geometry()).unwrap(),
             commands,
             reader_events: reader_event_rx,
-            reader_thread: thread::spawn(|| {}),
             events,
             accessibility,
             resizes: ResizeMailbox::default(),
@@ -3385,8 +3256,8 @@ mod tests {
         releases_reader: bool,
     }
 
-    impl SessionPtyTerminator for ScriptedPtyTerminator {
-        fn terminate(&self) -> io::Result<()> {
+    impl NativePtyTermination for ScriptedPtyTerminator {
+        fn request_termination(&self) -> io::Result<()> {
             self.records.update(|state| {
                 state.terminations += 1;
                 state.lifecycle.push(LifecycleStep::TerminationRequested);
@@ -3431,31 +3302,34 @@ mod tests {
         let result = TerminalSession::start_with(
             test_geometry(),
             Path::new("/scripted"),
-            move |size, working_directory| {
+            move |size, output, close_handle| {
                 assert_eq!(size, pty_size(test_geometry()));
-                assert_eq!(working_directory, Path::new("/scripted"));
-                Ok(StartedSessionPty {
-                    pty: Box::new(ScriptedPty {
-                        reader: Some(Box::new(ScriptedReader {
-                            steps,
-                            pending: VecDeque::new(),
-                            records: records_for_pty.clone(),
-                        })),
-                        records: records_for_pty,
-                        reader_error,
-                        resize_error,
-                        write_error,
-                        wait_error,
-                        wait_times_out,
-                        exit_code,
-                    }),
-                    terminator: Box::new(ScriptedPtyTerminator {
-                        records: records_for_terminator,
-                        reader_steps: terminator_steps,
-                        error: termination_error,
-                        releases_reader: termination_releases_reader,
-                    }),
-                })
+                NativePtyOwner::from_adapter_parts(
+                    NativePtyAdapterParts {
+                        adapter: Box::new(ScriptedPty {
+                            reader: Some(Box::new(ScriptedReader {
+                                steps,
+                                pending: VecDeque::new(),
+                                records: records_for_pty.clone(),
+                            })),
+                            records: records_for_pty,
+                            reader_error,
+                            resize_error,
+                            write_error,
+                            wait_error,
+                            wait_times_out,
+                            exit_code,
+                        }),
+                        termination: Arc::new(ScriptedPtyTerminator {
+                            records: records_for_terminator,
+                            reader_steps: terminator_steps,
+                            error: termination_error,
+                            releases_reader: termination_releases_reader,
+                        }),
+                    },
+                    output,
+                    close_handle,
+                )
             },
         );
 
@@ -3512,41 +3386,24 @@ mod tests {
 
     #[test]
     fn shell_exit_should_preserve_normal_signal_and_shutdown_classifications() {
-        let classify = |status, shutdown| classify_shell_exit(ShellExit { status, shutdown });
-
         assert_eq!(
-            classify(
-                ExitStatus::with_exit_code(0),
-                ShutdownDisposition::NotRequested
-            ),
+            classify_native_pty_exit(NativePtyExit::Success),
             SessionExit::Success
         );
         assert_eq!(
-            classify(
-                ExitStatus::with_exit_code(17),
-                ShutdownDisposition::NotRequested
-            ),
+            classify_native_pty_exit(NativePtyExit::ExitCode(17)),
             SessionExit::ExitCode(17)
         );
         assert_eq!(
-            classify(
-                ExitStatus::with_signal("Hangup"),
-                ShutdownDisposition::NotRequested
-            ),
+            classify_native_pty_exit(NativePtyExit::Signal("Hangup".to_owned())),
             SessionExit::Signal("Hangup".to_owned())
         );
         assert_eq!(
-            classify(
-                ExitStatus::with_signal("Hangup"),
-                ShutdownDisposition::Graceful
-            ),
+            classify_native_pty_exit(NativePtyExit::GracefulShutdown),
             SessionExit::GracefulShutdown
         );
         assert_eq!(
-            classify(
-                ExitStatus::with_signal("Killed"),
-                ShutdownDisposition::Forced
-            ),
+            classify_native_pty_exit(NativePtyExit::ForcedShutdown),
             SessionExit::ForcedShutdown
         );
     }
@@ -3687,12 +3544,13 @@ mod tests {
             test_geometry(),
             Path::new("/scripted"),
             None,
-            move |size, working_directory| {
+            move |size, _output, _close_handle| {
                 assert_eq!(size, pty_size(test_geometry()));
-                assert_eq!(working_directory, Path::new("/scripted"));
                 spawn_entered.send(()).unwrap();
                 release.recv().unwrap();
-                Err(PtyError::Open(AnyError::msg("scripted spawn unavailable")))
+                Err(NativePtyStartupFailure::Adapter(
+                    "scripted spawn unavailable".to_owned(),
+                ))
             },
         )
         .unwrap();
@@ -3718,6 +3576,67 @@ mod tests {
         };
         assert!(message.contains("scripted spawn unavailable"));
         session.shutdown();
+    }
+
+    #[test]
+    fn close_before_native_pty_installation_should_terminate_once_after_startup() {
+        let records = ScriptedPtyRecords::default();
+        let adapter_records = records.clone();
+        let termination_records = records.clone();
+        let (reader_steps, steps) = mpsc::channel();
+        let termination_steps = reader_steps.clone();
+        let (startup_entered, entered) = mpsc::sync_channel(1);
+        let (release_startup, release) = mpsc::sync_channel(1);
+
+        let (mut session, _events, _accessibility) = TerminalSession::start_deferred_with(
+            test_geometry(),
+            Path::new("/scripted"),
+            None,
+            move |_size, output, close_handle| {
+                startup_entered.send(()).unwrap();
+                release.recv().unwrap();
+                NativePtyOwner::from_adapter_parts(
+                    NativePtyAdapterParts {
+                        adapter: Box::new(ScriptedPty {
+                            reader: Some(Box::new(ScriptedReader {
+                                steps,
+                                pending: VecDeque::new(),
+                                records: adapter_records.clone(),
+                            })),
+                            records: adapter_records,
+                            reader_error: None,
+                            resize_error: None,
+                            write_error: None,
+                            wait_error: None,
+                            wait_times_out: false,
+                            exit_code: 0,
+                        }),
+                        termination: Arc::new(ScriptedPtyTerminator {
+                            records: termination_records,
+                            reader_steps: termination_steps,
+                            error: None,
+                            releases_reader: true,
+                        }),
+                    },
+                    output,
+                    close_handle,
+                )
+            },
+        )
+        .unwrap();
+
+        entered.recv_timeout(Duration::from_secs(1)).unwrap();
+        session.shutdown();
+        session.shutdown();
+        release_startup.send(()).unwrap();
+
+        let state = records.wait_for("the deferred Native PTY Owner cleanup", |state| {
+            state.pty_drops == 1 && state.reader_drops == 1
+        });
+        assert_eq!(
+            (state.terminations, state.pty_drops, state.reader_drops),
+            (1, 1, 1)
+        );
     }
 
     #[test]
@@ -3865,23 +3784,21 @@ mod tests {
 
     #[test]
     fn bounded_output_should_preserve_the_control_lane_and_unblock_the_producer() {
+        const CHUNK_SIZE: usize = 16 * 1024;
         let (command_tx, commands) = mpsc::channel();
         let (reader_events, reader_event_rx) = mpsc::sync_channel(PTY_OUTPUT_QUEUE_CAPACITY);
         let (attempted, attempts) = mpsc::channel();
         let (completed, completions) = mpsc::channel();
-        let producer_commands = command_tx.clone();
+        let output = SessionNativePtyOutputSink {
+            commands: command_tx.clone(),
+            events: reader_events,
+        };
 
         let producer = thread::spawn(move || {
             for index in 0..=PTY_OUTPUT_QUEUE_CAPACITY {
                 attempted.send(index).unwrap();
-                let sent = send_reader_event(
-                    ReaderEvent::Output(vec![index as u8; PTY_READ_BUFFER_SIZE]),
-                    &reader_events,
-                    &producer_commands,
-                );
-                completed
-                    .send(sent.then_some(PTY_READ_BUFFER_SIZE))
-                    .unwrap();
+                let sent = output.publish(NativePtyOutput::Bytes(vec![index as u8; CHUNK_SIZE]));
+                completed.send(sent.then_some(CHUNK_SIZE)).unwrap();
                 if !sent {
                     break;
                 }
@@ -3898,10 +3815,7 @@ mod tests {
             completions.try_recv(),
             Err(mpsc::TryRecvError::Empty)
         ));
-        assert_eq!(
-            queued_bytes,
-            PTY_OUTPUT_QUEUE_CAPACITY * PTY_READ_BUFFER_SIZE
-        );
+        assert_eq!(queued_bytes, PTY_OUTPUT_QUEUE_CAPACITY * CHUNK_SIZE);
 
         command_tx.send(Command::Shutdown).unwrap();
         for _ in 0..PTY_OUTPUT_QUEUE_CAPACITY {
@@ -4145,36 +4059,22 @@ mod tests {
     fn consecutive_output_chunks_should_publish_one_ordered_coalesced_screen() {
         let (command_tx, commands) = mpsc::channel();
         let (reader_events, reader_event_rx) = mpsc::sync_channel(PTY_OUTPUT_QUEUE_CAPACITY);
-        assert!(send_reader_event(
-            ReaderEvent::Output(b"first".to_vec()),
-            &reader_events,
-            &command_tx,
-        ));
-        assert!(send_reader_event(
-            ReaderEvent::Output(b" second".to_vec()),
-            &reader_events,
-            &command_tx,
-        ));
+        let output = SessionNativePtyOutputSink {
+            commands: command_tx,
+            events: reader_events,
+        };
+        assert!(output.publish(NativePtyOutput::Bytes(b"first".to_vec())));
+        assert!(output.publish(NativePtyOutput::Bytes(b" second".to_vec())));
         assert!(matches!(commands.recv().unwrap(), Command::ReaderReady));
 
         let records = ScriptedPtyRecords::default();
         let (events, receiver) = async_channel::bounded(PTY_OUTPUT_QUEUE_CAPACITY);
         let (accessibility, _accessibility_receiver) = async_channel::bounded(1);
         let mut worker = TerminalWorker {
-            pty: Box::new(ScriptedPty {
-                reader: None,
-                records,
-                reader_error: None,
-                resize_error: None,
-                write_error: None,
-                wait_error: None,
-                wait_times_out: false,
-                exit_code: 0,
-            }),
+            native_pty: direct_native_pty(records),
             emulator: TerminalEmulator::new(test_geometry()).unwrap(),
             commands,
             reader_events: reader_event_rx,
-            reader_thread: thread::spawn(|| {}),
             events,
             accessibility,
             resizes: ResizeMailbox::default(),
@@ -4220,20 +4120,10 @@ mod tests {
         let (events, receiver) = async_channel::bounded(PTY_OUTPUT_QUEUE_CAPACITY);
         let (accessibility, _accessibility_receiver) = async_channel::bounded(1);
         let mut worker = TerminalWorker {
-            pty: Box::new(ScriptedPty {
-                reader: None,
-                records,
-                reader_error: None,
-                resize_error: None,
-                write_error: None,
-                wait_error: None,
-                wait_times_out: false,
-                exit_code: 0,
-            }),
+            native_pty: direct_native_pty(records),
             emulator: TerminalEmulator::new(test_geometry()).unwrap(),
             commands,
             reader_events: reader_event_rx,
-            reader_thread: thread::spawn(|| {}),
             events,
             accessibility,
             resizes: ResizeMailbox::default(),
@@ -4459,9 +4349,9 @@ mod tests {
 
         assert_eq!(
             state.resizes,
-            vec![PtySize {
+            vec![NativePtySize {
                 rows: 2,
-                cols: 10,
+                columns: 10,
                 pixel_width: 113,
                 pixel_height: 60,
             }]
@@ -4476,7 +4366,7 @@ mod tests {
         let mut session = TerminalSession {
             commands: Some(commands),
             worker: None,
-            terminator: None,
+            native_pty_close: None,
             resizes: resizes.clone(),
             find_queries: FindQueryMailbox::default(),
             runtime_observation: None,
@@ -4509,7 +4399,7 @@ mod tests {
         let mut session = TerminalSession {
             commands: Some(commands),
             worker: None,
-            terminator: None,
+            native_pty_close: None,
             resizes: ResizeMailbox::default(),
             find_queries: find_queries.clone(),
             runtime_observation: None,
@@ -4538,7 +4428,7 @@ mod tests {
         let mut session = TerminalSession {
             commands: Some(commands),
             worker: None,
-            terminator: None,
+            native_pty_close: None,
             resizes: ResizeMailbox::default(),
             find_queries: find_queries.clone(),
             runtime_observation: None,
@@ -5041,7 +4931,7 @@ mod tests {
                 state.terminator_drops,
                 session.commands.is_none(),
                 session.worker.is_none(),
-                session.terminator.is_none(),
+                session.native_pty_close.is_none(),
             ),
             (1, 1, 0, 1, true, true, true)
         );
@@ -5121,7 +5011,7 @@ mod tests {
         let session = TerminalSession {
             commands: None,
             worker: None,
-            terminator: None,
+            native_pty_close: None,
             resizes: ResizeMailbox::default(),
             find_queries: FindQueryMailbox::default(),
             runtime_observation: None,
@@ -5135,7 +5025,7 @@ mod tests {
 
     #[test]
     fn real_shell_output_round_trips_through_the_pty_and_emulator() {
-        let _isolation = crate::platform::macos_pty::lock_real_pty_test();
+        let _isolation = crate::platform::native_pty::lock_real_pty_test();
         let size = test_geometry();
         let (session, events, _accessibility) =
             TerminalSession::start(size, &std::env::current_dir().unwrap(), None).unwrap();
@@ -5191,7 +5081,7 @@ mod tests {
 
     #[test]
     fn real_shell_exit_command_emits_an_exited_event() {
-        let _isolation = crate::platform::macos_pty::lock_real_pty_test();
+        let _isolation = crate::platform::native_pty::lock_real_pty_test();
         let size = test_geometry();
         let (session, events, _accessibility) =
             TerminalSession::start(size, &std::env::current_dir().unwrap(), None).unwrap();

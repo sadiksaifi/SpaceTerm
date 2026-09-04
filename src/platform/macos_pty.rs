@@ -1,4 +1,3 @@
-use std::env;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -12,6 +11,11 @@ use portable_pty::{
 };
 use thiserror::Error;
 
+use crate::platform::native_pty::{
+    NativePtyAdapter, NativePtyAdapterParts, NativePtyExit, NativePtyLaunch,
+    NativePtyOperationFailure, NativePtySize, NativePtyTermination, NativePtyWaitFailure,
+    user_shell,
+};
 use crate::platform::shell_integration::{
     ShellEnvironment, configured_mode, plan_shell_integration, resource_root,
 };
@@ -70,16 +74,16 @@ pub(crate) fn lock_real_pty_test() -> std::sync::MutexGuard<'static, ()> {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum ShutdownDisposition {
+enum ShutdownDisposition {
     NotRequested,
     Graceful,
     Forced,
 }
 
 #[derive(Debug)]
-pub(crate) struct ShellExit {
-    pub(crate) status: ExitStatus,
-    pub(crate) shutdown: ShutdownDisposition,
+struct ShellExit {
+    status: ExitStatus,
+    shutdown: ShutdownDisposition,
 }
 
 struct TerminationTarget {
@@ -133,10 +137,13 @@ impl ChildTermination {
     }
 
     fn signal(&self) -> io::Result<()> {
-        if self.requested.swap(true, Ordering::AcqRel) {
+        if self.requested.load(Ordering::Acquire) {
             return Ok(());
         }
         let mut target = self.lock_target();
+        if self.requested.swap(true, Ordering::AcqRel) {
+            return Ok(());
+        }
         match target.as_mut() {
             Some(target) => target.hang_up(),
             None => Ok(()),
@@ -157,30 +164,33 @@ impl ChildTermination {
         self.lock_target().take();
     }
 
-    fn complete_process_group(&self, graceful_deadline: Instant) -> ShutdownDisposition {
+    fn complete_process_group(
+        &self,
+        graceful_deadline: Instant,
+    ) -> io::Result<ShutdownDisposition> {
+        let mut target_slot = self.lock_target();
         if !self.requested.load(Ordering::Acquire) {
-            self.revoke();
-            return ShutdownDisposition::NotRequested;
+            target_slot.take();
+            return Ok(ShutdownDisposition::NotRequested);
         }
 
-        let mut target_slot = self.lock_target();
         let Some(target) = target_slot.as_mut() else {
-            return if self.forced.load(Ordering::Acquire) {
+            return Ok(if self.forced.load(Ordering::Acquire) {
                 ShutdownDisposition::Forced
             } else {
                 ShutdownDisposition::Graceful
-            };
+            });
         };
         if !target.owns_process_group() {
             target_slot.take();
-            return ShutdownDisposition::Graceful;
+            return Ok(ShutdownDisposition::Graceful);
         }
 
         while Instant::now() < graceful_deadline {
             match target.is_alive() {
                 Ok(false) => {
                     target_slot.take();
-                    return ShutdownDisposition::Graceful;
+                    return Ok(ShutdownDisposition::Graceful);
                 }
                 Ok(true) => thread::sleep(CHILD_EXIT_POLL_INTERVAL),
                 Err(error) => {
@@ -190,12 +200,10 @@ impl ChildTermination {
             }
         }
 
-        if let Err(error) = target.force() {
-            eprintln!("failed to force shell process group shutdown: {error}");
-        }
+        target.force()?;
         self.forced.store(true, Ordering::Release);
         target_slot.take();
-        ShutdownDisposition::Forced
+        Ok(ShutdownDisposition::Forced)
     }
 
     fn requested(&self) -> bool {
@@ -233,7 +241,7 @@ fn child_already_reaped_error() -> io::Error {
     io::Error::new(io::ErrorKind::NotFound, "shell process was already reaped")
 }
 
-pub(crate) struct PtyTerminator {
+struct PtyTerminator {
     termination: Arc<ChildTermination>,
 }
 
@@ -242,12 +250,12 @@ impl PtyTerminator {
         Self { termination }
     }
 
-    pub(crate) fn terminate(&self) -> io::Result<()> {
+    fn terminate(&self) -> io::Result<()> {
         self.termination.signal()
     }
 }
 
-pub(crate) struct SpawnedPty {
+struct SpawnedPty {
     master: Box<dyn MasterPty + Send>,
     reader: Option<Box<dyn Read + Send>>,
     writer: Box<dyn Write + Send>,
@@ -256,17 +264,17 @@ pub(crate) struct SpawnedPty {
 }
 
 impl SpawnedPty {
-    pub(crate) fn take_reader(&mut self) -> io::Result<Box<dyn Read + Send>> {
+    fn take_reader(&mut self) -> io::Result<Box<dyn Read + Send>> {
         self.reader
             .take()
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "PTY reader was already taken"))
     }
 
-    pub(crate) fn resize(&self, size: PtySize) -> Result<(), AnyError> {
+    fn resize(&self, size: PtySize) -> Result<(), AnyError> {
         self.master.resize(size)
     }
 
-    pub(crate) fn hidden_input(&self) -> io::Result<bool> {
+    fn hidden_input(&self) -> io::Result<bool> {
         let descriptor = self
             .master
             .as_raw_fd()
@@ -274,13 +282,13 @@ impl SpawnedPty {
         read_termios(descriptor).map(|termios| termios_hidden_input(&termios))
     }
 
-    pub(crate) fn wait_for_child(&mut self, timeout: Duration) -> io::Result<ShellExit> {
+    fn wait_for_child(&mut self, timeout: Duration) -> io::Result<ShellExit> {
         let deadline = Instant::now() + timeout;
         loop {
             if let Some(status) = self.try_wait_for_child()? {
                 let shutdown = self
                     .termination
-                    .complete_process_group(Instant::now() + GRACEFUL_SHUTDOWN_TIMEOUT);
+                    .complete_process_group(Instant::now() + GRACEFUL_SHUTDOWN_TIMEOUT)?;
                 return Ok(ShellExit { status, shutdown });
             }
 
@@ -312,13 +320,24 @@ impl SpawnedPty {
     fn cleanup_child(&mut self) {
         let child = self.child.take();
         let Some(mut child) = child else {
+            if self.termination.requested()
+                && let Err(error) = self
+                    .termination
+                    .complete_process_group(Instant::now() + GRACEFUL_SHUTDOWN_TIMEOUT)
+            {
+                eprintln!("failed to retry shell process group shutdown: {error}");
+            }
             return;
         };
 
         match child.try_wait() {
             Ok(Some(_)) => {
-                self.termination
-                    .complete_process_group(Instant::now() + GRACEFUL_SHUTDOWN_TIMEOUT);
+                if let Err(error) = self
+                    .termination
+                    .complete_process_group(Instant::now() + GRACEFUL_SHUTDOWN_TIMEOUT)
+                {
+                    eprintln!("failed to complete shell process group shutdown: {error}");
+                }
                 return;
             }
             Ok(None) => {}
@@ -339,7 +358,7 @@ impl SpawnedPty {
 
         if let Err(error) = child.kill() {
             eprintln!("failed to terminate shell process during cleanup: {error}");
-            Self::report_child_after_failed_termination(child.as_mut());
+            Self::reap_after_failed_termination(child.as_mut());
             return;
         }
 
@@ -357,14 +376,29 @@ impl SpawnedPty {
 
         let graceful_deadline = Instant::now() + GRACEFUL_SHUTDOWN_TIMEOUT;
         if Self::poll_child_until(child, graceful_deadline) {
-            self.termination.complete_process_group(graceful_deadline);
+            if let Err(error) = self.termination.complete_process_group(graceful_deadline) {
+                eprintln!("failed to complete shell process group shutdown: {error}");
+            }
             return;
         }
 
-        self.termination.complete_process_group(graceful_deadline);
+        if let Err(error) = self.termination.complete_process_group(graceful_deadline) {
+            eprintln!("failed to force shell process group shutdown: {error}");
+            if let Err(kill_error) = child.kill() {
+                eprintln!(
+                    "failed to terminate shell process after process-group shutdown failed: {kill_error}"
+                );
+            }
+        }
         let forced_deadline = Instant::now() + FORCED_SHUTDOWN_TIMEOUT;
         if !Self::poll_child_until(child, forced_deadline) {
             eprintln!("shell process did not become reapable after forced process-group shutdown");
+            if let Err(error) = child.wait() {
+                eprintln!("failed to reap shell process after bounded shutdown: {error}");
+            }
+        }
+        if let Err(error) = self.termination.complete_process_group(Instant::now()) {
+            eprintln!("failed to retry shell process group shutdown: {error}");
         }
     }
 
@@ -386,16 +420,19 @@ impl SpawnedPty {
         }
     }
 
-    fn report_child_after_failed_termination(child: &mut dyn Child) {
+    fn reap_after_failed_termination(child: &mut dyn Child) {
         match child.try_wait() {
             Ok(Some(_)) => {}
             Ok(None) => {
-                eprintln!(
-                    "shell process is still running after termination failed; it could not be reaped"
-                );
+                if let Err(error) = child.wait() {
+                    eprintln!("failed to reap shell process after termination failed: {error}");
+                }
             }
             Err(error) => {
                 eprintln!("failed to recheck shell process after termination failed: {error}");
+                if let Err(wait_error) = child.wait() {
+                    eprintln!("failed to reap shell process after inspection failed: {wait_error}");
+                }
             }
         }
     }
@@ -411,6 +448,46 @@ impl Write for SpawnedPty {
     }
 }
 
+impl NativePtyAdapter for SpawnedPty {
+    fn take_reader(&mut self) -> io::Result<Box<dyn Read + Send>> {
+        Self::take_reader(self)
+    }
+
+    fn resize(&self, size: NativePtySize) -> Result<(), NativePtyOperationFailure> {
+        Self::resize(self, portable_size(size))
+            .map_err(|error| NativePtyOperationFailure::new(error.to_string()))
+    }
+
+    fn hidden_input(&self) -> Result<bool, NativePtyOperationFailure> {
+        Self::hidden_input(self).map_err(|error| NativePtyOperationFailure::new(error.to_string()))
+    }
+
+    fn wait_for_exit(&mut self, timeout: Duration) -> Result<NativePtyExit, NativePtyWaitFailure> {
+        let exit = self
+            .wait_for_child(timeout)
+            .map_err(|error| NativePtyWaitFailure::new(error.to_string()))?;
+        Ok(native_exit(exit))
+    }
+}
+
+fn native_exit(exit: ShellExit) -> NativePtyExit {
+    match exit.shutdown {
+        ShutdownDisposition::Graceful => NativePtyExit::GracefulShutdown,
+        ShutdownDisposition::Forced => NativePtyExit::ForcedShutdown,
+        ShutdownDisposition::NotRequested => match exit.status.signal() {
+            Some(signal) => NativePtyExit::Signal(signal.to_owned()),
+            None if exit.status.success() => NativePtyExit::Success,
+            None => NativePtyExit::ExitCode(exit.status.exit_code()),
+        },
+    }
+}
+
+impl NativePtyTermination for PtyTerminator {
+    fn request_termination(&self) -> io::Result<()> {
+        self.terminate()
+    }
+}
+
 impl Drop for SpawnedPty {
     fn drop(&mut self) {
         self.cleanup_child();
@@ -418,7 +495,7 @@ impl Drop for SpawnedPty {
 }
 
 #[derive(Debug, Error)]
-pub(crate) enum PtyError {
+pub(super) enum PtyError {
     #[error("Workspace working directory {} is unavailable: {source}", path.display())]
     WorkingDirectory {
         path: PathBuf,
@@ -451,7 +528,7 @@ pub(crate) enum PtyError {
     SshChannelUnavailable,
 }
 
-pub(crate) fn spawn_user_shell(
+fn spawn_user_shell(
     size: PtySize,
     working_directory: &Path,
 ) -> Result<(SpawnedPty, PtyTerminator), PtyError> {
@@ -461,7 +538,7 @@ pub(crate) fn spawn_user_shell(
     spawn_command_in_pty(size, command, &shell)
 }
 
-pub(crate) fn spawn_remote_pane_channel(
+fn spawn_remote_pane_channel(
     size: PtySize,
     local_home: &Path,
     command: SshCommandSpec,
@@ -469,6 +546,34 @@ pub(crate) fn spawn_remote_pane_channel(
     validate_working_directory(local_home)?;
     let command = build_remote_pane_command(command, local_home)?;
     spawn_command_in_pty(size, command, "/usr/bin/ssh")
+}
+
+pub(super) fn spawn_native_pty(
+    launch: NativePtyLaunch,
+    size: NativePtySize,
+) -> Result<NativePtyAdapterParts, PtyError> {
+    let (pty, termination) = match launch {
+        NativePtyLaunch::Local { working_directory } => {
+            spawn_user_shell(portable_size(size), &working_directory)?
+        }
+        NativePtyLaunch::Remote {
+            local_home,
+            command,
+        } => spawn_remote_pane_channel(portable_size(size), &local_home, command)?,
+    };
+    Ok(NativePtyAdapterParts {
+        adapter: Box::new(pty),
+        termination: Arc::new(termination),
+    })
+}
+
+const fn portable_size(size: NativePtySize) -> PtySize {
+    PtySize {
+        rows: size.rows,
+        cols: size.columns,
+        pixel_width: size.pixel_width,
+        pixel_height: size.pixel_height,
+    }
 }
 
 fn spawn_command_in_pty(
@@ -638,13 +743,6 @@ fn apply_terminal_identity(command: &mut CommandBuilder, resources: &Path) {
     command.env("SPACETERM", "1");
 }
 
-pub(crate) fn user_shell() -> String {
-    env::var("SHELL")
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| "/bin/zsh".to_owned())
-}
-
 #[cfg(test)]
 pub(crate) fn conformance_initialization_observation() -> String {
     let command = build_shell_command_with_resources(
@@ -705,7 +803,9 @@ pub(crate) fn conformance_shutdown_observation() -> String {
     let termination = ChildTermination::new(None, Box::new(CountingKiller(Arc::clone(&kills))));
     let first = termination.signal().is_ok();
     let second = termination.signal().is_ok();
-    let disposition = termination.complete_process_group(Instant::now());
+    let disposition = termination
+        .complete_process_group(Instant::now())
+        .expect("the fake child killer should complete shutdown");
     format!(
         "first={first} duplicate={second} signals={} disposition={disposition:?} revoked={}",
         kills.load(Ordering::Relaxed),
@@ -726,6 +826,7 @@ fn terminate_after_startup_failure(child: &mut dyn Child) {
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+    use std::env;
     use std::fmt;
     use std::io::{self, BufRead, BufReader};
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -739,6 +840,69 @@ mod tests {
     use crate::ssh::command::{
         RemotePaneShellCommandBuilder, SshCommandContext, ValidatedRemoteLoginShell,
     };
+
+    #[test]
+    fn platform_neutral_size_preserves_rows_columns_and_pixels() {
+        assert_eq!(
+            portable_size(NativePtySize {
+                rows: 31,
+                columns: 97,
+                pixel_width: 1_164,
+                pixel_height: 620,
+            }),
+            PtySize {
+                rows: 31,
+                cols: 97,
+                pixel_width: 1_164,
+                pixel_height: 620,
+            }
+        );
+    }
+
+    #[test]
+    fn platform_neutral_exit_preserves_status_and_shutdown_classification() {
+        let cases = [
+            (
+                ShellExit {
+                    status: ExitStatus::with_exit_code(0),
+                    shutdown: ShutdownDisposition::NotRequested,
+                },
+                NativePtyExit::Success,
+            ),
+            (
+                ShellExit {
+                    status: ExitStatus::with_exit_code(23),
+                    shutdown: ShutdownDisposition::NotRequested,
+                },
+                NativePtyExit::ExitCode(23),
+            ),
+            (
+                ShellExit {
+                    status: ExitStatus::with_signal("TERM"),
+                    shutdown: ShutdownDisposition::NotRequested,
+                },
+                NativePtyExit::Signal("TERM".to_owned()),
+            ),
+            (
+                ShellExit {
+                    status: ExitStatus::with_exit_code(0),
+                    shutdown: ShutdownDisposition::Graceful,
+                },
+                NativePtyExit::GracefulShutdown,
+            ),
+            (
+                ShellExit {
+                    status: ExitStatus::with_exit_code(0),
+                    shutdown: ShutdownDisposition::Forced,
+                },
+                NativePtyExit::ForcedShutdown,
+            ),
+        ];
+
+        for (exit, expected) in cases {
+            assert_eq!(native_exit(exit), expected);
+        }
+    }
 
     #[test]
     fn hidden_input_requires_canonical_mode_without_echo() {
