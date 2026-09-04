@@ -10,7 +10,7 @@ SpaceTerm is a modern native macOS terminal. Its layout hierarchy takes useful i
 tmux, but SpaceTerm is not a tmux client and has no tmux-style server/client model.
 The canonical product hierarchy is `SpaceTerm -> Workspace -> Tab -> Pane Layout -> Pane`.
 Each Workspace owns one or more Tabs with exactly one Active Tab, and each Tab owns one or more
-Panes with exactly one Focused Pane. Window means the native macOS presentation surface.
+Panes with exactly one Focused Pane.
 
 ## Technology decisions
 
