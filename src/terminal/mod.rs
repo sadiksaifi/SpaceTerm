@@ -11,6 +11,7 @@ mod graphics;
 mod hyperlink;
 pub(crate) mod identity;
 mod key;
+mod key_input;
 mod keyboard_protocol;
 pub(crate) mod metadata;
 mod native_services;
@@ -48,6 +49,13 @@ pub(crate) use graphics::{GraphicsSnapshot, ImageKey, ImagePlacementSnapshot, Im
 pub(crate) use hyperlink::HyperlinkTarget;
 pub(crate) use key::{
     InputModifiers, KeyAction, KeyInput, KeyInputError, OptionAsAltPolicy, PhysicalKey,
+};
+#[cfg(test)]
+pub(crate) use key_input::assert_common_adapter_contract;
+pub(crate) use key_input::{
+    GpuiTerminalKeyInputAdapter, GpuiTerminalKeyInputAdapterFactory, KeyTranslation,
+    TerminalKeyInputAdapter, TerminalKeyInputAdapterFactory, TerminalKeyInputEventKind,
+    UnhandledKeyEvent,
 };
 pub(crate) use metadata::TerminalLocalFileCapabilities;
 pub(crate) use native_services::{

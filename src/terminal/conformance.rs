@@ -22,6 +22,7 @@ use super::identity::{
     launch_identity,
 };
 use super::key::{InputModifiers, KeyAction, KeyInput, OptionAsAltPolicy, PhysicalKey};
+use super::key_input::KeyTranslation;
 use super::metadata::{
     DirectoryProvenance, TerminalLocalFileCapabilities, parse_osc7_directory, sanitize_title,
 };
@@ -38,9 +39,7 @@ use super::session::{
     PointerButton, PointerInput, PointerPhase, ShiftSelectionPolicy, SurfacePosition, WheelInput,
     WheelPhase,
 };
-use crate::platform::macos_keyboard::{
-    KeyTranslation, MacosKeyboardBridge, NativeKeyEvent, NativeModifiers,
-};
+use crate::platform::macos_keyboard::{MacosKeyboardBridge, NativeKeyEvent, NativeModifiers};
 use crate::platform::shell_integration::{
     ShellEnvironment, ShellIntegrationMode, ShellIntegrationStatus, ShellKind,
     plan_shell_integration, resource_root,

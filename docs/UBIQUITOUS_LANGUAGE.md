@@ -4,7 +4,7 @@
 
 | Term | Definition | Aliases to avoid |
 | --- | --- | --- |
-| **SpaceTerm** | The macOS terminal application that owns all Workspaces. | tmux client, terminal client |
+| **SpaceTerm** | The native terminal application that owns all Workspaces, ships on macOS today, and intentionally targets Linux. | tmux client, terminal client |
 | **Workspace** | A named top-level scope of one immutable Workspace Kind that owns one Workspace Directory and one or more Tabs. | Session, attached session, project |
 | **Workspace Kind** | The immutable runtime-only classification of a Workspace as Scratch, Local Project, or Remote Project. | mode, source, converted Workspace |
 | **Scratch Workspace** | A Workspace created at `HOME` whose Workspace Directory follows its Directory Authority. | Ad Hoc Workspace, default project, temporary session |
@@ -42,6 +42,10 @@
 | Term | Definition | Aliases to avoid |
 | --- | --- | --- |
 | **Terminal Session** | The live terminal runtime owned by a Pane, joining terminal emulation and a PTY to either a local Shell Process or a remote Terminal Session Channel. | Session, Workspace session |
+| **Terminal Key Input** | The platform-neutral Module that translates GPUI key, text, and aggregate-modifier events into validated typed input or an explicit unhandled outcome before the Terminal Session command lane. | native event forwarding, terminal escape sequence |
+| **Terminal Key Input Adapter** | One application-selected implementation of Terminal Key Input created per Pane through an injected factory. | Pane keyboard bridge, global keyboard singleton |
+| **Portable GPUI Adapter** | The Terminal Key Input Adapter used as the initial Linux path and as the macOS fallback when no matching AppKit event is available; it never invents physical identities GPUI does not expose. | Linux-native key mapper, guessed keycode fallback |
+| **macOS Terminal Key Input Adapter** | The Terminal Key Input Adapter that enriches GPUI callbacks synchronously from AppKit with native key code, input-source-aware text, consumed modifiers, and left/right modifier transitions. | Pane-owned AppKit bridge, portable keyboard mapper |
 | **Control Connection** | The Remote Project runtime that exclusively owns one OpenSSH master process and private runtime socket for one SSH Destination. | Terminal Session, SSH client, shared Pane process |
 | **Authentication Prompt** | A single OpenSSH AskPass confirmation or obscured response request presented through SpaceTerm's application-owned Alert or Dialog while connection progress is suspended. | native prompt, macOS sheet, terminal password input |
 | **Terminal Session Channel** | A single-use prepared OpenSSH channel command consumed by one Remote Pane's Terminal Session through its Control Connection. | Control Connection, shell command string, reusable channel |
@@ -131,6 +135,14 @@
 - A **Tab** belongs to exactly one **Workspace** and cannot be linked, shared, or attached elsewhere.
 - A **Tab** owns one or more **Panes**, exactly one **Focused Pane**, and one arbitrarily nested **Pane Layout**.
 - **Terminal Input Focus** is derived transient state and never replaces or duplicates a Tab's **Focused Pane** identity.
+- Application composition selects the **Terminal Key Input Adapter** factory. Each Pane owns only
+  the resulting platform-neutral Interface and never constructs or names the concrete Adapter.
+- The **Portable GPUI Adapter** preserves supported press, repeat, release, printable text, special
+  key, aggregate modifier, and Caps Lock facts. Because GPUI 0.2.2 exposes no native key code,
+  modifier side, consumed modifier, Num Lock, or modifier-only physical identity, the Adapter leaves
+  those facts absent and emits no guessed modifier-only input.
+- Unsupported physical identities produce the typed unhandled **Terminal Key Input** outcome,
+  record only content-free **Local Diagnostics**, and write no guessed bytes to a Terminal Session.
 - **Terminal Find** belongs to one **Pane** and one **Terminal Session**; losing that Pane's **Focused Pane** status closes it and clears its worker-owned state.
 - A **Find Query Generation** belongs to one **Terminal Find** query; stale navigation commands and highlight snapshots cannot affect or present a newer query.
 - Opening **Terminal Find** transfers responder ownership away from terminal input without changing **Focused Pane** identity; clicking the terminal may restore **Terminal Input Focus** while Find remains open.

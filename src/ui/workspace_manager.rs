@@ -46,10 +46,12 @@ use crate::platform::workspace_directory::validate_workspace_directory;
 use crate::platform::workspace_picker_filesystem::NativeWorkspacePickerFilesystem;
 use crate::ssh::live_connection::{ControlConnectionObserver, ControlConnectionTerminalState};
 use crate::ssh::process::TransientSshErrorOutput;
+#[cfg(test)]
+use crate::terminal::GpuiTerminalKeyInputAdapterFactory;
 use crate::terminal::metadata::RemoteTerminalMetadataContext;
 use crate::terminal::{
     NativeServiceOrigin, NativeServiceStatus, PreparedWorkspaceTerminalLaunch, SelectionCopy,
-    TerminalSessionFactory, WorkspaceTerminalSessionFactory,
+    TerminalKeyInputAdapterFactory, TerminalSessionFactory, WorkspaceTerminalSessionFactory,
 };
 use crate::theme::{ACTIVE_THEME, Color};
 use gpui::prelude::*;
@@ -223,6 +225,14 @@ struct TabManagerCreation {
     sidebar_visible: bool,
     sidebar_width: Pixels,
     operating_system_window_drag_platform: Rc<dyn OperatingSystemWindowDragPlatform>,
+    key_input_adapter_factory: Rc<dyn TerminalKeyInputAdapterFactory>,
+}
+
+struct WorkspaceManagerAdapters {
+    key_input: Rc<dyn TerminalKeyInputAdapterFactory>,
+    finder: Rc<dyn FinderFallback>,
+    window_drag: Rc<dyn OperatingSystemWindowDragPlatform>,
+    remote_workspace: Arc<dyn RemoteWorkspaceFlowBackendFactory>,
 }
 
 struct PendingRemoteProjectActivation {
@@ -257,6 +267,7 @@ impl Drop for RemoteWorkspaceRuntime {
 pub(crate) struct WorkspaceManager {
     workspaces: WorkspaceCollection<Entity<TabManager>>,
     session_factory: Rc<dyn TerminalSessionFactory>,
+    key_input_adapter_factory: Rc<dyn TerminalKeyInputAdapterFactory>,
     default_workspace_root: PathBuf,
     default_workspace_identity: WorkspaceDirectoryIdentity,
     finder_fallback: Rc<dyn FinderFallback>,
@@ -291,6 +302,7 @@ pub(crate) struct WorkspaceManager {
 impl WorkspaceManager {
     pub(crate) fn new(
         session_factory: Rc<dyn TerminalSessionFactory>,
+        key_input_adapter_factory: Rc<dyn TerminalKeyInputAdapterFactory>,
         default_workspace_root: PathBuf,
         remote_workspace_backend_factory: Arc<NativeRemoteWorkspaceFlowBackendFactory>,
         window: &mut Window,
@@ -301,9 +313,12 @@ impl WorkspaceManager {
         Self::new_with_adapters(
             session_factory,
             default_workspace_root,
-            Rc::new(NativeFinderFallback),
-            Rc::new(MacosOperatingSystemWindowDragPlatform::default()),
-            remote_workspace_backend_factory,
+            WorkspaceManagerAdapters {
+                key_input: key_input_adapter_factory,
+                finder: Rc::new(NativeFinderFallback),
+                window_drag: Rc::new(MacosOperatingSystemWindowDragPlatform::default()),
+                remote_workspace: remote_workspace_backend_factory,
+            },
             window,
             cx,
         )
@@ -320,9 +335,12 @@ impl WorkspaceManager {
         Self::new_with_adapters(
             session_factory,
             default_workspace_root,
-            Rc::new(NativeFinderFallback),
-            Rc::new(MacosOperatingSystemWindowDragPlatform::default()),
-            remote_workspace_backend_factory,
+            WorkspaceManagerAdapters {
+                key_input: Rc::new(GpuiTerminalKeyInputAdapterFactory::default()),
+                finder: Rc::new(NativeFinderFallback),
+                window_drag: Rc::new(MacosOperatingSystemWindowDragPlatform::default()),
+                remote_workspace: remote_workspace_backend_factory,
+            },
             window,
             cx,
         )
@@ -340,9 +358,12 @@ impl WorkspaceManager {
         Self::new_with_adapters(
             session_factory,
             default_workspace_root,
-            finder_fallback,
-            Rc::new(MacosOperatingSystemWindowDragPlatform::default()),
-            remote_workspace_backend_factory,
+            WorkspaceManagerAdapters {
+                key_input: Rc::new(GpuiTerminalKeyInputAdapterFactory::default()),
+                finder: finder_fallback,
+                window_drag: Rc::new(MacosOperatingSystemWindowDragPlatform::default()),
+                remote_workspace: remote_workspace_backend_factory,
+            },
             window,
             cx,
         )
@@ -360,9 +381,12 @@ impl WorkspaceManager {
         Self::new_with_adapters(
             session_factory,
             default_workspace_root,
-            Rc::new(NativeFinderFallback),
-            operating_system_window_drag_platform,
-            remote_workspace_backend_factory,
+            WorkspaceManagerAdapters {
+                key_input: Rc::new(GpuiTerminalKeyInputAdapterFactory::default()),
+                finder: Rc::new(NativeFinderFallback),
+                window_drag: operating_system_window_drag_platform,
+                remote_workspace: remote_workspace_backend_factory,
+            },
             window,
             cx,
         )
@@ -371,23 +395,27 @@ impl WorkspaceManager {
     fn new_with_adapters(
         session_factory: Rc<dyn TerminalSessionFactory>,
         default_workspace_root: PathBuf,
-        finder_fallback: Rc<dyn FinderFallback>,
-        operating_system_window_drag_platform: Rc<dyn OperatingSystemWindowDragPlatform>,
-        remote_workspace_backend_factory: Arc<dyn RemoteWorkspaceFlowBackendFactory>,
+        adapters: WorkspaceManagerAdapters,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        let WorkspaceManagerAdapters {
+            key_input: key_input_adapter_factory,
+            finder: finder_fallback,
+            window_drag: operating_system_window_drag_platform,
+            remote_workspace: remote_workspace_backend_factory,
+        } = adapters;
         let (default_directory, initial_directory_error) =
             initial_workspace_directory(default_workspace_root.clone());
         let default_workspace_identity = default_directory.identity();
         let initial_workspace_identity = default_directory.identity();
         let initial_window_drag_platform = Rc::clone(&operating_system_window_drag_platform);
+        let initial_key_input_adapter_factory = Rc::clone(&key_input_adapter_factory);
         let mut workspaces = WorkspaceCollection::new_scratch(
             default_directory,
             DirectoryAuthority::initial(),
             |workspace_id, workspace_root| {
                 Self::create_local_tab_manager(
-                    workspace_id,
                     WorkspaceTerminalSessionFactory::new_local(
                         Rc::clone(&session_factory),
                         ValidatedWorkspaceDirectory::new(
@@ -395,9 +423,15 @@ impl WorkspaceManager {
                             initial_workspace_identity,
                         ),
                     ),
-                    true,
-                    px(WORKSPACE_SIDEBAR_DEFAULT_WIDTH),
-                    Rc::clone(&initial_window_drag_platform),
+                    TabManagerCreation {
+                        workspace_id,
+                        sidebar_visible: true,
+                        sidebar_width: px(WORKSPACE_SIDEBAR_DEFAULT_WIDTH),
+                        operating_system_window_drag_platform: Rc::clone(
+                            &initial_window_drag_platform,
+                        ),
+                        key_input_adapter_factory: Rc::clone(&initial_key_input_adapter_factory),
+                    },
                     window,
                     cx,
                 )
@@ -491,6 +525,7 @@ impl WorkspaceManager {
         Self {
             workspaces,
             session_factory,
+            key_input_adapter_factory,
             default_workspace_root,
             default_workspace_identity,
             finder_fallback,
@@ -524,25 +559,12 @@ impl WorkspaceManager {
     }
 
     fn create_local_tab_manager(
-        workspace_id: WorkspaceId,
         session_factory: WorkspaceTerminalSessionFactory,
-        sidebar_visible: bool,
-        sidebar_width: Pixels,
-        operating_system_window_drag_platform: Rc<dyn OperatingSystemWindowDragPlatform>,
+        creation: TabManagerCreation,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Entity<TabManager> {
-        match Self::try_create_tab_manager(
-            session_factory,
-            TabManagerCreation {
-                workspace_id,
-                sidebar_visible,
-                sidebar_width,
-                operating_system_window_drag_platform,
-            },
-            window,
-            cx,
-        ) {
+        match Self::try_create_tab_manager(session_factory, creation, window, cx) {
             Ok(manager) => manager,
             Err(error) => unreachable!("Local initial launch preparation is infallible: {error}"),
         }
@@ -576,12 +598,14 @@ impl WorkspaceManager {
             sidebar_visible,
             sidebar_width,
             operating_system_window_drag_platform,
+            key_input_adapter_factory,
         } = creation;
         let manager = cx.new(|cx| {
             let mut manager = TabManager::new_with_prepared_initial_launch(
                 session_factory,
                 prepared_launch,
                 operating_system_window_drag_platform,
+                key_input_adapter_factory,
                 window,
                 cx,
             );
@@ -1281,6 +1305,7 @@ impl WorkspaceManager {
     fn create_scratch_workspace(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let previous_manager = self.workspaces.active_workspace().payload().clone();
         let session_factory = Rc::clone(&self.session_factory);
+        let key_input_adapter_factory = Rc::clone(&self.key_input_adapter_factory);
         let window_drag_platform = Rc::clone(&self.operating_system_window_drag_platform);
         let sidebar_visible = self.sidebar_visible;
         let sidebar_width = self.sidebar_width;
@@ -1291,7 +1316,6 @@ impl WorkspaceManager {
             DirectoryAuthority::initial(),
             |workspace_id, workspace_root| {
                 Self::create_local_tab_manager(
-                    workspace_id,
                     WorkspaceTerminalSessionFactory::new_local(
                         session_factory,
                         ValidatedWorkspaceDirectory::new(
@@ -1299,9 +1323,13 @@ impl WorkspaceManager {
                             directory_identity,
                         ),
                     ),
-                    sidebar_visible,
-                    sidebar_width,
-                    window_drag_platform,
+                    TabManagerCreation {
+                        workspace_id,
+                        sidebar_visible,
+                        sidebar_width,
+                        operating_system_window_drag_platform: window_drag_platform,
+                        key_input_adapter_factory,
+                    },
                     window,
                     cx,
                 )
@@ -1667,6 +1695,7 @@ impl WorkspaceManager {
         let sidebar_visible = self.sidebar_visible;
         let sidebar_width = self.sidebar_width;
         let window_drag_platform = Rc::clone(&self.operating_system_window_drag_platform);
+        let key_input_adapter_factory = Rc::clone(&self.key_input_adapter_factory);
         let result = self.workspaces.create_remote_project_workspace(
             key,
             completion.directory().clone(),
@@ -1681,6 +1710,7 @@ impl WorkspaceManager {
                         sidebar_visible,
                         sidebar_width,
                         operating_system_window_drag_platform: window_drag_platform,
+                        key_input_adapter_factory,
                     },
                     window,
                     cx,
@@ -2436,6 +2466,7 @@ impl WorkspaceManager {
 
         let previous_manager = self.workspaces.active_workspace().payload().clone();
         let session_factory = Rc::clone(&self.session_factory);
+        let key_input_adapter_factory = Rc::clone(&self.key_input_adapter_factory);
         let window_drag_platform = Rc::clone(&self.operating_system_window_drag_platform);
         let sidebar_visible = self.sidebar_visible;
         let sidebar_width = self.sidebar_width;
@@ -2444,7 +2475,6 @@ impl WorkspaceManager {
             directory,
             |workspace_id, project_root| {
                 Self::create_local_tab_manager(
-                    workspace_id,
                     WorkspaceTerminalSessionFactory::new_local(
                         session_factory,
                         ValidatedWorkspaceDirectory::new(
@@ -2452,9 +2482,13 @@ impl WorkspaceManager {
                             project_root_identity,
                         ),
                     ),
-                    sidebar_visible,
-                    sidebar_width,
-                    window_drag_platform,
+                    TabManagerCreation {
+                        workspace_id,
+                        sidebar_visible,
+                        sidebar_width,
+                        operating_system_window_drag_platform: window_drag_platform,
+                        key_input_adapter_factory,
+                    },
                     window,
                     cx,
                 )
@@ -2801,6 +2835,7 @@ impl WorkspaceManager {
         self.begin_remote_workspace_close(workspace_id, window, cx);
         let was_active = self.workspaces.active_workspace_id() == workspace_id;
         let session_factory = Rc::clone(&self.session_factory);
+        let key_input_adapter_factory = Rc::clone(&self.key_input_adapter_factory);
         let window_drag_platform = Rc::clone(&self.operating_system_window_drag_platform);
         let sidebar_visible = self.sidebar_visible;
         let sidebar_width = self.sidebar_width;
@@ -2812,7 +2847,6 @@ impl WorkspaceManager {
             DirectoryAuthority::initial(),
             |replacement_workspace_id, workspace_root| {
                 Self::create_local_tab_manager(
-                    replacement_workspace_id,
                     WorkspaceTerminalSessionFactory::new_local(
                         session_factory,
                         ValidatedWorkspaceDirectory::new(
@@ -2820,9 +2854,13 @@ impl WorkspaceManager {
                             replacement_identity,
                         ),
                     ),
-                    sidebar_visible,
-                    sidebar_width,
-                    window_drag_platform,
+                    TabManagerCreation {
+                        workspace_id: replacement_workspace_id,
+                        sidebar_visible,
+                        sidebar_width,
+                        operating_system_window_drag_platform: window_drag_platform,
+                        key_input_adapter_factory,
+                    },
                     window,
                     cx,
                 )

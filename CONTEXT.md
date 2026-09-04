@@ -6,25 +6,29 @@ and architectural principles. Domain terminology, relationships, and invariants 
 
 ## Product intent
 
-SpaceTerm is a modern native macOS terminal. Its layout hierarchy takes useful inspiration from
-tmux, but SpaceTerm is not a tmux client and has no tmux-style server/client model.
+SpaceTerm is a modern native desktop terminal, shipped on macOS today with Linux as an intentional
+target. Its layout hierarchy takes useful inspiration from tmux, but SpaceTerm is not a tmux client
+and has no tmux-style server/client model.
 The canonical product hierarchy is `SpaceTerm -> Workspace -> Tab -> Pane Layout -> Pane`.
 Each Workspace owns one or more Tabs with exactly one Active Tab, and each Tab owns one or more
 Panes with exactly one Focused Pane.
 
 ## Technology decisions
 
-- Use Rust 2024 and GPUI for native UI and GPU rendering.
+- Use Rust 2024 and GPUI for native UI and GPU rendering on macOS and Linux.
 - Keep the executable in the root application crate and reusable GPUI controls in the internal
   `spaceterm-ui` library crate.
 - Use `libghostty-vt` for terminal emulation.
-- Use a macOS PTY to launch and communicate with shells.
+- Use an Operating-System-specific PTY Adapter to launch and communicate with shells. The current
+  production implementation is macOS-only; Linux PTY support remains future work.
 - Use typed `IconName` values from the exact `lucide-icons` 1.34.0 set for app-owned in-app
   icons. The platform-neutral `spaceterm-ui` crate owns the dependency, registers its bundled font,
   and renders icons through a size-and-tint adapter.
-- Ship the SpaceTerm application on macOS and keep native platform integration macOS-specific.
-  Reusable `spaceterm-ui` controls render entirely through GPUI and remain platform-neutral for
-  possible future Linux and Windows support; do not create speculative platform adapters.
+- Ship the SpaceTerm application on macOS today and keep native platform integration behind
+  explicit Adapters. Linux is the intentional next target, beginning with the portable GPUI
+  Terminal Key Input Adapter; a complete Linux application port is not yet claimed. Reusable
+  `spaceterm-ui` controls render entirely through GPUI and remain platform-neutral. Do not create
+  speculative Windows adapters.
 - Package the application and installer disk image with pinned `cargo-packager` 0.11.8. The
   tracked `SpaceTerm.icon` is the only application-icon source and requires Xcode 26 or newer to
   compile into a layered `Assets.car` plus the legacy `SpaceTerm.icns` fallback. Local packages
@@ -750,15 +754,32 @@ encoding to `libghostty-vt`; UI code never constructs terminal escape sequences.
 transitions remain protocol-visible without clearing the Selection or forcing the viewport to the
 bottom; the first non-modifier terminal input retains the normal clear-on-type behavior.
 
-### Native macOS Keyboard Bridge
+Terminal Key Input is a platform-neutral Module whose Interface accepts GPUI key-down, key-up,
+repeat, text, and aggregate-modifier events and returns either validated `KeyInput`, an explicit
+unhandled outcome, or no key when an aggregate state change cannot identify a physical key.
+Application composition selects one Adapter factory and passes it through Workspace, Tab, and Pane
+composition; an individual Pane neither constructs nor names an Operating-System-specific Adapter.
+The shared classification never invents bytes for an unsupported physical identity.
 
-The focused Pane reads the current AppKit keyboard event synchronously from GPUI's raw keyboard
+The portable GPUI Adapter is the initial Linux path. It maps the physical identities GPUI exposes,
+preserves printable text, special keys, repeat and release actions, and carries aggregate modifier
+and Caps Lock state into subsequent typed inputs. GPUI 0.2.2 does not expose a native key code,
+left/right modifier identity, consumed modifiers, Num Lock state, or a physical identity for an
+aggregate modifier change. The portable Adapter therefore leaves those facts absent, emits no
+modifier-only `KeyInput`, and never guesses a side or terminal byte. A Linux-native enrichment
+Adapter is deferred unless common conformance evidence requires those unavailable facts.
+
+### Native macOS Terminal Key Input Adapter
+
+The macOS Adapter reads the current AppKit keyboard event synchronously from GPUI's raw keyboard
 callbacks, after application Actions have had the first opportunity to consume Command bindings.
-The bridge maps native macOS keycodes to stable physical identities while deriving logical text,
-unshifted codepoints, and consumed modifiers from each event, so input-source changes require no
-cached layout state or Terminal Session restart. It balances left/right modifier transitions and
+Its native enrichment maps macOS keycodes to stable physical identities while deriving logical
+text, unshifted codepoints, and consumed modifiers from each event, so input-source changes require
+no cached layout state or Terminal Session restart. It balances left/right modifier transitions and
 carries the injected Option-as-Alt policy with every ordered key event. Key releases use the same
-Terminal Session command lane as presses and repeats.
+Terminal Session command lane as presses and repeats. When no matching AppKit event is available,
+the same Adapter delegates to the portable GPUI implementation rather than moving platform policy
+into the Pane.
 
 ### Native Input Method Composition
 

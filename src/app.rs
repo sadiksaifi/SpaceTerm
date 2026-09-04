@@ -9,10 +9,14 @@ use gpui::{
 use spaceterm_ui::{EditCopy, EditCut, EditPaste, EditRedo, EditSelectAll, EditUndo};
 
 use crate::platform::app_paths::{AppPathEnvironment, AppPaths, AppPathsError};
+use crate::platform::macos_keyboard::MacosTerminalKeyInputAdapterFactory;
 use crate::ssh::alias_usage::ActiveSshAliasRegistry;
 use crate::ssh::command::{NativeSshProbeRunner, SshCapability, SshUnavailableReason};
 use crate::ssh::startup_environment::StartupSshEnvironment;
-use crate::terminal::{NativeTerminalSessionFactory, TerminalSessionFactory};
+use crate::terminal::{
+    NativeTerminalSessionFactory, OptionAsAltPolicy, TerminalKeyInputAdapterFactory,
+    TerminalSessionFactory,
+};
 use crate::ui::{
     ClosePane, CloseTab, CloseWorkspace, CreateScratchWorkspace, CreateTab,
     ExportTerminalDiagnostics, FindNext, FindPrevious, NativeRemoteWorkspaceFlowBackendFactory,
@@ -225,6 +229,9 @@ pub(crate) fn open(cx: &mut App, startup: StartupDependencies) {
     let remote_backend_factory = startup.remote_backend_factory();
     let bounds = Bounds::centered(None, size(px(900.0), px(580.0)), cx);
     let session_factory: Rc<dyn TerminalSessionFactory> = Rc::new(NativeTerminalSessionFactory);
+    let key_input_adapter_factory: Rc<dyn TerminalKeyInputAdapterFactory> = Rc::new(
+        MacosTerminalKeyInputAdapterFactory::new(OptionAsAltPolicy::default()),
+    );
     let result = cx.open_window(
         WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
@@ -240,6 +247,7 @@ pub(crate) fn open(cx: &mut App, startup: StartupDependencies) {
             let workspace_manager = cx.new(|cx| {
                 WorkspaceManager::new(
                     Rc::clone(&session_factory),
+                    Rc::clone(&key_input_adapter_factory),
                     home_directory.clone(),
                     Arc::clone(&remote_backend_factory),
                     window,
