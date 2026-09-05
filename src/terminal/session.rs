@@ -2620,6 +2620,7 @@ fn join_worker(worker: JoinHandle<()>) {
 #[cfg(test)]
 mod tests {
     use std::collections::VecDeque;
+    use std::ffi::OsString;
     use std::io::{self, ErrorKind, Read};
     use std::sync::{Condvar, Mutex};
     use std::time::{Duration, Instant};
@@ -2695,6 +2696,75 @@ mod tests {
                 crate::ssh::command::PreparedSshPaneChannelError::AlreadyConsumed
             ))
         ));
+    }
+
+    #[test]
+    fn native_factory_routes_local_launches_through_the_injected_adapter_factory() {
+        let (factory, constructions) = recording_native_terminal_session_factory();
+        let working_directory = PathBuf::from("/exact/local/../project");
+        let plan = TerminalLaunchPlan::Local(LocalTerminalLaunchPlan::new(
+            crate::domain::ValidatedWorkspaceDirectory::new(
+                working_directory.clone(),
+                WorkspaceDirectoryIdentity::new(7, 11),
+            ),
+        ));
+
+        let started = factory.start(test_geometry(), plan).unwrap();
+        let construction = constructions
+            .recv_timeout(Duration::from_secs(1))
+            .expect("Local construction should reach the injected factory");
+        drop(started.handle);
+
+        assert_eq!(
+            construction,
+            RecordedNativePtyLaunch::Local {
+                working_directory,
+                size: pty_size(test_geometry()),
+            }
+        );
+    }
+
+    #[test]
+    fn native_factory_routes_remote_launches_through_the_injected_adapter_factory() {
+        let (factory, constructions) = recording_native_terminal_session_factory();
+        let local_home = PathBuf::from("/exact/local/home");
+        let destination = SshDestination::new("user@remote".to_owned()).unwrap();
+        let remote_directory = RemoteWorkspaceDirectory::new("~/project".to_owned()).unwrap();
+        let context = SshCommandContext::new(
+            PathBuf::from("/private/config/spaceterm/ssh_config"),
+            destination.clone(),
+            PathBuf::from("/private/runtime/spaceterm/control.sock"),
+        )
+        .unwrap();
+        let expected_command = context.pane_channel(remote_pane_command(&remote_directory));
+        let expected_executable = expected_command.executable().to_owned();
+        let expected_arguments = expected_command.arguments().to_vec();
+        let plan = TerminalLaunchPlan::Remote(Box::new(RemoteTerminalLaunchPlan::new(
+            crate::domain::ValidatedWorkspaceDirectory::new(
+                local_home.clone(),
+                WorkspaceDirectoryIdentity::new(7, 11),
+            ),
+            destination,
+            remote_directory.clone(),
+            "project on remote".to_owned(),
+            context.prepare_pane_channel(remote_pane_command(&remote_directory)),
+        )));
+
+        let started = factory.start(test_geometry(), plan).unwrap();
+        let construction = constructions
+            .recv_timeout(Duration::from_secs(1))
+            .expect("Remote construction should reach the injected factory");
+        drop(started.handle);
+
+        assert_eq!(
+            construction,
+            RecordedNativePtyLaunch::Remote {
+                local_home,
+                executable: expected_executable,
+                arguments: expected_arguments,
+                size: pty_size(test_geometry()),
+            }
+        );
     }
 
     #[test]
@@ -3063,6 +3133,80 @@ mod tests {
         fn request_termination(&self) -> io::Result<()> {
             Ok(())
         }
+    }
+
+    #[derive(Debug, Eq, PartialEq)]
+    enum RecordedNativePtyLaunch {
+        Local {
+            working_directory: PathBuf,
+            size: NativePtySize,
+        },
+        Remote {
+            local_home: PathBuf,
+            executable: OsString,
+            arguments: Vec<OsString>,
+            size: NativePtySize,
+        },
+    }
+
+    struct RecordingSessionAdapterFactory {
+        constructions: mpsc::Sender<RecordedNativePtyLaunch>,
+    }
+
+    impl NativePtyAdapterFactory for RecordingSessionAdapterFactory {
+        fn create(
+            &self,
+            launch: NativePtyLaunch,
+            size: NativePtySize,
+        ) -> Result<
+            NativePtyAdapterParts,
+            crate::platform::native_pty::NativePtyAdapterConstructionFailure,
+        > {
+            let launch = match launch {
+                NativePtyLaunch::Local { working_directory } => RecordedNativePtyLaunch::Local {
+                    working_directory,
+                    size,
+                },
+                NativePtyLaunch::Remote {
+                    local_home,
+                    command,
+                } => RecordedNativePtyLaunch::Remote {
+                    local_home,
+                    executable: command.executable().to_owned(),
+                    arguments: command.arguments().to_vec(),
+                    size,
+                },
+            };
+            self.constructions
+                .send(launch)
+                .expect("construction observation should remain available");
+            Ok(NativePtyAdapterParts {
+                adapter: Box::new(ScriptedPty {
+                    reader: Some(Box::new(io::empty())),
+                    records: ScriptedPtyRecords::default(),
+                    reader_error: None,
+                    resize_error: None,
+                    write_error: None,
+                    wait_error: None,
+                    wait_times_out: false,
+                    exit_code: 0,
+                }),
+                termination: Arc::new(NoopNativePtyTermination),
+            })
+        }
+    }
+
+    fn recording_native_terminal_session_factory() -> (
+        NativeTerminalSessionFactory,
+        mpsc::Receiver<RecordedNativePtyLaunch>,
+    ) {
+        let (constructions, observed) = mpsc::channel();
+        (
+            NativeTerminalSessionFactory::new(Arc::new(RecordingSessionAdapterFactory {
+                constructions,
+            })),
+            observed,
+        )
     }
 
     fn direct_native_pty(records: ScriptedPtyRecords) -> NativePtyOwner {
