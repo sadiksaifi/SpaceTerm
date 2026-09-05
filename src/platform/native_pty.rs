@@ -588,6 +588,67 @@ mod tests {
         drop(owner);
     }
 
+    #[test]
+    fn owner_retains_factory_parts_until_owner_destruction() {
+        let termination_count = Arc::new(AtomicUsize::new(0));
+        let factory = RecordingAdapterFactory {
+            construction: Arc::new(Mutex::new(None)),
+            adapter_observation: Arc::new(Mutex::new(AdapterObservation::default())),
+            termination_count: Arc::clone(&termination_count),
+        };
+        let owner = NativePtyOwner::start(
+            &factory,
+            NativePtyLaunch::local(PathBuf::from("/project")),
+            NativePtySize::default(),
+            Arc::new(DiscardOutput),
+            &NativePtyCloseHandle::default(),
+        )
+        .expect("fake Native PTY Owner should start");
+
+        drop(factory);
+        let before_owner_drop = termination_count.load(Ordering::Acquire);
+        drop(owner);
+        assert_eq!(
+            (before_owner_drop, termination_count.load(Ordering::Acquire),),
+            (0, 1)
+        );
+    }
+
+    struct FailingAdapterFactory;
+
+    impl NativePtyAdapterFactory for FailingAdapterFactory {
+        fn create(
+            &self,
+            _launch: NativePtyLaunch,
+            _size: NativePtySize,
+        ) -> Result<NativePtyAdapterParts, NativePtyAdapterConstructionFailure> {
+            Err(NativePtyAdapterConstructionFailure::new(
+                "adapter construction unavailable".to_owned(),
+            ))
+        }
+    }
+
+    #[test]
+    fn owner_maps_adapter_factory_failure_to_the_adapter_startup_stage() {
+        let error = NativePtyOwner::start(
+            &FailingAdapterFactory,
+            NativePtyLaunch::local(PathBuf::from("/project")),
+            NativePtySize::default(),
+            Arc::new(DiscardOutput),
+            &NativePtyCloseHandle::default(),
+        )
+        .err()
+        .expect("adapter construction should fail");
+
+        assert_eq!(
+            (error.stage(), error.to_string()),
+            (
+                NativePtyStartupStage::Adapter,
+                "adapter construction unavailable".to_owned(),
+            )
+        );
+    }
+
     fn observed_owner(
         exit: NativePtyExit,
         close_handle: &NativePtyCloseHandle,
