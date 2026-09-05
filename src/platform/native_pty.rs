@@ -158,6 +158,10 @@ pub(crate) trait NativePtyAdapter: Write + Send {
     fn wait_for_exit(&mut self, timeout: Duration) -> Result<NativePtyExit, NativePtyWaitFailure>;
 }
 
+/// Constructs the platform-neutral parts owned by one Native PTY Owner.
+///
+/// Application composition selects the Operating-System-specific implementation. The Interface
+/// deliberately exposes no descriptor, terminal attribute, signal, or process-group mechanism.
 pub(crate) trait NativePtyAdapterFactory: Send + Sync {
     fn create(
         &self,
@@ -168,6 +172,7 @@ pub(crate) trait NativePtyAdapterFactory: Send + Sync {
 
 #[derive(Clone, Debug, Eq, Error, PartialEq)]
 #[error("{message}")]
+/// A construction failure erased at the Operating-System Adapter boundary.
 pub(crate) struct NativePtyAdapterConstructionFailure {
     message: String,
 }
@@ -318,10 +323,19 @@ impl NativePtyOwner {
         let parts = adapter_factory
             .create(launch, size)
             .map_err(|error| NativePtyStartupFailure::Adapter(error.to_string()))?;
-        Self::from_adapter_parts(parts, output, close_handle)
+        Self::install_adapter_parts(parts, output, close_handle)
     }
 
+    #[cfg(test)]
     pub(crate) fn from_adapter_parts(
+        parts: NativePtyAdapterParts,
+        output: Arc<dyn NativePtyOutputSink>,
+        close_handle: &NativePtyCloseHandle,
+    ) -> Result<Self, NativePtyStartupFailure> {
+        Self::install_adapter_parts(parts, output, close_handle)
+    }
+
+    fn install_adapter_parts(
         mut parts: NativePtyAdapterParts,
         output: Arc<dyn NativePtyOutputSink>,
         close_handle: &NativePtyCloseHandle,

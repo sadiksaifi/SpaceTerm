@@ -774,6 +774,7 @@ fn spawn_remote_pane_channel(
 }
 
 #[derive(Clone, Copy, Debug, Default)]
+/// The application-selected macOS Native PTY construction implementation.
 pub(crate) struct MacosNativePtyAdapterFactory;
 
 impl NativePtyAdapterFactory for MacosNativePtyAdapterFactory {
