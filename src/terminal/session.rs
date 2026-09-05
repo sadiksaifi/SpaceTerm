@@ -13,9 +13,9 @@ use std::time::{Duration, Instant};
 use thiserror::Error;
 
 use crate::platform::native_pty::{
-    NativePtyCloseHandle, NativePtyExit, NativePtyLaunch, NativePtyOperationFailure,
-    NativePtyOutput, NativePtyOutputSink, NativePtyOwner, NativePtySize, NativePtyStartupFailure,
-    NativePtyStartupStage, NativePtyWaitFailure, shell_fallback_title,
+    NativePtyAdapterFactory, NativePtyCloseHandle, NativePtyExit, NativePtyLaunch,
+    NativePtyOperationFailure, NativePtyOutput, NativePtyOutputSink, NativePtyOwner, NativePtySize,
+    NativePtyStartupFailure, NativePtyStartupStage, NativePtyWaitFailure, shell_fallback_title,
 };
 use crate::platform::shell_integration::resource_root;
 #[cfg(all(target_os = "macos", not(test)))]
@@ -455,8 +455,18 @@ pub(crate) enum TerminalLaunchPlan {
     Remote(Box<RemoteTerminalLaunchPlan>),
 }
 
-#[derive(Clone, Copy, Debug, Default)]
-pub(crate) struct NativeTerminalSessionFactory;
+#[derive(Clone)]
+pub(crate) struct NativeTerminalSessionFactory {
+    native_pty_adapter_factory: Arc<dyn NativePtyAdapterFactory>,
+}
+
+impl NativeTerminalSessionFactory {
+    pub(crate) fn new(native_pty_adapter_factory: Arc<dyn NativePtyAdapterFactory>) -> Self {
+        Self {
+            native_pty_adapter_factory,
+        }
+    }
+}
 
 impl TerminalSessionFactory for NativeTerminalSessionFactory {
     fn start(
@@ -467,13 +477,17 @@ impl TerminalSessionFactory for NativeTerminalSessionFactory {
         let observation =
             crate::platform::acceptance_observation::take_runtime_session_observation();
         let (session, events, accessibility) = match launch_plan {
-            TerminalLaunchPlan::Local(local) => {
-                TerminalSession::start(geometry, local.working_directory().path(), observation)?
-            }
+            TerminalLaunchPlan::Local(local) => TerminalSession::start(
+                Arc::clone(&self.native_pty_adapter_factory),
+                geometry,
+                local.working_directory().path(),
+                observation,
+            )?,
             TerminalLaunchPlan::Remote(remote) => {
                 let remote = *remote;
                 let command = remote.pane_channel.take()?;
                 TerminalSession::start_remote(
+                    Arc::clone(&self.native_pty_adapter_factory),
                     geometry,
                     remote.local_home.path(),
                     remote.metadata_context,
@@ -601,6 +615,7 @@ fn native_osc52_clipboard() -> Box<dyn Osc52Clipboard> {
 
 impl TerminalSession {
     pub(crate) fn start(
+        native_pty_adapter_factory: Arc<dyn NativePtyAdapterFactory>,
         geometry: TerminalGeometry,
         working_directory: &Path,
         runtime_observation: Option<RuntimeObservation>,
@@ -611,12 +626,19 @@ impl TerminalSession {
             working_directory,
             runtime_observation,
             move |size, output, close_handle| {
-                NativePtyOwner::start(launch, size, output, close_handle)
+                NativePtyOwner::start(
+                    native_pty_adapter_factory.as_ref(),
+                    launch,
+                    size,
+                    output,
+                    close_handle,
+                )
             },
         )
     }
 
     fn start_remote(
+        native_pty_adapter_factory: Arc<dyn NativePtyAdapterFactory>,
         geometry: TerminalGeometry,
         local_home: &Path,
         metadata_context: RemoteTerminalMetadataContext,
@@ -632,7 +654,13 @@ impl TerminalSession {
             identity::TERM_FALLBACK,
             runtime_observation,
             move |size, output, close_handle| {
-                NativePtyOwner::start(launch, size, output, close_handle)
+                NativePtyOwner::start(
+                    native_pty_adapter_factory.as_ref(),
+                    launch,
+                    size,
+                    output,
+                    close_handle,
+                )
             },
         )
     }
@@ -2598,6 +2626,7 @@ mod tests {
 
     use super::*;
     use crate::domain::{RemoteWorkspaceDirectory, SshDestination, WorkspaceDirectoryIdentity};
+    use crate::platform::macos_pty::MacosNativePtyAdapterFactory;
     use crate::platform::native_pty::{
         NativePtyAdapter, NativePtyAdapterParts, NativePtyTermination,
     };
@@ -2605,6 +2634,14 @@ mod tests {
         RemotePaneShellCommandBuilder, SshCommandContext, ValidatedRemoteLoginShell,
         ValidatedRemoteShellCommand,
     };
+
+    fn macos_native_pty_adapter_factory() -> Arc<dyn NativePtyAdapterFactory> {
+        Arc::new(MacosNativePtyAdapterFactory)
+    }
+
+    fn native_terminal_session_factory() -> NativeTerminalSessionFactory {
+        NativeTerminalSessionFactory::new(macos_native_pty_adapter_factory())
+    }
 
     fn remote_pane_command(directory: &RemoteWorkspaceDirectory) -> ValidatedRemoteShellCommand {
         let shell = ValidatedRemoteLoginShell::new("/bin/zsh".to_owned()).unwrap();
@@ -2648,7 +2685,7 @@ mod tests {
         assert!(!debug.contains("/Users/local"));
         let _consumed = prepared.take().unwrap();
 
-        let error = NativeTerminalSessionFactory
+        let error = native_terminal_session_factory()
             .start(test_geometry(), TerminalLaunchPlan::Remote(Box::new(plan)))
             .err();
 
@@ -3645,7 +3682,7 @@ mod tests {
             handle: session,
             events,
             accessibility: _,
-        } = NativeTerminalSessionFactory
+        } = native_terminal_session_factory()
             .start(
                 test_geometry(),
                 TerminalLaunchPlan::Local(LocalTerminalLaunchPlan::new(
@@ -3699,7 +3736,7 @@ mod tests {
             handle: session,
             events,
             accessibility: _,
-        } = NativeTerminalSessionFactory
+        } = native_terminal_session_factory()
             .start(test_geometry(), TerminalLaunchPlan::Remote(Box::new(plan)))
             .unwrap();
 
@@ -5027,8 +5064,13 @@ mod tests {
     fn real_shell_output_round_trips_through_the_pty_and_emulator() {
         let _isolation = crate::platform::native_pty::lock_real_pty_test();
         let size = test_geometry();
-        let (session, events, _accessibility) =
-            TerminalSession::start(size, &std::env::current_dir().unwrap(), None).unwrap();
+        let (session, events, _accessibility) = TerminalSession::start(
+            macos_native_pty_adapter_factory(),
+            size,
+            &std::env::current_dir().unwrap(),
+            None,
+        )
+        .unwrap();
         let session = JoinedRealPtySession(session);
 
         // The command renders a red X. The echoed command contains an X too, but
@@ -5083,8 +5125,13 @@ mod tests {
     fn real_shell_exit_command_emits_an_exited_event() {
         let _isolation = crate::platform::native_pty::lock_real_pty_test();
         let size = test_geometry();
-        let (session, events, _accessibility) =
-            TerminalSession::start(size, &std::env::current_dir().unwrap(), None).unwrap();
+        let (session, events, _accessibility) = TerminalSession::start(
+            macos_native_pty_adapter_factory(),
+            size,
+            &std::env::current_dir().unwrap(),
+            None,
+        )
+        .unwrap();
         let session = JoinedRealPtySession(session);
 
         let request = session
