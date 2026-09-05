@@ -332,9 +332,15 @@ typed Native PTY launch, geometry, output, operation, exit, and failure values. 
 Emulator initialization, the Bounded PTY Output Transport, command ordering, resize delivery, and
 event publication without naming an Operating-System Adapter or POSIX mechanism.
 
+Application composition selects one concrete Native PTY Adapter factory and injects it through
+Terminal Session construction. The Native PTY Owner passes its existing platform-neutral launch
+and geometry values to that narrow construction Interface, then owns only the returned Adapter and
+termination authority. Adapter construction failures cross the Interface as one platform-neutral
+typed failure and retain the Native PTY startup-stage mapping.
+
 Local Shell Process and remote Terminal Session Channel launches enter the same Native PTY Owner
 Seam and ownership lifecycle. Terminal Session creation returns after starting its worker, while
-the Native PTY Owner creates its Adapter and Shell Process there. A platform-neutral close handle
+the Native PTY Owner invokes the injected construction Interface there. A platform-neutral close handle
 records a request that races startup, applies it promptly when termination authority is installed,
 and rejects duplicate effects. Close callers detach worker cleanup and never wait for the reader,
 shutdown escalation, Shell Process wait, or reap.

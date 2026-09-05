@@ -44,3 +44,4 @@ A native macOS terminal implemented as a Rust application with one internal UI l
 - Run `just doctor` before packaging when local tool availability is uncertain.
 - Product terminology intentionally differs from tmux, browser, and GPUI terminology; follow the
   ubiquitous language rather than visual analogy.
+- A user-installed `/Applications/SpaceTerm.app` is always present and may be an older build. Do not confuse it with test builds.

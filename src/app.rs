@@ -10,6 +10,8 @@ use spaceterm_ui::{EditCopy, EditCut, EditPaste, EditRedo, EditSelectAll, EditUn
 
 use crate::platform::app_paths::{AppPathEnvironment, AppPaths, AppPathsError};
 use crate::platform::macos_keyboard::MacosTerminalKeyInputAdapterFactory;
+use crate::platform::macos_pty::MacosNativePtyAdapterFactory;
+use crate::platform::native_pty::NativePtyAdapterFactory;
 use crate::ssh::alias_usage::ActiveSshAliasRegistry;
 use crate::ssh::command::{NativeSshProbeRunner, SshCapability, SshUnavailableReason};
 use crate::ssh::startup_environment::StartupSshEnvironment;
@@ -228,7 +230,11 @@ pub(crate) fn open(cx: &mut App, startup: StartupDependencies) {
     let home_directory = startup.home_directory.clone();
     let remote_backend_factory = startup.remote_backend_factory();
     let bounds = Bounds::centered(None, size(px(900.0), px(580.0)), cx);
-    let session_factory: Rc<dyn TerminalSessionFactory> = Rc::new(NativeTerminalSessionFactory);
+    let native_pty_adapter_factory: Arc<dyn NativePtyAdapterFactory> =
+        Arc::new(MacosNativePtyAdapterFactory);
+    let session_factory: Rc<dyn TerminalSessionFactory> = Rc::new(
+        NativeTerminalSessionFactory::new(native_pty_adapter_factory),
+    );
     let key_input_adapter_factory: Rc<dyn TerminalKeyInputAdapterFactory> = Rc::new(
         MacosTerminalKeyInputAdapterFactory::new(OptionAsAltPolicy::default()),
     );

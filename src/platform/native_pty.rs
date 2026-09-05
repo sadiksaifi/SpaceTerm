@@ -158,6 +158,31 @@ pub(crate) trait NativePtyAdapter: Write + Send {
     fn wait_for_exit(&mut self, timeout: Duration) -> Result<NativePtyExit, NativePtyWaitFailure>;
 }
 
+/// Constructs the platform-neutral parts owned by one Native PTY Owner.
+///
+/// Application composition selects the Operating-System-specific implementation. The Interface
+/// deliberately exposes no descriptor, terminal attribute, signal, or process-group mechanism.
+pub(crate) trait NativePtyAdapterFactory: Send + Sync {
+    fn create(
+        &self,
+        launch: NativePtyLaunch,
+        size: NativePtySize,
+    ) -> Result<NativePtyAdapterParts, NativePtyAdapterConstructionFailure>;
+}
+
+#[derive(Clone, Debug, Eq, Error, PartialEq)]
+#[error("{message}")]
+/// A construction failure erased at the Operating-System Adapter boundary.
+pub(crate) struct NativePtyAdapterConstructionFailure {
+    message: String,
+}
+
+impl NativePtyAdapterConstructionFailure {
+    pub(crate) fn new(message: String) -> Self {
+        Self { message }
+    }
+}
+
 pub(crate) trait NativePtyTermination: Send + Sync {
     fn request_termination(&self) -> io::Result<()>;
 }
@@ -289,17 +314,28 @@ pub(crate) struct NativePtyOwner {
 
 impl NativePtyOwner {
     pub(crate) fn start(
+        adapter_factory: &dyn NativePtyAdapterFactory,
         launch: NativePtyLaunch,
         size: NativePtySize,
         output: Arc<dyn NativePtyOutputSink>,
         close_handle: &NativePtyCloseHandle,
     ) -> Result<Self, NativePtyStartupFailure> {
-        let parts = crate::platform::macos_pty::spawn_native_pty(launch, size)
+        let parts = adapter_factory
+            .create(launch, size)
             .map_err(|error| NativePtyStartupFailure::Adapter(error.to_string()))?;
-        Self::from_adapter_parts(parts, output, close_handle)
+        Self::install_adapter_parts(parts, output, close_handle)
     }
 
+    #[cfg(test)]
     pub(crate) fn from_adapter_parts(
+        parts: NativePtyAdapterParts,
+        output: Arc<dyn NativePtyOutputSink>,
+        close_handle: &NativePtyCloseHandle,
+    ) -> Result<Self, NativePtyStartupFailure> {
+        Self::install_adapter_parts(parts, output, close_handle)
+    }
+
+    fn install_adapter_parts(
         mut parts: NativePtyAdapterParts,
         output: Arc<dyn NativePtyOutputSink>,
         close_handle: &NativePtyCloseHandle,
@@ -500,6 +536,131 @@ mod tests {
         fn publish(&self, _output: NativePtyOutput) -> bool {
             true
         }
+    }
+
+    struct RecordingAdapterFactory {
+        construction: Arc<Mutex<Option<(PathBuf, NativePtySize)>>>,
+        adapter_observation: Arc<Mutex<AdapterObservation>>,
+        termination_count: Arc<AtomicUsize>,
+    }
+
+    impl NativePtyAdapterFactory for RecordingAdapterFactory {
+        fn create(
+            &self,
+            launch: NativePtyLaunch,
+            size: NativePtySize,
+        ) -> Result<NativePtyAdapterParts, NativePtyAdapterConstructionFailure> {
+            let NativePtyLaunch::Local { working_directory } = launch else {
+                panic!("test constructor expected a Local launch")
+            };
+            *self
+                .construction
+                .lock()
+                .expect("construction observation should remain available") =
+                Some((working_directory, size));
+            Ok(NativePtyAdapterParts {
+                adapter: Box::new(ObservedAdapter {
+                    observation: Arc::clone(&self.adapter_observation),
+                    exit: NativePtyExit::Success,
+                }),
+                termination: Arc::new(CountingTermination(Arc::clone(&self.termination_count))),
+            })
+        }
+    }
+
+    #[test]
+    fn owner_forwards_exact_launch_and_geometry_to_the_injected_adapter_factory() {
+        let construction = Arc::new(Mutex::new(None));
+        let factory = RecordingAdapterFactory {
+            construction: Arc::clone(&construction),
+            adapter_observation: Arc::new(Mutex::new(AdapterObservation::default())),
+            termination_count: Arc::new(AtomicUsize::new(0)),
+        };
+        let size = NativePtySize {
+            rows: 31,
+            columns: 97,
+            pixel_width: 1_164,
+            pixel_height: 620,
+        };
+        let working_directory = PathBuf::from("/exact/spelling/../project");
+
+        let owner = NativePtyOwner::start(
+            &factory,
+            NativePtyLaunch::local(working_directory.clone()),
+            size,
+            Arc::new(DiscardOutput),
+            &NativePtyCloseHandle::default(),
+        )
+        .expect("fake Native PTY Owner should start");
+
+        assert_eq!(
+            *construction
+                .lock()
+                .expect("construction observation should remain available"),
+            Some((working_directory, size))
+        );
+        drop(owner);
+    }
+
+    #[test]
+    fn owner_retains_factory_parts_until_owner_destruction() {
+        let termination_count = Arc::new(AtomicUsize::new(0));
+        let factory = RecordingAdapterFactory {
+            construction: Arc::new(Mutex::new(None)),
+            adapter_observation: Arc::new(Mutex::new(AdapterObservation::default())),
+            termination_count: Arc::clone(&termination_count),
+        };
+        let owner = NativePtyOwner::start(
+            &factory,
+            NativePtyLaunch::local(PathBuf::from("/project")),
+            NativePtySize::default(),
+            Arc::new(DiscardOutput),
+            &NativePtyCloseHandle::default(),
+        )
+        .expect("fake Native PTY Owner should start");
+
+        drop(factory);
+        let before_owner_drop = termination_count.load(Ordering::Acquire);
+        drop(owner);
+        assert_eq!(
+            (before_owner_drop, termination_count.load(Ordering::Acquire),),
+            (0, 1)
+        );
+    }
+
+    struct FailingAdapterFactory;
+
+    impl NativePtyAdapterFactory for FailingAdapterFactory {
+        fn create(
+            &self,
+            _launch: NativePtyLaunch,
+            _size: NativePtySize,
+        ) -> Result<NativePtyAdapterParts, NativePtyAdapterConstructionFailure> {
+            Err(NativePtyAdapterConstructionFailure::new(
+                "adapter construction unavailable".to_owned(),
+            ))
+        }
+    }
+
+    #[test]
+    fn owner_maps_adapter_factory_failure_to_the_adapter_startup_stage() {
+        let error = NativePtyOwner::start(
+            &FailingAdapterFactory,
+            NativePtyLaunch::local(PathBuf::from("/project")),
+            NativePtySize::default(),
+            Arc::new(DiscardOutput),
+            &NativePtyCloseHandle::default(),
+        )
+        .err()
+        .expect("adapter construction should fail");
+
+        assert_eq!(
+            (error.stage(), error.to_string()),
+            (
+                NativePtyStartupStage::Adapter,
+                "adapter construction unavailable".to_owned(),
+            )
+        );
     }
 
     fn observed_owner(
