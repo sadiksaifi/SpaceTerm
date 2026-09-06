@@ -1,7 +1,5 @@
 use std::ffi::OsString;
-use std::path::{Path, PathBuf};
-
-use portable_pty::CommandBuilder;
+use std::path::Path;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ShellIntegrationMode {
@@ -26,27 +24,18 @@ pub(crate) enum ShellIntegrationStatus {
     MissingResources,
 }
 
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Default, Eq, PartialEq)]
 pub(crate) struct ShellEnvironment {
     pub(crate) xdg_data_dirs: Option<OsString>,
     pub(crate) zdotdir: Option<OsString>,
     pub(crate) env: Option<OsString>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub(crate) struct ShellIntegrationPlan {
     pub(crate) status: ShellIntegrationStatus,
-    arguments: Vec<OsString>,
-    environment: Vec<(OsString, OsString)>,
-}
-
-impl ShellIntegrationPlan {
-    pub(crate) fn apply(&self, command: &mut CommandBuilder) {
-        command.args(&self.arguments);
-        for (name, value) in &self.environment {
-            command.env(name, value);
-        }
-    }
+    pub(super) arguments: Vec<OsString>,
+    pub(super) environment: Vec<(OsString, OsString)>,
 }
 
 impl ShellEnvironment {
@@ -143,20 +132,6 @@ pub(crate) fn plan_shell_integration(
     }
 }
 
-pub(crate) fn resource_root() -> PathBuf {
-    if let Ok(executable) = std::env::current_exe()
-        && let Some(macos) = executable.parent()
-        && macos.file_name().is_some_and(|name| name == "MacOS")
-        && let Some(contents) = macos.parent()
-    {
-        let resources = contents.join("Resources");
-        if resources.join("shell-integration").is_dir() {
-            return resources;
-        }
-    }
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("assets")
-}
-
 pub(crate) fn configured_mode() -> ShellIntegrationMode {
     match std::env::var("SPACETERM_SHELL_INTEGRATION") {
         Ok(value)
@@ -195,6 +170,7 @@ mod tests {
     use std::process::Command;
 
     use super::*;
+    use crate::platform::launch_host::resource_root;
 
     #[test]
     fn supported_shells_receive_isolated_startup_plans() {

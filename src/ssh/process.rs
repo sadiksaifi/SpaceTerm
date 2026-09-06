@@ -1,4 +1,3 @@
-#[cfg(test)]
 use std::ffi::OsString;
 use std::fmt;
 use std::future::Future;
@@ -307,22 +306,23 @@ impl SshProcessEnvironment {
         }
     }
 
-    pub(crate) fn apply_to_pty(&self, command: &mut portable_pty::CommandBuilder) {
-        command.env_clear();
-        command.cwd(&self.home);
-        command.env("HOME", &self.home);
-        for (name, value) in self.startup.entries() {
-            command.env(name, value);
-        }
+    pub(crate) fn into_launch_environment(self) -> (PathBuf, Vec<(OsString, OsString)>) {
+        let mut entries = vec![(OsString::from("HOME"), self.home.as_os_str().to_owned())];
+        entries.extend(
+            self.startup
+                .entries()
+                .map(|(name, value)| (name.into(), value.to_owned())),
+        );
         match &self.authentication {
-            SshAuthentication::AskPass(authentication) => {
-                for (name, value) in authentication.entries() {
-                    command.env(name, value);
-                }
-            }
+            SshAuthentication::AskPass(authentication) => entries.extend(
+                authentication
+                    .entries()
+                    .map(|(name, value)| (name.into(), value.to_owned())),
+            ),
             #[cfg(test)]
             SshAuthentication::None => {}
         }
+        (self.home, entries)
     }
 
     #[cfg(test)]
@@ -755,27 +755,22 @@ mod tests {
             Some(OsString::from("/private/tmp/agent.sock")),
         )
         .unwrap();
-        let mut command = portable_pty::CommandBuilder::new("/usr/bin/ssh");
-        command.env("SPACETERM_UNKNOWN", "secret");
-        command.env("HOME", "/attacker/home");
-        command.env("PATH", "/attacker/bin");
-
-        environment.apply_to_pty(&mut command);
-
-        assert_eq!(command.get_cwd(), Some(&home.into_os_string()));
+        let (directory, entries) = environment.into_launch_environment();
+        let entries: std::collections::HashMap<_, _> = entries.into_iter().collect();
+        assert_eq!(directory, home);
         assert_eq!(
-            command.get_env("HOME"),
-            Some(std::ffi::OsStr::new("/private/tmp"))
+            entries.get(std::ffi::OsStr::new("HOME")),
+            Some(&OsString::from("/private/tmp"))
         );
         assert_eq!(
-            command.get_env("PATH"),
-            Some(std::ffi::OsStr::new("/usr/bin:/bin"))
+            entries.get(std::ffi::OsStr::new("PATH")),
+            Some(&OsString::from("/usr/bin:/bin"))
         );
         assert_eq!(
-            command.get_env("SSH_AUTH_SOCK"),
-            Some(std::ffi::OsStr::new("/private/tmp/agent.sock"))
+            entries.get(std::ffi::OsStr::new("SSH_AUTH_SOCK")),
+            Some(&OsString::from("/private/tmp/agent.sock"))
         );
-        assert_eq!(command.get_env("SPACETERM_UNKNOWN"), None);
+        assert!(!entries.contains_key(std::ffi::OsStr::new("SPACETERM_UNKNOWN")));
     }
 
     #[test]

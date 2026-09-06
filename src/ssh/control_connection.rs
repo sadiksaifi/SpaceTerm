@@ -1054,6 +1054,57 @@ mod tests {
     }
 
     #[gpui::test]
+    fn shell_launch_should_preserve_prepared_environment_and_reject_revoked_channel(
+        cx: &mut TestAppContext,
+    ) {
+        use crate::platform::shell_launch::{PreparedShellLaunch, ShellLaunchFailure};
+        let directory = TestDirectory::new();
+        let paths = directory.paths();
+        let backend = Arc::new(FakeBackend::with_readiness([ProcessExit::successful()]));
+        let connection = cx
+            .executor()
+            .block(OpenSshControlConnection::connect(
+                &paths,
+                destination(),
+                backend,
+                &SshCancellationToken::default(),
+                timing(),
+            ))
+            .unwrap();
+        let prepare = || {
+            connection
+                .prepare_pane_channel(
+                    ValidatedRemoteShellCommand::new("exec /bin/zsh -l".to_owned()).unwrap(),
+                )
+                .unwrap()
+        };
+        let channel = prepare();
+        let launch =
+            PreparedShellLaunch::remote(Path::new("/tmp"), channel.take().unwrap()).unwrap();
+        assert!(!launch.inherit_environment());
+        assert_eq!(launch.working_directory(), Path::new("/private/tmp"));
+        assert!(launch.environment_removals().is_empty());
+        assert_eq!(
+            launch.environment(),
+            &[
+                (OsString::from("HOME"), OsString::from("/private/tmp")),
+                (OsString::from("PATH"), OsString::from("/usr/bin:/bin")),
+                (OsString::from("TERM"), OsString::from("xterm-256color")),
+            ]
+        );
+        assert!(channel.take().is_err());
+        let command = prepare().take().unwrap();
+        connection
+            .authority
+            .as_ref()
+            .unwrap()
+            .transition(LiveConnectionState::ShuttingDown);
+        let error = PreparedShellLaunch::remote(Path::new("/tmp"), command).unwrap_err();
+        assert_eq!(error, ShellLaunchFailure::RemoteChannelUnavailable);
+        assert!(!format!("{launch:?} {error:?} {error}").contains("/private/tmp"));
+    }
+
+    #[gpui::test]
     fn connect_should_time_out_and_reap_the_master(cx: &mut TestAppContext) {
         let directory = TestDirectory::new();
         let paths = directory.paths();

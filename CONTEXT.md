@@ -333,8 +333,8 @@ Emulator initialization, the Bounded PTY Output Transport, command ordering, res
 event publication without naming an Operating-System Adapter or POSIX mechanism.
 
 Application composition selects one concrete Native PTY Adapter factory and injects it through
-Terminal Session construction. The Native PTY Owner passes its existing platform-neutral launch
-and geometry values to that narrow construction Interface, then owns only the returned Adapter and
+Terminal Session construction. The Native PTY Owner passes one complete prepared Shell Launch Plan and platform-neutral
+geometry to that narrow construction Interface, then owns only the returned Adapter and
 termination authority. Adapter construction failures cross the Interface only as a closed,
 platform-neutral classification and retain the Native PTY startup-stage mapping. Those failures do
 not carry concrete paths, command values, platform mechanisms, or raw Operating-System errors.
@@ -347,13 +347,43 @@ and rejects duplicate effects. Close callers detach worker cleanup and never wai
 shutdown escalation, Shell Process wait, or reap.
 
 The macOS Adapter is the only production PTY Adapter. It preserves controlling-terminal creation,
-initial row, column, and pixel geometry, working directory, UTF-8 terminal configuration,
+initial row, column, and pixel geometry, the prepared working directory, UTF-8 terminal configuration,
 hidden-input detection, and complete process-group shutdown. Shutdown sends one SIGHUP, allows a
 bounded grace period, then sends SIGKILL when any process-group member remains. The Native PTY
 Owner reports normal exit, signal exit, graceful shutdown, forced shutdown, startup failure,
 reader failure, and wait failure through platform-neutral typed outcomes. Its Interface exposes no
 file descriptor, termios flag, signal number, or process-group identity. A Linux Adapter is the
 intentional next implementation; no speculative Windows Adapter exists.
+
+### Shell Launch Plan
+
+The platform-neutral Shell Launch Plan owns complete local Shell Process and remote Terminal
+Session Channel preparation before either enters the Native PTY Adapter. Its immutable prepared
+value captures executable, ordered arguments, exact working-directory spelling, inherited-environment
+handling, environment removals and additions, Shell Integration decision, Terminal Capability
+Identity, Compatibility Identity, and required resource locations. It exposes read-only process
+values without SSH authority, `portable_pty` types, or POSIX mechanisms, and cannot be cloned.
+Application composition injects only the current user shell and host resource location into the
+planner. The selected terminal identity is shared by Terminal Emulator initialization and process
+preparation. Working-directory validation and Shell Integration preparation remain on the Terminal
+Session worker before Adapter construction.
+
+Local preparation preserves the selected user shell and login argument ordering, removes foreign
+terminal-runtime markers, and selects packaged terminfo only when discoverable at the injected
+resource location. Remote preparation rechecks the single-use SSH command's live authority and
+preserves its prepared environment, including clearing ambient inheritance and using the captured
+local home. Without a prepared environment it retains the existing inherited-environment fallback,
+removes foreign runtime and Shell Integration markers and `TERMINFO`, and uses the supplied local
+home. Remote launches always use the fallback `TERM` and never resolve a remote directory locally.
+The SSH command remains consumed even if later preparation or Adapter construction fails.
+
+The macOS Adapter only translates these prepared values into its private process-library command
+and performs PTY and process mechanics. It makes no shell, resource, identity, or SSH decisions.
+Preparation failures distinguish unavailable launch directories from unavailable remote channels,
+remain mapped to the existing terminal startup stage, and offer static local recovery guidance.
+Prepared launch Debug and process-spawn failures expose neither command/environment values nor
+sensitive paths. Shell Integration is a platform-neutral Module, while macOS bundle resource
+location and the host's default shell remain application composition facts.
 
 ### Temporary Shell Integration
 

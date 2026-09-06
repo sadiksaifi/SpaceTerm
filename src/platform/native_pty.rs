@@ -1,6 +1,6 @@
-use std::env;
 use std::fmt;
 use std::io::{self, Read, Write};
+#[cfg(test)]
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use thiserror::Error;
 
-use crate::ssh::command::SshCommandSpec;
+use super::shell_launch::{PreparedShellLaunch, ShellLaunchFailure};
 
 const READ_BUFFER_SIZE: usize = 16 * 1024;
 
@@ -19,40 +19,6 @@ pub(crate) struct NativePtySize {
     pub(crate) columns: u16,
     pub(crate) pixel_width: u16,
     pub(crate) pixel_height: u16,
-}
-
-pub(crate) enum NativePtyLaunch {
-    Local {
-        working_directory: PathBuf,
-    },
-    Remote {
-        local_home: PathBuf,
-        command: SshCommandSpec,
-    },
-}
-
-impl fmt::Debug for NativePtyLaunch {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct(match self {
-                Self::Local { .. } => "LocalNativePtyLaunch",
-                Self::Remote { .. } => "RemoteNativePtyLaunch",
-            })
-            .finish_non_exhaustive()
-    }
-}
-
-impl NativePtyLaunch {
-    pub(crate) fn local(working_directory: PathBuf) -> Self {
-        Self::Local { working_directory }
-    }
-
-    pub(crate) fn remote(local_home: PathBuf, command: SshCommandSpec) -> Self {
-        Self::Remote {
-            local_home,
-            command,
-        }
-    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -115,6 +81,8 @@ impl NativePtyOperationFailure {
 #[derive(Debug, Error)]
 pub(crate) enum NativePtyStartupFailure {
     #[error(transparent)]
+    Launch(#[from] ShellLaunchFailure),
+    #[error(transparent)]
     Adapter(#[from] NativePtyAdapterConstructionFailure),
     #[error("Native PTY lifecycle coordination could not be started")]
     LifecycleCoordination,
@@ -127,7 +95,9 @@ pub(crate) enum NativePtyStartupFailure {
 impl NativePtyStartupFailure {
     pub(crate) const fn stage(&self) -> NativePtyStartupStage {
         match self {
-            Self::Adapter(_) | Self::LifecycleCoordination => NativePtyStartupStage::Adapter,
+            Self::Launch(_) | Self::Adapter(_) | Self::LifecycleCoordination => {
+                NativePtyStartupStage::Adapter
+            }
             Self::Reader(_) => NativePtyStartupStage::Reader,
             Self::ReaderThread(_) => NativePtyStartupStage::ReaderThread,
         }
@@ -167,7 +137,7 @@ pub(crate) trait NativePtyAdapter: Write + Send {
 pub(crate) trait NativePtyAdapterFactory: Send + Sync {
     fn create(
         &self,
-        launch: NativePtyLaunch,
+        launch: PreparedShellLaunch,
         size: NativePtySize,
     ) -> Result<NativePtyAdapterParts, NativePtyAdapterConstructionFailure>;
 }
@@ -175,8 +145,6 @@ pub(crate) trait NativePtyAdapterFactory: Send + Sync {
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
 /// A closed construction failure classification at the Operating-System Adapter boundary.
 pub(crate) enum NativePtyAdapterConstructionFailure {
-    #[error("Native PTY launch directory is unavailable")]
-    LaunchDirectoryUnavailable,
     #[error("Native PTY resources could not be created")]
     ResourceCreationFailed,
     #[error("Native PTY resources could not be configured")]
@@ -187,8 +155,6 @@ pub(crate) enum NativePtyAdapterConstructionFailure {
     ProcessOwnershipFailed,
     #[error("Native PTY input/output could not be acquired")]
     InputOutputUnavailable,
-    #[error("Remote Terminal Session Channel is unavailable")]
-    RemoteChannelUnavailable,
 }
 
 pub(crate) trait NativePtyTermination: Send + Sync {
@@ -323,7 +289,7 @@ pub(crate) struct NativePtyOwner {
 impl NativePtyOwner {
     pub(crate) fn start(
         adapter_factory: &dyn NativePtyAdapterFactory,
-        launch: NativePtyLaunch,
+        launch: PreparedShellLaunch,
         size: NativePtySize,
         output: Arc<dyn NativePtyOutputSink>,
         close_handle: &NativePtyCloseHandle,
@@ -415,23 +381,6 @@ impl Drop for NativePtyOwner {
             eprintln!("PTY reader thread panicked");
         }
     }
-}
-
-pub(crate) fn shell_fallback_title() -> String {
-    let shell = user_shell();
-    std::path::Path::new(&shell)
-        .file_name()
-        .and_then(|name| name.to_str())
-        .filter(|name| !name.is_empty())
-        .unwrap_or(&shell)
-        .to_owned()
-}
-
-pub(super) fn user_shell() -> String {
-    env::var("SHELL")
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| "/bin/zsh".to_owned())
 }
 
 #[cfg(test)]
@@ -557,7 +506,7 @@ mod tests {
     impl NativePtyAdapterFactory for OneShotAdapterFactory {
         fn create(
             &self,
-            _launch: NativePtyLaunch,
+            _launch: PreparedShellLaunch,
             _size: NativePtySize,
         ) -> Result<NativePtyAdapterParts, NativePtyAdapterConstructionFailure> {
             self.0
@@ -571,12 +520,10 @@ mod tests {
     impl NativePtyAdapterFactory for RecordingAdapterFactory {
         fn create(
             &self,
-            launch: NativePtyLaunch,
+            launch: PreparedShellLaunch,
             size: NativePtySize,
         ) -> Result<NativePtyAdapterParts, NativePtyAdapterConstructionFailure> {
-            let NativePtyLaunch::Local { working_directory } = launch else {
-                panic!("test constructor expected a Local launch")
-            };
+            let working_directory = launch.working_directory().to_owned();
             *self
                 .construction
                 .lock()
@@ -610,7 +557,7 @@ mod tests {
 
         let owner = NativePtyOwner::start(
             &factory,
-            NativePtyLaunch::local(working_directory.clone()),
+            PreparedShellLaunch::for_test(working_directory.clone()),
             size,
             Arc::new(DiscardOutput),
             &NativePtyCloseHandle::default(),
@@ -636,7 +583,7 @@ mod tests {
         };
         let owner = NativePtyOwner::start(
             &factory,
-            NativePtyLaunch::local(PathBuf::from("/project")),
+            PreparedShellLaunch::for_test(PathBuf::from("/project")),
             NativePtySize::default(),
             Arc::new(DiscardOutput),
             &NativePtyCloseHandle::default(),
@@ -657,7 +604,7 @@ mod tests {
     impl NativePtyAdapterFactory for FailingAdapterFactory {
         fn create(
             &self,
-            _launch: NativePtyLaunch,
+            _launch: PreparedShellLaunch,
             _size: NativePtySize,
         ) -> Result<NativePtyAdapterParts, NativePtyAdapterConstructionFailure> {
             Err(NativePtyAdapterConstructionFailure::ResourceCreationFailed)
@@ -668,7 +615,7 @@ mod tests {
     fn owner_maps_adapter_factory_failure_to_the_adapter_startup_stage() {
         let error = NativePtyOwner::start(
             &FailingAdapterFactory,
-            NativePtyLaunch::local(PathBuf::from("/project")),
+            PreparedShellLaunch::for_test(PathBuf::from("/project")),
             NativePtySize::default(),
             Arc::new(DiscardOutput),
             &NativePtyCloseHandle::default(),
@@ -700,7 +647,7 @@ mod tests {
         })));
         let owner = NativePtyOwner::start(
             &factory,
-            NativePtyLaunch::local(PathBuf::from("/project")),
+            PreparedShellLaunch::for_test(PathBuf::from("/project")),
             NativePtySize::default(),
             Arc::new(DiscardOutput),
             close_handle,
@@ -871,7 +818,7 @@ mod tests {
         })));
         let owner = NativePtyOwner::start(
             &factory,
-            NativePtyLaunch::local(PathBuf::from("/project")),
+            PreparedShellLaunch::for_test(PathBuf::from("/project")),
             NativePtySize::default(),
             Arc::new(DiscardOutput),
             &NativePtyCloseHandle::default(),

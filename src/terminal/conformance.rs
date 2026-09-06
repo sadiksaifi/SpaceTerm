@@ -39,10 +39,11 @@ use super::session::{
     PointerButton, PointerInput, PointerPhase, ShiftSelectionPolicy, SurfacePosition, WheelInput,
     WheelPhase,
 };
+use crate::platform::launch_host::resource_root;
 use crate::platform::macos_keyboard::{MacosKeyboardBridge, NativeKeyEvent, NativeModifiers};
 use crate::platform::shell_integration::{
     ShellEnvironment, ShellIntegrationMode, ShellIntegrationStatus, ShellKind,
-    plan_shell_integration, resource_root,
+    plan_shell_integration,
 };
 use crate::ui::{
     RenderLifecycle, ScaleChange, SurfaceVisibility, TerminalFocusBlocker,

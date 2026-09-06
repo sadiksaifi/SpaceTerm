@@ -58,8 +58,11 @@ pub(crate) mod macos_system_settings;
 #[cfg(target_os = "macos")]
 pub(crate) mod macos_window_drag;
 
-#[cfg(target_os = "macos")]
 pub(crate) mod shell_integration;
+pub(crate) mod shell_launch;
+
+#[cfg(target_os = "macos")]
+pub(crate) mod launch_host;
 
 #[cfg(not(target_os = "macos"))]
 compile_error!("SpaceTerm currently supports macOS only");
