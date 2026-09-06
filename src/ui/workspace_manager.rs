@@ -2485,9 +2485,11 @@ impl WorkspaceManager {
                 .detach();
             }
             WorkspacePickerEvent::Confirmed(directory) => {
-                self.picker_entered_from_panel = false;
                 let activated =
                     self.activate_validated_local_project(directory.clone(), window, cx);
+                if activated {
+                    self.picker_entered_from_panel = false;
+                }
                 let picker = self.workspace_picker.clone();
                 window.defer(cx, move |window, cx| {
                     picker.update(cx, |picker, cx| {
@@ -8051,6 +8053,51 @@ mod tests {
             }),
             (false, true, Some(TerminalFocusBlocker::CommandPalette))
         );
+    }
+
+    #[gpui::test]
+    fn failed_picker_activation_keeps_escape_navigation_to_its_origin_panel(
+        cx: &mut TestAppContext,
+    ) {
+        let project = temporary_directory("activation-panel-origin");
+        fs::create_dir_all(&project).unwrap();
+        let (manager, records, cx) = workspace_manager_with_picker([Ok(Some(project.clone()))], cx);
+        open_new_workspace_panel(cx);
+        click("new-workspace-source-local-project", cx);
+        // The picker retains its valid background authority; activation independently fails.
+        manager.update(cx, |manager, _| {
+            manager.local_filesystem = LocalFilesystemAuthority::testing_with_failure(
+                crate::platform::local_filesystem::LocalFilesystemError::Capacity,
+            );
+        });
+        click("workspace-picker-finder", cx);
+        cx.run_until_parked();
+        assert_eq!(records.starts().len(), 1);
+        assert_eq!(
+            manager.read_with(cx, |manager, _| manager.workspaces.len()),
+            1
+        );
+        assert!(cx.update(|window, cx| {
+            manager
+                .read(cx)
+                .workspace_picker
+                .read(cx)
+                .path_input_is_focused(window, cx)
+        }));
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        assert_eq!(
+            cx.update(|window, cx| {
+                let manager = manager.read(cx);
+                (
+                    manager.workspace_picker.read(cx).is_open(),
+                    manager.new_workspace_panel.read(cx).is_open(),
+                    manager.terminal_focus_blocker(window, cx),
+                )
+            }),
+            (false, true, Some(TerminalFocusBlocker::CommandPalette))
+        );
+        fs::remove_dir_all(project).unwrap();
     }
 
     #[gpui::test]

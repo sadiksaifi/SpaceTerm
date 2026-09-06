@@ -18,6 +18,16 @@ impl LocalFilesystemAuthority {
         Self::new(Arc::new(NoAccess))
     }
 
+    pub(crate) fn testing_with_failure(error: LocalFilesystemError) -> Self {
+        struct Unavailable(LocalFilesystemError);
+        impl LocalIdentitySource for Unavailable {
+            fn identify(&self, _: &Path) -> Result<LocalIdentityObservation, LocalFilesystemError> {
+                Err(self.0)
+            }
+        }
+        Self::new(Arc::new(Unavailable(error)))
+    }
+
     pub(crate) fn same_source(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.identity, &other.identity)
     }
