@@ -6,10 +6,11 @@ pub(crate) mod secure_filesystem;
 pub(crate) mod window_visibility;
 
 pub(crate) mod finder_fallback;
+pub(crate) mod local_filesystem;
+#[cfg(target_os = "macos")]
+mod macos_local_identity;
 pub(crate) mod native_pty;
 pub(crate) mod terminal_accessibility;
-pub(crate) mod workspace_directory;
-pub(crate) mod workspace_picker_filesystem;
 
 #[cfg(all(target_os = "macos", not(test)))]
 mod macos_ssh_process;

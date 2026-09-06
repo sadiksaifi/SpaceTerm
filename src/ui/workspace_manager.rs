@@ -43,12 +43,11 @@ use crate::domain::{
 use crate::platform::finder_fallback::FinderFallback;
 #[cfg(test)]
 use crate::platform::finder_fallback::NativeFinderFallback;
+use crate::platform::local_filesystem::LocalFilesystemAuthority;
 use crate::platform::permission_recovery::PermissionRecoveryOpener;
 use crate::platform::window_movement::{
     OperatingSystemWindowDragError, OperatingSystemWindowDragPlatform,
 };
-use crate::platform::workspace_directory::validate_workspace_directory;
-use crate::platform::workspace_picker_filesystem::NativeWorkspacePickerFilesystem;
 use crate::ssh::live_connection::{ControlConnectionObserver, ControlConnectionTerminalState};
 use crate::ssh::process::TransientSshErrorOutput;
 #[cfg(test)]
@@ -238,6 +237,7 @@ struct TabManagerCreation {
 
 #[derive(Clone)]
 pub(crate) struct WorkspaceManagerAdapters {
+    pub(crate) local_filesystem: LocalFilesystemAuthority,
     pub(crate) key_input: Rc<dyn TerminalKeyInputAdapterFactory>,
     pub(crate) accessibility: Rc<dyn TerminalAccessibilityAdapterFactory>,
     pub(crate) native_services: NativeServiceAdapters,
@@ -278,6 +278,7 @@ impl Drop for RemoteWorkspaceRuntime {
 }
 
 pub(crate) struct WorkspaceManager {
+    local_filesystem: LocalFilesystemAuthority,
     workspaces: WorkspaceCollection<Entity<TabManager>>,
     session_factory: Rc<dyn TerminalSessionFactory>,
     key_input_adapter_factory: Rc<dyn TerminalKeyInputAdapterFactory>,
@@ -328,6 +329,7 @@ impl WorkspaceManager {
             session_factory,
             default_workspace_root,
             WorkspaceManagerAdapters {
+                local_filesystem: LocalFilesystemAuthority::testing(),
                 key_input: Rc::new(GpuiTerminalKeyInputAdapterFactory::default()),
                 accessibility: Rc::new(crate::platform::terminal_accessibility::testing::RecordingAccessibilityFactory::default()),
                 native_services: crate::terminal::native_services::testing::adapters(),
@@ -355,6 +357,7 @@ impl WorkspaceManager {
             session_factory,
             default_workspace_root,
             WorkspaceManagerAdapters {
+                local_filesystem: LocalFilesystemAuthority::testing(),
                 key_input: Rc::new(GpuiTerminalKeyInputAdapterFactory::default()),
                 accessibility: Rc::new(crate::platform::terminal_accessibility::testing::RecordingAccessibilityFactory::default()),
                 native_services: crate::terminal::native_services::testing::adapters(),
@@ -382,6 +385,7 @@ impl WorkspaceManager {
             session_factory,
             default_workspace_root,
             WorkspaceManagerAdapters {
+                local_filesystem: LocalFilesystemAuthority::testing(),
                 key_input: Rc::new(GpuiTerminalKeyInputAdapterFactory::default()),
                 accessibility: Rc::new(crate::platform::terminal_accessibility::testing::RecordingAccessibilityFactory::default()),
                 native_services: crate::terminal::native_services::testing::adapters(),
@@ -404,6 +408,7 @@ impl WorkspaceManager {
         cx: &mut Context<Self>,
     ) -> Self {
         let WorkspaceManagerAdapters {
+            local_filesystem,
             key_input: key_input_adapter_factory,
             accessibility: accessibility_adapter_factory,
             native_services: native_service_adapters,
@@ -414,7 +419,7 @@ impl WorkspaceManager {
             remote_workspace: remote_workspace_backend_factory,
         } = adapters;
         let (default_directory, initial_directory_error) =
-            initial_workspace_directory(default_workspace_root.clone());
+            initial_workspace_directory(default_workspace_root.clone(), &local_filesystem);
         let default_workspace_identity = default_directory.identity();
         let initial_workspace_identity = default_directory.identity();
         let initial_window_drag_platform = Rc::clone(&operating_system_window_drag_platform);
@@ -425,12 +430,13 @@ impl WorkspaceManager {
             DirectoryAuthority::initial(),
             |workspace_id, workspace_root| {
                 Self::create_local_tab_manager(
-                    WorkspaceTerminalSessionFactory::new_local(
+                    WorkspaceTerminalSessionFactory::new_local_with_authority(
                         Rc::clone(&session_factory),
                         ValidatedWorkspaceDirectory::new(
                             workspace_root.to_path_buf(),
                             initial_workspace_identity,
                         ),
+                        local_filesystem.clone(),
                     ),
                     TabManagerCreation {
                         workspace_id,
@@ -487,7 +493,7 @@ impl WorkspaceManager {
         let workspace_picker = cx.new(|cx| {
             WorkspacePicker::new(
                 workspace_picker_home,
-                Arc::new(NativeWorkspacePickerFilesystem),
+                Arc::new(local_filesystem.clone()),
                 permission_recovery,
                 window,
                 cx,
@@ -538,6 +544,7 @@ impl WorkspaceManager {
 
         Self {
             workspaces,
+            local_filesystem,
             session_factory,
             key_input_adapter_factory,
             accessibility_adapter_factory,
@@ -715,7 +722,7 @@ impl WorkspaceManager {
                 TabManagerEvent::DirectoryAvailable { identity } => {
                     let _ = workspace_manager
                         .workspaces
-                        .set_directory_available(workspace_id, *identity);
+                        .set_directory_available(workspace_id, identity.clone());
                     workspace_manager.refresh_workspace_search(cx);
                     cx.notify();
                 }
@@ -783,7 +790,12 @@ impl WorkspaceManager {
         path: &std::path::Path,
         cx: &mut Context<Self>,
     ) {
-        let directory = match validate_workspace_directory(path) {
+        if !self.workspaces.workspace(workspace_id).is_some_and(|workspace| {
+            matches!(workspace.kind(), WorkspaceKind::Scratch { directory_authority } if *directory_authority == authority)
+        }) {
+            return;
+        }
+        let directory = match self.local_filesystem.validate_workspace_directory(path) {
             Ok(directory) => directory,
             Err(error) => {
                 if self
@@ -834,8 +846,13 @@ impl WorkspaceManager {
         reported_directory: Option<&std::path::Path>,
         cx: &mut Context<Self>,
     ) {
+        if !self.workspaces.workspace(workspace_id).is_some_and(|workspace| {
+            matches!(workspace.kind(), WorkspaceKind::Scratch { directory_authority } if *directory_authority == removed_authority)
+        }) {
+            return;
+        }
         let (directory, invalid_reason) = match reported_directory {
-            Some(path) => match validate_workspace_directory(path) {
+            Some(path) => match self.local_filesystem.validate_workspace_directory(path) {
                 Ok(directory) => (Some(directory), None),
                 Err(error) => (None, Some(error.to_string())),
             },
@@ -886,8 +903,13 @@ impl WorkspaceManager {
         reported_directory: Option<&std::path::Path>,
         cx: &mut Context<Self>,
     ) {
+        if !self.workspaces.workspace(workspace_id).is_some_and(|workspace| {
+            matches!(workspace.kind(), WorkspaceKind::Scratch { directory_authority } if directory_authority.tab_id() == removed_tab_id)
+        }) {
+            return;
+        }
         let (directory, invalid_reason) = match reported_directory {
-            Some(path) => match validate_workspace_directory(path) {
+            Some(path) => match self.local_filesystem.validate_workspace_directory(path) {
                 Ok(directory) => (Some(directory), None),
                 Err(error) => (None, Some(error.to_string())),
             },
@@ -1326,6 +1348,7 @@ impl WorkspaceManager {
 
     fn create_scratch_workspace(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let previous_manager = self.workspaces.active_workspace().payload().clone();
+        let local_filesystem = self.local_filesystem.clone();
         let session_factory = Rc::clone(&self.session_factory);
         let key_input_adapter_factory = Rc::clone(&self.key_input_adapter_factory);
         let accessibility_adapter_factory = Rc::clone(&self.accessibility_adapter_factory);
@@ -1341,12 +1364,13 @@ impl WorkspaceManager {
             DirectoryAuthority::initial(),
             |workspace_id, workspace_root| {
                 Self::create_local_tab_manager(
-                    WorkspaceTerminalSessionFactory::new_local(
+                    WorkspaceTerminalSessionFactory::new_local_with_authority(
                         session_factory,
                         ValidatedWorkspaceDirectory::new(
                             workspace_root.to_path_buf(),
                             directory_identity,
                         ),
+                        local_filesystem.clone(),
                     ),
                     TabManagerCreation {
                         workspace_id,
@@ -1583,7 +1607,7 @@ impl WorkspaceManager {
             Rc::clone(&self.session_factory),
             ValidatedWorkspaceDirectory::new(
                 self.default_workspace_root.clone(),
-                self.default_workspace_identity,
+                self.default_workspace_identity.clone(),
             ),
             RemoteTerminalMetadataContext::new(
                 completion.destination().clone(),
@@ -1976,7 +2000,7 @@ impl WorkspaceManager {
         let tab_manager = workspace.payload().clone();
         let local_root = ValidatedWorkspaceDirectory::new(
             self.default_workspace_root.clone(),
-            self.default_workspace_identity,
+            self.default_workspace_identity.clone(),
         );
         let session_factory = Rc::clone(&self.session_factory);
         let cancelled = Arc::new(AtomicBool::new(false));
@@ -2492,6 +2516,7 @@ impl WorkspaceManager {
         }
 
         let previous_manager = self.workspaces.active_workspace().payload().clone();
+        let local_filesystem = self.local_filesystem.clone();
         let session_factory = Rc::clone(&self.session_factory);
         let key_input_adapter_factory = Rc::clone(&self.key_input_adapter_factory);
         let accessibility_adapter_factory = Rc::clone(&self.accessibility_adapter_factory);
@@ -2505,12 +2530,13 @@ impl WorkspaceManager {
             directory,
             |workspace_id, project_root| {
                 Self::create_local_tab_manager(
-                    WorkspaceTerminalSessionFactory::new_local(
+                    WorkspaceTerminalSessionFactory::new_local_with_authority(
                         session_factory,
                         ValidatedWorkspaceDirectory::new(
                             project_root.to_path_buf(),
                             project_root_identity,
                         ),
+                        local_filesystem.clone(),
                     ),
                     TabManagerCreation {
                         workspace_id,
@@ -2560,21 +2586,16 @@ impl WorkspaceManager {
         ) else {
             unreachable!("a Local Project Workspace must own a local Workspace Directory")
         };
-        let path = path.to_path_buf();
-        match validate_workspace_directory(&path) {
-            Ok(directory) if directory.identity() == expected_identity => {
+        let expected =
+            ValidatedWorkspaceDirectory::new(path.to_path_buf(), expected_identity.clone());
+        match self
+            .local_filesystem
+            .revalidate_workspace_directory(&expected)
+        {
+            Ok(_) => {
                 let _ = self
                     .workspaces
                     .set_directory_available(workspace_id, expected_identity);
-            }
-            Ok(_) => {
-                let _ = self.workspaces.set_directory_unavailable(
-                    workspace_id,
-                    format!(
-                        "{} no longer identifies the selected Project Root",
-                        path.display()
-                    ),
-                );
             }
             Err(error) => {
                 let _ = self
@@ -2585,12 +2606,15 @@ impl WorkspaceManager {
     }
 
     fn default_workspace_directory(&self) -> (ValidatedWorkspaceDirectory, Option<String>) {
-        match validate_workspace_directory(&self.default_workspace_root) {
+        match self
+            .local_filesystem
+            .validate_workspace_directory(&self.default_workspace_root)
+        {
             Ok(directory) => (directory, None),
             Err(error) => (
                 ValidatedWorkspaceDirectory::new(
                     self.default_workspace_root.clone(),
-                    self.default_workspace_identity,
+                    self.default_workspace_identity.clone(),
                 ),
                 Some(error.to_string()),
             ),
@@ -2872,6 +2896,7 @@ impl WorkspaceManager {
     ) {
         self.begin_remote_workspace_close(workspace_id, window, cx);
         let was_active = self.workspaces.active_workspace_id() == workspace_id;
+        let local_filesystem = self.local_filesystem.clone();
         let session_factory = Rc::clone(&self.session_factory);
         let key_input_adapter_factory = Rc::clone(&self.key_input_adapter_factory);
         let accessibility_adapter_factory = Rc::clone(&self.accessibility_adapter_factory);
@@ -2888,12 +2913,13 @@ impl WorkspaceManager {
             DirectoryAuthority::initial(),
             |replacement_workspace_id, workspace_root| {
                 Self::create_local_tab_manager(
-                    WorkspaceTerminalSessionFactory::new_local(
+                    WorkspaceTerminalSessionFactory::new_local_with_authority(
                         session_factory,
                         ValidatedWorkspaceDirectory::new(
                             workspace_root.to_path_buf(),
                             replacement_identity,
                         ),
+                        local_filesystem.clone(),
                     ),
                     TabManagerCreation {
                         workspace_id: replacement_workspace_id,
@@ -4434,23 +4460,24 @@ fn remote_workspace_fallback_title(
     format!("{basename} · {}", key.destination().as_str())
 }
 
-fn initial_workspace_directory(path: PathBuf) -> (ValidatedWorkspaceDirectory, Option<String>) {
+fn initial_workspace_directory(
+    path: PathBuf,
+    local_filesystem: &LocalFilesystemAuthority,
+) -> (ValidatedWorkspaceDirectory, Option<String>) {
     #[cfg(test)]
-    {
-        (
-            ValidatedWorkspaceDirectory::new(path, WorkspaceDirectoryIdentity::new(0, 0)),
-            None,
-        )
-    }
+    let _ = local_filesystem;
+    #[cfg(test)]
+    return (
+        ValidatedWorkspaceDirectory::new(path, WorkspaceDirectoryIdentity::for_test(0)),
+        None,
+    );
     #[cfg(not(test))]
-    {
-        match validate_workspace_directory(&path) {
-            Ok(directory) => (directory, None),
-            Err(error) => (
-                ValidatedWorkspaceDirectory::new(path, WorkspaceDirectoryIdentity::new(0, 0)),
-                Some(error.to_string()),
-            ),
-        }
+    match local_filesystem.validate_workspace_directory(&path) {
+        Ok(directory) => (directory, None),
+        Err(error) => (
+            ValidatedWorkspaceDirectory::new(path, WorkspaceDirectoryIdentity::unavailable()),
+            Some(error.to_string()),
+        ),
     }
 }
 
@@ -4461,6 +4488,10 @@ impl WorkspaceManager {
         expected: &crate::app::ApplicationCapabilities,
         _: &App,
     ) {
+        assert!(
+            self.local_filesystem
+                .same_source(&expected.local_filesystem)
+        );
         assert!(Rc::ptr_eq(
             &self.key_input_adapter_factory,
             &expected.key_input
@@ -5125,6 +5156,7 @@ mod tests {
                 session_factory,
                 std::env::temp_dir(),
                 WorkspaceManagerAdapters {
+                    local_filesystem: LocalFilesystemAuthority::testing(),
                     key_input: Rc::new(GpuiTerminalKeyInputAdapterFactory::default()),
                     accessibility: Rc::new(crate::platform::terminal_accessibility::testing::RecordingAccessibilityFactory::default()),
                     native_services,
@@ -5172,6 +5204,7 @@ mod tests {
                 session_factory,
                 std::env::temp_dir(),
                 WorkspaceManagerAdapters {
+                    local_filesystem: LocalFilesystemAuthority::testing(),
                     key_input: Rc::new(GpuiTerminalKeyInputAdapterFactory::default()),
                     accessibility: factory.clone(),
                     native_services: crate::terminal::native_services::testing::adapters(),
@@ -5557,7 +5590,7 @@ mod tests {
                     Rc::clone(&manager.session_factory),
                     ValidatedWorkspaceDirectory::new(
                         manager.default_workspace_root.clone(),
-                        manager.default_workspace_identity,
+                        manager.default_workspace_identity.clone(),
                     ),
                     RemoteTerminalMetadataContext::new(
                         completion.destination().clone(),
@@ -8129,6 +8162,63 @@ mod tests {
                 .local_working_directory()
                 .is_some_and(|directory| directory.path() == project)
         }));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[gpui::test]
+    fn replaced_local_project_blocks_both_child_actions_without_closing_sessions(
+        cx: &mut TestAppContext,
+    ) {
+        let root = temporary_directory("child-replacement");
+        let project = root.join("project");
+        let parked = root.join("parked");
+        fs::create_dir_all(&project).unwrap();
+        let (manager, records, cx) = workspace_manager_with_picker([Ok(Some(project.clone()))], cx);
+        choose_with_finder_fallback(cx);
+        let original_counts = manager.read_with(cx, |manager, cx| {
+            manager
+                .workspaces
+                .active_workspace()
+                .payload()
+                .read(cx)
+                .aggregate_counts(cx)
+        });
+        let original_drops = records.dropped_session_ids();
+        fs::rename(&project, &parked).unwrap();
+        fs::create_dir(&project).unwrap();
+
+        for action in ["cmd-t", "cmd-d"] {
+            cx.simulate_keystrokes(action);
+            cx.run_until_parked();
+            assert_eq!(records.starts().len(), 2);
+            assert_eq!(records.dropped_session_ids(), original_drops);
+            assert_eq!(
+                manager.read_with(cx, |manager, cx| {
+                    manager
+                        .workspaces
+                        .active_workspace()
+                        .payload()
+                        .read(cx)
+                        .aggregate_counts(cx)
+                }),
+                original_counts
+            );
+            assert!(!manager.read_with(cx, |manager, _| {
+                manager
+                    .workspaces
+                    .active_workspace()
+                    .availability()
+                    .is_available()
+            }));
+        }
+        fs::remove_dir(&project).unwrap();
+        fs::rename(&parked, &project).unwrap();
+        for action in ["cmd-t", "cmd-d"] {
+            cx.simulate_keystrokes(action);
+            cx.run_until_parked();
+        }
+        assert_eq!(records.starts().len(), 4);
+        assert_eq!(records.dropped_session_ids(), original_drops);
         fs::remove_dir_all(root).unwrap();
     }
 

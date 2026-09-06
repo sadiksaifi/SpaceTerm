@@ -1241,6 +1241,58 @@ chooses Export Terminal Diagnostics and confirms a path through the native save 
 
 ### Workspace Picker and Workspace-Bound Terminal Creation
 
+#### Local Filesystem Authority
+
+`src/platform/local_filesystem` is the platform-neutral owner of Local Workspace and Local File
+identity policy. It owns absolute-path and malformed-path checks, readable-directory validation,
+one-level directory listing, hidden-entry filtering, creation, exact-path probing, canonical file
+resolution, typed identity equality, and action-time revalidation. Its picker facade exposes the
+existing semantic operations for asynchronous picker coordination and recording tests; it is not
+an Operating-System Filesystem Interface. GPUI `prompt_for_paths` continues to own Finder Fallback.
+The picker and Workspace hierarchy retain their operation, lifecycle, and Directory Authority
+checks, rejecting stale owners before local I/O or hierarchy mutation.
+
+Workspace Directory Identity and validated Local File values are opaque retained object leases.
+The domain can retain, clone, and compare directory identities without inspecting or manufacturing
+native fields. Explicit test identities carry only logical fixture labels. An unavailable startup
+directory has an explicit identity with no filesystem authority. Directory validation observes the
+same object before and after checking readability. Child creation and Local Project activation
+revalidate the exact accepted spelling against its retained identity. Removal, replacement, symlink
+retargeting, permission failure, and type changes fail closed; an open identity lease prevents a
+removed object's identifier from being recycled into authority for its successor.
+
+Host Composition constructs one Local Filesystem Authority and supplies it to WorkspaceManager,
+Workspace Picker, Workspace-bound child factories, and the Native Terminal Session factory. Each
+Terminal Emulator receives that same selected identity capability. Local File targets retain it
+through immutable Pane snapshots and Native Terminal Services, so hyperlink activation and Quick
+Look use the same revalidation policy. Remote launch contexts never send remote directory data to
+this authority, and disabled Terminal Local File Capabilities reject file resolution and metadata
+transfer before local I/O.
+
+A Local File retains both its exact resolved input spelling and canonical presentation path.
+Activation and every Quick Look presentation recheck both against the retained file identity.
+Resolver-only emission metadata contains a versioned 24-byte opaque token, with no path, file
+contents, or native identity fields. Each Terminal Emulator owns at most 1024 emitted file leases;
+repeated references to an equal target reuse its entry, and eviction makes old metadata inert.
+The registry is released with the emulator. Snapshots already holding a typed target retain their
+own exact lease until released. Missing, malformed, oversized, unknown, foreign-emulator, and
+evicted tokens cannot reconstruct authority. File URLs and paths remain private presentation or
+action values; Debug, errors, Local Diagnostics, and terminal text never receive native identities
+or emission contents. The final path-based GPUI open or native preview still follows revalidation;
+these APIs do not accept an open-file lease, so the pre-existing final action race is not eliminated.
+
+The identity audit evaluated the maintained cross-platform Rust
+[`same-file` 1.0.6 Handle](https://docs.rs/same-file/1.0.6/same_file/struct.Handle.html).
+It retains an open object and encapsulates equality, but its ordinary `from_path` opens for reading.
+That can block on a FIFO substituted during resolution. The narrow macOS identity Adapter adds
+only `O_NONBLOCK` and `O_NOCTTY` to standard Rust opening, observes the retained object's type, and
+transfers it into `same-file`. Standard Rust supplies close-on-exec; no file contents are read.
+Opening still requires read access: targets that permit metadata inspection but deny retention
+fail closed, rather than receiving a recyclable snapshot identity. Portable Rust supplies all
+policy and maps `std::io::ErrorKind` into
+closed content-free failures. No native device, inode, descriptor, mode, errno, or error value
+crosses the identity Interface. No other Operating System's mechanics or support are added.
+
 Every runtime-only Workspace has an immutable Workspace Kind. The New Workspace Panel is the one
 surface that presents every Workspace Source, naming each row for its source rather than repeating
 the panel's own noun, and stating each Kind's Workspace Directory behaviour beside it. It performs
@@ -1273,7 +1325,7 @@ unreadable or missing path as the list's single empty line. It renders no scrim,
 section heading, and no second confirm.
 
 The Workspace owns the exact selected or typed Workspace Directory spelling, including a selected
-symlink path, and its canonical macOS device/file identity. Equivalent Local Project selections
+symlink path, and its opaque retained filesystem identity. Equivalent Local Project selections
 activate the existing Workspace, while a Scratch Workspace at that identity remains distinct. The
 picker starts at `HOME` on every open and retains no recents, index, persistence, or filesystem
 watcher. No Workspace state is persisted or watched.

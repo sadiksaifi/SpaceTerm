@@ -5,12 +5,10 @@ use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 
-use super::workspace_directory::{
-    WorkspaceDirectoryError, validate_workspace_directory as validate_existing_workspace_directory,
-};
+use super::{LocalFilesystemAuthority, LocalFilesystemError, validate_absolute_path};
 use crate::domain::ValidatedWorkspaceDirectory;
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub(crate) struct WorkspacePickerDirectoryEntry {
     name: String,
     path: PathBuf,
@@ -65,26 +63,18 @@ pub(crate) trait WorkspacePickerFilesystem: Send + Sync {
     ) -> Result<ValidatedWorkspaceDirectory, WorkspacePickerFilesystemError>;
 }
 
-#[derive(Clone, Copy, Debug, Default)]
-pub(crate) struct NativeWorkspacePickerFilesystem;
-
-impl WorkspacePickerFilesystem for NativeWorkspacePickerFilesystem {
+impl WorkspacePickerFilesystem for LocalFilesystemAuthority {
     fn list_directories(
         &self,
         directory: &Path,
         hide_dot_prefixed: bool,
     ) -> Result<Vec<WorkspacePickerDirectoryEntry>, WorkspacePickerFilesystemError> {
-        let entries = fs::read_dir(directory).map_err(|error| {
-            if error.raw_os_error() == Some(libc::ENOTDIR) {
-                WorkspacePickerFilesystemError::NotDirectory
-            } else {
-                classify_io_error(&error)
-            }
-        })?;
+        validate_absolute_path(directory).map_err(classify_workspace_directory_error)?;
+        let entries = fs::read_dir(directory).map_err(classify_io_error)?;
         let mut directories = Vec::new();
 
         for entry in entries {
-            let entry = entry.map_err(|error| classify_io_error(&error))?;
+            let entry = entry.map_err(classify_io_error)?;
             let Some(name) = visible_entry_name(entry.file_name(), hide_dot_prefixed) else {
                 continue;
             };
@@ -92,12 +82,10 @@ impl WorkspacePickerFilesystem for NativeWorkspacePickerFilesystem {
             let path = entry.path();
             let metadata = match fs::metadata(&path) {
                 Ok(metadata) => metadata,
-                Err(error)
-                    if classify_io_error(&error) == WorkspacePickerFilesystemError::Missing =>
-                {
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {
                     continue;
                 }
-                Err(error) => return Err(classify_io_error(&error)),
+                Err(error) => return Err(classify_io_error(error)),
             };
             if metadata.is_dir() {
                 directories.push(WorkspacePickerDirectoryEntry::new(name, path));
@@ -108,30 +96,21 @@ impl WorkspacePickerFilesystem for NativeWorkspacePickerFilesystem {
     }
 
     fn probe_exact_path(&self, path: &Path) -> WorkspacePickerExactPathProbe {
-        let metadata = match fs::metadata(path) {
-            Ok(metadata) => metadata,
-            Err(error) => {
-                return WorkspacePickerExactPathProbe::Unavailable(classify_io_error(&error));
-            }
-        };
-        if !metadata.is_dir() {
-            return WorkspacePickerExactPathProbe::Unavailable(
-                WorkspacePickerFilesystemError::NotDirectory,
-            );
-        }
-
-        match fs::read_dir(path) {
+        match self.validate_workspace_directory(path) {
             Ok(_) => WorkspacePickerExactPathProbe::ReadableDirectory,
-            Err(error) => WorkspacePickerExactPathProbe::Unavailable(classify_io_error(&error)),
+            Err(error) => WorkspacePickerExactPathProbe::Unavailable(
+                classify_workspace_directory_error(error),
+            ),
         }
     }
 
     fn create_dir_all(&self, path: &Path) -> Result<(), WorkspacePickerFilesystemError> {
+        validate_absolute_path(path).map_err(classify_workspace_directory_error)?;
         fs::create_dir_all(path).map_err(|error| {
             if fs::metadata(path).is_ok_and(|metadata| !metadata.is_dir()) {
                 WorkspacePickerFilesystemError::NotDirectory
             } else {
-                classify_io_error(&error)
+                classify_io_error(error)
             }
         })
     }
@@ -140,7 +119,8 @@ impl WorkspacePickerFilesystem for NativeWorkspacePickerFilesystem {
         &self,
         path: &Path,
     ) -> Result<ValidatedWorkspaceDirectory, WorkspacePickerFilesystemError> {
-        validate_existing_workspace_directory(path).map_err(classify_workspace_directory_error)
+        LocalFilesystemAuthority::validate_workspace_directory(self, path)
+            .map_err(classify_workspace_directory_error)
     }
 }
 
@@ -153,24 +133,24 @@ fn visible_entry_name(name: OsString, hide_dot_prefixed: bool) -> Option<String>
     }
 }
 
-fn classify_io_error(error: &io::Error) -> WorkspacePickerFilesystemError {
-    match error.raw_os_error() {
-        Some(libc::EPERM | libc::EACCES) => WorkspacePickerFilesystemError::PermissionDenied,
-        Some(libc::ENOENT) => WorkspacePickerFilesystemError::Missing,
-        _ => WorkspacePickerFilesystemError::Other,
+impl std::fmt::Debug for WorkspacePickerDirectoryEntry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("WorkspacePickerDirectoryEntry(<redacted>)")
     }
 }
 
+fn classify_io_error(error: io::Error) -> WorkspacePickerFilesystemError {
+    classify_workspace_directory_error(super::classify_io_error(error))
+}
+
 fn classify_workspace_directory_error(
-    error: WorkspaceDirectoryError,
+    error: LocalFilesystemError,
 ) -> WorkspacePickerFilesystemError {
     match error {
-        WorkspaceDirectoryError::Unavailable(error)
-        | WorkspaceDirectoryError::Unreadable(error) => classify_io_error(&error),
-        WorkspaceDirectoryError::NotDirectory => WorkspacePickerFilesystemError::NotDirectory,
-        WorkspaceDirectoryError::NotAbsolute | WorkspaceDirectoryError::IdentityChanged => {
-            WorkspacePickerFilesystemError::Other
-        }
+        LocalFilesystemError::PermissionDenied => WorkspacePickerFilesystemError::PermissionDenied,
+        LocalFilesystemError::Missing => WorkspacePickerFilesystemError::Missing,
+        LocalFilesystemError::NotDirectory => WorkspacePickerFilesystemError::NotDirectory,
+        _ => WorkspacePickerFilesystemError::Other,
     }
 }
 
@@ -178,11 +158,10 @@ fn classify_workspace_directory_error(
 mod tests {
     use std::fs;
     use std::os::unix::ffi::OsStringExt;
-    use std::os::unix::fs::{MetadataExt, symlink};
+    use std::os::unix::fs::symlink;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     use super::*;
-    use crate::domain::WorkspaceDirectoryIdentity;
 
     static NEXT_TEMPORARY_DIRECTORY: AtomicU64 = AtomicU64::new(0);
 
@@ -209,37 +188,28 @@ mod tests {
     }
 
     #[test]
-    fn error_mapping_should_classify_eperm_as_permission_denied() {
-        let error = io::Error::from_raw_os_error(libc::EPERM);
+    fn error_mapping_should_classify_permission_denied_as_permission_denied() {
+        let error = io::Error::from(io::ErrorKind::PermissionDenied);
 
-        let result = classify_io_error(&error);
-
-        assert_eq!(result, WorkspacePickerFilesystemError::PermissionDenied);
-    }
-
-    #[test]
-    fn error_mapping_should_classify_eacces_as_permission_denied() {
-        let error = io::Error::from_raw_os_error(libc::EACCES);
-
-        let result = classify_io_error(&error);
+        let result = classify_io_error(error);
 
         assert_eq!(result, WorkspacePickerFilesystemError::PermissionDenied);
     }
 
     #[test]
-    fn error_mapping_should_classify_enoent_as_missing() {
-        let error = io::Error::from_raw_os_error(libc::ENOENT);
+    fn error_mapping_should_classify_not_found_as_missing() {
+        let error = io::Error::from(io::ErrorKind::NotFound);
 
-        let result = classify_io_error(&error);
+        let result = classify_io_error(error);
 
         assert_eq!(result, WorkspacePickerFilesystemError::Missing);
     }
 
     #[test]
     fn error_mapping_should_classify_unrecognized_errors_as_other() {
-        let error = io::Error::from_raw_os_error(libc::EIO);
+        let error = io::Error::from(io::ErrorKind::Other);
 
-        let result = classify_io_error(&error);
+        let result = classify_io_error(error);
 
         assert_eq!(result, WorkspacePickerFilesystemError::Other);
     }
@@ -247,7 +217,7 @@ mod tests {
     #[test]
     fn exact_path_probe_should_classify_a_missing_path() {
         let root = TestDirectory::new("probe-missing");
-        let filesystem = NativeWorkspacePickerFilesystem;
+        let filesystem = LocalFilesystemAuthority::testing();
 
         let result = filesystem.probe_exact_path(&root.path.join("missing"));
 
@@ -262,7 +232,7 @@ mod tests {
         let root = TestDirectory::new("list-file");
         let file = root.path.join("file");
         fs::write(&file, b"test").unwrap();
-        let filesystem = NativeWorkspacePickerFilesystem;
+        let filesystem = LocalFilesystemAuthority::testing();
 
         let result = filesystem.list_directories(&file, true);
 
@@ -274,7 +244,7 @@ mod tests {
         let root = TestDirectory::new("probe-file");
         let file = root.path.join("file");
         fs::write(&file, b"test").unwrap();
-        let filesystem = NativeWorkspacePickerFilesystem;
+        let filesystem = LocalFilesystemAuthority::testing();
 
         let result = filesystem.probe_exact_path(&file);
 
@@ -292,7 +262,7 @@ mod tests {
         let visible = root.path.join("visible");
         fs::create_dir(&visible).unwrap();
         symlink(root.path.join("missing-target"), root.path.join(".hidden")).unwrap();
-        let filesystem = NativeWorkspacePickerFilesystem;
+        let filesystem = LocalFilesystemAuthority::testing();
 
         let result = filesystem.list_directories(&root.path, true).unwrap();
 
@@ -310,7 +280,7 @@ mod tests {
         let root = TestDirectory::new("shown-hidden");
         let hidden = root.path.join(".hidden");
         fs::create_dir(&hidden).unwrap();
-        let filesystem = NativeWorkspacePickerFilesystem;
+        let filesystem = LocalFilesystemAuthority::testing();
 
         let result = filesystem.list_directories(&root.path, false).unwrap();
 
@@ -327,7 +297,7 @@ mod tests {
     fn listing_should_omit_broken_visible_symlinks() {
         let root = TestDirectory::new("broken-symlink");
         symlink(root.path.join("missing-target"), root.path.join("broken")).unwrap();
-        let filesystem = NativeWorkspacePickerFilesystem;
+        let filesystem = LocalFilesystemAuthority::testing();
 
         let result = filesystem.list_directories(&root.path, true).unwrap();
 
@@ -341,7 +311,7 @@ mod tests {
         let link = root.path.join("linked");
         fs::create_dir(&target).unwrap();
         symlink(&target, &link).unwrap();
-        let filesystem = NativeWorkspacePickerFilesystem;
+        let filesystem = LocalFilesystemAuthority::testing();
 
         let result = filesystem.list_directories(&root.path, true).unwrap();
 
@@ -356,7 +326,7 @@ mod tests {
         let root = TestDirectory::new("package");
         let package = root.path.join("Example.app");
         fs::create_dir(&package).unwrap();
-        let filesystem = NativeWorkspacePickerFilesystem;
+        let filesystem = LocalFilesystemAuthority::testing();
 
         let result = filesystem.list_directories(&root.path, true).unwrap();
 
@@ -383,7 +353,7 @@ mod tests {
     fn create_dir_all_should_create_missing_ancestors() {
         let root = TestDirectory::new("recursive-create");
         let nested = root.path.join("one").join("two").join("three");
-        let filesystem = NativeWorkspacePickerFilesystem;
+        let filesystem = LocalFilesystemAuthority::testing();
 
         let result = filesystem.create_dir_all(&nested);
 
@@ -395,7 +365,7 @@ mod tests {
         let root = TestDirectory::new("create-file-collision");
         let file = root.path.join("collision");
         fs::write(&file, b"test").unwrap();
-        let filesystem = NativeWorkspacePickerFilesystem;
+        let filesystem = LocalFilesystemAuthority::testing();
 
         let result = filesystem.create_dir_all(&file);
 
@@ -403,14 +373,13 @@ mod tests {
     }
 
     #[test]
-    fn final_validation_should_preserve_the_exact_path_and_capture_device_inode_identity() {
+    fn final_validation_should_preserve_the_exact_path_and_capture_retained_identity() {
         let root = TestDirectory::new("validation");
         let target = root.path.join("target");
         let selected = root.path.join("selected-spelling");
         fs::create_dir(&target).unwrap();
         symlink(&target, &selected).unwrap();
-        let metadata = fs::metadata(&target).unwrap();
-        let filesystem = NativeWorkspacePickerFilesystem;
+        let filesystem = LocalFilesystemAuthority::testing();
 
         let result = filesystem.validate_workspace_directory(&selected).unwrap();
 
@@ -418,7 +387,10 @@ mod tests {
             (result.path(), result.identity()),
             (
                 selected.as_path(),
-                WorkspaceDirectoryIdentity::new(metadata.dev(), metadata.ino()),
+                filesystem
+                    .validate_workspace_directory(&target)
+                    .unwrap()
+                    .identity(),
             )
         );
     }

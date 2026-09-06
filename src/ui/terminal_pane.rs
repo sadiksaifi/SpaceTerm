@@ -112,13 +112,27 @@ fn terminal_surface_active(product_focus: TerminalProductFocus, activity: Surfac
         && activity.operating_system_window_key
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub(crate) enum TerminalPaneEvent {
     FocusRequested,
     TitleChanged(SharedString),
     ReportedWorkingDirectoryChanged(PathBuf),
     AttentionChanged { unread_count: u32 },
     Exited,
+}
+
+impl std::fmt::Debug for TerminalPaneEvent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::FocusRequested => "TerminalPaneEvent::FocusRequested",
+            Self::TitleChanged(_) => "TerminalPaneEvent::TitleChanged",
+            Self::ReportedWorkingDirectoryChanged(_) => {
+                "TerminalPaneEvent::ReportedWorkingDirectoryChanged"
+            }
+            Self::AttentionChanged { .. } => "TerminalPaneEvent::AttentionChanged",
+            Self::Exited => "TerminalPaneEvent::Exited",
+        })
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

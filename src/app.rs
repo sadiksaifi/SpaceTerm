@@ -266,6 +266,7 @@ pub(crate) fn open(
     host: &HostComposition,
 ) -> Result<gpui::WindowHandle<WorkspaceManager>, RuntimeError> {
     let adapters = crate::ui::WorkspaceManagerAdapters {
+        local_filesystem: host.adapters.local_filesystem.clone(),
         key_input: Rc::clone(&host.adapters.key_input),
         accessibility: Rc::clone(&host.adapters.accessibility),
         native_services: host.adapters.native_services.clone(),
@@ -513,6 +514,7 @@ impl crate::terminal::native_services::services::ServiceEndpoint for WorkspaceSe
 /// Application-scoped capabilities shared by every Operating-System Window.
 #[derive(Clone)]
 pub(crate) struct ApplicationCapabilities {
+    pub(crate) local_filesystem: crate::platform::local_filesystem::LocalFilesystemAuthority,
     pub(crate) key_input: Rc<dyn crate::terminal::TerminalKeyInputAdapterFactory>,
     pub(crate) accessibility:
         Rc<dyn crate::platform::terminal_accessibility::TerminalAccessibilityAdapterFactory>,
@@ -799,6 +801,7 @@ mod runtime_tests {
             home_directory: std::env::temp_dir(),
             session_factory: Rc::new(crate::terminal::testing::TestTerminalSessionFactory::new(Default::default())),
             adapters: ApplicationCapabilities {
+                local_filesystem: crate::platform::local_filesystem::LocalFilesystemAuthority::testing(),
                 key_input: Rc::new(crate::terminal::GpuiTerminalKeyInputAdapterFactory::default()),
                 accessibility: Rc::new(crate::platform::terminal_accessibility::testing::RecordingAccessibilityFactory::default()),
                 native_services: crate::terminal::native_services::testing::adapters(),

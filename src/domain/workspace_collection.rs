@@ -21,22 +21,7 @@ impl WorkspaceId {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub(crate) struct WorkspaceDirectoryIdentity {
-    device: u64,
-    file: u64,
-}
-
-impl WorkspaceDirectoryIdentity {
-    pub(crate) const fn new(device: u64, file: u64) -> Self {
-        Self { device, file }
-    }
-
-    #[cfg(test)]
-    pub(crate) const fn is_synthetic(self) -> bool {
-        self.device == 0 && self.file == 0
-    }
-}
+pub(crate) use crate::platform::local_filesystem::WorkspaceDirectoryIdentity;
 
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
 /// Validation failures for values that cross the local-to-remote domain boundary.
@@ -370,8 +355,8 @@ impl ValidatedWorkspaceDirectory {
         &self.path
     }
 
-    pub(crate) const fn identity(&self) -> WorkspaceDirectoryIdentity {
-        self.identity
+    pub(crate) fn identity(&self) -> WorkspaceDirectoryIdentity {
+        self.identity.clone()
     }
 }
 
@@ -502,7 +487,7 @@ impl<T> WorkspaceEntry<T> {
         }
     }
 
-    pub(crate) const fn directory_identity(&self) -> Option<WorkspaceDirectoryIdentity> {
+    pub(crate) fn directory_identity(&self) -> Option<WorkspaceDirectoryIdentity> {
         match &self.directory_location {
             WorkspaceDirectoryLocation::Local(directory) => Some(directory.identity()),
             WorkspaceDirectoryLocation::Remote => None,
@@ -539,7 +524,7 @@ impl<T> WorkspaceCollection<T> {
     ) -> Self {
         let directory = ValidatedWorkspaceDirectory::new(
             working_directory,
-            WorkspaceDirectoryIdentity::new(0, 0),
+            WorkspaceDirectoryIdentity::for_test(0),
         );
         let mut collection = Self::new_scratch(
             directory,
@@ -611,10 +596,10 @@ impl<T> WorkspaceCollection<T> {
     ) -> Option<WorkspaceId> {
         self.workspaces.iter().find_map(|workspace| {
             matches!(
-                workspace.kind,
+                &workspace.kind,
                 WorkspaceKind::LocalProject {
                     project_root_identity
-                } if project_root_identity == identity
+                } if project_root_identity == &identity
             )
             .then_some(workspace.id)
         })
@@ -692,7 +677,7 @@ impl<T> WorkspaceCollection<T> {
         let name = self.next_default_workspace_name(None);
         let directory = ValidatedWorkspaceDirectory::new(
             working_directory,
-            WorkspaceDirectoryIdentity::new(0, workspace_id.get()),
+            WorkspaceDirectoryIdentity::for_test(workspace_id.get()),
         );
         let payload = create_payload(workspace_id, directory.path());
         self.workspaces.push(WorkspaceEntry {
@@ -731,12 +716,12 @@ impl<T> WorkspaceCollection<T> {
         directory: ValidatedWorkspaceDirectory,
         create_payload: impl FnOnce(WorkspaceId, &Path) -> T,
     ) -> Result<WorkspaceId, WorkspaceError> {
-        if let Some(existing_id) = self.local_project_workspace(directory.identity) {
+        if let Some(existing_id) = self.local_project_workspace(directory.identity()) {
             self.active_workspace_id = existing_id;
             return Ok(existing_id);
         }
         let kind = WorkspaceKind::LocalProject {
-            project_root_identity: directory.identity,
+            project_root_identity: directory.identity(),
         };
         self.create_workspace_entry(kind, directory, create_payload)
     }
@@ -966,8 +951,10 @@ impl<T> WorkspaceCollection<T> {
         replacement_working_directory: PathBuf,
         create_replacement: impl FnOnce(WorkspaceId, &Path) -> T,
     ) -> Result<CloseWorkspaceOutcome<T>, WorkspaceError> {
-        let replacement =
-            ValidatedWorkspaceDirectory::new(replacement_working_directory, self.home_identity);
+        let replacement = ValidatedWorkspaceDirectory::new(
+            replacement_working_directory,
+            self.home_identity.clone(),
+        );
         self.close_workspace_with_replacement(
             workspace_id,
             replacement,
@@ -1011,8 +998,8 @@ impl<T> WorkspaceCollection<T> {
             let replacement_name = if self.directory_names {
                 automatic_workspace_basename(
                     replacement.path(),
-                    replacement.identity,
-                    self.home_identity,
+                    replacement.identity(),
+                    self.home_identity.clone(),
                 )
             } else {
                 self.next_default_workspace_name(Some(workspace_id))
@@ -1169,7 +1156,7 @@ impl<T> WorkspaceCollection<T> {
                         automatic_workspace_basename(
                             directory.path(),
                             directory.identity(),
-                            self.home_identity,
+                            self.home_identity.clone(),
                         )
                     }
                 };
@@ -1276,10 +1263,10 @@ mod tests {
         })
     }
 
-    fn validated(path: &str, file: u64) -> ValidatedWorkspaceDirectory {
+    fn validated(path: &str, identity_label: u64) -> ValidatedWorkspaceDirectory {
         ValidatedWorkspaceDirectory::new(
             PathBuf::from(path),
-            WorkspaceDirectoryIdentity::new(1, file),
+            WorkspaceDirectoryIdentity::for_test(identity_label),
         )
     }
 
@@ -1299,7 +1286,7 @@ mod tests {
         let key = RemoteWorkspaceKey::new(destination.clone(), physical.clone());
         let local = ValidatedWorkspaceDirectory::new(
             PathBuf::from("/sensitive/local"),
-            WorkspaceDirectoryIdentity::new(1, 1),
+            WorkspaceDirectoryIdentity::for_test(1001),
         );
 
         for debug in [
@@ -1344,7 +1331,7 @@ mod tests {
         assert!(matches!(
             workspaces.workspace(project_id).unwrap().kind(),
             WorkspaceKind::LocalProject { project_root_identity }
-                if *project_root_identity == WorkspaceDirectoryIdentity::new(1, 20)
+                if *project_root_identity == WorkspaceDirectoryIdentity::for_test(20)
         ));
         assert_eq!(
             (authority.tab_id(), authority.pane_id()),
@@ -1540,7 +1527,7 @@ mod tests {
         );
         assert_eq!(
             workspaces
-                .set_directory_available(workspace_id, WorkspaceDirectoryIdentity::new(1, 99),),
+                .set_directory_available(workspace_id, WorkspaceDirectoryIdentity::for_test(99),),
             Err(WorkspaceError::LocalDirectoryUnavailable(workspace_id))
         );
     }
@@ -1569,7 +1556,7 @@ mod tests {
             ),
             (
                 Some(Path::new("/Users/test")),
-                Some(WorkspaceDirectoryIdentity::new(1, 10)),
+                Some(WorkspaceDirectoryIdentity::for_test(10)),
             )
         );
         assert_eq!(
@@ -1585,7 +1572,7 @@ mod tests {
             ),
             (
                 Some(Path::new("/Users/test/project")),
-                Some(WorkspaceDirectoryIdentity::new(1, 20)),
+                Some(WorkspaceDirectoryIdentity::for_test(20)),
             )
         );
     }

@@ -1,14 +1,12 @@
 use std::fmt;
-use std::fs::Metadata;
-use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
+use crate::platform::local_filesystem::{
+    LocalFileEmissionRegistry, LocalFilesystemAuthority, ValidatedLocalFile,
+};
 use crate::terminal::metadata::TerminalLocalFileCapabilities;
 
 pub(crate) const MAX_LINK_BYTES: usize = 4096;
-const LOCAL_EMISSION_METADATA_PREFIX: &[u8; 8] = b"STLF\0\0\0\x01";
-const LOCAL_EMISSION_METADATA_HEADER_BYTES: usize = LOCAL_EMISSION_METADATA_PREFIX.len() + 8 * 3;
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum HyperlinkKind {
     Url,
@@ -20,7 +18,7 @@ pub(crate) struct HyperlinkTarget {
     pub(crate) identity: u64,
     pub(crate) kind: HyperlinkKind,
     pub(crate) value: String,
-    local_file_identity: Option<LocalFileIdentity>,
+    local_file: Option<ValidatedLocalFile>,
 }
 
 impl fmt::Debug for HyperlinkTarget {
@@ -28,21 +26,6 @@ impl fmt::Debug for HyperlinkTarget {
         let mut target = formatter.debug_struct("HyperlinkTarget");
         target.field("kind", &self.kind);
         target.finish_non_exhaustive()
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct LocalFileIdentity {
-    device: u64,
-    inode: u64,
-}
-
-impl From<&Metadata> for LocalFileIdentity {
-    fn from(metadata: &Metadata) -> Self {
-        Self {
-            device: metadata.dev(),
-            inode: metadata.ino(),
-        }
     }
 }
 
@@ -63,58 +46,47 @@ impl HyperlinkTarget {
         Some(Self::new(HyperlinkKind::Url, value.to_owned(), None))
     }
 
+    #[cfg(test)]
     pub(crate) fn osc8(
         value: &str,
         trusted_directory: &Path,
         local_hostname: Option<&str>,
         local_file_capabilities: TerminalLocalFileCapabilities,
     ) -> Option<Self> {
+        Self::resolve_osc8(
+            value,
+            trusted_directory,
+            local_hostname,
+            local_file_capabilities,
+            &LocalFilesystemAuthority::testing(),
+        )
+    }
+
+    pub(crate) fn resolve_osc8(
+        value: &str,
+        trusted_directory: &Path,
+        local_hostname: Option<&str>,
+        local_file_capabilities: TerminalLocalFileCapabilities,
+        authority: &LocalFilesystemAuthority,
+    ) -> Option<Self> {
         Self::url(value).or_else(|| {
             local_file_capabilities.are_enabled().then_some(())?;
             let path = parse_local_file_uri(value, local_hostname)?;
-            Self::local(&path, trusted_directory)
+            Self::from_local_file(authority.local_file(&path, trusted_directory)?)
         })
     }
 
-    fn local(value: &str, trusted_directory: &Path) -> Option<Self> {
-        if !valid_text(value) {
-            return None;
-        }
-        let path = Path::new(value);
-        let resolved = if path.is_absolute() {
-            path.to_path_buf()
-        } else {
-            if !trusted_directory.is_absolute() {
-                return None;
-            }
-            trusted_directory.join(path)
-        };
-        let resolved = resolved.canonicalize().ok()?;
-        let metadata = resolved.metadata().ok()?;
-        if !metadata.is_file() {
-            return None;
-        }
-        let resolved = resolved.to_str()?.to_owned();
-        if !valid_text(&resolved) {
-            return None;
-        }
-        Some(Self::new(
-            HyperlinkKind::LocalPath,
-            resolved,
-            Some(LocalFileIdentity::from(&metadata)),
-        ))
+    fn from_local_file(file: ValidatedLocalFile) -> Option<Self> {
+        let value = file.canonical_path().to_str()?.to_owned();
+        Some(Self::new(HyperlinkKind::LocalPath, value, Some(file)))
     }
 
-    fn new(
-        kind: HyperlinkKind,
-        value: String,
-        local_file_identity: Option<LocalFileIdentity>,
-    ) -> Self {
+    fn new(kind: HyperlinkKind, value: String, local_file: Option<ValidatedLocalFile>) -> Self {
         Self {
             identity: stable_identity(kind, value.as_bytes()),
             kind,
             value,
-            local_file_identity,
+            local_file,
         }
     }
 
@@ -141,55 +113,24 @@ impl HyperlinkTarget {
         (self.kind == HyperlinkKind::LocalPath).then(|| file_url(&self.value))
     }
 
-    /// Serializes the validated target into resolver-only metadata retained
-    /// separately from terminal text and hyperlink URI formatting.
+    /// Transfers authority through opaque, bounded, emulator-owned emission metadata.
     pub(crate) fn local_emission_metadata(
         &self,
         local_file_capabilities: TerminalLocalFileCapabilities,
+        registry: &mut LocalFileEmissionRegistry,
     ) -> Option<Vec<u8>> {
         local_file_capabilities.are_enabled().then_some(())?;
-        let identity = self.local_file_identity?;
         (self.kind == HyperlinkKind::LocalPath).then_some(())?;
-        let total = LOCAL_EMISSION_METADATA_HEADER_BYTES.checked_add(self.value.len())?;
-        if total > MAX_LINK_BYTES {
-            return None;
-        }
-        let mut metadata = Vec::with_capacity(total);
-        metadata.extend_from_slice(LOCAL_EMISSION_METADATA_PREFIX);
-        metadata.extend_from_slice(&self.identity.to_be_bytes());
-        metadata.extend_from_slice(&identity.device.to_be_bytes());
-        metadata.extend_from_slice(&identity.inode.to_be_bytes());
-        metadata.extend_from_slice(self.value.as_bytes());
-        Some(metadata)
+        registry.emit(self.local_file.as_ref()?)
     }
 
     pub(crate) fn from_local_emission_metadata(
         metadata: &[u8],
         local_file_capabilities: TerminalLocalFileCapabilities,
+        registry: &LocalFileEmissionRegistry,
     ) -> Option<Self> {
         local_file_capabilities.are_enabled().then_some(())?;
-        if metadata.len() > MAX_LINK_BYTES
-            || metadata.len() <= LOCAL_EMISSION_METADATA_HEADER_BYTES
-            || !metadata.starts_with(LOCAL_EMISSION_METADATA_PREFIX)
-        {
-            return None;
-        }
-        let identity = decode_u64(metadata.get(8..16)?)?;
-        let device = decode_u64(metadata.get(16..24)?)?;
-        let inode = decode_u64(metadata.get(24..32)?)?;
-        let value = std::str::from_utf8(metadata.get(32..)?).ok()?;
-        if !valid_text(value)
-            || !Path::new(value).is_absolute()
-            || stable_identity(HyperlinkKind::LocalPath, value.as_bytes()) != identity
-        {
-            return None;
-        }
-        Some(Self {
-            identity,
-            kind: HyperlinkKind::LocalPath,
-            value: value.to_owned(),
-            local_file_identity: Some(LocalFileIdentity { device, inode }),
-        })
+        Self::from_local_file(registry.restore(metadata)?)
     }
 
     pub(crate) fn revalidated_local_path(
@@ -197,23 +138,12 @@ impl HyperlinkTarget {
         local_file_capabilities: TerminalLocalFileCapabilities,
     ) -> Option<PathBuf> {
         local_file_capabilities.are_enabled().then_some(())?;
-        if self.kind != HyperlinkKind::LocalPath {
-            return None;
-        }
-        let path = Path::new(&self.value).canonicalize().ok()?;
-        let metadata = path.metadata().ok()?;
-        let canonical = path.to_str()?;
-        if !metadata.is_file()
-            || canonical != self.value
-            || stable_identity(HyperlinkKind::LocalPath, canonical.as_bytes()) != self.identity
-            || Some(LocalFileIdentity::from(&metadata)) != self.local_file_identity
-        {
-            return None;
-        }
-        // Revalidation rejects stale snapshot targets and replaced filesystem identities. The
-        // native open still occurs afterward, so eliminating the final TOCTOU window would require
-        // handing an already-open descriptor to the platform API.
-        Some(path)
+        (self.kind == HyperlinkKind::LocalPath).then_some(())?;
+        let file = self.local_file.as_ref()?;
+        (file.canonical_path().to_str()? == self.value
+            && stable_identity(self.kind, self.value.as_bytes()) == self.identity)
+            .then_some(())?;
+        file.revalidated_path()
     }
 }
 
@@ -221,10 +151,6 @@ pub(crate) fn has_file_scheme(value: &[u8]) -> bool {
     value
         .get(..5)
         .is_some_and(|scheme| scheme.eq_ignore_ascii_case(b"file:"))
-}
-
-fn decode_u64(bytes: &[u8]) -> Option<u64> {
-    Some(u64::from_be_bytes(bytes.try_into().ok()?))
 }
 
 fn parse_local_file_uri(value: &str, local_hostname: Option<&str>) -> Option<String> {
@@ -496,11 +422,15 @@ mod tests {
         fs::write(&file, b"first").unwrap();
         let target =
             HyperlinkTarget::osc8("file:preview.txt", &directory, None, LOCAL_FILES).unwrap();
-        let metadata = target.local_emission_metadata(LOCAL_FILES).unwrap();
+        let mut registry = LocalFileEmissionRegistry::default();
+        let metadata = target
+            .local_emission_metadata(LOCAL_FILES, &mut registry)
+            .unwrap();
 
         fs::remove_file(&file).unwrap();
         let restored =
-            HyperlinkTarget::from_local_emission_metadata(&metadata, LOCAL_FILES).unwrap();
+            HyperlinkTarget::from_local_emission_metadata(&metadata, LOCAL_FILES, &registry)
+                .unwrap();
 
         assert_eq!(restored, target);
         assert_eq!(restored.activation_url(LOCAL_FILES), None);
@@ -514,16 +444,20 @@ mod tests {
         fs::write(&file, b"preview").unwrap();
         let target =
             HyperlinkTarget::osc8("file:preview.txt", &directory, None, LOCAL_FILES).unwrap();
-        let metadata = target.local_emission_metadata(LOCAL_FILES).unwrap();
+        let mut registry = LocalFileEmissionRegistry::default();
+        let metadata = target
+            .local_emission_metadata(LOCAL_FILES, &mut registry)
+            .unwrap();
 
         assert_eq!(
-            target.local_emission_metadata(TerminalLocalFileCapabilities::Disabled),
+            target.local_emission_metadata(TerminalLocalFileCapabilities::Disabled, &mut registry),
             None
         );
         assert_eq!(
             HyperlinkTarget::from_local_emission_metadata(
                 &metadata,
                 TerminalLocalFileCapabilities::Disabled,
+                &registry,
             ),
             None
         );
@@ -532,7 +466,14 @@ mod tests {
 
     #[test]
     fn malformed_local_emission_metadata_is_rejected() {
-        assert!(HyperlinkTarget::from_local_emission_metadata(b"forged", LOCAL_FILES).is_none());
+        assert!(
+            HyperlinkTarget::from_local_emission_metadata(
+                b"forged",
+                LOCAL_FILES,
+                &LocalFileEmissionRegistry::default()
+            )
+            .is_none()
+        );
     }
 
     #[test]

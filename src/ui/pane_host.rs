@@ -76,7 +76,7 @@ const _: () = assert!(
         && MINIMUM_PANE_HEIGHT >= PANE_CONTROL_TOP + PANE_CONTROL_SIZE + PANE_CONTROL_INSET
 );
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub(crate) enum PaneHostEvent {
     UserClosePaneRequested {
         tab_id: TabId,
@@ -105,6 +105,22 @@ pub(crate) enum PaneHostEvent {
     DirectoryUnavailable {
         reason: String,
     },
+}
+
+impl std::fmt::Debug for PaneHostEvent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::UserClosePaneRequested { .. } => "PaneHostEvent::UserClosePaneRequested",
+            Self::CloseTabRequested { .. } => "PaneHostEvent::CloseTabRequested",
+            Self::PresentationChanged { .. } => "PaneHostEvent::PresentationChanged",
+            Self::ReportedWorkingDirectoryChanged { .. } => {
+                "PaneHostEvent::ReportedWorkingDirectoryChanged"
+            }
+            Self::PaneClosed { .. } => "PaneHostEvent::PaneClosed",
+            Self::DirectoryAvailable { .. } => "PaneHostEvent::DirectoryAvailable",
+            Self::DirectoryUnavailable { .. } => "PaneHostEvent::DirectoryUnavailable",
+        })
+    }
 }
 
 pub(crate) struct PaneHost {
@@ -763,12 +779,8 @@ impl PaneHost {
                 cx.emit(PaneHostEvent::DirectoryUnavailable {
                     reason: reason.clone(),
                 });
-                let directory = self.session_factory.local_working_directory().map_or_else(
-                    || "the local Workspace Directory".to_owned(),
-                    |path| path.display().to_string(),
-                );
                 let detail = format!(
-                    "Cannot create a Pane at {directory} because {reason}. Restore the directory or use another Workspace."
+                    "Cannot create a Pane because {reason}. Restore the Workspace Directory or use another Workspace."
                 );
                 drop(window.prompt(
                     PromptLevel::Warning,
@@ -1800,7 +1812,7 @@ mod tests {
             Rc::new(TestTerminalSessionFactory::new(records)),
             crate::domain::ValidatedWorkspaceDirectory::new(
                 PathBuf::from("/missing/local/home-is-not-a-workspace"),
-                WorkspaceDirectoryIdentity::new(71, 73),
+                WorkspaceDirectoryIdentity::for_test(71073),
             ),
             crate::terminal::metadata::RemoteTerminalMetadataContext::new(
                 destination,

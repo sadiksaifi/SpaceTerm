@@ -91,6 +91,9 @@ fn compose(
         visibility: Rc::new(crate::platform::macos_render_lifecycle::MacosWindowVisibilityFactory),
         wheel: Rc::new(crate::platform::macos_scroll::MacosWheelPhaseEnrichment),
     };
+    let local_filesystem = super::local_filesystem::LocalFilesystemAuthority::new(Arc::new(
+        super::macos_local_identity::MacosLocalIdentity,
+    ));
     let session_factory = Rc::new(NativeTerminalSessionFactory::new(
         Arc::new(super::macos_pty::MacosNativePtyAdapterFactory),
         super::shell_launch::ShellLaunchPlanner::new(
@@ -98,6 +101,7 @@ fn compose(
             super::launch_host::resource_root(),
         ),
         Arc::new(super::macos_pasteboard::MacosOsc52ClipboardFactory),
+        local_filesystem.clone(),
     ));
     let remote_workspace = startup.remote_backend_factory(Arc::new(
         super::macos_askpass_transport::AskPassWindowFactory,
@@ -107,6 +111,7 @@ fn compose(
         home_directory: startup.home_directory,
         session_factory,
         adapters: crate::app::ApplicationCapabilities {
+            local_filesystem,
             key_input: Rc::new(
                 super::macos_keyboard::MacosTerminalKeyInputAdapterFactory::new(
                     OptionAsAltPolicy::default(),
@@ -140,6 +145,13 @@ fn compose(
             traffic_light_position: Some(point(px(12.0), px(11.0))),
         }),
     })
+}
+
+#[cfg(test)]
+pub(crate) fn testing_local_filesystem() -> super::local_filesystem::LocalFilesystemAuthority {
+    super::local_filesystem::LocalFilesystemAuthority::new(Arc::new(
+        super::macos_local_identity::MacosLocalIdentity,
+    ))
 }
 
 #[cfg(test)]

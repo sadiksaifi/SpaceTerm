@@ -1,3 +1,4 @@
+use crate::platform::local_filesystem::{LocalFileEmissionRegistry, LocalFilesystemAuthority};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::mem;
@@ -559,6 +560,7 @@ fn rows_have_selection(rows: &[RowSnapshot]) -> bool {
 }
 
 pub(crate) struct TerminalEmulator {
+    local_file_emissions: Rc<RefCell<LocalFileEmissionRegistry>>,
     terminal: Terminal<'static, 'static>,
     ghostty_accessibility: ghostty_accessibility::State,
     accessibility: TerminalAccessibilityState,
@@ -736,12 +738,31 @@ impl TerminalEmulator {
         )
     }
 
+    #[cfg(test)]
     pub(crate) fn new_with_metadata_context(
         geometry: TerminalGeometry,
         metadata_context: TerminalMetadataContext,
         fallback_title: &str,
         terminal_name: &'static str,
         epoch: Instant,
+    ) -> Result<Self, Error> {
+        Self::new_with_local_filesystem(
+            geometry,
+            metadata_context,
+            fallback_title,
+            terminal_name,
+            epoch,
+            LocalFilesystemAuthority::testing(),
+        )
+    }
+
+    pub(crate) fn new_with_local_filesystem(
+        geometry: TerminalGeometry,
+        metadata_context: TerminalMetadataContext,
+        fallback_title: &str,
+        terminal_name: &'static str,
+        epoch: Instant,
+        local_filesystem: LocalFilesystemAuthority,
     ) -> Result<Self, Error> {
         let grid = geometry.grid();
         let cell = geometry.backing_cell_size();
@@ -807,7 +828,9 @@ impl TerminalEmulator {
                 }
             }
         })?;
+        let local_file_emissions = Rc::new(RefCell::new(LocalFileEmissionRegistry::default()));
         terminal.on_hyperlink_resolve({
+            let local_file_emissions = Rc::clone(&local_file_emissions);
             let trusted_directory = Rc::clone(&trusted_directory);
             let local_hostname = metadata_context.local_hostname().map(ToOwned::to_owned);
             move |_, uri| {
@@ -820,15 +843,19 @@ impl TerminalEmulator {
                 let Ok(uri) = std::str::from_utf8(uri) else {
                     return HyperlinkResolution::Suppress;
                 };
-                let Some(target) = HyperlinkTarget::osc8(
+                let Some(target) = HyperlinkTarget::resolve_osc8(
                     uri,
                     &directory,
                     local_hostname.as_deref(),
                     local_file_capabilities,
+                    &local_filesystem,
                 ) else {
                     return HyperlinkResolution::Suppress;
                 };
-                let Some(userdata) = target.local_emission_metadata(local_file_capabilities) else {
+                let Some(userdata) = target.local_emission_metadata(
+                    local_file_capabilities,
+                    &mut local_file_emissions.borrow_mut(),
+                ) else {
                     return HyperlinkResolution::Suppress;
                 };
                 HyperlinkResolution::Replace {
@@ -892,6 +919,7 @@ impl TerminalEmulator {
         mouse_encoder.set_track_last_cell(true);
 
         Ok(Self {
+            local_file_emissions,
             terminal,
             ghostty_accessibility: ghostty_accessibility::State::new()?,
             accessibility: TerminalAccessibilityState::default(),
@@ -2067,6 +2095,7 @@ impl TerminalEmulator {
                                     let target = crate::terminal::HyperlinkTarget::from_local_emission_metadata(
                                         userdata,
                                         self.local_file_capabilities,
+                                        &self.local_file_emissions.borrow(),
                                     );
                                     local_hyperlink_targets
                                         .insert(userdata.to_vec(), target.clone());
@@ -4992,12 +5021,13 @@ mod tests {
                 crate::domain::RemoteWorkspaceDirectory::new("~/project".to_owned()).unwrap(),
             ),
         );
-        let mut emulator = TerminalEmulator::new_with_metadata_context(
+        let mut emulator = TerminalEmulator::new_with_local_filesystem(
             geometry(16, 2, 10.0, 20.0),
             metadata_context,
             "project on remote",
             identity::TERM_FALLBACK,
             Instant::now(),
+            LocalFilesystemAuthority::testing_without_access(),
         )
         .unwrap();
 

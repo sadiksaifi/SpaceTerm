@@ -24,11 +24,11 @@ use super::{
     SearchWorkspaces, SplitDown, SplitRight, TogglePaneZoom, ToggleSidebar, ToggleSidebarFocus,
 };
 use crate::domain::ValidatedWorkspaceDirectory;
-use crate::platform::permission_recovery::PermissionRecoveryOpener;
-use crate::platform::workspace_picker_filesystem::{
+use crate::platform::local_filesystem::picker::{
     WorkspacePickerDirectoryEntry, WorkspacePickerExactPathProbe, WorkspacePickerFilesystem,
     WorkspacePickerFilesystemError,
 };
+use crate::platform::permission_recovery::PermissionRecoveryOpener;
 
 const HOME_DISPLAY: &str = "~/";
 const ROW_ICON_SIZE: f32 = 14.0;
@@ -53,13 +53,19 @@ impl WorkspacePathFormatError {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub(super) struct ParsedWorkspacePath {
     display: String,
     exact_path: PathBuf,
     enumeration_directory: PathBuf,
     leaf_filter: String,
     trailing_separator: bool,
+}
+
+impl std::fmt::Debug for ParsedWorkspacePath {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ParsedWorkspacePath(<redacted>)")
+    }
 }
 
 impl ParsedWorkspacePath {
@@ -1491,7 +1497,7 @@ mod tests {
             ],
             [Ok(ValidatedWorkspaceDirectory::new(
                 representable_path.clone(),
-                WorkspaceDirectoryIdentity::new(7, 11),
+                WorkspaceDirectoryIdentity::for_test(7011),
             ))],
         ));
         filesystem.set_listed_entries([
@@ -1546,7 +1552,7 @@ mod tests {
             [home()],
             [Ok(ValidatedWorkspaceDirectory::new(
                 finder_path.clone(),
-                WorkspaceDirectoryIdentity::new(7, 11),
+                WorkspaceDirectoryIdentity::for_test(7011),
             ))],
         ));
         let (picker, cx) = workspace_picker(Arc::clone(&filesystem), cx);
@@ -1856,7 +1862,7 @@ mod tests {
             [home(), selected.clone()],
             [Ok(ValidatedWorkspaceDirectory::new(
                 selected.clone(),
-                WorkspaceDirectoryIdentity::new(7, 11),
+                WorkspaceDirectoryIdentity::for_test(7011),
             ))],
         ));
         let (picker, cx) = workspace_picker(filesystem, cx);
@@ -1909,7 +1915,7 @@ mod tests {
             [home()],
             [Ok(ValidatedWorkspaceDirectory::new(
                 path.clone(),
-                WorkspaceDirectoryIdentity::new(7, 11),
+                WorkspaceDirectoryIdentity::for_test(7011),
             ))],
         ));
         let (picker, cx) = workspace_picker(Arc::clone(&filesystem), cx);
@@ -1945,7 +1951,7 @@ mod tests {
             [home(), path.clone()],
             [Ok(ValidatedWorkspaceDirectory::new(
                 path.clone(),
-                WorkspaceDirectoryIdentity::new(7, 11),
+                WorkspaceDirectoryIdentity::for_test(7011),
             ))],
         ));
         let (picker, cx) = workspace_picker(filesystem, cx);
@@ -1993,7 +1999,7 @@ mod tests {
             [home()],
             [Ok(ValidatedWorkspaceDirectory::new(
                 path,
-                WorkspaceDirectoryIdentity::new(7, 11),
+                WorkspaceDirectoryIdentity::for_test(7011),
             ))],
         ));
         let (picker, cx) = workspace_picker(filesystem, cx);
@@ -2086,7 +2092,7 @@ mod tests {
                 Err(WorkspacePickerFilesystemError::Missing),
                 Ok(ValidatedWorkspaceDirectory::new(
                     finder_path.clone(),
-                    WorkspaceDirectoryIdentity::new(7, 11),
+                    WorkspaceDirectoryIdentity::for_test(7011),
                 )),
             ],
         ));

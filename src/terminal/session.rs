@@ -1,3 +1,4 @@
+use crate::platform::local_filesystem::LocalFilesystemAuthority;
 use std::collections::VecDeque;
 use std::fmt;
 use std::io::Write;
@@ -485,6 +486,7 @@ pub(crate) enum TerminalLaunchPlan {
 
 #[derive(Clone)]
 pub(crate) struct NativeTerminalSessionFactory {
+    local_filesystem: LocalFilesystemAuthority,
     native_pty_adapter_factory: Arc<dyn NativePtyAdapterFactory>,
     launch_planner: ShellLaunchPlanner,
     osc52_clipboard_factory: Arc<dyn Osc52ClipboardFactory>,
@@ -495,8 +497,10 @@ impl NativeTerminalSessionFactory {
         native_pty_adapter_factory: Arc<dyn NativePtyAdapterFactory>,
         launch_planner: ShellLaunchPlanner,
         osc52_clipboard_factory: Arc<dyn Osc52ClipboardFactory>,
+        local_filesystem: LocalFilesystemAuthority,
     ) -> Self {
         Self {
+            local_filesystem,
             native_pty_adapter_factory,
             launch_planner,
             osc52_clipboard_factory,
@@ -520,6 +524,7 @@ impl TerminalSessionFactory for NativeTerminalSessionFactory {
                 local.working_directory().path(),
                 observation,
                 Arc::clone(&self.osc52_clipboard_factory),
+                self.local_filesystem.clone(),
             )?,
             TerminalLaunchPlan::Remote(remote) => {
                 let remote = *remote;
@@ -531,6 +536,7 @@ impl TerminalSessionFactory for NativeTerminalSessionFactory {
                     command,
                     observation,
                     Arc::clone(&self.osc52_clipboard_factory),
+                    self.local_filesystem.clone(),
                 )?
             }
         };
@@ -630,6 +636,7 @@ impl TerminalSession {
         working_directory: &Path,
         runtime_observation: Option<RuntimeObservation>,
         osc52_clipboard_factory: Arc<dyn Osc52ClipboardFactory>,
+        local_filesystem: LocalFilesystemAuthority,
     ) -> Result<StartedSession, SessionError> {
         let initial_directory = working_directory.to_string_lossy();
         let metadata_context = TerminalMetadataContext::local(
@@ -643,6 +650,7 @@ impl TerminalSession {
             launch_planner.fallback_title(),
             runtime_observation,
             osc52_clipboard_factory,
+            local_filesystem,
             move |size, output, close_handle| {
                 let launch = launch_planner.local(&launch_directory)?;
                 let terminal_name = launch.terminal_name();
@@ -665,6 +673,7 @@ impl TerminalSession {
         command: crate::ssh::command::SshCommandSpec,
         runtime_observation: Option<RuntimeObservation>,
         osc52_clipboard_factory: Arc<dyn Osc52ClipboardFactory>,
+        local_filesystem: LocalFilesystemAuthority,
     ) -> Result<StartedSession, SessionError> {
         let local_home = remote.local_home.path().to_owned();
         Self::start_deferred_with_context(
@@ -673,6 +682,7 @@ impl TerminalSession {
             remote.fallback_title,
             runtime_observation,
             osc52_clipboard_factory,
+            local_filesystem,
             move |size, output, close_handle| {
                 let launch = PreparedShellLaunch::remote(&local_home, command)?;
                 let terminal_name = launch.terminal_name();
@@ -712,6 +722,7 @@ impl TerminalSession {
             test_launch_planner().fallback_title(),
             runtime_observation,
             Arc::new(UnavailableOsc52ClipboardFactory),
+            LocalFilesystemAuthority::testing(),
             move |size, output, close_handle| {
                 start_native_pty(size, output, close_handle)
                     .map(|owner| (owner, identity::launch_identity(&resource_root()).term))
@@ -725,6 +736,7 @@ impl TerminalSession {
         fallback_title: String,
         runtime_observation: Option<RuntimeObservation>,
         osc52_clipboard_factory: Arc<dyn Osc52ClipboardFactory>,
+        local_filesystem: LocalFilesystemAuthority,
         start_native_pty: impl FnOnce(
             NativePtySize,
             Arc<dyn NativePtyOutputSink>,
@@ -784,6 +796,7 @@ impl TerminalSession {
                         fallback_title,
                         terminal_name,
                         osc52_clipboard_factory,
+                        local_filesystem,
                     },
                     command_rx,
                     reader_transport,
@@ -861,6 +874,7 @@ impl TerminalSession {
                         fallback_title: "Terminal".to_owned(),
                         terminal_name,
                         osc52_clipboard_factory: Arc::new(UnavailableOsc52ClipboardFactory),
+                        local_filesystem: LocalFilesystemAuthority::testing(),
                     },
                     command_rx,
                     reader_transport,
@@ -1346,6 +1360,7 @@ struct TerminalWorker {
 }
 
 struct TerminalWorkerContext {
+    local_filesystem: LocalFilesystemAuthority,
     initial_geometry: TerminalGeometry,
     metadata_context: TerminalMetadataContext,
     fallback_title: String,
@@ -1595,6 +1610,7 @@ impl TerminalWorker {
             fallback_title,
             terminal_name,
             osc52_clipboard_factory,
+            local_filesystem,
         } = context;
         let TerminalWorkerMailboxes {
             resizes,
@@ -1610,12 +1626,13 @@ impl TerminalWorker {
             event_rx: reader_event_rx,
         } = reader_transport;
 
-        let emulator = match TerminalEmulator::new_with_metadata_context(
+        let emulator = match TerminalEmulator::new_with_local_filesystem(
             initial_geometry,
             metadata_context,
             &fallback_title,
             terminal_name,
             Instant::now(),
+            local_filesystem,
         ) {
             Ok(emulator) => emulator,
             Err(error) => {
@@ -2609,6 +2626,7 @@ mod tests {
             macos_native_pty_adapter_factory(),
             test_launch_planner(),
             Arc::new(UnavailableOsc52ClipboardFactory),
+            LocalFilesystemAuthority::testing(),
         )
     }
 
@@ -2623,7 +2641,7 @@ mod tests {
     fn remote_launch_plan_should_preserve_typed_context_and_reject_reused_channels() {
         let local_home = crate::domain::ValidatedWorkspaceDirectory::new(
             PathBuf::from("/Users/local"),
-            WorkspaceDirectoryIdentity::new(7, 11),
+            WorkspaceDirectoryIdentity::for_test(7011),
         );
         let destination = SshDestination::new("user@remote".to_owned()).unwrap();
         let remote_directory = RemoteWorkspaceDirectory::new("~/project".to_owned()).unwrap();
@@ -2678,7 +2696,7 @@ mod tests {
         let plan = TerminalLaunchPlan::Local(LocalTerminalLaunchPlan::new(
             crate::domain::ValidatedWorkspaceDirectory::new(
                 working_directory.clone(),
-                WorkspaceDirectoryIdentity::new(7, 11),
+                WorkspaceDirectoryIdentity::for_test(7011),
             ),
         ));
 
@@ -2734,7 +2752,7 @@ mod tests {
         let plan = TerminalLaunchPlan::Remote(Box::new(RemoteTerminalLaunchPlan::new(
             crate::domain::ValidatedWorkspaceDirectory::new(
                 local_home.clone(),
-                WorkspaceDirectoryIdentity::new(7, 11),
+                WorkspaceDirectoryIdentity::for_test(7011),
             ),
             destination,
             remote_directory.clone(),
@@ -3197,6 +3215,7 @@ mod tests {
                 Arc::new(RecordingSessionAdapterFactory { constructions }),
                 test_launch_planner(),
                 osc52_clipboard_factory,
+                LocalFilesystemAuthority::testing(),
             ),
             observed,
         )
@@ -3961,6 +3980,7 @@ mod tests {
             &std::env::temp_dir(),
             None,
             Arc::new(UnavailableOsc52ClipboardFactory),
+            LocalFilesystemAuthority::testing(),
         )
         .unwrap();
 
@@ -3995,7 +4015,7 @@ mod tests {
                 TerminalLaunchPlan::Local(LocalTerminalLaunchPlan::new(
                     crate::domain::ValidatedWorkspaceDirectory::new(
                         PathBuf::from("/private/tmp/spaceterm-missing-session-workspace"),
-                        crate::domain::WorkspaceDirectoryIdentity::new(0, 0),
+                        crate::domain::WorkspaceDirectoryIdentity::for_test(0),
                     ),
                 )),
             )
@@ -4036,7 +4056,7 @@ mod tests {
         let plan = RemoteTerminalLaunchPlan::new(
             crate::domain::ValidatedWorkspaceDirectory::new(
                 PathBuf::from("/private/tmp/spaceterm-missing-local-home"),
-                WorkspaceDirectoryIdentity::new(0, 0),
+                WorkspaceDirectoryIdentity::for_test(0),
             ),
             destination,
             remote_directory,
@@ -5550,6 +5570,7 @@ mod tests {
             &std::env::current_dir().unwrap(),
             None,
             Arc::new(UnavailableOsc52ClipboardFactory),
+            LocalFilesystemAuthority::testing(),
         )
         .unwrap();
         let session = JoinedRealPtySession(session);
@@ -5613,6 +5634,7 @@ mod tests {
             &std::env::current_dir().unwrap(),
             None,
             Arc::new(UnavailableOsc52ClipboardFactory),
+            LocalFilesystemAuthority::testing(),
         )
         .unwrap();
         let session = JoinedRealPtySession(session);

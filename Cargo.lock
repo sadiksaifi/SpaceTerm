@@ -5124,6 +5124,7 @@ dependencies = [
  "objc",
  "portable-pty",
  "raw-window-handle",
+ "same-file",
  "smallvec",
  "spaceterm-ui",
  "thiserror 2.0.19",

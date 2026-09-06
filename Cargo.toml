@@ -46,6 +46,7 @@ spaceterm-ui = { path = "crates/spaceterm-ui" }
 thiserror = "2.0.17"
 unicode-bidi = "=0.3.18"
 zeroize = "=1.9.0"
+same-file = "=1.0.6"
 
 [patch.crates-io]
 libghostty-vt = { path = "third_party/libghostty-vt" }

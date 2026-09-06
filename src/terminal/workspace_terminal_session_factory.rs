@@ -12,7 +12,9 @@ use super::session::{
     TerminalLaunchPlan, TerminalSessionFactory,
 };
 use crate::domain::{ValidatedWorkspaceDirectory, WorkspaceDirectoryIdentity};
-use crate::platform::workspace_directory::{WorkspaceDirectoryError, validate_workspace_directory};
+use crate::platform::local_filesystem::{
+    LocalFilesystemAuthority, LocalFilesystemError as WorkspaceDirectoryError,
+};
 use crate::ssh::command::PreparedSshPaneChannelCommand;
 
 #[derive(Clone)]
@@ -120,17 +122,32 @@ pub(crate) enum WorkspaceChildLaunchValidation {
 /// Binds Terminal Session creation to one Workspace's immutable Local or Remote launch context.
 pub(crate) struct WorkspaceTerminalSessionFactory {
     session_factory: Rc<dyn TerminalSessionFactory>,
+    local_filesystem: Option<LocalFilesystemAuthority>,
     launch_context: WorkspaceTerminalLaunchContext,
 }
 
 impl WorkspaceTerminalSessionFactory {
-    /// Creates a factory whose children start from one validated local Workspace Directory.
+    #[cfg(test)]
     pub(crate) fn new_local(
         session_factory: Rc<dyn TerminalSessionFactory>,
         working_directory: ValidatedWorkspaceDirectory,
     ) -> Self {
+        Self::new_local_with_authority(
+            session_factory,
+            working_directory,
+            LocalFilesystemAuthority::testing(),
+        )
+    }
+
+    /// Creates a factory whose children start from one validated local Workspace Directory.
+    pub(crate) fn new_local_with_authority(
+        session_factory: Rc<dyn TerminalSessionFactory>,
+        working_directory: ValidatedWorkspaceDirectory,
+        local_filesystem: LocalFilesystemAuthority,
+    ) -> Self {
         Self {
             session_factory,
+            local_filesystem: Some(local_filesystem),
             launch_context: WorkspaceTerminalLaunchContext::Local(LocalTerminalLaunchPlan::new(
                 working_directory,
             )),
@@ -150,6 +167,7 @@ impl WorkspaceTerminalSessionFactory {
     ) -> Self {
         Self {
             session_factory,
+            local_filesystem: None,
             launch_context: WorkspaceTerminalLaunchContext::Remote(
                 RemoteWorkspaceTerminalLaunchContext {
                     local_home,
@@ -246,6 +264,7 @@ impl WorkspaceTerminalSessionFactory {
     /// Returns local filesystem authority only for a Local launch context.
     ///
     /// Remote Workspace directories are intentionally unavailable through this API.
+    #[cfg(test)]
     pub(crate) fn local_working_directory(&self) -> Option<&std::path::Path> {
         match &self.launch_context {
             WorkspaceTerminalLaunchContext::Local(plan) => Some(plan.working_directory().path()),
@@ -269,10 +288,11 @@ impl WorkspaceTerminalSessionFactory {
                 plan.working_directory().clone(),
             ));
         }
-        let directory = validate_workspace_directory(plan.working_directory().path())?;
-        if plan.working_directory().identity() != directory.identity() {
-            return Err(WorkspaceDirectoryError::IdentityChanged);
-        }
+        let directory = self
+            .local_filesystem
+            .as_ref()
+            .ok_or(WorkspaceDirectoryError::Other)?
+            .revalidate_workspace_directory(plan.working_directory())?;
         Ok(WorkspaceChildLaunchValidation::Local(directory))
     }
 
@@ -387,7 +407,7 @@ mod tests {
             Rc::new(TestTerminalSessionFactory::new(records.clone()));
         let directory = ValidatedWorkspaceDirectory::new(
             PathBuf::from("/typed-local-workspace"),
-            WorkspaceDirectoryIdentity::new(7, 11),
+            WorkspaceDirectoryIdentity::for_test(7011),
         );
         let factory =
             WorkspaceTerminalSessionFactory::new_local(session_factory, directory.clone());
