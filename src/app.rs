@@ -52,6 +52,7 @@ pub(crate) struct StartupDependencies<A: SshProcessAdapter> {
 
 impl<A: SshProcessAdapter> StartupDependencies<A> {
     pub(crate) fn capture(
+        path_environment: AppPathEnvironment,
         path_host_facts: &AppPathHostFacts,
         secure_filesystem: Arc<dyn SecureFilesystem>,
         executable: OpenSshExecutable,
@@ -59,7 +60,6 @@ impl<A: SshProcessAdapter> StartupDependencies<A> {
         control_socket_probe: Arc<dyn ControlSocketProbe>,
         host_config_filesystem: Arc<dyn HostConfigFilesystem>,
     ) -> Result<Self, StartupDependenciesError> {
-        let path_environment = AppPathEnvironment::capture();
         let home_directory = path_environment
             .home
             .as_deref()

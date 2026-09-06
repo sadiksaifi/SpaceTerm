@@ -105,6 +105,7 @@ pub(crate) trait SecureFilesystem: Send + Sync {
         child: &SecureDirectory,
     ) -> Result<(), SecureFilesystemError>;
 
+    /// Reads a committed snapshot without observing another operation's provisional publication.
     fn read_private_file(
         &self,
         directory: &SecureDirectory,
@@ -120,6 +121,8 @@ pub(crate) trait SecureFilesystem: Send + Sync {
         allocation_nonce: [u8; 16],
     ) -> Result<PreparedPrivateFile, SecureFilesystemError>;
 
+    /// Serializes identity validation, publication, rollback, and synchronization across handles
+    /// addressing the same storage. Rollback must preserve a successor installed by another writer.
     fn commit_private_file(
         &self,
         prepared: PreparedPrivateFile,

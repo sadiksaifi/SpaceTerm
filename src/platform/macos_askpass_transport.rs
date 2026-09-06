@@ -120,7 +120,10 @@ impl AskPassHelperConnector for MacosHelperConnector {
         let (expected_broker, socket_path) = parse_authenticated_endpoint(endpoint)?;
         let stream = UnixStream::connect(socket_path).map_err(|_| AskPassUnavailable)?;
         validate_broker_process(&stream, expected_broker)?;
-        set_connection_timeouts(&stream)?;
+        // The reply waits for a human prompt; its lifetime is governed by broker cancellation.
+        stream
+            .set_write_timeout(Some(CONNECTION_IO_TIMEOUT))
+            .map_err(|_| AskPassUnavailable)?;
         Ok(stream)
     }
 }
@@ -339,6 +342,23 @@ mod tests {
         let endpoint = authenticated_endpoint(&socket_path, std::process::id());
 
         assert!(MacosHelperConnector.connect(&endpoint).is_ok());
+    }
+
+    #[test]
+    fn helper_should_wait_for_the_prompt_without_a_protocol_read_deadline() {
+        let directory = TestDirectory::new();
+        let socket_path = directory.0.join("prompt-timeout.sock");
+        let listener = UnixListener::bind(&socket_path).unwrap();
+        let endpoint = authenticated_endpoint(&socket_path, std::process::id());
+
+        let helper = MacosHelperConnector.connect(&endpoint).unwrap();
+        let (broker, _) = listener.accept().unwrap();
+        set_connection_timeouts(&broker).unwrap();
+
+        assert_eq!(helper.read_timeout().unwrap(), None);
+        assert_eq!(helper.write_timeout().unwrap(), Some(CONNECTION_IO_TIMEOUT));
+        assert_eq!(broker.read_timeout().unwrap(), Some(CONNECTION_IO_TIMEOUT));
+        assert_eq!(broker.write_timeout().unwrap(), Some(CONNECTION_IO_TIMEOUT));
     }
 
     #[test]

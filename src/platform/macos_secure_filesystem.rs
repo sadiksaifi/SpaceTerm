@@ -138,6 +138,7 @@ impl SecureFilesystem for MacosSecureFilesystem {
         maximum_bytes: usize,
     ) -> Result<Option<PrivateFileSnapshot>, SecureFilesystemError> {
         let directory = directory(directory_handle)?;
+        let _transaction = lock_private_directory(&directory)?;
         verify_directory_entry(&directory)?;
         let file = match open_file_at(&directory.file, name, libc::O_RDONLY | libc::O_NONBLOCK, 0) {
             Ok(file) => file,
@@ -213,6 +214,7 @@ impl SecureFilesystem for MacosSecureFilesystem {
             .0
             .downcast::<NativePreparedFile>()
             .map_err(|_| SecureFilesystemError::Unsafe)?;
+        let _transaction = lock_private_directory(&prepared.directory)?;
         verify_directory_entry(&prepared.directory)?;
         let open_identity = private_file_identity(&prepared.file.metadata().map_err(classify)?)?;
         if open_identity != prepared.identity {
@@ -236,6 +238,8 @@ impl SecureFilesystem for MacosSecureFilesystem {
                 &prepared.target_name,
             )
             .map_err(classify)?;
+
+            run_after_private_file_publish_hook();
 
             if let Err(error) = validate_prepared_file(&prepared) {
                 rollback_prepared_swap(&mut prepared)?;
@@ -288,6 +292,7 @@ impl SecureFilesystem for MacosSecureFilesystem {
                 }
                 Err(error) => return Err(classify(error)),
             }
+            run_after_private_file_publish_hook();
             if let Err(error) = validate_prepared_file(&prepared) {
                 rollback_exclusive_publish(&mut prepared)?;
                 return Err(error);
@@ -535,6 +540,18 @@ fn verify_directory_entry(directory: &NativeDirectory) -> Result<(), SecureFiles
     }
 }
 
+fn lock_private_directory(directory: &NativeDirectory) -> Result<File, SecureFilesystemError> {
+    // A separate open description coordinates clones, independent adapters, and other processes.
+    // The directory identity survives replacement of the configuration file it protects.
+    let lock = open_directory_at(&directory.parent, &directory.name).map_err(classify)?;
+    if private_directory_identity(&lock).map_err(classify)? != directory.identity {
+        return Err(SecureFilesystemError::Unsafe);
+    }
+    lock.lock().map_err(classify)?;
+    verify_directory_entry(directory)?;
+    Ok(lock)
+}
+
 fn private_directory_identity(file: &File) -> io::Result<NativeIdentity> {
     let metadata = file.metadata()?;
     if !metadata.is_dir()
@@ -569,6 +586,8 @@ fn validate_prepared_file(prepared: &NativePreparedFile) -> Result<(), SecureFil
 std::thread_local! {
     static BEFORE_PRIVATE_FILE_PUBLISH_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
         std::cell::RefCell::new(None);
+    static AFTER_PRIVATE_FILE_PUBLISH_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        std::cell::RefCell::new(None);
 }
 
 #[cfg(test)]
@@ -590,21 +609,39 @@ fn run_before_private_file_publish_hook() {
 #[cfg(not(test))]
 fn run_before_private_file_publish_hook() {}
 
+#[cfg(test)]
+fn run_after_private_file_publish_hook() {
+    AFTER_PRIVATE_FILE_PUBLISH_HOOK.with(|slot| {
+        if let Some(hook) = slot.borrow_mut().take() {
+            hook();
+        }
+    });
+}
+
+#[cfg(not(test))]
+fn run_after_private_file_publish_hook() {}
+
 fn rollback_prepared_swap(prepared: &mut NativePreparedFile) -> Result<(), SecureFilesystemError> {
-    if swap_at(
+    prepared.active = false;
+    let withdrawn = withdraw_prepared_file(prepared)?;
+    let target = component_cstring(&prepared.target_name).map_err(classify)?;
+    if rename_exclusive_at(
         &prepared.directory.file,
-        &prepared.temporary_name,
-        &prepared.target_name,
+        OsStr::from_bytes(prepared.temporary_name.as_bytes()),
+        &target,
     )
     .is_err()
     {
-        prepared.active = false;
+        let _ = rename_exclusive_at(
+            &prepared.directory.file,
+            OsStr::from_bytes(withdrawn.as_bytes()),
+            &target,
+        );
         return Err(SecureFilesystemError::Unavailable);
     }
-    prepared.active = false;
     quarantine_and_remove_retained_file(
         &prepared.directory.file,
-        OsStr::from_bytes(prepared.temporary_name.as_bytes()),
+        OsStr::from_bytes(withdrawn.as_bytes()),
         prepared.identity,
     )
     .map_err(|_| SecureFilesystemError::Unavailable)
@@ -613,29 +650,29 @@ fn rollback_prepared_swap(prepared: &mut NativePreparedFile) -> Result<(), Secur
 fn rollback_exclusive_publish(
     prepared: &mut NativePreparedFile,
 ) -> Result<(), SecureFilesystemError> {
-    if rename_exclusive_at(
-        &prepared.directory.file,
-        &prepared.target_name,
-        &prepared.temporary_name,
-    )
-    .is_ok()
-    {
-        prepared.active = false;
-        return quarantine_and_remove_retained_file(
-            &prepared.directory.file,
-            OsStr::from_bytes(prepared.temporary_name.as_bytes()),
-            prepared.identity,
-        )
-        .map_err(|_| SecureFilesystemError::Unavailable);
-    }
-
-    let cleanup = quarantine_and_remove_retained_file(
-        &prepared.directory.file,
-        &prepared.target_name,
-        prepared.identity,
-    );
     prepared.active = false;
-    cleanup.map_err(|_| SecureFilesystemError::Unavailable)
+    let withdrawn = withdraw_prepared_file(prepared)?;
+    quarantine_and_remove_retained_file(
+        &prepared.directory.file,
+        OsStr::from_bytes(withdrawn.as_bytes()),
+        prepared.identity,
+    )
+    .map_err(|_| SecureFilesystemError::Unavailable)
+}
+
+fn withdraw_prepared_file(prepared: &NativePreparedFile) -> Result<CString, SecureFilesystemError> {
+    let parent = &prepared.directory.file;
+    let withdrawn = quarantine_name(&prepared.target_name)?;
+    rename_exclusive_at(parent, &prepared.target_name, &withdrawn).map_err(classify)?;
+    let withdrawn_name = OsStr::from_bytes(withdrawn.as_bytes());
+    if retained_private_file_identity_at(parent, withdrawn_name) == Ok(prepared.identity) {
+        return Ok(withdrawn);
+    }
+    // A writer ignoring the transaction lock can replace the publication. Restore that exact
+    // entry without overwriting anything newer, and retain the predecessor for recovery.
+    let target = component_cstring(&prepared.target_name).map_err(classify)?;
+    rename_exclusive_at(parent, withdrawn_name, &target).map_err(classify)?;
+    Err(SecureFilesystemError::Unsafe)
 }
 
 fn metadata_identity(metadata: &fs::Metadata) -> NativeIdentity {
@@ -1139,6 +1176,131 @@ mod tests {
 
         assert_eq!(result, SecureCommitOutcome::Conflict);
         assert_eq!(fs::read(root.join("config")).unwrap(), b"replacement");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn publication_should_exclude_a_second_writer_until_validation_finishes() {
+        let root = test_root("concurrent-publication");
+        let filesystem = MacosSecureFilesystem;
+        let directory = filesystem.ensure_private_directory(&root).unwrap();
+        let initial = filesystem
+            .prepare_private_file(&directory, OsStr::new("config"), b"initial", [20; 16])
+            .unwrap();
+        filesystem.commit_private_file(initial, None).unwrap();
+        let snapshot = filesystem
+            .read_private_file(&directory, OsStr::new("config"), 1024)
+            .unwrap()
+            .unwrap();
+        let first = filesystem
+            .prepare_private_file(&directory, OsStr::new("config"), b"first", [21; 16])
+            .unwrap();
+        let (published, publication) = std::sync::mpsc::sync_channel(1);
+        let (resume, resumed) = std::sync::mpsc::sync_channel(1);
+        let first_writer = std::thread::spawn(move || {
+            AFTER_PRIVATE_FILE_PUBLISH_HOOK.with(|slot| {
+                *slot.borrow_mut() = Some(Box::new(move || {
+                    published.send(()).unwrap();
+                    resumed.recv().unwrap();
+                }));
+            });
+            filesystem.commit_private_file(first, Some(&snapshot.identity))
+        });
+        publication.recv().unwrap();
+
+        let competing_lock = File::open(&root).unwrap();
+        let lock_result = competing_lock.try_lock();
+        let excluded = matches!(lock_result, Err(std::fs::TryLockError::WouldBlock));
+        drop(competing_lock);
+        let second_root = root.clone();
+        let second_writer = std::thread::spawn(move || {
+            let directory = filesystem
+                .open_private_directory(&second_root)
+                .unwrap()
+                .unwrap();
+            let snapshot = filesystem
+                .read_private_file(&directory, OsStr::new("config"), 1024)
+                .unwrap()
+                .unwrap();
+            let mut bytes = snapshot.bytes;
+            bytes.extend_from_slice(b"+second");
+            let second = filesystem
+                .prepare_private_file(&directory, OsStr::new("config"), &bytes, [22; 16])
+                .unwrap();
+            filesystem.commit_private_file(second, Some(&snapshot.identity))
+        });
+        resume.send(()).unwrap();
+        let first_result = first_writer.join().unwrap();
+        let second_result = second_writer.join().unwrap();
+
+        assert!(
+            excluded,
+            "publication must retain exclusion through validation"
+        );
+        assert_eq!(first_result.unwrap(), SecureCommitOutcome::Committed);
+        assert_eq!(second_result.unwrap(), SecureCommitOutcome::Committed);
+        assert_eq!(fs::read(root.join("config")).unwrap(), b"first+second");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn rollback_should_preserve_a_successor_that_ignores_the_transaction_lock() {
+        let root = test_root("rollback-successor");
+        let filesystem = MacosSecureFilesystem;
+        let directory = filesystem.ensure_private_directory(&root).unwrap();
+        let initial = filesystem
+            .prepare_private_file(&directory, OsStr::new("config"), b"initial", [23; 16])
+            .unwrap();
+        filesystem.commit_private_file(initial, None).unwrap();
+        let snapshot = filesystem
+            .read_private_file(&directory, OsStr::new("config"), 1024)
+            .unwrap()
+            .unwrap();
+        let replacement = filesystem
+            .prepare_private_file(&directory, OsStr::new("config"), b"replacement", [24; 16])
+            .unwrap();
+        let predecessor = prepared_path(&root, &replacement);
+        let successor = root.join("successor");
+        fs::write(&successor, b"successor").unwrap();
+        fs::set_permissions(&successor, fs::Permissions::from_mode(PRIVATE_FILE_MODE)).unwrap();
+        let target = root.join("config");
+        AFTER_PRIVATE_FILE_PUBLISH_HOOK.with(|slot| {
+            *slot.borrow_mut() = Some(Box::new(move || {
+                fs::rename(successor, target).unwrap();
+            }));
+        });
+
+        let result = filesystem.commit_private_file(replacement, Some(&snapshot.identity));
+
+        assert!(result.is_err());
+        assert_eq!(fs::read(root.join("config")).unwrap(), b"successor");
+        assert_eq!(fs::read(predecessor).unwrap(), b"initial");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn first_publication_rollback_should_preserve_an_unowned_successor() {
+        let root = test_root("first-publication-successor");
+        let filesystem = MacosSecureFilesystem;
+        let directory = filesystem.ensure_private_directory(&root).unwrap();
+        let prepared = filesystem
+            .prepare_private_file(&directory, OsStr::new("config"), b"first", [25; 16])
+            .unwrap();
+        let successor = root.join("successor");
+        fs::write(&successor, b"successor").unwrap();
+        fs::set_permissions(&successor, fs::Permissions::from_mode(PRIVATE_FILE_MODE)).unwrap();
+        let target = root.join("config");
+        AFTER_PRIVATE_FILE_PUBLISH_HOOK.with(|slot| {
+            *slot.borrow_mut() = Some(Box::new(move || {
+                fs::rename(successor, target).unwrap();
+            }));
+        });
+
+        let result = filesystem.commit_private_file(prepared, None);
+
+        assert!(result.is_err());
+        assert_eq!(fs::read(root.join("config")).unwrap(), b"successor");
+        assert_eq!(fs::read_dir(&root).unwrap().count(), 1);
         let _ = fs::remove_dir_all(root);
     }
 

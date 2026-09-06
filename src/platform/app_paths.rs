@@ -51,11 +51,15 @@ impl AppPathEnvironment {
             xdg_runtime_dir: std::env::var_os(XDG_RUNTIME_DIR_ENVIRONMENT_VARIABLE),
         }
     }
+
+    pub(crate) fn configured_runtime_root(&self) -> Option<PathBuf> {
+        absolute_environment_path(self.xdg_runtime_dir.as_deref())
+    }
 }
 
 #[derive(Clone, Eq, PartialEq)]
 pub(crate) struct AppPathHostFacts {
-    runtime_fallback_root: PathBuf,
+    runtime_fallback_root: Option<PathBuf>,
     local_ipc_path_maximum: NonZeroUsize,
 }
 
@@ -76,7 +80,19 @@ impl AppPathHostFacts {
         let local_ipc_path_maximum = NonZeroUsize::new(local_ipc_path_maximum)
             .ok_or(AppPathHostFactsError::InvalidLocalIpcPathMaximum)?;
         Ok(Self {
-            runtime_fallback_root,
+            runtime_fallback_root: Some(runtime_fallback_root),
+            local_ipc_path_maximum,
+        })
+    }
+
+    /// Omits fallback capture when the startup environment already selects an absolute root.
+    pub(crate) fn without_runtime_fallback(
+        local_ipc_path_maximum: usize,
+    ) -> Result<Self, AppPathHostFactsError> {
+        let local_ipc_path_maximum = NonZeroUsize::new(local_ipc_path_maximum)
+            .ok_or(AppPathHostFactsError::InvalidLocalIpcPathMaximum)?;
+        Ok(Self {
+            runtime_fallback_root: None,
             local_ipc_path_maximum,
         })
     }
@@ -139,8 +155,10 @@ impl AppPaths {
             AppPathRoot::Cache,
             &[".cache"],
         )?;
-        let runtime_base = absolute_environment_path(environment.xdg_runtime_dir.as_deref())
-            .unwrap_or_else(|| host.runtime_fallback_root.clone());
+        let runtime_base = environment
+            .configured_runtime_root()
+            .or_else(|| host.runtime_fallback_root.clone())
+            .ok_or(AppPathsError::RuntimeRootUnavailable)?;
         Ok(Self {
             config,
             data,
@@ -444,6 +462,8 @@ impl std::fmt::Debug for RegisteredRuntimeSocket {
 pub(crate) enum AppPathsError {
     #[error("HOME is required to resolve the {root:?} application root")]
     MissingHome { root: AppPathRoot },
+    #[error("the application runtime root is unavailable")]
+    RuntimeRootUnavailable,
     #[error("the application path is unsafe")]
     UnsafePath,
     #[error("the application filesystem is unavailable")]
@@ -686,6 +706,38 @@ mod tests {
         .unwrap();
         assert_eq!(paths.config(), Path::new("/explicit/../config/spaceterm"));
         assert_eq!(paths.runtime(), Path::new("/runtime/spaceterm"));
+    }
+
+    #[test]
+    fn resolve_should_preserve_explicit_runtime_spelling_without_fallback_facts() {
+        let environment = AppPathEnvironment {
+            xdg_runtime_dir: Some("/explicit/../runtime".into()),
+            ..environment()
+        };
+        let host = AppPathHostFacts::without_runtime_fallback(200).unwrap();
+
+        let paths = AppPaths::resolve(
+            &environment,
+            &host,
+            Arc::new(RecordingFilesystem::default()),
+        )
+        .unwrap();
+
+        assert_eq!(
+            paths.runtime().as_os_str(),
+            OsStr::new("/explicit/../runtime/spaceterm")
+        );
+    }
+
+    #[test]
+    fn resolve_should_reject_missing_runtime_root_and_fallback() {
+        let result = AppPaths::resolve(
+            &environment(),
+            &AppPathHostFacts::without_runtime_fallback(200).unwrap(),
+            Arc::new(RecordingFilesystem::default()),
+        );
+
+        assert!(matches!(result, Err(AppPathsError::RuntimeRootUnavailable)));
     }
 
     #[test]

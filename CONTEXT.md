@@ -461,12 +461,15 @@ path selection, process-supervision policy, and the complete AskPass protocol an
 Shared SSH, Remote Project, application-path, AskPass, and UI Modules contain no host selection or
 raw process, filesystem, local-IPC, peer-credential, or native error mechanics.
 
-Host Composition supplies one validated OpenSSH executable, one trusted runtime fallback root, the
-local IPC address-length constraint, and the independently selected process, secure-filesystem,
+Host Composition supplies one validated OpenSSH executable, a trusted runtime fallback root when
+the captured environment has no absolute XDG runtime root, the local IPC address-length constraint,
+and the independently selected process, secure-filesystem,
 Control Connection socket, AskPass local-IPC, and peer-authentication capabilities. These values are
 constructor wiring only and define no aggregate SSH Platform operation. The shipped macOS
 composition privately selects `/usr/bin/ssh`, the canonicalized user temporary directory as its
 runtime fallback, the 103-byte local socket-path maximum, and the current narrow macOS Adapters.
+Fallback canonicalization occurs only when required; an explicit XDG runtime root preserves its
+exact spelling and cannot fail because an unused temporary directory is unavailable.
 Another Operating System has no selected policy or placeholder Implementation.
 
 Portable application-path policy owns XDG precedence, exact accepted spelling, fallback choice,
@@ -476,9 +479,14 @@ protection, mutation sequencing, and retry decisions. The secure-filesystem Inte
 closed operations and identities needed by those policies. The macOS Adapter privately retains
 descriptor-relative no-follow traversal, native identity and ownership checks, permission
 enforcement, unpredictable temporary allocation, and race-resistant replacement and deletion.
-Publication retains the prepared file identity through commit, rolls back any post-publication
-validation failure, and removes only the exact retained temporary link. Deletion first moves the
-named entry into a private unpredictable quarantine and removes it only after its exact identity is
+Configuration reads and commits acquire an exclusive lock through an independently opened,
+identity-verified parent directory. The lock spans publication, validation, rollback, and sync,
+preventing cooperating writers from observing or replacing an unfinished publication. Publication
+retains the prepared file identity through commit and removes only the exact retained temporary
+link. Rollback withdraws and validates the installed entry before exclusively restoring its
+predecessor; an unowned successor is preserved, with the predecessor retained for recovery when
+restoration is no longer authorized. Deletion first moves the named entry into a private
+unpredictable quarantine and removes it only after its exact identity is
 revalidated there. Raw descriptors, inode fields, mode bits, and native errors never cross the
 Interface.
 
@@ -501,7 +509,10 @@ and only the exact prompt generation may resume connection progress. The macOS l
 retains Unix listener and stream mechanics, exact endpoint cleanup, and same-user peer inspection;
 the helper authenticates the exact broker process before sending its capability or prompt, and the
 broker authenticates the same-user helper before any frame is parsed or presented. The helper
-dispatch remains before startup dependency capture and bypasses GPUI application launch completely.
+keeps bounded socket writes but imposes no protocol read timeout on a human Authentication Prompt;
+broker cancellation and prompt lifecycle continue to govern that wait. Broker frame reads remain
+bounded. Helper dispatch remains before startup dependency capture and bypasses GPUI application
+launch completely.
 
 The OpenSSH executable, runtime and socket locations, capability tokens, prompts, replies,
 authentication material, environment values, SSH Destinations, process identities, and raw native
