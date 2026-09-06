@@ -1,3 +1,4 @@
+use super::pane_lifecycle::PaneLifecycleDependencies;
 use crate::platform::terminal_accessibility::TerminalAccessibilityAdapterFactory;
 use crate::terminal::native_services::NativeServiceAdapters;
 use std::collections::BTreeMap;
@@ -112,6 +113,7 @@ pub(crate) struct PaneHost {
     key_input_adapter_factory: Rc<dyn TerminalKeyInputAdapterFactory>,
     accessibility_adapter_factory: Rc<dyn TerminalAccessibilityAdapterFactory>,
     native_service_adapters: NativeServiceAdapters,
+    lifecycle_dependencies: PaneLifecycleDependencies,
     pane_bounds: BTreeMap<PaneId, Bounds<Pixels>>,
     split_bounds: BTreeMap<SplitId, Bounds<Pixels>>,
     pane_titles: BTreeMap<PaneId, gpui::SharedString>,
@@ -146,6 +148,7 @@ impl PaneHost {
             Rc::new(GpuiTerminalKeyInputAdapterFactory::default()),
             Rc::new(crate::platform::terminal_accessibility::testing::RecordingAccessibilityFactory::default()),
             crate::terminal::native_services::testing::adapters(),
+            PaneLifecycleDependencies::testing(),
             window,
             cx,
         )
@@ -162,6 +165,7 @@ impl PaneHost {
         key_input_adapter_factory: Rc<dyn TerminalKeyInputAdapterFactory>,
         accessibility_adapter_factory: Rc<dyn TerminalAccessibilityAdapterFactory>,
         native_service_adapters: NativeServiceAdapters,
+        lifecycle_dependencies: PaneLifecycleDependencies,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -179,6 +183,7 @@ impl PaneHost {
                 Rc::clone(&key_input_adapter_factory),
                 Rc::clone(&accessibility_adapter_factory),
                 native_service_adapters.clone(),
+                lifecycle_dependencies.clone(),
                 window,
                 cx,
             )
@@ -195,6 +200,7 @@ impl PaneHost {
             key_input_adapter_factory,
             accessibility_adapter_factory,
             native_service_adapters,
+            lifecycle_dependencies,
             pane_bounds: BTreeMap::new(),
             split_bounds: BTreeMap::new(),
             pane_titles: BTreeMap::from([(initial_pane_id, initial_title)]),
@@ -222,6 +228,7 @@ impl PaneHost {
         key_input_adapter_factory: Rc<dyn TerminalKeyInputAdapterFactory>,
         accessibility_adapter_factory: Rc<dyn TerminalAccessibilityAdapterFactory>,
         native_service_adapters: NativeServiceAdapters,
+        lifecycle_dependencies: PaneLifecycleDependencies,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Entity<TerminalPane> {
@@ -232,6 +239,7 @@ impl PaneHost {
                 key_input_adapter_factory.create(),
                 accessibility_adapter_factory.as_ref(),
                 native_service_adapters,
+                lifecycle_dependencies,
                 window,
                 cx,
             )
@@ -851,6 +859,7 @@ impl PaneHost {
         let key_input_adapter_factory = Rc::clone(&self.key_input_adapter_factory);
         let accessibility_adapter_factory = Rc::clone(&self.accessibility_adapter_factory);
         let native_service_adapters = self.native_service_adapters.clone();
+        let lifecycle_dependencies = self.lifecycle_dependencies.clone();
         let result = self.terminal_tab.split_pane(
             target_pane_id,
             axis,
@@ -864,6 +873,7 @@ impl PaneHost {
                     key_input_adapter_factory,
                     accessibility_adapter_factory,
                     native_service_adapters,
+                    lifecycle_dependencies,
                     window,
                     cx,
                 )

@@ -1,5 +1,7 @@
 pub(crate) mod acceptance_observation;
 pub(crate) mod app_paths;
+pub(crate) mod application_activity;
+pub(crate) mod window_visibility;
 
 pub(crate) mod finder_fallback;
 pub(crate) mod native_pty;

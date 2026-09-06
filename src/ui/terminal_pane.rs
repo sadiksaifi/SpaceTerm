@@ -1,3 +1,4 @@
+use super::pane_lifecycle::PaneLifecycleDependencies;
 use std::cell::Cell;
 use std::ops::Range;
 use std::path::PathBuf;
@@ -34,31 +35,14 @@ use crate::platform::acceptance_observation::{
     FailureActionCase, FailureActionController, FailureActionEvent, FailureActionPhase,
     FailureActionRequest, FailureActionResult, FailurePaneState, FailurePendingRecovery,
 };
-#[cfg(not(test))]
-use crate::platform::macos_application;
-use crate::platform::macos_attention::{
-    AttentionPaneId, AttentionSchedules, reconcile_scheduled as reconcile_attention_schedule,
-    register_pane as register_attention_pane, remove_pane as remove_attention_pane,
-    update_application_activation as update_attention_application_activation,
-};
-#[cfg(not(test))]
-use crate::platform::macos_attention::{MacosAttentionPlatform, apply_attention_effects};
-use crate::platform::macos_render_lifecycle::{
-    NativeWindowVisibility, NativeWindowVisibilitySource, current_window_visibility,
-};
-use crate::platform::macos_scroll::current_wheel_phase;
-use crate::platform::macos_secure_input::{
-    SecureInputPaneId, register_pane as register_secure_input_pane,
-    remove_pane as remove_secure_input_pane,
-    update_application_activation as update_secure_input_application_activation,
-    update_pane as update_secure_input_pane,
-};
 use crate::platform::terminal_accessibility::{
     TerminalAccessibilityAdapter, TerminalAccessibilityAdapterFactory, TerminalAccessibilityUpdate,
 };
+use crate::platform::window_visibility::{WindowVisibility, WindowVisibilitySource};
 #[cfg(test)]
 use crate::terminal::UnhandledKeyEvent;
 use crate::terminal::attention::AttentionState;
+use crate::terminal::attention_runtime::AttentionPaneId;
 use crate::terminal::geometry::{
     BackingPosition, BackingScale, CellGridPosition, CellGridSize, LogicalCellSize,
     LogicalPosition, LogicalSize, TerminalGeometry,
@@ -68,6 +52,8 @@ use crate::terminal::native_services::quick_look::{QuickLookPlatform, QuickLookP
 use crate::terminal::native_services::{
     NativeServiceAdapters, TerminalContextMenuState, activated_link, revalidated_context_link,
 };
+use crate::terminal::secure_input::SecureInputPane;
+use crate::terminal::wheel_phase::resolve_wheel_phase;
 use crate::terminal::{
     AccessibilityGeometry, AccessibilityNotification, AccessibilityNotifications, AttentionFacts,
     DiagnosticBundle, DiagnosticKeyEventKind, FindDirection, FindQueryGeneration, InputModifiers,
@@ -114,72 +100,16 @@ const PRESENTATION_BLINK_INTERVAL: Duration = Duration::from_millis(600);
 const VISUAL_BELL_DURATION: Duration = Duration::from_millis(120);
 const RUNTIME_VISIBILITY_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
-#[cfg(test)]
-fn current_application_active(cx: &App) -> bool {
-    cx.active_window().is_some()
-}
-
-#[cfg(not(test))]
-fn current_application_active(_: &App) -> bool {
-    macos_application::is_active()
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct NativeActivity {
+struct SurfaceActivity {
     application_active: bool,
     operating_system_window_key: bool,
 }
 
-impl NativeActivity {
-    fn current(window: &Window, cx: &App) -> Self {
-        Self {
-            application_active: current_application_active(cx),
-            operating_system_window_key: window.is_window_active(),
-        }
-    }
-}
-
-fn terminal_surface_active(product_focus: TerminalProductFocus, activity: NativeActivity) -> bool {
+fn terminal_surface_active(product_focus: TerminalProductFocus, activity: SurfaceActivity) -> bool {
     product_focus.active_workspace
         && product_focus.active_tab
         && activity.operating_system_window_key
-}
-
-fn apply_native_attention(
-    pane: AttentionPaneId,
-    effects: crate::terminal::attention::AttentionEffects,
-    cx: &mut Context<TerminalPane>,
-) {
-    #[cfg(not(test))]
-    schedule_attention_retries(
-        apply_attention_effects(&mut MacosAttentionPlatform::new(pane), effects),
-        cx,
-    );
-    #[cfg(test)]
-    let _ = (pane, effects, cx);
-}
-
-fn schedule_attention_retries(schedules: AttentionSchedules, cx: &mut Context<TerminalPane>) {
-    for schedule in schedules.into_array().into_iter().flatten() {
-        cx.spawn(async move |_, cx| {
-            let mut schedule = schedule;
-            loop {
-                cx.background_executor()
-                    .timer(schedule.delay_from(Instant::now()))
-                    .await;
-                let Some(next) = reconcile_attention_schedule(schedule)
-                    .into_array()
-                    .into_iter()
-                    .flatten()
-                    .next()
-                else {
-                    break;
-                };
-                schedule = next;
-            }
-        })
-        .detach();
-    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -293,6 +223,7 @@ pub(crate) struct TerminalPane {
     accessibility: Arc<TerminalAccessibilityModel>,
     accessibility_element: Box<dyn TerminalAccessibilityAdapter>,
     pending_accessibility_notifications: AccessibilityNotifications,
+    accessibility_needs_presentation: bool,
     render_lifecycle: RenderLifecycle,
     pane_state: PaneTerminalState,
     pending_recovery: Option<RecoveryToken>,
@@ -320,7 +251,9 @@ pub(crate) struct TerminalPane {
     attention_generation: u64,
     native_attention_pane: Option<AttentionPaneId>,
     hidden_input: bool,
-    secure_input_pane: Option<SecureInputPaneId>,
+    secure_input_pane: SecureInputPane,
+    lifecycle_dependencies: PaneLifecycleDependencies,
+    operating_system_window_key: bool,
     font_family: SharedString,
     font_size: f32,
     line_height: f32,
@@ -362,7 +295,8 @@ pub(crate) struct TerminalPane {
     _attention_task: Option<Task<()>>,
     _event_task: Option<Task<()>>,
     _accessibility_task: Option<Task<()>>,
-    runtime_visibility_source: Option<NativeWindowVisibilitySource>,
+    visibility_source: Option<Box<dyn WindowVisibilitySource>>,
+    _visibility_task: Option<Task<()>>,
     _runtime_visibility_task: Option<Task<()>>,
     _failure_action_task: Option<Task<()>>,
 }
@@ -381,17 +315,23 @@ impl TerminalPane {
             crate::terminal::testing::test_terminal_key_input_adapter(),
             &crate::platform::terminal_accessibility::testing::RecordingAccessibilityFactory::default(),
             crate::terminal::native_services::testing::adapters(),
+            PaneLifecycleDependencies::testing(),
             window,
             cx,
         )
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Explicit capability injection follows hierarchy ownership"
+    )]
     pub(crate) fn new_with_prepared_launch(
         session_factory: WorkspaceTerminalSessionFactory,
         prepared_launch: PreparedWorkspaceTerminalLaunch,
         key_input_adapter: Box<dyn TerminalKeyInputAdapter>,
         accessibility_adapter_factory: &dyn TerminalAccessibilityAdapterFactory,
         native_service_adapters: NativeServiceAdapters,
+        lifecycle_dependencies: PaneLifecycleDependencies,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -401,20 +341,46 @@ impl TerminalPane {
             key_input_adapter,
             accessibility_adapter_factory,
             native_service_adapters,
+            lifecycle_dependencies,
             window,
             cx,
         )
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Explicit capability injection follows hierarchy ownership"
+    )]
     fn new_with_services(
         session_factory: WorkspaceTerminalSessionFactory,
         prepared_launch: Option<PreparedWorkspaceTerminalLaunch>,
         key_input_adapter: Box<dyn TerminalKeyInputAdapter>,
         accessibility_adapter_factory: &dyn TerminalAccessibilityAdapterFactory,
         native_service_adapters: NativeServiceAdapters,
+        lifecycle_dependencies: PaneLifecycleDependencies,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        let (visibility_sender, visibility_receiver) = async_channel::bounded(1);
+        let visibility_source = lifecycle_dependencies.visibility.capture(
+            window,
+            Box::new(move || {
+                let _ = visibility_sender.try_send(());
+            }),
+        );
+        let visibility_task = cx.spawn_in(window, async move |this, cx| {
+            while visibility_receiver.recv().await.is_ok() {
+                while visibility_receiver.try_recv().is_ok() {}
+                if this
+                    .update_in(cx, |pane, window, cx| {
+                        pane.refresh_surface(window, cx);
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
         let focus_handle = cx.focus_handle();
         let font_family = terminal_font(cx);
         let cell_width = measure_cell_width(window, &font_family, DEFAULT_FONT_SIZE);
@@ -427,6 +393,7 @@ impl TerminalPane {
         let fallback_render_cache = cx.new(|_| TerminalGridCache::new());
         let graphics_cache = cx.new(|_| TerminalGraphicsCache::default());
         cx.on_release(|pane, cx| {
+            pane.close();
             pane.graphics_cache.update(cx, |cache, cx| cache.clear(cx));
         })
         .detach();
@@ -469,17 +436,17 @@ impl TerminalPane {
         })
         .detach();
         cx.observe_window_activation(window, |pane, window, cx| {
-            pane.sync_terminal_input_focus(window, cx);
+            pane.refresh_surface(window, cx);
             cx.notify();
         })
         .detach();
         cx.on_focus(&focus_handle, window, |pane, window, cx| {
-            pane.sync_terminal_input_focus(window, cx);
+            pane.refresh_surface(window, cx);
             cx.notify();
         })
         .detach();
         cx.on_blur(&focus_handle, window, |pane, window, cx| {
-            pane.sync_terminal_input_focus(window, cx);
+            pane.refresh_surface(window, cx);
             cx.notify();
         })
         .detach();
@@ -512,6 +479,7 @@ impl TerminalPane {
             accessibility,
             accessibility_element,
             pending_accessibility_notifications: AccessibilityNotifications::default(),
+            accessibility_needs_presentation: false,
             render_lifecycle,
             pane_state: PaneTerminalState::default(),
             pending_recovery: None,
@@ -537,9 +505,11 @@ impl TerminalPane {
             attention: AttentionState::default(),
             attention_visual: false,
             attention_generation: 0,
-            native_attention_pane: Some(register_attention_pane()),
+            native_attention_pane: Some(lifecycle_dependencies.attention.register_pane()),
             hidden_input: false,
-            secure_input_pane: Some(register_secure_input_pane()),
+            secure_input_pane: lifecycle_dependencies.secure_input.register_pane(),
+            lifecycle_dependencies,
+            operating_system_window_key: window.is_window_active(),
             font_family,
             font_size: DEFAULT_FONT_SIZE,
             line_height: DEFAULT_LINE_HEIGHT,
@@ -582,7 +552,8 @@ impl TerminalPane {
             _attention_task: None,
             _event_task: None,
             _accessibility_task: None,
-            runtime_visibility_source: None,
+            visibility_source,
+            _visibility_task: Some(visibility_task),
             _runtime_visibility_task: None,
             _failure_action_task: None,
         }
@@ -645,6 +616,9 @@ impl TerminalPane {
         let _ = self
             .render_lifecycle
             .update_product_visibility(product_focus.active_workspace, pane_visible);
+        if !self.render_lifecycle.effects().animations_active {
+            self.stop_surface_animations();
+        }
         if let Some(observation) = &self.runtime_observation {
             observation.product_visibility(product_focus.active_workspace, pane_visible);
         }
@@ -774,10 +748,56 @@ impl TerminalPane {
         }
     }
 
+    fn current_activity(&self, window: &Window, cx: &App) -> SurfaceActivity {
+        SurfaceActivity {
+            application_active: self.lifecycle_dependencies.activity.is_active(cx),
+            operating_system_window_key: window.is_window_active(),
+        }
+    }
+
+    fn update_application_activity(&mut self, activity: SurfaceActivity, cx: &mut Context<Self>) {
+        self.application_active = activity.application_active;
+        self.operating_system_window_key = activity.operating_system_window_key;
+        let runtime = &self.lifecycle_dependencies.attention;
+        let schedules =
+            runtime.update_application_activation(activity.application_active, Instant::now());
+        runtime.schedule(schedules, cx);
+        self.lifecycle_dependencies
+            .secure_input
+            .update_application_activation(activity.application_active);
+    }
+
+    fn apply_attention(
+        &self,
+        pane: AttentionPaneId,
+        effects: crate::terminal::attention::AttentionEffects,
+        cx: &mut Context<Self>,
+    ) {
+        let runtime = &self.lifecycle_dependencies.attention;
+        let schedules = runtime.apply(pane, effects, Instant::now());
+        runtime.schedule(schedules, cx);
+    }
+
+    fn refresh_surface(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.native_attention_pane.is_none() {
+            return;
+        }
+        let activity = self.current_activity(window, cx);
+        self.update_application_activity(activity, cx);
+        let (_, focus_gained) = self.sync_terminal_input_focus(window, cx);
+        self.surface_active = terminal_surface_active(self.product_focus, activity);
+        if focus_gained {
+            self.clear_attention(cx);
+        }
+        if let Some(source) = &self.visibility_source {
+            self.update_runtime_visibility(source.current(), cx);
+        }
+    }
+
     pub(crate) fn terminal_input_focused(&self, window: &Window, cx: &App) -> bool {
         self.terminal_input_focused_with_activity(
             window,
-            NativeActivity::current(window, cx),
+            self.current_activity(window, cx),
             window_modal_is_open(window, cx),
         )
     }
@@ -785,10 +805,10 @@ impl TerminalPane {
     fn terminal_input_focused_with_activity(
         &self,
         window: &Window,
-        activity: NativeActivity,
+        activity: SurfaceActivity,
         modal_open: bool,
     ) -> bool {
-        if self.remote_input_blocked {
+        if self.remote_input_blocked || self.native_attention_pane.is_none() {
             return false;
         }
         TerminalFocusCoordinator::is_focused(TerminalFocusFacts {
@@ -815,7 +835,7 @@ impl TerminalPane {
     fn sync_terminal_input_focus(&mut self, window: &Window, cx: &App) -> (bool, bool) {
         self.sync_terminal_input_focus_with_activity_and_modal(
             window,
-            NativeActivity::current(window, cx),
+            self.current_activity(window, cx),
             window_modal_is_open(window, cx),
         )
     }
@@ -823,9 +843,12 @@ impl TerminalPane {
     fn sync_terminal_input_focus_with_activity_and_modal(
         &mut self,
         window: &Window,
-        activity: NativeActivity,
+        activity: SurfaceActivity,
         modal_open: bool,
     ) -> (bool, bool) {
+        self.lifecycle_dependencies
+            .secure_input
+            .update_application_activation(activity.application_active);
         let focused = self.terminal_input_focused_with_activity(window, activity, modal_open);
         let focus_gained = !self.terminal_input_focus && focused;
         self.apply_terminal_input_focus(focused);
@@ -880,12 +903,15 @@ impl TerminalPane {
         self.attention_generation = self.attention_generation.wrapping_add(1);
         self._attention_task.take();
         if let Some(pane) = self.native_attention_pane {
-            apply_native_attention(pane, effects, cx);
+            self.apply_attention(pane, effects, cx);
         }
         cx.emit(TerminalPaneEvent::AttentionChanged { unread_count: 0 });
     }
 
     fn start_visual_bell(&mut self, cx: &mut Context<Self>) {
+        if !self.render_lifecycle.effects().animations_active {
+            return;
+        }
         self.attention_generation = self.attention_generation.wrapping_add(1);
         let generation = self.attention_generation;
         self.attention_visual = true;
@@ -902,9 +928,8 @@ impl TerminalPane {
     }
 
     fn sync_secure_input(&self) {
-        if let Some(id) = self.secure_input_pane {
-            update_secure_input_pane(id, self.hidden_input, self.terminal_input_focus);
-        }
+        self.secure_input_pane
+            .update(self.hidden_input, self.terminal_input_focus);
     }
 
     fn reset_hidden_input(&mut self) {
@@ -1089,6 +1114,9 @@ impl TerminalPane {
     }
 
     pub(crate) fn close(&mut self) {
+        if self.native_attention_pane.is_none() {
+            return;
+        }
         self.end_find_state();
         if let Some(observation) = &self.runtime_observation {
             observation.pane_released();
@@ -1110,8 +1138,14 @@ impl TerminalPane {
         self._event_task.take();
         self._accessibility_task.take();
         self._runtime_visibility_task.take();
-        self.runtime_visibility_source.take();
+        self._visibility_task.take();
+        self._failure_action_task.take();
+        self.secure_input_pane.retire();
+        if let Some(id) = self.native_attention_pane.take() {
+            self.lifecycle_dependencies.attention.remove_pane(id);
+        }
         self.render_lifecycle.release();
+        self.visibility_source.take();
         self.context_menu = None;
         self.quick_look.dismiss();
         self.accessibility_element.set_hierarchy(false, usize::MAX);
@@ -1135,14 +1169,7 @@ impl TerminalPane {
             self.native_service_session_identity =
                 self.native_service_session_identity.wrapping_add(1);
         }
-        self._failure_action_task.take();
         self.failure_actions.take();
-        if let Some(id) = self.secure_input_pane.take() {
-            remove_secure_input_pane(id);
-        }
-        if let Some(id) = self.native_attention_pane.take() {
-            remove_attention_pane(id);
-        }
     }
 
     fn validate_remote_generation(&self, generation: u64) -> Result<(), RemotePaneLifecycleError> {
@@ -1286,7 +1313,6 @@ impl TerminalPane {
             observation.pane_released();
         }
         self._runtime_visibility_task.take();
-        self.runtime_visibility_source.take();
         self.acceptance_observation_claimed = false;
         self.session.take();
         self.native_service_session_identity = self.native_service_session_identity.wrapping_add(1);
@@ -1320,6 +1346,13 @@ impl TerminalPane {
         Ok(())
     }
 
+    fn stop_surface_animations(&mut self) {
+        self.reset_blink_phase();
+        self.attention_generation = self.attention_generation.wrapping_add(1);
+        self._attention_task.take();
+        self.attention_visual = false;
+    }
+
     fn reset_blink_phase(&mut self) {
         self.blink_generation = self.blink_generation.wrapping_add(1);
         self._blink_task.take();
@@ -1351,7 +1384,9 @@ impl TerminalPane {
                     .timer(PRESENTATION_BLINK_INTERVAL)
                     .await;
                 let Ok(continue_blinking) = this.update(cx, |this, cx| {
-                    if this.blink_generation != generation {
+                    if this.blink_generation != generation
+                        || !this.render_lifecycle.effects().animations_active
+                    {
                         return false;
                     }
                     this.blink_phase_visible = !this.blink_phase_visible;
@@ -1379,6 +1414,9 @@ impl TerminalPane {
     }
 
     fn sync_scrollbar(&self, cx: &mut Context<Self>) {
+        if !self.render_lifecycle.can_present() {
+            return;
+        }
         let metrics = self.scrollbar_metrics();
         self.scrollbar
             .update(cx, |scrollbar, cx| scrollbar.sync(metrics, cx));
@@ -1753,7 +1791,9 @@ impl TerminalPane {
                                 for event in events {
                                     this.handle_session_event(session_epoch, event, cx);
                                 }
-                                cx.notify();
+                                if this.render_lifecycle.can_present() {
+                                    cx.notify();
+                                }
                             })
                             .is_err()
                         {
@@ -1774,7 +1814,9 @@ impl TerminalPane {
                         if this
                             .update(cx, |this, cx| {
                                 this.handle_session_accessibility(session_epoch, accessibility);
-                                cx.notify();
+                                if this.render_lifecycle.can_present() {
+                                    cx.notify();
+                                }
                             })
                             .is_err()
                         {
@@ -1802,13 +1844,15 @@ impl TerminalPane {
     }
 
     fn start_runtime_visibility_monitor(&mut self, cx: &mut Context<Self>) {
-        let Some(source) = NativeWindowVisibilitySource::capture() else {
+        if self.runtime_observation.is_none() {
+            return;
+        }
+        if self.visibility_source.is_none() {
             if let Some(observation) = &self.runtime_observation {
                 observation.fail();
             }
             return;
-        };
-        self.runtime_visibility_source = Some(source);
+        }
         self._runtime_visibility_task = Some(cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor()
@@ -1817,9 +1861,9 @@ impl TerminalPane {
                 if this
                     .update(cx, |pane, cx| {
                         let Some(native) = pane
-                            .runtime_visibility_source
+                            .visibility_source
                             .as_ref()
-                            .map(NativeWindowVisibilitySource::current)
+                            .map(|source| source.current())
                         else {
                             return;
                         };
@@ -2031,14 +2075,11 @@ impl TerminalPane {
         }
     }
 
-    fn update_runtime_visibility(
-        &mut self,
-        native: NativeWindowVisibility,
-        cx: &mut Context<Self>,
-    ) {
+    fn update_runtime_visibility(&mut self, native: WindowVisibility, cx: &mut Context<Self>) {
+        let was_presentable = self.render_lifecycle.can_present();
         let surface = SurfaceVisibility {
             application_active: self.application_active,
-            key_window: self.product_focus.active_tab,
+            key_window: self.operating_system_window_key,
             minimized: native.minimized,
             occluded: native.occluded,
             live_resize: native.live_resize,
@@ -2046,6 +2087,10 @@ impl TerminalPane {
             pane_visible: self.product_focus.active_tab && self.product_focus.pane_visible,
         };
         let effects = self.render_lifecycle.update_visibility(surface);
+        if !effects.animations_active {
+            self.stop_surface_animations();
+        }
+        self.sync_presentation_blink(effects.animations_active, self.terminal_input_focus, cx);
         if let Some(observation) = &self.runtime_observation {
             observation.visibility(crate::terminal::RuntimeVisibility {
                 presentable: !surface.minimized
@@ -2059,7 +2104,11 @@ impl TerminalPane {
                 live_resize: surface.live_resize,
             });
         }
-        if effects.request_redraw {
+        let accessibility_restored = !was_presentable
+            && self.render_lifecycle.can_present()
+            && (self.accessibility_needs_presentation
+                || !self.pending_accessibility_notifications.is_empty());
+        if effects.request_redraw || accessibility_restored {
             cx.notify();
         }
     }
@@ -2084,6 +2133,7 @@ impl TerminalPane {
                     notifications,
                     selection_sender,
                 });
+        self.accessibility_needs_presentation = false;
     }
 
     fn handle_event(&mut self, event: SessionEvent, cx: &mut Context<Self>) {
@@ -2144,7 +2194,7 @@ impl TerminalPane {
                 }
                 let unread_count = effects.unread_count;
                 if let Some(pane) = self.native_attention_pane {
-                    apply_native_attention(pane, effects, cx);
+                    self.apply_attention(pane, effects, cx);
                 }
                 cx.emit(TerminalPaneEvent::AttentionChanged { unread_count });
             }
@@ -2234,6 +2284,8 @@ impl TerminalPane {
     }
 
     fn handle_accessibility(&mut self, accessibility: Arc<TerminalAccessibilityModel>) {
+        self.accessibility_needs_presentation |=
+            !accessibility.shares_snapshot(self.accessibility.as_ref());
         if accessibility.active_screen() != self.accessibility.active_screen()
             || !accessibility.shares_document(self.accessibility.as_ref())
         {
@@ -2636,11 +2688,10 @@ impl TerminalPane {
             ),
             ScrollDelta::Lines(delta) => point(delta.x, delta.y),
         };
-        let phase = current_wheel_phase().unwrap_or(match event.touch_phase {
-            gpui::TouchPhase::Started => WheelPhase::GestureStarted,
-            gpui::TouchPhase::Moved => WheelPhase::GestureChanged,
-            gpui::TouchPhase::Ended => WheelPhase::GestureEnded,
-        });
+        let phase = resolve_wheel_phase(
+            event.touch_phase,
+            self.lifecycle_dependencies.wheel.current(_window),
+        );
         let (horizontal_steps, vertical_steps) =
             self.wheel_accumulator.push(delta.x, delta.y, phase);
 
@@ -3617,12 +3668,8 @@ impl Drop for TerminalPane {
 impl Render for TerminalPane {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.trigger_immediate_failure_action(window, cx);
-        let native_activity = NativeActivity::current(window, cx);
-        schedule_attention_retries(
-            update_attention_application_activation(native_activity.application_active),
-            cx,
-        );
-        update_secure_input_application_activation(native_activity.application_active);
+        let native_activity = self.current_activity(window, cx);
+        self.update_application_activity(native_activity, cx);
         let pane = cx.entity().downgrade();
         let (terminal_input_focused, focus_gained) = self
             .sync_terminal_input_focus_with_activity_and_modal(
@@ -3633,10 +3680,14 @@ impl Render for TerminalPane {
         self.flush_pending_file_insertion(cx);
         let surface_active = terminal_surface_active(self.product_focus, native_activity);
         let native_visibility = self
-            .runtime_visibility_source
+            .visibility_source
             .as_ref()
-            .map(NativeWindowVisibilitySource::current)
-            .unwrap_or_else(current_window_visibility);
+            .map(|source| source.current())
+            .unwrap_or(WindowVisibility {
+                minimized: false,
+                occluded: true,
+                live_resize: false,
+            });
         let surface_visibility = SurfaceVisibility {
             application_active: native_activity.application_active,
             key_window: native_activity.operating_system_window_key,
@@ -3647,6 +3698,10 @@ impl Render for TerminalPane {
             pane_visible: self.product_focus.active_tab && self.product_focus.pane_visible,
         };
         let lifecycle_effects = self.render_lifecycle.update_visibility(surface_visibility);
+        if !lifecycle_effects.animations_active {
+            self.stop_surface_animations();
+        }
+        self.sync_scrollbar(cx);
         if let Some(observation) = &self.runtime_observation {
             observation.visibility(crate::terminal::RuntimeVisibility {
                 presentable: !surface_visibility.minimized
@@ -4442,7 +4497,7 @@ mod tests {
 
     #[test]
     fn active_application_with_non_key_window_suppresses_inactive_only_notification() {
-        let activity = NativeActivity {
+        let activity = SurfaceActivity {
             application_active: true,
             operating_system_window_key: false,
         };
@@ -4712,6 +4767,152 @@ mod tests {
         });
         cx.run_until_parked();
         (pane, cx)
+    }
+
+    #[gpui::test]
+    fn visibility_subscription_coalesces_hidden_receivers_and_retires_without_polling(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(crate::ui::init).unwrap();
+        let records = TestTerminalSessionRecords::default();
+        let factory = Rc::new(
+            crate::platform::window_visibility::RecordingWindowVisibilityFactory::default(),
+        );
+        let mut dependencies = PaneLifecycleDependencies::testing();
+        dependencies.visibility = factory.clone();
+        let session_factory = WorkspaceTerminalSessionFactory::new_local(
+            Rc::new(TestTerminalSessionFactory::new(records.clone())),
+            test_workspace_directory(std::env::temp_dir()),
+        );
+        let (pane, cx) = cx.add_window_view(|window, cx| {
+            TerminalPane::new_with_services(
+                session_factory, None, crate::terminal::testing::test_terminal_key_input_adapter(),
+                &crate::platform::terminal_accessibility::testing::RecordingAccessibilityFactory::default(),
+                crate::terminal::native_services::testing::adapters(), dependencies, window, cx,
+            )
+        });
+        cx.update(|window, cx| {
+            window.activate_window();
+            pane.update(cx, |pane, _| pane.focus(window));
+        });
+        cx.run_until_parked();
+        let window_id = cx.update(|window, _| window.window_handle().window_id());
+        assert_eq!(factory.captured_windows(), vec![window_id]);
+        assert!(pane.read_with(cx, |pane, _| pane._runtime_visibility_task.is_none()));
+        let sender = records.last_event_sender().unwrap();
+        sender
+            .try_send(SessionEvent::Screen(text_screen(1, &["fixture"])))
+            .unwrap();
+        cx.run_until_parked();
+        pane.update(cx, |pane, cx| {
+            pane.screen = blinking_cursor_screen(true, true);
+            pane.sync_presentation_blink(true, true, cx);
+            pane.start_visual_bell(cx);
+        });
+        factory.set_visibility(
+            window_id,
+            WindowVisibility {
+                occluded: true,
+                ..WindowVisibility::default()
+            },
+        );
+        cx.run_until_parked();
+        assert!(
+            pane.read_with(cx, |pane, _| !pane.render_lifecycle.can_present()
+                && pane._blink_task.is_none()
+                && pane._attention_task.is_none())
+        );
+        let notifications = Rc::new(Cell::new(0));
+        cx.update(|_, cx| {
+            let notifications = notifications.clone();
+            cx.observe(&pane, move |_, _| {
+                notifications.set(notifications.get() + 1)
+            })
+            .detach();
+        });
+        for generation in 2..=12 {
+            sender
+                .try_send(SessionEvent::Screen(text_screen(generation, &["fixture"])))
+                .unwrap();
+        }
+        records
+            .last_accessibility_sender()
+            .unwrap()
+            .try_send(accessibility_model(12))
+            .unwrap();
+        cx.run_until_parked();
+        assert_eq!(notifications.get(), 0);
+        assert_eq!(
+            pane.read_with(cx, |pane, _| pane.screen.generation),
+            crate::terminal::PresentationGeneration::test(12)
+        );
+        factory.set_visibility(window_id, WindowVisibility::default());
+        cx.run_until_parked();
+        assert!(pane.read_with(cx, |pane, _| pane.render_lifecycle.can_present()));
+        assert!(notifications.get() > 0);
+        let (initial_accessibility, scrolled_accessibility) =
+            crate::terminal::testing::test_accessibility_viewport_models(
+                crate::terminal::PresentationGeneration::test(12),
+            );
+        pane.update(cx, |pane, _| pane.set_accessibility_hierarchy(true, 0));
+        records
+            .last_accessibility_sender()
+            .unwrap()
+            .try_send(initial_accessibility)
+            .unwrap();
+        cx.run_until_parked();
+        assert!(pane.read_with(cx, |pane, _| {
+            pane.pending_accessibility_notifications.is_empty()
+        }));
+        factory.set_visibility(
+            window_id,
+            WindowVisibility {
+                occluded: true,
+                ..WindowVisibility::default()
+            },
+        );
+        cx.run_until_parked();
+        pane.update(cx, |pane, _| {
+            pane.render_lifecycle.mark_presented(pane.screen.generation);
+        });
+        notifications.set(0);
+        records
+            .last_accessibility_sender()
+            .unwrap()
+            .try_send(scrolled_accessibility)
+            .unwrap();
+        cx.run_until_parked();
+        assert_eq!(notifications.get(), 0);
+        assert!(pane.read_with(cx, |pane, _| {
+            pane.pending_accessibility_notifications.is_empty()
+        }));
+        factory.set_visibility(window_id, WindowVisibility::default());
+        cx.run_until_parked();
+        assert!(
+            notifications.get() > 0,
+            "restoration must publish accessibility-only changes"
+        );
+        assert!(!pane.read_with(cx, |pane, _| pane.accessibility_needs_presentation));
+        let restored_notifications = notifications.get();
+        factory.set_visibility(window_id, WindowVisibility::default());
+        cx.run_until_parked();
+        assert_eq!(notifications.get(), restored_notifications);
+        pane.update(cx, |pane, _| {
+            pane.close();
+            pane.close();
+        });
+        assert_eq!(factory.drop_count(), 1);
+        assert!(pane.read_with(cx, |pane, _| pane._visibility_task.is_none()
+            && pane._runtime_visibility_task.is_none()));
+        factory.set_visibility(
+            window_id,
+            WindowVisibility {
+                minimized: true,
+                ..WindowVisibility::default()
+            },
+        );
+        cx.run_until_parked();
+        assert!(!pane.read_with(cx, |pane, _| pane.render_lifecycle.can_present()));
     }
 
     fn directory_screen(
@@ -5565,6 +5766,7 @@ mod tests {
                     crate::terminal::testing::test_terminal_key_input_adapter(),
                     &factory,
                     crate::terminal::native_services::testing::adapters(),
+                    PaneLifecycleDependencies::testing(),
                     window,
                     cx,
                 )

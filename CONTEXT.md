@@ -502,11 +502,24 @@ and therefore `just validate` run the corpus; `just conformance` provides the fo
 BEL and the transition to finished Command Metadata become typed Terminal Attention events on the
 owning Terminal Session lane; they never carry command text. Each Pane reduces only its own events
 against explicit Terminal Input Focus, active-surface, key-window, and application facts using an
-injected monotonic clock. Repeated bells are suppressed within 100 milliseconds, Dock requests are
-limited to one per second, and inactive-only notifications aggregate for five seconds. Vague Pro visual
-bells and Pane/Tab unread indicators never move focus. Focus gain or accepted key input clears
-eligible state and cancels the outstanding native Dock request. AppKit audio, Dock, and notification
-effects sit behind one testable platform Seam and native notification policy.
+injected monotonic clock. Repeated bells are suppressed within 100 milliseconds. Vague Pro visual
+bells and Pane/Tab unread indicators remain Pane-owned and never move focus. Focus gain or accepted
+key input clears eligible state.
+
+The platform-neutral `attention_runtime` Module coordinates application-wide effects across every
+registered Pane and Operating-System Window. It limits Dock requests to one per second, aggregates
+inactive-only notifications for five seconds, and retains the shared effect until its last owning
+Pane clears. The runtime owns its GPUI tasks, validates exact scheduling generations, samples fresh
+application activity before delayed delivery, and cancels obsolete tasks on activation or ownership
+loss. Removing one Pane cannot strand another Pane's pending delivery, and removed registrations
+cannot request effects. Pane visual-effect tasks remain separately owned and visibility-gated.
+
+The platform-neutral `attention_notification` Module owns notification authorization decisions,
+provisional-authorization coordination, bounded aggregate text, asynchronous delivery generations,
+and stale-completion rejection. Clear and submission serialize so an obsolete callback cannot
+publish after its generation was cleared. Independent Audio Bell, Dock Attention, and Notification
+Adapter Interfaces retain only native sound, Dock request/cancellation, settings/authorization,
+and notification-center mechanics. Failure values are closed, content-free classifications.
 
 ### Transactional Terminal Presentation
 
@@ -639,12 +652,21 @@ emitting focus-out, while application Actions remain outside that held-key set.
 
 The terminal worker requests hidden-input inspection from its Native PTY Owner at a bounded
 200-millisecond interval and
-classifies hidden input only when canonical mode is enabled and echo is disabled. An AppKit-thread,
-application-scoped coordinator enables Carbon Secure Event Input only when exactly one live Pane
-both reports hidden input and owns Terminal Input Focus. It performs only physical state
-transitions, treats API and termios failures as non-ownership, and releases on focus loss,
-application deactivation, Session completion, or Pane removal. Diagnostics contain state,
-identity counts, reasons, and OSStatus values but never terminal input.
+classifies hidden input only when canonical mode is enabled and echo is disabled. The portable
+`secure_input` Module owns one application-scoped coordinator selected by composition and shared
+across every Operating-System Window. Each Pane retains a non-cloneable registration lease. The
+coordinator enables protection only while the application is active and exactly one live registered
+Pane both reports hidden input and owns Terminal Input Focus. Focus loss, application deactivation,
+Terminal Session completion, and Pane removal remove eligibility; retirement is permanent and stale
+updates cannot recreate a registration or affect its successor.
+
+The independent Secure Input Adapter performs only physical enable/disable transitions. Failed
+enable never grants ownership. Failed disable revokes logical ownership while retaining the last
+acknowledged physical state for release retry before reacquisition; final coordinator destruction
+also attempts any outstanding release. Successful transitions are balanced without duplicate
+release. The current Adapter maps Carbon results to a closed, content-free failure classification;
+raw Operating-System errors and terminal input never cross this Interface. Native PTY inspection
+failures continue to report non-hidden input through their existing independent lifecycle.
 
 ### Unified Terminal Geometry
 
@@ -666,7 +688,10 @@ presses, motion, and wheel input. Worker snapshots publish whether application m
 active so the Pane's pointer presentation matches the effective route.
 
 Precision wheel input retains independent horizontal and vertical fractional remainders in logical
-cell units and carries AppKit gesture and momentum phases across GPUI's event boundary. Routing is
+cell units. Portable Rust interprets GPUI `TouchPhase` as the authority for ordinary gesture start,
+movement, and end. An independently injected Wheel Phase Enrichment capability supplies only the
+cancellation and momentum distinctions missing from GPUI, matched to the exact Operating-System
+Window's current event. Routing is
 strictly application mouse reporting first, alternate-screen arrow policy second, and Primary
 Screen Scrollback last. Mouse reporting uses buttons 4/5 vertically and 6/7 horizontally;
 horizontal movement never mutates ordinary Scrollback.
@@ -932,11 +957,57 @@ A Pane-owned Render Lifecycle separates one-shot presentation demand from recurr
 eligibility. Immutable Terminal Presentations received while minimized, occluded, in a hidden
 Workspace, or otherwise non-presentable coalesce to the newest Presentation Generation without
 requesting frames; visibility restoration requests exactly one presentation of that newest state.
+Hidden accessibility snapshots retain independent publication demand even when only their visible
+range changes without a new terminal generation or notification. Restoration publishes the newest
+model once, then clears that demand after the Accessibility Adapter receives it.
 Cursor blink, text blink, and visual effects run only while the application, key Operating-System
-Window, Workspace, and Pane can present them and while AppKit is not minimizing, occluding, or
-live-resizing the surface. Display moves and backing-scale changes preserve logical grid state and
-invalidate only scale-dependent prepared rows and symbol geometry. Pane destruction releases
-render caches and cancels every owned presentation task and native resource.
+Window, Active Workspace, Active Tab, and visible Pane can present them and the surface is not
+minimized, occluded, or live-resizing. GPUI window activation observation and `is_window_active`
+supply key-window transitions. An independent Application Activity capability supplies the distinct
+application-active fact. The portable Terminal Focus Coordinator and Render Lifecycle combine those
+facts with product visibility, responder ownership, and temporary UI blockers; native code contains
+no eligibility or presentation policy.
+
+An independent Window Visibility Factory captures the exact GPUI-backed Operating-System Window
+through its raw handle. Its source owns only minimized, occluded, and live-resize observations and
+native subscription lifetime. Native notifications enqueue bounded, coalesced wakeups; portable
+Pane tasks reconcile the latest facts without polling during ordinary launches. Display moves and
+GPUI backing-scale changes preserve logical grid state and invalidate only scale-dependent
+prepared rows and symbol geometry. Closing a Pane synchronously invalidates task generations,
+cancels its owned tasks, retires Secure Event Input and Terminal Attention registrations, and
+releases Render Lifecycle ownership before dropping the exact-window native source and other
+native resources. Repeated close is inert and queued callbacks cannot target a successor Pane.
+
+### Pane Surface Capability Composition
+
+Use GPUI first when its facts and operations preserve behavior, then portable Rust for reduction,
+scheduling, rate limits, authorization, identity, cleanup, and closed failure classification. Keep
+an Operating-System Adapter only for mechanics neither can faithfully provide; delete redundant
+native implementation instead of wrapping it. Application composition selects independent surface
+capabilities and shares application-wide coordinators once per GPUI App. It injects them through
+every Workspace, Tab, and Pane creation path, including replacement, split, Local, and Remote
+creation. `PaneLifecycleDependencies` is a cloneable constructor-wiring value with no operations,
+never a broad Platform or surface Adapter. TerminalPane and portable UI and terminal Modules do
+not construct or name the concrete migrated macOS implementations.
+
+The audit against pinned GPUI 0.2.2 retains these surface mechanics:
+
+| Capability | GPUI or portable Rust ownership | Remaining macOS mechanic and reason |
+| --- | --- | --- |
+| Key-window and application activity | GPUI activation observation and `is_window_active`; Rust focus and activity reduction | `NSApplication.isActive` only. GPUI `active_window` resolves AppKit's main window, which may remain present while the application is inactive, and is not an application-activity fact. |
+| Exact-window visibility | Rust presentation/animation eligibility, coalescing, task scheduling, and observation cadence | Retained exact NSWindow with minimize, occlusion, and live-resize queries and notification subscriptions. GPUI lacks the complete facts and notifications needed while presentation is suspended. |
+| Backing scale and display movement | GPUI window metrics and Rust scale-resource invalidation | None added for this lifecycle. |
+| Secure Event Input | Rust eligibility, registration, ownership, failure classification, and release retry | Carbon enable/disable. GPUI exposes no process-wide secure-input facility. |
+| Dock attention | Rust multi-Pane ownership, one-second rate limit, delayed scheduling, cancellation policy, and failure classification | AppKit request identifier and cancellation. GPUI does not expose equivalent scoped, cancellable request ownership. |
+| Audio bell | Rust BEL suppression and effect eligibility | AppKit alert sound. GPUI exposes no system alert-sound operation. |
+| Notifications | Rust inactive-only aggregation, authorization policy, delivery generations, content-free body, cancellation, and failure classification | Native notification settings, provisional authorization, submission, and removal. GPUI has no equivalent notification-center facility. |
+| Wheel phases | GPUI ordinary `TouchPhase`; Rust phase interpretation, axis remainders, and terminal routing | Current-event cancellation and momentum enrichment only. GPUI collapses distinctions required to preserve gesture-to-momentum behavior. |
+
+This migration does not implement Linux or Windows, alter the non-macOS compile guard, or change
+application menus, keybinding profiles, Operating-System Window dragging, Finder fallback, System
+Settings recovery, Native Terminal Services, Terminal Accessibility, Terminal Key Input, Native
+PTY, Shell Launch Plan, SSH, AskPass, runtime paths, or packaging. Runtime Observation keeps its
+existing authenticated protocol and acceptance scope.
 
 ### Authenticated Runtime Observation
 
@@ -975,9 +1046,11 @@ evidence therefore trusts the official verifier as the same-UID controller and r
 peer, package, process, nonce, sequence, and artifact authentication.
 
 Worker, UI, and render critical paths update atomics and a fixed-capacity transition queue only.
-While observation is active, a Pane-owned main-thread monitor samples its retained exact AppKit
-window at bounded 50-millisecond intervals so minimize, occlusion, and live-resize facts continue
-to advance even after AppKit suspends rendering; ordinary launches do not create that monitor.
+While observation is active, a portable Pane-owned main-thread monitor samples its injected exact
+Window Visibility source at bounded 50-millisecond intervals so minimize, occlusion, and live-resize
+facts continue to advance even when rendering is suspended. The current native source retains the
+exact AppKit window. Ordinary launches create no polling monitor; native visibility notifications
+still provide demand-driven runtime wakeups.
 One background writer samples the latest state at one-second absolute deadlines on the original
 authenticated socket, then performs a bounded final drain and acknowledgement during application
 shutdown. A transition drop, deadline miss, counter overflow, transport or writer failure, unknown

@@ -8,6 +8,7 @@ mod native_remote_workspace_flow_backend;
 mod new_workspace_panel;
 mod pane_action_menu;
 mod pane_host;
+pub(crate) mod pane_lifecycle;
 mod remote_child_launch;
 mod remote_workspace_flow;
 pub(crate) mod remote_workspace_picker;

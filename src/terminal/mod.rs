@@ -1,9 +1,13 @@
 mod accessibility;
 pub(crate) mod attention;
+pub(crate) mod attention_notification;
+pub(crate) mod attention_runtime;
 #[cfg(test)]
 mod conformance;
 mod emulator;
 mod failure;
+pub(crate) mod secure_input;
+pub(crate) mod wheel_phase;
 #[cfg(test)]
 pub(crate) use native_services::file_insertion;
 mod find;

@@ -1148,7 +1148,7 @@ fn check_ime() -> Result<(), String> {
 fn check_secure_input() -> Result<(), String> {
     require_eq(
         "secure-input-balance",
-        crate::platform::macos_secure_input::conformance_secure_input_observation(),
+        crate::terminal::secure_input::conformance_secure_input_observation(),
         "transitions=[true, false, true, false] enabled=false".to_owned(),
     )
 }
