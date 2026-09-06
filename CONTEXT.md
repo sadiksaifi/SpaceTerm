@@ -1272,10 +1272,14 @@ transfer before local I/O.
 A Local File retains both its exact resolved input spelling and canonical presentation path.
 Activation and every Quick Look presentation recheck both against the retained file identity.
 Resolver-only emission metadata contains a versioned 24-byte opaque token, with no path, file
-contents, or native identity fields. Each Terminal Emulator owns at most 1024 emitted file leases;
+contents, or native identity fields. Each Terminal Emulator owns at most 32 emitted file leases;
 repeated references to an equal target reuse its entry, and eviction makes old metadata inert.
 The registry is released with the emulator. Snapshots already holding a typed target retain their
-own exact lease until released. Missing, malformed, oversized, unknown, foreign-emulator, and
+own exact lease until released. The application-wide authority reserves capacity before opening:
+at most 64 Local File leases, including all snapshots and emulators, and at most 96 identity
+handles in total, including directories and transient validation observations. This leaves descriptor
+headroom under the standard macOS GUI soft limit of 256. A full registry evicts before resolution;
+capacity exhaustion refuses new authority, and final lease release restores capacity. Missing, malformed, oversized, unknown, foreign-emulator, and
 evicted tokens cannot reconstruct authority. File URLs and paths remain private presentation or
 action values; Debug, errors, Local Diagnostics, and terminal text never receive native identities
 or emission contents. The final path-based GPUI open or native preview still follows revalidation;

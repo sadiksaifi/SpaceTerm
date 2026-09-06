@@ -2508,6 +2508,12 @@ impl WorkspaceManager {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
+        let Ok(directory) = self
+            .local_filesystem
+            .revalidate_workspace_directory(&directory)
+        else {
+            return false;
+        };
         if let Some(workspace_id) = self
             .workspaces
             .local_project_workspace(directory.identity())
@@ -8162,6 +8168,49 @@ mod tests {
                 .local_working_directory()
                 .is_some_and(|directory| directory.path() == project)
         }));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[gpui::test]
+    fn replaced_local_project_is_rejected_between_picker_validation_and_activation(
+        cx: &mut TestAppContext,
+    ) {
+        let root = temporary_directory("activation-replacement");
+        let project = root.join("project");
+        let parked = root.join("parked");
+        fs::create_dir_all(&project).unwrap();
+        let (manager, records, cx) = workspace_manager(cx);
+        let directory = manager.read_with(cx, |manager, _| {
+            manager
+                .local_filesystem
+                .validate_workspace_directory(&project)
+                .unwrap()
+        });
+        let original_drops = records.dropped_session_ids();
+        fs::rename(&project, &parked).unwrap();
+        fs::create_dir(&project).unwrap();
+        let activate = |cx: &mut VisualTestContext| {
+            cx.update(|window, cx| {
+                manager.update(cx, |manager, cx| {
+                    manager.activate_validated_local_project(directory.clone(), window, cx)
+                })
+            })
+        };
+        assert!(!activate(cx));
+        assert_eq!(
+            manager.read_with(cx, |manager, _| manager.workspaces.len()),
+            1
+        );
+        assert_eq!(records.starts().len(), 1);
+        assert_eq!(records.dropped_session_ids(), original_drops);
+        fs::remove_dir(&project).unwrap();
+        fs::rename(&parked, &project).unwrap();
+        assert!(activate(cx));
+        assert_eq!(
+            manager.read_with(cx, |manager, _| manager.workspaces.len()),
+            2
+        );
+        assert_eq!(records.starts().len(), 2);
         fs::remove_dir_all(root).unwrap();
     }
 

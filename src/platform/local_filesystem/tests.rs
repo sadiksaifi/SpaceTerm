@@ -168,7 +168,7 @@ fn observation(
     kind: LocalObjectKind,
 ) -> Result<LocalIdentityObservation, LocalFilesystemError> {
     Ok(LocalIdentityObservation {
-        identity: LocalObjectIdentity(IdentityValue::Fixture(label)),
+        identity: LocalObjectIdentity(IdentityValue::Fixture(label), None),
         kind,
     })
 }
@@ -300,8 +300,9 @@ fn emission_eviction_revokes_old_metadata_without_reusing_its_authority() {
         let file = ValidatedLocalFile(Arc::new(LocalFileState {
             selected: path.clone(),
             canonical: path.clone(),
-            identity: LocalObjectIdentity(IdentityValue::Fixture(label as u64)),
+            identity: LocalObjectIdentity(IdentityValue::Fixture(label as u64), None),
             authority: authority.clone(),
+            _permit: authority.files.reserve(MAX_LOCAL_FILE_LEASES).unwrap(),
         }));
         registry.emit(&file).unwrap();
     }
@@ -312,4 +313,84 @@ fn emission_eviction_revokes_old_metadata_without_reusing_its_authority() {
     let next = registry.emit(&first_file).unwrap();
     assert_ne!(first, next);
     assert!(registry.restore(&first).is_none());
+}
+
+#[test]
+fn local_file_leases_preserve_descriptor_headroom_across_emulators_and_snapshots() {
+    const CHILD: &str = "SPACETERM_TEST_LOCAL_FILESYSTEM_LIMIT";
+    if std::env::var_os(CHILD).is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "platform::local_filesystem::tests::local_file_leases_preserve_descriptor_headroom_across_emulators_and_snapshots",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+    // SAFETY: only this isolated test subprocess changes its own descriptor limit.
+    let limit = libc::rlimit {
+        rlim_cur: 256,
+        rlim_max: 256,
+    };
+    assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &limit) }, 0);
+    let root = Fixture::new();
+    let authority = LocalFilesystemAuthority::testing();
+    let mut registries: Vec<_> = (0..4)
+        .map(|_| LocalFileEmissionRegistry::default())
+        .collect();
+    let mut snapshots = Vec::new();
+    for index in 0..MAX_LOCAL_FILE_LEASES {
+        let name = format!("file-{index}");
+        fs::write(root.0.join(&name), b"fixture").unwrap();
+        let file = authority.clone().local_file(&name, &root.0).unwrap();
+        let registry = &mut registries[index % 4];
+        registry.prepare_resolution();
+        let token = registry.emit(&file).unwrap();
+        snapshots.push(registry.restore(&token).unwrap());
+    }
+    for _ in 0..1024 {
+        assert!(authority.local_file("file-0", &root.0).is_none());
+    }
+    // Output cannot consume the descriptors reserved for PTYs, sockets and directory work.
+    let infrastructure: Vec<_> = (0..128).map(|_| fs::File::open(&root.0).unwrap()).collect();
+    let directory = authority.validate_workspace_directory(&root.0).unwrap();
+    assert!(authority.revalidate_workspace_directory(&directory).is_ok());
+    assert!(snapshots[0].revalidated_path().is_some());
+    drop(infrastructure);
+    drop(registries);
+    assert!(authority.local_file("file-0", &root.0).is_none());
+    snapshots.pop();
+    assert!(authority.local_file("file-0", &root.0).is_some());
+    drop(snapshots);
+    assert!(authority.local_file("file-0", &root.0).is_some());
+}
+
+#[test]
+fn registry_eviction_releases_real_handles_before_resolving_more_output() {
+    let root = Fixture::new();
+    let authority = LocalFilesystemAuthority::testing();
+    let mut registry = LocalFileEmissionRegistry::default();
+    let mut first = None;
+    for index in 0..256 {
+        let name = format!("file-{index}");
+        fs::write(root.0.join(&name), b"fixture").unwrap();
+        registry.prepare_resolution();
+        let file = authority.local_file(&name, &root.0).unwrap();
+        let token = registry.emit(&file).unwrap();
+        first.get_or_insert(token);
+    }
+    assert!(registry.restore(&first.unwrap()).is_none());
+    assert_eq!(registry.files.len(), MAX_EMITTED_LOCAL_FILES);
+    drop(registry);
+    assert_eq!(authority.handles.0.load(Ordering::Acquire), 0);
+    assert_eq!(authority.files.0.load(Ordering::Acquire), 0);
 }

@@ -2,9 +2,11 @@
 use std::collections::VecDeque;
 use std::fmt;
 use std::fs;
+use std::hash::{Hash, Hasher};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use thiserror::Error;
 
@@ -30,6 +32,8 @@ pub(crate) enum LocalFilesystemError {
     Unreadable,
     #[error("the path no longer identifies the selected object")]
     IdentityChanged,
+    #[error("local filesystem capacity is temporarily exhausted")]
+    Capacity,
     #[error("the filesystem operation failed")]
     Other,
 }
@@ -55,8 +59,48 @@ enum IdentityValue {
 }
 
 /// Equality retains the object, so removal cannot recycle its identity into a successor.
-#[derive(Clone, Eq, Hash, PartialEq)]
-pub(crate) struct LocalObjectIdentity(IdentityValue);
+#[derive(Clone)]
+pub(crate) struct LocalObjectIdentity(IdentityValue, Option<Arc<IdentityPermit>>);
+
+impl PartialEq for LocalObjectIdentity {
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+}
+impl Eq for LocalObjectIdentity {}
+
+impl Hash for LocalObjectIdentity {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.0.hash(state);
+    }
+}
+
+// Bound all open identity handles, including transient observations, across the application.
+// File targets have a smaller allowance so output cannot consume directory validation capacity.
+const MAX_IDENTITY_HANDLES: usize = 96;
+const MAX_LOCAL_FILE_LEASES: usize = 64;
+
+#[derive(Default)]
+struct IdentityBudget(AtomicUsize);
+
+impl IdentityBudget {
+    fn reserve(self: &Arc<Self>, limit: usize) -> Result<IdentityPermit, LocalFilesystemError> {
+        self.0
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |used| {
+                (used < limit).then_some(used + 1)
+            })
+            .map(|_| IdentityPermit(Arc::clone(self)))
+            .map_err(|_| LocalFilesystemError::Capacity)
+    }
+}
+
+struct IdentityPermit(Arc<IdentityBudget>);
+
+impl Drop for IdentityPermit {
+    fn drop(&mut self) {
+        self.0.0.fetch_sub(1, Ordering::AcqRel);
+    }
+}
 
 impl fmt::Debug for LocalObjectIdentity {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -67,7 +111,7 @@ impl fmt::Debug for LocalObjectIdentity {
 impl LocalObjectIdentity {
     pub(super) fn from_file(file: fs::File) -> Result<Self, LocalFilesystemError> {
         same_file::Handle::from_file(file)
-            .map(|handle| Self(IdentityValue::Retained(Arc::new(handle))))
+            .map(|handle| Self(IdentityValue::Retained(Arc::new(handle)), None))
             .map_err(classify_io_error)
     }
 }
@@ -78,12 +122,12 @@ pub(crate) struct WorkspaceDirectoryIdentity(LocalObjectIdentity);
 impl WorkspaceDirectoryIdentity {
     /// An unavailable startup directory carries no filesystem authority.
     pub(crate) fn unavailable() -> Self {
-        Self(LocalObjectIdentity(IdentityValue::Unavailable))
+        Self(LocalObjectIdentity(IdentityValue::Unavailable, None))
     }
 
     #[cfg(test)]
     pub(crate) fn for_test(label: u64) -> Self {
-        Self(LocalObjectIdentity(IdentityValue::Fixture(label)))
+        Self(LocalObjectIdentity(IdentityValue::Fixture(label), None))
     }
 
     #[cfg(test)]
@@ -113,11 +157,17 @@ pub(crate) trait LocalIdentitySource: Send + Sync {
 #[derive(Clone)]
 pub(crate) struct LocalFilesystemAuthority {
     identity: Arc<dyn LocalIdentitySource>,
+    handles: Arc<IdentityBudget>,
+    files: Arc<IdentityBudget>,
 }
 
 impl LocalFilesystemAuthority {
     pub(crate) fn new(identity: Arc<dyn LocalIdentitySource>) -> Self {
-        Self { identity }
+        Self {
+            identity,
+            handles: Arc::default(),
+            files: Arc::default(),
+        }
     }
 
     pub(crate) fn validate_workspace_directory(
@@ -156,13 +206,15 @@ impl LocalFilesystemAuthority {
         path: &Path,
         kind: LocalObjectKind,
     ) -> Result<LocalObjectIdentity, LocalFilesystemError> {
-        let observation = self.identity.identify(path)?;
+        let permit = self.handles.reserve(MAX_IDENTITY_HANDLES)?;
+        let mut observation = self.identity.identify(path)?;
         if observation.kind != kind {
             return Err(match kind {
                 LocalObjectKind::Directory => LocalFilesystemError::NotDirectory,
                 LocalObjectKind::File | LocalObjectKind::Other => LocalFilesystemError::NotFile,
             });
         }
+        observation.identity.1 = Some(Arc::new(permit));
         Ok(observation.identity)
     }
 
@@ -176,6 +228,7 @@ impl LocalFilesystemAuthority {
             directory.join(path)
         };
         validate_absolute_path(&selected).ok()?;
+        let permit = self.files.reserve(MAX_LOCAL_FILE_LEASES).ok()?;
         let identity = self.identify_kind(&selected, LocalObjectKind::File).ok()?;
         let canonical = fs::canonicalize(&selected).ok()?;
         valid_file_text(canonical.to_str()?).then_some(())?;
@@ -184,6 +237,7 @@ impl LocalFilesystemAuthority {
             canonical,
             identity,
             authority: self.clone(),
+            _permit: permit,
         }));
         file.revalidated_path()?;
         Some(file)
@@ -213,6 +267,7 @@ struct LocalFileState {
     canonical: PathBuf,
     identity: LocalObjectIdentity,
     authority: LocalFilesystemAuthority,
+    _permit: IdentityPermit,
 }
 
 #[derive(Clone)]
@@ -257,7 +312,7 @@ impl ValidatedLocalFile {
 }
 
 const EMISSION_PREFIX: &[u8; 8] = b"STLF\0\0\0\x02";
-const MAX_EMITTED_LOCAL_FILES: usize = 1024;
+const MAX_EMITTED_LOCAL_FILES: usize = 32;
 
 /// One Terminal Emulator owns this bounded lease table. Bytes reveal no paths or native identity.
 /// Eviction revokes old metadata; tokens are never reused, even after a file is replaced.
@@ -267,6 +322,14 @@ pub(crate) struct LocalFileEmissionRegistry {
 }
 
 impl LocalFileEmissionRegistry {
+    /// Release the oldest registry lease before resolution opens another identity handle.
+    /// A snapshot may still retain it; the shared budget counts that lifetime independently.
+    pub(crate) fn prepare_resolution(&mut self) {
+        if self.files.len() == MAX_EMITTED_LOCAL_FILES {
+            self.files.pop_front();
+        }
+    }
+
     pub(crate) fn emit(&mut self, file: &ValidatedLocalFile) -> Option<Vec<u8>> {
         if let Some((token, _)) = self.files.iter().find(|(_, retained)| retained == file) {
             return Some(token.to_vec());

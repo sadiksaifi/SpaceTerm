@@ -331,13 +331,19 @@ impl WorkspaceDirectoryAvailability {
     }
 }
 
-#[derive(Clone, Eq, PartialEq)]
+#[derive(Clone, Eq)]
 /// A validated local Workspace Directory and its local filesystem identity.
 ///
 /// This is the only Workspace directory value that may enter local `Path` and `PathBuf` APIs.
 pub(crate) struct ValidatedWorkspaceDirectory {
     path: PathBuf,
     identity: WorkspaceDirectoryIdentity,
+}
+
+impl PartialEq for ValidatedWorkspaceDirectory {
+    fn eq(&self, other: &Self) -> bool {
+        self.path.as_os_str() == other.path.as_os_str() && self.identity == other.identity
+    }
 }
 
 impl fmt::Debug for ValidatedWorkspaceDirectory {
@@ -2049,6 +2055,31 @@ mod tests {
                 .workspace(workspace_id)
                 .and_then(WorkspaceEntry::remote_connection_state),
             Some(RemoteConnectionState::closing(6))
+        );
+    }
+
+    #[test]
+    fn authority_reports_treat_exact_spelling_changes_as_directory_updates() {
+        let authority =
+            DirectoryAuthority::new(super::super::TabId::new(1), super::super::PaneId::new(1));
+        let mut workspaces =
+            WorkspaceCollection::new_scratch(validated("/project", 10), authority, |_, _| ());
+        assert!(
+            workspaces
+                .update_directory_authority_report(
+                    WorkspaceId::new(1),
+                    authority,
+                    validated("/project/.", 10)
+                )
+                .unwrap()
+        );
+        assert_eq!(
+            workspaces
+                .active_workspace()
+                .working_directory()
+                .unwrap()
+                .as_os_str(),
+            "/project/."
         );
     }
 

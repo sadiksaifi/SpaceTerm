@@ -843,6 +843,7 @@ impl TerminalEmulator {
                 let Ok(uri) = std::str::from_utf8(uri) else {
                     return HyperlinkResolution::Suppress;
                 };
+                local_file_emissions.borrow_mut().prepare_resolution();
                 let Some(target) = HyperlinkTarget::resolve_osc8(
                     uri,
                     &directory,
