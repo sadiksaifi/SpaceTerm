@@ -780,13 +780,19 @@ mod tests {
         drop(state);
         let callback_requestor = Rc::clone(&requestor);
         let observed_state = weak_state.clone();
+        let observed_retirement = Rc::new(std::cell::Cell::new(false));
+        let callback_observation = Rc::clone(&observed_retirement);
         *endpoint.on_status.borrow_mut() = Some(Box::new(move || {
             callback_requestor.deallocate();
-            let retained = observed_state.upgrade().unwrap();
-            assert!(retained.is_retired());
+            callback_observation.set(
+                observed_state
+                    .upgrade()
+                    .is_some_and(|state| state.is_retired()),
+            );
         }));
 
         assert!(requestor.validate().is_none());
+        assert!(observed_retirement.get());
         assert!(weak_state.upgrade().is_none());
         let successor = NativeObject::requestor(endpoint);
         assert!(successor.validate().is_some());
@@ -807,15 +813,18 @@ mod tests {
         let callback_requestor = Rc::clone(&requestor);
         let callback_operation = Rc::clone(&operation);
         let observed_state = weak_state.clone();
+        let observed_retention = Rc::new(std::cell::Cell::new(false));
+        let callback_observation = Rc::clone(&observed_retention);
         *endpoint.on_selection.borrow_mut() = Some(Box::new(move || {
             callback_operation.deallocate();
             callback_requestor.deallocate();
-            assert!(observed_state.upgrade().is_some());
+            callback_observation.set(observed_state.upgrade().is_some());
         }));
         let board = IsolatedPasteboard::new();
         board.set_text("untouched");
 
         assert!(!operation.write(board.0));
+        assert!(observed_retention.get());
         assert_eq!(board.text().as_deref(), Some("untouched"));
         assert!(weak_state.upgrade().is_none());
         let successor = NativeObject::requestor(endpoint.clone());
@@ -841,13 +850,16 @@ mod tests {
         let callback_requestor = Rc::clone(&requestor);
         let callback_operation = Rc::clone(&operation);
         let observed_state = weak_state.clone();
+        let observed_retention = Rc::new(std::cell::Cell::new(false));
+        let callback_observation = Rc::clone(&observed_retention);
         *endpoint.on_status.borrow_mut() = Some(Box::new(move || {
             callback_operation.deallocate();
             callback_requestor.deallocate();
-            assert!(observed_state.upgrade().is_some());
+            callback_observation.set(observed_state.upgrade().is_some());
         }));
 
         assert!(!operation.read(board.0));
+        assert!(observed_retention.get());
         assert!(weak_state.upgrade().is_none());
         assert!(endpoint.inserted.borrow().is_empty());
         let successor = NativeObject::requestor(endpoint);
@@ -871,12 +883,15 @@ mod tests {
         drop(state);
         let callback_operation = Rc::clone(&operation);
         let observed_state = weak_state.clone();
+        let observed_retention = Rc::new(std::cell::Cell::new(false));
+        let callback_observation = Rc::clone(&observed_retention);
         *endpoint.on_insert.borrow_mut() = Some(Box::new(move || {
             callback_operation.deallocate();
-            assert!(observed_state.upgrade().is_some());
+            callback_observation.set(observed_state.upgrade().is_some());
         }));
 
         assert!(operation.read(board.0));
+        assert!(observed_retention.get());
         assert!(weak_state.upgrade().is_none());
         assert_eq!(
             *endpoint.inserted.borrow(),
