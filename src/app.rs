@@ -232,9 +232,14 @@ pub(crate) fn open(cx: &mut App, startup: StartupDependencies) {
     let bounds = Bounds::centered(None, size(px(900.0), px(580.0)), cx);
     let native_pty_adapter_factory: Arc<dyn NativePtyAdapterFactory> =
         Arc::new(MacosNativePtyAdapterFactory);
-    let session_factory: Rc<dyn TerminalSessionFactory> = Rc::new(
-        NativeTerminalSessionFactory::new(native_pty_adapter_factory),
-    );
+    let session_factory: Rc<dyn TerminalSessionFactory> =
+        Rc::new(NativeTerminalSessionFactory::new(
+            native_pty_adapter_factory,
+            crate::platform::shell_launch::ShellLaunchPlanner::new(
+                crate::platform::launch_host::user_shell().into(),
+                crate::platform::launch_host::resource_root(),
+            ),
+        ));
     let key_input_adapter_factory: Rc<dyn TerminalKeyInputAdapterFactory> = Rc::new(
         MacosTerminalKeyInputAdapterFactory::new(OptionAsAltPolicy::default()),
     );

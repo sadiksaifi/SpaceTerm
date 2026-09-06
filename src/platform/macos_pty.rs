@@ -1,7 +1,8 @@
 use std::collections::BTreeMap;
 use std::io::{self, Read, Write};
 use std::os::fd::RawFd;
-use std::path::{Path, PathBuf};
+#[cfg(test)]
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -15,14 +16,12 @@ use thiserror::Error;
 
 use crate::platform::native_pty::{
     NativePtyAdapter, NativePtyAdapterConstructionFailure, NativePtyAdapterFactory,
-    NativePtyAdapterParts, NativePtyExit, NativePtyLaunch, NativePtyOperationFailure,
-    NativePtySize, NativePtyTermination, NativePtyWaitFailure, user_shell,
+    NativePtyAdapterParts, NativePtyExit, NativePtyOperationFailure, NativePtySize,
+    NativePtyTermination, NativePtyWaitFailure,
 };
-use crate::platform::shell_integration::{
-    ShellEnvironment, configured_mode, plan_shell_integration, resource_root,
-};
-use crate::ssh::command::SshCommandSpec;
-use crate::terminal::identity;
+use crate::platform::shell_launch::PreparedShellLaunch;
+#[cfg(test)]
+use crate::platform::shell_launch::ShellLaunchPlanner;
 
 const CHILD_EXIT_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const GRACEFUL_SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(250);
@@ -31,43 +30,6 @@ const FORCED_SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(250);
 // group cleanup. Serial execution keeps those OS-backed cases independent of runner scheduling.
 #[cfg(test)]
 static REAL_PTY_TEST_LOCK: Mutex<()> = Mutex::new(());
-const FOREIGN_RUNTIME_ENVIRONMENT: &[&str] = &[
-    "GHOSTTY_BIN_DIR",
-    "GHOSTTY_RESOURCES_DIR",
-    "GHOSTTY_SHELL_FEATURES",
-    "ITERM_SESSION_ID",
-    "KITTY_LISTEN_ON",
-    "KITTY_PID",
-    "KITTY_PUBLIC_KEY",
-    "KITTY_WINDOW_ID",
-    "LC_TERMINAL",
-    "LC_TERMINAL_VERSION",
-    "STY",
-    "TERM_SESSION_ID",
-    "TERMINAL_EMULATOR",
-    "TMUX",
-    "TMUX_PANE",
-    "WARP_SESSION_ID",
-    "WARP_TERMINAL_SESSION_UUID",
-    "WEZTERM_CONFIG_FILE",
-    "WEZTERM_EXECUTABLE",
-    "WEZTERM_EXECUTABLE_DIR",
-    "WEZTERM_PANE",
-    "WEZTERM_UNIX_SOCKET",
-    "WT_PROFILE_ID",
-    "WT_SESSION",
-    "ZELLIJ",
-    "ZELLIJ_PANE_ID",
-    "ZELLIJ_SESSION_NAME",
-];
-const SHELL_INTEGRATION_ENVIRONMENT: &[&str] = &[
-    "SPACETERM_BASH_ENV",
-    "SPACETERM_BASH_INJECT",
-    "SPACETERM_SHELL_INTEGRATION_VERSION",
-    "SPACETERM_SHELL_INTEGRATION_XDG_DIR",
-    "SPACETERM_ZSH_ZDOTDIR",
-];
-
 #[cfg(test)]
 pub(crate) fn lock_real_pty_test() -> std::sync::MutexGuard<'static, ()> {
     REAL_PTY_TEST_LOCK
@@ -717,12 +679,6 @@ impl Drop for SpawnedPty {
 
 #[derive(Debug, Error)]
 pub(super) enum PtyError {
-    #[error("Workspace working directory {} is unavailable: {source}", path.display())]
-    WorkingDirectory {
-        path: PathBuf,
-        #[source]
-        source: io::Error,
-    },
     #[error("failed to open the macOS pseudo-terminal: {0}")]
     Open(#[source] AnyError),
     #[error("the macOS pseudo-terminal did not expose its native descriptor")]
@@ -733,12 +689,8 @@ pub(super) enum PtyError {
     ConfigureTermios(#[source] io::Error),
     #[error("failed to apply the initial macOS pseudo-terminal size: {0}")]
     InitialResize(#[source] AnyError),
-    #[error("failed to start shell {shell}: {source}")]
-    SpawnShell {
-        shell: String,
-        #[source]
-        source: AnyError,
-    },
+    #[error("failed to start Shell Process")]
+    SpawnShell,
     #[error("the shell process did not expose its process-group identifier")]
     MissingProcessGroup,
     #[error("failed to identify the shell process session: {0}")]
@@ -749,28 +701,6 @@ pub(super) enum PtyError {
     CloneReader(#[source] AnyError),
     #[error("failed to acquire the pseudo-terminal writer: {0}")]
     TakeWriter(#[source] AnyError),
-    #[error("the prepared SSH Pane channel is no longer available")]
-    SshChannelUnavailable,
-}
-
-fn spawn_user_shell(
-    size: PtySize,
-    working_directory: &Path,
-) -> Result<(SpawnedPty, PtyTerminator), PtyError> {
-    validate_working_directory(working_directory)?;
-    let shell = user_shell();
-    let command = build_shell_command(&shell, working_directory);
-    spawn_command_in_pty(size, command, &shell)
-}
-
-fn spawn_remote_pane_channel(
-    size: PtySize,
-    local_home: &Path,
-    command: SshCommandSpec,
-) -> Result<(SpawnedPty, PtyTerminator), PtyError> {
-    validate_working_directory(local_home)?;
-    let command = build_remote_pane_command(command, local_home)?;
-    spawn_command_in_pty(size, command, "/usr/bin/ssh")
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -780,7 +710,7 @@ pub(crate) struct MacosNativePtyAdapterFactory;
 impl NativePtyAdapterFactory for MacosNativePtyAdapterFactory {
     fn create(
         &self,
-        launch: NativePtyLaunch,
+        launch: PreparedShellLaunch,
         size: NativePtySize,
     ) -> Result<NativePtyAdapterParts, NativePtyAdapterConstructionFailure> {
         spawn_native_pty(launch, size).map_err(classify_pty_construction_failure)
@@ -789,9 +719,6 @@ impl NativePtyAdapterFactory for MacosNativePtyAdapterFactory {
 
 fn classify_pty_construction_failure(error: PtyError) -> NativePtyAdapterConstructionFailure {
     match error {
-        PtyError::WorkingDirectory { .. } => {
-            NativePtyAdapterConstructionFailure::LaunchDirectoryUnavailable
-        }
         PtyError::Open(_) => NativePtyAdapterConstructionFailure::ResourceCreationFailed,
         PtyError::MissingDescriptor
         | PtyError::ReadTermios(_)
@@ -799,7 +726,7 @@ fn classify_pty_construction_failure(error: PtyError) -> NativePtyAdapterConstru
         | PtyError::InitialResize(_) => {
             NativePtyAdapterConstructionFailure::ResourceConfigurationFailed
         }
-        PtyError::SpawnShell { .. } => NativePtyAdapterConstructionFailure::ProcessStartFailed,
+        PtyError::SpawnShell => NativePtyAdapterConstructionFailure::ProcessStartFailed,
         PtyError::MissingProcessGroup
         | PtyError::InspectSession(_)
         | PtyError::UnisolatedSession => {
@@ -808,25 +735,15 @@ fn classify_pty_construction_failure(error: PtyError) -> NativePtyAdapterConstru
         PtyError::CloneReader(_) | PtyError::TakeWriter(_) => {
             NativePtyAdapterConstructionFailure::InputOutputUnavailable
         }
-        PtyError::SshChannelUnavailable => {
-            NativePtyAdapterConstructionFailure::RemoteChannelUnavailable
-        }
     }
 }
 
 fn spawn_native_pty(
-    launch: NativePtyLaunch,
+    launch: PreparedShellLaunch,
     size: NativePtySize,
 ) -> Result<NativePtyAdapterParts, PtyError> {
-    let (pty, termination) = match launch {
-        NativePtyLaunch::Local { working_directory } => {
-            spawn_user_shell(portable_size(size), &working_directory)?
-        }
-        NativePtyLaunch::Remote {
-            local_home,
-            command,
-        } => spawn_remote_pane_channel(portable_size(size), &local_home, command)?,
-    };
+    let command = command_from_launch(&launch);
+    let (pty, termination) = spawn_command_in_pty(portable_size(size), command)?;
     Ok(NativePtyAdapterParts {
         adapter: Box::new(pty),
         termination: Arc::new(termination),
@@ -845,7 +762,6 @@ const fn portable_size(size: NativePtySize) -> PtySize {
 fn spawn_command_in_pty(
     size: PtySize,
     command: CommandBuilder,
-    description: &str,
 ) -> Result<(SpawnedPty, PtyTerminator), PtyError> {
     let pty_system = native_pty_system();
     let pair = pty_system.openpty(size).map_err(PtyError::Open)?;
@@ -854,10 +770,7 @@ fn spawn_command_in_pty(
     let mut child = pair
         .slave
         .spawn_command(command)
-        .map_err(|source| PtyError::SpawnShell {
-            shell: description.to_owned(),
-            source,
-        })?;
+        .map_err(|_| PtyError::SpawnShell)?;
 
     // The application never uses the slave side after spawning the shell.
     drop(pair.slave);
@@ -942,95 +855,32 @@ const fn termios_hidden_input(termios: &libc::termios) -> bool {
     termios.c_lflag & libc::ICANON != 0 && termios.c_lflag & libc::ECHO == 0
 }
 
-fn validate_working_directory(working_directory: &Path) -> Result<(), PtyError> {
-    let metadata = working_directory
-        .metadata()
-        .map_err(|source| PtyError::WorkingDirectory {
-            path: working_directory.to_owned(),
-            source,
-        })?;
-    if metadata.is_dir() {
-        Ok(())
-    } else {
-        Err(PtyError::WorkingDirectory {
-            path: working_directory.to_owned(),
-            source: io::Error::new(io::ErrorKind::NotADirectory, "path is not a directory"),
-        })
+/// Translate already-decided launch values into the private process library representation.
+fn command_from_launch(launch: &PreparedShellLaunch) -> CommandBuilder {
+    let mut command = CommandBuilder::new(launch.executable());
+    command.args(launch.arguments());
+    if !launch.inherit_environment() {
+        command.env_clear();
     }
-}
-
-fn build_shell_command(shell: &str, working_directory: &Path) -> CommandBuilder {
-    build_shell_command_with_resources(shell, working_directory, &resource_root())
-}
-
-fn build_shell_command_with_resources(
-    shell: &str,
-    working_directory: &Path,
-    resources: &Path,
-) -> CommandBuilder {
-    let mut command = CommandBuilder::new(shell);
-    let integration = plan_shell_integration(
-        Path::new(shell),
-        resources,
-        configured_mode(),
-        &ShellEnvironment::capture(),
-    );
-    integration.apply(&mut command);
-    command.arg("-l");
-    apply_terminal_identity(&mut command, resources);
-    command.cwd(working_directory);
-    command
-}
-
-fn build_remote_pane_command(
-    command: SshCommandSpec,
-    local_home: &Path,
-) -> Result<CommandBuilder, PtyError> {
-    let (executable, arguments, environment) = command
-        .into_pane_launch_parts()
-        .map_err(|_| PtyError::SshChannelUnavailable)?;
-    let mut command = CommandBuilder::new(executable);
-    command.args(arguments);
-    if let Some(environment) = environment {
-        environment.apply_to_pty(&mut command);
-    } else {
-        for name in FOREIGN_RUNTIME_ENVIRONMENT {
-            command.env_remove(name);
-        }
-        for name in SHELL_INTEGRATION_ENVIRONMENT {
-            command.env_remove(name);
-        }
-        command.env_remove("TERMINFO");
-        command.cwd(local_home);
-    }
-    command.env("TERM", identity::TERM_FALLBACK);
-    Ok(command)
-}
-
-fn apply_terminal_identity(command: &mut CommandBuilder, resources: &Path) {
-    for name in FOREIGN_RUNTIME_ENVIRONMENT {
+    for name in launch.environment_removals() {
         command.env_remove(name);
     }
-    command.env_remove("TERMINFO");
-
-    let terminal_identity = identity::launch_identity(resources);
-    command.env("TERM", terminal_identity.term);
-    if let Some(terminfo) = terminal_identity.terminfo {
-        command.env("TERMINFO", terminfo);
+    for (name, value) in launch.environment() {
+        command.env(name, value);
     }
-    command.env("COLORTERM", identity::COLORTERM);
-    command.env("TERM_PROGRAM", identity::COMPATIBILITY_PROGRAM_NAME);
-    command.env("TERM_PROGRAM_VERSION", identity::PROGRAM_VERSION);
-    command.env("SPACETERM", "1");
+    command.cwd(launch.working_directory());
+    command
 }
 
 #[cfg(test)]
 pub(crate) fn conformance_initialization_observation() -> String {
-    let command = build_shell_command_with_resources(
-        "/bin/zsh",
-        Path::new("/tmp"),
-        Path::new("/spaceterm-conformance-missing-resources"),
-    );
+    let launch = ShellLaunchPlanner::new(
+        "/bin/zsh".into(),
+        "/spaceterm-conformance-missing-resources".into(),
+    )
+    .local(Path::new("/tmp"))
+    .unwrap();
+    let command = command_from_launch(&launch);
     format!(
         "argv={:?} cwd={} term={} colorterm={} program={} version={} spaceterm={} controlling-tty={}",
         command.get_argv(),
@@ -1117,10 +967,6 @@ mod tests {
     use portable_pty::{ChildKiller, ExitStatus};
 
     use super::*;
-    use crate::domain::{RemoteWorkspaceDirectory, SshDestination};
-    use crate::ssh::command::{
-        RemotePaneShellCommandBuilder, SshCommandContext, ValidatedRemoteLoginShell,
-    };
 
     #[test]
     fn platform_neutral_size_preserves_rows_columns_and_pixels() {
@@ -1305,8 +1151,7 @@ mod tests {
         };
         let command = controlled_child_command(&working_directory, "initialized");
 
-        let (mut pty, _terminator) =
-            spawn_command_in_pty(size, command, "controlled child").unwrap();
+        let (mut pty, _terminator) = spawn_command_in_pty(size, command).unwrap();
         let report = read_controlled_report(&mut pty);
 
         assert_eq!(
@@ -1351,18 +1196,12 @@ mod tests {
             pixel_width: 640,
             pixel_height: 480,
         };
-        let (mut first, _first_terminator) = spawn_command_in_pty(
-            size,
-            controlled_child_command(&working_directory, "first"),
-            "first controlled child",
-        )
-        .unwrap();
-        let (mut second, _second_terminator) = spawn_command_in_pty(
-            size,
-            controlled_child_command(&working_directory, "second"),
-            "second controlled child",
-        )
-        .unwrap();
+        let (mut first, _first_terminator) =
+            spawn_command_in_pty(size, controlled_child_command(&working_directory, "first"))
+                .unwrap();
+        let (mut second, _second_terminator) =
+            spawn_command_in_pty(size, controlled_child_command(&working_directory, "second"))
+                .unwrap();
 
         let first_report = read_controlled_report(&mut first);
         let second_report = read_controlled_report(&mut second);
@@ -1396,7 +1235,6 @@ mod tests {
                 pixel_height: 480,
             },
             command,
-            "stubborn process group",
         )
         .unwrap();
         let mut reader = BufReader::new(pty.take_reader().unwrap());
@@ -1447,7 +1285,6 @@ mod tests {
                 pixel_height: 480,
             },
             command,
-            "interactive foreground process group",
         )
         .unwrap();
         let mut reader = BufReader::new(pty.take_reader().unwrap());
@@ -1503,7 +1340,6 @@ mod tests {
                 pixel_height: 480,
             },
             command,
-            "interactive background process group",
         )
         .unwrap();
         let mut reader = BufReader::new(pty.take_reader().unwrap());
@@ -1581,7 +1417,6 @@ mod tests {
                 pixel_height: 480,
             },
             command,
-            "HUP handler process handoff",
         )
         .unwrap();
         let mut reader = BufReader::new(pty.take_reader().unwrap());
@@ -1634,7 +1469,6 @@ mod tests {
                 pixel_height: 480,
             },
             command,
-            "late close after session leader exit",
         )
         .unwrap();
         let mut reader = BufReader::new(pty.take_reader().unwrap());
@@ -1692,7 +1526,6 @@ mod tests {
                 pixel_height: 480,
             },
             command,
-            "responsive process group",
         )
         .unwrap();
         let mut reader = BufReader::new(pty.take_reader().unwrap());
@@ -1767,151 +1600,6 @@ mod tests {
             reader.read_exact(&mut byte).unwrap();
             observed.push(byte[0]);
         }
-    }
-
-    #[test]
-    fn shell_command_should_apply_compatibility_identity_and_working_directory() {
-        let working_directory = Path::new("/private/tmp/workspace root");
-
-        let command = build_shell_command("/bin/zsh", working_directory);
-
-        assert_eq!(
-            command.get_argv(),
-            &vec![
-                std::ffi::OsString::from("/bin/zsh"),
-                std::ffi::OsString::from("-l"),
-            ]
-        );
-        assert_eq!(
-            command.get_cwd(),
-            Some(&working_directory.as_os_str().to_owned())
-        );
-        assert_eq!(
-            command.get_env("TERM"),
-            Some(std::ffi::OsStr::new("xterm-256color"))
-        );
-        assert_eq!(
-            command.get_env("COLORTERM"),
-            Some(std::ffi::OsStr::new("truecolor"))
-        );
-        assert_eq!(
-            command.get_env("TERM_PROGRAM"),
-            Some(std::ffi::OsStr::new("ghostty"))
-        );
-        assert_eq!(
-            command.get_env("SPACETERM"),
-            Some(std::ffi::OsStr::new("1"))
-        );
-        assert_eq!(
-            command.get_env("TERM_PROGRAM_VERSION"),
-            Some(std::ffi::OsStr::new(env!("CARGO_PKG_VERSION")))
-        );
-        assert!(command.get_controlling_tty());
-    }
-
-    #[test]
-    fn remote_command_should_preserve_prepared_argv_and_use_only_local_home_as_cwd() {
-        let command_context = SshCommandContext::new(
-            PathBuf::from("/private/config/spaceterm/ssh_config"),
-            SshDestination::new("user@remote".to_owned()).unwrap(),
-            PathBuf::from("/private/runtime/spaceterm/control.sock"),
-        )
-        .unwrap();
-        let directory = RemoteWorkspaceDirectory::new("~/project".to_owned()).unwrap();
-        let login_shell = ValidatedRemoteLoginShell::new("/bin/zsh".to_owned()).unwrap();
-        let prepared = command_context.prepare_pane_channel(
-            RemotePaneShellCommandBuilder::new(&directory, &login_shell)
-                .build()
-                .unwrap(),
-        );
-        let local_home = Path::new("/Users/local");
-
-        let command = build_remote_pane_command(prepared.take().unwrap(), local_home).unwrap();
-
-        assert_eq!(command.get_argv().first().unwrap(), "/usr/bin/ssh");
-        assert_eq!(
-            command.get_argv().last().unwrap(),
-            "cd \"${HOME}\"'/project' && SPACETERM='1' COLORTERM='truecolor' exec '/bin/zsh' -l"
-        );
-        assert_eq!(command.get_cwd(), Some(&local_home.as_os_str().to_owned()));
-        assert_eq!(
-            command.get_env("TERM"),
-            Some(std::ffi::OsStr::new("xterm-256color"))
-        );
-        assert_eq!(command.get_env("TERMINFO"), None);
-        assert_eq!(command.get_env("SPACETERM_SHELL_INTEGRATION_VERSION"), None);
-    }
-
-    #[test]
-    fn shell_command_uses_packaged_terminfo_only_when_the_entry_is_discoverable() {
-        let resources = std::env::temp_dir().join(format!(
-            "spaceterm-command-terminfo-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let terminfo = resources.join("terminfo/78/xterm-spaceterm");
-        std::fs::create_dir_all(terminfo.parent().unwrap()).unwrap();
-        std::fs::write(&terminfo, b"compiled").unwrap();
-
-        let command = build_shell_command_with_resources("/bin/zsh", Path::new("/tmp"), &resources);
-
-        assert_eq!(
-            command.get_env("TERM"),
-            Some(std::ffi::OsStr::new(identity::TERM_NAME))
-        );
-        assert_eq!(
-            command.get_env("TERMINFO"),
-            Some(resources.join("terminfo").as_os_str())
-        );
-        assert_eq!(
-            command.get_env("TERM_PROGRAM"),
-            Some(std::ffi::OsStr::new("ghostty"))
-        );
-        assert_eq!(
-            command.get_env("TERM_PROGRAM_VERSION"),
-            Some(std::ffi::OsStr::new(identity::PROGRAM_VERSION))
-        );
-        std::fs::remove_dir_all(resources).unwrap();
-    }
-
-    #[test]
-    fn terminal_identity_should_remove_inherited_foreign_runtime_markers() {
-        let mut command = CommandBuilder::new("/bin/zsh");
-        for name in FOREIGN_RUNTIME_ENVIRONMENT {
-            command.env(name, "inherited");
-        }
-        command.env("TERMINFO", "/inherited/terminfo");
-
-        apply_terminal_identity(&mut command, Path::new("/spaceterm-test-missing-resources"));
-
-        assert!(
-            FOREIGN_RUNTIME_ENVIRONMENT
-                .iter()
-                .all(|name| command.get_env(name).is_none())
-        );
-        assert_eq!(command.get_env("TERMINFO"), None);
-    }
-
-    #[test]
-    fn shell_spawn_should_reject_a_missing_working_directory() {
-        let result = spawn_user_shell(
-            PtySize {
-                rows: 24,
-                cols: 80,
-                pixel_width: 640,
-                pixel_height: 480,
-            },
-            Path::new("/private/tmp/spaceterm-missing-working-directory"),
-        );
-
-        let error = match result {
-            Ok(_) => panic!("a missing Workspace root must not silently fall back to HOME"),
-            Err(error) => error,
-        };
-        assert!(matches!(error, PtyError::WorkingDirectory { .. }));
     }
 
     #[derive(Default)]

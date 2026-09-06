@@ -12,12 +12,14 @@ use std::time::{Duration, Instant};
 
 use thiserror::Error;
 
+#[cfg(test)]
+use crate::platform::launch_host::{resource_root, user_shell};
 use crate::platform::native_pty::{
-    NativePtyAdapterFactory, NativePtyCloseHandle, NativePtyExit, NativePtyLaunch,
-    NativePtyOperationFailure, NativePtyOutput, NativePtyOutputSink, NativePtyOwner, NativePtySize,
-    NativePtyStartupFailure, NativePtyStartupStage, NativePtyWaitFailure, shell_fallback_title,
+    NativePtyAdapterFactory, NativePtyCloseHandle, NativePtyExit, NativePtyOperationFailure,
+    NativePtyOutput, NativePtyOutputSink, NativePtyOwner, NativePtySize, NativePtyStartupFailure,
+    NativePtyStartupStage, NativePtyWaitFailure,
 };
-use crate::platform::shell_integration::resource_root;
+use crate::platform::shell_launch::{PreparedShellLaunch, ShellLaunchPlanner};
 use crate::terminal::accessibility::AccessibilitySelectionRequest;
 use crate::terminal::accessibility::TerminalAccessibilityModel;
 use crate::terminal::attention::AttentionEvent;
@@ -479,12 +481,17 @@ pub(crate) enum TerminalLaunchPlan {
 #[derive(Clone)]
 pub(crate) struct NativeTerminalSessionFactory {
     native_pty_adapter_factory: Arc<dyn NativePtyAdapterFactory>,
+    launch_planner: ShellLaunchPlanner,
 }
 
 impl NativeTerminalSessionFactory {
-    pub(crate) fn new(native_pty_adapter_factory: Arc<dyn NativePtyAdapterFactory>) -> Self {
+    pub(crate) fn new(
+        native_pty_adapter_factory: Arc<dyn NativePtyAdapterFactory>,
+        launch_planner: ShellLaunchPlanner,
+    ) -> Self {
         Self {
             native_pty_adapter_factory,
+            launch_planner,
         }
     }
 }
@@ -500,6 +507,7 @@ impl TerminalSessionFactory for NativeTerminalSessionFactory {
         let (session, events, accessibility) = match launch_plan {
             TerminalLaunchPlan::Local(local) => TerminalSession::start(
                 Arc::clone(&self.native_pty_adapter_factory),
+                self.launch_planner.clone(),
                 geometry,
                 local.working_directory().path(),
                 observation,
@@ -526,7 +534,7 @@ impl TerminalSessionFactory for NativeTerminalSessionFactory {
     }
 
     fn fallback_title(&self) -> String {
-        shell_fallback_title()
+        self.launch_planner.fallback_title()
     }
 }
 
@@ -634,22 +642,36 @@ fn native_osc52_clipboard() -> Box<dyn Osc52Clipboard> {
     }
 }
 
+#[cfg(test)]
+fn test_launch_planner() -> ShellLaunchPlanner {
+    ShellLaunchPlanner::new(user_shell().into(), resource_root())
+}
+
 impl TerminalSession {
     pub(crate) fn start(
         native_pty_adapter_factory: Arc<dyn NativePtyAdapterFactory>,
+        launch_planner: ShellLaunchPlanner,
         geometry: TerminalGeometry,
         working_directory: &Path,
         runtime_observation: Option<RuntimeObservation>,
     ) -> Result<StartedSession, SessionError> {
-        let launch = NativePtyLaunch::local(working_directory.to_owned());
-        Self::start_deferred_with(
+        let terminal_name = launch_planner.terminal_name();
+        let initial_directory = working_directory.to_string_lossy();
+        let metadata_context = TerminalMetadataContext::local(
+            &initial_directory,
+            crate::terminal::metadata::local_hostname().as_deref(),
+        );
+        let launch_directory = working_directory.to_owned();
+        Self::start_deferred_with_context(
             geometry,
-            working_directory,
+            metadata_context,
+            launch_planner.fallback_title(),
+            terminal_name,
             runtime_observation,
             move |size, output, close_handle| {
                 NativePtyOwner::start(
                     native_pty_adapter_factory.as_ref(),
-                    launch,
+                    launch_planner.local(&launch_directory)?,
                     size,
                     output,
                     close_handle,
@@ -667,7 +689,7 @@ impl TerminalSession {
         command: crate::ssh::command::SshCommandSpec,
         runtime_observation: Option<RuntimeObservation>,
     ) -> Result<StartedSession, SessionError> {
-        let launch = NativePtyLaunch::remote(local_home.to_owned(), command);
+        let local_home = local_home.to_owned();
         Self::start_deferred_with_context(
             geometry,
             TerminalMetadataContext::Remote(metadata_context),
@@ -677,7 +699,7 @@ impl TerminalSession {
             move |size, output, close_handle| {
                 NativePtyOwner::start(
                     native_pty_adapter_factory.as_ref(),
-                    launch,
+                    PreparedShellLaunch::remote(&local_home, command)?,
                     size,
                     output,
                     close_handle,
@@ -686,6 +708,7 @@ impl TerminalSession {
         )
     }
 
+    #[cfg(test)]
     fn start_deferred_with(
         geometry: TerminalGeometry,
         working_directory: &Path,
@@ -706,7 +729,7 @@ impl TerminalSession {
         Self::start_deferred_with_context(
             geometry,
             metadata_context,
-            shell_fallback_title(),
+            test_launch_planner().fallback_title(),
             identity::launch_identity(&resource_root()).term,
             runtime_observation,
             start_native_pty,
@@ -2659,7 +2682,7 @@ mod tests {
     }
 
     fn native_terminal_session_factory() -> NativeTerminalSessionFactory {
-        NativeTerminalSessionFactory::new(macos_native_pty_adapter_factory())
+        NativeTerminalSessionFactory::new(macos_native_pty_adapter_factory(), test_launch_planner())
     }
 
     fn remote_pane_command(directory: &RemoteWorkspaceDirectory) -> ValidatedRemoteShellCommand {
@@ -2719,7 +2742,7 @@ mod tests {
     #[test]
     fn native_factory_routes_local_launches_through_the_injected_adapter_factory() {
         let (factory, constructions) = recording_native_terminal_session_factory();
-        let working_directory = PathBuf::from("/exact/local/../project");
+        let working_directory = std::env::temp_dir().join(".");
         let plan = TerminalLaunchPlan::Local(LocalTerminalLaunchPlan::new(
             crate::domain::ValidatedWorkspaceDirectory::new(
                 working_directory.clone(),
@@ -2733,19 +2756,32 @@ mod tests {
             .expect("Local construction should reach the injected factory");
         drop(started.handle);
 
-        assert_eq!(
-            construction,
-            RecordedNativePtyLaunch::Local {
-                working_directory,
-                size: pty_size(test_geometry()),
-            }
+        assert_eq!(construction.working_directory, working_directory);
+        assert_eq!(construction.size, pty_size(test_geometry()));
+        assert_eq!(construction.executable, OsString::from(user_shell()));
+        assert_eq!(construction.arguments.last(), Some(&OsString::from("-l")));
+        assert!(construction.inherit_environment);
+        assert!(
+            construction
+                .environment_removals
+                .contains(&OsString::from("TMUX"))
+        );
+        assert!(
+            construction
+                .environment
+                .contains(&("TERM_PROGRAM".into(), "ghostty".into()))
+        );
+        assert!(
+            construction
+                .environment
+                .contains(&("SPACETERM".into(), "1".into()))
         );
     }
 
     #[test]
     fn native_factory_routes_remote_launches_through_the_injected_adapter_factory() {
         let (factory, constructions) = recording_native_terminal_session_factory();
-        let local_home = PathBuf::from("/exact/local/home");
+        let local_home = std::env::temp_dir();
         let destination = SshDestination::new("user@remote".to_owned()).unwrap();
         let remote_directory = RemoteWorkspaceDirectory::new("~/project".to_owned()).unwrap();
         let context = SshCommandContext::new(
@@ -2774,14 +2810,19 @@ mod tests {
             .expect("Remote construction should reach the injected factory");
         drop(started.handle);
 
+        assert_eq!(construction.working_directory, local_home);
+        assert_eq!(construction.executable, expected_executable);
+        assert_eq!(construction.arguments, expected_arguments);
+        assert_eq!(construction.size, pty_size(test_geometry()));
+        assert!(construction.inherit_environment);
+        assert!(
+            construction
+                .environment_removals
+                .contains(&OsString::from("SPACETERM_SHELL_INTEGRATION_VERSION"))
+        );
         assert_eq!(
-            construction,
-            RecordedNativePtyLaunch::Remote {
-                local_home,
-                executable: expected_executable,
-                arguments: expected_arguments,
-                size: pty_size(test_geometry()),
-            }
+            construction.environment,
+            vec![("TERM".into(), "xterm-256color".into())]
         );
     }
 
@@ -3154,46 +3195,37 @@ mod tests {
     }
 
     #[derive(Debug, Eq, PartialEq)]
-    enum RecordedNativePtyLaunch {
-        Local {
-            working_directory: PathBuf,
-            size: NativePtySize,
-        },
-        Remote {
-            local_home: PathBuf,
-            executable: OsString,
-            arguments: Vec<OsString>,
-            size: NativePtySize,
-        },
+    struct RecordedPreparedShellLaunch {
+        working_directory: PathBuf,
+        executable: OsString,
+        arguments: Vec<OsString>,
+        inherit_environment: bool,
+        environment_removals: Vec<OsString>,
+        environment: Vec<(OsString, OsString)>,
+        size: NativePtySize,
     }
 
     struct RecordingSessionAdapterFactory {
-        constructions: mpsc::Sender<RecordedNativePtyLaunch>,
+        constructions: mpsc::Sender<RecordedPreparedShellLaunch>,
     }
 
     impl NativePtyAdapterFactory for RecordingSessionAdapterFactory {
         fn create(
             &self,
-            launch: NativePtyLaunch,
+            launch: PreparedShellLaunch,
             size: NativePtySize,
         ) -> Result<
             NativePtyAdapterParts,
             crate::platform::native_pty::NativePtyAdapterConstructionFailure,
         > {
-            let launch = match launch {
-                NativePtyLaunch::Local { working_directory } => RecordedNativePtyLaunch::Local {
-                    working_directory,
-                    size,
-                },
-                NativePtyLaunch::Remote {
-                    local_home,
-                    command,
-                } => RecordedNativePtyLaunch::Remote {
-                    local_home,
-                    executable: command.executable().to_owned(),
-                    arguments: command.arguments().to_vec(),
-                    size,
-                },
+            let launch = RecordedPreparedShellLaunch {
+                working_directory: launch.working_directory().to_owned(),
+                executable: launch.executable().to_owned(),
+                arguments: launch.arguments().to_vec(),
+                inherit_environment: launch.inherit_environment(),
+                environment_removals: launch.environment_removals().to_vec(),
+                environment: launch.environment().to_vec(),
+                size,
             };
             self.constructions
                 .send(launch)
@@ -3216,13 +3248,14 @@ mod tests {
 
     fn recording_native_terminal_session_factory() -> (
         NativeTerminalSessionFactory,
-        mpsc::Receiver<RecordedNativePtyLaunch>,
+        mpsc::Receiver<RecordedPreparedShellLaunch>,
     ) {
         let (constructions, observed) = mpsc::channel();
         (
-            NativeTerminalSessionFactory::new(Arc::new(RecordingSessionAdapterFactory {
-                constructions,
-            })),
+            NativeTerminalSessionFactory::new(
+                Arc::new(RecordingSessionAdapterFactory { constructions }),
+                test_launch_planner(),
+            ),
             observed,
         )
     }
@@ -3513,16 +3546,14 @@ mod tests {
     impl NativePtyAdapterFactory for ScriptedSessionAdapterFactory {
         fn create(
             &self,
-            launch: NativePtyLaunch,
+            launch: PreparedShellLaunch,
             size: NativePtySize,
         ) -> Result<
             NativePtyAdapterParts,
             crate::platform::native_pty::NativePtyAdapterConstructionFailure,
         > {
-            let NativePtyLaunch::Local { working_directory } = launch else {
-                panic!("scripted factory expected a Local launch")
-            };
-            assert_eq!(working_directory, PathBuf::from("/scripted"));
+            let working_directory = launch.working_directory();
+            assert_eq!(working_directory, std::env::temp_dir());
             assert_eq!(size, pty_size(test_geometry()));
             if let Some(gate) = &self.startup_gate {
                 gate.entered.send(()).unwrap();
@@ -3583,7 +3614,7 @@ mod tests {
             move |size, output, close_handle| {
                 NativePtyOwner::start(
                     &adapter_factory,
-                    NativePtyLaunch::local(PathBuf::from("/scripted")),
+                    PreparedShellLaunch::for_test(std::env::temp_dir()),
                     size,
                     output,
                     close_handle,
@@ -3800,7 +3831,7 @@ mod tests {
 
         let (mut session, events, _accessibility) = TerminalSession::start_deferred_with(
             test_geometry(),
-            Path::new("/scripted"),
+            &std::env::temp_dir(),
             None,
             move |size, _output, _close_handle| {
                 assert_eq!(size, pty_size(test_geometry()));
@@ -3874,8 +3905,9 @@ mod tests {
         ));
         let (mut session, _events, _accessibility) = TerminalSession::start(
             adapter_factory,
+            test_launch_planner(),
             test_geometry(),
-            Path::new("/scripted"),
+            &std::env::temp_dir(),
             None,
         )
         .unwrap();
@@ -3930,7 +3962,10 @@ mod tests {
         let SessionEvent::Failed(SessionFailure::Startup { message, .. }) = event else {
             unreachable!("the event predicate accepts only typed PTY startup failures")
         };
-        assert_eq!(message, "Native PTY launch directory is unavailable");
+        assert_eq!(
+            message,
+            "Shell launch directory is unavailable; select an existing directory and retry"
+        );
         drop(session);
     }
 
@@ -3976,7 +4011,10 @@ mod tests {
         let SessionEvent::Failed(SessionFailure::Startup { message, .. }) = event else {
             unreachable!("the event predicate accepts only typed PTY startup failures")
         };
-        assert_eq!(message, "Native PTY launch directory is unavailable");
+        assert_eq!(
+            message,
+            "Shell launch directory is unavailable; select an existing directory and retry"
+        );
         drop(session);
     }
 
@@ -5358,6 +5396,7 @@ mod tests {
         let size = test_geometry();
         let (session, events, _accessibility) = TerminalSession::start(
             macos_native_pty_adapter_factory(),
+            test_launch_planner(),
             size,
             &std::env::current_dir().unwrap(),
             None,
@@ -5419,6 +5458,7 @@ mod tests {
         let size = test_geometry();
         let (session, events, _accessibility) = TerminalSession::start(
             macos_native_pty_adapter_factory(),
+            test_launch_planner(),
             size,
             &std::env::current_dir().unwrap(),
             None,
