@@ -8,9 +8,15 @@ use gpui::{
 };
 use spaceterm_ui::{EditCopy, EditCut, EditPaste, EditRedo, EditSelectAll, EditUndo};
 
-use crate::platform::app_paths::{AppPathEnvironment, AppPaths};
+use crate::platform::app_paths::{AppPathEnvironment, AppPathHostFacts, AppPaths};
+use crate::platform::control_socket::ControlSocketProbe;
+use crate::platform::secure_filesystem::SecureFilesystem;
 use crate::ssh::alias_usage::ActiveSshAliasRegistry;
-use crate::ssh::command::{NativeSshProbeRunner, SshCapability, SshUnavailableReason};
+use crate::ssh::command::{
+    OpenSshExecutable, SshCapability, SshCapabilityProbe, SshUnavailableReason,
+};
+use crate::ssh::host_config::HostConfigFilesystem;
+use crate::ssh::process::SshProcessAdapter;
 use crate::ssh::startup_environment::StartupSshEnvironment;
 use crate::terminal::{
     NativeServiceOrigin, NativeServiceStatus, SelectionCopy, TerminalSessionFactory,
@@ -18,7 +24,8 @@ use crate::terminal::{
 use crate::ui::{
     ClosePane, CloseTab, CloseWorkspace, CreateScratchWorkspace, CreateTab,
     ExportTerminalDiagnostics, FindNext, FindPrevious, NativeRemoteWorkspaceFlowBackendFactory,
-    OpenLocalProject, OpenTerminalFind, SearchWorkspaces, ShowNewWorkspacePanel, WorkspaceManager,
+    OpenLocalProject, OpenTerminalFind, RemoteWorkspaceSshRuntime, SearchWorkspaces,
+    ShowNewWorkspacePanel, WorkspaceManager,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -31,17 +38,28 @@ pub(crate) enum StartupDependenciesError {
     Paths,
 }
 
-pub(crate) struct StartupDependencies {
+pub(crate) struct StartupDependencies<A: SshProcessAdapter> {
     paths: Arc<AppPaths>,
     pub(crate) home_directory: PathBuf,
     ssh_environment: StartupSshEnvironment,
     ssh_capability: SshCapability,
     active_aliases: ActiveSshAliasRegistry,
+    executable: OpenSshExecutable,
+    process_adapter: A,
+    control_socket_probe: Arc<dyn ControlSocketProbe>,
+    host_config_filesystem: Arc<dyn HostConfigFilesystem>,
 }
 
-impl StartupDependencies {
-    pub(crate) fn capture() -> Result<Self, StartupDependenciesError> {
-        let path_environment = AppPathEnvironment::capture();
+impl<A: SshProcessAdapter> StartupDependencies<A> {
+    pub(crate) fn capture(
+        path_environment: AppPathEnvironment,
+        path_host_facts: &AppPathHostFacts,
+        secure_filesystem: Arc<dyn SecureFilesystem>,
+        executable: OpenSshExecutable,
+        process_adapter: A,
+        control_socket_probe: Arc<dyn ControlSocketProbe>,
+        host_config_filesystem: Arc<dyn HostConfigFilesystem>,
+    ) -> Result<Self, StartupDependenciesError> {
         let home_directory = path_environment
             .home
             .as_deref()
@@ -51,34 +69,48 @@ impl StartupDependencies {
             return Err(StartupDependenciesError::RelativeHome);
         }
         let ssh_environment = StartupSshEnvironment::capture();
-        let ssh_capability =
-            NativeSshProbeRunner::from_startup(home_directory.clone(), &ssh_environment)
-                .map(|runner| runner.probe_blocking())
-                .unwrap_or(SshCapability::Unavailable(
-                    SshUnavailableReason::ProbeFailed,
-                ));
+        let ssh_capability = SshCapabilityProbe::from_startup(
+            executable.clone(),
+            home_directory.clone(),
+            &ssh_environment,
+            process_adapter.clone(),
+        )
+        .map(|runner| runner.probe_blocking())
+        .unwrap_or(SshCapability::Unavailable(
+            SshUnavailableReason::ProbeFailed,
+        ));
         Ok(Self {
             paths: Arc::new(
-                AppPaths::resolve(&path_environment)
+                AppPaths::resolve(&path_environment, path_host_facts, secure_filesystem)
                     .map_err(|_| StartupDependenciesError::Paths)?,
             ),
             home_directory,
             ssh_environment,
             ssh_capability,
             active_aliases: ActiveSshAliasRegistry::default(),
+            executable,
+            process_adapter,
+            control_socket_probe,
+            host_config_filesystem,
         })
     }
 
     pub(crate) fn remote_backend_factory(
         &self,
         askpass: Arc<dyn crate::platform::askpass::AskPassWindowFactory>,
-    ) -> Arc<NativeRemoteWorkspaceFlowBackendFactory> {
+    ) -> Arc<dyn crate::ui::remote_workspace_flow::RemoteWorkspaceFlowBackendFactory> {
         Arc::new(NativeRemoteWorkspaceFlowBackendFactory::new(
-            Arc::clone(&self.paths),
-            self.home_directory.clone(),
-            self.ssh_environment.clone(),
-            self.ssh_capability.clone(),
-            self.active_aliases.clone(),
+            RemoteWorkspaceSshRuntime {
+                paths: Arc::clone(&self.paths),
+                local_home: self.home_directory.clone(),
+                startup_environment: self.ssh_environment.clone(),
+                startup_capability: self.ssh_capability.clone(),
+                aliases: self.active_aliases.clone(),
+                executable: self.executable.clone(),
+                process_adapter: self.process_adapter.clone(),
+                control_socket_probe: Arc::clone(&self.control_socket_probe),
+                host_config_filesystem: Arc::clone(&self.host_config_filesystem),
+            },
             askpass,
         ))
     }
@@ -563,12 +595,13 @@ enum LaunchError {
 }
 
 /// The host supplies only its composition constructor after helper dispatch has declined.
-pub(crate) fn launch(
+pub(crate) fn launch<A: SshProcessAdapter>(
+    startup: Result<StartupDependencies<A>, StartupDependenciesError>,
     compose: impl FnOnce(
-        StartupDependencies,
+        StartupDependencies<A>,
     ) -> Result<HostComposition, crate::desktop_profile::DesktopProfileError>,
 ) -> i32 {
-    let result = StartupDependencies::capture()
+    let result = startup
         .map_err(LaunchError::Dependencies)
         .and_then(|startup| compose(startup).map_err(LaunchError::Desktop))
         .and_then(|host| run(host).map_err(LaunchError::Runtime));

@@ -150,7 +150,7 @@ impl PreparedShellLaunch {
             .map_err(|_| ShellLaunchFailure::RemoteChannelUnavailable)?;
         let (working_directory, inherit_environment, environment_removals, mut environment) =
             if let Some(environment) = prepared_environment {
-                let (home, entries) = environment.into_launch_environment();
+                let (home, entries) = environment.into_pane_launch_environment();
                 (home, false, Vec::new(), entries)
             } else {
                 (
@@ -433,6 +433,7 @@ mod tests {
     #[test]
     fn remote_fallback_preserves_exact_command_consumes_once_and_removes_local_markers() {
         let context = SshCommandContext::new(
+            crate::ssh::command::OpenSshExecutable::for_test(),
             "/private/config/ssh_config".into(),
             SshDestination::new("user@remote".to_owned()).unwrap(),
             "/private/runtime/control.sock".into(),
@@ -451,7 +452,7 @@ mod tests {
             channel.take(),
             Err(PreparedSshPaneChannelError::AlreadyConsumed)
         ));
-        assert_eq!(launch.executable(), "/usr/bin/ssh");
+        assert_eq!(launch.executable(), "/test/ssh");
         assert_eq!(launch.arguments(), expected_arguments);
         assert_eq!(launch.working_directory(), std::env::temp_dir());
         assert!(launch.inherit_environment());

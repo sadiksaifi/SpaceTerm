@@ -153,7 +153,7 @@ against pinned GPUI 0.2.2 is:
 | Services | Rust registration ordering, exact endpoint identity and request authority | Existing NSServices registration and exact-view responder installation. GPUI has only the system menu facility. |
 | Terminal Key Input, Native PTY, Terminal Accessibility, Native Terminal Services, Pane surface lifecycle | Their existing portable owners and independent Interfaces remain authoritative | The mechanics documented in their completed audits remain unchanged and are selected solely by macOS composition. |
 | Host shell and resources | Shell Launch Plan retains portable launch policy | Composition captures the host shell and packaged/development resource location. Native PTY and Shell Launch Plan behavior is unchanged. |
-| SSH AskPass | Injected per-window factory and per-attempt lease/observation Interfaces preserve startup capture and lifetime authority | Existing helper dispatch, factory, private transport, and cleanup remain in the host implementation. This boundary does not redesign the transport. |
+| Remote Project SSH and AskPass | Rust owns host-fact validation, OpenSSH policy, process supervision, paths, managed hosts, protocol framing, prompt authority, cancellation, zeroization, and cleanup ordering; GPUI presents Authentication Prompts | Composition supplies the executable, runtime fallback, socket constraint, and independent process, secure-filesystem, local-IPC, and peer mechanics described in the completed SSH audit below. |
 
 One explicit macOS Keybinding Profile selects the application mappings and existing reusable
 Text Input and Modal profiles. Semantic Actions remain independent of their shortcuts. Show New
@@ -451,6 +451,91 @@ remain mapped to the existing terminal startup stage, and offer static local rec
 Prepared launch Debug and process-spawn failures expose neither command/environment values nor
 sensitive paths. Shell Integration is a platform-neutral Module, while macOS bundle resource
 location and the host's default shell remain application composition facts.
+
+### Remote Project SSH and AskPass Runtime
+
+The platform-neutral SSH runtime owns capture-once OpenSSH capability probing, the OpenSSH 8.2
+minimum-version policy, validated command specifications, sanitized startup environment policy,
+Control Connection state and Connection Generation authority, managed-host policy, application
+path selection, process-supervision policy, and the complete AskPass protocol and broker lifecycle.
+Shared SSH, Remote Project, application-path, AskPass, and UI Modules contain no host selection or
+raw process, filesystem, local-IPC, peer-credential, or native error mechanics.
+
+Host Composition supplies one validated OpenSSH executable, a trusted runtime fallback root when
+the captured environment has no absolute XDG runtime root, the local IPC address-length constraint,
+and the independently selected process, secure-filesystem,
+Control Connection socket, AskPass local-IPC, and peer-authentication capabilities. These values are
+constructor wiring only and define no aggregate SSH Platform operation. The shipped macOS
+composition privately selects `/usr/bin/ssh`, the canonicalized user temporary directory as its
+runtime fallback, the 103-byte local socket-path maximum, and the current narrow macOS Adapters.
+Fallback canonicalization occurs only when required; an explicit XDG runtime root preserves its
+exact spelling and cannot fail because an unused temporary directory is unavailable.
+Another Operating System has no selected policy or placeholder Implementation.
+
+Portable application-path policy owns XDG precedence, exact accepted spelling, fallback choice,
+runtime-owner namespaces, bounded owner allocation, artifact registration, ownership, and cleanup
+decisions. Portable managed-host policy owns validation, ordering, conflicts, active-alias
+protection, mutation sequencing, and retry decisions. The secure-filesystem Interface exposes only
+closed operations and identities needed by those policies. The macOS Adapter privately retains
+descriptor-relative no-follow traversal, native identity and ownership checks, permission
+enforcement, unpredictable temporary allocation, and race-resistant replacement and deletion.
+Configuration reads and commits acquire an exclusive lock through an independently opened,
+identity-verified parent directory. The lock spans publication, validation, rollback, and sync,
+preventing cooperating writers from observing or replacing an unfinished publication. Publication
+retains the prepared file identity through commit and removes only the exact retained temporary
+link. Rollback withdraws and validates the installed entry before exclusively restoring its
+predecessor; an unowned successor is preserved, with the predecessor retained for recovery when
+restoration is no longer authorized. Deletion first moves the named entry into a private
+unpredictable quarantine and removes it only after its exact identity is
+revalidated there. Raw descriptors, inode fields, mode bits, and native errors never cross the
+Interface.
+
+Portable process supervision owns cancellation, deadlines, graceful and forced escalation,
+descendant cleanup decisions, stale observation rejection, and exactly-once cleanup. The process
+Interface carries validated command values and closed results without process identifiers, signals,
+process groups, or raw errors. The macOS Adapter privately retains process-group creation, signal
+delivery, nonblocking status collection, and final reap. A dropped or cancelled operation transfers
+cleanup to retained background ownership, and GPUI never waits for process termination or reap.
+Runtime sockets, owner namespaces, and active alias leases remain owned until the background
+completion observes descendant termination, leader reap, and diagnostic-reader completion. Cleanup
+removes only a socket registered before that transfer; an unregistered replacement is never claimed
+or deleted during post-reap cleanup.
+
+The portable AskPass broker owns bounded versioned framing, constant-time capability comparison,
+request and reply validation, prompt classification, single-prompt authority, cancellation,
+observation, helper-mode policy, response zeroization, and teardown ordering. Capability entropy
+comes from portable `getrandom`. GPUI coordinates the application-owned Alert or obscured Dialog,
+and only the exact prompt generation may resume connection progress. The macOS local-IPC Adapter
+retains Unix listener and stream mechanics, exact endpoint cleanup, and same-user peer inspection;
+the helper authenticates the exact broker process before sending its capability or prompt, and the
+broker authenticates the same-user helper before any frame is parsed or presented. The helper
+keeps bounded socket writes but imposes no protocol read timeout on a human Authentication Prompt;
+broker cancellation and prompt lifecycle continue to govern that wait. Broker frame reads remain
+bounded. Helper dispatch remains before startup dependency capture and bypasses GPUI application
+launch completely.
+
+The OpenSSH executable, runtime and socket locations, capability tokens, prompts, replies,
+authentication material, environment values, SSH Destinations, process identities, and raw native
+failures never enter Debug output, errors, Local Diagnostics, or terminal state. User-visible
+availability and recovery guidance is host-neutral and never promises one executable or temporary
+directory.
+
+Broker-authorized process launches receive the exact six-variable AskPass overlay with the
+capability held separately in zeroizing spawn ownership. A Terminal Session Channel is already
+authorized against its live Control Connection and receives no AskPass transport state; its fixed
+ControlMaster and ProxyCommand policy fails closed instead of opening a new authenticated path.
+
+The audit against pinned GPUI 0.2.2 and portable Rust retains only these macOS mechanics:
+
+| Capability | GPUI or portable Rust ownership | Remaining macOS mechanism and reason |
+| --- | --- | --- |
+| Authentication Prompt | GPUI Alert, Dialog, Text Input, foreground coordination; Rust protocol, generations, cancellation, and secret lifetime | None beyond the independent local-IPC and peer mechanisms below. |
+| OpenSSH process lifecycle | Rust command policy, deadlines, escalation, stale rejection, and cleanup ownership | Private process-group creation, signal delivery, nonblocking status observation, and reap. GPUI and standard process APIs do not preserve descendant ownership. |
+| Application paths and managed hosts | Rust root precedence, validation, namespaces, artifact policy, ordering, conflicts, and mutation sequencing | Descriptor-relative no-follow traversal, native identity, ownership and permission checks, and race-resistant replace or delete. Standard filesystem operations do not preserve the existing attack resistance. |
+| Control Connection endpoint | Rust endpoint naming, registration, ownership, and cleanup policy | Local socket creation probe only. GPUI has no local IPC facility. |
+| AskPass transport and peer authentication | Rust framing, validation, prompt authority, responses, zeroization, and teardown order | Unix listener and stream I/O, exact endpoint mechanics, and same-user `getpeereid` inspection. GPUI has no local IPC or peer-credential facility. |
+| Capability entropy | Portable `getrandom` | None. |
+| Host-selected facts | Validated Rust values consumed without platform selection | macOS composition selects the executable, canonical runtime fallback, and socket limit. |
 
 ### Temporary Shell Integration
 

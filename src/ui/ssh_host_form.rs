@@ -6,6 +6,7 @@
     )
 )]
 
+use std::fmt;
 use std::num::NonZeroU16;
 use std::sync::Arc;
 
@@ -75,13 +76,19 @@ enum SshHostFormField {
     IdentityFile,
 }
 
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Default, Eq, PartialEq)]
 struct SshHostFormValues {
     alias: String,
     host_name: String,
     user: String,
     port: String,
     identity_file: String,
+}
+
+impl fmt::Debug for SshHostFormValues {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("SshHostFormValues(<redacted>)")
+    }
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -927,6 +934,21 @@ mod tests {
         RecordedFormEvents,
         &'a mut VisualTestContext,
     );
+
+    #[test]
+    fn form_values_debug_should_redact_connection_and_path_values() {
+        let values = SshHostFormValues {
+            alias: "sensitive-alias".to_owned(),
+            host_name: "sensitive.example".to_owned(),
+            user: "sensitive-user".to_owned(),
+            port: "22".to_owned(),
+            identity_file: "/sensitive/key".to_owned(),
+        };
+
+        let debug = format!("{values:?}");
+        assert_eq!(debug, "SshHostFormValues(<redacted>)");
+        assert!(!debug.contains("sensitive"));
+    }
 
     #[derive(Clone, Debug, Eq, PartialEq)]
     struct SaveRecord {

@@ -19,10 +19,11 @@ use crate::platform::app_paths::AppPaths;
 use crate::platform::askpass::{
     AskPassAttemptFactory, AskPassAttemptObservation, AskPassBrokerLease, AskPassWindowFactory,
 };
+use crate::platform::control_socket::ControlSocketProbe;
 use crate::ssh::alias_usage::{ActiveSshAliasLease, ActiveSshAliasRegistry};
 use crate::ssh::cancellation::SshCancellationToken;
 use crate::ssh::command::{
-    RemotePaneShellCommandBuilder, SshCapability, ValidatedRemoteLoginShell,
+    OpenSshExecutable, RemotePaneShellCommandBuilder, SshCapability, ValidatedRemoteLoginShell,
 };
 use crate::ssh::control_connection::{
     ControlConnectionError, ControlConnectionState, ControlConnectionTiming,
@@ -30,15 +31,12 @@ use crate::ssh::control_connection::{
 };
 use crate::ssh::destination::{SshHostAlias, resolve_destination_query};
 use crate::ssh::host_config::{
-    HostConfigRoots, HostDiscovery, HostDiscoveryLimits, NativeHostConfigFilesystem,
-    discover_ssh_hosts,
+    HostConfigFilesystem, HostConfigRoots, HostDiscovery, HostDiscoveryLimits, discover_ssh_hosts,
 };
 use crate::ssh::live_connection::{ControlConnectionObserver, LiveConnectionBinding};
-use crate::ssh::managed_hosts::{
-    ManagedHostsError, ManagedHostsStore, ManagedSshHost, NativeManagedHostsFilesystem,
-};
-use crate::ssh::process::{NativeSshProcessBackend, SshProcessEnvironment};
-use crate::ssh::remote_utility::NativeSshRemoteUtilityRunner;
+use crate::ssh::managed_hosts::{ManagedHostsError, ManagedHostsStore, ManagedSshHost};
+use crate::ssh::process::{SshProcessAdapter, SshProcessEnvironment, SshProcessSupervisor};
+use crate::ssh::remote_utility::SshRemoteUtilityProcessRunner;
 use crate::ssh::remote_workspace_provider::SshRemoteWorkspaceProvider;
 use crate::ssh::startup_environment::StartupSshEnvironment;
 use crate::terminal::{
@@ -47,39 +45,41 @@ use crate::terminal::{
 
 const CONNECT_CANCELLATION_POLL: Duration = Duration::from_millis(15);
 
+#[derive(Clone)]
+/// Capture-once portable SSH runtime supplied by Host Composition.
+pub(crate) struct RemoteWorkspaceSshRuntime<A: SshProcessAdapter> {
+    pub(crate) paths: Arc<AppPaths>,
+    pub(crate) local_home: PathBuf,
+    pub(crate) startup_environment: StartupSshEnvironment,
+    pub(crate) startup_capability: SshCapability,
+    pub(crate) aliases: ActiveSshAliasRegistry,
+    pub(crate) executable: OpenSshExecutable,
+    pub(crate) process_adapter: A,
+    pub(crate) control_socket_probe: Arc<dyn ControlSocketProbe>,
+    pub(crate) host_config_filesystem: Arc<dyn HostConfigFilesystem>,
+}
+
 /// Production SSH adapter for the window-independent remote Workspace flow.
 ///
 /// The backend shares captured startup paths, environment, capability, and alias registry. Every
 /// connection creates a fresh AskPass attempt, sanitized process backend, private control master,
 /// and request-cancellable utility provider. Typed UI errors never retain raw prompts, secrets, or
 /// remote output beyond the bounded sanitized connection-detail value.
-pub(super) struct NativeRemoteWorkspaceFlowBackend {
-    paths: Arc<AppPaths>,
-    local_home: PathBuf,
-    startup_environment: StartupSshEnvironment,
-    startup_capability: SshCapability,
-    aliases: ActiveSshAliasRegistry,
+pub(super) struct NativeRemoteWorkspaceFlowBackend<A: SshProcessAdapter> {
+    runtime: RemoteWorkspaceSshRuntime<A>,
     askpass: Arc<dyn AskPassAttemptFactory>,
     executor: BackgroundExecutor,
 }
 
-impl NativeRemoteWorkspaceFlowBackend {
+impl<A: SshProcessAdapter> NativeRemoteWorkspaceFlowBackend<A> {
     /// Creates an adapter from capture-once startup inputs and a main-thread AskPass factory.
     pub(super) fn new(
-        paths: Arc<AppPaths>,
-        local_home: PathBuf,
-        startup_environment: StartupSshEnvironment,
-        startup_capability: SshCapability,
-        aliases: ActiveSshAliasRegistry,
+        runtime: RemoteWorkspaceSshRuntime<A>,
         askpass: Arc<dyn AskPassAttemptFactory>,
         executor: BackgroundExecutor,
     ) -> Self {
         Self {
-            paths,
-            local_home,
-            startup_environment,
-            startup_capability,
-            aliases,
+            runtime,
             askpass,
             executor,
         }
@@ -87,15 +87,15 @@ impl NativeRemoteWorkspaceFlowBackend {
 
     fn roots(&self) -> HostConfigRoots {
         HostConfigRoots {
-            managed: self.paths.managed_ssh_config(),
-            user: self.local_home.join(".ssh/config"),
-            home: self.local_home.clone(),
+            managed: self.runtime.paths.managed_ssh_config(),
+            user: self.runtime.local_home.join(".ssh/config"),
+            home: self.runtime.local_home.clone(),
         }
     }
 
     fn fresh_discovery(&self) -> HostDiscovery {
         discover_ssh_hosts(
-            &NativeHostConfigFilesystem,
+            self.runtime.host_config_filesystem.as_ref(),
             &self.roots(),
             HostDiscoveryLimits::default(),
         )
@@ -143,38 +143,25 @@ fn acquire_destination_alias(
 ///
 /// Creating a backend captures only an attempt factory from the live window. Background connect
 /// futures do not retain the `Window` or access ambient process state.
-pub(crate) struct NativeRemoteWorkspaceFlowBackendFactory {
-    paths: Arc<AppPaths>,
-    local_home: PathBuf,
-    startup_environment: StartupSshEnvironment,
-    startup_capability: SshCapability,
-    aliases: ActiveSshAliasRegistry,
+pub(crate) struct NativeRemoteWorkspaceFlowBackendFactory<A: SshProcessAdapter> {
+    runtime: RemoteWorkspaceSshRuntime<A>,
     askpass: Arc<dyn AskPassWindowFactory>,
 }
 
-impl NativeRemoteWorkspaceFlowBackendFactory {
+impl<A: SshProcessAdapter> NativeRemoteWorkspaceFlowBackendFactory<A> {
     pub(crate) fn new(
-        paths: Arc<AppPaths>,
-        local_home: PathBuf,
-        startup_environment: StartupSshEnvironment,
-        startup_capability: SshCapability,
-        aliases: ActiveSshAliasRegistry,
+        runtime: RemoteWorkspaceSshRuntime<A>,
         askpass: Arc<dyn AskPassWindowFactory>,
     ) -> Self {
-        Self {
-            paths,
-            local_home,
-            startup_environment,
-            startup_capability,
-            aliases,
-            askpass,
-        }
+        Self { runtime, askpass }
     }
 }
 
-impl RemoteWorkspaceFlowBackendFactory for NativeRemoteWorkspaceFlowBackendFactory {
+impl<A: SshProcessAdapter> RemoteWorkspaceFlowBackendFactory
+    for NativeRemoteWorkspaceFlowBackendFactory<A>
+{
     fn unavailable_reason(&self) -> Option<String> {
-        match &self.startup_capability {
+        match &self.runtime.startup_capability {
             SshCapability::Available(_) => None,
             SshCapability::Unavailable(reason) => Some(reason.to_string()),
         }
@@ -190,28 +177,24 @@ impl RemoteWorkspaceFlowBackendFactory for NativeRemoteWorkspaceFlowBackendFacto
             .create(window, cx)
             .map_err(|_| RemoteWorkspaceFlowBackendError::ConnectionFailed)?;
         Ok(Arc::new(NativeRemoteWorkspaceFlowBackend::new(
-            Arc::clone(&self.paths),
-            self.local_home.clone(),
-            self.startup_environment.clone(),
-            self.startup_capability.clone(),
-            self.aliases.clone(),
+            self.runtime.clone(),
             askpass,
             cx.background_executor().clone(),
         )))
     }
 }
 
-impl RemoteWorkspaceFlowBackend for NativeRemoteWorkspaceFlowBackend {
+impl<A: SshProcessAdapter> RemoteWorkspaceFlowBackend for NativeRemoteWorkspaceFlowBackend<A> {
     fn discover_hosts(&self) -> HostDiscovery {
         self.fresh_discovery()
     }
 
     fn host_in_active_use(&self, alias: &SshHostAlias) -> bool {
-        self.aliases.is_active(alias)
+        self.runtime.aliases.is_active(alias)
     }
 
     fn managed_host(&self, alias: &SshHostAlias) -> Option<ManagedSshHost> {
-        ManagedHostsStore::new(&self.paths, &NativeManagedHostsFilesystem)
+        ManagedHostsStore::new(&self.runtime.paths)
             .load()
             .ok()?
             .into_iter()
@@ -223,9 +206,10 @@ impl RemoteWorkspaceFlowBackend for NativeRemoteWorkspaceFlowBackend {
         host: ManagedSshHost,
         editing_alias: Option<SshHostAlias>,
     ) -> Task<Result<(), ManagedHostFormBackendError>> {
-        let paths = self.paths.clone();
+        let paths = self.runtime.paths.clone();
         let roots = self.roots();
-        let aliases = self.aliases.clone();
+        let aliases = self.runtime.aliases.clone();
+        let host_config_filesystem = Arc::clone(&self.runtime.host_config_filesystem);
         self.executor.spawn(async move {
             let mut mutated_aliases = vec![host.alias().clone()];
             mutated_aliases.extend(editing_alias.iter().cloned());
@@ -233,11 +217,11 @@ impl RemoteWorkspaceFlowBackend for NativeRemoteWorkspaceFlowBackend {
                 .begin_mutation(mutated_aliases)
                 .map_err(|_| ManagedHostFormBackendError::HostInUse)?;
             let discovery = discover_ssh_hosts(
-                &NativeHostConfigFilesystem,
+                host_config_filesystem.as_ref(),
                 &roots,
                 HostDiscoveryLimits::default(),
             );
-            ManagedHostsStore::new(&paths, &NativeManagedHostsFilesystem)
+            ManagedHostsStore::new(&paths)
                 .upsert(host, &discovery.hosts, editing_alias.as_ref())
                 .map_err(map_save_error)
         })
@@ -247,13 +231,13 @@ impl RemoteWorkspaceFlowBackend for NativeRemoteWorkspaceFlowBackend {
         &self,
         alias: SshHostAlias,
     ) -> Task<Result<(), RemoteWorkspaceFlowBackendError>> {
-        let paths = self.paths.clone();
-        let aliases = self.aliases.clone();
+        let paths = self.runtime.paths.clone();
+        let aliases = self.runtime.aliases.clone();
         self.executor.spawn(async move {
             let _mutation = aliases
                 .begin_mutation([alias.clone()])
                 .map_err(|_| RemoteWorkspaceFlowBackendError::HostInUse)?;
-            ManagedHostsStore::new(&paths, &NativeManagedHostsFilesystem)
+            ManagedHostsStore::new(&paths)
                 .delete(&alias)
                 .map_err(|_| RemoteWorkspaceFlowBackendError::DeleteFailed)
         })
@@ -265,20 +249,21 @@ impl RemoteWorkspaceFlowBackend for NativeRemoteWorkspaceFlowBackend {
         context: RemoteWorkspaceConnectContext,
     ) -> Task<Result<RemoteWorkspaceConnectedSession, RemoteWorkspaceFlowBackendError>> {
         context.report(RemoteWorkspaceConnectionProgress::CheckingCompatibility);
-        if !matches!(self.startup_capability, SshCapability::Available(_)) {
+        if !matches!(self.runtime.startup_capability, SshCapability::Available(_)) {
             return Task::ready(Err(RemoteWorkspaceFlowBackendError::OpenSshUnavailable));
         }
-        let alias_lease = match acquire_destination_alias(&self.aliases, &destination, || {
-            self.fresh_discovery()
-                .hosts
-                .into_iter()
-                .map(|host| host.alias().clone())
-                .collect()
-        }) {
-            Ok(lease) => lease,
-            Err(error) => return Task::ready(Err(error)),
-        };
-        let attempt = match self.askpass.start_attempt(&self.paths) {
+        let alias_lease =
+            match acquire_destination_alias(&self.runtime.aliases, &destination, || {
+                self.fresh_discovery()
+                    .hosts
+                    .into_iter()
+                    .map(|host| host.alias().clone())
+                    .collect()
+            }) {
+                Ok(lease) => lease,
+                Err(error) => return Task::ready(Err(error)),
+            };
+        let attempt = match self.askpass.start_attempt(&self.runtime.paths) {
             Ok(attempt) => attempt,
             Err(_) => {
                 return Task::ready(Err(RemoteWorkspaceFlowBackendError::SshRuntimeUnavailable));
@@ -287,14 +272,17 @@ impl RemoteWorkspaceFlowBackend for NativeRemoteWorkspaceFlowBackend {
         let authentication = attempt.lease.clone();
         let observation = attempt.observation.clone();
         let environment = match SshProcessEnvironment::new(
-            self.local_home.clone(),
+            self.runtime.local_home.clone(),
             authentication.clone(),
-            &self.startup_environment,
+            &self.runtime.startup_environment,
         ) {
             Ok(environment) => environment,
             Err(_) => return Task::ready(Err(RemoteWorkspaceFlowBackendError::ConnectionFailed)),
         };
-        let paths = self.paths.clone();
+        let paths = self.runtime.paths.clone();
+        let executable = self.runtime.executable.clone();
+        let process_adapter = self.runtime.process_adapter.clone();
+        let control_socket_probe = Arc::clone(&self.runtime.control_socket_probe);
         let executor = self.executor.clone();
         self.executor.spawn(async move {
             let flow_cancellation = SshCancellationToken::default();
@@ -318,7 +306,7 @@ impl RemoteWorkspaceFlowBackend for NativeRemoteWorkspaceFlowBackend {
                 cancellation.cancel();
                 return Err(RemoteWorkspaceFlowBackendError::ConnectionFailed);
             }
-            ManagedHostsStore::new(&paths, &NativeManagedHostsFilesystem)
+            ManagedHostsStore::new(&paths)
                 .ensure_exists()
                 .map_err(|_| RemoteWorkspaceFlowBackendError::SshConfigurationUnavailable)?;
             if context.is_cancelled() {
@@ -326,12 +314,15 @@ impl RemoteWorkspaceFlowBackend for NativeRemoteWorkspaceFlowBackend {
                 return Err(RemoteWorkspaceFlowBackendError::ConnectionFailed);
             }
             context.report(RemoteWorkspaceConnectionProgress::Connecting);
-            let backend = Arc::new(NativeSshProcessBackend::new(
+            let backend = Arc::new(SshProcessSupervisor::new(
                 executor.clone(),
                 environment.clone(),
+                process_adapter.clone(),
             ));
             let connection = OpenSshControlConnection::connect(
                 &paths,
+                executable,
+                control_socket_probe.as_ref(),
                 destination,
                 Arc::clone(&backend),
                 &cancellation,
@@ -364,7 +355,10 @@ impl RemoteWorkspaceFlowBackend for NativeRemoteWorkspaceFlowBackend {
             let lifecycle = connection
                 .lifecycle_observer()
                 .map_err(|_| RemoteWorkspaceFlowBackendError::ConnectionFailed)?;
-            let utility_runner = Arc::new(NativeSshRemoteUtilityRunner::new(environment));
+            let utility_runner = Arc::new(SshRemoteUtilityProcessRunner::new(
+                process_adapter,
+                environment,
+            ));
             let provider: Arc<dyn RemoteWorkspaceProvider + Send + Sync> =
                 Arc::new(SshRemoteWorkspaceProvider::new(
                     utility_command,
@@ -432,7 +426,7 @@ fn watch_authentication(
 
 fn map_save_error(error: ManagedHostsError) -> ManagedHostFormBackendError {
     match error {
-        ManagedHostsError::AliasCollision { .. } => ManagedHostFormBackendError::AliasCollision,
+        ManagedHostsError::AliasCollision => ManagedHostFormBackendError::AliasCollision,
         _ => ManagedHostFormBackendError::SaveFailed,
     }
 }
@@ -683,7 +677,9 @@ trait NativeSessionControl: Send {
 
 type NativeSessionShutdown = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
 
-impl NativeSessionControl for OpenSshControlConnection<NativeSshProcessBackend> {
+impl<A: SshProcessAdapter> NativeSessionControl
+    for OpenSshControlConnection<SshProcessSupervisor<A>>
+{
     fn is_ready(&self) -> bool {
         self.state() == ControlConnectionState::Ready
     }
@@ -703,6 +699,7 @@ impl NativeSessionControl for OpenSshControlConnection<NativeSshProcessBackend> 
     fn shutdown(mut self: Box<Self>) -> NativeSessionShutdown {
         Box::pin(async move {
             let _ = OpenSshControlConnection::shutdown(&mut *self).await;
+            let _ = OpenSshControlConnection::finish_cleanup(&mut *self).await;
         })
     }
 }
@@ -720,7 +717,11 @@ mod tests {
     };
 
     use super::*;
-    use crate::platform::app_paths::AppPathEnvironment;
+    use crate::platform::app_paths::{AppPathEnvironment, AppPathHostFacts};
+    use crate::platform::macos_control_socket::MacosControlSocketProbe;
+    use crate::platform::macos_host_config_filesystem::MacosHostConfigFilesystem;
+    use crate::platform::macos_secure_filesystem::MacosSecureFilesystem;
+    use crate::platform::macos_ssh_process::MacOsSshProcessAdapter;
     use crate::ssh::command::{OpenSshVersion, SshUnavailableReason};
 
     struct FakeIdentityProvider {
@@ -830,19 +831,26 @@ mod tests {
 
     fn factory_with_capability(
         startup_capability: SshCapability,
-    ) -> NativeRemoteWorkspaceFlowBackendFactory {
-        let paths = AppPaths::resolve(&AppPathEnvironment {
+    ) -> NativeRemoteWorkspaceFlowBackendFactory<MacOsSshProcessAdapter> {
+        let environment = AppPathEnvironment {
             home: Some("/Users/test".into()),
-            macos_temporary_directory: PathBuf::from("/private/tmp"),
             ..AppPathEnvironment::default()
-        })
-        .unwrap();
+        };
+        let host = AppPathHostFacts::new(PathBuf::from("/private/tmp"), 103).unwrap();
+        let paths =
+            AppPaths::resolve(&environment, &host, Arc::new(MacosSecureFilesystem)).unwrap();
         NativeRemoteWorkspaceFlowBackendFactory::new(
-            Arc::new(paths),
-            PathBuf::from("/Users/test"),
-            StartupSshEnvironment::default(),
-            startup_capability,
-            ActiveSshAliasRegistry::default(),
+            RemoteWorkspaceSshRuntime {
+                paths: Arc::new(paths),
+                local_home: PathBuf::from("/Users/test"),
+                startup_environment: StartupSshEnvironment::default(),
+                startup_capability,
+                aliases: ActiveSshAliasRegistry::default(),
+                executable: OpenSshExecutable::for_test(),
+                process_adapter: MacOsSshProcessAdapter,
+                control_socket_probe: Arc::new(MacosControlSocketProbe),
+                host_config_filesystem: Arc::new(MacosHostConfigFilesystem),
+            },
             Arc::new(RejectAskPassFactory),
         )
     }
@@ -854,7 +862,7 @@ mod tests {
 
         assert_eq!(
             factory.unavailable_reason().as_deref(),
-            Some("OpenSSH was not found at /usr/bin/ssh")
+            Some("the selected OpenSSH client is unavailable")
         );
     }
 
@@ -986,6 +994,7 @@ mod tests {
         {
             self.preparations.fetch_add(1, Ordering::SeqCst);
             Ok(crate::ssh::command::SshCommandContext::new(
+                crate::ssh::command::OpenSshExecutable::for_test(),
                 PathBuf::from("/private/config/spaceterm/ssh_config"),
                 SshDestination::new("work".to_owned()).unwrap(),
                 PathBuf::from("/private/runtime/spaceterm/master.sock"),
@@ -1374,9 +1383,7 @@ mod tests {
     #[test]
     fn save_error_mapping_should_keep_collision_actionable_without_exposing_io() {
         assert_eq!(
-            map_save_error(ManagedHostsError::AliasCollision {
-                alias: "work".to_owned(),
-            }),
+            map_save_error(ManagedHostsError::AliasCollision),
             ManagedHostFormBackendError::AliasCollision
         );
         assert_eq!(

@@ -1,18 +1,16 @@
 use std::collections::BTreeSet;
-use std::ffi::{CString, OsStr};
-use std::fs::{self, File, OpenOptions};
-use std::io::{self, Read, Write};
+use std::fmt;
 use std::num::NonZeroU16;
-use std::os::fd::{AsRawFd, FromRawFd};
-use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
-use std::path::Path;
 
 use thiserror::Error;
 
 use super::destination::SshHostAlias;
 use super::host_config::{DiscoveredSshHost, HostConfigSource};
 use crate::platform::app_paths::{AppPathRoot, AppPaths, AppPathsError};
+use crate::platform::secure_filesystem::{
+    PrivateFileSnapshot, SecureCommitOutcome, SecureDirectory, SecureEntryIdentity,
+    SecureFilesystemError,
+};
 
 const HEADER: &str = "# This file is managed by SpaceTerm.\n\n";
 const PRECEDENCE_TAIL: &str = concat!(
@@ -24,9 +22,8 @@ const PRECEDENCE_TAIL: &str = concat!(
 const TOKEN_BYTES: usize = 255;
 const IDENTITY_FILE_BYTES: usize = 1024;
 const MANAGED_CONFIG_BYTES: usize = 1024 * 1024;
-const PRIVATE_DIRECTORY_MODE: u32 = 0o700;
-const PRIVATE_FILE_MODE: u32 = 0o600;
 const TEMP_CREATION_ATTEMPTS: usize = 128;
+const MUTATION_ATTEMPTS: usize = 8;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ManagedSshHostField {
@@ -56,13 +53,19 @@ pub(crate) struct ManagedSshHostValidationError {
     pub(crate) kind: ManagedSshHostValueError,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub(crate) struct ManagedSshHost {
     alias: SshHostAlias,
     host_name: String,
     user: Option<String>,
     port: Option<NonZeroU16>,
     identity_file: Option<String>,
+}
+
+impl fmt::Debug for ManagedSshHost {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("ManagedSshHost(<redacted>)")
+    }
 }
 
 impl ManagedSshHost {
@@ -123,168 +126,22 @@ pub(crate) enum ManagedHostsFormatError {
 
 #[derive(Debug, Error)]
 pub(crate) enum ManagedHostsError {
-    #[error("SSH alias `{alias}` is already configured")]
-    AliasCollision { alias: String },
-    #[error("managed SSH alias `{alias}` does not exist")]
-    Missing { alias: String },
+    #[error("the SSH alias is already configured")]
+    AliasCollision,
+    #[error("the managed SSH alias does not exist")]
+    Missing,
     #[error("the managed SSH config is not in SpaceTerm's canonical format")]
     NonCanonical,
     #[error(
-        "the managed SSH config was committed but its directory could not be synced; reload before retrying: {source}"
+        "the managed SSH config was committed but durable synchronization failed; reload before retrying"
     )]
-    CommittedButUnsynced {
-        #[source]
-        source: io::Error,
-    },
+    CommittedButUnsynced,
+    #[error("managed SSH storage is unavailable")]
+    StorageUnavailable,
+    #[error("managed SSH config changed too frequently; reload before retrying")]
+    ConcurrentMutation,
     #[error(transparent)]
     Paths(#[from] AppPathsError),
-    #[error("managed SSH config I/O failed: {0}")]
-    Io(#[from] io::Error),
-}
-
-#[derive(Debug, Error)]
-/// Atomic-replacement outcome separated by whether new bytes became visible.
-pub(crate) enum AtomicReplaceError {
-    #[error("managed SSH config was not committed: {0}")]
-    NotCommitted(#[source] io::Error),
-    #[error("managed SSH config was committed but its directory was not synced: {0}")]
-    CommittedButUnsynced(#[source] io::Error),
-}
-
-/// Filesystem boundary for the app-owned managed SSH configuration.
-///
-/// Reads must be bounded and reject unsafe owner, type, mode, or symlink state. Replacement and
-/// first creation must use a same-directory unpredictable create-new temporary file, mode `0600`,
-/// complete write and file sync, no-follow target validation, an atomic commit, and directory sync.
-/// First creation must not replace a target that appears after its absence check. Any pre-commit
-/// failure leaves the target unchanged and removes only the owned temporary artifact.
-pub(crate) trait ManagedHostsFilesystem {
-    /// Reads a private bounded file, returning `None` only when it does not exist.
-    fn read(&self, directory: &Path, name: &OsStr) -> io::Result<Option<Vec<u8>>>;
-
-    /// Atomically replaces `name`, distinguishing pre-commit failure from post-commit sync loss.
-    fn atomic_replace(
-        &self,
-        directory: &Path,
-        name: &OsStr,
-        bytes: &[u8],
-    ) -> Result<(), AtomicReplaceError>;
-
-    /// Atomically publishes `bytes` only when `name` remains absent at the commit point.
-    fn atomic_create(
-        &self,
-        directory: &Path,
-        name: &OsStr,
-        bytes: &[u8],
-    ) -> Result<AtomicCreateOutcome, AtomicReplaceError>;
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum AtomicCreateOutcome {
-    Created,
-    AlreadyExists,
-}
-
-#[derive(Clone, Copy, Debug, Default)]
-/// Native descriptor-relative implementation of [`ManagedHostsFilesystem`].
-pub(crate) struct NativeManagedHostsFilesystem;
-
-impl ManagedHostsFilesystem for NativeManagedHostsFilesystem {
-    fn read(&self, directory: &Path, name: &OsStr) -> io::Result<Option<Vec<u8>>> {
-        let directory = match open_private_directory(directory) {
-            Ok(directory) => directory,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-            Err(error) => return Err(error),
-        };
-        let file = match open_file_at(&directory, name, libc::O_RDONLY | libc::O_NONBLOCK, 0) {
-            Ok(file) => file,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-            Err(error) => return Err(error),
-        };
-        validate_private_file(&file.metadata()?)?;
-        let mut bytes = Vec::new();
-        (&file)
-            .take(MANAGED_CONFIG_BYTES.saturating_add(1) as u64)
-            .read_to_end(&mut bytes)?;
-        if bytes.len() > MANAGED_CONFIG_BYTES {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "managed SSH config exceeds its size limit",
-            ));
-        }
-        Ok(Some(bytes))
-    }
-
-    fn atomic_replace(
-        &self,
-        directory: &Path,
-        name: &OsStr,
-        bytes: &[u8],
-    ) -> Result<(), AtomicReplaceError> {
-        if bytes.len() > MANAGED_CONFIG_BYTES {
-            return Err(AtomicReplaceError::NotCommitted(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "managed SSH config exceeds its size limit",
-            )));
-        }
-        let directory = before_commit(open_private_directory(directory))?;
-        before_commit(validate_target_at(&directory, name))?;
-        let (temporary_name, mut temporary) =
-            before_commit(create_temporary_file(&directory, name))?;
-        let mut rollback = TemporaryRollback::new(&directory, &temporary_name);
-        before_commit(temporary.set_permissions(fs::Permissions::from_mode(PRIVATE_FILE_MODE)))?;
-        let temporary_metadata = before_commit(temporary.metadata())?;
-        before_commit(validate_private_file(&temporary_metadata))?;
-        before_commit(temporary.write_all(bytes))?;
-        before_commit(temporary.sync_all())?;
-        before_commit(validate_target_at(&directory, name))?;
-        before_commit(rename_at(&directory, &temporary_name, name))?;
-        rollback.disarm();
-        directory
-            .sync_all()
-            .map_err(AtomicReplaceError::CommittedButUnsynced)
-    }
-
-    fn atomic_create(
-        &self,
-        directory: &Path,
-        name: &OsStr,
-        bytes: &[u8],
-    ) -> Result<AtomicCreateOutcome, AtomicReplaceError> {
-        if bytes.len() > MANAGED_CONFIG_BYTES {
-            return Err(AtomicReplaceError::NotCommitted(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "managed SSH config exceeds its size limit",
-            )));
-        }
-        let directory = before_commit(open_private_directory(directory))?;
-        before_commit(validate_target_at(&directory, name))?;
-        let (temporary_name, mut temporary) =
-            before_commit(create_temporary_file(&directory, name))?;
-        let mut rollback = TemporaryRollback::new(&directory, &temporary_name);
-        before_commit(temporary.set_permissions(fs::Permissions::from_mode(PRIVATE_FILE_MODE)))?;
-        let temporary_metadata = before_commit(temporary.metadata())?;
-        before_commit(validate_private_file(&temporary_metadata))?;
-        before_commit(temporary.write_all(bytes))?;
-        before_commit(temporary.sync_all())?;
-        match link_at(&directory, &temporary_name, name) {
-            Ok(()) => {}
-            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-                return Ok(AtomicCreateOutcome::AlreadyExists);
-            }
-            Err(error) => return Err(AtomicReplaceError::NotCommitted(error)),
-        }
-        unlink_at(&directory, &temporary_name).map_err(AtomicReplaceError::CommittedButUnsynced)?;
-        rollback.disarm();
-        directory
-            .sync_all()
-            .map_err(AtomicReplaceError::CommittedButUnsynced)?;
-        Ok(AtomicCreateOutcome::Created)
-    }
-}
-
-fn before_commit<T>(result: io::Result<T>) -> Result<T, AtomicReplaceError> {
-    result.map_err(AtomicReplaceError::NotCommitted)
 }
 
 /// Canonical store for SpaceTerm-owned concrete SSH host stanzas.
@@ -292,25 +149,22 @@ fn before_commit<T>(result: io::Result<T>) -> Result<T, AtomicReplaceError> {
 /// The store rejects unknown or noncanonical content rather than rewriting it, serializes hosts
 /// deterministically, preserves OpenSSH include precedence, and never mutates user or system SSH
 /// files. Mutations perform fresh collision checks before a single atomic replacement.
-pub(crate) struct ManagedHostsStore<'a, F> {
+pub(crate) struct ManagedHostsStore<'a> {
     paths: &'a AppPaths,
-    filesystem: &'a F,
 }
 
-impl<'a, F: ManagedHostsFilesystem> ManagedHostsStore<'a, F> {
-    /// Binds the store to injected application paths and a filesystem implementation.
-    pub(crate) const fn new(paths: &'a AppPaths, filesystem: &'a F) -> Self {
-        Self { paths, filesystem }
+impl<'a> ManagedHostsStore<'a> {
+    /// Binds the store to application paths carrying the selected secure filesystem.
+    pub(crate) const fn new(paths: &'a AppPaths) -> Self {
+        Self { paths }
     }
 
     /// Loads only the bounded canonical app-owned format.
     pub(crate) fn load(&self) -> Result<Vec<ManagedSshHost>, ManagedHostsError> {
-        let target = self.paths.managed_ssh_config();
-        let name = target.file_name().ok_or_else(invalid_managed_path)?;
-        let Some(bytes) = self.filesystem.read(self.paths.config(), name)? else {
+        let Some(snapshot) = self.read_snapshot()? else {
             return Ok(Vec::new());
         };
-        parse_managed_hosts(&bytes).map_err(|_| ManagedHostsError::NonCanonical)
+        parse_managed_hosts(&snapshot.bytes).map_err(|_| ManagedHostsError::NonCanonical)
     }
 
     /// Ensures OpenSSH's explicit `-F` target exists in the canonical app-owned format.
@@ -319,43 +173,23 @@ impl<'a, F: ManagedHostsFilesystem> ManagedHostsStore<'a, F> {
     /// file so managed aliases retain deterministic precedence. The first connection therefore
     /// publishes an empty canonical file without replacing a concurrently created configuration.
     pub(crate) fn ensure_exists(&self) -> Result<(), ManagedHostsError> {
-        let target = self.paths.managed_ssh_config();
-        let name = target.file_name().ok_or_else(invalid_managed_path)?;
-        match self.filesystem.read(self.paths.config(), name)? {
-            Some(bytes) => parse_managed_hosts(&bytes)
-                .map(|_| ())
-                .map_err(|_| ManagedHostsError::NonCanonical),
-            None => {
-                let directory = self.paths.ensure_root(AppPathRoot::Config)?;
-                let bytes = serialize_managed_hosts(&[]);
-                match self
-                    .filesystem
-                    .atomic_create(directory, name, bytes.as_bytes())
-                {
-                    Ok(AtomicCreateOutcome::Created) => Ok(()),
-                    Ok(AtomicCreateOutcome::AlreadyExists) => self
-                        .filesystem
-                        .read(directory, name)?
-                        .ok_or_else(|| {
-                            ManagedHostsError::Io(io::Error::new(
-                                io::ErrorKind::NotFound,
-                                "managed SSH config disappeared during creation",
-                            ))
-                        })
-                        .and_then(|bytes| {
-                            parse_managed_hosts(&bytes)
-                                .map(|_| ())
-                                .map_err(|_| ManagedHostsError::NonCanonical)
-                        }),
-                    Err(AtomicReplaceError::NotCommitted(source)) => {
-                        Err(ManagedHostsError::Io(source))
-                    }
-                    Err(AtomicReplaceError::CommittedButUnsynced(source)) => {
-                        Err(ManagedHostsError::CommittedButUnsynced { source })
-                    }
+        for _ in 0..MUTATION_ATTEMPTS {
+            if let Some(snapshot) = self.read_snapshot()? {
+                return parse_managed_hosts(&snapshot.bytes)
+                    .map(|_| ())
+                    .map_err(|_| ManagedHostsError::NonCanonical);
+            }
+            let directory = self.paths.ensure_secure_root(AppPathRoot::Config)?;
+            let bytes = serialize_managed_hosts(&[]);
+            match self.commit(&directory, bytes.as_bytes(), None)? {
+                SecureCommitOutcome::Committed => return Ok(()),
+                SecureCommitOutcome::CommittedButUnsynced => {
+                    return Err(ManagedHostsError::CommittedButUnsynced);
                 }
+                SecureCommitOutcome::Conflict => continue,
             }
         }
+        Err(ManagedHostsError::ConcurrentMutation)
     }
 
     /// Inserts or edits one host after collision checks against fresh discovered provenance.
@@ -372,75 +206,135 @@ impl<'a, F: ManagedHostsFilesystem> ManagedHostsStore<'a, F> {
             .iter()
             .any(|configured| configured_host_collides(configured, host.alias(), editing_alias))
         {
-            return Err(ManagedHostsError::AliasCollision {
-                alias: host.alias().as_str().to_owned(),
-            });
+            return Err(ManagedHostsError::AliasCollision);
         }
-        let mut hosts = self.load()?;
-        if let Some(editing_alias) = editing_alias {
-            let position = hosts
-                .iter()
-                .position(|existing| existing.alias() == editing_alias)
-                .ok_or_else(|| ManagedHostsError::Missing {
-                    alias: editing_alias.as_str().to_owned(),
-                })?;
-            if editing_alias != host.alias()
-                && hosts
+        for _ in 0..MUTATION_ATTEMPTS {
+            let snapshot = self.read_snapshot()?;
+            let mut hosts = snapshot
+                .as_ref()
+                .map(|snapshot| parse_managed_hosts(&snapshot.bytes))
+                .transpose()
+                .map_err(|_| ManagedHostsError::NonCanonical)?
+                .unwrap_or_default();
+            if let Some(editing_alias) = editing_alias {
+                let position = hosts
                     .iter()
-                    .any(|existing| existing.alias() == host.alias())
+                    .position(|existing| existing.alias() == editing_alias)
+                    .ok_or(ManagedHostsError::Missing)?;
+                if editing_alias != host.alias()
+                    && hosts
+                        .iter()
+                        .any(|existing| existing.alias() == host.alias())
+                {
+                    return Err(ManagedHostsError::AliasCollision);
+                }
+                hosts.remove(position);
+            } else if hosts
+                .iter()
+                .any(|existing| existing.alias() == host.alias())
             {
-                return Err(ManagedHostsError::AliasCollision {
-                    alias: host.alias().as_str().to_owned(),
-                });
+                return Err(ManagedHostsError::AliasCollision);
             }
-            hosts.remove(position);
-        } else if hosts
-            .iter()
-            .any(|existing| existing.alias() == host.alias())
-        {
-            return Err(ManagedHostsError::AliasCollision {
-                alias: host.alias().as_str().to_owned(),
-            });
+            hosts.push(host.clone());
+            match self.write(&hosts, snapshot.as_ref().map(|snapshot| &snapshot.identity))? {
+                SecureCommitOutcome::Committed => return Ok(()),
+                SecureCommitOutcome::CommittedButUnsynced => {
+                    return Err(ManagedHostsError::CommittedButUnsynced);
+                }
+                SecureCommitOutcome::Conflict => continue,
+            }
         }
-        hosts.push(host);
-        self.write(&hosts)
+        Err(ManagedHostsError::ConcurrentMutation)
     }
 
     /// Deletes one existing managed alias using the same atomic mutation contract.
     pub(crate) fn delete(&self, alias: &SshHostAlias) -> Result<(), ManagedHostsError> {
-        let mut hosts = self.load()?;
-        let position = hosts
-            .iter()
-            .position(|host| host.alias() == alias)
-            .ok_or_else(|| ManagedHostsError::Missing {
-                alias: alias.as_str().to_owned(),
-            })?;
-        hosts.remove(position);
-        self.write(&hosts)
-    }
-
-    fn write(&self, hosts: &[ManagedSshHost]) -> Result<(), ManagedHostsError> {
-        let directory = self.paths.ensure_root(AppPathRoot::Config)?;
-        let target = self.paths.managed_ssh_config();
-        let name = target.file_name().ok_or_else(invalid_managed_path)?;
-        let bytes = serialize_managed_hosts(hosts);
-        if bytes.len() > MANAGED_CONFIG_BYTES {
-            return Err(ManagedHostsError::Io(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "managed SSH config exceeds its size limit",
-            )));
-        }
-        match self
-            .filesystem
-            .atomic_replace(directory, name, bytes.as_bytes())
-        {
-            Ok(()) => Ok(()),
-            Err(AtomicReplaceError::NotCommitted(source)) => Err(ManagedHostsError::Io(source)),
-            Err(AtomicReplaceError::CommittedButUnsynced(source)) => {
-                Err(ManagedHostsError::CommittedButUnsynced { source })
+        for _ in 0..MUTATION_ATTEMPTS {
+            let snapshot = self.read_snapshot()?;
+            let mut hosts = snapshot
+                .as_ref()
+                .map(|snapshot| parse_managed_hosts(&snapshot.bytes))
+                .transpose()
+                .map_err(|_| ManagedHostsError::NonCanonical)?
+                .unwrap_or_default();
+            let position = hosts
+                .iter()
+                .position(|host| host.alias() == alias)
+                .ok_or(ManagedHostsError::Missing)?;
+            hosts.remove(position);
+            match self.write(&hosts, snapshot.as_ref().map(|snapshot| &snapshot.identity))? {
+                SecureCommitOutcome::Committed => return Ok(()),
+                SecureCommitOutcome::CommittedButUnsynced => {
+                    return Err(ManagedHostsError::CommittedButUnsynced);
+                }
+                SecureCommitOutcome::Conflict => continue,
             }
         }
+        Err(ManagedHostsError::ConcurrentMutation)
     }
+
+    fn write(
+        &self,
+        hosts: &[ManagedSshHost],
+        expected: Option<&SecureEntryIdentity>,
+    ) -> Result<SecureCommitOutcome, ManagedHostsError> {
+        let directory = self.paths.ensure_secure_root(AppPathRoot::Config)?;
+        let bytes = serialize_managed_hosts(hosts);
+        if bytes.len() > MANAGED_CONFIG_BYTES {
+            return Err(ManagedHostsError::StorageUnavailable);
+        }
+        self.commit(&directory, bytes.as_bytes(), expected)
+    }
+
+    fn read_snapshot(&self) -> Result<Option<PrivateFileSnapshot>, ManagedHostsError> {
+        let Some(directory) = self.paths.open_secure_root(AppPathRoot::Config)? else {
+            return Ok(None);
+        };
+        let target = self.paths.managed_ssh_config();
+        let name = target
+            .file_name()
+            .ok_or(ManagedHostsError::StorageUnavailable)?;
+        self.paths
+            .filesystem()
+            .read_private_file(&directory, name, MANAGED_CONFIG_BYTES)
+            .map_err(map_filesystem_error)
+    }
+
+    fn commit(
+        &self,
+        directory: &SecureDirectory,
+        bytes: &[u8],
+        expected: Option<&SecureEntryIdentity>,
+    ) -> Result<SecureCommitOutcome, ManagedHostsError> {
+        let target = self.paths.managed_ssh_config();
+        let name = target
+            .file_name()
+            .ok_or(ManagedHostsError::StorageUnavailable)?;
+        for _ in 0..TEMP_CREATION_ATTEMPTS {
+            let mut nonce = [0_u8; 16];
+            getrandom::fill(&mut nonce).map_err(|_| ManagedHostsError::StorageUnavailable)?;
+            match self
+                .paths
+                .filesystem()
+                .prepare_private_file(directory, name, bytes, nonce)
+            {
+                Ok(prepared) => {
+                    return self
+                        .paths
+                        .filesystem()
+                        .commit_private_file(prepared, expected)
+                        .map_err(map_filesystem_error);
+                }
+                Err(SecureFilesystemError::AlreadyExists) => continue,
+                Err(error) => return Err(map_filesystem_error(error)),
+            }
+        }
+        Err(ManagedHostsError::StorageUnavailable)
+    }
+}
+
+fn map_filesystem_error(_: SecureFilesystemError) -> ManagedHostsError {
+    ManagedHostsError::StorageUnavailable
 }
 
 fn configured_host_collides(
@@ -463,237 +357,6 @@ fn configured_host_collides(
         }
     }
     !excluded_edited_declaration
-}
-
-fn invalid_managed_path() -> io::Error {
-    io::Error::new(
-        io::ErrorKind::InvalidInput,
-        "managed SSH config has no file name",
-    )
-}
-
-fn open_private_directory(path: &Path) -> io::Result<File> {
-    let directory = OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
-        .open(path)?;
-    let metadata = directory.metadata()?;
-    if !metadata.is_dir()
-        || metadata.uid() != effective_user_id()
-        || metadata.mode() & 0o7777 != PRIVATE_DIRECTORY_MODE
-    {
-        return Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            "managed SSH config directory is not owner-private",
-        ));
-    }
-    Ok(directory)
-}
-
-fn validate_private_file(metadata: &fs::Metadata) -> io::Result<()> {
-    if !metadata.is_file()
-        || metadata.uid() != effective_user_id()
-        || metadata.mode() & 0o7777 != PRIVATE_FILE_MODE
-    {
-        return Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            "managed SSH config file is not owner-private",
-        ));
-    }
-    Ok(())
-}
-
-fn validate_target_at(directory: &File, name: &OsStr) -> io::Result<()> {
-    let name = component_cstring(name)?;
-    let mut metadata = std::mem::MaybeUninit::<libc::stat>::uninit();
-    // SAFETY: `directory` and `name` remain valid for the call, and metadata points to writable memory.
-    let result = unsafe {
-        libc::fstatat(
-            directory.as_raw_fd(),
-            name.as_ptr(),
-            metadata.as_mut_ptr(),
-            libc::AT_SYMLINK_NOFOLLOW,
-        )
-    };
-    if result == -1 {
-        let error = io::Error::last_os_error();
-        if error.kind() == io::ErrorKind::NotFound {
-            return Ok(());
-        }
-        return Err(error);
-    }
-    // SAFETY: fstatat initialized metadata after returning success.
-    let metadata = unsafe { metadata.assume_init() };
-    let mode = metadata.st_mode as u32;
-    if mode & u32::from(libc::S_IFMT) != u32::from(libc::S_IFREG)
-        || metadata.st_uid != effective_user_id()
-        || mode & 0o7777 != PRIVATE_FILE_MODE
-    {
-        return Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            "managed SSH config target is unsafe",
-        ));
-    }
-    Ok(())
-}
-
-fn create_temporary_file(directory: &File, target: &OsStr) -> io::Result<(CString, File)> {
-    for _ in 0..TEMP_CREATION_ATTEMPTS {
-        let suffix = random_suffix()?;
-        let mut name = target.as_bytes().to_vec();
-        name.extend_from_slice(b".");
-        name.extend_from_slice(suffix.as_bytes());
-        name.extend_from_slice(b".tmp");
-        let name = CString::new(name)
-            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid temporary name"))?;
-        match open_file_at_cstring(
-            directory,
-            &name,
-            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL,
-            PRIVATE_FILE_MODE,
-        ) {
-            Ok(file) => return Ok((name, file)),
-            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
-            Err(error) => return Err(error),
-        }
-    }
-    Err(io::Error::new(
-        io::ErrorKind::AlreadyExists,
-        "could not allocate a unique managed SSH config temporary file",
-    ))
-}
-
-fn random_suffix() -> io::Result<String> {
-    let mut bytes = [0_u8; 16];
-    File::open("/dev/urandom")?.read_exact(&mut bytes)?;
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut suffix = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        suffix.push(HEX[usize::from(byte >> 4)] as char);
-        suffix.push(HEX[usize::from(byte & 0x0f)] as char);
-    }
-    Ok(suffix)
-}
-
-fn open_file_at(directory: &File, name: &OsStr, flags: i32, mode: u32) -> io::Result<File> {
-    let name = component_cstring(name)?;
-    open_file_at_cstring(directory, &name, flags, mode)
-}
-
-fn open_file_at_cstring(
-    directory: &File,
-    name: &CString,
-    flags: i32,
-    mode: u32,
-) -> io::Result<File> {
-    // SAFETY: `directory` and `name` remain valid for the call. A successful descriptor is owned below.
-    let descriptor = unsafe {
-        libc::openat(
-            directory.as_raw_fd(),
-            name.as_ptr(),
-            flags | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-            mode,
-        )
-    };
-    if descriptor == -1 {
-        return Err(io::Error::last_os_error());
-    }
-    // SAFETY: openat returned a new owned descriptor.
-    Ok(unsafe { File::from_raw_fd(descriptor) })
-}
-
-fn rename_at(directory: &File, source: &CString, target: &OsStr) -> io::Result<()> {
-    let target = component_cstring(target)?;
-    // SAFETY: both names and the directory descriptor remain valid for the call.
-    let result = unsafe {
-        libc::renameat(
-            directory.as_raw_fd(),
-            source.as_ptr(),
-            directory.as_raw_fd(),
-            target.as_ptr(),
-        )
-    };
-    if result == -1 {
-        Err(io::Error::last_os_error())
-    } else {
-        Ok(())
-    }
-}
-
-fn link_at(directory: &File, source: &CString, target: &OsStr) -> io::Result<()> {
-    let target = component_cstring(target)?;
-    // SAFETY: both names and the directory descriptor remain valid for the call.
-    let result = unsafe {
-        libc::linkat(
-            directory.as_raw_fd(),
-            source.as_ptr(),
-            directory.as_raw_fd(),
-            target.as_ptr(),
-            0,
-        )
-    };
-    if result == -1 {
-        Err(io::Error::last_os_error())
-    } else {
-        Ok(())
-    }
-}
-
-fn unlink_at(directory: &File, name: &CString) -> io::Result<()> {
-    // SAFETY: the directory descriptor and name remain valid for the call.
-    let result = unsafe { libc::unlinkat(directory.as_raw_fd(), name.as_ptr(), 0) };
-    if result == -1 {
-        Err(io::Error::last_os_error())
-    } else {
-        Ok(())
-    }
-}
-
-fn component_cstring(name: &OsStr) -> io::Result<CString> {
-    if name.is_empty() || name.as_bytes().contains(&b'/') {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "managed SSH config name is not a path component",
-        ));
-    }
-    CString::new(name.as_bytes())
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path component contains NUL"))
-}
-
-fn effective_user_id() -> u32 {
-    // SAFETY: geteuid takes no arguments and has no preconditions.
-    unsafe { libc::geteuid() }
-}
-
-struct TemporaryRollback<'a> {
-    directory: &'a File,
-    name: &'a CString,
-    active: bool,
-}
-
-impl<'a> TemporaryRollback<'a> {
-    const fn new(directory: &'a File, name: &'a CString) -> Self {
-        Self {
-            directory,
-            name,
-            active: true,
-        }
-    }
-
-    fn disarm(&mut self) {
-        self.active = false;
-    }
-}
-
-impl Drop for TemporaryRollback<'_> {
-    fn drop(&mut self) {
-        if self.active {
-            // SAFETY: the directory and name outlive this rollback guard.
-            unsafe {
-                libc::unlinkat(self.directory.as_raw_fd(), self.name.as_ptr(), 0);
-            }
-        }
-    }
 }
 
 fn validate_alias(value: &str) -> Result<(), ManagedSshHostValidationError> {
@@ -939,664 +602,367 @@ fn parse_quoted_argument(value: &str) -> Result<String, ManagedHostsFormatError>
 
 #[cfg(test)]
 mod tests {
-    use std::cell::{Cell, RefCell};
-    use std::fs;
-    use std::num::NonZeroU16;
-    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+    use std::collections::{BTreeMap, BTreeSet};
+    use std::ffi::OsStr;
     use std::path::{Path, PathBuf};
-    use std::process::Command;
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::{Arc, Mutex};
 
     use super::*;
-    use crate::platform::app_paths::{AppPathEnvironment, AppPaths};
-    use crate::ssh::host_config::{
-        HostConfigRoots, HostDiscovery, HostDiscoveryLimits, NativeHostConfigFilesystem,
-        discover_ssh_hosts,
-    };
+    use crate::platform::app_paths::{AppPathEnvironment, AppPathHostFacts};
+    use crate::platform::secure_filesystem::{PreparedPrivateFile, SecureFilesystem};
 
-    static NEXT_TEST_DIRECTORY: AtomicU64 = AtomicU64::new(0);
-
-    struct TestDirectory(PathBuf);
-
-    impl TestDirectory {
-        fn new() -> Self {
-            let sequence = NEXT_TEST_DIRECTORY.fetch_add(1, Ordering::Relaxed);
-            let path = PathBuf::from(format!(
-                "/private/tmp/spaceterm-managed-hosts-{}-{sequence}",
-                std::process::id()
-            ));
-            fs::DirBuilder::new().mode(0o700).create(&path).unwrap();
-            Self(path)
-        }
-
-        fn paths(&self) -> AppPaths {
-            AppPaths::resolve(&AppPathEnvironment {
-                home: None,
-                xdg_config_home: Some(self.0.join("config").into_os_string()),
-                xdg_data_home: Some(self.0.join("data").into_os_string()),
-                xdg_state_home: Some(self.0.join("state").into_os_string()),
-                xdg_cache_home: Some(self.0.join("cache").into_os_string()),
-                xdg_runtime_dir: Some(self.0.join("runtime").into_os_string()),
-                macos_temporary_directory: self.0.join("temporary"),
-            })
-            .unwrap()
-        }
-    }
-
-    impl Drop for TestDirectory {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
-        }
+    #[derive(Default)]
+    struct RecordingFilesystem {
+        state: Mutex<RecordingState>,
     }
 
     #[derive(Default)]
-    struct MemoryFilesystem {
-        bytes: RefCell<Option<Vec<u8>>>,
-        fail_before_commit: Cell<bool>,
-        fail_after_commit: Cell<bool>,
-        replacements: Cell<usize>,
-        create_race_bytes: RefCell<Option<Vec<u8>>>,
+    struct RecordingState {
+        directories: BTreeSet<PathBuf>,
+        files: BTreeMap<(PathBuf, String), (Vec<u8>, u64)>,
+        conflicts_remaining: usize,
+        prepare_collisions_remaining: usize,
+        preparation_nonces: Vec<[u8; 16]>,
+        next_identity: u64,
+        events: Vec<&'static str>,
     }
 
-    impl MemoryFilesystem {
-        fn with_bytes(bytes: Vec<u8>) -> Self {
-            Self {
-                bytes: RefCell::new(Some(bytes)),
-                fail_before_commit: Cell::new(false),
-                fail_after_commit: Cell::new(false),
-                replacements: Cell::new(0),
-                create_race_bytes: RefCell::new(None),
-            }
+    #[derive(Clone)]
+    struct RecordingDirectory(PathBuf);
+    #[derive(Clone)]
+    struct RecordingIdentity(u64);
+    struct RecordingPrepared(PathBuf, String, Vec<u8>);
+
+    impl RecordingFilesystem {
+        fn directory_path(directory: &SecureDirectory) -> Result<&PathBuf, SecureFilesystemError> {
+            directory
+                .opaque_ref::<RecordingDirectory>()
+                .map(|directory| &directory.0)
+                .ok_or(SecureFilesystemError::Unsafe)
+        }
+
+        fn directory(path: PathBuf) -> SecureDirectory {
+            SecureDirectory::from_opaque(RecordingDirectory(path))
+        }
+
+        fn set_conflicts(&self, conflicts: usize) {
+            self.state.lock().unwrap().conflicts_remaining = conflicts;
+        }
+
+        fn set_prepare_collisions(&self, collisions: usize) {
+            self.state.lock().unwrap().prepare_collisions_remaining = collisions;
         }
     }
 
-    impl ManagedHostsFilesystem for MemoryFilesystem {
-        fn read(
+    impl SecureFilesystem for RecordingFilesystem {
+        fn open_private_directory(
             &self,
-            _directory: &Path,
-            _name: &std::ffi::OsStr,
-        ) -> std::io::Result<Option<Vec<u8>>> {
-            Ok(self.bytes.borrow().clone())
+            path: &Path,
+        ) -> Result<Option<SecureDirectory>, SecureFilesystemError> {
+            Ok(self
+                .state
+                .lock()
+                .unwrap()
+                .directories
+                .contains(path)
+                .then(|| Self::directory(path.to_path_buf())))
         }
 
-        fn atomic_replace(
+        fn ensure_private_directory(
             &self,
-            _directory: &Path,
-            _name: &std::ffi::OsStr,
-            bytes: &[u8],
-        ) -> Result<(), AtomicReplaceError> {
-            self.replacements.set(self.replacements.get() + 1);
-            if self.fail_before_commit.get() {
-                return Err(AtomicReplaceError::NotCommitted(std::io::Error::other(
-                    "injected replacement failure",
-                )));
-            }
-            *self.bytes.borrow_mut() = Some(bytes.to_vec());
-            if self.fail_after_commit.get() {
-                return Err(AtomicReplaceError::CommittedButUnsynced(
-                    std::io::Error::other("injected directory sync failure"),
-                ));
-            }
+            path: &Path,
+        ) -> Result<SecureDirectory, SecureFilesystemError> {
+            let mut state = self.state.lock().unwrap();
+            state.events.push("ensure-directory");
+            state.directories.insert(path.to_path_buf());
+            Ok(Self::directory(path.to_path_buf()))
+        }
+
+        fn create_private_child(
+            &self,
+            _: &SecureDirectory,
+            _: &OsStr,
+        ) -> Result<SecureDirectory, SecureFilesystemError> {
+            Err(SecureFilesystemError::Unavailable)
+        }
+        fn verify_directory(&self, _: &SecureDirectory) -> Result<(), SecureFilesystemError> {
+            Ok(())
+        }
+        fn remove_private_child(
+            &self,
+            _: &SecureDirectory,
+            _: &OsStr,
+            _: &SecureDirectory,
+        ) -> Result<(), SecureFilesystemError> {
             Ok(())
         }
 
-        fn atomic_create(
+        fn read_private_file(
             &self,
-            _directory: &Path,
-            _name: &std::ffi::OsStr,
-            bytes: &[u8],
-        ) -> Result<AtomicCreateOutcome, AtomicReplaceError> {
-            if let Some(racing_bytes) = self.create_race_bytes.borrow_mut().take() {
-                *self.bytes.borrow_mut() = Some(racing_bytes);
-            }
-            if self.bytes.borrow().is_some() {
-                return Ok(AtomicCreateOutcome::AlreadyExists);
-            }
-            if self.fail_before_commit.get() {
-                return Err(AtomicReplaceError::NotCommitted(std::io::Error::other(
-                    "injected creation failure",
-                )));
-            }
-            *self.bytes.borrow_mut() = Some(bytes.to_vec());
-            if self.fail_after_commit.get() {
-                return Err(AtomicReplaceError::CommittedButUnsynced(
-                    std::io::Error::other("injected directory sync failure"),
-                ));
-            }
-            Ok(AtomicCreateOutcome::Created)
-        }
-    }
-
-    fn host(alias: &str, hostname: &str) -> ManagedSshHost {
-        ManagedSshHost::new(alias.to_owned(), hostname.to_owned(), None, None, None).unwrap()
-    }
-
-    fn discovered_hosts(directory: &TestDirectory, managed: &str, user: &str) -> HostDiscovery {
-        let managed_path = directory.0.join("discovered-managed-config");
-        let user_path = directory.0.join("discovered-user-config");
-        fs::write(&managed_path, managed).unwrap();
-        fs::write(&user_path, user).unwrap();
-        discover_ssh_hosts(
-            &NativeHostConfigFilesystem,
-            &HostConfigRoots {
-                managed: managed_path,
-                user: user_path,
-                home: directory.0.clone(),
-            },
-            HostDiscoveryLimits::default(),
-        )
-    }
-
-    #[test]
-    fn validation_should_report_the_required_field_inline() {
-        let error =
-            ManagedSshHost::new(String::new(), "server.example".to_owned(), None, None, None)
-                .unwrap_err();
-
-        assert_eq!(
-            error,
-            ManagedSshHostValidationError {
-                field: ManagedSshHostField::Alias,
-                kind: ManagedSshHostValueError::Required,
-            }
-        );
-    }
-
-    #[test]
-    fn validation_should_distinguish_injection_hazards() {
-        for (alias, kind) in [
-            ("*.example", ManagedSshHostValueError::Pattern),
-            ("!blocked", ManagedSshHostValueError::Negated),
-            ("two words", ManagedSshHostValueError::Whitespace),
-            ("line\nbreak", ManagedSshHostValueError::Control),
-            ("-option", ManagedSshHostValueError::LeadingOption),
-            ("Host", ManagedSshHostValueError::ReservedKeyword),
-            ("bad#alias", ManagedSshHostValueError::Unsafe),
-        ] {
-            let error = ManagedSshHost::new(
-                alias.to_owned(),
-                "server.example".to_owned(),
-                None,
-                None,
-                None,
-            )
-            .unwrap_err();
-            assert_eq!(error.kind, kind, "unexpected validation for {alias:?}");
-        }
-    }
-
-    #[test]
-    fn validation_should_reject_at_in_a_managed_alias() {
-        let error = ManagedSshHost::new(
-            "user@work".to_owned(),
-            "server.example".to_owned(),
-            None,
-            None,
-            None,
-        )
-        .unwrap_err();
-
-        assert_eq!(
-            error,
-            ManagedSshHostValidationError {
-                field: ManagedSshHostField::Alias,
-                kind: ManagedSshHostValueError::Unsafe,
-            }
-        );
-    }
-
-    #[test]
-    fn validation_should_accept_a_concrete_identity_path_with_spaces() {
-        let managed = ManagedSshHost::new(
-            "work".to_owned(),
-            "server.example".to_owned(),
-            Some("deploy".to_owned()),
-            NonZeroU16::new(2222),
-            Some("~/Keys/Work Key\"1\"".to_owned()),
-        );
-
-        assert!(managed.is_ok(), "unexpected error: {managed:?}");
-    }
-
-    #[test]
-    fn validation_should_reject_nonconcrete_identity_paths() {
-        for identity in ["relative/key", "~/../key", "/keys/*", "/keys/line\nbreak"] {
-            let error = ManagedSshHost::new(
-                "work".to_owned(),
-                "server.example".to_owned(),
-                None,
-                None,
-                Some(identity.to_owned()),
-            )
-            .unwrap_err();
-            assert_eq!(error.field, ManagedSshHostField::IdentityFile);
-        }
-    }
-
-    #[test]
-    fn canonical_format_should_sort_hosts_quote_paths_and_end_with_precedence_tail() {
-        let hosts = vec![
-            ManagedSshHost::new(
-                "zeta".to_owned(),
-                "zeta.example".to_owned(),
-                None,
-                None,
-                Some("~/Keys/Zeta Key".to_owned()),
-            )
-            .unwrap(),
-            host("alpha", "alpha.example"),
-        ];
-
-        let serialized = serialize_managed_hosts(&hosts);
-
-        assert_eq!(
-            serialized,
-            concat!(
-                "# This file is managed by SpaceTerm.\n\n",
-                "Host alpha\n",
-                "  HostName alpha.example\n\n",
-                "Host zeta\n",
-                "  HostName zeta.example\n",
-                "  IdentityFile \"~/Keys/Zeta Key\"\n\n",
-                "Host *\n",
-                "  Include ~/.ssh/config\n",
-                "Host *\n",
-                "  Include /etc/ssh/ssh_config\n",
-            )
-        );
-    }
-
-    #[test]
-    fn canonical_format_should_round_trip_all_five_fields() {
-        let expected = ManagedSshHost::new(
-            "work".to_owned(),
-            "server.example".to_owned(),
-            Some("deploy".to_owned()),
-            NonZeroU16::new(2222),
-            Some("~/Keys/Work Key\"1\"".to_owned()),
-        )
-        .unwrap();
-        let bytes = serialize_managed_hosts(std::slice::from_ref(&expected));
-
-        let parsed = parse_managed_hosts(bytes.as_bytes()).unwrap();
-
-        assert_eq!(parsed, vec![expected]);
-    }
-
-    #[test]
-    fn canonical_parser_should_reject_unknown_or_noncanonical_text() {
-        for bytes in [
-            b"Host manual\n  HostName manual.example\n".as_slice(),
-            concat!(
-                "# This file is managed by SpaceTerm.\n\n",
-                "Host work\n",
-                "  HostName work.example\n",
-                "  ProxyCommand unsafe\n\n",
-                "Host *\n",
-                "  Include ~/.ssh/config\n",
-                "Host *\n",
-                "  Include /etc/ssh/ssh_config\n",
-            )
-            .as_bytes(),
-        ] {
-            assert_eq!(
-                parse_managed_hosts(bytes),
-                Err(ManagedHostsFormatError::NonCanonical)
+            directory: &SecureDirectory,
+            name: &OsStr,
+            _: usize,
+        ) -> Result<Option<PrivateFileSnapshot>, SecureFilesystemError> {
+            let key = (
+                Self::directory_path(directory)?.clone(),
+                name.to_string_lossy().into_owned(),
             );
+            let mut state = self.state.lock().unwrap();
+            state.events.push("read");
+            Ok(state
+                .files
+                .get(&key)
+                .map(|(bytes, identity)| PrivateFileSnapshot {
+                    bytes: bytes.clone(),
+                    identity: SecureEntryIdentity::from_opaque(RecordingIdentity(*identity)),
+                }))
+        }
+
+        fn prepare_private_file(
+            &self,
+            directory: &SecureDirectory,
+            target: &OsStr,
+            bytes: &[u8],
+            nonce: [u8; 16],
+        ) -> Result<PreparedPrivateFile, SecureFilesystemError> {
+            let mut state = self.state.lock().unwrap();
+            state.events.push("prepare");
+            state.preparation_nonces.push(nonce);
+            if state.prepare_collisions_remaining > 0 {
+                state.prepare_collisions_remaining -= 1;
+                return Err(SecureFilesystemError::AlreadyExists);
+            }
+            drop(state);
+            Ok(PreparedPrivateFile::from_opaque(RecordingPrepared(
+                Self::directory_path(directory)?.clone(),
+                target.to_string_lossy().into_owned(),
+                bytes.to_vec(),
+            )))
+        }
+
+        fn commit_private_file(
+            &self,
+            prepared: PreparedPrivateFile,
+            expected: Option<&SecureEntryIdentity>,
+        ) -> Result<SecureCommitOutcome, SecureFilesystemError> {
+            let RecordingPrepared(path, name, bytes) = *prepared
+                .into_opaque::<RecordingPrepared>()
+                .map_err(|_| SecureFilesystemError::Unsafe)?;
+            let expected = expected
+                .map(|identity| {
+                    identity
+                        .opaque_ref::<RecordingIdentity>()
+                        .map(|identity| identity.0)
+                        .ok_or(SecureFilesystemError::Unsafe)
+                })
+                .transpose()?;
+            let mut state = self.state.lock().unwrap();
+            state.events.push("commit");
+            if state.conflicts_remaining > 0 {
+                state.conflicts_remaining -= 1;
+                return Ok(SecureCommitOutcome::Conflict);
+            }
+            let key = (path, name);
+            if state.files.get(&key).map(|(_, identity)| *identity) != expected {
+                return Ok(SecureCommitOutcome::Conflict);
+            }
+            state.next_identity += 1;
+            let identity = state.next_identity;
+            state.files.insert(key, (bytes, identity));
+            Ok(SecureCommitOutcome::Committed)
+        }
+
+        fn register_socket(
+            &self,
+            _: &SecureDirectory,
+            _: &OsStr,
+        ) -> Result<SecureEntryIdentity, SecureFilesystemError> {
+            Err(SecureFilesystemError::Unavailable)
+        }
+        fn verify_socket(
+            &self,
+            _: &SecureDirectory,
+            _: &OsStr,
+            _: &SecureEntryIdentity,
+        ) -> Result<(), SecureFilesystemError> {
+            Err(SecureFilesystemError::Unavailable)
+        }
+        fn remove_socket(
+            &self,
+            _: &SecureDirectory,
+            _: &OsStr,
+            _: &SecureEntryIdentity,
+        ) -> Result<(), SecureFilesystemError> {
+            Err(SecureFilesystemError::Unavailable)
+        }
+        fn create_private_artifact(
+            &self,
+            _: &SecureDirectory,
+            _: &OsStr,
+        ) -> Result<(), SecureFilesystemError> {
+            Err(SecureFilesystemError::Unavailable)
         }
     }
 
+    fn paths(filesystem: Arc<RecordingFilesystem>) -> AppPaths {
+        let environment = AppPathEnvironment {
+            home: Some("/home/test".into()),
+            ..Default::default()
+        };
+        let host = AppPathHostFacts::new("/runtime".into(), 200).unwrap();
+        AppPaths::resolve(&environment, &host, filesystem).unwrap()
+    }
+
+    fn host(alias: &str, host_name: &str) -> ManagedSshHost {
+        ManagedSshHost::new(alias.into(), host_name.into(), None, None, None).unwrap()
+    }
+
     #[test]
-    fn store_should_upsert_and_load_hosts_in_deterministic_order() {
-        let directory = TestDirectory::new();
-        let paths = directory.paths();
-        let filesystem = MemoryFilesystem::default();
-        let store = ManagedHostsStore::new(&paths, &filesystem);
+    fn store_should_add_edit_delete_and_preserve_canonical_order() {
+        let filesystem = Arc::new(RecordingFilesystem::default());
+        let paths = paths(filesystem);
+        let store = ManagedHostsStore::new(&paths);
         store
             .upsert(host("zeta", "zeta.example"), &[], None)
             .unwrap();
         store
             .upsert(host("alpha", "alpha.example"), &[], None)
             .unwrap();
+        store
+            .upsert(
+                host("beta", "beta.example"),
+                &[],
+                Some(host("zeta", "ignored").alias()),
+            )
+            .unwrap();
+        store.delete(host("alpha", "ignored").alias()).unwrap();
 
         let loaded = store.load().unwrap();
 
+        assert_eq!(loaded, vec![host("beta", "beta.example")]);
+    }
+
+    #[test]
+    fn mutation_should_retry_a_concurrent_conflict_from_a_fresh_snapshot() {
+        let filesystem = Arc::new(RecordingFilesystem::default());
+        filesystem.set_conflicts(2);
+        let paths = paths(filesystem.clone());
+        let store = ManagedHostsStore::new(&paths);
+
+        store
+            .upsert(host("work", "work.example"), &[], None)
+            .unwrap();
+
+        let state = filesystem.state.lock().unwrap();
         assert_eq!(
-            loaded
+            state
+                .events
                 .iter()
-                .map(|host| host.alias().as_str())
-                .collect::<Vec<_>>(),
-            ["alpha", "zeta"]
+                .filter(|event| **event == "commit")
+                .count(),
+            3
         );
-    }
-
-    #[test]
-    fn ensure_exists_should_bootstrap_the_empty_canonical_config() {
-        let directory = TestDirectory::new();
-        let paths = directory.paths();
-        let filesystem = MemoryFilesystem::default();
-        let store = ManagedHostsStore::new(&paths, &filesystem);
-
-        store.ensure_exists().unwrap();
-
         assert_eq!(
-            filesystem.bytes.borrow().as_deref(),
-            Some(format!("{HEADER}{PRECEDENCE_TAIL}").as_bytes())
+            state
+                .events
+                .iter()
+                .filter(|event| **event == "read")
+                .count(),
+            2
         );
     }
 
     #[test]
-    fn ensure_exists_should_validate_without_rewriting_an_existing_config() {
-        let directory = TestDirectory::new();
-        let paths = directory.paths();
-        let original = serialize_managed_hosts(&[host("work", "work.example")]).into_bytes();
-        let filesystem = MemoryFilesystem::with_bytes(original.clone());
-        filesystem.fail_before_commit.set(true);
-        let store = ManagedHostsStore::new(&paths, &filesystem);
-
-        store.ensure_exists().unwrap();
-
-        assert!(
-            filesystem.replacements.get() == 0
-                && filesystem.bytes.borrow().as_deref() == Some(original.as_slice())
-        );
-    }
-
-    #[test]
-    fn ensure_exists_should_report_atomic_creation_failure_without_leaving_bytes() {
-        let directory = TestDirectory::new();
-        let paths = directory.paths();
-        let filesystem = MemoryFilesystem::default();
-        filesystem.fail_before_commit.set(true);
-        let store = ManagedHostsStore::new(&paths, &filesystem);
-
-        let result = store.ensure_exists();
-
-        assert!(
-            matches!(result, Err(ManagedHostsError::Io(_))) && filesystem.bytes.borrow().is_none()
-        );
-    }
-
-    #[test]
-    fn ensure_exists_should_not_replace_a_config_created_after_the_absence_check() {
-        let directory = TestDirectory::new();
-        let paths = directory.paths();
-        let racing = serialize_managed_hosts(&[host("racing", "racing.example")]).into_bytes();
-        let filesystem = MemoryFilesystem::default();
-        *filesystem.create_race_bytes.borrow_mut() = Some(racing.clone());
-        let store = ManagedHostsStore::new(&paths, &filesystem);
-
-        store.ensure_exists().unwrap();
-
-        assert_eq!(
-            filesystem.bytes.borrow().as_deref(),
-            Some(racing.as_slice())
-        );
-    }
-
-    #[test]
-    fn ensure_exists_should_reject_existing_noncanonical_content_without_rewriting_it() {
-        let directory = TestDirectory::new();
-        let paths = directory.paths();
-        let original = b"Host manual\n  HostName manual.example\n".to_vec();
-        let filesystem = MemoryFilesystem::with_bytes(original.clone());
-        let store = ManagedHostsStore::new(&paths, &filesystem);
-
-        let result = store.ensure_exists();
-
-        assert!(
-            matches!(result, Err(ManagedHostsError::NonCanonical))
-                && filesystem.replacements.get() == 0
-                && filesystem.bytes.borrow().as_deref() == Some(original.as_slice())
-        );
-    }
-
-    #[test]
-    fn store_should_reject_a_configured_alias_collision() {
-        let directory = TestDirectory::new();
-        let paths = directory.paths();
-        let filesystem = MemoryFilesystem::default();
-        let store = ManagedHostsStore::new(&paths, &filesystem);
-        let configured = discovered_hosts(&directory, "", "Host work\n  HostName user.example\n");
-
-        let error = store
-            .upsert(host("work", "work.example"), &configured.hosts, None)
-            .unwrap_err();
-
-        assert!(matches!(
-            error,
-            ManagedHostsError::AliasCollision { alias } if alias == "work"
-        ));
-    }
-
-    #[test]
-    fn store_should_allow_the_exact_managed_alias_being_edited() {
-        let directory = TestDirectory::new();
-        let paths = directory.paths();
-        let original = host("work", "old.example");
-        let filesystem = MemoryFilesystem::with_bytes(
-            serialize_managed_hosts(std::slice::from_ref(&original)).into_bytes(),
-        );
-        let store = ManagedHostsStore::new(&paths, &filesystem);
-        let alias = SshHostAlias::new("work".to_owned()).unwrap();
-        let configured = discovered_hosts(&directory, "Host work\n  HostName old.example\n", "");
-
-        store
-            .upsert(host("work", "new.example"), &configured.hosts, Some(&alias))
-            .unwrap();
-
-        assert_eq!(store.load().unwrap()[0].host_name(), "new.example");
-    }
-
-    #[test]
-    fn store_should_not_exclude_a_user_collision_while_editing_a_managed_alias() {
-        let directory = TestDirectory::new();
-        let paths = directory.paths();
-        let original = host("work", "old.example");
-        let filesystem = MemoryFilesystem::with_bytes(
-            serialize_managed_hosts(std::slice::from_ref(&original)).into_bytes(),
-        );
-        let store = ManagedHostsStore::new(&paths, &filesystem);
-        let alias = SshHostAlias::new("work".to_owned()).unwrap();
-        let configured = discovered_hosts(
-            &directory,
-            "Host work\n  HostName old.example\n",
-            "Host work\n  HostName user.example\n",
-        );
-
-        let error = store
-            .upsert(host("work", "new.example"), &configured.hosts, Some(&alias))
-            .unwrap_err();
-
-        assert!(matches!(
-            error,
-            ManagedHostsError::AliasCollision { alias } if alias == "work"
-        ));
-    }
-
-    #[test]
-    fn store_should_leave_original_bytes_when_atomic_replace_fails() {
-        let directory = TestDirectory::new();
-        let paths = directory.paths();
-        let original = serialize_managed_hosts(&[host("work", "old.example")]).into_bytes();
-        let filesystem = MemoryFilesystem::with_bytes(original.clone());
-        filesystem.fail_before_commit.set(true);
-        let store = ManagedHostsStore::new(&paths, &filesystem);
-        let alias = SshHostAlias::new("work".to_owned()).unwrap();
-
-        let error = store.upsert(host("work", "new.example"), &[], Some(&alias));
-
-        assert!(
-            error.is_err() && filesystem.bytes.borrow().as_deref() == Some(original.as_slice())
-        );
-    }
-
-    #[test]
-    fn store_should_report_committed_but_unsynced_after_a_directory_sync_failure() {
-        let directory = TestDirectory::new();
-        let paths = directory.paths();
-        let original = serialize_managed_hosts(&[host("work", "old.example")]).into_bytes();
-        let filesystem = MemoryFilesystem::with_bytes(original);
-        filesystem.fail_after_commit.set(true);
-        let store = ManagedHostsStore::new(&paths, &filesystem);
-        let alias = SshHostAlias::new("work".to_owned()).unwrap();
-
-        let error = store
-            .upsert(host("work", "new.example"), &[], Some(&alias))
-            .unwrap_err();
-
-        assert!(
-            matches!(error, ManagedHostsError::CommittedButUnsynced { .. })
-                && store.load().unwrap()[0].host_name() == "new.example"
-        );
-    }
-
-    #[test]
-    fn store_should_reject_noncanonical_content_without_rewriting_it() {
-        let directory = TestDirectory::new();
-        let paths = directory.paths();
-        let original = b"Host manual\n  HostName manual.example\n".to_vec();
-        let filesystem = MemoryFilesystem::with_bytes(original.clone());
-        let store = ManagedHostsStore::new(&paths, &filesystem);
-
-        let error = store.upsert(host("work", "work.example"), &[], None);
-
-        assert!(
-            matches!(error, Err(ManagedHostsError::NonCanonical))
-                && filesystem.bytes.borrow().as_deref() == Some(original.as_slice())
-        );
-    }
-
-    #[test]
-    fn store_should_return_a_typed_error_when_deleting_a_missing_alias() {
-        let directory = TestDirectory::new();
-        let paths = directory.paths();
-        let filesystem = MemoryFilesystem::default();
-        let store = ManagedHostsStore::new(&paths, &filesystem);
-        let alias = SshHostAlias::new("missing".to_owned()).unwrap();
-
-        let error = store.delete(&alias).unwrap_err();
-
-        assert!(matches!(
-            error,
-            ManagedHostsError::Missing { alias } if alias == "missing"
-        ));
-    }
-
-    #[test]
-    fn store_should_delete_an_existing_alias_and_keep_the_canonical_tail() {
-        let directory = TestDirectory::new();
-        let paths = directory.paths();
-        let filesystem = MemoryFilesystem::with_bytes(
-            serialize_managed_hosts(&[host("work", "work.example")]).into_bytes(),
-        );
-        let store = ManagedHostsStore::new(&paths, &filesystem);
-        let alias = SshHostAlias::new("work".to_owned()).unwrap();
-
-        store.delete(&alias).unwrap();
-
-        assert_eq!(
-            filesystem.bytes.borrow().as_deref(),
-            Some(format!("{HEADER}{PRECEDENCE_TAIL}").as_bytes())
-        );
-    }
-
-    #[test]
-    fn native_store_should_create_private_config_and_file_permissions() {
-        let directory = TestDirectory::new();
-        let paths = directory.paths();
-        let filesystem = NativeManagedHostsFilesystem;
-        let store = ManagedHostsStore::new(&paths, &filesystem);
+    fn mutation_should_retry_temporary_name_collisions_with_fresh_nonces() {
+        let filesystem = Arc::new(RecordingFilesystem::default());
+        filesystem.set_prepare_collisions(2);
+        let paths = paths(filesystem.clone());
+        let store = ManagedHostsStore::new(&paths);
 
         store
             .upsert(host("work", "work.example"), &[], None)
             .unwrap();
 
-        let config_mode = fs::metadata(paths.config()).unwrap().permissions().mode() & 0o777;
-        let file_mode = fs::metadata(paths.managed_ssh_config())
-            .unwrap()
-            .permissions()
-            .mode()
-            & 0o777;
-        assert_eq!((config_mode, file_mode), (0o700, 0o600));
-    }
-
-    #[test]
-    fn native_store_should_prepare_first_connection_for_a_read_only_discovered_host() {
-        let directory = TestDirectory::new();
-        let paths = directory.paths();
-        let user_config = directory.0.join("user-ssh-config");
-        fs::write(
-            &user_config,
-            "Host read-only\n  HostName read-only.example\n",
-        )
-        .unwrap();
-        let roots = HostConfigRoots {
-            managed: paths.managed_ssh_config(),
-            user: user_config,
-            home: directory.0.clone(),
-        };
-        let initial = discover_ssh_hosts(
-            &NativeHostConfigFilesystem,
-            &roots,
-            HostDiscoveryLimits::default(),
-        );
-        let discovered = initial
-            .hosts
-            .iter()
-            .find(|host| host.alias().as_str() == "read-only")
-            .unwrap();
-        assert_eq!(
-            discovered.provenance().map(|source| source.source()),
-            Some(HostConfigSource::User)
-        );
-        assert!(!paths.managed_ssh_config().exists());
-        let before_bootstrap = Command::new("/usr/bin/ssh")
-            .args(["-F"])
-            .arg(paths.managed_ssh_config())
-            .args(["-G", "read-only"])
-            .output()
-            .unwrap();
-
-        ManagedHostsStore::new(&paths, &NativeManagedHostsFilesystem)
-            .ensure_exists()
-            .unwrap();
-
+        let state = filesystem.state.lock().unwrap();
+        assert_eq!(state.preparation_nonces.len(), 3);
         assert!(
-            !before_bootstrap.status.success()
-                && fs::read_to_string(paths.managed_ssh_config()).unwrap()
-                    == format!("{HEADER}{PRECEDENCE_TAIL}")
+            state
+                .preparation_nonces
+                .windows(2)
+                .all(|pair| pair[0] != pair[1])
         );
     }
 
     #[test]
-    fn native_store_should_not_leave_temporary_files_after_success() {
-        let directory = TestDirectory::new();
-        let paths = directory.paths();
-        let filesystem = NativeManagedHostsFilesystem;
-        let store = ManagedHostsStore::new(&paths, &filesystem);
-        store
-            .upsert(host("work", "work.example"), &[], None)
-            .unwrap();
-
-        let entries = fs::read_dir(paths.config()).unwrap().count();
-
-        assert_eq!(entries, 1);
-    }
-
-    #[test]
-    fn native_store_should_reject_a_symlink_target_without_following_it() {
-        let directory = TestDirectory::new();
-        let paths = directory.paths();
-        paths.ensure_root(AppPathRoot::Config).unwrap();
-        let outside = directory.0.join("outside");
-        fs::write(&outside, b"outside bytes").unwrap();
-        std::os::unix::fs::symlink(&outside, paths.managed_ssh_config()).unwrap();
-        let filesystem = NativeManagedHostsFilesystem;
-        let store = ManagedHostsStore::new(&paths, &filesystem);
+    fn mutation_should_stop_after_the_portable_retry_bound() {
+        let filesystem = Arc::new(RecordingFilesystem::default());
+        filesystem.set_conflicts(MUTATION_ATTEMPTS);
+        let paths = paths(filesystem);
+        let store = ManagedHostsStore::new(&paths);
 
         let result = store.upsert(host("work", "work.example"), &[], None);
 
-        assert!(result.is_err() && fs::read(outside).unwrap() == b"outside bytes");
+        assert!(matches!(result, Err(ManagedHostsError::ConcurrentMutation)));
+    }
+
+    #[test]
+    fn ensure_exists_should_publish_the_canonical_empty_file() {
+        let filesystem = Arc::new(RecordingFilesystem::default());
+        let paths = paths(filesystem);
+        let store = ManagedHostsStore::new(&paths);
+
+        store.ensure_exists().unwrap();
+
+        assert!(store.load().unwrap().is_empty());
+    }
+
+    #[test]
+    fn parser_should_reject_noncanonical_and_unsafe_content() {
+        assert_eq!(
+            parse_managed_hosts(b"Host *\n  HostName example\n"),
+            Err(ManagedHostsFormatError::NonCanonical)
+        );
+        assert!(
+            ManagedSshHost::new(
+                "-oProxyCommand=x".into(),
+                "example".into(),
+                None,
+                None,
+                None
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn storage_errors_should_not_expose_paths_or_native_failures() {
+        assert_eq!(
+            format!("{:?}", ManagedHostsError::StorageUnavailable),
+            "StorageUnavailable"
+        );
+        assert_eq!(
+            ManagedHostsError::StorageUnavailable.to_string(),
+            "managed SSH storage is unavailable"
+        );
+        assert_eq!(
+            ManagedHostsError::AliasCollision.to_string(),
+            "the SSH alias is already configured"
+        );
+    }
+
+    #[test]
+    fn managed_host_debug_should_redact_all_connection_values() {
+        let host = ManagedSshHost::new(
+            "sensitive-alias".into(),
+            "sensitive.example".into(),
+            Some("sensitive-user".into()),
+            None,
+            Some("/sensitive/key".into()),
+        )
+        .unwrap();
+
+        let debug = format!("{host:?}");
+        assert_eq!(debug, "ManagedSshHost(<redacted>)");
+        assert!(!debug.contains("sensitive"));
     }
 }

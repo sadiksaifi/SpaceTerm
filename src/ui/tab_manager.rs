@@ -1662,6 +1662,7 @@ mod tests {
                 revalidation_error: Mutex::new(None),
                 invalidate_grant_after_revalidation: AtomicBool::new(false),
                 command_context: SshCommandContext::new(
+                    crate::ssh::command::OpenSshExecutable::for_test(),
                     PathBuf::from("/private/config/spaceterm/ssh_config"),
                     destination,
                     PathBuf::from("/private/runtime/spaceterm/master.sock"),
@@ -1897,6 +1898,7 @@ mod tests {
         let destination = crate::domain::SshDestination::new("tester@remote".to_owned()).unwrap();
         let command_context = Arc::new(
             SshCommandContext::new(
+                crate::ssh::command::OpenSshExecutable::for_test(),
                 PathBuf::from("/private/config/spaceterm/ssh_config"),
                 destination.clone(),
                 PathBuf::from("/private/runtime/spaceterm/master.sock"),
@@ -2185,6 +2187,7 @@ mod tests {
         let destination = crate::domain::SshDestination::new("tester@remote".to_owned()).unwrap();
         let command_context = Arc::new(
             SshCommandContext::new(
+                crate::ssh::command::OpenSshExecutable::for_test(),
                 PathBuf::from("/private/config/spaceterm/ssh_config"),
                 destination.clone(),
                 PathBuf::from("/private/runtime/spaceterm/master.sock"),

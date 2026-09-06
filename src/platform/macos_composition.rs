@@ -1,19 +1,54 @@
 //! The sole production selector of desktop policy and native capabilities.
-use crate::app::{HostComposition, HostCompositionParts, StartupDependencies};
+use crate::app::{
+    HostComposition, HostCompositionParts, StartupDependencies, StartupDependenciesError,
+};
 use crate::desktop_profile::{DesktopProfile, DesktopProfileError};
 use crate::terminal::{NativeTerminalSessionFactory, OptionAsAltPolicy};
 use gpui::{TitlebarOptions, point, px};
-use std::{rc::Rc, sync::Arc};
+use std::{path::PathBuf, rc::Rc, sync::Arc};
 
 pub(crate) fn main() {
     let code = crate::app::dispatch_or_prepare_application(
         super::macos_askpass_transport::dispatch_helper_from_environment,
-        || crate::app::launch(compose),
+        || crate::app::launch(capture_startup_dependencies(), compose),
     )
     .unwrap_or_else(|code| code);
     if code != 0 {
         std::process::exit(code);
     }
+}
+
+fn capture_startup_dependencies() -> Result<
+    StartupDependencies<super::macos_ssh_process::MacOsSshProcessAdapter>,
+    StartupDependenciesError,
+> {
+    let path_environment = super::app_paths::AppPathEnvironment::capture();
+    let path_host_facts = runtime_path_host_facts(&path_environment, || {
+        std::fs::canonicalize(std::env::temp_dir())
+    })?;
+    let executable = crate::ssh::command::OpenSshExecutable::new(PathBuf::from("/usr/bin/ssh"))
+        .map_err(|_| StartupDependenciesError::Paths)?;
+    StartupDependencies::capture(
+        path_environment,
+        &path_host_facts,
+        Arc::new(super::macos_secure_filesystem::MacosSecureFilesystem),
+        executable,
+        super::macos_ssh_process::MacOsSshProcessAdapter,
+        Arc::new(super::macos_control_socket::MacosControlSocketProbe),
+        Arc::new(super::macos_host_config_filesystem::MacosHostConfigFilesystem),
+    )
+}
+
+fn runtime_path_host_facts(
+    environment: &super::app_paths::AppPathEnvironment,
+    fallback: impl FnOnce() -> std::io::Result<PathBuf>,
+) -> Result<super::app_paths::AppPathHostFacts, StartupDependenciesError> {
+    if environment.configured_runtime_root().is_some() {
+        return super::app_paths::AppPathHostFacts::without_runtime_fallback(103)
+            .map_err(|_| StartupDependenciesError::Paths);
+    }
+    let root = fallback().map_err(|_| StartupDependenciesError::Paths)?;
+    super::app_paths::AppPathHostFacts::new(root, 103).map_err(|_| StartupDependenciesError::Paths)
 }
 
 fn desktop_profile(
@@ -33,7 +68,9 @@ pub(crate) fn testing_desktop_profile(direction: spaceterm_ui::TextDirection) ->
         .expect("valid desktop profile")
 }
 
-fn compose(startup: StartupDependencies) -> Result<HostComposition, DesktopProfileError> {
+fn compose(
+    startup: StartupDependencies<super::macos_ssh_process::MacOsSshProcessAdapter>,
+) -> Result<HostComposition, DesktopProfileError> {
     let activity: Rc<dyn crate::platform::application_activity::ApplicationActivity> =
         Rc::new(crate::platform::macos_application::MacosApplicationActivity);
     let lifecycle = crate::ui::pane_lifecycle::PaneLifecycleDependencies {
@@ -103,4 +140,50 @@ fn compose(startup: StartupDependencies) -> Result<HostComposition, DesktopProfi
             traffic_light_position: Some(point(px(12.0), px(11.0))),
         }),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::platform::app_paths::{AppPathEnvironment, AppPaths};
+
+    #[test]
+    fn runtime_facts_should_not_consult_an_unused_temporary_fallback() {
+        let environment = AppPathEnvironment {
+            home: Some("/Users/test".into()),
+            xdg_runtime_dir: Some("/private/runtime".into()),
+            ..AppPathEnvironment::default()
+        };
+        let consulted = std::cell::Cell::new(false);
+        let facts = runtime_path_host_facts(&environment, || {
+            consulted.set(true);
+            Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied))
+        })
+        .unwrap();
+        let paths = AppPaths::resolve(
+            &environment,
+            &facts,
+            Arc::new(super::super::macos_secure_filesystem::MacosSecureFilesystem),
+        )
+        .unwrap();
+
+        assert!(!consulted.get());
+        assert_eq!(
+            paths.runtime(),
+            std::path::Path::new("/private/runtime/spaceterm")
+        );
+    }
+
+    #[test]
+    fn runtime_facts_should_report_an_unavailable_required_temporary_fallback() {
+        let environment = AppPathEnvironment {
+            xdg_runtime_dir: Some("relative/runtime".into()),
+            ..AppPathEnvironment::default()
+        };
+        let result = runtime_path_host_facts(&environment, || {
+            Err(std::io::Error::from(std::io::ErrorKind::NotFound))
+        });
+
+        assert!(matches!(result, Err(StartupDependenciesError::Paths)));
+    }
 }

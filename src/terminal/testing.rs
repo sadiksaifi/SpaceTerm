@@ -509,6 +509,7 @@ mod tests {
         let destination = SshDestination::new("user@remote".to_owned()).unwrap();
         let directory = RemoteWorkspaceDirectory::new("~/project".to_owned()).unwrap();
         let prepared = SshCommandContext::new(
+            crate::ssh::command::OpenSshExecutable::for_test(),
             PathBuf::from("/private/config/spaceterm/ssh_config"),
             destination.clone(),
             PathBuf::from("/private/runtime/spaceterm/control.sock"),

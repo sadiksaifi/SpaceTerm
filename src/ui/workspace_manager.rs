@@ -4870,6 +4870,7 @@ mod tests {
                 return Err(crate::terminal::RemoteChannelUnavailable);
             }
             Ok(SshCommandContext::new(
+                crate::ssh::command::OpenSshExecutable::for_test(),
                 PathBuf::from("/private/config/spaceterm/ssh_config"),
                 self.destination.clone(),
                 PathBuf::from("/private/runtime/spaceterm/master.sock"),

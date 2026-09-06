@@ -2628,6 +2628,7 @@ mod tests {
         let destination = SshDestination::new("user@remote".to_owned()).unwrap();
         let remote_directory = RemoteWorkspaceDirectory::new("~/project".to_owned()).unwrap();
         let prepared = SshCommandContext::new(
+            crate::ssh::command::OpenSshExecutable::for_test(),
             PathBuf::from("/private/config/spaceterm/ssh_config"),
             destination.clone(),
             PathBuf::from("/private/runtime/spaceterm/control.sock"),
@@ -2721,6 +2722,7 @@ mod tests {
         let destination = SshDestination::new("user@remote".to_owned()).unwrap();
         let remote_directory = RemoteWorkspaceDirectory::new("~/project".to_owned()).unwrap();
         let context = SshCommandContext::new(
+            crate::ssh::command::OpenSshExecutable::for_test(),
             PathBuf::from("/private/config/spaceterm/ssh_config"),
             destination.clone(),
             PathBuf::from("/private/runtime/spaceterm/control.sock"),
@@ -4024,6 +4026,7 @@ mod tests {
         let destination = SshDestination::new("user@remote".to_owned()).unwrap();
         let remote_directory = RemoteWorkspaceDirectory::new("~/project".to_owned()).unwrap();
         let prepared = SshCommandContext::new(
+            crate::ssh::command::OpenSshExecutable::for_test(),
             PathBuf::from("/private/config/spaceterm/ssh_config"),
             destination.clone(),
             PathBuf::from("/private/runtime/spaceterm/control.sock"),

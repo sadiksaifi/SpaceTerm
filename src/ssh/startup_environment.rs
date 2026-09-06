@@ -1,5 +1,5 @@
 use std::ffi::{OsStr, OsString};
-use std::os::unix::ffi::OsStrExt;
+use std::fmt;
 
 const FALLBACK_PATH: &str = "/usr/bin:/bin";
 const PATH_ENVIRONMENT_VARIABLE: &str = "PATH";
@@ -28,11 +28,17 @@ impl StartupSshEnvironmentReader for ProcessStartupSshEnvironmentReader {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub(crate) struct StartupSshEnvironment {
     path: OsString,
     locale: Vec<(&'static str, OsString)>,
     agent_socket: Option<OsString>,
+}
+
+impl fmt::Debug for StartupSshEnvironment {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("StartupSshEnvironment(<redacted>)")
+    }
 }
 
 impl Default for StartupSshEnvironment {
@@ -113,7 +119,7 @@ impl StartupSshEnvironment {
 }
 
 fn safe_environment_value(value: &OsStr) -> bool {
-    let bytes = value.as_bytes();
+    let bytes = value.as_encoded_bytes();
     !bytes.is_empty()
         && bytes.len() <= MAXIMUM_CAPTURED_ENVIRONMENT_VALUE_BYTES
         && !bytes.iter().any(u8::is_ascii_control)
@@ -125,6 +131,18 @@ mod tests {
     use std::os::unix::ffi::OsStringExt;
 
     use super::*;
+
+    #[test]
+    fn debug_should_redact_captured_values() {
+        let environment = StartupSshEnvironment::for_test_with_path(
+            "/sensitive/bin".into(),
+            Some("/sensitive/agent.sock".into()),
+        );
+
+        let debug = format!("{environment:?}");
+        assert_eq!(debug, "StartupSshEnvironment(<redacted>)");
+        assert!(!debug.contains("sensitive"));
+    }
 
     #[derive(Default)]
     struct TestStartupSshEnvironmentReader {
