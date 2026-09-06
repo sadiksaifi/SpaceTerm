@@ -335,8 +335,9 @@ event publication without naming an Operating-System Adapter or POSIX mechanism.
 Application composition selects one concrete Native PTY Adapter factory and injects it through
 Terminal Session construction. The Native PTY Owner passes its existing platform-neutral launch
 and geometry values to that narrow construction Interface, then owns only the returned Adapter and
-termination authority. Adapter construction failures cross the Interface as one platform-neutral
-typed failure and retain the Native PTY startup-stage mapping.
+termination authority. Adapter construction failures cross the Interface only as a closed,
+platform-neutral classification and retain the Native PTY startup-stage mapping. Those failures do
+not carry concrete paths, command values, platform mechanisms, or raw Operating-System errors.
 
 Local Shell Process and remote Terminal Session Channel launches enter the same Native PTY Owner
 Seam and ownership lifecycle. Terminal Session creation returns after starting its worker, while

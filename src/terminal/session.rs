@@ -3459,6 +3459,63 @@ mod tests {
         }
     }
 
+    struct ScriptedSessionAdapterFactory {
+        parts: Mutex<Option<NativePtyAdapterParts>>,
+        startup_gate: Option<ScriptedStartupGate>,
+    }
+
+    struct ScriptedStartupGate {
+        entered: mpsc::SyncSender<()>,
+        release: Mutex<mpsc::Receiver<()>>,
+    }
+
+    impl ScriptedSessionAdapterFactory {
+        fn immediate(parts: NativePtyAdapterParts) -> Self {
+            Self {
+                parts: Mutex::new(Some(parts)),
+                startup_gate: None,
+            }
+        }
+
+        fn gated(
+            parts: NativePtyAdapterParts,
+            entered: mpsc::SyncSender<()>,
+            release: mpsc::Receiver<()>,
+        ) -> Self {
+            Self {
+                parts: Mutex::new(Some(parts)),
+                startup_gate: Some(ScriptedStartupGate {
+                    entered,
+                    release: Mutex::new(release),
+                }),
+            }
+        }
+    }
+
+    impl NativePtyAdapterFactory for ScriptedSessionAdapterFactory {
+        fn create(
+            &self,
+            launch: NativePtyLaunch,
+            size: NativePtySize,
+        ) -> Result<
+            NativePtyAdapterParts,
+            crate::platform::native_pty::NativePtyAdapterConstructionFailure,
+        > {
+            let NativePtyLaunch::Local { working_directory } = launch else {
+                panic!("scripted factory expected a Local launch")
+            };
+            assert_eq!(working_directory, PathBuf::from("/scripted"));
+            assert_eq!(size, pty_size(test_geometry()));
+            if let Some(gate) = &self.startup_gate {
+                gate.entered.send(()).unwrap();
+                gate.release.lock().unwrap().recv().unwrap();
+            }
+            self.parts.lock().unwrap().take().ok_or(
+                crate::platform::native_pty::NativePtyAdapterConstructionFailure::ResourceCreationFailed,
+            )
+        }
+    }
+
     type ScriptedStart = Result<StartedSession, SessionError>;
 
     fn start_scripted_session(
@@ -3480,34 +3537,36 @@ mod tests {
             termination_releases_reader,
         } = options;
 
+        let adapter_factory = ScriptedSessionAdapterFactory::immediate(NativePtyAdapterParts {
+            adapter: Box::new(ScriptedPty {
+                reader: Some(Box::new(ScriptedReader {
+                    steps,
+                    pending: VecDeque::new(),
+                    records: records_for_pty.clone(),
+                })),
+                records: records_for_pty,
+                reader_error,
+                resize_error,
+                write_error,
+                wait_error,
+                wait_times_out,
+                exit_code,
+            }),
+            termination: Arc::new(ScriptedPtyTerminator {
+                records: records_for_terminator,
+                reader_steps: terminator_steps,
+                error: termination_error,
+                releases_reader: termination_releases_reader,
+            }),
+        });
         let result = TerminalSession::start_with(
             test_geometry(),
             Path::new("/scripted"),
             move |size, output, close_handle| {
-                assert_eq!(size, pty_size(test_geometry()));
-                NativePtyOwner::from_adapter_parts(
-                    NativePtyAdapterParts {
-                        adapter: Box::new(ScriptedPty {
-                            reader: Some(Box::new(ScriptedReader {
-                                steps,
-                                pending: VecDeque::new(),
-                                records: records_for_pty.clone(),
-                            })),
-                            records: records_for_pty,
-                            reader_error,
-                            resize_error,
-                            write_error,
-                            wait_error,
-                            wait_times_out,
-                            exit_code,
-                        }),
-                        termination: Arc::new(ScriptedPtyTerminator {
-                            records: records_for_terminator,
-                            reader_steps: terminator_steps,
-                            error: termination_error,
-                            releases_reader: termination_releases_reader,
-                        }),
-                    },
+                NativePtyOwner::start(
+                    &adapter_factory,
+                    NativePtyLaunch::local(PathBuf::from("/scripted")),
+                    size,
                     output,
                     close_handle,
                 )
@@ -3730,7 +3789,7 @@ mod tests {
                 spawn_entered.send(()).unwrap();
                 release.recv().unwrap();
                 Err(NativePtyStartupFailure::Adapter(
-                    "scripted spawn unavailable".to_owned(),
+                    crate::platform::native_pty::NativePtyAdapterConstructionFailure::ResourceCreationFailed,
                 ))
             },
         )
@@ -3755,7 +3814,7 @@ mod tests {
         let SessionEvent::Failed(SessionFailure::Startup { message, .. }) = event else {
             unreachable!("the event predicate accepts only typed startup failures")
         };
-        assert!(message.contains("scripted spawn unavailable"));
+        assert_eq!(message, "Native PTY resources could not be created");
         session.shutdown();
     }
 
@@ -3769,40 +3828,37 @@ mod tests {
         let (startup_entered, entered) = mpsc::sync_channel(1);
         let (release_startup, release) = mpsc::sync_channel(1);
 
-        let (mut session, _events, _accessibility) = TerminalSession::start_deferred_with(
+        let adapter_factory = Arc::new(ScriptedSessionAdapterFactory::gated(
+            NativePtyAdapterParts {
+                adapter: Box::new(ScriptedPty {
+                    reader: Some(Box::new(ScriptedReader {
+                        steps,
+                        pending: VecDeque::new(),
+                        records: adapter_records.clone(),
+                    })),
+                    records: adapter_records,
+                    reader_error: None,
+                    resize_error: None,
+                    write_error: None,
+                    wait_error: None,
+                    wait_times_out: false,
+                    exit_code: 0,
+                }),
+                termination: Arc::new(ScriptedPtyTerminator {
+                    records: termination_records,
+                    reader_steps: termination_steps,
+                    error: None,
+                    releases_reader: true,
+                }),
+            },
+            startup_entered,
+            release,
+        ));
+        let (mut session, _events, _accessibility) = TerminalSession::start(
+            adapter_factory,
             test_geometry(),
             Path::new("/scripted"),
             None,
-            move |_size, output, close_handle| {
-                startup_entered.send(()).unwrap();
-                release.recv().unwrap();
-                NativePtyOwner::from_adapter_parts(
-                    NativePtyAdapterParts {
-                        adapter: Box::new(ScriptedPty {
-                            reader: Some(Box::new(ScriptedReader {
-                                steps,
-                                pending: VecDeque::new(),
-                                records: adapter_records.clone(),
-                            })),
-                            records: adapter_records,
-                            reader_error: None,
-                            resize_error: None,
-                            write_error: None,
-                            wait_error: None,
-                            wait_times_out: false,
-                            exit_code: 0,
-                        }),
-                        termination: Arc::new(ScriptedPtyTerminator {
-                            records: termination_records,
-                            reader_steps: termination_steps,
-                            error: None,
-                            releases_reader: true,
-                        }),
-                    },
-                    output,
-                    close_handle,
-                )
-            },
         )
         .unwrap();
 
@@ -3815,8 +3871,13 @@ mod tests {
             state.pty_drops == 1 && state.reader_drops == 1
         });
         assert_eq!(
-            (state.terminations, state.pty_drops, state.reader_drops),
-            (1, 1, 1)
+            (
+                state.terminations,
+                state.waits,
+                state.pty_drops,
+                state.reader_drops
+            ),
+            (1, 0, 1, 1)
         );
     }
 
@@ -3851,7 +3912,7 @@ mod tests {
         let SessionEvent::Failed(SessionFailure::Startup { message, .. }) = event else {
             unreachable!("the event predicate accepts only typed PTY startup failures")
         };
-        assert!(message.contains("Workspace working directory"));
+        assert_eq!(message, "Native PTY launch directory is unavailable");
         drop(session);
     }
 
@@ -3897,7 +3958,7 @@ mod tests {
         let SessionEvent::Failed(SessionFailure::Startup { message, .. }) = event else {
             unreachable!("the event predicate accepts only typed PTY startup failures")
         };
-        assert!(message.contains("Workspace working directory"));
+        assert_eq!(message, "Native PTY launch directory is unavailable");
         drop(session);
     }
 

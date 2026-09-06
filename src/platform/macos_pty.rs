@@ -783,8 +783,34 @@ impl NativePtyAdapterFactory for MacosNativePtyAdapterFactory {
         launch: NativePtyLaunch,
         size: NativePtySize,
     ) -> Result<NativePtyAdapterParts, NativePtyAdapterConstructionFailure> {
-        spawn_native_pty(launch, size)
-            .map_err(|error| NativePtyAdapterConstructionFailure::new(error.to_string()))
+        spawn_native_pty(launch, size).map_err(classify_pty_construction_failure)
+    }
+}
+
+fn classify_pty_construction_failure(error: PtyError) -> NativePtyAdapterConstructionFailure {
+    match error {
+        PtyError::WorkingDirectory { .. } => {
+            NativePtyAdapterConstructionFailure::LaunchDirectoryUnavailable
+        }
+        PtyError::Open(_) => NativePtyAdapterConstructionFailure::ResourceCreationFailed,
+        PtyError::MissingDescriptor
+        | PtyError::ReadTermios(_)
+        | PtyError::ConfigureTermios(_)
+        | PtyError::InitialResize(_) => {
+            NativePtyAdapterConstructionFailure::ResourceConfigurationFailed
+        }
+        PtyError::SpawnShell { .. } => NativePtyAdapterConstructionFailure::ProcessStartFailed,
+        PtyError::MissingProcessGroup
+        | PtyError::InspectSession(_)
+        | PtyError::UnisolatedSession => {
+            NativePtyAdapterConstructionFailure::ProcessOwnershipFailed
+        }
+        PtyError::CloneReader(_) | PtyError::TakeWriter(_) => {
+            NativePtyAdapterConstructionFailure::InputOutputUnavailable
+        }
+        PtyError::SshChannelUnavailable => {
+            NativePtyAdapterConstructionFailure::RemoteChannelUnavailable
+        }
     }
 }
 
