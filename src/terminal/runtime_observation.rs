@@ -13,6 +13,9 @@ pub(crate) struct RuntimeObservation {
 
 #[derive(Debug)]
 struct RuntimeObservationState {
+    clock: Arc<dyn crate::observation::ContinuousClock>,
+    last_sample_ns: AtomicU64,
+    last_transition_ns: AtomicU64,
     worker_generation: AtomicU64,
     screens_published: AtomicU64,
     screens_enqueued: AtomicU64,
@@ -174,9 +177,17 @@ pub(crate) struct RuntimeVisibility {
 }
 
 impl RuntimeObservation {
+    #[cfg(test)]
     pub(crate) fn new() -> Self {
+        Self::with_clock(Arc::new(crate::observation::TestClock::default()))
+    }
+
+    pub(crate) fn with_clock(clock: Arc<dyn crate::observation::ContinuousClock>) -> Self {
         Self {
             state: Arc::new(RuntimeObservationState {
+                clock,
+                last_sample_ns: AtomicU64::new(0),
+                last_transition_ns: AtomicU64::new(0),
                 worker_generation: AtomicU64::new(0),
                 screens_published: AtomicU64::new(0),
                 screens_enqueued: AtomicU64::new(0),
@@ -226,6 +237,9 @@ impl RuntimeObservation {
     }
 
     pub(crate) fn worker_started(&self, geometry: TerminalGeometry) {
+        if self.state.sealed.load(Ordering::Acquire) {
+            return;
+        }
         self.store_pty_geometry(geometry);
         self.state
             .lifecycle
@@ -233,6 +247,9 @@ impl RuntimeObservation {
     }
 
     pub(crate) fn screen_published(&self, generation: u64) {
+        if self.state.sealed.load(Ordering::Acquire) {
+            return;
+        }
         if self
             .state
             .worker_generation
@@ -273,12 +290,18 @@ impl RuntimeObservation {
     }
 
     pub(crate) fn event_send_failed(&self) {
+        if self.state.sealed.load(Ordering::Acquire) {
+            return;
+        }
         if self.state.ui_attached.load(Ordering::Acquire) {
             self.mark_failed();
         }
     }
 
     pub(crate) fn ui_dispatch(&self, drain_count: usize, queue_length: usize) {
+        if self.state.sealed.load(Ordering::Acquire) {
+            return;
+        }
         self.increment(&self.state.ui_dispatches);
         self.update_high_water(&self.state.ui_drain_high_water, drain_count as u64);
         self.state
@@ -287,6 +310,9 @@ impl RuntimeObservation {
     }
 
     pub(crate) fn ui_screen_received(&self) {
+        if self.state.sealed.load(Ordering::Acquire) {
+            return;
+        }
         self.increment(&self.state.ui_screen_events);
     }
 
@@ -303,10 +329,16 @@ impl RuntimeObservation {
     }
 
     pub(crate) fn render_started(&self, generation: u64) {
+        if self.state.sealed.load(Ordering::Acquire) {
+            return;
+        }
         self.store_nondecreasing(&self.state.render_latest_generation, generation);
     }
 
     pub(crate) fn next_frame(&self, generation: u64) {
+        if self.state.sealed.load(Ordering::Acquire) {
+            return;
+        }
         if !self.state.presentable.load(Ordering::Acquire) {
             return;
         }
@@ -330,6 +362,9 @@ impl RuntimeObservation {
     }
 
     pub(crate) fn visibility(&self, visibility: RuntimeVisibility) {
+        if self.state.sealed.load(Ordering::Acquire) {
+            return;
+        }
         let Some(base_version) = self.begin_fact_update(&self.state.visibility_version) else {
             return;
         };
@@ -380,6 +415,9 @@ impl RuntimeObservation {
     }
 
     pub(crate) fn product_visibility(&self, workspace_visible: bool, pane_visible: bool) {
+        if self.state.sealed.load(Ordering::Acquire) {
+            return;
+        }
         let visibility = RuntimeVisibility {
             presentable: !self.state.minimized.load(Ordering::Relaxed)
                 && !self.state.occluded.load(Ordering::Relaxed)
@@ -395,6 +433,9 @@ impl RuntimeObservation {
     }
 
     pub(crate) fn resize_requested(&self, notified: bool, coalesced: bool) {
+        if self.state.sealed.load(Ordering::Acquire) {
+            return;
+        }
         self.increment(&self.state.resize_requests);
         if notified {
             self.increment(&self.state.resize_notifications);
@@ -405,15 +446,24 @@ impl RuntimeObservation {
     }
 
     pub(crate) fn resize_applied(&self, geometry: TerminalGeometry) {
+        if self.state.sealed.load(Ordering::Acquire) {
+            return;
+        }
         self.store_pty_geometry(geometry);
         self.increment(&self.state.resize_applied);
     }
 
     pub(crate) fn terminal_input_accepted(&self) {
+        if self.state.sealed.load(Ordering::Acquire) {
+            return;
+        }
         self.increment(&self.state.terminal_inputs_accepted);
     }
 
     pub(crate) fn pane_released(&self) {
+        if self.state.sealed.load(Ordering::Acquire) {
+            return;
+        }
         self.state.ui_attached.store(false, Ordering::Release);
         self.visibility(RuntimeVisibility {
             presentable: false,
@@ -426,6 +476,9 @@ impl RuntimeObservation {
     }
 
     pub(crate) fn session_exited(&self, class_code: u64) {
+        if self.state.sealed.load(Ordering::Acquire) {
+            return;
+        }
         self.push_terminal_transition(
             RuntimeLifecycle::Exited,
             RuntimeEventKind::SessionExited,
@@ -434,6 +487,9 @@ impl RuntimeObservation {
     }
 
     pub(crate) fn session_failed(&self, class_code: u64) {
+        if self.state.sealed.load(Ordering::Acquire) {
+            return;
+        }
         self.push_terminal_transition(
             RuntimeLifecycle::Failed,
             RuntimeEventKind::SessionFailed,
@@ -462,10 +518,15 @@ impl RuntimeObservation {
         let resize_coalesced = self.state.resize_coalesced.load(Ordering::Relaxed);
         let resize_requests = self.state.resize_requests.load(Ordering::Relaxed);
         RuntimeSample {
-            continuous_ns: continuous_time_ns().unwrap_or_else(|| {
-                self.mark_failed();
-                0
-            }),
+            continuous_ns: self
+                .state
+                .clock
+                .now_ns()
+                .filter(|now| *now >= self.state.last_sample_ns.fetch_max(*now, Ordering::AcqRel))
+                .unwrap_or_else(|| {
+                    self.mark_failed();
+                    0
+                }),
             worker_generation,
             screens_published,
             screens_enqueued,
@@ -525,6 +586,9 @@ impl RuntimeObservation {
     }
 
     pub(crate) fn fail(&self) {
+        if self.state.sealed.load(Ordering::Acquire) {
+            return;
+        }
         self.mark_failed();
     }
 
@@ -710,7 +774,12 @@ impl RuntimeObservation {
             self.mark_failed();
             return;
         };
-        let Some(continuous_ns) = continuous_time_ns() else {
+        let Some(continuous_ns) = self.state.clock.now_ns().filter(|now| {
+            *now >= self
+                .state
+                .last_transition_ns
+                .fetch_max(*now, Ordering::AcqRel)
+        }) else {
             drop(transitions);
             self.mark_failed();
             return;
@@ -762,7 +831,12 @@ impl RuntimeObservation {
             self.mark_failed();
             return;
         };
-        let Some(continuous_ns) = continuous_time_ns() else {
+        let Some(continuous_ns) = self.state.clock.now_ns().filter(|now| {
+            *now >= self
+                .state
+                .last_transition_ns
+                .fetch_max(*now, Ordering::AcqRel)
+        }) else {
             drop(transitions);
             self.mark_failed();
             return;
@@ -870,7 +944,12 @@ impl RuntimeObservation {
         ) else {
             return;
         };
-        let Some(continuous_ns) = continuous_time_ns() else {
+        let Some(continuous_ns) = self.state.clock.now_ns().filter(|now| {
+            *now >= self
+                .state
+                .last_transition_ns
+                .fetch_max(*now, Ordering::AcqRel)
+        }) else {
             return;
         };
         transitions.push_back(RuntimeTransition {
@@ -882,35 +961,6 @@ impl RuntimeObservation {
             aux1: 0,
         });
     }
-}
-
-#[repr(C)]
-struct MachTimebaseInfo {
-    numer: u32,
-    denom: u32,
-}
-
-unsafe extern "C" {
-    fn mach_continuous_time() -> u64;
-    fn mach_timebase_info(info: *mut MachTimebaseInfo) -> i32;
-}
-
-fn continuous_time_ns() -> Option<u64> {
-    static TIMEBASE: std::sync::OnceLock<Option<(u32, u32)>> = std::sync::OnceLock::new();
-    let &(numer, denom) = TIMEBASE
-        .get_or_init(|| {
-            let mut info = MachTimebaseInfo { numer: 0, denom: 0 };
-            // SAFETY: `info` is writable for the duration of this synchronous system call.
-            let status = unsafe { mach_timebase_info(&raw mut info) };
-            (status == 0 && info.numer != 0 && info.denom != 0).then_some((info.numer, info.denom))
-        })
-        .as_ref()?;
-    // SAFETY: `mach_continuous_time` has no arguments and is available on the supported macOS.
-    let ticks = unsafe { mach_continuous_time() };
-    let nanoseconds = u128::from(ticks)
-        .checked_mul(u128::from(numer))?
-        .checked_div(u128::from(denom))?;
-    u64::try_from(nanoseconds).ok()
 }
 
 #[cfg(test)]

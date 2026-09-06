@@ -135,13 +135,6 @@ pub(crate) fn init(cx: &mut App) {
     cx.on_action(|_: &ShowAllApplications, cx| cx.unhide_other_apps());
     cx.on_action(minimize_active_window);
     cx.on_action(toggle_active_window_full_screen);
-    cx.on_app_quit(|_| {
-        if crate::platform::acceptance_observation::finish_runtime_observation().is_err() {
-            eprintln!("acceptance runtime observation did not complete");
-        }
-        async {}
-    })
-    .detach();
     cx.set_menus(vec![
         Menu {
             name: "SpaceTerm".into(),
@@ -582,8 +575,6 @@ pub(crate) enum RuntimeError {
     Initialization,
     #[error("Operating-System Window creation failed")]
     WindowOpen,
-    #[error("Runtime Observation configuration failed")]
-    Observation,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -617,8 +608,7 @@ pub(crate) fn launch<A: SshProcessAdapter>(
 }
 
 pub(crate) fn run(host: HostComposition) -> Result<(), RuntimeError> {
-    crate::platform::acceptance_observation::configure_from_environment()
-        .map_err(|_| RuntimeError::Observation)?;
+    let observation = host.adapters.lifecycle.observation.clone();
     let failure = Rc::new(std::cell::Cell::new(None));
     let reported_failure = Rc::clone(&failure);
     gpui::Application::new().run(move |cx| {
@@ -627,7 +617,10 @@ pub(crate) fn run(host: HostComposition) -> Result<(), RuntimeError> {
             cx.quit();
         }
     });
-    if crate::platform::acceptance_observation::finish_runtime_observation().is_err() {
+    if observation
+        .as_ref()
+        .is_some_and(|owner| owner.finish().is_err())
+    {
         eprintln!("acceptance runtime observation did not complete");
     }
     failure.get().map_or(Ok(()), Err)
@@ -646,6 +639,17 @@ fn start_application(
                 eprintln!("failed to register Services: {error}");
             }
             init(cx);
+            if let Some(observation) = host.adapters.lifecycle.observation.clone() {
+                cx.on_app_quit(move |cx| {
+                    let observation = observation.clone();
+                    cx.background_executor().spawn(async move {
+                        if observation.finish().is_err() {
+                            eprintln!("acceptance runtime observation did not complete");
+                        }
+                    })
+                })
+                .detach();
+            }
             open(cx, host)
         },
     )

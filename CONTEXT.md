@@ -1163,13 +1163,51 @@ existing authenticated protocol and acceptance scope.
 
 ### Authenticated Runtime Observation
 
-Release acceptance may activate one dormant, content-free Runtime Observation through the private
-Unix socket already authenticated to the exact mounted SpaceTerm process. The launch capability is
-removed from the environment before GPUI or any Terminal Session starts and is never inherited by
-a PTY or Shell Process. One claimed production Pane and its Terminal Session publish only bounded
-numeric counters, closed lifecycle and visibility states, geometry, and Presentation Generations;
-terminal cells or hashes, titles, commands, paths, environment, key identity, clipboard data,
-Selection text, and hyperlink metadata are outside the protocol.
+`src/observation.rs` is the platform-neutral Authenticated Runtime Observation owner. Host
+Composition consumes and removes the optional launch capability before capturing startup paths,
+SSH environment, or shell resources. No capability means `None`: no writer, Failure Action channel,
+transport, native clock, acceptance task, or 50-millisecond visibility monitor is constructed.
+One application-scoped owner travels through the existing Workspace, Tab, and Pane lifecycle
+constructor wiring. Its first production Pane claims a non-cloneable Pane lease and a separate
+single-use Terminal Session lease. The Workspace-bound factory passes that exact lease explicitly
+to Terminal Session construction; no process-global request slot or factory lookup remains.
+Removed Panes, dropped owners, consumed leases, and successor applications cannot reclaim it.
+
+Portable Rust owns bounded framing, strict schema and field ordering, escaping, request sequences,
+claim and completion authority, counters and transitions, geometry, visibility, final sealing,
+writer cadence, acknowledgement, and content-free errors. One background writer owns the initial
+proof and every later socket operation. GPUI's quit hook returns a background completion task;
+post-event-loop completion serializes against the same owner and retains its original result.
+Foreground frame delivery only transfers prepared ownership to that writer. Dropping the owner
+revokes authority and disconnects shutdown, allowing the existing writer to clean up off-thread.
+Worker and UI producers publish only bounded atomic and fixed-capacity queue facts and become inert
+after sealing. The result channel has eight slots, the request channel one, and portable request
+policy rejects overlap, foreign receipts, and illegal phase ordering before publication.
+
+The native audit retains independent private-owner filesystem, packaged-executable authentication,
+local byte transport, and continuous-clock capabilities. The current macOS filesystem capability
+checks no-symlink private-owner directory facts; Rust owns the environment allowlist and directory
+containment policy. Package authentication privately retains exact canonical bundle placement,
+executable device/inode comparison and read-only mount inspection. It consumes native challenge fields before returning validated portable authentication facts, and
+publishes native proof fields directly to the byte transport between portable proof sections. The
+legacy challenge/proof bytes remain intact without transferring native identity values to the
+portable owner, application, Pane, or Terminal Session code. Local transport privately retains Unix connection and descriptor
+flags; native errors are reduced to closed I/O kinds before crossing its Interface. No aggregate
+Acceptance Platform or release-verification Adapter exists.
+
+The remaining Mach clock produces checked, sleep-inclusive monotonic nanoseconds in the verifier's
+existing time domain. Rust `Instant` cannot replace those evidence timestamps: its sleep semantics
+are unspecified and it exposes no common absolute epoch. Portable `Instant` retains the existing
+absolute writer scheduling and bounded shutdown deadline policy. See the
+[Rust Instant contract](https://doc.rust-lang.org/std/time/struct.Instant.html).
+The injected clock is independently replaceable in portable tests; no Mach ticks cross its Interface.
+
+One claimed production Pane and its Terminal Session publish only bounded numeric counters,
+closed lifecycle and visibility states, geometry, and Presentation Generations. Terminal cells or
+hashes, titles, commands, paths, environment, key identity, clipboard data, Selection text, and
+hyperlink metadata are outside the runtime protocol. Native package identity remains confined to
+the existing authenticated launch envelope, not runtime frames or diagnostics. Authentication and
+request Debug values are redacted; collection failure remains NOT-RUN.
 
 The trusted same-UID mounted-DMG acceptance verifier extends that authenticated app peer with an
 **Acceptance Failure Action** channel. The app independently requires its own canonical packaged

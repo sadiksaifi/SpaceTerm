@@ -31,7 +31,7 @@ use super::{
     TERMINAL_PASTE_CONFIRMATION_KEY_CONTEXT,
 };
 use crate::domain::{PaneId, TabId, WorkspaceId};
-use crate::platform::acceptance_observation::{
+use crate::observation::{
     FailureActionCase, FailureActionController, FailureActionEvent, FailureActionPhase,
     FailureActionRequest, FailureActionResult, FailurePaneState, FailurePendingRecovery,
 };
@@ -220,6 +220,7 @@ pub(crate) struct TerminalPane {
     remote_connection_generation: Option<u64>,
     remote_input_blocked: bool,
     remote_restart_start_pending: bool,
+    observation_lease: Option<crate::observation::ObservationLease>,
     acceptance_observation_claimed: bool,
     runtime_observation: Option<crate::terminal::RuntimeObservation>,
     failure_actions: Option<FailureActionController>,
@@ -476,6 +477,7 @@ impl TerminalPane {
             remote_connection_generation: None,
             remote_input_blocked: false,
             remote_restart_start_pending: false,
+            observation_lease: None,
             acceptance_observation_claimed: false,
             runtime_observation: None,
             failure_actions: None,
@@ -1026,8 +1028,10 @@ impl TerminalPane {
         }) {
             self.complete_failure_action(FailureActionResult::Recovered);
         }
-        if let Some(observation) =
-            crate::platform::acceptance_observation::prepare_once(rows, columns)
+        if let Some(observation) = self
+            .observation_lease
+            .as_ref()
+            .and_then(|lease| lease.prepare_once(rows, columns))
             && let Err(error) = observation.emit()
         {
             eprintln!("failed to emit acceptance observation: {error}");
@@ -1184,6 +1188,7 @@ impl TerminalPane {
                 self.native_service_session_identity.wrapping_add(1);
         }
         self.failure_actions.take();
+        self.observation_lease.take();
     }
 
     fn validate_remote_generation(&self, generation: u64) -> Result<(), RemotePaneLifecycleError> {
@@ -1327,6 +1332,7 @@ impl TerminalPane {
             observation.pane_released();
         }
         self._runtime_visibility_task.take();
+        self.observation_lease.take();
         self.acceptance_observation_claimed = false;
         self.session.take();
         self.native_service_session_identity = self.native_service_session_identity.wrapping_add(1);
@@ -1703,10 +1709,8 @@ impl TerminalPane {
             return;
         }
         self.last_geometry = Some(geometry);
-        if self.acceptance_observation_claimed {
-            crate::platform::acceptance_observation::update_geometry(observation_geometry(
-                geometry,
-            ));
+        if let Some(lease) = &self.observation_lease {
+            lease.update_geometry(observation_geometry(geometry));
         }
         self.sync_scrollbar(cx);
 
@@ -1724,12 +1728,20 @@ impl TerminalPane {
         }
         self.session_start_attempted = true;
 
-        let claimed = crate::platform::acceptance_observation::claim_session(
-            self.font_family.as_ref(),
-            observation_geometry(geometry),
-        );
-        self.runtime_observation = claimed.as_ref().map(|claimed| claimed.runtime.clone());
-        self.failure_actions = claimed.and_then(|claimed| claimed.failure_actions);
+        let claimed = self
+            .lifecycle_dependencies
+            .observation
+            .as_ref()
+            .and_then(|owner| {
+                owner.claim_session(self.font_family.as_ref(), observation_geometry(geometry))
+            });
+        let mut session_observation = None;
+        if let Some(claimed) = claimed {
+            self.runtime_observation = Some(claimed.runtime);
+            self.failure_actions = claimed.failure_actions;
+            self.observation_lease = Some(claimed.lease);
+            session_observation = Some(claimed.session);
+        }
         self.acceptance_observation_claimed = self.runtime_observation.is_some();
         if self.acceptance_observation_claimed {
             self.start_runtime_visibility_monitor(cx);
@@ -1763,7 +1775,10 @@ impl TerminalPane {
                 return;
             }
         };
-        match self.session_factory.start(geometry, prepared_launch) {
+        match self
+            .session_factory
+            .start_observed(geometry, prepared_launch, session_observation)
+        {
             Ok(started) => {
                 self.remote_restart_start_pending = false;
                 if self
@@ -4323,13 +4338,11 @@ fn terminal_geometry(
     )
 }
 
-fn observation_geometry(
-    geometry: TerminalGeometry,
-) -> crate::platform::acceptance_observation::ObservationGeometry {
+fn observation_geometry(geometry: TerminalGeometry) -> crate::observation::ObservationGeometry {
     let grid = geometry.grid();
     let logical = geometry.logical_grid_size();
     let backing = geometry.backing_grid_size();
-    crate::platform::acceptance_observation::ObservationGeometry {
+    crate::observation::ObservationGeometry {
         rows: grid.rows,
         columns: grid.cols,
         logical_width: logical.width,

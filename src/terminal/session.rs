@@ -378,6 +378,16 @@ pub(crate) trait TerminalSessionFactory {
         launch_plan: TerminalLaunchPlan,
     ) -> Result<StartedTerminalSession, SessionError>;
 
+    fn start_observed(
+        &self,
+        geometry: TerminalGeometry,
+        launch_plan: TerminalLaunchPlan,
+        observation: Option<crate::observation::SessionObservationLease>,
+    ) -> Result<StartedTerminalSession, SessionError> {
+        drop(observation);
+        self.start(geometry, launch_plan)
+    }
+
     fn fallback_title(&self) -> String {
         "Terminal".to_owned()
     }
@@ -514,8 +524,18 @@ impl TerminalSessionFactory for NativeTerminalSessionFactory {
         geometry: TerminalGeometry,
         launch_plan: TerminalLaunchPlan,
     ) -> Result<StartedTerminalSession, SessionError> {
+        self.start_observed(geometry, launch_plan, None)
+    }
+
+    fn start_observed(
+        &self,
+        geometry: TerminalGeometry,
+        launch_plan: TerminalLaunchPlan,
+        observation: Option<crate::observation::SessionObservationLease>,
+    ) -> Result<StartedTerminalSession, SessionError> {
         let observation =
-            crate::platform::acceptance_observation::take_runtime_session_observation();
+            observation.and_then(crate::observation::SessionObservationLease::consume);
+
         let (session, events, accessibility) = match launch_plan {
             TerminalLaunchPlan::Local(local) => TerminalSession::start(
                 Arc::clone(&self.native_pty_adapter_factory),

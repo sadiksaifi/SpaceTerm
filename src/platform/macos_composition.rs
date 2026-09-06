@@ -10,7 +10,18 @@ use std::{path::PathBuf, rc::Rc, sync::Arc};
 pub(crate) fn main() {
     let code = crate::app::dispatch_or_prepare_application(
         super::macos_askpass_transport::dispatch_helper_from_environment,
-        || crate::app::launch(capture_startup_dependencies(), compose),
+        || {
+            let observation = match super::macos_observation::discover() {
+                Ok(observation) => observation,
+                Err(_) => {
+                    eprintln!("acceptance observation configuration failed");
+                    return 2;
+                }
+            };
+            crate::app::launch(capture_startup_dependencies(), move |startup| {
+                compose(startup, observation)
+            })
+        },
     )
     .unwrap_or_else(|code| code);
     if code != 0 {
@@ -70,10 +81,12 @@ pub(crate) fn testing_desktop_profile(direction: spaceterm_ui::TextDirection) ->
 
 fn compose(
     startup: StartupDependencies<super::macos_ssh_process::MacOsSshProcessAdapter>,
+    observation: Option<crate::observation::AuthenticatedObservation>,
 ) -> Result<HostComposition, DesktopProfileError> {
     let activity: Rc<dyn crate::platform::application_activity::ApplicationActivity> =
         Rc::new(crate::platform::macos_application::MacosApplicationActivity);
     let lifecycle = crate::ui::pane_lifecycle::PaneLifecycleDependencies {
+        observation,
         attention: crate::terminal::attention_runtime::AttentionRuntime::new(
             Box::new(crate::platform::macos_attention::AppKitAudioBell),
             Box::new(crate::platform::macos_attention::AppKitDockAttention::default()),
