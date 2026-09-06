@@ -254,6 +254,7 @@ pub(super) struct WorkspacePicker {
     open: bool,
     lifecycle_generation: u64,
     operation_generation: u64,
+    finder_generation: u64,
     parsed: Option<ParsedWorkspacePath>,
     snapshot: Option<LoadedDirectorySnapshot>,
     rows: Vec<WorkspacePickerDirectoryEntry>,
@@ -296,6 +297,7 @@ impl WorkspacePicker {
             open: false,
             lifecycle_generation: 0,
             operation_generation: 0,
+            finder_generation: 0,
             parsed: None,
             snapshot: None,
             rows: Vec::new(),
@@ -799,7 +801,8 @@ impl WorkspacePicker {
 
     fn request_finder(&mut self, cx: &mut Context<Self>) {
         if self.open && self.busy.is_none() {
-            self.operation_generation = self.operation_generation.wrapping_add(1);
+            // The chooser must not retire a directory read that cancellation still needs.
+            self.finder_generation = self.finder_generation.wrapping_add(1);
             self.busy = Some(WorkspacePickerBusy::Finder);
             self.publish(cx);
             cx.emit(WorkspacePickerEvent::FinderRequested);
@@ -985,13 +988,13 @@ fn status_for_error(error: WorkspacePickerFilesystemError) -> WorkspacePickerSta
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct FinderRequestIdentity {
     lifecycle: u64,
-    operation: u64,
+    request: u64,
 }
 impl WorkspacePicker {
     pub(super) fn finder_request_identity(&self) -> FinderRequestIdentity {
         FinderRequestIdentity {
             lifecycle: self.lifecycle_generation,
-            operation: self.operation_generation,
+            request: self.finder_generation,
         }
     }
     pub(super) fn complete_finder_request(
@@ -1732,6 +1735,46 @@ mod tests {
                 assert_eq!(picker.actions_menu().len(), 3);
             })
         });
+    }
+
+    #[gpui::test]
+    fn finder_cancellation_preserves_a_pending_directory_refresh(cx: &mut TestAppContext) {
+        let filesystem = Arc::new(ScriptedWorkspacePickerFilesystem::new([home()], []));
+        filesystem.set_listed_entries([WorkspacePickerDirectoryEntry::new(
+            "Projects".to_owned(),
+            home().join("Projects"),
+        )]);
+        let (picker, cx) = workspace_picker(filesystem, cx);
+
+        // Exercise both possible orders without parking the background executor until Finder
+        // is already open. The real refresh task must still publish its result in either order.
+        for cancel_before_refresh in [true, false] {
+            let identity = cx.update(|window, cx| {
+                picker.update(cx, |picker, cx| {
+                    picker.retry(window, cx);
+                    assert_eq!(picker.status, WorkspacePickerStatus::Loading);
+                    picker.request_finder(cx);
+                    let identity = picker.finder_request_identity();
+                    if cancel_before_refresh {
+                        picker.complete_finder_request(identity, Ok(None), window, cx);
+                    }
+                    identity
+                })
+            });
+            cx.run_until_parked();
+            cx.update(|window, cx| {
+                picker.update(cx, |picker, cx| {
+                    assert_eq!(picker.status, WorkspacePickerStatus::Readable);
+                    if !cancel_before_refresh {
+                        picker.complete_finder_request(identity, Ok(None), window, cx);
+                    }
+                    assert!(picker.can_confirm());
+                    assert!(picker.path_input_is_focused(window, cx));
+                });
+            });
+            assert_eq!(path_bar(&picker, cx), HOME_DISPLAY);
+            assert_eq!(row_names(&picker, cx), vec!["Projects"]);
+        }
     }
 
     #[gpui::test]

@@ -111,6 +111,11 @@ Implementations. Startup and window failures cross this boundary only as closed,
 classifications; raw paths, environment, native error messages, and authentication values are not
 startup diagnostics.
 
+Application quit examines every live WorkspaceManager in GPUI's window registry, including
+inactive windows. If any manager requires close confirmation or already has one pending, the
+runtime activates a matching window and uses its close coordinator before allowing application
+quit. Removed windows retain no quit authority.
+
 The private macOS composition selects one complete validated Host Composition. Constructor-wiring
 values group independent capabilities without defining platform operations. Required capabilities
 must be present, startup HOME must be absolute, window chrome options must agree, and the desktop

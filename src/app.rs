@@ -203,24 +203,30 @@ fn toggle_active_window_full_screen(_: &ToggleFullScreen, cx: &mut App) {
 }
 
 fn request_application_quit(_: &QuitApplication, cx: &mut App) {
-    let Some(active_window) = cx.active_window() else {
-        cx.quit();
-        return;
-    };
-    let Some(active_window) = active_window.downcast::<WorkspaceManager>() else {
-        cx.quit();
-        return;
-    };
-    cx.defer(move |cx| {
-        if active_window
-            .update(cx, |manager, window, cx| {
-                manager.request_application_quit(window, cx)
-            })
-            .is_err()
-        {
+    cx.defer(|cx| {
+        // Resolve live roots at dispatch time, including inactive windows. GPUI owns the
+        // window registry, so a removed window cannot leave stale application quit authority.
+        let confirmation_window = application_quit_confirmation_window(cx);
+        if let Some(handle) = confirmation_window {
+            let _ = handle.update(cx, |manager, window, cx| {
+                window.activate_window();
+                manager.request_application_quit(window, cx);
+            });
+        } else {
             cx.quit();
         }
     });
+}
+
+fn application_quit_confirmation_window(cx: &App) -> Option<gpui::WindowHandle<WorkspaceManager>> {
+    cx.windows()
+        .into_iter()
+        .filter_map(|window| window.downcast::<WorkspaceManager>())
+        .find(|window| {
+            window
+                .read(cx)
+                .is_ok_and(|manager| manager.blocks_unconfirmed_application_quit(cx))
+        })
 }
 
 pub(crate) fn open(
@@ -856,6 +862,91 @@ mod runtime_tests {
         );
         assert!(cx.update(|cx| second.update(cx, |_, _, _| ()).is_ok()));
     }
+    #[gpui::test]
+    fn application_quit_checks_inactive_windows_and_discards_removed_roots(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use crate::terminal::testing::{TestTerminalSessionFactory, TestTerminalSessionRecords};
+        let records = TestTerminalSessionRecords::default();
+        let mut wiring = parts(Rc::default(), Rc::default());
+        wiring.session_factory = Rc::new(TestTerminalSessionFactory::new(records.clone()));
+        let host = HostComposition::new(wiring).unwrap();
+        let (running, idle) = cx.update(|cx| {
+            let running = start_application(cx, &host).unwrap();
+            let idle = open(cx, &host).unwrap();
+            idle.update(cx, |_, window, _| window.activate_window())
+                .unwrap();
+            (running, idle)
+        });
+        cx.run_until_parked();
+        let now = std::time::Instant::now();
+        let mut metadata =
+            crate::terminal::metadata::MetadataTracker::new("/tmp", "zsh", None, now);
+        assert!(metadata.apply_semantic_prompt("A", now));
+        let mut screen = (*crate::terminal::ScreenSnapshot::empty()).clone();
+        screen.metadata = metadata.snapshot();
+        records
+            .event_sender(2)
+            .unwrap()
+            .try_send(crate::terminal::SessionEvent::Screen(Arc::new(screen)))
+            .unwrap();
+        cx.run_until_parked();
+
+        cx.update(|cx| {
+            assert!(cx.active_window() == Some(idle.into()));
+            assert!(
+                !idle
+                    .read(cx)
+                    .unwrap()
+                    .blocks_unconfirmed_application_quit(cx)
+            );
+            assert_eq!(application_quit_confirmation_window(cx), Some(running));
+            request_application_quit(&QuitApplication, cx);
+        });
+        cx.run_until_parked();
+        cx.update(|cx| {
+            assert!(cx.active_window() == Some(running.into()));
+            assert!(
+                running
+                    .update(cx, |_, window, cx| spaceterm_ui::window_modal_is_open(
+                        window, cx
+                    ))
+                    .unwrap()
+            );
+            assert!(
+                !idle
+                    .update(cx, |_, window, cx| spaceterm_ui::window_modal_is_open(
+                        window, cx
+                    ))
+                    .unwrap()
+            );
+        });
+        cx.simulate_keystrokes(running.into(), "escape");
+        cx.run_until_parked();
+        assert!(records.dropped_session_ids().is_empty());
+        cx.update(|cx| {
+            // Remove the old owner before deferred quit dispatch. The remaining idle root
+            // must not inherit its pending state or receive a stale confirmation.
+            request_application_quit(&QuitApplication, cx);
+            running
+                .update(cx, |_, window, _| window.remove_window())
+                .unwrap();
+        });
+        cx.run_until_parked();
+        cx.update(|cx| {
+            assert!(running.read(cx).is_err());
+            assert_eq!(cx.windows().len(), 1);
+            assert_eq!(application_quit_confirmation_window(cx), None);
+            assert!(
+                !idle
+                    .update(cx, |_, window, cx| spaceterm_ui::window_modal_is_open(
+                        window, cx
+                    ))
+                    .unwrap()
+            );
+        });
+    }
+
     #[gpui::test]
     fn menus_and_shortcuts_share_the_three_semantic_actions(cx: &mut gpui::TestAppContext) {
         use gpui::{Action, Keystroke, OwnedMenuItem};

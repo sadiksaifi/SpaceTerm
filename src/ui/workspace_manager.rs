@@ -2859,6 +2859,11 @@ impl WorkspaceManager {
         self.request_close(CloseTarget::Application, window, cx);
     }
 
+    pub(crate) fn blocks_unconfirmed_application_quit(&self, cx: &App) -> bool {
+        self.pending_close_confirmation.is_some()
+            || self.close_target_requires_confirmation(CloseTarget::Application, cx) == Some(true)
+    }
+
     fn close_workspace(
         &mut self,
         workspace_id: WorkspaceId,

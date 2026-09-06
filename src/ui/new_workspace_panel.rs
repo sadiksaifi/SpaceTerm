@@ -49,8 +49,8 @@ impl NewWorkspaceSource {
 
     const fn accessory(self) -> Option<&'static str> {
         match self {
-            Self::LocalProject => Some("\u{21e7}\u{2318}O"),
-            Self::Scratch => Some("\u{2318}N"),
+            Self::LocalProject => Some("\u{2318}O"),
+            Self::Scratch => Some("\u{21e7}\u{2318}N"),
             Self::RemoteProject => None,
         }
     }
@@ -65,7 +65,7 @@ impl NewWorkspaceSource {
 
     /// Every source in presentation order.
     const fn ordered() -> [Self; 3] {
-        // Local Project leads so that the default selection makes cmd-o enter the Workspace
+        // Local Project leads so that the default selection after cmd-n enters the Workspace
         // Picker, keeping the most frequent path two keystrokes deep despite the added chooser.
         [Self::LocalProject, Self::Scratch, Self::RemoteProject]
     }
@@ -317,6 +317,39 @@ mod tests {
     use gpui::{FocusHandle, TestAppContext, VisualTestContext, div};
 
     use super::*;
+
+    #[gpui::test]
+    fn source_accessories_agree_with_the_installed_desktop_profile(cx: &mut TestAppContext) {
+        use gpui::{Action, Keystroke};
+        cx.update(|cx| {
+            crate::ui::init(cx).unwrap();
+            for (source, shortcut, label, action) in [
+                (
+                    NewWorkspaceSource::LocalProject,
+                    "cmd-o",
+                    "⌘O",
+                    crate::ui::OpenLocalProject.name(),
+                ),
+                (
+                    NewWorkspaceSource::Scratch,
+                    "cmd-shift-n",
+                    "⇧⌘N",
+                    crate::ui::CreateScratchWorkspace.name(),
+                ),
+            ] {
+                assert_eq!(source.accessory(), Some(label));
+                let bindings = cx.all_bindings_for_input(&[Keystroke::parse(shortcut).unwrap()]);
+                assert_eq!(bindings.len(), 1);
+                assert_eq!(bindings[0].action().name(), action);
+            }
+            let panel = cx.all_bindings_for_input(&[Keystroke::parse("cmd-n").unwrap()]);
+            assert_eq!(panel.len(), 1);
+            assert_eq!(
+                panel[0].action().name(),
+                crate::ui::ShowNewWorkspacePanel.name()
+            );
+        });
+    }
 
     struct NewWorkspacePanelHarness {
         panel: Entity<NewWorkspacePanel>,
