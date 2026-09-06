@@ -200,6 +200,21 @@ mod tests {
     use crate::terminal::testing::ShellResourcesFixture;
 
     #[test]
+    fn configured_mode_uses_only_the_supplied_value() {
+        for (value, expected) in [
+            (None, ShellIntegrationMode::Automatic),
+            (Some(""), ShellIntegrationMode::Automatic),
+            (Some("0"), ShellIntegrationMode::Disabled),
+            (Some(" Off "), ShellIntegrationMode::Disabled),
+            (Some("FALSE"), ShellIntegrationMode::Disabled),
+            (Some("true"), ShellIntegrationMode::Automatic),
+            (Some("unknown"), ShellIntegrationMode::Automatic),
+        ] {
+            assert_eq!(configured_mode(value.map(std::ffi::OsStr::new)), expected);
+        }
+    }
+
+    #[test]
     fn path_lists_use_only_the_supplied_separator_and_preserve_empty_entries() {
         for (root, prior, separator, expected) in [
             ("/resources", "/one:/two", ':', Some("/resources:/one:/two")),

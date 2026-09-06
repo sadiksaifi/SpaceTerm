@@ -42,6 +42,19 @@ impl LocalPathSemantics {
             Self::Posix => (!decoded.starts_with("//")).then_some(decoded),
         }
     }
+    /// OSC 7 retains repeated separators, matching reported directory spelling.
+    pub(crate) fn decode_directory_uri_path(self, decoded: String) -> Option<String> {
+        self.is_absolute(Path::new(&decoded)).then_some(decoded)
+    }
+
+    pub(crate) fn directory_basename(self, path: &str) -> Option<String> {
+        path.trim_end_matches(self.separator())
+            .rsplit(self.separator())
+            .next()
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned)
+    }
+
     pub(crate) fn file_url(self, path: &str) -> String {
         const HEX: &[u8; 16] = b"0123456789ABCDEF";
         let mut url = String::from("file://");

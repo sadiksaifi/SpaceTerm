@@ -8622,13 +8622,16 @@ mod tests {
         redraw(cx);
         let (_, tab_manager) = active_tab_manager(&manager, cx);
         let mut metadata = crate::terminal::metadata::MetadataTracker::new(
+            crate::local_path::LocalPathSemantics::Posix,
             "/Users/test",
             "zsh",
             None,
             Instant::now(),
         );
         assert!(metadata.apply_semantic_prompt("A", Instant::now()));
-        let mut screen = (*crate::terminal::ScreenSnapshot::empty()).clone();
+        let mut screen =
+            (*crate::terminal::ScreenSnapshot::empty(crate::local_path::LocalPathSemantics::Posix))
+                .clone();
         screen.metadata = metadata.snapshot();
         records
             .event_sender(2)

@@ -1016,10 +1016,17 @@ mod runtime_tests {
         });
         cx.run_until_parked();
         let now = std::time::Instant::now();
-        let mut metadata =
-            crate::terminal::metadata::MetadataTracker::new("/tmp", "zsh", None, now);
+        let mut metadata = crate::terminal::metadata::MetadataTracker::new(
+            crate::local_path::LocalPathSemantics::Posix,
+            "/tmp",
+            "zsh",
+            None,
+            now,
+        );
         assert!(metadata.apply_semantic_prompt("A", now));
-        let mut screen = (*crate::terminal::ScreenSnapshot::empty()).clone();
+        let mut screen =
+            (*crate::terminal::ScreenSnapshot::empty(crate::local_path::LocalPathSemantics::Posix))
+                .clone();
         screen.metadata = metadata.snapshot();
         records
             .event_sender(2)

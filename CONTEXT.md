@@ -893,7 +893,10 @@ component-aware home display, completion boundaries, URI-path conversion, and fi
 Host Composition selects POSIX semantics once for the Local Filesystem Authority. The picker obtains
 those semantics through its filesystem facade, and validated Local File leases retain the same
 selection for later activation. Neither shared UI nor file-action policy detects the host or
-manufactures slash-only local paths. URI slashes and remote POSIX commands remain protocol syntax.
+manufactures slash-only local paths. Local Terminal Metadata retains the same semantics for OSC 7
+conversion, directory-derived titles, and Reported Working Directory authority, including the trusted
+base used by relative OSC 8 links. Clipboard decoding receives the same composition-selected
+semantics. URI slashes and remote POSIX commands remain protocol syntax.
 
 System Directory Selection is application behavior implemented directly with GPUI. Its lifecycle
 and request identities remain independent of directory-read operations. File Preview owns target

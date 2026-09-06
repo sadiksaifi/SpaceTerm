@@ -414,7 +414,7 @@ impl TerminalPane {
             pane.graphics_cache.update(cx, |cache, cx| cache.clear(cx));
         })
         .detach();
-        let screen = ScreenSnapshot::empty();
+        let screen = ScreenSnapshot::empty(native_service_adapters.file_insertion.paths);
         let accessibility = Arc::new(TerminalAccessibilityModel::from_screen(&screen));
         let accessibility_element = accessibility_adapter_factory.create(
             window,
@@ -1076,10 +1076,14 @@ impl TerminalPane {
     pub(crate) fn reported_working_directory(&self) -> Option<PathBuf> {
         use crate::terminal::metadata::MetadataFreshness;
 
-        (self.screen.metadata.context.is_local()
-            && self.screen.metadata.freshness == MetadataFreshness::Live)
-            .then(|| PathBuf::from(self.screen.metadata.directory.path.as_ref()))
-            .filter(|path| path.is_absolute())
+        (self.screen.metadata.freshness == MetadataFreshness::Live)
+            .then(|| {
+                self.screen
+                    .metadata
+                    .context
+                    .local_directory(&self.screen.metadata.directory.path)
+            })
+            .flatten()
     }
 
     pub(crate) fn requires_close_confirmation(&self) -> bool {
@@ -2256,11 +2260,12 @@ impl TerminalPane {
                         == crate::terminal::metadata::MetadataFreshness::Live
                     && (self.screen.metadata.directory.path != screen.metadata.directory.path
                         || self.screen.metadata.freshness != screen.metadata.freshness)
+                    && let Some(path) = screen
+                        .metadata
+                        .context
+                        .local_directory(&screen.metadata.directory.path)
                 {
-                    let path = PathBuf::from(screen.metadata.directory.path.as_ref());
-                    if path.is_absolute() {
-                        cx.emit(TerminalPaneEvent::ReportedWorkingDirectoryChanged(path));
-                    }
+                    cx.emit(TerminalPaneEvent::ReportedWorkingDirectoryChanged(path));
                 }
                 let _ = self.render_lifecycle.observe_snapshot(screen.generation);
                 self.accepted_screen_generation = Some(screen.generation);

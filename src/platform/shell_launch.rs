@@ -313,9 +313,15 @@ mod tests {
             ("/bin/zsh", ShellKind::Zsh, vec!["-l"]),
         ] {
             let directory = std::env::temp_dir();
-            let launch = ShellLaunchPlanner::for_test(shell.into(), resources.path().to_path_buf())
-                .local_with_environment(&directory, ShellIntegrationMode::Automatic, &inherited)
-                .unwrap();
+            let launch = ShellLaunchPlanner::new(
+                shell.into(),
+                resources.path().to_path_buf(),
+                ShellIntegrationMode::Automatic,
+                inherited.clone(),
+                ShellIntegrationPolicy::fixture(),
+            )
+            .local(&directory)
+            .unwrap();
             assert_eq!(launch.executable(), OsStr::new(shell));
             assert_eq!(launch.arguments(), arguments);
             assert_eq!(launch.working_directory(), directory);
@@ -382,9 +388,15 @@ mod tests {
                 ShellIntegrationStatus::MissingResources,
             ),
         ] {
-            let launch = ShellLaunchPlanner::for_test(shell.into(), root)
-                .local_with_environment(&std::env::temp_dir(), mode, &ShellEnvironment::default())
-                .unwrap();
+            let launch = ShellLaunchPlanner::new(
+                shell.into(),
+                root,
+                mode,
+                ShellEnvironment::default(),
+                ShellIntegrationPolicy::fixture(),
+            )
+            .local(&std::env::temp_dir())
+            .unwrap();
             assert_eq!(launch.arguments(), ["-l"]);
             assert_eq!(launch.integration, Some(status));
             assert_eq!(

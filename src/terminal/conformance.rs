@@ -1491,8 +1491,15 @@ fn check_metadata() -> Result<(), String> {
         sanitize_title("  cargo\u{1b}]2;forged\u{7}  "),
         "cargo]2;forged".to_owned(),
     )?;
-    let directory = parse_osc7_directory("file://localhost/Users/me/My%20Project", None)
-        .ok_or_else(|| "local OSC 7 directory was rejected".to_owned())?;
+    let directory = parse_osc7_directory(
+        "file://localhost/Users/me/My%20Project",
+        &crate::terminal::metadata::TerminalMetadataContext::local(
+            crate::local_path::LocalPathSemantics::Posix,
+            "/fixture",
+            None,
+        ),
+    )
+    .ok_or_else(|| "local OSC 7 directory was rejected".to_owned())?;
     require_eq("osc7-path", directory.path.as_ref(), "/Users/me/My Project")?;
     require_eq(
         "osc7-provenance",
@@ -1500,7 +1507,15 @@ fn check_metadata() -> Result<(), String> {
         DirectoryProvenance::Osc7,
     )?;
     require(
-        parse_osc7_directory("file://remote.test/tmp", None).is_none(),
+        parse_osc7_directory(
+            "file://remote.test/tmp",
+            &crate::terminal::metadata::TerminalMetadataContext::local(
+                crate::local_path::LocalPathSemantics::Posix,
+                "/fixture",
+                None,
+            ),
+        )
+        .is_none(),
         "remote-osc7",
         "remote authority was accepted",
     )

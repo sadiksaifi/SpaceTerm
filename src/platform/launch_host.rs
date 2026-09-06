@@ -42,8 +42,17 @@ pub(crate) fn local_hostname() -> Option<String> {
 
 /// Capture every shell planning fact once at composition.
 pub(crate) fn shell_launch_planner() -> super::shell_launch::ShellLaunchPlanner {
+    shell_launch_planner_with(PathBuf::from(user_shell()), resource_root(), |key| {
+        std::env::var_os(key)
+    })
+}
+
+pub(super) fn shell_launch_planner_with(
+    shell: PathBuf,
+    resources: PathBuf,
+    mut read: impl FnMut(&str) -> Option<std::ffi::OsString>,
+) -> super::shell_launch::ShellLaunchPlanner {
     use super::shell_integration::{ShellEnvironment, ShellIntegrationPolicy, configured_mode};
-    let shell = PathBuf::from(user_shell());
     let policy = ShellIntegrationPolicy {
         supported: shell != Path::new("/bin/bash"),
         path_list_separator: ':',
@@ -51,12 +60,12 @@ pub(crate) fn shell_launch_planner() -> super::shell_launch::ShellLaunchPlanner 
     };
     super::shell_launch::ShellLaunchPlanner::new(
         shell,
-        resource_root(),
-        configured_mode(std::env::var_os("SPACETERM_SHELL_INTEGRATION").as_deref()),
+        resources,
+        configured_mode(read("SPACETERM_SHELL_INTEGRATION").as_deref()),
         ShellEnvironment {
-            xdg_data_dirs: std::env::var_os("XDG_DATA_DIRS"),
-            zdotdir: std::env::var_os("ZDOTDIR"),
-            env: std::env::var_os("ENV"),
+            xdg_data_dirs: read("XDG_DATA_DIRS"),
+            zdotdir: read("ZDOTDIR"),
+            env: read("ENV"),
         },
         policy,
     )

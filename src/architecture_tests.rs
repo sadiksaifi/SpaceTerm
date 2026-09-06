@@ -225,7 +225,6 @@ fn portable_verification_cannot_select_native_adapters_or_host_mechanics() {
                 "std::env::var",
                 "std::env::current_exe",
                 "ShellEnvironment::capture(",
-                "configured_mode(",
                 "CARGO_MANIFEST_DIR",
                 "user_shell(",
                 "local_hostname(",
@@ -431,6 +430,8 @@ fn local_interaction_policy_cannot_discover_the_host_or_embed_desktop_branding()
         "platform/shell_integration.rs",
         "platform/shell_launch.rs",
         "ssh/startup_environment.rs",
+        "terminal/metadata.rs",
+        "terminal/emulator.rs",
         "terminal/native_services.rs",
         "terminal/native_services/file_insertion.rs",
         "terminal/native_services/hyperlink.rs",
@@ -485,6 +486,20 @@ fn local_interaction_policy_cannot_discover_the_host_or_embed_desktop_branding()
     assert!(!composition.contains("SystemDirectorySelection"));
     let platform = std::fs::read_to_string(root.join("platform/mod.rs")).unwrap();
     assert!(!platform.contains("mod directory_selection"));
+    for name in [
+        "terminal/metadata.rs",
+        "terminal/emulator.rs",
+        "ui/terminal_pane.rs",
+    ] {
+        let source = std::fs::read_to_string(root.join(name)).unwrap();
+        assert!(
+            !source.contains(".is_absolute()"),
+            "{name} uses ambient path semantics"
+        );
+    }
+    let pasteboard = std::fs::read_to_string(root.join("platform/macos_pasteboard.rs")).unwrap();
+    let production = pasteboard.split("#[cfg(test)]\nmod tests").next().unwrap();
+    assert!(!production.contains("LocalPathSemantics::Posix"));
     let picker = std::fs::read_to_string(root.join("ui/workspace_picker.rs")).unwrap();
     let production = picker.split("#[cfg(test)]\nmod tests").next().unwrap();
     for forbidden in [
