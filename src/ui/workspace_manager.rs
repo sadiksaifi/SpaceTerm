@@ -1,3 +1,4 @@
+use super::pane_lifecycle::PaneLifecycleDependencies;
 use crate::platform::terminal_accessibility::TerminalAccessibilityAdapterFactory;
 use crate::terminal::native_services::NativeServiceAdapters;
 use std::collections::{BTreeMap, BTreeSet};
@@ -230,12 +231,14 @@ struct TabManagerCreation {
     key_input_adapter_factory: Rc<dyn TerminalKeyInputAdapterFactory>,
     accessibility_adapter_factory: Rc<dyn TerminalAccessibilityAdapterFactory>,
     native_service_adapters: NativeServiceAdapters,
+    lifecycle_dependencies: PaneLifecycleDependencies,
 }
 
 struct WorkspaceManagerAdapters {
     key_input: Rc<dyn TerminalKeyInputAdapterFactory>,
     accessibility: Rc<dyn TerminalAccessibilityAdapterFactory>,
     native_services: NativeServiceAdapters,
+    lifecycle: PaneLifecycleDependencies,
     finder: Rc<dyn FinderFallback>,
     window_drag: Rc<dyn OperatingSystemWindowDragPlatform>,
     remote_workspace: Arc<dyn RemoteWorkspaceFlowBackendFactory>,
@@ -276,6 +279,7 @@ pub(crate) struct WorkspaceManager {
     key_input_adapter_factory: Rc<dyn TerminalKeyInputAdapterFactory>,
     accessibility_adapter_factory: Rc<dyn TerminalAccessibilityAdapterFactory>,
     native_service_adapters: NativeServiceAdapters,
+    lifecycle_dependencies: PaneLifecycleDependencies,
     default_workspace_root: PathBuf,
     default_workspace_identity: WorkspaceDirectoryIdentity,
     finder_fallback: Rc<dyn FinderFallback>,
@@ -317,6 +321,7 @@ impl WorkspaceManager {
         key_input_adapter_factory: Rc<dyn TerminalKeyInputAdapterFactory>,
         accessibility_adapter_factory: Rc<dyn TerminalAccessibilityAdapterFactory>,
         native_service_adapters: NativeServiceAdapters,
+        lifecycle_dependencies: PaneLifecycleDependencies,
         default_workspace_root: PathBuf,
         remote_workspace_backend_factory: Arc<NativeRemoteWorkspaceFlowBackendFactory>,
         window: &mut Window,
@@ -331,6 +336,7 @@ impl WorkspaceManager {
                 key_input: key_input_adapter_factory,
                 accessibility: accessibility_adapter_factory,
                 native_services: native_service_adapters,
+                lifecycle: lifecycle_dependencies,
                 finder: Rc::new(NativeFinderFallback),
                 window_drag: Rc::new(MacosOperatingSystemWindowDragPlatform::default()),
                 remote_workspace: remote_workspace_backend_factory,
@@ -355,6 +361,7 @@ impl WorkspaceManager {
                 key_input: Rc::new(GpuiTerminalKeyInputAdapterFactory::default()),
                 accessibility: Rc::new(crate::platform::terminal_accessibility::testing::RecordingAccessibilityFactory::default()),
                 native_services: crate::terminal::native_services::testing::adapters(),
+                lifecycle: PaneLifecycleDependencies::testing(),
                 finder: Rc::new(NativeFinderFallback),
                 window_drag: Rc::new(MacosOperatingSystemWindowDragPlatform::default()),
                 remote_workspace: remote_workspace_backend_factory,
@@ -380,6 +387,7 @@ impl WorkspaceManager {
                 key_input: Rc::new(GpuiTerminalKeyInputAdapterFactory::default()),
                 accessibility: Rc::new(crate::platform::terminal_accessibility::testing::RecordingAccessibilityFactory::default()),
                 native_services: crate::terminal::native_services::testing::adapters(),
+                lifecycle: PaneLifecycleDependencies::testing(),
                 finder: finder_fallback,
                 window_drag: Rc::new(MacosOperatingSystemWindowDragPlatform::default()),
                 remote_workspace: remote_workspace_backend_factory,
@@ -405,6 +413,7 @@ impl WorkspaceManager {
                 key_input: Rc::new(GpuiTerminalKeyInputAdapterFactory::default()),
                 accessibility: Rc::new(crate::platform::terminal_accessibility::testing::RecordingAccessibilityFactory::default()),
                 native_services: crate::terminal::native_services::testing::adapters(),
+                lifecycle: PaneLifecycleDependencies::testing(),
                 finder: Rc::new(NativeFinderFallback),
                 window_drag: operating_system_window_drag_platform,
                 remote_workspace: remote_workspace_backend_factory,
@@ -425,6 +434,7 @@ impl WorkspaceManager {
             key_input: key_input_adapter_factory,
             accessibility: accessibility_adapter_factory,
             native_services: native_service_adapters,
+            lifecycle: lifecycle_dependencies,
             finder: finder_fallback,
             window_drag: operating_system_window_drag_platform,
             remote_workspace: remote_workspace_backend_factory,
@@ -460,6 +470,7 @@ impl WorkspaceManager {
                             &initial_accessibility_adapter_factory,
                         ),
                         native_service_adapters: native_service_adapters.clone(),
+                        lifecycle_dependencies: lifecycle_dependencies.clone(),
                     },
                     window,
                     cx,
@@ -557,6 +568,7 @@ impl WorkspaceManager {
             key_input_adapter_factory,
             accessibility_adapter_factory,
             native_service_adapters,
+            lifecycle_dependencies,
             default_workspace_root,
             default_workspace_identity,
             finder_fallback,
@@ -632,6 +644,7 @@ impl WorkspaceManager {
             key_input_adapter_factory,
             accessibility_adapter_factory,
             native_service_adapters,
+            lifecycle_dependencies,
         } = creation;
         let manager = cx.new(|cx| {
             let mut manager = TabManager::new_with_prepared_initial_launch(
@@ -641,6 +654,7 @@ impl WorkspaceManager {
                 key_input_adapter_factory,
                 accessibility_adapter_factory,
                 native_service_adapters,
+                lifecycle_dependencies,
                 window,
                 cx,
             );
@@ -1343,6 +1357,7 @@ impl WorkspaceManager {
         let key_input_adapter_factory = Rc::clone(&self.key_input_adapter_factory);
         let accessibility_adapter_factory = Rc::clone(&self.accessibility_adapter_factory);
         let native_service_adapters = self.native_service_adapters.clone();
+        let lifecycle_dependencies = self.lifecycle_dependencies.clone();
         let window_drag_platform = Rc::clone(&self.operating_system_window_drag_platform);
         let sidebar_visible = self.sidebar_visible;
         let sidebar_width = self.sidebar_width;
@@ -1368,6 +1383,7 @@ impl WorkspaceManager {
                         key_input_adapter_factory,
                         accessibility_adapter_factory,
                         native_service_adapters,
+                        lifecycle_dependencies,
                     },
                     window,
                     cx,
@@ -1737,6 +1753,7 @@ impl WorkspaceManager {
         let key_input_adapter_factory = Rc::clone(&self.key_input_adapter_factory);
         let accessibility_adapter_factory = Rc::clone(&self.accessibility_adapter_factory);
         let native_service_adapters = self.native_service_adapters.clone();
+        let lifecycle_dependencies = self.lifecycle_dependencies.clone();
         let result = self.workspaces.create_remote_project_workspace(
             key,
             completion.directory().clone(),
@@ -1754,6 +1771,7 @@ impl WorkspaceManager {
                         key_input_adapter_factory,
                         accessibility_adapter_factory,
                         native_service_adapters,
+                        lifecycle_dependencies,
                     },
                     window,
                     cx,
@@ -2512,6 +2530,7 @@ impl WorkspaceManager {
         let key_input_adapter_factory = Rc::clone(&self.key_input_adapter_factory);
         let accessibility_adapter_factory = Rc::clone(&self.accessibility_adapter_factory);
         let native_service_adapters = self.native_service_adapters.clone();
+        let lifecycle_dependencies = self.lifecycle_dependencies.clone();
         let window_drag_platform = Rc::clone(&self.operating_system_window_drag_platform);
         let sidebar_visible = self.sidebar_visible;
         let sidebar_width = self.sidebar_width;
@@ -2535,6 +2554,7 @@ impl WorkspaceManager {
                         key_input_adapter_factory,
                         accessibility_adapter_factory,
                         native_service_adapters,
+                        lifecycle_dependencies,
                     },
                     window,
                     cx,
@@ -2885,6 +2905,7 @@ impl WorkspaceManager {
         let key_input_adapter_factory = Rc::clone(&self.key_input_adapter_factory);
         let accessibility_adapter_factory = Rc::clone(&self.accessibility_adapter_factory);
         let native_service_adapters = self.native_service_adapters.clone();
+        let lifecycle_dependencies = self.lifecycle_dependencies.clone();
         let window_drag_platform = Rc::clone(&self.operating_system_window_drag_platform);
         let sidebar_visible = self.sidebar_visible;
         let sidebar_width = self.sidebar_width;
@@ -2911,6 +2932,7 @@ impl WorkspaceManager {
                         key_input_adapter_factory,
                         accessibility_adapter_factory,
                         native_service_adapters,
+                        lifecycle_dependencies,
                     },
                     window,
                     cx,
@@ -5081,6 +5103,7 @@ mod tests {
                     key_input: Rc::new(GpuiTerminalKeyInputAdapterFactory::default()),
                     accessibility: Rc::new(crate::platform::terminal_accessibility::testing::RecordingAccessibilityFactory::default()),
                     native_services,
+                    lifecycle: PaneLifecycleDependencies::testing(),
                     finder: Rc::new(NativeFinderFallback),
                     window_drag: Rc::new(MacosOperatingSystemWindowDragPlatform::default()),
                     remote_workspace: test_remote_backend_factory(),
@@ -5126,6 +5149,7 @@ mod tests {
                     key_input: Rc::new(GpuiTerminalKeyInputAdapterFactory::default()),
                     accessibility: factory.clone(),
                     native_services: crate::terminal::native_services::testing::adapters(),
+                    lifecycle: PaneLifecycleDependencies::testing(),
                     finder: Rc::new(NativeFinderFallback),
                     window_drag: Rc::new(MacosOperatingSystemWindowDragPlatform::default()),
                     remote_workspace: test_remote_backend_factory(),

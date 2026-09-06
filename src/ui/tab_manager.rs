@@ -1,3 +1,4 @@
+use super::pane_lifecycle::PaneLifecycleDependencies;
 use crate::platform::terminal_accessibility::TerminalAccessibilityAdapterFactory;
 use crate::terminal::native_services::NativeServiceAdapters;
 use std::path::{Path, PathBuf};
@@ -137,6 +138,7 @@ pub(crate) struct TabManager {
     key_input_adapter_factory: Rc<dyn TerminalKeyInputAdapterFactory>,
     accessibility_adapter_factory: Rc<dyn TerminalAccessibilityAdapterFactory>,
     native_service_adapters: NativeServiceAdapters,
+    lifecycle_dependencies: PaneLifecycleDependencies,
     active: bool,
     sidebar_visible: bool,
     sidebar_width: Pixels,
@@ -188,6 +190,7 @@ impl TabManager {
             Rc::new(GpuiTerminalKeyInputAdapterFactory::default()),
             Rc::new(crate::platform::terminal_accessibility::testing::RecordingAccessibilityFactory::default()),
             crate::terminal::native_services::testing::adapters(),
+            PaneLifecycleDependencies::testing(),
             window,
             cx,
         ))
@@ -204,6 +207,7 @@ impl TabManager {
         key_input_adapter_factory: Rc<dyn TerminalKeyInputAdapterFactory>,
         accessibility_adapter_factory: Rc<dyn TerminalAccessibilityAdapterFactory>,
         native_service_adapters: NativeServiceAdapters,
+        lifecycle_dependencies: PaneLifecycleDependencies,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -217,6 +221,7 @@ impl TabManager {
                 Rc::clone(&initial_key_input_adapter_factory),
                 Rc::clone(&initial_accessibility_adapter_factory),
                 native_service_adapters.clone(),
+                lifecycle_dependencies.clone(),
                 window,
                 cx,
             )
@@ -227,6 +232,7 @@ impl TabManager {
             key_input_adapter_factory,
             accessibility_adapter_factory,
             native_service_adapters,
+            lifecycle_dependencies,
             active: true,
             sidebar_visible: true,
             sidebar_width: px(WORKSPACE_SIDEBAR_DEFAULT_WIDTH),
@@ -253,6 +259,7 @@ impl TabManager {
         key_input_adapter_factory: Rc<dyn TerminalKeyInputAdapterFactory>,
         accessibility_adapter_factory: Rc<dyn TerminalAccessibilityAdapterFactory>,
         native_service_adapters: NativeServiceAdapters,
+        lifecycle_dependencies: PaneLifecycleDependencies,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Entity<PaneHost> {
@@ -264,6 +271,7 @@ impl TabManager {
                 key_input_adapter_factory,
                 accessibility_adapter_factory,
                 native_service_adapters,
+                lifecycle_dependencies,
                 window,
                 cx,
             )
@@ -900,6 +908,7 @@ impl TabManager {
         let key_input_adapter_factory = Rc::clone(&self.key_input_adapter_factory);
         let accessibility_adapter_factory = Rc::clone(&self.accessibility_adapter_factory);
         let native_service_adapters = self.native_service_adapters.clone();
+        let lifecycle_dependencies = self.lifecycle_dependencies.clone();
         let result = self.tabs.create_tab(|tab_id| {
             Self::create_pane_host(
                 tab_id,
@@ -908,6 +917,7 @@ impl TabManager {
                 key_input_adapter_factory,
                 accessibility_adapter_factory,
                 native_service_adapters,
+                lifecycle_dependencies,
                 window,
                 cx,
             )

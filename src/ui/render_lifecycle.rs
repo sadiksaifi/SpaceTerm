@@ -92,7 +92,7 @@ impl RenderLifecycle {
     }
 
     pub(crate) fn take_frame(&self) -> Option<PresentationGeneration> {
-        (self.visibility.presentable() && !self.released)
+        self.can_present()
             .then_some(self.latest)
             .flatten()
             .filter(|latest| Some(*latest) != self.presented)
@@ -116,9 +116,18 @@ impl RenderLifecycle {
     }
 
     pub(crate) fn mark_presented(&mut self, generation: PresentationGeneration) {
-        if !self.released && self.latest.is_some_and(|latest| generation <= latest) {
+        if !self.released
+            && self.latest.is_some_and(|latest| generation <= latest)
+            && self
+                .presented
+                .is_none_or(|presented| generation >= presented)
+        {
             self.presented = Some(generation);
         }
+    }
+
+    pub(crate) fn can_present(&self) -> bool {
+        self.visibility.presentable() && !self.released
     }
 
     pub(crate) fn is_presented(&self, generation: PresentationGeneration) -> bool {
@@ -281,6 +290,59 @@ mod tests {
         ] {
             assert!(!lifecycle.update_visibility(hidden).animations_active);
         }
+    }
+
+    #[test]
+    fn every_visibility_combination_has_independent_presentation_and_animation_policy() {
+        for mask in 0_u8..128 {
+            let visibility = SurfaceVisibility {
+                application_active: mask & 1 != 0,
+                key_window: mask & 2 != 0,
+                minimized: mask & 4 != 0,
+                occluded: mask & 8 != 0,
+                live_resize: mask & 16 != 0,
+                workspace_visible: mask & 32 != 0,
+                pane_visible: mask & 64 != 0,
+            };
+            let presentable = mask & (4 | 8) == 0 && mask & (32 | 64) == (32 | 64);
+            let animating = presentable && mask & (1 | 2 | 16) == (1 | 2);
+            let mut lifecycle = RenderLifecycle::new(visibility);
+            let effects = lifecycle.observe_snapshot(PresentationGeneration::test(1));
+            assert_eq!(lifecycle.can_present(), presentable, "mask={mask}");
+            assert_eq!(effects.request_redraw, presentable, "mask={mask}");
+            assert_eq!(effects.animations_active, animating, "mask={mask}");
+            lifecycle.release();
+            assert!(!lifecycle.can_present());
+            assert!(!lifecycle.update_visibility(visible()).request_redraw);
+            assert!(!lifecycle.effects().animations_active);
+        }
+    }
+
+    #[test]
+    fn stale_presented_completion_never_regresses_committed_generation() {
+        let mut lifecycle = RenderLifecycle::new(visible());
+        lifecycle.observe_snapshot(PresentationGeneration::test(3));
+        lifecycle.mark_presented(PresentationGeneration::test(3));
+        lifecycle.mark_presented(PresentationGeneration::test(2));
+        lifecycle.observe_snapshot(PresentationGeneration::test(1));
+        assert!(lifecycle.is_presented(PresentationGeneration::test(3)));
+        assert_eq!(lifecycle.take_frame(), None);
+    }
+
+    #[test]
+    fn repeated_visibility_notifications_request_only_one_restoration_frame() {
+        let mut lifecycle = RenderLifecycle::new(SurfaceVisibility {
+            minimized: true,
+            ..visible()
+        });
+        lifecycle.observe_snapshot(PresentationGeneration::test(1));
+        lifecycle.observe_snapshot(PresentationGeneration::test(5));
+        assert!(lifecycle.update_visibility(visible()).request_redraw);
+        assert!(!lifecycle.update_visibility(visible()).request_redraw);
+        assert_eq!(
+            lifecycle.take_frame(),
+            Some(PresentationGeneration::test(5))
+        );
     }
 
     #[test]

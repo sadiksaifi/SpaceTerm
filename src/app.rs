@@ -226,7 +226,41 @@ fn request_application_quit(_: &QuitApplication, cx: &mut App) {
     });
 }
 
+struct ApplicationPaneLifecycle(crate::ui::pane_lifecycle::PaneLifecycleDependencies);
+impl gpui::Global for ApplicationPaneLifecycle {}
+
+fn pane_lifecycle_dependencies(
+    cx: &mut App,
+) -> crate::ui::pane_lifecycle::PaneLifecycleDependencies {
+    if let Some(dependencies) = cx.try_global::<ApplicationPaneLifecycle>() {
+        return dependencies.0.clone();
+    }
+    let activity: Rc<dyn crate::platform::application_activity::ApplicationActivity> =
+        Rc::new(crate::platform::macos_application::MacosApplicationActivity);
+    let dependencies = crate::ui::pane_lifecycle::PaneLifecycleDependencies {
+        attention: crate::terminal::attention_runtime::AttentionRuntime::new(
+            Box::new(crate::platform::macos_attention::AppKitAudioBell),
+            Box::new(crate::platform::macos_attention::AppKitDockAttention::default()),
+            Box::new(
+                crate::terminal::attention_notification::AttentionNotifications::new(Arc::new(
+                    crate::platform::macos_notification::UserNotificationAdapter,
+                )),
+            ),
+            Rc::clone(&activity),
+        ),
+        secure_input: crate::terminal::secure_input::SecureInputHandle::new(Box::new(
+            crate::platform::macos_secure_input::MacosSecureInputAdapter::new(),
+        )),
+        activity,
+        visibility: Rc::new(crate::platform::macos_render_lifecycle::MacosWindowVisibilityFactory),
+        wheel: Rc::new(crate::platform::macos_scroll::MacosWheelPhaseEnrichment),
+    };
+    cx.set_global(ApplicationPaneLifecycle(dependencies.clone()));
+    dependencies
+}
+
 pub(crate) fn open(cx: &mut App, startup: StartupDependencies) {
+    let lifecycle_dependencies = pane_lifecycle_dependencies(cx);
     let home_directory = startup.home_directory.clone();
     let remote_backend_factory = startup.remote_backend_factory();
     let bounds = Bounds::centered(None, size(px(900.0), px(580.0)), cx);
@@ -266,6 +300,7 @@ pub(crate) fn open(cx: &mut App, startup: StartupDependencies) {
                         file_clipboard: Rc::new(crate::platform::macos_pasteboard::MacosFileClipboard),
                         quick_look: Rc::new(crate::platform::macos_quick_look::MacosQuickLookFactory),
                     },
+                    lifecycle_dependencies.clone(),
                     home_directory.clone(),
                     Arc::clone(&remote_backend_factory),
                     window,

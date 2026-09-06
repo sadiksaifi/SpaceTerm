@@ -35,6 +35,14 @@ pub(crate) const fn is_active() -> bool {
     true
 }
 
+pub(crate) struct MacosApplicationActivity;
+
+impl super::application_activity::ApplicationActivity for MacosApplicationActivity {
+    fn is_active(&self, _: &gpui::App) -> bool {
+        is_active()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::mem::size_of;
