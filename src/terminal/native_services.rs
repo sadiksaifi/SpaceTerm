@@ -322,6 +322,8 @@ mod tests {
             include_str!("native_services/services.rs"),
         ];
         for source in policy {
+            // Local Filesystem Authority is portable policy, shared with Workspaces.
+            let source = source.replace("crate::platform::local_filesystem::", "");
             assert!(!source.contains("crate::platform::"));
             assert!(!source.contains("target_os"));
             assert!(!source.contains("use cocoa::"));

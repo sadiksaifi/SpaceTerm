@@ -1,5 +1,70 @@
 //! Structural regression gates for the shared application and UI boundary.
 #[test]
+fn local_filesystem_policy_cannot_reintroduce_native_identity_or_host_selection() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    for name in [
+        "domain/workspace_collection.rs",
+        "platform/local_filesystem.rs",
+        "platform/local_filesystem/picker.rs",
+        "terminal/workspace_terminal_session_factory.rs",
+        "terminal/native_services/hyperlink.rs",
+        "terminal/native_services/quick_look.rs",
+        "terminal/native_services.rs",
+        "terminal/emulator.rs",
+        "ui/workspace_manager.rs",
+        "ui/workspace_picker.rs",
+        "ui/pane_host.rs",
+        "ui/tab_manager.rs",
+    ] {
+        let source = std::fs::read_to_string(root.join(name)).unwrap();
+        let source = source.split("#[cfg(test)]\nmod tests").next().unwrap();
+        for forbidden in [
+            "std::os::unix",
+            "MetadataExt",
+            ".dev()",
+            ".ino()",
+            "raw_os_error",
+            "libc::",
+            "AsRawFd",
+            "FromRawFd",
+            "OpenOptionsExt",
+            "PermissionsExt",
+            "NativeWorkspacePickerFilesystem",
+            "macos_local_identity",
+            "target_os",
+            "identity.device",
+            "identity.inode",
+            "identity.file",
+        ] {
+            assert!(!source.contains(forbidden), "{name} contains {forbidden}");
+        }
+    }
+    for name in [
+        "domain/workspace_collection.rs",
+        "terminal/native_services/hyperlink.rs",
+        "terminal/native_services/quick_look.rs",
+        "terminal/workspace_terminal_session_factory.rs",
+        "ui/workspace_manager.rs",
+        "ui/workspace_picker.rs",
+    ] {
+        let source = std::fs::read_to_string(root.join(name)).unwrap();
+        let source = source.split("#[cfg(test)]\nmod tests").next().unwrap();
+        for forbidden in [
+            "same_file::",
+            "fs::metadata(",
+            "fs::read_dir(",
+            ".canonicalize()",
+            "LocalFilesystemAuthority::new(",
+        ] {
+            assert!(
+                !source.contains(forbidden),
+                "{name} bypasses Local Filesystem Authority with {forbidden}"
+            );
+        }
+    }
+}
+
+#[test]
 fn shared_startup_and_ui_cannot_select_native_implementations() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     let mut files = vec![

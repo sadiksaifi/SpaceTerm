@@ -1355,11 +1355,13 @@ fn check_hyperlinks() -> Result<(), String> {
                 .to_str()
                 .ok_or_else(|| "canonical fixture path was not UTF-8".to_owned())?,
         )?;
+        let mut registry = crate::platform::local_filesystem::LocalFileEmissionRegistry::default();
         let retained = HyperlinkTarget::from_local_emission_metadata(
             &local
-                .local_emission_metadata(local_files)
+                .local_emission_metadata(local_files, &mut registry)
                 .ok_or_else(|| "valid local target metadata exceeded its bound".to_owned())?,
             local_files,
+            &registry,
         )
         .ok_or_else(|| "resolver-only local target metadata did not decode".to_owned())?;
         require_eq("local-link-emission-identity", retained, local.clone())?;

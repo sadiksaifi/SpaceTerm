@@ -94,7 +94,7 @@ struct TabMenuState {
     invocation: TabMenuInvocation,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub(crate) enum TabManagerEvent {
     ClosePaneRequested {
         tab_id: TabId,
@@ -130,6 +130,24 @@ pub(crate) enum TabManagerEvent {
     DirectoryUnavailable {
         reason: String,
     },
+}
+
+impl std::fmt::Debug for TabManagerEvent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::ClosePaneRequested { .. } => "TabManagerEvent::ClosePaneRequested",
+            Self::CloseTabRequested { .. } => "TabManagerEvent::CloseTabRequested",
+            Self::FinalTabCloseRequested { .. } => "TabManagerEvent::FinalTabCloseRequested",
+            Self::PresentationChanged => "TabManagerEvent::PresentationChanged",
+            Self::ReportedWorkingDirectoryChanged { .. } => {
+                "TabManagerEvent::ReportedWorkingDirectoryChanged"
+            }
+            Self::PaneClosed { .. } => "TabManagerEvent::PaneClosed",
+            Self::TabClosed { .. } => "TabManagerEvent::TabClosed",
+            Self::DirectoryAvailable { .. } => "TabManagerEvent::DirectoryAvailable",
+            Self::DirectoryUnavailable { .. } => "TabManagerEvent::DirectoryUnavailable",
+        })
+    }
 }
 
 pub(crate) struct TabManager {
@@ -316,7 +334,7 @@ impl TabManager {
                 }),
                 PaneHostEvent::DirectoryAvailable { identity } => {
                     cx.emit(TabManagerEvent::DirectoryAvailable {
-                        identity: *identity,
+                        identity: identity.clone(),
                     });
                 }
                 PaneHostEvent::DirectoryUnavailable { reason } => {
@@ -642,10 +660,10 @@ impl TabManager {
         cx: &mut Context<Self>,
     ) {
         self.session_factory
-            .set_working_directory(path.to_path_buf(), identity);
+            .set_working_directory(path.to_path_buf(), identity.clone());
         for (_, pane_host) in self.tabs.iter() {
             pane_host.update(cx, |pane_host, _| {
-                pane_host.set_workspace_directory(path, identity)
+                pane_host.set_workspace_directory(path, identity.clone())
             });
         }
     }
@@ -837,12 +855,8 @@ impl TabManager {
                 cx.emit(TabManagerEvent::DirectoryUnavailable {
                     reason: reason.clone(),
                 });
-                let directory = self.session_factory.local_working_directory().map_or_else(
-                    || "the local Workspace Directory".to_owned(),
-                    |path| path.display().to_string(),
-                );
                 let detail = format!(
-                    "Cannot create a Tab at {directory} because {reason}. Restore the directory or use another Workspace."
+                    "Cannot create a Tab because {reason}. Restore the Workspace Directory or use another Workspace."
                 );
                 drop(window.prompt(
                     PromptLevel::Warning,
@@ -1945,7 +1959,7 @@ mod tests {
             terminal_factory,
             crate::domain::ValidatedWorkspaceDirectory::new(
                 PathBuf::from("/missing/local/home-is-not-a-workspace"),
-                WorkspaceDirectoryIdentity::new(79, 83),
+                WorkspaceDirectoryIdentity::for_test(79083),
             ),
             crate::terminal::metadata::RemoteTerminalMetadataContext::new(
                 destination,

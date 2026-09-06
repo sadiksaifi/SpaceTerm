@@ -16,7 +16,7 @@ use super::{
 use crate::domain::{ValidatedWorkspaceDirectory, WorkspaceDirectoryIdentity};
 
 pub(crate) fn test_workspace_directory(path: PathBuf) -> ValidatedWorkspaceDirectory {
-    ValidatedWorkspaceDirectory::new(path, WorkspaceDirectoryIdentity::new(0, 0))
+    ValidatedWorkspaceDirectory::new(path, WorkspaceDirectoryIdentity::for_test(0))
 }
 
 pub(crate) fn test_accessibility_viewport_models(
