@@ -118,7 +118,7 @@ pub(crate) mod testing {
             record.bounds = update.bounds;
             record.cell_width = update.cell_width;
             record.line_height = update.line_height;
-            record.selection_sender = update.selection_sender;
+            record.selection_sender = update.selection_sender.filter(|_| record.presented);
             record.visible = record.presented && update.bounds.is_some();
             record.focused = record.visible && update.focused;
             record.delivered = AccessibilityNotifications::default();

@@ -5676,6 +5676,87 @@ mod tests {
         assert!(record.borrow().selection_sender.is_none());
     }
 
+    #[gpui::test]
+    fn accessibility_selection_authority_follows_remote_restart_hierarchy_and_close(
+        cx: &mut TestAppContext,
+    ) {
+        let (pane, cx, records) = connected_remote_terminal_pane(cx);
+        let record = prepare_accessibility_presentation(&pane, cx);
+        let request = record.borrow().model.selection_request(0..0).unwrap();
+        let predecessor = record
+            .borrow()
+            .selection_sender
+            .clone()
+            .expect("Pane must publish Selection authority");
+        predecessor.request(request.clone());
+        assert_eq!(
+            records.accessibility_selection_requests(1),
+            std::slice::from_ref(&request)
+        );
+
+        pane.update(cx, |pane, _| {
+            pane.set_accessibility_hierarchy(false, usize::MAX)
+        });
+        assert!(record.borrow().selection_sender.is_none());
+        cx.update(|window, cx| {
+            pane.update(cx, |pane, _| pane.sync_native_accessibility(window, false))
+        });
+        assert!(
+            record.borrow().selection_sender.is_none(),
+            "hidden publication must not restore authority"
+        );
+        pane.update(cx, |pane, _| {
+            pane.set_accessibility_hierarchy(false, usize::MAX)
+        });
+        assert!(record.borrow().selection_sender.is_none());
+        pane.update(cx, |pane, _| pane.set_accessibility_hierarchy(true, 0));
+        cx.update(|window, cx| {
+            pane.update(cx, |pane, _| pane.sync_native_accessibility(window, true))
+        });
+        assert!(record.borrow().selection_sender.is_some());
+
+        let factory = pane.read_with(cx, |pane, _| pane.session_factory.clone());
+        pane.update(cx, |pane, cx| pane.disconnect_remote(7, cx).unwrap());
+        assert_eq!(
+            cx.executor()
+                .block(factory.revalidate_remote_child_launch().unwrap()),
+            Ok(())
+        );
+        let prepared_launch = factory.prepare_child_launch().unwrap();
+        let prepared = pane
+            .read_with(cx, |pane, _| {
+                pane.prepare_remote_restart(factory, 8, prepared_launch)
+            })
+            .unwrap();
+        cx.update(|window, cx| {
+            pane.update(cx, |pane, cx| {
+                pane.commit_remote_restart(prepared, window, cx).unwrap()
+            })
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            pane.update(cx, |pane, _| pane.sync_native_accessibility(window, true))
+        });
+        predecessor.request(request.clone());
+        assert!(records.accessibility_selection_requests(2).is_empty());
+        let successor = record
+            .borrow()
+            .selection_sender
+            .clone()
+            .expect("restart must publish successor authority");
+        successor.request(request.clone());
+        assert_eq!(
+            records.accessibility_selection_requests(2),
+            std::slice::from_ref(&request)
+        );
+        assert_eq!(records.dropped_session_ids(), [1]);
+        pane.update(cx, |pane, _| pane.close());
+        assert!(record.borrow().selection_sender.is_none());
+        successor.request(request);
+        assert!(records.accessibility_selection_requests(2).is_empty());
+        assert_eq!(records.dropped_session_ids(), [1, 2]);
+    }
+
     fn prepare_accessibility_presentation(
         pane: &Entity<TerminalPane>,
         cx: &mut VisualTestContext,

@@ -285,6 +285,15 @@ pub(crate) struct AccessibilitySelectionSender {
 }
 
 impl AccessibilitySelectionSender {
+    #[cfg(test)]
+    pub(crate) fn recording_channel() -> (Self, RecordingAccessibilitySelectionReceiver) {
+        let (commands, receiver) = mpsc::channel();
+        (
+            Self { commands },
+            RecordingAccessibilitySelectionReceiver(receiver),
+        )
+    }
+
     pub(crate) fn request(&self, request: AccessibilitySelectionRequest) {
         if self
             .commands
@@ -295,6 +304,22 @@ impl AccessibilitySelectionSender {
                 "terminal accessibility selection was dropped because the worker has stopped"
             );
         }
+    }
+}
+
+#[cfg(test)]
+pub(crate) struct RecordingAccessibilitySelectionReceiver(CommandReceiver<Command>);
+
+#[cfg(test)]
+impl RecordingAccessibilitySelectionReceiver {
+    pub(crate) fn drain(&self) -> Vec<AccessibilitySelectionRequest> {
+        self.0
+            .try_iter()
+            .map(|command| match command {
+                Command::AccessibilitySelection(request) => request,
+                _ => unreachable!("Selection authority only sends Selection commands"),
+            })
+            .collect()
     }
 }
 

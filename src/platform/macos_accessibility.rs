@@ -298,7 +298,7 @@ mod native {
             if !self.state.model.shares_snapshot(model) {
                 self.state.model = model.clone();
             }
-            self.state.selection_sender = selection_sender;
+            self.state.selection_sender = selection_sender.filter(|_| self.state.presented);
             self.state.cell_width = f32::from(cell_width);
             self.state.line_height = f32::from(line_height);
             let point_size = f32::from(font_size);
