@@ -1,3 +1,4 @@
+use crate::platform::terminal_accessibility::TerminalAccessibilityAdapterFactory;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -108,6 +109,7 @@ pub(crate) struct PaneHost {
     terminal_tab: TerminalTab<Entity<TerminalPane>>,
     session_factory: WorkspaceTerminalSessionFactory,
     key_input_adapter_factory: Rc<dyn TerminalKeyInputAdapterFactory>,
+    accessibility_adapter_factory: Rc<dyn TerminalAccessibilityAdapterFactory>,
     pane_bounds: BTreeMap<PaneId, Bounds<Pixels>>,
     split_bounds: BTreeMap<SplitId, Bounds<Pixels>>,
     pane_titles: BTreeMap<PaneId, gpui::SharedString>,
@@ -140,6 +142,7 @@ impl PaneHost {
             session_factory,
             prepared_launch,
             Rc::new(GpuiTerminalKeyInputAdapterFactory::default()),
+            Rc::new(crate::platform::terminal_accessibility::testing::RecordingAccessibilityFactory::default()),
             window,
             cx,
         )
@@ -150,6 +153,7 @@ impl PaneHost {
         session_factory: WorkspaceTerminalSessionFactory,
         prepared_launch: PreparedWorkspaceTerminalLaunch,
         key_input_adapter_factory: Rc<dyn TerminalKeyInputAdapterFactory>,
+        accessibility_adapter_factory: Rc<dyn TerminalAccessibilityAdapterFactory>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -165,6 +169,7 @@ impl PaneHost {
                 session_factory.clone(),
                 prepared_launch,
                 Rc::clone(&key_input_adapter_factory),
+                Rc::clone(&accessibility_adapter_factory),
                 window,
                 cx,
             )
@@ -179,6 +184,7 @@ impl PaneHost {
             terminal_tab,
             session_factory,
             key_input_adapter_factory,
+            accessibility_adapter_factory,
             pane_bounds: BTreeMap::new(),
             split_bounds: BTreeMap::new(),
             pane_titles: BTreeMap::from([(initial_pane_id, initial_title)]),
@@ -200,6 +206,7 @@ impl PaneHost {
         session_factory: WorkspaceTerminalSessionFactory,
         prepared_launch: PreparedWorkspaceTerminalLaunch,
         key_input_adapter_factory: Rc<dyn TerminalKeyInputAdapterFactory>,
+        accessibility_adapter_factory: Rc<dyn TerminalAccessibilityAdapterFactory>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Entity<TerminalPane> {
@@ -208,6 +215,7 @@ impl PaneHost {
                 session_factory,
                 prepared_launch,
                 key_input_adapter_factory.create(),
+                accessibility_adapter_factory.as_ref(),
                 window,
                 cx,
             )
@@ -825,6 +833,7 @@ impl PaneHost {
     ) {
         let session_factory = self.session_factory.clone();
         let key_input_adapter_factory = Rc::clone(&self.key_input_adapter_factory);
+        let accessibility_adapter_factory = Rc::clone(&self.accessibility_adapter_factory);
         let result = self.terminal_tab.split_pane(
             target_pane_id,
             axis,
@@ -836,6 +845,7 @@ impl PaneHost {
                     session_factory,
                     prepared_launch,
                     key_input_adapter_factory,
+                    accessibility_adapter_factory,
                     window,
                     cx,
                 )

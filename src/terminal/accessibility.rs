@@ -707,7 +707,6 @@ impl TerminalAccessibilityModel {
         }
     }
 
-    #[cfg(all(target_os = "macos", not(test)))]
     pub(crate) fn shares_snapshot(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.data, &other.data)
     }

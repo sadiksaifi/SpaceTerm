@@ -1,20 +1,26 @@
 use std::ops::Range;
 
-use gpui::{Bounds, Pixels, Window};
+#[cfg(not(test))]
+use super::terminal_accessibility::TerminalAccessibilityUpdate;
+use super::terminal_accessibility::{
+    TerminalAccessibilityAdapter, TerminalAccessibilityAdapterFactory,
+};
+#[cfg(not(test))]
+use crate::terminal::AccessibilityNotifications;
+use gpui::{Pixels, Window};
 
 #[cfg(all(target_os = "macos", not(test)))]
 use crate::terminal::AccessibilitySelectionSender;
 use crate::terminal::{
-    AccessibilityGeometry, AccessibilityNotification, AccessibilityNotifications,
-    TerminalAccessibilityModel,
+    AccessibilityGeometry, AccessibilityNotification, TerminalAccessibilityModel,
 };
 
-pub(crate) const TEXT_AREA_ROLE: &str = "AXTextArea";
-pub(crate) const VALUE_CHANGED: &str = "AXValueChanged";
-pub(crate) const SELECTION_CHANGED: &str = "AXSelectedTextChanged";
-pub(crate) const FOCUS_CHANGED: &str = "AXFocusedUIElementChanged";
+const TEXT_AREA_ROLE: &str = "AXTextArea";
+const VALUE_CHANGED: &str = "AXValueChanged";
+const SELECTION_CHANGED: &str = "AXSelectedTextChanged";
+const FOCUS_CHANGED: &str = "AXFocusedUIElementChanged";
 
-pub(crate) fn notification_name(notification: AccessibilityNotification) -> &'static str {
+fn notification_name(notification: AccessibilityNotification) -> &'static str {
     match notification {
         AccessibilityNotification::Value => VALUE_CHANGED,
         AccessibilityNotification::Selection => SELECTION_CHANGED,
@@ -72,20 +78,6 @@ struct AccessibilityFontMetadata {
 struct AccessibilityAttributedText<'a> {
     text: String,
     font: &'a AccessibilityFontMetadata,
-}
-
-pub(crate) struct MacosAccessibilityUpdate<'a> {
-    pub(crate) window: &'a Window,
-    pub(crate) model: &'a TerminalAccessibilityModel,
-    pub(crate) bounds: Option<Bounds<Pixels>>,
-    pub(crate) cell_width: Pixels,
-    pub(crate) line_height: Pixels,
-    pub(crate) font_family: &'a str,
-    pub(crate) font_size: Pixels,
-    pub(crate) focused: bool,
-    pub(crate) notifications: AccessibilityNotifications,
-    #[cfg(all(target_os = "macos", not(test)))]
-    pub(crate) selection_sender: Option<AccessibilitySelectionSender>,
 }
 
 impl AccessibilityElementState {
@@ -162,8 +154,8 @@ mod native {
 
     use super::{
         AccessibilityAttributedText, AccessibilityElementState, AccessibilityFontMetadata,
-        AccessibilityNotification, AccessibilityNotifications, MacosAccessibilityUpdate,
-        ScreenRect, TEXT_AREA_ROLE, TerminalAccessibilityModel, normalized_font_family,
+        AccessibilityNotification, AccessibilityNotifications, ScreenRect, TEXT_AREA_ROLE,
+        TerminalAccessibilityModel, TerminalAccessibilityUpdate, normalized_font_family,
         normalized_font_point_size, notification_name,
     };
 
@@ -263,6 +255,9 @@ mod native {
             }
             self.state.presented = presented;
             self.state.order = order;
+            if !presented {
+                self.state.selection_sender = None;
+            }
             self.state.visible &= presented;
             self.state.focused &= presented;
             if self.state.registered && !presented {
@@ -275,9 +270,9 @@ mod native {
 
         pub(crate) fn update(
             &mut self,
-            update: MacosAccessibilityUpdate<'_>,
+            update: TerminalAccessibilityUpdate<'_>,
         ) -> AccessibilityNotifications {
-            let MacosAccessibilityUpdate {
+            let TerminalAccessibilityUpdate {
                 window,
                 model,
                 bounds,
@@ -986,82 +981,44 @@ fn normalized_font_point_size(point_size: f32) -> f32 {
     }
 }
 
-#[cfg(all(target_os = "macos", not(test)))]
-pub(crate) use native::MacosAccessibilityElement;
+pub(crate) struct MacosTerminalAccessibilityAdapterFactory;
 
-#[cfg(any(not(target_os = "macos"), test))]
-pub(crate) struct MacosAccessibilityElement {
-    model: TerminalAccessibilityModel,
-    presented: bool,
-    visible: bool,
-    focused: bool,
-    delivered: AccessibilityNotifications,
+impl TerminalAccessibilityAdapterFactory for MacosTerminalAccessibilityAdapterFactory {
+    fn create(
+        &self,
+        window: &Window,
+        model: TerminalAccessibilityModel,
+        font_family: &str,
+        font_size: Pixels,
+    ) -> Box<dyn TerminalAccessibilityAdapter> {
+        #[cfg(not(test))]
+        {
+            Box::new(native::MacosAccessibilityElement::new(
+                window,
+                model,
+                font_family,
+                font_size,
+            ))
+        }
+        #[cfg(test)]
+        {
+            super::terminal_accessibility::testing::RecordingAccessibilityFactory::default().create(
+                window,
+                model,
+                font_family,
+                font_size,
+            )
+        }
+    }
 }
 
-#[cfg(any(not(target_os = "macos"), test))]
-impl MacosAccessibilityElement {
-    pub(crate) fn new(
-        _: &gpui::Window,
-        model: TerminalAccessibilityModel,
-        _: &str,
-        _: Pixels,
-    ) -> Self {
-        Self {
-            model,
-            presented: false,
-            visible: false,
-            focused: false,
-            delivered: AccessibilityNotifications::default(),
-        }
+#[cfg(not(test))]
+impl TerminalAccessibilityAdapter for native::MacosAccessibilityElement {
+    fn set_hierarchy(&mut self, presented: bool, order: usize) {
+        self.set_hierarchy(presented, order);
     }
-
-    pub(crate) fn set_hierarchy(&mut self, presented: bool, _: usize) {
-        self.presented = presented;
-        self.visible &= presented;
-        self.focused &= presented;
-    }
-
-    pub(crate) fn update(
-        &mut self,
-        update: MacosAccessibilityUpdate<'_>,
-    ) -> AccessibilityNotifications {
-        let _ = (
-            update.window,
-            update.cell_width,
-            update.line_height,
-            update.font_family,
-            update.font_size,
-        );
-        let was_focused = self.focused;
-        self.model = update.model.clone();
-        self.visible = self.presented && update.bounds.is_some();
-        self.focused = self.visible && update.focused;
-        if !self.visible {
-            self.delivered = AccessibilityNotifications::default();
-            return update.notifications;
-        }
-        self.delivered = update
-            .notifications
-            .without(AccessibilityNotification::Focus);
-        if self.focused
-            && (!was_focused
-                || update
-                    .notifications
-                    .contains(AccessibilityNotification::Focus))
-        {
-            self.delivered.insert(AccessibilityNotification::Focus);
-        }
-        AccessibilityNotifications::default()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn delivered_notifications(&self) -> AccessibilityNotifications {
-        self.delivered
-    }
-
-    #[cfg(test)]
-    pub(crate) fn model(&self) -> &TerminalAccessibilityModel {
-        &self.model
+    fn update(&mut self, update: TerminalAccessibilityUpdate<'_>) -> AccessibilityNotifications {
+        self.update(update)
     }
 }
 

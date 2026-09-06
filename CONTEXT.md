@@ -820,6 +820,16 @@ invalidates it immediately.
 
 ### Terminal Accessibility
 
+Terminal Accessibility has a narrow platform-neutral Adapter Interface selected by application
+composition and injected as a factory through Workspace, Tab, and Pane construction. Each Pane
+owns only the returned Adapter and publishes its immutable Terminal Accessibility Model, logical
+geometry, selected font request, hierarchy order, visibility, Terminal Input Focus, and coalesced
+notification facts. The current macOS Adapter exclusively owns AppKit objects, native roles and
+attributes, coordinate conversion, hierarchy registration, notification posting, and teardown.
+Hierarchy removal synchronously unregisters the element and revokes its Selection authority;
+Pane destruction drops the Adapter and releases its native resources. No Linux AT-SPI or Windows
+UI Automation Adapter is implemented, and this Seam makes no new accessibility conformance claim.
+
 Each Pane exposes one native editable text-area model whose canonical indexes are UTF-16 code
 units, matching AppKit. The model preserves complete grapheme text while mapping wide-cell spacer
 tails, combining sequences, hard lines, soft wraps, the visible range, Selection, and Cursor back
@@ -835,8 +845,11 @@ accessibility notifications; a Pane retains
 at most one pending Value, Selection, and Focus fact while it cannot present, then delivers those
 facts against its newest model on the next native presentation. Parent layout membership remains a
 separate synchronous hierarchy notification. Notifications carry no terminal contents.
-Accessibility may request terminal-owned selection changes through the Terminal Session, but never
-mutates the Terminal Emulator from the native callback.
+The platform-neutral Terminal Session handle supplies scoped Accessibility Selection authority to
+the Adapter. Requests retain the model's generation, revision, UTF-16 range, and complete-grapheme
+normalization and cross the existing reliable Terminal Session command lane. The worker alone
+validates and applies Selection changes; native callbacks never mutate the Terminal Emulator.
+Retained request handles are inert after worker shutdown.
 
 ### Demand-Driven Render Lifecycle
 

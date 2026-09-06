@@ -33,7 +33,6 @@ use crate::platform::acceptance_observation::{
     FailureActionCase, FailureActionController, FailureActionEvent, FailureActionPhase,
     FailureActionRequest, FailureActionResult, FailurePaneState, FailurePendingRecovery,
 };
-use crate::platform::macos_accessibility::{MacosAccessibilityElement, MacosAccessibilityUpdate};
 #[cfg(not(test))]
 use crate::platform::macos_application;
 use crate::platform::macos_attention::{
@@ -54,6 +53,9 @@ use crate::platform::macos_secure_input::{
     remove_pane as remove_secure_input_pane,
     update_application_activation as update_secure_input_application_activation,
     update_pane as update_secure_input_pane,
+};
+use crate::platform::terminal_accessibility::{
+    TerminalAccessibilityAdapter, TerminalAccessibilityAdapterFactory, TerminalAccessibilityUpdate,
 };
 #[cfg(test)]
 use crate::terminal::UnhandledKeyEvent;
@@ -312,7 +314,7 @@ pub(crate) struct TerminalPane {
     last_valid_screen: Arc<ScreenSnapshot>,
     last_valid_screen_session_epoch: u64,
     accessibility: Arc<TerminalAccessibilityModel>,
-    accessibility_element: MacosAccessibilityElement,
+    accessibility_element: Box<dyn TerminalAccessibilityAdapter>,
     pending_accessibility_notifications: AccessibilityNotifications,
     render_lifecycle: RenderLifecycle,
     pane_state: PaneTerminalState,
@@ -399,6 +401,7 @@ impl TerminalPane {
             session_factory,
             prepared_launch,
             crate::terminal::testing::test_terminal_key_input_adapter(),
+            &crate::platform::terminal_accessibility::testing::RecordingAccessibilityFactory::default(),
             Box::new(MacosQuickLook::default()),
             window,
             cx,
@@ -409,6 +412,7 @@ impl TerminalPane {
         session_factory: WorkspaceTerminalSessionFactory,
         prepared_launch: PreparedWorkspaceTerminalLaunch,
         key_input_adapter: Box<dyn TerminalKeyInputAdapter>,
+        accessibility_adapter_factory: &dyn TerminalAccessibilityAdapterFactory,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -416,6 +420,7 @@ impl TerminalPane {
             session_factory,
             Some(prepared_launch),
             key_input_adapter,
+            accessibility_adapter_factory,
             Box::new(MacosQuickLook::default()),
             window,
             cx,
@@ -426,6 +431,7 @@ impl TerminalPane {
         session_factory: WorkspaceTerminalSessionFactory,
         prepared_launch: Option<PreparedWorkspaceTerminalLaunch>,
         key_input_adapter: Box<dyn TerminalKeyInputAdapter>,
+        accessibility_adapter_factory: &dyn TerminalAccessibilityAdapterFactory,
         quick_look: Box<dyn QuickLookPlatform>,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -447,7 +453,7 @@ impl TerminalPane {
         .detach();
         let screen = ScreenSnapshot::empty();
         let accessibility = Arc::new(TerminalAccessibilityModel::from_screen(&screen));
-        let accessibility_element = MacosAccessibilityElement::new(
+        let accessibility_element = accessibility_adapter_factory.create(
             window,
             accessibility.as_ref().clone(),
             font_family.as_ref(),
@@ -2076,25 +2082,24 @@ impl TerminalPane {
 
     fn sync_native_accessibility(&mut self, window: &Window, focused: bool) {
         let notifications = self.pending_accessibility_notifications.take();
-        #[cfg(all(target_os = "macos", not(test)))]
         let selection_sender = self
             .session
             .as_ref()
             .and_then(|session| session.accessibility_selection_sender());
         self.pending_accessibility_notifications =
-            self.accessibility_element.update(MacosAccessibilityUpdate {
-                window,
-                model: self.accessibility.as_ref(),
-                bounds: self.grid_bounds,
-                cell_width: self.cell_width,
-                line_height: px(self.line_height),
-                font_family: self.font_family.as_ref(),
-                font_size: px(self.font_size),
-                focused,
-                notifications,
-                #[cfg(all(target_os = "macos", not(test)))]
-                selection_sender,
-            });
+            self.accessibility_element
+                .update(TerminalAccessibilityUpdate {
+                    window,
+                    model: self.accessibility.as_ref(),
+                    bounds: self.grid_bounds,
+                    cell_width: self.cell_width,
+                    line_height: px(self.line_height),
+                    font_family: self.font_family.as_ref(),
+                    font_size: px(self.font_size),
+                    focused,
+                    notifications,
+                    selection_sender,
+                });
     }
 
     fn handle_event(&mut self, event: SessionEvent, cx: &mut Context<Self>) {
@@ -5609,13 +5614,91 @@ mod tests {
         ))
     }
 
-    fn prepare_accessibility_presentation(pane: &Entity<TerminalPane>, cx: &mut VisualTestContext) {
+    #[gpui::test]
+    fn accessibility_adapter_receives_construction_publication_and_teardown(
+        cx: &mut TestAppContext,
+    ) {
+        let (_, cx) = terminal_pane(cx);
+        let factory = crate::platform::terminal_accessibility::testing::RecordingAccessibilityFactory::default();
+        let session_factory = WorkspaceTerminalSessionFactory::new_local(
+            Rc::new(TestTerminalSessionFactory::new(
+                TestTerminalSessionRecords::default(),
+            )),
+            crate::terminal::testing::test_workspace_directory(PathBuf::from(
+                "/tmp/spaceterm-accessibility-test",
+            )),
+        );
+        let pane = cx.update(|window, cx| {
+            cx.new(|cx| {
+                TerminalPane::new_with_prepared_launch(
+                    session_factory.clone(),
+                    session_factory.prepare_child_launch().unwrap(),
+                    crate::terminal::testing::test_terminal_key_input_adapter(),
+                    &factory,
+                    window,
+                    cx,
+                )
+            })
+        });
+        assert_eq!(factory.records.borrow().len(), 1);
+        let record = Rc::clone(&factory.records.borrow()[0]);
+        assert!(record.borrow().model.text().is_empty());
+        pane.read_with(cx, |pane, _| {
+            assert_eq!(record.borrow().font_family, pane.font_family.as_ref());
+            assert_eq!(record.borrow().font_size, px(pane.font_size));
+        });
+        let model = accessibility_model(42);
+        let bounds = Bounds::new(point(px(13.0), px(27.0)), size(px(300.0), px(200.0)));
+        cx.update(|window, cx| {
+            pane.update(cx, |pane, _| {
+                pane.grid_bounds = Some(bounds);
+                pane.cell_width = px(9.5);
+                pane.line_height = 21.0;
+                pane.handle_accessibility(Arc::clone(&model));
+                pane.set_accessibility_hierarchy(true, 7);
+                pane.sync_native_accessibility(window, true);
+            })
+        });
+        {
+            let record = record.borrow();
+            assert!(record.model.shares_snapshot(&model));
+            assert_eq!(record.bounds, Some(bounds));
+            assert_eq!((record.cell_width, record.line_height), (px(9.5), px(21.0)));
+            assert!(record.focused && record.visible);
+            assert_eq!(record.hierarchy, [(true, 7)]);
+        }
+        pane.update(cx, |pane, _| pane.close());
+        assert_eq!(record.borrow().hierarchy.last(), Some(&(false, usize::MAX)));
+        assert!(!record.borrow().visible && !record.borrow().focused);
+        cx.update(|_, _| drop(pane));
+        cx.run_until_parked();
+        assert!(record.borrow().dropped);
+        assert!(record.borrow().selection_sender.is_none());
+    }
+
+    fn prepare_accessibility_presentation(
+        pane: &Entity<TerminalPane>,
+        cx: &mut VisualTestContext,
+    ) -> Rc<std::cell::RefCell<crate::platform::terminal_accessibility::testing::AccessibilityRecord>>
+    {
+        let factory = crate::platform::terminal_accessibility::testing::RecordingAccessibilityFactory::default();
+        cx.update(|window, cx| {
+            pane.update(cx, |pane, _| {
+                pane.accessibility_element = factory.create(
+                    window,
+                    pane.accessibility.as_ref().clone(),
+                    pane.font_family.as_ref(),
+                    px(pane.font_size),
+                );
+            });
+        });
         cx.update(|window, cx| {
             pane.update(cx, |pane, _| {
                 pane.set_accessibility_hierarchy(true, 0);
                 pane.sync_native_accessibility(window, false);
             });
         });
+        Rc::clone(&factory.records.borrow()[0])
     }
 
     fn visible_surface() -> SurfaceVisibility {
@@ -5635,7 +5718,7 @@ mod tests {
         cx: &mut TestAppContext,
     ) {
         let (pane, cx) = terminal_pane(cx);
-        prepare_accessibility_presentation(&pane, cx);
+        let accessibility_record = prepare_accessibility_presentation(&pane, cx);
         pane.update(cx, |pane, _| {
             pane.render_lifecycle.update_visibility(SurfaceVisibility {
                 minimized: true,
@@ -5670,11 +5753,12 @@ mod tests {
             pane.read_with(cx, |pane, _| {
                 (
                     pane.pending_accessibility_notifications.is_empty(),
-                    pane.accessibility_element
-                        .delivered_notifications()
+                    accessibility_record
+                        .borrow()
+                        .delivered
                         .iter()
                         .collect::<Vec<_>>(),
-                    pane.accessibility_element.model().text().to_owned(),
+                    accessibility_record.borrow().model.text().to_owned(),
                 )
             }),
             (
@@ -5693,7 +5777,7 @@ mod tests {
         cx: &mut TestAppContext,
     ) {
         let (pane, cx) = terminal_pane(cx);
-        prepare_accessibility_presentation(&pane, cx);
+        let accessibility_record = prepare_accessibility_presentation(&pane, cx);
         pane.update(cx, |pane, _| {
             pane.render_lifecycle.update_visibility(SurfaceVisibility {
                 occluded: true,
@@ -5724,11 +5808,12 @@ mod tests {
             pane.read_with(cx, |pane, _| {
                 (
                     pane.pending_accessibility_notifications.is_empty(),
-                    pane.accessibility_element
-                        .delivered_notifications()
+                    accessibility_record
+                        .borrow()
+                        .delivered
                         .iter()
                         .collect::<Vec<_>>(),
-                    pane.accessibility_element.model().text().to_owned(),
+                    accessibility_record.borrow().model.text().to_owned(),
                 )
             }),
             (
@@ -5747,7 +5832,7 @@ mod tests {
         cx: &mut TestAppContext,
     ) {
         let (pane, cx) = terminal_pane(cx);
-        prepare_accessibility_presentation(&pane, cx);
+        let accessibility_record = prepare_accessibility_presentation(&pane, cx);
         pane.update(cx, |pane, _| {
             pane.set_product_focus(TerminalProductFocus {
                 pane_visible: false,
@@ -5767,9 +5852,7 @@ mod tests {
             pane.read_with(cx, |pane, _| {
                 (
                     pane.pending_accessibility_notifications.len(),
-                    pane.accessibility_element
-                        .delivered_notifications()
-                        .is_empty(),
+                    accessibility_record.borrow().delivered.is_empty(),
                     pane.accessibility.text().to_owned(),
                 )
             }),
@@ -5787,11 +5870,12 @@ mod tests {
             pane.read_with(cx, |pane, _| {
                 (
                     pane.pending_accessibility_notifications.is_empty(),
-                    pane.accessibility_element
-                        .delivered_notifications()
+                    accessibility_record
+                        .borrow()
+                        .delivered
                         .iter()
                         .collect::<Vec<_>>(),
-                    pane.accessibility_element.model().text().to_owned(),
+                    accessibility_record.borrow().model.text().to_owned(),
                 )
             }),
             (
@@ -5810,7 +5894,7 @@ mod tests {
         cx: &mut TestAppContext,
     ) {
         let (pane, cx) = terminal_pane(cx);
-        prepare_accessibility_presentation(&pane, cx);
+        let accessibility_record = prepare_accessibility_presentation(&pane, cx);
         pane.update(cx, |pane, _| {
             pane.set_product_focus(TerminalProductFocus {
                 active_workspace: false,
@@ -5832,9 +5916,7 @@ mod tests {
             pane.read_with(cx, |pane, _| {
                 (
                     pane.pending_accessibility_notifications.len(),
-                    pane.accessibility_element
-                        .delivered_notifications()
-                        .is_empty(),
+                    accessibility_record.borrow().delivered.is_empty(),
                     pane.accessibility.text().to_owned(),
                 )
             }),
@@ -5852,11 +5934,12 @@ mod tests {
             pane.read_with(cx, |pane, _| {
                 (
                     pane.pending_accessibility_notifications.is_empty(),
-                    pane.accessibility_element
-                        .delivered_notifications()
+                    accessibility_record
+                        .borrow()
+                        .delivered
                         .iter()
                         .collect::<Vec<_>>(),
-                    pane.accessibility_element.model().text().to_owned(),
+                    accessibility_record.borrow().model.text().to_owned(),
                 )
             }),
             (
@@ -5875,7 +5958,7 @@ mod tests {
         cx: &mut TestAppContext,
     ) {
         let (pane, cx) = terminal_pane(cx);
-        prepare_accessibility_presentation(&pane, cx);
+        let accessibility_record = prepare_accessibility_presentation(&pane, cx);
         pane.update(cx, |pane, _| {
             pane.set_accessibility_hierarchy(false, usize::MAX);
             pane.apply_terminal_input_focus(false);
@@ -5887,10 +5970,7 @@ mod tests {
         assert!(pane.read_with(cx, |pane, _| {
             pane.pending_accessibility_notifications
                 .contains(AccessibilityNotification::Focus)
-                && pane
-                    .accessibility_element
-                    .delivered_notifications()
-                    .is_empty()
+                && accessibility_record.borrow().delivered.is_empty()
         }));
 
         pane.update(cx, |pane, _| pane.set_accessibility_hierarchy(true, 0));
@@ -5902,8 +5982,9 @@ mod tests {
             pane.read_with(cx, |pane, _| {
                 (
                     pane.pending_accessibility_notifications.is_empty(),
-                    pane.accessibility_element
-                        .delivered_notifications()
+                    accessibility_record
+                        .borrow()
+                        .delivered
                         .iter()
                         .collect::<Vec<_>>(),
                 )
@@ -5917,7 +5998,7 @@ mod tests {
         cx: &mut TestAppContext,
     ) {
         let (pane, cx) = terminal_pane(cx);
-        prepare_accessibility_presentation(&pane, cx);
+        let accessibility_record = prepare_accessibility_presentation(&pane, cx);
         cx.update(|window, cx| {
             pane.update(cx, |pane, _| {
                 pane.apply_terminal_input_focus(true);
@@ -5941,8 +6022,9 @@ mod tests {
             pane.read_with(cx, |pane, _| {
                 (
                     pane.pending_accessibility_notifications.is_empty(),
-                    pane.accessibility_element
-                        .delivered_notifications()
+                    accessibility_record
+                        .borrow()
+                        .delivered
                         .iter()
                         .collect::<Vec<_>>(),
                 )

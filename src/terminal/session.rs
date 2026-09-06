@@ -18,7 +18,6 @@ use crate::platform::native_pty::{
     NativePtyStartupFailure, NativePtyStartupStage, NativePtyWaitFailure, shell_fallback_title,
 };
 use crate::platform::shell_integration::resource_root;
-#[cfg(all(target_os = "macos", not(test)))]
 use crate::terminal::accessibility::AccessibilitySelectionRequest;
 use crate::terminal::accessibility::TerminalAccessibilityModel;
 use crate::terminal::attention::AttentionEvent;
@@ -281,12 +280,10 @@ pub(crate) enum AcceptanceSessionFailure {
 }
 
 #[derive(Clone, Debug)]
-#[cfg(all(target_os = "macos", not(test)))]
 pub(crate) struct AccessibilitySelectionSender {
     commands: CommandSender<Command>,
 }
 
-#[cfg(all(target_os = "macos", not(test)))]
 impl AccessibilitySelectionSender {
     pub(crate) fn request(&self, request: AccessibilitySelectionRequest) {
         if self
@@ -331,7 +328,6 @@ pub(crate) trait TerminalSessionHandle {
     );
     fn copy_selection(&self) -> Result<Option<SelectionCopy>, SelectionCopyError>;
     fn inject_acceptance_failure(&self, failure: AcceptanceSessionFailure);
-    #[cfg(all(target_os = "macos", not(test)))]
     fn accessibility_selection_sender(&self) -> Option<AccessibilitySelectionSender> {
         None
     }
@@ -1146,7 +1142,6 @@ impl TerminalSessionHandle for TerminalSession {
         }
     }
 
-    #[cfg(all(target_os = "macos", not(test)))]
     fn accessibility_selection_sender(&self) -> Option<AccessibilitySelectionSender> {
         self.commands
             .as_ref()
@@ -1226,7 +1221,6 @@ enum Command {
     Osc52AuthorizationExpired(Osc52AuthorizationId),
     ResumeOsc52Output,
     SelectionCopy(mpsc::SyncSender<Result<Option<SelectionCopy>, SelectionCopyError>>),
-    #[cfg(all(target_os = "macos", not(test)))]
     AccessibilitySelection(AccessibilitySelectionRequest),
     AccessibilityContinue,
     SelectionAutoscrollTick(PresentationGeneration),
@@ -1926,7 +1920,6 @@ impl TerminalWorker {
                 );
                 true
             }
-            #[cfg(all(target_os = "macos", not(test)))]
             Command::AccessibilitySelection(request) => {
                 match self.emulator.set_accessibility_selection(request) {
                     Ok(action) => {
@@ -5246,6 +5239,75 @@ mod tests {
             ),
             (1, 1, 1, 1)
         );
+    }
+
+    #[test]
+    fn accessibility_selection_authority_uses_the_reliable_worker_command_lane() {
+        let (mut worker, _events, records) = osc52_worker(
+            Osc52AuthorizationPolicy::default(),
+            RecordingOsc52Clipboard::default(),
+        );
+        worker.emulator.feed("a😀b".as_bytes());
+        let (_, more) = worker.emulator.accessibility_snapshot(true).unwrap();
+        assert!(more);
+        let (model, more) = worker.emulator.accessibility_snapshot(false).unwrap();
+        assert!(!more);
+        let _ = worker.emulator.snapshot().unwrap();
+        let request = model.unwrap().selection_request(2..3).unwrap();
+        assert_eq!(request.range, 1..3);
+        let (commands, receiver) = mpsc::channel();
+        worker.commands = receiver;
+        let session = TerminalSession {
+            commands: Some(commands),
+            worker: None,
+            native_pty_close: None,
+            resizes: ResizeMailbox::default(),
+            find_queries: FindQueryMailbox::default(),
+            runtime_observation: None,
+        };
+        let handle: &dyn TerminalSessionHandle = &session;
+        let sender = handle.accessibility_selection_sender().unwrap();
+        session.focus(false);
+        sender.request(request.clone());
+        assert!(
+            worker
+                .emulator
+                .selection_copy(SelectionCopyOptions::default())
+                .unwrap()
+                .is_none()
+        );
+        assert!(matches!(
+            worker.commands.try_recv().unwrap(),
+            Command::Focus(false)
+        ));
+        let command = worker.commands.try_recv().unwrap();
+        assert!(matches!(&command, Command::AccessibilitySelection(actual) if actual == &request));
+        assert!(worker.process_command(command));
+        assert_eq!(
+            worker
+                .emulator
+                .selection_copy(SelectionCopyOptions::default())
+                .unwrap()
+                .unwrap()
+                .plain_text,
+            "😀"
+        );
+        assert!(records.snapshot().written.is_empty());
+    }
+
+    #[test]
+    fn accessibility_selection_authority_is_inert_after_worker_shutdown() {
+        let (result, _reader_steps, records) =
+            start_scripted_session(ScriptedPtyOptions::default());
+        let (mut session, _events, _accessibility) = result.unwrap();
+        let sender = session.accessibility_selection_sender().unwrap();
+        let model = TerminalAccessibilityModel::from_screen(&ScreenSnapshot::empty());
+        let request = model.selection_request(0..0).unwrap();
+        session.shutdown_and_join();
+        let writes = records.snapshot().written;
+        sender.request(request);
+        assert!(session.accessibility_selection_sender().is_none());
+        assert_eq!(records.snapshot().written, writes);
     }
 
     #[test]

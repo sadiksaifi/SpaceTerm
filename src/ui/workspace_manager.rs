@@ -1,3 +1,4 @@
+use crate::platform::terminal_accessibility::TerminalAccessibilityAdapterFactory;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -226,10 +227,12 @@ struct TabManagerCreation {
     sidebar_width: Pixels,
     operating_system_window_drag_platform: Rc<dyn OperatingSystemWindowDragPlatform>,
     key_input_adapter_factory: Rc<dyn TerminalKeyInputAdapterFactory>,
+    accessibility_adapter_factory: Rc<dyn TerminalAccessibilityAdapterFactory>,
 }
 
 struct WorkspaceManagerAdapters {
     key_input: Rc<dyn TerminalKeyInputAdapterFactory>,
+    accessibility: Rc<dyn TerminalAccessibilityAdapterFactory>,
     finder: Rc<dyn FinderFallback>,
     window_drag: Rc<dyn OperatingSystemWindowDragPlatform>,
     remote_workspace: Arc<dyn RemoteWorkspaceFlowBackendFactory>,
@@ -268,6 +271,7 @@ pub(crate) struct WorkspaceManager {
     workspaces: WorkspaceCollection<Entity<TabManager>>,
     session_factory: Rc<dyn TerminalSessionFactory>,
     key_input_adapter_factory: Rc<dyn TerminalKeyInputAdapterFactory>,
+    accessibility_adapter_factory: Rc<dyn TerminalAccessibilityAdapterFactory>,
     default_workspace_root: PathBuf,
     default_workspace_identity: WorkspaceDirectoryIdentity,
     finder_fallback: Rc<dyn FinderFallback>,
@@ -303,6 +307,7 @@ impl WorkspaceManager {
     pub(crate) fn new(
         session_factory: Rc<dyn TerminalSessionFactory>,
         key_input_adapter_factory: Rc<dyn TerminalKeyInputAdapterFactory>,
+        accessibility_adapter_factory: Rc<dyn TerminalAccessibilityAdapterFactory>,
         default_workspace_root: PathBuf,
         remote_workspace_backend_factory: Arc<NativeRemoteWorkspaceFlowBackendFactory>,
         window: &mut Window,
@@ -315,6 +320,7 @@ impl WorkspaceManager {
             default_workspace_root,
             WorkspaceManagerAdapters {
                 key_input: key_input_adapter_factory,
+                accessibility: accessibility_adapter_factory,
                 finder: Rc::new(NativeFinderFallback),
                 window_drag: Rc::new(MacosOperatingSystemWindowDragPlatform::default()),
                 remote_workspace: remote_workspace_backend_factory,
@@ -337,6 +343,7 @@ impl WorkspaceManager {
             default_workspace_root,
             WorkspaceManagerAdapters {
                 key_input: Rc::new(GpuiTerminalKeyInputAdapterFactory::default()),
+                accessibility: Rc::new(crate::platform::terminal_accessibility::testing::RecordingAccessibilityFactory::default()),
                 finder: Rc::new(NativeFinderFallback),
                 window_drag: Rc::new(MacosOperatingSystemWindowDragPlatform::default()),
                 remote_workspace: remote_workspace_backend_factory,
@@ -360,6 +367,7 @@ impl WorkspaceManager {
             default_workspace_root,
             WorkspaceManagerAdapters {
                 key_input: Rc::new(GpuiTerminalKeyInputAdapterFactory::default()),
+                accessibility: Rc::new(crate::platform::terminal_accessibility::testing::RecordingAccessibilityFactory::default()),
                 finder: finder_fallback,
                 window_drag: Rc::new(MacosOperatingSystemWindowDragPlatform::default()),
                 remote_workspace: remote_workspace_backend_factory,
@@ -383,6 +391,7 @@ impl WorkspaceManager {
             default_workspace_root,
             WorkspaceManagerAdapters {
                 key_input: Rc::new(GpuiTerminalKeyInputAdapterFactory::default()),
+                accessibility: Rc::new(crate::platform::terminal_accessibility::testing::RecordingAccessibilityFactory::default()),
                 finder: Rc::new(NativeFinderFallback),
                 window_drag: operating_system_window_drag_platform,
                 remote_workspace: remote_workspace_backend_factory,
@@ -401,6 +410,7 @@ impl WorkspaceManager {
     ) -> Self {
         let WorkspaceManagerAdapters {
             key_input: key_input_adapter_factory,
+            accessibility: accessibility_adapter_factory,
             finder: finder_fallback,
             window_drag: operating_system_window_drag_platform,
             remote_workspace: remote_workspace_backend_factory,
@@ -411,6 +421,7 @@ impl WorkspaceManager {
         let initial_workspace_identity = default_directory.identity();
         let initial_window_drag_platform = Rc::clone(&operating_system_window_drag_platform);
         let initial_key_input_adapter_factory = Rc::clone(&key_input_adapter_factory);
+        let initial_accessibility_adapter_factory = Rc::clone(&accessibility_adapter_factory);
         let mut workspaces = WorkspaceCollection::new_scratch(
             default_directory,
             DirectoryAuthority::initial(),
@@ -431,6 +442,9 @@ impl WorkspaceManager {
                             &initial_window_drag_platform,
                         ),
                         key_input_adapter_factory: Rc::clone(&initial_key_input_adapter_factory),
+                        accessibility_adapter_factory: Rc::clone(
+                            &initial_accessibility_adapter_factory,
+                        ),
                     },
                     window,
                     cx,
@@ -526,6 +540,7 @@ impl WorkspaceManager {
             workspaces,
             session_factory,
             key_input_adapter_factory,
+            accessibility_adapter_factory,
             default_workspace_root,
             default_workspace_identity,
             finder_fallback,
@@ -599,6 +614,7 @@ impl WorkspaceManager {
             sidebar_width,
             operating_system_window_drag_platform,
             key_input_adapter_factory,
+            accessibility_adapter_factory,
         } = creation;
         let manager = cx.new(|cx| {
             let mut manager = TabManager::new_with_prepared_initial_launch(
@@ -606,6 +622,7 @@ impl WorkspaceManager {
                 prepared_launch,
                 operating_system_window_drag_platform,
                 key_input_adapter_factory,
+                accessibility_adapter_factory,
                 window,
                 cx,
             );
@@ -1306,6 +1323,7 @@ impl WorkspaceManager {
         let previous_manager = self.workspaces.active_workspace().payload().clone();
         let session_factory = Rc::clone(&self.session_factory);
         let key_input_adapter_factory = Rc::clone(&self.key_input_adapter_factory);
+        let accessibility_adapter_factory = Rc::clone(&self.accessibility_adapter_factory);
         let window_drag_platform = Rc::clone(&self.operating_system_window_drag_platform);
         let sidebar_visible = self.sidebar_visible;
         let sidebar_width = self.sidebar_width;
@@ -1329,6 +1347,7 @@ impl WorkspaceManager {
                         sidebar_width,
                         operating_system_window_drag_platform: window_drag_platform,
                         key_input_adapter_factory,
+                        accessibility_adapter_factory,
                     },
                     window,
                     cx,
@@ -1696,6 +1715,7 @@ impl WorkspaceManager {
         let sidebar_width = self.sidebar_width;
         let window_drag_platform = Rc::clone(&self.operating_system_window_drag_platform);
         let key_input_adapter_factory = Rc::clone(&self.key_input_adapter_factory);
+        let accessibility_adapter_factory = Rc::clone(&self.accessibility_adapter_factory);
         let result = self.workspaces.create_remote_project_workspace(
             key,
             completion.directory().clone(),
@@ -1711,6 +1731,7 @@ impl WorkspaceManager {
                         sidebar_width,
                         operating_system_window_drag_platform: window_drag_platform,
                         key_input_adapter_factory,
+                        accessibility_adapter_factory,
                     },
                     window,
                     cx,
@@ -2467,6 +2488,7 @@ impl WorkspaceManager {
         let previous_manager = self.workspaces.active_workspace().payload().clone();
         let session_factory = Rc::clone(&self.session_factory);
         let key_input_adapter_factory = Rc::clone(&self.key_input_adapter_factory);
+        let accessibility_adapter_factory = Rc::clone(&self.accessibility_adapter_factory);
         let window_drag_platform = Rc::clone(&self.operating_system_window_drag_platform);
         let sidebar_visible = self.sidebar_visible;
         let sidebar_width = self.sidebar_width;
@@ -2488,6 +2510,7 @@ impl WorkspaceManager {
                         sidebar_width,
                         operating_system_window_drag_platform: window_drag_platform,
                         key_input_adapter_factory,
+                        accessibility_adapter_factory,
                     },
                     window,
                     cx,
@@ -2836,6 +2859,7 @@ impl WorkspaceManager {
         let was_active = self.workspaces.active_workspace_id() == workspace_id;
         let session_factory = Rc::clone(&self.session_factory);
         let key_input_adapter_factory = Rc::clone(&self.key_input_adapter_factory);
+        let accessibility_adapter_factory = Rc::clone(&self.accessibility_adapter_factory);
         let window_drag_platform = Rc::clone(&self.operating_system_window_drag_platform);
         let sidebar_visible = self.sidebar_visible;
         let sidebar_width = self.sidebar_width;
@@ -2860,6 +2884,7 @@ impl WorkspaceManager {
                         sidebar_width,
                         operating_system_window_drag_platform: window_drag_platform,
                         key_input_adapter_factory,
+                        accessibility_adapter_factory,
                     },
                     window,
                     cx,
@@ -4992,6 +5017,55 @@ mod tests {
             closes,
             runtime_lifecycle_sender,
         )
+    }
+
+    #[gpui::test]
+    fn accessibility_factory_reaches_initial_and_new_workspaces_tabs_and_split_panes(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(crate::ui::init).unwrap();
+        let factory = Rc::new(crate::platform::terminal_accessibility::testing::RecordingAccessibilityFactory::default());
+        let session_factory: Rc<dyn TerminalSessionFactory> = Rc::new(
+            TestTerminalSessionFactory::new(TestTerminalSessionRecords::default()),
+        );
+        let (manager, cx) = cx.add_window_view(|window, cx| {
+            WorkspaceManager::new_with_adapters(
+                session_factory,
+                std::env::temp_dir(),
+                WorkspaceManagerAdapters {
+                    key_input: Rc::new(GpuiTerminalKeyInputAdapterFactory::default()),
+                    accessibility: factory.clone(),
+                    finder: Rc::new(NativeFinderFallback),
+                    window_drag: Rc::new(MacosOperatingSystemWindowDragPlatform::default()),
+                    remote_workspace: test_remote_backend_factory(),
+                },
+                window,
+                cx,
+            )
+        });
+        cx.update(|window, cx| manager.update(cx, |manager, cx| manager.focus(window, cx)));
+        cx.run_until_parked();
+        assert_eq!(factory.records.borrow().len(), 1);
+        for (shortcut, expected) in [("cmd-d", 2), ("cmd-t", 3), ("cmd-n", 4)] {
+            cx.simulate_keystrokes(shortcut);
+            cx.run_until_parked();
+            assert_eq!(factory.records.borrow().len(), expected, "{shortcut}");
+        }
+        let records = factory.records.borrow();
+        assert!(
+            records[0]
+                .borrow()
+                .hierarchy
+                .iter()
+                .any(|(presented, _)| !presented)
+        );
+        assert!(
+            records[3]
+                .borrow()
+                .hierarchy
+                .iter()
+                .any(|(presented, order)| *presented && *order == 0)
+        );
     }
 
     fn workspace_manager(
