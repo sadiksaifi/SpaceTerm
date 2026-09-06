@@ -1,5 +1,4 @@
 use std::ffi::{OsStr, OsString};
-use std::os::unix::ffi::OsStrExt;
 
 const FALLBACK_PATH: &str = "/usr/bin:/bin";
 const PATH_ENVIRONMENT_VARIABLE: &str = "PATH";
@@ -113,7 +112,7 @@ impl StartupSshEnvironment {
 }
 
 fn safe_environment_value(value: &OsStr) -> bool {
-    let bytes = value.as_bytes();
+    let bytes = value.as_encoded_bytes();
     !bytes.is_empty()
         && bytes.len() <= MAXIMUM_CAPTURED_ENVIRONMENT_VALUE_BYTES
         && !bytes.iter().any(u8::is_ascii_control)

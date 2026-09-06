@@ -1,5 +1,3 @@
-use std::io;
-use std::os::unix::net::UnixListener;
 #[cfg(test)]
 use std::path::Path;
 use std::path::PathBuf;
@@ -12,7 +10,7 @@ use thiserror::Error;
 
 pub(crate) use super::cancellation::SshCancellationToken;
 use super::command::{
-    PreparedSshPaneChannelCommand, SshCommandContext, SshCommandContextError,
+    OpenSshExecutable, PreparedSshPaneChannelCommand, SshCommandContext, SshCommandContextError,
     ValidatedRemoteShellCommand,
 };
 use super::live_connection::{
@@ -20,7 +18,8 @@ use super::live_connection::{
     LiveConnectionState,
 };
 use super::process::{
-    ProcessExit, ProcessRunError, ProcessSignal, SshProcessBackend, TransientSshErrorOutput,
+    ProcessExit, ProcessRunError, ProcessSignal, SshProcessBackend, SshProcessMechanismError,
+    TransientSshErrorOutput,
 };
 use super::remote_utility::PreparedSshRemoteUtilityCommand;
 use crate::domain::SshDestination;
@@ -28,6 +27,7 @@ use crate::platform::app_paths::{
     AppPaths, AppPathsError, CONTROL_RUNTIME_OWNER_KIND, CONTROL_RUNTIME_SOCKET_NAME,
     RegisteredRuntimeSocket, RuntimeOwner,
 };
+use crate::platform::control_socket::{ControlSocketProbe, ControlSocketUnavailable};
 #[cfg(test)]
 const MAXIMUM_READINESS_TIMEOUT: Duration = Duration::from_secs(60);
 const SHUTDOWN_OPERATION_TIMEOUT: Duration = Duration::from_secs(5);
@@ -114,12 +114,12 @@ pub(crate) enum ControlConnectionError {
     #[error("SSH control master could not be launched: {source}")]
     Launch {
         #[source]
-        source: io::Error,
+        source: SshProcessMechanismError,
     },
     #[error("SSH control master status could not be checked: {source}")]
     MasterStatus {
         #[source]
-        source: io::Error,
+        source: SshProcessMechanismError,
     },
     #[error("SSH readiness command could not be run: {source}")]
     Readiness {
@@ -136,28 +136,22 @@ pub(crate) enum ControlConnectionError {
     #[error("SSH control master could not be reaped: {source}")]
     Reap {
         #[source]
-        source: io::Error,
+        source: SshProcessMechanismError,
     },
     #[error("SSH control master did not terminate before its cleanup deadline")]
     MasterTerminationTimedOut,
     #[error("SSH private runtime cleanup failed: {0}")]
     Cleanup(AppPathsError),
-    #[error("SSH private socket reservation failed: {source}")]
-    SocketReservation {
-        #[source]
-        source: io::Error,
-    },
+    #[error("SSH private socket reservation failed")]
+    SocketReservation(#[from] ControlSocketUnavailable),
     #[error(transparent)]
     Paths(#[from] AppPathsError),
     #[error(transparent)]
     Command(#[from] SshCommandContextError),
     #[error("SSH control connection ownership was lost")]
     Ownership,
-    #[error("SSH control master supervisor could not be started: {source}")]
-    StartSupervisor {
-        #[source]
-        source: io::Error,
-    },
+    #[error("SSH control master supervisor could not be started")]
+    StartSupervisor,
     #[error("SSH control connection is not ready")]
     NotReady,
 }
@@ -197,6 +191,8 @@ impl<B: SshProcessBackend> OpenSshControlConnection<B> {
     /// direct SSH connection when the registered control socket is unavailable.
     pub(crate) async fn connect(
         paths: &AppPaths,
+        executable: OpenSshExecutable,
+        socket_probe: &dyn ControlSocketProbe,
         destination: SshDestination,
         backend: Arc<B>,
         cancellation: &SshCancellationToken,
@@ -207,8 +203,9 @@ impl<B: SshProcessBackend> OpenSshControlConnection<B> {
         }
         let runtime_owner = paths.create_runtime_owner(CONTROL_RUNTIME_OWNER_KIND)?;
         let control_path = runtime_owner.socket_path(CONTROL_RUNTIME_SOCKET_NAME)?;
-        reserve_socket(&runtime_owner)?;
+        reserve_socket(&runtime_owner, socket_probe)?;
         let commands = SshCommandContext::new(
+            executable,
             paths.managed_ssh_config(),
             destination,
             control_path.clone(),
@@ -630,7 +627,7 @@ fn spawn_supervisor<B: SshProcessBackend>(
                     return;
                 }
                 let result = child.lock().map_or_else(
-                    |_| Err(io::Error::other("SSH master ownership lock was poisoned")),
+                    |_| Err(SshProcessMechanismError::StatusFailed),
                     |mut child| match child.as_mut() {
                         Some(process) => backend.try_wait(process).inspect(|exit| {
                             if exit.is_some() {
@@ -649,15 +646,16 @@ fn spawn_supervisor<B: SshProcessBackend>(
                 }
             }
         })
-        .map_err(|source| ControlConnectionError::StartSupervisor { source })
+        .map_err(|_| ControlConnectionError::StartSupervisor)
 }
 
-fn reserve_socket(owner: &RuntimeOwner) -> Result<(), ControlConnectionError> {
+fn reserve_socket(
+    owner: &RuntimeOwner,
+    socket_probe: &dyn ControlSocketProbe,
+) -> Result<(), ControlConnectionError> {
     let path = owner.socket_path(CONTROL_RUNTIME_SOCKET_NAME)?;
-    let listener = UnixListener::bind(&path)
-        .map_err(|source| ControlConnectionError::SocketReservation { source })?;
+    socket_probe.probe(&path)?;
     let registered = owner.register_socket(CONTROL_RUNTIME_SOCKET_NAME)?;
-    drop(listener);
     owner.remove_registered_socket(registered)?;
     Ok(())
 }
@@ -668,7 +666,6 @@ mod tests {
     use std::ffi::OsString;
     use std::fs;
     use std::future::pending;
-    use std::io;
     use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
     use std::os::unix::net::UnixListener;
     use std::path::PathBuf;
@@ -682,8 +679,10 @@ mod tests {
 
     use super::*;
     use crate::domain::SshDestination;
-    use crate::platform::app_paths::{AppPathEnvironment, AppPaths};
-    use crate::ssh::command::SshCommandSpec;
+    use crate::platform::app_paths::{AppPathEnvironment, AppPathHostFacts, AppPaths};
+    use crate::platform::macos_control_socket::MacosControlSocketProbe;
+    use crate::platform::macos_secure_filesystem::MacosSecureFilesystem;
+    use crate::ssh::command::{OpenSshExecutable, SshCommandSpec};
     use crate::ssh::process::{ProcessExit, ProcessRunError, ProcessSignal, SshProcessBackend};
 
     static NEXT_TEST_DIRECTORY: AtomicU64 = AtomicU64::new(0);
@@ -702,16 +701,16 @@ mod tests {
         }
 
         fn paths(&self) -> AppPaths {
-            AppPaths::resolve(&AppPathEnvironment {
+            let environment = AppPathEnvironment {
                 home: None,
                 xdg_config_home: Some(self.0.join("config").into_os_string()),
                 xdg_data_home: Some(self.0.join("data").into_os_string()),
                 xdg_state_home: Some(self.0.join("state").into_os_string()),
                 xdg_cache_home: Some(self.0.join("cache").into_os_string()),
                 xdg_runtime_dir: Some(self.0.join("runtime").into_os_string()),
-                macos_temporary_directory: self.0.join("temporary"),
-            })
-            .unwrap()
+            };
+            let host = AppPathHostFacts::new(self.0.join("temporary"), 103).unwrap();
+            AppPaths::resolve(&environment, &host, Arc::new(MacosSecureFilesystem)).unwrap()
         }
     }
 
@@ -827,10 +826,14 @@ mod tests {
             self.epoch + self.state.lock().unwrap().elapsed
         }
 
-        async fn spawn(&self, spec: SshCommandSpec) -> io::Result<Self::Child> {
+        async fn spawn(
+            &self,
+            spec: SshCommandSpec,
+        ) -> Result<Self::Child, SshProcessMechanismError> {
             let arguments = spec.arguments().to_vec();
             let socket_path = argument_after(&arguments, "-S").unwrap();
-            let listener = UnixListener::bind(&socket_path)?;
+            let listener = UnixListener::bind(&socket_path)
+                .map_err(|_| SshProcessMechanismError::LaunchFailed)?;
             let mut state = self.state.lock().unwrap();
             state.records.push(arguments);
             state.socket_path = Some(socket_path);
@@ -880,7 +883,10 @@ mod tests {
             }
         }
 
-        fn try_wait(&self, child: &mut Self::Child) -> io::Result<Option<ProcessExit>> {
+        fn try_wait(
+            &self,
+            child: &mut Self::Child,
+        ) -> Result<Option<ProcessExit>, SshProcessMechanismError> {
             let mut state = self.state.lock().unwrap();
             let exit = state.early_exits.pop_front().flatten();
             if exit.is_some() {
@@ -894,7 +900,7 @@ mod tests {
             &self,
             _child: &mut Self::Child,
             signal: ProcessSignal,
-        ) -> io::Result<()> {
+        ) -> Result<(), SshProcessMechanismError> {
             let mut state = self.state.lock().unwrap();
             state.signals.push(signal);
             if signal == state.exit_on_signal {
@@ -962,6 +968,8 @@ mod tests {
             .executor()
             .block(OpenSshControlConnection::connect(
                 &paths,
+                OpenSshExecutable::for_test(),
+                &MacosControlSocketProbe,
                 destination(),
                 Arc::clone(&backend),
                 &cancellation,
@@ -989,6 +997,8 @@ mod tests {
             .executor()
             .block(OpenSshControlConnection::connect(
                 &paths,
+                OpenSshExecutable::for_test(),
+                &MacosControlSocketProbe,
                 destination(),
                 Arc::new(FakeBackend::with_readiness([ProcessExit::successful()])),
                 &cancellation,
@@ -999,6 +1009,8 @@ mod tests {
             .executor()
             .block(OpenSshControlConnection::connect(
                 &paths,
+                OpenSshExecutable::for_test(),
+                &MacosControlSocketProbe,
                 destination(),
                 Arc::new(FakeBackend::with_readiness([ProcessExit::successful()])),
                 &cancellation,
@@ -1021,6 +1033,8 @@ mod tests {
             .executor()
             .block(OpenSshControlConnection::connect(
                 &paths,
+                OpenSshExecutable::for_test(),
+                &MacosControlSocketProbe,
                 destination(),
                 backend,
                 &cancellation,
@@ -1065,6 +1079,8 @@ mod tests {
             .executor()
             .block(OpenSshControlConnection::connect(
                 &paths,
+                OpenSshExecutable::for_test(),
+                &MacosControlSocketProbe,
                 destination(),
                 backend,
                 &SshCancellationToken::default(),
@@ -1115,6 +1131,8 @@ mod tests {
             .executor()
             .block(OpenSshControlConnection::connect(
                 &paths,
+                OpenSshExecutable::for_test(),
+                &MacosControlSocketProbe,
                 destination(),
                 Arc::clone(&backend),
                 &cancellation,
@@ -1150,6 +1168,8 @@ mod tests {
             .executor()
             .block(OpenSshControlConnection::connect(
                 &paths,
+                OpenSshExecutable::for_test(),
+                &MacosControlSocketProbe,
                 destination(),
                 Arc::clone(&backend),
                 &cancellation,
@@ -1179,6 +1199,8 @@ mod tests {
             .executor()
             .block(OpenSshControlConnection::connect(
                 &paths,
+                OpenSshExecutable::for_test(),
+                &MacosControlSocketProbe,
                 destination(),
                 Arc::clone(&backend),
                 &cancellation,
@@ -1201,6 +1223,8 @@ mod tests {
 
         let _ = cx.executor().block(OpenSshControlConnection::connect(
             &paths,
+            OpenSshExecutable::for_test(),
+            &MacosControlSocketProbe,
             destination(),
             Arc::clone(&backend),
             &cancellation,
@@ -1221,6 +1245,8 @@ mod tests {
             .executor()
             .block(OpenSshControlConnection::connect(
                 &paths,
+                OpenSshExecutable::for_test(),
+                &MacosControlSocketProbe,
                 destination(),
                 Arc::clone(&backend),
                 &cancellation,
@@ -1258,6 +1284,8 @@ mod tests {
             .executor()
             .block(OpenSshControlConnection::connect(
                 &paths,
+                OpenSshExecutable::for_test(),
+                &MacosControlSocketProbe,
                 destination(),
                 Arc::clone(&backend),
                 &SshCancellationToken::default(),
@@ -1281,6 +1309,8 @@ mod tests {
             .executor()
             .block(OpenSshControlConnection::connect(
                 &paths,
+                OpenSshExecutable::for_test(),
+                &MacosControlSocketProbe,
                 destination(),
                 Arc::clone(&backend),
                 &SshCancellationToken::default(),
@@ -1312,6 +1342,8 @@ mod tests {
             .executor()
             .block(OpenSshControlConnection::connect(
                 &paths,
+                OpenSshExecutable::for_test(),
+                &MacosControlSocketProbe,
                 destination(),
                 Arc::clone(&backend),
                 &SshCancellationToken::default(),
@@ -1341,6 +1373,8 @@ mod tests {
             .executor()
             .block(OpenSshControlConnection::connect(
                 &paths,
+                OpenSshExecutable::for_test(),
+                &MacosControlSocketProbe,
                 destination(),
                 Arc::clone(&backend),
                 &SshCancellationToken::default(),
@@ -1393,6 +1427,8 @@ mod tests {
             .executor()
             .block(OpenSshControlConnection::connect(
                 &paths,
+                OpenSshExecutable::for_test(),
+                &MacosControlSocketProbe,
                 destination(),
                 backend,
                 &SshCancellationToken::default(),
@@ -1418,6 +1454,8 @@ mod tests {
             .executor()
             .block(OpenSshControlConnection::connect(
                 &paths,
+                OpenSshExecutable::for_test(),
+                &MacosControlSocketProbe,
                 destination(),
                 Arc::clone(&backend),
                 &SshCancellationToken::default(),
@@ -1462,6 +1500,8 @@ mod tests {
         let cancellation = SshCancellationToken::default();
         let mut future = Box::pin(OpenSshControlConnection::connect(
             &paths,
+            OpenSshExecutable::for_test(),
+            &MacosControlSocketProbe,
             destination(),
             Arc::clone(&backend),
             &cancellation,

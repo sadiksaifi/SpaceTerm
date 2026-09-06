@@ -1,30 +1,23 @@
 use std::ffi::{OsStr, OsString};
 use std::fmt;
-use std::io::{self, Read};
-use std::os::unix::ffi::OsStrExt;
-use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
-use std::thread;
 use std::time::{Duration, Instant};
-
-#[cfg(test)]
-use std::sync::mpsc;
 
 use thiserror::Error;
 
 use super::cancellation::SshCancellationToken;
 use super::live_connection::LiveConnectionCapability;
-use super::process::{SshProbeEnvironment, SshProcessEnvironment, SshProcessEnvironmentError};
+use super::process::{
+    CapturedProcessError, SshProbeEnvironment, SshProcessAdapter, SshProcessEnvironment,
+    SshProcessEnvironmentError, SshProcessMechanismError, run_probe_process,
+};
 use super::startup_environment::StartupSshEnvironment;
 use crate::domain::{RemoteWorkspaceDirectory, SshDestination};
 
-const SSH_EXECUTABLE: &str = "/usr/bin/ssh";
 const MINIMUM_OPENSSH_VERSION: OpenSshVersion = OpenSshVersion::new(8, 2);
 const MAX_PROBE_STREAM_BYTES: usize = 4 * 1024;
-const NATIVE_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
-const NATIVE_PROBE_POLL_INTERVAL: Duration = Duration::from_millis(10);
+const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 const MAXIMUM_REMOTE_SHELL_VALUE_BYTES: usize = 4 * 1024;
 const MAXIMUM_REMOTE_PANE_COMMAND_BYTES: usize = 32 * 1024;
 
@@ -54,7 +47,7 @@ pub(crate) enum SshCapability {
 
 #[derive(Clone, Debug, Eq, Error, PartialEq)]
 pub(crate) enum SshUnavailableReason {
-    #[error("OpenSSH was not found at /usr/bin/ssh")]
+    #[error("the selected OpenSSH client is unavailable")]
     NotFound,
     #[error("OpenSSH {minimum} or newer is required; found {found}")]
     TooOld {
@@ -65,6 +58,44 @@ pub(crate) enum SshUnavailableReason {
     Unrecognized,
     #[error("the installed SSH client could not be checked")]
     ProbeFailed,
+}
+
+#[derive(Clone, Eq, PartialEq)]
+/// Capture-once validated host selection for the OpenSSH executable.
+pub(crate) struct OpenSshExecutable(PathBuf);
+
+#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
+pub(crate) enum OpenSshExecutableError {
+    #[error("the selected OpenSSH executable is invalid")]
+    UnsafePath,
+}
+
+impl OpenSshExecutable {
+    pub(crate) fn new(path: PathBuf) -> Result<Self, OpenSshExecutableError> {
+        if !is_safe_absolute_path(&path) {
+            return Err(OpenSshExecutableError::UnsafePath);
+        }
+        Ok(Self(path))
+    }
+
+    pub(super) fn as_path(&self) -> &Path {
+        &self.0
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test() -> Self {
+        Self(PathBuf::from("/test/ssh"))
+    }
+
+    fn into_path(self) -> PathBuf {
+        self.0
+    }
+}
+
+impl fmt::Debug for OpenSshExecutable {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("OpenSshExecutable(<redacted>)")
+    }
 }
 
 #[derive(Clone)]
@@ -86,14 +117,21 @@ impl SshProbeOutput {
 
 #[cfg(test)]
 pub(crate) trait SshProbeRunner {
-    fn run(&self, executable: &Path, arguments: &[OsString]) -> io::Result<SshProbeOutput>;
+    fn run(
+        &self,
+        executable: &OpenSshExecutable,
+        arguments: &[OsString],
+    ) -> Result<SshProbeOutput, SshProcessMechanismError>;
 }
 
 #[cfg(test)]
-pub(crate) fn probe_ssh_capability(runner: &impl SshProbeRunner) -> SshCapability {
-    let output = match runner.run(Path::new(SSH_EXECUTABLE), &[OsString::from("-V")]) {
+pub(crate) fn probe_ssh_capability(
+    executable: &OpenSshExecutable,
+    runner: &impl SshProbeRunner,
+) -> SshCapability {
+    let output = match runner.run(executable, &[OsString::from("-V")]) {
         Ok(output) => output,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+        Err(SshProcessMechanismError::NotFound) => {
             return SshCapability::Unavailable(SshUnavailableReason::NotFound);
         }
         Err(_) => return SshCapability::Unavailable(SshUnavailableReason::ProbeFailed),
@@ -102,126 +140,67 @@ pub(crate) fn probe_ssh_capability(runner: &impl SshProbeRunner) -> SshCapabilit
 }
 
 #[derive(Clone)]
-pub(crate) struct NativeSshProbeRunner {
+pub(crate) struct SshCapabilityProbe<A: SshProcessAdapter> {
+    executable: OpenSshExecutable,
     environment: SshProbeEnvironment,
+    adapter: A,
     timeout: Duration,
-    #[cfg(test)]
-    executable: PathBuf,
-    #[cfg(test)]
-    spawned: Option<mpsc::SyncSender<libc::pid_t>>,
 }
 
-impl NativeSshProbeRunner {
+impl<A: SshProcessAdapter> SshCapabilityProbe<A> {
     pub(crate) fn from_startup(
+        executable: OpenSshExecutable,
         home: PathBuf,
         startup: &StartupSshEnvironment,
+        adapter: A,
     ) -> Result<Self, SshProcessEnvironmentError> {
         Ok(Self {
-            environment: SshProbeEnvironment::new(home, startup)?,
-            timeout: NATIVE_PROBE_TIMEOUT,
-            #[cfg(test)]
-            executable: PathBuf::new(),
-            #[cfg(test)]
-            spawned: None,
-        })
-    }
-
-    #[cfg(test)]
-    fn for_test(
-        environment: SshProcessEnvironment,
-        executable: PathBuf,
-        timeout: Duration,
-    ) -> Self {
-        Self {
-            environment: environment.probe_environment(),
-            timeout,
             executable,
-            spawned: None,
-        }
-    }
-
-    #[cfg(test)]
-    fn observing_spawn(mut self, spawned: mpsc::SyncSender<libc::pid_t>) -> Self {
-        self.spawned = Some(spawned);
-        self
+            environment: SshProbeEnvironment::new(home, startup)?,
+            adapter,
+            timeout: PROBE_TIMEOUT,
+        })
     }
 
     pub(crate) fn probe_blocking(&self) -> SshCapability {
         let cancellation = SshCancellationToken::default();
-        classify_native_probe_result(run_native_probe(
-            self.executable(),
-            self.environment.clone(),
+        classify_supervised_probe_result(run_probe_process(
+            &self.adapter,
+            &self.command(),
+            &self.environment,
+            MAX_PROBE_STREAM_BYTES + 1,
             &cancellation,
             Instant::now()
                 .checked_add(self.timeout)
                 .unwrap_or_else(Instant::now),
-            #[cfg(test)]
-            self.spawned.clone(),
         ))
     }
 
-    fn executable(&self) -> PathBuf {
-        #[cfg(not(test))]
-        {
-            PathBuf::from(SSH_EXECUTABLE)
-        }
-        #[cfg(test)]
-        {
-            if self.executable.as_os_str().is_empty() {
-                PathBuf::from(SSH_EXECUTABLE)
-            } else {
-                self.executable.clone()
-            }
-        }
-    }
-
-    #[cfg(test)]
-    pub(crate) async fn probe(&self, cancellation: SshCancellationToken) -> SshCapability {
-        if cancellation.is_cancelled() {
-            return SshCapability::Unavailable(SshUnavailableReason::ProbeFailed);
-        }
-        let environment = self.environment.clone();
-        let timeout = self.timeout;
-        let executable = self.executable();
-        let spawned = self.spawned.clone();
-        let mut cancel_on_drop = ProbeCancelOnDrop::new(cancellation.clone());
-        let (sender, receiver) = async_channel::bounded(1);
-        let worker = thread::Builder::new()
-            .name("spaceterm-ssh-version".to_owned())
-            .spawn(move || {
-                let result = run_native_probe(
-                    executable,
-                    environment,
-                    &cancellation,
-                    Instant::now()
-                        .checked_add(timeout)
-                        .unwrap_or_else(Instant::now),
-                    spawned,
-                );
-                let _ = sender.send_blocking(result);
-            });
-        if worker.is_err() {
-            cancel_on_drop.disarm();
-            return SshCapability::Unavailable(SshUnavailableReason::ProbeFailed);
-        }
-        let result = receiver.recv().await;
-        cancel_on_drop.disarm();
-        result.map_or_else(
-            |_| SshCapability::Unavailable(SshUnavailableReason::ProbeFailed),
-            classify_native_probe_result,
-        )
+    fn command(&self) -> SshCommandSpec {
+        SshCommandSpec::new(self.executable.clone(), vec![OsString::from("-V")])
     }
 }
 
-fn classify_native_probe_result(result: Result<SshProbeOutput, NativeProbeError>) -> SshCapability {
+fn classify_supervised_probe_result(
+    result: Result<super::process::CapturedProcessOutput, CapturedProcessError>,
+) -> SshCapability {
     match result {
-        Ok(output) => classify_probe_output(output),
-        Err(NativeProbeError::NotFound) => {
+        Ok(output) => classify_probe_output(SshProbeOutput::new(
+            output.exit.is_success(),
+            output.stdout,
+            output.stderr,
+        )),
+        Err(CapturedProcessError::Operation(SshProcessMechanismError::NotFound)) => {
             SshCapability::Unavailable(SshUnavailableReason::NotFound)
         }
-        Err(NativeProbeError::Cancelled | NativeProbeError::TimedOut | NativeProbeError::Io) => {
-            SshCapability::Unavailable(SshUnavailableReason::ProbeFailed)
+        Err(CapturedProcessError::OutputTooLarge) => {
+            SshCapability::Unavailable(SshUnavailableReason::Unrecognized)
         }
+        Err(
+            CapturedProcessError::Cancelled
+            | CapturedProcessError::TimedOut
+            | CapturedProcessError::Operation(_),
+        ) => SshCapability::Unavailable(SshUnavailableReason::ProbeFailed),
     }
 }
 
@@ -245,150 +224,6 @@ fn classify_probe_output(output: SshProbeOutput) -> SshCapability {
         });
     }
     SshCapability::Available(version)
-}
-
-#[derive(Debug)]
-enum NativeProbeError {
-    NotFound,
-    Cancelled,
-    TimedOut,
-    Io,
-}
-
-#[cfg(test)]
-struct ProbeCancelOnDrop {
-    cancellation: SshCancellationToken,
-    armed: bool,
-}
-
-#[cfg(test)]
-impl ProbeCancelOnDrop {
-    fn new(cancellation: SshCancellationToken) -> Self {
-        Self {
-            cancellation,
-            armed: true,
-        }
-    }
-
-    fn disarm(&mut self) {
-        self.armed = false;
-    }
-}
-
-#[cfg(test)]
-impl Drop for ProbeCancelOnDrop {
-    fn drop(&mut self) {
-        if self.armed {
-            self.cancellation.cancel();
-        }
-    }
-}
-
-fn run_native_probe(
-    executable: PathBuf,
-    environment: SshProbeEnvironment,
-    cancellation: &SshCancellationToken,
-    deadline: Instant,
-    #[cfg(test)] spawned: Option<mpsc::SyncSender<libc::pid_t>>,
-) -> Result<SshProbeOutput, NativeProbeError> {
-    let mut command = Command::new(executable);
-    command
-        .arg("-V")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .process_group(0);
-    environment.apply(&mut command);
-    let mut child = command.spawn().map_err(|error| {
-        if error.kind() == io::ErrorKind::NotFound {
-            NativeProbeError::NotFound
-        } else {
-            NativeProbeError::Io
-        }
-    })?;
-    let process_group = match libc::pid_t::try_from(child.id()) {
-        Ok(process_group) => process_group,
-        Err(_) => {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(NativeProbeError::Io);
-        }
-    };
-    #[cfg(test)]
-    if let Some(spawned) = spawned {
-        let _ = spawned.send(process_group);
-    }
-    let stdout = child.stdout.take().ok_or_else(|| {
-        terminate_probe(&mut child, process_group);
-        NativeProbeError::Io
-    })?;
-    let stderr = child.stderr.take().ok_or_else(|| {
-        terminate_probe(&mut child, process_group);
-        NativeProbeError::Io
-    })?;
-    let stdout_reader = thread::spawn(move || read_probe_stream(stdout));
-    let stderr_reader = thread::spawn(move || read_probe_stream(stderr));
-
-    let status = loop {
-        if cancellation.is_cancelled() {
-            terminate_probe(&mut child, process_group);
-            let _ = stdout_reader.join();
-            let _ = stderr_reader.join();
-            return Err(NativeProbeError::Cancelled);
-        }
-        if Instant::now() >= deadline {
-            terminate_probe(&mut child, process_group);
-            let _ = stdout_reader.join();
-            let _ = stderr_reader.join();
-            return Err(NativeProbeError::TimedOut);
-        }
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                signal_probe_group(process_group);
-                break status;
-            }
-            Ok(None) => thread::sleep(
-                NATIVE_PROBE_POLL_INTERVAL.min(deadline.saturating_duration_since(Instant::now())),
-            ),
-            Err(_) => {
-                terminate_probe(&mut child, process_group);
-                let _ = stdout_reader.join();
-                let _ = stderr_reader.join();
-                return Err(NativeProbeError::Io);
-            }
-        }
-    };
-    let stdout = join_probe_reader(stdout_reader)?;
-    let stderr = join_probe_reader(stderr_reader)?;
-    Ok(SshProbeOutput::new(status.success(), stdout, stderr))
-}
-
-fn read_probe_stream(mut stream: impl Read) -> io::Result<Vec<u8>> {
-    let mut output = Vec::with_capacity(256);
-    stream
-        .by_ref()
-        .take(u64::try_from(MAX_PROBE_STREAM_BYTES + 1).unwrap_or(u64::MAX))
-        .read_to_end(&mut output)?;
-    Ok(output)
-}
-
-fn join_probe_reader(
-    reader: thread::JoinHandle<io::Result<Vec<u8>>>,
-) -> Result<Vec<u8>, NativeProbeError> {
-    reader
-        .join()
-        .map_err(|_| NativeProbeError::Io)?
-        .map_err(|_| NativeProbeError::Io)
-}
-
-fn terminate_probe(child: &mut Child, process_group: libc::pid_t) {
-    signal_probe_group(process_group);
-    let _ = child.wait();
-}
-
-fn signal_probe_group(process_group: libc::pid_t) {
-    // SAFETY: this is the positive process group of the child launched above with a private group.
-    let _ = unsafe { libc::kill(-process_group, libc::SIGKILL) };
 }
 
 fn parse_version_stream(stream: &[u8]) -> Option<OpenSshVersion> {
@@ -423,7 +258,7 @@ pub(crate) enum SshCommandContextError {
 }
 
 pub(crate) struct SshCommandContext {
-    executable: PathBuf,
+    executable: OpenSshExecutable,
     managed_config: PathBuf,
     destination: SshDestination,
     control_path: PathBuf,
@@ -431,6 +266,7 @@ pub(crate) struct SshCommandContext {
 
 impl SshCommandContext {
     pub(crate) fn new(
+        executable: OpenSshExecutable,
         managed_config: PathBuf,
         destination: SshDestination,
         control_path: PathBuf,
@@ -439,7 +275,7 @@ impl SshCommandContext {
             return Err(SshCommandContextError::UnsafePath);
         }
         Ok(Self {
-            executable: PathBuf::from(SSH_EXECUTABLE),
+            executable,
             managed_config,
             destination,
             control_path,
@@ -547,12 +383,7 @@ impl SshCommandContext {
 }
 
 fn is_safe_absolute_path(path: &Path) -> bool {
-    path.is_absolute()
-        && !path
-            .as_os_str()
-            .as_bytes()
-            .iter()
-            .any(|byte| byte.is_ascii_control())
+    path.is_absolute() && !path.to_string_lossy().chars().any(char::is_control)
 }
 
 fn push_option(arguments: &mut Vec<OsString>, option: OsString) {
@@ -561,7 +392,7 @@ fn push_option(arguments: &mut Vec<OsString>, option: OsString) {
 }
 
 pub(crate) struct SshCommandSpec {
-    executable: PathBuf,
+    executable: OpenSshExecutable,
     arguments: Vec<OsString>,
     pane_execution: Option<SshPaneExecution>,
 }
@@ -572,8 +403,7 @@ struct SshPaneExecution {
 }
 
 impl SshCommandSpec {
-    #[cfg(test)]
-    pub(super) fn for_test(executable: PathBuf, arguments: Vec<OsString>) -> Self {
+    fn new(executable: OpenSshExecutable, arguments: Vec<OsString>) -> Self {
         Self {
             executable,
             arguments,
@@ -581,8 +411,13 @@ impl SshCommandSpec {
         }
     }
 
+    #[cfg(test)]
+    pub(super) fn for_test(executable: PathBuf, arguments: Vec<OsString>) -> Self {
+        Self::new(OpenSshExecutable::new(executable).unwrap(), arguments)
+    }
+
     pub(crate) fn executable(&self) -> &OsStr {
-        self.executable.as_os_str()
+        self.executable.as_path().as_os_str()
     }
 
     pub(crate) fn arguments(&self) -> &[OsString] {
@@ -612,7 +447,7 @@ impl SshCommandSpec {
                 }
             }
         };
-        Ok((self.executable, self.arguments, environment))
+        Ok((self.executable.into_path(), self.arguments, environment))
     }
 }
 
@@ -975,89 +810,20 @@ mod tests {
     use std::cell::RefCell;
     use std::ffi::{OsStr, OsString};
     use std::fs;
-    use std::future::Future;
-    use std::io;
     use std::os::unix::fs::PermissionsExt;
-    use std::path::{Path, PathBuf};
-    use std::pin::Pin;
+    use std::path::PathBuf;
+    use std::process::Command;
     use std::sync::atomic::{AtomicU64, Ordering};
-    use std::task::{Context, Poll, Wake, Waker};
 
     use crate::domain::{RemoteWorkspaceDirectory, SshDestination};
 
     use super::*;
 
     static NEXT_PROBE_SCRIPT: AtomicU64 = AtomicU64::new(0);
-    const TEST_NATIVE_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
-
-    struct ProbeScript(PathBuf);
-
-    impl ProbeScript {
-        fn new(body: &str) -> Self {
-            let sequence = NEXT_PROBE_SCRIPT.fetch_add(1, Ordering::Relaxed);
-            let path = PathBuf::from(format!(
-                "/private/tmp/spaceterm-probe-{}-{sequence}",
-                std::process::id()
-            ));
-            fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
-            fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
-            Self(path)
-        }
-    }
-
-    impl Drop for ProbeScript {
-        fn drop(&mut self) {
-            let _ = fs::remove_file(&self.0);
-        }
-    }
-
-    struct ThreadWake(std::thread::Thread);
-
-    impl Wake for ThreadWake {
-        fn wake(self: Arc<Self>) {
-            self.0.unpark();
-        }
-
-        fn wake_by_ref(self: &Arc<Self>) {
-            self.0.unpark();
-        }
-    }
-
-    fn block_on_external<T>(future: impl Future<Output = T>) -> T {
-        let mut future = Box::pin(future);
-        let waker = Waker::from(Arc::new(ThreadWake(thread::current())));
-        let mut context = Context::from_waker(&waker);
-        loop {
-            match Pin::as_mut(&mut future).poll(&mut context) {
-                Poll::Ready(output) => return output,
-                Poll::Pending => thread::park(),
-            }
-        }
-    }
-
-    fn native_probe(executable: PathBuf, timeout: Duration) -> NativeSshProbeRunner {
-        NativeSshProbeRunner::for_test(
-            SshProcessEnvironment::new_without_authentication(PathBuf::from("/private/tmp"), None)
-                .unwrap(),
-            executable,
-            timeout,
-        )
-    }
-
-    fn startup_probe(
-        executable: PathBuf,
-        home: PathBuf,
-        agent_socket: Option<OsString>,
-    ) -> Result<NativeSshProbeRunner, SshProcessEnvironmentError> {
-        let startup = StartupSshEnvironment::for_test(agent_socket);
-        let mut runner = NativeSshProbeRunner::from_startup(home, &startup)?;
-        runner.executable = executable;
-        Ok(runner)
-    }
 
     enum FakeProbeResult {
         Output(SshProbeOutput),
-        Error(io::ErrorKind),
+        Error(SshProcessMechanismError),
     }
 
     struct FakeProbeRunner {
@@ -1077,28 +843,37 @@ mod tests {
             }
         }
 
-        fn error(kind: io::ErrorKind) -> Self {
+        fn error(error: SshProcessMechanismError) -> Self {
             Self {
                 calls: RefCell::new(Vec::new()),
-                result: FakeProbeResult::Error(kind),
+                result: FakeProbeResult::Error(error),
             }
         }
     }
 
     impl SshProbeRunner for FakeProbeRunner {
-        fn run(&self, executable: &Path, arguments: &[OsString]) -> io::Result<SshProbeOutput> {
+        fn run(
+            &self,
+            executable: &OpenSshExecutable,
+            arguments: &[OsString],
+        ) -> Result<SshProbeOutput, SshProcessMechanismError> {
             self.calls
                 .borrow_mut()
-                .push((executable.to_path_buf(), arguments.to_vec()));
+                .push((executable.as_path().to_path_buf(), arguments.to_vec()));
             match &self.result {
                 FakeProbeResult::Output(output) => Ok(output.clone()),
-                FakeProbeResult::Error(kind) => Err(io::Error::from(*kind)),
+                FakeProbeResult::Error(error) => Err(*error),
             }
         }
     }
 
+    fn executable() -> OpenSshExecutable {
+        OpenSshExecutable::new(PathBuf::from("/selected/openssh")).unwrap()
+    }
+
     fn context() -> SshCommandContext {
         SshCommandContext::new(
+            executable(),
             PathBuf::from("/private/config/spaceterm/ssh_config"),
             SshDestination::new("root@fedora@orb".to_owned()).unwrap(),
             PathBuf::from("/private/runtime/spaceterm/ssh/control.sock"),
@@ -1130,14 +905,17 @@ mod tests {
     }
 
     #[test]
-    fn capability_probe_should_invoke_only_the_system_ssh_version_command() {
+    fn capability_probe_should_invoke_only_the_selected_ssh_version_command() {
         let runner = FakeProbeRunner::output(true, b"", b"OpenSSH_9.9p2\n");
 
-        let _ = probe_ssh_capability(&runner);
+        let _ = probe_ssh_capability(&executable(), &runner);
 
         assert_eq!(
             runner.calls.into_inner(),
-            vec![(PathBuf::from("/usr/bin/ssh"), vec![OsString::from("-V")])]
+            vec![(
+                PathBuf::from("/selected/openssh"),
+                vec![OsString::from("-V")]
+            )]
         );
     }
 
@@ -1145,7 +923,7 @@ mod tests {
     fn capability_probe_should_accept_an_apple_version_from_stderr() {
         let runner = FakeProbeRunner::output(true, b"", b"OpenSSH_9.9p2 Apple-1, LibreSSL 3.3.6\n");
 
-        let capability = probe_ssh_capability(&runner);
+        let capability = probe_ssh_capability(&executable(), &runner);
 
         assert_eq!(
             capability,
@@ -1157,7 +935,7 @@ mod tests {
     fn capability_probe_should_accept_the_minimum_version_from_stdout() {
         let runner = FakeProbeRunner::output(true, b"OpenSSH_8.2\n", b"");
 
-        let capability = probe_ssh_capability(&runner);
+        let capability = probe_ssh_capability(&executable(), &runner);
 
         assert_eq!(
             capability,
@@ -1169,7 +947,7 @@ mod tests {
     fn capability_probe_should_report_a_too_old_version() {
         let runner = FakeProbeRunner::output(true, b"", b"OpenSSH_8.1p1\n");
 
-        let capability = probe_ssh_capability(&runner);
+        let capability = probe_ssh_capability(&executable(), &runner);
 
         assert_eq!(
             capability,
@@ -1182,9 +960,9 @@ mod tests {
 
     #[test]
     fn capability_probe_should_report_not_found_without_an_io_message() {
-        let runner = FakeProbeRunner::error(io::ErrorKind::NotFound);
+        let runner = FakeProbeRunner::error(SshProcessMechanismError::NotFound);
 
-        let capability = probe_ssh_capability(&runner);
+        let capability = probe_ssh_capability(&executable(), &runner);
 
         assert_eq!(
             capability,
@@ -1196,7 +974,7 @@ mod tests {
     fn capability_probe_should_report_unrecognized_control_output() {
         let runner = FakeProbeRunner::output(true, b"", b"OpenSSH_9.9\0secret");
 
-        let capability = probe_ssh_capability(&runner);
+        let capability = probe_ssh_capability(&executable(), &runner);
 
         assert_eq!(
             capability,
@@ -1208,7 +986,7 @@ mod tests {
     fn capability_probe_should_report_unrecognized_oversized_output() {
         let runner = FakeProbeRunner::output(true, &vec![b'x'; MAX_PROBE_STREAM_BYTES + 1], b"");
 
-        let capability = probe_ssh_capability(&runner);
+        let capability = probe_ssh_capability(&executable(), &runner);
 
         assert_eq!(
             capability,
@@ -1220,7 +998,7 @@ mod tests {
     fn capability_probe_should_report_probe_failed_for_a_failed_exit() {
         let runner = FakeProbeRunner::output(false, b"", b"OpenSSH_9.9p2\n");
 
-        let capability = probe_ssh_capability(&runner);
+        let capability = probe_ssh_capability(&executable(), &runner);
 
         assert_eq!(
             capability,
@@ -1230,9 +1008,9 @@ mod tests {
 
     #[test]
     fn capability_probe_should_report_probe_failed_for_an_io_error() {
-        let runner = FakeProbeRunner::error(io::ErrorKind::PermissionDenied);
+        let runner = FakeProbeRunner::error(SshProcessMechanismError::LaunchFailed);
 
-        let capability = probe_ssh_capability(&runner);
+        let capability = probe_ssh_capability(&executable(), &runner);
 
         assert_eq!(
             capability,
@@ -1241,143 +1019,15 @@ mod tests {
     }
 
     #[test]
-    fn native_probe_should_report_not_found_without_exposing_an_io_message() {
-        let runner = native_probe(
-            PathBuf::from("/private/tmp/spaceterm-missing-ssh"),
-            Duration::from_secs(1),
-        );
+    fn openssh_executable_should_require_a_safe_absolute_path_and_redact_debug() {
+        let executable = executable();
 
+        assert_eq!(format!("{executable:?}"), "OpenSshExecutable(<redacted>)");
         assert_eq!(
-            block_on_external(runner.probe(SshCancellationToken::default())),
-            SshCapability::Unavailable(SshUnavailableReason::NotFound)
+            OpenSshExecutable::new(PathBuf::from("relative/ssh")).unwrap_err(),
+            OpenSshExecutableError::UnsafePath
         );
-    }
-
-    #[test]
-    fn native_probe_should_force_cleanup_at_its_deadline() {
-        let script = ProbeScript::new("sleep 30");
-        let runner = native_probe(script.0.clone(), Duration::from_millis(20));
-
-        assert_eq!(
-            block_on_external(runner.probe(SshCancellationToken::default())),
-            SshCapability::Unavailable(SshUnavailableReason::ProbeFailed)
-        );
-    }
-
-    #[test]
-    fn native_probe_should_reject_malformed_and_too_old_versions() {
-        let malformed = ProbeScript::new("printf 'not-openssh\\n' >&2");
-        let old = ProbeScript::new("printf 'OpenSSH_8.1p1\\n' >&2");
-
-        assert_eq!(
-            block_on_external(
-                native_probe(malformed.0.clone(), TEST_NATIVE_PROBE_TIMEOUT)
-                    .probe(SshCancellationToken::default())
-            ),
-            SshCapability::Unavailable(SshUnavailableReason::Unrecognized)
-        );
-        assert_eq!(
-            block_on_external(
-                native_probe(old.0.clone(), TEST_NATIVE_PROBE_TIMEOUT)
-                    .probe(SshCancellationToken::default())
-            ),
-            SshCapability::Unavailable(SshUnavailableReason::TooOld {
-                found: OpenSshVersion::new(8, 1),
-                minimum: OpenSshVersion::new(8, 2),
-            })
-        );
-    }
-
-    #[test]
-    fn native_probe_should_use_only_the_sanitized_captured_environment() {
-        let script = ProbeScript::new(
-            r#"[ "$HOME" = /private/tmp ] || exit 4
-[ "$PATH" = /usr/bin:/bin ] || exit 5
-[ -z "${SPACETERM_AMBIENT_PROBE+x}" ] || exit 6
-printf 'OpenSSH_9.9p2 Apple-1, LibreSSL 3.3.6\n' >&2"#,
-        );
-        let runner = native_probe(script.0.clone(), TEST_NATIVE_PROBE_TIMEOUT);
-
-        assert_eq!(
-            block_on_external(runner.probe(SshCancellationToken::default())),
-            SshCapability::Available(OpenSshVersion::new(9, 9))
-        );
-    }
-
-    #[test]
-    fn startup_probe_should_use_no_askpass_environment_and_keep_the_captured_agent() {
-        let script = ProbeScript::new(
-            r#"[ "$HOME" = /private/tmp ] || exit 4
-[ "$PATH" = /usr/bin:/bin ] || exit 5
-[ "$SSH_AUTH_SOCK" = /private/tmp/ssh-agent.sock ] || exit 6
-[ -z "${SSH_ASKPASS+x}" ] || exit 7
-[ -z "${SSH_ASKPASS_REQUIRE+x}" ] || exit 8
-printf 'OpenSSH_9.9p2 Apple-1, LibreSSL 3.3.6\n' >&2"#,
-        );
-        let runner = startup_probe(
-            script.0.clone(),
-            PathBuf::from("/private/tmp"),
-            Some(OsString::from("/private/tmp/ssh-agent.sock")),
-        )
-        .unwrap();
-
-        assert_eq!(
-            runner.probe_blocking(),
-            SshCapability::Available(OpenSshVersion::new(9, 9))
-        );
-    }
-
-    #[test]
-    fn startup_probe_should_reject_unsafe_captured_paths_before_launch() {
-        assert!(matches!(
-            startup_probe(
-                PathBuf::from("/usr/bin/ssh"),
-                PathBuf::from("relative-home"),
-                None,
-            ),
-            Err(SshProcessEnvironmentError::UnsafeHome)
-        ));
-        assert!(matches!(
-            startup_probe(
-                PathBuf::from("/usr/bin/ssh"),
-                PathBuf::from("/private/tmp"),
-                Some(OsString::from("relative-agent")),
-            ),
-            Err(SshProcessEnvironmentError::UnsafeAgentSocket)
-        ));
-    }
-
-    #[test]
-    fn native_probe_cancellation_should_terminate_the_private_process_group() {
-        let script = ProbeScript::new("sleep 30");
-        let (spawned_sender, spawned_receiver) = mpsc::sync_channel(1);
-        let runner =
-            native_probe(script.0.clone(), Duration::from_secs(5)).observing_spawn(spawned_sender);
-        let cancellation = SshCancellationToken::default();
-        let canceller = cancellation.clone();
-        let cancel_thread = thread::spawn(move || {
-            let process = spawned_receiver
-                .recv_timeout(TEST_NATIVE_PROBE_TIMEOUT)
-                .unwrap();
-            canceller.cancel();
-            process
-        });
-
-        assert_eq!(
-            block_on_external(runner.probe(cancellation)),
-            SshCapability::Unavailable(SshUnavailableReason::ProbeFailed)
-        );
-        let process = cancel_thread.join().unwrap();
-        let missing = (0..100).any(|_| {
-            // SAFETY: signal zero checks process existence and dereferences no pointers.
-            let missing = unsafe { libc::kill(process, 0) } == -1
-                && io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH);
-            if !missing {
-                thread::sleep(Duration::from_millis(10));
-            }
-            missing
-        });
-        assert!(missing);
+        assert!(!format!("{executable:?}").contains("selected"));
     }
 
     #[test]
@@ -1824,7 +1474,7 @@ pwd -P > "$SPACETERM_WORKING_DIRECTORY"
 
         let spec = prepared.take().unwrap();
 
-        assert_eq!(spec.executable(), OsStr::new("/usr/bin/ssh"));
+        assert_eq!(spec.executable(), OsStr::new("/selected/openssh"));
         assert_eq!(
             arguments(&spec).last().map(String::as_str),
             Some("cd '/srv/project' && SPACETERM='1' COLORTERM='truecolor' exec '/bin/zsh' -l")
@@ -1850,7 +1500,7 @@ pwd -P > "$SPACETERM_WORKING_DIRECTORY"
     }
 
     #[test]
-    fn all_specs_should_use_the_exact_system_executable() {
+    fn all_specs_should_use_the_exact_selected_executable() {
         let context = context();
         let command = pane_command("/srv/project", "/bin/fish").unwrap();
         let specs = [
@@ -1864,7 +1514,7 @@ pwd -P > "$SPACETERM_WORKING_DIRECTORY"
         assert!(
             specs
                 .iter()
-                .all(|spec| spec.executable() == OsStr::new("/usr/bin/ssh"))
+                .all(|spec| spec.executable() == OsStr::new("/selected/openssh"))
         );
     }
 
@@ -1886,6 +1536,7 @@ pwd -P > "$SPACETERM_WORKING_DIRECTORY"
         let destination = SshDestination::new("host".to_owned()).unwrap();
 
         let error = SshCommandContext::new(
+            executable(),
             PathBuf::from("relative/config"),
             destination,
             PathBuf::from("relative/control"),

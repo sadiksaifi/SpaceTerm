@@ -5193,6 +5193,7 @@ mod tests {
         let destination = crate::domain::SshDestination::new("tester@remote".to_owned()).unwrap();
         let command_context = Arc::new(
             SshCommandContext::new(
+                crate::ssh::command::OpenSshExecutable::for_test(),
                 PathBuf::from("/private/config/spaceterm/ssh_config"),
                 destination.clone(),
                 PathBuf::from("/private/runtime/spaceterm/master.sock"),

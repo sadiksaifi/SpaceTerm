@@ -1,0 +1,881 @@
+use std::ffi::{CString, OsStr, OsString};
+use std::fs::{self, File};
+use std::io::{self, Read, Write};
+use std::os::fd::{AsRawFd, FromRawFd};
+use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::MetadataExt;
+use std::path::{Component, Path};
+use std::sync::Arc;
+
+use super::secure_filesystem::{
+    PreparedPrivateFile, PrivateFileSnapshot, SecureCommitOutcome, SecureDirectory,
+    SecureEntryIdentity, SecureFilesystem, SecureFilesystemError,
+};
+
+const PRIVATE_DIRECTORY_MODE: u32 = 0o700;
+const PRIVATE_FILE_MODE: u32 = 0o600;
+
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct MacosSecureFilesystem;
+
+#[derive(Debug)]
+struct NativeDirectory {
+    parent: File,
+    file: File,
+    name: OsString,
+    identity: NativeIdentity,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct NativeIdentity {
+    device: u64,
+    inode: u64,
+}
+
+struct NativePreparedFile {
+    directory: Arc<NativeDirectory>,
+    temporary_name: CString,
+    target_name: OsString,
+    active: bool,
+}
+
+impl Drop for NativePreparedFile {
+    fn drop(&mut self) {
+        if self.active {
+            let _ = unlink_at_cstring(&self.directory.file, &self.temporary_name, 0);
+        }
+    }
+}
+
+impl SecureFilesystem for MacosSecureFilesystem {
+    fn open_private_directory(
+        &self,
+        path: &Path,
+    ) -> Result<Option<SecureDirectory>, SecureFilesystemError> {
+        match open_existing_private_directory(path) {
+            Ok(directory) => Ok(Some(wrap_directory(directory))),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(classify(error)),
+        }
+    }
+
+    fn ensure_private_directory(
+        &self,
+        path: &Path,
+    ) -> Result<SecureDirectory, SecureFilesystemError> {
+        ensure_private_directory(path)
+            .map(wrap_directory)
+            .map_err(classify)
+    }
+
+    fn create_private_child(
+        &self,
+        parent: &SecureDirectory,
+        name: &OsStr,
+    ) -> Result<SecureDirectory, SecureFilesystemError> {
+        let parent = directory(parent)?;
+        verify_directory_entry(&parent)?;
+        create_directory_at(&parent.file, name).map_err(classify)?;
+        match open_private_child(&parent, name) {
+            Ok(child) => Ok(wrap_directory(child)),
+            Err(error) => {
+                let _ = remove_at(&parent.file, name, libc::AT_REMOVEDIR);
+                Err(classify(error))
+            }
+        }
+    }
+
+    fn verify_directory(
+        &self,
+        directory_handle: &SecureDirectory,
+    ) -> Result<(), SecureFilesystemError> {
+        let directory = directory(directory_handle)?;
+        verify_directory_entry(&directory)
+    }
+
+    fn remove_private_child(
+        &self,
+        parent_handle: &SecureDirectory,
+        name: &OsStr,
+        child_handle: &SecureDirectory,
+    ) -> Result<(), SecureFilesystemError> {
+        let parent = directory(parent_handle)?;
+        let child = directory(child_handle)?;
+        verify_directory_entry(&parent)?;
+        verify_directory_entry(&child)?;
+        let current = open_directory_at(&parent.file, name).map_err(classify)?;
+        if private_directory_identity(&current).map_err(classify)? != child.identity {
+            return Err(SecureFilesystemError::Unsafe);
+        }
+        remove_at(&parent.file, name, libc::AT_REMOVEDIR).map_err(classify)
+    }
+
+    fn read_private_file(
+        &self,
+        directory_handle: &SecureDirectory,
+        name: &OsStr,
+        maximum_bytes: usize,
+    ) -> Result<Option<PrivateFileSnapshot>, SecureFilesystemError> {
+        let directory = directory(directory_handle)?;
+        verify_directory_entry(&directory)?;
+        let file = match open_file_at(&directory.file, name, libc::O_RDONLY | libc::O_NONBLOCK, 0) {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(classify(error)),
+        };
+        let identity = private_file_identity(&file.metadata().map_err(classify)?)?;
+        let mut bytes = Vec::new();
+        (&file)
+            .take(maximum_bytes.saturating_add(1) as u64)
+            .read_to_end(&mut bytes)
+            .map_err(classify)?;
+        if bytes.len() > maximum_bytes {
+            return Err(SecureFilesystemError::Unsafe);
+        }
+        verify_directory_entry(&directory)?;
+        let current =
+            file_identity_at(&directory.file, name)?.ok_or(SecureFilesystemError::Unsafe)?;
+        if current != identity {
+            return Err(SecureFilesystemError::Unsafe);
+        }
+        Ok(Some(PrivateFileSnapshot {
+            bytes,
+            identity: SecureEntryIdentity(Arc::new(identity)),
+        }))
+    }
+
+    fn prepare_private_file(
+        &self,
+        directory_handle: &SecureDirectory,
+        target: &OsStr,
+        bytes: &[u8],
+        allocation_sequence: u64,
+    ) -> Result<PreparedPrivateFile, SecureFilesystemError> {
+        let directory = directory(directory_handle)?;
+        verify_directory_entry(&directory)?;
+        let temporary_name = temporary_name(target, allocation_sequence)?;
+        let mut temporary = open_file_at_cstring(
+            &directory.file,
+            &temporary_name,
+            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL,
+            PRIVATE_FILE_MODE,
+        )
+        .map_err(classify)?;
+        if let Err(error) = (|| {
+            set_file_mode(&temporary, PRIVATE_FILE_MODE)?;
+            private_file_identity(&temporary.metadata()?).map_err(as_io_error)?;
+            temporary.write_all(bytes)?;
+            temporary.sync_all()?;
+            verify_directory_entry(&directory).map_err(as_io_error)
+        })() {
+            let _ = unlink_at_cstring(&directory.file, &temporary_name, 0);
+            return Err(classify(error));
+        }
+        Ok(PreparedPrivateFile(Box::new(NativePreparedFile {
+            directory: Arc::clone(&directory),
+            temporary_name,
+            target_name: target.to_os_string(),
+            active: true,
+        })))
+    }
+
+    fn commit_private_file(
+        &self,
+        prepared: PreparedPrivateFile,
+        expected: Option<&SecureEntryIdentity>,
+    ) -> Result<SecureCommitOutcome, SecureFilesystemError> {
+        let mut prepared = prepared
+            .0
+            .downcast::<NativePreparedFile>()
+            .map_err(|_| SecureFilesystemError::Unsafe)?;
+        verify_directory_entry(&prepared.directory)?;
+        let actual = file_identity_at(&prepared.directory.file, &prepared.target_name)?;
+        let expected = expected.map(identity).transpose()?;
+        if actual.as_ref() != expected {
+            return Ok(SecureCommitOutcome::Conflict);
+        }
+        if expected.is_some() {
+            swap_at(
+                &prepared.directory.file,
+                &prepared.temporary_name,
+                &prepared.target_name,
+            )
+            .map_err(classify)?;
+            let displaced_name = OsStr::from_bytes(prepared.temporary_name.as_bytes());
+            let displaced = match file_identity_at(&prepared.directory.file, displaced_name) {
+                Ok(displaced) => displaced,
+                Err(error) => {
+                    if swap_at(
+                        &prepared.directory.file,
+                        &prepared.temporary_name,
+                        &prepared.target_name,
+                    )
+                    .is_err()
+                    {
+                        prepared.active = false;
+                        return Err(SecureFilesystemError::Unavailable);
+                    }
+                    return Err(error);
+                }
+            };
+            if displaced.as_ref() != expected {
+                if swap_at(
+                    &prepared.directory.file,
+                    &prepared.temporary_name,
+                    &prepared.target_name,
+                )
+                .is_err()
+                {
+                    prepared.active = false;
+                    return Err(SecureFilesystemError::Unavailable);
+                }
+                return Ok(SecureCommitOutcome::Conflict);
+            }
+            if unlink_at_cstring(&prepared.directory.file, &prepared.temporary_name, 0).is_err() {
+                return Ok(SecureCommitOutcome::CommittedButUnsynced);
+            }
+        } else {
+            match link_at(
+                &prepared.directory.file,
+                &prepared.temporary_name,
+                &prepared.target_name,
+            ) {
+                Ok(()) => {
+                    if unlink_at_cstring(&prepared.directory.file, &prepared.temporary_name, 0)
+                        .is_err()
+                    {
+                        return Ok(SecureCommitOutcome::CommittedButUnsynced);
+                    }
+                }
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                    return Ok(SecureCommitOutcome::Conflict);
+                }
+                Err(error) => return Err(classify(error)),
+            }
+        }
+        prepared.active = false;
+        match prepared.directory.file.sync_all() {
+            Ok(()) => Ok(SecureCommitOutcome::Committed),
+            Err(_) => Ok(SecureCommitOutcome::CommittedButUnsynced),
+        }
+    }
+
+    fn register_socket(
+        &self,
+        directory_handle: &SecureDirectory,
+        name: &OsStr,
+    ) -> Result<SecureEntryIdentity, SecureFilesystemError> {
+        let directory = directory(directory_handle)?;
+        verify_directory_entry(&directory)?;
+        let before = socket_identity_at(&directory.file, name, None)?;
+        set_entry_mode_at(&directory.file, name, PRIVATE_FILE_MODE).map_err(classify)?;
+        let after = socket_identity_at(&directory.file, name, Some(PRIVATE_FILE_MODE))?;
+        if before != after {
+            return Err(SecureFilesystemError::Unsafe);
+        }
+        verify_directory_entry(&directory)?;
+        Ok(SecureEntryIdentity(Arc::new(after)))
+    }
+
+    fn verify_socket(
+        &self,
+        directory_handle: &SecureDirectory,
+        name: &OsStr,
+        identity_handle: &SecureEntryIdentity,
+    ) -> Result<(), SecureFilesystemError> {
+        let directory = directory(directory_handle)?;
+        verify_directory_entry(&directory)?;
+        let actual = socket_identity_at(&directory.file, name, Some(PRIVATE_FILE_MODE))?;
+        if &actual == identity(identity_handle)? {
+            Ok(())
+        } else {
+            Err(SecureFilesystemError::Unsafe)
+        }
+    }
+
+    fn remove_socket(
+        &self,
+        directory_handle: &SecureDirectory,
+        name: &OsStr,
+        identity_handle: &SecureEntryIdentity,
+    ) -> Result<(), SecureFilesystemError> {
+        self.verify_socket(directory_handle, name, identity_handle)?;
+        let directory = directory(directory_handle)?;
+        remove_at(&directory.file, name, 0).map_err(classify)
+    }
+
+    #[cfg(test)]
+    fn create_private_artifact(
+        &self,
+        directory_handle: &SecureDirectory,
+        name: &OsStr,
+    ) -> Result<(), SecureFilesystemError> {
+        let directory = directory(directory_handle)?;
+        verify_directory_entry(&directory)?;
+        let file = open_file_at(
+            &directory.file,
+            name,
+            libc::O_RDWR | libc::O_CREAT | libc::O_EXCL,
+            PRIVATE_FILE_MODE,
+        )
+        .map_err(classify)?;
+        set_file_mode(&file, PRIVATE_FILE_MODE).map_err(classify)?;
+        private_file_identity(&file.metadata().map_err(classify)?)?;
+        Ok(())
+    }
+}
+
+fn wrap_directory(directory: NativeDirectory) -> SecureDirectory {
+    SecureDirectory(Arc::new(directory))
+}
+
+fn directory(handle: &SecureDirectory) -> Result<Arc<NativeDirectory>, SecureFilesystemError> {
+    Arc::clone(&handle.0)
+        .downcast::<NativeDirectory>()
+        .map_err(|_| SecureFilesystemError::Unsafe)
+}
+
+fn identity(handle: &SecureEntryIdentity) -> Result<&NativeIdentity, SecureFilesystemError> {
+    handle
+        .0
+        .downcast_ref::<NativeIdentity>()
+        .ok_or(SecureFilesystemError::Unsafe)
+}
+
+fn classify(error: io::Error) -> SecureFilesystemError {
+    if matches!(error.raw_os_error(), Some(code) if code == libc::ELOOP || code == libc::ENOTDIR) {
+        return SecureFilesystemError::Unsafe;
+    }
+    match error.kind() {
+        io::ErrorKind::NotFound => SecureFilesystemError::Missing,
+        io::ErrorKind::AlreadyExists => SecureFilesystemError::AlreadyExists,
+        io::ErrorKind::InvalidInput | io::ErrorKind::PermissionDenied => {
+            SecureFilesystemError::Unsafe
+        }
+        _ => SecureFilesystemError::Unavailable,
+    }
+}
+
+fn as_io_error(error: SecureFilesystemError) -> io::Error {
+    let kind = match error {
+        SecureFilesystemError::Missing => io::ErrorKind::NotFound,
+        SecureFilesystemError::AlreadyExists => io::ErrorKind::AlreadyExists,
+        SecureFilesystemError::Unsafe => io::ErrorKind::PermissionDenied,
+        SecureFilesystemError::Unavailable => io::ErrorKind::Other,
+    };
+    io::Error::from(kind)
+}
+
+fn ensure_private_directory(path: &Path) -> io::Result<NativeDirectory> {
+    if !path.is_absolute() {
+        return Err(io::Error::from(io::ErrorKind::InvalidInput));
+    }
+    let mut parent = File::open("/")?;
+    let mut components = path.components().peekable();
+    let mut rollback = DirectoryRollback::default();
+    while let Some(component) = components.next() {
+        let Component::Normal(name) = component else {
+            if matches!(component, Component::RootDir) {
+                continue;
+            }
+            return Err(io::Error::from(io::ErrorKind::InvalidInput));
+        };
+        let is_final = components.peek().is_none();
+        let (directory, was_created) = match open_directory_at(&parent, name) {
+            Ok(directory) => (directory, false),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                match create_directory_at(&parent, name) {
+                    Ok(()) => {
+                        if let Err(error) = rollback.record(&parent, name) {
+                            let _ = remove_at(&parent, name, libc::AT_REMOVEDIR);
+                            return Err(error);
+                        }
+                        (open_directory_at(&parent, name)?, true)
+                    }
+                    Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                        (open_directory_at(&parent, name)?, false)
+                    }
+                    Err(error) => {
+                        return Err(error);
+                    }
+                }
+            }
+            Err(error) => {
+                return Err(error);
+            }
+        };
+        if was_created {
+            set_file_mode(&directory, PRIVATE_DIRECTORY_MODE)?;
+        }
+        if is_final {
+            if !was_created && directory.metadata()?.uid() != effective_user_id() {
+                return Err(io::Error::from(io::ErrorKind::PermissionDenied));
+            }
+            if !was_created {
+                set_file_mode(&directory, PRIVATE_DIRECTORY_MODE)?;
+            }
+            let identity = private_directory_identity(&directory)?;
+            let parent_clone = parent.try_clone()?;
+            rollback.disarm();
+            return Ok(NativeDirectory {
+                parent: parent_clone,
+                file: directory,
+                name: name.to_os_string(),
+                identity,
+            });
+        }
+        parent = directory;
+    }
+    Err(io::Error::from(io::ErrorKind::InvalidInput))
+}
+
+fn open_existing_private_directory(path: &Path) -> io::Result<NativeDirectory> {
+    if !path.is_absolute() {
+        return Err(io::Error::from(io::ErrorKind::InvalidInput));
+    }
+    let mut parent = File::open("/")?;
+    let mut components = path.components().peekable();
+    while let Some(component) = components.next() {
+        let Component::Normal(name) = component else {
+            if matches!(component, Component::RootDir) {
+                continue;
+            }
+            return Err(io::Error::from(io::ErrorKind::InvalidInput));
+        };
+        let directory = open_directory_at(&parent, name)?;
+        if components.peek().is_none() {
+            let identity = private_directory_identity(&directory)?;
+            return Ok(NativeDirectory {
+                parent,
+                file: directory,
+                name: name.to_os_string(),
+                identity,
+            });
+        }
+        parent = directory;
+    }
+    Err(io::Error::from(io::ErrorKind::InvalidInput))
+}
+
+fn open_private_child(parent: &NativeDirectory, name: &OsStr) -> io::Result<NativeDirectory> {
+    let file = open_directory_at(&parent.file, name)?;
+    set_file_mode(&file, PRIVATE_DIRECTORY_MODE)?;
+    let identity = private_directory_identity(&file)?;
+    Ok(NativeDirectory {
+        parent: parent.file.try_clone()?,
+        file,
+        name: name.to_os_string(),
+        identity,
+    })
+}
+
+fn verify_directory_entry(directory: &NativeDirectory) -> Result<(), SecureFilesystemError> {
+    let entry = open_directory_at(&directory.parent, &directory.name).map_err(classify)?;
+    let entry_identity = private_directory_identity(&entry).map_err(classify)?;
+    let open_identity = private_directory_identity(&directory.file).map_err(classify)?;
+    if entry_identity == directory.identity && open_identity == directory.identity {
+        Ok(())
+    } else {
+        Err(SecureFilesystemError::Unsafe)
+    }
+}
+
+fn private_directory_identity(file: &File) -> io::Result<NativeIdentity> {
+    let metadata = file.metadata()?;
+    if !metadata.is_dir()
+        || metadata.uid() != effective_user_id()
+        || metadata.mode() & 0o7777 != PRIVATE_DIRECTORY_MODE
+    {
+        return Err(io::Error::from(io::ErrorKind::PermissionDenied));
+    }
+    Ok(metadata_identity(&metadata))
+}
+
+fn private_file_identity(metadata: &fs::Metadata) -> Result<NativeIdentity, SecureFilesystemError> {
+    if !metadata.is_file()
+        || metadata.uid() != effective_user_id()
+        || metadata.mode() & 0o7777 != PRIVATE_FILE_MODE
+        || metadata.nlink() != 1
+    {
+        return Err(SecureFilesystemError::Unsafe);
+    }
+    Ok(metadata_identity(metadata))
+}
+
+fn metadata_identity(metadata: &fs::Metadata) -> NativeIdentity {
+    NativeIdentity {
+        device: metadata.dev(),
+        inode: metadata.ino(),
+    }
+}
+
+fn file_identity_at(
+    parent: &File,
+    name: &OsStr,
+) -> Result<Option<NativeIdentity>, SecureFilesystemError> {
+    let status = match status_at(parent, name) {
+        Ok(status) => status,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(classify(error)),
+    };
+    let mode = u32::from(status.st_mode);
+    if mode & u32::from(libc::S_IFMT) != u32::from(libc::S_IFREG)
+        || status.st_uid != effective_user_id()
+        || mode & 0o7777 != PRIVATE_FILE_MODE
+        || status.st_nlink != 1
+    {
+        return Err(SecureFilesystemError::Unsafe);
+    }
+    Ok(Some(NativeIdentity {
+        device: status.st_dev as u64,
+        inode: status.st_ino,
+    }))
+}
+
+fn socket_identity_at(
+    parent: &File,
+    name: &OsStr,
+    expected_mode: Option<u32>,
+) -> Result<NativeIdentity, SecureFilesystemError> {
+    let status = status_at(parent, name).map_err(classify)?;
+    let mode = u32::from(status.st_mode);
+    if mode & u32::from(libc::S_IFMT) != u32::from(libc::S_IFSOCK)
+        || status.st_uid != effective_user_id()
+        || expected_mode.is_some_and(|expected| mode & 0o777 != expected)
+        || status.st_nlink != 1
+    {
+        return Err(SecureFilesystemError::Unsafe);
+    }
+    Ok(NativeIdentity {
+        device: status.st_dev as u64,
+        inode: status.st_ino,
+    })
+}
+
+fn status_at(parent: &File, name: &OsStr) -> io::Result<libc::stat> {
+    let name = component_cstring(name)?;
+    let mut status = std::mem::MaybeUninit::<libc::stat>::uninit();
+    // SAFETY: the descriptor and NUL-terminated name remain valid, and status is writable.
+    let result = unsafe {
+        libc::fstatat(
+            parent.as_raw_fd(),
+            name.as_ptr(),
+            status.as_mut_ptr(),
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    };
+    if result == 0 {
+        // SAFETY: fstatat initialized status on success.
+        Ok(unsafe { status.assume_init() })
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+fn temporary_name(target: &OsStr, sequence: u64) -> Result<CString, SecureFilesystemError> {
+    let mut name = target.as_bytes().to_vec();
+    name.extend_from_slice(b".");
+    name.extend_from_slice(sequence.to_string().as_bytes());
+    name.extend_from_slice(b".tmp");
+    CString::new(name).map_err(|_| SecureFilesystemError::Unsafe)
+}
+
+fn component_cstring(name: &OsStr) -> io::Result<CString> {
+    if name.is_empty() || name.as_bytes().contains(&b'/') {
+        return Err(io::Error::from(io::ErrorKind::InvalidInput));
+    }
+    CString::new(name.as_bytes()).map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))
+}
+
+fn open_directory_at(parent: &File, name: &OsStr) -> io::Result<File> {
+    let name = component_cstring(name)?;
+    open_file_at_cstring(parent, &name, libc::O_RDONLY | libc::O_DIRECTORY, 0)
+}
+
+fn create_directory_at(parent: &File, name: &OsStr) -> io::Result<()> {
+    let name = component_cstring(name)?;
+    // SAFETY: the descriptor and NUL-terminated name remain valid for this call.
+    let result = unsafe {
+        libc::mkdirat(
+            parent.as_raw_fd(),
+            name.as_ptr(),
+            PRIVATE_DIRECTORY_MODE as libc::mode_t,
+        )
+    };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+fn open_file_at(parent: &File, name: &OsStr, flags: i32, mode: u32) -> io::Result<File> {
+    let name = component_cstring(name)?;
+    open_file_at_cstring(parent, &name, flags, mode)
+}
+
+fn open_file_at_cstring(parent: &File, name: &CString, flags: i32, mode: u32) -> io::Result<File> {
+    // SAFETY: the descriptor and NUL-terminated name remain valid. A successful descriptor is owned below.
+    let descriptor = unsafe {
+        libc::openat(
+            parent.as_raw_fd(),
+            name.as_ptr(),
+            flags | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            mode,
+        )
+    };
+    if descriptor < 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        // SAFETY: openat returned a new owned descriptor.
+        Ok(unsafe { File::from_raw_fd(descriptor) })
+    }
+}
+
+fn set_file_mode(file: &File, mode: u32) -> io::Result<()> {
+    // SAFETY: file owns a valid descriptor.
+    let result = unsafe { libc::fchmod(file.as_raw_fd(), mode as libc::mode_t) };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+fn set_entry_mode_at(parent: &File, name: &OsStr, mode: u32) -> io::Result<()> {
+    let name = component_cstring(name)?;
+    // SAFETY: the descriptor and NUL-terminated name remain valid for this call.
+    let result = unsafe {
+        libc::fchmodat(
+            parent.as_raw_fd(),
+            name.as_ptr(),
+            mode as libc::mode_t,
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+fn swap_at(parent: &File, source: &CString, target: &OsStr) -> io::Result<()> {
+    let target = component_cstring(target)?;
+    // SAFETY: the descriptor and both NUL-terminated names remain valid for this call.
+    let result = unsafe {
+        libc::renameatx_np(
+            parent.as_raw_fd(),
+            source.as_ptr(),
+            parent.as_raw_fd(),
+            target.as_ptr(),
+            libc::RENAME_SWAP,
+        )
+    };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+fn link_at(parent: &File, source: &CString, target: &OsStr) -> io::Result<()> {
+    let target = component_cstring(target)?;
+    // SAFETY: the descriptor and both NUL-terminated names remain valid for this call.
+    let result = unsafe {
+        libc::linkat(
+            parent.as_raw_fd(),
+            source.as_ptr(),
+            parent.as_raw_fd(),
+            target.as_ptr(),
+            0,
+        )
+    };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+fn remove_at(parent: &File, name: &OsStr, flags: i32) -> io::Result<()> {
+    let name = component_cstring(name)?;
+    unlink_at_cstring(parent, &name, flags)
+}
+
+fn unlink_at_cstring(parent: &File, name: &CString, flags: i32) -> io::Result<()> {
+    // SAFETY: the descriptor and NUL-terminated name remain valid for this call.
+    let result = unsafe { libc::unlinkat(parent.as_raw_fd(), name.as_ptr(), flags) };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+#[derive(Default)]
+struct DirectoryRollback {
+    created: Vec<(File, OsString)>,
+    active: bool,
+}
+
+impl DirectoryRollback {
+    fn record(&mut self, parent: &File, name: &OsStr) -> io::Result<()> {
+        self.active = true;
+        self.created
+            .push((parent.try_clone()?, name.to_os_string()));
+        Ok(())
+    }
+
+    fn disarm(&mut self) {
+        self.active = false;
+    }
+}
+
+impl Drop for DirectoryRollback {
+    fn drop(&mut self) {
+        if self.active {
+            for (parent, name) in self.created.iter().rev() {
+                let _ = remove_at(parent, name, libc::AT_REMOVEDIR);
+            }
+        }
+    }
+}
+
+fn effective_user_id() -> u32 {
+    // SAFETY: geteuid takes no arguments and has no preconditions.
+    unsafe { libc::geteuid() }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::os::unix::fs::{PermissionsExt, symlink};
+    use std::os::unix::net::UnixListener;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use super::*;
+
+    static NEXT_TEST: AtomicU64 = AtomicU64::new(0);
+
+    fn test_root(label: &str) -> PathBuf {
+        let sequence = NEXT_TEST.fetch_add(1, Ordering::Relaxed);
+        fs::canonicalize(std::env::temp_dir())
+            .unwrap()
+            .join(format!(
+                "spaceterm-secure-fs-{}-{sequence}-{label}",
+                std::process::id()
+            ))
+    }
+
+    #[test]
+    fn ensure_should_reject_symlinked_traversal() {
+        let root = test_root("symlink");
+        let outside = test_root("outside");
+        fs::create_dir_all(&root).unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(PRIVATE_DIRECTORY_MODE)).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        symlink(&outside, root.join("linked")).unwrap();
+
+        let result = MacosSecureFilesystem.ensure_private_directory(&root.join("linked/child"));
+
+        assert!(matches!(result, Err(SecureFilesystemError::Unsafe)));
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(outside);
+    }
+
+    #[test]
+    fn read_should_reject_hard_linked_private_file() {
+        let root = test_root("hard-link");
+        let filesystem = MacosSecureFilesystem;
+        let directory = filesystem.ensure_private_directory(&root).unwrap();
+        filesystem
+            .create_private_artifact(&directory, OsStr::new("config"))
+            .unwrap();
+        fs::hard_link(root.join("config"), root.join("second")).unwrap();
+
+        let result = filesystem.read_private_file(&directory, OsStr::new("config"), 1024);
+
+        assert!(matches!(result, Err(SecureFilesystemError::Unsafe)));
+        let _ = fs::remove_file(root.join("second"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn ensure_should_restrict_the_owned_directory() {
+        let root = test_root("permission");
+        fs::create_dir_all(&root).unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o755)).unwrap();
+
+        MacosSecureFilesystem
+            .ensure_private_directory(&root)
+            .unwrap();
+
+        assert_eq!(
+            fs::metadata(&root).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn commit_should_detect_identity_replacement() {
+        let root = test_root("replacement");
+        let filesystem = MacosSecureFilesystem;
+        let directory = filesystem.ensure_private_directory(&root).unwrap();
+        let first = filesystem
+            .prepare_private_file(&directory, OsStr::new("config"), b"first", 1)
+            .unwrap();
+        assert_eq!(
+            filesystem.commit_private_file(first, None).unwrap(),
+            SecureCommitOutcome::Committed
+        );
+        let snapshot = filesystem
+            .read_private_file(&directory, OsStr::new("config"), 1024)
+            .unwrap()
+            .unwrap();
+        let stale = filesystem
+            .prepare_private_file(&directory, OsStr::new("config"), b"stale", 2)
+            .unwrap();
+        let replacement = filesystem
+            .prepare_private_file(&directory, OsStr::new("config"), b"replacement", 3)
+            .unwrap();
+        assert_eq!(
+            filesystem
+                .commit_private_file(replacement, Some(&snapshot.identity))
+                .unwrap(),
+            SecureCommitOutcome::Committed
+        );
+
+        let result = filesystem
+            .commit_private_file(stale, Some(&snapshot.identity))
+            .unwrap();
+
+        assert_eq!(result, SecureCommitOutcome::Conflict);
+        assert_eq!(fs::read(root.join("config")).unwrap(), b"replacement");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn socket_cleanup_should_remove_only_the_registered_identity() {
+        let root = test_root("socket");
+        let filesystem = MacosSecureFilesystem;
+        let directory = filesystem.ensure_private_directory(&root).unwrap();
+        let path = root.join("endpoint");
+        let listener = UnixListener::bind(&path).unwrap();
+        let identity = filesystem
+            .register_socket(&directory, OsStr::new("endpoint"))
+            .unwrap();
+        filesystem
+            .verify_socket(&directory, OsStr::new("endpoint"), &identity)
+            .unwrap();
+
+        filesystem
+            .remove_socket(&directory, OsStr::new("endpoint"), &identity)
+            .unwrap();
+
+        assert!(!path.exists());
+        drop(listener);
+        let _ = fs::remove_dir_all(root);
+    }
+}

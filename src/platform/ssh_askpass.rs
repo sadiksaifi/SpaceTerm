@@ -363,8 +363,8 @@ struct KeyPassphrasePrompt<'a> {
     location: Option<&'a str>,
 }
 
-/// Recognizes Apple OpenSSH's locally generated first-contact grammar even though `sshconnect.c`
-/// requests it through `RP_ECHO` and therefore supplies no confirmation hint to AskPass.
+/// Recognizes OpenSSH's first-contact grammar even when the prompt metadata supplies no
+/// confirmation hint to AskPass.
 fn classify_prompt(prompt: &str, hint: AskPassPromptKind) -> AskPassPromptClassification<'_> {
     if let Some(first_contact) = parse_first_contact_prompt(prompt) {
         return AskPassPromptClassification::FirstContact(first_contact);

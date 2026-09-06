@@ -354,6 +354,7 @@ mod tests {
         command: &str,
     ) -> PreparedSshPaneChannelCommand {
         SshCommandContext::new(
+            crate::ssh::command::OpenSshExecutable::for_test(),
             PathBuf::from("/private/config/spaceterm/ssh_config"),
             destination.clone(),
             PathBuf::from("/private/runtime/spaceterm/master.sock"),

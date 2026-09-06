@@ -34,7 +34,9 @@ mod workspace_search;
 
 use gpui::{App, actions};
 
-pub(crate) use native_remote_workspace_flow_backend::NativeRemoteWorkspaceFlowBackendFactory;
+pub(crate) use native_remote_workspace_flow_backend::{
+    NativeRemoteWorkspaceFlowBackendFactory, RemoteWorkspaceSshRuntime,
+};
 pub(crate) use pane_host::{
     PaneHost, PaneHostEvent, PreparedPaneHostRemoteRestart, RemotePaneHostLifecycleError,
 };

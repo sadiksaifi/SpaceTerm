@@ -1,19 +1,40 @@
 //! The sole production selector of desktop policy and native capabilities.
-use crate::app::{HostComposition, HostCompositionParts, StartupDependencies};
+use crate::app::{
+    HostComposition, HostCompositionParts, StartupDependencies, StartupDependenciesError,
+};
 use crate::desktop_profile::{DesktopProfile, DesktopProfileError};
 use crate::terminal::{NativeTerminalSessionFactory, OptionAsAltPolicy};
 use gpui::{TitlebarOptions, point, px};
-use std::{rc::Rc, sync::Arc};
+use std::{path::PathBuf, rc::Rc, sync::Arc};
 
 pub(crate) fn main() {
     let code = crate::app::dispatch_or_prepare_application(
         super::macos_askpass_transport::dispatch_helper_from_environment,
-        || crate::app::launch(compose),
+        || crate::app::launch(capture_startup_dependencies(), compose),
     )
     .unwrap_or_else(|code| code);
     if code != 0 {
         std::process::exit(code);
     }
+}
+
+fn capture_startup_dependencies() -> Result<
+    StartupDependencies<super::macos_ssh_process::MacOsSshProcessAdapter>,
+    StartupDependenciesError,
+> {
+    let runtime_fallback =
+        std::fs::canonicalize(std::env::temp_dir()).map_err(|_| StartupDependenciesError::Paths)?;
+    let path_host_facts = super::app_paths::AppPathHostFacts::new(runtime_fallback, 103)
+        .map_err(|_| StartupDependenciesError::Paths)?;
+    let executable = crate::ssh::command::OpenSshExecutable::new(PathBuf::from("/usr/bin/ssh"))
+        .map_err(|_| StartupDependenciesError::Paths)?;
+    StartupDependencies::capture(
+        &path_host_facts,
+        Arc::new(super::macos_secure_filesystem::MacosSecureFilesystem),
+        executable,
+        super::macos_ssh_process::MacOsSshProcessAdapter,
+        Arc::new(super::macos_control_socket::MacosControlSocketProbe),
+    )
 }
 
 fn desktop_profile(
@@ -33,7 +54,9 @@ pub(crate) fn testing_desktop_profile(direction: spaceterm_ui::TextDirection) ->
         .expect("valid desktop profile")
 }
 
-fn compose(startup: StartupDependencies) -> Result<HostComposition, DesktopProfileError> {
+fn compose(
+    startup: StartupDependencies<super::macos_ssh_process::MacOsSshProcessAdapter>,
+) -> Result<HostComposition, DesktopProfileError> {
     let activity: Rc<dyn crate::platform::application_activity::ApplicationActivity> =
         Rc::new(crate::platform::macos_application::MacosApplicationActivity);
     let lifecycle = crate::ui::pane_lifecycle::PaneLifecycleDependencies {

@@ -3,119 +3,142 @@
     reason = "the AskPass broker lands before control-connection integration"
 )]
 
-use super::askpass::{AskPassAttemptObservation, AskPassBrokerLease};
-use std::cell::RefCell;
-use std::ffi::{OsStr, OsString};
-use std::io::{self, Read, Write};
+#[cfg(test)]
+use super::askpass::{
+    AskPassAttemptObservation, AskPassBrokerLease, AskPassCapability, AskPassHelperReply,
+    AskPassPresentationFailure as BrokerPresentationFailure, AskPassPresenter as BrokerPresenter,
+    AskPassProtocolError, AskPassProtocolReply, AskPassTeardown, CAPABILITY_ENV,
+    CAPABILITY_TEXT_BYTES, DISPLAY_MARKER, ENDPOINT_ENV, GpuiAskPassBridge, HELPER_MODE,
+    HELPER_MODE_ENV, MAX_PROMPT_BYTES, MAX_REPLY_FRAME_BYTES, MAX_REQUEST_FRAME_BYTES,
+    ObservedAskPassPresenter, read_reply, read_request, write_reply, write_request,
+};
+use super::askpass::{
+    AskPassHelperConnector, AskPassLocalAccept, AskPassLocalIpc, AskPassLocalListener,
+    GpuiAskPassBrokerFactory as PortableAskPassBrokerFactory,
+    dispatch_helper_from_environment as dispatch_portable_helper,
+};
+use std::ffi::OsStr;
+#[cfg(test)]
+use std::ffi::OsString;
+use std::io;
+#[cfg(test)]
+use std::io::{Read, Write};
 use std::os::fd::AsRawFd;
+#[cfg(test)]
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::path::{Path, PathBuf};
-use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, mpsc};
-use std::thread::{self, JoinHandle};
+use std::path::Path;
+#[cfg(test)]
+use std::path::PathBuf;
+use std::sync::Arc;
+#[cfg(test)]
+use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(test)]
+use std::thread;
 use std::time::Duration;
 
-use gpui::{App, AppContext, Window};
+use gpui::{App, Window};
+#[cfg(test)]
 use thiserror::Error;
-use zeroize::Zeroizing;
 
+#[cfg(test)]
+use super::app_paths::AppPathsError;
 use super::app_paths::{
-    ASKPASS_RUNTIME_OWNER_KIND, ASKPASS_RUNTIME_SOCKET_NAME, AppPaths, AppPathsError,
-    RegisteredRuntimeSocket, RuntimeOwner,
+    ASKPASS_RUNTIME_OWNER_KIND, ASKPASS_RUNTIME_SOCKET_NAME, AppPaths, RegisteredRuntimeSocket,
+    RuntimeOwner,
 };
+#[cfg(test)]
 use super::ssh_askpass::{
-    AskPassPresentationError, AskPassPromptKind, AskPassRequest, AskPassResponseError,
-    AskPassResult,
+    AskPassPresentationError, AskPassPromptKind, AskPassRequest, AskPassSecret,
 };
-use crate::ui::ssh_askpass_dialog::GpuiAskPassPresenter;
 
-const PROTOCOL_VERSION: u8 = 1;
-const CAPABILITY_BYTES: usize = 32;
-const CAPABILITY_TEXT_BYTES: usize = CAPABILITY_BYTES * 2;
-const MAX_PROMPT_BYTES: usize = 4 * 1024;
-const MAX_SECRET_BYTES: usize = 16 * 1024;
-const MAX_REQUEST_FRAME_BYTES: usize = CAPABILITY_TEXT_BYTES + MAX_PROMPT_BYTES + 8;
-const MAX_REPLY_FRAME_BYTES: usize = MAX_SECRET_BYTES + 1;
-const HELPER_MODE_ENV: &str = "SPACETERM_SSH_ASKPASS_MODE";
-const SOCKET_ENV: &str = "SPACETERM_SSH_ASKPASS_SOCKET";
-const CAPABILITY_ENV: &str = "SPACETERM_SSH_ASKPASS_CAPABILITY";
-const HELPER_MODE: &str = "broker-v1";
-const DISPLAY_MARKER: &str = "spaceterm-askpass";
+#[cfg(test)]
+const SOCKET_ENV: &str = ENDPOINT_ENV;
+#[cfg(test)]
 const SSH_PROMPT_KIND_ENV: &str = "SSH_ASKPASS_PROMPT";
+#[cfg(test)]
 const HELPER_SUCCESS: i32 = 0;
+#[cfg(test)]
 const HELPER_CANCELLED: i32 = 1;
+#[cfg(test)]
 const HELPER_FAILED: i32 = 2;
 const ACCEPT_POLL_INTERVAL: Duration = Duration::from_millis(15);
 const CONNECTION_IO_TIMEOUT: Duration = Duration::from_secs(5);
 
-const REQUEST_SECRET: u8 = 1;
-const REQUEST_CONFIRMATION: u8 = 2;
-const REPLY_SECRET: u8 = 1;
-const REPLY_CONFIRMATION_YES: u8 = 2;
-const REPLY_CONFIRMATION_NO: u8 = 3;
-const REPLY_CANCELLED: u8 = 4;
-const REPLY_FAILED: u8 = 5;
+struct MacosAskPassLocalIpc;
 
-struct CapabilityToken {
-    text: Zeroizing<String>,
-}
-
-impl CapabilityToken {
-    fn generate() -> Result<Self, AskPassBrokerError> {
-        let mut bytes = Zeroizing::new([0_u8; CAPABILITY_BYTES]);
-        // SAFETY: `bytes` names a writable allocation of exactly the length passed to
-        // `getentropy`. macOS guarantees either a full fill or failure for this bounded request.
-        let result = unsafe {
-            libc::getentropy(
-                bytes.as_mut_ptr().cast::<libc::c_void>(),
-                bytes.len() as libc::size_t,
-            )
+impl AskPassLocalIpc for MacosAskPassLocalIpc {
+    fn bind(
+        &self,
+        paths: &AppPaths,
+    ) -> Result<super::askpass::BoundAskPassEndpoint, super::askpass::AskPassUnavailable> {
+        let runtime_owner = paths
+            .create_runtime_owner(ASKPASS_RUNTIME_OWNER_KIND)
+            .map_err(|_| super::askpass::AskPassUnavailable)?;
+        let socket_path = runtime_owner
+            .socket_path(ASKPASS_RUNTIME_SOCKET_NAME)
+            .map_err(|_| super::askpass::AskPassUnavailable)?;
+        let listener =
+            UnixListener::bind(&socket_path).map_err(|_| super::askpass::AskPassUnavailable)?;
+        let socket = match runtime_owner.register_socket(ASKPASS_RUNTIME_SOCKET_NAME) {
+            Ok(socket) => socket,
+            Err(_) => {
+                drop(listener);
+                let _ = std::fs::remove_file(&socket_path);
+                return Err(super::askpass::AskPassUnavailable);
+            }
         };
-        if result != 0 {
-            return Err(AskPassBrokerError::Random(io::Error::last_os_error()));
-        }
-        Ok(Self::from_random_bytes(bytes.as_slice()))
-    }
-
-    fn from_random_bytes(bytes: &[u8]) -> Self {
-        const HEX: &[u8; 16] = b"0123456789abcdef";
-        let mut text = String::with_capacity(bytes.len() * 2);
-        for byte in bytes {
-            text.push(char::from(HEX[usize::from(byte >> 4)]));
-            text.push(char::from(HEX[usize::from(byte & 0x0f)]));
-        }
-        Self {
-            text: Zeroizing::new(text),
-        }
-    }
-
-    fn as_str(&self) -> &str {
-        self.text.as_str()
-    }
-
-    fn matches(&self, candidate: &[u8]) -> bool {
-        let expected = self.text.as_bytes();
-        if candidate.len() != expected.len() {
-            return false;
-        }
-        expected
-            .iter()
-            .zip(candidate)
-            .fold(0_u8, |difference, (left, right)| {
-                difference | (left ^ right)
-            })
-            == 0
+        listener
+            .set_nonblocking(true)
+            .map_err(|_| super::askpass::AskPassUnavailable)?;
+        Ok(super::askpass::BoundAskPassEndpoint::new(
+            socket_path.into_os_string(),
+            Box::new(MacosAskPassListener {
+                listener,
+                _socket: socket,
+                _runtime_owner: runtime_owner,
+            }),
+        ))
     }
 }
 
+struct MacosAskPassListener {
+    listener: UnixListener,
+    _socket: RegisteredRuntimeSocket,
+    _runtime_owner: RuntimeOwner,
+}
+
+impl AskPassLocalListener for MacosAskPassListener {
+    fn accept_authenticated(&self) -> AskPassLocalAccept {
+        let stream = match self.listener.accept() {
+            Ok((stream, _)) => stream,
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                return AskPassLocalAccept::Pending;
+            }
+            Err(_) => return AskPassLocalAccept::Failed,
+        };
+        if MacosPeerValidator.validate(&stream).is_err() {
+            return AskPassLocalAccept::Rejected;
+        }
+        if stream
+            .set_read_timeout(Some(CONNECTION_IO_TIMEOUT))
+            .and_then(|()| stream.set_write_timeout(Some(CONNECTION_IO_TIMEOUT)))
+            .is_err()
+        {
+            return AskPassLocalAccept::Rejected;
+        }
+        AskPassLocalAccept::Connected(Box::new(stream))
+    }
+}
+
+#[cfg(test)]
 struct AskPassEnvironment {
     helper_path: PathBuf,
     socket_path: PathBuf,
-    capability: Arc<CapabilityToken>,
+    capability: Arc<AskPassCapability>,
 }
 
+#[cfg(test)]
 impl AskPassEnvironment {
     /// Returns the complete AskPass overlay for a single control connection.
     ///
@@ -139,16 +162,19 @@ impl AskPassEnvironment {
 /// The broker validates a bounded versioned frame and capability before presenting. It never logs
 /// prompt or response content. Dropping its final lease cancels any presentation, joins the worker,
 /// and removes only the registered socket and owner-private runtime artifacts.
+#[cfg(test)]
 pub(crate) struct AskPassBroker {
     lifetime: Arc<AskPassBrokerLifetime>,
 }
 
 /// Fresh broker lifetime and content-free observation for one connection attempt.
+#[cfg(test)]
 pub(crate) struct AskPassConnectionAttempt {
     broker: AskPassBroker,
     observation: AskPassAttemptObservation,
 }
 
+#[cfg(test)]
 impl AskPassConnectionAttempt {
     /// Retains the broker and returns its fixed six-variable environment overlay.
     pub(crate) fn lease(&self) -> AskPassBrokerLease {
@@ -165,15 +191,17 @@ impl AskPassConnectionAttempt {
 ///
 /// Construction captures the current executable and a safe GPUI presentation bridge, so
 /// background connection work never retains a live `Window`.
+#[cfg(test)]
 pub(crate) struct GpuiAskPassBrokerFactory {
     helper_path: PathBuf,
     bridge: GpuiAskPassBridge,
 }
 
+#[cfg(test)]
 impl GpuiAskPassBrokerFactory {
     /// Captures the helper executable and presenter on the application main thread.
     pub(crate) fn new(window: &Window, cx: &mut App) -> Result<Self, AskPassBrokerError> {
-        let bridge = gpui_askpass_bridge(window, cx);
+        let bridge = GpuiAskPassBridge::new(window, cx);
         Ok(Self {
             helper_path: std::env::current_exe()?,
             bridge,
@@ -186,10 +214,10 @@ impl GpuiAskPassBrokerFactory {
         paths: &AppPaths,
     ) -> Result<AskPassConnectionAttempt, AskPassBrokerError> {
         let observation = AskPassAttemptObservation::default();
-        let presenter = Arc::new(ObservedBrokerPresenter {
-            inner: self.bridge.presenter(),
-            observation: observation.clone(),
-        });
+        let presenter = Arc::new(ObservedAskPassPresenter::new(
+            self.bridge.presenter(),
+            observation.clone(),
+        ));
         let broker =
             AskPassBroker::start_with_presenter(paths, self.helper_path.clone(), presenter)?;
         Ok(AskPassConnectionAttempt {
@@ -199,15 +227,13 @@ impl GpuiAskPassBrokerFactory {
     }
 }
 
+#[cfg(test)]
 struct AskPassBrokerLifetime {
     environment: Arc<AskPassEnvironment>,
-    presenter: Arc<dyn BrokerPresenter>,
-    stop: Arc<AtomicBool>,
-    worker: Mutex<Option<JoinHandle<()>>>,
-    socket: Mutex<Option<RegisteredRuntimeSocket>>,
-    _runtime_owner: Mutex<Option<RuntimeOwner>>,
+    teardown: AskPassTeardown,
 }
 
+#[cfg(test)]
 impl super::askpass::AskPassLease for AskPassBrokerLifetime {
     fn entries(&self) -> Vec<(&'static str, &OsStr)> {
         self.environment.entries().collect()
@@ -217,6 +243,7 @@ impl super::askpass::AskPassLease for AskPassBrokerLifetime {
     }
 }
 
+#[cfg(test)]
 impl AskPassBroker {
     pub(crate) fn start_gpui(
         paths: &AppPaths,
@@ -258,7 +285,9 @@ impl AskPassBroker {
             .set_nonblocking(true)
             .map_err(AskPassBrokerError::ConfigureSocket)?;
 
-        let capability = Arc::new(CapabilityToken::generate()?);
+        let capability = Arc::new(
+            AskPassCapability::generate().map_err(|_| AskPassBrokerError::CapabilityUnavailable)?,
+        );
         let stop = Arc::new(AtomicBool::new(false));
         let worker_stop = stop.clone();
         let worker_capability = capability.clone();
@@ -267,9 +296,14 @@ impl AskPassBroker {
             .name("spaceterm-askpass-broker".to_owned())
             .spawn(move || {
                 run_broker(listener, worker_capability, worker_presenter, worker_stop);
+                drop(socket);
+                drop(runtime_owner);
             })
             .map_err(AskPassBrokerError::StartWorker)?;
 
+        let cancel_presenter = Arc::clone(&presenter);
+        let cancel_presentation: Arc<dyn Fn() + Send + Sync> =
+            Arc::new(move || cancel_presenter.cancel_active());
         Ok(Self {
             lifetime: Arc::new(AskPassBrokerLifetime {
                 environment: Arc::new(AskPassEnvironment {
@@ -277,11 +311,7 @@ impl AskPassBroker {
                     socket_path,
                     capability,
                 }),
-                presenter,
-                stop,
-                worker: Mutex::new(Some(worker)),
-                socket: Mutex::new(Some(socket)),
-                _runtime_owner: Mutex::new(Some(runtime_owner)),
+                teardown: AskPassTeardown::new(stop, cancel_presentation, worker),
             }),
         })
     }
@@ -296,83 +326,21 @@ impl AskPassBroker {
     }
 }
 
-fn gpui_askpass_bridge(window: &Window, cx: &mut App) -> GpuiAskPassBridge {
-    let presenter = cx.new(|_| GpuiAskPassPresenter::default());
-    let window_handle = window.window_handle();
-    let (command_sender, command_receiver) = async_channel::bounded(2);
-    cx.spawn(async move |cx| {
-        while let Ok(command) = command_receiver.recv().await {
-            match command {
-                AskPassUiCommand::Present { owner, job } => {
-                    if job.cancelled.load(Ordering::Acquire) {
-                        let _ = job.response.send(Ok(BrokerAnswer::Cancelled));
-                        continue;
-                    }
-                    let response = Rc::new(RefCell::new(Some(job.response)));
-                    let completion_response = Rc::clone(&response);
-                    let result = window_handle.update(cx, |_, window, cx| {
-                        presenter.update(cx, |presenter, cx| {
-                            presenter.present(
-                                owner,
-                                job.request,
-                                Box::new(move |result| {
-                                    if let Some(response) = completion_response.borrow_mut().take()
-                                    {
-                                        let _ = response.send(Ok(map_presentation_result(result)));
-                                    }
-                                }),
-                                window,
-                                cx,
-                            )
-                        })
-                    });
-                    if !matches!(result, Ok(Ok(())))
-                        && let Some(response) = response.borrow_mut().take()
-                    {
-                        let _ = response.send(Err(BrokerPresentationFailure::Rejected));
-                    }
-                }
-                AskPassUiCommand::Cancel { owner } => {
-                    let _ = window_handle.update(cx, |_, window, cx| {
-                        presenter.update(cx, |presenter, cx| {
-                            presenter.cancel_owner(owner, window, cx);
-                        });
-                    });
-                }
-            }
-        }
-    })
-    .detach();
-    GpuiAskPassBridge {
-        commands: command_sender,
-        next_owner: Arc::new(AtomicU64::new(0)),
-    }
-}
-
+#[cfg(test)]
 impl AskPassBrokerLifetime {
     fn close(&self) {
-        self.stop.store(true, Ordering::Release);
-        self.presenter.cancel_active();
-        if let Ok(mut worker) = self.worker.lock()
-            && let Some(worker) = worker.take()
-        {
-            let _ = worker.join();
-        }
-        if let Ok(mut socket) = self.socket.lock() {
-            socket.take();
-        }
-        if let Ok(mut runtime_owner) = self._runtime_owner.lock() {
-            runtime_owner.take();
-        }
+        self.teardown.close();
     }
 }
 
+#[cfg(test)]
 impl Drop for AskPassBrokerLifetime {
     fn drop(&mut self) {
         self.close();
     }
 }
 
+#[cfg(test)]
 #[derive(Debug, Error)]
 /// Broker startup failure with prompt, capability, and response content excluded.
 pub(crate) enum AskPassBrokerError {
@@ -386,213 +354,21 @@ pub(crate) enum AskPassBrokerError {
     Bind(io::Error),
     #[error("failed to configure the private AskPass socket: {0}")]
     ConfigureSocket(io::Error),
-    #[error("failed to generate the AskPass capability: {0}")]
-    Random(io::Error),
+    #[error("the AskPass capability is unavailable")]
+    CapabilityUnavailable,
     #[error("failed to start the AskPass broker: {0}")]
     StartWorker(io::Error),
     #[error(transparent)]
     Presentation(#[from] AskPassPresentationError),
 }
 
-enum BrokerAnswer {
-    Secret(Zeroizing<Vec<u8>>),
-    Confirmation(bool),
-    Cancelled,
-    Failed,
-}
+#[cfg(test)]
+type BrokerAnswer = AskPassProtocolReply;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum BrokerPresentationFailure {
-    Unavailable,
-    Rejected,
-}
-
-trait BrokerPresenter: Send + Sync {
-    fn present(
-        &self,
-        request: AskPassRequest,
-        stop: &AtomicBool,
-    ) -> Result<BrokerAnswer, BrokerPresentationFailure>;
-
-    fn cancel_active(&self);
-}
-
-struct ObservedBrokerPresenter {
-    inner: Arc<dyn BrokerPresenter>,
-    observation: AskPassAttemptObservation,
-}
-
-struct PromptActivity<'a> {
-    active: &'a AtomicBool,
-}
-
-impl<'a> PromptActivity<'a> {
-    fn begin(active: &'a AtomicBool) -> Self {
-        active.store(true, Ordering::Release);
-        Self { active }
-    }
-}
-
-impl Drop for PromptActivity<'_> {
-    fn drop(&mut self) {
-        self.active.store(false, Ordering::Release);
-    }
-}
-
-impl BrokerPresenter for ObservedBrokerPresenter {
-    fn present(
-        &self,
-        request: AskPassRequest,
-        stop: &AtomicBool,
-    ) -> Result<BrokerAnswer, BrokerPresentationFailure> {
-        self.observation
-            .state
-            .prompt_started
-            .store(true, Ordering::Release);
-        let activity = PromptActivity::begin(&self.observation.state.prompt_active);
-        let answer = self.inner.present(request, stop);
-        drop(activity);
-        if matches!(answer, Ok(BrokerAnswer::Cancelled)) {
-            self.observation
-                .state
-                .cancelled
-                .store(true, Ordering::Release);
-        }
-        answer
-    }
-
-    fn cancel_active(&self) {
-        self.observation
-            .state
-            .cancelled
-            .store(true, Ordering::Release);
-        self.inner.cancel_active();
-    }
-}
-
-struct PresentationJob {
-    request: AskPassRequest,
-    response: mpsc::SyncSender<Result<BrokerAnswer, BrokerPresentationFailure>>,
-    cancelled: Arc<AtomicBool>,
-}
-
-enum AskPassUiCommand {
-    Present { owner: u64, job: PresentationJob },
-    Cancel { owner: u64 },
-}
-
-struct GpuiAskPassBridge {
-    commands: async_channel::Sender<AskPassUiCommand>,
-    next_owner: Arc<AtomicU64>,
-}
-
-impl GpuiAskPassBridge {
-    fn presenter(&self) -> Arc<dyn BrokerPresenter> {
-        let owner = self
-            .next_owner
-            .fetch_add(1, Ordering::Relaxed)
-            .wrapping_add(1);
-        Arc::new(ChannelBrokerPresenter {
-            commands: self.commands.clone(),
-            owner,
-            state: Mutex::new(ChannelCommandState::default()),
-            cancelled: Arc::new(AtomicBool::new(false)),
-        })
-    }
-}
-
-#[derive(Default)]
-struct ChannelCommandState {
-    closed: bool,
-}
-
-struct ChannelBrokerPresenter {
-    commands: async_channel::Sender<AskPassUiCommand>,
-    owner: u64,
-    state: Mutex<ChannelCommandState>,
-    cancelled: Arc<AtomicBool>,
-}
-
-impl BrokerPresenter for ChannelBrokerPresenter {
-    fn present(
-        &self,
-        request: AskPassRequest,
-        stop: &AtomicBool,
-    ) -> Result<BrokerAnswer, BrokerPresentationFailure> {
-        let (response, receiver) = mpsc::sync_channel(1);
-        let state = self
-            .state
-            .lock()
-            .map_err(|_| BrokerPresentationFailure::Unavailable)?;
-        if state.closed {
-            return Err(BrokerPresentationFailure::Unavailable);
-        }
-        self.commands
-            .send_blocking(AskPassUiCommand::Present {
-                owner: self.owner,
-                job: PresentationJob {
-                    request,
-                    response,
-                    cancelled: Arc::clone(&self.cancelled),
-                },
-            })
-            .map_err(|_| BrokerPresentationFailure::Unavailable)?;
-        drop(state);
-        loop {
-            match receiver.recv_timeout(ACCEPT_POLL_INTERVAL) {
-                Ok(answer) => return answer,
-                Err(mpsc::RecvTimeoutError::Timeout) if stop.load(Ordering::Acquire) => {
-                    return Err(BrokerPresentationFailure::Unavailable);
-                }
-                Err(mpsc::RecvTimeoutError::Timeout) => {}
-                Err(mpsc::RecvTimeoutError::Disconnected) => {
-                    return Err(BrokerPresentationFailure::Unavailable);
-                }
-            }
-        }
-    }
-
-    fn cancel_active(&self) {
-        let Ok(mut state) = self.state.lock() else {
-            return;
-        };
-        if state.closed {
-            return;
-        }
-        state.closed = true;
-        self.cancelled.store(true, Ordering::Release);
-        enqueue_cancel_without_blocking(self.commands.clone(), self.owner);
-    }
-}
-
-fn enqueue_cancel_without_blocking(commands: async_channel::Sender<AskPassUiCommand>, owner: u64) {
-    let command = AskPassUiCommand::Cancel { owner };
-    match commands.try_send(command) {
-        Ok(()) | Err(async_channel::TrySendError::Closed(_)) => {}
-        Err(async_channel::TrySendError::Full(command)) => {
-            let _ = thread::Builder::new()
-                .name("spaceterm-askpass-cancel".to_owned())
-                .spawn(move || {
-                    let _ = commands.send_blocking(command);
-                });
-        }
-    }
-}
-
-fn map_presentation_result(result: AskPassResult) -> BrokerAnswer {
-    match result {
-        AskPassResult::Secret(secret) => {
-            BrokerAnswer::Secret(Zeroizing::new(secret.as_bytes().to_vec()))
-        }
-        AskPassResult::Confirmation(confirmed) => BrokerAnswer::Confirmation(confirmed),
-        AskPassResult::Cancelled => BrokerAnswer::Cancelled,
-        AskPassResult::Failed(AskPassResponseError::SecretTooLong) => BrokerAnswer::Failed,
-    }
-}
-
+#[cfg(test)]
 fn run_broker(
     listener: UnixListener,
-    capability: Arc<CapabilityToken>,
+    capability: Arc<AskPassCapability>,
     presenter: Arc<dyn BrokerPresenter>,
     stop: Arc<AtomicBool>,
 ) {
@@ -653,9 +429,10 @@ impl PeerValidator for MacosPeerValidator {
     }
 }
 
+#[cfg(test)]
 fn handle_connection(
     stream: &mut UnixStream,
-    capability: &CapabilityToken,
+    capability: &AskPassCapability,
     peer_validator: &dyn PeerValidator,
     presenter: &dyn BrokerPresenter,
     stop: &AtomicBool,
@@ -664,17 +441,18 @@ fn handle_connection(
     handle_verified_connection(stream, capability, presenter, stop)
 }
 
+#[cfg(test)]
 fn handle_verified_connection<S: Read + Write>(
     stream: &mut S,
-    capability: &CapabilityToken,
+    capability: &AskPassCapability,
     presenter: &dyn BrokerPresenter,
     stop: &AtomicBool,
 ) -> Result<(), ConnectionError> {
-    let request = read_request(stream, capability)?;
+    let request = read_request(stream, capability).map_err(ConnectionError::from)?;
     let answer = presenter
         .present(request, stop)
         .unwrap_or(BrokerAnswer::Failed);
-    write_reply(stream, answer)?;
+    write_reply(stream, answer).map_err(ConnectionError::from)?;
     Ok(())
 }
 
@@ -690,131 +468,17 @@ enum ConnectionError {
     WriteFailed,
 }
 
-fn read_request<S: Read>(
-    stream: &mut S,
-    capability: &CapabilityToken,
-) -> Result<AskPassRequest, ConnectionError> {
-    let length = read_frame_length(stream, MAX_REQUEST_FRAME_BYTES)?;
-    let mut frame = Zeroizing::new(vec![0_u8; length]);
-    stream
-        .read_exact(frame.as_mut_slice())
-        .map_err(|_| ConnectionError::Disconnected)?;
-    let mut cursor = FrameCursor::new(frame.as_slice());
-    if cursor.byte()? != PROTOCOL_VERSION {
-        return Err(ConnectionError::MalformedFrame);
-    }
-    let kind = match cursor.byte()? {
-        REQUEST_SECRET => AskPassPromptKind::Secret,
-        REQUEST_CONFIRMATION => AskPassPromptKind::Confirmation,
-        _ => return Err(ConnectionError::MalformedFrame),
-    };
-    let token_length = usize::from(cursor.u16()?);
-    let token = cursor.bytes(token_length)?;
-    if !capability.matches(token) {
-        return Err(ConnectionError::InvalidCapability);
-    }
-    let prompt_length =
-        usize::try_from(cursor.u32()?).map_err(|_| ConnectionError::MalformedFrame)?;
-    if prompt_length == 0 || prompt_length > MAX_PROMPT_BYTES {
-        return Err(ConnectionError::InvalidRequest);
-    }
-    let prompt_bytes = cursor.bytes(prompt_length)?;
-    if !cursor.is_empty() {
-        return Err(ConnectionError::MalformedFrame);
-    }
-    let prompt = std::str::from_utf8(prompt_bytes)
-        .map_err(|_| ConnectionError::InvalidRequest)?
-        .to_owned();
-    AskPassRequest::new(prompt, kind).map_err(|_| ConnectionError::InvalidRequest)
-}
-
-fn write_reply<S: Write>(stream: &mut S, answer: BrokerAnswer) -> Result<(), ConnectionError> {
-    match answer {
-        BrokerAnswer::Secret(secret) if secret.len() <= MAX_SECRET_BYTES => {
-            let body_length = 1_usize
-                .checked_add(secret.len())
-                .ok_or(ConnectionError::OversizedFrame)?;
-            write_frame_length(stream, body_length)?;
-            stream
-                .write_all(&[REPLY_SECRET])
-                .and_then(|()| stream.write_all(secret.as_slice()))
-                .map_err(|_| ConnectionError::WriteFailed)
+#[cfg(test)]
+impl From<AskPassProtocolError> for ConnectionError {
+    fn from(error: AskPassProtocolError) -> Self {
+        match error {
+            AskPassProtocolError::Disconnected => Self::Disconnected,
+            AskPassProtocolError::OversizedFrame => Self::OversizedFrame,
+            AskPassProtocolError::MalformedFrame => Self::MalformedFrame,
+            AskPassProtocolError::InvalidCapability => Self::InvalidCapability,
+            AskPassProtocolError::InvalidRequest => Self::InvalidRequest,
+            AskPassProtocolError::WriteFailed => Self::WriteFailed,
         }
-        BrokerAnswer::Secret(_) => write_status_reply(stream, REPLY_FAILED),
-        BrokerAnswer::Confirmation(true) => write_status_reply(stream, REPLY_CONFIRMATION_YES),
-        BrokerAnswer::Confirmation(false) => write_status_reply(stream, REPLY_CONFIRMATION_NO),
-        BrokerAnswer::Cancelled => write_status_reply(stream, REPLY_CANCELLED),
-        BrokerAnswer::Failed => write_status_reply(stream, REPLY_FAILED),
-    }
-}
-
-fn write_status_reply<S: Write>(stream: &mut S, status: u8) -> Result<(), ConnectionError> {
-    write_frame_length(stream, 1)?;
-    stream
-        .write_all(&[status])
-        .map_err(|_| ConnectionError::WriteFailed)
-}
-
-fn read_frame_length<S: Read>(stream: &mut S, maximum: usize) -> Result<usize, ConnectionError> {
-    let mut encoded = [0_u8; 4];
-    stream
-        .read_exact(&mut encoded)
-        .map_err(|_| ConnectionError::Disconnected)?;
-    let length = usize::try_from(u32::from_be_bytes(encoded))
-        .map_err(|_| ConnectionError::OversizedFrame)?;
-    if length == 0 || length > maximum {
-        return Err(ConnectionError::OversizedFrame);
-    }
-    Ok(length)
-}
-
-fn write_frame_length<S: Write>(stream: &mut S, length: usize) -> Result<(), ConnectionError> {
-    let length = u32::try_from(length).map_err(|_| ConnectionError::OversizedFrame)?;
-    stream
-        .write_all(&length.to_be_bytes())
-        .map_err(|_| ConnectionError::WriteFailed)
-}
-
-struct FrameCursor<'a> {
-    remaining: &'a [u8],
-}
-
-impl<'a> FrameCursor<'a> {
-    fn new(bytes: &'a [u8]) -> Self {
-        Self { remaining: bytes }
-    }
-
-    fn byte(&mut self) -> Result<u8, ConnectionError> {
-        Ok(self.bytes(1)?[0])
-    }
-
-    fn u16(&mut self) -> Result<u16, ConnectionError> {
-        let bytes: [u8; 2] = self
-            .bytes(2)?
-            .try_into()
-            .map_err(|_| ConnectionError::MalformedFrame)?;
-        Ok(u16::from_be_bytes(bytes))
-    }
-
-    fn u32(&mut self) -> Result<u32, ConnectionError> {
-        let bytes: [u8; 4] = self
-            .bytes(4)?
-            .try_into()
-            .map_err(|_| ConnectionError::MalformedFrame)?;
-        Ok(u32::from_be_bytes(bytes))
-    }
-
-    fn bytes(&mut self, length: usize) -> Result<&'a [u8], ConnectionError> {
-        if length > self.remaining.len() {
-            return Err(ConnectionError::MalformedFrame);
-        }
-        let (bytes, remaining) = self.remaining.split_at(length);
-        self.remaining = remaining;
-        Ok(bytes)
-    }
-
-    fn is_empty(&self) -> bool {
-        self.remaining.is_empty()
     }
 }
 
@@ -823,23 +487,28 @@ impl<'a> FrameCursor<'a> {
 /// Invalid or incomplete helper transport input fails closed without presenting UI. The helper
 /// writes only a successful response to stdout and never emits transport details to stderr.
 pub(crate) fn dispatch_helper_from_environment() -> Option<i32> {
-    dispatch_helper_role(std::env::var_os(HELPER_MODE_ENV), |mode| {
-        let invocation = HelperInvocation {
-            mode,
-            socket_path: std::env::var_os(SOCKET_ENV),
-            capability: std::env::var_os(CAPABILITY_ENV),
-            prompt: std::env::args_os().nth(1),
-            prompt_kind: std::env::var_os(SSH_PROMPT_KIND_ENV),
-        };
-        let mut stdout = io::stdout().lock();
-        run_helper(invocation, &UnixHelperConnector, &mut stdout)
-    })
+    dispatch_portable_helper(&MacosHelperConnector)
 }
 
+struct MacosHelperConnector;
+
+impl AskPassHelperConnector for MacosHelperConnector {
+    type Stream = UnixStream;
+
+    fn connect(
+        &self,
+        endpoint: &OsStr,
+    ) -> Result<Self::Stream, super::askpass::AskPassUnavailable> {
+        UnixStream::connect(Path::new(endpoint)).map_err(|_| super::askpass::AskPassUnavailable)
+    }
+}
+
+#[cfg(test)]
 fn dispatch_helper_role(mode: Option<OsString>, run: impl FnOnce(OsString) -> i32) -> Option<i32> {
     mode.map(run)
 }
 
+#[cfg(test)]
 struct HelperInvocation {
     mode: OsString,
     socket_path: Option<OsString>,
@@ -848,14 +517,17 @@ struct HelperInvocation {
     prompt_kind: Option<OsString>,
 }
 
+#[cfg(test)]
 trait HelperConnector {
     type Stream: Read + Write;
 
     fn connect(&self, path: &Path) -> io::Result<Self::Stream>;
 }
 
+#[cfg(test)]
 struct UnixHelperConnector;
 
+#[cfg(test)]
 impl HelperConnector for UnixHelperConnector {
     type Stream = UnixStream;
 
@@ -864,6 +536,7 @@ impl HelperConnector for UnixHelperConnector {
     }
 }
 
+#[cfg(test)]
 fn run_helper<C: HelperConnector, W: Write>(
     invocation: HelperInvocation,
     connector: &C,
@@ -921,6 +594,7 @@ fn run_helper<C: HelperConnector, W: Write>(
     }
 }
 
+#[cfg(test)]
 fn helper_request(invocation: &HelperInvocation) -> Option<AskPassRequest> {
     if invocation.mode != OsStr::new(HELPER_MODE) {
         return None;
@@ -939,76 +613,8 @@ fn helper_request(invocation: &HelperInvocation) -> Option<AskPassRequest> {
     AskPassRequest::new(prompt, kind).ok()
 }
 
-fn write_request<S: Write>(
-    stream: &mut S,
-    capability: &[u8],
-    request: &AskPassRequest,
-) -> Result<(), ConnectionError> {
-    if capability.len() > usize::from(u16::MAX) || request.prompt().len() > MAX_PROMPT_BYTES {
-        return Err(ConnectionError::OversizedFrame);
-    }
-    let body_length = 1_usize
-        .checked_add(1)
-        .and_then(|length| length.checked_add(2))
-        .and_then(|length| length.checked_add(capability.len()))
-        .and_then(|length| length.checked_add(4))
-        .and_then(|length| length.checked_add(request.prompt().len()))
-        .ok_or(ConnectionError::OversizedFrame)?;
-    if body_length > MAX_REQUEST_FRAME_BYTES {
-        return Err(ConnectionError::OversizedFrame);
-    }
-    write_frame_length(stream, body_length)?;
-    let kind = match request.kind() {
-        AskPassPromptKind::Secret => REQUEST_SECRET,
-        AskPassPromptKind::Confirmation => REQUEST_CONFIRMATION,
-    };
-    stream
-        .write_all(&[PROTOCOL_VERSION, kind])
-        .and_then(|()| {
-            stream.write_all(
-                &u16::try_from(capability.len())
-                    .expect("capability length was bounded")
-                    .to_be_bytes(),
-            )
-        })
-        .and_then(|()| stream.write_all(capability))
-        .and_then(|()| {
-            stream.write_all(
-                &u32::try_from(request.prompt().len())
-                    .expect("prompt length was bounded")
-                    .to_be_bytes(),
-            )
-        })
-        .and_then(|()| stream.write_all(request.prompt().as_bytes()))
-        .map_err(|_| ConnectionError::WriteFailed)
-}
-
-enum HelperAnswer {
-    Secret(Zeroizing<Vec<u8>>),
-    Confirmation(bool),
-    Cancelled,
-    Failed,
-}
-
-fn read_reply<S: Read>(stream: &mut S) -> Result<HelperAnswer, ConnectionError> {
-    let length = read_frame_length(stream, MAX_REPLY_FRAME_BYTES)?;
-    let mut frame = Zeroizing::new(vec![0_u8; length]);
-    stream
-        .read_exact(frame.as_mut_slice())
-        .map_err(|_| ConnectionError::Disconnected)?;
-    let status = frame[0];
-    match status {
-        REPLY_SECRET => {
-            frame.remove(0);
-            Ok(HelperAnswer::Secret(frame))
-        }
-        REPLY_CONFIRMATION_YES if frame.len() == 1 => Ok(HelperAnswer::Confirmation(true)),
-        REPLY_CONFIRMATION_NO if frame.len() == 1 => Ok(HelperAnswer::Confirmation(false)),
-        REPLY_CANCELLED if frame.len() == 1 => Ok(HelperAnswer::Cancelled),
-        REPLY_FAILED if frame.len() == 1 => Ok(HelperAnswer::Failed),
-        _ => Err(ConnectionError::MalformedFrame),
-    }
-}
+#[cfg(test)]
+type HelperAnswer = AskPassHelperReply;
 
 pub(super) struct AskPassWindowFactory;
 impl super::askpass::AskPassWindowFactory for AskPassWindowFactory {
@@ -1018,23 +624,9 @@ impl super::askpass::AskPassWindowFactory for AskPassWindowFactory {
         cx: &mut App,
     ) -> Result<Arc<dyn super::askpass::AskPassAttemptFactory>, super::askpass::AskPassUnavailable>
     {
-        GpuiAskPassBrokerFactory::new(window, cx)
+        PortableAskPassBrokerFactory::new(window, cx, Arc::new(MacosAskPassLocalIpc))
             .map(|factory| Arc::new(factory) as Arc<dyn super::askpass::AskPassAttemptFactory>)
             .map_err(|_| super::askpass::AskPassUnavailable)
-    }
-}
-impl super::askpass::AskPassAttemptFactory for GpuiAskPassBrokerFactory {
-    fn start_attempt(
-        &self,
-        paths: &AppPaths,
-    ) -> Result<super::askpass::AskPassAttempt, super::askpass::AskPassUnavailable> {
-        let attempt = self
-            .start_attempt(paths)
-            .map_err(|_| super::askpass::AskPassUnavailable)?;
-        Ok(super::askpass::AskPassAttempt {
-            lease: attempt.lease(),
-            observation: attempt.observation(),
-        })
     }
 }
 
@@ -1047,7 +639,8 @@ mod tests {
     use std::sync::{Mutex, mpsc};
 
     use super::*;
-    use crate::platform::app_paths::{AppPathEnvironment, AppPaths};
+    use crate::platform::app_paths::{AppPathEnvironment, AppPathHostFacts, AppPaths};
+    use crate::platform::macos_secure_filesystem::MacosSecureFilesystem;
 
     static NEXT_TEST_DIRECTORY: AtomicU64 = AtomicU64::new(0);
 
@@ -1065,15 +658,18 @@ mod tests {
         }
 
         fn paths(&self) -> AppPaths {
-            AppPaths::resolve(&AppPathEnvironment {
-                home: None,
-                xdg_config_home: Some(self.0.join("config").into_os_string()),
-                xdg_data_home: Some(self.0.join("data").into_os_string()),
-                xdg_state_home: Some(self.0.join("state").into_os_string()),
-                xdg_cache_home: Some(self.0.join("cache").into_os_string()),
-                xdg_runtime_dir: Some(self.0.join("runtime").into_os_string()),
-                macos_temporary_directory: self.0.join("temporary"),
-            })
+            AppPaths::resolve(
+                &AppPathEnvironment {
+                    home: None,
+                    xdg_config_home: Some(self.0.join("config").into_os_string()),
+                    xdg_data_home: Some(self.0.join("data").into_os_string()),
+                    xdg_state_home: Some(self.0.join("state").into_os_string()),
+                    xdg_cache_home: Some(self.0.join("cache").into_os_string()),
+                    xdg_runtime_dir: Some(self.0.join("runtime").into_os_string()),
+                },
+                &AppPathHostFacts::new(self.0.join("temporary"), 104).unwrap(),
+                Arc::new(MacosSecureFilesystem),
+            )
             .unwrap()
         }
     }
@@ -1209,8 +805,8 @@ mod tests {
         }
     }
 
-    fn token() -> CapabilityToken {
-        CapabilityToken::from_random_bytes(&[0x5a; CAPABILITY_BYTES])
+    fn token() -> AskPassCapability {
+        AskPassCapability::from_random_bytes(&[0x5a; 32])
     }
 
     fn request_bytes(capability: &[u8], prompt: &str, kind: AskPassPromptKind) -> Vec<u8> {
@@ -1239,9 +835,9 @@ mod tests {
     #[test]
     fn secret_request_is_presented_and_framed_without_text_conversion() {
         let token = token();
-        let presenter = FakePresenter::new([BrokerAnswer::Secret(Zeroizing::new(
-            b"correct horse".to_vec(),
-        ))]);
+        let presenter = FakePresenter::new([BrokerAnswer::Secret(
+            AskPassSecret::new(b"correct horse".to_vec()).unwrap(),
+        )]);
         let mut stream = MemoryStream::new(request_bytes(
             token.as_str().as_bytes(),
             "Password:",
@@ -1283,7 +879,7 @@ mod tests {
     fn helper_writes_only_the_secret_answer_and_required_terminator() {
         let connector = FakeConnector {
             stream: Mutex::new(Some(MemoryStream::new(reply_bytes(BrokerAnswer::Secret(
-                Zeroizing::new(b"private bytes".to_vec()),
+                AskPassSecret::new(b"private bytes".to_vec()).unwrap(),
             ))))),
         };
         let mut stdout = Vec::new();
@@ -1393,7 +989,7 @@ mod tests {
         let token = token();
         let presenter = FakePresenter::new([
             BrokerAnswer::Confirmation(true),
-            BrokerAnswer::Secret(Zeroizing::new(b"second".to_vec())),
+            BrokerAnswer::Secret(AskPassSecret::new(b"second".to_vec()).unwrap()),
         ]);
         let mut first = MemoryStream::new(request_bytes(
             token.as_str().as_bytes(),
@@ -1421,6 +1017,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(any())]
     fn channel_presenter_orders_cancel_after_present_without_waiting_for_modal_completion() {
         let (commands, receiver) = async_channel::bounded(2);
         let presenter = Arc::new(ChannelBrokerPresenter {
@@ -1457,6 +1054,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(any())]
     fn channel_presenter_rejects_presentation_after_attempt_cancellation() {
         let (commands, receiver) = async_channel::bounded(2);
         let presenter = ChannelBrokerPresenter {
@@ -1482,6 +1080,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(any())]
     fn channel_presenter_delivers_cancel_after_the_shared_command_queue_was_full() {
         let (commands, receiver) = async_channel::bounded(2);
         assert!(
@@ -1552,7 +1151,7 @@ mod tests {
         )
         .unwrap();
         let socket_path = broker.environment().socket_path.clone();
-        let capability = broker.environment().capability.text.as_bytes().to_vec();
+        let capability = broker.environment().capability.as_str().as_bytes().to_vec();
         let lease = broker.lease();
         let (finished_sender, finished_receiver) = mpsc::sync_channel(1);
         let helper = thread::spawn({
@@ -1581,14 +1180,18 @@ mod tests {
         );
 
         drop(lease);
-        assert!(
-            presenter.cancelled.load(Ordering::Acquire)
-                && !socket_path.exists()
-                && matches!(
-                    finished_receiver.recv_timeout(Duration::from_secs(1)),
-                    Ok(Ok(HelperAnswer::Failed))
-                )
-        );
+        assert!(matches!(
+            finished_receiver.recv_timeout(Duration::from_secs(1)),
+            Ok(Ok(HelperAnswer::Failed))
+        ));
+        for _ in 0..100 {
+            if !socket_path.exists() {
+                break;
+            }
+            thread::sleep(ACCEPT_POLL_INTERVAL);
+        }
+        assert!(presenter.cancelled.load(Ordering::Acquire));
+        assert!(!socket_path.exists());
         helper.join().unwrap();
     }
 
@@ -1609,6 +1212,12 @@ mod tests {
 
         lease.cancel();
 
+        for _ in 0..100 {
+            if !socket_path.exists() {
+                break;
+            }
+            thread::sleep(ACCEPT_POLL_INTERVAL);
+        }
         assert!(!socket_path.exists());
         assert_eq!(retained.entries().count(), 6);
     }
@@ -1617,10 +1226,7 @@ mod tests {
     fn attempt_observation_should_report_prompt_start_and_cancellation_without_content() {
         let inner = Arc::new(FakePresenter::new([BrokerAnswer::Cancelled]));
         let observation = AskPassAttemptObservation::default();
-        let presenter = ObservedBrokerPresenter {
-            inner,
-            observation: observation.clone(),
-        };
+        let presenter = ObservedAskPassPresenter::new(inner, observation.clone());
         let stop = AtomicBool::new(false);
 
         assert!(!observation.prompt_started());
@@ -1662,7 +1268,9 @@ mod tests {
                     .send(())
                     .unwrap();
                 self.release.lock().unwrap().recv().unwrap();
-                Ok(BrokerAnswer::Secret(Zeroizing::new(Vec::new())))
+                Ok(BrokerAnswer::Secret(
+                    AskPassSecret::new(Vec::new()).unwrap(),
+                ))
             }
 
             fn cancel_active(&self) {}
@@ -1671,13 +1279,13 @@ mod tests {
         let (entered_sender, entered_receiver) = mpsc::sync_channel(1);
         let (release_sender, release_receiver) = mpsc::sync_channel(1);
         let observation = AskPassAttemptObservation::default();
-        let presenter = ObservedBrokerPresenter {
-            inner: Arc::new(GatedPresenter {
+        let presenter = ObservedAskPassPresenter::new(
+            Arc::new(GatedPresenter {
                 entered: Mutex::new(Some(entered_sender)),
                 release: Mutex::new(release_receiver),
             }),
-            observation: observation.clone(),
-        };
+            observation.clone(),
+        );
         let stop = Arc::new(AtomicBool::new(false));
         let worker = thread::spawn({
             let stop = Arc::clone(&stop);

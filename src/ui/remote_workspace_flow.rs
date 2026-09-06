@@ -171,7 +171,7 @@ fn connection_error_content(
 ) -> ConnectionErrorContent {
     let message = match error {
         Some(RemoteWorkspaceFlowBackendError::OpenSshUnavailable) => {
-            "SpaceTerm requires OpenSSH 8.2 or newer at /usr/bin/ssh."
+            "SpaceTerm requires OpenSSH 8.2 or newer. Install or restore the system SSH client, then retry."
         }
         Some(RemoteWorkspaceFlowBackendError::IncompatibleServer) => {
             "This host does not provide the remote capabilities SpaceTerm requires."
@@ -180,7 +180,7 @@ fn connection_error_content(
             "SpaceTerm couldn\u{2019}t prepare its private SSH configuration. Check permissions for the SpaceTerm configuration folder and retry."
         }
         Some(RemoteWorkspaceFlowBackendError::SshRuntimeUnavailable) => {
-            "SpaceTerm couldn\u{2019}t prepare its private SSH runtime. Check permissions for the macOS temporary folder and retry."
+            "SpaceTerm couldn\u{2019}t prepare its private SSH runtime. Check permissions for SpaceTerm\u{2019}s runtime storage and retry."
         }
         _ => "SpaceTerm couldn\u{2019}t establish the remote connection.",
     };
@@ -2828,6 +2828,21 @@ mod tests {
     }
 
     #[test]
+    fn openssh_availability_content_should_not_disclose_the_host_executable() {
+        let error = RemoteWorkspaceFlowBackendError::OpenSshUnavailable;
+
+        let content = connection_error_content(Some(&error));
+
+        assert_eq!(
+            (content.message, content.detail),
+            (
+                "SpaceTerm requires OpenSSH 8.2 or newer. Install or restore the system SSH client, then retry.",
+                None,
+            )
+        );
+    }
+
+    #[test]
     fn ssh_configuration_failure_content_should_be_actionable_and_content_free() {
         let error = RemoteWorkspaceFlowBackendError::SshConfigurationUnavailable;
 
@@ -2852,7 +2867,7 @@ mod tests {
         assert_eq!(
             (content.message, content.detail, format!("{error:?}")),
             (
-                "SpaceTerm couldn\u{2019}t prepare its private SSH runtime. Check permissions for the macOS temporary folder and retry.",
+                "SpaceTerm couldn\u{2019}t prepare its private SSH runtime. Check permissions for SpaceTerm\u{2019}s runtime storage and retry.",
                 None,
                 "SshRuntimeUnavailable".to_owned(),
             )

@@ -317,6 +317,7 @@ mod tests {
         outputs: impl IntoIterator<Item = Vec<u8>>,
     ) -> SshRemoteWorkspaceProvider<FakeRunner> {
         let command = SshCommandContext::new(
+            crate::ssh::command::OpenSshExecutable::for_test(),
             PathBuf::from("/private/config/spaceterm/ssh_config"),
             SshDestination::new("remote".to_owned()).unwrap(),
             PathBuf::from("/private/runtime/spaceterm/master.sock"),
@@ -338,6 +339,7 @@ mod tests {
         Arc<PendingRunner>,
     ) {
         let command = SshCommandContext::new(
+            crate::ssh::command::OpenSshExecutable::for_test(),
             PathBuf::from("/private/config/spaceterm/ssh_config"),
             SshDestination::new("remote".to_owned()).unwrap(),
             PathBuf::from("/private/runtime/spaceterm/master.sock"),
