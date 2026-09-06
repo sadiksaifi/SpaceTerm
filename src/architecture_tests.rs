@@ -383,3 +383,39 @@ fn portable_verification_guard_rejects_native_dependencies_and_allows_suite_wiri
     let wiring = "#[cfg(test)]\n#[path = \"../platform/macos_adapter_tests/session.rs\"]\nmod macos_adapter_tests;";
     assert!(native_verification_dependency(&portable_verification_source(wiring)).is_none());
 }
+
+#[test]
+fn migrated_policy_and_callers_do_not_name_concrete_adapters() {
+    let policy = [
+        include_str!("terminal/native_services/clipboard.rs"),
+        include_str!("terminal/native_services/file_insertion.rs"),
+        include_str!("terminal/native_services/hyperlink.rs"),
+        include_str!("terminal/native_services/osc52.rs"),
+        include_str!("terminal/native_services/paste.rs"),
+        include_str!("terminal/native_services/quick_look.rs"),
+        include_str!("terminal/native_services/selection.rs"),
+        include_str!("terminal/native_services/services.rs"),
+    ];
+    for source in policy {
+        // Local Filesystem Authority is portable policy, shared with Workspaces.
+        let source = source.replace("crate::platform::local_filesystem::", "");
+        assert!(!source.contains("crate::platform::"));
+        assert!(!source.contains("target_os"));
+        assert!(!source.contains("use cocoa::"));
+        assert!(!source.contains("use objc::"));
+    }
+    for source in [
+        include_str!("ui/terminal_pane.rs"),
+        include_str!("terminal/session.rs"),
+    ] {
+        for concrete in [
+            "macos_pasteboard",
+            "macos_quick_look",
+            "macos_services",
+            "MacosOsc52Clipboard",
+            "MacosQuickLook",
+        ] {
+            assert!(!source.contains(concrete));
+        }
+    }
+}

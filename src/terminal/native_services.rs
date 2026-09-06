@@ -309,42 +309,6 @@ mod tests {
     use crate::terminal::{HyperlinkTarget, SelectionCopy};
 
     #[test]
-    fn migrated_policy_and_callers_do_not_name_concrete_adapters() {
-        let policy = [
-            include_str!("native_services/clipboard.rs"),
-            include_str!("native_services/file_insertion.rs"),
-            include_str!("native_services/hyperlink.rs"),
-            include_str!("native_services/osc52.rs"),
-            include_str!("native_services/paste.rs"),
-            include_str!("native_services/quick_look.rs"),
-            include_str!("native_services/selection.rs"),
-            include_str!("native_services/services.rs"),
-        ];
-        for source in policy {
-            // Local Filesystem Authority is portable policy, shared with Workspaces.
-            let source = source.replace("crate::platform::local_filesystem::", "");
-            assert!(!source.contains("crate::platform::"));
-            assert!(!source.contains("target_os"));
-            assert!(!source.contains("use cocoa::"));
-            assert!(!source.contains("use objc::"));
-        }
-        for source in [
-            include_str!("../ui/terminal_pane.rs"),
-            include_str!("session.rs"),
-        ] {
-            for concrete in [
-                "macos_pasteboard",
-                "macos_quick_look",
-                "macos_services",
-                "MacosOsc52Clipboard",
-                "MacosQuickLook",
-            ] {
-                assert!(!source.contains(concrete));
-            }
-        }
-    }
-
-    #[test]
     fn service_content_values_have_redacted_debug_output() {
         let selection = SelectionCopy {
             plain_text: "fixture".into(),
