@@ -57,16 +57,21 @@ fn read_file_urls_from_pasteboard(pasteboard: cocoa::base::id) -> Result<Vec<Pat
         let file_url_type = NSString::alloc(nil)
             .init_str("public.file-url")
             .autorelease();
-        if count > MAX_FILE_ITEMS {
-            return Err("too many clipboard items".to_owned());
-        }
         let mut urls = Vec::new();
         let mut bytes = 0usize;
         for index in 0..count {
             let item: cocoa::base::id = msg_send![items, objectAtIndex: index];
+            let types: cocoa::base::id = msg_send![item, types];
+            let has_file_url: bool = msg_send![types, containsObject: file_url_type];
+            if !has_file_url {
+                continue;
+            }
+            if urls.len() >= MAX_FILE_ITEMS {
+                return Err("too many clipboard files".to_owned());
+            }
             let value: cocoa::base::id = msg_send![item, stringForType: file_url_type];
             if value == nil {
-                continue;
+                return Err("file URL is unreadable".to_owned());
             }
             let length: usize = msg_send![value, lengthOfBytesUsingEncoding: 4_usize];
             if length > MAX_FILE_INSERTION_BYTES.saturating_sub(bytes) {
@@ -186,6 +191,85 @@ impl Osc52Clipboard for MacosOsc52Clipboard {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_file_discovery_counts_only_file_representations() {
+        use cocoa::base::id;
+        use objc::class;
+        // SAFETY: Each case owns an isolated pasteboard and autoreleases its items.
+        unsafe {
+            let pool = NSAutoreleasePool::new(nil);
+            let file_type = NSString::alloc(nil)
+                .init_str("public.file-url")
+                .autorelease();
+            let text = NSString::alloc(nil).init_str("ordinary text").autorelease();
+            let url = NSString::alloc(nil).init_str("file:///a").autorelease();
+            for (text_count, file_count) in [
+                (MAX_FILE_ITEMS + 1, 0),
+                (1, MAX_FILE_ITEMS),
+                (0, MAX_FILE_ITEMS + 1),
+            ] {
+                let pasteboard = NSPasteboard::pasteboardWithUniqueName(nil);
+                let mut items = Vec::new();
+                for index in 0..text_count + file_count {
+                    let item: id = msg_send![class!(NSPasteboardItem), new];
+                    let item: id = msg_send![item, autorelease];
+                    let (value, item_type) = if index < text_count {
+                        (text, NSPasteboardTypeString)
+                    } else {
+                        (url, file_type)
+                    };
+                    let written: bool = msg_send![item, setString: value forType: item_type];
+                    assert!(written);
+                    items.push(item);
+                }
+                let items = NSArray::arrayWithObjects(nil, &items);
+                let written: bool = msg_send![pasteboard, writeObjects: items];
+                assert!(written);
+                let result = read_file_urls_from_pasteboard(pasteboard);
+                pasteboard.releaseGlobally();
+                if file_count > MAX_FILE_ITEMS {
+                    assert!(result.is_err());
+                } else {
+                    assert_eq!(result.unwrap(), vec![PathBuf::from("/a"); file_count]);
+                }
+            }
+            pool.drain();
+        }
+    }
+
+    #[test]
+    fn native_file_discovery_rejects_unreadable_file_representation_with_text() {
+        use cocoa::base::id;
+        use objc::class;
+        // SAFETY: This test owns an isolated pasteboard and autoreleases its item and data.
+        unsafe {
+            let pool = NSAutoreleasePool::new(nil);
+            let pasteboard = NSPasteboard::pasteboardWithUniqueName(nil);
+            let file_type = NSString::alloc(nil)
+                .init_str("public.file-url")
+                .autorelease();
+            let invalid_utf8 = [0xff_u8];
+            let data: id = msg_send![class!(NSData),
+                dataWithBytes: invalid_utf8.as_ptr() length: invalid_utf8.len()];
+            let item: id = msg_send![class!(NSPasteboardItem), new];
+            let item: id = msg_send![item, autorelease];
+            let written: bool = msg_send![item, setData: data forType: file_type];
+            assert!(written);
+            let text = NSString::alloc(nil)
+                .init_str("alternate text")
+                .autorelease();
+            let written: bool = msg_send![item, setString: text forType: NSPasteboardTypeString];
+            assert!(written);
+            let items = NSArray::arrayWithObjects(nil, &[item]);
+            let written: bool = msg_send![pasteboard, writeObjects: items];
+            assert!(written);
+            let result = read_file_urls_from_pasteboard(pasteboard);
+            pasteboard.releaseGlobally();
+            pool.drain();
+            assert!(result.is_err());
+        }
+    }
 
     #[test]
     fn native_file_discovery_preserves_items_and_rejects_invalid_authority() {
