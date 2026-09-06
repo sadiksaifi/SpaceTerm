@@ -24,7 +24,7 @@ use super::{
     SearchWorkspaces, SplitDown, SplitRight, TogglePaneZoom, ToggleSidebar, ToggleSidebarFocus,
 };
 use crate::domain::ValidatedWorkspaceDirectory;
-use crate::platform::macos_system_settings::SystemSettingsOpener;
+use crate::platform::permission_recovery::PermissionRecoveryOpener;
 use crate::platform::workspace_picker_filesystem::{
     WorkspacePickerDirectoryEntry, WorkspacePickerExactPathProbe, WorkspacePickerFilesystem,
     WorkspacePickerFilesystemError,
@@ -249,11 +249,12 @@ struct ValidationCompletion {
 pub(super) struct WorkspacePicker {
     home: PathBuf,
     filesystem: Arc<dyn WorkspacePickerFilesystem + Send + Sync>,
-    system_settings: Rc<dyn SystemSettingsOpener>,
+    system_settings: Option<Rc<dyn PermissionRecoveryOpener>>,
     palette: Entity<CommandPalette<PathBuf>>,
     open: bool,
     lifecycle_generation: u64,
     operation_generation: u64,
+    finder_generation: u64,
     parsed: Option<ParsedWorkspacePath>,
     snapshot: Option<LoadedDirectorySnapshot>,
     rows: Vec<WorkspacePickerDirectoryEntry>,
@@ -267,7 +268,7 @@ impl WorkspacePicker {
     pub(super) fn new(
         home: PathBuf,
         filesystem: Arc<dyn WorkspacePickerFilesystem + Send + Sync>,
-        system_settings: Rc<dyn SystemSettingsOpener>,
+        system_settings: Option<Rc<dyn PermissionRecoveryOpener>>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -296,6 +297,7 @@ impl WorkspacePicker {
             open: false,
             lifecycle_generation: 0,
             operation_generation: 0,
+            finder_generation: 0,
             parsed: None,
             snapshot: None,
             rows: Vec::new(),
@@ -799,6 +801,8 @@ impl WorkspacePicker {
 
     fn request_finder(&mut self, cx: &mut Context<Self>) {
         if self.open && self.busy.is_none() {
+            // The chooser must not retire a directory read that cancellation still needs.
+            self.finder_generation = self.finder_generation.wrapping_add(1);
             self.busy = Some(WorkspacePickerBusy::Finder);
             self.publish(cx);
             cx.emit(WorkspacePickerEvent::FinderRequested);
@@ -814,7 +818,13 @@ impl WorkspacePicker {
     }
 
     fn open_system_settings(&mut self, cx: &mut Context<Self>) {
-        if self.system_settings.open_files_and_folders().is_err() {
+        if self.busy.is_some() || !self.open {
+            return;
+        }
+        let Some(settings) = &self.system_settings else {
+            return;
+        };
+        if settings.open().is_err() {
             self.status = WorkspacePickerStatus::Other;
             self.publish(cx);
         }
@@ -867,10 +877,12 @@ impl WorkspacePicker {
                     .disabled(self.busy.is_some())
                     .debug_selector(RETRY_ACTION),
             );
-            entries.push(
-                MenuEntry::action("Open System Settings", SYSTEM_SETTINGS_ACTION.into())
-                    .debug_selector(SYSTEM_SETTINGS_ACTION),
-            );
+            if let Some(settings) = &self.system_settings {
+                entries.push(
+                    MenuEntry::action(settings.label(), SYSTEM_SETTINGS_ACTION.into())
+                        .debug_selector(SYSTEM_SETTINGS_ACTION),
+                );
+            }
         }
         entries
     }
@@ -973,6 +985,36 @@ fn status_for_error(error: WorkspacePickerFilesystemError) -> WorkspacePickerSta
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct FinderRequestIdentity {
+    lifecycle: u64,
+    request: u64,
+}
+impl WorkspacePicker {
+    pub(super) fn finder_request_identity(&self) -> FinderRequestIdentity {
+        FinderRequestIdentity {
+            lifecycle: self.lifecycle_generation,
+            request: self.finder_generation,
+        }
+    }
+    pub(super) fn complete_finder_request(
+        &mut self,
+        identity: FinderRequestIdentity,
+        result: Result<Option<PathBuf>, crate::platform::finder_fallback::DirectoryChooserError>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if identity != self.finder_request_identity() {
+            return;
+        }
+        match result {
+            Ok(Some(path)) => self.validate_finder_selection(path, window, cx),
+            Ok(None) => self.finder_cancelled(window, cx),
+            Err(_) => self.finder_failed(window, cx),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::VecDeque;
@@ -982,7 +1024,7 @@ mod tests {
 
     use super::*;
     use crate::domain::WorkspaceDirectoryIdentity;
-    use crate::platform::macos_system_settings::SystemSettingsOpenError;
+    use crate::platform::permission_recovery::PermissionRecoveryError;
 
     #[derive(Default)]
     struct ScriptedWorkspacePickerFilesystemState {
@@ -1089,10 +1131,13 @@ mod tests {
         }
     }
 
-    struct TestSystemSettingsOpener;
+    struct TestPermissionRecoveryOpener;
 
-    impl SystemSettingsOpener for TestSystemSettingsOpener {
-        fn open_files_and_folders(&self) -> Result<(), SystemSettingsOpenError> {
+    impl PermissionRecoveryOpener for TestPermissionRecoveryOpener {
+        fn label(&self) -> &'static str {
+            "Open System Settings"
+        }
+        fn open(&self) -> Result<(), PermissionRecoveryError> {
             Ok(())
         }
     }
@@ -1143,7 +1188,8 @@ mod tests {
         cx.update(crate::ui::init)
             .expect("UI initialization should succeed");
         let injected_filesystem: Arc<dyn WorkspacePickerFilesystem + Send + Sync> = filesystem;
-        let system_settings: Rc<dyn SystemSettingsOpener> = Rc::new(TestSystemSettingsOpener);
+        let system_settings: Option<Rc<dyn PermissionRecoveryOpener>> =
+            Some(Rc::new(TestPermissionRecoveryOpener));
         let (harness, cx) = cx.add_window_view(move |window, cx| {
             let picker = cx.new(|cx| {
                 WorkspacePicker::new(home(), injected_filesystem, system_settings, window, cx)
@@ -1170,7 +1216,8 @@ mod tests {
         cx.update(crate::ui::init)
             .expect("UI initialization should succeed");
         let injected_filesystem: Arc<dyn WorkspacePickerFilesystem + Send + Sync> = filesystem;
-        let system_settings: Rc<dyn SystemSettingsOpener> = Rc::new(TestSystemSettingsOpener);
+        let system_settings: Option<Rc<dyn PermissionRecoveryOpener>> =
+            Some(Rc::new(TestPermissionRecoveryOpener));
         let (harness, cx) = cx.add_window_view(move |window, cx| {
             let picker = cx.new(|cx| {
                 WorkspacePicker::new(home(), injected_filesystem, system_settings, window, cx)
@@ -1673,6 +1720,81 @@ mod tests {
             cx.debug_bounds("workspace-picker-permission").is_none(),
             "the picker rendered a centred permission body instead of using its empty state"
         );
+    }
+
+    #[gpui::test]
+    fn unavailable_permission_recovery_is_omitted_and_cannot_be_invoked(cx: &mut TestAppContext) {
+        let filesystem = Arc::new(ScriptedWorkspacePickerFilesystem::new([home()], []));
+        filesystem.set_listing_error(WorkspacePickerFilesystemError::PermissionDenied);
+        let (picker, cx) = workspace_picker(filesystem, cx);
+        cx.update(|_, cx| {
+            picker.update(cx, |picker, cx| {
+                picker.system_settings = None;
+                picker.open_system_settings(cx);
+                assert_eq!(picker.status, WorkspacePickerStatus::PermissionDenied);
+                assert_eq!(picker.actions_menu().len(), 3);
+            })
+        });
+    }
+
+    #[gpui::test]
+    fn finder_cancellation_preserves_a_pending_directory_refresh(cx: &mut TestAppContext) {
+        let filesystem = Arc::new(ScriptedWorkspacePickerFilesystem::new([home()], []));
+        filesystem.set_listed_entries([WorkspacePickerDirectoryEntry::new(
+            "Projects".to_owned(),
+            home().join("Projects"),
+        )]);
+        let (picker, cx) = workspace_picker(filesystem, cx);
+
+        // Exercise both possible orders without parking the background executor until Finder
+        // is already open. The real refresh task must still publish its result in either order.
+        for cancel_before_refresh in [true, false] {
+            let identity = cx.update(|window, cx| {
+                picker.update(cx, |picker, cx| {
+                    picker.retry(window, cx);
+                    assert_eq!(picker.status, WorkspacePickerStatus::Loading);
+                    picker.request_finder(cx);
+                    let identity = picker.finder_request_identity();
+                    if cancel_before_refresh {
+                        picker.complete_finder_request(identity, Ok(None), window, cx);
+                    }
+                    identity
+                })
+            });
+            cx.run_until_parked();
+            cx.update(|window, cx| {
+                picker.update(cx, |picker, cx| {
+                    assert_eq!(picker.status, WorkspacePickerStatus::Readable);
+                    if !cancel_before_refresh {
+                        picker.complete_finder_request(identity, Ok(None), window, cx);
+                    }
+                    assert!(picker.can_confirm());
+                    assert!(picker.path_input_is_focused(window, cx));
+                });
+            });
+            assert_eq!(path_bar(&picker, cx), HOME_DISPLAY);
+            assert_eq!(row_names(&picker, cx), vec!["Projects"]);
+        }
+    }
+
+    #[gpui::test]
+    fn stale_chooser_completion_cannot_settle_a_later_request(cx: &mut TestAppContext) {
+        let filesystem = Arc::new(ScriptedWorkspacePickerFilesystem::new([home()], []));
+        let (picker, cx) = workspace_picker(filesystem, cx);
+        cx.update(|window, cx| {
+            picker.update(cx, |picker, cx| {
+                picker.request_finder(cx);
+                let previous = picker.finder_request_identity();
+                picker.complete_finder_request(previous, Ok(None), window, cx);
+                picker.request_finder(cx);
+                let current = picker.finder_request_identity();
+                assert_ne!(previous, current);
+                picker.complete_finder_request(previous, Ok(Some(home())), window, cx);
+                assert_eq!(picker.busy, Some(WorkspacePickerBusy::Finder));
+                picker.complete_finder_request(current, Ok(None), window, cx);
+                assert_eq!(picker.busy, None);
+            })
+        });
     }
 
     #[gpui::test]

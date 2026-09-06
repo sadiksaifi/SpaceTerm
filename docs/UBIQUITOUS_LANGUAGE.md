@@ -22,6 +22,16 @@
 | **Split** | A layout division with exactly two child Pane Layouts and a constrained size ratio. | Pane, divider |
 | **Operating-System Window** | A native application surface that presents SpaceTerm. | Window |
 
+## Application composition
+
+| Term | Definition | Aliases to avoid |
+| --- | --- | --- |
+| **Application Runtime** | The platform-neutral owner of common startup after host helper dispatch, GPUI/control initialization, semantic Actions and menus, Operating-System Window and Workspace composition, close and quit coordination, activation, startup failure handling, and Runtime Observation completion. | macOS startup, broad Platform Adapter |
+| **Host Composition** | One validated constructor-wiring value selected by the host that supplies desktop policy and independent capabilities, sharing application coordinators and allocating exact-window mechanics at their owning scope. It defines no platform operations. | desktop Adapter, platform callback bag |
+| **macOS Keybinding Profile** | The explicitly selected mapping of semantic Actions and reusable control profiles to the shipped macOS shortcuts; it is immutable and not user-configurable. | semantic Actions, automatic platform detection |
+| **Permission Recovery** | An optional injected capability whose availability and label determine whether the Workspace Picker offers a recovery action, with portable preferred/fallback ordering and closed outcomes. | unconditional System Settings action |
+| **Locale Direction** | The injected application-locale fact sampled after GPUI application initialization and consumed by installed desktop layout policy. | per-dialog host detection |
+
 ## Selection and visibility
 
 | Term | Definition | Aliases to avoid |
@@ -120,6 +130,13 @@
 
 ## Relationships
 
+- The **Application Runtime** consumes a complete validated **Host Composition** and performs no host detection or concrete native selection. Host helper dispatch precedes capture of startup dependencies and bypasses application startup when handled.
+- Use GPUI when it preserves behavior, then portable Rust for policy, validation, availability, ordering, identity, cleanup, and failures; retain independent capability-specific Operating-System Adapters only for irreducible mechanics.
+- The **Host Composition** selects application-wide Terminal Attention and Secure Event Input coordinators once and shares their identities through every Operating-System Window, Workspace, Tab, Pane, split, replacement, Local, and Remote path. Window movement state belongs to one exact Operating-System Window.
+- The **macOS Keybinding Profile** maps **Show New Workspace Panel** to `cmd-n`, **Create Scratch Workspace** to `cmd-shift-n`, and **Open Local Project** to `cmd-o`. Its other 141 binding/action/context pairs are unchanged, and native menus dispatch those same semantic Actions.
+- **Finder Fallback** completion requires its exact picker lifecycle and chooser request identity, independent of directory reads. Cancellation preserves picker state and any pending read; a successful selection enters the existing shared validation path; a stale completion cannot settle a successor request.
+- **Permission Recovery** is offered only when its selected capability is present. Portable Rust owns preferred/fallback ordering and content-free failure classification; host composition supplies the current System Settings destinations and label.
+- A Services endpoint belongs to both its exact **Operating-System Window** and the original WorkspaceManager. Retained endpoint authority cannot resolve a replacement root or successor window.
 - **SpaceTerm** owns one or more **Workspaces** and has exactly one **Active Workspace**.
 - A **Workspace Kind** is fixed for the lifetime of its runtime-only **Workspace** and is never persisted.
 - A **Scratch Workspace** starts at `HOME`; its **Directory Authority** is initially the first Pane of its first Tab.

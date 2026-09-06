@@ -5,7 +5,7 @@ use std::pin::Pin;
 use gpui::{App, PathPromptOptions};
 
 pub(crate) type FinderFallbackFuture =
-    Pin<Box<dyn Future<Output = Result<Option<PathBuf>, String>>>>;
+    Pin<Box<dyn Future<Output = Result<Option<PathBuf>, DirectoryChooserError>>>>;
 
 pub(crate) trait FinderFallback {
     fn choose(&self, cx: &App) -> FinderFallbackFuture;
@@ -25,8 +25,8 @@ impl FinderFallback for NativeFinderFallback {
             match selection.await {
                 Ok(Ok(Some(paths))) => Ok(paths.into_iter().next()),
                 Ok(Ok(None)) => Ok(None),
-                Ok(Err(error)) => Err(error.to_string()),
-                Err(error) => Err(error.to_string()),
+                Ok(Err(_)) => Err(DirectoryChooserError::Rejected),
+                Err(_) => Err(DirectoryChooserError::Unavailable),
             }
         })
     }
@@ -34,13 +34,15 @@ impl FinderFallback for NativeFinderFallback {
 
 #[cfg(test)]
 pub(crate) struct ScriptedFinderFallback {
-    selections: std::cell::RefCell<std::collections::VecDeque<Result<Option<PathBuf>, String>>>,
+    selections: std::cell::RefCell<
+        std::collections::VecDeque<Result<Option<PathBuf>, DirectoryChooserError>>,
+    >,
 }
 
 #[cfg(test)]
 impl ScriptedFinderFallback {
     pub(crate) fn new(
-        selections: impl IntoIterator<Item = Result<Option<PathBuf>, String>>,
+        selections: impl IntoIterator<Item = Result<Option<PathBuf>, DirectoryChooserError>>,
     ) -> Self {
         Self {
             selections: std::cell::RefCell::new(selections.into_iter().collect()),
@@ -54,4 +56,10 @@ impl FinderFallback for ScriptedFinderFallback {
         let result = self.selections.borrow_mut().pop_front().unwrap_or(Ok(None));
         Box::pin(async move { result })
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum DirectoryChooserError {
+    Unavailable,
+    Rejected,
 }

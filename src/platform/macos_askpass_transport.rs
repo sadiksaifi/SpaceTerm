@@ -3,6 +3,7 @@
     reason = "the AskPass broker lands before control-connection integration"
 )]
 
+use super::askpass::{AskPassAttemptObservation, AskPassBrokerLease};
 use std::cell::RefCell;
 use std::ffi::{OsStr, OsString};
 use std::io::{self, Read, Write};
@@ -142,42 +143,6 @@ pub(crate) struct AskPassBroker {
     lifetime: Arc<AskPassBrokerLifetime>,
 }
 
-#[derive(Clone, Default)]
-/// Content-free observation of authentication prompt activity and user cancellation.
-///
-/// It is scoped to one connection attempt and carries no prompt or response bytes.
-pub(crate) struct AskPassAttemptObservation {
-    state: Arc<AskPassAttemptObservationState>,
-}
-
-#[derive(Default)]
-struct AskPassAttemptObservationState {
-    prompt_started: AtomicBool,
-    prompt_active: AtomicBool,
-    cancelled: Arc<AtomicBool>,
-}
-
-impl AskPassAttemptObservation {
-    /// Reports whether any prompt in this attempt reached the presenter.
-    pub(crate) fn prompt_started(&self) -> bool {
-        self.state.prompt_started.load(Ordering::Acquire)
-    }
-
-    /// Reports whether an authentication prompt is currently active for this attempt.
-    pub(crate) fn prompt_active(&self) -> bool {
-        self.state.prompt_active.load(Ordering::Acquire)
-    }
-
-    /// Reports whether any prompt in this attempt was cancelled.
-    pub(crate) fn cancelled(&self) -> bool {
-        self.state.cancelled.load(Ordering::Acquire)
-    }
-
-    pub(crate) fn cancellation_flag(&self) -> Arc<AtomicBool> {
-        Arc::clone(&self.state.cancelled)
-    }
-}
-
 /// Fresh broker lifetime and content-free observation for one connection attempt.
 pub(crate) struct AskPassConnectionAttempt {
     broker: AskPassBroker,
@@ -243,24 +208,12 @@ struct AskPassBrokerLifetime {
     _runtime_owner: Mutex<Option<RuntimeOwner>>,
 }
 
-#[derive(Clone)]
-/// Cloneable lifetime lease for one connection attempt's private AskPass broker.
-///
-/// Clones extend only the broker lifetime. Environment access exposes exactly six fixed names and
-/// borrowed values, preventing overrides of process policy such as `HOME`, `PATH`, or agent state.
-pub(crate) struct AskPassBrokerLease {
-    lifetime: Arc<AskPassBrokerLifetime>,
-}
-
-impl AskPassBrokerLease {
-    /// Borrows the fixed AskPass environment overlay for immediate process construction.
-    pub(crate) fn entries(&self) -> impl Iterator<Item = (&'static str, &OsStr)> {
-        self.lifetime.environment.entries()
+impl super::askpass::AskPassLease for AskPassBrokerLifetime {
+    fn entries(&self) -> Vec<(&'static str, &OsStr)> {
+        self.environment.entries().collect()
     }
-
-    /// Cancels presentation and tears down the broker, socket, worker, and runtime owner once.
-    pub(crate) fn cancel(&self) {
-        self.lifetime.close();
+    fn cancel(&self) {
+        self.close();
     }
 }
 
@@ -334,9 +287,7 @@ impl AskPassBroker {
     }
 
     pub(crate) fn lease(&self) -> AskPassBrokerLease {
-        AskPassBrokerLease {
-            lifetime: Arc::clone(&self.lifetime),
-        }
+        AskPassBrokerLease::new(self.lifetime.clone())
     }
 
     #[cfg(test)]
@@ -1056,6 +1007,34 @@ fn read_reply<S: Read>(stream: &mut S) -> Result<HelperAnswer, ConnectionError> 
         REPLY_CANCELLED if frame.len() == 1 => Ok(HelperAnswer::Cancelled),
         REPLY_FAILED if frame.len() == 1 => Ok(HelperAnswer::Failed),
         _ => Err(ConnectionError::MalformedFrame),
+    }
+}
+
+pub(super) struct AskPassWindowFactory;
+impl super::askpass::AskPassWindowFactory for AskPassWindowFactory {
+    fn create(
+        &self,
+        window: &Window,
+        cx: &mut App,
+    ) -> Result<Arc<dyn super::askpass::AskPassAttemptFactory>, super::askpass::AskPassUnavailable>
+    {
+        GpuiAskPassBrokerFactory::new(window, cx)
+            .map(|factory| Arc::new(factory) as Arc<dyn super::askpass::AskPassAttemptFactory>)
+            .map_err(|_| super::askpass::AskPassUnavailable)
+    }
+}
+impl super::askpass::AskPassAttemptFactory for GpuiAskPassBrokerFactory {
+    fn start_attempt(
+        &self,
+        paths: &AppPaths,
+    ) -> Result<super::askpass::AskPassAttempt, super::askpass::AskPassUnavailable> {
+        let attempt = self
+            .start_attempt(paths)
+            .map_err(|_| super::askpass::AskPassUnavailable)?;
+        Ok(super::askpass::AskPassAttempt {
+            lease: attempt.lease(),
+            observation: attempt.observation(),
+        })
     }
 }
 

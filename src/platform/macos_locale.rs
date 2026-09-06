@@ -25,6 +25,13 @@ const fn text_direction_from_native(native_direction: NSInteger) -> TextDirectio
     }
 }
 
+pub(super) struct ApplicationLocale;
+impl super::locale::LocaleDirection for ApplicationLocale {
+    fn text_direction(&self) -> TextDirection {
+        current_text_direction()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

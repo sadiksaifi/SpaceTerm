@@ -10,7 +10,7 @@ mod pane_action_menu;
 mod pane_host;
 pub(crate) mod pane_lifecycle;
 mod remote_child_launch;
-mod remote_workspace_flow;
+pub(crate) mod remote_workspace_flow;
 pub(crate) mod remote_workspace_picker;
 mod render_lifecycle;
 mod resize_handle_theme;
@@ -32,8 +32,7 @@ mod workspace_manager;
 mod workspace_picker;
 mod workspace_search;
 
-use gpui::{App, KeyBinding, actions};
-use spaceterm_ui::{EditCopy, EditPaste};
+use gpui::{App, actions};
 
 pub(crate) use native_remote_workspace_flow_backend::NativeRemoteWorkspaceFlowBackendFactory;
 pub(crate) use pane_host::{
@@ -52,7 +51,7 @@ pub(crate) use terminal_ime::conformance_ime_observation;
 pub(crate) use terminal_pane::{
     PreparedRemotePaneRestart, RemotePaneLifecycleError, TerminalPane, TerminalPaneEvent,
 };
-pub(crate) use workspace_manager::WorkspaceManager;
+pub(crate) use workspace_manager::{WorkspaceManager, WorkspaceManagerAdapters};
 
 actions!(
     terminal,
@@ -125,128 +124,22 @@ fn workspace_count_summary(tab_count: usize, pane_count: usize) -> String {
     format!("{tab_count} {tab_label} · {pane_count} {pane_label}")
 }
 
-pub(crate) fn init(cx: &mut App) -> gpui::Result<()> {
-    init_with_text_direction(cx, crate::platform::macos_locale::current_text_direction())
+pub(crate) fn initialize_controls(cx: &mut App) -> gpui::Result<()> {
+    spaceterm_ui::init(cx, control_theme_catalog::catalog())
 }
 
+#[cfg(test)]
+pub(crate) fn init(cx: &mut App) -> gpui::Result<()> {
+    init_with_text_direction(cx, spaceterm_ui::TextDirection::LeftToRight)
+}
+
+#[cfg(test)]
 fn init_with_text_direction(
     cx: &mut App,
-    text_direction: spaceterm_ui::TextDirection,
+    direction: spaceterm_ui::TextDirection,
 ) -> gpui::Result<()> {
-    spaceterm_ui::init(cx, control_theme_catalog::catalog())?;
-    spaceterm_ui::install_modal_policy(
-        cx,
-        spaceterm_ui::ModalDesktopPolicy::mac_os().with_text_direction(text_direction),
-    );
-    spaceterm_ui::install_modal_keybindings(cx, spaceterm_ui::ModalKeybindingProfile::MacOs);
-    spaceterm_ui::install_text_input_keybindings(
-        cx,
-        spaceterm_ui::TextInputKeybindingProfile::MacOs,
-    );
-    cx.bind_keys([
-        KeyBinding::new("cmd-n", CreateScratchWorkspace, None),
-        KeyBinding::new("cmd-p", SearchWorkspaces, None),
-        KeyBinding::new("cmd-o", ShowNewWorkspacePanel, None),
-        KeyBinding::new("shift-cmd-o", OpenLocalProject, None),
-        KeyBinding::new("cmd-t", CreateTab, None),
-        KeyBinding::new("cmd-w", ClosePane, None),
-        KeyBinding::new("cmd-shift-w", CloseTab, None),
-        KeyBinding::new("cmd-c", EditCopy, Some(TERMINAL_KEY_CONTEXT)),
-        KeyBinding::new("cmd-v", EditPaste, Some(TERMINAL_KEY_CONTEXT)),
-        KeyBinding::new("cmd-f", OpenTerminalFind, Some(TERMINAL_KEY_CONTEXT)),
-        KeyBinding::new("cmd-g", FindNext, Some(TERMINAL_KEY_CONTEXT)),
-        KeyBinding::new("cmd-shift-g", FindPrevious, Some(TERMINAL_KEY_CONTEXT)),
-        KeyBinding::new("cmd-f", OpenTerminalFind, Some(TERMINAL_FIND_KEY_CONTEXT)),
-        KeyBinding::new("cmd-g", FindNext, Some(TERMINAL_FIND_KEY_CONTEXT)),
-        KeyBinding::new("cmd-shift-g", FindPrevious, Some(TERMINAL_FIND_KEY_CONTEXT)),
-        KeyBinding::new("shift-enter", FindPrevious, Some(TERMINAL_FIND_KEY_CONTEXT)),
-        KeyBinding::new("escape", CloseTerminalFind, Some(TERMINAL_FIND_KEY_CONTEXT)),
-        KeyBinding::new(
-            "tab",
-            FocusNextTerminalFindControl,
-            Some(TERMINAL_FIND_KEY_CONTEXT),
-        ),
-        KeyBinding::new(
-            "shift-tab",
-            FocusPreviousTerminalFindControl,
-            Some(TERMINAL_FIND_KEY_CONTEXT),
-        ),
-        KeyBinding::new(
-            "enter",
-            ConfirmUnsafePaste,
-            Some(TERMINAL_PASTE_CONFIRMATION_KEY_CONTEXT),
-        ),
-        KeyBinding::new(
-            "escape",
-            CancelUnsafePaste,
-            Some(TERMINAL_PASTE_CONFIRMATION_KEY_CONTEXT),
-        ),
-        KeyBinding::new(
-            "cmd-enter",
-            AllowOsc52Clipboard,
-            Some(TERMINAL_OSC52_AUTHORIZATION_KEY_CONTEXT),
-        ),
-        KeyBinding::new(
-            "escape",
-            DenyOsc52Clipboard,
-            Some(TERMINAL_OSC52_AUTHORIZATION_KEY_CONTEXT),
-        ),
-        KeyBinding::new(
-            "cmd-=",
-            IncreaseTerminalFontSize,
-            Some(TERMINAL_KEY_CONTEXT),
-        ),
-        KeyBinding::new(
-            "cmd-+",
-            IncreaseTerminalFontSize,
-            Some(TERMINAL_KEY_CONTEXT),
-        ),
-        KeyBinding::new(
-            "cmd--",
-            DecreaseTerminalFontSize,
-            Some(TERMINAL_KEY_CONTEXT),
-        ),
-        KeyBinding::new("cmd-0", ResetTerminalFontSize, Some(TERMINAL_KEY_CONTEXT)),
-        KeyBinding::new("cmd-d", SplitRight, Some(TERMINAL_KEY_CONTEXT)),
-        KeyBinding::new("cmd-shift-d", SplitDown, Some(TERMINAL_KEY_CONTEXT)),
-        KeyBinding::new("cmd-shift-h", FocusPaneLeft, Some(TERMINAL_KEY_CONTEXT)),
-        KeyBinding::new("cmd-alt-left", FocusPaneLeft, Some(TERMINAL_KEY_CONTEXT)),
-        KeyBinding::new("cmd-shift-l", FocusPaneRight, Some(TERMINAL_KEY_CONTEXT)),
-        KeyBinding::new("cmd-alt-right", FocusPaneRight, Some(TERMINAL_KEY_CONTEXT)),
-        KeyBinding::new("cmd-shift-k", FocusPaneUp, Some(TERMINAL_KEY_CONTEXT)),
-        KeyBinding::new("cmd-alt-up", FocusPaneUp, Some(TERMINAL_KEY_CONTEXT)),
-        KeyBinding::new("cmd-shift-j", FocusPaneDown, Some(TERMINAL_KEY_CONTEXT)),
-        KeyBinding::new("cmd-alt-down", FocusPaneDown, Some(TERMINAL_KEY_CONTEXT)),
-        KeyBinding::new(
-            "cmd-shift-enter",
-            TogglePaneZoom,
-            Some(TERMINAL_KEY_CONTEXT),
-        ),
-        KeyBinding::new("cmd-1", ActivateTab1, Some(TERMINAL_KEY_CONTEXT)),
-        KeyBinding::new("cmd-2", ActivateTab2, Some(TERMINAL_KEY_CONTEXT)),
-        KeyBinding::new("cmd-3", ActivateTab3, Some(TERMINAL_KEY_CONTEXT)),
-        KeyBinding::new("cmd-4", ActivateTab4, Some(TERMINAL_KEY_CONTEXT)),
-        KeyBinding::new("cmd-5", ActivateTab5, Some(TERMINAL_KEY_CONTEXT)),
-        KeyBinding::new("cmd-6", ActivateTab6, Some(TERMINAL_KEY_CONTEXT)),
-        KeyBinding::new("cmd-7", ActivateTab7, Some(TERMINAL_KEY_CONTEXT)),
-        KeyBinding::new("cmd-8", ActivateTab8, Some(TERMINAL_KEY_CONTEXT)),
-        KeyBinding::new("cmd-9", ActivateTab9, Some(TERMINAL_KEY_CONTEXT)),
-        KeyBinding::new("ctrl-1", ActivateWorkspace1, Some(TERMINAL_KEY_CONTEXT)),
-        KeyBinding::new("ctrl-2", ActivateWorkspace2, Some(TERMINAL_KEY_CONTEXT)),
-        KeyBinding::new("ctrl-3", ActivateWorkspace3, Some(TERMINAL_KEY_CONTEXT)),
-        KeyBinding::new("ctrl-4", ActivateWorkspace4, Some(TERMINAL_KEY_CONTEXT)),
-        KeyBinding::new("ctrl-5", ActivateWorkspace5, Some(TERMINAL_KEY_CONTEXT)),
-        KeyBinding::new("ctrl-6", ActivateWorkspace6, Some(TERMINAL_KEY_CONTEXT)),
-        KeyBinding::new("ctrl-7", ActivateWorkspace7, Some(TERMINAL_KEY_CONTEXT)),
-        KeyBinding::new("ctrl-8", ActivateWorkspace8, Some(TERMINAL_KEY_CONTEXT)),
-        KeyBinding::new("ctrl-9", ActivateWorkspace9, Some(TERMINAL_KEY_CONTEXT)),
-        KeyBinding::new("cmd-b", ToggleSidebar, Some(TERMINAL_KEY_CONTEXT)),
-        KeyBinding::new(
-            "cmd-shift-e",
-            ToggleSidebarFocus,
-            Some(TERMINAL_KEY_CONTEXT),
-        ),
-    ]);
+    initialize_controls(cx)?;
+    crate::desktop_profile::testing_profile(direction).install(cx);
     Ok(())
 }
 
@@ -373,10 +266,10 @@ mod tests {
     fn workspace_and_hierarchy_shortcuts_should_be_global(cx: &mut TestAppContext) {
         cx.update(|cx| init(cx).expect("UI initialization should succeed"));
         let expected = [
-            ("cmd-n", CreateScratchWorkspace.name()),
+            ("cmd-shift-n", CreateScratchWorkspace.name()),
             ("cmd-p", SearchWorkspaces.name()),
-            ("cmd-o", ShowNewWorkspacePanel.name()),
-            ("shift-cmd-o", OpenLocalProject.name()),
+            ("cmd-n", ShowNewWorkspacePanel.name()),
+            ("cmd-o", OpenLocalProject.name()),
             ("cmd-t", CreateTab.name()),
             ("cmd-w", ClosePane.name()),
             ("cmd-shift-w", CloseTab.name()),

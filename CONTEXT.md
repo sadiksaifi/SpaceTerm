@@ -99,6 +99,73 @@ small crates. Add another crate only when it creates a meaningful Seam, Leverage
 
 ## Current architectural decisions
 
+### Application Runtime and Host Composition
+
+The platform-neutral Application Runtime in `src/app.rs` owns the common startup sequence after
+host helper dispatch, capture-once startup dependencies, reusable GPUI control and theme
+initialization, semantic Action handlers and menus, application quit coordination, Operating-System
+Window creation and close flow, WorkspaceManager construction, startup failure classification,
+application activation, and Runtime Observation completion. The executable delegates to the
+host entry point; shared startup and UI Modules never detect the host or select concrete native
+Implementations. Startup and window failures cross this boundary only as closed, content-free
+classifications; raw paths, environment, native error messages, and authentication values are not
+startup diagnostics.
+
+Application quit examines every live WorkspaceManager in GPUI's window registry, including
+inactive windows. If any manager requires close confirmation or already has one pending, the
+runtime activates a matching window and uses its close coordinator before allowing application
+quit. Removed windows retain no quit authority.
+
+The private macOS composition selects one complete validated Host Composition. Constructor-wiring
+values group independent capabilities without defining platform operations. Required capabilities
+must be present, startup HOME must be absolute, window chrome options must agree, and the desktop
+profile rejects duplicate global key ownership after GPUI keystroke normalization. Application
+capabilities, the Terminal Session factory, captured SSH inputs, and the shared Terminal Attention
+and Secure Event Input coordinators are constructed once for the GPUI application and reused by
+every Operating-System Window. Window movement state is constructed separately for each window;
+Workspace, Tab, Pane, split, replacement, Local, and Remote creation retain their injected
+capabilities. WorkspaceManager receives directory selection and optional permission recovery and
+never constructs a native desktop default.
+
+GPUI initializes the native application before the injected Locale Direction capability samples
+its application locale. The runtime then installs the selected desktop profile, registers Services,
+installs semantic handlers and menus, opens and focuses the WorkspaceManager, attaches close
+coordination and the exact-window Services endpoint, and activates the application. A Services
+registration or installation failure remains nonfatal. Each endpoint is bound to both the exact
+Operating-System Window and its original WorkspaceManager identity, so removal or root replacement
+cannot redirect a retained request into a successor. GPUI owns native-window removal; responder
+associations retain only their exact view lifetime. Quit retains the existing aggregate Close
+Confirmation and final Runtime Observation drain, including the post-event-loop completion fallback.
+
+Use GPUI first when it faithfully preserves behavior, then portable Rust for validation,
+availability, fallback ordering, ownership, generations, cleanup, and closed failure mapping. Retain
+only capability-specific Operating-System Adapters for irreducible facts or effects. The audit
+against pinned GPUI 0.2.2 is:
+
+| Capability | GPUI or portable Rust ownership | Remaining native mechanism and reason |
+| --- | --- | --- |
+| Hide, hide others, show all, minimize, fullscreen | Direct GPUI App and Window operations; Rust semantic Action routing | None. |
+| Window opening, activation, close, and titlebar double activation | Direct GPUI `open_window`, `activate`, `activate_window`, `on_window_should_close`, and `titlebar_double_click`; Rust close and quit policy | None. Host composition supplies GPUI titlebar options, including traffic-light placement. |
+| Window movement | Window Drag Region owns press, threshold, exclusion, capture, cancellation, and handoff response; Rust shares the exact window's injected movement state | Retain the original primary NSEvent and hand it to the exact NSWindow. GPUI `start_window_move` is a compositor operation with no macOS implementation. A mismatched event window is rejected. Double activation no longer passes through this Adapter. |
+| Native directory selection | Direct GPUI `prompt_for_paths`; Rust chooser outcome classification and Workspace Picker validation | None. The injected directory chooser uses GPUI, not a native wrapper. Each completion carries its picker lifecycle and operation identity; cancellation preserves the picker and selection joins its existing validation path. |
+| Permission recovery | Rust capability availability, label, preferred/fallback ordering, and closed errors | NSWorkspace URL acceptance result only. GPUI `open_url` returns no result and discards native rejection, so it cannot preserve the current preferred-then-fallback behavior. macOS composition supplies both System Settings destinations and the label. Ordinary URL opening remains direct GPUI. |
+| Locale direction | Rust desktop policy and reusable control layout | AppKit's application-locale direction fact, sampled after GPUI initializes its application; GPUI has no corresponding public fact. |
+| Services | Rust registration ordering, exact endpoint identity and request authority | Existing NSServices registration and exact-view responder installation. GPUI has only the system menu facility. |
+| Terminal Key Input, Native PTY, Terminal Accessibility, Native Terminal Services, Pane surface lifecycle | Their existing portable owners and independent Interfaces remain authoritative | The mechanics documented in their completed audits remain unchanged and are selected solely by macOS composition. |
+| Host shell and resources | Shell Launch Plan retains portable launch policy | Composition captures the host shell and packaged/development resource location. Native PTY and Shell Launch Plan behavior is unchanged. |
+| SSH AskPass | Injected per-window factory and per-attempt lease/observation Interfaces preserve startup capture and lifetime authority | Existing helper dispatch, factory, private transport, and cleanup remain in the host implementation. This boundary does not redesign the transport. |
+
+One explicit macOS Keybinding Profile selects the application mappings and existing reusable
+Text Input and Modal profiles. Semantic Actions remain independent of their shortcuts. Show New
+Workspace Panel uses `cmd-n`; Create Scratch Workspace uses `cmd-shift-n`; Open Local Project uses
+`cmd-o`. The other 141 installed binding/action/context pairs are unchanged and guarded by the
+original 144-binding GPUI baseline. Native menus dispatch the same Actions and obtain their key
+equivalents from that installed profile; the sidebar's displayed New Workspace shortcut agrees.
+This is not user-configurable and defines no other Operating System's keymap.
+
+This application remains macOS-only with its existing compile guard and packaging. No Linux or
+Windows Adapter, placeholder implementation, CI job, packaging, or compilation claim is added.
+
 ### Internal UI Library
 
 `spaceterm-ui` owns reusable GPUI control mechanics behind narrow, application-independent
@@ -194,8 +261,8 @@ final normal overlay rather than a deferred draw so a deferred owned Menu can re
 
 The application installs one aggregate Vague Pro modal paint and scaled-metric catalog through its
 control-theme catalog and separately installs the immutable macOS logical desktop policy and macOS
-modal keybinding profile. Normal UI initialization resolves AppKit's current application-locale
-layout direction into that bounded policy, and every Operating-System Window modal root consumes the
+modal keybinding profile. The injected host locale capability resolves the current application-locale
+layout direction during GPUI initialization into that bounded policy, and every Operating-System Window modal root consumes the
 installed direction automatically; individual modal call sites do not select direction. That paint
 consumes a complete canonical backdrop token and maps every Alert intent to an internally owned
 semantic marker and treatment. Modal actions never use the reusable Outline variant. The macOS
@@ -252,7 +319,7 @@ lets application policy derive whether the control owns an interaction without d
 pointer lifecycle. The control adds no presentation.
 The application owns top-chrome layout and paint, Terminal Input Focus coordination, actual
 Operating-System Window movement, and zoom, maximize, restore, or preference policy for double
-activation. One injected macOS platform adapter retains the original primary mouse-down, targets
+activation. One per-window injected movement capability retains the original primary mouse-down, targets
 the exact GPUI-backed Operating-System Window, and hands accepted movement to AppKit. The adapter's
 accepted response ends the control-owned active interaction because native movement may consume the
 pointer release.

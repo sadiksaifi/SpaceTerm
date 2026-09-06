@@ -48,8 +48,8 @@ use crate::domain::{
     WorkspaceId, ZoomState,
 };
 #[cfg(test)]
-use crate::platform::macos_window_drag::MacosOperatingSystemWindowDragPlatform;
-use crate::platform::macos_window_drag::{
+use crate::platform::window_movement::RecordingOperatingSystemWindowDragPlatform;
+use crate::platform::window_movement::{
     OperatingSystemWindowDragError, OperatingSystemWindowDragPlatform,
 };
 #[cfg(test)]
@@ -166,7 +166,7 @@ impl TabManager {
     ) -> Self {
         match Self::new_with_operating_system_window_drag_platform(
             session_factory,
-            Rc::new(MacosOperatingSystemWindowDragPlatform::default()),
+            Rc::new(RecordingOperatingSystemWindowDragPlatform::default()),
             window,
             cx,
         ) {
@@ -732,8 +732,7 @@ impl TabManager {
                 }
             }
             WindowDragRegionEvent::DoubleActivationRequested => {
-                self.operating_system_window_drag_platform
-                    .double_activation_requested(window);
+                window.titlebar_double_click();
                 WindowDragRegionResponse::Continue
             }
             WindowDragRegionEvent::InteractionFinished { .. } => {
@@ -1609,7 +1608,7 @@ mod tests {
 
     use super::*;
     use crate::domain::PaneId;
-    use crate::platform::macos_window_drag::RecordingOperatingSystemWindowDragPlatform;
+    use crate::platform::window_movement::RecordingOperatingSystemWindowDragPlatform;
     use crate::ssh::command::{SshCommandContext, ValidatedRemoteShellCommand};
     use crate::terminal::testing::{
         RecordedSessionCommand, TestTerminalSessionFactory, TestTerminalSessionRecords,
@@ -2730,7 +2729,7 @@ mod tests {
             click_count: 2,
         });
 
-        assert_eq!(platform.counts(), (1, 1, 1, 1));
+        assert_eq!(platform.counts(), (1, 1, 1, 0));
     }
 
     #[gpui::test]

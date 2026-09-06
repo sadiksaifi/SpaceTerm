@@ -585,6 +585,13 @@ impl AttentionRuntime {
 }
 
 #[cfg(test)]
+impl AttentionRuntime {
+    pub(crate) fn same_coordinator(&self, other: &Self) -> bool {
+        Rc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use std::time::Duration;
 

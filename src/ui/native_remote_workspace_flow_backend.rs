@@ -16,8 +16,8 @@ use super::remote_workspace_picker::RemoteWorkspaceProvider;
 use super::ssh_host_form::ManagedHostFormBackendError;
 use crate::domain::{RemoteDirectoryIdentity, RemoteWorkspaceDirectory, SshDestination};
 use crate::platform::app_paths::AppPaths;
-use crate::platform::macos_askpass_transport::{
-    AskPassAttemptObservation, AskPassBrokerLease, GpuiAskPassBrokerFactory,
+use crate::platform::askpass::{
+    AskPassAttemptFactory, AskPassAttemptObservation, AskPassBrokerLease, AskPassWindowFactory,
 };
 use crate::ssh::alias_usage::{ActiveSshAliasLease, ActiveSshAliasRegistry};
 use crate::ssh::cancellation::SshCancellationToken;
@@ -59,7 +59,7 @@ pub(super) struct NativeRemoteWorkspaceFlowBackend {
     startup_environment: StartupSshEnvironment,
     startup_capability: SshCapability,
     aliases: ActiveSshAliasRegistry,
-    askpass: Arc<GpuiAskPassBrokerFactory>,
+    askpass: Arc<dyn AskPassAttemptFactory>,
     executor: BackgroundExecutor,
 }
 
@@ -71,7 +71,7 @@ impl NativeRemoteWorkspaceFlowBackend {
         startup_environment: StartupSshEnvironment,
         startup_capability: SshCapability,
         aliases: ActiveSshAliasRegistry,
-        askpass: Arc<GpuiAskPassBrokerFactory>,
+        askpass: Arc<dyn AskPassAttemptFactory>,
         executor: BackgroundExecutor,
     ) -> Self {
         Self {
@@ -149,6 +149,7 @@ pub(crate) struct NativeRemoteWorkspaceFlowBackendFactory {
     startup_environment: StartupSshEnvironment,
     startup_capability: SshCapability,
     aliases: ActiveSshAliasRegistry,
+    askpass: Arc<dyn AskPassWindowFactory>,
 }
 
 impl NativeRemoteWorkspaceFlowBackendFactory {
@@ -158,6 +159,7 @@ impl NativeRemoteWorkspaceFlowBackendFactory {
         startup_environment: StartupSshEnvironment,
         startup_capability: SshCapability,
         aliases: ActiveSshAliasRegistry,
+        askpass: Arc<dyn AskPassWindowFactory>,
     ) -> Self {
         Self {
             paths,
@@ -165,6 +167,7 @@ impl NativeRemoteWorkspaceFlowBackendFactory {
             startup_environment,
             startup_capability,
             aliases,
+            askpass,
         }
     }
 }
@@ -182,8 +185,9 @@ impl RemoteWorkspaceFlowBackendFactory for NativeRemoteWorkspaceFlowBackendFacto
         window: &Window,
         cx: &mut App,
     ) -> Result<Arc<dyn RemoteWorkspaceFlowBackend>, RemoteWorkspaceFlowBackendError> {
-        let askpass = GpuiAskPassBrokerFactory::new(window, cx)
-            .map(Arc::new)
+        let askpass = self
+            .askpass
+            .create(window, cx)
             .map_err(|_| RemoteWorkspaceFlowBackendError::ConnectionFailed)?;
         Ok(Arc::new(NativeRemoteWorkspaceFlowBackend::new(
             Arc::clone(&self.paths),
@@ -280,8 +284,8 @@ impl RemoteWorkspaceFlowBackend for NativeRemoteWorkspaceFlowBackend {
                 return Task::ready(Err(RemoteWorkspaceFlowBackendError::SshRuntimeUnavailable));
             }
         };
-        let authentication = attempt.lease();
-        let observation = attempt.observation();
+        let authentication = attempt.lease.clone();
+        let observation = attempt.observation.clone();
         let environment = match SshProcessEnvironment::new(
             self.local_home.clone(),
             authentication.clone(),
@@ -812,6 +816,18 @@ mod tests {
         }
     }
 
+    struct RejectAskPassFactory;
+    impl AskPassWindowFactory for RejectAskPassFactory {
+        fn create(
+            &self,
+            _: &Window,
+            _: &mut App,
+        ) -> Result<Arc<dyn AskPassAttemptFactory>, crate::platform::askpass::AskPassUnavailable>
+        {
+            Err(crate::platform::askpass::AskPassUnavailable)
+        }
+    }
+
     fn factory_with_capability(
         startup_capability: SshCapability,
     ) -> NativeRemoteWorkspaceFlowBackendFactory {
@@ -827,6 +843,7 @@ mod tests {
             StartupSshEnvironment::default(),
             startup_capability,
             ActiveSshAliasRegistry::default(),
+            Arc::new(RejectAskPassFactory),
         )
     }
 

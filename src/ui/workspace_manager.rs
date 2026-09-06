@@ -1,5 +1,7 @@
 use super::pane_lifecycle::PaneLifecycleDependencies;
 use crate::platform::terminal_accessibility::TerminalAccessibilityAdapterFactory;
+#[cfg(test)]
+use crate::platform::window_movement::RecordingOperatingSystemWindowDragPlatform;
 use crate::terminal::native_services::NativeServiceAdapters;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
@@ -8,7 +10,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use super::close_policy::CloseScope;
-use super::native_remote_workspace_flow_backend::NativeRemoteWorkspaceFlowBackendFactory;
 use super::new_workspace_panel::{NewWorkspacePanel, NewWorkspacePanelEvent, NewWorkspaceSource};
 use super::remote_workspace_flow::{
     RemoteWorkspaceAliasPin, RemoteWorkspaceConnectContext, RemoteWorkspaceConnectedSession,
@@ -39,11 +40,12 @@ use crate::domain::{
     WorkspaceCollection, WorkspaceDirectoryAvailability, WorkspaceDirectoryIdentity,
     WorkspaceError, WorkspaceId, WorkspaceKind,
 };
-use crate::platform::finder_fallback::{FinderFallback, NativeFinderFallback};
-use crate::platform::macos_system_settings::MacosSystemSettingsOpener;
-use crate::platform::macos_window_drag::{
-    MacosOperatingSystemWindowDragPlatform, OperatingSystemWindowDragError,
-    OperatingSystemWindowDragPlatform,
+use crate::platform::finder_fallback::FinderFallback;
+#[cfg(test)]
+use crate::platform::finder_fallback::NativeFinderFallback;
+use crate::platform::permission_recovery::PermissionRecoveryOpener;
+use crate::platform::window_movement::{
+    OperatingSystemWindowDragError, OperatingSystemWindowDragPlatform,
 };
 use crate::platform::workspace_directory::validate_workspace_directory;
 use crate::platform::workspace_picker_filesystem::NativeWorkspacePickerFilesystem;
@@ -234,14 +236,16 @@ struct TabManagerCreation {
     lifecycle_dependencies: PaneLifecycleDependencies,
 }
 
-struct WorkspaceManagerAdapters {
-    key_input: Rc<dyn TerminalKeyInputAdapterFactory>,
-    accessibility: Rc<dyn TerminalAccessibilityAdapterFactory>,
-    native_services: NativeServiceAdapters,
-    lifecycle: PaneLifecycleDependencies,
-    finder: Rc<dyn FinderFallback>,
-    window_drag: Rc<dyn OperatingSystemWindowDragPlatform>,
-    remote_workspace: Arc<dyn RemoteWorkspaceFlowBackendFactory>,
+#[derive(Clone)]
+pub(crate) struct WorkspaceManagerAdapters {
+    pub(crate) key_input: Rc<dyn TerminalKeyInputAdapterFactory>,
+    pub(crate) accessibility: Rc<dyn TerminalAccessibilityAdapterFactory>,
+    pub(crate) native_services: NativeServiceAdapters,
+    pub(crate) lifecycle: PaneLifecycleDependencies,
+    pub(crate) finder: Rc<dyn FinderFallback>,
+    pub(crate) window_drag: Rc<dyn OperatingSystemWindowDragPlatform>,
+    pub(crate) remote_workspace: Arc<dyn RemoteWorkspaceFlowBackendFactory>,
+    pub(crate) permission_recovery: Option<Rc<dyn PermissionRecoveryOpener>>,
 }
 
 struct PendingRemoteProjectActivation {
@@ -312,40 +316,6 @@ pub(crate) struct WorkspaceManager {
 }
 
 impl WorkspaceManager {
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "Explicit capability injection follows hierarchy ownership"
-    )]
-    pub(crate) fn new(
-        session_factory: Rc<dyn TerminalSessionFactory>,
-        key_input_adapter_factory: Rc<dyn TerminalKeyInputAdapterFactory>,
-        accessibility_adapter_factory: Rc<dyn TerminalAccessibilityAdapterFactory>,
-        native_service_adapters: NativeServiceAdapters,
-        lifecycle_dependencies: PaneLifecycleDependencies,
-        default_workspace_root: PathBuf,
-        remote_workspace_backend_factory: Arc<NativeRemoteWorkspaceFlowBackendFactory>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Self {
-        let remote_workspace_backend_factory: Arc<dyn RemoteWorkspaceFlowBackendFactory> =
-            remote_workspace_backend_factory;
-        Self::new_with_adapters(
-            session_factory,
-            default_workspace_root,
-            WorkspaceManagerAdapters {
-                key_input: key_input_adapter_factory,
-                accessibility: accessibility_adapter_factory,
-                native_services: native_service_adapters,
-                lifecycle: lifecycle_dependencies,
-                finder: Rc::new(NativeFinderFallback),
-                window_drag: Rc::new(MacosOperatingSystemWindowDragPlatform::default()),
-                remote_workspace: remote_workspace_backend_factory,
-            },
-            window,
-            cx,
-        )
-    }
-
     #[cfg(test)]
     fn new_with_remote_workspace_backend_factory(
         session_factory: Rc<dyn TerminalSessionFactory>,
@@ -363,7 +333,8 @@ impl WorkspaceManager {
                 native_services: crate::terminal::native_services::testing::adapters(),
                 lifecycle: PaneLifecycleDependencies::testing(),
                 finder: Rc::new(NativeFinderFallback),
-                window_drag: Rc::new(MacosOperatingSystemWindowDragPlatform::default()),
+                permission_recovery: None,
+                window_drag: Rc::new(RecordingOperatingSystemWindowDragPlatform::default()),
                 remote_workspace: remote_workspace_backend_factory,
             },
             window,
@@ -389,7 +360,8 @@ impl WorkspaceManager {
                 native_services: crate::terminal::native_services::testing::adapters(),
                 lifecycle: PaneLifecycleDependencies::testing(),
                 finder: finder_fallback,
-                window_drag: Rc::new(MacosOperatingSystemWindowDragPlatform::default()),
+                permission_recovery: None,
+                window_drag: Rc::new(RecordingOperatingSystemWindowDragPlatform::default()),
                 remote_workspace: remote_workspace_backend_factory,
             },
             window,
@@ -415,6 +387,7 @@ impl WorkspaceManager {
                 native_services: crate::terminal::native_services::testing::adapters(),
                 lifecycle: PaneLifecycleDependencies::testing(),
                 finder: Rc::new(NativeFinderFallback),
+                permission_recovery: None,
                 window_drag: operating_system_window_drag_platform,
                 remote_workspace: remote_workspace_backend_factory,
             },
@@ -423,7 +396,7 @@ impl WorkspaceManager {
         )
     }
 
-    fn new_with_adapters(
+    pub(crate) fn new_with_adapters(
         session_factory: Rc<dyn TerminalSessionFactory>,
         default_workspace_root: PathBuf,
         adapters: WorkspaceManagerAdapters,
@@ -436,6 +409,7 @@ impl WorkspaceManager {
             native_services: native_service_adapters,
             lifecycle: lifecycle_dependencies,
             finder: finder_fallback,
+            permission_recovery,
             window_drag: operating_system_window_drag_platform,
             remote_workspace: remote_workspace_backend_factory,
         } = adapters;
@@ -514,7 +488,7 @@ impl WorkspaceManager {
             WorkspacePicker::new(
                 workspace_picker_home,
                 Arc::new(NativeWorkspacePickerFilesystem),
-                Rc::new(MacosSystemSettingsOpener::default()),
+                permission_recovery,
                 window,
                 cx,
             )
@@ -1201,8 +1175,7 @@ impl WorkspaceManager {
                 }
             }
             WindowDragRegionEvent::DoubleActivationRequested => {
-                self.operating_system_window_drag_platform
-                    .double_activation_requested(window);
+                window.titlebar_double_click();
                 WindowDragRegionResponse::Continue
             }
             WindowDragRegionEvent::InteractionFinished { .. } => {
@@ -2473,21 +2446,14 @@ impl WorkspaceManager {
                 });
             }
             WorkspacePickerEvent::FinderRequested => {
+                let identity = self.workspace_picker.read(cx).finder_request_identity();
                 let selection = self.finder_fallback.choose(cx);
                 cx.spawn_in(window, async move |manager, cx| {
                     let result = selection.await;
                     let _ = manager.update_in(cx, |manager, window, cx| {
-                        match result {
-                            Ok(Some(path)) => manager.workspace_picker.update(cx, |picker, cx| {
-                                picker.validate_finder_selection(path, window, cx)
-                            }),
-                            Ok(None) => manager
-                                .workspace_picker
-                                .update(cx, |picker, cx| picker.finder_cancelled(window, cx)),
-                            Err(_) => manager
-                                .workspace_picker
-                                .update(cx, |picker, cx| picker.finder_failed(window, cx)),
-                        };
+                        manager.workspace_picker.update(cx, |picker, cx| {
+                            picker.complete_finder_request(identity, result, window, cx);
+                        });
                         manager.sync_terminal_focus_blocker(window, cx);
                         cx.notify();
                     });
@@ -2891,6 +2857,11 @@ impl WorkspaceManager {
 
     pub(crate) fn request_application_quit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.request_close(CloseTarget::Application, window, cx);
+    }
+
+    pub(crate) fn blocks_unconfirmed_application_quit(&self, cx: &App) -> bool {
+        self.pending_close_confirmation.is_some()
+            || self.close_target_requires_confirmation(CloseTarget::Application, cx) == Some(true)
     }
 
     fn close_workspace(
@@ -4096,7 +4067,7 @@ impl WorkspaceManager {
                                 div()
                                     .text_size(px(10.0))
                                     .text_color(gpui_color(ACTIVE_THEME.icon))
-                                    .child("⌘O")
+                                    .child("⌘N")
                                     .into_any_element()
                             })
                             .on_activate(move |_, window, cx| {
@@ -4484,6 +4455,59 @@ fn initial_workspace_directory(path: PathBuf) -> (ValidatedWorkspaceDirectory, O
 }
 
 #[cfg(test)]
+impl WorkspaceManager {
+    pub(crate) fn assert_application_capabilities(
+        &self,
+        expected: &crate::app::ApplicationCapabilities,
+        _: &App,
+    ) {
+        assert!(Rc::ptr_eq(
+            &self.key_input_adapter_factory,
+            &expected.key_input
+        ));
+        assert!(Rc::ptr_eq(
+            &self.accessibility_adapter_factory,
+            &expected.accessibility
+        ));
+        assert!(Rc::ptr_eq(&self.finder_fallback, &expected.finder));
+        assert!(Rc::ptr_eq(
+            &self.native_service_adapters.selection_clipboard,
+            &expected.native_services.selection_clipboard
+        ));
+        assert!(Rc::ptr_eq(
+            &self.native_service_adapters.file_clipboard,
+            &expected.native_services.file_clipboard
+        ));
+        assert!(Rc::ptr_eq(
+            &self.native_service_adapters.quick_look,
+            &expected.native_services.quick_look
+        ));
+        assert!(Rc::ptr_eq(
+            &self.lifecycle_dependencies.activity,
+            &expected.lifecycle.activity
+        ));
+        assert!(Rc::ptr_eq(
+            &self.lifecycle_dependencies.visibility,
+            &expected.lifecycle.visibility
+        ));
+        assert!(Rc::ptr_eq(
+            &self.lifecycle_dependencies.wheel,
+            &expected.lifecycle.wheel
+        ));
+        assert!(
+            self.lifecycle_dependencies
+                .attention
+                .same_coordinator(&expected.lifecycle.attention)
+        );
+        assert!(
+            self.lifecycle_dependencies
+                .secure_input
+                .same_coordinator(&expected.lifecycle.secure_input)
+        );
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use std::cell::RefCell;
     use std::collections::VecDeque;
@@ -4513,8 +4537,8 @@ mod tests {
         async_channel::Sender<crate::ssh::live_connection::ControlConnectionTerminalState>,
     );
     use crate::platform::finder_fallback::ScriptedFinderFallback;
-    use crate::platform::macos_window_drag::RecordingOperatingSystemWindowDragPlatform;
     use crate::platform::ssh_askpass::{AskPassPromptKind, AskPassRequest, AskPassResult};
+    use crate::platform::window_movement::RecordingOperatingSystemWindowDragPlatform;
     use crate::ssh::command::{SshCommandContext, ValidatedRemoteShellCommand};
     use crate::ssh::destination::SshHostAlias;
     use crate::ssh::host_config::HostDiscovery;
@@ -5105,7 +5129,8 @@ mod tests {
                     native_services,
                     lifecycle: PaneLifecycleDependencies::testing(),
                     finder: Rc::new(NativeFinderFallback),
-                    window_drag: Rc::new(MacosOperatingSystemWindowDragPlatform::default()),
+                permission_recovery: None,
+                    window_drag: Rc::new(RecordingOperatingSystemWindowDragPlatform::default()),
                     remote_workspace: test_remote_backend_factory(),
                 },
                 window,
@@ -5115,7 +5140,7 @@ mod tests {
         cx.update(|window, cx| manager.update(cx, |manager, cx| manager.focus(window, cx)));
         cx.run_until_parked();
         assert_eq!(created.get(), 1);
-        for (shortcut, expected) in [("cmd-d", 2), ("cmd-t", 3), ("cmd-n", 4)] {
+        for (shortcut, expected) in [("cmd-d", 2), ("cmd-t", 3), ("cmd-shift-n", 4)] {
             cx.simulate_keystrokes(shortcut);
             cx.run_until_parked();
             assert_eq!(created.get(), expected, "{shortcut}");
@@ -5151,7 +5176,8 @@ mod tests {
                     native_services: crate::terminal::native_services::testing::adapters(),
                     lifecycle: PaneLifecycleDependencies::testing(),
                     finder: Rc::new(NativeFinderFallback),
-                    window_drag: Rc::new(MacosOperatingSystemWindowDragPlatform::default()),
+                    permission_recovery: None,
+                    window_drag: Rc::new(RecordingOperatingSystemWindowDragPlatform::default()),
                     remote_workspace: test_remote_backend_factory(),
                 },
                 window,
@@ -5161,7 +5187,7 @@ mod tests {
         cx.update(|window, cx| manager.update(cx, |manager, cx| manager.focus(window, cx)));
         cx.run_until_parked();
         assert_eq!(factory.records.borrow().len(), 1);
-        for (shortcut, expected) in [("cmd-d", 2), ("cmd-t", 3), ("cmd-n", 4)] {
+        for (shortcut, expected) in [("cmd-d", 2), ("cmd-t", 3), ("cmd-shift-n", 4)] {
             cx.simulate_keystrokes(shortcut);
             cx.run_until_parked();
             assert_eq!(factory.records.borrow().len(), expected, "{shortcut}");
@@ -5386,7 +5412,9 @@ mod tests {
     }
 
     fn workspace_manager_with_picker(
-        selections: impl IntoIterator<Item = Result<Option<PathBuf>, String>>,
+        selections: impl IntoIterator<
+            Item = Result<Option<PathBuf>, crate::platform::finder_fallback::DirectoryChooserError>,
+        >,
         cx: &mut TestAppContext,
     ) -> (
         Entity<WorkspaceManager>,
@@ -5456,12 +5484,12 @@ mod tests {
     }
 
     fn open_workspace_picker(cx: &mut VisualTestContext) {
-        cx.simulate_keystrokes("shift-cmd-o");
+        cx.simulate_keystrokes("cmd-o");
         cx.run_until_parked();
     }
 
     fn open_new_workspace_panel(cx: &mut VisualTestContext) {
-        cx.simulate_keystrokes("cmd-o");
+        cx.simulate_keystrokes("cmd-n");
         cx.run_until_parked();
     }
 
@@ -8009,7 +8037,7 @@ mod tests {
     #[gpui::test]
     fn workspace_picker_should_block_parent_shortcuts_and_keep_path_focus(cx: &mut TestAppContext) {
         let (manager, records, cx) = workspace_manager(cx);
-        cx.simulate_keystrokes("cmd-n");
+        cx.simulate_keystrokes("cmd-shift-n");
         open_workspace_picker(cx);
         let baseline = manager.read_with(cx, |manager, cx| {
             (
@@ -8024,7 +8052,7 @@ mod tests {
             )
         });
 
-        cx.simulate_keystrokes("cmd-n");
+        cx.simulate_keystrokes("cmd-shift-n");
         assert_eq!(
             manager.read_with(cx, |manager, _| manager.workspaces.len()),
             baseline.0
@@ -8290,7 +8318,7 @@ mod tests {
         let inactive_sender = records
             .event_sender(1)
             .expect("the initial Workspace terminal session must have started");
-        cx.simulate_keystrokes("cmd-n");
+        cx.simulate_keystrokes("cmd-shift-n");
         cx.run_until_parked();
         manager.update(cx, |manager, cx| {
             manager
@@ -8325,7 +8353,7 @@ mod tests {
     #[gpui::test]
     fn workspace_search_selection_should_activate_the_matching_workspace(cx: &mut TestAppContext) {
         let (manager, _, cx) = workspace_manager(cx);
-        cx.simulate_keystrokes("cmd-n");
+        cx.simulate_keystrokes("cmd-shift-n");
         cx.run_until_parked();
         manager.update(cx, |manager, cx| {
             manager
@@ -8867,7 +8895,7 @@ mod tests {
             click_count: 2,
         });
 
-        assert_eq!(platform.counts(), (1, 1, 1, 1));
+        assert_eq!(platform.counts(), (1, 1, 1, 0));
     }
 
     #[gpui::test]
@@ -9336,7 +9364,7 @@ mod tests {
     #[gpui::test]
     fn every_workspace_row_should_end_with_a_full_width_divider(cx: &mut TestAppContext) {
         let (_manager, _records, cx) = workspace_manager(cx);
-        cx.simulate_keystrokes("cmd-n");
+        cx.simulate_keystrokes("cmd-shift-n");
         cx.run_until_parked();
 
         let first_row = cx
@@ -9467,7 +9495,7 @@ mod tests {
         let (manager, _, cx) = workspace_manager(cx);
 
         click("toggle-sidebar-button", cx);
-        cx.simulate_keystrokes("cmd-n");
+        cx.simulate_keystrokes("cmd-shift-n");
         redraw(cx);
 
         let chip = cx
@@ -9491,7 +9519,7 @@ mod tests {
     fn cmd_n_should_create_a_scratch_workspace_without_the_panel(cx: &mut TestAppContext) {
         let (manager, _records, cx) = workspace_manager(cx);
 
-        cx.simulate_keystrokes("cmd-n");
+        cx.simulate_keystrokes("cmd-shift-n");
         cx.run_until_parked();
 
         assert_eq!(
@@ -9529,7 +9557,7 @@ mod tests {
     fn workspace_list_should_scroll_vertically_with_the_mouse_wheel(cx: &mut TestAppContext) {
         let (manager, _records, cx) = workspace_manager(cx);
         for _ in 0..24 {
-            cx.simulate_keystrokes("cmd-n");
+            cx.simulate_keystrokes("cmd-shift-n");
         }
 
         manager.read_with(cx, |manager, _| {
@@ -9563,7 +9591,7 @@ mod tests {
     fn workspace_scrollbar_should_reveal_when_the_list_scrolls(cx: &mut TestAppContext) {
         let (manager, _records, cx) = workspace_manager(cx);
         for _ in 0..24 {
-            cx.simulate_keystrokes("cmd-n");
+            cx.simulate_keystrokes("cmd-shift-n");
         }
         manager.read_with(cx, |manager, _| {
             manager
@@ -9599,7 +9627,7 @@ mod tests {
     fn workspace_scrollbar_thumb_should_drag_the_list(cx: &mut TestAppContext) {
         let (manager, _records, cx) = workspace_manager(cx);
         for _ in 0..24 {
-            cx.simulate_keystrokes("cmd-n");
+            cx.simulate_keystrokes("cmd-shift-n");
         }
         manager.update(cx, |manager, cx| {
             manager
@@ -9641,7 +9669,7 @@ mod tests {
     fn creating_workspaces_should_scroll_the_active_workspace_into_view(cx: &mut TestAppContext) {
         let (manager, _records, cx) = workspace_manager(cx);
         for _ in 0..24 {
-            cx.simulate_keystrokes("cmd-n");
+            cx.simulate_keystrokes("cmd-shift-n");
         }
 
         let state = manager.read_with(cx, |manager, _| {
@@ -9663,7 +9691,7 @@ mod tests {
     ) {
         let (_manager, _records, cx) = workspace_manager(cx);
         for _ in 0..24 {
-            cx.simulate_keystrokes("cmd-n");
+            cx.simulate_keystrokes("cmd-shift-n");
         }
 
         let sidebar = cx
@@ -9759,7 +9787,7 @@ mod tests {
     fn command_n_should_create_and_activate_a_default_root_workspace(cx: &mut TestAppContext) {
         let (manager, records, cx) = workspace_manager(cx);
 
-        cx.simulate_keystrokes("cmd-n");
+        cx.simulate_keystrokes("cmd-shift-n");
         cx.run_until_parked();
 
         let state = manager.read_with(cx, |manager, _| {
@@ -9801,7 +9829,7 @@ mod tests {
     #[gpui::test]
     fn control_number_should_activate_workspaces_by_position(cx: &mut TestAppContext) {
         let (manager, _records, cx) = workspace_manager(cx);
-        cx.simulate_keystrokes("cmd-n cmd-n");
+        cx.simulate_keystrokes("cmd-shift-n cmd-shift-n");
         cx.run_until_parked();
 
         cx.simulate_keystrokes("ctrl-1");
@@ -9848,7 +9876,7 @@ mod tests {
     #[gpui::test]
     fn clicking_an_inactive_workspace_should_restore_its_focused_pane(cx: &mut TestAppContext) {
         let (manager, _records, cx) = workspace_manager(cx);
-        cx.simulate_keystrokes("cmd-d cmd-n");
+        cx.simulate_keystrokes("cmd-d cmd-shift-n");
         cx.run_until_parked();
 
         click("workspace-row-1-inactive", cx);
@@ -9907,7 +9935,7 @@ mod tests {
         cx: &mut TestAppContext,
     ) {
         let (manager, _records, cx) = workspace_manager(cx);
-        cx.simulate_keystrokes("cmd-n");
+        cx.simulate_keystrokes("cmd-shift-n");
         cx.run_until_parked();
 
         right_click("workspace-row-1-inactive", cx);
@@ -10250,7 +10278,7 @@ mod tests {
         cx: &mut TestAppContext,
     ) {
         let (manager, records, cx) = workspace_manager(cx);
-        cx.simulate_keystrokes("cmd-n");
+        cx.simulate_keystrokes("cmd-shift-n");
         cx.run_until_parked();
         click("workspace-row-1-inactive", cx);
         right_click("workspace-row-1-active", cx);
@@ -10331,14 +10359,14 @@ mod tests {
         let inactive_sender = records
             .event_sender(1)
             .expect("the initial Workspace terminal session must have started");
-        cx.simulate_keystrokes("cmd-n");
+        cx.simulate_keystrokes("cmd-shift-n");
         cx.run_until_parked();
 
         inactive_sender
             .try_send(SessionEvent::Exited(SessionExit::Success))
             .expect("the inactive shell exit must be delivered");
         cx.run_until_parked();
-        cx.simulate_keystrokes("cmd-n");
+        cx.simulate_keystrokes("cmd-shift-n");
         cx.run_until_parked();
 
         let state = manager.read_with(cx, |manager, _| {
