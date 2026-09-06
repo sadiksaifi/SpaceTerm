@@ -10,7 +10,7 @@ use std::rc::Rc;
 
 #[cfg(not(test))]
 use cocoa::appkit::NSApp;
-use cocoa::appkit::NSPasteboardTypeString;
+use cocoa::appkit::{NSPasteboardTypeString, NSStringPboardType};
 use cocoa::base::{BOOL, NO, YES, id, nil};
 use cocoa::foundation::{NSArray, NSAutoreleasePool, NSInteger, NSString, NSUInteger};
 use gpui::Window;
@@ -262,7 +262,11 @@ extern "C" fn write_selection_to_pasteboard(
         // SAFETY: AppKit supplies NSPasteboard and NSArray objects for this synchronous callback.
         let contains_string: BOOL =
             unsafe { msg_send![types, containsObject: NSPasteboardTypeString] };
-        if contains_string == NO {
+        // AppKit may validate modern text but pass the legacy type in this array (FB11838671).
+        // Both names describe the same text representation; publication remains modern UTF-8.
+        let contains_legacy_string: BOOL =
+            unsafe { msg_send![types, containsObject: NSStringPboardType] };
+        if contains_string == NO && contains_legacy_string == NO {
             return NO;
         }
         let Some(state) = (unsafe { services_operation_state(this) }) else {
@@ -313,7 +317,8 @@ unsafe fn service_data_type(value: id) -> ServiceDataType {
         return ServiceDataType::Absent;
     }
     let is_string: BOOL = unsafe { msg_send![value, isEqualToString: NSPasteboardTypeString] };
-    if is_string == YES {
+    let is_legacy_string: BOOL = unsafe { msg_send![value, isEqualToString: NSStringPboardType] };
+    if is_string == YES || is_legacy_string == YES {
         ServiceDataType::String
     } else {
         ServiceDataType::Unsupported
@@ -391,7 +396,18 @@ mod tests {
                 service_data_type(NSPasteboardTypeString),
                 ServiceDataType::String
             );
+            assert_eq!(
+                service_data_type(NSStringPboardType),
+                ServiceDataType::String
+            );
             assert_eq!(service_data_type(unsupported), ServiceDataType::Unsupported);
+            let generic_plain_text = NSString::alloc(nil)
+                .init_str("public.plain-text")
+                .autorelease();
+            assert_eq!(
+                service_data_type(generic_plain_text),
+                ServiceDataType::Unsupported
+            );
 
             pool.drain();
         }
@@ -522,15 +538,24 @@ mod tests {
         }
 
         fn validate(&self) -> Option<Rc<Self>> {
+            self.validate_returning(true)
+        }
+
+        fn validate_returning(&self, returns_text: bool) -> Option<Rc<Self>> {
             let _pool = NativePool::new();
             let object = self.0.get();
             assert_ne!(object, nil);
             // SAFETY: The receiver is live at message entry. Tests may destroy it reentrantly
             // through the endpoint; the production callback must survive that destruction.
             unsafe {
+                let return_type = if returns_text {
+                    NSPasteboardTypeString
+                } else {
+                    nil
+                };
                 let operation: id = msg_send![object,
                     validRequestorForSendType: NSPasteboardTypeString
-                    returnType: NSPasteboardTypeString
+                    returnType: return_type
                 ];
                 if operation == nil {
                     return None;
@@ -898,5 +923,40 @@ mod tests {
             vec![(native_origin(1), "accepted return".into())]
         );
         assert!(requestor.validate().unwrap().write(board.0));
+    }
+
+    #[test]
+    fn native_modern_validation_accepts_legacy_only_write_types_once() {
+        let _serial = NATIVE_REQUESTOR_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _pool = NativePool::new();
+        let endpoint = NativeEndpoint::new("selected 日本語");
+        let requestor = NativeObject::requestor(endpoint.clone());
+        // Stickies is a send-only service: validation supplies modern text and no return type.
+        let operation = requestor.validate_returning(false).unwrap();
+        let board = IsolatedPasteboard::new();
+        let object = operation.0.get();
+
+        // SAFETY: The real registered operation responder and isolated pasteboard are retained
+        // throughout these selector calls. This reproduces AppKit's legacy-only write array.
+        unsafe {
+            let types = NSArray::arrayWithObject(nil, NSStringPboardType);
+            let contains_modern: BOOL = msg_send![types, containsObject: NSPasteboardTypeString];
+            assert_eq!(contains_modern, NO);
+            let wrote: BOOL = msg_send![object, writeSelectionToPasteboard: board.0 types: types];
+            assert_eq!(wrote, YES);
+            assert_eq!(board.text().as_deref(), Some("selected 日本語"));
+            let legacy_text: id = msg_send![board.0, stringForType: NSStringPboardType];
+            assert_eq!(
+                read_nsstring_text(legacy_text).as_deref(),
+                Some("selected 日本語")
+            );
+            let repeated: BOOL =
+                msg_send![object, writeSelectionToPasteboard: board.0 types: types];
+            assert_eq!(repeated, NO);
+        }
+        assert!(!operation.read(board.0));
+        assert!(endpoint.inserted.borrow().is_empty());
     }
 }
