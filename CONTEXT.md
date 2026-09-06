@@ -957,6 +957,9 @@ A Pane-owned Render Lifecycle separates one-shot presentation demand from recurr
 eligibility. Immutable Terminal Presentations received while minimized, occluded, in a hidden
 Workspace, or otherwise non-presentable coalesce to the newest Presentation Generation without
 requesting frames; visibility restoration requests exactly one presentation of that newest state.
+Hidden accessibility snapshots retain independent publication demand even when only their visible
+range changes without a new terminal generation or notification. Restoration publishes the newest
+model once, then clears that demand after the Accessibility Adapter receives it.
 Cursor blink, text blink, and visual effects run only while the application, key Operating-System
 Window, Active Workspace, Active Tab, and visible Pane can present them and the surface is not
 minimized, occluded, or live-resizing. GPUI window activation observation and `is_window_active`

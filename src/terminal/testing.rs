@@ -19,6 +19,78 @@ pub(crate) fn test_workspace_directory(path: PathBuf) -> ValidatedWorkspaceDirec
     ValidatedWorkspaceDirectory::new(path, WorkspaceDirectoryIdentity::new(0, 0))
 }
 
+pub(crate) fn test_accessibility_viewport_models(
+    generation: PresentationGeneration,
+) -> (
+    Arc<TerminalAccessibilityModel>,
+    Arc<TerminalAccessibilityModel>,
+) {
+    use super::accessibility::{
+        AccessibilityCell, AccessibilityCellRef, AccessibilityRowId, AccessibilityRowUpdate,
+        AccessibilityScreen, AccessibilityUpdate, TerminalAccessibilityState,
+    };
+    let rows = [0, 1].map(|page_row| AccessibilityRowId {
+        screen: AccessibilityScreen::Primary,
+        screen_generation: 1,
+        node_serial: 1,
+        page_row,
+    });
+    let cursor = Some(AccessibilityCellRef {
+        row: rows[0],
+        row_revision: 1,
+        column: 0,
+    });
+    let mut state = TerminalAccessibilityState::default();
+    let initial = state
+        .apply(
+            AccessibilityUpdate {
+                revision: 1,
+                screen: AccessibilityScreen::Primary,
+                screen_generation: 1,
+                complete: true,
+                more: false,
+                topology: Some(rows.to_vec()),
+                visible_lines: 0..1,
+                cursor,
+                selection: None,
+                changed_rows: rows
+                    .into_iter()
+                    .map(|id| AccessibilityRowUpdate {
+                        id,
+                        revision: 1,
+                        soft_wrapped: false,
+                        cells: vec![AccessibilityCell::at_column("x", 0, 1)],
+                    })
+                    .collect(),
+            },
+            generation,
+        )
+        .unwrap();
+    let scrolled = state
+        .apply(
+            AccessibilityUpdate {
+                revision: 2,
+                screen: AccessibilityScreen::Primary,
+                screen_generation: 1,
+                complete: true,
+                more: false,
+                topology: None,
+                visible_lines: 1..2,
+                cursor,
+                selection: None,
+                changed_rows: Vec::new(),
+            },
+            generation,
+        )
+        .unwrap();
+    assert!(initial.shares_document(&scrolled));
+    assert_eq!(
+        initial.selected_or_cursor_range(),
+        scrolled.selected_or_cursor_range()
+    );
+    (initial, scrolled)
+}
+
 pub(crate) fn test_terminal_key_input_adapter() -> Box<dyn TerminalKeyInputAdapter> {
     crate::platform::macos_keyboard::MacosTerminalKeyInputAdapterFactory::new(
         OptionAsAltPolicy::default(),

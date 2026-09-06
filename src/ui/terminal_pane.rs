@@ -223,6 +223,7 @@ pub(crate) struct TerminalPane {
     accessibility: Arc<TerminalAccessibilityModel>,
     accessibility_element: Box<dyn TerminalAccessibilityAdapter>,
     pending_accessibility_notifications: AccessibilityNotifications,
+    accessibility_needs_presentation: bool,
     render_lifecycle: RenderLifecycle,
     pane_state: PaneTerminalState,
     pending_recovery: Option<RecoveryToken>,
@@ -478,6 +479,7 @@ impl TerminalPane {
             accessibility,
             accessibility_element,
             pending_accessibility_notifications: AccessibilityNotifications::default(),
+            accessibility_needs_presentation: false,
             render_lifecycle,
             pane_state: PaneTerminalState::default(),
             pending_recovery: None,
@@ -2074,6 +2076,7 @@ impl TerminalPane {
     }
 
     fn update_runtime_visibility(&mut self, native: WindowVisibility, cx: &mut Context<Self>) {
+        let was_presentable = self.render_lifecycle.can_present();
         let surface = SurfaceVisibility {
             application_active: self.application_active,
             key_window: self.operating_system_window_key,
@@ -2101,7 +2104,11 @@ impl TerminalPane {
                 live_resize: surface.live_resize,
             });
         }
-        if effects.request_redraw {
+        let accessibility_restored = !was_presentable
+            && self.render_lifecycle.can_present()
+            && (self.accessibility_needs_presentation
+                || !self.pending_accessibility_notifications.is_empty());
+        if effects.request_redraw || accessibility_restored {
             cx.notify();
         }
     }
@@ -2126,6 +2133,7 @@ impl TerminalPane {
                     notifications,
                     selection_sender,
                 });
+        self.accessibility_needs_presentation = false;
     }
 
     fn handle_event(&mut self, event: SessionEvent, cx: &mut Context<Self>) {
@@ -2276,6 +2284,8 @@ impl TerminalPane {
     }
 
     fn handle_accessibility(&mut self, accessibility: Arc<TerminalAccessibilityModel>) {
+        self.accessibility_needs_presentation |=
+            !accessibility.shares_snapshot(self.accessibility.as_ref());
         if accessibility.active_screen() != self.accessibility.active_screen()
             || !accessibility.shares_document(self.accessibility.as_ref())
         {
@@ -4840,6 +4850,53 @@ mod tests {
         cx.run_until_parked();
         assert!(pane.read_with(cx, |pane, _| pane.render_lifecycle.can_present()));
         assert!(notifications.get() > 0);
+        let (initial_accessibility, scrolled_accessibility) =
+            crate::terminal::testing::test_accessibility_viewport_models(
+                crate::terminal::PresentationGeneration::test(12),
+            );
+        pane.update(cx, |pane, _| pane.set_accessibility_hierarchy(true, 0));
+        records
+            .last_accessibility_sender()
+            .unwrap()
+            .try_send(initial_accessibility)
+            .unwrap();
+        cx.run_until_parked();
+        assert!(pane.read_with(cx, |pane, _| {
+            pane.pending_accessibility_notifications.is_empty()
+        }));
+        factory.set_visibility(
+            window_id,
+            WindowVisibility {
+                occluded: true,
+                ..WindowVisibility::default()
+            },
+        );
+        cx.run_until_parked();
+        pane.update(cx, |pane, _| {
+            pane.render_lifecycle.mark_presented(pane.screen.generation);
+        });
+        notifications.set(0);
+        records
+            .last_accessibility_sender()
+            .unwrap()
+            .try_send(scrolled_accessibility)
+            .unwrap();
+        cx.run_until_parked();
+        assert_eq!(notifications.get(), 0);
+        assert!(pane.read_with(cx, |pane, _| {
+            pane.pending_accessibility_notifications.is_empty()
+        }));
+        factory.set_visibility(window_id, WindowVisibility::default());
+        cx.run_until_parked();
+        assert!(
+            notifications.get() > 0,
+            "restoration must publish accessibility-only changes"
+        );
+        assert!(!pane.read_with(cx, |pane, _| pane.accessibility_needs_presentation));
+        let restored_notifications = notifications.get();
+        factory.set_visibility(window_id, WindowVisibility::default());
+        cx.run_until_parked();
+        assert_eq!(notifications.get(), restored_notifications);
         pane.update(cx, |pane, _| {
             pane.close();
             pane.close();
