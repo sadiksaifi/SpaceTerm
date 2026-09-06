@@ -1187,7 +1187,11 @@ updates before sampling; a bounded quiescence failure is NOT-RUN. Quit waits for
 lifecycle and does not manufacture a successful exit. The result channel has eight slots, the
 request channel one, and portable request policy rejects overlap, foreign receipts, illegal phase
 ordering, and invalid typed failure, generation, recovery, session, or rollback evidence before
-publication. Duplicate Retry activation cannot publish another retry receipt.
+publication. Repeated Retry activation cannot publish another retry receipt; an empty Selection
+can be restored and copied on a later attempt under the same authenticated request. Collection failure
+revokes producer admission, ends the writer, and stops authenticated visibility polling. Abandoned
+prepared observations and writer-start failure revoke the same authority. Deferred Failure Action
+faults are canceled when authority ends and checked again before rendering or Selection publication.
 
 The native audit retains independent private-owner filesystem, packaged-executable authentication,
 local byte transport, and continuous-clock capabilities. The current macOS filesystem capability

@@ -1659,14 +1659,11 @@ impl TerminalPane {
         let Some(pending) = self.pending_recovery else {
             return;
         };
-        if self.recovery_retry_requested == Some(pending)
-            || (self.failure_action_request.is_some() && self.failure_action_retry_requested)
-        {
+        if self.recovery_retry_requested == Some(pending) {
             return;
         }
-        if self.failure_action_request.is_some() {
+        if self.failure_action_request.is_some() && !self.failure_action_retry_requested {
             self.failure_action_retry_requested = true;
-            self.recovery_retry_requested = Some(pending);
             self.emit_failure_action(
                 FailureActionPhase::RetryRequested,
                 FailureActionResult::Accepted,
@@ -1896,19 +1893,26 @@ impl TerminalPane {
                 cx.background_executor()
                     .timer(RUNTIME_VISIBILITY_POLL_INTERVAL)
                     .await;
-                if this
-                    .update(cx, |pane, cx| {
-                        let Some(native) = pane
-                            .visibility_source
-                            .as_ref()
-                            .map(|source| source.current())
-                        else {
-                            return;
-                        };
-                        pane.update_runtime_visibility(native, cx);
-                    })
-                    .is_err()
-                {
+                let keep_polling = this.update(cx, |pane, cx| {
+                    if pane
+                        .runtime_observation
+                        .as_ref()
+                        .is_none_or(|observation| !observation.is_active())
+                    {
+                        pane.cancel_inactive_failure_action(cx);
+                        return false;
+                    }
+                    let Some(native) = pane
+                        .visibility_source
+                        .as_ref()
+                        .map(|source| source.current())
+                    else {
+                        return false;
+                    };
+                    pane.update_runtime_visibility(native, cx);
+                    true
+                });
+                if !matches!(keep_polling, Ok(true)) {
                     break;
                 }
             }
@@ -1930,10 +1934,57 @@ impl TerminalPane {
                     break;
                 }
             }
+            let _ = this.update(cx, |pane, cx| pane.cancel_inactive_failure_action(cx));
         }));
     }
 
+    fn cancel_inactive_failure_action(&mut self, cx: &mut Context<Self>) {
+        let Some(request) = self.failure_action_request.as_ref() else {
+            return;
+        };
+        if self
+            .failure_actions
+            .as_ref()
+            .is_some_and(FailureActionController::is_active)
+            && self
+                .runtime_observation
+                .as_ref()
+                .is_none_or(crate::terminal::RuntimeObservation::is_active)
+        {
+            return;
+        }
+        match request.case {
+            FailureActionCase::PresentationGlyph | FailureActionCase::RendererImagePreflight => {
+                self.paint_fault = None
+            }
+            FailureActionCase::RendererResourceBeforeSync
+            | FailureActionCase::RendererResourceAfterStaging => self
+                .graphics_cache
+                .update(cx, |cache, _| cache.cancel_injected_failure()),
+            FailureActionCase::PasteboardWrite => {
+                self.selection_pasteboard.cancel_injected_failure()
+            }
+            _ => {}
+        }
+        self.failure_action_request = None;
+        self.failure_action_trigger_pending = false;
+        self.failure_action_retry_requested = false;
+        self.failure_action_recovery_frame = None;
+        cx.notify();
+    }
+
     fn arm_failure_action(&mut self, request: FailureActionRequest, cx: &mut Context<Self>) {
+        if self
+            .failure_actions
+            .as_ref()
+            .is_none_or(|controller| !controller.is_active())
+            || self
+                .runtime_observation
+                .as_ref()
+                .is_some_and(|observation| !observation.is_active())
+        {
+            return;
+        }
         if self.failure_action_request.is_some() {
             if let Some(observation) = &self.runtime_observation {
                 observation.fail();
@@ -1947,6 +1998,10 @@ impl TerminalPane {
         self.failure_action_recovery_frame = None;
         self.failure_action_resource_rollback = GraphicsRollbackProof::default();
         self.emit_failure_action(FailureActionPhase::Armed, FailureActionResult::Accepted);
+        self.cancel_inactive_failure_action(cx);
+        if self.failure_action_request.is_none() {
+            return;
+        }
         match case {
             FailureActionCase::PresentationInvalidScale => {
                 self.failure_action_trigger_pending = true;
@@ -1995,6 +2050,7 @@ impl TerminalPane {
     }
 
     fn trigger_immediate_failure_action(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.cancel_inactive_failure_action(cx);
         let Some(request) = self.failure_action_request.as_ref() else {
             return;
         };
@@ -2779,6 +2835,7 @@ impl TerminalPane {
         recovery: Option<RecoveryToken>,
         cx: &mut Context<Self>,
     ) {
+        self.cancel_inactive_failure_action(cx);
         if let Some(copy) = self.selection_copy_from_result(result, cx) {
             if let Err(error) = self.selection_pasteboard.write(copy, cx) {
                 let _ = error;
@@ -9437,6 +9494,138 @@ mod tests {
     }
 
     #[gpui::test]
+    fn observation_revocation_should_cancel_deferred_presentation_renderer_and_copy_faults(
+        cx: &mut TestAppContext,
+    ) {
+        let (pane, cx, records) = terminal_pane_with_selection_copy(
+            cx,
+            SelectionCopy {
+                plain_text: "ordinary selection".into(),
+                html: None,
+            },
+        );
+        for (index, case) in [
+            FailureActionCase::PresentationInvalidScale,
+            FailureActionCase::PresentationGlyph,
+            FailureActionCase::RendererImagePreflight,
+            FailureActionCase::RendererResourceBeforeSync,
+            FailureActionCase::RendererResourceAfterStaging,
+            FailureActionCase::PasteboardWrite,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let (controller, _requests, events) = FailureActionController::test_channel();
+            cx.update(|window, cx| {
+                pane.update(cx, |pane, cx| {
+                    pane.failure_actions = Some(controller.clone());
+                    pane.arm_failure_action(
+                        FailureActionRequest {
+                            id: "a".repeat(64),
+                            sequence: 0,
+                            case,
+                        },
+                        cx,
+                    );
+                    assert_eq!(events.try_recv().unwrap().phase, FailureActionPhase::Armed);
+                    controller.test_revoke();
+                    // Both entry points consume cancellation before any deferred seam can fire.
+                    pane.trigger_immediate_failure_action(window, cx);
+                    pane.copy_selection_with_recovery(None, window, cx);
+                    assert!(pane.failure_action_request.is_none());
+                    assert!(pane.paint_fault.is_none());
+                    assert!(matches!(pane.pane_state, PaneTerminalState::Running));
+                    cx.notify();
+                });
+            });
+            records
+                .last_event_sender()
+                .unwrap()
+                .try_send(SessionEvent::Screen(graphics_screen(
+                    index as u64 + 1,
+                    index as u32 + 1,
+                )))
+                .unwrap();
+            cx.run_until_parked();
+            assert!(pane.read_with(cx, |pane, _| matches!(
+                pane.pane_state,
+                PaneTerminalState::Running
+            )));
+            assert!(events.try_recv().is_err());
+        }
+    }
+
+    #[gpui::test]
+    fn observation_request_received_before_revocation_should_not_arm_a_stale_failure(
+        cx: &mut TestAppContext,
+    ) {
+        let (pane, cx, _) = connected_terminal_pane(cx);
+        let (controller, requests, events) = FailureActionController::test_channel();
+        requests
+            .try_send(FailureActionRequest {
+                id: "f".repeat(64),
+                sequence: 0,
+                case: FailureActionCase::PresentationGlyph,
+            })
+            .unwrap();
+        let mut receive = std::pin::pin!(controller.receive());
+        let std::task::Poll::Ready(Some(request)) = std::future::Future::poll(
+            receive.as_mut(),
+            &mut std::task::Context::from_waker(std::task::Waker::noop()),
+        ) else {
+            panic!("queued request must be received");
+        };
+        controller.test_revoke();
+        pane.update(cx, |pane, cx| {
+            pane.failure_actions = Some(controller.clone());
+            pane.arm_failure_action(request, cx);
+        });
+        assert!(
+            pane.read_with(cx, |pane, _| pane.failure_action_request.is_none()
+                && pane.paint_fault.is_none()
+                && !pane.failure_action_trigger_pending)
+        );
+        assert!(events.try_recv().is_err());
+    }
+
+    #[gpui::test]
+    fn failed_observation_should_stop_authenticated_visibility_polling(cx: &mut TestAppContext) {
+        struct CountingVisibility(Rc<Cell<usize>>);
+        impl crate::platform::window_visibility::WindowVisibilitySource for CountingVisibility {
+            fn current(&self) -> WindowVisibility {
+                self.0.set(self.0.get() + 1);
+                WindowVisibility {
+                    minimized: true,
+                    occluded: true,
+                    live_resize: false,
+                }
+            }
+        }
+        let (pane, cx, _) = connected_terminal_pane(cx);
+        let calls = Rc::new(Cell::new(0));
+        let observation = crate::terminal::RuntimeObservation::new();
+        pane.update(cx, |pane, cx| {
+            pane.stop_surface_animations();
+            pane.visibility_source = Some(Box::new(CountingVisibility(calls.clone())));
+            pane.runtime_observation = Some(observation.clone());
+            pane.start_runtime_visibility_monitor(cx);
+        });
+        cx.run_until_parked();
+        cx.executor()
+            .advance_clock(RUNTIME_VISIBILITY_POLL_INTERVAL);
+        cx.run_until_parked();
+        assert!(calls.get() > 0);
+        observation.fail();
+        let before = calls.get();
+        for _ in 0..3 {
+            cx.executor()
+                .advance_clock(RUNTIME_VISIBILITY_POLL_INTERVAL);
+            cx.run_until_parked();
+        }
+        assert_eq!(calls.get(), before);
+    }
+
+    #[gpui::test]
     fn ordinary_pane_has_no_failure_action_monitor_or_armed_seam(cx: &mut TestAppContext) {
         let (pane, cx, _) = connected_terminal_pane(cx);
         assert!(pane.read_with(cx, |pane, _| {
@@ -10107,8 +10296,16 @@ mod tests {
     }
 
     #[gpui::test]
-    fn pasteboard_failure_action_does_not_complete_without_a_selection(cx: &mut TestAppContext) {
-        let (pane, cx, _) = connected_terminal_pane(cx);
+    fn pasteboard_failure_action_should_allow_retry_after_missing_selection_without_duplicate_receipt(
+        cx: &mut TestAppContext,
+    ) {
+        let (pane, cx, records) = terminal_pane_with_selection_copy(
+            cx,
+            SelectionCopy {
+                plain_text: "restored selection".into(),
+                html: None,
+            },
+        );
         let (controller, requests, events) = FailureActionController::test_channel();
         pane.update(cx, |pane, cx| {
             pane.failure_actions = Some(controller);
@@ -10122,14 +10319,12 @@ mod tests {
             })
             .unwrap();
         cx.run_until_parked();
+        cx.simulate_keystrokes("cmd-c");
+        cx.run_until_parked();
+        records.queue_selection_copy(None);
+        records.queue_selection_copy(None);
         cx.update(|window, cx| {
             pane.update(cx, |pane, cx| {
-                pane.present_failure(
-                    TerminalFailure::platform("write-selection-pasteboard"),
-                    true,
-                    Some(RecoveryAction::CopySelection),
-                );
-                pane.emit_injected_failure_if_matching();
                 pane.retry_recovery(window, cx);
                 pane.retry_recovery(window, cx);
             });
@@ -10142,10 +10337,26 @@ mod tests {
             vec![
                 FailureActionPhase::Armed,
                 FailureActionPhase::Injected,
-                FailureActionPhase::RetryRequested,
+                FailureActionPhase::RetryRequested
             ]
         );
         assert!(pane.read_with(cx, |pane, _| pane.failure_action_request.is_some()));
+        cx.update(|window, cx| {
+            pane.update(cx, |pane, cx| pane.retry_recovery(window, cx));
+        });
+        let completed = events.try_recv().unwrap();
+        assert_eq!(
+            (completed.phase, completed.result),
+            (
+                FailureActionPhase::Completed,
+                FailureActionResult::Recovered
+            )
+        );
+        assert!(events.try_recv().is_err());
+        assert!(
+            pane.read_with(cx, |pane, _| pane.failure_action_request.is_none()
+                && pane.pending_recovery.is_none())
+        );
     }
 
     #[gpui::test]

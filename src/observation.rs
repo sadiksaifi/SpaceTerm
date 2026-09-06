@@ -73,6 +73,28 @@ pub(crate) struct PreparedObservation {
     request: ObservationRequest,
     initial: ObservationSelection,
     owner: Weak<ObservationOwner>,
+    cleanup: PreparedCleanup,
+}
+
+struct PreparedCleanup {
+    owner: Weak<ObservationOwner>,
+    armed: bool,
+}
+impl PreparedCleanup {
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+impl Drop for PreparedCleanup {
+    fn drop(&mut self) {
+        if self.armed
+            && let Some(owner) = self.owner.upgrade()
+        {
+            owner.live.store(false, Ordering::Release);
+            owner.runtime.fail();
+            owner.runtime.revoke_producers();
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -296,6 +318,13 @@ fn failure_channels(
 }
 
 impl FailureActionController {
+    pub(crate) fn is_active(&self) -> bool {
+        self.live.load(Ordering::Acquire)
+    }
+    #[cfg(test)]
+    pub(crate) fn test_revoke(&self) {
+        self.live.store(false, Ordering::Release);
+    }
     pub(crate) async fn receive(&self) -> Option<FailureActionRequest> {
         let request = self.commands.recv().await.ok()?;
         self.live.load(Ordering::Acquire).then_some(request)
@@ -359,6 +388,9 @@ fn run_runtime_writer(
     let mut incoming = IncomingFrames::default();
 
     let last_periodic_ns = loop {
+        if observation.is_failed() {
+            return Err(RuntimeWriterError::Protocol);
+        }
         let now = Instant::now();
         let due = cadence.poll(now)?;
         if due == Some(true) {
@@ -1341,6 +1373,10 @@ impl ObservationLease {
             request,
             initial,
             owner: Arc::downgrade(&owner),
+            cleanup: PreparedCleanup {
+                owner: Arc::downgrade(&owner),
+                armed: true,
+            },
         })
     }
 }
@@ -1353,7 +1389,19 @@ impl Drop for ObservationLease {
     }
 }
 impl PreparedObservation {
-    pub(crate) fn emit(mut self) -> Result<(), AcceptanceObservationError> {
+    pub(crate) fn emit(self) -> Result<(), AcceptanceObservationError> {
+        self.emit_with(|work| {
+            thread::Builder::new()
+                .name("spaceterm-acceptance-observer".to_owned())
+                .spawn(work)
+        })
+    }
+    fn emit_with(
+        self,
+        spawn: impl FnOnce(
+            Box<dyn FnOnce() -> Result<(), RuntimeWriterError> + Send>,
+        ) -> io::Result<JoinHandle<Result<(), RuntimeWriterError>>>,
+    ) -> Result<(), AcceptanceObservationError> {
         let owner = self
             .owner
             .upgrade()
@@ -1368,51 +1416,53 @@ impl PreparedObservation {
         {
             return Err(AcceptanceObservationError::InvalidChallenge);
         }
+        let PreparedObservation {
+            mut request,
+            initial,
+            mut cleanup,
+            ..
+        } = self;
         let (shutdown, receiver) = mpsc::channel();
-        let observation = self.request.runtime.clone();
+        let observation = request.runtime.clone();
         let thread_observation = observation.clone();
         let live = Arc::clone(&owner.live);
-        let thread = thread::Builder::new()
-            .name("spaceterm-acceptance-observer".to_owned())
-            .spawn(move || {
-                let result = (|| {
-                    let record = format_observation(
-                        &self.request,
-                        &self.initial.selected_font,
-                        self.initial.geometry,
-                    );
-                    self.request
-                        .stream
-                        .set_read_timeout(Some(FAILURE_ACTION_POLL_INTERVAL))
-                        .map_err(|_| RuntimeWriterError::Transport)?;
-                    self.request
-                        .stream
-                        .set_write_timeout(Some(SOCKET_TIMEOUT))
-                        .map_err(|_| RuntimeWriterError::Transport)?;
-                    self.request
-                        .package
-                        .publish(self.request.stream.as_mut(), record)
-                        .map_err(|_| RuntimeWriterError::Transport)?;
-                    run_runtime_writer(
-                        self.request.stream.as_mut(),
-                        &thread_observation,
-                        &receiver,
-                        FailureTransport {
-                            nonce: self.request.nonce,
-                            run_id: self.request.run_id,
-                            app_sha256: self.request.app_sha256,
-                            requests: self.request.failure_action_sender,
-                            results: self.request.failure_result_receiver,
-                        },
-                    )
-                })();
-                live.store(false, Ordering::Release);
-                if result.is_err() {
-                    thread_observation.fail();
-                }
-                result
-            })
-            .map_err(|_| AcceptanceObservationError::Transport)?;
+        let thread = spawn(Box::new(move || {
+            let result = (|| {
+                let record = format_observation(&request, &initial.selected_font, initial.geometry);
+                request
+                    .stream
+                    .set_read_timeout(Some(FAILURE_ACTION_POLL_INTERVAL))
+                    .map_err(|_| RuntimeWriterError::Transport)?;
+                request
+                    .stream
+                    .set_write_timeout(Some(SOCKET_TIMEOUT))
+                    .map_err(|_| RuntimeWriterError::Transport)?;
+                request
+                    .package
+                    .publish(request.stream.as_mut(), record)
+                    .map_err(|_| RuntimeWriterError::Transport)?;
+                run_runtime_writer(
+                    request.stream.as_mut(),
+                    &thread_observation,
+                    &receiver,
+                    FailureTransport {
+                        nonce: request.nonce,
+                        run_id: request.run_id,
+                        app_sha256: request.app_sha256,
+                        requests: request.failure_action_sender,
+                        results: request.failure_result_receiver,
+                    },
+                )
+            })();
+            live.store(false, Ordering::Release);
+            if result.is_err() {
+                thread_observation.fail();
+            }
+            thread_observation.revoke_producers();
+            cleanup.disarm();
+            result
+        }))
+        .map_err(|_| AcceptanceObservationError::Transport)?;
         *slot = Some(RuntimeWriter { shutdown, thread });
         Ok(())
     }

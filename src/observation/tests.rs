@@ -863,3 +863,83 @@ fn observation_finalization_without_a_real_terminal_exit_should_remain_not_run()
     );
     assert!(finalizer.join().unwrap().is_err());
 }
+
+#[test]
+fn observation_writer_transport_failure_should_revoke_existing_pane_and_session_handles() {
+    let (owner, mut peer) = configured();
+    let claim = owner.claim_session("test-font", geometry()).unwrap();
+    let session = claim.session.consume().unwrap();
+    claim.lease.prepare_once(24, 80).unwrap().emit().unwrap();
+    let _ = read_text_frame(&mut peer);
+    drop(peer);
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while session.is_active() && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(1));
+    }
+    assert!(!session.is_active());
+    assert!(!claim.runtime.is_active());
+    assert!(session.is_failed());
+    let mut before = session.sample();
+    session.screen_published(99);
+    claim.runtime.ui_screen_applied(99, 100, 24, 2, true);
+    let after = session.sample();
+    before.continuous_ns = after.continuous_ns;
+    assert_eq!(before, after);
+    assert!(owner.finish().is_err());
+}
+
+#[test]
+fn observation_abandoned_preparation_or_writer_spawn_failure_should_revoke_all_handles() {
+    for spawn_failure in [false, true] {
+        let (owner, _peer) = configured();
+        let claim = owner.claim_session("test-font", geometry()).unwrap();
+        let session = claim.session.consume().unwrap();
+        let prepared = claim.lease.prepare_once(24, 80).unwrap();
+        if spawn_failure {
+            assert!(
+                prepared
+                    .emit_with(|_| Err(io::Error::from(io::ErrorKind::WouldBlock)))
+                    .is_err()
+            );
+        } else {
+            drop(prepared);
+        }
+        assert!(!session.is_active());
+        assert!(!claim.runtime.is_active());
+        assert!(session.is_failed());
+        assert!(owner.finish().is_err());
+    }
+}
+
+#[test]
+fn observation_writer_panic_should_revoke_authority_before_later_finalization() {
+    struct PanickingPackage;
+    impl PackagedExecutable for PanickingPackage {
+        fn publish(
+            &self,
+            _: &mut dyn ObservationTransport,
+            _: LaunchProof,
+        ) -> Result<(), AcceptanceObservationError> {
+            panic!("injected package writer panic");
+        }
+    }
+    let (stream, _peer) = MemoryTransport::pair().unwrap();
+    let owner = AuthenticatedObservation::configure(
+        Box::new(stream),
+        parse_challenge(challenge().as_bytes()).unwrap(),
+        Box::new(PanickingPackage),
+        Arc::new(TestClock::default()),
+    )
+    .unwrap();
+    let claim = owner.claim_session("test-font", geometry()).unwrap();
+    let session = claim.session.consume().unwrap();
+    claim.lease.prepare_once(24, 80).unwrap().emit().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while session.is_active() && Instant::now() < deadline {
+        thread::yield_now();
+    }
+    assert!(!session.is_active());
+    assert!(!claim.runtime.is_active());
+    assert!(session.is_failed());
+    assert!(owner.finish().is_err());
+}

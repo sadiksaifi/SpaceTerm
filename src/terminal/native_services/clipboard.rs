@@ -83,6 +83,10 @@ impl SelectionPublication {
         self.clipboard.publish(&copy, cx)
     }
 
+    pub(crate) fn cancel_injected_failure(&mut self) {
+        self.fail_next_write = false;
+    }
+
     pub(crate) fn fail_next_write(&mut self) {
         self.fail_next_write = true;
     }

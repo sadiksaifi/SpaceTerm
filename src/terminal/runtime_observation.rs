@@ -618,12 +618,16 @@ impl RuntimeObservation {
             .fetch_or(PRODUCERS_CLOSED, Ordering::AcqRel);
     }
 
+    pub(crate) fn is_active(&self) -> bool {
+        self.state.producers.load(Ordering::Acquire) & PRODUCERS_CLOSED == 0
+            && self
+                .producer_live
+                .as_ref()
+                .is_none_or(|live| live.load(Ordering::Acquire))
+    }
+
     fn begin_production(&self) -> Option<ProducerGuard<'_>> {
-        if self
-            .producer_live
-            .as_ref()
-            .is_some_and(|live| !live.load(Ordering::Acquire))
-        {
+        if !self.is_active() {
             return None;
         }
         let previous = self.state.producers.fetch_add(1, Ordering::AcqRel);
@@ -992,6 +996,7 @@ impl RuntimeObservation {
                 .store(RuntimeLifecycle::ObserverFailed as u8, Ordering::Release);
             self.push_observer_failure_transition();
         }
+        self.revoke_producers();
     }
 
     fn push_observer_failure_transition(&self) {
