@@ -169,3 +169,89 @@ fn main_thread() -> bool {
 
 #[link(name = "QuickLookUI", kind = "framework")]
 unsafe extern "C" {}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::OnceLock;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use objc::declare::ClassDecl;
+    use objc::runtime::{Class, Object, Sel};
+
+    use super::*;
+
+    static RELEASES: AtomicUsize = AtomicUsize::new(0);
+    static CLOSES: AtomicUsize = AtomicUsize::new(0);
+    static DETACHES: AtomicUsize = AtomicUsize::new(0);
+
+    extern "C" fn close(_: &Object, _: Sel) {
+        CLOSES.fetch_add(1, Ordering::SeqCst);
+    }
+
+    extern "C" fn detach(_: &Object, _: Sel, view: id) {
+        if view == nil {
+            DETACHES.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    extern "C" fn deallocate(this: &Object, _: Sel) {
+        RELEASES.fetch_add(1, Ordering::SeqCst);
+        // SAFETY: This NSObject subclass owns no additional storage.
+        unsafe {
+            let _: () = msg_send![super(this, class!(NSObject)), dealloc];
+        }
+    }
+
+    fn resource_class() -> &'static Class {
+        static CLASS: OnceLock<&'static Class> = OnceLock::new();
+        CLASS.get_or_init(|| {
+            let mut class =
+                ClassDecl::new("SpaceTermPreviewOwnershipProbe", class!(NSObject)).unwrap();
+            // SAFETY: The probe implements the exact selectors used by the production owner.
+            unsafe {
+                class.add_method(sel!(close), close as extern "C" fn(&Object, Sel));
+                class.add_method(
+                    sel!(setContentView:),
+                    detach as extern "C" fn(&Object, Sel, id),
+                );
+                class.add_method(sel!(dealloc), deallocate as extern "C" fn(&Object, Sel));
+            }
+            class.register()
+        })
+    }
+
+    fn owned_resources() -> OwnedQuickLookWindow {
+        // SAFETY: Both probe objects transfer one alloc/init retain into the production owner.
+        unsafe {
+            OwnedQuickLookWindow {
+                panel: msg_send![resource_class(), new],
+                preview: msg_send![resource_class(), new],
+            }
+        }
+    }
+
+    #[test]
+    fn native_preview_ownership_releases_replaced_and_final_resources_once() {
+        // NSObject probes exercise production Objective-C teardown without opening a test window.
+        // QLPreviewView visual presentation still requires an AppKit main-thread application host.
+        let mut current = Some(owned_resources());
+        drop(current.replace(owned_resources()));
+        assert_eq!(
+            (
+                RELEASES.load(Ordering::SeqCst),
+                CLOSES.load(Ordering::SeqCst),
+                DETACHES.load(Ordering::SeqCst)
+            ),
+            (2, 1, 1)
+        );
+        drop(current);
+        assert_eq!(
+            (
+                RELEASES.load(Ordering::SeqCst),
+                CLOSES.load(Ordering::SeqCst),
+                DETACHES.load(Ordering::SeqCst)
+            ),
+            (4, 2, 2)
+        );
+    }
+}

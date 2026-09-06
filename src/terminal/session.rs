@@ -37,16 +37,16 @@ use crate::terminal::key::{InputModifiers, KeyInput, PhysicalKey};
 use crate::terminal::metadata::{RemoteTerminalMetadataContext, TerminalMetadataContext};
 use crate::terminal::osc52::{
     MAX_OSC52_CONTENT_BYTES, Osc52AccessPolicy, Osc52AuthorizationDecision, Osc52AuthorizationId,
-    Osc52AuthorizationPolicy, Osc52AuthorizationRequest, Osc52Clipboard, Osc52ClipboardFactory,
-    Osc52Effect, Osc52Filter, Osc52Operation,
+    Osc52AuthorizationPolicy, Osc52AuthorizationRequest, Osc52AuthorizationSchedule,
+    Osc52Clipboard, Osc52ClipboardFactory, Osc52Effect, Osc52Filter, Osc52Operation,
 };
 #[cfg(test)]
 use crate::terminal::osc52::{
     Osc52ClipboardError, UnavailableOsc52Clipboard, UnavailableOsc52ClipboardFactory,
 };
 use crate::terminal::paste::{
-    PasteConfirmationId, PasteDecision, PasteRejection, PasteRequestOutcome, PasteResolution,
-    PreparedPaste,
+    PasteConfirmationId, PasteConfirmationSchedule, PasteDecision, PasteRejection,
+    PasteRequestOutcome, PasteResolution, PreparedPaste,
 };
 use crate::terminal::selection::{SelectionCopy, SelectionCopyOptions};
 use crate::terminal::{FindDirection, FindQueryGeneration, RuntimeObservation};
@@ -54,8 +54,6 @@ use crate::terminal::{FindDirection, FindQueryGeneration, RuntimeObservation};
 const FINAL_CHILD_WAIT_TIMEOUT: Duration = Duration::from_secs(2);
 const PTY_OUTPUT_QUEUE_CAPACITY: usize = 8;
 const HIDDEN_INPUT_POLL_INTERVAL: Duration = Duration::from_millis(200);
-const PASTE_CONFIRMATION_TIMEOUT: Duration = Duration::from_secs(30);
-const OSC52_AUTHORIZATION_TIMEOUT: Duration = Duration::from_secs(30);
 const ACCESSIBILITY_NORMAL_COMMAND_BURST: u8 = 8;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -357,6 +355,10 @@ pub(crate) trait TerminalSessionHandle {
         decision: Osc52AuthorizationDecision,
     );
     fn copy_selection(&self) -> Result<Option<SelectionCopy>, SelectionCopyError>;
+    fn copy_selection_at(
+        &self,
+        generation: PresentationGeneration,
+    ) -> Result<Option<SelectionCopy>, SelectionCopyError>;
     fn inject_acceptance_failure(&self, failure: AcceptanceSessionFailure);
     fn accessibility_selection_sender(&self) -> Option<AccessibilitySelectionSender> {
         None
@@ -1053,12 +1055,26 @@ impl TerminalSession {
     }
 
     pub(crate) fn copy_selection(&self) -> Result<Option<SelectionCopy>, SelectionCopyError> {
+        self.copy_selection_query(None)
+    }
+
+    pub(crate) fn copy_selection_at(
+        &self,
+        generation: PresentationGeneration,
+    ) -> Result<Option<SelectionCopy>, SelectionCopyError> {
+        self.copy_selection_query(Some(generation))
+    }
+
+    fn copy_selection_query(
+        &self,
+        generation: Option<PresentationGeneration>,
+    ) -> Result<Option<SelectionCopy>, SelectionCopyError> {
         let Some(commands) = &self.commands else {
             return Err(SelectionCopyError::WorkerStopped);
         };
         let (reply, receiver) = mpsc::sync_channel(1);
         commands
-            .send(Command::SelectionCopy(reply))
+            .send(Command::SelectionCopy(generation, reply))
             .map_err(|_| SelectionCopyError::WorkerStopped)?;
         receiver
             .recv()
@@ -1166,6 +1182,13 @@ impl TerminalSessionHandle for TerminalSession {
         Self::copy_selection(self)
     }
 
+    fn copy_selection_at(
+        &self,
+        generation: PresentationGeneration,
+    ) -> Result<Option<SelectionCopy>, SelectionCopyError> {
+        Self::copy_selection_at(self, generation)
+    }
+
     fn inject_acceptance_failure(&self, failure: AcceptanceSessionFailure) {
         if let Some(commands) = &self.commands
             && commands.send(Command::AcceptanceFailure(failure)).is_err()
@@ -1225,7 +1248,6 @@ struct ReaderEventBatch {
     reader_stopped: Option<Option<crate::platform::native_pty::NativePtyReadFailure>>,
 }
 
-#[derive(Debug)]
 enum Command {
     Key(KeyInput),
     Focus(bool),
@@ -1252,7 +1274,10 @@ enum Command {
     ResolveOsc52Authorization(Osc52AuthorizationId, Osc52AuthorizationDecision),
     Osc52AuthorizationExpired(Osc52AuthorizationId),
     ResumeOsc52Output,
-    SelectionCopy(mpsc::SyncSender<Result<Option<SelectionCopy>, SelectionCopyError>>),
+    SelectionCopy(
+        Option<PresentationGeneration>,
+        mpsc::SyncSender<Result<Option<SelectionCopy>, SelectionCopyError>>,
+    ),
     AccessibilitySelection(AccessibilitySelectionRequest),
     AccessibilityContinue,
     SelectionAutoscrollTick(PresentationGeneration),
@@ -1260,6 +1285,37 @@ enum Command {
     AcceptanceFailure(AcceptanceSessionFailure),
     Shutdown,
     PollHiddenInput,
+}
+
+impl fmt::Debug for Command {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let name = match self {
+            Self::Key(..) => "Key",
+            Self::Focus(..) => "Focus",
+            Self::Resize => "Resize",
+            Self::Pointer(..) => "Pointer",
+            Self::PointerAndCopySelection(..) => "PointerAndCopySelection",
+            Self::Wheel(..) => "Wheel",
+            Self::ScrollTo(..) => "ScrollTo",
+            Self::FindQueryChanged => "FindQueryChanged",
+            Self::NavigateFind(..) => "NavigateFind",
+            Self::RequestPaste(..) => "RequestPaste",
+            Self::ResolvePaste(..) => "ResolvePaste",
+            Self::PasteConfirmationExpired => "PasteConfirmationExpired",
+            Self::ResolveOsc52Authorization(..) => "ResolveOsc52Authorization",
+            Self::Osc52AuthorizationExpired(..) => "Osc52AuthorizationExpired",
+            Self::ResumeOsc52Output => "ResumeOsc52Output",
+            Self::SelectionCopy(..) => "SelectionCopy",
+            Self::AccessibilitySelection(..) => "AccessibilitySelection",
+            Self::AccessibilityContinue => "AccessibilityContinue",
+            Self::SelectionAutoscrollTick(..) => "SelectionAutoscrollTick",
+            Self::ReaderReady => "ReaderReady",
+            Self::AcceptanceFailure(..) => "AcceptanceFailure",
+            Self::Shutdown => "Shutdown",
+            Self::PollHiddenInput => "PollHiddenInput",
+        };
+        formatter.write_str(name)
+    }
 }
 
 struct TerminalWorker {
@@ -1376,131 +1432,6 @@ impl HiddenInputSchedule {
             self.active = active;
             Some(active)
         }
-    }
-}
-
-struct PendingOsc52Authorization {
-    id: Osc52AuthorizationId,
-    operation: Osc52Operation,
-    deadline: Instant,
-}
-
-#[derive(Default)]
-struct Osc52AuthorizationSchedule {
-    next_id: u64,
-    pending: Option<PendingOsc52Authorization>,
-}
-
-impl Osc52AuthorizationSchedule {
-    fn deadline(&self) -> Option<Instant> {
-        self.pending.as_ref().map(|pending| pending.deadline)
-    }
-
-    fn is_pending(&self) -> bool {
-        self.pending.is_some()
-    }
-
-    fn create(
-        &mut self,
-        operation: Osc52Operation,
-        now: Instant,
-    ) -> Option<Osc52AuthorizationRequest> {
-        if self.pending.is_some() {
-            return None;
-        }
-        self.next_id = self.next_id.wrapping_add(1).max(1);
-        let id = Osc52AuthorizationId::from_counter(self.next_id);
-        let request = Osc52AuthorizationRequest {
-            id,
-            access: operation.access(),
-            target: operation.target(),
-            byte_len: operation.byte_len(),
-        };
-        self.pending = Some(PendingOsc52Authorization {
-            id,
-            operation,
-            deadline: now + OSC52_AUTHORIZATION_TIMEOUT,
-        });
-        Some(request)
-    }
-
-    fn take(&mut self, id: Osc52AuthorizationId, now: Instant) -> Option<Osc52Operation> {
-        let pending = self.pending.as_ref()?;
-        if pending.id != id || now >= pending.deadline {
-            return None;
-        }
-        self.pending.take().map(|pending| pending.operation)
-    }
-
-    fn expire(&mut self, now: Instant) -> Option<Osc52AuthorizationId> {
-        if self.deadline().is_some_and(|deadline| now >= deadline) {
-            self.pending.take().map(|pending| pending.id)
-        } else {
-            None
-        }
-    }
-
-    fn cancel(&mut self) {
-        self.pending = None;
-    }
-}
-
-struct PendingPaste {
-    id: PasteConfirmationId,
-    payload: PreparedPaste,
-    deadline: Instant,
-}
-
-#[derive(Default)]
-struct PasteConfirmationSchedule {
-    next_id: u64,
-    pending: Option<PendingPaste>,
-}
-
-impl PasteConfirmationSchedule {
-    fn deadline(&self) -> Option<Instant> {
-        self.pending.as_ref().map(|pending| pending.deadline)
-    }
-
-    fn create(
-        &mut self,
-        payload: PreparedPaste,
-        now: Instant,
-    ) -> Option<crate::terminal::PasteConfirmation> {
-        if self.pending.is_some() {
-            return None;
-        }
-        self.next_id = self.next_id.wrapping_add(1).max(1);
-        let id = PasteConfirmationId::new(self.next_id);
-        let confirmation = payload.confirmation(id);
-        self.pending = Some(PendingPaste {
-            id,
-            payload,
-            deadline: now + PASTE_CONFIRMATION_TIMEOUT,
-        });
-        Some(confirmation)
-    }
-
-    fn take(&mut self, id: PasteConfirmationId, now: Instant) -> Option<PreparedPaste> {
-        let pending = self.pending.take()?;
-        if pending.id == id && now < pending.deadline {
-            Some(pending.payload)
-        } else {
-            None
-        }
-    }
-
-    fn expire(&mut self, now: Instant) -> bool {
-        if self.deadline().is_some_and(|deadline| now >= deadline) {
-            self.pending = None;
-            true
-        } else {
-            false
-        }
-    }
-
-    fn cancel(&mut self) {
-        self.pending = None;
     }
 }
 
@@ -1946,12 +1877,18 @@ impl TerminalWorker {
                 true
             }
             Command::ResumeOsc52Output => self.resume_osc52_output(),
-            Command::SelectionCopy(reply) => {
-                let _ = reply.send(
+            Command::SelectionCopy(generation, reply) => {
+                let selection = if generation.is_some_and(|generation| {
+                    generation != self.emulator.presentation_generation()
+                        || self.emulator.synchronized_output_deadline().is_some()
+                }) {
+                    Ok(None)
+                } else {
                     self.emulator
                         .selection_copy(SelectionCopyOptions::default())
-                        .map_err(|_| SelectionCopyError::Formatting),
-                );
+                        .map_err(|_| SelectionCopyError::Formatting)
+                };
+                let _ = reply.send(selection);
                 true
             }
             Command::AccessibilitySelection(request) => {
@@ -3584,26 +3521,6 @@ mod tests {
         assert_eq!(records.snapshot().pty_drops, 1);
     }
 
-    #[test]
-    fn osc52_authorization_allows_one_pending_request_and_rejects_stale_ids() {
-        let now = Instant::now();
-        let mut schedule = Osc52AuthorizationSchedule::default();
-        let operation = Osc52Operation::Read {
-            target: crate::terminal::Osc52Target::Standard,
-            terminator: crate::terminal::osc52::Osc52Terminator::StringTerminator,
-        };
-        let request = schedule.create(operation.clone(), now).unwrap();
-
-        assert!(schedule.create(operation, now).is_none());
-        assert_eq!(schedule.take(Osc52AuthorizationId::new(999), now), None);
-        assert!(schedule.is_pending());
-        assert_eq!(
-            schedule.expire(now + OSC52_AUTHORIZATION_TIMEOUT),
-            Some(request.id)
-        );
-        assert!(!schedule.is_pending());
-    }
-
     impl Drop for ScriptedPty {
         fn drop(&mut self) {
             self.records.update(|state| {
@@ -4646,6 +4563,113 @@ mod tests {
     }
 
     #[test]
+    fn copy_selection_at_rejects_a_stale_menu_generation_when_the_worker_is_ahead() {
+        let (result, reader_steps, records) = start_scripted_session(ScriptedPtyOptions::default());
+        let (mut session, events, _accessibility) = result.unwrap();
+        reader_steps
+            .send(ReaderStep::Bytes(b"selected".to_vec()))
+            .unwrap();
+        let SessionEvent::Screen(screen) = receive_event(
+            &events,
+            "the selectable terminal output",
+            |event| matches!(event, SessionEvent::Screen(screen) if screen_text(screen).contains("selected")),
+        ) else {
+            unreachable!()
+        };
+        let pointer = |phase, x| PointerInput {
+            generation: screen.generation,
+            phase,
+            button: (phase != PointerPhase::Motion).then_some(PointerButton::Left),
+            position: SurfacePosition { x, y: 1.0 },
+            modifiers: InputModifiers::default(),
+            shift_selection: ShiftSelectionPolicy::default(),
+        };
+        session.pointer(pointer(PointerPhase::Press, 1.0));
+        session.pointer(pointer(PointerPhase::Motion, 63.0));
+        assert_eq!(
+            session
+                .pointer_and_copy_selection(pointer(PointerPhase::Release, 63.0))
+                .unwrap()
+                .unwrap()
+                .plain_text,
+            "selected",
+        );
+        let mut menu_generation = screen.generation;
+        while let Ok(event) = events.try_recv() {
+            if let SessionEvent::Screen(screen) = event {
+                menu_generation = screen.generation;
+            }
+        }
+        assert_eq!(
+            session
+                .copy_selection_at(menu_generation)
+                .unwrap()
+                .unwrap()
+                .plain_text,
+            "selected"
+        );
+
+        // Keep the UI's snapshot unread while terminal output advances the worker.
+        reader_steps
+            .send(ReaderStep::Bytes(b"\r\nnew\x1b[6n".to_vec()))
+            .unwrap();
+        records.wait_for("the worker to process later output", |state| {
+            !state.written.is_empty()
+        });
+        assert_eq!(session.copy_selection_at(menu_generation).unwrap(), None);
+        assert_eq!(
+            session.copy_selection().unwrap().unwrap().plain_text,
+            "selected"
+        );
+
+        let SessionEvent::Screen(current) = receive_event(
+            &events,
+            "the newer worker presentation",
+            |event| matches!(event, SessionEvent::Screen(screen) if screen_text(screen).contains("new")),
+        ) else {
+            unreachable!()
+        };
+        assert!(current.generation > menu_generation);
+        assert_eq!(
+            session
+                .copy_selection_at(current.generation)
+                .unwrap()
+                .unwrap()
+                .plain_text,
+            "selected"
+        );
+        // A synchronized transaction retains its published generation while hiding mutations.
+        let replies = records.snapshot().written.len();
+        reader_steps
+            .send(ReaderStep::Bytes(
+                b"\x1b[?2026h\r\ntransaction\x1b[6n".to_vec(),
+            ))
+            .unwrap();
+        records.wait_for(
+            "the worker to process a synchronized transaction",
+            |state| state.written.len() > replies,
+        );
+        assert_eq!(session.copy_selection_at(current.generation).unwrap(), None);
+        session.shutdown();
+    }
+
+    #[test]
+    fn command_debug_never_exposes_paste_or_key_contents() {
+        let (reply, _receiver) = async_channel::bounded(1);
+        assert_eq!(
+            format!(
+                "{:?}",
+                Command::RequestPaste("private paste content".to_owned(), reply)
+            ),
+            "RequestPaste",
+        );
+        assert_eq!(
+            format!("{:?}", Command::Key(text_key(KeyAction::Press))),
+            "Key"
+        );
+    }
+
+    #[test]
     fn pointer_release_copy_should_observe_the_completed_selection_atomically() {
         let (result, reader_steps, _records) =
             start_scripted_session(ScriptedPtyOptions::default());
@@ -5091,17 +5115,6 @@ mod tests {
         );
         assert!(records.snapshot().written.is_empty());
         session.shutdown();
-    }
-
-    #[test]
-    fn paste_confirmation_schedule_expires_without_exposing_payload() {
-        let now = Instant::now();
-        let mut schedule = PasteConfirmationSchedule::default();
-        let payload = PreparedPaste::prepare("first\nsecond".to_owned()).unwrap();
-        let confirmation = schedule.create(payload, now).unwrap();
-
-        assert!(schedule.expire(now + PASTE_CONFIRMATION_TIMEOUT));
-        assert_eq!(schedule.take(confirmation.id, now), None);
     }
 
     #[test]

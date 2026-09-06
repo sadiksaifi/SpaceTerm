@@ -485,4 +485,403 @@ mod tests {
             assert_eq!(text.as_deref(), Some("service text\n"));
         }
     }
+    // NSResponder objects have no window or application attachment here. Each fixture is confined
+    // to its test thread, and this lock serializes Objective-C class registration and callbacks.
+    static NATIVE_REQUESTOR_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    struct NativePool(id);
+
+    impl NativePool {
+        fn new() -> Self {
+            // SAFETY: The pool is created and drained on the same synchronous test thread.
+            Self(unsafe { NSAutoreleasePool::new(nil) })
+        }
+    }
+
+    impl Drop for NativePool {
+        fn drop(&mut self) {
+            unsafe { self.0.drain() };
+        }
+    }
+
+    struct NativeObject(std::cell::Cell<id>);
+
+    impl NativeObject {
+        fn requestor(endpoint: Rc<dyn ServiceEndpoint>) -> Rc<Self> {
+            // SAFETY: This constructs the registered production responder with the same owned
+            // ivar representation as install, without creating an NSView or NSApplication.
+            unsafe {
+                let class = services_responder_class().unwrap();
+                let object: id = msg_send![class, alloc];
+                let object: id = msg_send![object, init];
+                assert_ne!(object, nil);
+                let state = Box::new(Rc::new(ServiceRequests::new(endpoint)));
+                (*object).set_ivar(SERVICES_STATE_IVAR, Box::into_raw(state).cast::<c_void>());
+                Rc::new(Self(std::cell::Cell::new(object)))
+            }
+        }
+
+        fn validate(&self) -> Option<Rc<Self>> {
+            let _pool = NativePool::new();
+            let object = self.0.get();
+            assert_ne!(object, nil);
+            // SAFETY: The receiver is live at message entry. Tests may destroy it reentrantly
+            // through the endpoint; the production callback must survive that destruction.
+            unsafe {
+                let operation: id = msg_send![object,
+                    validRequestorForSendType: NSPasteboardTypeString
+                    returnType: NSPasteboardTypeString
+                ];
+                if operation == nil {
+                    return None;
+                }
+                let operation: id = msg_send![operation, retain];
+                Some(Rc::new(Self(std::cell::Cell::new(operation))))
+            }
+        }
+
+        fn write(&self, pasteboard: id) -> bool {
+            let object = self.0.get();
+            assert_ne!(object, nil);
+            // SAFETY: These are the registered production selector and an owned NSPasteboard.
+            unsafe {
+                let types = NSArray::arrayWithObject(nil, NSPasteboardTypeString);
+                let result: BOOL =
+                    msg_send![object, writeSelectionToPasteboard: pasteboard types: types];
+                result == YES
+            }
+        }
+
+        fn read(&self, pasteboard: id) -> bool {
+            let object = self.0.get();
+            assert_ne!(object, nil);
+            // SAFETY: The receiver is live at entry and the isolated pasteboard remains owned.
+            let result: BOOL =
+                unsafe { msg_send![object, readSelectionFromPasteboard: pasteboard] };
+            result == YES
+        }
+
+        fn release(&self) {
+            let object = self.0.replace(nil);
+            if object != nil {
+                // SAFETY: This consumes only the fixture's owned retain under normal Cocoa rules.
+                let _: () = unsafe { msg_send![object, release] };
+            }
+        }
+
+        fn deallocate(&self) {
+            let object = self.0.replace(nil);
+            assert_ne!(object, nil);
+            // SAFETY: The fixture owns the sole retain and is unattached to an NSView. AppKit's
+            // final-release scheduling does not run synchronously on the Rust harness thread.
+            // Deliberately dispatch the actual production dealloc selector here to probe
+            // reentrant callback ownership and superclass teardown. The cleared cell prevents
+            // a second release. This is no claim about native window removal or release timing.
+            unsafe {
+                let count: NSUInteger = msg_send![object, retainCount];
+                assert_eq!(count, 1);
+                let _: () = msg_send![object, dealloc];
+            }
+        }
+    }
+
+    impl Drop for NativeObject {
+        fn drop(&mut self) {
+            self.release();
+        }
+    }
+
+    struct IsolatedPasteboard(id);
+
+    impl IsolatedPasteboard {
+        fn new() -> Self {
+            // SAFETY: The test's outer pool retains the unique pasteboard through every callback.
+            Self(unsafe { NSPasteboard::pasteboardWithUniqueName(nil) })
+        }
+
+        fn set_text(&self, text: &str) {
+            assert!(unsafe { write_service_text(self.0, text) });
+        }
+
+        fn text(&self) -> Option<String> {
+            unsafe { read_service_text(self.0) }
+        }
+    }
+
+    impl Drop for IsolatedPasteboard {
+        fn drop(&mut self) {
+            // SAFETY: This fixture exclusively owns its named server-side pasteboard.
+            unsafe { self.0.releaseGlobally() };
+        }
+    }
+
+    type NativeCallback = std::cell::RefCell<Option<Box<dyn FnOnce()>>>;
+
+    struct NativeEndpoint {
+        origin: std::cell::Cell<crate::terminal::NativeServiceOrigin>,
+        selection: &'static str,
+        inserted: std::cell::RefCell<Vec<(crate::terminal::NativeServiceOrigin, String)>>,
+        on_status: NativeCallback,
+        on_selection: NativeCallback,
+        on_insert: NativeCallback,
+    }
+
+    impl NativeEndpoint {
+        fn new(selection: &'static str) -> Rc<Self> {
+            Rc::new(Self {
+                origin: std::cell::Cell::new(native_origin(1)),
+                selection,
+                inserted: std::cell::RefCell::new(Vec::new()),
+                on_status: std::cell::RefCell::new(None),
+                on_selection: std::cell::RefCell::new(None),
+                on_insert: std::cell::RefCell::new(None),
+            })
+        }
+
+        fn invoke(callback: &NativeCallback) {
+            let callback = callback.borrow_mut().take();
+            if let Some(callback) = callback {
+                callback();
+            }
+        }
+    }
+
+    impl ServiceEndpoint for NativeEndpoint {
+        fn status(&self) -> crate::terminal::NativeServiceStatus {
+            Self::invoke(&self.on_status);
+            crate::terminal::NativeServiceStatus::new(
+                crate::terminal::NativeServiceCapabilities::new(true, true),
+                Some(self.origin.get()),
+            )
+        }
+
+        fn selection(
+            &self,
+            origin: crate::terminal::NativeServiceOrigin,
+        ) -> Option<crate::terminal::SelectionCopy> {
+            Self::invoke(&self.on_selection);
+            (origin == self.origin.get()).then(|| crate::terminal::SelectionCopy {
+                plain_text: self.selection.to_owned(),
+                html: None,
+            })
+        }
+
+        fn insert_text(&self, origin: crate::terminal::NativeServiceOrigin, text: String) -> bool {
+            Self::invoke(&self.on_insert);
+            if origin != self.origin.get() {
+                return false;
+            }
+            self.inserted.borrow_mut().push((origin, text));
+            true
+        }
+    }
+
+    fn native_origin(generation: u64) -> crate::terminal::NativeServiceOrigin {
+        crate::terminal::NativeServiceOrigin::new(
+            crate::domain::WorkspaceId::new(1),
+            crate::domain::TabId::new(2),
+            crate::domain::PaneId::new(3),
+            4,
+            5,
+            generation,
+        )
+    }
+
+    #[test]
+    fn native_selectors_publish_selection_and_accept_exactly_one_return() {
+        let _serial = NATIVE_REQUESTOR_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _pool = NativePool::new();
+        let endpoint = NativeEndpoint::new("selected 日本語");
+        let requestor = NativeObject::requestor(endpoint.clone());
+        let operation = requestor.validate().unwrap();
+        let board = IsolatedPasteboard::new();
+
+        assert!(operation.write(board.0));
+        assert_eq!(board.text().as_deref(), Some("selected 日本語"));
+        assert!(!operation.write(board.0));
+        board.set_text("transformed text");
+        assert!(operation.read(board.0));
+        assert!(!operation.read(board.0));
+        assert_eq!(
+            *endpoint.inserted.borrow(),
+            vec![(native_origin(1), "transformed text".into())]
+        );
+    }
+
+    #[test]
+    fn native_selectors_reject_stale_validation_and_stale_return() {
+        let _serial = NATIVE_REQUESTOR_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _pool = NativePool::new();
+        let endpoint = NativeEndpoint::new("successor selection");
+        let requestor = NativeObject::requestor(endpoint.clone());
+        let stale = requestor.validate().unwrap();
+        let board = IsolatedPasteboard::new();
+        board.set_text("untouched");
+        endpoint.origin.set(native_origin(2));
+        assert!(!stale.write(board.0));
+        assert_eq!(board.text().as_deref(), Some("untouched"));
+
+        let current = requestor.validate().unwrap();
+        assert!(current.write(board.0));
+        board.set_text("stale return");
+        endpoint.origin.set(native_origin(3));
+        assert!(!current.read(board.0));
+        endpoint.origin.set(native_origin(2));
+        assert!(!current.read(board.0));
+        assert!(endpoint.inserted.borrow().is_empty());
+    }
+
+    #[test]
+    fn native_requestors_keep_overlapping_window_equivalent_owners_isolated() {
+        let _serial = NATIVE_REQUESTOR_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _pool = NativePool::new();
+        let first = NativeEndpoint::new("first selection");
+        let second = NativeEndpoint::new("second selection");
+        let first_requestor = NativeObject::requestor(first.clone());
+        let second_requestor = NativeObject::requestor(second.clone());
+        let first_operation = first_requestor.validate().unwrap();
+        let overlap = first_requestor.validate().unwrap();
+        let second_operation = second_requestor.validate().unwrap();
+        let first_board = IsolatedPasteboard::new();
+        let second_board = IsolatedPasteboard::new();
+
+        assert!(first_operation.write(first_board.0));
+        assert!(!overlap.write(first_board.0));
+        assert!(second_operation.write(second_board.0));
+        assert!(!first_operation.read(second_board.0));
+        assert!(!second_operation.read(first_board.0));
+        first_requestor.deallocate();
+        assert!(!first_operation.read(first_board.0));
+        second_board.set_text("second return");
+        assert!(second_operation.read(second_board.0));
+        assert!(first.inserted.borrow().is_empty());
+        assert_eq!(
+            *second.inserted.borrow(),
+            vec![(native_origin(1), "second return".into())]
+        );
+    }
+
+    #[test]
+    fn native_validation_survives_requestor_deallocation_inside_status() {
+        let _serial = NATIVE_REQUESTOR_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _pool = NativePool::new();
+        let endpoint = NativeEndpoint::new("selected");
+        let requestor = NativeObject::requestor(endpoint.clone());
+        let state = unsafe { services_state(&*requestor.0.get()) }.unwrap();
+        let weak_state = Rc::downgrade(&state);
+        drop(state);
+        let callback_requestor = Rc::clone(&requestor);
+        let observed_state = weak_state.clone();
+        *endpoint.on_status.borrow_mut() = Some(Box::new(move || {
+            callback_requestor.deallocate();
+            let retained = observed_state.upgrade().unwrap();
+            assert!(retained.is_retired());
+        }));
+
+        assert!(requestor.validate().is_none());
+        assert!(weak_state.upgrade().is_none());
+        let successor = NativeObject::requestor(endpoint);
+        assert!(successor.validate().is_some());
+    }
+
+    #[test]
+    fn native_selection_survives_operation_and_owner_deallocation_without_publishing() {
+        let _serial = NATIVE_REQUESTOR_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _pool = NativePool::new();
+        let endpoint = NativeEndpoint::new("selected");
+        let requestor = NativeObject::requestor(endpoint.clone());
+        let operation = requestor.validate().unwrap();
+        let state = unsafe { services_operation_state(&*operation.0.get()) }.unwrap();
+        let weak_state = Rc::downgrade(&state);
+        drop(state);
+        let callback_requestor = Rc::clone(&requestor);
+        let callback_operation = Rc::clone(&operation);
+        let observed_state = weak_state.clone();
+        *endpoint.on_selection.borrow_mut() = Some(Box::new(move || {
+            callback_operation.deallocate();
+            callback_requestor.deallocate();
+            assert!(observed_state.upgrade().is_some());
+        }));
+        let board = IsolatedPasteboard::new();
+        board.set_text("untouched");
+
+        assert!(!operation.write(board.0));
+        assert_eq!(board.text().as_deref(), Some("untouched"));
+        assert!(weak_state.upgrade().is_none());
+        let successor = NativeObject::requestor(endpoint.clone());
+        assert!(successor.validate().unwrap().write(board.0));
+        assert!(endpoint.inserted.borrow().is_empty());
+    }
+
+    #[test]
+    fn native_return_survives_operation_and_owner_deallocation_inside_status() {
+        let _serial = NATIVE_REQUESTOR_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _pool = NativePool::new();
+        let endpoint = NativeEndpoint::new("selected");
+        let requestor = NativeObject::requestor(endpoint.clone());
+        let operation = requestor.validate().unwrap();
+        let board = IsolatedPasteboard::new();
+        assert!(operation.write(board.0));
+        board.set_text("returned after retirement");
+        let state = unsafe { services_operation_state(&*operation.0.get()) }.unwrap();
+        let weak_state = Rc::downgrade(&state);
+        drop(state);
+        let callback_requestor = Rc::clone(&requestor);
+        let callback_operation = Rc::clone(&operation);
+        let observed_state = weak_state.clone();
+        *endpoint.on_status.borrow_mut() = Some(Box::new(move || {
+            callback_operation.deallocate();
+            callback_requestor.deallocate();
+            assert!(observed_state.upgrade().is_some());
+        }));
+
+        assert!(!operation.read(board.0));
+        assert!(weak_state.upgrade().is_none());
+        assert!(endpoint.inserted.borrow().is_empty());
+        let successor = NativeObject::requestor(endpoint);
+        assert!(successor.validate().unwrap().write(board.0));
+    }
+
+    #[test]
+    fn native_operation_deallocation_inside_insertion_releases_state_and_gate_after_callback() {
+        let _serial = NATIVE_REQUESTOR_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _pool = NativePool::new();
+        let endpoint = NativeEndpoint::new("selected");
+        let requestor = NativeObject::requestor(endpoint.clone());
+        let operation = requestor.validate().unwrap();
+        let board = IsolatedPasteboard::new();
+        assert!(operation.write(board.0));
+        board.set_text("accepted return");
+        let state = unsafe { services_operation_state(&*operation.0.get()) }.unwrap();
+        let weak_state = Rc::downgrade(&state);
+        drop(state);
+        let callback_operation = Rc::clone(&operation);
+        let observed_state = weak_state.clone();
+        *endpoint.on_insert.borrow_mut() = Some(Box::new(move || {
+            callback_operation.deallocate();
+            assert!(observed_state.upgrade().is_some());
+        }));
+
+        assert!(operation.read(board.0));
+        assert!(weak_state.upgrade().is_none());
+        assert_eq!(
+            *endpoint.inserted.borrow(),
+            vec![(native_origin(1), "accepted return".into())]
+        );
+        assert!(requestor.validate().unwrap().write(board.0));
+    }
 }

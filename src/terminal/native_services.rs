@@ -243,26 +243,13 @@ impl NativeInsertion {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-#[cfg_attr(
-    not(test),
-    allow(
-        dead_code,
-        reason = "the next stacked context-action layer owns Quick Look presentation"
-    )
-)]
+
 pub(crate) struct QuickLookTarget {
     link: HyperlinkTarget,
     local_file_capabilities: TerminalLocalFileCapabilities,
 }
 
 impl QuickLookTarget {
-    #[cfg_attr(
-        not(test),
-        allow(
-            dead_code,
-            reason = "the next stacked context-action layer resolves the current hyperlink"
-        )
-    )]
     pub(crate) fn from_link(
         link: &HyperlinkTarget,
         local_file_capabilities: TerminalLocalFileCapabilities,
@@ -274,13 +261,6 @@ impl QuickLookTarget {
         })
     }
 
-    #[cfg_attr(
-        not(test),
-        allow(
-            dead_code,
-            reason = "the next stacked context-action layer revalidates before native presentation"
-        )
-    )]
     pub(crate) fn revalidated_path(&self) -> Option<PathBuf> {
         self.link
             .revalidated_local_path(self.local_file_capabilities)

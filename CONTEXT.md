@@ -705,6 +705,9 @@ revalidation, Terminal Hyperlink activation, Quick Look eligibility and cleanup,
 request identity and lifecycle. Terminal Session workers remain the sole owners of terminal
 mutation, ordered copy queries, Paste Confirmation, OSC 52 pending operations, and PTY writes.
 GPUI supplies immutable presentation facts and routes actions into that policy.
+Context-menu Copy carries its captured Presentation Generation through the synchronous worker
+query. The worker rejects a newer generation or an active Synchronized Output transaction before
+formatting Selection, while ordinary Copy remains an ordered query of the current Selection.
 
 For every capability, use GPUI first when it preserves the required behavior, then portable Rust
 for policy, validation, authorization, identity, ordering, and lifecycle. Retain an Operating-System

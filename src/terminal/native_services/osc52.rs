@@ -1,4 +1,7 @@
+use std::time::{Duration, Instant};
 use std::{fmt, mem};
+
+const OSC52_AUTHORIZATION_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub(crate) const MAX_OSC52_CONTENT_BYTES: usize = 1024 * 1024;
 const MAX_OSC52_ENCODED_BYTES: usize = MAX_OSC52_CONTENT_BYTES.div_ceil(3) * 4;
@@ -456,6 +459,76 @@ fn encode_base64(input: &[u8]) -> Vec<u8> {
     output
 }
 
+struct PendingOsc52Authorization {
+    id: Osc52AuthorizationId,
+    operation: Osc52Operation,
+    deadline: Instant,
+}
+
+#[derive(Default)]
+pub(in crate::terminal) struct Osc52AuthorizationSchedule {
+    next_id: u64,
+    pending: Option<PendingOsc52Authorization>,
+}
+
+impl Osc52AuthorizationSchedule {
+    pub(in crate::terminal) fn deadline(&self) -> Option<Instant> {
+        self.pending.as_ref().map(|pending| pending.deadline)
+    }
+
+    pub(in crate::terminal) fn is_pending(&self) -> bool {
+        self.pending.is_some()
+    }
+
+    pub(in crate::terminal) fn create(
+        &mut self,
+        operation: Osc52Operation,
+        now: Instant,
+    ) -> Option<Osc52AuthorizationRequest> {
+        if self.pending.is_some() {
+            return None;
+        }
+        self.next_id = self.next_id.wrapping_add(1).max(1);
+        let id = Osc52AuthorizationId::from_counter(self.next_id);
+        let request = Osc52AuthorizationRequest {
+            id,
+            access: operation.access(),
+            target: operation.target(),
+            byte_len: operation.byte_len(),
+        };
+        self.pending = Some(PendingOsc52Authorization {
+            id,
+            operation,
+            deadline: now + OSC52_AUTHORIZATION_TIMEOUT,
+        });
+        Some(request)
+    }
+
+    pub(in crate::terminal) fn take(
+        &mut self,
+        id: Osc52AuthorizationId,
+        now: Instant,
+    ) -> Option<Osc52Operation> {
+        let pending = self.pending.as_ref()?;
+        if pending.id != id || now >= pending.deadline {
+            return None;
+        }
+        self.pending.take().map(|pending| pending.operation)
+    }
+
+    pub(in crate::terminal) fn expire(&mut self, now: Instant) -> Option<Osc52AuthorizationId> {
+        if self.deadline().is_some_and(|deadline| now >= deadline) {
+            self.pending.take().map(|pending| pending.id)
+        } else {
+            None
+        }
+    }
+
+    pub(in crate::terminal) fn cancel(&mut self) {
+        self.pending = None;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -468,6 +541,26 @@ mod tests {
                 Osc52Effect::Terminal(_) | Osc52Effect::Rejected(_) => None,
             })
             .collect()
+    }
+
+    #[test]
+    fn osc52_authorization_allows_one_pending_request_and_rejects_stale_ids() {
+        let now = Instant::now();
+        let mut schedule = Osc52AuthorizationSchedule::default();
+        let operation = Osc52Operation::Read {
+            target: Osc52Target::Standard,
+            terminator: Osc52Terminator::StringTerminator,
+        };
+        let request = schedule.create(operation.clone(), now).unwrap();
+
+        assert!(schedule.create(operation, now).is_none());
+        assert_eq!(schedule.take(Osc52AuthorizationId::new(999), now), None);
+        assert!(schedule.is_pending());
+        assert_eq!(
+            schedule.expire(now + OSC52_AUTHORIZATION_TIMEOUT),
+            Some(request.id)
+        );
+        assert!(!schedule.is_pending());
     }
 
     #[test]

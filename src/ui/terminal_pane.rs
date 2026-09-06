@@ -375,7 +375,7 @@ impl TerminalPane {
         cx: &mut Context<Self>,
     ) -> Self {
         let prepared_launch = session_factory.prepare_child_launch().ok();
-        Self::new_with_quick_look(
+        Self::new_with_services(
             session_factory,
             prepared_launch,
             crate::terminal::testing::test_terminal_key_input_adapter(),
@@ -395,7 +395,7 @@ impl TerminalPane {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        Self::new_with_quick_look(
+        Self::new_with_services(
             session_factory,
             Some(prepared_launch),
             key_input_adapter,
@@ -406,7 +406,7 @@ impl TerminalPane {
         )
     }
 
-    fn new_with_quick_look(
+    fn new_with_services(
         session_factory: WorkspaceTerminalSessionFactory,
         prepared_launch: Option<PreparedWorkspaceTerminalLaunch>,
         key_input_adapter: Box<dyn TerminalKeyInputAdapter>,
@@ -2954,7 +2954,13 @@ impl TerminalPane {
 
         match command {
             TerminalContextMenuCommand::Copy if actions.copy => {
-                self.copy_selection(&CopySelection, window, cx);
+                if let Some(session) = &self.session {
+                    self.publish_selection_copy(
+                        session.copy_selection_at(menu.generation),
+                        None,
+                        cx,
+                    );
+                }
             }
             TerminalContextMenuCommand::OpenLink if actions.open_link => {
                 if let Some(url) =
@@ -2979,6 +2985,7 @@ impl TerminalPane {
         cx: &mut Context<Self>,
     ) {
         let Some(target) = QuickLookTarget::from_link(link, self.local_file_capabilities) else {
+            self.quick_look.dismiss();
             return;
         };
         if self.quick_look.preview(&target).is_err() {
@@ -8571,8 +8578,8 @@ mod tests {
                 RecordedSessionCommand::Focus(focused) => {
                     Some(RecordedSessionCommand::Focus(focused))
                 }
-                RecordedSessionCommand::RequestSelectionCopy => {
-                    Some(RecordedSessionCommand::RequestSelectionCopy)
+                RecordedSessionCommand::RequestSelectionCopyAt(generation) => {
+                    Some(RecordedSessionCommand::RequestSelectionCopyAt(generation))
                 }
                 _ => None,
             })
@@ -8582,7 +8589,9 @@ mod tests {
             [
                 RecordedSessionCommand::Focus(false),
                 RecordedSessionCommand::Focus(true),
-                RecordedSessionCommand::RequestSelectionCopy,
+                RecordedSessionCommand::RequestSelectionCopyAt(
+                    pane.read_with(cx, |pane, _| pane.screen.generation)
+                ),
             ]
         );
     }
@@ -8671,6 +8680,46 @@ mod tests {
         assert_eq!(dismissals.get(), 0);
         pane.update(cx, |pane, _| pane.close());
         assert_eq!(dismissals.get(), 1);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[gpui::test]
+    fn unavailable_replacement_preview_dismisses_the_previous_presentation(
+        cx: &mut TestAppContext,
+    ) {
+        let directory = std::env::temp_dir().join(format!(
+            "spaceterm-preview-replacement-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let first = directory.join("first");
+        let second = directory.join("second");
+        std::fs::write(&first, b"fixture").unwrap();
+        std::fs::write(&second, b"fixture").unwrap();
+        let replacement = directory.join("replacement");
+        std::fs::write(&replacement, b"replacement").unwrap();
+        let local = TerminalLocalFileCapabilities::Enabled;
+        let first_link =
+            crate::terminal::HyperlinkTarget::osc8("file:first", &directory, None, local).unwrap();
+        let second_link =
+            crate::terminal::HyperlinkTarget::osc8("file:second", &directory, None, local).unwrap();
+        let previews = Rc::new(Cell::new(0));
+        let dismissals = Rc::new(Cell::new(0));
+        let (pane, cx, _) = connected_terminal_pane(cx);
+        pane.update(cx, |pane, cx| {
+            pane.quick_look = Box::new(RecordingQuickLookPresenter {
+                previews: previews.clone(),
+                dismissals: dismissals.clone(),
+            });
+            pane.preview_context_link(&first_link, cx);
+            assert_eq!(previews.get(), 1);
+            std::fs::remove_file(&second).unwrap();
+            pane.preview_context_link(&second_link, cx);
+            assert_eq!((previews.get(), dismissals.get()), (1, 1));
+            std::fs::rename(&replacement, &second).unwrap();
+            pane.preview_context_link(&second_link, cx);
+            assert_eq!((previews.get(), dismissals.get()), (1, 2));
+        });
         std::fs::remove_dir_all(directory).unwrap();
     }
 
