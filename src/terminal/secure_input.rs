@@ -215,6 +215,13 @@ pub(crate) fn conformance_secure_input_observation() -> String {
 }
 
 #[cfg(test)]
+impl SecureInputHandle {
+    pub(crate) fn same_coordinator(&self, other: &Self) -> bool {
+        Rc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 

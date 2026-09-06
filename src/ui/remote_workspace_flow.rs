@@ -49,14 +49,14 @@ const DELETE_ERROR_ID: &str = "remote-workspace-delete-error";
 
 /// Content-free progress phases reported by the native SSH connector.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum RemoteWorkspaceConnectionProgress {
+pub(crate) enum RemoteWorkspaceConnectionProgress {
     CheckingCompatibility,
     Connecting,
     Authenticating,
 }
 
 impl RemoteWorkspaceConnectionProgress {
-    pub(super) const fn status(self) -> &'static str {
+    pub(crate) const fn status(self) -> &'static str {
         match self {
             Self::CheckingCompatibility => "Checking remote compatibility",
             Self::Connecting => "Connecting securely",
@@ -76,13 +76,13 @@ fn connection_progress_dialog_update(
 
 /// Cloneable, bounded progress and cancellation authority passed to one connect attempt.
 #[derive(Clone)]
-pub(super) struct RemoteWorkspaceConnectContext {
+pub(crate) struct RemoteWorkspaceConnectContext {
     progress: async_channel::Sender<RemoteWorkspaceConnectionProgress>,
     cancelled: Arc<AtomicBool>,
 }
 
 impl RemoteWorkspaceConnectContext {
-    pub(super) fn new(
+    pub(crate) fn new(
         progress: async_channel::Sender<RemoteWorkspaceConnectionProgress>,
         cancelled: Arc<AtomicBool>,
     ) -> Self {
@@ -92,11 +92,11 @@ impl RemoteWorkspaceConnectContext {
         }
     }
 
-    pub(super) fn report(&self, progress: RemoteWorkspaceConnectionProgress) {
+    pub(crate) fn report(&self, progress: RemoteWorkspaceConnectionProgress) {
         let _ = self.progress.try_send(progress);
     }
 
-    pub(super) fn is_cancelled(&self) -> bool {
+    pub(crate) fn is_cancelled(&self) -> bool {
         self.cancelled.load(Ordering::Acquire)
     }
 }
@@ -106,7 +106,7 @@ impl RemoteWorkspaceConnectContext {
 ///
 /// Connection detail, when present, is already control-free and bounded to the transient alert
 /// lifetime. Its `Debug` representation remains redacted.
-pub(super) enum RemoteWorkspaceFlowBackendError {
+pub(crate) enum RemoteWorkspaceFlowBackendError {
     #[error("the managed SSH host could not be deleted")]
     DeleteFailed,
     #[error("the SSH host is already in use")]
@@ -129,7 +129,7 @@ pub(super) enum RemoteWorkspaceFlowBackendError {
 
 impl RemoteWorkspaceFlowBackendError {
     /// Borrows the sanitized connection tail intended only for the active failure alert.
-    pub(super) fn connection_detail(&self) -> Option<&str> {
+    pub(crate) fn connection_detail(&self) -> Option<&str> {
         match self {
             Self::ConnectionFailedWithDetail(detail) => Some(detail.as_str()),
             _ => None,
@@ -137,7 +137,7 @@ impl RemoteWorkspaceFlowBackendError {
     }
 
     /// Transfers the bounded diagnostic without converting it into an inspectable string.
-    pub(super) fn into_connection_detail(self) -> Option<TransientSshErrorOutput> {
+    pub(crate) fn into_connection_detail(self) -> Option<TransientSshErrorOutput> {
         match self {
             Self::ConnectionFailedWithDetail(detail) => Some(detail),
             _ => None,
@@ -196,12 +196,12 @@ fn connection_error_content(
 ///
 /// This value is intentionally non-Clone and non-Debug. Dropping it releases exactly its own
 /// registry count without affecting the connected session's independent alias lease.
-pub(super) struct RemoteWorkspaceAliasPin {
+pub(crate) struct RemoteWorkspaceAliasPin {
     _owner: Box<dyn Send>,
 }
 
 impl RemoteWorkspaceAliasPin {
-    pub(super) fn new(owner: impl Send + 'static) -> Self {
+    pub(crate) fn new(owner: impl Send + 'static) -> Self {
         Self {
             _owner: Box::new(owner),
         }
@@ -210,7 +210,7 @@ impl RemoteWorkspaceAliasPin {
 
 #[derive(Clone, Copy, Debug, Error, Eq, PartialEq)]
 #[error("the configured SSH alias could not be pinned for Workspace ownership")]
-pub(super) struct RemoteWorkspaceAliasPinError;
+pub(crate) struct RemoteWorkspaceAliasPinError;
 
 /// The opaque lifetime owner for one connected SSH control path.
 ///
@@ -218,7 +218,7 @@ pub(super) struct RemoteWorkspaceAliasPinError;
 /// non-clone owners and must make `close` idempotent and non-blocking for the calling GPUI thread.
 /// Retained background ownership remains responsible for bounded exact process, socket,
 /// authentication, cancellation, and per-session alias cleanup after `close` returns.
-pub(super) trait RemoteWorkspaceSessionOwner: Send + 'static {
+pub(crate) trait RemoteWorkspaceSessionOwner: Send + 'static {
     /// Acquires an independent Workspace-lifetime alias count without consuming session ownership.
     fn acquire_workspace_alias_pin(
         &self,
@@ -242,14 +242,14 @@ pub(super) trait RemoteWorkspaceSessionOwner: Send + 'static {
 /// A live connected session and its narrow directory-provider capability.
 ///
 /// This value is intentionally non-Clone. Dropping it closes the session exactly once.
-pub(super) struct RemoteWorkspaceConnectedSession {
+pub(crate) struct RemoteWorkspaceConnectedSession {
     owner: Option<Box<dyn RemoteWorkspaceSessionOwner>>,
     provider: Arc<dyn RemoteWorkspaceProvider + Send + Sync>,
 }
 
 impl RemoteWorkspaceConnectedSession {
     /// Creates a connected session from its singular owner and narrow utility provider.
-    pub(super) fn new(
+    pub(crate) fn new(
         owner: Box<dyn RemoteWorkspaceSessionOwner>,
         provider: Arc<dyn RemoteWorkspaceProvider + Send + Sync>,
     ) -> Self {
@@ -259,12 +259,12 @@ impl RemoteWorkspaceConnectedSession {
         }
     }
 
-    pub(super) fn provider(&self) -> Arc<dyn RemoteWorkspaceProvider + Send + Sync> {
+    pub(crate) fn provider(&self) -> Arc<dyn RemoteWorkspaceProvider + Send + Sync> {
         Arc::clone(&self.provider)
     }
 
     /// Creates a provider that requires physical revalidation before every child reservation.
-    pub(super) fn bind_terminal_channels_for_identity(
+    pub(crate) fn bind_terminal_channels_for_identity(
         &self,
         directory: &RemoteWorkspaceDirectory,
         expected_identity: &RemoteDirectoryIdentity,
@@ -277,7 +277,7 @@ impl RemoteWorkspaceConnectedSession {
     }
 
     /// Transfers the session-paired lifecycle observer at most once.
-    pub(super) fn take_lifecycle_observer(&mut self) -> Option<ControlConnectionObserver> {
+    pub(crate) fn take_lifecycle_observer(&mut self) -> Option<ControlConnectionObserver> {
         self.owner.as_mut()?.take_lifecycle_observer()
     }
 
@@ -300,7 +300,7 @@ impl Drop for RemoteWorkspaceConnectedSession {
 }
 
 /// All side effects required by the standalone remote-workspace creation flow.
-pub(super) trait RemoteWorkspaceFlowBackend: Send + Sync {
+pub(crate) trait RemoteWorkspaceFlowBackend: Send + Sync {
     /// Performs fresh bounded host discovery and preserves partial-scan diagnostics.
     fn discover_hosts(&self) -> HostDiscovery;
 
@@ -328,7 +328,7 @@ pub(super) trait RemoteWorkspaceFlowBackend: Send + Sync {
 }
 
 /// Builds the window-bound backend once while its Workspace Manager is initialized.
-pub(super) trait RemoteWorkspaceFlowBackendFactory: Send + Sync {
+pub(crate) trait RemoteWorkspaceFlowBackendFactory: Send + Sync {
     /// Returns a content-free startup gate reason before AskPass or connection work begins.
     fn unavailable_reason(&self) -> Option<String> {
         None
@@ -373,7 +373,7 @@ impl ManagedHostFormBackend for FlowManagedHostBackend {
 }
 
 /// A completed remote workspace creation. Its connected session is live and non-Clone.
-pub(super) struct RemoteWorkspaceFlowCompletion {
+pub(crate) struct RemoteWorkspaceFlowCompletion {
     session: RemoteWorkspaceConnectedSession,
     destination: SshDestination,
     directory: RemoteWorkspaceDirectory,
@@ -385,7 +385,7 @@ pub(super) struct RemoteWorkspaceFlowCompletion {
 
 impl RemoteWorkspaceFlowCompletion {
     #[cfg(test)]
-    pub(super) fn for_test(
+    pub(crate) fn for_test(
         session: RemoteWorkspaceConnectedSession,
         destination: SshDestination,
         directory: RemoteWorkspaceDirectory,
@@ -405,48 +405,48 @@ impl RemoteWorkspaceFlowCompletion {
         }
     }
 
-    pub(super) const fn session(&self) -> &RemoteWorkspaceConnectedSession {
+    pub(crate) const fn session(&self) -> &RemoteWorkspaceConnectedSession {
         &self.session
     }
 
-    pub(super) const fn destination(&self) -> &SshDestination {
+    pub(crate) const fn destination(&self) -> &SshDestination {
         &self.destination
     }
 
-    pub(super) const fn directory(&self) -> &RemoteWorkspaceDirectory {
+    pub(crate) const fn directory(&self) -> &RemoteWorkspaceDirectory {
         &self.directory
     }
 
-    pub(super) const fn physical_directory(&self) -> &RemoteDirectoryIdentity {
+    pub(crate) const fn physical_directory(&self) -> &RemoteDirectoryIdentity {
         &self.physical_directory
     }
 
-    pub(super) fn remote_user(&self) -> &str {
+    pub(crate) fn remote_user(&self) -> &str {
         self.account.user()
     }
 
-    pub(super) const fn remote_home_identity(&self) -> &RemoteDirectoryIdentity {
+    pub(crate) const fn remote_home_identity(&self) -> &RemoteDirectoryIdentity {
         self.account.home_identity()
     }
 
-    pub(super) fn login_shell(&self) -> &str {
+    pub(crate) fn login_shell(&self) -> &str {
         self.account.login_shell().as_str()
     }
 
-    pub(super) fn terminal_channels(&self) -> Arc<dyn RemoteTerminalChannelProvider> {
+    pub(crate) fn terminal_channels(&self) -> Arc<dyn RemoteTerminalChannelProvider> {
         Arc::clone(&self.terminal_channels)
     }
 
     /// Acquires the independent alias pin only when Workspace installation is ready to commit.
     ///
     /// Failure borrows no ownership from this completion, so activation can return it intact.
-    pub(super) fn acquire_workspace_alias_pin(
+    pub(crate) fn acquire_workspace_alias_pin(
         &self,
     ) -> Result<Option<RemoteWorkspaceAliasPin>, RemoteWorkspaceAliasPinError> {
         self.session.acquire_workspace_alias_pin()
     }
 
-    pub(super) fn into_parts(
+    pub(crate) fn into_parts(
         self,
     ) -> (
         RemoteWorkspaceConnectedSession,
@@ -471,7 +471,7 @@ impl RemoteWorkspaceFlowCompletion {
 
 /// Borrow-safe, exactly-once transfer of a non-Clone flow completion through GPUI events.
 #[derive(Clone)]
-pub(super) struct RemoteWorkspaceFlowCompletionHandle {
+pub(crate) struct RemoteWorkspaceFlowCompletionHandle {
     completion: Arc<Mutex<Option<RemoteWorkspaceFlowCompletion>>>,
 }
 
@@ -482,7 +482,7 @@ impl RemoteWorkspaceFlowCompletionHandle {
         }
     }
 
-    pub(super) fn take(&self) -> Option<RemoteWorkspaceFlowCompletion> {
+    pub(crate) fn take(&self) -> Option<RemoteWorkspaceFlowCompletion> {
         self.completion
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -502,14 +502,14 @@ impl RemoteWorkspaceFlowCompletionHandle {
 }
 
 #[derive(Clone)]
-pub(super) enum RemoteWorkspaceFlowEvent {
+pub(crate) enum RemoteWorkspaceFlowEvent {
     StateChanged,
     Completed(RemoteWorkspaceFlowCompletionHandle),
     Cancelled,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum RemoteWorkspaceFlowStage {
+pub(crate) enum RemoteWorkspaceFlowStage {
     Idle,
     HostSelection,
     AddingHost,
@@ -542,7 +542,7 @@ enum AcknowledgeAction {
     Acknowledge,
 }
 
-pub(super) struct RemoteWorkspaceFlow {
+pub(crate) struct RemoteWorkspaceFlow {
     backend: Arc<dyn RemoteWorkspaceFlowBackend>,
     host_picker: Entity<SshHostPicker>,
     focus_scope: FocusHandle,
@@ -566,7 +566,7 @@ pub(super) struct RemoteWorkspaceFlow {
 impl EventEmitter<RemoteWorkspaceFlowEvent> for RemoteWorkspaceFlow {}
 
 impl RemoteWorkspaceFlow {
-    pub(super) fn new(
+    pub(crate) fn new(
         backend: Arc<dyn RemoteWorkspaceFlowBackend>,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -608,11 +608,11 @@ impl RemoteWorkspaceFlow {
         }
     }
 
-    pub(super) const fn stage(&self) -> RemoteWorkspaceFlowStage {
+    pub(crate) const fn stage(&self) -> RemoteWorkspaceFlowStage {
         self.stage
     }
 
-    pub(super) fn owns_activation(&self, handle: &RemoteWorkspaceFlowCompletionHandle) -> bool {
+    pub(crate) fn owns_activation(&self, handle: &RemoteWorkspaceFlowCompletionHandle) -> bool {
         self.stage == RemoteWorkspaceFlowStage::AwaitingActivation
             && self
                 .pending_completion
@@ -622,7 +622,7 @@ impl RemoteWorkspaceFlow {
     }
 
     #[cfg(test)]
-    pub(super) fn emit_completion_for_test(
+    pub(crate) fn emit_completion_for_test(
         &mut self,
         completion: RemoteWorkspaceFlowCompletion,
         cx: &mut Context<Self>,
@@ -635,12 +635,12 @@ impl RemoteWorkspaceFlow {
     }
 
     #[cfg(test)]
-    pub(super) fn cancel_for_test(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn cancel_for_test(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.cancel_flow(window, cx);
     }
 
     #[cfg(test)]
-    pub(super) fn select_destination_for_test(
+    pub(crate) fn select_destination_for_test(
         &mut self,
         destination: SshDestination,
         window: &mut Window,
@@ -653,11 +653,11 @@ impl RemoteWorkspaceFlow {
         );
     }
 
-    pub(super) fn open(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+    pub(crate) fn open(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
         self.open_with_replacement(None, window, cx)
     }
 
-    pub(super) fn open_replacing(
+    pub(crate) fn open_replacing(
         &mut self,
         replacement: CommandPaletteReplacementFocus,
         window: &mut Window,
@@ -693,7 +693,7 @@ impl RemoteWorkspaceFlow {
         true
     }
 
-    pub(super) fn blocks_terminal_input(&self) -> bool {
+    pub(crate) fn blocks_terminal_input(&self) -> bool {
         !matches!(
             self.stage,
             RemoteWorkspaceFlowStage::Idle
@@ -702,7 +702,7 @@ impl RemoteWorkspaceFlow {
         )
     }
 
-    pub(super) fn owns_first_responder(&self, window: &Window, cx: &App) -> bool {
+    pub(crate) fn owns_first_responder(&self, window: &Window, cx: &App) -> bool {
         self.focus_scope.contains_focused(window, cx)
     }
 
@@ -1471,7 +1471,7 @@ impl RemoteWorkspaceFlow {
     }
 
     /// Acknowledges that the transferred completion was installed into Workspace ownership.
-    pub(super) fn activation_succeeded(
+    pub(crate) fn activation_succeeded(
         &mut self,
         handle: &RemoteWorkspaceFlowCompletionHandle,
         window: &mut Window,
@@ -1495,7 +1495,7 @@ impl RemoteWorkspaceFlow {
     }
 
     /// Returns a completion whose Workspace creation failed, restoring the retained picker.
-    pub(super) fn activation_failed(
+    pub(crate) fn activation_failed(
         &mut self,
         handle: &RemoteWorkspaceFlowCompletionHandle,
         completion: RemoteWorkspaceFlowCompletion,

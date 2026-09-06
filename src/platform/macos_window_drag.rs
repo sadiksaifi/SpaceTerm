@@ -1,5 +1,4 @@
-#[cfg(test)]
-use std::cell::Cell;
+use super::window_movement::{OperatingSystemWindowDragError, OperatingSystemWindowDragPlatform};
 use std::cell::RefCell;
 use std::marker::PhantomData;
 use std::rc::Rc;
@@ -10,25 +9,6 @@ use gpui::Window;
 use objc::runtime::Object;
 use objc::{msg_send, sel, sel_impl};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
-pub(crate) enum OperatingSystemWindowDragError {
-    #[error("the AppKit application is unavailable")]
-    Application,
-    #[error("the current AppKit event is not a primary mouse-down")]
-    MouseDownEvent,
-    #[error("the GPUI Operating-System Window view is unavailable")]
-    NativeView,
-    #[error("the AppKit Operating-System Window is unavailable")]
-    NativeWindow,
-}
-
-pub(crate) trait OperatingSystemWindowDragPlatform {
-    fn interaction_started(&self) -> Result<(), OperatingSystemWindowDragError>;
-    fn start_window_move(&self, window: &Window) -> Result<(), OperatingSystemWindowDragError>;
-    fn interaction_finished(&self);
-    fn double_activation_requested(&self, window: &Window);
-}
 
 pub(crate) struct MacosOperatingSystemWindowDragPlatform {
     mouse_down: RefCell<Option<RetainedMouseDownEvent>>,
@@ -68,7 +48,8 @@ impl OperatingSystemWindowDragPlatform for MacosOperatingSystemWindowDragPlatfor
         // through the complete `performWindowDragWithEvent:` handoff.
         unsafe {
             let native_window: id = msg_send![native_view, window];
-            if native_window == nil {
+            let event_window: id = msg_send![event.0, window];
+            if native_window == nil || native_window != event_window {
                 return Err(OperatingSystemWindowDragError::NativeWindow);
             }
             let _: () = msg_send![native_window, performWindowDragWithEvent: event.0];
@@ -78,10 +59,6 @@ impl OperatingSystemWindowDragPlatform for MacosOperatingSystemWindowDragPlatfor
 
     fn interaction_finished(&self) {
         self.mouse_down.borrow_mut().take();
-    }
-
-    fn double_activation_requested(&self, window: &Window) {
-        window.titlebar_double_click();
     }
 }
 
@@ -116,47 +93,9 @@ impl Drop for RetainedMouseDownEvent {
     }
 }
 
-#[cfg(test)]
-#[derive(Default)]
-pub(crate) struct RecordingOperatingSystemWindowDragPlatform {
-    interaction_starts: Cell<usize>,
-    move_requests: Cell<usize>,
-    interaction_finishes: Cell<usize>,
-    double_activations: Cell<usize>,
-}
-
-#[cfg(test)]
-impl RecordingOperatingSystemWindowDragPlatform {
-    pub(crate) fn counts(&self) -> (usize, usize, usize, usize) {
-        (
-            self.interaction_starts.get(),
-            self.move_requests.get(),
-            self.interaction_finishes.get(),
-            self.double_activations.get(),
-        )
-    }
-}
-
-#[cfg(test)]
-impl OperatingSystemWindowDragPlatform for RecordingOperatingSystemWindowDragPlatform {
-    fn interaction_started(&self) -> Result<(), OperatingSystemWindowDragError> {
-        self.interaction_starts
-            .set(self.interaction_starts.get() + 1);
-        Ok(())
-    }
-
-    fn start_window_move(&self, _: &Window) -> Result<(), OperatingSystemWindowDragError> {
-        self.move_requests.set(self.move_requests.get() + 1);
-        Ok(())
-    }
-
-    fn interaction_finished(&self) {
-        self.interaction_finishes
-            .set(self.interaction_finishes.get() + 1);
-    }
-
-    fn double_activation_requested(&self, _: &Window) {
-        self.double_activations
-            .set(self.double_activations.get() + 1);
+pub(super) struct WindowMovementFactory;
+impl super::window_movement::WindowMovementFactory for WindowMovementFactory {
+    fn create(&self) -> Rc<dyn OperatingSystemWindowDragPlatform> {
+        Rc::new(MacosOperatingSystemWindowDragPlatform::default())
     }
 }

@@ -9,55 +9,87 @@ pub(crate) mod terminal_accessibility;
 pub(crate) mod workspace_directory;
 pub(crate) mod workspace_picker_filesystem;
 
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", not(test)))]
+mod macos_attention;
+#[cfg(all(target_os = "macos", test))]
 pub(crate) mod macos_attention;
 
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", not(test)))]
+mod macos_application;
+#[cfg(all(target_os = "macos", test))]
 pub(crate) mod macos_application;
 
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", not(test)))]
+mod macos_accessibility;
+#[cfg(all(target_os = "macos", test))]
 pub(crate) mod macos_accessibility;
 
 #[cfg(target_os = "macos")]
 pub(crate) mod ssh_askpass;
 
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", not(test)))]
+mod macos_askpass_transport;
+#[cfg(all(target_os = "macos", test))]
 pub(crate) mod macos_askpass_transport;
 
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", not(test)))]
+mod macos_keyboard;
+#[cfg(all(target_os = "macos", test))]
 pub(crate) mod macos_keyboard;
 
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", not(test)))]
+mod macos_locale;
+#[cfg(all(target_os = "macos", test))]
 pub(crate) mod macos_locale;
 
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", not(test)))]
+mod macos_notification;
+#[cfg(all(target_os = "macos", test))]
 pub(crate) mod macos_notification;
 
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", not(test)))]
+mod macos_pasteboard;
+#[cfg(all(target_os = "macos", test))]
 pub(crate) mod macos_pasteboard;
 
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", not(test)))]
+mod macos_quick_look;
+#[cfg(all(target_os = "macos", test))]
 pub(crate) mod macos_quick_look;
 
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", not(test)))]
+mod macos_render_lifecycle;
+#[cfg(all(target_os = "macos", test))]
 pub(crate) mod macos_render_lifecycle;
 
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", not(test)))]
+mod macos_pty;
+#[cfg(all(target_os = "macos", test))]
 pub(crate) mod macos_pty;
 
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", not(test)))]
+mod macos_secure_input;
+#[cfg(all(target_os = "macos", test))]
 pub(crate) mod macos_secure_input;
 
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", not(test)))]
+mod macos_scroll;
+#[cfg(all(target_os = "macos", test))]
 pub(crate) mod macos_scroll;
 
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", not(test)))]
+mod macos_services;
+#[cfg(all(target_os = "macos", test))]
 pub(crate) mod macos_services;
 
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", not(test)))]
+mod macos_system_settings;
+#[cfg(all(target_os = "macos", test))]
 pub(crate) mod macos_system_settings;
 
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", not(test)))]
+mod macos_window_drag;
+#[cfg(all(target_os = "macos", test))]
 pub(crate) mod macos_window_drag;
 
 pub(crate) mod shell_integration;
@@ -68,3 +100,17 @@ pub(crate) mod launch_host;
 
 #[cfg(not(target_os = "macos"))]
 compile_error!("SpaceTerm currently supports macOS only");
+
+pub(crate) mod askpass;
+#[cfg(target_os = "macos")]
+mod macos_composition;
+pub(crate) mod permission_recovery;
+pub(crate) mod services_registration;
+pub(crate) mod window_movement;
+pub(crate) use macos_composition::main;
+
+mod macos_keybindings;
+#[cfg(test)]
+pub(crate) use macos_composition::testing_desktop_profile;
+
+pub(crate) mod locale;

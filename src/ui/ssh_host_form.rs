@@ -32,7 +32,7 @@ const COLLISION_MESSAGE: &str = "That SSH host alias is already configured.";
 const HOST_IN_USE_MESSAGE: &str = "This SSH host is in use by a Remote Project Workspace. Close that Workspace before editing it.";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum ManagedHostFormBackendError {
+pub(crate) enum ManagedHostFormBackendError {
     AliasCollision,
     HostInUse,
     SaveFailed,

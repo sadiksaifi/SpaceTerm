@@ -8,7 +8,7 @@ use std::ffi::{c_char, c_void};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::rc::Rc;
 
-#[cfg(not(test))]
+use super::services_registration::{ServicesRegistration, ServicesRegistrationError};
 use cocoa::appkit::NSApp;
 use cocoa::appkit::{NSPasteboardTypeString, NSStringPboardType};
 use cocoa::base::{BOOL, NO, YES, id, nil};
@@ -18,7 +18,6 @@ use objc::declare::ClassDecl;
 use objc::runtime::{Class, Object, Protocol, Sel};
 use objc::{class, msg_send, sel, sel_impl};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-use thiserror::Error;
 
 use crate::terminal::native_services::services::{
     ServiceDataType, ServiceEndpoint, ServiceOperation, ServicePasteboardIdentity, ServiceRequests,
@@ -38,21 +37,7 @@ unsafe extern "C" {
     fn objc_setAssociatedObject(object: id, key: *const c_void, value: id, policy: usize);
 }
 
-#[derive(Debug, Error)]
-pub(crate) enum MacosServicesError {
-    #[cfg(not(test))]
-    #[error("the AppKit application is unavailable")]
-    ApplicationUnavailable,
-    #[error("the GPUI window did not expose an AppKit view")]
-    NativeViewUnavailable,
-    #[error("the SpaceTerm Services responder class could not be registered")]
-    ResponderClassUnavailable,
-    #[error("the SpaceTerm Services responder could not be allocated")]
-    ResponderAllocationFailed,
-}
-
-#[cfg(not(test))]
-pub(crate) fn register() -> Result<(), MacosServicesError> {
+pub(crate) fn register() -> Result<(), ServicesRegistrationError> {
     // SAFETY: SpaceTerm initializes its application on AppKit's main thread. The array is used only
     // for this synchronous registration call, and AppKit retains the registered type strings.
     unsafe {
@@ -60,7 +45,7 @@ pub(crate) fn register() -> Result<(), MacosServicesError> {
         let application = NSApp();
         if application == nil {
             pool.drain();
-            return Err(MacosServicesError::ApplicationUnavailable);
+            return Err(ServicesRegistrationError::ApplicationUnavailable);
         }
         let string_types = NSArray::arrayWithObject(nil, NSPasteboardTypeString);
         let _: () = msg_send![application,
@@ -75,11 +60,11 @@ pub(crate) fn register() -> Result<(), MacosServicesError> {
 pub(crate) fn install(
     window: &Window,
     endpoint: Rc<dyn ServiceEndpoint>,
-) -> Result<(), MacosServicesError> {
+) -> Result<(), ServicesRegistrationError> {
     let native_handle = HasWindowHandle::window_handle(window)
-        .map_err(|_| MacosServicesError::NativeViewUnavailable)?;
+        .map_err(|_| ServicesRegistrationError::NativeViewUnavailable)?;
     let RawWindowHandle::AppKit(native_handle) = native_handle.as_raw() else {
-        return Err(MacosServicesError::NativeViewUnavailable);
+        return Err(ServicesRegistrationError::NativeViewUnavailable);
     };
     let native_view = native_handle.ns_view.as_ptr().cast::<Object>();
 
@@ -97,7 +82,7 @@ pub(crate) fn install(
         let responder: id = msg_send![responder_class, alloc];
         let responder: id = msg_send![responder, init];
         if responder == nil {
-            return Err(MacosServicesError::ResponderAllocationFailed);
+            return Err(ServicesRegistrationError::ResponderAllocationFailed);
         }
 
         let state = Box::new(Rc::new(ServiceRequests::new(endpoint)));
@@ -117,13 +102,13 @@ pub(crate) fn install(
     Ok(())
 }
 
-fn services_responder_class() -> Result<&'static Class, MacosServicesError> {
+fn services_responder_class() -> Result<&'static Class, ServicesRegistrationError> {
     if let Some(class) = Class::get(SERVICES_RESPONDER_CLASS) {
         return Ok(class);
     }
     let Some(mut declaration) = ClassDecl::new(SERVICES_RESPONDER_CLASS, class!(NSResponder))
     else {
-        return Err(MacosServicesError::ResponderClassUnavailable);
+        return Err(ServicesRegistrationError::ResponderClassUnavailable);
     };
     declaration.add_ivar::<*mut c_void>(SERVICES_STATE_IVAR);
     if let Some(protocol) = Protocol::get("NSServicesMenuRequestor") {
@@ -144,14 +129,14 @@ fn services_responder_class() -> Result<&'static Class, MacosServicesError> {
     Ok(declaration.register())
 }
 
-fn services_operation_responder_class() -> Result<&'static Class, MacosServicesError> {
+fn services_operation_responder_class() -> Result<&'static Class, ServicesRegistrationError> {
     if let Some(class) = Class::get(SERVICES_OPERATION_RESPONDER_CLASS) {
         return Ok(class);
     }
     let Some(mut declaration) =
         ClassDecl::new(SERVICES_OPERATION_RESPONDER_CLASS, class!(NSResponder))
     else {
-        return Err(MacosServicesError::ResponderClassUnavailable);
+        return Err(ServicesRegistrationError::ResponderClassUnavailable);
     };
     declaration.add_ivar::<*mut c_void>(SERVICES_OPERATION_STATE_IVAR);
     if let Some(protocol) = Protocol::get("NSServicesMenuRequestor") {
@@ -372,6 +357,20 @@ unsafe fn read_nsstring_text(value: id) -> Option<String> {
     // the same object and was rejected before this slice can exceed Paste Payload's hard limit.
     let bytes = unsafe { std::slice::from_raw_parts(utf8.cast::<u8>(), byte_len) };
     decode_service_text_bytes(bytes)
+}
+
+pub(super) struct NativeServicesRegistration;
+impl ServicesRegistration for NativeServicesRegistration {
+    fn register(&self) -> Result<(), ServicesRegistrationError> {
+        register()
+    }
+    fn install(
+        &self,
+        window: &Window,
+        endpoint: Rc<dyn ServiceEndpoint>,
+    ) -> Result<(), ServicesRegistrationError> {
+        install(window, endpoint)
+    }
 }
 
 #[cfg(test)]

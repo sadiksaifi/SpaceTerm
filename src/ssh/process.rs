@@ -16,7 +16,7 @@ use thiserror::Error;
 use super::cancellation::SshCancellationToken;
 use super::command::SshCommandSpec;
 use super::startup_environment::StartupSshEnvironment;
-use crate::platform::macos_askpass_transport::AskPassBrokerLease;
+use crate::platform::askpass::AskPassBrokerLease;
 
 pub(crate) const MAXIMUM_TRANSIENT_SSH_ERROR_BYTES: usize = 8 * 1024;
 const TRANSIENT_SSH_ERROR_TRUNCATION_MARKER: &str = "[earlier OpenSSH output truncated] ";

@@ -3,21 +3,17 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui::{
-    App, AppContext, Bounds, KeyBinding, Menu, MenuItem, SystemMenuType, TitlebarOptions,
-    WindowBounds, WindowOptions, actions, point, px, size,
+    App, AppContext, Bounds, Menu, MenuItem, SystemMenuType, TitlebarOptions, WindowBounds,
+    WindowOptions, actions, px, size,
 };
 use spaceterm_ui::{EditCopy, EditCut, EditPaste, EditRedo, EditSelectAll, EditUndo};
 
-use crate::platform::app_paths::{AppPathEnvironment, AppPaths, AppPathsError};
-use crate::platform::macos_keyboard::MacosTerminalKeyInputAdapterFactory;
-use crate::platform::macos_pty::MacosNativePtyAdapterFactory;
-use crate::platform::native_pty::NativePtyAdapterFactory;
+use crate::platform::app_paths::{AppPathEnvironment, AppPaths};
 use crate::ssh::alias_usage::ActiveSshAliasRegistry;
 use crate::ssh::command::{NativeSshProbeRunner, SshCapability, SshUnavailableReason};
 use crate::ssh::startup_environment::StartupSshEnvironment;
 use crate::terminal::{
-    NativeServiceOrigin, NativeServiceStatus, NativeTerminalSessionFactory, OptionAsAltPolicy,
-    SelectionCopy, TerminalKeyInputAdapterFactory, TerminalSessionFactory,
+    NativeServiceOrigin, NativeServiceStatus, SelectionCopy, TerminalSessionFactory,
 };
 use crate::ui::{
     ClosePane, CloseTab, CloseWorkspace, CreateScratchWorkspace, CreateTab,
@@ -31,13 +27,13 @@ pub(crate) enum StartupDependenciesError {
     MissingHome,
     #[error("the user home directory is not absolute")]
     RelativeHome,
-    #[error(transparent)]
-    Paths(#[from] AppPathsError),
+    #[error("application paths are unavailable")]
+    Paths,
 }
 
 pub(crate) struct StartupDependencies {
     paths: Arc<AppPaths>,
-    home_directory: PathBuf,
+    pub(crate) home_directory: PathBuf,
     ssh_environment: StartupSshEnvironment,
     ssh_capability: SshCapability,
     active_aliases: ActiveSshAliasRegistry,
@@ -62,7 +58,10 @@ impl StartupDependencies {
                     SshUnavailableReason::ProbeFailed,
                 ));
         Ok(Self {
-            paths: Arc::new(AppPaths::resolve(&path_environment)?),
+            paths: Arc::new(
+                AppPaths::resolve(&path_environment)
+                    .map_err(|_| StartupDependenciesError::Paths)?,
+            ),
             home_directory,
             ssh_environment,
             ssh_capability,
@@ -70,13 +69,17 @@ impl StartupDependencies {
         })
     }
 
-    fn remote_backend_factory(&self) -> Arc<NativeRemoteWorkspaceFlowBackendFactory> {
+    pub(crate) fn remote_backend_factory(
+        &self,
+        askpass: Arc<dyn crate::platform::askpass::AskPassWindowFactory>,
+    ) -> Arc<NativeRemoteWorkspaceFlowBackendFactory> {
         Arc::new(NativeRemoteWorkspaceFlowBackendFactory::new(
             Arc::clone(&self.paths),
             self.home_directory.clone(),
             self.ssh_environment.clone(),
             self.ssh_capability.clone(),
             self.active_aliases.clone(),
+            askpass,
         ))
     }
 }
@@ -94,18 +97,6 @@ actions!(
 );
 
 pub(crate) fn init(cx: &mut App) {
-    #[cfg(not(test))]
-    if let Err(error) = crate::platform::macos_services::register() {
-        eprintln!("failed to register macOS Services types: {error}");
-    }
-    cx.bind_keys([
-        KeyBinding::new("cmd-q", QuitApplication, None),
-        KeyBinding::new("cmd-h", HideApplication, None),
-        KeyBinding::new("alt-cmd-h", HideOtherApplications, None),
-        KeyBinding::new("cmd-m", MinimizeWindow, None),
-        KeyBinding::new("ctrl-cmd-f", ToggleFullScreen, None),
-        KeyBinding::new("fn-f", ToggleFullScreen, None),
-    ]);
     cx.on_action(request_application_quit);
     cx.on_action(|_: &HideApplication, cx| cx.hide());
     cx.on_action(|_: &HideOtherApplications, cx| cx.hide_other_apps());
@@ -113,8 +104,8 @@ pub(crate) fn init(cx: &mut App) {
     cx.on_action(minimize_active_window);
     cx.on_action(toggle_active_window_full_screen);
     cx.on_app_quit(|_| {
-        if let Err(error) = crate::platform::acceptance_observation::finish_runtime_observation() {
-            eprintln!("acceptance runtime observation did not complete: {error}");
+        if crate::platform::acceptance_observation::finish_runtime_observation().is_err() {
+            eprintln!("acceptance runtime observation did not complete");
         }
         async {}
     })
@@ -188,8 +179,11 @@ fn minimize_active_window(_: &MinimizeWindow, cx: &mut App) {
         return;
     };
     cx.defer(move |cx| {
-        if let Err(error) = active_window.update(cx, |_, window, _| window.minimize_window()) {
-            eprintln!("failed to minimize the active SpaceTerm window: {error:#}");
+        if active_window
+            .update(cx, |_, window, _| window.minimize_window())
+            .is_err()
+        {
+            eprintln!("failed to minimize the active SpaceTerm window");
         }
     });
 }
@@ -199,8 +193,11 @@ fn toggle_active_window_full_screen(_: &ToggleFullScreen, cx: &mut App) {
         return;
     };
     cx.defer(move |cx| {
-        if let Err(error) = active_window.update(cx, |_, window, _| window.toggle_fullscreen()) {
-            eprintln!("failed to toggle full screen for the active SpaceTerm window: {error:#}");
+        if active_window
+            .update(cx, |_, window, _| window.toggle_fullscreen())
+            .is_err()
+        {
+            eprintln!("failed to toggle full screen for the active SpaceTerm window");
         }
     });
 }
@@ -226,83 +223,40 @@ fn request_application_quit(_: &QuitApplication, cx: &mut App) {
     });
 }
 
-struct ApplicationPaneLifecycle(crate::ui::pane_lifecycle::PaneLifecycleDependencies);
-impl gpui::Global for ApplicationPaneLifecycle {}
-
-fn pane_lifecycle_dependencies(
+pub(crate) fn open(
     cx: &mut App,
-) -> crate::ui::pane_lifecycle::PaneLifecycleDependencies {
-    if let Some(dependencies) = cx.try_global::<ApplicationPaneLifecycle>() {
-        return dependencies.0.clone();
-    }
-    let activity: Rc<dyn crate::platform::application_activity::ApplicationActivity> =
-        Rc::new(crate::platform::macos_application::MacosApplicationActivity);
-    let dependencies = crate::ui::pane_lifecycle::PaneLifecycleDependencies {
-        attention: crate::terminal::attention_runtime::AttentionRuntime::new(
-            Box::new(crate::platform::macos_attention::AppKitAudioBell),
-            Box::new(crate::platform::macos_attention::AppKitDockAttention::default()),
-            Box::new(
-                crate::terminal::attention_notification::AttentionNotifications::new(Arc::new(
-                    crate::platform::macos_notification::UserNotificationAdapter,
-                )),
-            ),
-            Rc::clone(&activity),
-        ),
-        secure_input: crate::terminal::secure_input::SecureInputHandle::new(Box::new(
-            crate::platform::macos_secure_input::MacosSecureInputAdapter::new(),
-        )),
-        activity,
-        visibility: Rc::new(crate::platform::macos_render_lifecycle::MacosWindowVisibilityFactory),
-        wheel: Rc::new(crate::platform::macos_scroll::MacosWheelPhaseEnrichment),
+    host: &HostComposition,
+) -> Result<gpui::WindowHandle<WorkspaceManager>, RuntimeError> {
+    let adapters = crate::ui::WorkspaceManagerAdapters {
+        key_input: Rc::clone(&host.adapters.key_input),
+        accessibility: Rc::clone(&host.adapters.accessibility),
+        native_services: host.adapters.native_services.clone(),
+        lifecycle: host.adapters.lifecycle.clone(),
+        finder: Rc::clone(&host.adapters.finder),
+        permission_recovery: host.adapters.permission_recovery.clone(),
+        remote_workspace: Arc::clone(&host.adapters.remote_workspace),
+        window_drag: host.window_movement.create(),
     };
-    cx.set_global(ApplicationPaneLifecycle(dependencies.clone()));
-    dependencies
-}
-
-pub(crate) fn open(cx: &mut App, startup: StartupDependencies) {
-    let lifecycle_dependencies = pane_lifecycle_dependencies(cx);
-    let home_directory = startup.home_directory.clone();
-    let remote_backend_factory = startup.remote_backend_factory();
+    let session_factory = Rc::clone(&host.session_factory);
+    let home_directory = host.home_directory.clone();
     let bounds = Bounds::centered(None, size(px(900.0), px(580.0)), cx);
-    let native_pty_adapter_factory: Arc<dyn NativePtyAdapterFactory> =
-        Arc::new(MacosNativePtyAdapterFactory);
-    let session_factory: Rc<dyn TerminalSessionFactory> =
-        Rc::new(NativeTerminalSessionFactory::new(
-            native_pty_adapter_factory,
-            crate::platform::shell_launch::ShellLaunchPlanner::new(
-                crate::platform::launch_host::user_shell().into(),
-                crate::platform::launch_host::resource_root(),
-            ),
-            Arc::new(crate::platform::macos_pasteboard::MacosOsc52ClipboardFactory),
-        ));
-    let key_input_adapter_factory: Rc<dyn TerminalKeyInputAdapterFactory> = Rc::new(
-        MacosTerminalKeyInputAdapterFactory::new(OptionAsAltPolicy::default()),
-    );
     let result = cx.open_window(
         WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
             window_min_size: Some(size(px(480.0), px(260.0))),
-            titlebar: Some(TitlebarOptions {
-                title: None,
-                appears_transparent: true,
-                traffic_light_position: Some(point(px(12.0), px(11.0))),
+            titlebar: host.titlebar.as_ref().map(|titlebar| TitlebarOptions {
+                title: titlebar.title.clone(),
+                appears_transparent: titlebar.appears_transparent,
+                traffic_light_position: titlebar.traffic_light_position,
             }),
             ..WindowOptions::default()
         },
         |window, cx| {
             let workspace_manager = cx.new(|cx| {
-                WorkspaceManager::new(
-                    Rc::clone(&session_factory),
-                    Rc::clone(&key_input_adapter_factory),
-                    Rc::new(crate::platform::macos_accessibility::MacosTerminalAccessibilityAdapterFactory),
-                    crate::terminal::native_services::NativeServiceAdapters {
-                        selection_clipboard: Rc::new(crate::platform::macos_pasteboard::MacosSelectionClipboard),
-                        file_clipboard: Rc::new(crate::platform::macos_pasteboard::MacosFileClipboard),
-                        quick_look: Rc::new(crate::platform::macos_quick_look::MacosQuickLookFactory),
-                    },
-                    lifecycle_dependencies.clone(),
-                    home_directory.clone(),
-                    Arc::clone(&remote_backend_factory),
+                WorkspaceManager::new_with_adapters(
+                    session_factory,
+                    home_directory,
+                    adapters,
                     window,
                     cx,
                 )
@@ -316,23 +270,23 @@ pub(crate) fn open(cx: &mut App, startup: StartupDependencies) {
                     .update(cx, |manager, cx| manager.should_close_window(window, cx))
                     .unwrap_or(true)
             });
-            if let Err(error) = crate::platform::macos_services::install(window, Rc::new(WorkspaceServicesEndpoint {
-                app: cx.to_async(),
-                window: window.window_handle(),
-            })) {
-                eprintln!("failed to install the macOS Services responder: {error}");
+            if let Err(error) = host.services.install(
+                window,
+                Rc::new(WorkspaceServicesEndpoint {
+                    app: cx.to_async(),
+                    window: window.window_handle(),
+                    owner: workspace_manager.downgrade(),
+                }),
+            ) {
+                eprintln!("failed to install the Services responder: {error}");
             }
             workspace_manager
         },
     );
 
-    if let Err(error) = result {
-        eprintln!("failed to open SpaceTerm window: {error:#}");
-        cx.quit();
-        return;
-    }
-
+    let window = result.map_err(|_| RuntimeError::WindowOpen)?;
     cx.activate(true);
+    Ok(window)
 }
 
 #[cfg(test)]
@@ -346,6 +300,7 @@ mod tests {
 
     #[gpui::test]
     fn standard_macos_shortcuts_should_bind_global_application_actions(cx: &mut TestAppContext) {
+        cx.update(crate::ui::init).expect("UI initialization");
         cx.update(init);
         let expected = [
             ("cmd-q", QuitApplication.name()),
@@ -454,6 +409,7 @@ mod tests {
 struct WorkspaceServicesEndpoint {
     app: gpui::AsyncApp,
     window: gpui::AnyWindowHandle,
+    owner: gpui::WeakEntity<WorkspaceManager>,
 }
 
 impl crate::terminal::native_services::services::ServiceEndpoint for WorkspaceServicesEndpoint {
@@ -464,6 +420,9 @@ impl crate::terminal::native_services::services::ServiceEndpoint for WorkspaceSe
                     let Ok(manager) = root.downcast::<WorkspaceManager>() else {
                         return NativeServiceStatus::default();
                     };
+                    if manager.entity_id() != self.owner.entity_id() {
+                        return NativeServiceStatus::default();
+                    }
                     manager.update(cx, |manager, cx| manager.native_service_status(window, cx))
                 })
             })
@@ -479,6 +438,9 @@ impl crate::terminal::native_services::services::ServiceEndpoint for WorkspaceSe
                     let Ok(manager) = root.downcast::<WorkspaceManager>() else {
                         return None;
                     };
+                    if manager.entity_id() != self.owner.entity_id() {
+                        return None;
+                    }
                     manager.update(cx, |manager, cx| {
                         manager.native_service_selection(origin, window, cx)
                     })
@@ -496,6 +458,9 @@ impl crate::terminal::native_services::services::ServiceEndpoint for WorkspaceSe
                     let Ok(manager) = root.downcast::<WorkspaceManager>() else {
                         return false;
                     };
+                    if manager.entity_id() != self.owner.entity_id() {
+                        return false;
+                    }
                     manager.update(cx, |manager, cx| {
                         manager.insert_native_service_text(origin, text, window, cx)
                     })
@@ -504,5 +469,416 @@ impl crate::terminal::native_services::services::ServiceEndpoint for WorkspaceSe
             .ok()
             .and_then(Result::ok)
             .unwrap_or(false)
+    }
+}
+
+/// Application-scoped capabilities shared by every Operating-System Window.
+#[derive(Clone)]
+pub(crate) struct ApplicationCapabilities {
+    pub(crate) key_input: Rc<dyn crate::terminal::TerminalKeyInputAdapterFactory>,
+    pub(crate) accessibility:
+        Rc<dyn crate::platform::terminal_accessibility::TerminalAccessibilityAdapterFactory>,
+    pub(crate) native_services: crate::terminal::native_services::NativeServiceAdapters,
+    pub(crate) lifecycle: crate::ui::pane_lifecycle::PaneLifecycleDependencies,
+    pub(crate) finder: Rc<dyn crate::platform::finder_fallback::FinderFallback>,
+    pub(crate) permission_recovery:
+        Option<Rc<dyn crate::platform::permission_recovery::PermissionRecoveryOpener>>,
+    pub(crate) remote_workspace:
+        Arc<dyn crate::ui::remote_workspace_flow::RemoteWorkspaceFlowBackendFactory>,
+}
+
+/// Complete constructor wiring. This value defines no platform operations.
+pub(crate) struct HostCompositionParts {
+    pub(crate) profile: crate::desktop_profile::DesktopProfile,
+    pub(crate) home_directory: PathBuf,
+    pub(crate) session_factory: Rc<dyn TerminalSessionFactory>,
+    pub(crate) adapters: ApplicationCapabilities,
+    pub(crate) services:
+        Option<Rc<dyn crate::platform::services_registration::ServicesRegistration>>,
+    pub(crate) window_movement:
+        Option<Rc<dyn crate::platform::window_movement::WindowMovementFactory>>,
+    pub(crate) titlebar: Option<TitlebarOptions>,
+}
+pub(crate) struct HostComposition {
+    profile: crate::desktop_profile::DesktopProfile,
+    home_directory: PathBuf,
+    session_factory: Rc<dyn TerminalSessionFactory>,
+    adapters: ApplicationCapabilities,
+    services: Rc<dyn crate::platform::services_registration::ServicesRegistration>,
+    window_movement: Rc<dyn crate::platform::window_movement::WindowMovementFactory>,
+    titlebar: Option<TitlebarOptions>,
+}
+impl HostComposition {
+    pub(crate) fn new(
+        parts: HostCompositionParts,
+    ) -> Result<Self, crate::desktop_profile::DesktopProfileError> {
+        use crate::desktop_profile::DesktopProfileError;
+        if !parts.home_directory.is_absolute() {
+            return Err(DesktopProfileError::InvalidCombination);
+        }
+        if parts.titlebar.as_ref().is_some_and(|titlebar| {
+            titlebar.traffic_light_position.is_some() && !titlebar.appears_transparent
+        }) {
+            return Err(DesktopProfileError::InvalidCombination);
+        }
+        Ok(Self {
+            profile: parts.profile,
+            home_directory: parts.home_directory,
+            session_factory: parts.session_factory,
+            adapters: parts.adapters,
+            services: parts
+                .services
+                .ok_or(DesktopProfileError::MissingCapability)?,
+            window_movement: parts
+                .window_movement
+                .ok_or(DesktopProfileError::MissingCapability)?,
+            titlebar: parts.titlebar,
+        })
+    }
+}
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+pub(crate) enum RuntimeError {
+    #[error("UI initialization failed")]
+    Initialization,
+    #[error("Operating-System Window creation failed")]
+    WindowOpen,
+    #[error("Runtime Observation configuration failed")]
+    Observation,
+}
+
+#[derive(Debug, thiserror::Error)]
+enum LaunchError {
+    #[error("{0}")]
+    Dependencies(StartupDependenciesError),
+    #[error("{0}")]
+    Desktop(crate::desktop_profile::DesktopProfileError),
+    #[error("{0}")]
+    Runtime(RuntimeError),
+}
+
+/// The host supplies only its composition constructor after helper dispatch has declined.
+pub(crate) fn launch(
+    compose: impl FnOnce(
+        StartupDependencies,
+    ) -> Result<HostComposition, crate::desktop_profile::DesktopProfileError>,
+) -> i32 {
+    let result = StartupDependencies::capture()
+        .map_err(LaunchError::Dependencies)
+        .and_then(|startup| compose(startup).map_err(LaunchError::Desktop))
+        .and_then(|host| run(host).map_err(LaunchError::Runtime));
+    match result {
+        Ok(()) => 0,
+        Err(error) => {
+            eprintln!("failed to start SpaceTerm: {error}");
+            2
+        }
+    }
+}
+
+pub(crate) fn run(host: HostComposition) -> Result<(), RuntimeError> {
+    crate::platform::acceptance_observation::configure_from_environment()
+        .map_err(|_| RuntimeError::Observation)?;
+    let failure = Rc::new(std::cell::Cell::new(None));
+    let reported_failure = Rc::clone(&failure);
+    gpui::Application::new().run(move |cx| {
+        if let Err(error) = start_application(cx, &host) {
+            reported_failure.set(Some(error));
+            cx.quit();
+        }
+    });
+    if crate::platform::acceptance_observation::finish_runtime_observation().is_err() {
+        eprintln!("acceptance runtime observation did not complete");
+    }
+    failure.get().map_or(Ok(()), Err)
+}
+
+fn start_application(
+    cx: &mut App,
+    host: &HostComposition,
+) -> Result<gpui::WindowHandle<WorkspaceManager>, RuntimeError> {
+    initialize_application(
+        cx,
+        |cx| crate::ui::initialize_controls(cx).map_err(|_| RuntimeError::Initialization),
+        |cx| {
+            host.profile.install(cx);
+            if let Err(error) = host.services.register() {
+                eprintln!("failed to register Services: {error}");
+            }
+            init(cx);
+            open(cx, host)
+        },
+    )
+}
+
+fn initialize_application<T, R, E>(
+    state: &mut T,
+    initialize_ui: impl FnOnce(&mut T) -> Result<(), E>,
+    open_application: impl FnOnce(&mut T) -> Result<R, E>,
+) -> Result<R, E> {
+    initialize_ui(state)?;
+    open_application(state)
+}
+pub(crate) fn dispatch_or_prepare_application<T>(
+    dispatch_helper: impl FnOnce() -> Option<i32>,
+    prepare_application: impl FnOnce() -> T,
+) -> Result<T, i32> {
+    match dispatch_helper() {
+        Some(exit_code) => Err(exit_code),
+        None => Ok(prepare_application()),
+    }
+}
+
+#[cfg(test)]
+mod startup_tests {
+    use std::cell::RefCell;
+
+    use super::{dispatch_or_prepare_application, initialize_application};
+
+    #[test]
+    fn ui_initialization_failure_should_prevent_opening_an_operating_system_window() {
+        let mut window_opened = false;
+
+        let result = initialize_application(
+            &mut window_opened,
+            |_| Err::<(), _>("font registration failed"),
+            |window_opened| {
+                *window_opened = true;
+                Ok(())
+            },
+        );
+
+        assert_eq!(result, Err("font registration failed"));
+        assert!(!window_opened);
+    }
+
+    #[test]
+    fn askpass_helper_dispatch_should_precede_and_bypass_application_startup_capture() {
+        let calls = RefCell::new(Vec::new());
+
+        let outcome = dispatch_or_prepare_application(
+            || {
+                calls.borrow_mut().push("helper");
+                Some(17)
+            },
+            || {
+                calls.borrow_mut().push("capture");
+                "application"
+            },
+        );
+
+        assert_eq!(outcome, Err(17));
+        assert_eq!(calls.into_inner(), ["helper"]);
+    }
+
+    #[test]
+    fn application_startup_should_capture_once_after_helper_declines_dispatch() {
+        let calls = RefCell::new(Vec::new());
+
+        let outcome = dispatch_or_prepare_application(
+            || {
+                calls.borrow_mut().push("helper");
+                None
+            },
+            || {
+                calls.borrow_mut().push("capture");
+                "application"
+            },
+        );
+
+        assert_eq!(outcome, Ok("application"));
+        assert_eq!(calls.into_inner(), ["helper", "capture"]);
+    }
+}
+
+#[cfg(test)]
+mod runtime_tests {
+    use super::*;
+    use crate::platform::services_registration::{ServicesRegistration, ServicesRegistrationError};
+    use crate::platform::window_movement::{
+        OperatingSystemWindowDragPlatform, RecordingOperatingSystemWindowDragPlatform,
+        WindowMovementFactory,
+    };
+    use crate::terminal::native_services::services::ServiceEndpoint;
+    use crate::ui::remote_workspace_flow::{
+        RemoteWorkspaceFlowBackend, RemoteWorkspaceFlowBackendError,
+        RemoteWorkspaceFlowBackendFactory,
+    };
+    use std::cell::RefCell;
+
+    #[derive(Default)]
+    struct RecordingServices {
+        calls: RefCell<Vec<&'static str>>,
+        endpoints: RefCell<Vec<Rc<dyn ServiceEndpoint>>>,
+        windows: RefCell<Vec<gpui::AnyWindowHandle>>,
+    }
+    impl ServicesRegistration for RecordingServices {
+        fn register(&self) -> Result<(), ServicesRegistrationError> {
+            self.calls.borrow_mut().push("register");
+            Ok(())
+        }
+        fn install(
+            &self,
+            window: &gpui::Window,
+            endpoint: Rc<dyn ServiceEndpoint>,
+        ) -> Result<(), ServicesRegistrationError> {
+            assert_eq!(self.calls.borrow().first(), Some(&"register"));
+            self.calls.borrow_mut().push("install");
+            self.windows.borrow_mut().push(window.window_handle());
+            self.endpoints.borrow_mut().push(endpoint);
+            Ok(())
+        }
+    }
+    #[derive(Default)]
+    struct RecordingMovement(RefCell<Vec<Rc<dyn OperatingSystemWindowDragPlatform>>>);
+    impl WindowMovementFactory for RecordingMovement {
+        fn create(&self) -> Rc<dyn OperatingSystemWindowDragPlatform> {
+            let movement: Rc<dyn OperatingSystemWindowDragPlatform> =
+                Rc::new(RecordingOperatingSystemWindowDragPlatform::default());
+            self.0.borrow_mut().push(Rc::clone(&movement));
+            movement
+        }
+    }
+    struct UnavailableRemote;
+    impl RemoteWorkspaceFlowBackendFactory for UnavailableRemote {
+        fn unavailable_reason(&self) -> Option<String> {
+            Some("Unavailable in this test".into())
+        }
+        fn create(
+            &self,
+            _: &gpui::Window,
+            _: &mut App,
+        ) -> Result<Arc<dyn RemoteWorkspaceFlowBackend>, RemoteWorkspaceFlowBackendError> {
+            panic!("unavailable capability must not be constructed")
+        }
+    }
+    fn parts(
+        services: Rc<RecordingServices>,
+        movement: Rc<RecordingMovement>,
+    ) -> HostCompositionParts {
+        HostCompositionParts {
+            profile: crate::desktop_profile::testing_profile(spaceterm_ui::TextDirection::LeftToRight),
+            home_directory: std::env::temp_dir(),
+            session_factory: Rc::new(crate::terminal::testing::TestTerminalSessionFactory::new(Default::default())),
+            adapters: ApplicationCapabilities {
+                key_input: Rc::new(crate::terminal::GpuiTerminalKeyInputAdapterFactory::default()),
+                accessibility: Rc::new(crate::platform::terminal_accessibility::testing::RecordingAccessibilityFactory::default()),
+                native_services: crate::terminal::native_services::testing::adapters(),
+                lifecycle: crate::ui::pane_lifecycle::PaneLifecycleDependencies::testing(),
+                finder: Rc::new(crate::platform::finder_fallback::ScriptedFinderFallback::new([])),
+                permission_recovery: None,
+                remote_workspace: Arc::new(UnavailableRemote),
+            },
+            services: Some(services), window_movement: Some(movement), titlebar: None,
+        }
+    }
+    #[test]
+    fn incomplete_composition_is_rejected_before_runtime_startup() {
+        for missing_services in [true, false] {
+            let mut parts = parts(Rc::default(), Rc::default());
+            if missing_services {
+                parts.services = None;
+            } else {
+                parts.window_movement = None;
+            }
+            assert_eq!(
+                HostComposition::new(parts).err(),
+                Some(crate::desktop_profile::DesktopProfileError::MissingCapability)
+            );
+        }
+    }
+    #[test]
+    fn invalid_composition_has_only_closed_failure_classification() {
+        let mut parts = parts(Rc::default(), Rc::default());
+        parts.home_directory = "sensitive-relative-value".into();
+        let error = HostComposition::new(parts).err().unwrap();
+        assert_eq!(
+            error.to_string(),
+            "desktop policy and capabilities disagree"
+        );
+    }
+    #[test]
+    fn window_failure_propagates_after_initialization_without_activation() {
+        let mut events = Vec::new();
+        let result = initialize_application(
+            &mut events,
+            |events| {
+                events.push("initialize");
+                Ok(())
+            },
+            |events| {
+                events.push("open");
+                Err::<(), _>(RuntimeError::WindowOpen)
+            },
+        );
+        assert_eq!(
+            (result, events),
+            (Err(RuntimeError::WindowOpen), vec!["initialize", "open"])
+        );
+    }
+    #[gpui::test]
+    fn runtime_registers_once_and_installs_distinct_exact_window_endpoints(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let services = Rc::new(RecordingServices::default());
+        let movement = Rc::new(RecordingMovement::default());
+        let host = HostComposition::new(parts(Rc::clone(&services), Rc::clone(&movement))).unwrap();
+        let (first, second) = cx.update(|cx| {
+            let first = start_application(cx, &host).unwrap();
+            let second = open(cx, &host).unwrap();
+            (first, second)
+        });
+        cx.run_until_parked();
+        assert_eq!(*services.calls.borrow(), ["register", "install", "install"]);
+        assert!(*services.windows.borrow() == [first.into(), second.into()]);
+        assert!(!Rc::ptr_eq(
+            &movement.0.borrow()[0],
+            &movement.0.borrow()[1]
+        ));
+        cx.update(|cx| {
+            first
+                .update(cx, |manager, _, cx| {
+                    manager.assert_application_capabilities(&host.adapters, cx)
+                })
+                .unwrap();
+            second
+                .update(cx, |manager, _, cx| {
+                    manager.assert_application_capabilities(&host.adapters, cx)
+                })
+                .unwrap();
+            first
+                .update(cx, |_, window, _| window.remove_window())
+                .unwrap();
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            services.endpoints.borrow()[0].status(),
+            NativeServiceStatus::default()
+        );
+        assert!(cx.update(|cx| second.update(cx, |_, _, _| ()).is_ok()));
+    }
+    #[gpui::test]
+    fn menus_and_shortcuts_share_the_three_semantic_actions(cx: &mut gpui::TestAppContext) {
+        use gpui::{Action, Keystroke, OwnedMenuItem};
+        cx.update(|cx| {
+            crate::ui::init(cx).unwrap();
+            let file = file_menu().owned();
+            for (item, shortcut, action) in [
+                (&file.items[0], "cmd-n", ShowNewWorkspacePanel.name()),
+                (&file.items[1], "cmd-shift-n", CreateScratchWorkspace.name()),
+                (&file.items[2], "cmd-o", OpenLocalProject.name()),
+            ] {
+                let OwnedMenuItem::Action {
+                    action: menu_action,
+                    ..
+                } = item
+                else {
+                    panic!("expected action");
+                };
+                assert_eq!(menu_action.name(), action);
+                let bindings = cx.all_bindings_for_input(&[Keystroke::parse(shortcut).unwrap()]);
+                assert_eq!(bindings.len(), 1);
+                assert_eq!(bindings[0].action().name(), action);
+            }
+        });
     }
 }
