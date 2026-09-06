@@ -1,20 +1,21 @@
+//! Application-owned system directory selection through GPUI, with injectable test outcomes.
 use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
 
 use gpui::{App, PathPromptOptions};
 
-pub(crate) type FinderFallbackFuture =
+pub(crate) type DirectorySelectionFuture =
     Pin<Box<dyn Future<Output = Result<Option<PathBuf>, DirectoryChooserError>>>>;
 
-pub(crate) trait FinderFallback {
-    fn choose(&self, cx: &App) -> FinderFallbackFuture;
+pub(crate) trait SystemDirectorySelection {
+    fn choose(&self, cx: &App) -> DirectorySelectionFuture;
 }
 
-pub(crate) struct NativeFinderFallback;
+pub(crate) struct GpuiDirectorySelection;
 
-impl FinderFallback for NativeFinderFallback {
-    fn choose(&self, cx: &App) -> FinderFallbackFuture {
+impl SystemDirectorySelection for GpuiDirectorySelection {
+    fn choose(&self, cx: &App) -> DirectorySelectionFuture {
         let selection = cx.prompt_for_paths(PathPromptOptions {
             files: false,
             directories: true,
@@ -33,14 +34,14 @@ impl FinderFallback for NativeFinderFallback {
 }
 
 #[cfg(test)]
-pub(crate) struct ScriptedFinderFallback {
+pub(crate) struct ScriptedDirectorySelection {
     selections: std::cell::RefCell<
         std::collections::VecDeque<Result<Option<PathBuf>, DirectoryChooserError>>,
     >,
 }
 
 #[cfg(test)]
-impl ScriptedFinderFallback {
+impl ScriptedDirectorySelection {
     pub(crate) fn new(
         selections: impl IntoIterator<Item = Result<Option<PathBuf>, DirectoryChooserError>>,
     ) -> Self {
@@ -51,8 +52,8 @@ impl ScriptedFinderFallback {
 }
 
 #[cfg(test)]
-impl FinderFallback for ScriptedFinderFallback {
-    fn choose(&self, _: &App) -> FinderFallbackFuture {
+impl SystemDirectorySelection for ScriptedDirectorySelection {
+    fn choose(&self, _: &App) -> DirectorySelectionFuture {
         let result = self.selections.borrow_mut().pop_front().unwrap_or(Ok(None));
         Box::pin(async move { result })
     }

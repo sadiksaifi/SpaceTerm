@@ -457,7 +457,7 @@ fn shell_launch_should_preserve_prepared_environment_and_reject_revoked_channel(
         launch.environment(),
         &[
             (OsString::from("HOME"), OsString::from("/private/tmp")),
-            (OsString::from("PATH"), OsString::from("/usr/bin:/bin")),
+            (OsString::from("PATH"), OsString::from("/fixture/bin")),
             (OsString::from("TERM"), OsString::from("xterm-256color")),
         ]
     );

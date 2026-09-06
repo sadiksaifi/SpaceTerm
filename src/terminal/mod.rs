@@ -64,8 +64,8 @@ pub(crate) use key_input::{
 };
 pub(crate) use metadata::TerminalLocalFileCapabilities;
 pub(crate) use native_services::{
-    NativeContextActions, NativeInsertion, NativeServiceCapabilities, NativeServiceOrigin,
-    NativeServiceStatus, QuickLookTarget,
+    FilePreviewTarget, NativeContextActions, NativeInsertion, NativeServiceCapabilities,
+    NativeServiceOrigin, NativeServiceStatus,
 };
 #[cfg(test)]
 pub(crate) use osc52::Osc52AuthorizationId;

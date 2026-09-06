@@ -148,3 +148,10 @@ Shared UI test setup constructs its Desktop Profile from explicit modal, text-in
 shortcut, and locale policy facts. It does not call host composition. Portable PTY fixtures return
 observations to the corpus diagnostic checks, including repeated-close termination counts and
 termination-before-adapter-drop ordering.
+
+Local path and file-action fixtures supply explicit POSIX path and Shell Insertion Dialect values.
+Shell Integration fixtures supply captured environment, compatibility, fallback directories, and
+path-list separators. Portable tests cover both colon and semicolon path lists without selecting
+another host implementation. System Directory Selection cancellation and stale completion, File
+Preview revalidation and teardown, and Remote Pane denial remain shared policy evidence. Native
+Quick Look and OpenSSH denial with hostile PATH entries remain in the macOS Adapter Integration Suite.

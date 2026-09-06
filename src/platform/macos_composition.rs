@@ -41,6 +41,11 @@ fn capture_startup_dependencies() -> Result<
         .map_err(|_| StartupDependenciesError::Paths)?;
     StartupDependencies::capture(
         path_environment,
+        crate::ssh::startup_environment::StartupSshEnvironment::from_environment(
+            |key| std::env::var_os(key),
+            "/usr/bin:/bin".into(),
+        )
+        .map_err(|_| StartupDependenciesError::Paths)?,
         &path_host_facts,
         Arc::new(super::macos_secure_filesystem::MacosSecureFilesystem),
         executable,
@@ -72,6 +77,12 @@ fn desktop_profile(
         crate::desktop_profile::keybindings::bindings(),
         locale,
     )
+    .map(|profile| {
+        profile.with_file_labels(crate::desktop_profile::FileInteractionLabels {
+            directory_selection: "Choose with Finder",
+            file_preview: "Quick Look",
+        })
+    })
 }
 
 fn compose(
@@ -99,15 +110,13 @@ fn compose(
         visibility: Rc::new(crate::platform::macos_render_lifecycle::MacosWindowVisibilityFactory),
         wheel: Rc::new(crate::platform::macos_scroll::MacosWheelPhaseEnrichment),
     };
-    let local_filesystem = super::local_filesystem::LocalFilesystemAuthority::new(Arc::new(
-        super::macos_local_identity::MacosLocalIdentity,
-    ));
+    let local_filesystem = super::local_filesystem::LocalFilesystemAuthority::new(
+        crate::local_path::LocalPathSemantics::Posix,
+        Arc::new(super::macos_local_identity::MacosLocalIdentity),
+    );
     let session_factory = Rc::new(NativeTerminalSessionFactory::new(
         Arc::new(super::macos_pty::MacosNativePtyAdapterFactory),
-        super::shell_launch::ShellLaunchPlanner::new(
-            super::launch_host::user_shell().into(),
-            super::launch_host::resource_root(),
-        ),
+        super::launch_host::shell_launch_planner(),
         Arc::new(super::macos_pasteboard::MacosOsc52ClipboardFactory),
         local_filesystem.clone(),
         super::launch_host::local_hostname(),
@@ -131,11 +140,14 @@ fn compose(
             ),
             native_services: crate::terminal::native_services::NativeServiceAdapters {
                 selection_clipboard: Rc::new(super::macos_pasteboard::MacosSelectionClipboard),
+                file_insertion: crate::terminal::native_services::file_insertion::FileInsertionPolicy {
+                    paths: crate::local_path::LocalPathSemantics::Posix,
+                    shell: crate::terminal::native_services::file_insertion::ShellInsertionDialect::Posix,
+                },
                 file_clipboard: Rc::new(super::macos_pasteboard::MacosFileClipboard),
-                quick_look: Rc::new(super::macos_quick_look::MacosQuickLookFactory),
+                file_preview: Rc::new(super::macos_quick_look::MacosQuickLookFactory),
             },
             lifecycle,
-            finder: Rc::new(super::finder_fallback::NativeFinderFallback),
             permission_recovery: Some(Rc::new(
                 super::permission_recovery::PermissionRecovery::new(
                     Box::new(super::macos_system_settings::NsWorkspaceUrlLauncher::default()),

@@ -48,7 +48,7 @@ use crate::terminal::geometry::{
     LogicalPosition, LogicalSize, TerminalGeometry,
 };
 use crate::terminal::native_services::clipboard::{FileClipboard, SelectionPublication};
-use crate::terminal::native_services::quick_look::{QuickLookPlatform, QuickLookPresenter};
+use crate::terminal::native_services::file_preview::{FilePreviewPlatform, FilePreviewPresenter};
 use crate::terminal::native_services::{
     NativeServiceAdapters, TerminalContextMenuState, activated_link, revalidated_context_link,
 };
@@ -56,12 +56,12 @@ use crate::terminal::secure_input::SecureInputPane;
 use crate::terminal::wheel_phase::resolve_wheel_phase;
 use crate::terminal::{
     AccessibilityGeometry, AccessibilityNotification, AccessibilityNotifications, AttentionFacts,
-    DiagnosticBundle, DiagnosticKeyEventKind, FindDirection, FindQueryGeneration, InputModifiers,
-    KeyAction, KeyInput, KeyTranslation, NativeContextActions, NativeInsertion,
-    NativeServiceCapabilities, NativeServiceOrigin, NativeServiceStatus, Osc52Access,
-    Osc52AuthorizationDecision, Osc52AuthorizationRequest, Osc52Target, PaneTerminalState,
-    PasteConfirmation, PasteDecision, PasteRequestOutcome, PasteResolution, PhysicalKey,
-    PointerButton, PointerInput, PointerPhase, PreparedWorkspaceTerminalLaunch, QuickLookTarget,
+    DiagnosticBundle, DiagnosticKeyEventKind, FilePreviewTarget, FindDirection,
+    FindQueryGeneration, InputModifiers, KeyAction, KeyInput, KeyTranslation, NativeContextActions,
+    NativeInsertion, NativeServiceCapabilities, NativeServiceOrigin, NativeServiceStatus,
+    Osc52Access, Osc52AuthorizationDecision, Osc52AuthorizationRequest, Osc52Target,
+    PaneTerminalState, PasteConfirmation, PasteDecision, PasteRequestOutcome, PasteResolution,
+    PhysicalKey, PointerButton, PointerInput, PointerPhase, PreparedWorkspaceTerminalLaunch,
     RemoteChannelUnavailable, ScreenSnapshot, SelectionCopy, SelectionCopyError, SessionEvent,
     ShiftSelectionPolicy, SurfacePosition, TerminalAccessibilityModel, TerminalFailure,
     TerminalKeyInputAdapter, TerminalKeyInputEventKind, TerminalLocalFileCapabilities,
@@ -288,6 +288,7 @@ pub(crate) struct TerminalPane {
     paint_fault: Option<PaintPreflightFault>,
     graphics_cache: Entity<TerminalGraphicsCache>,
     selection_pasteboard: SelectionPublication,
+    file_insertion: crate::terminal::native_services::file_insertion::FileInsertionPolicy,
     file_clipboard: Rc<dyn FileClipboard>,
     key_input_adapter: Box<dyn TerminalKeyInputAdapter>,
     ime: TerminalIme,
@@ -303,7 +304,7 @@ pub(crate) struct TerminalPane {
         crate::terminal::PresentationGeneration,
         crate::terminal::HyperlinkTarget,
     )>,
-    quick_look: Box<dyn QuickLookPlatform>,
+    file_preview: Box<dyn FilePreviewPlatform>,
     context_menu: Option<TerminalContextMenuState>,
     blink_phase_visible: bool,
     blink_generation: u64,
@@ -548,6 +549,7 @@ impl TerminalPane {
             selection_pasteboard: SelectionPublication::new(
                 native_service_adapters.selection_clipboard,
             ),
+            file_insertion: native_service_adapters.file_insertion,
             file_clipboard: native_service_adapters.file_clipboard,
             key_input_adapter,
             ime: TerminalIme::default(),
@@ -560,8 +562,8 @@ impl TerminalPane {
             pending_osc52: None,
             hovered_link: None,
             pressed_link: None,
-            quick_look: Box::new(QuickLookPresenter::new(
-                native_service_adapters.quick_look.create(),
+            file_preview: Box::new(FilePreviewPresenter::new(
+                native_service_adapters.file_preview.create(),
             )),
             context_menu: None,
             blink_phase_visible: true,
@@ -611,7 +613,7 @@ impl TerminalPane {
             || !product_focus.active_tab
             || !product_focus.focused_pane;
         if pane_inactive {
-            self.quick_look.dismiss();
+            self.file_preview.dismiss();
         }
         if native_service_blocked {
             self.pending_file_insertion = None;
@@ -1167,7 +1169,7 @@ impl TerminalPane {
         self.render_lifecycle.release();
         self.visibility_source.take();
         self.context_menu = None;
-        self.quick_look.dismiss();
+        self.file_preview.dismiss();
         self.accessibility_element.set_hierarchy(false, usize::MAX);
         let session_was_attached = self.session.take().is_some();
         if self.failure_action_request.as_ref().is_some_and(|request| {
@@ -2316,7 +2318,7 @@ impl TerminalPane {
                     return;
                 }
                 self.context_menu = None;
-                self.quick_look.dismiss();
+                self.file_preview.dismiss();
                 if matches!(self.pane_state, PaneTerminalState::Exited(_))
                     || self
                         .pane_state
@@ -2347,7 +2349,7 @@ impl TerminalPane {
                     return;
                 }
                 self.context_menu = None;
-                self.quick_look.dismiss();
+                self.file_preview.dismiss();
                 self.hidden_input = false;
                 self.sync_secure_input();
                 let failure = TerminalFailure::from_session(&failure);
@@ -2914,6 +2916,7 @@ impl TerminalPane {
     fn paste_clipboard(&mut self, _: &PasteClipboard, window: &mut Window, cx: &mut Context<Self>) {
         let terminal_input_focused = self.synchronize_terminal_input_focus(window, cx);
         let Ok(Some(insertion)) = NativeInsertion::clipboard(
+            self.file_insertion,
             self.file_clipboard.as_ref(),
             || cx.read_from_clipboard().and_then(|item| item.text()),
             terminal_input_focused,
@@ -2965,15 +2968,18 @@ impl TerminalPane {
         if !self.local_file_capabilities.are_enabled() {
             return;
         }
-        let insertion =
-            match NativeInsertion::prepare_dropped_files(paths, self.local_file_capabilities) {
-                Ok(insertion) => insertion,
-                Err(message) => {
-                    self.status = Some(format!("File drop rejected: {message}"));
-                    cx.notify();
-                    return;
-                }
-            };
+        let insertion = match NativeInsertion::prepare_dropped_files(
+            self.file_insertion,
+            paths,
+            self.local_file_capabilities,
+        ) {
+            Ok(insertion) => insertion,
+            Err(message) => {
+                self.status = Some(format!("File drop rejected: {message}"));
+                cx.notify();
+                return;
+            }
+        };
         self.pending_file_insertion = Some(insertion);
         window.activate_window();
         self.focus(window);
@@ -3046,14 +3052,14 @@ impl TerminalPane {
         }
 
         let link = self.link_at(position);
-        let quick_look_eligible =
+        let file_preview_eligible =
             NativeContextActions::from_presence(self.local_file_capabilities, false, link.as_ref())
-                .quick_look;
+                .file_preview;
         self.context_menu = Some(TerminalContextMenuState {
             generation: self.screen.generation,
             position,
             selection_present: self.screen.selection_present,
-            quick_look_eligible,
+            file_preview_eligible,
             link,
         });
         self.sync_terminal_input_focus(window, cx);
@@ -3117,7 +3123,7 @@ impl TerminalPane {
                     cx.open_url(&url);
                 }
             }
-            TerminalContextMenuCommand::QuickLook if actions.quick_look => {
+            TerminalContextMenuCommand::FilePreview if actions.file_preview => {
                 if let Some(link) = link {
                     self.preview_context_link(&link, cx);
                 }
@@ -3132,11 +3138,11 @@ impl TerminalPane {
         link: &crate::terminal::HyperlinkTarget,
         cx: &mut Context<Self>,
     ) {
-        let Some(target) = QuickLookTarget::from_link(link, self.local_file_capabilities) else {
-            self.quick_look.dismiss();
+        let Some(target) = FilePreviewTarget::from_link(link, self.local_file_capabilities) else {
+            self.file_preview.dismiss();
             return;
         };
-        if self.quick_look.preview(&target).is_err() {
+        if self.file_preview.preview(&target).is_err() {
             self.present_failure(TerminalFailure::platform("preview-local-file"), true, None);
             cx.notify();
         }
@@ -3965,10 +3971,10 @@ impl Render for TerminalPane {
         let export_pane = cx.entity().downgrade();
         let retry_pane = cx.entity().downgrade();
         let native_context_selector = format!(
-            "terminal-native-context-copy-{}-open-{}-quick-look-{}-failure-{}-last-frame-{}",
+            "terminal-native-context-copy-{}-open-{}-file-preview-{}-failure-{}-last-frame-{}",
             native_context_actions.copy,
             native_context_actions.open_link,
-            native_context_actions.quick_look,
+            native_context_actions.file_preview,
             diagnostics_available,
             last_valid_frame_preserved,
         );
@@ -4014,7 +4020,10 @@ impl Render for TerminalPane {
                 self.context_menu_actions(menu)
             });
         let context_menu_available = self.context_menu_available();
-        let context_menu_entries = terminal_context_menu_entries(context_menu_actions);
+        let context_menu_entries = terminal_context_menu_entries(
+            context_menu_actions,
+            crate::desktop_profile::FileInteractionLabels::get(cx),
+        );
         let context_open_pane = pane.clone();
         let context_activation_pane = pane.clone();
         let context_activation_target = context_menu_target.clone();
@@ -4619,16 +4628,16 @@ mod tests {
         propagated_key_downs: Rc<Cell<usize>>,
     }
 
-    struct RecordingQuickLookPresenter {
+    struct RecordingFilePreviewPresenter {
         previews: Rc<Cell<usize>>,
         dismissals: Rc<Cell<usize>>,
     }
 
-    impl QuickLookPlatform for RecordingQuickLookPresenter {
+    impl FilePreviewPlatform for RecordingFilePreviewPresenter {
         fn preview(
             &mut self,
-            _: &QuickLookTarget,
-        ) -> Result<(), crate::terminal::native_services::quick_look::QuickLookError> {
+            _: &FilePreviewTarget,
+        ) -> Result<(), crate::terminal::native_services::file_preview::FilePreviewError> {
             self.previews.set(self.previews.get() + 1);
             Ok(())
         }
@@ -5697,7 +5706,7 @@ mod tests {
                     LogicalCellSize::new(f32::from(pane.cell_width), pane.line_height),
                     BackingScale::ONE,
                 ));
-                pane.quick_look = Box::new(RecordingQuickLookPresenter {
+                pane.file_preview = Box::new(RecordingFilePreviewPresenter {
                     previews: Rc::clone(&previews),
                     dismissals: Rc::new(Cell::new(0)),
                 });
@@ -5706,19 +5715,19 @@ mod tests {
                     position: SurfacePosition::default(),
                     link: Some(local_link.clone()),
                     selection_present: true,
-                    quick_look_eligible: true,
+                    file_preview_eligible: true,
                 };
                 assert_eq!(
                     pane.context_menu_actions(&menu),
                     NativeContextActions {
                         copy: true,
                         open_link: false,
-                        quick_look: false,
+                        file_preview: false,
                     }
                 );
                 pane.perform_context_menu_command(
                     menu,
-                    TerminalContextMenuCommand::QuickLook,
+                    TerminalContextMenuCommand::FilePreview,
                     window,
                     cx,
                 );
@@ -8765,7 +8774,7 @@ mod tests {
                 position: SurfacePosition::default(),
                 link: None,
                 selection_present: true,
-                quick_look_eligible: false,
+                file_preview_eligible: false,
             };
             let current = pane.context_menu_actions(&menu);
             menu.generation = crate::terminal::PresentationGeneration::test(6);
@@ -8787,7 +8796,7 @@ mod tests {
                     position: SurfacePosition::default(),
                     link: None,
                     selection_present: false,
-                    quick_look_eligible: false,
+                    file_preview_eligible: false,
                 });
                 pane.sync_terminal_input_focus(window, cx);
                 pane.context_menu_closed(cx);
@@ -8850,7 +8859,7 @@ mod tests {
                 .is_some()
         );
         assert!(
-            cx.debug_bounds("terminal-context-menu-row-quick-look-disabled")
+            cx.debug_bounds("terminal-context-menu-row-file-preview-disabled")
                 .is_some()
         );
         assert!(records.commands().iter().all(|call| !matches!(
@@ -8925,9 +8934,9 @@ mod tests {
     }
 
     #[gpui::test]
-    fn quick_look_command_revalidates_then_calls_the_retained_presenter(cx: &mut TestAppContext) {
+    fn file_preview_command_revalidates_then_calls_the_retained_presenter(cx: &mut TestAppContext) {
         let directory = std::env::temp_dir().join(format!(
-            "spaceterm-context-quick-look-{}",
+            "spaceterm-context-file-preview-{}",
             std::process::id()
         ));
         std::fs::create_dir_all(&directory).unwrap();
@@ -8952,7 +8961,7 @@ mod tests {
                     LogicalCellSize::new(f32::from(pane.cell_width), pane.line_height),
                     BackingScale::ONE,
                 ));
-                pane.quick_look = Box::new(RecordingQuickLookPresenter {
+                pane.file_preview = Box::new(RecordingFilePreviewPresenter {
                     previews: Rc::clone(&previews),
                     dismissals: Rc::clone(&dismissals),
                 });
@@ -8961,13 +8970,13 @@ mod tests {
                     position: SurfacePosition::default(),
                     link: Some(link),
                     selection_present: false,
-                    quick_look_eligible: true,
+                    file_preview_eligible: true,
                 };
                 pane.context_menu = Some(menu.clone());
                 pane.sync_terminal_input_focus(window, cx);
                 pane.perform_context_menu_command(
                     menu,
-                    TerminalContextMenuCommand::QuickLook,
+                    TerminalContextMenuCommand::FilePreview,
                     window,
                     cx,
                 );
@@ -8984,7 +8993,7 @@ mod tests {
     #[gpui::test]
     fn stale_context_generation_never_reaches_the_presenter(cx: &mut TestAppContext) {
         let directory = std::env::temp_dir().join(format!(
-            "spaceterm-stale-context-quick-look-{}",
+            "spaceterm-stale-context-file-preview-{}",
             std::process::id()
         ));
         std::fs::create_dir_all(&directory).unwrap();
@@ -9009,7 +9018,7 @@ mod tests {
                     LogicalCellSize::new(f32::from(pane.cell_width), pane.line_height),
                     BackingScale::ONE,
                 ));
-                pane.quick_look = Box::new(RecordingQuickLookPresenter {
+                pane.file_preview = Box::new(RecordingFilePreviewPresenter {
                     previews: Rc::clone(&previews),
                     dismissals: Rc::clone(&dismissals),
                 });
@@ -9018,7 +9027,7 @@ mod tests {
                     position: SurfacePosition::default(),
                     link: Some(link),
                     selection_present: false,
-                    quick_look_eligible: true,
+                    file_preview_eligible: true,
                 };
                 pane.context_menu = Some(menu.clone());
                 pane.screen = ScreenSnapshot::from_test_parts_at(
@@ -9030,7 +9039,7 @@ mod tests {
                 pane.sync_terminal_input_focus(window, cx);
                 pane.perform_context_menu_command(
                     menu,
-                    TerminalContextMenuCommand::QuickLook,
+                    TerminalContextMenuCommand::FilePreview,
                     window,
                     cx,
                 );
@@ -9104,12 +9113,12 @@ mod tests {
     }
 
     #[gpui::test]
-    fn session_exit_dismisses_quick_look_and_the_context_menu(cx: &mut TestAppContext) {
+    fn session_exit_dismisses_file_preview_and_the_context_menu(cx: &mut TestAppContext) {
         let (pane, cx) = terminal_pane(cx);
         let dismissals = Rc::new(Cell::new(0));
 
         pane.update(cx, |pane, cx| {
-            pane.quick_look = Box::new(RecordingQuickLookPresenter {
+            pane.file_preview = Box::new(RecordingFilePreviewPresenter {
                 previews: Rc::new(Cell::new(0)),
                 dismissals: Rc::clone(&dismissals),
             });
@@ -9118,7 +9127,7 @@ mod tests {
                 position: SurfacePosition::default(),
                 link: None,
                 selection_present: false,
-                quick_look_eligible: false,
+                file_preview_eligible: false,
             });
             pane.handle_event(
                 SessionEvent::Exited(crate::terminal::SessionExit::Success),

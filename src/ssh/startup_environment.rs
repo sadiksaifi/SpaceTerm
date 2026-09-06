@@ -1,7 +1,8 @@
 use std::ffi::{OsStr, OsString};
 use std::fmt;
 
-const FALLBACK_PATH: &str = "/usr/bin:/bin";
+#[cfg(test)]
+const FALLBACK_PATH: &str = "/fixture/bin";
 const PATH_ENVIRONMENT_VARIABLE: &str = "PATH";
 const SSH_AUTH_SOCK_ENVIRONMENT_VARIABLE: &str = "SSH_AUTH_SOCK";
 const MAXIMUM_CAPTURED_ENVIRONMENT_VALUE_BYTES: usize = 16 * 1024;
@@ -20,11 +21,9 @@ trait StartupSshEnvironmentReader {
     fn environment_variable(&mut self, key: &OsStr) -> Option<OsString>;
 }
 
-struct ProcessStartupSshEnvironmentReader;
-
-impl StartupSshEnvironmentReader for ProcessStartupSshEnvironmentReader {
+impl<F: FnMut(&OsStr) -> Option<OsString>> StartupSshEnvironmentReader for F {
     fn environment_variable(&mut self, key: &OsStr) -> Option<OsString> {
-        std::env::var_os(key)
+        self(key)
     }
 }
 
@@ -41,6 +40,7 @@ impl fmt::Debug for StartupSshEnvironment {
     }
 }
 
+#[cfg(test)]
 impl Default for StartupSshEnvironment {
     fn default() -> Self {
         Self {
@@ -52,15 +52,26 @@ impl Default for StartupSshEnvironment {
 }
 
 impl StartupSshEnvironment {
-    pub(crate) fn capture() -> Self {
-        Self::capture_with(&mut ProcessStartupSshEnvironmentReader)
+    pub(crate) fn from_environment(
+        mut read: impl FnMut(&OsStr) -> Option<OsString>,
+        fallback_path: OsString,
+    ) -> Result<Self, &'static str> {
+        if !safe_environment_value(&fallback_path) {
+            return Err("SSH search-path fallback is invalid");
+        }
+        Ok(Self::prepare(&mut read, fallback_path))
     }
 
+    #[cfg(test)]
     fn capture_with(reader: &mut impl StartupSshEnvironmentReader) -> Self {
+        Self::prepare(reader, FALLBACK_PATH.into())
+    }
+
+    fn prepare(reader: &mut impl StartupSshEnvironmentReader, fallback_path: OsString) -> Self {
         let path = reader
             .environment_variable(OsStr::new(PATH_ENVIRONMENT_VARIABLE))
             .filter(|value| safe_environment_value(value))
-            .unwrap_or_else(|| FALLBACK_PATH.into());
+            .unwrap_or(fallback_path);
         let locale = LOCALE_ENVIRONMENT_VARIABLES
             .into_iter()
             .filter_map(|name| {
@@ -130,6 +141,24 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::*;
+
+    #[test]
+    fn explicit_fallback_is_validated_and_does_not_assume_a_path_list_separator() {
+        for captured in [None, Some(OsString::new()), Some("bad\npath".into())] {
+            let environment = StartupSshEnvironment::from_environment(
+                |key| (key == "PATH").then(|| captured.clone()).flatten(),
+                "fixture-one;fixture-two".into(),
+            )
+            .unwrap();
+            assert_eq!(
+                environment.entries().next(),
+                Some(("PATH", OsStr::new("fixture-one;fixture-two")))
+            );
+        }
+        for fallback in ["", "bad\npath", "bad\0path"] {
+            assert!(StartupSshEnvironment::from_environment(|_| None, fallback.into()).is_err());
+        }
+    }
 
     #[test]
     fn debug_should_redact_captured_values() {

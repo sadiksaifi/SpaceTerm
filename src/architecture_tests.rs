@@ -8,7 +8,7 @@ fn local_filesystem_policy_cannot_reintroduce_native_identity_or_host_selection(
         "platform/local_filesystem/picker.rs",
         "terminal/workspace_terminal_session_factory.rs",
         "terminal/native_services/hyperlink.rs",
-        "terminal/native_services/quick_look.rs",
+        "terminal/native_services/file_preview.rs",
         "terminal/native_services.rs",
         "terminal/emulator.rs",
         "ui/workspace_manager.rs",
@@ -42,7 +42,7 @@ fn local_filesystem_policy_cannot_reintroduce_native_identity_or_host_selection(
     for name in [
         "domain/workspace_collection.rs",
         "terminal/native_services/hyperlink.rs",
-        "terminal/native_services/quick_look.rs",
+        "terminal/native_services/file_preview.rs",
         "terminal/workspace_terminal_session_factory.rs",
         "ui/workspace_manager.rs",
         "ui/workspace_picker.rs",
@@ -168,7 +168,7 @@ fn portable_verification_cannot_select_native_adapters_or_host_mechanics() {
         root.join("terminal/metadata.rs"),
         root.join("terminal/native_services/testing.rs"),
         root.join("terminal/native_services/hyperlink.rs"),
-        root.join("terminal/native_services/quick_look.rs"),
+        root.join("terminal/native_services/file_preview.rs"),
         root.join("terminal/workspace_terminal_session_factory.rs"),
         root.join("terminal/session.rs"),
         root.join("platform/native_pty.rs"),
@@ -392,7 +392,7 @@ fn migrated_policy_and_callers_do_not_name_concrete_adapters() {
         include_str!("terminal/native_services/hyperlink.rs"),
         include_str!("terminal/native_services/osc52.rs"),
         include_str!("terminal/native_services/paste.rs"),
-        include_str!("terminal/native_services/quick_look.rs"),
+        include_str!("terminal/native_services/file_preview.rs"),
         include_str!("terminal/native_services/selection.rs"),
         include_str!("terminal/native_services/services.rs"),
     ];
@@ -417,5 +417,86 @@ fn migrated_policy_and_callers_do_not_name_concrete_adapters() {
         ] {
             assert!(!source.contains(concrete));
         }
+    }
+}
+
+#[test]
+fn local_interaction_policy_cannot_discover_the_host_or_embed_desktop_branding() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    for name in [
+        "local_path.rs",
+        "directory_selection.rs",
+        "platform/local_filesystem.rs",
+        "platform/local_filesystem/picker.rs",
+        "platform/shell_integration.rs",
+        "platform/shell_launch.rs",
+        "ssh/startup_environment.rs",
+        "terminal/native_services.rs",
+        "terminal/native_services/file_insertion.rs",
+        "terminal/native_services/hyperlink.rs",
+        "terminal/native_services/file_preview.rs",
+        "ui/workspace_picker.rs",
+        "ui/terminal_context_menu.rs",
+    ] {
+        let source = std::fs::read_to_string(root.join(name)).unwrap();
+        let source = portable_verification_source(&source);
+        for forbidden in [
+            "std::env::var",
+            "std::env::current_exe",
+            "std::env::current_dir",
+            "env::split_paths",
+            "env::join_paths",
+            "target_os",
+            "cfg!(unix)",
+            "Finder",
+            "finder",
+            "QuickLook",
+            "Quick Look",
+            "quick_look",
+        ] {
+            assert!(!source.contains(forbidden), "{name} contains {forbidden}");
+        }
+    }
+    for name in [
+        "platform/shell_integration.rs",
+        "platform/shell_launch.rs",
+        "ssh/startup_environment.rs",
+    ] {
+        let source = std::fs::read_to_string(root.join(name)).unwrap();
+        let production = source.split("#[cfg(test)]\nmod tests").next().unwrap();
+        // Test-only launch construction precedes the test module and supplies a fixture path.
+        for forbidden in [
+            "/usr/bin",
+            "/usr/local",
+            "/usr/share",
+            "/bin/zsh",
+            "/bin/bash",
+        ] {
+            assert!(
+                !production.contains(forbidden),
+                "{name} contains fixed host path {forbidden}"
+            );
+        }
+    }
+    let ssh = std::fs::read_to_string(root.join("ssh/command.rs")).unwrap();
+    assert!(!ssh.contains("/usr/bin/false"));
+    let composition = std::fs::read_to_string(root.join("platform/macos_composition.rs")).unwrap();
+    assert!(!composition.contains("GpuiDirectorySelection"));
+    assert!(!composition.contains("SystemDirectorySelection"));
+    let platform = std::fs::read_to_string(root.join("platform/mod.rs")).unwrap();
+    assert!(!platform.contains("mod directory_selection"));
+    let picker = std::fs::read_to_string(root.join("ui/workspace_picker.rs")).unwrap();
+    let production = picker.split("#[cfg(test)]\nmod tests").next().unwrap();
+    for forbidden in [
+        "\"~/\"",
+        "starts_with('/')",
+        "ends_with('/')",
+        "rfind('/')",
+        "LocalPathSemantics::Posix",
+    ] {
+        assert!(
+            !production.contains(forbidden),
+            "picker embeds path dialect: {forbidden}"
+        );
     }
 }

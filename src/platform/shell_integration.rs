@@ -38,14 +38,43 @@ pub(crate) struct ShellIntegrationPlan {
     pub(super) environment: Vec<(OsString, OsString)>,
 }
 
-impl ShellEnvironment {
-    pub(crate) fn capture() -> Self {
+/// Captured compatibility and search-path facts, selected independently of the host at planning.
+#[derive(Clone)]
+pub(crate) struct ShellIntegrationPolicy {
+    pub(crate) supported: bool,
+    pub(crate) path_list_separator: char,
+    pub(crate) fallback_xdg_data_dirs: OsString,
+}
+
+impl ShellIntegrationPolicy {
+    #[cfg(test)]
+    pub(crate) fn fixture() -> Self {
         Self {
-            xdg_data_dirs: std::env::var_os("XDG_DATA_DIRS"),
-            zdotdir: std::env::var_os("ZDOTDIR"),
-            env: std::env::var_os("ENV"),
+            supported: true,
+            path_list_separator: ':',
+            fallback_xdg_data_dirs: "/fixture/share".into(),
         }
     }
+}
+
+/// Prepend without lossy conversion or ambient platform path-list operations.
+fn prepend_path(
+    root: &std::ffi::OsStr,
+    prior: &std::ffi::OsStr,
+    separator: char,
+) -> Option<OsString> {
+    if !separator.is_ascii() || separator.is_ascii_control() {
+        return None;
+    }
+    if root.as_encoded_bytes().contains(&(separator as u8)) {
+        return None;
+    }
+    let mut value = root.to_owned();
+    if !prior.is_empty() {
+        value.push(separator.to_string());
+        value.push(prior);
+    }
+    Some(value)
 }
 
 pub(crate) fn plan_shell_integration(
@@ -53,6 +82,7 @@ pub(crate) fn plan_shell_integration(
     resource_root: &Path,
     mode: ShellIntegrationMode,
     inherited: &ShellEnvironment,
+    policy: &ShellIntegrationPolicy,
 ) -> ShellIntegrationPlan {
     if mode == ShellIntegrationMode::Disabled {
         return empty_plan(ShellIntegrationStatus::Disabled);
@@ -60,7 +90,7 @@ pub(crate) fn plan_shell_integration(
     let Some(kind) = detect_shell(shell) else {
         return empty_plan(ShellIntegrationStatus::Unsupported);
     };
-    if kind == ShellKind::Bash && shell == Path::new("/bin/bash") {
+    if !policy.supported {
         return empty_plan(ShellIntegrationStatus::Unsupported);
     }
 
@@ -96,13 +126,11 @@ pub(crate) fn plan_shell_integration(
             let xdg_root = integration_root.into_os_string();
             let prior = inherited
                 .xdg_data_dirs
-                .clone()
-                .unwrap_or_else(|| OsString::from("/usr/local/share:/usr/share"));
-            let mut xdg = xdg_root.clone();
-            if !prior.is_empty() {
-                xdg.push(":");
-                xdg.push(prior);
-            }
+                .as_deref()
+                .unwrap_or(&policy.fallback_xdg_data_dirs);
+            let Some(xdg) = prepend_path(&xdg_root, prior, policy.path_list_separator) else {
+                return empty_plan(ShellIntegrationStatus::Unsupported);
+            };
             environment.push((
                 OsString::from("SPACETERM_SHELL_INTEGRATION_XDG_DIR"),
                 xdg_root,
@@ -132,9 +160,9 @@ pub(crate) fn plan_shell_integration(
     }
 }
 
-pub(crate) fn configured_mode() -> ShellIntegrationMode {
-    match std::env::var("SPACETERM_SHELL_INTEGRATION") {
-        Ok(value)
+pub(crate) fn configured_mode(value: Option<&std::ffi::OsStr>) -> ShellIntegrationMode {
+    match value.and_then(std::ffi::OsStr::to_str) {
+        Some(value)
             if matches!(
                 value.trim().to_ascii_lowercase().as_str(),
                 "0" | "off" | "false"
@@ -172,6 +200,55 @@ mod tests {
     use crate::terminal::testing::ShellResourcesFixture;
 
     #[test]
+    fn path_lists_use_only_the_supplied_separator_and_preserve_empty_entries() {
+        for (root, prior, separator, expected) in [
+            ("/resources", "/one:/two", ':', Some("/resources:/one:/two")),
+            ("/resources", ";/two;", ';', Some("/resources;;/two;")),
+            ("/resources", "", ';', Some("/resources")),
+            ("/bad;root", "/one", ';', None),
+            ("/resources", "/one", '\0', None),
+        ] {
+            assert_eq!(
+                prepend_path(root.as_ref(), prior.as_ref(), separator).as_deref(),
+                expected.map(std::ffi::OsStr::new)
+            );
+        }
+    }
+
+    #[test]
+    fn captured_fallback_and_compatibility_control_the_plan() {
+        let resources = ShellResourcesFixture::new();
+        let mut policy = ShellIntegrationPolicy {
+            supported: true,
+            path_list_separator: ';',
+            fallback_xdg_data_dirs: "/fixture/one;/fixture/two".into(),
+        };
+        let plan = plan_shell_integration(
+            Path::new("/fixture/fish"),
+            resources.path(),
+            ShellIntegrationMode::Automatic,
+            &ShellEnvironment::default(),
+            &policy,
+        );
+        let mut expected = resources.path().join("shell-integration").into_os_string();
+        expected.push(";/fixture/one;/fixture/two");
+        assert!(
+            plan.environment
+                .contains(&("XDG_DATA_DIRS".into(), expected))
+        );
+        policy.supported = false;
+        let plan = plan_shell_integration(
+            Path::new("/fixture/bash"),
+            resources.path(),
+            ShellIntegrationMode::Automatic,
+            &ShellEnvironment::default(),
+            &policy,
+        );
+        assert_eq!(plan.status, ShellIntegrationStatus::Unsupported);
+        assert!(plan.arguments.is_empty() && plan.environment.is_empty());
+    }
+
+    #[test]
     fn supported_shells_receive_isolated_startup_plans() {
         let fixture = ShellResourcesFixture::new();
         let resources = fixture.path();
@@ -186,6 +263,7 @@ mod tests {
             resources,
             ShellIntegrationMode::Automatic,
             &inherited,
+            &ShellIntegrationPolicy::fixture(),
         );
         assert_eq!(zsh.status, ShellIntegrationStatus::Applied(ShellKind::Zsh));
         assert!(zsh.environment.iter().any(|(name, value)| {
@@ -197,6 +275,7 @@ mod tests {
             resources,
             ShellIntegrationMode::Automatic,
             &inherited,
+            &ShellIntegrationPolicy::fixture(),
         );
         assert_eq!(
             fish.status,
@@ -214,6 +293,7 @@ mod tests {
             resources,
             ShellIntegrationMode::Automatic,
             &inherited,
+            &ShellIntegrationPolicy::fixture(),
         );
         assert_eq!(
             nu.status,
@@ -226,6 +306,7 @@ mod tests {
             resources,
             ShellIntegrationMode::Automatic,
             &inherited,
+            &ShellIntegrationPolicy::fixture(),
         );
         assert_eq!(
             bash.status,
@@ -243,6 +324,7 @@ mod tests {
             resources,
             ShellIntegrationMode::Automatic,
             &inherited,
+            &ShellIntegrationPolicy::fixture(),
         );
         assert_eq!(
             elvish.status,
@@ -267,24 +349,28 @@ mod tests {
                 resources,
                 ShellIntegrationMode::Disabled,
                 &inherited,
+                &ShellIntegrationPolicy::fixture(),
             ),
             plan_shell_integration(
                 Path::new("/bin/sh"),
                 resources,
                 ShellIntegrationMode::Automatic,
                 &inherited,
+                &ShellIntegrationPolicy::fixture(),
             ),
             plan_shell_integration(
                 Path::new("/bin/zsh"),
                 Path::new("/private/tmp/spaceterm-missing-resources"),
                 ShellIntegrationMode::Automatic,
                 &inherited,
+                &ShellIntegrationPolicy::fixture(),
             ),
             plan_shell_integration(
-                Path::new("/bin/bash"),
+                Path::new("/fixture/unsupported"),
                 resources,
                 ShellIntegrationMode::Automatic,
                 &inherited,
+                &ShellIntegrationPolicy::fixture(),
             ),
         ];
 

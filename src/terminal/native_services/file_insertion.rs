@@ -1,5 +1,27 @@
 use std::path::PathBuf;
 
+/// Selected from the local shell configuration, never inferred from the operating system.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ShellInsertionDialect {
+    Posix,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct FileInsertionPolicy {
+    pub(crate) paths: crate::local_path::LocalPathSemantics,
+    pub(crate) shell: ShellInsertionDialect,
+}
+
+impl FileInsertionPolicy {
+    #[cfg(test)]
+    pub(crate) const fn fixture() -> Self {
+        Self {
+            paths: crate::local_path::LocalPathSemantics::Posix,
+            shell: ShellInsertionDialect::Posix,
+        }
+    }
+}
+
 pub(crate) const MAX_FILE_ITEMS: usize = 256;
 pub(crate) const MAX_FILE_INSERTION_BYTES: usize = 1024 * 1024;
 
@@ -8,7 +30,10 @@ pub(crate) struct FileInsertion {
     pub(crate) text: String,
 }
 
-pub(crate) fn prepare_file_insertion(paths: &[PathBuf]) -> Result<FileInsertion, &'static str> {
+pub(crate) fn prepare_file_insertion(
+    policy: FileInsertionPolicy,
+    paths: &[PathBuf],
+) -> Result<FileInsertion, &'static str> {
     if paths.is_empty() {
         return Err("no file paths were supplied");
     }
@@ -17,13 +42,14 @@ pub(crate) fn prepare_file_insertion(paths: &[PathBuf]) -> Result<FileInsertion,
     }
     let mut text = String::new();
     for path in paths {
-        if !path.is_absolute() {
+        if !policy.paths.is_absolute(path) {
             return Err("file paths must be absolute");
         }
         let value = path.to_str().ok_or("file paths must be valid UTF-8")?;
         if value.as_bytes().contains(&0) {
             return Err("file paths must not contain NUL");
         }
+        let ShellInsertionDialect::Posix = policy.shell;
         let quotes = value.bytes().filter(|byte| *byte == b'\'').count();
         let length = value
             .len()
@@ -56,7 +82,10 @@ impl std::fmt::Debug for FileInsertion {
 }
 
 /// Parses only local absolute file URLs before shell conversion, without filesystem access.
-pub(crate) fn parse_file_urls(urls: &[String]) -> Result<Vec<PathBuf>, &'static str> {
+pub(crate) fn parse_file_urls(
+    semantics: crate::local_path::LocalPathSemantics,
+    urls: &[String],
+) -> Result<Vec<PathBuf>, &'static str> {
     if urls.len() > MAX_FILE_ITEMS {
         return Err("too many file URLs");
     }
@@ -82,7 +111,10 @@ pub(crate) fn parse_file_urls(urls: &[String]) -> Result<Vec<PathBuf>, &'static 
                 }
                 path = value;
             }
-            if !path.starts_with('/') || path.starts_with("//") || path.contains(['?', '#']) {
+            if !semantics.absolute_uri_path(path)
+                || path.starts_with("//")
+                || path.contains(['?', '#'])
+            {
                 return Err("file URL has no absolute path");
             }
             let mut decoded = Vec::with_capacity(path.len());
@@ -104,10 +136,14 @@ pub(crate) fn parse_file_urls(urls: &[String]) -> Result<Vec<PathBuf>, &'static 
                 decoded.push(byte);
             }
             let path = String::from_utf8(decoded).map_err(|_| "file URL is not valid UTF-8")?;
-            if path.starts_with("//") {
-                return Err("file URL authority is not local");
+            let path = semantics
+                .decode_uri_path(path)
+                .ok_or("file URL authority is not local")?;
+            let path = PathBuf::from(path);
+            if !semantics.is_absolute(&path) {
+                return Err("file URL has no absolute path");
             }
-            Ok(PathBuf::from(path))
+            Ok(path)
         })
         .collect()
 }
@@ -118,11 +154,18 @@ mod tests {
 
     #[test]
     fn file_urls_preserve_order_and_decode_before_shared_quoting() {
-        let paths =
-            parse_file_urls(&["file:///a%20b%27c%0A".into(), "file://localhost/d".into()]).unwrap();
-        let insertion = prepare_file_insertion(&paths).unwrap();
+        let paths = parse_file_urls(
+            crate::local_path::LocalPathSemantics::Posix,
+            &["file:///a%20b%27c%0A".into(), "file://localhost/d".into()],
+        )
+        .unwrap();
+        let insertion = prepare_file_insertion(FileInsertionPolicy::fixture(), &paths).unwrap();
         assert!(insertion.text == "'/a b'\"'\"'c\n' '/d'");
-        assert!(parse_file_urls(&[]).unwrap().is_empty());
+        assert!(
+            parse_file_urls(crate::local_path::LocalPathSemantics::Posix, &[])
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
@@ -130,6 +173,7 @@ mod tests {
         for value in [
             "https://example.test",
             "file:relative",
+            "file:%2Fencoded-root",
             "file://remote/a",
             "file:///a%00b",
             "file:///a%GG",
@@ -137,38 +181,62 @@ mod tests {
             "file:///%2fa",
             "file:///a?query",
         ] {
-            assert!(parse_file_urls(&[value.into()]).is_err());
+            assert!(
+                parse_file_urls(
+                    crate::local_path::LocalPathSemantics::Posix,
+                    &[value.into()]
+                )
+                .is_err()
+            );
         }
         let path = PathBuf::from(format!("/{}", "'".repeat(MAX_FILE_INSERTION_BYTES / 4)));
-        assert!(prepare_file_insertion(&[path]).is_err());
+        assert!(prepare_file_insertion(FileInsertionPolicy::fixture(), &[path]).is_err());
         let path = PathBuf::from(format!("/{}", "x".repeat(MAX_FILE_INSERTION_BYTES - 3)));
         assert_eq!(
-            prepare_file_insertion(&[path]).unwrap().text.len(),
+            prepare_file_insertion(FileInsertionPolicy::fixture(), &[path])
+                .unwrap()
+                .text
+                .len(),
             MAX_FILE_INSERTION_BYTES
         );
         assert!(
-            parse_file_urls(&[format!("file:///{}", "x".repeat(MAX_FILE_INSERTION_BYTES))])
-                .is_err()
+            parse_file_urls(
+                crate::local_path::LocalPathSemantics::Posix,
+                &[format!("file:///{}", "x".repeat(MAX_FILE_INSERTION_BYTES))]
+            )
+            .is_err()
         );
     }
 
     #[test]
     fn hostile_filenames_are_single_quoted_without_losing_unicode_or_newlines() {
-        let insertion = prepare_file_insertion(&[PathBuf::from("/tmp/a b'c\n😀")]).unwrap();
+        let insertion = prepare_file_insertion(
+            FileInsertionPolicy::fixture(),
+            &[PathBuf::from("/tmp/a b'c\n😀")],
+        )
+        .unwrap();
         assert_eq!(insertion.text, "'/tmp/a b'\"'\"'c\n😀'");
     }
 
     #[test]
     fn multiple_items_preserve_order_with_one_space_separator() {
         let paths = [PathBuf::from("/a"), PathBuf::from("/b c")];
-        assert_eq!(prepare_file_insertion(&paths).unwrap().text, "'/a' '/b c'");
+        assert_eq!(
+            prepare_file_insertion(FileInsertionPolicy::fixture(), &paths)
+                .unwrap()
+                .text,
+            "'/a' '/b c'"
+        );
     }
 
     #[test]
     fn relative_empty_and_oversized_inputs_are_rejected() {
-        assert!(prepare_file_insertion(&[]).is_err());
-        assert!(prepare_file_insertion(&[PathBuf::from("relative")]).is_err());
+        assert!(prepare_file_insertion(FileInsertionPolicy::fixture(), &[]).is_err());
+        assert!(
+            prepare_file_insertion(FileInsertionPolicy::fixture(), &[PathBuf::from("relative")])
+                .is_err()
+        );
         let many = vec![PathBuf::from("/x"); MAX_FILE_ITEMS + 1];
-        assert!(prepare_file_insertion(&many).is_err());
+        assert!(prepare_file_insertion(FileInsertionPolicy::fixture(), &many).is_err());
     }
 }

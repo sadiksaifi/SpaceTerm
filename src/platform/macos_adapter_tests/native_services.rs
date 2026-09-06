@@ -30,9 +30,9 @@ fn local_native_actions_are_inert_after_the_file_is_replaced() {
     fs::rename(&replacement, &file).unwrap();
 
     assert_eq!(local.activation_url(LOCAL_FILES), None);
-    assert_eq!(QuickLookTarget::from_link(&local, LOCAL_FILES), None);
+    assert_eq!(FilePreviewTarget::from_link(&local, LOCAL_FILES), None);
     assert!(NativeContextActions::from_presence(LOCAL_FILES, false, Some(&local)).open_link);
-    assert!(NativeContextActions::from_presence(LOCAL_FILES, false, Some(&local)).quick_look);
+    assert!(NativeContextActions::from_presence(LOCAL_FILES, false, Some(&local)).file_preview);
     fs::remove_dir_all(directory).unwrap();
 }
 
@@ -51,8 +51,8 @@ fn local_native_actions_are_inert_after_the_path_becomes_a_different_symlink() {
     symlink(&other, &file).unwrap();
 
     assert_eq!(local.activation_url(LOCAL_FILES), None);
-    assert_eq!(QuickLookTarget::from_link(&local, LOCAL_FILES), None);
+    assert_eq!(FilePreviewTarget::from_link(&local, LOCAL_FILES), None);
     assert!(NativeContextActions::from_presence(LOCAL_FILES, false, Some(&local)).open_link);
-    assert!(NativeContextActions::from_presence(LOCAL_FILES, false, Some(&local)).quick_look);
+    assert!(NativeContextActions::from_presence(LOCAL_FILES, false, Some(&local)).file_preview);
     fs::remove_dir_all(directory).unwrap();
 }

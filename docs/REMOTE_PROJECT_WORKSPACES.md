@@ -164,7 +164,7 @@ They intentionally do not offer features that would interpret a remote value as 
 
 - local-path hyperlink classification or opening
 - File Insertion and clipboard file-URL insertion
-- Finder, Quick Look, and file-aware macOS Services
+- System Directory Selection, File Preview, and file-aware native Services. The macOS profile labels the first two Finder and Quick Look.
 - file-path drag and drop
 
 Remote over SSH does not include SFTP browsing, upload, download, remote preview, file

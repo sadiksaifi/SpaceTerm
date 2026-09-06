@@ -8,7 +8,7 @@ fn test_geometry() -> TerminalGeometry {
     super::tests::test_geometry()
 }
 fn test_launch_planner() -> ShellLaunchPlanner {
-    ShellLaunchPlanner::new(
+    ShellLaunchPlanner::for_test(
         "/bin/zsh".into(),
         crate::platform::launch_host::resource_root(),
     )

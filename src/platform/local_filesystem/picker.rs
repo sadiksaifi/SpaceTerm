@@ -47,6 +47,7 @@ pub(crate) enum WorkspacePickerExactPathProbe {
 }
 
 pub(crate) trait WorkspacePickerFilesystem: Send + Sync {
+    fn path_semantics(&self) -> crate::local_path::LocalPathSemantics;
     fn list_directories(
         &self,
         directory: &Path,
@@ -64,12 +65,16 @@ pub(crate) trait WorkspacePickerFilesystem: Send + Sync {
 }
 
 impl WorkspacePickerFilesystem for LocalFilesystemAuthority {
+    fn path_semantics(&self) -> crate::local_path::LocalPathSemantics {
+        self.path_semantics()
+    }
     fn list_directories(
         &self,
         directory: &Path,
         hide_dot_prefixed: bool,
     ) -> Result<Vec<WorkspacePickerDirectoryEntry>, WorkspacePickerFilesystemError> {
-        validate_absolute_path(directory).map_err(classify_workspace_directory_error)?;
+        validate_absolute_path(self.path_semantics(), directory)
+            .map_err(classify_workspace_directory_error)?;
         let entries = fs::read_dir(directory).map_err(classify_io_error)?;
         let mut directories = Vec::new();
 
@@ -105,7 +110,8 @@ impl WorkspacePickerFilesystem for LocalFilesystemAuthority {
     }
 
     fn create_dir_all(&self, path: &Path) -> Result<(), WorkspacePickerFilesystemError> {
-        validate_absolute_path(path).map_err(classify_workspace_directory_error)?;
+        validate_absolute_path(self.path_semantics(), path)
+            .map_err(classify_workspace_directory_error)?;
         fs::create_dir_all(path).map_err(|error| {
             if fs::metadata(path).is_ok_and(|metadata| !metadata.is_dir()) {
                 WorkspacePickerFilesystemError::NotDirectory

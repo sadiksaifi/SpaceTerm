@@ -39,3 +39,25 @@ pub(crate) fn local_hostname() -> Option<String> {
         .filter(|hostname| !hostname.is_empty() && !hostname.chars().any(char::is_control))
         .map(ToOwned::to_owned)
 }
+
+/// Capture every shell planning fact once at composition.
+pub(crate) fn shell_launch_planner() -> super::shell_launch::ShellLaunchPlanner {
+    use super::shell_integration::{ShellEnvironment, ShellIntegrationPolicy, configured_mode};
+    let shell = PathBuf::from(user_shell());
+    let policy = ShellIntegrationPolicy {
+        supported: shell != Path::new("/bin/bash"),
+        path_list_separator: ':',
+        fallback_xdg_data_dirs: "/usr/local/share:/usr/share".into(),
+    };
+    super::shell_launch::ShellLaunchPlanner::new(
+        shell,
+        resource_root(),
+        configured_mode(std::env::var_os("SPACETERM_SHELL_INTEGRATION").as_deref()),
+        ShellEnvironment {
+            xdg_data_dirs: std::env::var_os("XDG_DATA_DIRS"),
+            zdotdir: std::env::var_os("ZDOTDIR"),
+            env: std::env::var_os("ENV"),
+        },
+        policy,
+    )
+}

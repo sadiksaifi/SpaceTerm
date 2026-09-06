@@ -647,7 +647,7 @@ type StartedSession = (
 
 #[cfg(test)]
 fn test_launch_planner() -> ShellLaunchPlanner {
-    ShellLaunchPlanner::new(
+    ShellLaunchPlanner::for_test(
         "/fixture/zsh".into(),
         PathBuf::from("/fixture/missing-resources"),
     )

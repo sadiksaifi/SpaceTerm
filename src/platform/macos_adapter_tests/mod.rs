@@ -90,7 +90,8 @@ fn keyboard_enrichment_oracle() {
 }
 
 pub(crate) fn local_filesystem() -> crate::platform::local_filesystem::LocalFilesystemAuthority {
-    crate::platform::local_filesystem::LocalFilesystemAuthority::new(std::sync::Arc::new(
-        super::macos_local_identity::MacosLocalIdentity,
-    ))
+    crate::platform::local_filesystem::LocalFilesystemAuthority::new(
+        crate::local_path::LocalPathSemantics::Posix,
+        std::sync::Arc::new(super::macos_local_identity::MacosLocalIdentity),
+    )
 }

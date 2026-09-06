@@ -27,7 +27,7 @@ use super::metadata::{
     DirectoryProvenance, TerminalLocalFileCapabilities, parse_osc7_directory, sanitize_title,
 };
 use super::native_services::{
-    NativeContextActions, NativeInsertion, NativeInsertionError, QuickLookTarget,
+    FilePreviewTarget, NativeContextActions, NativeInsertion, NativeInsertionError,
 };
 use super::osc52::{
     Osc52AccessPolicy, Osc52AuthorizationPolicy, Osc52Effect, Osc52Filter, Osc52Operation,
@@ -1439,15 +1439,21 @@ fn check_paste_safety() -> Result<(), String> {
 }
 
 fn check_file_insertion() -> Result<(), String> {
-    let insertion =
-        prepare_file_insertion(&[PathBuf::from("/tmp/a b'c"), PathBuf::from("/tmp/界")])?;
+    let insertion = prepare_file_insertion(
+        crate::terminal::native_services::file_insertion::FileInsertionPolicy::fixture(),
+        &[PathBuf::from("/tmp/a b'c"), PathBuf::from("/tmp/界")],
+    )?;
     require_eq(
         "file-shell-quoting",
         insertion.text,
         "'/tmp/a b'\"'\"'c' '/tmp/界'".to_owned(),
     )?;
     require(
-        prepare_file_insertion(&[PathBuf::from("relative")]).is_err(),
+        prepare_file_insertion(
+            crate::terminal::native_services::file_insertion::FileInsertionPolicy::fixture(),
+            &[PathBuf::from("relative")],
+        )
+        .is_err(),
         "absolute-file-gate",
         "relative path was accepted",
     )
@@ -1509,6 +1515,7 @@ fn check_shell_integration() -> Result<(), String> {
         resources,
         ShellIntegrationMode::Automatic,
         &inherited,
+        &crate::platform::shell_integration::ShellIntegrationPolicy::fixture(),
     );
     require_eq(
         "zsh-integration",
@@ -1520,6 +1527,7 @@ fn check_shell_integration() -> Result<(), String> {
         resources,
         ShellIntegrationMode::Disabled,
         &inherited,
+        &crate::platform::shell_integration::ShellIntegrationPolicy::fixture(),
     );
     require_eq(
         "disabled-integration",
@@ -1590,11 +1598,16 @@ fn check_native_services() -> Result<(), String> {
         NativeContextActions {
             copy: true,
             open_link: true,
-            quick_look: false,
+            file_preview: false,
         },
     )?;
-    let insertion = NativeInsertion::dropped_files(&[PathBuf::from("/tmp/a b")], true, local_files)
-        .map_err(|error| format!("native insertion failed: {error:?}"))?;
+    let insertion = NativeInsertion::dropped_files(
+        crate::terminal::native_services::file_insertion::FileInsertionPolicy::fixture(),
+        &[PathBuf::from("/tmp/a b")],
+        true,
+        local_files,
+    )
+    .map_err(|error| format!("native insertion failed: {error:?}"))?;
     require_eq("native-file-insertion", insertion.text(), "'/tmp/a b'")?;
     require_eq(
         "native-focus-gate",
@@ -1603,7 +1616,7 @@ fn check_native_services() -> Result<(), String> {
     )?;
 
     let directory = std::env::temp_dir().join(format!(
-        "spaceterm-conformance-quick-look-{}",
+        "spaceterm-conformance-file-preview-{}",
         std::process::id()
     ));
     _ = std::fs::remove_dir_all(&directory);
@@ -1617,17 +1630,18 @@ fn check_native_services() -> Result<(), String> {
             None,
             local_files,
         )
-        .ok_or_else(|| "valid Quick Look link was rejected".to_owned())?;
+        .ok_or_else(|| "valid file preview link was rejected".to_owned())?;
         require_eq(
-            "quick-look-local-regular-file",
-            NativeContextActions::from_presence(local_files, false, Some(&local)).quick_look,
+            "file-preview-local-regular-file",
+            NativeContextActions::from_presence(local_files, false, Some(&local)).file_preview,
             true,
         )?;
         std::fs::remove_file(&file).map_err(|error| error.to_string())?;
         require(
-            QuickLookTarget::from_link(&local, local_files).is_none()
-                && NativeContextActions::from_presence(local_files, false, Some(&local)).quick_look,
-            "quick-look-stale-path",
+            FilePreviewTarget::from_link(&local, local_files).is_none()
+                && NativeContextActions::from_presence(local_files, false, Some(&local))
+                    .file_preview,
+            "file-preview-stale-path",
             "missing local file remained executable or immutable eligibility was lost",
         )
     })();

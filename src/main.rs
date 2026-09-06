@@ -15,3 +15,6 @@ fn main() {
 
 #[cfg(test)]
 mod architecture_tests;
+
+mod directory_selection;
+mod local_path;

@@ -9,7 +9,6 @@ pub(crate) mod macos_observation_transport;
 pub(crate) mod secure_filesystem;
 pub(crate) mod window_visibility;
 
-pub(crate) mod finder_fallback;
 pub(crate) mod local_filesystem;
 #[cfg(target_os = "macos")]
 mod macos_local_identity;

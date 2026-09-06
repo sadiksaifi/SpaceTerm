@@ -87,7 +87,7 @@ fn read_file_urls_from_pasteboard(pasteboard: cocoa::base::id) -> Result<Vec<Pat
                 std::str::from_utf8(raw).map_err(|_| "file URL is not valid UTF-8".to_owned())?;
             urls.push(text.to_owned());
         }
-        parse_file_urls(&urls).map_err(str::to_owned)
+        parse_file_urls(crate::local_path::LocalPathSemantics::Posix, &urls).map_err(str::to_owned)
     }
 }
 

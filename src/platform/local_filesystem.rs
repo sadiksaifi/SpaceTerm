@@ -158,25 +158,34 @@ pub(crate) trait LocalIdentitySource: Send + Sync {
 
 #[derive(Clone)]
 pub(crate) struct LocalFilesystemAuthority {
+    paths: crate::local_path::LocalPathSemantics,
     identity: Arc<dyn LocalIdentitySource>,
     handles: Arc<IdentityBudget>,
     files: Arc<IdentityBudget>,
 }
 
 impl LocalFilesystemAuthority {
-    pub(crate) fn new(identity: Arc<dyn LocalIdentitySource>) -> Self {
+    pub(crate) fn new(
+        paths: crate::local_path::LocalPathSemantics,
+        identity: Arc<dyn LocalIdentitySource>,
+    ) -> Self {
         Self {
+            paths,
             identity,
             handles: Arc::default(),
             files: Arc::default(),
         }
     }
 
+    pub(crate) fn path_semantics(&self) -> crate::local_path::LocalPathSemantics {
+        self.paths
+    }
+
     pub(crate) fn validate_workspace_directory(
         &self,
         path: &Path,
     ) -> Result<ValidatedWorkspaceDirectory, LocalFilesystemError> {
-        validate_absolute_path(path)?;
+        validate_absolute_path(self.paths, path)?;
         let first = self.identify_kind(path, LocalObjectKind::Directory)?;
         fs::read_dir(path).map_err(|error| match classify_io_error(error) {
             LocalFilesystemError::Other => LocalFilesystemError::Unreadable,
@@ -223,13 +232,13 @@ impl LocalFilesystemAuthority {
     pub(crate) fn local_file(&self, value: &str, directory: &Path) -> Option<ValidatedLocalFile> {
         valid_file_text(value).then_some(())?;
         let path = Path::new(value);
-        let selected = if path.is_absolute() {
+        let selected = if self.paths.is_absolute(path) {
             path.to_owned()
         } else {
-            validate_absolute_path(directory).ok()?;
+            validate_absolute_path(self.paths, directory).ok()?;
             directory.join(path)
         };
-        validate_absolute_path(&selected).ok()?;
+        validate_absolute_path(self.paths, &selected).ok()?;
         let permit = self.files.reserve(MAX_LOCAL_FILE_LEASES).ok()?;
         let identity = self.identify_kind(&selected, LocalObjectKind::File).ok()?;
         let canonical = fs::canonicalize(&selected).ok()?;
@@ -246,8 +255,11 @@ impl LocalFilesystemAuthority {
     }
 }
 
-fn validate_absolute_path(path: &Path) -> Result<(), LocalFilesystemError> {
-    if !path.is_absolute() {
+fn validate_absolute_path(
+    semantics: crate::local_path::LocalPathSemantics,
+    path: &Path,
+) -> Result<(), LocalFilesystemError> {
+    if !semantics.is_absolute(path) {
         return Err(LocalFilesystemError::NotAbsolute);
     }
     if path.as_os_str().as_encoded_bytes().contains(&0) {
@@ -291,6 +303,9 @@ impl PartialEq for ValidatedLocalFile {
 impl Eq for ValidatedLocalFile {}
 
 impl ValidatedLocalFile {
+    pub(crate) fn path_semantics(&self) -> crate::local_path::LocalPathSemantics {
+        self.0.authority.paths
+    }
     pub(crate) fn canonical_path(&self) -> &Path {
         &self.0.canonical
     }

@@ -95,6 +95,7 @@ impl SelectionPublication {
 impl NativeInsertion {
     /// Focus and local authority are checked before consulting either clipboard source.
     pub(crate) fn clipboard(
+        policy: super::file_insertion::FileInsertionPolicy,
         files: &dyn FileClipboard,
         text: impl FnOnce() -> Option<String>,
         focused: bool,
@@ -108,7 +109,7 @@ impl NativeInsertion {
                 NativeInsertionError::InvalidFiles("clipboard files are unavailable")
             })?;
             if !paths.is_empty() {
-                return Self::dropped_files(&paths, focused, local).map(Some);
+                return Self::dropped_files(policy, &paths, focused, local).map(Some);
             }
         }
         text()
@@ -152,20 +153,36 @@ mod tests {
             Some("fixture".to_owned())
         };
         assert!(
-            NativeInsertion::clipboard(&files, text, false, TerminalLocalFileCapabilities::Enabled)
-                .is_err()
+            NativeInsertion::clipboard(
+                crate::terminal::native_services::file_insertion::FileInsertionPolicy::fixture(),
+                &files,
+                text,
+                false,
+                TerminalLocalFileCapabilities::Enabled
+            )
+            .is_err()
         );
         assert_eq!((files.reads.get(), text_reads.get()), (0, 0));
-        let remote =
-            NativeInsertion::clipboard(&files, text, true, TerminalLocalFileCapabilities::Disabled)
-                .unwrap()
-                .unwrap();
+        let remote = NativeInsertion::clipboard(
+            crate::terminal::native_services::file_insertion::FileInsertionPolicy::fixture(),
+            &files,
+            text,
+            true,
+            TerminalLocalFileCapabilities::Disabled,
+        )
+        .unwrap()
+        .unwrap();
         assert!(remote.text() == "fixture");
         assert_eq!((files.reads.get(), text_reads.get()), (0, 1));
-        let local =
-            NativeInsertion::clipboard(&files, text, true, TerminalLocalFileCapabilities::Enabled)
-                .unwrap()
-                .unwrap();
+        let local = NativeInsertion::clipboard(
+            crate::terminal::native_services::file_insertion::FileInsertionPolicy::fixture(),
+            &files,
+            text,
+            true,
+            TerminalLocalFileCapabilities::Enabled,
+        )
+        .unwrap()
+        .unwrap();
         assert!(local.text() == "'/a b' '/c'");
         assert_eq!((files.reads.get(), text_reads.get()), (1, 1));
     }
@@ -178,6 +195,7 @@ mod tests {
             fail: true,
         };
         let result = NativeInsertion::clipboard(
+            crate::terminal::native_services::file_insertion::FileInsertionPolicy::fixture(),
             &files,
             || panic!("unexpected clipboard read"),
             true,

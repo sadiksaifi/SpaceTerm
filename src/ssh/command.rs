@@ -350,10 +350,9 @@ impl SshCommandContext {
         let mut arguments = self.base_arguments();
         push_option(&mut arguments, OsString::from("ControlMaster=no"));
         push_option(&mut arguments, OsString::from("ControlPersist=no"));
-        push_option(
-            &mut arguments,
-            OsString::from("ProxyCommand=/usr/bin/false"),
-        );
+        // OpenSSH prefixes ProxyCommand with `exec `. Terminate that empty exec before
+        // using the shell builtin, so even a hostile PATH cannot supply an `exit` executable.
+        push_option(&mut arguments, OsString::from("ProxyCommand=; exit 1"));
         arguments
     }
 
@@ -1083,7 +1082,7 @@ mod tests {
                 "-o",
                 "ControlPersist=no",
                 "-o",
-                "ProxyCommand=/usr/bin/false",
+                "ProxyCommand=; exit 1",
                 "-O",
                 "check",
                 "--",
@@ -1108,7 +1107,7 @@ mod tests {
                 "-o",
                 "ControlPersist=no",
                 "-o",
-                "ProxyCommand=/usr/bin/false",
+                "ProxyCommand=; exit 1",
                 "-O",
                 "exit",
                 "--",
@@ -1133,7 +1132,7 @@ mod tests {
                 "-o",
                 "ControlPersist=no",
                 "-o",
-                "ProxyCommand=/usr/bin/false",
+                "ProxyCommand=; exit 1",
                 "-o",
                 "ClearAllForwardings=yes",
                 "-T",
@@ -1169,7 +1168,7 @@ mod tests {
                 "-o",
                 "ControlPersist=no",
                 "-o",
-                "ProxyCommand=/usr/bin/false",
+                "ProxyCommand=; exit 1",
                 "-o",
                 "ClearAllForwardings=yes",
                 "-tt",
@@ -1433,7 +1432,7 @@ mod tests {
         assert!(specs.iter().all(|spec| {
             spec.arguments()
                 .windows(2)
-                .any(|pair| pair[0] == "-o" && pair[1] == "ProxyCommand=/usr/bin/false")
+                .any(|pair| pair[0] == "-o" && pair[1] == "ProxyCommand=; exit 1")
         }));
     }
 

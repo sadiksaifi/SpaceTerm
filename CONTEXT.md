@@ -51,7 +51,7 @@ Panes with exactly one Focused Pane.
 - Use the application-owned Workspace Picker as the primary Open Local Project selection
   mechanism. It is a live, keyboard-first, one-level filesystem navigator that preserves typed
   path spelling and performs no indexing, recents, persistence, filesystem watching, or fuzzy
-  matching. Finder is available only as an explicit fallback from the picker.
+  matching. System Directory Selection is available only as an explicit fallback from the picker.
 - Present the Workspace Picker as a mode of the Command Palette rather than as its own panel, so
   the application has exactly one transient surface geometry, chrome, and dismissal behavior.
 
@@ -149,7 +149,7 @@ against pinned GPUI 0.2.2 is:
 | Hide, hide others, show all, minimize, fullscreen | Direct GPUI App and Window operations; Rust semantic Action routing | None. |
 | Window opening, activation, close, and titlebar double activation | Direct GPUI `open_window`, `activate`, `activate_window`, `on_window_should_close`, and `titlebar_double_click`; Rust close and quit policy | None. Host composition supplies GPUI titlebar options, including traffic-light placement. |
 | Window movement | Window Drag Region owns press, threshold, exclusion, capture, cancellation, and handoff response; Rust shares the exact window's injected movement state | Retain the original primary NSEvent and hand it to the exact NSWindow. GPUI `start_window_move` is a compositor operation with no macOS implementation. A mismatched event window is rejected. Double activation no longer passes through this Adapter. |
-| Native directory selection | Direct GPUI `prompt_for_paths`; Rust chooser outcome classification and Workspace Picker validation | None. The injected directory chooser uses GPUI, not a native wrapper. Each completion carries its picker lifecycle and operation identity; cancellation preserves the picker and selection joins its existing validation path. |
+| Native directory selection | Direct GPUI `prompt_for_paths`; Rust chooser outcome classification and Workspace Picker validation | None. The Application Runtime constructs the shared GPUI chooser; Host Composition supplies no directory-selection Adapter. Each completion carries its picker lifecycle and operation identity; cancellation preserves the picker and selection joins its existing validation path. |
 | Permission recovery | Rust capability availability, label, preferred/fallback ordering, and closed errors | NSWorkspace URL acceptance result only. GPUI `open_url` returns no result and discards native rejection, so it cannot preserve the current preferred-then-fallback behavior. macOS composition supplies both System Settings destinations and the label. Ordinary URL opening remains direct GPUI. |
 | Locale direction | Rust desktop policy and reusable control layout | AppKit's application-locale direction fact, sampled after GPUI initializes its application; GPUI has no corresponding public fact. |
 | Services | Rust registration ordering, exact endpoint identity and request authority | Existing NSServices registration and exact-view responder installation. GPUI has only the system menu facility. |
@@ -432,8 +432,9 @@ value captures executable, ordered arguments, exact working-directory spelling, 
 handling, environment removals and additions, Shell Integration decision, Terminal Capability
 Identity, Compatibility Identity, and required resource locations. It exposes read-only process
 values without SSH authority, `portable_pty` types, or POSIX mechanisms, and cannot be cloned.
-Application composition injects only the current user shell and host resource location into the
-planner. The selected terminal identity is shared by Terminal Emulator initialization and process
+Application composition injects the selected shell, host resource location, captured Shell Integration
+environment and mode, compatibility eligibility, path-list separator, and fallback search directories
+into the planner. Planning never reads the ambient environment or discovers executable locations. The selected terminal identity is shared by Terminal Emulator initialization and process
 preparation. Working-directory validation and Shell Integration preparation remain on the Terminal
 Session worker before Adapter construction.
 
@@ -463,7 +464,8 @@ path selection, process-supervision policy, and the complete AskPass protocol an
 Shared SSH, Remote Project, application-path, AskPass, and UI Modules contain no host selection or
 raw process, filesystem, local-IPC, peer-credential, or native error mechanics.
 
-Host Composition supplies one validated OpenSSH executable, a trusted runtime fallback root when
+Host Composition supplies a captured SSH environment with an explicit validated search-path fallback,
+and one validated OpenSSH executable, a trusted runtime fallback root when
 the captured environment has no absolute XDG runtime root, the local IPC address-length constraint,
 and the independently selected process, secure-filesystem,
 Control Connection socket, AskPass local-IPC, and peer-authentication capabilities. These values are
@@ -526,6 +528,9 @@ Broker-authorized process launches receive the exact six-variable AskPass overla
 capability held separately in zeroizing spawn ownership. A Terminal Session Channel is already
 authorized against its live Control Connection and receives no AskPass transport state; its fixed
 ControlMaster and ProxyCommand policy fails closed instead of opening a new authenticated path.
+The denial uses `ProxyCommand=; exit 1`: OpenSSH prepends `exec `, so the leading separator
+completes that empty builtin before the shell exits. No executable is looked up through PATH, and
+no fixed local executable path is needed. The sanitized SSH environment never inherits SHELL.
 
 The audit against pinned GPUI 0.2.2 and portable Rust retains only these macOS mechanics:
 
@@ -881,11 +886,28 @@ separate occurrences of the same target. Opening requires a platform-modified pr
 the same identity and Presentation Generation; drags, stale mappings, malformed schemes, and
 missing paths are inert.
 
+### Local Path and File Interaction Policy
+
+`src/local_path.rs` owns explicit Local Path Semantics for absolute entry, home expansion,
+component-aware home display, completion boundaries, URI-path conversion, and file-URL emission.
+Host Composition selects POSIX semantics once for the Local Filesystem Authority. The picker obtains
+those semantics through its filesystem facade, and validated Local File leases retain the same
+selection for later activation. Neither shared UI nor file-action policy detects the host or
+manufactures slash-only local paths. URI slashes and remote POSIX commands remain protocol syntax.
+
+System Directory Selection is application behavior implemented directly with GPUI. Its lifecycle
+and request identities remain independent of directory-read operations. File Preview owns target
+eligibility, retained identity revalidation, failure cleanup, and teardown behind an independent
+presentation capability. The installed Desktop Profile supplies both labels; the macOS profile
+retains “Choose with Finder” and “Quick Look”, and its preview Adapter retains Quick Look mechanics.
+No additional Operating-System Adapter or target implementation is defined.
+
 ### Native File Insertion
 
 Pasteboard, Services, and drag/drop file inputs enter one bounded converter as ordered absolute
-paths. Each item uses POSIX single-quote shell syntax with embedded quotes split safely, and items
-join with exactly one space. Native pasteboard intake accepts only `public.file-url` values;
+paths. Each item uses the explicitly selected local Shell Insertion Dialect. The current composition
+selects POSIX single-quote syntax with embedded quotes split safely, and items join with exactly one
+space. Dialect selection is policy data, never inferred from the Operating System. Native pasteboard intake accepts only `public.file-url` values;
 non-file URLs, relative paths, excessive items, and oversized output are rejected. Converted text
 always enters the existing worker-owned Paste Payload sanitizer and confirmation lifecycle and
 never writes directly to the PTY.
@@ -895,7 +917,7 @@ never writes directly to the PTY.
 Native Terminal Services is one platform-neutral Rust Module under
 `src/terminal/native_services`. It owns Selection publication and representations, clipboard intake,
 File Insertion, Paste Payload validation, OSC 52 filtering and authorization, contextual-action
-revalidation, Terminal Hyperlink activation, Quick Look eligibility and cleanup, and Services
+revalidation, Terminal Hyperlink activation, File Preview eligibility and cleanup, and Services
 request identity and lifecycle. Terminal Session workers remain the sole owners of terminal
 mutation, ordered copy queries, Paste Confirmation, OSC 52 pending operations, and PTY writes.
 GPUI supplies immutable presentation facts and routes actions into that policy.
@@ -907,7 +929,7 @@ For every capability, use GPUI first when it preserves the required behavior, th
 for policy, validation, authorization, identity, ordering, and lifecycle. Retain an Operating-System
 Adapter only for mechanics that neither can faithfully supply. Delete redundant native policy and
 mechanics rather than preserving them behind a wrapper. There is no aggregate platform trait:
-Selection Clipboard, File Clipboard, Quick Look Panel/Factory, Services Endpoint, and worker OSC 52
+Selection Clipboard, File Clipboard, File Preview Panel/Factory, Services Endpoint, and worker OSC 52
 Clipboard/Factory are independent capability Interfaces. `NativeServiceAdapters` is a cloneable
 constructor-wiring value containing the three independent Pane capabilities, never an Adapter.
 
@@ -924,7 +946,7 @@ rejected without falling through to its alternate text representation. Ordered a
 pasteboard and GPUI drag/drop share bounded quoting and worker-owned Paste Payload policy; encoded
 file URLs are decoded and validated in Rust without NSURL. Input and escaped aggregate sizes are
 checked before allocation. Native interactions never bypass Paste Confirmation or mutate the
-Terminal Emulator. Quick Look revalidates the file identity before every presentation, dismisses
+Terminal Emulator. File Preview revalidates the file identity before every presentation, dismisses
 failed previews, and releases presentation ownership on Pane teardown.
 
 Each Services request binds its exact Window endpoint and Workspace, Tab, Pane, Terminal Session,
@@ -940,7 +962,7 @@ The audit against pinned GPUI 0.2.2 retains only these current macOS mechanics:
 | Selection publication | Rust representation selection, empty handling and synchronous publication policy | NSPasteboard public plain-text and HTML publication. GPUI ClipboardEntry supports strings and images, not an independently supplied public HTML representation or publication failure result. |
 | Clipboard text and files | GPUI reads ordinary text; Rust validates and decodes local file URLs and performs bounded quoting | NSPasteboard `public.file-url` discovery and bounded NSString copying. GPUI does not expose file-URL entries. Native NSURL parsing is deleted. |
 | Contextual actions and links | GPUI Menu and `open_url`; Rust generation, Selection, link, and local-authority revalidation | None. |
-| Quick Look | Rust target eligibility, file identity checks, failure cleanup and owner teardown | QLPreviewView/NSPanel creation, presentation and release. GPUI exposes no equivalent system preview facility. |
+| File Preview | Rust target eligibility, file identity checks, failure cleanup and owner teardown | QLPreviewView/NSPanel creation, presentation and release. GPUI exposes no equivalent system preview facility. |
 | OSC 52 | Rust streaming bounds, targets, authorization and ordered worker lifecycle | Synchronous NSPasteboard reads/writes. GPUI clipboard access is through main-thread App and exposes no Send worker API; a foreground rendezvous would deadlock against synchronous Copy waiting on that worker. |
 | Services | Rust capability checks, exact origin, allocation, one-shot consumption and reentrancy gates | NSServices registration, per-view responder integration, requestor lifetime, and provided NSPasteboard transport. GPUI installs a Services menu but has no NSServicesMenuRequestor integration. |
 
@@ -1173,7 +1195,7 @@ The audit against pinned GPUI 0.2.2 retains these surface mechanics:
 | Wheel phases | GPUI ordinary `TouchPhase`; Rust phase interpretation, axis remainders, and terminal routing | Current-event cancellation and momentum enrichment only. GPUI collapses distinctions required to preserve gesture-to-momentum behavior. |
 
 This migration does not implement Linux or Windows, alter the non-macOS compile guard, or change
-application menus, keybinding profiles, Operating-System Window dragging, Finder fallback, System
+application menus, keybinding profiles, Operating-System Window dragging, system directory selection, System
 Settings recovery, Native Terminal Services, Terminal Accessibility, Terminal Key Input, Native
 PTY, Shell Launch Plan, SSH, AskPass, runtime paths, or packaging. Runtime Observation keeps its
 existing authenticated protocol and acceptance scope.
@@ -1312,7 +1334,7 @@ identity policy. It owns absolute-path and malformed-path checks, readable-direc
 one-level directory listing, hidden-entry filtering, creation, exact-path probing, canonical file
 resolution, typed identity equality, and action-time revalidation. Its picker facade exposes the
 existing semantic operations for asynchronous picker coordination and recording tests; it is not
-an Operating-System Filesystem Interface. GPUI `prompt_for_paths` continues to own Finder Fallback.
+an Operating-System Filesystem Interface. The application-owned `src/directory_selection.rs` uses GPUI `prompt_for_paths` for System Directory Selection.
 The picker and Workspace hierarchy retain their operation, lifecycle, and Directory Authority
 checks, rejecting stale owners before local I/O or hierarchy mutation.
 
@@ -1328,13 +1350,13 @@ removed object's identifier from being recycled into authority for its successor
 Host Composition constructs one Local Filesystem Authority and supplies it to WorkspaceManager,
 Workspace Picker, Workspace-bound child factories, and the Native Terminal Session factory. Each
 Terminal Emulator receives that same selected identity capability. Local File targets retain it
-through immutable Pane snapshots and Native Terminal Services, so hyperlink activation and Quick
-Look use the same revalidation policy. Remote launch contexts never send remote directory data to
+through immutable Pane snapshots and Native Terminal Services, so hyperlink activation and File
+Preview use the same revalidation policy. Remote launch contexts never send remote directory data to
 this authority, and disabled Terminal Local File Capabilities reject file resolution and metadata
 transfer before local I/O.
 
 A Local File retains both its exact resolved input spelling and canonical presentation path.
-Activation and every Quick Look presentation recheck both against the retained file identity.
+Activation and every File Preview presentation recheck both against the retained file identity.
 Resolver-only emission metadata contains a versioned 24-byte opaque token, with no path, file
 contents, or native identity fields. Each Terminal Emulator owns at most 32 emitted file leases;
 repeated references to an equal target reuse its entry, and eviction makes old metadata inert.
@@ -1377,17 +1399,17 @@ an operation is running rather than that a command will ask for more.
 Choosing Local Project replaces the panel with the Workspace Picker. Escape there returns to the
 panel that presented it; any other dismissal ends the flow, and confirming a directory completes
 it. Reaching the picker without the panel leaves nothing to step back to. The picker is the canonical selection path and
-Finder is an explicit fallback retained behind its footer. Both paths complete the same background
+System Directory Selection is an explicit fallback retained behind its footer. Both paths complete the same background
 validation before Workspace activation.
 
 The picker composes the Command Palette with caller-owned matching and continuing activation. The
 typed path is the palette query and the only way to change directory: activating a row descends by
-rewriting that query, and moving up a level is editing it. Finder, folder-creation confirmation,
+rewriting that query, and moving up a level is editing it. System Directory Selection, folder-creation confirmation,
 validation, creation, and Workspace activation make that query read-only and retain the picker
 until their cancellation, failure, or explicit completion restores an authoritative state. The
 picker publishes one primary confirm
 whose label alone distinguishes adding an existing folder from creating a missing one, offers the
-Finder Fallback directly in its footer and gathers it with permission recovery into a menu only
+System Directory Selection directly in its footer and gathers it with permission recovery into a menu only
 when an unreadable folder adds those entries, and states an
 unreadable or missing path as the list's single empty line. It renders no scrim, no parent row, no
 section heading, and no second confirm.

@@ -5,7 +5,7 @@ use gpui::{App, ClipboardItem};
 
 use super::NativeServiceAdapters;
 use super::clipboard::{ClipboardError, FileClipboard, SelectionClipboard};
-use super::quick_look::{QuickLookError, QuickLookFactory, QuickLookPanel};
+use super::file_preview::{FilePreviewError, FilePreviewFactory, FilePreviewPanel};
 use crate::terminal::SelectionCopy;
 
 struct TestSelectionClipboard;
@@ -24,14 +24,14 @@ impl FileClipboard for EmptyFileClipboard {
 }
 
 struct UnavailablePreview;
-impl QuickLookPanel for UnavailablePreview {
-    fn preview_file(&mut self, _: &Path) -> Result<(), QuickLookError> {
-        Err(QuickLookError::PlatformUnavailable)
+impl FilePreviewPanel for UnavailablePreview {
+    fn preview_file(&mut self, _: &Path) -> Result<(), FilePreviewError> {
+        Err(FilePreviewError::PlatformUnavailable)
     }
     fn dismiss(&mut self) {}
 }
-impl QuickLookFactory for UnavailablePreview {
-    fn create(&self) -> Box<dyn QuickLookPanel> {
+impl FilePreviewFactory for UnavailablePreview {
+    fn create(&self) -> Box<dyn FilePreviewPanel> {
         Box::new(UnavailablePreview)
     }
 }
@@ -39,7 +39,9 @@ impl QuickLookFactory for UnavailablePreview {
 pub(crate) fn adapters() -> NativeServiceAdapters {
     NativeServiceAdapters {
         selection_clipboard: Rc::new(TestSelectionClipboard),
+        file_insertion:
+            crate::terminal::native_services::file_insertion::FileInsertionPolicy::fixture(),
         file_clipboard: Rc::new(EmptyFileClipboard),
-        quick_look: Rc::new(UnavailablePreview),
+        file_preview: Rc::new(UnavailablePreview),
     }
 }

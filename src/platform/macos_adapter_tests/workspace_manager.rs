@@ -2,7 +2,7 @@ use super::*;
 use std::os::unix::fs::symlink;
 fn workspace_manager_with_picker(
     selections: impl IntoIterator<
-        Item = Result<Option<PathBuf>, crate::platform::finder_fallback::DirectoryChooserError>,
+        Item = Result<Option<PathBuf>, crate::directory_selection::DirectoryChooserError>,
     >,
     cx: &mut TestAppContext,
 ) -> (
@@ -15,7 +15,8 @@ fn workspace_manager_with_picker(
     let records = TestTerminalSessionRecords::default();
     let session_factory: Rc<dyn TerminalSessionFactory> =
         Rc::new(TestTerminalSessionFactory::new(records.clone()).with_fallback_title("zsh"));
-    let finder_fallback: Rc<dyn FinderFallback> = Rc::new(ScriptedFinderFallback::new(selections));
+    let directory_selection_fallback: Rc<dyn SystemDirectorySelection> =
+        Rc::new(ScriptedDirectorySelection::new(selections));
     let (manager, cx) = cx.add_window_view(|window, cx| {
         WorkspaceManager::new_with_adapters(
             session_factory,
@@ -25,7 +26,7 @@ fn workspace_manager_with_picker(
                 key_input: Rc::new(GpuiTerminalKeyInputAdapterFactory::default()),
                 accessibility: Rc::new(crate::platform::terminal_accessibility::testing::RecordingAccessibilityFactory::default()),
                 native_services: crate::terminal::native_services::testing::adapters(),
-                lifecycle: PaneLifecycleDependencies::testing(), finder: finder_fallback,
+                lifecycle: PaneLifecycleDependencies::testing(), directory_selection: directory_selection_fallback,
                 permission_recovery: None,
                 window_drag: Rc::new(RecordingOperatingSystemWindowDragPlatform::default()),
                 remote_workspace: test_remote_backend_factory(),
@@ -53,8 +54,8 @@ fn equivalent_local_project_selections_should_preserve_the_first_path_and_dedupl
     let selections = [Ok(Some(project.clone())), Ok(Some(equivalent))];
     let (manager, records, cx) = workspace_manager_with_picker(selections, cx);
 
-    choose_with_finder_fallback(cx);
-    choose_with_finder_fallback(cx);
+    choose_with_directory_selection_fallback(cx);
+    choose_with_directory_selection_fallback(cx);
     cx.simulate_keystrokes("cmd-t");
     cx.run_until_parked();
     cx.simulate_keystrokes("cmd-d");
@@ -130,7 +131,7 @@ fn replaced_local_project_blocks_both_child_actions_without_closing_sessions(
     let parked = root.join("parked");
     fs::create_dir_all(&project).unwrap();
     let (manager, records, cx) = workspace_manager_with_picker([Ok(Some(project.clone()))], cx);
-    choose_with_finder_fallback(cx);
+    choose_with_directory_selection_fallback(cx);
     let original_counts = manager.read_with(cx, |manager, cx| {
         manager
             .workspaces

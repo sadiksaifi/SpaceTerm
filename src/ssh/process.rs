@@ -1292,7 +1292,7 @@ mod tests {
         );
         assert_eq!(
             entries.get(std::ffi::OsStr::new("PATH")),
-            Some(&OsString::from("/usr/bin:/bin"))
+            Some(&OsString::from("/fixture/bin"))
         );
         assert_eq!(
             entries.get(std::ffi::OsStr::new("SSH_AUTH_SOCK")),
@@ -1378,7 +1378,7 @@ mod tests {
         );
         assert_eq!(
             entries.get(std::ffi::OsStr::new("PATH")),
-            Some(&OsString::from("/usr/bin:/bin"))
+            Some(&OsString::from("/fixture/bin"))
         );
         assert_eq!(
             entries.get(std::ffi::OsStr::new("SSH_AUTH_SOCK")),
