@@ -795,10 +795,7 @@ fn reserve_socket(
 mod tests {
     use std::collections::VecDeque;
     use std::ffi::OsString;
-    use std::fs;
     use std::future::pending;
-    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
-    use std::os::unix::net::UnixListener;
     use std::path::PathBuf;
     use std::pin::Pin;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -811,24 +808,19 @@ mod tests {
     use super::*;
     use crate::domain::SshDestination;
     use crate::platform::app_paths::{AppPathEnvironment, AppPathHostFacts, AppPaths};
-    use crate::platform::macos_control_socket::MacosControlSocketProbe;
-    use crate::platform::macos_secure_filesystem::MacosSecureFilesystem;
+    use crate::platform::testing::{RecordingControlSocketProbe, RecordingFilesystem};
     use crate::ssh::command::{OpenSshExecutable, SshCommandSpec};
     use crate::ssh::process::{ProcessExit, ProcessRunError, ProcessSignal, SshProcessBackend};
 
     static NEXT_TEST_DIRECTORY: AtomicU64 = AtomicU64::new(0);
 
-    struct TestDirectory(PathBuf);
+    struct TestDirectory(PathBuf, Arc<RecordingFilesystem>);
 
     impl TestDirectory {
         fn new() -> Self {
             let sequence = NEXT_TEST_DIRECTORY.fetch_add(1, Ordering::Relaxed);
-            let path = PathBuf::from(format!(
-                "/private/tmp/stc-{}-{sequence}",
-                std::process::id()
-            ));
-            fs::DirBuilder::new().mode(0o700).create(&path).unwrap();
-            Self(path)
+            let path = PathBuf::from(format!("/fixture/stc-{}-{sequence}", std::process::id()));
+            Self(path, Arc::new(RecordingFilesystem::default()))
         }
 
         fn paths(&self) -> AppPaths {
@@ -841,18 +833,12 @@ mod tests {
                 xdg_runtime_dir: Some(self.0.join("runtime").into_os_string()),
             };
             let host = AppPathHostFacts::new(self.0.join("temporary"), 103).unwrap();
-            AppPaths::resolve(&environment, &host, Arc::new(MacosSecureFilesystem)).unwrap()
-        }
-    }
-
-    impl Drop for TestDirectory {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
+            AppPaths::resolve(&environment, &host, self.1.clone()).unwrap()
         }
     }
 
     struct FakeChild {
-        listener: Option<UnixListener>,
+        listener: Option<()>,
         socket_path: PathBuf,
         create_socket_during_cleanup: bool,
         reaped: bool,
@@ -900,29 +886,19 @@ mod tests {
 
     struct FakeBackend {
         epoch: Instant,
+        filesystem: Arc<RecordingFilesystem>,
         state: Mutex<FakeState>,
         environment: super::super::process::SshProcessEnvironment,
     }
 
-    impl Default for FakeBackend {
-        fn default() -> Self {
-            Self {
-                epoch: Instant::now(),
-                state: Mutex::new(FakeState::default()),
-                environment:
-                    super::super::process::SshProcessEnvironment::new_without_authentication(
-                        PathBuf::from("/private/tmp"),
-                        None,
-                    )
-                    .unwrap(),
-            }
-        }
-    }
-
     impl FakeBackend {
-        fn with_readiness(readiness: impl IntoIterator<Item = ProcessExit>) -> Self {
+        fn with_readiness(
+            filesystem: Arc<RecordingFilesystem>,
+            readiness: impl IntoIterator<Item = ProcessExit>,
+        ) -> Self {
             Self {
                 epoch: Instant::now(),
+                filesystem,
                 state: Mutex::new(FakeState {
                     readiness: readiness.into_iter().collect(),
                     ..FakeState::default()
@@ -966,13 +942,12 @@ mod tests {
         ) -> Result<Self::Child, SshProcessMechanismError> {
             let arguments = spec.arguments().to_vec();
             let socket_path = argument_after(&arguments, "-S").unwrap();
-            let listener = UnixListener::bind(&socket_path)
-                .map_err(|_| SshProcessMechanismError::LaunchFailed)?;
+            self.filesystem.create_socket(&socket_path);
             let mut state = self.state.lock().unwrap();
             state.records.push(arguments);
             state.socket_path = Some(socket_path);
             Ok(FakeChild {
-                listener: Some(listener),
+                listener: Some(()),
                 socket_path: state.socket_path.clone().unwrap(),
                 create_socket_during_cleanup: false,
                 reaped: false,
@@ -1060,8 +1035,7 @@ mod tests {
                 self.state.lock().unwrap().reaps += 1;
             }
             if child.create_socket_during_cleanup {
-                let late_socket = UnixListener::bind(&child.socket_path).unwrap();
-                drop(late_socket);
+                self.filesystem.create_socket(&child.socket_path);
             }
             if let Some(after) = after {
                 after();
@@ -1113,10 +1087,13 @@ mod tests {
     fn connect_should_own_a_ready_private_control_socket(cx: &mut TestAppContext) {
         let directory = TestDirectory::new();
         let paths = directory.paths();
-        let backend = Arc::new(FakeBackend::with_readiness([
-            ProcessExit::unsuccessful(Some(255)),
-            ProcessExit::successful(),
-        ]));
+        let backend = Arc::new(FakeBackend::with_readiness(
+            directory.1.clone(),
+            [
+                ProcessExit::unsuccessful(Some(255)),
+                ProcessExit::successful(),
+            ],
+        ));
         let cancellation = SshCancellationToken::default();
 
         let connection = cx
@@ -1124,7 +1101,7 @@ mod tests {
             .block(OpenSshControlConnection::connect(
                 &paths,
                 OpenSshExecutable::for_test(),
-                &MacosControlSocketProbe,
+                &RecordingControlSocketProbe(directory.1.clone()),
                 destination(),
                 Arc::clone(&backend),
                 &cancellation,
@@ -1132,15 +1109,9 @@ mod tests {
             ))
             .unwrap();
 
-        let mode = fs::metadata(connection.control_path())
-            .unwrap()
-            .permissions()
-            .mode()
-            & 0o777;
-        assert_eq!(
-            (connection.state(), mode),
-            (ControlConnectionState::Ready, 0o600)
-        );
+        assert_eq!(connection.state(), ControlConnectionState::Ready);
+        assert!(directory.1.has_socket(connection.control_path()));
+        assert!(directory.1.events.lock().unwrap().contains(&"register"));
     }
 
     #[gpui::test]
@@ -1153,9 +1124,12 @@ mod tests {
             .block(OpenSshControlConnection::connect(
                 &paths,
                 OpenSshExecutable::for_test(),
-                &MacosControlSocketProbe,
+                &RecordingControlSocketProbe(directory.1.clone()),
                 destination(),
-                Arc::new(FakeBackend::with_readiness([ProcessExit::successful()])),
+                Arc::new(FakeBackend::with_readiness(
+                    directory.1.clone(),
+                    [ProcessExit::successful()],
+                )),
                 &cancellation,
                 timing(),
             ))
@@ -1165,9 +1139,12 @@ mod tests {
             .block(OpenSshControlConnection::connect(
                 &paths,
                 OpenSshExecutable::for_test(),
-                &MacosControlSocketProbe,
+                &RecordingControlSocketProbe(directory.1.clone()),
                 destination(),
-                Arc::new(FakeBackend::with_readiness([ProcessExit::successful()])),
+                Arc::new(FakeBackend::with_readiness(
+                    directory.1.clone(),
+                    [ProcessExit::successful()],
+                )),
                 &cancellation,
                 timing(),
             ))
@@ -1182,14 +1159,17 @@ mod tests {
     ) {
         let directory = TestDirectory::new();
         let paths = directory.paths();
-        let backend = Arc::new(FakeBackend::with_readiness([ProcessExit::successful()]));
+        let backend = Arc::new(FakeBackend::with_readiness(
+            directory.1.clone(),
+            [ProcessExit::successful()],
+        ));
         let cancellation = SshCancellationToken::default();
         let connection = cx
             .executor()
             .block(OpenSshControlConnection::connect(
                 &paths,
                 OpenSshExecutable::for_test(),
-                &MacosControlSocketProbe,
+                &RecordingControlSocketProbe(directory.1.clone()),
                 destination(),
                 backend,
                 &cancellation,
@@ -1229,13 +1209,16 @@ mod tests {
         use crate::platform::shell_launch::{PreparedShellLaunch, ShellLaunchFailure};
         let directory = TestDirectory::new();
         let paths = directory.paths();
-        let backend = Arc::new(FakeBackend::with_readiness([ProcessExit::successful()]));
+        let backend = Arc::new(FakeBackend::with_readiness(
+            directory.1.clone(),
+            [ProcessExit::successful()],
+        ));
         let connection = cx
             .executor()
             .block(OpenSshControlConnection::connect(
                 &paths,
                 OpenSshExecutable::for_test(),
-                &MacosControlSocketProbe,
+                &RecordingControlSocketProbe(directory.1.clone()),
                 destination(),
                 backend,
                 &SshCancellationToken::default(),
@@ -1279,7 +1262,7 @@ mod tests {
     fn connect_should_time_out_and_reap_the_master(cx: &mut TestAppContext) {
         let directory = TestDirectory::new();
         let paths = directory.paths();
-        let backend = Arc::new(FakeBackend::default());
+        let backend = Arc::new(FakeBackend::with_readiness(directory.1.clone(), []));
         let cancellation = SshCancellationToken::default();
 
         let error = cx
@@ -1287,7 +1270,7 @@ mod tests {
             .block(OpenSshControlConnection::connect(
                 &paths,
                 OpenSshExecutable::for_test(),
-                &MacosControlSocketProbe,
+                &RecordingControlSocketProbe(directory.1.clone()),
                 destination(),
                 Arc::clone(&backend),
                 &cancellation,
@@ -1308,7 +1291,7 @@ mod tests {
     fn connect_should_report_an_early_master_exit_as_reaped(cx: &mut TestAppContext) {
         let directory = TestDirectory::new();
         let paths = directory.paths();
-        let backend = Arc::new(FakeBackend::default());
+        let backend = Arc::new(FakeBackend::with_readiness(directory.1.clone(), []));
         {
             let mut state = backend.state.lock().unwrap();
             state
@@ -1324,7 +1307,7 @@ mod tests {
             .block(OpenSshControlConnection::connect(
                 &paths,
                 OpenSshExecutable::for_test(),
-                &MacosControlSocketProbe,
+                &RecordingControlSocketProbe(directory.1.clone()),
                 destination(),
                 Arc::clone(&backend),
                 &cancellation,
@@ -1346,7 +1329,7 @@ mod tests {
     fn connect_should_cancel_during_readiness_and_cleanup(cx: &mut TestAppContext) {
         let directory = TestDirectory::new();
         let paths = directory.paths();
-        let backend = Arc::new(FakeBackend::default());
+        let backend = Arc::new(FakeBackend::with_readiness(directory.1.clone(), []));
         let cancellation = SshCancellationToken::default();
         backend.state.lock().unwrap().cancel_on_delay = Some(cancellation.clone());
 
@@ -1355,7 +1338,7 @@ mod tests {
             .block(OpenSshControlConnection::connect(
                 &paths,
                 OpenSshExecutable::for_test(),
-                &MacosControlSocketProbe,
+                &RecordingControlSocketProbe(directory.1.clone()),
                 destination(),
                 Arc::clone(&backend),
                 &cancellation,
@@ -1371,15 +1354,15 @@ mod tests {
     fn failed_connect_should_preserve_its_unregistered_socket(cx: &mut TestAppContext) {
         let directory = TestDirectory::new();
         let paths = directory.paths();
-        let backend = Arc::new(FakeBackend::default());
+        let backend = Arc::new(FakeBackend::with_readiness(directory.1.clone(), []));
         let cancellation = SshCancellationToken::default();
         let unrelated = directory.0.join("unrelated");
-        fs::write(&unrelated, b"keep").unwrap();
+        directory.1.create_socket(&unrelated);
 
         let _ = cx.executor().block(OpenSshControlConnection::connect(
             &paths,
             OpenSshExecutable::for_test(),
-            &MacosControlSocketProbe,
+            &RecordingControlSocketProbe(directory.1.clone()),
             destination(),
             Arc::clone(&backend),
             &cancellation,
@@ -1387,7 +1370,7 @@ mod tests {
         ));
 
         let socket_path = backend.socket_path();
-        assert!(socket_path.exists() && unrelated.exists());
+        assert!(directory.1.has_socket(&socket_path) && directory.1.has_socket(&unrelated));
     }
 
     #[test]
@@ -1400,8 +1383,8 @@ mod tests {
         let socket_path = runtime_owner
             .socket_path(CONTROL_RUNTIME_SOCKET_NAME)
             .unwrap();
-        let backend = Arc::new(FakeBackend::default());
-        let replacement = UnixListener::bind(&socket_path).unwrap();
+        let backend = Arc::new(FakeBackend::with_readiness(directory.1.clone(), []));
+        directory.1.create_socket(&socket_path);
         let launch = ConnectingControl {
             backend: Arc::clone(&backend),
             child: Some(FakeChild {
@@ -1416,22 +1399,24 @@ mod tests {
 
         drop(launch);
 
-        assert!(socket_path.exists() && backend.reap_count() == 1);
-        drop(replacement);
+        assert!(directory.1.has_socket(&socket_path) && backend.reap_count() == 1);
     }
 
     #[gpui::test]
     fn shutdown_should_send_one_exact_exit_then_reap_and_cleanup(cx: &mut TestAppContext) {
         let directory = TestDirectory::new();
         let paths = directory.paths();
-        let backend = Arc::new(FakeBackend::with_readiness([ProcessExit::successful()]));
+        let backend = Arc::new(FakeBackend::with_readiness(
+            directory.1.clone(),
+            [ProcessExit::successful()],
+        ));
         let cancellation = SshCancellationToken::default();
         let mut connection = cx
             .executor()
             .block(OpenSshControlConnection::connect(
                 &paths,
                 OpenSshExecutable::for_test(),
-                &MacosControlSocketProbe,
+                &RecordingControlSocketProbe(directory.1.clone()),
                 destination(),
                 Arc::clone(&backend),
                 &cancellation,
@@ -1451,7 +1436,7 @@ mod tests {
         assert!(
             exit_commands == 1
                 && backend.reap_count() == 1
-                && !socket_path.exists()
+                && !directory.1.has_socket(&socket_path)
                 && connection.state() == ControlConnectionState::Closed
         );
     }
@@ -1462,7 +1447,7 @@ mod tests {
     ) {
         let directory = TestDirectory::new();
         let paths = directory.paths();
-        let backend = Arc::new(FakeBackend::default());
+        let backend = Arc::new(FakeBackend::with_readiness(directory.1.clone(), []));
         backend.state.lock().unwrap().hang_readiness = true;
 
         let error = cx
@@ -1470,7 +1455,7 @@ mod tests {
             .block(OpenSshControlConnection::connect(
                 &paths,
                 OpenSshExecutable::for_test(),
-                &MacosControlSocketProbe,
+                &RecordingControlSocketProbe(directory.1.clone()),
                 destination(),
                 Arc::clone(&backend),
                 &SshCancellationToken::default(),
@@ -1489,13 +1474,16 @@ mod tests {
     fn hanging_exit_command_should_retain_ready_master_ownership(cx: &mut TestAppContext) {
         let directory = TestDirectory::new();
         let paths = directory.paths();
-        let backend = Arc::new(FakeBackend::with_readiness([ProcessExit::successful()]));
+        let backend = Arc::new(FakeBackend::with_readiness(
+            directory.1.clone(),
+            [ProcessExit::successful()],
+        ));
         let mut connection = cx
             .executor()
             .block(OpenSshControlConnection::connect(
                 &paths,
                 OpenSshExecutable::for_test(),
-                &MacosControlSocketProbe,
+                &RecordingControlSocketProbe(directory.1.clone()),
                 destination(),
                 Arc::clone(&backend),
                 &SshCancellationToken::default(),
@@ -1513,7 +1501,7 @@ mod tests {
                     source: ProcessRunError::TimedOut
                 }
             ) && connection.state() == ControlConnectionState::Ready
-                && connection.control_path().exists()
+                && directory.1.has_socket(connection.control_path())
                 && backend.reap_count() == 0
         );
     }
@@ -1522,13 +1510,16 @@ mod tests {
     fn shutdown_should_grace_then_terminate_then_force_the_owned_group(cx: &mut TestAppContext) {
         let directory = TestDirectory::new();
         let paths = directory.paths();
-        let backend = Arc::new(FakeBackend::with_readiness([ProcessExit::successful()]));
+        let backend = Arc::new(FakeBackend::with_readiness(
+            directory.1.clone(),
+            [ProcessExit::successful()],
+        ));
         let mut connection = cx
             .executor()
             .block(OpenSshControlConnection::connect(
                 &paths,
                 OpenSshExecutable::for_test(),
-                &MacosControlSocketProbe,
+                &RecordingControlSocketProbe(directory.1.clone()),
                 destination(),
                 Arc::clone(&backend),
                 &SshCancellationToken::default(),
@@ -1553,13 +1544,16 @@ mod tests {
     fn master_death_should_invalidate_stale_pane_and_utility_commands(cx: &mut TestAppContext) {
         let directory = TestDirectory::new();
         let paths = directory.paths();
-        let backend = Arc::new(FakeBackend::with_readiness([ProcessExit::successful()]));
+        let backend = Arc::new(FakeBackend::with_readiness(
+            directory.1.clone(),
+            [ProcessExit::successful()],
+        ));
         let connection = cx
             .executor()
             .block(OpenSshControlConnection::connect(
                 &paths,
                 OpenSshExecutable::for_test(),
-                &MacosControlSocketProbe,
+                &RecordingControlSocketProbe(directory.1.clone()),
                 destination(),
                 Arc::clone(&backend),
                 &SshCancellationToken::default(),
@@ -1607,13 +1601,16 @@ mod tests {
     fn dropping_a_ready_connection_should_publish_closed_once(cx: &mut TestAppContext) {
         let directory = TestDirectory::new();
         let paths = directory.paths();
-        let backend = Arc::new(FakeBackend::with_readiness([ProcessExit::successful()]));
+        let backend = Arc::new(FakeBackend::with_readiness(
+            directory.1.clone(),
+            [ProcessExit::successful()],
+        ));
         let connection = cx
             .executor()
             .block(OpenSshControlConnection::connect(
                 &paths,
                 OpenSshExecutable::for_test(),
-                &MacosControlSocketProbe,
+                &RecordingControlSocketProbe(directory.1.clone()),
                 destination(),
                 backend,
                 &SshCancellationToken::default(),
@@ -1634,13 +1631,16 @@ mod tests {
     fn socket_replacement_should_block_command_use_and_never_be_unlinked(cx: &mut TestAppContext) {
         let directory = TestDirectory::new();
         let paths = directory.paths();
-        let backend = Arc::new(FakeBackend::with_readiness([ProcessExit::successful()]));
+        let backend = Arc::new(FakeBackend::with_readiness(
+            directory.1.clone(),
+            [ProcessExit::successful()],
+        ));
         let connection = cx
             .executor()
             .block(OpenSshControlConnection::connect(
                 &paths,
                 OpenSshExecutable::for_test(),
-                &MacosControlSocketProbe,
+                &RecordingControlSocketProbe(directory.1.clone()),
                 destination(),
                 Arc::clone(&backend),
                 &SshCancellationToken::default(),
@@ -1662,31 +1662,31 @@ mod tests {
             .unwrap()
             .listener
             .take();
-        fs::remove_file(&socket_path).unwrap();
-        let replacement = UnixListener::bind(&socket_path).unwrap();
+        directory.1.delete_socket(&socket_path);
+        directory.1.create_socket(&socket_path);
 
         assert!(matches!(
             command.into_pane_launch_parts(),
             Err(crate::ssh::command::PreparedSshPaneChannelError::Unavailable)
         ));
         drop(connection);
-        assert!(socket_path.exists());
+        assert!(directory.1.has_socket(&socket_path));
 
-        drop(replacement);
-        fs::remove_file(socket_path).unwrap();
+        directory.1.delete_socket(&socket_path);
     }
 
     #[test]
     fn dropping_a_pending_connect_future_should_reap_and_preserve_unregistered_socket() {
         let directory = TestDirectory::new();
         let paths = directory.paths();
-        let backend = Arc::new(FakeBackend::default());
+        let backend = Arc::new(FakeBackend::with_readiness(directory.1.clone(), []));
         backend.state.lock().unwrap().pending_delay = true;
         let cancellation = SshCancellationToken::default();
+        let probe = RecordingControlSocketProbe(directory.1.clone());
         let mut future = Box::pin(OpenSshControlConnection::connect(
             &paths,
             OpenSshExecutable::for_test(),
-            &MacosControlSocketProbe,
+            &probe,
             destination(),
             Arc::clone(&backend),
             &cancellation,
@@ -1702,7 +1702,7 @@ mod tests {
         drop(future);
 
         let socket_path = backend.socket_path();
-        assert!(backend.reap_count() == 1 && socket_path.exists());
+        assert!(backend.reap_count() == 1 && directory.1.has_socket(&socket_path));
     }
 
     struct NoopWake;
@@ -1725,3 +1725,7 @@ mod tests {
         assert!(ControlConnectionTiming::default().timeout.is_none());
     }
 }
+
+#[cfg(test)]
+#[path = "../platform/macos_adapter_tests/control_connection.rs"]
+mod macos_adapter_tests;

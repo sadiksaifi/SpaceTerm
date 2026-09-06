@@ -383,11 +383,6 @@ impl Drop for NativePtyOwner {
     }
 }
 
-#[cfg(test)]
-pub(crate) fn lock_real_pty_test() -> std::sync::MutexGuard<'static, ()> {
-    crate::platform::macos_pty::lock_real_pty_test()
-}
-
 fn spawn_reader(
     mut reader: Box<dyn Read + Send>,
     output: Arc<dyn NativePtyOutputSink>,
@@ -411,6 +406,17 @@ fn spawn_reader(
                 }
             }
         })
+}
+
+#[cfg(test)]
+pub(crate) fn conformance_initialization() {
+    tests::owner_forwards_exact_launch_and_geometry_to_the_injected_adapter_factory();
+}
+
+#[cfg(test)]
+pub(crate) fn conformance_shutdown() {
+    tests::owner_retains_factory_parts_until_owner_destruction();
+    tests::owner_completes_the_termination_request_before_dropping_the_adapter();
 }
 
 #[cfg(test)]
@@ -540,7 +546,7 @@ mod tests {
     }
 
     #[test]
-    fn owner_forwards_exact_launch_and_geometry_to_the_injected_adapter_factory() {
+    pub(super) fn owner_forwards_exact_launch_and_geometry_to_the_injected_adapter_factory() {
         let construction = Arc::new(Mutex::new(None));
         let factory = RecordingAdapterFactory {
             construction: Arc::clone(&construction),
@@ -574,7 +580,7 @@ mod tests {
     }
 
     #[test]
-    fn owner_retains_factory_parts_until_owner_destruction() {
+    pub(super) fn owner_retains_factory_parts_until_owner_destruction() {
         let termination_count = Arc::new(AtomicUsize::new(0));
         let factory = RecordingAdapterFactory {
             construction: Arc::new(Mutex::new(None)),
@@ -806,7 +812,7 @@ mod tests {
     }
 
     #[test]
-    fn owner_completes_the_termination_request_before_dropping_the_adapter() {
+    pub(super) fn owner_completes_the_termination_request_before_dropping_the_adapter() {
         let termination_completed = Arc::new(AtomicBool::new(false));
         let dropped_before_termination = Arc::new(AtomicBool::new(false));
         let factory = OneShotAdapterFactory(Mutex::new(Some(NativePtyAdapterParts {

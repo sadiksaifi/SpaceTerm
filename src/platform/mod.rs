@@ -141,3 +141,10 @@ mod macos_keybindings;
 pub(crate) use macos_composition::testing_desktop_profile;
 
 pub(crate) mod locale;
+
+#[cfg(test)]
+#[path = "macos_adapter_tests/mod.rs"]
+pub(crate) mod macos_adapter_tests;
+
+#[cfg(test)]
+pub(crate) mod testing;

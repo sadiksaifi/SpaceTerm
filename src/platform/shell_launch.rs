@@ -55,11 +55,26 @@ const SHELL_INTEGRATION_ENVIRONMENT: &[&str] = &[
 pub(crate) struct ShellLaunchPlanner {
     shell: PathBuf,
     resources: PathBuf,
+    environment: Option<(ShellIntegrationMode, ShellEnvironment)>,
 }
 
 impl ShellLaunchPlanner {
     pub(crate) fn new(shell: PathBuf, resources: PathBuf) -> Self {
-        Self { shell, resources }
+        Self {
+            shell,
+            resources,
+            environment: None,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_environment(
+        mut self,
+        mode: ShellIntegrationMode,
+        inherited: ShellEnvironment,
+    ) -> Self {
+        self.environment = Some((mode, inherited));
+        self
     }
 
     pub(crate) fn fallback_title(&self) -> String {
@@ -74,6 +89,9 @@ impl ShellLaunchPlanner {
         &self,
         working_directory: &Path,
     ) -> Result<PreparedShellLaunch, ShellLaunchFailure> {
+        if let Some((mode, inherited)) = &self.environment {
+            return self.local_with_environment(working_directory, *mode, inherited);
+        }
         self.local_with_environment(
             working_directory,
             configured_mode(),
@@ -251,10 +269,6 @@ mod tests {
         ValidatedRemoteLoginShell,
     };
 
-    fn resources() -> PathBuf {
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("assets")
-    }
-
     fn env_value<'a>(launch: &'a PreparedShellLaunch, key: &str) -> Option<&'a OsStr> {
         launch
             .environment()
@@ -265,6 +279,7 @@ mod tests {
 
     #[test]
     fn local_launch_prepares_every_supported_shell_and_preserves_login_order() {
+        let resources = crate::terminal::testing::ShellResourcesFixture::new();
         let inherited = ShellEnvironment {
             xdg_data_dirs: Some("/custom/share".into()),
             zdotdir: Some("/private/zsh config".into()),
@@ -282,7 +297,7 @@ mod tests {
             ("/bin/zsh", ShellKind::Zsh, vec!["-l"]),
         ] {
             let directory = std::env::temp_dir();
-            let launch = ShellLaunchPlanner::new(shell.into(), resources())
+            let launch = ShellLaunchPlanner::new(shell.into(), resources.path().to_path_buf())
                 .local_with_environment(&directory, ShellIntegrationMode::Automatic, &inherited)
                 .unwrap();
             assert_eq!(launch.executable(), OsStr::new(shell));
@@ -307,7 +322,11 @@ mod tests {
                     inherited.zdotdir.as_deref()
                 ),
                 _ => {
-                    let mut expected = resources().join("shell-integration").into_os_string();
+                    let mut expected = resources
+                        .path()
+                        .to_path_buf()
+                        .join("shell-integration")
+                        .into_os_string();
                     expected.push(":/custom/share");
                     assert_eq!(
                         env_value(&launch, "XDG_DATA_DIRS"),
@@ -320,29 +339,30 @@ mod tests {
 
     #[test]
     fn local_fallbacks_keep_login_arguments_and_terminal_identity() {
+        let resources = crate::terminal::testing::ShellResourcesFixture::new();
         for (shell, mode, root, status) in [
             (
                 "/bin/zsh",
                 ShellIntegrationMode::Disabled,
-                resources(),
+                resources.path().to_path_buf(),
                 ShellIntegrationStatus::Disabled,
             ),
             (
                 "/bin/bash",
                 ShellIntegrationMode::Automatic,
-                resources(),
+                resources.path().to_path_buf(),
                 ShellIntegrationStatus::Unsupported,
             ),
             (
                 "/bin/unknown",
                 ShellIntegrationMode::Automatic,
-                resources(),
+                resources.path().to_path_buf(),
                 ShellIntegrationStatus::Unsupported,
             ),
             (
                 "/bin/zsh",
                 ShellIntegrationMode::Automatic,
-                resources().join("missing"),
+                resources.path().to_path_buf().join("missing"),
                 ShellIntegrationStatus::MissingResources,
             ),
         ] {
@@ -392,7 +412,8 @@ mod tests {
         let entry = root.join("terminfo/78/xterm-spaceterm");
         std::fs::create_dir_all(entry.parent().unwrap()).unwrap();
         std::fs::write(&entry, b"compiled fixture").unwrap();
-        let planner = ShellLaunchPlanner::new("/bin/zsh".into(), root.clone());
+        let planner = ShellLaunchPlanner::new("/fixture/zsh".into(), root.clone())
+            .with_environment(ShellIntegrationMode::Automatic, ShellEnvironment::default());
         let launch = planner.local(&std::env::temp_dir()).unwrap();
         assert_eq!(
             env_value(&launch, "TERM"),
@@ -413,15 +434,26 @@ mod tests {
 
     #[test]
     fn launch_validation_preserves_spelling_and_redacts_missing_and_file_paths() {
-        let planner = ShellLaunchPlanner::new("/sensitive/shell/zsh".into(), resources());
+        let resources = crate::terminal::testing::ShellResourcesFixture::new();
+        let planner = ShellLaunchPlanner::new(
+            "/sensitive/shell/zsh".into(),
+            resources.path().to_path_buf(),
+        )
+        .with_environment(ShellIntegrationMode::Automatic, ShellEnvironment::default());
         let directory = std::env::temp_dir().join(".");
         assert_eq!(
             planner.local(&directory).unwrap().working_directory(),
             directory
         );
         for directory in [
-            resources().join("missing-private-project"),
-            resources().join("shell-integration/VERSION"),
+            resources
+                .path()
+                .to_path_buf()
+                .join("missing-private-project"),
+            resources
+                .path()
+                .to_path_buf()
+                .join("shell-integration/zsh/.zshenv"),
         ] {
             let error = planner.local(&directory).unwrap_err();
             assert_eq!(error, ShellLaunchFailure::DirectoryUnavailable);

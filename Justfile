@@ -43,10 +43,12 @@ check:
 # Format all Rust sources.
 fmt:
     cargo fmt --all
+    rustfmt --edition 2024 src/platform/macos_adapter_tests/*.rs
 
 # Check Rust formatting without changing files.
 fmt-check:
     cargo fmt --all -- --check
+    rustfmt --edition 2024 --check src/platform/macos_adapter_tests/*.rs
 
 # Run the complete test suite.
 test:
@@ -59,6 +61,10 @@ test-one filter:
 # Run the conventional terminal capability and protocol conformance corpus.
 conformance:
     cargo test --all-targets --all-features --locked "terminal::conformance"
+
+# Run isolated native Adapter suites and existing macOS capability integration tests.
+macos-adapter-tests:
+    cargo test --all-targets --all-features --locked "macos"
 
 # Run Clippy with warnings treated as errors.
 clippy:

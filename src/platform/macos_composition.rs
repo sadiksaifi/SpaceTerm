@@ -115,6 +115,7 @@ fn compose(
         ),
         Arc::new(super::macos_pasteboard::MacosOsc52ClipboardFactory),
         local_filesystem.clone(),
+        super::launch_host::local_hostname(),
     ));
     let remote_workspace = startup.remote_backend_factory(Arc::new(
         super::macos_askpass_transport::AskPassWindowFactory,
@@ -158,13 +159,6 @@ fn compose(
             traffic_light_position: Some(point(px(12.0), px(11.0))),
         }),
     })
-}
-
-#[cfg(test)]
-pub(crate) fn testing_local_filesystem() -> super::local_filesystem::LocalFilesystemAuthority {
-    super::local_filesystem::LocalFilesystemAuthority::new(Arc::new(
-        super::macos_local_identity::MacosLocalIdentity,
-    ))
 }
 
 #[cfg(test)]

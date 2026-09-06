@@ -534,12 +534,8 @@ fn validate_child_name(name: &str) -> Result<(), AppPathsError> {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeSet;
 
     use super::*;
-    use crate::platform::secure_filesystem::{
-        PreparedPrivateFile, PrivateFileSnapshot, SecureCommitOutcome,
-    };
 
     #[test]
     fn captured_environment_debug_should_redact_paths() {
@@ -554,133 +550,7 @@ mod tests {
         assert!(!debug.contains("sensitive"));
     }
 
-    #[derive(Default)]
-    struct RecordingFilesystem {
-        directories: Mutex<BTreeSet<PathBuf>>,
-        events: Mutex<Vec<&'static str>>,
-    }
-    #[derive(Clone)]
-    struct RecordingDirectory(PathBuf);
-    #[derive(Clone)]
-    struct RecordingIdentity;
-
-    impl RecordingFilesystem {
-        fn path(directory: &SecureDirectory) -> Result<&PathBuf, SecureFilesystemError> {
-            directory
-                .0
-                .downcast_ref::<RecordingDirectory>()
-                .map(|directory| &directory.0)
-                .ok_or(SecureFilesystemError::Unsafe)
-        }
-        fn directory(path: PathBuf) -> SecureDirectory {
-            SecureDirectory(Arc::new(RecordingDirectory(path)))
-        }
-    }
-
-    impl SecureFilesystem for RecordingFilesystem {
-        fn open_private_directory(
-            &self,
-            path: &Path,
-        ) -> Result<Option<SecureDirectory>, SecureFilesystemError> {
-            Ok(self
-                .directories
-                .lock()
-                .unwrap()
-                .contains(path)
-                .then(|| Self::directory(path.to_path_buf())))
-        }
-        fn ensure_private_directory(
-            &self,
-            path: &Path,
-        ) -> Result<SecureDirectory, SecureFilesystemError> {
-            self.events.lock().unwrap().push("ensure");
-            self.directories.lock().unwrap().insert(path.to_path_buf());
-            Ok(Self::directory(path.to_path_buf()))
-        }
-        fn create_private_child(
-            &self,
-            parent: &SecureDirectory,
-            name: &OsStr,
-        ) -> Result<SecureDirectory, SecureFilesystemError> {
-            self.events.lock().unwrap().push("create-owner");
-            let path = Self::path(parent)?.join(name);
-            if !self.directories.lock().unwrap().insert(path.clone()) {
-                return Err(SecureFilesystemError::AlreadyExists);
-            }
-            Ok(Self::directory(path))
-        }
-        fn verify_directory(&self, _: &SecureDirectory) -> Result<(), SecureFilesystemError> {
-            self.events.lock().unwrap().push("verify");
-            Ok(())
-        }
-        fn remove_private_child(
-            &self,
-            _: &SecureDirectory,
-            _: &OsStr,
-            _: &SecureDirectory,
-        ) -> Result<(), SecureFilesystemError> {
-            self.events.lock().unwrap().push("remove-owner");
-            Ok(())
-        }
-        fn read_private_file(
-            &self,
-            _: &SecureDirectory,
-            _: &OsStr,
-            _: usize,
-        ) -> Result<Option<PrivateFileSnapshot>, SecureFilesystemError> {
-            Ok(None)
-        }
-        fn prepare_private_file(
-            &self,
-            _: &SecureDirectory,
-            _: &OsStr,
-            _: &[u8],
-            _: [u8; 16],
-        ) -> Result<PreparedPrivateFile, SecureFilesystemError> {
-            Ok(PreparedPrivateFile(Box::new(())))
-        }
-        fn commit_private_file(
-            &self,
-            _: PreparedPrivateFile,
-            _: Option<&SecureEntryIdentity>,
-        ) -> Result<SecureCommitOutcome, SecureFilesystemError> {
-            Ok(SecureCommitOutcome::Committed)
-        }
-        fn register_socket(
-            &self,
-            _: &SecureDirectory,
-            _: &OsStr,
-        ) -> Result<SecureEntryIdentity, SecureFilesystemError> {
-            self.events.lock().unwrap().push("register");
-            Ok(SecureEntryIdentity(Arc::new(RecordingIdentity)))
-        }
-        fn verify_socket(
-            &self,
-            _: &SecureDirectory,
-            _: &OsStr,
-            _: &SecureEntryIdentity,
-        ) -> Result<(), SecureFilesystemError> {
-            self.events.lock().unwrap().push("verify-socket");
-            Ok(())
-        }
-        fn remove_socket(
-            &self,
-            _: &SecureDirectory,
-            _: &OsStr,
-            _: &SecureEntryIdentity,
-        ) -> Result<(), SecureFilesystemError> {
-            self.events.lock().unwrap().push("remove-socket");
-            Ok(())
-        }
-        fn create_private_artifact(
-            &self,
-            _: &SecureDirectory,
-            _: &OsStr,
-        ) -> Result<(), SecureFilesystemError> {
-            Ok(())
-        }
-    }
-
+    use crate::platform::testing::RecordingFilesystem;
     fn environment() -> AppPathEnvironment {
         AppPathEnvironment {
             home: Some("/home/test".into()),
@@ -760,6 +630,7 @@ mod tests {
             .create_runtime_owner_with_identity("a", 35, 36)
             .unwrap();
         assert!(owner.path().ends_with("a-z-10"));
+        filesystem.create_socket(&owner.socket_path("a").unwrap());
         let socket = owner.register_socket("a").unwrap();
         owner.remove_registered_socket(socket).unwrap();
         owner.close().unwrap();

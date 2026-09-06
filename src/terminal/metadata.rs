@@ -419,23 +419,6 @@ pub(crate) fn parse_osc7_directory(
     })
 }
 
-pub(crate) fn local_hostname() -> Option<String> {
-    let mut buffer = [0_u8; 256];
-    // SAFETY: `buffer` is writable for its complete length and gethostname writes at most that
-    // many bytes. A missing terminator is handled by using the full initialized buffer.
-    if unsafe { libc::gethostname(buffer.as_mut_ptr().cast(), buffer.len()) } != 0 {
-        return None;
-    }
-    let length = buffer
-        .iter()
-        .position(|byte| *byte == 0)
-        .unwrap_or(buffer.len());
-    std::str::from_utf8(&buffer[..length])
-        .ok()
-        .filter(|hostname| !hostname.is_empty() && !hostname.chars().any(char::is_control))
-        .map(ToOwned::to_owned)
-}
-
 fn percent_decode(value: &str) -> Option<String> {
     let bytes = value.as_bytes();
     let mut decoded = Vec::with_capacity(bytes.len());
