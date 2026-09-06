@@ -1,4 +1,9 @@
-use std::cell::Cell;
+//! AppKit Services responder registration and native pasteboard conversion.
+//!
+//! GPUI 0.2.2 can install the Services menu but exposes neither its requestor callbacks nor
+//! access to a Service's supplied pasteboard. Request policy and lifetime authority live in
+//! the portable Services owner; this adapter only connects those operations to AppKit.
+
 use std::ffi::{c_char, c_void};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::rc::Rc;
@@ -8,18 +13,17 @@ use cocoa::appkit::NSApp;
 use cocoa::appkit::NSPasteboardTypeString;
 use cocoa::base::{BOOL, NO, YES, id, nil};
 use cocoa::foundation::{NSArray, NSAutoreleasePool, NSInteger, NSString, NSUInteger};
-use gpui::{AnyWindowHandle, App, AsyncApp, Window};
+use gpui::Window;
 use objc::declare::ClassDecl;
 use objc::runtime::{Class, Object, Protocol, Sel};
 use objc::{class, msg_send, sel, sel_impl};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use thiserror::Error;
 
-use crate::terminal::{
-    MAX_PASTE_BYTES, NativeServiceCapabilities, NativeServiceOrigin, NativeServiceStatus,
-    SelectionCopy,
+use crate::terminal::native_services::services::{
+    ServiceDataType, ServiceEndpoint, ServiceOperation, ServicePasteboardIdentity, ServiceRequests,
+    bounded_service_text_byte_len, decode_service_text_bytes,
 };
-use crate::ui::WorkspaceManager;
 
 const SERVICES_RESPONDER_CLASS: &str = "SpaceTermServicesResponder";
 const SERVICES_STATE_IVAR: &str = "spaceTermServicesState";
@@ -47,165 +51,6 @@ pub(crate) enum MacosServicesError {
     ResponderAllocationFailed,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum ServiceDataType {
-    Absent,
-    String,
-    Unsupported,
-}
-
-impl ServiceDataType {
-    const fn is_requested(self) -> bool {
-        !matches!(self, Self::Absent)
-    }
-
-    const fn is_supported(self) -> bool {
-        !matches!(self, Self::Unsupported)
-    }
-}
-
-#[derive(Clone)]
-struct MacosServicesEndpoint {
-    app: AsyncApp,
-    window: AnyWindowHandle,
-}
-
-impl MacosServicesEndpoint {
-    fn status(&self) -> NativeServiceStatus {
-        self.app
-            .update(|cx| {
-                self.window.update(cx, |root, window, cx| {
-                    let Ok(manager) = root.downcast::<WorkspaceManager>() else {
-                        return NativeServiceStatus::default();
-                    };
-                    manager.update(cx, |manager, cx| manager.native_service_status(window, cx))
-                })
-            })
-            .ok()
-            .and_then(Result::ok)
-            .unwrap_or_default()
-    }
-
-    fn selection(&self, origin: NativeServiceOrigin) -> Option<SelectionCopy> {
-        self.app
-            .update(|cx| {
-                self.window.update(cx, |root, window, cx| {
-                    let Ok(manager) = root.downcast::<WorkspaceManager>() else {
-                        return None;
-                    };
-                    manager.update(cx, |manager, cx| {
-                        manager.native_service_selection(origin, window, cx)
-                    })
-                })
-            })
-            .ok()
-            .and_then(Result::ok)
-            .flatten()
-    }
-
-    fn insert_text(&self, origin: NativeServiceOrigin, text: String) -> bool {
-        self.app
-            .update(|cx| {
-                self.window.update(cx, |root, window, cx| {
-                    let Ok(manager) = root.downcast::<WorkspaceManager>() else {
-                        return false;
-                    };
-                    manager.update(cx, |manager, cx| {
-                        manager.insert_native_service_text(origin, text, window, cx)
-                    })
-                })
-            })
-            .ok()
-            .and_then(Result::ok)
-            .unwrap_or(false)
-    }
-}
-
-struct MacosServicesState {
-    // AppKit invokes Services requestor methods on its main thread. The per-validation requestors
-    // therefore share this non-Send gate through Rc<Cell<_>>; no instance crosses that thread.
-    endpoint: MacosServicesEndpoint,
-    next_request_id: Cell<u64>,
-    active_return_request: Rc<Cell<Option<u64>>>,
-}
-
-impl MacosServicesState {
-    fn operation(&self, returns_text: bool) -> Option<MacosServicesOperationState> {
-        let request_id = self.next_request_id.get().checked_add(1)?;
-        self.next_request_id.set(request_id);
-        Some(MacosServicesOperationState {
-            endpoint: self.endpoint.clone(),
-            identity: ServiceOperationIdentity {
-                request_id,
-                returns_text,
-                active_return_request: Rc::clone(&self.active_return_request),
-                write_claimed: Cell::new(false),
-                pasteboard: Cell::new(None),
-                origin: Cell::new(None),
-            },
-        })
-    }
-}
-
-struct MacosServicesOperationState {
-    endpoint: MacosServicesEndpoint,
-    identity: ServiceOperationIdentity,
-}
-
-struct ServiceOperationIdentity {
-    request_id: u64,
-    returns_text: bool,
-    active_return_request: Rc<Cell<Option<u64>>>,
-    write_claimed: Cell<bool>,
-    pasteboard: Cell<Option<usize>>,
-    origin: Cell<Option<NativeServiceOrigin>>,
-}
-
-impl ServiceOperationIdentity {
-    fn claim_write(&self) -> bool {
-        if self.write_claimed.replace(true) || self.active_return_request.get().is_some() {
-            return false;
-        }
-        if self.returns_text {
-            self.active_return_request.set(Some(self.request_id));
-        }
-        true
-    }
-
-    fn finish_send(&self, origin: NativeServiceOrigin, pasteboard: id, succeeded: bool) {
-        if self.returns_text && succeeded {
-            self.origin.set(Some(origin));
-            self.pasteboard.set(Some(pasteboard as usize));
-        } else {
-            self.release_return();
-        }
-    }
-
-    fn take_return_origin(&self, pasteboard: id) -> Option<NativeServiceOrigin> {
-        if self.active_return_request.get() != Some(self.request_id)
-            || self.pasteboard.get() != Some(pasteboard as usize)
-        {
-            return None;
-        }
-        let origin = self.origin.take();
-        self.pasteboard.set(None);
-        self.release_return();
-        origin
-    }
-
-    fn release_return(&self) {
-        if self.active_return_request.get() == Some(self.request_id) {
-            self.active_return_request.set(None);
-        }
-    }
-}
-
-impl Drop for ServiceOperationIdentity {
-    fn drop(&mut self) {
-        self.release_return();
-    }
-}
-
 #[cfg(not(test))]
 pub(crate) fn register() -> Result<(), MacosServicesError> {
     // SAFETY: SpaceTerm initializes its application on AppKit's main thread. The array is used only
@@ -227,7 +72,10 @@ pub(crate) fn register() -> Result<(), MacosServicesError> {
     Ok(())
 }
 
-pub(crate) fn install(window: &Window, cx: &App) -> Result<(), MacosServicesError> {
+pub(crate) fn install(
+    window: &Window,
+    endpoint: Rc<dyn ServiceEndpoint>,
+) -> Result<(), MacosServicesError> {
     let native_handle = HasWindowHandle::window_handle(window)
         .map_err(|_| MacosServicesError::NativeViewUnavailable)?;
     let RawWindowHandle::AppKit(native_handle) = native_handle.as_raw() else {
@@ -252,14 +100,7 @@ pub(crate) fn install(window: &Window, cx: &App) -> Result<(), MacosServicesErro
             return Err(MacosServicesError::ResponderAllocationFailed);
         }
 
-        let state = Box::new(MacosServicesState {
-            endpoint: MacosServicesEndpoint {
-                app: cx.to_async(),
-                window: window.window_handle(),
-            },
-            next_request_id: Cell::new(0),
-            active_return_request: Rc::new(Cell::new(None)),
-        });
+        let state = Box::new(Rc::new(ServiceRequests::new(endpoint)));
         (*responder).set_ivar(SERVICES_STATE_IVAR, Box::into_raw(state).cast::<c_void>());
 
         let previous_responder: id = msg_send![native_view, nextResponder];
@@ -274,24 +115,6 @@ pub(crate) fn install(window: &Window, cx: &App) -> Result<(), MacosServicesErro
         let _: () = msg_send![responder, release];
     }
     Ok(())
-}
-
-fn accepts_service_request(
-    capabilities: NativeServiceCapabilities,
-    send_type: ServiceDataType,
-    return_type: ServiceDataType,
-) -> bool {
-    if !send_type.is_supported() || !return_type.is_supported() {
-        return false;
-    }
-    if !send_type.is_requested() && !return_type.is_requested() {
-        return false;
-    }
-    if return_type.is_requested() && !send_type.is_requested() {
-        return false;
-    }
-    (!send_type.is_requested() || capabilities.send_text)
-        && (!return_type.is_requested() || capabilities.return_text)
 }
 
 fn services_responder_class() -> Result<&'static Class, MacosServicesError> {
@@ -359,7 +182,9 @@ extern "C" fn dealloc_services_responder(this: &Object, _: Sel) {
     unsafe {
         let state: *mut c_void = *this.get_ivar(SERVICES_STATE_IVAR);
         if !state.is_null() {
-            drop(Box::from_raw(state.cast::<MacosServicesState>()));
+            let state = Box::from_raw(state.cast::<Rc<ServiceRequests>>());
+            state.retire();
+            drop(state);
         }
         let _: () = msg_send![super(this, class!(NSResponder)), dealloc];
     }
@@ -370,29 +195,30 @@ extern "C" fn dealloc_services_operation_responder(this: &Object, _: Sel) {
     unsafe {
         let state: *mut c_void = *this.get_ivar(SERVICES_OPERATION_STATE_IVAR);
         if !state.is_null() {
-            drop(Box::from_raw(state.cast::<MacosServicesOperationState>()));
+            drop(Box::from_raw(state.cast::<Rc<ServiceOperation>>()));
         }
         let _: () = msg_send![super(this, class!(NSResponder)), dealloc];
     }
 }
 
 extern "C" fn valid_requestor(this: &Object, _: Sel, send_type: id, return_type: id) -> id {
+    let state = unsafe { services_state(this) };
     let operation = catch_unwind(AssertUnwindSafe(|| {
         let send_type = unsafe { service_data_type(send_type) };
         let return_type = unsafe { service_data_type(return_type) };
-        let state = (unsafe { services_state(this) })?;
-        let status = state.endpoint.status();
-        let accepted = accepts_service_request(status.capabilities, send_type, return_type);
-        if !accepted || status.origin.is_none() {
-            return None;
-        }
-        let operation = state.operation(return_type.is_requested())?;
+        let operation = state.as_ref()?.operation(send_type, return_type)?;
         unsafe { create_services_operation(operation) }
     }))
     .ok()
     .flatten();
     if let Some(operation) = operation {
         return operation;
+    }
+
+    if state.is_some_and(|state| state.is_retired()) {
+        // A callback destroyed the native responder. Its retained Rust owner remains safe, but
+        // the old Objective-C object can no longer continue the responder chain.
+        return nil;
     }
 
     // SAFETY: NSResponder's implementation continues the pre-existing responder chain when
@@ -405,14 +231,14 @@ extern "C" fn valid_requestor(this: &Object, _: Sel, send_type: id, return_type:
     }
 }
 
-unsafe fn create_services_operation(state: MacosServicesOperationState) -> Option<id> {
+unsafe fn create_services_operation(state: ServiceOperation) -> Option<id> {
     let responder_class = services_operation_responder_class().ok()?;
     let responder: id = unsafe { msg_send![responder_class, alloc] };
     let responder: id = unsafe { msg_send![responder, init] };
     if responder == nil {
         return None;
     }
-    let state = Box::new(state);
+    let state = Box::new(Rc::new(state));
     unsafe {
         (*responder).set_ivar(
             SERVICES_OPERATION_STATE_IVAR,
@@ -442,20 +268,10 @@ extern "C" fn write_selection_to_pasteboard(
         let Some(state) = (unsafe { services_operation_state(this) }) else {
             return NO;
         };
-        if !state.identity.claim_write() {
-            return NO;
-        }
-        let status = state.endpoint.status();
-        let Some(origin) = status.origin.filter(|_| status.capabilities.send_text) else {
-            state.identity.release_return();
-            return NO;
-        };
-        let Some(selection) = state.endpoint.selection(origin) else {
-            state.identity.release_return();
-            return NO;
-        };
-        let wrote = unsafe { write_service_text(pasteboard, &selection.plain_text) };
-        state.identity.finish_send(origin, pasteboard, wrote);
+        let wrote = state.write_selection(
+            ServicePasteboardIdentity::new(pasteboard as usize),
+            |text| unsafe { write_service_text(pasteboard, text) },
+        );
         if wrote { YES } else { NO }
     }))
     .unwrap_or(NO)
@@ -466,29 +282,24 @@ extern "C" fn read_selection_from_pasteboard(this: &Object, _: Sel, pasteboard: 
         let Some(state) = (unsafe { services_operation_state(this) }) else {
             return NO;
         };
-        let Some(origin) = state.identity.take_return_origin(pasteboard) else {
-            return NO;
-        };
-        let Some(text) = (unsafe { read_service_text(pasteboard) }) else {
-            return NO;
-        };
-        if state.endpoint.insert_text(origin, text) {
-            YES
-        } else {
-            NO
-        }
+        let inserted = state.read_selection(
+            ServicePasteboardIdentity::new(pasteboard as usize),
+            || unsafe { read_service_text(pasteboard) },
+        );
+        if inserted { YES } else { NO }
     }))
     .unwrap_or(NO)
 }
 
-unsafe fn services_state(this: &Object) -> Option<&MacosServicesState> {
+unsafe fn services_state(this: &Object) -> Option<Rc<ServiceRequests>> {
     let state: *mut c_void = unsafe { *this.get_ivar(SERVICES_STATE_IVAR) };
-    unsafe { state.cast::<MacosServicesState>().as_ref() }
+    // Clone before any callback can reentrantly destroy the native responder and its ivar.
+    unsafe { state.cast::<Rc<ServiceRequests>>().as_ref() }.cloned()
 }
 
-unsafe fn services_operation_state(this: &Object) -> Option<&MacosServicesOperationState> {
+unsafe fn services_operation_state(this: &Object) -> Option<Rc<ServiceOperation>> {
     let state: *mut c_void = unsafe { *this.get_ivar(SERVICES_OPERATION_STATE_IVAR) };
-    unsafe { state.cast::<MacosServicesOperationState>().as_ref() }
+    unsafe { state.cast::<Rc<ServiceOperation>>().as_ref() }.cloned()
 }
 
 unsafe fn service_data_type(value: id) -> ServiceDataType {
@@ -543,7 +354,10 @@ unsafe fn read_nsstring_text(value: id) -> Option<String> {
     let character_len: NSUInteger = unsafe { msg_send![value, length] };
     let byte_len: NSUInteger =
         unsafe { msg_send![value, lengthOfBytesUsingEncoding: NS_UTF8_STRING_ENCODING] };
-    let byte_len = bounded_nsstring_byte_len(character_len, byte_len)?;
+    let byte_len = bounded_service_text_byte_len(
+        usize::try_from(character_len).ok()?,
+        usize::try_from(byte_len).ok()?,
+    )?;
     let utf8: *const c_char = unsafe { msg_send![value, UTF8String] };
     if utf8.is_null() {
         return None;
@@ -555,87 +369,12 @@ unsafe fn read_nsstring_text(value: id) -> Option<String> {
     decode_service_text_bytes(bytes)
 }
 
-fn bounded_nsstring_byte_len(character_len: NSUInteger, byte_len: NSUInteger) -> Option<usize> {
-    let byte_len = usize::try_from(byte_len).ok()?;
-    ((byte_len != 0 || character_len == 0) && byte_len <= MAX_PASTE_BYTES).then_some(byte_len)
-}
-
-fn decode_service_text_bytes(bytes: &[u8]) -> Option<String> {
-    if bytes.len() > MAX_PASTE_BYTES || bytes.contains(&0) {
-        return None;
-    }
-    std::str::from_utf8(bytes).ok().map(ToOwned::to_owned)
-}
-
 #[cfg(test)]
 mod tests {
     use cocoa::appkit::NSPasteboard;
 
     use super::*;
-    use crate::domain::{PaneId, TabId, WorkspaceId};
-
-    fn origin(generation: u64) -> NativeServiceOrigin {
-        NativeServiceOrigin::new(
-            WorkspaceId::new(1),
-            TabId::new(2),
-            PaneId::new(3),
-            4,
-            5,
-            generation,
-        )
-    }
-
-    fn operation_identity(
-        request_id: u64,
-        returns_text: bool,
-        active_return_request: Rc<Cell<Option<u64>>>,
-    ) -> ServiceOperationIdentity {
-        ServiceOperationIdentity {
-            request_id,
-            returns_text,
-            active_return_request,
-            write_claimed: Cell::new(false),
-            pasteboard: Cell::new(None),
-            origin: Cell::new(None),
-        }
-    }
-
-    #[test]
-    fn service_request_requires_each_requested_capability() {
-        assert!(accepts_service_request(
-            NativeServiceCapabilities::new(true, false),
-            ServiceDataType::String,
-            ServiceDataType::Absent,
-        ));
-        assert!(!accepts_service_request(
-            NativeServiceCapabilities::new(true, false),
-            ServiceDataType::String,
-            ServiceDataType::String,
-        ));
-    }
-
-    #[test]
-    fn string_return_requires_a_bound_send_and_terminal_input_focus_capability() {
-        assert!(accepts_service_request(
-            NativeServiceCapabilities::new(true, true),
-            ServiceDataType::String,
-            ServiceDataType::String,
-        ));
-        assert!(!accepts_service_request(
-            NativeServiceCapabilities::new(true, true),
-            ServiceDataType::Absent,
-            ServiceDataType::String,
-        ));
-    }
-
-    #[test]
-    fn unsupported_service_types_are_never_accepted() {
-        assert!(!accepts_service_request(
-            NativeServiceCapabilities::new(true, true),
-            ServiceDataType::Unsupported,
-            ServiceDataType::Absent,
-        ));
-    }
+    use crate::terminal::MAX_PASTE_BYTES;
 
     #[test]
     fn service_type_classifies_nil_and_empty_nsstring_as_absent() {
@@ -656,76 +395,6 @@ mod tests {
 
             pool.drain();
         }
-    }
-
-    #[test]
-    fn service_operation_keeps_the_validated_origin_through_send_and_return() {
-        let operation = operation_identity(1, true, Rc::new(Cell::new(None)));
-        let pasteboard = 0x1234usize as id;
-
-        assert!(operation.claim_write());
-        operation.finish_send(origin(6), pasteboard, true);
-
-        assert_eq!(operation.take_return_origin(pasteboard), Some(origin(6)));
-        assert_eq!(operation.take_return_origin(pasteboard), None);
-    }
-
-    #[test]
-    fn service_operation_rejects_overlap_and_wrong_pasteboard_return() {
-        let active = Rc::new(Cell::new(None));
-        let operation = operation_identity(1, true, Rc::clone(&active));
-        let overlap = operation_identity(2, true, active);
-        let first_pasteboard = 0x1234usize as id;
-        let other_pasteboard = 0x5678usize as id;
-        assert!(operation.claim_write());
-        operation.finish_send(origin(6), first_pasteboard, true);
-
-        assert!(!overlap.claim_write());
-        assert_eq!(overlap.take_return_origin(first_pasteboard), None);
-        assert_eq!(operation.take_return_origin(other_pasteboard), None);
-        assert_eq!(
-            operation.take_return_origin(first_pasteboard),
-            Some(origin(6))
-        );
-    }
-
-    #[test]
-    fn repeated_validation_produces_distinct_operation_identities() {
-        let active = Rc::new(Cell::new(None));
-        let transform = operation_identity(1, true, Rc::clone(&active));
-        let send_only = operation_identity(2, false, active);
-
-        assert_ne!(transform.request_id, send_only.request_id);
-        assert!(transform.returns_text);
-        assert!(!send_only.returns_text);
-    }
-
-    #[test]
-    fn service_operation_write_is_one_shot() {
-        let operation = operation_identity(1, false, Rc::new(Cell::new(None)));
-
-        assert!(operation.claim_write());
-        assert!(!operation.claim_write());
-    }
-
-    #[test]
-    fn return_only_service_cannot_create_an_unbound_operation() {
-        assert!(!accepts_service_request(
-            NativeServiceCapabilities::new(true, true),
-            ServiceDataType::Absent,
-            ServiceDataType::String,
-        ));
-    }
-
-    #[test]
-    fn service_text_rejects_oversized_and_embedded_nul_payloads() {
-        assert!(decode_service_text_bytes(&vec![b'x'; MAX_PASTE_BYTES + 1]).is_none());
-        assert!(decode_service_text_bytes(b"before\0after").is_none());
-        assert_eq!(
-            decode_service_text_bytes("日本語".as_bytes()).as_deref(),
-            Some("日本語")
-        );
-        assert_eq!(bounded_nsstring_byte_len(1, 0), None);
     }
 
     #[test]

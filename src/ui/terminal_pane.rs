@@ -1,6 +1,7 @@
 use std::cell::Cell;
 use std::ops::Range;
 use std::path::PathBuf;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -42,8 +43,6 @@ use crate::platform::macos_attention::{
 };
 #[cfg(not(test))]
 use crate::platform::macos_attention::{MacosAttentionPlatform, apply_attention_effects};
-use crate::platform::macos_pasteboard::read_file_urls;
-use crate::platform::macos_quick_look::{MacosQuickLook, QuickLookPlatform};
 use crate::platform::macos_render_lifecycle::{
     NativeWindowVisibility, NativeWindowVisibilitySource, current_window_visibility,
 };
@@ -63,6 +62,11 @@ use crate::terminal::attention::AttentionState;
 use crate::terminal::geometry::{
     BackingPosition, BackingScale, CellGridPosition, CellGridSize, LogicalCellSize,
     LogicalPosition, LogicalSize, TerminalGeometry,
+};
+use crate::terminal::native_services::clipboard::{FileClipboard, SelectionPublication};
+use crate::terminal::native_services::quick_look::{QuickLookPlatform, QuickLookPresenter};
+use crate::terminal::native_services::{
+    NativeServiceAdapters, TerminalContextMenuState, activated_link, revalidated_context_link,
 };
 use crate::terminal::{
     AccessibilityGeometry, AccessibilityNotification, AccessibilityNotifications, AttentionFacts,
@@ -194,15 +198,6 @@ struct PasteRequestGuard {
     hierarchy_generation: u64,
 }
 
-#[derive(Clone, Debug, PartialEq)]
-struct TerminalContextMenuState {
-    generation: crate::terminal::PresentationGeneration,
-    position: SurfacePosition,
-    link: Option<crate::terminal::HyperlinkTarget>,
-    selection_present: bool,
-    quick_look_eligible: bool,
-}
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct HoveredTerminalLink {
     generation: crate::terminal::PresentationGeneration,
@@ -243,11 +238,6 @@ pub(super) struct OperationToken {
     recovery: Option<RecoveryToken>,
 }
 
-#[derive(Default)]
-struct SelectionPasteboard {
-    fail_next_write: bool,
-}
-
 #[derive(Clone, Copy, Debug, Error, Eq, PartialEq)]
 /// A typed rejection of a Remote Pane disconnect or restart lifecycle operation.
 ///
@@ -273,19 +263,6 @@ pub(crate) struct PreparedRemotePaneRestart {
     prepared_launch: PreparedWorkspaceTerminalLaunch,
     generation: u64,
     expected_epoch: u64,
-}
-
-impl SelectionPasteboard {
-    fn write(&mut self, copy: SelectionCopy, cx: &mut App) -> Result<(), String> {
-        if std::mem::take(&mut self.fail_next_write) {
-            return Err("injected native pasteboard failure".to_owned());
-        }
-        write_selection_copy(copy, cx)
-    }
-
-    fn fail_next_write(&mut self) {
-        self.fail_next_write = true;
-    }
 }
 
 pub(crate) struct TerminalPane {
@@ -361,7 +338,8 @@ pub(crate) struct TerminalPane {
     fallback_render_cache: Entity<TerminalGridCache>,
     paint_fault: Option<PaintPreflightFault>,
     graphics_cache: Entity<TerminalGraphicsCache>,
-    selection_pasteboard: SelectionPasteboard,
+    selection_pasteboard: SelectionPublication,
+    file_clipboard: Rc<dyn FileClipboard>,
     key_input_adapter: Box<dyn TerminalKeyInputAdapter>,
     ime: TerminalIme,
     preedit_layout: Option<PreeditLayout>,
@@ -402,7 +380,7 @@ impl TerminalPane {
             prepared_launch,
             crate::terminal::testing::test_terminal_key_input_adapter(),
             &crate::platform::terminal_accessibility::testing::RecordingAccessibilityFactory::default(),
-            Box::new(MacosQuickLook::default()),
+            crate::terminal::native_services::testing::adapters(),
             window,
             cx,
         )
@@ -413,6 +391,7 @@ impl TerminalPane {
         prepared_launch: PreparedWorkspaceTerminalLaunch,
         key_input_adapter: Box<dyn TerminalKeyInputAdapter>,
         accessibility_adapter_factory: &dyn TerminalAccessibilityAdapterFactory,
+        native_service_adapters: NativeServiceAdapters,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -421,7 +400,7 @@ impl TerminalPane {
             Some(prepared_launch),
             key_input_adapter,
             accessibility_adapter_factory,
-            Box::new(MacosQuickLook::default()),
+            native_service_adapters,
             window,
             cx,
         )
@@ -432,7 +411,7 @@ impl TerminalPane {
         prepared_launch: Option<PreparedWorkspaceTerminalLaunch>,
         key_input_adapter: Box<dyn TerminalKeyInputAdapter>,
         accessibility_adapter_factory: &dyn TerminalAccessibilityAdapterFactory,
-        quick_look: Box<dyn QuickLookPlatform>,
+        native_service_adapters: NativeServiceAdapters,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -578,7 +557,10 @@ impl TerminalPane {
             fallback_render_cache,
             paint_fault: None,
             graphics_cache,
-            selection_pasteboard: SelectionPasteboard::default(),
+            selection_pasteboard: SelectionPublication::new(
+                native_service_adapters.selection_clipboard,
+            ),
+            file_clipboard: native_service_adapters.file_clipboard,
             key_input_adapter,
             ime: TerminalIme::default(),
             preedit_layout: None,
@@ -590,7 +572,9 @@ impl TerminalPane {
             pending_osc52: None,
             hovered_link: None,
             pressed_link: None,
-            quick_look,
+            quick_look: Box::new(QuickLookPresenter::new(
+                native_service_adapters.quick_look.create(),
+            )),
             context_menu: None,
             blink_phase_visible: true,
             blink_generation: 0,
@@ -2781,24 +2765,12 @@ impl TerminalPane {
 
     fn paste_clipboard(&mut self, _: &PasteClipboard, window: &mut Window, cx: &mut Context<Self>) {
         let terminal_input_focused = self.synchronize_terminal_input_focus(window, cx);
-        let paths = if self.local_file_capabilities.are_enabled() {
-            read_file_urls().unwrap_or_default()
-        } else {
-            Vec::new()
-        };
-        let insertion = if paths.is_empty() {
-            let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) else {
-                return;
-            };
-            NativeInsertion::service_text(text, terminal_input_focused)
-        } else {
-            NativeInsertion::dropped_files(
-                &paths,
-                terminal_input_focused,
-                self.local_file_capabilities,
-            )
-        };
-        let Ok(insertion) = insertion else {
+        let Ok(Some(insertion)) = NativeInsertion::clipboard(
+            self.file_clipboard.as_ref(),
+            || cx.read_from_clipboard().and_then(|item| item.text()),
+            terminal_input_focused,
+            self.local_file_capabilities,
+        ) else {
             return;
         };
         if !insertion.text().is_empty() {
@@ -2891,20 +2863,12 @@ impl TerminalPane {
 
     fn context_menu_actions(&self, menu: &TerminalContextMenuState) -> NativeContextActions {
         let current = self.link_at(menu.position);
-        let link = revalidated_context_link(
-            menu.generation,
-            menu.link.as_ref(),
-            self.screen.generation,
-            current.as_ref(),
-        );
-        let selection_is_current = menu.generation == self.screen.generation;
-        let mut actions = NativeContextActions::from_presence(
+        menu.actions(
             self.local_file_capabilities,
-            selection_is_current && menu.selection_present && self.screen.selection_present,
-            link,
-        );
-        actions.quick_look = menu.quick_look_eligible && link.is_some();
-        actions
+            self.screen.generation,
+            self.screen.selection_present,
+            current.as_ref(),
+        )
     }
 
     fn request_context_menu(
@@ -2980,13 +2944,12 @@ impl TerminalPane {
             current.as_ref(),
         )
         .cloned();
-        let selection_is_current = menu.generation == self.screen.generation;
-        let mut actions = NativeContextActions::from_presence(
+        let actions = menu.actions(
             self.local_file_capabilities,
-            selection_is_current && menu.selection_present && self.screen.selection_present,
-            link.as_ref(),
+            self.screen.generation,
+            self.screen.selection_present,
+            current.as_ref(),
         );
-        actions.quick_look = menu.quick_look_eligible && link.is_some();
         self.sync_terminal_input_focus(window, cx);
 
         match command {
@@ -4364,20 +4327,6 @@ fn input_modifiers(modifiers: gpui::Modifiers) -> InputModifiers {
     }
 }
 
-fn write_selection_copy(copy: SelectionCopy, cx: &mut App) -> Result<(), String> {
-    #[cfg(test)]
-    {
-        cx.write_to_clipboard(ClipboardItem::new_string(copy.plain_text));
-        let _ = copy.html;
-        Ok(())
-    }
-    #[cfg(not(test))]
-    {
-        let _ = cx;
-        crate::platform::macos_pasteboard::write_selection(&copy.plain_text, copy.html.as_deref())
-    }
-}
-
 fn pointer_uses_text_cursor(
     mouse_tracking: bool,
     shift: bool,
@@ -4412,33 +4361,6 @@ fn terminal_surface_position(
     Some(SurfacePosition {
         x: backing.x,
         y: backing.y,
-    })
-}
-
-fn activated_link(
-    local_file_capabilities: TerminalLocalFileCapabilities,
-    pressed_generation: crate::terminal::PresentationGeneration,
-    pressed: &crate::terminal::HyperlinkTarget,
-    current_generation: crate::terminal::PresentationGeneration,
-    current: Option<&crate::terminal::HyperlinkTarget>,
-    platform_modifier: bool,
-) -> Option<String> {
-    (platform_modifier
-        && pressed_generation == current_generation
-        && current.is_some_and(|link| link.identity == pressed.identity))
-    .then(|| pressed.activation_url(local_file_capabilities))
-    .flatten()
-}
-
-fn revalidated_context_link<'a>(
-    clicked_generation: crate::terminal::PresentationGeneration,
-    clicked: Option<&'a crate::terminal::HyperlinkTarget>,
-    current_generation: crate::terminal::PresentationGeneration,
-    current: Option<&crate::terminal::HyperlinkTarget>,
-) -> Option<&'a crate::terminal::HyperlinkTarget> {
-    clicked.filter(|clicked| {
-        clicked_generation == current_generation
-            && current.is_some_and(|current| current.identity == clicked.identity)
     })
 }
 
@@ -4549,7 +4471,7 @@ mod tests {
         fn preview(
             &mut self,
             _: &QuickLookTarget,
-        ) -> Result<(), crate::platform::macos_quick_look::QuickLookError> {
+        ) -> Result<(), crate::terminal::native_services::quick_look::QuickLookError> {
             self.previews.set(self.previews.get() + 1);
             Ok(())
         }
@@ -5635,6 +5557,7 @@ mod tests {
                     session_factory.prepare_child_launch().unwrap(),
                     crate::terminal::testing::test_terminal_key_input_adapter(),
                     &factory,
+                    crate::terminal::native_services::testing::adapters(),
                     window,
                     cx,
                 )

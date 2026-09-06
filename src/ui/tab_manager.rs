@@ -1,4 +1,5 @@
 use crate::platform::terminal_accessibility::TerminalAccessibilityAdapterFactory;
+use crate::terminal::native_services::NativeServiceAdapters;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
@@ -135,6 +136,7 @@ pub(crate) struct TabManager {
     session_factory: WorkspaceTerminalSessionFactory,
     key_input_adapter_factory: Rc<dyn TerminalKeyInputAdapterFactory>,
     accessibility_adapter_factory: Rc<dyn TerminalAccessibilityAdapterFactory>,
+    native_service_adapters: NativeServiceAdapters,
     active: bool,
     sidebar_visible: bool,
     sidebar_width: Pixels,
@@ -185,17 +187,23 @@ impl TabManager {
             operating_system_window_drag_platform,
             Rc::new(GpuiTerminalKeyInputAdapterFactory::default()),
             Rc::new(crate::platform::terminal_accessibility::testing::RecordingAccessibilityFactory::default()),
+            crate::terminal::native_services::testing::adapters(),
             window,
             cx,
         ))
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Explicit capability injection follows hierarchy ownership"
+    )]
     pub(crate) fn new_with_prepared_initial_launch(
         session_factory: WorkspaceTerminalSessionFactory,
         prepared_launch: PreparedWorkspaceTerminalLaunch,
         operating_system_window_drag_platform: Rc<dyn OperatingSystemWindowDragPlatform>,
         key_input_adapter_factory: Rc<dyn TerminalKeyInputAdapterFactory>,
         accessibility_adapter_factory: Rc<dyn TerminalAccessibilityAdapterFactory>,
+        native_service_adapters: NativeServiceAdapters,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -208,6 +216,7 @@ impl TabManager {
                 prepared_launch,
                 Rc::clone(&initial_key_input_adapter_factory),
                 Rc::clone(&initial_accessibility_adapter_factory),
+                native_service_adapters.clone(),
                 window,
                 cx,
             )
@@ -217,6 +226,7 @@ impl TabManager {
             session_factory,
             key_input_adapter_factory,
             accessibility_adapter_factory,
+            native_service_adapters,
             active: true,
             sidebar_visible: true,
             sidebar_width: px(WORKSPACE_SIDEBAR_DEFAULT_WIDTH),
@@ -232,12 +242,17 @@ impl TabManager {
         }
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Explicit capability injection follows hierarchy ownership"
+    )]
     fn create_pane_host(
         tab_id: TabId,
         session_factory: WorkspaceTerminalSessionFactory,
         prepared_launch: PreparedWorkspaceTerminalLaunch,
         key_input_adapter_factory: Rc<dyn TerminalKeyInputAdapterFactory>,
         accessibility_adapter_factory: Rc<dyn TerminalAccessibilityAdapterFactory>,
+        native_service_adapters: NativeServiceAdapters,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Entity<PaneHost> {
@@ -248,6 +263,7 @@ impl TabManager {
                 prepared_launch,
                 key_input_adapter_factory,
                 accessibility_adapter_factory,
+                native_service_adapters,
                 window,
                 cx,
             )
@@ -883,6 +899,7 @@ impl TabManager {
         let session_factory = self.session_factory.clone();
         let key_input_adapter_factory = Rc::clone(&self.key_input_adapter_factory);
         let accessibility_adapter_factory = Rc::clone(&self.accessibility_adapter_factory);
+        let native_service_adapters = self.native_service_adapters.clone();
         let result = self.tabs.create_tab(|tab_id| {
             Self::create_pane_host(
                 tab_id,
@@ -890,6 +907,7 @@ impl TabManager {
                 prepared_launch,
                 key_input_adapter_factory,
                 accessibility_adapter_factory,
+                native_service_adapters,
                 window,
                 cx,
             )

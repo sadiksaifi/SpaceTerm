@@ -698,15 +698,57 @@ never writes directly to the PTY.
 
 ### Native Terminal Services
 
-macOS Services, contextual actions, Quick Look eligibility, pasteboard file insertion, and
-drag/drop are adapters over existing terminal policies rather than independent mutation paths.
-Context actions are derived from the current immutable Selection and Terminal Hyperlink state.
-Service text and converted file paths become Paste Payload candidates only while the Pane owns
-Terminal Input Focus, so normalization, size limits, unsafe-paste confirmation, cancellation, and
-PTY writes remain worker-owned. Quick Look accepts only a validated Terminal Hyperlink whose
-canonical target is an existing local regular file; a web URL or stale path is never previewable.
-Native interactions may request selection formatting or paste processing, but never mutate the
-Terminal Emulator directly.
+Native Terminal Services is one platform-neutral Rust Module under
+`src/terminal/native_services`. It owns Selection publication and representations, clipboard intake,
+File Insertion, Paste Payload validation, OSC 52 filtering and authorization, contextual-action
+revalidation, Terminal Hyperlink activation, Quick Look eligibility and cleanup, and Services
+request identity and lifecycle. Terminal Session workers remain the sole owners of terminal
+mutation, ordered copy queries, Paste Confirmation, OSC 52 pending operations, and PTY writes.
+GPUI supplies immutable presentation facts and routes actions into that policy.
+
+For every capability, use GPUI first when it preserves the required behavior, then portable Rust
+for policy, validation, authorization, identity, ordering, and lifecycle. Retain an Operating-System
+Adapter only for mechanics that neither can faithfully supply. Delete redundant native policy and
+mechanics rather than preserving them behind a wrapper. There is no aggregate platform trait:
+Selection Clipboard, File Clipboard, Quick Look Panel/Factory, Services Endpoint, and worker OSC 52
+Clipboard/Factory are independent capability Interfaces. `NativeServiceAdapters` is a cloneable
+constructor-wiring value containing the three independent Pane capabilities, never an Adapter.
+
+Application composition selects those capabilities and passes them through Workspace, Tab, and
+Pane creation, including replacement and remote paths. The selected Terminal Session factory
+carries its worker clipboard factory through that same hierarchy and constructs clipboard ownership
+on the worker. Pane and Terminal Session code never name or instantiate the migrated macOS
+Implementations. Application composition also binds each injected Services Endpoint to one exact
+Operating-System Window; the native responder sees only that Interface, never Workspace UI types.
+
+Clipboard file intake checks Terminal Input Focus and local authority before reading paths. Remote
+Panes never inspect the file clipboard and retain ordinary GPUI text paste. Invalid file intake is
+rejected without falling through to its alternate text representation. Ordered absolute paths from
+pasteboard and GPUI drag/drop share bounded quoting and worker-owned Paste Payload policy; encoded
+file URLs are decoded and validated in Rust without NSURL. Input and escaped aggregate sizes are
+checked before allocation. Native interactions never bypass Paste Confirmation or mutate the
+Terminal Emulator. Quick Look revalidates the file identity before every presentation, dismisses
+failed previews, and releases presentation ownership on Pane teardown.
+
+Each Services request binds its exact Window endpoint and Workspace, Tab, Pane, Terminal Session,
+focus epoch, and hierarchy generation. Requests are single-use, overlapping synchronous sends are
+reserved against reentrancy, returns consume authority before callbacks, and obsolete origins or
+released owners cannot affect a successor. Clipboard and terminal contents remain private values;
+Debug, errors, and diagnostics expose only closed classifications and bounded metadata.
+
+The audit against pinned GPUI 0.2.2 retains only these current macOS mechanics:
+
+| Capability | GPUI or portable Rust replacement | Remaining macOS mechanic and reason |
+| --- | --- | --- |
+| Selection publication | Rust representation selection, empty handling and synchronous publication policy | NSPasteboard public plain-text and HTML publication. GPUI ClipboardEntry supports strings and images, not an independently supplied public HTML representation or publication failure result. |
+| Clipboard text and files | GPUI reads ordinary text; Rust validates and decodes local file URLs and performs bounded quoting | NSPasteboard `public.file-url` discovery and bounded NSString copying. GPUI does not expose file-URL entries. Native NSURL parsing is deleted. |
+| Contextual actions and links | GPUI Menu and `open_url`; Rust generation, Selection, link, and local-authority revalidation | None. |
+| Quick Look | Rust target eligibility, file identity checks, failure cleanup and owner teardown | QLPreviewView/NSPanel creation, presentation and release. GPUI exposes no equivalent system preview facility. |
+| OSC 52 | Rust streaming bounds, targets, authorization and ordered worker lifecycle | Synchronous NSPasteboard reads/writes. GPUI clipboard access is through main-thread App and exposes no Send worker API; a foreground rendezvous would deadlock against synchronous Copy waiting on that worker. |
+| Services | Rust capability checks, exact origin, allocation, one-shot consumption and reentrancy gates | NSServices registration, per-view responder integration, requestor lifetime, and provided NSPasteboard transport. GPUI installs a Services menu but has no NSServicesMenuRequestor integration. |
+
+The application remains macOS-only. This migration supplies no Linux or Windows Adapter and changes
+none of the unrelated native platform capabilities.
 
 ### Terminal Selection
 

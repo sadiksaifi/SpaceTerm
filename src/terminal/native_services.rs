@@ -1,8 +1,29 @@
+//! Native Terminal Services owns portable clipboard, insertion, contextual-action,
+//! preview and Services request policy. Application composition injects each
+//! irreducible capability independently; this value is wiring, not a platform API.
+pub(crate) mod clipboard;
+pub(crate) mod file_insertion;
+pub(crate) mod hyperlink;
+pub(crate) mod osc52;
+pub(crate) mod paste;
+pub(crate) mod quick_look;
+pub(crate) mod selection;
+pub(crate) mod services;
+#[cfg(test)]
+pub(crate) mod testing;
+
+#[derive(Clone)]
+pub(crate) struct NativeServiceAdapters {
+    pub(crate) selection_clipboard: std::rc::Rc<dyn clipboard::SelectionClipboard>,
+    pub(crate) file_clipboard: std::rc::Rc<dyn clipboard::FileClipboard>,
+    pub(crate) quick_look: std::rc::Rc<dyn quick_look::QuickLookFactory>,
+}
+
 use std::path::PathBuf;
 
 use crate::domain::{PaneId, TabId, WorkspaceId};
 
-use super::file_insertion::prepare_file_insertion;
+use self::file_insertion::prepare_file_insertion;
 use super::hyperlink::{HyperlinkKind, HyperlinkTarget};
 use super::metadata::TerminalLocalFileCapabilities;
 #[cfg(test)]
@@ -13,6 +34,39 @@ pub(crate) struct NativeContextActions {
     pub(crate) copy: bool,
     pub(crate) open_link: bool,
     pub(crate) quick_look: bool,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct TerminalContextMenuState {
+    pub(crate) generation: crate::terminal::PresentationGeneration,
+    pub(crate) position: crate::terminal::SurfacePosition,
+    pub(crate) link: Option<crate::terminal::HyperlinkTarget>,
+    pub(crate) selection_present: bool,
+    pub(crate) quick_look_eligible: bool,
+}
+
+impl TerminalContextMenuState {
+    pub(crate) fn actions(
+        &self,
+        local: TerminalLocalFileCapabilities,
+        generation: crate::terminal::PresentationGeneration,
+        selection_present: bool,
+        current_link: Option<&HyperlinkTarget>,
+    ) -> NativeContextActions {
+        let link = revalidated_context_link(
+            self.generation,
+            self.link.as_ref(),
+            generation,
+            current_link,
+        );
+        let mut actions = NativeContextActions::from_presence(
+            local,
+            self.generation == generation && self.selection_present && selection_present,
+            link,
+        );
+        actions.quick_look &= self.quick_look_eligible;
+        actions
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -133,7 +187,7 @@ impl NativeContextActions {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub(crate) struct NativeInsertion {
     text: String,
 }
@@ -233,6 +287,39 @@ impl QuickLookTarget {
     }
 }
 
+impl std::fmt::Debug for NativeInsertion {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NativeInsertion").finish_non_exhaustive()
+    }
+}
+
+pub(crate) fn activated_link(
+    local_file_capabilities: TerminalLocalFileCapabilities,
+    pressed_generation: crate::terminal::PresentationGeneration,
+    pressed: &crate::terminal::HyperlinkTarget,
+    current_generation: crate::terminal::PresentationGeneration,
+    current: Option<&crate::terminal::HyperlinkTarget>,
+    platform_modifier: bool,
+) -> Option<String> {
+    (platform_modifier
+        && pressed_generation == current_generation
+        && current.is_some_and(|link| link.identity == pressed.identity))
+    .then(|| pressed.activation_url(local_file_capabilities))
+    .flatten()
+}
+
+pub(crate) fn revalidated_context_link<'a>(
+    clicked_generation: crate::terminal::PresentationGeneration,
+    clicked: Option<&'a crate::terminal::HyperlinkTarget>,
+    current_generation: crate::terminal::PresentationGeneration,
+    current: Option<&crate::terminal::HyperlinkTarget>,
+) -> Option<&'a crate::terminal::HyperlinkTarget> {
+    clicked.filter(|clicked| {
+        clicked_generation == current_generation
+            && current.is_some_and(|current| current.identity == clicked.identity)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -241,6 +328,53 @@ mod tests {
 
     use super::*;
     use crate::terminal::{HyperlinkTarget, SelectionCopy};
+
+    #[test]
+    fn migrated_policy_and_callers_do_not_name_concrete_adapters() {
+        let policy = [
+            include_str!("native_services/clipboard.rs"),
+            include_str!("native_services/file_insertion.rs"),
+            include_str!("native_services/hyperlink.rs"),
+            include_str!("native_services/osc52.rs"),
+            include_str!("native_services/paste.rs"),
+            include_str!("native_services/quick_look.rs"),
+            include_str!("native_services/selection.rs"),
+            include_str!("native_services/services.rs"),
+        ];
+        for source in policy {
+            assert!(!source.contains("crate::platform::"));
+            assert!(!source.contains("target_os"));
+            assert!(!source.contains("use cocoa::"));
+            assert!(!source.contains("use objc::"));
+        }
+        for source in [
+            include_str!("../ui/terminal_pane.rs"),
+            include_str!("session.rs"),
+        ] {
+            for concrete in [
+                "macos_pasteboard",
+                "macos_quick_look",
+                "macos_services",
+                "MacosOsc52Clipboard",
+                "MacosQuickLook",
+            ] {
+                assert!(!source.contains(concrete));
+            }
+        }
+    }
+
+    #[test]
+    fn service_content_values_have_redacted_debug_output() {
+        let selection = SelectionCopy {
+            plain_text: "fixture".into(),
+            html: Some("<pre>fixture</pre>".into()),
+        };
+        assert_eq!(format!("{selection:?}"), "SelectionCopy { .. }");
+        let insertion = NativeInsertion::service_text("fixture", true).unwrap();
+        assert_eq!(format!("{insertion:?}"), "NativeInsertion { .. }");
+        let link = HyperlinkTarget::url("https://example.test/fixture").unwrap();
+        assert_eq!(format!("{link:?}"), "HyperlinkTarget { kind: Url, .. }");
+    }
 
     const LOCAL_FILES: TerminalLocalFileCapabilities = TerminalLocalFileCapabilities::Enabled;
     const REMOTE_FILES: TerminalLocalFileCapabilities = TerminalLocalFileCapabilities::Disabled;

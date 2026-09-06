@@ -3,7 +3,7 @@ use std::fs::Metadata;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
-use super::metadata::TerminalLocalFileCapabilities;
+use crate::terminal::metadata::TerminalLocalFileCapabilities;
 
 pub(crate) const MAX_LINK_BYTES: usize = 4096;
 const LOCAL_EMISSION_METADATA_PREFIX: &[u8; 8] = b"STLF\0\0\0\x01";
@@ -27,14 +27,6 @@ impl fmt::Debug for HyperlinkTarget {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut target = formatter.debug_struct("HyperlinkTarget");
         target.field("kind", &self.kind);
-        match self.kind {
-            HyperlinkKind::Url => target
-                .field("identity", &self.identity)
-                .field("value", &self.value),
-            HyperlinkKind::LocalPath => target
-                .field("identity", &"<redacted-local-file>")
-                .field("value", &"<validated-local-file>"),
-        };
         target.finish_non_exhaustive()
     }
 }

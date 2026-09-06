@@ -1,4 +1,4 @@
-use std::mem;
+use std::{fmt, mem};
 
 pub(crate) const MAX_OSC52_CONTENT_BYTES: usize = 1024 * 1024;
 const MAX_OSC52_ENCODED_BYTES: usize = MAX_OSC52_CONTENT_BYTES.div_ceil(3) * 4;
@@ -6,10 +6,6 @@ const OSC52_PREFIX: &[u8] = b"\x1b]52;";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Osc52ClipboardError {
-    #[cfg_attr(
-        test,
-        expect(dead_code, reason = "native adapter owns unsupported target result")
-    )]
     UnsupportedTarget,
     Unavailable,
 }
@@ -17,6 +13,39 @@ pub(crate) enum Osc52ClipboardError {
 pub(crate) trait Osc52Clipboard: Send {
     fn read(&mut self, target: Osc52Target) -> Result<String, Osc52ClipboardError>;
     fn write(&mut self, target: Osc52Target, text: &str) -> Result<(), Osc52ClipboardError>;
+}
+
+/// Constructs clipboard ownership on the Terminal Session worker.
+///
+/// Implementations perform synchronous operations so authorized clipboard replies retain
+/// their order among emulator replies without waiting on the GPUI application thread.
+pub(crate) trait Osc52ClipboardFactory: Send + Sync {
+    fn create(&self) -> Box<dyn Osc52Clipboard>;
+}
+
+#[cfg(test)]
+#[derive(Default)]
+pub(crate) struct UnavailableOsc52Clipboard;
+
+#[cfg(test)]
+impl Osc52Clipboard for UnavailableOsc52Clipboard {
+    fn read(&mut self, _target: Osc52Target) -> Result<String, Osc52ClipboardError> {
+        Err(Osc52ClipboardError::Unavailable)
+    }
+
+    fn write(&mut self, _target: Osc52Target, _text: &str) -> Result<(), Osc52ClipboardError> {
+        Err(Osc52ClipboardError::Unavailable)
+    }
+}
+
+#[cfg(test)]
+pub(crate) struct UnavailableOsc52ClipboardFactory;
+
+#[cfg(test)]
+impl Osc52ClipboardFactory for UnavailableOsc52ClipboardFactory {
+    fn create(&self) -> Box<dyn Osc52Clipboard> {
+        Box::new(UnavailableOsc52Clipboard)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -51,7 +80,7 @@ impl Osc52AuthorizationId {
         Self(value)
     }
 
-    pub(super) const fn from_counter(value: u64) -> Self {
+    pub(in crate::terminal) const fn from_counter(value: u64) -> Self {
         Self(value)
     }
 }
@@ -100,7 +129,7 @@ impl Default for Osc52AuthorizationPolicy {
 }
 
 impl Osc52AuthorizationPolicy {
-    pub(super) const fn for_access(self, access: Osc52Access) -> Osc52AccessPolicy {
+    pub(in crate::terminal) const fn for_access(self, access: Osc52Access) -> Osc52AccessPolicy {
         match access {
             Osc52Access::Read => self.read,
             Osc52Access::Write => self.write,
@@ -109,13 +138,13 @@ impl Osc52AuthorizationPolicy {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum Osc52Terminator {
+pub(in crate::terminal) enum Osc52Terminator {
     Bell,
     StringTerminator,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(super) enum Osc52Operation {
+#[derive(Clone, Eq, PartialEq)]
+pub(in crate::terminal) enum Osc52Operation {
     Read {
         target: Osc52Target,
         terminator: Osc52Terminator,
@@ -126,28 +155,39 @@ pub(super) enum Osc52Operation {
     },
 }
 
+impl fmt::Debug for Osc52Operation {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Osc52Operation")
+            .field("access", &self.access())
+            .field("target", &self.target())
+            .field("byte_len", &self.byte_len())
+            .finish_non_exhaustive()
+    }
+}
+
 impl Osc52Operation {
-    pub(super) const fn access(&self) -> Osc52Access {
+    pub(in crate::terminal) const fn access(&self) -> Osc52Access {
         match self {
             Self::Read { .. } => Osc52Access::Read,
             Self::Write { .. } => Osc52Access::Write,
         }
     }
 
-    pub(super) const fn target(&self) -> Osc52Target {
+    pub(in crate::terminal) const fn target(&self) -> Osc52Target {
         match self {
             Self::Read { target, .. } | Self::Write { target, .. } => *target,
         }
     }
 
-    pub(super) fn byte_len(&self) -> usize {
+    pub(in crate::terminal) fn byte_len(&self) -> usize {
         match self {
             Self::Read { .. } => 0,
             Self::Write { text, .. } => text.len(),
         }
     }
 
-    pub(super) fn read_reply(&self, text: &str) -> Option<Vec<u8>> {
+    pub(in crate::terminal) fn read_reply(&self, text: &str) -> Option<Vec<u8>> {
         let Self::Read { target, terminator } = self else {
             return None;
         };
@@ -169,7 +209,7 @@ impl Osc52Operation {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum Osc52Rejection {
+pub(in crate::terminal) enum Osc52Rejection {
     Malformed,
     Oversized,
     UnsupportedTarget,
@@ -177,11 +217,25 @@ pub(super) enum Osc52Rejection {
     InvalidUtf8,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(super) enum Osc52Effect {
+#[derive(Clone, Eq, PartialEq)]
+pub(in crate::terminal) enum Osc52Effect {
     Terminal(Vec<u8>),
     Operation(Osc52Operation),
     Rejected(Osc52Rejection),
+}
+
+impl fmt::Debug for Osc52Effect {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Terminal(_) => formatter.debug_struct("Terminal").finish_non_exhaustive(),
+            Self::Operation(operation) => {
+                formatter.debug_tuple("Operation").field(operation).finish()
+            }
+            Self::Rejected(rejection) => {
+                formatter.debug_tuple("Rejected").field(rejection).finish()
+            }
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -192,10 +246,18 @@ enum FilterState {
     DiscardOversized { escape_pending: bool },
 }
 
-#[derive(Debug)]
-pub(super) struct Osc52Filter {
+pub(in crate::terminal) struct Osc52Filter {
     state: FilterState,
     candidate: Vec<u8>,
+}
+
+impl fmt::Debug for Osc52Filter {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Osc52Filter")
+            .field("state", &self.state)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Default for Osc52Filter {
@@ -208,7 +270,7 @@ impl Default for Osc52Filter {
 }
 
 impl Osc52Filter {
-    pub(super) fn feed(&mut self, bytes: &[u8]) -> Vec<Osc52Effect> {
+    pub(in crate::terminal) fn feed(&mut self, bytes: &[u8]) -> Vec<Osc52Effect> {
         let mut effects = Vec::new();
         let mut terminal = Vec::with_capacity(bytes.len());
 
@@ -406,6 +468,36 @@ mod tests {
                 Osc52Effect::Terminal(_) | Osc52Effect::Rejected(_) => None,
             })
             .collect()
+    }
+
+    #[test]
+    fn osc52_debug_exposes_only_operation_metadata_and_filter_state() {
+        let operation = Osc52Operation::Write {
+            target: Osc52Target::Standard,
+            text: "private clipboard content".to_owned(),
+        };
+        assert_eq!(
+            format!("{operation:?}"),
+            "Osc52Operation { access: Write, target: Standard, byte_len: 25, .. }",
+        );
+        assert_eq!(
+            format!("{:?}", Osc52Effect::Operation(operation)),
+            "Operation(Osc52Operation { access: Write, target: Standard, byte_len: 25, .. })",
+        );
+        assert_eq!(
+            format!(
+                "{:?}",
+                Osc52Effect::Terminal(b"private terminal content".to_vec())
+            ),
+            "Terminal { .. }",
+        );
+
+        let mut filter = Osc52Filter::default();
+        let _ = filter.feed(b"\x1b]52;c;cHJpdmF0ZSBjbGlwYm9hcmQgY29udGVudA==");
+        assert_eq!(
+            format!("{filter:?}"),
+            "Osc52Filter { state: Osc52 { escape_pending: false }, .. }",
+        );
     }
 
     #[test]

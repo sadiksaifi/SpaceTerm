@@ -83,13 +83,13 @@ pub(crate) enum PasteResolution {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(super) struct PreparedPaste {
+pub(in crate::terminal) struct PreparedPaste {
     text: String,
     risk: PasteRisk,
 }
 
 impl PreparedPaste {
-    pub(super) fn prepare(text: String) -> Result<Self, PasteRejection> {
+    pub(in crate::terminal) fn prepare(text: String) -> Result<Self, PasteRejection> {
         if text.is_empty() {
             return Err(PasteRejection::Empty);
         }
@@ -114,11 +114,11 @@ impl PreparedPaste {
         Ok(Self { text, risk })
     }
 
-    pub(super) const fn requires_confirmation(&self, bracketed_paste: bool) -> bool {
+    pub(in crate::terminal) const fn requires_confirmation(&self, bracketed_paste: bool) -> bool {
         self.risk.requires_confirmation(bracketed_paste)
     }
 
-    pub(super) fn confirmation(&self, id: PasteConfirmationId) -> PasteConfirmation {
+    pub(in crate::terminal) fn confirmation(&self, id: PasteConfirmationId) -> PasteConfirmation {
         PasteConfirmation {
             id,
             byte_len: self.text.len(),
@@ -127,7 +127,7 @@ impl PreparedPaste {
         }
     }
 
-    pub(super) fn into_text(self) -> String {
+    pub(in crate::terminal) fn into_text(self) -> String {
         self.text
     }
 }
