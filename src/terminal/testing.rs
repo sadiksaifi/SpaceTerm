@@ -86,6 +86,8 @@ pub(crate) struct RecordedSessionCall {
 #[derive(Clone, Default)]
 pub(crate) struct TestTerminalSessionRecords {
     starts: Rc<RefCell<Vec<RecordedSessionStart>>>,
+    selection_receivers:
+        Rc<RefCell<BTreeMap<usize, super::session::RecordingAccessibilitySelectionReceiver>>>,
     event_senders: Rc<RefCell<BTreeMap<usize, async_channel::Sender<SessionEvent>>>>,
     accessibility_senders:
         Rc<RefCell<BTreeMap<usize, async_channel::Sender<Arc<TerminalAccessibilityModel>>>>>,
@@ -94,6 +96,16 @@ pub(crate) struct TestTerminalSessionRecords {
 }
 
 impl TestTerminalSessionRecords {
+    pub(crate) fn accessibility_selection_requests(
+        &self,
+        session_id: usize,
+    ) -> Vec<super::accessibility::AccessibilitySelectionRequest> {
+        self.selection_receivers
+            .borrow()
+            .get(&session_id)
+            .map_or_else(Vec::new, |receiver| receiver.drain())
+    }
+
     pub(crate) fn starts(&self) -> Vec<RecordedSessionStart> {
         self.starts.borrow().clone()
     }
@@ -252,9 +264,16 @@ impl TerminalSessionFactory for TestTerminalSessionFactory {
             .borrow_mut()
             .insert(session_id, accessibility_sender);
 
+        let (selection_sender, selection_receiver) =
+            super::AccessibilitySelectionSender::recording_channel();
+        self.records
+            .selection_receivers
+            .borrow_mut()
+            .insert(session_id, selection_receiver);
         Ok(StartedTerminalSession {
             handle: Box::new(TestTerminalSessionHandle {
                 session_id,
+                selection_sender,
                 records: self.records.clone(),
                 selection_response: self.selection_response.clone(),
                 paste_response: self.paste_response.clone(),
@@ -272,6 +291,7 @@ impl TerminalSessionFactory for TestTerminalSessionFactory {
 
 struct TestTerminalSessionHandle {
     session_id: usize,
+    selection_sender: super::AccessibilitySelectionSender,
     records: TestTerminalSessionRecords,
     selection_response: Result<Option<SelectionCopy>, SelectionCopyError>,
     paste_response: Result<PasteRequestOutcome, String>,
@@ -293,6 +313,10 @@ impl TestTerminalSessionHandle {
 impl Drop for TestTerminalSessionHandle {
     fn drop(&mut self) {
         self.records
+            .selection_receivers
+            .borrow_mut()
+            .remove(&self.session_id);
+        self.records
             .dropped_session_ids
             .borrow_mut()
             .push(self.session_id);
@@ -300,6 +324,10 @@ impl Drop for TestTerminalSessionHandle {
 }
 
 impl TerminalSessionHandle for TestTerminalSessionHandle {
+    fn accessibility_selection_sender(&self) -> Option<super::AccessibilitySelectionSender> {
+        Some(self.selection_sender.clone())
+    }
+
     fn key(&self, input: KeyInput) {
         self.record(RecordedSessionCommand::Key(input));
     }

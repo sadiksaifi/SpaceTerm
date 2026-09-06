@@ -3,6 +3,7 @@ pub(crate) mod app_paths;
 
 pub(crate) mod finder_fallback;
 pub(crate) mod native_pty;
+pub(crate) mod terminal_accessibility;
 pub(crate) mod workspace_directory;
 pub(crate) mod workspace_picker_filesystem;
 

@@ -254,6 +254,7 @@ pub(crate) fn open(cx: &mut App, startup: StartupDependencies) {
                 WorkspaceManager::new(
                     Rc::clone(&session_factory),
                     Rc::clone(&key_input_adapter_factory),
+                    Rc::new(crate::platform::macos_accessibility::MacosTerminalAccessibilityAdapterFactory),
                     home_directory.clone(),
                     Arc::clone(&remote_backend_factory),
                     window,

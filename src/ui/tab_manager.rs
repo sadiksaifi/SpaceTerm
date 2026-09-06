@@ -1,3 +1,4 @@
+use crate::platform::terminal_accessibility::TerminalAccessibilityAdapterFactory;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
@@ -133,6 +134,7 @@ pub(crate) struct TabManager {
     tabs: TabCollection<Entity<PaneHost>>,
     session_factory: WorkspaceTerminalSessionFactory,
     key_input_adapter_factory: Rc<dyn TerminalKeyInputAdapterFactory>,
+    accessibility_adapter_factory: Rc<dyn TerminalAccessibilityAdapterFactory>,
     active: bool,
     sidebar_visible: bool,
     sidebar_width: Pixels,
@@ -182,6 +184,7 @@ impl TabManager {
             prepared_launch,
             operating_system_window_drag_platform,
             Rc::new(GpuiTerminalKeyInputAdapterFactory::default()),
+            Rc::new(crate::platform::terminal_accessibility::testing::RecordingAccessibilityFactory::default()),
             window,
             cx,
         ))
@@ -192,16 +195,19 @@ impl TabManager {
         prepared_launch: PreparedWorkspaceTerminalLaunch,
         operating_system_window_drag_platform: Rc<dyn OperatingSystemWindowDragPlatform>,
         key_input_adapter_factory: Rc<dyn TerminalKeyInputAdapterFactory>,
+        accessibility_adapter_factory: Rc<dyn TerminalAccessibilityAdapterFactory>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         let initial_key_input_adapter_factory = Rc::clone(&key_input_adapter_factory);
+        let initial_accessibility_adapter_factory = Rc::clone(&accessibility_adapter_factory);
         let tabs = TabCollection::new(|tab_id| {
             Self::create_pane_host(
                 tab_id,
                 session_factory.clone(),
                 prepared_launch,
                 Rc::clone(&initial_key_input_adapter_factory),
+                Rc::clone(&initial_accessibility_adapter_factory),
                 window,
                 cx,
             )
@@ -210,6 +216,7 @@ impl TabManager {
             tabs,
             session_factory,
             key_input_adapter_factory,
+            accessibility_adapter_factory,
             active: true,
             sidebar_visible: true,
             sidebar_width: px(WORKSPACE_SIDEBAR_DEFAULT_WIDTH),
@@ -230,6 +237,7 @@ impl TabManager {
         session_factory: WorkspaceTerminalSessionFactory,
         prepared_launch: PreparedWorkspaceTerminalLaunch,
         key_input_adapter_factory: Rc<dyn TerminalKeyInputAdapterFactory>,
+        accessibility_adapter_factory: Rc<dyn TerminalAccessibilityAdapterFactory>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Entity<PaneHost> {
@@ -239,6 +247,7 @@ impl TabManager {
                 session_factory,
                 prepared_launch,
                 key_input_adapter_factory,
+                accessibility_adapter_factory,
                 window,
                 cx,
             )
@@ -873,12 +882,14 @@ impl TabManager {
         let previous_tab = self.tabs.active_tab().clone();
         let session_factory = self.session_factory.clone();
         let key_input_adapter_factory = Rc::clone(&self.key_input_adapter_factory);
+        let accessibility_adapter_factory = Rc::clone(&self.accessibility_adapter_factory);
         let result = self.tabs.create_tab(|tab_id| {
             Self::create_pane_host(
                 tab_id,
                 session_factory,
                 prepared_launch,
                 key_input_adapter_factory,
+                accessibility_adapter_factory,
                 window,
                 cx,
             )

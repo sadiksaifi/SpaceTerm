@@ -78,7 +78,6 @@ pub(crate) use runtime_observation::{
     RuntimeLifecycle, RuntimeObservation, RuntimeSample, RuntimeTransition, RuntimeVisibility,
 };
 pub(crate) use selection::SelectionCopy;
-#[cfg(all(target_os = "macos", not(test)))]
 pub(crate) use session::AccessibilitySelectionSender;
 #[cfg_attr(
     not(test),
