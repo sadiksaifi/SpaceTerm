@@ -1,8 +1,9 @@
+//! Explicit application shortcut policy shared by host composition and test fixtures.
 use crate::app::*;
 use crate::ui::*;
 use gpui::KeyBinding;
 use spaceterm_ui::{EditCopy, EditPaste};
-pub(super) fn bindings() -> Vec<KeyBinding> {
+pub(crate) fn bindings() -> Vec<KeyBinding> {
     let mut bindings = vec![
         KeyBinding::new("cmd-shift-n", CreateScratchWorkspace, None),
         KeyBinding::new("cmd-p", SearchWorkspaces, None),

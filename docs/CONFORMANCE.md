@@ -143,3 +143,8 @@ applicable, registry mapping, and this matrix together. Add the narrowest failin
 then implement the behavior. Do not weaken expected values to accept multiple protocol outputs.
 If a published specification and the audited Ghostty reference differ, preserve the specification
 behavior and document the reference difference here.
+
+Shared UI test setup constructs its Desktop Profile from explicit modal, text-input, application
+shortcut, and locale policy facts. It does not call host composition. Portable PTY fixtures return
+observations to the corpus diagnostic checks, including repeated-close termination counts and
+termination-before-adapter-drop ordering.

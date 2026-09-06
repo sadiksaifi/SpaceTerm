@@ -125,7 +125,9 @@ and Secure Event Input coordinators are constructed once for the GPUI applicatio
 every Operating-System Window. Window movement state is constructed separately for each window;
 Workspace, Tab, Pane, split, replacement, Local, and Remote creation retain their injected
 capabilities. WorkspaceManager receives directory selection and optional permission recovery and
-never constructs a native desktop default.
+never constructs a native desktop default. Shared UI test setup constructs its Desktop Profile
+from explicit policy and locale facts without calling macOS composition. Application shortcuts
+are portable policy data shared with the production-selected profile.
 
 GPUI initializes the native application before the injected Locale Direction capability samples
 its application locale. The runtime then installs the selected desktop profile, registers Services,

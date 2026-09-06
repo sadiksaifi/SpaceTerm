@@ -895,13 +895,46 @@ fn check_geometry() -> Result<(), String> {
 }
 
 fn check_pty_initialization() -> Result<(), String> {
-    crate::platform::native_pty::conformance_initialization();
-    Ok(())
+    use crate::platform::native_pty::NativePtySize;
+    let observed = crate::platform::native_pty::conformance_initialization()?;
+    require_eq(
+        "construction",
+        observed,
+        Some((
+            std::path::PathBuf::from("/exact/spelling/../project"),
+            NativePtySize {
+                rows: 31,
+                columns: 97,
+                pixel_width: 1_164,
+                pixel_height: 620,
+            },
+        )),
+    )
 }
 
 fn check_pty_shutdown() -> Result<(), String> {
-    crate::platform::native_pty::conformance_shutdown();
-    Ok(())
+    let observed = crate::platform::native_pty::conformance_shutdown()?;
+    require_eq(
+        "termination-after-factory-drop",
+        observed.after_factory_drop,
+        0,
+    )?;
+    require_eq("termination-after-owner-drop", observed.after_owner_drop, 1)?;
+    require_eq(
+        "termination-after-repeated-close",
+        observed.after_repeated_close,
+        1,
+    )?;
+    require_eq(
+        "termination-completed",
+        observed.termination_completed,
+        true,
+    )?;
+    require_eq(
+        "adapter-dropped-before-termination",
+        observed.dropped_before_termination,
+        false,
+    )
 }
 
 fn check_presentation(issue: u8) -> Result<(), String> {

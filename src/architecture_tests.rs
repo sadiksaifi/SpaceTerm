@@ -155,6 +155,12 @@ fn portable_ssh_runtime_cannot_encode_host_mechanics_or_host_selected_facts() {
 fn portable_verification_cannot_select_native_adapters_or_host_mechanics() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     let mut files = vec![
+        root.join("desktop_profile.rs"),
+        root.join("desktop_profile/keybindings.rs"),
+        root.join("ui/mod.rs"),
+        root.join("ui/workspace_manager.rs"),
+        root.join("ui/workspace_picker.rs"),
+        root.join("ui/terminal_pane.rs"),
         root.join("terminal/conformance.rs"),
         root.join("terminal/testing.rs"),
         root.join("terminal/key_input.rs"),
@@ -162,6 +168,7 @@ fn portable_verification_cannot_select_native_adapters_or_host_mechanics() {
         root.join("terminal/metadata.rs"),
         root.join("terminal/native_services/testing.rs"),
         root.join("terminal/native_services/hyperlink.rs"),
+        root.join("terminal/native_services/quick_look.rs"),
         root.join("terminal/workspace_terminal_session_factory.rs"),
         root.join("terminal/session.rs"),
         root.join("platform/native_pty.rs"),
@@ -178,8 +185,35 @@ fn portable_verification_cannot_select_native_adapters_or_host_mechanics() {
     for directory in ["ssh", "platform/local_filesystem"] {
         collect_rust_sources(&root.join(directory), &mut files);
     }
+    // Discover every shared owner of an isolated suite so new mounts cannot escape the gate.
+    let mut sources = Vec::new();
+    collect_rust_sources(&root, &mut sources);
+    for path in sources {
+        if path == root.join("architecture_tests.rs")
+            || path == root.join("platform/mod.rs")
+            || path.starts_with(root.join("platform/macos_adapter_tests"))
+        {
+            continue;
+        }
+        let source = std::fs::read_to_string(&path).unwrap();
+        if source.contains("macos_adapter_tests/") {
+            files.push(path);
+        }
+    }
+    files.sort();
+    files.dedup();
     for path in files {
         let source = std::fs::read_to_string(&path).unwrap();
+        if matches!(
+            path.file_name().and_then(|name| name.to_str()),
+            Some("conformance.rs" | "testing.rs")
+        ) {
+            assert!(
+                !source.contains("macos_adapter_tests"),
+                "{} mounts native tests in shared facilities",
+                path.display()
+            );
+        }
         let source = portable_verification_source(&source);
         if let Some(forbidden) = native_verification_dependency(&source) {
             panic!("{} contains {forbidden}", path.display());
@@ -240,18 +274,30 @@ fn collect_rust_sources(directory: &std::path::Path, files: &mut Vec<std::path::
 }
 
 pub(crate) fn portable_verification_source(source: &str) -> String {
-    source
-        .lines()
-        .filter(|line| {
-            let line = line.trim();
-            // Only exact declarations mount isolated suites. Other code on the line is still scanned.
-            !native_suite_declaration(line, "#[path = \"", "\"]")
-                && line != "mod macos_adapter_tests;"
-                && line != "mod macos_adapter_tests {"
-                && !native_suite_declaration(line, "include!(\"", "\");")
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
+    let lines: Vec<_> = source.lines().collect();
+    let mut portable = Vec::new();
+    let mut index = 0;
+    while index < lines.len() {
+        let line = lines[index].trim();
+        if native_suite_declaration(line, "#[path = \"", "\"]")
+            && lines
+                .get(index + 1)
+                .is_some_and(|next| next.trim() == "mod macos_adapter_tests;")
+        {
+            index += 2;
+        } else if line == "mod macos_adapter_tests {"
+            && lines
+                .get(index + 1)
+                .is_some_and(|next| native_suite_declaration(next.trim(), "include!(\"", "\");"))
+            && lines.get(index + 2).is_some_and(|next| next.trim() == "}")
+        {
+            index += 3;
+        } else {
+            portable.push(lines[index]);
+            index += 1;
+        }
+    }
+    portable.join("\n")
 }
 
 fn native_suite_declaration(line: &str, prefix: &str, suffix: &str) -> bool {
@@ -272,11 +318,16 @@ fn native_suite_declaration(line: &str, prefix: &str, suffix: &str) -> bool {
 }
 
 fn native_verification_dependency(source: &str) -> Option<&'static str> {
+    // These enum values are supplied desktop policy facts, not Adapter selection.
+    let source = source
+        .replace("ModalKeybindingProfile::MacOs", "ExplicitModalProfile")
+        .replace("TextInputKeybindingProfile::MacOs", "ExplicitTextProfile");
     let compact: String = source
         .chars()
         .filter(|character| !character.is_whitespace())
         .collect();
     [
+        "testing_desktop_profile",
         "macos_",
         "Macos",
         "MacOs",
@@ -320,6 +371,8 @@ fn portable_verification_guard_rejects_native_dependencies_and_allows_suite_wiri
         "let resources = crate::platform::launch_host::resource_root();",
         "std::process::Command::new(\"/bin/zsh\");",
         "std::env::current_exe();",
+        "#[path = \"../platform/macos_adapter_tests/session.rs\"]\nmod native_evidence;",
+        "mod native_evidence {\ninclude!(\"../platform/macos_adapter_tests/session.rs\");\n}",
         "include!(\"../platform/macos_adapter_tests/session.rs\"); use libc::kill;",
     ] {
         assert!(

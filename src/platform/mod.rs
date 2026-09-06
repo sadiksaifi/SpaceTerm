@@ -136,10 +136,6 @@ pub(crate) mod services_registration;
 pub(crate) mod window_movement;
 pub(crate) use macos_composition::main;
 
-mod macos_keybindings;
-#[cfg(test)]
-pub(crate) use macos_composition::testing_desktop_profile;
-
 pub(crate) mod locale;
 
 #[cfg(test)]

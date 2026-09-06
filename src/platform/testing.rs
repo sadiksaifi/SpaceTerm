@@ -120,7 +120,10 @@ impl SecureFilesystem for RecordingFilesystem {
     ) -> Result<(), SecureFilesystemError> {
         self.events.lock().unwrap().push("verify-socket");
         let path = Self::path(directory)?.join(name);
-        if self.sockets.lock().unwrap().get(&path) == identity.opaque_ref::<u64>() {
+        if identity
+            .opaque_ref::<u64>()
+            .is_some_and(|expected| self.sockets.lock().unwrap().get(&path) == Some(expected))
+        {
             Ok(())
         } else {
             Err(SecureFilesystemError::Unsafe)

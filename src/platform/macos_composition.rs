@@ -69,14 +69,9 @@ fn desktop_profile(
         spaceterm_ui::ModalDesktopPolicy::mac_os(),
         spaceterm_ui::ModalKeybindingProfile::MacOs,
         spaceterm_ui::TextInputKeybindingProfile::MacOs,
-        super::macos_keybindings::bindings(),
+        crate::desktop_profile::keybindings::bindings(),
         locale,
     )
-}
-#[cfg(test)]
-pub(crate) fn testing_desktop_profile(direction: spaceterm_ui::TextDirection) -> DesktopProfile {
-    desktop_profile(Rc::new(super::locale::FixedLocaleDirection(direction)))
-        .expect("valid desktop profile")
 }
 
 fn compose(
