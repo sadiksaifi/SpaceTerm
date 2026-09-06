@@ -18,7 +18,7 @@ use super::geometry::{
 };
 use super::hyperlink::{HyperlinkKind, HyperlinkTarget, detect_url_cells};
 use super::identity::{
-    COLORTERM, COMPATIBILITY_PROGRAM_NAME, TERM_FALLBACK, TERM_NAME, XTVERSION, XtGetTcapObserver,
+    COLORTERM, COMPATIBILITY_PROGRAM_NAME, TERM_FALLBACK, XTVERSION, XtGetTcapObserver,
     launch_identity,
 };
 use super::key::{InputModifiers, KeyAction, KeyInput, OptionAsAltPolicy, PhysicalKey};
@@ -39,8 +39,7 @@ use super::session::{
     PointerButton, PointerInput, PointerPhase, ShiftSelectionPolicy, SurfacePosition, WheelInput,
     WheelPhase,
 };
-use crate::platform::launch_host::resource_root;
-use crate::platform::macos_keyboard::{MacosKeyboardBridge, NativeKeyEvent, NativeModifiers};
+use super::testing::ShellResourcesFixture;
 use crate::platform::shell_integration::{
     ShellEnvironment, ShellIntegrationMode, ShellIntegrationStatus, ShellKind,
     plan_shell_integration,
@@ -61,7 +60,7 @@ enum OracleKind {
     Geometry,
     Lifecycle,
     Security,
-    Native,
+    Interface,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -110,14 +109,14 @@ const FIXTURES: &[FixtureSpec] = &[
         "pty.initialization",
         8,
         [38, 46],
-        "posix-and-darwin-pty",
+        "spaceterm-pty-owner-contract",
         Lifecycle
     ),
     fixture!(
         "pty.shutdown",
         9,
         [39, 46],
-        "posix-process-lifecycle",
+        "spaceterm-pty-owner-contract",
         Lifecycle
     ),
     fixture!(
@@ -167,7 +166,7 @@ const FIXTURES: &[FixtureSpec] = &[
         16,
         [8, 9, 10, 11, 12, 13, 46],
         "apple-responder-and-spaceterm-focus",
-        Native
+        Interface
     ),
     fixture!(
         "keyboard.vocabulary",
@@ -184,11 +183,11 @@ const FIXTURES: &[FixtureSpec] = &[
         Bytes
     ),
     fixture!(
-        "keyboard.macos-bridge",
+        "keyboard.gpui-adapter",
         19,
         [20, 21],
-        "apple-nsevent",
-        Native
+        "w3c-code-and-ghostty-key",
+        Interface
     ),
     fixture!(
         "focus.dec-1004",
@@ -209,7 +208,7 @@ const FIXTURES: &[FixtureSpec] = &[
         22,
         [22],
         "apple-nstextinputclient",
-        Native
+        Interface
     ),
     fixture!(
         "input.secure-event",
@@ -295,21 +294,21 @@ const FIXTURES: &[FixtureSpec] = &[
         37,
         [41],
         "ecma-48-bel-and-apple-notifications",
-        Native
+        Interface
     ),
     fixture!(
         "services.native-actions",
         38,
         [43],
         "apple-services-drag-and-quick-look",
-        Native
+        Interface
     ),
     fixture!(
         "accessibility.editable-text",
         39,
         [42],
         "apple-nsaccessibility",
-        Native
+        Interface
     ),
     fixture!(
         "render.visibility-lifecycle",
@@ -768,7 +767,7 @@ fn observe_advertised_capability(
         10..=15 => check_presentation(spec.issue)?,
         16 => check_terminal_focus()?,
         17..=18 => check_keyboard_encoding()?,
-        19 => check_macos_keyboard_bridge()?,
+        19 => check_gpui_keyboard_adapter()?,
         20 => check_focus_reporting()?,
         21 => check_cursor_blink_lifecycle()?,
         22 => check_ime()?,
@@ -896,30 +895,45 @@ fn check_geometry() -> Result<(), String> {
 }
 
 fn check_pty_initialization() -> Result<(), String> {
-    let observation = crate::platform::macos_pty::conformance_initialization_observation();
-    for expected in [
-        "argv=[\"/bin/zsh\", \"-l\"]",
-        "cwd=/tmp",
-        "term=xterm-256color",
-        "colorterm=truecolor",
-        "program=ghostty",
-        "spaceterm=1",
-        "controlling-tty=true",
-    ] {
-        require(
-            observation.contains(expected),
-            "pty-initialization",
-            format!("expected `{expected}` in `{observation}`"),
-        )?;
-    }
-    Ok(())
+    use crate::platform::native_pty::NativePtySize;
+    let observed = crate::platform::native_pty::conformance_initialization()?;
+    require_eq(
+        "construction",
+        observed,
+        Some((
+            std::path::PathBuf::from("/exact/spelling/../project"),
+            NativePtySize {
+                rows: 31,
+                columns: 97,
+                pixel_width: 1_164,
+                pixel_height: 620,
+            },
+        )),
+    )
 }
 
 fn check_pty_shutdown() -> Result<(), String> {
+    let observed = crate::platform::native_pty::conformance_shutdown()?;
     require_eq(
-        "pty-shutdown",
-        crate::platform::macos_pty::conformance_shutdown_observation(),
-        "first=true duplicate=true signals=1 disposition=Graceful revoked=true".to_owned(),
+        "termination-after-factory-drop",
+        observed.after_factory_drop,
+        0,
+    )?;
+    require_eq("termination-after-owner-drop", observed.after_owner_drop, 1)?;
+    require_eq(
+        "termination-after-repeated-close",
+        observed.after_repeated_close,
+        1,
+    )?;
+    require_eq(
+        "termination-completed",
+        observed.termination_completed,
+        true,
+    )?;
+    require_eq(
+        "adapter-dropped-before-termination",
+        observed.dropped_before_termination,
+        false,
     )
 }
 
@@ -1064,33 +1078,22 @@ fn check_keyboard_encoding() -> Result<(), String> {
     require_eq("cursor-golden", observed[1].value.as_str(), "1b 4f 41")
 }
 
-fn check_macos_keyboard_bridge() -> Result<(), String> {
-    let bridge = MacosKeyboardBridge::new(OptionAsAltPolicy::Left);
-    let translation = bridge.translate(NativeKeyEvent {
-        action: KeyAction::Press,
-        native_key_code: 0,
-        characters: Some("å".to_owned()),
-        characters_ignoring_modifiers: Some("a".to_owned()),
-        unmodified_characters: Some("a".to_owned()),
-        characters_without_option: Some("a".to_owned()),
-        modifiers: NativeModifiers {
-            alt: true,
-            alt_left: true,
-            ..NativeModifiers::default()
+fn check_gpui_keyboard_adapter() -> Result<(), String> {
+    let mut adapter = super::testing::test_terminal_key_input_adapter();
+    let translation = adapter.key_down(&gpui::KeyDownEvent {
+        keystroke: gpui::Keystroke {
+            key: "a".into(),
+            key_char: Some("a".into()),
+            modifiers: gpui::Modifiers::default(),
         },
+        is_held: false,
     });
     let KeyTranslation::Encoded(input) = translation else {
-        return Err(format!(
-            "expected encoded macOS key, observed {translation:?}"
-        ));
+        return Err(format!("expected encoded key, observed {translation:?}"));
     };
     require_eq("physical-key", input.physical_key, PhysicalKey::A)?;
-    require_eq("option-as-alt-text", input.text.as_deref(), Some("a"))?;
-    require(
-        input.modifiers.alt && !input.consumed_modifiers.alt,
-        "modifier-routing",
-        format!("observed {input:?}"),
-    )
+    require_eq("printable-text", input.text.as_deref(), Some("a"))?;
+    require_eq("native-identity-absent", input.native_key_code, None)
 }
 
 fn check_focus_reporting() -> Result<(), String> {
@@ -1498,11 +1501,12 @@ fn check_metadata() -> Result<(), String> {
 }
 
 fn check_shell_integration() -> Result<(), String> {
-    let resources = resource_root();
+    let fixture = ShellResourcesFixture::new();
+    let resources = fixture.path();
     let inherited = ShellEnvironment::default();
     let zsh = plan_shell_integration(
-        Path::new("/bin/zsh"),
-        &resources,
+        Path::new("/fixture/zsh"),
+        resources,
         ShellIntegrationMode::Automatic,
         &inherited,
     );
@@ -1512,8 +1516,8 @@ fn check_shell_integration() -> Result<(), String> {
         ShellIntegrationStatus::Applied(ShellKind::Zsh),
     )?;
     let disabled = plan_shell_integration(
-        Path::new("/bin/zsh"),
-        &resources,
+        Path::new("/fixture/zsh"),
+        resources,
         ShellIntegrationMode::Disabled,
         &inherited,
     );
@@ -1536,12 +1540,10 @@ fn check_identity() -> Result<(), String> {
         "ghostty",
     )?;
     require_eq("colorterm", COLORTERM, "truecolor")?;
-    let identity = launch_identity(&resource_root());
-    require(
-        matches!(identity.term, TERM_NAME | TERM_FALLBACK),
-        "term-identity",
-        format!("observed {}", identity.term),
-    )?;
+    let fixture = ShellResourcesFixture::new();
+    let identity = launch_identity(fixture.path());
+    require_eq("term-identity", identity.term, TERM_FALLBACK)?;
+    require_eq("no-packaged-terminfo", identity.terminfo, None)?;
     let mut observer = XtGetTcapObserver::new(identity.term);
     let mut replies = Vec::new();
     observer.feed(b"\x1bP+q544e;436f;524742\x1b\\", &mut replies);
@@ -1788,7 +1790,7 @@ fn registry_covers_every_advertised_capability() {
                 | OracleKind::Geometry
                 | OracleKind::Lifecycle
                 | OracleKind::Security
-                | OracleKind::Native
+                | OracleKind::Interface
         ));
     }
 }

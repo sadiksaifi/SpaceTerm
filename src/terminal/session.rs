@@ -13,8 +13,6 @@ use std::time::{Duration, Instant};
 
 use thiserror::Error;
 
-#[cfg(test)]
-use crate::platform::launch_host::{resource_root, user_shell};
 use crate::platform::native_pty::{
     NativePtyAdapterFactory, NativePtyCloseHandle, NativePtyExit, NativePtyOperationFailure,
     NativePtyOutput, NativePtyOutputSink, NativePtyOwner, NativePtySize, NativePtyStartupFailure,
@@ -497,6 +495,7 @@ pub(crate) enum TerminalLaunchPlan {
 #[derive(Clone)]
 pub(crate) struct NativeTerminalSessionFactory {
     local_filesystem: LocalFilesystemAuthority,
+    local_hostname: Option<String>,
     native_pty_adapter_factory: Arc<dyn NativePtyAdapterFactory>,
     launch_planner: ShellLaunchPlanner,
     osc52_clipboard_factory: Arc<dyn Osc52ClipboardFactory>,
@@ -508,9 +507,11 @@ impl NativeTerminalSessionFactory {
         launch_planner: ShellLaunchPlanner,
         osc52_clipboard_factory: Arc<dyn Osc52ClipboardFactory>,
         local_filesystem: LocalFilesystemAuthority,
+        local_hostname: Option<String>,
     ) -> Self {
         Self {
             local_filesystem,
+            local_hostname,
             native_pty_adapter_factory,
             launch_planner,
             osc52_clipboard_factory,
@@ -542,6 +543,7 @@ impl TerminalSessionFactory for NativeTerminalSessionFactory {
                 self.launch_planner.clone(),
                 geometry,
                 local.working_directory().path(),
+                self.local_hostname.as_deref(),
                 observation,
                 Arc::clone(&self.osc52_clipboard_factory),
                 self.local_filesystem.clone(),
@@ -645,24 +647,33 @@ type StartedSession = (
 
 #[cfg(test)]
 fn test_launch_planner() -> ShellLaunchPlanner {
-    ShellLaunchPlanner::new(user_shell().into(), resource_root())
+    ShellLaunchPlanner::new(
+        "/fixture/zsh".into(),
+        PathBuf::from("/fixture/missing-resources"),
+    )
+    .with_environment(
+        crate::platform::shell_integration::ShellIntegrationMode::Disabled,
+        crate::platform::shell_integration::ShellEnvironment::default(),
+    )
 }
 
 impl TerminalSession {
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "independent session dependencies are injected at construction"
+    )]
     pub(crate) fn start(
         native_pty_adapter_factory: Arc<dyn NativePtyAdapterFactory>,
         launch_planner: ShellLaunchPlanner,
         geometry: TerminalGeometry,
         working_directory: &Path,
+        local_hostname: Option<&str>,
         runtime_observation: Option<RuntimeObservation>,
         osc52_clipboard_factory: Arc<dyn Osc52ClipboardFactory>,
         local_filesystem: LocalFilesystemAuthority,
     ) -> Result<StartedSession, SessionError> {
         let initial_directory = working_directory.to_string_lossy();
-        let metadata_context = TerminalMetadataContext::local(
-            &initial_directory,
-            crate::terminal::metadata::local_hostname().as_deref(),
-        );
+        let metadata_context = TerminalMetadataContext::local(&initial_directory, local_hostname);
         let launch_directory = working_directory.to_owned();
         Self::start_deferred_with_context(
             geometry,
@@ -732,10 +743,8 @@ impl TerminalSession {
         + 'static,
     ) -> Result<StartedSession, SessionError> {
         let initial_directory = working_directory.to_string_lossy();
-        let metadata_context = TerminalMetadataContext::local(
-            &initial_directory,
-            crate::terminal::metadata::local_hostname().as_deref(),
-        );
+        let metadata_context =
+            TerminalMetadataContext::local(&initial_directory, Some("fixture.test"));
         Self::start_deferred_with_context(
             geometry,
             metadata_context,
@@ -745,7 +754,7 @@ impl TerminalSession {
             LocalFilesystemAuthority::testing(),
             move |size, output, close_handle| {
                 start_native_pty(size, output, close_handle)
-                    .map(|owner| (owner, identity::launch_identity(&resource_root()).term))
+                    .map(|owner| (owner, identity::TERM_FALLBACK))
             },
         )
     }
@@ -861,9 +870,9 @@ impl TerminalSession {
         let worker_directory = working_directory.to_owned();
         let metadata_context = TerminalMetadataContext::local(
             &worker_directory.to_string_lossy(),
-            crate::terminal::metadata::local_hostname().as_deref(),
+            Some("fixture.test"),
         );
-        let terminal_name = identity::launch_identity(&resource_root()).term;
+        let terminal_name = identity::TERM_FALLBACK;
         let (command_tx, command_rx) = mpsc::channel();
         let reader_transport = ReaderTransport::new(command_tx.clone());
         let native_pty_close = NativePtyCloseHandle::default();
@@ -2634,7 +2643,6 @@ mod tests {
 
     use super::*;
     use crate::domain::{RemoteWorkspaceDirectory, SshDestination, WorkspaceDirectoryIdentity};
-    use crate::platform::macos_pty::MacosNativePtyAdapterFactory;
     use crate::platform::native_pty::{
         NativePtyAdapter, NativePtyAdapterParts, NativePtyTermination,
     };
@@ -2643,16 +2651,15 @@ mod tests {
         ValidatedRemoteShellCommand,
     };
 
-    fn macos_native_pty_adapter_factory() -> Arc<dyn NativePtyAdapterFactory> {
-        Arc::new(MacosNativePtyAdapterFactory)
-    }
-
     fn native_terminal_session_factory() -> NativeTerminalSessionFactory {
         NativeTerminalSessionFactory::new(
-            macos_native_pty_adapter_factory(),
+            Arc::new(RecordingSessionAdapterFactory {
+                constructions: mpsc::channel().0,
+            }),
             test_launch_planner(),
             Arc::new(UnavailableOsc52ClipboardFactory),
             LocalFilesystemAuthority::testing(),
+            Some("fixture.test".into()),
         )
     }
 
@@ -2735,7 +2742,7 @@ mod tests {
 
         assert_eq!(construction.working_directory, working_directory);
         assert_eq!(construction.size, pty_size(test_geometry()));
-        assert_eq!(construction.executable, OsString::from(user_shell()));
+        assert_eq!(construction.executable, OsString::from("/fixture/zsh"));
         assert_eq!(construction.arguments.last(), Some(&OsString::from("-l")));
         assert!(construction.inherit_environment);
         assert!(
@@ -2903,22 +2910,6 @@ mod tests {
     use crate::terminal::geometry::{BackingScale, CellGridSize, LogicalCellSize};
     use crate::terminal::key::{KeyAction, PhysicalKey};
 
-    struct JoinedRealPtySession(TerminalSession);
-
-    impl std::ops::Deref for JoinedRealPtySession {
-        type Target = TerminalSession;
-
-        fn deref(&self) -> &Self::Target {
-            &self.0
-        }
-    }
-
-    impl Drop for JoinedRealPtySession {
-        fn drop(&mut self) {
-            self.0.shutdown_and_join();
-        }
-    }
-
     fn geometry(cols: u16, rows: u16, cell_width: f32, cell_height: f32) -> TerminalGeometry {
         TerminalGeometry::from_grid(
             CellGridSize::new(cols, rows),
@@ -2927,7 +2918,7 @@ mod tests {
         )
     }
 
-    fn test_geometry() -> TerminalGeometry {
+    pub(super) fn test_geometry() -> TerminalGeometry {
         geometry(80, 24, 8.0, 20.0)
     }
 
@@ -3242,6 +3233,7 @@ mod tests {
                 test_launch_planner(),
                 osc52_clipboard_factory,
                 LocalFilesystemAuthority::testing(),
+                Some("fixture.test".into()),
             ),
             observed,
         )
@@ -4004,6 +3996,7 @@ mod tests {
             test_launch_planner(),
             test_geometry(),
             &std::env::temp_dir(),
+            Some("fixture.test"),
             None,
             Arc::new(UnavailableOsc52ClipboardFactory),
             LocalFilesystemAuthority::testing(),
@@ -5586,124 +5579,6 @@ mod tests {
     }
 
     #[test]
-    fn real_shell_output_round_trips_through_the_pty_and_emulator() {
-        let _isolation = crate::platform::native_pty::lock_real_pty_test();
-        let size = test_geometry();
-        let (session, events, _accessibility) = TerminalSession::start(
-            macos_native_pty_adapter_factory(),
-            test_launch_planner(),
-            size,
-            &std::env::current_dir().unwrap(),
-            None,
-            Arc::new(UnavailableOsc52ClipboardFactory),
-            LocalFilesystemAuthority::testing(),
-        )
-        .unwrap();
-        let session = JoinedRealPtySession(session);
-
-        // The command renders a red X. The echoed command contains an X too, but
-        // only the shell's output passes through the SGR sequence and becomes red.
-        let request = session
-            .request_paste("printf '\\033[31mX\\033[0m\\n'\n".to_owned())
-            .recv_blocking()
-            .unwrap()
-            .unwrap();
-        let PasteRequestOutcome::ConfirmationRequired(confirmation) = request else {
-            panic!("multiline paste must require confirmation")
-        };
-        assert_eq!(
-            session
-                .resolve_paste(confirmation.id, PasteDecision::Confirm)
-                .recv_blocking()
-                .unwrap(),
-            Ok(PasteResolution::Written)
-        );
-
-        let deadline = Instant::now() + Duration::from_secs(5);
-        let mut saw_red_x = false;
-        while Instant::now() < deadline && !saw_red_x {
-            match events.try_recv() {
-                Ok(SessionEvent::Screen(screen)) => {
-                    saw_red_x = screen.rows.iter().flat_map(|row| row.iter()).any(|cell| {
-                        cell.text == "X"
-                            && cell.foreground_source == crate::terminal::TerminalColor::Palette(1)
-                    });
-                }
-                Ok(SessionEvent::Failed(failure)) => panic!("terminal session failed: {failure}"),
-                Ok(SessionEvent::Exited(status)) => panic!("shell exited early: {status}"),
-                Ok(
-                    SessionEvent::Osc52Authorization(_)
-                    | SessionEvent::Osc52AuthorizationExpired(_),
-                ) => {}
-                Ok(SessionEvent::HiddenInputChanged(_) | SessionEvent::Attention(_)) => {}
-                Err(async_channel::TryRecvError::Empty) => {
-                    thread::sleep(Duration::from_millis(10));
-                }
-                Err(async_channel::TryRecvError::Closed) => break,
-            }
-        }
-
-        assert!(
-            saw_red_x,
-            "did not receive colored output from the real shell"
-        );
-    }
-
-    #[test]
-    fn real_shell_exit_command_emits_an_exited_event() {
-        let _isolation = crate::platform::native_pty::lock_real_pty_test();
-        let size = test_geometry();
-        let (session, events, _accessibility) = TerminalSession::start(
-            macos_native_pty_adapter_factory(),
-            test_launch_planner(),
-            size,
-            &std::env::current_dir().unwrap(),
-            None,
-            Arc::new(UnavailableOsc52ClipboardFactory),
-            LocalFilesystemAuthority::testing(),
-        )
-        .unwrap();
-        let session = JoinedRealPtySession(session);
-
-        let request = session
-            .request_paste("exit\n".to_owned())
-            .recv_blocking()
-            .unwrap()
-            .unwrap();
-        let PasteRequestOutcome::ConfirmationRequired(confirmation) = request else {
-            panic!("multiline paste must require confirmation")
-        };
-        let _ = session
-            .resolve_paste(confirmation.id, PasteDecision::Confirm)
-            .recv_blocking();
-
-        let deadline = Instant::now() + Duration::from_secs(5);
-        let mut exit_status = None;
-        while Instant::now() < deadline && exit_status.is_none() {
-            match events.try_recv() {
-                Ok(SessionEvent::Screen(_)) => {}
-                Ok(SessionEvent::Exited(status)) => exit_status = Some(status),
-                Ok(SessionEvent::Failed(failure)) => panic!("terminal session failed: {failure}"),
-                Ok(
-                    SessionEvent::Osc52Authorization(_)
-                    | SessionEvent::Osc52AuthorizationExpired(_),
-                ) => {}
-                Ok(SessionEvent::HiddenInputChanged(_) | SessionEvent::Attention(_)) => {}
-                Err(async_channel::TryRecvError::Empty) => {
-                    thread::sleep(Duration::from_millis(10));
-                }
-                Err(async_channel::TryRecvError::Closed) => break,
-            }
-        }
-
-        drop(session);
-        assert!(
-            exit_status.is_some(),
-            "shell exit did not produce a terminal lifecycle event"
-        );
-    }
-
-    #[test]
     fn selection_autoscroll_schedule_uses_an_injected_monotonic_now() {
         let epoch = Instant::now();
         let generation = PresentationGeneration::default();
@@ -5775,3 +5650,7 @@ mod tests {
         session.shutdown();
     }
 }
+
+#[cfg(test)]
+#[path = "../platform/macos_adapter_tests/session.rs"]
+mod macos_adapter_tests;

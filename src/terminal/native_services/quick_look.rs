@@ -149,33 +149,6 @@ mod tests {
     }
 
     #[test]
-    fn presenter_rejects_a_replaced_file_before_calling_the_platform() {
-        let directory = std::env::temp_dir().join(format!(
-            "spaceterm-quick-look-platform-replaced-{}",
-            std::process::id()
-        ));
-        fs::create_dir_all(&directory).unwrap();
-        let file = directory.join("preview.txt");
-        let replacement = directory.join("replacement.txt");
-        fs::write(&file, b"preview").unwrap();
-        let link =
-            HyperlinkTarget::osc8("file:preview.txt", &directory, None, LOCAL_FILES).unwrap();
-        let target = QuickLookTarget::from_link(&link, LOCAL_FILES).unwrap();
-        fs::write(&replacement, b"replacement").unwrap();
-        fs::rename(replacement, &file).unwrap();
-        let mut presenter = QuickLookPresenter::new(RecordingPanel::default());
-
-        let result = presenter.preview(&target);
-
-        assert_eq!(result, Err(QuickLookError::StaleTarget));
-        assert_eq!(
-            (presenter.panel.previews.len(), presenter.panel.dismissals),
-            (0, 1)
-        );
-        fs::remove_dir_all(directory).unwrap();
-    }
-
-    #[test]
     fn quick_look_target_rejects_web_links_before_the_platform_boundary() {
         let link = HyperlinkTarget::url("https://example.test/file.txt").unwrap();
 
@@ -242,5 +215,8 @@ mod tests {
         presenter.dismiss();
 
         assert_eq!(presenter.panel.dismissals, 1);
+    }
+    mod macos_adapter_tests {
+        include!("../../platform/macos_adapter_tests/quick_look.rs");
     }
 }

@@ -1184,11 +1184,9 @@ impl Drop for CancelOnDrop {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::VecDeque;
-    use std::io::Cursor;
     use std::path::PathBuf;
+    use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::{Arc, Mutex};
 
     use crate::platform::askpass::AskPassLease;
     use crate::ssh::command::SshCommandSpec;
@@ -1401,77 +1399,7 @@ mod tests {
         }));
     }
 
-    #[derive(Clone, Default)]
-    struct RecordingAdapter {
-        state: Arc<Mutex<RecordingState>>,
-    }
-
-    #[derive(Default)]
-    struct RecordingState {
-        stdout: Vec<u8>,
-        stderr: Vec<u8>,
-        statuses: VecDeque<Option<ProcessExit>>,
-        spawn_error: Option<SshProcessMechanismError>,
-        omit_requested_stderr: bool,
-        cancel_on_status: Option<SshCancellationToken>,
-        spawns: usize,
-        signals: Vec<ProcessSignal>,
-        reaps: usize,
-    }
-
-    struct RecordingProcess;
-
-    impl SshProcessAdapter for RecordingAdapter {
-        type Process = RecordingProcess;
-
-        fn spawn(
-            &self,
-            request: SshProcessSpawnRequest,
-        ) -> Result<SpawnedSshProcess<Self::Process>, SshProcessMechanismError> {
-            let mut state = self.state.lock().unwrap();
-            state.spawns += 1;
-            if let Some(error) = state.spawn_error {
-                return Err(error);
-            }
-            let stdin = (request.stdin() == SshProcessStdio::Piped)
-                .then(|| Box::new(io::sink()) as Box<dyn Write + Send>);
-            let stdout = (request.stdout() == SshProcessStdio::Piped)
-                .then(|| Box::new(Cursor::new(state.stdout.clone())) as Box<dyn Read + Send>);
-            let stderr = (request.stderr() == SshProcessStdio::Piped
-                && !state.omit_requested_stderr)
-                .then(|| Box::new(Cursor::new(state.stderr.clone())) as Box<dyn Read + Send>);
-            Ok(SpawnedSshProcess::new(
-                RecordingProcess,
-                SshProcessPipes::new(stdin, stdout, stderr),
-            ))
-        }
-
-        fn try_status(
-            &self,
-            _process: &mut Self::Process,
-        ) -> Result<Option<ProcessExit>, SshProcessMechanismError> {
-            let mut state = self.state.lock().unwrap();
-            if let Some(cancellation) = state.cancel_on_status.take() {
-                cancellation.cancel();
-            }
-            Ok(state.statuses.pop_front().unwrap_or(None))
-        }
-
-        fn signal(
-            &self,
-            _process: &mut Self::Process,
-            signal: ProcessSignal,
-        ) -> Result<(), SshProcessMechanismError> {
-            self.state.lock().unwrap().signals.push(signal);
-            Ok(())
-        }
-
-        fn reap(&self, _process: Self::Process) -> Result<(), SshProcessMechanismError> {
-            self.state.lock().unwrap().reaps += 1;
-            Ok(())
-        }
-    }
-
+    use super::testing::*;
     fn test_spec() -> SshCommandSpec {
         SshCommandSpec::for_test(PathBuf::from("/selected/ssh"), vec!["-V".into()])
     }
@@ -1696,5 +1624,83 @@ mod tests {
                 && state.signals.is_empty()
                 && state.reaps == 0
         );
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod testing {
+    use super::*;
+    use std::collections::VecDeque;
+    use std::io::Cursor;
+    use std::sync::{Arc, Mutex};
+    #[derive(Clone, Default)]
+    pub(crate) struct RecordingAdapter {
+        pub(super) state: Arc<Mutex<RecordingState>>,
+    }
+
+    #[derive(Default)]
+    pub(super) struct RecordingState {
+        pub(super) stdout: Vec<u8>,
+        pub(super) stderr: Vec<u8>,
+        pub(super) statuses: VecDeque<Option<ProcessExit>>,
+        pub(super) spawn_error: Option<SshProcessMechanismError>,
+        pub(super) omit_requested_stderr: bool,
+        pub(super) cancel_on_status: Option<SshCancellationToken>,
+        pub(super) spawns: usize,
+        pub(super) signals: Vec<ProcessSignal>,
+        pub(super) reaps: usize,
+    }
+
+    pub(crate) struct RecordingProcess;
+
+    impl SshProcessAdapter for RecordingAdapter {
+        type Process = RecordingProcess;
+
+        fn spawn(
+            &self,
+            request: SshProcessSpawnRequest,
+        ) -> Result<SpawnedSshProcess<Self::Process>, SshProcessMechanismError> {
+            let mut state = self.state.lock().unwrap();
+            state.spawns += 1;
+            if let Some(error) = state.spawn_error {
+                return Err(error);
+            }
+            let stdin = (request.stdin() == SshProcessStdio::Piped)
+                .then(|| Box::new(io::sink()) as Box<dyn Write + Send>);
+            let stdout = (request.stdout() == SshProcessStdio::Piped)
+                .then(|| Box::new(Cursor::new(state.stdout.clone())) as Box<dyn Read + Send>);
+            let stderr = (request.stderr() == SshProcessStdio::Piped
+                && !state.omit_requested_stderr)
+                .then(|| Box::new(Cursor::new(state.stderr.clone())) as Box<dyn Read + Send>);
+            Ok(SpawnedSshProcess::new(
+                RecordingProcess,
+                SshProcessPipes::new(stdin, stdout, stderr),
+            ))
+        }
+
+        fn try_status(
+            &self,
+            _process: &mut Self::Process,
+        ) -> Result<Option<ProcessExit>, SshProcessMechanismError> {
+            let mut state = self.state.lock().unwrap();
+            if let Some(cancellation) = state.cancel_on_status.take() {
+                cancellation.cancel();
+            }
+            Ok(state.statuses.pop_front().unwrap_or(None))
+        }
+
+        fn signal(
+            &self,
+            _process: &mut Self::Process,
+            signal: ProcessSignal,
+        ) -> Result<(), SshProcessMechanismError> {
+            self.state.lock().unwrap().signals.push(signal);
+            Ok(())
+        }
+
+        fn reap(&self, _process: Self::Process) -> Result<(), SshProcessMechanismError> {
+            self.state.lock().unwrap().reaps += 1;
+            Ok(())
+        }
     }
 }

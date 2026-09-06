@@ -119,6 +119,18 @@
 | **OSC 52 Authorization** | A bounded, opaque, one-operation decision governing whether a terminal program may read or write a named clipboard target; access is denied unless explicit policy allows or asks for it. | paste confirmation, unrestricted clipboard access |
 | **Close Confirmation** | The one application-owned window-modal authorization for an exact user-requested destructive close whose affected hierarchy contains at least one Pane that may still be running work. | per-Pane prompt, shell transcript, automatic-exit prompt |
 
+## Verification evidence
+
+| Term | Definition | Aliases to avoid |
+| --- | --- | --- |
+| **Conformance Corpus** | The portable release gate that exercises platform-neutral Module Interfaces and real terminal and UI reducers with deterministic recording implementations, isolated fixtures, explicit host facts, bounded inputs, and protocol or semantic oracles. | native integration suite, host-selected harness |
+| **macOS Adapter Integration Suite** | Isolated verification of native PTY, keyboard enrichment, real processes, local transport, retained filesystem identity, security, and shipped resources that portable recording implementations cannot prove. | portable corpus, mocked native evidence |
+
+The Conformance Corpus and shared Terminal Session, Terminal Key Input, SSH, Remote Project,
+Local Filesystem Authority, and Shell Integration facilities never select concrete macOS Adapters,
+discover host launch facts, or use Unix-only mechanics. Native suites retain genuine mechanism
+evidence separately. Both layers run in `just validate`; this separation makes no new host-support claim.
+
 ## Lifecycle actions
 
 | Term | Definition | Aliases to avoid |

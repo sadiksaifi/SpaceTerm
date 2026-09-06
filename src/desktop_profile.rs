@@ -1,4 +1,6 @@
 //! Validated desktop policy supplied by host composition, with no host detection.
+pub(crate) mod keybindings;
+
 use gpui::{App, KeyBinding};
 use spaceterm_ui::{ModalDesktopPolicy, ModalKeybindingProfile, TextInputKeybindingProfile};
 
@@ -56,7 +58,14 @@ impl DesktopProfile {
 }
 #[cfg(test)]
 pub(crate) fn testing_profile(direction: spaceterm_ui::TextDirection) -> DesktopProfile {
-    crate::platform::testing_desktop_profile(direction)
+    DesktopProfile::new(
+        ModalDesktopPolicy::mac_os(),
+        ModalKeybindingProfile::MacOs,
+        TextInputKeybindingProfile::MacOs,
+        keybindings::bindings(),
+        std::rc::Rc::new(crate::platform::locale::FixedLocaleDirection(direction)),
+    )
+    .expect("valid explicit desktop profile fixture")
 }
 
 #[cfg(test)]

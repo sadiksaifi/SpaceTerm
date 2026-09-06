@@ -193,7 +193,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn ui_init_should_install_macos_modal_command_period_binding(cx: &mut TestAppContext) {
+    fn ui_init_should_install_explicit_modal_command_period_binding(cx: &mut TestAppContext) {
         cx.update(|cx| init(cx).expect("UI initialization should succeed"));
         let command_period =
             Keystroke::parse("cmd-.").expect("macOS modal key equivalent should parse");
@@ -235,7 +235,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn terminal_find_shortcuts_should_bind_standard_macos_actions(cx: &mut TestAppContext) {
+    fn terminal_find_shortcuts_should_bind_supplied_desktop_actions(cx: &mut TestAppContext) {
         cx.update(|cx| init(cx).expect("UI initialization should succeed"));
         let expected = [
             ("cmd-f", OpenTerminalFind.name()),

@@ -56,6 +56,8 @@ enum IdentityValue {
     Unavailable,
     #[cfg(test)]
     Fixture(u64),
+    #[cfg(test)]
+    FixturePath(PathBuf),
 }
 
 /// Equality retains the object, so removal cannot recycle its identity into a successor.
@@ -357,3 +359,7 @@ impl LocalFileEmissionRegistry {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+#[path = "macos_adapter_tests/local_filesystem.rs"]
+mod macos_adapter_tests;

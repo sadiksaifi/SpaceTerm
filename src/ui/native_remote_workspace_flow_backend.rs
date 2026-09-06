@@ -718,11 +718,11 @@ mod tests {
 
     use super::*;
     use crate::platform::app_paths::{AppPathEnvironment, AppPathHostFacts};
-    use crate::platform::macos_control_socket::MacosControlSocketProbe;
-    use crate::platform::macos_host_config_filesystem::MacosHostConfigFilesystem;
-    use crate::platform::macos_secure_filesystem::MacosSecureFilesystem;
-    use crate::platform::macos_ssh_process::MacOsSshProcessAdapter;
+    use crate::platform::testing::{
+        EmptyHostConfigFilesystem, RecordingControlSocketProbe, RecordingFilesystem,
+    };
     use crate::ssh::command::{OpenSshVersion, SshUnavailableReason};
+    use crate::ssh::process::testing::RecordingAdapter;
 
     struct FakeIdentityProvider {
         validations: Mutex<
@@ -831,14 +831,18 @@ mod tests {
 
     fn factory_with_capability(
         startup_capability: SshCapability,
-    ) -> NativeRemoteWorkspaceFlowBackendFactory<MacOsSshProcessAdapter> {
+    ) -> NativeRemoteWorkspaceFlowBackendFactory<RecordingAdapter> {
         let environment = AppPathEnvironment {
             home: Some("/Users/test".into()),
             ..AppPathEnvironment::default()
         };
         let host = AppPathHostFacts::new(PathBuf::from("/private/tmp"), 103).unwrap();
-        let paths =
-            AppPaths::resolve(&environment, &host, Arc::new(MacosSecureFilesystem)).unwrap();
+        let paths = AppPaths::resolve(
+            &environment,
+            &host,
+            Arc::new(RecordingFilesystem::default()),
+        )
+        .unwrap();
         NativeRemoteWorkspaceFlowBackendFactory::new(
             RemoteWorkspaceSshRuntime {
                 paths: Arc::new(paths),
@@ -847,9 +851,9 @@ mod tests {
                 startup_capability,
                 aliases: ActiveSshAliasRegistry::default(),
                 executable: OpenSshExecutable::for_test(),
-                process_adapter: MacOsSshProcessAdapter,
-                control_socket_probe: Arc::new(MacosControlSocketProbe),
-                host_config_filesystem: Arc::new(MacosHostConfigFilesystem),
+                process_adapter: RecordingAdapter::default(),
+                control_socket_probe: Arc::new(RecordingControlSocketProbe::default()),
+                host_config_filesystem: Arc::new(EmptyHostConfigFilesystem),
             },
             Arc::new(RejectAskPassFactory),
         )

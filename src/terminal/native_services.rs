@@ -303,47 +303,10 @@ pub(crate) fn revalidated_context_link<'a>(
 #[cfg(test)]
 mod tests {
     use std::fs;
-    use std::os::unix::fs::symlink;
     use std::path::PathBuf;
 
     use super::*;
     use crate::terminal::{HyperlinkTarget, SelectionCopy};
-
-    #[test]
-    fn migrated_policy_and_callers_do_not_name_concrete_adapters() {
-        let policy = [
-            include_str!("native_services/clipboard.rs"),
-            include_str!("native_services/file_insertion.rs"),
-            include_str!("native_services/hyperlink.rs"),
-            include_str!("native_services/osc52.rs"),
-            include_str!("native_services/paste.rs"),
-            include_str!("native_services/quick_look.rs"),
-            include_str!("native_services/selection.rs"),
-            include_str!("native_services/services.rs"),
-        ];
-        for source in policy {
-            // Local Filesystem Authority is portable policy, shared with Workspaces.
-            let source = source.replace("crate::platform::local_filesystem::", "");
-            assert!(!source.contains("crate::platform::"));
-            assert!(!source.contains("target_os"));
-            assert!(!source.contains("use cocoa::"));
-            assert!(!source.contains("use objc::"));
-        }
-        for source in [
-            include_str!("../ui/terminal_pane.rs"),
-            include_str!("session.rs"),
-        ] {
-            for concrete in [
-                "macos_pasteboard",
-                "macos_quick_look",
-                "macos_services",
-                "MacosOsc52Clipboard",
-                "MacosQuickLook",
-            ] {
-                assert!(!source.contains(concrete));
-            }
-        }
-    }
 
     #[test]
     fn service_content_values_have_redacted_debug_output() {
@@ -476,49 +439,6 @@ mod tests {
     }
 
     #[test]
-    fn local_native_actions_are_inert_after_the_file_is_replaced() {
-        let directory =
-            std::env::temp_dir().join(format!("spaceterm-local-replaced-{}", std::process::id()));
-        fs::create_dir_all(&directory).unwrap();
-        let file = directory.join("preview.txt");
-        let replacement = directory.join("replacement.txt");
-        fs::write(&file, b"first").unwrap();
-        let local =
-            HyperlinkTarget::osc8("file:preview.txt", &directory, None, LOCAL_FILES).unwrap();
-
-        fs::write(&replacement, b"replacement").unwrap();
-        fs::rename(&replacement, &file).unwrap();
-
-        assert_eq!(local.activation_url(LOCAL_FILES), None);
-        assert_eq!(QuickLookTarget::from_link(&local, LOCAL_FILES), None);
-        assert!(NativeContextActions::from_presence(LOCAL_FILES, false, Some(&local)).open_link);
-        assert!(NativeContextActions::from_presence(LOCAL_FILES, false, Some(&local)).quick_look);
-        fs::remove_dir_all(directory).unwrap();
-    }
-
-    #[test]
-    fn local_native_actions_are_inert_after_the_path_becomes_a_different_symlink() {
-        let directory =
-            std::env::temp_dir().join(format!("spaceterm-local-symlink-{}", std::process::id()));
-        fs::create_dir_all(&directory).unwrap();
-        let file = directory.join("preview.txt");
-        let other = directory.join("other.txt");
-        fs::write(&file, b"first").unwrap();
-        fs::write(&other, b"other").unwrap();
-        let local =
-            HyperlinkTarget::osc8("file:preview.txt", &directory, None, LOCAL_FILES).unwrap();
-
-        fs::remove_file(&file).unwrap();
-        symlink(&other, &file).unwrap();
-
-        assert_eq!(local.activation_url(LOCAL_FILES), None);
-        assert_eq!(QuickLookTarget::from_link(&local, LOCAL_FILES), None);
-        assert!(NativeContextActions::from_presence(LOCAL_FILES, false, Some(&local)).open_link);
-        assert!(NativeContextActions::from_presence(LOCAL_FILES, false, Some(&local)).quick_look);
-        fs::remove_dir_all(directory).unwrap();
-    }
-
-    #[test]
     fn remote_capabilities_disable_every_file_action_but_preserve_text_and_web_actions() {
         let directory = std::env::temp_dir().join(format!(
             "spaceterm-remote-capability-boundary-{}",
@@ -545,5 +465,8 @@ mod tests {
         assert!(NativeInsertion::service_text("ordinary text", true).is_ok());
         assert!(NativeInsertion::dropped_files(&[file], true, REMOTE_FILES).is_err());
         fs::remove_dir_all(directory).unwrap();
+    }
+    mod macos_adapter_tests {
+        include!("../platform/macos_adapter_tests/native_services.rs");
     }
 }

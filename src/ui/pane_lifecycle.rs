@@ -50,6 +50,7 @@ mod tests {
             include_str!("../terminal/wheel_phase.rs"),
             include_str!("../platform/window_visibility.rs"),
         ] {
+            let source = crate::architecture_tests::portable_verification_source(source);
             for forbidden in ["macos_", "Macos", "use cocoa::", "use objc::", "target_os"] {
                 assert!(
                     !source.contains(forbidden),

@@ -125,7 +125,9 @@ and Secure Event Input coordinators are constructed once for the GPUI applicatio
 every Operating-System Window. Window movement state is constructed separately for each window;
 Workspace, Tab, Pane, split, replacement, Local, and Remote creation retain their injected
 capabilities. WorkspaceManager receives directory selection and optional permission recovery and
-never constructs a native desktop default.
+never constructs a native desktop default. Shared UI test setup constructs its Desktop Profile
+from explicit policy and locale facts without calling macOS composition. Application shortcuts
+are portable policy data shared with the production-selected profile.
 
 GPUI initializes the native application before the injected Locale Direction capability samples
 its application locale. The runtime then installs the selected desktop profile, registers Services,
@@ -637,8 +639,12 @@ geometry without recopying decoded pixels.
 The test-only corpus in `src/terminal/conformance.rs` is the release gate for every advertised
 conventional terminal capability. Each fixture names its owning issue, covered user stories,
 authoritative protocol key, oracle class, and deterministic step/input/output budgets. The runner
-executes real Terminal Emulator, Session, platform, and UI reducers without user configuration,
-network access, or mutable global application state. Byte goldens preserve protocol output;
+executes real Terminal Emulator, Session, and UI reducers through platform-neutral Interfaces,
+recording implementations, isolated fixtures, and explicitly supplied host facts. Composition
+supplies the local hostname and AskPass helper executable; shared session and broker constructors
+never discover those values. It performs no
+host composition, login-shell discovery, packaged-resource discovery, native process launch,
+local IPC, or Unix-only mechanics. Byte goldens preserve protocol output;
 semantic goldens preserve row and cell order, Presentation Generation, Cursor, screen, and
 Terminal Metadata identity. Failures report the fixture, exact step, field, expected value, and
 observed value.
@@ -648,6 +654,17 @@ reference. Static Kitty graphics is covered by its protocol authority; Sixel, iT
 and animated or host-file Kitty media remain outside the corpus. The fixture matrix, authority
 catalog, audit revision, and maintenance rules are canonical in `docs/CONFORMANCE.md`. `just test`
 and therefore `just validate` run the corpus; `just conformance` provides the focused loop.
+
+The separate macOS Adapter integration suites under `src/platform/macos_adapter_tests` and the
+existing `src/platform/macos_*` capability modules preserve native PTY initialization and shutdown,
+key-event enrichment, real SSH and shell process lifecycle, local socket behavior, secure filesystem
+identity and permissions, and shipped-resource evidence. Native suites may use shared portable
+recorders, but shared test facilities never select native Adapters. Tests needing private owner
+state mount those isolated files within their owner's test scope. `just macos-adapter-tests` runs
+this native evidence; `just validate` includes both layers. Structural regression tests inspect
+shared test bodies and helpers, not just production code, to prevent native dependencies returning.
+Fixture identities prove policy and bounds only; they never claim retained native object identity.
+This verification split adds no Operating-System Adapter, target, packaging, or compilation claim.
 
 ### Scoped Terminal Attention
 

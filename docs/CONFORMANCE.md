@@ -6,12 +6,12 @@ decisions remain canonical in `CONTEXT.md` and `docs/UBIQUITOUS_LANGUAGE.md`.
 ## Contract
 
 The corpus covers US-01 through US-46 with deterministic, offline fixtures. Every fixture executes
-a real SpaceTerm mechanism and declares:
+real SpaceTerm policy through platform-neutral Module Interfaces and declares:
 
 - a stable fixture identifier;
 - the prerequisite GitHub issue and covered user stories;
 - one authority key from the catalog below;
-- an oracle class: bytes, semantic snapshot, geometry, lifecycle, security, or native behavior;
+- an oracle class: bytes, semantic snapshot, geometry, lifecycle, security, or interface behavior;
 - bounded step, input-byte, and output-byte budgets.
 
 The registry rejects missing story coverage, duplicate fixture identifiers, unbounded fixtures,
@@ -23,8 +23,11 @@ active screen, grid size, title, and Terminal Metadata. A mismatch identifies th
 field, expected value, and observed value.
 
 The suite uses no network, login shell, pasteboard, notification center, accessibility server, or
-user configuration. AppKit and PTY behavior that would otherwise mutate external state is tested
-through test-only deterministic adapters around the same reducers used by production. `just
+user configuration. The shared harness supplies deterministic recording implementations, isolated resource and filesystem
+fixtures, and explicit host facts. It never selects concrete macOS Adapters or uses Unix mechanics.
+The isolated macOS Adapter suites retain native PTY, key-event enrichment, real SSH and shell
+process, local socket, filesystem-security, and shipped-resource evidence. Run those with
+`just macos-adapter-tests`; their assertions remain part of `just validate`. `just
 conformance` is the focused loop. `just test` includes the same tests, so `just validate` is the
 required release gate.
 
@@ -46,6 +49,7 @@ verify that unsupported media cannot read host files or produce a false capabili
 | --- | --- |
 | `spaceterm-snapshot-contract` | [SpaceTerm immutable snapshot decision](../CONTEXT.md#immutable-terminal-presentation-snapshots) |
 | `ecma-48-and-xterm-window-ops` | [ECMA-48](https://ecma-international.org/publications-and-standards/standards/ecma-48/) and [XTerm control sequences](https://invisible-island.net/xterm/ctlseqs/ctlseqs.html) |
+| `spaceterm-pty-owner-contract` | [SpaceTerm Native PTY Owner](../CONTEXT.md#native-pty-owner) |
 | `posix-and-darwin-pty` | [POSIX terminal interface](https://pubs.opengroup.org/onlinepubs/9799919799/basedefs/termios.h.html), [Apple `openpty`](https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man3/openpty.3.html), and [SpaceTerm capability and compatibility identity](../CONTEXT.md#terminal-capability-and-compatibility-identity) |
 | `posix-process-lifecycle` | [POSIX `wait`](https://pubs.opengroup.org/onlinepubs/9799919799/functions/wait.html) and [POSIX `kill`](https://pubs.opengroup.org/onlinepubs/9799919799/functions/kill.html) |
 | `ecma-48-sgr` | [ECMA-48 Select Graphic Rendition](https://ecma-international.org/publications-and-standards/standards/ecma-48/) |
@@ -97,21 +101,21 @@ and `0x9c` OSC payload handling follow the pinned emulator without a parallel pa
 | --- | ---: | --- | --- | --- |
 | `snapshot.damage-and-isolation` | #6 | US-45, US-46 | `spaceterm-snapshot-contract` | Semantic snapshot |
 | `geometry.logical-and-backing` | #7 | US-34, US-44 | `ecma-48-and-xterm-window-ops` | Geometry |
-| `pty.initialization` | #8 | US-38, US-46 | `posix-and-darwin-pty` | Lifecycle |
-| `pty.shutdown` | #9 | US-39, US-46 | `posix-process-lifecycle` | Lifecycle |
+| `pty.initialization` | #8 | US-38, US-46 | `spaceterm-pty-owner-contract` | Lifecycle |
+| `pty.shutdown` | #9 | US-39, US-46 | `spaceterm-pty-owner-contract` | Lifecycle |
 | `presentation.colors` | #10 | US-03 | `ecma-48-sgr` | Semantic snapshot |
 | `presentation.text-attributes` | #11 | US-04 | `ecma-48-sgr` | Semantic snapshot |
 | `presentation.decorations` | #12 | US-04 | `ecma-48-and-xterm-sgr` | Semantic snapshot |
 | `unicode.graphemes` | #13 | US-02 | `unicode-uax-11-uax-29` | Semantic snapshot |
 | `unicode.drawing-symbols` | #14 | US-02 | `unicode-blocks` | Geometry |
 | `cursor.negotiated-shape` | #15 | US-05, US-07 | `dec-deccusr` | Semantic snapshot |
-| `focus.terminal-input-focus` | #16 | US-08–US-13, US-46 | `apple-responder-and-spaceterm-focus` | Native |
+| `focus.terminal-input-focus` | #16 | US-08–US-13, US-46 | `apple-responder-and-spaceterm-focus` | Interface |
 | `keyboard.vocabulary` | #17 | US-01, US-17, US-18 | `w3c-code-and-ghostty-key` | Bytes |
 | `keyboard.protocols` | #18 | US-18, US-19 | `kitty-keyboard-fixterms-xterm` | Bytes |
-| `keyboard.macos-bridge` | #19 | US-20, US-21 | `apple-nsevent` | Native |
+| `keyboard.gpui-adapter` | #19 | US-20, US-21 | `w3c-code-and-ghostty-key` | Interface |
 | `focus.dec-1004` | #20 | US-14–US-16 | `xterm-focus-event` | Bytes |
 | `cursor.blink-lifecycle` | #21 | US-06, US-07 | `dec-deccusr-and-spaceterm-cadence` | Lifecycle |
-| `ime.marked-text` | #22 | US-22 | `apple-nstextinputclient` | Native |
+| `ime.marked-text` | #22 | US-22 | `apple-nstextinputclient` | Interface |
 | `input.secure-event` | #23 | US-23 | `apple-secure-event-input` | Security |
 | `screen.scrollback-and-reflow` | #24 | US-33, US-34 | `ecma-48-and-xterm-private-modes` | Semantic snapshot |
 | `mouse.protocols` | #25 | US-24, US-25 | `xterm-mouse-tracking` | Bytes |
@@ -125,9 +129,9 @@ and `0x9c` OSC payload handling follow the pinned emulator without a parallel pa
 | `metadata.osc-7-and-133` | #34 | US-35 | `osc-7-and-finalterm-osc-133` | Semantic snapshot |
 | `shell.temporary-integration` | #35 | US-36 | `shell-startup-contracts` | Lifecycle |
 | `identity.terminfo-and-runtime` | #36 | US-37 | `ncurses-terminfo-and-xterm` | Bytes |
-| `attention.bell-and-notification` | #37 | US-41 | `ecma-48-bel-and-apple-notifications` | Native |
-| `services.native-actions` | #38 | US-43 | `apple-services-drag-and-quick-look` | Native |
-| `accessibility.editable-text` | #39 | US-42 | `apple-nsaccessibility` | Native |
+| `attention.bell-and-notification` | #37 | US-41 | `ecma-48-bel-and-apple-notifications` | Interface |
+| `services.native-actions` | #38 | US-43 | `apple-services-drag-and-quick-look` | Interface |
+| `accessibility.editable-text` | #39 | US-42 | `apple-nsaccessibility` | Interface |
 | `render.visibility-lifecycle` | #40 | US-12, US-13, US-44, US-45 | `apple-window-visibility` | Lifecycle |
 | `failure.typed-local-diagnostics` | #41 | US-40 | `spaceterm-failure-contract` | Security |
 | `graphics.kitty-static` | #89 | US-02, US-34, US-44–US-46 | `kitty-graphics-protocol` | Semantic snapshot |
@@ -139,3 +143,8 @@ applicable, registry mapping, and this matrix together. Add the narrowest failin
 then implement the behavior. Do not weaken expected values to accept multiple protocol outputs.
 If a published specification and the audited Ghostty reference differ, preserve the specification
 behavior and document the reference difference here.
+
+Shared UI test setup constructs its Desktop Profile from explicit modal, text-input, application
+shortcut, and locale policy facts. It does not call host composition. Portable PTY fixtures return
+observations to the corpus diagnostic checks, including repeated-close termination counts and
+termination-before-adapter-drop ordering.

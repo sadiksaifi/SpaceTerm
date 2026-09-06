@@ -845,8 +845,8 @@ impl GpuiAskPassBrokerFactory {
         window: &Window,
         cx: &mut App,
         local_ipc: Arc<dyn AskPassLocalIpc>,
+        helper_path: PathBuf,
     ) -> Result<Self, AskPassUnavailable> {
-        let helper_path = std::env::current_exe().map_err(|_| AskPassUnavailable)?;
         if !helper_path.is_absolute() {
             return Err(AskPassUnavailable);
         }

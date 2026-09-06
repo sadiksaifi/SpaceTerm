@@ -383,11 +383,6 @@ impl Drop for NativePtyOwner {
     }
 }
 
-#[cfg(test)]
-pub(crate) fn lock_real_pty_test() -> std::sync::MutexGuard<'static, ()> {
-    crate::platform::macos_pty::lock_real_pty_test()
-}
-
 fn spawn_reader(
     mut reader: Box<dyn Read + Send>,
     output: Arc<dyn NativePtyOutputSink>,
@@ -411,6 +406,34 @@ fn spawn_reader(
                 }
             }
         })
+}
+
+#[cfg(test)]
+pub(crate) fn conformance_initialization() -> Result<Option<(PathBuf, NativePtySize)>, String> {
+    tests::observe_initialization()
+}
+
+#[cfg(test)]
+pub(crate) struct ShutdownObservation {
+    pub(crate) after_factory_drop: usize,
+    pub(crate) after_owner_drop: usize,
+    pub(crate) after_repeated_close: usize,
+    pub(crate) termination_completed: bool,
+    pub(crate) dropped_before_termination: bool,
+}
+
+#[cfg(test)]
+pub(crate) fn conformance_shutdown() -> Result<ShutdownObservation, String> {
+    let (after_factory_drop, after_owner_drop) = tests::observe_retention(false)?;
+    let (_, after_repeated_close) = tests::observe_retention(true)?;
+    let (termination_completed, dropped_before_termination) = tests::observe_drop_order()?;
+    Ok(ShutdownObservation {
+        after_factory_drop,
+        after_owner_drop,
+        after_repeated_close,
+        termination_completed,
+        dropped_before_termination,
+    })
 }
 
 #[cfg(test)]
@@ -539,8 +562,7 @@ mod tests {
         }
     }
 
-    #[test]
-    fn owner_forwards_exact_launch_and_geometry_to_the_injected_adapter_factory() {
+    pub(super) fn observe_initialization() -> Result<Option<(PathBuf, NativePtySize)>, String> {
         let construction = Arc::new(Mutex::new(None));
         let factory = RecordingAdapterFactory {
             construction: Arc::clone(&construction),
@@ -562,41 +584,68 @@ mod tests {
             Arc::new(DiscardOutput),
             &NativePtyCloseHandle::default(),
         )
-        .expect("fake Native PTY Owner should start");
+        .map_err(|error| format!("step=start field=owner expected=started observed={error}"))?;
 
-        assert_eq!(
-            *construction
-                .lock()
-                .expect("construction observation should remain available"),
-            Some((working_directory, size))
-        );
+        let observed = construction.lock().unwrap().clone();
         drop(owner);
+        Ok(observed)
     }
 
-    #[test]
-    fn owner_retains_factory_parts_until_owner_destruction() {
+    pub(super) fn observe_retention(repeat_close: bool) -> Result<(usize, usize), String> {
         let termination_count = Arc::new(AtomicUsize::new(0));
         let factory = RecordingAdapterFactory {
             construction: Arc::new(Mutex::new(None)),
             adapter_observation: Arc::new(Mutex::new(AdapterObservation::default())),
             termination_count: Arc::clone(&termination_count),
         };
+        let close_handle = NativePtyCloseHandle::default();
         let owner = NativePtyOwner::start(
             &factory,
             PreparedShellLaunch::for_test(PathBuf::from("/project")),
             NativePtySize::default(),
             Arc::new(DiscardOutput),
-            &NativePtyCloseHandle::default(),
+            &close_handle,
         )
-        .expect("fake Native PTY Owner should start");
+        .map_err(|error| format!("step=start field=owner expected=started observed={error}"))?;
 
         drop(factory);
         let before_owner_drop = termination_count.load(Ordering::Acquire);
+        if repeat_close {
+            close_handle
+                .request_close()
+                .map_err(|error| error.to_string())?;
+            close_handle
+                .request_close()
+                .map_err(|error| error.to_string())?;
+        }
         drop(owner);
+        Ok((before_owner_drop, termination_count.load(Ordering::Acquire)))
+    }
+
+    #[test]
+    fn owner_forwards_exact_launch_and_geometry_to_the_injected_adapter_factory() {
         assert_eq!(
-            (before_owner_drop, termination_count.load(Ordering::Acquire),),
-            (0, 1)
+            observe_initialization().unwrap(),
+            Some((
+                PathBuf::from("/exact/spelling/../project"),
+                NativePtySize {
+                    rows: 31,
+                    columns: 97,
+                    pixel_width: 1_164,
+                    pixel_height: 620
+                },
+            ))
         );
+    }
+
+    #[test]
+    fn owner_retains_factory_parts_until_owner_destruction() {
+        assert_eq!(observe_retention(false).unwrap(), (0, 1));
+    }
+
+    #[test]
+    fn repeated_close_and_owner_drop_request_termination_once() {
+        assert_eq!(observe_retention(true).unwrap(), (0, 1));
     }
 
     struct FailingAdapterFactory;
@@ -805,8 +854,7 @@ mod tests {
         }
     }
 
-    #[test]
-    fn owner_completes_the_termination_request_before_dropping_the_adapter() {
+    pub(super) fn observe_drop_order() -> Result<(bool, bool), String> {
         let termination_completed = Arc::new(AtomicBool::new(false));
         let dropped_before_termination = Arc::new(AtomicBool::new(false));
         let factory = OneShotAdapterFactory(Mutex::new(Some(NativePtyAdapterParts {
@@ -823,11 +871,18 @@ mod tests {
             Arc::new(DiscardOutput),
             &NativePtyCloseHandle::default(),
         )
-        .expect("fake Native PTY Owner should start");
+        .map_err(|error| format!("step=start field=owner expected=started observed={error}"))?;
 
         drop(owner);
 
-        assert!(termination_completed.load(Ordering::Acquire));
-        assert!(!dropped_before_termination.load(Ordering::Acquire));
+        Ok((
+            termination_completed.load(Ordering::Acquire),
+            dropped_before_termination.load(Ordering::Acquire),
+        ))
+    }
+
+    #[test]
+    fn owner_completes_the_termination_request_before_dropping_the_adapter() {
+        assert_eq!(observe_drop_order().unwrap(), (true, false));
     }
 }

@@ -193,8 +193,13 @@ impl super::askpass::AskPassWindowFactory for AskPassWindowFactory {
         window: &Window,
         cx: &mut App,
     ) -> Result<Arc<dyn super::askpass::AskPassAttemptFactory>, AskPassUnavailable> {
-        PortableAskPassBrokerFactory::new(window, cx, Arc::new(MacosAskPassLocalIpc))
-            .map(|factory| Arc::new(factory) as Arc<dyn super::askpass::AskPassAttemptFactory>)
+        PortableAskPassBrokerFactory::new(
+            window,
+            cx,
+            Arc::new(MacosAskPassLocalIpc),
+            std::env::current_exe().map_err(|_| AskPassUnavailable)?,
+        )
+        .map(|factory| Arc::new(factory) as Arc<dyn super::askpass::AskPassAttemptFactory>)
     }
 }
 
